@@ -37,6 +37,7 @@ Plug 'gruvbox-community/gruvbox'
 Plug 'sainnhe/gruvbox-material'
 Plug 'tweekmonster/gofmt.vim'
 Plug 'haya14busa/incsearch.vim'
+Plug 'mhinz/vim-signify'
 call plug#end()
 
 let g:gofmt_exe = 'goimports'
@@ -108,6 +109,11 @@ nmap <leader>gs :G<CR>
 map /  <Plug>(incsearch-forward)
 map ?  <Plug>(incsearch-backward)
 map g/ <Plug>(incsearch-stay)
+
+nmap <leader>gj <plug>(signify-next-hunk)
+nmap <leader>gk <plug>(signify-prev-hunk)
+nmap <leader>gJ 9999<leader>gj
+nmap <leader>gK 9999<leader>gk
 
 function! s:show_documentation()
   if (index(['vim','help'], &filetype) >= 0)
