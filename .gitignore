@@ -1,42 +1,4 @@
-.CFUserTextEncoding
-	.DS_Store
-	.bash_history
-	.cache/
-	.cloudflared/
-	.config/coc/
-	.config/configstore/
-	.config/fish/conf.d/
-	.config/fish/fish_variables
-	.config/fish/functions/
-	.config/nvim/.netrwhist
-	.config/nvim/plugged/
-	.config/omf/
-	.cups/
-	.docker/
-	.gitconfig
-	.gitlab-runner/
-	.kube/
-	.lesshst
-	.local/
-	.node_repl_history
-	.npm/
-	.nvm/
-	.profile
-	.ssh/
-	.vim/
-	.viminfo
-	.vimrc
-	.windmill/
-	.yarnrc
-	.zsh_history
-	Applications/
-	Documents/
-	Downloads/
-	Library/
-	Movies/
-	Music/
-	Pictures/
-	Public/
-	go/
-	notes/
-	workspace/
+*
+!.config/nvim/
+!.tmux.conf
+!.vimrc
