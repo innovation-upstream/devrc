@@ -101,6 +101,7 @@ nmap <leader>g[ <Plug>(coc-diagnostic-prev)
 nmap <leader>g] <Plug>(coc-diagnostic-next)
 nmap <silent> <leader>gp <Plug>(coc-diagnostic-prev-error)
 nmap <silent> <leader>gn <Plug>(coc-diagnostic-next-error)
+map <leader>es :CocCommand eslint.executeAutofix<cr>
 
 nmap <leader>gj :diffget //3<CR>
 nmap <leader>gf :diffget //2<CR>
@@ -114,6 +115,7 @@ nmap <leader>gj <plug>(signify-next-hunk)
 nmap <leader>gk <plug>(signify-prev-hunk)
 nmap <leader>gJ 9999<leader>gj
 nmap <leader>gK 9999<leader>gk
+nmap <leader>gh :Glog! -- % <bar> :wincmd j<CR>
 
 function! s:show_documentation()
   if (index(['vim','help'], &filetype) >= 0)
