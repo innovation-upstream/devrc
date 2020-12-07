@@ -1,0 +1,4 @@
+*
+!.config/nvim/
+!.tmux.conf
+!.vimrc
