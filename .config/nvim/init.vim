@@ -38,6 +38,7 @@ Plug 'sainnhe/gruvbox-material'
 Plug 'tweekmonster/gofmt.vim'
 Plug 'haya14busa/incsearch.vim'
 Plug 'mhinz/vim-signify'
+Plug 'cappyzawa/starlark.vim'
 call plug#end()
 
 let g:gofmt_exe = 'goimports'
