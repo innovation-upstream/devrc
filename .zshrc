@@ -1,7 +1,7 @@
 # Reasonable zsh defaults
 export ZSH="/home/$USER/.oh-my-zsh"
 ZSH_THEME="robbyrussell"
-plugins=(git)
+plugins=(git golang gcloud)
 source $ZSH/oh-my-zsh.sh
 
 # Custom Dev Env Init
