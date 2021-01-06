@@ -1,0 +1,13 @@
+#!/usr/bin/env sh
+
+export EDITOR='nvim'
+
+export DEV_CLUSTER=k3d-dev-cluster
+
+alias k=kubectl
+alias dc=docker-compose
+alias b=bazel
+
+# Use Standard Dev Env Init
+source $HOME/cmd/profile.sh
+

@@ -3,3 +3,9 @@
 !.tmux.conf
 !.vimrc
 !README.md
+!.zshrc
+!.devrc
+!.bash_profile
+!.devrc.default
+!cmd/
+
