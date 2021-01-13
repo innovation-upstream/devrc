@@ -22,8 +22,7 @@ curl -fsSL https://raw.githubusercontent.com/tilt-dev/tilt/master/scripts/instal
 npm i -g @bazel/bazelisk
 
 # Install python for Bazel pip deps
-# Install nvim
-sudo apt install -y python neovim
+sudo apt install -y python
 
 # Install Firebase tools
 curl -sL https://firebase.tools | bash
@@ -34,4 +33,11 @@ sh -c "$(curl -fsSL https://raw.github.com/ohmyzsh/ohmyzsh/master/tools/install.
 # Install fzf
 git clone --depth 1 https://github.com/junegunn/fzf.git $HOME/.fzf
 $HOME/.fzf/install
+
+# Install nvim
+curl -OL https://github.com/neovim/neovim/releases/download/v0.4.4/nvim-linux64.tar.gz
+tar -xzf nvim-linux64.tar.gz
+sudo cp nvim-linux64/bin/nvim /usr/local/bin
+sudo cp -a nvim-linux64/share/. /usr/local/share
+rm nvim-linux64.tar.gz
 

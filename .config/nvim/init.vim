@@ -63,7 +63,7 @@ let g:go_highlight_generate_tags = 1
 let g:go_highlight_format_strings = 1
 let g:go_highlight_variable_declarations = 1
 let g:go_auto_sameids = 1
-let g:coc_global_extensions = ['coc-json', 'coc-git', 'coc-go', 'coc-tsserver']
+let g:coc_global_extensions = ['coc-json', 'coc-git', 'coc-go', 'coc-tsserver', 'coc-eslint']
 
 colorscheme gruvbox
 
