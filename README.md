@@ -1,6 +1,6 @@
 # DEVRC
 
-This repo assumes you are running Ubuntu 16 LTS but it may work on other versions/distros
+This repo assumes you are running Ubuntu 20 LTS but it may work on other versions/distros
 
 ## Setup
 
