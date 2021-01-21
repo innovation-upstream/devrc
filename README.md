@@ -6,7 +6,7 @@ This repo assumes you are running Ubuntu 16 LTS but it may work on other version
 
 1. `cd $HOME`
 2. Clone this repo
-3. Copy the content into your home dir: `cp -a $HOME/devrc .`
+3. Copy the content into your home dir: `cp -a $HOME/devrc/. .`
 4. Remove the not redundent directory: `rm -rf $HOME/devrc`
 5. Run `cmd/install.sh`
 6. Open nvim and run `:PlugInstall`, `:CocInstall`
