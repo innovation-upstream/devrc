@@ -7,6 +7,7 @@ export DEV_CLUSTER=k3d-dev-cluster
 alias k=kubectl
 alias dc=docker-compose
 alias b=bazel
+alias d=docker
 
 # Use Standard Dev Env Init
 source $HOME/cmd/profile.sh
