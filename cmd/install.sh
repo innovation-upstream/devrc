@@ -7,9 +7,6 @@ sudo apt-get update
 # Create workspace dir
 [ -d $HOME/workspace ] || mkdir workspace
 
-# Install zsh, fd
-sudo DEBIAN_FRONTEND=noninteractive apt install -y zsh fd-find python3-pip
-
 # Install ripgrep
 sudo apt-get install ripgrep
 
@@ -17,6 +14,8 @@ source $HOME/.devrc.default
 
 # Install nvm and configure default node/npm version to lts
 curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.37.2/install.sh | bash
+# Refresh shell so nvm is in $PATH
+su - ${USER}
 nvm install --lts
 
 # Docker Install
@@ -90,7 +89,10 @@ sudo tar -C /usr/local -xzf go1.15.7.linux-amd64.tar.gz
 git checkout master .zshrc
 
 # Set user default shell to zsh
-chsh -s /usr/bin/zsh
+# chsh -s /usr/bin/zsh
 # Refresh session
-su - ${USER}
+# su - ${USER}
+
+# Install zsh, fd
+sudo DEBIAN_FRONTEND=noninteractive apt install -y zsh fd-find python3-pip
 
