@@ -21,7 +21,8 @@ if test -f $HOME/.devrc; then
 else
   BLUE='\033[1;34m'
   NC='\033[0m' # No Color
-  printf "${BLUE}No \$HOME/.devrc file found! ${NC}Create one to configure your shell.\n"
+  printf "${BLUE}No \$HOME/.devrc file found! ${NC}Copy ~/.devrc.default if you would like \
+to configure your shell.\n"
   source $HOME/.devrc.default
 fi
 

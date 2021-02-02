@@ -1,8 +1,8 @@
 #!/usr/bin/env sh
 
-export DEV_CLUSTER=k3d-dev-cluster-server-0
+export DEV_CLUSTER_CONTAINER=k3d-dev-cluster-server-0
 
-alias kubectl="docker exec $DEV_CLUSTER kubectl $@"
+alias kubectl="docker exec $DEV_CLUSTER_CONTAINER kubectl $@"
 
 # Init and configure fzf if we are in zsh
 [ -f ~/.fzf.zsh ] && [ "$SHELL" = "/usr/bin/zsh" ] && source ~/.fzf.zsh
