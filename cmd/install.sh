@@ -82,8 +82,8 @@ k3d cluster create dev-cluster --volume $HOME/workspace:/home/$USER/workspace --
 sudo update-alternatives --install /usr/bin/python python /usr/bin/python3 1
 
 # Install golang
-curl -OL https://golang.org/dl/go1.15.7.linux-amd64.tar.gz
-sudo tar -C /usr/local -xzf go1.15.7.linux-amd64.tar.gz
+curl -OL https://golang.org/dl/go1.16.3.linux-amd64.tar.gz
+sudo rm -rf /usr/local/go ; sudo tar -C /usr/local -xzf go1.16.3.linux-amd64.tar.gz
 
 # Revert .zshrc (it gets overwritten when we install zsh)
 git checkout master .zshrc
