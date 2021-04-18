@@ -84,7 +84,6 @@ sudo update-alternatives --install /usr/bin/python python /usr/bin/python3 1
 # Install golang
 curl -OL https://golang.org/dl/go1.15.7.linux-amd64.tar.gz
 sudo tar -C /usr/local -xzf go1.15.7.linux-amd64.tar.gz
-go get golang.org/x/tools/cmd/goimports
 
 # Revert .zshrc (it gets overwritten when we install zsh)
 git checkout master .zshrc
@@ -97,3 +96,5 @@ git checkout master .zshrc
 # Install zsh, fd
 sudo DEBIAN_FRONTEND=noninteractive apt install -y zsh fd-find python3-pip
 
+# Install goimports
+go get golang.org/x/tools/cmd/goimports
