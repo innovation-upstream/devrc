@@ -15,3 +15,9 @@ export PATH=$PATH:/usr/local/go/bin:$HOME/go/bin
 # Init nvm
 export NVM_DIR="$([ -z "${XDG_CONFIG_HOME-}" ] && printf %s "${HOME}/.nvm" || printf %s "${XDG_CONFIG_HOME}/nvm")"
 [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
+
+# The next line updates PATH for the Google Cloud SDK.
+if [ -f '/home/developer/google-cloud-sdk/path.zsh.inc' ]; then . '/home/developer/google-cloud-sdk/path.zsh.inc'; fi
+
+# The next line enables shell command completion for gcloud.
+if [ -f '/home/developer/google-cloud-sdk/completion.zsh.inc' ]; then . '/home/developer/google-cloud-sdk/completion.zsh.inc'; fi
