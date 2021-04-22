@@ -1,8 +1,15 @@
 #!/usr/bin/env sh
 
+# DO NOT PUT ANY TOKENS OR USER-SPECIFIC code in here
+# to set tokens and customize your shell, please copy this file into a `.devrc` file and edit that
+# (this file will be ignored if `.devrc` exists)
+
 export EDITOR='nvim'
 
 export DEV_CLUSTER=k3d-dev-cluster
+# This needs to be set to a gitlab personal access token if the project your working on uses
+# private npm modules
+export NPM_TOKEN=
 
 alias k=kubectl
 alias dc=docker-compose
