@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # This script must remain idempotent
 
+source ./source_devrc.sh
+
 sudo apt update
 sudo apt-get update
 
@@ -9,8 +11,6 @@ sudo apt-get update
 
 # Install ripgrep
 sudo apt-get install ripgrep
-
-source $HOME/.devrc.default
 
 # Install nvm and configure default node/npm version to lts
 curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.37.2/install.sh | bash
@@ -74,9 +74,6 @@ https://raw.githubusercontent.com/junegunn/vim-plug/master/plug.vim'
 
 # Install k3d
 curl -s https://raw.githubusercontent.com/rancher/k3d/main/install.sh | bash
-# Create and switch to new cluster TODO: Make this wait for dockerd to start
-# (currently there is a race condition between this line being executed and dockerd having enough time to start)
-k3d cluster create dev-cluster --volume $HOME/workspace:/home/$USER/workspace --no-image-volume --volume "${HOME}/.k3d/registries.yaml:/etc/rancher/k3s/registries.yaml"
 
 # Alias python to run python3 binary
 sudo update-alternatives --install /usr/bin/python python /usr/bin/python3 1

@@ -15,23 +15,5 @@ ZSH_THEME="robbyrussell"
 plugins=(git golang gcloud)
 source $ZSH/oh-my-zsh.sh
 
-BLUE='\033[1;34m'
-RED='\033[0;31m'
-NC='\033[0m' # No Color
-BOLDNC="${NC}\033[1m"
-
-# Custom Dev Env Init
-if test -f $HOME/.devrc; then
-  source $HOME/.devrc
-  # Try to catch if the .devrc is misconfigured
-  if ! command -v bazel &> /dev/null; then
-    printf "${BLUE}bazel ${RED}command was not found after loading ${BOLDNC}\$HOME/.devrc! \
-${RED}Please ensure you are sourcing ${BOLDNC}\$HOME/cmd/profile.sh ${RED}or initializing nvm in \
-${BOLDNC}\$HOME/.devrc${NC}. \n(See \$HOME/.devrc.default for a working example)\n"
-  fi
-else
-  printf "Using ${BLUE}\$HOME/.devrc${BOLDNC}. Copy ~/.devrc.default if you would like \
-to further configure your shell.\n"
-  source $HOME/.devrc.default
-fi
+source ./cmd/source_devrc.sh
 

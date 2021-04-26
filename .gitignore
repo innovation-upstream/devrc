@@ -1,10 +1,10 @@
 *
-!.config/nvim/
+!.config/nvim/*
 !.tmux.conf
 !.vimrc
 !README.md
 !.zshrc
 !.bash_profile
 !.devrc.default
-!cmd/
+!cmd/*
 
