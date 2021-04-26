@@ -16,6 +16,10 @@ alias dc=docker-compose
 alias b=bazel
 alias d=docker
 
+DEVRC_DIR="$(dirname "$(readlink -f "$0")")"
+alias devenvup="$DEVRC_DIR/cmd/dev_env_up.sh"
+alias devenvdown="$DEVRC_DIR/cmd/dev_env_down.sh"
+
 # Use Standard Dev Env Init
 source $HOME/cmd/profile.sh
 
