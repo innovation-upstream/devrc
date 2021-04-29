@@ -20,7 +20,14 @@ script
 $ source $HOME/workspace/devrc/.zshrc
 ```
 
-5. Run `devenvup` to start the kubernetes cluster
+If you cloned devrc into a different repo, you will need to set the `DEVRC_DIR` environment variable before sourcing devrc's zshrc so devrc can init properly.
+
+```sh
+$ export DEVRC_DIR="$HOME/workspace-2/devrc"
+$ source $HOME/workspace/devrc/.zshrc
+```
+
+5. Run `cmd/dev_env_up.sh` to start the kubernetes cluster
 6. If you plan on using nvim, open it and run 
   `:PlugInstall`
   `:TSInstall go graphql typescript json vim bash` you can add more
@@ -34,3 +41,10 @@ $ cp .devrc.default .devrc
 ```
 
 `.zshrc` willl prefer to source `.devrc` if it exists.
+
+
+## Configuring Multicluster
+
+- `mkdir $HOME/.dev_certs`
+- `cp cmd/cluster/certs/* $HOME/.dev_certs`
+- `./cmd/cluster/linkerd_up.sh`

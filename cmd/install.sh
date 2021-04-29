@@ -7,7 +7,7 @@ sudo apt update
 sudo apt-get update
 
 # Create workspace dir
-[ -d $HOME/workspace ] || mkdir workspace
+[ -d $HOME/workspace ] || mkdir $HOME/workspace
 
 # Install ripgrep
 sudo apt-get install ripgrep
@@ -25,7 +25,6 @@ sudo apt install -y apt-transport-https ca-certificates curl software-properties
 curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo apt-key add -
 # Add Docker repo to apt
 sudo add-apt-repository "deb [arch=amd64] https://download.docker.com/linux/ubuntu focal stable"
-sudo apt update
 # Install Docker CE
 sudo apt install -y docker-ce
 # Add user to docker group
@@ -55,12 +54,18 @@ sh -c "$(curl -fsSL https://raw.github.com/ohmyzsh/ohmyzsh/master/tools/install.
 git clone --depth 1 https://github.com/junegunn/fzf.git $HOME/.fzf
 $HOME/.fzf/install --key-bindings --no-update-rc --completion
 
+# Install tools for building nvim nightly
+sudo apt-get install -y cmake pkg-config libtool libtool-bin unzip getext
+
 # Install nvim
-curl -OL https://github.com/neovim/neovim/releases/download/nightly/nvim-linux64.tar.gz
-tar -xzf nvim-linux64.tar.gz
-sudo cp nvim-linux64/bin/nvim /usr/local/bin
-sudo cp -a nvim-linux64/share/. /usr/local/share
-rm nvim-linux64.tar.gz
+# Upgrade nvim
+sudo apt-get install -y cmake pkg-config libtool libtool-bin unzip getext
+git clone https://github.com/neovim/neovim.git $HOME/neovim
+(
+cd $HOME/neovim && git pull &&
+make CMAKE_BUILD_TYPE=Release &&
+sudo mv ./build/bin/nvim /usr/local/bin/nvim
+)
 
 # Install some pkgs for nvim lsp/plugins
 npm install -g typescript typescript-language-server vscode-json-languageserver neovim eslint_d
@@ -74,6 +79,11 @@ https://raw.githubusercontent.com/junegunn/vim-plug/master/plug.vim'
 
 # Install k3d
 curl -s https://raw.githubusercontent.com/rancher/k3d/main/install.sh | bash
+
+# Install kubectl
+curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+sudo mv kubectl /usr/local/bin
+sudo chmod +x /usr/local/bin/kubectl
 
 # Alias python to run python3 binary
 sudo update-alternatives --install /usr/bin/python python /usr/bin/python3 1
@@ -93,5 +103,13 @@ git checkout master .zshrc
 # Install zsh, fd
 sudo DEBIAN_FRONTEND=noninteractive apt install -y zsh fd-find python3-pip
 
-# Install goimports
-go get golang.org/x/tools/cmd/goimports
+# Install go tools
+go get -u golang.org/x/tools/cmd/goimports
+go get -u golang.org/x/tools/gopls/...
+
+# Install kubefwd
+curl -OL https://github.com/txn2/kubefwd/releases/download/1.18.1/kubefwd_Linux_x86_64.tar.gz
+tar -zxvf kubefwd_Linux_x86_64.tar.gz kubefwd
+sudo mv kubefwd /usr/local/bin
+rm kubefwd_Linux_x86_64.tar.gz
+

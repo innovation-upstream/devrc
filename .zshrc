@@ -15,5 +15,13 @@ ZSH_THEME="robbyrussell"
 plugins=(git golang gcloud)
 source $ZSH/oh-my-zsh.sh
 
-source ./cmd/source_devrc.sh
+devrcDir=$DEVRC_DIR
+
+if [ "$devrcDir" = "" ]; then
+  devrcDir="$HOME/workspace/devrc"
+fi
+
+export DEVRC_DIR=$devrcDir
+
+source $devrcDir/cmd/source_devrc.sh
 
