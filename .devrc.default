@@ -7,6 +7,8 @@
 export EDITOR='nvim'
 
 export DEV_CLUSTER=k3d-dev-cluster
+export SHARED_DEV_CLUSTER=shared-dev-env
+
 # This needs to be set to a gitlab personal access token if the project your working on uses
 # private npm modules
 export NPM_TOKEN=
@@ -16,7 +18,6 @@ alias dc=docker-compose
 alias b=bazel
 alias d=docker
 
-DEVRC_DIR="$(dirname "$(readlink -f "$0")")"
 alias devenvup="$DEVRC_DIR/cmd/dev_env_up.sh"
 alias devenvdown="$DEVRC_DIR/cmd/dev_env_down.sh"
 
