@@ -23,12 +23,10 @@ done
 linkerd --context=$DEV_CLUSTER viz install | kubectl apply -f -
 
 # Install multicluster
-linkerd --context=$DEV_CLUSTER multicluster install | \
-  kubectl --context=$DEV_CLUSTER apply -f -
+linkerd --context=$DEV_CLUSTER multicluster install | kubectl --context=$DEV_CLUSTER apply -f -
 
 # Verify linkerd gateway
-kubectl --context=$DEV_CLUSTER -n linkerd-multicluster \
-    rollout status deploy/linkerd-gateway
+kubectl --context=$DEV_CLUSTER -n linkerd-multicluster rollout status deploy/linkerd-gateway
 
 # Verify linkerd lb
 while [ "$(kubectl --context=$DEV_CLUSTER -n linkerd-multicluster get service \

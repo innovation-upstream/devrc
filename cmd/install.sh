@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # This script must remain idempotent
 
-source ./source_devrc.sh
+source $DEVRC_DIR/cmd/source_devrc.sh
 
 sudo apt update
 sudo apt-get update
