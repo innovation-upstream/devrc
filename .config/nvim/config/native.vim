@@ -1,5 +1,7 @@
 syntax on
 
+" Convert to lua once this PR is merged
+" https://github.com/neovim/neovim/pull/13479
 set noerrorbells
 set tabstop=2 softtabstop=2
 set shiftwidth=2
@@ -13,7 +15,7 @@ set nobackup
 set undodir=~/.vim/undodir
 set undofile
 set incsearch
-set colorcolumn=100
+set colorcolumn=80
 set updatetime=50
 set cmdheight=2
 set re=0
