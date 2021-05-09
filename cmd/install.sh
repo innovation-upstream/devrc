@@ -58,8 +58,6 @@ $HOME/.fzf/install --key-bindings --no-update-rc --completion
 sudo apt-get install -y cmake pkg-config libtool libtool-bin unzip getext
 
 # Install nvim
-# Upgrade nvim
-sudo apt-get install -y cmake pkg-config libtool libtool-bin unzip getext
 git clone https://github.com/neovim/neovim.git $HOME/neovim
 (
 cd $HOME/neovim && git pull &&
@@ -70,12 +68,9 @@ sudo mv ./build/bin/nvim /usr/local/bin/nvim
 # Install some pkgs for nvim lsp/plugins
 npm install -g typescript typescript-language-server vscode-json-languageserver neovim eslint_d
 
-# Install pynvim for nvim deoplete(completion) plugin
-pip3 install --user pynvim
-
-# Install vim-plug
-sh -c 'curl -fLo "${XDG_DATA_HOME:-$HOME/.local/share}"/nvim/site/autoload/plug.vim --create-dirs \
-https://raw.githubusercontent.com/junegunn/vim-plug/master/plug.vim'
+# Install packer
+git clone https://github.com/wbthomason/packer.nvim\
+ ~/.local/share/nvim/site/pack/packer/start/packer.nvim
 
 # Install k3d
 curl -s https://raw.githubusercontent.com/rancher/k3d/main/install.sh | bash
