@@ -5,10 +5,6 @@ local on_attach = function(client, bufnr)
 
   -- Init nvim completion
   require'completion'.on_attach(client, bufnr)
-  -- Init treesitter
-  require'nvim-treesitter.configs'.setup {
-    ensure_installed = { "go", "graphql", "json", "bash", "typescript", "lua" },
-  }
 
   buf_set_option('omnifunc', 'v:lua.vim.lsp.omnifunc')
 
@@ -57,8 +53,10 @@ nvim_lsp.tsserver.setup {
     on_attach = on_attach,
     nvim_lsp.util.root_pattern("package.json", "tsconfig.json", "jsconfig.json")
 }
+
 nvim_lsp.gopls.setup {
   on_attach = on_attach,
   root_dir = nvim_lsp.util.root_pattern('go.mod')
 }
 
+nvim_lsp.graphql.setup{}
