@@ -4,7 +4,6 @@ return require('packer').startup(function(use)
   use {'nvim-treesitter/nvim-treesitter', run = ':TSUpdate'}
   use 'tpope/vim-fugitive'
   use 'mbbill/undotree'
-  use 'sheerun/vim-polyglot'
   use 'gruvbox-community/gruvbox'
   use 'sainnhe/gruvbox-material'
   use 'tweekmonster/gofmt.vim'
@@ -20,5 +19,6 @@ return require('packer').startup(function(use)
     'nvim-telescope/telescope.nvim',
     requires = {{'nvim-lua/popup.nvim'}, {'nvim-lua/plenary.nvim'}}
   }
+  use 'alexaandru/nvim-lspupdate'
 end)
 

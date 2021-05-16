@@ -37,11 +37,12 @@ $ source $DEVRC_DIR/.zshrc
 source $DEVRC_DIR/.config/nvim/init.vim
 ```
 
-2. Ensure plugins are up to date
+2. Ensure plugins and language parsers/servers are up to date
   `:PackerSync`
   `:TSUpdate` you can install more
-  [supported languages](https://github.com/nvim-treesitter/nvim-treesitter#supported-languages) if
+  [language parsers](https://github.com/nvim-treesitter/nvim-treesitter#supported-languages) if
   necessary
+  `:LspUpdate`
 
 ### Kubernetes
 

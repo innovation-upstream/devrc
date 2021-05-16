@@ -11,4 +11,6 @@ source("map/native.lua")
 source("plugins.lua")
 source("nvim_lsp.lua")
 
+source("config/plugin/treesitter.lua")
+
 source("map/plugin/telescope.lua")
