@@ -58,6 +58,19 @@ If your project uses linkerd for its multicluster service mesh,
 - `$DEVRC_DIR/cmd/cluster/linkerd_up.sh`
 - `$DEVRC_DIR/cmd/cluster/add_gke_context.sh`
 
+### Tmux
+
+Only necessary if you plan on using tmux.
+
+Add the following to your `~/.tmux.conf`, replacing 
+`/home/developer/workspace/devrc` with the directory you cloned devrc into.
+
+```tmux
+source-file /home/developer/workspace/devrc/.tmux.conf
+```
+
+1. Open `tmux` and press `<prefix>` + `I` to install plugins. You can also press `<prefix>` + `U` to update plugins.
+
 ## Customization
 
 If you need to add/modify your shell profile, do so by copying `.devrc.default` into `.devrc` and 

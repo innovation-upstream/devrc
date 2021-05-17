@@ -108,3 +108,6 @@ tar -zxvf kubefwd_Linux_x86_64.tar.gz kubefwd
 sudo mv kubefwd /usr/local/bin
 rm kubefwd_Linux_x86_64.tar.gz
 
+# Install TPM tmux plugin manager
+git clone https://github.com/tmux-plugins/tpm ~/.tmux/plugins/tpm
+
