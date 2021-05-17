@@ -22,5 +22,5 @@ alias devenvup="$DEVRC_DIR/cmd/dev_env_up.sh"
 alias devenvdown="$DEVRC_DIR/cmd/dev_env_down.sh"
 
 # Use Standard Dev Env Init
-source $HOME/cmd/profile.sh
+source $DEVRC_DIR/cmd/profile.sh
 
