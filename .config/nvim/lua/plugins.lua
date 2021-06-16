@@ -21,5 +21,7 @@ return require('packer').startup(function(use)
   }
   use 'alexaandru/nvim-lspupdate'
   use 'sheerun/vim-polyglot'
+  use 'vijaymarupudi/nvim-fzf'
+  use 'hrsh7th/nvim-compe'
 end)
 

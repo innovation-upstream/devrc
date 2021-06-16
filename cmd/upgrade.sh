@@ -16,7 +16,9 @@ curl -fsSL https://raw.githubusercontent.com/tilt-dev/tilt/master/scripts/instal
 printf "${BOLDNC}Upgrading Nvim${NC}\n"
 
 # Upgrade nvim
-sudo apt-get install -y cmake pkg-config libtool libtool-bin unzip getext
+sudo apt-get install -y ninja-build gettext libtool libtool-bin autoconf \
+  automake cmake g++ pkg-config unzip
+
 git clone https://github.com/neovim/neovim.git $HOME/neovim
 (
 cd $HOME/neovim && git pull &&
@@ -26,10 +28,10 @@ sudo mv ./build/bin/nvim /usr/local/bin/nvim
 
 printf "${BOLDNC}Upgrading Golang${NC}\n"
 
-curl -OL https://golang.org/dl/go1.16.3.linux-amd64.tar.gz >/dev/null
+curl -OL https://golang.org/dl/go1.16.4.linux-amd64.tar.gz >/dev/null
 sudo rm -rf /usr/local/go >/dev/null
-sudo tar -C /usr/local -xzf go1.16.3.linux-amd64.tar.gz >/dev/null
-rm go1.16.3.linux-amd64.tar.gz >/dev/null
+sudo tar -C /usr/local -xzf go1.16.4.linux-amd64.tar.gz >/dev/null
+rm go1.16.4.linux-amd64.tar.gz >/dev/null
 
 tilt version | xargs -I {} printf "${BOLDNC}Tilt upgraded to: ${NC}%s\n" "{}"
 nvim --version | head -1 | xargs -I {} printf "${BOLDNC}Nvim upgraded to: ${NC}%s\n" "{}"

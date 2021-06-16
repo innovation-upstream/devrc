@@ -1,0 +1,5 @@
+map("n", "<silent><expr> <C-Space>", "compe#complete()")
+map("n", "<silent><expr> <CR>", "compe#confirm('<CR>')")
+map("n", "<silent><expr> <C-e>", "compe#scroll({ 'delta': +4 })")
+map("n", "<silent><expr> <C-f>", "compe#close('<C-e>')")
+map("n", "<silent><expr> <C-d>", "compe#scroll({ 'delta': -4 })")
