@@ -55,7 +55,8 @@ git clone --depth 1 https://github.com/junegunn/fzf.git $HOME/.fzf
 $HOME/.fzf/install --key-bindings --no-update-rc --completion
 
 # Install tools for building nvim nightly
-sudo apt-get install -y cmake pkg-config libtool libtool-bin unzip getext
+sudo apt-get install -y ninja-build gettext libtool libtool-bin autoconf \
+  automake cmake g++ pkg-config unzip
 
 # Install nvim
 git clone https://github.com/neovim/neovim.git $HOME/neovim
@@ -66,7 +67,8 @@ sudo mv ./build/bin/nvim /usr/local/bin/nvim
 )
 
 # Install some pkgs for nvim lsp/plugins
-npm install -g typescript typescript-language-server vscode-json-languageserver neovim eslint_d
+npm install -g typescript typescript-language-server \
+  vscode-json-languageserver neovim eslint_d npm vscode-css-languageserver-bin
 
 # Install packer
 git clone https://github.com/wbthomason/packer.nvim\
@@ -101,6 +103,7 @@ sudo DEBIAN_FRONTEND=noninteractive apt install -y zsh fd-find python3-pip
 # Install go tools
 go get -u golang.org/x/tools/cmd/goimports
 go get -u golang.org/x/tools/gopls/...
+go get github.com/evilmartians/lefthook
 
 # Install kubefwd
 curl -OL https://github.com/txn2/kubefwd/releases/download/1.18.1/kubefwd_Linux_x86_64.tar.gz

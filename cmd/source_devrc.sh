@@ -15,7 +15,7 @@ ${RED}Please ensure you are sourcing ${BOLDNC}${DEVRC_DIR}/cmd/profile.sh ${RED}
 ${BOLDNC}${DEVRC_DIR}/.devrc${NC}. \n(See ${DIR}/.devrc.default for a working example)\n"
   fi
 else
-  printf "Using ${BLUE}${DEVRC_DIR}/.devrc${BOLDNC}. Copy ${DIR}/.devrc.default into ${DIR}/.devrc if you
+  printf "Using ${BLUE}${DEVRC_DIR}/.devrc${BOLDNC}. Copy ${DEVRC_DIR}/.devrc.default into ${DEVRC_DIR}/.devrc if you
   would like to further configure your shell.\n"
   source ${DEVRC_DIR}/.devrc.default
 fi
