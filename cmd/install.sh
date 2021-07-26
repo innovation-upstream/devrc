@@ -103,6 +103,7 @@ sudo DEBIAN_FRONTEND=noninteractive apt install -y zsh fd-find python3-pip
 # Install go tools
 go get -u golang.org/x/tools/cmd/goimports
 go get -u golang.org/x/tools/gopls/...
+go get github.com/evilmartians/lefthook
 
 # Install kubefwd
 curl -OL https://github.com/txn2/kubefwd/releases/download/1.18.1/kubefwd_Linux_x86_64.tar.gz

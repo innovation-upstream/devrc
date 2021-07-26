@@ -6,6 +6,7 @@
 export FZF_DEFAULT_COMMAND='fdfind --type file --follow --hidden --exclude .git --exclude node_modules --exclude www --exclude public'
 export FZF_ALT_C_COMMAND='fdfind --type d . --color=never'
 export FZF_CTRL_T_COMMAND="$FZF_DEFAULT_COMMAND"
+# Add go, linkerd
 export PATH=$PATH:/usr/local/go/bin:$HOME/go/bin:$HOME/.linkerd2/bin
 
 # Init nvm

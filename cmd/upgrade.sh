@@ -21,9 +21,12 @@ sudo apt-get install -y ninja-build gettext libtool libtool-bin autoconf \
 
 git clone https://github.com/neovim/neovim.git $HOME/neovim
 (
-cd $HOME/neovim && git pull &&
-make CMAKE_BUILD_TYPE=Release &&
-sudo mv ./build/bin/nvim /usr/local/bin/nvim
+  cd $HOME/neovim && git pull &&
+  make distclean &&
+  make deps &&
+  sudo make install &&
+  make CMAKE_BUILD_TYPE=Release &&
+  sudo mv ./build/bin/nvim /usr/local/bin/nvim
 )
 
 printf "${BOLDNC}Upgrading Golang${NC}\n"
