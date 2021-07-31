@@ -2,6 +2,8 @@
 
 set -v
 
+kubectl config use-context $DEV_CLUSTER
+
 # Create devcerts dir
 devCertsDir=$HOME/.dev_certs
 [ -d $devCertsDir ] || { echo Missing dev certs ; exit 1; }
