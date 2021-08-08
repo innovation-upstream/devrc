@@ -29,14 +29,15 @@ $ source $DEVRC_DIR/.zshrc
 If your project uses linkerd for its multicluster service mesh,
 
 Copy dev certs (for authenticating cross-cluster communication)
+
 - `mkdir $HOME/.dev_certs`
 - `cp cmd/cluster/certs/* $HOME/.dev_certs`
-Install linkerd CLI
 - `$DEVRC_DIR/cmd/cluster/linkerd_install.sh`
-Deploy linkered k8s resources into your `$DEV_CLUSER`
+Install linkerd CLI
 - `$DEVRC_DIR/cmd/cluster/linkerd_up.sh`
-Add `$SHARED_DEV_CLUSTER` as a kubectl context
+Deploy linkered k8s resources into your `$DEV_CLUSER`
 - `$DEVRC_DIR/cmd/cluster/add_gke_context.sh`
+Add `$SHARED_DEV_CLUSTER` as a kubectl context
 
 ## Customization
 
