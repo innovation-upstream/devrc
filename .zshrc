@@ -1,3 +1,16 @@
+export DEVRC_DIR="$HOME/workspace/devrc"
+
+# Source ~/.devrc if it exists
+[ -f "$HOME/.devrc" ] && . "$HOME/.devrc"
+
+# Source nix
+. "$HOME/.nix-profile/etc/profile.d/hm-session-vars.sh"
+. "$HOME/workspace/devrc/nix/bin/source-nix.sh"
+
+# Set bazel as an alternative to bazelisk since nix bazelisk only sets the
+# bazelisk command
+[ "$(command -v bazel)" ] || sudo update-alternatives --install /usr/local/bin/bazel bazel $(which bazelisk) 20
+
 function git_prompt_info() {
   local ref
   if [[ "$(command git config --get oh-my-zsh.hide-dirty)" != "1" ]]; then
@@ -9,19 +22,7 @@ function git_prompt_info() {
   fi
 }
 
-# Reasonable zsh defaults
-export ZSH="/home/$USER/.oh-my-zsh"
-ZSH_THEME="robbyrussell"
-plugins=(git golang gcloud)
-source $ZSH/oh-my-zsh.sh
-
-devrcDir=$DEVRC_DIR
-
-if [ "$devrcDir" = "" ]; then
-  devrcDir="$HOME/workspace/devrc"
-fi
-
-export DEVRC_DIR=$devrcDir
-
-source $devrcDir/cmd/source_devrc.sh
+# Init nvm
+export NVM_DIR="$([ -z "${XDG_CONFIG_HOME-}" ] && printf %s "${HOME}/.nvm" || printf %s "${XDG_CONFIG_HOME}/nvm")"
+[ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
 
