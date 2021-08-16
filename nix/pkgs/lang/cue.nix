@@ -2,10 +2,6 @@
 
 with pkgs;
 [
-  go
-  gopls
-  goimports
-  mockgen
-  gotests
+  cue
 ]
 

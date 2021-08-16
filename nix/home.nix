@@ -31,6 +31,7 @@ in
       nvim-fzf
       fzf-lua
       vim-obsession
+      vim-cue
     ];
   };
 

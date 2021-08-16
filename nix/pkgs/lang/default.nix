@@ -6,3 +6,5 @@ with pkgs;
   (import ./python.nix {pkgs=pkgs;})
   ++
   (import ./nodejs.nix {pkgs=pkgs;})
+  ++
+  (import ./cue.nix {pkgs=pkgs;})

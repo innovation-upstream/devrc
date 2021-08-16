@@ -16,12 +16,8 @@ with pkgs;
   gcc
   bat
 
-  # viewer
-  exa # modern replacement for ls
-
   # search
   ripgrep
-  amber
   fd
 
   # git
