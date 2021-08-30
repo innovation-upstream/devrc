@@ -6,6 +6,7 @@ end
 
 source("helpers.lua")
 
+source("config/native.lua")
 source("map/native.lua")
 
 source("plugins.lua")
