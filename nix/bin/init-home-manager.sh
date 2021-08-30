@@ -2,7 +2,7 @@
 
 nix_home_path="${DEVRC_DIR}/nix/home.nix"
 
-nix-shell --show-trace '<home-manager>' -A install
+TMPDIR=/tmp nix-shell --show-trace '<home-manager>' -A install
 
 cat << EOF > ~/.config/nixpkgs/home.nix
 let
