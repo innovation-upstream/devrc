@@ -1,4 +1,4 @@
 vim.cmd([[
-  autocmd BufReadPost * vertical resize 100
+  autocmd BufReadPost * wincmd =
 ]])
 
