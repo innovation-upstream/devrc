@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-set -v
+set -vuo errexit
 
 kubectl config use-context $DEV_CLUSTER
 
@@ -12,8 +12,7 @@ linkerd install \
   --identity-trust-anchors-file $devCertsDir/root.crt \
   --identity-issuer-certificate-file $devCertsDir/issuer.crt \
   --identity-issuer-key-file $devCertsDir/issuer.key \
-  | tee \
-    >(kubectl --context=$DEV_CLUSTER apply -f -)
+    | kubectl --context=$DEV_CLUSTER apply -f -
 
 # Wait for linkerd install
 while [ "$(linkerd --context=$DEV_CLUSTER multicluster install)" = "Waiting for control plane to become available" ]; do

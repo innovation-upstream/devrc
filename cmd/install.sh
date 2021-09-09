@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+
 # This script must remain idempotent
 
 sudo apt update
@@ -42,3 +43,4 @@ ${DEVRC_DIR}/nix/bin/channels.sh
 ${DEVRC_DIR}/nix/bin/init-home-manager.sh
 
 TMPDIR=/var/tmp home-manager switch
+
