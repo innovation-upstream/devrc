@@ -2,7 +2,7 @@
 
 with pkgs;
 [
-  go
+  go_1_17
   gopls
   goimports
   mockgen

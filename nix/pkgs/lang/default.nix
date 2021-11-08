@@ -8,3 +8,5 @@ with pkgs;
   (import ./nodejs.nix {pkgs=pkgs;})
   ++
   (import ./cue.nix {pkgs=pkgs;})
+  ++
+  (import ./rust.nix {pkgs=pkgs;})

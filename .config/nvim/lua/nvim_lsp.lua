@@ -1,4 +1,5 @@
 local nvim_lsp = require('lspconfig')
+
 local on_attach = function(client, bufnr)
   local function buf_set_keymap(...) vim.api.nvim_buf_set_keymap(bufnr, ...) end
   local function buf_set_option(...) vim.api.nvim_buf_set_option(bufnr, ...) end
@@ -59,7 +60,9 @@ nvim_lsp.gopls.setup {
   root_dir = nvim_lsp.util.root_pattern('go.mod')
 }
 
-nvim_lsp.graphql.setup{}
+nvim_lsp.graphql.setup{
+  on_attach = on_attach,
+}
 
 local capabilities = vim.lsp.protocol.make_client_capabilities()
 capabilities.textDocument.completion.completionItem.snippetSupport = true
@@ -81,5 +84,13 @@ nvim_lsp.cssls.setup {
       validate = true
     }
   },
+}
+
+nvim_lsp.rust_analyzer.setup{
+  on_attach = on_attach,
+}
+
+nvim_lsp.bashls.setup{
+  on_attach = on_attach,
 }
 
