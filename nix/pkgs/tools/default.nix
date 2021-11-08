@@ -5,7 +5,9 @@ with pkgs;
   ++
   (import ./docker.nix {pkgs=pkgs;})
   ++
-  (import ./k8s.nix {pkgs=pkgs;})
+  (import ./k8s {pkgs=pkgs;})
   ++
   (import ./linkerd.nix {pkgs=pkgs;})
+  ++
+  (import ./direnv {pkgs=pkgs;})
 
