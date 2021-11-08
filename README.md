@@ -11,6 +11,7 @@ running any Innovation Upstream repo.
 1. `mkdir $HOME/workspace && cd $HOME/workspace` (Optional, see step 4)
 2. Clone this repo
 3. Run `cmd/install.sh`
+4. Run `home-manager switch` build the env
 
 (Optional) If you cloned devrc into a different directory, you will need to set the 
 `DEVRC_DIR` environment variable in `~/.devrc`.
