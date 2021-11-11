@@ -2,7 +2,7 @@
 
 nix_home_path="${DEVRC_DIR}/nix/home.nix"
 
-TMPDIR=/tmp nix-shell --show-trace '<home-manager>' -A install
+NIX_PATH=$HOME/.nix-defexpr/channels${NIX_PATH:+:}$NIX_PATH TMPDIR=/tmp nix-shell --show-trace '<home-manager>' -A install
 
 cat << EOF > ~/.config/nixpkgs/home.nix
 let
