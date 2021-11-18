@@ -29,7 +29,7 @@ export NVM_DIR="$([ -z "${XDG_CONFIG_HOME-}" ] && printf %s "${HOME}/.nvm" || pr
 
 _direnv_hook() {
   trap -- '' SIGINT;
-  eval "$("/nix/store/mlii79cnn73lzr9qh2w0gqgr0spqwkkl-direnv-2.28.0/bin/direnv" export zsh)";
+  eval "$("direnv" export zsh)";
   trap - SIGINT;
 }
 typeset -ag precmd_functions;
@@ -41,3 +41,4 @@ if [[ -z ${chpwd_functions[(r)_direnv_hook]} ]]; then
   chpwd_functions=( _direnv_hook ${chpwd_functions[@]} )
 fi
 
+export PATH=$PATH:$HOME/go/bin
