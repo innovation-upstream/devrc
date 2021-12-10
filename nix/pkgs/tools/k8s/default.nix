@@ -4,7 +4,7 @@ with pkgs;
 let
   tilt = buildGoModule rec {
     pname = "tilt";
-    version = "0.23.0";
+    version = "0.23.2";
 
     src = builtins.fetchGit {
       url = "https://github.com/tilt-dev/tilt.git";
