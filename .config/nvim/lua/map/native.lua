@@ -7,4 +7,5 @@ map('n', '<leader>ee', 'oif err != nil {<CR>return errors.WithStack(err)<CR>}<CR
 map('t', '<Esc>', '<C-\\><C-n>')
 map('n', '<leader>t', ':wincmd s<bar> :wincmd j<bar> :resize 10<bar> :terminal<CR>')
 map('n', '<leader>b', ':G blame %<CR>')
+map('n', '<leader>c', '~<CR>')
 
