@@ -4,6 +4,7 @@ let
   packages = import ./pkgs {pkgs=pkgs;};
   fzfDefaultCommand = "fd --type file --follow --hidden --exclude .git --exclude node_modules --exclude www --exclude public";
   neovim = import ./programs/neovim {pkgs=pkgs;};
+  isNixOS = builtins.pathExists /etc/NIXOS;
 in
 {
   # Let Home Manager install and manage itself.
@@ -67,6 +68,9 @@ in
     enable = true;
     initExtra = ''
       . "$HOME/workspace/devrc/nix/bin/source-nix.sh"
+      ${if isNixOS then ''
+        xset r rate 300
+      '' else ""}
       [ "$(command -v zsh)" ] && zsh
     '';
   };
@@ -106,9 +110,9 @@ in
     };
   };
 
-  home.stateVersion = "21.05";
+  home.stateVersion = "21.11";
 
-  home.packages = packages;
+  home.packages = if isNixOS then packages ++ [pkgs.autorandr] else packages;
 
   home.sessionVariables = {
     EDITOR = "nvim";
