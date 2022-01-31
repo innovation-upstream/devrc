@@ -66,13 +66,14 @@ in
 
   programs.bash = {
     enable = true;
-    initExtra = ''
+    initExtra = let 
+      cmd = ''
       . "$HOME/workspace/devrc/nix/bin/source-nix.sh"
-      ${if isNixOS then ''
-        xset r rate 300
-      '' else ""}
       [ "$(command -v zsh)" ] && zsh
     '';
+      hasDevBashRc = builtins.pathExists ../.bashrc.devrc;
+    in
+      if hasDevBashRc then cmd + builtins.readFile ../.bashrc.devrc else cmd;
   };
 
   programs.tmux = {
