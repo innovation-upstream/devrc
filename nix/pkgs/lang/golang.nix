@@ -4,7 +4,7 @@ with pkgs;
 [
   go_1_17
   gopls
-  goimports
+  gotools
   mockgen
   gotests
 ]
