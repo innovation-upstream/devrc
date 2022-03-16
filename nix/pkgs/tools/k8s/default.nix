@@ -4,13 +4,13 @@ with pkgs;
 let
   tilt = buildGoModule rec {
     pname = "tilt";
-    version = "0.23.4";
+    version = "0.25.1";
 
     src = fetchFromGitHub {
       owner = "tilt-dev";
       repo = pname;
       rev = "v${version}";
-      sha256 = "sha256-SWofXsbkuirPvqgU639W8IQklafLKbThoZUzOzfYwdQ=";
+      sha256 = "sha256-dvY5kiLJ3psoQxG12E4qOjgF9GdXpjRKU3HlbPvwWBU==";
     };
 
     vendorSha256 = null;
