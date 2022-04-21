@@ -94,3 +94,6 @@ nvim_lsp.bashls.setup{
   on_attach = on_attach,
 }
 
+nvim_lsp.perlls.setup{
+  on_attach = on_attach,
+}
