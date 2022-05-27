@@ -4,7 +4,7 @@ with pkgs;
 let
   tilt = buildGoModule rec {
     pname = "tilt";
-    version = "0.27.3";
+    version = "0.30.0";
 
     src = fetchFromGitHub {
       owner = "tilt-dev";
