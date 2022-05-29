@@ -6,7 +6,7 @@ with pkgs;
   nodePackages.typescript
   nodePackages.typescript-language-server
   nodePackages.vscode-json-languageserver
-  nodePackages.eslint_d
   nodePackages.vscode-css-languageserver-bin
+  nodePackages.vscode-langservers-extracted
 ]
 

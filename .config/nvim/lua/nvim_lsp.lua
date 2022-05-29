@@ -55,6 +55,10 @@ nvim_lsp.tsserver.setup {
     nvim_lsp.util.root_pattern("package.json", "tsconfig.json", "jsconfig.json")
 }
 
+nvim_lsp.eslint.setup {
+    on_attach = on_attach,
+}
+
 nvim_lsp.gopls.setup {
   on_attach = on_attach,
   root_dir = nvim_lsp.util.root_pattern('go.mod')

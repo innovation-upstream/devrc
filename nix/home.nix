@@ -26,7 +26,6 @@ in
       completion-buffers
       completion-treesitter
       nvim-treesitter
-      ale
       nvim-compe
       vim-polyglot
       nvim-fzf

@@ -4,10 +4,9 @@ return require('packer').startup(function(use)
   use 'tweekmonster/gofmt.vim'
   use 'cappyzawa/starlark.vim'
   use 'rust-lang/rust.vim'
-  --use {
-    --'nvim-telescope/telescope.nvim',
-    --requires = {{'nvim-lua/popup.nvim'}, {'nvim-lua/plenary.nvim'}}
-  --}
-  --use 'vijaymarupudi/nvim-fzf'
+  use {
+    'kyazdani42/nvim-tree.lua',
+    tag = 'nightly'
+  }
 end)
 
