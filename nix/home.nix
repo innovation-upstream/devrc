@@ -107,6 +107,9 @@ in
     };
   };
 
+  programs.direnv.enable = true;
+  programs.direnv.nix-direnv.enable = true;
+
   home.stateVersion = "21.11";
 
   home.packages = if isNixOS then packages ++ [pkgs.autorandr] else packages;
