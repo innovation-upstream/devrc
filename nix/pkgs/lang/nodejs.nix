@@ -8,5 +8,6 @@ with pkgs;
   nodePackages.vscode-json-languageserver
   nodePackages.vscode-css-languageserver-bin
   nodePackages.vscode-langservers-extracted
+  nodejs-16_x
 ]
 
