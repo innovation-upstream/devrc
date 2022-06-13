@@ -8,5 +8,9 @@ return require('packer').startup(function(use)
     'kyazdani42/nvim-tree.lua',
     tag = 'nightly'
   }
+  use 'ibhagwan/fzf-lua'
+  use 'vijaymarupudi/nvim-fzf'
+  use 'nvim-lua/plenary.nvim'
+  use 'windwp/nvim-spectre'
 end)
 

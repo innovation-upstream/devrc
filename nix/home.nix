@@ -25,11 +25,8 @@ in
       completion-nvim
       completion-buffers
       completion-treesitter
-      nvim-treesitter
       nvim-compe
       vim-polyglot
-      nvim-fzf
-      fzf-lua
       vim-obsession
       vim-cue
     ];

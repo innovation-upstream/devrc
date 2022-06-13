@@ -17,6 +17,7 @@ with pkgs;
   bat
 
   # search
+  gnugrep
   ripgrep
   fd
 
@@ -25,6 +26,7 @@ with pkgs;
   lefthook
 
   google-cloud-sdk
+  nix-direnv
 ]
 ++
 (import ./lang {pkgs=pkgs;})
