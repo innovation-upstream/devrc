@@ -12,3 +12,5 @@ with pkgs;
   (import ./rust.nix {pkgs=pkgs;})
   ++
   (import ./perl.nix {pkgs=pkgs;})
+  ++
+  (import ./lua.nix {pkgs=pkgs;})

@@ -27,6 +27,8 @@ set hlsearch
 set scrolloff=8
 set completeopt=menuone,noinsert,noselect
 set shortmess+=c
+" Disable mouse
+set mouse=
 
 highlight ColorColumn ctermbg=blue guibg=lightgrey
 

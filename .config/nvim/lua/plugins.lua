@@ -12,5 +12,7 @@ return require('packer').startup(function(use)
   use 'vijaymarupudi/nvim-fzf'
   use 'nvim-lua/plenary.nvim'
   use 'windwp/nvim-spectre'
+  use 'ZacxDev/qdr.nvim'
+  use 'MunifTanjim/nui.nvim'
 end)
 
