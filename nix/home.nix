@@ -7,11 +7,18 @@ let
   isNixOS = builtins.pathExists /etc/NIXOS;
 in
 {
+  nixpkgs.overlays = [
+    (import (builtins.fetchTarball {
+      url = https://github.com/nix-community/neovim-nightly-overlay/archive/master.tar.gz;
+    }))
+  ];
+
   # Let Home Manager install and manage itself.
   programs.home-manager.enable = true;
 
   programs.neovim = {
     enable = true;
+    package = pkgs.neovim-nightly;
     vimAlias = true;
     extraConfig = builtins.readFile ../.config/nvim/init.vim;
     plugins = with pkgs.vimPlugins; with neovim; [
@@ -29,6 +36,9 @@ in
       vim-polyglot
       vim-obsession
       vim-cue
+    ];
+    extraLuaPackages = with pkgs.lua51Packages; [
+      lyaml
     ];
   };
 
@@ -52,6 +62,7 @@ in
       d = "docker";
       dc = "docker-compose";
       b = "bazel";
+      ba = "cat /sys/class/power_supply/BAT1/capacity";
     };
   };
 
