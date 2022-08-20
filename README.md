@@ -25,21 +25,6 @@ $ source $DEVRC_DIR/.zshrc
 
 1. Run `cmd/dev_env_up.sh` to start the kubernetes cluster
 
-**Configuring Multicluster**
-
-If your project uses linkerd for its multicluster service mesh,
-
-Copy dev certs (for authenticating cross-cluster communication)
-
-- `mkdir $HOME/.dev_certs`
-- `cp cmd/cluster/certs/* $HOME/.dev_certs`
-- `$DEVRC_DIR/cmd/cluster/linkerd_install.sh`
-Install linkerd CLI
-- `$DEVRC_DIR/cmd/cluster/linkerd_up.sh`
-Deploy linkered k8s resources into your `$DEV_CLUSER`
-- `$DEVRC_DIR/cmd/cluster/add_gke_context.sh`
-Add `$SHARED_DEV_CLUSTER` as a kubectl context
-
 ## Customization
 
 If you need to add/modify your shell profile, you can do so by 

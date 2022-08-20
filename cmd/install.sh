@@ -22,15 +22,6 @@ then
   sudo usermod -aG docker ${USER}
 fi
 
-if [ -z $(command -v nvm) ];
-then
-  # Install nvm
-  curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.37.2/install.sh | bash
-  # Refresh shell so nvm is in $PATH
-  su - ${USER}
-  nvm install --lts
-fi
-
 if [ -z $(command -v nix) ];
 then
   sh <(curl -L https://nixos.org/nix/install) --no-daemon
