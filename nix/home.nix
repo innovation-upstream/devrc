@@ -33,9 +33,9 @@ in
       completion-buffers
       completion-treesitter
       nvim-compe
-      vim-polyglot
       vim-obsession
       vim-cue
+      nvim-treesitter
     ];
     extraLuaPackages = with pkgs.lua51Packages; [
       lyaml
@@ -47,7 +47,11 @@ in
     autocd = true;
     dotDir = ".config/zsh";
     enableCompletion = true;
-    initExtra = builtins.readFile ../.zshrc;
+    initExtra = let
+      zshRc = builtins.readFile ../.zshrc;
+      hasDevRc = builtins.pathExists "${config.home.homeDirectory}/.devrc";
+    in
+      if hasDevRc then zshRc + builtins.readFile "${config.home.homeDirectory}/.devrc" else zshRc;
     oh-my-zsh = {
       enable = true;
 
@@ -78,9 +82,9 @@ in
       . "$HOME/workspace/devrc/nix/bin/source-nix.sh"
       [ "$(command -v zsh)" ] && zsh
     '';
-      hasDevBashRc = builtins.pathExists ../.bashrc.devrc;
+      hasDevBashRc = builtins.pathExists "${config.home.homeDirectory}/bashrc.devrc";
     in
-      if hasDevBashRc then cmd + builtins.readFile ../.bashrc.devrc else cmd;
+      if hasDevBashRc then cmd + builtins.readFile "${config.home.homeDirectory}/bashrc.devrc" else cmd;
   };
 
   programs.tmux = {

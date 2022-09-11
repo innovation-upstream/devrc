@@ -27,6 +27,8 @@ then
   sh <(curl -L https://nixos.org/nix/install) --no-daemon
 fi
 
+DEVRC_DIR=${DEVRC_DIR:-$PWD}
+
 . ${DEVRC_DIR}/nix/bin/source-nix.sh
 
 ${DEVRC_DIR}/nix/bin/channels.sh

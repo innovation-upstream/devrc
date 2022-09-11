@@ -1,6 +1,7 @@
 -- Init treesitter
 require'nvim-treesitter.configs'.setup {
-  ensure_installed = { "go", "graphql", "json", "bash", "typescript", "lua", "javascript" },
+  ensure_installed = { "go", "graphql", "json", "bash", "typescript", "lua", "javascript", "markdown", "regex", "tsx", "yaml", "nix", "json", "html" },
+  parser_install_dir = "$HOME/.treesitter-parsers",
   highlight = {
     enable = true,
   },
@@ -9,4 +10,5 @@ require'nvim-treesitter.configs'.setup {
   }
 }
 
+vim.opt.runtimepath:append("$HOME/.treesitter-parsers")
 
