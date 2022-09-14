@@ -21,10 +21,6 @@ $ export DEVRC_DIR="$HOME/workspace-2/devrc"
 $ source $DEVRC_DIR/.zshrc
 ```
 
-### Kubernetes
-
-1. Run `cmd/dev_env_up.sh` to start the kubernetes cluster
-
 ## Customization
 
 If you need to add/modify your shell profile, you can do so by 
