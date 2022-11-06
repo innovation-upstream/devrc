@@ -10,5 +10,6 @@ return require('packer').startup(function(use)
   use 'MunifTanjim/nui.nvim'
   use 'tpope/vim-obsession'
   use 'tveskag/nvim-blame-line'
+  use 'vmchale/dhall-vim'
 end)
 

@@ -101,3 +101,12 @@ nvim_lsp.bashls.setup{
 nvim_lsp.perlls.setup{
   on_attach = on_attach,
 }
+
+nvim_lsp.dhall_lsp_server.setup{
+  on_attach = on_attach,
+}
+
+nvim_lsp.solidity_ls.setup{
+  on_attach = on_attach,
+}
+
