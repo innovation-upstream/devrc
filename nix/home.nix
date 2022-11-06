@@ -35,7 +35,6 @@ in
       nvim-compe
       vim-obsession
       vim-cue
-      nvim-treesitter
     ];
     extraLuaPackages = with pkgs.lua51Packages; [
       lyaml
