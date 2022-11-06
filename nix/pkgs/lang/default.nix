@@ -18,3 +18,5 @@ with pkgs;
   (import ./solidity.nix {pkgs=pkgs;})
   ++
   (import ./nodejs.nix {pkgs=pkgs;})
+  #++
+  #(import ./graphql.nix {pkgs=pkgs;})

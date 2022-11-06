@@ -64,9 +64,10 @@ nvim_lsp.gopls.setup {
   root_dir = nvim_lsp.util.root_pattern('go.mod')
 }
 
-nvim_lsp.graphql.setup{
-  on_attach = on_attach,
-}
+-- The Graphql LSP we get from nixpkgs doesn't seem to work
+--nvim_lsp.graphql.setup{
+  --on_attach = on_attach,
+--}
 
 local capabilities = vim.lsp.protocol.make_client_capabilities()
 capabilities.textDocument.completion.completionItem.snippetSupport = true
