@@ -5,4 +5,9 @@
     c = "commit";
     co = "checkout";
   };
+  extraConfig = {
+    init = {
+      defaultBranch = "trunk";
+    };
+  };
 }
