@@ -2,7 +2,7 @@
 
 with pkgs;
 [
-  go_1_17
+  go_1_19
   gopls
   gotools
   mockgen
