@@ -111,3 +111,7 @@ nvim_lsp.solidity_ls.setup{
   on_attach = on_attach,
 }
 
+nvim_lsp.tailwindcss.setup{
+  on_attach = on_attach,
+}
+
