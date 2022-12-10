@@ -17,5 +17,6 @@ return require('packer').startup(function(use)
   use 'tpope/vim-obsession'
   use { 'tveskag/nvim-blame-line', cmd = 'ToggleBlameLine' }
   use 'vmchale/dhall-vim'
+  use 'simrat39/symbols-outline.nvim'
 end)
 
