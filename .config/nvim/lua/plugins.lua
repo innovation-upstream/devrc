@@ -7,7 +7,12 @@ return require('packer').startup(function(use)
   use 'ibhagwan/fzf-lua'
   use 'nvim-lua/plenary.nvim'
   use 'windwp/nvim-spectre'
-  use { 'ZacxDev/qdr.nvim', requires = 'vijaymarupudi/nvim-fzf' }
+  use {
+    'ZacxDev/qdr.nvim',
+    requires = 'vijaymarupudi/nvim-fzf',
+    opt = true,
+    rocks = 'lyaml'
+  }
   use 'MunifTanjim/nui.nvim'
   use 'tpope/vim-obsession'
   use { 'tveskag/nvim-blame-line', cmd = 'ToggleBlameLine' }
