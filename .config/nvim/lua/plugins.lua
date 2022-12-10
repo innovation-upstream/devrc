@@ -10,7 +10,7 @@ return require('packer').startup(function(use)
   use { 'ZacxDev/qdr.nvim', requires = 'vijaymarupudi/nvim-fzf' }
   use 'MunifTanjim/nui.nvim'
   use 'tpope/vim-obsession'
-  use 'tveskag/nvim-blame-line'
+  use { 'tveskag/nvim-blame-line', cmd = 'ToggleBlameLine' }
   use 'vmchale/dhall-vim'
 end)
 
