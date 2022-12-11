@@ -24,5 +24,6 @@
     dc = "docker-compose";
     b = "bazel";
     ba = "cat /sys/class/power_supply/BAT1/capacity";
+    gc = "git checkout $1";
   };
 }
