@@ -27,6 +27,7 @@ with pkgs;
 
   google-cloud-sdk
   nix-direnv
+  lua53Packages.lyaml
 ]
 ++
 (import ./lang {pkgs=pkgs;})

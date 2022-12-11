@@ -10,8 +10,6 @@ return require('packer').startup(function(use)
   use {
     'ZacxDev/qdr.nvim',
     requires = 'vijaymarupudi/nvim-fzf',
-    opt = true,
-    rocks = 'lyaml'
   }
   use 'MunifTanjim/nui.nvim'
   use 'tpope/vim-obsession'
