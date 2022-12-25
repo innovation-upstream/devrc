@@ -10,6 +10,7 @@
     content = if hasDevRc then zshRc + builtins.readFile "${config.home.homeDirectory}/.devrc" else zshRc;
   in
     ''
+    ${content}
     PROMPT="%(?:%{$fg_bold[green]%}➜ :%{$fg_bold[red]%}➜ )"
     PROMPT+=' %{$fg[cyan]%}%c%{$reset_color%} $(git_prompt_info)'
 
