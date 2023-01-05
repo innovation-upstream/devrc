@@ -23,7 +23,7 @@ in
     vim-obsession
     vim-cue
   ];
-  extraLuaPackages = with pkgs.lua51Packages; [
-    lyaml
+  extraLuaPackages = ps: [
+    ps.lyaml
   ];
 }
