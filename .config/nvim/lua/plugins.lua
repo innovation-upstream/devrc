@@ -10,11 +10,13 @@ return require('packer').startup(function(use)
   use {
     'ZacxDev/qdr.nvim',
     requires = 'vijaymarupudi/nvim-fzf',
+    commit = 'fd2e174f9f9c2707e6a64b9c982ebf6e6d46ad05',
   }
   use 'MunifTanjim/nui.nvim'
   use 'tpope/vim-obsession'
   use { 'tveskag/nvim-blame-line', cmd = 'ToggleBlameLine' }
   use 'vmchale/dhall-vim'
   use 'simrat39/symbols-outline.nvim'
+  use 'nvim-telescope/telescope.nvim'
 end)
 
