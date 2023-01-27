@@ -10,5 +10,5 @@ map('n', '<leader>b', ':G blame %<CR>')
 map('n', '<leader>c', '~<CR>')
 map('n', '<leader>F', ':wincmd_<CR> :wincmd|<CR>')
 map('n', '<leader>M', ':wincmd=<CR>')
-map('n', '<leader>d', 'ofmt.Printf("%+v\n", )<Esc>i')
+map('n', '<leader>d', 'ofmt.Printf("%+v\\n", )<Esc>i')
 
