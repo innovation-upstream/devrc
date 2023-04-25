@@ -5,5 +5,5 @@
 echo "prefix = $HOME/.npm-packages" > $HOME/.npmrc
 echo 'export $PATH=$PATH:$HOME/.npm-packages/bin' >> $HOME/.devenvrc
 
-npm install -g solidity-language-server @tailwindcss/language-server
+npm install -g solidity-language-server @tailwindcss/language-server @volar/vue-language-server
 
