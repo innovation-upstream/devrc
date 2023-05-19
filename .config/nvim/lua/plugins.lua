@@ -1,5 +1,9 @@
 return require('packer').startup(function(use)
-  use {'nvim-treesitter/nvim-treesitter', run = ':TSUpdate'}
+  use 'wbthomason/packer.nvim'
+  use {
+    'nvim-treesitter/nvim-treesitter',
+    run = ':TSUpdate'
+  }
   use {'jremmen/vim-ripgrep', cmd = 'Rg'}
   use 'tweekmonster/gofmt.vim'
   use 'cappyzawa/starlark.vim'
