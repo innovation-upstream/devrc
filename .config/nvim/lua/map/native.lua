@@ -11,4 +11,5 @@ map('n', '<leader>c', '~<CR>')
 map('n', '<leader>F', ':wincmd_<CR> :wincmd|<CR>')
 map('n', '<leader>M', ':wincmd=<CR>')
 map('n', '<leader>d', 'ofmt.Printf("%+v\\n", )<Esc>i')
+map('i', '<C-j>', '<Esc>')
 
