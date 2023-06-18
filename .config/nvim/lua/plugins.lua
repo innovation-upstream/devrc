@@ -22,5 +22,6 @@ return require('packer').startup(function(use)
   use 'vmchale/dhall-vim'
   use 'simrat39/symbols-outline.nvim'
   use 'nvim-telescope/telescope.nvim'
+  use 'github/copilot.vim'
 end)
 
