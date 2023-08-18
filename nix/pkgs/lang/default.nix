@@ -12,8 +12,8 @@ with pkgs;
   (import ./perl.nix {pkgs=pkgs;})
   ++
   (import ./lua.nix {pkgs=pkgs;})
-  ++
-  (import ./dhall.nix {pkgs=pkgs;})
+  #++
+  #(import ./dhall.nix {pkgs=pkgs;})
   ++
   (import ./solidity.nix {pkgs=pkgs;})
   ++
