@@ -121,6 +121,7 @@ nvim_lsp.cucumber_language_server.setup{
   on_attach = on_attach,
 }
 
+--[[
 nvim_lsp.sumneko_lua.setup{
   on_attach = on_attach,
   settings = {
@@ -144,4 +145,5 @@ nvim_lsp.sumneko_lua.setup{
     },
   },
 }
+]]--
 
