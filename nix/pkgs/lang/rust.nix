@@ -2,7 +2,7 @@
 
 with pkgs;
 [
-  rustup
+  #rustup
   rust-analyzer
 ]
 
