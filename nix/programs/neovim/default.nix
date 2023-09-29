@@ -14,7 +14,6 @@ in
     undotree
     gruvbox
     vim-signify
-    nvim-lspconfig
     completion-nvim
     completion-buffers
     vim-obsession

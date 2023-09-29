@@ -23,6 +23,7 @@ return require('packer').startup(function(use)
   use 'simrat39/symbols-outline.nvim'
   use 'nvim-telescope/telescope.nvim'
   use 'github/copilot.vim'
+  use 'neovim/nvim-lspconfig'
   use 'hrsh7th/cmp-nvim-lsp'
   use 'hrsh7th/cmp-buffer'
   use 'hrsh7th/cmp-path'
