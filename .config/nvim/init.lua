@@ -13,12 +13,11 @@ source("plugins.lua")
 source("nvim_lsp.lua")
 
 source("config/plugin/treesitter.lua")
-source("config/plugin/compe.lua")
+source("config/plugin/cmp.lua")
 source("config/plugin/eslint.lua")
 source("config/plugin/symbols-outline.lua")
 
 source("map/plugin/fzf.lua")
-source("map/plugin/compe.lua")
 source("map/plugin/spectre.lua")
 source("map/plugin/qdr.lua")
 source("map/plugin/symbols-outline.lua")

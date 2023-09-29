@@ -18,7 +18,6 @@ in
     nvim-lspconfig
     completion-nvim
     completion-buffers
-    nvim-compe
     vim-obsession
     vim-cue
   ];
