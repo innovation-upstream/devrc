@@ -14,7 +14,6 @@ return require('packer').startup(function(use)
   use {
     'ZacxDev/qdr.nvim',
     requires = 'vijaymarupudi/nvim-fzf',
-    commit = 'fd2e174f9f9c2707e6a64b9c982ebf6e6d46ad05',
   }
   use 'MunifTanjim/nui.nvim'
   use 'tpope/vim-obsession'
