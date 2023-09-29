@@ -13,7 +13,6 @@ in
     vim-fugitive
     undotree
     gruvbox
-    incsearch-vim
     vim-signify
     nvim-lspconfig
     completion-nvim
