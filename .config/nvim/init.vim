@@ -14,6 +14,5 @@ source $DEVRC_DIR/.config/nvim/config/plugin/completion_nvim.vim
 "source $DEVRC_DIR/.config/nvim/map/plugin/completion_nvim.vim
 source $DEVRC_DIR/.config/nvim/map/plugin/undotree.vim
 source $DEVRC_DIR/.config/nvim/map/plugin/fugitive.vim
-source $DEVRC_DIR/.config/nvim/map/plugin/incsearch.vim
 source $DEVRC_DIR/.config/nvim/map/plugin/signify.vim
 
