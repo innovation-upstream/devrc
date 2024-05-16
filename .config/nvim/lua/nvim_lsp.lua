@@ -49,15 +49,27 @@ end
 
 nvim_lsp.tsserver.setup {
     on_attach = on_attach,
-    nvim_lsp.util.root_pattern("package.json", "tsconfig.json", "jsconfig.json")
+    nvim_lsp.util.root_pattern("tsconfig.json")
 }
 
 nvim_lsp.eslint.setup {
-    on_attach = on_attach,
+  on_attach = function(client, bufnr)
+    vim.api.nvim_create_autocmd("BufWritePre", {
+      buffer = bufnr,
+      command = "EslintFixAll",
+    })
+    on_attach(client, bufnr)
+  end
 }
 
 nvim_lsp.gopls.setup {
-  on_attach = on_attach,
+  on_attach = function(client, bufnr)
+    vim.api.nvim_create_autocmd("BufWritePre", {
+      buffer = bufnr,
+      command = "lua vim.lsp.buf.format{}",
+    })
+    on_attach(client, bufnr)
+  end,
   root_dir = nvim_lsp.util.root_pattern('go.mod')
 }
 

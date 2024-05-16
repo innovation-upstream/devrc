@@ -12,7 +12,6 @@ in
     packer-nvim
     vim-fugitive
     undotree
-    gruvbox
     vim-signify
     completion-nvim
     completion-buffers

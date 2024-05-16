@@ -12,7 +12,7 @@ in
 
   nixpkgs.overlays = overlays;
 
-  home.stateVersion = "21.11";
+  home.stateVersion = "23.05";
 
   home.packages = if isNixOS
   then
