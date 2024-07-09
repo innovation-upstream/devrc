@@ -5,7 +5,7 @@ let
 in
 {
   enable = true;
-  package = pkgs.neovim-nightly;
+  package = pkgs.neovim;
   vimAlias = true;
   extraConfig = builtins.readFile ../../../.config/nvim/init.vim;
   plugins = with pkgs.vimPlugins; with plugins; [
@@ -13,8 +13,6 @@ in
     vim-fugitive
     undotree
     vim-signify
-    completion-nvim
-    completion-buffers
     vim-obsession
     vim-cue
   ];
