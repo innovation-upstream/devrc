@@ -6,7 +6,7 @@ with pkgs;
   nodePackages.typescript
   nodePackages.typescript-language-server
   nodePackages.vscode-json-languageserver
-  nodePackages.vscode-css-languageserver-bin
+  #nodePackages.vscode-css-languageserver-bin
   nodePackages.vscode-langservers-extracted
   nodejs_20
 ]
