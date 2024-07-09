@@ -2,6 +2,7 @@
 
 with pkgs;
 [
-  python39Full
+  python312Full
+  python312Packages.jedi-language-server
 ]
 
