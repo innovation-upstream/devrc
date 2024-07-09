@@ -1,6 +1,7 @@
 {}:
 {
   enable = true;
+  lfs.enable = true;
   aliases = {
     co = "checkout";
   };
