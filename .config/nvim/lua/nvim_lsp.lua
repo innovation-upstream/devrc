@@ -133,7 +133,9 @@ nvim_lsp.cucumber_language_server.setup{
   on_attach = on_attach,
 }
 
-nvim_lsp.jedi_language_server.setup{}
+nvim_lsp.pyright.setup{
+  on_attach = on_attach,
+}
 
 --[[
 nvim_lsp.sumneko_lua.setup{
