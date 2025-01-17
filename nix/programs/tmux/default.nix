@@ -9,7 +9,7 @@
     {
       plugin = dracula;
       extraConfig = ''
-        set -g @dracula-plugins "cpu-usage ram-usage"
+        set -g @dracula-plugins "ram-usage battery"
       '';
     }
     {

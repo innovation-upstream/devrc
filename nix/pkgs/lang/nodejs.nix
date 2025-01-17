@@ -2,12 +2,12 @@
 
 with pkgs;
 [
-  nodePackages.firebase-tools
+  #nodePackages.firebase-tools
   nodePackages.typescript
-  nodePackages.typescript-language-server
+  #nodePackages.typescript-language-server
   nodePackages.vscode-json-languageserver
-  #nodePackages.vscode-css-languageserver-bin
   nodePackages.vscode-langservers-extracted
   nodejs_20
+  typescript-language-server
 ]
 

@@ -14,9 +14,9 @@ source("nvim_lsp.lua")
 
 source("config/plugin/treesitter.lua")
 source("config/plugin/cmp.lua")
---source("config/plugin/symbols-outline.lua")
+source("config/plugin/harpoon.lua")
 
 source("map/plugin/fzf.lua")
 source("map/plugin/spectre.lua")
 source("map/plugin/qdr.lua")
---source("map/plugin/symbols-outline.lua")
+source("map/plugin/harpoon.lua")

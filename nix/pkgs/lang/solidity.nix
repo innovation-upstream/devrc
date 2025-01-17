@@ -2,6 +2,6 @@
 
 with pkgs;
 [
-  solc
+  #solc
 ]
 

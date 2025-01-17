@@ -7,6 +7,7 @@ let
   tmux = import ./tmux {pkgs=pkgs;};
   git = import ./git {};
   direnv = import ./direnv {};
+  alacritty = import ./alacritty {};
 in
 {
   # Let Home Manager install and manage itself.
@@ -18,4 +19,5 @@ in
   tmux = tmux;
   git = git;
   direnv = direnv;
+  alacritty = alacritty;
 }

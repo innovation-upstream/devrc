@@ -20,10 +20,11 @@ local on_attach = function(client, bufnr)
   buf_set_keymap('n', '<space>rr', '<cmd>lua vim.lsp.buf.rename()<CR>', opts)
   buf_set_keymap('n', 'gr', '<cmd>lua vim.lsp.buf.references()<CR>', opts)
   buf_set_keymap('n', '<space>e', '<cmd>lua vim.diagnostic.open_float()<CR>', opts)
-  buf_set_keymap('n', 'gp', '<cmd>lua vim.diagnostic.jump({count=-1, float=true})<CR>', opts)
-  buf_set_keymap('n', 'gn', '<cmd>lua vim.diagnostic.jump({count=1, float=true})<CR>', opts)
+  buf_set_keymap('n', 'gp', '<cmd>lua vim.diagnostic.goto_prev({float=true})<CR>', opts)
+  buf_set_keymap('n', 'gn', '<cmd>lua vim.diagnostic.goto_next({float=true})<CR>', opts)
   buf_set_keymap('n', 'er', '<cmd>lua vim.diagnostic.set_loclist()<CR>', opts)
   buf_set_keymap('n', 'do', '<cmd>lua vim.lsp.buf.code_action()<CR>', opts)
+  buf_set_keymap('n', 'dc', 'i' .. client.name, opts)
 
   -- Set some keybinds conditional on server capabilities
   if client.server_capabilities.documentFormattingProvider then
@@ -47,9 +48,8 @@ local on_attach = function(client, bufnr)
   end
 end
 
-nvim_lsp.tsserver.setup {
-    on_attach = on_attach,
-    nvim_lsp.util.root_pattern("tsconfig.json")
+nvim_lsp.ts_ls.setup {
+  on_attach = on_attach,
 }
 
 nvim_lsp.eslint.setup {
@@ -126,7 +126,8 @@ nvim_lsp.tailwindcss.setup{
 
 nvim_lsp.volar.setup{
   on_attach = on_attach,
-  filetypes = {'typescript', 'javascript', 'javascriptreact', 'typescriptreact', 'vue', 'json'}
+  --filetypes = {'typescript', 'javascript', 'javascriptreact', 'typescriptreact', 'vue', 'json'}
+  filetypes = {'vue'}
 }
 
 nvim_lsp.cucumber_language_server.setup{
@@ -135,6 +136,33 @@ nvim_lsp.cucumber_language_server.setup{
 
 nvim_lsp.pyright.setup{
   on_attach = on_attach,
+}
+
+nvim_lsp.starpls.setup{
+  on_attach = on_attach,
+}
+
+-- This is set in sessionVariables.nix
+local elixirlspPath = os.getenv("ELIXIR_LSP_PATH")
+nvim_lsp.elixirls.setup{
+  on_attach = on_attach,
+  cmd = { elixirlspPath },
+}
+
+local capabilities = vim.lsp.protocol.make_client_capabilities()
+capabilities.textDocument.completion.completionItem.snippetSupport = true
+
+nvim_lsp.html.setup {
+  on_attach = on_attach,
+  capabilities = capabilities,
+  filetypes = { "html", "templ", "typescriptreact", "javascriptreact" },
+  init_options =  {
+    embeddedLanguages = {
+      css = true,
+      javascript = true
+    },
+    provideFormatter = true -- this was false before, idk why
+  },
 }
 
 --[[

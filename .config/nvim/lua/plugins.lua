@@ -29,6 +29,14 @@ return require('packer').startup(function(use)
   use 'hrsh7th/cmp-path'
   use 'hrsh7th/cmp-cmdline'
   use 'hrsh7th/nvim-cmp'
+  -- For vsnip users.
+  use 'hrsh7th/cmp-vsnip'
+  use 'hrsh7th/vim-vsnip'
   use 'andymass/vim-matchup'
+  use {
+    "ThePrimeagen/harpoon",
+    branch = "harpoon2",
+    requires = { {"nvim-lua/plenary.nvim"} }
+  }
 end)
 
