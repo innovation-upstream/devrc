@@ -5,7 +5,7 @@ let
 in
 {
   enable = true;
-  package = pkgs.neovim;
+  #package = pkgs.neovim;
   vimAlias = true;
   extraConfig = builtins.readFile ../../../.config/nvim/init.vim;
   plugins = with pkgs.vimPlugins; with plugins; [
