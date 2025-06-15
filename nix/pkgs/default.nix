@@ -25,8 +25,9 @@ with pkgs;
   git # to replace possible old git comes with OS
   lefthook
 
-  google-cloud-sdk
   nix-direnv
+
+  kdePackages.kdenlive
 ]
 ++
 (import ./lang {pkgs=pkgs;})
