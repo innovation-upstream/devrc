@@ -4,20 +4,21 @@
   autocd = true;
   dotDir = ".config/zsh";
   enableCompletion = true;
-  initExtra = let
+  initContent = let
     zshRc = builtins.readFile ../../../.zshrc;
     hasDevRc = builtins.pathExists "${config.home.homeDirectory}/.devrc";
     content = if hasDevRc then zshRc + builtins.readFile "${config.home.homeDirectory}/.devrc" else zshRc;
   in
     ''
     ${content}
-    PROMPT='%{$fg_bold[blue]%}%c%{$reset_color%} $(git_prompt_info)'
+    PROMPT='%{$fg_bold[white]%}%c%{$reset_color%} $(git_prompt_info)'
 
     ZSH_THEME_GIT_PROMPT_PREFIX="%{$fg[green]%}"
     ZSH_THEME_GIT_PROMPT_SUFFIX="%{$reset_color%} "
     ZSH_THEME_GIT_PROMPT_DIRTY="%{$fg[blue]%} %{$fg_bold[yellow]%}!"
     ZSH_THEME_GIT_PROMPT_CLEAN="%{$fg[blue]%}"
     '';
+
   oh-my-zsh = {
     enable = true;
 
@@ -25,13 +26,18 @@
       "git"
     ];
   };
+
   shellAliases = {
-    k = "kubectl";
     g = "git";
     d = "docker";
-    dc = "docker-compose";
-    b = "bazel";
-    ba = "cat /sys/class/power_supply/BAT1/capacity";
-    gc = "git checkout $1";
+    n = "nvim";
+    k = "kubectl";
   };
+
+  history = {
+    append = true;
+    save = 15000;
+    saveNoDups = true;
+  };
+
 }

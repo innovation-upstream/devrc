@@ -32,3 +32,4 @@ fi
 export PATH=$PATH:$HOME/go/bin:$HOME/.npm-packages/bin
 export NODE_PATH=$HOME/.npm-packages/lib/node_modules
 
+xset r rate 180 30

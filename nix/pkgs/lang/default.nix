@@ -19,8 +19,8 @@ with pkgs;
   ++
   (import ./nodejs.nix {pkgs=pkgs;})
   ++
-  (import ./elixir.nix {pkgs=pkgs;})
-  ++
   (import ./starlark.nix {pkgs=pkgs;})
+  ++
+  (import ./nix.nix {pkgs=pkgs;})
   #++
   #(import ./graphql.nix {pkgs=pkgs;})
