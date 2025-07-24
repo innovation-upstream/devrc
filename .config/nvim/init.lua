@@ -5,6 +5,7 @@ local function source(relPath)
 end
 
 source("config/plugin/gruvbox.lua")
+source("config/plugin/lazygit.lua")
 
 source("helpers.lua")
 
