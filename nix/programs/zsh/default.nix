@@ -2,7 +2,7 @@
 {
   enable = true;
   autocd = true;
-  dotDir = ".config/zsh";
+  dotDir = config.home.homeDirectory + "/.config/zsh";
   enableCompletion = true;
   initContent = let
     zshRc = builtins.readFile ../../../.zshrc;
