@@ -11,14 +11,14 @@ return require('packer').startup(function(use)
   use 'rust-lang/rust.vim'
   use 'ibhagwan/fzf-lua'
   use 'nvim-lua/plenary.nvim'
-  use 'windwp/nvim-spectre'
+  --use 'windwp/nvim-spectre'
   use {
     'ZacxDev/qdr.nvim',
     requires = 'vijaymarupudi/nvim-fzf',
   }
   --use 'MunifTanjim/nui.nvim'
-  use 'tpope/vim-obsession'
-  use { 'tveskag/nvim-blame-line', cmd = 'ToggleBlameLine' }
+  --use 'tpope/vim-obsession'
+  --use { 'tveskag/nvim-blame-line', cmd = 'ToggleBlameLine' }
   --use 'vmchale/dhall-vim'
   --use 'simrat39/symbols-outline.nvim'
   use 'nvim-telescope/telescope.nvim'
@@ -30,8 +30,8 @@ return require('packer').startup(function(use)
   use 'hrsh7th/cmp-cmdline'
   use 'hrsh7th/nvim-cmp'
   -- For vsnip users.
-  --use 'hrsh7th/cmp-vsnip'
-  --use 'hrsh7th/vim-vsnip'
+  use 'hrsh7th/cmp-vsnip'
+  use 'hrsh7th/vim-vsnip'
   --use 'andymass/vim-matchup'
   use 'kdheepak/lazygit.nvim'
 end)
