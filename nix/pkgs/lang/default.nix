@@ -22,5 +22,7 @@ with pkgs;
   (import ./starlark.nix {pkgs=pkgs;})
   ++
   (import ./nix.nix {pkgs=pkgs;})
+  ++
+  (import ./yaml.nix {pkgs=pkgs;})
   #++
   #(import ./graphql.nix {pkgs=pkgs;})

@@ -22,7 +22,7 @@ local on_attach = function(client, bufnr)
   buf_set_keymap('n', '<space>e', '<cmd>lua vim.diagnostic.open_float()<CR>', opts)
   buf_set_keymap('n', 'gp', '<cmd>lua vim.diagnostic.goto_prev({float=true})<CR>', opts)
   buf_set_keymap('n', 'gn', '<cmd>lua vim.diagnostic.goto_next({float=true})<CR>', opts)
-  buf_set_keymap('n', 'er', '<cmd>lua vim.diagnostic.set_loclist()<CR>', opts)
+  buf_set_keymap('n', 'gl', '<cmd>lua vim.diagnostic.setloclist()<CR>', opts)
   buf_set_keymap('n', 'do', '<cmd>lua vim.lsp.buf.code_action()<CR>', opts)
   buf_set_keymap('n', 'dc', 'i' .. client.name, opts)
 
@@ -149,9 +149,6 @@ nvim_lsp.elixirls.setup{
   cmd = { elixirlspPath },
 }
 
-local capabilities = vim.lsp.protocol.make_client_capabilities()
-capabilities.textDocument.completion.completionItem.snippetSupport = true
-
 nvim_lsp.html.setup {
   on_attach = on_attach,
   capabilities = capabilities,
@@ -163,6 +160,25 @@ nvim_lsp.html.setup {
     },
     provideFormatter = true -- this was false before, idk why
   },
+}
+
+nvim_lsp.nixd.setup {
+  on_attach = on_attach,
+}
+
+nvim_lsp.yamlls.setup {
+  on_attach = on_attach,
+  settings = {
+    yaml = {
+      schemas = {
+        ["https://raw.githubusercontent.com/yannh/kubernetes-json-schema/master/v1.33.3-standalone/all.json"] = "/*.yaml",
+        ["http://json.schemastore.org/kustomization"] = "kustomization.yaml",
+      },
+      validate = true,
+      completion = true,
+      hover = true
+    }
+  }
 }
 
 --[[
