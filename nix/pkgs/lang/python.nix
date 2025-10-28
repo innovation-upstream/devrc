@@ -2,7 +2,7 @@
 
 with pkgs;
 [
-  python312Full
+  python312
   pyright
 ]
 
