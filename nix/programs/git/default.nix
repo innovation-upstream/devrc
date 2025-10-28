@@ -2,10 +2,7 @@
 {
   enable = true;
   lfs.enable = true;
-  aliases = {
-    co = "checkout";
-  };
-  extraConfig = {
+  settings = {
     url."git@github.com:".insteadOf = "https://github.com/";
     init = {
       defaultBranch = "trunk";
