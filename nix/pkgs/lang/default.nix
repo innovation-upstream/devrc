@@ -24,5 +24,7 @@ with pkgs;
   (import ./nix.nix {pkgs=pkgs;})
   ++
   (import ./yaml.nix {pkgs=pkgs;})
+  ++
+  (import ./csharp.nix {pkgs=pkgs;})
   #++
   #(import ./graphql.nix {pkgs=pkgs;})
