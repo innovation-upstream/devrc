@@ -28,6 +28,8 @@ with pkgs;
   nix-direnv
 
   kdePackages.kdenlive
+
+  tig
 ]
 ++
 (import ./lang {pkgs=pkgs;})

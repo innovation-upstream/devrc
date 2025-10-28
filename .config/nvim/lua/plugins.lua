@@ -34,5 +34,35 @@ return require('packer').startup(function(use)
   use 'hrsh7th/vim-vsnip'
   --use 'andymass/vim-matchup'
   use 'kdheepak/lazygit.nvim'
+  use {
+    'kelly-lin/ranger.nvim',
+    config = function()
+      local ranger_nvim = require("ranger-nvim")
+      ranger_nvim.setup({
+        enable_cmds = true,
+        replace_netrw = true
+      })
+    end
+  }
+  use {
+    'greggh/claude-code.nvim',
+    requires = {
+      'nvim-lua/plenary.nvim', -- Required for git operations
+    },
+    config = function()
+      require('claude-code').setup({
+        keymaps = {
+          window_navigation = false,
+          scrolling = false
+        }
+      })
+    end
+  }
+  use {
+    'iberianpig/tig-explorer.vim',
+    requires = {
+      'rbgrouleff/bclose.vim',
+    }
+  }
 end)
 
