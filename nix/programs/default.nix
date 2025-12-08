@@ -8,6 +8,7 @@ let
   git = import ./git {};
   direnv = import ./direnv {};
   alacritty = import ./alacritty {};
+  ranger = import ./ranger {};
 in
 {
   # Let Home Manager install and manage itself.
@@ -20,4 +21,5 @@ in
   git = git;
   direnv = direnv;
   alacritty = alacritty;
+  ranger = ranger;
 }
