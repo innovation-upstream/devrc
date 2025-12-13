@@ -32,4 +32,7 @@ fi
 export PATH=$PATH:$HOME/go/bin:$HOME/.npm-packages/bin
 export NODE_PATH=$HOME/.npm-packages/lib/node_modules
 
+# Directory jumping via CDPATH
+export CDPATH=".:$HOME/workspace"
+
 xset r rate 180 30
