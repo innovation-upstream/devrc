@@ -5,18 +5,22 @@
 WINDOW_IDX="$1"
 WINDOW_NAME="$2"
 WINDOW_FLAGS="$3"
-BELL_FLAG="$4"           # "1" if bell active, "0" otherwise
-WINDOW_ACTIVITY="$5"     # Unix timestamp of last activity
+WINDOW_ID="$4"           # Window ID (e.g., @1) for activity file lookup
 
-# Strip '#' activity flag - we show activity via color instead
+# Strip '#' activity flag and other noise
 WINDOW_FLAGS="${WINDOW_FLAGS//#/}"
 
-# Calculate idle time from last activity
-if [[ -z "$WINDOW_ACTIVITY" || "$WINDOW_ACTIVITY" == "0" ]]; then
-  IDLE_SECS=99999
-else
+# Read last activity timestamp from file (set by pipe-pane receiver)
+ACTIVITY_DIR="${HOME}/.tmux/activity"
+ACTIVITY_FILE="${ACTIVITY_DIR}/${WINDOW_ID//[@%]/}"
+
+if [[ -f "$ACTIVITY_FILE" ]]; then
+  LAST_ACTIVITY=$(cat "$ACTIVITY_FILE" 2>/dev/null)
   NOW=$(date +%s)
-  IDLE_SECS=$((NOW - WINDOW_ACTIVITY))
+  IDLE_SECS=$((NOW - LAST_ACTIVITY))
+else
+  # No activity file = window hasn't had background output yet
+  IDLE_SECS=99999
 fi
 
 # Color thresholds (Gruvbox palette)
@@ -33,11 +37,5 @@ else
   COLOR="#665c54"  # dim gray - dormant
 fi
 
-# Bell overrides idle color with bright magenta + bold
-STYLE="fg=$COLOR,bg=default"
-if [[ "$BELL_FLAG" == "1" ]]; then
-  STYLE="fg=#d3869b,bg=default,bold"  # bright magenta - demands attention
-fi
-
 # Output formatted window tab
-echo "#[$STYLE] $WINDOW_IDX:$WINDOW_NAME$WINDOW_FLAGS "
+echo "#[fg=$COLOR,bg=default] $WINDOW_IDX:$WINDOW_NAME$WINDOW_FLAGS "

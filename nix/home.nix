@@ -31,4 +31,12 @@ in
     source = ../scripts/tmux-idle-color.sh;
     executable = true;
   };
+  home.file.".config/tmux/pipe-activity.sh" = {
+    source = ../scripts/tmux-pipe-activity.sh;
+    executable = true;
+  };
+  home.file.".config/tmux/activity-receiver.sh" = {
+    source = ../scripts/tmux-activity-receiver.sh;
+    executable = true;
+  };
 }
