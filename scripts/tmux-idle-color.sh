@@ -5,18 +5,19 @@
 WINDOW_IDX="$1"
 WINDOW_NAME="$2"
 WINDOW_FLAGS="$3"
-BELL_FLAG="$4"  # "1" if bell active, "0" otherwise
+BELL_FLAG="$4"           # "1" if bell active, "0" otherwise
+WINDOW_ACTIVITY="$5"     # Unix timestamp of last activity in window
 
-# Get last focused timestamp for this specific window
-LAST_FOCUSED=$(tmux display-message -t ":$WINDOW_IDX" -p '#{@window_last_focused}' 2>/dev/null)
+# Strip '#' activity flag - we show activity via color instead
+WINDOW_FLAGS="${WINDOW_FLAGS//#/}"
 
-# Default to now if no timestamp (newly created window)
-if [[ -z "$LAST_FOCUSED" || "$LAST_FOCUSED" == "" ]]; then
-  LAST_FOCUSED=$(date +%s)
+# Default to now if no timestamp
+if [[ -z "$WINDOW_ACTIVITY" || "$WINDOW_ACTIVITY" == "0" ]]; then
+  WINDOW_ACTIVITY=$(date +%s)
 fi
 
 NOW=$(date +%s)
-IDLE_SECS=$((NOW - LAST_FOCUSED))
+IDLE_SECS=$((NOW - WINDOW_ACTIVITY))
 
 # Color thresholds (Gruvbox palette)
 # < 5min = green, 5-10min = yellow, 10-30min = orange, 30-60min = red, >60min = gray
@@ -33,9 +34,9 @@ else
 fi
 
 # Bell overrides idle color with bright magenta + bold
-STYLE="fg=$COLOR"
+STYLE="fg=$COLOR,bg=default"
 if [[ "$BELL_FLAG" == "1" ]]; then
-  STYLE="fg=#d3869b,bold"  # bright magenta - demands attention
+  STYLE="fg=#d3869b,bg=default,bold"  # bright magenta - demands attention
 fi
 
 # Output formatted window tab
