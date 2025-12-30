@@ -6,6 +6,7 @@ WINDOW_IDX="$1"
 WINDOW_NAME="$2"
 WINDOW_FLAGS="$3"
 WINDOW_ID="$4"           # Window ID (e.g., @1) for activity file lookup
+BELL_FLAG="$5"           # "1" if bell active, "0" otherwise
 
 # Strip '#' activity flag and other noise
 WINDOW_FLAGS="${WINDOW_FLAGS//#/}"
@@ -37,5 +38,13 @@ else
   COLOR="#665c54"  # dim gray - dormant
 fi
 
+# Bell overrides idle color with bright magenta + bold
+if [[ "$BELL_FLAG" == "1" ]]; then
+  COLOR="#d3869b"  # bright magenta - bell alert
+  STYLE="fg=$COLOR,bg=default,bold"
+else
+  STYLE="fg=$COLOR,bg=default"
+fi
+
 # Output formatted window tab
-echo "#[fg=$COLOR,bg=default] $WINDOW_IDX:$WINDOW_NAME$WINDOW_FLAGS "
+echo "#[$STYLE] $WINDOW_IDX:$WINDOW_NAME$WINDOW_FLAGS "
