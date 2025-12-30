@@ -6,18 +6,17 @@ WINDOW_IDX="$1"
 WINDOW_NAME="$2"
 WINDOW_FLAGS="$3"
 BELL_FLAG="$4"           # "1" if bell active, "0" otherwise
-LAST_ACTIVITY="$5"       # Unix timestamp from @last_activity (set by alert-activity hook)
+WINDOW_ACTIVITY="$5"     # Unix timestamp of last activity
 
 # Strip '#' activity flag - we show activity via color instead
 WINDOW_FLAGS="${WINDOW_FLAGS//#/}"
 
-# No activity recorded yet = window hasn't had output while unfocused
-# Treat as very idle (will show dim gray)
-if [[ -z "$LAST_ACTIVITY" || "$LAST_ACTIVITY" == "" ]]; then
+# Calculate idle time from last activity
+if [[ -z "$WINDOW_ACTIVITY" || "$WINDOW_ACTIVITY" == "0" ]]; then
   IDLE_SECS=99999
 else
   NOW=$(date +%s)
-  IDLE_SECS=$((NOW - LAST_ACTIVITY))
+  IDLE_SECS=$((NOW - WINDOW_ACTIVITY))
 fi
 
 # Color thresholds (Gruvbox palette)
