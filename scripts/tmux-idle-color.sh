@@ -6,18 +6,19 @@ WINDOW_IDX="$1"
 WINDOW_NAME="$2"
 WINDOW_FLAGS="$3"
 BELL_FLAG="$4"           # "1" if bell active, "0" otherwise
-WINDOW_ACTIVITY="$5"     # Unix timestamp of last activity in window
+LAST_ACTIVITY="$5"       # Unix timestamp from @last_activity (set by alert-activity hook)
 
 # Strip '#' activity flag - we show activity via color instead
 WINDOW_FLAGS="${WINDOW_FLAGS//#/}"
 
-# Default to now if no timestamp
-if [[ -z "$WINDOW_ACTIVITY" || "$WINDOW_ACTIVITY" == "0" ]]; then
-  WINDOW_ACTIVITY=$(date +%s)
+# No activity recorded yet = window hasn't had output while unfocused
+# Treat as very idle (will show dim gray)
+if [[ -z "$LAST_ACTIVITY" || "$LAST_ACTIVITY" == "" ]]; then
+  IDLE_SECS=99999
+else
+  NOW=$(date +%s)
+  IDLE_SECS=$((NOW - LAST_ACTIVITY))
 fi
-
-NOW=$(date +%s)
-IDLE_SECS=$((NOW - WINDOW_ACTIVITY))
 
 # Color thresholds (Gruvbox palette)
 # < 5min = green, 5-10min = yellow, 10-30min = orange, 30-60min = red, >60min = gray
