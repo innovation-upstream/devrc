@@ -5,7 +5,10 @@ let
   isNixOS = builtins.pathExists /etc/NIXOS;
   # To enable nightly, also remove comment in neovim/default.nix
   #overlays = import ./overlays.nix;
-  sessionVariables = import ./sessionVariables.nix {elixirLspPath = pkgs.vscode-extensions.elixir-lsp.vscode-elixir-ls;};
+  sessionVariables = import ./sessionVariables.nix {
+    elixirLspPath = pkgs.vscode-extensions.elixir-lsp.vscode-elixir-ls;
+    playwrightBrowsersPath = pkgs.playwright-driver.browsers;
+  };
   programs = import ./programs {pkgs=pkgs; config=config;};
 in
 {
@@ -22,4 +25,10 @@ in
     userPackages;
 
   home.sessionVariables = sessionVariables;
+
+  # Symlink tmux scripts
+  home.file.".config/tmux/idle-color.sh" = {
+    source = ../scripts/tmux-idle-color.sh;
+    executable = true;
+  };
 }

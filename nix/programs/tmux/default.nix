@@ -6,12 +6,14 @@
   baseIndex = 1;
   extraConfig = builtins.readFile ../../../.tmux.conf;
   plugins = with pkgs.tmuxPlugins; [
-    {
-      plugin = dracula;
-      extraConfig = ''
-        set -g @dracula-plugins "ram-usage"
-      '';
-    }
+    # Dracula removed - using custom Gruvbox theme with idle-fade colors
+    # To restore: uncomment dracula block below
+    # {
+    #   plugin = dracula;
+    #   extraConfig = ''
+    #     set -g @dracula-plugins "ram-usage"
+    #   '';
+    # }
     {
       plugin = resurrect;
     }
