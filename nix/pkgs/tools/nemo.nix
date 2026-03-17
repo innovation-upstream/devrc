@@ -2,5 +2,5 @@
 
 with pkgs;
 [
-  cinnamon.nemo
+  nemo-with-extensions
 ]
