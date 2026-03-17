@@ -32,6 +32,7 @@
     d = "docker";
     n = "nvim";
     k = "kubectl";
+    nemo = "GTK_THEME=Adwaita-dark nemo";
   };
 
   history = {
