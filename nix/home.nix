@@ -83,16 +83,13 @@ in
     };
   };
 
-  # Compositor (vsync, no tearing with NVIDIA)
-  services.picom = {
-    enable = true;
-    backend = "glx";
-    vSync = true;
-    settings = {
-      glx-no-stencil = true;
-      glx-no-rebind-pixmap = true;
-    };
-  };
+  # Compositor disabled — NVIDIA forceFullCompositionPipeline handles vsync/tearing
+  # picom conflicts with NVIDIA's composition pipeline causing workspace switch flicker
+  # services.picom = {
+  #   enable = true;
+  #   backend = "glx";
+  #   vSync = true;
+  # };
 
   # Notification daemon (Gruvbox-themed)
   services.dunst = {
@@ -158,6 +155,14 @@ in
   };
   home.file.".config/tmux/activity-receiver.sh" = {
     source = ../scripts/tmux-activity-receiver.sh;
+    executable = true;
+  };
+  home.file.".config/tmux/task-hook.sh" = {
+    source = ../scripts/tmux-task-hook.sh;
+    executable = true;
+  };
+  home.file.".config/tmux/task-dashboard.sh" = {
+    source = ../scripts/tmux-task-dashboard.sh;
     executable = true;
   };
 }
