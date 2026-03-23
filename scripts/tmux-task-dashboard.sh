@@ -152,13 +152,24 @@ generate_lines() {
         local keywords
         keywords=$(extract_keywords "$full_cwd" "$session_id")
 
-        # Clean display name (strip emoji prefix for cleaner look since we show status separately)
+        # Clean display name: strip emoji prefix and trailing ● indicator
         local display_name
-        display_name=$(echo "$name" | sed -E 's/^(🔄|⏸|✅) //')
+        display_name=$(echo "$name" | sed -E 's/^(🔄|⏸|✅) //' | sed 's/ ●$//')
+        # Truncate to 24 chars
+        display_name="${display_name:0:24}"
+
+        # Status column: pad to consistent width
+        # Emoji = 2 display cols, ● = 1, blank = 0
+        local st_col
+        case "$status" in
+            "🔄"|"⏸"|"✅") st_col="$status" ;;
+            "●")            st_col="● " ;;
+            *)              st_col="  " ;;
+        esac
 
         # Format: target\tkeywords\tdisplay (fzf shows field 3+)
-        printf "%s\t%s\t${color}  %-2s %-28s  %-18s  %5s  %.60s${stale_marker}${NC}\n" \
-            "$target" "$keywords" "$status" "$display_name" "$dir" "$idle" "$summary"
+        printf "%s\t%s\t${color} %s %-24s  %-20s  %5s  %.55s${stale_marker}${NC}\n" \
+            "$target" "$keywords" "$st_col" "$display_name" "$dir" "$idle" "$summary"
     done
 }
 
@@ -209,7 +220,7 @@ SELECTED=$(generate_lines | \
         --with-nth=3.. \
         --reverse \
         --ansi \
-        --header="$(printf '     %-2s %-28s  %-18s  %5s  %s' 'ST' 'TASK' 'DIR' 'IDLE' 'SUMMARY')" \
+        --header="$(printf ' %-2s %-24s  %-20s  %5s  %s' 'ST' 'TASK' 'DIR' 'IDLE' 'SUMMARY')" \
         --preview="$PREVIEW_CMD" \
         --preview-window=right:45%:wrap \
         --bind='ctrl-x:execute-silent(tmux kill-window -t {1})+reload('"$0"' --lines)' \
