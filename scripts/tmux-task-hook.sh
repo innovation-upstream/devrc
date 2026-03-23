@@ -26,13 +26,12 @@ CLAUDE_SESSION=$(echo "$INPUT" | jq -r '.session_id // "unknown"' 2>/dev/null)
 LAST_MSG=$(echo "$INPUT" | jq -r '.last_assistant_message // ""' 2>/dev/null | head -c 200 | tr '\n' ' ')
 NOW=$(date -Iseconds)
 
-# Strip existing status prefix from window name to get the task name
-# Handles: "🔄 task", "⏸ task", "✅ task", or plain "task"
-TASK_NAME=$(echo "$WIN_NAME" | sed 's/^[^ ]* //' | sed '/^$/d')
-# If sed stripped everything (single-word name with no prefix), use original
-[[ -z "$TASK_NAME" ]] && TASK_NAME="$WIN_NAME"
-# If name still looks like a status emoji alone, fall back to directory
-[[ "$TASK_NAME" =~ ^[🔄⏸✅]$ ]] && TASK_NAME=$(basename "$CWD_DIR")
+# Strip known status emoji prefixes only, preserve everything else
+TASK_NAME=$(echo "$WIN_NAME" | sed -E 's/^(🔄|⏸|✅) //')
+# Strip trailing Claude indicator (or bare ●)
+TASK_NAME=$(echo "$TASK_NAME" | sed -e 's/ ●$//' -e 's/^●$//')
+# If empty after stripping, fall back to directory basename
+[[ -z "$TASK_NAME" ]] && TASK_NAME=$(basename "$CWD_DIR")
 
 # Task state file keyed by tmux window ID (strip @ and % chars for filename)
 TASK_FILE="${TASK_DIR}/${WIN_ID//[@%]/}.json"
@@ -43,7 +42,8 @@ STARTED="$NOW"
 if [[ -f "$TASK_FILE" ]]; then
     ORIG_TASK=$(jq -r '.task // ""' "$TASK_FILE" 2>/dev/null)
     STARTED=$(jq -r '.started // ""' "$TASK_FILE" 2>/dev/null)
-    [[ -z "$ORIG_TASK" ]] && ORIG_TASK="$TASK_NAME"
+    # Fall back to extracted name if stored task is empty or just the Claude indicator
+    [[ -z "$ORIG_TASK" || "$ORIG_TASK" == "●" ]] && ORIG_TASK="$TASK_NAME"
     [[ -z "$STARTED" ]] && STARTED="$NOW"
 fi
 
