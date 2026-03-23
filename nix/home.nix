@@ -3,6 +3,8 @@
 let
   userPackages = import ./pkgs {pkgs=pkgs;};
   isNixOS = builtins.pathExists /etc/NIXOS;
+  home = config.home.homeDirectory;
+  workspace = "${home}/workspace";
   # To enable nightly, also remove comment in neovim/default.nix
   #overlays = import ./overlays.nix;
   sessionVariables = import ./sessionVariables.nix {
@@ -39,38 +41,36 @@ in
           { trigger = ":iso"; replace = "{{myiso}}"; label = "ISO 8601 timestamp"; search_terms = ["utc" "rfc"]; vars = [{ name = "myiso"; type = "date"; params = { format = "%Y-%m-%dT%H:%M:%S%z"; }; }]; }
 
           # Paths - labeled for autocomplete
-          { trigger = ":pv"; replace = "/home/zach/workspace/promptver "; label = "promptver path"; }
-          { trigger = ":hlt"; replace = "/home/zach/workspace/homelab-talos "; label = "homelab-talos path"; search_terms = ["infra"]; }
-          { trigger = ":gss"; replace = "/home/zach/workspace/go-static-site "; label = "go static site"; search_terms = ["repo" ]; }
+          { trigger = ":pv"; replace = "${workspace}/promptver "; label = "promptver path"; }
+          { trigger = ":hlt"; replace = "${workspace}/homelab-talos "; label = "homelab-talos path"; search_terms = ["infra"]; }
+          { trigger = ":gss"; replace = "${workspace}/go-static-site "; label = "go static site"; search_terms = ["repo"]; }
           { trigger = ":nixos"; replace = "/etc/nixos/configuration.nix"; label = "nixos config"; search_terms = ["nixos" "system"]; }
 
           # hot phrases
           { trigger = ":psg"; replace = "prometheus stack grafana "; label = "Prometheus stack grafana"; search_terms = ["monitoring" "metrics"]; }
           { trigger = ":gal"; replace = "grafana alloy "; label = "alloy"; search_terms = ["monitoring" "metrics"]; }
-          { trigger = ":prov"; replace = "provisioned dashboards list "; label = "provisioned dashboards "; search_terms = ["monitoring" "metrics"]; }
-          { trigger = ":mfc"; replace = "make the following changes:\n"; label = "make changes"; search_terms = ["workflow" ]; }
-          { trigger = ":mtfc"; replace = "make the following changes:\n"; label = "make changes"; search_terms = ["workflow" ]; }
-          { trigger = ":itfc"; replace = "implement the following changes:\n"; label = "implement changes"; search_terms = ["workflow" ]; }
-          { trigger = ":itc"; replace = "implement the following changes:\n"; label = "implement changes"; search_terms = ["workflow" ]; }
+          { trigger = ":prov"; replace = "provisioned dashboards list "; label = "provisioned dashboards"; search_terms = ["monitoring" "metrics"]; }
+          { trigger = ":mfc"; replace = "make the following changes:\n"; label = "make changes"; search_terms = ["workflow"]; }
+          { trigger = ":itc"; replace = "implement the following changes:\n"; label = "implement changes"; search_terms = ["workflow"]; }
 
           # hot singles
           { trigger = "dashbaord"; replace = "dashboard"; }
           { trigger = ":su"; replace = "set"; label = "setup"; search_terms = ["setup"]; }
 
           # Workflows
-          { trigger = ":cpr"; replace = "commit push reconcile flux verify"; label = "Comit push reconcile verify"; search_terms = ["flux" "deploy"]; }
-          { trigger = ":tmt:"; replace = "use task-master MCP to create tasks, then implement and validate them"; label = "Comit push reconcile verify"; search_terms = ["flux" "deploy"]; }
+          { trigger = ":cpr"; replace = "commit push reconcile flux verify"; label = "Commit push reconcile verify"; search_terms = ["flux" "deploy"]; }
+          { trigger = ":tmt:"; replace = "use task-master MCP to create tasks, then implement and validate them"; label = "Task-master workflow"; search_terms = ["taskmaster" "workflow"]; }
 
-          { trigger = ":cdp"; replace = "/home/zach/workspace/civit/datapacket-talos "; label = "civitai datapacket-talos path"; search_terms = ["civitai"]; }
-          { trigger = ":cgf"; replace = "/home/zach/workspace/civit/civitai-gpu-fleet "; label = "civitai gpu-fleet path"; search_terms = ["civitai"]; }
-          { trigger = ":cdo"; replace = "/home/zach/workspace/civit/civitai-deployment "; label = "civitai do deployment path"; search_terms = ["civitai"]; }
-          { trigger = ":cpk"; replace = "/home/zach/workspace/civit/datapacket-talos/prod-kubeconfig "; label = "civitai dp prod kubeconfig path"; search_terms = ["civitai"]; }
-          { trigger = ":cdk"; replace = "/home/zach/Downloads/civitai-kubeconfig.yaml "; label = "civitai do kubeconfig path"; search_terms = ["civitai"]; }
+          { trigger = ":cdp"; replace = "${workspace}/civit/datapacket-talos "; label = "civitai datapacket-talos path"; search_terms = ["civitai"]; }
+          { trigger = ":cgf"; replace = "${workspace}/civit/civitai-gpu-fleet "; label = "civitai gpu-fleet path"; search_terms = ["civitai"]; }
+          { trigger = ":cdo"; replace = "${workspace}/civit/civitai-deployment "; label = "civitai do deployment path"; search_terms = ["civitai"]; }
+          { trigger = ":cpk"; replace = "${workspace}/civit/datapacket-talos/prod-kubeconfig "; label = "civitai dp prod kubeconfig path"; search_terms = ["civitai"]; }
+          { trigger = ":cdk"; replace = "${home}/Downloads/civitai-kubeconfig.yaml "; label = "civitai do kubeconfig path"; search_terms = ["civitai"]; }
 
           # Word expansions
           { trigger = ":anal"; replace = "analyze "; }
-          { trigger = ":analc"; replace = "analyze the client "; search_terms = ["client" ]; }
-          { trigger = ":gene"; replace = "generator "; search_terms = ["client" ]; }
+          { trigger = ":analc"; replace = "analyze the client "; search_terms = ["client"]; }
+          { trigger = ":gene"; replace = "generator "; search_terms = ["client"]; }
           { trigger = ":prop"; replace = "propose"; }
           { trigger = ":det"; replace = "determine "; }
           { trigger = ":gra"; replace = "grafana "; }
@@ -98,7 +98,14 @@ in
   else
     userPackages;
 
-  home.sessionVariables = sessionVariables;
+  home.sessionVariables = sessionVariables // {
+    NODE_PATH = "${home}/.npm-packages/lib/node_modules";
+  };
+
+  home.sessionPath = [
+    "${home}/go/bin"
+    "${home}/.npm-packages/bin"
+  ];
 
   # Symlink tmux scripts
   home.file.".config/tmux/idle-update.sh" = {

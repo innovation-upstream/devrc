@@ -15,24 +15,8 @@ function git_prompt_info() {
 
 export DEVRC_DIR=${DEVRC_DIR:-$HOME/workspace/devrc}
 
-_direnv_hook() {
-  trap -- '' SIGINT;
-  eval "$("direnv" export zsh)";
-  trap - SIGINT;
-}
-typeset -ag precmd_functions;
-if [[ -z ${precmd_functions[(r)_direnv_hook]} ]]; then
-  precmd_functions=( _direnv_hook ${precmd_functions[@]} )
-fi
-typeset -ag chpwd_functions;
-if [[ -z ${chpwd_functions[(r)_direnv_hook]} ]]; then
-  chpwd_functions=( _direnv_hook ${chpwd_functions[@]} )
-fi
-
-export PATH=$PATH:$HOME/go/bin:$HOME/.npm-packages/bin
-export NODE_PATH=$HOME/.npm-packages/lib/node_modules
-
 # Directory jumping via CDPATH
-export CDPATH=".:$HOME/workspace"
+export CDPATH=".:$HOME/workspace:$HOME/workspace/civit"
 
-xset r rate 180 30
+# Set keyboard repeat rate (X11 only, skip inside tmux to avoid running per-pane)
+[[ -z "$TMUX" && -n "$DISPLAY" ]] && xset r rate 180 30

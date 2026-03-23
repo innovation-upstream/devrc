@@ -3,11 +3,9 @@
   enable = true;
 
   settings = {
+    # Bell sound handled by tmux hook (set-hook alert-bell) to avoid double notification
     bell = {
-      command = {
-        program = "paplay";
-        args = ["/run/current-system/sw/share/sounds/freedesktop/stereo/message.oga"];
-      };
+      duration = 0;
     };
 
     keyboard.bindings = [
