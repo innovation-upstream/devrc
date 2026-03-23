@@ -44,15 +44,19 @@ extract_keywords() {
     fi
     [[ -z "$session_file" || ! -f "$session_file" ]] && return
 
-    # Extract user messages + assistant text from last 300 lines
-    tail -300 "$session_file" 2>/dev/null | \
-        jq -r 'select(.type == "user" or .type == "assistant") |
-            if .type == "user" then
-                .message.content | if type == "string" then . else "" end
-            else
-                [.message.content[]? | select(.type == "text") | .text // ""] | join(" ")
-            end' 2>/dev/null | \
-        tr '\n\t' '  ' | head -c 1000
+    # Extract user messages first (short, keyword-rich), then assistant text
+    {
+        # User prompts — most valuable for search
+        tail -500 "$session_file" 2>/dev/null | \
+            jq -r 'select(.type == "user" and .userType == "external") |
+                .message.content | if type == "string" then . else "" end' 2>/dev/null | \
+            tr '\n\t' '  '
+        # Assistant text — supplementary context
+        tail -200 "$session_file" 2>/dev/null | \
+            jq -r 'select(.type == "assistant") |
+                [.message.content[]? | select(.type == "text") | .text // ""] | join(" ")' 2>/dev/null | \
+            tr '\n\t' '  '
+    } | head -c 3000
 }
 
 # Extract a short summary from task file or Claude session
@@ -157,6 +161,9 @@ format_window() {
         *)              st_col="  " ;;
     esac
 
+    # Truncate dir to 20 chars
+    dir="${dir:0:20}"
+
     printf "%s\t%s\t${color} %s %-24s  %-20s  %5s  %.55s${stale_marker}${NC}\n" \
         "$target" "$keywords" "$st_col" "$display_name" "$dir" "$idle" "$summary"
 }
@@ -227,7 +234,7 @@ PREVIEW_CMD='
     echo -e "\033[1mRecent Prompts\033[0m"
     LATEST=$(ls -t "$PDIR"/*.jsonl 2>/dev/null | head -1)
     if [[ -n "$LATEST" ]]; then
-        tail -200 "$LATEST" | jq -r "select(.type == \"user\" and .userType == \"external\") | .message.content | if type == \"string\" then . else \"\" end" 2>/dev/null | tail -5 | while read -r line; do
+        tail -500 "$LATEST" | jq -r "select(.type == \"user\" and .userType == \"external\") | .message.content | if type == \"string\" then . elif type == \"array\" then [.[] | select(type == \"object\" and .type == \"text\") | .text] | join(\" \") else \"\" end" 2>/dev/null | grep -v "^$" | tail -5 | while read -r line; do
             echo "  > $(echo "$line" | head -c 120)"
         done
     else
