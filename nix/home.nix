@@ -83,6 +83,46 @@ in
     };
   };
 
+  # Compositor (vsync, no tearing with NVIDIA)
+  services.picom = {
+    enable = true;
+    backend = "glx";
+    vSync = true;
+    settings = {
+      glx-no-stencil = true;
+      glx-no-rebind-pixmap = true;
+    };
+  };
+
+  # Notification daemon (Gruvbox-themed)
+  services.dunst = {
+    enable = true;
+    settings = {
+      global = {
+        font = "Monospace 10";
+        frame_color = "#504945";
+        separator_color = "frame";
+        corner_radius = 4;
+      };
+      urgency_low = {
+        background = "#282828";
+        foreground = "#ebdbb2";
+        timeout = 5;
+      };
+      urgency_normal = {
+        background = "#282828";
+        foreground = "#ebdbb2";
+        frame_color = "#83a598";
+        timeout = 10;
+      };
+      urgency_critical = {
+        background = "#cc241d";
+        foreground = "#ebdbb2";
+        timeout = 0;
+      };
+    };
+  };
+
   # Workaround: ensure espanso config directory exists
   home.activation.espansoConfigDir = lib.hm.dag.entryAfter ["writeBoundary"] ''
     mkdir -p ~/.config/espanso/config

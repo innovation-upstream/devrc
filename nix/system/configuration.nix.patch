@@ -1,0 +1,65 @@
+Changes to apply to /etc/nixos/configuration.nix:
+
+1. i3 extraPackages — add rofi, remove polybar:
+
+    windowManager.i3 = {
+      enable = true;
+      configFile = "/etc/i3.conf";
+      extraPackages = with pkgs; [
+        dmenu
+        rofi
+        xorg.xrandr
+        i3lock
+        i3blocks
+     ];
+    };
+
+2. Remove polybar stub config (delete lines 202-210):
+
+  DELETE:
+  environment.etc."config/polybar" = {
+    text = ''
+      [bar/example]
+      width = 100%
+      height = 27
+      radius = 6.0
+      fixed-center = false
+    '';
+  };
+
+3. Enable xss-lock for suspend/idle protection (replace commented block at lines 433-439):
+
+  programs.xss-lock = {
+    enable = true;
+    lockerCommand = "${pkgs.i3lock}/bin/i3lock -c 282828";
+  };
+
+4. Remove dunst from systemPackages (home-manager now manages it):
+
+  environment.systemPackages = with pkgs; [
+    acpi
+    iw
+    lm_sensors
+
+    git
+    htop
+
+    libnotify
+
+    pavucontrol
+
+    cifs-utils
+
+    libnvidia-container
+    nvidia-container-toolkit
+    nvidia-container-toolkit.tools
+    runc
+
+    cachix
+  ];
+
+5. Remove I3CONFIG_DMENU_INCLUDE (rofi doesn't need a whitelist filter):
+
+  environment.extraInit = ''
+  export I3CONFIG_DEFAULT_TERMINAL="alacritty"
+  '';
