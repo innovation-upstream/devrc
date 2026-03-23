@@ -97,13 +97,97 @@ format_idle() {
     fi
 }
 
+# Format a single window line
+# Args: target win_id name dir activity full_cwd command bell color_override
+format_window() {
+    local target="$1" win_id="$2" name="$3" dir="$4" activity="$5"
+    local full_cwd="$6" command="$7" bell="$8" color_override="$9"
+
+    # Idle time + staleness color
+    local idle
+    idle=$(format_idle "$activity")
+    local idle_s=0
+    [[ -n "$activity" && "$activity" != "0" ]] && idle_s=$((NOW - activity))
+
+    local color="${color_override}"
+    local stale_marker=""
+    if [[ -z "$color" ]]; then
+        if (( idle_s > 86400 )); then
+            color="${DIM}${RED}"
+            stale_marker=" 💀"
+        elif (( idle_s > 3600 )); then
+            color="${YELLOW}"
+        fi
+    fi
+
+    # Claude status indicator
+    local status=""
+    case "$name" in
+        "🔄 "*) status="🔄" ;;
+        "⏸ "*)  status="⏸" ;;
+        "✅ "*) status="✅" ;;
+        *)
+            [[ "$command" == claude* ]] && status="●"
+            ;;
+    esac
+
+    # Get session ID from task file if available
+    local session_id=""
+    local task_file="${TASK_DIR}/${win_id//[@%]/}.json"
+    [[ -f "$task_file" ]] && session_id=$(jq -r '.claude_session // ""' "$task_file" 2>/dev/null)
+
+    # Summary (task file → auto-populated from session)
+    local summary
+    summary=$(get_summary "$win_id" "$full_cwd")
+
+    # Conversation keywords for search (hidden from display)
+    local keywords
+    keywords=$(extract_keywords "$full_cwd" "$session_id")
+
+    # Clean display name: strip emoji prefix and trailing ● indicator
+    local display_name
+    display_name=$(echo "$name" | sed -E 's/^(🔄|⏸|✅) //' | sed 's/ ●$//')
+    display_name="${display_name:0:24}"
+
+    # Status column: pad to consistent width
+    local st_col
+    case "$status" in
+        "🔄"|"⏸"|"✅") st_col="$status" ;;
+        "●")            st_col="● " ;;
+        *)              st_col="  " ;;
+    esac
+
+    printf "%s\t%s\t${color} %s %-24s  %-20s  %5s  %.55s${stale_marker}${NC}\n" \
+        "$target" "$keywords" "$st_col" "$display_name" "$dir" "$idle" "$summary"
+}
+
 generate_lines() {
     local current_session=""
+    local has_blocked=false
 
-    # Sort by session name for grouping
-    tmux list-windows -a -F '#{session_name}	#{session_name}:#{window_index}	#{window_id}	#{window_name}	#{b:pane_current_path}	#{window_activity}	#{pane_current_path}	#{pane_current_command}' | \
-    sort -t$'\t' -k1,1 | \
-    while IFS=$'\t' read -r session target win_id name dir activity full_cwd command; do
+    # Collect all window data once (avoid multiple tmux calls)
+    local tmpfile
+    tmpfile=$(mktemp)
+    tmux list-windows -a -F '#{session_name}	#{session_name}:#{window_index}	#{window_id}	#{window_name}	#{b:pane_current_path}	#{window_activity}	#{pane_current_path}	#{pane_current_command}	#{window_bell_flag}' > "$tmpfile"
+
+    # Pass 1: Blocked/waiting section (bell flag + claude running)
+    while IFS=$'\t' read -r session target win_id name dir activity full_cwd command bell; do
+        if [[ "$bell" == "1" && "$command" == claude* ]]; then
+            if [[ "$has_blocked" == false ]]; then
+                printf "\t\t${BOLD}${RED}── WAITING FOR INPUT ──${NC}\n"
+                has_blocked=true
+            fi
+            format_window "$target" "$win_id" "$name" "$dir" "$activity" "$full_cwd" "$command" "$bell" "${BOLD}${RED}"
+        fi
+    done < "$tmpfile"
+
+    if [[ "$has_blocked" == true ]]; then
+        printf "\t\t\n"
+    fi
+
+    # Pass 2: All windows grouped by session
+    sort -t$'\t' -k1,1 "$tmpfile" | \
+    while IFS=$'\t' read -r session target win_id name dir activity full_cwd command bell; do
         # Session header
         if [[ "$session" != "$current_session" ]]; then
             current_session="$session"
@@ -112,65 +196,10 @@ generate_lines() {
             printf "\t\t${BOLD}${CYAN}── %s (%d) ──${NC}\n" "$session" "$count"
         fi
 
-        # Idle time + staleness color
-        local idle
-        idle=$(format_idle "$activity")
-        local idle_s=0
-        [[ -n "$activity" && "$activity" != "0" ]] && idle_s=$((NOW - activity))
-
-        local color=""
-        local stale_marker=""
-        if (( idle_s > 86400 )); then
-            color="${DIM}${RED}"
-            stale_marker=" 💀"
-        elif (( idle_s > 3600 )); then
-            color="${YELLOW}"
-        fi
-
-        # Claude status indicator
-        local status=""
-        case "$name" in
-            "🔄 "*) status="🔄" ;;
-            "⏸ "*)  status="⏸" ;;
-            "✅ "*) status="✅" ;;
-            *)
-                # Check if claude is running but no status prefix
-                [[ "$command" == claude* ]] && status="●"
-                ;;
-        esac
-
-        # Get session ID from task file if available
-        local session_id=""
-        local task_file="${TASK_DIR}/${win_id//[@%]/}.json"
-        [[ -f "$task_file" ]] && session_id=$(jq -r '.claude_session // ""' "$task_file" 2>/dev/null)
-
-        # Summary (task file → auto-populated from session)
-        local summary
-        summary=$(get_summary "$win_id" "$full_cwd")
-
-        # Conversation keywords for search (hidden from display)
-        local keywords
-        keywords=$(extract_keywords "$full_cwd" "$session_id")
-
-        # Clean display name: strip emoji prefix and trailing ● indicator
-        local display_name
-        display_name=$(echo "$name" | sed -E 's/^(🔄|⏸|✅) //' | sed 's/ ●$//')
-        # Truncate to 24 chars
-        display_name="${display_name:0:24}"
-
-        # Status column: pad to consistent width
-        # Emoji = 2 display cols, ● = 1, blank = 0
-        local st_col
-        case "$status" in
-            "🔄"|"⏸"|"✅") st_col="$status" ;;
-            "●")            st_col="● " ;;
-            *)              st_col="  " ;;
-        esac
-
-        # Format: target\tkeywords\tdisplay (fzf shows field 3+)
-        printf "%s\t%s\t${color} %s %-24s  %-20s  %5s  %.55s${stale_marker}${NC}\n" \
-            "$target" "$keywords" "$st_col" "$display_name" "$dir" "$idle" "$summary"
+        format_window "$target" "$win_id" "$name" "$dir" "$activity" "$full_cwd" "$command" "$bell" ""
     done
+
+    rm -f "$tmpfile"
 }
 
 # Preview: show task state + recent conversation
