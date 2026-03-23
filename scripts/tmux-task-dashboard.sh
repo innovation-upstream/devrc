@@ -162,7 +162,6 @@ format_window() {
 }
 
 generate_lines() {
-    local current_session=""
     local has_blocked=false
 
     # Collect all window data once (avoid multiple tmux calls)
@@ -185,17 +184,10 @@ generate_lines() {
         printf "\t\t\n"
     fi
 
-    # Pass 2: All windows grouped by session
-    sort -t$'\t' -k1,1 "$tmpfile" | \
+    # Pass 2: All windows sorted by idle time ASC (most recent activity first)
+    # Sort by activity timestamp descending (most recent activity = least idle first)
+    sort -t$'\t' -k6,6rn "$tmpfile" | \
     while IFS=$'\t' read -r session target win_id name dir activity full_cwd command bell; do
-        # Session header
-        if [[ "$session" != "$current_session" ]]; then
-            current_session="$session"
-            local count
-            count=$(tmux list-windows -t "$session" 2>/dev/null | wc -l)
-            printf "\t\t${BOLD}${CYAN}── %s (%d) ──${NC}\n" "$session" "$count"
-        fi
-
         format_window "$target" "$win_id" "$name" "$dir" "$activity" "$full_cwd" "$command" "$bell" ""
     done
 
