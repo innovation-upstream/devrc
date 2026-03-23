@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # tmux-pipe-activity.sh - Manage pipe-pane for background activity tracking
-# Usage: tmux-pipe-activity.sh [start|stop|switch] [window_id]
+# Usage: tmux-pipe-activity.sh [start|stop|switch|linked|init] [window_id]
 
 ACTIVITY_DIR="${HOME}/.tmux/activity"
 mkdir -p "$ACTIVITY_DIR"
@@ -14,7 +14,6 @@ start_pipe() {
     pane_id=$(tmux list-panes -t "$win_id" -F '#{pane_id}' 2>/dev/null | head -1)
 
     if [[ -n "$pane_id" ]]; then
-        # Start piping - on any output, update timestamp file
         tmux pipe-pane -t "$pane_id" "~/.config/tmux/activity-receiver.sh '$win_id'"
     fi
 }
@@ -25,40 +24,38 @@ stop_pipe() {
     pane_id=$(tmux list-panes -t "$win_id" -F '#{pane_id}' 2>/dev/null | head -1)
 
     if [[ -n "$pane_id" ]]; then
-        # Stop piping (no argument to pipe-pane stops it)
         tmux pipe-pane -t "$pane_id"
     fi
 }
 
 case "$ACTION" in
     start)
-        # Start piping for a specific window
-        if [[ -n "$WINDOW_ID" ]]; then
-            start_pipe "$WINDOW_ID"
-        fi
+        [[ -n "$WINDOW_ID" ]] && start_pipe "$WINDOW_ID"
         ;;
     stop)
-        # Stop piping for a specific window
-        if [[ -n "$WINDOW_ID" ]]; then
-            stop_pipe "$WINDOW_ID"
-        fi
+        [[ -n "$WINDOW_ID" ]] && stop_pipe "$WINDOW_ID"
         ;;
     switch)
-        # Called on window switch - stop pipe on new current, start on all others
+        # Hot path: only pipe prev→current transition instead of iterating all windows
+        SESSION=$(tmux display-message -p '#{session_name}')
         current_win=$(tmux display-message -p '#{window_id}')
+        prev_file="${ACTIVITY_DIR}/.prev_${SESSION}"
 
-        # Stop pipe on current window
+        # Stop pipe on current window (now focused)
         stop_pipe "$current_win"
 
-        # Start pipe on all non-current windows
-        tmux list-windows -F '#{window_id} #{window_active}' | while read -r win_id is_active; do
-            if [[ "$is_active" == "0" ]]; then
-                start_pipe "$win_id"
-            fi
-        done
+        # Start pipe on previous window (just moved to background)
+        if [[ -f "$prev_file" ]]; then
+            prev_win=$(< "$prev_file")
+            [[ "$prev_win" != "$current_win" ]] && start_pipe "$prev_win"
+        fi
+
+        # Track current for next switch
+        echo "$current_win" > "$prev_file"
         ;;
-    init)
-        # Initialize all non-current windows (called on session create)
+    linked|init)
+        # Cold path: ensure all background windows have pipes
+        # Fires on window creation (linked) and session creation (init)
         tmux list-windows -F '#{window_id} #{window_active}' | while read -r win_id is_active; do
             if [[ "$is_active" == "0" ]]; then
                 start_pipe "$win_id"
@@ -66,7 +63,7 @@ case "$ACTION" in
         done
         ;;
     *)
-        echo "Usage: $0 [start|stop|switch|init] [window_id]"
+        echo "Usage: $0 [start|stop|switch|linked|init] [window_id]"
         exit 1
         ;;
 esac
