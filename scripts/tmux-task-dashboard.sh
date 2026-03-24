@@ -48,23 +48,25 @@ precompute_for_cwd() {
         SUMMARY_CACHE["$cwd"]=""
         return
     fi
-    # Extract keywords: user prompts (keyword-rich) + assistant text
+    # Extract keywords: rg scans full file (~14ms) for complete conversation coverage
     KEYWORD_CACHE["$cwd"]=$(
         {
-            tail -500 "$latest" 2>/dev/null | \
-                jq -r 'select(.type == "user" and .userType == "external") |
-                    .message.content | if type == "string" then . else "" end' 2>/dev/null | \
+            # User prompts — full history, keyword-rich
+            rg '"type":"user"' "$latest" 2>/dev/null | \
+                jq -r '.message.content | if type == "string" then . else "" end' 2>/dev/null | \
                 tr '\n\t' '  '
+            # Assistant text — last 200 lines for recent context
             tail -200 "$latest" 2>/dev/null | \
-                jq -r 'select(.type == "assistant") |
-                    [.message.content[]? | select(.type == "text") | .text // ""] | join(" ")' 2>/dev/null | \
+                rg '"type":"assistant"' 2>/dev/null | \
+                jq -r '[.message.content[]? | select(.type == "text") | .text // ""] | join(" ")' 2>/dev/null | \
                 tr '\n\t' '  '
         } | head -c 3000
     )
     # Extract summary: last assistant text
     SUMMARY_CACHE["$cwd"]=$(
         tail -50 "$latest" 2>/dev/null | \
-            jq -r 'select(.type == "assistant") | [.message.content[]? | select(.type == "text") | .text] | join(" ")' 2>/dev/null | \
+            rg '"type":"assistant"' 2>/dev/null | \
+            jq -r '[.message.content[]? | select(.type == "text") | .text] | join(" ")' 2>/dev/null | \
             tail -1 | head -c 80 | tr '\n' ' '
     )
 }
