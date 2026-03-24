@@ -205,16 +205,32 @@ PREVIEW_CMD='
         echo "  Command: $CMD"
     fi
 
-    # Recent user messages from session
-    echo ""
-    echo -e "\033[1mRecent Prompts\033[0m"
     LATEST=$(ls -t "$PDIR"/*.jsonl 2>/dev/null | head -1)
-    if [[ -n "$LATEST" ]]; then
-        tail -500 "$LATEST" | jq -r "select(.type == \"user\" and .userType == \"external\") | .message.content | if type == \"string\" then . elif type == \"array\" then [.[] | select(type == \"object\" and .type == \"text\") | .text] | join(\" \") else \"\" end" 2>/dev/null | grep -v "^$" | tail -5 | while read -r line; do
-            echo "  > $(echo "$line" | head -c 120)"
-        done
+    QUERY={q}
+
+    if [[ -n "$QUERY" && -n "$LATEST" ]]; then
+        # Search mode: show matching lines from conversation with context
+        echo ""
+        echo -e "\033[1mMatches for \033[33m$QUERY\033[0m"
+        echo ""
+        # Extract all user+assistant text, then grep with context
+        {
+            rg "\"type\":\"user\"" "$LATEST" 2>/dev/null | \
+                jq -r ".message.content | if type == \"string\" then . elif type == \"array\" then [.[] | select(type == \"object\" and .type == \"text\") | .text] | join(\" \") else \"\" end" 2>/dev/null
+            rg "\"type\":\"assistant\"" "$LATEST" 2>/dev/null | \
+                jq -r "[.message.content[]? | select(.type == \"text\") | .text // \"\"] | join(\" \")" 2>/dev/null
+        } | grep -v "^$" | rg -i -C1 --color=always "$QUERY" 2>/dev/null | head -40
     else
-        echo "  (no Claude session found)"
+        # Default: show recent prompts
+        echo ""
+        echo -e "\033[1mRecent Prompts\033[0m"
+        if [[ -n "$LATEST" ]]; then
+            tail -500 "$LATEST" | jq -r "select(.type == \"user\" and .userType == \"external\") | .message.content | if type == \"string\" then . elif type == \"array\" then [.[] | select(type == \"object\" and .type == \"text\") | .text] | join(\" \") else \"\" end" 2>/dev/null | grep -v "^$" | tail -5 | while read -r line; do
+                echo "  > $(echo "$line" | head -c 120)"
+            done
+        else
+            echo "  (no Claude session found)"
+        fi
     fi
 '
 
