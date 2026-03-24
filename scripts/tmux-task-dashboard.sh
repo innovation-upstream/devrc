@@ -206,7 +206,7 @@ PREVIEW_CMD='
     fi
 
     LATEST=$(ls -t "$PDIR"/*.jsonl 2>/dev/null | head -1)
-    QUERY={q}
+    QUERY='{q}'
 
     if [[ -n "$QUERY" && -n "$LATEST" ]]; then
         # Search mode: show matching lines from conversation with context
@@ -243,6 +243,7 @@ SELECTED=$(generate_lines | \
         --header="$(printf ' %-2s %-24s  %-20s  %5s  %s' 'ST' 'TASK' 'DIR' 'IDLE' 'SUMMARY')" \
         --preview="$PREVIEW_CMD" \
         --preview-window=right:45%:wrap \
+        --bind='change:refresh-preview' \
         --bind='ctrl-x:execute-silent(tmux kill-window -t {1})+reload('"$0"' --lines)' \
         --bind='ctrl-d:execute-silent(tmux kill-window -t {1})+reload('"$0"' --lines)' \
 )
