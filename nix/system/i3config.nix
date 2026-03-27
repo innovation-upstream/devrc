@@ -129,10 +129,19 @@ mode "resize" {
 
 bindsym $mod+r mode "resize"
 
-# Status bar
+# Status bar (Gruvbox dark)
 bar {
         status_command SCRIPT_DIR=/etc/nixos/i3blocks-scripts i3blocks -c /etc/i3blocks.conf
         position top
+        colors {
+                background #282828
+                statusline #ebdbb2
+                separator  #504945
+                focused_workspace  #83a598 #282828 #83a598
+                active_workspace   #504945 #282828 #ebdbb2
+                inactive_workspace #282828 #282828 #665c54
+                urgent_workspace   #cc241d #cc241d #ebdbb2
+        }
 }
 
 # Launch browser
@@ -143,6 +152,10 @@ bindsym $mod+s exec --no-startup-id ~/workspace/devrc/scripts/dictate
 
 # Quick workspace switching
 bindsym $mod+Tab workspace back_and_forth
+
+# Scratchpad
+bindsym $mod+minus move scratchpad
+bindsym $mod+equal scratchpad show
 
 # Thin borders
 default_border pixel 2
