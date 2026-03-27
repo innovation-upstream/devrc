@@ -1,0 +1,12 @@
+views:
+  v1/nodes:
+    sortColumn: NAME:asc
+    columns:
+      - NAME
+      - STATUS
+      - ROLE
+      - ROLE-LBL:.metadata.labels.role|S
+      - VERSION:.status.nodeInfo.kubeletVersion
+      - CPU:.status.capacity.cpu
+      - MEMORY:.status.capacity.memory
+      - AGE
