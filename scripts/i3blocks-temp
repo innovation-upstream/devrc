@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+# CPU temperature block for i3blocks
+# Reads from k10temp (AMD) or coretemp (Intel) via hwmon
+
+WARN_TEMP=${WARN_TEMP:-70}
+CRIT_TEMP=${CRIT_TEMP:-85}
+
+# Find CPU temp sensor by name (k10temp for AMD, coretemp for Intel)
+find_cpu_temp() {
+    for hwmon in /sys/class/hwmon/hwmon*/; do
+        name=$(cat "${hwmon}name" 2>/dev/null)
+        if [[ "$name" == "k10temp" || "$name" == "coretemp" ]]; then
+            if [[ -f "${hwmon}temp1_input" ]]; then
+                echo "${hwmon}temp1_input"
+                return 0
+            fi
+        fi
+    done
+    return 1
+}
+
+temp_file=$(find_cpu_temp)
+if [[ -z "$temp_file" ]]; then
+    echo "N/A"
+    exit 0
+fi
+
+# Read temp (millidegrees) and convert to degrees
+temp_raw=$(cat "$temp_file")
+temp=$((temp_raw / 1000))
+
+# Full text
+echo "${temp}°C"
+# Short text
+echo "${temp}°C"
+
+# Color based on temp
+if [ "$temp" -ge "$CRIT_TEMP" ]; then
+    echo "#FF0000"
+elif [ "$temp" -ge "$WARN_TEMP" ]; then
+    echo "#FFA500"
+fi

@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# Memory usage block for i3blocks
+
+WARN_PERCENT=${WARN_PERCENT:-70}
+CRIT_PERCENT=${CRIT_PERCENT:-90}
+
+read -r _ total _ <<< "$(grep MemTotal /proc/meminfo)"
+read -r _ available _ <<< "$(grep MemAvailable /proc/meminfo)"
+
+used=$((total - available))
+percent=$((used * 100 / total))
+
+# Convert to human readable (GB)
+used_gb=$(awk "BEGIN {printf \"%.1f\", $used/1048576}")
+total_gb=$(awk "BEGIN {printf \"%.1f\", $total/1048576}")
+
+# Full text
+echo "${used_gb}/${total_gb}G"
+# Short text
+echo "${percent}%"
+
+# Color based on usage
+if [ "$percent" -ge "$CRIT_PERCENT" ]; then
+    echo "#FF0000"
+elif [ "$percent" -ge "$WARN_PERCENT" ]; then
+    echo "#FFA500"
+fi

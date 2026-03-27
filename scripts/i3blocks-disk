@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# Disk usage block for i3blocks
+
+MOUNT=${MOUNT:-/}
+WARN_PERCENT=${WARN_PERCENT:-80}
+CRIT_PERCENT=${CRIT_PERCENT:-90}
+
+read -r _ size used available percent _ <<< "$(df -h "$MOUNT" | tail -1)"
+
+# Remove % sign for comparison
+percent_num=${percent%\%}
+
+# Full text
+echo "${used}/${size}"
+# Short text
+echo "${percent}"
+
+# Color based on usage
+if [ "$percent_num" -ge "$CRIT_PERCENT" ]; then
+    echo "#FF0000"
+elif [ "$percent_num" -ge "$WARN_PERCENT" ]; then
+    echo "#FFA500"
+fi

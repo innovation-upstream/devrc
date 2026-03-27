@@ -3,8 +3,8 @@
 # Features: stale detection, auto-populated summaries,
 # full conversation history search via hidden fzf field
 #
-# Format: target\tkeywords\tvisible_display
-# fzf --with-nth=3.. hides target+keywords but searches all fields
+# Format: target\tvisible_display + bg-colored keywords
+# Keywords appended in bg color (#282828) + --no-hscroll so fzf searches but doesn't show them
 
 TASK_DIR="${HOME}/.tmux/tasks"
 CLAUDE_PROJECTS="${HOME}/.claude/projects"
@@ -87,15 +87,12 @@ generate_lines() {
     # Pass 1: Blocked/waiting section (bell flag + claude running)
     while IFS=$'\t' read -r _ target win_id name dir activity full_cwd command bell; do
         if [[ "$bell" == "1" && "$command" == claude* ]]; then
-            if [[ "$has_blocked" == false ]]; then
-                printf "\t\t${BOLD}${RED}── WAITING FOR INPUT ──${NC}\n"
-                has_blocked=true
-            fi
+            has_blocked=true
             format_line "$target" "$win_id" "$name" "$dir" "$activity" "$full_cwd" "$command" "${BOLD}${RED}"
         fi
     done < "$tmpfile"
 
-    [[ "$has_blocked" == true ]] && printf "\t\t\n"
+    [[ "$has_blocked" == true ]] && printf "\t\n"
 
     # Pass 2: All windows sorted by idle time ASC (most recent activity first)
     sort -t$'\t' -k6,6rn "$tmpfile" | \
@@ -173,8 +170,8 @@ format_line() {
     display_name="${display_name:0:24}"
     dir="${dir:0:20}"
 
-    printf "%s\t%s\t${color} %s %-24s  %-20s  %5s  %.55s${stale_marker}${NC}\n" \
-        "$target" "$keywords" "$st_col" "$display_name" "$dir" "$idle" "$summary"
+    printf "%s\t${color} %s %-24s  %-20s  %5s  %.55s${stale_marker}${NC}\033[38;2;40;40;40m %s\033[0m\n" \
+        "$target" "$st_col" "$display_name" "$dir" "$idle" "$summary" "$keywords"
 }
 
 # Preview: show task state + recent conversation
@@ -205,7 +202,13 @@ PREVIEW_CMD='
         echo "  Command: $CMD"
     fi
 
-    LATEST=$(ls -t "$PDIR"/*.jsonl 2>/dev/null | head -1)
+    # Prefer session-specific JSONL from task file, fall back to most recent
+    LATEST=""
+    if [[ -f "$TF" ]]; then
+        SID=$(jq -r ".claude_session // \"\"" "$TF" 2>/dev/null)
+        [[ -n "$SID" && -f "$PDIR/$SID.jsonl" ]] && LATEST="$PDIR/$SID.jsonl"
+    fi
+    [[ -z "$LATEST" ]] && LATEST=$(ls -t "$PDIR"/*.jsonl 2>/dev/null | head -1)
     QUERY='{q}'
 
     if [[ -n "$QUERY" && -n "$LATEST" ]]; then
@@ -237,9 +240,10 @@ PREVIEW_CMD='
 # Generate lines and pipe to fzf
 SELECTED=$(generate_lines | \
     fzf --delimiter='\t' \
-        --with-nth=3.. \
+        --with-nth=2.. \
         --reverse \
         --ansi \
+        --no-hscroll \
         --header="$(printf ' %-2s %-24s  %-20s  %5s  %s' 'ST' 'TASK' 'DIR' 'IDLE' 'SUMMARY')" \
         --preview="$PREVIEW_CMD" \
         --preview-window=right:45%:wrap \

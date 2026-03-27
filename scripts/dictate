@@ -1,0 +1,61 @@
+#!/usr/bin/env bash
+# Wrapper script for dictate.py that uses the venv
+# Call this from i3 keybinding
+# Automatically starts daemon if not running
+
+VENV_DIR="${HOME}/.local/share/dictation-venv"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CACHE_FILE="${HOME}/.cache/dictation-ld-path"
+SOCKET_PATH="/tmp/dictate.sock"
+
+if [ ! -d "$VENV_DIR" ]; then
+    notify-send -u critical "Dictation" "Run setup-dictation.sh first"
+    exit 1
+fi
+
+# Cache LD_LIBRARY_PATH to avoid slow nix-build on every call
+if [ ! -f "$CACHE_FILE" ] || [ "$1" = "--rebuild-cache" ]; then
+    mkdir -p "$(dirname "$CACHE_FILE")"
+    LD_PATH="$(nix-build '<nixpkgs>' -A zlib --no-out-link)/lib"
+    LD_PATH="$LD_PATH:$(nix-build '<nixpkgs>' -A ffmpeg --no-out-link)/lib"
+    LD_PATH="$LD_PATH:$(nix-build '<nixpkgs>' -A stdenv.cc.cc.lib --no-out-link)/lib"
+    echo "$LD_PATH" > "$CACHE_FILE"
+fi
+
+export LD_LIBRARY_PATH="$(cat "$CACHE_FILE"):${LD_LIBRARY_PATH:-}"
+
+# Add CUDA libraries (driver + pip packages)
+export LD_LIBRARY_PATH="/run/opengl-driver/lib:${LD_LIBRARY_PATH}"
+SITE_PACKAGES="$VENV_DIR/lib/python3.12/site-packages"
+if [ -d "$SITE_PACKAGES/nvidia" ]; then
+    for lib_dir in "$SITE_PACKAGES"/nvidia/*/lib; do
+        [ -d "$lib_dir" ] && export LD_LIBRARY_PATH="$lib_dir:$LD_LIBRARY_PATH"
+    done
+fi
+
+# If explicit daemon/stop-daemon flag, pass through directly
+if [ "$1" = "--daemon" ] || [ "$1" = "--stop-daemon" ]; then
+    exec "$VENV_DIR/bin/python" "$SCRIPT_DIR/dictate.py" "$@"
+fi
+
+# Auto-start daemon if not running
+if [ ! -S "$SOCKET_PATH" ]; then
+    notify-send -t 2000 -u low "Dictation" "Starting daemon (first run)..."
+    "$VENV_DIR/bin/python" "$SCRIPT_DIR/dictate.py" --daemon &
+
+    # Wait for daemon to be ready (max 30s)
+    for i in {1..60}; do
+        if [ -S "$SOCKET_PATH" ]; then
+            break
+        fi
+        sleep 0.5
+    done
+
+    if [ ! -S "$SOCKET_PATH" ]; then
+        notify-send -u critical "Dictation" "Daemon failed to start"
+        exit 1
+    fi
+fi
+
+# Run transcription (will use daemon automatically)
+exec "$VENV_DIR/bin/python" "$SCRIPT_DIR/dictate.py" "$@"

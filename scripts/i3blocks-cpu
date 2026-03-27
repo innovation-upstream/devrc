@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+# CPU utilization block for i3blocks
+
+WARN_PERCENT=${WARN_PERCENT:-70}
+CRIT_PERCENT=${CRIT_PERCENT:-90}
+
+# Read CPU stats from /proc/stat
+read_cpu() {
+    read -r cpu user nice system idle iowait irq softirq _ < /proc/stat
+    total=$((user + nice + system + idle + iowait + irq + softirq))
+    idle_total=$((idle + iowait))
+    echo "$total $idle_total"
+}
+
+# Sample 1 second apart
+read -r total1 idle1 <<< "$(read_cpu)"
+sleep 1
+read -r total2 idle2 <<< "$(read_cpu)"
+
+# Calculate usage
+total_delta=$((total2 - total1))
+idle_delta=$((idle2 - idle1))
+
+if [ "$total_delta" -gt 0 ]; then
+    percent=$(( (total_delta - idle_delta) * 100 / total_delta ))
+else
+    percent=0
+fi
+
+# Full text
+printf "%3d%%\n" "$percent"
+# Short text
+printf "%3d%%\n" "$percent"
+
+# Color based on usage
+if [ "$percent" -ge "$CRIT_PERCENT" ]; then
+    echo "#FF0000"
+elif [ "$percent" -ge "$WARN_PERCENT" ]; then
+    echo "#FFA500"
+fi
