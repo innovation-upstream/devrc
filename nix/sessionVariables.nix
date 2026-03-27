@@ -1,4 +1,4 @@
-{ elixirLspPath, ... }:
+{ elixirLspPath, playwrightBrowsersPath, ... }:
 
 let
   fzfDefaultCommand = "fd --type file --follow --hidden --exclude .git --exclude node_modules --exclude www --exclude public -E vendor";
@@ -12,4 +12,8 @@ in
   FZF_CTRL_T_COMMAND = fzfDefaultCommand;
 
   ELIXIR_LSP_PATH = "${elixirLspPath}/share/vscode/extensions/JakeBecker.elixir-ls/elixir-ls-release/language_server.sh";
+
+  # Playwright browser automation (for MCP)
+  PLAYWRIGHT_BROWSERS_PATH = "${playwrightBrowsersPath}";
+  PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS = "true";
 }
