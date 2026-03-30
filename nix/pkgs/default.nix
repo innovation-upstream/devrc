@@ -30,6 +30,8 @@ with pkgs;
   kdePackages.kdenlive
 
   tig
+  # browser automation
+  playwright-driver.browsers
 ]
 ++
 (import ./lang {pkgs=pkgs;})
