@@ -169,4 +169,8 @@ in
     source = ../scripts/tmux-task-resume.sh;
     executable = true;
   };
+  home.file.".config/tmux/scratch-picker.sh" = {
+    source = ../scripts/tmux-scratch-picker.sh;
+    executable = true;
+  };
 }
