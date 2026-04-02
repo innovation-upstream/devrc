@@ -1,30 +1,43 @@
-{ pkgs ? import <nixpkgs> {} }:
+{ pkgs }:
 
-with pkgs;
-  (import ./golang.nix {pkgs=pkgs;})
-  ++
-  (import ./python.nix {pkgs=pkgs;})
-  ++
-  (import ./cue.nix {pkgs=pkgs;})
-  ++
-  (import ./rust.nix {pkgs=pkgs;})
-  ++
-  (import ./perl.nix {pkgs=pkgs;})
-  ++
-  (import ./lua.nix {pkgs=pkgs;})
-  #++
-  #(import ./dhall.nix {pkgs=pkgs;})
-  ++
-  (import ./solidity.nix {pkgs=pkgs;})
-  ++
-  (import ./nodejs.nix {pkgs=pkgs;})
-  ++
-  (import ./starlark.nix {pkgs=pkgs;})
-  ++
-  (import ./nix.nix {pkgs=pkgs;})
-  ++
-  (import ./yaml.nix {pkgs=pkgs;})
-  ++
-  (import ./csharp.nix {pkgs=pkgs;})
-  #++
-  #(import ./graphql.nix {pkgs=pkgs;})
+with pkgs; [
+  # Go
+  go_1_25
+  gopls
+
+  # Python
+  python312
+  pyright
+
+  # Rust
+  rust-analyzer
+
+  # Node.js / TypeScript
+  nodejs_20
+  typescript
+  vscode-langservers-extracted # HTML/CSS/JSON LSPs
+  typescript-language-server
+
+  # Lua (5.1 for Neovim's LuaJIT)
+  lua5_1
+  lua-language-server
+  lua53Packages.lyaml
+
+  # C#
+  csharp-ls
+
+  # Perl
+  perl
+
+  # Cue
+  cue
+
+  # Nix
+  nixd
+
+  # YAML
+  yaml-language-server
+
+  # Bash
+  bash-language-server
+]

@@ -1,13 +1,9 @@
-{ pkgs ? import <nixpkgs> {} }:
+{ pkgs, workspace }:
 
-with pkgs;
-  (import ./docker.nix {pkgs=pkgs;})
-  ++
-  (import ./lazygit.nix {pkgs=pkgs;})
-  ++
-  (import ./k9s.nix {pkgs=pkgs;})
-  ++
-  (import ./nemo.nix {pkgs=pkgs;})
-  ++
-  (import ./tmux-fuzzyclaw.nix {pkgs=pkgs;})
-
+with pkgs; [
+  docker-compose
+  lazygit
+  k9s
+  nemo-with-extensions
+]
+++ (import ./tmux-fuzzyclaw.nix { inherit pkgs workspace; })

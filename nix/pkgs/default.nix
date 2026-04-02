@@ -1,39 +1,45 @@
-{ pkgs ? import <nixpkgs> {} }:
+{ pkgs, workspace }:
 
-with pkgs;
-[
-  # basics
+with pkgs; [
+  # Core utilities
   coreutils
-  gnused # sed
+  gnused
   zsh
   oh-my-zsh
-  bash # use latest bash
+  bash
   tmux
   vim
-  fzf # fuzzy finder
-  gotop # terminal based graphical activity monitor
+  fzf
+  gotop
   wget
   gcc
   bat
 
-  # search
+  # Search
   gnugrep
   ripgrep
   fd
 
-  # git
-  git # to replace possible old git comes with OS
+  # Git
+  git
   lefthook
 
+  # Nix
   nix-direnv
 
-  kdePackages.kdenlive
-
+  # VCS
   tig
-  # browser automation
+
+  # Dictation (speech-to-text)
+  sox
+  xdotool
+  libnotify
+  pulseaudio
+  zlib
+  ffmpeg
+
+  # Browser automation
   playwright-driver.browsers
 ]
-++
-(import ./lang {pkgs=pkgs;})
-++
-(import ./tools {pkgs=pkgs;})
+++ (import ./lang { inherit pkgs; })
+++ (import ./tools { inherit pkgs workspace; })

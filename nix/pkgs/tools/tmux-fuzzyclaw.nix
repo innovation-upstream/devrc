@@ -1,16 +1,11 @@
-{ pkgs ? import <nixpkgs> {} }:
+{ pkgs, workspace }:
 
 let
   fuzzyclaw = pkgs.buildGoModule {
     pname = "tmux-fuzzyclaw";
     version = "2.0.0";
 
-    src = pkgs.fetchFromGitHub {
-      owner = "ZacxDev";
-      repo = "tmux-fuzzyclaw";
-      rev = "e46baeeab09fa5899778fd561054a5bfceb32b41";
-      sha256 = "sha256-EX79PwI2J0ojdzIrarcTdyXg+kb0RVOte22iV2MTrvg=";
-    };
+    src = pkgs.lib.cleanSource (/. + "${workspace}/tmux-fuzzyclaw");
 
     vendorHash = null;
 
@@ -29,6 +24,4 @@ let
     };
   };
 in
-[
-  fuzzyclaw
-]
+[ fuzzyclaw ]

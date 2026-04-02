@@ -1,17 +1,14 @@
-{ config, pkgs, lib, ... }:
+{ config, pkgs, lib, isNixOS ? false, ... }:
 
 let
-  userPackages = import ./pkgs {pkgs=pkgs;};
-  isNixOS = builtins.pathExists /etc/NIXOS;
   home = config.home.homeDirectory;
   workspace = "${home}/workspace";
-  # To enable nightly, also remove comment in neovim/default.nix
-  #overlays = import ./overlays.nix;
+  userPackages = import ./pkgs { inherit pkgs workspace; };
   sessionVariables = import ./sessionVariables.nix {
     elixirLspPath = pkgs.vscode-extensions.elixir-lsp.vscode-elixir-ls;
     playwrightBrowsersPath = pkgs.playwright-driver.browsers;
   };
-  programs = import ./programs {pkgs=pkgs; config=config;};
+  programs = import ./programs { inherit pkgs config; };
 in
 {
   programs = programs;
@@ -124,8 +121,6 @@ in
   home.activation.espansoConfigDir = lib.hm.dag.entryAfter ["writeBoundary"] ''
     mkdir -p ~/.config/espanso/config
   '';
-
-  #nixpkgs.overlays = overlays;
 
   home.stateVersion = "24.11";
 

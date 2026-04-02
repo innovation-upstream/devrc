@@ -1,31 +1,61 @@
 # DEVRC
 
-This repo assumes you are running Ubuntu 20 LTS or NixOS, but it may work on 
-other versions/distros if you are lucky.
+Personal development environment configuration using NixOS, home-manager, and flakes.
+
+## Architecture
+
+```
+flake.nix                  # Pinned nixpkgs + home-manager inputs
+flake.lock                 # Auto-generated dependency lock
+nix/
+  home.nix                 # Home-manager entry point (services, file symlinks)
+  sessionVariables.nix     # Environment variables (EDITOR, FZF, LSP paths)
+  pkgs/
+    default.nix            # Core packages (coreutils, search, git, dictation)
+    lang/default.nix       # Language runtimes + LSPs (Go, Python, Rust, Node, etc.)
+    tools/default.nix      # Dev tools (docker-compose, lazygit, k9s, nemo)
+    tools/tmux-fuzzyclaw.nix  # Custom Go binary (local build)
+  programs/                # Per-program home-manager modules
+    neovim/ zsh/ bash/ tmux/ git/ fzf/ direnv/ alacritty/ ranger/
+scripts/                   # Tmux activity tracking, task dashboard, dictation
+cmd/install.sh             # Activation script
+```
 
 ## Installation
 
-Follow these steps to initialize a fresh environment capable of building and 
-running any Innovation Upstream repo.
-
-1. `mkdir $HOME/workspace && cd $HOME/workspace` (Optional, see step 4)
+1. `mkdir -p ~/workspace && cd ~/workspace`
 2. Clone this repo
-3. Run `cmd/install.sh`
-4. Run `home-manager switch` build the env
+3. First-time setup (no home-manager in PATH yet):
+   ```sh
+   nix run github:nix-community/home-manager -- switch --flake ./devrc --impure
+   ```
+4. Subsequent rebuilds:
+   ```sh
+   cd devrc && ./cmd/install.sh
+   # or directly:
+   home-manager switch --flake . --impure
+   ```
 
-(Optional) If you cloned devrc into a different directory, you will need to set the 
-`DEVRC_DIR` environment variable in `~/.devrc`.
+The `--impure` flag is required because the config references local paths outside the flake (tmux-fuzzyclaw source, optional `~/.devrc`).
+
+If you cloned devrc somewhere other than `~/workspace`, set `DEVRC_DIR`:
+```sh
+export DEVRC_DIR="$HOME/other-path/devrc"
+```
+
+## Updating
 
 ```sh
-$ export DEVRC_DIR="$HOME/workspace-2/devrc"
-$ source $DEVRC_DIR/.zshrc
+# Update nixpkgs and home-manager to latest
+nix flake update
+
+# Rebuild
+home-manager switch --flake . --impure
 ```
 
 ## Customization
 
-If you need to add/modify your shell profile, you can do so by
-creating/modifying `~/.devrc`. (home-manager will tell zsh to source this file
-if it exists)
+Create `~/.devrc` to add shell customizations without editing the repo. Home-manager sources this file automatically if it exists.
 
 ## Speech-to-Text Dictation
 
@@ -46,7 +76,7 @@ Local speech-to-text using [faster-whisper](https://github.com/SYSTRAN/faster-wh
 3. Rebuild:
    ```sh
    sudo nixos-rebuild switch
-   home-manager switch
+   home-manager switch --flake . --impure
    ```
 
 ### Usage
@@ -73,7 +103,7 @@ With `Alt+s`:
 
 The script includes optimizations for technical dictation:
 - **Developer vocabulary prompt**: Guides Whisper toward technical terms (NixOS, TypeScript, React, etc.)
-- **Word replacements**: Auto-corrects common misheard terms (e.g., "knicks os" → "NixOS")
+- **Word replacements**: Auto-corrects common misheard terms (e.g., "knicks os" -> "NixOS")
 - **Reduced beam_size**: Faster transcription with minimal accuracy loss
 
 Edit `WORD_REPLACEMENTS` in `scripts/dictate.py` to add your own corrections.
