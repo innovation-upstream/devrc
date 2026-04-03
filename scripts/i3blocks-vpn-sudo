@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+# Privileged helper for i3blocks-vpn. Run via NOPASSWD sudoers rule.
+# Usage:
+#   vpn-sudo switch OLD_IP NEW_IP OLD_PUBKEY NEW_PUBKEY
+#   vpn-sudo up
+#   vpn-sudo down
+set -euo pipefail
+
+WG_IFACE="mullvad"
+WG_SERVICE="wg-quick-mullvad.service"
+NIXCFG="/etc/nixos/configuration.nix"
+
+# Validate an IPv4 address
+is_ipv4() { [[ "$1" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; }
+
+# Validate a WireGuard public key (base64, 44 chars ending in =)
+is_wg_pubkey() { [[ "$1" =~ ^[A-Za-z0-9+/]{43}=$ ]]; }
+
+case "${1:-}" in
+    switch)
+        [[ $# -eq 5 ]] || { echo "usage: vpn-sudo switch OLD_IP NEW_IP OLD_PUBKEY NEW_PUBKEY"; exit 1; }
+        old_ip="$2" new_ip="$3" old_pubkey="$4" new_pubkey="$5"
+
+        is_ipv4 "$old_ip"     || { echo "invalid old IP: $old_ip"; exit 1; }
+        is_ipv4 "$new_ip"     || { echo "invalid new IP: $new_ip"; exit 1; }
+        is_wg_pubkey "$old_pubkey" || { echo "invalid old pubkey"; exit 1; }
+        is_wg_pubkey "$new_pubkey" || { echo "invalid new pubkey"; exit 1; }
+
+        # Use fixed-string replacement via awk to avoid sed regex injection
+        awk -v old="$old_ip" -v new="$new_ip" '{gsub(old, new)} 1' "$NIXCFG" > "${NIXCFG}.tmp" \
+            && mv "${NIXCFG}.tmp" "$NIXCFG"
+        awk -v old="$old_pubkey" -v new="$new_pubkey" '{gsub(old, new)} 1' "$NIXCFG" > "${NIXCFG}.tmp" \
+            && mv "${NIXCFG}.tmp" "$NIXCFG"
+
+        /run/current-system/sw/bin/nixos-rebuild switch
+        systemctl restart "$WG_SERVICE"
+        ;;
+    up)
+        systemctl start "$WG_SERVICE"
+        ;;
+    down)
+        systemctl stop "$WG_SERVICE"
+        ;;
+    *)
+        echo "usage: vpn-sudo {switch|up|down}"
+        exit 1
+        ;;
+esac

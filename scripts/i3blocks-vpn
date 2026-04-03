@@ -1,0 +1,154 @@
+#!/usr/bin/env bash
+# Mullvad VPN status block for i3blocks
+# Left-click: rofi menu (switch server, toggle VPN)
+# Right-click: show full status in floating terminal
+# Signal: pkill -RTMIN+10 i3blocks
+
+WG_IFACE="mullvad"
+TIMEOUT=${TIMEOUT:-3}
+CACHE_FILE="/tmp/i3blocks-vpn-cache"
+CACHE_TTL=${CACHE_TTL:-30}
+SERVER_CACHE="/tmp/i3blocks-vpn-servers"
+SERVER_CACHE_TTL=3600
+SCRIPT_BASE="$(dirname "$(readlink -f "$0")")"
+SUDO_HELPER="${SCRIPT_BASE}/vpn-sudo"
+FLOAT_TERM="alacritty --class float,float -e"
+
+fetch_servers() {
+    if [[ -f "$SERVER_CACHE" ]]; then
+        age=$(( $(date +%s) - $(stat -c %Y "$SERVER_CACHE") ))
+        if (( age < SERVER_CACHE_TTL )); then
+            cat "$SERVER_CACHE"
+            return
+        fi
+    fi
+    curl -s --max-time 10 https://api.mullvad.net/www/relays/wireguard/ 2>/dev/null | python3 -c "
+import json, sys
+relays = json.load(sys.stdin)
+for r in sorted(relays, key=lambda x: (x['country_name'], x['city_name'], x['hostname'])):
+    if r['active']:
+        print(f\"{r['hostname']}|{r['ipv4_addr_in']}|{r['pubkey']}|{r['city_name']}, {r['country_name']}\")
+" 2>/dev/null | tee "$SERVER_CACHE"
+}
+
+apply_server() {
+    local hostname="$1" ip="$2" pubkey="$3"
+    local old_ip old_pubkey
+    old_ip=$(grep -v '#' /etc/nixos/configuration.nix | grep -oP '(?<=endpoint = ")\d[\d.]+(?=:)')
+    old_pubkey=$(grep -v '#' /etc/nixos/configuration.nix | grep -oP '(?<=publicKey = ")[^"]+(?=")')
+
+    if [[ -z "$old_ip" || -z "$old_pubkey" ]]; then
+        notify-send -u critical -t 5000 "VPN" "Failed to parse current config"
+        return 1
+    fi
+
+    notify-send -t 3000 "VPN" "Switching to $hostname..."
+    if sudo "$SUDO_HELPER" switch "$old_ip" "$ip" "$old_pubkey" "$pubkey" 2>/tmp/vpn-switch.log; then
+        rm -f "$CACHE_FILE"
+        notify-send -t 5000 "VPN" "Switched to $hostname"
+        pkill -RTMIN+10 i3blocks
+    else
+        notify-send -u critical -t 10000 "VPN" "Failed: $(tail -3 /tmp/vpn-switch.log)"
+    fi
+}
+
+toggle_vpn() {
+    local state
+    state=$(ip link show "$WG_IFACE" 2>/dev/null | grep -o 'UP')
+    if [[ "$state" == "UP" ]]; then
+        sudo "$SUDO_HELPER" down
+        notify-send -t 3000 "VPN" "Disabled"
+    else
+        sudo "$SUDO_HELPER" up
+        notify-send -t 3000 "VPN" "Enabled"
+    fi
+    rm -f "$CACHE_FILE"
+    pkill -RTMIN+10 i3blocks
+}
+
+rofi_menu() {
+    local toggle_label="Disable VPN"
+    if ! ip link show "$WG_IFACE" 2>/dev/null | grep -q 'UP'; then
+        toggle_label="Enable VPN"
+    fi
+
+    local choice
+    choice=$(printf '%s\n' "Refresh" "Switch Server" "$toggle_label" "Status Details" \
+        | rofi -dmenu -p "VPN" -theme gruvbox-dark-hard -i)
+
+    case "$choice" in
+        "Refresh")
+            rm -f "$CACHE_FILE"
+            pkill -RTMIN+10 i3blocks
+            ;;
+        "Switch Server")
+            local servers server_line hostname ip pubkey
+            servers=$(fetch_servers)
+            if [[ -z "$servers" ]]; then
+                notify-send -t 3000 "VPN" "Failed to fetch server list"
+                return
+            fi
+            server_line=$(echo "$servers" | awk -F'|' '{printf "%-20s  %s\n", $1, $4}' \
+                | rofi -dmenu -p "Server" -theme gruvbox-dark-hard -i -matching fuzzy)
+            [[ -z "$server_line" ]] && return
+            hostname=$(echo "$server_line" | awk '{print $1}')
+            local record
+            record=$(grep "^${hostname}|" "$SERVER_CACHE")
+            ip=$(echo "$record" | cut -d'|' -f2)
+            pubkey=$(echo "$record" | cut -d'|' -f3)
+            apply_server "$hostname" "$ip" "$pubkey"
+            ;;
+        "Disable VPN"|"Enable VPN")
+            toggle_vpn
+            ;;
+        "Status Details")
+            i3-msg -q exec "$FLOAT_TERM ${SCRIPT_BASE}/vpn-detail"
+            ;;
+    esac
+}
+
+# Click handling
+case "$BLOCK_BUTTON" in
+    1)
+        [[ -f "$CACHE_FILE" ]] && cat "$CACHE_FILE"
+        rofi_menu
+        exit 0
+        ;;
+    3) i3-msg -q exec "$FLOAT_TERM ${SCRIPT_BASE}/vpn-detail" ;;
+esac
+
+# Use cache if fresh
+if [[ -f "$CACHE_FILE" ]]; then
+    age=$(( $(date +%s) - $(stat -c %Y "$CACHE_FILE") ))
+    if (( age < CACHE_TTL )); then
+        cat "$CACHE_FILE"
+        exit 0
+    fi
+fi
+
+# Query Mullvad status API
+json=$(curl -s --max-time "$TIMEOUT" https://am.i.mullvad.net/json 2>/dev/null)
+
+if [[ -z "$json" ]]; then
+    printf 'VPN ?\nVPN ?\n#FFA500\n' | tee "$CACHE_FILE"
+    exit 0
+fi
+
+eval "$(echo "$json" | python3 -c "
+import json, sys, shlex
+d = json.load(sys.stdin)
+print(f'is_mullvad={shlex.quote(str(d.get(\"mullvad_exit_ip\", False)))}')
+print(f'city={shlex.quote(d.get(\"city\", \"?\"))}')
+print(f'hostname={shlex.quote(d.get(\"mullvad_exit_ip_hostname\", \"\"))}')
+" 2>/dev/null)"
+
+if [[ "$is_mullvad" == "True" ]]; then
+    if [[ "$city" == *", "* ]]; then
+        short="${city##*, }"
+    else
+        short="${city:0:3}"
+    fi
+    printf 'VPN %s\nVPN %s\n\n' "$city" "$short" | tee "$CACHE_FILE"
+else
+    printf 'VPN OFF\nVPN !\n#FF0000\n' | tee "$CACHE_FILE"
+fi

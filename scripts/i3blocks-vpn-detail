@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# Show Mullvad VPN status details in a floating terminal
+json=$(curl -s --max-time 5 https://am.i.mullvad.net/json 2>/dev/null)
+if [[ -z "$json" ]]; then
+    echo "Failed to reach am.i.mullvad.net"
+else
+    echo "$json" | python3 -m json.tool
+fi
+echo
+read -rp "Press enter to close..."
