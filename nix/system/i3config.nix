@@ -12,6 +12,12 @@ bindsym XF86AudioLowerVolume exec --no-startup-id pactl set-sink-volume @DEFAULT
 bindsym XF86AudioMute exec --no-startup-id pactl set-sink-mute @DEFAULT_SINK@ toggle
 bindsym XF86AudioMicMute exec --no-startup-id pactl set-source-mute @DEFAULT_SOURCE@ toggle
 
+# Brightness (laptop backlight, 5% steps; Shift for 1% fine control)
+bindsym XF86MonBrightnessUp exec --no-startup-id brightnessctl set +5%
+bindsym XF86MonBrightnessDown exec --no-startup-id brightnessctl set 5%-
+bindsym Shift+XF86MonBrightnessUp exec --no-startup-id brightnessctl set +1%
+bindsym Shift+XF86MonBrightnessDown exec --no-startup-id brightnessctl set 1%-
+
 floating_modifier $mod
 
 # Terminal
