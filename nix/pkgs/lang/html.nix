@@ -2,6 +2,6 @@
 
 with pkgs;
 [
-  nodePackages.vscode-langservers-extracted
+  vscode-langservers-extracted
 ]
 

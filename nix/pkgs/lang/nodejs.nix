@@ -2,9 +2,9 @@
 
 with pkgs;
 [
-  nodePackages.typescript
+  typescript
   #nodePackages.vscode-json-languageserver
-  nodePackages.vscode-langservers-extracted
+  vscode-langservers-extracted
   nodejs_20
   typescript-language-server
 ]
