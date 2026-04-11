@@ -115,14 +115,14 @@ symbol_info_budget:
 # is activated post-init, an error will be returned.
 language_backend:
 
-# list of regex patterns which, when matched, mark a memory entry as read‑only.
-# Extends the list from the global configuration, merging the two lists.
-read_only_memory_patterns: []
-
 # line ending convention to use when writing source files.
 # Possible values: unset (use global setting), "lf", "crlf", or "native" (platform default)
 # This does not affect Serena's own files (e.g. memories and configuration files), which always use native line endings.
 line_ending:
+
+# list of regex patterns which, when matched, mark a memory entry as read‑only.
+# Extends the list from the global configuration, merging the two lists.
+read_only_memory_patterns: []
 
 # list of regex patterns for memories to completely ignore.
 # Matching memories will not appear in list_memories or activate_project output

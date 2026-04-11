@@ -8,6 +8,7 @@ let
   git = import ./git {};
   direnv = import ./direnv {};
   alacritty = import ./alacritty {};
+  k9s = import ./k9s {};
   ranger = import ./ranger {};
 in
 {
@@ -21,5 +22,6 @@ in
   git = git;
   direnv = direnv;
   alacritty = alacritty;
+  k9s = k9s;
   ranger = ranger;
 }
