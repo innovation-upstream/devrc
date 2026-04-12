@@ -3,8 +3,6 @@ set $mod Mod1
 
 font pango:monospace 8
 
-# NetworkManager applet
-exec --no-startup-id nm-applet
 
 # Volume control (PipeWire via pactl, 5% steps)
 bindsym XF86AudioRaiseVolume exec --no-startup-id pactl set-sink-volume @DEFAULT_SINK@ +5%
