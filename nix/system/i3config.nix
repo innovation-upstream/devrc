@@ -64,6 +64,7 @@ bindsym $mod+f fullscreen toggle
 # Layouts
 bindsym $mod+w layout tabbed
 bindsym $mod+e layout toggle split
+bindsym $mod+equal exec --no-startup-id ~/workspace/devrc/scripts/i3-grid
 
 # Floating
 bindsym $mod+Shift+space floating toggle
@@ -156,7 +157,6 @@ bindsym $mod+Tab workspace back_and_forth
 
 # Scratchpad
 bindsym $mod+minus move scratchpad
-bindsym $mod+equal scratchpad show
 
 # Thin borders
 default_border pixel 2

@@ -33,10 +33,9 @@ with pkgs; [
   # Dictation (speech-to-text)
   sox
   xdotool
+  wtype          # Wayland text injection fallback
   libnotify
   pulseaudio
-  zlib
-  ffmpeg
 
   # Browser automation
   playwright-driver.browsers

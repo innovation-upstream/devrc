@@ -1,4 +1,4 @@
-{ elixirLspPath, ... }:
+{ elixirLspPath, homePath, ... }:
 
 let
   fzfDefaultCommand = "fd --type file --follow --hidden --exclude .git --exclude node_modules --exclude www --exclude public -E vendor";
@@ -10,6 +10,8 @@ in
   FZF_INCLUDE_HIDDEN_COMMAND = fzfIncludeHiddenCommand;
   FZF_ALT_C_COMMAND = fzfIncludeHiddenCommand;
   FZF_CTRL_T_COMMAND = fzfDefaultCommand;
+
+  NODE_PATH = "${homePath}/.npm-packages/lib/node_modules";
 
   ELIXIR_LSP_PATH = "${elixirLspPath}/share/vscode/extensions/JakeBecker.elixir-ls/elixir-ls-release/language_server.sh";
   K9S_FEATURE_GATE_NODE_SHELL = "true";

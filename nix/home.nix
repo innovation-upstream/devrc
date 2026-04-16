@@ -7,6 +7,7 @@ let
   sessionVariables = import ./sessionVariables.nix {
     elixirLspPath = pkgs.vscode-extensions.elixir-lsp.vscode-elixir-ls;
     playwrightBrowsersPath = pkgs.playwright-driver.browsers;
+    homePath = home;
   };
   programs = import ./programs { inherit pkgs config; };
 in
@@ -130,9 +131,7 @@ in
   else
     userPackages;
 
-  home.sessionVariables = sessionVariables // {
-    NODE_PATH = "${home}/.npm-packages/lib/node_modules";
-  };
+  home.sessionVariables = sessionVariables;
 
   home.sessionPath = [
     "${home}/go/bin"
