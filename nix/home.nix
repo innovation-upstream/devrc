@@ -167,4 +167,8 @@ in
     source = ../scripts/tmux-scratch-picker.sh;
     executable = true;
   };
+  home.file.".config/tmux/scratch-status.sh" = {
+    source = ../scripts/tmux-scratch-status.sh;
+    executable = true;
+  };
 }
