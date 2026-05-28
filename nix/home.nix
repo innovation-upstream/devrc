@@ -5,6 +5,7 @@ let
   workspace = "${home}/workspace";
   userPackages = import ./pkgs { inherit pkgs workspace; };
   sessionVariables = import ./sessionVariables.nix {
+    inherit pkgs;
     elixirLspPath = pkgs.vscode-extensions.elixir-lsp.vscode-elixir-ls;
     playwrightBrowsersPath = pkgs.playwright-driver.browsers;
     homePath = home;
@@ -58,12 +59,16 @@ in
           # Workflows
           { trigger = ":cpr"; replace = "commit push reconcile flux verify"; label = "Commit push reconcile verify"; search_terms = ["flux" "deploy"]; }
           { trigger = ":tmt:"; replace = "use task-master MCP to create tasks, then implement and validate them"; label = "Task-master workflow"; search_terms = ["taskmaster" "workflow"]; }
+          { trigger = ":dsa"; replace = "dispatch a subagent to "; label = "Dispatch subagent opener"; search_terms = ["subagent" "dispatch"]; }
+          { trigger = ":whn"; replace = "write the handoff for next session"; label = "Write handoff for next session"; search_terms = ["handoff" "session"]; }
+          { trigger = ":rau"; replace = "regressions, assumptions, gaps, bugs, issues"; label = "PR audit checklist tail"; search_terms = ["review" "audit" "pr"]; }
 
+          { trigger = ":cc"; replace = "${workspace}/civit/civitai "; label = "civitai main repo path"; search_terms = ["civitai" "repo"]; }
           { trigger = ":cdp"; replace = "${workspace}/civit/datapacket-talos "; label = "civitai datapacket-talos path"; search_terms = ["civitai"]; }
           { trigger = ":cgf"; replace = "${workspace}/civit/civitai-gpu-fleet "; label = "civitai gpu-fleet path"; search_terms = ["civitai"]; }
           { trigger = ":cdo"; replace = "${workspace}/civit/civitai-deployment "; label = "civitai do deployment path"; search_terms = ["civitai"]; }
+          { trigger = ":cmo"; replace = "${workspace}/civit/civitai-orchestration "; label = "civitai-orchestration path"; search_terms = ["civitai" "orchestration"]; }
           { trigger = ":cpk"; replace = "${workspace}/civit/datapacket-talos/prod-kubeconfig "; label = "civitai dp prod kubeconfig path"; search_terms = ["civitai"]; }
-          { trigger = ":cdk"; replace = "${home}/Downloads/civitai-kubeconfig.yaml "; label = "civitai do kubeconfig path"; search_terms = ["civitai"]; }
 
           # Word expansions
           { trigger = ":anal"; replace = "analyze "; }
