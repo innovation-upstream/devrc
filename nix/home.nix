@@ -61,7 +61,7 @@ in
           { trigger = ":tmt:"; replace = "use task-master MCP to create tasks, then implement and validate them"; label = "Task-master workflow"; search_terms = ["taskmaster" "workflow"]; }
           { trigger = ":dsa"; replace = "dispatch a subagent to "; label = "Dispatch subagent opener"; search_terms = ["subagent" "dispatch"]; }
           { trigger = ":whn"; replace = "write the handoff for next session"; label = "Write handoff for next session"; search_terms = ["handoff" "session"]; }
-          { trigger = ":rau"; replace = "regressions, assumptions, gaps, bugs, issues"; label = "PR audit checklist tail"; search_terms = ["review" "audit" "pr"]; }
+          { trigger = ":rau"; replace = "audit for regressions, assumptions, gaps, bugs, issues"; label = "PR audit checklist tail"; search_terms = ["review" "audit" "pr"]; }
 
           { trigger = ":cc"; replace = "${workspace}/civit/civitai "; label = "civitai main repo path"; search_terms = ["civitai" "repo"]; }
           { trigger = ":cdp"; replace = "${workspace}/civit/datapacket-talos "; label = "civitai datapacket-talos path"; search_terms = ["civitai"]; }
