@@ -160,10 +160,6 @@ in
     source = ../scripts/tmux-task-hook.sh;
     executable = true;
   };
-  home.file.".config/tmux/task-dashboard.sh" = {
-    source = ../scripts/tmux-task-dashboard.sh;
-    executable = true;
-  };
   home.file.".config/tmux/task-resume.sh" = {
     source = ../scripts/tmux-task-resume.sh;
     executable = true;
