@@ -43,11 +43,32 @@ render() {
 
         if tmux has-session -t "$sess" 2>/dev/null; then
             printf "\033[1;38;2;%d;%d;%dm── %s   %s\033[0m\n" "$r" "$g" "$b" "$key" "$name"
-            # capture-pane -S -N grabs last N lines including scrollback;
-            # trim trailing blank lines so each section stays compact
-            tmux capture-pane -t "$sess" -p -S -"$per_section" 2>/dev/null \
-                | sed -e :a -e '/^[[:space:]]*$/{$d;N;ba' -e '}' \
-                | tail -n "$per_section"
+            # Capture enough scrollback to find Claude's input-box boundary,
+            # then take last per_section lines of REAL content (chrome stripped).
+            # Chrome is two ─────── separator lines wrapping the input box,
+            # followed by the model+ctx status bar. Anything above the upper
+            # separator is conversation. Non-Claude panes (no separator pair
+            # near the bottom) fall through and tail normally.
+            tmux capture-pane -t "$sess" -p -S -50 2>/dev/null \
+                | awk -v per="$per_section" '
+                    { lines[NR] = $0 }
+                    END {
+                        last_sep = 0; prev_sep = 0
+                        for (i = NR; i > NR - 15 && i > 0; i--) {
+                            if (lines[i] ~ /^[[:space:]]*─{20,}/) {
+                                if (last_sep == 0) { last_sep = i }
+                                else { prev_sep = i; break }
+                            }
+                        }
+                        chrome_top = (prev_sep > 0) ? prev_sep \
+                                  : (last_sep > 0 ? last_sep : NR + 1)
+                        end = chrome_top - 1
+                        while (end >= 1 && lines[end] ~ /^[[:space:]]*$/) end--
+                        start = end - per + 1
+                        if (start < 1) start = 1
+                        for (i = start; i <= end; i++) print lines[i]
+                    }
+                '
         else
             printf "\033[2;38;2;%d;%d;%dm── %s   %s (not started)\033[0m\n" \
                 "$r" "$g" "$b" "$key" "$name"
