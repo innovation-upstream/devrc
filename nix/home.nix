@@ -184,4 +184,31 @@ in
     source = ../scripts/tmux-initiatives.sh;
     executable = true;
   };
+
+  # CPU load monitor: desktop alert on sustained high load
+  home.file.".config/cpu-monitor/cpu-monitor.sh" = {
+    source = ../scripts/cpu-monitor.sh;
+    executable = true;
+  };
+
+  systemd.user.services.cpu-monitor = {
+    Unit = {
+      Description = "Desktop alert on sustained high CPU load";
+      After = [ "graphical-session.target" ];
+    };
+    Service = {
+      # PATH must be explicit: a user service does not inherit the login shell PATH.
+      Environment = [
+        "PATH=${lib.makeBinPath [ pkgs.coreutils pkgs.gawk pkgs.procps pkgs.gnugrep pkgs.libnotify ]}"
+      ];
+      ExecStart = "${pkgs.bash}/bin/bash %h/.config/cpu-monitor/cpu-monitor.sh";
+      Restart = "always";
+      RestartSec = 10;
+    };
+    Install = {
+      # default.target = starts on login. i3 is not systemd-integrated, so the
+      # script borrows DISPLAY/DBUS from i3's /proc environ to reach dunst.
+      WantedBy = [ "default.target" ];
+    };
+  };
 }
