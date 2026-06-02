@@ -176,4 +176,8 @@ in
     source = ../scripts/tmux-scratch-monitor.sh;
     executable = true;
   };
+  home.file.".config/tmux/claude-counters.sh" = {
+    source = ../scripts/tmux-claude-counters.sh;
+    executable = true;
+  };
 }
