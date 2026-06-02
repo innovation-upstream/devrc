@@ -1,0 +1,80 @@
+#!/usr/bin/env bash
+# Monitor popup: live HUD of the last N lines from all 6 scratch sessions.
+# Bound to Alt+m. Auto-refreshes every REFRESH seconds. Dismiss with q/Esc.
+#
+# Each section renders:
+#   ── grove                    (header in slot color; dim if session not started)
+#   <last per_section lines of capture-pane>
+#
+# Per-section line count adapts to popup height so all 6 fit without scroll.
+
+REFRESH=${REFRESH:-2}
+
+# slot key : session : color : title  (parallel order to .tmux.conf)
+SLOTS=(
+    "g:scratch:#b8bb26:grove"
+    "G:scratch2:#d79921:Gold"
+    "v:scratch3:#b16286:violet"
+    "V:scratch4:#83a598:Vapor"
+    "p:scratch5:#cc241d:poppy"
+    "P:scratch6:#689d6a:Pool"
+)
+
+hex_to_rgb() {
+    local h="${1#\#}"
+    printf '%d %d %d' "$((16#${h:0:2}))" "$((16#${h:2:2}))" "$((16#${h:4:2}))"
+}
+
+render() {
+    local rows cols per_section
+    rows=$(tput lines 2>/dev/null || echo 40)
+    cols=$(tput cols 2>/dev/null || echo 80)
+
+    # Reserve 1 header line + 1 blank line per section + 1 footer line.
+    # Available content = rows - (6 headers + 6 blanks + 1 footer) = rows - 13
+    per_section=$(( (rows - 13) / 6 ))
+    [[ $per_section -lt 2 ]] && per_section=2
+
+    printf '\033[H\033[2J'  # clear + home
+
+    for slot in "${SLOTS[@]}"; do
+        IFS=':' read -r key sess color name <<< "$slot"
+        IFS=' ' read -r r g b <<< "$(hex_to_rgb "$color")"
+
+        if tmux has-session -t "$sess" 2>/dev/null; then
+            printf "\033[1;38;2;%d;%d;%dm── %s   %s\033[0m\n" "$r" "$g" "$b" "$key" "$name"
+            # capture-pane -S -N grabs last N lines including scrollback;
+            # trim trailing blank lines so each section stays compact
+            tmux capture-pane -t "$sess" -p -S -"$per_section" 2>/dev/null \
+                | sed -e :a -e '/^[[:space:]]*$/{$d;N;ba' -e '}' \
+                | tail -n "$per_section"
+        else
+            printf "\033[2;38;2;%d;%d;%dm── %s   %s (not started)\033[0m\n" \
+                "$r" "$g" "$b" "$key" "$name"
+        fi
+        printf '\n'
+    done
+
+    printf '\033[2m[q/Esc: dismiss · auto-refresh %ss]\033[0m' "$REFRESH"
+}
+
+# Hide cursor while running; restore on exit
+trap 'printf "\033[?25h\n"; exit 0' INT TERM EXIT
+printf '\033[?25l'
+
+while true; do
+    render
+    # Wait REFRESH seconds for a keypress; on key, decide what to do.
+    if IFS= read -t "$REFRESH" -rsn 1 key; then
+        case "$key" in
+            q|Q) exit 0 ;;
+            $'\e')
+                # plain Esc (no follow-up) → dismiss; if it's an arrow/escape seq,
+                # drain it without acting
+                if ! IFS= read -t 0.05 -rsn 2 _trailing; then
+                    exit 0
+                fi
+                ;;
+        esac
+    fi
+done

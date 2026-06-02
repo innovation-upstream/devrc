@@ -172,4 +172,8 @@ in
     source = ../scripts/tmux-scratch-status.sh;
     executable = true;
   };
+  home.file.".config/tmux/scratch-monitor.sh" = {
+    source = ../scripts/tmux-scratch-monitor.sh;
+    executable = true;
+  };
 }
