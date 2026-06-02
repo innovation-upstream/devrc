@@ -180,4 +180,8 @@ in
     source = ../scripts/tmux-claude-counters.sh;
     executable = true;
   };
+  home.file.".config/tmux/initiatives.sh" = {
+    source = ../scripts/tmux-initiatives.sh;
+    executable = true;
+  };
 }
