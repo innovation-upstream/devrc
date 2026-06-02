@@ -14,6 +14,8 @@
 #      ...
 
 REFRESH=${REFRESH:-3}
+STALE_DAYS=${STALE_DAYS:-7}
+STALE_SECS=$((STALE_DAYS * 86400))
 
 # session : slot-key : color : title  (parallel order to scratch-status.sh)
 SLOTS=(
@@ -81,6 +83,7 @@ render_group() {
         $3 == "paused"  { print "3\t" $0 }
     ' | sort -t$'\t' -k1,1n -k7,7r | cut -f2-)
 
+    local stale_count=0
     while IFS=$'\t' read -r _sess wi status task summary lastact; do
         local icon icon_hex
         case "$status" in
@@ -89,6 +92,19 @@ render_group() {
             paused)  icon="$ICON_PAUSE"; icon_hex="$COLOR_PAUSE" ;;
             *)       icon="?";           icon_hex="#665c54" ;;
         esac
+
+        # Compute age once per entry; reused for stale check and display.
+        local then=0 diff=0
+        if [[ -n "$lastact" ]]; then
+            then=$(date -d "$lastact" +%s 2>/dev/null) || then=0
+            [[ $then -gt 0 ]] && diff=$((now - then))
+        fi
+
+        # Stale paused: don't render, just tally for the footer line.
+        if [[ "$status" == "paused" && $then -gt 0 && $diff -gt $STALE_SECS ]]; then
+            ((stale_count++))
+            continue
+        fi
 
         # Single-line summary; replace embedded newlines with spaces.
         local sum="${summary//$'\n'/ }"
@@ -105,22 +121,25 @@ render_group() {
         fi
 
         # Age for paused
-        local age="" then=0
-        if [[ "$status" == "paused" && -n "$lastact" ]]; then
-            then=$(date -d "$lastact" +%s 2>/dev/null) || then=0
-            if [[ $then -gt 0 ]]; then
-                local diff=$((now - then))
-                if   [[ $diff -lt 3600 ]];  then age="$((diff / 60))m"
-                elif [[ $diff -lt 86400 ]]; then age="$((diff / 3600))h"
-                else age="$((diff / 86400))d"
-                fi
-                age="  \033[2m($age ago)\033[0m"
+        local age=""
+        if [[ "$status" == "paused" && $then -gt 0 ]]; then
+            local a
+            if   [[ $diff -lt 3600 ]];  then a="$((diff / 60))m"
+            elif [[ $diff -lt 86400 ]]; then a="$((diff / 3600))h"
+            else a="$((diff / 86400))d"
             fi
+            age="  \033[2m($a ago)\033[0m"
         fi
 
         printf '   %s%s\033[0m  \033[2m%-6s\033[0m  \033[1m%-22s\033[0m  \033[2m%s\033[0m%b\n' \
             "$(ansi_fg "$icon_hex")" "$icon" "$label" "$task" "$sum" "$age"
     done <<< "$sorted"
+
+    if [[ $stale_count -gt 0 ]]; then
+        printf '   %s%s\033[0m  \033[2m+%d paused >%dd (set STALE_DAYS to widen)\033[0m\n' \
+            "$(ansi_fg "$COLOR_PAUSE")" "$ICON_PAUSE" "$stale_count" "$STALE_DAYS"
+    fi
+
     printf '\n'
 }
 
