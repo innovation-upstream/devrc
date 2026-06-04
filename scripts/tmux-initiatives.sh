@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 # Initiatives dashboard for tmux.
-# Aggregates ongoing Claude sessions grouped by tmux session, showing the
-# project name and fuzzyclaw's LLM-generated summary per window.
-# Bound to Alt+i. Auto-refresh every REFRESH seconds. Dismiss with q/Esc.
+# Aggregates ongoing Claude sessions grouped by tmux session, showing each
+# window's location + project name. Bound to Alt+i. Auto-refresh every
+# REFRESH seconds. Dismiss with q/Esc.
 #
 # Visual:
 #   🌳 grove                       3 sessions  1●  1🔄  1⏸
-#      ● g:2  datapacket-talos     Permission needed: write nix/system/apply…
-#      🔄 g:1  civitai-orch         Implementing batch retry handler for stuck jobs
-#      ⏸ g:3  starters             Adding TypeScript template  (5h ago)
+#      ● g:2   datapacket-talos
+#      🔄 g:1  civitai-orch
+#      ⏸ g:3  starters  (5h ago)
 #
 #   🌳 Gold                        2 sessions  1⏸
 #      ...
@@ -48,7 +48,7 @@ ansi_fg() {
 }
 
 render_group() {
-    local sess="$1" key="$2" title="$3" hex="$4" data="$5" smax="$6" now="$7"
+    local sess="$1" key="$2" title="$3" hex="$4" data="$5" now="$6"
 
     local lines
     lines=$(printf '%s\n' "$data" | awk -F'\t' -v s="$sess" '$1 == s')
@@ -81,10 +81,10 @@ render_group() {
         $3 == "waiting" { print "1\t" $0 }
         $3 == "running" { print "2\t" $0 }
         $3 == "paused"  { print "3\t" $0 }
-    ' | sort -t$'\t' -k1,1n -k7,7r | cut -f2-)
+    ' | sort -t$'\t' -k1,1n -k6,6r | cut -f2-)
 
     local stale_count=0
-    while IFS=$'\t' read -r _sess wi status task summary lastact; do
+    while IFS=$'\t' read -r _sess wi status task lastact; do
         local icon icon_hex
         case "$status" in
             waiting) icon="$ICON_WAIT";  icon_hex="$COLOR_WAIT" ;;
@@ -106,12 +106,6 @@ render_group() {
             continue
         fi
 
-        # Single-line summary; replace embedded newlines with spaces.
-        local sum="${summary//$'\n'/ }"
-        if [[ ${#sum} -gt $smax ]]; then
-            sum="${sum:0:$smax}…"
-        fi
-
         # Label: scratch slots use the hotkey letter; other sessions use session name
         local label
         if [[ -n "$key" ]]; then
@@ -131,8 +125,8 @@ render_group() {
             age="  \033[2m($a ago)\033[0m"
         fi
 
-        printf '   %s%s\033[0m  \033[2m%-6s\033[0m  \033[1m%-22s\033[0m  \033[2m%s\033[0m%b\n' \
-            "$(ansi_fg "$icon_hex")" "$icon" "$label" "$task" "$sum" "$age"
+        printf '   %s%s\033[0m  \033[2m%-6s\033[0m  \033[1m%s\033[0m%b\n' \
+            "$(ansi_fg "$icon_hex")" "$icon" "$label" "$task" "$age"
     done <<< "$sorted"
 
     if [[ $stale_count -gt 0 ]]; then
@@ -157,7 +151,7 @@ render() {
     now=$(date +%s)
     current_wids=" $(tmux list-windows -a -F '#{window_id}' 2>/dev/null | tr '\n' ' ')"
 
-    # TSV: session, window_index, status, task, summary, last_activity
+    # TSV: session, window_index, status, task, last_activity
     data=$(jq -r -s --arg wids "$current_wids" '
         map(. as $t | select(($wids | contains(" " + $t.window_id + " ")) and $t.status != "done"))
         | .[]
@@ -166,7 +160,6 @@ render() {
             (.window_index | tostring),
             .status,
             .task,
-            ((.summary // "") | gsub("[\\n\\r\\t]"; " ")),
             (.last_activity // "")
           ]
         | @tsv
@@ -177,13 +170,10 @@ render() {
         return
     fi
 
-    local smax=$((cols - 40))
-    [[ $smax -lt 25 ]] && smax=25
-
     local rendered=""
     for slot in "${SLOTS[@]}"; do
         IFS=':' read -r sess key color title <<< "$slot"
-        render_group "$sess" "$key" "$title" "$color" "$data" "$smax" "$now"
+        render_group "$sess" "$key" "$title" "$color" "$data" "$now"
         rendered+=" $sess "
     done
 
@@ -195,7 +185,7 @@ render() {
     if [[ -n "$others" ]]; then
         while read -r sess; do
             [[ -z "$sess" ]] && continue
-            render_group "$sess" "" "$sess" "$COLOR_OTHER" "$data" "$smax" "$now"
+            render_group "$sess" "" "$sess" "$COLOR_OTHER" "$data" "$now"
         done <<< "$others"
     fi
 
