@@ -38,7 +38,8 @@ if [[ -f "$TASK_FILE" ]]; then
     [[ -z "$STARTED" ]] && STARTED="$NOW"
 fi
 
-tmux rename-window -t "$WIN_ID" "⏸ ${ORIG_TASK}" 2>/dev/null
+# Status lives in the JSON task state below, not the window name — the window
+# name is left to tmux automatic-rename so the tab tracks cwd.
 
 jq -n \
     --arg task "$ORIG_TASK" \
