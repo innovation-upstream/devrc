@@ -7,9 +7,13 @@
 #      Catches a stuck/looping process that pegs one core but barely moves the
 #      load average (a single hung script adds only ~1 to load on an 8-core box,
 #      so the load trigger alone would never see it).
+#   3. High TEMPERATURE     — package temp stays >= a threshold for several
+#      samples. Catches thermal events the load/runaway triggers are blind to:
+#      the chassis running near the thermal ceiling at modest load (failing
+#      cooling, dust, aging paste), where throttling becomes the real risk.
 #
-# Both require the condition to persist across consecutive samples, so brief
-# bursts (e.g. a nix build) do not alert. Each has its own state and cooldown.
+# All three require the condition to persist across consecutive samples, so
+# brief bursts (e.g. a nix build) do not alert. Each has its own state/cooldown.
 #
 # Run in foreground:   bash scripts/cpu-monitor.sh
 # Run detached:        setsid bash scripts/cpu-monitor.sh >/dev/null 2>&1 &
@@ -21,6 +25,8 @@
 #   CPU_MON_COOLDOWN         seconds before re-alerting          (default: 300)
 #   CPU_MON_RUNAWAY_PCT      per-process CPU%% that counts as a runaway (default: 85)
 #   CPU_MON_RUNAWAY_SUSTAIN  consecutive samples same proc stays hot    (default: 6 -> ~3m)
+#   CPU_MON_TEMP_THRESHOLD   package temp (°C) that counts as "hot"     (default: 95)
+#   CPU_MON_TEMP_SUSTAIN     consecutive hot samples to fire            (default: 3 -> ~90s)
 set -euo pipefail
 
 CORES=$(nproc)
@@ -30,6 +36,9 @@ SUSTAIN=${CPU_MON_SUSTAIN:-3}
 COOLDOWN=${CPU_MON_COOLDOWN:-300}
 RUNAWAY_PCT=${CPU_MON_RUNAWAY_PCT:-85}
 RUNAWAY_SUSTAIN=${CPU_MON_RUNAWAY_SUSTAIN:-6}
+TEMP_THRESHOLD=${CPU_MON_TEMP_THRESHOLD:-95}
+TEMP_SUSTAIN=${CPU_MON_TEMP_SUSTAIN:-3}
+TEMP_HYSTERESIS=5   # recover only once temp drops this far below the threshold
 
 # notify-send needs a display + session bus. If we were launched without them
 # (systemd, cron, detached shell), borrow them from a running i3 process.
@@ -72,6 +81,31 @@ runaway_proc() {
 # float comparison: is $1 >= $2 ?
 load_ge() { awk -v a="$1" -v b="$2" 'BEGIN { exit !(a+0 >= b+0) }'; }
 
+# Package temperature in whole °C, read from sysfs (no lm_sensors dependency).
+# Prefers coretemp "Package id 0"; falls back to the hottest thermal zone.
+package_temp() {
+  local hwmon label f best=""
+  for hwmon in /sys/class/hwmon/hwmon*; do
+    [ -r "$hwmon/name" ] && [ "$(cat "$hwmon/name")" = "coretemp" ] || continue
+    for label in "$hwmon"/temp*_label; do
+      [ -r "$label" ] || continue
+      case "$(cat "$label")" in
+        "Package id "*)
+          f="${label%_label}_input"
+          [ -r "$f" ] && { echo $(( $(cat "$f") / 1000 )); return 0; } ;;
+      esac
+    done
+  done
+  # Fallback: hottest thermal zone.
+  local t
+  for f in /sys/class/thermal/thermal_zone*/temp; do
+    [ -r "$f" ] || continue
+    t=$(cat "$f")
+    if [ -z "$best" ] || [ "$t" -gt "$best" ]; then best="$t"; fi
+  done
+  [ -n "$best" ] && echo $(( best / 1000 ))
+}
+
 # alert <urgency> <summary> <body>
 alert() {
   local urgency="$1" summary="$2" body="$3"
@@ -93,6 +127,11 @@ runaway_pid=""
 runaway_streak=0
 runaway_alerting=0
 runaway_last_alert=0
+
+# --- temperature trigger state ---
+temp_streak=0
+temp_alerting=0
+temp_last_alert=0
 
 while :; do
   now=$(date +%s)
@@ -144,6 +183,26 @@ ${rargs}"
     runaway_pid=""
     runaway_streak=0
     runaway_alerting=0
+  fi
+
+  # --- 3. high package temperature ---
+  temp=$(package_temp || true)
+  if [ -n "$temp" ] && [ "$temp" -ge "$TEMP_THRESHOLD" ]; then
+    temp_streak=$((temp_streak + 1))
+    if [ "$temp_streak" -ge "$TEMP_SUSTAIN" ]; then
+      if [ "$temp_alerting" -eq 0 ] || [ $((now - temp_last_alert)) -ge "$COOLDOWN" ]; then
+        alert critical "🌡 High CPU temperature" \
+          "Package: ${temp}°C (threshold ${TEMP_THRESHOLD}°C) — throttling risk
+Load ${load}, top: $(top_proc)"
+        temp_last_alert=$now
+        temp_alerting=1
+      fi
+    fi
+  elif [ -n "$temp" ] && [ "$temp" -lt "$((TEMP_THRESHOLD - TEMP_HYSTERESIS))" ]; then
+    # Only clear once temp drops a margin below the threshold (avoid flapping).
+    [ "$temp_alerting" -eq 1 ] && alert low "✓ CPU temperature back to normal" "Package: ${temp}°C"
+    temp_streak=0
+    temp_alerting=0
   fi
 
   sleep "$INTERVAL"
