@@ -50,7 +50,7 @@ in
           # Workflows
           { trigger = ":cpr"; replace = "commit push reconcile flux verify"; label = "Commit push reconcile verify"; search_terms = ["flux" "deploy"]; }
           { trigger = ":whn"; replace = "write the handoff to continue in next session"; label = "Write handoff for next session"; search_terms = ["handoff" "session"]; }
-          { trigger = ":rau"; replace = "dispatch a subagent to audit the PR for risks, regressions, assumptions, gaps, bugs, issues"; label = "PR audit checklist tail"; search_terms = ["review" "audit" "pr"]; }
+          { trigger = ":rau"; replace = "dispatch a subagent to audit the PR for risks, regressions, assumptions, gaps, bugs, issues, behaviour changes, leaks, second-order consequences"; label = "PR audit checklist tail"; search_terms = ["review" "audit" "pr"]; }
 
           { trigger = ":cc"; replace = "${workspace}/civit/civitai "; label = "civitai main repo path"; search_terms = ["civitai" "repo" "web"]; }
           { trigger = ":cdp"; replace = "${workspace}/civit/datapacket-talos "; label = "civitai datapacket-talos path"; search_terms = ["civitai"]; }
