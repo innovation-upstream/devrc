@@ -3,6 +3,10 @@
 let
   home = config.home.homeDirectory;
   workspace = "${home}/workspace";
+  # Headless/server mode: `touch ~/.server-mode` to disable graphical-session
+  # services (dunst, espanso) that can't start without X/i3 and otherwise make
+  # every `home-manager switch` report "degraded / Failed services".
+  serverMode = builtins.pathExists "${home}/.server-mode";
   userPackages = import ./pkgs { inherit pkgs workspace; };
   sessionVariables = import ./sessionVariables.nix {
     inherit pkgs;
@@ -17,7 +21,7 @@ in
 
   # Espanso text expander service (X11/i3)
   services.espanso = {
-    enable = true;
+    enable = !serverMode;
     package = pkgs.espanso;
     x11Support = true;
     waylandSupport = false;
@@ -78,7 +82,7 @@ in
 
   # Notification daemon (Gruvbox-themed)
   services.dunst = {
-    enable = true;
+    enable = !serverMode;
     settings = {
       global = {
         font = "Monospace 10";
