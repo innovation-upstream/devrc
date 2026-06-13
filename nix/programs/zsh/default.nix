@@ -39,6 +39,11 @@
     n = "nvim";
     k = "kubectl";
     nemo = "GTK_THEME=Adwaita-dark nemo";
+
+    # Toggle headless vs graphical mode (see ~/.server-mode marker in home.nix).
+    # graphical-mode re-enables dunst/espanso; headless-mode disables them.
+    graphical-mode = "rm -f ~/.server-mode && home-manager switch --flake ~/workspace/devrc --impure";
+    headless-mode = "touch ~/.server-mode && home-manager switch --flake ~/workspace/devrc --impure";
   };
 
   history = {
