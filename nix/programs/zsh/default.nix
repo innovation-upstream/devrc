@@ -11,6 +11,12 @@
   in
     ''
     ${content}
+
+    # Pass unmatched globs through literally instead of aborting the command
+    # (bash default behavior). Without this, zsh fails commands like
+    # `grep --include=*.go` or `ls /tmp/foo* 2>/dev/null` with "no matches found".
+    unsetopt nomatch
+
     PROMPT='%{$fg_bold[white]%}%c%{$reset_color%} $(git_prompt_info)'
 
     ZSH_THEME_GIT_PROMPT_PREFIX="%{$fg[green]%}"
