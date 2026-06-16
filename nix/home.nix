@@ -61,7 +61,6 @@ in
           { trigger = ":usd"; replace = "update the skills and project docs then write the handoff to proceed in next session"; label = "Update skills + docs + write handoff"; search_terms = ["update" "skill" "skills" "docs" "documentation" "handoff" "session"]; }
           { trigger = ":nday"; replace = "it's the next day, check"; label = "Next-day check-in"; search_terms = ["next day" "check" "days" "resume" "morning"]; }
           { trigger = ":pec"; replace = "push an empty commit to retrigger the build"; label = "Push empty commit to retrigger build"; search_terms = ["empty commit" "retrigger" "rebuild" "build" "ci" "pipeline" "push"]; }
-          { trigger = ":hcs"; replace = "do we have a claude code skill for this?"; label = "Ask: existing Claude Code skill?"; search_terms = ["skill" "claude code" "exists" "have" "reuse"]; }
 
           { trigger = ":cc"; replace = "${workspace}/civit/civitai "; label = "civitai main repo path"; search_terms = ["civitai" "repo" "web"]; }
           { trigger = ":cdp"; replace = "${workspace}/civit/datapacket-talos "; label = "civitai datapacket-talos path"; search_terms = ["civitai"]; }
