@@ -54,13 +54,20 @@ in
           # Workflows
           { trigger = ":cpr"; replace = "commit push reconcile flux verify"; label = "Commit push reconcile verify"; search_terms = ["flux" "deploy"]; }
           { trigger = ":whn"; replace = "write the handoff to continue in next session"; label = "Write handoff for next session"; search_terms = ["handoff" "session"]; }
-          { trigger = ":rau"; replace = "dispatch a subagent to audit the PR for risks, regressions, assumptions, gaps, bugs, issues, behaviour changes, leaks, second-order consequences"; label = "PR audit checklist tail"; search_terms = ["review" "audit" "pr"]; }
+          { trigger = ":rau"; replace = "dispatch a subagent to audit the PR for risks, regressions, assumptions, gaps, bugs, issues, behaviour changes, leaks, second-order consequences"; label = "PR audit checklist tail"; search_terms = ["review" "audit" "pr" "risks" "regressions" "subagent"]; }
+          { trigger = ":rns"; replace = "recommend next steps, improvements, extension, evaluation, evolution, iteration"; label = "Recommend next steps & evolution"; search_terms = ["next" "recommend" "steps" "improvements" "extension" "evaluation" "evolution" "iteration"]; }
+          { trigger = ":pst"; replace = "proceed, use subagent, ensure test coverage"; label = "Proceed with subagent + test coverage"; search_terms = ["proceed" "subagent" "test" "coverage" "dispatch" "yes"]; }
+          { trigger = ":kom"; replace = "give me the kickoff message to copy paste to next session"; label = "Kickoff message for next session"; search_terms = ["kickoff" "kick off" "next session" "copy paste" "handoff" "message"]; }
+          { trigger = ":usd"; replace = "update the skills and project docs then write the handoff to proceed in next session"; label = "Update skills + docs + write handoff"; search_terms = ["update" "skill" "skills" "docs" "documentation" "handoff" "session"]; }
+          { trigger = ":nday"; replace = "it's the next day, check"; label = "Next-day check-in"; search_terms = ["next day" "check" "days" "resume" "morning"]; }
+          { trigger = ":pec"; replace = "push an empty commit to retrigger the build"; label = "Push empty commit to retrigger build"; search_terms = ["empty commit" "retrigger" "rebuild" "build" "ci" "pipeline" "push"]; }
+          { trigger = ":hcs"; replace = "do we have a claude code skill for this?"; label = "Ask: existing Claude Code skill?"; search_terms = ["skill" "claude code" "exists" "have" "reuse"]; }
 
           { trigger = ":cc"; replace = "${workspace}/civit/civitai "; label = "civitai main repo path"; search_terms = ["civitai" "repo" "web"]; }
           { trigger = ":cdp"; replace = "${workspace}/civit/datapacket-talos "; label = "civitai datapacket-talos path"; search_terms = ["civitai"]; }
           { trigger = ":cgf"; replace = "${workspace}/civit/civitai-gpu-fleet "; label = "civitai gpu-fleet path"; search_terms = ["civitai"]; }
           { trigger = ":cmo"; replace = "${workspace}/civit/civitai-orchestration "; label = "civitai-orchestration path"; search_terms = ["civitai" "orchestration"]; }
-          { trigger = ":cmo"; replace = "${workspace}/civit/civitai-spine-controller "; label = "civitai-spine-controller path"; search_terms = ["civitai" "spine controller"]; }
+          { trigger = ":csc"; replace = "${workspace}/civit/civitai-spine-controller "; label = "civitai-spine-controller path"; search_terms = ["civitai" "spine controller" "spine"]; }
           { trigger = ":cpk"; replace = "${workspace}/civit/datapacket-talos/prod-kubeconfig "; label = "civitai dp prod kubeconfig path"; search_terms = ["civitai"]; }
           { trigger = ":subk"; replace = "${workspace}/civit/civitai-gpu-fleet/submodel-dc-03-a-kubeconfig "; label = "civitai submodel dc 03 kubeconfig path"; search_terms = ["civitai" "gpu" "submodel" "dc 03"]; }
 
