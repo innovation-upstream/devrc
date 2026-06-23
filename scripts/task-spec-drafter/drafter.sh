@@ -15,6 +15,19 @@
 # This is a VERIFIER / TRIAGE layer, not a task-factory: most inbound dissolves
 # on verification; it surfaces only the few that are decision-ready.
 #
+# === DELTA-SCOPING (cheap continuous runs) =================================
+# A processed-state cache (DRAFTER_STATE_FILE, ticket_id -> date_updated) makes
+# each run cheap: a ticket is processed ONLY IF it is NEW (not in state) or
+# CHANGED (its live date_updated is newer than the stored value). Unchanged
+# tickets are skipped ("skipped N unchanged"). State is updated after each ticket
+# is handled (processed OR baselined), so the next run sees them as known.
+#
+# FIRST RUN (empty/missing/corrupt state): does NOT process all ~74 — it processes
+# at most DRAFTER_MAX_TICKETS and BASELINES the remainder (records their current
+# date_updated without running the model), so they count as "seen" and are only
+# processed later when they actually change. A corrupt/unreadable state file is
+# treated as empty (never crashes).
+#
 # === SAFETY: read-only + shadow-first ======================================
 #   * Makes NO writes to ClickUp / repos / cluster. Sources are read-only and
 #     the claude pass is launched with --permission-mode plan.
@@ -35,7 +48,16 @@
 #                         (haiku|sonnet|opus) or full id. Haiku is the cheap shadow
 #                         default; the deterministic safety gate (below) compensates
 #                         for Haiku's measured intent-ambiguity blind spot.
-#   DRAFTER_MAX_TICKETS   cap tickets processed per run (def 0 = all)
+#   DRAFTER_MAX_TICKETS   cap tickets PROCESSED per run (def 25). This is a
+#                         backstop, NOT a per-run target: with delta-scoping
+#                         (below) a steady-state run processes only the handful
+#                         of NEW/CHANGED tickets. The cap matters on the FIRST
+#                         run (empty state): instead of processing all ~74 it
+#                         processes the cap and BASELINES the rest (records their
+#                         date_updated as "seen" so they're only re-processed
+#                         when they change). Set 0 to disable the cap.
+#   DRAFTER_STATE_FILE    processed-state cache, ticket_id -> date_updated, used
+#                         for delta-scoping (def $OUT_DIR/processed.json)
 #   DRAFTER_TIMEOUT       seconds budget per ticket's claude -p call (def 240)
 #   DRAFTER_OUT_DIR       where shadow queues are written (def ~/.claude/task-spec-drafter)
 #   DRAFTER_LOG_FILE      run log                          (def $OUT_DIR/drafter.log)
@@ -58,9 +80,10 @@ DRAFTER_CONF="${DRAFTER_CONF_FILE:-$HOME/.claude/task-spec-drafter.env}"
 
 DRAFTER_MODE="${DRAFTER_MODE:-shadow}"
 DRAFTER_MODEL="${DRAFTER_MODEL:-haiku}"
-DRAFTER_MAX_TICKETS="${DRAFTER_MAX_TICKETS:-0}"
+DRAFTER_MAX_TICKETS="${DRAFTER_MAX_TICKETS:-25}"
 DRAFTER_TIMEOUT="${DRAFTER_TIMEOUT:-240}"
 DRAFTER_OUT_DIR="${DRAFTER_OUT_DIR:-$HOME/.claude/task-spec-drafter}"
+DRAFTER_STATE_FILE="${DRAFTER_STATE_FILE:-$DRAFTER_OUT_DIR/processed.json}"
 DRAFTER_LOG_FILE="${DRAFTER_LOG_FILE:-$DRAFTER_OUT_DIR/drafter.log}"
 CLICKUP_VIEW_ID="${CLICKUP_VIEW_ID:-6-901111220963-1}"
 API_URL="${CLAWGATE_API_URL:-http://192.168.50.250:30302}"
@@ -173,11 +196,11 @@ fetch_queue() {
     local body
     body="$(curl -sf --max-time 30 -H "Authorization: $CU_TOKEN" \
       "https://api.clickup.com/api/v2/view/$CLICKUP_VIEW_ID/task?page=$page" 2>/dev/null)" || break
-    # emit "id\tstatus\tname" per task, set last from last_page
+    # emit "id\tstatus\tname\tdate_updated" per task, set last from last_page
     printf '%s' "$body" | node -e '
       let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{
         let j;try{j=JSON.parse(d)}catch(e){process.exit(3)}
-        for(const t of (j.tasks||[])) process.stdout.write(`${t.id}\t${(t.status&&t.status.status)||""}\t${(t.name||"").replace(/\s+/g," ").trim()}\n`);
+        for(const t of (j.tasks||[])) process.stdout.write(`${t.id}\t${(t.status&&t.status.status)||""}\t${(t.name||"").replace(/\s+/g," ").trim()}\t${t.date_updated||t.date_created||""}\n`);
         process.stderr.write((j.last_page?"LAST":"MORE")+"\n");
       });' 2>"$DRAFTER_OUT_DIR/.lastpage"
     grep -q LAST "$DRAFTER_OUT_DIR/.lastpage" 2>/dev/null && last=true
@@ -192,22 +215,83 @@ TOTAL="$(printf '%s\n' "$QUEUE_TSV" | grep -c . || true)"
 [ "${TOTAL:-0}" -gt 0 ] || { log "FATAL: triage queue empty / unreachable"; exit 1; }
 log "fetched $TOTAL tickets from triage view"
 
-if [ "${DRAFTER_MAX_TICKETS:-0}" -gt 0 ]; then
-  QUEUE_TSV="$(printf '%s\n' "$QUEUE_TSV" | head -n "$DRAFTER_MAX_TICKETS")"
-  log "capped to first $DRAFTER_MAX_TICKETS tickets (DRAFTER_MAX_TICKETS)"
+# === DELTA-SCOPING: load processed-state, classify each ticket =============
+# State file: {"<ticket_id>": "<date_updated_ms>", ...}. Robust to missing /
+# empty / corrupt (treated as empty object {} — never crashes).
+STATE_OBJ="$(jq -ec 'if type=="object" then . else {} end' "$DRAFTER_STATE_FILE" 2>/dev/null)"
+if [ -z "$STATE_OBJ" ]; then
+  [ -f "$DRAFTER_STATE_FILE" ] && log "WARN: state file unreadable/corrupt ($DRAFTER_STATE_FILE) — treating as empty"
+  STATE_OBJ='{}'
 fi
+STATE_COUNT="$(printf '%s' "$STATE_OBJ" | jq -r 'length')"
+FIRST_RUN=false
+[ "${STATE_COUNT:-0}" -eq 0 ] && FIRST_RUN=true
+log "delta: state has $STATE_COUNT known ticket(s)$( [ "$FIRST_RUN" = true ] && echo ' (FIRST RUN — empty state)')"
+
+# Partition the fetched queue into: TO_PROCESS (new/changed, subject to cap) and
+# TO_BASELINE (everything we won't run this round but want to record as seen so
+# it isn't reprocessed until it changes). Unchanged tickets are simply skipped.
+# We emit two TSV streams to temp files using the live STATE_OBJ for lookups.
+CAP="${DRAFTER_MAX_TICKETS:-0}"
+PROCESS_TSV="$DRAFTER_OUT_DIR/.process.$$"
+BASELINE_TSV="$DRAFTER_OUT_DIR/.baseline.$$"
+: > "$PROCESS_TSV"; : > "$BASELINE_TSV"
+SKIPPED=0; NEW_OR_CHANGED=0; BASELINED=0
+while IFS=$'\t' read -r TID TSTATUS TNAME TUPD; do
+  [ -n "$TID" ] || continue
+  PREV="$(printf '%s' "$STATE_OBJ" | jq -r --arg id "$TID" '.[$id] // ""')"
+  # new (no prior) OR changed (live date_updated strictly newer than stored).
+  if [ -z "$PREV" ] || { [ -n "$TUPD" ] && [ "$TUPD" -gt "$PREV" ] 2>/dev/null; }; then
+    if [ "$CAP" -gt 0 ] && [ "$NEW_OR_CHANGED" -ge "$CAP" ]; then
+      # Over the cap this run: baseline it (record date_updated as seen) so a
+      # first-run / surge doesn't blow up cost; it'll be picked up when it changes.
+      printf '%s\t%s\n' "$TID" "$TUPD" >> "$BASELINE_TSV"; BASELINED=$((BASELINED+1))
+    else
+      printf '%s\t%s\t%s\t%s\n' "$TID" "$TSTATUS" "$TNAME" "$TUPD" >> "$PROCESS_TSV"
+      NEW_OR_CHANGED=$((NEW_OR_CHANGED+1))
+    fi
+  else
+    SKIPPED=$((SKIPPED+1))
+  fi
+done <<< "$QUEUE_TSV"
+
+TO_PROCESS="$(cat "$PROCESS_TSV" 2>/dev/null)"
+PROC_TOTAL="$(printf '%s\n' "$TO_PROCESS" | grep -c . || true)"
+log "delta: $PROC_TOTAL to process (new/changed), $BASELINED baselined (over cap=$CAP), skipped $SKIPPED unchanged"
 
 # --- per-ticket pipeline ---------------------------------------------------
 : > "$QUEUE_JSONL"
 N=0; FAIL=0
 PROMPT_BODY="$(cat "$PROMPT_FILE")"
 
+# update_state <ticket_id> <date_updated> — merge into STATE_OBJ and persist
+# atomically. Called after a ticket is processed OR baselined.
+update_state() {
+  local id="$1" upd="$2"
+  STATE_OBJ="$(printf '%s' "$STATE_OBJ" | jq -c --arg id "$id" --arg u "$upd" '.[$id]=$u')"
+  printf '%s\n' "$STATE_OBJ" > "$DRAFTER_STATE_FILE.tmp.$$" && mv -f "$DRAFTER_STATE_FILE.tmp.$$" "$DRAFTER_STATE_FILE"
+}
+
+# Baseline the over-cap / first-run remainder up front (record as seen, no model).
+if [ -s "$BASELINE_TSV" ]; then
+  while IFS=$'\t' read -r BID BUPD; do
+    [ -n "$BID" ] || continue
+    update_state "$BID" "$BUPD"
+  done < "$BASELINE_TSV"
+  log "delta: baselined $BASELINED ticket(s) into state (recorded as seen, not processed)"
+fi
+rm -f "$BASELINE_TSV" 2>/dev/null || true
+
+if [ "$PROC_TOTAL" -eq 0 ]; then
+  log "delta: nothing new/changed to process this run (skipped $SKIPPED unchanged)"
+fi
+
 GATE_HITS=0
 TICKET_TXT="$DRAFTER_OUT_DIR/.ticket-text.$$"
-while IFS=$'\t' read -r TID TSTATUS TNAME <&3; do
+while IFS=$'\t' read -r TID TSTATUS TNAME TUPD <&3; do
   [ -n "$TID" ] || continue
   N=$((N+1))
-  log "[$N/$TOTAL] $TID  ($TSTATUS)  ${TNAME:0:60}"
+  log "[$N/$PROC_TOTAL] $TID  ($TSTATUS)  ${TNAME:0:60}"
 
   # Gather the ticket text (title + body + comments) for the DETERMINISTIC safety
   # gate. Read-only clickup CLI; failures degrade to title-only (the title still
@@ -279,24 +363,39 @@ Run the five-step pipeline on ticket $TID now and output ONLY the json block."
     else
       log "  -> $MODEL_CLS"
     fi
+    # delta: record this ticket-version as processed so it isn't reprocessed
+    # until its date_updated changes. Only on a SUCCESSFUL classification — an
+    # ERROR/timeout deliberately leaves state untouched so the ticket retries
+    # next run.
+    update_state "$TID" "$TUPD"
   else
-    log "  ! unparseable output — emitting error record"
+    log "  ! unparseable output — emitting error record (state untouched, will retry)"
     ERR_JSON="$(jq -nc --arg id "$TID" --arg t "$TNAME" --arg s "$TSTATUS" \
       '{ticket_id:$id,title:$t,status:$s,classification:"ERROR",confidence:"low",verification:"unparseable claude output",correlations:[],recommendation:"re-run",spec:{goal:"",done:"",owner:"",autonomy:""},safety_flag:""}')"
     safety_gate "$TICKET_TXT" "$ERR_JSON" >> "$QUEUE_JSONL"
     FAIL=$((FAIL+1))
   fi
-done 3<<< "$QUEUE_TSV"
-rm -f "$TICKET_TXT" 2>/dev/null || true
+done 3<<< "$TO_PROCESS"
+rm -f "$TICKET_TXT" "$PROCESS_TSV" 2>/dev/null || true
 
 PROCESSED="$N"
-log "processed=$PROCESSED parse_failures=$FAIL gate_escalations=$GATE_HITS queue=$QUEUE_JSONL"
+log "processed=$PROCESSED parse_failures=$FAIL gate_escalations=$GATE_HITS skipped_unchanged=$SKIPPED baselined=$BASELINED queue=$QUEUE_JSONL"
+
+# delta no-op short-circuit: if nothing was new/changed this run, there is no new
+# queue content. Don't clobber latest.{jsonl,md} (Zach's accumulating adjudication
+# surface) with an empty file, and don't POST an empty card to clawgate.
+if [ "$PROCESSED" -eq 0 ]; then
+  rm -f "$QUEUE_JSONL" "$QUEUE_SUMMARY" 2>/dev/null || true
+  log "delta: 0 new/changed — kept previous latest.{jsonl,md}; nothing sent."
+  log "=== run $RUN_TS done (delta no-op: skipped $SKIPPED unchanged, $BASELINED baselined) ==="
+  exit 0
+fi
 
 # --- build the human summary (counts by class + the genuine/decision items) -
 {
   echo "# Task-spec drafter — shadow queue $RUN_TS"
   echo
-  echo "Source: ClickUp triage view \`$CLICKUP_VIEW_ID\` · processed $PROCESSED of $TOTAL · model=$DRAFTER_MODEL · mode=$DRAFTER_MODE · deterministic-gate escalations: $GATE_HITS"
+  echo "Source: ClickUp triage view \`$CLICKUP_VIEW_ID\` · queue $TOTAL · processed $PROCESSED new/changed · skipped $SKIPPED unchanged · baselined $BASELINED · model=$DRAFTER_MODEL · mode=$DRAFTER_MODE · deterministic-gate escalations: $GATE_HITS"
   echo
   echo "## Classification counts"
   echo

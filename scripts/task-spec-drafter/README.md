@@ -17,6 +17,11 @@ on verification (already done / stale / underspecified / deliberately-off).
 clawgate. **SHADOW by default** — it writes the queue + logs "would send" and
 **sends nothing, dispatches nothing, writes nothing** until you flip it on.
 
+**Continuous + cheap (delta-scoping).** It runs daily but only processes tickets
+that are **new or changed** since the last run, so a steady-state run costs a
+handful of `claude -p` passes, not the whole ~74-ticket queue. See
+[Delta-scoping](#delta-scoping-cheap-continuous-runs) below.
+
 ## What it does (per ticket — the validated pipeline)
 
 1. **ENRICH** — full body + ALL comments + status + created/last-activity (age) +
@@ -102,6 +107,41 @@ rejected: it blocks tool execution, so the model reasons from the title only —
 the exact failure mode this design exists to kill. Read-only is enforced by both
 the prompt's HARD CONSTRAINTS and the allowlist.
 
+## Delta-scoping (cheap continuous runs)
+
+The whole point of running daily is to triage **inbound deltas**, not re-grind the
+backlog. A processed-state cache makes each run cheap:
+
+- **State file:** `DRAFTER_STATE_FILE` (default `~/.claude/task-spec-drafter/processed.json`),
+  a flat map `{"<ticket_id>": "<date_updated_ms>"}`. ClickUp exposes `date_updated`
+  (and `date_created`) per task on the view fetch.
+- **Per run:** fetch the queue, then process a ticket **only if** it is **new**
+  (not in state) **or changed** (live `date_updated` strictly newer than the
+  stored value). **Unchanged tickets are skipped** (logged `skipped N unchanged`).
+  State is updated **after each ticket is handled** so the next run sees it.
+- **Successful classification → state updated.** An **ERROR/timeout/unparseable**
+  pass deliberately **leaves state untouched**, so that ticket is retried next
+  run rather than silently dropped.
+- **No-op short-circuit:** if nothing is new/changed, the run does **not** clobber
+  `latest.{jsonl,md}` with an empty file and sends nothing — it logs the no-op
+  and keeps the previous queue as your standing adjudication surface.
+- **Robustness:** a missing / empty / **corrupt** state file is treated as an
+  empty `{}` (it never crashes); a warning is logged if a present file was
+  unreadable. State is written atomically (`.tmp` + `mv`).
+
+### First-run behavior (important)
+
+On the **very first run** the state is empty. It does **NOT** process all ~74
+tickets. `DRAFTER_MAX_TICKETS` (default **25**) is the backstop: it processes up
+to that many new/changed tickets and **baselines the remainder** — records their
+current `date_updated` into state as "seen" **without running the model**. Those
+baselined tickets are then only processed on a later run **when they actually
+change**. This trades first-run completeness for cost safety: the backlog is
+treated as "already seen", and the tool earns its keep on the inbound deltas going
+forward. (If you *want* a full first-pass classification of the whole backlog, run
+once with a high/`0` cap deliberately — that is the expensive run the default
+avoids.)
+
 ## Run it
 
 ```bash
@@ -134,24 +174,63 @@ writes to ClickUp/repos/cluster. The clawgate notice is an informational
 `permission` card listing the action-worthy items (TASK / NEEDS-DECISION /
 VERIFY + any safety flags). Kill-switch: set `DRAFTER_MODE=off` or `shadow`.
 
-## Schedule
+## Persistent config
 
-Simplest mechanism on this (devrc) host = a **user systemd timer**, daily at
-09:15 local (before standup-triage's 10:30 slot):
+Install the persistent env once (the daily timer reads it; flips need no unit edit):
 
 ```bash
+cp /home/zach/workspace/devrc/scripts/task-spec-drafter/task-spec-drafter.env.example \
+   ~/.claude/task-spec-drafter.env
+# defaults: DRAFTER_MODE=shadow, DRAFTER_MODEL=haiku, DRAFTER_MAX_TICKETS=25
+```
+
+## Schedule (daily user systemd timer + linger)
+
+Mechanism on this (devrc) host = a **user systemd timer**, daily at 09:15 local
+(before standup-triage's 10:30 slot). This host runs **headless / server-mode**,
+so a *user* timer needs **lingering** enabled or the user session won't be up to
+fire it:
+
+```bash
+loginctl enable-linger zach                              # user units run without a login session
+
 mkdir -p ~/.config/systemd/user
 ln -sf /home/zach/workspace/devrc/scripts/task-spec-drafter/systemd/task-spec-drafter.service ~/.config/systemd/user/
 ln -sf /home/zach/workspace/devrc/scripts/task-spec-drafter/systemd/task-spec-drafter.timer   ~/.config/systemd/user/
 systemctl --user daemon-reload
 systemctl --user enable --now task-spec-drafter.timer
-systemctl --user list-timers task-spec-drafter.timer     # confirm next run
+systemctl --user list-timers task-spec-drafter.timer     # confirm next fire time
 ```
 
-(NB: this host currently runs headless / server-mode; a *user* timer needs the
-user session/linger active — `loginctl enable-linger zach` — or run it from the
-graphical session. The timer is shadow-by-default so enabling it changes nothing
-until `DRAFTER_MODE=on`.)
+The timer is **shadow-by-default**, so enabling it changes nothing externally
+until `DRAFTER_MODE=on`. Delta-scoping keeps the daily run cheap (a handful of
+tickets), and the first scheduled run baselines the backlog (see
+[First-run behavior](#first-run-behavior-important)).
+
+### NixOS note (why imperative, not home-manager — yet)
+
+This is NixOS, but the timer is installed **imperatively** (`systemctl --user
+enable`, which symlinks the unit) **on purpose**: this is an experimental shadow
+tool and the imperative path is reversible and zero-commitment. **Do not bake it
+into `nix/home-manager` yet** — it isn't proven. The productionization step, once
+shadow proves out, is `systemd.user.services`/`systemd.user.timers` in the
+home-manager config (declarative, with `services.<…>` units pointing at this same
+`drafter.sh`), plus moving `~/.claude/task-spec-drafter.env` into a managed file.
+That's the "graduate to declarative" task, deferred until the adjudication ratio
+justifies it.
+
+### Disable / kill-switch
+
+```bash
+systemctl --user disable --now task-spec-drafter.timer   # stop scheduling
+rm -f ~/.config/systemd/user/task-spec-drafter.{service,timer}
+systemctl --user daemon-reload
+loginctl disable-linger zach                              # ONLY if no other user units need linger
+# soft kill (keep timer, run nothing): set DRAFTER_MODE=off in ~/.claude/task-spec-drafter.env
+```
+
+(Heads-up: other user services may rely on linger — only `disable-linger` if this
+timer was the reason it was turned on.)
 
 **Prod path (alternative, documented not built):** the deployed `standup-triage`
 CronJob is the natural home for an in-cluster version (same ClickUp view, same
@@ -203,10 +282,18 @@ trust-history does.
   the adjudication ratio for graduation must be tracked manually (or built next:
   record drafts → later read whether Zach acted on each). Until then,
   "graduation" is a human judgement over the shadow log.
-- **No de-dup across runs.** Re-runs re-classify the whole queue (cost + the
-  same items resurface). standup-triage's `<!-- marker -->` idempotency is not
-  ported (it can't write the marker — read-only). A run-to-run "already
-  classified this ticket-version" cache is the obvious next addition.
+- **Delta-scoping is by `date_updated`, not content.** A run reprocesses a ticket
+  whenever its ClickUp `date_updated` advances — which includes *any* edit (a
+  one-word comment, a label change), not just semantically meaningful ones. So an
+  active ticket can be reprocessed on consecutive days. That's the conservative
+  choice (don't miss a real change); the cost is occasional redundant passes. It
+  does **not** diff content or hash the ticket.
+- **First-run baseline hides the backlog.** Per the default, the first run only
+  classifies `DRAFTER_MAX_TICKETS` and marks the rest "seen" without ever looking
+  at them — so a backlog ticket that was *already* a genuine TASK at install time
+  is **not** surfaced until it next changes. This is deliberate (cost), but it
+  means the shadow queue reflects **inbound deltas**, not a full backlog audit.
+  Run once with a high cap if you want the one-time full pass.
 - **clawgate notice shape.** In `on` mode the summary arrives as a `permission`
   card (same path as audit-on-push) — it leaves a card to clear and is not yet a
   first-class "triage queue" surface in clawgate. Fine for v1; a dedicated tab is
