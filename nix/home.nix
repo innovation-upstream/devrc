@@ -50,15 +50,22 @@ in
 
           # hot singles
           { trigger = "dashbaord"; replace = "dashboard"; }
+          { trigger = "reocmmend"; replace = "recommend"; }
 
           # Workflows
           { trigger = ":whn"; replace = "write the handoff to continue in next session"; label = "Write handoff for next session"; search_terms = ["handoff" "session"]; }
-          { trigger = ":rau"; replace = "dispatch a subagent to audit the PR for risks, regressions, assumptions, gaps, bugs, issues, behaviour changes, leaks, second-order consequences"; label = "PR audit checklist tail"; search_terms = ["review" "audit" "pr" "risks" "regressions" "subagent"]; }
-          { trigger = ":rns"; replace = "recommend next steps, improvements, extension, evaluation, evolution, iteration"; label = "Recommend next steps & evolution"; search_terms = ["next" "recommend" "steps" "improvements" "extension" "evaluation" "evolution" "iteration"]; }
+          { trigger = ":rau"; replace = "dispatch a subagent to audit the PR for risks, regressions, assumptions, gaps, edge cases, bugs, issues, behaviour changes, leaks, second-order consequences"; label = "PR audit checklist tail"; search_terms = ["review" "audit" "pr" "risks" "regressions" "subagent"]; }
+          { trigger = ":rns"; replace = "recommend next steps"; label = "Recommend next steps"; search_terms = ["next" "recommend" "steps" "whats next"]; }
           { trigger = ":pst"; replace = "proceed, use subagent, ensure test coverage"; label = "Proceed with subagent + test coverage"; search_terms = ["proceed" "subagent" "test" "coverage" "dispatch" "yes"]; }
           { trigger = ":kickoff"; replace = "give me the kickoff message to copy paste to next session"; label = "Kickoff message for next session"; search_terms = ["kickoff" "kick off" "next session" "copy paste" "handoff" "message"]; }
-          { trigger = ":usd"; replace = "update the skills and project docs then write the handoff to proceed in next session"; label = "Update skills + docs + write handoff"; search_terms = ["update" "skill" "skills" "docs" "documentation" "handoff" "session"]; }
           { trigger = ":nday"; replace = "it's the next day, check"; label = "Next-day check-in"; search_terms = ["next day" "check" "days" "resume" "morning"]; }
+          { trigger = ":fhrs"; replace = "it's been a few hours, check"; label = "Few-hours check-in"; search_terms = ["hours" "check" "elapsed" "resume"]; }
+          { trigger = ":fdays"; replace = "it's been a few days, check"; label = "Few-days check-in"; search_terms = ["days" "check" "elapsed" "resume"]; }
+          { trigger = ":mdc"; replace = "merged and deployed, check"; label = "Merged and deployed, check"; search_terms = ["merged" "deployed" "check" "verify"]; }
+          { trigger = ":wn"; replace = "what's next"; label = "What's next"; search_terms = ["next" "whats next" "what next"]; }
+          { trigger = ":cont"; replace = "continue from where you left off."; label = "Continue from where you left off"; search_terms = ["continue" "resume" "left off"]; }
+          { trigger = ":pec"; replace = "push an empty commit"; label = "Push an empty commit"; search_terms = ["push" "empty" "commit" "trigger" "ci"]; }
+          { trigger = ":aep"; replace = "dispatch subagents to audit each PR for risks, regressions, assumptions, gaps, edge cases, bugs, issues, behaviour changes, leaks, second-order consequences"; label = "Audit each PR (one subagent per PR)"; search_terms = ["audit" "each" "prs" "subagents" "risks" "regressions" "review"]; }
 
           { trigger = ":cc"; replace = "${workspace}/civit/civitai "; label = "civitai main repo path"; search_terms = ["civitai" "repo" "web"]; }
           { trigger = ":cdp"; replace = "${workspace}/civit/datapacket-talos "; label = "civitai datapacket-talos path"; search_terms = ["civitai"]; }

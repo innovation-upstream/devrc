@@ -31,6 +31,10 @@
 #   on     — run + actually POST the triage summary to clawgate
 #
 # Other knobs:
+#   DRAFTER_MODEL         model for the headless claude -p pass (def haiku). Alias
+#                         (haiku|sonnet|opus) or full id. Haiku is the cheap shadow
+#                         default; the deterministic safety gate (below) compensates
+#                         for Haiku's measured intent-ambiguity blind spot.
 #   DRAFTER_MAX_TICKETS   cap tickets processed per run (def 0 = all)
 #   DRAFTER_TIMEOUT       seconds budget per ticket's claude -p call (def 240)
 #   DRAFTER_OUT_DIR       where shadow queues are written (def ~/.claude/task-spec-drafter)
@@ -53,6 +57,7 @@ DRAFTER_CONF="${DRAFTER_CONF_FILE:-$HOME/.claude/task-spec-drafter.env}"
 [ -f "$DRAFTER_CONF" ]  && { set -a; . "$DRAFTER_CONF"  2>/dev/null || true; set +a; }
 
 DRAFTER_MODE="${DRAFTER_MODE:-shadow}"
+DRAFTER_MODEL="${DRAFTER_MODEL:-haiku}"
 DRAFTER_MAX_TICKETS="${DRAFTER_MAX_TICKETS:-0}"
 DRAFTER_TIMEOUT="${DRAFTER_TIMEOUT:-240}"
 DRAFTER_OUT_DIR="${DRAFTER_OUT_DIR:-$HOME/.claude/task-spec-drafter}"
@@ -73,6 +78,67 @@ DRAFTER_ALLOWED_TOOLS="${DRAFTER_ALLOWED_TOOLS:-Read,Glob,Grep,WebFetch,Bash(nod
 
 mkdir -p "$DRAFTER_OUT_DIR" 2>/dev/null || true
 log() { printf '[%s] %s\n' "$(date '+%F %T')" "$*" | tee -a "$DRAFTER_LOG_FILE" >&2; }
+
+# === DETERMINISTIC SAFETY-ESCALATION GATE ==================================
+# Structural (regex/keyword) escalation that does NOT trust the model's
+# self-assessment. A measured test showed Haiku runs the verify tools fine but
+# lacks the judgment to flag intent-ambiguity (it confidently mis-drafted the
+# safety-critical "Civitai Link on .red" cert ticket as a high-confidence TASK
+# with no safety_flag; Opus correctly said NEEDS-DECISION). So for the dangerous
+# classes we pin the label in code, not in the prompt.
+#
+# Rule: scan the ticket text (title + body + comments) AND the model's own
+# verification/spec text. If it matches a RISK category, FORCE the record to
+# classification=NEEDS-DECISION, autonomy=needs-Zach, never auto-dispatch,
+# overriding whatever the model returned, and stamp safety_flag + gate_fired.
+#
+# Categories (word-boundary, case-insensitive). Tune the lists here.
+GATE_RE_SECURITY='\b(cert|certs|tls|ssl|mtls|mta-?sts|secret|secrets|token|tokens|credential|credentials|password|passwd|auth|authn|authz|rbac|vuln|vulnerability|cve|disclosure|exploit|x\.509|x509|\.red)\b'
+GATE_RE_MONEY='\b(buzz|currency|payment|payments|refund|refunds|withdraw|withdrawal|payout|payouts|billing|invoice|stripe|paypal|subscription|chargeback|wallet|merch)\b'
+GATE_RE_DESTRUCTIVE='\b(delete|deletes|deletion|drop|truncate|migration|migrations|rollback|restore|prod|production|scale ?down|scale-down|evict|eviction|wipe|purge|destroy|terraform destroy|drop table|force ?push)\b'
+
+# safety_gate <ticket_text_file> <model_json>  -> prints possibly-rewritten json
+# Returns the json on stdout. Sets nothing else.
+safety_gate() {
+  local txt_file="$1" json="$2"
+  # Combine ticket text with the model's verification/recommendation/spec so the
+  # gate sees both the raw inbound and whatever reality the model surfaced.
+  local model_text
+  model_text="$(printf '%s' "$json" | jq -r '[.title,.verification,.recommendation,.spec.goal,.spec.done]|map(select(.!=null))|join(" ")' 2>/dev/null)"
+  local scan
+  scan="$(printf '%s\n%s' "$(cat "$txt_file" 2>/dev/null)" "$model_text")"
+
+  local cats=""
+  printf '%s' "$scan" | grep -Eiq "$GATE_RE_SECURITY"     && cats="${cats}security/secrets, "
+  printf '%s' "$scan" | grep -Eiq "$GATE_RE_MONEY"        && cats="${cats}money, "
+  printf '%s' "$scan" | grep -Eiq "$GATE_RE_DESTRUCTIVE"  && cats="${cats}destructive/prod-mutation, "
+  cats="${cats%, }"
+
+  if [ -z "$cats" ]; then
+    # no risk match: pass through, just mark gate_fired=false for audit
+    printf '%s' "$json" | jq -c '. + {gate_fired:false}'
+    return 0
+  fi
+
+  # RISK match: force escalation, overriding the model. Preserve the model's
+  # original classification for audit (gate_override_from), blank the spec
+  # (it is no longer a dispatchable TASK), and stamp/extend the safety_flag.
+  printf '%s' "$json" | jq -c \
+    --arg cats "$cats" '
+      . as $orig
+      | .gate_fired = true
+      | .gate_categories = ($cats | split(", "))
+      | .gate_override_from = ($orig.classification // "?")
+      | .classification = "NEEDS-DECISION"
+      | (.confidence) = (if (.confidence=="high") then "medium" else (.confidence // "low") end)
+      | .spec = {goal:"",done:"",owner:(.spec.owner // ""),autonomy:"needs-Zach"}
+      | .recommendation = ((.recommendation // "") | if .=="" then "" else . + " " end) + "ESCALATED by deterministic safety gate (" + $cats + "): risk keywords present; needs Zach. Do NOT auto-dispatch."
+      | .safety_flag = (
+          (if (($orig.safety_flag // "")|length>0) then ($orig.safety_flag + " | ") else "" end)
+          + "deterministic gate fired [" + $cats + "]: structural risk match — intent must be verified by a human before any action (model self-assessment not trusted for these classes)."
+        )
+    '
+}
 
 RUN_TS="$(date '+%Y%m%dT%H%M%S')"
 QUEUE_JSONL="$DRAFTER_OUT_DIR/queue-$RUN_TS.jsonl"
@@ -98,7 +164,7 @@ command -v curl   >/dev/null 2>&1 || { log "FATAL: curl missing"; exit 1; }
 CU_TOKEN="$(node -e "const a=require('$CLICKUP_ACCOUNTS');const acc=a.accounts[a.defaultAccount];process.stdout.write(acc.apiToken)" 2>/dev/null)"
 [ -n "$CU_TOKEN" ] || { log "FATAL: could not read ClickUp token from $CLICKUP_ACCOUNTS"; exit 1; }
 
-log "=== run $RUN_TS mode=$DRAFTER_MODE view=$CLICKUP_VIEW_ID ==="
+log "=== run $RUN_TS mode=$DRAFTER_MODE model=$DRAFTER_MODEL view=$CLICKUP_VIEW_ID ==="
 
 # --- fetch the triage queue (paginated /view/<id>/task) --------------------
 fetch_queue() {
@@ -136,10 +202,22 @@ fi
 N=0; FAIL=0
 PROMPT_BODY="$(cat "$PROMPT_FILE")"
 
+GATE_HITS=0
+TICKET_TXT="$DRAFTER_OUT_DIR/.ticket-text.$$"
 while IFS=$'\t' read -r TID TSTATUS TNAME <&3; do
   [ -n "$TID" ] || continue
   N=$((N+1))
   log "[$N/$TOTAL] $TID  ($TSTATUS)  ${TNAME:0:60}"
+
+  # Gather the ticket text (title + body + comments) for the DETERMINISTIC safety
+  # gate. Read-only clickup CLI; failures degrade to title-only (the title still
+  # catches the .red cert + buzz/currency cases). This text is independent of the
+  # model — the gate must not depend on the model surfacing the risk.
+  {
+    printf '%s\n' "$TNAME"
+    node "$CLICKUP_CLI" get "$TID" 2>/dev/null
+    node "$CLICKUP_CLI" comments "$TID" --threads 2>/dev/null
+  } > "$TICKET_TXT" 2>/dev/null || printf '%s\n' "$TNAME" > "$TICKET_TXT"
 
   PROMPT="$PROMPT_BODY
 
@@ -170,14 +248,15 @@ Run the five-step pipeline on ticket $TID now and output ONLY the json block."
   RAW="$(timeout "$DRAFTER_TIMEOUT" \
     env KUBECONFIG="$PROD_KUBECONFIG" \
     claude -p "$PROMPT" \
+      --model "$DRAFTER_MODEL" \
       --allowedTools "$DRAFTER_ALLOWED_TOOLS" \
       </dev/null 2>>"$DRAFTER_LOG_FILE")"
   RC=$?
   if [ $RC -ne 0 ]; then
     log "  ! claude rc=$RC (timeout/error) — emitting error record"
-    jq -nc --arg id "$TID" --arg t "$TNAME" --arg s "$TSTATUS" \
-      '{ticket_id:$id,title:$t,status:$s,classification:"ERROR",confidence:"low",verification:"claude pass failed (timeout/error)",correlations:[],recommendation:"re-run",spec:{goal:"",done:"",owner:"",autonomy:""},safety_flag:""}' \
-      >> "$QUEUE_JSONL"
+    ERR_JSON="$(jq -nc --arg id "$TID" --arg t "$TNAME" --arg s "$TSTATUS" \
+      '{ticket_id:$id,title:$t,status:$s,classification:"ERROR",confidence:"low",verification:"claude pass failed (timeout/error)",correlations:[],recommendation:"re-run",spec:{goal:"",done:"",owner:"",autonomy:""},safety_flag:""}')"
+    safety_gate "$TICKET_TXT" "$ERR_JSON" >> "$QUEUE_JSONL"
     FAIL=$((FAIL+1))
     continue
   fi
@@ -187,26 +266,37 @@ Run the five-step pipeline on ticket $TID now and output ONLY the json block."
     /```json/{f=1;next} /```/{if(f){f=0}} f{print}')"
   [ -n "$JSON" ] || JSON="$(printf '%s' "$RAW" | sed -n '/^[[:space:]]*{/,/^[[:space:]]*}[[:space:]]*$/p')"
   if printf '%s' "$JSON" | jq -e . >/dev/null 2>&1; then
-    printf '%s' "$JSON" | jq -c --arg id "$TID" '. + {ticket_id:$id}' >> "$QUEUE_JSONL"
-    CLS="$(printf '%s' "$JSON" | jq -r '.classification // "?"')"
-    log "  -> $CLS"
+    # Normalize, then run the DETERMINISTIC safety gate (overrides the model for
+    # risk classes — Haiku's self-assessment is not trusted here).
+    NORM="$(printf '%s' "$JSON" | jq -c --arg id "$TID" '. + {ticket_id:$id}')"
+    MODEL_CLS="$(printf '%s' "$NORM" | jq -r '.classification // "?"')"
+    GATED="$(safety_gate "$TICKET_TXT" "$NORM")"
+    printf '%s\n' "$GATED" >> "$QUEUE_JSONL"
+    if [ "$(printf '%s' "$GATED" | jq -r '.gate_fired')" = "true" ]; then
+      GATE_HITS=$((GATE_HITS+1))
+      GCATS="$(printf '%s' "$GATED" | jq -r '.gate_categories|join(",")')"
+      log "  -> $MODEL_CLS  ⛔ GATE FIRED [$GCATS] -> forced NEEDS-DECISION (needs-Zach)"
+    else
+      log "  -> $MODEL_CLS"
+    fi
   else
     log "  ! unparseable output — emitting error record"
-    jq -nc --arg id "$TID" --arg t "$TNAME" --arg s "$TSTATUS" \
-      '{ticket_id:$id,title:$t,status:$s,classification:"ERROR",confidence:"low",verification:"unparseable claude output",correlations:[],recommendation:"re-run",spec:{goal:"",done:"",owner:"",autonomy:""},safety_flag:""}' \
-      >> "$QUEUE_JSONL"
+    ERR_JSON="$(jq -nc --arg id "$TID" --arg t "$TNAME" --arg s "$TSTATUS" \
+      '{ticket_id:$id,title:$t,status:$s,classification:"ERROR",confidence:"low",verification:"unparseable claude output",correlations:[],recommendation:"re-run",spec:{goal:"",done:"",owner:"",autonomy:""},safety_flag:""}')"
+    safety_gate "$TICKET_TXT" "$ERR_JSON" >> "$QUEUE_JSONL"
     FAIL=$((FAIL+1))
   fi
 done 3<<< "$QUEUE_TSV"
+rm -f "$TICKET_TXT" 2>/dev/null || true
 
 PROCESSED="$N"
-log "processed=$PROCESSED parse_failures=$FAIL queue=$QUEUE_JSONL"
+log "processed=$PROCESSED parse_failures=$FAIL gate_escalations=$GATE_HITS queue=$QUEUE_JSONL"
 
 # --- build the human summary (counts by class + the genuine/decision items) -
 {
   echo "# Task-spec drafter — shadow queue $RUN_TS"
   echo
-  echo "Source: ClickUp triage view \`$CLICKUP_VIEW_ID\` · processed $PROCESSED of $TOTAL · mode=$DRAFTER_MODE"
+  echo "Source: ClickUp triage view \`$CLICKUP_VIEW_ID\` · processed $PROCESSED of $TOTAL · model=$DRAFTER_MODEL · mode=$DRAFTER_MODE · deterministic-gate escalations: $GATE_HITS"
   echo
   echo "## Classification counts"
   echo

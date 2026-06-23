@@ -35,6 +35,45 @@ clawgate. **SHADOW by default** — it writes the queue + logs "would send" and
    flags `NEEDS-DECISION` rather than draft a confident, possibly-harmful task
    (the meili-cron lesson). Drafting is gated behind verification, by construction.
 
+## Model + the deterministic safety-escalation gate
+
+The per-ticket reasoning pass runs on **Haiku by default** (`DRAFTER_MODEL=haiku`;
+override to `sonnet`/`opus` or a full id). Haiku is ~cents not dollars per ticket.
+
+**Why a structural gate is mandatory.** A measured test showed Haiku runs the
+verify tools fine but **lacks the judgment to flag intent-ambiguity**: it
+confidently mis-drafted the safety-critical "Civitai Link on `.red`" cert ticket
+as a high-confidence `TASK` with **no** `safety_flag` (Opus correctly said
+`NEEDS-DECISION`), and missed it even with more tool turns. So we **do not trust
+the model's self-assessment** for the dangerous classes. The fix is structural
+(code), not prompt/model.
+
+**What the gate does** (`safety_gate()` in `drafter.sh`). After the model emits
+its record, a deterministic step scans the **ticket text (title + body + all
+comments) AND the model's own verification/spec text** for risk keywords
+(word-boundary, case-insensitive). If any RISK category matches, it **overrides
+the model**: forces `classification = NEEDS-DECISION`, `spec.autonomy =
+needs-Zach`, blanks the dispatchable spec, downgrades a `high` confidence to
+`medium`, and stamps `safety_flag` + audit fields (`gate_fired`,
+`gate_categories`, `gate_override_from`). It runs independently of what the model
+returned — even an `ERROR`/timeout record passes through it.
+
+Risk categories (tune the regexes at the top of `drafter.sh`):
+
+| Category | Keywords (abbrev.) |
+|---|---|
+| **security/secrets** | cert, tls, ssl, mtls, mta-sts, secret, token, credential, password, auth, authn/authz, rbac, vuln, cve, disclosure, exploit, x509, `.red` |
+| **money** | buzz, currency, payment, refund, withdraw, payout, billing, invoice, stripe, paypal, subscription, chargeback, wallet, merch |
+| **destructive/prod-mutation** | delete, drop, truncate, migration, rollback, restore, prod/production, scale down, evict, wipe, purge, destroy, drop table, force push |
+
+The gate is intentionally **conservative (escalate-on-touch)**: `migration` /
+`delete` / `prod` are common dev words, so the destructive category fires often.
+That bias is the point — a false escalation costs one human glance; a false
+auto-dispatch on a `.red`-cert / Blue-Buzz-currency / prod-`delete` ticket is the
+harm this exists to prevent. Verified to catch both Opus-safety-rule cases (the
+`.red` cert ticket → security, the Blue-Buzz currency ticket → money) **even
+though Haiku alone did not flag them.**
+
 ## Files (all in devrc — harness artifacts, NOT a project repo)
 
 | File | Purpose |
