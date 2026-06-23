@@ -4,6 +4,15 @@
   autocd = true;
   dotDir = config.home.homeDirectory + "/.config/zsh";
   enableCompletion = true;
+
+  # MUST live in .zshenv (via envExtra), not just .zshrc/initContent: NON-interactive
+  # shells (Claude Code's Bash tool runs `zsh -c`) source .zshenv only. Without this,
+  # every unmatched glob (`grep --include=*.go`, `ls /tmp/foo* 2>/dev/null`) aborts the
+  # command with "no matches found" — the single largest source of session command errors.
+  envExtra = ''
+    unsetopt nomatch
+  '';
+
   initContent = let
     zshRc = builtins.readFile ../../../.zshrc;
     hasDevRc = builtins.pathExists "${config.home.homeDirectory}/.devrc";
