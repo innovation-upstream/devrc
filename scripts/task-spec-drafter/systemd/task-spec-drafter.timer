@@ -1,0 +1,14 @@
+# Daily run, ~09:15 local, a bit before standup-triage's 10:30 slot so the queue
+# is fresh when you glance at it. Persistent=true catches up if the machine was
+# off at the scheduled time (it's a daily cadence; nothing auto-dispatches).
+[Unit]
+Description=Daily timer for the deep-context task-spec drafter
+
+[Timer]
+OnCalendar=*-*-* 09:15:00
+Persistent=true
+RandomizedDelaySec=300
+Unit=task-spec-drafter.service
+
+[Install]
+WantedBy=timers.target

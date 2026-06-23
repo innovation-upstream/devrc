@@ -1,0 +1,28 @@
+# task-spec-drafter — deep-context ClickUp triage drafter (SHADOW-first).
+#
+# Install (user service, no root):
+#   mkdir -p ~/.config/systemd/user
+#   ln -sf /home/zach/workspace/devrc/scripts/task-spec-drafter/systemd/task-spec-drafter.service ~/.config/systemd/user/
+#   ln -sf /home/zach/workspace/devrc/scripts/task-spec-drafter/systemd/task-spec-drafter.timer   ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now task-spec-drafter.timer
+#
+# Run once on demand:  systemctl --user start task-spec-drafter.service
+# Watch logs:          journalctl --user -u task-spec-drafter.service -f
+#                      (also tee'd to ~/.claude/task-spec-drafter/drafter.log)
+#
+# Default mode is shadow (sends nothing). Flip to live by setting DRAFTER_MODE=on
+# in ~/.claude/task-spec-drafter.env — no unit change needed.
+[Unit]
+Description=Deep-context task-spec drafter (ClickUp triage, shadow-first)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# Adjust the path if devrc lives elsewhere on this host.
+ExecStart=/home/zach/workspace/devrc/scripts/task-spec-drafter/drafter.sh
+# Long because each ticket runs a headless claude pass; the timer is daily so an
+# occasional long run is fine. Tune down via DRAFTER_MAX_TICKETS for cheap runs.
+TimeoutStartSec=3600
+Nice=10
