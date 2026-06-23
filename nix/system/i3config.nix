@@ -62,7 +62,8 @@ bindsym $mod+Shift+Right move right
 bindsym $mod+f fullscreen toggle
 
 # Layouts
-bindsym $mod+w layout tabbed
+# tabbed moved off $mod+w (was) so Alt+w passes through to tmux scratch11 (Wheat)
+bindsym $mod+Shift+t layout tabbed
 bindsym $mod+e layout toggle split
 bindsym $mod+equal exec --no-startup-id ~/workspace/devrc/scripts/i3-grid
 
