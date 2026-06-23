@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Scratch slot indicator for tmux status-left.
-# Renders the 6 scratch slots as their hotkey letter, colored to match the
+# Renders the 12 scratch slots as their hotkey letter, colored to match the
 # popup border color set in .tmux.conf, so the status bar acts as a legend
 # mapping popup color -> hotkey.
 #
@@ -30,7 +30,7 @@ tmux list-sessions -F '#{session_name}' 2>/dev/null \
   | awk -v waiting="$waiting" '
     BEGIN {
         # slot key : session : color (matches popup -s border color in .tmux.conf)
-        n = split("scratch:g:#b8bb26 scratch2:G:#d79921 scratch3:v:#b16286 scratch4:V:#83a598 scratch5:p:#cc241d scratch6:P:#689d6a", slots, " ")
+        n = split("scratch:g:#b8bb26 scratch2:G:#d79921 scratch3:v:#b16286 scratch4:V:#83a598 scratch5:p:#cc241d scratch6:P:#689d6a scratch7:o:#fe8019 scratch8:O:#d3869b scratch9:n:#458588 scratch10:N:#928374 scratch11:w:#ebdbb2 scratch12:W:#af3a03", slots, " ")
         for (i = 1; i <= n; i++) {
             split(slots[i], p, ":")
             sess[i]      = p[1]

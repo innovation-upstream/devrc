@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# Monitor popup: live HUD of the last N lines from all 6 scratch sessions.
+# Monitor popup: live HUD of the last N lines from all 12 scratch sessions.
 # Bound to Alt+m. Auto-refreshes every REFRESH seconds. Dismiss with q/Esc.
 #
 # Each section renders:
 #   ── grove                    (header in slot color; dim if session not started)
 #   <last per_section lines of capture-pane>
 #
-# Per-section line count adapts to popup height so all 6 fit without scroll.
+# Per-section line count adapts to popup height so all slots fit without scroll.
 
 REFRESH=${REFRESH:-2}
 
@@ -18,6 +18,12 @@ SLOTS=(
     "V:scratch4:#83a598:Vapor"
     "p:scratch5:#cc241d:poppy"
     "P:scratch6:#689d6a:Pool"
+    "o:scratch7:#fe8019:Orange"
+    "O:scratch8:#d3869b:Orchid"
+    "n:scratch9:#458588:Navy"
+    "N:scratch10:#928374:Nickel"
+    "w:scratch11:#ebdbb2:Wheat"
+    "W:scratch12:#af3a03:Walnut"
 )
 
 hex_to_rgb() {
@@ -26,13 +32,14 @@ hex_to_rgb() {
 }
 
 render() {
-    local rows cols per_section
+    local rows cols per_section nslots
     rows=$(tput lines 2>/dev/null || echo 40)
     cols=$(tput cols 2>/dev/null || echo 80)
+    nslots=${#SLOTS[@]}
 
     # Reserve 1 header line + 1 blank line per section + 1 footer line.
-    # Available content = rows - (6 headers + 6 blanks + 1 footer) = rows - 13
-    per_section=$(( (rows - 13) / 6 ))
+    # Available content = rows - (nslots headers + nslots blanks + 1 footer)
+    per_section=$(( (rows - (2 * nslots + 1)) / nslots ))
     [[ $per_section -lt 2 ]] && per_section=2
 
     printf '\033[H\033[2J'  # clear + home
