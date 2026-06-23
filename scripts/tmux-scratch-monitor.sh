@@ -18,11 +18,11 @@ SLOTS=(
     "V:scratch4:#83a598:Vapor"
     "p:scratch5:#cc241d:poppy"
     "P:scratch6:#689d6a:Pool"
-    "o:scratch7:#fe8019:Orange"
+    "o:scratch7:#fe8019:orange"
     "O:scratch8:#d3869b:Orchid"
-    "n:scratch9:#458588:Navy"
+    "n:scratch9:#458588:navy"
     "N:scratch10:#928374:Nickel"
-    "w:scratch11:#ebdbb2:Wheat"
+    "w:scratch11:#ebdbb2:wheat"
     "W:scratch12:#af3a03:Walnut"
 )
 
