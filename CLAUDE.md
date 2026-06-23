@@ -8,7 +8,8 @@ Personal dev-environment config (zsh, tmux, neovim, i3, scripts) for the workben
 - Use `git -C <path>` and absolute paths — never `cd <repo> && …` (triggers approval prompts and can run untrusted hooks).
 
 ## Applying changes
-- **Apply config:** `home-manager switch --flake ~/workspace/devrc --impure` (allowlisted). This is how you validate a Nix edit end-to-end.
+- **Deploy to BOTH hosts (after merge):** `scripts/ship.sh` — converges workbench + laptop to `origin/main` (stash → ff-pull → `home-manager switch` → pop → verify HEAD==origin/main) in one idempotent call. Use this instead of hand-running the per-host dance; `--no-laptop`/`--no-local` to scope. Covers home-manager only (not `sudo nixos-rebuild`).
+- **Apply config (single host):** `home-manager switch --flake ~/workspace/devrc --impure` (allowlisted). This is how you validate a Nix edit end-to-end.
 - **Quick syntax check** before switching: `nix-instantiate --parse <file>.nix >/dev/null`.
 - **NEVER `sudo nixos-rebuild` from Claude** — can't sudo non-interactively. System-level changes must be staged as an apply script for the user to run (see the `laptop` skill's `stage-system` pattern). home-manager (user-level) is fine.
 
