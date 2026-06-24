@@ -36,8 +36,10 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 # spool_emit lives in the sibling keylog/ dir (single source of truth for the
-# v1 line format). Add it to the path.
-_HERE = Path(__file__).resolve().parent
+# v1 line format). Use the INVOKED path — do NOT .resolve(): home-manager
+# symlinks each deployed file to a flat /nix/store object, so resolving discards
+# the browser-ext/ ↔ keylog/ sibling layout and breaks this import at runtime.
+_HERE = Path(__file__).parent
 sys.path.insert(0, str(_HERE.parent / "keylog"))
 import spool_emit as SE  # noqa: E402
 
