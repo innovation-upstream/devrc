@@ -189,6 +189,20 @@ in
     executable = true;
   };
 
+  # Global Claude Code behavioural config — single source of truth for both
+  # hosts (these were drifting when edited per-host). Synced via scripts/ship.sh.
+  # NOTE: now read-only symlinks into the nix store → edit `devrc/claude/*.md`
+  # then `home-manager switch` (or ship.sh), NOT `~/.claude/*.md` directly.
+  # CLAUDE.md and skills/ stay per-host/mutable (host-specific + frequently edited).
+  home.file.".claude/RULES.md" = {
+    source = ../claude/RULES.md;
+    force = true;  # overwrite the pre-existing unmanaged file on first switch
+  };
+  home.file.".claude/PRINCIPLES.md" = {
+    source = ../claude/PRINCIPLES.md;
+    force = true;
+  };
+
   systemd.user.services.cpu-monitor = {
     Unit = {
       Description = "Desktop alert on sustained high CPU load";

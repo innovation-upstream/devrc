@@ -19,6 +19,7 @@ Personal dev-environment config (zsh, tmux, neovim, i3, scripts) for the workben
 ## Layout
 - `nix/` — home-manager modules (`programs/zsh`, tmux, nvim, i3, …). `flake.nix` at root.
 - `scripts/` — utility scripts (prefer extending these over re-typing inline bash / heredocs).
+- `claude/` — **global Claude Code config managed declaratively** (`RULES.md`, `PRINCIPLES.md`). `nix/home.nix` symlinks these to `~/.claude/` via `home.file`, so both hosts stay in sync (they were drifting when edited per-host). **Edit `claude/*.md` here + `home-manager switch`/`ship.sh` — NOT `~/.claude/*.md` (it's a read-only nix-store symlink).** New-host caveat: `home.file.force` does NOT clobber a pre-existing *foreign* `~/.claude/RULES.md`; `rm` it once before the first switch. (`~/.claude/CLAUDE.md` and `skills/` stay per-host — host-specific + frequently edited in place.)
 - `.zshrc`, `.tmux.conf` etc. are read by the nix modules — read with offset/limit, they're large.
 
 ## Conventions
