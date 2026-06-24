@@ -1,0 +1,69 @@
+#!/usr/bin/env bash
+# emit — activity-telemetry hot-path helper.
+#
+# Appends ONE event to the local spool. This runs on EVERY interactive shell
+# command (and later on keystrokes), so it must be near-zero overhead: pure
+# shell, NO python/jq/interpreter startup. The daemon (collector.py) does all
+# JSON assembly + ClickHouse formatting; emit just records a robustly-escaped
+# line.
+#
+# Spool/emit contract (v1) — see scripts/collector/README is the daemon parser:
+#   * Spool dir:     $ACTIVITY_SPOOL_DIR  (default ~/.local/state/activity/spool)
+#   * Current file:  <spool>/current.log   (writer appends; daemon rotates it)
+#   * One event per line. A line is TAB-separated key=value pairs:
+#         v1<TAB>ts=<ms-iso><TAB>source=<s><TAB>kind=<k><TAB>b64:text=<b64>...
+#   * Keys whose name is prefixed `b64:` carry a base64-encoded value, so the
+#     free-text fields (text/command/cwd/app/session/project/payload) can hold
+#     ARBITRARY bytes — quotes, backslashes, newlines, tabs, unicode — with no
+#     escaping ambiguity. Plain (non-b64) keys are restricted to safe scalars
+#     produced here (ts, source, kind, integers).
+#   * Append is atomic: a single `printf >>` of a <PIPE_BUF (4096B) line on a
+#     local fs is written atomically with O_APPEND, so concurrent shells never
+#     interleave. Lines exceeding that are still safe for the common case and
+#     the daemon tolerates a torn tail (it re-queues unparseable lines once).
+#
+# Usage (called from zsh/tmux hooks):
+#   emit source=zsh kind=command \
+#        b64:text="$cmd" b64:cwd="$PWD" \
+#        duration_ms=123 exit_code=0 \
+#        b64:project="$proj" b64:session="$sess" b64:app="$app"
+#
+# Any key=value is accepted; the daemon maps known keys to ClickHouse columns
+# and bundles the rest into `payload`. `ts` and `host` are auto-filled if absent.
+
+set -u
+
+SPOOL_DIR="${ACTIVITY_SPOOL_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/activity/spool}"
+CUR="$SPOOL_DIR/current.log"
+
+# Bounded best-effort: never let telemetry break an interactive shell.
+mkdir -p "$SPOOL_DIR" 2>/dev/null || exit 0
+
+# Millisecond timestamp in ClickHouse DateTime64(3) local format.
+_ts() { date +"%Y-%m-%d %H:%M:%S.%3N"; }
+
+line="v1"
+have_ts=0
+have_host=0
+
+for kv in "$@"; do
+    key="${kv%%=*}"
+    val="${kv#*=}"
+    case "$key" in
+        b64:*)
+            # base64 (no wrap) the value so arbitrary bytes survive.
+            enc=$(printf '%s' "$val" | base64 | tr -d '\n')
+            line="$line	$key=$enc"
+            ;;
+        ts) have_ts=1; line="$line	ts=$val" ;;
+        host) have_host=1; line="$line	host=$val" ;;
+        *) line="$line	$key=$val" ;;
+    esac
+done
+
+[ "$have_ts" -eq 0 ] && line="$line	ts=$(_ts)"
+[ "$have_host" -eq 0 ] && line="$line	host=${HOST:-$(hostname)}"
+
+# Atomic append. Single printf of one newline-terminated line.
+printf '%s\n' "$line" >>"$CUR" 2>/dev/null || exit 0
+exit 0

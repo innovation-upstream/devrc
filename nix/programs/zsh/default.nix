@@ -26,6 +26,59 @@
     # `grep --include=*.go` or `ls /tmp/foo* 2>/dev/null` with "no matches found".
     unsetopt nomatch
 
+    # ── activity telemetry (interactive only) ───────────────────────────────
+    # preexec/precmd capture each HUMAN command + its duration/exit-code and
+    # `emit` an event to the local spool (the collector daemon ships it to
+    # ClickHouse). These live in initContent / .zshrc — interactive shells only.
+    # Claude Code's Bash tool runs NON-interactive `zsh -c` (sources .zshenv
+    # only), so the agent's own commands are correctly EXCLUDED from the log.
+    # The hot path is pure shell (no python/jq): `emit` does an atomic >> append.
+    ACTIVITY_EMIT="${config.home.homeDirectory}/.config/activity-collector/emit"
+    if [[ -x "$ACTIVITY_EMIT" ]]; then
+      autoload -Uz add-zsh-hook
+
+      _activity_preexec() {
+        _ACTIVITY_CMD="$1"
+        _ACTIVITY_START=$EPOCHREALTIME    # float seconds; zsh/datetime
+        _ACTIVITY_CWD="$PWD"
+      }
+
+      _activity_precmd() {
+        local ec=$?
+        [[ -z "$_ACTIVITY_CMD" ]] && return
+        local dur_ms=0
+        if [[ -n "$_ACTIVITY_START" ]]; then
+          dur_ms=$(( (EPOCHREALTIME - _ACTIVITY_START) * 1000 ))
+          dur_ms=''${dur_ms%.*}
+          (( dur_ms < 0 )) && dur_ms=0
+        fi
+        # project = git repo basename (or cwd basename fallback), else "".
+        local proj=""
+        local root
+        root=$(command git -C "$_ACTIVITY_CWD" rev-parse --show-toplevel 2>/dev/null)
+        [[ -n "$root" ]] && proj="''${root:t}"
+        # session = tmux session:window.pane if in tmux, else shell-PID.
+        local sess
+        if [[ -n "$TMUX" ]]; then
+          sess=$(command tmux display-message -p '#S:#I.#P' 2>/dev/null)
+        fi
+        [[ -z "$sess" ]] && sess="sh-$$"
+        "$ACTIVITY_EMIT" \
+          source=zsh kind=command \
+          "b64:text=$_ACTIVITY_CMD" "b64:cwd=$_ACTIVITY_CWD" \
+          "duration_ms=$dur_ms" "exit_code=$ec" \
+          "b64:project=$proj" "b64:session=$sess" \
+          "b64:app=''${TERM_PROGRAM:-''${TERM:-}}" &!
+        _ACTIVITY_CMD=""
+        _ACTIVITY_START=""
+      }
+
+      # EPOCHREALTIME needs zsh/datetime.
+      zmodload zsh/datetime 2>/dev/null
+      add-zsh-hook preexec _activity_preexec
+      add-zsh-hook precmd  _activity_precmd
+    fi
+
     PROMPT='%{$fg_bold[white]%}%c%{$reset_color%} $(git_prompt_info)'
 
     ZSH_THEME_GIT_PROMPT_PREFIX="%{$fg[green]%}"
