@@ -1,0 +1,12 @@
+{
+  "manifest_version": 3,
+  "name": "Activity Collector (browser)",
+  "version": "1.0.0",
+  "description": "Self-instrumentation: reports active tab URL/title, active-duration, and focus/idle transitions to a localhost activity collector. Full URL capture, local-only.",
+  "permissions": ["tabs", "webNavigation", "idle", "storage"],
+  "host_permissions": ["http://127.0.0.1:8787/*"],
+  "background": {
+    "service_worker": "service_worker.js",
+    "type": "module"
+  }
+}

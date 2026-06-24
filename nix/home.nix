@@ -220,6 +220,20 @@ in
     executable = true;
   };
 
+  # GUI activity collectors (keylogger + browser receiver). The whole module
+  # dir is symlinked recursively so the daemons can import their sibling modules
+  # (keymap/chunker/winctx/spool_emit). The browser receiver reuses keylog's
+  # spool_emit (single source of truth for the v1 line format), so keylog/ must
+  # be present even on a browser-only host.
+  home.file.".config/activity-collector/keylog" = {
+    source = ../scripts/collector/keylog;
+    recursive = true;
+  };
+  home.file.".config/activity-collector/browser-ext" = {
+    source = ../scripts/collector/browser-ext;
+    recursive = true;
+  };
+
   # Global Claude Code behavioural config — single source of truth for both
   # hosts (these were drifting when edited per-host). Synced via scripts/ship.sh.
   # NOTE: now read-only symlinks into the nix store → edit `devrc/claude/*.md`
@@ -277,6 +291,62 @@ in
       ];
       EnvironmentFile = "-%h/.config/activity-collector/env";
       ExecStart = "${pkgs.python312}/bin/python3 %h/.config/activity-collector/collector.py";
+      Restart = "always";
+      RestartSec = 10;
+    };
+    Install = {
+      WantedBy = [ "default.target" ];
+    };
+  };
+
+  # X11 full-content keystroke collector. Captures globally via the RECORD
+  # extension (python-xlib) as the logged-in user — needs the X session, so it
+  # is gated on graphical-session.target (NOT started in headless/server mode).
+  # Writes typing units into the same spool the activity-collector ships.
+  # NOTE: staged but NOT enabled here; enablement is a deliberate converge step.
+  systemd.user.services.keylog = {
+    Unit = {
+      Description = "X11 full-content keystroke collector → activity spool";
+      # Requires a live X session (RECORD + active-window context).
+      After = [ "graphical-session.target" ];
+      PartOf = [ "graphical-session.target" ];
+    };
+    Service = {
+      Type = "simple";
+      # python3 WITH python-xlib (the X RECORD plumbing). DISPLAY is borrowed
+      # from the running session; i3 is not systemd-integrated, so import the
+      # graphical env if available.
+      Environment = [
+        "PATH=${lib.makeBinPath [ (pkgs.python312.withPackages (ps: [ ps.xlib ])) pkgs.coreutils ]}"
+      ];
+      ExecStart = "${pkgs.python312.withPackages (ps: [ ps.xlib ])}/bin/python3 %h/.config/activity-collector/keylog/keylog.py";
+      Restart = "always";
+      RestartSec = 10;
+    };
+    Install = {
+      WantedBy = [ "graphical-session.target" ];
+    };
+  };
+
+  # Browser-activity receiver: localhost HTTP bridge that the MV3 extension
+  # POSTs to; writes browser nav/focus events into the activity spool. Loopback
+  # only, stdlib-only python. No X dependency (the extension lives in the
+  # browser), but it is only useful alongside a running browser, so it tracks
+  # default.target like the collector. Staged but NOT enabled.
+  systemd.user.services.browser-activity-receiver = {
+    Unit = {
+      Description = "Browser-activity receiver (localhost → activity spool)";
+      After = [ "network.target" ];
+    };
+    Service = {
+      Type = "simple";
+      Environment = [
+        "PATH=${lib.makeBinPath [ pkgs.python312 pkgs.coreutils ]}"
+        # Bind loopback only; keep off any external interface.
+        "BROWSER_RECEIVER_HOST=127.0.0.1"
+        "BROWSER_RECEIVER_PORT=8787"
+      ];
+      ExecStart = "${pkgs.python312}/bin/python3 %h/.config/activity-collector/browser-ext/receiver.py";
       Restart = "always";
       RestartSec = 10;
     };
