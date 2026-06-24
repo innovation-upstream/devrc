@@ -39,8 +39,10 @@ CUR="$SPOOL_DIR/current.log"
 # Bounded best-effort: never let telemetry break an interactive shell.
 mkdir -p "$SPOOL_DIR" 2>/dev/null || exit 0
 
-# Millisecond timestamp in ClickHouse DateTime64(3) local format.
-_ts() { date +"%Y-%m-%d %H:%M:%S.%3N"; }
+# Millisecond timestamp for the tz-less ClickHouse DateTime64(3), as the UTC
+# instant — so now()/Grafana $__timeFilter range comparisons (UTC) align.
+# (Hour-of-day is bucketed back to local tz in the dashboard queries.)
+_ts() { date -u +"%Y-%m-%d %H:%M:%S.%3N"; }
 
 line="v1"
 have_ts=0

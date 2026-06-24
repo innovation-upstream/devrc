@@ -404,6 +404,28 @@ def test_emit_to_daemon_roundtrip_arbitrary_content(tmp_path):
 
 
 @pytest.mark.skipif(not EMIT.exists(), reason="emit script missing")
+def test_emit_ts_is_utc(tmp_path):
+    # emit auto-fills ts as the UTC instant (`date -u`), so it lands inside the
+    # UTC window we bracket around the call — a local-time stamp on a non-UTC
+    # host would be offset out of this window.
+    import datetime as _dt
+    spool = tmp_path / "spool"
+    env = dict(os.environ, ACTIVITY_SPOOL_DIR=str(spool))
+    before = _dt.datetime.now(_dt.timezone.utc)
+    rc = subprocess.run(
+        ["bash", str(EMIT), "source=zsh", "kind=command", "b64:text=tz"],
+        env=env, capture_output=True, text=True,
+    )
+    after = _dt.datetime.now(_dt.timezone.utc)
+    assert rc.returncode == 0, rc.stderr
+    ev = C.parse_line((spool / "current.log").read_text().splitlines()[0])
+    parsed = _dt.datetime.strptime(ev["ts"], "%Y-%m-%d %H:%M:%S.%f").replace(
+        tzinfo=_dt.timezone.utc
+    )
+    assert before - _dt.timedelta(seconds=2) <= parsed <= after + _dt.timedelta(seconds=2)
+
+
+@pytest.mark.skipif(not EMIT.exists(), reason="emit script missing")
 def test_emit_concurrent_appends_dont_interleave(tmp_path):
     spool = tmp_path / "spool"
     env = dict(os.environ, ACTIVITY_SPOOL_DIR=str(spool))

@@ -147,11 +147,12 @@ def test_event_mapping_fields(tmp_path):
 
 
 def test_ts_conversion_to_ch_format():
-    out = T.to_ch_ts("2026-06-24T01:25:00.759Z")
-    # local-time string in CH DateTime64(3) format: 'YYYY-MM-DD HH:MM:SS.mmm'
-    assert len(out) == len("2026-06-24 01:25:00.759")
-    assert out[4] == "-" and out[10] == " " and out[19] == "."
-    assert out.endswith(".759")
+    # Stored as the UTC instant (tz-less DateTime64), NOT shifted to local.
+    # Input is UTC (…Z) → unchanged wall-clock.
+    assert T.to_ch_ts("2026-06-24T01:25:00.759Z") == "2026-06-24 01:25:00.759"
+    # An offset input normalizes to the SAME UTC instant (proves no local shift).
+    assert T.to_ch_ts("2026-06-24T06:25:00.759+05:00") == "2026-06-24 01:25:00.759"
+    assert T.to_ch_ts("2026-06-23T20:25:00.759-05:00") == "2026-06-24 01:25:00.759"
 
 
 # --------------------------------------------------------------------------- #
