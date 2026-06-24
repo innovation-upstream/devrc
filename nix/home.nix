@@ -126,6 +126,20 @@ in
     mkdir -p ~/.config/espanso/config
   '';
 
+  # Seed the activity-collector EnvironmentFile with safe defaults if it does not
+  # exist yet. The real file holds the (future) ClickHouse credentials, so it is
+  # NEVER in the nix store and NEVER committed — created here once, chmod 600,
+  # then edited in place. We copy the in-repo .env.example as the template.
+  home.activation.activityCollectorEnv = lib.hm.dag.entryAfter ["writeBoundary"] ''
+    envFile="$HOME/.config/activity-collector/env"
+    if [ ! -e "$envFile" ]; then
+      mkdir -p "$HOME/.config/activity-collector"
+      cp ${../scripts/collector/.env.example} "$envFile"
+      chmod 600 "$envFile"
+      echo "activity-collector: seeded $envFile from .env.example (edit to add CLICKHOUSE_PASSWORD)"
+    fi
+  '';
+
   home.stateVersion = "24.11";
 
   home.packages = if isNixOS
@@ -183,9 +197,26 @@ in
     executable = true;
   };
 
+  home.file.".config/tmux/activity-emit.sh" = {
+    source = ../scripts/tmux-activity-emit.sh;
+    executable = true;
+  };
+
   # CPU load monitor: desktop alert on sustained high load
   home.file.".config/cpu-monitor/cpu-monitor.sh" = {
     source = ../scripts/cpu-monitor.sh;
+    executable = true;
+  };
+
+  # Activity-telemetry collector: hot-path emit helper + daemon. Symlinked from
+  # the repo so both hosts stay in sync. Config (CLICKHOUSE_URL/credentials) lives
+  # in ~/.config/activity-collector/env — created below, NOT in the nix store.
+  home.file.".config/activity-collector/emit" = {
+    source = ../scripts/collector/emit;
+    executable = true;
+  };
+  home.file.".config/activity-collector/collector.py" = {
+    source = ../scripts/collector/collector.py;
     executable = true;
   };
 
@@ -222,6 +253,34 @@ in
     Install = {
       # default.target = starts on login. i3 is not systemd-integrated, so the
       # script borrows DISPLAY/DBUS from i3's /proc environ to reach dunst.
+      WantedBy = [ "default.target" ];
+    };
+  };
+
+  # Activity-telemetry collector daemon. Batches spooled events and ships them to
+  # ClickHouse. Mirrors the cpu-monitor user-service pattern (Restart=always,
+  # explicit PATH via lib.makeBinPath). Config comes from the EnvironmentFile
+  # (not the nix store); EnvironmentFile is optional so a missing file (e.g. mid
+  # first switch, before activation seeds it) does not fail the unit.
+  systemd.user.services.activity-collector = {
+    Unit = {
+      Description = "Personal activity-telemetry collector → ClickHouse";
+      # No graphical-session dep: this must run in headless/server mode too.
+      After = [ "network.target" ];
+    };
+    Service = {
+      Type = "simple";
+      # PATH must be explicit: a user service does not inherit the login PATH.
+      # python3 (with stdlib only) + base64/coreutils for the helper path.
+      Environment = [
+        "PATH=${lib.makeBinPath [ pkgs.python312 pkgs.coreutils pkgs.bash ]}"
+      ];
+      EnvironmentFile = "-%h/.config/activity-collector/env";
+      ExecStart = "${pkgs.python312}/bin/python3 %h/.config/activity-collector/collector.py";
+      Restart = "always";
+      RestartSec = 10;
+    };
+    Install = {
       WantedBy = [ "default.target" ];
     };
   };
