@@ -400,4 +400,34 @@ in
       WantedBy = [ "default.target" ];
     };
   };
+
+  # Laptop-only SOCKS5 tunnel to the homelab kube API via the workbench. The
+  # homelab API server (192.168.50.94:6443) is LAN-only and the laptop is
+  # nebula-only, so it cannot reach the API directly. This holds an `ssh -D`
+  # SOCKS proxy on 127.0.0.1:1080 through the workbench (nebula 10.42.0.30, which
+  # IS on the LAN). The kubeconfig ~/.kube/homelab-nebula.yaml points at the real
+  # API with `proxy-url: socks5://127.0.0.1:1080` — server stays 192.168.50.94 so
+  # its TLS cert still verifies. Gated on graphical-session.target → starts on the
+  # laptop only (the headless workbench reaches the API directly and never starts
+  # it, like keylog). The kubeconfig is placed out-of-band (chmod 600, holds admin
+  # creds — deliberately NOT in the world-readable nix store).
+  systemd.user.services.homelab-kube-tunnel = {
+    Unit = {
+      Description = "SOCKS5 tunnel to the homelab kube API via the workbench (nebula)";
+      After = [ "graphical-session.target" "network-online.target" ];
+      PartOf = [ "graphical-session.target" ];
+    };
+    Service = {
+      Type = "simple";
+      Environment = [ "PATH=${lib.makeBinPath [ pkgs.openssh ]}" ];
+      # -N: no remote command; -D: dynamic SOCKS on loopback. Keepalives let
+      # systemd notice a dead link and Restart it.
+      ExecStart = "${pkgs.openssh}/bin/ssh -N -D 127.0.0.1:1080 -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -o ExitOnForwardFailure=yes -o StrictHostKeyChecking=accept-new -o BatchMode=yes zach@10.42.0.30";
+      Restart = "always";
+      RestartSec = 10;
+    };
+    Install = {
+      WantedBy = [ "graphical-session.target" ];
+    };
+  };
 }
