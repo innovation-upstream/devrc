@@ -1,0 +1,5 @@
+{"type": "user", "timestamp": "2026-06-24T12:31:45.012Z", "sessionId": "sess-1", "cwd": "/home/zach/workspace/devrc", "message": {"role": "user", "content": "hello, first prompt"}}
+{"type": "assistant", "timestamp": "2026-06-24T12:31:50.000Z", "sessionId": "sess-1", "message": {"role": "assistant", "content": [{"type": "text", "text": "hi"}]}}
+{"type": "user", "timestamp": "2026-06-24T12:32:00.000Z", "sessionId": "sess-1", "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "x", "content": "tool output"}]}}
+{"type": "user", "timestamp": "2026-06-24T12:33:00.000Z", "sessionId": "sess-1", "cwd": "/home/zach/workspace/devrc", "message": {"role": "user", "content": "second real prompt"}}
+{"type": "user", "timestamp": "2025-01-01T00:00:00.000Z", "sessionId": "sess-1", "message": {"role": "user", "content": "old prompt outside window"}}
