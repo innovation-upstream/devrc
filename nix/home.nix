@@ -220,6 +220,17 @@ in
     executable = true;
   };
 
+  # Claude Code activity source (5th source): a periodic tailer that scans the
+  # ~/.claude transcripts and emits NEW user-typed messages / slash-commands as
+  # source=claude events via the shared emit helper. Symlinked recursively so the
+  # tailer lands at ~/.config/activity-collector/claude/tailer.py and resolves its
+  # sibling emit at ~/.config/activity-collector/emit (two dirs up). Driven by a
+  # systemd user TIMER (below), not Restart=always — it is a periodic oneshot.
+  home.file.".config/activity-collector/claude" = {
+    source = ../scripts/collector/claude;
+    recursive = true;
+  };
+
   # GUI activity collectors (keylogger + browser receiver). The whole module
   # dir is symlinked recursively so the daemons can import their sibling modules
   # (keymap/chunker/winctx/spool_emit). The browser receiver reuses keylog's
@@ -296,6 +307,41 @@ in
     };
     Install = {
       WantedBy = [ "default.target" ];
+    };
+  };
+
+  # Claude Code activity source — periodic oneshot tailer. Type=oneshot (runs the
+  # scan once and exits) driven by the timer below, NOT Restart=always. Stdlib-only
+  # python + the emit helper's bash/coreutils on PATH. No graphical/network dep —
+  # it only reads local transcripts and appends to the local spool, so it runs in
+  # headless/server mode too. Host is stamped by the collector daemon (ACTIVITY_HOST).
+  systemd.user.services.claude-activity-source = {
+    Unit = {
+      Description = "Tail Claude Code transcripts → activity spool (source=claude)";
+    };
+    Service = {
+      Type = "oneshot";
+      Environment = [
+        "PATH=${lib.makeBinPath [ pkgs.python312 pkgs.coreutils pkgs.bash ]}"
+      ];
+      ExecStart = "${pkgs.python312}/bin/python3 %h/.config/activity-collector/claude/tailer.py";
+    };
+  };
+
+  # Timer: fire the tailer ~every 5 min. OnUnitActiveSec re-arms relative to the
+  # last run, so a slow scan never overlaps itself. OnStartupSec gives one prompt
+  # run shortly after login. Persistent catches up a single missed run after sleep.
+  systemd.user.timers.claude-activity-source = {
+    Unit = {
+      Description = "Periodic timer for the Claude Code activity source";
+    };
+    Timer = {
+      OnStartupSec = "1min";
+      OnUnitActiveSec = "5min";
+      Persistent = true;
+    };
+    Install = {
+      WantedBy = [ "timers.target" ];
     };
   };
 
