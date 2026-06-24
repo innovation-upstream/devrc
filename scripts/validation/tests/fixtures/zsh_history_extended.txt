@@ -1,0 +1,5 @@
+: 1718000000:0;git status
+: 1718000010:2;for f in *.py; do \
+echo $f; \
+done
+: 1718000050:1;ls -la
