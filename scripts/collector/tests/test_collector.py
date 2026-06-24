@@ -91,6 +91,14 @@ def test_parse_arbitrary_content_survives():
     assert ev["text"] == nasty
 
 
+def test_host_override_replaces_emit_host():
+    # emit stamps host=nixos on both machines; the daemon's ACTIVITY_HOST wins.
+    line = f"v1\tts=t\tsource=zsh\tkind=command\thost=nixos\tb64:text={b64('echo hi')}"
+    assert C.parse_line(line)["host"] == "nixos"            # passthrough when unset
+    assert C.parse_line(line, "laptop")["host"] == "laptop"  # override wins
+    assert C.parse_line(line, "workbench")["host"] == "workbench"
+
+
 def test_parse_unknown_keys_go_to_payload():
     ev = C.parse_line(f"v1\tts=t\tsource=zsh\tkind=command\twindow=@3\tpane=%7")
     pl = json.loads(ev["payload"])

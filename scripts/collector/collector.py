@@ -92,6 +92,9 @@ class Config:
     max_buffer_bytes: int = 64 * 1024 * 1024
     max_buffer_age_seconds: float = 7 * 24 * 3600
     http_timeout: float = 10.0
+    # Per-host label. Both machines are hostname `nixos`, so emit's host=$(hostname)
+    # collides — set ACTIVITY_HOST=workbench/laptop per host to disambiguate.
+    host_override: str = ""
 
     @classmethod
     def from_env(cls, env: dict | None = None) -> "Config":
@@ -111,6 +114,7 @@ class Config:
                 e.get("ACTIVITY_MAX_BUFFER_AGE_SECONDS", cls.max_buffer_age_seconds)
             ),
             http_timeout=float(e.get("ACTIVITY_HTTP_TIMEOUT", cls.http_timeout)),
+            host_override=e.get("ACTIVITY_HOST", cls.host_override),
         )
 
     @property
@@ -123,11 +127,13 @@ class Config:
 # --------------------------------------------------------------------------- #
 # Line parsing (the emit contract)
 # --------------------------------------------------------------------------- #
-def parse_line(line: str) -> dict | None:
+def parse_line(line: str, host_override: str = "") -> dict | None:
     """Parse one v1 spool line into an event dict, or None if unparseable.
 
     Returns a dict with ClickHouse-ready values: known string/int columns plus a
-    `payload` JSON string holding any unknown keys. `ts`/`host` pass through.
+    `payload` JSON string holding any unknown keys. `ts` passes through; `host`
+    is forced to `host_override` when set (both machines are hostname `nixos`, so
+    emit's value collides — the daemon stamps the real per-host label).
     """
     line = line.rstrip("\n")
     if not line:
@@ -180,6 +186,9 @@ def parse_line(line: str) -> dict | None:
                 merged = {"_payload": existing}
         merged.update(extra)
         event["payload"] = json.dumps(merged, ensure_ascii=False, separators=(",", ":"))
+
+    if host_override:
+        event["host"] = host_override
 
     return event
 
@@ -275,7 +284,7 @@ class Spool:
         return dropped
 
 
-def read_segment(path: Path) -> tuple[list[dict], int, int]:
+def read_segment(path: Path, host_override: str = "") -> tuple[list[dict], int, int]:
     """Parse a segment file → (events, parsed_ok, parse_failed).
 
     Unparseable lines are counted and logged but do not block the rest; they are
@@ -292,7 +301,7 @@ def read_segment(path: Path) -> tuple[list[dict], int, int]:
     for line in text.splitlines():
         if not line:
             continue
-        ev = parse_line(line)
+        ev = parse_line(line, host_override)
         if ev is None:
             bad += 1
             LOG.warning("dropping malformed spool line in %s: %.120r", path.name, line)
@@ -338,7 +347,7 @@ def ship_segment(
     should be retried later (network/HTTP error). No-double-ship: the file is
     deleted only after every batch in it has been accepted.
     """
-    events, ok, bad = read_segment(seg)
+    events, ok, bad = read_segment(seg, client.cfg.host_override)
     if not events:
         # Nothing shippable (empty or all-malformed) — drop the file so it does
         # not wedge the queue. Malformed counts already logged.
