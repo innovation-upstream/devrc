@@ -9,6 +9,8 @@
 # Scope: home-manager (user-level) — the bulk of this repo's changes.
 # It does NOT run `sudo nixos-rebuild` (needs an interactive password);
 # system/i3 changes are surfaced as a remaining manual step, not attempted.
+# It ALSO rsyncs the per-host Claude skills (~/.claude/skills/, not in git/nix)
+# from the workbench to the laptop so the skill set does not drift between hosts.
 #
 # Verifier (cheap + automatic): each host ends ON the `main` BRANCH at
 # HEAD == origin/main AND `home-manager switch` exits 0. It is not enough for
@@ -134,6 +136,19 @@ if [ "$DO_LAPTOP" = 1 ]; then
     laprc=$?
     rc=$laprc
     echo "[laptop] converge exited $laprc"
+  fi
+
+  # Sync per-host Claude skills (~/.claude/skills/ — NOT in git/nix; the workbench
+  # is the source of truth where they're edited). Keeps the laptop's skill set from
+  # drifting. Additive (NO --delete) so a laptop-only skill is never clobbered.
+  # Auxiliary + best-effort: a failure warns but never fails the ship. Skipped on a
+  # --no-switch dry-run (it is a real file change, like the home-manager switch).
+  if [ "$SHIP_NO_SWITCH" != 1 ] && [ -d "$HOME/.claude/skills" ]; then
+    if rsync -az -e "ssh -o ConnectTimeout=10" "$HOME/.claude/skills/" "$LAPTOP_SSH:.claude/skills/" 2>/dev/null; then
+      echo "[laptop] skills synced (~/.claude/skills/)"
+    else
+      echo "[laptop] ⚠ skill sync failed (non-fatal — check rsync on both hosts)"
+    fi
   fi
   echo
 fi
