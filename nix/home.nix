@@ -304,6 +304,12 @@ in
       ExecStart = "${pkgs.python312}/bin/python3 %h/.config/activity-collector/collector.py";
       Restart = "always";
       RestartSec = 10;
+      # Restart on a script-only change. sd-switch only restarts a unit when the
+      # unit definition itself changes; the script is symlinked-by-path, so a
+      # code edit alone leaves the daemon running STALE code until a manual
+      # `systemctl --user restart`. Pinning the script's store path here makes the
+      # unit definition change whenever the code changes → switch restarts it.
+      X-Restart-Triggers = [ "${../scripts/collector/collector.py}" ];
     };
     Install = {
       WantedBy = [ "default.target" ];
@@ -368,6 +374,8 @@ in
       ExecStart = "${pkgs.python312.withPackages (ps: [ ps.xlib ])}/bin/python3 %h/.config/activity-collector/keylog/keylog.py";
       Restart = "always";
       RestartSec = 10;
+      # Restart on a script-only change (see activity-collector for rationale).
+      X-Restart-Triggers = [ "${../scripts/collector/keylog}" ];
     };
     Install = {
       WantedBy = [ "graphical-session.target" ];
@@ -395,6 +403,10 @@ in
       ExecStart = "${pkgs.python312}/bin/python3 %h/.config/activity-collector/browser-ext/receiver.py";
       Restart = "always";
       RestartSec = 10;
+      # Restart on a script-only change (see activity-collector for rationale).
+      # Tracks browser-ext AND keylog, because the receiver reuses keylog's
+      # spool_emit (single source of truth for the v1 line format).
+      X-Restart-Triggers = [ "${../scripts/collector/browser-ext}" "${../scripts/collector/keylog}" ];
     };
     Install = {
       WantedBy = [ "default.target" ];
