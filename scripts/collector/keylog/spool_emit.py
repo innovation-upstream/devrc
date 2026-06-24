@@ -39,8 +39,9 @@ def default_spool_dir() -> Path:
 
 
 def _ts_now() -> str:
-    # %3N has no portable strftime equivalent; build milliseconds explicitly.
-    now = datetime.datetime.now()
+    # UTC instant for the tz-less DateTime64 (matches emit's `date -u`); %3N has
+    # no portable strftime equivalent so build milliseconds explicitly.
+    now = datetime.datetime.now(datetime.timezone.utc)
     return now.strftime("%Y-%m-%d %H:%M:%S.") + f"{now.microsecond // 1000:03d}"
 
 

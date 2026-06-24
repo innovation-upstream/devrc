@@ -117,8 +117,9 @@ def classify(raw: str) -> tuple[str, str] | None:
 # Timestamp conversion: ISO8601 (…Z) -> ClickHouse DateTime64(3) local string
 # --------------------------------------------------------------------------- #
 def to_ch_ts(iso: str | None) -> str | None:
-    """Convert a transcript ISO timestamp to emit's '%Y-%m-%d %H:%M:%S.%3N' local
-    format. Returns None if it cannot be parsed (caller then lets emit auto-fill)."""
+    """Convert a transcript ISO timestamp to emit's '%Y-%m-%d %H:%M:%S.%3N' UTC
+    format (matches emit's `date -u`). Returns None if it cannot be parsed
+    (caller then lets emit auto-fill)."""
     if not iso:
         return None
     s = iso.strip()
@@ -129,7 +130,7 @@ def to_ch_ts(iso: str | None) -> str | None:
     except ValueError:
         return None
     if dt.tzinfo is not None:
-        dt = dt.astimezone()  # to local time
+        dt = dt.astimezone(_dt.timezone.utc)  # normalize to the UTC instant
     return dt.strftime("%Y-%m-%d %H:%M:%S.") + f"{dt.microsecond // 1000:03d}"
 
 

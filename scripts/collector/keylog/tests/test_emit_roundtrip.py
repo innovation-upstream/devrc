@@ -44,6 +44,18 @@ def test_ts_and_host_autofilled():
     assert "host" in line  # host present as a plain token
 
 
+def test_ts_now_is_utc():
+    # The autofilled ts must be the UTC instant (matches emit's `date -u`), so
+    # Grafana $__timeFilter / now() (UTC) range comparisons align — not local.
+    import datetime as _dt
+    before = _dt.datetime.now(_dt.timezone.utc)
+    parsed = _dt.datetime.strptime(SE._ts_now(), "%Y-%m-%d %H:%M:%S.%f").replace(
+        tzinfo=_dt.timezone.utc
+    )
+    after = _dt.datetime.now(_dt.timezone.utc)
+    assert before - _dt.timedelta(seconds=2) <= parsed <= after + _dt.timedelta(seconds=2)
+
+
 def test_emit_appends_to_spool(tmp_path):
     spool = tmp_path / "spool"
     written = SE.emit(
