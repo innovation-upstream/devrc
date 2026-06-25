@@ -244,6 +244,12 @@ in
     source = ../scripts/collector/browser-ext;
     recursive = true;
   };
+  # i3 focus collector. Reuses keylog's spool_emit (the v1 line format), so
+  # keylog/ must be present alongside it (it always is — shipped above).
+  home.file.".config/activity-collector/i3" = {
+    source = ../scripts/collector/i3;
+    recursive = true;
+  };
 
   # Global Claude Code behavioural config — single source of truth for both
   # hosts (these were drifting when edited per-host). Synced via scripts/ship.sh.
@@ -376,6 +382,41 @@ in
       RestartSec = 10;
       # Restart on a script-only change (see activity-collector for rationale).
       X-Restart-Triggers = [ "${../scripts/collector/keylog}" ];
+    };
+    Install = {
+      WantedBy = [ "graphical-session.target" ];
+    };
+  };
+
+  # i3 focus collector. Subscribes to i3's IPC event stream and emits a
+  # source=i3 record on every window-focus / workspace-focus change — capturing
+  # attention even when the user is only READING (the keylogger only records
+  # focus context WHEN typing). Needs a live i3 IPC socket, so it is gated on
+  # graphical-session.target (laptop-only, NOT started in headless/server mode),
+  # exactly like keylog. Writes into the same spool the activity-collector ships,
+  # reusing keylog's spool_emit (single source of truth for the v1 line format).
+  systemd.user.services.i3-source = {
+    Unit = {
+      Description = "i3 window/workspace focus collector → activity spool";
+      # Requires a live i3 (IPC socket); tracks the graphical session.
+      After = [ "graphical-session.target" ];
+      PartOf = [ "graphical-session.target" ];
+    };
+    Service = {
+      Type = "simple";
+      # python3 WITH i3ipc (the IPC client). WM_CLASS/title come straight from
+      # the i3ipc container, so no Xlib is needed. I3SOCK is auto-discovered by
+      # i3ipc from the running session.
+      Environment = [
+        "PATH=${lib.makeBinPath [ (pkgs.python312.withPackages (ps: [ ps.i3ipc ])) pkgs.coreutils ]}"
+      ];
+      ExecStart = "${pkgs.python312.withPackages (ps: [ ps.i3ipc ])}/bin/python3 %h/.config/activity-collector/i3/i3source.py";
+      Restart = "always";
+      RestartSec = 10;
+      # Restart on a script-only change (see activity-collector for rationale).
+      # Tracks i3/ AND keylog/, because i3source reuses keylog's spool_emit
+      # (single source of truth for the v1 line format).
+      X-Restart-Triggers = [ "${../scripts/collector/i3}" "${../scripts/collector/keylog}" ];
     };
     Install = {
       WantedBy = [ "graphical-session.target" ];

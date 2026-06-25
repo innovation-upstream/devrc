@@ -37,7 +37,7 @@ FUTURE_SLACK_HOURS = 26  # > max |tz offset| (14h) + margin
 OLDEST_PLAUSIBLE = "2025-01-01 00:00:00"
 
 EXPECTED_HOSTS = {"workbench", "laptop"}
-EXPECTED_SOURCES = {"zsh", "tmux", "keys", "browser", "claude"}
+EXPECTED_SOURCES = {"zsh", "tmux", "keys", "browser", "claude", "i3"}
 
 
 @dataclass
