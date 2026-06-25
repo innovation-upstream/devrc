@@ -159,6 +159,48 @@ def test_focus_event_with_no_container_or_current_skipped():
 # --------------------------------------------------------------------------- #
 # round-trip through the existing collector.parse_line
 # --------------------------------------------------------------------------- #
+# --------------------------------------------------------------------------- #
+# current_workspace fallback (Fix 2): window-focus whose container can't resolve
+# its own workspace gets stamped with the daemon's tracked workspace.
+# --------------------------------------------------------------------------- #
+def test_window_focus_uses_tracked_workspace_when_container_unresolved():
+    ev = FakeWindowEvent(
+        "focus",
+        FakeCon(window_class="Alacritty", name="zsh", workspace_name=None),
+    )
+    f = M.build_record(ev, current_workspace="3:code")
+    pl = json.loads(f["payload"])
+    assert pl["workspace"] == "3:code"
+
+
+def test_window_focus_prefers_container_workspace_over_tracked():
+    # When the container DOES resolve, that wins over the tracker.
+    ev = FakeWindowEvent(
+        "focus",
+        FakeCon(window_class="firefox", name="x", workspace_name="2:web"),
+    )
+    f = M.build_record(ev, current_workspace="9:stale")
+    assert json.loads(f["payload"])["workspace"] == "2:web"
+
+
+def test_window_focus_empty_when_neither_container_nor_tracker_resolve():
+    ev = FakeWindowEvent(
+        "focus",
+        FakeCon(window_class="x", name="y", workspace_name=None),
+    )
+    f = M.build_record(ev)  # current_workspace defaults to ""
+    assert json.loads(f["payload"])["workspace"] == ""
+
+
+def test_workspace_focus_still_sets_from_current():
+    # A workspace-focus record reads its workspace from .current, regardless of
+    # any tracked value passed in.
+    ev = FakeWorkspaceEvent("focus", FakeWorkspace("4:chat"))
+    f = M.build_record(ev, current_workspace="ignored")
+    assert f["kind"] == "workspace-focus"
+    assert json.loads(f["payload"])["workspace"] == "4:chat"
+
+
 def test_window_focus_roundtrips_through_parse_line():
     import spool_emit as SE
     ev = FakeWindowEvent(

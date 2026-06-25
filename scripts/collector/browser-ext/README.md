@@ -64,6 +64,12 @@ To point at a TEST spool while validating:
   a fake password, bad-JSON 400, wrong-path 404). See `tests/test_receiver.py`.
 - Manifest + service-worker logic: validated (manifest JSON parses, MV3 schema
   fields present; `buildEvent` payload shape mirrored by the receiver test).
+- Active-time accounting: the idle/blur-aware accumulator lives in the PURE
+  `active_time.js` (no `chrome.*`, no `Date.now()` — all timestamps passed in)
+  and is unit-tested in `tests/active_time.test.mjs`. Run with Node's built-in
+  runner; pass a glob (a bare directory positional is treated as a module on
+  Node ≥22, so glob or run from inside the dir):
+  `nix-shell -p nodejs --run "node --test 'scripts/collector/browser-ext/tests/**/*.test.mjs'"`.
 - The end-to-end **load-unpacked in a real browser** step is a MANUAL step (MV3
   service workers are not reliably driveable headlessly). Follow "Load unpacked"
   above to complete it.
