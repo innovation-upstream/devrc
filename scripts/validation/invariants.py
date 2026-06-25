@@ -23,9 +23,13 @@ from typing import Callable
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from chquery import CHClient, CHConn  # noqa: E402
 
-# A single event cannot plausibly represent more than this much active time.
-# Browser nav active_ms and zsh duration_ms both live in the same ms space.
-ACTIVE_MS_CAP = 6 * 60 * 60 * 1000  # 6h in one event = implausible
+# active_ms (browser/keys) is IDLE-AWARE engagement time, so a single event over
+# this is an idle-detection bug. duration_ms (zsh command wall-clock) is NOT
+# idle-aware — a long interactive command (claude/vim/ssh held open for hours)
+# legitimately exceeds it — so raw duration is preserved and only gets the high
+# SANITY bound below (catches clock-skew/parse garbage, not real long sessions).
+ACTIVE_MS_CAP = 6 * 60 * 60 * 1000  # 6h of engagement in one event = implausible
+DURATION_SANITY_CAP = 24 * 60 * 60 * 1000  # >24h in one command = garbage
 # Slack for the local-vs-UTC timezone offset on the "no future ts" check.
 FUTURE_SLACK_HOURS = 26  # > max |tz offset| (14h) + margin
 # Oldest plausible ts: the table TTL is 180d, but data only started 2026; guard
@@ -121,8 +125,11 @@ def build_invariants(table: str = "activity.events") -> list[Invariant]:
         ),
         Invariant(
             "duration_ms_capped",
-            f"SELECT count() FROM {table} WHERE duration_ms > {ACTIVE_MS_CAP}",
-            eval_zero_violations(f"duration_ms > {ACTIVE_MS_CAP}ms cap"),
+            # Raw duration is PRESERVED (a multi-hour interactive `claude` is real);
+            # only flag values above the 24h garbage bound. Long durations no longer
+            # inflate active time — per_host_hour_active_cap now sums active_ms only.
+            f"SELECT count() FROM {table} WHERE duration_ms > {DURATION_SANITY_CAP}",
+            eval_zero_violations(f"duration_ms > {DURATION_SANITY_CAP}ms (garbage)"),
         ),
         Invariant(
             "ts_not_ancient",
@@ -141,9 +148,12 @@ def build_invariants(table: str = "activity.events") -> list[Invariant]:
         ),
         Invariant(
             "per_host_hour_active_cap",
-            # Sum active time per (host, clock-hour) bucket.
+            # Engagement time per (host, clock-hour) — IDLE-AWARE active_ms ONLY.
+            # duration_ms (command wall-clock) is deliberately excluded: it is not
+            # active engagement, and a long interactive command (claude) would
+            # otherwise falsely blow past the 60min/hour bound.
             "SELECT host, toStartOfHour(ts) AS hour, "
-            "sum(toUInt32OrZero(JSONExtractString(payload, 'active_ms')) + duration_ms) AS active_ms "
+            "sum(toUInt32OrZero(JSONExtractString(payload, 'active_ms'))) AS active_ms "
             f"FROM {table} GROUP BY host, hour",
             eval_per_host_hour_cap,
         ),
