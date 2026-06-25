@@ -13,8 +13,15 @@
 //   focus — window/idle focus transition (browser focused/blurred, idle/active).
 //
 // MV3 service workers are ephemeral (the browser may suspend them). We persist
-// the "current active tab + since-timestamp" in chrome.storage.session so an
-// active-duration can still be computed across a worker restart.
+// the "current active tab + active-time accumulator" in chrome.storage.session
+// so active-duration accounting survives a worker restart.
+//
+// active_ms is now IDLE/BLUR-AWARE: the accumulator in active_time.js only
+// accrues wall-clock while the browser is focused AND the user is not
+// idle/locked, so a tab "focused" while the user walked away no longer logs
+// that away-time as engagement. (Pure module — no chrome.* — unit-tested.)
+
+import * as AT from "./active_time.js";
 
 const ENDPOINT = "http://127.0.0.1:8787/event";
 const STORE_KEY = "active_state";
@@ -44,23 +51,43 @@ async function post(event) {
   }
 }
 
+// Stored shape: { tabId, url, title, accum } where `accum` is the pure
+// active_time accumulator state ({ banked, since }). A fresh worker assumes the
+// browser is active (it just ran an event) — the next idle/blur will correct.
 async function getState() {
   const o = await chrome.storage.session.get(STORE_KEY);
-  return o[STORE_KEY] || { tabId: null, url: "", title: "", since: Date.now() };
+  const s = o[STORE_KEY];
+  if (!s) {
+    return { tabId: null, url: "", title: "", accum: AT.freshState(Date.now(), true) };
+  }
+  s.accum = AT.fromStored(s.accum);
+  return s;
 }
 
 async function setState(s) {
   await chrome.storage.session.set({ [STORE_KEY]: s });
 }
 
-// Compute active_ms for the outgoing (previous) tab, emit a nav event for the
-// NEW active tab, and record the new active state.
-async function onActive({ url, title, tabId }) {
+// Apply an accumulator transition (onActive/onBlur/onIdle) to the persisted
+// state in one read-modify-write. Keeps the active-time bookkeeping in sync
+// with focus/idle signals without emitting a nav event.
+async function applyAccum(fn, now) {
+  const cur = await getState();
+  fn(cur.accum, now);
+  await setState(cur);
+}
+
+// A tab change / navigation: bank the active time for the OUTGOING tab, emit a
+// nav event carrying that (capped, idle/blur-excluded) active_ms, then reset
+// the accumulator for the new tab. take() re-anchors the in-progress span to
+// `now` if still active, so continuous engagement across a switch keeps
+// accruing.
+async function onTabChange({ url, title, tabId }) {
   const prev = await getState();
   const now = Date.now();
-  const active_ms = prev.since ? now - prev.since : 0;
+  const active_ms = AT.take(prev.accum, now);
   await post(buildEvent("nav", { url, title, active_ms }));
-  await setState({ tabId, url, title, since: now });
+  await setState({ tabId, url, title, accum: prev.accum });
 }
 
 async function tabInfo(tabId) {
@@ -74,7 +101,7 @@ async function tabInfo(tabId) {
 
 // --- chrome event wiring --------------------------------------------------- //
 chrome.tabs.onActivated.addListener(async ({ tabId }) => {
-  await onActive(await tabInfo(tabId));
+  await onTabChange(await tabInfo(tabId));
 });
 
 // Navigation within the active tab (committed top-frame loads).
@@ -83,7 +110,7 @@ chrome.webNavigation.onCommitted.addListener(async (d) => {
   const info = await tabInfo(d.tabId);
   const cur = await getState();
   if (cur.tabId !== null && cur.tabId !== d.tabId) return; // not the active tab
-  await onActive(info);
+  await onTabChange(info);
 });
 
 // Title can arrive after commit; refresh stored title without a duration reset.
@@ -96,14 +123,20 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo) => {
   }
 });
 
-// Window focus changes (browser gained/lost OS focus).
+// Window focus changes (browser gained/lost OS focus). Blur PAUSES the active-
+// time accumulator (banks the elapsed span); refocus RESUMES it.
 chrome.windows.onFocusChanged.addListener(async (windowId) => {
   const focused = windowId !== chrome.windows.WINDOW_ID_NONE;
+  const now = Date.now();
+  await applyAccum(focused ? AT.onActive : AT.onBlur, now);
   await post(buildEvent("focus", { state: focused ? "focused" : "blurred" }));
 });
 
-// Idle / active / locked transitions.
+// Idle / active / locked transitions. "active" resumes accrual; "idle"/"locked"
+// pause it (banking the active span) so away-time isn't counted as engagement.
 chrome.idle.setDetectionInterval(60);
 chrome.idle.onStateChanged.addListener(async (state) => {
+  const now = Date.now();
+  await applyAccum(state === "active" ? AT.onActive : AT.onIdle, now);
   await post(buildEvent("focus", { state }));
 });

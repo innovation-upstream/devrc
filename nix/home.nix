@@ -440,6 +440,9 @@ in
         # Bind loopback only; keep off any external interface.
         "BROWSER_RECEIVER_HOST=127.0.0.1"
         "BROWSER_RECEIVER_PORT=8787"
+        # The browser is Brave (Chromium-based); label records accordingly so
+        # they don't masquerade as generic chromium.
+        "BROWSER_APP=brave"
       ];
       ExecStart = "${pkgs.python312}/bin/python3 %h/.config/activity-collector/browser-ext/receiver.py";
       Restart = "always";

@@ -100,13 +100,20 @@ def _json(obj) -> str:
     return json.dumps(obj, ensure_ascii=False, separators=(",", ":"))
 
 
-def build_record(event) -> dict | None:
+def build_record(event, current_workspace: str = "") -> dict | None:
     """Pure: map an i3ipc-event-like object → v1 spool fields (or None to skip).
 
     Handles WINDOW events (`change == 'focus'`, has `.container`) and WORKSPACE
     events (`change == 'focus'`, has `.current`). Any other change/shape returns
     None so the caller emits nothing. No i3 / X / network — unit-testable with
     synthetic event objects.
+
+    `current_workspace` is the daemon's tracked currently-focused workspace
+    (maintained from workspace::focus events). It's used as a FALLBACK for
+    window-focus records: i3's WindowEvent container's `.workspace()` frequently
+    fails to resolve (yielding ""), leaving window-focus events with an empty
+    workspace. When the container can't resolve its own workspace we stamp the
+    tracked one instead.
     """
     change = getattr(event, "change", None)
     if change != "focus":
@@ -116,7 +123,7 @@ def build_record(event) -> dict | None:
     con = getattr(event, "container", None)
     if con is not None:
         title = _con_title(con)
-        workspace = _con_workspace_name(con)
+        workspace = _con_workspace_name(con) or current_workspace
         return {
             "source": SOURCE,
             "kind": "window-focus",
@@ -142,6 +149,23 @@ def build_record(event) -> dict | None:
         }
 
     return None
+
+
+def _focused_workspace_name(i3) -> str:
+    """Best-effort current workspace name from a live i3 Connection.
+
+    Uses get_workspaces() (a flat list with a `.focused` flag) — robust across
+    i3ipc versions and cheap. Any failure yields "" so startup never crashes on
+    a transient IPC hiccup; the tracker self-corrects on the first
+    workspace::focus event.
+    """
+    try:
+        for ws in i3.get_workspaces():
+            if getattr(ws, "focused", False):
+                return _text(getattr(ws, "name", None))
+    except Exception:
+        return ""
+    return ""
 
 
 def _safe_emit(fields: dict, spool_dir: Path) -> None:
@@ -171,8 +195,22 @@ def main(argv=None) -> int:
         print(f"i3source: cannot connect to i3 IPC: {exc}", file=sys.stderr, flush=True)
         return 1
 
+    # Track the currently-focused workspace so window-focus events (whose
+    # container often can't resolve its own .workspace()) can still be stamped
+    # with one. Seed it from the live tree, then keep it current on every
+    # workspace::focus.
+    tracker = {"ws": _focused_workspace_name(i3)}
+
     def _on_event(_conn, event):
-        fields = build_record(event)
+        # Update the tracker BEFORE building so a workspace-focus event's own
+        # record is unaffected (it reads from .current), while the next
+        # window-focus picks up the freshly-focused workspace.
+        if getattr(event, "current", None) is not None and \
+                getattr(event, "change", None) == "focus":
+            ws = _con_title(event.current)
+            if ws:
+                tracker["ws"] = ws
+        fields = build_record(event, current_workspace=tracker["ws"])
         if fields is not None:
             _safe_emit(fields, spool_dir)
 
