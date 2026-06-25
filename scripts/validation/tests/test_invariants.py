@@ -23,9 +23,17 @@ def test_zero_violations_evaluator():
 def test_unexpected_set_evaluator_clean():
     ev = I.eval_unexpected_set(I.EXPECTED_SOURCES, "source")
     rows = [{"value": "zsh", "count": 10}, {"value": "browser", "count": 5},
-            {"value": "claude", "count": 2}]
+            {"value": "claude", "count": 2}, {"value": "i3", "count": 7}]
     passed, detail = ev(rows)
     assert passed is True
+
+
+def test_i3_is_an_expected_source():
+    # The i3 focus collector is a first-class source; once its events land the
+    # expected_sources invariant must not flag them.
+    assert "i3" in I.EXPECTED_SOURCES
+    ev = I.eval_unexpected_set(I.EXPECTED_SOURCES, "source")
+    assert ev([{"value": "i3", "count": 3}])[0] is True
 
 
 def test_unexpected_set_evaluator_catches_bad():
