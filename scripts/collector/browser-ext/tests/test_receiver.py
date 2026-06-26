@@ -49,6 +49,26 @@ def test_unknown_kind_coerced_to_nav():
     assert f["kind"] == "nav"
 
 
+def test_event_to_fields_carries_scroll_metrics():
+    f = R.event_to_fields(
+        {"kind": "nav", "url": "https://x.test/a", "title": "T",
+         "active_ms": 10, "scroll_pct": 73, "scroll_ms": 4200},
+        "chromium",
+    )
+    pl = json.loads(f["payload"])
+    assert pl["scroll_pct"] == 73
+    assert pl["scroll_ms"] == 4200
+
+
+def test_event_to_fields_scroll_defaults_to_zero():
+    # An event WITHOUT scroll metrics (focus event / older client) still maps,
+    # defaulting both to 0.
+    f = R.event_to_fields({"kind": "nav", "url": "https://x.test/a"}, "chromium")
+    pl = json.loads(f["payload"])
+    assert pl["scroll_pct"] == 0
+    assert pl["scroll_ms"] == 0
+
+
 def test_fields_roundtrip_through_parse_line():
     f = R.event_to_fields(
         {"kind": "nav", "url": "https://site/x", "title": "T", "active_ms": 5},
@@ -106,6 +126,42 @@ def test_post_writes_spool_record(tmp_path):
     pl = json.loads(ev["payload"])
     assert pl["title"] == 'weird "quoted"\ttab\nnewline 你好'
     assert pl["active_ms"] == 4200
+
+
+def test_post_scroll_metrics_land_in_spool(tmp_path):
+    spool = tmp_path / "spool"
+    srv = _serve(spool)
+    try:
+        status, _ = _post(srv, {
+            "kind": "nav",
+            "url": "https://example.test/article",
+            "title": "Long read",
+            "active_ms": 90000,
+            "scroll_pct": 88,
+            "scroll_ms": 12500,
+        })
+        assert status == 200
+    finally:
+        srv.shutdown()
+        srv.server_close()
+    ev = C.parse_line((spool / "current.log").read_text().splitlines()[0])
+    pl = json.loads(ev["payload"])
+    assert pl["scroll_pct"] == 88
+    assert pl["scroll_ms"] == 12500
+
+
+def test_post_without_scroll_metrics_defaults_zero(tmp_path):
+    spool = tmp_path / "spool"
+    srv = _serve(spool)
+    try:
+        _post(srv, {"kind": "nav", "url": "https://example.test/x", "title": "t"})
+    finally:
+        srv.shutdown()
+        srv.server_close()
+    ev = C.parse_line((spool / "current.log").read_text().splitlines()[0])
+    pl = json.loads(ev["payload"])
+    assert pl["scroll_pct"] == 0
+    assert pl["scroll_ms"] == 0
 
 
 def test_post_arbitrary_url_content_survives(tmp_path):

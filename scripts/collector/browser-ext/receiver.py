@@ -49,9 +49,10 @@ MAX_BODY = 64 * 1024  # a nav event is tiny; cap to avoid abuse.
 def event_to_fields(evt: dict, app_default: str) -> dict:
     """Map an incoming extension event dict → v1 emit fields.
 
-    `text` is the full URL (full-content choice). title/active_ms/state go into
-    payload JSON. `app` is the browser label (chromium/brave). Robust to missing
-    keys — anything absent becomes empty/0.
+    `text` is the full URL (full-content choice). title/active_ms/state plus
+    scroll engagement (scroll_pct/scroll_ms) go into payload JSON. `app` is the
+    browser label (chromium/brave). Robust to missing keys — anything absent
+    becomes empty/0.
     """
     kind = evt.get("kind") or "nav"
     if kind not in ("nav", "focus"):
@@ -60,6 +61,10 @@ def event_to_fields(evt: dict, app_default: str) -> dict:
         "title": evt.get("title", "") or "",
         "active_ms": int(evt.get("active_ms") or 0),
         "state": evt.get("state", "") or "",
+        # Scroll engagement for this page view (nav events). Default 0 when the
+        # extension didn't send them (focus events, older client, no scrolling).
+        "scroll_pct": int(evt.get("scroll_pct") or 0),
+        "scroll_ms": int(evt.get("scroll_ms") or 0),
     }
     if evt.get("ts"):
         payload["client_ts"] = evt["ts"]
