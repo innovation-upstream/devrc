@@ -5,7 +5,20 @@
 // Run: nix-shell -p nodejs --run "node --test scripts/collector/browser-ext/tests/"
 import test from "node:test";
 import assert from "node:assert/strict";
-import { createScrollTracker, GAP_MS } from "../scroll_track.js";
+
+// scroll_track.js is now a CLASSIC (non-ESM) content script: it assigns its
+// factory to globalThis.__activityScrollTracker as a side effect (no exports).
+// Load it for that side effect, then read the global — exactly how the sibling
+// content_scroll.js content script consumes it in the shared isolated world.
+await import("../scroll_track.js");
+const createScrollTracker = globalThis.__activityScrollTracker;
+const GAP_MS = createScrollTracker.GAP_MS;
+
+// The classic script must have published the factory on the global.
+test("scroll_track publishes its factory on the global", () => {
+  assert.equal(typeof globalThis.__activityScrollTracker, "function");
+  assert.equal(typeof GAP_MS, "number");
+});
 
 // (a) scroll_pct is the MAX depth reached — it goes UP, never back down when you
 // scroll back toward the top.
@@ -86,4 +99,95 @@ test("scroll_ms ignores non-advancing timestamps", () => {
   t.onScroll(50, 500, 2000, 900);  // backwards → delta < 0, +0
   t.onScroll(60, 500, 2000, 900);  // same ts → delta 0, +0
   assert.equal(t.snapshot().scroll_ms, 0);
+});
+
+// ---------------------------------------------------------------------------
+// deriveScrollGeometry — pure element→geometry derivation used by the content
+// script's capture-phase document scroll listener (root cause #2). Tested with
+// minimal mock document/window objects (no real DOM).
+// ---------------------------------------------------------------------------
+const deriveScrollGeometry = createScrollTracker.deriveScrollGeometry;
+const MIN_RATIO = createScrollTracker.MIN_SCROLLABLE_RATIO;
+
+// Build a fake document whose scrollingElement carries the given geometry.
+function mockDoc(scrollTop, scrollHeight) {
+  const documentElement = { scrollTop: 0, scrollHeight: 0, clientHeight: 0 };
+  const body = {};
+  const doc = {
+    documentElement,
+    body,
+    scrollingElement: { scrollTop, scrollHeight },
+  };
+  return doc;
+}
+
+test("deriveScrollGeometry reads document scroll via scrollingElement + innerHeight", () => {
+  const doc = mockDoc(800, 5000);
+  const win = { innerHeight: 900 };
+  // target === document → document-scroll branch.
+  assert.deepEqual(deriveScrollGeometry(doc, doc, win), {
+    pos: 800,
+    viewport: 900,
+    total: 5000,
+  });
+  // target === <html> and === <body> resolve through the same branch.
+  assert.deepEqual(deriveScrollGeometry(doc.documentElement, doc, win), {
+    pos: 800,
+    viewport: 900,
+    total: 5000,
+  });
+  assert.deepEqual(deriveScrollGeometry(doc.body, doc, win), {
+    pos: 800,
+    viewport: 900,
+    total: 5000,
+  });
+});
+
+test("deriveScrollGeometry reads an inner container's own geometry", () => {
+  const doc = mockDoc(0, 0);
+  const win = { innerHeight: 900 };
+  // A real SPA inner scroller (e.g. Discord message list): tall content in a
+  // short viewport. 300px viewport / 3000px content → qualifies (ratio 10).
+  const el = { scrollTop: 1200, clientHeight: 300, scrollHeight: 3000 };
+  assert.deepEqual(deriveScrollGeometry(el, doc, win), {
+    pos: 1200,
+    viewport: 300,
+    total: 3000,
+  });
+});
+
+test("deriveScrollGeometry guards against trivial scrollers (tiny dropdowns)", () => {
+  const doc = mockDoc(0, 0);
+  const win = { innerHeight: 900 };
+  // Just below the ratio threshold → ignored (returns null).
+  const tiny = {
+    scrollTop: 5,
+    clientHeight: 100,
+    scrollHeight: Math.floor(100 * MIN_RATIO) - 1, // < 1.3× → trivial
+  };
+  assert.equal(deriveScrollGeometry(tiny, doc, win), null);
+
+  // At/above the threshold → qualifies.
+  const ok = {
+    scrollTop: 5,
+    clientHeight: 100,
+    scrollHeight: Math.ceil(100 * MIN_RATIO) + 1, // ≥ 1.3× → real scroller
+  };
+  assert.deepEqual(deriveScrollGeometry(ok, doc, win), {
+    pos: 5,
+    viewport: 100,
+    total: Math.ceil(100 * MIN_RATIO) + 1,
+  });
+
+  // A zero-height element can never qualify (avoids divide-by-trivial).
+  const zero = { scrollTop: 0, clientHeight: 0, scrollHeight: 1000 };
+  assert.equal(deriveScrollGeometry(zero, doc, win), null);
+});
+
+test("deriveScrollGeometry returns null for an unknown / non-scrollable target", () => {
+  const doc = mockDoc(0, 0);
+  const win = { innerHeight: 900 };
+  assert.equal(deriveScrollGeometry({}, doc, win), null); // no scrollTop number
+  assert.equal(deriveScrollGeometry(null, doc, win), null);
+  assert.equal(deriveScrollGeometry(doc, doc, undefined).viewport, 0); // no win → 0 viewport
 });

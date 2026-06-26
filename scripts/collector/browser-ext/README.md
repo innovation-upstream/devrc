@@ -12,10 +12,17 @@ is gated on an authenticated ClickHouse.
 ## Components
 - `manifest.json` — MV3 manifest. Permissions: `tabs`, `webNavigation`, `idle`,
   `storage`. Host permission for `http://127.0.0.1:8787/*` only. **A
-  `content_scripts` entry injects `content_scroll.js` into all `http(s)://*`
-  pages** for scroll capture — this broadens the extension's host access to ALL
-  sites (intended; the script only reads scroll geometry and never touches page
-  content, and nothing leaves localhost).
+  `content_scripts` entry injects TWO scripts — `scroll_track.js` then
+  `content_scroll.js`, in that order — into all `http(s)://*` pages** for scroll
+  capture. **Load order matters:** content scripts of the same extension share
+  ONE isolated-world global scope, so the first script (`scroll_track.js`)
+  publishes its factory on `globalThis.__activityScrollTracker` and the second
+  (`content_scroll.js`) reads it synchronously — no dynamic `import()` and no
+  `web_accessible_resources`. (The old dynamic-import-of-a-web-accessible-resource
+  path was CSP-fragile and failed silently, leaving `scroll_pct` stuck at 0.)
+  Injecting content scripts broadens host access to ALL sites (intended; the
+  scripts only read scroll geometry, never page content, and nothing leaves
+  localhost).
 - `service_worker.js` — background worker. Listens on `chrome.tabs.onActivated`,
   `chrome.webNavigation.onCommitted`, `chrome.tabs.onUpdated` (title),
   `chrome.windows.onFocusChanged`, `chrome.idle.onStateChanged`,
@@ -23,14 +30,26 @@ is gated on an authenticated ClickHouse.
   Computes active-duration across tab switches and stores per-tab scroll metrics
   (both persisted in `chrome.storage.session` so they survive MV3 worker
   suspension); folds the LEAVING tab's scroll metrics into its `nav` event.
-- `content_scroll.js` — content script (all http/https pages). Thin DOM/chrome
-  wiring: throttled `scroll` listener → pure tracker → throttled
-  `chrome.runtime.sendMessage` updates + a final flush on
-  `visibilitychange`/`pagehide`. Best-effort; swallows errors when the SW is
-  asleep.
-- `scroll_track.js` — PURE scroll-engagement accumulator (no `window`/`document`/
-  `chrome`, no `Date.now()`; loaded by the content script via dynamic `import()`
-  and listed in `web_accessible_resources`). Unit-tested in plain Node.
+- `content_scroll.js` — content script (all http/https pages), injected SECOND.
+  Thin DOM/chrome wiring: a **capture-phase, document-level** `scroll` listener
+  (`document.addEventListener("scroll", …, { capture: true, passive: true })`)
+  so scroll from ANY element is caught — including SPA inner containers
+  (Discord/Gmail/Grafana) that scroll a `div` rather than the document and never
+  bubble a `window`-level scroll event. It derives `(pos, viewport, total)` from
+  the scrolled element via the pure `deriveScrollGeometry` helper, feeds throttled
+  samples to the tracker (which keeps the MAX depth across all qualifying
+  scrollers this view), and sends throttled `chrome.runtime.sendMessage` updates
+  + a final flush on `visibilitychange`/`pagehide`. Best-effort; swallows errors
+  when the SW is asleep.
+- `scroll_track.js` — PURE scroll accounting, injected FIRST as a CLASSIC
+  (non-ESM) script. No `window`/`document`/`chrome`, no `Date.now()`; no
+  top-level `export`/`import`. It publishes its factory on the shared isolated-
+  world global (`globalThis.__activityScrollTracker`) plus a pure
+  `deriveScrollGeometry(target, doc, win)` helper and the `MIN_SCROLLABLE_RATIO`
+  trivial-scroller threshold (1.3 — an inner container must overflow its own
+  viewport by ≥1.3× to count, so tiny dropdowns/menus don't report 100% depth).
+  Unit-tested in plain Node (the test loads it for its side effect and reads the
+  global).
 - `receiver.py` — stdlib `http.server` bound to `127.0.0.1:8787`. Accepts
   `POST /event`, maps the JSON to a v1 spool record, appends to the spool.
   Shares `../keylog/spool_emit.py` (single source of truth for the line format).
@@ -97,8 +116,10 @@ To point at a TEST spool while validating:
   `nix-shell -p nodejs --run "node --test 'scripts/collector/browser-ext/tests/**/*.test.mjs'"`.
 - Scroll engagement: the PURE `scroll_track.js` (same no-`chrome`/no-`Date.now()`
   discipline) is unit-tested in `tests/scroll_track.test.mjs` (max-depth
-  monotonicity, 0–100 clamp, burst accrual with the >1s gap rule, snapshot/reset).
-  `content_scroll.js` (DOM/chrome wiring) and the SW message→nav fold are NOT
+  monotonicity, 0–100 clamp, burst accrual with the >1s gap rule, snapshot/reset,
+  the classic-script global-publish, and `deriveScrollGeometry`'s document vs
+  inner-container branches + the trivial-scroller guard threshold). The remaining
+  `content_scroll.js` DOM/listener wiring and the SW message→nav fold are NOT
   exercised headlessly — verify in the load-unpacked step below.
 - The end-to-end **load-unpacked in a real browser** step is a MANUAL step (MV3
   service workers are not reliably driveable headlessly). Follow "Load unpacked"

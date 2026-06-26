@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Activity Collector (browser)",
-  "version": "1.2.0",
+  "version": "1.3.0",
   "description": "Self-instrumentation: reports active tab URL/title, active-duration, scroll engagement, and focus/idle transitions to a localhost activity collector. Full URL capture, local-only.",
   "permissions": ["tabs", "webNavigation", "idle", "storage"],
   "host_permissions": ["http://127.0.0.1:8787/*"],
@@ -18,15 +18,9 @@
   "content_scripts": [
     {
       "matches": ["http://*/*", "https://*/*"],
-      "js": ["content_scroll.js"],
+      "js": ["scroll_track.js", "content_scroll.js"],
       "run_at": "document_idle",
       "all_frames": false
-    }
-  ],
-  "web_accessible_resources": [
-    {
-      "resources": ["scroll_track.js"],
-      "matches": ["http://*/*", "https://*/*"]
     }
   ]
 }
