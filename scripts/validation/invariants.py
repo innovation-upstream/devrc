@@ -23,30 +23,40 @@ from typing import Callable
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from chquery import CHClient, CHConn  # noqa: E402
 
-# active_ms (browser/keys) is IDLE-AWARE engagement time, so a single event over
-# this is an idle-detection bug. duration_ms (zsh command wall-clock) is NOT
-# idle-aware — a long interactive command (claude/vim/ssh held open for hours)
-# legitimately exceeds it — so raw duration is preserved and only gets the high
-# SANITY bound below (catches clock-skew/parse garbage, not real long sessions).
-ACTIVE_MS_CAP = 6 * 60 * 60 * 1000  # 6h of engagement in one event = implausible
 DURATION_SANITY_CAP = 24 * 60 * 60 * 1000  # >24h in one command = garbage
 # Slack for the local-vs-UTC timezone offset on the "no future ts" check.
 FUTURE_SLACK_HOURS = 26  # > max |tz offset| (14h) + margin
 # Oldest plausible ts: the table TTL is 180d, but data only started 2026; guard
 # against an epoch-0 / 1970 clock-skew bug.
 OLDEST_PLAUSIBLE = "2025-01-01 00:00:00"
-# Trailing window for the per-(host,hour) active-time HEALTH invariant ONLY.
-# This telemetry store is APPEND-ONLY and raw rows are intentionally NEVER
-# mutated (a documented project decision), so any historical hours inflated by a
-# *fixed* bug (e.g. the active_ms read-modify-write race) would otherwise keep
-# this all-time scan RED forever — long after the code is corrected and
-# deployed. Windowing it to recent ingestion makes it a CURRENT-health signal:
-# it recovers as the bad hours age out, while still catching any NEW inflation
-# promptly. This is NOT weakening the check to hide a live bug — the race is
-# fixed in the extension; this only lets a legitimately-recovered system report
-# green. All the OTHER invariants stay all-time (they guard immutable
-# correctness properties, not transient ingestion health).
-ACTIVE_CAP_WINDOW_HOURS = 48
+
+# RETIRED METRIC — browser extension `active_ms` (and its guards) ----------------
+# The browser extension's per-page `active_ms` is STRUCTURALLY WRONG on the i3
+# host and is NO LONGER a trusted or displayed metric. `chrome.idle` measures
+# *system-wide* input (so typing in the terminal kept the browser counted as
+# "active") and `chrome.windows.onFocusChanged` blur is unreliable on i3 — so the
+# extension counted time-spent-in-OTHER-apps as browser engagement (a 10-min
+# stretch focused entirely on Alacritty logged as ~60 min of Brave "active";
+# 2026-06-27 11:00-12:00 UTC read ~144 min "active" against only 12.4 min of
+# actual i3 Brave focus). The two invariants that guarded `active_ms`
+# (`active_ms_capped`, `per_host_hour_active_cap`) and their constants
+# (`ACTIVE_MS_CAP`, `ACTIVE_CAP_WINDOW_HOURS`) have therefore been REMOVED — the
+# metric is being RETIRED, not silenced: there is nothing left to guard once it's
+# no longer trusted/shown. True per-domain browser attention is now DERIVED
+# downstream by intersecting i3 Brave-focused intervals with the active-tab
+# domain timeline (see `derived_attention_consistent` below + the dashboard panel
+# "Browser attention by domain (i3-derived, s)"). The vestigial `active_ms` field
+# is still emitted by the extension (stripping it needs an operator Brave reload);
+# that is a deferred follow-up and does not affect correctness here.
+
+# Dwell cap applied to a single i3 focus interval, matching the dashboard's
+# i3-dwell panels (an idle focus must not inflate attention). 30 minutes in ms.
+DWELL_CAP_MS = 30 * 60 * 1000
+# Tolerance for the derived-attention <= i3-Brave-dwell bound (boundary straddle /
+# rounding). 2% of the dwell.
+DERIVED_ATTENTION_TOL = 0.02
+# Trailing window for the derived-attention consistency check (current-health).
+DERIVED_ATTENTION_WINDOW_HOURS = 48
 
 EXPECTED_HOSTS = {"workbench", "laptop"}
 EXPECTED_SOURCES = {"zsh", "tmux", "keys", "browser", "claude", "i3"}
@@ -92,23 +102,104 @@ def eval_unexpected_set(allowed: set, label: str):
     return _ev
 
 
-def eval_per_host_hour_cap(rows, cap_ms: int = 60 * 60 * 1000):
-    """PASS iff no (host,hour) bucket sums more active time than the wall clock.
+def eval_derived_attention(rows):
+    """PASS iff the DERIVED per-domain browser attention is internally consistent.
 
-    rows: [{host, hour, active_ms}, ...]. Summed active time within any one
-    clock-hour bucket cannot exceed 60 minutes of real time (a sanity bound on
-    double-counted / runaway active_ms). A small overshoot tolerance covers the
-    bucket-boundary case where a single long dwell straddles the hour edge.
+    This is the replacement guard for the retired `active_ms` invariants. It
+    checks the new i3-derived attention metric (intersection of i3 Brave-focused
+    intervals with the active-tab domain timeline) against two structural bounds
+    that the intersection MUST satisfy by construction:
+
+      1. No single domain's attention exceeds wall-clock for the window
+         (an interval intersection can never exceed elapsed real time).
+      2. The SUM of per-domain Brave attention is <= total i3 Brave dwell for the
+         same window (the intersection is a subset of the i3 Brave intervals), up
+         to a small tolerance for boundary-straddle/rounding.
+
+    rows: a single-row result
+      [{derived_total_ms, brave_dwell_ms, max_domain_ms, wallclock_ms}].
+    If there's no browser/i3 data in the window (e.g. headless workbench) the
+    metric is vacuously consistent -> PASS.
     """
-    tol = int(cap_ms * 0.05)
-    over = []
-    for r in rows or []:
-        ams = int(r.get("active_ms") or 0)
-        if ams > cap_ms + tol:
-            over.append(f"{r.get('host')}@{r.get('hour')}={ams}ms")
-    if over:
-        return (False, f"per-(host,hour) active time over 60min: {', '.join(over)}")
-    return (True, "per-(host,hour) active time within 60min")
+    if not rows:
+        return (True, "derived attention: no rows in window (vacuous PASS)")
+    r = rows[0]
+    derived_total = int(r.get("derived_total_ms") or 0)
+    brave_dwell = int(r.get("brave_dwell_ms") or 0)
+    max_domain = int(r.get("max_domain_ms") or 0)
+    wallclock = int(r.get("wallclock_ms") or 0)
+    problems = []
+    if wallclock and max_domain > wallclock:
+        problems.append(
+            f"max-domain {max_domain}ms exceeds wall-clock {wallclock}ms")
+    bound = int(brave_dwell * (1 + DERIVED_ATTENTION_TOL))
+    if derived_total > bound:
+        problems.append(
+            f"sum-per-domain {derived_total}ms exceeds i3 Brave dwell "
+            f"{brave_dwell}ms (+{int(DERIVED_ATTENTION_TOL*100)}% tol)")
+    if problems:
+        return (False, "derived attention inconsistent: " + "; ".join(problems))
+    return (True,
+            f"derived attention consistent: sum={derived_total}ms <= "
+            f"brave_dwell={brave_dwell}ms, max_domain={max_domain}ms <= "
+            f"wallclock={wallclock}ms")
+
+
+# --------------------------------------------------------------------------- #
+# Derived-attention SQL (the replacement guard for the retired active_ms checks)
+# --------------------------------------------------------------------------- #
+def derived_attention_sql(table: str = "activity.events",
+                          window_hours: int = DERIVED_ATTENTION_WINDOW_HOURS,
+                          cap_ms: int = DWELL_CAP_MS) -> str:
+    """SQL computing the i3-derived per-domain browser attention summary.
+
+    Intersects i3 Brave-focused intervals (dwell-capped) with the active-tab
+    domain timeline (from browser `nav` events; the URL is in `text`), and
+    returns ONE row of structural aggregates the evaluator can bound:
+
+      derived_total_ms  sum of intersection across all domains
+      brave_dwell_ms    total i3 Brave dwell over the window (the upper bound)
+      max_domain_ms     largest single-domain attention (must be <= wall-clock)
+      wallclock_ms      elapsed real time of the window
+
+    The interval END for each i3 focus uses leadInFrame over ALL i3 focus events
+    (the next focus of anything), then keeps only Brave rows — so a Brave
+    interval ends when focus LEAVES Brave, not at the next Brave focus. Restricted
+    to host='laptop' (the only GUI host with i3 + browser); Brave only (the
+    extension runs only in Brave, so Chromium focus has no domain data).
+    """
+    w = f"ts > now() - INTERVAL {window_hours} HOUR"
+    return (
+        "WITH brave AS ( "
+        "SELECT bs, be FROM ( "
+        "SELECT toUnixTimestamp64Milli(ts) AS bs, app, "
+        "least((leadInFrame(toUnixTimestamp64Milli(ts), 1, toUnixTimestamp64Milli(ts)) "
+        "OVER (PARTITION BY host ORDER BY ts ASC ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING)), "
+        f"toUnixTimestamp64Milli(ts) + {cap_ms}) AS be "
+        f"FROM {table} WHERE source = 'i3' AND kind = 'window-focus' "
+        f"AND host = 'laptop' AND {w} "
+        ") WHERE app = 'Brave-browser' "
+        "), dom AS ( "
+        f"SELECT d, ds, least(de, ds + {cap_ms}) AS de FROM ( "
+        "SELECT if(domain(text) != '', domain(text), netloc(text)) AS d, "
+        "toUnixTimestamp64Milli(ts) AS ds, "
+        f"(leadInFrame(toUnixTimestamp64Milli(ts), 1, toUnixTimestamp64Milli(ts) + {cap_ms}) "
+        "OVER (PARTITION BY host ORDER BY ts ASC ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING)) AS de "
+        f"FROM {table} WHERE source = 'browser' AND kind = 'nav' AND text != '' "
+        f"AND host = 'laptop' AND {w} "
+        ") ), "
+        "per_domain AS ( "
+        "SELECT dom.d AS d, "
+        "sum(greatest(0, least(be, de) - greatest(bs, ds))) AS attn_ms "
+        "FROM brave CROSS JOIN dom WHERE be > ds AND de > bs "
+        "GROUP BY dom.d HAVING attn_ms > 0 "
+        ") "
+        "SELECT "
+        "toInt64(ifNull((SELECT sum(attn_ms) FROM per_domain), 0)) AS derived_total_ms, "
+        "toInt64(ifNull((SELECT sum(be - bs) FROM brave), 0)) AS brave_dwell_ms, "
+        "toInt64(ifNull((SELECT max(attn_ms) FROM per_domain), 0)) AS max_domain_ms, "
+        f"toInt64({window_hours} * 3600 * 1000) AS wallclock_ms"
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -129,17 +220,13 @@ def build_invariants(table: str = "activity.events") -> list[Invariant]:
             f"SELECT count() FROM {table} WHERE toInt64(duration_ms) < 0",
             eval_zero_violations("duration_ms < 0"),
         ),
-        Invariant(
-            "active_ms_capped",
-            "SELECT count() FROM " + table + " WHERE "
-            f"toUInt32OrZero(JSONExtractString(payload, 'active_ms')) > {ACTIVE_MS_CAP}",
-            eval_zero_violations(f"active_ms > {ACTIVE_MS_CAP}ms cap"),
-        ),
+        # NOTE: `active_ms_capped` was REMOVED here — the browser extension's
+        # `active_ms` is a retired, untrusted metric (see the RETIRED METRIC note
+        # at the top of this module). Its replacement is `derived_attention_consistent`.
         Invariant(
             "duration_ms_capped",
             # Raw duration is PRESERVED (a multi-hour interactive `claude` is real);
-            # only flag values above the 24h garbage bound. Long durations no longer
-            # inflate active time — per_host_hour_active_cap now sums active_ms only.
+            # only flag values above the 24h garbage bound.
             f"SELECT count() FROM {table} WHERE duration_ms > {DURATION_SANITY_CAP}",
             eval_zero_violations(f"duration_ms > {DURATION_SANITY_CAP}ms (garbage)"),
         ),
@@ -158,25 +245,24 @@ def build_invariants(table: str = "activity.events") -> list[Invariant]:
             f"SELECT source AS value, count() AS count FROM {table} GROUP BY source",
             eval_unexpected_set(EXPECTED_SOURCES, "source"),
         ),
+        # NOTE: `per_host_hour_active_cap` was REMOVED here — it guarded the
+        # retired `active_ms` metric (see the RETIRED METRIC note at the top).
+        # `derived_attention_consistent` below is its structural replacement.
         Invariant(
-            "per_host_hour_active_cap",
-            # Engagement time per (host, clock-hour) — IDLE-AWARE active_ms ONLY.
-            # duration_ms (command wall-clock) is deliberately excluded: it is not
-            # active engagement, and a long interactive command (claude) would
-            # otherwise falsely blow past the 60min/hour bound.
-            #
-            # TRAILING WINDOW (this invariant only): see ACTIVE_CAP_WINDOW_HOURS
-            # above — the append-only store never rewrites bad historical hours,
-            # so this health check is windowed to recent ingestion rather than
-            # scanning all-time, letting a fixed+deployed system recover to green
-            # while still catching NEW inflation. NB: `ts` is the host LOCAL wall
-            # clock and now() is UTC, so the window edge is fuzzy by the tz offset
-            # — acceptable for a 48h health window (we only need "recent").
-            "SELECT host, toStartOfHour(ts) AS hour, "
-            "sum(toUInt32OrZero(JSONExtractString(payload, 'active_ms'))) AS active_ms "
-            f"FROM {table} WHERE ts > now() - INTERVAL {ACTIVE_CAP_WINDOW_HOURS} HOUR "
-            "GROUP BY host, hour",
-            eval_per_host_hour_cap,
+            "derived_attention_consistent",
+            # The replacement guard. Asserts the NEW i3-derived per-domain browser
+            # attention is internally consistent: sum-per-domain <= total i3 Brave
+            # dwell (the intersection is a subset of the i3 Brave intervals) and no
+            # single domain exceeds wall-clock. Trailing-windowed (current-health,
+            # like the metric it replaces): the append-only store never rewrites
+            # history, but the DERIVED metric is bounded BY CONSTRUCTION so it can
+            # never go inconsistent unless the query/data shape regresses — this
+            # catches such a regression promptly. NB: `ts` is host-LOCAL and now()
+            # is UTC, so the window edge is fuzzy by the tz offset — fine for a
+            # recent-health window. Vacuously PASSes when there's no GUI data
+            # (e.g. the headless workbench has no i3/browser rows).
+            derived_attention_sql(table),
+            eval_derived_attention,
         ),
     ]
 
@@ -187,7 +273,7 @@ def run_invariants(client: CHClient) -> list[Result]:
     for inv in build_invariants(table):
         try:
             # Multi-row evaluators expect rows(); scalar evaluators expect a number.
-            if inv.name in ("expected_hosts", "expected_sources", "per_host_hour_active_cap"):
+            if inv.name in ("expected_hosts", "expected_sources", "derived_attention_consistent"):
                 data = client.rows(inv.sql)
             else:
                 data = client.scalar(inv.sql)

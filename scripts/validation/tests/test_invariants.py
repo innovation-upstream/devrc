@@ -51,45 +51,77 @@ def test_unexpected_set_ignores_empty_value():
     assert ev(rows)[0] is True
 
 
-def test_per_host_hour_cap_clean():
-    rows = [
-        {"host": "workbench", "hour": "2026-06-24 07:00:00", "active_ms": 60 * 60 * 1000},
-        {"host": "laptop", "hour": "2026-06-24 08:00:00", "active_ms": 1234},
-    ]
-    assert I.eval_per_host_hour_cap(rows)[0] is True
+# --------------------------------------------------------------------------- #
+# Derived-attention consistency (the replacement guard for the retired active_ms
+# invariants — see the RETIRED METRIC note in invariants.py).
+# --------------------------------------------------------------------------- #
+def test_derived_attention_clean():
+    # sum-per-domain <= brave dwell and max-domain <= wall-clock -> PASS.
+    rows = [{"derived_total_ms": 18_000_000, "brave_dwell_ms": 20_000_000,
+             "max_domain_ms": 3_000_000, "wallclock_ms": 172_800_000}]
+    passed, detail = I.eval_derived_attention(rows)
+    assert passed is True, detail
 
 
-def test_per_host_hour_cap_catches_overflow():
-    rows = [
-        {"host": "workbench", "hour": "2026-06-24 07:00:00", "active_ms": 90 * 60 * 1000},
-    ]
-    passed, detail = I.eval_per_host_hour_cap(rows)
+def test_derived_attention_catches_sum_over_dwell():
+    # The intersection can NEVER exceed total i3 Brave dwell — this is the core
+    # structural property that the broken active_ms metric violated (20x inflated).
+    rows = [{"derived_total_ms": 40_000_000, "brave_dwell_ms": 20_000_000,
+             "max_domain_ms": 5_000_000, "wallclock_ms": 172_800_000}]
+    passed, detail = I.eval_derived_attention(rows)
     assert passed is False
-    assert "workbench" in detail
+    assert "Brave dwell" in detail
 
 
-def test_per_host_hour_cap_tolerates_small_overshoot():
-    # 60min + 2% < 5% tolerance -> still PASS (boundary-straddle case)
-    rows = [{"host": "h", "hour": "x", "active_ms": int(60 * 60 * 1000 * 1.02)}]
-    assert I.eval_per_host_hour_cap(rows)[0] is True
+def test_derived_attention_catches_domain_over_wallclock():
+    rows = [{"derived_total_ms": 1000, "brave_dwell_ms": 1000,
+             "max_domain_ms": 200_000_000, "wallclock_ms": 172_800_000}]
+    passed, detail = I.eval_derived_attention(rows)
+    assert passed is False
+    assert "wall-clock" in detail
 
 
-def test_per_host_hour_cap_query_is_windowed():
-    # The active-time HEALTH invariant must scan only a trailing window, not
-    # all-time — the append-only store never rewrites bad historical hours, so an
-    # all-time scan would stay RED forever after a fixed+deployed bug. Every
-    # OTHER invariant must stay all-time (no such WHERE-ts window).
+def test_derived_attention_tolerates_small_overshoot():
+    # sum at +1% (< 2% tolerance) for boundary-straddle/rounding -> PASS.
+    dwell = 20_000_000
+    rows = [{"derived_total_ms": int(dwell * 1.01), "brave_dwell_ms": dwell,
+             "max_domain_ms": 1000, "wallclock_ms": 172_800_000}]
+    assert I.eval_derived_attention(rows)[0] is True
+
+
+def test_derived_attention_vacuous_when_no_data():
+    # Headless host / empty window: no rows -> vacuously consistent.
+    assert I.eval_derived_attention([])[0] is True
+    assert I.eval_derived_attention(
+        [{"derived_total_ms": 0, "brave_dwell_ms": 0,
+          "max_domain_ms": 0, "wallclock_ms": 172_800_000}])[0] is True
+
+
+def test_derived_attention_query_is_windowed_and_brave_only():
+    # The derived-attention check is trailing-windowed (current-health) and
+    # restricted to Brave + the laptop GUI host. Every OTHER invariant stays
+    # all-time (they guard immutable correctness, not transient health).
     invs = {inv.name: inv for inv in I.build_invariants("activity.events")}
-    cap = invs["per_host_hour_active_cap"]
-    assert f"INTERVAL {I.ACTIVE_CAP_WINDOW_HOURS} HOUR" in cap.sql
-    assert "WHERE ts > now() -" in cap.sql
-    assert I.ACTIVE_CAP_WINDOW_HOURS == 48
-    # No other invariant should carry a trailing ts window (they guard immutable
-    # correctness, not transient health).
+    da = invs["derived_attention_consistent"]
+    assert f"INTERVAL {I.DERIVED_ATTENTION_WINDOW_HOURS} HOUR" in da.sql
+    assert "now() - INTERVAL" in da.sql
+    assert "Brave-browser" in da.sql
+    assert "host = 'laptop'" in da.sql
+    assert I.DERIVED_ATTENTION_WINDOW_HOURS == 48
     for name, inv in invs.items():
-        if name == "per_host_hour_active_cap":
+        if name == "derived_attention_consistent":
             continue
         assert "now() - INTERVAL" not in inv.sql, f"{name} unexpectedly windowed"
+
+
+def test_retired_active_ms_invariants_are_gone():
+    # The broken active_ms metric is RETIRED — its guards must no longer exist.
+    names = {inv.name for inv in I.build_invariants("activity.events")}
+    assert "active_ms_capped" not in names
+    assert "per_host_hour_active_cap" not in names
+    assert not hasattr(I, "ACTIVE_MS_CAP")
+    assert not hasattr(I, "ACTIVE_CAP_WINDOW_HOURS")
+    assert not hasattr(I, "eval_per_host_hour_cap")
 
 
 # --------------------------------------------------------------------------- #
@@ -106,8 +138,9 @@ class FakeClient:
         return 0  # no violations
 
     def rows(self, sql):
-        if "GROUP BY host, hour" in sql:
-            return [{"host": "workbench", "hour": "2026-06-24 07:00:00", "active_ms": 1000}]
+        if "per_domain" in sql:  # derived_attention_consistent
+            return [{"derived_total_ms": 18_000_000, "brave_dwell_ms": 20_000_000,
+                     "max_domain_ms": 3_000_000, "wallclock_ms": 172_800_000}]
         if "GROUP BY source" in sql:
             return [{"value": "zsh", "count": 5}]
         if "GROUP BY host" in sql:
@@ -118,10 +151,10 @@ class FakeClient:
 def test_run_invariants_all_pass_on_clean_data():
     results = I.run_invariants(FakeClient())
     names = {r.name for r in results}
-    # all the documented invariants present
-    assert {"no_future_ts", "duration_ms_nonneg", "active_ms_capped",
+    # all the documented invariants present (active_ms guards retired)
+    assert {"no_future_ts", "duration_ms_nonneg", "duration_ms_capped",
             "ts_not_ancient", "expected_hosts", "expected_sources",
-            "per_host_hour_active_cap"} <= names
+            "derived_attention_consistent"} <= names
     assert all(r.passed for r in results), [r.detail for r in results if not r.passed]
 
 
@@ -130,8 +163,9 @@ class FailClient(FakeClient):
         return 7  # violations everywhere
 
     def rows(self, sql):
-        if "GROUP BY host, hour" in sql:
-            return [{"host": "h", "hour": "x", "active_ms": 99 * 60 * 1000}]
+        if "per_domain" in sql:  # derived attention inconsistent (sum > dwell)
+            return [{"derived_total_ms": 40_000_000, "brave_dwell_ms": 20_000_000,
+                     "max_domain_ms": 5_000_000, "wallclock_ms": 172_800_000}]
         if "GROUP BY source" in sql:
             return [{"value": "evil-source", "count": 1}]
         if "GROUP BY host" in sql:
@@ -145,7 +179,7 @@ def test_run_invariants_catches_violations():
     assert "no_future_ts" in failed
     assert "expected_sources" in failed
     assert "expected_hosts" in failed
-    assert "per_host_hour_active_cap" in failed
+    assert "derived_attention_consistent" in failed
 
 
 def test_run_invariants_query_error_is_fail():
