@@ -36,10 +36,40 @@ validate.py     — runner (invariants + reconcile always; replay+assert with --
   asserts each equals the replay's expected value (counts, active_ms, switches,
   deep-work, **timezone hour-bucket**).
 - **`invariants.py`** — SQL sanity checks over all rows: no future ts (with a
-  tz-slack window — see below), `duration_ms >= 0`, active_ms/duration_ms within
-  a plausible cap, per-(host,hour) active time ≤ 60min, only expected
-  host/source values, ts not clock-skewed-ancient. Surfaces ingestion lag as a
-  collector-health proxy.
+  tz-slack window — see below), `duration_ms >= 0`, `duration_ms` within the 24h
+  garbage cap, only expected host/source values, ts not clock-skewed-ancient,
+  and the **`derived_attention_consistent`** check (see *Retired metric* below).
+  Surfaces ingestion lag as a collector-health proxy.
+
+### Retired metric: browser extension `active_ms`
+The browser extension's per-page `active_ms` was **structurally wrong on the i3
+host** and has been **retired** (no longer trusted or displayed):
+`chrome.idle` measures *system-wide* input — so typing in the terminal kept the
+browser counted as "active" — and `chrome.windows.onFocusChanged` blur is
+unreliable on i3. It counted time-spent-in-OTHER-apps as browser engagement (a
+10-min stretch focused entirely on Alacritty logged as ~60 min of Brave
+"active"; 2026-06-27 11:00–12:00 UTC read ~144 min "active" against only 12.4 min
+of actual i3 Brave focus). Because the metric is **retired, not hidden**, its two
+guards — `active_ms_capped` and `per_host_hour_active_cap` — and their constants
+(`ACTIVE_MS_CAP`, `ACTIVE_CAP_WINDOW_HOURS`) were **removed**: there is nothing
+to guard once the metric isn't trusted/shown.
+
+**Replacement — true per-domain browser attention (i3-derived):** computed
+downstream by intersecting **i3 Brave-focused intervals** (the OS-level truth of
+when the browser actually had focus; dwell-capped at 30 min, matching the
+dashboard's i3-dwell panels) with the **active-tab domain timeline** from
+browser `nav` events (`domain(text)` from each nav's ts to the next nav's ts),
+summing the overlap per domain. Brave only (the extension runs only in Brave;
+Chromium focus has no domain data → excluded); laptop-only. This powers the
+dashboard panel **"Browser attention by domain (i3-derived, s)"**.
+
+The new **`derived_attention_consistent`** invariant is its deterministic guard:
+over a trailing 48h window it asserts the derived metric's two structural bounds
+(which the broken `active_ms` violated): (1) sum-per-domain attention ≤ total i3
+Brave dwell (+2% tol) — an intersection is a subset of the i3 Brave intervals —
+and (2) no single domain exceeds wall-clock. Vacuously PASSes on a host with no
+GUI data. The extension still emits the vestigial `active_ms` (stripping it needs
+an operator Brave reload — a deferred follow-up), but nothing consumes it.
 - **`reconcile.py`** — for a recent window, diffs each source against an
   independent existing record: zsh ↔ `~/.zsh_history`, browser ↔ Chrome/Brave
   `History` sqlite (read from a copy — the live DB is locked), tmux ↔
