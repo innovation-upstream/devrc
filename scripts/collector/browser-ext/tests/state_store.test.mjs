@@ -1,20 +1,25 @@
-// Concurrency tests for state_store.js — the serialized (race-free) state store.
+// Concurrency tests for state_store.js — the serialized (race-free) tab+scroll
+// store.
 //
 // These drive the store with a FAKE chrome.storage.session (a plain in-memory
 // object with async get/set) and a fake `post`, so the concurrency-critical
 // read-modify-write logic is exercised WITHOUT a real Chrome.
 //
-// The key tests reproduce the production bug and assert it's gone:
-//   - no lost update under concurrency (an idle pause racing a tab switch is
-//     banked, not clobbered; total emitted active_ms == the single real span,
-//     NOT 2x it — i.e. no double-count).
+// The key tests:
 //   - redundant-nav suppression (a second identical {tabId,url} emits no nav;
-//     a same-tab DIFFERENT-url still emits).
+//     a same-tab DIFFERENT-url still emits) — relies on the lock for consistent
+//     reads.
+//   - scroll-map serialization (a take for tab X must not lose a concurrent put
+//     for tab Y).
+//   - tab tracking (the leaving tab's scroll metrics fold into the nav event).
+//   - the nav payload no longer carries the retired active_ms/state fields.
+//
+// (The per-page active_ms accumulator + focus/idle handling this store used to
+// integrate have been RETIRED — see service_worker.js.)
 //
 // Run: nix-shell -p nodejs --run "node --test 'scripts/collector/browser-ext/tests/**/*.test.mjs'"
 import test from "node:test";
 import assert from "node:assert/strict";
-import * as AT from "../active_time.js";
 import { createStateStore, makeLock } from "../state_store.js";
 
 // A fake chrome.storage.session: in-memory key/value with an awaitable get/set.
@@ -45,7 +50,6 @@ function makeStore(storage, now) {
   const store = createStateStore({
     storage,
     post: async (e) => { posted.push(e); },
-    AT,
     buildEvent: (kind, p) => ({ kind, ...p }),
     now,
   });
@@ -74,58 +78,16 @@ test("makeLock keeps the chain alive after a throw", async () => {
   assert.equal(r, 42);
 });
 
-// --- THE BUG: lost idle pause + double-count under concurrency ------------- //
-// Scenario: tab is active and accruing. The user goes idle at the SAME instant
-// the worker processes a tab switch — both handlers fire and interleave at
-// their storage await points. Pre-fix, the second writer clobbered the first's
-// mutation, so the idle pause was lost and BOTH take()s returned the full span.
-test("idle racing a tab switch: pause is banked, NOT clobbered (no double-count)", async () => {
+// --- double-fired switch (onActivated+onCommitted) ------------------------- //
+// Two concurrent onTabChange for the SAME destination (onActivated + onCommitted
+// both firing for one switch). The lock + redundant-nav suppression mean the
+// second runs after the first recorded the new tab and is suppressed.
+test("double-fired switch (onActivated+onCommitted): exactly one nav", async () => {
   const storage = makeFakeStorage(2); // nonzero delay forces interleave
   let clock = 0;
   const { store, posted } = makeStore(storage, () => clock);
-
-  // Seed an active tab (A) that has been focused for 10 min of real time.
-  await storage.set({ active_state: { tabId: 1, url: "a", title: "A", accum: AT.freshState(0, true) } });
-  clock = 10 * 60_000; // 10 min later, two events fire "simultaneously":
-
-  // (1) user goes idle -> should bank the 10-min span and PAUSE.
-  // (2) tab switch A -> B -> should take() the active span as the nav active_ms.
-  // Fire WITHOUT awaiting between them so they race.
-  const pIdle = store.applyAccum(AT.onIdle, clock);
-  const pSwitch = store.onTabChange({ tabId: 2, url: "b", title: "B" });
-  const [, switchRes] = await Promise.all([pIdle, pSwitch]);
-
-  // Exactly one nav event emitted (the A->B switch).
-  const navs = posted.filter((e) => e.kind === "nav");
-  assert.equal(navs.length, 1);
-
-  // The total active_ms attributed to the switch must equal the SINGLE real
-  // 10-min span — never 2x it. (Pre-fix this could be ~20 min: the idle write
-  // and the switch write both saw since=0 and the clobber lost the reset.)
-  const totalActive = navs.reduce((s, e) => s + e.active_ms, 0);
-  assert.equal(totalActive, 10 * 60_000,
-    `expected one 10-min span, got ${totalActive}ms across ${navs.length} nav(s)`);
-  assert.ok(switchRes.emitted);
-
-  // And whichever order they settled in, the accumulator must not have leaked a
-  // second full span: advancing the clock with no further activity yields a
-  // bounded, single-span take(), never a doubled value.
-  clock += 60_000; // +1 min
-  const after = await store.onTabChange({ tabId: 3, url: "c", title: "C" });
-  assert.ok(after.active_ms <= 60_000 + 5,
-    `follow-up active_ms ${after.active_ms} should be <= ~1 min, not a leaked span`);
-});
-
-// Two concurrent onTabChange for the SAME destination (onActivated + onCommitted
-// both firing for one switch). Pre-fix: both take() the full span -> two nav
-// events each carrying the full active_ms (the proven double-count). Post-fix:
-// the second runs after the first reset since=now AND is suppressed as redundant.
-test("double-fired switch (onActivated+onCommitted): no duplicate full-span nav", async () => {
-  const storage = makeFakeStorage(2);
-  let clock = 0;
-  const { store, posted } = makeStore(storage, () => clock);
-  await storage.set({ active_state: { tabId: 1, url: "a", title: "A", accum: AT.freshState(0, true) } });
-  clock = 30 * 60_000; // 30 min focused on A
+  await storage.set({ active_state: { tabId: 1, url: "a", title: "A" } });
+  clock = 30 * 60_000;
 
   // Same destination B fired twice, concurrently.
   const p1 = store.onTabChange({ tabId: 2, url: "b", title: "B" });
@@ -135,8 +97,28 @@ test("double-fired switch (onActivated+onCommitted): no duplicate full-span nav"
   const navs = posted.filter((e) => e.kind === "nav");
   // Only ONE nav emitted; the second identical {tabId,url} is suppressed.
   assert.equal(navs.length, 1, `expected 1 nav, got ${navs.length}`);
-  // And it carries the single real span, not 2x.
-  assert.equal(navs[0].active_ms, 30 * 60_000);
+  assert.equal(navs[0].url, "b");
+});
+
+// --- the nav payload no longer carries retired fields ---------------------- //
+test("nav event carries url/title/scroll but NOT active_ms/state", async () => {
+  const storage = makeFakeStorage();
+  let clock = 0;
+  const { store, posted } = makeStore(storage, () => clock);
+  await storage.set({ active_state: { tabId: 1, url: "a", title: "A" } });
+  await store.putScroll(1, 64, 3200);
+
+  clock = 5000;
+  await store.onTabChange({ tabId: 2, url: "b", title: "B" });
+  const nav = posted.find((e) => e.kind === "nav");
+  assert.ok(nav, "a nav event should have been emitted");
+  assert.equal(nav.url, "b");
+  assert.equal(nav.title, "B");
+  assert.equal(nav.scroll_pct, 64);
+  assert.equal(nav.scroll_ms, 3200);
+  // Retired fields must be absent.
+  assert.ok(!("active_ms" in nav), "nav must NOT carry active_ms");
+  assert.ok(!("state" in nav), "nav must NOT carry state");
 });
 
 // --- redundant-nav suppression --------------------------------------------- //
@@ -144,7 +126,7 @@ test("redundant onTabChange (same tabId+url) emits no nav", async () => {
   const storage = makeFakeStorage();
   let clock = 0;
   const { store, posted } = makeStore(storage, () => clock);
-  await storage.set({ active_state: { tabId: 1, url: "a", title: "A", accum: AT.freshState(0, true) } });
+  await storage.set({ active_state: { tabId: 1, url: "a", title: "A" } });
 
   clock = 1000;
   const r = await store.onTabChange({ tabId: 1, url: "a", title: "A (refreshed title)" });
@@ -156,7 +138,7 @@ test("same-tab DIFFERENT-url IS a real navigation and still emits", async () => 
   const storage = makeFakeStorage();
   let clock = 0;
   const { store, posted } = makeStore(storage, () => clock);
-  await storage.set({ active_state: { tabId: 1, url: "a", title: "A", accum: AT.freshState(0, true) } });
+  await storage.set({ active_state: { tabId: 1, url: "a", title: "A" } });
 
   clock = 2000;
   const r = await store.onTabChange({ tabId: 1, url: "a2", title: "A2" });
@@ -164,7 +146,19 @@ test("same-tab DIFFERENT-url IS a real navigation and still emits", async () => 
   const navs = posted.filter((e) => e.kind === "nav");
   assert.equal(navs.length, 1);
   assert.equal(navs[0].url, "a2");
-  assert.equal(navs[0].active_ms, 2000);
+});
+
+// --- tab tracking ---------------------------------------------------------- //
+test("updateTitle refreshes the stored title for the current tab only", async () => {
+  const storage = makeFakeStorage();
+  const { store } = makeStore(storage, () => 0);
+  await storage.set({ active_state: { tabId: 1, url: "a", title: "A" } });
+
+  await store.updateTitle(2, "Wrong tab"); // not the current tab → ignored
+  assert.equal((await store._getState()).title, "A");
+
+  await store.updateTitle(1, "New Title"); // current tab → applied
+  assert.equal((await store._getState()).title, "New Title");
 });
 
 // --- scroll map serialization ---------------------------------------------- //
@@ -192,7 +186,7 @@ test("onTabChange folds the leaving tab's scroll metrics into the nav event", as
   const storage = makeFakeStorage();
   let clock = 0;
   const { store, posted } = makeStore(storage, () => clock);
-  await storage.set({ active_state: { tabId: 7, url: "p", title: "P", accum: AT.freshState(0, true) } });
+  await storage.set({ active_state: { tabId: 7, url: "p", title: "P" } });
   await store.putScroll(7, 88, 12500);
 
   clock = 3000;
@@ -200,5 +194,4 @@ test("onTabChange folds the leaving tab's scroll metrics into the nav event", as
   const nav = posted.find((e) => e.kind === "nav");
   assert.equal(nav.scroll_pct, 88);
   assert.equal(nav.scroll_ms, 12500);
-  assert.equal(nav.active_ms, 3000);
 });

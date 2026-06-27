@@ -45,9 +45,9 @@ OLDEST_PLAUSIBLE = "2025-01-01 00:00:00"
 # no longer trusted/shown. True per-domain browser attention is now DERIVED
 # downstream by intersecting i3 Brave-focused intervals with the active-tab
 # domain timeline (see `derived_attention_consistent` below + the dashboard panel
-# "Browser attention by domain (i3-derived, s)"). The vestigial `active_ms` field
-# is still emitted by the extension (stripping it needs an operator Brave reload);
-# that is a deferred follow-up and does not affect correctness here.
+# "Browser attention by domain (i3-derived, s)"). The extension no longer emits
+# `active_ms` or focus/idle events at all (removed in the browser-ext cleanup;
+# takes effect after an operator Brave reload), so there is nothing left to guard.
 
 # Dwell cap applied to a single i3 focus interval, matching the dashboard's
 # i3-dwell panels (an idle focus must not inflate attention). 30 minutes in ms.

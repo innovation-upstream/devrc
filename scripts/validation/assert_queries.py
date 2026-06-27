@@ -8,7 +8,6 @@ computations:
 
   * timezone        — events emitted at a known LOCAL time land in the expected
                       hour-of-day bucket (catches UTC-vs-local bugs).
-  * active_ms sum   — equals the scripted dwell.
   * switch count    — lag/neighbour over app changes == K.
   * deep-work block — gaps-and-islands longest run == the scripted gap.
   * counts          — command count == N, nav count == M.
@@ -54,8 +53,6 @@ def assert_all(client: CHClient, gt: dict) -> list[Assertion]:
           chquery.q_command_count(where))
     check("nav_count", gt["expected_nav_count"],
           chquery.q_nav_count(where))
-    check("active_ms_sum", gt["expected_active_ms"],
-          chquery.q_browser_active_ms(where))
     check("app_switches", gt["expected_switches"],
           chquery.q_app_switches(where))
     check("deep_work_block_ms", gt["expected_deep_work_ms"],

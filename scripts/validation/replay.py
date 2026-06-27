@@ -6,16 +6,17 @@ Generates a deterministic burst tagged with a unique run-id (stamped into the
 cannot DELETE. It writes:
 
   * N shell commands         via the real `emit` path (source=zsh, kind=command)
-  * M browser navs           with KNOWN active_ms each, via the receiver if it's
-                             up (POST 127.0.0.1:8787/event) else direct to spool
+  * M browser navs           (source=browser, kind=nav) with KNOWN scroll
+                             metrics, via the receiver if it's up
+                             (POST 127.0.0.1:8787/event) else direct to spool
   * K app-focus switches     with a KNOWN longest-uninterrupted same-app gap
                              (source=keys, kind=window-focus, distinct apps)
   * synthetic keystrokes     ONLY if DISPLAY is set (xdotool). Headless → SKIP
                              with a logged note (keylog replay must run on the
                              laptop's X session).
 
-The exact ground truth (counts, summed active_ms, switch-count=K, deep-work
-block ms) is computed with the SAME pure functions the assertions use and
+The exact ground truth (counts, switch-count=K, deep-work block ms) is computed
+with the SAME pure functions the assertions use and
 written to a JSON sidecar, so assert_queries.py can compare CH's answer to an
 independently-derived expected value.
 
@@ -52,7 +53,7 @@ EMIT = Path(__file__).resolve().parents[1] / "collector" / "emit"
 class ReplayPlan:
     n_commands: int = 5
     m_navs: int = 4
-    nav_active_ms: int = 2000          # known dwell per nav
+    nav_scroll_pct: int = 42           # known scroll depth per nav
     k_switches: int = 3                # number of app changes to produce
     deep_work_block_ms: int = 4000     # the scripted longest uninterrupted gap
     receiver_url: str = "http://127.0.0.1:8787/event"
@@ -68,7 +69,6 @@ class GroundTruth:
     m_navs: int
     expected_command_count: int
     expected_nav_count: int
-    expected_active_ms: int
     expected_switches: int
     expected_deep_work_ms: int
     expected_hour_bucket: int
@@ -141,13 +141,13 @@ def build_ground_truth(plan: ReplayPlan, run_id: str, host: str,
         [(ts, app) for app, ts in focus_events]
     )
 
-    # --- navs with known active_ms each.
+    # --- navs with known scroll metrics each. (Per-page active_ms is RETIRED —
+    # browser attention is derived downstream from i3 focus, not asserted here.)
     nav_payloads = [
-        json.dumps({"title": f"replay nav {i}", "active_ms": plan.nav_active_ms,
-                    "state": "active"})
+        json.dumps({"title": f"replay nav {i}", "scroll_pct": plan.nav_scroll_pct,
+                    "scroll_ms": 0})
         for i in range(plan.m_navs)
     ]
-    expected_active_ms = chquery.sum_active_ms(nav_payloads)
 
     gt = GroundTruth(
         run_id=run_id,
@@ -158,7 +158,6 @@ def build_ground_truth(plan: ReplayPlan, run_id: str, host: str,
         m_navs=plan.m_navs,
         expected_command_count=plan.n_commands,
         expected_nav_count=plan.m_navs,
-        expected_active_ms=expected_active_ms,
         expected_switches=expected_switches,
         expected_deep_work_ms=expected_deep_work,
         expected_hour_bucket=chquery.hour_of_day(_ts(now)),
@@ -200,8 +199,8 @@ def perform_replay(plan: ReplayPlan, host: str, run_id: str,
     # health endpoint and record whether it was reachable.
     # app="" on purpose: the switch / deep-work metrics filter app != '', so
     # leaving navs app-less keeps those metrics driven SOLELY by the scripted
-    # focus sequence (deterministic K and gap). active_ms / nav_count filter on
-    # source='browser' AND text != '', so they are unaffected by the empty app.
+    # focus sequence (deterministic K and gap). nav_count filters on
+    # source='browser' AND text != '', so it is unaffected by the empty app.
     for nav in spec["navs"]:
         emit_event({
             "source": "browser", "kind": "nav", "ts": spec["commands"][0]["ts"],

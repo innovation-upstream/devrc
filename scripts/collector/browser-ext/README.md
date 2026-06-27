@@ -1,52 +1,59 @@
 # browser-ext — Chrome MV3 browser-activity collector
 
-Tracks the active tab (full URL + title), active-duration, scroll engagement,
-and focus/idle transitions, and POSTs each event to a localhost receiver that
-writes it into the activity-collector spool (v1 emit format) for the existing
-daemon to ship.
+Tracks the active tab (full URL + title) and per-page scroll engagement, and
+POSTs a `nav` event to a localhost receiver that writes it into the
+activity-collector spool (v1 emit format) for the existing daemon to ship.
 
 Full URL capture, local-only — consistent with the full-content self-instrumentation
 choice. Nothing leaves the host from here; shipping is the daemon's decision and
 is gated on an authenticated ClickHouse.
 
+> **Retired:** per-page `active_ms` (active-engagement time) and the
+> `focus`/idle events that drove it have been **removed**. The extension's
+> `active_ms` was structurally wrong on the i3 WM (`chrome.idle` measures
+> system-wide input and `chrome.windows.onFocusChanged` blur is unreliable on i3,
+> so it counted time spent in OTHER apps as browser engagement). True per-domain
+> browser attention is now **derived downstream** by intersecting i3
+> "Brave-focused" intervals with the active-tab domain timeline (see
+> `scripts/validation/` and the Grafana dashboard). Removing the field is a
+> noise-reduction cleanup — it takes effect only after an operator reloads the
+> unpacked extension in Brave. Nav + scroll capture are unchanged.
+
 ## Components
-- `manifest.json` — MV3 manifest. Permissions: `tabs`, `webNavigation`, `idle`,
-  `storage`. Host permission for `http://127.0.0.1:8787/*` only. **A
-  `content_scripts` entry injects TWO scripts — `scroll_track.js` then
-  `content_scroll.js`, in that order — into all `http(s)://*` pages** for scroll
-  capture. **Load order matters:** content scripts of the same extension share
-  ONE isolated-world global scope, so the first script (`scroll_track.js`)
-  publishes its factory on `globalThis.__activityScrollTracker` and the second
-  (`content_scroll.js`) reads it synchronously — no dynamic `import()` and no
-  `web_accessible_resources`. (The old dynamic-import-of-a-web-accessible-resource
-  path was CSP-fragile and failed silently, leaving `scroll_pct` stuck at 0.)
-  Injecting content scripts broadens host access to ALL sites (intended; the
-  scripts only read scroll geometry, never page content, and nothing leaves
-  localhost).
+- `manifest.json` — MV3 manifest. Permissions: `tabs`, `webNavigation`,
+  `storage` (the `idle` permission was removed with the focus/idle wiring). Host
+  permission for `http://127.0.0.1:8787/*` only. **A `content_scripts` entry
+  injects TWO scripts — `scroll_track.js` then `content_scroll.js`, in that
+  order — into all `http(s)://*` pages** for scroll capture. **Load order
+  matters:** content scripts of the same extension share ONE isolated-world
+  global scope, so the first script (`scroll_track.js`) publishes its factory on
+  `globalThis.__activityScrollTracker` and the second (`content_scroll.js`) reads
+  it synchronously — no dynamic `import()` and no `web_accessible_resources`.
+  (The old dynamic-import-of-a-web-accessible-resource path was CSP-fragile and
+  failed silently, leaving `scroll_pct` stuck at 0.) Injecting content scripts
+  broadens host access to ALL sites (intended; the scripts only read scroll
+  geometry, never page content, and nothing leaves localhost).
 - `service_worker.js` — background worker. Listens on `chrome.tabs.onActivated`,
-  `chrome.webNavigation.onCommitted`, `chrome.tabs.onUpdated` (title),
-  `chrome.windows.onFocusChanged`, `chrome.idle.onStateChanged`,
-  `chrome.runtime.onMessage` (scroll updates), and `chrome.tabs.onRemoved`.
-  Computes active-duration across tab switches and stores per-tab scroll metrics
-  (both persisted in `chrome.storage.session` so they survive MV3 worker
-  suspension); folds the LEAVING tab's scroll metrics into its `nav` event.
-  **All read-modify-write access to that persisted state goes through the
+  `chrome.webNavigation.onCommitted` (top-frame), `chrome.tabs.onUpdated`
+  (title), `chrome.runtime.onMessage` (scroll updates), and
+  `chrome.tabs.onRemoved`. Tracks the current `{tabId, url, title}` and per-tab
+  scroll metrics (both persisted in `chrome.storage.session` so they survive MV3
+  worker suspension); folds the LEAVING tab's scroll metrics into its `nav`
+  event. **All read-modify-write access to that persisted state goes through the
   serialized store in `state_store.js`** — the worker is thin wiring only.
-- `state_store.js` — the SERIALIZED (race-free) state store. The chrome event
-  handlers fire concurrently and each used to do a non-atomic
-  `getState → mutate accum → setState` against `chrome.storage.session`; they
-  interleaved at the `await` points and clobbered each other's writes, which
-  **lost idle/blur pauses** (an active span ran unbroken to the 1h cap) and
-  **double-counted tab switches** (`onActivated` + `onCommitted` for one switch
-  each `take()`-ed the full span before either reset → duplicate `nav` events,
-  each carrying the full `active_ms`). The store wraps every state mutation
-  (`onTabChange`, `applyAccum`, `updateTitle`) in a promise-chain async mutex so
-  each runs to completion before the next, and a SEPARATE mutex serializes the
-  scroll map's read-delete-write. It also SUPPRESSES the redundant second `nav`
-  when an incoming `{tabId,url}` equals the current stored one (same-tab
-  *different*-url still emits — that's a real in-tab navigation). The accounting
-  itself is unchanged (it stays in the pure `active_time.js`); storage + `post`
-  are injected so the concurrency logic is unit-testable without a real Chrome.
+- `state_store.js` — the SERIALIZED (race-free) tab + scroll store. The chrome
+  event handlers fire concurrently and each used to do a non-atomic
+  `getState → mutate → setState` against `chrome.storage.session`; they
+  interleaved at the `await` points and clobbered each other's writes (a
+  double-fired switch — `onActivated` + `onCommitted` for one switch — emitting
+  duplicate `nav` events; the scroll map's read-delete-write losing a concurrent
+  put for a different tab). The store wraps every state mutation (`onTabChange`,
+  `updateTitle`) in a promise-chain async mutex so each runs to completion before
+  the next, and a SEPARATE mutex serializes the scroll map's read-delete-write.
+  It also SUPPRESSES the redundant second `nav` when an incoming `{tabId,url}`
+  equals the current stored one (same-tab *different*-url still emits — that's a
+  real in-tab navigation). Storage + `post` are injected so the concurrency logic
+  is unit-testable without a real Chrome.
 - `content_scroll.js` — content script (all http/https pages), injected SECOND.
   Thin DOM/chrome wiring: a **capture-phase, document-level** `scroll` listener
   (`document.addEventListener("scroll", …, { capture: true, passive: true })`)
@@ -83,22 +90,23 @@ is gated on an authenticated ClickHouse.
 `POST http://127.0.0.1:8787/event`, `Content-Type: application/json`:
 
 ```json
-{ "kind": "nav" | "focus",
-  "url":   "https://full/url",      // full URL (nav events)
+{ "kind": "nav",
+  "url":   "https://full/url",      // full URL
   "title": "tab title",
-  "active_ms": 1234,                  // ms the previous tab was focused
   "scroll_pct": 88,                   // max reading depth % of the leaving page
   "scroll_ms": 12500,                 // active-scroll time on the leaving page
-  "state": "focused|blurred|idle|active|locked",  // focus events
   "ts": 1719240000000 }              // client epoch ms
 ```
 
 Receiver writes:
 ```
-source=browser  kind=<nav|focus>  text=<url>  app=<chromium|brave>
-payload={"title":…,"active_ms":…,"state":…,"scroll_pct":…,"scroll_ms":…,"client_ts":…}
+source=browser  kind=nav  text=<url>  app=<chromium|brave>
+payload={"title":…,"scroll_pct":…,"scroll_ms":…,"client_ts":…}
 ```
-`GET /health` → `{"ok":true}`.
+`GET /health` → `{"ok":true}`. (The receiver is robust to a legacy client that
+still sends `active_ms`/`state`/a `focus` kind — those are coerced to a `nav` and
+the retired fields are dropped from the payload — but the current extension never
+sends them.)
 
 ## Load unpacked (chromium / brave)
 1. Start the receiver:
@@ -122,30 +130,28 @@ To point at a TEST spool while validating:
 ## Verification status
 - Receiver: fully unit-tested (event→fields, real loopback POST→spool round-trip
   through `collector.parse_line`, arbitrary content incl. unicode/quotes/newlines/
-  a fake password, bad-JSON 400, wrong-path 404). See `tests/test_receiver.py`.
+  a fake password, a legacy `active_ms`/`state`/`focus` payload coerced+stripped,
+  bad-JSON 400, wrong-path 404). See `tests/test_receiver.py`.
 - Manifest + service-worker logic: validated (manifest JSON parses, MV3 schema
   fields present; `buildEvent` payload shape mirrored by the receiver test).
-- Active-time accounting: the idle/blur-aware accumulator lives in the PURE
-  `active_time.js` (no `chrome.*`, no `Date.now()` — all timestamps passed in)
-  and is unit-tested in `tests/active_time.test.mjs`. Run with Node's built-in
-  runner; pass a glob (a bare directory positional is treated as a module on
-  Node ≥22, so glob or run from inside the dir):
-  `nix-shell -p nodejs --run "node --test 'scripts/collector/browser-ext/tests/**/*.test.mjs'"`.
 - State-store concurrency: `state_store.js` is driven by `tests/state_store.test.mjs`
   with a FAKE in-memory `chrome.storage.session` (async get/set with a delay that
-  forces interleave) and a fake `post`. It reproduces the production race —
-  an idle pause racing a tab switch, and a double-fired `onActivated`+`onCommitted`
-  switch — and asserts the pause is banked (not clobbered) and the total emitted
-  `active_ms` equals the SINGLE real span (no 2x double-count), plus the
-  redundant-nav suppression and the scroll-map read-delete-write serialization.
-  (These tests FAIL if the mutex is neutered.)
-- Scroll engagement: the PURE `scroll_track.js` (same no-`chrome`/no-`Date.now()`
+  forces interleave) and a fake `post`. It reproduces the double-fired
+  `onActivated`+`onCommitted` switch (asserts exactly one `nav`), the redundant-nav
+  suppression, tab-title tracking, the scroll-map read-delete-write serialization,
+  and asserts the `nav` payload carries url/title/scroll but NOT the retired
+  `active_ms`/`state`. (These tests FAIL if the mutex is neutered.)
+- Scroll engagement: the PURE `scroll_track.js` (no-`chrome`/no-`Date.now()`
   discipline) is unit-tested in `tests/scroll_track.test.mjs` (max-depth
   monotonicity, 0–100 clamp, burst accrual with the >1s gap rule, snapshot/reset,
   the classic-script global-publish, and `deriveScrollGeometry`'s document vs
   inner-container branches + the trivial-scroller guard threshold). The remaining
   `content_scroll.js` DOM/listener wiring and the SW message→nav fold are NOT
-  exercised headlessly — verify in the load-unpacked step below.
+  exercised headlessly — verify in the load-unpacked step above.
 - The end-to-end **load-unpacked in a real browser** step is a MANUAL step (MV3
   service workers are not reliably driveable headlessly). Follow "Load unpacked"
   above to complete it.
+
+Run the JS unit tests with Node's built-in runner (pass a glob — a bare directory
+positional is treated as a module on Node ≥22):
+`nix-shell -p nodejs --run "node --test 'scripts/collector/browser-ext/tests/**/*.test.mjs'"`.

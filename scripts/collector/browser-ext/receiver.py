@@ -7,11 +7,11 @@ existing collector daemon ships browser activity unchanged. Bound to 127.0.0.1
 only — it must never be reachable off-host.
 
 Incoming JSON (from service_worker.js buildEvent):
-    { kind: "nav"|"focus", url, title, active_ms, state, ts }
+    { kind: "nav", url, title, scroll_pct, scroll_ms, ts }
 
 Emitted spool record (v1 contract):
-    source=browser  kind=<nav|focus>  text=<url>  app=<browser>
-    payload=<json: title, active_ms, state>
+    source=browser  kind=nav  text=<url>  app=<browser>
+    payload=<json: title, scroll_pct, scroll_ms, client_ts>
 
 Why a separate service (not folded into collector.py): the collector daemon's
 job is rotate→ship→ClickHouse and it has NO inbound network surface by design;
@@ -49,20 +49,21 @@ MAX_BODY = 64 * 1024  # a nav event is tiny; cap to avoid abuse.
 def event_to_fields(evt: dict, app_default: str) -> dict:
     """Map an incoming extension event dict → v1 emit fields.
 
-    `text` is the full URL (full-content choice). title/active_ms/state plus
-    scroll engagement (scroll_pct/scroll_ms) go into payload JSON. `app` is the
-    browser label (chromium/brave). Robust to missing keys — anything absent
-    becomes empty/0.
+    `text` is the full URL (full-content choice). title plus scroll engagement
+    (scroll_pct/scroll_ms) go into payload JSON. `app` is the browser label
+    (chromium/brave). Robust to missing keys — anything absent becomes empty/0,
+    and any legacy fields (e.g. a retired client's active_ms/state) are ignored.
+
+    The extension emits only `nav` events now (per-page active_ms + focus/idle
+    events are RETIRED — browser attention is derived downstream from i3 focus).
+    Any non-nav kind from an older client is coerced to nav so the receiver never
+    crashes on it.
     """
-    kind = evt.get("kind") or "nav"
-    if kind not in ("nav", "focus"):
-        kind = "nav"
+    kind = "nav"
     payload = {
         "title": evt.get("title", "") or "",
-        "active_ms": int(evt.get("active_ms") or 0),
-        "state": evt.get("state", "") or "",
-        # Scroll engagement for this page view (nav events). Default 0 when the
-        # extension didn't send them (focus events, older client, no scrolling).
+        # Scroll engagement for this page view. Default 0 when absent (older
+        # client, no scrolling).
         "scroll_pct": int(evt.get("scroll_pct") or 0),
         "scroll_ms": int(evt.get("scroll_ms") or 0),
     }

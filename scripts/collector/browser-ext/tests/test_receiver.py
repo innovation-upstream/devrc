@@ -22,8 +22,7 @@ import collector as C  # noqa: E402
 
 def test_event_to_fields_nav():
     f = R.event_to_fields(
-        {"kind": "nav", "url": "https://x.test/a?b=c", "title": "Hi",
-         "active_ms": 1234, "ts": 99},
+        {"kind": "nav", "url": "https://x.test/a?b=c", "title": "Hi", "ts": 99},
         "chromium",
     )
     assert f["source"] == "browser"
@@ -32,27 +31,45 @@ def test_event_to_fields_nav():
     assert f["app"] == "chromium"
     pl = json.loads(f["payload"])
     assert pl["title"] == "Hi"
-    assert pl["active_ms"] == 1234
     assert pl["client_ts"] == 99
+    # Retired fields must NOT be present in the payload.
+    assert "active_ms" not in pl
+    assert "state" not in pl
 
 
-def test_event_to_fields_focus_and_defaults():
-    f = R.event_to_fields({"kind": "focus", "state": "idle"}, "brave")
-    assert f["kind"] == "focus"
-    assert f["text"] == ""
+def test_event_to_fields_defaults():
+    f = R.event_to_fields({"url": "https://x.test/a"}, "brave")
+    assert f["kind"] == "nav"
     assert f["app"] == "brave"
-    assert json.loads(f["payload"])["state"] == "idle"
+    pl = json.loads(f["payload"])
+    assert pl["title"] == ""
 
 
 def test_unknown_kind_coerced_to_nav():
+    # The extension emits only nav now; any legacy/odd kind coerces to nav so the
+    # receiver never crashes on it.
     f = R.event_to_fields({"kind": "weird"}, "chromium")
     assert f["kind"] == "nav"
+
+
+def test_legacy_active_ms_and_state_are_ignored(tmp_path):
+    # A retired client that still sends active_ms/state/focus must not crash the
+    # receiver, and those fields must be dropped from the emitted payload.
+    f = R.event_to_fields(
+        {"kind": "focus", "url": "https://x.test/a", "active_ms": 1234,
+         "state": "idle"},
+        "chromium",
+    )
+    assert f["kind"] == "nav"
+    pl = json.loads(f["payload"])
+    assert "active_ms" not in pl
+    assert "state" not in pl
 
 
 def test_event_to_fields_carries_scroll_metrics():
     f = R.event_to_fields(
         {"kind": "nav", "url": "https://x.test/a", "title": "T",
-         "active_ms": 10, "scroll_pct": 73, "scroll_ms": 4200},
+         "scroll_pct": 73, "scroll_ms": 4200},
         "chromium",
     )
     pl = json.loads(f["payload"])
@@ -61,7 +78,7 @@ def test_event_to_fields_carries_scroll_metrics():
 
 
 def test_event_to_fields_scroll_defaults_to_zero():
-    # An event WITHOUT scroll metrics (focus event / older client) still maps,
+    # An event WITHOUT scroll metrics (older client, no scrolling) still maps,
     # defaulting both to 0.
     f = R.event_to_fields({"kind": "nav", "url": "https://x.test/a"}, "chromium")
     pl = json.loads(f["payload"])
@@ -71,14 +88,15 @@ def test_event_to_fields_scroll_defaults_to_zero():
 
 def test_fields_roundtrip_through_parse_line():
     f = R.event_to_fields(
-        {"kind": "nav", "url": "https://site/x", "title": "T", "active_ms": 5},
+        {"kind": "nav", "url": "https://site/x", "title": "T",
+         "scroll_pct": 42, "scroll_ms": 5},
         "chromium",
     )
     line = __import__("spool_emit").build_line(f)
     ev = C.parse_line(line)
     assert ev["source"] == "browser"
     assert ev["text"] == "https://site/x"
-    assert json.loads(ev["payload"])["active_ms"] == 5
+    assert json.loads(ev["payload"])["scroll_pct"] == 42
 
 
 def _serve(spool_dir, app="chromium"):
@@ -109,7 +127,7 @@ def test_post_writes_spool_record(tmp_path):
             "kind": "nav",
             "url": "https://example.test/path?token=password123!",
             "title": 'weird "quoted"\ttab\nnewline 你好',
-            "active_ms": 4200,
+            "scroll_pct": 55,
         })
         assert status == 200
     finally:
@@ -125,7 +143,7 @@ def test_post_writes_spool_record(tmp_path):
     assert ev["text"] == "https://example.test/path?token=password123!"
     pl = json.loads(ev["payload"])
     assert pl["title"] == 'weird "quoted"\ttab\nnewline 你好'
-    assert pl["active_ms"] == 4200
+    assert pl["scroll_pct"] == 55
 
 
 def test_post_scroll_metrics_land_in_spool(tmp_path):
@@ -136,7 +154,6 @@ def test_post_scroll_metrics_land_in_spool(tmp_path):
             "kind": "nav",
             "url": "https://example.test/article",
             "title": "Long read",
-            "active_ms": 90000,
             "scroll_pct": 88,
             "scroll_ms": 12500,
         })

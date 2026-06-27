@@ -13,7 +13,7 @@ value over the run-id scope.
 
 ```
 replay.py ──emit──► spool ──collector──► activity.events
-   │ (records known counts/active_ms/switches/deep-work/hour)
+   │ (records known counts/switches/deep-work/hour)
    └──► /tmp/replay-ground-truth.json
                                             ▲
 assert_queries.py ──dashboard queries, scoped to run-id──┘  (== ground truth?)
@@ -27,14 +27,14 @@ validate.py     — runner (invariants + reconcile always; replay+assert with --
 - **`chquery.py`** — ClickHouse HTTP read client (creds from env, password never
   hardcoded) + the EXACT dashboard query builders (scoped + reduced to a scalar)
   + pure-Python re-implementations of switch-count, deep-work gaps-and-islands,
-  active_ms sum, and hour-of-day bucketing.
+  and hour-of-day bucketing.
 - **`replay.py`** — emits N shell commands (via the real `emit`), M browser navs
-  with known active_ms, K app-focus switches with a known longest gap, and
+  (with known scroll metrics), K app-focus switches with a known longest gap, and
   (only with `$DISPLAY`) synthetic xdotool keystrokes. Records ground truth to
   JSON. Events are tagged `session=vrun-...`.
 - **`assert_queries.py`** — runs the dashboard queries scoped to the run-id and
-  asserts each equals the replay's expected value (counts, active_ms, switches,
-  deep-work, **timezone hour-bucket**).
+  asserts each equals the replay's expected value (counts, switches, deep-work,
+  **timezone hour-bucket**).
 - **`invariants.py`** — SQL sanity checks over all rows: no future ts (with a
   tz-slack window — see below), `duration_ms >= 0`, `duration_ms` within the 24h
   garbage cap, only expected host/source values, ts not clock-skewed-ancient,
@@ -68,8 +68,9 @@ over a trailing 48h window it asserts the derived metric's two structural bounds
 (which the broken `active_ms` violated): (1) sum-per-domain attention ≤ total i3
 Brave dwell (+2% tol) — an intersection is a subset of the i3 Brave intervals —
 and (2) no single domain exceeds wall-clock. Vacuously PASSes on a host with no
-GUI data. The extension still emits the vestigial `active_ms` (stripping it needs
-an operator Brave reload — a deferred follow-up), but nothing consumes it.
+GUI data. The extension no longer emits `active_ms` or focus/idle events at all
+(removed in the browser-ext cleanup; takes effect after an operator Brave reload),
+so the replay/assert path no longer scripts or checks browser `active_ms`.
 - **`reconcile.py`** — for a recent window, diffs each source against an
   independent existing record: zsh ↔ `~/.zsh_history`, browser ↔ Chrome/Brave
   `History` sqlite (read from a copy — the live DB is locked), tmux ↔

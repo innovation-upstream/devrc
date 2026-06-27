@@ -15,8 +15,8 @@ thing, all unit-testable WITHOUT a live ClickHouse:
      controlled replay (replay.py) can assert query == known-expected.
 
   3. Pure Python re-implementations of the same computations (switch count,
-     longest deep-work block via gaps-and-islands, active_ms sum, hour-of-day
-     bucketing). The replay records its ground truth with THESE so the test
+     longest deep-work block via gaps-and-islands, hour-of-day bucketing). The
+     replay records its ground truth with THESE so the test
      suite can verify the math independently of ClickHouse, and so the live
      assertions compare CH's answer against an independent computation.
 
@@ -183,18 +183,6 @@ def q_app_switches(where: str, table: str = "activity.events") -> str:
     )
 
 
-def q_browser_active_ms(where: str, table: str = "activity.events") -> str:
-    """Sum of payload.active_ms over browser events, in MILLISECONDS.
-
-    (The panel divides by 1000 for seconds; we keep ms for an exact integer
-    assertion against the scripted dwell.)
-    """
-    return (
-        "SELECT sum(toUInt32OrZero(JSONExtractString(payload, 'active_ms'))) AS value "
-        f"FROM {table} WHERE source = 'browser' AND text != '' AND ({where})"
-    )
-
-
 def q_longest_deep_work_ms(where: str, table: str = "activity.events") -> str:
     """Longest uninterrupted same-app run, in MILLISECONDS (gaps-and-islands).
 
@@ -271,23 +259,6 @@ def longest_deep_work_ms(events: list[tuple]) -> int:
         prev_app = app
     best = max(best, _to_ms(last_ts) - _to_ms(island_start))
     return best
-
-
-def sum_active_ms(payloads: list) -> int:
-    """Sum payload.active_ms across browser events (toUInt32OrZero semantics)."""
-    total = 0
-    for p in payloads:
-        try:
-            obj = json.loads(p) if isinstance(p, str) else (p or {})
-        except (ValueError, TypeError):
-            obj = {}
-        v = obj.get("active_ms", 0) if isinstance(obj, dict) else 0
-        try:
-            iv = int(v)
-        except (ValueError, TypeError):
-            iv = 0
-        total += iv if 0 <= iv <= 0xFFFFFFFF else 0  # toUInt32OrZero
-    return total
 
 
 def hour_of_day(ts) -> int:
