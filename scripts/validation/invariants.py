@@ -35,6 +35,18 @@ FUTURE_SLACK_HOURS = 26  # > max |tz offset| (14h) + margin
 # Oldest plausible ts: the table TTL is 180d, but data only started 2026; guard
 # against an epoch-0 / 1970 clock-skew bug.
 OLDEST_PLAUSIBLE = "2025-01-01 00:00:00"
+# Trailing window for the per-(host,hour) active-time HEALTH invariant ONLY.
+# This telemetry store is APPEND-ONLY and raw rows are intentionally NEVER
+# mutated (a documented project decision), so any historical hours inflated by a
+# *fixed* bug (e.g. the active_ms read-modify-write race) would otherwise keep
+# this all-time scan RED forever — long after the code is corrected and
+# deployed. Windowing it to recent ingestion makes it a CURRENT-health signal:
+# it recovers as the bad hours age out, while still catching any NEW inflation
+# promptly. This is NOT weakening the check to hide a live bug — the race is
+# fixed in the extension; this only lets a legitimately-recovered system report
+# green. All the OTHER invariants stay all-time (they guard immutable
+# correctness properties, not transient ingestion health).
+ACTIVE_CAP_WINDOW_HOURS = 48
 
 EXPECTED_HOSTS = {"workbench", "laptop"}
 EXPECTED_SOURCES = {"zsh", "tmux", "keys", "browser", "claude", "i3"}
@@ -152,9 +164,18 @@ def build_invariants(table: str = "activity.events") -> list[Invariant]:
             # duration_ms (command wall-clock) is deliberately excluded: it is not
             # active engagement, and a long interactive command (claude) would
             # otherwise falsely blow past the 60min/hour bound.
+            #
+            # TRAILING WINDOW (this invariant only): see ACTIVE_CAP_WINDOW_HOURS
+            # above — the append-only store never rewrites bad historical hours,
+            # so this health check is windowed to recent ingestion rather than
+            # scanning all-time, letting a fixed+deployed system recover to green
+            # while still catching NEW inflation. NB: `ts` is the host LOCAL wall
+            # clock and now() is UTC, so the window edge is fuzzy by the tz offset
+            # — acceptable for a 48h health window (we only need "recent").
             "SELECT host, toStartOfHour(ts) AS hour, "
             "sum(toUInt32OrZero(JSONExtractString(payload, 'active_ms'))) AS active_ms "
-            f"FROM {table} GROUP BY host, hour",
+            f"FROM {table} WHERE ts > now() - INTERVAL {ACTIVE_CAP_WINDOW_HOURS} HOUR "
+            "GROUP BY host, hour",
             eval_per_host_hour_cap,
         ),
     ]

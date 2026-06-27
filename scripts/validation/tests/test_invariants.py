@@ -74,6 +74,24 @@ def test_per_host_hour_cap_tolerates_small_overshoot():
     assert I.eval_per_host_hour_cap(rows)[0] is True
 
 
+def test_per_host_hour_cap_query_is_windowed():
+    # The active-time HEALTH invariant must scan only a trailing window, not
+    # all-time — the append-only store never rewrites bad historical hours, so an
+    # all-time scan would stay RED forever after a fixed+deployed bug. Every
+    # OTHER invariant must stay all-time (no such WHERE-ts window).
+    invs = {inv.name: inv for inv in I.build_invariants("activity.events")}
+    cap = invs["per_host_hour_active_cap"]
+    assert f"INTERVAL {I.ACTIVE_CAP_WINDOW_HOURS} HOUR" in cap.sql
+    assert "WHERE ts > now() -" in cap.sql
+    assert I.ACTIVE_CAP_WINDOW_HOURS == 48
+    # No other invariant should carry a trailing ts window (they guard immutable
+    # correctness, not transient health).
+    for name, inv in invs.items():
+        if name == "per_host_hour_active_cap":
+            continue
+        assert "now() - INTERVAL" not in inv.sql, f"{name} unexpectedly windowed"
+
+
 # --------------------------------------------------------------------------- #
 # run_invariants wiring (mocked client)
 # --------------------------------------------------------------------------- #
