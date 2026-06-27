@@ -49,8 +49,7 @@ export function makeLock() {
 //            chrome.storage.session shape (get returns { [key]: value }).
 //   post:    async fn(event) -> emits an event.
 //   buildEvent: pure payload builder.
-//   now:     () => epoch ms (injectable for deterministic tests).
-export function createStateStore({ storage, post, buildEvent, now = () => Date.now() }) {
+export function createStateStore({ storage, post, buildEvent }) {
   const STORE_KEY = "active_state";
   const SCROLL_KEY = "scroll_by_tab";
   const lockState = makeLock();
