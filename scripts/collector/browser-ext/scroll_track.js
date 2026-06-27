@@ -12,7 +12,7 @@
 //                burst (their inter-sample delta is added); a gap ≥ GAP_MS ends
 //                the burst, so idle reading time between scrolls is NOT counted.
 //
-// Mirrors active_time.js's design: PURE — no window/document/chrome, no
+// PURE by design: no window/document/chrome, no
 // Date.now(); every method takes `now` (ms) from the caller, and state is plain
 // so content_scroll.js stays a thin DOM/chrome wrapper that's trivially
 // unit-testable in plain Node.

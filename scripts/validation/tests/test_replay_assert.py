@@ -13,15 +13,15 @@ import assert_queries as A  # noqa: E402
 
 
 def test_ground_truth_matches_plan():
-    plan = RP.ReplayPlan(n_commands=5, m_navs=4, nav_active_ms=2000,
+    plan = RP.ReplayPlan(n_commands=5, m_navs=4, nav_scroll_pct=42,
                          k_switches=3, deep_work_block_ms=4000)
     gt, spec = RP.build_ground_truth(plan, "vrun-test", "workbench",
                                      keystrokes=False, notes=[])
     # counts
     assert gt.expected_command_count == 5
     assert gt.expected_nav_count == 4
-    # active_ms = 4 navs * 2000
-    assert gt.expected_active_ms == 8000
+    # active_ms is RETIRED — no expected_active_ms on the ground truth anymore.
+    assert not hasattr(gt, "expected_active_ms")
     # switches: the deep-work island is one app (A,A) then K distinct apps.
     # sequence apps = [A, A, S0, S1, S2] -> switches A->S0, S0->S1, S1->S2 = 3 = K
     assert gt.expected_switches == 3
@@ -66,10 +66,8 @@ class EchoClient:
     def scalar(self, sql):
         if "source = 'zsh'" in sql:
             return self.gt["expected_command_count"]
-        if "source = 'browser' AND text != ''" in sql and "active_ms" not in sql:
+        if "source = 'browser' AND text != ''" in sql:
             return self.gt["expected_nav_count"]
-        if "active_ms" in sql:
-            return self.gt["expected_active_ms"]
         if "lagInFrame" in sql and "sum(is_switch) AS value" in sql:
             return self.gt["expected_switches"]
         if "max(run_ms)" in sql:
@@ -94,8 +92,10 @@ def test_assert_all_passes_on_correct_ch():
     gt = _gt()
     results = A.assert_all(EchoClient(gt), gt)
     names = {r.name for r in results}
-    assert {"command_count", "nav_count", "active_ms_sum", "app_switches",
+    assert {"command_count", "nav_count", "app_switches",
             "deep_work_block_ms", "timezone_hour_bucket"} == names
+    # active_ms_sum is RETIRED — must not be asserted anymore.
+    assert "active_ms_sum" not in names
     assert all(r.passed for r in results), [(r.name, r.detail) for r in results if not r.passed]
 
 
@@ -104,13 +104,13 @@ def test_assert_catches_wrong_value():
 
     class WrongClient(EchoClient):
         def scalar(self, sql):
-            if "active_ms" in sql:
-                return 999999  # wrong active_ms
+            if "lagInFrame" in sql and "sum(is_switch) AS value" in sql:
+                return 999999  # wrong switch count
             return super().scalar(sql)
 
     results = A.assert_all(WrongClient(gt), gt)
-    active = [r for r in results if r.name == "active_ms_sum"][0]
-    assert active.passed is False
+    sw = [r for r in results if r.name == "app_switches"][0]
+    assert sw.passed is False
 
 
 def test_assert_catches_timezone_bug():

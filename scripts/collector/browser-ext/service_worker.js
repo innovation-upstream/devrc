@@ -1,45 +1,44 @@
 // service_worker.js — MV3 background worker for the activity browser collector.
 //
-// Tracks the active tab (URL + title), how long it stayed active, and
-// focus/idle transitions, then POSTs each event to the localhost receiver
-// (http://127.0.0.1:8787/event). The receiver bridges these into the existing
+// Tracks the active tab (URL + title) and per-page scroll engagement, then POSTs
+// a `nav` event to the localhost receiver (http://127.0.0.1:8787/event) on each
+// tab change / navigation. The receiver bridges these into the existing
 // activity-collector spool in the v1 emit format. FULL URL capture — consistent
 // with the full-content self-instrumentation choice; nothing leaves localhost
 // here (the daemon decides shipping).
 //
 // Event kinds:
-//   nav   — the active tab navigated / changed; carries url, title, active_ms
-//            (how long the PREVIOUS active tab was focused before this switch).
-//   focus — window/idle focus transition (browser focused/blurred, idle/active).
+//   nav — the active tab navigated / changed; carries url, title, scroll_pct,
+//         scroll_ms (the scroll engagement on the page being LEFT).
+//
+// RETIRED: per-page `active_ms` (active-engagement time) and `focus`/idle events.
+// The extension's `active_ms` was STRUCTURALLY WRONG on the i3 WM — chrome.idle
+// measures system-wide input and chrome.windows.onFocusChanged blur is unreliable
+// on i3, so it counted time spent in OTHER apps as browser engagement. Browser
+// attention is now DERIVED DOWNSTREAM by intersecting i3 "Brave-focused" intervals
+// with the active-tab domain timeline (see the validation harness + the dashboard
+// panel); the focus/idle wiring + accumulator that drove `active_ms` are gone.
 //
 // MV3 service workers are ephemeral (the browser may suspend them). We persist
-// the "current active tab + active-time accumulator" in chrome.storage.session
-// so active-duration accounting survives a worker restart.
+// the "current active tab + per-tab scroll" in chrome.storage.session so tab
+// tracking + scroll attribution survive a worker restart.
 //
-// active_ms is now IDLE/BLUR-AWARE: the accumulator in active_time.js only
-// accrues wall-clock while the browser is focused AND the user is not
-// idle/locked, so a tab "focused" while the user walked away no longer logs
-// that away-time as engagement. (Pure module — no chrome.* — unit-tested.)
-//
-// All read-modify-write access to the persisted accumulator + scroll map is
-// SERIALIZED through an async mutex in state_store.js — the chrome event
-// handlers fire concurrently and used to interleave at their await points and
-// clobber each other's writes (lost idle/blur pauses → spans pinned at the 1h
-// cap; double-counted tab switches). See state_store.js for the full writeup.
+// All read-modify-write access to the persisted tab state + scroll map is
+// SERIALIZED through an async mutex in state_store.js — the chrome event handlers
+// fire concurrently and used to interleave at their await points and clobber each
+// other's writes (duplicate nav events from a double-fired switch; lost scroll
+// metrics from a racing read-delete-write). See state_store.js for the writeup.
 
-import * as AT from "./active_time.js";
 import { createStateStore } from "./state_store.js";
 
 const ENDPOINT = "http://127.0.0.1:8787/event";
 
 // --- pure payload builder (kept tiny + mirrored by the receiver test) ----- //
-export function buildEvent(kind, { url, title, active_ms, state, scroll_pct, scroll_ms }) {
+export function buildEvent(kind, { url, title, scroll_pct, scroll_ms }) {
   return {
-    kind, // "nav" | "focus"
+    kind, // "nav"
     url: url || "",
     title: title || "",
-    active_ms: Number.isFinite(active_ms) ? Math.max(0, Math.round(active_ms)) : 0,
-    state: state || "", // for focus events: focused|blurred|idle|active|locked
     scroll_pct: Number.isFinite(scroll_pct) ? Math.max(0, Math.min(100, Math.round(scroll_pct))) : 0,
     scroll_ms: Number.isFinite(scroll_ms) ? Math.max(0, Math.round(scroll_ms)) : 0,
     ts: Date.now(),
@@ -59,16 +58,14 @@ async function post(event) {
   }
 }
 
-// The serialized (race-free) state store. Stored shape:
-//   { tabId, url, title, accum }  where `accum` is the pure active_time
-// accumulator ({ banked, since }), persisted in chrome.storage.session so the
-// active-duration survives MV3 worker suspension. All reads/writes go through
-// the mutex inside the store; the chrome.storage.session backend is injected so
-// the store is unit-testable without a real browser.
+// The serialized (race-free) tab + scroll store. Stored shape:
+//   { tabId, url, title }  persisted in chrome.storage.session so tab tracking
+// survives MV3 worker suspension, plus a separate per-tab scroll map. All
+// reads/writes go through the mutex inside the store; the chrome.storage.session
+// backend is injected so the store is unit-testable without a real browser.
 const store = createStateStore({
   storage: chrome.storage.session,
   post,
-  AT,
   buildEvent,
   now: () => Date.now(),
 });
@@ -115,24 +112,8 @@ chrome.webNavigation.onCommitted.addListener(async (d) => {
   await store.onTabChange(info);
 });
 
-// Title can arrive after commit; refresh stored title without a duration reset.
+// Title can arrive after commit; refresh stored title without re-emitting a nav.
 chrome.tabs.onUpdated.addListener(async (tabId, changeInfo) => {
   if (!changeInfo.title) return;
   await store.updateTitle(tabId, changeInfo.title);
-});
-
-// Window focus changes (browser gained/lost OS focus). Blur PAUSES the active-
-// time accumulator (banks the elapsed span); refocus RESUMES it.
-chrome.windows.onFocusChanged.addListener(async (windowId) => {
-  const focused = windowId !== chrome.windows.WINDOW_ID_NONE;
-  await store.applyAccum(focused ? AT.onActive : AT.onBlur, Date.now());
-  await post(buildEvent("focus", { state: focused ? "focused" : "blurred" }));
-});
-
-// Idle / active / locked transitions. "active" resumes accrual; "idle"/"locked"
-// pause it (banking the active span) so away-time isn't counted as engagement.
-chrome.idle.setDetectionInterval(60);
-chrome.idle.onStateChanged.addListener(async (state) => {
-  await store.applyAccum(state === "active" ? AT.onActive : AT.onIdle, Date.now());
-  await post(buildEvent("focus", { state }));
 });

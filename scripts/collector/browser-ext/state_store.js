@@ -1,29 +1,32 @@
-// state_store.js — serialized (race-free) state store for the browser collector.
+// state_store.js — serialized (race-free) tab + scroll store for the browser
+// collector.
 //
-// Why this exists: every event handler in service_worker.js used to do a
-// NON-ATOMIC read-modify-write of the active-time accumulator persisted in
-// chrome.storage.session:
+// Why this exists: the chrome event handlers in service_worker.js each do a
+// NON-ATOMIC read-modify-write of state persisted in chrome.storage.session:
 //
 //     const cur = await getState();   // read  (await point)
-//     ...mutate cur.accum...
+//     ...mutate cur...
 //     await setState(cur);            // write (await point)
 //
-// chrome.tabs.onActivated, webNavigation.onCommitted, tabs.onUpdated,
-// windows.onFocusChanged and idle.onStateChanged all fire concurrently and
-// interleave at those await points. Two handlers read the SAME `since`, both
-// mutate, then both write — the second setState() clobbers the first's mutation.
-// Observed in production: lost idle/blur pauses (active span runs unbroken to
-// the 1h cap) and double-counted tab switches (onActivated + onCommitted for the
-// same switch each take() the full span before either resets → duplicate nav
-// events each carrying the full active_ms).
+// chrome.tabs.onActivated, webNavigation.onCommitted and tabs.onUpdated all fire
+// concurrently and interleave at those await points. Two handlers read the SAME
+// state, both mutate, then both write — the second setState() clobbers the
+// first's mutation. Without a lock, a double-fired switch (onActivated AND
+// onCommitted for one destination) would each emit a nav event, and the scroll
+// map's read-delete-write would lose a concurrent put for a different tab.
 //
-// Fix: a promise-chain async mutex so every read→mutate→write on the
-// `active_state` key runs to completion before the next one starts (within the
-// worker lifetime). The accumulator accounting itself lives in the PURE
-// active_time.js and is unchanged.
+// Fix: a promise-chain async mutex so every read→mutate→write on the tab state
+// runs to completion before the next one starts (within the worker lifetime),
+// plus a SEPARATE mutex serializing the scroll map. This also makes the
+// redundant-nav suppression (same {tabId,url} → no duplicate nav) reliable by
+// guaranteeing consistent reads.
+//
+// (The per-page `active_ms` accumulator this store used to integrate has been
+// RETIRED — see service_worker.js. The store is now a plain serialized tab+scroll
+// store: no active-time accounting, no `accum` field, no focus/idle handling.)
 //
 // This module takes its dependencies (an async storage backend matching the
-// chrome.storage.session get/set shape, a `post` fn, and the active_time module)
+// chrome.storage.session get/set shape, a `post` fn, and the buildEvent builder)
 // by injection so the concurrency-critical logic is unit-testable WITHOUT a real
 // Chrome — see tests/state_store.test.mjs.
 
@@ -41,14 +44,12 @@ export function makeLock() {
   };
 }
 
-// Build a serialized state store over an injected storage backend.
+// Build a serialized tab + scroll store over an injected storage backend.
 //   storage: { get(key) -> Promise<obj>, set(obj) -> Promise<void> } matching the
 //            chrome.storage.session shape (get returns { [key]: value }).
 //   post:    async fn(event) -> emits an event.
-//   AT:      the active_time module (freshState/fromStored/take/onActive/...).
 //   buildEvent: pure payload builder.
-//   now:     () => epoch ms (injectable for deterministic tests).
-export function createStateStore({ storage, post, AT, buildEvent, now = () => Date.now() }) {
+export function createStateStore({ storage, post, buildEvent }) {
   const STORE_KEY = "active_state";
   const SCROLL_KEY = "scroll_by_tab";
   const lockState = makeLock();
@@ -58,9 +59,8 @@ export function createStateStore({ storage, post, AT, buildEvent, now = () => Da
     const o = await storage.get(STORE_KEY);
     const s = o[STORE_KEY];
     if (!s) {
-      return { tabId: null, url: "", title: "", accum: AT.freshState(now(), true) };
+      return { tabId: null, url: "", title: "" };
     }
-    s.accum = AT.fromStored(s.accum);
     return s;
   }
 
@@ -107,51 +107,33 @@ export function createStateStore({ storage, post, AT, buildEvent, now = () => Da
     });
   }
 
-  // Apply an accumulator transition (onActive/onBlur/onIdle) to the persisted
-  // state in one ATOMIC read-modify-write (serialized against onTabChange and
-  // every other state mutation).
-  async function applyAccum(fn, at) {
-    return lockState(async () => {
-      const cur = await getState();
-      fn(cur.accum, at);
-      await setState(cur);
-    });
-  }
-
-  // A tab change / navigation. Serialized: bank the OUTGOING tab's active time,
-  // emit a nav event carrying that (capped, idle/blur-excluded) active_ms, then
-  // reset the accumulator for the new tab — all atomic w.r.t. concurrent
-  // applyAccum / onTabChange. Because the second of two concurrent onTabChange
-  // calls now runs AFTER the first has take()-reset since=now, it returns ~0
-  // instead of a duplicate full span.
+  // A tab change / navigation. Serialized: emit a nav event for the new tab
+  // carrying the LEAVING tab's scroll metrics, then record the new tab as
+  // current — all atomic w.r.t. concurrent onTabChange.
   //
   // Redundant-nav suppression: if the incoming {tabId,url} equals the CURRENT
   // stored {tabId,url}, nothing actually changed (e.g. onActivated AND
-  // onCommitted both fired for the same destination switch) — bank the time but
-  // do NOT emit a second nav event. A same-tab DIFFERENT-url load is a real
-  // in-tab navigation and STILL emits.
+  // onCommitted both fired for the same destination switch) — do NOT emit a
+  // second nav event. A same-tab DIFFERENT-url load is a real in-tab navigation
+  // and STILL emits.
   async function onTabChange({ url, title, tabId }) {
-    // Pop the leaving tab's scroll metrics OUTSIDE the state lock (independent
-    // lock); capture prev.tabId first inside the lock to know which tab leaves.
     return lockState(async () => {
       const prev = await getState();
-      const at = now();
-      const active_ms = AT.take(prev.accum, at);
       const redundant = prev.tabId === tabId && prev.url === url;
       if (redundant) {
-        // Nothing changed — keep accruing for the SAME tab, no duplicate nav.
-        await setState({ tabId, url: prev.url, title: prev.title || title, accum: prev.accum });
-        return { emitted: false, active_ms };
+        // Nothing changed — refresh the title only, no duplicate nav.
+        await setState({ tabId, url: prev.url, title: prev.title || title });
+        return { emitted: false };
       }
       const { scroll_pct, scroll_ms } = await takeScroll(prev.tabId);
-      await post(buildEvent("nav", { url, title, active_ms, scroll_pct, scroll_ms }));
-      await setState({ tabId, url, title, accum: prev.accum });
-      return { emitted: true, active_ms };
+      await post(buildEvent("nav", { url, title, scroll_pct, scroll_ms }));
+      await setState({ tabId, url, title });
+      return { emitted: true };
     });
   }
 
-  // Title can arrive after commit; refresh stored title without a duration reset.
-  // Serialized so it doesn't clobber a concurrent accumulator mutation.
+  // Title can arrive after commit; refresh stored title without re-emitting.
+  // Serialized so it doesn't clobber a concurrent state mutation.
   async function updateTitle(tabId, title) {
     return lockState(async () => {
       const cur = await getState();
@@ -170,7 +152,6 @@ export function createStateStore({ storage, post, AT, buildEvent, now = () => Da
 
   return {
     onTabChange,
-    applyAccum,
     updateTitle,
     putScroll,
     takeScroll,

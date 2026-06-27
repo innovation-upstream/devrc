@@ -2,7 +2,6 @@
 
 No test hits a real ClickHouse — the client opener is faked.
 """
-import json
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -79,26 +78,14 @@ def test_longest_deep_work_datetime_input():
 
 
 # --------------------------------------------------------------------------- #
-# Pure: active_ms sum (toUInt32OrZero semantics)
+# RETIRED: browser active_ms — the per-page active-engagement metric and its
+# query builder / pure summer have been removed (structurally wrong on i3;
+# attention is now derived downstream from i3 focus). Guard against a regression
+# re-introducing them.
 # --------------------------------------------------------------------------- #
-def test_sum_active_ms():
-    payloads = [
-        json.dumps({"active_ms": 1000}),
-        json.dumps({"active_ms": 2500}),
-        json.dumps({"active_ms": 0}),
-    ]
-    assert Q.sum_active_ms(payloads) == 3500
-
-
-def test_sum_active_ms_bad_values_become_zero():
-    payloads = [
-        json.dumps({"active_ms": "notanumber"}),
-        json.dumps({"active_ms": -50}),          # negative -> 0 (toUInt32OrZero)
-        json.dumps({}),                          # missing -> 0
-        "not json at all",                       # unparseable -> 0
-        json.dumps({"active_ms": 700}),
-    ]
-    assert Q.sum_active_ms(payloads) == 700
+def test_browser_active_ms_helpers_are_gone():
+    assert not hasattr(Q, "q_browser_active_ms")
+    assert not hasattr(Q, "sum_active_ms")
 
 
 # --------------------------------------------------------------------------- #
@@ -140,7 +127,6 @@ def test_builders_contain_verbatim_logic():
     where = Q.run_scope("vrun-x")
     assert "lagInFrame(app, 1, app)" in Q.q_app_switches(where)
     assert "sum(is_switch)" in Q.q_longest_deep_work_ms(where)
-    assert "toUInt32OrZero(JSONExtractString(payload, 'active_ms'))" in Q.q_browser_active_ms(where)
     assert "toHour(ts)" in Q.q_hour_histogram(where)
     assert "source = 'zsh'" in Q.q_command_count(where)
     assert "source = 'browser'" in Q.q_nav_count(where)
