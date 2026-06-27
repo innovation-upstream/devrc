@@ -30,6 +30,23 @@ is gated on an authenticated ClickHouse.
   Computes active-duration across tab switches and stores per-tab scroll metrics
   (both persisted in `chrome.storage.session` so they survive MV3 worker
   suspension); folds the LEAVING tab's scroll metrics into its `nav` event.
+  **All read-modify-write access to that persisted state goes through the
+  serialized store in `state_store.js`** — the worker is thin wiring only.
+- `state_store.js` — the SERIALIZED (race-free) state store. The chrome event
+  handlers fire concurrently and each used to do a non-atomic
+  `getState → mutate accum → setState` against `chrome.storage.session`; they
+  interleaved at the `await` points and clobbered each other's writes, which
+  **lost idle/blur pauses** (an active span ran unbroken to the 1h cap) and
+  **double-counted tab switches** (`onActivated` + `onCommitted` for one switch
+  each `take()`-ed the full span before either reset → duplicate `nav` events,
+  each carrying the full `active_ms`). The store wraps every state mutation
+  (`onTabChange`, `applyAccum`, `updateTitle`) in a promise-chain async mutex so
+  each runs to completion before the next, and a SEPARATE mutex serializes the
+  scroll map's read-delete-write. It also SUPPRESSES the redundant second `nav`
+  when an incoming `{tabId,url}` equals the current stored one (same-tab
+  *different*-url still emits — that's a real in-tab navigation). The accounting
+  itself is unchanged (it stays in the pure `active_time.js`); storage + `post`
+  are injected so the concurrency logic is unit-testable without a real Chrome.
 - `content_scroll.js` — content script (all http/https pages), injected SECOND.
   Thin DOM/chrome wiring: a **capture-phase, document-level** `scroll` listener
   (`document.addEventListener("scroll", …, { capture: true, passive: true })`)
@@ -114,6 +131,14 @@ To point at a TEST spool while validating:
   runner; pass a glob (a bare directory positional is treated as a module on
   Node ≥22, so glob or run from inside the dir):
   `nix-shell -p nodejs --run "node --test 'scripts/collector/browser-ext/tests/**/*.test.mjs'"`.
+- State-store concurrency: `state_store.js` is driven by `tests/state_store.test.mjs`
+  with a FAKE in-memory `chrome.storage.session` (async get/set with a delay that
+  forces interleave) and a fake `post`. It reproduces the production race —
+  an idle pause racing a tab switch, and a double-fired `onActivated`+`onCommitted`
+  switch — and asserts the pause is banked (not clobbered) and the total emitted
+  `active_ms` equals the SINGLE real span (no 2x double-count), plus the
+  redundant-nav suppression and the scroll-map read-delete-write serialization.
+  (These tests FAIL if the mutex is neutered.)
 - Scroll engagement: the PURE `scroll_track.js` (same no-`chrome`/no-`Date.now()`
   discipline) is unit-tested in `tests/scroll_track.test.mjs` (max-depth
   monotonicity, 0–100 clamp, burst accrual with the >1s gap rule, snapshot/reset,
