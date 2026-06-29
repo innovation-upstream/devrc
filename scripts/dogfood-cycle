@@ -1,0 +1,256 @@
+#!/usr/bin/env bash
+# dogfood-cycle — automate the manual civitai App Block "dogfood test cycle".
+#
+# Reconstructed from activity telemetry (laptop, 7d): Zach runs a tight
+# create -> install -> (token) -> run -> (submit) -> teardown -> upgrade loop
+# by hand ~20x/week to exercise the `civitai` CLI's App Block lifecycle.
+# The recurring command stream (in the canonical parent dir
+# /home/zach/workspace/civit/civitai-app-dogfood-manual) was:
+#
+#     rm -r dogfood-manual                         # teardown last run
+#     civitai upgrade                              # pull newest CLI
+#     civitai app create dogfood-manual            # scaffold ./dogfood-manual (page-money)
+#     cd dogfood-manual && npm install             # install deps
+#     # (live variant, when testing real generation:)
+#     #   civitai login --token <key>
+#     #   civitai app dev-token dogfood-manual --env >> .env.development.local
+#     npm run dev:live                             # run the dev harness
+#     # (occasional:)  civitai app submit / civitai app status
+#
+# This script mirrors that sequence as named phases. The common path is
+# `cycle` (= reset + run). The occasional steps (token/submit/login) are
+# opt-in flags or separate subcommands, never forced.
+#
+# SAFETY: the destructive `rm -r dogfood-manual` is guarded hard — it only
+# removes a directory whose basename is EXACTLY $APP, living directly under
+# $BASE_DIR, never with an empty path var, and refuses if $BASE_DIR is wrong.
+# See _rm_app().
+#
+# Usage:
+#   dogfood-cycle reset        # teardown + upgrade + create + install (+token if --live)
+#   dogfood-cycle run          # npm run <DEV_SCRIPT> (default dev:live) in the app dir
+#   dogfood-cycle cycle        # reset then run  (the common manual loop) [alias: all]
+#   dogfood-cycle submit       # civitai app submit (validate + package + submit)
+#   dogfood-cycle status       # civitai app status
+#   dogfood-cycle upgrade      # civitai upgrade
+#   dogfood-cycle login        # civitai login (browser device flow)
+#   dogfood-cycle teardown     # just the guarded rm of the app dir
+#
+# Flags:
+#   --live                mint a dev-token + write .env.development.local during reset
+#                         (requires a prior `civitai login --token <key>` for real spend)
+#   --submit              after `cycle`, also run `civitai app submit`
+#   --no-upgrade          skip `civitai upgrade` during reset (faster iteration)
+#   -n, --dry-run         print every command instead of running it
+#   -h, --help            show this help
+#
+# Env overrides (sane defaults so nothing is hard-coded brittle):
+#   APP        app name / slug / dir basename      (default: dogfood-manual)
+#   BASE_DIR   parent dir the app is created under  (default: ~/workspace/civit/civitai-app-dogfood-manual)
+#   DEV_SCRIPT npm script `run` invokes            (default: dev:live)
+#   CIVITAI    path to the civitai binary          (default: civitai on PATH)
+set -euo pipefail
+
+APP="${APP:-dogfood-manual}"
+BASE_DIR="${BASE_DIR:-$HOME/workspace/civit/civitai-app-dogfood-manual}"
+DEV_SCRIPT="${DEV_SCRIPT:-dev:live}"
+CIVITAI="${CIVITAI:-civitai}"
+
+DRY_RUN=0
+LIVE=0
+DO_SUBMIT=0
+DO_UPGRADE=1
+
+# ---- helpers ---------------------------------------------------------------
+
+# run: echo a phase command and execute it (or just print it under --dry-run).
+run() {
+  if [ "$DRY_RUN" = 1 ]; then
+    printf '  + %s\n' "$*"
+  else
+    printf '\033[36m+ %s\033[0m\n' "$*"
+    "$@"
+  fi
+}
+
+# run_sh: same as run() but for a shell snippet (pipes, &&, redirects).
+run_sh() {
+  if [ "$DRY_RUN" = 1 ]; then
+    printf '  + %s\n' "$1"
+  else
+    printf '\033[36m+ %s\033[0m\n' "$1"
+    bash -c "$1"
+  fi
+}
+
+phase() { printf '\n\033[1m== %s ==\033[0m\n' "$1"; }
+
+app_dir() { printf '%s/%s' "$BASE_DIR" "$APP"; }
+
+# in_dir <dir> <fn>: run fn with cwd=dir. Under --dry-run we do NOT actually cd
+# (the dir may not exist yet / on this host) — fn's commands just print.
+in_dir() {
+  local d="$1"; shift
+  if [ "$DRY_RUN" = 1 ]; then
+    "$@"
+  else
+    ( cd "$d" && "$@" )
+  fi
+}
+
+# _rm_app: the ONE destructive operation, guarded every way that matters.
+#   - $APP must be non-empty and contain no slashes / .. (basename only)
+#   - target = $BASE_DIR/$APP, and its basename must be EXACTLY $APP
+#   - $BASE_DIR must exist and be a directory (the expected dogfood parent)
+#   - the path var is never allowed to be empty at rm time (${dir:?})
+# Any violation aborts before rm runs. A missing dir is a no-op (idempotent).
+_rm_app() {
+  # Pure string guards first — these never touch the filesystem and so always
+  # apply (even under --dry-run). An empty or path-shaped APP can never proceed.
+  if [ -z "$APP" ]; then
+    echo "dogfood-cycle: refusing to rm — APP is empty" >&2; exit 3
+  fi
+  case "$APP" in
+    */*|*..*|.) echo "dogfood-cycle: refusing to rm — unsafe APP '$APP'" >&2; exit 3 ;;
+  esac
+  if [ -z "$BASE_DIR" ]; then
+    echo "dogfood-cycle: refusing to rm — BASE_DIR is empty" >&2; exit 3
+  fi
+  local dir; dir="$(app_dir)"
+  if [ "$(basename "$dir")" != "$APP" ]; then
+    echo "dogfood-cycle: refusing to rm — basename('$dir') != '$APP'" >&2; exit 3
+  fi
+  # ${dir:?} aborts the rm if dir is somehow empty (belt-and-suspenders).
+  if [ "$DRY_RUN" = 1 ]; then
+    run rm -rf "${dir:?}"   # prints only
+    return 0
+  fi
+  # Live filesystem guards: BASE_DIR must be the real dogfood parent dir.
+  if [ ! -d "$BASE_DIR" ]; then
+    echo "dogfood-cycle: refusing to rm — BASE_DIR '$BASE_DIR' is not a directory" >&2; exit 3
+  fi
+  if [ ! -e "$dir" ]; then
+    echo "  (teardown) $dir does not exist — nothing to remove"
+    return 0
+  fi
+  if [ ! -d "$dir" ]; then
+    echo "dogfood-cycle: refusing to rm — '$dir' exists but is not a directory" >&2; exit 3
+  fi
+  run rm -rf "${dir:?}"
+}
+
+require_base_dir() {
+  [ "$DRY_RUN" = 1 ] && return 0
+  if [ ! -d "$BASE_DIR" ]; then
+    echo "dogfood-cycle: BASE_DIR '$BASE_DIR' does not exist." >&2
+    echo "  create it (mkdir -p) or set BASE_DIR to the real dogfood parent dir." >&2
+    exit 4
+  fi
+}
+
+# ---- phases ----------------------------------------------------------------
+
+do_teardown() {
+  phase "teardown — guarded rm of $(app_dir)"
+  _rm_app
+}
+
+do_upgrade() {
+  phase "upgrade — civitai upgrade"
+  run "$CIVITAI" upgrade
+}
+
+do_login() {
+  phase "login — civitai login (browser device flow)"
+  run "$CIVITAI" login
+}
+
+do_create() {
+  phase "create — civitai app create $APP (in $BASE_DIR)"
+  require_base_dir
+  in_dir "$BASE_DIR" run "$CIVITAI" app create "$APP"
+}
+
+do_install() {
+  phase "install — npm install (in $(app_dir))"
+  in_dir "$(app_dir)" run npm install
+}
+
+do_dev_token() {
+  phase "dev-token — mint + write .env.development.local (in $(app_dir))"
+  # Mirrors: civitai app dev-token <slug> --env >> .env.development.local
+  in_dir "$(app_dir)" run_sh "$CIVITAI app dev-token $APP --env >> .env.development.local"
+}
+
+do_run() {
+  phase "run — npm run $DEV_SCRIPT (in $(app_dir))"
+  in_dir "$(app_dir)" run npm run "$DEV_SCRIPT"
+}
+
+do_submit() {
+  phase "submit — civitai app submit (in $(app_dir))"
+  in_dir "$(app_dir)" run "$CIVITAI" app submit
+}
+
+do_status() {
+  phase "status — civitai app status"
+  local d; d="$(app_dir)"
+  [ -d "$d" ] || d="$BASE_DIR"
+  in_dir "$d" run "$CIVITAI" app status
+}
+
+do_reset() {
+  do_teardown
+  [ "$DO_UPGRADE" = 1 ] && do_upgrade
+  do_create
+  do_install
+  [ "$LIVE" = 1 ] && do_dev_token
+  return 0
+}
+
+do_cycle() {
+  do_reset
+  do_run
+  [ "$DO_SUBMIT" = 1 ] && do_submit
+  return 0
+}
+
+usage() { sed -n '2,/^set -euo/p' "$0" | sed '$d; s/^# \{0,1\}//'; }
+
+# ---- arg parsing -----------------------------------------------------------
+
+CMD=""
+for a in "$@"; do
+  case "$a" in
+    --live)        LIVE=1 ;;
+    --submit)      DO_SUBMIT=1 ;;
+    --no-upgrade)  DO_UPGRADE=0 ;;
+    -n|--dry-run)  DRY_RUN=1 ;;
+    -h|--help)     usage; exit 0 ;;
+    -*)            echo "unknown flag: $a" >&2; usage; exit 2 ;;
+    *)
+      if [ -n "$CMD" ]; then echo "unexpected extra arg: $a" >&2; exit 2; fi
+      CMD="$a" ;;
+  esac
+done
+
+[ -n "$CMD" ] || { usage; exit 2; }
+
+if [ "$DRY_RUN" = 1 ]; then
+  echo "[dry-run] APP=$APP BASE_DIR=$BASE_DIR DEV_SCRIPT=$DEV_SCRIPT"
+fi
+
+case "$CMD" in
+  reset)            do_reset ;;
+  run)              do_run ;;
+  cycle|all)        do_cycle ;;
+  submit)           do_submit ;;
+  status)           do_status ;;
+  upgrade)          do_upgrade ;;
+  login)            do_login ;;
+  teardown)         do_teardown ;;
+  *) echo "unknown command: $CMD" >&2; usage; exit 2 ;;
+esac
+
+echo
+echo "dogfood-cycle: $CMD done."
