@@ -118,9 +118,33 @@ def test_billing_subject_regex_is_tight():
     assert res.drop
 
 
+def test_feedback_id_marketing_dropped():
+    # hubstaff job-matches + LinkedIn lead-digest carry NO List-* headers but DO carry
+    # the ESP Feedback-ID header → must drop without burning an LLM call.
+    for mid in (45343, 48326):
+        res = classify_fixture(BY_ID[mid])
+        assert res.drop and res.reason == "header:Feedback-ID", \
+            f"feedback-id noise {mid} not dropped ({res.reason})"
+
+
+def test_feedback_id_unit():
+    res = f.classify(from_addr="x@y.com", subject="Weekly digest",
+                     category="personal", headers={"Feedback-ID": "abc:ses"})
+    assert res.drop and res.reason == "header:Feedback-ID"
+
+
+def test_billing_invoice_with_feedback_id_still_kept():
+    # An invoice that ALSO carries Feedback-ID must still be rescued — the billing
+    # exemption runs before the header drop.
+    res = f.classify(from_addr="billing@vendor.com", subject="Your invoice is attached",
+                     category="notification",
+                     headers={"Feedback-ID": "x:ses", "List-Unsubscribe": "<u>"})
+    assert not res.drop and res.reason == "exempt:billing"
+
+
 def test_noreply_without_list_headers_survives_to_llm():
-    # nasdaq password-expiry: no-reply, no List headers → MUST reach the LLM, not be
-    # blanket-dropped (could be action-required).
+    # nasdaq password-expiry: no-reply, no List/Feedback headers → MUST reach the LLM,
+    # not be blanket-dropped (could be action-required).
     nasdaq = BY_ID[21720]
     assert not classify_fixture(nasdaq).drop
 

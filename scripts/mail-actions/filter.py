@@ -32,7 +32,12 @@ SENDER_DENYLIST = (
 )
 
 # Headers whose mere PRESENCE marks the mail as a mailing-list / bulk / auto blast.
-_BULK_PRESENCE_HEADERS = ("List-Unsubscribe", "List-Id", "Auto-Submitted")
+# Feedback-ID is the standardized ESP feedback-loop header (RFC-ish, set by SES /
+# Google / LinkedIn / Mailchimp on high-volume mail) — it catches marketing/digest
+# blasts (hubstaff job matches, LinkedIn lead digests, vetr newsletter) that omit
+# List-* headers. Verified zero genuine action threads carry it; the billing
+# exemption runs BEFORE this, so invoices that carry it (Cloudflare) are still kept.
+_BULK_PRESENCE_HEADERS = ("List-Unsubscribe", "List-Id", "Auto-Submitted", "Feedback-ID")
 # Precedence values that mark bulk mail.
 _BULK_PRECEDENCE = frozenset({"bulk", "list", "junk"})
 

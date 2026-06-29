@@ -168,5 +168,33 @@
     "id": 39150,
     "message_id": "<6a41fd688f6a3@sidekiq.mail>",
     "subject": "[rest.gateway.api.mobl.ca] Weekly stability summary"
+  },
+  {
+    "category": "personal",
+    "from_addr": "talent@hubstaff.com",
+    "headers": {
+      "Date": "Mon, 29 Jun 2026 14:35:53 +0000",
+      "From": "Hubstaff Talent <talent@hubstaff.com>",
+      "Subject": "Top Jobs Matches for Zachary Lowden",
+      "Feedback-ID": "::1.us-east-1.lEocHt686HTBLUhcrsJm25BkLA92FMrj9JB1EtAg84w=:AmazonSES",
+      "Return-Path": "<0100019f13cee16f-749c705a-8b71-4c10-bc1b-c172906d64bd-000000@notify.hubstaff.com>"
+    },
+    "id": 45343,
+    "message_id": "<0100019f13cee16f-749c705a-8b71-4c10-bc1b-c172906d64bd-000000@us-east-1.amazonses.com>",
+    "subject": "Top Jobs Matches for Zachary Lowden"
+  },
+  {
+    "category": "notification",
+    "from_addr": "messages-noreply@linkedin.com",
+    "headers": {
+      "Date": "Mon, 29 Jun 2026 19:26:30 +0000 (UTC)",
+      "From": "LinkedIn <messages-noreply@linkedin.com>",
+      "Subject": "Zachary, you have 18 new lead suggestions",
+      "Feedback-ID": "email_lss_new_autogen_list_entities_digest_v2:linkedin",
+      "Return-Path": "<m-bvhg51w93zjhjk8z1uazi7z4tisebf5jlojthxqdrfrzp6jvl7pq1qe7scnvxr@bounce.linkedin.com>"
+    },
+    "id": 48326,
+    "message_id": "<linkedin-lss-digest-48326@linkedin.com>",
+    "subject": "Zachary, you have 18 new lead suggestions"
   }
 ]
