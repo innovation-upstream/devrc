@@ -206,6 +206,20 @@ class MailDB:
                 r["raw"] = r["raw"].tobytes()
         return rows
 
+    def fetch_raw(self, mail_id: int) -> bytes | None:
+        """The raw RFC822 bytes for one mail, or None if absent.
+
+        Called ONLY for the (few) Stage-1 survivors during a run, so the whole
+        backlog's `raw` column is never pulled into memory. psycopg2 hands bytea
+        back as a memoryview; convert to plain bytes for the email parser."""
+        with self._c.cursor() as cur:
+            cur.execute("SELECT raw FROM mail WHERE id = %s", (mail_id,))
+            row = cur.fetchone()
+        if not row or row[0] is None:
+            return None
+        raw = row[0]
+        return raw.tobytes() if isinstance(raw, memoryview) else bytes(raw)
+
     def amount_for_mail(self, mail_id: int) -> str | None:
         """Best-effort: the `amount` from a mail_actions row for this mail, if one
         exists (the action pipeline may have extracted it). None otherwise — including
