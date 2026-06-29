@@ -56,9 +56,11 @@ def extract_pdf_attachments(raw: bytes) -> list[PdfAttachment]:
         if not is_pdf:
             continue
         payload = part.get_payload(decode=True)
-        if payload is None:
+        if not isinstance(payload, (bytes, bytearray)):
             continue
-        out.append(PdfAttachment(filename=fname, data=payload))
+        # fname may be None when a PDF is detected by content-type alone; key
+        # derivation falls back to message_id for an empty filename.
+        out.append(PdfAttachment(filename=fname or "", data=bytes(payload)))
     return out
 
 

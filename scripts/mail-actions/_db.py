@@ -212,7 +212,8 @@ class MailDB:
         when the mail_actions table has never been created (action pipeline unrun)."""
         with self._c.cursor() as cur:
             cur.execute("SELECT to_regclass('public.mail_actions')")
-            if cur.fetchone()[0] is None:
+            reg = cur.fetchone()
+            if reg is None or reg[0] is None:
                 return None
             cur.execute(
                 "SELECT amount FROM mail_actions WHERE mail_id = %s", (mail_id,)
