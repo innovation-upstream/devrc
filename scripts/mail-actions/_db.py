@@ -38,6 +38,8 @@ except ImportError as exc:  # pragma: no cover - import guard
 
 NAMESPACE = "mailbox"
 SERVICE = "svc/mailbox-postgres"
+# Idempotency label for the invoice archiver (distinct from action-triage state).
+ARCHIVED_LABEL = "invoice-archived"
 DSN_SECRET = "mailbox-postgres-auth"
 DSN_KEY = "pg-dsn"
 
@@ -178,6 +180,47 @@ class MailDB:
             cur.execute(sql, params)
             return cur.fetchall()
 
+    def fetch_unarchived(self, limit: int | None = None):
+        """Invoice-archiver delta: via_gmail mail with a raw message that has NOT yet
+        been archived (no 'invoice-archived' label). Independent of processed_at — a
+        mail may be both fyi-processed AND not-yet-archived. Returns the row INCLUDING
+        the `raw` bytea, converted from psycopg2's memoryview to plain bytes.
+        """
+        sql = (
+            "SELECT id, message_id, from_addr, subject, received_at, date_header, "
+            "raw "
+            "FROM mail "
+            "WHERE via_gmail AND raw IS NOT NULL "
+            "AND NOT (%s = ANY(coalesce(labels, '{}'))) "
+            "ORDER BY received_at DESC"
+        )
+        params: tuple = (ARCHIVED_LABEL,)
+        if limit is not None:
+            sql += " LIMIT %s"
+            params = (ARCHIVED_LABEL, limit)
+        with self._c.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(sql, params)
+            rows = cur.fetchall()
+        for r in rows:
+            if isinstance(r.get("raw"), memoryview):
+                r["raw"] = r["raw"].tobytes()
+        return rows
+
+    def amount_for_mail(self, mail_id: int) -> str | None:
+        """Best-effort: the `amount` from a mail_actions row for this mail, if one
+        exists (the action pipeline may have extracted it). None otherwise — including
+        when the mail_actions table has never been created (action pipeline unrun)."""
+        with self._c.cursor() as cur:
+            cur.execute("SELECT to_regclass('public.mail_actions')")
+            reg = cur.fetchone()
+            if reg is None or reg[0] is None:
+                return None
+            cur.execute(
+                "SELECT amount FROM mail_actions WHERE mail_id = %s", (mail_id,)
+            )
+            row = cur.fetchone()
+        return row[0] if row else None
+
     def list_open_actions(self):
         with self._c.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(
@@ -199,6 +242,24 @@ class MailDB:
                          FROM unnest(coalesce(labels, '{}') || ARRAY[%s]::text[]) AS x
                        ),
                        processed_at = now()
+                 WHERE id = %s
+                """,
+                (label, mail_id),
+            )
+
+    def add_label(self, mail_id: int, label: str) -> None:
+        """Append `label` to mail.labels (dedup) WITHOUT touching processed_at.
+
+        Distinct from mark_processed: archival state (`invoice-archived`) is
+        orthogonal to action-triage state, so it must not stamp processed_at."""
+        with self._c.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE mail
+                   SET labels = (
+                         SELECT array_agg(DISTINCT x)
+                         FROM unnest(coalesce(labels, '{}') || ARRAY[%s]::text[]) AS x
+                       )
                  WHERE id = %s
                 """,
                 (label, mail_id),
