@@ -23,7 +23,7 @@ from typing import Callable
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from chquery import CHClient, CHConn  # noqa: E402
 
-DURATION_SANITY_CAP = 24 * 60 * 60 * 1000  # >24h in one command = garbage
+DURATION_SANITY_CAP = 7 * 24 * 60 * 60 * 1000  # >7d in one command = garbage (multi-day interactive `claude --resume` sessions legitimately run >24h)
 # Slack for the local-vs-UTC timezone offset on the "no future ts" check.
 FUTURE_SLACK_HOURS = 26  # > max |tz offset| (14h) + margin
 # Oldest plausible ts: the table TTL is 180d, but data only started 2026; guard
@@ -225,8 +225,8 @@ def build_invariants(table: str = "activity.events") -> list[Invariant]:
         # at the top of this module). Its replacement is `derived_attention_consistent`.
         Invariant(
             "duration_ms_capped",
-            # Raw duration is PRESERVED (a multi-hour interactive `claude` is real);
-            # only flag values above the 24h garbage bound.
+            # Raw duration is PRESERVED (a multi-DAY interactive `claude --resume`
+            # is real — observed 40h+); only flag values above the 7d garbage bound.
             f"SELECT count() FROM {table} WHERE duration_ms > {DURATION_SANITY_CAP}",
             eval_zero_violations(f"duration_ms > {DURATION_SANITY_CAP}ms (garbage)"),
         ),
