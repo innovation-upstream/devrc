@@ -55,11 +55,51 @@ class FakeMailDB:
     def insert_action(self, row):
         if row["mail_id"] in self.actions:
             return False  # ON CONFLICT DO NOTHING
-        self.actions[row["mail_id"]] = row
+        r = dict(row)
+        r.setdefault("thread_key", None)
+        r.setdefault("status", "open")
+        r.setdefault("id", row["mail_id"])
+        self.actions[row["mail_id"]] = r
         return True
 
+    def supersede_open_actions(self, thread_key, before_received_at):
+        n = 0
+        for a in self.actions.values():
+            if (a.get("thread_key") == thread_key and a.get("status") == "open"
+                    and a.get("received_at") is not None
+                    and before_received_at is not None
+                    and a["received_at"] < before_received_at):
+                a["status"] = "superseded"
+                n += 1
+        return n
+
+    def close_actions_done(self, action_ids):
+        ids = set(action_ids)
+        n = 0
+        for a in self.actions.values():
+            if a.get("id") in ids and a.get("status") == "open":
+                a["status"] = "done"
+                n += 1
+        return n
+
+    def fetch_open_actions_min(self):
+        return [
+            {"id": a["id"], "thread_key": a.get("thread_key"),
+             "received_at": a.get("received_at")}
+            for a in self.actions.values() if a.get("status") == "open"
+        ]
+
+    def fetch_owner_messages(self, owner_addrs):
+        addrs = {a.lower() for a in owner_addrs}
+        return [
+            {"id": r["id"], "headers": r.get("headers"),
+             "message_id": r.get("message_id"), "received_at": r.get("received_at")}
+            for r in self._mail.values()
+            if (r.get("from_addr") or "").strip().lower() in addrs
+        ]
+
     def list_open_actions(self):
-        return list(self.actions.values())
+        return [a for a in self.actions.values() if a.get("status") == "open"]
 
     def commit(self):
         self.commits += 1

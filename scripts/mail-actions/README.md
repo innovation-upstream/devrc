@@ -141,6 +141,60 @@ WHERE id = <mail_id>;
 DELETE FROM mail_actions WHERE mail_id = <mail_id>;
 ```
 
+## Thread reconciliation (auto-supersede + auto-close)
+
+Beyond the within-run thread-dedup (one action per thread per run), `run` keeps the
+`mail_actions` table in sync with how a thread evolves over time, using the
+`mail_actions.thread_key` column (the RFC 5322 thread root; see `thread_key()`).
+
+**Feature 1 — cross-run supersede (works today, no setup).** When a NEWER message of a
+thread becomes an action, the older OPEN action for that same thread is set
+`status='superseded'` before the new row is inserted, so the reply's action is the
+single live one. A timestamp guard (`received_at <`) means an older message can never
+retire a newer open action. This fires across runs (it reads existing rows), not just
+within one run.
+
+**Feature 2 — auto-close on the OWNER's reply (needs operator setup; see below).** At
+the START of each `run`, any OPEN action whose thread the **owner** has since replied in
+is set `status='done'` (owner reply ⇒ handled). Matching is by `thread_key`, with a
+timestamp guard so only actions that PREDATE the owner's reply are closed (a stale owner
+message can't close a fresh action from a later inbound reply). Legacy rows with a NULL
+`thread_key` are skipped. The run also defensively labels any inbound survivor whose
+sender is an owner address `sent` and never sends it to the LLM.
+
+Owner addresses come from `MAIL_ACTIONS_OWNER_ADDRS` (comma-separated), defaulting to
+`zachlowden1@gmail.com,zach@civitai.com,zacxdev@gmail.com`.
+
+### Operator prerequisite for Feature 2 (auto-close) — REQUIRED, not built here
+
+Feature 2 only fires when the owner's **sent** replies actually land in the `mail`
+table. **Gmail does not cleanly auto-forward Sent mail** — Gmail filters act on
+*received* mail, so a normal "forward to inbox.zacx.dev" filter never sees your
+outbound replies. Until you arrange for sent mail to reach the inbox, **Feature 2 is
+inert** (Feature 1 works regardless). Two ways to wire it up:
+
+- **BCC habit / client rule:** BCC `<anything>@inbox.zacx.dev` on replies you want
+  auto-closed (a send-time client rule or a manual habit). This is the simplest path.
+- **Apps Script:** a small Google Apps Script that forwards messages under the `Sent`
+  label to `inbox.zacx.dev` on a timer.
+
+**`via_gmail` caveat:** BCC'd / forwarded sent mail often arrives with
+`via_gmail=false`. That is *deliberately* why the reconcile pass scans owner mail with
+`SELECT … FROM mail WHERE lower(from_addr) = ANY(%s)` and does **NOT** restrict to
+`via_gmail` — otherwise the owner's own replies would be invisible to it.
+
+### Migration / backfill
+
+`ensure_schema` adds `thread_key text` to the live table via
+`ALTER TABLE mail_actions ADD COLUMN IF NOT EXISTS thread_key text` (idempotent).
+Pre-existing rows keep `thread_key = NULL` and are skipped by Feature 2 until the
+operator backfills them, e.g.:
+
+```sql
+-- backfill thread_key for existing open actions from their source mail's headers
+-- (done by the operator during verification; new rows get it automatically)
+```
+
 ## Invoice archiver (`archive-invoices`)
 
 A **separate, deterministic** loop (no LLM) that mines the inbox for **PDF invoice
@@ -236,6 +290,19 @@ nix-shell -p 'python3.withPackages(p:[p.pytest p.requests p.psycopg2 p.minio])' 
   sanity guard, confidence clamping, and the single-retry behaviour (mocked caller, no key).
 - `test_idempotency.py` — fake in-memory DB: first pass labels+stamps; second pass sees an
   empty delta and is a no-op; `ON CONFLICT` insert is a no-op.
+- `test_db_schema.py` — SQL-level (mock psycopg2 connection): `ensure_schema` emits the
+  `ADD COLUMN IF NOT EXISTS thread_key` migration; `insert_action` carries `thread_key`;
+  `supersede_open_actions`/`close_actions_done`/`fetch_open_actions_min`/
+  `fetch_owner_messages` emit the expected SQL incl. the `received_at <` timestamp guard
+  and the `via_gmail`-unrestricted owner scan; empty-list/empty-addrs short-circuits.
+- `test_reconcile.py` — fake in-memory DB with the reconcile surface, synthetic
+  `References` chains. Feature 1: a newer message supersedes an existing older open
+  action, but does NOT supersede a newer one (timestamp guard); summary counts it.
+  Feature 2 (`reconcile_owner_replies`): an owner reply AFTER the action closes it; an
+  owner message OLDER than the action does not; an unrelated thread does not; a legacy
+  NULL-`thread_key` action is skipped; runs at the start of `cmd_run` and counts.
+  Owner-from inbound survivor → labeled `sent`, no LLM. `owner_addrs()` env override +
+  default.
 
 Fixtures are scrubbed to **headers + from + subject only** — no personal email bodies are
 committed.

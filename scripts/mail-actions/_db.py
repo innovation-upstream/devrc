@@ -157,9 +157,17 @@ class MailDB:
                     confidence  real,
                     reason      text,
                     status      text DEFAULT 'open',
+                    thread_key  text,
                     created_at  timestamptz DEFAULT now()
                 )
                 """
+            )
+            # Idempotent migration for the existing live table (created before the
+            # thread_key column). Legacy rows keep thread_key NULL (parent backfills
+            # during verification); the reconcile pass skips NULL-keyed rows.
+            cur.execute(
+                "ALTER TABLE mail_actions "
+                "ADD COLUMN IF NOT EXISTS thread_key text"
             )
         self._c.commit()
 
@@ -280,22 +288,86 @@ class MailDB:
             )
 
     def insert_action(self, row: dict) -> bool:
-        """Insert a mail_actions row. Returns True if inserted, False on conflict."""
+        """Insert a mail_actions row. Returns True if inserted, False on conflict.
+
+        `thread_key` is optional in `row` (defaults to NULL) so older callers keep
+        working; cmd_run always supplies it now."""
+        params = dict(row)
+        params.setdefault("thread_key", None)
         with self._c.cursor() as cur:
             cur.execute(
                 """
                 INSERT INTO mail_actions
                     (mail_id, message_id, from_addr, subject, received_at,
-                     who, ask, deadline, amount, confidence, reason)
+                     who, ask, deadline, amount, confidence, reason, thread_key)
                 VALUES
                     (%(mail_id)s, %(message_id)s, %(from_addr)s, %(subject)s,
                      %(received_at)s, %(who)s, %(ask)s, %(deadline)s, %(amount)s,
-                     %(confidence)s, %(reason)s)
+                     %(confidence)s, %(reason)s, %(thread_key)s)
                 ON CONFLICT (mail_id) DO NOTHING
                 """,
-                row,
+                params,
             )
             return cur.rowcount > 0
+
+    def supersede_open_actions(self, thread_key: str, before_received_at) -> int:
+        """Retire OPEN actions of `thread_key` that predate `before_received_at`.
+
+        Called just before inserting a newer message's action for the same thread:
+        the stale open action is marked 'superseded' so the reply's action becomes the
+        single live one. The `received_at <` guard means an older message can never
+        retire a newer still-open action. Returns the number of rows superseded."""
+        with self._c.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE mail_actions
+                   SET status = 'superseded'
+                 WHERE thread_key = %s
+                   AND status = 'open'
+                   AND received_at < %s
+                """,
+                (thread_key, before_received_at),
+            )
+            return cur.rowcount
+
+    def close_actions_done(self, action_ids: list[int]) -> int:
+        """Mark the given action rows 'done' (the owner replied → handled).
+
+        No-op on an empty list. Returns the number of rows closed."""
+        if not action_ids:
+            return 0
+        with self._c.cursor() as cur:
+            cur.execute(
+                "UPDATE mail_actions SET status = 'done' WHERE id = ANY(%s)",
+                (list(action_ids),),
+            )
+            return cur.rowcount
+
+    def fetch_open_actions_min(self):
+        """Minimal projection of OPEN actions for the owner-reply reconcile pass:
+        id, thread_key, received_at. thread_key may be NULL on legacy rows (the
+        caller skips those — they can't be thread-matched)."""
+        with self._c.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                "SELECT id, thread_key, received_at "
+                "FROM mail_actions WHERE status = 'open'"
+            )
+            return cur.fetchall()
+
+    def fetch_owner_messages(self, owner_addrs: list[str]):
+        """Mail rows authored by an owner address (any of `owner_addrs`, compared
+        case-insensitively). Deliberately NOT restricted to via_gmail — the owner's
+        forwarded/BCC'd sent mail may have via_gmail=false. Returns id, headers,
+        message_id, received_at so the caller can compute each one's thread_key."""
+        if not owner_addrs:
+            return []
+        with self._c.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                "SELECT id, headers, message_id, received_at "
+                "FROM mail WHERE lower(from_addr) = ANY(%s)",
+                (list(owner_addrs),),
+            )
+            return cur.fetchall()
 
     def commit(self) -> None:
         self._c.commit()

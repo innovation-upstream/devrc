@@ -9,9 +9,18 @@ Pipeline (see scripts/mail-actions/README.md for the full picture):
 
 Delta/idempotency: a row is only touched while `mail.processed_at IS NULL`. Every
 processed row is labelled ('bulk' | 'fyi' | 'action-required' | 'invoice' |
-'superseded') and stamped, so a re-run is a no-op over already-seen mail.
+'superseded' | 'sent') and stamped, so a re-run is a no-op over already-seen mail.
   invoice    — an invoice (auto-paid; captured by the archiver, never an action)
   superseded — an older message of a thread already represented by a newer one
+  sent       — the owner's own mail (from an owner address); never an action
+
+Thread reconciliation (on the mail_actions.thread_key column):
+  Feature 1 (cross-run supersede) — when a NEWER message's action is inserted, the
+    older OPEN action for the same thread is set status='superseded' (the other party
+    replied → the stale ask is no longer the live one).
+  Feature 2 (auto-close on owner reply) — at the START of a run, any OPEN action whose
+    thread the OWNER has since replied in (owner reply received_at > action) is set
+    status='done'. Inert until the owner's sent mail lands in `mail` (see README).
 
 Subcommands:
   run               run the action-required pipeline (filter → LLM → persist)
@@ -31,6 +40,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -95,6 +105,62 @@ def thread_key(headers: dict | None, message_id: str | None) -> str:
     return (message_id or "").strip().strip("<>")
 
 
+# Owner addresses: a reply from any of these means the action is handled (Feature 2),
+# and an inbound survivor authored by one is the owner's own mail, never an action.
+DEFAULT_OWNER_ADDRS = "zachlowden1@gmail.com,zach@civitai.com,zacxdev@gmail.com"
+
+
+def owner_addrs() -> set[str]:
+    """Normalized (lowercase, stripped) owner addresses from
+    $MAIL_ACTIONS_OWNER_ADDRS (comma-separated), else the built-in default."""
+    raw = os.environ.get("MAIL_ACTIONS_OWNER_ADDRS") or DEFAULT_OWNER_ADDRS
+    return {a.strip().lower() for a in raw.split(",") if a.strip()}
+
+
+def reconcile_owner_replies(db, owners: set[str]) -> int:
+    """Auto-close OPEN actions whose thread the OWNER has since replied in.
+
+    thread_key isn't computable in SQL, so the grouping is done here in Python:
+      1. pull OPEN actions (id, thread_key, received_at); skip NULL-keyed legacy rows;
+      2. pull every mail authored by an owner address (regardless of via_gmail — the
+         owner's BCC'd/forwarded sent mail may be via_gmail=false) and key each;
+      3. close an action iff some owner message shares its thread_key AND arrived
+         AFTER the action (the timestamp guard stops a stale owner message closing a
+         fresh action from a later inbound reply).
+    Returns the number of actions closed."""
+    open_actions = db.fetch_open_actions_min()
+    if not open_actions:
+        return 0
+    owner_msgs = db.fetch_owner_messages(sorted(owners))
+
+    # thread_key -> latest owner-reply received_at seen for that thread.
+    owner_latest: dict[str, object] = {}
+    for m in owner_msgs:
+        tkey = thread_key(m.get("headers"), m.get("message_id"))
+        if not tkey:
+            continue
+        ts = m.get("received_at")
+        if ts is None:
+            continue
+        cur = owner_latest.get(tkey)
+        if cur is None or ts > cur:
+            owner_latest[tkey] = ts
+
+    to_close: list[int] = []
+    for a in open_actions:
+        tkey = a.get("thread_key")
+        if not tkey:  # legacy row with no thread_key — can't be matched.
+            continue
+        owner_ts = owner_latest.get(tkey)
+        a_ts = a.get("received_at")
+        if owner_ts is None or a_ts is None:
+            continue
+        if owner_ts > a_ts:  # owner replied AFTER the action arrived → handled.
+            to_close.append(a["id"])
+
+    return db.close_actions_done(to_close)
+
+
 def _is_invoice(db, r) -> bool:
     """True iff this survivor is an invoice by the SAME definition the archiver uses:
     load the mail's raw bytes, parse PDF attachments, and test
@@ -114,8 +180,17 @@ def _is_invoice(db, r) -> bool:
 def cmd_run(args) -> int:
     from _db import MailDB
 
+    owners = owner_addrs()
+
     with MailDB() as db:
         db.ensure_schema()
+
+        # Feature 2: BEFORE fetching new survivors, close any open action whose thread
+        # the owner has since replied in (owner reply = handled). Skipped on --dry-run
+        # since it writes. Inert until the owner's sent mail actually lands in `mail`
+        # (see README "Auto-close on owner reply (Feature 2)").
+        closed = 0 if args.dry_run else reconcile_owner_replies(db, owners)
+
         rows = db.fetch_unprocessed(limit=args.limit)
         dropped, survivors = _partition(rows)
 
@@ -123,6 +198,7 @@ def cmd_run(args) -> int:
             "delta_rows": len(rows),
             "dropped_bulk": len(dropped),
             "survivors": len(survivors),
+            "closed": closed,
             "est_llm_cost_usd": round(_est_cost(len(survivors)), 4),
         }
 
@@ -144,6 +220,7 @@ def cmd_run(args) -> int:
         fyis = 0
         invoices = 0
         superseded = 0
+        sent = 0
         errors = 0
         emitted = 0
         seen_threads: set[str] = set()
@@ -151,8 +228,19 @@ def cmd_run(args) -> int:
         # DESC), so the FIRST survivor seen for a thread is the latest message — the
         # one we keep; older messages of an already-seen thread are superseded.
         for r, _res in survivors:
-            # (1) thread-dedup: an older message of a thread we've already represented.
             tkey = thread_key(r.get("headers"), r.get("message_id"))
+
+            # (0) owner's own mail is never an action — label 'sent', skip the LLM.
+            # Owner mail is usually NOT via_gmail (so it won't appear here), but guard
+            # defensively in case a forwarded/BCC'd copy does.
+            if (r.get("from_addr") or "").strip().lower() in owners:
+                db.mark_processed(r["id"], "sent")
+                sent += 1
+                if tkey:
+                    seen_threads.add(tkey)
+                continue
+
+            # (1) thread-dedup: an older message of a thread we've already represented.
             if tkey and tkey in seen_threads:
                 db.mark_processed(r["id"], "superseded")
                 superseded += 1
@@ -181,12 +269,20 @@ def cmd_run(args) -> int:
                 continue
 
             if ex.action_required:
+                # Feature 1: a NEWER message's action retires the older OPEN action for
+                # this thread (cross-run, persisted). Guarded by received_at so an older
+                # message can't supersede a newer open action.
+                if tkey:
+                    superseded += db.supersede_open_actions(
+                        thread_key=tkey, before_received_at=r.get("received_at"),
+                    )
                 inserted = db.insert_action({
                     "mail_id": r["id"],
                     "message_id": r.get("message_id"),
                     "from_addr": r.get("from_addr"),
                     "subject": r.get("subject"),
                     "received_at": r.get("received_at"),
+                    "thread_key": tkey or None,
                     **ex.as_row(),
                 })
                 db.mark_processed(r["id"], "action-required")
@@ -208,6 +304,8 @@ def cmd_run(args) -> int:
             "fyi": fyis,
             "invoice": invoices,
             "superseded": superseded,
+            "sent": sent,
+            "closed": closed,
             "extract_errors": errors,
             "clawgate_emitted": emitted,
             "est_llm_cost_usd": round(_est_cost(len(survivors)), 4),
@@ -425,6 +523,8 @@ def _print_run(s) -> None:
     print(f"  fyi:              {s['fyi']}")
     print(f"  invoice:          {s.get('invoice', 0)}")
     print(f"  superseded:       {s.get('superseded', 0)}")
+    print(f"  sent (owner):     {s.get('sent', 0)}")
+    print(f"  closed (owner):   {s.get('closed', 0)}")
     if s["extract_errors"]:
         print(f"  extract errors:   {s['extract_errors']}")
     if s.get("clawgate_emitted"):
