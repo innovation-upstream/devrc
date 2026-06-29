@@ -8,8 +8,10 @@ Pipeline (see scripts/mail-actions/README.md for the full picture):
   Stage 4  surface to clawgate       (clawgate.py, optional, --emit-clawgate)
 
 Delta/idempotency: a row is only touched while `mail.processed_at IS NULL`. Every
-processed row is labelled ('bulk' | 'fyi' | 'action-required') and stamped, so a
-re-run is a no-op over already-seen mail.
+processed row is labelled ('bulk' | 'fyi' | 'action-required' | 'invoice' |
+'superseded') and stamped, so a re-run is a no-op over already-seen mail.
+  invoice    — an invoice (auto-paid; captured by the archiver, never an action)
+  superseded — an older message of a thread already represented by a newer one
 
 Subcommands:
   run               run the action-required pipeline (filter → LLM → persist)
@@ -34,6 +36,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import archive  # noqa: E402  (sibling module, reuse the invoice definition — do NOT duplicate)
 import filter as f  # noqa: E402  (sibling module, not a package)
 import llm  # noqa: E402
 
@@ -59,6 +62,53 @@ def _partition(rows):
         )
         (dropped if res.drop else survivors).append((r, res))
     return dropped, survivors
+
+
+def thread_key(headers: dict | None, message_id: str | None) -> str:
+    """Stable key grouping every message of one email thread together.
+
+    Resolution order (RFC 5322 threading), case-insensitive on header names:
+      1. `References` — a whitespace-separated list of <msg-id>s; return the FIRST
+         (the thread root, which every reply carries).
+      2. `In-Reply-To` — the parent's msg-id, stripped of angle brackets.
+      3. the mail's own `message_id`, stripped.
+
+    A thread root has neither References nor In-Reply-To, and its own message_id is
+    exactly what replies put in References[0], so the root and all its replies map to
+    the same key. Returns "" only when nothing identifying is present."""
+    hdrs = headers or {}
+    # Case-insensitive header lookup (header dicts in this pipeline aren't normalized).
+    lower = {str(k).lower(): v for k, v in hdrs.items()}
+
+    refs = lower.get("references")
+    if refs and str(refs).strip():
+        ids = str(refs).split()
+        if ids:
+            return ids[0].strip().strip("<>")
+
+    in_reply_to = lower.get("in-reply-to")
+    if in_reply_to and str(in_reply_to).strip():
+        # In-Reply-To is normally a single id, but tolerate extra tokens.
+        first = str(in_reply_to).split()[0]
+        return first.strip().strip("<>")
+
+    return (message_id or "").strip().strip("<>")
+
+
+def _is_invoice(db, r) -> bool:
+    """True iff this survivor is an invoice by the SAME definition the archiver uses:
+    load the mail's raw bytes, parse PDF attachments, and test
+    `archive.is_archive_candidate`. Called only for survivors (few), so the whole
+    backlog's `raw` is never loaded. A None/empty raw → not an invoice (no PDFs)."""
+    raw = db.fetch_raw(r["id"])
+    if not raw:
+        return False
+    atts = archive.extract_pdf_attachments(raw)
+    return archive.is_archive_candidate(
+        from_addr=r.get("from_addr"),
+        subject=r.get("subject"),
+        attachments=atts,
+    )
 
 
 def cmd_run(args) -> int:
@@ -92,9 +142,32 @@ def cmd_run(args) -> int:
 
         actions = 0
         fyis = 0
+        invoices = 0
+        superseded = 0
         errors = 0
         emitted = 0
+        seen_threads: set[str] = set()
+        # Survivors arrive most-recent-first (fetch_unprocessed ORDER BY received_at
+        # DESC), so the FIRST survivor seen for a thread is the latest message — the
+        # one we keep; older messages of an already-seen thread are superseded.
         for r, _res in survivors:
+            # (1) thread-dedup: an older message of a thread we've already represented.
+            tkey = thread_key(r.get("headers"), r.get("message_id"))
+            if tkey and tkey in seen_threads:
+                db.mark_processed(r["id"], "superseded")
+                superseded += 1
+                continue
+            if tkey:
+                seen_threads.add(tkey)
+
+            # (2) invoice check: invoices are auto-paid + captured by the archiver for
+            # tax records — they are never action items, so skip the LLM entirely.
+            if _is_invoice(db, r):
+                db.mark_processed(r["id"], "invoice")
+                invoices += 1
+                continue
+
+            # (3) otherwise: LLM extraction as before.
             try:
                 ex = llm.extract(
                     from_addr=r.get("from_addr") or "",
@@ -133,6 +206,8 @@ def cmd_run(args) -> int:
             "mode": "run",
             "action_required": actions,
             "fyi": fyis,
+            "invoice": invoices,
+            "superseded": superseded,
             "extract_errors": errors,
             "clawgate_emitted": emitted,
             "est_llm_cost_usd": round(_est_cost(len(survivors)), 4),
@@ -348,6 +423,8 @@ def _print_run(s) -> None:
     print(f"  survivors → LLM:  {s['survivors']}")
     print(f"  action-required:  {s['action_required']}")
     print(f"  fyi:              {s['fyi']}")
+    print(f"  invoice:          {s.get('invoice', 0)}")
+    print(f"  superseded:       {s.get('superseded', 0)}")
     if s["extract_errors"]:
         print(f"  extract errors:   {s['extract_errors']}")
     if s.get("clawgate_emitted"):

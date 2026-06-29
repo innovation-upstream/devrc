@@ -42,6 +42,10 @@ class FakeMailDB:
         out.sort(key=lambda r: r["id"], reverse=True)
         return out[:limit] if limit is not None else out
 
+    def fetch_raw(self, mail_id):
+        # The idempotency-test rows have no PDF/raw → never invoices.
+        return self._mail[mail_id].get("raw")
+
     def mark_processed(self, mail_id, label):
         r = self._mail[mail_id]
         if label not in r["labels"]:
