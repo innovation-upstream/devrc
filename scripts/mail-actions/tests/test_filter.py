@@ -142,11 +142,28 @@ def test_billing_invoice_with_feedback_id_still_kept():
     assert not res.drop and res.reason == "exempt:billing"
 
 
-def test_noreply_without_list_headers_survives_to_llm():
-    # nasdaq password-expiry: no-reply, no List/Feedback headers → MUST reach the LLM,
-    # not be blanket-dropped (could be action-required).
-    nasdaq = BY_ID[21720]
-    assert not classify_fixture(nasdaq).drop
+def test_github_noreply_security_notices_dropped():
+    # noreply@github.com account-security audit mail (new key/PAT/OAuth) carries no
+    # List-* headers but is automated noise → dropped by the *@github.com denylist.
+    res = f.classify(from_addr="noreply@github.com",
+                     subject="[GitHub] A new public key was added to vetrllc/vetr-api",
+                     category="notification", headers={})
+    assert res.drop and res.reason == "sender:denylist"
+
+
+def test_nasdaq_signin_dropped():
+    # nasdaq signin/password-expiry notification → denylisted (operator: noise).
+    res = classify_fixture(BY_ID[21720])
+    assert res.drop and res.reason == "sender:denylist"
+
+
+def test_aws_google_verification_still_survives():
+    # The genuine-verification carve-out: AWS/Google sign-in codes are NOT denylisted
+    # and carry no bulk headers → still reach the LLM.
+    for addr in ("no-reply@signin.aws.amazon.com", "no-reply@accounts.google.com"):
+        res = f.classify(from_addr=addr, subject="Your verification code",
+                         category="notification", headers={})
+        assert not res.drop, f"{addr} wrongly dropped"
 
 
 # -- pure-unit coverage of the primitives ---------------------------------

@@ -10,9 +10,10 @@ KEEPS (lets the LLM judge). It only drops on unambiguous, header-driven signals:
 mailing-list / bulk headers, the `alert` category, or a SHORT denylist of senders
 that are unambiguously automated notification machinery.
 
-It deliberately does NOT blanket-drop `no-reply@` / `noreply@` — AWS / Google /
-verification / password-expiry mail can be action-required, so those survive to the
-LLM. It does NOT try to enumerate newsletters; the header signals + LLM cover those.
+It deliberately does NOT blanket-drop `no-reply@` / `noreply@` — AWS / Google sign-in
+verification codes can be action-required, so those survive to the LLM. It does NOT try
+to enumerate newsletters; the header signals + LLM cover those. Specific automated
+notification senders (GitHub, nasdaq signin, …) ARE denylisted by address below.
 """
 from __future__ import annotations
 
@@ -24,11 +25,13 @@ from dataclasses import dataclass
 # header signals do the heavy lifting; the LLM handles ambiguous survivors. Patterns
 # are matched case-insensitively with fnmatch (so `*@npmjs.com` covers subdomains).
 SENDER_DENYLIST = (
-    "notifications@github.com",
+    "*@github.com",                 # all GitHub mail is automated: PR/issue activity
+                                    # AND account-security audit notices (new key/PAT/OAuth)
     "*@npmjs.com",
     "no-reply@pagerduty.com",
     "notifications@bugsnag.com",
     "notifications@tasks.clickup.com",
+    "*@signin.nasdaq.com",          # signin/security notifications (password-expiry etc.)
 )
 
 # Headers whose mere PRESENCE marks the mail as a mailing-list / bulk / auto blast.
