@@ -1,0 +1,200 @@
+[
+  {
+    "category": "personal",
+    "from_addr": "sales@zenpayments.com",
+    "headers": {
+      "Date": "Mon, 29 Jun 2026 00:39:01 +0000 (GMT)",
+      "From": "Zen Payments <sales@zenpayments.com>",
+      "Subject": "Application Incomplete for Civitai",
+      "To": "\"zach@civitai.com\" <zach@civitai.com>"
+    },
+    "id": 36442,
+    "message_id": "<PoofO000000000000000000000000000000000000000000000THDB5100YIGyX7AiSQKf5abjzeRUsg@sfdc.net>",
+    "subject": "Application Incomplete for Civitai"
+  },
+  {
+    "category": "personal",
+    "from_addr": "kara.redford@zenpayments.com",
+    "headers": {
+      "Date": "Mon, 29 Jun 2026 20:10:29 +0000",
+      "From": "Kara Redford <kara.redford@zenpayments.com>",
+      "Subject": "Re: Zen Payments Merchant Account for",
+      "To": "Justin Maier <justin@civitai.com>"
+    },
+    "id": 48374,
+    "message_id": "<SN6PR13MB251043565280E54716B7DFDE96E82@SN6PR13MB2510.namprd13.prod.outlook.com>",
+    "subject": "Re: Zen Payments Merchant Account for"
+  },
+  {
+    "category": "personal",
+    "from_addr": "accounts@stripe.com",
+    "headers": {
+      "Date": "Mon, 29 Jun 2026 04:34:41 +0000 (GMT)",
+      "From": "Stripe Support <accounts@stripe.com>",
+      "Subject": "Re: [Action required] Share more details about vetr llc",
+      "To": "\"zachlowden1@gmail.com\" <zachlowden1@gmail.com>"
+    },
+    "id": 38796,
+    "message_id": "<mEUT0000000000000000000000000000000000000000000000THDM1R00DkPnOe9zSeicW-DJsHGjXg@sfdc.net>",
+    "subject": "Re: [Action required] Share more details about vetr llc"
+  },
+  {
+    "category": "personal",
+    "from_addr": "lauren@naidacom.com",
+    "headers": {
+      "Date": "Mon, 29 Jun 2026 13:31:01 -0500",
+      "From": "Lauren Mitchosky <lauren@naidacom.com>",
+      "Subject": "Re: Sales Audit Excel Template",
+      "To": "Zach Lowden <zachlowden1@gmail.com>"
+    },
+    "id": 48072,
+    "message_id": "<272E015A-ED26-4DAE-AE72-22F51773BE0C@naidacom.com>",
+    "subject": "Re: Sales Audit Excel Template"
+  },
+  {
+    "category": "personal",
+    "from_addr": "billing@hetzner.com",
+    "headers": {
+      "Date": "Sun, 28 Jun 2026 02:27:26 +0200",
+      "From": "Accounting - Hetzner Online GmbH <billing@hetzner.com>",
+      "Subject": "Hetzner Online GmbH - Invoice 082000970828 (K0803356324)",
+      "To": "zachlowden1@gmail.com"
+    },
+    "id": 22321,
+    "message_id": "<1782606446.6a406a6ede770@efs-ws.hetzner.de>",
+    "subject": "Hetzner Online GmbH - Invoice 082000970828 (K0803356324)"
+  },
+  {
+    "category": "notification",
+    "from_addr": "noreply@notify.cloudflare.com",
+    "headers": {
+      "Date": "Sat, 27 Jun 2026 11:56:26 +0000",
+      "From": "\"Cloudflare\" <noreply@notify.cloudflare.com>",
+      "List-Id": "<spc.265094.0.sparkpostmail.com>",
+      "List-Unsubscribe": "<mailto:unsubscribe@unsub.spmta.com?subject=unsubscribe%3ADoOY5PaPKcDjZXcxjualWI2RqH8RY198qCN7MHEn5zw~%7CeyAicmNwdF90byI6ICJ6YWN4ZGV2QGdtYWlsLmNvbSIsICJ0ZW5hbnRfaWQiOiAic3BjIiwgImN1c3RvbWVyX2lkIjogIjI2NTA5NCIsICJzdWJhY2NvdW50X2lkIjogIjAiLCAibWVzc2FnZV9pZCI6ICI2YTNlNmFiYTNmNmFmYzIxNDNjYiIgfQ~~>,<https://unsubscribe.spmta.com/u/7ZqLQD449VwrX1wxE2s9kw~~/AAQLhhA~/HMsjICNj6Kxbi3ZBDH6hbTs4xtc0wG2WKBvmCh_eormrxFhANd6L1RAmz932_hSOoW93adZiRdpiEmne-FGq-g~~>",
+      "Subject": "Your invoice is attached",
+      "To": "zacxdev@gmail.com"
+    },
+    "id": 14563,
+    "message_id": "<BC.3C.25922.A6ABF3A6@i-0ed925b9e69ce275e.mta1vrest.sd.prd.sparkpost>",
+    "subject": "Your invoice is attached"
+  },
+  {
+    "category": "notification",
+    "from_addr": "notifications@github.com",
+    "headers": {
+      "Date": "Mon, 29 Jun 2026 14:43:01 -0700",
+      "From": "Zachary Lowden <notifications@github.com>",
+      "List-Unsubscribe": "<mailto:unsub+CEL4N7E2P7N5CAPGZXDP6Z3KXQYOLEVBNHHQAAAAAEOGSLTU@reply.github.com>,\r\n <https://github.com/notifications/unsubscribe/one-click/CEL4N7CNOVMGWSNYUUVMOTL5CLPGLAVCNFSNUABFKJSXA33TNF2G64TZHM2TIOJYGMYDIMJTHNEXG43VMU5TINZXGE3DEMRVGE3KC5QC>",
+      "Precedence": "list",
+      "Reply-To": "civitai/civitai <reply+CEL4N7E2P7N5CAPGZXDP6Z3KXQYOLEVBNHHQAAAAAEOGSLTU@reply.github.com>",
+      "Subject": "Re: [civitai/civitai] feat(app-blocks): support off-site\r\n (external-link) apps in listings (PR #2821)",
+      "To": "civitai/civitai <civitai@noreply.github.com>"
+    },
+    "id": 48450,
+    "message_id": "<civitai/civitai/pull/2821/issue_event/27350659147@github.com>",
+    "subject": "Re: [civitai/civitai] feat(app-blocks): support off-site\r\n (external-link) apps in listings (PR #2821)"
+  },
+  {
+    "category": "personal",
+    "from_addr": "support@npmjs.com",
+    "headers": {
+      "Date": "Sun, 28 Jun 2026 22:28:55 +0000",
+      "From": "npm <support@npmjs.com>",
+      "Subject": "Successfully published @civitai/blocks-react@0.15.3",
+      "To": "devzacx <zachlowden1@gmail.com>"
+    },
+    "id": 35230,
+    "message_id": "<0101019f10599c00-a2f34bfb-fd3e-4be0-9f96-e28a293420a0-000000@us-west-2.amazonses.com>",
+    "subject": "Successfully published @civitai/blocks-react@0.15.3"
+  },
+  {
+    "category": "alert",
+    "from_addr": "alerts@civitaic.com",
+    "headers": {
+      "Date": "Mon, 29 Jun 2026 21:53:25 +0000",
+      "From": "\"GoAlert\" <alerts@civitaic.com>",
+      "Subject": "Alert #132619: FIRING: GPU Fleet: Root disk filling up",
+      "To": "zach@civitai.com"
+    },
+    "id": 48454,
+    "message_id": "<20260629215325.25E03310E9FDF@smtp-relay.civitaic.com>",
+    "subject": "Alert #132619: FIRING: GPU Fleet: Root disk filling up"
+  },
+  {
+    "category": "notification",
+    "from_addr": "notifications@github.com",
+    "headers": {
+      "Date": "Mon, 29 Jun 2026 14:23:28 -0700",
+      "From": "\"Zachary Lowden\" <notifications@github.com>",
+      "List-Id": "vetrllc/vetr-app <vetr-app.vetrllc.github.com>",
+      "Precedence": "list",
+      "Reply-To": "vetrllc/vetr-app <vetr-app@noreply.github.com>",
+      "Subject": "[vetrllc/vetr-app] PR run failed: tests - fix(checkout):\r\n gateway-aware pay-now checkout (authnet) + servicer card-on-file (06dca46)",
+      "To": "\"vetrllc/vetr-app\" <vetr-app@noreply.github.com>"
+    },
+    "id": 48429,
+    "message_id": "<vetrllc/vetr-app/check-suites/CS_kwDOSPOrP88AAAAR2znEmA/1782768188@github.com>",
+    "subject": "[vetrllc/vetr-app] PR run failed: tests - fix(checkout):\r\n gateway-aware pay-now checkout (authnet) + servicer card-on-file (06dca46)"
+  },
+  {
+    "category": "personal",
+    "from_addr": "lucy@buildcanada.com",
+    "headers": {
+      "Date": "Mon, 29 Jun 2026 08:49:44 -0400",
+      "From": "Lucy Hargreaves <lucy@buildcanada.com>",
+      "List-Unsubscribe": "<mailto:1axdgbp1mkn21xnh34kr3yzjnfkfne2yhx0oto-zachlowden1=gmail.com@bf01.na3.hubspotstarter.net?subject=unsubscribe>, <https://landing.buildcanada.com/hs/subscription-preferences/v2/unsubscribe-all?data=aV2ncw96hK95CW6FVHsG5drjnFW83bZGy4kdXppW7_3syt8zGNXmW4TP1qP79t9wlVb-Zdd90lTZcVS7WQL7D0xtTW5c1Q5n2p2vgPW3xC1NK2pMzl3W6g55kn3qkCl0W736jK82R59l0W99KDzG5fS_Zlf20SnHq04>",
+      "Precedence": "bulk",
+      "Reply-To": "lucy@buildcanada.com",
+      "Subject": "Build Canada: A Few Things from this Week...",
+      "To": "zachlowden1@gmail.com"
+    },
+    "id": 44190,
+    "message_id": "<1782737382279.d3f20826-5403-489d-aeef-18d6415c6fc4@bf01.na3.hubspotstarter.net>",
+    "subject": "Build Canada: A Few Things from this Week..."
+  },
+  {
+    "category": "notification",
+    "from_addr": "noreply@signin.nasdaq.com",
+    "headers": {},
+    "id": 21720,
+    "message_id": "<76740571.58352.1782602586460@okta.com>",
+    "subject": "[Nasdaq Signin] Your Nasdaq Signin password is expiring!"
+  },
+  {
+    "category": "notification",
+    "from_addr": "notifications@bugsnag.com",
+    "headers": {},
+    "id": 39150,
+    "message_id": "<6a41fd688f6a3@sidekiq.mail>",
+    "subject": "[rest.gateway.api.mobl.ca] Weekly stability summary"
+  },
+  {
+    "category": "personal",
+    "from_addr": "talent@hubstaff.com",
+    "headers": {
+      "Date": "Mon, 29 Jun 2026 14:35:53 +0000",
+      "From": "Hubstaff Talent <talent@hubstaff.com>",
+      "Subject": "Top Jobs Matches for Zachary Lowden",
+      "Feedback-ID": "::1.us-east-1.lEocHt686HTBLUhcrsJm25BkLA92FMrj9JB1EtAg84w=:AmazonSES",
+      "Return-Path": "<0100019f13cee16f-749c705a-8b71-4c10-bc1b-c172906d64bd-000000@notify.hubstaff.com>"
+    },
+    "id": 45343,
+    "message_id": "<0100019f13cee16f-749c705a-8b71-4c10-bc1b-c172906d64bd-000000@us-east-1.amazonses.com>",
+    "subject": "Top Jobs Matches for Zachary Lowden"
+  },
+  {
+    "category": "notification",
+    "from_addr": "messages-noreply@linkedin.com",
+    "headers": {
+      "Date": "Mon, 29 Jun 2026 19:26:30 +0000 (UTC)",
+      "From": "LinkedIn <messages-noreply@linkedin.com>",
+      "Subject": "Zachary, you have 18 new lead suggestions",
+      "Feedback-ID": "email_lss_new_autogen_list_entities_digest_v2:linkedin",
+      "Return-Path": "<m-bvhg51w93zjhjk8z1uazi7z4tisebf5jlojthxqdrfrzp6jvl7pq1qe7scnvxr@bounce.linkedin.com>"
+    },
+    "id": 48326,
+    "message_id": "<linkedin-lss-digest-48326@linkedin.com>",
+    "subject": "Zachary, you have 18 new lead suggestions"
+  }
+]
