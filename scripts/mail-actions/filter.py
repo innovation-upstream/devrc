@@ -34,6 +34,17 @@ SENDER_DENYLIST = (
     "*@signin.nasdaq.com",          # signin/security notifications (password-expiry etc.)
     "*@info.avianca.com",           # airline MARKETING subdomain — legit booking/flight
                                     # mail comes from other avianca addresses, not info.
+    "team@notifications.resend.com",  # cancelled-subscription dunning nag (operator: ignore)
+)
+
+# Operator NOISE-by-topic rules: (sender_pattern, subject_regex). Drops mail from an
+# OTHERWISE-legit sender when the subject matches — for senders whose SOME mail matters
+# but a specific recurring topic is noise. Scoped tight so legit mail from the same
+# party still flows (e.g. VoIP low-balance warnings are noise, but a future $0 / account-
+# suspended alert has a different subject and survives). Runs BEFORE the billing
+# exemption so it can suppress topics that would otherwise be billing-rescued.
+SENDER_SUBJECT_DENYLIST = (
+    (r"*@voip.ms", re.compile(r"\blow\s+balance\b", re.IGNORECASE)),
 )
 
 # Headers whose mere PRESENCE marks the mail as a mailing-list / bulk / auto blast.
@@ -61,7 +72,6 @@ BILLING_SENDER_ALLOWLIST = (
     "invoices@*",
     "invoicing@*",
     "accounts@stripe.com",
-    "support@datapacket.com",
     # NOTE: no broad `billing-*@*` — vendors (e.g. LinkedIn) abuse a billing-noreply
     # address for marketing upsell. A genuine invoice from such an address is still
     # rescued by the transactional-subject regex below; marketing with a bulk header
@@ -112,6 +122,16 @@ def _sender_denylisted(from_addr: str | None) -> bool:
     return any(fnmatch.fnmatch(addr, pat) for pat in SENDER_DENYLIST)
 
 
+def _sender_subject_denied(from_addr: str | None, subject: str | None) -> bool:
+    """True if (sender, subject) matches an operator noise-by-topic rule."""
+    addr = (from_addr or "").strip().lower()
+    subj = subject or ""
+    for sender_pat, subj_re in SENDER_SUBJECT_DENYLIST:
+        if fnmatch.fnmatch(addr, sender_pat) and subj_re.search(subj):
+            return True
+    return False
+
+
 def _billing_exempt(from_addr: str | None, subject: str | None) -> bool:
     """True if the mail looks like transactional billing/invoice → rescue from bulk drop."""
     addr = (from_addr or "").strip().lower()
@@ -136,24 +156,28 @@ def classify(
     if (category or "").lower() == "alert":
         return FilterResult(True, "category:alert")
 
-    # 1b. billing/invoice exemption — rescue transactional money mail from the bulk
+    # 2. operator NOISE rules (sender + sender/subject denylists). These run BEFORE the
+    # billing exemption so an operator-suppressed topic (e.g. a cancelled service's
+    # "Payment failed" dunning) cannot be rescued by the billing subject regex.
+    if _sender_denylisted(from_addr):
+        return FilterResult(True, "sender:denylist")
+    if _sender_subject_denied(from_addr, subject):
+        return FilterResult(True, "sender-subject:denylist")
+
+    # 3. billing/invoice exemption — rescue transactional money mail from the bulk
     # drop below (vendors blast invoices via ESPs, so they carry List-* headers). KEEP
     # → let the LLM judge whether a bill actually needs action.
     if _billing_exempt(from_addr, subject):
         return FilterResult(False, "exempt:billing")
 
-    # 2. mailing-list / bulk / auto headers by presence.
+    # 4. mailing-list / bulk / auto headers by presence.
     for h in _BULK_PRESENCE_HEADERS:
         if _header_present(headers, h):
             return FilterResult(True, f"header:{h}")
 
-    # 3. Precedence: bulk/list/junk.
+    # 5. Precedence: bulk/list/junk.
     prec = (_header_get(headers, "Precedence") or "").strip().lower()
     if prec in _BULK_PRECEDENCE:
         return FilterResult(True, f"precedence:{prec}")
-
-    # 4. short automated-notification sender denylist.
-    if _sender_denylisted(from_addr):
-        return FilterResult(True, "sender:denylist")
 
     return FilterResult(False, "survivor")

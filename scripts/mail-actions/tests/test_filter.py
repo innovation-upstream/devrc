@@ -107,6 +107,45 @@ def test_billing_sender_allowlist_survives():
     assert not res.drop and res.reason == "exempt:billing"
 
 
+def test_resend_dunning_dropped_despite_billing_subject():
+    # Cancelled-subscription dunning. Subject "Payment failed" matches the billing
+    # regex, but the sender denylist runs FIRST → it drops, not billing-rescued.
+    res = f.classify(from_addr="team@notifications.resend.com",
+                     subject="Payment failed for zachlowden1 Resend subscription",
+                     category="personal", headers={"Feedback-ID": "x:ses"})
+    assert res.drop and res.reason == "sender:denylist"
+
+
+def test_voip_low_balance_dropped_but_zero_balance_survives():
+    # Low-balance warnings are noise (operator: care only when it hits 0). A future
+    # $0 / suspended alert has a different subject and MUST survive.
+    low = f.classify(from_addr="noreply@voip.ms", subject="VoIP.ms - Low Balance",
+                     category="personal", headers={})
+    assert low.drop and low.reason == "sender-subject:denylist"
+    zero = f.classify(from_addr="noreply@voip.ms",
+                      subject="VoIP.ms - Account suspended (balance depleted)",
+                      category="personal", headers={})
+    assert not zero.drop, "zero-balance/suspended alert must reach the LLM"
+
+
+def test_datapacket_ddos_dropped_but_real_mail_survives():
+    # DDoS reports (operator: false alarms) carry Feedback-ID and are no longer
+    # billing-exempted → drop. A real support reply (no bulk header) survives; a real
+    # invoice (invoice subject) is still billing-rescued.
+    ddos = f.classify(from_addr="support@datapacket.com",
+                      subject="DDoS detected on one of your servers",
+                      category="notification", headers={"Feedback-ID": "x:ses"})
+    assert ddos.drop and ddos.reason == "header:Feedback-ID"
+    reply = f.classify(from_addr="support@datapacket.com",
+                       subject="Re: ticket #4412 server provisioning",
+                       category="personal", headers={})
+    assert not reply.drop, "genuine datapacket support reply must survive"
+    invoice = f.classify(from_addr="support@datapacket.com",
+                         subject="Your invoice is ready", category="notification",
+                         headers={"Feedback-ID": "x:ses"})
+    assert not invoice.drop and invoice.reason == "exempt:billing"
+
+
 def test_avianca_marketing_subdomain_dropped():
     res = f.classify(from_addr="avianca@info.avianca.com",
                      subject="Tu cabina, tu experiencia de vuelo",
