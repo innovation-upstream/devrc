@@ -12,8 +12,9 @@ processed row is labelled ('bulk' | 'fyi' | 'action-required') and stamped, so a
 re-run is a no-op over already-seen mail.
 
 Subcommands:
-  run            run the pipeline (filter → LLM → persist)
-  list           print open mail_actions (the artifact, for verification)
+  run               run the action-required pipeline (filter → LLM → persist)
+  archive-invoices  extract PDF invoices from mail → upload PDF+JSON to MinIO
+  list              print open mail_actions (the artifact, for verification)
 
 Run flags:
   --dry-run         filter only; show survivor counts + what WOULD be extracted; no LLM, no writes
@@ -156,6 +157,149 @@ def _emit_clawgate(r, ex) -> int:
         return 0
 
 
+def cmd_archive(args) -> int:
+    """Invoice archiver: scan ALL via_gmail mail (independent of processed_at), extract
+    PDF invoice attachments, upload each + a JSON sidecar to a per-year MinIO bucket,
+    and label the mail `invoice-archived` only after ALL its PDFs upload OK.
+    """
+    import json as _json
+
+    import archive as a
+    from _db import MailDB
+
+    summary = {
+        "scanned": 0, "candidates": 0, "pdfs_uploaded": 0, "sidecars": 0,
+        "buckets_touched": [], "errors": 0, "labeled": 0,
+    }
+    buckets_seen: set[str] = set()
+    candidates_out: list[dict] = []
+
+    with MailDB() as db:
+        rows = db.fetch_unarchived(limit=args.limit)
+        summary["scanned"] = len(rows)
+
+        # Identify candidates (pure) first — used by both dry-run and live.
+        candidates = []
+        for r in rows:
+            atts = a.extract_pdf_attachments(r["raw"] or b"")
+            if not a.is_archive_candidate(
+                from_addr=r.get("from_addr"), subject=r.get("subject"),
+                attachments=atts,
+            ):
+                continue
+            dt = a.invoice_date(r.get("date_header"), r.get("received_at"))
+            vendor = a.vendor_domain(r.get("from_addr"))
+            bucket = a.bucket_for(dt)
+            candidates.append((r, atts, dt, vendor, bucket))
+        summary["candidates"] = len(candidates)
+
+        if args.dry_run:
+            for r, atts, dt, vendor, bucket in candidates:
+                keys = [
+                    a.object_key(vendor=vendor, dt=dt, filename=att.filename,
+                                 message_id=r.get("message_id"))
+                    for att in atts
+                ]
+                buckets_seen.add(bucket)
+                candidates_out.append({
+                    "mail_id": r["id"], "from_addr": r.get("from_addr"),
+                    "subject": r.get("subject"), "bucket": bucket,
+                    "pdf_filenames": [att.filename for att in atts],
+                    "object_keys": keys,
+                })
+            summary["buckets_touched"] = sorted(buckets_seen)
+            summary["mode"] = "dry-run"
+            if args.json:
+                print(_json.dumps(
+                    {"summary": summary, "candidates": candidates_out}, indent=2,
+                    default=str,
+                ))
+            else:
+                _print_archive_dry_run(candidates_out, summary)
+            return 0
+
+        # Live: upload PDFs + sidecars, then label.
+        from _minio import MinioArchive
+
+        with MinioArchive() as mc:
+            ensured: set[str] = set()
+            for r, atts, dt, vendor, bucket in candidates:
+                amount = None
+                try:
+                    amount = db.amount_for_mail(r["id"])
+                except Exception:  # noqa: BLE001 — amount is best-effort, never fatal
+                    amount = None
+
+                mail_ok = True
+                for att in atts:
+                    key = a.object_key(
+                        vendor=vendor, dt=dt, filename=att.filename,
+                        message_id=r.get("message_id"),
+                    )
+                    try:
+                        if bucket not in ensured:
+                            if mc.ensure_bucket(bucket):
+                                pass
+                            ensured.add(bucket)
+                        buckets_seen.add(bucket)
+                        mc.put_object(bucket, key, att.data, "application/pdf")
+                        summary["pdfs_uploaded"] += 1
+                        sidecar = a.sidecar_metadata(
+                            vendor=vendor, from_addr=r.get("from_addr"), dt=dt,
+                            amount=amount, subject=r.get("subject"),
+                            message_id=r.get("message_id"), mail_id=r["id"],
+                        )
+                        body = _json.dumps(sidecar, indent=2, default=str).encode()
+                        mc.put_object(bucket, key + ".json", body, "application/json")
+                        summary["sidecars"] += 1
+                    except Exception as exc:  # noqa: BLE001 — report, skip labeling, keep going
+                        mail_ok = False
+                        summary["errors"] += 1
+                        print(f"  ! upload failed mail_id={r['id']} key={key}: {exc}",
+                              file=sys.stderr)
+
+                # Label ONLY if every PDF+sidecar for this mail uploaded successfully.
+                if mail_ok and atts:
+                    db.add_label(r["id"], a.ARCHIVED_LABEL)
+                    db.commit()
+                    summary["labeled"] += 1
+
+        summary["buckets_touched"] = sorted(buckets_seen)
+        summary["mode"] = "run"
+        if args.json:
+            print(_json.dumps(summary, indent=2, default=str))
+        else:
+            _print_archive_run(summary)
+        return 0
+
+
+def _print_archive_dry_run(candidates, summary) -> None:
+    print(f"DRY RUN — scanned {summary['scanned']} unarchived via_gmail rows → "
+          f"{summary['candidates']} invoice candidate(s)")
+    if summary["buckets_touched"]:
+        print(f"  buckets that WOULD be touched: {', '.join(summary['buckets_touched'])}")
+    print()
+    for c in candidates:
+        print(f"  mail#{c['mail_id']:<6} {(c['from_addr'] or '')[:36]:<36} "
+              f"{(c['subject'] or '')[:46]!r}")
+        for fn, key in zip(c["pdf_filenames"], c["object_keys"]):
+            print(f"      PDF {fn!r}")
+            print(f"       → s3://{c['bucket']}/{key}  (+ .json sidecar)")
+    if not candidates:
+        print("  (no invoice candidates)")
+
+
+def _print_archive_run(s) -> None:
+    print(f"ARCHIVE RUN — scanned {s['scanned']} rows")
+    print(f"  candidates:       {s['candidates']}")
+    print(f"  PDFs uploaded:    {s['pdfs_uploaded']}")
+    print(f"  sidecars written: {s['sidecars']}")
+    print(f"  mails labeled:    {s['labeled']}")
+    print(f"  buckets touched:  {', '.join(s['buckets_touched']) or '(none)'}")
+    if s["errors"]:
+        print(f"  upload errors:    {s['errors']}")
+
+
 def cmd_list(args) -> int:
     from _db import MailDB
 
@@ -226,6 +370,17 @@ def build_parser() -> argparse.ArgumentParser:
                      help="POST a clawgate Task card per NEW action item")
     run.add_argument("--json", action="store_true", help="machine-readable summary")
     run.set_defaults(func=cmd_run)
+
+    arch = sub.add_parser(
+        "archive-invoices",
+        help="extract PDF invoices from mail → upload PDF+JSON sidecar to MinIO",
+    )
+    arch.add_argument("--dry-run", action="store_true",
+                      help="list candidates + target bucket/key; NO uploads, NO label writes")
+    arch.add_argument("--limit", type=int, default=None,
+                      help="max unarchived rows to scan (default: all)")
+    arch.add_argument("--json", action="store_true", help="machine-readable summary")
+    arch.set_defaults(func=cmd_archive)
 
     ls = sub.add_parser("list", help="print open mail_actions (the artifact)")
     ls.add_argument("--json", action="store_true")

@@ -141,12 +141,92 @@ WHERE id = <mail_id>;
 DELETE FROM mail_actions WHERE mail_id = <mail_id>;
 ```
 
+## Invoice archiver (`archive-invoices`)
+
+A **separate, deterministic** loop (no LLM) that mines the inbox for **PDF invoice
+attachments** and archives them — plus a JSON metadata sidecar — to a homelab MinIO
+bucket, so a downstream tax agent can reconcile them.
+
+It is **independent of the action-required pipeline above**: scope is *all* invoices
+across the full backlog, regardless of `processed_at`. A paid invoice the LLM marked
+`fyi` is still a tax document. Idempotency uses a **dedicated `invoice-archived`
+label** (NOT `processed_at`) — a mail may be both fyi-processed AND archived.
+
+```
+mail (via_gmail, raw IS NOT NULL, NOT labelled 'invoice-archived')   ← delta read
+  │
+  ├─ parse raw RFC822 (stdlib email) → PDF attachments (content-type OR .pdf name)
+  │
+  ├─ candidate iff ≥1 PDF AND (filter._billing_exempt(from,subject)  ← reused, not duped
+  │                            OR an attachment named /invoice|receipt|statement/i)
+  │
+  ├─ per PDF → upload to  s3://taxes-{YEAR}-invoices/{vendor}/{YYYY-MM-DD}-{file}
+  │            + a .json sidecar {vendor, from_addr, date, amount, subject,
+  │                               message_id, mail_id}  (amount best-effort, may be null)
+  │
+  └─ AFTER all of a mail's PDFs+sidecars upload OK → label mail 'invoice-archived'
+        (on any upload error: NOT labelled → retried next run; error counted, keep going)
+```
+
+- `year` = year of `date_header` (else `received_at`). `vendor` = registrable domain of
+  the sender — last two dotted labels (`billing@hetzner.com` → `hetzner.com`,
+  `noreply@notify.cloudflare.com` → `cloudflare.com`); a HEURISTIC that is wrong for
+  multi-label public suffixes (`co.uk`), noted in `archive.py`.
+- `amount` is best-effort: it is *not* extracted here (the PDF / tax agent is
+  authoritative); if a `mail_actions` row already carries an amount for that mail it is
+  passed through, else `null`.
+- MinIO is reached the same way Postgres is: `kubectl -n minio-archive port-forward
+  svc/minio 0:80` on an ephemeral local port, then the `minio` python client at
+  `http://127.0.0.1:<port>` with **path-style** addressing (`_minio.py`).
+
+### Env
+
+| var | needed for | notes |
+|-----|------------|-------|
+| `KUBECONFIG` | DB + MinIO | `~/workspace/homelab-talos/homelab-kubeconfig` |
+| `MINIO_ARCHIVE_ACCESS_KEY` / `MINIO_ARCHIVE_SECRET_KEY` | MinIO auth (optional) | if unset, read from k8s secret `minio-archive-config` key `config.env` (parses `export MINIO_ROOT_USER`/`MINIO_ROOT_PASSWORD`) |
+| `MINIO_ARCHIVE_ENDPOINT` | optional | use a verbatim S3 endpoint (e.g. an in-cluster runner) instead of starting a port-forward |
+
+No secrets are hardcoded.
+
+### Usage
+
+```sh
+export KUBECONFIG=~/workspace/homelab-talos/homelab-kubeconfig
+
+# Dry-run: list invoice candidates + their target bucket/key + detected PDF names.
+# NO uploads, NO label writes, NO bucket creation.
+nix-shell -p 'python3.withPackages(p:[p.minio p.psycopg2 p.requests])' --run \
+  'python scripts/mail-actions/extract.py archive-invoices --dry-run [--limit N] [--json]'
+
+# Live: upload PDFs + JSON sidecars, create buckets as needed, label archived mail.
+nix-shell -p 'python3.withPackages(p:[p.minio p.psycopg2 p.requests])' --run \
+  'python scripts/mail-actions/extract.py archive-invoices [--limit N] [--json]'
+```
+
+### Verify
+
+```sh
+# A second --dry-run after a live run reports 0 candidates (idempotency).
+# List what landed (the `mc` client; alias `archive` set up to the tenant):
+mc ls --recursive archive/taxes-2026-invoices
+# or via the python client / MinIO console.
+```
+
 ## Tests
 
 ```sh
-nix-shell -p 'python3.withPackages(p:[p.pytest p.requests p.psycopg2])' --run \
+nix-shell -p 'python3.withPackages(p:[p.pytest p.requests p.psycopg2 p.minio])' --run \
   'python -m pytest scripts/mail-actions/tests -q'
 ```
+
+- `test_archive.py` — invoice archiver, all offline (no DB/MinIO/network): PDF
+  attachment extraction from a synthetic `multipart/mixed` RFC822 message; candidate
+  detection (billing-sender, invoice-filename signal, negative cases); bucket/vendor/
+  object-key derivation incl. sanitization + message_id fallback; sidecar JSON shape;
+  the `invoice-archived` idempotency predicate; and the `archive-invoices` orchestration
+  with a **mocked MinIO client + fake DB** (upload+label, dry-run writes nothing, an
+  upload error skips the label so the mail retries).
 
 - `test_filter.py` — Stage-1 filter vs scrubbed real fixtures (`tests/fixtures/mail_headers.json`):
   asserts the genuine action threads survive and the noise (alert/github/npm/bugsnag/
