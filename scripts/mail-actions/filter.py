@@ -32,6 +32,8 @@ SENDER_DENYLIST = (
     "notifications@bugsnag.com",
     "notifications@tasks.clickup.com",
     "*@signin.nasdaq.com",          # signin/security notifications (password-expiry etc.)
+    "*@info.avianca.com",           # airline MARKETING subdomain — legit booking/flight
+                                    # mail comes from other avianca addresses, not info.
 )
 
 # Headers whose mere PRESENCE marks the mail as a mailing-list / bulk / auto blast.
@@ -55,12 +57,15 @@ _BULK_PRECEDENCE = frozenset({"bulk", "list", "junk"})
 #     send invoices from a generic/noreply address (Cloudflare's noreply@notify.…).
 BILLING_SENDER_ALLOWLIST = (
     "billing@*",
-    "billing-*@*",
     "invoice@*",
     "invoices@*",
     "invoicing@*",
     "accounts@stripe.com",
     "support@datapacket.com",
+    # NOTE: no broad `billing-*@*` — vendors (e.g. LinkedIn) abuse a billing-noreply
+    # address for marketing upsell. A genuine invoice from such an address is still
+    # rescued by the transactional-subject regex below; marketing with a bulk header
+    # is not. Keeps the exemption to real bills without re-admitting upsell blasts.
 )
 _BILLING_SUBJECT_RE = re.compile(
     r"\b(invoice|past[\s-]?due|overdue|payment\s+(failed|declined|due)|"

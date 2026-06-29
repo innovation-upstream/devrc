@@ -107,6 +107,32 @@ def test_billing_sender_allowlist_survives():
     assert not res.drop and res.reason == "exempt:billing"
 
 
+def test_avianca_marketing_subdomain_dropped():
+    res = f.classify(from_addr="avianca@info.avianca.com",
+                     subject="Tu cabina, tu experiencia de vuelo",
+                     category="personal", headers={})
+    assert res.drop and res.reason == "sender:denylist"
+
+
+def test_linkedin_billing_noreply_upsell_not_rescued():
+    # LinkedIn abuses billing-noreply@ for Sales Navigator upsell; it carries
+    # Feedback-ID. Without the broad billing-*@ allowlist it must NOT be exempted →
+    # it drops on the bulk header instead of reaching the LLM.
+    res = f.classify(from_addr="billing-noreply@linkedin.com",
+                     subject="Maximize your Sales Navigator benefits.",
+                     category="personal", headers={"Feedback-ID": "x:linkedin"})
+    assert res.drop and res.reason == "header:Feedback-ID"
+
+
+def test_genuine_billing_noreply_invoice_still_rescued():
+    # A real invoice from a billing-noreply@ address (transactional subject) is still
+    # rescued by the subject regex even without the broad sender pattern.
+    res = f.classify(from_addr="billing-noreply@somevendor.com",
+                     subject="Your invoice is ready", category="notification",
+                     headers={"Feedback-ID": "x:ses"})
+    assert not res.drop and res.reason == "exempt:billing"
+
+
 def test_billing_subject_regex_is_tight():
     # A newsletter that merely MENTIONS billing in prose should NOT trip the exemption
     # (the regex matches whole billing words, not arbitrary substrings).
