@@ -17,6 +17,7 @@ LLM. It does NOT try to enumerate newsletters; the header signals + LLM cover th
 from __future__ import annotations
 
 import fnmatch
+import re
 from dataclasses import dataclass
 
 # Senders that are unambiguously automated notification machinery. KEEP THIS SHORT —
@@ -34,6 +35,30 @@ SENDER_DENYLIST = (
 _BULK_PRESENCE_HEADERS = ("List-Unsubscribe", "List-Id", "Auto-Submitted")
 # Precedence values that mark bulk mail.
 _BULK_PRECEDENCE = frozenset({"bulk", "list", "junk"})
+
+# Billing / invoice EXEMPTION. Transactional money mail often ALSO carries bulk
+# headers (vendors blast invoices through ESPs — e.g. Cloudflare's invoice arrives
+# via sparkpost with List-Id + List-Unsubscribe), so the bulk-header drop above would
+# lose genuine action-required bills. This exemption is additive-KEEP only: it rescues
+# such mail from the drop so the LLM can judge it — it never drops anything itself, so
+# it cannot violate the never-drop-an-action-item contract.
+#   • sender allowlist: billing-style local-parts (high precision)
+#   • subject regex: HEURISTIC (per RULES — flagged) but tight; covers vendors that
+#     send invoices from a generic/noreply address (Cloudflare's noreply@notify.…).
+BILLING_SENDER_ALLOWLIST = (
+    "billing@*",
+    "billing-*@*",
+    "invoice@*",
+    "invoices@*",
+    "invoicing@*",
+    "accounts@stripe.com",
+    "support@datapacket.com",
+)
+_BILLING_SUBJECT_RE = re.compile(
+    r"\b(invoice|past[\s-]?due|overdue|payment\s+(failed|declined|due)|"
+    r"your\s+bill|statement\s+is\s+ready)\b",
+    re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True)
@@ -74,6 +99,14 @@ def _sender_denylisted(from_addr: str | None) -> bool:
     return any(fnmatch.fnmatch(addr, pat) for pat in SENDER_DENYLIST)
 
 
+def _billing_exempt(from_addr: str | None, subject: str | None) -> bool:
+    """True if the mail looks like transactional billing/invoice → rescue from bulk drop."""
+    addr = (from_addr or "").strip().lower()
+    if addr and any(fnmatch.fnmatch(addr, pat) for pat in BILLING_SENDER_ALLOWLIST):
+        return True
+    return bool(_BILLING_SUBJECT_RE.search(subject or ""))
+
+
 def classify(
     *,
     from_addr: str | None,
@@ -89,6 +122,12 @@ def classify(
     # 1. category alert — civitai/GPU, handled by ADS elsewhere.
     if (category or "").lower() == "alert":
         return FilterResult(True, "category:alert")
+
+    # 1b. billing/invoice exemption — rescue transactional money mail from the bulk
+    # drop below (vendors blast invoices via ESPs, so they carry List-* headers). KEEP
+    # → let the LLM judge whether a bill actually needs action.
+    if _billing_exempt(from_addr, subject):
+        return FilterResult(False, "exempt:billing")
 
     # 2. mailing-list / bulk / auto headers by presence.
     for h in _BULK_PRESENCE_HEADERS:

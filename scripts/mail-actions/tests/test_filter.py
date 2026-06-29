@@ -89,6 +89,35 @@ def test_newsletter_with_list_unsubscribe_dropped():
     assert res.drop and res.reason.startswith("header:") or res.reason.startswith("precedence:")
 
 
+def test_billing_invoice_survives_despite_bulk_headers():
+    # Cloudflare invoice (noreply@notify.cloudflare.com) arrives via sparkpost with
+    # List-Id + List-Unsubscribe; the billing exemption must rescue it from the bulk
+    # drop so the LLM can judge it. Subject "Your invoice is attached".
+    cf = BY_ID[14563]
+    res = classify_fixture(cf)
+    assert not res.drop, "billing invoice wrongly dropped as bulk"
+    assert res.reason == "exempt:billing"
+
+
+def test_billing_sender_allowlist_survives():
+    # billing@hetzner.com is covered by the billing@* sender pattern even if it ever
+    # gained bulk headers.
+    res = f.classify(from_addr="billing@hetzner.com", subject="Monthly statement",
+                     category="personal", headers={"List-Id": "<x>"})
+    assert not res.drop and res.reason == "exempt:billing"
+
+
+def test_billing_subject_regex_is_tight():
+    # A newsletter that merely MENTIONS billing in prose should NOT trip the exemption
+    # (the regex matches whole billing words, not arbitrary substrings).
+    res = f.classify(from_addr="newsletter@vetr.com",
+                     subject="Tips for invoicing… subscribe!",
+                     category="personal",
+                     headers={"List-Unsubscribe": "<x>"})
+    # 'invoicing' in prose is not in the regex's word set → stays dropped as bulk.
+    assert res.drop
+
+
 def test_noreply_without_list_headers_survives_to_llm():
     # nasdaq password-expiry: no-reply, no List headers → MUST reach the LLM, not be
     # blanket-dropped (could be action-required).
