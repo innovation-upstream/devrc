@@ -108,7 +108,7 @@ class MailDB:
         self.conn.autocommit = False
         return self
 
-    def __exit__(self, *exc) -> None:
+    def __exit__(self, *_exc) -> None:
         with contextlib.suppress(Exception):
             if self.conn is not None:
                 self.conn.close()
@@ -116,6 +116,13 @@ class MailDB:
             self._pf.terminate()
             with contextlib.suppress(Exception):
                 self._pf.wait(timeout=5)
+
+    @property
+    def _c(self) -> "psycopg2.extensions.connection":
+        """The live connection, or a clear error if used outside the context manager."""
+        if self.conn is None:
+            raise RuntimeError("MailDB used outside its context manager (no connection)")
+        return self.conn
 
     def _wait_for_port(self, host: str, port: int) -> None:
         deadline = time.monotonic() + self._ready_timeout
@@ -131,7 +138,7 @@ class MailDB:
 
     # -- schema ------------------------------------------------------------
     def ensure_schema(self) -> None:
-        with self.conn.cursor() as cur:
+        with self._c.cursor() as cur:
             cur.execute(
                 """
                 CREATE TABLE IF NOT EXISTS mail_actions (
@@ -152,7 +159,7 @@ class MailDB:
                 )
                 """
             )
-        self.conn.commit()
+        self._c.commit()
 
     # -- reads -------------------------------------------------------------
     def fetch_unprocessed(self, limit: int | None = None):
@@ -167,12 +174,12 @@ class MailDB:
         if limit is not None:
             sql += " LIMIT %s"
             params = (limit,)
-        with self.conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        with self._c.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(sql, params)
             return cur.fetchall()
 
     def list_open_actions(self):
-        with self.conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        with self._c.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(
                 "SELECT id, mail_id, from_addr, subject, received_at, who, ask, "
                 "deadline, amount, confidence, status, created_at "
@@ -183,7 +190,7 @@ class MailDB:
     # -- writes ------------------------------------------------------------
     def mark_processed(self, mail_id: int, label: str) -> None:
         """Append `label` to mail.labels (dedup) and stamp processed_at=now()."""
-        with self.conn.cursor() as cur:
+        with self._c.cursor() as cur:
             cur.execute(
                 """
                 UPDATE mail
@@ -199,7 +206,7 @@ class MailDB:
 
     def insert_action(self, row: dict) -> bool:
         """Insert a mail_actions row. Returns True if inserted, False on conflict."""
-        with self.conn.cursor() as cur:
+        with self._c.cursor() as cur:
             cur.execute(
                 """
                 INSERT INTO mail_actions
@@ -216,4 +223,4 @@ class MailDB:
             return cur.rowcount > 0
 
     def commit(self) -> None:
-        self.conn.commit()
+        self._c.commit()
