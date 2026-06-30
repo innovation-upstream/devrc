@@ -486,4 +486,58 @@ in
       WantedBy = [ "graphical-session.target" ];
     };
   };
+
+  # Mail-actions invoice archiver — daily DETERMINISTIC pass (no LLM). Scans the
+  # homelab Postgres `mail` table for invoice PDFs and uploads them + JSON
+  # sidecars to the minio-archive bucket `taxes-{year}-invoices`. Idempotent: a
+  # clean run reports 0 new candidates once the existing invoices are archived.
+  #
+  # It reaches the cluster via `kubectl port-forward` (pulling MinIO creds + the
+  # PG DSN from k8s secrets itself), and runs its Python under nix-shell for the
+  # archive-path deps. Type=oneshot, fired by the timer below.
+  #
+  # A user service runs with a minimal environment, so PATH/NIX_PATH must be
+  # explicit (cf. the activity-collector units above): kubectl + nix (nix-shell)
+  # + bash/coreutils on PATH, and NIX_PATH so `nix-shell -p` can resolve
+  # <nixpkgs>. KUBECONFIG points at the homelab admin config. The logic lives in
+  # the committed wrapper (scripts/mail-actions/run-archive.sh) to keep the unit
+  # clean and version-controlled.
+  systemd.user.services.mail-actions-archive = {
+    Unit = {
+      Description = "Mail-actions invoice archiver → minio-archive (deterministic, daily)";
+      After = [ "network-online.target" ];
+      Wants = [ "network-online.target" ];
+    };
+    Service = {
+      Type = "oneshot";
+      Environment = [
+        "PATH=${lib.makeBinPath [ pkgs.kubectl pkgs.nix pkgs.bash pkgs.coreutils pkgs.gnused pkgs.gnugrep pkgs.gawk ]}"
+        # `nix-shell -p` resolves <nixpkgs> from NIX_PATH; the minimal user-unit
+        # env does not carry it. Mirror the system channel the login shell uses.
+        "NIX_PATH=nixpkgs=/nix/var/nix/profiles/per-user/root/channels/nixos"
+        "KUBECONFIG=%h/workspace/homelab-talos/homelab-kubeconfig"
+        # nix-shell needs a HOME for its caches; %h is exported by systemd but be
+        # explicit for the nested invocation.
+        "HOME=%h"
+      ];
+      ExecStart = "${pkgs.bash}/bin/bash %h/workspace/devrc/scripts/mail-actions/run-archive.sh";
+      # Re-run the unit when the wrapper changes (cf. X-Restart-Triggers above).
+      X-Restart-Triggers = [ "${../scripts/mail-actions/run-archive.sh}" ];
+    };
+  };
+
+  # Timer: fire the archiver daily at 06:00 local. Persistent=true catches up a
+  # single missed run (e.g. host asleep at 06:00) on the next wake.
+  systemd.user.timers.mail-actions-archive = {
+    Unit = {
+      Description = "Daily timer for the mail-actions invoice archiver";
+    };
+    Timer = {
+      OnCalendar = "*-*-* 06:00:00";
+      Persistent = true;
+    };
+    Install = {
+      WantedBy = [ "timers.target" ];
+    };
+  };
 }
