@@ -435,6 +435,101 @@ def test_telemetry_same_branch_token_does_not_cross_repo():
 
 
 # --------------------------------------------------------------------------- #
+# Git worktree dedup (#worktree): collapse linked worktrees to canonical repo
+# --------------------------------------------------------------------------- #
+def test_discover_repos_collapses_worktrees_to_one_canonical(monkeypatch, tmp_path):
+    # Three candidate dirs: the MAIN worktree (its .git is a directory) and two
+    # linked worktrees of the same repo. All three share ONE git-common-dir, so
+    # discover_repos must fold them into the single main worktree.
+    main = tmp_path / "civit" / "datapacket-talos"
+    wt1 = tmp_path / "civit" / "datapacket-talos-review-sandbox"
+    wt2 = tmp_path / "civit" / "datapacket-talos-flagger-autoscaler"
+    for d in (main, wt1, wt2):
+        (d / "claudedocs").mkdir(parents=True)
+        (d / "claudedocs" / "handoff-thing.md").write_text("# Handoff: thing\n")
+    common = str(main / ".git")  # the main worktree's .git directory
+    (main / ".git").mkdir()  # main worktree has a .git DIRECTORY
+
+    monkeypatch.setattr(isc, "_candidate_repo_dirs",
+                        lambda ws: sorted(str(d) for d in (main, wt1, wt2)))
+
+    # Every dir is a worktree of the same repo -> same common-dir.
+    def fake_common(path):
+        return common
+
+    monkeypatch.setattr(isc, "_git_common_dir", fake_common)
+
+    repos = isc.discover_repos(str(tmp_path))
+    assert repos == [str(main)]  # collapsed to the main worktree only
+
+
+def test_discover_repos_falls_back_to_main_toplevel_when_only_linked(
+        monkeypatch, tmp_path):
+    # Only linked worktrees carry handoffs (the main worktree isn't a candidate).
+    # Fall back to the main worktree's toplevel (common-dir's parent) if it exists.
+    main = tmp_path / "repo"
+    main.mkdir()
+    (main / ".git").mkdir()
+    common = str(main / ".git")
+    wt = tmp_path / "repo-wt"
+    (wt / "claudedocs").mkdir(parents=True)
+
+    monkeypatch.setattr(isc, "_candidate_repo_dirs", lambda ws: [str(wt)])
+    monkeypatch.setattr(isc, "_git_common_dir", lambda path: common)
+
+    repos = isc.discover_repos(str(tmp_path))
+    # Folds to the main toplevel (parent of <main>/.git), not the linked worktree.
+    assert repos == [str(main)]
+
+
+def test_discover_repos_non_git_dir_survives_as_own_repo(monkeypatch, tmp_path):
+    # A plain (non-git) dir with a claudedocs/ has no git-common-dir -> it must
+    # survive as its own repo (graceful fallback, never crash, never dropped).
+    plain = tmp_path / "loose-notes"
+    (plain / "claudedocs").mkdir(parents=True)
+
+    monkeypatch.setattr(isc, "_candidate_repo_dirs", lambda ws: [str(plain)])
+    monkeypatch.setattr(isc, "_git_common_dir", lambda path: None)  # not a repo
+
+    repos = isc.discover_repos(str(tmp_path))
+    assert repos == [str(plain)]
+
+
+def test_cwd_in_linked_worktree_maps_to_canonical_not_unknown():
+    # A telemetry row whose cwd lives inside a LINKED worktree (a dir that is NOT
+    # itself a discovered repo) must attribute to the canonical parent repo, NOT
+    # fall into the `(unknown repo)` bucket.
+    canonical = "/home/u/workspace/civit/datapacket-talos"
+    linked = "/home/u/workspace/civit/datapacket-talos-review-sandbox"
+    inis = [{"slug": "flagger-autoscaler", "repo": canonical}]
+    rows = [
+        {"branch": "feat/flagger-autoscaler",
+         "cwd": linked + "/charts",
+         "n": 17, "last_ts": "2026-06-30 10:00:00"},
+        {"branch": "main", "cwd": linked, "n": 25, "last_ts": "2026-06-30 09:00:00"},
+    ]
+    catchall = isc.attribute_telemetry(
+        inis, rows, [canonical], worktree_map={linked: canonical})
+    # The feature-branch row credits the initiative; the trunk row lands in the
+    # CANONICAL repo's catch-all, NOT `(unknown repo)`.
+    assert inis[0]["telem_events"] == 17
+    assert "(unknown repo)" not in catchall
+    assert catchall[canonical]["events"] == 25
+
+
+def test_cwd_without_worktree_map_still_unknown():
+    # Control: same linked cwd, but no worktree_map -> it stays `(unknown repo)`,
+    # proving the mapping is what rescues it (not an accidental prefix match).
+    canonical = "/home/u/workspace/civit/datapacket-talos"
+    linked = "/home/u/workspace/civit/datapacket-talos-review-sandbox"
+    inis = [{"slug": "x", "repo": canonical}]
+    rows = [{"branch": "main", "cwd": linked, "n": 25, "last_ts": "2026-06-30 09:00:00"}]
+    catchall = isc.attribute_telemetry(inis, rows, [canonical])  # no worktree_map
+    assert "(unknown repo)" in catchall
+    assert catchall["(unknown repo)"]["events"] == 25
+
+
+# --------------------------------------------------------------------------- #
 # Session attribution (genesis text -> initiative)
 # --------------------------------------------------------------------------- #
 def test_attribute_sessions_matches_handoff_filename():
