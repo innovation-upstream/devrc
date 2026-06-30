@@ -273,6 +273,14 @@ in
     recursive = true;
     force = true;
   };
+  # Claude Code hooks managed here (the script only — the settings.json
+  # registration is per-host/unmanaged, like bash-guard.py). audit-pr-nudge fires
+  # PostToolUse on `gh pr create` and injects context so Claude reflexively offers
+  # `/audit-pr` (transcript audit: that request was hand-typed ≥14x while the skill
+  # sat unused). Registered as `python3 ~/.claude/hooks/audit-pr-nudge.py`.
+  home.file.".claude/hooks/audit-pr-nudge.py" = {
+    source = ../scripts/claude-hooks/audit-pr-nudge.py;
+  };
 
   systemd.user.services.cpu-monitor = {
     Unit = {
@@ -511,7 +519,16 @@ in
   # <nixpkgs>. KUBECONFIG points at the homelab admin config. The logic lives in
   # the committed wrapper (scripts/mail-actions/run-archive.sh) to keep the unit
   # clean and version-controlled.
-  systemd.user.services.mail-actions-archive = {
+  #
+  # WORKBENCH-ONLY (gated on serverMode). Both hosts build the same flake, but the
+  # archiver needs DIRECT LAN access to the homelab API (the committed kubeconfig
+  # points at 192.168.50.94:6443, no proxy). The laptop is nebula-only and reaches
+  # the API solely via the SOCKS tunnel + nebula kubeconfig above, so its run would
+  # just fail noisily — and a second host archiving the same mail table is pure
+  # redundancy (idempotent, but wasteful). serverMode (= ~/.server-mode marker,
+  # true on the headless workbench, false on the graphical laptop) is the existing
+  # host discriminator and currently coincides exactly with "has direct LAN access".
+  systemd.user.services.mail-actions-archive = lib.mkIf serverMode {
     Unit = {
       Description = "Mail-actions invoice archiver → minio-archive (deterministic, daily)";
       After = [ "network-online.target" ];
@@ -537,7 +554,8 @@ in
 
   # Timer: fire the archiver daily at 06:00 local. Persistent=true catches up a
   # single missed run (e.g. host asleep at 06:00) on the next wake.
-  systemd.user.timers.mail-actions-archive = {
+  # Workbench-only, same as its service (see the serverMode note above).
+  systemd.user.timers.mail-actions-archive = lib.mkIf serverMode {
     Unit = {
       Description = "Daily timer for the mail-actions invoice archiver";
     };
