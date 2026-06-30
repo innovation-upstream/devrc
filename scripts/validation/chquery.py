@@ -20,13 +20,17 @@ thing, all unit-testable WITHOUT a live ClickHouse:
      suite can verify the math independently of ClickHouse, and so the live
      assertions compare CH's answer against an independent computation.
 
-Timezone note (load-bearing): emit/spool_emit stamp `ts` with the host's LOCAL
-wall clock (`date +"%Y-%m-%d %H:%M:%S.%3N"`), and the `ts` column is a bare
-DateTime64(3) with NO column timezone. ClickHouse `toHour(ts)` therefore returns
-the LOCAL hour of the stored wall-clock value, which is what the heatmap wants.
-But `now()` / `today()` on the (UTC) server are in UTC, so any `ts <= now()`
-style comparison mixes a local wall-clock against a UTC clock. `hour_of_day()`
-here mirrors CH's behaviour: it reads the literal hour off the wall-clock string.
+Timezone note (load-bearing): emit/spool_emit stamp `ts` in UTC
+(`date -u +"%Y-%m-%d %H:%M:%S.%3N"` — see scripts/collector/tests/
+test_collector.py::test_emit_ts_is_utc), and the `ts` column is a bare
+DateTime64(3) with NO column timezone, so the stored wall-clock value IS the
+UTC instant. ClickHouse `toHour(ts)` therefore returns the UTC hour, and
+`now()` / `today()` on the (UTC) server are also UTC — so `ts <= now()`-style
+comparisons are apples-to-apples in UTC. The Grafana dashboard buckets/displays
+in the browser's local zone, but the raw column is UTC. `hour_of_day()` here
+mirrors CH's behaviour: it reads the literal (UTC) hour off the wall-clock
+string. (Earlier revisions of this header wrongly claimed `ts` was host-LOCAL —
+that was never true; emit has always used `date -u`.)
 """
 from __future__ import annotations
 
