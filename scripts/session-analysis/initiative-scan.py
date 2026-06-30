@@ -224,30 +224,80 @@ def slug_tokens(slug: str) -> list[str]:
     return toks
 
 
-def branch_matches_slug(branch: str, slug: str) -> bool:
-    """Heuristic: does a git branch / telemetry gitBranch belong to this slug?
+def branch_tokens(branch: str) -> list[str]:
+    """Tokenize a branch name the SAME way slugs are tokenized.
 
-    A branch matches if, after stripping a `type/` prefix (feat/, fix/, chore/...),
-    it shares a strong token overlap with the slug. We require that EITHER the
-    branch tail contains the full base slug as a substring, OR >=2 slug tokens (or
-    all of them, if the slug has <2 tokens) appear in the branch. Trunk/main never
-    match a specific initiative.
+    Strips an `origin/` remote prefix and a leading `type/` segment (feat/, fix/,
+    chore/, zach/, …) then tokenizes the remainder with `slug_tokens`. Tokenizing
+    both sides identically is what lets us compare on WORD equality instead of
+    substrings (the source of the `app-blocks`⊂`app-blocks-followups` and
+    `mail-actions`⊂`email-fractions-redesign` false matches).
+    """
+    if not branch:
+        return []
+    b = branch.lower()
+    if b.startswith("origin/"):
+        b = b[len("origin/"):]
+    # Drop a single leading type/owner segment so feat/x and x tokenize alike.
+    tail = b.split("/", 1)[1] if "/" in b else b
+    return slug_tokens(tail)
+
+
+def branch_matches_slug(branch: str, slug: str) -> bool:
+    """Does a git branch / telemetry gitBranch belong to this slug?
+
+    Rule (WORD equality, not substring): tokenize both the branch and the slug
+    with the SAME tokenizer, then require EVERY slug token to equal a branch
+    token — i.e. the slug's token set is a subset of the branch's token set. A
+    branch may carry extra tokens (a `feat/` prefix, a `-collector` suffix) and
+    still match, but a token must match a WHOLE word, so:
+      - `app-blocks` does NOT match `app-blocks-followups` (extra token on the
+        BRANCH is fine, but here `followups` is unrelated and the SIBLING slug
+        `app-blocks-followups` is the better, more-specific match — see
+        best_matching_initiative);
+      - `mail-actions` does NOT match `email-fractions-redesign`
+        (`mail`≠`email`, `actions`≠`fractions`);
+      - `app-api` does NOT match `mapper-rapid`.
+    Trunk/main never match a specific initiative.
+
+    NOTE: this is the LOW-LEVEL predicate (does the slug fit inside the branch?).
+    When several initiatives' slugs all fit one branch (siblings sharing a common
+    prefix), use `best_matching_initiative` to award credit to the single
+    longest / most-specific slug instead of every sibling.
     """
     if not branch:
         return False
-    b = branch.lower()
-    if b in {x.lower() for x in TRUNK_BRANCHES}:
+    if branch.lower() in {x.lower() for x in TRUNK_BRANCHES}:
         return False
-    tail = b.split("/", 1)[1] if "/" in b else b
-    base = slug.lower()
-    if base and base in tail:
-        return True
-    toks = slug_tokens(slug)
-    if not toks:
+    slug_toks = slug_tokens(slug)
+    if not slug_toks:
         return False
-    hit = sum(1 for t in toks if t in b)
-    need = 2 if len(toks) >= 2 else len(toks)
-    return hit >= need
+    btoks = set(branch_tokens(branch))
+    if not btoks:
+        return False
+    return set(slug_toks).issubset(btoks)
+
+
+def best_matching_initiative(branch: str, initiatives: list[dict]) -> dict | None:
+    """Pick the single most-specific initiative whose slug matches `branch`.
+
+    Among all initiatives whose slug fits the branch (`branch_matches_slug`),
+    return the one with the MOST slug tokens (longest / most-specific), so a
+    branch like `app-blocks-followups` is credited to the `app-blocks-followups`
+    initiative, NOT also to the broader `app-blocks` sibling. Ties (equal token
+    count) are broken by the longer raw slug, then lexically, for determinism.
+    None if nothing matches.
+    """
+    candidates = [ini for ini in initiatives
+                  if branch_matches_slug(branch, ini.get("slug", ""))]
+    if not candidates:
+        return None
+    return max(
+        candidates,
+        key=lambda ini: (len(slug_tokens(ini.get("slug", ""))),
+                         len(ini.get("slug", "")),
+                         ini.get("slug", "")),
+    )
 
 
 def classify_momentum(last_ts: float | None, now: float | None = None) -> str:
@@ -403,17 +453,63 @@ def _run(cmd: list[str], timeout: float = 20.0) -> str:
     return out.stdout if out.returncode == 0 else ""
 
 
+def _ref_exists(repo: str, ref: str) -> bool:
+    """True iff `ref` resolves in `repo` (local or remote-tracking)."""
+    if not ref:
+        return False
+    try:
+        out = subprocess.run(
+            ["git", "-C", repo, "rev-parse", "--verify", "--quiet", ref],
+            capture_output=True, text=True, timeout=20.0)
+    except (subprocess.TimeoutExpired, OSError):
+        return False
+    return out.returncode == 0
+
+
+def _resolve_branch_ref(repo: str, branch: str) -> str | None:
+    """Pick an existing ref for a branch token: prefer local, else origin/<branch>.
+
+    `branch` may already carry an `origin/` prefix (from `git branch -a`). Returns
+    the first ref that actually resolves, or None if neither the local branch nor
+    its remote-tracking counterpart exists (so callers can report "unknown" rather
+    than fataling git → a silent 0).
+    """
+    if not branch:
+        return None
+    bare = branch[len("origin/"):] if branch.startswith("origin/") else branch
+    for cand in (bare, f"origin/{bare}", branch):
+        if _ref_exists(repo, cand):
+            return cand
+    return None
+
+
 def git_branches(repo: str) -> list[str]:
+    """Branch SHORT names. Keeps the `origin/` prefix on remote-only branches so
+    a branch existing solely as `origin/feat/x` stays resolvable (stripping it to
+    `feat/x` would later fatal `git log feat/x`). Local branches (no prefix) are
+    preferred — when both a local `x` and `origin/x` exist they dedup to `x`.
+    """
     out = _run(["git", "-C", repo, "branch", "-a", "--format=%(refname:short)"])
-    names = []
+    local: set[str] = set()
+    remote: set[str] = set()
     for ln in out.splitlines():
         ln = ln.strip()
         if not ln:
             continue
         if ln.startswith("origin/"):
-            ln = ln[len("origin/"):]
-        names.append(ln)
-    return names
+            tail = ln[len("origin/"):]
+            if tail == "HEAD" or tail.startswith("HEAD"):
+                continue  # the origin/HEAD -> origin/<default> alias, not a branch
+            remote.add(ln)
+        else:
+            local.add(ln)
+    names = set(local)
+    local_tails = local
+    for r in remote:
+        tail = r[len("origin/"):]
+        if tail not in local_tails:
+            names.add(r)  # remote-only branch — keep the origin/ prefix
+    return sorted(names)
 
 
 def git_default_branch(repo: str) -> str | None:
@@ -431,22 +527,42 @@ def git_default_branch(repo: str) -> str | None:
 
 
 def git_commits_in_window(repo: str, branch: str, since_days: int,
-                          default_branch: str | None = None) -> tuple[int, float | None]:
+                          default_branch: str | None = None
+                          ) -> tuple[int | None, float | None]:
     """(# commits UNIQUE to `branch` within window, last-commit epoch | None).
 
-    Critically excludes commits reachable from the default branch (`--not <default>`)
+    Count is None when the branch can't be resolved to ANY existing ref (neither
+    local nor `origin/<branch>`) — a clearly-distinguished "unknown", NOT a silent
+    0, so a fresh clone / remote-only branch doesn't masquerade as "no work".
+
+    Critically excludes commits reachable from the default branch (`--not <ref>`)
     so a feature branch is credited only with ITS OWN work — otherwise every branch
     counts the entire trunk history in the window (thousands of commits), grossly
-    inflating + double-counting attribution. If `branch` IS the default, return (0, None)
-    (default-branch work is the unsegmented catch-all, not an initiative).
+    inflating + double-counting attribution. Each `--not` ref is guarded with
+    `git rev-parse --verify`, so a missing local `main` (repo on `trunk`, or a
+    remote-only default) no longer fatals git rc=128 → a swallowed "" → false 0.
+    If `branch` IS the default, return (0, None) (default-branch work is the
+    unsegmented catch-all, not an initiative).
     """
     if default_branch and branch.lower() == default_branch.lower():
         return (0, None)
-    cmd = ["git", "-C", repo, "log", branch, "--no-merges",
+
+    target = _resolve_branch_ref(repo, branch)
+    if target is None:
+        # Neither the branch nor its remote exists — report unknown, not 0.
+        return (None, None)
+
+    cmd = ["git", "-C", repo, "log", target, "--no-merges",
            f"--since={since_days} days ago", "--format=%ct"]
     if default_branch and default_branch.lower() != branch.lower():
-        # Only commits NOT already on the default branch.
-        cmd += ["--not", default_branch, f"origin/{default_branch}"]
+        # Only commits NOT already on the default branch — but ONLY include
+        # exclusion refs that actually exist (else git fatals and we'd undercount).
+        excludes = []
+        for ref in (default_branch, f"origin/{default_branch}"):
+            if _ref_exists(repo, ref) and ref not in excludes:
+                excludes.append(ref)
+        if excludes:
+            cmd += ["--not", *excludes]
     out = _run(cmd)
     epochs = [int(x) for x in out.split() if x.strip().isdigit()]
     if not epochs:
@@ -611,13 +727,20 @@ def attribute_sessions(initiatives: list[dict], genesis: list[dict]) -> None:
 # Telemetry (I/O, optional)
 # --------------------------------------------------------------------------- #
 def q_branch_activity(win: int) -> str:
-    """Per gitBranch (+cwd): claude-source event count + last ts, within window."""
+    """Per (gitBranch, cwd): claude-source event count + last ts, within window.
+
+    Grouping by BOTH branch and cwd (not `GROUP BY branch` with `any(cwd)`) keeps
+    each repo's activity tied to its own working dir — otherwise every repo's
+    `main`/`trunk`, and any branch name reused across repos (`feat/api`,
+    `fix/bug`), collapse into one row attributed to one arbitrary cwd, and
+    attribution double-credits unrelated repos.
+    """
     return (
         "SELECT JSONExtractString(toString(payload),'gitBranch') AS branch, "
-        "any(cwd) AS cwd, count() AS n, max(ts) AS last_ts "
+        "cwd AS cwd, count() AS n, max(ts) AS last_ts "
         "FROM activity.events "
         f"WHERE source='claude' AND ts>now()-{win} "
-        "GROUP BY branch ORDER BY n DESC LIMIT 500"
+        "GROUP BY branch, cwd ORDER BY n DESC LIMIT 500"
     )
 
 
@@ -631,10 +754,15 @@ def fetch_telemetry(client, days: int) -> list[dict] | None:
 
 
 def ch_ts_to_epoch(s) -> float | None:
-    """ClickHouse `max(ts)` (a wall-clock 'YYYY-MM-DD HH:MM:SS' string) -> epoch.
+    """ClickHouse `max(ts)` (a 'YYYY-MM-DD HH:MM:SS[.fff]' string) -> epoch.
 
-    `ts` is stored as host LOCAL wall-clock with NO column tz (see chquery header),
-    so interpret it in the local zone for relative-age math.
+    `ts` is stored in UTC — `scripts/collector/emit` stamps it with `date -u`
+    (see scripts/collector/tests/test_collector.py::test_emit_ts_is_utc and the
+    root CLAUDE.md "ts is UTC" note). The column is a bare DateTime64(3) with NO
+    attached timezone, so the wall-clock string we read back IS the UTC instant.
+    We therefore parse it as UTC — NOT local — or every relative-age/momentum
+    computation is skewed by the host's UTC offset (~5h here), wrongly pushing
+    initiatives toward slowing/stalled.
     """
     if s is None:
         return None
@@ -643,7 +771,7 @@ def ch_ts_to_epoch(s) -> float | None:
     txt = str(s).strip()
     for fmt in ("%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d %H:%M:%S"):
         try:
-            return datetime.strptime(txt, fmt).timestamp()
+            return datetime.strptime(txt, fmt).replace(tzinfo=timezone.utc).timestamp()
         except ValueError:
             continue
     return None
@@ -652,6 +780,14 @@ def ch_ts_to_epoch(s) -> float | None:
 def attribute_telemetry(initiatives: list[dict], rows: list[dict] | None,
                         repos: list[str]) -> dict:
     """Attribute branch-activity rows to initiatives; return per-repo trunk catch-all.
+
+    Each row carries (branch, cwd). The cwd is mapped to its repo by path
+    containment, and a row is only credited to an initiative WHOSE repo matches
+    that cwd's repo — so a branch token reused across repos (`feat/api` in repo A
+    and repo B) never cross-credits, and an arbitrary `any(cwd)` no longer
+    collapses every repo's `main` into one. Within the matching repo, credit goes
+    to the SINGLE most-specific initiative (`best_matching_initiative`), so
+    sibling slugs don't all share the same event count.
 
     Mutates each initiative with telem_events + telem_last (epoch). Returns
     {repo: {"events": n, "last": epoch, "branches": set}} for trunk/main + any
@@ -672,6 +808,11 @@ def attribute_telemetry(initiatives: list[dict], rows: list[dict] | None,
                 return r
         return None
 
+    # Initiatives indexed by their repo, so matching is scoped to the row's repo.
+    inis_by_repo: dict[str, list[dict]] = {}
+    for ini in initiatives:
+        inis_by_repo.setdefault(ini["repo"], []).append(ini)
+
     for row in rows:
         branch = (row.get("branch") or "").strip()
         n = _num(row.get("n"))
@@ -687,14 +828,15 @@ def attribute_telemetry(initiatives: list[dict], rows: list[dict] | None,
                 c["branches"].add(branch)
             continue
 
-        matched = False
-        for ini in initiatives:
-            if branch_matches_slug(branch, ini["slug"]):
-                ini["telem_events"] += n
-                ini["telem_last"] = newest_touch(ini["telem_last"], last)
-                matched = True
-        if not matched:
-            # Real branch but no handoff — surface as unsegmented work too.
+        # Only initiatives in THIS row's repo are eligible (no cross-repo credit).
+        eligible = inis_by_repo.get(repo, []) if repo is not None else []
+        ini = best_matching_initiative(branch, eligible)
+        if ini is not None:
+            ini["telem_events"] += n
+            ini["telem_last"] = newest_touch(ini["telem_last"], last)
+        else:
+            # Real branch but no matching handoff in its repo — surface as
+            # unsegmented work too (honest, not dropped, not mis-credited).
             key = repo or "(unknown repo)"
             c = catchall.setdefault(key, {"events": 0, "last": None, "branches": set()})
             c["events"] += n
@@ -719,42 +861,68 @@ def _num(v, default=0):
 # git attribution per initiative
 # --------------------------------------------------------------------------- #
 def attribute_git(initiatives: list[dict], days: int) -> None:
-    """Mutate each initiative with commit/PR fields. Caches per-repo gh calls."""
+    """Mutate each initiative with commit/PR fields. Caches per-repo gh calls.
+
+    A branch / PR head is awarded to the SINGLE most-specific initiative in its
+    repo (`best_matching_initiative`), so sibling slugs sharing a common prefix
+    (`app-blocks` vs `app-blocks-followups`) no longer all claim the same branch
+    and end up with identical commit/PR counts.
+    """
     branch_cache: dict[str, list[str]] = {}
     default_cache: dict[str, str | None] = {}
     open_pr_cache: dict[str, list[dict]] = {}
     merged_pr_cache: dict[str, list[dict]] = {}
 
+    # Group initiatives by repo so "best match" is decided within a repo's own slugs.
+    by_repo: dict[str, list[dict]] = {}
     for ini in initiatives:
-        repo = ini["repo"]
+        by_repo.setdefault(ini["repo"], []).append(ini)
+        ini["matching_branches"] = []
+        ini["commits"] = 0
+        ini["commits_unknown"] = False
+        ini["last_commit"] = None
+        ini["open_prs"] = []
+        ini["merged_prs"] = 0
+
+    for repo, repo_inis in by_repo.items():
         if repo not in branch_cache:
             # Dedup branch names (origin/x + x normalize to the same tail).
             branch_cache[repo] = sorted(set(git_branches(repo)))
             default_cache[repo] = git_default_branch(repo)
             open_pr_cache[repo] = gh_open_prs(repo)
             merged_pr_cache[repo] = gh_merged_prs(repo, days)
-
         default_branch = default_cache[repo]
-        matching_branches = [b for b in branch_cache[repo]
-                             if branch_matches_slug(b, ini["slug"])]
-        commits = 0
-        last_commit = None
-        for b in matching_branches:
+
+        # Each branch → its single best initiative (most-specific slug).
+        for b in branch_cache[repo]:
+            ini = best_matching_initiative(b, repo_inis)
+            if ini is None:
+                continue
+            ini["matching_branches"].append(b)
             c, lc = git_commits_in_window(repo, b, days, default_branch)
-            commits += c
-            last_commit = newest_touch(last_commit, lc)
+            if c is None:
+                ini["commits_unknown"] = True  # unresolvable ref — don't fake 0
+                continue
+            ini["commits"] += c
+            ini["last_commit"] = newest_touch(ini["last_commit"], lc)
 
-        open_prs = [{"number": p["number"], "title": p.get("title", "")}
-                    for p in open_pr_cache[repo]
-                    if branch_matches_slug(p.get("headRefName", ""), ini["slug"])]
-        merged = [p for p in merged_pr_cache[repo]
-                  if branch_matches_slug(p.get("headRefName", ""), ini["slug"])]
+        # Each PR head → its single best initiative, same rule.
+        for p in open_pr_cache[repo]:
+            ini = best_matching_initiative(p.get("headRefName", ""), repo_inis)
+            if ini is not None:
+                ini["open_prs"].append({"number": p["number"], "title": p.get("title", "")})
+        merged_counts: dict[int, int] = {}
+        for p in merged_pr_cache[repo]:
+            ini = best_matching_initiative(p.get("headRefName", ""), repo_inis)
+            if ini is not None:
+                merged_counts[id(ini)] = merged_counts.get(id(ini), 0) + 1
+        for ini in repo_inis:
+            ini["merged_prs"] = merged_counts.get(id(ini), 0)
 
-        ini["matching_branches"] = matching_branches
-        ini["commits"] = commits
-        ini["last_commit"] = last_commit
-        ini["open_prs"] = open_prs
-        ini["merged_prs"] = len(merged)
+    for ini in initiatives:
+        # "commits:?" only when we have NO confident count at all (every matching
+        # branch was unresolvable) — a partial count stays a number.
+        ini["commits_unknown"] = ini["commits_unknown"] and ini["commits"] == 0
 
 
 # --------------------------------------------------------------------------- #
@@ -833,10 +1001,11 @@ def render(report: dict, now: float | None = None) -> str:
             out.append("   (handoffs present but none parsed)")
         for ini in inis:
             tag = MOMENTUM_TAG.get(ini["momentum"], "?")
+            commits_str = "?" if ini.get("commits_unknown") else str(ini.get("commits", 0))
             head = (f"  {tag}  {ini['slug']}"
                     f"   touched {rel_age(ini.get('last_touch'), now)}"
                     f"   sess:{ini.get('session_count', 0)}"
-                    f"   commits:{ini.get('commits', 0)}"
+                    f"   commits:{commits_str}"
                     f"   merged-PR:{ini.get('merged_prs', 0)}")
             if report["telemetry_available"]:
                 head += f"   ev:{ini.get('telem_events', 0)}"

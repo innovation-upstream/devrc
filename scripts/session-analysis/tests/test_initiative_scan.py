@@ -9,7 +9,6 @@ clustering, momentum classification (2d/7d boundaries), and slug<->branch matchi
 The git/gh/ClickHouse calls are stubbed where the orchestration is exercised.
 """
 import importlib.util
-import os
 import sys
 from pathlib import Path
 
@@ -271,11 +270,168 @@ def test_commits_feature_branch_uses_not_default(monkeypatch):
         seen["cmd"] = cmd
         return "1700000000\n1699990000\n"
 
+    # The branch + both default refs resolve (local main present alongside origin).
+    monkeypatch.setattr(isc, "_ref_exists", lambda repo, ref: True)
     monkeypatch.setattr(isc, "_run", fake_run)
     n, last = isc.git_commits_in_window("/r", "feat/x", 14, "trunk")
     assert n == 2 and last == 1700000000.0
     # The --not <default> exclusion must be present so trunk history isn't counted.
     assert "--not" in seen["cmd"] and "trunk" in seen["cmd"]
+
+
+# --------------------------------------------------------------------------- #
+# Robust git refs (#2/#3): missing local default + remote-only branch
+# --------------------------------------------------------------------------- #
+def test_commits_missing_local_default_does_not_fatal(monkeypatch):
+    # Repo on `trunk` with no local `main`: only `feat/x` and `origin/trunk`
+    # exist. The exclusion set must drop the missing `trunk` local ref instead of
+    # passing it to git (which would fatal rc=128 → swallowed "" → a false 0).
+    existing = {"feat/x", "origin/trunk"}
+    monkeypatch.setattr(isc, "_ref_exists", lambda repo, ref: ref in existing)
+
+    seen = {}
+
+    def fake_run(cmd, timeout=20.0):
+        seen["cmd"] = cmd
+        return "1700000000\n1699990000\n1699980000\n"
+
+    monkeypatch.setattr(isc, "_run", fake_run)
+    n, last = isc.git_commits_in_window("/r", "feat/x", 14, "trunk")
+    # Counts correctly (3), NOT a false 0; the missing local `trunk` is excluded
+    # from --not but `origin/trunk` is kept.
+    assert n == 3 and last == 1700000000.0
+    assert "--not" in seen["cmd"]
+    assert "origin/trunk" in seen["cmd"]
+    # The non-existent bare `trunk` ref must NOT have been passed to git.
+    idx = seen["cmd"].index("--not")
+    assert "trunk" not in seen["cmd"][idx:]
+
+
+def test_commits_unresolvable_branch_reports_unknown(monkeypatch):
+    # Neither `feat/ghost` nor `origin/feat/ghost` exists → (None, None) "unknown",
+    # never a silent (0, None) that masquerades as "no work".
+    monkeypatch.setattr(isc, "_ref_exists", lambda repo, ref: False)
+    monkeypatch.setattr(isc, "_run", lambda cmd, timeout=20.0: "")
+    assert isc.git_commits_in_window("/r", "feat/ghost", 14, "main") == (None, None)
+
+
+def test_commits_remote_only_branch_resolves_to_origin(monkeypatch):
+    # A branch existing ONLY as origin/feat/y must resolve (and git log it) via
+    # its remote-tracking ref, not fatal on a non-existent local `feat/y`.
+    existing = {"origin/feat/y", "main", "origin/main"}
+    monkeypatch.setattr(isc, "_ref_exists", lambda repo, ref: ref in existing)
+
+    seen = {}
+
+    def fake_run(cmd, timeout=20.0):
+        seen["cmd"] = cmd
+        return "1700000000\n"
+
+    monkeypatch.setattr(isc, "_run", fake_run)
+    n, last = isc.git_commits_in_window("/r", "origin/feat/y", 14, "main")
+    assert n == 1 and last == 1700000000.0
+    # git log was invoked against the resolved origin/feat/y ref.
+    assert "origin/feat/y" in seen["cmd"]
+
+
+def test_git_branches_keeps_remote_only_branch(monkeypatch):
+    # `feat/local` exists both places (dedups to bare); `feat/remote` is remote-only
+    # (keeps the origin/ prefix so a later `git log` can resolve it). origin/HEAD
+    # alias is dropped.
+    out = ("main\nfeat/local\norigin/main\norigin/feat/local\n"
+           "origin/feat/remote\norigin/HEAD\n")
+    monkeypatch.setattr(isc, "_run", lambda cmd, timeout=20.0: out)
+    names = isc.git_branches("/r")
+    assert "feat/local" in names           # bare (local preferred)
+    assert "origin/feat/local" not in names  # deduped away
+    assert "origin/feat/remote" in names   # remote-only keeps prefix
+    assert "main" in names
+    assert not any(n.endswith("HEAD") for n in names)
+
+
+# --------------------------------------------------------------------------- #
+# Word-equality branch matching (#5): no substring false positives
+# --------------------------------------------------------------------------- #
+def test_longer_slug_not_matched_by_shorter_branch():
+    # The `app-blocks-followups` slug must NOT match the plain `feat/app-blocks`
+    # branch: {app,blocks,followups} ⊄ {app,blocks}. (The sibling-credit direction —
+    # `app-blocks` matching the LONGER branch — is handled by best_matching_initiative,
+    # tested in test_best_match_prefers_most_specific_sibling.)
+    assert not isc.branch_matches_slug("feat/app-blocks", "app-blocks-followups")
+
+
+def test_mail_actions_does_not_match_email_fractions():
+    # The classic false positive: mail⊂email, actions⊂fractions under substrings.
+    # Word equality kills it: {mail,actions} ⊄ {email,fractions,redesign}.
+    assert not isc.branch_matches_slug("feat/email-fractions-redesign", "mail-actions")
+
+
+def test_app_api_does_not_match_mapper_rapid():
+    assert not isc.branch_matches_slug("feat/mapper-rapid", "app-api")
+
+
+def test_exact_feature_branch_still_matches():
+    assert isc.branch_matches_slug(
+        "zach/civitai-auth-observability", "civitai-auth-observability")
+
+
+def test_best_match_prefers_most_specific_sibling():
+    # Branch app-blocks-followups fits BOTH slugs; credit the specific one only.
+    inis = [
+        {"slug": "app-blocks", "repo": "/r"},
+        {"slug": "app-blocks-followups", "repo": "/r"},
+    ]
+    best = isc.best_matching_initiative("feat/app-blocks-followups", inis)
+    assert best is not None and best["slug"] == "app-blocks-followups"
+    # And the plain `app-blocks` branch goes to the broad one (followups not present).
+    best2 = isc.best_matching_initiative("feat/app-blocks", inis)
+    assert best2 is not None and best2["slug"] == "app-blocks"
+
+
+def test_siblings_do_not_share_identical_commit_counts(monkeypatch):
+    # Two sibling initiatives + per-branch distinct commit counts: each branch is
+    # awarded to its single best initiative, so the counts must DIFFER (the bug was
+    # both siblings claiming every app-blocks-* branch → identical totals).
+    inis = [
+        {"slug": "app-blocks", "repo": "/r"},
+        {"slug": "app-blocks-followups", "repo": "/r"},
+    ]
+    monkeypatch.setattr(isc, "git_branches", lambda r: [
+        "feat/app-blocks", "feat/app-blocks-followups"])
+    monkeypatch.setattr(isc, "git_default_branch", lambda r: "main")
+    monkeypatch.setattr(isc, "gh_open_prs", lambda r: [])
+    monkeypatch.setattr(isc, "gh_merged_prs", lambda r, d: [])
+
+    def fake_commits(repo, branch, days, default=None):
+        return ({"feat/app-blocks": 4,
+                 "feat/app-blocks-followups": 9}.get(branch, 0), 1000.0)
+
+    monkeypatch.setattr(isc, "git_commits_in_window", fake_commits)
+    isc.attribute_git(inis, 14)
+    by_slug = {i["slug"]: i["commits"] for i in inis}
+    assert by_slug == {"app-blocks": 4, "app-blocks-followups": 9}
+
+
+# --------------------------------------------------------------------------- #
+# Cross-repo telemetry isolation (#4)
+# --------------------------------------------------------------------------- #
+def test_telemetry_same_branch_token_does_not_cross_repo():
+    # Two initiatives in different repos, same branch token `feat/api`. Activity in
+    # repo A's cwd must credit ONLY repo A's initiative, not repo B's.
+    inis = [
+        {"slug": "api", "repo": "/home/u/workspace/repoA"},
+        {"slug": "api", "repo": "/home/u/workspace/repoB"},
+    ]
+    rows = [
+        {"branch": "feat/api", "cwd": "/home/u/workspace/repoA/sub", "n": 7,
+         "last_ts": "2026-06-30 10:00:00"},
+    ]
+    isc.attribute_telemetry(inis, rows, [
+        "/home/u/workspace/repoA", "/home/u/workspace/repoB"])
+    a = next(i for i in inis if i["repo"].endswith("repoA"))
+    b = next(i for i in inis if i["repo"].endswith("repoB"))
+    assert a["telem_events"] == 7
+    assert b["telem_events"] == 0  # no cross-credit into the other repo
 
 
 # --------------------------------------------------------------------------- #
@@ -327,12 +483,32 @@ def test_attribute_telemetry_none_rows_is_safe():
     assert inis[0]["telem_last"] is None
 
 
-def test_ch_ts_to_epoch_roundtrip():
-    import datetime as _dt
-    ep = isc.ch_ts_to_epoch("2026-06-30 12:34:56")
-    assert ep == _dt.datetime(2026, 6, 30, 12, 34, 56).timestamp()
+def test_ch_ts_to_epoch_is_utc_not_local():
+    # #1: the ClickHouse `ts` column is UTC (emit uses `date -u`), so the wall-clock
+    # string must convert as UTC — NOT the host's local zone, or every relative-age
+    # is skewed by the UTC offset. Build the expected epoch with calendar.timegm so
+    # the assertion is independent of the machine's TZ.
+    import calendar
+    expected = calendar.timegm((2026, 6, 30, 12, 34, 56, 0, 0, 0))
+    assert isc.ch_ts_to_epoch("2026-06-30 12:34:56") == float(expected)
+    # Fractional-seconds variant the column actually returns must also parse as UTC.
+    assert isc.ch_ts_to_epoch("2026-06-30 12:34:56.789") == float(expected) + 0.789
     assert isc.ch_ts_to_epoch(None) is None
     assert isc.ch_ts_to_epoch("garbage") is None
+
+
+def test_ch_ts_to_epoch_independent_of_local_tz(monkeypatch):
+    # Force a non-UTC TZ and confirm the result is unchanged (proves UTC parsing).
+    import calendar
+    import time as _time
+    expected = float(calendar.timegm((2026, 1, 15, 8, 0, 0, 0, 0, 0)))
+    monkeypatch.setenv("TZ", "America/New_York")
+    _time.tzset()
+    try:
+        assert isc.ch_ts_to_epoch("2026-01-15 08:00:00") == expected
+    finally:
+        monkeypatch.delenv("TZ", raising=False)
+        _time.tzset()
 
 
 # --------------------------------------------------------------------------- #
