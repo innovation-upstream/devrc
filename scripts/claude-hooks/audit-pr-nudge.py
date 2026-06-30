@@ -24,12 +24,18 @@ def main():
     if data.get("tool_name") != "Bash":
         sys.exit(0)
     cmd = (data.get("tool_input") or {}).get("command", "")
-    # Match an actual PR-create invocation, not `gh pr view/list/diff/checkout`.
+    # Sanity gate: the command must invoke `gh pr create` (not `gh pr view/list`).
+    # NOTE: this can match the phrase inside a commit message / echo / grep pattern
+    # (it once misfired on a commit whose message described this very hook), so it
+    # is only a gate — the real trigger below is the PR URL in the OUTPUT.
     if not re.search(r"\bgh\s+pr\s+create\b", cmd):
         sys.exit(0)
 
-    # Best-effort: pull the PR URL/number from the command's stdout so the nudge
-    # is specific. tool_response may be a dict ({stdout:...}) or a raw string.
+    # The decisive signal: a real `gh pr create` prints the new PR URL
+    # (.../pull/<number>) to stdout. A commit/echo that merely mentions the phrase
+    # does not. Require that URL — no URL => no PR was actually created => stay
+    # silent. (GitHub's `git push` "create a PR" hint uses /pull/new/<branch>, which
+    # has no digits and won't match.) tool_response may be a dict or a raw string.
     resp = data.get("tool_response")
     text = ""
     if isinstance(resp, dict):
@@ -37,8 +43,10 @@ def main():
     elif isinstance(resp, str):
         text = resp
     m = re.search(r"https://github\.com/[^\s]+/pull/(\d+)", text)
-    target = f"PR #{m.group(1)} ({m.group(0)})" if m else "the PR you just created"
-    arg = m.group(1) if m else "<n>"
+    if not m:
+        sys.exit(0)
+    target = f"PR #{m.group(1)} ({m.group(0)})"
+    arg = m.group(1)
 
     nudge = (
         f"A PR was just created: {target}. Before moving on (and before merging), "
