@@ -393,17 +393,136 @@ def sort_initiatives(initiatives: list[dict]) -> list[dict]:
 # --------------------------------------------------------------------------- #
 # Handoff discovery + parsing (I/O)
 # --------------------------------------------------------------------------- #
+def _git_common_dir(path: str) -> str | None:
+    """Absolute `git rev-parse --git-common-dir` for `path`, or None if not a repo.
+
+    Two dirs that are worktrees of the SAME repository resolve to the SAME
+    common-dir (the main worktree's `.git`), which is exactly the key we dedup on.
+    `--path-format=absolute` makes the result stable regardless of cwd; we realpath
+    it so symlinked workspace roots compare equal too.
+    """
+    out = _run(["git", "-C", path, "rev-parse", "--path-format=absolute",
+                "--git-common-dir"]).strip()
+    if not out:
+        # Older git without --path-format: fall back and absolutize ourselves.
+        out = _run(["git", "-C", path, "rev-parse", "--git-common-dir"]).strip()
+        if not out:
+            return None
+        if not os.path.isabs(out):
+            out = os.path.join(path, out)
+    try:
+        return os.path.realpath(out)
+    except OSError:
+        return out
+
+
+def _is_main_worktree(path: str, common_dir: str) -> bool:
+    """True iff `path` is the MAIN worktree of its repo (not a linked worktree).
+
+    The main worktree's `.git` is a real directory and its common-dir resolves to
+    `<path>/.git`; a linked worktree has a `.git` FILE pointing elsewhere, so its
+    common-dir lives under a different toplevel. We compare the common-dir's parent
+    (the toplevel that owns `.git`) against `path` by realpath.
+    """
+    try:
+        owner = os.path.realpath(os.path.dirname(common_dir))
+        return owner == os.path.realpath(path)
+    except OSError:
+        return False
+
+
+def _canonical_repo_for_group(candidates: list[str], common_dir: str) -> str:
+    """Pick ONE canonical repo for a set of dirs sharing `common_dir`.
+
+    Prefer a candidate that IS the main worktree. Else fall back to the main
+    worktree's toplevel (common-dir's parent) if it exists on disk, else the first
+    candidate deterministically (sorted) so the choice is reproducible.
+    """
+    for c in sorted(candidates):
+        if _is_main_worktree(c, common_dir):
+            return c
+    main_toplevel = os.path.dirname(common_dir)
+    if main_toplevel and os.path.isdir(main_toplevel):
+        return os.path.realpath(main_toplevel)
+    return sorted(candidates)[0]
+
+
 def discover_repos(workspace: str = WORKSPACE) -> list[str]:
-    """Dirs under ~/workspace (and one nested level) that hold handoff docs."""
-    repos = set()
+    """Dirs under ~/workspace (and one nested level) that hold handoff docs.
+
+    Collapses git worktrees to their canonical repo: candidate dirs that are
+    worktrees of the SAME repository (same `git rev-parse --git-common-dir`) are
+    grouped, and ONE canonical repo per group is kept (the main worktree, or its
+    toplevel, see `_canonical_repo_for_group`). A candidate that isn't a git repo
+    at all (no common-dir) falls back to being its own repo, so a plain dir with a
+    `claudedocs/` still surfaces.
+    """
+    return _dedup_worktrees(_candidate_repo_dirs(workspace))
+
+
+def _candidate_repo_dirs(workspace: str) -> list[str]:
+    """Raw candidate repo dirs (pre-dedup): parents of any handoff doc."""
+    cands: set[str] = set()
     patterns = [
         os.path.join(workspace, "*", "claudedocs", "handoff-*.md"),
         os.path.join(workspace, "*", "*", "claudedocs", "handoff-*.md"),
     ]
     for pat in patterns:
         for p in glob.glob(pat):
-            repos.add(os.path.dirname(os.path.dirname(p)))
-    return sorted(repos)
+            cands.add(os.path.dirname(os.path.dirname(p)))
+    return sorted(cands)
+
+
+def _dedup_worktrees(candidates: list[str]) -> list[str]:
+    """Collapse candidate dirs that are worktrees of one repo to a canonical repo.
+
+    Groups by `git rev-parse --git-common-dir`; non-git candidates (common-dir is
+    None) are each their own group keyed by their own path (graceful fallback —
+    never crash, never drop). Returns the sorted, deduped canonical repo list.
+    """
+    by_common: dict[str, list[str]] = {}
+    for cand in candidates:
+        common = _git_common_dir(cand)
+        key = common if common is not None else f"\0nogit:{cand}"
+        by_common.setdefault(key, []).append(cand)
+
+    canonical: set[str] = set()
+    for key, group in by_common.items():
+        if key.startswith("\0nogit:"):
+            # Not a git repo — keep the dir itself.
+            canonical.update(group)
+        else:
+            canonical.add(_canonical_repo_for_group(group, key))
+    return sorted(canonical)
+
+
+def worktree_canonical_map(repos: list[str]) -> dict[str, str]:
+    """Map every linked-worktree path of a canonical repo -> that canonical repo.
+
+    For each canonical repo we ask git for ALL its worktree paths
+    (`git worktree list`) and map each linked-worktree path back to the canonical.
+    This lets cwd attribution resolve telemetry whose `cwd` lives in a linked
+    worktree (a dir that is NOT itself a discovered repo) to the parent repo —
+    shrinking the `(unknown repo)` bucket. Best-effort: a repo whose worktree list
+    can't be read just contributes nothing (its own realpath-prefix still matches).
+    """
+    mapping: dict[str, str] = {}
+    for repo in repos:
+        for wt in _git_worktree_paths(repo):
+            rp = os.path.realpath(wt)
+            if rp != os.path.realpath(repo):
+                mapping[rp] = repo
+    return mapping
+
+
+def _git_worktree_paths(repo: str) -> list[str]:
+    """Absolute worktree paths for `repo` via `git worktree list --porcelain`."""
+    out = _run(["git", "-C", repo, "worktree", "list", "--porcelain"])
+    paths: list[str] = []
+    for ln in out.splitlines():
+        if ln.startswith("worktree "):
+            paths.append(ln[len("worktree "):].strip())
+    return paths
 
 
 def read_handoff(path: str) -> dict:
@@ -778,16 +897,20 @@ def ch_ts_to_epoch(s) -> float | None:
 
 
 def attribute_telemetry(initiatives: list[dict], rows: list[dict] | None,
-                        repos: list[str]) -> dict:
+                        repos: list[str],
+                        worktree_map: dict[str, str] | None = None) -> dict:
     """Attribute branch-activity rows to initiatives; return per-repo trunk catch-all.
 
-    Each row carries (branch, cwd). The cwd is mapped to its repo by path
-    containment, and a row is only credited to an initiative WHOSE repo matches
-    that cwd's repo — so a branch token reused across repos (`feat/api` in repo A
-    and repo B) never cross-credits, and an arbitrary `any(cwd)` no longer
-    collapses every repo's `main` into one. Within the matching repo, credit goes
-    to the SINGLE most-specific initiative (`best_matching_initiative`), so
-    sibling slugs don't all share the same event count.
+    Each row carries (branch, cwd). The cwd is mapped to its CANONICAL repo by
+    realpath-prefix containment — including linked-worktree paths via
+    `worktree_map`, so telemetry whose cwd lives in a sibling worktree
+    (`…/datapacket-talos-review-sandbox`) attributes to the parent repo instead of
+    falling into `(unknown repo)`. A row is only credited to an initiative WHOSE
+    repo matches that cwd's repo — so a branch token reused across repos
+    (`feat/api` in repo A and repo B) never cross-credits, and an arbitrary
+    `any(cwd)` no longer collapses every repo's `main` into one. Within the
+    matching repo, credit goes to the SINGLE most-specific initiative
+    (`best_matching_initiative`), so sibling slugs don't all share the same count.
 
     Mutates each initiative with telem_events + telem_last (epoch). Returns
     {repo: {"events": n, "last": epoch, "branches": set}} for trunk/main + any
@@ -800,12 +923,24 @@ def attribute_telemetry(initiatives: list[dict], rows: list[dict] | None,
     if not rows:
         return catchall
 
+    wt_map = worktree_map or {}
+    # Linked-worktree paths, longest-first, so the most specific prefix wins.
+    wt_paths = sorted(wt_map.keys(), key=len, reverse=True)
+    repos_by_len = sorted(repos, key=len, reverse=True)
+
     def cwd_repo(cwd: str | None) -> str | None:
         if not cwd:
             return None
-        for r in sorted(repos, key=len, reverse=True):
-            if cwd == r or cwd.startswith(r + "/"):
+        rp = os.path.realpath(cwd)
+        # A canonical repo is the most direct match.
+        for r in repos_by_len:
+            rr = os.path.realpath(r)
+            if rp == rr or rp.startswith(rr + "/"):
                 return r
+        # Else a linked-worktree path -> its canonical repo.
+        for wt in wt_paths:
+            if rp == wt or rp.startswith(wt + "/"):
+                return wt_map[wt]
         return None
 
     # Initiatives indexed by their repo, so matching is scoped to the row's repo.
@@ -944,7 +1079,10 @@ def build_report(days: int, repos: list[str] | None = None,
 
     telem_rows = fetch_telemetry(client, days) if client is not None else None
     telemetry_available = telem_rows is not None
-    catchall = attribute_telemetry(initiatives, telem_rows, repos)
+    # Resolve cwds living in linked worktrees back to their canonical repo so
+    # worktree telemetry attributes to the parent and `(unknown repo)` shrinks.
+    wt_map = worktree_canonical_map(repos) if telem_rows else {}
+    catchall = attribute_telemetry(initiatives, telem_rows, repos, wt_map)
 
     # Compute momentum from the MAX of every touch signal.
     for ini in initiatives:
