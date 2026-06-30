@@ -54,6 +54,7 @@ in
 
           # Workflows
           { trigger = ":whn"; replace = "write the handoff to continue in next session"; label = "Write handoff for next session"; search_terms = ["handoff" "session"]; }
+          { trigger = ":eos"; replace = "review work done this session and identify skills that may need updating, then update those skills and any relevant docs, then write the handoff to proceed in next session"; label = "End-of-session ritual: review → update skills/docs → handoff"; search_terms = ["end" "session" "wrap" "handoff" "skills" "review" "update" "docs" "ritual"]; }
           { trigger = ":rau"; replace = "dispatch a subagent to adversarially audit the PR for bugs, regressions, edge cases, race conditions, security holes, error/failure handling, backward-compat and data-integrity risks, leaked secrets, hidden assumptions, and second-order consequences — cite evidence from the diff, rank findings by severity, and propose a fix for each"; label = "PR audit checklist tail"; search_terms = ["review" "audit" "pr" "risks" "regressions" "subagent"]; }
           { trigger = ":rns"; replace = "recommend next steps"; label = "Recommend next steps"; search_terms = ["next" "recommend" "steps" "whats next"]; }
           { trigger = ":rnx"; replace = "recommend next steps ranked by leverage (impact vs effort); call out the single highest-value move and any quick wins"; label = "Recommend next steps, ranked by leverage"; search_terms = ["next" "recommend" "steps" "ranked" "leverage" "impact" "deep"]; }
