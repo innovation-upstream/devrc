@@ -8,6 +8,14 @@
       duration = 0;
     };
 
+    # Honor OSC 52 *copy* requests so tmux (incl. over SSH from the workbench)
+    # can set this laptop's system clipboard. "OnlyCopy" is alacritty's default
+    # but pinned here so the clipboard path can't silently break on a default
+    # change; paste-via-OSC52 stays disabled (it's a security footgun).
+    terminal = {
+      osc52 = "OnlyCopy";
+    };
+
     # Gruvbox Dark theme
     colors = {
       primary = {
