@@ -254,7 +254,8 @@ in
   # Global Claude Code behavioural config — single source of truth for both
   # hosts (these were drifting when edited per-host). Synced via scripts/ship.sh.
   # NOTE: now read-only symlinks into the nix store → edit `devrc/claude/*.md`
-  # then `home-manager switch` (or ship.sh), NOT `~/.claude/*.md` directly.
+  # (or devrc/claude/commands/*.md) then `home-manager switch` (or ship.sh),
+  # NOT `~/.claude/*.md` directly.
   # CLAUDE.md and skills/ stay per-host/mutable (host-specific + frequently edited).
   home.file.".claude/RULES.md" = {
     source = ../claude/RULES.md;
@@ -262,6 +263,14 @@ in
   };
   home.file.".claude/PRINCIPLES.md" = {
     source = ../claude/PRINCIPLES.md;
+    force = true;
+  };
+  # Slash-commands — recursively symlinked so each command lands individually at
+  # ~/.claude/commands/<name>.md (and sc/load.md) as a read-only store symlink.
+  # Edit in devrc/claude/commands/ then switch; both hosts stay in lockstep.
+  home.file.".claude/commands" = {
+    source = ../claude/commands;
+    recursive = true;
     force = true;
   };
 
