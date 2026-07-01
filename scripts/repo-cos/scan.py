@@ -53,6 +53,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import digest  # noqa: E402
+import exclusions  # noqa: E402
 import prescan  # noqa: E402
 
 # Workbench-local default repos. naida/vetr are laptop-only (~/workspace/scratch/) —
@@ -92,9 +93,71 @@ def resolve_repos(override: str | None) -> list[str]:
 
 
 def cmd_scan(args) -> int:
+    # --show-exclusions: print the current deterministic exclusion state and exit.
+    if getattr(args, "show_exclusions", False):
+        print(exclusions.format_state(exclusions.load_state()))
+        return 0
+
+    # ---- DETERMINISTIC EXCLUSIONS (load first; a reply can add to them before scan) ----
+    # Load the persisted exclusion state. If a reply was fetched (see below), it's parsed
+    # into repo-level exclusions and applied BEFORE the scan — so excluded repos are never
+    # scanned or synthesized and CANNOT reappear no matter what the LLM does.
+    excl_state = exclusions.load_state()
+
+    # ---- REPLY-FEEDBACK: fetch Zach's reply to LAST week's digest ONCE, up front.
+    # It serves two masters: (1) the DETERMINISTIC exclusion parse below, and (2) the
+    # existing context-injection into synthesis (passed through as `fb`). Best-effort — a
+    # None result (no prior digest, no reply, IMAP down) proceeds as a stateless run would.
+    # --no-feedback skips the fetch (and the exclusion parse) entirely. The Stage-1-only
+    # smoke modes (--no-llm/--candidates-only) skip the fetch too — they must stay free +
+    # network-less — but the ALREADY-PERSISTED exclusion filter below still applies to them.
+    fb = None
+    stage1_only = args.no_llm or args.candidates_only
+    if not args.no_feedback and not stage1_only:
+        try:
+            import feedback as feedback_mod
+            fb = feedback_mod.fetch_last_feedback()
+        except Exception as exc:  # noqa: BLE001
+            print(f"  ! feedback fetch failed (proceeding without): {exc}", file=sys.stderr)
+            fb = None
+
+        if fb is not None:
+            # Parse the reply into HARD exclusions against the digest Zach ACTUALLY SAW
+            # (the last EMAILED one — proposals rotate + latest.json is overwritten each run).
+            try:
+                emailed = exclusions.load_last_emailed()
+                emailed_props = (emailed or {}).get("proposals") or []
+                alias_map = exclusions.build_alias_map(DEFAULT_REPOS)
+                parsed = exclusions.parse_reply(fb.reply_text, emailed_props,
+                                                alias_map=alias_map)
+                if parsed["exclude"] or parsed["resume"]:
+                    exclusions.apply(excl_state, parsed, source="reply")
+                    exclusions.save_state(excl_state)
+                    if parsed["exclude"]:
+                        names = ", ".join(e["repo"] for e in parsed["exclude"])
+                        print(f"  exclusions: reply excluded {names}", file=sys.stderr)
+                    if parsed["resume"]:
+                        print(f"  exclusions: reply resumed {', '.join(parsed['resume'])}",
+                              file=sys.stderr)
+            except Exception as exc:  # noqa: BLE001
+                print(f"  ! exclusion parse failed (proceeding): {exc}", file=sys.stderr)
+
     repos = resolve_repos(args.repos)
     if not repos:
         print("ERROR: no repos to scan (none of the defaults exist and --repos empty).",
+              file=sys.stderr)
+        return 2
+
+    # Drop excluded repos deterministically — they never reach the scan or the LLM.
+    repos, excluded = exclusions.filter_repos(repos, excl_state)
+    excluded_names = exclusions.excluded_names(excl_state)
+    if excluded:
+        names = ", ".join(Path(r).name for r in excluded)
+        print(f"  excluding {len(excluded)} repo(s): {names} "
+              f"(reply 'resume <repo>' to re-enable)", file=sys.stderr)
+    if not repos:
+        print("ERROR: no repos to scan (all resolved repos are excluded — "
+              "reply 'resume <repo>' or edit ~/.config/repo-cos/exclusions.json).",
               file=sys.stderr)
         return 2
 
@@ -120,22 +183,13 @@ def cmd_scan(args) -> int:
 
     if not cand_dicts:
         # Nothing to synthesize — emit an honest empty digest without spending.
-        body = digest.render([], candidate_count=0)
+        body = digest.render([], candidate_count=0, excluded_repos=excluded_names)
         return _deliver(body, args, proposals=[], candidate_count=0, approx_tokens=0,
-                        feedback_applied=False)
+                        feedback_applied=False, excluded_repos=excluded_names)
 
-    # ---- REPLY-FEEDBACK: pull Zach's reply to LAST week's digest as steering context.
-    # Best-effort — a None result (no prior digest, no reply, IMAP down) proceeds exactly
-    # as a stateless run would. --no-feedback skips the fetch entirely (clean/test runs).
-    fb = None
-    if not args.no_feedback:
-        try:
-            import feedback as feedback_mod
-            fb = feedback_mod.fetch_last_feedback()
-        except Exception as exc:  # noqa: BLE001
-            print(f"  ! feedback fetch failed (proceeding without): {exc}", file=sys.stderr)
-            fb = None
-
+    # `fb` (Zach's reply) was already fetched up front — reused here as synthesis CONTEXT
+    # (nuance the deterministic exclusion layer can't express). The reply is passed through
+    # unchanged; the exclusion filter already ran on the repo list above.
     try:
         result = llm.synthesize(cand_dicts, top=args.top, model=args.model, feedback=fb)
     except Exception as exc:  # noqa: BLE001
@@ -146,15 +200,16 @@ def cmd_scan(args) -> int:
         result.proposals,
         candidate_count=len(cand_dicts),
         approx_tokens=result.approx_prompt_tokens,
+        excluded_repos=excluded_names,
     )
     print(f"  synthesis: model={result.model} candidates={len(cand_dicts)} "
           f"proposals={len(result.proposals)} ~prompt_tokens={result.approx_prompt_tokens} "
-          f"feedback_applied={fb is not None}",
+          f"feedback_applied={fb is not None} excluded={len(excluded_names)}",
           file=sys.stderr)
     return _deliver(
         body, args, proposals=result.proposals,
         candidate_count=len(cand_dicts), approx_tokens=result.approx_prompt_tokens,
-        feedback_applied=fb is not None,
+        feedback_applied=fb is not None, excluded_repos=excluded_names,
     )
 
 
@@ -188,15 +243,17 @@ def _emit_candidates(candidates, scans, cand_dicts, args) -> int:
 
 
 def _deliver(body: str, args, *, proposals, candidate_count, approx_tokens,
-             feedback_applied: bool = False) -> int:
+             feedback_applied: bool = False, excluded_repos=None) -> int:
     """Print (dry-run) or send (--email) the digest. --dry-run is the default and always
     prints; --email additionally sends."""
+    excluded_repos = list(excluded_repos or [])
     if args.json:
         print(json.dumps({
             "subject": digest.subject(),
             "candidate_count": candidate_count,
             "approx_prompt_tokens": approx_tokens,
             "feedback_applied": feedback_applied,
+            "excluded_repos": excluded_repos,
             "proposals": [p.as_dict() for p in proposals],
             "emailed": bool(args.email),
         }, indent=2))
@@ -208,9 +265,16 @@ def _deliver(body: str, args, *, proposals, candidate_count, approx_tokens,
     if args.email:
         import email_send
         try:
-            to = email_send.send_digest(subject=digest.subject(), body=body)
+            subj = digest.subject()
+            to = email_send.send_digest(subject=subj, body=body)
             print(f"\n  emailed digest → {to}", file=sys.stderr)
             emailed = True
+            # Snapshot the EMAILED proposals so a later reply's positional refs ("1./2./…")
+            # map to what Zach SAW — not the next run's rotated set. Best-effort.
+            from datetime import datetime
+            exclusions.write_last_emailed(
+                proposals, subject=subj,
+                generated_at=datetime.now().astimezone().isoformat(timespec="seconds"))
         except Exception as exc:  # noqa: BLE001
             print(f"ERROR: email send failed: {exc}", file=sys.stderr)
             rc = 1
@@ -257,8 +321,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--candidates-only", action="store_true",
                    help="alias for --no-llm (the free pre-scan smoke test)")
     p.add_argument("--no-feedback", action="store_true",
-                   help="skip pulling last week's emailed reply into synthesis "
-                        "(stateless run; for clean/testing)")
+                   help="skip pulling last week's emailed reply into synthesis AND the "
+                        "deterministic exclusion parse (stateless run; for clean/testing)")
+    p.add_argument("--show-exclusions", action="store_true",
+                   help="print the current deterministic repo-exclusion state and exit")
     p.add_argument("--repos", default=None,
                    help="comma-separated repo paths overriding the default list")
     p.add_argument("--limit-candidates", type=int, default=DEFAULT_LIMIT_CANDIDATES,
