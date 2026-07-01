@@ -121,10 +121,23 @@ def cmd_scan(args) -> int:
     if not cand_dicts:
         # Nothing to synthesize — emit an honest empty digest without spending.
         body = digest.render([], candidate_count=0)
-        return _deliver(body, args, proposals=[], candidate_count=0, approx_tokens=0)
+        return _deliver(body, args, proposals=[], candidate_count=0, approx_tokens=0,
+                        feedback_applied=False)
+
+    # ---- REPLY-FEEDBACK: pull Zach's reply to LAST week's digest as steering context.
+    # Best-effort — a None result (no prior digest, no reply, IMAP down) proceeds exactly
+    # as a stateless run would. --no-feedback skips the fetch entirely (clean/test runs).
+    fb = None
+    if not args.no_feedback:
+        try:
+            import feedback as feedback_mod
+            fb = feedback_mod.fetch_last_feedback()
+        except Exception as exc:  # noqa: BLE001
+            print(f"  ! feedback fetch failed (proceeding without): {exc}", file=sys.stderr)
+            fb = None
 
     try:
-        result = llm.synthesize(cand_dicts, top=args.top, model=args.model)
+        result = llm.synthesize(cand_dicts, top=args.top, model=args.model, feedback=fb)
     except Exception as exc:  # noqa: BLE001
         print(f"ERROR: synthesis failed: {exc}", file=sys.stderr)
         return 1
@@ -135,11 +148,13 @@ def cmd_scan(args) -> int:
         approx_tokens=result.approx_prompt_tokens,
     )
     print(f"  synthesis: model={result.model} candidates={len(cand_dicts)} "
-          f"proposals={len(result.proposals)} ~prompt_tokens={result.approx_prompt_tokens}",
+          f"proposals={len(result.proposals)} ~prompt_tokens={result.approx_prompt_tokens} "
+          f"feedback_applied={fb is not None}",
           file=sys.stderr)
     return _deliver(
         body, args, proposals=result.proposals,
         candidate_count=len(cand_dicts), approx_tokens=result.approx_prompt_tokens,
+        feedback_applied=fb is not None,
     )
 
 
@@ -172,7 +187,8 @@ def _emit_candidates(candidates, scans, cand_dicts, args) -> int:
     return 0
 
 
-def _deliver(body: str, args, *, proposals, candidate_count, approx_tokens) -> int:
+def _deliver(body: str, args, *, proposals, candidate_count, approx_tokens,
+             feedback_applied: bool = False) -> int:
     """Print (dry-run) or send (--email) the digest. --dry-run is the default and always
     prints; --email additionally sends."""
     if args.json:
@@ -180,6 +196,7 @@ def _deliver(body: str, args, *, proposals, candidate_count, approx_tokens) -> i
             "subject": digest.subject(),
             "candidate_count": candidate_count,
             "approx_prompt_tokens": approx_tokens,
+            "feedback_applied": feedback_applied,
             "proposals": [p.as_dict() for p in proposals],
             "emailed": bool(args.email),
         }, indent=2))
@@ -239,6 +256,9 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Stage-1 only: print raw candidates, no LLM, no API key needed")
     p.add_argument("--candidates-only", action="store_true",
                    help="alias for --no-llm (the free pre-scan smoke test)")
+    p.add_argument("--no-feedback", action="store_true",
+                   help="skip pulling last week's emailed reply into synthesis "
+                        "(stateless run; for clean/testing)")
     p.add_argument("--repos", default=None,
                    help="comma-separated repo paths overriding the default list")
     p.add_argument("--limit-candidates", type=int, default=DEFAULT_LIMIT_CANDIDATES,

@@ -26,6 +26,7 @@ shrinks the corpus, then the LLM runs on the small survivor set.
 
 | Stage | Module | What | Cost |
 |-------|--------|------|------|
+| 0 | `feedback.py` | pull Zach's IMAP reply to LAST digest → synthesis context | none |
 | 1 | `prescan.py` | cheap grep/git signals, capped **per repo** | none |
 | 2 | `llm.py` | OpenRouter clusters survivors → ranked JSON proposals | one call |
 | 3 | `digest.py` | one formatter shared by stdout **and** email | none |
@@ -43,6 +44,30 @@ shrinks the corpus, then the LLM runs on the small survivor set.
 Each signal is **capped per repo** (see `prescan.CAP_PER_SIGNAL`) so a huge repo like
 `civit/civitai` can't flood the LLM input, and a **global** `--limit-candidates` cap is
 applied by round-robin interleaving so no single repo monopolizes the budget.
+
+## Reply-feedback loop (Stage 0)
+
+The runs are no longer stateless: **your emailed REPLY to last week's digest steers the
+next one.** Before synthesis, `feedback.py` reads back your reply over **IMAP** (stdlib
+`imaplib`, the *same* Gmail app-password used for send — no new deps, no cluster/Postgres
+path) and prepends last week's proposals + your reply to the LLM prompt as context, with
+an instruction to *drop what you rejected and honor your steering* while still surfacing
+genuinely new evidence-backed candidates. It's context only — the structural evidence /
+anti-slop rules still fully apply.
+
+- **Matching:** searches recent mail SINCE the last digest for the ASCII-stable subject
+  core `Repo proposals` (the full subject's 🧭 + em-dash are flaky in IMAP SEARCH), then
+  picks the most-recent genuine **reply from you** (`Re:` / `In-Reply-To`), so the
+  original digest isn't mistaken for feedback. Looks in `INBOX`, falls back to
+  `[Gmail]/All Mail`.
+- **De-quoting:** drops `>`-quoted lines and everything from the `On … wrote:` attribution
+  onward, leaving only your new words (capped 4000 chars).
+- **Best-effort + safe:** no prior digest / no creds / IMAP down / no reply / parse error
+  → logged to stderr and skipped; the run proceeds exactly as a stateless one. `--no-feedback`
+  skips the fetch entirely (clean / testing runs); `--json` reports `feedback_applied`.
+- **Limits:** relies on subject-thread matching — if Gmail groups a reply under a
+  different subject (or you compose fresh instead of replying), it won't be found. The
+  loop closes naturally because each run persists its own subject → next run's "previous".
 
 ## Usage
 
@@ -64,9 +89,13 @@ nix-shell -p 'python3.withPackages(p:[p.requests])' --run \
   'python scripts/repo-cos/scan.py --dry-run'
 ```
 
-Flags: `--dry-run` (default), `--email`, `--no-llm`/`--candidates-only`, `--repos`,
-`--limit-candidates N` (default 60), `--top N` (default 5), `--model` (default
-`deepseek/deepseek-v4-flash`), `--json`.
+Flags: `--dry-run` (default), `--email`, `--no-llm`/`--candidates-only`, `--no-feedback`
+(skip Stage 0), `--repos`, `--limit-candidates N` (default 60), `--top N` (default 5),
+`--model` (default `deepseek/deepseek-v4-flash`), `--json`.
+
+The weekly unit / `run-weekly.sh` need **no change**: `feedback.py` uses only stdlib
+`imaplib` (already available) and the SAME app-password already decrypted for SMTP send —
+so the reply-fetch adds no new system deps or secrets to the timer.
 
 ## Repos
 

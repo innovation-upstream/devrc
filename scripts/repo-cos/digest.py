@@ -10,10 +10,16 @@ from datetime import date
 
 EFFORT_LABEL = {"S": "small", "M": "medium", "L": "large"}
 
+# ASCII-stable core of the digest subject. The full subject carries a leading emoji (🧭)
+# and an em-dash (—), both non-ASCII and flaky in IMAP SEARCH — so feedback.py matches a
+# reply against THIS fragment instead of the whole subject. Keep `subject()` embedding it
+# verbatim (asserted in tests) so the reply-matcher stays in lockstep with what we send.
+SUBJECT_CORE = "Repo proposals"
+
 
 def subject(today: date | None = None) -> str:
     d = today or date.today()
-    return f"🧭 Repo proposals — week of {d.isoformat()}"
+    return f"🧭 {SUBJECT_CORE} — week of {d.isoformat()}"
 
 
 def render(proposals: list, *, today: date | None = None,

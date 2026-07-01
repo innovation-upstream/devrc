@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import sys
 from dataclasses import dataclass, field
 
 DEFAULT_MODEL = "deepseek/deepseek-v4-flash"
@@ -169,13 +170,49 @@ def _ref_known(ref: str, valid_refs: set[str]) -> bool:
     return any(v.split(":", 1)[0] == ref_path for v in valid_refs)
 
 
-def build_user_prompt(candidates: list[dict], *, top: int) -> str:
-    """Render the capped candidate evidence compactly (one line each) for the model."""
-    lines = [
+def build_feedback_block(feedback) -> str:
+    """Render the REPLY-FEEDBACK context block prepended to the user prompt.
+
+    `feedback` is a `feedback.Feedback` (duck-typed: needs `.prev_summary()` and
+    `.reply_text`). It carries LAST week's proposals + Zach's emailed reply so the model
+    can drop what he rejected and honor his steering — WITHOUT bypassing the evidence
+    requirement (the block is context, the HARD RULES below still apply to new output).
+    """
+    prev = feedback.prev_summary()
+    lines = ["=== LAST WEEK'S FEEDBACK (context — read before the new signals) ==="]
+    if prev:
+        lines.append("Previous proposals you sent the user:")
+        lines.extend(f"  - {p}" for p in prev)
+    else:
+        lines.append("(previous proposals unavailable)")
+    lines.append("")
+    lines.append(f'USER\'S REPLY: "{feedback.reply_text.strip()}"')
+    lines.append("")
+    lines.append(
+        "The user reviewed last week's proposals and replied above. Take their feedback "
+        "into account — do NOT re-propose what they rejected or dismissed, honor any "
+        "steering (what to focus on / ignore), and reflect their stated preferences — "
+        "while still surfacing genuinely NEW high-value candidates from the signals below. "
+        "This feedback is CONTEXT only: every new proposal must STILL cite concrete "
+        "file:line evidence from the candidates per the rules."
+    )
+    lines.append("=== END FEEDBACK ===")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def build_user_prompt(candidates: list[dict], *, top: int, feedback=None) -> str:
+    """Render the capped candidate evidence compactly (one line each) for the model.
+
+    When `feedback` is present, the REPLY-FEEDBACK block is prepended (before the new
+    candidates) so the model steers off last week's reply."""
+    lines: list[str] = []
+    if feedback is not None:
+        lines.append(build_feedback_block(feedback))
+    lines.append(
         f"Cluster these {len(candidates)} raw signals into at most {top} bounded, "
-        "shippable, ranked proposals per the rules. Candidates (kind | ref | detail):",
-        "",
-    ]
+        "shippable, ranked proposals per the rules. Candidates (kind | ref | detail):")
+    lines.append("")
     for c in candidates:
         detail = (c.get("text") or "").replace("\n", " ")[:160]
         lines.append(f"- {c['kind']:<12} {c['ref']}  {detail}")
@@ -221,6 +258,7 @@ def synthesize(
     top: int = 5,
     model: str | None = None,
     api_key: str | None = None,
+    feedback=None,
     _caller=_call_openrouter,
 ) -> Synthesis:
     """Synthesize proposals, retrying on malformed OR empty output. `_caller` injectable.
@@ -230,13 +268,22 @@ def synthesize(
     ARE candidates kills that empty-tail (a weekly digest should not be blank while real
     signals exist); we still emit an honest empty result if the model surfaces nothing
     across every attempt. `candidates` are candidate dicts (kind/ref/text).
+
+    `feedback` (optional `feedback.Feedback`): when present, LAST week's proposals + Zach's
+    emailed reply are prepended to the user prompt so the model drops what he rejected and
+    honors his steering. It's CONTEXT only — the structural evidence/anti-slop rules still
+    fully apply to new output.
     """
     model = model or os.environ.get("REPO_COS_MODEL", DEFAULT_MODEL)
     api_key = api_key or os.environ.get("OPENROUTER_API_KEY")
     if not api_key:
         raise RuntimeError("OPENROUTER_API_KEY not set")
     system = SYSTEM_PROMPT.replace("{top}", str(top))
-    user = build_user_prompt(candidates, top=top)
+    user = build_user_prompt(candidates, top=top, feedback=feedback)
+    if feedback is not None:
+        when = getattr(feedback, "replied_at", "") or "unknown"
+        print(f"  feedback: applied reply from {when} "
+              f"({len(feedback.reply_text)} chars) into synthesis", file=sys.stderr)
     valid_refs = {c["ref"] for c in candidates if c.get("ref")}
     approx = _approx_tokens(system) + _approx_tokens(user)
 
