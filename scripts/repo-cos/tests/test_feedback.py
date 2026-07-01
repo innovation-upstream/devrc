@@ -247,3 +247,33 @@ def test_subject_core_present_in_digest_subject():
     from datetime import date
     assert feedback.digest.SUBJECT_CORE in digest.subject(date(2026, 7, 6))
     assert feedback.digest.SUBJECT_CORE == "Repo proposals"
+
+
+def test_strip_quoted_keeps_bottom_posted_reply():
+    # bottom-posting: quote FIRST, new text below the attribution — must NOT be dropped
+    # (the audit's 🟡: `break` at the attribution silently discarded the whole reply).
+    body = (
+        "On Mon, 1 Jul 2026 at 08:00, Zach <zachlowden1@gmail.com> wrote:\n"
+        "> 🧭 Repo proposals — week of 2026-07-01\n"
+        "> 1. Implement report modal for Model3D\n"
+        "\n"
+        "Yes to #1, and add auth to the assets controller too.\n"
+    )
+    cleaned = feedback.strip_quoted(body)
+    assert "Yes to #1, and add auth to the assets controller" in cleaned
+    assert "Model3D" not in cleaned      # quoted digest still stripped
+    assert "wrote:" not in cleaned       # attribution line removed
+
+
+def test_reply_from_owner_requires_exact_address():
+    ok = _mk_msg(subject="Re: 🧭 Repo proposals — week of 2026-07-01",
+                 frm="Zach Lowden <zachlowden1@gmail.com>", body="x", in_reply_to="<a>")
+    assert feedback._is_reply_from_owner(ok) is True
+    # lookalike domain (address as a substring) must be REJECTED
+    look = _mk_msg(subject="Re: 🧭 Repo proposals — week of 2026-07-01",
+                   frm="zachlowden1@gmail.com.evil.com", body="x", in_reply_to="<a>")
+    assert feedback._is_reply_from_owner(look) is False
+    # owner address only in the DISPLAY NAME; real addr-spec is the attacker's
+    spoof = _mk_msg(subject="Re: 🧭 Repo proposals — week of 2026-07-01",
+                    frm='"zachlowden1@gmail.com" <attacker@evil.com>', body="x", in_reply_to="<a>")
+    assert feedback._is_reply_from_owner(spoof) is False

@@ -120,8 +120,11 @@ def _is_reply_from_owner(msg: Message) -> bool:
     In-Reply-To/References). The subject-core match already scoped us to the digest thread;
     this rejects the ORIGINAL digest (Zach→Zach, but no Re:/In-Reply-To) so we don't feed
     the model its own prior output as "feedback"."""
-    frm = _decode(msg.get("From")).lower()
-    if email_send.OWNER_EMAIL.lower() not in frm:
+    from email.utils import parseaddr
+    # EXACT addr-spec match (not substring) — a display-name or lookalike domain
+    # containing the address (e.g. `zachlowden1@gmail.com.evil.com`) must NOT pass.
+    frm_addr = parseaddr(_decode(msg.get("From")))[1].strip().lower()
+    if frm_addr != email_send.OWNER_EMAIL.lower():
         return False
     subj = _decode(msg.get("Subject")).strip().lower()
     is_re = subj.startswith("re:")
@@ -165,7 +168,11 @@ def strip_quoted(body: str) -> str:
     for raw in (body or "").splitlines():
         line = raw.rstrip()
         if _ATTRIBUTION_RE.match(line):
-            break
+            # SKIP the attribution line but keep scanning — do NOT cut here, or a
+            # bottom-posted reply (quote first, new text below) loses everything.
+            # Gmail >-prefixes every quoted line, so the quote itself is dropped below;
+            # only the (unprefixed) attribution needs removing.
+            continue
         if line.strip() == "--":  # signature delimiter (some clients omit the trailing space)
             break
         if line.lstrip().startswith(">"):
