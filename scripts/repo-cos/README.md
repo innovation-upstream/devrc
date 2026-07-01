@@ -27,6 +27,7 @@ shrinks the corpus, then the LLM runs on the small survivor set.
 | Stage | Module | What | Cost |
 |-------|--------|------|------|
 | 0 | `feedback.py` | pull Zach's IMAP reply to LAST digest → synthesis context | none |
+| 0.5 | `exclusions.py` | parse that reply → **HARD** repo-level exclusions (deterministic) | none |
 | 1 | `prescan.py` | cheap grep/git signals, capped **per repo** | none |
 | 2 | `llm.py` | OpenRouter clusters survivors → ranked JSON proposals | one call |
 | 3 | `digest.py` | one formatter shared by stdout **and** email | none |
@@ -69,6 +70,38 @@ anti-slop rules still fully apply.
   different subject (or you compose fresh instead of replying), it won't be found. The
   loop closes naturally because each run persists its own subject → next run's "previous".
 
+## Deterministic repo-exclusion layer (Stage 0.5) — `exclusions.py`
+
+Context-injection alone proved **too weak**: a reply that said `1. this project is paused
+/ … / 5. we are not the code owner for that repo` was *ignored* — the model re-proposed
+the exact paused repos. So a reply that scopes out a repo now becomes a **HARD,
+DETERMINISTIC filter** (no LLM) that DROPS those repos from the scan before synthesis ever
+runs — they **cannot reappear**. (The context-injection above is kept for nuance; this
+*adds* the hard layer.)
+
+- **Positional mapping (primary):** a line starting `N.` / `N)` / `N -` / `#N` / `N:` maps
+  to proposal **N** in the digest you actually saw → that proposal's repo.
+- **Keyword intent (deterministic set):** `paused / skip / ignore / stop / drop / remove /
+  don't / do not / won't / leave it / not (mine|ours|relevant|interested) / no / archived /
+  deprecated` → **exclude**. `not (the|code) owner` / `deprecated` / `archived` → the
+  exclusion is **permanent** (vs. `paused`, which is undoable). `resume / unpause /
+  un-exclude / re-enable / reactivate / bring back / … again` + a repo ref → **resume**
+  (un-exclude).
+- **Name mentions:** a reply naming a repo/alias (`kubeclaw`, `civitai`, `homelab`,
+  `datapacket`, …) with an exclude/resume intent applies even without a position number.
+- **Position source = the digest you SAW, not `latest.json`.** Proposals rotate run-to-run
+  and every run overwrites `latest.json`, so `--email` also writes **`last_emailed.json`**
+  (the emailed set). `parse_reply` maps `1./2./…` against `last_emailed.json` → else the
+  newest `history/*.json` with `emailed:true` → else `latest.json`.
+- **State:** `~/.config/repo-cos/exclusions.json` (`{repos:{<name>:{reason, excluded_at,
+  permanent, source}}}`) — **hand-editable**. Robust to a missing/corrupt file (→ empty).
+- **Visibility + undo:** excluded repos are surfaced as a digest footer (`Excluded
+  (paused/not-yours): … — reply "resume <repo>" to re-enable.`). `--show-exclusions` prints
+  the current state and exits; `--no-feedback` skips the reply parse too.
+- **Limits:** the keyword set is finite — a reply that's *pure prose* with no positional
+  anchor and no repo name won't exclude anything (it still reaches the LLM as context).
+  Unparseable lines are ignored and never raise.
+
 ## Usage
 
 ```sh
@@ -90,8 +123,9 @@ nix-shell -p 'python3.withPackages(p:[p.requests])' --run \
 ```
 
 Flags: `--dry-run` (default), `--email`, `--no-llm`/`--candidates-only`, `--no-feedback`
-(skip Stage 0), `--repos`, `--limit-candidates N` (default 60), `--top N` (default 5),
-`--model` (default `deepseek/deepseek-v4-flash`), `--json`.
+(skip Stage 0 **and** the exclusion parse), `--show-exclusions` (print exclusion state +
+exit), `--repos`, `--limit-candidates N` (default 60), `--top N` (default 5), `--model`
+(default `deepseek/deepseek-v4-flash`), `--json`.
 
 The weekly unit / `run-weekly.sh` need **no change**: `feedback.py` uses only stdlib
 `imaplib` (already available) and the SAME app-password already decrypted for SMTP send —
