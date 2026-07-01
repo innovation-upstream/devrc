@@ -147,3 +147,35 @@ def test_synthesize_requires_api_key(monkeypatch):
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
     with pytest.raises(RuntimeError):
         llm.synthesize([{"kind": "marker", "ref": "x:1", "text": "t"}], _caller=lambda *a, **k: GOOD)
+
+
+def test_ref_known_rejects_bare_prefix():
+    # The audit's case: a bare repo name / truncated path must NOT validate, or the
+    # "drop invented refs" anti-slop guarantee is hollow.
+    valid = {"devrc/scripts/a.py:12"}
+    assert not llm._ref_known("devrc", valid)
+    assert not llm._ref_known("devrc/scripts", valid)
+    assert not llm._ref_known("d", valid)
+    # exact + line-drop still accepted
+    assert llm._ref_known("devrc/scripts/a.py:12", valid)
+    assert llm._ref_known("devrc/scripts/a.py", valid)
+
+
+def test_synthesize_retries_past_empty():
+    # DeepSeek rotates even at temp=0 → a valid-but-empty result should be re-rolled
+    # while candidates exist, returning the first non-empty synthesis.
+    seq = ['{"proposals": []}', GOOD]
+    def flaky(model, system, user, api_key, timeout=90.0):
+        return seq.pop(0)
+    cands = [{"kind": "marker", "ref": "devrc/scripts/a.py:12", "text": "t"}]
+    res = llm.synthesize(cands, top=5, api_key="k", _caller=flaky)
+    assert len(res.proposals) == 1
+    assert seq == []  # both calls consumed → it re-rolled past the empty
+
+
+def test_synthesize_returns_honest_empty_after_all_empty():
+    def always_empty(model, system, user, api_key, timeout=90.0):
+        return '{"proposals": []}'
+    cands = [{"kind": "marker", "ref": "devrc/scripts/a.py:12", "text": "t"}]
+    res = llm.synthesize(cands, top=5, api_key="k", _caller=always_empty)
+    assert res.proposals == []  # honest empty after retries — not an exception

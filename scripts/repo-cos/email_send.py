@@ -20,6 +20,7 @@ from __future__ import annotations
 import os
 import shutil
 import smtplib
+import ssl
 import subprocess
 import tempfile
 from email.message import EmailMessage
@@ -110,7 +111,9 @@ def _smtp_send(msg: EmailMessage, *, user: str, password: str,
                host: str = SMTP_HOST, port: int = SMTP_PORT) -> None:
     """Isolated network send — mocked in tests."""
     with smtplib.SMTP(host, port, timeout=30) as smtp:
-        smtp.starttls()
+        # Verify the server cert + hostname — a bare starttls() uses an unverified
+        # context (CERT_NONE), letting an on-path attacker capture the app-password.
+        smtp.starttls(context=ssl.create_default_context())
         smtp.login(user, password)
         smtp.send_message(msg)
 

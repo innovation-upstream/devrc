@@ -159,18 +159,14 @@ def parse_proposals(text: str, *, top: int, valid_refs: set[str] | None = None) 
 
 
 def _ref_known(ref: str, valid_refs: set[str]) -> bool:
-    """A model ref counts as valid if it exactly matches a candidate ref, OR the
-    candidate ref starts with it (model may drop the :line), OR vice-versa. Tolerant
-    but still anchored to a real candidate path."""
+    """A model ref is valid ONLY if it exactly matches a candidate ref, or matches a
+    candidate's file PATH exactly (the model may drop/alter the `:line`). No prefix
+    matching — a bare repo name or truncated path must NOT pass, or the "drop invented
+    refs" anti-slop guarantee is hollow (a model could cite `devrc` and survive)."""
     if ref in valid_refs:
         return True
-    for v in valid_refs:
-        if v == ref or v.startswith(ref) or ref.startswith(v):
-            return True
-        # match on the path portion (ignore line numbers on both sides)
-        if v.split(":", 1)[0] == ref.split(":", 1)[0]:
-            return True
-    return False
+    ref_path = ref.split(":", 1)[0]
+    return any(v.split(":", 1)[0] == ref_path for v in valid_refs)
 
 
 def build_user_prompt(candidates: list[dict], *, top: int) -> str:
@@ -227,10 +223,13 @@ def synthesize(
     api_key: str | None = None,
     _caller=_call_openrouter,
 ) -> Synthesis:
-    """Run one synthesis call with a single malformed-output retry. `_caller` injectable.
+    """Synthesize proposals, retrying on malformed OR empty output. `_caller` injectable.
 
-    `candidates` are candidate dicts (from Candidate.as_dict); each must have `kind`,
-    `ref`, `text`. Returns a Synthesis (proposals + approx token count).
+    DeepSeek rotates its output even at temperature=0, so an identical candidate set
+    can yield 4-5 good proposals one call and 0 the next. Retrying up to 3× when there
+    ARE candidates kills that empty-tail (a weekly digest should not be blank while real
+    signals exist); we still emit an honest empty result if the model surfaces nothing
+    across every attempt. `candidates` are candidate dicts (kind/ref/text).
     """
     model = model or os.environ.get("REPO_COS_MODEL", DEFAULT_MODEL)
     api_key = api_key or os.environ.get("OPENROUTER_API_KEY")
@@ -242,11 +241,18 @@ def synthesize(
     approx = _approx_tokens(system) + _approx_tokens(user)
 
     last_err: Exception | None = None
-    for _ in range(2):  # one retry on malformed output
+    last_ok: list | None = None
+    attempts = 3 if valid_refs else 1  # only worth re-rolling when candidates exist
+    for _ in range(attempts):
         raw = _caller(model, system, user, api_key)
         try:
             props = parse_proposals(raw, top=top, valid_refs=valid_refs)
-            return Synthesis(proposals=props, approx_prompt_tokens=approx, model=model)
         except SynthesisError as exc:
             last_err = exc
-    raise SynthesisError(f"model output invalid after retry: {last_err}")
+            continue
+        if props:  # non-empty — done
+            return Synthesis(proposals=props, approx_prompt_tokens=approx, model=model)
+        last_ok = props  # valid but empty — re-roll, but remember it
+    if last_ok is not None:  # genuinely nothing surfaced after every attempt
+        return Synthesis(proposals=last_ok, approx_prompt_tokens=approx, model=model)
+    raise SynthesisError(f"model output invalid after {attempts} attempt(s): {last_err}")
