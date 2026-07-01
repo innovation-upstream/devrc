@@ -569,4 +569,44 @@ in
       WantedBy = [ "timers.target" ];
     };
   };
+
+  # Repo chief-of-staff — WEEKLY: deterministic scan of Zach's repos for improvement
+  # signals (TODO/FIXME, skipped tests, `latest` tags, churn, large files) → cheap LLM
+  # synthesis (OpenRouter) → ranked proposal digest EMAILED to his Gmail. The "agents
+  # bring me ideas" experiment (scripts/repo-cos/, `run-weekly.sh` wrapper).
+  #
+  # WORKBENCH-ONLY (serverMode): the full repo set (incl. the civitai client repos)
+  # lives here, and the OpenRouter key + SOPS age key are here. Minimal user-unit env,
+  # so PATH needs nix (nix-shell) + git + rg + coreutils, and NIX_PATH so `nix-shell -p`
+  # resolves <nixpkgs>. Creds are loaded by the wrapper, never in the nix store.
+  systemd.user.services.repo-cos = lib.mkIf serverMode {
+    Unit = {
+      Description = "Repo chief-of-staff — weekly repo-scan → LLM proposals → email digest";
+      After = [ "network-online.target" ];
+      Wants = [ "network-online.target" ];
+    };
+    Service = {
+      Type = "oneshot";
+      Environment = [
+        "PATH=${lib.makeBinPath [ pkgs.nix pkgs.git pkgs.ripgrep pkgs.bash pkgs.coreutils pkgs.gnused pkgs.gnugrep ]}"
+        "NIX_PATH=nixpkgs=/nix/var/nix/profiles/per-user/root/channels/nixos"
+        "HOME=%h"
+      ];
+      ExecStart = "${pkgs.bash}/bin/bash %h/workspace/devrc/scripts/repo-cos/run-weekly.sh";
+      X-Restart-Triggers = [ "${../scripts/repo-cos/run-weekly.sh}" ];
+    };
+  };
+
+  systemd.user.timers.repo-cos = lib.mkIf serverMode {
+    Unit = {
+      Description = "Weekly timer for the repo chief-of-staff proposal digest";
+    };
+    Timer = {
+      OnCalendar = "Mon *-*-* 08:00:00";
+      Persistent = true;
+    };
+    Install = {
+      WantedBy = [ "timers.target" ];
+    };
+  };
 }
