@@ -76,3 +76,32 @@ def test_default_flags():
     assert args.top == 5
     assert args.limit_candidates == 60
     assert args.model == "deepseek/deepseek-v4-flash"
+
+
+class _FakeProp:
+    def __init__(self, title):
+        self._t = title
+    def as_dict(self):
+        return {"title": self._t, "evidence": ["r/f.py:1"]}
+
+
+def test_persist_latest_writes_readable_json(tmp_path, monkeypatch):
+    # another session reads latest.json → it must exist with the exact proposals + flag
+    monkeypatch.setattr(scan, "PERSIST_DIR", tmp_path)
+    scan._persist_latest([_FakeProp("fix the thing")], subject="🧭 test",
+                         candidate_count=3, approx_tokens=42, emailed=True)
+    import json
+    latest = json.loads((tmp_path / "latest.json").read_text())
+    assert latest["emailed"] is True
+    assert latest["candidate_count"] == 3
+    assert latest["proposals"][0]["title"] == "fix the thing"
+    assert "generated_at" in latest
+    # a dated history copy is also written
+    hist = list((tmp_path / "history").glob("*.json"))
+    assert len(hist) == 1
+
+
+def test_persist_latest_never_raises(monkeypatch):
+    # best-effort: an unwritable dir must not crash the run
+    monkeypatch.setattr(scan, "PERSIST_DIR", Path("/proc/nonexistent/repo-cos"))
+    scan._persist_latest([], subject="s", candidate_count=0, approx_tokens=0, emailed=False)

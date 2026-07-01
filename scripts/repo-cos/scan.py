@@ -34,11 +34,13 @@ Env:
   REPO_COS_MODEL       overrides --model default.
   REPO_COS_SMTP_USER / REPO_COS_SMTP_PASSWORD  optional SMTP cred override (else SOPS).
 
-## Step 2 (NOT built yet)
-A weekly, serverMode-gated workbench systemd user timer (mirroring `mail-actions-archive`)
-would run `scan.py --email` every Monday. It is deliberately NOT wired: we validate
-signal quality on a manual `--dry-run` first, then add the timer + home-manager unit in a
-follow-up once the proposals prove worth an inbox slot.
+Persistence: EVERY run writes its proposals to `~/.config/repo-cos/latest.json` (+ a
+dated copy under `history/`) with an `emailed` flag — so another session can read the
+exact set and evaluate it collaboratively without re-running the (rotating) LLM.
+
+Schedule: LIVE — a weekly serverMode-gated workbench systemd user timer (`repo-cos.timer`,
+Mon 08:00, mirrors `mail-actions-archive`) runs `scan.py --email` via the committed
+wrapper `run-weekly.sh`. Check `systemctl --user list-timers | grep repo-cos`.
 """
 from __future__ import annotations
 
@@ -71,6 +73,10 @@ DEFAULT_REPOS = [
 DEFAULT_LIMIT_CANDIDATES = 60
 DEFAULT_TOP = 5
 DEFAULT_MODEL = "deepseek/deepseek-v4-flash"
+
+# Every run persists its proposals here so ANOTHER session can read the exact set
+# that was generated/emailed and evaluate it — without re-running the (rotating) LLM.
+PERSIST_DIR = Path("~/.config/repo-cos").expanduser()
 
 
 def resolve_repos(override: str | None) -> list[str]:
@@ -180,15 +186,44 @@ def _deliver(body: str, args, *, proposals, candidate_count, approx_tokens) -> i
     else:
         print(body)
 
+    emailed = False
+    rc = 0
     if args.email:
         import email_send
         try:
             to = email_send.send_digest(subject=digest.subject(), body=body)
             print(f"\n  emailed digest → {to}", file=sys.stderr)
+            emailed = True
         except Exception as exc:  # noqa: BLE001
             print(f"ERROR: email send failed: {exc}", file=sys.stderr)
-            return 1
-    return 0
+            rc = 1
+
+    _persist_latest(proposals, subject=digest.subject(), candidate_count=candidate_count,
+                    approx_tokens=approx_tokens, emailed=emailed)
+    return rc
+
+
+def _persist_latest(proposals, *, subject, candidate_count, approx_tokens, emailed) -> None:
+    """Write this run's proposals to ~/.config/repo-cos/latest.json (+ a dated history
+    copy) so another session can read the EXACT set (not a re-rolled LLM call) and
+    evaluate it collaboratively. Best-effort — never fails the run."""
+    from datetime import datetime
+    try:
+        (PERSIST_DIR / "history").mkdir(parents=True, exist_ok=True)
+        now = datetime.now().astimezone()
+        payload = {
+            "generated_at": now.isoformat(timespec="seconds"),
+            "emailed": emailed,
+            "subject": subject,
+            "candidate_count": candidate_count,
+            "approx_prompt_tokens": approx_tokens,
+            "proposals": [p.as_dict() for p in proposals],
+        }
+        data = json.dumps(payload, indent=2)
+        (PERSIST_DIR / "latest.json").write_text(data)
+        (PERSIST_DIR / "history" / f"{now.strftime('%Y%m%d-%H%M%S')}.json").write_text(data)
+    except Exception as exc:  # noqa: BLE001
+        print(f"  ! could not persist proposals: {exc}", file=sys.stderr)
 
 
 def build_parser() -> argparse.ArgumentParser:
