@@ -330,7 +330,7 @@ def apply(state: dict, parsed: dict, *, source: str = "reply",
     ts = now or datetime.now().astimezone().isoformat(timespec="seconds")
 
     for entry in parsed.get("exclude", []):
-        key = str(entry.get("repo") or "").strip()
+        key = _canon_key(entry.get("repo"))
         if not key:
             continue
         prev = repos.get(key) or {}
@@ -344,9 +344,22 @@ def apply(state: dict, parsed: dict, *, source: str = "reply",
         }
 
     for key in parsed.get("resume", []):
-        repos.pop(str(key).strip(), None)
+        repos.pop(_canon_key(key), None)
 
     return state
+
+
+def _canon_key(ref) -> str:
+    """Canonical exclusion key = the repo BASENAME, so the same repo referenced as a bare
+    name, a `~/…` path, or an absolute path all collapse to ONE entry (was creating dup
+    keys like both `kubeclaw-cloud` and `~/workspace/kubeclaw-cloud`). Basename is unique
+    across ~/workspace and is what `resume <name>` / --show-exclusions use."""
+    ref = str(ref or "").strip()
+    if not ref:
+        return ""
+    if "/" in ref or ref.startswith("~"):
+        return os.path.basename(os.path.normpath(os.path.expanduser(ref)))
+    return ref
 
 
 def filter_repos(repos: list[str], state: dict) -> tuple[list[str], list[str]]:

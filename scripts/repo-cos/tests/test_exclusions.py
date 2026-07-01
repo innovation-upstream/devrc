@@ -219,6 +219,19 @@ def test_apply_permanent_sticks_across_refresh():
     assert state["repos"]["r"]["permanent"] is True
 
 
+def test_apply_normalizes_keys_no_duplicates():
+    # the SAME repo referenced as a bare name AND a ~/…/absolute path must collapse to ONE
+    # entry (was creating both `kubeclaw-cloud` and `~/workspace/kubeclaw-cloud`).
+    state = {"repos": {}}
+    exclusions.apply(state, {"exclude": [{"repo": "kubeclaw-cloud", "reason": "a"}], "resume": []})
+    exclusions.apply(state, {"exclude": [{"repo": "~/workspace/kubeclaw-cloud", "reason": "b"}], "resume": []})
+    exclusions.apply(state, {"exclude": [{"repo": "/home/zach/workspace/kubeclaw-cloud"}], "resume": []})
+    assert list(state["repos"].keys()) == ["kubeclaw-cloud"]  # one canonical key
+    # resume via a path form also clears the basename entry
+    exclusions.apply(state, {"exclude": [], "resume": ["~/workspace/kubeclaw-cloud"]})
+    assert state["repos"] == {}
+
+
 # ---- load_last_emailed resolution order ---------------------------------------------
 
 def test_load_last_emailed_prefers_last_emailed_file(tmp_path):
