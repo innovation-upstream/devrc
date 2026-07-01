@@ -105,3 +105,123 @@ def test_persist_latest_never_raises(monkeypatch):
     # best-effort: an unwritable dir must not crash the run
     monkeypatch.setattr(scan, "PERSIST_DIR", Path("/proc/nonexistent/repo-cos"))
     scan._persist_latest([], subject="s", candidate_count=0, approx_tokens=0, emailed=False)
+
+
+# ---- REPLY-FEEDBACK wiring (feedback + llm mocked; no network) ----------------------
+
+class _RealishProp:
+    def __init__(self, title):
+        self.title, self.repo = title, "r"
+        self.evidence, self.why = ["r/f.py:1"], "w"
+        self.effort, self.approach, self.ci_verifiable = "S", "a", True
+
+    def as_dict(self):
+        return {"title": self.title, "repo": self.repo, "evidence": self.evidence,
+                "why": self.why, "effort": self.effort, "approach": self.approach,
+                "ci_verifiable": self.ci_verifiable}
+
+
+def _prime_llm_path(tmp_path, monkeypatch):
+    """Set up a repo with a real candidate + an API key + persist redirect so cmd_scan
+    reaches the LLM branch. Returns the sentinel feedback object the fake fetch yields."""
+    _write(tmp_path, "a.py", "# TODO fix the thing\n")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "k")
+    monkeypatch.setattr(scan, "PERSIST_DIR", tmp_path / "state")
+
+
+def test_scan_wires_feedback_into_synthesize(tmp_path, monkeypatch):
+    _prime_llm_path(tmp_path, monkeypatch)
+    import feedback as feedback_mod
+    import llm
+
+    sentinel = object()
+    monkeypatch.setattr(feedback_mod, "fetch_last_feedback", lambda: sentinel)
+
+    seen = {}
+
+    def fake_synth(cands, *, top, model, feedback=None):
+        seen["feedback"] = feedback
+        return llm.Synthesis(proposals=[_RealishProp("do it")], approx_prompt_tokens=10)
+
+    monkeypatch.setattr(llm, "synthesize", fake_synth)
+
+    args = scan.build_parser().parse_args(["--json", "--repos", str(tmp_path)])
+    rc = scan.cmd_scan(args)
+    assert rc == 0
+    assert seen["feedback"] is sentinel  # feedback was fetched AND passed through
+
+
+def test_scan_json_reports_feedback_applied(tmp_path, monkeypatch, capsys):
+    _prime_llm_path(tmp_path, monkeypatch)
+    import feedback as feedback_mod
+    import llm
+
+    monkeypatch.setattr(feedback_mod, "fetch_last_feedback", lambda: object())
+    monkeypatch.setattr(llm, "synthesize", lambda cands, *, top, model, feedback=None:
+                        llm.Synthesis(proposals=[_RealishProp("x")], approx_prompt_tokens=1))
+
+    args = scan.build_parser().parse_args(["--json", "--repos", str(tmp_path)])
+    scan.cmd_scan(args)
+    import json
+    data = json.loads(capsys.readouterr().out)
+    assert data["feedback_applied"] is True
+
+
+def test_scan_no_feedback_flag_skips_fetch(tmp_path, monkeypatch, capsys):
+    _prime_llm_path(tmp_path, monkeypatch)
+    import feedback as feedback_mod
+    import llm
+
+    called = {"fetch": False}
+
+    def spy_fetch():
+        called["fetch"] = True
+        return object()
+
+    monkeypatch.setattr(feedback_mod, "fetch_last_feedback", spy_fetch)
+
+    seen = {}
+
+    def fake_synth(cands, *, top, model, feedback=None):
+        seen["feedback"] = feedback
+        return llm.Synthesis(proposals=[_RealishProp("y")], approx_prompt_tokens=1)
+
+    monkeypatch.setattr(llm, "synthesize", fake_synth)
+
+    args = scan.build_parser().parse_args(
+        ["--no-feedback", "--json", "--repos", str(tmp_path)])
+    scan.cmd_scan(args)
+    assert called["fetch"] is False       # fetch skipped
+    assert seen["feedback"] is None       # synthesize got no feedback
+    import json
+    data = json.loads(capsys.readouterr().out)
+    assert data["feedback_applied"] is False
+
+
+def test_scan_feedback_fetch_failure_proceeds(tmp_path, monkeypatch):
+    # a raising fetch must not crash the run — synthesis proceeds with feedback=None.
+    _prime_llm_path(tmp_path, monkeypatch)
+    import feedback as feedback_mod
+    import llm
+
+    def boom():
+        raise RuntimeError("imap exploded")
+    monkeypatch.setattr(feedback_mod, "fetch_last_feedback", boom)
+
+    seen = {}
+
+    def fake_synth(cands, *, top, model, feedback=None):
+        seen["feedback"] = feedback
+        return llm.Synthesis(proposals=[_RealishProp("z")], approx_prompt_tokens=1)
+
+    monkeypatch.setattr(llm, "synthesize", fake_synth)
+
+    args = scan.build_parser().parse_args(["--json", "--repos", str(tmp_path)])
+    rc = scan.cmd_scan(args)
+    assert rc == 0
+    assert seen["feedback"] is None
+
+
+def test_no_feedback_flag_default_false():
+    args = scan.build_parser().parse_args([])
+    assert args.no_feedback is False

@@ -179,3 +179,61 @@ def test_synthesize_returns_honest_empty_after_all_empty():
     cands = [{"kind": "marker", "ref": "devrc/scripts/a.py:12", "text": "t"}]
     res = llm.synthesize(cands, top=5, api_key="k", _caller=always_empty)
     assert res.proposals == []  # honest empty after retries — not an exception
+
+
+# ---- REPLY-FEEDBACK injection -------------------------------------------------------
+
+class _FakeFeedback:
+    def __init__(self, reply_text, prev):
+        self.reply_text = reply_text
+        self._prev = prev
+        self.replied_at = "2026-07-01T08:00:00-05:00"
+
+    def prev_summary(self):
+        return self._prev
+
+
+def test_synthesize_injects_feedback_block_into_user_prompt():
+    captured = {}
+
+    def caller(model, system, user, api_key, timeout=90.0):
+        captured["user"] = user
+        return GOOD
+
+    fb = _FakeFeedback(
+        reply_text="Drop the civitai 3D one, focus on kubeclaw test fixes.",
+        prev=["Implement report modal for Model3D in civitai — civitai/x.md:103"],
+    )
+    cands = [{"kind": "marker", "ref": "devrc/scripts/a.py:12", "text": "TODO fix"}]
+    llm.synthesize(cands, top=5, api_key="k", feedback=fb, _caller=caller)
+    user = captured["user"]
+    assert "LAST WEEK'S FEEDBACK" in user
+    assert "Drop the civitai 3D one, focus on kubeclaw test fixes." in user
+    assert "Implement report modal for Model3D in civitai — civitai/x.md:103" in user
+    assert "do NOT re-propose what they rejected" in user
+    # feedback block is prepended BEFORE the new candidates
+    assert user.index("LAST WEEK'S FEEDBACK") < user.index("devrc/scripts/a.py:12")
+    # evidence requirement is preserved (still asked to cite file:line)
+    assert "file:line evidence" in user
+
+
+def test_synthesize_no_feedback_prompt_unchanged():
+    captured = {}
+
+    def caller(model, system, user, api_key, timeout=90.0):
+        captured["user"] = user
+        return GOOD
+
+    cands = [{"kind": "marker", "ref": "devrc/scripts/a.py:12", "text": "TODO fix"}]
+    llm.synthesize(cands, top=5, api_key="k", _caller=caller)
+    user = captured["user"]
+    assert "LAST WEEK'S FEEDBACK" not in user
+    # matches the stateless build_user_prompt exactly
+    assert user == llm.build_user_prompt(cands, top=5)
+
+
+def test_build_feedback_block_handles_missing_prev():
+    fb = _FakeFeedback(reply_text="just steer generally", prev=[])
+    block = llm.build_feedback_block(fb)
+    assert "just steer generally" in block
+    assert "previous proposals unavailable" in block
