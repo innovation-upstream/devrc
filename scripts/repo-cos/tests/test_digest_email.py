@@ -74,7 +74,7 @@ def test_send_digest_uses_injected_sender_and_creds():
         sent["to"] = msg["To"]
 
     to = email_send.send_digest(
-        subject="🧭 test", body="hello", to_addr="z@y.com",
+        subject="🧭 test", body="hello", to_addr="z@y.com", mode="gmail",
         _sender=fake_sender, _creds=fake_creds,
     )
     assert to == "z@y.com"
@@ -98,6 +98,121 @@ def test_send_digest_propagates_sender_failure():
 
     with pytest.raises(email_send.EmailError):
         email_send.send_digest(
-            subject="s", body="b",
+            subject="s", body="b", mode="gmail",
             _sender=boom, _creds=lambda: ("u", "p"),
         )
+
+
+# ---- relay send path (DEFAULT) ------------------------------------------------
+
+def test_build_message_sets_reply_to():
+    msg = email_send.build_message(
+        subject="s", body="b", from_addr="repo-cos@mail.zacx.dev",
+        to_addr="z@y.com", reply_to="repo-cos@inbox.zacx.dev")
+    assert msg["Reply-To"] == "repo-cos@inbox.zacx.dev"
+
+
+def test_relay_is_default_and_sets_headers(monkeypatch):
+    # No REPO_COS_SEND → relay path. Capture the message handed to the relay sender.
+    monkeypatch.delenv("REPO_COS_SEND", raising=False)
+    monkeypatch.delenv("REPO_COS_FROM", raising=False)
+    monkeypatch.delenv("REPO_COS_REPLY_TO", raising=False)
+    captured = {}
+
+    def fake_relay(msg):
+        captured["from"] = msg["From"]
+        captured["to"] = msg["To"]
+        captured["reply_to"] = msg["Reply-To"]
+        captured["subject"] = msg["Subject"]
+
+    to = email_send.send_digest(
+        subject="🧭 test", body="hello", to_addr="z@y.com", _relay=fake_relay)
+    assert to == "z@y.com"
+    assert captured["from"] == email_send.DEFAULT_FROM  # repo-cos@mail.zacx.dev
+    assert "mail.zacx.dev" in captured["from"]
+    assert captured["reply_to"] == "repo-cos@inbox.zacx.dev"
+    assert captured["to"] == "z@y.com"
+    assert captured["subject"] == "🧭 test"
+
+
+def test_relay_env_overrides_from_and_reply_to(monkeypatch):
+    monkeypatch.setenv("REPO_COS_FROM", "custom <cos@mail.zacx.dev>")
+    monkeypatch.setenv("REPO_COS_REPLY_TO", "reply@inbox.zacx.dev")
+    captured = {}
+
+    def fake_relay(msg):
+        captured["from"] = msg["From"]
+        captured["reply_to"] = msg["Reply-To"]
+
+    email_send.send_digest(subject="s", body="b", mode="relay", _relay=fake_relay)
+    assert captured["from"] == "custom <cos@mail.zacx.dev>"
+    assert captured["reply_to"] == "reply@inbox.zacx.dev"
+
+
+def test_gmail_mode_uses_gmail_path_not_relay(monkeypatch):
+    monkeypatch.setenv("REPO_COS_SEND", "gmail")
+    monkeypatch.delenv("REPO_COS_REPLY_TO", raising=False)
+    used = {"relay": False, "gmail": False}
+
+    def fake_relay(msg):
+        used["relay"] = True
+
+    def fake_sender(msg, *, user, password, host=None, port=None):
+        used["gmail"] = True
+        used["reply_to"] = msg["Reply-To"]
+
+    email_send.send_digest(
+        subject="s", body="b",
+        _relay=fake_relay, _sender=fake_sender, _creds=lambda: ("u@g", "pw"))
+    assert used["gmail"] is True
+    assert used["relay"] is False
+    # Reply-To is set on the gmail path too → replies still route to inbox.zacx.dev
+    assert used["reply_to"] == "repo-cos@inbox.zacx.dev"
+
+
+def test_unknown_send_mode_raises():
+    with pytest.raises(email_send.EmailError):
+        email_send.send_digest(subject="s", body="b", mode="carrier-pigeon")
+
+
+def test_relay_send_uses_unverified_starttls(monkeypatch):
+    # The relay presents a mail.zacx.dev cert but we hit 127.0.0.1 → hostname-verify OFF.
+    # Assert the SMTP.starttls context is CERT_NONE (mock out the port-forward + smtplib).
+    import ssl as _ssl
+
+    class FakePF:
+        stderr = None
+        def poll(self):
+            return None
+        def terminate(self):
+            pass
+        def wait(self, timeout=None):
+            return 0
+
+    class FakeSMTP:
+        def __init__(self, host, port, timeout=None):
+            self.started = None
+            self.sent = None
+        def starttls(self, context=None):
+            self.started = context
+        def send_message(self, msg):
+            self.sent = msg
+        def quit(self):
+            pass
+
+    fake_smtp = FakeSMTP("127.0.0.1", 1)
+    monkeypatch.setattr(email_send.subprocess, "Popen", lambda *a, **k: FakePF())
+    monkeypatch.setattr(email_send, "_wait_for_port", lambda *a, **k: None)
+    monkeypatch.setattr(email_send.smtplib, "SMTP", lambda *a, **k: fake_smtp)
+    # PROD_KUBECONFIG.exists() must pass — point it at a file we know exists (this test).
+    monkeypatch.setattr(email_send, "PROD_KUBECONFIG", Path(__file__))
+
+    msg = email_send.build_message(
+        subject="s", body="b", from_addr="repo-cos@mail.zacx.dev",
+        to_addr="z@y.com", reply_to="repo-cos@inbox.zacx.dev")
+    email_send._relay_send(msg)
+
+    assert isinstance(fake_smtp.started, _ssl.SSLContext)
+    assert fake_smtp.started.check_hostname is False
+    assert fake_smtp.started.verify_mode == _ssl.CERT_NONE
+    assert fake_smtp.sent is msg

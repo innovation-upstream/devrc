@@ -2,23 +2,30 @@
 """REPLY-FEEDBACK loop — pull Zach's emailed reply to the LAST digest, so the NEXT run
 can feed his steering into synthesis as CONTEXT.
 
-The digest goes out Zach→Zach (zachlowden1@gmail.com), so his reply lands in his OWN
-Gmail. We read it back over IMAP with the SAME Gmail app-password repo-cos already uses
-for SMTP send (`email_send.load_credentials()` → SOPS `mailbox-gmail-imap`). NO new deps
-(imaplib is stdlib), NO homelab-cluster / Postgres / kubectl path.
+TWO reply sources, selected by REPO_COS_REPLY_SRC (default `postgres`):
 
-Design contract:
-  * BEST-EFFORT + SAFE. Any failure — no creds, IMAP down, no reply found, parse error —
+  * postgres  (DEFAULT) — read the reply from Zach's OWN infra. The digest asks for
+    replies at `repo-cos@inbox.zacx.dev`; his reply routes Gmail→his MX→mail-receiver→
+    the homelab Postgres `mail` table. We query for the most-recent row where
+    `'repo-cos@inbox.zacx.dev' = ANY(to_addrs)` AND `from_addr ILIKE '%zachlowden1@gmail.com%'`
+    AND `received_at > <last-digest generated_at>`. That query IS the ownership gate
+    (from=Zach, to=repo-cos@inbox). `text_body` is already plain-text from the receiver,
+    so we only strip the quoted reply history. Reuses the mail-actions DB helper
+    (`scripts/mail-actions/_db.py`: kubectl port-forward + psycopg2 + DSN-from-secret,
+    homelab cluster).
+
+  * imap  (FALLBACK) — the original path: read Zach's reply to a Zach→Zach digest out of
+    his OWN Gmail over IMAP with the SAME Gmail app-password repo-cos's gmail send path
+    uses (SOPS `mailbox-gmail-imap`). Selectable via REPO_COS_REPLY_SRC=imap; NO homelab
+    cluster / Postgres / kubectl. Only relevant if the digest was sent via REPO_COS_SEND=gmail.
+
+Design contract (BOTH sources):
+  * BEST-EFFORT + SAFE. Any failure — no creds, source down, no reply found, parse error —
     is logged to stderr and returns None. This NEVER crashes the weekly run.
-  * The previous digest's `subject` + `generated_at` come from ~/.config/repo-cos/latest.json
-    (missing → no prior digest → return None).
-  * Matching is robust to Gmail quirks: we SEARCH on the ASCII-stable subject core
-    (`digest.SUBJECT_CORE`, e.g. "Repo proposals") — the full subject's emoji + em-dash are
-    non-ASCII and flaky in IMAP SEARCH — restricted to mail SINCE the digest date, then pick
-    the most-recent message that is a genuine REPLY FROM Zach (subject starts "Re:" and/or
-    carries In-Reply-To/References). We look in INBOX and, if needed, "[Gmail]/All Mail".
-  * The reply body is de-quoted: lines starting ">" are dropped, and everything from an
-    "On <date> … wrote:" attribution onward is cut, leaving only Zach's NEW words. Capped.
+  * The previous digest's `subject` + `generated_at` + `proposals` come from
+    ~/.config/repo-cos/latest.json (missing → no prior digest → return None).
+  * The reply body is de-quoted (`strip_quoted`): lines starting ">" dropped, and everything
+    from an "On <date> … wrote:" attribution onward cut, leaving only Zach's NEW words. Capped.
 
 Returned to synthesis: a `Feedback` with the cleaned reply text + the previous proposals
 (title + first evidence ref) so the model can reference exactly what it's steering off.
@@ -28,6 +35,7 @@ from __future__ import annotations
 import email
 import imaplib
 import json
+import os
 import re
 import sys
 from dataclasses import dataclass, field
@@ -51,6 +59,32 @@ ALL_MAIL = "[Gmail]/All Mail"
 MAX_REPLY_CHARS = 4000
 
 PERSIST_LATEST = Path("~/.config/repo-cos/latest.json").expanduser()
+
+# Postgres reply-source coordinates (his infra). The digest's Reply-To is this address;
+# a reply lands as a `mail` row with it in to_addrs[] and Zach's Gmail in from_addr.
+REPLY_TO_ADDR = os.environ.get("REPO_COS_REPLY_TO", "repo-cos@inbox.zacx.dev")
+OWNER_MATCH = "zachlowden1@gmail.com"  # from_addr ILIKE '%<this>%'
+
+
+def _reply_src() -> str:
+    return os.environ.get("REPO_COS_REPLY_SRC", "postgres").strip().lower() or "postgres"
+
+
+def _import_maildb():
+    """Import MailDB from the sibling scripts/mail-actions/_db.py (the shared port-forward
+    + psycopg2 + DSN-from-secret helper). Kept lazy so the IMAP path needs no psycopg2."""
+    # Load by EXPLICIT path via importlib — do NOT put mail-actions on sys.path: it has
+    # its own `llm.py` that would SHADOW repo-cos's `llm.py` (sys.path[0] wins) and break
+    # synthesis with "module 'llm' has no attribute 'synthesize'" (caught live). `_db.py`
+    # imports only stdlib, so a standalone load is safe.
+    import importlib.util
+    db_path = Path(__file__).resolve().parents[1] / "mail-actions" / "_db.py"
+    spec = importlib.util.spec_from_file_location("repo_cos_maildb", db_path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"cannot load {db_path}")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod.MailDB
 
 # "On Mon, 1 Jul 2026 at 08:00, Zach <…> wrote:" — Gmail's quote attribution line. Once we
 # hit it, everything after is quoted history, not Zach's new words. Kept permissive (the
@@ -233,24 +267,68 @@ def _best_reply_in_mailbox(imap: imaplib.IMAP4_SSL, mailbox: str, core: str,
     return None
 
 
-def fetch_last_feedback(*, _creds=None, _imap_factory=None) -> Feedback | None:
-    """Pull Zach's reply to the previous digest as steering CONTEXT for the next synthesis.
-
-    Best-effort: returns None (never raises) if there's no prior digest, no creds, IMAP is
-    unreachable, or no reply is found. `_creds` / `_imap_factory` are injectable for tests
-    (no real network).
-    """
-    last = _load_last_digest()
-    if not last:
-        _log("no previous digest (latest.json missing) — skipping")
+def _parse_generated_at(generated_at: str):
+    """Parse the digest's ISO `generated_at` into a tz-aware datetime for the Postgres
+    `received_at >` bound. None if unparseable (the query then omits the time bound)."""
+    try:
+        dt = datetime.fromisoformat(generated_at)
+    except Exception:  # noqa: BLE001
         return None
-    subject = str(last.get("subject") or "")
-    generated_at = str(last.get("generated_at") or "")
-    prev_proposals = [
-        {"title": p.get("title"), "evidence": p.get("evidence") or []}
-        for p in (last.get("proposals") or []) if isinstance(p, dict)
-    ]
+    if dt.tzinfo is None:
+        dt = dt.astimezone()
+    return dt
 
+
+def _fetch_via_postgres(generated_at: str, *, _maildb=None) -> str | None:
+    """Query the homelab `mail` table for Zach's most-recent reply to repo-cos@inbox.
+
+    The WHERE clause IS the ownership gate: to_addrs contains the Reply-To address AND
+    from_addr is Zach's Gmail AND (if we can parse it) received_at is after the last digest.
+    Returns the de-quoted reply body, or None. Best-effort — any error → None (never raises).
+    `_maildb` is injectable for tests (a context-manager factory yielding an object with a
+    live `.conn`).
+    """
+    try:
+        MailDB = _maildb or _import_maildb()
+    except Exception as exc:  # noqa: BLE001
+        _log(f"postgres helper import failed ({exc}) — skipping")
+        return None
+
+    after = _parse_generated_at(generated_at)
+    # EXACT from_addr match — NOT a substring ILIKE. repo-cos@inbox.zacx.dev is a public
+    # Reply-To, the receiver stores unauthenticated/spoofable From: addr-specs, and a
+    # spoofed reply can drive the deterministic exclusion parser. A substring gate would
+    # let `zachlowden1@gmail.com.evil.com` pass (audit 🔴); mirror the IMAP path's exact gate.
+    sql = (
+        "SELECT text_body FROM mail "
+        "WHERE %s = ANY(to_addrs) "
+        "  AND lower(trim(from_addr)) = %s "
+    )
+    params: list = [REPLY_TO_ADDR, OWNER_MATCH.strip().lower()]
+    if after is not None:
+        sql += "  AND received_at > %s "
+        params.append(after)
+    sql += "ORDER BY received_at DESC LIMIT 1"
+
+    try:
+        with MailDB() as db:
+            with db.conn.cursor() as cur:
+                cur.execute(sql, tuple(params))
+                row = cur.fetchone()
+    except Exception as exc:  # noqa: BLE001
+        _log(f"postgres error ({exc}) — skipping")
+        return None
+
+    if not row or row[0] is None:
+        return None
+    cleaned = strip_quoted(str(row[0]))
+    return cleaned or None
+
+
+def _fetch_via_imap(subject: str, generated_at: str, *,
+                    _creds=None, _imap_factory=None) -> str | None:
+    """Read Zach's reply out of his Gmail over IMAP. Returns the de-quoted body or None.
+    Best-effort — any error → None (never raises)."""
     core = digest.SUBJECT_CORE
     if core not in subject and subject:
         # Subject drifted from our known format — fall back to the constant anyway (that's
@@ -284,11 +362,43 @@ def fetch_last_feedback(*, _creds=None, _imap_factory=None) -> Feedback | None:
                 imap.logout()
             except Exception:  # noqa: BLE001
                 pass
+    return reply
+
+
+def fetch_last_feedback(*, src: str | None = None, _creds=None, _imap_factory=None,
+                        _maildb=None) -> Feedback | None:
+    """Pull Zach's reply to the previous digest as steering CONTEXT for the next synthesis.
+
+    `src` (or REPO_COS_REPLY_SRC env, default `postgres`) selects the reply source. Best-
+    effort: returns None (never raises) if there's no prior digest, the source is
+    unreachable, or no reply is found. `_creds` / `_imap_factory` / `_maildb` are injectable
+    for tests (no real network / cluster).
+    """
+    last = _load_last_digest()
+    if not last:
+        _log("no previous digest (latest.json missing) — skipping")
+        return None
+    subject = str(last.get("subject") or "")
+    generated_at = str(last.get("generated_at") or "")
+    prev_proposals = [
+        {"title": p.get("title"), "evidence": p.get("evidence") or []}
+        for p in (last.get("proposals") or []) if isinstance(p, dict)
+    ]
+
+    src = (src or _reply_src()).strip().lower()
+    if src == "postgres":
+        reply = _fetch_via_postgres(generated_at, _maildb=_maildb)
+    elif src == "imap":
+        reply = _fetch_via_imap(subject, generated_at,
+                                _creds=_creds, _imap_factory=_imap_factory)
+    else:
+        _log(f"unknown REPO_COS_REPLY_SRC {src!r} (expected postgres|imap) — skipping")
+        return None
 
     if not reply:
         _log("no reply found for the previous digest")
         return None
 
-    _log(f"applied reply from {generated_at or 'unknown'} ({len(reply)} chars)")
+    _log(f"applied reply from {generated_at or 'unknown'} ({len(reply)} chars) via {src}")
     return Feedback(reply_text=reply, prev_proposals=prev_proposals,
                     replied_at=generated_at)

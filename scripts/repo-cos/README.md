@@ -26,12 +26,12 @@ shrinks the corpus, then the LLM runs on the small survivor set.
 
 | Stage | Module | What | Cost |
 |-------|--------|------|------|
-| 0 | `feedback.py` | pull Zach's IMAP reply to LAST digest → synthesis context | none |
+| 0 | `feedback.py` | read Zach's reply to LAST digest → synthesis context (Postgres default; IMAP fallback) | none |
 | 0.5 | `exclusions.py` | parse that reply → **HARD** repo-level exclusions (deterministic) | none |
 | 1 | `prescan.py` | cheap grep/git signals, capped **per repo** | none |
 | 2 | `llm.py` | OpenRouter clusters survivors → ranked JSON proposals | one call |
 | 3 | `digest.py` | one formatter shared by stdout **and** email | none |
-| 4 | `email_send.py` | Gmail SMTP, gated behind `--email` (default OFF) | none |
+| 4 | `email_send.py` | send via his postfix RELAY (default; Gmail SMTP fallback), gated behind `--email` | none |
 
 ### Stage-1 signals (deterministic, evidence-bearing)
 
@@ -49,26 +49,35 @@ applied by round-robin interleaving so no single repo monopolizes the budget.
 ## Reply-feedback loop (Stage 0)
 
 The runs are no longer stateless: **your emailed REPLY to last week's digest steers the
-next one.** Before synthesis, `feedback.py` reads back your reply over **IMAP** (stdlib
-`imaplib`, the *same* Gmail app-password used for send — no new deps, no cluster/Postgres
-path) and prepends last week's proposals + your reply to the LLM prompt as context, with
-an instruction to *drop what you rejected and honor your steering* while still surfacing
-genuinely new evidence-backed candidates. It's context only — the structural evidence /
-anti-slop rules still fully apply.
+next one.** Before synthesis, `feedback.py` reads back your reply and prepends last week's
+proposals + your reply to the LLM prompt as context, with an instruction to *drop what you
+rejected and honor your steering* while still surfacing genuinely new evidence-backed
+candidates. It's context only — the structural evidence / anti-slop rules still fully apply.
 
-- **Matching:** searches recent mail SINCE the last digest for the ASCII-stable subject
-  core `Repo proposals` (the full subject's 🧭 + em-dash are flaky in IMAP SEARCH), then
-  picks the most-recent genuine **reply from you** (`Re:` / `In-Reply-To`), so the
-  original digest isn't mistaken for feedback. Looks in `INBOX`, falls back to
-  `[Gmail]/All Mail`.
-- **De-quoting:** drops `>`-quoted lines and everything from the `On … wrote:` attribution
-  onward, leaving only your new words (capped 4000 chars).
-- **Best-effort + safe:** no prior digest / no creds / IMAP down / no reply / parse error
-  → logged to stderr and skipped; the run proceeds exactly as a stateless one. `--no-feedback`
-  skips the fetch entirely (clean / testing runs); `--json` reports `feedback_applied`.
-- **Limits:** relies on subject-thread matching — if Gmail groups a reply under a
-  different subject (or you compose fresh instead of replying), it won't be found. The
-  loop closes naturally because each run persists its own subject → next run's "previous".
+**Reply source (`REPO_COS_REPLY_SRC`, default `postgres`):**
+
+- **postgres (DEFAULT) — his infra.** The digest's `Reply-To` is
+  `repo-cos@inbox.zacx.dev`; your reply routes Gmail→his MX→mail-receiver→the homelab
+  Postgres `mail` table. `feedback.py` queries for the most-recent row where
+  `'repo-cos@inbox.zacx.dev' = ANY(to_addrs)` AND `from_addr ILIKE '%zachlowden1@gmail.com%'`
+  AND `received_at >` the last digest's `generated_at`. **That WHERE clause IS the ownership
+  gate.** It reuses the mail-actions DB helper (`scripts/mail-actions/_db.py`: `kubectl
+  port-forward` to the homelab `mailbox-postgres` + psycopg2 + DSN-from-secret). `text_body`
+  is already plain-text from the receiver, so only the quoted reply history is stripped.
+- **imap (fallback) — Gmail.** `REPO_COS_REPLY_SRC=imap` reads the reply out of Gmail over
+  IMAP (stdlib `imaplib`, the same Gmail app-password the `gmail` send path uses). Only
+  relevant if the digest was sent via `REPO_COS_SEND=gmail`. Matching: searches recent mail
+  SINCE the last digest for the ASCII-stable subject core `Repo proposals` (the full
+  subject's 🧭 + em-dash are flaky in IMAP SEARCH), picks the most-recent genuine **reply
+  from you** (`Re:` / `In-Reply-To`) so the original digest isn't mistaken for feedback,
+  `INBOX` then `[Gmail]/All Mail`.
+
+- **De-quoting (both):** drops `>`-quoted lines and everything from the `On … wrote:`
+  attribution onward, leaving only your new words (capped 4000 chars).
+- **Best-effort + safe (both):** no prior digest / no creds / source down / no reply / parse
+  error → logged to stderr and skipped; the run proceeds exactly as a stateless one.
+  `--no-feedback` skips the fetch entirely (clean / testing runs); `--json` reports
+  `feedback_applied`.
 
 ## Deterministic repo-exclusion layer (Stage 0.5) — `exclusions.py`
 
@@ -115,10 +124,11 @@ OPENROUTER_API_KEY=... scripts/repo-cos/scan.py --dry-run
 OPENROUTER_API_KEY=... scripts/repo-cos/scan.py --email
 ```
 
-Run under nix-shell (stdlib + requests only):
+Run under nix-shell. The default relay-send + Postgres-read paths need `requests` +
+`psycopg2` + `kubectl` on PATH:
 
 ```sh
-nix-shell -p 'python3.withPackages(p:[p.requests])' --run \
+nix-shell -p 'python3.withPackages(p:[p.requests p.psycopg2])' kubectl --run \
   'python scripts/repo-cos/scan.py --dry-run'
 ```
 
@@ -127,9 +137,10 @@ Flags: `--dry-run` (default), `--email`, `--no-llm`/`--candidates-only`, `--no-f
 exit), `--repos`, `--limit-candidates N` (default 60), `--top N` (default 5), `--model`
 (default `deepseek/deepseek-v4-flash`), `--json`.
 
-The weekly unit / `run-weekly.sh` need **no change**: `feedback.py` uses only stdlib
-`imaplib` (already available) and the SAME app-password already decrypted for SMTP send —
-so the reply-fetch adds no new system deps or secrets to the timer.
+Env toggles: `REPO_COS_SEND=relay|gmail` (default `relay`), `REPO_COS_REPLY_SRC=postgres|imap`
+(default `postgres`). Relay overrides: `REPO_COS_FROM`, `REPO_COS_REPLY_TO`,
+`REPO_COS_PROD_KUBECONFIG` (production cluster). Postgres uses `KUBECONFIG` (homelab, via the
+mail-actions `_db.py` helper).
 
 ## Repos
 
@@ -137,30 +148,45 @@ Workbench-local. Discovers the default list, filtered to existing dirs. **`naida
 live only on the LAPTOP (`~/workspace/scratch/`)** so this workbench tool can't see them
 yet.
 
-## Email secret
+## Mail infra (self-hosted, default)
 
-`--email` reuses the **same Gmail app-password the mailbox sent-poller uses**: SOPS secret
-`mailbox-gmail-imap` on homelab-talos `origin/trunk`
-(`clusters/homelab/apps/mailbox/secrets-imap.enc.yaml`), keys `IMAP_USER` /
-`IMAP_APP_PASSWORD` — verified against `sent-poller.yaml` which mounts the same secret.
-The app password authenticates SMTP send just as it does IMAP read. Env overrides
-`REPO_COS_SMTP_USER` / `REPO_COS_SMTP_PASSWORD` win if set.
+SEND, READ, and SIGN are all on Zach's own infra; Gmail is only where he happens to type
+the reply.
 
-## Step 2 (NOT built yet)
+- **SEND — postfix relay (default).** `email_send.py` sends via `service/postfix-relay` in
+  ns `nebula` of the **production** cluster (`REPO_COS_PROD_KUBECONFIG`, default
+  `~/workspace/homelab-talos/production-kubeconfig`) over a `kubectl port-forward` to :587.
+  No SMTP auth — the relay trusts MYNETWORKS (127.0.0.0/8) over the localhost hop; it
+  presents a `mail.zacx.dev` cert, so STARTTLS is done with hostname-verify OFF (justified:
+  a localhost hop to our OWN relay, already tunneled through the authenticated k8s API).
+  `From: repo-cos@mail.zacx.dev` (DKIM-signed by the relay; SPF/DMARC published → clean
+  Gmail deliverability), `Reply-To: repo-cos@inbox.zacx.dev`.
+- **READ — Postgres (default).** The reply is read from the homelab `mail` table (see the
+  Stage-0 reply-feedback section) — no Gmail IMAP.
+- **Gmail fallback.** `REPO_COS_SEND=gmail` / `REPO_COS_REPLY_SRC=imap` reuse the **same
+  Gmail app-password the mailbox sent-poller uses**: SOPS secret `mailbox-gmail-imap` on
+  homelab-talos `origin/trunk` (`clusters/homelab/apps/mailbox/secrets-imap.enc.yaml`), keys
+  `IMAP_USER` / `IMAP_APP_PASSWORD`. Only these fallback paths need the app-password /
+  `SOPS_AGE_KEY_FILE`. Env overrides `REPO_COS_SMTP_USER` / `REPO_COS_SMTP_PASSWORD` win.
 
-A weekly, `serverMode`-gated **workbench systemd user timer** (mirroring
-`mail-actions-archive`) would run `scan.py --email` every Monday. It is deliberately NOT
-wired: we validate signal quality on a manual `--dry-run` first, then add the timer +
-home-manager unit in a follow-up once the proposals prove worth an inbox slot.
+## Weekly timer
+
+LIVE: a `serverMode`-gated **workbench systemd user timer** (`repo-cos.timer`, Mon 08:00,
+mirroring `mail-actions-archive`) runs `scan.py --email` via `run-weekly.sh`. The self-
+hosted mail default means the weekly send now depends on the **production cluster** (relay)
++ the **homelab cluster** (postgres) + two `kubectl port-forward`s; both are best-effort so
+a hiccup logs + skips rather than wedging. Check `systemctl --user list-timers | grep repo-cos`.
 
 ## Tests
 
 ```sh
-nix-shell -p 'python3.withPackages(p:[p.pytest p.requests])' --run \
+nix-shell -p 'python3.withPackages(p:[p.pytest p.requests p.psycopg2])' --run \
   'python -m pytest scripts/repo-cos/tests -q'
 ```
 
 Covers the deterministic parts with fixtures: marker/skip extraction (file:line correct
 across languages), per-repo + global capping, churn/large/lockfile signals, the digest
-formatter, and the LLM JSON parse/repair + anti-slop filters. HTTP (OpenRouter) and SMTP
-are mocked — no live network in unit tests.
+formatter, the LLM JSON parse/repair + anti-slop filters, and BOTH mail paths — the relay
+send (From/Reply-To/To headers, unverified-STARTTLS context) and the Postgres reply read
+(ownership-gate SQL, cleaned reply, no-row/DB-error → None). HTTP (OpenRouter), SMTP, the
+port-forward, and the DB cursor are all mocked — no live network / cluster in unit tests.
