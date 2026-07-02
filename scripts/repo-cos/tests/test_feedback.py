@@ -164,7 +164,7 @@ def test_fetch_finds_reply_and_strips(latest):
         in_reply_to="<digest-msg-id@mail>",
     )
     fake = FakeIMAP({"INBOX": [reply]})
-    fb = feedback.fetch_last_feedback(_creds=_creds, _imap_factory=lambda: fake)
+    fb = feedback.fetch_last_feedback(src="imap", _creds=_creds, _imap_factory=lambda: fake)
     assert fb is not None
     assert "Skip the civitai 3D report modal" in fb.reply_text
     assert "Model3D" not in fb.reply_text  # quoted part stripped
@@ -185,7 +185,7 @@ def test_fetch_ignores_original_digest_not_a_reply(latest):
         body="1. Implement report modal for Model3D\n",
     )
     fake = FakeIMAP({"INBOX": [original], feedback.ALL_MAIL: [original]})
-    fb = feedback.fetch_last_feedback(_creds=_creds, _imap_factory=lambda: fake)
+    fb = feedback.fetch_last_feedback(src="imap", _creds=_creds, _imap_factory=lambda: fake)
     assert fb is None
 
 
@@ -193,7 +193,7 @@ def test_fetch_no_matching_mail_returns_none(latest):
     other = _mk_msg(subject="Re: dinner plans", frm="zachlowden1@gmail.com",
                     body="sure", in_reply_to="<x>")
     fake = FakeIMAP({"INBOX": [other], feedback.ALL_MAIL: [other]})
-    fb = feedback.fetch_last_feedback(_creds=_creds, _imap_factory=lambda: fake)
+    fb = feedback.fetch_last_feedback(src="imap", _creds=_creds, _imap_factory=lambda: fake)
     assert fb is None
 
 
@@ -206,7 +206,7 @@ def test_fetch_falls_back_to_all_mail(latest):
     )
     # only in All Mail, not INBOX (e.g. archived)
     fake = FakeIMAP({"INBOX": [], feedback.ALL_MAIL: [reply]})
-    fb = feedback.fetch_last_feedback(_creds=_creds, _imap_factory=lambda: fake)
+    fb = feedback.fetch_last_feedback(src="imap", _creds=_creds, _imap_factory=lambda: fake)
     assert fb is not None
     assert "Focus on kubeclaw tests." in fb.reply_text
 
@@ -214,20 +214,20 @@ def test_fetch_falls_back_to_all_mail(latest):
 def test_fetch_imap_error_returns_none(latest):
     def boom():
         raise OSError("connection refused")
-    fb = feedback.fetch_last_feedback(_creds=_creds, _imap_factory=boom)
+    fb = feedback.fetch_last_feedback(src="imap", _creds=_creds, _imap_factory=boom)
     assert fb is None  # never raises
 
 
 def test_fetch_no_creds_returns_none(latest):
     def bad_creds():
         raise RuntimeError("no app password")
-    fb = feedback.fetch_last_feedback(_creds=bad_creds, _imap_factory=lambda: FakeIMAP({}))
+    fb = feedback.fetch_last_feedback(src="imap", _creds=bad_creds, _imap_factory=lambda: FakeIMAP({}))
     assert fb is None
 
 
 def test_fetch_no_latest_json_returns_none(tmp_path, monkeypatch):
     monkeypatch.setattr(feedback, "PERSIST_LATEST", tmp_path / "missing.json")
-    fb = feedback.fetch_last_feedback(_creds=_creds, _imap_factory=lambda: FakeIMAP({}))
+    fb = feedback.fetch_last_feedback(src="imap", _creds=_creds, _imap_factory=lambda: FakeIMAP({}))
     assert fb is None
 
 
@@ -237,7 +237,7 @@ def test_fetch_picks_most_recent_reply(latest):
     new = _mk_msg(subject="Re: 🧭 Repo proposals — week of 2026-07-01",
                   frm="zachlowden1@gmail.com", body="new reply wins", in_reply_to="<b>")
     fake = FakeIMAP({"INBOX": [old, new]})  # search returns ascending → newest last
-    fb = feedback.fetch_last_feedback(_creds=_creds, _imap_factory=lambda: fake)
+    fb = feedback.fetch_last_feedback(src="imap", _creds=_creds, _imap_factory=lambda: fake)
     assert fb is not None
     assert "new reply wins" in fb.reply_text
 
@@ -277,3 +277,138 @@ def test_reply_from_owner_requires_exact_address():
     spoof = _mk_msg(subject="Re: 🧭 Repo proposals — week of 2026-07-01",
                     frm='"zachlowden1@gmail.com" <attacker@evil.com>', body="x", in_reply_to="<a>")
     assert feedback._is_reply_from_owner(spoof) is False
+
+
+# ---- Postgres reply source (DEFAULT) -----------------------------------------
+#
+# A fake MailDB context manager: yields an object with a live `.conn` whose cursor's
+# execute/fetchone are recorded, so we exercise the exact SQL + ownership-gate params
+# without a cluster or psycopg2 connection.
+
+class _FakeCursor:
+    def __init__(self, row, sink):
+        self._row = row
+        self._sink = sink
+    def __enter__(self):
+        return self
+    def __exit__(self, *exc):
+        return False
+    def execute(self, sql, params):
+        self._sink["sql"] = sql
+        self._sink["params"] = params
+    def fetchone(self):
+        return self._row
+
+
+class _FakeConn:
+    def __init__(self, row, sink):
+        self._row = row
+        self._sink = sink
+    def cursor(self, *a, **k):
+        return _FakeCursor(self._row, self._sink)
+
+
+class _FakeMailDB:
+    """Factory that behaves like MailDB() → context manager with a `.conn`."""
+    def __init__(self, row, sink):
+        self._row = row
+        self._sink = sink
+    def __call__(self):
+        return self
+    def __enter__(self):
+        self.conn = _FakeConn(self._row, self._sink)
+        return self
+    def __exit__(self, *exc):
+        return False
+
+
+def _pg_maildb(row, sink):
+    return _FakeMailDB(row, sink)
+
+
+def test_postgres_is_default_and_returns_cleaned_reply(latest, monkeypatch):
+    # No REPO_COS_REPLY_SRC → postgres. The DB row body carries quoted history that must
+    # be stripped by strip_quoted, leaving only Zach's new words.
+    monkeypatch.delenv("REPO_COS_REPLY_SRC", raising=False)
+    sink = {}
+    body = (
+        "Skip the civitai 3D report modal — not doing that.\n"
+        "\n"
+        "On Mon, 1 Jul 2026 at 08:00, Zach <zachlowden1@gmail.com> wrote:\n"
+        "> 1. Implement report modal for Model3D\n"
+    )
+    fb = feedback.fetch_last_feedback(_maildb=_pg_maildb((body,), sink))
+    assert fb is not None
+    assert "Skip the civitai 3D report modal" in fb.reply_text
+    assert "Model3D" not in fb.reply_text          # quoted part stripped
+    assert fb.replied_at == "2026-07-01T08:00:00-05:00"
+    assert len(fb.prev_proposals) == 2             # from latest.json
+    # ownership gate: query binds the Reply-To address + owner match + time bound
+    assert feedback.REPLY_TO_ADDR in sink["params"]
+    assert f"%{feedback.OWNER_MATCH}%" in sink["params"]
+    assert "= ANY(to_addrs)" in sink["sql"]
+    assert "from_addr ILIKE" in sink["sql"]
+    assert "received_at >" in sink["sql"]
+
+
+def test_postgres_no_row_returns_none(latest, monkeypatch):
+    monkeypatch.delenv("REPO_COS_REPLY_SRC", raising=False)
+    fb = feedback.fetch_last_feedback(_maildb=_pg_maildb(None, {}))
+    assert fb is None
+
+
+def test_postgres_null_body_returns_none(latest, monkeypatch):
+    monkeypatch.delenv("REPO_COS_REPLY_SRC", raising=False)
+    fb = feedback.fetch_last_feedback(_maildb=_pg_maildb((None,), {}))
+    assert fb is None
+
+
+def test_postgres_db_error_returns_none(latest, monkeypatch):
+    # A DB/port-forward failure must be swallowed → None, never raised.
+    monkeypatch.delenv("REPO_COS_REPLY_SRC", raising=False)
+
+    class _BoomDB:
+        def __call__(self):
+            return self
+        def __enter__(self):
+            raise OSError("port-forward refused")
+        def __exit__(self, *exc):
+            return False
+
+    fb = feedback.fetch_last_feedback(_maildb=lambda: _BoomDB())
+    assert fb is None
+
+
+def test_postgres_no_latest_json_returns_none(tmp_path, monkeypatch):
+    monkeypatch.delenv("REPO_COS_REPLY_SRC", raising=False)
+    monkeypatch.setattr(feedback, "PERSIST_LATEST", tmp_path / "missing.json")
+    fb = feedback.fetch_last_feedback(_maildb=_pg_maildb(("anything",), {}))
+    assert fb is None
+
+
+def test_imap_src_still_uses_imap(latest, monkeypatch):
+    # REPO_COS_REPLY_SRC=imap must route to the IMAP path (not postgres), even with a
+    # _maildb injected — the src selector wins.
+    monkeypatch.setenv("REPO_COS_REPLY_SRC", "imap")
+    reply = _mk_msg(
+        subject="Re: 🧭 Repo proposals — week of 2026-07-01",
+        frm="zachlowden1@gmail.com", body="Focus on kubeclaw tests.\n",
+        in_reply_to="<digest@mail>")
+    fake = FakeIMAP({"INBOX": [reply]})
+    called = {"pg": False}
+
+    def boom_db():
+        called["pg"] = True
+        raise AssertionError("postgres must not be used when src=imap")
+
+    fb = feedback.fetch_last_feedback(
+        _creds=_creds, _imap_factory=lambda: fake, _maildb=boom_db)
+    assert called["pg"] is False
+    assert fb is not None
+    assert "Focus on kubeclaw tests." in fb.reply_text
+
+
+def test_unknown_reply_src_returns_none(latest, monkeypatch):
+    monkeypatch.setenv("REPO_COS_REPLY_SRC", "carrier-pigeon")
+    fb = feedback.fetch_last_feedback()
+    assert fb is None

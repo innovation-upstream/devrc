@@ -572,13 +572,27 @@ in
 
   # Repo chief-of-staff — WEEKLY: deterministic scan of Zach's repos for improvement
   # signals (TODO/FIXME, skipped tests, `latest` tags, churn, large files) → cheap LLM
-  # synthesis (OpenRouter) → ranked proposal digest EMAILED to his Gmail. The "agents
-  # bring me ideas" experiment (scripts/repo-cos/, `run-weekly.sh` wrapper).
+  # synthesis (OpenRouter) → ranked proposal digest EMAILED. The "agents bring me ideas"
+  # experiment (scripts/repo-cos/, `run-weekly.sh` wrapper).
   #
-  # WORKBENCH-ONLY (serverMode): the full repo set (incl. the civitai client repos)
-  # lives here, and the OpenRouter key + SOPS age key are here. Minimal user-unit env,
-  # so PATH needs nix (nix-shell) + git + rg + coreutils, and NIX_PATH so `nix-shell -p`
-  # resolves <nixpkgs>. Creds are loaded by the wrapper, never in the nix store.
+  # SELF-HOSTED MAIL (default): the digest is SENT via Zach's postfix relay in the
+  # PRODUCTION cluster (From: repo-cos@mail.zacx.dev, DKIM-signed; Reply-To:
+  # repo-cos@inbox.zacx.dev) and his REPLY is READ back from the HOMELAB Postgres `mail`
+  # table (his reply routes Gmail→his MX→mail-receiver→Postgres). BOTH go through a
+  # `kubectl port-forward` — so the weekly send now depends on the production cluster
+  # (relay) + the homelab cluster (postgres) + TWO port-forwards. Both are BEST-EFFORT:
+  # a hiccup logs + skips (send fails loudly, feedback returns None) rather than wedging.
+  # The two kubeconfigs (production for relay, homelab for postgres) are exported by the
+  # wrapper; the Python resolves each per operation. The Gmail SMTP/IMAP fallback
+  # (REPO_COS_SEND=gmail / REPO_COS_REPLY_SRC=imap) still exists behind those toggles and
+  # is the only path needing the SOPS app-password.
+  #
+  # WORKBENCH-ONLY (serverMode): the full repo set (incl. the civitai client repos) lives
+  # here, the OpenRouter key + SOPS age key + both kubeconfigs are here, and this host has
+  # direct LAN access to both cluster APIs. Minimal user-unit env, so PATH needs nix
+  # (nix-shell) + git + rg + kubectl (the two port-forwards) + coreutils, and NIX_PATH so
+  # `nix-shell -p` resolves <nixpkgs>. The wrapper's nix-shell adds psycopg2 (Postgres read)
+  # + kubectl + sops; creds are loaded by the wrapper, never in the nix store.
   systemd.user.services.repo-cos = lib.mkIf serverMode {
     Unit = {
       Description = "Repo chief-of-staff — weekly repo-scan → LLM proposals → email digest";
@@ -588,7 +602,7 @@ in
     Service = {
       Type = "oneshot";
       Environment = [
-        "PATH=${lib.makeBinPath [ pkgs.nix pkgs.git pkgs.ripgrep pkgs.bash pkgs.coreutils pkgs.gnused pkgs.gnugrep ]}"
+        "PATH=${lib.makeBinPath [ pkgs.nix pkgs.git pkgs.ripgrep pkgs.kubectl pkgs.bash pkgs.coreutils pkgs.gnused pkgs.gnugrep ]}"
         "NIX_PATH=nixpkgs=/nix/var/nix/profiles/per-user/root/channels/nixos"
         "HOME=%h"
       ];
