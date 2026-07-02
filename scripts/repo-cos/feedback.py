@@ -118,14 +118,23 @@ def _log(msg: str) -> None:
 
 
 def _load_last_digest() -> dict | None:
-    """Read ~/.config/repo-cos/latest.json (the previous run). None if absent/unreadable."""
-    try:
-        if not PERSIST_LATEST.exists():
-            return None
-        return json.loads(PERSIST_LATEST.read_text())
-    except Exception as exc:  # noqa: BLE001
-        _log(f"could not read {PERSIST_LATEST}: {exc}")
-        return None
+    """The 'previous digest' the reply threads to. Prefer last_emailed.json (only --email
+    writes it) over latest.json: EVERY run — including dry-runs — overwrites latest.json, so
+    its `generated_at` drifts to 'now' and would exclude the reply (found live: after one
+    dry-run the reply became unfindable). last_emailed.json holds the digest Zach actually
+    got + saw, and stays put until the next real send. Normalize `emailed_at`→`generated_at`
+    so callers (cutoff + positional mapping) read one field."""
+    emailed = PERSIST_LATEST.with_name("last_emailed.json")
+    for p in (emailed, PERSIST_LATEST):
+        try:
+            if p.exists():
+                d = json.loads(p.read_text())
+                if isinstance(d, dict) and d.get("proposals") is not None:
+                    d.setdefault("generated_at", d.get("emailed_at"))
+                    return d
+        except Exception as exc:  # noqa: BLE001
+            _log(f"could not read {p}: {exc}")
+    return None
 
 
 def _decode(value: str | None) -> str:
