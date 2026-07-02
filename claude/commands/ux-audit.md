@@ -26,6 +26,15 @@ Hand the subagent the base URL + target flow and have it use the **Playwright MC
    - are there any walls, points of friction, points of confusion
    - is there any unnecessary friction
    - could it be simplified or made easier
+4. **Check responsive design across breakpoints** — resize the viewport to the standard set and re-look at each key view (`mcp__playwright__browser_resize`, then screenshot named by view+width):
+   - **375** (mobile) · **768** (tablet) · **1024** (laptop) · **1440** (desktop) · **2560** (ultrawide)
+
+   At each width check, from the same easily-deterred-user lens:
+   - **No horizontal overflow / scroll**, especially on small screens. Verify with `document.documentElement.scrollWidth <= window.innerWidth` (via `mcp__playwright__browser_evaluate`); if it overflows, find the widest offending element and name it.
+   - **Large screens actually USE the width** — content is not trapped in a thin column with huge empty margins on 1440/2560. Measure the main content container's width across viewports (`getBoundingClientRect().width`); it should grow with the viewport on desktop and cap at a sane readable max on ultrawide — not stay pinned to a narrow column.
+   - **Tap targets ≥ ~40px** and reachable on mobile (nothing clipped off-screen or hidden behind chrome).
+   - **Layout reflows cleanly** — no clipped, overlapping, or cut-off elements at any width; multi-column layouts collapse to a single readable column on mobile.
+   - **Text stays readable** — line length isn't absurdly long on ultrawide (caps via max-width), and isn't crushed/wrapping awkwardly on mobile.
 
 The subagent must actually drive the browser and look at what rendered — not infer from the code.
 
