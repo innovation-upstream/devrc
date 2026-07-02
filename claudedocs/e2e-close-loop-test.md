@@ -1,0 +1,1 @@
+clawgate close-the-loop e2e test — safe to delete.
