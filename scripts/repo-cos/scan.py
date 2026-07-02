@@ -130,8 +130,16 @@ def cmd_scan(args) -> int:
                 alias_map = exclusions.build_alias_map(DEFAULT_REPOS)
                 parsed = exclusions.parse_reply(fb.reply_text, emailed_props,
                                                 alias_map=alias_map)
-                if parsed["exclude"] or parsed["resume"] or parsed.get("dismiss"):
+                if (parsed["exclude"] or parsed["resume"] or parsed.get("dismiss")
+                        or parsed.get("approve")):
                     exclusions.apply(excl_state, parsed, source="reply")
+                    # ---- APPROVE → clawgate Task (the ONLY new network in this path) ----
+                    # For each approved proposal, POST a durable Task card to clawgate and
+                    # SUPPRESS-ON-SUCCESS ONLY: a proposal whose POST returned a task id is
+                    # recorded in excl_state["approved"] so it can't re-nag; a FAILED POST is
+                    # left unsuppressed → it re-proposes next week (a natural retry).
+                    if parsed.get("approve"):
+                        _post_approvals_to_clawgate(parsed["approve"], excl_state)
                     exclusions.save_state(excl_state)
                     if parsed["exclude"]:
                         names = ", ".join(e["repo"] for e in parsed["exclude"])
@@ -168,13 +176,15 @@ def cmd_scan(args) -> int:
 
     candidates, scans = prescan.scan_all(repos, args.limit_candidates)
 
-    # ---- DISMISSED-RECOMMENDATION FILTER (drop suppressed proposals BEFORE the LLM) ----
-    # A recommendation Zach replied "skip" to (its evidence refs live in excl_state
-    # ["dismissed"]) is removed here so its signal never reaches synthesis and cannot
-    # re-form as the same proposal — while the rest of that repo still surfaces.
+    # ---- SUPPRESSED-RECOMMENDATION FILTER (drop suppressed proposals BEFORE the LLM) ----
+    # A recommendation Zach replied "skip" (→ excl_state["dismissed"]) OR "approve" (→
+    # excl_state["approved"], already queued in clawgate) to is removed here so its signal
+    # never reaches synthesis and cannot re-form as the same proposal — while the rest of that
+    # repo still surfaces. ONE combined suppressed-set (dismissed ∪ approved).
     candidates, dropped = exclusions.filter_candidates(candidates, excl_state)
     if dropped:
-        print(f"  dismissed: {len(dropped)} candidate(s) suppressed", file=sys.stderr)
+        print(f"  suppressed: {len(dropped)} candidate(s) (dismissed ∪ approved)",
+              file=sys.stderr)
     dismissed_recs = exclusions.dismissed_entries(excl_state)
     cand_dicts = [c.as_dict() for c in candidates]
 
@@ -231,6 +241,38 @@ def cmd_scan(args) -> int:
         feedback_applied=fb is not None, excluded_repos=excluded_names,
         dismissed_count=len(dismissed_recs),
     )
+
+
+def _post_approvals_to_clawgate(approvals, excl_state, *, _clawgate=None) -> None:
+    """POST each approved proposal to clawgate as a durable Task, then SUPPRESS-ON-SUCCESS.
+
+    For every approved proposal (full dict from parse_reply), build a card + POST it. Collect
+    {first-evidence-ref → task_id-or-None} and hand it to `exclusions.apply_approvals`, which
+    records ONLY the ones with a real task id into excl_state["approved"] — a failed POST is
+    left unsuppressed so it re-proposes next week. Best-effort; never raises (mirrors the rest
+    of the reply path). `_clawgate` is injectable for tests (no real network)."""
+    clawgate = _clawgate
+    if clawgate is None:
+        import clawgate as clawgate  # noqa: PLC0414
+    task_ids: dict = {}
+    posted = 0
+    for prop in approvals:
+        evidence = prop.get("evidence") or []
+        if not evidence:
+            continue
+        try:
+            directory = clawgate.build_task_title(prop)
+            body = clawgate.build_task_body(prop)
+            tid = clawgate.post_task(directory, body)
+        except Exception as exc:  # noqa: BLE001
+            print(f"  ! clawgate post failed (proceeding): {exc}", file=sys.stderr)
+            tid = None
+        task_ids[evidence[0]] = tid
+        if isinstance(tid, int) and not isinstance(tid, bool):
+            posted += 1
+    exclusions.apply_approvals(excl_state, approvals, task_ids)
+    print(f"  approved: {len(approvals)} proposal(s) → clawgate task(s) {posted}/"
+          f"{len(approvals)}; suppressed", file=sys.stderr)
 
 
 def _emit_candidates(candidates, scans, cand_dicts, args, *, dismissed_recs=None) -> int:

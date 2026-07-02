@@ -27,7 +27,8 @@ shrinks the corpus, then the LLM runs on the small survivor set.
 | Stage | Module | What | Cost |
 |-------|--------|------|------|
 | 0 | `feedback.py` | read Zach's reply to LAST digest → synthesis context (Postgres default; IMAP fallback) | none |
-| 0.5 | `exclusions.py` | parse that reply → **HARD** repo-level exclusions **+ per-recommendation dismissals** (deterministic) | none |
+| 0.5 | `exclusions.py` | parse that reply → **HARD** repo-level exclusions **+ per-recommendation dismissals + approvals** (deterministic) | none |
+| 0.5b | `clawgate.py` | approved proposals → durable clawgate Task cards (`POST /api/tasks`) + suppress-on-success | 1 POST/approval |
 | 1 | `prescan.py` | cheap grep/git signals, capped **per repo** | none |
 | 2 | `llm.py` | OpenRouter clusters survivors → ranked JSON proposals | one call |
 | 3 | `digest.py` | one formatter shared by stdout **and** email | none |
@@ -90,8 +91,8 @@ runs — they **cannot reappear**. (The context-injection above is kept for nuan
 
 - **Positional mapping (primary):** a line starting `N.` / `N)` / `N -` / `#N` / `N:` maps
   to proposal **N** in the digest you actually saw → that proposal's repo **and evidence**.
-- **Two intents, split by a strict precedence** (a reply distinguishes *pause the repo* from
-  *skip this one recommendation*):
+- **Four intents, split by a strict precedence** (a reply distinguishes *pause the repo* from
+  *skip this one recommendation* from *approve + dispatch it*):
   1. **repo-pause** — `paused / on hold / hold off` → **repo exclusion** (non-permanent).
   2. **repo-owner/dead** — `not (the|our|my|code) owner / not ours / deprecated / archived /
      dead / …` → **repo exclusion, permanent**. (`dont own the 3d model FEATURE` does **not**
@@ -99,33 +100,63 @@ runs — they **cannot reappear**. (The context-injection above is kept for nuan
   3. **recommendation-dismiss** — `skip / not needed / not relevant / dismiss / nah / no /
      don't (propose|want|need)` **when no repo-pause/owner language is present** → **dismiss
      THAT proposal** (collect its evidence `repo/file:line` refs); the **repo stays in scope**.
+  4. **recommendation-approve** — `approve(d) / yes / lgtm / ship it / do it / build it / go
+     ahead / 👍 / looks good / +1` **when no resume/exclude/dismiss keyword is present** →
+     **register THAT proposal as a durable clawgate Task** + suppress it (see the approve
+     subsection below). A **positive action**, the **lowest-priority** tier: a mixed
+     `approve … skip` line is a **dismiss** (negative wins — dropping is safer than dispatching).
   Higher tiers win: a line with both `paused` and `skip` is a repo-pause. `resume / unpause /
-  … again` beats all three → **resume** (un-exclude a repo).
+  … again` beats all four → **resume** (un-exclude a repo).
 - **Name mentions:** a reply naming a repo/alias (`kubeclaw`, `civitai`, `homelab`,
   `datapacket`, …) with a **repo-level** intent applies even without a position number.
-  (Dismissal needs a *positional* line — there's no proposal to look up from a bare name.)
+  (Dismissal + approve need a *positional* line — there's no proposal to look up from a bare name.)
 - **Position source = the digest you SAW, not `latest.json`.** Proposals rotate run-to-run
   and every run overwrites `latest.json`, so `--email` also writes **`last_emailed.json`**
   (the emailed set). `parse_reply` maps `1./2./…` against `last_emailed.json` → else the
   newest `history/*.json` with `emailed:true` → else `latest.json`.
-- **State:** `~/.config/repo-cos/exclusions.json` — **hand-editable**, two keys:
-  `{repos:{<name>:{reason, excluded_at, permanent, source}}}` (repo-level) and
-  `{dismissed:{<repo/file:line>:{reason, dismissed_at, repo}}}` (per-recommendation). Robust
-  to a missing/corrupt file **or an older file without `dismissed`** (→ empty). Dismissals
-  accumulate and are never auto-removed — hand-edit the JSON to un-dismiss one.
-- **Pre-scan dismiss filter (the guarantee):** `filter_candidates(candidates, state)` runs
+- **State:** `~/.config/repo-cos/exclusions.json` — **hand-editable**, three keys:
+  `{repos:{<name>:{reason, excluded_at, permanent, source}}}` (repo-level),
+  `{dismissed:{<repo/file:line>:{reason, dismissed_at, repo}}}` (per-recommendation), and
+  `{approved:{<repo/file:line>:{reason, approved_at, repo, clawgate_task_id}}}` (queued in
+  clawgate). Robust to a missing/corrupt file **or an older file without `dismissed`/`approved`**
+  (→ empty). Dismissals + approvals accumulate and are never auto-removed — hand-edit the JSON
+  to un-suppress one.
+- **Pre-scan suppression filter (the guarantee):** `filter_candidates(candidates, state)` runs
   right after `prescan.scan_all(...)` and **before** synthesis — it drops any candidate whose
-  `repo/file:line` ref is in `dismissed`, so a dismissed proposal's signal **never reaches
-  the LLM and cannot re-form**, while the rest of that repo still surfaces. Logs
-  `dismissed: N candidate(s) suppressed` to stderr.
+  `repo/file:line` ref is in `dismissed` **or `approved`** (ONE combined suppressed-set), so a
+  dismissed/queued proposal's signal **never reaches the LLM and cannot re-form**, while the
+  rest of that repo still surfaces. Logs `suppressed: N candidate(s) (dismissed ∪ approved)`.
 - **Visibility + undo:** excluded repos surface as a digest footer (`Excluded
   (paused/not-yours): … — reply "resume <repo>" to re-enable.`); dismissals add a terse
-  `Dismissed N past proposal(s).` line. `--show-exclusions` prints **both** (repos +
-  each dismissed `repo/file:line` + reason) and exits; `--no-feedback` skips the reply parse.
+  `Dismissed N past proposal(s).` line. `--show-exclusions` prints **all three** (repos +
+  each dismissed `repo/file:line` + reason + the approved/in-clawgate-queue section with task
+  ids) and exits; `--no-feedback` skips the reply parse.
 - **Limits:** the keyword set is finite — a reply that's *pure prose* with no positional
-  anchor and no repo name (and no clear skip/pause anchor) won't exclude or dismiss anything
-  (it still reaches the LLM as context).
+  anchor and no repo name (and no clear skip/pause/approve anchor) won't exclude, dismiss, or
+  approve anything (it still reaches the LLM as context).
   Unparseable lines are ignored and never raise.
+
+### Approve → clawgate Task (Stage 0.5b) — `clawgate.py`
+
+When you reply `N. approve` (yes/lgtm/ship it/👍/…), the approved proposal is **registered as
+a durable Task card in your clawgate adjudication+dispatch queue** so you can one-tap-Dispatch
+it, and it **won't re-nag** next week. The parser (`parse_reply`) stays **pure/deterministic** —
+it only collects the full proposal; the **only new network** is the clawgate POST.
+
+- **Poster (`clawgate.py`, stdlib-only, best-effort):** `load_creds()` parses
+  `~/.claude/clawgate.env` (simple `KEY=VALUE` → `CLAWGATE_API_URL`, `CLAWGATE_HOOK_TOKEN`);
+  `post_task(directory, body)` → `POST {API_URL}/api/tasks` with `Content-Type: application/json`
+  + `Authorization: Bearer <token>`, 15s timeout, returns the created task **id** (else `None` +
+  a stderr log on any error — never raises). The card matches the homelab task-drafter style:
+  lead `**🤖 repo-cos · APPROVED**`, the title/why, `**Approach:**`, `**Repo:**`, `**Effort:**`
+  (+ CI-verifiable note), then the `**Evidence:**` `repo/file:line` refs. Title = the proposal
+  title (≤80 chars).
+- **Suppress-on-SUCCESS only:** in `scan.py`, each approved proposal is POSTed; a proposal whose
+  POST returns an **id** has its evidence refs written to `state["approved"]` (so it can't
+  re-form). A **failed** POST is **left unsuppressed** → it re-proposes next week (a natural
+  retry). Logs `approved: N proposal(s) → clawgate task(s) M/N; suppressed`.
+- **Reachability:** the weekly timer runs on the workbench where `~/.claude/clawgate.env` exists
+  and clawgate is on the open, hook-token-gated LAN NodePort — no unit change needed.
 
 ## Usage
 

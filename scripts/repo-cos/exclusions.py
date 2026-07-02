@@ -20,19 +20,35 @@ Two distinct intents (a real conflation this fixes):
   feature, skip" (about a FEATURE) wrongly excluded all of civitai. The parser now classifies
   per line with a strict precedence: repo-pause > repo-owner/dead > recommendation-dismiss.
 
+A THIRD intent — "APPROVE this recommendation":
+  * "N. approve" (yes/lgtm/ship it/👍/…) is a POSITIVE action: register the FULL proposal as a
+    durable clawgate Task (Zach's adjudication+dispatch queue) AND suppress it so it can't
+    re-nag. The parser stays PURE — it only collects the approved proposal(s); the network POST
+    lives in `clawgate.py` and the suppression (a NEW "approved" state section) is applied by
+    `scan.py` ONLY when the POST returns a task id (a failed POST re-proposes next week = a
+    natural retry). Approve is the LOWEST-priority tier: resume > repo-exclude > dismiss >
+    approve, so a mixed "approve but skip" line is a DISMISS (negative wins — dropping is safer
+    than dispatching).
+
 Design (mirrors the rest of repo-cos: deterministic, no LLM, best-effort, never raises):
   * `parse_reply(reply_text, emailed_proposals)` →
-      {"exclude":[...], "resume":[...], "dismiss":[{evidence, reason, repo}]}
+      {"exclude":[...], "resume":[...], "dismiss":[{evidence, reason, repo}], "approve":[{prop}]}
     using POSITIONAL line mapping (`1.`, `2)`, `#3`, `4:` → proposal N) + a fixed keyword
     set + explicit repo-name/alias mentions. A dismiss line collects proposal N's `evidence`
-    (repo/file:line refs) so the exact recommendation can be suppressed. NO model call.
-  * State persists to ~/.config/repo-cos/exclusions.json (hand-editable by Zach) under two
-    top-level keys: "repos" (repo-level exclusions) and "dismissed" (per-recommendation,
-    keyed by the normalized evidence ref → {reason, dismissed_at, repo}).
+    (repo/file:line refs) so the exact recommendation can be suppressed; an approve line
+    collects proposal N's FULL dict (title/repo/evidence/why/approach/effort/ci_verifiable).
+    NO model call, NO network.
+  * State persists to ~/.config/repo-cos/exclusions.json (hand-editable by Zach) under three
+    top-level keys: "repos" (repo-level exclusions), "dismissed" (per-recommendation, keyed by
+    the normalized evidence ref → {reason, dismissed_at, repo}), and "approved" (per-evidence-
+    ref → {reason, approved_at, repo, clawgate_task_id}).
   * `apply(state, parsed)` merges excludes / drops resumes / accumulates dismissals.
+    `apply_approvals(state, approved, task_ids)` records approved evidence (ONLY the entries
+    with a real clawgate task id) into state["approved"] — scan.py drives this after POSTing.
     `filter_repos(repos, state)` drops excluded repos (match on realpath OR basename).
-    `filter_candidates(candidates, state)` drops dismissed candidates by evidence ref BEFORE
-    the LLM — the guarantee a skipped proposal can't re-form from the same signal.
+    `filter_candidates(candidates, state)` drops candidates whose ref is dismissed OR approved
+    (one combined suppressed-set) BEFORE the LLM — the guarantee a skipped/queued proposal
+    can't re-form from the same signal.
   * Position mapping resolves against the LAST EMAILED digest (`last_emailed.json`, else the
     most-recent history entry with emailed=true, else latest.json) — because proposals
     ROTATE run-to-run and every run overwrites latest.json, so "1./2./…" must map to the
@@ -134,6 +150,28 @@ _DISMISS_RE = re.compile(
     re.IGNORECASE | re.VERBOSE,
 )
 
+# Tier 4 — "approve THIS recommendation" → register a durable clawgate Task + suppress it so
+# it can't re-nag. APPROVE is a POSITIVE action and the LOWEST-priority tier: it only fires
+# when NO resume / repo-exclude / dismiss keyword is present on the line. A mixed line like
+# "approve but skip the test" is treated as a DISMISS (negative wins — dropping a proposal is
+# safer than dispatching one Zach also said to skip). "yes"/"lgtm"/"+1" are word-bounded so
+# "yes" doesn't fire inside "eyes"; a bare "no" is a DISMISS signal (tier 3), never approve.
+_APPROVE_RE = re.compile(
+    r"""
+      \b approved? \b
+    | \b yes \b
+    | \b lgtm \b
+    | ship \s+ it
+    | do \s+ it
+    | build \s+ (?:it|this)
+    | go \s+ ahead
+    | \U0001F44D                                          # 👍 emoji
+    | looks \s+ good
+    | \+ 1                                                # "+1"
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
+
 # Phrasings that mean "resume" (un-exclude / bring back). A resume beats an exclude on the
 # same line (Zach would only say "resume" about something already paused).
 _RESUME_RE = re.compile(
@@ -158,13 +196,13 @@ _POSITIONAL_RE = re.compile(r"^\s*(?:#\s*)?(\d{1,3})\s*(?:[.)\-:]|\s|$)")
 # ---- state (exclusions.json) -------------------------------------------------------
 
 def _empty_state() -> dict:
-    return {"repos": {}, "dismissed": {}}
+    return {"repos": {}, "dismissed": {}, "approved": {}}
 
 
 def load_state(path: Path | None = None) -> dict:
-    """Load exclusions.json → {"repos": {...}, "dismissed": {...}}. Robust:
-    missing/corrupt/wrong-shape file → an empty state; an OLDER file with no "dismissed"
-    key loads clean with an empty dismissed dict. Never raises."""
+    """Load exclusions.json → {"repos": {...}, "dismissed": {...}, "approved": {...}}. Robust:
+    missing/corrupt/wrong-shape file → an empty state; an OLDER file with no "dismissed"/
+    "approved" key loads clean with those defaulted to empty dicts. Never raises."""
     p = path or EXCLUSIONS_FILE
     try:
         if not p.exists():
@@ -178,6 +216,9 @@ def load_state(path: Path | None = None) -> dict:
         # missing OR wrong-shaped "dismissed" key).
         if not isinstance(obj.get("dismissed"), dict):
             obj["dismissed"] = {}
+        # older files predate the approve feature → default to empty.
+        if not isinstance(obj.get("approved"), dict):
+            obj["approved"] = {}
         return obj
     except Exception as exc:  # noqa: BLE001
         _log(f"could not read {p} ({exc}); starting empty")
@@ -309,9 +350,10 @@ def parse_reply(reply_text: str, emailed_proposals: list[dict] | None,
                 *, alias_map: dict[str, str] | None = None) -> dict:
     """Parse Zach's reply into
         {"exclude": [{repo, reason, permanent}], "resume": [repo],
-         "dismiss": [{evidence: [refs], reason, repo}]}.
+         "dismiss": [{evidence: [refs], reason, repo}],
+         "approve": [{title, repo, evidence, why, approach, effort, ci_verifiable}]}.
 
-    DETERMINISTIC — no LLM. Line-by-line, with a STRICT intent precedence:
+    DETERMINISTIC — no LLM, no network. Line-by-line, with a STRICT intent precedence:
       * RESUME beats everything (Zach only says "resume" about something paused).
       * a POSITIONAL line ('1.', '2)', '#3', '4:') → proposal N in `emailed_proposals`
         (1-indexed) → its repo AND its evidence. This is the primary mechanism.
@@ -319,20 +361,26 @@ def parse_reply(reply_text: str, emailed_proposals: list[dict] | None,
       * TIER 2 repo-owner/dead (not owner/deprecated/archived) → repo exclusion (permanent).
       * TIER 3 skip/dismiss (skip/not needed/dismiss/no…) WHEN no tier-1/2 language →
         DISMISS that one proposal: collect proposal N's `evidence` refs; the repo STAYS.
+      * TIER 4 approve/yes/lgtm/ship-it/👍 (a POSITIVE action, LOWEST priority) WHEN no
+        resume/exclude/dismiss keyword is present → APPROVE that proposal: collect proposal N's
+        FULL dict so scan.py can POST it to clawgate. A mixed "approve … skip" line is a DISMISS
+        (negative beats approve). Approve needs a positional match (the full proposal to queue).
       * an explicit repo-NAME/alias mention (non-positional) with repo-level intent applies
-        likewise (name-mentions cannot dismiss — there's no proposal to look up).
+        likewise (name-mentions cannot dismiss/approve — there's no proposal to look up).
     Unparseable lines are ignored (they still reach the LLM via context injection). Never
     raises."""
-    parsed = {"exclude": [], "resume": [], "dismiss": []}
+    parsed = {"exclude": [], "resume": [], "dismiss": [], "approve": []}
     if not reply_text:
         return parsed
     props = emailed_proposals or []
 
     # de-dupe: last write wins per repo; resume beats exclude. Dismissals accumulate keyed
-    # by evidence ref so re-touching the same proposal doesn't duplicate.
+    # by evidence ref so re-touching the same proposal doesn't duplicate. Approvals accumulate
+    # keyed by the proposal's FIRST evidence ref (a proposal's identity for suppression).
     excl: dict[str, dict] = {}
     resume: set[str] = set()
     dismiss: dict[str, dict] = {}  # ref -> {evidence:[ref], reason, repo}
+    approve: dict[str, dict] = {}  # first-ref -> full proposal dict
 
     for raw in reply_text.splitlines():
         line = raw.strip()
@@ -369,6 +417,20 @@ def parse_reply(reply_text: str, emailed_proposals: list[dict] | None,
                 continue  # no evidence to key on (e.g. a name-only line) → can't dismiss
             for ref in refs:
                 dismiss[ref] = {"evidence": [ref], "reason": line, "repo": repo}
+            continue
+        if _APPROVE_RE.search(line):
+            # TIER 4 — APPROVE (positive, lowest priority; only reached when NO negative/resume
+            # keyword matched above, so "approve but skip" already fell to dismiss). Collect the
+            # FULL proposal so scan.py can POST it to clawgate. Needs a positional match (a
+            # name-only line has no proposal to queue). Keyed by the first evidence ref =
+            # the proposal's suppression identity; a proposal with NO evidence can't be
+            # suppressed, so it's skipped (mirrors the anti-slop no-evidence rule).
+            if not prop:
+                continue
+            full = _approve_payload(prop, line)
+            if not full["evidence"]:
+                continue
+            approve[full["evidence"][0]] = full
 
     # resume wins over exclude for the same repo
     for r in resume:
@@ -386,7 +448,23 @@ def parse_reply(reply_text: str, emailed_proposals: list[dict] | None,
     for g in grouped.values():
         g["evidence"] = sorted(set(g["evidence"]))
     parsed["dismiss"] = list(grouped.values())
+    parsed["approve"] = list(approve.values())
     return parsed
+
+
+def _approve_payload(prop: dict, line: str) -> dict:
+    """The FULL proposal an approve line queues, with normalized evidence refs (so suppression
+    keys compare equal to fresh candidate refs). Carries the reason line for the audit trail."""
+    return {
+        "title": str(prop.get("title") or "").strip(),
+        "repo": str(prop.get("repo") or "").strip(),
+        "evidence": _proposal_evidence(prop),
+        "why": str(prop.get("why") or "").strip(),
+        "approach": str(prop.get("approach") or "").strip(),
+        "effort": str(prop.get("effort") or "").strip(),
+        "ci_verifiable": bool(prop.get("ci_verifiable")),
+        "reason": line,
+    }
 
 
 def _proposal_evidence(prop: dict | None) -> list[str]:
@@ -434,6 +512,7 @@ def apply(state: dict, parsed: dict, *, source: str = "reply",
     dict. Caller persists via save_state."""
     repos = state.setdefault("repos", {})
     dismissed = state.setdefault("dismissed", {})
+    state.setdefault("approved", {})  # ensure the key exists for older loaded states
     ts = now or datetime.now().astimezone().isoformat(timespec="seconds")
 
     for entry in parsed.get("exclude", []):
@@ -470,6 +549,42 @@ def apply(state: dict, parsed: dict, *, source: str = "reply",
                 "dismissed_at": prev.get("dismissed_at") or ts,
             }
 
+    return state
+
+
+def apply_approvals(state: dict, approvals: list[dict], task_ids: dict,
+                    *, now: str | None = None) -> dict:
+    """Record SUCCESSFULLY-posted approvals into state["approved"] so they can't re-nag.
+
+    `approvals` are the full proposal dicts from parse_reply's "approve" list. `task_ids` maps
+    a proposal's FIRST evidence ref → the clawgate task id returned by post_task (None if the
+    POST failed). SUPPRESS-ON-SUCCESS ONLY: a proposal is written to state["approved"] ONLY
+    when its task id is a real int — a failed POST is left UNSUPPRESSED so the proposal
+    re-surfaces next week (a natural retry). Each of the proposal's evidence refs is stored
+    (keyed by the normalized ref, same space as "dismissed") → {reason, approved_at, repo,
+    clawgate_task_id}. Returns the mutated state. Never raises."""
+    approved = state.setdefault("approved", {})
+    ts = now or datetime.now().astimezone().isoformat(timespec="seconds")
+    for prop in approvals or []:
+        evidence = prop.get("evidence") or []
+        if not evidence:
+            continue
+        tid = (task_ids or {}).get(evidence[0])
+        if not isinstance(tid, int) or isinstance(tid, bool):
+            continue  # POST failed / no id → do NOT suppress (re-propose next week = retry)
+        reason = prop.get("reason") or ""
+        repo = prop.get("repo") or ""
+        for ref in evidence:
+            key = _canon_ref(ref)
+            if not key:
+                continue
+            prev = approved.get(key) or {}
+            approved[key] = {
+                "reason": reason or prev.get("reason") or "",
+                "repo": repo or prev.get("repo") or "",
+                "approved_at": prev.get("approved_at") or ts,
+                "clawgate_task_id": tid,
+            }
     return state
 
 
@@ -510,15 +625,18 @@ def _canon_ref(ref) -> str:
 
 def filter_candidates(candidates: list, state: dict) -> tuple[list, list]:
     """Split prescan candidates into (kept, dropped) — drop any whose `.ref` matches a
-    dismissed recommendation in state["dismissed"]. Compared on the NORMALIZED repo/file:line
-    ref, so a dismissed proposal's evidence and the fresh candidate produced by the same
-    signal collapse to the same key. This is the GUARANTEE a dismissed proposal can't re-form:
-    its signal never reaches the LLM. Candidates are prescan.Candidate objects (have `.ref`)
-    OR dicts with a "ref" key. Never raises."""
+    SUPPRESSED recommendation: dismissed (state["dismissed"]) OR approved-and-queued
+    (state["approved"]). ONE combined suppressed-set — approved items are already in the
+    clawgate queue, so re-proposing them would double-nag. Compared on the NORMALIZED
+    repo/file:line ref, so a suppressed proposal's evidence and the fresh candidate produced by
+    the same signal collapse to the same key. This is the GUARANTEE a skipped/queued proposal
+    can't re-form: its signal never reaches the LLM. Candidates are prescan.Candidate objects
+    (have `.ref`) OR dicts with a "ref" key. Never raises."""
     dismissed = (state or {}).get("dismissed") or {}
-    if not dismissed:
+    approved = (state or {}).get("approved") or {}
+    if not dismissed and not approved:
         return list(candidates), []
-    keys = {_canon_ref(k) for k in dismissed}
+    keys = {_canon_ref(k) for k in dismissed} | {_canon_ref(k) for k in approved}
     kept, dropped = [], []
     for c in candidates:
         ref = c.ref if hasattr(c, "ref") else (c.get("ref") if isinstance(c, dict) else "")
@@ -541,6 +659,23 @@ def dismissed_entries(state: dict) -> list[dict]:
             "reason": (e.get("reason") or "").strip(),
             "repo": e.get("repo") or "",
             "dismissed_at": e.get("dismissed_at") or "",
+        })
+    return out
+
+
+def approved_entries(state: dict) -> list[dict]:
+    """Sorted list of approved (in-clawgate-queue) recommendations for --show-exclusions:
+    [{ref, reason, repo, approved_at, clawgate_task_id}, …]."""
+    a = (state or {}).get("approved") or {}
+    out = []
+    for ref in sorted(a):
+        e = a[ref] or {}
+        out.append({
+            "ref": ref,
+            "reason": (e.get("reason") or "").strip(),
+            "repo": e.get("repo") or "",
+            "approved_at": e.get("approved_at") or "",
+            "clawgate_task_id": e.get("clawgate_task_id"),
         })
     return out
 
@@ -598,7 +733,8 @@ def format_state(state: dict) -> str:
     REPO-level exclusions AND per-recommendation dismissals."""
     repos = (state or {}).get("repos") or {}
     dismissed = dismissed_entries(state)
-    if not repos and not dismissed:
+    approved = approved_entries(state)
+    if not repos and not dismissed and not approved:
         return ("repo-cos exclusions: none.\n(Excluded repos + dismissed recommendations come "
                 "from your emailed reply; hand-edit ~/.config/repo-cos/exclusions.json to "
                 "adjust.)")
@@ -631,6 +767,19 @@ def format_state(state: dict) -> str:
             lines.append(f"  {d['ref']}  [since {when}]")
             if d["reason"]:
                 lines.append(f"      reason: {d['reason']}")
+        lines.append("")
+
+    if approved:
+        lines.append(f"repo-cos approved (in clawgate queue): {len(approved)} proposal(s) "
+                     "dispatched to Tasks (suppressed from re-proposing).")
+        lines.append("")
+        for a in approved:
+            when = a["approved_at"] or "?"
+            tid = a["clawgate_task_id"]
+            tag = f", clawgate task #{tid}" if tid is not None else ""
+            lines.append(f"  {a['ref']}  [since {when}{tag}]")
+            if a["reason"]:
+                lines.append(f"      reason: {a['reason']}")
         lines.append("")
 
     lines.append('Reply "resume <repo>" to re-enable a repo; edit '

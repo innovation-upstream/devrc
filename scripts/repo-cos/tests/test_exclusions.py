@@ -110,22 +110,25 @@ def test_parse_reply_resume_beats_exclude_same_repo():
     assert all(e["repo"] != "homelab-talos" for e in parsed["exclude"])
 
 
-_EMPTY_PARSED = {"exclude": [], "resume": [], "dismiss": []}
+_EMPTY_PARSED = {"exclude": [], "resume": [], "dismiss": [], "approve": []}
 
 
 def test_parse_reply_unparseable_and_empty_never_raise():
     assert exclusions.parse_reply("", EMAILED, alias_map=_alias()) == _EMPTY_PARSED
     assert exclusions.parse_reply(None, EMAILED, alias_map=_alias()) == _EMPTY_PARSED
-    # prose with no positional/name anchor → nothing excluded (falls through to LLM context)
-    prose = "Great work this week, keep the momentum going on everything!\n"
+    # prose with no positional/name anchor → nothing excluded (falls through to LLM context).
+    # NOTE: "looks good" is an APPROVE keyword, but with no positional anchor there's no
+    # proposal to queue, so approve can't fire either → still a full no-op.
+    prose = "Great work this week, looks good, keep the momentum going on everything!\n"
     parsed = exclusions.parse_reply(prose, EMAILED, alias_map=_alias())
     assert parsed == _EMPTY_PARSED
 
 
 def test_parse_reply_positional_no_intent_is_ignored():
-    # "1. looks good" — a bare positional line with NO exclude/resume/dismiss keyword does
-    # nothing (no skip/pause/no anchor).
-    parsed = exclusions.parse_reply("1. looks good, ship it\n", EMAILED, alias_map=_alias())
+    # a bare positional line with NO exclude/resume/dismiss/approve keyword does nothing.
+    # (Previously used "looks good, ship it" — those are now APPROVE keywords, so this must
+    # be a line with genuinely no intent.)
+    parsed = exclusions.parse_reply("1. sounds about right\n", EMAILED, alias_map=_alias())
     assert parsed == _EMPTY_PARSED
 
 
@@ -190,19 +193,19 @@ def test_state_load_save_roundtrip(tmp_path):
 
 
 def test_load_state_missing_file_is_empty(tmp_path):
-    assert exclusions.load_state(tmp_path / "nope.json") == {"repos": {}, "dismissed": {}}
+    assert exclusions.load_state(tmp_path / "nope.json") == {"repos": {}, "dismissed": {}, "approved": {}}
 
 
 def test_load_state_corrupt_file_is_empty(tmp_path):
     p = tmp_path / "exclusions.json"
     p.write_text("{ this is not json ")
-    assert exclusions.load_state(p) == {"repos": {}, "dismissed": {}}
+    assert exclusions.load_state(p) == {"repos": {}, "dismissed": {}, "approved": {}}
 
 
 def test_load_state_wrong_shape_is_normalized(tmp_path):
     p = tmp_path / "exclusions.json"
     p.write_text(json.dumps(["not", "a", "dict"]))
-    assert exclusions.load_state(p) == {"repos": {}, "dismissed": {}}
+    assert exclusions.load_state(p) == {"repos": {}, "dismissed": {}, "approved": {}}
     p.write_text(json.dumps({"repos": "not-a-dict"}))
     assert exclusions.load_state(p)["repos"] == {}
 
