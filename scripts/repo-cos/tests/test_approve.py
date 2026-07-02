@@ -260,6 +260,137 @@ def test_post_task_unparseable_response_is_failure():
     assert clawgate.post_task("t", "b", creds=creds, _post=junk) is None
 
 
+# ==== 2b. REPO RESOLVER + dispatch-config payload ====================================
+
+# fake repos whose BASENAMES we control — no real fs/git needed.
+_FAKE_REPOS = ["~/ws/devrc", "~/ws/civit/civitai", "~/ws/kubeclaw-cloud"]
+
+
+def test_resolve_repo_fullname_ssh_remote():
+    def run(path):
+        assert path.endswith("/ws/civit/civitai")   # ~ expanded, basename matched
+        return "git@github.com:Owner/Repo.git"
+    assert clawgate.resolve_repo_fullname("civitai", repos=_FAKE_REPOS, _run=run) == "Owner/Repo"
+
+
+def test_resolve_repo_fullname_https_remote_with_git_suffix():
+    run = lambda p: "https://github.com/Owner/Repo.git"
+    assert clawgate.resolve_repo_fullname("devrc", repos=_FAKE_REPOS, _run=run) == "Owner/Repo"
+
+
+def test_resolve_repo_fullname_https_remote_no_git_suffix():
+    run = lambda p: "https://github.com/Owner/Repo"
+    assert clawgate.resolve_repo_fullname("devrc", repos=_FAKE_REPOS, _run=run) == "Owner/Repo"
+
+
+def test_resolve_repo_fullname_ssh_scheme_remote():
+    run = lambda p: "ssh://git@github.com/Owner/Repo.git"
+    assert clawgate.resolve_repo_fullname("devrc", repos=_FAKE_REPOS, _run=run) == "Owner/Repo"
+
+
+def test_resolve_repo_fullname_unknown_name_returns_empty():
+    # a name whose basename matches nothing in repos → "" (never shells out).
+    called = []
+    run = lambda p: called.append(p) or "git@github.com:Owner/Repo.git"
+    assert clawgate.resolve_repo_fullname("nope", repos=_FAKE_REPOS, _run=run) == ""
+    assert called == []          # short-circuits before running git
+
+
+def test_resolve_repo_fullname_empty_name_returns_empty():
+    assert clawgate.resolve_repo_fullname("", repos=_FAKE_REPOS, _run=lambda p: "x") == ""
+    assert clawgate.resolve_repo_fullname(None, repos=_FAKE_REPOS, _run=lambda p: "x") == ""
+
+
+def test_resolve_repo_fullname_run_raises_returns_empty():
+    def boom(path):
+        raise OSError("git not found")
+    assert clawgate.resolve_repo_fullname("devrc", repos=_FAKE_REPOS, _run=boom) == ""
+
+
+def test_resolve_repo_fullname_empty_remote_returns_empty():
+    # _run returning "" (no remote / non-zero exit) → "".
+    assert clawgate.resolve_repo_fullname("devrc", repos=_FAKE_REPOS, _run=lambda p: "") == ""
+
+
+def test_resolve_repo_fullname_non_github_remote_returns_empty():
+    run = lambda p: "https://gitlab.com/Owner/Repo.git"
+    assert clawgate.resolve_repo_fullname("devrc", repos=_FAKE_REPOS, _run=run) == ""
+
+
+def test_git_remote_wrapper_non_zero_returns_empty(monkeypatch):
+    import subprocess
+
+    class _Proc:
+        returncode = 1
+        stdout = ""
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: _Proc())
+    assert clawgate._git_remote("/nope") == ""
+
+
+def test_post_task_includes_repo_when_passed():
+    seen = {}
+
+    def fake_post(url, payload, token, timeout=15):
+        seen["payload"] = payload
+        return json.dumps({"id": 5})
+
+    creds = {"CLAWGATE_API_URL": "http://cg", "CLAWGATE_HOOK_TOKEN": "t"}
+    tid = clawgate.post_task("d", "b", repo="Owner/Repo", creds=creds, _post=fake_post)
+    assert tid == 5
+    assert seen["payload"] == {"directory": "d", "body": "b", "repo": "Owner/Repo"}
+
+
+def test_post_task_includes_model_when_passed():
+    seen = {}
+    fake_post = lambda u, payload, t, timeout=15: (seen.update(payload=payload)
+                                                   or json.dumps({"id": 6}))
+    creds = {"CLAWGATE_API_URL": "http://cg", "CLAWGATE_HOOK_TOKEN": "t"}
+    clawgate.post_task("d", "b", repo="O/R", model="opus", creds=creds, _post=fake_post)
+    assert seen["payload"] == {"directory": "d", "body": "b", "repo": "O/R", "model": "opus"}
+
+
+def test_post_task_omits_repo_and_model_when_absent():
+    # BACKWARD-COMPAT GUARD: a bare call must send EXACTLY the old 2-key payload.
+    seen = {}
+    fake_post = lambda u, payload, t, timeout=15: (seen.update(payload=payload)
+                                                   or json.dumps({"id": 7}))
+    creds = {"CLAWGATE_API_URL": "http://cg", "CLAWGATE_HOOK_TOKEN": "t"}
+    clawgate.post_task("d", "b", creds=creds, _post=fake_post)
+    assert seen["payload"] == {"directory": "d", "body": "b"}
+
+
+def test_post_approvals_passes_resolved_repo_to_post_task():
+    """The caller wiring: _post_approvals_to_clawgate resolves the repo full-name and threads
+    it into post_task(repo=...). Inject a fake clawgate module via the `_clawgate` param."""
+    import types
+    captured = {}
+
+    def _resolve(name):
+        captured["resolve_arg"] = name
+        return "Owner/Repo"
+
+    def _post_task(directory, body, *, repo="", model=""):
+        captured["directory"] = directory
+        captured["repo"] = repo
+        return 4242
+
+    fake_cg = types.SimpleNamespace(
+        build_task_title=lambda p: p["title"],
+        build_task_body=lambda p: "body",
+        resolve_repo_fullname=_resolve,
+        post_task=_post_task,
+    )
+    approvals = [{"repo": "civitai", "title": "T",
+                  "evidence": ["civitai/src/x.ts:1"]}]
+    state = {"repos": {}, "dismissed": {}, "approved": {}}
+    scan._post_approvals_to_clawgate(approvals, state, _clawgate=fake_cg)
+
+    assert captured["resolve_arg"] == "civitai"
+    assert captured["repo"] == "Owner/Repo"
+    # suppress-on-success still records the evidence with the returned task id.
+    assert "civitai/src/x.ts:1" in state["approved"]
+
+
 # ==== 3. SUPPRESS-ON-SUCCESS (exclusions.apply_approvals) ============================
 
 def test_apply_approvals_success_suppresses():
@@ -417,9 +548,10 @@ def test_scan_approve_posts_and_suppresses_repo_kept(tmp_path, monkeypatch):
             return "**🤖 repo-cos · APPROVED**\n" + p["title"]
 
         @staticmethod
-        def post_task(directory, body):
+        def post_task(directory, body, *, repo="", model=""):
             posted["directory"] = directory
             posted["body"] = body
+            posted["repo"] = repo
             return 4242
 
     # inject the fake clawgate into scan's poster helper via monkeypatching the module import.
@@ -469,7 +601,7 @@ def test_scan_approve_failed_post_not_suppressed(tmp_path, monkeypatch):
     import clawgate as clawgate_mod
     monkeypatch.setattr(clawgate_mod, "build_task_title", lambda p: p["title"])
     monkeypatch.setattr(clawgate_mod, "build_task_body", lambda p: "body")
-    monkeypatch.setattr(clawgate_mod, "post_task", lambda d, b: None)   # FAILURE
+    monkeypatch.setattr(clawgate_mod, "post_task", lambda d, b, **kw: None)   # FAILURE
 
     seen = {}
 

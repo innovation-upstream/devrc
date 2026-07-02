@@ -11,8 +11,13 @@ Design (mirrors the rest of repo-cos: best-effort, never raises, stdlib-only):
     CLAWGATE_HOOK_TOKEN}. Missing file / keys → {} (→ post_task no-ops to None).
   * `build_task_body(proposal)` → clean markdown card matching the homelab task-drafter's
     style (lead `**🤖 repo-cos · APPROVED**`, then the goal, structured fields, evidence).
-  * `post_task(directory, body)` → POST {API_URL}/api/tasks with the Bearer hook token, 15s
-    timeout. Returns the created task id (int) on success, else None (logged). NEVER raises.
+  * `resolve_repo_fullname(repo_name)` → the proposal's local repo basename → its GitHub
+    `owner/name` (from `git remote get-url origin`), so the Task carries a dispatch-ready
+    `repo` pre-fill. Best-effort/stdlib-only; unknown/unparseable → "" (repo left unset).
+  * `post_task(directory, body, *, repo="", model="")` → POST {API_URL}/api/tasks with the
+    Bearer hook token, 15s timeout. The payload carries the resolved `repo` (and `model`)
+    ONLY when non-empty — a bare call still sends exactly {"directory","body"} (back-compat).
+    Returns the created task id (int) on success, else None (logged). NEVER raises.
 
 This is the ONLY new network in the approve path. Everything upstream (the parser) is pure.
 Reference impl: homelab-talos …/agent-pods/task-drafter/trigger-configmap.yaml `route_clawgate`.
@@ -20,6 +25,7 @@ Reference impl: homelab-talos …/agent-pods/task-drafter/trigger-configmap.yaml
 from __future__ import annotations
 
 import json
+import subprocess
 import sys
 import urllib.error
 import urllib.request
@@ -58,6 +64,84 @@ def load_creds(path: Path | None = None) -> dict:
         _log(f"could not read {p}: {exc}")
         return {}
     return creds
+
+
+# ---- repo → GitHub full-name resolver ----------------------------------------------
+
+def _git_remote(path: str, *, timeout: int = 10) -> str:
+    """Run `git -C <path> remote get-url origin`, returning the stripped stdout, or "" on any
+    failure (non-zero, missing git, timeout, …). Isolated + injectable so tests never shell
+    out. Never raises."""
+    try:
+        proc = subprocess.run(
+            ["git", "-C", path, "remote", "get-url", "origin"],
+            capture_output=True, text=True, timeout=timeout,
+        )
+    except Exception as exc:  # noqa: BLE001
+        _log(f"git remote for {path} failed: {exc}")
+        return ""
+    if proc.returncode != 0:
+        return ""
+    return (proc.stdout or "").strip()
+
+
+def _parse_github_fullname(url: str) -> str:
+    """Parse a git remote URL to `owner/name`. Strips a leading `git@github.com:`,
+    `https://github.com/`, `http://github.com/`, or `ssh://git@github.com/`, and a trailing
+    `.git`. Anything we don't recognize as a GitHub remote → "" (best-effort)."""
+    u = (url or "").strip()
+    if not u:
+        return ""
+    for prefix in ("git@github.com:", "ssh://git@github.com/",
+                   "https://github.com/", "http://github.com/"):
+        if u.startswith(prefix):
+            u = u[len(prefix):]
+            break
+    else:
+        return ""  # not a GitHub remote we can map
+    if u.endswith(".git"):
+        u = u[:-4]
+    parts = [seg for seg in u.strip("/").split("/") if seg]
+    if len(parts) != 2:
+        return ""
+    return f"{parts[0]}/{parts[1]}"
+
+
+def resolve_repo_fullname(repo_name: str, *, repos=None, _run=None) -> str:
+    """Map a proposal's repo BASENAME (e.g. `civitai`, `devrc`) → its GitHub `owner/name` by
+    reading `git remote get-url origin` on the matching local path. A naive basename is WRONG
+    (e.g. `datapacket-talos → civitai/talos-infra`), so we always resolve from the remote.
+
+    `repos` defaults to `scan.DEFAULT_REPOS` (a list of `~`-relative paths); `_run` defaults to
+    `_git_remote` — both injectable so the function is pure/testable (no real fs/git needed).
+    BEST-EFFORT, stdlib-only, NEVER raises: unknown name / no matching path / no remote /
+    unparseable → "" (the Task's repo is then left unset → clawgate's dispatch default)."""
+    name = (repo_name or "").strip()
+    if not name:
+        return ""
+    try:
+        if repos is None:
+            import scan  # lazy — avoids a top-level cycle; picks up monkeypatched value
+            repos = scan.DEFAULT_REPOS
+        run = _run if _run is not None else _git_remote
+
+        path = None
+        for entry in repos or []:
+            p = str(Path(str(entry)).expanduser())
+            if Path(p).name == name:
+                path = p
+                break
+        if path is None:
+            _log(f"no local repo path matches {name!r} — Task repo left unset")
+            return ""
+
+        full = _parse_github_fullname(run(path))
+        if not full:
+            _log(f"could not resolve GitHub full-name for {name!r} — Task repo left unset")
+        return full
+    except Exception as exc:  # noqa: BLE001
+        _log(f"resolve_repo_fullname({name!r}) failed: {exc}")
+        return ""
 
 
 # ---- card body ---------------------------------------------------------------------
@@ -118,11 +202,15 @@ def _post(url: str, payload: dict, token: str, *, timeout: int = POST_TIMEOUT) -
         return resp.read().decode("utf-8")
 
 
-def post_task(directory: str, body: str, *, creds: dict | None = None,
-              _post=_post) -> int | None:
+def post_task(directory: str, body: str, *, repo: str = "", model: str = "",
+              creds: dict | None = None, _post=_post) -> int | None:
     """POST a Task to clawgate's `/api/tasks`. Returns the created task id (int) on success,
     else None. BEST-EFFORT: any error (no creds, unreachable, non-JSON, no id) is logged and
-    yields None — NEVER raises. `creds`/`_post` are injectable for tests (no real network)."""
+    yields None — NEVER raises. `creds`/`_post` are injectable for tests (no real network).
+
+    `repo` (a GitHub `owner/name`) and `model` pre-fill the Task's dispatch config; each is
+    added to the payload ONLY when non-empty, so a bare call still sends exactly the old
+    2-key {"directory","body"} payload (backward-compatible)."""
     c = creds if creds is not None else load_creds()
     api = (c.get("CLAWGATE_API_URL") or "").rstrip("/")
     token = c.get("CLAWGATE_HOOK_TOKEN") or ""
@@ -132,6 +220,10 @@ def post_task(directory: str, body: str, *, creds: dict | None = None,
 
     url = f"{api}/api/tasks"
     payload = {"directory": directory, "body": body}
+    if repo:
+        payload["repo"] = repo
+    if model:
+        payload["model"] = model
     try:
         raw = _post(url, payload, token)
     except urllib.error.HTTPError as exc:  # noqa: PERF203
