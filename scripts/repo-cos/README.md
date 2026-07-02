@@ -27,7 +27,7 @@ shrinks the corpus, then the LLM runs on the small survivor set.
 | Stage | Module | What | Cost |
 |-------|--------|------|------|
 | 0 | `feedback.py` | read Zach's reply to LAST digest → synthesis context (Postgres default; IMAP fallback) | none |
-| 0.5 | `exclusions.py` | parse that reply → **HARD** repo-level exclusions (deterministic) | none |
+| 0.5 | `exclusions.py` | parse that reply → **HARD** repo-level exclusions **+ per-recommendation dismissals** (deterministic) | none |
 | 1 | `prescan.py` | cheap grep/git signals, capped **per repo** | none |
 | 2 | `llm.py` | OpenRouter clusters survivors → ranked JSON proposals | one call |
 | 3 | `digest.py` | one formatter shared by stdout **and** email | none |
@@ -89,26 +89,42 @@ runs — they **cannot reappear**. (The context-injection above is kept for nuan
 *adds* the hard layer.)
 
 - **Positional mapping (primary):** a line starting `N.` / `N)` / `N -` / `#N` / `N:` maps
-  to proposal **N** in the digest you actually saw → that proposal's repo.
-- **Keyword intent (deterministic set):** `paused / skip / ignore / stop / drop / remove /
-  don't / do not / won't / leave it / not (mine|ours|relevant|interested) / no / archived /
-  deprecated` → **exclude**. `not (the|code) owner` / `deprecated` / `archived` → the
-  exclusion is **permanent** (vs. `paused`, which is undoable). `resume / unpause /
-  un-exclude / re-enable / reactivate / bring back / … again` + a repo ref → **resume**
-  (un-exclude).
+  to proposal **N** in the digest you actually saw → that proposal's repo **and evidence**.
+- **Two intents, split by a strict precedence** (a reply distinguishes *pause the repo* from
+  *skip this one recommendation*):
+  1. **repo-pause** — `paused / on hold / hold off` → **repo exclusion** (non-permanent).
+  2. **repo-owner/dead** — `not (the|our|my|code) owner / not ours / deprecated / archived /
+     dead / …` → **repo exclusion, permanent**. (`dont own the 3d model FEATURE` does **not**
+     match — that's `dont own`, not `not owner`, and about a feature → falls to dismiss.)
+  3. **recommendation-dismiss** — `skip / not needed / not relevant / dismiss / nah / no /
+     don't (propose|want|need)` **when no repo-pause/owner language is present** → **dismiss
+     THAT proposal** (collect its evidence `repo/file:line` refs); the **repo stays in scope**.
+  Higher tiers win: a line with both `paused` and `skip` is a repo-pause. `resume / unpause /
+  … again` beats all three → **resume** (un-exclude a repo).
 - **Name mentions:** a reply naming a repo/alias (`kubeclaw`, `civitai`, `homelab`,
-  `datapacket`, …) with an exclude/resume intent applies even without a position number.
+  `datapacket`, …) with a **repo-level** intent applies even without a position number.
+  (Dismissal needs a *positional* line — there's no proposal to look up from a bare name.)
 - **Position source = the digest you SAW, not `latest.json`.** Proposals rotate run-to-run
   and every run overwrites `latest.json`, so `--email` also writes **`last_emailed.json`**
   (the emailed set). `parse_reply` maps `1./2./…` against `last_emailed.json` → else the
   newest `history/*.json` with `emailed:true` → else `latest.json`.
-- **State:** `~/.config/repo-cos/exclusions.json` (`{repos:{<name>:{reason, excluded_at,
-  permanent, source}}}`) — **hand-editable**. Robust to a missing/corrupt file (→ empty).
-- **Visibility + undo:** excluded repos are surfaced as a digest footer (`Excluded
-  (paused/not-yours): … — reply "resume <repo>" to re-enable.`). `--show-exclusions` prints
-  the current state and exits; `--no-feedback` skips the reply parse too.
+- **State:** `~/.config/repo-cos/exclusions.json` — **hand-editable**, two keys:
+  `{repos:{<name>:{reason, excluded_at, permanent, source}}}` (repo-level) and
+  `{dismissed:{<repo/file:line>:{reason, dismissed_at, repo}}}` (per-recommendation). Robust
+  to a missing/corrupt file **or an older file without `dismissed`** (→ empty). Dismissals
+  accumulate and are never auto-removed — hand-edit the JSON to un-dismiss one.
+- **Pre-scan dismiss filter (the guarantee):** `filter_candidates(candidates, state)` runs
+  right after `prescan.scan_all(...)` and **before** synthesis — it drops any candidate whose
+  `repo/file:line` ref is in `dismissed`, so a dismissed proposal's signal **never reaches
+  the LLM and cannot re-form**, while the rest of that repo still surfaces. Logs
+  `dismissed: N candidate(s) suppressed` to stderr.
+- **Visibility + undo:** excluded repos surface as a digest footer (`Excluded
+  (paused/not-yours): … — reply "resume <repo>" to re-enable.`); dismissals add a terse
+  `Dismissed N past proposal(s).` line. `--show-exclusions` prints **both** (repos +
+  each dismissed `repo/file:line` + reason) and exits; `--no-feedback` skips the reply parse.
 - **Limits:** the keyword set is finite — a reply that's *pure prose* with no positional
-  anchor and no repo name won't exclude anything (it still reaches the LLM as context).
+  anchor and no repo name (and no clear skip/pause anchor) won't exclude or dismiss anything
+  (it still reaches the LLM as context).
   Unparseable lines are ignored and never raise.
 
 ## Usage

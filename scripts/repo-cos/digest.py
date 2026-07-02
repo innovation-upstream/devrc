@@ -32,17 +32,29 @@ def _excluded_footer(excluded_repos: list | None) -> str | None:
             'reply "resume <repo>" to re-enable.')
 
 
+def _dismissed_footer(dismissed_count: int | None) -> str | None:
+    """Terse footer line surfacing how many past proposals were dismissed (skipped) — the
+    repos stay in scope, only those specific recommendations are suppressed. None when zero."""
+    n = int(dismissed_count or 0)
+    if n <= 0:
+        return None
+    return f"Dismissed {n} past proposal(s) (repos kept in scope)."
+
+
 def render(proposals: list, *, today: date | None = None,
            candidate_count: int | None = None,
            approx_tokens: int | None = None,
-           excluded_repos: list | None = None) -> str:
+           excluded_repos: list | None = None,
+           dismissed_count: int | None = None) -> str:
     """Render proposals (llm.Proposal objects) into a compact skimmable digest.
 
     Empty proposal list is handled explicitly (honest 'nothing surfaced' message rather
     than a blank email). `excluded_repos` (deterministically dropped from the scan) is
-    surfaced as a footer so Zach sees the state and can reply "resume <repo>" to undo it."""
+    surfaced as a footer so Zach sees the state and can reply "resume <repo>" to undo it.
+    `dismissed_count` (per-recommendation dismissals) is surfaced as a terse footer line."""
     d = today or date.today()
     excl_footer = _excluded_footer(excluded_repos)
+    dism_footer = _dismissed_footer(dismissed_count)
     lines: list[str] = [subject(d), ""]
     if candidate_count is not None:
         meta = f"From {candidate_count} deterministic signal(s)"
@@ -58,9 +70,12 @@ def render(proposals: list, *, today: date | None = None,
     if not proposals:
         lines.append("No bounded, evidence-backed proposals surfaced this run.")
         lines.append("(That is a valid outcome — the bar is deliberately high.)")
-        if excl_footer:
+        if excl_footer or dism_footer:
             lines.append("")
-            lines.append(excl_footer)
+            if excl_footer:
+                lines.append(excl_footer)
+            if dism_footer:
+                lines.append(dism_footer)
         return "\n".join(lines)
 
     for i, p in enumerate(proposals, 1):
@@ -76,8 +91,11 @@ def render(proposals: list, *, today: date | None = None,
             lines.append(f"     - {ref}")
         lines.append("")
 
-    if excl_footer:
-        lines.append(excl_footer)
+    if excl_footer or dism_footer:
+        if excl_footer:
+            lines.append(excl_footer)
+        if dism_footer:
+            lines.append(dism_footer)
         lines.append("")
 
     lines.append("—")

@@ -130,7 +130,7 @@ def cmd_scan(args) -> int:
                 alias_map = exclusions.build_alias_map(DEFAULT_REPOS)
                 parsed = exclusions.parse_reply(fb.reply_text, emailed_props,
                                                 alias_map=alias_map)
-                if parsed["exclude"] or parsed["resume"]:
+                if parsed["exclude"] or parsed["resume"] or parsed.get("dismiss"):
                     exclusions.apply(excl_state, parsed, source="reply")
                     exclusions.save_state(excl_state)
                     if parsed["exclude"]:
@@ -138,6 +138,11 @@ def cmd_scan(args) -> int:
                         print(f"  exclusions: reply excluded {names}", file=sys.stderr)
                     if parsed["resume"]:
                         print(f"  exclusions: reply resumed {', '.join(parsed['resume'])}",
+                              file=sys.stderr)
+                    if parsed.get("dismiss"):
+                        nrefs = sum(len(d.get("evidence") or []) for d in parsed["dismiss"])
+                        print(f"  exclusions: reply dismissed {len(parsed['dismiss'])} "
+                              f"recommendation(s) ({nrefs} evidence ref(s)); repos kept",
                               file=sys.stderr)
             except Exception as exc:  # noqa: BLE001
                 print(f"  ! exclusion parse failed (proceeding): {exc}", file=sys.stderr)
@@ -162,6 +167,15 @@ def cmd_scan(args) -> int:
         return 2
 
     candidates, scans = prescan.scan_all(repos, args.limit_candidates)
+
+    # ---- DISMISSED-RECOMMENDATION FILTER (drop suppressed proposals BEFORE the LLM) ----
+    # A recommendation Zach replied "skip" to (its evidence refs live in excl_state
+    # ["dismissed"]) is removed here so its signal never reaches synthesis and cannot
+    # re-form as the same proposal — while the rest of that repo still surfaces.
+    candidates, dropped = exclusions.filter_candidates(candidates, excl_state)
+    if dropped:
+        print(f"  dismissed: {len(dropped)} candidate(s) suppressed", file=sys.stderr)
+    dismissed_recs = exclusions.dismissed_entries(excl_state)
     cand_dicts = [c.as_dict() for c in candidates]
 
     scan_errors = [(s.repo, s.error) for s in scans if s.error]
@@ -170,7 +184,8 @@ def cmd_scan(args) -> int:
 
     # ---- Stage-1-only smoke mode: no LLM, no key, no spend. ----
     if args.no_llm or args.candidates_only:
-        return _emit_candidates(candidates, scans, cand_dicts, args)
+        return _emit_candidates(candidates, scans, cand_dicts, args,
+                                dismissed_recs=dismissed_recs)
 
     # ---- Stage 2: LLM synthesis over survivors. ----
     import llm
@@ -183,9 +198,11 @@ def cmd_scan(args) -> int:
 
     if not cand_dicts:
         # Nothing to synthesize — emit an honest empty digest without spending.
-        body = digest.render([], candidate_count=0, excluded_repos=excluded_names)
+        body = digest.render([], candidate_count=0, excluded_repos=excluded_names,
+                             dismissed_count=len(dismissed_recs))
         return _deliver(body, args, proposals=[], candidate_count=0, approx_tokens=0,
-                        feedback_applied=False, excluded_repos=excluded_names)
+                        feedback_applied=False, excluded_repos=excluded_names,
+                        dismissed_count=len(dismissed_recs))
 
     # `fb` (Zach's reply) was already fetched up front — reused here as synthesis CONTEXT
     # (nuance the deterministic exclusion layer can't express). The reply is passed through
@@ -201,24 +218,29 @@ def cmd_scan(args) -> int:
         candidate_count=len(cand_dicts),
         approx_tokens=result.approx_prompt_tokens,
         excluded_repos=excluded_names,
+        dismissed_count=len(dismissed_recs),
     )
     print(f"  synthesis: model={result.model} candidates={len(cand_dicts)} "
           f"proposals={len(result.proposals)} ~prompt_tokens={result.approx_prompt_tokens} "
-          f"feedback_applied={fb is not None} excluded={len(excluded_names)}",
+          f"feedback_applied={fb is not None} excluded={len(excluded_names)} "
+          f"dismissed={len(dismissed_recs)}",
           file=sys.stderr)
     return _deliver(
         body, args, proposals=result.proposals,
         candidate_count=len(cand_dicts), approx_tokens=result.approx_prompt_tokens,
         feedback_applied=fb is not None, excluded_repos=excluded_names,
+        dismissed_count=len(dismissed_recs),
     )
 
 
-def _emit_candidates(candidates, scans, cand_dicts, args) -> int:
+def _emit_candidates(candidates, scans, cand_dicts, args, *, dismissed_recs=None) -> int:
+    dismissed_recs = dismissed_recs or []
     if args.json:
         print(json.dumps({
             "repos": [{"repo": s.repo, "path": s.path, "error": s.error,
                        "candidate_count": len(s.candidates)} for s in scans],
             "capped_total": len(cand_dicts),
+            "dismissed_count": len(dismissed_recs),
             "candidates": cand_dicts,
         }, indent=2))
         return 0
@@ -227,6 +249,12 @@ def _emit_candidates(candidates, scans, cand_dicts, args) -> int:
     for s in scans:
         tag = f" [ERROR: {s.error}]" if s.error else ""
         print(f"  {s.repo}: {len(s.candidates)} raw candidate(s){tag}")
+    if dismissed_recs:
+        print(f"\n  dismissed: {len(dismissed_recs)} recommendation(s) suppressed "
+              "(repos kept):")
+        for d in dismissed_recs:
+            reason = f" — {d['reason']}" if d.get("reason") else ""
+            print(f"    {d['ref']}{reason}")
     print()
     # group the capped set by repo for readability
     by_repo: dict[str, list] = {}
@@ -243,7 +271,8 @@ def _emit_candidates(candidates, scans, cand_dicts, args) -> int:
 
 
 def _deliver(body: str, args, *, proposals, candidate_count, approx_tokens,
-             feedback_applied: bool = False, excluded_repos=None) -> int:
+             feedback_applied: bool = False, excluded_repos=None,
+             dismissed_count: int = 0) -> int:
     """Print (dry-run) or send (--email) the digest. --dry-run is the default and always
     prints; --email additionally sends."""
     excluded_repos = list(excluded_repos or [])
@@ -254,6 +283,7 @@ def _deliver(body: str, args, *, proposals, candidate_count, approx_tokens,
             "approx_prompt_tokens": approx_tokens,
             "feedback_applied": feedback_applied,
             "excluded_repos": excluded_repos,
+            "dismissed_count": int(dismissed_count),
             "proposals": [p.as_dict() for p in proposals],
             "emailed": bool(args.email),
         }, indent=2))
