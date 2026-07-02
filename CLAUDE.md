@@ -6,6 +6,7 @@ Personal dev-environment config (zsh, tmux, neovim, i3, scripts) for the workben
 - **Bash tool runs NON-interactive zsh** (`zsh -c`) → sources `.zshenv` only, NOT `.zshrc`/`initContent`. Shell tweaks Claude needs at runtime must go in home-manager `programs.zsh.envExtra` (→ `.zshenv`). `unsetopt nomatch` lives there so unmatched globs pass through literally instead of aborting with "no matches found".
 - zsh reserves `status` — use `rc=`/`out=`, never `status=$(...)`.
 - Use `git -C <path>` and absolute paths — never `cd <repo> && …` (triggers approval prompts and can run untrusted hooks).
+- **Canonical env handles are pre-exported in `.zshenv`** (via `envExtra`) so you don't re-`cd`/`export` on every call — non-interactive `zsh -c` doesn't persist state. Use them directly (each is existence-guarded, absent on hosts without that checkout): repo roots `$DEVRC` `$HOMELAB` `$DATAPACKET` `$CIVITAI` (e.g. `git -C $DATAPACKET status`); kubeconfigs `$KC_HOMELAB` `$KC_WORKBENCH` `$KC_DPPROD` `$KC_NEBULA` (e.g. `KUBECONFIG=$KC_DPPROD kubectl get pods`). There is deliberately **no default `KUBECONFIG`** — pick a cluster per command so a bare `kubectl` can't hit prod.
 
 ## Applying changes
 - **Deploy to BOTH hosts (after merge):** `scripts/ship.sh` — converges workbench + laptop to `origin/main` (stash → ff-pull → `home-manager switch` → pop → verify HEAD==origin/main) in one idempotent call. Use this instead of hand-running the per-host dance; `--no-laptop`/`--no-local` to scope. Covers home-manager only (not `sudo nixos-rebuild`).
