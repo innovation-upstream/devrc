@@ -73,11 +73,18 @@ def _reply_src() -> str:
 def _import_maildb():
     """Import MailDB from the sibling scripts/mail-actions/_db.py (the shared port-forward
     + psycopg2 + DSN-from-secret helper). Kept lazy so the IMAP path needs no psycopg2."""
-    mail_actions = Path(__file__).resolve().parents[1] / "mail-actions"
-    if str(mail_actions) not in sys.path:
-        sys.path.insert(0, str(mail_actions))
-    import _db  # noqa: E402  (module lives in scripts/mail-actions)
-    return _db.MailDB
+    # Load by EXPLICIT path via importlib — do NOT put mail-actions on sys.path: it has
+    # its own `llm.py` that would SHADOW repo-cos's `llm.py` (sys.path[0] wins) and break
+    # synthesis with "module 'llm' has no attribute 'synthesize'" (caught live). `_db.py`
+    # imports only stdlib, so a standalone load is safe.
+    import importlib.util
+    db_path = Path(__file__).resolve().parents[1] / "mail-actions" / "_db.py"
+    spec = importlib.util.spec_from_file_location("repo_cos_maildb", db_path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"cannot load {db_path}")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod.MailDB
 
 # "On Mon, 1 Jul 2026 at 08:00, Zach <…> wrote:" — Gmail's quote attribution line. Once we
 # hit it, everything after is quoted history, not Zach's new words. Kept permissive (the
@@ -288,12 +295,16 @@ def _fetch_via_postgres(generated_at: str, *, _maildb=None) -> str | None:
         return None
 
     after = _parse_generated_at(generated_at)
+    # EXACT from_addr match — NOT a substring ILIKE. repo-cos@inbox.zacx.dev is a public
+    # Reply-To, the receiver stores unauthenticated/spoofable From: addr-specs, and a
+    # spoofed reply can drive the deterministic exclusion parser. A substring gate would
+    # let `zachlowden1@gmail.com.evil.com` pass (audit 🔴); mirror the IMAP path's exact gate.
     sql = (
         "SELECT text_body FROM mail "
         "WHERE %s = ANY(to_addrs) "
-        "  AND from_addr ILIKE %s "
+        "  AND lower(trim(from_addr)) = %s "
     )
-    params: list = [REPLY_TO_ADDR, f"%{OWNER_MATCH}%"]
+    params: list = [REPLY_TO_ADDR, OWNER_MATCH.strip().lower()]
     if after is not None:
         sql += "  AND received_at > %s "
         params.append(after)

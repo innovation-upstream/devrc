@@ -343,11 +343,14 @@ def test_postgres_is_default_and_returns_cleaned_reply(latest, monkeypatch):
     assert "Model3D" not in fb.reply_text          # quoted part stripped
     assert fb.replied_at == "2026-07-01T08:00:00-05:00"
     assert len(fb.prev_proposals) == 2             # from latest.json
-    # ownership gate: query binds the Reply-To address + owner match + time bound
+    # ownership gate: query binds the Reply-To address + EXACT owner match + time bound.
+    # Exact (not substring) so a spoofed lookalike From (…gmail.com.evil.com) to the
+    # public Reply-To can't be treated as Zach's reply (audit 🔴).
     assert feedback.REPLY_TO_ADDR in sink["params"]
-    assert f"%{feedback.OWNER_MATCH}%" in sink["params"]
+    assert feedback.OWNER_MATCH.strip().lower() in sink["params"]  # exact, not "%…%"
     assert "= ANY(to_addrs)" in sink["sql"]
-    assert "from_addr ILIKE" in sink["sql"]
+    assert "lower(trim(from_addr)) =" in sink["sql"]   # exact match, NOT substring ILIKE
+    assert "ILIKE" not in sink["sql"]
     assert "received_at >" in sink["sql"]
 
 
