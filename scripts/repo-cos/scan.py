@@ -263,7 +263,8 @@ def _post_approvals_to_clawgate(approvals, excl_state, *, _clawgate=None) -> Non
         try:
             directory = clawgate.build_task_title(prop)
             body = clawgate.build_task_body(prop)
-            tid = clawgate.post_task(directory, body)
+            repo = clawgate.resolve_repo_fullname(prop.get("repo") or "")
+            tid = clawgate.post_task(directory, body, repo=repo)
         except Exception as exc:  # noqa: BLE001
             print(f"  ! clawgate post failed (proceeding): {exc}", file=sys.stderr)
             tid = None
