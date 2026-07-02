@@ -11,6 +11,25 @@
   # command with "no matches found" — the single largest source of session command errors.
   envExtra = ''
     unsetopt nomatch
+
+    # ── Canonical repo roots + kubeconfigs for agent shells ─────────────────
+    # Claude Code's Bash tool runs NON-interactive `zsh -c`, which sources ONLY
+    # .zshenv and does NOT persist shell state between calls. So agents were
+    # re-typing `cd <repo> && …` / `export KUBECONFIG=…` on ~50% of Bash calls
+    # (measured: ~3.8k plumbing turns/week). Exporting stable handles ONCE here
+    # lets a call be `git -C $DATAPACKET …` / `KUBECONFIG=$KC_DPPROD kubectl …`
+    # with no per-call setup. Existence-guarded so the laptop (no civit
+    # checkouts) and any missing file stay clean — no stale vars.
+    # NO default KUBECONFIG on purpose: a merged/default one lets a bare
+    # `kubectl` hit prod. Pick a cluster explicitly per command.
+    [[ -d $HOME/workspace/devrc ]]                  && export DEVRC=$HOME/workspace/devrc
+    [[ -d $HOME/workspace/homelab-talos ]]          && export HOMELAB=$HOME/workspace/homelab-talos
+    [[ -d $HOME/workspace/civit/datapacket-talos ]] && export DATAPACKET=$HOME/workspace/civit/datapacket-talos
+    [[ -d $HOME/workspace/civit/civitai ]]          && export CIVITAI=$HOME/workspace/civit/civitai
+    [[ -f $HOME/workspace/homelab-talos/homelab-kubeconfig ]]       && export KC_HOMELAB=$HOME/workspace/homelab-talos/homelab-kubeconfig
+    [[ -f $HOME/workspace/homelab-talos/workbench-kubeconfig ]]     && export KC_WORKBENCH=$HOME/workspace/homelab-talos/workbench-kubeconfig
+    [[ -f $HOME/workspace/civit/datapacket-talos/prod-kubeconfig ]] && export KC_DPPROD=$HOME/workspace/civit/datapacket-talos/prod-kubeconfig
+    [[ -f $HOME/.kube/homelab-nebula.yaml ]]        && export KC_NEBULA=$HOME/.kube/homelab-nebula.yaml
   '';
 
   initContent = let
