@@ -1,0 +1,1 @@
+clawgate manual e2e on 0.7.52 — safe to delete.
