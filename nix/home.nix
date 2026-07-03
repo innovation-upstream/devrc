@@ -282,6 +282,13 @@ in
   home.file.".claude/hooks/audit-pr-nudge.py" = {
     source = ../scripts/claude-hooks/audit-pr-nudge.py;
   };
+  # shell-env-nudge fires PostToolUse on Bash calls that re-type a repo/kubeconfig
+  # path (`cd <repo>`, `export KUBECONFIG=<path>`) and hints the pre-exported $handle
+  # (deterministic, once per handle per session). The in-the-moment counterpart to
+  # the CLAUDE.md pointers — opt-in guidance didn't stick, so nudge at the moment.
+  home.file.".claude/hooks/shell-env-nudge.py" = {
+    source = ../scripts/claude-hooks/shell-env-nudge.py;
+  };
 
   systemd.user.services.cpu-monitor = {
     Unit = {

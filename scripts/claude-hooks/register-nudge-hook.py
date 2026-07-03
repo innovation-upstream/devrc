@@ -1,14 +1,22 @@
 #!/usr/bin/env python3
-"""Idempotently register the audit-pr-nudge PostToolUse hook in ~/.claude/settings.json.
+"""Idempotently register the PostToolUse nudge hooks in ~/.claude/settings.json.
 
-settings.json is per-host and unmanaged (holds permissions/allowlists/secrets), so
-the hook *script* is symlinked by home-manager but its *registration* is applied by
-running this once per host. Safe to re-run: it adds the entry only if missing.
+settings.json is per-host and unmanaged (holds permissions/allowlists/secrets), so the
+hook *scripts* are symlinked by home-manager but their *registration* is applied by
+running this once per host. Safe to re-run: it adds only the entries that are missing.
+
+Run on each host after a home-manager switch that adds a new nudge hook:
+    python3 ~/workspace/devrc/scripts/claude-hooks/register-nudge-hook.py
 """
 import json, os, sys
 
 SETTINGS = os.path.expanduser("~/.claude/settings.json")
-CMD = "python3 ~/.claude/hooks/audit-pr-nudge.py"
+
+# PostToolUse(Bash) nudge hooks to ensure are registered.
+CMDS = [
+    "python3 ~/.claude/hooks/audit-pr-nudge.py",
+    "python3 ~/.claude/hooks/shell-env-nudge.py",
+]
 
 with open(SETTINGS) as f:
     data = json.load(f)
@@ -16,20 +24,22 @@ with open(SETTINGS) as f:
 hooks = data.setdefault("hooks", {})
 post = hooks.setdefault("PostToolUse", [])
 
-# Already registered anywhere in PostToolUse? -> no-op.
-for entry in post:
-    for h in entry.get("hooks", []):
-        if h.get("command") == CMD:
-            print("already registered — no change")
-            sys.exit(0)
+registered = {h.get("command") for entry in post for h in entry.get("hooks", [])}
 
-post.append({
-    "matcher": "Bash",
-    "hooks": [{"type": "command", "command": CMD}],
-})
+added = []
+for cmd in CMDS:
+    if cmd in registered:
+        continue
+    post.append({"matcher": "Bash", "hooks": [{"type": "command", "command": cmd}]})
+    added.append(cmd)
 
-# Write back, preserving 2-space indentation style used by the file.
+if not added:
+    print("all nudge hooks already registered — no change")
+    sys.exit(0)
+
 with open(SETTINGS, "w") as f:
     json.dump(data, f, indent=2)
     f.write("\n")
-print("registered audit-pr-nudge PostToolUse(Bash) hook")
+print("registered PostToolUse(Bash) hooks:")
+for c in added:
+    print("  +", c)

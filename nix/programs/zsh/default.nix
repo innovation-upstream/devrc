@@ -26,6 +26,7 @@
     [[ -d $HOME/workspace/homelab-talos ]]          && export HOMELAB=$HOME/workspace/homelab-talos
     [[ -d $HOME/workspace/civit/datapacket-talos ]] && export DATAPACKET=$HOME/workspace/civit/datapacket-talos
     [[ -d $HOME/workspace/civit/civitai ]]          && export CIVITAI=$HOME/workspace/civit/civitai
+    [[ -d $HOME/workspace/civit/civitai-cli ]]      && export CIVITAI_CLI=$HOME/workspace/civit/civitai-cli
     [[ -f $HOME/workspace/homelab-talos/homelab-kubeconfig ]]       && export KC_HOMELAB=$HOME/workspace/homelab-talos/homelab-kubeconfig
     [[ -f $HOME/workspace/homelab-talos/workbench-kubeconfig ]]     && export KC_WORKBENCH=$HOME/workspace/homelab-talos/workbench-kubeconfig
     [[ -f $HOME/workspace/civit/datapacket-talos/prod-kubeconfig ]] && export KC_DPPROD=$HOME/workspace/civit/datapacket-talos/prod-kubeconfig
