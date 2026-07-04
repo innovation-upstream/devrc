@@ -1,0 +1,16 @@
+# Normalize all text files to LF — only affects future checkouts
+* text=auto eol=lf
+
+# Explicit text + LF for known text types
+*.sh    text eol=lf
+*.bash  text eol=lf
+*.nix   text eol=lf
+*.py    text eol=lf
+*.lua   text eol=lf
+
+# Binary / generated markers
+*.png     binary
+*.jpg     binary
+*.jpeg    binary
+*.lock    linguist-generated=true
+flake.lock linguist-generated=true
