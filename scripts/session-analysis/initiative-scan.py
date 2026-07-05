@@ -49,10 +49,14 @@ Populate the password from SOPS (homelab-talos trunk):
       sops -d --extract '["stringData"]["reader-password"]' /tmp/s.yaml); rm -f /tmp/s.yaml
 
 Usage:
-  initiative-scan.py [--days N] [--json] [--repo PATH]
+  initiative-scan.py [--days N] [--json] [--repo PATH] [--tmux]
   --days   trailing window in days (default 14)
   --json   machine-readable output (the raw per-initiative data)
   --repo   restrict to a single repo path (default: auto-discover under ~/workspace)
+  --tmux   link each initiative to the live tmux session(s) hosting it (matches the
+           claude pane title against the initiative slug/title, scoped by the pane's
+           cwd→repo); also lists live claude sessions with no matched initiative.
+           Best-effort: no tmux server -> initiatives simply show [no session].
 
 HONESTY NOTE: this measures ACTIVITY, RECENCY, and EFFORT (commits / sessions /
 telemetry events / handoff freshness) plus the human-written "Next steps" line —
@@ -208,20 +212,79 @@ def _flatten_md(s: str) -> str:
     return " ".join(s.split())
 
 
+# Ultra-common tokens that would over-match if used as an initiative fingerprint.
+STOP_TOKENS = {"the", "and", "for", "wip", "tmp", "fix", "feat", "v2", "ha"}
+
+
 def slug_tokens(slug: str) -> list[str]:
     """Meaningful tokens of a slug for fuzzy branch/genesis matching.
 
     Drops date tokens and ultra-short/stop tokens that would over-match.
     """
-    stop = {"the", "and", "for", "wip", "tmp", "fix", "feat", "v2", "ha"}
     toks = []
     for t in re.split(r"[-_/]", slug.lower()):
         if not t or DATE_RE.fullmatch(t) or t.isdigit():
             continue
-        if len(t) < 3 or t in stop:
+        if len(t) < 3 or t in STOP_TOKENS:
             continue
         toks.append(t)
     return toks
+
+
+# Generic session-summary / action verbs that lead tmux pane titles ("Resume …",
+# "Monitor …", "Continue …") and prose handoff titles — never a TOPIC identifier, so
+# they must not carry a pane→initiative match (a "Resume session <id>" pane wrongly
+# hitting a `…-resume` slug). Applied ONLY to free text (`text_tokens`), NOT to
+# `slug_tokens`, so branch/git/telemetry attribution stays byte-identical.
+TITLE_STOP = {
+    "resume", "continue", "monitor", "review", "audit", "update", "check",
+    "implement", "assess", "revive", "identify", "finish", "run", "get", "wire",
+    "build", "work", "session", "task", "tasks", "add", "use",
+}
+
+
+def text_tokens(s: str) -> list[str]:
+    """Meaningful tokens of FREE TEXT (a handoff title, a tmux pane title).
+
+    Same filters as `slug_tokens` (drop dates / digits / short / stop tokens) but
+    splits on any non-alphanumeric run instead of only slug separators, so a prose
+    string like a live tmux pane title ("Continue clawgate agent loop soak testing")
+    tokenizes the same way a slug does and the two can be compared on word equality.
+    Additionally drops `TITLE_STOP` action verbs — noise in a session summary that
+    would otherwise link a pane on a generic word (see TITLE_STOP).
+    """
+    toks = []
+    for t in re.split(r"[^a-z0-9]+", s.lower()):
+        if not t or DATE_RE.fullmatch(t) or t.isdigit():
+            continue
+        if len(t) < 3 or t in STOP_TOKENS or t in TITLE_STOP:
+            continue
+        toks.append(t)
+    return toks
+
+
+def resolve_cwd_repo(cwd: str | None, repos: list[str],
+                     wt_map: dict[str, str] | None = None) -> str | None:
+    """Map a working directory to its CANONICAL repo, or None.
+
+    A cwd inside a discovered repo (realpath-prefix containment) resolves to that
+    repo; a cwd inside a linked worktree resolves via `wt_map` to the worktree's
+    canonical repo (shrinking the `(unknown repo)` bucket). Longest-prefix-first so
+    the most specific repo / worktree wins. Shared by telemetry cwd attribution and
+    tmux pane→initiative matching so both agree on what repo a dir belongs to.
+    """
+    if not cwd:
+        return None
+    wt_map = wt_map or {}
+    rp = os.path.realpath(cwd)
+    for r in sorted(repos, key=len, reverse=True):
+        rr = os.path.realpath(r)
+        if rp == rr or rp.startswith(rr + "/"):
+            return r
+    for wt in sorted(wt_map.keys(), key=len, reverse=True):
+        if rp == wt or rp.startswith(wt + "/"):
+            return wt_map[wt]
+    return None
 
 
 def branch_tokens(branch: str) -> list[str]:
@@ -924,24 +987,9 @@ def attribute_telemetry(initiatives: list[dict], rows: list[dict] | None,
         return catchall
 
     wt_map = worktree_map or {}
-    # Linked-worktree paths, longest-first, so the most specific prefix wins.
-    wt_paths = sorted(wt_map.keys(), key=len, reverse=True)
-    repos_by_len = sorted(repos, key=len, reverse=True)
 
     def cwd_repo(cwd: str | None) -> str | None:
-        if not cwd:
-            return None
-        rp = os.path.realpath(cwd)
-        # A canonical repo is the most direct match.
-        for r in repos_by_len:
-            rr = os.path.realpath(r)
-            if rp == rr or rp.startswith(rr + "/"):
-                return r
-        # Else a linked-worktree path -> its canonical repo.
-        for wt in wt_paths:
-            if rp == wt or rp.startswith(wt + "/"):
-                return wt_map[wt]
-        return None
+        return resolve_cwd_repo(cwd, repos, wt_map)
 
     # Initiatives indexed by their repo, so matching is scoped to the row's repo.
     inis_by_repo: dict[str, list[dict]] = {}
@@ -990,6 +1038,99 @@ def _num(v, default=0):
         return int(s) if s.lstrip("-").isdigit() else float(s)
     except (ValueError, TypeError):
         return default
+
+
+# --------------------------------------------------------------------------- #
+# Live tmux sessions (I/O, optional) — which scratch session hosts an initiative
+# --------------------------------------------------------------------------- #
+def collect_tmux_panes() -> list[dict]:
+    """Every live tmux pane as [{session, cwd, command, title}] (empty if no server).
+
+    Zach runs many `scratch*`-named tmux sessions in parallel, one per in-flight
+    initiative; a claude pane sets its title to the session's summary line. We read
+    those titles to link the DURABLE initiative ledger to what's actually open right
+    now (the ephemeral Alt+i view). Best-effort: `_run` returns "" when the tmux
+    binary is missing or no server is running, so this yields [] and callers degrade.
+    """
+    out = _run(["tmux", "list-panes", "-a", "-F",
+                "#{session_name}\t#{pane_current_path}\t#{pane_current_command}\t#{pane_title}"])
+    panes: list[dict] = []
+    for ln in out.splitlines():
+        if not ln.strip():
+            continue
+        parts = ln.split("\t")
+        while len(parts) < 4:
+            parts.append("")
+        panes.append({"session": parts[0], "cwd": parts[1],
+                      "command": parts[2], "title": parts[3]})
+    return panes
+
+
+def best_title_match(pane_toks: set[str], initiatives: list[dict]) -> dict | None:
+    """Pick the initiative whose slug/title best overlaps a pane title's tokens.
+
+    Scored as (# slug-token overlaps, # extra title-token overlaps). Slug tokens are
+    the initiative fingerprint (clawgate, sysredis, wedge, tekton, bitdex); the pane
+    title is first stripped of generic action verbs (`TITLE_STOP` in `text_tokens`),
+    so a pane can't be linked on "resume"/"review"/"monitor" alone — that stripping,
+    not any weighting, is what kills the generic-word false positives. A candidate
+    qualifies with ≥1 slug-token overlap, OR ≥2 title-token overlaps. Best by
+    (slug_overlap, title_overlap), then longer slug, then lexically, for determinism.
+    A more-specific sibling wins on count: a "sysRedis wedge" pane beats plain
+    "sysRedis" siblings (2 slug tokens vs 1). None when nothing clears the bar.
+
+    LIMITATION: a genuinely multi-topic pane title is attributed to its single
+    strongest match and may miss a co-hosted sibling; bag-of-words can't disambiguate.
+    Heuristic — read it as "which session is likely on this", not a proof.
+    """
+    best: dict | None = None
+    best_key: tuple = (0, 0, 0, "")
+    for ini in initiatives:
+        slug_t = set(slug_tokens(ini.get("slug", "")))
+        title_t = set(text_tokens(ini.get("title") or ""))
+        slug_overlap = len(pane_toks & slug_t)
+        title_overlap = len(pane_toks & (title_t - slug_t))
+        if slug_overlap == 0 and title_overlap < 2:
+            continue
+        key = (slug_overlap, title_overlap,
+               len(ini.get("slug", "")), ini.get("slug", ""))
+        if key > best_key:
+            best_key = key
+            best = ini
+    return best
+
+
+def match_tmux_to_initiatives(initiatives: list[dict], panes: list[dict],
+                              repos: list[str],
+                              wt_map: dict[str, str] | None = None) -> list[dict]:
+    """Attach live tmux sessions to initiatives; return unmatched claude panes.
+
+    Each pane's cwd is resolved to its repo (`resolve_cwd_repo`), and its title is
+    matched ONLY against initiatives in that repo (`best_title_match`) — so a pane in
+    devrc can't match a civit initiative that happens to share a word. Mutates each
+    initiative's `tmux_sessions` (a set of session names). A claude pane that resolves
+    to no initiative is returned as unmatched (live work the ledger doesn't cover),
+    with its session/title/repo — the honest mirror of the "no session" gap.
+    """
+    for ini in initiatives:
+        ini.setdefault("tmux_sessions", set())
+    by_repo: dict[str, list[dict]] = {}
+    for ini in initiatives:
+        by_repo.setdefault(ini["repo"], []).append(ini)
+
+    unmatched: list[dict] = []
+    for pane in panes:
+        ptoks = set(text_tokens(pane.get("title", "")))
+        repo = resolve_cwd_repo(pane.get("cwd"), repos, wt_map)
+        eligible = by_repo.get(repo, []) if repo is not None else []
+        ini = best_title_match(ptoks, eligible) if ptoks else None
+        if ini is not None:
+            ini["tmux_sessions"].add(pane["session"])
+        elif pane.get("command", "") == "claude":
+            unmatched.append({"session": pane.get("session", ""),
+                              "title": pane.get("title", ""),
+                              "repo": repo})
+    return unmatched
 
 
 # --------------------------------------------------------------------------- #
@@ -1065,10 +1206,13 @@ def attribute_git(initiatives: list[dict], days: int) -> None:
 # --------------------------------------------------------------------------- #
 def build_report(days: int, repos: list[str] | None = None,
                  client=None, projects_root: str = PROJECTS_ROOT,
-                 now: float | None = None) -> dict:
+                 now: float | None = None, include_tmux: bool = False,
+                 panes: list[dict] | None = None) -> dict:
     """Fuse the three sources into a ranked, per-repo report dict.
 
     `client` may be None (telemetry skipped). `repos` None -> auto-discover.
+    `include_tmux` links live tmux sessions to initiatives; `panes` overrides the
+    live `collect_tmux_panes()` read (for tests / reproducibility).
     """
     repos = repos if repos is not None else discover_repos()
     initiatives = load_initiatives(repos)
@@ -1081,8 +1225,19 @@ def build_report(days: int, repos: list[str] | None = None,
     telemetry_available = telem_rows is not None
     # Resolve cwds living in linked worktrees back to their canonical repo so
     # worktree telemetry attributes to the parent and `(unknown repo)` shrinks.
-    wt_map = worktree_canonical_map(repos) if telem_rows else {}
+    wt_map = worktree_canonical_map(repos) if (telem_rows or include_tmux) else {}
     catchall = attribute_telemetry(initiatives, telem_rows, repos, wt_map)
+
+    tmux_unmatched: list[dict] = []
+    tmux_active = False
+    if include_tmux:
+        live_panes = panes if panes is not None else collect_tmux_panes()
+        # A live read that finds NO panes = no tmux server on this host -> suppress the
+        # column entirely (annotating every initiative "[no session]" would be noise).
+        # An explicitly-injected pane list (tests) always activates, even when empty.
+        if panes is not None or live_panes:
+            tmux_active = True
+            tmux_unmatched = match_tmux_to_initiatives(initiatives, live_panes, repos, wt_map)
 
     # Compute momentum from the MAX of every touch signal.
     for ini in initiatives:
@@ -1096,6 +1251,12 @@ def build_report(days: int, repos: list[str] | None = None,
 
     initiatives = sort_initiatives(initiatives)
 
+    # Sets aren't JSON-serializable and the renderer wants a stable order.
+    if tmux_active:
+        for ini in initiatives:
+            ini["tmux_sessions"] = sorted(ini.get("tmux_sessions", set()),
+                                          key=_tmux_session_sort_key)
+
     by_repo: dict[str, list[dict]] = {}
     for ini in initiatives:
         by_repo.setdefault(ini["repo"], []).append(ini)
@@ -1103,12 +1264,27 @@ def build_report(days: int, repos: list[str] | None = None,
     return {
         "days": days,
         "telemetry_available": telemetry_available,
+        "tmux_enabled": tmux_active,
+        "tmux_unmatched": tmux_unmatched,
         "repos": repos,
         "by_repo": by_repo,
         "catchall": {k: {"events": v["events"], "last": v["last"],
                          "branches": sorted(v["branches"])}
                      for k, v in catchall.items()},
     }
+
+
+def _tmux_session_sort_key(name: str) -> tuple:
+    """Order session names naturally: '1','2','8' before 'scratch2','scratch10'.
+
+    Splits into (non-digit prefix, numeric suffix) so a numeric tail sorts by VALUE
+    ('scratch2' < 'scratch10'), and pure-numeric names ('8') sort ahead of prefixed
+    ones — matching how the sessions read in `tmux list-sessions`.
+    """
+    m = re.match(r"^(.*?)(\d*)$", name)
+    prefix = m.group(1) if m else name
+    num = int(m.group(2)) if (m and m.group(2)) else -1
+    return (prefix, num, name)
 
 
 # --------------------------------------------------------------------------- #
@@ -1147,6 +1323,9 @@ def render(report: dict, now: float | None = None) -> str:
                     f"   merged-PR:{ini.get('merged_prs', 0)}")
             if report["telemetry_available"]:
                 head += f"   ev:{ini.get('telem_events', 0)}"
+            if report.get("tmux_enabled"):
+                sess = ini.get("tmux_sessions") or []
+                head += f"   [tmux:{','.join(sess)}]" if sess else "   [no session]"
             out.append(head)
             if ini.get("title") and ini["title"] != ini["slug"]:
                 out.append(f"        “{ini['title']}”")
@@ -1177,6 +1356,22 @@ def render(report: dict, now: float | None = None) -> str:
         out.append(f"  ·trunk·  unsegmented trunk/main work"
                    f"   touched {rel_age(ca['last'], now)}   ev:{ca['events']}")
 
+    if report.get("tmux_enabled"):
+        unmatched = report.get("tmux_unmatched") or []
+        if unmatched:
+            out.append("\n## live claude sessions — no matched initiative")
+            out.append("   (open work the ledger doesn't cover — a new thread, or a "
+                       "handoff not yet written)")
+            seen = set()
+            for u in sorted(unmatched, key=lambda u: _tmux_session_sort_key(u.get("session", ""))):
+                key = (u.get("session"), u.get("title"))
+                if key in seen:
+                    continue
+                seen.add(key)
+                repo = _short_repo(u["repo"]) if u.get("repo") else "?"
+                title = (u.get("title") or "").strip() or "(untitled)"
+                out.append(f"  [{u.get('session', '?')}]  {title[:80]}   ({repo})")
+
     if not report["telemetry_available"]:
         out.append("\n(NOTE: telemetry OFF — CLICKHOUSE_* unset or unreachable. "
                    "Momentum/recency here come from commits + sessions + handoff mtime only.)")
@@ -1199,6 +1394,8 @@ def parse_args(argv=None) -> argparse.Namespace:
     p.add_argument("--days", type=int, default=14, help="trailing window in days (default 14)")
     p.add_argument("--json", action="store_true", help="machine-readable output")
     p.add_argument("--repo", default=None, help="restrict to a single repo path")
+    p.add_argument("--tmux", action="store_true",
+                   help="link each initiative to the live tmux session(s) hosting it")
     return p.parse_args(argv)
 
 
@@ -1224,7 +1421,7 @@ def main(argv=None) -> int:
     except RuntimeError:
         client = None  # telemetry optional — degrade gracefully
 
-    report = build_report(a.days, repos=repos, client=client)
+    report = build_report(a.days, repos=repos, client=client, include_tmux=a.tmux)
 
     if a.json:
         print(json.dumps(report, indent=2, default=str))

@@ -1,7 +1,7 @@
 ---
 name: initiatives
-description: "Show the cross-repo initiative + progress ledger (initiative-scan): every ongoing initiative, its momentum (●active / ◐slowing / ○stalled), last-touched, commits/PRs, and next-step — fused deterministically from handoff docs + git + activity telemetry. Use for 'what am I working on', 'what's in flight across my projects', 'what's stalled', 'where did I leave X'."
-argument-hint: "[--days N] [--repo PATH] [--json] — optional; defaults to --days 14"
+description: "Show the cross-repo initiative + progress ledger (initiative-scan): every ongoing initiative, its momentum (●active / ◐slowing / ○stalled), last-touched, commits/PRs, next-step, and the live tmux session hosting it — fused deterministically from handoff docs + git + activity telemetry + live tmux. Use for 'what am I working on', 'what's in flight across my projects', 'what's stalled', 'where did I leave X', 'which session is X in'."
+argument-hint: "[--days N] [--repo PATH] [--json] [--tmux] — optional; defaults to --days 14 --tmux"
 allowed-tools: Bash
 ---
 
@@ -21,10 +21,11 @@ Runs the read-only `initiative-scan` report and presents it. This is the durable
    ```
    - **Host note:** `192.168.50.94:30123` is the workbench LAN endpoint. On the **laptop** (no `~/.server-mode` marker, nebula-only) that's unreachable → the report runs **telemetry-OFF** (still useful from handoff + git). To get telemetry there, point `CLICKHOUSE_URL` at the laptop's nebula CH endpoint — see the `activity` skill.
 
-2. **Run the scan** (substitute `$ARGUMENTS`, or `--days 14` if none):
+2. **Run the scan** (substitute `$ARGUMENTS`, or `--days 14 --tmux` if none):
    ```bash
    nix-shell -p 'python3.withPackages(p:[p.requests])' --run \
-     'python ~/workspace/devrc/scripts/session-analysis/initiative-scan.py --days 14'
+     'python ~/workspace/devrc/scripts/session-analysis/initiative-scan.py --days 14 --tmux'
    ```
+   - **`--tmux`** links each initiative to the live tmux session(s) hosting it — `[tmux:8,scratch7]` vs `[no session]` — by matching the claude pane's title (its session summary) against the initiative slug/title, scoped by the pane's cwd→repo. It also lists **live claude sessions with no matched initiative** (open work the ledger doesn't cover). Best-effort: on a host with no tmux server the column is silently omitted. This is the durable ledger fused with the live Alt+i view. Drop `--tmux` if `$ARGUMENTS` explicitly overrides.
 
-3. **Present the output as-is** — it's already a ranked, skimmable report grouped by repo. Optionally lead with a one-line read: which initiatives are ●ACTIVE vs the most notable ○stalled one, and any next-step that looks owed. **Do not editorialize beyond the data** — momentum is *recency of touch, NOT % done*, and initiative↔commit linking is heuristic (see the script's honesty note).
+3. **Present the output as-is** — it's already a ranked, skimmable report grouped by repo. Optionally lead with a one-line read: which initiatives are ●ACTIVE vs the most notable ○stalled one, and any next-step that looks owed. **Do not editorialize beyond the data** — momentum is *recency of touch, NOT % done*, and both initiative↔commit and initiative↔tmux-session linking are heuristic (see the script's honesty notes; a multi-topic pane title may attach to one of several co-hosted initiatives).
