@@ -663,3 +663,264 @@ def test_render_emits_trunk_catchall(monkeypatch, tmp_path):
     txt = isc.render(report, now=2_000_000_000.0)
     assert "unsegmented trunk/main work" in txt
     assert "ev:99" in txt
+
+
+# --------------------------------------------------------------------------- #
+# text_tokens — free-text tokenization (prose titles, tmux pane titles)
+# --------------------------------------------------------------------------- #
+def test_text_tokens_splits_prose_like_slugs():
+    # Prose splits on any non-alnum run; same short/stop/date filters as slug_tokens.
+    # 'Continue' is a TITLE_STOP action verb -> dropped; topic words survive.
+    assert isc.text_tokens("Continue clawgate agent loop soak testing") == [
+        "clawgate", "agent", "loop", "soak", "testing"]
+
+
+def test_text_tokens_drops_action_verbs_keeps_topic():
+    # Session-summary verbs ('Resume','Monitor','Build') are noise; the topic remains.
+    assert isc.text_tokens("Resume Monitor Build sysredis buffer") == [
+        "sysredis", "buffer"]
+
+
+def test_text_tokens_drops_stopwords_dates_and_short():
+    # 'and' is a stop word, '2026-07-05' a date, 'go' too short -> all dropped.
+    assert isc.text_tokens("Faro and RUM 2026-07-05 go widen") == [
+        "faro", "rum", "widen"]
+
+
+# --------------------------------------------------------------------------- #
+# resolve_cwd_repo — cwd -> canonical repo (shared by telemetry + tmux)
+# --------------------------------------------------------------------------- #
+def test_resolve_cwd_repo_prefix_match():
+    repos = ["/home/u/workspace/devrc", "/home/u/workspace/civit/dp"]
+    assert isc.resolve_cwd_repo("/home/u/workspace/devrc/scripts", repos) == \
+        "/home/u/workspace/devrc"
+    # Longest-prefix wins: the nested repo, not a shorter accidental prefix.
+    assert isc.resolve_cwd_repo("/home/u/workspace/civit/dp", repos) == \
+        "/home/u/workspace/civit/dp"
+
+
+def test_resolve_cwd_repo_unknown_is_none():
+    assert isc.resolve_cwd_repo("/home/u/taxes/2025", ["/home/u/workspace/devrc"]) is None
+    assert isc.resolve_cwd_repo(None, ["/r"]) is None
+
+
+def test_resolve_cwd_repo_via_worktree_map():
+    repos = ["/home/u/workspace/civit/dp"]
+    wt_map = {"/home/u/workspace/civit/dp-sandbox": "/home/u/workspace/civit/dp"}
+    assert isc.resolve_cwd_repo("/home/u/workspace/civit/dp-sandbox/x", repos, wt_map) == \
+        "/home/u/workspace/civit/dp"
+
+
+# --------------------------------------------------------------------------- #
+# best_title_match — pane title tokens -> most-specific initiative
+# --------------------------------------------------------------------------- #
+def test_best_title_match_by_slug_token():
+    inis = [{"slug": "faro-rum-widening", "title": "Faro RUM widening ramp"}]
+    toks = set(isc.text_tokens("Wire Faro to main civitai app with Zach review"))
+    assert isc.best_title_match(toks, inis) is inis[0]
+
+
+def test_best_title_match_prefers_more_slug_overlap():
+    # A pane naming agent+loop+clawgate should credit agent-loop-close (3 slug
+    # tokens overlap), NOT the chat-polish sibling (only 'clawgate' overlaps).
+    inis = [
+        {"slug": "clawgate-agent-loop-close", "title": "clawgate: the agent loop closes"},
+        {"slug": "clawgate-chat-polish", "title": "clawgate agent-chat polish"},
+    ]
+    toks = set(isc.text_tokens("Continue clawgate agent loop production soak testing"))
+    assert isc.best_title_match(toks, inis)["slug"] == "clawgate-agent-loop-close"
+
+
+def test_best_title_match_needs_distinctive_overlap():
+    # One generic title-only word ('review') must NOT link — no slug-token overlap
+    # and fewer than two title-token overlaps.
+    inis = [{"slug": "faro-rum-widening", "title": "Faro RUM review ramp"}]
+    toks = set(isc.text_tokens("Audit PR 355 review"))
+    assert isc.best_title_match(toks, inis) is None
+
+
+def test_best_title_match_empty_when_no_initiatives():
+    assert isc.best_title_match({"clawgate"}, []) is None
+
+
+def test_best_title_match_generic_shared_word_does_not_link():
+    # 'session' is shared across many initiatives -> low IDF -> a pane that overlaps
+    # ONLY on 'session' must not link (the scratch8 "Resume session <id>" false hit).
+    inis = [
+        {"slug": "app-blocks-dev-live-session", "title": "App Blocks dev live session"},
+        {"slug": "app-blocks-session", "title": "App Blocks session civitai"},
+        {"slug": "app-blocks-review-session", "title": "App Blocks review session"},
+    ]
+    toks = set(isc.text_tokens("Resume session 868k8b9f6"))
+    assert isc.best_title_match(toks, inis) is None
+
+
+def test_best_title_match_distinctive_token_beats_generic(monkeypatch):
+    # 'tekton' is unique (idf 1.0); 'app'/'blocks' are shared (low idf). A pane
+    # naming tekton links to the tekton initiative, not an app-blocks sibling that
+    # only shares generic words.
+    inis = [
+        {"slug": "tekton-control-plane-ha", "title": "tekton control plane ha"},
+        {"slug": "app-blocks-ux", "title": "App Blocks UX readiness"},
+        {"slug": "app-blocks-followups", "title": "App Blocks follow-ups"},
+    ]
+    toks = set(isc.text_tokens("Review cordoned build node and Tekton pipelines"))
+    assert isc.best_title_match(toks, inis)["slug"] == "tekton-control-plane-ha"
+
+
+# --------------------------------------------------------------------------- #
+# match_tmux_to_initiatives — attach live sessions, scoped by repo
+# --------------------------------------------------------------------------- #
+def test_match_tmux_attaches_session_scoped_by_repo():
+    devrc, civit = "/home/u/workspace/devrc", "/home/u/workspace/civit/dp"
+    inis = [
+        {"slug": "faro-rum-widening", "title": "Faro RUM widening", "repo": civit},
+        {"slug": "clawgate-chat-polish", "title": "clawgate chat polish", "repo": devrc},
+    ]
+    panes = [
+        {"session": "scratch4", "cwd": civit, "command": "claude",
+         "title": "Wire Faro to main civitai app with Zach review"},
+        {"session": "1", "cwd": devrc, "command": "claude",
+         "title": "clawgate chat polish soak"},
+    ]
+    unmatched = isc.match_tmux_to_initiatives(inis, panes, [devrc, civit])
+    assert inis[0]["tmux_sessions"] == {"scratch4"}
+    assert inis[1]["tmux_sessions"] == {"1"}
+    assert unmatched == []
+
+
+def test_match_tmux_wrong_repo_does_not_cross_credit():
+    # A 'faro' pane whose cwd is devrc must NOT credit the civit faro initiative.
+    devrc, civit = "/home/u/workspace/devrc", "/home/u/workspace/civit/dp"
+    inis = [{"slug": "faro-rum-widening", "title": "Faro RUM widening", "repo": civit}]
+    panes = [{"session": "scratchX", "cwd": devrc, "command": "claude",
+              "title": "Wire Faro to civitai app"}]
+    unmatched = isc.match_tmux_to_initiatives(inis, panes, [devrc, civit])
+    assert inis[0]["tmux_sessions"] == set()
+    # devrc has no matching initiative -> the claude pane is surfaced as unmatched.
+    assert len(unmatched) == 1
+    assert unmatched[0]["session"] == "scratchX"
+    assert unmatched[0]["repo"] == devrc
+
+
+def test_match_tmux_non_claude_unmatched_pane_ignored():
+    # A plain zsh pane in an unknown dir is neither matched nor reported as unmatched.
+    inis = [{"slug": "x", "title": "X", "repo": "/r"}]
+    panes = [{"session": "scratch5", "cwd": "/home/u/taxes/2025", "command": "zsh",
+              "title": "nixos"}]
+    unmatched = isc.match_tmux_to_initiatives(inis, panes, ["/r"])
+    assert inis[0]["tmux_sessions"] == set()
+    assert unmatched == []
+
+
+def test_match_tmux_multiple_panes_one_initiative():
+    civit = "/home/u/workspace/civit/dp"
+    inis = [{"slug": "sysredis-buffer", "title": "sysRedis buffer soft-dependency",
+             "repo": civit}]
+    panes = [
+        {"session": "8", "cwd": civit, "command": "claude",
+         "title": "Continue sysredis buffer soft-dependency work"},
+        {"session": "8", "cwd": civit, "command": "claude",
+         "title": "Monitor sysredis buffer fixes"},
+    ]
+    isc.match_tmux_to_initiatives(inis, panes, [civit])
+    assert inis[0]["tmux_sessions"] == {"8"}
+
+
+def test_tmux_session_sort_key_natural_order():
+    names = ["scratch10", "scratch2", "8", "1", "scratch"]
+    assert sorted(names, key=isc._tmux_session_sort_key) == [
+        "1", "8", "scratch", "scratch2", "scratch10"]
+
+
+# --------------------------------------------------------------------------- #
+# collect_tmux_panes — parsing the tab-delimited tmux output
+# --------------------------------------------------------------------------- #
+def test_collect_tmux_panes_parses_and_handles_empty_title(monkeypatch):
+    out = ("1\t/home/u/workspace/devrc\tclaude\tContinue clawgate loop\n"
+           "scratch5\t/home/u/taxes/2025\tzsh\t\n")  # empty title -> ""
+    monkeypatch.setattr(isc, "_run", lambda cmd, timeout=20.0: out)
+    panes = isc.collect_tmux_panes()
+    assert panes[0] == {"session": "1", "cwd": "/home/u/workspace/devrc",
+                        "command": "claude", "title": "Continue clawgate loop"}
+    assert panes[1]["title"] == ""
+
+
+def test_collect_tmux_panes_empty_when_no_server(monkeypatch):
+    monkeypatch.setattr(isc, "_run", lambda cmd, timeout=20.0: "")
+    assert isc.collect_tmux_panes() == []
+
+
+# --------------------------------------------------------------------------- #
+# build_report + render with --tmux (panes injected for hermeticity)
+# --------------------------------------------------------------------------- #
+def test_build_report_tmux_annotates_and_lists_unmatched(tmp_path, monkeypatch):
+    repo = tmp_path / "myrepo"
+    (repo / "claudedocs").mkdir(parents=True)
+    (repo / "claudedocs" / "handoff-mail-automation-2026-06-30.md").write_text(NEXT_DOC)
+
+    monkeypatch.setattr(isc, "git_branches", lambda r: ["main"])
+    monkeypatch.setattr(isc, "git_default_branch", lambda r: "main")
+    monkeypatch.setattr(isc, "gh_open_prs", lambda r: [])
+    monkeypatch.setattr(isc, "gh_merged_prs", lambda r, d: [])
+    monkeypatch.setattr(isc, "session_genesis_refs", lambda root, d: [])
+
+    panes = [
+        {"session": "scratch9", "cwd": str(repo), "command": "claude",
+         "title": "Resume mail automation extractor work"},
+        {"session": "scratch2", "cwd": str(repo), "command": "claude",
+         "title": "Some brand new unrelated exploration thread"},
+    ]
+    report = isc.build_report(14, repos=[str(repo)], client=None,
+                              now=2_000.0, include_tmux=True, panes=panes)
+    assert report["tmux_enabled"] is True
+    ini = report["by_repo"][str(repo)][0]
+    assert ini["tmux_sessions"] == ["scratch9"]
+    # The unrelated pane is surfaced as live-but-unmatched.
+    assert any(u["session"] == "scratch2" for u in report["tmux_unmatched"])
+
+    txt = isc.render(report, now=2_000.0)
+    assert "[tmux:scratch9]" in txt
+    assert "live claude sessions — no matched initiative" in txt
+    assert "scratch2" in txt
+
+
+def test_build_report_tmux_no_session_marker(tmp_path, monkeypatch):
+    repo = tmp_path / "r"
+    (repo / "claudedocs").mkdir(parents=True)
+    (repo / "claudedocs" / "handoff-lonely.md").write_text(
+        "# Handoff: lonely\n## Next steps\n1. go\n")
+    monkeypatch.setattr(isc, "git_branches", lambda r: ["main"])
+    monkeypatch.setattr(isc, "git_default_branch", lambda r: "main")
+    monkeypatch.setattr(isc, "gh_open_prs", lambda r: [])
+    monkeypatch.setattr(isc, "gh_merged_prs", lambda r, d: [])
+    monkeypatch.setattr(isc, "session_genesis_refs", lambda root, d: [])
+
+    # No panes at all -> initiative shows [no session].
+    report = isc.build_report(14, repos=[str(repo)], client=None,
+                              now=2_000.0, include_tmux=True, panes=[])
+    txt = isc.render(report, now=2_000.0)
+    assert "[no session]" in txt
+
+
+def test_build_report_tmux_suppressed_when_no_server(tmp_path, monkeypatch):
+    # --tmux on a host with NO tmux server (live read yields []) suppresses the column
+    # entirely rather than tagging every initiative "[no session]".
+    repo = tmp_path / "r"
+    (repo / "claudedocs").mkdir(parents=True)
+    (repo / "claudedocs" / "handoff-lonely.md").write_text(
+        "# Handoff: lonely\n## Next steps\n1. go\n")
+    monkeypatch.setattr(isc, "git_branches", lambda r: ["main"])
+    monkeypatch.setattr(isc, "git_default_branch", lambda r: "main")
+    monkeypatch.setattr(isc, "gh_open_prs", lambda r: [])
+    monkeypatch.setattr(isc, "gh_merged_prs", lambda r, d: [])
+    monkeypatch.setattr(isc, "session_genesis_refs", lambda root, d: [])
+    monkeypatch.setattr(isc, "collect_tmux_panes", lambda: [])  # no server
+
+    # panes=None -> live read path; collect returns [] -> column disabled.
+    report = isc.build_report(14, repos=[str(repo)], client=None,
+                              now=2_000.0, include_tmux=True)
+    assert report["tmux_enabled"] is False
+    txt = isc.render(report, now=2_000.0)
+    assert "[no session]" not in txt
+    assert "[tmux:" not in txt
