@@ -389,6 +389,31 @@ def newest_touch(*timestamps) -> float | None:
     return max(vals) if vals else None
 
 
+def _date_to_epoch(date_str: str | None) -> float | None:
+    """'YYYY-MM-DD' -> epoch at UTC midnight, or None if absent/unparseable."""
+    if not date_str:
+        return None
+    try:
+        return datetime.strptime(date_str, "%Y-%m-%d").replace(
+            tzinfo=timezone.utc).timestamp()
+    except ValueError:
+        return None
+
+
+def doc_touch_epoch(ini: dict) -> float | None:
+    """Freshness of a handoff, for momentum — its AUTHORED date, NOT filesystem mtime.
+
+    The handoffs live in an untracked `claudedocs/` (no git history), and a bulk
+    `git checkout`/`pull`/`clone` rewrites EVERY working-tree file's mtime to the same
+    instant — so filesystem mtime routinely reports a batch of months-old, done
+    handoffs as all "touched" on the checkout day, and they masquerade as in-flight.
+    The filename's `YYYY-MM-DD` (parsed into `date`) is the real authoring date and is
+    immune to that. Fall back to filesystem mtime ONLY for a dateless handoff, where
+    there is no better signal.
+    """
+    return _date_to_epoch(ini.get("date")) or ini.get("doc_mtime")
+
+
 def rel_age(ts: float | None, now: float | None = None) -> str:
     """Human relative age: '5h', '3d', '2w' — or '-' if unknown."""
     if ts is None:
@@ -1126,25 +1151,36 @@ def best_title_match(pane_toks: set[str], initiatives: list[dict]) -> dict | Non
     Scored as (# slug-token overlaps, # extra title-token overlaps). Slug tokens are
     the initiative fingerprint (clawgate, sysredis, wedge, tekton, bitdex); the pane
     title is first stripped of generic action verbs (`TITLE_STOP` in `text_tokens`),
-    so a pane can't be linked on "resume"/"review"/"monitor" alone — that stripping,
-    not any weighting, is what kills the generic-word false positives. A candidate
-    qualifies with ≥1 slug-token overlap, OR ≥2 title-token overlaps. Best by
+    so a pane can't be linked on "resume"/"review"/"monitor" alone. A candidate
+    qualifies with ≥2 slug-token overlaps, OR ≥1 slug-token overlap on a token UNIQUE
+    to that initiative among the eligible set, OR ≥2 title-token overlaps. The
+    uniqueness gate is what stops a pane linking on ONE token SHARED across siblings
+    (e.g. "grafana" in both grafana-alert-drift and alert-chaos-grafana-sqlite) while
+    still allowing a single distinctive token (faro, tekton) to match. Best by
     (slug_overlap, title_overlap), then longer slug, then lexically, for determinism.
-    A more-specific sibling wins on count: a "sysRedis wedge" pane beats plain
-    "sysRedis" siblings (2 slug tokens vs 1). None when nothing clears the bar.
 
     LIMITATION: a genuinely multi-topic pane title is attributed to its single
     strongest match and may miss a co-hosted sibling; bag-of-words can't disambiguate.
     Heuristic — read it as "which session is likely on this", not a proof.
     """
+    # Document frequency of each token across the eligible set, so a single-token
+    # match can require that token to be UNIQUE (df == 1) to this initiative.
+    df: dict[str, int] = {}
+    for ini in initiatives:
+        toks = set(slug_tokens(ini.get("slug", ""))) | set(text_tokens(ini.get("title") or ""))
+        for t in toks:
+            df[t] = df.get(t, 0) + 1
+
     best: dict | None = None
     best_key: tuple = (0, 0, 0, "")
     for ini in initiatives:
         slug_t = set(slug_tokens(ini.get("slug", "")))
         title_t = set(text_tokens(ini.get("title") or ""))
-        slug_overlap = len(pane_toks & slug_t)
+        slug_hits = pane_toks & slug_t
+        slug_overlap = len(slug_hits)
         title_overlap = len(pane_toks & (title_t - slug_t))
-        if slug_overlap == 0 and title_overlap < 2:
+        unique_single = slug_overlap == 1 and df.get(next(iter(slug_hits)), 1) == 1
+        if not (slug_overlap >= 2 or unique_single or title_overlap >= 2):
             continue
         key = (slug_overlap, title_overlap,
                len(ini.get("slug", "")), ini.get("slug", ""))
@@ -1297,15 +1333,29 @@ def build_report(days: int, repos: list[str] | None = None,
             tmux_unmatched = match_tmux_to_initiatives(initiatives, live_panes, repos,
                                                        wt_map, codenames)
 
-    # Compute momentum from the MAX of every touch signal.
+    # Compute momentum from the MAX of every touch signal. Note doc freshness comes
+    # from the handoff's AUTHORED date (doc_touch_epoch), not filesystem mtime, which
+    # a bulk git checkout clobbers. A LIVE tmux session on the initiative counts as
+    # touched-now — open work is active regardless of how old its handoff is.
+    now_epoch = now if now is not None else time.time()
     for ini in initiatives:
+        live_session = now_epoch if ini.get("tmux_sessions") else None
         ini["last_touch"] = newest_touch(
             ini.get("last_commit"),
             ini.get("telem_last"),
             ini.get("last_session"),
-            ini.get("doc_mtime"),
+            doc_touch_epoch(ini),
+            live_session,
         )
         ini["momentum"] = classify_momentum(ini["last_touch"], now)
+
+    # Window-filter: `--days N` now means "in flight within the last N days" — keep
+    # only initiatives whose newest touch is inside the window (a live tmux session
+    # keeps it regardless). Widen `--days` to resurface older / stalled work. This is
+    # what stops months-old done handoffs from surfacing in a short-window view.
+    cutoff = now_epoch - days * DAY
+    initiatives = [i for i in initiatives
+                   if i.get("last_touch") is not None and i["last_touch"] >= cutoff]
 
     initiatives = sort_initiatives(initiatives)
 
@@ -1370,6 +1420,8 @@ def render(report: dict, now: float | None = None) -> str:
                f"({'telemetry ON' if report['telemetry_available'] else 'telemetry OFF — handoff+git only'}) ===")
     out.append("   Look for: what's in flight (●active <2d / ◐slowing 2-7d / ○stalled >7d), "
                "its momentum + next step. Momentum = recency of touch, NOT % done.")
+    out.append(f"   Showing only initiatives touched in the last {days}d "
+               "(or with a live tmux session); widen --days to resurface older/stalled work.")
 
     repo_names = sorted(report["by_repo"].keys()) or report.get("repos", [])
     for repo in repo_names:
