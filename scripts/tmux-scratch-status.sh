@@ -52,11 +52,14 @@ tmux list-sessions -F '#{session_name}' 2>/dev/null \
         for (i = 1; i <= n; i++) {
             s = sess[i]
             if (s in exists) {
-                marker = (index(waiting, " " s " ") > 0) ? "●" : ""
-                printf "%s#[fg=%s,bold]%s%s#[default]", sep, color[s], marker, key[s]
+                style  = color[s] ",bold"                              # slot color, bold
+                marker = (index(waiting, " " s " ") > 0) ? "●" : ""    # waiting indicator
             } else {
-                printf "%s#[fg=#504945]%s#[default]", sep, key[s]
+                style  = "#504945"                                     # dim: session not started
+                marker = ""
             }
+            # Single color-format printf for both states (deduped).
+            printf "%s#[fg=%s]%s%s#[default]", sep, style, marker, key[s]
             sep = " "
         }
     }
