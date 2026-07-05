@@ -1099,16 +1099,22 @@ def load_scratch_codenames(path: str | os.PathLike | None = None) -> dict[str, s
 
 
 def pane_id(pane: dict, codenames: dict[str, str] | None = None) -> str:
-    """`<session>-<window>` display id for a pane, e.g. `8-1`, `Vapor-2`.
+    """`<session>-<window>` display id for a pane, e.g. `Vapor-2`, `main:8-3`.
 
-    The tmux session name is translated to its scratchpad CODENAME when one exists
-    (`scratch4` → `Vapor`), so the id matches what Zach sees on his hotkey-bound
-    scratchpads; sessions with no codename (plain numeric `8`) keep their raw name.
-    Falls back to the bare session name if a window index is somehow absent, so the id
-    is never a dangling `session-`.
+    A hotkey-bound scratchpad shows its CODENAME (`scratch4` → `Vapor-2`), matching
+    what Zach navigates by. A session with NO codename is the persistent "main tmux"
+    (auto-numbered `8`/`2`, host-dependent), marked `main:` so it reads distinctly
+    from a scratchpad — `main:8-3`. Falls back to the bare (marked) session name if a
+    window index is somehow absent, so the id is never a dangling `session-`.
     """
-    session = pane.get("session", "")
-    session = (codenames or {}).get(session, session)
+    raw = pane.get("session", "")
+    codename = (codenames or {}).get(raw)
+    if codename is not None:
+        session = codename
+    elif raw:
+        session = f"main:{raw}"
+    else:
+        session = raw
     window = str(pane.get("window", "")).strip()
     return f"{session}-{window}" if window else session
 

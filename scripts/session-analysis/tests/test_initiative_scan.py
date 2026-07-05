@@ -783,10 +783,11 @@ def test_match_tmux_attaches_session_scoped_by_repo():
         {"session": "1", "window": "3", "cwd": devrc, "command": "claude",
          "title": "clawgate chat polish soak"},
     ]
-    unmatched = isc.match_tmux_to_initiatives(inis, panes, [devrc, civit])
-    # id is <session>-<window>, so two initiatives in one session stay distinguishable.
-    assert inis[0]["tmux_sessions"] == {"scratch4-2"}
-    assert inis[1]["tmux_sessions"] == {"1-3"}
+    # scratch4 is a codenamed scratchpad; session '1' is the un-codenamed main tmux.
+    unmatched = isc.match_tmux_to_initiatives(inis, panes, [devrc, civit],
+                                              codenames={"scratch4": "Vapor"})
+    assert inis[0]["tmux_sessions"] == {"Vapor-2"}
+    assert inis[1]["tmux_sessions"] == {"main:1-3"}
     assert unmatched == []
 
 
@@ -798,9 +799,10 @@ def test_match_tmux_wrong_repo_does_not_cross_credit():
               "title": "Wire Faro to civitai app"}]
     unmatched = isc.match_tmux_to_initiatives(inis, panes, [devrc, civit])
     assert inis[0]["tmux_sessions"] == set()
-    # devrc has no matching initiative -> the claude pane is surfaced as unmatched.
+    # devrc has no matching initiative -> the claude pane is surfaced as unmatched
+    # (un-codenamed -> marked main:).
     assert len(unmatched) == 1
-    assert unmatched[0]["id"] == "scratchX-1"
+    assert unmatched[0]["id"] == "main:scratchX-1"
     assert unmatched[0]["repo"] == devrc
 
 
@@ -831,8 +833,8 @@ def test_match_tmux_two_windows_same_session_two_initiatives():
          "title": "Continue sysredis buffer soft-dependency work"},
     ]
     isc.match_tmux_to_initiatives(inis, panes, [civit])
-    assert inis[0]["tmux_sessions"] == {"8-3"}   # buffer -> window 3
-    assert inis[1]["tmux_sessions"] == {"8-1"}   # wedge  -> window 1
+    assert inis[0]["tmux_sessions"] == {"main:8-3"}   # buffer -> main tmux window 3
+    assert inis[1]["tmux_sessions"] == {"main:8-1"}   # wedge  -> main tmux window 1
 
 
 def test_match_tmux_same_window_dedups():
@@ -846,23 +848,24 @@ def test_match_tmux_same_window_dedups():
          "title": "Monitor sysredis buffer fixes"},
     ]
     isc.match_tmux_to_initiatives(inis, panes, [civit])
-    assert inis[0]["tmux_sessions"] == {"8-2"}
+    assert inis[0]["tmux_sessions"] == {"main:8-2"}
 
 
 def test_pane_id_formats_session_window():
-    assert isc.pane_id({"session": "8", "window": "1"}) == "8-1"
-    assert isc.pane_id({"session": "wheat", "window": "3"}) == "wheat-3"
-    # Missing window -> bare session, never a dangling 'session-'.
-    assert isc.pane_id({"session": "scratch7", "window": ""}) == "scratch7"
-    assert isc.pane_id({"session": "scratch7"}) == "scratch7"
+    # Un-codenamed session -> marked main: (persistent "main tmux").
+    assert isc.pane_id({"session": "8", "window": "1"}) == "main:8-1"
+    assert isc.pane_id({"session": "wheat", "window": "3"}) == "main:wheat-3"
+    # Missing window -> bare (marked) session, never a dangling 'session-'.
+    assert isc.pane_id({"session": "scratch7", "window": ""}) == "main:scratch7"
+    assert isc.pane_id({"session": "scratch7"}) == "main:scratch7"
 
 
 def test_pane_id_translates_scratch_codename():
-    # A scratchpad session shows its hotkey codename; a plain numeric session doesn't.
+    # A scratchpad session shows its hotkey codename; a main-tmux session is marked.
     codes = {"scratch4": "Vapor", "scratch11": "wheat"}
     assert isc.pane_id({"session": "scratch4", "window": "2"}, codes) == "Vapor-2"
     assert isc.pane_id({"session": "scratch11", "window": "1"}, codes) == "wheat-1"
-    assert isc.pane_id({"session": "8", "window": "3"}, codes) == "8-3"  # no codename
+    assert isc.pane_id({"session": "8", "window": "3"}, codes) == "main:8-3"  # no codename
 
 
 def test_load_scratch_codenames_parses_slots(tmp_path):
@@ -911,6 +914,13 @@ def test_tmux_session_sort_key_orders_windows_within_session():
         "1-2", "8-1", "8-3", "8-10", "scratch2-1"]
 
 
+def test_tmux_session_sort_key_handles_main_and_codename_ids():
+    # Real ids carry a main: marker or a codename; windows still order within a group.
+    names = ["main:8-3", "main:8-1", "Vapor-2", "main:2-1"]
+    assert sorted(names, key=isc._tmux_session_sort_key) == [
+        "Vapor-2", "main:2-1", "main:8-1", "main:8-3"]
+
+
 # --------------------------------------------------------------------------- #
 # collect_tmux_panes — parsing the tab-delimited tmux output
 # --------------------------------------------------------------------------- #
@@ -957,14 +967,15 @@ def test_build_report_tmux_annotates_and_lists_unmatched(tmp_path, monkeypatch):
                               now=2_000.0, include_tmux=True, panes=panes)
     assert report["tmux_enabled"] is True
     ini = report["by_repo"][str(repo)][0]
-    assert ini["tmux_sessions"] == ["scratch9-1"]
+    # Empty codename map -> both sessions fall through to the main: marker.
+    assert ini["tmux_sessions"] == ["main:scratch9-1"]
     # The unrelated pane is surfaced as live-but-unmatched, by its <session>-<window>.
-    assert any(u["id"] == "scratch2-4" for u in report["tmux_unmatched"])
+    assert any(u["id"] == "main:scratch2-4" for u in report["tmux_unmatched"])
 
     txt = isc.render(report, now=2_000.0)
-    assert "[tmux:scratch9-1]" in txt
+    assert "[tmux:main:scratch9-1]" in txt
     assert "live claude sessions — no matched initiative" in txt
-    assert "scratch2-4" in txt
+    assert "main:scratch2-4" in txt
 
 
 def test_build_report_tmux_applies_codenames(tmp_path, monkeypatch):
