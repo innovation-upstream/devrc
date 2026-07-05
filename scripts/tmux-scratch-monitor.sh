@@ -10,21 +10,13 @@
 
 REFRESH=${REFRESH:-2}
 
-# slot key : session : color : title  (parallel order to .tmux.conf)
-SLOTS=(
-    "g:scratch:#b8bb26:grove"
-    "G:scratch2:#d79921:Gold"
-    "v:scratch3:#b16286:violet"
-    "V:scratch4:#83a598:Vapor"
-    "p:scratch5:#cc241d:poppy"
-    "P:scratch6:#689d6a:Pool"
-    "o:scratch7:#fe8019:orange"
-    "O:scratch8:#d3869b:Orchid"
-    "n:scratch9:#458588:navy"
-    "N:scratch10:#928374:Nickel"
-    "w:scratch11:#ebdbb2:wheat"
-    "W:scratch12:#af3a03:Walnut"
-)
+# The scratchpad slot table (session:key:color:name) is the ONE source of truth in
+# scratch-slots.sh — sourced here so this HUD, the Alt+i dashboard, the status-left
+# legend, and initiative-scan.py can't drift.
+_d="$(dirname "$0")"
+if   [ -f "$_d/scratch-slots.sh" ];      then . "$_d/scratch-slots.sh"
+elif [ -f "$_d/tmux-scratch-slots.sh" ]; then . "$_d/tmux-scratch-slots.sh"
+fi
 
 hex_to_rgb() {
     local h="${1#\#}"
@@ -35,7 +27,7 @@ render() {
     local rows cols per_section nslots
     rows=$(tput lines 2>/dev/null || echo 40)
     cols=$(tput cols 2>/dev/null || echo 80)
-    nslots=${#SLOTS[@]}
+    nslots=${#SCRATCH_SLOTS[@]}
 
     # Reserve 1 header line + 1 blank line per section + 1 footer line.
     # Available content = rows - (nslots headers + nslots blanks + 1 footer)
@@ -44,8 +36,8 @@ render() {
 
     printf '\033[H\033[2J'  # clear + home
 
-    for slot in "${SLOTS[@]}"; do
-        IFS=':' read -r key sess color name <<< "$slot"
+    for slot in "${SCRATCH_SLOTS[@]}"; do
+        IFS=':' read -r sess key color name <<< "$slot"
         IFS=' ' read -r r g b <<< "$(hex_to_rgb "$color")"
 
         if tmux has-session -t "$sess" 2>/dev/null; then

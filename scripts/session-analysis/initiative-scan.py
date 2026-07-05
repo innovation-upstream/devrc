@@ -1071,29 +1071,30 @@ def collect_tmux_panes() -> list[dict]:
     return panes
 
 
-# The scratchpad codename map lives in ONE place — the `SLOTS` table of
-# scripts/tmux-scratch-monitor.sh, which mirrors the tmux/i3 hotkey bindings
-# ($mod+Shift+V → session `scratch4` → codename `Vapor`). We parse it at runtime so
-# the report speaks the SAME names Zach navigates by, and never drifts from a copy.
-SCRATCH_MONITOR = Path(__file__).resolve().parent.parent / "tmux-scratch-monitor.sh"
-# A SLOTS entry: "V:scratch4:#83a598:Vapor"  (key : session : hex-color : codename).
+# The scratchpad codename map lives in ONE place — the `SCRATCH_SLOTS` table of
+# scripts/tmux-scratch-slots.sh, the single source of truth also sourced by the tmux
+# HUD / dashboard / status-left, mirroring the tmux/i3 hotkey bindings ($mod+Shift+V
+# → session `scratch4` → codename `Vapor`). We parse it at runtime so the report
+# speaks the SAME names Zach navigates by, and never drifts from a copy.
+SCRATCH_SLOTS_FILE = Path(__file__).resolve().parent.parent / "tmux-scratch-slots.sh"
+# A SCRATCH_SLOTS entry: "scratch4:V:#83a598:Vapor" (session:key:hex-color:codename).
 _SLOT_RE = re.compile(r'"([^":]+):([^":]+):(#[0-9a-fA-F]{6}):([^":]+)"')
 
 
 def load_scratch_codenames(path: str | os.PathLike | None = None) -> dict[str, str]:
-    """Parse `{session: codename}` from tmux-scratch-monitor.sh's SLOTS table.
+    """Parse `{session: codename}` from tmux-scratch-slots.sh's SCRATCH_SLOTS table.
 
     Returns e.g. {"scratch4": "Vapor", "scratch11": "wheat", …}. Empty dict on any
     failure (file missing / unreadable) so callers degrade to raw session names — the
     codename layer is a display nicety, never a hard dependency.
     """
-    p = Path(path) if path is not None else SCRATCH_MONITOR
+    p = Path(path) if path is not None else SCRATCH_SLOTS_FILE
     try:
         text = p.read_text()
     except OSError:
         return {}
     mapping: dict[str, str] = {}
-    for _key, session, _color, name in _SLOT_RE.findall(text):
+    for session, _key, _color, name in _SLOT_RE.findall(text):
         mapping[session] = name
     return mapping
 

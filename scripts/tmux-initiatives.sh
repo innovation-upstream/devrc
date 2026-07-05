@@ -17,15 +17,12 @@ REFRESH=${REFRESH:-3}
 STALE_DAYS=${STALE_DAYS:-7}
 STALE_SECS=$((STALE_DAYS * 86400))
 
-# session : slot-key : color : title  (parallel order to scratch-status.sh)
-SLOTS=(
-    "scratch:g:#b8bb26:grove"
-    "scratch2:G:#d79921:Gold"
-    "scratch3:v:#b16286:violet"
-    "scratch4:V:#83a598:Vapor"
-    "scratch5:p:#cc241d:poppy"
-    "scratch6:P:#689d6a:Pool"
-)
+# Scratchpad slot table (session:key:color:name) — sourced from the ONE source of
+# truth in scratch-slots.sh (was a stale 6-entry copy here; now all 12).
+_d="$(dirname "$0")"
+if   [ -f "$_d/scratch-slots.sh" ];      then . "$_d/scratch-slots.sh"
+elif [ -f "$_d/tmux-scratch-slots.sh" ]; then . "$_d/tmux-scratch-slots.sh"
+fi
 
 ICON_RUN="🔄"
 ICON_PAUSE="⏸"
@@ -171,7 +168,7 @@ render() {
     fi
 
     local rendered=""
-    for slot in "${SLOTS[@]}"; do
+    for slot in "${SCRATCH_SLOTS[@]}"; do
         IFS=':' read -r sess key color title <<< "$slot"
         render_group "$sess" "$key" "$title" "$color" "$data" "$now"
         rendered+=" $sess "
