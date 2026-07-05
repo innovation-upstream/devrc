@@ -17,11 +17,11 @@ Topic argument (optional): `$ARGUMENTS`.
 
 2. **Read it fully.**
 
-3. **Re-verify against live state — do not assume the doc is still accurate:**
-   - `git status -sb`, `git log --oneline -5` — has the branch/PR moved since the doc?
-   - Were the "in flight" items completed or merged already?
-   - If the doc claims a deploy/state, check it live (pod/HelmRelease/PR status as relevant).
-   - Flag any line of the handoff that now contradicts reality.
+3. **Re-verify against live state — run the deterministic reconciler, don't hand-roll it:**
+   ```bash
+   bash ~/workspace/devrc/scripts/resume-state.sh "$ARGUMENTS"
+   ```
+   This is the initiative-scoped, on-demand collector (modeled on `standup.sh`). It resolves the handoff, then reconciles it against FRESH live state in one call and prints a compact digest: `GIT/PR` (branch ahead/behind, dirty, referenced PR states + CI, branch existence), `WORKLOAD` (handoff-named deployment readiness + canary phase — v1: datapacket), `ALERTS` (firing alerts scoped to the initiative's namespace), and a `DRIFT` block. **Interpret the digest — especially `DRIFT`** (the lines where live state contradicts the handoff, e.g. a PR the doc calls in-flight has already merged). Do NOT re-derive this by hand-rolling `git`/`kubectl`/`gh`. It degrades gracefully (git-only) when a source is unreachable or the repo isn't datapacket; only reach for a targeted `kubectl`/`gh` drill-down if the digest flags something needing one.
 
 4. **Report**:
    - One-paragraph "where things stand" (reconciled with what you just verified).
