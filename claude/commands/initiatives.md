@@ -1,13 +1,13 @@
 ---
 name: initiatives
 description: "Show the cross-repo initiative + progress ledger (initiative-scan): every ongoing initiative, its momentum (●active / ◐slowing / ○stalled), last-touched, commits/PRs, next-step, and the live tmux session hosting it — fused deterministically from handoff docs + git + activity telemetry + live tmux. Use for 'what am I working on', 'what's in flight across my projects', 'what's stalled', 'where did I leave X', 'which session is X in'."
-argument-hint: "[--days N] [--repo PATH] [--json] [--tmux] — optional; defaults to --days 14 --tmux"
+argument-hint: "[--days N] [--repo PATH] [--json] [--tmux] — optional; defaults to --days 4 --tmux"
 allowed-tools: Bash
 ---
 
 # /initiatives — durable initiative + progress ledger
 
-Runs the read-only `initiative-scan` report and presents it. This is the durable, cross-session counterpart to the live Alt+i tmux view (which only shows sessions open right now). Args: `$ARGUMENTS` (passed through to the script; default `--days 14`).
+Runs the read-only `initiative-scan` report and presents it. This is the durable, cross-session counterpart to the live Alt+i tmux view (which only shows sessions open right now). Args: `$ARGUMENTS` (passed through to the script; default `--days 4`).
 
 ## Steps
 
@@ -21,10 +21,10 @@ Runs the read-only `initiative-scan` report and presents it. This is the durable
    ```
    - **Host note:** `192.168.50.94:30123` is the workbench LAN endpoint. On the **laptop** (no `~/.server-mode` marker, nebula-only) that's unreachable → the report runs **telemetry-OFF** (still useful from handoff + git). To get telemetry there, point `CLICKHOUSE_URL` at the laptop's nebula CH endpoint — see the `activity` skill.
 
-2. **Run the scan** (substitute `$ARGUMENTS`, or `--days 14 --tmux` if none):
+2. **Run the scan** (substitute `$ARGUMENTS`, or `--days 4 --tmux` if none):
    ```bash
    nix-shell -p 'python3.withPackages(p:[p.requests])' --run \
-     'python ~/workspace/devrc/scripts/session-analysis/initiative-scan.py --days 14 --tmux'
+     'python ~/workspace/devrc/scripts/session-analysis/initiative-scan.py --days 4 --tmux'
    ```
    - **`--tmux`** links each initiative to the live tmux session(s) hosting it — `[tmux:8,scratch7]` vs `[no session]` — by matching the claude pane's title (its session summary) against the initiative slug/title, scoped by the pane's cwd→repo. It also lists **live claude sessions with no matched initiative** (open work the ledger doesn't cover). Best-effort: on a host with no tmux server the column is silently omitted. This is the durable ledger fused with the live Alt+i view. Drop `--tmux` if `$ARGUMENTS` explicitly overrides.
 
