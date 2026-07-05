@@ -778,14 +778,15 @@ def test_match_tmux_attaches_session_scoped_by_repo():
         {"slug": "clawgate-chat-polish", "title": "clawgate chat polish", "repo": devrc},
     ]
     panes = [
-        {"session": "scratch4", "cwd": civit, "command": "claude",
+        {"session": "scratch4", "window": "2", "cwd": civit, "command": "claude",
          "title": "Wire Faro to main civitai app with Zach review"},
-        {"session": "1", "cwd": devrc, "command": "claude",
+        {"session": "1", "window": "3", "cwd": devrc, "command": "claude",
          "title": "clawgate chat polish soak"},
     ]
     unmatched = isc.match_tmux_to_initiatives(inis, panes, [devrc, civit])
-    assert inis[0]["tmux_sessions"] == {"scratch4"}
-    assert inis[1]["tmux_sessions"] == {"1"}
+    # id is <session>-<window>, so two initiatives in one session stay distinguishable.
+    assert inis[0]["tmux_sessions"] == {"scratch4-2"}
+    assert inis[1]["tmux_sessions"] == {"1-3"}
     assert unmatched == []
 
 
@@ -793,38 +794,67 @@ def test_match_tmux_wrong_repo_does_not_cross_credit():
     # A 'faro' pane whose cwd is devrc must NOT credit the civit faro initiative.
     devrc, civit = "/home/u/workspace/devrc", "/home/u/workspace/civit/dp"
     inis = [{"slug": "faro-rum-widening", "title": "Faro RUM widening", "repo": civit}]
-    panes = [{"session": "scratchX", "cwd": devrc, "command": "claude",
+    panes = [{"session": "scratchX", "window": "1", "cwd": devrc, "command": "claude",
               "title": "Wire Faro to civitai app"}]
     unmatched = isc.match_tmux_to_initiatives(inis, panes, [devrc, civit])
     assert inis[0]["tmux_sessions"] == set()
     # devrc has no matching initiative -> the claude pane is surfaced as unmatched.
     assert len(unmatched) == 1
-    assert unmatched[0]["session"] == "scratchX"
+    assert unmatched[0]["id"] == "scratchX-1"
     assert unmatched[0]["repo"] == devrc
 
 
 def test_match_tmux_non_claude_unmatched_pane_ignored():
     # A plain zsh pane in an unknown dir is neither matched nor reported as unmatched.
     inis = [{"slug": "x", "title": "X", "repo": "/r"}]
-    panes = [{"session": "scratch5", "cwd": "/home/u/taxes/2025", "command": "zsh",
-              "title": "nixos"}]
+    panes = [{"session": "scratch5", "window": "1", "cwd": "/home/u/taxes/2025",
+              "command": "zsh", "title": "nixos"}]
     unmatched = isc.match_tmux_to_initiatives(inis, panes, ["/r"])
     assert inis[0]["tmux_sessions"] == set()
     assert unmatched == []
 
 
-def test_match_tmux_multiple_panes_one_initiative():
+def test_match_tmux_two_windows_same_session_two_initiatives():
+    # The core reason for window granularity: one session, two windows, two distinct
+    # initiatives -> each initiative points at its OWN <session>-<window>.
     civit = "/home/u/workspace/civit/dp"
-    inis = [{"slug": "sysredis-buffer", "title": "sysRedis buffer soft-dependency",
-             "repo": civit}]
+    inis = [
+        {"slug": "sysredis-buffer", "title": "sysRedis buffer soft-dependency",
+         "repo": civit},
+        {"slug": "sysredis-wedge-latency", "title": "sysRedis wedge latency",
+         "repo": civit},
+    ]
     panes = [
-        {"session": "8", "cwd": civit, "command": "claude",
+        {"session": "8", "window": "1", "cwd": civit, "command": "claude",
+         "title": "Monitor sysredis wedge fixes"},
+        {"session": "8", "window": "3", "cwd": civit, "command": "claude",
          "title": "Continue sysredis buffer soft-dependency work"},
-        {"session": "8", "cwd": civit, "command": "claude",
+    ]
+    isc.match_tmux_to_initiatives(inis, panes, [civit])
+    assert inis[0]["tmux_sessions"] == {"8-3"}   # buffer -> window 3
+    assert inis[1]["tmux_sessions"] == {"8-1"}   # wedge  -> window 1
+
+
+def test_match_tmux_same_window_dedups():
+    # Two panes in the SAME window matching one initiative dedup to one id.
+    civit = "/home/u/workspace/civit/dp"
+    inis = [{"slug": "sysredis-buffer", "title": "sysRedis buffer", "repo": civit}]
+    panes = [
+        {"session": "8", "window": "2", "cwd": civit, "command": "claude",
+         "title": "Continue sysredis buffer work"},
+        {"session": "8", "window": "2", "cwd": civit, "command": "claude",
          "title": "Monitor sysredis buffer fixes"},
     ]
     isc.match_tmux_to_initiatives(inis, panes, [civit])
-    assert inis[0]["tmux_sessions"] == {"8"}
+    assert inis[0]["tmux_sessions"] == {"8-2"}
+
+
+def test_pane_id_formats_session_window():
+    assert isc.pane_id({"session": "8", "window": "1"}) == "8-1"
+    assert isc.pane_id({"session": "wheat", "window": "3"}) == "wheat-3"
+    # Missing window -> bare session, never a dangling 'session-'.
+    assert isc.pane_id({"session": "scratch7", "window": ""}) == "scratch7"
+    assert isc.pane_id({"session": "scratch7"}) == "scratch7"
 
 
 def test_tmux_session_sort_key_natural_order():
@@ -833,16 +863,24 @@ def test_tmux_session_sort_key_natural_order():
         "1", "8", "scratch", "scratch2", "scratch10"]
 
 
+def test_tmux_session_sort_key_orders_windows_within_session():
+    names = ["8-3", "8-1", "8-10", "1-2", "scratch2-1"]
+    assert sorted(names, key=isc._tmux_session_sort_key) == [
+        "1-2", "8-1", "8-3", "8-10", "scratch2-1"]
+
+
 # --------------------------------------------------------------------------- #
 # collect_tmux_panes — parsing the tab-delimited tmux output
 # --------------------------------------------------------------------------- #
 def test_collect_tmux_panes_parses_and_handles_empty_title(monkeypatch):
-    out = ("1\t/home/u/workspace/devrc\tclaude\tContinue clawgate loop\n"
-           "scratch5\t/home/u/taxes/2025\tzsh\t\n")  # empty title -> ""
+    out = ("1\t1\t/home/u/workspace/devrc\tclaude\tContinue clawgate loop\n"
+           "scratch5\t2\t/home/u/taxes/2025\tzsh\t\n")  # empty title -> ""
     monkeypatch.setattr(isc, "_run", lambda cmd, timeout=20.0: out)
     panes = isc.collect_tmux_panes()
-    assert panes[0] == {"session": "1", "cwd": "/home/u/workspace/devrc",
+    assert panes[0] == {"session": "1", "window": "1",
+                        "cwd": "/home/u/workspace/devrc",
                         "command": "claude", "title": "Continue clawgate loop"}
+    assert panes[1]["window"] == "2"
     assert panes[1]["title"] == ""
 
 
@@ -866,23 +904,23 @@ def test_build_report_tmux_annotates_and_lists_unmatched(tmp_path, monkeypatch):
     monkeypatch.setattr(isc, "session_genesis_refs", lambda root, d: [])
 
     panes = [
-        {"session": "scratch9", "cwd": str(repo), "command": "claude",
+        {"session": "scratch9", "window": "1", "cwd": str(repo), "command": "claude",
          "title": "Resume mail automation extractor work"},
-        {"session": "scratch2", "cwd": str(repo), "command": "claude",
+        {"session": "scratch2", "window": "4", "cwd": str(repo), "command": "claude",
          "title": "Some brand new unrelated exploration thread"},
     ]
     report = isc.build_report(14, repos=[str(repo)], client=None,
                               now=2_000.0, include_tmux=True, panes=panes)
     assert report["tmux_enabled"] is True
     ini = report["by_repo"][str(repo)][0]
-    assert ini["tmux_sessions"] == ["scratch9"]
-    # The unrelated pane is surfaced as live-but-unmatched.
-    assert any(u["session"] == "scratch2" for u in report["tmux_unmatched"])
+    assert ini["tmux_sessions"] == ["scratch9-1"]
+    # The unrelated pane is surfaced as live-but-unmatched, by its <session>-<window>.
+    assert any(u["id"] == "scratch2-4" for u in report["tmux_unmatched"])
 
     txt = isc.render(report, now=2_000.0)
-    assert "[tmux:scratch9]" in txt
+    assert "[tmux:scratch9-1]" in txt
     assert "live claude sessions — no matched initiative" in txt
-    assert "scratch2" in txt
+    assert "scratch2-4" in txt
 
 
 def test_build_report_tmux_no_session_marker(tmp_path, monkeypatch):
