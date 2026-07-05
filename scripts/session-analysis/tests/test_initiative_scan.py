@@ -869,13 +869,13 @@ def test_pane_id_translates_scratch_codename():
 
 
 def test_load_scratch_codenames_parses_slots(tmp_path):
-    # Mirrors the real tmux-scratch-monitor.sh SLOTS format.
-    script = tmp_path / "tmux-scratch-monitor.sh"
+    # Mirrors the real tmux-scratch-slots.sh SCRATCH_SLOTS format (session:key:color:name).
+    script = tmp_path / "tmux-scratch-slots.sh"
     script.write_text(
-        'SLOTS=(\n'
-        '    "g:scratch:#b8bb26:grove"\n'
-        '    "V:scratch4:#83a598:Vapor"\n'
-        '    "w:scratch11:#ebdbb2:wheat"\n'
+        'SCRATCH_SLOTS=(\n'
+        '    "scratch:g:#b8bb26:grove"\n'
+        '    "scratch4:V:#83a598:Vapor"\n'
+        '    "scratch11:w:#ebdbb2:wheat"\n'
         ')\n'
         'printf "unrelated:line:#nothex:x"\n')  # must not be parsed as a slot
     codes = isc.load_scratch_codenames(script)
@@ -887,8 +887,8 @@ def test_load_scratch_codenames_missing_file_is_empty():
 
 
 def test_load_scratch_codenames_real_file_has_vapor():
-    # Guards against the on-disk SLOTS format drifting away from the parser.
-    codes = isc.load_scratch_codenames()  # the repo's real tmux-scratch-monitor.sh
+    # Guards against the on-disk SCRATCH_SLOTS format drifting away from the parser.
+    codes = isc.load_scratch_codenames()  # the repo's real tmux-scratch-slots.sh
     assert codes.get("scratch4") == "Vapor"
     assert codes.get("scratch11") == "wheat"
 

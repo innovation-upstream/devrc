@@ -13,6 +13,14 @@
 #   g ●G v V p P    — Gold (scratch2) has a waiting prompt
 #   g G v V p P     — slot dimmed (gray) when session doesn't exist
 
+# Scratchpad slot table (session:key:color:name) — sourced from the ONE source of
+# truth in scratch-slots.sh, then joined for awk (the name field is ignored here).
+_d="$(dirname "$0")"
+if   [ -f "$_d/scratch-slots.sh" ];      then . "$_d/scratch-slots.sh"
+elif [ -f "$_d/tmux-scratch-slots.sh" ]; then . "$_d/tmux-scratch-slots.sh"
+fi
+slots_str="$(printf '%s ' "${SCRATCH_SLOTS[@]}")"
+
 # Sessions with at least one window waiting for input, space-padded for
 # substring matching in awk. Empty if jq / task files are missing.
 waiting=""
@@ -27,10 +35,10 @@ if command -v jq >/dev/null 2>&1 && compgen -G "$HOME/.tmux/tasks/*.json" >/dev/
 fi
 
 tmux list-sessions -F '#{session_name}' 2>/dev/null \
-  | awk -v waiting="$waiting" '
+  | awk -v waiting="$waiting" -v slots_str="$slots_str" '
     BEGIN {
-        # slot key : session : color (matches popup -s border color in .tmux.conf)
-        n = split("scratch:g:#b8bb26 scratch2:G:#d79921 scratch3:v:#b16286 scratch4:V:#83a598 scratch5:p:#cc241d scratch6:P:#689d6a scratch7:o:#fe8019 scratch8:O:#d3869b scratch9:n:#458588 scratch10:N:#928374 scratch11:w:#ebdbb2 scratch12:W:#af3a03", slots, " ")
+        # session:key:color:name from scratch-slots.sh (name unused here).
+        n = split(slots_str, slots, " ")
         for (i = 1; i <= n; i++) {
             split(slots[i], p, ":")
             sess[i]      = p[1]
