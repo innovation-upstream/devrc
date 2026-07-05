@@ -743,6 +743,27 @@ def test_best_title_match_empty_when_no_initiatives():
     assert isc.best_title_match({"clawgate"}, []) is None
 
 
+def test_best_title_match_shared_single_token_does_not_link():
+    # 'grafana' is shared across two initiatives -> a pane overlapping ONLY 'grafana'
+    # links to neither (the false grafana-alert-provisioning-drift match).
+    inis = [
+        {"slug": "grafana-alert-provisioning-drift", "title": "Grafana alerting drift"},
+        {"slug": "alert-chaos-grafana-sqlite", "title": "alert chaos Grafana sqlite"},
+    ]
+    toks = set(isc.text_tokens("Build Support 10x Grafana dashboard"))
+    assert isc.best_title_match(toks, inis) is None
+
+
+def test_best_title_match_unique_single_token_still_links():
+    # A token unique to ONE initiative (faro) still matches on its own.
+    inis = [
+        {"slug": "faro-rum-widening", "title": "Faro RUM widening"},
+        {"slug": "sysredis-buffer", "title": "sysRedis buffer"},
+    ]
+    toks = set(isc.text_tokens("Wire Faro to civitai app"))
+    assert isc.best_title_match(toks, inis)["slug"] == "faro-rum-widening"
+
+
 def test_best_title_match_generic_shared_word_does_not_link():
     # 'session' is shared across many initiatives -> low IDF -> a pane that overlaps
     # ONLY on 'session' must not link (the scratch8 "Resume session <id>" false hit).
@@ -1037,3 +1058,70 @@ def test_build_report_tmux_suppressed_when_no_server(tmp_path, monkeypatch):
     txt = isc.render(report, now=2_000.0)
     assert "[no session]" not in txt
     assert "[tmux:" not in txt
+
+
+# --------------------------------------------------------------------------- #
+# doc freshness + window filtering (the mtime-clobber fix)
+# --------------------------------------------------------------------------- #
+def test_doc_touch_epoch_prefers_authored_date_over_mtime():
+    import calendar
+    authored = float(calendar.timegm((2026, 6, 16, 0, 0, 0, 0, 0, 0)))
+    # A clobbered-recent fs-mtime must NOT win over the filename's authored date.
+    ini = {"date": "2026-06-16", "doc_mtime": 9_999_999_999.0}
+    assert isc.doc_touch_epoch(ini) == authored
+
+
+def test_doc_touch_epoch_falls_back_to_mtime_when_dateless():
+    assert isc.doc_touch_epoch({"date": None, "doc_mtime": 123.0}) == 123.0
+    assert isc.doc_touch_epoch({"doc_mtime": 123.0}) == 123.0
+
+
+def _stub_no_external_io(monkeypatch):
+    monkeypatch.setattr(isc, "git_branches", lambda r: ["main"])
+    monkeypatch.setattr(isc, "git_default_branch", lambda r: "main")
+    monkeypatch.setattr(isc, "gh_open_prs", lambda r: [])
+    monkeypatch.setattr(isc, "gh_merged_prs", lambda r, d: [])
+    monkeypatch.setattr(isc, "session_genesis_refs", lambda root, d: [])
+
+
+def test_build_report_windows_out_stale_dated_handoff(tmp_path, monkeypatch):
+    # The reported bug: an old, done handoff whose fs-mtime got bulk-clobbered to
+    # "recent" must NOT surface in a short window — its AUTHORED date is what counts.
+    import calendar
+    now = float(calendar.timegm((2026, 7, 5, 0, 0, 0, 0, 0, 0)))
+    repo = tmp_path / "r"
+    (repo / "claudedocs").mkdir(parents=True)
+    (repo / "claudedocs" / "handoff-fresh-2026-07-04.md").write_text(
+        "# Handoff: fresh\n## Next steps\n1. go\n")
+    (repo / "claudedocs" / "handoff-stale-2026-06-16.md").write_text(
+        "# Handoff: stale\n## Next steps\n1. go\n")  # fs-mtime real-now, but dated 06-16
+    _stub_no_external_io(monkeypatch)
+
+    fresh_only = isc.build_report(4, repos=[str(repo)], client=None, now=now)
+    assert {i["slug"] for i in fresh_only["by_repo"].get(str(repo), [])} == {"fresh"}
+
+    # Widen the window and the stale one resurfaces (not dropped, just out-of-window).
+    both = isc.build_report(30, repos=[str(repo)], client=None, now=now)
+    assert {i["slug"] for i in both["by_repo"].get(str(repo), [])} == {"fresh", "stale"}
+
+
+def test_build_report_keeps_stale_handoff_with_live_session(tmp_path, monkeypatch):
+    # An old handoff still being worked (a live tmux session on it) stays — and reads
+    # active — even though its authored date is far outside the window.
+    import calendar
+    now = float(calendar.timegm((2026, 7, 5, 0, 0, 0, 0, 0, 0)))
+    repo = tmp_path / "r"
+    (repo / "claudedocs").mkdir(parents=True)
+    (repo / "claudedocs" / "handoff-oldwork-2026-05-01.md").write_text(
+        "# Handoff: oldwork\n## Next steps\n1. go\n")
+    _stub_no_external_io(monkeypatch)
+    monkeypatch.setattr(isc, "load_scratch_codenames", lambda *a, **k: {})
+
+    panes = [{"session": "8", "window": "1", "cwd": str(repo), "command": "claude",
+              "title": "Continue oldwork task"}]
+    report = isc.build_report(4, repos=[str(repo)], client=None, now=now,
+                              include_tmux=True, panes=panes)
+    inis = report["by_repo"].get(str(repo), [])
+    assert len(inis) == 1 and inis[0]["slug"] == "oldwork"
+    assert inis[0]["momentum"] == "active"        # live session => touched now
+    assert inis[0]["tmux_sessions"] == ["main:8-1"]
