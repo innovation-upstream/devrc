@@ -9,6 +9,17 @@ allowed-tools: Bash
 
 Runs the read-only `initiative-scan` report and presents it. This is the durable, cross-session counterpart to the live Alt+i tmux view (which only shows sessions open right now). Args: `$ARGUMENTS` (passed through to the script; default `--days 4`).
 
+## Session snapshot / restore (survive a reboot)
+
+If `$ARGUMENTS` is **`snapshot`** (or `save`), **`restore`** (optionally `restore --dry-run`), or **`show`**, run the workspace snapshot helper instead of the scan — it binds each live claude tmux window to its exact session id (by matching pane content) so you can bring the whole workspace back after a reboot. tmux-continuum already restores the sessions/windows/cwds; this relaunches the right `claude --resume <id>` in each.
+
+```bash
+python3 ~/workspace/devrc/scripts/tmux-session-restore.py <snapshot|restore|show> [--dry-run]
+```
+- **`snapshot`** — run BEFORE rebooting: writes `~/.config/initiatives/restore-plan.json` + a readable `restore-cheatsheet.md` (survives reboot). Present the cheat-sheet.
+- **`restore`** — run AFTER reboot (once tmux-continuum has restored the shells): relaunches `claude --resume <id>` in each window; windows already running claude are skipped, and windows with no certain match fall back to the interactive picker. Use `--dry-run` first to preview.
+- **⚠ host-local:** run it on the host you're rebooting — it reads that host's live tmux + `~/.claude/projects`. The plan is per-host.
+
 ## Steps
 
 1. **Load the ClickHouse read-only reader creds** (for the telemetry/momentum columns). The script **degrades gracefully** without them (handoff + git only), so if this fails, still proceed.
