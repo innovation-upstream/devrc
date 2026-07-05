@@ -9,6 +9,7 @@ claim-based unique-session assignment (no two windows share a session, uncertain
 picker), and cheat-sheet rendering. tmux/grep/capture-pane I/O is stubbed.
 """
 import importlib.util
+import json
 import sys
 from pathlib import Path
 
@@ -118,3 +119,28 @@ def test_cheat_sheet_shows_resume_command_and_picker_fallback():
     assert "claude --resume abc" in txt
     assert "Vapor:2" in txt and "main:8:1" in txt
     assert "pick from the list" in txt           # empty id -> picker guidance
+
+
+# --------------------------------------------------------------------------- #
+# restore — custom plan path + no-clobber guard
+# --------------------------------------------------------------------------- #
+def test_cmd_restore_reads_custom_plan_and_renders_send(tmp_path, monkeypatch, capsys):
+    plan = tmp_path / "p.json"
+    plan.write_text(json.dumps([{"session": "s", "window": "1", "codename": "Vapor",
+                                 "cwd": "/r", "session_id": "abc", "title": "t", "hint": ""}]))
+    monkeypatch.setattr(tsr, "tmux_session_exists", lambda n: True)
+    monkeypatch.setattr(tsr, "window_state", lambda t: (True, "zsh"))  # bare shell
+    rc = tsr.cmd_restore(dry_run=True, plan_path=plan)
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "claude --resume abc" in out and "would send" in out
+
+
+def test_cmd_restore_skips_window_already_running_claude(tmp_path, monkeypatch, capsys):
+    plan = tmp_path / "p.json"
+    plan.write_text(json.dumps([{"session": "s", "window": "1", "codename": "Vapor",
+                                 "cwd": "/r", "session_id": "abc", "title": "t", "hint": ""}]))
+    monkeypatch.setattr(tsr, "tmux_session_exists", lambda n: True)
+    monkeypatch.setattr(tsr, "window_state", lambda t: (True, "claude"))  # already running
+    tsr.cmd_restore(dry_run=True, plan_path=plan)
+    assert "claude already running" in capsys.readouterr().out
