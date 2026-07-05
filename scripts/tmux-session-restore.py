@@ -231,11 +231,12 @@ def window_state(target: str) -> tuple[bool, str]:
     return (bool(out.strip()), out.strip())
 
 
-def cmd_restore(dry_run: bool = False) -> int:
-    if not PLAN.exists():
-        print("no restore plan — run `save` before rebooting", file=sys.stderr)
+def cmd_restore(dry_run: bool = False, plan_path: Path | None = None) -> int:
+    src = plan_path or PLAN
+    if not src.exists():
+        print(f"no restore plan at {src} — run `save` before rebooting", file=sys.stderr)
         return 1
-    plan = json.loads(PLAN.read_text())
+    plan = json.loads(src.read_text())
     tag = "[dry-run] would " if dry_run else ""
     sent = skipped = 0
     for e in plan:
@@ -272,10 +273,17 @@ def main(argv: list[str]) -> int:
     if argv[:1] == ["show"]:
         return cmd_show()
     if argv[:1] == ["restore"]:
-        return cmd_restore(dry_run="--dry-run" in argv[1:] or "-n" in argv[1:])
+        rest = argv[1:]
+        dry = "--dry-run" in rest or "-n" in rest
+        plan_path = None
+        if "--plan" in rest:
+            i = rest.index("--plan")
+            if i + 1 < len(rest):
+                plan_path = Path(os.path.expanduser(rest[i + 1]))
+        return cmd_restore(dry_run=dry, plan_path=plan_path)
     print(__doc__.strip().split("\n\n")[0])
-    print("\nusage: tmux-session-restore.py {save | restore [--dry-run] | show}",
-          file=sys.stderr)
+    print("\nusage: tmux-session-restore.py "
+          "{save | restore [--dry-run] [--plan PATH] | show}", file=sys.stderr)
     return 2
 
 
