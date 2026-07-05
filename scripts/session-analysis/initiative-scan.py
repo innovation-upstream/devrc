@@ -1044,26 +1044,42 @@ def _num(v, default=0):
 # Live tmux sessions (I/O, optional) — which scratch session hosts an initiative
 # --------------------------------------------------------------------------- #
 def collect_tmux_panes() -> list[dict]:
-    """Every live tmux pane as [{session, cwd, command, title}] (empty if no server).
+    """Every live tmux pane as [{session, window, cwd, command, title}] (empty if no
+    server).
 
-    Zach runs many `scratch*`-named tmux sessions in parallel, one per in-flight
-    initiative; a claude pane sets its title to the session's summary line. We read
-    those titles to link the DURABLE initiative ledger to what's actually open right
-    now (the ephemeral Alt+i view). Best-effort: `_run` returns "" when the tmux
-    binary is missing or no server is running, so this yields [] and callers degrade.
+    Zach runs many named scratchpad tmux sessions in parallel (`8`, `scratch7`,
+    `wheat`), each often with SEVERAL windows on DIFFERENT initiatives; a claude pane
+    sets its title to that window's session-summary line. We capture the window index
+    too so the ledger can point at `<session>-<window>` (e.g. `8-1` vs `8-3`), the
+    exact unit `tmux select-window -t 8:1` navigates to — a bare session id can't
+    disambiguate two initiatives in one session. Best-effort: `_run` returns "" when
+    the tmux binary is missing or no server is running, so this yields [] and callers
+    degrade to [no session].
     """
     out = _run(["tmux", "list-panes", "-a", "-F",
-                "#{session_name}\t#{pane_current_path}\t#{pane_current_command}\t#{pane_title}"])
+                "#{session_name}\t#{window_index}\t#{pane_current_path}"
+                "\t#{pane_current_command}\t#{pane_title}"])
     panes: list[dict] = []
     for ln in out.splitlines():
         if not ln.strip():
             continue
         parts = ln.split("\t")
-        while len(parts) < 4:
+        while len(parts) < 5:
             parts.append("")
-        panes.append({"session": parts[0], "cwd": parts[1],
-                      "command": parts[2], "title": parts[3]})
+        panes.append({"session": parts[0], "window": parts[1], "cwd": parts[2],
+                      "command": parts[3], "title": parts[4]})
     return panes
+
+
+def pane_id(pane: dict) -> str:
+    """`<session>-<window>` display id for a pane, e.g. `8-1`, `wheat-3`.
+
+    Falls back to the bare session name if a window index is somehow absent, so the id
+    is never a dangling `session-`.
+    """
+    session = pane.get("session", "")
+    window = str(pane.get("window", "")).strip()
+    return f"{session}-{window}" if window else session
 
 
 def best_title_match(pane_toks: set[str], initiatives: list[dict]) -> dict | None:
@@ -1108,9 +1124,10 @@ def match_tmux_to_initiatives(initiatives: list[dict], panes: list[dict],
     Each pane's cwd is resolved to its repo (`resolve_cwd_repo`), and its title is
     matched ONLY against initiatives in that repo (`best_title_match`) — so a pane in
     devrc can't match a civit initiative that happens to share a word. Mutates each
-    initiative's `tmux_sessions` (a set of session names). A claude pane that resolves
-    to no initiative is returned as unmatched (live work the ledger doesn't cover),
-    with its session/title/repo — the honest mirror of the "no session" gap.
+    initiative's `tmux_sessions` (a set of `<session>-<window>` ids, e.g. `8-1`). A
+    claude pane that resolves to no initiative is returned as unmatched (live work the
+    ledger doesn't cover), with its id/title/repo — the honest mirror of the "no
+    session" gap.
     """
     for ini in initiatives:
         ini.setdefault("tmux_sessions", set())
@@ -1125,9 +1142,9 @@ def match_tmux_to_initiatives(initiatives: list[dict], panes: list[dict],
         eligible = by_repo.get(repo, []) if repo is not None else []
         ini = best_title_match(ptoks, eligible) if ptoks else None
         if ini is not None:
-            ini["tmux_sessions"].add(pane["session"])
+            ini["tmux_sessions"].add(pane_id(pane))
         elif pane.get("command", "") == "claude":
-            unmatched.append({"session": pane.get("session", ""),
+            unmatched.append({"id": pane_id(pane),
                               "title": pane.get("title", ""),
                               "repo": repo})
     return unmatched
@@ -1275,16 +1292,23 @@ def build_report(days: int, repos: list[str] | None = None,
 
 
 def _tmux_session_sort_key(name: str) -> tuple:
-    """Order session names naturally: '1','2','8' before 'scratch2','scratch10'.
+    """Order `<session>-<window>` ids naturally: '1','8-1','8-3','scratch2','scratch10'.
 
-    Splits into (non-digit prefix, numeric suffix) so a numeric tail sorts by VALUE
-    ('scratch2' < 'scratch10'), and pure-numeric names ('8') sort ahead of prefixed
-    ones — matching how the sessions read in `tmux list-sessions`.
+    Peels a trailing `-<window>` (greedy, so a dashed session like
+    `scratch-1774833757-1` splits at the LAST dash), then sorts the session part by
+    (non-digit prefix, numeric suffix) so a numeric tail sorts by VALUE
+    ('scratch2' < 'scratch10') and pure-numeric sessions ('8') sort ahead of prefixed
+    ones — with the window index as the final tiebreak ('8-1' before '8-3').
     """
-    m = re.match(r"^(.*?)(\d*)$", name)
-    prefix = m.group(1) if m else name
+    win = -1
+    session = name
+    mw = re.match(r"^(.*)-(\d+)$", name)
+    if mw:
+        session, win = mw.group(1), int(mw.group(2))
+    m = re.match(r"^(.*?)(\d*)$", session)
+    prefix = m.group(1) if m else session
     num = int(m.group(2)) if (m and m.group(2)) else -1
-    return (prefix, num, name)
+    return (prefix, num, win, name)
 
 
 # --------------------------------------------------------------------------- #
@@ -1363,14 +1387,14 @@ def render(report: dict, now: float | None = None) -> str:
             out.append("   (open work the ledger doesn't cover — a new thread, or a "
                        "handoff not yet written)")
             seen = set()
-            for u in sorted(unmatched, key=lambda u: _tmux_session_sort_key(u.get("session", ""))):
-                key = (u.get("session"), u.get("title"))
+            for u in sorted(unmatched, key=lambda u: _tmux_session_sort_key(u.get("id", ""))):
+                key = (u.get("id"), u.get("title"))
                 if key in seen:
                     continue
                 seen.add(key)
                 repo = _short_repo(u["repo"]) if u.get("repo") else "?"
                 title = (u.get("title") or "").strip() or "(untitled)"
-                out.append(f"  [{u.get('session', '?')}]  {title[:80]}   ({repo})")
+                out.append(f"  [{u.get('id', '?')}]  {title[:80]}   ({repo})")
 
     if not report["telemetry_available"]:
         out.append("\n(NOTE: telemetry OFF — CLICKHOUSE_* unset or unreachable. "
