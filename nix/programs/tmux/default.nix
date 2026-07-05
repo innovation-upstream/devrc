@@ -31,16 +31,26 @@ in
   prefix = "C-a";
   keyMode = "vi";
   baseIndex = 1;
+  terminal = "tmux-256color";
+  escapeTime = 0;
+  historyLimit = 50000;
+  focusEvents = true;
   extraConfig = builtins.readFile ../../../.tmux.conf
     + "\n# --- generated scratchpad popup toggles (see nix/programs/tmux/default.nix) ---\n"
     + scratchBindings + "\n";
   plugins = with pkgs.tmuxPlugins; [
-    resurrect
+    {
+      plugin = resurrect;
+      extraConfig = ''
+        set -g @resurrect-capture-pane-contents 'on'
+        set -g @resurrect-strategy-nvim 'session'
+      '';
+    }
     {
       plugin = continuum;
       extraConfig = ''
         set -g @continuum-restore 'on'
-        set -g @continuum-save-interval '5'
+        set -g @continuum-save-interval '15'
       '';
     }
     {
