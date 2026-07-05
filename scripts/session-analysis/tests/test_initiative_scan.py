@@ -857,6 +857,48 @@ def test_pane_id_formats_session_window():
     assert isc.pane_id({"session": "scratch7"}) == "scratch7"
 
 
+def test_pane_id_translates_scratch_codename():
+    # A scratchpad session shows its hotkey codename; a plain numeric session doesn't.
+    codes = {"scratch4": "Vapor", "scratch11": "wheat"}
+    assert isc.pane_id({"session": "scratch4", "window": "2"}, codes) == "Vapor-2"
+    assert isc.pane_id({"session": "scratch11", "window": "1"}, codes) == "wheat-1"
+    assert isc.pane_id({"session": "8", "window": "3"}, codes) == "8-3"  # no codename
+
+
+def test_load_scratch_codenames_parses_slots(tmp_path):
+    # Mirrors the real tmux-scratch-monitor.sh SLOTS format.
+    script = tmp_path / "tmux-scratch-monitor.sh"
+    script.write_text(
+        'SLOTS=(\n'
+        '    "g:scratch:#b8bb26:grove"\n'
+        '    "V:scratch4:#83a598:Vapor"\n'
+        '    "w:scratch11:#ebdbb2:wheat"\n'
+        ')\n'
+        'printf "unrelated:line:#nothex:x"\n')  # must not be parsed as a slot
+    codes = isc.load_scratch_codenames(script)
+    assert codes == {"scratch": "grove", "scratch4": "Vapor", "scratch11": "wheat"}
+
+
+def test_load_scratch_codenames_missing_file_is_empty():
+    assert isc.load_scratch_codenames("/no/such/file.sh") == {}
+
+
+def test_load_scratch_codenames_real_file_has_vapor():
+    # Guards against the on-disk SLOTS format drifting away from the parser.
+    codes = isc.load_scratch_codenames()  # the repo's real tmux-scratch-monitor.sh
+    assert codes.get("scratch4") == "Vapor"
+    assert codes.get("scratch11") == "wheat"
+
+
+def test_match_tmux_uses_codenames_end_to_end():
+    civit = "/home/u/workspace/civit/dp"
+    inis = [{"slug": "faro-rum-widening", "title": "Faro RUM widening", "repo": civit}]
+    panes = [{"session": "scratch4", "window": "2", "cwd": civit, "command": "claude",
+              "title": "Wire Faro to civitai app"}]
+    isc.match_tmux_to_initiatives(inis, panes, [civit], codenames={"scratch4": "Vapor"})
+    assert inis[0]["tmux_sessions"] == {"Vapor-2"}
+
+
 def test_tmux_session_sort_key_natural_order():
     names = ["scratch10", "scratch2", "8", "1", "scratch"]
     assert sorted(names, key=isc._tmux_session_sort_key) == [
@@ -902,6 +944,8 @@ def test_build_report_tmux_annotates_and_lists_unmatched(tmp_path, monkeypatch):
     monkeypatch.setattr(isc, "gh_open_prs", lambda r: [])
     monkeypatch.setattr(isc, "gh_merged_prs", lambda r, d: [])
     monkeypatch.setattr(isc, "session_genesis_refs", lambda root, d: [])
+    # Isolate the window/unmatched logic from the real codename table (tested apart).
+    monkeypatch.setattr(isc, "load_scratch_codenames", lambda *a, **k: {})
 
     panes = [
         {"session": "scratch9", "window": "1", "cwd": str(repo), "command": "claude",
@@ -921,6 +965,26 @@ def test_build_report_tmux_annotates_and_lists_unmatched(tmp_path, monkeypatch):
     assert "[tmux:scratch9-1]" in txt
     assert "live claude sessions — no matched initiative" in txt
     assert "scratch2-4" in txt
+
+
+def test_build_report_tmux_applies_codenames(tmp_path, monkeypatch):
+    # End-to-end: a scratch4 pane renders under its Vapor codename in the report.
+    repo = tmp_path / "myrepo"
+    (repo / "claudedocs").mkdir(parents=True)
+    (repo / "claudedocs" / "handoff-mail-automation-2026-06-30.md").write_text(NEXT_DOC)
+    monkeypatch.setattr(isc, "git_branches", lambda r: ["main"])
+    monkeypatch.setattr(isc, "git_default_branch", lambda r: "main")
+    monkeypatch.setattr(isc, "gh_open_prs", lambda r: [])
+    monkeypatch.setattr(isc, "gh_merged_prs", lambda r, d: [])
+    monkeypatch.setattr(isc, "session_genesis_refs", lambda root, d: [])
+    monkeypatch.setattr(isc, "load_scratch_codenames", lambda *a, **k: {"scratch4": "Vapor"})
+
+    panes = [{"session": "scratch4", "window": "2", "cwd": str(repo),
+              "command": "claude", "title": "Resume mail automation extractor work"}]
+    report = isc.build_report(14, repos=[str(repo)], client=None,
+                              now=2_000.0, include_tmux=True, panes=panes)
+    assert report["by_repo"][str(repo)][0]["tmux_sessions"] == ["Vapor-2"]
+    assert "[tmux:Vapor-2]" in isc.render(report, now=2_000.0)
 
 
 def test_build_report_tmux_no_session_marker(tmp_path, monkeypatch):

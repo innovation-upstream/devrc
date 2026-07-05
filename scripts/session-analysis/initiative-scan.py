@@ -1071,13 +1071,44 @@ def collect_tmux_panes() -> list[dict]:
     return panes
 
 
-def pane_id(pane: dict) -> str:
-    """`<session>-<window>` display id for a pane, e.g. `8-1`, `wheat-3`.
+# The scratchpad codename map lives in ONE place — the `SLOTS` table of
+# scripts/tmux-scratch-monitor.sh, which mirrors the tmux/i3 hotkey bindings
+# ($mod+Shift+V → session `scratch4` → codename `Vapor`). We parse it at runtime so
+# the report speaks the SAME names Zach navigates by, and never drifts from a copy.
+SCRATCH_MONITOR = Path(__file__).resolve().parent.parent / "tmux-scratch-monitor.sh"
+# A SLOTS entry: "V:scratch4:#83a598:Vapor"  (key : session : hex-color : codename).
+_SLOT_RE = re.compile(r'"([^":]+):([^":]+):(#[0-9a-fA-F]{6}):([^":]+)"')
 
+
+def load_scratch_codenames(path: str | os.PathLike | None = None) -> dict[str, str]:
+    """Parse `{session: codename}` from tmux-scratch-monitor.sh's SLOTS table.
+
+    Returns e.g. {"scratch4": "Vapor", "scratch11": "wheat", …}. Empty dict on any
+    failure (file missing / unreadable) so callers degrade to raw session names — the
+    codename layer is a display nicety, never a hard dependency.
+    """
+    p = Path(path) if path is not None else SCRATCH_MONITOR
+    try:
+        text = p.read_text()
+    except OSError:
+        return {}
+    mapping: dict[str, str] = {}
+    for _key, session, _color, name in _SLOT_RE.findall(text):
+        mapping[session] = name
+    return mapping
+
+
+def pane_id(pane: dict, codenames: dict[str, str] | None = None) -> str:
+    """`<session>-<window>` display id for a pane, e.g. `8-1`, `Vapor-2`.
+
+    The tmux session name is translated to its scratchpad CODENAME when one exists
+    (`scratch4` → `Vapor`), so the id matches what Zach sees on his hotkey-bound
+    scratchpads; sessions with no codename (plain numeric `8`) keep their raw name.
     Falls back to the bare session name if a window index is somehow absent, so the id
     is never a dangling `session-`.
     """
     session = pane.get("session", "")
+    session = (codenames or {}).get(session, session)
     window = str(pane.get("window", "")).strip()
     return f"{session}-{window}" if window else session
 
@@ -1118,7 +1149,8 @@ def best_title_match(pane_toks: set[str], initiatives: list[dict]) -> dict | Non
 
 def match_tmux_to_initiatives(initiatives: list[dict], panes: list[dict],
                               repos: list[str],
-                              wt_map: dict[str, str] | None = None) -> list[dict]:
+                              wt_map: dict[str, str] | None = None,
+                              codenames: dict[str, str] | None = None) -> list[dict]:
     """Attach live tmux sessions to initiatives; return unmatched claude panes.
 
     Each pane's cwd is resolved to its repo (`resolve_cwd_repo`), and its title is
@@ -1142,9 +1174,9 @@ def match_tmux_to_initiatives(initiatives: list[dict], panes: list[dict],
         eligible = by_repo.get(repo, []) if repo is not None else []
         ini = best_title_match(ptoks, eligible) if ptoks else None
         if ini is not None:
-            ini["tmux_sessions"].add(pane_id(pane))
+            ini["tmux_sessions"].add(pane_id(pane, codenames))
         elif pane.get("command", "") == "claude":
-            unmatched.append({"id": pane_id(pane),
+            unmatched.append({"id": pane_id(pane, codenames),
                               "title": pane.get("title", ""),
                               "repo": repo})
     return unmatched
@@ -1254,7 +1286,9 @@ def build_report(days: int, repos: list[str] | None = None,
         # An explicitly-injected pane list (tests) always activates, even when empty.
         if panes is not None or live_panes:
             tmux_active = True
-            tmux_unmatched = match_tmux_to_initiatives(initiatives, live_panes, repos, wt_map)
+            codenames = load_scratch_codenames()
+            tmux_unmatched = match_tmux_to_initiatives(initiatives, live_panes, repos,
+                                                       wt_map, codenames)
 
     # Compute momentum from the MAX of every touch signal.
     for ini in initiatives:
