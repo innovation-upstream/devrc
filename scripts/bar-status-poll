@@ -286,6 +286,7 @@ def write_status(name: str, payload: dict) -> str:
     tmp = path + ".tmp"
     with open(tmp, "w") as f:
         json.dump(payload, f)
+    os.chmod(tmp, 0o600)  # contents are infra alert counts / task ids — keep them non-world-readable
     os.replace(tmp, path)
     return path
 

@@ -232,15 +232,17 @@ lib.mkIf isNixOS {
   # network. The poller itself (scripts/bar-status-poll) is NOT symlinked here: it
   # is run from the repo working tree by the systemd unit below so it can resolve
   # its sibling scripts/mail-actions/_db.py (cf. mail-actions/run-archive.sh).
-  home.file.".config/i3status-rust/scripts/i3status-clawgate" = {
+  # The clawgate/mail/alerts block scripts + poller are workbench-only, so their
+  # symlinks are !isLaptop-gated too (they'd be dead files on the laptop otherwise).
+  home.file.".config/i3status-rust/scripts/i3status-clawgate" = lib.mkIf (!isLaptop) {
     source = ../scripts/i3status-clawgate;
     executable = true;
   };
-  home.file.".config/i3status-rust/scripts/i3status-mail" = {
+  home.file.".config/i3status-rust/scripts/i3status-mail" = lib.mkIf (!isLaptop) {
     source = ../scripts/i3status-mail;
     executable = true;
   };
-  home.file.".config/i3status-rust/scripts/i3status-alerts" = {
+  home.file.".config/i3status-rust/scripts/i3status-alerts" = lib.mkIf (!isLaptop) {
     source = ../scripts/i3status-alerts;
     executable = true;
   };
@@ -266,6 +268,11 @@ lib.mkIf isNixOS {
     };
     Service = {
       Type = "oneshot";
+      # Hard ceiling so a half-hung kubectl (nebula up, API server not answering)
+      # can't wedge the poller forever: systemd kills the cgroup (reaping any stuck
+      # kubectl child) and the timer re-arms. Without this, Type=oneshot defaults to
+      # TimeoutStartSec=infinity and OnUnitActiveSec only re-fires once inactive.
+      TimeoutStartSec = 90;
       Environment = [
         "PATH=${lib.makeBinPath [ pollPyEnv pkgs.kubectl pkgs.procps pkgs.coreutils ]}"
         "KUBECONFIG=%h/workspace/homelab-talos/homelab-kubeconfig"
@@ -280,8 +287,8 @@ lib.mkIf isNixOS {
   };
 
   # Timer: fire the poller ~every 45s. OnUnitActiveSec re-arms after each run so a
-  # slow poll never overlaps itself; OnStartupSec gives one prompt run after login;
-  # Persistent catches up a single missed run after sleep.
+  # slow poll never overlaps itself; OnStartupSec gives one prompt run after login.
+  # (No Persistent — it only applies to OnCalendar timers, not monotonic ones.)
   systemd.user.timers.bar-status-poll = lib.mkIf (!isLaptop) {
     Unit = {
       Description = "Periodic timer for the i3 bar-status poller";
@@ -289,7 +296,6 @@ lib.mkIf isNixOS {
     Timer = {
       OnStartupSec = "20s";
       OnUnitActiveSec = "45s";
-      Persistent = true;
     };
     Install = {
       WantedBy = [ "timers.target" ];
