@@ -1,4 +1,8 @@
 ''
+[rigcontrol]
+command=$SCRIPT_DIR/rigcontrol
+interval=once
+
 [dictation]
 command=$SCRIPT_DIR/dictation
 interval=once

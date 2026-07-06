@@ -18,6 +18,9 @@ bindsym Shift+XF86MonBrightnessDown exec --no-startup-id brightnessctl set 1%-
 
 floating_modifier $mod
 
+# Float the rig-control (yad) popup as a compact centered window instead of tiling it
+for_window [class="Yad" title="Rig Controls"] floating enable, move position center
+
 # Terminal
 bindsym $mod+Return exec [ ! "$I3CONFIG_DEFAULT_TERMINAL" = "" ] && $I3CONFIG_DEFAULT_TERMINAL || i3-sensible-terminal
 
