@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+# Mullvad VPN status block for i3status-rust (custom block, json = true).
+# Render-only: queries the Mullvad status API and prints a single JSON line
+#   {"text": "...", "short_text": "...", "state": "Good|Warning|Critical"}
+# The clickable half (rofi menu / server switch / toggle) lives in the sibling
+# i3status-vpn-menu, wired via [[block.click]] in the i3status-rust config.
+# Refreshed on demand with:  pkill -RTMIN+10 i3status-rs  (block signal = 10)
+#
+# State mapping from the old i3blocks colors:
+#   connected  -> Good      (was default/green)
+#   not on VPN -> Critical  (was #FF0000 red)
+#   API error  -> Warning   (was #FFA500 orange)
+set -uo pipefail
+
+TIMEOUT=${TIMEOUT:-3}
+CACHE_FILE="/tmp/i3status-vpn-cache"
+CACHE_TTL=${CACHE_TTL:-30}
+
+emit() {
+    # $1=text $2=short_text $3=state
+    printf '{"text": "%s", "short_text": "%s", "state": "%s"}\n' "$1" "$2" "$3"
+}
+
+# Use cache if fresh (identical TTL behaviour to the old block).
+if [[ -f "$CACHE_FILE" ]]; then
+    age=$(( $(date +%s) - $(stat -c %Y "$CACHE_FILE") ))
+    if (( age < CACHE_TTL )); then
+        cat "$CACHE_FILE"
+        exit 0
+    fi
+fi
+
+json=$(curl -s --max-time "$TIMEOUT" https://am.i.mullvad.net/json 2>/dev/null)
+
+if [[ -z "$json" ]]; then
+    emit "VPN ?" "VPN ?" "Warning" | tee "$CACHE_FILE"
+    exit 0
+fi
+
+eval "$(echo "$json" | python3 -c "
+import json, sys, shlex
+d = json.load(sys.stdin)
+print(f'is_mullvad={shlex.quote(str(d.get(\"mullvad_exit_ip\", False)))}')
+print(f'city={shlex.quote(d.get(\"city\", \"?\"))}')
+print(f'hostname={shlex.quote(d.get(\"mullvad_exit_ip_hostname\", \"\"))}')
+" 2>/dev/null)"
+
+if [[ "${is_mullvad:-False}" == "True" ]]; then
+    if [[ "$city" == *", "* ]]; then
+        short="${city##*, }"
+    else
+        short="${city:0:3}"
+    fi
+    emit "VPN ${city}" "VPN ${short}" "Good" | tee "$CACHE_FILE"
+else
+    emit "VPN OFF" "VPN !" "Critical" | tee "$CACHE_FILE"
+fi

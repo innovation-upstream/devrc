@@ -1,22 +1,52 @@
+# i3 window-manager config, rendered to ~/.config/i3/config by home-manager
+# (xdg.configFile."i3/config".text). Raw string (NOT the HM i3 DSL) so Zach can
+# keep hand-maintaining it. Function of { isLaptop } so the one file serves both
+# hosts: laptop gets backlight brightness bindings; workbench gets the rig-control
+# (yad) float rule. Reconciled superset of the pre-migration drift between the repo
+# nix/system/i3config.nix and the live /etc/nixos/i3config.nix.
+{ isLaptop ? false }:
+
+let
+  # Laptop-only: hardware backlight brightness keys (workbench has no backlight).
+  brightnessBindings =
+    if isLaptop then ''
+
+      # Brightness (laptop backlight, 5% steps; Shift for 1% fine control)
+      bindsym XF86MonBrightnessUp exec --no-startup-id brightnessctl set +5%
+      bindsym XF86MonBrightnessDown exec --no-startup-id brightnessctl set 5%-
+      bindsym Shift+XF86MonBrightnessUp exec --no-startup-id brightnessctl set +1%
+      bindsym Shift+XF86MonBrightnessDown exec --no-startup-id brightnessctl set 1%-''
+    else "";
+
+  # Workbench-only: float the rig-control (yad) popup instead of tiling it.
+  rigControlFloat =
+    if isLaptop then ""
+    else ''
+
+      # Float the rig-control (yad) popup as a compact centered window instead of tiling it
+      for_window [class="Yad" title="Rig Controls"] floating enable, move position center'';
+in
 ''
 set $mod Mod1
 
 font pango:monospace 8
 
+# NetworkManager applet
+exec --no-startup-id nm-applet
 
 # Volume control (PipeWire via pactl, 5% steps)
 bindsym XF86AudioRaiseVolume exec --no-startup-id pactl set-sink-volume @DEFAULT_SINK@ +5%
 bindsym XF86AudioLowerVolume exec --no-startup-id pactl set-sink-volume @DEFAULT_SINK@ -5%
 bindsym XF86AudioMute exec --no-startup-id pactl set-sink-mute @DEFAULT_SINK@ toggle
 bindsym XF86AudioMicMute exec --no-startup-id pactl set-source-mute @DEFAULT_SOURCE@ toggle
-
-# Brightness (laptop backlight, 5% steps; Shift for 1% fine control)
-bindsym XF86MonBrightnessUp exec --no-startup-id brightnessctl set +5%
-bindsym XF86MonBrightnessDown exec --no-startup-id brightnessctl set 5%-
-bindsym Shift+XF86MonBrightnessUp exec --no-startup-id brightnessctl set +1%
-bindsym Shift+XF86MonBrightnessDown exec --no-startup-id brightnessctl set 1%-
+${brightnessBindings}
 
 floating_modifier $mod
+
+# Float any window explicitly launched with WM_CLASS "float" (e.g. the VPN detail
+# terminal: `alacritty --class float,float`). No such rule existed pre-migration.
+for_window [class="float"] floating enable
+${rigControlFloat}
 
 # Terminal
 bindsym $mod+Return exec [ ! "$I3CONFIG_DEFAULT_TERMINAL" = "" ] && $I3CONFIG_DEFAULT_TERMINAL || i3-sensible-terminal
@@ -132,9 +162,11 @@ mode "resize" {
 
 bindsym $mod+r mode "resize"
 
-# Status bar (Gruvbox dark)
+# Status bar (Gruvbox dark) — statusline is now i3status-rust (i3status-rs); the
+# i3bar workspace/background colors below stay as-is (i3status-rust replaces only
+# the statusline content, not the i3bar chrome).
 bar {
-        status_command SCRIPT_DIR=/etc/nixos/i3blocks-scripts i3blocks -c /etc/i3blocks.conf
+        status_command i3status-rs ~/.config/i3status-rust/config-top.toml
         position top
         colors {
                 background #282828
@@ -161,5 +193,4 @@ bindsym $mod+minus move scratchpad
 
 # Thin borders
 default_border pixel 2
-
 ''
