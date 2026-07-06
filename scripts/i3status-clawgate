@@ -1,0 +1,71 @@
+#!/usr/bin/env python3
+"""i3status-rust custom block: clawgate operator-pending task count.
+
+Reads the cache file written by scripts/bar-status-poll and emits ONE
+i3status-rust JSON line. This is INSTANT (a local file read) and never touches
+the network, so it can never block the bar.
+
+CALM rendering (colour == "look at me"):
+  missing / stale / error / count<=0  -> empty, invisible block
+  count > 0                           -> `tasks` icon + count, coloured (state
+                                          from the cache; default Warning)
+Click (wired in graphical.nix) opens the clawgate UI.
+"""
+import json
+import os
+import sys
+
+NAME = "clawgate"
+ICON = "tasks"
+_VALID_STATES = ("Idle", "Info", "Good", "Warning", "Critical")
+_EMPTY = {"text": "", "state": "Idle"}
+
+
+def cache_path() -> str:
+    base = os.environ.get("BAR_STATUS_DIR") or os.path.join(
+        os.path.expanduser("~"), ".cache", "bar-status")
+    return os.path.join(base, NAME + ".json")
+
+
+def load(path):
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+
+def render(payload, icon: str = ICON) -> dict:
+    """Pure: cache payload (or None) -> i3status-rust block dict.
+
+    Hide-at-zero + fail-safe: None / malformed / stale / error / count<=0 all
+    map to the empty (invisible) block — never a crash.
+    """
+    if not isinstance(payload, dict):
+        return dict(_EMPTY)
+    if payload.get("error") or payload.get("state") == "stale":
+        return dict(_EMPTY)
+    try:
+        count = int(payload.get("count", 0))
+    except (TypeError, ValueError):
+        return dict(_EMPTY)
+    if count <= 0:
+        return dict(_EMPTY)
+    state = payload.get("state")
+    if state not in _VALID_STATES or state == "Idle":
+        state = "Warning"
+    return {"icon": icon, "text": str(count),
+            "short_text": str(count), "state": state}
+
+
+def main() -> int:
+    sys.stdout.write(json.dumps(render(load(cache_path()))) + "\n")
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except Exception:
+        sys.stdout.write(json.dumps(_EMPTY) + "\n")
+        sys.exit(0)

@@ -20,6 +20,11 @@ let
   home = config.home.homeDirectory;
   scriptsDir = "${home}/.config/i3status-rust/scripts";
 
+  # Python env for the decoupled bar-status poller (workbench systemd user timer):
+  # psycopg2 for the homelab Postgres open-mail_actions count; clawgate + Alertmanager
+  # go over stdlib urllib, so psycopg2 is the only non-stdlib dep.
+  pollPyEnv = pkgs.python312.withPackages (ps: [ ps.psycopg2 ]);
+
   # Built-in blocks (order = left → right on the bar).
   memoryBlock = {
     block = "memory";
@@ -75,6 +80,23 @@ let
     chip = "k10temp-*";
     inputs = [ "Tctl" ];
   });
+  # nvidia_gpu: workbench only (RTX 5080). The block's state is TEMPERATURE-driven
+  # (idle/good/info/warning are UPPER bounds; temp ≤ idle → neutral). Keep it CALM
+  # like temperatureBlock: the 5080 idles ~45°C and sits ~65-78°C under sustained
+  # load, so collapse idle/good/info onto ONE neutral ceiling (82) and only colour
+  # yellow 82-88 / red >88 (edge temp; the throttle zone is higher still). Utilization
+  # + power still render in the text at every load — only the COLOUR waits for heat.
+  # Needs nvidia-smi on PATH (it is, in the graphical session).
+  gpuBlock = {
+    block = "nvidia_gpu";
+    gpu_id = 0;
+    format = " $icon $utilization $temperature $power ";
+    interval = 5;
+    idle = 82;
+    good = 82;
+    info = 82;
+    warning = 88;
+  };
   batteryBlock = {
     block = "battery";
     format = " $icon $percentage ";
@@ -95,6 +117,43 @@ let
     click = [
       { button = "left"; cmd = "${scriptsDir}/i3status-vpn-menu"; }
       { button = "right"; cmd = "alacritty --class float,float -e ${scriptsDir}/vpn-detail"; }
+    ];
+  };
+  # Decoupled status-count blocks (workbench only). These NEVER query a remote
+  # system per bar tick — they read a small JSON cache file written every ~45s by
+  # the bar-status-poll systemd user timer (see below) and render it instantly, so
+  # a slow/down source can never hang the bar. CALM: each is empty+invisible at
+  # zero / stale / error, and only appears (icon + count, coloured) when >0. The
+  # `signal` matches SIGNALS in bar-status-poll so the poller can `pkill -RTMIN+N
+  # i3status-rs` to refresh exactly this block the instant it writes.
+  alertsBlock = {
+    block = "custom";
+    command = "${scriptsDir}/i3status-alerts";
+    json = true;
+    interval = 30;
+    signal = 13;
+    click = [
+      { button = "left"; cmd = "xdg-open http://grafana.homelab.lan"; }
+    ];
+  };
+  mailBlock = {
+    block = "custom";
+    command = "${scriptsDir}/i3status-mail";
+    json = true;
+    interval = 30;
+    signal = 12;
+    click = [
+      { button = "left"; cmd = "alacritty --class float,float -e ${home}/workspace/devrc/scripts/mail-triage"; }
+    ];
+  };
+  clawgateBlock = {
+    block = "custom";
+    command = "${scriptsDir}/i3status-clawgate";
+    json = true;
+    interval = 30;
+    signal = 11;
+    click = [
+      { button = "left"; cmd = "xdg-open http://192.168.50.250:30302"; }
     ];
   };
   timeBlock = {
@@ -120,8 +179,11 @@ let
 
   blocks =
     [ memoryBlock diskBlock netBlock cpuBlock temperatureBlock ]
+    ++ lib.optional (!isLaptop) gpuBlock
     ++ lib.optional isLaptop batteryBlock
-    ++ [ soundBlock vpnBlock timeBlock ]
+    ++ [ soundBlock ]
+    ++ lib.optionals (!isLaptop) [ alertsBlock mailBlock clawgateBlock ]
+    ++ [ vpnBlock timeBlock ]
     ++ lib.optional (!isLaptop) rigcontrolBlock;
 in
 lib.mkIf isNixOS {
@@ -163,5 +225,80 @@ lib.mkIf isNixOS {
   home.file.".config/i3status-rust/scripts/i3blocks-rigcontrol" = {
     source = ../scripts/i3blocks-rigcontrol;
     executable = true;
+  };
+
+  # Decoupled status-count block scripts (workbench blocks reference these by
+  # scriptsDir path). They only read ~/.cache/bar-status/*.json — instant, never
+  # network. The poller itself (scripts/bar-status-poll) is NOT symlinked here: it
+  # is run from the repo working tree by the systemd unit below so it can resolve
+  # its sibling scripts/mail-actions/_db.py (cf. mail-actions/run-archive.sh).
+  # The clawgate/mail/alerts block scripts + poller are workbench-only, so their
+  # symlinks are !isLaptop-gated too (they'd be dead files on the laptop otherwise).
+  home.file.".config/i3status-rust/scripts/i3status-clawgate" = lib.mkIf (!isLaptop) {
+    source = ../scripts/i3status-clawgate;
+    executable = true;
+  };
+  home.file.".config/i3status-rust/scripts/i3status-mail" = lib.mkIf (!isLaptop) {
+    source = ../scripts/i3status-mail;
+    executable = true;
+  };
+  home.file.".config/i3status-rust/scripts/i3status-alerts" = lib.mkIf (!isLaptop) {
+    source = ../scripts/i3status-alerts;
+    executable = true;
+  };
+
+  # bar-status poller — WORKBENCH ONLY (!isLaptop). Every ~45s it queries clawgate
+  # (pending Tasks), the homelab Postgres (open mail_actions), and Alertmanager
+  # (firing alerts, homelab required + production best-effort) and writes a small
+  # JSON status file per source to ~/.cache/bar-status/, then signals i3status-rs
+  # to refresh the matching block. Fully fail-safe: a down source writes a 'stale'
+  # marker (the block renders empty) and never wedges. Laptop is excluded: it is
+  # nebula-only with no direct LAN path to these homelab endpoints, exactly like
+  # mail-actions-archive / repo-cos in home.nix.
+  #
+  # A user service runs with a minimal env, so PATH must be explicit: the pinned
+  # python (psycopg2) + kubectl (the mail + Alertmanager port-forwards) + procps
+  # (pkill signals the bar) + coreutils. It resolves the kubeconfig/clawgate.env/
+  # repo paths itself (no .zshenv handles under systemd).
+  systemd.user.services.bar-status-poll = lib.mkIf (!isLaptop) {
+    Unit = {
+      Description = "Poll clawgate/mail/alerts → ~/.cache/bar-status for the i3 bar";
+      After = [ "network-online.target" ];
+      Wants = [ "network-online.target" ];
+    };
+    Service = {
+      Type = "oneshot";
+      # Hard ceiling so a half-hung kubectl (nebula up, API server not answering)
+      # can't wedge the poller forever: systemd kills the cgroup (reaping any stuck
+      # kubectl child) and the timer re-arms. Without this, Type=oneshot defaults to
+      # TimeoutStartSec=infinity and OnUnitActiveSec only re-fires once inactive.
+      TimeoutStartSec = 90;
+      Environment = [
+        "PATH=${lib.makeBinPath [ pollPyEnv pkgs.kubectl pkgs.procps pkgs.coreutils ]}"
+        "KUBECONFIG=%h/workspace/homelab-talos/homelab-kubeconfig"
+        "DEVRC_DIR=%h/workspace/devrc"
+        "HOMELAB_DIR=%h/workspace/homelab-talos"
+        "HOME=%h"
+      ];
+      ExecStart = "${pollPyEnv}/bin/python3 %h/workspace/devrc/scripts/bar-status-poll";
+      # Re-run the unit when the poller changes (cf. X-Restart-Triggers in home.nix).
+      X-Restart-Triggers = [ "${../scripts/bar-status-poll}" ];
+    };
+  };
+
+  # Timer: fire the poller ~every 45s. OnUnitActiveSec re-arms after each run so a
+  # slow poll never overlaps itself; OnStartupSec gives one prompt run after login.
+  # (No Persistent — it only applies to OnCalendar timers, not monotonic ones.)
+  systemd.user.timers.bar-status-poll = lib.mkIf (!isLaptop) {
+    Unit = {
+      Description = "Periodic timer for the i3 bar-status poller";
+    };
+    Timer = {
+      OnStartupSec = "20s";
+      OnUnitActiveSec = "45s";
+    };
+    Install = {
+      WantedBy = [ "timers.target" ];
+    };
   };
 }

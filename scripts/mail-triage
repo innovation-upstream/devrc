@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# Interactive triage view for the mail bar-block's click action.
+#
+# Prints the open mail_actions queue (`extract.py list`) and holds the terminal
+# open. Reaches the homelab Postgres itself (kubectl port-forward + psycopg2),
+# so KUBECONFIG + kubectl + nix-shell are the only requirements — same shape as
+# scripts/mail-actions/run-archive.sh. Referenced by absolute repo path from the
+# i3status-rust click (like scripts/rig-control.sh), so its own directory resolves
+# the sibling mail-actions/extract.py.
+set -uo pipefail
+
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+export KUBECONFIG="${KUBECONFIG:-${HOME}/workspace/homelab-talos/homelab-kubeconfig}"
+
+nix-shell -p 'python3.withPackages(p:[p.psycopg2 p.requests])' kubectl --run \
+  "python ${DIR}/mail-actions/extract.py list" || true
+
+read -rsp $'\nPress any key to close…\n' -n1
