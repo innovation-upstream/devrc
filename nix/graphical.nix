@@ -23,15 +23,15 @@ let
   # Built-in blocks (order = left → right on the bar).
   memoryBlock = {
     block = "memory";
-    format = " MEM $mem_used_percents ";
-    warning_mem = 70;
-    critical_mem = 90;
+    format = " $icon $mem_used_percents ";
+    warning_mem = 80;
+    critical_mem = 92;
     interval = 10;
   };
   diskBlock = {
     block = "disk_space";
     path = "/";
-    format = " DISK $available ";
+    format = " $icon $available ";
     info_type = "available";
     interval = 60;
   };
@@ -42,22 +42,29 @@ let
   # rendered nothing on the workbench.
   netBlock = {
     block = "net";
-    format = " NET $speed_down $speed_up ";
+    format = " $icon ↓$speed_down ↑$speed_up ";
     interval = 5;
   };
   cpuBlock = {
     block = "cpu";
-    format = " CPU $utilization ";
+    format = " $icon $utilization ";
     interval = 2;
-    warning_cpu = 50;
-    critical_cpu = 80;
+    warning_cpu = 85;
+    critical_cpu = 95;
   };
   # temperature: per-host chip. Workbench is AMD (k10temp; Tctl = CPU package temp).
   # Laptop is Intel (coretemp). Validated on workbench via `sensors -u k10temp-*`.
   temperatureBlock = {
     block = "temperature";
-    format = " TEMP $average ";
+    format = " $icon $average ";
     interval = 10;
+    # Thresholds are UPPER bounds (temp ≤ idle → Idle/neutral, ≤ info → Info, …).
+    # AMD Tctl idles ~55-65°C, so idle must sit above that or the block reads Info
+    # (blue) at rest. Neutral ≤78, blue 78-88, yellow 88-95, red >95 (throttle zone).
+    good = 20;
+    idle = 78;
+    info = 88;
+    warning = 95;
   } // (if isLaptop then {
     chip = "coretemp-*";
   } else {
@@ -66,8 +73,14 @@ let
   });
   batteryBlock = {
     block = "battery";
-    format = " BAT $percentage ";
+    format = " $icon $percentage ";
     interval = 10;
+  };
+  # Volume indicator (default clicks: right = mute, scroll = up/down).
+  soundBlock = {
+    block = "sound";
+    driver = "auto";
+    format = " $icon $volume ";
   };
   vpnBlock = {
     block = "custom";
@@ -83,7 +96,7 @@ let
   timeBlock = {
     block = "time";
     interval = 10;
-    format = " $timestamp.datetime(f:'%a, %b %d | %H:%M') ";
+    format = " $icon $timestamp.datetime(f:'%a, %b %d | %H:%M') ";
     click = [
       { button = "left"; cmd = "yad --calendar --width=200 --height=200 --undecorated --fixed --close-on-unfocus --no-buttons"; }
     ];
@@ -104,7 +117,7 @@ let
   blocks =
     [ memoryBlock diskBlock netBlock cpuBlock temperatureBlock ]
     ++ lib.optional isLaptop batteryBlock
-    ++ [ vpnBlock timeBlock ]
+    ++ [ soundBlock vpnBlock timeBlock ]
     ++ lib.optional (!isLaptop) rigcontrolBlock;
 in
 lib.mkIf isNixOS {
@@ -112,19 +125,17 @@ lib.mkIf isNixOS {
     enable = true;
     bars.top = {
       theme = "gruvbox-dark";
-      # No nerd font installed → glyph icons would render as tofu. Keep text labels.
-      icons = "none";
+      # JetBrainsMono Nerd Font (declared below) provides the glyphs, so use the
+      # Material-Design nerd-font icon set + the theme's default powerline separators.
+      icons = "material-nf";
       inherit blocks;
-      # gruvbox-dark's default block separator is a powerline glyph (U+E0B2) that
-      # tofus without a powerline/nerd font (bar font is plain `pango:monospace`).
-      # Blank it for the same reason icons="none" — keep the bar pure text. The
-      # gruvbox COLORS are unaffected (colored-state blocks still get their bg).
-      settings.theme = {
-        theme = "gruvbox-dark";
-        overrides.separator = "";
-      };
     };
   };
+
+  # Nerd font for the bar glyphs (block icons + powerline separators). fontconfig
+  # makes the home.packages font discoverable by pango / i3bar.
+  home.packages = [ pkgs.nerd-fonts.jetbrains-mono ];
+  fonts.fontconfig.enable = true;
 
   # i3 config — raw string. INERT until the system cutover stops forcing /etc/i3.conf.
   xdg.configFile."i3/config".text = import ./i3/config.nix { inherit isLaptop; };
