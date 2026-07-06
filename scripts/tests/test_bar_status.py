@@ -304,6 +304,47 @@ def test_civitai_block_labels_count_distinctly():
     assert civ["text"] != hl["text"]
 
 
+# red_above threshold — neutral at/below the standing backlog, red only above it.
+ALERT_BLOCKS = [("alerts", alerts_block), ("civitai", civitai_block)]
+
+
+@pytest.mark.parametrize("name,mod", ALERT_BLOCKS)
+def test_red_above_neutral_at_or_below_baseline(name, mod):
+    for count in (25, 30):  # <= red_above=30
+        out = mod.render({"count": count, "state": "Critical"}, red_above=30)
+        assert out["state"] == "Idle"          # visible but NOT coloured
+        assert out["icon"] == "bell"           # still shown (not hidden)
+        assert str(count) in out["text"]
+
+
+@pytest.mark.parametrize("name,mod", ALERT_BLOCKS)
+def test_red_above_colours_when_over_baseline(name, mod):
+    out = mod.render({"count": 31, "state": "Critical"}, red_above=30)
+    assert out["state"] == "Critical"          # above the baseline -> red
+
+
+@pytest.mark.parametrize("name,mod", ALERT_BLOCKS)
+def test_red_above_zero_is_backward_compatible(name, mod):
+    # default (no threshold) still colours whenever count > 0
+    assert mod.render({"count": 1, "state": "Critical"})["state"] == "Critical"
+
+
+@pytest.mark.parametrize("name,mod", ALERT_BLOCKS)
+def test_red_above_still_hides_at_zero(name, mod):
+    assert mod.render({"count": 0, "state": "Idle"}, red_above=30) == \
+        {"text": "", "state": "Idle"}
+
+
+@pytest.mark.parametrize("name,mod", ALERT_BLOCKS)
+def test_red_above_arg_parsing(name, mod, monkeypatch):
+    monkeypatch.setattr(sys, "argv", [name, "--red-above", "42"])
+    assert mod._red_above_arg() == 42
+    monkeypatch.setattr(sys, "argv", [name])            # absent -> 0
+    assert mod._red_above_arg() == 0
+    monkeypatch.setattr(sys, "argv", [name, "--red-above", "nan"])  # junk -> 0
+    assert mod._red_above_arg() == 0
+
+
 @pytest.mark.parametrize("name,mod,icon,default_state", BLOCKS)
 def test_block_stale_is_invisible(name, mod, icon, default_state):
     assert mod.render({"count": 5, "state": "stale"}) == {"text": "", "state": "Idle"}
