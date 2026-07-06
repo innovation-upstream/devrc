@@ -80,13 +80,6 @@ let
       { button = "right"; cmd = "alacritty --class float,float -e ${scriptsDir}/vpn-detail"; }
     ];
   };
-  dictationBlock = {
-    block = "custom";
-    command = "${scriptsDir}/i3status-dictation";
-    json = true;
-    interval = 60;
-    signal = 11;
-  };
   timeBlock = {
     block = "time";
     interval = 10;
@@ -111,7 +104,7 @@ let
   blocks =
     [ memoryBlock diskBlock netBlock cpuBlock temperatureBlock ]
     ++ lib.optional isLaptop batteryBlock
-    ++ [ vpnBlock dictationBlock timeBlock ]
+    ++ [ vpnBlock timeBlock ]
     ++ lib.optional (!isLaptop) rigcontrolBlock;
 in
 lib.mkIf isNixOS {
@@ -146,10 +139,6 @@ lib.mkIf isNixOS {
   };
   home.file.".config/i3status-rust/scripts/i3status-vpn-menu" = {
     source = ../scripts/i3status-vpn-menu;
-    executable = true;
-  };
-  home.file.".config/i3status-rust/scripts/i3status-dictation" = {
-    source = ../scripts/i3status-dictation;
     executable = true;
   };
   home.file.".config/i3status-rust/scripts/vpn-detail" = {
