@@ -128,7 +128,9 @@ let
   # i3status-rs` to refresh exactly this block the instant it writes.
   alertsBlock = {
     block = "custom";
-    command = "${scriptsDir}/i3status-alerts";
+    # --red-above: neutral at/below the standing homelab backlog (~23), red only
+    # when the firing count climbs ABOVE it (something new). Tune as the baseline drifts.
+    command = "${scriptsDir}/i3status-alerts --red-above 30";
     json = true;
     interval = 30;
     signal = 13;
@@ -142,7 +144,9 @@ let
   # Click opens the civitai Grafana.
   civitaiBlock = {
     block = "custom";
-    command = "${scriptsDir}/i3status-civitai";
+    # --red-above: neutral at/below the standing civitai-prod backlog (~312), red
+    # only above it. Big client cluster, so the baseline is high; tune as it drifts.
+    command = "${scriptsDir}/i3status-civitai --red-above 340";
     json = true;
     interval = 30;
     signal = 14;

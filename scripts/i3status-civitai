@@ -41,12 +41,16 @@ def load(path):
         return None
 
 
-def render(payload, icon: str = ICON) -> dict:
+def render(payload, icon: str = ICON, red_above: int = 0) -> dict:
     """Pure: cache payload (or None) -> i3status-rust block dict.
 
     Hide-at-zero + fail-safe: None / malformed / stale / error / count<=0 all
     map to the empty (invisible) block — never a crash. Visible text carries a
     `civ ` label prefix so it reads distinctly from the homelab alerts block.
+
+    red_above: the standing-backlog baseline. count <= red_above shows the count
+    but NEUTRAL (no colour); red is reserved for the count climbing ABOVE the
+    known backlog. red_above=0 => colour whenever >0.
     """
     if not isinstance(payload, dict):
         return dict(_EMPTY)
@@ -58,16 +62,31 @@ def render(payload, icon: str = ICON) -> dict:
         return dict(_EMPTY)
     if count <= 0:
         return dict(_EMPTY)
-    state = payload.get("state")
-    if state not in _VALID_STATES or state == "Idle":
-        state = "Critical"
+    if count <= red_above:
+        state = "Idle"
+    else:
+        state = payload.get("state")
+        if state not in _VALID_STATES or state == "Idle":
+            state = "Critical"
     text = "%s %d" % (LABEL, count)
     return {"icon": icon, "text": text,
             "short_text": text, "state": state}
 
 
+def _red_above_arg() -> int:
+    """Parse `--red-above N` from argv (default 0 = colour whenever count>0)."""
+    argv = sys.argv[1:]
+    if "--red-above" in argv:
+        try:
+            return int(argv[argv.index("--red-above") + 1])
+        except (IndexError, ValueError):
+            return 0
+    return 0
+
+
 def main() -> int:
-    sys.stdout.write(json.dumps(render(load(cache_path()))) + "\n")
+    sys.stdout.write(
+        json.dumps(render(load(cache_path()), red_above=_red_above_arg())) + "\n")
     return 0
 
 
