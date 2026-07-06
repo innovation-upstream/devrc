@@ -30,12 +30,10 @@ with pkgs; [
   # VCS
   tig
 
-  # Dictation (speech-to-text)
-  sox
+  # Desktop utilities (X automation, notifications, audio control)
   xdotool
-  wtype          # Wayland text injection fallback
   libnotify
-  pulseaudio
+  pulseaudio     # pactl — volume keybinds
 
   # Browser automation
   playwright-driver.browsers

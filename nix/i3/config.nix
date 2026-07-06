@@ -182,9 +182,6 @@ bar {
 # Launch browser
 bindsym $mod+b exec --no-startup-id brave
 
-# Speech-to-text dictation (faster-whisper)
-bindsym $mod+s exec --no-startup-id ~/workspace/devrc/scripts/dictate
-
 # Quick workspace switching
 bindsym $mod+Tab workspace back_and_forth
 
