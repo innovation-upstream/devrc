@@ -136,6 +136,20 @@ let
       { button = "left"; cmd = "xdg-open http://grafana.homelab.lan"; }
     ];
   };
+  # civitai DataPacket prod alerts — a SEPARATE block from the homelab alertsBlock
+  # (Zach's request). Renders `civ <count>` so it reads distinctly on the bar; the
+  # poller reaches the client cluster's Alertmanager through CIVITAI_KUBECONFIG.
+  # Click opens the civitai Grafana.
+  civitaiBlock = {
+    block = "custom";
+    command = "${scriptsDir}/i3status-civitai";
+    json = true;
+    interval = 30;
+    signal = 14;
+    click = [
+      { button = "left"; cmd = "xdg-open https://grafana-new.civitai.com"; }
+    ];
+  };
   mailBlock = {
     block = "custom";
     command = "${scriptsDir}/i3status-mail";
@@ -182,7 +196,7 @@ let
     ++ lib.optional (!isLaptop) gpuBlock
     ++ lib.optional isLaptop batteryBlock
     ++ [ soundBlock ]
-    ++ lib.optionals (!isLaptop) [ alertsBlock mailBlock clawgateBlock ]
+    ++ lib.optionals (!isLaptop) [ alertsBlock civitaiBlock mailBlock clawgateBlock ]
     ++ [ vpnBlock timeBlock ]
     ++ lib.optional (!isLaptop) rigcontrolBlock;
 in
@@ -246,6 +260,10 @@ lib.mkIf isNixOS {
     source = ../scripts/i3status-alerts;
     executable = true;
   };
+  home.file.".config/i3status-rust/scripts/i3status-civitai" = lib.mkIf (!isLaptop) {
+    source = ../scripts/i3status-civitai;
+    executable = true;
+  };
 
   # bar-status poller — WORKBENCH ONLY (!isLaptop). Every ~45s it queries clawgate
   # (pending Tasks), the homelab Postgres (open mail_actions), and Alertmanager
@@ -262,7 +280,7 @@ lib.mkIf isNixOS {
   # repo paths itself (no .zshenv handles under systemd).
   systemd.user.services.bar-status-poll = lib.mkIf (!isLaptop) {
     Unit = {
-      Description = "Poll clawgate/mail/alerts → ~/.cache/bar-status for the i3 bar";
+      Description = "Poll clawgate/mail/alerts/civitai → ~/.cache/bar-status for the i3 bar";
       After = [ "network-online.target" ];
       Wants = [ "network-online.target" ];
     };
@@ -276,6 +294,9 @@ lib.mkIf isNixOS {
       Environment = [
         "PATH=${lib.makeBinPath [ pollPyEnv pkgs.kubectl pkgs.procps pkgs.coreutils ]}"
         "KUBECONFIG=%h/workspace/homelab-talos/homelab-kubeconfig"
+        # civitai (CLIENT) prod cluster kubeconfig — the civitai alerts source
+        # port-forwards through THIS, never the homelab KUBECONFIG above.
+        "CIVITAI_KUBECONFIG=%h/workspace/civit/datapacket-talos/prod-kubeconfig"
         "DEVRC_DIR=%h/workspace/devrc"
         "HOMELAB_DIR=%h/workspace/homelab-talos"
         "HOME=%h"

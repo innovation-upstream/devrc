@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """Decoupled status poller for the i3status-rust bar (workbench only).
 
-Every ~45s (a home-manager systemd user timer) this queries three remote/local
-sources and writes a tiny JSON status file per source to
-    ~/.cache/bar-status/{clawgate,mail,alerts}.json
+Every ~45s (a home-manager systemd user timer) this queries a handful of
+remote/local sources and writes a tiny JSON status file per source to
+    ~/.cache/bar-status/{clawgate,mail,alerts,civitai}.json
 that the *instant* i3status-rust block scripts (i3status-clawgate / -mail /
--alerts) read. The bar never queries a remote system per tick — it only reads a
+-alerts / -civitai) read. The bar never queries a remote system per tick — it only reads a
 local file — so a slow or down source can never hang or break the bar.
 
 Fully FAIL-SAFE: a down/slow source writes a {"state":"stale"} marker (never
@@ -26,6 +26,11 @@ Sources
              InfoInhibitor) from Alertmanager /api/v2/alerts, reached through a
              short bounded `kubectl port-forward`. homelab is REQUIRED; the
              production cluster is best-effort (added only if reachable).
+  civitai  : the SAME firing-alert filter, but against the civitai DataPacket
+             prod cluster (a CLIENT prod cluster) via its own kubeconfig
+             (CIVITAI_KUBECONFIG). Deliberately a SEPARATE block/count from the
+             homelab `alerts` source, so a large standing client-prod count never
+             swamps the homelab number.
 
 Parse is deliberately separated from fetch so the parse_* functions are unit
 tested against mock inputs (scripts/tests/test_bar_status.py). Drive the whole
@@ -59,10 +64,15 @@ IGNORE_ALERTNAMES = frozenset({"Watchdog", "InfoInhibitor"})
 
 # Real-time signal offset per source: the block's `signal = N` in graphical.nix
 # must match, so `pkill -RTMIN+N i3status-rs` refreshes exactly that block.
-SIGNALS = {"clawgate": 11, "mail": 12, "alerts": 13}
+SIGNALS = {"clawgate": 11, "mail": 12, "alerts": 13, "civitai": 14}
 
 DEVRC_DIR = os.environ.get("DEVRC_DIR") or os.path.expanduser("~/workspace/devrc")
 HOMELAB_DIR = os.environ.get("HOMELAB_DIR") or os.path.expanduser("~/workspace/homelab-talos")
+# civitai DataPacket prod cluster kubeconfig (a CLIENT prod cluster). The alerts
+# source reaches its Alertmanager through THIS kubeconfig, never the poller's env
+# KUBECONFIG (which points at homelab).
+CIVITAI_KUBECONFIG = os.environ.get("CIVITAI_KUBECONFIG") or os.path.expanduser(
+    "~/workspace/civit/datapacket-talos/prod-kubeconfig")
 
 
 # ---------------------------------------------------------------------------
@@ -260,6 +270,23 @@ def fetch_alerts() -> dict:
     return parse_alerts(alerts)
 
 
+def fetch_civitai() -> dict:
+    """Firing alerts on the civitai DataPacket prod cluster (CLIENT infra).
+
+    Same Alertmanager service name as homelab, so _pf_alerts clones directly —
+    but reached through the civitai kubeconfig (CIVITAI_KUBECONFIG), NOT the
+    poller's env KUBECONFIG (homelab). _pf_alerts binds a fresh free local port,
+    so this can never collide with the homelab/production port-forwards, and its
+    finally-block terminates the forward every call (no leak). Kept SEPARATE from
+    homelab alerts by request, so the counts don't merge into one block. Missing
+    kubeconfig / unreachable cluster -> stale (block renders empty), never crash.
+    """
+    if not os.path.exists(CIVITAI_KUBECONFIG):
+        return stale("civitai kubeconfig missing")
+    alerts = _pf_alerts(CIVITAI_KUBECONFIG)  # raises -> stale on failure
+    return parse_alerts(alerts)
+
+
 # ---------------------------------------------------------------------------
 # Orchestration
 # ---------------------------------------------------------------------------
@@ -313,12 +340,15 @@ def main(argv=None) -> int:
                     help="parse this JSON file as the /api/tasks payload")
     ap.add_argument("--mock-alerts", metavar="FILE",
                     help="parse this JSON file as the Alertmanager alert list")
+    ap.add_argument("--mock-civitai", metavar="FILE",
+                    help="parse this JSON file as the civitai Alertmanager alert list")
     ap.add_argument("--mock-mail", metavar="N", type=int,
                     help="use N as the open-mail_actions count")
     args = ap.parse_args(argv)
 
     mocking = any(x is not None for x in
-                  (args.mock_clawgate, args.mock_alerts, args.mock_mail))
+                  (args.mock_clawgate, args.mock_alerts, args.mock_civitai,
+                   args.mock_mail))
 
     if mocking:
         if args.mock_clawgate is not None:
@@ -329,12 +359,16 @@ def main(argv=None) -> int:
         if args.mock_alerts is not None:
             with open(args.mock_alerts) as f:
                 run_source("alerts", lambda: parse_alerts(json.load(f)))
+        if args.mock_civitai is not None:
+            with open(args.mock_civitai) as f:
+                run_source("civitai", lambda: parse_alerts(json.load(f)))
         return 0
 
     # Live poll: each source is independent + fail-safe.
     run_source("clawgate", fetch_clawgate)
     run_source("mail", fetch_mail)
     run_source("alerts", fetch_alerts)
+    run_source("civitai", fetch_civitai)
     return 0
 
 
