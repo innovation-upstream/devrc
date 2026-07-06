@@ -145,7 +145,7 @@ in
 
   home.packages = if isNixOS
   then
-    userPackages ++ [pkgs.autorandr]
+    userPackages ++ [pkgs.autorandr pkgs.ddcutil]
   else
     userPackages;
 
