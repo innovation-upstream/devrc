@@ -6,10 +6,11 @@
 # i3status-vpn-menu, wired via [[block.click]] in the i3status-rust config.
 # Refreshed on demand with:  pkill -RTMIN+10 i3status-rs  (block signal = 10)
 #
-# State mapping from the old i3blocks colors:
-#   connected  -> Good      (was default/green)
-#   not on VPN -> Critical  (was #FF0000 red)
-#   API error  -> Warning   (was #FFA500 orange)
+# State mapping (colors reserved for things needing attention — the VPN is toggled
+# deliberately, so on/off are both neutral; the icon + text carry the state):
+#   connected  -> Idle     (neutral)
+#   not on VPN -> Idle     (neutral)
+#   API error  -> Warning  (this one is unexpected → worth flagging)
 set -uo pipefail
 
 TIMEOUT=${TIMEOUT:-3}
@@ -51,7 +52,7 @@ if [[ "${is_mullvad:-False}" == "True" ]]; then
     else
         short="${city:0:3}"
     fi
-    emit "VPN ${city}" "VPN ${short}" "Good" | tee "$CACHE_FILE"
+    emit "VPN ${city}" "VPN ${short}" "Idle" | tee "$CACHE_FILE"
 else
-    emit "VPN OFF" "VPN !" "Critical" | tee "$CACHE_FILE"
+    emit "VPN OFF" "VPN !" "Idle" | tee "$CACHE_FILE"
 fi

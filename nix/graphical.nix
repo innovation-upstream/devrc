@@ -49,6 +49,10 @@ let
     block = "cpu";
     format = " $icon $utilization ";
     interval = 2;
+    # info_cpu defaults to 30 → the block goes blue (Info) at any moderate load.
+    # Pin it to warning so CPU stays neutral until it actually needs attention:
+    # neutral <85, warning 85-95, critical >95.
+    info_cpu = 85;
     warning_cpu = 85;
     critical_cpu = 95;
   };
