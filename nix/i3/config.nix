@@ -1,0 +1,196 @@
+# i3 window-manager config, rendered to ~/.config/i3/config by home-manager
+# (xdg.configFile."i3/config".text). Raw string (NOT the HM i3 DSL) so Zach can
+# keep hand-maintaining it. Function of { isLaptop } so the one file serves both
+# hosts: laptop gets backlight brightness bindings; workbench gets the rig-control
+# (yad) float rule. Reconciled superset of the pre-migration drift between the repo
+# nix/system/i3config.nix and the live /etc/nixos/i3config.nix.
+{ isLaptop ? false }:
+
+let
+  # Laptop-only: hardware backlight brightness keys (workbench has no backlight).
+  brightnessBindings =
+    if isLaptop then ''
+
+      # Brightness (laptop backlight, 5% steps; Shift for 1% fine control)
+      bindsym XF86MonBrightnessUp exec --no-startup-id brightnessctl set +5%
+      bindsym XF86MonBrightnessDown exec --no-startup-id brightnessctl set 5%-
+      bindsym Shift+XF86MonBrightnessUp exec --no-startup-id brightnessctl set +1%
+      bindsym Shift+XF86MonBrightnessDown exec --no-startup-id brightnessctl set 1%-''
+    else "";
+
+  # Workbench-only: float the rig-control (yad) popup instead of tiling it.
+  rigControlFloat =
+    if isLaptop then ""
+    else ''
+
+      # Float the rig-control (yad) popup as a compact centered window instead of tiling it
+      for_window [class="Yad" title="Rig Controls"] floating enable, move position center'';
+in
+''
+set $mod Mod1
+
+font pango:monospace 8
+
+# NetworkManager applet
+exec --no-startup-id nm-applet
+
+# Volume control (PipeWire via pactl, 5% steps)
+bindsym XF86AudioRaiseVolume exec --no-startup-id pactl set-sink-volume @DEFAULT_SINK@ +5%
+bindsym XF86AudioLowerVolume exec --no-startup-id pactl set-sink-volume @DEFAULT_SINK@ -5%
+bindsym XF86AudioMute exec --no-startup-id pactl set-sink-mute @DEFAULT_SINK@ toggle
+bindsym XF86AudioMicMute exec --no-startup-id pactl set-source-mute @DEFAULT_SOURCE@ toggle
+${brightnessBindings}
+
+floating_modifier $mod
+
+# Float any window explicitly launched with WM_CLASS "float" (e.g. the VPN detail
+# terminal: `alacritty --class float,float`). No such rule existed pre-migration.
+for_window [class="float"] floating enable
+${rigControlFloat}
+
+# Terminal
+bindsym $mod+Return exec [ ! "$I3CONFIG_DEFAULT_TERMINAL" = "" ] && $I3CONFIG_DEFAULT_TERMINAL || i3-sensible-terminal
+
+# Kill focused window
+bindsym $mod+Shift+q kill
+
+# Application launcher (rofi replaces fragile dmenu filter pipeline)
+bindsym $mod+d exec --no-startup-id rofi -show drun -show-icons -theme gruvbox-dark-hard
+
+# Screenshots (flameshot)
+bindsym Print exec --no-startup-id flameshot gui
+bindsym $mod+Print exec --no-startup-id flameshot full -p ~/Pictures
+
+# Screen lock
+bindsym $mod+Shift+x exec --no-startup-id i3lock -c 282828
+
+# Focus (vim-style)
+bindsym $mod+h focus left
+bindsym $mod+j focus down
+bindsym $mod+k focus up
+bindsym $mod+l focus right
+
+# Focus (arrow keys)
+bindsym $mod+Left focus left
+bindsym $mod+Down focus down
+bindsym $mod+Up focus up
+bindsym $mod+Right focus right
+
+# Move (vim-style, consistent with focus)
+bindsym $mod+Shift+h move left
+bindsym $mod+Shift+j move down
+bindsym $mod+Shift+k move up
+bindsym $mod+Shift+l move right
+
+# Move (arrow keys)
+bindsym $mod+Shift+Left move left
+bindsym $mod+Shift+Down move down
+bindsym $mod+Shift+Up move up
+bindsym $mod+Shift+Right move right
+
+# Fullscreen
+bindsym $mod+f fullscreen toggle
+
+# Layouts
+# tabbed moved off $mod+w (was) so Alt+w passes through to tmux scratch11 (Wheat)
+bindsym $mod+Shift+t layout tabbed
+bindsym $mod+e layout toggle split
+bindsym $mod+equal exec --no-startup-id ~/workspace/devrc/scripts/i3-grid
+
+# Floating
+bindsym $mod+Shift+space floating toggle
+bindsym $mod+space focus mode_toggle
+
+# Focus parent
+bindsym $mod+a focus parent
+
+# Workspaces
+set $ws1 "1"
+set $ws2 "2"
+set $ws3 "3"
+set $ws4 "4"
+set $ws5 "5"
+set $ws6 "6"
+set $ws7 "7"
+set $ws8 "8"
+set $ws9 "9"
+set $ws10 "10"
+
+bindsym $mod+1 workspace number $ws1
+bindsym $mod+2 workspace number $ws2
+bindsym $mod+3 workspace number $ws3
+bindsym $mod+4 workspace number $ws4
+bindsym $mod+5 workspace number $ws5
+bindsym $mod+6 workspace number $ws6
+bindsym $mod+7 workspace number $ws7
+bindsym $mod+8 workspace number $ws8
+bindsym $mod+9 workspace number $ws9
+bindsym $mod+0 workspace number $ws10
+
+bindsym $mod+Shift+1 move container to workspace number $ws1
+bindsym $mod+Shift+2 move container to workspace number $ws2
+bindsym $mod+Shift+3 move container to workspace number $ws3
+bindsym $mod+Shift+4 move container to workspace number $ws4
+bindsym $mod+Shift+5 move container to workspace number $ws5
+bindsym $mod+Shift+6 move container to workspace number $ws6
+bindsym $mod+Shift+7 move container to workspace number $ws7
+bindsym $mod+Shift+8 move container to workspace number $ws8
+bindsym $mod+Shift+9 move container to workspace number $ws9
+bindsym $mod+Shift+0 move container to workspace number $ws10
+
+# Reload / restart / exit
+bindsym $mod+Shift+c reload
+bindsym $mod+Shift+r restart
+bindsym $mod+Shift+e exec "i3-nagbar -t warning -m 'Exit i3?' -B 'Yes, exit i3' 'i3-msg exit'"
+
+# Resize mode (vim-style, consistent with focus/move)
+mode "resize" {
+        bindsym h resize shrink width 10 px or 10 ppt
+        bindsym j resize grow height 10 px or 10 ppt
+        bindsym k resize shrink height 10 px or 10 ppt
+        bindsym l resize grow width 10 px or 10 ppt
+
+        bindsym Left resize shrink width 10 px or 10 ppt
+        bindsym Down resize grow height 10 px or 10 ppt
+        bindsym Up resize shrink height 10 px or 10 ppt
+        bindsym Right resize grow width 10 px or 10 ppt
+
+        bindsym Return mode "default"
+        bindsym Escape mode "default"
+        bindsym $mod+r mode "default"
+}
+
+bindsym $mod+r mode "resize"
+
+# Status bar (Gruvbox dark) — statusline is now i3status-rust (i3status-rs); the
+# i3bar workspace/background colors below stay as-is (i3status-rust replaces only
+# the statusline content, not the i3bar chrome).
+bar {
+        status_command i3status-rs ~/.config/i3status-rust/config-top.toml
+        position top
+        colors {
+                background #282828
+                statusline #ebdbb2
+                separator  #504945
+                focused_workspace  #83a598 #282828 #83a598
+                active_workspace   #504945 #282828 #ebdbb2
+                inactive_workspace #282828 #282828 #665c54
+                urgent_workspace   #cc241d #cc241d #ebdbb2
+        }
+}
+
+# Launch browser
+bindsym $mod+b exec --no-startup-id brave
+
+# Speech-to-text dictation (faster-whisper)
+bindsym $mod+s exec --no-startup-id ~/workspace/devrc/scripts/dictate
+
+# Quick workspace switching
+bindsym $mod+Tab workspace back_and_forth
+
+# Scratchpad
+bindsym $mod+minus move scratchpad
+
+# Thin borders
+default_border pixel 2
+''

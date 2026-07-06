@@ -7,6 +7,12 @@ let
   # services (dunst, espanso) that can't start without X/i3 and otherwise make
   # every `home-manager switch` report "degraded / Failed services".
   serverMode = builtins.pathExists "${home}/.server-mode";
+  # Host discriminator for the graphical config (i3 + i3status-rust bar). Evaluated
+  # per-host under `--impure`: the laptop has an intel_backlight, the workbench does
+  # not. Threaded into ./graphical.nix via _module.args below. Drives battery/backlight
+  # (laptop) vs rig-control/DDC (workbench). Do NOT use serverMode for this — it is
+  # true on the graphical workbench (it only gates dunst/espanso there).
+  isLaptop = builtins.pathExists "/sys/class/backlight/intel_backlight";
   userPackages = import ./pkgs { inherit pkgs workspace; };
   sessionVariables = import ./sessionVariables.nix {
     inherit pkgs;
@@ -17,6 +23,11 @@ let
   programs = import ./programs { inherit pkgs config; };
 in
 {
+  # Graphical (i3 + i3status-rust bar) config lives in ./graphical.nix; isLaptop is
+  # threaded to it as a module arg so it can branch battery/backlight vs rig/DDC.
+  imports = [ ./graphical.nix ];
+  _module.args.isLaptop = isLaptop;
+
   programs = programs;
 
   # Espanso text expander service (X11/i3)
@@ -145,7 +156,7 @@ in
 
   home.packages = if isNixOS
   then
-    userPackages ++ [pkgs.autorandr]
+    userPackages ++ [pkgs.autorandr pkgs.ddcutil pkgs.yad]
   else
     userPackages;
 

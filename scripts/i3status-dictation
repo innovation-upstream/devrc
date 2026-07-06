@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+# Dictation status block for i3status-rust (custom block, json = true).
+# Render-only JSON version of scripts/i3blocks-dictation: shows recording /
+# processing / idle state of the faster-whisper dictation daemon.
+# Refreshed on demand with:  pkill -RTMIN+11 i3status-rs  (block signal = 11)
+#
+# State mapping from the old i3blocks colors:
+#   recording  -> Critical (was Gruvbox red    #FB4934)
+#   processing -> Warning  (was Gruvbox yellow  #FABD2F)
+#   idle       -> Info     (was Gruvbox blue    #83A598)
+set -uo pipefail
+
+STATUS_FILE="/tmp/dictate-state/status"
+SOCKET_PATH="/tmp/dictate.sock"
+
+emit() { printf '{"text": "%s", "short_text": "%s", "state": "%s"}\n' "$1" "$2" "$3"; }
+
+# Daemon not running -> render nothing (empty block).
+if [ ! -S "$SOCKET_PATH" ]; then
+    emit "" "" "Idle"
+    exit 0
+fi
+
+status="idle"
+if [ -f "$STATUS_FILE" ]; then
+    status=$(cat "$STATUS_FILE")
+fi
+
+case "$status" in
+    recording)  emit "REC"    "REC" "Critical" ;;
+    processing) emit "STT..." "STT" "Warning"  ;;
+    idle)       emit "STT"    "STT" "Info"     ;;
+    *)          emit "STT"    "STT" "Idle"     ;;
+esac
