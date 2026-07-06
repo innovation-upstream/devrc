@@ -17,8 +17,8 @@ CACHE_FILE="/tmp/i3status-vpn-cache"
 CACHE_TTL=${CACHE_TTL:-30}
 
 emit() {
-    # $1=text $2=short_text $3=state
-    printf '{"text": "%s", "short_text": "%s", "state": "%s"}\n' "$1" "$2" "$3"
+    # $1=text $2=short_text $3=state ; icon (net_vpn) resolved via the icon set
+    printf '{"icon": "net_vpn", "text": "%s", "short_text": "%s", "state": "%s"}\n' "$1" "$2" "$3"
 }
 
 # Use cache if fresh (identical TTL behaviour to the old block).

@@ -167,6 +167,7 @@ bindsym $mod+r mode "resize"
 # the statusline content, not the i3bar chrome).
 bar {
         status_command i3status-rs ~/.config/i3status-rust/config-top.toml
+        font pango:JetBrainsMono Nerd Font 10
         position top
         colors {
                 background #282828
