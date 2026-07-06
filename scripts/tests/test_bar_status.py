@@ -39,6 +39,7 @@ poll = _load("bar-status-poll", "bar_status_poll")
 clawgate_block = _load("i3status-clawgate", "i3status_clawgate")
 mail_block = _load("i3status-mail", "i3status_mail")
 alerts_block = _load("i3status-alerts", "i3status_alerts")
+civitai_block = _load("i3status-civitai", "i3status_civitai")
 
 
 # --------------------------------------------------------------------------- #
@@ -147,6 +148,64 @@ def test_parse_alerts_malformed_toplevel_raises():
 
 
 # --------------------------------------------------------------------------- #
+# poller: civitai source (separate CLIENT-prod alerts block, own kubeconfig)
+# --------------------------------------------------------------------------- #
+def test_civitai_uses_distinct_signal():
+    # signal 14 must be free of the existing three so pkill -RTMIN+14 refreshes
+    # exactly the civitai block (11/12/13 are clawgate/mail/alerts).
+    assert poll.SIGNALS["civitai"] == 14
+    assert 14 not in {poll.SIGNALS["clawgate"], poll.SIGNALS["mail"],
+                      poll.SIGNALS["alerts"]}
+
+
+def test_civitai_parses_same_severity_filter_as_alerts():
+    # civitai reuses parse_alerts, so warn|critical count + Critical state hold.
+    alerts = [
+        _alert("KubeJobFailed", "critical"),
+        _alert("CPUThrottlingHigh", "warning"),
+        _alert("Watchdog", "none"),          # excluded (housekeeping)
+        _alert("InfoInhibitor", "none"),     # excluded (housekeeping)
+        _alert("SomeInfo", "info"),          # excluded (severity)
+    ]
+    out = poll.parse_alerts(alerts)
+    assert out["count"] == 2 and out["state"] == "Critical"
+
+
+def test_civitai_fetch_stale_when_kubeconfig_missing(monkeypatch):
+    # Missing client kubeconfig -> stale (never spawns kubectl, never crashes).
+    monkeypatch.setattr(poll, "CIVITAI_KUBECONFIG", "/no/such/kubeconfig")
+    out = poll.source("civitai", poll.fetch_civitai)
+    assert out["state"] == "stale" and out["count"] == 0
+    assert out["source"] == "civitai"
+
+
+def test_mock_run_writes_civitai(tmp_path, monkeypatch):
+    monkeypatch.setenv("BAR_STATUS_DIR", str(tmp_path))
+    monkeypatch.setattr(poll, "signal_bar", lambda name: None)
+    alerts_f = tmp_path / "civ.json"
+    alerts_f.write_text(json.dumps([
+        _alert("KubeJobFailed", "critical"),
+        _alert("CPUThrottlingHigh", "warning"),
+    ]))
+    rc = poll.main(["--mock-civitai", str(alerts_f)])
+    assert rc == 0
+    civ = json.loads((tmp_path / "civitai.json").read_text())
+    assert civ["count"] == 2 and civ["state"] == "Critical"
+    assert civ["source"] == "civitai"
+
+
+def test_mock_run_malformed_civitai_writes_stale(tmp_path, monkeypatch):
+    monkeypatch.setenv("BAR_STATUS_DIR", str(tmp_path))
+    monkeypatch.setattr(poll, "signal_bar", lambda name: None)
+    bad = tmp_path / "bad.json"
+    bad.write_text('{"not":"a list"}')
+    rc = poll.main(["--mock-civitai", str(bad)])
+    assert rc == 0
+    civ = json.loads((tmp_path / "civitai.json").read_text())
+    assert civ["state"] == "stale" and civ["count"] == 0
+
+
+# --------------------------------------------------------------------------- #
 # poller: source() fail-safe wrapper turns any exception into a stale marker
 # --------------------------------------------------------------------------- #
 def test_source_wraps_exception_as_stale():
@@ -209,7 +268,14 @@ BLOCKS = [
     ("clawgate", clawgate_block, "tasks", "Warning"),
     ("mail", mail_block, "mail", "Warning"),
     ("alerts", alerts_block, "bell", "Critical"),
+    ("civitai", civitai_block, "bell", "Critical"),
 ]
+
+
+def _expected_text(mod, count):
+    # i3status-civitai prefixes the count with its `civ` LABEL; the others don't.
+    label = getattr(mod, "LABEL", None)
+    return ("%s %d" % (label, count)) if label else str(count)
 
 
 @pytest.mark.parametrize("name,mod,icon,default_state", BLOCKS)
@@ -222,9 +288,20 @@ def test_block_hides_at_zero(name, mod, icon, default_state):
 @pytest.mark.parametrize("name,mod,icon,default_state", BLOCKS)
 def test_block_visible_and_coloured_when_positive(name, mod, icon, default_state):
     out = mod.render({"count": 3, "state": default_state})
+    exp = _expected_text(mod, 3)
     assert out["icon"] == icon
-    assert out["text"] == "3" and out["short_text"] == "3"
+    assert out["text"] == exp and out["short_text"] == exp
     assert out["state"] == default_state
+
+
+def test_civitai_block_labels_count_distinctly():
+    # The civitai block must be visually distinguishable from homelab alerts:
+    # its text carries the `civ` label prefix, alerts' does not.
+    civ = civitai_block.render({"count": 317, "state": "Critical"})
+    hl = alerts_block.render({"count": 317, "state": "Critical"})
+    assert civ["text"] == "civ 317" and civ["state"] == "Critical"
+    assert hl["text"] == "317"
+    assert civ["text"] != hl["text"]
 
 
 @pytest.mark.parametrize("name,mod,icon,default_state", BLOCKS)
@@ -261,6 +338,7 @@ def test_block_defaults_state_when_missing_or_idle(name, mod, icon, default_stat
     ("i3status-clawgate", "clawgate.json"),
     ("i3status-mail", "mail.json"),
     ("i3status-alerts", "alerts.json"),
+    ("i3status-civitai", "civitai.json"),
 ])
 def test_block_subprocess_missing_file_is_invisible(tmp_path, script, cachefile):
     env = dict(os.environ, BAR_STATUS_DIR=str(tmp_path))
@@ -270,12 +348,13 @@ def test_block_subprocess_missing_file_is_invisible(tmp_path, script, cachefile)
     assert json.loads(r.stdout) == {"text": "", "state": "Idle"}
 
 
-@pytest.mark.parametrize("script,cachefile,icon", [
-    ("i3status-clawgate", "clawgate.json", "tasks"),
-    ("i3status-mail", "mail.json", "mail"),
-    ("i3status-alerts", "alerts.json", "bell"),
+@pytest.mark.parametrize("script,cachefile,icon,text", [
+    ("i3status-clawgate", "clawgate.json", "tasks", "2"),
+    ("i3status-mail", "mail.json", "mail", "2"),
+    ("i3status-alerts", "alerts.json", "bell", "2"),
+    ("i3status-civitai", "civitai.json", "bell", "civ 2"),
 ])
-def test_block_subprocess_positive_renders(tmp_path, script, cachefile, icon):
+def test_block_subprocess_positive_renders(tmp_path, script, cachefile, icon, text):
     (tmp_path / cachefile).write_text(json.dumps(
         {"count": 2, "state": "Warning", "detail": "x"}))
     env = dict(os.environ, BAR_STATUS_DIR=str(tmp_path))
@@ -283,13 +362,14 @@ def test_block_subprocess_positive_renders(tmp_path, script, cachefile, icon):
                        capture_output=True, text=True, env=env)
     assert r.returncode == 0
     out = json.loads(r.stdout)
-    assert out["icon"] == icon and out["text"] == "2"
+    assert out["icon"] == icon and out["text"] == text
 
 
 @pytest.mark.parametrize("script,cachefile", [
     ("i3status-clawgate", "clawgate.json"),
     ("i3status-mail", "mail.json"),
     ("i3status-alerts", "alerts.json"),
+    ("i3status-civitai", "civitai.json"),
 ])
 def test_block_subprocess_corrupt_json_is_invisible(tmp_path, script, cachefile):
     (tmp_path / cachefile).write_text("{ this is not json ")
