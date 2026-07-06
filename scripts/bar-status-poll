@@ -1,0 +1,344 @@
+#!/usr/bin/env python3
+"""Decoupled status poller for the i3status-rust bar (workbench only).
+
+Every ~45s (a home-manager systemd user timer) this queries three remote/local
+sources and writes a tiny JSON status file per source to
+    ~/.cache/bar-status/{clawgate,mail,alerts}.json
+that the *instant* i3status-rust block scripts (i3status-clawgate / -mail /
+-alerts) read. The bar never queries a remote system per tick — it only reads a
+local file — so a slow or down source can never hang or break the bar.
+
+Fully FAIL-SAFE: a down/slow source writes a {"state":"stale"} marker (never
+crashes the poller); the block scripts render a stale/missing file as an empty
+(invisible) block, honouring the bar's CALM principle (colour == "look at me";
+steady state is neutral / invisible). After writing each file the poller signals
+i3status-rs (RTMIN+N) so the corresponding block refreshes immediately.
+
+Sources
+  clawgate : GET $CLAWGATE_API_URL/api/tasks with the bearer CLAWGATE_HOOK_TOKEN
+             (both from ~/.claude/clawgate.env) -> count tasks awaiting the
+             operator (status in {open, ready_for_review}).
+  mail     : open rows in the homelab Postgres `mail_actions` table, via
+             mail-actions/_db.py (kubectl port-forward + psycopg2). That module
+             is loaded by EXPLICIT PATH, never via sys.path — its sibling llm.py
+             must not shadow anything (per CLAUDE.md).
+  alerts   : firing alerts (severity warning|critical, excluding Watchdog /
+             InfoInhibitor) from Alertmanager /api/v2/alerts, reached through a
+             short bounded `kubectl port-forward`. homelab is REQUIRED; the
+             production cluster is best-effort (added only if reachable).
+
+Parse is deliberately separated from fetch so the parse_* functions are unit
+tested against mock inputs (scripts/tests/test_bar_status.py). Drive the whole
+write+signal path against fixtures without any live endpoint:
+    bar-status-poll --mock-clawgate tasks.json --mock-alerts alerts.json --mock-mail 3
+"""
+from __future__ import annotations
+
+import argparse
+import contextlib
+import json
+import os
+import socket
+import subprocess
+import sys
+import time
+import urllib.request
+
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+# clawgate task statuses that mean "the operator still has to act": a freshly
+# posted task awaiting dispatch (open) or a finished agent run awaiting review
+# (ready_for_review). in_progress = an agent is working = not on the human.
+PENDING_TASK_STATES = frozenset({"open", "ready_for_review"})
+
+# Alertmanager: only real, actionable severities count; Watchdog is the
+# always-firing dead-man's switch and InfoInhibitor is an inhibition helper.
+REAL_ALERT_SEVERITIES = frozenset({"warning", "critical"})
+IGNORE_ALERTNAMES = frozenset({"Watchdog", "InfoInhibitor"})
+
+# Real-time signal offset per source: the block's `signal = N` in graphical.nix
+# must match, so `pkill -RTMIN+N i3status-rs` refreshes exactly that block.
+SIGNALS = {"clawgate": 11, "mail": 12, "alerts": 13}
+
+DEVRC_DIR = os.environ.get("DEVRC_DIR") or os.path.expanduser("~/workspace/devrc")
+HOMELAB_DIR = os.environ.get("HOMELAB_DIR") or os.path.expanduser("~/workspace/homelab-talos")
+
+
+# ---------------------------------------------------------------------------
+# Pure parse functions (unit-tested against mock inputs)
+# ---------------------------------------------------------------------------
+def parse_clawgate(tasks, pending_states=PENDING_TASK_STATES) -> dict:
+    """Map the /api/tasks list to a status dict. Counts operator-pending tasks.
+
+    Raises ValueError if the top-level payload is not a list (the caller turns
+    that into a 'stale' marker); tolerates junk list *elements*.
+    """
+    if not isinstance(tasks, list):
+        raise ValueError("clawgate /api/tasks payload is not a list")
+    pending = [
+        t for t in tasks
+        if isinstance(t, dict) and t.get("status") in pending_states
+    ]
+    count = len(pending)
+    if count:
+        ids = ", ".join("#%s" % t.get("id") for t in pending[:6])
+        detail = "%d task(s) awaiting: %s" % (count, ids)
+        state = "Warning"
+    else:
+        detail = "no pending tasks"
+        state = "Idle"
+    return {"count": count, "state": state, "detail": detail}
+
+
+def parse_mail(open_count) -> dict:
+    """Map an open-mail_actions count to a status dict."""
+    n = int(open_count)
+    if n < 0:
+        n = 0
+    return {
+        "count": n,
+        "state": "Warning" if n else "Idle",
+        "detail": ("%d open mail action(s)" % n) if n else "inbox clear",
+    }
+
+
+def parse_alerts(alerts) -> dict:
+    """Map an Alertmanager /api/v2/alerts list to a status dict.
+
+    Counts firing (active) alerts of severity warning|critical, excluding the
+    Watchdog / InfoInhibitor housekeeping alerts. State is Critical if any
+    critical is firing, else Warning if any warning, else neutral.
+    Raises ValueError if the payload is not a list; tolerates junk elements.
+    """
+    if not isinstance(alerts, list):
+        raise ValueError("alertmanager payload is not a list")
+    real = []
+    for a in alerts:
+        if not isinstance(a, dict):
+            continue
+        labels = a.get("labels")
+        if not isinstance(labels, dict):
+            continue
+        if labels.get("alertname") in IGNORE_ALERTNAMES:
+            continue
+        sev = labels.get("severity")
+        if sev not in REAL_ALERT_SEVERITIES:
+            continue
+        status = a.get("status")
+        if isinstance(status, dict):
+            st = status.get("state")
+            if st and st != "active":
+                continue
+        real.append(sev)
+    count = len(real)
+    crit = sum(1 for s in real if s == "critical")
+    if count == 0:
+        return {"count": 0, "state": "Idle", "detail": "no firing alerts"}
+    if crit:
+        return {"count": count, "state": "Critical",
+                "detail": "%d firing (%d critical)" % (count, crit)}
+    return {"count": count, "state": "Warning",
+            "detail": "%d firing (warning)" % count}
+
+
+def stale(reason: str, err=None) -> dict:
+    """A neutral 'source unavailable' marker; the block renders it as empty."""
+    d = {"count": 0, "state": "stale", "detail": reason}
+    if err is not None:
+        d["error"] = str(err)[:200]
+    return d
+
+
+# ---------------------------------------------------------------------------
+# Low-level helpers
+# ---------------------------------------------------------------------------
+def _free_port() -> int:
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()
+    return port
+
+
+def _wait_port(host: str, port: int, timeout: float, proc=None) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if proc is not None and proc.poll() is not None:
+            raise RuntimeError("kubectl port-forward exited early")
+        with contextlib.suppress(OSError):
+            with socket.create_connection((host, port), timeout=1):
+                return
+        time.sleep(0.2)
+    raise TimeoutError("port-forward to %s:%d not ready in time" % (host, port))
+
+
+def _http_json(url: str, headers=None, timeout: float = 3.0):
+    req = urllib.request.Request(url, headers=headers or {})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return json.loads(resp.read().decode())
+
+
+# ---------------------------------------------------------------------------
+# Fetch functions (network / cluster; wrapped by source() so failures -> stale)
+# ---------------------------------------------------------------------------
+def _clawgate_creds():
+    env = {}
+    with open(os.path.expanduser("~/.claude/clawgate.env")) as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            k, v = line.split("=", 1)
+            env[k.strip()] = v.strip()
+    url = env.get("CLAWGATE_API_URL", "http://192.168.50.250:30302").rstrip("/")
+    token = env["CLAWGATE_HOOK_TOKEN"]
+    return token, url
+
+
+def fetch_clawgate() -> dict:
+    token, url = _clawgate_creds()
+    tasks = _http_json(url + "/api/tasks",
+                       headers={"Authorization": "Bearer " + token}, timeout=3)
+    return parse_clawgate(tasks)
+
+
+def _load_maildb():
+    """Load mail-actions/_db.py by explicit path (NOT via sys.path — its sibling
+    llm.py must not shadow anything; CLAUDE.md gotcha)."""
+    import importlib.util
+    path = os.path.join(DEVRC_DIR, "scripts", "mail-actions", "_db.py")
+    spec = importlib.util.spec_from_file_location("_bar_maildb", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def fetch_mail() -> dict:
+    mod = _load_maildb()
+    with mod.MailDB() as db:
+        rows = db.list_open_actions()
+    return parse_mail(len(rows))
+
+
+def _kubeconfig(name: str) -> str:
+    return os.path.join(HOMELAB_DIR, name)
+
+
+def _pf_alerts(kubeconfig: str, timeout: float = 6.0):
+    """Bounded kubectl port-forward to Alertmanager; returns the raw alert list."""
+    port = _free_port()
+    env = dict(os.environ, KUBECONFIG=kubeconfig)
+    pf = subprocess.Popen(
+        ["kubectl", "-n", "monitoring", "port-forward",
+         "svc/kube-prometheus-stack-alertmanager", "%d:9093" % port],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env,
+    )
+    try:
+        _wait_port("127.0.0.1", port, 8.0, proc=pf)
+        data = _http_json(
+            "http://127.0.0.1:%d/api/v2/alerts"
+            "?active=true&silenced=false&inhibited=false" % port,
+            timeout=timeout,
+        )
+        return data if isinstance(data, list) else []
+    finally:
+        pf.terminate()
+        with contextlib.suppress(Exception):
+            pf.wait(timeout=3)
+
+
+def fetch_alerts() -> dict:
+    homelab = _kubeconfig("homelab-kubeconfig")   # REQUIRED
+    alerts = _pf_alerts(homelab)                   # raises -> stale on failure
+    prod = _kubeconfig("production-kubeconfig")    # best-effort
+    if os.path.exists(prod):
+        try:
+            alerts = list(alerts) + _pf_alerts(prod)
+        except Exception:
+            pass  # production is optional; homelab already counted
+    return parse_alerts(alerts)
+
+
+# ---------------------------------------------------------------------------
+# Orchestration
+# ---------------------------------------------------------------------------
+def source(name: str, fn) -> dict:
+    """Run a fetch fail-safe: any exception becomes a 'stale' marker."""
+    try:
+        payload = fn()
+    except Exception as e:  # noqa: BLE001 — the point is to never propagate
+        payload = stale("%s unavailable" % name, e)
+    payload["ts"] = int(time.time())
+    payload["source"] = name
+    return payload
+
+
+def cache_dir() -> str:
+    return os.environ.get("BAR_STATUS_DIR") or os.path.join(
+        os.path.expanduser("~"), ".cache", "bar-status")
+
+
+def write_status(name: str, payload: dict) -> str:
+    d = cache_dir()
+    os.makedirs(d, exist_ok=True)
+    path = os.path.join(d, name + ".json")
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(payload, f)
+    os.replace(tmp, path)
+    return path
+
+
+def signal_bar(name: str) -> None:
+    n = SIGNALS.get(name)
+    if n is None:
+        return
+    with contextlib.suppress(Exception):
+        subprocess.run(["pkill", "-RTMIN+%d" % n, "i3status-rs"],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def run_source(name: str, fn) -> dict:
+    payload = source(name, fn)
+    write_status(name, payload)
+    signal_bar(name)
+    return payload
+
+
+def main(argv=None) -> int:
+    ap = argparse.ArgumentParser(description="i3status-rust bar-status poller")
+    ap.add_argument("--mock-clawgate", metavar="FILE",
+                    help="parse this JSON file as the /api/tasks payload")
+    ap.add_argument("--mock-alerts", metavar="FILE",
+                    help="parse this JSON file as the Alertmanager alert list")
+    ap.add_argument("--mock-mail", metavar="N", type=int,
+                    help="use N as the open-mail_actions count")
+    args = ap.parse_args(argv)
+
+    mocking = any(x is not None for x in
+                  (args.mock_clawgate, args.mock_alerts, args.mock_mail))
+
+    if mocking:
+        if args.mock_clawgate is not None:
+            with open(args.mock_clawgate) as f:
+                run_source("clawgate", lambda: parse_clawgate(json.load(f)))
+        if args.mock_mail is not None:
+            run_source("mail", lambda: parse_mail(args.mock_mail))
+        if args.mock_alerts is not None:
+            with open(args.mock_alerts) as f:
+                run_source("alerts", lambda: parse_alerts(json.load(f)))
+        return 0
+
+    # Live poll: each source is independent + fail-safe.
+    run_source("clawgate", fetch_clawgate)
+    run_source("mail", fetch_mail)
+    run_source("alerts", fetch_alerts)
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except Exception:  # noqa: BLE001 — a poller must never crash the timer loudly
+        sys.exit(0)
