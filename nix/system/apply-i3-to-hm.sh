@@ -13,7 +13,7 @@
 # It keeps  windowManager.i3.enable = true  and  services.displayManager.defaultSession.
 #
 # It is IDEMPOTENT, backs up configuration.nix, PRINTS the diff, and STOPS before
-# nixos-rebuild — review the diff, then rebuild + restart i3 yourself (see footer).
+# nixos-rebuild — review the diff, then rebuild + restart display-manager yourself (see footer).
 #
 # --- vpn-sudo NOPASSWD sudoers rule (deliberately NOT touched) --------------
 # configuration.nix has:
@@ -85,14 +85,27 @@ cat <<DONE
   1. Confirm ~/.config/i3/config is the home-manager symlink:
        ls -l ~/.config/i3/config     # -> /nix/store/...  (run 'home-manager switch' first if not)
   2. sudo nixos-rebuild switch
-  3. i3-msg restart                   # reload i3 with the new config (preserves your layout)
+  3. sudo systemctl restart display-manager
 
-Verify after restart:
+  ⚠ DO NOT use 'i3-msg restart' here, and do NOT just log out/in at the greeter.
+    This rebuild deletes /etc/i3/config and switches the session to launch a
+    PLAIN 'i3' (which then reads ~/.config/i3/config). But:
+      - your RUNNING i3 was launched as 'i3 -c /etc/i3/config', and 'i3 restart'
+        re-execs with that SAME argv -> it can't find the now-deleted file -> the
+        session dies.
+      - the already-running lightdm keeps launching the OLD session command until
+        the display-manager SERVICE itself is restarted, so a greeter log-out/in
+        just loops on the deleted path.
+    Restarting display-manager re-execs lightdm from the new generation (plain i3).
+    If you're stuck at a black screen / login loop: Ctrl+Alt+F2 for a TTY, log in,
+    run 'sudo systemctl restart display-manager', then Ctrl+Alt+F1 (or F7).
+
+Verify after re-login:
   - the bar renders (memory/disk/net/cpu/temp/vpn/dictation/time [+ ⚙ on workbench])
   - VPN left-click menu + right-click detail work (NOPASSWD sudo still trusted)
   - workbench shows NO battery block
 
-Rollback: sudo cp $BACKUP $CFG && sudo nixos-rebuild switch && i3-msg restart
+Rollback: sudo cp $BACKUP $CFG && sudo nixos-rebuild switch && sudo systemctl restart display-manager
 The old /etc/nixos/i3config.nix, i3blocks.nix and i3blocks-scripts/ are left in
 place as a fallback until you verify the new bar over a day.
 DONE
