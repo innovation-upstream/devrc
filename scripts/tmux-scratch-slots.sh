@@ -6,7 +6,6 @@
 # This file is SOURCED (not executed). Consumers — keep in sync by reading THIS,
 # never a private copy:
 #   - tmux-scratch-monitor.sh   (Alt+m HUD)
-#   - tmux-initiatives.sh       (Alt+i dashboard)
 #   - tmux-scratch-status.sh    (status-left legend)
 #   - scripts/session-analysis/initiative-scan.py  (parses this file's entries)
 #

@@ -17,19 +17,27 @@ Sections (priority order) and their sources
   2. Active runs     LIVE Claude Code sessions running in tmux — enumerate panes
                      (`tmux list-panes -a`) and, per pane, walk the pane's process
                      tree looking for the Claude Code CLI (comm matches /claude/,
-                     e.g. the nix-wrapped `.claude-wrapped`). The dashboard's own
-                     pane is excluded. NOT fuzzyclaw's ~/.tmux/tasks/*.json (stale).
-  3. In flight PRs   initiative-scan.py --json (open_prs across workspace repos).
+                     e.g. the nix-wrapped `.claude-wrapped`). Each row shows the
+                     ACTUAL task from the pane_title (`✳ Investigate 500s` →
+                     "Investigate 500s") + its scratch codename + a busy marker
+                     derived from the title's leading glyph (braille spinner ⇒
+                     running, ✳ ⇒ idle). The dashboard's own pane is excluded.
+                     NOT fuzzyclaw's ~/.tmux/tasks/*.json (stale).
+  3. In flight PRs   REAL open PRs fetched DIRECTLY via `gh pr list` per workspace
+                     repo (NOT initiative-scan, whose per-initiative open_prs are
+                     fingerprint-matched and mostly empty). TTL-cached to
+                     ~/.cache/agent-ops/open-prs.json.
   4. Momentum        initiative-scan.py --json (●active / ◐slowing / ○stalled +
                      next-step).
   5. Health          ~/.cache/bar-status/{alerts,civitai}.json.
   6. Recently done   initiative-scan.py --json (merged PRs).
 
-initiative-scan is SLOW (hits `gh` across repos) so it is NEVER run on the popup
-refresh path: its --json output is cached to ~/.cache/agent-ops/initiative-scan.json
-with a TTL; the popup renders the last-cached copy immediately with a freshness
-indicator and kicks a background refresh when stale. The file-backed + tmux-scan
-sections render instantly and auto-refresh every few seconds.
+initiative-scan AND the `gh pr list` sweep are SLOW (both hit `gh` across repos)
+so NEITHER runs on the popup refresh path: each is cached under
+~/.cache/agent-ops/ (initiative-scan.json / open-prs.json) with a TTL; the popup
+renders the last-cached copy immediately with a freshness indicator and kicks a
+detached background refresh when stale. The file-backed + tmux-scan sections
+render instantly and auto-refresh every few seconds.
 
 fetch is deliberately separated from render so the pure aggregation/render
 functions are unit-tested against mock inputs (scripts/tests/test_agent_ops.py).
@@ -81,6 +89,11 @@ ISCAN_CACHE = os.path.join(CACHE_DIR, "initiative-scan.json")
 ISCAN_LOCK = os.path.join(CACHE_DIR, "refresh.lock")
 ISCAN_TTL = 120          # seconds — render last-cached, refresh in background if older
 ISCAN_LOCK_TTL = 240     # a refresh older than this is presumed dead
+# Open-PR sweep (gh pr list per repo) — same TTL-cache mechanism as initiative-scan.
+PRS_CACHE = os.path.join(CACHE_DIR, "open-prs.json")
+PRS_LOCK = os.path.join(CACHE_DIR, "prs-refresh.lock")
+PRS_TTL = 120
+PRS_GH_TIMEOUT = 12      # per-repo `gh pr list` bound (background path, fail-safe)
 DEVRC_DIR = os.environ.get("DEVRC_DIR") or os.path.join(HOME, "workspace", "devrc")
 ISCAN_SCRIPT = os.path.join(DEVRC_DIR, "scripts", "session-analysis", "initiative-scan.py")
 CLAWGATE_ENV = os.path.join(HOME, ".claude", "clawgate.env")
@@ -121,8 +134,11 @@ def file_age_secs(path: str, now: float | None = None):
 
 def list_tmux_panes_raw() -> str:
     """Raw `tmux list-panes -a` output (pipe-delimited). '' on any failure."""
+    # pane_title is LAST — it carries the agent's actual task (`✳ Investigate 500s`)
+    # and may itself contain '|', so parse_panes splits with a bounded maxsplit.
     fmt = ("#{pane_id}|#{pane_pid}|#{session_name}|#{window_index}|"
-           "#{window_name}|#{pane_current_path}|#{pane_current_command}")
+           "#{window_name}|#{pane_current_path}|#{pane_current_command}|"
+           "#{pane_title}")
     try:
         out = subprocess.run(
             ["tmux", "list-panes", "-a", "-F", fmt],
@@ -223,6 +239,23 @@ def enrich_clawgate_titles(timeout=2.5):
         return []
 
 
+def fetch_repo_open_prs(repo_dir, timeout=PRS_GH_TIMEOUT):
+    """`gh pr list --state open` for one repo → list of PR dicts, or None on ANY
+    failure (not a repo, gh missing/unauth, timeout, malformed). Bounded + fail-safe.
+    """
+    try:
+        out = subprocess.run(
+            ["gh", "pr", "list", "--state", "open", "--json",
+             "number,title,headRefName,isDraft,reviewDecision,createdAt"],
+            cwd=repo_dir, capture_output=True, text=True, timeout=timeout)
+        if out.returncode != 0:
+            return None
+        data = json.loads(out.stdout)
+        return data if isinstance(data, list) else None
+    except Exception:
+        return None
+
+
 # ===========================================================================
 # PURE aggregation — unit-tested
 # ===========================================================================
@@ -242,11 +275,16 @@ def clawgate_pending_titles(tasks, pending=_PENDING_STATES) -> list:
 
 
 def parse_panes(raw: str) -> list:
-    """Split raw `tmux list-panes -a` output into pane dicts. Tolerates junk."""
+    """Split raw `tmux list-panes -a` output into pane dicts. Tolerates junk.
+
+    pane_title is the LAST field (may contain '|'), so split with maxsplit=7 and
+    absorb any trailing pipes into the title. A 7-field line (no title) degrades
+    to an empty title rather than being dropped.
+    """
     panes = []
     for line in raw.splitlines():
-        parts = line.split("|")
-        if len(parts) != 7:
+        parts = line.split("|", 7)
+        if len(parts) < 7:
             continue
         pid = parts[1]
         if not pid.isdigit():
@@ -259,6 +297,7 @@ def parse_panes(raw: str) -> list:
             "window_name": parts[4].rstrip(" ●").strip(),
             "path": parts[5],
             "command": parts[6],
+            "title": (parts[7].strip() if len(parts) >= 8 else ""),
         })
     return panes
 
@@ -299,6 +338,49 @@ def default_git_root(path: str):
     return None
 
 
+# Claude Code renders a leading status glyph in the pane_title: an animated
+# BRAILLE spinner (U+2800–U+28FF, e.g. ⠐⠂⠄) while actively working, and a
+# "sparkle" (✳/✶/✷/…) at rest / awaiting input. That glyph is a more reliable
+# busy signal than a /proc R-state snapshot (which flickers), and stripping it
+# leaves the human-readable task.  (The window_name's trailing ` ●` is NOT a
+# discriminator — Claude sets it on every one of its windows, busy or idle.)
+_BRAILLE_LO, _BRAILLE_HI = 0x2800, 0x28FF
+_SPARKLE_GLYPHS = frozenset("✳✻✽✶✷✢✺❋✱*")
+
+
+def _is_braille(ch: str) -> bool:
+    return bool(ch) and _BRAILLE_LO <= ord(ch[0]) <= _BRAILLE_HI
+
+
+def strip_status_glyph(title: str) -> str:
+    """Drop a leading Claude status glyph (braille spinner / sparkle) + whitespace.
+
+    `✳ Investigate remaining 500 errors` → `Investigate remaining 500 errors`.
+    A title with no leading glyph (a bare shell prompt like `nixos`) is returned
+    trimmed but otherwise unchanged. Never raises."""
+    t = (title or "").replace("\n", " ").strip()
+    if not t:
+        return ""
+    if _is_braille(t[0]) or t[0] in _SPARKLE_GLYPHS:
+        return t[1:].strip()
+    return t
+
+
+def busy_from_title(title: str):
+    """Busy tri-state from the pane_title's leading glyph.
+
+    braille spinner → True (working), sparkle → False (idle/awaiting), neither
+    (no glyph / empty) → None (unknown → caller falls back to /proc state)."""
+    t = (title or "").strip()
+    if not t:
+        return None
+    if _is_braille(t[0]):
+        return True
+    if t[0] in _SPARKLE_GLYPHS:
+        return False
+    return None
+
+
 def classify_claude_sessions(panes, proc_index, own_pids=frozenset(),
                              root_resolver=default_git_root) -> list:
     """Return the live Claude-Code sessions among `panes`.
@@ -306,7 +388,9 @@ def classify_claude_sessions(panes, proc_index, own_pids=frozenset(),
     A pane is a Claude session if its foreground command matches /claude/ OR any
     process in its tree has a comm matching /claude/ (e.g. `.claude-wrapped`).
     The dashboard's OWN pane (any pane whose tree contains one of `own_pids`) is
-    excluded. Pure given an injected `proc_index` + `root_resolver`.
+    excluded. Each row carries the pane's TASK (pane_title, status-glyph stripped)
+    and a busy flag derived from the title glyph, falling back to /proc R-state
+    when the title has no glyph. Pure given an injected `proc_index` + `root_resolver`.
     """
     sessions = []
     for pane in panes:
@@ -324,13 +408,17 @@ def classify_claude_sessions(panes, proc_index, own_pids=frozenset(),
             continue
         info = proc_index.get(claude_pid, {}) if claude_pid else {}
         state = info.get("state")
-        busy = None if state is None else (state == "R")
+        proc_busy = None if state is None else (state == "R")
+        title = pane.get("title", "")
+        title_busy = busy_from_title(title)
+        busy = title_busy if title_busy is not None else proc_busy
         sessions.append({
             "pane_id": pane["pane_id"],
             "repo": _basename_repo(pane["path"], root_resolver),
             "session": pane["session"],
             "window_index": pane["window_index"],
             "window_name": pane.get("window_name", ""),
+            "task": strip_status_glyph(title),
             "busy": busy,
             "age_secs": info.get("age_secs"),
         })
@@ -359,6 +447,53 @@ def flatten_initiatives(scan) -> list:
         if isinstance(items, list):
             out.extend(i for i in items if isinstance(i, dict))
     return out
+
+
+def pr_repo_dirs(scan, fallback=None) -> list:
+    """Repo dirs to sweep for open PRs — reuse initiative-scan's repo list.
+
+    The `by_repo` keys of a cached initiative-scan --json ARE the active workspace
+    repo paths (e.g. /home/zach/workspace/devrc). Keeps the `gh pr list` sweep
+    scoped to repos Zach is actually working, not all ~70 dirs under ~/workspace.
+    Falls back to `[DEVRC_DIR]` when no scan cache exists yet."""
+    if isinstance(scan, dict):
+        by_repo = scan.get("by_repo")
+        if isinstance(by_repo, dict) and by_repo:
+            return [r for r in by_repo.keys() if isinstance(r, str)]
+    return list(fallback) if fallback is not None else [DEVRC_DIR]
+
+
+def flatten_open_prs(cache) -> list:
+    """Flatten an open-prs cache `{"repos": {repo_path: [gh-pr-dicts]}}` into a
+    single list of row dicts, newest-first. []-safe on any missing/malformed input.
+
+    Each row: {repo, number, title, branch, draft, created}. `repo` is the repo's
+    basename. Sorted by createdAt desc (a real recency order across repos), with
+    PR number desc as a stable tiebreak."""
+    if not isinstance(cache, dict):
+        return []
+    repos = cache.get("repos")
+    if not isinstance(repos, dict):
+        return []
+    rows = []
+    for repo_path, prs in repos.items():
+        if not isinstance(prs, list):
+            continue
+        repo = os.path.basename(str(repo_path).rstrip("/")) or "?"
+        for pr in prs:
+            if not isinstance(pr, dict):
+                continue
+            rows.append({
+                "repo": repo,
+                "number": pr.get("number"),
+                "title": pr.get("title") or "",
+                "branch": pr.get("headRefName") or "",
+                "draft": bool(pr.get("isDraft")),
+                "created": pr.get("createdAt") or "",
+            })
+    rows.sort(key=lambda r: (r.get("created") or "", _int_or(r.get("number"))),
+              reverse=True)
+    return rows
 
 
 def load_scratch_codenames(paths=None) -> dict:
@@ -469,33 +604,37 @@ def render_active_runs(sessions, codenames=None) -> list:
         elif s["busy"] is False:
             glyph, gcol = "●", BLUE
         else:
-            glyph, gcol = "●", DIM
-        loc = "%s:%s" % (_session_label(s["session"], codenames), s["window_index"])
+            glyph, gcol = "·", DIM
+        label = _session_label(s["session"], codenames)
+        # task = the pane_title's actual work; fall back to window name, then idle.
+        task = s.get("task") or s.get("window_name") or "—"
         age = rel_age(s["age_secs"]) if s["age_secs"] is not None else ""
         lines.append("   %s  %s  %s  %s" % (
             paint(glyph, gcol),
-            paint("%-18s" % _truncate(s["repo"], 18), FG, bold=True),
-            paint("%-14s" % _truncate(loc, 14), DIM),
+            paint("%-10s" % _truncate(label, 10), PURPLE, bold=True),
+            paint("%-48s" % _truncate(task, 48), FG),
             paint(age, DIMMER)))
     return lines
 
 
-def render_prs(initiatives, freshness="") -> list:
+def render_prs(pr_rows, freshness="", limit=12) -> list:
+    """Render the open-PR section from `flatten_open_prs` rows (real `gh` PRs).
+
+    Row: `repo #num  title  [branch]` (drafts marked), newest-first, capped —
+    the body scroller handles any overflow past `limit`."""
     lines = [_header("In flight — PRs", PURPLE, freshness)]
-    rows = []
-    for ini in initiatives:
-        for pr in ini.get("open_prs") or []:
-            if isinstance(pr, dict):
-                rows.append((os.path.basename(ini.get("repo", "").rstrip("/")),
-                             pr.get("number"), pr.get("title", "")))
-    if not rows:
+    if not pr_rows:
         lines.append("   " + paint("— no open PRs", DIMMER))
         return lines
-    for repo, num, title in rows[:8]:
-        lines.append("   %s  %s  %s" % (
-            paint("#%s" % num, YELLOW, bold=True),
-            paint("%-16s" % _truncate(repo, 16), BLUE),
-            paint(_truncate(title, 48), FG)))
+    for r in pr_rows[:limit]:
+        head = "%s #%s" % (r.get("repo", "?"), r.get("number"))
+        draft = paint(" draft", ORANGE, bold=True) if r.get("draft") else ""
+        branch = r.get("branch") or ""
+        lines.append("   %s  %s%s  %s" % (
+            paint("%-24s" % _truncate(head, 24), YELLOW, bold=True),
+            paint(_truncate(r.get("title", ""), 44), FG),
+            draft,
+            paint("[%s]" % _truncate(branch, 22), DIM) if branch else ""))
     return lines
 
 
@@ -608,6 +747,73 @@ def maybe_refresh_initiatives(now=None):
             pass
 
 
+def refresh_prs_cache(now=None):
+    """Worker (run via `agent-ops --refresh-prs`): sweep `gh pr list` across the
+    active workspace repos and atomically write ~/.cache/agent-ops/open-prs.json.
+
+    A repo whose `gh` errors is skipped (not written), so a single unauth/renamed
+    repo never blanks the section. Always drops the refresh lock on exit."""
+    now = now or time.time()
+    try:
+        os.makedirs(CACHE_DIR, exist_ok=True)
+    except Exception:
+        return
+    try:
+        scan = read_json(ISCAN_CACHE)
+        repos = pr_repo_dirs(scan)
+        result = {}
+        for repo in repos:
+            prs = fetch_repo_open_prs(repo)
+            if prs is None:
+                continue  # gh error → skip this repo gracefully
+            result[repo] = prs
+        payload = {"generated": now, "repos": result}
+        tmp = PRS_CACHE + ".tmp"
+        with open(tmp, "w") as fh:
+            json.dump(payload, fh)
+        os.replace(tmp, PRS_CACHE)
+    except Exception:
+        pass
+    finally:
+        try:
+            os.remove(PRS_LOCK)
+        except Exception:
+            pass
+
+
+def maybe_refresh_prs(now=None):
+    """Kick a detached `agent-ops --refresh-prs` if the open-PR cache is stale and
+    no refresh is already running. Never blocks; NEVER hits `gh` on this path."""
+    now = now or time.time()
+    try:
+        os.makedirs(CACHE_DIR, exist_ok=True)
+    except Exception:
+        return
+    cache_age = file_age_secs(PRS_CACHE, now)
+    if cache_age is not None and cache_age < PRS_TTL:
+        return
+    lock_age = file_age_secs(PRS_LOCK, now)
+    if lock_age is not None and lock_age < ISCAN_LOCK_TTL:
+        return
+    if not shutil.which("gh"):
+        return
+    try:
+        open(PRS_LOCK, "w").close()
+    except Exception:
+        return
+    try:
+        subprocess.Popen(
+            [sys.executable, os.path.abspath(__file__), "--refresh-prs"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            start_new_session=True)
+    except Exception:
+        try:
+            os.remove(PRS_LOCK)
+        except Exception:
+            pass
+
+
 # ===========================================================================
 # Frame assembly + interactive loop
 # ===========================================================================
@@ -633,14 +839,17 @@ def build_body_lines(width: int) -> list:
     codenames = load_scratch_codenames()
 
     maybe_refresh_initiatives()
+    maybe_refresh_prs()
     scan = read_json(ISCAN_CACHE)
     initiatives = flatten_initiatives(scan)
     fresh = initiatives_freshness()
+    pr_rows = flatten_open_prs(read_json(PRS_CACHE))
+    prs_fresh = initiatives_freshness(cache=PRS_CACHE, lock=PRS_LOCK)
 
     blocks = [
         render_blocked(clawgate, mail, titles),
         render_active_runs(sessions, codenames),
-        render_prs(initiatives, fresh),
+        render_prs(pr_rows, prs_fresh),
         render_momentum(initiatives, fresh),
         render_health(alerts, civitai),
         render_done(initiatives, fresh),
@@ -788,6 +997,10 @@ def _run_interactive():
 
 def main(argv=None):
     argv = argv if argv is not None else sys.argv[1:]
+    if "--refresh-prs" in argv:
+        # Internal: the detached background open-PR sweep (spawned by maybe_refresh_prs).
+        refresh_prs_cache()
+        return 0
     if "--once" in argv:
         # Non-interactive single frame — handy for capture-pane / debugging.
         print(build_frame(shutil.get_terminal_size((100, 40)).columns))
