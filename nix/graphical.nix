@@ -211,7 +211,14 @@ lib.mkIf isNixOS {
       theme = "gruvbox-dark";
       # JetBrainsMono Nerd Font (declared below) provides the glyphs, so use the
       # Material-Design nerd-font icon set + the theme's default powerline separators.
-      icons = "material-nf";
+      # Icon set in TABLE form (not the `icons = "..."` shortcut) so we can override
+      # a single icon — the shortcut + an [icons.overrides] table conflict and drop
+      # ALL icons back to text. material-nf maps `gpu` to nf-md-monitor (a display);
+      # the RTX 5080 is not a monitor → nf-md-expansion_card (a graphics card).
+      settings.icons = {
+        icons = "material-nf";
+        overrides.gpu = "󰢮";
+      };
       inherit blocks;
     };
   };
