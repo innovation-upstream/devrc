@@ -64,7 +64,8 @@ in
           { trigger = "reocmmend"; replace = "recommend"; }
 
           # Workflows
-          { trigger = ":whn"; replace = "write the handoff to continue in next session"; label = "Write handoff for next session"; search_terms = ["handoff" "session"]; }
+          # (:whn removed 2026-07-06 — 0 fires over the audit window, superseded by
+          #  /handoff + :eos which ends "…then write the handoff to proceed in next session")
           { trigger = ":eos"; replace = "review work done this session and identify skills that may need updating, then update those skills and any relevant docs, then write the handoff to proceed in next session"; label = "End-of-session ritual: review → update skills/docs → handoff"; search_terms = ["end" "session" "wrap" "handoff" "skills" "review" "update" "docs" "ritual"]; }
           { trigger = ":acq"; replace = "ask me clarifying questions and recommend anything you think would be useful to include"; label = "Ask clarifying questions + recommend additions"; search_terms = ["ask" "clarify" "clarifying" "questions" "recommend" "elicit" "scope" "include"]; }
           { trigger = ":rns"; replace = "recommend next steps"; label = "Recommend next steps"; search_terms = ["next" "recommend" "steps" "whats next"]; }

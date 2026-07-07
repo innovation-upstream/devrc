@@ -51,9 +51,12 @@ SNIPPETS = {
     ":cpk":   ("path", ["datapacket-talos/prod-kubeconfig"], [], False),
     ":subk":  ("path", ["submodel-dc-03-a-kubeconfig"], [], False),
     # workflow prompts (current expansions)
-    ":whn":     ("prompt", ["write the handoff to continue in next session"], [], False),
-    ":rau":     ("prompt", ["adversarially audit the pr for bugs"], [], False),
-    ":aep":     ("prompt", ["adversarially audit each pr"], [], False),
+    # :whn removed 2026-07-06 (dead + superseded by /handoff + :eos).
+    ":eos":     ("prompt", ["identify skills that may need updating"], [], False),
+    ":acq":     ("prompt", ["recommend anything you think would be useful to include"], [], False),
+    # :aep expansion starts "dispatch subagent to adversarially audit the PR for
+    # bugs, regressions, edge cases, race conditions…" — match a distinctive tail.
+    ":aep":     ("prompt", ["regressions, edge cases, race conditions"], [], False),
     ":rns":     ("prompt", ["recommend next steps"], ["ranked by leverage"], True),
     ":rnx":     ("prompt", ["recommend next steps ranked by leverage"], [], False),
     # NOTE: PR (espanso-shorten-unfired-snippets, 2026-06-30) reverted these to
