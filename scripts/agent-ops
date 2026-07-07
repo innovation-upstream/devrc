@@ -1,0 +1,669 @@
+#!/usr/bin/env python3
+"""agent-ops — tmux "mission-control" agent operations dashboard.
+
+One hotkey-away tmux popup (prefix+A → display-popup) that live-renders
+"what are my agents doing / what's blocked on me", consolidating signals that
+are otherwise scattered across the i3 bar, slash-commands, tmux, and clawgate.
+
+It is a RENDER LAYER over EXISTING deterministic sources — it never re-implements
+scanning and never invokes an LLM / slash-command. Fully fail-safe: any missing,
+slow, or malformed source degrades to a graceful "—"/"n/a" line, never a hang or
+a crash.
+
+Sections (priority order) and their sources
+  1. Blocked on me   ~/.cache/bar-status/{clawgate,mail}.json  (polled every 45s
+                     by scripts/bar-status-poll). clawgate optionally enriched
+                     with task TITLES via its API (bounded, fail-safe, optional).
+  2. Active runs     LIVE Claude Code sessions running in tmux — enumerate panes
+                     (`tmux list-panes -a`) and, per pane, walk the pane's process
+                     tree looking for the Claude Code CLI (comm matches /claude/,
+                     e.g. the nix-wrapped `.claude-wrapped`). The dashboard's own
+                     pane is excluded. NOT fuzzyclaw's ~/.tmux/tasks/*.json (stale).
+  3. In flight PRs   initiative-scan.py --json (open_prs across workspace repos).
+  4. Momentum        initiative-scan.py --json (●active / ◐slowing / ○stalled +
+                     next-step).
+  5. Health          ~/.cache/bar-status/{alerts,civitai}.json.
+  6. Recently done   initiative-scan.py --json (merged PRs).
+
+initiative-scan is SLOW (hits `gh` across repos) so it is NEVER run on the popup
+refresh path: its --json output is cached to ~/.cache/agent-ops/initiative-scan.json
+with a TTL; the popup renders the last-cached copy immediately with a freshness
+indicator and kicks a background refresh when stale. The file-backed + tmux-scan
+sections render instantly and auto-refresh every few seconds.
+
+fetch is deliberately separated from render so the pure aggregation/render
+functions are unit-tested against mock inputs (scripts/tests/test_agent_ops.py).
+"""
+from __future__ import annotations
+
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import time
+
+# ---------------------------------------------------------------------------
+# Palette (gruvbox, truecolor)
+# ---------------------------------------------------------------------------
+FG = "#ebdbb2"
+DIM = "#928374"
+DIMMER = "#665c54"
+RED = "#fb4934"
+GREEN = "#b8bb26"
+YELLOW = "#fabd2f"
+BLUE = "#83a598"
+PURPLE = "#d3869b"
+AQUA = "#8ec07c"
+ORANGE = "#fe8019"
+
+RESET = "\033[0m"
+BOLD = "\033[1m"
+
+
+def fg(hex_color: str) -> str:
+    h = hex_color.lstrip("#")
+    return "\033[38;2;%d;%d;%dm" % (int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16))
+
+
+def paint(text: str, color: str, bold: bool = False) -> str:
+    return "%s%s%s%s" % (BOLD if bold else "", fg(color), text, RESET)
+
+
+# ---------------------------------------------------------------------------
+# Paths / constants
+# ---------------------------------------------------------------------------
+HOME = os.path.expanduser("~")
+BAR_STATUS_DIR = os.path.join(HOME, ".cache", "bar-status")
+CACHE_DIR = os.path.join(HOME, ".cache", "agent-ops")
+ISCAN_CACHE = os.path.join(CACHE_DIR, "initiative-scan.json")
+ISCAN_LOCK = os.path.join(CACHE_DIR, "refresh.lock")
+ISCAN_TTL = 120          # seconds — render last-cached, refresh in background if older
+ISCAN_LOCK_TTL = 240     # a refresh older than this is presumed dead
+DEVRC_DIR = os.environ.get("DEVRC_DIR") or os.path.join(HOME, "workspace", "devrc")
+ISCAN_SCRIPT = os.path.join(DEVRC_DIR, "scripts", "session-analysis", "initiative-scan.py")
+CLAWGATE_ENV = os.path.join(HOME, ".claude", "clawgate.env")
+
+REFRESH = float(os.environ.get("AGENT_OPS_REFRESH", "4"))
+CLAUDE_RE = re.compile(r"claude", re.IGNORECASE)
+# MCP servers & tool subprocesses claude always keeps as children — not a busy signal.
+_MCP_HINT = re.compile(r"claude", re.IGNORECASE)
+
+
+# ===========================================================================
+# FETCH — file / process / network sources (impure; thin, injectable)
+# ===========================================================================
+def read_json(path: str):
+    """Load a JSON file; return its parsed value or None (never raises)."""
+    try:
+        with open(path, "r") as fh:
+            return json.load(fh)
+    except Exception:
+        return None
+
+
+def file_age_secs(path: str, now: float | None = None):
+    try:
+        return (now or time.time()) - os.path.getmtime(path)
+    except Exception:
+        return None
+
+
+def list_tmux_panes_raw() -> str:
+    """Raw `tmux list-panes -a` output (pipe-delimited). '' on any failure."""
+    fmt = ("#{pane_id}|#{pane_pid}|#{session_name}|#{window_index}|"
+           "#{window_name}|#{pane_current_path}|#{pane_current_command}")
+    try:
+        out = subprocess.run(
+            ["tmux", "list-panes", "-a", "-F", fmt],
+            capture_output=True, text=True, timeout=3)
+        return out.stdout if out.returncode == 0 else ""
+    except Exception:
+        return ""
+
+
+def _read_proc(pid: int):
+    """Read (comm, ppid, state, age_secs) for a pid from /proc. None if gone."""
+    try:
+        with open("/proc/%d/stat" % pid, "r") as fh:
+            data = fh.read()
+        # comm is in parens and may contain spaces/parens: split on the LAST ')'.
+        rparen = data.rfind(")")
+        lparen = data.find("(")
+        comm = data[lparen + 1:rparen]
+        rest = data[rparen + 2:].split()
+        state = rest[0]                      # field 3
+        ppid = int(rest[1])                  # field 4
+        starttime = int(rest[19])            # field 22 (clock ticks since boot)
+        hz = os.sysconf("SC_CLK_TCK")
+        with open("/proc/uptime", "r") as fh:
+            uptime = float(fh.read().split()[0])
+        age = uptime - (starttime / hz) if hz else None
+        return {"comm": comm, "ppid": ppid, "state": state, "age_secs": age}
+    except Exception:
+        return None
+
+
+def build_proc_index(reader=_read_proc) -> dict:
+    """Snapshot every visible process into {pid: {comm,ppid,state,age_secs,children:[]}}.
+
+    `reader(pid)` is injectable so classify_claude_sessions can be unit-tested
+    against a mock process tree without touching /proc.
+    """
+    index: dict[int, dict] = {}
+    try:
+        pids = [int(d) for d in os.listdir("/proc") if d.isdigit()]
+    except Exception:
+        return index
+    for pid in pids:
+        info = reader(pid)
+        if info is None:
+            continue
+        entry = index.setdefault(pid, {})
+        entry.update(info)
+        entry.setdefault("children", [])
+    # link children
+    for pid, info in list(index.items()):
+        ppid = info.get("ppid")
+        if ppid in index and ppid != pid:
+            index[ppid]["children"].append(pid)
+    return index
+
+
+def own_pid_chain(reader=_read_proc) -> set:
+    """PIDs of this process and its ancestors (so we can exclude our own pane)."""
+    chain = set()
+    pid = os.getpid()
+    for _ in range(64):
+        if pid <= 0 or pid in chain:
+            break
+        chain.add(pid)
+        info = reader(pid)
+        if not info:
+            break
+        pid = info.get("ppid", 0)
+    return chain
+
+
+def enrich_clawgate_titles(timeout=2.5):
+    """Best-effort: fetch operator-pending task titles from the clawgate API.
+
+    Returns a list of "#<id> <title>" strings, or [] on ANY failure (no creds,
+    unreachable, slow, malformed). Purely additive — never blocks the section.
+    """
+    try:
+        env = {}
+        with open(CLAWGATE_ENV, "r") as fh:
+            for line in fh:
+                line = line.strip()
+                if "=" in line and not line.startswith("#"):
+                    k, v = line.split("=", 1)
+                    env[k.strip()] = v.strip()
+        base = env.get("CLAWGATE_API_URL")
+        token = env.get("CLAWGATE_HOOK_TOKEN")
+        if not base or not token:
+            return []
+        import urllib.request
+        req = urllib.request.Request(base.rstrip("/") + "/api/tasks",
+                                     headers={"Authorization": "Bearer " + token})
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            tasks = json.loads(resp.read().decode("utf-8"))
+        return clawgate_pending_titles(tasks)
+    except Exception:
+        return []
+
+
+# ===========================================================================
+# PURE aggregation — unit-tested
+# ===========================================================================
+_PENDING_STATES = frozenset({"open", "ready_for_review"})
+
+
+def clawgate_pending_titles(tasks, pending=_PENDING_STATES) -> list:
+    """Map /api/tasks payload → ['#<id> <title>', …] for operator-pending tasks."""
+    if not isinstance(tasks, list):
+        return []
+    out = []
+    for t in tasks:
+        if isinstance(t, dict) and t.get("status") in pending:
+            title = (t.get("title") or "").strip() or "(no title)"
+            out.append("#%s %s" % (t.get("id"), title))
+    return out
+
+
+def parse_panes(raw: str) -> list:
+    """Split raw `tmux list-panes -a` output into pane dicts. Tolerates junk."""
+    panes = []
+    for line in raw.splitlines():
+        parts = line.split("|")
+        if len(parts) != 7:
+            continue
+        pid = parts[1]
+        if not pid.isdigit():
+            continue
+        panes.append({
+            "pane_id": parts[0],
+            "pane_pid": int(pid),
+            "session": parts[2],
+            "window_index": parts[3],
+            "window_name": parts[4].rstrip(" ●").strip(),
+            "path": parts[5],
+            "command": parts[6],
+        })
+    return panes
+
+
+def _descendants(pid: int, proc_index: dict) -> list:
+    """BFS every descendant pid of `pid` (inclusive) using the children map."""
+    seen, stack, out = set(), [pid], []
+    while stack:
+        p = stack.pop()
+        if p in seen:
+            continue
+        seen.add(p)
+        out.append(p)
+        stack.extend(proc_index.get(p, {}).get("children", []))
+    return out
+
+
+def _basename_repo(path: str, root_resolver) -> str:
+    root = root_resolver(path) if path else None
+    if root:
+        return os.path.basename(root.rstrip("/"))
+    return os.path.basename((path or "").rstrip("/")) or "?"
+
+
+def default_git_root(path: str):
+    """Walk up `path` until a .git entry is found. Pure filesystem, no subprocess."""
+    try:
+        cur = os.path.abspath(path)
+    except Exception:
+        return None
+    for _ in range(40):
+        if os.path.exists(os.path.join(cur, ".git")):
+            return cur
+        parent = os.path.dirname(cur)
+        if parent == cur:
+            return None
+        cur = parent
+    return None
+
+
+def classify_claude_sessions(panes, proc_index, own_pids=frozenset(),
+                             root_resolver=default_git_root) -> list:
+    """Return the live Claude-Code sessions among `panes`.
+
+    A pane is a Claude session if its foreground command matches /claude/ OR any
+    process in its tree has a comm matching /claude/ (e.g. `.claude-wrapped`).
+    The dashboard's OWN pane (any pane whose tree contains one of `own_pids`) is
+    excluded. Pure given an injected `proc_index` + `root_resolver`.
+    """
+    sessions = []
+    for pane in panes:
+        tree = _descendants(pane["pane_pid"], proc_index)
+        if own_pids and any(p in own_pids for p in tree):
+            continue  # our own dashboard pane
+        claude_pid = None
+        for p in tree:
+            comm = proc_index.get(p, {}).get("comm", "")
+            if CLAUDE_RE.search(comm):
+                claude_pid = p
+                break
+        is_claude = claude_pid is not None or CLAUDE_RE.search(pane.get("command", ""))
+        if not is_claude:
+            continue
+        info = proc_index.get(claude_pid, {}) if claude_pid else {}
+        state = info.get("state")
+        busy = None if state is None else (state == "R")
+        sessions.append({
+            "pane_id": pane["pane_id"],
+            "repo": _basename_repo(pane["path"], root_resolver),
+            "session": pane["session"],
+            "window_index": pane["window_index"],
+            "window_name": pane.get("window_name", ""),
+            "busy": busy,
+            "age_secs": info.get("age_secs"),
+        })
+    # Group ordering: by repo, then session, then window.
+    sessions.sort(key=lambda s: (s["repo"], s["session"],
+                                 _int_or(s["window_index"])))
+    return sessions
+
+
+def _int_or(v, default=0):
+    try:
+        return int(v)
+    except Exception:
+        return default
+
+
+def flatten_initiatives(scan) -> list:
+    """Flatten initiative-scan --json `by_repo` into a single list. []-safe."""
+    if not isinstance(scan, dict):
+        return []
+    by_repo = scan.get("by_repo")
+    if not isinstance(by_repo, dict):
+        return []
+    out = []
+    for items in by_repo.values():
+        if isinstance(items, list):
+            out.extend(i for i in items if isinstance(i, dict))
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Formatting helpers
+# ---------------------------------------------------------------------------
+def rel_age(secs) -> str:
+    if secs is None:
+        return "?"
+    secs = int(secs)
+    if secs < 60:
+        return "%ds" % secs
+    if secs < 3600:
+        return "%dm" % (secs // 60)
+    if secs < 86400:
+        return "%dh" % (secs // 3600)
+    return "%dd" % (secs // 86400)
+
+
+def _truncate(text: str, width: int) -> str:
+    text = (text or "").replace("\n", " ")
+    if width <= 1 or len(text) <= width:
+        return text
+    return text[:width - 1] + "…"
+
+
+MOMENTUM_GLYPH = {"active": ("●", GREEN), "slowing": ("◐", YELLOW),
+                  "stalled": ("○", DIM)}
+MOMENTUM_RANK = {"active": 0, "slowing": 1, "stalled": 2}
+
+
+# ===========================================================================
+# PURE render — each returns a list[str] of (ANSI) lines. Unit-tested.
+# ===========================================================================
+def _header(title: str, color: str, note: str = "") -> str:
+    line = "%s %s" % (paint("▸", color, bold=True), paint(title.upper(), color, bold=True))
+    if note:
+        line += "  " + paint(note, DIMMER)
+    return line
+
+
+def render_blocked(clawgate, mail, titles=None) -> list:
+    lines = [_header("Blocked on me", RED)]
+    cg_count = (clawgate or {}).get("count")
+    if clawgate is None:
+        lines.append("   " + paint("clawgate  — n/a", DIMMER))
+    else:
+        col = YELLOW if (cg_count or 0) > 0 else DIM
+        detail = clawgate.get("detail") or clawgate.get("state") or ""
+        lines.append("   %s  %s  %s" % (
+            paint("clawgate", BLUE),
+            paint("%s" % (cg_count if cg_count is not None else "?"), col, bold=True),
+            paint(_truncate(detail, 60), DIM)))
+        for t in (titles or [])[:6]:
+            lines.append("      " + paint("• " + _truncate(t, 66), YELLOW))
+    if mail is None:
+        lines.append("   " + paint("mail      — n/a", DIMMER))
+    else:
+        m_count = mail.get("count")
+        col = YELLOW if (m_count or 0) > 0 else DIM
+        detail = mail.get("detail") or mail.get("state") or ""
+        lines.append("   %s      %s  %s" % (
+            paint("mail", BLUE),
+            paint("%s" % (m_count if m_count is not None else "?"), col, bold=True),
+            paint(_truncate(detail, 60), DIM)))
+    return lines
+
+
+def render_active_runs(sessions) -> list:
+    lines = [_header("Active agent runs", AQUA,
+                     "%d live Claude session(s) in tmux" % len(sessions))]
+    if not sessions:
+        lines.append("   " + paint("— no live Claude sessions detected", DIMMER))
+        return lines
+    for s in sessions:
+        if s["busy"] is True:
+            glyph, gcol = "▶", GREEN
+        elif s["busy"] is False:
+            glyph, gcol = "●", BLUE
+        else:
+            glyph, gcol = "●", DIM
+        loc = "%s:%s" % (s["session"], s["window_index"])
+        age = rel_age(s["age_secs"]) if s["age_secs"] is not None else ""
+        lines.append("   %s  %s  %s  %s" % (
+            paint(glyph, gcol),
+            paint("%-18s" % _truncate(s["repo"], 18), FG, bold=True),
+            paint("%-14s" % _truncate(loc, 14), DIM),
+            paint(age, DIMMER)))
+    return lines
+
+
+def render_prs(initiatives, freshness="") -> list:
+    lines = [_header("In flight — PRs", PURPLE, freshness)]
+    rows = []
+    for ini in initiatives:
+        for pr in ini.get("open_prs") or []:
+            if isinstance(pr, dict):
+                rows.append((os.path.basename(ini.get("repo", "").rstrip("/")),
+                             pr.get("number"), pr.get("title", "")))
+    if not rows:
+        lines.append("   " + paint("— no open PRs", DIMMER))
+        return lines
+    for repo, num, title in rows[:8]:
+        lines.append("   %s  %s  %s" % (
+            paint("#%s" % num, YELLOW, bold=True),
+            paint("%-16s" % _truncate(repo, 16), BLUE),
+            paint(_truncate(title, 48), FG)))
+    return lines
+
+
+def render_momentum(initiatives, freshness="", limit=7) -> list:
+    lines = [_header("Momentum", BLUE, freshness)]
+    active = [i for i in initiatives if i.get("momentum") in ("active", "slowing")]
+    active.sort(key=lambda i: (MOMENTUM_RANK.get(i.get("momentum"), 9),
+                               -(i.get("last_touch") or 0)))
+    if not active:
+        lines.append("   " + paint("— nothing active", DIMMER))
+        return lines
+    for ini in active[:limit]:
+        glyph, gcol = MOMENTUM_GLYPH.get(ini.get("momentum"), ("·", DIM))
+        title = ini.get("title") or ini.get("slug") or "?"
+        age = rel_age((time.time() - ini["last_touch"]) if ini.get("last_touch") else None)
+        lines.append("   %s  %s  %s" % (
+            paint(glyph, gcol, bold=True),
+            paint("%-42s" % _truncate(title, 42), FG),
+            paint(age, DIMMER)))
+        ns = ini.get("next_step")
+        if ns:
+            lines.append("      " + paint("→ " + _truncate(ns, 62), DIM))
+    return lines
+
+
+def render_health(alerts, civitai) -> list:
+    lines = [_header("Health", ORANGE)]
+
+    def _row(label, data):
+        if data is None:
+            return "   %s  %s" % (paint("%-9s" % label, BLUE), paint("— n/a", DIMMER))
+        count = data.get("count")
+        state = (data.get("state") or "").lower()
+        col = RED if state in ("critical",) else (YELLOW if (count or 0) > 0 else GREEN)
+        detail = data.get("detail") or data.get("state") or ""
+        return "   %s  %s  %s" % (
+            paint("%-9s" % label, BLUE),
+            paint("%s" % (count if count is not None else "?"), col, bold=True),
+            paint(_truncate(detail, 56), DIM))
+
+    lines.append(_row("homelab", alerts))
+    lines.append(_row("civitai", civitai))
+    return lines
+
+
+def render_done(initiatives, freshness="", limit=6) -> list:
+    lines = [_header("Recently done", GREEN, freshness)]
+    merged = [i for i in initiatives if (i.get("merged_prs") or 0) > 0]
+    merged.sort(key=lambda i: -(i.get("last_commit") or i.get("last_touch") or 0))
+    if not merged:
+        lines.append("   " + paint("— no recently merged PRs", DIMMER))
+        return lines
+    for ini in merged[:limit]:
+        title = ini.get("title") or ini.get("slug") or "?"
+        age = rel_age((time.time() - ini["last_commit"]) if ini.get("last_commit") else None)
+        lines.append("   %s  %s  %s" % (
+            paint("✓%d" % ini["merged_prs"], GREEN, bold=True),
+            paint("%-42s" % _truncate(title, 42), FG),
+            paint(age, DIMMER)))
+    return lines
+
+
+# ===========================================================================
+# initiative-scan cache + background refresh
+# ===========================================================================
+def initiatives_freshness(now=None, cache=ISCAN_CACHE, lock=ISCAN_LOCK) -> str:
+    age = file_age_secs(cache, now)
+    if age is None:
+        note = "no cache yet"
+    else:
+        note = "updated %s ago" % rel_age(age)
+    lock_age = file_age_secs(lock, now)
+    if lock_age is not None and lock_age < ISCAN_LOCK_TTL:
+        note += " · refreshing…"
+    return note
+
+
+def maybe_refresh_initiatives(now=None):
+    """Kick a detached background `initiative-scan --json` refresh if the cache is
+    stale (older than TTL) and no live refresh is already running. Never blocks."""
+    now = now or time.time()
+    try:
+        os.makedirs(CACHE_DIR, exist_ok=True)
+    except Exception:
+        return
+    cache_age = file_age_secs(ISCAN_CACHE, now)
+    if cache_age is not None and cache_age < ISCAN_TTL:
+        return  # fresh enough
+    lock_age = file_age_secs(ISCAN_LOCK, now)
+    if lock_age is not None and lock_age < ISCAN_LOCK_TTL:
+        return  # a refresh is already in flight
+    if not os.path.exists(ISCAN_SCRIPT):
+        return
+    try:
+        open(ISCAN_LOCK, "w").close()
+    except Exception:
+        return
+    tmp = ISCAN_CACHE + ".tmp"
+    cmd = ("'%s' --json > '%s' 2>/dev/null && mv '%s' '%s'; rm -f '%s'" %
+           (ISCAN_SCRIPT, tmp, tmp, ISCAN_CACHE, ISCAN_LOCK))
+    try:
+        subprocess.Popen(["/usr/bin/env", "bash", "-c", cmd],
+                         stdin=subprocess.DEVNULL,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         start_new_session=True)
+    except Exception:
+        try:
+            os.remove(ISCAN_LOCK)
+        except Exception:
+            pass
+
+
+# ===========================================================================
+# Frame assembly + interactive loop
+# ===========================================================================
+def build_frame(width: int) -> str:
+    """Assemble one full-screen frame from all sources. Pure of terminal I/O."""
+    clawgate = read_json(os.path.join(BAR_STATUS_DIR, "clawgate.json"))
+    mail = read_json(os.path.join(BAR_STATUS_DIR, "mail.json"))
+    alerts = read_json(os.path.join(BAR_STATUS_DIR, "alerts.json"))
+    civitai = read_json(os.path.join(BAR_STATUS_DIR, "civitai.json"))
+
+    titles = []
+    if clawgate and (clawgate.get("count") or 0) > 0:
+        titles = enrich_clawgate_titles()
+
+    panes = parse_panes(list_tmux_panes_raw())
+    proc_index = build_proc_index()
+    sessions = classify_claude_sessions(panes, proc_index, own_pids=own_pid_chain())
+
+    maybe_refresh_initiatives()
+    scan = read_json(ISCAN_CACHE)
+    initiatives = flatten_initiatives(scan)
+    fresh = initiatives_freshness()
+
+    blocks = [
+        render_blocked(clawgate, mail, titles),
+        render_active_runs(sessions),
+        render_prs(initiatives, fresh),
+        render_momentum(initiatives, fresh),
+        render_health(alerts, civitai),
+        render_done(initiatives, fresh),
+    ]
+    lines = []
+    title = paint(" agent-ops ", YELLOW, bold=True)
+    clock = paint(time.strftime("%H:%M:%S"), DIMMER)
+    lines.append("%s  %s" % (title, clock))
+    lines.append("")
+    for block in blocks:
+        lines.extend(block)
+        lines.append("")
+    lines.append(paint("[q/Esc: close · refresh %ss]" % int(REFRESH), DIMMER))
+    return "\n".join(lines)
+
+
+def _run_interactive():
+    import select
+    import termios
+    import tty
+
+    fd = sys.stdin.fileno()
+    old = None
+    try:
+        old = termios.tcgetattr(fd)
+        tty.setcbreak(fd)
+    except Exception:
+        old = None
+
+    sys.stdout.write("\033[?25l")  # hide cursor
+    try:
+        while True:
+            size = shutil.get_terminal_size((100, 40))
+            frame = build_frame(size.columns)
+            sys.stdout.write("\033[H\033[2J" + frame)
+            sys.stdout.flush()
+            r, _, _ = select.select([sys.stdin], [], [], REFRESH)
+            if r:
+                ch = sys.stdin.read(1)
+                if ch in ("q", "Q"):
+                    break
+                if ch == "\x1b":  # Esc — swallow any CSI trailer, then quit
+                    r2, _, _ = select.select([sys.stdin], [], [], 0.05)
+                    if not r2:
+                        break
+    except KeyboardInterrupt:
+        pass
+    finally:
+        sys.stdout.write("\033[?25h\n")  # show cursor
+        sys.stdout.flush()
+        if old is not None:
+            try:
+                termios.tcsetattr(fd, termios.TCSADRAIN, old)
+            except Exception:
+                pass
+
+
+def main(argv=None):
+    argv = argv if argv is not None else sys.argv[1:]
+    if "--once" in argv:
+        # Non-interactive single frame — handy for capture-pane / debugging.
+        print(build_frame(shutil.get_terminal_size((100, 40)).columns))
+        return 0
+    if not sys.stdout.isatty():
+        print(build_frame(shutil.get_terminal_size((100, 40)).columns))
+        return 0
+    _run_interactive()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

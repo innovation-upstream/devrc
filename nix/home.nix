@@ -251,6 +251,13 @@ in
     source = ../scripts/tmux-initiatives.sh;
     executable = true;
   };
+  # agent-ops "mission control" popup (prefix+A). Renders over the existing
+  # deterministic sources (bar-status cache + a live tmux/process scan + a
+  # TTL-cached initiative-scan) — see scripts/agent-ops.
+  home.file.".config/tmux/agent-ops" = {
+    source = ../scripts/agent-ops;
+    executable = true;
+  };
 
   home.file.".config/tmux/activity-emit.sh" = {
     source = ../scripts/tmux-activity-emit.sh;
