@@ -40,17 +40,19 @@ TEMP_THRESHOLD=${CPU_MON_TEMP_THRESHOLD:-95}
 TEMP_SUSTAIN=${CPU_MON_TEMP_SUSTAIN:-3}
 TEMP_HYSTERESIS=5   # recover only once temp drops this far below the threshold
 
-# Process comms to NEVER alert on — expected heavy hitters (games etc.) whose
-# high CPU is not a problem. Case-insensitive SUBSTRING match against the busy
-# process's command (so "anno" also catches "Anno1800.exe" under Proton).
-# Space-separated; extend via CPU_MON_IGNORE in the systemd service.
-IGNORE=${CPU_MON_IGNORE:-anno}
+# Process comms to NEVER alert on — expected heavy hitters (games, the Android
+# stack, etc.) whose high CPU is not a problem. Case-insensitive SUBSTRING match
+# against the busy process's command (so "anno" also catches "Anno1800.exe" under
+# Proton). COMMA-separated — a space would be split by systemd's Environment=
+# parsing and silently drop entries. Extend via CPU_MON_IGNORE in the service.
+IGNORE=${CPU_MON_IGNORE:-anno,logd}
 
-# is_ignored <comm> -> 0 if it matches any IGNORE entry (case-insensitive substring)
+# is_ignored <comm> -> 0 if it matches any IGNORE entry (case-insensitive substring).
+# Accepts comma- or space-separated IGNORE.
 is_ignored() {
   local comm_lc want_lc
   comm_lc=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')
-  for want_lc in $(printf '%s' "$IGNORE" | tr '[:upper:] ' '[:lower:]\n'); do
+  for want_lc in $(printf '%s' "$IGNORE" | tr ',' ' ' | tr '[:upper:]' '[:lower:]'); do
     [ -n "$want_lc" ] || continue
     case "$comm_lc" in *"$want_lc"*) return 0 ;; esac
   done
