@@ -419,3 +419,193 @@ def test_block_subprocess_corrupt_json_is_invisible(tmp_path, script, cachefile)
                        capture_output=True, text=True, env=env)
     assert r.returncode == 0
     assert json.loads(r.stdout) == {"text": "", "state": "Idle"}
+
+
+# --------------------------------------------------------------------------- #
+# poller: edge_decision — the PURE rising-edge latch (given prev latch + count +
+# threshold -> (should_toast, new_latch)). Offline, deterministic, no side effects.
+# --------------------------------------------------------------------------- #
+def test_edge_decision_rising_edge_fires_once():
+    # not latched, count crosses above threshold -> fire + latch.
+    assert poll.edge_decision(False, 31, 30) == (True, True)
+
+
+def test_edge_decision_steady_state_does_not_retoast():
+    # already latched + still above -> NO re-toast, stays latched.
+    assert poll.edge_decision(True, 40, 30) == (False, True)
+    assert poll.edge_decision(True, 31, 30) == (False, True)
+
+
+def test_edge_decision_at_or_below_threshold_resets_latch():
+    # count == threshold is NOT "above" -> latch clears (so next crossing fires).
+    assert poll.edge_decision(True, 30, 30) == (False, False)
+    assert poll.edge_decision(True, 5, 30) == (False, False)
+    assert poll.edge_decision(False, 30, 30) == (False, False)
+
+
+def test_edge_decision_re_fires_after_drop_and_recross():
+    # full cycle: fire -> steady -> drop (reset) -> re-cross fires again.
+    should1, latch1 = poll.edge_decision(False, 31, 30)   # rising edge
+    assert (should1, latch1) == (True, True)
+    should2, latch2 = poll.edge_decision(latch1, 35, 30)  # steady above
+    assert (should2, latch2) == (False, True)
+    should3, latch3 = poll.edge_decision(latch2, 10, 30)  # dropped -> reset
+    assert (should3, latch3) == (False, False)
+    should4, latch4 = poll.edge_decision(latch3, 31, 30)  # re-cross -> fires
+    assert (should4, latch4) == (True, True)
+
+
+def test_edge_decision_threshold_zero_is_zero_to_positive():
+    # clawgate/mail rule: threshold 0 -> any count>0 is the rising edge.
+    assert poll.edge_decision(False, 1, 0) == (True, True)     # 0 -> 1 fires
+    assert poll.edge_decision(True, 3, 0) == (False, True)     # still >0, quiet
+    assert poll.edge_decision(True, 0, 0) == (False, False)    # back to 0, reset
+    assert poll.edge_decision(False, 0, 0) == (False, False)   # stays at 0
+
+
+# --------------------------------------------------------------------------- #
+# poller: latch persistence across invocations (sidecar file)
+# --------------------------------------------------------------------------- #
+def test_latch_defaults_false_when_absent(tmp_path, monkeypatch):
+    monkeypatch.setenv("BAR_STATUS_DIR", str(tmp_path))
+    assert poll.read_latch("alerts") is False
+
+
+def test_latch_round_trips(tmp_path, monkeypatch):
+    monkeypatch.setenv("BAR_STATUS_DIR", str(tmp_path))
+    poll.write_latch("alerts", True)
+    assert poll.read_latch("alerts") is True
+    poll.write_latch("alerts", False)
+    assert poll.read_latch("alerts") is False
+
+
+def test_latch_corrupt_file_reads_false(tmp_path, monkeypatch):
+    monkeypatch.setenv("BAR_STATUS_DIR", str(tmp_path))
+    (tmp_path / "alerts.toast-state").write_text("{ not json")
+    assert poll.read_latch("alerts") is False
+
+
+# --------------------------------------------------------------------------- #
+# poller: evaluate_edge_toast — the decision + latch + fire orchestration.
+# fire/read/write are injected so this stays fully OFFLINE (no dunstify, no disk).
+# --------------------------------------------------------------------------- #
+def _latch_store(initial=False):
+    """An in-memory latch backend + a fire-recorder for evaluate_edge_toast."""
+    state = {"latched": initial}
+    fired = []
+    return (state, fired,
+            lambda name: state["latched"],
+            lambda name, v: state.__setitem__("latched", v),
+            lambda *a, **k: fired.append((a, k)) or True)
+
+
+ALERTS_SPEC = {"threshold": 30, "urgency": "normal", "summary": "s",
+               "action": "xdg-open http://x"}
+MAIL_SPEC = {"threshold": 0, "urgency": "low", "summary": "m", "action": None}
+
+
+def test_eval_fires_once_on_rising_edge():
+    state, fired, rd, wr, fr = _latch_store(initial=False)
+    out = poll.evaluate_edge_toast(
+        "alerts", {"count": 31, "state": "Critical", "detail": "31 firing"},
+        ALERTS_SPEC, fire=fr, read=rd, write=wr)
+    assert out == (True, True)
+    assert state["latched"] is True
+    assert len(fired) == 1
+    # body carries the source detail; action is the block's target.
+    args, kw = fired[0]
+    assert "31 firing" in args[2]
+    assert kw["action_cmd"] == "xdg-open http://x"
+
+
+def test_eval_steady_state_does_not_refire():
+    state, fired, rd, wr, fr = _latch_store(initial=True)
+    out = poll.evaluate_edge_toast(
+        "alerts", {"count": 45, "state": "Critical"},
+        ALERTS_SPEC, fire=fr, read=rd, write=wr)
+    assert out == (False, True)
+    assert fired == []                       # no toast on steady state
+
+
+def test_eval_drop_resets_latch_no_fire():
+    state, fired, rd, wr, fr = _latch_store(initial=True)
+    out = poll.evaluate_edge_toast(
+        "alerts", {"count": 5, "state": "Warning"},
+        ALERTS_SPEC, fire=fr, read=rd, write=wr)
+    assert out == (False, False)
+    assert state["latched"] is False
+    assert fired == []
+
+
+def test_eval_zero_to_positive_fires_for_mail_and_clawgate():
+    state, fired, rd, wr, fr = _latch_store(initial=False)
+    out = poll.evaluate_edge_toast(
+        "mail", {"count": 2, "state": "Warning", "detail": "2 open"},
+        MAIL_SPEC, fire=fr, read=rd, write=wr)
+    assert out == (True, True) and len(fired) == 1
+    assert fired[0][1]["action_cmd"] is None        # mail toast has no action
+
+
+def test_eval_skips_stale_and_error_payloads_without_touching_latch():
+    for payload in ({"count": 99, "state": "stale"},
+                    {"count": 99, "state": "Critical", "error": "boom"}):
+        state, fired, rd, wr, fr = _latch_store(initial=False)
+        out = poll.evaluate_edge_toast("alerts", payload, ALERTS_SPEC,
+                                       fire=fr, read=rd, write=wr)
+        assert out is None
+        assert fired == [] and state["latched"] is False
+
+
+def test_eval_skips_malformed_payloads():
+    for bad in (None, [], "x", 3, {"count": "NaN"}):
+        state, fired, rd, wr, fr = _latch_store(initial=False)
+        out = poll.evaluate_edge_toast("alerts", bad, ALERTS_SPEC,
+                                       fire=fr, read=rd, write=wr)
+        assert out is None and fired == []
+
+
+def test_eval_is_failsafe_when_fire_raises():
+    # A dunstify/notify failure must NOT crash the decision path: evaluate_edge_
+    # toast still latches, and the exception is swallowed by the caller's wrapper.
+    def boom(*a, **k):
+        raise RuntimeError("no display")
+    state, fired, rd, wr, _ = _latch_store(initial=False)
+    with pytest.raises(RuntimeError):
+        # evaluate itself does not swallow (the live main() wraps it) — but the
+        # latch is written BEFORE the fire, so state is consistent even on failure.
+        poll.evaluate_edge_toast("alerts", {"count": 31, "state": "Critical"},
+                                 ALERTS_SPEC, fire=boom, read=rd, write=wr)
+    assert state["latched"] is True             # latch persisted before the fire
+
+
+# --------------------------------------------------------------------------- #
+# poller: fire_toast is fully fail-safe (offline) — a broken toast never raises
+# --------------------------------------------------------------------------- #
+def test_fire_toast_skips_without_session_bus(monkeypatch):
+    # No session bus reachable (headless / laptop) -> skip, return False, no raise.
+    monkeypatch.setattr(poll, "_borrow_desktop_env", lambda env: {})
+    assert poll.fire_toast("normal", "s", "b", action_cmd="xdg-open x") is False
+
+
+def test_fire_toast_swallows_launcher_failure(monkeypatch):
+    monkeypatch.setattr(poll, "_borrow_desktop_env",
+                        lambda env: {"DBUS_SESSION_BUS_ADDRESS": "unix:x"})
+
+    def boom(argv):
+        raise OSError("systemd-run missing")
+    assert poll.fire_toast("normal", "s", "b", runner=boom) is False
+
+
+def test_fire_toast_dispatches_with_action(monkeypatch):
+    monkeypatch.setattr(poll, "_borrow_desktop_env",
+                        lambda env: {"DBUS_SESSION_BUS_ADDRESS": "unix:x",
+                                     "DISPLAY": ":0"})
+    captured = {}
+    assert poll.fire_toast("normal", "sum", "body", action_cmd="xdg-open URL",
+                           runner=lambda a: captured.update(argv=a)) is True
+    argv = captured["argv"]
+    assert argv[0] == "systemd-run" and "--user" in argv
+    assert "bash" in argv and argv[-1] == "xdg-open URL"       # action is last arg
+    joined = " ".join(argv)
+    assert "-A open,Open" in joined                            # clickable action
+    assert "--setenv=DISPLAY=:0" in argv

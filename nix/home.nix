@@ -112,31 +112,61 @@ in
   #   vSync = true;
   # };
 
-  # Notification daemon (Gruvbox-themed)
+  # Notification daemon (Gruvbox-themed, CALM). Value formats verified parse-clean
+  # against dunst 1.13.2 (the running version): `width`/`offset` take a paren-tuple
+  # `(min, max)` / `(x, y)` (v1.11- used NxN); the home-manager module quotes string
+  # values, and dunst strips those quotes before enum/tuple parsing (confirmed via a
+  # control reload that DID warn on a bogus value but not on these). After a switch,
+  # re-inspect ~/.config/dunst/dunstrc + `journalctl --user -u dunst` for warnings.
   services.dunst = {
     enable = graphical;
     settings = {
       global = {
-        font = "Monospace 10";
+        # Match the i3 bar font so nerd-font glyphs in notification bodies render.
+        font = "JetBrainsMono Nerd Font 10";
         frame_color = "#504945";
         separator_color = "frame";
         corner_radius = 4;
+        # Placement: top-right, offset down far enough to clear the ~24-34px top bar.
+        origin = "top-right";
+        offset = "(12, 40)";
+        # Bounded, content-sized width (grows to 420px max, never wider).
+        width = "(0, 420)";
+        # Cap the visible stack + keep a recall buffer (dunstctl history-pop).
+        notification_limit = 4;
+        history_length = 40;
+        stack_duplicates = true;      # collapse repeats into one with a counter
+        show_indicators = false;      # no "(x more)" / action hints — calmer
+        # Mouse: left dismisses the current toast, middle fires its action then
+        # dismisses, right opens the dunst context menu.
+        mouse_left_click = "close_current";
+        mouse_middle_click = "do_action, close_current";
+        mouse_right_click = "context";
       };
       urgency_low = {
         background = "#282828";
         foreground = "#ebdbb2";
+        frame_color = "#504945";
         timeout = 5;
       };
       urgency_normal = {
         background = "#282828";
         foreground = "#ebdbb2";
-        frame_color = "#83a598";
+        frame_color = "#83a598";      # gruvbox blue accent
         timeout = 10;
       };
       urgency_critical = {
-        background = "#cc241d";
+        background = "#cc241d";        # gruvbox red bg
         foreground = "#ebdbb2";
-        timeout = 0;
+        frame_color = "#fb4934";       # bright-red frame
+        timeout = 0;                   # sticky until dismissed
+      };
+      # Native fullscreen DND: a filterless rule matches all notifications and,
+      # while any window is fullscreen (video/games/screen-share), hides the
+      # visible stack + holds new toasts, re-showing them once fullscreen ends.
+      # The biggest calm win — no helper needed, dunst does this itself.
+      fullscreen_pushback = {
+        fullscreen = "pushback";
       };
     };
   };
