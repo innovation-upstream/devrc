@@ -3,10 +3,17 @@
 let
   home = config.home.homeDirectory;
   workspace = "${home}/workspace";
-  # Headless/server mode: `touch ~/.server-mode` to disable graphical-session
-  # services (dunst, espanso) that can't start without X/i3 and otherwise make
-  # every `home-manager switch` report "degraded / Failed services".
+  # Server mode: `touch ~/.server-mode`. Historically this ALSO gated the graphical
+  # services (dunst, espanso) off — but the workbench carries the marker to enable
+  # its server-side tasks (mail-actions-archive, repo-cos) while STILL running a full
+  # X/i3 desktop, so gating the desktop bits on serverMode wrongly disabled them
+  # there (same trap the i3 bar hit — see graphical.nix). serverMode now gates ONLY
+  # server-side task enablement; graphical services key off `graphical` below.
   serverMode = builtins.pathExists "${home}/.server-mode";
+  # Graphical host = runs X/i3 (both current NixOS hosts do; only a genuinely headless
+  # box would not). Approximated as isNixOS, mirroring graphical.nix — deliberately NOT
+  # !serverMode, which is true on the graphical workbench.
+  graphical = isNixOS;
   # Host discriminator for the graphical config (i3 + i3status-rust bar). Evaluated
   # per-host under `--impure`: the laptop has an intel_backlight, the workbench does
   # not. Threaded into ./graphical.nix via _module.args below. Drives battery/backlight
@@ -32,7 +39,7 @@ in
 
   # Espanso text expander service (X11/i3)
   services.espanso = {
-    enable = !serverMode;
+    enable = graphical;
     package = pkgs.espanso;
     x11Support = true;
     waylandSupport = false;
@@ -107,7 +114,7 @@ in
 
   # Notification daemon (Gruvbox-themed)
   services.dunst = {
-    enable = !serverMode;
+    enable = graphical;
     settings = {
       global = {
         font = "Monospace 10";
