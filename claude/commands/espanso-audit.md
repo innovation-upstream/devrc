@@ -13,10 +13,10 @@ Args: `$ARGUMENTS` (optional `--since YYYY-MM-DD`).
 
 ## Critical topology (read first — it's bitten before)
 
-espanso runs **only on the laptop** (the workbench is server-mode → espanso off, binary not even in PATH). The user SSHes laptop→workbench, so laptop-espanso expands text *before* it travels over SSH and lands in **workbench** transcripts. So:
-- Expansion hits appear in **both** hosts' `~/.claude/projects`. This is NOT a contradiction with server-mode.
-- **Combine** both hosts' counts — espanso fires once (on the laptop) regardless of which host's session receives the text. Never compare them as if they were separate usage.
-- Deploy target for any change is the **laptop**.
+espanso runs on **BOTH hosts** since 2026-07-06 / PR #83 (the workbench was un-gated from serverMode — it IS graphical; espanso/dunst now key off the `graphical` predicate, not `!serverMode`). The old "laptop-only" rule is retired. So:
+- **Combine** both hosts' `~/.claude/projects` counts — an expansion fires on whichever host you typed it on (you type on the workbench directly; and when you SSH laptop→workbench, laptop-espanso expands *before* the text travels and it lands in workbench transcripts). Summing both hosts is the true usage; never treat them as separate.
+- **Deploy target is BOTH hosts** (`scripts/ship.sh`) — no longer just the laptop.
+- Note the miner drifts from the live config and can silently misreport (2026-07-06: a stale `:aep` substring read 0; `:eos`/`:acq` were untracked). Always re-sync `SNIPPETS` before trusting counts (step 2).
 
 ## What to do
 
@@ -33,12 +33,12 @@ espanso runs **only on the laptop** (the workbench is server-mode → espanso of
 4. **Combine + interpret.** Present one merged table (workbench + laptop hits summed). Then apply the recipe:
    - **Paths** (`:cc :cdp :hlt …`) — almost always earn their keep; rarely touch.
    - **The recurring lesson:** a workflow snippet that expands to a **long steering paragraph goes UNFIRED** — the user hand-types the short phrase instead. Cross-reference each zero/low-fire prompt snippet against the "recurring short user messages" section: if the short form of its intent is being hand-typed a lot, that's the signal. (Measured 2026-06-23 `:rns`, again 2026-06-30 → PR #37.)
-   - **Verdict per snippet:** keep-long (used + sticks, e.g. `:rau`), **shorten back** to the hand-typed form (zero fires + short-form demand — option (a); steering already lives in RULES.md / `/verify` / `/audit-pr`), repoint-to-skill (option (b)), remove (dead, no demand), or add (high-frequency phrase with no snippet).
+   - **Verdict per snippet:** keep-long (used + sticks, e.g. `:eos`/`:acq`), **shorten back** to the hand-typed form (zero fires + short-form demand — option (a); steering already lives in RULES.md / `/verify` / `/audit-pr`), repoint-to-skill (option (b)), remove (dead, no demand), or add (high-frequency phrase with no snippet).
    - Honest caveat to always state: keyword-packing is a probabilistic nudge, and new triggers need habit-formation time — but **zero fires + active short-form hand-typing** is strong signal the trigger→habit transfer failed.
 
 5. **Implement (if the user picks changes).** Edit the `services.espanso` block in `nix/home.nix` on a feature branch. Re-sync the miner's `SNIPPETS` to whatever you changed (so the next run detects them). Validate: `nix-instantiate --parse nix/home.nix` + check no trigger is a prefix of another (espanso longest-matches, but avoid surprises). PR → merge → **`scripts/ship.sh`** converges both hosts.
 
-6. **Verify honestly.** After ship, confirm the laptop's deployed `~/.config/espanso/match/base.yml` carries the new replace strings (note: home-manager emits `replace` before `trigger`) and `systemctl --user is-active espanso`. The one thing you **cannot** verify over SSH is the actual keystroke expansion — hand that final check to the user (type a trigger on the laptop, watch it expand).
+6. **Verify honestly.** After ship, confirm each host's deployed `~/.config/espanso/match/base.yml` carries the new replace strings (note: home-manager emits `replace` before `trigger`) and `systemctl --user is-active espanso` (both hosts now run it). The one thing you **cannot** verify over SSH is the actual keystroke expansion — hand that final check to the user (type a trigger, watch it expand).
 
 Notes:
 - Edit `claude/commands/*.md` and `nix/home.nix` in the repo, NOT `~/.claude/*` (read-only nix-store symlinks). New command/script files must be `git add`ed before a switch (flakes only see tracked files).
