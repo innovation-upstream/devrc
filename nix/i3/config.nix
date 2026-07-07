@@ -186,9 +186,11 @@ bindsym $mod+b exec --no-startup-id brave
 # agent-ops "mission control" dashboard — real open PRs, live agent runs (task +
 # codename + busy), momentum, health. Floats via the class="float" rule above; the
 # SAME launch the i3-bar button uses. Dashboard renders the deterministic caches.
-bindsym $mod+i exec --no-startup-id alacritty --class float,float \
-    -o window.dimensions.columns=130 -o window.dimensions.lines=45 \
-    -e ~/.config/tmux/agent-ops
+# NOTE: the exec command MUST be quoted as a single string. Unquoted (and/or with
+# `\` line-continuation), i3's command parser chokes on the alacritty flags at
+# key-press time and pops an error nagbar — even though it partly runs. Quoting
+# hands the whole string to `sh -c` as one command.
+bindsym $mod+i exec --no-startup-id "alacritty --class float,float -o window.dimensions.columns=130 -o window.dimensions.lines=45 -e ~/.config/tmux/agent-ops"
 
 # Quick workspace switching
 bindsym $mod+Tab workspace back_and_forth
