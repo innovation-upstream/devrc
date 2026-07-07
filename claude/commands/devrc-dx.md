@@ -307,15 +307,14 @@ sessions) at the left of status-right. Each segment dim-grays when zero. Pairs
 with the per-slot `●` flag in status-left: the slot legend tells you *which*
 scratch needs attention; the counter tells you the *magnitude* of work in flight.
 
-**Initiatives dashboard (Alt+i):** `scripts/tmux-initiatives.sh` is a read-only
-grouped view of every active Claude session — pulls fuzzyclaw's per-window
-`summary` field (LLM-generated description of the last completed turn) and
-groups by tmux session. Scratches render in slot order with their popup
-colors; non-scratch sessions follow in neutral beige. Within each group:
-waiting → running → paused-by-recency, with `(Xh ago)` age on paused entries.
-"Done" status is filtered out. Pairs with the monitor popup: M-m shows
-*what's happening right now* (live capture-pane), M-i shows *what each
-session is about* (summary field). Same detach-if-inside-scratch guard as M-m.
+**agent-ops dashboard ($mod+i):** `scripts/agent-ops` is the read-only
+"mission-control" dashboard — real open PRs (`gh pr list` per repo, TTL-cached),
+live agent runs (each row = the pane's actual task from its title + scratch
+codename + a busy marker), momentum/next-step + recently-merged (initiative-scan),
+and health (bar-status caches). Launched from i3 as a floating alacritty
+(`class="float"`). It replaced the old fuzzyclaw-summary `tmux-initiatives.sh`
+Alt+i HUD. Pairs with the monitor popup: M-m shows *what's happening right now*
+(live capture-pane); agent-ops shows *what each session is working on*.
 
 ### Task Management System
 | Component | File | Purpose |

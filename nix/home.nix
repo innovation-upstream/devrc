@@ -247,10 +247,6 @@ in
     source = ../scripts/tmux-claude-counters.sh;
     executable = true;
   };
-  home.file.".config/tmux/initiatives.sh" = {
-    source = ../scripts/tmux-initiatives.sh;
-    executable = true;
-  };
   # agent-ops "mission control" popup (prefix+A). Renders over the existing
   # deterministic sources (bar-status cache + a live tmux/process scan + a
   # TTL-cached initiative-scan) — see scripts/agent-ops.

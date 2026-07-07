@@ -132,6 +132,41 @@ def test_classify_detects_via_foreground_command_when_tree_missing():
     assert sessions[0]["busy"] is None      # no proc info → unknown, not a crash
 
 
+def test_classify_task_and_busy_from_pane_title():
+    # busy is derived from the pane_title's leading glyph, task from the rest.
+    panes = [
+        {"pane_id": "%i", "pane_pid": 7, "session": "sa", "window_index": "1",
+         "window_name": "devrc", "path": "/r1", "command": "claude",
+         "title": "✳ Investigate remaining 500 errors"},        # sparkle → idle
+        {"pane_id": "%b", "pane_pid": 8, "session": "sb", "window_index": "1",
+         "window_name": "dp", "path": "/r2", "command": "claude",
+         "title": "⠐ Trace and validate external app listing"},  # braille → busy
+        {"pane_id": "%e", "pane_pid": 9, "session": "sc", "window_index": "1",
+         "window_name": "dp", "path": "/r3", "command": "claude",
+         "title": ""},                                            # empty → fallback
+    ]
+    sessions = ao.classify_claude_sessions(panes, {}, root_resolver=lambda p: p)
+    by_pane = {s["pane_id"]: s for s in sessions}
+    assert by_pane["%i"]["task"] == "Investigate remaining 500 errors"
+    assert by_pane["%i"]["busy"] is False        # ✳ sparkle = idle/awaiting
+    assert by_pane["%b"]["task"] == "Trace and validate external app listing"
+    assert by_pane["%b"]["busy"] is True         # braille spinner = running
+    assert by_pane["%e"]["task"] == ""           # empty title → caller falls back
+    assert by_pane["%e"]["busy"] is None         # no glyph, no proc info → unknown
+
+
+def test_strip_status_glyph_and_busy_from_title():
+    assert ao.strip_status_glyph("✳ Foo bar") == "Foo bar"
+    assert ao.strip_status_glyph("⠐ Foo bar") == "Foo bar"
+    assert ao.strip_status_glyph("nixos") == "nixos"      # no glyph → unchanged
+    assert ao.strip_status_glyph("") == ""
+    assert ao.strip_status_glyph(None) == ""
+    assert ao.busy_from_title("⠂ working") is True        # braille spinner
+    assert ao.busy_from_title("✳ idle") is False          # sparkle
+    assert ao.busy_from_title("plain title") is None      # no glyph
+    assert ao.busy_from_title("") is None
+
+
 def test_classify_empty_and_ordering():
     assert ao.classify_claude_sessions([], {}) == []
     # ordering: sort by (repo, session, window_index)
@@ -200,18 +235,21 @@ def test_render_blocked_failsafe_missing():
 # ---------------------------------------------------------------------------
 # render_active_runs
 # ---------------------------------------------------------------------------
-def test_render_active_runs_rows_and_glyph():
+def test_render_active_runs_rows_show_task_and_glyph():
     sessions = [
         {"pane_id": "%0", "repo": "devrc", "session": "main", "window_index": "1",
-         "window_name": "devrc", "busy": True, "age_secs": 3600},
-        {"pane_id": "%1", "repo": "homelab", "session": "s", "window_index": "2",
-         "window_name": "h", "busy": False, "age_secs": 90},
+         "window_name": "devrc", "task": "Investigate remaining 500 errors",
+         "busy": True, "age_secs": 3600},
+        {"pane_id": "%1", "repo": "homelab", "session": "scratch2", "window_index": "2",
+         "window_name": "h", "task": "Wire up the exporter", "busy": False,
+         "age_secs": 90},
     ]
-    out = plain(ao.render_active_runs(sessions))
+    out = plain(ao.render_active_runs(sessions, {"scratch2": "Gold"}))
     body = "\n".join(out)
     assert "2 live Claude session(s)" in body
-    assert "devrc" in body and "main:1" in body and "1h" in body
-    assert "homelab" in body and "s:2" in body
+    # the ACTUAL task (from pane_title) is shown, plus the codename, plus age
+    assert "Investigate remaining 500 errors" in body and "1h" in body
+    assert "Gold" in body and "Wire up the exporter" in body
 
 
 def test_render_active_runs_empty():
@@ -222,26 +260,29 @@ def test_render_active_runs_empty():
 def test_render_active_runs_maps_scratch_codenames():
     sessions = [
         {"pane_id": "%0", "repo": "devrc", "session": "scratch10", "window_index": "1",
-         "window_name": "w", "busy": True, "age_secs": 60},
+         "window_name": "w", "task": "Ship the drafter", "busy": True, "age_secs": 60},
         {"pane_id": "%1", "repo": "homelab", "session": "8", "window_index": "2",
-         "window_name": "w", "busy": False, "age_secs": 60},
+         "window_name": "w", "task": "Audit the cluster", "busy": False, "age_secs": 60},
     ]
     codenames = {"scratch10": "Nickel", "scratch2": "Gold"}
     out = plain(ao.render_active_runs(sessions, codenames))
     body = "\n".join(out)
-    assert "Nickel:1" in body          # scratch10 → codename
-    assert "scratch10" not in body     # raw name gone
-    assert "8:2" in body               # numbered session passes through untouched
+    assert "Nickel" in body             # scratch10 → codename label
+    assert "scratch10" not in body      # raw name gone
+    assert "Ship the drafter" in body   # task text rendered
+    assert "Audit the cluster" in body  # numbered session (8) still renders its task
 
 
-def test_render_active_runs_empty_codenames_fallback():
+def test_render_active_runs_task_falls_back_to_window_name():
+    # a bare-shell / empty-title claude pane → task '' → falls back to window name
     sessions = [{"pane_id": "%0", "repo": "devrc", "session": "scratch10",
-                 "window_index": "1", "window_name": "w", "busy": None,
-                 "age_secs": 1}]
-    # empty map / None both fall back to the raw session name (never crash)
+                 "window_index": "1", "window_name": "devrc", "task": "",
+                 "busy": None, "age_secs": 1}]
+    # empty codename map / None both fall back to the raw session label (never crash)
     for cn in ({}, None):
         body = "\n".join(plain(ao.render_active_runs(sessions, cn)))
-        assert "scratch10:1" in body
+        assert "scratch10" in body      # raw session label fallback
+        assert "devrc" in body          # window-name task fallback
 
 
 # ---------------------------------------------------------------------------
@@ -333,17 +374,90 @@ def test_viewport_degenerate_avail():
 # ---------------------------------------------------------------------------
 # render_prs / render_momentum / render_done
 # ---------------------------------------------------------------------------
+def _prs_cache():
+    """Mock ~/.cache/agent-ops/open-prs.json — multiple repos, a draft, an empty
+    repo (no PRs), all sourced from `gh pr list --json`."""
+    return {"generated": 123, "repos": {
+        "/home/zach/workspace/devrc": [
+            {"number": 72, "title": "add editorconfig", "headRefName": "add-editorconfig",
+             "isDraft": False, "reviewDecision": "", "createdAt": "2026-07-05T23:00:00Z"},
+            {"number": 71, "title": "shellcheckrc", "headRefName": "feat/shellcheckrc",
+             "isDraft": True, "reviewDecision": "", "createdAt": "2026-07-05T22:00:00Z"},
+        ],
+        "/home/zach/workspace/homelab-talos": [
+            {"number": 10, "title": "bump image", "headRefName": "bump",
+             "isDraft": False, "reviewDecision": "APPROVED", "createdAt": "2026-07-06T00:00:00Z"},
+        ],
+        "/home/zach/workspace/empty-repo": [],   # a repo with no open PRs
+    }}
+
+
+def test_flatten_open_prs_rows_sorted_newest_first():
+    rows = ao.flatten_open_prs(_prs_cache())
+    assert len(rows) == 3                       # empty repo contributes nothing
+    # sorted by createdAt desc: homelab #10 (07-06) precedes the devrc PRs (07-05)
+    assert rows[0]["repo"] == "homelab-talos" and rows[0]["number"] == 10
+    assert rows[1]["number"] == 72 and rows[2]["number"] == 71
+    assert rows[2]["draft"] is True and rows[2]["branch"] == "feat/shellcheckrc"
+    assert rows[1]["repo"] == "devrc"
+
+
+def test_flatten_open_prs_failsafe():
+    assert ao.flatten_open_prs(None) == []          # no cache file
+    assert ao.flatten_open_prs({}) == []
+    assert ao.flatten_open_prs({"repos": "nope"}) == []
+    # junk PR elements dropped, repo basename derived
+    rows = ao.flatten_open_prs({"repos": {"/a/b": ["x", {"number": 1, "title": "ok"}]}})
+    assert len(rows) == 1 and rows[0]["repo"] == "b" and rows[0]["title"] == "ok"
+
+
+def test_pr_repo_dirs_reuses_scan_keys_with_fallback():
+    scan = {"by_repo": {"/w/devrc": [], "/w/homelab": []}}
+    assert set(ao.pr_repo_dirs(scan)) == {"/w/devrc", "/w/homelab"}
+    assert ao.pr_repo_dirs(None, fallback=["/x"]) == ["/x"]
+    assert ao.pr_repo_dirs({}) == [ao.DEVRC_DIR]        # no scan cache → devrc only
+
+
+def test_refresh_prs_cache_skips_gh_error_repo(tmp_path, monkeypatch):
+    import json as _json
+    monkeypatch.setattr(ao, "CACHE_DIR", str(tmp_path))
+    monkeypatch.setattr(ao, "PRS_CACHE", str(tmp_path / "open-prs.json"))
+    monkeypatch.setattr(ao, "PRS_LOCK", str(tmp_path / "prs.lock"))
+    monkeypatch.setattr(ao, "ISCAN_CACHE", str(tmp_path / "iscan.json"))
+    (tmp_path / "iscan.json").write_text(
+        _json.dumps({"by_repo": {"/w/devrc": [], "/w/broken": []}}))
+    (tmp_path / "prs.lock").write_text("")   # a live refresh lock, cleared on exit
+
+    def fake_fetch(repo, timeout=ao.PRS_GH_TIMEOUT):
+        if repo.endswith("broken"):
+            return None                      # gh errored on this repo
+        return [{"number": 9, "title": "t", "headRefName": "b",
+                 "isDraft": False, "createdAt": "z"}]
+
+    monkeypatch.setattr(ao, "fetch_repo_open_prs", fake_fetch)
+    ao.refresh_prs_cache(now=1000)
+    cache = ao.read_json(str(tmp_path / "open-prs.json"))
+    assert set(cache["repos"].keys()) == {"/w/devrc"}   # broken repo skipped
+    rows = ao.flatten_open_prs(cache)
+    assert len(rows) == 1 and rows[0]["repo"] == "devrc"
+    assert not os.path.exists(str(tmp_path / "prs.lock"))  # lock always dropped
+
+
 def test_render_prs_lists_open_prs():
-    items = ao.flatten_initiatives(_scan())
-    out = plain(ao.render_prs(items, "updated 1m ago"))
+    rows = ao.flatten_open_prs(_prs_cache())
+    out = plain(ao.render_prs(rows, "updated 1m ago"))
     body = "\n".join(out)
-    assert "#70" in body and "restore plan override" in body
+    assert "devrc #72" in body and "add editorconfig" in body
+    assert "add-editorconfig" in body        # branch shown
+    assert "draft" in body                   # #71 flagged as draft
     assert "updated 1m ago" in body
 
 
-def test_render_prs_empty():
-    out = plain(ao.render_prs([]))
-    assert any("no open PRs" in ln for ln in out)
+def test_render_prs_empty_and_missing_cache():
+    assert any("no open PRs" in ln for ln in plain(ao.render_prs([])))
+    # a missing cache file (read_json → None) degrades to the same empty section
+    assert any("no open PRs" in ln
+               for ln in plain(ao.render_prs(ao.flatten_open_prs(None))))
 
 
 def test_render_momentum_orders_active_first_and_shows_next_step():
@@ -413,6 +527,7 @@ def test_build_frame_failsafe(monkeypatch):
     monkeypatch.setattr(ao, "build_proc_index", lambda: {})
     monkeypatch.setattr(ao, "own_pid_chain", lambda: set())
     monkeypatch.setattr(ao, "maybe_refresh_initiatives", lambda *a, **k: None)
+    monkeypatch.setattr(ao, "maybe_refresh_prs", lambda *a, **k: None)
     monkeypatch.setattr(ao, "enrich_clawgate_titles", lambda *a, **k: [])
     frame = ao.build_frame(100)
     body = plain(frame)

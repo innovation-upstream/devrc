@@ -4,7 +4,7 @@
 The gap this fills: Zach runs many multi-session work threads ("initiatives") —
 "App Blocks soft-launch", "sysRedis HA", "mail-automation", "dp-prod 500-floor".
 Each is anchored by a handoff doc (`claudedocs/handoff-<slug>.md`) and spans many
-Claude Code sessions over days. The existing `tmux-initiatives.sh` (Alt+i) shows
+Claude Code sessions over days. The live tmux `agent-ops` dashboard ($mod+i) shows
 only LIVE tmux sessions — ephemeral, lost on reboot. This is the durable analogue:
 a re-runnable, deterministic, read-only report of every initiative + its momentum +
 its next step, so you can stop searching for your own in-flight work.
