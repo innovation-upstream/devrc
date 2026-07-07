@@ -174,6 +174,18 @@ let
       { button = "left"; cmd = "xdg-open http://192.168.50.250:30302"; }
     ];
   };
+  # DND indicator (workbench only): a small muted glyph that appears ONLY while
+  # dunst is paused (quiet mode), hidden otherwise — same calm hide-at-zero idea
+  # as the count blocks. Reads `dunstctl is-paused` (instant, local). signal 15
+  # is sent by the `$mod+Shift+n` toggle for instant feedback; the short interval
+  # is a backstop.
+  dndBlock = {
+    block = "custom";
+    command = "${scriptsDir}/i3status-dnd";
+    json = true;
+    interval = 5;
+    signal = 15;
+  };
   timeBlock = {
     block = "time";
     interval = 10;
@@ -200,7 +212,7 @@ let
     ++ lib.optional (!isLaptop) gpuBlock
     ++ lib.optional isLaptop batteryBlock
     ++ [ soundBlock ]
-    ++ lib.optionals (!isLaptop) [ alertsBlock civitaiBlock mailBlock clawgateBlock ]
+    ++ lib.optionals (!isLaptop) [ alertsBlock civitaiBlock mailBlock clawgateBlock dndBlock ]
     ++ [ vpnBlock timeBlock ]
     ++ lib.optional (!isLaptop) rigcontrolBlock;
 in
@@ -275,6 +287,10 @@ lib.mkIf isNixOS {
     source = ../scripts/i3status-civitai;
     executable = true;
   };
+  home.file.".config/i3status-rust/scripts/i3status-dnd" = lib.mkIf (!isLaptop) {
+    source = ../scripts/i3status-dnd;
+    executable = true;
+  };
 
   # bar-status poller — WORKBENCH ONLY (!isLaptop). Every ~45s it queries clawgate
   # (pending Tasks), the homelab Postgres (open mail_actions), and Alertmanager
@@ -303,7 +319,12 @@ lib.mkIf isNixOS {
       # TimeoutStartSec=infinity and OnUnitActiveSec only re-fires once inactive.
       TimeoutStartSec = 90;
       Environment = [
-        "PATH=${lib.makeBinPath [ pollPyEnv pkgs.kubectl pkgs.procps pkgs.coreutils ]}"
+        # systemd -> systemd-run, which launches the edge-toast as a DETACHED
+        # transient --user service so a clickable dunstify outlives this oneshot's
+        # cgroup teardown. procps -> pgrep (borrow DISPLAY/DBUS from i3 for the
+        # toast). bash/dunstify/xdg-open resolve from the user-manager PATH inside
+        # that transient unit, so they need not be on the poller's own PATH.
+        "PATH=${lib.makeBinPath [ pollPyEnv pkgs.kubectl pkgs.procps pkgs.coreutils pkgs.systemd ]}"
         "KUBECONFIG=%h/workspace/homelab-talos/homelab-kubeconfig"
         # civitai (CLIENT) prod cluster kubeconfig — the civitai alerts source
         # port-forwards through THIS, never the homelab KUBECONFIG above.

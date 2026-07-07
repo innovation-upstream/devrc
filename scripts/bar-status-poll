@@ -161,6 +161,174 @@ def stale(reason: str, err=None) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Edge-triggered desktop toasts (the calm-bar complement)
+# ---------------------------------------------------------------------------
+# The count blocks show STEADY STATE silently; a toast fires exactly ONCE on the
+# RISING EDGE (something NEW crosses the line), then stays quiet until it drops
+# back and crosses again. This poller is a systemd *oneshot* — nothing survives
+# in memory between runs — so the per-source latch is persisted to a sidecar file
+# (~/.cache/bar-status/<src>.toast-state). Thresholds match the block's
+# --red-above in graphical.nix (homelab 30 / civitai 340), env-tunable so the two
+# never drift. clawgate/mail use threshold 0 (the 0 -> >0 rule). Complements
+# clawgate's mobile push: push = away from desk, toast = at the desk.
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.environ.get(name, str(default)))
+    except (TypeError, ValueError):
+        return default
+
+
+def edge_decision(latched: bool, count: int, threshold: int):
+    """Pure rising-edge latch → (should_toast, new_latched).
+
+    Fires once when `count` crosses strictly ABOVE `threshold` while the latch is
+    clear; stays quiet while it remains above (already latched — never re-toasts
+    steady state); clears the latch once `count` falls back to/below `threshold`
+    so the NEXT crossing can re-fire. threshold=0 gives the 0 -> >0 rule.
+    """
+    if count > threshold:
+        return (not latched), True
+    return False, False
+
+
+def _latch_path(name: str) -> str:
+    return os.path.join(cache_dir(), name + ".toast-state")
+
+
+def read_latch(name: str) -> bool:
+    """Persisted per-source latch; any error (missing/corrupt) -> False."""
+    try:
+        with open(_latch_path(name)) as f:
+            return bool(json.load(f).get("latched"))
+    except Exception:
+        return False
+
+
+def write_latch(name: str, latched: bool) -> None:
+    """Persist the latch (best-effort, atomic); never raises."""
+    try:
+        d = cache_dir()
+        os.makedirs(d, exist_ok=True)
+        path = _latch_path(name)
+        tmp = path + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump({"latched": bool(latched)}, f)
+        os.replace(tmp, path)
+    except Exception:
+        pass
+
+
+def _borrow_desktop_env(env: dict) -> dict:
+    """Fill DISPLAY/DBUS_SESSION_BUS_ADDRESS/XAUTHORITY from a running i3's
+    /proc/<pid>/environ when this (systemd) context lacks them — the same trick
+    scripts/cpu-monitor.sh uses so notifications reach the desktop from a headless
+    service context. Best-effort; returns the (possibly augmented) env dict."""
+    need = [k for k in ("DISPLAY", "DBUS_SESSION_BUS_ADDRESS", "XAUTHORITY")
+            if not env.get(k)]
+    if not need:
+        return env
+    try:
+        r = subprocess.run(["pgrep", "-u", str(os.getuid()), "-x", "i3"],
+                           stdout=subprocess.PIPE, timeout=3)
+        pids = r.stdout.decode().split()
+        if not pids:
+            return env
+        with open("/proc/%s/environ" % pids[0], "rb") as f:
+            raw = f.read().decode("utf-8", "replace")
+        for kv in raw.split("\0"):
+            k, sep, v = kv.partition("=")
+            if sep and k in need and v:
+                env[k] = v
+    except Exception:
+        pass
+    return env
+
+
+def fire_toast(urgency, summary, body, action_cmd=None, runner=None) -> bool:
+    """Best-effort edge toast. Launches dunstify inside a DETACHED transient
+    --user service (systemd-run) so it OUTLIVES this oneshot poller's cgroup
+    teardown — systemd kills the poller's cgroup on exit, and a plain child
+    dunstify (which blocks on -A waiting for the click) would die with it. With
+    action_cmd the toast carries a clickable 'Open' action that runs it (verified:
+    dunstctl action / middle-click -> the action key -> the command). Reaches the
+    desktop over the session bus, borrowing DISPLAY/DBUS from i3 if this context
+    lacks them. Returns True if dispatched, False if skipped (no session bus, e.g.
+    headless/laptop). FAIL-SAFE: never raises, never slows the poll."""
+    try:
+        env = _borrow_desktop_env(dict(os.environ))
+        if not env.get("DBUS_SESSION_BUS_ADDRESS"):
+            return False  # no reachable session bus -> silently skip
+        script = 'a=$(dunstify -a bar-status -u "$1"%s "$2" "$3")' % (
+            " -A open,Open" if action_cmd else "")
+        if action_cmd:
+            script += '; [ "$a" = open ] && sh -c "$4"'
+        argv = ["systemd-run", "--user", "--collect", "--quiet"]
+        for k in ("DISPLAY", "DBUS_SESSION_BUS_ADDRESS", "XAUTHORITY"):
+            if env.get(k):
+                argv.append("--setenv=%s=%s" % (k, env[k]))
+        argv += ["bash", "-c", script, "bar-status", urgency, summary, body]
+        if action_cmd:
+            argv.append(action_cmd)
+        run = runner or (lambda a: subprocess.run(
+            a, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=6))
+        run(argv)
+        return True
+    except Exception:
+        return False
+
+
+def _toast_specs() -> dict:
+    """Per-source rising-edge toast config, resolved at call time (thresholds are
+    env-tunable and MUST match the block's --red-above in graphical.nix). The
+    action opens the SAME target as the block's left-click, so a middle-click on
+    the toast is a shortcut to the dashboard/UI."""
+    return {
+        "alerts": {"threshold": _env_int("ALERTS_TOAST_ABOVE", 30),
+                   "urgency": "normal", "summary": "⚠ Homelab alerts firing",
+                   "action": "xdg-open http://grafana.homelab.lan"},
+        "civitai": {"threshold": _env_int("CIVITAI_TOAST_ABOVE", 340),
+                    "urgency": "normal", "summary": "⚠ civitai prod alerts firing",
+                    "action": "xdg-open https://grafana-new.civitai.com"},
+        "clawgate": {"threshold": 0, "urgency": "normal",
+                     "summary": "clawgate: task awaiting",
+                     "action": "xdg-open http://192.168.50.250:30302"},
+        "mail": {"threshold": 0, "urgency": "low",
+                 "summary": "New mail action", "action": None},
+    }
+
+
+def evaluate_edge_toast(name, payload, spec, fire=None,
+                        read=None, write=None):
+    """Rising-edge gate for one source: read the persisted latch, decide via
+    edge_decision, fire a toast on the rising edge ONLY, persist the new latch.
+    SKIPS (leaving the latch untouched) for stale/error/malformed payloads so a
+    source blackout never resets the latch or fires a spurious toast. Returns
+    (should_toast, new_latched), or None when skipped. Pure/offline + fail-safe:
+    the decision is deterministic and the toast side-effect is injectable, so a
+    dunstify failure can never crash the poll."""
+    fire = fire or fire_toast
+    read = read or read_latch
+    write = write or write_latch
+    if not isinstance(payload, dict):
+        return None
+    if payload.get("state") == "stale" or payload.get("error"):
+        return None
+    try:
+        count = int(payload.get("count", 0))
+    except (TypeError, ValueError):
+        return None
+    latched = read(name)
+    should, new = edge_decision(latched, count, spec["threshold"])
+    if new != latched:
+        write(name, new)
+    if should:
+        body = str(payload.get("detail") or ("%d" % count))
+        fire(spec["urgency"], spec["summary"], body,
+             action_cmd=spec.get("action"))
+    return should, new
+
+
+# ---------------------------------------------------------------------------
 # Low-level helpers
 # ---------------------------------------------------------------------------
 def _free_port() -> int:
@@ -364,11 +532,16 @@ def main(argv=None) -> int:
                 run_source("civitai", lambda: parse_alerts(json.load(f)))
         return 0
 
-    # Live poll: each source is independent + fail-safe.
-    run_source("clawgate", fetch_clawgate)
-    run_source("mail", fetch_mail)
-    run_source("alerts", fetch_alerts)
-    run_source("civitai", fetch_civitai)
+    # Live poll: each source is independent + fail-safe. After writing each
+    # source's status the poller evaluates a RISING-EDGE toast (fires once when a
+    # source crosses its baseline; steady state stays silent). The toast step is
+    # wrapped so a desktop-notify failure can never break or slow the poll.
+    specs = _toast_specs()
+    for name, fn in (("clawgate", fetch_clawgate), ("mail", fetch_mail),
+                     ("alerts", fetch_alerts), ("civitai", fetch_civitai)):
+        payload = run_source(name, fn)
+        with contextlib.suppress(Exception):
+            evaluate_edge_toast(name, payload, specs[name])
     return 0
 
 
