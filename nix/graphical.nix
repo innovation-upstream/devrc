@@ -206,6 +206,18 @@ let
       { button = "left"; cmd = "setsid -f ${home}/workspace/devrc/scripts/rig-control.sh gui"; }
     ];
   };
+  # agent-ops: workbench only. Static dashboard glyph (plain-text render, like
+  # rigcontrol). A bar click can't cleanly spawn a tmux display-popup, so the
+  # left-click opens the mission-control dashboard in a FLOATING alacritty (the
+  # `class="float"` i3 rule floats it), sized to fit the ~6-section frame.
+  agentOpsBlock = {
+    block = "custom";
+    command = "${scriptsDir}/i3blocks-agent-ops";
+    interval = "once";
+    click = [
+      { button = "left"; cmd = "alacritty --class float,float -o window.dimensions.columns=130 -o window.dimensions.lines=45 -e ${home}/.config/tmux/agent-ops"; }
+    ];
+  };
 
   blocks =
     [ memoryBlock diskBlock netBlock cpuBlock temperatureBlock ]
@@ -214,7 +226,7 @@ let
     ++ [ soundBlock ]
     ++ lib.optionals (!isLaptop) [ alertsBlock civitaiBlock mailBlock clawgateBlock dndBlock ]
     ++ [ vpnBlock timeBlock ]
-    ++ lib.optional (!isLaptop) rigcontrolBlock;
+    ++ lib.optionals (!isLaptop) [ agentOpsBlock rigcontrolBlock ];
 in
 lib.mkIf isNixOS {
   programs.i3status-rust = {
@@ -261,6 +273,10 @@ lib.mkIf isNixOS {
   };
   home.file.".config/i3status-rust/scripts/i3blocks-rigcontrol" = {
     source = ../scripts/i3blocks-rigcontrol;
+    executable = true;
+  };
+  home.file.".config/i3status-rust/scripts/i3blocks-agent-ops" = {
+    source = ../scripts/i3blocks-agent-ops;
     executable = true;
   };
 
