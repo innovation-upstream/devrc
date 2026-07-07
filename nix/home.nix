@@ -362,6 +362,10 @@ in
         "PATH=${lib.makeBinPath [ pkgs.coreutils pkgs.gawk pkgs.procps pkgs.gnugrep pkgs.libnotify ]}"
         # This laptop runs hot at idle (cooling needs attention); warn early.
         "CPU_MON_TEMP_THRESHOLD=88"
+        # Never alert on these (games / expected heavy apps): case-insensitive
+        # substring match on the busy process's command. Space-separated — add
+        # more here (e.g. "anno steam wine proton") as needed.
+        "CPU_MON_IGNORE=anno"
       ];
       ExecStart = "${pkgs.bash}/bin/bash %h/.config/cpu-monitor/cpu-monitor.sh";
       Restart = "always";
