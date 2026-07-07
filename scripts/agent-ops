@@ -85,6 +85,15 @@ DEVRC_DIR = os.environ.get("DEVRC_DIR") or os.path.join(HOME, "workspace", "devr
 ISCAN_SCRIPT = os.path.join(DEVRC_DIR, "scripts", "session-analysis", "initiative-scan.py")
 CLAWGATE_ENV = os.path.join(HOME, ".claude", "clawgate.env")
 
+# Scratchpad codename table — THE single source of truth for session<->codename
+# (scripts/tmux-scratch-slots.sh). Mirror how the bash/py consumers resolve it:
+# prefer the DEPLOYED copy under ~/.config/tmux/ (what runs on a live host), fall
+# back to the in-repo copy. A SCRATCH_SLOTS entry is "scratch4:V:#83a598:Vapor"
+# (session:key:hex-color:codename), same regex as initiative-scan.load_scratch_codenames.
+SCRATCH_SLOTS_DEPLOYED = os.path.join(HOME, ".config", "tmux", "scratch-slots.sh")
+SCRATCH_SLOTS_REPO = os.path.join(DEVRC_DIR, "scripts", "tmux-scratch-slots.sh")
+_SLOT_RE = re.compile(r'"([^":]+):([^":]+):(#[0-9a-fA-F]{6}):([^":]+)"')
+
 REFRESH = float(os.environ.get("AGENT_OPS_REFRESH", "4"))
 CLAUDE_RE = re.compile(r"claude", re.IGNORECASE)
 # MCP servers & tool subprocesses claude always keeps as children — not a busy signal.
@@ -352,6 +361,37 @@ def flatten_initiatives(scan) -> list:
     return out
 
 
+def load_scratch_codenames(paths=None) -> dict:
+    """Parse `{session: codename}` from the SCRATCH_SLOTS table (single source of
+    truth in tmux-scratch-slots.sh, deployed to ~/.config/tmux/scratch-slots.sh).
+
+    Tries each path in order (deployed first, then in-repo) and returns the first
+    non-empty mapping, e.g. {"scratch4": "Vapor", "scratch10": "Nickel", …}. Empty
+    dict on any failure (missing/unreadable/empty) so callers degrade to raw
+    session names — codenames are a display nicety, never a hard dependency.
+    """
+    for p in (paths if paths is not None else
+              (SCRATCH_SLOTS_DEPLOYED, SCRATCH_SLOTS_REPO)):
+        try:
+            with open(p, "r") as fh:
+                text = fh.read()
+        except OSError:
+            continue
+        mapping = {session: name
+                   for session, _key, _color, name in _SLOT_RE.findall(text)}
+        if mapping:
+            return mapping
+    return {}
+
+
+def _session_label(session: str, codenames: dict | None) -> str:
+    """Map a tmux session name to its scratchpad codename (`scratch10` → `Nickel`).
+
+    Non-scratch / numbered sessions (`8`, `2`) have no codename → returned as-is.
+    Empty / missing map → raw name. Never raises."""
+    return (codenames or {}).get(session, session)
+
+
 # ---------------------------------------------------------------------------
 # Formatting helpers
 # ---------------------------------------------------------------------------
@@ -417,7 +457,7 @@ def render_blocked(clawgate, mail, titles=None) -> list:
     return lines
 
 
-def render_active_runs(sessions) -> list:
+def render_active_runs(sessions, codenames=None) -> list:
     lines = [_header("Active agent runs", AQUA,
                      "%d live Claude session(s) in tmux" % len(sessions))]
     if not sessions:
@@ -430,7 +470,7 @@ def render_active_runs(sessions) -> list:
             glyph, gcol = "●", BLUE
         else:
             glyph, gcol = "●", DIM
-        loc = "%s:%s" % (s["session"], s["window_index"])
+        loc = "%s:%s" % (_session_label(s["session"], codenames), s["window_index"])
         age = rel_age(s["age_secs"]) if s["age_secs"] is not None else ""
         lines.append("   %s  %s  %s  %s" % (
             paint(glyph, gcol),
@@ -571,8 +611,13 @@ def maybe_refresh_initiatives(now=None):
 # ===========================================================================
 # Frame assembly + interactive loop
 # ===========================================================================
-def build_frame(width: int) -> str:
-    """Assemble one full-screen frame from all sources. Pure of terminal I/O."""
+def build_body_lines(width: int) -> list:
+    """Assemble the scrollable BODY (all sections) as a list of ANSI lines.
+
+    Pure of terminal I/O and of the fixed header/footer chrome — the interactive
+    loop slices this through `viewport`, while `build_frame` wraps it whole for
+    --once / non-tty dumps.
+    """
     clawgate = read_json(os.path.join(BAR_STATUS_DIR, "clawgate.json"))
     mail = read_json(os.path.join(BAR_STATUS_DIR, "mail.json"))
     alerts = read_json(os.path.join(BAR_STATUS_DIR, "alerts.json"))
@@ -585,6 +630,7 @@ def build_frame(width: int) -> str:
     panes = parse_panes(list_tmux_panes_raw())
     proc_index = build_proc_index()
     sessions = classify_claude_sessions(panes, proc_index, own_pids=own_pid_chain())
+    codenames = load_scratch_codenames()
 
     maybe_refresh_initiatives()
     scan = read_json(ISCAN_CACHE)
@@ -593,22 +639,55 @@ def build_frame(width: int) -> str:
 
     blocks = [
         render_blocked(clawgate, mail, titles),
-        render_active_runs(sessions),
+        render_active_runs(sessions, codenames),
         render_prs(initiatives, fresh),
         render_momentum(initiatives, fresh),
         render_health(alerts, civitai),
         render_done(initiatives, fresh),
     ]
     lines = []
-    title = paint(" agent-ops ", YELLOW, bold=True)
-    clock = paint(time.strftime("%H:%M:%S"), DIMMER)
-    lines.append("%s  %s" % (title, clock))
-    lines.append("")
     for block in blocks:
         lines.extend(block)
         lines.append("")
+    return lines
+
+
+def _frame_title() -> str:
+    return "%s  %s" % (paint(" agent-ops ", YELLOW, bold=True),
+                       paint(time.strftime("%H:%M:%S"), DIMMER))
+
+
+def build_frame(width: int) -> str:
+    """Full unscrolled frame (title + every section + footer) as one string.
+
+    Used by --once and the non-tty path where the whole thing is dumped for
+    capture-pane / piping. The interactive loop composes its own scrolled frame.
+    """
+    lines = [_frame_title(), ""]
+    lines.extend(build_body_lines(width))
     lines.append(paint("[q/Esc: close · refresh %ss]" % int(REFRESH), DIMMER))
     return "\n".join(lines)
+
+
+def viewport(body: list, avail: int, offset: int):
+    """PURE scroll-slice: (body, rows-available, desired-offset) → (visible,
+    clamped_offset, indicator).
+
+    `avail` is how many body rows fit between the fixed header and footer.
+    `offset` is clamped to [0, len(body) - avail]; `indicator` is '' when the
+    whole body fits, else a '[lo–hi/total ↓/↑]' scroll hint.
+    """
+    if avail < 1:
+        avail = 1
+    n = len(body)
+    max_off = max(0, n - avail)
+    off = max(0, min(int(offset), max_off))
+    visible = body[off:off + avail]
+    if n <= avail:
+        return visible, off, ""
+    lo, hi = off + 1, min(off + avail, n)
+    arrows = ("↑" if off > 0 else " ") + ("↓" if off < max_off else " ")
+    return visible, off, "[%d–%d/%d %s]" % (lo, hi, n, arrows)
 
 
 def _run_interactive():
@@ -624,22 +703,77 @@ def _run_interactive():
     except Exception:
         old = None
 
+    keyhint = ("[q close · j/k line · space/b page · ^d/^u half · g/G top/bot"
+               " · refresh %ss]" % int(REFRESH))
+    offset = 0
+    avail = 1
+    # Decouple the (expensive: /proc scan + tmux query) data fetch from input:
+    # rebuild the body only on the ~REFRESH timer, and let keypresses re-slice the
+    # CACHED body so scrolling is instant instead of paying a full re-fetch per key.
+    body = None
+    last_fetch = 0.0
     sys.stdout.write("\033[?25l")  # hide cursor
     try:
         while True:
             size = shutil.get_terminal_size((100, 40))
-            frame = build_frame(size.columns)
+            now = time.time()
+            if body is None or (now - last_fetch) >= REFRESH:
+                body = build_body_lines(size.columns)
+                last_fetch = now
+            header = [_frame_title(), ""]
+            # one footer row; reserve header + footer from the height.
+            avail = max(1, size.lines - len(header) - 1)
+            visible, offset, indicator = viewport(body, avail, offset)
+            footer = paint(keyhint, DIMMER)
+            if indicator:
+                footer += "  " + paint(indicator, YELLOW)
+            frame = "\n".join(header + visible + [footer])
             sys.stdout.write("\033[H\033[2J" + frame)
             sys.stdout.flush()
-            r, _, _ = select.select([sys.stdin], [], [], REFRESH)
-            if r:
-                ch = sys.stdin.read(1)
-                if ch in ("q", "Q"):
-                    break
-                if ch == "\x1b":  # Esc — swallow any CSI trailer, then quit
-                    r2, _, _ = select.select([sys.stdin], [], [], 0.05)
-                    if not r2:
-                        break
+
+            # Wake on input, else when the next refresh is due (keeps the clock +
+            # data live without re-fetching on every keypress).
+            timeout = max(0.05, REFRESH - (time.time() - last_fetch))
+            r, _, _ = select.select([sys.stdin], [], [], timeout)
+            if not r:
+                continue  # refresh due → loop rebuilds body; offset preserved
+            ch = sys.stdin.read(1)
+            half = max(1, avail // 2)
+            if ch in ("q", "Q"):
+                break
+            elif ch == "j":
+                offset += 1
+            elif ch == "k":
+                offset -= 1
+            elif ch == "g":
+                offset = 0
+            elif ch == "G":
+                offset = 10 ** 9  # viewport clamps to bottom
+            elif ch == " ":
+                offset += avail
+            elif ch == "b":
+                offset -= avail
+            elif ch == "\x04":       # Ctrl-d — half page down
+                offset += half
+            elif ch == "\x15":       # Ctrl-u — half page up
+                offset -= half
+            elif ch == "\x1b":       # Esc / arrow keys / PgUp / PgDn
+                r2, _, _ = select.select([sys.stdin], [], [], 0.05)
+                if not r2:
+                    break            # bare Esc → quit
+                if sys.stdin.read(1) != "[":
+                    continue
+                code = sys.stdin.read(1)
+                if code == "A":
+                    offset -= 1                # up arrow
+                elif code == "B":
+                    offset += 1                # down arrow
+                elif code == "5":              # PgUp  (ESC [ 5 ~)
+                    select.select([sys.stdin], [], [], 0.05) and sys.stdin.read(1)
+                    offset -= avail
+                elif code == "6":              # PgDn  (ESC [ 6 ~)
+                    select.select([sys.stdin], [], [], 0.05) and sys.stdin.read(1)
+                    offset += avail
     except KeyboardInterrupt:
         pass
     finally:

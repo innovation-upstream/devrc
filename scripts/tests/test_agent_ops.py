@@ -219,6 +219,117 @@ def test_render_active_runs_empty():
     assert any("no live Claude sessions" in ln for ln in out)
 
 
+def test_render_active_runs_maps_scratch_codenames():
+    sessions = [
+        {"pane_id": "%0", "repo": "devrc", "session": "scratch10", "window_index": "1",
+         "window_name": "w", "busy": True, "age_secs": 60},
+        {"pane_id": "%1", "repo": "homelab", "session": "8", "window_index": "2",
+         "window_name": "w", "busy": False, "age_secs": 60},
+    ]
+    codenames = {"scratch10": "Nickel", "scratch2": "Gold"}
+    out = plain(ao.render_active_runs(sessions, codenames))
+    body = "\n".join(out)
+    assert "Nickel:1" in body          # scratch10 → codename
+    assert "scratch10" not in body     # raw name gone
+    assert "8:2" in body               # numbered session passes through untouched
+
+
+def test_render_active_runs_empty_codenames_fallback():
+    sessions = [{"pane_id": "%0", "repo": "devrc", "session": "scratch10",
+                 "window_index": "1", "window_name": "w", "busy": None,
+                 "age_secs": 1}]
+    # empty map / None both fall back to the raw session name (never crash)
+    for cn in ({}, None):
+        body = "\n".join(plain(ao.render_active_runs(sessions, cn)))
+        assert "scratch10:1" in body
+
+
+# ---------------------------------------------------------------------------
+# codename mapping — _session_label / load_scratch_codenames
+# ---------------------------------------------------------------------------
+def test_session_label_scratch_and_passthrough():
+    cn = {"scratch4": "Vapor", "scratch10": "Nickel"}
+    assert ao._session_label("scratch4", cn) == "Vapor"
+    assert ao._session_label("scratch10", cn) == "Nickel"
+    assert ao._session_label("8", cn) == "8"          # numbered → passthrough
+    assert ao._session_label("main", cn) == "main"    # named → passthrough
+    assert ao._session_label("scratch4", {}) == "scratch4"   # empty map
+    assert ao._session_label("scratch4", None) == "scratch4"  # missing map
+
+
+def test_load_scratch_codenames_parses_and_prefers_first(tmp_path):
+    slots = tmp_path / "scratch-slots.sh"
+    slots.write_text(
+        'SCRATCH_SLOTS=(\n'
+        '    "scratch2:G:#d79921:Gold"\n'
+        '    "scratch10:N:#928374:Nickel"\n'
+        ')\n')
+    mapping = ao.load_scratch_codenames([str(slots)])
+    assert mapping == {"scratch2": "Gold", "scratch10": "Nickel"}
+    # first non-empty wins: a missing deployed path falls through to the repo copy
+    missing = tmp_path / "nope.sh"
+    assert ao.load_scratch_codenames([str(missing), str(slots)]) == mapping
+
+
+def test_load_scratch_codenames_failsafe(tmp_path):
+    assert ao.load_scratch_codenames([str(tmp_path / "nope.sh")]) == {}
+
+
+# ---------------------------------------------------------------------------
+# viewport — the PURE scroll-slice
+# ---------------------------------------------------------------------------
+def _lines(n):
+    return ["L%d" % i for i in range(n)]
+
+
+def test_viewport_short_content_no_scroll():
+    body = _lines(5)
+    visible, off, ind = ao.viewport(body, avail=20, offset=0)
+    assert visible == body            # everything fits
+    assert off == 0
+    assert ind == ""                  # no indicator when nothing clipped
+
+
+def test_viewport_top_window_and_indicator():
+    body = _lines(58)
+    visible, off, ind = ao.viewport(body, avail=20, offset=0)
+    assert visible == body[0:20]
+    assert off == 0
+    assert "1–20/58" in ind
+    assert "↓" in ind and "↑" not in ind   # more below, nothing above
+
+
+def test_viewport_middle_window():
+    body = _lines(58)
+    visible, off, ind = ao.viewport(body, avail=20, offset=10)
+    assert visible == body[10:30]
+    assert off == 10
+    assert "11–30/58" in ind
+    assert "↑" in ind and "↓" in ind        # clipped both ends
+
+
+def test_viewport_clamps_offset_to_bottom():
+    body = _lines(58)
+    # a huge offset (e.g. from 'G') clamps to the last full window
+    visible, off, ind = ao.viewport(body, avail=20, offset=10 ** 9)
+    assert off == 38                        # 58 - 20
+    assert visible == body[38:58]
+    assert "39–58/58" in ind
+    assert "↑" in ind and "↓" not in ind    # at bottom, nothing below
+
+
+def test_viewport_clamps_negative_offset():
+    body = _lines(58)
+    visible, off, ind = ao.viewport(body, avail=20, offset=-5)
+    assert off == 0 and visible == body[0:20]
+
+
+def test_viewport_degenerate_avail():
+    # avail < 1 is coerced to 1 (never an empty/negative slice)
+    visible, off, ind = ao.viewport(_lines(10), avail=0, offset=3)
+    assert len(visible) == 1 and off == 3
+
+
 # ---------------------------------------------------------------------------
 # render_prs / render_momentum / render_done
 # ---------------------------------------------------------------------------
