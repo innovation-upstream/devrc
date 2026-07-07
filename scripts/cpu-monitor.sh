@@ -40,6 +40,23 @@ TEMP_THRESHOLD=${CPU_MON_TEMP_THRESHOLD:-95}
 TEMP_SUSTAIN=${CPU_MON_TEMP_SUSTAIN:-3}
 TEMP_HYSTERESIS=5   # recover only once temp drops this far below the threshold
 
+# Process comms to NEVER alert on — expected heavy hitters (games etc.) whose
+# high CPU is not a problem. Case-insensitive SUBSTRING match against the busy
+# process's command (so "anno" also catches "Anno1800.exe" under Proton).
+# Space-separated; extend via CPU_MON_IGNORE in the systemd service.
+IGNORE=${CPU_MON_IGNORE:-anno}
+
+# is_ignored <comm> -> 0 if it matches any IGNORE entry (case-insensitive substring)
+is_ignored() {
+  local comm_lc want_lc
+  comm_lc=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')
+  for want_lc in $(printf '%s' "$IGNORE" | tr '[:upper:] ' '[:lower:]\n'); do
+    [ -n "$want_lc" ] || continue
+    case "$comm_lc" in *"$want_lc"*) return 0 ;; esac
+  done
+  return 1
+}
+
 # notify-send needs a display + session bus. If we were launched without them
 # (systemd, cron, detached shell), borrow them from a running i3 process.
 ensure_desktop_env() {
@@ -140,7 +157,8 @@ while :; do
   load=$(read_load)
   if load_ge "$load" "$THRESHOLD"; then
     high_streak=$((high_streak + 1))
-    if [ "$high_streak" -ge "$SUSTAIN" ]; then
+    # Suppress if the load is dominated by an expected heavy app (game etc.).
+    if [ "$high_streak" -ge "$SUSTAIN" ] && ! is_ignored "$(ps -eo comm= --sort=-%cpu | head -1)"; then
       if [ "$load_alerting" -eq 0 ] || [ $((now - load_last_alert)) -ge "$COOLDOWN" ]; then
         alert critical "⚠ High CPU load" \
           "1-min load: ${load} (threshold ${THRESHOLD}, ${CORES} cores)
@@ -157,6 +175,10 @@ Top: $(top_proc)"
 
   # --- 2. single runaway process ---
   cand=$(runaway_proc || true)
+  if [ -n "$cand" ]; then
+    # Drop the candidate if it's an expected heavy app (game etc.) — no alert.
+    is_ignored "$(ps -o comm= -p "${cand%% *}" 2>/dev/null)" && cand=""
+  fi
   if [ -n "$cand" ]; then
     rpid=${cand%% *}
     rpct=${cand##* }
