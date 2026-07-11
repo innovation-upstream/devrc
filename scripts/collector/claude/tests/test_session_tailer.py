@@ -1,10 +1,11 @@
 """Tests for the Layer-A session-summary emitter (session-tailer.py).
 
 Covers:
-  * rollup correctness — tool_counts, tokens, languages (by file extension), git
-    commit/push counting, message counts, duration, interruptions, tool_errors
-    (+ categories), models, task/mcp/web flags, churn, first_prompt,
-  * ts conversion (session START, UTC),
+  * rollup correctness — tool_counts, tokens (incl. cache-read/creation), languages
+    (by file extension), git commit/push counting, message counts, duration,
+    interruptions, tool_errors (+ categories), models, task/mcp/web flags, churn,
+  * no raw prompt free-text leaks into the payload (first_prompt was dropped),
+  * ts conversion (session START, UTC); sidechain turns excluded from duration,
   * idempotency (unchanged transcript → no re-emit) + MUTABLE re-emit (grows → re-emit),
   * subagent / wf_ dir skip,
   * the `unreadable` path (garbage file / empty file),
@@ -52,7 +53,8 @@ def user_tool_result(*, is_error, text, ts="2026-07-11T10:05:00.000Z",
 
 
 def assistant(tool_uses=None, *, model="claude-opus-4-8", input_tokens=0,
-              output_tokens=0, ts="2026-07-11T10:01:00.000Z",
+              output_tokens=0, cache_read_tokens=0, cache_creation_tokens=0,
+              ts="2026-07-11T10:01:00.000Z",
               cwd="/home/zach/workspace/devrc", isSidechain=False):
     content = []
     for tu in (tool_uses or []):
@@ -61,7 +63,9 @@ def assistant(tool_uses=None, *, model="claude-opus-4-8", input_tokens=0,
             "isSidechain": isSidechain,
             "message": {"role": "assistant", "model": model, "content": content,
                         "usage": {"input_tokens": input_tokens,
-                                  "output_tokens": output_tokens}}}
+                                  "output_tokens": output_tokens,
+                                  "cache_read_input_tokens": cache_read_tokens,
+                                  "cache_creation_input_tokens": cache_creation_tokens}}}
 
 
 def _write(projects_dir: Path, project_dirname: str, session: str, objs):
@@ -130,6 +134,7 @@ def test_rollup_full():
         assistant([("Read", {"file_path": "a.py"}),
                    ("Bash", {"command": "git commit -m x && git push"})],
                   input_tokens=100, output_tokens=2000,
+                  cache_read_tokens=1000, cache_creation_tokens=200,
                   ts="2026-07-11T10:01:00.000Z"),
         assistant([("Edit", {"file_path": "a.py", "old_string": "x", "new_string": "1\n2"}),
                    ("Write", {"file_path": "notes.md", "content": "line1\nline2\nline3"}),
@@ -137,6 +142,7 @@ def test_rollup_full():
                    ("WebSearch", {"query": "q"}),
                    ("mcp__serena__find_symbol", {"name": "foo"})],
                   input_tokens=50, output_tokens=500,
+                  cache_read_tokens=3000, cache_creation_tokens=50,
                   ts="2026-07-11T10:30:00.000Z"),
         user_tool_result(is_error=True, text="bash: command failed exit code 2"),
         user_typed("[Request interrupted by user]", ts="2026-07-11T10:40:00.000Z"),
@@ -145,6 +151,7 @@ def test_rollup_full():
     assert r["tool_counts"]["Read"] == 1
     assert r["tool_counts"]["Edit"] == 1 and r["tool_counts"]["Write"] == 1
     assert r["input_tokens"] == 150 and r["output_tokens"] == 2500
+    assert r["cache_read_tokens"] == 4000 and r["cache_creation_tokens"] == 250
     assert r["assistant_message_count"] == 2
     assert r["user_message_count"] == 1  # only the genuine typed turn (interrupt not genuine)
     assert r["user_interruptions"] == 1
@@ -157,7 +164,10 @@ def test_rollup_full():
     assert r["uses_task_agent"] is True and r["uses_mcp"] is True
     assert r["uses_web_search"] is True and r["uses_web_fetch"] is False
     assert r["models"] == ["claude-opus-4-8"]
-    assert r["first_prompt"] == "implement the feature"
+    # first_prompt was DROPPED (unscrubbed raw-prompt leak surface — reintroduced
+    # in PR-2 only after the scrubber lands). No raw prompt text in the rollup.
+    assert "first_prompt" not in r
+    assert "message_hours" not in r
     assert r["start_ts"] == "2026-07-11 10:00:00.000"
     assert r["end_ts"] == "2026-07-11 10:40:00.000"
     assert r["duration_minutes"] == 40
@@ -165,7 +175,7 @@ def test_rollup_full():
     assert r["cwd"] == "/home/zach/workspace/devrc"
 
 
-def test_rollup_slash_command_counts_as_user_turn_not_first_prompt():
+def test_rollup_slash_command_counts_as_user_turn():
     objs = [
         user_typed("<command-name>handoff</command-name><command-args>now</command-args>",
                    ts="2026-07-11T09:00:00.000Z"),
@@ -173,8 +183,54 @@ def test_rollup_slash_command_counts_as_user_turn_not_first_prompt():
     ]
     r = S.build_rollup(objs)
     assert r["user_message_count"] == 2
-    # first_prompt is the first TYPED turn, not the slash command
-    assert r["first_prompt"] == "real question"
+    # no raw prompt free-text is stored (first_prompt dropped in PR-1 hardening)
+    assert "first_prompt" not in r
+
+
+def test_rollup_has_no_raw_prompt_freetext_field():
+    """The rollup must NOT carry any raw transcript free-text (unscrubbed leak
+    surface deferred to PR-2). Guards against re-adding first_prompt et al."""
+    objs = [
+        user_typed("this prompt might contain a pasted secret token ABC123",
+                   ts="2026-07-11T10:00:00.000Z"),
+        assistant([("Read", {"file_path": "a.py"})], ts="2026-07-11T10:01:00.000Z"),
+    ]
+    r = S.build_rollup(objs)
+    assert "first_prompt" not in r
+    assert "message_hours" not in r
+    serialized = json.dumps(r)
+    assert "pasted secret token" not in serialized
+
+
+def test_rollup_cache_tokens_summed():
+    objs = [
+        user_typed("go", ts="2026-07-11T10:00:00.000Z"),
+        assistant([], input_tokens=10, output_tokens=20,
+                  cache_read_tokens=500, cache_creation_tokens=30,
+                  ts="2026-07-11T10:01:00.000Z"),
+        assistant([], input_tokens=5, output_tokens=8,
+                  cache_read_tokens=100, cache_creation_tokens=0,
+                  ts="2026-07-11T10:02:00.000Z"),
+    ]
+    r = S.build_rollup(objs)
+    assert r["input_tokens"] == 15 and r["output_tokens"] == 28
+    assert r["cache_read_tokens"] == 600 and r["cache_creation_tokens"] == 30
+
+
+def test_rollup_sidechain_timestamps_dont_inflate_duration():
+    """A subagent/sidechain turn timestamped far outside the session window must
+    NOT stretch duration_minutes — the sidechain skip happens before min/max."""
+    objs = [
+        user_typed("start", ts="2026-07-11T10:00:00.000Z"),
+        assistant([("Read", {"file_path": "a.py"})], ts="2026-07-11T10:10:00.000Z"),
+        # sidechain turn 5 hours later — must be ignored for duration + counts
+        assistant([("Read", {"file_path": "z.py"})], isSidechain=True,
+                  ts="2026-07-11T15:00:00.000Z"),
+    ]
+    r = S.build_rollup(objs)
+    assert r["duration_minutes"] == 10   # not 300
+    assert r["end_ts"] == "2026-07-11 10:10:00.000"
+    assert "Read" in r["tool_counts"] and r["tool_counts"]["Read"] == 1
 
 
 def test_rollup_skips_sidechain_and_meta():
@@ -310,3 +366,47 @@ def test_state_round_trips(env):
     S.run()
     sigs = S.load_state(env["state"])
     assert any(k.endswith("s1.jsonl") for k in sigs)
+
+
+def test_run_checkpoints_and_resumes_after_interrupt(env, monkeypatch):
+    """A run interrupted (SIGTERM-style) mid-backfill must persist the sessions it
+    already emitted, so the next run RESUMES rather than re-emitting everything
+    (the first-deploy duplicate-storm the checkpointing fix prevents)."""
+    monkeypatch.setattr(S, "CHECKPOINT_EVERY", 1)  # checkpoint after every emit
+    for i in range(3):
+        _write(env["projects"], "-home-zach-workspace-devrc", f"s{i}",
+               [user_typed(f"session {i}", ts=f"2026-07-11T1{i}:00:00.000Z")])
+
+    real_emit = S.emit_event
+    calls = {"n": 0}
+
+    def flaky_emit(emit, ev):
+        if calls["n"] >= 2:              # emit two, then simulate SIGTERM
+            raise KeyboardInterrupt("simulated interrupt mid-backfill")
+        calls["n"] += 1
+        return real_emit(emit, ev)
+
+    monkeypatch.setattr(S, "emit_event", flaky_emit)
+    with pytest.raises(KeyboardInterrupt):
+        S.run()
+
+    # two sessions reached the spool AND were checkpointed to state
+    assert len(_spool_events(env["spool"])) == 2
+    checkpointed = [k for k in S.load_state(env["state"]) if k.endswith(".jsonl")]
+    assert len(checkpointed) == 2
+
+    # resume with a healthy emit: only the un-emitted session emits (no re-storm)
+    monkeypatch.setattr(S, "emit_event", real_emit)
+    assert S.run() == 0
+    assert len(_spool_events(env["spool"])) == 3  # 2 + 1, NOT 2 + 3
+
+
+def test_run_prunes_deleted_transcripts_from_state(env):
+    """A transcript that disappears is dropped from the state file on the next
+    full pass (state doesn't grow forever)."""
+    p = _write(env["projects"], "-home-zach-workspace-devrc", "gone", [user_typed("hi")])
+    S.run()
+    assert any(k.endswith("gone.jsonl") for k in S.load_state(env["state"]))
+    p.unlink()
+    S.run()
+    assert not any(k.endswith("gone.jsonl") for k in S.load_state(env["state"]))

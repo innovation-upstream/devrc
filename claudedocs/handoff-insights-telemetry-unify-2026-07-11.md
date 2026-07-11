@@ -11,10 +11,11 @@ story). This is a **two-PR initiative**; PR-1 is done.
 - **Message stream** — `kind=prompt|command`. One event per genuine user turn /
   slash-command. Emitter: `scripts/collector/claude/tailer.py`. (Pre-existed.)
 - **Layer A — deterministic session rollups** — `kind=session-summary`. One event
-  per session; `payload` = whole-transcript rollup (tool counts, tokens, langs,
-  git commits/pushes, churn, durations, interruptions, tool errors + categories,
-  task/mcp/web flags, models, first_prompt, start/end ts). Emitter:
-  `scripts/collector/claude/session-tailer.py`. **NO LLM.** ← shipped in PR-1.
+  per session; `payload` = whole-transcript rollup (tool counts, input/output +
+  cache-read/cache-creation tokens, langs, git commits/pushes, churn, durations,
+  interruptions, tool errors + categories, task/mcp/web flags, models, start/end
+  ts). Emitter: `scripts/collector/claude/session-tailer.py`. **NO LLM.** ← shipped
+  in PR-1 (post-review hardening dropped `first_prompt`/`message_hours` — see below).
 - **Layer B — qualitative facets** — `kind=session-insight`. goal/outcome/friction
   + automation_opportunity/recurring_toil/workflow_gap. ← PR-2 (not built).
 
@@ -75,6 +76,25 @@ grouped by `session`.** State file (per-transcript signature):
 - Consider back-emitting Layer A over the existing transcript history once on
   first deploy (the tailer already handles all sessions; a first timer fire will
   summarize every transcript on disk).
+
+## PR-2 / follow-up considerations
+- **Post-review hardening (on the PR-1 branch, additive commits):** `--host` query
+  alias-shadow fixed (`argMax(host,…) AS sess_host`, mirroring the earlier `ts`
+  fix); first-run backfill hardened — `save_state()` now checkpoints incrementally
+  (every 25 emits) so a SIGTERM mid-backfill resumes instead of re-storming, and
+  the oneshot got `TimeoutStartSec=600`; `input_tokens` no longer masquerades as
+  total input (cache-read + cache-creation now summed and rendered honestly);
+  `first_prompt` (unscrubbed raw-prompt leak surface) and `message_hours`
+  (unbounded, unread) DROPPED from the rollup; sidechain skip moved ahead of the
+  duration min/max.
+- **Re-emit storm for long-lived sessions (deferred):** a session re-emits its FULL
+  summary on every 5-min tick while it keeps growing (signature changes on each new
+  turn). For a long-lived session that is a lot of near-duplicate `session-summary`
+  rows. `argMax`-latest read contract makes this correct but wasteful. Address later
+  via **emit-on-settle** (only emit once a session has been idle N minutes) and/or a
+  **ClickHouse TTL** on `session-summary` rows so superseded rollups age out.
+- **`first_prompt` reintroduction:** deferred to PR-2, and only once the secret
+  scrubber exists (PR-2 owns free-text scrubbing before any raw prompt hits CH).
 
 ## Deploy (when merged)
 `~/workspace/devrc/scripts/ship.sh` converges both hosts; the 5-min timer then

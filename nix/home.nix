@@ -427,6 +427,12 @@ in
     };
     Service = {
       Type = "oneshot";
+      # First run backfills the WHOLE transcript corpus (both tailers scan every
+      # session). That can far exceed systemd's default ~90s start timeout; a
+      # SIGTERM mid-backfill would strand state and re-storm next tick. Give it
+      # room — session-tailer.py also now checkpoints its state incrementally so
+      # an interrupted run still resumes rather than restarts.
+      TimeoutStartSec = 600;
       Environment = [
         "PATH=${lib.makeBinPath [ pkgs.python312 pkgs.coreutils pkgs.bash ]}"
       ];

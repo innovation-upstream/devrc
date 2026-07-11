@@ -86,8 +86,6 @@ _FILE_TOOLS = {"Edit", "Write", "NotebookEdit", "MultiEdit"}
 _GIT_COMMIT = re.compile(r"\bgit\s+(?:-C\s+\S+\s+|-\S+\s+)*commit\b")
 _GIT_PUSH = re.compile(r"\bgit\s+(?:-C\s+\S+\s+|-\S+\s+)*push\b")
 
-FIRST_PROMPT_MAX = 240
-
 
 def lang_for_path(path: str) -> str | None:
     """Map an edited/written file path to a language name (by extension / special
@@ -179,16 +177,6 @@ def _int(v) -> int:
         return 0
 
 
-def _ts_hour(ch_ts: str | None) -> int | None:
-    """UTC hour-of-day from a 'YYYY-MM-DD HH:MM:SS.fff' string (tz-less/UTC)."""
-    if not ch_ts or len(ch_ts) < 13:
-        return None
-    try:
-        return int(ch_ts[11:13])
-    except ValueError:
-        return None
-
-
 # --------------------------------------------------------------------------- #
 # Rollup
 # --------------------------------------------------------------------------- #
@@ -197,6 +185,8 @@ def _empty_rollup() -> dict:
         "tool_counts": {},
         "input_tokens": 0,
         "output_tokens": 0,
+        "cache_read_tokens": 0,
+        "cache_creation_tokens": 0,
         "user_message_count": 0,
         "assistant_message_count": 0,
         "duration_minutes": 0,
@@ -214,10 +204,8 @@ def _empty_rollup() -> dict:
         "uses_web_search": False,
         "uses_web_fetch": False,
         "models": [],
-        "first_prompt": None,
         "start_ts": None,
         "end_ts": None,
-        "message_hours": [],
         "cwd": "",
         "unreadable": False,
     }
@@ -235,13 +223,16 @@ def build_rollup(objects: list[dict]) -> dict:
     err_cats: dict = r["tool_error_categories"]
     files: set[str] = set()
     models: set[str] = set()
-    hours: list[int] = []
     start_iso = end_iso = None
     cwd = ""
 
     for obj in objects:
         if not isinstance(obj, dict):
             continue
+        # Skip subagent/sidechain turns FIRST — before the timestamp min/max below —
+        # so their timestamps don't inflate the session's duration_minutes.
+        if obj.get("isSidechain"):
+            continue  # subagent's own turns — not this session's work
         iso = obj.get("timestamp")
         if iso:
             if start_iso is None or iso < start_iso:
@@ -251,8 +242,6 @@ def build_rollup(objects: list[dict]) -> dict:
         if not cwd and obj.get("cwd"):
             cwd = obj.get("cwd") or ""
 
-        if obj.get("isSidechain"):
-            continue  # subagent's own turns — not this session's work
         typ = obj.get("type")
 
         if typ == "user":
@@ -280,11 +269,6 @@ def build_rollup(objects: list[dict]) -> dict:
                     genuine = res  # (kind, text)
             if genuine is not None:
                 r["user_message_count"] += 1
-                h = _ts_hour(to_ch_ts(iso))
-                if h is not None:
-                    hours.append(h)
-                if r["first_prompt"] is None and genuine[0] == "typed":
-                    r["first_prompt"] = genuine[1][:FIRST_PROMPT_MAX]
 
         elif typ == "assistant":
             msg = obj.get("message") or {}
@@ -295,6 +279,10 @@ def build_rollup(objects: list[dict]) -> dict:
             usage = msg.get("usage") or {}
             r["input_tokens"] += _int(usage.get("input_tokens"))
             r["output_tokens"] += _int(usage.get("output_tokens"))
+            # input_tokens is only the NON-cached input; the bulk of real input
+            # volume is cached — sum both so the report can show honest input.
+            r["cache_read_tokens"] += _int(usage.get("cache_read_input_tokens"))
+            r["cache_creation_tokens"] += _int(usage.get("cache_creation_input_tokens"))
             content = msg.get("content")
             if isinstance(content, list):
                 for block in content:
@@ -330,7 +318,6 @@ def build_rollup(objects: list[dict]) -> dict:
 
     r["files_modified"] = len(files)
     r["models"] = sorted(models)
-    r["message_hours"] = hours
     r["cwd"] = cwd
     r["start_ts"] = to_ch_ts(start_iso)
     r["end_ts"] = to_ch_ts(end_iso)
@@ -443,6 +430,12 @@ def save_state(path: Path, sigs: dict) -> None:
     os.replace(tmp, path)  # atomic
 
 
+# Flush the seen-set to disk every this-many emits so an interrupted run
+# (e.g. a first-run full-corpus backfill SIGTERMed on the systemd start timeout)
+# resumes from where it left off instead of re-emitting everything.
+CHECKPOINT_EVERY = 25
+
+
 # --------------------------------------------------------------------------- #
 # Run
 # --------------------------------------------------------------------------- #
@@ -452,21 +445,38 @@ def run() -> int:
     prev = load_state(sp)
     emit = emit_path()
 
+    # Start from the prior state and record a session's signature ONLY after it
+    # has been (re-)emitted (or confirmed unchanged), checkpointing periodically.
+    # This makes a long backfill RESUMABLE: whatever was flushed is skipped next
+    # run rather than re-emitted, so an interrupted scan converges instead of
+    # storming duplicates. A session reached-but-not-yet-emitted at interrupt is
+    # simply re-emitted next run (append-only read contract dedupes on it).
+    new_sigs: dict = dict(prev)
+    seen: set = set()
     emitted = 0
     scanned = 0
-    new_sigs: dict = {}
+    since_checkpoint = 0
     for path, session in iter_transcripts(roots):
         sig = signature(path)
         if sig is None:
             continue
+        seen.add(path)
         scanned += 1
-        new_sigs[path] = sig
         if prev.get(path) == sig:
-            continue  # unchanged since last emit — skip (idempotent)
+            new_sigs[path] = sig  # unchanged since last emit — carry forward
+            continue
         rollup = summarize_transcript(path)
         emit_event(emit, build_event(session, rollup))
+        new_sigs[path] = sig  # record ONLY after a successful emit
         emitted += 1
+        since_checkpoint += 1
+        if since_checkpoint >= CHECKPOINT_EVERY:
+            save_state(sp, new_sigs)  # atomic tmp+rename checkpoint
+            since_checkpoint = 0
 
+    # Final save: prune signatures for transcripts that no longer exist (we saw
+    # every current path this pass), keeping the state file from growing forever.
+    new_sigs = {p: s for p, s in new_sigs.items() if p in seen}
     save_state(sp, new_sigs)
     print(f"session-tailer: scanned={scanned} emitted={emitted} state={sp}")
     return 0

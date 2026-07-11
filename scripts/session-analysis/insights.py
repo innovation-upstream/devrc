@@ -131,12 +131,16 @@ def q_summaries(win: int, host: str | None = None) -> str:
     """Latest session-summary per session (argMax on ingested_at — the read contract)."""
     return (
         "SELECT session, "
-        "argMax(host, ingested_at) AS host, "
+        # A SELECT alias must NOT reuse the name of any column referenced by the
+        # WHERE clause: ClickHouse resolves the WHERE identifier to the aggregate
+        # alias and errors with ILLEGAL_AGGREGATION. `host` is filtered below via
+        # _host_filter, so the aggregate is aliased `sess_host` (aggregate() reads
+        # that key). `ts` is filtered too, so it is NOT selected as an aggregate at
+        # all (an `AS ts` alias would collide the same way; the value is unused).
+        # `project` has no WHERE filter, so reusing its name is safe.
+        "argMax(host, ingested_at) AS sess_host, "
         "argMax(project, ingested_at) AS project, "
-        "argMax(toString(payload), ingested_at) AS payload, "
-        # alias must NOT be `ts` — a `ts` alias shadows the ts column in WHERE and
-        # ClickHouse then reports an aggregate-in-WHERE error (ILLEGAL_AGGREGATION).
-        "argMax(ts, ingested_at) AS session_ts "
+        "argMax(toString(payload), ingested_at) AS payload "
         "FROM activity.events "
         f"WHERE source='claude' AND kind='session-summary' AND ts>now()-{win}{_host_filter(host)} "
         "GROUP BY session"
@@ -178,7 +182,9 @@ def aggregate(summary_rows: list[dict], message_rows: list[dict],
     unreadable = 0
     for row in summary_rows:
         p = _parse_payload(row.get("payload"))
-        h = row.get("host") or "?"
+        # summary rows carry the host under the `sess_host` alias (see q_summaries);
+        # tolerate a bare `host` key too for robustness.
+        h = row.get("sess_host") or row.get("host") or "?"
         hp = hosts.setdefault(h, {"sessions": 0, "messages": 0, "prompts": 0,
                                   "commands": 0, "commits": 0,
                                   "output_tokens": 0})
@@ -205,6 +211,8 @@ def aggregate(summary_rows: list[dict], message_rows: list[dict],
         agg["lines_removed"] += num(p.get("lines_removed"))
         agg["files_modified"] += num(p.get("files_modified"))
         agg["input_tokens"] += num(p.get("input_tokens"))
+        agg["cache_read_tokens"] += num(p.get("cache_read_tokens"))
+        agg["cache_creation_tokens"] += num(p.get("cache_creation_tokens"))
         agg["output_tokens"] += num(p.get("output_tokens"))
         agg["interruptions"] += num(p.get("user_interruptions"))
         agg["tool_errors"] += num(p.get("tool_errors"))
@@ -317,8 +325,18 @@ def render(data: dict) -> str:
     out.append(f"  messages:   {data['messages']}  ({data['prompts']} typed prompts, {data['commands']} slash-commands)")
     out.append(f"  turns:      {t.get('user_messages',0)} user / {t.get('assistant_messages',0)} assistant")
     out.append(f"  git:        {t.get('commits',0)} commits · {t.get('pushes',0)} pushes")
+    out.append("   NOTE: git counts are approximate — one Bash call chaining several commits under-counts; "
+               "`--amend`/failed commits over-count (per-tool-use regex match).")
     out.append(f"  code churn: +{t.get('lines_added',0)} / -{t.get('lines_removed',0)} lines · {t.get('files_modified',0)} files")
-    out.append(f"  tokens:     {t.get('input_tokens',0):,} in / {t.get('output_tokens',0):,} out")
+    in_fresh = num(t.get('input_tokens', 0))
+    cache_r = num(t.get('cache_read_tokens', 0))
+    cache_w = num(t.get('cache_creation_tokens', 0))
+    total_in = in_fresh + cache_r + cache_w
+    out.append(f"  tokens:     {total_in:,} in "
+               f"({in_fresh:,} fresh + {cache_r:,} cache-read + {cache_w:,} cache-write) "
+               f"/ {num(t.get('output_tokens',0)):,} out")
+    dur_h = num(t.get('duration_minutes', 0)) / 60
+    out.append(f"  wall-clock: {dur_h:,.1f}h across sessions (sum of per-session spans)")
     out.append(f"  friction:   {t.get('interruptions',0)} interruptions · {t.get('tool_errors',0)} tool errors")
 
     def _bars(title, items, n=8):
@@ -384,6 +402,8 @@ def _html_bars(items, n=8):
 def render_html(data: dict) -> str:
     t = data["totals"]
     scope = data["host"] or "all hosts"
+    total_in = (num(t.get('input_tokens', 0)) + num(t.get('cache_read_tokens', 0))
+                + num(t.get('cache_creation_tokens', 0)))
     hosts_rows = "".join(
         f"<tr><td>{html.escape(h)}</td><td>{hp['sessions']}</td><td>{hp['messages']}</td>"
         f"<td>{hp['commits']}</td><td>{hp['output_tokens']:,}</td></tr>"
@@ -440,8 +460,13 @@ layer (goal/outcome/friction) arrives in PR-2.</div>
 <div class="stat"><b>{t.get('commits',0)}</b><span>commits · {t.get('pushes',0)} pushes</span></div>
 <div class="stat"><b>+{t.get('lines_added',0):,}</b><span>lines (−{t.get('lines_removed',0):,})</span></div>
 <div class="stat"><b>{t.get('files_modified',0):,}</b><span>files touched</span></div>
-<div class="stat"><b>{t.get('output_tokens',0)//1_000_000}M</b><span>output tokens</span></div>
+<div class="stat"><b>{total_in//1_000_000}M</b><span>input tokens (incl. cache)</span></div>
+<div class="stat"><b>{num(t.get('output_tokens',0))//1_000_000}M</b><span>output tokens</span></div>
 </div>
+<div class="note">Input tokens include cache-read + cache-creation, not just fresh input
+({num(t.get('input_tokens',0)):,} fresh · {num(t.get('cache_read_tokens',0)):,} cache-read ·
+{num(t.get('cache_creation_tokens',0)):,} cache-write). Git commit/push counts are approximate
+(per-tool-use regex: chained commits under-count, <code>--amend</code>/failed commits over-count).</div>
 <div class="cols">
 <div class="card"><b>Tools</b>{_html_bars(data['tool_counts'].items())}</div>
 <div class="card"><b>Languages</b>{_html_bars(data['languages'].items(), n=8)}</div>

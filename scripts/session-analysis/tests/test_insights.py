@@ -65,11 +65,39 @@ def test_messages_and_insights_queries():
     assert "kind='session-insight'" in I.q_insights(86400)
 
 
+def test_summaries_host_alias_is_not_shadowing():
+    # the host aggregate must be aliased sess_host (NOT host) so the WHERE host
+    # filter isn't resolved to the aggregate (ILLEGAL_AGGREGATION).
+    sql = I.q_summaries(86400, "workbench")
+    assert "argMax(host, ingested_at) AS sess_host" in sql
+    assert "AS host" not in sql
+    assert "host='workbench'" in sql
+
+
+def test_no_select_alias_shadows_a_where_filtered_column():
+    """Guard the whole file: in EVERY query, no `... AS <alias>` may reuse the
+    name of a column referenced by a WHERE comparison (the class of bug that hit
+    both `ts` and `host`)."""
+    import re
+    op = re.compile(r"\b([a-zA-Z_]\w*)\s*(?:>=|<=|=|>|<)")
+    for sql in (I.q_summaries(86400, "workbench"),
+                I.q_insights(86400, "workbench"),
+                I.q_messages(86400, "workbench")):
+        aliases = set(re.findall(r"\bAS\s+(\w+)", sql))
+        where = sql.split("WHERE", 1)[1] if "WHERE" in sql else ""
+        where_cols = set(op.findall(where))
+        clash = aliases & where_cols
+        assert not clash, f"alias(es) {clash} shadow a WHERE column in: {sql}"
+
+
 # --------------------------------------------------------------------------- #
 # aggregate()
 # --------------------------------------------------------------------------- #
 def _summary(session, host, project, payload, ts="2026-07-10 10:00:00.000"):
-    return {"session": session, "host": host, "project": project,
+    # q_summaries aliases the host aggregate as `sess_host` (a bare `host` alias
+    # would shadow the WHERE host filter → ILLEGAL_AGGREGATION), so real rows
+    # carry the host under `sess_host`.
+    return {"session": session, "sess_host": host, "project": project,
             "ts": ts, "payload": json.dumps(payload)}
 
 
@@ -78,6 +106,7 @@ def _sample_summaries():
         _summary("s1", "workbench", "devrc", {
             "tool_counts": {"Bash": 10, "Edit": 5}, "languages": {"Python": 3, "Nix": 2},
             "input_tokens": 1000, "output_tokens": 20000,
+            "cache_read_tokens": 500000, "cache_creation_tokens": 40000,
             "user_message_count": 4, "assistant_message_count": 40,
             "git_commits": 2, "git_pushes": 1, "lines_added": 50, "lines_removed": 10,
             "files_modified": 6, "user_interruptions": 1, "tool_errors": 2,
@@ -86,6 +115,7 @@ def _sample_summaries():
         _summary("s2", "laptop", "homelab-talos", {
             "tool_counts": {"Bash": 4, "Read": 8}, "languages": {"YAML": 5},
             "input_tokens": 500, "output_tokens": 8000,
+            "cache_read_tokens": 100000, "cache_creation_tokens": 10000,
             "user_message_count": 2, "assistant_message_count": 20,
             "git_commits": 1, "git_pushes": 0, "lines_added": 12, "lines_removed": 3,
             "files_modified": 2, "user_interruptions": 0, "tool_errors": 0,
@@ -111,6 +141,9 @@ def test_aggregate_totals_and_hosts():
     assert t["commits"] == 3 and t["pushes"] == 1
     assert t["lines_added"] == 62 and t["lines_removed"] == 13
     assert t["output_tokens"] == 28000
+    assert t["input_tokens"] == 1500
+    assert t["cache_read_tokens"] == 600000
+    assert t["cache_creation_tokens"] == 50000
     assert d["tool_counts"]["Bash"] == 14
     assert d["languages"]["Python"] == 3 and d["languages"]["YAML"] == 5
     assert d["projects"]["devrc"] == 2
@@ -193,6 +226,11 @@ def test_render_text_has_sections_and_numbers():
     assert "qualitative layer pending (PR-2)" in text
     assert "1 unreadable" in text
     assert "3 commits" in text
+    # honest tokens: total input = 1500 fresh + 600000 cache-read + 50000 cache-write
+    assert "651,500 in" in text
+    assert "cache-read" in text and "cache-write" in text
+    # approximate-git caveat present
+    assert "git counts are approximate" in text
 
 
 def test_render_json_is_valid():
@@ -208,6 +246,9 @@ def test_render_html_is_self_contained_and_honest():
     assert "prefers-color-scheme:dark" in h and "data-theme=dark" in h
     assert "no fabricated outcomes" in h.lower()
     assert "unreadable" in h.lower()
+    # honest input tokens (incl. cache) surfaced, not bare fresh input
+    assert "input tokens (incl. cache)" in h
+    assert "cache-read" in h
     # no external resources (CSP-safe / self-contained)
     assert "http://" not in h and "https://" not in h
     assert "<script" not in h.lower()
