@@ -223,7 +223,7 @@ def test_render_text_has_sections_and_numbers():
     assert "## TOOLS" in text
     assert "## TOP SLASH-COMMANDS" in text
     assert "## OUTCOMES" in text
-    assert "qualitative layer pending (PR-2)" in text
+    assert "no qualitative insights yet" in text
     assert "1 unreadable" in text
     assert "3 commits" in text
     # honest tokens: total input = 1500 fresh + 600000 cache-read + 50000 cache-write
@@ -252,3 +252,128 @@ def test_render_html_is_self_contained_and_honest():
     # no external resources (CSP-safe / self-contained)
     assert "http://" not in h and "https://" not in h
     assert "<script" not in h.lower()
+
+
+# --------------------------------------------------------------------------- #
+# Layer B (PR-2) — session-insight aggregation + report sections
+# --------------------------------------------------------------------------- #
+def _insight(session, payload):
+    return {"session": session, "payload": json.dumps(payload)}
+
+
+def _sample_insights():
+    return [
+        _insight("s1", {
+            "outcome": "fully_achieved", "session_type": "feature_build",
+            "goal_categories": ["infra", "feature"], "claude_helpfulness": 5,
+            "friction_counts": {"wrong_approach": 2},
+            "automation_opportunity": {"present": True, "description": "wrap deploy dance",
+                "trigger": "hand-typed nix switch+verify", "leverage": "high",
+                "evidence": "did it by hand"},
+            "recurring_toil": {"present": True, "description": "manual env export",
+                "category": "env-setup", "frequency_hint": "every session"},
+            "workflow_gap": {"present": True, "description": "no status skill",
+                "kind": "missing_tool"},
+            "unreadable": False}),
+        _insight("s2", {
+            "outcome": "partially_achieved", "session_type": "bugfix",
+            "goal_categories": ["bugfix"], "claude_helpfulness": 3,
+            "friction_counts": {"tool_error": 1, "wrong_approach": 1},
+            # SAME normalized automation opportunity as s1 → grouped, session-count 2
+            "automation_opportunity": {"present": True, "description": "Wrap Deploy Dance",
+                "trigger": "hand-typed   nix switch+verify", "leverage": "medium",
+                "evidence": "again"},
+            "recurring_toil": None, "workflow_gap": None, "unreadable": False}),
+        _insight("s3", {"unreadable": True, "unreadable_reason": "truncated"}),
+    ]
+
+
+def test_aggregate_insights_distribution_and_grouping():
+    d = I.aggregate(_sample_summaries(), [], _sample_insights(), 14, None)
+    assert d["qualitative_pending"] is False
+    assert d["insight_sessions"] == 2
+    assert d["unreadable_insights"] == 1
+    # outcome distribution (unreadable excluded)
+    assert d["outcomes"]["fully_achieved"] == 1
+    assert d["outcomes"]["partially_achieved"] == 1
+    # mean helpfulness over the 2 readable rows
+    assert d["helpfulness"]["mean"] == 4.0 and d["helpfulness"]["n"] == 2
+    assert d["helpfulness"]["hist"][5] == 1 and d["helpfulness"]["hist"][3] == 1
+    # session types + goal categories
+    assert d["session_types"]["feature_build"] == 1
+    assert d["goal_categories"]["infra"] == 1 and d["goal_categories"]["bugfix"] == 1
+    # friction summed across sessions
+    assert d["friction"]["wrong_approach"] == 3 and d["friction"]["tool_error"] == 1
+    # automation grouped by normalized trigger|description → one entry, 2 sessions,
+    # highest leverage (high) retained
+    assert len(d["automation"]) == 1
+    a = d["automation"][0]
+    assert a["sessions"] == 2 and a["leverage"] == "high"
+    assert d["toil"][0]["category"] == "env-setup"
+    assert d["gaps"][0]["kind"] == "missing_tool"
+
+
+def test_automation_leverage_then_frequency_ranking():
+    rows = [
+        _insight("a", {"outcome": "unclear", "session_type": "chore",
+                       "claude_helpfulness": 3, "friction_counts": {},
+                       "automation_opportunity": {"present": True, "description": "low win",
+                           "trigger": "t-low", "leverage": "low"}, "unreadable": False}),
+        _insight("b", {"outcome": "unclear", "session_type": "chore",
+                       "claude_helpfulness": 3, "friction_counts": {},
+                       "automation_opportunity": {"present": True, "description": "high win",
+                           "trigger": "t-high", "leverage": "high"}, "unreadable": False}),
+    ]
+    d = I.aggregate([], [], rows, 14, None)
+    # high leverage ranks first regardless of insertion order
+    assert d["automation"][0]["leverage"] == "high"
+    assert d["automation"][1]["leverage"] == "low"
+
+
+def test_render_lights_up_layer_b_sections():
+    d = I.aggregate(_sample_summaries(), [], _sample_insights(), 14, None)
+    text = I.render(d)
+    assert "## OUTCOMES" in text
+    assert "fully_achieved" in text
+    assert "mean Claude-helpfulness" in text
+    assert "AUTOMATION CANDIDATES / RECURRING TOIL / WORKFLOW GAPS" in text
+    assert "wrap deploy dance" in text
+    assert "env-setup" in text
+    assert "missing_tool" in text
+    # unreadable footnote present, excluded from aggregates
+    assert "1 session(s) flagged unreadable" in text
+
+
+def test_insight_window_defaults_to_30():
+    d = I.aggregate(_sample_summaries(), [], _sample_insights(), 14, None)
+    assert d["insight_days"] == 30
+    d2 = I.aggregate(_sample_summaries(), [], _sample_insights(), 45, None)
+    assert d2["insight_days"] == 45   # widens with --days
+    d3 = I.aggregate(_sample_summaries(), [], _sample_insights(), 14, None, insight_days=60)
+    assert d3["insight_days"] == 60
+
+
+def test_empty_window_degrades_gracefully():
+    d = I.aggregate(_sample_summaries(), [], [], 14, None)
+    text = I.render(d)
+    assert "no qualitative insights yet" in text
+    assert "AUTOMATION CANDIDATES" not in text   # section suppressed when empty
+
+
+def test_gather_uses_wider_insight_window():
+    # the insights query must use the WIDER window (spec §11); assert the SQL win.
+    captured = {}
+
+    class C:
+        def rows(self, sql):
+            if "session-summary" in sql:
+                captured["summary"] = sql
+                return _sample_summaries()
+            if "session-insight" in sql:
+                captured["insight"] = sql
+                return _sample_insights()
+            return []
+    I.gather(C(), days=14, host=None)
+    assert "now()-1209600" in captured["summary"]     # 14d
+    assert "now()-2592000" in captured["insight"]      # 30d
+

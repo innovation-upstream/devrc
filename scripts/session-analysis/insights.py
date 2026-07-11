@@ -55,9 +55,17 @@ from pathlib import Path
 # Reuse the shared ClickHouse client + creds-from-env handling (no new deps).
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "validation"))
 import chquery as Q  # noqa: E402
+# Layer B schema is the single source of truth for vocab / enum ordering — the
+# report imports it so it stays a drop-in over the session-insight payload.
+sys.path.insert(0, str(Path(__file__).resolve().parent / "session_insight"))
+import schema as SCH  # noqa: E402
 
 DAY = 86400
 DEFAULT_DAYS = 14
+# Qualitative facets (Layer B) accrue slower than raw activity, so the insight
+# sections use a wider default window than the Layer A sections (spec §11).
+DEFAULT_INSIGHT_DAYS = 30
+_LEVERAGE_ORDER = {lv: i for i, lv in enumerate(SCH.LEVERAGES)}
 
 
 class TelemetryUnavailable(Exception):
@@ -167,10 +175,116 @@ def q_insights(win: int, host: str | None = None) -> str:
 
 
 # --------------------------------------------------------------------------- #
+# Layer B (qualitative) aggregation — pure
+# --------------------------------------------------------------------------- #
+def _norm(s) -> str:
+    """Normalize a free-text key for exact-match grouping (lowercase, whitespace-
+    collapsed). Exact-match only — no fuzzy clustering (decision O4 / YAGNI)."""
+    return " ".join(str(s or "").lower().split())
+
+
+def aggregate_insights(insight_rows: list[dict]) -> dict:
+    """Aggregate the Layer B session-insight payloads (spec §11).
+
+    Unreadable rows are EXCLUDED from every qualitative aggregate but counted so
+    the report can footnote them honestly. Automation opportunities are grouped
+    by a normalized (trigger|description) key and ranked leverage (high>med>low)
+    then session-frequency; toil by category, gaps by kind."""
+    outcomes: Counter = Counter()
+    session_types: Counter = Counter()
+    goal_categories: Counter = Counter()
+    friction: Counter = Counter()
+    help_vals: list[int] = []
+    help_hist: dict[int, int] = {i: 0 for i in range(1, 6)}
+    auto_groups: dict = {}
+    toil_groups: dict = {}
+    gap_groups: dict = {}
+    unreadable = 0
+    readable = 0
+
+    for row in insight_rows:
+        p = _parse_payload(row.get("payload"))
+        if p.get("unreadable"):
+            unreadable += 1
+            continue
+        readable += 1
+        if p.get("outcome"):
+            outcomes[p["outcome"]] += 1
+        if p.get("session_type"):
+            session_types[p["session_type"]] += 1
+        for g in p.get("goal_categories") or []:
+            goal_categories[g] += 1
+        for k, v in (p.get("friction_counts") or {}).items():
+            friction[k] += num(v)
+        h = p.get("claude_helpfulness")
+        if isinstance(h, int) and not isinstance(h, bool) and 1 <= h <= 5:
+            help_vals.append(h)
+            help_hist[h] += 1
+
+        ao = p.get("automation_opportunity")
+        if isinstance(ao, dict) and (ao.get("description") or ao.get("trigger")):
+            key = _norm(ao.get("trigger")) + "|" + _norm(ao.get("description"))
+            g = auto_groups.setdefault(key, {
+                "description": ao.get("description", ""),
+                "trigger": ao.get("trigger", ""),
+                "leverage": ao.get("leverage", "low"),
+                "evidence": ao.get("evidence", ""),
+                "sessions": 0})
+            g["sessions"] += 1
+            if not g["evidence"] and ao.get("evidence"):
+                g["evidence"] = ao["evidence"]
+            # keep the highest leverage seen for this opportunity
+            if _LEVERAGE_ORDER.get(ao.get("leverage"), 9) < _LEVERAGE_ORDER.get(g["leverage"], 9):
+                g["leverage"] = ao.get("leverage")
+
+        rt = p.get("recurring_toil")
+        if isinstance(rt, dict) and rt.get("description"):
+            key = _norm(rt.get("category")) + "|" + _norm(rt.get("description"))
+            g = toil_groups.setdefault(key, {
+                "category": rt.get("category", "other"),
+                "description": rt.get("description", ""),
+                "frequency_hints": [], "sessions": 0})
+            g["sessions"] += 1
+            fh = rt.get("frequency_hint")
+            if fh and fh not in g["frequency_hints"]:
+                g["frequency_hints"].append(fh)
+
+        wg = p.get("workflow_gap")
+        if isinstance(wg, dict) and wg.get("description"):
+            key = _norm(wg.get("kind")) + "|" + _norm(wg.get("description"))
+            g = gap_groups.setdefault(key, {
+                "kind": wg.get("kind", ""),
+                "description": wg.get("description", ""), "sessions": 0})
+            g["sessions"] += 1
+
+    automation = sorted(auto_groups.values(),
+                        key=lambda a: (_LEVERAGE_ORDER.get(a["leverage"], 9),
+                                       -a["sessions"]))
+    toil = sorted(toil_groups.values(), key=lambda t: (t["category"], -t["sessions"]))
+    gaps = sorted(gap_groups.values(), key=lambda w: (w["kind"], -w["sessions"]))
+    mean_help = round(sum(help_vals) / len(help_vals), 2) if help_vals else None
+
+    return {
+        "insight_rows": len(insight_rows),
+        "insight_sessions": readable,
+        "unreadable_insights": unreadable,
+        "outcomes": dict(outcomes.most_common()) if readable else None,
+        "session_types": dict(session_types.most_common()),
+        "goal_categories": dict(goal_categories.most_common()),
+        "friction": dict(friction.most_common()),
+        "helpfulness": {"mean": mean_help, "n": len(help_vals), "hist": help_hist},
+        "automation": automation,
+        "toil": toil,
+        "gaps": gaps,
+    }
+
+
+# --------------------------------------------------------------------------- #
 # Aggregate (pure — the testable core)
 # --------------------------------------------------------------------------- #
 def aggregate(summary_rows: list[dict], message_rows: list[dict],
-              insight_rows: list[dict], days: int, host: str | None) -> dict:
+              insight_rows: list[dict], days: int, host: str | None,
+              insight_days: int | None = None) -> dict:
     tool_counts: Counter = Counter()
     languages: Counter = Counter()
     projects: Counter = Counter()
@@ -254,12 +368,8 @@ def aggregate(summary_rows: list[dict], message_rows: list[dict],
                 first_words[w[0]] += 1
 
     # Layer B (qualitative) — present only when PR-2 has emitted it.
-    outcomes: Counter = Counter()
-    for row in insight_rows:
-        p = _parse_payload(row.get("payload"))
-        oc = p.get("outcome")
-        if oc:
-            outcomes[oc] += 1
+    ins = aggregate_insights(insight_rows)
+    eff_insight_days = max(insight_days or DEFAULT_INSIGHT_DAYS, days)
 
     now = _dt.datetime.now(_dt.timezone.utc)
     return {
@@ -283,23 +393,39 @@ def aggregate(summary_rows: list[dict], message_rows: list[dict],
         "top_first_words": first_words.most_common(15),
         "activity_by_day": dict(sorted(by_day.items())),
         "hosts": hosts,
-        "outcomes": dict(outcomes.most_common()) if outcomes else None,
-        "qualitative_pending": not bool(outcomes),
+        # Layer B qualitative aggregates (spec §11).
+        "insight_days": eff_insight_days,
+        "insight_rows": ins["insight_rows"],
+        "insight_sessions": ins["insight_sessions"],
+        "unreadable_insights": ins["unreadable_insights"],
+        "outcomes": ins["outcomes"],
+        "session_types": ins["session_types"],
+        "goal_categories": ins["goal_categories"],
+        "friction": ins["friction"],
+        "helpfulness": ins["helpfulness"],
+        "automation": ins["automation"],
+        "toil": ins["toil"],
+        "gaps": ins["gaps"],
+        "qualitative_pending": ins["insight_rows"] == 0,
     }
 
 
 # --------------------------------------------------------------------------- #
 # Gather
 # --------------------------------------------------------------------------- #
-def gather(client, days: int, host: str | None = None) -> dict:
+def gather(client, days: int, host: str | None = None,
+           insight_days: int | None = None) -> dict:
     win = window_seconds(days)
+    # Layer B uses a wider window than Layer A (qualitative facets accrue slower).
+    iwin = window_seconds(max(insight_days or DEFAULT_INSIGHT_DAYS, days))
     try:
         summaries = client.rows(q_summaries(win, host))
         messages = client.rows(q_messages(win, host))
-        insights = client.rows(q_insights(win, host))
+        insights = client.rows(q_insights(iwin, host))
     except Exception as e:  # noqa: BLE001 — telemetry is optional; degrade cleanly
         raise TelemetryUnavailable(str(e)) from e
-    return aggregate(summaries, messages, insights, days, host)
+    return aggregate(summaries, messages, insights, days, host,
+                     insight_days=insight_days)
 
 
 # --------------------------------------------------------------------------- #
@@ -369,15 +495,71 @@ def render(data: dict) -> str:
         out.append(f"  {h:<10} {hp['sessions']} sessions · {hp['messages']} msgs · "
                    f"{hp['commits']} commits · {hp['output_tokens']:,} out-tokens")
 
-    out.append("\n## OUTCOMES (qualitative — Layer B)")
+    out.append(f"\n## OUTCOMES (qualitative — Layer B · trailing {data['insight_days']}d)")
     if data["qualitative_pending"]:
-        out.append("  qualitative layer pending (PR-2): the owned LLM extractor "
-                   "(goal/outcome/friction) is not emitted yet.")
+        out.append("  (no qualitative insights yet — run session_insight via the activity skill)")
         out.append("  This report shows ONLY deterministic facts — no fabricated outcomes.")
-    else:
-        peak = max(data["outcomes"].values())
-        for oc, cnt in data["outcomes"].items():
-            out.append(f"  {cnt:>4}  {_bar(cnt, peak):<18}  {oc}")
+        return "\n".join(out)
+
+    oc = data["outcomes"] or {}
+    total_oc = sum(oc.values()) or 1
+    peak = max(oc.values(), default=0)
+    for name, cnt in oc.items():
+        out.append(f"  {cnt:>4} {100 * cnt / total_oc:>4.0f}%  {_bar(cnt, peak):<18}  {name}")
+
+    h = data["helpfulness"]
+    if h["n"]:
+        out.append(f"  mean Claude-helpfulness: {h['mean']:.2f}/5  (n={h['n']}; "
+                   "5=materially drove the win … 1=mostly got in the way)")
+        hpeak = max(h["hist"].values(), default=0)
+        for score in (5, 4, 3, 2, 1):
+            c = num(h["hist"].get(score, h["hist"].get(str(score), 0)))
+            out.append(f"    {score}  {_bar(c, hpeak):<18}  {c}")
+
+    def _dist(title, mapping, nmax=10):
+        items = list(mapping.items())[:nmax]
+        if not items:
+            return
+        out.append(f"  {title}:")
+        pk = max((num(v) for _, v in items), default=0)
+        for k, v in items:
+            out.append(f"    {num(v):>4}  {_bar(v, pk):<18}  {k}")
+
+    _dist("session types", data["session_types"])
+    _dist("goal categories", data["goal_categories"])
+    _dist("friction (qualitative interaction tallies)", data["friction"])
+    if data["unreadable_insights"]:
+        out.append(f"  ({data['unreadable_insights']} session(s) flagged unreadable "
+                   "— excluded from the aggregates above)")
+
+    out.append("\n## AUTOMATION CANDIDATES / RECURRING TOIL / WORKFLOW GAPS (leverage-ranked)")
+    out.append("   NOTE: model-surfaced qualitative candidates, NOT measured savings — "
+               "they earn their keep only if reading them changes what you automate.")
+    aut = data["automation"]
+    out.append("  Automation candidates (leverage · sessions):")
+    if not aut:
+        out.append("    (none surfaced)")
+    for a in aut[:12]:
+        out.append(f"    [{a['leverage']:<6} ×{a['sessions']}]  {a['description']}")
+        if a.get("trigger"):
+            out.append(f"        trigger:  {a['trigger']}")
+        if a.get("evidence"):
+            out.append(f"        evidence: {a['evidence']}")
+
+    toil = data["toil"]
+    out.append("  Recurring toil (by category):")
+    if not toil:
+        out.append("    (none surfaced)")
+    for t in toil[:12]:
+        hints = f"  [{', '.join(t['frequency_hints'])}]" if t["frequency_hints"] else ""
+        out.append(f"    {t['category']:<18} ×{t['sessions']}  {t['description']}{hints}")
+
+    gaps = data["gaps"]
+    out.append("  Workflow gaps (by kind):")
+    if not gaps:
+        out.append("    (none surfaced)")
+    for w in gaps[:12]:
+        out.append(f"    {w['kind']:<18} ×{w['sessions']}  {w['description']}")
 
     return "\n".join(out)
 
@@ -409,12 +591,27 @@ def render_html(data: dict) -> str:
         f"<td>{hp['commits']}</td><td>{hp['output_tokens']:,}</td></tr>"
         for h, hp in sorted(data["hosts"].items()))
     if data["qualitative_pending"]:
-        outcomes_html = ('<p class="mut">Qualitative layer pending (PR-2). The owned LLM '
-                         'extractor (goal / outcome / friction + automation opportunities) is not '
-                         'emitted yet. This report shows ONLY deterministic facts — '
-                         '<b>no fabricated outcomes</b>.</p>')
+        outcomes_html = ('<p class="mut">No qualitative insights yet — run '
+                         '<code>session_insight</code> via the activity skill. This report '
+                         'shows ONLY deterministic facts — <b>no fabricated outcomes</b>.</p>')
     else:
-        outcomes_html = _html_bars(data["outcomes"].items(), n=12)
+        parts = [_html_bars((data["outcomes"] or {}).items(), n=12)]
+        h = data["helpfulness"]
+        if h["n"]:
+            parts.append(f'<p class="mut">mean Claude-helpfulness '
+                         f'<b>{h["mean"]:.2f}/5</b> (n={h["n"]})</p>')
+        if data["unreadable_insights"]:
+            parts.append(f'<p class="mut">{data["unreadable_insights"]} session(s) flagged '
+                         'unreadable — excluded from the aggregates.</p>')
+        if data["automation"]:
+            rows = "".join(
+                f'<div class="bar"><span class="bl">{html.escape(a["leverage"])} '
+                f'×{a["sessions"]}</span><span class="bt"><i style="width:100%"></i></span>'
+                f'<span class="bv">{html.escape(a["description"][:80])}</span></div>'
+                for a in data["automation"][:10])
+            parts.append(f'<p class="mut" style="margin-top:12px"><b>Automation candidates '
+                         f'(leverage-ranked)</b></p>{rows}')
+        outcomes_html = "\n".join(parts)
     unreadable_note = ""
     if data["unreadable_sessions"]:
         unreadable_note = (f'<div class="note">{data["unreadable_sessions"]} session(s) '
@@ -497,7 +694,10 @@ Regenerate: <code>insights.py --days {data['days']} --html PATH</code>. Source: 
 def parse_args(argv=None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Telemetry-native Claude Code insights report.")
     p.add_argument("--days", type=int, default=DEFAULT_DAYS,
-                   help=f"trailing window in days (default {DEFAULT_DAYS})")
+                   help=f"trailing window in days for Layer A sections (default {DEFAULT_DAYS})")
+    p.add_argument("--insight-days", type=int, default=None,
+                   help=f"window for the Layer B qualitative sections "
+                        f"(default max({DEFAULT_INSIGHT_DAYS}, --days))")
     p.add_argument("--json", action="store_true", help="machine-readable output")
     p.add_argument("--host", default=None, help="restrict to one host (default: all)")
     p.add_argument("--html", nargs="?", const="__DEFAULT__", default=None,
@@ -523,7 +723,7 @@ def main(argv=None) -> int:
         return 0
     client = Q.CHClient(conn)
     try:
-        data = gather(client, a.days, a.host)
+        data = gather(client, a.days, a.host, insight_days=a.insight_days)
     except TelemetryUnavailable as e:
         print(f"insights: telemetry unavailable ({e}); nothing to report.", file=sys.stderr)
         return 0
