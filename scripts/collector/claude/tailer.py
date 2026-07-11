@@ -34,15 +34,18 @@ unchanged on both workbench + laptop, each tailing its own ~/.claude transcripts
 """
 from __future__ import annotations
 
-import datetime as _dt
 import glob
 import hashlib
 import json
 import os
 import re
 import subprocess
-import sys
 from pathlib import Path
+
+# Shared ts/project/emit/root helpers (DRY with session-tailer.py). Imported by
+# name so the module keeps re-exporting them (T.to_ch_ts / T.project_basename /
+# T.emit_path stay valid for the tests + callers).
+from _shared import emit_path, project_basename, to_ch_ts  # noqa: F401
 
 # --------------------------------------------------------------------------- #
 # Noise-filtering (ported from scripts/session-analysis/extract_user_msgs.py)
@@ -114,35 +117,8 @@ def classify(raw: str) -> tuple[str, str] | None:
 
 
 # --------------------------------------------------------------------------- #
-# Timestamp conversion: ISO8601 (…Z) -> ClickHouse DateTime64(3) local string
-# --------------------------------------------------------------------------- #
-def to_ch_ts(iso: str | None) -> str | None:
-    """Convert a transcript ISO timestamp to emit's '%Y-%m-%d %H:%M:%S.%3N' UTC
-    format (matches emit's `date -u`). Returns None if it cannot be parsed
-    (caller then lets emit auto-fill)."""
-    if not iso:
-        return None
-    s = iso.strip()
-    if s.endswith("Z"):
-        s = s[:-1] + "+00:00"
-    try:
-        dt = _dt.datetime.fromisoformat(s)
-    except ValueError:
-        return None
-    if dt.tzinfo is not None:
-        dt = dt.astimezone(_dt.timezone.utc)  # normalize to the UTC instant
-    return dt.strftime("%Y-%m-%d %H:%M:%S.") + f"{dt.microsecond // 1000:03d}"
-
-
-# --------------------------------------------------------------------------- #
 # Transcript scan
 # --------------------------------------------------------------------------- #
-def project_basename(cwd: str | None) -> str:
-    if not cwd:
-        return ""
-    return os.path.basename(cwd.rstrip("/"))
-
-
 def message_id(obj: dict, session: str, text: str) -> str:
     """Stable identity for dedup. Prefer the line's own uuid; fall back to a hash
     of (session, content) so uuid-less lines are still deduped deterministically."""
@@ -237,17 +213,6 @@ def save_state(path: Path, seen: set[str]) -> None:
 # --------------------------------------------------------------------------- #
 # Emit
 # --------------------------------------------------------------------------- #
-def emit_path() -> str:
-    explicit = os.environ.get("CLAUDE_SOURCE_EMIT")
-    if explicit:
-        return explicit
-    # Prefer the symlinked sibling emit (this file lives in scripts/collector/claude).
-    here = Path(__file__).resolve().parent.parent / "emit"
-    if here.exists():
-        return str(here)
-    return str(Path.home() / ".config/activity-collector/emit")
-
-
 def build_emit_args(ev: dict) -> list[str]:
     payload = json.dumps(
         {

@@ -409,21 +409,37 @@ in
     };
   };
 
-  # Claude Code activity source — periodic oneshot tailer. Type=oneshot (runs the
-  # scan once and exits) driven by the timer below, NOT Restart=always. Stdlib-only
-  # python + the emit helper's bash/coreutils on PATH. No graphical/network dep —
-  # it only reads local transcripts and appends to the local spool, so it runs in
-  # headless/server mode too. Host is stamped by the collector daemon (ACTIVITY_HOST).
+  # Claude Code activity source — periodic oneshot, runs BOTH transcript tailers on
+  # the SAME 5-min cadence (Type=oneshot ExecStart lines run sequentially):
+  #   1. tailer.py         — the MESSAGE STREAM (kind=prompt|command).
+  #   2. session-tailer.py — LAYER A per-session rollups (kind=session-summary):
+  #                          deterministic tool/token/lang/git counts, the
+  #                          telemetry-native replacement for the built-in
+  #                          /insights session-meta cache. NO LLM.
+  # Stdlib-only python + the emit helper's bash/coreutils on PATH. No graphical/
+  # network dep — both only read local transcripts and append to the local spool,
+  # so they run in headless/server mode too. Host is stamped by the collector
+  # daemon (ACTIVITY_HOST). No X-Restart-Triggers: the timer re-runs fresh code
+  # each cycle (a oneshot picks up the new store path on its next fire).
   systemd.user.services.claude-activity-source = {
     Unit = {
-      Description = "Tail Claude Code transcripts → activity spool (source=claude)";
+      Description = "Tail Claude Code transcripts → activity spool (prompts + session summaries)";
     };
     Service = {
       Type = "oneshot";
+      # First run backfills the WHOLE transcript corpus (both tailers scan every
+      # session). That can far exceed systemd's default ~90s start timeout; a
+      # SIGTERM mid-backfill would strand state and re-storm next tick. Give it
+      # room — session-tailer.py also now checkpoints its state incrementally so
+      # an interrupted run still resumes rather than restarts.
+      TimeoutStartSec = 600;
       Environment = [
         "PATH=${lib.makeBinPath [ pkgs.python312 pkgs.coreutils pkgs.bash ]}"
       ];
-      ExecStart = "${pkgs.python312}/bin/python3 %h/.config/activity-collector/claude/tailer.py";
+      ExecStart = [
+        "${pkgs.python312}/bin/python3 %h/.config/activity-collector/claude/tailer.py"
+        "${pkgs.python312}/bin/python3 %h/.config/activity-collector/claude/session-tailer.py"
+      ];
     };
   };
 

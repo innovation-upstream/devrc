@@ -108,8 +108,12 @@ def test_derived_attention_query_is_windowed_and_brave_only():
     assert "Brave-browser" in da.sql
     assert "host = 'laptop'" in da.sql
     assert I.DERIVED_ATTENTION_WINDOW_HOURS == 48
+    # derived_attention_consistent and session_summary_no_orphans are the only
+    # legitimately-windowed invariants (current-health / settled-grace); every
+    # other guards immutable, all-time correctness.
+    windowed_ok = {"derived_attention_consistent", "session_summary_no_orphans"}
     for name, inv in invs.items():
-        if name == "derived_attention_consistent":
+        if name in windowed_ok:
             continue
         assert "now() - INTERVAL" not in inv.sql, f"{name} unexpectedly windowed"
 
@@ -122,6 +126,46 @@ def test_retired_active_ms_invariants_are_gone():
     assert not hasattr(I, "ACTIVE_MS_CAP")
     assert not hasattr(I, "ACTIVE_CAP_WINDOW_HOURS")
     assert not hasattr(I, "eval_per_host_hour_cap")
+
+
+# --------------------------------------------------------------------------- #
+# Layer-A session-summary invariants (session-tailer.py)
+# --------------------------------------------------------------------------- #
+def test_session_summary_invariants_registered():
+    names = {inv.name for inv in I.build_invariants("activity.events")}
+    assert "session_summary_wellformed" in names
+    assert "session_summary_no_orphans" in names
+
+
+def test_session_summary_wellformed_sql_checks_required_keys():
+    sql = I.session_summary_wellformed_sql("activity.events")
+    assert "kind='session-summary'" in sql
+    assert "NOT (" in sql
+    for key in I.SUMMARY_REQUIRED_KEYS:
+        assert f"JSONHas(toString(payload),'{key}')" in sql
+    # all-time (guards immutable correctness) — NOT trailing-windowed
+    assert "now() - INTERVAL" not in sql
+    assert "unreadable" in I.SUMMARY_REQUIRED_KEYS
+
+
+def test_session_summary_orphans_sql_is_settled_and_layer_a_scoped():
+    sql = I.session_summary_orphans_sql("activity.events")
+    # settled-grace window + Layer-A-era gate (vacuous before the first summary)
+    assert f"INTERVAL {I.SUMMARY_ORPHAN_GRACE_HOURS} HOUR" in sql
+    assert "first_summary" in sql
+    assert "last_ts >= first_summary" in sql
+    assert "kind IN ('prompt','command')" in sql
+    assert "NOT IN (SELECT session" in sql
+
+
+def test_session_summary_invariants_use_zero_violations_evaluator():
+    invs = {inv.name: inv for inv in I.build_invariants("activity.events")}
+    # 0 violations -> PASS, N>0 -> FAIL, NULL -> PASS (vacuous)
+    for name in ("session_summary_wellformed", "session_summary_no_orphans"):
+        ev = invs[name].evaluate
+        assert ev(0)[0] is True
+        assert ev(4)[0] is False
+        assert ev(None)[0] is True
 
 
 # --------------------------------------------------------------------------- #

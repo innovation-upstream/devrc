@@ -61,6 +61,20 @@ DERIVED_ATTENTION_WINDOW_HOURS = 48
 EXPECTED_HOSTS = {"workbench", "laptop"}
 EXPECTED_SOURCES = {"zsh", "tmux", "keys", "browser", "claude", "i3"}
 
+# Layer-A session-summary invariants (scripts/collector/claude/session-tailer.py).
+# Required payload keys every well-formed session-summary rollup must carry (a
+# subset that consumers — insights.py, PR-2 — rely on). A row missing ANY is a bug.
+SUMMARY_REQUIRED_KEYS = (
+    "tool_counts", "user_message_count", "assistant_message_count",
+    "input_tokens", "output_tokens", "unreadable",
+)
+# A session with prompt events but no summary is only an ORPHAN once it has SETTLED
+# (no new turn for this long) AND we are in the Layer-A era (its last prompt is at
+# or after the first summary ever emitted) — otherwise a just-started session or the
+# entire pre-deploy prompt history would false-positive. Grace absorbs the 5-min
+# tailer cadence + ingestion lag.
+SUMMARY_ORPHAN_GRACE_HOURS = 2
+
 
 @dataclass
 class Invariant:
@@ -203,6 +217,51 @@ def derived_attention_sql(table: str = "activity.events",
 
 
 # --------------------------------------------------------------------------- #
+# Layer-A session-summary SQL (well-formedness + orphan check)
+# --------------------------------------------------------------------------- #
+def session_summary_wellformed_sql(table: str = "activity.events",
+                                   keys: tuple = SUMMARY_REQUIRED_KEYS) -> str:
+    """Count session-summary rows whose payload is MISSING any required key.
+
+    Each session-summary payload is a deterministic rollup (session-tailer.py); a
+    row missing a required key means the emitter regressed or a foreign writer put
+    a malformed row on `kind=session-summary`. All-time (guards immutable
+    correctness). JSONHas works on the payload JSON string."""
+    has = " AND ".join(f"JSONHas(toString(payload),'{k}')" for k in keys)
+    return (
+        f"SELECT count() FROM {table} "
+        "WHERE source='claude' AND kind='session-summary' "
+        f"AND NOT ({has})"
+    )
+
+
+def session_summary_orphans_sql(table: str = "activity.events",
+                                grace_hours: int = SUMMARY_ORPHAN_GRACE_HOURS) -> str:
+    """Count SETTLED, Layer-A-era prompt sessions that have NO session-summary.
+
+    Every session carrying prompt/command events should also get a Layer-A summary
+    (the tailer scans the same transcripts on a 5-min timer). We flag a session as
+    an orphan only when (a) it has settled — no new turn for `grace_hours` — and
+    (b) it is in the Layer-A era: its last prompt is at/after the FIRST summary ever
+    emitted. Before Layer A ships, `first_summary` is NULL, `last_ts >= NULL` is
+    NULL, and every candidate is excluded → vacuous PASS on the whole prompt
+    backlog. (`ts` is UTC vs now() UTC — the grace edge is exact.)"""
+    return (
+        f"WITH (SELECT min(ts) FROM {table} WHERE source='claude' "
+        "AND kind='session-summary') AS first_summary "
+        "SELECT count() FROM ("
+        f"SELECT session, max(ts) AS last_ts FROM {table} "
+        "WHERE source='claude' AND kind IN ('prompt','command') "
+        "GROUP BY session "
+        f"HAVING last_ts < now() - INTERVAL {grace_hours} HOUR "
+        "AND last_ts >= first_summary "
+        f"AND session NOT IN (SELECT session FROM {table} "
+        "WHERE source='claude' AND kind='session-summary')"
+        ")"
+    )
+
+
+# --------------------------------------------------------------------------- #
 # The battery
 # --------------------------------------------------------------------------- #
 def build_invariants(table: str = "activity.events") -> list[Invariant]:
@@ -263,6 +322,20 @@ def build_invariants(table: str = "activity.events") -> list[Invariant]:
             # (e.g. the headless workbench has no i3/browser rows).
             derived_attention_sql(table),
             eval_derived_attention,
+        ),
+        Invariant(
+            "session_summary_wellformed",
+            # Layer A: every session-summary payload carries the required rollup
+            # keys consumers depend on (insights.py + PR-2). All-time.
+            session_summary_wellformed_sql(table),
+            eval_zero_violations("session-summary payload missing required key(s)"),
+        ),
+        Invariant(
+            "session_summary_no_orphans",
+            # Layer A: no SETTLED, Layer-A-era prompt session is missing its
+            # summary (see session_summary_orphans_sql — vacuous before deploy).
+            session_summary_orphans_sql(table),
+            eval_zero_violations("prompt session(s) with no session-summary"),
         ),
     ]
 

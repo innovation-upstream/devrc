@@ -39,7 +39,12 @@ validate.py     — runner (invariants + reconcile always; replay+assert with --
   tz-slack window — see below), `duration_ms >= 0`, `duration_ms` within the 24h
   garbage cap, only expected host/source values, ts not clock-skewed-ancient,
   and the **`derived_attention_consistent`** check (see *Retired metric* below).
-  Surfaces ingestion lag as a collector-health proxy.
+  Plus the Layer-A guards **`session_summary_wellformed`** (every
+  `kind=session-summary` payload carries the required rollup keys) and
+  **`session_summary_no_orphans`** (no SETTLED, Layer-A-era prompt session is
+  missing its summary — vacuous before Layer A is deployed, since the check gates
+  on the first summary ever emitted). Surfaces ingestion lag as a collector-health
+  proxy.
 
 ### Retired metric: browser extension `active_ms`
 The browser extension's per-page `active_ms` was **structurally wrong on the i3
