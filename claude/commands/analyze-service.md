@@ -93,10 +93,10 @@ Recon stays **read-only by default** — the index is mutated only when a run su
 - Config **values** (replica counts, image tags, env) — re-derived live, never persisted.
 - Anything already captured verbatim by a pointer target — add/keep the pointer, don't copy the content.
 
-**Auto-discovered pointers** (propose in the diff, still confirm-gated — a bad grep match must be rejectable):
-- `manage-* skill`: match the service name against skill names/descriptions in `.claude/skills/*/SKILL.md` (e.g. `redis`→`manage-redis`).
-- `MEMORY.md slug`: grep the project memory dir for slugs mentioning the service; propose top matches.
-- `claudedocs handoff`: grep `claudedocs/` filenames for the service.
+**Auto-discovered pointers** (propose in the diff, still confirm-gated — a bad match must be rejectable). Curate the starting set — **propose at most ~5-7 candidates, never a raw match list**; the human still confirms/rejects each in the diff, but a dump is unusable:
+- `manage-* skill`: match the service name against skill names/descriptions in `.claude/skills/*/SKILL.md` (e.g. `redis`→`manage-redis`). Skill-name matching is already precise — keep as-is.
+- `MEMORY.md slug`: **filename-match first** — propose slugs whose *filename* contains the normalized service token (or one of the index file's `aliases`), e.g. `*redis*.md`; these are the slugs actually ABOUT the service and are the primary signal. **Only if that yields <3**, fall back to content-grep of the memory dir — but **rank candidates by mention count / density and propose only the top few**, never the raw `grep -il` list (naive content-grep is far too broad: `redis` returns ~90 slugs vs ~15 actually redis-centric).
+- `claudedocs handoff`: same spirit — **prefer handoff filenames containing the normalized service token**; only density-rank a content-grep fallback if filename-match is too thin, and cap the proposal count.
 
 **Bloat discipline** (mirrors the `MEMORY.md` memory-hygiene rules):
 - **Pointers, not copies** — `## Pointers` is paths/slugs + a one-clause why; domain detail stays in the skill/slug/handoff it points at.
