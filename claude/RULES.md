@@ -96,6 +96,16 @@ Derived from auditing 232 sessions: 1,712 preventable errors + a ~1,000× redund
 - **Clean up**: remove temp files/artifacts before finishing; never leave anything that could be accidentally committed.
 - **Respect the framework**: check deps (package.json etc.) before using a library; follow existing conventions and import style.
 
+## Memory Hygiene 🟡
+**Triggers**: writing to a project's auto-memory (`MEMORY.md` / `memory/` files); after finishing a piece of work
+
+The auto-loaded `MEMORY.md` index costs tokens **every session** and has a hard byte cap (content past it is silently dropped on load). Topic files and skill bodies cost 0 until recalled/triggered — so the only per-session lever is keeping the index minimal.
+
+- **Work-STATUS/progress does NOT belong in `MEMORY.md`** — shipped/verified/PR#/deployed/soaking state goes in a `claudedocs/` (or repo) handoff doc. An index entry is a durable *lesson*, not a status line; **prune it to `ARCHIVE.md` the moment the work ships.** Status re-bloat is the #1 cause of hitting the cap.
+- **Domain ops-gotchas go in the matching skill** (`.claude/skills/<name>/SKILL.md`), not the index — the skill loads deterministically on trigger; re-loading it from the index is pure per-session cost.
+- **`MEMORY.md` is only for cross-cutting lessons that map to NO skill** (git/shell/language/tooling tripwires).
+- **Prune before you add**: if the index is near its cap, archive/dedupe first — don't just append.
+
 ## Temporal Awareness 🔴
 **Triggers**: date/time references, version checks, "latest" keywords
 
