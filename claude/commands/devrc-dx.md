@@ -18,7 +18,7 @@ description: "Analyze and improve developer experience across NixOS, home-manage
 Scopes:
   all              Full stack analysis (default)
   tmux             Tmux config, plugins, scripts, status bar, task management
-  i3               i3 config, i3blocks, keybindings, bar
+  i3               i3 config + i3status-rust bar + dunst (all home-manager), keybindings
   shell            Zsh, bash, direnv, session variables, PATH
   theme            Gruvbox consistency across all components
   nix              Home-manager and NixOS config hygiene
@@ -44,7 +44,7 @@ Read all config sources — do NOT assume locations, discover them:
 - `nix/system/` — staged NixOS config changes + apply scripts
 - `.tmux.conf` — extra tmux config loaded via `builtins.readFile` in tmux/default.nix
 - `.zshrc` — extra zsh config loaded via `builtins.readFile` in zsh/default.nix
-- `scripts/` — tmux scripts (task-hook, task-resume, activity-receiver — thin wrappers over fuzzyclaw; scratch-picker, scratch-status, scratch-monitor, claude-counters, initiatives), i3blocks-*, dictation
+- `scripts/` — tmux scripts (task-hook, task-resume, activity-receiver — thin wrappers over fuzzyclaw; scratch-picker, scratch-status, scratch-monitor, claude-counters; `agent-ops` dashboard) + the i3status-rust bar scripts (`i3status-*` block scripts, `bar-status-poll`, `i3blocks-rigcontrol`/`i3blocks-agent-ops` launchers). (`tmux-initiatives.sh` + `dictation` were removed 2026-07.)
 - `nix/pkgs/tools/tmux-fuzzyclaw.nix` — Nix buildGoModule package for fuzzyclaw Go binary
 
 **Claude Code task management system (upstream: [ZacxDev/tmux-fuzzyclaw](https://github.com/ZacxDev/tmux-fuzzyclaw)):**
@@ -63,11 +63,13 @@ Read all config sources — do NOT assume locations, discover them:
 - `~/.tmux/tasks/*.json` — Task state files keyed by tmux window ID
 - For fuzzyclaw-specific development/debugging, use `/fuzzyclaw` skill in the tmux-fuzzyclaw repo
 
+**i3 + status bar — home-manager since 2026-07 (PR #74); NOT /etc/nixos anymore:**
+- `nix/i3/config.nix` — the i3 config (raw string → `~/.config/i3/config`); keybinds incl. `$mod+i` → agent-ops
+- `nix/graphical.nix` — the **i3status-rust** bar (`programs.i3status-rust`, gruvbox, nerd-font icons) + `services.dunst` + the `bar-status-poll` systemd user timer feeding the count blocks
+- ⚠ the old `/etc/nixos/{i3config.nix,i3blocks.nix,i3blocks-scripts/}` are **RETIRED** — edit the bar/i3 in home-manager, never /etc/nixos
+
 **System (NixOS at /etc/nixos/):**
-- `configuration.nix` — system packages, services, i3, PipeWire audio, NVIDIA GPU, k3s, networking
-- `i3config.nix` — i3 keybindings, launcher, bar config (nix string returning i3 config)
-- `i3blocks.nix` — status bar block definitions (nix string returning i3blocks INI)
-- `i3blocks-scripts/` — compiled/shell status bar scripts (bandwidth, battery, calendar, cpu_usage, etc.)
+- `configuration.nix` — system packages, services, display-manager (lightdm `none+i3`, i3 *enabled* but config now in home-manager), PipeWire audio, NVIDIA GPU, k3s, networking
 
 ### 2. Analyze Each Layer
 For each scope, check for these categories of issues:
@@ -348,7 +350,8 @@ dead code still symlinked by `home.nix`; safe to remove when convenient.
 | Task scripts | home-manager (file symlinks) | ~/workspace/devrc/scripts/ → ~/.config/tmux/ |
 | Claude hooks | Claude settings | ~/.claude/settings.json |
 | Task state | Runtime | ~/.tmux/tasks/*.json |
-| i3, i3blocks, system pkgs | NixOS | /etc/nixos/ |
+| i3 config + i3status-rust bar | home-manager | ~/workspace/devrc/nix/i3/config.nix, nix/graphical.nix |
+| System pkgs, i3 *enablement*, display-manager | NixOS | /etc/nixos/ |
 | Staged NixOS changes | devrc repo | ~/workspace/devrc/nix/system/ |
 | Audio (PipeWire) | NixOS | /etc/nixos/configuration.nix |
 | GPU (NVIDIA beta) | NixOS | /etc/nixos/configuration.nix |
@@ -391,7 +394,7 @@ dead code still symlinked by `home.nix`; safe to remove when convenient.
   was a real footgun on the scratch bindings before being corrected. The global
   `popup-border-style` is overridden by `-S` per-popup.
 - Picom compositor is disabled — conflicts with NVIDIA `forceFullCompositionPipeline`,
-  causing window and i3blocks flicker on workspace switching.
+  causing window and status-bar flicker on workspace switching.
 - Multi-byte UTF-8 emoji (🔄⏸✅) must use `sed -E` alternation `(🔄|⏸|✅)` not
   character classes `[🔄⏸✅]` which fail on multi-byte sequences. (Now mostly vestigial:
   hooks no longer put emoji in window names, so the strip in `tmux-task-hook.sh` is a
