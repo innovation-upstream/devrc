@@ -128,9 +128,10 @@ let
   # i3status-rs` to refresh exactly this block the instant it writes.
   alertsBlock = {
     block = "custom";
-    # --red-above: neutral at/below the standing homelab backlog (~23), red only
-    # when the firing count climbs ABOVE it (something new). Tune as the baseline drifts.
-    command = "${scriptsDir}/i3status-alerts --red-above 30";
+    # --red-above: neutral at/below the standing homelab backlog (~24-27 as of
+    # 2026-07-11, all known noise), red only when the count climbs ABOVE it. Tune as
+    # the baseline drifts. (civitai's stays low deliberately — its growth is real.)
+    command = "${scriptsDir}/i3status-alerts --red-above 34";
     json = true;
     interval = 30;
     signal = 13;
