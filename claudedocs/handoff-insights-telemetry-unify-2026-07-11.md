@@ -58,12 +58,18 @@ grouped by `session`.** State file (per-transcript signature):
 - **NOT deployed / not switched.** No live `session-summary` rows exist until
   `ship.sh` converges both hosts. Do NOT `home-manager switch` from the agent.
 
-## PR-2 plan (next)
-- **Owned LLM extractor** via headless `claude -p` (no built-in `/insights` LLM,
-  no confabulation): read a transcript, emit `kind=session-insight` with an
-  ENRICHED schema — goal, outcome, friction PLUS `automation_opportunity`,
-  `recurring_toil`, `workflow_gap`. **MANUAL trigger** (the only $/LLM piece),
-  like `mail-actions/extract.py run` — NOT on the 5-min timer.
+## PR-2 plan (next) — see full spec: claudedocs/spec-insights-telemetry-pr2-2026-07-11.md
+- **Owned qualitative extractor driven by the LIVE Claude Code session** (NOT
+  `claude -p`, NOT an external API — decision locked with Zach). Deterministic
+  Python does the plumbing (select settled+un-extracted sessions → secret-scrub →
+  attach Layer A rollup as GROUND TRUTH → write staging inputs; then validate +
+  `emit` the results); the session running the `activity` skill performs the
+  extraction step (inline, or Agent-tool fan-out for a backlog). Emits
+  `kind=session-insight` with the ENRICHED schema — goal, outcome, friction PLUS
+  `automation_opportunity`, `recurring_toil`, `workflow_gap`. **MANUAL** only
+  (operated via the `activity` skill; no timer). Anti-confabulation contract:
+  the model may NOT invent/restate counts (kills the built-in's "500-token max"
+  failure) and must flag `unreadable` honestly.
 - Fold outcomes into `insights.py` OUTCOMES (already reads `session-insight` if
   present) + document in the `activity` skill.
 - Consider back-emitting Layer A over the existing transcript history once on
