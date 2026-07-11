@@ -1,5 +1,10 @@
 """scrub — every SECRET_PATTERN redacted + labelled + counted; private-key block
 redacted; internal IPs survive; public IPs redacted only when enabled."""
+import ast
+from pathlib import Path
+
+import pytest
+
 import scrub
 
 
@@ -74,3 +79,42 @@ def test_version_string_not_treated_as_ip():
 
 def test_empty_text():
     assert scrub.scrub("") == ("", {})
+
+
+# --------------------------------------------------------------------------- #
+# FIX 4 — best-effort drift guard against the vendored source of truth.
+# --------------------------------------------------------------------------- #
+_BASH_GUARD = Path.home() / ".claude" / "hooks" / "bash-guard.py"
+
+
+def _bash_guard_patterns():
+    """Extract the regex strings from bash-guard.py's SECRET_PATTERNS literal by
+    parsing the module (never executing it)."""
+    tree = ast.parse(_BASH_GUARD.read_text(encoding="utf-8"))
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Assign)
+                and any(getattr(t, "id", None) == "SECRET_PATTERNS"
+                        for t in node.targets)
+                and isinstance(node.value, ast.List)):
+            pats = []
+            for elt in node.value.elts:            # each elt is (regex, label)
+                if isinstance(elt, ast.Tuple) and elt.elts:
+                    lit = ast.literal_eval(elt.elts[0])
+                    if isinstance(lit, str):
+                        pats.append(lit)
+            return pats
+    return []
+
+
+def test_patterns_cover_bash_guard():
+    """scrub.py's pattern set must be a SUPERSET of bash-guard's SECRET_PATTERNS.
+    Skipped on a fresh checkout where the hook file is absent (so CI is green)."""
+    if not _BASH_GUARD.exists():
+        pytest.skip(f"{_BASH_GUARD} absent (vendored source not on this host)")
+    theirs = _bash_guard_patterns()
+    assert theirs, "could not parse SECRET_PATTERNS from bash-guard.py"
+    ours = {rx.pattern for rx, _label in scrub.SECRET_PATTERNS}
+    missing = [p for p in theirs if p not in ours]
+    assert not missing, (
+        "scrub.py drifted from bash-guard.py — these SECRET_PATTERNS are no "
+        f"longer covered: {missing}")

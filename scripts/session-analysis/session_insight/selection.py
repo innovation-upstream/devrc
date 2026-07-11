@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""select — pick SETTLED + un-extracted sessions to extract (spec §4/§5).
+"""selection — pick SETTLED + un-extracted sessions to extract (spec §4/§5).
+
+(Named `selection`, not `select`, so it never shadows the stdlib `select`
+module — a same-named file on sys.path[0] breaks urllib/selectors/subprocess.)
 
 All the ClickHouse access is in `select_candidates` (thin I/O); the decision
 logic is the pure `choose()` (unit-tested with fixture rows + synthetic mtimes,

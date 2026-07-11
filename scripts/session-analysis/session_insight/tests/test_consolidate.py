@@ -70,3 +70,15 @@ def test_no_quarantine_when_disabled(tmp_path):
     consolidate.consolidate(["s1"], tmp_path, quarantine=False)
     assert (tmp_path / "s1.result.json").exists()   # left in place
     assert not (tmp_path / "rejected").exists()
+
+
+def test_orphan_result_reported_not_dropped(tmp_path):
+    # a result whose echoed `session` matches NO expected candidate → orphan.
+    _drop(tmp_path, "s1", _valid("s1"))
+    _drop(tmp_path, "stray", _valid("stray"))
+    r = consolidate.consolidate(["s1"], tmp_path)
+    assert [i["session"] for i in r["emitted_ok"]] == ["s1"]
+    assert [o["session"] for o in r["orphans"]] == ["stray"]
+    assert r["orphans"][0]["paths"][0].endswith("stray.result.json")
+    # an all-expected run has no orphans
+    assert consolidate.consolidate(["s1", "stray"], tmp_path)["orphans"] == []

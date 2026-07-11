@@ -13,8 +13,11 @@ Rules (spec §9):
                (forces a clean re-run for that session).
   * SCHEMA   — each result validated via schema.validate; a failing result is
                QUARANTINED (moved to `<results>/rejected/`) and reported.
+  * ORPHAN   — a result whose echoed `session` matches NO expected candidate
+               (mis-named file, stale re-run, wrong run-id) → reported so it is
+               never silently dropped; NOT emitted.
 
-Returns `{emitted_ok, missing, conflicts, rejected}`.
+Returns `{emitted_ok, missing, conflicts, rejected, orphans}`.
 """
 from __future__ import annotations
 
@@ -68,6 +71,13 @@ def consolidate(expected_sessions: list[str], results_path,
     conflicts: list[str] = []
     rejected: list[dict] = []
 
+    expected_set = set(expected_sessions)
+    orphans: list[dict] = [
+        {"session": key, "paths": [str(p) for p, _pl, _e in entries]}
+        for key, entries in sorted(groups.items())
+        if key not in expected_set
+    ]
+
     for session in expected_sessions:
         entries = groups.get(session, [])
         if not entries:
@@ -97,7 +107,7 @@ def consolidate(expected_sessions: list[str], results_path,
         })
 
     return {"emitted_ok": emitted_ok, "missing": missing,
-            "conflicts": conflicts, "rejected": rejected}
+            "conflicts": conflicts, "rejected": rejected, "orphans": orphans}
 
 
 def _quarantine(path: Path, do_move: bool) -> None:

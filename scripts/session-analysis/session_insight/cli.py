@@ -12,8 +12,10 @@ Subcommands (operated via the `activity` skill — see its SKILL.md):
            truth, write staging/<run-id>/*.input.json. Prints the run-id + the
            input paths for the LIVE SESSION to extract from.
 
-  write    --run-id <id> [--force] [--clean] [--json]
+  write    --run-id <id> [--force] [--clean] [--keep] [--json]
            consolidate the result.json files → validate → emit (no CH read).
+           Emitted sessions are purged per-session (--keep opts out; --clean
+           purges the whole run).
 
 CH creds come from the env (CLICKHOUSE_URL/USER/PASSWORD — reader creds via
 SOPS; see the activity skill), reusing chquery exactly like activity-scan.py.
@@ -21,38 +23,20 @@ Degrades gracefully when telemetry is unconfigured/unreachable (message + exit 0
 """
 from __future__ import annotations
 
-# When run as a script, THIS dir is sys.path[0] and it contains `select.py`,
-# which would shadow the stdlib `select` module that urllib/selectors import
-# lazily (breaking any socket use). Import the real stdlib `select` FIRST — with
-# our dir temporarily off the path — so it wins in sys.modules before anything
-# below pulls in urllib (via chquery).
-import os as _os
-import sys as _sys
-_HERE = _os.path.dirname(_os.path.abspath(__file__))
-_saved_path = list(_sys.path)
-_sys.path = [p for p in _sys.path
-             if _os.path.abspath(p or _os.getcwd()) != _HERE]
-import select as _stdlib_select  # noqa: F401,E402  (now the real stdlib module)
-_sys.path = _saved_path
+import argparse
+import json
+import os
+import sys
 
-import argparse  # noqa: E402
-import importlib.util  # noqa: E402
-import json  # noqa: E402
-import os  # noqa: E402
-import sys  # noqa: E402
-from pathlib import Path  # noqa: E402
+# `selection` is a plain module import (it wires chquery + _shared onto sys.path
+# as a side effect). It is deliberately NOT named `select.py` — a same-named
+# file on sys.path[0] would shadow the stdlib `select` module that
+# urllib/selectors/subprocess import lazily, so no import-order dance is needed.
+import selection as sel
 
-# Load select.py under a distinct name: the bare name `select` is a stdlib module
-# (imported at interpreter startup), so `import select` would resolve to THAT.
-# Loading by file path also runs select.py's sys.path wiring (chquery + _shared).
-_sel_spec = importlib.util.spec_from_file_location(
-    "si_select", Path(__file__).resolve().parent / "select.py")
-sel = importlib.util.module_from_spec(_sel_spec)
-_sel_spec.loader.exec_module(sel)
-
-import chquery as Q           # noqa: E402  (put on sys.path by select.py above)
-from prepare import new_run_id, prepare_run, DEFAULT_CHUNK_CHARS  # noqa: E402
-from write import write_run   # noqa: E402
+import chquery as Q           # noqa: E402  (put on sys.path by `selection` above)
+from prepare import new_run_id, prepare_run, DEFAULT_CHUNK_CHARS
+from write import write_run
 
 DEFAULT_DAYS = 14
 DEFAULT_LIMIT = 20
@@ -166,11 +150,17 @@ def cmd_prepare(a) -> int:
 
 def cmd_write(a) -> int:
     try:
-        summary = write_run(a.run_id, force=a.force, clean=a.clean)
+        summary = write_run(a.run_id, force=a.force, clean=a.clean, keep=a.keep)
     except FileNotFoundError:
+        # ONLY the missing manifest reaches here — a failed emit is caught inside
+        # write_run and reported in summary["failed"], not raised.
         print(f"session_insight: no such run-id {a.run_id!r} "
               "(run `prepare` first, or check the id).", file=sys.stderr)
         return 2
+    except Exception as e:  # noqa: BLE001 — report cleanly, never a bare traceback
+        print(f"session_insight: write failed for run {a.run_id!r}: "
+              f"{type(e).__name__}: {e}", file=sys.stderr)
+        return 1
     if a.json:
         print(json.dumps(summary, indent=2))
     else:
@@ -187,8 +177,22 @@ def cmd_write(a) -> int:
             print("  REJECTED (schema-invalid, quarantined):")
             for r in summary["rejected"]:
                 print(f"    - {r['session']}: {r['errors']}")
+        if summary.get("orphans"):
+            print("  ORPHANS (result matches no expected session — not emitted):")
+            for o in summary["orphans"]:
+                print(f"    - {o['session']}: {o['paths']}")
+        if summary.get("failed"):
+            print("  EMIT-FAILED (retry):")
+            for f in summary["failed"]:
+                print(f"    - {f['session']}: {f['error']}")
         if summary.get("warnings"):
             print(f"  vocab warnings: {summary['warnings']}")
+        if summary.get("purged"):
+            print(f"  purged (emitted → input+result removed): {summary['purged']}")
+        if summary.get("retained"):
+            print("  retained on disk (need a re-run):")
+            for sess, why in sorted(summary["retained"].items()):
+                print(f"    - {sess}: {why}")
         if summary.get("cleaned"):
             print("  cleaned staging + results dirs")
     return 0
@@ -235,6 +239,9 @@ def parse_args(argv=None) -> argparse.Namespace:
                     help="re-emit even sessions already emitted for this run")
     wr.add_argument("--clean", action="store_true",
                     help="purge the run's staging + results dirs on a fully clean run")
+    wr.add_argument("--keep", action="store_true",
+                    help="do NOT purge emitted sessions' input/result files "
+                         "(default: emitted sessions are cleaned per-session)")
     wr.add_argument("--json", action="store_true", help="machine-readable output")
     wr.set_defaults(func=cmd_write)
     return p.parse_args(argv)

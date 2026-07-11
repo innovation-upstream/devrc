@@ -43,7 +43,7 @@ The division of labour is fixed by decision: **deterministic Python does all plu
                           │                         session_insight/)                   │
                           └──────────────────────────────────────────────────────────┘
                                               │
-  activity.events (CH) ── select.py ─────────┤  select settled + un-extracted sessions
+  activity.events (CH) ── selection.py ─────────┤  select settled + un-extracted sessions
   (session-summary rows,                     │    · has a session-summary row (ground truth exists)
    session-insight rows,                     │    · settled: no new activity for N hours
    message stream)                           │    · no session-insight row (unless --force)
@@ -91,7 +91,7 @@ New package (underscore name so it is importable and `-m`-runnable; mirrors the 
 scripts/session-analysis/session_insight/
   __init__.py
   cli.py          entrypoint: subcommands `status` | `prepare` | `write`; flags below
-  select.py       settled + un-extracted session selection (queries CH + transcript mtime)
+  selection.py       settled + un-extracted session selection (queries CH + transcript mtime)
   prepare.py      build + write per-session input.json (scrub, chunk, attach ground truth)
   scrub.py        secret / private-key / (opt) public-IP redaction — patterns vendored from bash-guard
   schema.py       session-insight payload schema, controlled vocabularies, validation, constants
@@ -100,7 +100,7 @@ scripts/session-analysis/session_insight/
   consolidate.py  merge/verify result files from a subagent fan-out (union by session, conflict/missing checks)
   tests/
     __init__.py
-    test_select.py        settled/un-extracted logic over fixture rows + mtimes
+    test_selection.py        settled/un-extracted logic over fixture rows + mtimes
     test_scrub.py         redaction of each secret pattern; internal IP left intact
     test_prepare.py       input.json shape, ground-truth embedding, chunk boundaries
     test_schema.py        validation: enums, required fields, unreadable path, bad payloads rejected
@@ -212,7 +212,7 @@ Detection is belt-and-suspenders, all deterministic:
 
 1. **Ground truth exists** — the session has a `session-summary` row (Layer A). Without it there is no rollup to inject, so it is not yet a candidate.
 2. **Last activity age** — `now() - last_activity_ts > N hours`, where `last_activity_ts = max(ts)` for that `session` across `source='claude'` rows (message stream + session-summary). Prefer the Layer A rollup's `end_ts` when present; fall back to `max(ts)`.
-3. **Transcript mtime** — the transcript file's mtime is also older than `N` hours (guards against a rollup emitted mid-session; the message tailer runs on a 5-min timer so `ts` can lag the live file). `select.py` resolves the transcript path via `_shared.iter_transcripts` and `os.stat().st_mtime`.
+3. **Transcript mtime** — the transcript file's mtime is also older than `N` hours (guards against a rollup emitted mid-session; the message tailer runs on a 5-min timer so `ts` can lag the live file). `selection.py` resolves the transcript path via `_shared.iter_transcripts` and `os.stat().st_mtime`.
 
 A session is a **candidate** iff (1) ∧ (2) ∧ (3) ∧ not-already-extracted (§5). `--settle-hours 0` disables the settle gate (for testing a specific just-finished session).
 
@@ -449,12 +449,12 @@ CLICKHOUSE_URL=… CLICKHOUSE_USER=activity_reader CLICKHOUSE_PASSWORD=… \
 All Python is unit-testable with **no live ClickHouse and no live LLM**. Follow the repo idiom: pure logic separated from I/O; `chquery`/`emit`/CH access injected. The LLM step is mocked by dropping fixture `result.json` files into a fake `results/<run-id>/` dir.
 
 **Unit-testable (must all be covered):**
-1. **Selection / settled logic** (`test_select.py`): fixture `session-summary` rows + synthetic transcript mtimes → assert candidate set respects (has-rollup ∧ settled ∧ not-extracted); `--settle-hours 0` bypass; `--days` window; `--limit` truncation + over-limit skip-log entries.
+1. **Selection / settled logic** (`test_selection.py`): fixture `session-summary` rows + synthetic transcript mtimes → assert candidate set respects (has-rollup ∧ settled ∧ not-extracted); `--settle-hours 0` bypass; `--days` window; `--limit` truncation + over-limit skip-log entries.
 2. **Scrubber** (`test_scrub.py`): each `SECRET_PATTERNS` entry redacted with correct label + count; private-key block redacted; internal RFC1918/nebula IP SURVIVES with `--redact-public-ips` off; a public IP redacted when on.
 3. **Ground-truth prep + input.json contract** (`test_prepare.py`): `ground_truth` embedded verbatim from the (mocked) argMax query; chunk boundaries never split a message; `chunk_count`/`redaction_counts` present; the schema/anti-confab block present; file written under `staging/<run-id>/`.
 4. **Schema validation** (`test_schema.py`): valid payload passes; bad `outcome`/`session_type`/`leverage`/`workflow_gap.kind` rejected; `unreadable=true` requires non-empty `unreadable_reason`; null vs husk facets both handled; out-of-vocab `goal_categories` → soft warning not hard fail.
 5. **Writer / emit arg shape** (`test_write.py`): `subprocess.run` mocked → assert argv is exactly `emit source=claude kind=session-insight b64:session=… b64:project=… b64:cwd=… b64:text=… b64:payload=… ts=…`, payload round-trips through JSON, `ts` = rollup `end_ts` in CH format.
-6. **Idempotency + `--force`** (`test_write.py`/`test_select.py`): a session already having a `session-insight` row is skipped by prepare; `--force` re-prepares; re-write emits a second row (argMax-newer) — assert no delete path exists; a prior `unreadable` row is re-attempted only when transcript mtime is newer.
+6. **Idempotency + `--force`** (`test_write.py`/`test_selection.py`): a session already having a `session-insight` row is skipped by prepare; `--force` re-prepares; re-write emits a second row (argMax-newer) — assert no delete path exists; a prior `unreadable` row is re-attempted only when transcript mtime is newer.
 7. **Unreadable path** (`test_write.py`): a fixture result with `unreadable=true` IS emitted (not dropped) with empty qualitative fields + reason.
 8. **Report aggregation** (`test_insights.py`, extend PR-1's): over fixture `session-insight` payloads, assert OUTCOMES distribution, mean helpfulness, and the leverage-ranked automation/toil/gap grouping (high>med>low then frequency); `unreadable` rows excluded from aggregates but counted in the footnote; empty-window graceful-degrade message.
 9. **Consolidation merge** (`test_consolidate.py`): clean union; a missing session → reported + not emitted; duplicate results for one session → neither emitted + conflict flagged; a schema-invalid result → quarantined + reported.
@@ -494,7 +494,7 @@ Conventions baked in (from RULES / CLAUDE.md): feature branch; **never `git add 
 1. **Branch.** From up-to-date `main` (ideally after PR-1 merges; see O1): `git -C $DEVRC checkout -b feat/insights-telemetry-pr2 origin/main`.
 2. **`schema.py`** — payload schema, controlled vocabularies, `validate()`, shared field-name constants. Tests: `test_schema.py`.
 3. **`scrub.py`** — vendor bash-guard `SECRET_PATTERNS` + private-key + optional public-IP; `scrub(text) -> (clean, counts)`. Tests: `test_scrub.py`.
-4. **`select.py`** — CH queries (has-rollup, settled, already-extracted) via `chquery`; transcript-mtime gate via `_shared.iter_transcripts`; candidate selection honoring `--days/--limit/--settle-hours/--force`; skip-log. Tests: `test_select.py` (inject a fake `CHClient` + fixture mtimes).
+4. **`selection.py`** — CH queries (has-rollup, settled, already-extracted) via `chquery`; transcript-mtime gate via `_shared.iter_transcripts`; candidate selection honoring `--days/--limit/--settle-hours/--force`; skip-log. Tests: `test_selection.py` (inject a fake `CHClient` + fixture mtimes).
 5. **`prepare.py`** — fetch ground-truth argMax, scrub, chunk, write `staging/<run-id>/<session>.input.json` + `manifest.json`; embed the schema + anti-confab block. Tests: `test_prepare.py`.
 6. **`consolidate.py`** — union/missing/conflict/schema-quarantine over `results/<run-id>/`. Tests: `test_consolidate.py`.
 7. **`write.py`** — consolidate → per valid result build emit argv (`_shared.emit_path`) → `subprocess.run`; unreadable rows emitted; `--clean` to purge the run dir on success. Tests: `test_write.py` (subprocess mocked).

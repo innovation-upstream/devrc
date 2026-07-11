@@ -1,15 +1,27 @@
-"""select.choose — settled / un-extracted / limit / settle-bypass logic over
+"""selection.choose — settled / un-extracted / limit / settle-bypass logic over
 fixture rows + synthetic transcript mtimes (no live ClickHouse)."""
-import importlib.util
-from pathlib import Path
+import subprocess
+import sys
 
-# Load select.py under a distinct name — the bare name `select` is a stdlib
-# module (already imported by the interpreter), so a plain `import select` would
-# resolve to THAT, not our sibling. Loading by file path sidesteps the clash.
-_spec = importlib.util.spec_from_file_location(
-    "si_select", Path(__file__).resolve().parent.parent / "select.py")
-sel = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(sel)
+import selection as sel   # conftest puts the package dir on sys.path[0]
+
+
+def test_no_module_shadows_stdlib_select():
+    """FIX 1 regression: with the package dir as sys.path[0] (any direct script
+    run there), importing modules that pull in subprocess/urllib must NOT crash.
+    A file named `select.py` used to shadow the stdlib `select` module and raise
+    `AttributeError: partially initialized module 'select'`. Run in a CLEAN
+    interpreter so the parent's already-imported stdlib `select` can't mask it."""
+    from pathlib import Path
+    pkg = Path(__file__).resolve().parent.parent
+    code = "import sys; sys.path.insert(0, %r); import write; import cli" % str(pkg)
+    r = subprocess.run([sys.executable, "-c", code],
+                       capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    # and no package filename collides with a stdlib top-level module name.
+    for py in pkg.glob("*.py"):
+        assert py.stem not in sys.stdlib_module_names, \
+            f"{py.name} shadows the stdlib module {py.stem!r}"
 
 NOW = 1_000_000.0
 SETTLE = 6 * 3600  # 21600s
@@ -131,8 +143,16 @@ def test_end_ts_preferred_over_last_activity_for_settle():
 
 
 def test_queries_are_alias_shadow_safe():
+    # Mirror insights.py's structural guard (test_insights.py) over selection.py's
+    # queries: no `... AS <alias>` may reuse a WHERE-filtered column name, AND no
+    # `argMax(col, …) AS col` may alias an aggregate back onto its own filtered
+    # column (the ILLEGAL_AGGREGATION shape that bit `ts`/`host`).
     import re
     op = re.compile(r"\b([a-zA-Z_]\w*)\s*(?:>=|<=|=|>|<)")
+    # aggregate aliased back onto its OWN source column: `argMax(col,…) AS col`.
+    # Legal in general (e.g. `... AS project`); illegal only when `col` is also a
+    # WHERE-filtered column (ILLEGAL_AGGREGATION), so intersect with where_cols.
+    self_alias = re.compile(r"argMax\(\s*(\w+)\s*,[^)]*\)\s+AS\s+(\w+)")
     for sql in (sel.q_rollups(86400, "workbench"),
                 sel.q_last_activity(86400, "workbench"),
                 sel.q_extracted("workbench")):
@@ -140,3 +160,6 @@ def test_queries_are_alias_shadow_safe():
         where = sql.split("WHERE", 1)[1] if "WHERE" in sql else ""
         where_cols = set(op.findall(where))
         assert not (aliases & where_cols), f"alias shadows WHERE col in: {sql}"
+        self_shadow = {a for src, a in self_alias.findall(sql)
+                       if src == a and a in where_cols}
+        assert not self_shadow, f"argMax(col,…) AS col shadows WHERE col in: {sql}"

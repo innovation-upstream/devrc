@@ -27,8 +27,12 @@ import re
 
 # --------------------------------------------------------------------------- #
 # Secret token patterns — (compiled regex, short label slug).
-# Vendored from bash-guard.py SECRET_PATTERNS (labels shortened to slugs so the
-# redaction token reads `<REDACTED:aws-key>` etc.).
+# VENDORED from `~/.claude/hooks/bash-guard.py` `SECRET_PATTERNS` (source of
+# truth; lives OUTSIDE this repo so it can't be imported). Labels are shortened
+# to slugs so the redaction token reads `<REDACTED:aws-key>` etc. Keep this a
+# SUPERSET of bash-guard's set — `test_scrub.py::test_patterns_cover_bash_guard`
+# is a best-effort drift guard that reads that file and fails if it adds a
+# pattern not covered here.
 # --------------------------------------------------------------------------- #
 SECRET_PATTERNS: list[tuple[re.Pattern, str]] = [
     (re.compile(r"\bAKIA[0-9A-Z]{16}\b"), "aws-key"),

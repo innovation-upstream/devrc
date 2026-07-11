@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """prepare — build the per-session `input.json` the live session extracts from.
 
-For each candidate (from select.py) this deterministically:
+For each candidate (from selection.py) this deterministically:
   1. reads the transcript (raw JSONL) and SCRUBS secrets (scrub.py) BEFORE
      anything else touches it,
   2. CHUNKS the scrubbed text on a char budget WITHOUT ever splitting a single
@@ -65,9 +65,33 @@ def new_run_id() -> str:
 
 
 def _ensure_private(path: Path) -> None:
+    """Create `path` (and EVERY level from state_root down) mode 0700 — these
+    dirs hold scrubbed full transcripts. A plain `mkdir(parents=True)` creates the
+    intermediate `staging/`|`results/` (and even `state_root`) at the umask
+    (typically 0755, group/world-readable); we force 0700 on every level so a
+    scrubbed-but-incomplete transcript on disk is never group/world-readable."""
+    root = state_root()
     path.mkdir(parents=True, exist_ok=True)
     try:
-        os.chmod(state_root(), 0o700)
+        os.chmod(root, 0o700)
+        cur = root
+        for part in path.relative_to(root).parts:
+            cur = cur / part
+            os.chmod(cur, 0o700)
+    except (OSError, ValueError):
+        # ValueError: path not under root (custom INSIGHT_STATE_DIR layout) —
+        # still lock down the leaf, best-effort.
+        try:
+            os.chmod(path, 0o700)
+        except OSError:
+            pass
+
+
+def _write_private(path: Path, text: str) -> None:
+    """Write `text` to `path` mode 0600 (holds scrubbed transcript content)."""
+    path.write_text(text, encoding="utf-8")
+    try:
+        os.chmod(path, 0o600)
     except OSError:
         pass
 
@@ -157,8 +181,8 @@ def prepare_run(candidates: list[dict], skips: list[tuple], run_id: str,
     for cand in candidates:
         payload = build_input(cand, run_id, chunk_chars, redact_public_ips)
         input_path = sdir / f"{cand['session']}.input.json"
-        input_path.write_text(
-            json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        _write_private(
+            input_path, json.dumps(payload, ensure_ascii=False, indent=2))
         sessions_meta.append({
             "session": cand["session"],
             "project": cand.get("project") or "",
@@ -183,8 +207,8 @@ def prepare_run(candidates: list[dict], skips: list[tuple], run_id: str,
         "sessions": sessions_meta,
         "skips": [[s, r] for s, r in skips],
     }
-    (sdir / "manifest.json").write_text(
-        json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+    _write_private(sdir / "manifest.json",
+                   json.dumps(manifest, ensure_ascii=False, indent=2))
     return manifest
 
 
