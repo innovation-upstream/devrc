@@ -1,0 +1,113 @@
+#!/usr/bin/env python3
+"""i3status-rust custom block: LIVE count of Claude-Code-in-tmux runs.
+
+Renders the agent-ops dashboard glyph `󰕮` (nf-md-view_dashboard) with a live
+count of how many Claude Code sessions are currently running in tmux:
+  N == 0  ->  `󰕮`      (bare glyph — it is ALSO the dashboard launcher, so it
+                        must ALWAYS show; the left-click is wired in graphical.nix)
+  N  > 0  ->  `󰕮 N`
+
+State is ALWAYS neutral/Idle — running agents are the normal steady state, NOT
+"blocked on you" (CALM bar: colour == "look at me", and nothing here demands
+attention). Local + cheap (a tmux + /proc scan), so this block needs NO poller /
+cache / signal — it just recounts on its own `interval`.
+
+Counting REUSES agent-ops's tested pure detector (parse_panes +
+build_proc_index + classify_claude_sessions + own_pid_chain) rather than forking
+it — the module is loaded from the deployed ~/.config/tmux/agent-ops (fallback:
+the in-repo copy) so there is exactly ONE Claude-session detector. This block's
+own process tree is excluded (own_pid_chain), exactly as the dashboard excludes
+its own pane.
+
+Fail-safe: ANY error (agent-ops missing, tmux/proc unavailable, malformed) →
+emit the bare glyph and exit 0. A bar block must never crash loudly.
+
+The pure `count_live_sessions` wrapper is unit-tested against fixture tmux/proc
+data in scripts/tests/test_agent_ops_count.py (mirrors test_agent_ops.py).
+"""
+from __future__ import annotations
+
+import importlib.machinery
+import importlib.util
+import json
+import os
+import sys
+
+GLYPH = "\U000f056e"  # 󰕮 nf-md-view_dashboard (verified present in the bar font)
+_BARE = {"text": GLYPH, "state": "Idle"}
+
+# Deployed copy first (always symlinked on a live host), then the in-repo copy.
+_AGENT_OPS_PATHS = (
+    os.path.join(os.path.expanduser("~"), ".config", "tmux", "agent-ops"),
+    os.path.join(
+        os.environ.get("DEVRC_DIR", os.path.join(
+            os.path.expanduser("~"), "workspace", "devrc")),
+        "scripts", "agent-ops"),
+)
+
+
+def load_agent_ops(paths=_AGENT_OPS_PATHS):
+    """Load the agent-ops module by explicit path (it has no .py extension).
+
+    Returns the module or None if no copy is loadable (→ caller renders the bare
+    glyph). Import is side-effect-free: agent-ops guards its main() under
+    `if __name__ == '__main__'`."""
+    for p in paths:
+        if not os.path.exists(p):
+            continue
+        try:
+            loader = importlib.machinery.SourceFileLoader("agent_ops_live", p)
+            spec = importlib.util.spec_from_loader("agent_ops_live", loader)
+            mod = importlib.util.module_from_spec(spec)
+            loader.exec_module(mod)
+            return mod
+        except Exception:
+            continue
+    return None
+
+
+def count_live_sessions(ao, list_panes=None, build_index=None,
+                        own_chain=None) -> int:
+    """Number of live Claude-Code-in-tmux runs via agent-ops's pure detector.
+
+    The three impure fetchers (tmux pane list, /proc index, own-pid chain) are
+    injectable so this is unit-testable against fixtures without touching tmux or
+    /proc. `ao` is the loaded agent-ops module; None → 0. Never raises."""
+    if ao is None:
+        return 0
+    try:
+        list_panes = list_panes or ao.list_tmux_panes_raw
+        build_index = build_index or ao.build_proc_index
+        own_chain = own_chain or ao.own_pid_chain
+        panes = ao.parse_panes(list_panes())
+        proc_index = build_index()
+        own = own_chain()
+        return len(ao.classify_claude_sessions(panes, proc_index, own_pids=own))
+    except Exception:
+        return 0
+
+
+def render(count: int) -> dict:
+    """Pure: live-session count → i3status-rust block dict. Glyph always shows;
+    the count is appended only when >0. State stays neutral/Idle always."""
+    try:
+        n = int(count)
+    except (TypeError, ValueError):
+        n = 0
+    text = "%s %d" % (GLYPH, n) if n > 0 else GLYPH
+    return {"text": text, "state": "Idle"}
+
+
+def main() -> int:
+    ao = load_agent_ops()
+    n = count_live_sessions(ao)
+    sys.stdout.write(json.dumps(render(n)) + "\n")
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except Exception:
+        sys.stdout.write(json.dumps(_BARE) + "\n")
+        sys.exit(0)

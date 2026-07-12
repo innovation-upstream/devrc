@@ -20,6 +20,19 @@ let
   home = config.home.homeDirectory;
   scriptsDir = "${home}/.config/i3status-rust/scripts";
 
+  # Count-block red thresholds — SINGLE SOURCE for both the pill (--red-above) and
+  # the poller's rising-edge toast (ALERTS_TOAST_ABOVE / CIVITAI_TOAST_ABOVE in the
+  # systemd Environment below). Defining them once here stops the pill and its
+  # toast from drifting apart (they did: pill 34 vs toast default 30 for alerts).
+  alertsRedAbove = 34;
+  civitaiRedAbove = 340;
+
+  # Floating btop for the vitals-block left-clicks (memory/cpu/temperature/gpu).
+  # `float,float` matches the existing i3 float rule so it opens as a float.
+  # Explicit dimensions are REQUIRED — btop refuses to render ("terminal size too
+  # small") in the default float size; matches the agentOps popup sizing idiom.
+  btopCmd = "alacritty --class float,float -o window.dimensions.columns=160 -o window.dimensions.lines=45 -e btop";
+
   # Python env for the decoupled bar-status poller (workbench systemd user timer):
   # psycopg2 for the homelab Postgres open-mail_actions count; clawgate + Alertmanager
   # go over stdlib urllib, so psycopg2 is the only non-stdlib dep.
@@ -28,10 +41,16 @@ let
   # Built-in blocks (order = left → right on the bar).
   memoryBlock = {
     block = "memory";
-    format = " $icon $mem_used_percents ";
+    # Show RAM *used* as a size (e.g. "6.5GB"), NOT a percentage — a bare % here
+    # collided visually with the cpu block's % (they read as two CPU items). A size
+    # for RAM + a % for CPU are instantly distinct. warning/critical still key off %.
+    format = " $icon $mem_used ";
     warning_mem = 80;
     critical_mem = 92;
     interval = 10;
+    click = [
+      { button = "left"; cmd = btopCmd; }
+    ];
   };
   # Bar shows "/" only; left-click opens a rofi gauge list of all real filesystems
   # (disk-detail — mirrors the media/vpn detail idiom, not a raw df terminal dump).
@@ -43,6 +62,8 @@ let
     interval = 60;
     click = [
       { button = "left"; cmd = "${scriptsDir}/disk-detail"; }
+      # Right-click drills into the FULLEST real mount with ncdu (float terminal).
+      { button = "right"; cmd = "alacritty --class float,float -e ${scriptsDir}/disk-explore"; }
     ];
   };
   # net: NO `device` set on purpose. i3status-rust auto-follows the default-route
@@ -65,6 +86,9 @@ let
     info_cpu = 85;
     warning_cpu = 85;
     critical_cpu = 95;
+    click = [
+      { button = "left"; cmd = btopCmd; }
+    ];
   };
   # temperature: per-host chip. Workbench is AMD (k10temp; Tctl = CPU package temp).
   # Laptop is Intel (coretemp). Validated on workbench via `sensors -u k10temp-*`.
@@ -79,6 +103,9 @@ let
     idle = 78;
     info = 88;
     warning = 95;
+    click = [
+      { button = "left"; cmd = btopCmd; }
+    ];
   } // (if isLaptop then {
     chip = "coretemp-*";
   } else {
@@ -101,6 +128,9 @@ let
     good = 82;
     info = 82;
     warning = 88;
+    click = [
+      { button = "left"; cmd = btopCmd; }
+    ];
   };
   batteryBlock = {
     block = "battery";
@@ -136,7 +166,7 @@ let
     # --red-above: neutral at/below the standing homelab backlog (~24-27 as of
     # 2026-07-11, all known noise), red only when the count climbs ABOVE it. Tune as
     # the baseline drifts. (civitai's stays low deliberately — its growth is real.)
-    command = "${scriptsDir}/i3status-alerts --red-above 34";
+    command = "${scriptsDir}/i3status-alerts --red-above ${toString alertsRedAbove}";
     json = true;
     interval = 30;
     signal = 13;
@@ -152,7 +182,7 @@ let
     block = "custom";
     # --red-above: neutral at/below the standing civitai-prod backlog (~312), red
     # only above it. Big client cluster, so the baseline is high; tune as it drifts.
-    command = "${scriptsDir}/i3status-civitai --red-above 340";
+    command = "${scriptsDir}/i3status-civitai --red-above ${toString civitaiRedAbove}";
     json = true;
     interval = 30;
     signal = 14;
@@ -234,14 +264,17 @@ let
       { button = "left"; cmd = "setsid -f ${home}/workspace/devrc/scripts/rig-control.sh gui"; }
     ];
   };
-  # agent-ops: workbench only. Static dashboard glyph (plain-text render, like
-  # rigcontrol). A bar click can't cleanly spawn a tmux display-popup, so the
-  # left-click opens the mission-control dashboard in a FLOATING alacritty (the
-  # `class="float"` i3 rule floats it), sized to fit the ~6-section frame.
+  # agent-ops: workbench only. LIVE count of Claude-Code-in-tmux runs — renders
+  # `󰕮 N` (N>0) / bare `󰕮` (N==0), always neutral (running agents are steady
+  # state, not "blocked on you"). json render, recounts every 15s via a local
+  # tmux+/proc scan (reuses agent-ops's tested detector) — NO poller/cache/signal
+  # needed since it's local + cheap. The left-click still opens the mission-control
+  # dashboard in a FLOATING alacritty (the `class="float"` i3 rule floats it).
   agentOpsBlock = {
     block = "custom";
-    command = "${scriptsDir}/i3blocks-agent-ops";
-    interval = "once";
+    command = "${scriptsDir}/i3status-agent-ops";
+    json = true;
+    interval = 15;
     click = [
       { button = "left"; cmd = "alacritty --class float,float -o window.dimensions.columns=130 -o window.dimensions.lines=45 -e ${home}/.config/tmux/agent-ops"; }
     ];
@@ -303,12 +336,17 @@ lib.mkIf isNixOS {
     source = ../scripts/disk-detail;
     executable = true;
   };
+  # disk-explore: the disk block's right-click — ncdu on the fullest real mount.
+  home.file.".config/i3status-rust/scripts/disk-explore" = {
+    source = ../scripts/disk-explore;
+    executable = true;
+  };
   home.file.".config/i3status-rust/scripts/i3blocks-rigcontrol" = {
     source = ../scripts/i3blocks-rigcontrol;
     executable = true;
   };
-  home.file.".config/i3status-rust/scripts/i3blocks-agent-ops" = {
-    source = ../scripts/i3blocks-agent-ops;
+  home.file.".config/i3status-rust/scripts/i3status-agent-ops" = {
+    source = ../scripts/i3status-agent-ops;
     executable = true;
   };
 
@@ -397,6 +435,11 @@ lib.mkIf isNixOS {
         "CIVITAI_KUBECONFIG=%h/workspace/civit/datapacket-talos/prod-kubeconfig"
         "DEVRC_DIR=%h/workspace/devrc"
         "HOMELAB_DIR=%h/workspace/homelab-talos"
+        # Rising-edge toast thresholds — SAME source as the pills' --red-above
+        # (alertsRedAbove/civitaiRedAbove) so pill colour + toast fire on one line.
+        # The poller's _env_int(..., 30/340) defaults are now pure fallback.
+        "ALERTS_TOAST_ABOVE=${toString alertsRedAbove}"
+        "CIVITAI_TOAST_ABOVE=${toString civitaiRedAbove}"
         "HOME=%h"
       ];
       ExecStart = "${pollPyEnv}/bin/python3 %h/workspace/devrc/scripts/bar-status-poll";
