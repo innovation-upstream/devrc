@@ -41,7 +41,10 @@ let
   # Built-in blocks (order = left → right on the bar).
   memoryBlock = {
     block = "memory";
-    format = " $icon $mem_used_percents ";
+    # Show RAM *used* as a size (e.g. "6.5GB"), NOT a percentage — a bare % here
+    # collided visually with the cpu block's % (they read as two CPU items). A size
+    # for RAM + a % for CPU are instantly distinct. warning/critical still key off %.
+    format = " $icon $mem_used ";
     warning_mem = 80;
     critical_mem = 92;
     interval = 10;
