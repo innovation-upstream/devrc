@@ -1,0 +1,507 @@
+#!/usr/bin/env python3
+"""Interactive rofi action menu for the i3status-rust `media` block (right-click).
+
+Left-click on the pill still opens the qBit WebUI; RIGHT-click now opens THIS
+rofi menu — an actions launcher for the *arr media stack (qBittorrent behind the
+gluetun AirVPN sidecar + Whisparr / Stash / Prowlarr on the workbench cluster).
+
+The rofi `-mesg` header shows a LIVE status line fetched with a short timeout
+(`🟢 AirVPN CA ↓.. ↑.. · N active`); a down/unreachable cluster degrades to an
+error line in the header instead of hanging. Menu:
+  * Open qBittorrent / Whisparr / Stash / Prowlarr -> xdg-open the *.workbench.lan URLs
+  * ⏸ Pause all / ▶ Resume all torrents          -> instant, reversible (no confirm)
+  * 🚀 Force-start Whisparr grabs                  -> setForceStart the `whisparr`-category hashes
+  * 🔁 Reconnect / verify VPN                      -> re-check tunnel; offer a confirm-gated
+                                                       `kubectl rollout restart deploy/qbittorrent`
+  * 🔍 Whisparr: search all missing               -> POST /command MissingMoviesSearch (confirm-gated)
+  * 📊 Full status -> TUI                          -> float terminal running `media-detail --watch`
+
+Design mirrors scripts/bar-status-poll + scripts/media-detail:
+  * Credentials/keys come from ~/.config/bar/media.env (0600, NOT in git/nix-store),
+    read by explicit path. NEVER hardcode a secret here.
+  * qBit auth reuses the login flow (qBit 5.x sets a QBT_SID_<port> cookie, not the
+    legacy SID=; capture the whole first cookie pair and send it straight back).
+  * Every network call is short-timeout + best-effort; nothing hangs the menu.
+  * The pure/mockable logic (header formatter, whisparr-hash filter, qBit action
+    URL/param construction) is factored out and unit-tested in
+    scripts/tests/test_media_menu.py. `--dry-run ACTION` / `--dump-menu` exercise
+    an action / the menu without touching the network or rofi.
+
+qBit 5.x NOTE: the WebAPI renamed /torrents/pause -> /stop and /resume -> /start
+(the old paths 404 on 5.2.3 / WebAPI 2.15.1 — verified live 2026-07). The menu keeps
+the familiar Pause/Resume labels but hits the live start/stop endpoints.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import subprocess
+import sys
+import urllib.error
+import urllib.parse
+import urllib.request
+
+TIMEOUT = 4
+ROFI_THEME = "gruvbox-dark-hard"   # matches the $mod+d launcher in nix/i3/config.nix
+
+# Menu: (label shown in rofi, action id). Order = top->bottom.
+MENU = [
+    ("Open qBittorrent", "open-qbit"),
+    ("Open Whisparr", "open-whisparr"),
+    ("Open Stash", "open-stash"),
+    ("Open Prowlarr", "open-prowlarr"),
+    ("⏸  Pause all torrents", "pause"),
+    ("▶  Resume all torrents", "resume"),
+    ("🚀 Force-start Whisparr grabs", "forcestart"),
+    ("🔁 Reconnect / verify VPN", "vpn"),
+    ("🔍 Whisparr: search all missing", "whisparr-search"),
+    ("📊 Full status → TUI", "status"),
+]
+# Actions that need a yes/no confirm (destructive / mass-grab).
+CONFIRM = {"vpn-restart", "whisparr-search"}
+
+
+# --------------------------------------------------------------------------- #
+# Credentials (explicit path — mirrors media-detail.creds / _media_creds)
+# --------------------------------------------------------------------------- #
+def creds() -> dict:
+    env = {}
+    path = os.environ.get("MEDIA_ENV") or os.path.expanduser("~/.config/bar/media.env")
+    try:
+        with open(path) as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                k, v = line.split("=", 1)
+                env[k.strip()] = v.strip()
+    except Exception:
+        pass
+    return env
+
+
+# --------------------------------------------------------------------------- #
+# Pure / mockable logic (unit-tested against fixtures — NO network)
+# --------------------------------------------------------------------------- #
+def _fmt_speed(bps) -> str:
+    """Compact human byte-rate: '0B', '148K', '1.2M' (matches the poller pill)."""
+    try:
+        n = int(bps)
+    except (TypeError, ValueError):
+        n = 0
+    if n < 0:
+        n = 0
+    if n >= 1024 * 1024:
+        return "%.1fM" % (n / 1024.0 / 1024.0)
+    if n >= 1024:
+        return "%dK" % (n // 1024)
+    return "%dB" % n
+
+
+def format_header(info, active=None, country="CA", err=None) -> str:
+    """Live status header for the rofi -mesg line, from a qBit /transfer/info dict.
+
+    Cases:
+      * err set (fetch failed / cluster unreachable) -> a plain error line, never hangs.
+      * connection_status == 'firewalled' -> RED marker (forwarded port down — the
+        one media state worth crying about).
+      * 'connected' -> green dot + `CA ↓dl ↑up` (+ `· N active` when active given).
+      * any other/transitional status -> yellow dot + the raw status.
+    """
+    if err:
+        return "⚠ qBit unreachable (%s) — cluster/VPN down?" % err
+    if not isinstance(info, dict):
+        return "⚠ qBit status unknown"
+    status = info.get("connection_status")
+    dl = _fmt_speed(info.get("dl_info_speed"))
+    up = _fmt_speed(info.get("up_info_speed"))
+    if status == "firewalled":
+        head = "🔴 AirVPN %s ⚠ firewalled · forwarded port DOWN" % country
+    else:
+        dot = "🟢" if status == "connected" else "🟡"
+        head = "%s AirVPN %s ↓%s ↑%s" % (dot, country, dl, up)
+        if status and status != "connected":
+            head += " (%s)" % status
+    if active is not None:
+        head += " · %d active" % active
+    return head
+
+
+# qBit torrent states counted as "actively transferring" (mirrors media-detail).
+ACTIVE_STATES = frozenset({
+    "downloading", "uploading", "forcedDL", "forcedUP",
+    "stalledUP", "checkingUP", "checkingDL", "metaDL",
+})
+
+
+def active_count(torrents) -> int:
+    """Number of actively transferring torrents in a /torrents/info list."""
+    if not isinstance(torrents, list):
+        return 0
+    return sum(1 for t in torrents if isinstance(t, dict)
+               and t.get("state") in ACTIVE_STATES)
+
+
+def whisparr_hashes(torrents, category="whisparr") -> list:
+    """Hashes of torrents in the given qBit category (default 'whisparr')."""
+    if not isinstance(torrents, list):
+        return []
+    return [t["hash"] for t in torrents
+            if isinstance(t, dict) and t.get("category") == category and t.get("hash")]
+
+
+def qbit_action_request(action, hashes="all"):
+    """(path, params) for a qBit torrent action.
+
+    qBit 5.x renamed the endpoints (the legacy /pause + /resume 404 on 5.2.3), so
+    the user-facing verb maps to the LIVE endpoint:
+      pause      -> POST /api/v2/torrents/stop   hashes=<all|h1|h2>
+      resume     -> POST /api/v2/torrents/start  hashes=<...>
+      forcestart -> POST /api/v2/torrents/setForceStart hashes=<...> value=true
+    `hashes` is either the literal 'all' or a '|'-joined hash list.
+    """
+    if action == "pause":
+        return "/api/v2/torrents/stop", {"hashes": hashes}
+    if action == "resume":
+        return "/api/v2/torrents/start", {"hashes": hashes}
+    if action == "forcestart":
+        return "/api/v2/torrents/setForceStart", {"hashes": hashes, "value": "true"}
+    raise ValueError("unknown qbit action: %s" % action)
+
+
+def whisparr_command_request(name="MissingMoviesSearch"):
+    """(path, json-body) for a Whisparr v3 command (Radarr-style API)."""
+    return "/api/v3/command", {"name": name}
+
+
+def join_hashes(hashes) -> str:
+    """qBit multi-hash param join ('|'-separated); passthrough for the literal 'all'."""
+    if hashes == "all":
+        return "all"
+    return "|".join(hashes)
+
+
+# --------------------------------------------------------------------------- #
+# Network (best-effort; every call short-timeout, wrapped by callers)
+# --------------------------------------------------------------------------- #
+def _http(url, headers=None, data=None, timeout=TIMEOUT):
+    req = urllib.request.Request(url, data=data, headers=headers or {})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return resp.status, resp.read()
+
+
+def _http_json(url, headers=None, data=None, timeout=TIMEOUT):
+    _, body = _http(url, headers=headers, data=data, timeout=timeout)
+    return json.loads(body.decode())
+
+
+def qbit_login(url, user, pw, timeout=TIMEOUT):
+    """POST /auth/login -> the whole first cookie pair ('QBT_SID_<port>=...'), or None."""
+    data = urllib.parse.urlencode({"username": user, "password": pw}).encode()
+    req = urllib.request.Request(
+        url + "/api/v2/auth/login", data=data,
+        headers={"Content-Type": "application/x-www-form-urlencoded"})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        cookie = resp.headers.get("Set-Cookie", "") or ""
+    pair = cookie.split(";", 1)[0].strip()
+    return pair if "=" in pair else None
+
+
+class QBit:
+    """Thin authed qBit client. `.ok` is False if login/first-call fails."""
+
+    def __init__(self, c):
+        self.url = c.get("QBIT_URL", "http://qbittorrent.workbench.lan").rstrip("/")
+        self.user = c.get("QBIT_USER", "admin")
+        self.pw = c.get("QBIT_PASS", "")
+        self.country = c.get("MEDIA_COUNTRY", "CA")
+        self.token = None
+        self.ok = False
+        try:
+            self.token = qbit_login(self.url, self.user, self.pw)
+            self.ok = True
+        except Exception:
+            self.ok = False
+
+    def _hdr(self):
+        return {"Cookie": self.token} if self.token else {}
+
+    def transfer_info(self):
+        return _http_json(self.url + "/api/v2/transfer/info", headers=self._hdr())
+
+    def torrents_info(self):
+        return _http_json(self.url + "/api/v2/torrents/info", headers=self._hdr())
+
+    def action(self, action, hashes="all"):
+        """POST a qBit torrent action; returns the HTTP status code."""
+        path, params = qbit_action_request(action, hashes=join_hashes(hashes))
+        data = urllib.parse.urlencode(params).encode()
+        status, _ = _http(self.url + path, headers=self._hdr(), data=data, timeout=6)
+        return status
+
+
+# --------------------------------------------------------------------------- #
+# rofi + notify wrappers (side-effecting; not unit-tested)
+# --------------------------------------------------------------------------- #
+def rofi_pick(entries, prompt="Media", mesg=None):
+    """Show a rofi dmenu; return the selected entry string, or None if cancelled."""
+    argv = ["rofi", "-dmenu", "-i", "-no-custom", "-p", prompt, "-theme", ROFI_THEME]
+    if mesg:
+        argv += ["-mesg", mesg]
+    try:
+        r = subprocess.run(argv, input="\n".join(entries), text=True,
+                           stdout=subprocess.PIPE)
+    except Exception:
+        return None
+    if r.returncode != 0:
+        return None
+    sel = r.stdout.strip()
+    return sel or None
+
+
+def rofi_confirm(prompt):
+    """A yes/no rofi prompt (default = no). Returns True only on an explicit 'yes'."""
+    sel = rofi_pick(["no", "yes"], prompt=prompt,
+                    mesg="⚠ This is disruptive — pick 'yes' to proceed.")
+    return sel == "yes"
+
+
+def notify(summary, body=""):
+    """Best-effort desktop toast (notify-send, dunstify fallback). Never raises."""
+    for argv in (["notify-send", "-a", "media-menu", summary, body],
+                 ["dunstify", "-a", "media-menu", summary, body]):
+        try:
+            subprocess.run(argv, stdout=subprocess.DEVNULL,
+                           stderr=subprocess.DEVNULL, timeout=5)
+            return
+        except Exception:
+            continue
+
+
+def xdg_open(url):
+    try:
+        subprocess.Popen(["xdg-open", url], stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL)
+    except Exception:
+        pass
+
+
+# --------------------------------------------------------------------------- #
+# Action handlers
+# --------------------------------------------------------------------------- #
+def _url(c, key, default):
+    return c.get(key, default).rstrip("/")
+
+
+def do_pause_resume(qb, action):
+    """action in {'pause','resume'}: apply to ALL torrents, toast the result."""
+    if not qb.ok:
+        notify("qBit unreachable", "Could not reach qBittorrent — VPN/cluster down?")
+        return
+    try:
+        n = len(qb.torrents_info())
+    except Exception:
+        n = None
+    try:
+        code = qb.action(action, hashes="all")
+    except Exception as e:
+        notify("qBit %s failed" % action, str(e)[:120])
+        return
+    verb = "Paused" if action == "pause" else "Resumed"
+    if code == 200:
+        notify("%s torrents" % verb, ("%d torrent(s)" % n) if n is not None else "all")
+    else:
+        notify("qBit %s -> HTTP %s" % (action, code), "unexpected response")
+
+
+def do_forcestart(qb):
+    """Force-start the whisparr-category grabs (setForceStart value=true)."""
+    if not qb.ok:
+        notify("qBit unreachable", "Could not reach qBittorrent.")
+        return
+    try:
+        hashes = whisparr_hashes(qb.torrents_info())
+    except Exception as e:
+        notify("Force-start failed", str(e)[:120])
+        return
+    if not hashes:
+        notify("Force-start Whisparr", "No whisparr-category grabs to force.")
+        return
+    try:
+        code = qb.action("forcestart", hashes=hashes)
+    except Exception as e:
+        notify("Force-start failed", str(e)[:120])
+        return
+    if code == 200:
+        notify("Force-started Whisparr grabs", "%d torrent(s)" % len(hashes))
+    else:
+        notify("Force-start -> HTTP %s" % code, "unexpected response")
+
+
+def do_vpn(qb):
+    """Re-check the tunnel; if down/firewalled, offer a confirm-gated qBit restart."""
+    if not qb.ok:
+        info, err = None, "login failed"
+    else:
+        try:
+            info = qb.transfer_info()
+            err = None
+        except Exception as e:
+            info, err = None, type(e).__name__
+    status = (info or {}).get("connection_status") if not err else None
+    ext = (info or {}).get("last_external_address_v4") if not err else None
+    healthy = status == "connected"
+    if healthy:
+        notify("VPN OK", "qBit tunnel: connected · %s · egress %s"
+               % (qb.country, ext or "?"))
+        return
+    # down / firewalled / unreachable -> confirm-gate a rollout restart.
+    detail = ("firewalled (forwarded port down)" if status == "firewalled"
+              else (status or err or "unreachable"))
+    notify("VPN degraded", "qBit tunnel: %s" % detail)
+    if not rofi_confirm("Restart qBittorrent (interrupts downloads)? — VPN %s" % detail):
+        return
+    restart_qbit()
+
+
+def restart_qbit():
+    """kubectl rollout restart deploy/qbittorrent -n media-stack (KUBECONFIG=$KC_WORKBENCH)."""
+    kc = os.environ.get("KC_WORKBENCH") or os.path.expanduser(
+        "~/workspace/homelab-talos/workbench-kubeconfig")
+    env = dict(os.environ, KUBECONFIG=kc)
+    try:
+        r = subprocess.run(
+            ["kubectl", "rollout", "restart", "deploy/qbittorrent", "-n", "media-stack"],
+            env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True, timeout=30)
+        if r.returncode == 0:
+            notify("qBittorrent restarting", "rollout restart issued — tunnel will re-establish")
+        else:
+            notify("Restart failed", (r.stdout or "").strip()[:160])
+    except Exception as e:
+        notify("Restart failed", str(e)[:160])
+
+
+def do_whisparr_search(c):
+    """POST /api/v3/command {name: MissingMoviesSearch} (confirm-gated by caller)."""
+    url = _url(c, "WHISPARR_URL", "http://whisparr.workbench.lan")
+    key = c.get("WHISPARR_KEY", "")
+    path, body = whisparr_command_request("MissingMoviesSearch")
+    data = json.dumps(body).encode()
+    hdr = {"Content-Type": "application/json"}
+    if key:
+        hdr["X-Api-Key"] = key
+    try:
+        status, _ = _http(url + path, headers=hdr, data=data, timeout=8)
+        notify("Whisparr: search all missing", "command queued (HTTP %s)" % status)
+    except Exception as e:
+        notify("Whisparr search failed", str(e)[:140])
+
+
+def do_status_tui():
+    """Float a terminal running media-detail --watch (auto-refresh). Sibling script."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    detail = os.path.join(here, "media-detail")
+    try:
+        subprocess.Popen(
+            ["alacritty", "--class", "float,float", "-e", detail, "--watch"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception as e:
+        notify("Could not open status TUI", str(e)[:120])
+
+
+# --------------------------------------------------------------------------- #
+# Header + dispatch
+# --------------------------------------------------------------------------- #
+def build_header(qb):
+    """Fetch the live status header (short timeout, best-effort)."""
+    if not qb.ok:
+        return format_header(None, err="login failed", country=qb.country)
+    try:
+        info = qb.transfer_info()
+    except Exception as e:
+        return format_header(None, err=type(e).__name__, country=qb.country)
+    try:
+        act = active_count(qb.torrents_info())
+    except Exception:
+        act = None
+    return format_header(info, active=act, country=qb.country)
+
+
+def dispatch(action, c, qb):
+    if action == "open-qbit":
+        xdg_open(_url(c, "QBIT_URL", "http://qbittorrent.workbench.lan"))
+    elif action == "open-whisparr":
+        xdg_open(_url(c, "WHISPARR_URL", "http://whisparr.workbench.lan"))
+    elif action == "open-stash":
+        xdg_open(_url(c, "STASH_URL", "http://stash.workbench.lan"))
+    elif action == "open-prowlarr":
+        xdg_open(_url(c, "PROWLARR_URL", "http://prowlarr.workbench.lan"))
+    elif action in ("pause", "resume"):
+        do_pause_resume(qb, action)
+    elif action == "forcestart":
+        do_forcestart(qb)
+    elif action == "vpn":
+        do_vpn(qb)
+    elif action == "whisparr-search":
+        if rofi_confirm("Search ALL missing in Whisparr (mass grab)?"):
+            do_whisparr_search(c)
+    elif action == "status":
+        do_status_tui()
+
+
+def run_menu():
+    c = creds()
+    qb = QBit(c)
+    header = build_header(qb)
+    labels = [label for label, _ in MENU]
+    by_label = {label: aid for label, aid in MENU}
+    sel = rofi_pick(labels, prompt="Media", mesg=header)
+    if not sel:
+        return 0
+    action = by_label.get(sel)
+    if action:
+        dispatch(action, c, qb)
+    return 0
+
+
+# --------------------------------------------------------------------------- #
+# CLI (interactive default + offline --dry-run / --dump-menu for tests)
+# --------------------------------------------------------------------------- #
+def dry_run(action) -> str:
+    """Construct + print an action's request WITHOUT touching the network."""
+    if action in ("pause", "resume", "forcestart"):
+        path, params = qbit_action_request(action, hashes="all")
+        return "DRY-RUN %s: POST %s %s" % (
+            action, path, urllib.parse.urlencode(params))
+    if action == "whisparr-search":
+        path, body = whisparr_command_request("MissingMoviesSearch")
+        return "DRY-RUN whisparr-search: POST %s %s" % (path, json.dumps(body))
+    raise ValueError("no dry-run for action: %s" % action)
+
+
+def main(argv=None) -> int:
+    ap = argparse.ArgumentParser(description="rofi action menu for the media block")
+    ap.add_argument("--dry-run", metavar="ACTION",
+                    choices=["pause", "resume", "forcestart", "whisparr-search"],
+                    help="print the constructed request for ACTION; no network, no rofi")
+    ap.add_argument("--dump-menu", action="store_true",
+                    help="print the menu entries (label\\taction) and exit")
+    args = ap.parse_args(argv)
+
+    if args.dump_menu:
+        for label, aid in MENU:
+            print("%s\t%s" % (label, aid))
+        return 0
+    if args.dry_run:
+        print(dry_run(args.dry_run))
+        return 0
+    return run_menu()
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except Exception:   # a launcher must never crash loudly
+        sys.exit(0)

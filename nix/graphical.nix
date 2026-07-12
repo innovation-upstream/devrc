@@ -182,8 +182,10 @@ let
   # and reads `CA ↓.. ↑..` (the static SERVER_COUNTRIES=Canada label + qBit speed).
   # CALM: hidden when connected+idle; shows speeds while transferring; RED when the
   # tunnel is `firewalled` (forwarded port down); soft-yellow `qBit?` on poller-
-  # stale. Left-click opens the qBit WebUI; right-click floats the detail popup
-  # (Whisparr queue / Stash scenes / Prowlarr health / torrent counts).
+  # stale. Left-click opens the qBit WebUI; right-click opens the media-menu rofi
+  # action launcher (open *arr UIs / pause-resume / force-start / VPN reconnect /
+  # Whisparr search / float the live `media-detail --watch` TUI). The menu reads
+  # ~/.config/bar/media.env (0600) for creds — NOT baked into the store.
   mediaBlock = {
     block = "custom";
     command = "${scriptsDir}/i3status-media";
@@ -192,7 +194,7 @@ let
     signal = 16;
     click = [
       { button = "left"; cmd = "xdg-open http://qbittorrent.workbench.lan"; }
-      { button = "right"; cmd = "alacritty --class float,float -e ${scriptsDir}/media-detail"; }
+      { button = "right"; cmd = "${scriptsDir}/media-menu"; }
     ];
   };
   # DND indicator (workbench only): a small muted glyph that appears ONLY while
@@ -337,6 +339,13 @@ lib.mkIf isNixOS {
   };
   home.file.".config/i3status-rust/scripts/media-detail" = lib.mkIf (!isLaptop) {
     source = ../scripts/media-detail;
+    executable = true;
+  };
+  # media-menu: the right-click rofi action launcher (sibling of media-detail so it
+  # can float `media-detail --watch`). Workbench-only. Reads creds from
+  # ~/.config/bar/media.env (0600); no secret in the store.
+  home.file.".config/i3status-rust/scripts/media-menu" = lib.mkIf (!isLaptop) {
+    source = ../scripts/media-menu;
     executable = true;
   };
 
