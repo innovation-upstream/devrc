@@ -29,7 +29,9 @@ let
 
   # Floating btop for the vitals-block left-clicks (memory/cpu/temperature/gpu).
   # `float,float` matches the existing i3 float rule so it opens as a float.
-  btopCmd = "alacritty --class float,float -e btop";
+  # Explicit dimensions are REQUIRED — btop refuses to render ("terminal size too
+  # small") in the default float size; matches the agentOps popup sizing idiom.
+  btopCmd = "alacritty --class float,float -o window.dimensions.columns=160 -o window.dimensions.lines=45 -e btop";
 
   # Python env for the decoupled bar-status poller (workbench systemd user timer):
   # psycopg2 for the homelab Postgres open-mail_actions count; clawgate + Alertmanager
