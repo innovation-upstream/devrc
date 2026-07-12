@@ -175,6 +175,26 @@ let
       { button = "left"; cmd = "xdg-open http://192.168.50.250:30302"; }
     ];
   };
+  # media (qBittorrent behind the gluetun AirVPN WireGuard sidecar). A SECOND VPN
+  # pill, deliberately kept SEPARATE from vpnBlock: vpnBlock tracks the HOST
+  # Mullvad tunnel, this one tracks the qBit AirVPN tunnel. Differentiated so they
+  # aren't confusable — this pill uses the `net_down` icon (vs vpnBlock's net_vpn)
+  # and reads `CA ↓.. ↑..` (the static SERVER_COUNTRIES=Canada label + qBit speed).
+  # CALM: hidden when connected+idle; shows speeds while transferring; RED when the
+  # tunnel is `firewalled` (forwarded port down); soft-yellow `qBit?` on poller-
+  # stale. Left-click opens the qBit WebUI; right-click floats the detail popup
+  # (Whisparr queue / Stash scenes / Prowlarr health / torrent counts).
+  mediaBlock = {
+    block = "custom";
+    command = "${scriptsDir}/i3status-media";
+    json = true;
+    interval = 30;
+    signal = 16;
+    click = [
+      { button = "left"; cmd = "xdg-open http://qbittorrent.workbench.lan"; }
+      { button = "right"; cmd = "alacritty --class float,float -e ${scriptsDir}/media-detail"; }
+    ];
+  };
   # DND indicator (workbench only): a small muted glyph that appears ONLY while
   # dunst is paused (quiet mode), hidden otherwise — same calm hide-at-zero idea
   # as the count blocks. Reads `dunstctl is-paused` (instant, local). signal 15
@@ -225,7 +245,7 @@ let
     ++ lib.optional (!isLaptop) gpuBlock
     ++ lib.optional isLaptop batteryBlock
     ++ [ soundBlock ]
-    ++ lib.optionals (!isLaptop) [ alertsBlock civitaiBlock mailBlock clawgateBlock dndBlock ]
+    ++ lib.optionals (!isLaptop) [ alertsBlock civitaiBlock mailBlock clawgateBlock dndBlock mediaBlock ]
     ++ [ vpnBlock timeBlock ]
     ++ lib.optionals (!isLaptop) [ agentOpsBlock rigcontrolBlock ];
 in
@@ -306,6 +326,17 @@ lib.mkIf isNixOS {
   };
   home.file.".config/i3status-rust/scripts/i3status-dnd" = lib.mkIf (!isLaptop) {
     source = ../scripts/i3status-dnd;
+    executable = true;
+  };
+  # media block: the credential-free render script (reads ~/.cache/bar-status/
+  # media.json) + its right-click detail popup. Both workbench-only. Creds/keys
+  # for the popup live in ~/.config/bar/media.env (0600), NOT here / in the store.
+  home.file.".config/i3status-rust/scripts/i3status-media" = lib.mkIf (!isLaptop) {
+    source = ../scripts/i3status-media;
+    executable = true;
+  };
+  home.file.".config/i3status-rust/scripts/media-detail" = lib.mkIf (!isLaptop) {
+    source = ../scripts/media-detail;
     executable = true;
   };
 

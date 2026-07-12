@@ -1,0 +1,172 @@
+#!/usr/bin/env python3
+"""Right-click detail popup for the i3status-rust `media` block (a float terminal).
+
+Best-effort secondary metrics for the *arr media stack — the stuff decision 4
+keeps OFF the bar pill (which is qBit VPN + speed only) and behind this popup:
+  * qBit AirVPN tunnel: connection_status, forwarded port, ↓/↑ speed, active/total
+    torrents
+  * Whisparr download queue size
+  * Stash scene count
+  * Prowlarr indexer count + health warnings
+
+Every call is short-timeout and individually wrapped: an unreachable service
+prints a dim `unavailable` line instead of aborting the popup. Credentials/keys
+come from ~/.config/bar/media.env (0600, NOT in git/nix-store), the same file the
+poller reads. Launched via `alacritty --class float,float -e media-detail`.
+"""
+import json
+import os
+import sys
+import urllib.parse
+import urllib.request
+
+TIMEOUT = 4
+
+
+def creds() -> dict:
+    env = {}
+    path = os.environ.get("MEDIA_ENV") or os.path.expanduser("~/.config/bar/media.env")
+    try:
+        with open(path) as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                k, v = line.split("=", 1)
+                env[k.strip()] = v.strip()
+    except Exception:
+        pass
+    return env
+
+
+def _get_json(url, headers=None, data=None):
+    req = urllib.request.Request(url, data=data, headers=headers or {})
+    with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
+        return json.loads(resp.read().decode())
+
+
+def _fmt_speed(bps):
+    try:
+        n = int(bps)
+    except (TypeError, ValueError):
+        n = 0
+    if n >= 1024 * 1024:
+        return "%.1f MiB/s" % (n / 1024.0 / 1024.0)
+    if n >= 1024:
+        return "%d KiB/s" % (n // 1024)
+    return "%d B/s" % n
+
+
+def qbit_section(c, out):
+    url = c.get("QBIT_URL", "http://qbittorrent.workbench.lan").rstrip("/")
+    user = c.get("QBIT_USER", "admin")
+    pw = c.get("QBIT_PASS", "")
+    token = None
+    try:
+        data = urllib.parse.urlencode({"username": user, "password": pw}).encode()
+        req = urllib.request.Request(
+            url + "/api/v2/auth/login", data=data,
+            headers={"Content-Type": "application/x-www-form-urlencoded"})
+        with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
+            cookie = resp.headers.get("Set-Cookie", "") or ""
+        # qBittorrent 5.x cookie is QBT_SID_<port>; send the whole pair back.
+        pair = cookie.split(";", 1)[0].strip()
+        if "=" in pair:
+            token = pair
+    except Exception:
+        token = None
+    hdr = {"Cookie": token} if token else {}
+    try:
+        info = _get_json(url + "/api/v2/transfer/info", headers=hdr)
+        out.append(("qBit tunnel", info.get("connection_status", "?")))
+        out.append(("  ↓ / ↑", "%s  /  %s" % (
+            _fmt_speed(info.get("dl_info_speed")),
+            _fmt_speed(info.get("up_info_speed")))))
+        out.append(("  DHT nodes", str(info.get("dht_nodes", "?"))))
+        out.append(("  external IPv4", info.get("last_external_address_v4") or "-"))
+    except Exception as e:
+        out.append(("qBit tunnel", "unavailable (%s)" % type(e).__name__))
+    try:
+        torr = _get_json(url + "/api/v2/torrents/info", headers=hdr)
+        active = sum(1 for t in torr if isinstance(t, dict)
+                     and t.get("state") in (
+                         "downloading", "uploading", "forcedDL", "forcedUP",
+                         "stalledUP", "checkingUP", "checkingDL", "metaDL"))
+        out.append(("  torrents", "%d active / %d total" % (active, len(torr))))
+    except Exception:
+        out.append(("  torrents", "unavailable"))
+
+
+def arr_section(c, out):
+    # Whisparr queue
+    wurl = c.get("WHISPARR_URL", "http://whisparr.workbench.lan").rstrip("/")
+    wkey = c.get("WHISPARR_KEY", "")
+    try:
+        q = _get_json("%s/api/v3/queue?pageSize=1&apikey=%s" % (wurl, wkey))
+        out.append(("Whisparr queue", "%s item(s)" % q.get("totalRecords", "?")))
+    except Exception:
+        out.append(("Whisparr queue", "unavailable"))
+    # Stash scene count (GraphQL)
+    surl = c.get("STASH_URL", "http://stash.workbench.lan").rstrip("/")
+    skey = c.get("STASH_KEY", "")
+    try:
+        body = json.dumps({
+            "query": "{ findScenes(filter:{per_page:0}){ count } }"}).encode()
+        hdr = {"Content-Type": "application/json"}
+        if skey:
+            hdr["ApiKey"] = skey
+        r = _get_json(surl + "/graphql", headers=hdr, data=body)
+        out.append(("Stash scenes",
+                    str(r["data"]["findScenes"]["count"])))
+    except Exception:
+        out.append(("Stash scenes", "unavailable"))
+    # Prowlarr indexers + health
+    purl = c.get("PROWLARR_URL", "http://prowlarr.workbench.lan").rstrip("/")
+    pkey = c.get("PROWLARR_KEY", "")
+    try:
+        idx = _get_json("%s/api/v1/indexer?apikey=%s" % (purl, pkey))
+        out.append(("Prowlarr indexers", "%d configured" % len(idx)))
+    except Exception:
+        out.append(("Prowlarr indexers", "unavailable"))
+    try:
+        health = _get_json("%s/api/v1/health?apikey=%s" % (purl, pkey))
+        n = len(health) if isinstance(health, list) else 0
+        out.append(("Prowlarr health",
+                    "OK" if n == 0 else "%d warning(s)" % n))
+        for h in (health if isinstance(health, list) else [])[:4]:
+            if isinstance(h, dict) and h.get("message"):
+                out.append(("  ·", h["message"][:70]))
+    except Exception:
+        out.append(("Prowlarr health", "unavailable"))
+
+
+def main() -> int:
+    c = creds()
+    rows = []
+    qbit_section(c, rows)
+    rows.append(("", ""))
+    arr_section(c, rows)
+    print("\n  \033[1mMedia stack — detail\033[0m  (qBit via gluetun AirVPN · CA)\n")
+    for k, v in rows:
+        if not k and not v:
+            print()
+        else:
+            print("  %-20s %s" % (k, v))
+    print()
+    try:
+        input("  Press Enter to close… ")
+    except (EOFError, KeyboardInterrupt):
+        pass
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except Exception as e:
+        print("media-detail error:", e)
+        try:
+            input("  Press Enter to close… ")
+        except Exception:
+            pass
+        sys.exit(0)

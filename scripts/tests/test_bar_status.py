@@ -40,6 +40,7 @@ clawgate_block = _load("i3status-clawgate", "i3status_clawgate")
 mail_block = _load("i3status-mail", "i3status_mail")
 alerts_block = _load("i3status-alerts", "i3status_alerts")
 civitai_block = _load("i3status-civitai", "i3status_civitai")
+media_block = _load("i3status-media", "i3status_media")
 
 
 # --------------------------------------------------------------------------- #
@@ -203,6 +204,148 @@ def test_mock_run_malformed_civitai_writes_stale(tmp_path, monkeypatch):
     assert rc == 0
     civ = json.loads((tmp_path / "civitai.json").read_text())
     assert civ["state"] == "stale" and civ["count"] == 0
+
+
+# --------------------------------------------------------------------------- #
+# poller parse: media (qBittorrent behind the gluetun AirVPN sidecar)
+# The pill is qBit VPN status + ↓/↑ speed ONLY; parse_media emits render fields.
+# --------------------------------------------------------------------------- #
+def test_parse_media_connected_active_shows_speeds():
+    # connected + actively transferring -> neutral pill with the CA label + speeds.
+    out = poll.parse_media({"connection_status": "connected",
+                            "dl_info_speed": 151903, "up_info_speed": 412349})
+    assert out["state"] == "Idle"                 # connected == neutral (decision 5)
+    assert out["icon"] == "net_down"              # differs from Mullvad's net_vpn
+    assert out["text"].startswith("CA ")
+    assert "↓" in out["text"] and "↑" in out["text"]
+    assert "148K" in out["text"] and "402K" in out["text"]
+
+
+def test_parse_media_connected_idle_is_hidden():
+    # connected but no transfer -> hidden (empty, invisible block).
+    out = poll.parse_media({"connection_status": "connected",
+                            "dl_info_speed": 0, "up_info_speed": 0})
+    assert out == {"text": "", "state": "Idle"}
+
+
+def test_parse_media_firewalled_is_red():
+    # firewalled = API reachable but forwarded port not open (the AirVPN-fixed
+    # regression) -> RED, always shown.
+    out = poll.parse_media({"connection_status": "firewalled",
+                            "dl_info_speed": 0, "up_info_speed": 0})
+    assert out["state"] == "Critical"
+    assert out["icon"] == "net_down"
+    assert "firewalled" in out["text"] and out["text"].startswith("CA")
+
+
+def test_parse_media_unknown_status_is_soft_warning():
+    out = poll.parse_media({"connection_status": "connecting",
+                            "dl_info_speed": 0, "up_info_speed": 0})
+    assert out["state"] == "Warning" and "CA" in out["text"]
+
+
+def test_parse_media_country_label_is_configurable():
+    out = poll.parse_media({"connection_status": "firewalled"}, country="US")
+    assert out["text"].startswith("US")
+
+
+def test_parse_media_malformed_toplevel_raises():
+    # non-dict payload -> raise (caller -> stale marker -> soft-yellow qBit?).
+    with pytest.raises(ValueError):
+        poll.parse_media([1, 2, 3])
+
+
+def test_media_uses_distinct_signal():
+    assert poll.SIGNALS["media"] == 16
+    assert 16 not in {poll.SIGNALS["clawgate"], poll.SIGNALS["mail"],
+                      poll.SIGNALS["alerts"], poll.SIGNALS["civitai"]}
+
+
+def test_fetch_media_stale_when_creds_missing(monkeypatch):
+    # Missing creds file -> source() turns the read error into a stale marker
+    # (never crashes, never spawns a request with junk creds).
+    monkeypatch.setenv("MEDIA_ENV", "/no/such/media.env")
+    out = poll.source("media", poll.fetch_media)
+    assert out["state"] == "stale" and out["count"] == 0
+    assert out["source"] == "media"
+
+
+# --------------------------------------------------------------------------- #
+# media block render: alarms (not hides) on stale/firewalled per decision 5
+# --------------------------------------------------------------------------- #
+def test_media_block_passes_through_connected_active():
+    payload = poll.parse_media({"connection_status": "connected",
+                                "dl_info_speed": 151903, "up_info_speed": 412349})
+    out = media_block.render(payload)
+    assert out["icon"] == "net_down" and out["state"] == "Idle"
+    assert out["text"] == payload["text"]
+
+
+def test_media_block_hides_when_connected_idle():
+    payload = poll.parse_media({"connection_status": "connected",
+                                "dl_info_speed": 0, "up_info_speed": 0})
+    assert media_block.render(payload) == {"text": "", "state": "Idle"}
+
+
+def test_media_block_firewalled_is_red():
+    payload = poll.parse_media({"connection_status": "firewalled"})
+    out = media_block.render(payload)
+    assert out["state"] == "Critical" and "firewalled" in out["text"]
+
+
+def test_media_block_stale_is_soft_yellow():
+    # poller-stale marker -> soft yellow `qBit?` (NOT red, NOT hidden).
+    out = media_block.render({"count": 0, "state": "stale", "detail": "x"})
+    assert out == {"icon": "net_down", "text": "qBit?",
+                   "short_text": "qBit?", "state": "Warning"}
+
+
+def test_media_block_error_marker_is_soft_yellow():
+    out = media_block.render({"state": "Idle", "text": "CA ↓1K ↑1K",
+                              "error": "boom"})
+    assert out["state"] == "Warning" and out["text"] == "qBit?"
+
+
+def test_media_block_missing_or_malformed_is_soft_yellow():
+    # decision 5: stale/missing -> soft yellow (this block ALARMS, unlike the
+    # hide-at-zero count blocks which go invisible on a missing cache).
+    for bad in (None, [], "x", 3):
+        out = media_block.render(bad)
+        assert out == {"icon": "net_down", "text": "qBit?",
+                       "short_text": "qBit?", "state": "Warning"}
+
+
+def test_media_block_subprocess_missing_file_is_soft_yellow(tmp_path):
+    env = dict(os.environ, BAR_STATUS_DIR=str(tmp_path))
+    r = subprocess.run([sys.executable, str(SCRIPTS / "i3status-media")],
+                       capture_output=True, text=True, env=env)
+    assert r.returncode == 0
+    assert json.loads(r.stdout)["text"] == "qBit?"
+
+
+def test_mock_run_writes_media(tmp_path, monkeypatch):
+    monkeypatch.setenv("BAR_STATUS_DIR", str(tmp_path))
+    monkeypatch.setattr(poll, "signal_bar", lambda name: None)
+    info_f = tmp_path / "info.json"
+    info_f.write_text(json.dumps({"connection_status": "connected",
+                                  "dl_info_speed": 151903,
+                                  "up_info_speed": 412349}))
+    rc = poll.main(["--mock-media", str(info_f)])
+    assert rc == 0
+    media = json.loads((tmp_path / "media.json").read_text())
+    assert media["state"] == "Idle" and media["source"] == "media"
+    assert "↓" in media["text"]
+
+
+def test_mock_run_malformed_media_writes_stale(tmp_path, monkeypatch):
+    monkeypatch.setenv("BAR_STATUS_DIR", str(tmp_path))
+    monkeypatch.setattr(poll, "signal_bar", lambda name: None)
+    bad = tmp_path / "bad.json"
+    bad.write_text('[1,2,3]')
+    rc = poll.main(["--mock-media", str(bad)])
+    assert rc == 0
+    media = json.loads((tmp_path / "media.json").read_text())
+    assert media["state"] == "stale" and media["count"] == 0
 
 
 # --------------------------------------------------------------------------- #

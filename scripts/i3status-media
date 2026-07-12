@@ -1,0 +1,82 @@
+#!/usr/bin/env python3
+"""i3status-rust custom block: qBittorrent (behind the gluetun AirVPN sidecar).
+
+Reads the cache file written by scripts/bar-status-poll (the `media` source) and
+emits ONE i3status-rust JSON line. INSTANT local file read — CREDENTIAL-FREE,
+never touches the network, never blocks the bar. All the fetch/auth lives in the
+poller; this block only renders what parse_media already decided.
+
+Unlike the hide-at-zero count blocks, this one ALARMS instead of hiding on the
+failure states (per the media widget's decision 5):
+  connected + actively transferring -> neutral pill `CA ↓.. ↑..` (from cache)
+  connected + idle                  -> HIDDEN (empty block; parse_media emits "")
+  firewalled (port not forwarded)   -> RED  (Critical; the AirVPN-fixed regression)
+  poller-stale / qBit unreachable / missing / corrupt cache -> soft yellow `qBit?`
+
+The right-click detail popup (media-detail) and left-click (open the qBit WebUI)
+are wired in graphical.nix, not here.
+"""
+import json
+import os
+import sys
+
+NAME = "media"
+_VALID_STATES = ("Idle", "Info", "Good", "Warning", "Critical")
+_EMPTY = {"text": "", "state": "Idle"}
+# Soft-yellow "status unknown" pill: the poller ran but couldn't reach qBit, OR
+# the cache is missing/corrupt. Deliberately NOT red (avoid crying wolf on a
+# transient poller hiccup) and NOT hidden (a down media tunnel is worth a nudge).
+_STALE = {"icon": "net_down", "text": "qBit?",
+          "short_text": "qBit?", "state": "Warning"}
+
+
+def cache_path() -> str:
+    base = os.environ.get("BAR_STATUS_DIR") or os.path.join(
+        os.path.expanduser("~"), ".cache", "bar-status")
+    return os.path.join(base, NAME + ".json")
+
+
+def load(path):
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+
+def render(payload) -> dict:
+    """Pure: cache payload (or None) -> i3status-rust block dict.
+
+    None / malformed / stale / error -> soft-yellow `qBit?` (alarm, not hide).
+    Otherwise pass through parse_media's render fields; an empty text (the
+    connected+idle case) collapses to the invisible block.
+    """
+    if not isinstance(payload, dict):
+        return dict(_STALE)                       # missing / corrupt cache
+    if payload.get("state") == "stale" or payload.get("error"):
+        return dict(_STALE)                       # poller reached, qBit didn't
+    text = payload.get("text", "")
+    if not isinstance(text, str) or text == "":
+        return dict(_EMPTY)                        # connected + idle -> hidden
+    state = payload.get("state")
+    if state not in _VALID_STATES:
+        state = "Idle"
+    out = {"text": text, "short_text": payload.get("short_text", text),
+           "state": state}
+    icon = payload.get("icon")
+    if icon:
+        out["icon"] = icon
+    return out
+
+
+def main() -> int:
+    sys.stdout.write(json.dumps(render(load(cache_path()))) + "\n")
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except Exception:
+        sys.stdout.write(json.dumps(_EMPTY) + "\n")
+        sys.exit(0)

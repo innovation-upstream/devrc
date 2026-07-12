@@ -64,7 +64,20 @@ IGNORE_ALERTNAMES = frozenset({"Watchdog", "InfoInhibitor"})
 
 # Real-time signal offset per source: the block's `signal = N` in graphical.nix
 # must match, so `pkill -RTMIN+N i3status-rs` refreshes exactly that block.
-SIGNALS = {"clawgate": 11, "mail": 12, "alerts": 13, "civitai": 14}
+SIGNALS = {"clawgate": 11, "mail": 12, "alerts": 13, "civitai": 14, "media": 16}
+
+# media (qBittorrent behind the gluetun AirVPN sidecar). The pill's ONLY content
+# is the qBit tunnel status + ↓/↑ speed; secondary metrics live behind the block's
+# right-click popup (scripts/media-detail), not here. The country label is STATIC
+# (the gluetun sidecar's SERVER_COUNTRIES=Canada; gluetun's control server is not
+# exposed, so we don't query it). Icon net_down deliberately DIFFERS from the host
+# Mullvad pill's net_vpn so the two VPN pills are not confusable.
+MEDIA_COUNTRY = os.environ.get("MEDIA_COUNTRY", "CA")
+MEDIA_ICON = "net_down"
+# "Actively transferring" floor (bytes/s): below this the block hides on a
+# connected+idle tunnel (a little slack so trickle keep-alive traffic doesn't
+# keep the pill permanently lit).
+MEDIA_ACTIVE_MIN_BPS = 1024
 
 DEVRC_DIR = os.environ.get("DEVRC_DIR") or os.path.expanduser("~/workspace/devrc")
 HOMELAB_DIR = os.environ.get("HOMELAB_DIR") or os.path.expanduser("~/workspace/homelab-talos")
@@ -150,6 +163,66 @@ def parse_alerts(alerts) -> dict:
                 "detail": "%d firing (%d critical)" % (count, crit)}
     return {"count": count, "state": "Warning",
             "detail": "%d firing (warning)" % count}
+
+
+def _to_int(v, default: int = 0) -> int:
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return default
+
+
+def _fmt_speed(bps) -> str:
+    """Compact human byte-rate: 0..1023 -> '0B', KiB -> '148K', MiB -> '1.2M'."""
+    n = _to_int(bps)
+    if n < 0:
+        n = 0
+    if n >= 1024 * 1024:
+        return "%.1fM" % (n / 1024.0 / 1024.0)
+    if n >= 1024:
+        return "%dK" % (n // 1024)
+    return "%dB" % n
+
+
+def parse_media(qbit, country: str = MEDIA_COUNTRY) -> dict:
+    """Map a qBittorrent /api/v2/transfer/info dict to an i3status-rust render dict.
+
+    The ONLY pill content is the qBit AirVPN tunnel status + ↓/↑ speed. Decisions:
+      * connection_status == 'firewalled' (API reachable but the forwarded port is
+        not open — the exact regression AirVPN fixed) -> RED (Critical), always
+        shown; this is the one media state worth crying about.
+      * connection_status == 'connected' + actively transferring -> NEUTRAL,
+        shows `CA ↓<dl> ↑<up>`.
+      * connection_status == 'connected' + idle (no transfer) -> HIDDEN (empty
+        block) — steady state is invisible (the CALM bar).
+      * any other/unknown status (connecting/disconnected/...) -> soft Warning,
+        shown so it is not silently swallowed.
+
+    Returns ONLY render fields (icon/text/short_text/state) so the credential-free
+    i3status-media block can emit it verbatim. Raises ValueError if the payload is
+    not a dict (the caller turns that into a 'stale' marker -> soft-yellow qBit?).
+    """
+    if not isinstance(qbit, dict):
+        raise ValueError("qbittorrent transfer/info payload is not a dict")
+    status = qbit.get("connection_status")
+    dl = _to_int(qbit.get("dl_info_speed"))
+    up = _to_int(qbit.get("up_info_speed"))
+    if status == "firewalled":
+        text = "%s ⚠ firewalled" % country
+        return {"icon": MEDIA_ICON, "text": text,
+                "short_text": "%s !" % country, "state": "Critical"}
+    speeds = "↓%s ↑%s" % (_fmt_speed(dl), _fmt_speed(up))
+    if status == "connected":
+        active = (dl >= MEDIA_ACTIVE_MIN_BPS) or (up >= MEDIA_ACTIVE_MIN_BPS)
+        if not active:
+            return {"text": "", "state": "Idle"}   # connected + idle -> hidden
+        text = "%s %s" % (country, speeds)
+        return {"icon": MEDIA_ICON, "text": text,
+                "short_text": speeds, "state": "Idle"}
+    # unknown / transitional tunnel state -> soft, visible (not red, not hidden)
+    text = "%s %s" % (country, status or "?")
+    return {"icon": MEDIA_ICON, "text": text,
+            "short_text": "%s ?" % country, "state": "Warning"}
 
 
 def stale(reason: str, err=None) -> dict:
@@ -455,6 +528,61 @@ def fetch_civitai() -> dict:
     return parse_alerts(alerts)
 
 
+def _media_creds() -> dict:
+    """Read ~/.config/bar/media.env by EXPLICIT PATH (mirrors _clawgate_creds).
+
+    Kept OUT of git / the nix-store (it holds the qBit password + *arr API keys),
+    so it is read straight off disk at 0600. MEDIA_ENV overrides the path (tests)."""
+    env = {}
+    path = os.environ.get("MEDIA_ENV") or os.path.expanduser("~/.config/bar/media.env")
+    with open(path) as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            k, v = line.split("=", 1)
+            env[k.strip()] = v.strip()
+    return env
+
+
+def _qbit_login(url: str, user: str, pw: str, timeout: float = 3.0):
+    """POST /api/v2/auth/login (form) -> the session cookie 'name=value' token,
+    or None.
+
+    qBittorrent 5.x names the cookie QBT_SID_<port> (older builds used SID), so we
+    return the WHOLE first cookie pair verbatim rather than assuming a name, and
+    send it straight back in the Cookie header. None means login yielded no cookie;
+    the caller then tries the request unauthenticated (the LAN subnet may allow it)
+    and falls through to a 'stale' marker if that is refused too."""
+    import urllib.parse
+    data = urllib.parse.urlencode({"username": user, "password": pw}).encode()
+    req = urllib.request.Request(url + "/api/v2/auth/login", data=data,
+                                 headers={"Content-Type":
+                                          "application/x-www-form-urlencoded"})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        cookie = resp.headers.get("Set-Cookie", "") or ""
+    token = cookie.split(";", 1)[0].strip()
+    return token if "=" in token else None
+
+
+def fetch_media() -> dict:
+    """Authed qBittorrent /transfer/info -> parse_media. Single short-timeout call
+    (the pill is speed-only); the secondary *arr metrics live in media-detail."""
+    creds = _media_creds()
+    url = creds.get("QBIT_URL", "http://qbittorrent.workbench.lan").rstrip("/")
+    user = creds.get("QBIT_USER", "admin")
+    pw = creds.get("QBIT_PASS", "")
+    country = creds.get("MEDIA_COUNTRY", MEDIA_COUNTRY)
+    token = None
+    try:
+        token = _qbit_login(url, user, pw, timeout=3)
+    except Exception:
+        token = None  # fall back to an unauthenticated request below
+    headers = {"Cookie": token} if token else {}
+    info = _http_json(url + "/api/v2/transfer/info", headers=headers, timeout=3)
+    return parse_media(info, country=country)
+
+
 # ---------------------------------------------------------------------------
 # Orchestration
 # ---------------------------------------------------------------------------
@@ -510,13 +638,15 @@ def main(argv=None) -> int:
                     help="parse this JSON file as the Alertmanager alert list")
     ap.add_argument("--mock-civitai", metavar="FILE",
                     help="parse this JSON file as the civitai Alertmanager alert list")
+    ap.add_argument("--mock-media", metavar="FILE",
+                    help="parse this JSON file as the qBittorrent transfer/info payload")
     ap.add_argument("--mock-mail", metavar="N", type=int,
                     help="use N as the open-mail_actions count")
     args = ap.parse_args(argv)
 
     mocking = any(x is not None for x in
                   (args.mock_clawgate, args.mock_alerts, args.mock_civitai,
-                   args.mock_mail))
+                   args.mock_media, args.mock_mail))
 
     if mocking:
         if args.mock_clawgate is not None:
@@ -530,6 +660,9 @@ def main(argv=None) -> int:
         if args.mock_civitai is not None:
             with open(args.mock_civitai) as f:
                 run_source("civitai", lambda: parse_alerts(json.load(f)))
+        if args.mock_media is not None:
+            with open(args.mock_media) as f:
+                run_source("media", lambda: parse_media(json.load(f)))
         return 0
 
     # Live poll: each source is independent + fail-safe. After writing each
@@ -538,10 +671,13 @@ def main(argv=None) -> int:
     # wrapped so a desktop-notify failure can never break or slow the poll.
     specs = _toast_specs()
     for name, fn in (("clawgate", fetch_clawgate), ("mail", fetch_mail),
-                     ("alerts", fetch_alerts), ("civitai", fetch_civitai)):
+                     ("alerts", fetch_alerts), ("civitai", fetch_civitai),
+                     ("media", fetch_media)):
         payload = run_source(name, fn)
-        with contextlib.suppress(Exception):
-            evaluate_edge_toast(name, payload, specs[name])
+        spec = specs.get(name)   # media has no edge-toast spec (alarm is in-pill)
+        if spec is not None:
+            with contextlib.suppress(Exception):
+                evaluate_edge_toast(name, payload, spec)
     return 0
 
 
