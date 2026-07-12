@@ -33,7 +33,8 @@ let
     critical_mem = 92;
     interval = 10;
   };
-  # Bar shows "/" only; left-click expands to all real filesystems (disk-detail).
+  # Bar shows "/" only; left-click opens a rofi gauge list of all real filesystems
+  # (disk-detail — mirrors the media/vpn detail idiom, not a raw df terminal dump).
   diskBlock = {
     block = "disk_space";
     path = "/";
@@ -41,7 +42,7 @@ let
     info_type = "available";
     interval = 60;
     click = [
-      { button = "left"; cmd = "alacritty --class float,float -e ${scriptsDir}/disk-detail"; }
+      { button = "left"; cmd = "${scriptsDir}/disk-detail"; }
     ];
   };
   # net: NO `device` set on purpose. i3status-rust auto-follows the default-route
