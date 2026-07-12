@@ -1,0 +1,97 @@
+#!/usr/bin/env python3
+"""Disk block right-click: open `ncdu` on the FULLEST real filesystem.
+
+Pairs with the disk block's left-click (disk-detail's rofi gauge list). Where the
+left-click LISTS all mounts, the right-click drills straight into the one that is
+most full — `ncdu <mountpoint>` in the float terminal (wired in graphical.nix) so
+you can immediately see what is eating the space.
+
+Reuses disk-detail's tested `parse_df` (loaded by path — disk-detail has no .py
+extension) to pick the real mount with the highest usage pct; pseudo/overlay/tmpfs
+mounts are already filtered there. Fail-safe: any failure (df missing, no real
+mounts, malformed) → default to `/`. A launcher must never crash loudly.
+
+`--dry-run` prints the chosen mountpoint instead of exec'ing ncdu (offline test /
+debug path).
+"""
+from __future__ import annotations
+
+import importlib.machinery
+import importlib.util
+import os
+import subprocess
+import sys
+
+# disk-detail sits next to this script (in the repo AND in the deployed
+# ~/.config/i3status-rust/scripts/ dir) — load it by path to reuse parse_df.
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_DISK_DETAIL = os.path.join(_HERE, "disk-detail")
+
+
+def _load_disk_detail(path=_DISK_DETAIL):
+    """Load the disk-detail module (parse_df + read_disks). None on failure."""
+    try:
+        loader = importlib.machinery.SourceFileLoader("disk_detail_ex", path)
+        spec = importlib.util.spec_from_loader("disk_detail_ex", loader)
+        mod = importlib.util.module_from_spec(spec)
+        loader.exec_module(mod)
+        return mod
+    except Exception:
+        return None
+
+
+def fullest_mount(disks, default: str = "/") -> str:
+    """Pick the mountpoint of the real filesystem with the highest usage pct.
+
+    `disks` is disk-detail.parse_df output (pseudo-fs already filtered). Empty /
+    malformed / no valid target → `default`. Pure + fail-safe; a tie keeps the
+    first (df order)."""
+    best = None
+    best_pct = -1
+    for d in disks or []:
+        if not isinstance(d, dict):
+            continue
+        target = d.get("target")
+        if not target:
+            continue
+        try:
+            pct = int(d.get("pct", 0))
+        except (TypeError, ValueError):
+            continue
+        if pct > best_pct:
+            best_pct = pct
+            best = target
+    return best or default
+
+
+def pick_mount() -> str:
+    """Read the live df (via disk-detail) and return the fullest mount, or `/`."""
+    dd = _load_disk_detail()
+    if dd is None:
+        return "/"
+    try:
+        disks = dd.read_disks()
+    except Exception:
+        disks = []
+    return fullest_mount(disks)
+
+
+def main(argv=None) -> int:
+    argv = sys.argv[1:] if argv is None else argv
+    mount = pick_mount()
+    if "--dry-run" in argv:
+        print(mount)
+        return 0
+    try:
+        os.execvp("ncdu", ["ncdu", mount])
+    except Exception:
+        # ncdu missing / exec failed — don't leave a dead terminal crash-dumping.
+        return 0
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except Exception:  # a launcher must never crash loudly
+        sys.exit(0)

@@ -1,9 +1,0 @@
-#!/usr/bin/env bash
-# i3blocks launcher block for the agent-ops mission-control dashboard.
-#   interval=once -> renders the icon once at startup (static launcher).
-# Plain-text stdout (json defaults false), exactly like i3blocks-rigcontrol — the
-# glyph is a material-design nerd-font `md-view_dashboard` (U+F056E), verified
-# present in JetBrainsMono Nerd Font (the bar font) so it never renders as tofu.
-# The left-click (wired in graphical.nix, since i3status-rust custom blocks do NOT
-# set $BLOCK_BUTTON) opens agent-ops in a floating terminal.
-echo "󰕮"
