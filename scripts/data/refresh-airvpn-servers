@@ -1,0 +1,193 @@
+#!/usr/bin/env python3
+"""Refresh scripts/data/airvpn-servers.json — the AirVPN WireGuard server manifest.
+
+The host AirVPN block's "switch server" feature needs, per server: a WireGuard
+ENDPOINT (ip:port) and the server's WireGuard PUBLIC KEY. AirVPN's own public API
+(https://airvpn.org/api/status/) gives per-server load/health/country but NOT the
+WG pubkeys or WG endpoints. gluetun (qmcgaw/gluetun) bundles exactly that missing
+data in its per-provider server list. So this manifest is built by MERGING:
+
+  * gluetun's bundled `airvpn.json`  -> server_name, country/city, WG entry IPv4,
+                                        wgpubkey  (the authoritative WG data)
+  * airvpn.org/api/status            -> currentload / users / health  (merged in
+                                        LIVE at runtime by airvpn-menu, NOT baked
+                                        into this file, so load never goes stale)
+
+KEY FACT (verified 2026-07): AirVPN uses ONE shared WireGuard public key across
+ALL its servers, so a server switch only has to swap the [Peer] Endpoint IP and
+keep the same PublicKey. The shared key is stored ONCE at the manifest top level
+(`wg_pubkey`). It is NOT a secret — it is the SERVER's public key, present in the
+[Peer] section of every AirVPN WireGuard config that AirVPN hands out.
+
+Nothing here is a credential: server IPs and the shared server pubkey are public.
+The user's OWN [Interface] PrivateKey never touches this file or git.
+
+Sources of gluetun data (in preference order — first that works wins):
+  1. the RUNNING gluetun sidecar in the qBit pod (namespace media-stack, deploy
+     qbittorrent, container gluetun) at /gluetun/servers/airvpn.json  — needs
+     KUBECONFIG=$KC_WORKBENCH (workbench cluster).
+  2. gluetun's public servers.json in the qdm12/gluetun GitHub repo (fallback).
+  3. a local --gluetun-json FILE you pass explicitly.
+
+Usage:
+    scripts/data/refresh-airvpn-servers                 # auto-source + write manifest
+    scripts/data/refresh-airvpn-servers --gluetun-json /path/airvpn.json
+    scripts/data/refresh-airvpn-servers --no-api        # skip the load merge sanity fetch
+    scripts/data/refresh-airvpn-servers --dry-run       # print summary, don't write
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import subprocess
+import sys
+import time
+import urllib.request
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+MANIFEST = os.path.join(HERE, "airvpn-servers.json")
+
+GLUETUN_NS = "media-stack"
+GLUETUN_POD_SELECTOR = "app=qbittorrent"
+GLUETUN_CONTAINER = "gluetun"
+GLUETUN_PATH = "/gluetun/servers/airvpn.json"
+GLUETUN_GITHUB = ("https://raw.githubusercontent.com/qdm12/gluetun/master/"
+                  "internal/storage/servers.json")
+AIRVPN_API = "https://airvpn.org/api/status/"
+
+
+# --------------------------------------------------------------------------- #
+# Pure transform (unit-testable): gluetun airvpn.json -> manifest dict
+# --------------------------------------------------------------------------- #
+def build_manifest(gluetun: dict) -> dict:
+    """Merge gluetun's bundled AirVPN data into the compact switch manifest.
+
+    Keeps ONLY WireGuard servers that expose an IPv4 entry IP (the switch needs a
+    v4 endpoint). Emits one row per server_name with its country/city + v4 entry
+    IP, and hoists the (single, shared) WG pubkey to the top level. Raises
+    ValueError on a payload that isn't gluetun-shaped.
+    """
+    if not isinstance(gluetun, dict) or not isinstance(gluetun.get("servers"), list):
+        raise ValueError("not a gluetun servers file (missing 'servers' list)")
+    rows = []
+    pubkeys = set()
+    for s in gluetun["servers"]:
+        if not isinstance(s, dict) or s.get("vpn") != "wireguard":
+            continue
+        ips = s.get("ips") or []
+        v4 = next((i for i in ips if isinstance(i, str) and ":" not in i), None)
+        if not v4:
+            continue
+        pk = s.get("wgpubkey")
+        if pk:
+            pubkeys.add(pk)
+        rows.append({
+            "name": s.get("server_name") or s.get("hostname") or v4,
+            "country": s.get("country") or "?",
+            "city": s.get("city") or "",
+            "endpoint_ip": v4,
+        })
+    if not rows:
+        raise ValueError("no WireGuard IPv4 servers found in gluetun data")
+    rows.sort(key=lambda r: (r["country"], r["city"], r["name"]))
+    # AirVPN shares one WG server key across all servers; if that ever changes,
+    # keep the manifest per-row instead. Store the single shared key when uniform.
+    wg_pubkey = next(iter(pubkeys)) if len(pubkeys) == 1 else None
+    if wg_pubkey is None:
+        # Rare: multiple keys -> store per-row so switch stays correct.
+        by_name = {s.get("server_name"): s.get("wgpubkey")
+                   for s in gluetun["servers"] if isinstance(s, dict)}
+        for r in rows:
+            r["wg_pubkey"] = by_name.get(r["name"])
+    return {
+        "generated": int(time.time()),
+        "source": "gluetun airvpn.json (bundled) merged with airvpn.org/api at runtime",
+        "wg_pubkey_shared": wg_pubkey is not None,
+        "wg_pubkey": wg_pubkey,
+        "servers": rows,
+    }
+
+
+# --------------------------------------------------------------------------- #
+# Sourcing (side-effecting)
+# --------------------------------------------------------------------------- #
+def _from_kube() -> dict:
+    kc = os.environ.get("KC_WORKBENCH") or os.path.expanduser(
+        "~/workspace/homelab-talos/workbench-kubeconfig")
+    env = dict(os.environ, KUBECONFIG=kc)
+    pod = subprocess.run(
+        ["kubectl", "-n", GLUETUN_NS, "get", "pods", "-l", GLUETUN_POD_SELECTOR,
+         "-o", "jsonpath={.items[0].metadata.name}"],
+        env=env, stdout=subprocess.PIPE, text=True, timeout=15).stdout.strip()
+    if not pod:
+        raise RuntimeError("no qbittorrent pod found")
+    raw = subprocess.run(
+        ["kubectl", "-n", GLUETUN_NS, "exec", pod, "-c", GLUETUN_CONTAINER,
+         "--", "cat", GLUETUN_PATH],
+        env=env, stdout=subprocess.PIPE, text=True, timeout=30).stdout
+    return json.loads(raw)
+
+
+def _from_github() -> dict:
+    with urllib.request.urlopen(GLUETUN_GITHUB, timeout=20) as r:
+        allp = json.loads(r.read().decode())
+    # gluetun's combined servers.json nests providers under lowercase keys.
+    av = allp.get("airvpn") or allp.get("AirVPN")
+    if not isinstance(av, dict):
+        raise RuntimeError("github servers.json has no airvpn section")
+    return av
+
+
+def source_gluetun(explicit=None) -> dict:
+    if explicit:
+        with open(explicit) as f:
+            return json.load(f)
+    for fn in (_from_kube, _from_github):
+        try:
+            return fn()
+        except Exception as e:  # noqa: BLE001
+            sys.stderr.write("source %s failed: %s\n" % (fn.__name__, e))
+    raise SystemExit("could not source gluetun AirVPN data from any source")
+
+
+def sanity_api(manifest: dict) -> None:
+    """Best-effort: confirm the AirVPN API public_names still cover the manifest."""
+    try:
+        with urllib.request.urlopen(AIRVPN_API, timeout=20) as r:
+            api = json.loads(r.read().decode())
+        names = {s.get("public_name") for s in api.get("servers", [])}
+        covered = sum(1 for s in manifest["servers"] if s["name"] in names)
+        sys.stderr.write("AirVPN API: %d/%d manifest servers have live load data\n"
+                         % (covered, len(manifest["servers"])))
+    except Exception as e:  # noqa: BLE001
+        sys.stderr.write("AirVPN API sanity fetch skipped: %s\n" % e)
+
+
+def main(argv=None) -> int:
+    ap = argparse.ArgumentParser(description="refresh the AirVPN WG server manifest")
+    ap.add_argument("--gluetun-json", help="read gluetun airvpn.json from this file")
+    ap.add_argument("--no-api", action="store_true", help="skip the API sanity fetch")
+    ap.add_argument("--dry-run", action="store_true", help="don't write the manifest")
+    args = ap.parse_args(argv)
+
+    gluetun = source_gluetun(args.gluetun_json)
+    manifest = build_manifest(gluetun)
+    sys.stderr.write("built manifest: %d WG servers, shared pubkey=%s\n"
+                     % (len(manifest["servers"]), manifest["wg_pubkey_shared"]))
+    if not args.no_api:
+        sanity_api(manifest)
+    if args.dry_run:
+        print(json.dumps(manifest, indent=1))
+        return 0
+    tmp = MANIFEST + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(manifest, f, indent=1)
+        f.write("\n")
+    os.replace(tmp, MANIFEST)
+    sys.stderr.write("wrote %s\n" % MANIFEST)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

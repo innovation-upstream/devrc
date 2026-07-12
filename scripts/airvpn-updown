@@ -1,0 +1,117 @@
+#!/usr/bin/env bash
+# AirVPN host tunnel PostUp/PostDown helper — the KILLSWITCH + SPLIT-TUNNEL
+# BYPASSES for the whole-host AirVPN WireGuard tunnel. Called BY wg-quick (as
+# root) from the conf's PostUp/PostDown lines, so the killswitch is tied to the
+# tunnel LIFECYCLE (armed only while up, torn down on down) rather than always-on.
+#
+# Destined for the STABLE path /etc/nixos/i3blocks-scripts/airvpn-updown (copied
+# there by Zach in Phase 2; see nix/system/airvpn-host.nix). Reference it from the
+# generated /etc/wireguard/airvpn.conf:
+#     [Interface]
+#     ...
+#     PostUp   = /etc/nixos/i3blocks-scripts/airvpn-updown up %i
+#     PreDown  = /etc/nixos/i3blocks-scripts/airvpn-updown down %i
+#
+# It REPLICATES the old (commented) Mullvad host wg-quick split-tunnel bypasses:
+#   * bypass the VPN ENDPOINT itself via the original gateway (wg-quick's fwmark
+#     already exempts wg's own encrypted packets; this /32 is belt-and-suspenders
+#     + is what a `switch` refreshes),
+#   * bypass 192.168.50.1 (LAN router / DNS upstream),
+#   * keep the LAN 192.168.50.0/24 direct (it already is — connected route),
+#   * bypass the nebula Hetzner lighthouse 5.161.118.55 so the mail/mesh chain
+#     survives while the host is tunnelled.
+# The KILLSWITCH is fail-closed: while up, any output that would leave the box
+# NOT through the tunnel (and isn't one of the explicit bypasses / LAN) is dropped,
+# so a tunnel drop can't silently leak traffic onto the direct link.
+#
+# wg-quick uses fwmark routing (Table=auto): the main table keeps the physical
+# default route, unmarked traffic is sent to the wg table via `ip rule`, and
+# `suppress_prefixlength 0` lets MORE-SPECIFIC main-table routes win. So a /32
+# bypass added to the MAIN table wins over the tunnel default -> direct. wg's own
+# encrypted packets carry the fwmark and use the physical default automatically.
+set -uo pipefail
+
+action="${1:-}"
+IFACE="${2:-airvpn}"
+
+# The split-tunnel bypass destinations (mirror the old Mullvad conf).
+LAN_ROUTER="192.168.50.1"          # LAN router / DNS upstream
+NEBULA_LIGHTHOUSE="5.161.118.55"   # Hetzner nebula lighthouse (mail/mesh survives)
+LAN_SUBNET="192.168.50.0/24"       # LAN kept direct
+
+GW_FILE="/run/airvpn-gateway"
+IFACE_FILE="/run/airvpn-iface"
+KS_TABLE="airvpn_ks"
+
+log() { logger -t airvpn-updown "$*" 2>/dev/null || echo "airvpn-updown: $*" >&2; }
+
+# Original default gateway + physical iface (the default route NOT via the tunnel).
+orig_gw()   { ip -o route show default 2>/dev/null | grep -v "dev ${IFACE}" | awk '{print $3}' | head -1; }
+orig_if()   { ip -o route show default 2>/dev/null | grep -v "dev ${IFACE}" | awk '{print $5}' | head -1; }
+
+# The connected peer endpoint IP (for the endpoint bypass /32).
+endpoint_ip() {
+    wg show "$IFACE" endpoints 2>/dev/null | awk '{print $2}' | sed 's/:[0-9]*$//' | head -1
+}
+
+case "$action" in
+    up)
+        GW="$(orig_gw)"; PHYS="$(orig_if)"
+        if [[ -z "$GW" || -z "$PHYS" ]]; then
+            log "could not determine original gateway/iface — aborting bypass setup"
+            exit 0   # never fail the tunnel bring-up
+        fi
+        echo "$GW"   > "$GW_FILE"
+        echo "$PHYS" > "$IFACE_FILE"
+
+        EP="$(endpoint_ip)"
+        # --- split-tunnel bypass routes (MAIN table /32s beat the tunnel default) --
+        [[ -n "$EP" ]] && ip route replace "$EP" via "$GW" dev "$PHYS" 2>/dev/null || true
+        ip route replace "$LAN_ROUTER"       via "$GW" dev "$PHYS" 2>/dev/null || true
+        ip route replace "$NEBULA_LIGHTHOUSE" via "$GW" dev "$PHYS" 2>/dev/null || true
+        # LAN /24 stays direct via the connected route; assert it explicitly too.
+        ip route replace "$LAN_SUBNET" dev "$PHYS" scope link 2>/dev/null || true
+
+        # --- fail-closed killswitch (nftables) -----------------------------------
+        FWMARK="$(wg show "$IFACE" fwmark 2>/dev/null)"   # e.g. 0xca6c
+        nft add table inet "$KS_TABLE" 2>/dev/null || true
+        nft flush table inet "$KS_TABLE" 2>/dev/null || true
+        nft -f - <<NFT || log "killswitch nft load failed (traffic NOT fail-closed)"
+table inet ${KS_TABLE} {
+    chain out {
+        type filter hook output priority 0; policy accept;
+        oifname "${IFACE}" accept
+        oifname "lo" accept
+        $( [[ -n "$FWMARK" && "$FWMARK" != "off" ]] && echo "meta mark ${FWMARK} accept" )
+        ip daddr ${LAN_SUBNET} accept
+        ip daddr ${NEBULA_LIGHTHOUSE} accept
+        $( [[ -n "$EP" ]] && echo "ip daddr ${EP} accept" )
+        ip daddr ${GW} accept
+        # link-local + multicast housekeeping stay allowed
+        ip6 daddr fe80::/10 accept
+        ip daddr 224.0.0.0/4 accept
+        # anything else that would egress un-tunnelled -> DROP (fail-closed)
+        meta nfproto ipv4 drop
+        meta nfproto ipv6 drop
+    }
+}
+NFT
+        log "up: killswitch armed (fwmark=${FWMARK:-none}), bypasses gw=$GW ep=${EP:-?}"
+        ;;
+    down)
+        nft delete table inet "$KS_TABLE" 2>/dev/null || true
+        GW="$(cat "$GW_FILE" 2>/dev/null || true)"
+        for dst in "$NEBULA_LIGHTHOUSE" "$LAN_ROUTER"; do
+            ip route del "$dst" 2>/dev/null || true
+        done
+        # endpoint bypass /32 (if any) — best-effort cleanup by removing non-default
+        # /32s we might have added is unnecessary; wg-quick down drops the iface and
+        # its table. Leave LAN /24 (it is the normal connected route).
+        rm -f "$GW_FILE" "$IFACE_FILE"
+        log "down: killswitch disarmed, bypass routes removed"
+        ;;
+    *)
+        echo "usage: airvpn-updown {up|down} <iface>" >&2
+        exit 1
+        ;;
+esac

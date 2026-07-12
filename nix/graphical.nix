@@ -143,15 +143,25 @@ let
     driver = "auto";
     format = " $icon $volume ";
   };
-  vpnBlock = {
+  # airvpn: the HOST-level AirVPN WireGuard tunnel (the whole workbench routes
+  # through AirVPN). REPLACES the decommissioned host Mullvad block. Default-OFF,
+  # toggled from the menu. Credential-free render (reads ~/.cache/bar-status/
+  # airvpn.json written by the poller's `airvpn` source); signal 10 (inherited
+  # from the retired vpnBlock). Distinct from mediaBlock (the qBit-pod AirVPN,
+  # net_down icon) — this one uses net_vpn. CALM: dim `VPN off` when down, neutral
+  # `AirVPN CC` when up+verified, RED on a leak, yellow on a down forwarded port,
+  # soft-yellow `VPN?` on poller-stale. Left-click opens airvpn-menu (Connect/
+  # Disconnect / switch server / verify exit-IP / forwarded-port / TUI); right-click
+  # floats the airvpn-detail TUI. WORKBENCH-ONLY (the tunnel + poller are there).
+  airvpnBlock = {
     block = "custom";
-    command = "${scriptsDir}/i3status-vpn-status";
+    command = "${scriptsDir}/i3status-airvpn";
     json = true;
     interval = 30;
     signal = 10;
     click = [
-      { button = "left"; cmd = "${scriptsDir}/i3status-vpn-menu"; }
-      { button = "right"; cmd = "alacritty --class float,float -e ${scriptsDir}/vpn-detail"; }
+      { button = "left"; cmd = "${scriptsDir}/airvpn-menu"; }
+      { button = "right"; cmd = "alacritty --class float,float -e ${scriptsDir}/airvpn-detail"; }
     ];
   };
   # Decoupled status-count blocks (workbench only). These NEVER query a remote
@@ -285,8 +295,8 @@ let
     ++ lib.optional (!isLaptop) gpuBlock
     ++ lib.optional isLaptop batteryBlock
     ++ [ soundBlock ]
-    ++ lib.optionals (!isLaptop) [ alertsBlock civitaiBlock mailBlock clawgateBlock dndBlock mediaBlock ]
-    ++ [ vpnBlock timeBlock ]
+    ++ lib.optionals (!isLaptop) [ alertsBlock civitaiBlock mailBlock clawgateBlock dndBlock mediaBlock airvpnBlock ]
+    ++ [ timeBlock ]
     ++ lib.optionals (!isLaptop) [ agentOpsBlock rigcontrolBlock ];
 in
 lib.mkIf isNixOS {
@@ -316,21 +326,28 @@ lib.mkIf isNixOS {
   # i3 config — raw string. INERT until the system cutover stops forcing /etc/i3.conf.
   xdg.configFile."i3/config".text = import ./i3/config.nix { inherit isLaptop; };
 
-  # Custom-block scripts, symlinked beside the generated TOML. vpn-detail is landed
-  # under the name the menu script expects (${SCRIPT_BASE}/vpn-detail). vpn-sudo is
-  # deliberately NOT symlinked here — it must stay at the stable, sudoers-trusted
-  # /etc/nixos/i3blocks-scripts/vpn-sudo path (a nix-store path would break NOPASSWD).
-  home.file.".config/i3status-rust/scripts/i3status-vpn-status" = {
-    source = ../scripts/i3status-vpn-status;
+  # Host AirVPN block scripts (workbench-only), symlinked beside the generated TOML.
+  # airvpn-sudo is deliberately NOT symlinked here — it must stay at the stable,
+  # sudoers-trusted /etc/nixos/i3blocks-scripts/airvpn-sudo path (a nix-store path
+  # would break the NOPASSWD rule + change every rebuild), exactly like the old
+  # vpn-sudo. The credential-free render + menu + detail read the poller cache
+  # (~/.cache/bar-status/airvpn.json) + the committed server manifest; no secret in
+  # the store. The manifest is symlinked into scripts/data/ so airvpn-menu resolves
+  # it relative to its own dir (MANIFEST = <script dir>/data/airvpn-servers.json).
+  home.file.".config/i3status-rust/scripts/i3status-airvpn" = lib.mkIf (!isLaptop) {
+    source = ../scripts/i3status-airvpn;
     executable = true;
   };
-  home.file.".config/i3status-rust/scripts/i3status-vpn-menu" = {
-    source = ../scripts/i3status-vpn-menu;
+  home.file.".config/i3status-rust/scripts/airvpn-menu" = lib.mkIf (!isLaptop) {
+    source = ../scripts/airvpn-menu;
     executable = true;
   };
-  home.file.".config/i3status-rust/scripts/vpn-detail" = {
-    source = ../scripts/i3blocks-vpn-detail;
+  home.file.".config/i3status-rust/scripts/airvpn-detail" = lib.mkIf (!isLaptop) {
+    source = ../scripts/airvpn-detail;
     executable = true;
+  };
+  home.file.".config/i3status-rust/scripts/data/airvpn-servers.json" = lib.mkIf (!isLaptop) {
+    source = ../scripts/data/airvpn-servers.json;
   };
   home.file.".config/i3status-rust/scripts/disk-detail" = {
     source = ../scripts/disk-detail;
@@ -411,7 +428,7 @@ lib.mkIf isNixOS {
   # repo paths itself (no .zshenv handles under systemd).
   systemd.user.services.bar-status-poll = lib.mkIf (!isLaptop) {
     Unit = {
-      Description = "Poll clawgate/mail/alerts/civitai → ~/.cache/bar-status for the i3 bar";
+      Description = "Poll clawgate/mail/alerts/civitai/media/airvpn → ~/.cache/bar-status for the i3 bar";
       After = [ "network-online.target" ];
       Wants = [ "network-online.target" ];
     };
@@ -428,7 +445,10 @@ lib.mkIf isNixOS {
         # cgroup teardown. procps -> pgrep (borrow DISPLAY/DBUS from i3 for the
         # toast). bash/dunstify/xdg-open resolve from the user-manager PATH inside
         # that transient unit, so they need not be on the poller's own PATH.
-        "PATH=${lib.makeBinPath [ pollPyEnv pkgs.kubectl pkgs.procps pkgs.coreutils pkgs.systemd ]}"
+        # /run/wrappers/bin first for the setuid `sudo` wrapper: the `airvpn`
+        # source runs `sudo -n airvpn-sudo status` (read-only `wg show`, NOPASSWD)
+        # to read the host tunnel state. iproute2 provides `ip` (link up/down probe).
+        "PATH=/run/wrappers/bin:${lib.makeBinPath [ pollPyEnv pkgs.kubectl pkgs.procps pkgs.coreutils pkgs.systemd pkgs.iproute2 ]}"
         "KUBECONFIG=%h/workspace/homelab-talos/homelab-kubeconfig"
         # civitai (CLIENT) prod cluster kubeconfig — the civitai alerts source
         # port-forwards through THIS, never the homelab KUBECONFIG above.

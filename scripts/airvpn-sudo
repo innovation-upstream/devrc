@@ -1,0 +1,117 @@
+#!/usr/bin/env bash
+# Privileged helper for the HOST AirVPN WireGuard block. Run via a NOPASSWD
+# sudoers rule at the STABLE path /etc/nixos/i3blocks-scripts/airvpn-sudo (a
+# nix-store path would (a) not match the NOPASSWD rule and (b) change every
+# rebuild). Analogous to the retired vpn-sudo (Mullvad) helper.
+#
+# Runs as ROOT via NOPASSWD, so EVERY argument is strictly validated/whitelisted
+# before use — no shell-injection surface, no eval, fixed-string replacements only.
+#
+# Usage:
+#   airvpn-sudo up                                  # wg-quick up airvpn (killswitch on)
+#   airvpn-sudo down                                # wg-quick down airvpn (killswitch off)
+#   airvpn-sudo switch <ip:port> <server_pubkey> [psk]
+#       -> rewrite the [Peer] Endpoint/PublicKey (+optional PresharedKey) in the
+#          LIVE conf and `wg syncconf` for an INSTANT reconnect (NO nixos-rebuild).
+#          Also fixes the per-endpoint bypass route (syncconf does NOT re-run PostUp).
+#   airvpn-sudo status                              # read-only `wg show airvpn dump`
+#
+# The conf is Zach's secret at /etc/wireguard/airvpn.conf (0600, root). This helper
+# only READS/rewrites the [Peer] Endpoint/PublicKey/PresharedKey lines; it never
+# prints the [Interface] PrivateKey. The conf rewrite MIRRORS the pure
+# rewrite_conf() in scripts/airvpn-menu (kept in lock-step; both replace the
+# Endpoint/PublicKey lines, which in a wg conf appear ONLY in [Peer]).
+set -euo pipefail
+
+WG_IFACE="airvpn"
+CONF="/etc/wireguard/${WG_IFACE}.conf"
+# Saved by the conf's PostUp so a `switch` can bypass the NEW endpoint via the
+# original gateway (WG's own encrypted packets must not enter the tunnel).
+GW_FILE="/run/airvpn-gateway"
+IFACE_FILE="/run/airvpn-iface"
+
+log() { echo "airvpn-sudo: $*" >&2; }
+
+# --- strict validators ------------------------------------------------------
+is_ipv4() {
+    [[ "$1" =~ ^([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})$ ]] || return 1
+    local o
+    for o in "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}" "${BASH_REMATCH[3]}" "${BASH_REMATCH[4]}"; do
+        (( o >= 0 && o <= 255 )) || return 1
+    done
+}
+is_endpoint() {  # A.B.C.D:port
+    [[ "$1" == *:* ]] || return 1
+    local ip="${1%:*}" port="${1##*:}"
+    is_ipv4 "$ip" || return 1
+    [[ "$port" =~ ^[0-9]+$ ]] || return 1
+    (( port >= 1 && port <= 65535 ))
+}
+is_wg_key() { [[ "$1" =~ ^[A-Za-z0-9+/]{43}=$ ]]; }
+
+require_conf() {
+    [[ -f "$CONF" ]] || { log "conf $CONF missing — generate an AirVPN WireGuard config first"; exit 3; }
+}
+
+cmd="${1:-}"
+case "$cmd" in
+    up)
+        require_conf
+        wg-quick up "$WG_IFACE"
+        ;;
+    down)
+        # Best-effort: down even if partially up; never fail the menu on a no-op.
+        wg-quick down "$WG_IFACE" || true
+        ;;
+    status)
+        # Read-only. Empty output if the interface isn't up.
+        wg show "$WG_IFACE" dump 2>/dev/null || true
+        ;;
+    switch)
+        require_conf
+        [[ $# -ge 3 ]] || { log "usage: airvpn-sudo switch <ip:port> <server_pubkey> [psk]"; exit 1; }
+        endpoint="$2"; pubkey="$3"; psk="${4:-}"
+        is_endpoint "$endpoint" || { log "invalid endpoint: $endpoint"; exit 1; }
+        is_wg_key "$pubkey"      || { log "invalid server pubkey"; exit 1; }
+        if [[ -n "$psk" ]]; then is_wg_key "$psk" || { log "invalid psk"; exit 1; }; fi
+        new_ip="${endpoint%:*}"
+
+        # Old endpoint IP (for the bypass-route cleanup) from the current conf.
+        old_ip="$(grep -oP '(?<=^Endpoint = )\d{1,3}(?:\.\d{1,3}){3}' "$CONF" | head -1 || true)"
+
+        # 1) Bypass the NEW endpoint via the original gateway BEFORE switching, so
+        #    the tunnel handshake to the new server doesn't route into the tunnel
+        #    (syncconf does NOT re-run the conf's PostUp that set this up).
+        if [[ -r "$GW_FILE" && -r "$IFACE_FILE" ]]; then
+            gw="$(cat "$GW_FILE")"; wgif="$(cat "$IFACE_FILE")"
+            if is_ipv4 "$gw"; then
+                ip route replace "$new_ip" via "$gw" dev "$wgif" || true
+            fi
+        fi
+
+        # 2) Rewrite [Peer] Endpoint + PublicKey (+ PresharedKey if given) in place.
+        #    Fixed-string line replacement via awk (no regex injection from args).
+        tmp="$(mktemp)"; trap 'rm -f "$tmp"' EXIT
+        awk -v ep="$endpoint" -v pk="$pubkey" -v psk="$psk" '
+            /^[[:space:]]*Endpoint[[:space:]]*=/   { print "Endpoint = " ep; next }
+            /^[[:space:]]*PublicKey[[:space:]]*=/  { print "PublicKey = " pk; next }
+            /^[[:space:]]*PresharedKey[[:space:]]*=/ { if (psk != "") { print "PresharedKey = " psk; next } }
+            { print }
+        ' "$CONF" > "$tmp"
+        # Preserve perms/ownership: write back through the existing file.
+        cat "$tmp" > "$CONF"
+
+        # 3) Instant reconnect: apply the new peer without tearing the iface down.
+        wg syncconf "$WG_IFACE" <(wg-quick strip "$WG_IFACE")
+
+        # 4) Drop the stale bypass route for the OLD endpoint (best-effort).
+        if [[ -n "${old_ip:-}" && "$old_ip" != "$new_ip" ]]; then
+            ip route del "$old_ip" 2>/dev/null || true
+        fi
+        log "switched to $endpoint"
+        ;;
+    *)
+        echo "usage: airvpn-sudo {up|down|switch <ip:port> <pubkey> [psk]|status}" >&2
+        exit 1
+        ;;
+esac
