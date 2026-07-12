@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# All-disks view for the bar's disk block (left-click → floating alacritty).
+# Shows every real filesystem (pseudo/overlay/tmpfs mounts filtered out) so the
+# single "/" figure on the bar can be expanded to the full mount picture on demand.
+set -u
+
+echo "Filesystems  ($(date '+%Y-%m-%d %H:%M'))"
+echo
+df -h --output=source,fstype,size,used,avail,pcent,target \
+  -x tmpfs -x devtmpfs -x efivarfs -x squashfs -x overlay -x ramfs -x autofs
+echo
+read -rp "Press enter to close..."

@@ -33,12 +33,16 @@ let
     critical_mem = 92;
     interval = 10;
   };
+  # Bar shows "/" only; left-click expands to all real filesystems (disk-detail).
   diskBlock = {
     block = "disk_space";
     path = "/";
     format = " $icon $available ";
     info_type = "available";
     interval = 60;
+    click = [
+      { button = "left"; cmd = "alacritty --class float,float -e ${scriptsDir}/disk-detail"; }
+    ];
   };
   # net: NO `device` set on purpose. i3status-rust auto-follows the default-route
   # interface, so the one config is correct on BOTH hosts (workbench is wired on
@@ -292,6 +296,10 @@ lib.mkIf isNixOS {
   };
   home.file.".config/i3status-rust/scripts/vpn-detail" = {
     source = ../scripts/i3blocks-vpn-detail;
+    executable = true;
+  };
+  home.file.".config/i3status-rust/scripts/disk-detail" = {
+    source = ../scripts/disk-detail;
     executable = true;
   };
   home.file.".config/i3status-rust/scripts/i3blocks-rigcontrol" = {
