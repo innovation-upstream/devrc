@@ -15,19 +15,23 @@
 # It is IDEMPOTENT, backs up configuration.nix, PRINTS the diff, and STOPS before
 # nixos-rebuild — review the diff, then rebuild + restart display-manager yourself (see footer).
 #
-# --- vpn-sudo NOPASSWD sudoers rule (deliberately NOT touched) --------------
-# configuration.nix has:
+# --- airvpn-sudo NOPASSWD sudoers rule (deliberately NOT touched) -----------
+# The host Mullvad block (and its vpn-sudo helper) is DECOMMISSIONED; the host VPN
+# is now AirVPN, driven by scripts/airvpn-{menu,detail} + the poller's `airvpn`
+# source. Those invoke a privileged helper at the STABLE, sudoers-trusted path
+# /etc/nixos/i3blocks-scripts/airvpn-sudo ($AIRVPN_SUDO_HELPER default). Add this
+# NOPASSWD rule to configuration.nix (see nix/system/airvpn-host.nix for the full
+# block Zach applies in Phase 2):
 #     security.sudo.extraRules = [{
 #       users = ["zach"];
-#       commands = [{ command = "/etc/nixos/i3blocks-scripts/vpn-sudo"; options = ["NOPASSWD"]; }];
+#       commands = [{ command = "/etc/nixos/i3blocks-scripts/airvpn-sudo"; options = ["NOPASSWD"]; }];
 #     }];
-# The VPN menu (scripts/i3status-vpn-menu) still invokes exactly that stable path
-# ($VPN_SUDO_HELPER default). We do NOT move vpn-sudo into the nix store: a store
-# path (a) would not match this NOPASSWD rule and (b) changes on every rebuild.
-# So this script leaves the sudoers rule AND /etc/nixos/i3blocks-scripts/vpn-sudo
-# in place. When you later clean up /etc/nixos/i3blocks-scripts, PRESERVE vpn-sudo
-# (or relocate it to another stable path and repoint both the sudoers `command`
-# and $VPN_SUDO_HELPER together).
+# We do NOT move airvpn-sudo into the nix store: a store path (a) would not match
+# this NOPASSWD rule and (b) changes on every rebuild. Copy scripts/airvpn-sudo to
+# /etc/nixos/i3blocks-scripts/airvpn-sudo (root-owned, 0755) and keep it there.
+# When you clean up /etc/nixos/i3blocks-scripts, PRESERVE airvpn-sudo (or relocate
+# it to another stable path and repoint both the sudoers `command` and
+# $AIRVPN_SUDO_HELPER together). The retired vpn-sudo may be removed with Mullvad.
 set -euo pipefail
 
 NIXOS_DIR="/etc/nixos"

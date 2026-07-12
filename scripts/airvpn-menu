@@ -1,0 +1,678 @@
+#!/usr/bin/env python3
+"""Interactive rofi action menu for the i3status-rust `airvpn` block (left-click).
+
+The clickable half of the HOST-level AirVPN WireGuard block (whole workbench routes
+through AirVPN; default-OFF, toggled from here). Mirrors scripts/media-menu exactly:
+
+  * The rofi `-mesg` header shows a LIVE status line (best-effort, INSTANT: it reads
+    the poller's ~/.cache/bar-status/airvpn.json facts + a fresh `ip link` up/down
+    check; it degrades to an error line, never hangs / never blocks on the network).
+  * Menu (order): Connect | Disconnect (whichever applies) · 🌍 Switch server ▸ ·
+    🔎 Verify exit IP / leak · 📶 Forwarded-port health · 📊 Full status → TUI.
+  * PRIVILEGED ops (wg up / down, live conf switch + `wg syncconf`, killswitch) are
+    delegated to `airvpn-sudo` under a NOPASSWD sudoers rule at the STABLE path
+    /etc/nixos/i3blocks-scripts/airvpn-sudo (a nix-store path would break NOPASSWD).
+  * ALL pure logic is factored out + unit-tested in tests/test_airvpn_menu.py:
+    header formatter, server-list parse/sort/merge-with-load, config-switch rewrite,
+    exit-IP leak verdict, forwarded-port verdict. `--dry-run ACTION` / `--dump-menu`
+    exercise the menu WITHOUT touching network / rofi / sudo.
+
+NEVER hardcodes a key or endpoint. The switch data (server -> country, WG endpoint
+IP, shared WG pubkey) comes from the committed manifest scripts/data/airvpn-servers.json
+(public info, refreshable via scripts/data/refresh-airvpn-servers), with LIVE load
+merged from the AirVPN API at menu time. The user's OWN [Interface] PrivateKey lives
+only in the root-owned /etc/wireguard/airvpn.conf and is never read here.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import subprocess
+import sys
+import urllib.error
+import urllib.request
+
+TIMEOUT = 4
+ROFI_THEME = "gruvbox-dark-hard"
+WG_IFACE = "airvpn"
+SUDO_HELPER = os.environ.get(
+    "AIRVPN_SUDO_HELPER", "/etc/nixos/i3blocks-scripts/airvpn-sudo")
+AIRVPN_API = "https://airvpn.org/api/status/"
+IPINFO_URL = "https://ipinfo.io/json"
+# Default AirVPN WireGuard port (their standard). Overridable if the generated
+# config uses a different one (set AIRVPN_WG_PORT in ~/.config/bar/airvpn.env).
+DEFAULT_WG_PORT = 1637
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+MANIFEST_PATH = os.environ.get(
+    "AIRVPN_MANIFEST", os.path.join(HERE, "data", "airvpn-servers.json"))
+
+# Action ids.
+A_CONNECT = "connect"
+A_DISCONNECT = "disconnect"
+A_SWITCH = "switch"
+A_VERIFY = "verify"
+A_FWD = "fwd"
+A_STATUS = "status"
+
+
+# --------------------------------------------------------------------------- #
+# Config (explicit path — mirrors media-menu.creds)
+# --------------------------------------------------------------------------- #
+def creds() -> dict:
+    """Read ~/.config/bar/airvpn.env (0600, NOT in git/store). Optional keys:
+       AIRVPN_WG_PORT, AIRVPN_FWD_PORT (host forwarded port), AIRVPN_COUNTRY."""
+    env = {}
+    path = os.environ.get("AIRVPN_ENV") or os.path.expanduser("~/.config/bar/airvpn.env")
+    try:
+        with open(path) as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                k, v = line.split("=", 1)
+                env[k.strip()] = v.strip()
+    except Exception:
+        pass
+    return env
+
+
+def wg_port(c=None) -> int:
+    c = c if c is not None else creds()
+    try:
+        return int(c.get("AIRVPN_WG_PORT") or os.environ.get("AIRVPN_WG_PORT")
+                   or DEFAULT_WG_PORT)
+    except (TypeError, ValueError):
+        return DEFAULT_WG_PORT
+
+
+def fwd_port(c=None):
+    c = c if c is not None else creds()
+    v = c.get("AIRVPN_FWD_PORT") or os.environ.get("AIRVPN_FWD_PORT")
+    try:
+        return int(v) if v else None
+    except (TypeError, ValueError):
+        return None
+
+
+# --------------------------------------------------------------------------- #
+# Pure / mockable logic (unit-tested against fixtures — NO network / sudo)
+# --------------------------------------------------------------------------- #
+def _fmt_age(secs) -> str:
+    try:
+        n = int(secs)
+    except (TypeError, ValueError):
+        return ""
+    if n < 0:
+        return ""
+    if n < 90:
+        return "%ds" % n
+    if n < 90 * 60:
+        return "%dm" % (n // 60)
+    return "%dh" % (n // 3600)
+
+
+def format_header(facts, err=None) -> str:
+    """Live status header for the rofi -mesg line, from the poller's fact dict.
+
+      * err set (couldn't determine state) -> a plain error line, never hangs.
+      * not up -> neutral `⚪ AirVPN off — tunnel down`.
+      * up + verdict 'leak' -> RED `🔴 AirVPN LEAK` (exit IP is the real ISP IP).
+      * up + forwarded port down -> yellow `🟡 AirVPN CC ⚠ forwarded port DOWN`.
+      * up + verified/unknown -> green/neutral `🟢 AirVPN CC · <server> · exit <ip>`.
+    """
+    if err:
+        return "⚠ AirVPN status unavailable (%s)" % err
+    if not isinstance(facts, dict):
+        return "⚠ AirVPN status unknown"
+    if not facts.get("up"):
+        return "⚪ AirVPN off — tunnel down (Connect to route through AirVPN)"
+    cc = (facts.get("country_code") or "").upper() or "?"
+    server = facts.get("server") or "?"
+    if facts.get("verdict") == "leak":
+        return "🔴 AirVPN LEAK — exit IP %s is NOT the tunnel (killswitch/route bug)" % (
+            facts.get("exit_ip") or "?")
+    if facts.get("fwd_verdict") == "down":
+        return "🟡 AirVPN %s · %s ⚠ forwarded port %s DOWN" % (
+            cc, server, facts.get("fwd_port") or "?")
+    dot = "🟢" if facts.get("verdict") == "verified" else "🟡"
+    head = "%s AirVPN %s · %s · exit %s" % (
+        dot, cc, server, facts.get("exit_ip") or "?")
+    age = _fmt_age(facts.get("handshake_age"))
+    if age:
+        head += " · hs %s" % age
+    if facts.get("verdict") != "verified":
+        head += " (unverified)"
+    return head
+
+
+def build_menu(up: bool):
+    """The action menu as (label, action_id), order = top->bottom. The first entry
+    is Connect OR Disconnect depending on the LIVE tunnel state."""
+    toggle = ("🔌 Disconnect (stop routing through AirVPN)", A_DISCONNECT) if up else \
+             ("🔒 Connect (route host through AirVPN)", A_CONNECT)
+    return [
+        toggle,
+        ("🌍 Switch server ▸", A_SWITCH),
+        ("🔎 Verify exit IP / leak", A_VERIFY),
+        ("📶 Forwarded-port health", A_FWD),
+        ("📊 Full status → TUI", A_STATUS),
+    ]
+
+
+# ---- manifest parse / merge-with-load / sort ------------------------------- #
+def parse_manifest(manifest) -> list:
+    """Manifest dict -> list of server dicts with the WG pubkey attached per row.
+
+    Each row: {name, country, country_code, city, endpoint_ip, wg_pubkey}. The
+    manifest stores the (shared) AirVPN WG pubkey once at the top level; hoist it
+    onto each row (or use a per-row key if a future manifest is non-uniform).
+    Raises ValueError if the payload isn't manifest-shaped.
+    """
+    if not isinstance(manifest, dict) or not isinstance(manifest.get("servers"), list):
+        raise ValueError("not an airvpn-servers manifest")
+    shared = manifest.get("wg_pubkey")
+    out = []
+    for s in manifest["servers"]:
+        if not isinstance(s, dict) or not s.get("endpoint_ip"):
+            continue
+        out.append({
+            "name": s.get("name") or s.get("endpoint_ip"),
+            "country": s.get("country") or "?",
+            "country_code": (s.get("country_code") or "").lower(),
+            "city": s.get("city") or "",
+            "endpoint_ip": s["endpoint_ip"],
+            "wg_pubkey": s.get("wg_pubkey") or shared,
+        })
+    return out
+
+
+def merge_load(servers, api) -> list:
+    """Merge the AirVPN API status list (public_name -> currentload/users/health/
+    country_code) into the manifest server rows. Servers without live data get
+    load=None (sorted last). Tolerant of a missing/partial API payload."""
+    by_name = {}
+    if isinstance(api, dict):
+        api = api.get("servers")
+    if isinstance(api, list):
+        for a in api:
+            if isinstance(a, dict) and a.get("public_name"):
+                by_name[a["public_name"]] = a
+    out = []
+    for s in servers:
+        row = dict(s)
+        a = by_name.get(s["name"])
+        if a:
+            row["load"] = a.get("currentload")
+            row["users"] = a.get("users")
+            row["health"] = a.get("health")
+            if not row.get("country_code") and a.get("country_code"):
+                row["country_code"] = a["country_code"].lower()
+        else:
+            row.setdefault("load", None)
+        out.append(row)
+    return out
+
+
+def _load_key(row):
+    v = row.get("load")
+    try:
+        return (0, int(v))
+    except (TypeError, ValueError):
+        return (1, 10 ** 9)   # unknown load sorts last
+
+
+def sort_servers(servers, by="load") -> list:
+    """Sort merged rows. by='load' -> least-loaded first (unknown last), tie-break
+    country/name; by='country' -> country/city/name alphabetical."""
+    if by == "country":
+        return sorted(servers, key=lambda r: (r.get("country", ""),
+                                              r.get("city", ""), r.get("name", "")))
+    return sorted(servers, key=lambda r: (_load_key(r), r.get("country", ""),
+                                         r.get("name", "")))
+
+
+def server_label(row) -> str:
+    """One rofi row: `Beemim            AT · Vienna     load 12% · 40u`."""
+    load = row.get("load")
+    loadstr = ("load %s%%" % load) if load is not None else "load  ?"
+    users = row.get("users")
+    userstr = (" · %su" % users) if users is not None else ""
+    health = row.get("health")
+    warn = " ⚠" if health and health != "ok" else ""
+    cc = (row.get("country_code") or "").upper() or "??"
+    where = cc + (" · " + row["city"] if row.get("city") else "")
+    return "%-18s %-16s %s%s%s" % (row.get("name", "?")[:18], where, loadstr,
+                                   userstr, warn)
+
+
+# ---- config switch rewrite (mirrored by airvpn-sudo's root-side rewrite) ---- #
+_ENDPOINT_RE = re.compile(r"^\d{1,3}(?:\.\d{1,3}){3}:\d{1,5}$")
+_PUBKEY_RE = re.compile(r"^[A-Za-z0-9+/]{43}=$")
+_IPV4_OCTET_OK = lambda ip: all(0 <= int(o) <= 255 for o in ip.split("."))
+
+
+def is_valid_endpoint(s) -> bool:
+    """A well-formed `A.B.C.D:port` with octets 0-255 and port 1-65535."""
+    if not isinstance(s, str) or not _ENDPOINT_RE.match(s):
+        return False
+    ip, port = s.rsplit(":", 1)
+    try:
+        return _IPV4_OCTET_OK(ip) and 1 <= int(port) <= 65535
+    except ValueError:
+        return False
+
+
+def is_valid_pubkey(s) -> bool:
+    """A canonical 44-char base64 WireGuard key (43 chars + '=')."""
+    return isinstance(s, str) and bool(_PUBKEY_RE.match(s))
+
+
+def rewrite_conf(conf_text, endpoint, pubkey) -> str:
+    """Pure: given the CURRENT wg conf text, return a NEW conf with the [Peer]
+    `Endpoint` and `PublicKey` swapped to `endpoint`/`pubkey`. Everything else —
+    crucially the [Interface] PrivateKey/Address/DNS and any PostUp/PostDown — is
+    left byte-for-byte identical. In a WireGuard conf `Endpoint` and `PublicKey`
+    appear ONLY in the [Peer] section, so a line-oriented value replace is safe.
+
+    Raises ValueError on a malformed endpoint/pubkey (defence in depth — the root
+    airvpn-sudo re-validates too) or if the conf has no Endpoint line to replace.
+    airvpn-sudo's bash rewrite MIRRORS this transform; keep them in lock-step.
+    """
+    if not is_valid_endpoint(endpoint):
+        raise ValueError("malformed endpoint: %r" % (endpoint,))
+    if not is_valid_pubkey(pubkey):
+        raise ValueError("malformed pubkey: %r" % (pubkey,))
+    if not isinstance(conf_text, str):
+        raise ValueError("conf_text must be str")
+    out, saw_endpoint = [], False
+    for line in conf_text.splitlines(keepends=True):
+        nl = "\n" if line.endswith("\n") else ""
+        body = line[:-1] if nl else line
+        m = re.match(r"^(\s*)Endpoint\s*=", body)
+        if m:
+            out.append("%sEndpoint = %s%s" % (m.group(1), endpoint, nl))
+            saw_endpoint = True
+            continue
+        m = re.match(r"^(\s*)PublicKey\s*=", body)
+        if m:
+            out.append("%sPublicKey = %s%s" % (m.group(1), pubkey, nl))
+            continue
+        out.append(line)
+    if not saw_endpoint:
+        raise ValueError("conf has no [Peer] Endpoint line to replace")
+    return "".join(out)
+
+
+def build_endpoint(ip, port) -> str:
+    return "%s:%d" % (ip, int(port))
+
+
+# ---- exit-IP leak verdict -------------------------------------------------- #
+def _geo_ip(geo):
+    return (geo or {}).get("ip") if isinstance(geo, dict) else None
+
+
+def _geo_cc(geo):
+    """Country code from an ipinfo (`country`) or ipleak (`country_code`) payload."""
+    if not isinstance(geo, dict):
+        return None
+    cc = geo.get("country") or geo.get("country_code")
+    return cc.lower() if isinstance(cc, str) and cc.strip() else None
+
+
+def exit_ip_verdict(geo, expected) -> str:
+    """Pure: does the observed exit geo look like it egressed through the tunnel?
+
+    geo      : an ipinfo.io (`{ip, country, org}`) or ipleak.net
+               (`{ip, country_code, isp_name}`) style dict fetched THROUGH the tunnel.
+    expected : {home_ip: the host's real (pre-tunnel) ISP IP, if known;
+                home_cc: the host's real country code, if known;
+                server_cc: the CONNECTED server's country code;
+                server_entry_ip: the connected peer's entry IP}.
+
+    Returns:
+      'leak'     — exit IP is the real ISP IP, OR exit country == the home country
+                   (traffic is NOT going through the tunnel / DNS-style leak).
+      'verified' — exit IP differs from home AND exit country == the server country
+                   (or matches the server's own entry IP).
+      'unknown'  — not enough signal to decide (missing geo / no reference).
+    """
+    exit_ip = _geo_ip(geo)
+    if not exit_ip:
+        return "unknown"
+    expected = expected or {}
+    home_ip = expected.get("home_ip")
+    if home_ip and exit_ip == home_ip:
+        return "leak"
+    exit_cc = _geo_cc(geo)
+    server_cc = (expected.get("server_cc") or "").lower() or None
+    entry_ip = expected.get("server_entry_ip")
+    if entry_ip and exit_ip == entry_ip:
+        return "verified"
+    if server_cc and exit_cc:
+        if exit_cc == server_cc:
+            return "verified"
+        home_cc = (expected.get("home_cc") or "").lower() or None
+        if home_cc and exit_cc == home_cc:
+            return "leak"
+        return "unknown"
+    return "unknown"
+
+
+# ---- forwarded-port verdict ------------------------------------------------ #
+def forwarded_port_verdict(port, reachable) -> str:
+    """Pure: (configured port, reachability) -> 'na' | 'ok' | 'down' | 'unknown'.
+
+    No port configured -> 'na' (shown as n/a until Zach sets AIRVPN_FWD_PORT).
+    reachable True/False -> 'ok'/'down'. reachable None (couldn't check) -> 'unknown'.
+    """
+    try:
+        p = int(port) if port else 0
+    except (TypeError, ValueError):
+        p = 0
+    if p <= 0:
+        return "na"
+    if reachable is True:
+        return "ok"
+    if reachable is False:
+        return "down"
+    return "unknown"
+
+
+# --------------------------------------------------------------------------- #
+# Cache / live-state readers (instant, credential-free — no sudo, no hang)
+# --------------------------------------------------------------------------- #
+def read_cache() -> dict:
+    base = os.environ.get("BAR_STATUS_DIR") or os.path.join(
+        os.path.expanduser("~"), ".cache", "bar-status")
+    try:
+        with open(os.path.join(base, "airvpn.json")) as f:
+            d = json.load(f)
+            return d if isinstance(d, dict) else {}
+    except Exception:
+        return {}
+
+
+def iface_up(iface=WG_IFACE) -> bool:
+    """Instant, user-readable up/down via `ip link show` (no sudo). False on any
+    error / missing interface."""
+    try:
+        r = subprocess.run(["ip", "link", "show", iface], stdout=subprocess.PIPE,
+                           stderr=subprocess.DEVNULL, text=True, timeout=3)
+    except Exception:
+        return False
+    return r.returncode == 0 and ("state UP" in r.stdout or ",UP" in r.stdout
+                                  or "UP," in r.stdout)
+
+
+def live_facts() -> dict:
+    """Merge the poller's cached facts with a FRESH `ip link` up/down probe (the
+    user may have just toggled the tunnel). Instant + best-effort; never raises."""
+    facts = read_cache()
+    facts["up"] = iface_up()
+    return facts
+
+
+# --------------------------------------------------------------------------- #
+# Network (best-effort; short timeout; wrapped by callers)
+# --------------------------------------------------------------------------- #
+def _http_json(url, timeout=TIMEOUT):
+    req = urllib.request.Request(url, headers={"User-Agent": "airvpn-menu"})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return json.loads(resp.read().decode())
+
+
+def fetch_api():
+    """AirVPN /api/status/ server list (for live load). None on failure."""
+    try:
+        return _http_json(AIRVPN_API, timeout=8)
+    except Exception:
+        return None
+
+
+def fetch_exit_geo():
+    """ipinfo.io/json fetched THROUGH the tunnel. None on failure."""
+    try:
+        return _http_json(IPINFO_URL, timeout=6)
+    except Exception:
+        return None
+
+
+# --------------------------------------------------------------------------- #
+# rofi + notify wrappers (side-effecting; not unit-tested)
+# --------------------------------------------------------------------------- #
+def rofi_pick(entries, prompt="AirVPN", mesg=None):
+    argv = ["rofi", "-dmenu", "-i", "-no-custom", "-p", prompt, "-theme", ROFI_THEME]
+    if mesg:
+        argv += ["-mesg", mesg]
+    try:
+        r = subprocess.run(argv, input="\n".join(entries), text=True,
+                           stdout=subprocess.PIPE)
+    except Exception:
+        return None
+    if r.returncode != 0:
+        return None
+    return r.stdout.strip() or None
+
+
+def notify(summary, body=""):
+    for argv in (["notify-send", "-a", "airvpn-menu", summary, body],
+                 ["dunstify", "-a", "airvpn-menu", summary, body]):
+        try:
+            subprocess.run(argv, stdout=subprocess.DEVNULL,
+                           stderr=subprocess.DEVNULL, timeout=5)
+            return
+        except Exception:
+            continue
+
+
+def refresh_bar():
+    """Force the airvpn block to re-render (signal 10) + kick the poller so the
+    cache reflects the new tunnel state promptly."""
+    for argv in (["pkill", "-RTMIN+10", "i3status-rs"],
+                 ["systemctl", "--user", "start", "bar-status-poll.service"]):
+        try:
+            subprocess.run(argv, stdout=subprocess.DEVNULL,
+                           stderr=subprocess.DEVNULL, timeout=5)
+        except Exception:
+            pass
+
+
+def sudo_helper(*args):
+    """Run the NOPASSWD airvpn-sudo helper; return (rc, combined-output)."""
+    try:
+        r = subprocess.run(["sudo", SUDO_HELPER, *args], stdout=subprocess.PIPE,
+                           stderr=subprocess.STDOUT, text=True, timeout=30)
+        return r.returncode, (r.stdout or "").strip()
+    except Exception as e:
+        return 1, str(e)
+
+
+# --------------------------------------------------------------------------- #
+# Action handlers
+# --------------------------------------------------------------------------- #
+def do_connect():
+    notify("AirVPN", "Connecting — routing host through AirVPN…")
+    rc, out = sudo_helper("up")
+    if rc == 0:
+        notify("AirVPN connected", "killswitch active · verifying exit IP…")
+        refresh_bar()
+    else:
+        notify("AirVPN connect FAILED", out[:160])
+
+
+def do_disconnect():
+    rc, out = sudo_helper("down")
+    if rc == 0:
+        notify("AirVPN disconnected", "host back on the direct route (tunnel down)")
+        refresh_bar()
+    else:
+        notify("AirVPN disconnect FAILED", out[:160])
+
+
+def do_switch():
+    try:
+        with open(MANIFEST_PATH) as f:
+            manifest = json.load(f)
+        servers = parse_manifest(manifest)
+    except Exception as e:
+        notify("AirVPN switch", "manifest unavailable (%s)" % type(e).__name__)
+        return
+    servers = merge_load(servers, fetch_api())      # best-effort live load
+    servers = sort_servers(servers, by="load")
+    labels = [server_label(s) for s in servers]
+    by_label = dict(zip(labels, servers))
+    sel = rofi_pick(labels, prompt="AirVPN server",
+                    mesg="Least-loaded first · pick a server to switch to (instant reconnect)")
+    if not sel:
+        return
+    row = by_label.get(sel)
+    if not row:
+        return
+    endpoint = build_endpoint(row["endpoint_ip"], wg_port())
+    pubkey = row["wg_pubkey"]
+    if not is_valid_endpoint(endpoint) or not is_valid_pubkey(pubkey or ""):
+        notify("AirVPN switch", "refusing malformed endpoint/pubkey")
+        return
+    notify("AirVPN", "Switching to %s (%s)…" % (row["name"], endpoint))
+    rc, out = sudo_helper("switch", endpoint, pubkey)
+    if rc == 0:
+        notify("AirVPN → %s" % row["name"], "reconnected (%s)" % row.get("country", ""))
+        refresh_bar()
+    else:
+        notify("AirVPN switch FAILED", out[:160])
+
+
+def do_verify():
+    facts = live_facts()
+    if not facts.get("up"):
+        notify("AirVPN verify", "tunnel is DOWN — nothing to verify (Connect first)")
+        return
+    geo = fetch_exit_geo()
+    if not geo:
+        notify("AirVPN verify", "could not reach ipinfo through the tunnel")
+        return
+    expected = {
+        "home_ip": facts.get("home_ip"),
+        "home_cc": facts.get("home_cc"),
+        "server_cc": facts.get("country_code"),
+        "server_entry_ip": facts.get("server_entry_ip"),
+    }
+    verdict = exit_ip_verdict(geo, expected)
+    ip = _geo_ip(geo) or "?"
+    cc = _geo_cc(geo) or "?"
+    emoji = {"verified": "🟢", "leak": "🔴", "unknown": "🟡"}.get(verdict, "🟡")
+    notify("%s AirVPN exit IP: %s" % (emoji, verdict),
+           "exit %s (%s) · org %s" % (ip, cc.upper(), geo.get("org", "?")))
+
+
+def do_fwd():
+    c = creds()
+    port = fwd_port(c)
+    facts = live_facts()
+    if port is None:
+        notify("AirVPN forwarded port", "n/a — set AIRVPN_FWD_PORT in ~/.config/bar/airvpn.env")
+        return
+    verdict = facts.get("fwd_verdict") or forwarded_port_verdict(port, None)
+    msg = {"ok": "🟢 reachable", "down": "🔴 DOWN — check AirVPN port-forward mapping",
+           "unknown": "🟡 could not check"}.get(verdict, "🟡 %s" % verdict)
+    notify("AirVPN forwarded port %d" % port, msg)
+
+
+def do_status_tui():
+    here = os.path.dirname(os.path.abspath(__file__))
+    detail = os.path.join(here, "airvpn-detail")
+    try:
+        subprocess.Popen(
+            ["alacritty", "--class", "float,float", "-e", detail, "--watch"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception as e:
+        notify("Could not open status TUI", str(e)[:120])
+
+
+def dispatch(action):
+    if action == A_CONNECT:
+        do_connect()
+    elif action == A_DISCONNECT:
+        do_disconnect()
+    elif action == A_SWITCH:
+        do_switch()
+    elif action == A_VERIFY:
+        do_verify()
+    elif action == A_FWD:
+        do_fwd()
+    elif action == A_STATUS:
+        do_status_tui()
+
+
+def run_menu():
+    facts = live_facts()
+    header = format_header(facts)
+    menu = build_menu(bool(facts.get("up")))
+    labels = [label for label, _ in menu]
+    by_label = {label: aid for label, aid in menu}
+    sel = rofi_pick(labels, prompt="AirVPN", mesg=header)
+    if not sel:
+        return 0
+    action = by_label.get(sel)
+    if action:
+        dispatch(action)
+    return 0
+
+
+# --------------------------------------------------------------------------- #
+# CLI (interactive default + offline --dry-run / --dump-menu for tests)
+# --------------------------------------------------------------------------- #
+def dry_run(action) -> str:
+    """Describe an action's privileged call WITHOUT touching network/sudo/rofi."""
+    if action == A_CONNECT:
+        return "DRY-RUN connect: sudo %s up" % SUDO_HELPER
+    if action == A_DISCONNECT:
+        return "DRY-RUN disconnect: sudo %s down" % SUDO_HELPER
+    if action == A_SWITCH:
+        # Show the switch call for the top (least-loaded, or first) manifest server,
+        # using the offline manifest only (no API/rofi/sudo).
+        with open(MANIFEST_PATH) as f:
+            servers = sort_servers(parse_manifest(json.load(f)), by="country")
+        s = servers[0]
+        endpoint = build_endpoint(s["endpoint_ip"], wg_port())
+        return "DRY-RUN switch: sudo %s switch %s %s   (server=%s, %s)" % (
+            SUDO_HELPER, endpoint, s["wg_pubkey"], s["name"], s["country"])
+    if action == A_VERIFY:
+        return "DRY-RUN verify: fetch %s through tunnel → exit_ip_verdict()" % IPINFO_URL
+    if action == A_FWD:
+        p = fwd_port()
+        return "DRY-RUN fwd: forwarded_port_verdict(port=%s) → %s" % (
+            p, forwarded_port_verdict(p, None))
+    raise ValueError("no dry-run for action: %s" % action)
+
+
+def main(argv=None) -> int:
+    ap = argparse.ArgumentParser(description="rofi action menu for the AirVPN block")
+    ap.add_argument("--dry-run", metavar="ACTION",
+                    choices=[A_CONNECT, A_DISCONNECT, A_SWITCH, A_VERIFY, A_FWD],
+                    help="print the action's call; no network, no sudo, no rofi")
+    ap.add_argument("--dump-menu", action="store_true",
+                    help="print the menu entries (label\\taction) and exit")
+    ap.add_argument("--up", action="store_true",
+                    help="with --dump-menu: render the menu for the tunnel-UP state")
+    args = ap.parse_args(argv)
+
+    if args.dump_menu:
+        for label, aid in build_menu(args.up):
+            print("%s\t%s" % (label, aid))
+        return 0
+    if args.dry_run:
+        print(dry_run(args.dry_run))
+        return 0
+    return run_menu()
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except Exception:
+        sys.exit(0)

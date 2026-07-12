@@ -1,0 +1,160 @@
+#!/usr/bin/env python3
+"""Right-click detail popup for the i3status-rust `airvpn` block (a float terminal).
+
+Full panel for the HOST AirVPN WireGuard tunnel — the stuff the pill keeps off the
+bar. Every field is read best-effort and individually wrapped: an unavailable
+source prints a dim `unavailable` line instead of aborting the popup.
+
+Sources:
+  * the poller's ~/.cache/bar-status/airvpn.json facts (server / exit IP / verdict
+    / handshake age / forwarded port / killswitch), refreshed every ~45s;
+  * a FRESH `ip link show airvpn` up/down probe (instant, user-readable);
+  * `sudo airvpn-sudo status` (read-only `wg show` dump: peer endpoint + last
+    handshake) when the tunnel is up — best-effort, short timeout.
+
+Launched via `alacritty --class float,float -e airvpn-detail --watch`. Mirrors
+scripts/media-detail's style (clear+redraw loop under --watch, Enter to close
+otherwise). CREDENTIAL-FREE: never reads the root-owned conf or any private key.
+"""
+import json
+import os
+import subprocess
+import sys
+import time
+
+WG_IFACE = "airvpn"
+SUDO_HELPER = os.environ.get(
+    "AIRVPN_SUDO_HELPER", "/etc/nixos/i3blocks-scripts/airvpn-sudo")
+
+
+def cache_facts() -> dict:
+    base = os.environ.get("BAR_STATUS_DIR") or os.path.join(
+        os.path.expanduser("~"), ".cache", "bar-status")
+    try:
+        with open(os.path.join(base, "airvpn.json")) as f:
+            d = json.load(f)
+            return d if isinstance(d, dict) else {}
+    except Exception:
+        return {}
+
+
+def iface_up() -> bool:
+    try:
+        r = subprocess.run(["ip", "link", "show", WG_IFACE], stdout=subprocess.PIPE,
+                           stderr=subprocess.DEVNULL, text=True, timeout=3)
+        return r.returncode == 0 and "UP" in r.stdout
+    except Exception:
+        return False
+
+
+def wg_status() -> str:
+    """Read-only `wg show` dump via the NOPASSWD helper; '' on any failure."""
+    try:
+        r = subprocess.run(["sudo", SUDO_HELPER, "status"], stdout=subprocess.PIPE,
+                           stderr=subprocess.DEVNULL, text=True, timeout=8)
+        return r.stdout if r.returncode == 0 else ""
+    except Exception:
+        return ""
+
+
+def _fmt_age(secs):
+    try:
+        n = int(secs)
+    except (TypeError, ValueError):
+        return "?"
+    if n < 0:
+        return "?"
+    if n < 90:
+        return "%ds ago" % n
+    if n < 90 * 60:
+        return "%dm ago" % (n // 60)
+    return "%dh ago" % (n // 3600)
+
+
+def build_rows(facts, up, wg_dump):
+    rows = []
+    rows.append(("Tunnel", "🟢 UP" if up else "⚪ down (default-off)"))
+    if not up:
+        rows.append(("", ""))
+        rows.append(("Hint", "left-click the pill → Connect to route through AirVPN"))
+        return rows
+    rows.append(("Server", facts.get("server") or "?"))
+    cc = (facts.get("country_code") or "").upper()
+    rows.append(("Country", "%s %s" % (facts.get("country") or "?",
+                                       ("(" + cc + ")") if cc else "")))
+    verdict = facts.get("verdict") or "unknown"
+    vmark = {"verified": "🟢 verified", "leak": "🔴 LEAK — not through tunnel!",
+             "unknown": "🟡 unverified"}.get(verdict, verdict)
+    rows.append(("Exit IP", facts.get("exit_ip") or "?"))
+    rows.append(("Exit geo", "%s (%s)" % (facts.get("exit_country") or "?",
+                                          facts.get("exit_org") or "?")))
+    rows.append(("Leak check", vmark))
+    rows.append(("Last handshake", _fmt_age(facts.get("handshake_age"))))
+    rows.append(("Peer endpoint", facts.get("server_entry_ip") or "?"))
+    fp = facts.get("fwd_port")
+    fv = facts.get("fwd_verdict") or "na"
+    fmap = {"ok": "🟢 reachable", "down": "🔴 DOWN", "unknown": "🟡 unchecked",
+            "na": "n/a (set AIRVPN_FWD_PORT)"}
+    rows.append(("Forwarded port", "%s → %s" % (fp if fp else "-", fmap.get(fv, fv))))
+    rows.append(("Killswitch", "🔒 active (fail-closed)" if facts.get("killswitch")
+                 else "off"))
+    if wg_dump:
+        rows.append(("", ""))
+        rows.append(("wg show (live)", ""))
+        for line in wg_dump.strip().splitlines()[:8]:
+            rows.append(("  ", line.strip()[:70]))
+    return rows
+
+
+def render(title_suffix=""):
+    facts = cache_facts()
+    up = iface_up()
+    wg_dump = wg_status() if up else ""
+    rows = build_rows(facts, up, wg_dump)
+    print("\n  \033[1mHost AirVPN — detail\033[0m  (whole-host WireGuard tunnel)%s\n"
+          % title_suffix)
+    for k, v in rows:
+        if not k and not v:
+            print()
+        else:
+            print("  %-18s %s" % (k, v))
+    print()
+
+
+def main(argv=None) -> int:
+    args = argv if argv is not None else sys.argv[1:]
+    watch = "--watch" in args
+    interval = 3
+    for a in args:
+        if a.startswith("--interval="):
+            try:
+                interval = max(1, int(a.split("=", 1)[1]))
+            except ValueError:
+                pass
+    if watch:
+        try:
+            while True:
+                sys.stdout.write("\033[2J\033[H")
+                render(title_suffix="  ·  live (every %ds, Ctrl-C to quit)" % interval)
+                sys.stdout.flush()
+                time.sleep(interval)
+        except (KeyboardInterrupt, EOFError):
+            return 0
+    render()
+    try:
+        input("  Press Enter to close… ")
+    except (EOFError, KeyboardInterrupt):
+        pass
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except Exception as e:
+        print("airvpn-detail error:", e)
+        try:
+            input("  Press Enter to close… ")
+        except Exception:
+            pass
+        sys.exit(0)

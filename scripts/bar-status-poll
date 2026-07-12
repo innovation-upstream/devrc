@@ -64,7 +64,8 @@ IGNORE_ALERTNAMES = frozenset({"Watchdog", "InfoInhibitor"})
 
 # Real-time signal offset per source: the block's `signal = N` in graphical.nix
 # must match, so `pkill -RTMIN+N i3status-rs` refreshes exactly that block.
-SIGNALS = {"clawgate": 11, "mail": 12, "alerts": 13, "civitai": 14, "media": 16}
+SIGNALS = {"clawgate": 11, "mail": 12, "alerts": 13, "civitai": 14, "media": 16,
+           "airvpn": 10}
 
 # media (qBittorrent behind the gluetun AirVPN sidecar). The pill's ONLY content
 # is the qBit tunnel status + ↓/↑ speed; secondary metrics live behind the block's
@@ -223,6 +224,94 @@ def parse_media(qbit, country: str = MEDIA_COUNTRY) -> dict:
     text = "%s %s" % (country, status or "?")
     return {"icon": MEDIA_ICON, "text": text,
             "short_text": "%s ?" % country, "state": "Warning"}
+
+
+# --- host AirVPN tunnel -----------------------------------------------------
+# The whole-host AirVPN WireGuard tunnel (REPLACES the decommissioned host
+# Mullvad). SEPARATE from the qBit-pod AirVPN (that is the `media` source above).
+# parse_airvpn is a PURE normalizer: it turns a `probe` dict (assembled by
+# fetch_airvpn from `wg show`, an exit-IP geo lookup + a forwarded-port check)
+# into the compact fact dict the credential-free i3status-airvpn block renders +
+# airvpn-detail expands. The exit-IP leak verdict + forwarded-port verdict are
+# decided by fetch_airvpn using the canonical helpers in scripts/airvpn-menu
+# (unit-tested there) and passed in via the probe — so no logic is duplicated.
+AIRVPN_SIGNAL_ICON = "net_vpn"
+
+
+def parse_wg_dump(text) -> dict:
+    """Pure: parse `wg show <if> dump` output -> {peer_endpoint_ip, handshake_age,
+    peers}. The dump's FIRST line is the interface; each subsequent line is a peer
+    (tab-separated: pubkey, psk, endpoint, allowed-ips, latest-handshake(epoch),
+    rx, tx, keepalive). Returns {} for empty/garbage input (never raises)."""
+    out = {"peer_endpoint_ip": None, "handshake_age": None, "peers": 0}
+    if not isinstance(text, str) or not text.strip():
+        return out
+    lines = [l for l in text.splitlines() if l.strip()]
+    peers = lines[1:]  # line 0 = interface
+    out["peers"] = len(peers)
+    now = int(time.time())
+    for p in peers:
+        cols = p.split("\t")
+        if len(cols) < 5:
+            continue
+        endpoint = cols[2]
+        if endpoint and endpoint != "(none)" and ":" in endpoint:
+            out["peer_endpoint_ip"] = endpoint.rsplit(":", 1)[0]
+        hs = _to_int(cols[4], 0)
+        if hs > 0:
+            age = now - hs
+            if out["handshake_age"] is None or age < out["handshake_age"]:
+                out["handshake_age"] = age
+        break  # single-peer tunnel
+    return out
+
+
+def parse_airvpn(probe) -> dict:
+    """Pure: a probe dict -> the fact dict the airvpn block/detail read.
+
+    probe keys (all optional, tolerant of junk):
+      up (bool), server {name,country,country_code}, exit {ip,country,org},
+      verdict ('verified'|'leak'|'unknown'), handshake_age (int|None),
+      server_entry_ip, fwd_port (int|None), fwd_verdict, killswitch (bool),
+      home_ip, home_cc.
+    Tunnel DOWN collapses to a minimal {up:false} fact (+ any home_ip reference
+    the caller carried forward for the next up's leak check). Raises ValueError if
+    `probe` isn't a dict (caller turns that into a 'stale' marker -> `VPN?`)."""
+    if not isinstance(probe, dict):
+        raise ValueError("airvpn probe is not a dict")
+    up = bool(probe.get("up"))
+    if not up:
+        f = {"up": False}
+        if probe.get("home_ip"):
+            f["home_ip"] = probe["home_ip"]
+        if probe.get("home_cc"):
+            f["home_cc"] = probe["home_cc"]
+        return f
+    server = probe.get("server") or {}
+    exit_ = probe.get("exit") or {}
+    verdict = probe.get("verdict")
+    if verdict not in ("verified", "leak", "unknown"):
+        verdict = "unknown"
+    fwd_verdict = probe.get("fwd_verdict")
+    if fwd_verdict not in ("ok", "down", "unknown", "na"):
+        fwd_verdict = "na"
+    return {
+        "up": True,
+        "server": server.get("name"),
+        "country": server.get("country"),
+        "country_code": (server.get("country_code") or "").lower() or None,
+        "exit_ip": exit_.get("ip"),
+        "exit_country": exit_.get("country"),
+        "exit_org": exit_.get("org"),
+        "verdict": verdict,
+        "handshake_age": probe.get("handshake_age"),
+        "server_entry_ip": probe.get("server_entry_ip"),
+        "fwd_port": probe.get("fwd_port"),
+        "fwd_verdict": fwd_verdict,
+        "killswitch": bool(probe.get("killswitch", up)),
+        "home_ip": probe.get("home_ip"),
+        "home_cc": probe.get("home_cc"),
+    }
 
 
 def stale(reason: str, err=None) -> dict:
@@ -583,6 +672,169 @@ def fetch_media() -> dict:
     return parse_media(info, country=country)
 
 
+# --- host AirVPN tunnel fetch ----------------------------------------------
+AIRVPN_SUDO = os.environ.get(
+    "AIRVPN_SUDO_HELPER", "/etc/nixos/i3blocks-scripts/airvpn-sudo")
+IPINFO_URL = "https://ipinfo.io/json"
+
+
+def _load_airvpn_menu():
+    """Load scripts/airvpn-menu by EXPLICIT path for its canonical, unit-tested
+    verdict helpers (exit_ip_verdict / forwarded_port_verdict) — no logic is
+    duplicated between the menu and the poller."""
+    import importlib.machinery
+    import importlib.util
+    path = os.path.join(DEVRC_DIR, "scripts", "airvpn-menu")
+    loader = importlib.machinery.SourceFileLoader("_bar_airvpn_menu", path)
+    spec = importlib.util.spec_from_loader("_bar_airvpn_menu", loader)
+    mod = importlib.util.module_from_spec(spec)
+    loader.exec_module(mod)
+    return mod
+
+
+def _airvpn_manifest():
+    path = os.path.join(DEVRC_DIR, "scripts", "data", "airvpn-servers.json")
+    with open(path) as f:
+        return json.load(f)
+
+
+def _airvpn_creds() -> dict:
+    env = {}
+    path = os.environ.get("AIRVPN_ENV") or os.path.expanduser("~/.config/bar/airvpn.env")
+    try:
+        with open(path) as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                k, v = line.split("=", 1)
+                env[k.strip()] = v.strip()
+    except Exception:
+        pass
+    return env
+
+
+def _wg_dump() -> str:
+    """Read-only `wg show airvpn dump` via the NOPASSWD helper. '' on any failure."""
+    try:
+        r = subprocess.run(["sudo", "-n", AIRVPN_SUDO, "status"],
+                           stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                           text=True, timeout=8)
+        return r.stdout if r.returncode == 0 else ""
+    except Exception:
+        return ""
+
+
+def _iface_up(iface="airvpn") -> bool:
+    try:
+        r = subprocess.run(["ip", "link", "show", iface], stdout=subprocess.PIPE,
+                           stderr=subprocess.DEVNULL, text=True, timeout=3)
+        return r.returncode == 0 and "UP" in r.stdout
+    except Exception:
+        return False
+
+
+def _manifest_lookup(manifest, entry_ip):
+    """Manifest server row whose endpoint_ip == the connected peer's entry IP."""
+    for s in (manifest.get("servers") or []):
+        if isinstance(s, dict) and s.get("endpoint_ip") == entry_ip:
+            return s
+    return None
+
+
+def _port_reachable(ip, port):
+    """Best-effort TCP reachability of the forwarded port on the exit IP: True on
+    connect, False on an explicit refusal, None (unknown) on timeout/other — so a
+    transient hiccup never shows a false 'down'."""
+    if not ip or not port:
+        return None
+    try:
+        with socket.create_connection((ip, int(port)), timeout=3):
+            return True
+    except ConnectionRefusedError:
+        return False
+    except Exception:
+        return None
+
+
+def _prev_home():
+    """Carry the last-known real (pre-tunnel) ISP IP/cc forward from the cache so an
+    up-tunnel poll has a leak reference even though it can't see the direct IP."""
+    try:
+        with open(os.path.join(cache_dir(), "airvpn.json")) as f:
+            d = json.load(f)
+            return d.get("home_ip"), d.get("home_cc")
+    except Exception:
+        return None, None
+
+
+def fetch_airvpn() -> dict:
+    """Assemble the host-AirVPN probe (wg state + exit-IP verify + forwarded-port
+    check) and normalize via parse_airvpn. Fail-safe: any piece that fails degrades
+    to unknown; a total failure raises -> the caller writes a 'stale' marker."""
+    menu = _load_airvpn_menu()
+    dump = _wg_dump()
+    wg = parse_wg_dump(dump)
+    up = bool(dump.strip()) and wg.get("peer_endpoint_ip") is not None
+    if not up:
+        up = _iface_up()
+
+    home_ip, home_cc = _prev_home()
+    if not up:
+        # Direct route: this IS the real ISP IP. Record it as the leak reference.
+        try:
+            geo = _http_json(IPINFO_URL, timeout=5)
+            home_ip = geo.get("ip") or home_ip
+            home_cc = (geo.get("country") or home_cc or "").lower() or home_cc
+        except Exception:
+            pass
+        return parse_airvpn({"up": False, "home_ip": home_ip, "home_cc": home_cc})
+
+    entry_ip = wg.get("peer_endpoint_ip")
+    server = None
+    try:
+        row = _manifest_lookup(_airvpn_manifest(), entry_ip)
+        if row:
+            server = {"name": row.get("name"), "country": row.get("country"),
+                      "country_code": (row.get("country_code") or "").lower()}
+    except Exception:
+        server = None
+
+    exit_geo, verdict = None, "unknown"
+    try:
+        exit_geo = _http_json(IPINFO_URL, timeout=6)
+        verdict = menu.exit_ip_verdict(exit_geo, {
+            "home_ip": home_ip, "home_cc": home_cc,
+            "server_cc": (server or {}).get("country_code"),
+            "server_entry_ip": entry_ip,
+        })
+    except Exception:
+        verdict = "unknown"
+
+    c = _airvpn_creds()
+    try:
+        fport = int(c.get("AIRVPN_FWD_PORT") or os.environ.get("AIRVPN_FWD_PORT") or 0)
+    except (TypeError, ValueError):
+        fport = 0
+    fwd_reach = _port_reachable((exit_geo or {}).get("ip"), fport) if fport else None
+    fwd_verdict = menu.forwarded_port_verdict(fport, fwd_reach)
+
+    return parse_airvpn({
+        "up": True,
+        "server": server,
+        "exit": {"ip": (exit_geo or {}).get("ip"),
+                 "country": (exit_geo or {}).get("country"),
+                 "org": (exit_geo or {}).get("org")},
+        "verdict": verdict,
+        "handshake_age": wg.get("handshake_age"),
+        "server_entry_ip": entry_ip,
+        "fwd_port": fport or None,
+        "fwd_verdict": fwd_verdict,
+        "killswitch": True,   # the conf's PostUp arms the killswitch while up
+        "home_ip": home_ip, "home_cc": home_cc,
+    })
+
+
 # ---------------------------------------------------------------------------
 # Orchestration
 # ---------------------------------------------------------------------------
@@ -640,13 +892,15 @@ def main(argv=None) -> int:
                     help="parse this JSON file as the civitai Alertmanager alert list")
     ap.add_argument("--mock-media", metavar="FILE",
                     help="parse this JSON file as the qBittorrent transfer/info payload")
+    ap.add_argument("--mock-airvpn", metavar="FILE",
+                    help="parse this JSON file as the host-AirVPN probe payload")
     ap.add_argument("--mock-mail", metavar="N", type=int,
                     help="use N as the open-mail_actions count")
     args = ap.parse_args(argv)
 
     mocking = any(x is not None for x in
                   (args.mock_clawgate, args.mock_alerts, args.mock_civitai,
-                   args.mock_media, args.mock_mail))
+                   args.mock_media, args.mock_airvpn, args.mock_mail))
 
     if mocking:
         if args.mock_clawgate is not None:
@@ -663,6 +917,9 @@ def main(argv=None) -> int:
         if args.mock_media is not None:
             with open(args.mock_media) as f:
                 run_source("media", lambda: parse_media(json.load(f)))
+        if args.mock_airvpn is not None:
+            with open(args.mock_airvpn) as f:
+                run_source("airvpn", lambda: parse_airvpn(json.load(f)))
         return 0
 
     # Live poll: each source is independent + fail-safe. After writing each
@@ -672,7 +929,7 @@ def main(argv=None) -> int:
     specs = _toast_specs()
     for name, fn in (("clawgate", fetch_clawgate), ("mail", fetch_mail),
                      ("alerts", fetch_alerts), ("civitai", fetch_civitai),
-                     ("media", fetch_media)):
+                     ("media", fetch_media), ("airvpn", fetch_airvpn)):
         payload = run_source(name, fn)
         spec = specs.get(name)   # media has no edge-toast spec (alarm is in-pill)
         if spec is not None:
