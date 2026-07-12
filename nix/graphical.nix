@@ -182,10 +182,10 @@ let
   # and reads `CA ↓.. ↑..` (the static SERVER_COUNTRIES=Canada label + qBit speed).
   # CALM: hidden when connected+idle; shows speeds while transferring; RED when the
   # tunnel is `firewalled` (forwarded port down); soft-yellow `qBit?` on poller-
-  # stale. Left-click opens the qBit WebUI; right-click opens the media-menu rofi
-  # action launcher (open *arr UIs / pause-resume / force-start / VPN reconnect /
-  # Whisparr search / float the live `media-detail --watch` TUI). The menu reads
-  # ~/.config/bar/media.env (0600) for creds — NOT baked into the store.
+  # stale. Left-click opens the media-menu rofi action launcher (open *arr UIs /
+  # pause-resume / force-start / VPN reconnect / Whisparr search / float the live
+  # `media-detail --watch` TUI); right-click opens the qBit WebUI directly. The menu
+  # reads ~/.config/bar/media.env (0600) for creds — NOT baked into the store.
   mediaBlock = {
     block = "custom";
     command = "${scriptsDir}/i3status-media";
@@ -193,8 +193,8 @@ let
     interval = 30;
     signal = 16;
     click = [
-      { button = "left"; cmd = "xdg-open http://qbittorrent.workbench.lan"; }
-      { button = "right"; cmd = "${scriptsDir}/media-menu"; }
+      { button = "left"; cmd = "${scriptsDir}/media-menu"; }
+      { button = "right"; cmd = "xdg-open http://qbittorrent.workbench.lan"; }
     ];
   };
   # DND indicator (workbench only): a small muted glyph that appears ONLY while
