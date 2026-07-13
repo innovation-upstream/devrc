@@ -157,9 +157,16 @@ def test_render_unseen_noncritical_is_neutral_bell():
     assert b["state"] == "Idle"
 
 
-def test_render_zero_is_empty_hidden():
+def test_render_zero_is_plain_bell():
+    # idle (nothing unseen, DND off) now renders a plain neutral bell — ALWAYS
+    # visible so it stays the click-target for the notification center.
     b = nf.render(paused=False, count=0, critical=False)
-    assert b == {"text": "", "state": "Idle"}
+    assert nf.BELL_GLYPH in b["text"]
+    assert nf.MUTED_GLYPH not in b["text"]
+    assert not any(ch.isdigit() for ch in b["text"])   # no count badge
+    assert b["state"] == "Idle"
+    assert b == {"text": " %s " % nf.BELL_GLYPH,
+                 "short_text": " %s " % nf.BELL_GLYPH, "state": "Idle"}
 
 
 # --------------------------------------------------------------------------- #

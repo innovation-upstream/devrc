@@ -7,17 +7,24 @@ never blocks the bar.
 
 CALM rendering (colour == "look at me"):
   missing / stale / error / count<=0  -> empty, invisible block
-  count > 0                           -> `bell` icon + count, coloured (Critical
-                                          if any critical is firing, else Warning
-                                          — the state comes from the cache)
+  count > 0                           -> `󰀪` alert glyph + count, coloured
+                                          (Critical if any critical is firing,
+                                          else Warning — state comes from cache)
 Click (wired in graphical.nix) opens Grafana.
+
+The leading glyph is the nf-md-alert triangle (rendered from the bar font),
+deliberately DISTINCT from the notifications-pill bell so a firing alert never
+reads as an unseen notification.
 """
 import json
 import os
 import sys
 
 NAME = "alerts"
-ICON = "bell"
+# nf-md-alert 󰀪 (U+F002A) — a warning triangle, rendered in the bar's
+# JetBrainsMono Nerd Font. Prepended to the text (not the i3status-rust `icon`
+# field) because the material-nf icon set has no alert/warning glyph.
+ALERT_GLYPH = "\U000f002a"
 _VALID_STATES = ("Idle", "Info", "Good", "Warning", "Critical")
 _EMPTY = {"text": "", "state": "Idle"}
 
@@ -36,7 +43,7 @@ def load(path):
         return None
 
 
-def render(payload, icon: str = ICON, red_above: int = 0) -> dict:
+def render(payload, glyph: str = ALERT_GLYPH, red_above: int = 0) -> dict:
     """Pure: cache payload (or None) -> i3status-rust block dict.
 
     Hide-at-zero + fail-safe: None / malformed / stale / error / count<=0 all
@@ -62,8 +69,8 @@ def render(payload, icon: str = ICON, red_above: int = 0) -> dict:
         state = payload.get("state")
         if state not in _VALID_STATES or state == "Idle":
             state = "Critical"
-    return {"icon": icon, "text": str(count),
-            "short_text": str(count), "state": state}
+    text = "%s %d" % (glyph, count)
+    return {"text": text, "short_text": text, "state": state}
 
 
 def _red_above_arg() -> int:

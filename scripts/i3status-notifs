@@ -7,8 +7,8 @@ do-not-disturb state and the unseen-notification badge into one bell:
   * DND paused        -> muted bell  󰂛  (nf-md-bell_off), neutral (state Idle)
   * unseen count N>0  -> 󰂚 N          (nf-md-bell), RED (Critical) iff any unseen
                          entry is urgency CRITICAL, else neutral (Idle)
-  * nothing unseen    -> empty/invisible (hide-at-zero, exactly like the count
-                         blocks + the retired i3status-dnd did at rest)
+  * nothing unseen    -> plain neutral bell 󰂚 (nf-md-bell), ALWAYS visible so it
+                         stays the click-target for the notification center
 
 Data source is 100% LOCAL via `dunstctl` — no poller, no network, instant.
 
@@ -115,9 +115,11 @@ def max_id(entries) -> int:
 def render(paused: bool, count: int, critical: bool) -> dict:
     """Pure: (paused, unseen-count, has-critical) -> i3status-rust block dict.
 
-    Precedence: DND (muted bell) > unseen badge > empty/hidden. The badge is
+    Precedence: DND (muted bell) > unseen badge > plain bell. The badge is
     RED only when an unseen entry is CRITICAL; otherwise neutral (Idle) so a
-    routine notification never reads as an alarm.
+    routine notification never reads as an alarm. The idle case renders a plain
+    neutral bell (always visible) rather than an empty block, so the pill stays
+    the click-target for the notification center.
     """
     if paused:
         return {"text": " %s " % MUTED_GLYPH,
@@ -126,7 +128,8 @@ def render(paused: bool, count: int, critical: bool) -> dict:
         state = "Critical" if critical else "Idle"
         return {"text": " %s %d " % (BELL_GLYPH, count),
                 "short_text": " %s %d " % (BELL_GLYPH, count), "state": state}
-    return dict(_EMPTY)
+    return {"text": " %s " % BELL_GLYPH,
+            "short_text": " %s " % BELL_GLYPH, "state": "Idle"}
 
 
 # --------------------------------------------------------------------------- #
