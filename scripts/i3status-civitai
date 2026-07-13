@@ -11,17 +11,26 @@ prod can be told apart from the homelab alert count at a glance.
 
 CALM rendering (colour == "look at me"):
   missing / stale / error / count<=0  -> empty, invisible block
-  count > 0                           -> `bell` icon + `civ <count>`, coloured
-                                          (Critical if any critical is firing,
-                                          else the cache's state)
+  count > 0                           -> `󰀪` alert glyph + `civ <count>`,
+                                          coloured (Critical if any critical is
+                                          firing, else the cache's state)
 Click (wired in graphical.nix) opens the civitai Grafana.
+
+The leading glyph is the nf-md-alert triangle (rendered from the bar font),
+deliberately DISTINCT from the notifications-pill bell so a firing alert never
+reads as an unseen notification. Same glyph as the homelab alerts block; the
+`civ` label is what tells the two count blocks apart.
 """
 import json
 import os
 import sys
 
 NAME = "civitai"
-ICON = "bell"
+# nf-md-alert 󰀪 (U+F002A) — a warning triangle, rendered in the bar's
+# JetBrainsMono Nerd Font. Prepended to the text (not the i3status-rust `icon`
+# field) because the material-nf icon set has no alert/warning glyph. Same
+# glyph as i3status-alerts (differentiated by the `civ` LABEL below).
+ALERT_GLYPH = "\U000f002a"
 LABEL = "civ"
 _VALID_STATES = ("Idle", "Info", "Good", "Warning", "Critical")
 _EMPTY = {"text": "", "state": "Idle"}
@@ -41,7 +50,7 @@ def load(path):
         return None
 
 
-def render(payload, icon: str = ICON, red_above: int = 0) -> dict:
+def render(payload, glyph: str = ALERT_GLYPH, red_above: int = 0) -> dict:
     """Pure: cache payload (or None) -> i3status-rust block dict.
 
     Hide-at-zero + fail-safe: None / malformed / stale / error / count<=0 all
@@ -68,9 +77,8 @@ def render(payload, icon: str = ICON, red_above: int = 0) -> dict:
         state = payload.get("state")
         if state not in _VALID_STATES or state == "Idle":
             state = "Critical"
-    text = "%s %d" % (LABEL, count)
-    return {"icon": icon, "text": text,
-            "short_text": text, "state": state}
+    text = "%s %s %d" % (glyph, LABEL, count)
+    return {"text": text, "short_text": text, "state": state}
 
 
 def _red_above_arg() -> int:

@@ -308,10 +308,11 @@ let
     [ memoryBlock diskBlock netBlock cpuBlock temperatureBlock ]
     ++ lib.optional (!isLaptop) gpuBlock
     ++ lib.optional isLaptop batteryBlock
-    ++ [ soundBlock notifsBlock ]
+    ++ [ soundBlock ]
     ++ lib.optionals (!isLaptop) [ alertsBlock civitaiBlock mailBlock clawgateBlock mediaBlock airvpnBlock ]
     ++ [ timeBlock ]
-    ++ lib.optionals (!isLaptop) [ agentOpsBlock rigcontrolBlock ];
+    ++ lib.optionals (!isLaptop) [ agentOpsBlock rigcontrolBlock ]
+    ++ [ notifsBlock ];
 in
 lib.mkIf isNixOS {
   programs.i3status-rust = {

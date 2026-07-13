@@ -407,18 +407,29 @@ def test_mock_run_malformed_clawgate_writes_stale(tmp_path, monkeypatch):
 # --------------------------------------------------------------------------- #
 # block scripts: render() — hide-at-zero + colour-when->0 + fail-safe
 # --------------------------------------------------------------------------- #
+# icon = the i3status-rust named icon for count-only blocks, or None for the
+# alert blocks (which carry a literal nf-md-alert glyph in the text instead).
 BLOCKS = [
     ("clawgate", clawgate_block, "tasks", "Warning"),
     ("mail", mail_block, "mail", "Warning"),
-    ("alerts", alerts_block, "bell", "Critical"),
-    ("civitai", civitai_block, "bell", "Critical"),
+    ("alerts", alerts_block, None, "Critical"),
+    ("civitai", civitai_block, None, "Critical"),
 ]
 
 
 def _expected_text(mod, count):
-    # i3status-civitai prefixes the count with its `civ` LABEL; the others don't.
+    # The alert blocks (i3status-alerts / -civitai) prepend a literal nf-md-alert
+    # GLYPH to the text; i3status-civitai additionally prefixes the `civ` LABEL.
+    # The count-only blocks (clawgate/mail) carry neither.
+    parts = []
+    glyph = getattr(mod, "ALERT_GLYPH", None)
+    if glyph:
+        parts.append(glyph)
     label = getattr(mod, "LABEL", None)
-    return ("%s %d" % (label, count)) if label else str(count)
+    if label:
+        parts.append(label)
+    parts.append(str(count))
+    return " ".join(parts)
 
 
 @pytest.mark.parametrize("name,mod,icon,default_state", BLOCKS)
@@ -432,7 +443,12 @@ def test_block_hides_at_zero(name, mod, icon, default_state):
 def test_block_visible_and_coloured_when_positive(name, mod, icon, default_state):
     out = mod.render({"count": 3, "state": default_state})
     exp = _expected_text(mod, 3)
-    assert out["icon"] == icon
+    if getattr(mod, "ALERT_GLYPH", None):
+        # alert blocks carry the glyph in the text, NOT the i3status-rust `icon`
+        assert "icon" not in out
+        assert mod.ALERT_GLYPH in out["text"]
+    else:
+        assert out["icon"] == icon
     assert out["text"] == exp and out["short_text"] == exp
     assert out["state"] == default_state
 
@@ -442,8 +458,10 @@ def test_civitai_block_labels_count_distinctly():
     # its text carries the `civ` label prefix, alerts' does not.
     civ = civitai_block.render({"count": 317, "state": "Critical"})
     hl = alerts_block.render({"count": 317, "state": "Critical"})
-    assert civ["text"] == "civ 317" and civ["state"] == "Critical"
-    assert hl["text"] == "317"
+    assert civ["text"] == "%s civ 317" % civitai_block.ALERT_GLYPH
+    assert civ["state"] == "Critical"
+    assert hl["text"] == "%s 317" % alerts_block.ALERT_GLYPH
+    assert "civ" not in hl["text"]
     assert civ["text"] != hl["text"]
 
 
@@ -456,7 +474,7 @@ def test_red_above_neutral_at_or_below_baseline(name, mod):
     for count in (25, 30):  # <= red_above=30
         out = mod.render({"count": count, "state": "Critical"}, red_above=30)
         assert out["state"] == "Idle"          # visible but NOT coloured
-        assert out["icon"] == "bell"           # still shown (not hidden)
+        assert mod.ALERT_GLYPH in out["text"]  # still shown (not hidden)
         assert str(count) in out["text"]
 
 
@@ -532,11 +550,13 @@ def test_block_subprocess_missing_file_is_invisible(tmp_path, script, cachefile)
     assert json.loads(r.stdout) == {"text": "", "state": "Idle"}
 
 
+# icon=None => alert blocks (glyph in text, no `icon` field); the given `text`
+# is the trailing (glyph-stripped) portion the rendered text must end with.
 @pytest.mark.parametrize("script,cachefile,icon,text", [
     ("i3status-clawgate", "clawgate.json", "tasks", "2"),
     ("i3status-mail", "mail.json", "mail", "2"),
-    ("i3status-alerts", "alerts.json", "bell", "2"),
-    ("i3status-civitai", "civitai.json", "bell", "civ 2"),
+    ("i3status-alerts", "alerts.json", None, "2"),
+    ("i3status-civitai", "civitai.json", None, "civ 2"),
 ])
 def test_block_subprocess_positive_renders(tmp_path, script, cachefile, icon, text):
     (tmp_path / cachefile).write_text(json.dumps(
@@ -546,7 +566,11 @@ def test_block_subprocess_positive_renders(tmp_path, script, cachefile, icon, te
                        capture_output=True, text=True, env=env)
     assert r.returncode == 0
     out = json.loads(r.stdout)
-    assert out["icon"] == icon and out["text"] == text
+    if icon is None:
+        assert "icon" not in out
+        assert out["text"].endswith(text)
+    else:
+        assert out["icon"] == icon and out["text"] == text
 
 
 @pytest.mark.parametrize("script,cachefile", [
