@@ -1,0 +1,225 @@
+#!/usr/bin/env python3
+"""Notification center for the i3status-rust notifications pill (left-click).
+
+A rofi `-dmenu` list (gruvbox-dark-hard, monospace-forced, pango markup rows),
+newest-first, over the local `dunstctl history`:
+
+  🔕 Toggle Do-Not-Disturb   -> dunstctl set-paused toggle
+  🗑 Clear all               -> dunstctl history-clear
+  <each entry>               -> dunstctl history-pop <id>   (re-display it)
+
+Every entry row is `[urgency dot] summary — body (appname · age)`, the body
+truncated and the dot colored by urgency via pango.
+
+On open (regardless of the selection), ALL history is marked seen: the marker
+file (~/.cache/bar-status/notifs-seen) is set to the max history id and the pill
+is refreshed (`pkill -RTMIN+15 i3status-rs`) so the unseen badge clears instantly.
+
+`--dump` prints the rows offline (no rofi) for testing. Fully FAIL-SAFE — a
+launcher must never crash loudly.
+
+The history parsing / marker / urgency logic is shared with the pill: this loads
+scripts/i3status-notifs (its co-located sibling) as a module rather than
+duplicating it.
+"""
+from __future__ import annotations
+
+import importlib.machinery
+import importlib.util
+import os
+import subprocess
+import sys
+import time
+
+ROFI_THEME = "gruvbox-dark-hard"   # matches media-menu / disk-detail / the launcher
+
+# gruvbox-dark-hard palette (urgency-tier dot colors + row accents).
+RED, YELLOW, AQUA, FG, DIM = "#fb4934", "#fabd2f", "#8ec07c", "#ebdbb2", "#928374"
+
+# Urgency -> dot color. CRITICAL screams red; NORMAL is a calm aqua; LOW dims.
+URGENCY_COLOR = {"CRITICAL": RED, "NORMAL": AQUA, "LOW": DIM}
+
+BODY_WIDTH = 60   # body truncation width (chars)
+
+# Action rows shown above the history. (label, action-tuple).
+ACTION_ROWS = [
+    ("🔕 Toggle Do-Not-Disturb", ("toggle-dnd",)),
+    ("🗑 Clear all", ("clear",)),
+]
+
+
+# --------------------------------------------------------------------------- #
+# Load the sibling pill module for the shared pure logic (parse/unseen/marker).
+# --------------------------------------------------------------------------- #
+def _load_sibling(name):
+    here = os.path.dirname(os.path.abspath(__file__))
+    loader = importlib.machinery.SourceFileLoader(
+        name.replace("-", "_"), os.path.join(here, name))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    mod = importlib.util.module_from_spec(spec)
+    loader.exec_module(mod)
+    return mod
+
+
+notifs = _load_sibling("i3status-notifs")
+
+
+# --------------------------------------------------------------------------- #
+# Pure / mockable logic (unit-tested against fixtures — NO rofi / dunstctl)
+# --------------------------------------------------------------------------- #
+def _esc(s) -> str:
+    """Escape pango markup metacharacters (& < >) in user-supplied text."""
+    return (str(s or "").replace("&", "&amp;")
+            .replace("<", "&lt;").replace(">", "&gt;"))
+
+
+def _trunc(s: str, n: int) -> str:
+    """Collapse newlines + right-truncate a long string with a trailing ellipsis."""
+    s = " ".join((s or "").split())
+    return s if len(s) <= n else s[: n - 1] + "…"
+
+
+def age_str(delta_us) -> str:
+    """Compact age from a CLOCK_MONOTONIC microsecond delta: 'now','5s','3m','2h','4d'."""
+    try:
+        secs = int(delta_us) // 1_000_000
+    except (TypeError, ValueError):
+        return "?"
+    if secs < 1:
+        return "now"
+    if secs < 60:
+        return "%ds" % secs
+    if secs < 3600:
+        return "%dm" % (secs // 60)
+    if secs < 86400:
+        return "%dh" % (secs // 3600)
+    return "%dd" % (secs // 86400)
+
+
+def format_entry_row(e: dict, now_us: int) -> str:
+    """One pango-markup rofi row: `[dot] summary — body (appname · age)`.
+
+    Requires a monospace font (forced via -theme-str) for alignment. The dot is
+    colored by urgency; body is truncated; everything user-supplied is escaped.
+    """
+    urg = str(e.get("urgency", "NORMAL")).upper()
+    dot = "<span foreground='%s'>●</span>" % URGENCY_COLOR.get(urg, FG)
+    summary = _esc(_trunc(e.get("summary", ""), 40))
+    body = _esc(_trunc(e.get("body", ""), BODY_WIDTH))
+    app = _esc(e.get("appname", "") or "?")
+    age = age_str(now_us - e.get("timestamp", 0))
+    meta = "<span foreground='%s'>(%s · %s)</span>" % (DIM, app, age)
+    row = "%s <b>%s</b>" % (dot, summary)
+    if body:
+        row += " <span foreground='%s'>— %s</span>" % (FG, body)
+    return "%s %s" % (row, meta)
+
+
+def build_rows(entries, now_us) -> list:
+    """(markup_row, action-tuple) pairs: the two action rows, then newest-first history.
+
+    Actions: ('toggle-dnd',) ('clear',) ('pop', <id>).
+    """
+    rows = list(ACTION_ROWS)
+    for e in entries if isinstance(entries, list) else []:
+        rows.append((format_entry_row(e, now_us), ("pop", e.get("id", 0))))
+    return rows
+
+
+# --------------------------------------------------------------------------- #
+# Side-effecting (dunstctl / marker / rofi — not unit-tested)
+# --------------------------------------------------------------------------- #
+def now_monotonic_us() -> int:
+    return int(time.clock_gettime(time.CLOCK_MONOTONIC) * 1_000_000)
+
+
+def mark_all_seen(entries) -> None:
+    """Write the marker = max history id, then refresh the pill (clears the badge)."""
+    mid = notifs.max_id(entries)
+    try:
+        os.makedirs(os.path.dirname(notifs.MARKER), exist_ok=True)
+        with open(notifs.MARKER, "w") as f:
+            f.write(str(mid))
+    except Exception:
+        pass
+    try:
+        subprocess.run(["pkill", "-RTMIN+15", "i3status-rs"],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                       timeout=3)
+    except Exception:
+        pass
+
+
+def do_action(action) -> None:
+    """Apply a selected action (toggle-dnd / clear / pop <id>). Best-effort."""
+    kind = action[0]
+    try:
+        if kind == "toggle-dnd":
+            notifs._dunstctl("set-paused", "toggle")
+        elif kind == "clear":
+            notifs._dunstctl("history-clear")
+        elif kind == "pop":
+            notifs._dunstctl("history-pop", str(action[1]))
+    except Exception:
+        pass
+    # any of these changes the pill state -> refresh it.
+    try:
+        subprocess.run(["pkill", "-RTMIN+15", "i3status-rs"],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                       timeout=3)
+    except Exception:
+        pass
+
+
+def rofi_pick(rows) -> int | None:
+    """Show the notification list in rofi; return the selected index or None."""
+    theme_str = ("element-text { font: \"JetBrainsMono Nerd Font Mono 11\"; } "
+                 "listview { lines: %d; }" % max(1, min(len(rows), 20)))
+    argv = [
+        "rofi", "-dmenu", "-i", "-no-custom", "-markup-rows", "-format", "i",
+        "-p", "Notifications", "-theme", ROFI_THEME, "-theme-str", theme_str,
+    ]
+    try:
+        r = subprocess.run(argv, input="\n".join(m for m, _ in rows),
+                           text=True, stdout=subprocess.PIPE)
+    except Exception:
+        return None
+    if r.returncode != 0:
+        return None
+    sel = r.stdout.strip()
+    return int(sel) if sel.isdigit() else None
+
+
+def run_center() -> int:
+    entries = notifs.history()
+    rows = build_rows(entries, now_monotonic_us())
+    # Opening the center = acknowledging everything -> mark seen up-front so the
+    # badge clears even if the user Escs without picking anything.
+    mark_all_seen(entries)
+    idx = rofi_pick(rows)
+    if idx is not None and 0 <= idx < len(rows):
+        do_action(rows[idx][1])
+    return 0
+
+
+def dump() -> int:
+    """Offline: print `<action>\\t<markup>` rows without rofi (for tests/debug)."""
+    entries = notifs.history()
+    rows = build_rows(entries, now_monotonic_us())
+    for markup, action in rows:
+        print("%s\t%s" % (":".join(str(a) for a in action), markup))
+    return 0
+
+
+def main(argv=None) -> int:
+    argv = sys.argv[1:] if argv is None else argv
+    if "--dump" in argv:
+        return dump()
+    return run_center()
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except Exception:   # a launcher must never crash loudly
+        sys.exit(0)

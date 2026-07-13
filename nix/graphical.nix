@@ -242,17 +242,31 @@ let
       { button = "right"; cmd = "xdg-open http://qbittorrent.workbench.lan"; }
     ];
   };
-  # DND indicator (workbench only): a small muted glyph that appears ONLY while
-  # dunst is paused (quiet mode), hidden otherwise — same calm hide-at-zero idea
-  # as the count blocks. Reads `dunstctl is-paused` (instant, local). signal 15
-  # is sent by the `$mod+Shift+n` toggle for instant feedback; the short interval
-  # is a backstop.
-  dndBlock = {
+  # Notifications bell (BOTH hosts) — merges the dunst DND state and the unseen-
+  # notification badge into ONE calm pill (replaces the old DND-only dndBlock).
+  # Reads `dunstctl history` / `is-paused` (instant, local — never network):
+  #   DND paused        -> muted bell 󰂛 (neutral)
+  #   unseen count N>0  -> 󰂚 N (red iff an unseen entry is CRITICAL, else neutral)
+  #   nothing unseen    -> empty/invisible (hide-at-zero, like the count blocks)
+  # "Unseen" = history ids above the ~/.cache/bar-status/notifs-seen marker; a
+  # missing marker surfaces ALL history (so notifications suppressed during
+  # fullscreen still show up). Left-click opens the notif-center rofi list
+  # (toggle-DND / clear-all / history-pop a past toast); right-click toggles DND
+  # instantly (mirrors the sound block's right-click idiom). signal 15 is
+  # inherited from the retired dndBlock so the `$mod+Shift+n` keybind's
+  # `pkill -RTMIN+15` and notif-center's mark-seen still refresh it. Purely local,
+  # so it lives on BOTH hosts (the laptop runs dunst too + previously had no DND
+  # indicator).
+  notifsBlock = {
     block = "custom";
-    command = "${scriptsDir}/i3status-dnd";
+    command = "${scriptsDir}/i3status-notifs";
     json = true;
     interval = 5;
     signal = 15;
+    click = [
+      { button = "left"; cmd = "${scriptsDir}/notif-center"; }
+      { button = "right"; cmd = "dunstctl set-paused toggle && pkill -RTMIN+15 i3status-rs"; }
+    ];
   };
   timeBlock = {
     block = "time";
@@ -294,8 +308,8 @@ let
     [ memoryBlock diskBlock netBlock cpuBlock temperatureBlock ]
     ++ lib.optional (!isLaptop) gpuBlock
     ++ lib.optional isLaptop batteryBlock
-    ++ [ soundBlock ]
-    ++ lib.optionals (!isLaptop) [ alertsBlock civitaiBlock mailBlock clawgateBlock dndBlock mediaBlock airvpnBlock ]
+    ++ [ soundBlock notifsBlock ]
+    ++ lib.optionals (!isLaptop) [ alertsBlock civitaiBlock mailBlock clawgateBlock mediaBlock airvpnBlock ]
     ++ [ timeBlock ]
     ++ lib.optionals (!isLaptop) [ agentOpsBlock rigcontrolBlock ];
 in
@@ -390,8 +404,16 @@ lib.mkIf isNixOS {
     source = ../scripts/i3status-civitai;
     executable = true;
   };
-  home.file.".config/i3status-rust/scripts/i3status-dnd" = lib.mkIf (!isLaptop) {
-    source = ../scripts/i3status-dnd;
+  # notifications bell + its notif-center rofi list. BOTH hosts (NOT !isLaptop-
+  # gated) — purely local via dunstctl, and the laptop gains a DND/notif indicator
+  # it never had. notif-center loads i3status-notifs as a co-located sibling module
+  # for the shared history/marker logic, so both MUST be symlinked together.
+  home.file.".config/i3status-rust/scripts/i3status-notifs" = {
+    source = ../scripts/i3status-notifs;
+    executable = true;
+  };
+  home.file.".config/i3status-rust/scripts/notif-center" = {
+    source = ../scripts/notif-center;
     executable = true;
   };
   # media block: the credential-free render script (reads ~/.cache/bar-status/
