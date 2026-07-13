@@ -162,11 +162,15 @@ in
         timeout = 0;                   # sticky until dismissed
       };
       # Native fullscreen DND: a filterless rule matches all notifications and,
-      # while any window is fullscreen (video/games/screen-share), hides the
-      # visible stack + holds new toasts, re-showing them once fullscreen ends.
-      # The biggest calm win — no helper needed, dunst does this itself.
-      fullscreen_pushback = {
-        fullscreen = "pushback";
+      # while a fullscreen window (video/games/screen-share) is focused, routes
+      # toasts STRAIGHT TO HISTORY — nothing shows, nothing accumulates, and
+      # nothing dumps on exit. Recall missed ones with $mod+n (history-pop).
+      # NOTE: `pushback` (the prior value) instead PAUSES each toast's expiry
+      # timer while fullscreen, so on a workbench that's fullscreen a lot they
+      # never expired and piled up — `suppress` is the calm-but-no-pile-up fix.
+      # Urgent agent approvals still reach the phone via clawgate push.
+      fullscreen_suppress = {
+        fullscreen = "suppress";
       };
     };
   };
