@@ -154,6 +154,62 @@ def test_skipped_js_detected(tmp_path):
     assert any(c.line == 2 and "js.skip" in c.text for c in cands)
 
 
+# ---- skipped JS: conditional guard vs disabled block --------------------------
+# Playwright/Jest `test.skip(cond, reason)` is a RUNTIME GUARD (runs when cond is
+# false, e.g. Docker present in CI) — not a disabled test. Motivated by a real false
+# positive: prescan flagged 7 clawgate e2e specs guarded by
+# `test.skip(!dockerAvailable(), 'full-mode specs need Docker …')` as "enable me".
+
+def test_conditional_js_skip_helper():
+    # Conditional runtime guards — first arg is a condition expression → NOT flagged.
+    assert prescan._is_conditional_js_skip(
+        "  test.skip(!dockerAvailable(), 'needs Docker');") is True
+    assert prescan._is_conditional_js_skip(
+        "test.skip(process.env.CI, 'flaky in CI');") is True
+    assert prescan._is_conditional_js_skip("  it.skip(isSlow, () => {});") is True
+    # Disabled test blocks — first arg is a string-literal name → conditional? no.
+    assert prescan._is_conditional_js_skip("  it.skip('renders the widget', () => {})") is False
+    assert prescan._is_conditional_js_skip('describe.skip("auth suite", () => {})') is False
+    assert prescan._is_conditional_js_skip("test.skip(`name`, async () => {})") is False
+    # Bare block modifier with no arg → disabled block, not conditional.
+    assert prescan._is_conditional_js_skip("describe.skip()") is False
+    # A line without a JS skip → False (helper only speaks to js.skip).
+    assert prescan._is_conditional_js_skip("x = 1") is False
+
+
+def test_conditional_js_skip_not_flagged(tmp_path):
+    # The real clawgate case + sibling condition forms must NOT become candidates.
+    _write(tmp_path, "e2e.spec.ts",
+           "test('full mode', () => {\n"
+           "  test.skip(!dockerAvailable(), 'full-mode specs need Docker');\n"
+           "  test.skip(process.env.CI, 'slow in CI');\n"
+           "  it.skip(isSlow, () => {});\n"
+           "});\n")
+    cands = prescan.scan_skipped_tests(tmp_path, "repo", cap=10)
+    assert cands == []
+
+
+def test_disabled_js_test_still_flagged(tmp_path):
+    # String-literal / bare disabled forms remain CI-verifiable "enable me" candidates.
+    _write(tmp_path, "widget.test.ts",
+           "it.skip('renders the widget', () => {});\n"
+           "describe.skip('auth suite', () => {});\n"
+           "test.skip('name', async () => {});\n")
+    cands = prescan.scan_skipped_tests(tmp_path, "repo", cap=10)
+    lines = {c.line for c in cands}
+    assert lines == {1, 2, 3}
+    assert all("js.skip" in c.text for c in cands)
+
+
+def test_mixed_conditional_and_disabled_js(tmp_path):
+    # In one file: a conditional guard is dropped but the disabled test survives.
+    _write(tmp_path, "mix.spec.ts",
+           "test.skip(!dockerAvailable(), 'guard');\n"
+           "it.skip('disabled thing', () => {});\n")
+    cands = prescan.scan_skipped_tests(tmp_path, "repo", cap=10)
+    assert [c.line for c in cands] == [2]
+
+
 def test_skipped_go_detected(tmp_path):
     _write(tmp_path, "x_test.go", "func TestFoo(t *testing.T) {\n\tt.Skip(\"wip\")\n}\n")
     cands = prescan.scan_skipped_tests(tmp_path, "repo", cap=10)
