@@ -40,6 +40,14 @@ _MARKER_QUOTE_CHARS = frozenset("'\"`")
 SKIP_PATTERNS: tuple[tuple[str, re.Pattern], ...] = (
     ("pytest.skip", re.compile(r"@pytest\.mark\.(skip|skipif|xfail)")),
     ("pytest.skip-call", re.compile(r"pytest\.skip\(")),
+    # NB: `(it|describe|test).skip(` is overloaded. The *block-modifier* form
+    # (`it.skip('name', fn)`, `describe.skip('suite', ...)`) is a genuinely DISABLED
+    # test → a CI-verifiable "enable me" candidate → flag it. But the *conditional*
+    # form (`test.skip(<condition>, 'reason')`, e.g. `test.skip(!dockerAvailable(), …)`)
+    # is a runtime guard: the test RUNS when the condition is false (Docker present in
+    # CI) and skips gracefully otherwise — NOT disabled, must never be flagged.
+    # This broad regex matches BOTH forms; `_is_conditional_js_skip` post-filters out
+    # the conditional one in `scan_skipped_tests` (see it for the first-arg heuristic).
     ("js.skip", re.compile(r"\b(it|describe|test)\.skip\(")),
     ("js.xfail", re.compile(r"\.(only)\(")),  # .only leaves the rest un-run — same smell
     ("go.skip", re.compile(r"\bt\.Skip(f|Now)?\(")),
@@ -228,6 +236,43 @@ def _walk_markers(root: Path) -> list[Candidate]:
 
 # ---- signal: skipped/xfail tests ---------------------------------------------
 
+# Matches the JS `.skip(` head so we can inspect its first argument. Kept separate from
+# the SKIP_PATTERNS entry (which is used only for the yes/no match) so `.end()` lands
+# exactly after the `(`.
+_JS_SKIP_HEAD_RE = re.compile(r"\b(?:it|describe|test)\.skip\(")
+
+
+def _is_conditional_js_skip(line: str) -> bool:
+    """True when a JS `(it|describe|test).skip(...)` is the *conditional* runtime-guard
+    form — `test.skip(<condition>, 'reason')` — rather than a genuinely-disabled block.
+
+    Playwright/Jest overload `.skip(` two ways, and only one is a real "enable me" fix:
+      • block modifier / disabled test — first arg is the test NAME (a string literal)
+        or a function: `it.skip('renders', () => {})`, `describe.skip('suite', ...)`,
+        or the bare `describe.skip()`. Genuinely disabled → a CI-verifiable candidate
+        → the caller FLAGS it.
+      • conditional guard — first arg is a boolean expression: `test.skip(!dockerAvailable(),
+        'needs Docker')`, `test.skip(process.env.CI, ...)`, `it.skip(isSlow, ...)`. The
+        test RUNS when the condition is false (e.g. Docker present in CI) and skips
+        gracefully otherwise — NOT disabled, so it must NEVER be flagged.
+
+    Heuristic (line-based, no parse): look at the first non-space char after `.skip(`.
+    A string-literal quote (`'`, `"`, `` ` ``) ⇒ the arg is a test name ⇒ disabled block
+    ⇒ NOT conditional. An empty arg list (`)` immediately) ⇒ bare block modifier ⇒ NOT
+    conditional. Anything else (identifier / call / `!expr` / boolean) ⇒ conditional
+    guard ⇒ True. Conservative on purpose: a missed disabled test is only a dropped
+    candidate, but a flagged conditional guard is the false positive we must avoid."""
+    m = _JS_SKIP_HEAD_RE.search(line)
+    if not m:
+        return False
+    rest = line[m.end():].lstrip()
+    if not rest or rest[0] == ")":
+        return False  # `.skip()` — bare block modifier, treat as disabled block
+    if rest[0] in "'\"`":
+        return False  # first arg is a string-literal test name → disabled block
+    return True       # first arg is a condition expression → conditional runtime guard
+
+
 def scan_skipped_tests(root: Path, repo: str, cap: int) -> list[Candidate]:
     """Line-scan for skip/xfail/ignore markers across languages. A skipped test is a
     concrete, CI-verifiable fix — bias the LLM toward these."""
@@ -245,6 +290,10 @@ def scan_skipped_tests(root: Path, repo: str, cap: int) -> list[Candidate]:
                 continue
             for label, pat in SKIP_PATTERNS:
                 if pat.search(line):
+                    # A conditional `test.skip(<cond>, …)` is a runtime guard that runs
+                    # in CI, not a disabled test — never a candidate. See the helper.
+                    if label == "js.skip" and _is_conditional_js_skip(line):
+                        continue
                     res.append(Candidate(
                         repo, "skipped_test", _rel(root, p), i,
                         f"[{label}] {line.strip()[:180]}"))
