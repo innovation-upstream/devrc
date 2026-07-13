@@ -4,9 +4,12 @@ per-repo capping, churn/large/lockfile signals, and global interleave cap.
 All fixtures are built on a real temp directory tree (tmp_path) so the file-walk,
 line-numbering, and ordering are exercised end-to-end without any network or git remote.
 """
+import shutil
 import sys
 import time
 from pathlib import Path
+
+import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import prescan  # noqa: E402
@@ -57,6 +60,80 @@ def test_walk_markers_ignores_binary_exts(tmp_path):
     _write(tmp_path, "img.png", "TODO not code\n")
     cands = prescan._walk_markers(tmp_path)
     assert cands == []
+
+
+# ---- markers: quoted-literal suppression (false positive class 1) -------------
+
+def test_quoted_marker_helper_suppresses_string_literals():
+    # A marker token flanked by matching quotes on both sides is a data/enum literal.
+    assert prescan._has_unquoted_marker("WHEN 16 THEN RETURN 'XXX';") is False
+    assert prescan._has_unquoted_marker('const k = "XXX";') is False
+    assert prescan._has_unquoted_marker("label = `TODO`") is False
+    # An ordinary comment marker (char before is a space, not a quote) survives.
+    assert prescan._has_unquoted_marker("# TODO: real thing") is True
+    assert prescan._has_unquoted_marker("// FIXME later") is True
+    # Mixed quote chars on either side must NOT count as wrapped.
+    assert prescan._has_unquoted_marker("x = 'XXX\"") is True
+
+
+def test_quoted_marker_not_flagged_in_scan(tmp_path):
+    # SQL enum literals must not become marker candidates.
+    _write(tmp_path, "enum.sql",
+           "SELECT CASE code\n  WHEN 16 THEN RETURN 'XXX'\n  WHEN 17 THEN 'ok'\nEND;\n")
+    _write(tmp_path, "consts.js", 'const placeholder = "XXX";\nconst tag = `TODO`;\n')
+    cands = prescan.scan_markers(tmp_path, "repo", cap=10)
+    assert cands == []
+
+
+def test_line_with_quoted_and_real_marker_still_flagged(tmp_path):
+    # A quoted XXX literal AND a genuine trailing comment marker → the real one survives.
+    _write(tmp_path, "q.sql",
+           "WHEN 16 THEN RETURN 'XXX';  -- real comment TODO here\n")
+    cands = prescan.scan_markers(tmp_path, "repo", cap=10)
+    assert len(cands) == 1
+    assert cands[0].line == 1
+    assert "TODO" in cands[0].text
+
+
+def test_genuine_marker_still_flagged(tmp_path):
+    _write(tmp_path, "real.py", "def f():\n    pass  # TODO: real thing\n")
+    cands = prescan.scan_markers(tmp_path, "repo", cap=10)
+    assert len(cands) == 1
+    assert cands[0].line == 2
+
+
+# ---- markers: .md leak parity between rg and walk paths (false positive class 2)
+
+def test_walk_markers_ignores_md_files(tmp_path):
+    # `.md` is not in SCAN_EXTS — the walk path must never scan RULES.md / handoff docs.
+    _write(tmp_path, "RULES.md", "- no TODO comments for core functionality\n")
+    _write(tmp_path, "src.py", "# TODO real\n")
+    cands = prescan._walk_markers(tmp_path)
+    files = {c.file for c in cands}
+    assert "src.py" in files
+    assert "RULES.md" not in files
+
+
+@pytest.mark.skipif(shutil.which("rg") is None, reason="ripgrep not on PATH")
+def test_rg_markers_ignores_md_files(tmp_path):
+    # rg walks EVERY file (ignores SCAN_EXTS); the SCAN_EXTS filter must exclude `.md`
+    # so the rg path agrees with the walk path (deterministic regardless of rg presence).
+    _write(tmp_path, "RULES.md", "- no TODO comments for core functionality\n")
+    _write(tmp_path, "src.py", "# TODO real\n")
+    cands = prescan._rg_markers(tmp_path)
+    files = {c.file for c in cands}
+    assert "src.py" in files
+    assert "RULES.md" not in files
+
+
+def test_scan_markers_excludes_md_either_path(tmp_path):
+    # End-to-end via whichever backend (rg or walk) the env resolves to.
+    _write(tmp_path, "doc.md", "TODO write this section\n")
+    _write(tmp_path, "code.py", "# TODO real\n")
+    cands = prescan.scan_markers(tmp_path, "repo", cap=10)
+    files = {c.file for c in cands}
+    assert "code.py" in files
+    assert "doc.md" not in files
 
 
 # ---- skipped tests ------------------------------------------------------------
