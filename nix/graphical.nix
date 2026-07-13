@@ -227,9 +227,9 @@ let
   # and reads `CA ↓.. ↑..` (the static SERVER_COUNTRIES=Canada label + qBit speed).
   # CALM: hidden when connected+idle; shows speeds while transferring; RED when the
   # tunnel is `firewalled` (forwarded port down); soft-yellow `qBit?` on poller-
-  # stale. Left-click opens the media-menu rofi action launcher (open *arr UIs /
-  # pause-resume / force-start / VPN reconnect / Whisparr search / float the live
-  # `media-detail --watch` TUI); right-click opens the qBit WebUI directly. The menu
+  # stale. Left-click opens the media-menu rofi action launcher (open the service
+  # UIs / pause-resume / force-start / VPN reconnect / search all missing / float
+  # the live `media-detail --watch` TUI); right-click opens the qBit WebUI directly. The menu
   # reads ~/.config/bar/media.env (0600) for creds — NOT baked into the store.
   mediaBlock = {
     block = "custom";

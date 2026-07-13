@@ -620,8 +620,8 @@ def fetch_civitai() -> dict:
 def _media_creds() -> dict:
     """Read ~/.config/bar/media.env by EXPLICIT PATH (mirrors _clawgate_creds).
 
-    Kept OUT of git / the nix-store (it holds the qBit password + *arr API keys),
-    so it is read straight off disk at 0600. MEDIA_ENV overrides the path (tests)."""
+    Kept OUT of git / the nix-store (it holds the qBit password + media-service API
+    keys), so it is read straight off disk at 0600. MEDIA_ENV overrides the path (tests)."""
     env = {}
     path = os.environ.get("MEDIA_ENV") or os.path.expanduser("~/.config/bar/media.env")
     with open(path) as f:
@@ -656,7 +656,7 @@ def _qbit_login(url: str, user: str, pw: str, timeout: float = 3.0):
 
 def fetch_media() -> dict:
     """Authed qBittorrent /transfer/info -> parse_media. Single short-timeout call
-    (the pill is speed-only); the secondary *arr metrics live in media-detail."""
+    (the pill is speed-only); the secondary media-service metrics live in media-detail."""
     creds = _media_creds()
     url = creds.get("QBIT_URL", "http://qbittorrent.workbench.lan").rstrip("/")
     user = creds.get("QBIT_USER", "admin")

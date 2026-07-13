@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """Right-click detail popup for the i3status-rust `media` block (a float terminal).
 
-Best-effort secondary metrics for the *arr media stack — the stuff decision 4
+Best-effort secondary metrics for the media stack — the stuff decision 4
 keeps OFF the bar pill (which is qBit VPN + speed only) and behind this popup:
   * qBit AirVPN tunnel: connection_status, forwarded port, ↓/↑ speed, active/total
     torrents
-  * Whisparr download queue size
-  * Stash scene count
-  * Prowlarr indexer count + health warnings
+  * Downloader queue size
+  * Library item count
+  * Indexer count + health warnings
 
 Every call is short-timeout and individually wrapped: an unreachable service
 prints a dim `unavailable` line instead of aborting the popup. Credentials/keys
@@ -98,16 +98,16 @@ def qbit_section(c, out):
         out.append(("  torrents", "unavailable"))
 
 
-def arr_section(c, out):
-    # Whisparr queue
+def services_section(c, out):
+    # Downloader queue
     wurl = c.get("WHISPARR_URL", "http://whisparr.workbench.lan").rstrip("/")
     wkey = c.get("WHISPARR_KEY", "")
     try:
         q = _get_json("%s/api/v3/queue?pageSize=1&apikey=%s" % (wurl, wkey))
-        out.append(("Whisparr queue", "%s item(s)" % q.get("totalRecords", "?")))
+        out.append(("Downloader queue", "%s item(s)" % q.get("totalRecords", "?")))
     except Exception:
-        out.append(("Whisparr queue", "unavailable"))
-    # Stash scene count (GraphQL)
+        out.append(("Downloader queue", "unavailable"))
+    # Library item count (GraphQL)
     surl = c.get("STASH_URL", "http://stash.workbench.lan").rstrip("/")
     skey = c.get("STASH_KEY", "")
     try:
@@ -117,28 +117,28 @@ def arr_section(c, out):
         if skey:
             hdr["ApiKey"] = skey
         r = _get_json(surl + "/graphql", headers=hdr, data=body)
-        out.append(("Stash scenes",
+        out.append(("Library items",
                     str(r["data"]["findScenes"]["count"])))
     except Exception:
-        out.append(("Stash scenes", "unavailable"))
-    # Prowlarr indexers + health
+        out.append(("Library items", "unavailable"))
+    # Indexer count + health
     purl = c.get("PROWLARR_URL", "http://prowlarr.workbench.lan").rstrip("/")
     pkey = c.get("PROWLARR_KEY", "")
     try:
         idx = _get_json("%s/api/v1/indexer?apikey=%s" % (purl, pkey))
-        out.append(("Prowlarr indexers", "%d configured" % len(idx)))
+        out.append(("Indexers", "%d configured" % len(idx)))
     except Exception:
-        out.append(("Prowlarr indexers", "unavailable"))
+        out.append(("Indexers", "unavailable"))
     try:
         health = _get_json("%s/api/v1/health?apikey=%s" % (purl, pkey))
         n = len(health) if isinstance(health, list) else 0
-        out.append(("Prowlarr health",
+        out.append(("Indexer health",
                     "OK" if n == 0 else "%d warning(s)" % n))
         for h in (health if isinstance(health, list) else [])[:4]:
             if isinstance(h, dict) and h.get("message"):
                 out.append(("  ·", h["message"][:70]))
     except Exception:
-        out.append(("Prowlarr health", "unavailable"))
+        out.append(("Indexer health", "unavailable"))
 
 
 def render(c, title_suffix="") -> None:
@@ -146,7 +146,7 @@ def render(c, title_suffix="") -> None:
     rows = []
     qbit_section(c, rows)
     rows.append(("", ""))
-    arr_section(c, rows)
+    services_section(c, rows)
     print("\n  \033[1mMedia stack — detail\033[0m  (qBit via gluetun AirVPN · CA)%s\n"
           % title_suffix)
     for k, v in rows:
