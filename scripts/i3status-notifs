@@ -1,0 +1,179 @@
+#!/usr/bin/env python3
+"""i3status-rust custom block: merged notifications bell + DND indicator.
+
+REPLACES the old i3status-dnd block. A single CALM pill that folds the dunst
+do-not-disturb state and the unseen-notification badge into one bell:
+
+  * DND paused        -> muted bell  󰂛  (nf-md-bell_off), neutral (state Idle)
+  * unseen count N>0  -> 󰂚 N          (nf-md-bell), RED (Critical) iff any unseen
+                         entry is urgency CRITICAL, else neutral (Idle)
+  * nothing unseen    -> empty/invisible (hide-at-zero, exactly like the count
+                         blocks + the retired i3status-dnd did at rest)
+
+Data source is 100% LOCAL via `dunstctl` — no poller, no network, instant.
+
+"Unseen" is defined against a marker file (~/.cache/bar-status/notifs-seen)
+holding the highest notification id "seen" at the last notif-center open:
+  * unseen = history entries whose id > marker
+  * marker ABSENT -> ALL history counts as unseen, so notifications already
+    missed (e.g. suppressed during fullscreen) still surface — the whole point.
+
+signal 15 (inherited from the retired i3status-dnd) so the existing
+`$mod+Shift+n` keybind's `pkill -RTMIN+15 i3status-rs` still refreshes it, and
+notif-center can refresh it instantly after marking-all-seen.
+
+Fully FAIL-SAFE: any dunstctl error/timeout -> empty json, exit 0. A broken
+query must NEVER crash or wedge the bar.
+"""
+from __future__ import annotations
+
+import json
+import os
+import subprocess
+import sys
+
+# nf-md glyphs (render in the bar's JetBrainsMono Nerd Font).
+BELL_GLYPH = "\U000f009a"        # nf-md-bell        󰂚
+MUTED_GLYPH = "\U000f009b"       # nf-md-bell_off    󰂛
+_EMPTY = {"text": "", "state": "Idle"}
+
+MARKER = os.path.expanduser("~/.cache/bar-status/notifs-seen")
+
+
+# --------------------------------------------------------------------------- #
+# Pure / mockable logic (unit-tested against fixtures — NO dunstctl)
+# --------------------------------------------------------------------------- #
+def unwrap_entry(entry) -> dict:
+    """Flatten one dunstctl-history entry (each field is a {type,data} wrapper).
+
+    Returns a plain dict with id/summary/body/appname/urgency/timestamp; missing
+    or malformed fields degrade to sensible defaults (never raises).
+    """
+    out = {"id": 0, "summary": "", "body": "", "appname": "",
+           "urgency": "NORMAL", "timestamp": 0}
+    if not isinstance(entry, dict):
+        return out
+    for key in out:
+        wrapper = entry.get(key)
+        if isinstance(wrapper, dict) and "data" in wrapper:
+            out[key] = wrapper["data"]
+    # coerce the numeric fields defensively (dunst gives ints, but be safe)
+    for num in ("id", "timestamp"):
+        try:
+            out[num] = int(out[num])
+        except (TypeError, ValueError):
+            out[num] = 0
+    out["urgency"] = str(out.get("urgency") or "NORMAL")
+    return out
+
+
+def parse_history(raw) -> list:
+    """Parse a `dunstctl history` JSON object into a newest-first list of dicts.
+
+    dunstctl returns {"type":"aa{sv}","data":[[ <entry>, <entry>, ... ]]}, i.e.
+    data[0] is the array of entries and each entry's fields are {type,data}
+    wrappers. Any shape surprise -> [] (fail-safe).
+    """
+    try:
+        rows = raw["data"][0]
+    except (KeyError, IndexError, TypeError):
+        return []
+    if not isinstance(rows, list):
+        return []
+    return [unwrap_entry(e) for e in rows]
+
+
+def unseen_entries(entries, marker) -> list:
+    """History entries considered UNSEEN given the last-seen id marker.
+
+    marker None (absent) -> ALL entries are unseen (surface already-missed ones).
+    Otherwise -> entries whose id is strictly greater than the marker.
+    """
+    if not isinstance(entries, list):
+        return []
+    if marker is None:
+        return list(entries)
+    return [e for e in entries if isinstance(e, dict) and e.get("id", 0) > marker]
+
+
+def has_critical(entries) -> bool:
+    """True iff any entry has urgency CRITICAL (case-insensitive)."""
+    if not isinstance(entries, list):
+        return False
+    return any(isinstance(e, dict)
+               and str(e.get("urgency", "")).upper() == "CRITICAL"
+               for e in entries)
+
+
+def max_id(entries) -> int:
+    """Highest notification id in the list (0 if empty/none)."""
+    if not isinstance(entries, list) or not entries:
+        return 0
+    return max((e.get("id", 0) for e in entries if isinstance(e, dict)), default=0)
+
+
+def render(paused: bool, count: int, critical: bool) -> dict:
+    """Pure: (paused, unseen-count, has-critical) -> i3status-rust block dict.
+
+    Precedence: DND (muted bell) > unseen badge > empty/hidden. The badge is
+    RED only when an unseen entry is CRITICAL; otherwise neutral (Idle) so a
+    routine notification never reads as an alarm.
+    """
+    if paused:
+        return {"text": " %s " % MUTED_GLYPH,
+                "short_text": " %s " % MUTED_GLYPH, "state": "Idle"}
+    if count > 0:
+        state = "Critical" if critical else "Idle"
+        return {"text": " %s %d " % (BELL_GLYPH, count),
+                "short_text": " %s %d " % (BELL_GLYPH, count), "state": state}
+    return dict(_EMPTY)
+
+
+# --------------------------------------------------------------------------- #
+# Side-effecting (dunstctl / marker file — not unit-tested directly)
+# --------------------------------------------------------------------------- #
+def read_marker(path=MARKER):
+    """Highest-seen notification id from the marker file, or None if absent/bad."""
+    try:
+        with open(path) as f:
+            return int(f.read().strip())
+    except Exception:
+        return None
+
+
+def _dunstctl(*args, timeout=2):
+    return subprocess.run(["dunstctl", *args], capture_output=True,
+                          text=True, timeout=timeout)
+
+
+def is_paused() -> bool:
+    """True iff dunst reports paused. Fail-safe: any error -> False."""
+    try:
+        return (_dunstctl("is-paused").stdout or "").strip().lower() == "true"
+    except Exception:
+        return False
+
+
+def history() -> list:
+    """Newest-first unwrapped history via `dunstctl history`. [] on any error."""
+    try:
+        out = _dunstctl("history").stdout
+        return parse_history(json.loads(out))
+    except Exception:
+        return []
+
+
+def main() -> int:
+    entries = history()
+    unseen = unseen_entries(entries, read_marker())
+    block = render(is_paused(), len(unseen), has_critical(unseen))
+    sys.stdout.write(json.dumps(block) + "\n")
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except Exception:   # a bar block must never crash loudly
+        sys.stdout.write(json.dumps(_EMPTY) + "\n")
+        sys.exit(0)

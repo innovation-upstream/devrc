@@ -200,7 +200,7 @@ bindsym $mod+minus move scratchpad
 
 # Notifications (dunst). dunstctl ships with the dunst package on PATH.
 bindsym $mod+n exec --no-startup-id dunstctl history-pop            # recall last dismissed
-bindsym $mod+Shift+n exec --no-startup-id dunstctl set-paused toggle && pkill -RTMIN+15 i3status-rs # manual DND (quiet mode) + refresh the DND bar block
+bindsym $mod+Shift+n exec --no-startup-id dunstctl set-paused toggle && pkill -RTMIN+15 i3status-rs # manual DND (quiet mode) + refresh the notifications bar block
 bindsym $mod+grave exec --no-startup-id dunstctl close-all          # clear the whole stack
 
 # Thin borders
