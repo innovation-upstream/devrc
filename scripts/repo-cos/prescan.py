@@ -29,6 +29,11 @@ from pathlib import Path
 
 # ---- tunables (kept as module constants so tests can reference them) ----------
 MARKER_RE = re.compile(r"\b(TODO|FIXME|HACK|XXX|BUG)\b")
+# Quote chars that, when they immediately flank a marker token on BOTH sides
+# (`'XXX'`, `"XXX"`, `` `XXX` ``), mark it as a data/enum string literal rather than a
+# real comment marker — e.g. a SQL `WHEN 16 THEN RETURN 'XXX';`. See
+# `_has_unquoted_marker` below.
+_MARKER_QUOTE_CHARS = frozenset("'\"`")
 # Skipped/xfail test patterns across the languages in Zach's repos. Kept as literal
 # substrings/regex fragments — intentionally broad-but-cheap (a false positive is a
 # candidate the LLM can drop, not a correctness bug).
@@ -146,6 +151,25 @@ def _reref(c: Candidate, repo: str) -> Candidate:
     return Candidate(repo=repo, kind=c.kind, file=c.file, line=c.line, text=c.text)
 
 
+def _has_unquoted_marker(line: str) -> bool:
+    """True iff `line` has at least one marker token (TODO/FIXME/HACK/XXX/BUG) that is
+    NOT immediately wrapped in matching quotes.
+
+    A marker whose char-before and char-after are the SAME quote char (`'XXX'`, `"XXX"`,
+    `` `XXX` ``) is a data/enum string literal (e.g. a SQL `RETURN 'XXX';`), not a
+    comment marker. We suppress a line only when EVERY marker occurrence on it is
+    quote-wrapped — a single un-wrapped hit (an ordinary `# TODO: fix`, where the char
+    before is a space) keeps the line. Uses `finditer` so a line mixing a quoted literal
+    and a real marker (`RETURN 'XXX';  -- TODO real`) still survives on the real one."""
+    for m in MARKER_RE.finditer(line):
+        before = line[m.start() - 1] if m.start() > 0 else ""
+        after = line[m.end()] if m.end() < len(line) else ""
+        if before in _MARKER_QUOTE_CHARS and before == after:
+            continue  # quote-wrapped → string/enum literal, not a marker
+        return True   # an un-wrapped marker occurrence — this is a real hit
+    return False      # no markers, or all of them quote-wrapped → suppress
+
+
 def _rg_markers(root: Path) -> list[Candidate]:
     globs = []
     for d in PRUNE_DIRS:
@@ -168,6 +192,15 @@ def _rg_markers(root: Path) -> list[Candidate]:
         path, lno, content = parts
         if not lno.isdigit():
             continue
+        # Align with `_walk_markers`: only scan text/code files in SCAN_EXTS. rg walks
+        # EVERY file (it ignores SCAN_EXTS), so without this the two code paths disagree
+        # and results go non-deterministic depending on whether `rg` is installed — e.g.
+        # `.md` docs (RULES.md's "no TODO comments", handoff notes) leak only under rg.
+        if Path(path).suffix not in SCAN_EXTS:
+            continue
+        # Skip marker tokens that are just quoted string/enum literals (`RETURN 'XXX'`).
+        if not _has_unquoted_marker(content):
+            continue
         rel = _rel(root, Path(path))
         res.append(Candidate("", "marker", rel, int(lno), content.strip()[:200]))
     return res
@@ -183,7 +216,9 @@ def _walk_markers(root: Path) -> list[Candidate]:
                 for i, line in enumerate(fh, 1):
                     if len(line) > MAX_LINE_LEN:
                         continue
-                    if MARKER_RE.search(line):
+                    # Real marker only if some occurrence isn't a quoted literal
+                    # (skips SQL enums like `RETURN 'XXX';`). See `_has_unquoted_marker`.
+                    if _has_unquoted_marker(line):
                         res.append(Candidate(
                             "", "marker", _rel(root, p), i, line.strip()[:200]))
         except (OSError, UnicodeError):
