@@ -320,7 +320,15 @@ lib.mkIf isNixOS {
 
   # Nerd font for the bar glyphs (block icons + powerline separators). fontconfig
   # makes the home.packages font discoverable by pango / i3bar.
-  home.packages = [ pkgs.nerd-fonts.jetbrains-mono ];
+  #
+  # deep-search (WORKBENCH ONLY): a tiny PATH wrapper so the media tool is runnable
+  # as a bare `deep-search` from any terminal. It execs the live script symlinked
+  # into scriptsDir below (same file HM manages), pinned to a python3 with the
+  # stdlib it needs (urllib/json/argparse) — no secret enters the nix store.
+  home.packages = [ pkgs.nerd-fonts.jetbrains-mono ]
+    ++ lib.optional (!isLaptop) (pkgs.writeShellScriptBin "deep-search" ''
+      exec ${pkgs.python3}/bin/python3 ${scriptsDir}/deep-search "$@"
+    '');
   fonts.fontconfig.enable = true;
 
   # i3 config — raw string. INERT until the system cutover stops forcing /etc/i3.conf.
@@ -410,6 +418,15 @@ lib.mkIf isNixOS {
   # ~/.config/bar/media.env (0600); no secret in the store.
   home.file.".config/i3status-rust/scripts/media-menu" = lib.mkIf (!isLaptop) {
     source = ../scripts/media-menu;
+    executable = true;
+  };
+  # deep-search: terminal tool to search ALL Prowlarr indexers for a release and grab
+  # a chosen one straight into qBittorrent. Sibling of media-detail/media-menu; reads
+  # the same media.env creds (PROWLARR_URL/PROWLARR_KEY) by explicit path.
+  # Workbench-only. Invoked as a bare `deep-search` via the writeShellScriptBin PATH
+  # wrapper in home.packages.
+  home.file.".config/i3status-rust/scripts/deep-search" = lib.mkIf (!isLaptop) {
+    source = ../scripts/deep-search;
     executable = true;
   };
 

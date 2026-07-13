@@ -1,0 +1,505 @@
+#!/usr/bin/env python3
+"""deep-search — search all Prowlarr indexers and grab a release into qBittorrent.
+
+WHY THIS EXISTS
+    A quick terminal helper for a Prowlarr + qBittorrent setup. A targeted free-text
+    query in Prowlarr returns clean, well-seeded, correctly-named results across
+    every configured indexer at once, and the chosen release is handed straight to
+    qBittorrent — no per-indexer clicking, no separate download-client step. The
+    download lands in qBittorrent's configured save path, where whatever media
+    scanner already watches that library picks it up on its next scan.
+
+WHAT IT DOES
+    deep-search "Big Buck Bunny 1080p" [--auto] [--pick] [--dry-run] [--json]
+                [--limit N] [--min-seeders N] [--all]
+    1. Search ALL Prowlarr indexers for the free-text query.
+    2. Process the results (all PURE, unit-tested): parse quality, score relevance,
+       drop cross-indexer dupes (keep best-seeded), rank (relevance -> quality
+       preference -> seeders), and filter noise + low-seeders.
+    3. Present a ranked numbered list; pick interactively (fzf if present, else a
+       plain prompt) and CONFIRM, or grab rank #1 unattended with --auto.
+    4. Grab = push the chosen release to Prowlarr's configured qBittorrent client
+       (POST /api/v1/search {guid, indexerId}). Prowlarr fetches the .torrent
+       (tracker auth + FlareSolverr) and hands it to qBittorrent.
+
+DESIGN (mirrors scripts/media-detail + scripts/media-menu)
+    * Credentials come from ~/.config/bar/media.env (0600, NOT in git/nix-store),
+      read by explicit path (MEDIA_ENV overrides — used by the tests). Keys used:
+      PROWLARR_URL, PROWLARR_KEY. NEVER hardcode a secret here.
+    * All the decision logic (quality/relevance/dedupe/rank/filter/size/payload/
+      selection) is pure + mockable and unit-tested in tests/test_deep_search.py.
+    * The network is a single seam (`search(..., fetch=...)`, `grab(..., post=...)`),
+      so --dry-run / --json / --search-fixture and the tests run with canned JSON
+      and NO live network. Every live call is short-timeout + best-effort.
+    * The GRAB is the ONLY side-effecting op; it is gated behind an explicit confirm
+      (or --auto). Everything else is read-only.
+
+    Prowlarr grab endpoint (verified live against Prowlarr 2.4.0.5397, 2026-07):
+      POST {PROWLARR_URL}/api/v1/search  header X-Api-Key
+      body {"guid": "<result.guid>", "indexerId": <result.indexerId>}
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import urllib.error
+import urllib.parse
+import urllib.request
+
+TIMEOUT = 30            # indexers behind FlareSolverr can be slow; search is patient
+GRAB_TIMEOUT = 60       # the grab makes Prowlarr fetch the .torrent (+ FlareSolverr)
+DEFAULT_LIMIT = 100
+DEFAULT_MIN_SEEDERS = 1
+
+# Quality preference for ranking (LOWER = better): prefer 1080p, then 720p, then
+# 480p/sd; DEPRIORITIZE 2160p/4K (rank below the SD tiers) but never drop it;
+# unknown quality ranks last.
+QUALITY_PREF = {"1080p": 0, "720p": 1, "480p": 2, "sd": 3, "2160p": 4, None: 5}
+
+
+# --------------------------------------------------------------------------- #
+# Credentials (explicit path — identical idiom to media-detail / media-menu)
+# --------------------------------------------------------------------------- #
+def creds() -> dict:
+    env = {}
+    path = os.environ.get("MEDIA_ENV") or os.path.expanduser("~/.config/bar/media.env")
+    try:
+        with open(path) as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                k, v = line.split("=", 1)
+                env[k.strip()] = v.strip()
+    except Exception:
+        pass
+    return env
+
+
+# --------------------------------------------------------------------------- #
+# Pure / mockable logic (unit-tested against fixtures — NO network)
+# --------------------------------------------------------------------------- #
+def _tokens(s) -> list:
+    """Lowercased alphanumeric tokens of length >= 2 (drops 1-char noise)."""
+    if not s:
+        return []
+    return [t for t in re.findall(r"[a-z0-9]+", str(s).lower()) if len(t) >= 2]
+
+
+def parse_quality(title) -> str | None:
+    """Video quality tier parsed from a release title.
+
+    Returns one of '2160p'/'1080p'/'720p'/'480p'/'sd' or None (unknown). 4K/UHD map
+    to '2160p'; a standalone 'SD' maps to 'sd'.
+    """
+    t = " " + str(title or "").lower() + " "
+    if re.search(r"2160p|\b4k\b|\buhd\b", t):
+        return "2160p"
+    if "1080p" in t:
+        return "1080p"
+    if "720p" in t:
+        return "720p"
+    if "480p" in t:
+        return "480p"
+    if re.search(r"\bsd\b", t):
+        return "sd"
+    return None
+
+
+def relevance(query, title) -> int:
+    """How many DISTINCT query tokens appear as whole tokens in the title."""
+    q = set(_tokens(query))
+    if not q:
+        return 0
+    t = set(_tokens(title))
+    return sum(1 for tok in q if tok in t)
+
+
+def is_relevant(query, title) -> bool:
+    """True if the title carries the query's key terms.
+
+    Requires a MAJORITY (ceil(n/2)) of the query's distinct tokens to appear. This
+    is what cuts indexer noise: some indexers dump unrelated releases for a specific
+    query, and those share none (or too few) of the query's tokens. `--all` bypasses
+    this filter.
+    """
+    q = list(dict.fromkeys(_tokens(query)))
+    if not q:
+        return True
+    need = (len(q) + 1) // 2          # ceil(n/2)
+    return relevance(query, title) >= need
+
+
+def _norm_title(title) -> str:
+    """Normalized title for cross-indexer dedupe.
+
+    Lowercase, strip bracketed site/release tags ([PI], [x264], ...), then collapse
+    to space-separated alphanumeric tokens. This collapses the same release seen on
+    multiple indexers (e.g. '...x264-GROUP [PI]' on TrackerA vs '...x264-GROUP' on
+    TrackerB) while keeping genuinely different releases (720p vs 1080p, or a
+    different title) distinct.
+    """
+    t = str(title or "").lower()
+    t = re.sub(r"\[[^\]]*\]", " ", t)       # drop [tag] groups
+    t = re.sub(r"[^a-z0-9]+", " ", t)
+    return " ".join(t.split())
+
+
+def _seeders(r) -> int:
+    try:
+        return int(r.get("seeders") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def dedupe(results) -> list:
+    """Collapse the same release seen across multiple indexers, keeping the copy
+    with the most seeders. Order of first appearance is preserved."""
+    best = {}
+    order = []
+    for r in results:
+        if not isinstance(r, dict):
+            continue
+        key = _norm_title(r.get("title"))
+        if not key:
+            key = str(r.get("guid") or id(r))
+        if key not in best:
+            best[key] = r
+            order.append(key)
+        elif _seeders(r) > _seeders(best[key]):
+            best[key] = r
+    return [best[k] for k in order]
+
+
+def rank(results, query) -> list:
+    """Order results by (relevance desc, quality preference, seeders desc)."""
+    def key(r):
+        title = r.get("title") if isinstance(r, dict) else ""
+        return (
+            -relevance(query, title),
+            QUALITY_PREF.get(parse_quality(title), QUALITY_PREF[None]),
+            -_seeders(r),
+        )
+    return sorted([r for r in results if isinstance(r, dict)], key=key)
+
+
+def filter_results(results, query, *, min_seeders=DEFAULT_MIN_SEEDERS,
+                   relevant_only=True) -> list:
+    """Drop below-min-seeders and (unless relevant_only=False) irrelevant noise."""
+    out = []
+    for r in results:
+        if not isinstance(r, dict):
+            continue
+        if _seeders(r) < min_seeders:
+            continue
+        if relevant_only and not is_relevant(query, r.get("title")):
+            continue
+        out.append(r)
+    return out
+
+
+def process(results, query, *, min_seeders=DEFAULT_MIN_SEEDERS,
+            relevant_only=True) -> list:
+    """Full PURE pipeline: filter -> dedupe -> rank. Returns ranked raw results."""
+    kept = filter_results(results, query, min_seeders=min_seeders,
+                          relevant_only=relevant_only)
+    return rank(dedupe(kept), query)
+
+
+def human_size(n) -> str:
+    """Human byte size: '536.0M', '3.2G', '304967840'->'290.8M', '0'->'0B'."""
+    try:
+        n = float(n)
+    except (TypeError, ValueError):
+        return "?"
+    if n < 0:
+        return "?"
+    for unit, div in (("T", 1024 ** 4), ("G", 1024 ** 3),
+                      ("M", 1024 ** 2), ("K", 1024)):
+        if n >= div:
+            return "%.1f%s" % (n / div, unit)
+    return "%dB" % int(n)
+
+
+def grab_payload(result) -> dict:
+    """The exact Prowlarr grab body for a release: {"guid", "indexerId"}."""
+    return {"guid": result.get("guid"), "indexerId": result.get("indexerId")}
+
+
+def parse_selection(user_input, n):
+    """1-based selection string -> 0-based index, or None for garbage/out-of-range."""
+    try:
+        i = int(str(user_input).strip())
+    except (TypeError, ValueError):
+        return None
+    if 1 <= i <= n:
+        return i - 1
+    return None
+
+
+def project(result) -> dict:
+    """A cleaned, quality/relevance-annotated view of a raw result (for --json)."""
+    title = result.get("title")
+    return {
+        "title": title,
+        "seeders": _seeders(result),
+        "quality": parse_quality(title),
+        "size": result.get("size"),
+        "size_h": human_size(result.get("size")),
+        "indexer": result.get("indexer"),
+        "indexerId": result.get("indexerId"),
+        "protocol": result.get("protocol"),
+        "guid": result.get("guid"),
+    }
+
+
+def format_row(i, result) -> str:
+    """One ranked line: '#  S=<seeders>  <quality>  <size>  [<indexer>]  <title>'."""
+    q = parse_quality(result.get("title")) or "?"
+    return "%3d  S=%-4d %-6s %8s  [%s]  %s" % (
+        i,
+        _seeders(result),
+        q,
+        human_size(result.get("size")),
+        result.get("indexer") or "?",
+        result.get("title") or "?",
+    )
+
+
+def format_list(results) -> str:
+    """The full ranked, numbered (1-based) list as a printable string."""
+    return "\n".join(format_row(i + 1, r) for i, r in enumerate(results))
+
+
+# --------------------------------------------------------------------------- #
+# Network seam (best-effort; short timeout; injectable for tests / offline)
+# --------------------------------------------------------------------------- #
+def _http_get_json(url, headers=None, timeout=TIMEOUT):
+    req = urllib.request.Request(url, headers=headers or {})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return json.loads(resp.read().decode())
+
+
+def _http_post(url, headers=None, data=None, timeout=GRAB_TIMEOUT):
+    req = urllib.request.Request(url, data=data, headers=headers or {}, method="POST")
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return resp.status, resp.read()
+
+
+def search(query, c, *, limit=DEFAULT_LIMIT, fetch=_http_get_json) -> list:
+    """Search every Prowlarr indexer for QUERY. `fetch` is the injectable seam.
+
+    GET {PROWLARR_URL}/api/v1/search?type=search&limit=N&query=<urlencoded>
+    header X-Api-Key: {PROWLARR_KEY}. Returns the raw list of release dicts.
+    """
+    url = c.get("PROWLARR_URL", "http://prowlarr.workbench.lan").rstrip("/")
+    key = c.get("PROWLARR_KEY", "")
+    q = urllib.parse.quote(query)
+    full = "%s/api/v1/search?type=search&limit=%d&query=%s" % (url, int(limit), q)
+    data = fetch(full, headers={"X-Api-Key": key})
+    return data if isinstance(data, list) else []
+
+
+def grab(result, c, *, post=_http_post) -> tuple:
+    """Push a chosen release to Prowlarr's configured qBittorrent client.
+
+    POST {PROWLARR_URL}/api/v1/search  {"guid", "indexerId"} + X-Api-Key.
+    Returns (ok: bool, detail: str). `post` is the injectable seam.
+    """
+    url = c.get("PROWLARR_URL", "http://prowlarr.workbench.lan").rstrip("/")
+    key = c.get("PROWLARR_KEY", "")
+    body = json.dumps(grab_payload(result)).encode()
+    headers = {"Content-Type": "application/json", "X-Api-Key": key}
+    try:
+        status, _ = post(url + "/api/v1/search", headers=headers, data=body)
+    except urllib.error.HTTPError as e:
+        return False, "HTTP %s: %s" % (e.code, (e.read() or b"").decode()[:200])
+    except Exception as e:
+        return False, "%s: %s" % (type(e).__name__, str(e)[:200])
+    if 200 <= int(status) < 300:
+        return True, "HTTP %s" % status
+    return False, "HTTP %s" % status
+
+
+# --------------------------------------------------------------------------- #
+# Selection UI (side-effecting; not unit-tested)
+# --------------------------------------------------------------------------- #
+def _select_fzf(results):
+    """Pick a result via fzf (one row per result); returns index or None."""
+    lines = [format_row(i + 1, r) for i, r in enumerate(results)]
+    try:
+        r = subprocess.run(
+            ["fzf", "--prompt", "deep-search> ", "--with-nth", "1..",
+             "--header", "Pick a release to grab (Esc to cancel)"],
+            input="\n".join(lines), text=True, stdout=subprocess.PIPE)
+    except Exception:
+        return None
+    if r.returncode != 0:
+        return None
+    sel = r.stdout.strip()
+    if not sel:
+        return None
+    m = re.match(r"\s*(\d+)", sel)
+    return parse_selection(m.group(1), len(results)) if m else None
+
+
+def _select_prompt(results):
+    """Plain numbered prompt fallback; returns index or None."""
+    try:
+        raw = input("Pick # to grab (Enter to cancel): ")
+    except (EOFError, KeyboardInterrupt):
+        return None
+    return parse_selection(raw, len(results))
+
+
+def select(results):
+    """Interactive pick — fzf if on PATH, else a numbered prompt."""
+    if shutil.which("fzf"):
+        return _select_fzf(results)
+    return _select_prompt(results)
+
+
+def confirm(prompt) -> bool:
+    """Explicit y/N confirm; True only on 'y'/'yes'."""
+    try:
+        raw = input("%s [y/N]: " % prompt).strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        return False
+    return raw in ("y", "yes")
+
+
+# --------------------------------------------------------------------------- #
+# Grab + report
+# --------------------------------------------------------------------------- #
+LANDING_NOTE = (
+    "  The release is now downloading in qBittorrent's configured save path.\n"
+    "  Whatever media scanner watches that library will pick it up on its next scan."
+)
+
+
+def do_grab(result, c) -> int:
+    """Grab `result` and print an honest result. Returns a process exit code."""
+    print("\nGrabbing:")
+    print("  " + format_row(1, result).strip())
+    ok, detail = grab(result, c)
+    if ok:
+        print("\n✓ Pushed to qBittorrent via Prowlarr (%s)." % detail)
+        print(LANDING_NOTE)
+        return 0
+    print("\n✗ Grab failed: %s" % detail, file=sys.stderr)
+    return 1
+
+
+# --------------------------------------------------------------------------- #
+# CLI
+# --------------------------------------------------------------------------- #
+def _load_fixture(path):
+    with open(path) as f:
+        data = json.load(f)
+    return data if isinstance(data, list) else []
+
+
+def run(args) -> int:
+    c = creds()
+
+    # Search (live, or from a canned fixture for offline runs/tests).
+    if args.search_fixture:
+        raw = _load_fixture(args.search_fixture)
+    else:
+        if not c.get("PROWLARR_URL") and "PROWLARR_URL" not in os.environ:
+            print("deep-search: no PROWLARR_URL in media.env "
+                  "(set MEDIA_ENV or ~/.config/bar/media.env)", file=sys.stderr)
+            return 2
+        try:
+            raw = search(args.query, c, limit=args.limit)
+        except Exception as e:
+            print("deep-search: search failed: %s: %s"
+                  % (type(e).__name__, str(e)[:200]), file=sys.stderr)
+            return 1
+
+    ranked = process(raw, args.query, min_seeders=args.min_seeders,
+                     relevant_only=not args.all)
+
+    if args.json:
+        print(json.dumps([project(r) for r in ranked], ensure_ascii=False, indent=2))
+        return 0
+
+    if not ranked:
+        print("No matching releases (searched %d raw result(s); try --all or "
+              "--min-seeders 0)." % len(raw))
+        return 0
+
+    print("Ranked results for %r  (%d after filter/dedupe of %d raw):\n"
+          % (args.query, len(ranked), len(raw)))
+    print(format_list(ranked))
+
+    if args.dry_run:
+        print("\n(dry-run — nothing grabbed)")
+        return 0
+
+    # Choose the release to grab.
+    if args.auto:
+        chosen = ranked[0]
+        print("\n--auto: grabbing rank #1.")
+        return do_grab(chosen, c)
+
+    idx = select(ranked)
+    if idx is None:
+        print("Cancelled — nothing grabbed.")
+        return 0
+    chosen = ranked[idx]
+    if not confirm("Grab #%d: %s" % (idx + 1, chosen.get("title"))):
+        print("Cancelled — nothing grabbed.")
+        return 0
+    return do_grab(chosen, c)
+
+
+def build_parser():
+    ap = argparse.ArgumentParser(
+        prog="deep-search",
+        description="Search all Prowlarr indexers for a release and grab a chosen "
+                    "one straight into qBittorrent.")
+    ap.add_argument("query", nargs="?", default=None,
+                    help="free-text query, e.g. 'Big Buck Bunny 1080p'")
+    ap.add_argument("--auto", action="store_true",
+                    help="grab the top-ranked result with no prompt")
+    ap.add_argument("--pick", action="store_true",
+                    help="force the interactive pick (default when neither --auto "
+                         "nor --dry-run/--json)")
+    ap.add_argument("--dry-run", action="store_true",
+                    help="print the ranked list and exit — no grab, no network write")
+    ap.add_argument("--json", action="store_true",
+                    help="print processed results as JSON; no grab, no prompt")
+    ap.add_argument("--limit", type=int, default=DEFAULT_LIMIT,
+                    help="max raw results to request from Prowlarr (default %d)"
+                         % DEFAULT_LIMIT)
+    ap.add_argument("--min-seeders", type=int, default=DEFAULT_MIN_SEEDERS,
+                    help="drop results below this many seeders (default %d)"
+                         % DEFAULT_MIN_SEEDERS)
+    ap.add_argument("--all", action="store_true",
+                    help="disable the relevance filter (keep every result)")
+    ap.add_argument("--search-fixture", metavar="FILE",
+                    help="read Prowlarr search JSON from FILE instead of the network "
+                         "(offline; for scripting/tests)")
+    return ap
+
+
+def main(argv=None) -> int:
+    args = build_parser().parse_args(argv)
+    if not args.query and not args.search_fixture:
+        build_parser().error("a QUERY is required (or --search-fixture FILE)")
+    if args.query is None:
+        args.query = ""
+    return run(args)
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:
+        sys.exit(130)
