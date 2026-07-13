@@ -2,18 +2,19 @@
 """Interactive rofi action menu for the i3status-rust `media` block (right-click).
 
 Left-click on the pill still opens the qBit WebUI; RIGHT-click now opens THIS
-rofi menu — an actions launcher for the *arr media stack (qBittorrent behind the
-gluetun AirVPN sidecar + Whisparr / Stash / Prowlarr on the workbench cluster).
+rofi menu — an actions launcher for the media stack (qBittorrent behind the
+gluetun AirVPN sidecar + the downloader / indexer / library services on the
+workbench cluster).
 
 The rofi `-mesg` header shows a LIVE status line fetched with a short timeout
 (`🟢 AirVPN CA ↓.. ↑.. · N active`); a down/unreachable cluster degrades to an
 error line in the header instead of hanging. Menu:
-  * Open qBittorrent / Whisparr / Stash / Prowlarr -> xdg-open the *.workbench.lan URLs
+  * Open qBittorrent / Downloader / Library / Indexer -> xdg-open the *.workbench.lan URLs
   * ⏸ Pause all / ▶ Resume all torrents          -> instant, reversible (no confirm)
-  * 🚀 Force-start Whisparr grabs                  -> setForceStart the `whisparr`-category hashes
+  * 🚀 Force-start grabs                           -> setForceStart the downloader-category hashes
   * 🔁 Reconnect / verify VPN                      -> re-check tunnel; offer a confirm-gated
                                                        `kubectl rollout restart deploy/qbittorrent`
-  * 🔍 Whisparr: search all missing               -> POST /command MissingMoviesSearch (confirm-gated)
+  * 🔍 Search all missing                          -> POST /command MissingMoviesSearch (confirm-gated)
   * 📊 Full status -> TUI                          -> float terminal running `media-detail --watch`
 
 Design mirrors scripts/bar-status-poll + scripts/media-detail:
@@ -22,7 +23,7 @@ Design mirrors scripts/bar-status-poll + scripts/media-detail:
   * qBit auth reuses the login flow (qBit 5.x sets a QBT_SID_<port> cookie, not the
     legacy SID=; capture the whole first cookie pair and send it straight back).
   * Every network call is short-timeout + best-effort; nothing hangs the menu.
-  * The pure/mockable logic (header formatter, whisparr-hash filter, qBit action
+  * The pure/mockable logic (header formatter, grab-hash filter, qBit action
     URL/param construction) is factored out and unit-tested in
     scripts/tests/test_media_menu.py. `--dry-run ACTION` / `--dump-menu` exercise
     an action / the menu without touching the network or rofi.
@@ -48,18 +49,18 @@ ROFI_THEME = "gruvbox-dark-hard"   # matches the $mod+d launcher in nix/i3/confi
 # Menu: (label shown in rofi, action id). Order = top->bottom.
 MENU = [
     ("Open qBittorrent", "open-qbit"),
-    ("Open Whisparr", "open-whisparr"),
-    ("Open Stash", "open-stash"),
-    ("Open Prowlarr", "open-prowlarr"),
+    ("Open Downloader", "open-downloader"),
+    ("Open Library", "open-library"),
+    ("Open Indexer", "open-indexer"),
     ("⏸  Pause all torrents", "pause"),
     ("▶  Resume all torrents", "resume"),
-    ("🚀 Force-start Whisparr grabs", "forcestart"),
+    ("🚀 Force-start grabs", "forcestart"),
     ("🔁 Reconnect / verify VPN", "vpn"),
-    ("🔍 Whisparr: search all missing", "whisparr-search"),
+    ("🔍 Search all missing", "search-all"),
     ("📊 Full status → TUI", "status"),
 ]
 # Actions that need a yes/no confirm (destructive / mass-grab).
-CONFIRM = {"vpn-restart", "whisparr-search"}
+CONFIRM = {"vpn-restart", "search-all"}
 
 
 # --------------------------------------------------------------------------- #
@@ -143,8 +144,8 @@ def active_count(torrents) -> int:
                and t.get("state") in ACTIVE_STATES)
 
 
-def whisparr_hashes(torrents, category="whisparr") -> list:
-    """Hashes of torrents in the given qBit category (default 'whisparr')."""
+def grab_hashes(torrents, category="whisparr") -> list:
+    """Hashes of torrents in the given qBit category (default download category)."""
     if not isinstance(torrents, list):
         return []
     return [t["hash"] for t in torrents
@@ -170,8 +171,8 @@ def qbit_action_request(action, hashes="all"):
     raise ValueError("unknown qbit action: %s" % action)
 
 
-def whisparr_command_request(name="MissingMoviesSearch"):
-    """(path, json-body) for a Whisparr v3 command (Radarr-style API)."""
+def downloader_command_request(name="MissingMoviesSearch"):
+    """(path, json-body) for a v3 downloader command (Radarr-style API)."""
     return "/api/v3/command", {"name": name}
 
 
@@ -316,17 +317,17 @@ def do_pause_resume(qb, action):
 
 
 def do_forcestart(qb):
-    """Force-start the whisparr-category grabs (setForceStart value=true)."""
+    """Force-start the download-category grabs (setForceStart value=true)."""
     if not qb.ok:
         notify("qBit unreachable", "Could not reach qBittorrent.")
         return
     try:
-        hashes = whisparr_hashes(qb.torrents_info())
+        hashes = grab_hashes(qb.torrents_info())
     except Exception as e:
         notify("Force-start failed", str(e)[:120])
         return
     if not hashes:
-        notify("Force-start Whisparr", "No whisparr-category grabs to force.")
+        notify("Force-start grabs", "No grabs to force.")
         return
     try:
         code = qb.action("forcestart", hashes=hashes)
@@ -334,7 +335,7 @@ def do_forcestart(qb):
         notify("Force-start failed", str(e)[:120])
         return
     if code == 200:
-        notify("Force-started Whisparr grabs", "%d torrent(s)" % len(hashes))
+        notify("Force-started grabs", "%d torrent(s)" % len(hashes))
     else:
         notify("Force-start -> HTTP %s" % code, "unexpected response")
 
@@ -383,20 +384,20 @@ def restart_qbit():
         notify("Restart failed", str(e)[:160])
 
 
-def do_whisparr_search(c):
+def do_search_all(c):
     """POST /api/v3/command {name: MissingMoviesSearch} (confirm-gated by caller)."""
     url = _url(c, "WHISPARR_URL", "http://whisparr.workbench.lan")
     key = c.get("WHISPARR_KEY", "")
-    path, body = whisparr_command_request("MissingMoviesSearch")
+    path, body = downloader_command_request("MissingMoviesSearch")
     data = json.dumps(body).encode()
     hdr = {"Content-Type": "application/json"}
     if key:
         hdr["X-Api-Key"] = key
     try:
         status, _ = _http(url + path, headers=hdr, data=data, timeout=8)
-        notify("Whisparr: search all missing", "command queued (HTTP %s)" % status)
+        notify("Search all missing", "command queued (HTTP %s)" % status)
     except Exception as e:
-        notify("Whisparr search failed", str(e)[:140])
+        notify("Search failed", str(e)[:140])
 
 
 def do_status_tui():
@@ -432,11 +433,11 @@ def build_header(qb):
 def dispatch(action, c, qb):
     if action == "open-qbit":
         xdg_open(_url(c, "QBIT_URL", "http://qbittorrent.workbench.lan"))
-    elif action == "open-whisparr":
+    elif action == "open-downloader":
         xdg_open(_url(c, "WHISPARR_URL", "http://whisparr.workbench.lan"))
-    elif action == "open-stash":
+    elif action == "open-library":
         xdg_open(_url(c, "STASH_URL", "http://stash.workbench.lan"))
-    elif action == "open-prowlarr":
+    elif action == "open-indexer":
         xdg_open(_url(c, "PROWLARR_URL", "http://prowlarr.workbench.lan"))
     elif action in ("pause", "resume"):
         do_pause_resume(qb, action)
@@ -444,9 +445,9 @@ def dispatch(action, c, qb):
         do_forcestart(qb)
     elif action == "vpn":
         do_vpn(qb)
-    elif action == "whisparr-search":
-        if rofi_confirm("Search ALL missing in Whisparr (mass grab)?"):
-            do_whisparr_search(c)
+    elif action == "search-all":
+        if rofi_confirm("Search ALL missing (mass grab)?"):
+            do_search_all(c)
     elif action == "status":
         do_status_tui()
 
@@ -475,16 +476,16 @@ def dry_run(action) -> str:
         path, params = qbit_action_request(action, hashes="all")
         return "DRY-RUN %s: POST %s %s" % (
             action, path, urllib.parse.urlencode(params))
-    if action == "whisparr-search":
-        path, body = whisparr_command_request("MissingMoviesSearch")
-        return "DRY-RUN whisparr-search: POST %s %s" % (path, json.dumps(body))
+    if action == "search-all":
+        path, body = downloader_command_request("MissingMoviesSearch")
+        return "DRY-RUN search-all: POST %s %s" % (path, json.dumps(body))
     raise ValueError("no dry-run for action: %s" % action)
 
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="rofi action menu for the media block")
     ap.add_argument("--dry-run", metavar="ACTION",
-                    choices=["pause", "resume", "forcestart", "whisparr-search"],
+                    choices=["pause", "resume", "forcestart", "search-all"],
                     help="print the constructed request for ACTION; no network, no rofi")
     ap.add_argument("--dump-menu", action="store_true",
                     help="print the menu entries (label\\taction) and exit")

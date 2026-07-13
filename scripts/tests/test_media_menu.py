@@ -3,9 +3,9 @@
 All OFFLINE: rofi/network/cluster are never touched. rofi UI itself isn't
 unit-testable, so the LOGIC is factored into pure functions and tested here:
   - the live-status header formatter (connected / firewalled / unreachable),
-  - the whisparr-category hash filter + active-torrent counter,
+  - the download-category hash filter + active-torrent counter,
   - qBit action URL/param construction (incl. the 5.x pause->stop / resume->start
-    rename) and the Whisparr command request,
+    rename) and the downloader command request,
 and the `--dry-run ACTION` / `--dump-menu` CLI paths are exercised via subprocess
 (no network). Mirrors scripts/tests/test_bar_status.py.
 
@@ -73,22 +73,22 @@ def test_header_non_dict_payload_never_raises():
 
 
 # --------------------------------------------------------------------------- #
-# whisparr filter + active counter
+# grab-category filter + active counter
 # --------------------------------------------------------------------------- #
-def test_whisparr_hashes_filters_by_category():
+def test_grab_hashes_filters_by_category():
     torrents = [
         {"hash": "aaa", "category": "whisparr"},
-        {"hash": "bbb", "category": "prowlarr"},
+        {"hash": "bbb", "category": "other"},
         {"hash": "ccc", "category": "whisparr"},
         {"category": "whisparr"},              # no hash -> skipped
         "junk",                                # non-dict -> skipped
     ]
-    assert mm.whisparr_hashes(torrents) == ["aaa", "ccc"]
+    assert mm.grab_hashes(torrents) == ["aaa", "ccc"]
 
 
-def test_whisparr_hashes_empty_on_bad_input():
-    assert mm.whisparr_hashes(None) == []
-    assert mm.whisparr_hashes("x") == []
+def test_grab_hashes_empty_on_bad_input():
+    assert mm.grab_hashes(None) == []
+    assert mm.grab_hashes("x") == []
 
 
 def test_active_count_counts_only_transferring_states():
@@ -103,7 +103,7 @@ def test_active_count_counts_only_transferring_states():
 
 
 # --------------------------------------------------------------------------- #
-# qBit action / whisparr command construction (5.x rename)
+# qBit action / downloader command construction (5.x rename)
 # --------------------------------------------------------------------------- #
 def test_pause_maps_to_stop_endpoint():
     path, params = mm.qbit_action_request("pause")
@@ -133,8 +133,8 @@ def test_join_hashes():
     assert mm.join_hashes(["a", "b", "c"]) == "a|b|c"
 
 
-def test_whisparr_command_request():
-    path, body = mm.whisparr_command_request()
+def test_downloader_command_request():
+    path, body = mm.downloader_command_request()
     assert path == "/api/v3/command"
     assert body == {"name": "MissingMoviesSearch"}
 
@@ -142,7 +142,7 @@ def test_whisparr_command_request():
 def test_confirm_gated_actions_are_the_risky_two():
     # restart + mass-grab must be behind a confirm; instant/reversible ones must not.
     assert "vpn-restart" in mm.CONFIRM
-    assert "whisparr-search" in mm.CONFIRM
+    assert "search-all" in mm.CONFIRM
     assert "pause" not in mm.CONFIRM and "resume" not in mm.CONFIRM
 
 
@@ -160,7 +160,7 @@ def test_dump_menu_lists_all_entries():
     assert r.returncode == 0
     assert "open-qbit" in r.stdout
     assert "Pause all torrents\tpause" in r.stdout
-    assert "whisparr-search" in r.stdout
+    assert "search-all" in r.stdout
     assert len(r.stdout.strip().splitlines()) == len(mm.MENU)
 
 
@@ -176,7 +176,7 @@ def test_dry_run_resume_hits_start_endpoint():
     assert "POST /api/v2/torrents/start" in r.stdout
 
 
-def test_dry_run_whisparr_search():
-    r = _run("--dry-run", "whisparr-search")
+def test_dry_run_search_all():
+    r = _run("--dry-run", "search-all")
     assert "/api/v3/command" in r.stdout
     assert "MissingMoviesSearch" in r.stdout
