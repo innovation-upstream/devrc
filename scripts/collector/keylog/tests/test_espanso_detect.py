@@ -238,6 +238,100 @@ def test_search_short_unattributed_term_emits_trigger_none():
     assert evs[0].search_term == "zzzzz"
 
 
+# -- FIX 3: espanso search window steals X focus -----------------------------
+# espanso's Ctrl+Space search bar opens as its OWN window (WM_CLASS
+# .espanso-wrapped) and STEALS X focus. The FIRST query char therefore arrives
+# under app=".espanso-wrapped", a focus change from the original window. That
+# must NOT close search-mode with an empty term (the live bug: the search path
+# produced ZERO events because search died before the query was typed).
+ESPANSO_WIN = ".espanso-wrapped"
+
+
+def test_focus_steal_by_espanso_window_keeps_search_and_attributes():
+    # Ctrl+Space recorded under Alacritty; espanso's window then steals focus and
+    # the query "leverage" is typed INTO .espanso-wrapped; Enter closes it.
+    d = _det()
+    d.feed_search_open(app="Alacritty", session="win-term", now=0.0)
+    # Query chars arrive under the STOLEN focus (espanso's own window).
+    evs = _type(d, "leverage", app=ESPANSO_WIN, session="win-esp", now=1.0)
+    assert evs == []  # accumulates, nothing emitted mid-term
+    out = list(d.feed_char("\n", app=ESPANSO_WIN, session="win-esp", now=9.0))
+    assert len(out) == 1
+    ev = out[0]
+    assert ev.method == "search"
+    assert ev.inferred is True
+    assert ev.search_term == "leverage"
+    assert ev.trigger == ":rnx"  # "leverage" uniquely maps to :rnx
+    # Attributed to the ORIGIN window (where Ctrl+Space was pressed), NOT the
+    # ".espanso-wrapped" window that stole focus mid-search.
+    assert ev.app == "Alacritty"
+    assert ev.session == "win-term"
+
+
+def test_focus_steal_ambiguous_term_still_emits_trigger_none():
+    # Same focus-steal path, but an ambiguous term ("date" ⊂ :date and :datetime)
+    # → trigger=None yet the event is still emitted (real search, unattributed).
+    d = _det()
+    d.feed_search_open(app="Alacritty", session="win-term", now=0.0)
+    _type(d, "date", app=ESPANSO_WIN, session="win-esp", now=1.0)
+    out = list(d.feed_char("\n", app=ESPANSO_WIN, session="win-esp", now=6.0))
+    assert len(out) == 1
+    assert out[0].trigger is None
+    assert out[0].search_term == "date"
+    assert out[0].method == "search"
+    assert out[0].app == "Alacritty"  # origin window preserved
+
+
+def test_focus_steal_multichar_window_hop_accumulates_full_term():
+    # Every char of the term lands under the espanso window (no per-char focus
+    # thrash re-closing search); the FULL term survives to attribution.
+    d = _det()
+    d.feed_search_open(app="Alacritty", session="win-term", now=0.0)
+    for i, ch in enumerate("clarify"):
+        assert d.feed_char(ch, app=ESPANSO_WIN, session="win-esp", now=1 + i) == []
+    out = list(d.feed_char("\n", app=ESPANSO_WIN, session="win-esp", now=20.0))
+    assert len(out) == 1
+    assert out[0].search_term == "clarify"
+    assert out[0].app == "Alacritty"  # origin window preserved
+
+
+def test_focus_change_to_nonespanso_window_still_closes_search():
+    # A focus change to a genuinely DIFFERENT non-espanso window (e.g. the
+    # browser) is a real abandon: search closes under the OLD context and does
+    # NOT keep accumulating into the new window.
+    d = _det()
+    d.feed_search_open(app="Alacritty", session="win-term", now=0.0)
+    _type(d, "today", app="Alacritty", session="win-term", now=1.0)
+    # Focus jumps to Brave before Enter → close under the old context.
+    out = list(d.feed_char("x", app="Brave-browser", session="win-brave", now=10.0))
+    assert len(out) == 1
+    assert out[0].method == "search"
+    assert out[0].search_term == "today"  # the "x" did NOT get appended
+    assert out[0].app == "Alacritty"      # closed under the window search began in
+    # Search-mode is off; the stray "x" and a following Enter emit nothing more.
+    assert list(d.feed_char("\n", app="Brave-browser", session="win-brave", now=11.0)) == []
+
+
+def test_espanso_focus_steal_does_not_break_direct_fires():
+    # Regression: after a focus-steal search completes, direct triggers under a
+    # normal window still fire (search state fully reset).
+    d = _det()
+    d.feed_search_open(app="Alacritty", session="win-term", now=0.0)
+    _type(d, "leverage", app=ESPANSO_WIN, session="win-esp", now=1.0)
+    list(d.feed_char("\n", app=ESPANSO_WIN, session="win-esp", now=9.0))
+    evs = _type(d, ":date", app="Alacritty", session="win-term", now=20.0)
+    assert [e.trigger for e in evs] == [":date"]
+
+
+def test_empty_close_still_suppressed_under_espanso_focus_steal():
+    # Focus steal to the espanso window, then Escape with nothing typed → still a
+    # phantom empty close → suppressed (prior fix preserved through this path).
+    d = _det()
+    d.feed_search_open(app="Alacritty", session="win-term", now=0.0)
+    out = list(d.feed_char("\x1b", app=ESPANSO_WIN, session="win-esp", now=1.0))
+    assert out == []
+
+
 # -- FIX 2: caret-navigation resets the direct ring --------------------------
 def test_notify_navigation_resets_direct_ring():
     # ":da" then a caret move then "te" → ":date" was NOT typed contiguously,
