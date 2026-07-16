@@ -9,6 +9,7 @@ user messages, and surface recurring phrases that are not yet snippets.
 SNIPPETS is synced to the live config in nix/home.nix (PRs #4/#5, 2026-06-23:
 :rns shortened, :rau/:mdc/:nday/... steer-extended, :aep/:cont/:pec/:wn/:rnx/
 :fhrs/:fdays added, :usd removed).
+2026-07-15: :ds added; :wn/:mdc removed (dead — hand-typed short forms won).
 
 Caveats baked in:
 - Some expansions are now IDENTICAL to phrases you hand-type (:rns="recommend
@@ -54,6 +55,9 @@ SNIPPETS = {
     # :whn removed 2026-07-06 (dead + superseded by /handoff + :eos).
     ":eos":     ("prompt", ["identify skills that may need updating"], [], False),
     ":acq":     ("prompt", ["recommend anything you think would be useful to include"], [], False),
+    # :ds="dispatch subagent to " is a phrase-PREFIX the user also hand-types, so
+    # its count conflates snippet-expansion with manual typing (ambiguous=True).
+    ":ds":      ("prompt", ["dispatch subagent to"], [], True),
     # :aep expansion starts "dispatch subagent to adversarially audit the PR for
     # bugs, regressions, edge cases, race conditions…" — match a distinctive tail.
     ":aep":     ("prompt", ["regressions, edge cases, race conditions"], [], False),
@@ -67,8 +71,6 @@ SNIPPETS = {
     ":nday":    ("prompt", ["it's the next day, check"], [], True),
     ":fhrs":    ("prompt", ["it's been a few hours, check"], [], True),
     ":fdays":   ("prompt", ["it's been a few days, check"], [], True),
-    ":mdc":     ("prompt", ["merged and deployed, check"], [], True),
-    ":wn":      ("prompt", ["what's next"], [], True),
     ":cont":    ("prompt", ["continue from where you left off"], [], True),
     ":pec":     ("prompt", ["push an empty commit"], [], True),
     # utilities / typo-correction — output not distinguishable

@@ -75,6 +75,7 @@ in
           #  /handoff + :eos which ends "…then write the handoff to proceed in next session")
           { trigger = ":eos"; replace = "review work done this session and identify skills that may need updating, then dispatch subagent to update those skills and any relevant docs, then write the handoff to proceed in next session"; label = "End-of-session ritual: review → update skills/docs → handoff"; search_terms = ["end" "session" "wrap" "handoff" "skills" "review" "update" "docs" "ritual"]; }
           { trigger = ":acq"; replace = "ask me clarifying questions and recommend anything you think would be useful to include"; label = "Ask clarifying questions + recommend additions"; search_terms = ["ask" "clarify" "clarifying" "questions" "recommend" "elicit" "scope" "include"]; }
+          { trigger = ":ds"; replace = "dispatch subagent to "; label = "Dispatch subagent to…"; search_terms = ["dispatch" "subagent" "delegate"]; }
           { trigger = ":rns"; replace = "recommend next steps"; label = "Recommend next steps"; search_terms = ["next" "recommend" "steps" "whats next"]; }
           { trigger = ":rnx"; replace = "recommend next steps ranked by leverage (impact vs effort); call out the single highest-value move and any quick wins"; label = "Recommend next steps, ranked by leverage"; search_terms = ["next" "recommend" "steps" "ranked" "leverage" "impact" "deep"]; }
           { trigger = ":pst"; replace = "proceed, use subagent, ensure test coverage"; label = "Proceed with subagent + test coverage"; search_terms = ["proceed" "subagent" "test" "coverage" "verify" "dispatch" "yes"]; }
@@ -82,8 +83,6 @@ in
           { trigger = ":nday"; replace = "it's the next day, check"; label = "Next-day re-check"; search_terms = ["next day" "check" "days" "resume" "morning"]; }
           { trigger = ":fhrs"; replace = "it's been a few hours, check"; label = "Few-hours re-check"; search_terms = ["hours" "check" "elapsed" "resume"]; }
           { trigger = ":fdays"; replace = "it's been a few days, check"; label = "Few-days re-check"; search_terms = ["days" "check" "elapsed" "resume"]; }
-          { trigger = ":mdc"; replace = "merged and deployed, check"; label = "Merged & deployed — check"; search_terms = ["merged" "deployed" "check" "verify"]; }
-          { trigger = ":wn"; replace = "what's next"; label = "What's next"; search_terms = ["next" "whats next" "what next"]; }
           { trigger = ":cont"; replace = "continue from where you left off"; label = "Continue from where you left off"; search_terms = ["continue" "resume" "left off"]; }
           { trigger = ":pec"; replace = "push an empty commit"; label = "Push an empty commit"; search_terms = ["push" "empty" "commit" "trigger" "ci"]; }
           { trigger = ":aep"; replace = "dispatch subagent to adversarially audit the PR for bugs, regressions, edge cases, race conditions, security holes, error/failure handling, backward-compat and data-integrity risks, leaked secrets, hidden assumptions, and second-order consequences — cite evidence from the diff, rank findings by severity, and propose a fix for each"; label = "Audit PR"; search_terms = ["audit" "each" "prs" "subagents" "risks" "regressions" "review"]; }
