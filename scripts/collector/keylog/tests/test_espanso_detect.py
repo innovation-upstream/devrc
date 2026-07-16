@@ -179,7 +179,82 @@ def test_empty_trigger_set_is_inert():
     d = EspansoDetector(ET.TriggerSet())
     assert _type(d, ":date anything :rnx") == []
     d.feed_search_open(app=APP, session=SESS, now=0.0)
+    # An empty search close is a phantom → suppressed (no trigger=None row).
     evs = list(d.feed_char("\n", app=APP, session=SESS, now=1.0))
-    # Search still records the open even with no snippets to attribute.
+    assert evs == []
+
+
+# -- FIX 1: bounded search-mode + phantom-empty suppression ------------------
+def test_search_term_over_cap_aborts_without_emitting():
+    # A non-espanso Ctrl+Space that keeps typing past the cap is a misfire:
+    # search-mode aborts silently (no method=search row for ordinary text).
+    from espanso_detect import SEARCH_TERM_MAX
+    d = _det()
+    d.feed_search_open(app=APP, session=SESS, now=0.0)
+    long_term = "x" * (SEARCH_TERM_MAX + 5)
+    assert _type(d, long_term, now=1.0) == []
+    # search-mode is off again; a subsequent close produces nothing.
+    assert list(d.feed_char("\n", app=APP, session=SESS, now=200.0)) == []
+    # And the direct ring is live again (typed text is no longer swallowed).
+    assert [e.trigger for e in _type(d, ":date", now=300.0)] == [":date"]
+
+
+def test_ctrl_space_then_empty_close_suppresses_phantom():
+    # Accidental Ctrl+Space then Escape with nothing typed → NO phantom row.
+    d = _det()
+    d.feed_search_open(app=APP, session=SESS, now=0.0)
+    evs = list(d.feed_char("\x1b", app=APP, session=SESS, now=1.0))
+    assert evs == []
+
+
+def test_search_whitespace_only_close_suppressed():
+    d = _det()
+    d.feed_search_open(app=APP, session=SESS, now=0.0)
+    _type(d, "   ", now=1.0)
+    evs = list(d.feed_char("\n", app=APP, session=SESS, now=5.0))
+    assert evs == []
+
+
+def test_search_short_attributed_term_still_emits():
+    # Short term that uniquely attributes → event as before (unchanged).
+    d = _det()
+    d.feed_search_open(app=APP, session=SESS, now=0.0)
+    _type(d, "leverage", now=1.0)
+    evs = list(d.feed_char("\n", app=APP, session=SESS, now=9.0))
+    assert len(evs) == 1
+    assert evs[0].trigger == ":rnx"
+    assert evs[0].inferred is True
+
+
+def test_search_short_unattributed_term_emits_trigger_none():
+    # Short term matching nothing → legit "real search we couldn't attribute".
+    d = _det()
+    d.feed_search_open(app=APP, session=SESS, now=0.0)
+    _type(d, "zzzzz", now=1.0)
+    evs = list(d.feed_char("\n", app=APP, session=SESS, now=6.0))
     assert len(evs) == 1
     assert evs[0].trigger is None
+    assert evs[0].inferred is True
+    assert evs[0].search_term == "zzzzz"
+
+
+# -- FIX 2: caret-navigation resets the direct ring --------------------------
+def test_notify_navigation_resets_direct_ring():
+    # ":da" then a caret move then "te" → ":date" was NOT typed contiguously,
+    # so nothing fires (mirrors espanso resetting its buffer on nav keys).
+    d = _det()
+    assert _type(d, ":da") == []
+    d.notify_navigation()
+    evs = _type(d, "te", now=10.0)
+    assert evs == []
+
+
+def test_notify_navigation_leaves_search_mode_intact():
+    # A nav key during search must NOT drop the accumulated term.
+    d = _det()
+    d.feed_search_open(app=APP, session=SESS, now=0.0)
+    _type(d, "today", now=1.0)
+    d.notify_navigation()
+    evs = list(d.feed_char("\n", app=APP, session=SESS, now=8.0))
+    assert len(evs) == 1
+    assert evs[0].search_term == "today"

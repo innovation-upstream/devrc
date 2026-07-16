@@ -39,6 +39,12 @@ _WORD_RE = re.compile(r"[a-z0-9]+")
 _ENTER = "\n"
 _ESCAPE = "\x1b"
 _BACKSPACE = "\b"
+# A real espanso search query is short. Ctrl+Space is NOT espanso-exclusive
+# (IDE completion, emacs set-mark, IME), so a non-espanso Ctrl+Space would
+# otherwise enter search-mode and accumulate ordinary typed text unbounded,
+# mislabeling it as a method=search row. Past this cap we treat search-mode as
+# a misfire and abort it WITHOUT emitting.
+SEARCH_TERM_MAX = 64
 
 
 @dataclass
@@ -103,6 +109,19 @@ class EspansoDetector:
         except Exception:
             return out
 
+    def notify_navigation(self) -> None:
+        """Caret-navigation / editing key (arrow, Home/End, PageUp/Down, Delete).
+
+        Such a key breaks contiguously-typed text, and espanso resets its own
+        buffer on it. Clear the DIRECT ring so a trigger split by a caret move
+        (":da" → arrow → "te") cannot assemble into a phantom ":date". Search
+        state is deliberately left untouched. Never raises.
+        """
+        try:
+            self._ring.clear()
+        except Exception:
+            pass
+
     def feed_search_open(self, *, app, session, now, workspace="") -> None:
         """Enter search-mode (called when keylog sees the Ctrl+Space shortcut)."""
         try:
@@ -153,6 +172,12 @@ class EspansoDetector:
                 self._search_term.pop()
         else:
             self._search_term.append(char)
+            if len(self._search_term) > SEARCH_TERM_MAX:
+                # Way past a plausible espanso query → this was a non-espanso
+                # Ctrl+Space and we've been mislabeling typed text. Abort
+                # search-mode WITHOUT emitting and reset search state.
+                self._search = False
+                self._search_term = []
 
     def _match_direct(self, app, session, now, workspace):
         if not self.ts.triggers:
@@ -179,6 +204,10 @@ class EspansoDetector:
         term = "".join(self._search_term)
         self._search = False
         self._search_term = []
+        # No real query was typed (accidental Ctrl+Space then Escape/idle/focus)
+        # → suppress the phantom empty trigger=None row rather than emit it.
+        if not term.strip():
+            return None
         trigger = self._attribute(term)
         label = (self.ts.meta.get(trigger) or {}).get("label", "") if trigger else ""
         return EspansoEvent(

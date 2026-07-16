@@ -56,6 +56,23 @@ KIND_ESPANSO = "espanso"
 CONTROL_MASK = 0x04
 XK_ESCAPE = 0xFF1B
 
+# Caret-navigation / editing keysyms. These reposition the caret or delete
+# forward, breaking contiguously-typed text — espanso resets its buffer on
+# them, so the detector's direct ring must reset too (else ":da" → arrow →
+# "te" would assemble a ":date" that was never typed contiguously). They carry
+# no printable char, so we detect them from the base keysym BEFORE the
+# char-is-None drop. NOTE: mouse-click caret repositioning is NOT captured
+# (device_events are KeyPress/KeyRelease only) → a documented residual
+# false-positive vector.
+NAV_KEYSYMS = frozenset({
+    0xFF50,                          # Home
+    0xFF51, 0xFF52, 0xFF53, 0xFF54,  # Left / Up / Right / Down
+    0xFF55,                          # Prior (PageUp)
+    0xFF56,                          # Next  (PageDown)
+    0xFF57,                          # End
+    0xFFFF,                          # Delete
+})
+
 
 def _emit_chunk(chunk, spool_dir: Path) -> str:
     """Map a Chunker.Chunk → the v1 emit fields and append to the spool."""
@@ -211,6 +228,17 @@ class KeyLogger:
                 except Exception:
                     pass
                 continue
+            if base_ks in NAV_KEYSYMS:
+                # Caret moved / forward-delete → reset the direct ring so a
+                # trigger split by the navigation cannot assemble. Search-mode
+                # is left as-is. Guarded like every other detector call; these
+                # keys carry no char so they drop below and never reach the
+                # chunker (chunker behaviour is byte-for-byte unchanged).
+                try:
+                    with self._lock:
+                        self.detector.notify_navigation()
+                except Exception:
+                    pass
             if char is None:
                 # Escape closes an open espanso search; otherwise it is a
                 # non-printing key the chunker already ignores.

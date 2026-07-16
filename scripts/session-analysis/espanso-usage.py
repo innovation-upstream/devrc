@@ -11,8 +11,10 @@ text. That breaks naive counting two different ways, hence two signals:
      emits one `source=keys, kind=espanso` row per fire into ClickHouse. This is
      the real per-trigger fire count, split direct vs Ctrl+Space-search. It is
      FORWARD-ONLY: there is no historical data before the detector was deployed.
-     Honest caveat: "keystrokes ended with a trigger" ≈ "espanso fired", except
-     in per-app espanso-disabled contexts — still far better than phrase-counting.
+     Honest caveat: direct fires are high-fidelity but can rarely over-count if a
+     trigger string is assembled via a mouse-repositioned caret (key events only)
+     or in a per-app espanso-disabled context; search rows are best-effort /
+     inferred. Still far better than phrase-counting.
 
   2. SECONDARY — transcript miner (ADD-CANDIDATES).  Because the expansion IS
      what Claude sees, mining `~/.claude/projects/**/*.jsonl` cannot reliably
