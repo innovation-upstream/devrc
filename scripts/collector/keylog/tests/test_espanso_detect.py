@@ -262,6 +262,10 @@ def test_focus_steal_by_espanso_window_keeps_search_and_attributes():
     assert ev.inferred is True
     assert ev.search_term == "leverage"
     assert ev.trigger == ":rnx"  # "leverage" uniquely maps to :rnx
+    # Attributed to the ORIGIN window (where Ctrl+Space was pressed), NOT the
+    # ".espanso-wrapped" window that stole focus mid-search.
+    assert ev.app == "Alacritty"
+    assert ev.session == "win-term"
 
 
 def test_focus_steal_ambiguous_term_still_emits_trigger_none():
@@ -275,6 +279,7 @@ def test_focus_steal_ambiguous_term_still_emits_trigger_none():
     assert out[0].trigger is None
     assert out[0].search_term == "date"
     assert out[0].method == "search"
+    assert out[0].app == "Alacritty"  # origin window preserved
 
 
 def test_focus_steal_multichar_window_hop_accumulates_full_term():
@@ -287,6 +292,7 @@ def test_focus_steal_multichar_window_hop_accumulates_full_term():
     out = list(d.feed_char("\n", app=ESPANSO_WIN, session="win-esp", now=20.0))
     assert len(out) == 1
     assert out[0].search_term == "clarify"
+    assert out[0].app == "Alacritty"  # origin window preserved
 
 
 def test_focus_change_to_nonespanso_window_still_closes_search():

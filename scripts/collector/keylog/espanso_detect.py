@@ -80,6 +80,13 @@ class EspansoDetector:
         # search-mode state
         self._search = False
         self._search_term: list[str] = []
+        # Origin context captured when search OPENS (before espanso's window
+        # steals focus). Emitting from these — not the live self._app, which by
+        # close time is ".espanso-wrapped" — attributes the event to the window
+        # the user was actually working in when they hit Ctrl+Space.
+        self._search_app = ""
+        self._search_session = ""
+        self._search_workspace = ""
         self._last_ts = 0.0
 
     # -- direct-trigger + search feed ------------------------------------- #
@@ -139,6 +146,11 @@ class EspansoDetector:
         """Enter search-mode (called when keylog sees the Ctrl+Space shortcut)."""
         try:
             self._app, self._session, self._workspace = app, session, workspace
+            # Snapshot the ORIGIN context now — before espanso's search window
+            # steals focus and the adopted self._app becomes ".espanso-wrapped".
+            self._search_app = app
+            self._search_session = session
+            self._search_workspace = workspace
             self._last_ts = now
             self._ring.clear()
             self._search = True
@@ -223,10 +235,13 @@ class EspansoDetector:
             return None
         trigger = self._attribute(term)
         label = (self.ts.meta.get(trigger) or {}).get("label", "") if trigger else ""
+        # Attribute to the ORIGIN window (captured at feed_search_open), NOT the
+        # live self._app — after the focus steal that would be ".espanso-wrapped",
+        # which is identical for every search and tells us nothing about context.
         return EspansoEvent(
             trigger=trigger, method="search", inferred=True, search_term=term,
-            app=self._app or "", session=self._session or "",
-            workspace=self._workspace, label=label or "",
+            app=self._search_app or "", session=self._search_session or "",
+            workspace=self._search_workspace, label=label or "",
         )
 
     def _attribute(self, term):
