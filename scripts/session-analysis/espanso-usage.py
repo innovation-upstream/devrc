@@ -10,6 +10,8 @@ SNIPPETS is synced to the live config in nix/home.nix (PRs #4/#5, 2026-06-23:
 :rns shortened, :rau/:mdc/:nday/... steer-extended, :aep/:cont/:pec/:wn/:rnx/
 :fhrs/:fdays added, :usd removed).
 2026-07-15: :ds added; :wn/:mdc removed (dead — hand-typed short forms won).
+2026-07-15b: :cont/:pec removed (dead); :aep repointed to /audit-pr
+  (slash-command shortcut, no longer text-detectable).
 
 Caveats baked in:
 - Some expansions are now IDENTICAL to phrases you hand-type (:rns="recommend
@@ -61,9 +63,10 @@ SNIPPETS = {
     # exclude their distinctive tails so those fires don't inflate the :ds count
     # (mirrors the :rns/:rnx overlap guard).
     ":ds":      ("prompt", ["dispatch subagent to"], ["adversarially audit the PR", "identify skills that may need updating"], True),
-    # :aep expansion starts "dispatch subagent to adversarially audit the PR for
-    # bugs, regressions, edge cases, race conditions…" — match a distinctive tail.
-    ":aep":     ("prompt", ["regressions, edge cases, race conditions"], [], False),
+    # :aep repointed to the /audit-pr slash command (PR-quality audit, 2026-07-15)
+    # — slash-command invocations aren't captured as human text, so it's no longer
+    # transcript-detectable.
+    ":aep":     ("prompt", None, [], False),
     ":rns":     ("prompt", ["recommend next steps"], ["ranked by leverage"], True),
     ":rnx":     ("prompt", ["recommend next steps ranked by leverage"], [], False),
     # NOTE: PR (espanso-shorten-unfired-snippets, 2026-06-30) reverted these to
@@ -74,8 +77,6 @@ SNIPPETS = {
     ":nday":    ("prompt", ["it's the next day, check"], [], True),
     ":fhrs":    ("prompt", ["it's been a few hours, check"], [], True),
     ":fdays":   ("prompt", ["it's been a few days, check"], [], True),
-    ":cont":    ("prompt", ["continue from where you left off"], [], True),
-    ":pec":     ("prompt", ["push an empty commit"], [], True),
     # utilities / typo-correction — output not distinguishable
     ":uuid":     ("util", None, [], False),
     ":clip":     ("util", None, [], False),
