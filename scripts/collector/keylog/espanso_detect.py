@@ -45,6 +45,15 @@ _BACKSPACE = "\b"
 # mislabeling it as a method=search row. Past this cap we treat search-mode as
 # a misfire and abort it WITHOUT emitting.
 SEARCH_TERM_MAX = 64
+# espanso's Ctrl+Space search bar opens as its OWN X window that STEALS focus.
+# On NixOS its WM_CLASS is observed as ".espanso-wrapped"; other packagings use
+# variants, so match by substring rather than the exact class.
+ESPANSO_SEARCH_WM_CLASS = ".espanso-wrapped"
+
+
+def _is_espanso_search_window(app) -> bool:
+    """True when `app` is espanso's own search window (which steals X focus)."""
+    return "espanso" in (app or "").lower()
 
 
 @dataclass
@@ -80,9 +89,13 @@ class EspansoDetector:
         try:
             # Focus change: typing moved to another window. Flush an open search
             # under the OLD context, then reset the direct ring (no cross-window
-            # false match).
+            # false match). EXCEPTION: espanso's Ctrl+Space search bar opens as
+            # its OWN window (.espanso-wrapped) and steals focus — while in
+            # search-mode a focus change TO that window is EXPECTED, so keep
+            # search alive and keep accumulating the term. Only a focus change
+            # to a genuinely different NON-espanso window closes the search.
             if self._app is not None and (app != self._app or session != self._session):
-                if self._search:
+                if self._search and not _is_espanso_search_window(app):
                     ev = self._close_search("focus")
                     if ev is not None:
                         out.append(ev)
