@@ -57,7 +57,10 @@ SNIPPETS = {
     ":acq":     ("prompt", ["recommend anything you think would be useful to include"], [], False),
     # :ds="dispatch subagent to " is a phrase-PREFIX the user also hand-types, so
     # its count conflates snippet-expansion with manual typing (ambiguous=True).
-    ":ds":      ("prompt", ["dispatch subagent to"], [], True),
+    # "dispatch subagent to" is also a substring of the :aep/:eos expansions —
+    # exclude their distinctive tails so those fires don't inflate the :ds count
+    # (mirrors the :rns/:rnx overlap guard).
+    ":ds":      ("prompt", ["dispatch subagent to"], ["adversarially audit the PR", "identify skills that may need updating"], True),
     # :aep expansion starts "dispatch subagent to adversarially audit the PR for
     # bugs, regressions, edge cases, race conditions…" — match a distinctive tail.
     ":aep":     ("prompt", ["regressions, edge cases, race conditions"], [], False),
