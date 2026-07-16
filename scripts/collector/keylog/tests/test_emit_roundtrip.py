@@ -80,3 +80,45 @@ def test_plain_keys_not_base64(tmp_path):
     assert "kind=typing" in line
     assert "duration_ms=5" in line
     assert "b64:text=" in line
+
+
+def test_espanso_event_line_roundtrips():
+    """An EspansoEvent → spool line carries kind=espanso (plain scalar) and the
+    trigger + method/inferred/search_term survive base64 round-trip through
+    collector.parse_line — proving the report can read TRUE espanso fires."""
+    import keylog as KL
+
+    class _Ev:
+        trigger = ":rnx"
+        method = "direct"
+        inferred = False
+        search_term = None
+        label = "Recommend next steps, ranked by leverage"
+        workspace = "3"
+        app = "kitty"
+        session = "win-9"
+
+    line = SE.build_line({
+        "source": "keys", "kind": KL.KIND_ESPANSO,
+        "text": _Ev.trigger, "app": _Ev.app, "project": "",
+        "session": _Ev.session,
+        "payload": json.dumps({
+            "method": _Ev.method, "inferred": _Ev.inferred,
+            "search_term": _Ev.search_term, "label": _Ev.label,
+            "workspace": _Ev.workspace,
+        }),
+    })
+    # kind is a plain scalar; text/payload are base64.
+    assert "kind=espanso" in line
+    assert "b64:text=" in line
+    assert "b64:payload=" in line
+
+    ev = C.parse_line(line)
+    assert ev is not None
+    assert ev["kind"] == "espanso"
+    assert ev["text"] == ":rnx"
+    pl = json.loads(ev["payload"])
+    assert pl["method"] == "direct"
+    assert pl["inferred"] is False
+    assert pl["search_term"] is None
+    assert pl["workspace"] == "3"

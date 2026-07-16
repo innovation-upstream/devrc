@@ -479,9 +479,9 @@ in
       # from the running session; i3 is not systemd-integrated, so import the
       # graphical env if available.
       Environment = [
-        "PATH=${lib.makeBinPath [ (pkgs.python312.withPackages (ps: [ ps.xlib ])) pkgs.coreutils ]}"
+        "PATH=${lib.makeBinPath [ (pkgs.python312.withPackages (ps: [ ps.xlib ps.pyyaml ])) pkgs.coreutils ]}"
       ];
-      ExecStart = "${pkgs.python312.withPackages (ps: [ ps.xlib ])}/bin/python3 %h/.config/activity-collector/keylog/keylog.py";
+      ExecStart = "${pkgs.python312.withPackages (ps: [ ps.xlib ps.pyyaml ])}/bin/python3 %h/.config/activity-collector/keylog/keylog.py";
       Restart = "always";
       RestartSec = 10;
       # Restart on a script-only change (see activity-collector for rationale).

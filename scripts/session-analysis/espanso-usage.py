@@ -1,40 +1,127 @@
 #!/usr/bin/env python3
-"""Mine Claude transcripts for espanso snippet usage + snippet candidates.
+"""Espanso usage audit — TWO complementary signals.
 
-espanso expands a trigger to its replacement BEFORE Claude sees it, so
-transcripts contain the replacement text, never the trigger. We detect usage
-by matching each snippet's distinctive expansion substring in human-typed
-user messages, and surface recurring phrases that are not yet snippets.
+Espanso, on firing, BACKSPACES the trigger away and pastes the replacement via
+the CLIPBOARD, so BOTH the trigger and its expansion are ERASED from any stored
+text. That breaks naive counting two different ways, hence two signals:
 
-SNIPPETS is synced to the live config in nix/home.nix (PRs #4/#5, 2026-06-23:
-:rns shortened, :rau/:mdc/:nday/... steer-extended, :aep/:cont/:pec/:wn/:rnx/
-:fhrs/:fdays added, :usd removed).
-2026-07-15: :ds added; :wn/:mdc removed (dead — hand-typed short forms won).
-2026-07-15b: :cont/:pec removed (dead); :aep repointed to /audit-pr
-  (slash-command shortcut, no longer text-detectable).
+  1. PRIMARY — keylog (TRUE fires).  The X11 keylogger's `EspansoDetector`
+     (scripts/collector/keylog/espanso_detect.py) detects espanso usage AT
+     CAPTURE TIME from the raw keystroke stream, BEFORE espanso reacts, and
+     emits one `source=keys, kind=espanso` row per fire into ClickHouse. This is
+     the real per-trigger fire count, split direct vs Ctrl+Space-search. It is
+     FORWARD-ONLY: there is no historical data before the detector was deployed.
+     Honest caveat: direct fires are high-fidelity but can rarely over-count if a
+     trigger string is assembled via a mouse-repositioned caret (key events only)
+     or in a per-app espanso-disabled context; search rows are best-effort /
+     inferred. Still far better than phrase-counting.
 
-Caveats baked in:
-- Some expansions are now IDENTICAL to phrases you hand-type (:rns="recommend
-  next steps", :wn="what's next", :pec="push an empty commit"). Their counts
-  CONFLATE snippet-expansion with manual typing and are flagged ambiguous.
-- :rns vs :rnx overlap ("recommend next steps" is a prefix of the :rnx text);
-  handled via an exclude substring so :rns doesn't double-count :rnx.
+  2. SECONDARY — transcript miner (ADD-CANDIDATES).  Because the expansion IS
+     what Claude sees, mining `~/.claude/projects/**/*.jsonl` cannot reliably
+     tell a snippet fire from hand-typing (the two produce identical text). Its
+     durable, UNIQUE value is the inverse view: recurring SHORT phrases you type
+     that are NOT yet snippets — i.e. candidates to ADD. The per-trigger
+     "hits" it reports are kept only as a rough, ambiguous cross-check.
 
-Usage: espanso-usage.py [--since YYYY-MM-DD] [--root PATH] [--host LABEL]
+Credentials for the keylog signal (read-only reader, from env — NEVER hardcoded;
+same pattern as activity-scan.py / validation/chquery.py):
+  export CLICKHOUSE_URL=http://192.168.50.94:30123
+  export CLICKHOUSE_USER=activity_reader
+  export CLICKHOUSE_PASSWORD=<reader-password>   # from SOPS
+
+Usage: espanso-usage.py [--since YYYY-MM-DD] [--source keys|transcript|both]
+                        [--root PATH] [--host LABEL]
+  --source   which signal(s) to show (default: both; keylog shown first)
 """
 import json, os, re, glob, collections, sys
+from pathlib import Path
 
 # --- args ---
 SINCE = None
 ROOT = os.path.expanduser("~/.claude/projects")
 HOST = ""
+SOURCE = "both"
 _a = sys.argv[1:]
 while _a:
     k = _a.pop(0)
-    if k == "--since":  SINCE = _a.pop(0)
-    elif k == "--root": ROOT = os.path.expanduser(_a.pop(0))
-    elif k == "--host": HOST = _a.pop(0)
+    if k == "--since":    SINCE = _a.pop(0)
+    elif k == "--root":   ROOT = os.path.expanduser(_a.pop(0))
+    elif k == "--host":   HOST = _a.pop(0)
+    elif k == "--source": SOURCE = _a.pop(0)
+    else:
+        sys.stderr.write(f"unknown arg: {k}\n"); sys.exit(2)
+if SOURCE not in ("keys", "transcript", "both"):
+    sys.stderr.write("--source must be keys|transcript|both\n"); sys.exit(2)
 
+
+# --------------------------------------------------------------------------- #
+# PRIMARY signal — keylog TRUE fires from ClickHouse (source=keys, kind=espanso)
+# --------------------------------------------------------------------------- #
+def keylog_section(since):
+    """Print the per-trigger TRUE-fire table from the keylog espanso rows.
+
+    Degrades gracefully: if ClickHouse is unreachable OR there are zero espanso
+    rows yet (detection is forward-only), print a clear note and return — the
+    transcript section still runs.
+    """
+    print("## PRIMARY — keylog TRUE fires (source=keys, kind=espanso)\n")
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "validation"))
+        import chquery as Q  # noqa: E402
+        conn = Q.CHConn.from_env()
+        client = Q.CHClient(conn)
+    except Exception as e:
+        print(f"(keylog signal unavailable — {e.__class__.__name__}: {e})")
+        print("(set CLICKHOUSE_URL/USER/PASSWORD; detection is forward-only)\n")
+        return
+    where = "source = 'keys' AND kind = 'espanso'"
+    if since:
+        where += f" AND ts >= {Q.sql_quote(since)}"
+    sql = (
+        "SELECT text AS trigger, "
+        "JSONExtractString(payload, 'method') AS method, "
+        "JSONExtractBool(payload, 'inferred') AS inferred, "
+        "count() AS fires "
+        f"FROM {conn.fq_table} WHERE {where} "
+        "GROUP BY trigger, method, inferred ORDER BY fires DESC, trigger"
+    )
+    try:
+        rows = client.rows(sql)
+    except Exception as e:
+        print(f"(ClickHouse query failed — {e.__class__.__name__}: {e})")
+        print("(no keylog espanso events yet — detection is forward-only; "
+              "collecting since deploy)\n")
+        return
+    if not rows:
+        print("(no keylog espanso events yet — detection is forward-only; "
+              "collecting since deploy)\n")
+        return
+    # Aggregate per trigger with a direct/search split.
+    per = collections.defaultdict(lambda: {"direct": 0, "search": 0, "inferred": False})
+    total = 0
+    for r in rows:
+        trig = r.get("trigger") or "(unattributed search)"
+        method = r.get("method") or "direct"
+        fires = int(r.get("fires") or 0)
+        total += fires
+        bucket = per[trig]
+        bucket["direct" if method == "direct" else "search"] += fires
+        if r.get("inferred"):
+            bucket["inferred"] = True
+    print(f"# total fires: {total}\n")
+    print(f"{'trigger':22} {'direct':>7} {'search':>7} {'total':>7}  note")
+    order = sorted(per, key=lambda t: (-(per[t]['direct'] + per[t]['search']), t))
+    for t in order:
+        b = per[t]
+        tot = b["direct"] + b["search"]
+        note = "search=inferred attribution" if b["search"] else ""
+        print(f"{t:22} {b['direct']:>7} {b['search']:>7} {tot:>7}  {note}")
+    print()
+
+
+# --------------------------------------------------------------------------- #
+# SECONDARY signal — transcript miner (ADD-CANDIDATES + ambiguous cross-check)
+# --------------------------------------------------------------------------- #
 # trigger -> (kind, [include substrs] | None, [exclude substrs], ambiguous?)
 # include=None => not text-detectable (date/clipboard/typo-correction).
 SNIPPETS = {
@@ -54,24 +141,12 @@ SNIPPETS = {
     ":cpk":   ("path", ["datapacket-talos/prod-kubeconfig"], [], False),
     ":subk":  ("path", ["submodel-dc-03-a-kubeconfig"], [], False),
     # workflow prompts (current expansions)
-    # :whn removed 2026-07-06 (dead + superseded by /handoff + :eos).
     ":eos":     ("prompt", ["identify skills that may need updating"], [], False),
     ":acq":     ("prompt", ["recommend anything you think would be useful to include"], [], False),
-    # :ds="dispatch subagent to " is a phrase-PREFIX the user also hand-types, so
-    # its count conflates snippet-expansion with manual typing (ambiguous=True).
-    # "dispatch subagent to" is also a substring of the :aep/:eos expansions —
-    # exclude their distinctive tails so those fires don't inflate the :ds count
-    # (mirrors the :rns/:rnx overlap guard).
     ":ds":      ("prompt", ["dispatch subagent to"], ["adversarially audit the PR", "identify skills that may need updating"], True),
-    # :aep repointed to the /audit-pr slash command (PR-quality audit, 2026-07-15)
-    # — slash-command invocations aren't captured as human text, so it's no longer
-    # transcript-detectable.
     ":aep":     ("prompt", None, [], False),
     ":rns":     ("prompt", ["recommend next steps"], ["ranked by leverage"], True),
     ":rnx":     ("prompt", ["recommend next steps ranked by leverage"], [], False),
-    # NOTE: PR (espanso-shorten-unfired-snippets, 2026-06-30) reverted these to
-    # their short hand-typed forms — option (a) — so their counts now CONFLATE
-    # snippet-expansion with manual typing (ambiguous=True), the accepted trade.
     ":pst":     ("prompt", ["proceed, use subagent, ensure test coverage"], [], True),
     ":kickoff": ("prompt", ["kickoff message to copy paste to next session"], [], False),
     ":nday":    ("prompt", ["it's the next day, check"], [], True),
@@ -84,16 +159,13 @@ SNIPPETS = {
     "reocmmend": ("typo", None, [], False),
 }
 
-counts = {t: 0 for t in SNIPPETS}
-sessions_hit = {t: set() for t in SNIPPETS}
-last_seen = {t: None for t in SNIPPETS}
-
-short_msgs = collections.Counter()
-phrase_counter = collections.Counter()
-total_user_msgs = 0
-files_scanned = 0
-
+WORD = re.compile(r"[a-z][a-z'\-]+")
 KNOWN_EXPANSIONS = [m for _, subs, _, _ in SNIPPETS.values() if subs for m in subs]
+
+
+def norm(s):
+    return " ".join(s.lower().split())
+
 
 def human_text(o):
     if o.get("type") != "user":
@@ -123,86 +195,107 @@ def human_text(o):
         return None
     return s
 
-WORD = re.compile(r"[a-z][a-z'\-]+")
-def norm(s):
-    return " ".join(s.lower().split())
 
-for fp in glob.glob(os.path.join(ROOT, "**", "*.jsonl"), recursive=True):
-    files_scanned += 1
-    sid = os.path.basename(fp)[:8]
-    try:
-        with open(fp, errors="ignore") as fh:
-            for line in fh:
-                if '"type":"user"' not in line and '"type": "user"' not in line:
-                    continue
-                try:
-                    o = json.loads(line)
-                except Exception:
-                    continue
-                ts = o.get("timestamp", "")[:10]
-                if SINCE and ts and ts < SINCE:
-                    continue
-                s = human_text(o)
-                if s is None:
-                    continue
-                total_user_msgs += 1
-                low = s.lower()
-                for t, (kind, subs, excl, _amb) in SNIPPETS.items():
-                    if not subs:
+def transcript_section(since, root, host):
+    counts = {t: 0 for t in SNIPPETS}
+    sessions_hit = {t: set() for t in SNIPPETS}
+    last_seen = {t: None for t in SNIPPETS}
+    short_msgs = collections.Counter()
+    phrase_counter = collections.Counter()
+    total_user_msgs = 0
+    files_scanned = 0
+
+    for fp in glob.glob(os.path.join(root, "**", "*.jsonl"), recursive=True):
+        files_scanned += 1
+        sid = os.path.basename(fp)[:8]
+        try:
+            with open(fp, errors="ignore") as fh:
+                for line in fh:
+                    if '"type":"user"' not in line and '"type": "user"' not in line:
                         continue
-                    if any(sub in low for sub in subs) and not any(e in low for e in excl):
-                        counts[t] += 1
-                        sessions_hit[t].add(sid)
-                        if ts and (last_seen[t] is None or ts > last_seen[t]):
-                            last_seen[t] = ts
-                if len(s) <= 140 and not s.startswith("/"):
-                    n = norm(s)
-                    if not any(e in n for e in KNOWN_EXPANSIONS):
-                        if len(n) >= 3:
-                            short_msgs[n] += 1
-                        words = WORD.findall(n)
-                        for k in (4, 5):
-                            for i in range(len(words) - k + 1):
-                                phrase_counter[" ".join(words[i:i+k])] += 1
-    except Exception:
-        continue
+                    try:
+                        o = json.loads(line)
+                    except Exception:
+                        continue
+                    ts = o.get("timestamp", "")[:10]
+                    if since and ts and ts < since:
+                        continue
+                    s = human_text(o)
+                    if s is None:
+                        continue
+                    total_user_msgs += 1
+                    low = s.lower()
+                    for t, (kind, subs, excl, _amb) in SNIPPETS.items():
+                        if not subs:
+                            continue
+                        if any(sub in low for sub in subs) and not any(e in low for e in excl):
+                            counts[t] += 1
+                            sessions_hit[t].add(sid)
+                            if ts and (last_seen[t] is None or ts > last_seen[t]):
+                                last_seen[t] = ts
+                    if len(s) <= 140 and not s.startswith("/"):
+                        n = norm(s)
+                        if not any(e in n for e in KNOWN_EXPANSIONS):
+                            if len(n) >= 3:
+                                short_msgs[n] += 1
+                            words = WORD.findall(n)
+                            for k in (4, 5):
+                                for i in range(len(words) - k + 1):
+                                    phrase_counter[" ".join(words[i:i+k])] += 1
+        except Exception:
+            continue
 
-hdr = f"# espanso usage"
-if HOST:  hdr += f" — host={HOST}"
-if SINCE: hdr += f" — since {SINCE}"
-print(hdr)
-print(f"# files scanned: {files_scanned}   human user messages: {total_user_msgs}\n")
+    print(f"# transcript files scanned: {files_scanned}   "
+          f"human user messages: {total_user_msgs}\n")
 
-print("## Espanso snippet usage (text-detectable)\n")
-print(f"{'trigger':12} {'kind':7} {'hits':>6} {'sessions':>9}  {'last-seen':10} note")
-order = sorted(SNIPPETS, key=lambda t: (-counts[t], t))
-for t in order:
-    kind, subs, excl, amb = SNIPPETS[t]
-    if subs is None:
-        print(f"{t:12} {kind:7} {'   n/a':>6} {'      n/a':>9}  {'-':10} not text-detectable")
-    else:
-        note = "AMBIGUOUS (conflates hand-typing)" if amb else ""
-        print(f"{t:12} {kind:7} {counts[t]:>6} {len(sessions_hit[t]):>9}  {(last_seen[t] or '-'):10} {note}")
+    print("## SECONDARY — transcript ADD-CANDIDATES (short phrases, no snippet)\n")
+    STOP_EXACT = {"yes", "ok", "okay", "y", "continue", "go", "proceed", "do it",
+                  "yes do it", "no", "thanks", "thank you", "good", "nice", "next",
+                  "stop", "wait", "k", "yep", "yes please", "sure", "perfect"}
+    print("### Recurring short user messages NOT already snippets (>=3 hits)\n")
+    for msg, n in short_msgs.most_common(120):
+        if n < 3:
+            break
+        if msg in STOP_EXACT or len(msg) < 8:
+            continue
+        print(f"{n:4}  {msg[:110]}")
 
-print("\n## Recurring short user messages NOT already snippets (>=3 hits)\n")
-STOP_EXACT = {"yes", "ok", "okay", "y", "continue", "go", "proceed", "do it",
-              "yes do it", "no", "thanks", "thank you", "good", "nice", "next",
-              "stop", "wait", "k", "yep", "yes please", "sure", "perfect"}
-for msg, n in short_msgs.most_common(120):
-    if n < 3:
-        break
-    if msg in STOP_EXACT or len(msg) < 8:
-        continue
-    print(f"{n:4}  {msg[:110]}")
+    print("\n### Recurring 4-5 word phrases (candidate building blocks, >=6 hits)\n")
+    shown = 0
+    for ph, n in phrase_counter.most_common(400):
+        if n < 6:
+            break
+        if any(e.startswith(ph[:15]) for e in KNOWN_EXPANSIONS):
+            continue
+        print(f"{n:4}  {ph}")
+        shown += 1
+        if shown >= 40:
+            break
 
-print("\n## Recurring 4-5 word phrases (candidate building blocks, >=6 hits)\n")
-shown = 0
-for ph, n in phrase_counter.most_common(400):
-    if n < 6:
-        break
-    if any(e.startswith(ph[:15]) for e in KNOWN_EXPANSIONS):
-        continue
-    print(f"{n:4}  {ph}")
-    shown += 1
-    if shown >= 40:
-        break
+    print("\n### Ambiguous transcript cross-check (CONFLATES fire + hand-typing)\n")
+    print(f"{'trigger':12} {'kind':7} {'hits':>6} {'sessions':>9}  {'last-seen':10} note")
+    order = sorted(SNIPPETS, key=lambda t: (-counts[t], t))
+    for t in order:
+        kind, subs, excl, amb = SNIPPETS[t]
+        if subs is None:
+            print(f"{t:12} {kind:7} {'   n/a':>6} {'      n/a':>9}  {'-':10} not text-detectable")
+        else:
+            note = "AMBIGUOUS (conflates hand-typing)" if amb else ""
+            print(f"{t:12} {kind:7} {counts[t]:>6} {len(sessions_hit[t]):>9}  {(last_seen[t] or '-'):10} {note}")
+
+
+# --------------------------------------------------------------------------- #
+def main():
+    hdr = "# espanso usage"
+    if HOST:  hdr += f" — host={HOST}"
+    if SINCE: hdr += f" — since {SINCE}"
+    print(hdr + "\n")
+
+    if SOURCE in ("keys", "both"):
+        keylog_section(SINCE)
+    if SOURCE in ("transcript", "both"):
+        transcript_section(SINCE, ROOT, HOST)
+
+
+if __name__ == "__main__":
+    main()
