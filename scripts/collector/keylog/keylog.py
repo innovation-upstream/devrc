@@ -43,9 +43,18 @@ import keymap as KM        # noqa: E402
 import spool_emit as SE    # noqa: E402
 from chunker import Chunker  # noqa: E402
 from winctx import WindowContext, WinCtx  # noqa: E402
+from espanso_detect import EspansoDetector  # noqa: E402
+from espanso_triggers import (  # noqa: E402
+    TriggerSet, load_triggers, standard_config_paths,
+)
 
 SOURCE = "keys"
 KIND = "typing"
+KIND_ESPANSO = "espanso"
+
+# X ControlMask (1<<2); espanso's search shortcut is Ctrl+Space on this host.
+CONTROL_MASK = 0x04
+XK_ESCAPE = 0xFF1B
 
 
 def _emit_chunk(chunk, spool_dir: Path) -> str:
@@ -67,10 +76,48 @@ def _emit_chunk(chunk, spool_dir: Path) -> str:
     return SE.emit(fields, spool_dir=spool_dir)
 
 
+def _emit_espanso(ev, spool_dir: Path) -> str:
+    """Map an EspansoEvent → the v1 emit fields and append to the spool.
+
+    The trigger goes in `text` (base64'd like typing); method / inferred /
+    search_term / label / workspace ride in the JSON `payload`. `kind=espanso`
+    is a plain scalar so the report can filter on it cheaply.
+    """
+    import json
+    payload = json.dumps(
+        {
+            "method": ev.method,
+            "inferred": ev.inferred,
+            "search_term": ev.search_term,
+            "label": ev.label,
+            "workspace": ev.workspace,
+        },
+        ensure_ascii=False, separators=(",", ":"),
+    )
+    fields = {
+        "source": SOURCE,
+        "kind": KIND_ESPANSO,
+        "text": ev.trigger or "",
+        "app": ev.app,
+        "project": "",
+        "session": ev.session,
+        "payload": payload,
+    }
+    return SE.emit(fields, spool_dir=spool_dir)
+
+
 class KeyLogger:
     def __init__(self, spool_dir: Path, idle_seconds: float, max_chars: int):
         self.spool_dir = spool_dir
         self.chunker = Chunker(idle_seconds=idle_seconds, max_chars=max_chars)
+        # Espanso usage detector (forward-only, deterministic). A missing or
+        # unparseable espanso config yields an empty trigger set → the detector
+        # is inert and typing capture behaves exactly as before.
+        try:
+            base_p, default_p = standard_config_paths()
+            self.detector = EspansoDetector(load_triggers(base_p, default_p))
+        except Exception:
+            self.detector = EspansoDetector(TriggerSet())
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._ctx = None
@@ -134,10 +181,52 @@ class KeyLogger:
             if event.type != X.KeyPress:
                 continue
             char = self._char_for(event.detail, event.state)
-            if char is None:
-                continue
             ctx = self._safe_ctx()
             now = time.time()
+
+            # -- espanso: search-shortcut / Escape (keysym-level, fully guarded).
+            # A detector bug must NEVER kill keystroke capture, so every detector
+            # call here is wrapped in try/except.
+            try:
+                base_ks = self.local_dpy.keycode_to_keysym(event.detail, 0)
+            except Exception:
+                base_ks = 0
+            try:
+                ctrl_req, sc_keysym = self.detector.ts.search_shortcut
+                is_shortcut = (
+                    base_ks == sc_keysym
+                    and (not ctrl_req or bool(event.state & CONTROL_MASK))
+                )
+            except Exception:
+                is_shortcut = False
+            if is_shortcut:
+                # Ctrl+Space opens the espanso search UI — enter search-mode and
+                # do NOT also feed this as a normal char.
+                try:
+                    with self._lock:
+                        self.detector.feed_search_open(
+                            app=ctx.app, session=ctx.window_id,
+                            now=now, workspace=ctx.workspace,
+                        )
+                except Exception:
+                    pass
+                continue
+            if char is None:
+                # Escape closes an open espanso search; otherwise it is a
+                # non-printing key the chunker already ignores.
+                if base_ks == XK_ESCAPE:
+                    try:
+                        with self._lock:
+                            evs = self.detector.feed_char(
+                                "\x1b", app=ctx.app, session=ctx.window_id,
+                                now=now, workspace=ctx.workspace,
+                            )
+                    except Exception:
+                        evs = []
+                    for ev in evs:
+                        _emit_espanso(ev, self.spool_dir)
+                continue
+
             with self._lock:
                 chunks = self.chunker.feed(
                     char, app=ctx.app, title=ctx.title,
@@ -145,6 +234,18 @@ class KeyLogger:
                 )
             for ch in chunks:
                 _emit_chunk(ch, self.spool_dir)
+
+            # Feed the detector in parallel with the chunker (guarded).
+            try:
+                with self._lock:
+                    evs = self.detector.feed_char(
+                        char, app=ctx.app, session=ctx.window_id,
+                        now=now, workspace=ctx.workspace,
+                    )
+            except Exception:
+                evs = []
+            for ev in evs:
+                _emit_espanso(ev, self.spool_dir)
 
     def _safe_ctx(self) -> WinCtx:
         try:
@@ -160,6 +261,14 @@ class KeyLogger:
                 chunks = self.chunker.flush_idle(now)
             for ch in chunks:
                 _emit_chunk(ch, self.spool_dir)
+            # Close an idle, unterminated espanso search (guarded).
+            try:
+                with self._lock:
+                    evs = self.detector.flush_idle(now, self.chunker.idle_seconds)
+            except Exception:
+                evs = []
+            for ev in evs:
+                _emit_espanso(ev, self.spool_dir)
 
     def run(self, poll_seconds: float = 0.5):
         from Xlib import X
@@ -196,6 +305,13 @@ class KeyLogger:
             with self._lock:
                 for ch in self.chunker.flush_now():
                     _emit_chunk(ch, self.spool_dir)
+            try:
+                with self._lock:
+                    evs = self.detector.flush_now()
+            except Exception:
+                evs = []
+            for ev in evs:
+                _emit_espanso(ev, self.spool_dir)
 
     def stop(self):
         # record_enable_context blocks on the record connection; disabling must
