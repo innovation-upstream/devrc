@@ -83,9 +83,7 @@ in
           { trigger = ":nday"; replace = "it's the next day, check"; label = "Next-day re-check"; search_terms = ["next day" "check" "days" "resume" "morning"]; }
           { trigger = ":fhrs"; replace = "it's been a few hours, check"; label = "Few-hours re-check"; search_terms = ["hours" "check" "elapsed" "resume"]; }
           { trigger = ":fdays"; replace = "it's been a few days, check"; label = "Few-days re-check"; search_terms = ["days" "check" "elapsed" "resume"]; }
-          { trigger = ":cont"; replace = "continue from where you left off"; label = "Continue from where you left off"; search_terms = ["continue" "resume" "left off"]; }
-          { trigger = ":pec"; replace = "push an empty commit"; label = "Push an empty commit"; search_terms = ["push" "empty" "commit" "trigger" "ci"]; }
-          { trigger = ":aep"; replace = "dispatch subagent to adversarially audit the PR for bugs, regressions, edge cases, race conditions, security holes, error/failure handling, backward-compat and data-integrity risks, leaked secrets, hidden assumptions, and second-order consequences — cite evidence from the diff, rank findings by severity, and propose a fix for each"; label = "Audit PR"; search_terms = ["audit" "each" "prs" "subagents" "risks" "regressions" "review"]; }
+          { trigger = ":aep"; replace = "/audit-pr "; label = "Audit PR (→ /audit-pr)"; search_terms = ["audit" "pr" "review" "adversarial"]; }
 
           { trigger = ":cc"; replace = "${workspace}/civit/civitai "; label = "civitai main repo path"; search_terms = ["civitai" "repo" "web"]; }
           { trigger = ":cdp"; replace = "${workspace}/civit/datapacket-talos "; label = "civitai datapacket-talos path"; search_terms = ["civitai"]; }
