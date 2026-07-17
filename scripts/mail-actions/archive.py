@@ -111,7 +111,7 @@ def vendor_domain(from_addr: str | None) -> str:
     """Registrable domain of the sender, as a coarse vendor key.
 
     HEURISTIC: takes the last two dotted labels of the address domain
-    (`billing@hetzner.com` → `hetzner.com`; `noreply@notify.cloudflare.com` →
+    (`billing@example.net` → `example.net`; `noreply@notify.cloudflare.com` →
     `cloudflare.com`). This is WRONG for multi-label public suffixes such as
     `co.uk` / `com.au` (`x@a.co.uk` → `co.uk` instead of `a.co.uk`) — a full fix
     needs the Public Suffix List, which is out of scope here. Falls back to

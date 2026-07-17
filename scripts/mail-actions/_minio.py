@@ -20,7 +20,7 @@ No secrets are hardcoded. See README for the nix-shell run command.
 Usage:
     with MinioArchive() as mc:
         mc.ensure_bucket("taxes-2026-invoices")
-        mc.put_object("taxes-2026-invoices", "hetzner.com/2026-06-28-inv.pdf",
+        mc.put_object("taxes-2026-invoices", "example.net/2026-06-28-inv.pdf",
                       data_bytes, "application/pdf")
 """
 from __future__ import annotations

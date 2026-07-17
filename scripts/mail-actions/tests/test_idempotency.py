@@ -110,7 +110,7 @@ def _fake_llm_extract(**kwargs):
     subj = (kwargs.get("subject") or "").lower()
     if "incomplete" in subj or "action required" in subj:
         return llm.Extraction(
-            action_required=True, who="Zen Payments",
+            action_required=True, who="Acme Pay",
             ask="Complete the merchant-account application.",
             deadline=None, amount=None, confidence=0.9, reason="incomplete notice",
         )
@@ -123,15 +123,15 @@ def _fake_llm_extract(**kwargs):
 def _rows():
     return [
         # survivor → action-required
-        {"id": 1, "message_id": "<a>", "from_addr": "sales@zenpayments.com",
-         "subject": "Application Incomplete for Civitai", "received_at": None,
+        {"id": 1, "message_id": "<a>", "from_addr": "sales@acmepay.example.com",
+         "subject": "Application Incomplete for Acme", "received_at": None,
          "category": "personal", "headers": {}, "text_body": "please complete"},
         # survivor → fyi
-        {"id": 2, "message_id": "<b>", "from_addr": "lauren@naidacom.com",
+        {"id": 2, "message_id": "<b>", "from_addr": "robin.hayes@brightco.example.com",
          "subject": "Re: Sales Audit Excel Template", "received_at": None,
          "category": "personal", "headers": {}, "text_body": "thanks"},
         # bulk drop (alert)
-        {"id": 3, "message_id": "<c>", "from_addr": "alerts@civitaic.com",
+        {"id": 3, "message_id": "<c>", "from_addr": "alerts@goalert.example.com",
          "subject": "Alert FIRING", "received_at": None,
          "category": "alert", "headers": {}, "text_body": "fire"},
     ]

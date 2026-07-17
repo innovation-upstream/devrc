@@ -159,14 +159,14 @@ def test_thread_dedup_one_llm_call_two_superseded(monkeypatch, capsys):
     # 3 messages of one thread, plus a lone unrelated survivor. received_at orders
     # them so the thread's NEWEST (reply2, id=3) is processed first.
     rows = [
-        {"id": 1, "message_id": "<M0>", "from_addr": "lauren@naidacom.com",
+        {"id": 1, "message_id": "<M0>", "from_addr": "robin.hayes@brightco.example.com",
          "subject": "Sales Audit Excel Template", "received_at": 100,
          "category": "personal", "headers": {}, "text_body": "root"},
-        {"id": 2, "message_id": "<M1>", "from_addr": "lauren@naidacom.com",
+        {"id": 2, "message_id": "<M1>", "from_addr": "robin.hayes@brightco.example.com",
          "subject": "Re: Sales Audit Excel Template", "received_at": 200,
          "category": "personal", "headers": {"References": "<M0>"},
          "text_body": "reply1"},
-        {"id": 3, "message_id": "<M2>", "from_addr": "lauren@naidacom.com",
+        {"id": 3, "message_id": "<M2>", "from_addr": "robin.hayes@brightco.example.com",
          "subject": "Re: Sales Audit Excel Template", "received_at": 300,
          "category": "personal", "headers": {"References": "<M0> <M1>"},
          "text_body": "reply2"},
@@ -187,17 +187,17 @@ def test_thread_dedup_one_llm_call_two_superseded(monkeypatch, capsys):
 
 def test_invoice_survivor_skips_llm_and_labels_invoice(monkeypatch, capsys):
     rows = [
-        {"id": 10, "message_id": "<inv@x>", "from_addr": "billing@hetzner.com",
+        {"id": 10, "message_id": "<inv@x>", "from_addr": "billing@examplehost.example.com",
          "subject": "Your invoice", "received_at": 100, "category": "personal",
          "headers": {}, "text_body": "invoice body",
-         "raw": _raw_with_pdf("billing@hetzner.com", "Your invoice",
+         "raw": _raw_with_pdf("billing@examplehost.example.com", "Your invoice",
                               "invoice_123.pdf")},
     ]
     db = FakeMailDB(rows)
     fake_llm = CountingLLM(action_required=True)
     # Sanity: the same definition the archiver uses flags this as a candidate.
     assert archive.is_archive_candidate(
-        from_addr="billing@hetzner.com", subject="Your invoice",
+        from_addr="billing@examplehost.example.com", subject="Your invoice",
         attachments=archive.extract_pdf_attachments(rows[0]["raw"]),
     )
     _run(monkeypatch, db, fake_llm)
@@ -225,7 +225,7 @@ def test_invoice_via_monkeypatched_candidate(monkeypatch):
 
 def test_normal_lone_survivor_one_llm_call_action(monkeypatch):
     rows = [
-        {"id": 20, "message_id": "<lone@x>", "from_addr": "sales@zenpayments.com",
+        {"id": 20, "message_id": "<lone@x>", "from_addr": "sales@acmepay.example.com",
          "subject": "Application Incomplete", "received_at": 100,
          "category": "personal", "headers": {}, "text_body": "complete it"},
     ]
@@ -263,10 +263,10 @@ def test_summary_reports_invoice_and_superseded_counters(monkeypatch, capsys):
          "received_at": 200, "category": "personal",
          "headers": {"References": "<T0>"}, "text_body": "reply"},
         # ... plus an invoice
-        {"id": 3, "message_id": "<inv@x>", "from_addr": "billing@hetzner.com",
+        {"id": 3, "message_id": "<inv@x>", "from_addr": "billing@examplehost.example.com",
          "subject": "Invoice", "received_at": 300, "category": "personal",
          "headers": {}, "text_body": "inv",
-         "raw": _raw_with_pdf("billing@hetzner.com", "Invoice", "invoice.pdf")},
+         "raw": _raw_with_pdf("billing@examplehost.example.com", "Invoice", "invoice.pdf")},
     ]
     db = FakeMailDB(rows)
     fake_llm = CountingLLM(action_required=True)

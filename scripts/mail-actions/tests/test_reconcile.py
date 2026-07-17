@@ -150,7 +150,7 @@ def test_feature1_newer_msg_supersedes_existing_older_open_action(monkeypatch):
     # A new reply (ts=300, References starts <M0>) arrives → its action is inserted and
     # the older open action is superseded by the timestamp-guarded UPDATE.
     rows = [
-        {"id": 3, "message_id": "<M2>", "from_addr": "lauren@naidacom.com",
+        {"id": 3, "message_id": "<M2>", "from_addr": "robin.hayes@brightco.example.com",
          "subject": "Re: thread", "received_at": 300, "category": "personal",
          "headers": {"References": "<M0> <M1>"}, "text_body": "reply2"},
     ]
@@ -172,7 +172,7 @@ def test_feature1_does_not_supersede_a_newer_open_action(monkeypatch):
     # reply (ts=300) of the same thread is processed → its action is inserted but the
     # newer open action is NOT superseded (received_at < guard fails).
     rows = [
-        {"id": 3, "message_id": "<M2>", "from_addr": "lauren@naidacom.com",
+        {"id": 3, "message_id": "<M2>", "from_addr": "robin.hayes@brightco.example.com",
          "subject": "Re: thread", "received_at": 300, "category": "personal",
          "headers": {"References": "<M0> <M1>"}, "text_body": "older reply"},
     ]
