@@ -5,3 +5,11 @@
 __pycache__/
 *.pyc
 .pytest_cache/
+
+# Playwright MCP scratch
+.playwright-mcp/
+
+# Loose scratch screenshots at repo root (does NOT affect tracked
+# scripts/collector/browser-ext/icons/*.png — those live in a subdir)
+/*.png
+/*.jpg

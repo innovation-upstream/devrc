@@ -1,23 +1,7 @@
 { pkgs, ... }:
 
-let
-  nvim-fzf = pkgs.vimUtils.buildVimPlugin {
-    name = "nvim-fzf";
-    src = builtins.fetchGit {
-      url = "https://github.com/vijaymarupudi/nvim-fzf.git";
-      ref = "master";
-    };
-  };
-  fzf-lua = pkgs.vimUtils.buildVimPlugin {
-    name = "fzf-lua";
-    src = builtins.fetchGit {
-      url = "https://github.com/ibhagwan/fzf-lua.git";
-      ref = "main";
-    };
-  };
-in
+# Custom vim-plugin derivations not available (or not preferred) from nixpkgs.
+# Currently empty — the previous nvim-fzf / fzf-lua fetchGit builds were removed
+# as dead (not referenced by the active plugin list in default.nix).
 {
-  nvim-fzf=nvim-fzf;
-  fzf-lua=fzf-lua;
 }
-
