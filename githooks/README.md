@@ -1,19 +1,39 @@
-# githooks — auto-run the PR adversarial audit on push
+# githooks — pre-push test gate + adversarial-audit-on-push
 
-Version-controlled, global git hooks. Today this is one feature:
+Version-controlled, global git hooks. Two features, in order on every push:
 
-**Auto-run `/audit-pr` on push of a feature branch, route only 🔴/🟡 findings to
-your phone (clawgate), never block the push.** It replaces the hand-typed
-"dispatch a subagent to audit this PR for risks/regressions/…" ritual.
+1. **Blocking test gate (devrc only).** Run the devrc Python suite before the
+   push and **block the push if any test fails.** No-op for every other repo.
+2. **Auto-run `/audit-pr` on push of a feature branch**, route only 🔴/🟡
+   findings to your phone (clawgate), **never block the push.** Replaces the
+   hand-typed "dispatch a subagent to audit this PR for risks/…" ritual.
 
 ## Files
 
 | File | Role |
 |---|---|
-| `pre-push` | Global dispatcher. Chains to any repo-local pre-push first (never clobbers it), then fires the audit **backgrounded** so the push is never delayed. |
+| `pre-push` | Global dispatcher. Chains to any repo-local pre-push first (never clobbers it), runs the **blocking test gate**, then fires the audit **backgrounded** so the push is never delayed. |
+| `tests-on-push.sh` | SYNCHRONOUS blocking worker: self-detects devrc, runs `scripts/run-tests.sh --set all` (via nix-shell if needed), **blocks the push on failure**. No-op for non-devrc repos. |
 | `audit-on-push.sh` | The backgrounded worker: branch + diff-size + flag gates, then headless `claude -p "/audit-pr current"`, then routes 🔴/🟡 to clawgate. |
 | `install.sh` | Sets `git config --global core.hooksPath` to this dir. `--uninstall` reverts. |
 | `audit-on-push.env.example` | Config template → copy to `~/.claude/audit-on-push.env`. |
+
+## Test gate (`tests-on-push.sh`)
+
+The hermetic subset of the suite is enforced independently by
+`nix flake check` (`flake.nix` → `checks.x86_64-linux.pytests`, run offline in
+the nix sandbox — see `scripts/run-tests.sh` for the exact dir list). This
+pre-push worker is the **dev-host tier**: it runs the FULLER set (`--set all`)
+before the push so any dev-host-only suites are exercised too, and it BLOCKS a
+push whose tests fail.
+
+- **devrc only** — the worker exits 0 immediately for any repo that isn't the
+  devrc flake, so the global hook never starts running pytest on unrelated repos.
+- **Escape hatch** — `DEVRC_SKIP_TESTS=1 git push …` skips the gate (the flake
+  check / CI still enforce the hermetic subset).
+- **Graceful degrade** — if neither an ambient pytest nor `nix-shell` is
+  available it warns and allows the push (never wedges pushes on a broken env);
+  the hard gate is `nix flake check` / CI.
 
 ## Install (safe — changes nothing about your push UX)
 
