@@ -1,0 +1,81 @@
+#!/usr/bin/env bash
+#
+# Global pre-push dispatcher (devrc-managed, version-controlled).
+#
+# Installed via a GLOBAL core.hooksPath that points at this directory
+# (githooks/install.sh). Two jobs, in order:
+#
+#   1. COMPOSE — chain to any repo-local pre-push hook first, so this global
+#      hook never clobbers a repo's own gate (e.g. the datapacket-talos
+#      gitops-gate at .githooks/pre-push). If a repo-local hook exists AND
+#      blocks (non-zero), we propagate that block and STOP — the local gate
+#      wins and the audit is skipped for that push.
+#
+#   2. AUDIT — fire the adversarial PR audit (githooks/audit-on-push.sh) in the
+#      BACKGROUND, fully detached, so the push is never delayed or blocked. All
+#      branch/size/flag filtering lives in that script; the only thing this hook
+#      guarantees is "never slow the push".
+#
+# git feeds pre-push the ref updates on stdin AND passes <remote> <url> as $1 $2.
+# We tee stdin so both the chained repo-local hook and the audit worker see it.
+#
+# Composition caveat (git limitation, documented in README): core.hooksPath is
+# single-valued. A repo that sets its OWN repo-local core.hooksPath (e.g.
+# datapacket-talos via scripts/install-hooks.sh -> .githooks) OVERRIDES this
+# global one entirely, so in that repo THIS hook does not run at all and the
+# repo's gate is authoritative. This chaining handles the inverse case: repos
+# using the default .git/hooks, where a developer-dropped .git/hooks/pre-push
+# should still run alongside the global audit.
+
+set -uo pipefail
+
+REMOTE="${1:-}"
+URL="${2:-}"
+
+# Slurp stdin once (the ref-update lines) so we can replay it to both consumers.
+STDIN_DATA="$(cat || true)"
+
+REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+GIT_DIR="$(git rev-parse --git-dir 2>/dev/null || true)"
+SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
+
+# --- 1. Chain to a repo-local pre-push hook, if any (and it isn't us) --------
+# Candidates: the repo's .git/hooks/pre-push and (defensively) a tracked
+# .githooks/pre-push. Skip any path that resolves to THIS file (no recursion).
+for candidate in \
+  "${GIT_DIR:+$GIT_DIR/hooks/pre-push}" \
+  "${REPO_ROOT:+$REPO_ROOT/.githooks/pre-push}" \
+; do
+  [ -n "$candidate" ] || continue
+  [ -f "$candidate" ] && [ -x "$candidate" ] || continue
+  # Don't invoke ourselves (handles a symlinked or copied global hook).
+  if [ "$(readlink -f "$candidate" 2>/dev/null)" = "$(readlink -f "$SELF" 2>/dev/null)" ]; then
+    continue
+  fi
+  # Run it with the same args + stdin git would have given it. If it blocks,
+  # propagate the EXACT exit code and skip the audit (the local gate is
+  # authoritative). Capture the hook's status via PIPESTATUS — a bare `$?` after
+  # `if ! pipe` would read the negated test result (always 0), letting a block
+  # leak through.
+  printf '%s' "$STDIN_DATA" | "$candidate" "$REMOTE" "$URL"
+  local_rc="${PIPESTATUS[1]}"
+  if [ "$local_rc" -ne 0 ]; then
+    exit "$local_rc"
+  fi
+  break   # one repo-local hook is enough; don't double-run
+done
+
+# --- 2. Fire the audit in the background, fully detached ---------------------
+# Never block the push: redirect all fds, disown, and hand stdin via a heredoc
+# string so the backgrounded process is independent of the terminal.
+AUDIT_WORKER="$(dirname "$SELF")/audit-on-push.sh"
+if [ -x "$AUDIT_WORKER" ]; then
+  (
+    printf '%s' "$STDIN_DATA" | \
+      "$AUDIT_WORKER" "$REMOTE" "$URL" "$REPO_ROOT" \
+      >/dev/null 2>&1 &
+  ) >/dev/null 2>&1 &
+  disown 2>/dev/null || true
+fi
+
+exit 0

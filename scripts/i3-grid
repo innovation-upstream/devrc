@@ -1,0 +1,125 @@
+#!/usr/bin/env bash
+# Arrange all windows on a workspace into a grid layout.
+#
+# Usage: i3-grid [workspace]
+#   workspace: workspace number to arrange (default: currently focused)
+#
+# Grid sizing: cols = ceil(sqrt(N)), rows = ceil(N/cols). Windows fill rows
+# left-to-right, top-to-bottom. The final row may be short (e.g. N=5 -> 3+2).
+
+set -euo pipefail
+
+TEMP_WS=99
+LOG="/tmp/i3-grid.log"
+
+log() { echo "$(date +%T.%N) $*" >> "$LOG"; }
+die() { log "FATAL: $*"; echo "i3-grid: $*" >&2; exit 1; }
+
+: > "$LOG"  # truncate
+
+command -v i3-msg >/dev/null || die "i3-msg not found"
+command -v jq >/dev/null || die "jq not found"
+
+# Resolve target workspace
+if [[ $# -ge 1 ]]; then
+    WS="$1"
+else
+    WS=$(i3-msg -t get_workspaces | jq -r '.[] | select(.focused) | .num')
+fi
+[[ -n "$WS" ]] || die "could not determine target workspace"
+[[ "$WS" =~ ^[0-9]+$ ]] || die "workspace must be numeric, got: $WS"
+[[ "$WS" != "$TEMP_WS" ]] || die "cannot arrange temp workspace $TEMP_WS"
+
+# Collect X11 window IDs on the target workspace, in tree order (left-to-right,
+# top-to-bottom of current layout). jq recurse preserves document order.
+mapfile -t WIN_IDS < <(
+    i3-msg -t get_tree | jq -r --argjson n "$WS" '
+        .. | objects | select(.num? == $n) |
+        [recurse(.nodes[]?, .floating_nodes[]?) |
+         select(.window | type == "number") | .window] | .[]
+    '
+)
+
+N=${#WIN_IDS[@]}
+(( N > 0 )) || die "workspace $WS has no windows"
+
+if (( N == 1 )); then
+    echo "i3-grid: 1 window on ws$WS, nothing to arrange"
+    exit 0
+fi
+
+# Grid dimensions
+COLS=1
+while (( COLS * COLS < N )); do COLS=$((COLS + 1)); done
+ROWS=$(( (N + COLS - 1) / COLS ))
+
+log "arranging $N windows on ws$WS into ${ROWS}x${COLS} grid"
+log "WIN_IDS: ${WIN_IDS[*]}"
+
+# Phase 1: flatten by shuttling through temp workspace.
+# Switch to temp ws first so the target ws has no focused container —
+# this ensures windows land as flat workspace children when moved back.
+log "phase1: flatten"
+for id in "${WIN_IDS[@]}"; do
+    r=$(i3-msg "[id=$id] move container to workspace number $TEMP_WS")
+    log "  move $id -> ws$TEMP_WS: $r"
+done
+i3-msg "workspace number $TEMP_WS" >/dev/null
+sleep 0.05
+for id in "${WIN_IDS[@]}"; do
+    r=$(i3-msg "[id=$id] move container to workspace number $WS")
+    log "  move $id -> ws$WS: $r"
+done
+
+# Phase 2: switch to target ws and set vertical root layout
+log "phase2: set splitv root"
+i3-msg "workspace number $WS" >/dev/null
+sleep 0.05
+r=$(i3-msg "[id=${WIN_IDS[0]}] focus")
+log "  focus ${WIN_IDS[0]}: $r"
+sleep 0.05
+r=$(i3-msg 'focus parent')
+log "  focus parent: $r"
+r=$(i3-msg 'layout splitv')
+log "  layout splitv: $r"
+r=$(i3-msg 'focus child')
+log "  focus child: $r"
+sleep 0.05
+
+# Phase 3: build rows.
+# Flat state is splitv[w0, w1, ..., w(N-1)]. For each row we:
+#   1. split h on the first window of the row (wraps it in splith container)
+#   2. for remaining windows in the row, `move up` to enter the splith from below
+# Result: splitv[splith[row0...], splith[row1...], ...]
+i=0
+for (( r = 0; r < ROWS; r++ )); do
+    row_size=$COLS
+    remaining=$(( N - i ))
+    (( remaining < row_size )) && row_size=$remaining
+
+    # First window of this row: wrap in splith
+    first_id="${WIN_IDS[$i]}"
+    log "  row $r: split h on $first_id"
+    r2=$(i3-msg "[id=$first_id] focus")
+    log "    focus $first_id: $r2"
+    sleep 0.05
+    r2=$(i3-msg "split h")
+    log "    split h: $r2"
+    sleep 0.05
+    i=$((i + 1))
+
+    # Remaining windows in this row: move up into the splith
+    for (( c = 1; c < row_size; c++ )); do
+        id="${WIN_IDS[$i]}"
+        log "  row $r: move up $id"
+        r2=$(i3-msg "[id=$id] focus")
+        log "    focus $id: $r2"
+        sleep 0.05
+        r2=$(i3-msg "move up")
+        log "    move up: $r2"
+        sleep 0.05
+        i=$((i + 1))
+    done
+done
+
+log "done"
