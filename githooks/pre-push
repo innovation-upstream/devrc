@@ -3,13 +3,18 @@
 # Global pre-push dispatcher (devrc-managed, version-controlled).
 #
 # Installed via a GLOBAL core.hooksPath that points at this directory
-# (githooks/install.sh). Two jobs, in order:
+# (githooks/install.sh). Three jobs, in order:
 #
 #   1. COMPOSE — chain to any repo-local pre-push hook first, so this global
 #      hook never clobbers a repo's own gate (e.g. the datapacket-talos
 #      gitops-gate at .githooks/pre-push). If a repo-local hook exists AND
 #      blocks (non-zero), we propagate that block and STOP — the local gate
 #      wins and the audit is skipped for that push.
+#
+#   1.5 TEST GATE — run the devrc Python suite (githooks/tests-on-push.sh)
+#      SYNCHRONOUSLY and BLOCK the push on failure. No-op for every repo except
+#      devrc, so it is safe as a global hook. Independent of `nix flake check`,
+#      which enforces the hermetic subset offline in the nix sandbox.
 #
 #   2. AUDIT — fire the adversarial PR audit (githooks/audit-on-push.sh) in the
 #      BACKGROUND, fully detached, so the push is never delayed or blocked. All
@@ -64,6 +69,23 @@ for candidate in \
   fi
   break   # one repo-local hook is enough; don't double-run
 done
+
+# --- 1.5 Blocking test gate (devrc only; no-op elsewhere) --------------------
+# Run the devrc Python suite BEFORE the push and block on failure. The worker
+# self-detects devrc and exits 0 for every other repo, so this is safe as a
+# GLOBAL hook. This is the dev-host tier; `nix flake check` enforces the
+# hermetic subset independently (flake.nix checks.pytests).
+TESTS_WORKER="$(dirname "$SELF")/tests-on-push.sh"
+if [ -x "$TESTS_WORKER" ]; then
+  # Replay the ref-update lines so the worker's changed-files filter can decide
+  # whether this push touches code. Capture the worker's status via PIPESTATUS
+  # (a bare $? after the pipe would read printf's, not the worker's).
+  printf '%s' "$STDIN_DATA" | "$TESTS_WORKER" "$REPO_ROOT"
+  tests_rc="${PIPESTATUS[1]}"
+  if [ "$tests_rc" -ne 0 ]; then
+    exit "$tests_rc"
+  fi
+fi
 
 # --- 2. Fire the audit in the background, fully detached ---------------------
 # Never block the push: redirect all fds, disown, and hand stdin via a heredoc
