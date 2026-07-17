@@ -18,10 +18,18 @@ DDC=$(command -v ddcutil) || { echo "ddcutil not found on PATH" >&2; exit 1; }
 UNIT=monitor-blackout-restore
 STATE="${XDG_RUNTIME_DIR:-/tmp}/monitor-blackout.state"   # "bus:brightness"
 
-# First DDC/CI-capable display's i2c bus number.
+# First DDC/CI bus that actually ANSWERS a brightness (VCP 0x10) read.
+# With >1 monitor connected, some panels enumerate an i2c bus but EIO on read
+# (e.g. the ASUS VK278 over HDMI), so a blind "first bus" grabs a dead one and
+# the blackout fails. Probe each detected bus and return the first that responds.
 detect_bus() {
-  "$DDC" detect --brief 2>/dev/null \
-    | grep -m1 -o 'i2c-[0-9]\+' | grep -o '[0-9]\+$'
+  local b
+  for b in $("$DDC" detect --brief 2>/dev/null | grep -o 'i2c-[0-9]\+' | grep -o '[0-9]\+$'); do
+    if "$DDC" --bus "$b" getvcp 10 --brief >/dev/null 2>&1; then
+      printf '%s\n' "$b"; return 0
+    fi
+  done
+  return 1
 }
 
 get_brightness() { # $1=bus  -> current VCP 0x10 value
