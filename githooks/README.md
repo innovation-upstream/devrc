@@ -13,7 +13,7 @@ Version-controlled, global git hooks. Two features, in order on every push:
 | File | Role |
 |---|---|
 | `pre-push` | Global dispatcher. Chains to any repo-local pre-push first (never clobbers it), runs the **blocking test gate**, then fires the audit **backgrounded** so the push is never delayed. |
-| `tests-on-push.sh` | SYNCHRONOUS blocking worker: self-detects devrc, runs `scripts/run-tests.sh --set all` (via nix-shell if needed), **blocks the push on failure**. No-op for non-devrc repos. |
+| `tests-on-push.sh` | SYNCHRONOUS worker: self-detects devrc, filters on changed files, runs `scripts/run-tests.sh --set all` in a **pinned nix-shell**, and (mode `on`) **blocks the push on a genuine test failure**. Infra-can't-prepare-env → warn + allow. No-op for non-devrc repos. |
 | `audit-on-push.sh` | The backgrounded worker: branch + diff-size + flag gates, then headless `claude -p "/audit-pr current"`, then routes 🔴/🟡 to clawgate. |
 | `install.sh` | Sets `git config --global core.hooksPath` to this dir. `--uninstall` reverts. |
 | `audit-on-push.env.example` | Config template → copy to `~/.claude/audit-on-push.env`. |
@@ -24,26 +24,54 @@ The hermetic subset of the suite is enforced independently by
 `nix flake check` (`flake.nix` → `checks.x86_64-linux.pytests`, run offline in
 the nix sandbox — see `scripts/run-tests.sh` for the exact dir list). This
 pre-push worker is the **dev-host tier**: it runs the FULLER set (`--set all`)
-before the push so any dev-host-only suites are exercised too, and it BLOCKS a
-push whose tests fail.
+before the push so any dev-host-only suites are exercised too, and (mode `on`)
+BLOCKS a push whose tests genuinely fail.
+
+**Mode** — `TESTS_ON_PUSH`, from env or `~/.claude/audit-on-push.env` (parallels
+the audit's flag):
+
+- `off` — skip the gate entirely.
+- `shadow` — run the tests, report the result, **never block** (warn-only).
+- `on` / `enforce` — run the tests, **block** the push on a genuine failure.
+  **Default (devrc only).**
+
+Behaviour, all failing in the **safe direction**:
 
 - **devrc only** — the worker exits 0 immediately for any repo that isn't the
   devrc flake, so the global hook never starts running pytest on unrelated repos.
-- **Escape hatch** — `DEVRC_SKIP_TESTS=1 git push …` skips the gate (the flake
-  check / CI still enforce the hermetic subset).
-- **Graceful degrade** — if neither an ambient pytest nor `nix-shell` is
-  available it warns and allows the push (never wedges pushes on a broken env);
-  the hard gate is `nix flake check` / CI.
+- **Changed-files filter** — the gate only runs when the pushed commits touch
+  `scripts/`, `flake.nix`, or `flake.lock`; docs-only / nix-non-flake pushes skip
+  it. Any ambiguity (new branch whose base can't be resolved, unparseable stdin,
+  a `git diff` error) **fails toward RUNNING** — it never silently skips a code
+  push.
+- **Infra flakiness degrades, never blocks** — the env is a **pinned nix-shell**
+  (never a trusted ambient pytest — the modules import requests/psycopg2/minio/
+  yaml at collection). Env preparation is a **separate step** from the pytest
+  run: if the env can't be built (offline, uncached, substituter hiccup, disk
+  full, no `nix-shell`) the worker **warns and allows the push** (exit 0). Only
+  tests that actually executed and failed block.
+- **Escape hatch** — `DEVRC_SKIP_TESTS=1 git push …` skips the gate for one push
+  regardless of mode (the flake check / CI still enforce the hermetic subset).
 
-## Install (safe — changes nothing about your push UX)
+> **flake-check gotcha:** `nix flake check` only sees **git-tracked** files. A
+> **new** test file must be `git add`ed before the check (or the pre-push gate,
+> which copies via the flake) will run it — an untracked new test is invisible.
+
+## Install
 
 ```bash
 ~/workspace/devrc/githooks/install.sh
 ```
 
-This sets the **global** `core.hooksPath` and seeds `~/.claude/audit-on-push.env`
-with `AUDIT_ON_PUSH=shadow`. In shadow mode it runs the audit and logs what it
-*would* send, but **sends nothing**. Your pushes are unchanged.
+This sets the **global** `core.hooksPath` and seeds `~/.claude/audit-on-push.env`.
+Two independent knobs, seeded from the example:
+
+- **Audit** (`AUDIT_ON_PUSH=shadow`) — logs what it *would* send, sends nothing;
+  the audit side changes nothing about your push UX until you flip it to `on`.
+- **Test gate** (`TESTS_ON_PUSH=on`) — **in the devrc repo, pushes now run the
+  Python suite and block on a genuine failure.** It is a no-op in every other
+  repo. Set `TESTS_ON_PUSH=shadow` (warn-only) or `off` to change that, or
+  `DEVRC_SKIP_TESTS=1 git push …` to skip a single push.
 
 ## Flag states (`~/.claude/audit-on-push.env`)
 

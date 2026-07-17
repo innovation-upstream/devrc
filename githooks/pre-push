@@ -77,8 +77,11 @@ done
 # hermetic subset independently (flake.nix checks.pytests).
 TESTS_WORKER="$(dirname "$SELF")/tests-on-push.sh"
 if [ -x "$TESTS_WORKER" ]; then
-  "$TESTS_WORKER" "$REPO_ROOT"
-  tests_rc=$?
+  # Replay the ref-update lines so the worker's changed-files filter can decide
+  # whether this push touches code. Capture the worker's status via PIPESTATUS
+  # (a bare $? after the pipe would read printf's, not the worker's).
+  printf '%s' "$STDIN_DATA" | "$TESTS_WORKER" "$REPO_ROOT"
+  tests_rc="${PIPESTATUS[1]}"
   if [ "$tests_rc" -ne 0 ]; then
     exit "$tests_rc"
   fi

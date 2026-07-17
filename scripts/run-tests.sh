@@ -28,7 +28,7 @@ SET="hermetic"
 ROOT=""
 while [ $# -gt 0 ]; do
   case "$1" in
-    --set) SET="${2:-}"; shift 2 ;;
+    --set) SET="${2:-hermetic}"; shift; [ $# -gt 0 ] && shift ;;
     --set=*) SET="${1#*=}"; shift ;;
     *) ROOT="$1"; shift ;;
   esac
