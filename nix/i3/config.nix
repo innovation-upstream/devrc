@@ -25,11 +25,23 @@ let
 
       # Float the rig-control (yad) popup as a compact centered window instead of tiling it
       for_window [class="Yad" title="Rig Controls"] floating enable, move position center'';
+
+  # Workbench-only: dual-monitor layout. The 1920x1080 (HDMI-0) sits to the LEFT of
+  # the 3440x1440 ultrawide (DP-0, primary), bottom-aligned (both on the same desk, so
+  # the shorter panel gets a 360px dead zone at its top). Restored on every i3 start;
+  # hotplug mid-session still needs a manual re-run of this xrandr.
+  monitorLayout =
+    if isLaptop then ""
+    else ''
+
+      # Dual-monitor layout: 1080p (HDMI-0) left of the ultrawide (DP-0, primary)
+      exec --no-startup-id xrandr --output DP-0 --primary --mode 3440x1440 --rate 143.92 --pos 1920x0 --output HDMI-0 --mode 1920x1080 --pos 0x360'';
 in
 ''
 set $mod Mod1
 
 font pango:monospace 8
+${monitorLayout}
 
 # NetworkManager applet
 exec --no-startup-id nm-applet
