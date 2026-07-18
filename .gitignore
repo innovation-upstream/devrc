@@ -13,3 +13,6 @@ __pycache__/
 # scripts/collector/browser-ext/icons/*.png — those live in a subdir)
 /*.png
 /*.jpg
+
+# Local Claude Code settings (allowlists, settings.local.json) — never commit
+.claude/

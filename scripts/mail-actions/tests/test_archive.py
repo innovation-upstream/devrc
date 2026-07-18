@@ -59,17 +59,17 @@ def _msg_no_attachment(from_addr, subject):
 # Attachment extraction
 # --------------------------------------------------------------------------- #
 def test_extract_pdf_attachment_returns_filename_and_bytes():
-    raw = _msg_with_pdf("billing@hetzner.com", "Your invoice",
-                        "Hetzner_2026-06-28.pdf")
+    raw = _msg_with_pdf("billing@example.net", "Your invoice",
+                        "Examplehost_2026-06-28.pdf")
     atts = a.extract_pdf_attachments(raw)
     assert len(atts) == 1
-    assert atts[0].filename == "Hetzner_2026-06-28.pdf"
+    assert atts[0].filename == "Examplehost_2026-06-28.pdf"
     assert atts[0].data == FAKE_PDF
 
 
 def test_extract_pdf_by_content_type_without_pdf_suffix():
     # filename lacks .pdf but content-type is application/pdf → still extracted.
-    raw = _msg_with_pdf("billing@hetzner.com", "inv", "document")
+    raw = _msg_with_pdf("billing@example.net", "inv", "document")
     atts = a.extract_pdf_attachments(raw)
     assert len(atts) == 1
     assert atts[0].data == FAKE_PDF
@@ -94,7 +94,7 @@ def _atts(filename):
 
 def test_candidate_billing_sender_plus_pdf():
     assert a.is_archive_candidate(
-        from_addr="billing@hetzner.com", subject="Your monthly bill",
+        from_addr="billing@example.net", subject="Your monthly bill",
         attachments=_atts("statement.pdf"),
     )
 
@@ -116,7 +116,7 @@ def test_not_candidate_non_billing_non_invoice_pdf():
 
 def test_not_candidate_no_pdf():
     assert not a.is_archive_candidate(
-        from_addr="billing@hetzner.com", subject="invoice", attachments=[],
+        from_addr="billing@example.net", subject="invoice", attachments=[],
     )
 
 
@@ -137,7 +137,7 @@ def test_bucket_for_year():
 
 
 def test_vendor_domain_two_label():
-    assert a.vendor_domain("billing@hetzner.com") == "hetzner.com"
+    assert a.vendor_domain("billing@example.net") == "example.net"
 
 
 def test_vendor_domain_subdomain_collapsed():
@@ -151,10 +151,10 @@ def test_vendor_domain_missing():
 
 def test_object_key_basic():
     key = a.object_key(
-        vendor="hetzner.com", dt=datetime(2026, 6, 28),
-        filename="Hetzner_2026.pdf", message_id="<x@y>",
+        vendor="example.net", dt=datetime(2026, 6, 28),
+        filename="Examplehost_2026.pdf", message_id="<x@y>",
     )
-    assert key == "hetzner.com/2026-06-28-Hetzner_2026.pdf"
+    assert key == "example.net/2026-06-28-Examplehost_2026.pdf"
 
 
 def test_object_key_sanitizes_spaces_and_slashes():
@@ -206,14 +206,14 @@ def test_invoice_date_falls_back_to_received_at():
 # --------------------------------------------------------------------------- #
 def test_sidecar_metadata_shape():
     sc = a.sidecar_metadata(
-        vendor="hetzner.com", from_addr="billing@hetzner.com",
+        vendor="example.net", from_addr="billing@example.net",
         dt=datetime(2026, 6, 28), amount="$5.00", subject="Invoice",
         message_id="<x@y>", mail_id=22321,
     )
     assert set(sc) == {
         "vendor", "from_addr", "date", "amount", "subject", "message_id", "mail_id",
     }
-    assert sc["vendor"] == "hetzner.com"
+    assert sc["vendor"] == "example.net"
     assert sc["date"] == "2026-06-28"
     assert sc["amount"] == "$5.00"
     assert sc["mail_id"] == 22321
@@ -319,20 +319,20 @@ class FakeMailDB:
 def _archive_rows():
     return [
         # candidate: billing sender + PDF
-        {"id": 22321, "message_id": "<h@x>", "from_addr": "billing@hetzner.com",
-         "subject": "Your Hetzner invoice", "received_at": None,
+        {"id": 22321, "message_id": "<h@x>", "from_addr": "billing@example.net",
+         "subject": "Your Examplehost invoice", "received_at": None,
          "date_header": "Sun, 28 Jun 2026 08:20:00 +0000", "via_gmail": True,
-         "raw": _msg_with_pdf("billing@hetzner.com", "Your Hetzner invoice",
-                              "Hetzner_2026-06-28.pdf"), "labels": ["fyi"]},
+         "raw": _msg_with_pdf("billing@example.net", "Your Examplehost invoice",
+                              "Examplehost_2026-06-28.pdf"), "labels": ["fyi"]},
         # NOT a candidate: no pdf
         {"id": 99, "message_id": "<n@x>", "from_addr": "friend@gmail.com",
          "subject": "lunch?", "received_at": None, "date_header": None,
          "via_gmail": True, "raw": _msg_no_attachment("friend@gmail.com", "lunch?"),
          "labels": []},
         # already archived → excluded by fetch
-        {"id": 7, "message_id": "<a@x>", "from_addr": "billing@hetzner.com",
+        {"id": 7, "message_id": "<a@x>", "from_addr": "billing@example.net",
          "subject": "old invoice", "received_at": None, "date_header": None,
-         "via_gmail": True, "raw": _msg_with_pdf("billing@hetzner.com", "old",
+         "via_gmail": True, "raw": _msg_with_pdf("billing@example.net", "old",
                                                  "old.pdf"),
          "labels": ["invoice-archived"]},
     ]
@@ -351,16 +351,16 @@ def test_cmd_archive_uploads_and_labels(monkeypatch, capsys):
     rc = extract.cmd_archive(args)
     assert rc == 0
 
-    # one candidate (hetzner) → one PDF + one sidecar uploaded, bucket created, labeled.
+    # one candidate (example.net) → one PDF + one sidecar uploaded, bucket created, labeled.
     assert ("taxes-2026-invoices",
-            "hetzner.com/2026-06-28-Hetzner_2026-06-28.pdf") in fake_mc.objects
+            "example.net/2026-06-28-Examplehost_2026-06-28.pdf") in fake_mc.objects
     sidecar_key = ("taxes-2026-invoices",
-                   "hetzner.com/2026-06-28-Hetzner_2026-06-28.pdf.json")
+                   "example.net/2026-06-28-Examplehost_2026-06-28.pdf.json")
     assert sidecar_key in fake_mc.objects
     sc_bytes, sc_ct = fake_mc.objects[sidecar_key]
     assert sc_ct == "application/json"
     sc = json.loads(sc_bytes)
-    assert sc["mail_id"] == 22321 and sc["vendor"] == "hetzner.com"
+    assert sc["mail_id"] == 22321 and sc["vendor"] == "example.net"
 
     assert fake_db.labeled == [(22321, "invoice-archived")]
     out = capsys.readouterr().out

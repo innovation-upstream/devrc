@@ -50,7 +50,7 @@ SENDER_SUBJECT_DENYLIST = (
 # Headers whose mere PRESENCE marks the mail as a mailing-list / bulk / auto blast.
 # Feedback-ID is the standardized ESP feedback-loop header (RFC-ish, set by SES /
 # Google / LinkedIn / Mailchimp on high-volume mail) — it catches marketing/digest
-# blasts (hubstaff job matches, LinkedIn lead digests, vetr newsletter) that omit
+# blasts (hubstaff job matches, LinkedIn lead digests, product newsletters) that omit
 # List-* headers. Verified zero genuine action threads carry it; the billing
 # exemption runs BEFORE this, so invoices that carry it (Cloudflare) are still kept.
 _BULK_PRESENCE_HEADERS = ("List-Unsubscribe", "List-Id", "Auto-Submitted", "Feedback-ID")
@@ -152,7 +152,7 @@ def classify(
     Returns FilterResult(drop=True, reason=...) to DROP as bulk noise, or
     FilterResult(drop=False, reason="survivor") to pass on to the LLM tier.
     """
-    # 1. category alert — civitai/GPU, handled by ADS elsewhere.
+    # 1. category alert — infra/GPU alerts, handled by ADS elsewhere.
     if (category or "").lower() == "alert":
         return FilterResult(True, "category:alert")
 

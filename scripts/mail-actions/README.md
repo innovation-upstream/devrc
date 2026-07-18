@@ -122,8 +122,9 @@ kubectl -n mailbox exec mailbox-postgres-0 -- psql -U mailbox -d mailbox -c \
 
 Correctness checks:
 - **Precision** — every `mail_actions` row is a real ask (no hallucinated/FYI items). The
-  genuine threads to expect: Zen Payments merchant onboarding, Stripe `[Action required]`
-  on vetr, naida sales (lauren@naidacom.com), Hetzner/DataPacket invoices.
+  kinds of genuine threads to expect: a payment processor's merchant onboarding, an
+  `[Action required]` account-verification notice, a client sales thread, and
+  hosting-vendor invoices.
 - **Recall** — none of those genuine threads are missing (i.e. Stage 1 didn't wrongly drop
   them, and Stage 2 didn't mark them fyi). Cross-check against the `--dry-run` survivor list.
 - **Idempotency** — a second `run` reports `survivors: 0` (nothing left unprocessed).
@@ -223,7 +224,7 @@ mail (via_gmail, raw IS NOT NULL, NOT labelled 'invoice-archived')   ← delta r
 ```
 
 - `year` = year of `date_header` (else `received_at`). `vendor` = registrable domain of
-  the sender — last two dotted labels (`billing@hetzner.com` → `hetzner.com`,
+  the sender — last two dotted labels (`billing@example.net` → `example.net`,
   `noreply@notify.cloudflare.com` → `cloudflare.com`); a HEURISTIC that is wrong for
   multi-label public suffixes (`co.uk`), noted in `archive.py`.
 - `amount` is best-effort: it is *not* extracted here (the PDF / tax agent is
@@ -282,7 +283,7 @@ nix-shell -p 'python3.withPackages(p:[p.pytest p.requests p.psycopg2 p.minio])' 
   with a **mocked MinIO client + fake DB** (upload+label, dry-run writes nothing, an
   upload error skips the label so the mail retries).
 
-- `test_filter.py` — Stage-1 filter vs scrubbed real fixtures (`tests/fixtures/mail_headers.json`):
+- `test_filter.py` — Stage-1 filter vs synthetic fixtures (`tests/fixtures/mail_headers.json`):
   asserts the genuine action threads survive and the noise (alert/github/npm/bugsnag/
   newsletter-with-List-Unsubscribe) is dropped, and that a no-reply password-expiry mail
   survives to the LLM rather than being blanket-dropped.
@@ -304,6 +305,6 @@ nix-shell -p 'python3.withPackages(p:[p.pytest p.requests p.psycopg2 p.minio])' 
   Owner-from inbound survivor → labeled `sent`, no LLM. `owner_addrs()` env override +
   default.
 
-Fixtures are scrubbed to **headers + from + subject only** — no personal email bodies are
-committed.
+Fixtures are synthetic and limited to **headers + from + subject only** — no email bodies
+are committed.
 ```

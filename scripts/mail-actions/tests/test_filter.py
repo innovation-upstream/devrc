@@ -2,10 +2,10 @@
 
 Run: nix-shell -p python312Packages.pytest --run "pytest scripts/mail-actions/tests"
 
-The fixtures in fixtures/mail_headers.json are scrubbed real mail (headers + from +
-subject only — NO bodies) pulled from the live inbox: the genuine action threads
-(Zen/Stripe/naida/Hetzner) plus representative noise (github, npm, alert, newsletters
-with/without List-Unsubscribe, a no-reply password-expiry).
+The fixtures in fixtures/mail_headers.json are synthetic mail (headers + from +
+subject only — NO bodies) modelled on real inbox shapes: the genuine action threads
+(Acme Pay/Paygate/BrightCo/Example Host) plus representative noise (github, npm, alert,
+newsletters with/without List-Unsubscribe, a no-reply password-expiry).
 
 Contract under test: the high-precision tier must NEVER drop a genuine action item,
 and MUST drop unambiguous bulk/notification noise.
@@ -28,13 +28,13 @@ def classify_fixture(r):
     )
 
 
-# Genuine action threads — must SURVIVE Stage 1 (reach the LLM). Pulled from live mail.
+# Genuine action threads — must SURVIVE Stage 1 (reach the LLM). Modelled on real mail.
 ACTION_SENDERS = {
-    "sales@zenpayments.com",
-    "kara.redford@zenpayments.com",
-    "accounts@stripe.com",
-    "lauren@naidacom.com",
-    "billing@hetzner.com",
+    "sales@acmepay.example.com",
+    "dana.avery@acmepay.example.com",
+    "accounts@paygate.example.com",
+    "robin.hayes@brightco.example.com",
+    "billing@examplehost.example.com",
 }
 
 
@@ -83,7 +83,7 @@ def test_bugsnag_dropped_via_denylist():
 
 
 def test_newsletter_with_list_unsubscribe_dropped():
-    # buildcanada newsletter carries List-Unsubscribe + Precedence: bulk.
+    # the Example News newsletter carries List-Unsubscribe + Precedence: bulk.
     nl = BY_ID[44190]
     res = classify_fixture(nl)
     assert res.drop and res.reason.startswith("header:") or res.reason.startswith("precedence:")
@@ -100,9 +100,10 @@ def test_billing_invoice_survives_despite_bulk_headers():
 
 
 def test_billing_sender_allowlist_survives():
-    # billing@hetzner.com is covered by the billing@* sender pattern even if it ever
-    # gained bulk headers.
-    res = f.classify(from_addr="billing@hetzner.com", subject="Monthly statement",
+    # billing@examplehost.example.com is covered by the billing@* sender pattern even if
+    # it ever gained bulk headers.
+    res = f.classify(from_addr="billing@examplehost.example.com",
+                     subject="Monthly statement",
                      category="personal", headers={"List-Id": "<x>"})
     assert not res.drop and res.reason == "exempt:billing"
 
@@ -111,7 +112,7 @@ def test_resend_dunning_dropped_despite_billing_subject():
     # Cancelled-subscription dunning. Subject "Payment failed" matches the billing
     # regex, but the sender denylist runs FIRST → it drops, not billing-rescued.
     res = f.classify(from_addr="team@notifications.resend.com",
-                     subject="Payment failed for zachlowden1 Resend subscription",
+                     subject="Payment failed for owner Resend subscription",
                      category="personal", headers={"Feedback-ID": "x:ses"})
     assert res.drop and res.reason == "sender:denylist"
 
@@ -128,19 +129,19 @@ def test_voip_low_balance_dropped_but_zero_balance_survives():
     assert not zero.drop, "zero-balance/suspended alert must reach the LLM"
 
 
-def test_datapacket_ddos_dropped_but_real_mail_survives():
+def test_hosting_ddos_dropped_but_real_mail_survives():
     # DDoS reports (operator: false alarms) carry Feedback-ID and are no longer
     # billing-exempted → drop. A real support reply (no bulk header) survives; a real
     # invoice (invoice subject) is still billing-rescued.
-    ddos = f.classify(from_addr="support@datapacket.com",
+    ddos = f.classify(from_addr="support@examplehost.example.com",
                       subject="DDoS detected on one of your servers",
                       category="notification", headers={"Feedback-ID": "x:ses"})
     assert ddos.drop and ddos.reason == "header:Feedback-ID"
-    reply = f.classify(from_addr="support@datapacket.com",
+    reply = f.classify(from_addr="support@examplehost.example.com",
                        subject="Re: ticket #4412 server provisioning",
                        category="personal", headers={})
-    assert not reply.drop, "genuine datapacket support reply must survive"
-    invoice = f.classify(from_addr="support@datapacket.com",
+    assert not reply.drop, "genuine hosting support reply must survive"
+    invoice = f.classify(from_addr="support@examplehost.example.com",
                          subject="Your invoice is ready", category="notification",
                          headers={"Feedback-ID": "x:ses"})
     assert not invoice.drop and invoice.reason == "exempt:billing"
@@ -175,7 +176,7 @@ def test_genuine_billing_noreply_invoice_still_rescued():
 def test_billing_subject_regex_is_tight():
     # A newsletter that merely MENTIONS billing in prose should NOT trip the exemption
     # (the regex matches whole billing words, not arbitrary substrings).
-    res = f.classify(from_addr="newsletter@vetr.com",
+    res = f.classify(from_addr="newsletter@example-shop.example.com",
                      subject="Tips for invoicing… subscribe!",
                      category="personal",
                      headers={"List-Unsubscribe": "<x>"})
@@ -211,7 +212,7 @@ def test_github_noreply_security_notices_dropped():
     # noreply@github.com account-security audit mail (new key/PAT/OAuth) carries no
     # List-* headers but is automated noise → dropped by the *@github.com denylist.
     res = f.classify(from_addr="noreply@github.com",
-                     subject="[GitHub] A new public key was added to vetrllc/vetr-api",
+                     subject="[GitHub] A new public key was added to vega/vega-api",
                      category="notification", headers={})
     assert res.drop and res.reason == "sender:denylist"
 
