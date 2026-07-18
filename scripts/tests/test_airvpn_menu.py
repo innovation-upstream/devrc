@@ -285,39 +285,40 @@ def test_forwarded_port_verdict():
 # --------------------------------------------------------------------------- #
 # block render (i3status-airvpn) — cache payload -> block dict
 # --------------------------------------------------------------------------- #
-def test_render_off_is_neutral_visible():
+def test_render_off_is_neutral_icon_only():
+    # Minimal: off is a dim, icon-only button (empty text), NEVER hidden — it's the
+    # left-click Connect target. The glyph still renders.
     r = blk.render({"up": False})
-    assert r["state"] == "Idle" and r["text"] == "VPN off"
+    assert r["state"] == "Idle" and r["text"] == "" and r["icon"] == blk.ICON
 
 
 def test_render_up_verified_neutral():
+    # Minimal token: just `CC`, no "AirVPN" prose and no handshake age on the pill.
     r = blk.render({"up": True, "country_code": "ca", "verdict": "verified",
                     "handshake_age": 30})
-    assert r["state"] == "Idle"
-    assert r["text"].startswith("AirVPN CA")
-    assert "?" not in r["text"]
+    assert r["state"] == "Idle" and r["text"] == "CA"
 
 
 def test_render_up_unknown_marks_but_stays_neutral():
     r = blk.render({"up": True, "country_code": "ca", "verdict": "unknown"})
-    assert r["state"] == "Idle" and r["text"].endswith("?")
+    assert r["state"] == "Idle" and r["text"] == "CA?"
 
 
 def test_render_leak_is_critical():
     r = blk.render({"up": True, "country_code": "ca", "verdict": "leak"})
-    assert r["state"] == "Critical" and "LEAK" in r["text"]
+    assert r["state"] == "Critical" and r["text"] == "LEAK"
 
 
 def test_render_port_down_is_warning():
     r = blk.render({"up": True, "country_code": "ca", "verdict": "verified",
                     "fwd_verdict": "down"})
-    assert r["state"] == "Warning" and "port" in r["text"]
+    assert r["state"] == "Warning" and r["text"] == "CA!"
 
 
-def test_render_stale_error_missing_corrupt_soft_yellow():
+def test_render_stale_error_missing_corrupt_soft_yellow_icon_only():
     for payload in ({"state": "stale"}, {"error": "boom"}, None, "garbage", 42):
         r = blk.render(payload)
-        assert r["state"] == "Warning" and r["text"] == "VPN?"
+        assert r["state"] == "Warning" and r["text"] == "" and r["icon"] == blk.ICON
 
 
 # --------------------------------------------------------------------------- #

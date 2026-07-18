@@ -7,18 +7,17 @@
 # AirVPN sidecar (the `media` block) — that lives in the cluster, untouched.
 #
 # 🔴 PHASE 2 — Zach applies this by hand. This file is committed for review only;
-#    NOTHING here has been applied to the host. To activate (see the repo PR's
-#    "Phase-2 handoff" for the full ordered steps):
+#    NOTHING here has been applied to the host. The staged apply script
+#    nix/system/apply-airvpn-host.sh AUTOMATES steps 2-4 idempotently (with backups):
 #      1. Generate a NEW-device AirVPN WireGuard config (airvpn.org → Config
 #         Generator → Linux → WireGuard → NEW device) and drop it at
-#         /etc/wireguard/airvpn.conf  (root:root, chmod 0600).  ← Zach's secret;
-#         never in git / the nix store.
-#      2. Append the PostUp/PreDown lines (below) to that conf's [Interface].
-#      3. Copy scripts/airvpn-sudo   → /etc/nixos/i3blocks-scripts/airvpn-sudo   (0755 root)
-#         Copy scripts/airvpn-updown → /etc/nixos/i3blocks-scripts/airvpn-updown (0755 root)
-#      4. `import` this file from /etc/nixos/configuration.nix  (or paste its
-#         attrs in), then:  sudo nixos-rebuild switch
-#      5. Toggle ON from the bar (left-click the AirVPN pill → Connect) and run the
+#         /etc/wireguard/airvpn.conf  ← Zach's secret; never in git / the nix store.
+#      2. Then run:  sudo bash nix/system/apply-airvpn-host.sh
+#         (locks the conf 0600, appends the PostUp/PreDown hooks below, installs
+#          airvpn-sudo + airvpn-updown to /etc/nixos/i3blocks-scripts/, copies this
+#          module to /etc/nixos/airvpn-host.nix + adds it to configuration.nix's
+#          imports, then `nixos-rebuild switch`.)
+#      3. Toggle ON from the bar (left-click the AirVPN pill → Connect) and run the
 #         live-verification checklist. DEFAULT-OFF: the rebuild does NOT bring the
 #         tunnel up (there is no wg-quick auto-start unit — see below).
 #
