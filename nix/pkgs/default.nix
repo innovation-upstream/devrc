@@ -10,7 +10,6 @@ with pkgs; [
   tmux
   vim
   fzf
-  gotop
   btop          # vitals-block left-click (float terminal) — memory/cpu/temp/gpu
   ncdu          # disk-block right-click — ncdu on the fullest mount
   wget
