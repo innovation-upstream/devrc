@@ -54,7 +54,9 @@ if grep -q 'airvpn-updown' "${CONF}"; then
   echo "[2/5] PostUp/PreDown hooks already present — skipping."
 else
   echo "[2/5] Appending PostUp/PreDown killswitch hooks to [Interface]..."
-  cp "${CONF}" "${CONF}.bak.airvpn-apply"
+  # 0600 backup — the conf holds the [Interface] PrivateKey; a default-umask cp
+  # would leave a world-readable (0644) copy of the secret at a predictable path.
+  ( umask 077; cp "${CONF}" "${CONF}.bak.airvpn-apply" )
   sed -i '/^\[Interface\]/a PostUp = /etc/nixos/i3blocks-scripts/airvpn-updown up %i\nPreDown = /etc/nixos/i3blocks-scripts/airvpn-updown down %i' "${CONF}"
   if ! grep -q 'airvpn-updown' "${CONF}"; then
     echo "  -> ERROR: no [Interface] line to anchor to. Add these two lines under" >&2
@@ -83,7 +85,19 @@ if grep -q 'airvpn-host.nix' "${CONFIG}"; then
   echo "  -> import already present — skipping."
 else
   cp "${CONFIG}" "${CONFIG}.bak.airvpn-host"
-  # Insert ./airvpn-host.nix as the first entry of the existing imports = [ ... ] list,
+  # Guard: only auto-insert when there is EXACTLY ONE `imports = [` list. If a nested
+  # module list (e.g. home-manager.users.zach = { imports = [ ... ]; }) also matches,
+  # `0,/re/` would anchor on whichever comes first and could inject the SYSTEM module
+  # into the wrong list → a cryptic eval failure. Refuse to guess instead.
+  n_imports="$(grep -cE '^[[:space:]]*imports[[:space:]]*=[[:space:]]*\[' "${CONFIG}" || true)"
+  if [[ "${n_imports}" != "1" ]]; then
+    echo "  -> ERROR: found ${n_imports} single-line 'imports = [' list(s) in ${CONFIG}." >&2
+    echo "     Refusing to guess which is the top-level system list. Add" >&2
+    echo "       ./airvpn-host.nix" >&2
+    echo "     to the top-level imports list manually, then re-run." >&2
+    exit 1
+  fi
+  # Insert ./airvpn-host.nix as the first entry of that imports = [ ... ] list,
   # preserving the leading indentation (empty-regex reuse keeps the address's \1 group).
   sed -i '0,/^\(\s*\)imports\s*=\s*\[/s//&\n\1  .\/airvpn-host.nix/' "${CONFIG}"
   if ! grep -q 'airvpn-host.nix' "${CONFIG}"; then
