@@ -10,20 +10,22 @@ This is the WHOLE-HOST AirVPN tunnel (the workbench routes through AirVPN),
 REPLACING the decommissioned host Mullvad block. It is SEPARATE from the qBit-pod
 AirVPN tunnel (that is the `media` block) — do not confuse the two.
 
-State philosophy (mirrors the old host-VPN block: colour is reserved for things
-that need ATTENTION; a deliberately-toggled tunnel is NOT an alarm):
-  tunnel DOWN (the default-off steady state)      -> dim NEUTRAL `VPN off`
-      (deliberately visible, NOT hidden: the pill is the left-click target that
+Display philosophy: a MINIMAL icon button that matches the rest of the bar's
+icon+token blocks — the `net_vpn` glyph carries the identity, a short token carries
+the state, and colour is reserved for things that need ATTENTION (a deliberately-
+toggled tunnel is NOT an alarm). No prose ("VPN off"/"AirVPN …") on the pill; the
+full status line lives in the menu header + the detail TUI.
+  tunnel DOWN (the default-off steady state)      -> dim NEUTRAL icon ONLY (no text)
+      (deliberately rendered, NOT hidden: the icon is the left-click target that
        opens the menu to Connect — a hidden pill can't be clicked.)
-  tunnel UP + exit-IP verified as the tunnel      -> NEUTRAL `AirVPN CC` (net_vpn)
-       (+ a small handshake age when known, e.g. `AirVPN CA ·1m`)
-  tunnel UP + exit-IP could not be verified        -> NEUTRAL `AirVPN CC?`
+  tunnel UP + exit-IP verified as the tunnel      -> NEUTRAL `<icon> CC` (e.g. `CA`)
+  tunnel UP + exit-IP could not be verified        -> NEUTRAL `<icon> CC?`
        (unknown != leak; don't cry wolf on a transient ipinfo failure)
   tunnel UP + LEAK detected (exit IP is the host's real ISP IP / home country)
-                                                   -> RED (Critical) `AirVPN ⚠ LEAK`
+                                                   -> RED (Critical) `<icon> LEAK`
        (a leak IS worth crying about — the whole point of the killswitch)
-  tunnel UP + forwarded port configured but DOWN   -> YELLOW (Warning) `AirVPN CC ⚠port`
-  poller stale / error / missing / corrupt cache   -> soft-yellow `VPN?` (Warning),
+  tunnel UP + forwarded port configured but DOWN   -> YELLOW (Warning) `<icon> CC!`
+  poller stale / error / missing / corrupt cache   -> soft-yellow icon ONLY (Warning),
        never red (avoid crying wolf on a transient poller hiccup)
 
 The left-click (airvpn-menu) and right-click (airvpn-detail float term) are wired
@@ -38,8 +40,10 @@ ICON = "net_vpn"          # deliberately DIFFERS from the media block's net_down
 _VALID_STATES = ("Idle", "Info", "Good", "Warning", "Critical")
 # Soft-yellow "status unknown" pill: the poller couldn't determine tunnel state,
 # OR the cache is missing/corrupt/stale. NOT red (transient), NOT hidden.
-_STALE = {"icon": ICON, "text": "VPN?", "short_text": "VPN?", "state": "Warning"}
-_OFF = {"icon": ICON, "text": "VPN off", "short_text": "off", "state": "Idle"}
+# Icon-ONLY pills (minimal, match the rest of the bar): the glyph is the whole
+# button — off is dim/neutral, stale is soft-yellow. Empty text renders just the icon.
+_STALE = {"icon": ICON, "text": "", "short_text": "", "state": "Warning"}
+_OFF = {"icon": ICON, "text": "", "short_text": "", "state": "Idle"}
 
 
 def cache_path() -> str:
@@ -56,21 +60,6 @@ def load(path):
         return None
 
 
-def _fmt_age(secs) -> str:
-    """Compact handshake age: '3s', '1m', '2h'; '' if unknown/negative."""
-    try:
-        n = int(secs)
-    except (TypeError, ValueError):
-        return ""
-    if n < 0:
-        return ""
-    if n < 90:
-        return "%ds" % n
-    if n < 90 * 60:
-        return "%dm" % (n // 60)
-    return "%dh" % (n // 3600)
-
-
 def _cc(payload) -> str:
     """Short country label for the pill: country_code upper, else first-2 of name."""
     cc = payload.get("country_code")
@@ -85,10 +74,11 @@ def _cc(payload) -> str:
 def render(payload) -> dict:
     """Pure: cache payload (facts written by parse_airvpn) -> i3status-rust block.
 
-    None / malformed / stale / error -> soft-yellow `VPN?`. Tunnel down -> dim
-    `VPN off`. Up: neutral (verified/unknown), RED on leak, yellow on a down
-    forwarded port. Colour is reserved for the leak (critical) + port-down
-    (warning) attention cases; everything else is neutral.
+    A MINIMAL icon button. None / malformed / stale / error -> soft-yellow icon
+    only. Tunnel down -> dim icon only. Up: neutral `CC` (verified) / `CC?`
+    (unknown), RED `LEAK`, yellow `CC!` on a down forwarded port. Colour is
+    reserved for the leak (critical) + port-down (warning) attention cases; the
+    verbose status line lives in the menu header + detail TUI, not the pill.
     """
     if not isinstance(payload, dict):
         return dict(_STALE)                       # missing / corrupt cache
@@ -100,22 +90,18 @@ def render(payload) -> dict:
     cc = _cc(payload)
     verdict = payload.get("verdict")
     if verdict == "leak":
-        return {"icon": ICON, "text": "AirVPN ⚠ LEAK",
+        return {"icon": ICON, "text": "LEAK",
                 "short_text": "LEAK", "state": "Critical"}
 
     fwd = payload.get("fwd_verdict")
     if fwd == "down":
-        return {"icon": ICON, "text": "AirVPN %s ⚠port" % cc,
-                "short_text": "%s ⚠" % cc, "state": "Warning"}
+        return {"icon": ICON, "text": "%s!" % cc,
+                "short_text": "%s!" % cc, "state": "Warning"}
 
     # verified or unknown -> neutral. Unknown gets a subtle '?' but stays calm.
     mark = "" if verdict == "verified" else "?"
-    age = _fmt_age(payload.get("handshake_age"))
-    text = "AirVPN %s%s" % (cc, mark)
-    if age:
-        text += " ·%s" % age
-    return {"icon": ICON, "text": text, "short_text": "%s%s" % (cc, mark),
-            "state": "Idle"}
+    text = "%s%s" % (cc, mark)
+    return {"icon": ICON, "text": text, "short_text": text, "state": "Idle"}
 
 
 def main() -> int:
