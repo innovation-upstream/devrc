@@ -71,17 +71,41 @@ KS_TABLE="airvpn_ks"
 
 log() { logger -t airvpn-updown "$*" 2>/dev/null || echo "airvpn-updown: $*" >&2; }
 
+# Blanket FAIL-CLOSED ruleset — installed only if the main killswitch nft load
+# fails, so an nft error can never leave the uplink UNFILTERED (fail-open). Minimal
+# on purpose (no dynamic PHYS_SET / fwmark / EP substitution that could be what
+# broke the main load): allow internal ifaces + nebula (skuid) + LAN + lighthouse,
+# drop the rest. Keeps the operator reachable while still stopping an internet leak.
+arm_failclosed() {
+    nft add table inet "$KS_TABLE" 2>/dev/null || true
+    nft flush table inet "$KS_TABLE" 2>/dev/null || true
+    nft -f - <<FB || log "FALLBACK nft load ALSO FAILED — uplink is NOT filtered!"
+table inet ${KS_TABLE} {
+    chain out {
+        type filter hook output priority 0; policy accept;
+        oifname { "lo", "${IFACE}", "nebula.mesh", "cni0", "flannel.1", "docker0" } accept
+        meta skuid "${NEBULA_USER}" accept
+        ip daddr ${LAN_SUBNET} accept
+        ip daddr ${NEBULA_LIGHTHOUSE} accept
+        drop
+    }
+}
+FB
+}
+
 # Original default gateway + physical iface (the default route NOT via the tunnel).
 # Used for the split-tunnel bypass ROUTES (they need one specific gateway).
 orig_gw()   { ip -o route show default 2>/dev/null | grep -v "dev ${IFACE}" | awk '{print $3}' | head -1; }
 orig_if()   { ip -o route show default 2>/dev/null | grep -v "dev ${IFACE}" | awk '{print $5}' | head -1; }
 
-# ALL physical NICs (hardware devices), one name per line — the COMPLETE leak
-# surface for the killswitch. `/sys/class/net/<if>/device` exists only for real
-# hardware (PCI/USB) NICs; virtual ifaces (lo, wg/airvpn, nebula.mesh tun, cni0
-# bridge, flannel.1 vxlan, docker0, veth*) have no such symlink and are never
-# policed. Derived from hardware presence (not the default route) so it covers
-# multi-homed hosts and a NIC that gets routed after PostUp.
+# ALL physical NICs (hardware devices), one name per line. `/sys/class/net/<if>/
+# device` exists only for real hardware (PCI/USB) NICs; virtual ifaces (lo, wg/
+# airvpn, nebula.mesh tun, cni0 bridge, flannel.1 vxlan, docker0, veth*) have no
+# such symlink. Derived from hardware presence (not the default route) so it covers
+# multi-homed hosts and a NIC that gets routed after PostUp. NOTE: the policed set
+# (below) UNIONS this with the live default-route egress iface — because a
+# bridge/bond/VLAN uplink (br0, bond0, eth1.100) carries internet but has NO device
+# symlink, so hardware-presence ALONE would trust (leak) it (#128 audit 🟡).
 phys_ifaces() {
     local d n
     for d in /sys/class/net/*/device; do
@@ -99,7 +123,14 @@ endpoint_ip() {
 case "$action" in
     up)
         GW="$(orig_gw)"; PHYS="$(orig_if)"
-        mapfile -t PHYS_SET < <(phys_ifaces)
+        # Policed set = ALL hardware NICs UNION the live default-route egress iface(s)
+        # (excluding the tunnel). The union closes the bridge/bond/VLAN blind spot: those
+        # carry internet but have no /sys device, so hardware-presence alone would leak
+        # them; adding the actual egress iface polices whatever the default route uses.
+        mapfile -t PHYS_SET < <(
+            { phys_ifaces
+              ip -o route show default 2>/dev/null | grep -v "dev ${IFACE}" | awk '{print $5}'
+            } | sort -u)
 
         # --- split-tunnel bypass routes (need ONE gateway; skip + warn if absent,
         #     but STILL arm the killswitch below so we never fail OPEN) -------------
@@ -133,7 +164,7 @@ case "$action" in
         fi
         nft add table inet "$KS_TABLE" 2>/dev/null || true
         nft flush table inet "$KS_TABLE" 2>/dev/null || true
-        nft -f - <<NFT || log "killswitch nft load failed (traffic NOT fail-closed)"
+        nft -f - <<NFT || { log "killswitch nft load FAILED — installing blanket fail-closed fallback"; arm_failclosed; }
 table inet ${KS_TABLE} {
     chain out {
         type filter hook output priority 0; policy accept;
@@ -159,7 +190,6 @@ NFT
         ;;
     down)
         nft delete table inet "$KS_TABLE" 2>/dev/null || true
-        GW="$(cat "$GW_FILE" 2>/dev/null || true)"
         for dst in "$NEBULA_LIGHTHOUSE" "$LAN_ROUTER"; do
             ip route del "$dst" 2>/dev/null || true
         done
