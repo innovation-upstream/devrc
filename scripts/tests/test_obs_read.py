@@ -15,7 +15,10 @@ cleanup-on-error.
 """
 import importlib.machinery
 import importlib.util
+import io
 import json
+import os
+import signal
 import subprocess
 import sys
 from pathlib import Path
@@ -252,6 +255,16 @@ def test_validated_presets_reference_a_file_source():
             assert ":" in p.source  # a file:line reference
 
 
+def test_traefik_500_preset_groups_by_path_matching_source():
+    # regression: the source (investigate-dp-errors:271) groups `by (path)` to
+    # find WHICH endpoint 500s; a `by (code)` variant collapses to ~1 bucket and
+    # is less diagnostic. Keep it verbatim-to-source while tagged validated.
+    p = obs.PRESETS_BY_NAME["dp-traefik-500-by-path"]
+    assert "sum by (path)" in p.query
+    assert "by (code)" not in p.query
+    assert p.validated is True
+
+
 # =========================================================================== #
 # URL building (pure)
 # =========================================================================== #
@@ -342,10 +355,13 @@ def test_render_json_real_zero_no_warning():
 # Port-forward lifecycle — cleanup on success AND on error
 # =========================================================================== #
 class FakeProc:
-    def __init__(self, alive=True):
+    def __init__(self, alive=True, pid=None, stderr_text=None):
         self._alive = alive
         self.terminated = False
         self.waited = False
+        self.pid = pid                      # None -> _kill_process_group no-ops
+        self.stderr = (io.StringIO(stderr_text) if stderr_text is not None
+                       else None)
 
     def poll(self):
         return None if self._alive else 0
@@ -415,6 +431,156 @@ def test_query_backend_injected_transport_no_cluster():
 
 
 # =========================================================================== #
+# KUBECONFIG override — the #1-priority "can't hit ambient/wrong cluster"
+# invariant (locks the env= actually handed to the kubectl child)
+# =========================================================================== #
+def test_port_forward_forces_named_kubeconfig_and_overrides_ambient(monkeypatch):
+    # a hostile ambient KUBECONFIG that must NOT leak through
+    monkeypatch.setenv("KUBECONFIG", "/ambient/WRONG/cluster")
+    captured = {}
+
+    def fake_popen(argv, **kw):
+        captured["argv"] = argv
+        captured["env"] = kw.get("env")
+        captured["start_new_session"] = kw.get("start_new_session")
+        captured["stderr"] = kw.get("stderr")
+        return FakeProc()
+
+    pf = obs.PortForward("/named/homelab-kubeconfig", obs.BACKENDS["prometheus"],
+                         popen=fake_popen, wait_ready=lambda *a, **k: None)
+    with pf:
+        pass
+    # (a) the named cluster's kubeconfig is forced onto the child
+    assert captured["env"]["KUBECONFIG"] == "/named/homelab-kubeconfig"
+    # (b) the ambient KUBECONFIG is OVERRIDDEN, not inherited
+    assert captured["env"]["KUBECONFIG"] != "/ambient/WRONG/cluster"
+    # (c) child is in its own session so a signal can killpg the group
+    assert captured["start_new_session"] is True
+    # kubectl is actually the argv, forwarding the right svc
+    assert captured["argv"][0] == "kubectl"
+    assert "svc/kube-prometheus-stack-prometheus" in captured["argv"]
+
+
+# =========================================================================== #
+# Signal-safe teardown — SIGTERM must run __exit__ / killpg (no leaked tunnel)
+# =========================================================================== #
+def test_sigterm_raises_systemexit_and_restores_handler():
+    prev = signal.getsignal(signal.SIGTERM)
+    with pytest.raises(SystemExit):
+        with obs._sigterm_raises():
+            # inside the block SIGTERM is converted to SystemExit (so enclosing
+            # context managers unwind) instead of the default silent kill
+            os.kill(os.getpid(), signal.SIGTERM)
+    # handler restored to whatever it was before the block
+    assert signal.getsignal(signal.SIGTERM) == prev
+
+
+def test_port_forward_torn_down_on_sigterm():
+    # THE headline claim: a SIGTERM mid-query must tear the forward down.
+    proc = FakeProc()
+    pf = obs.PortForward("/kc", obs.BACKENDS["prometheus"],
+                         popen=lambda *a, **k: proc,
+                         wait_ready=lambda *a, **k: None)
+    with pytest.raises(SystemExit):
+        with obs._sigterm_raises():
+            with pf as port:
+                assert port > 0
+                os.kill(os.getpid(), signal.SIGTERM)
+    assert proc.terminated is True             # __exit__ ran despite SIGTERM
+
+
+def test_terminate_kills_process_group(monkeypatch):
+    # with a real pid, _terminate must attempt a process-GROUP kill (reaps the
+    # kubectl child + any grandchild), not just proc.terminate().
+    killed = {}
+    monkeypatch.setattr(obs, "_kill_process_group",
+                        lambda proc: killed.setdefault("pid", proc.pid))
+    proc = FakeProc(pid=4242)
+    pf = obs.PortForward("/kc", obs.BACKENDS["prometheus"],
+                         popen=lambda *a, **k: proc,
+                         wait_ready=lambda *a, **k: None)
+    with pf:
+        pass
+    assert killed.get("pid") == 4242
+    assert proc.terminated is True             # belt-and-braces child kill too
+
+
+def test_kill_process_group_noop_without_pid():
+    # a fake proc with pid=None must NOT blow up (no os.killpg on a None pid)
+    obs._kill_process_group(FakeProc(pid=None))   # should simply return
+
+
+# =========================================================================== #
+# kubectl stderr surfaced on early exit (#4)
+# =========================================================================== #
+def test_wait_ready_surfaces_kubectl_stderr():
+    err = 'Error from server (NotFound): services "pyroscope" not found'
+    proc = FakeProc(alive=False, stderr_text=err + "\n")
+    with pytest.raises(RuntimeError) as ei:
+        obs._wait_ready(12345, "/ready", 1.0, proc=proc)
+    assert "NotFound" in str(ei.value)
+    assert "exited early" in str(ei.value)
+
+
+def test_wait_ready_early_exit_without_stderr_still_raises():
+    proc = FakeProc(alive=False)               # no stderr stream
+    with pytest.raises(RuntimeError) as ei:
+        obs._wait_ready(12345, "/ready", 1.0, proc=proc)
+    assert "exited early" in str(ei.value)
+
+
+# =========================================================================== #
+# HTTP error body surfaced (#6) — malformed PromQL -> 400 + JSON error
+# =========================================================================== #
+def test_http_get_surfaces_error_body(monkeypatch):
+    import urllib.error
+
+    def boom(req, timeout=None):
+        raise urllib.error.HTTPError(
+            req.full_url, 400, "Bad Request", {},
+            io.BytesIO(b'{"status":"error","error":"unexpected end of query"}'))
+
+    monkeypatch.setattr(obs.urllib.request, "urlopen", boom)
+    with pytest.raises(RuntimeError) as ei:
+        obs._http_get("http://127.0.0.1:9090/api/v1/query?query=sum(")
+    msg = str(ei.value)
+    assert "400" in msg
+    assert "unexpected end of query" in msg     # the BODY, not a bare code
+
+
+# =========================================================================== #
+# Expected-absence preset (#5) — empty renders calm OK, not the ⚠ banner
+# =========================================================================== #
+def test_absence_ok_empty_renders_calm_ok_not_warning():
+    qr = obs.parse_prometheus(prom_empty())
+    out, err = obs.render(qr, False, "q", "homelab", "prometheus",
+                          absence_ok=True)
+    assert err == ""                            # NO scary stderr banner
+    assert "OK" in out and "MATCHED NOTHING" not in out
+
+
+def test_absence_ok_json_marks_ok_absent_not_warning():
+    qr = obs.parse_prometheus(prom_empty())
+    out, _ = obs.render(qr, True, "q", "homelab", "prometheus", absence_ok=True)
+    doc = json.loads(out)
+    assert doc["matched_nothing"] is True
+    assert doc.get("status") == "ok-absent"
+    assert "warning" not in doc
+
+
+def test_absence_ok_off_still_warns():
+    qr = obs.parse_prometheus(prom_empty())
+    _, err = obs.render(qr, False, "q", "homelab", "prometheus",
+                        absence_ok=False)
+    assert "MATCHED NOTHING" in err
+
+
+def test_homelab_alerts_preset_is_absence_ok():
+    p = obs.PRESETS_BY_NAME["homelab-alerts-firing"]
+    assert p.absence_ok is True
+
+
+# =========================================================================== #
 # main() end-to-end with injected transport (no cluster, no network)
 # =========================================================================== #
 def _fake_pf(payload_holder):
@@ -473,6 +639,24 @@ def test_main_silent_zero_warns_and_exit0(capsys, tmp_path):
     assert rc == 0
     assert "MATCHED NOTHING" in cap.err     # loud on stderr
     assert "0" not in cap.out or "no series" in cap.out
+
+
+def test_main_absence_ok_preset_empty_renders_calm_ok(capsys, tmp_path):
+    # homelab-alerts-firing with nothing firing -> empty result -> calm OK on
+    # stdout, NOT the ⚠ banner on stderr (guard keeps its credibility).
+    kc = tmp_path / "kc"
+    kc.write_text("x")
+    env = {"KC_HOMELAB": str(kc)}
+
+    def fake_http(url, timeout=15.0):
+        return prom_empty()
+
+    rc = obs.main(["--cluster", "homelab", "--preset", "homelab-alerts-firing"],
+                  pf_factory=_fake_pf(None), http_get=fake_http, env=env)
+    cap = capsys.readouterr()
+    assert rc == 0
+    assert "OK" in cap.out
+    assert "MATCHED NOTHING" not in cap.err
 
 
 def test_main_list_presets(capsys):

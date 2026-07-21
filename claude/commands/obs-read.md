@@ -43,6 +43,10 @@ scripts/obs-read --cluster homelab --backend loki --query '{namespace="monitorin
   confirmed zero` banner on stderr. Treat it as "check the metric/label exists",
   not as a real 0.
 - **matched, value 0** → rendered normally with a `note: … a REAL zero`.
+- **expected-absence presets** (e.g. `homelab-alerts-firing`, where empty = "no
+  alerts firing" = healthy) carry an `absence_ok` flag, so an empty result renders
+  a calm `✓ OK — nothing firing` instead of the ⚠ banner — the guard stays loud
+  only where empty is genuinely suspicious.
 
 ## Presets
 Seeded from **real** queries surveyed out of the datapacket skills
@@ -57,3 +61,9 @@ validated preset; treat unvalidated ones as starting points.
 - Operated deterministically — no LLM in the path. Extend the preset library or
   wiring in `scripts/obs-read`; tests are `scripts/tests/test_obs_read.py`.
 - `--since` applies to range/profile queries (Loki, Pyroscope, `--kind range`).
+- Signal-safe teardown: kubectl runs in its own session and is torn down by
+  killing the process group on success/error/SIGINT/SIGTERM (no leaked tunnel).
+- Known limitations (documented, unchanged): a matched-nothing result still exits
+  0 (check the `--json` `matched_nothing`/`warning` fields to fail a pipeline);
+  `_free_port` has a sub-ms TOCTOU window (kubectl fails loudly, surfaced via its
+  captured stderr, if the port is taken).
