@@ -55,7 +55,8 @@
         pkgs.runCommandLocal "devrc-pytests"
           {
             # ripgrep: one repo-cos prescan test skipif's without it on PATH.
-            nativeBuildInputs = [ pyEnv pkgs.bash pkgs.ripgrep ];
+            # git: verify-agent-work tests drive real temp git repos in-sandbox.
+            nativeBuildInputs = [ pyEnv pkgs.bash pkgs.ripgrep pkgs.git ];
           }
           ''
             cp -r ${./.} src
