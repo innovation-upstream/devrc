@@ -296,33 +296,107 @@ def test_plan_ts_typecheck_and_test(tmp_path):
 def test_plan_ts_tsc_fallback_when_no_script(tmp_path):
     write(tmp_path / "package.json", json.dumps({"dependencies": {"x": "1"}}))
     write(tmp_path / "tsconfig.json", "{}")
-    write(tmp_path / "node_modules" / ".keep", "") if False else (tmp_path / "node_modules").mkdir()
+    (tmp_path / "node_modules").mkdir()
     stacks = vaw.detect_stacks(tmp_path)
-    specs, skips = vaw.build_gate_plan(tmp_path, stacks, {}, node_ok=True)
+    specs, aux = vaw.build_gate_plan(tmp_path, stacks, {}, node_ok=True)
     tc = next(s for s in specs if s.name == "ts:typecheck")
     assert tc.cmd == ["npx", "--no-install", "tsc", "--noEmit"]
-    # no test script → skipped
-    assert any(s.name == "ts:test" and s.status == vaw.SKIP for s in skips)
+    # a runnable gate (typecheck) resolved → stack is NOT incomplete even though
+    # there's no test script.
+    assert not any(c.status == vaw.INCOMPLETE for c in aux)
 
 
-def test_plan_ts_skipped_when_node_not_ok(tmp_path):
+def test_plan_ts_no_runnable_gate_is_incomplete(tmp_path):
+    # package.json with deps but NO typecheck/test script and NO tsconfig →
+    # nothing authoritative to run → INCOMPLETE, never a silent green.
+    write(tmp_path / "package.json", json.dumps({"dependencies": {"x": "1"}}))
+    (tmp_path / "node_modules").mkdir()
+    stacks = vaw.detect_stacks(tmp_path)
+    specs, aux = vaw.build_gate_plan(tmp_path, stacks, {}, node_ok=True)
+    assert _plan_names(specs) == []
+    ts_aux = [c for c in aux if c.name == "ts"]
+    assert ts_aux and ts_aux[0].status == vaw.INCOMPLETE
+
+
+def test_plan_ts_incomplete_when_node_not_ok(tmp_path):
     write(tmp_path / "package.json", json.dumps({"scripts": {"typecheck": "tsc"}}))
     stacks = vaw.detect_stacks(tmp_path)
-    specs, skips = vaw.build_gate_plan(tmp_path, stacks, {}, node_ok=False)
+    specs, aux = vaw.build_gate_plan(tmp_path, stacks, {}, node_ok=False)
     assert _plan_names(specs) == []  # nothing runs
-    skip_names = {s.name for s in skips}
-    assert {"ts:typecheck", "ts:test"} <= skip_names
-    assert all(s.status == vaw.SKIP for s in skips)
+    ts_aux = [c for c in aux if c.name == "ts"]
+    assert ts_aux and ts_aux[0].status == vaw.INCOMPLETE
 
 
-def test_plan_go(tmp_path):
+def test_plan_monorepo_no_root_script_resolves_members(tmp_path):
+    # workspace root with NO root typecheck/test script → fan out to members.
+    write(
+        tmp_path / "package.json",
+        json.dumps({"private": True, "workspaces": ["packages/*"]}),
+    )
+    pkg_a = tmp_path / "packages" / "a"
+    pkg_a.mkdir(parents=True)
+    write(pkg_a / "package.json", json.dumps({"scripts": {"typecheck": "tsc"}}))
+    stacks = vaw.detect_stacks(tmp_path)
+    assert stacks["ts"]["is_workspace_root"] is True
+    specs, aux = vaw.build_gate_plan(tmp_path, stacks, {}, node_ok=True)
+    names = _plan_names(specs)
+    assert any(n.startswith("ts:typecheck[a]") for n in names)
+    assert not any(c.status == vaw.INCOMPLETE for c in aux)
+
+
+def test_plan_monorepo_no_runnable_member_is_incomplete(tmp_path):
+    # workspace root, members have no scripts/tsconfig → nothing runs → INCOMPLETE.
+    write(
+        tmp_path / "package.json",
+        json.dumps({"private": True, "workspaces": ["packages/*"]}),
+    )
+    pkg_a = tmp_path / "packages" / "a"
+    pkg_a.mkdir(parents=True)
+    write(pkg_a / "package.json", json.dumps({"name": "a"}))
+    stacks = vaw.detect_stacks(tmp_path)
+    specs, aux = vaw.build_gate_plan(tmp_path, stacks, {}, node_ok=True)
+    assert _plan_names(specs) == []
+    assert any(c.name == "ts" and c.status == vaw.INCOMPLETE for c in aux)
+
+
+def test_plan_pnpm_workspace_detected(tmp_path):
+    write(tmp_path / "package.json", json.dumps({"private": True}))
+    write(tmp_path / "pnpm-workspace.yaml", "packages:\n  - 'apps/*'\n  - 'libs/*'\n")
+    globs = vaw.detect_stacks(tmp_path)["ts"]["workspace_globs"]
+    assert "apps/*" in globs and "libs/*" in globs
+
+
+def test_plan_go_race_when_cgo(tmp_path):
     write(tmp_path / "go.mod", "module x\n")
     stacks = vaw.detect_stacks(tmp_path)
-    specs, _ = vaw.build_gate_plan(tmp_path, stacks, {}, node_ok=True)
-    names = _plan_names(specs)
-    assert names == ["go:build", "go:vet", "go:test"]
+    # force cgo/race ON via config so the assertion is deterministic
+    specs, _ = vaw.build_gate_plan(tmp_path, stacks, {"go": {"race": True}}, node_ok=True)
+    assert _plan_names(specs) == ["go:build", "go:vet", "go:test"]
     test_spec = next(s for s in specs if s.name == "go:test")
     assert "go test -race ./..." in " ".join(test_spec.cmd)
+
+
+def test_plan_go_no_race_when_cgo_unavailable(tmp_path):
+    write(tmp_path / "go.mod", "module x\n")
+    stacks = vaw.detect_stacks(tmp_path)
+    specs, aux = vaw.build_gate_plan(tmp_path, stacks, {"go": {"race": False}}, node_ok=True)
+    test_spec = next(s for s in specs if s.name == "go:test")
+    cmd = " ".join(test_spec.cmd)
+    assert "-race" not in cmd
+    assert "go test ./..." in cmd
+    assert any(c.name == "go:race" and c.status == vaw.SKIP for c in aux)
+
+
+def test_plan_nested_go_modules(tmp_path):
+    write(tmp_path / "go.mod", "module root\n")
+    nested = tmp_path / "sub" / "svc"
+    nested.mkdir(parents=True)
+    write(nested / "go.mod", "module svc\n")
+    stacks = vaw.detect_stacks(tmp_path)
+    specs, _ = vaw.build_gate_plan(tmp_path, stacks, {"go": {"race": True}}, node_ok=True)
+    names = _plan_names(specs)
+    assert "go:build" in names  # root module
+    assert any("[sub/svc]" in n for n in names)  # nested module covered
 
 
 def test_plan_nix_default_parse(tmp_path):
@@ -443,25 +517,87 @@ def test_verify_strict_promotes_warn(tmp_path):
     assert res.exit_code == 1  # strict promotes WARN
 
 
-def test_verify_node_modules_footgun_skips_ts(tmp_path):
+def test_verify_node_modules_footgun_is_incomplete_nonzero(tmp_path):
+    # broken node_modules for a DETECTED TS stack: the typecheck genuinely did
+    # not run → INCOMPLETE + non-zero, NOT a silent green. The env WARN explains
+    # WHY (attributes a 'cannot find module' flood to env, not code).
     init_repo(tmp_path)
     write(tmp_path / "package.json", json.dumps({"dependencies": {"x": "1"}}))
     commit_all(tmp_path)
     res = vaw.verify(tmp_path, use_gh=False, gate_runner=_fake_runner({}))
     by = _by_name(res.checks)
     assert by["env:node_modules"].status == vaw.WARN
-    assert by["ts:typecheck"].status == vaw.SKIP
-    assert by["ts:test"].status == vaw.SKIP
-    assert res.exit_code == 0  # env issue is a WARN, not a code failure
+    assert by["ts"].status == vaw.INCOMPLETE
+    assert res.verdict == vaw.INCOMPLETE
+    assert res.exit_code == 1
 
 
-def test_verify_no_stack_still_runs_git(tmp_path):
+def test_verify_incomplete_makes_nonzero(tmp_path):
+    # a detected stack whose gate returns INCOMPLETE (e.g. missing toolchain)
+    # must never count as an overall PASS.
+    init_repo(tmp_path)
+    write(tmp_path / "go.mod", "module x\n")
+    commit_all(tmp_path)
+    res = vaw.verify(
+        tmp_path, use_gh=False, gate_runner=_fake_runner({"go:build": vaw.INCOMPLETE})
+    )
+    assert res.verdict == vaw.INCOMPLETE
+    assert res.exit_code == 1
+
+
+def test_verify_no_stack_present_is_pass(tmp_path):
+    # the legitimate PASS: nothing to verify → PASS / exit 0.
     init_repo(tmp_path)
     write(tmp_path / "README.md", "hi")
     commit_all(tmp_path)
     res = vaw.verify(tmp_path, use_gh=False, gate_runner=_fake_runner({}))
     assert res.stacks == []
     assert any(c.name == "git:clean-tree" for c in res.checks)
+    assert res.verdict == vaw.PASS
+    assert res.exit_code == 0
+
+
+# --------------------------------------------------------------------------- #
+# run_gate: missing-toolchain / exit-127 → INCOMPLETE (real subprocess)
+# --------------------------------------------------------------------------- #
+
+
+def test_run_gate_pass_real(tmp_path):
+    spec = vaw.GateSpec("probe", ["true"], tmp_path, tool="true")
+    chk = vaw.run_gate(spec)
+    assert chk.status == vaw.PASS
+
+
+def test_run_gate_fail_real(tmp_path):
+    spec = vaw.GateSpec("probe", ["bash", "-c", "echo boom >&2; exit 3"], tmp_path, tool="bash")
+    chk = vaw.run_gate(spec)
+    assert chk.status == vaw.FAIL
+    assert "boom" in chk.output
+
+
+def test_run_gate_missing_tool_is_incomplete(tmp_path):
+    spec = vaw.GateSpec("ts:typecheck", ["pnpm", "run", "typecheck"], tmp_path,
+                        tool="definitely-not-a-real-tool-xyz")
+    chk = vaw.run_gate(spec)
+    assert chk.status == vaw.INCOMPLETE
+    assert "not found" in chk.summary
+
+
+def test_run_gate_exit127_is_incomplete(tmp_path):
+    # inner tool missing under a `bash -c` wrapper (tool=bash exists) → 127.
+    spec = vaw.GateSpec("go:build", ["bash", "-c", "definitely-not-a-real-tool-xyz build"],
+                        tmp_path, tool="bash")
+    chk = vaw.run_gate(spec)
+    assert chk.status == vaw.INCOMPLETE
+
+
+def test_python_no_gate_is_incomplete(tmp_path):
+    # requirements.txt but no ruff, no pytest config, no tests dir → INCOMPLETE.
+    write(tmp_path / "requirements.txt", "requests\n")
+    stacks = vaw.detect_stacks(tmp_path)
+    specs, aux = vaw.build_gate_plan(tmp_path, stacks, {}, node_ok=True)
+    assert _plan_names(specs) == []
+    assert any(c.name == "python" and c.status == vaw.INCOMPLETE for c in aux)
 
 
 # --------------------------------------------------------------------------- #
