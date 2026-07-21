@@ -1,0 +1,915 @@
+#!/usr/bin/env python3
+"""obs-read — one-command, cluster-aware observability query tool.
+
+Collapses the chain that got hand-rebuilt in every incident/perf session:
+    kubectl port-forward -> ad-hoc PromQL/LogQL -> inline python parse ->
+    re-aggregate -> tear the port-forward down
+into a single deterministic command that OWNS the port-forward lifecycle,
+carries a library of REAL (surveyed, not invented) queries, and — the whole
+point — makes the silent-zero failure impossible to miss.
+
+THE SILENT-ZERO GUARD (the key feature)
+---------------------------------------
+A wrong service/label silently returns ZERO series, and people act on the empty
+result as if it were a confirmed zero. obs-read distinguishes two cases the naked
+tools blur together:
+  * MATCHED NOTHING  — the query resolved to zero series / zero rows / an empty
+    matrix. This is almost always a wrong metric/label/service name, NOT a real
+    zero. It is rendered as a LOUD warning, never as a clean "0".
+  * matched, value 0 — a real series whose current value happens to be 0. This is
+    a genuine zero and is rendered normally (with a small note).
+
+Safety
+------
+  * REQUIRES an explicit --cluster (homelab|workbench|dpprod|nebula) that maps to
+    a pre-exported kubeconfig env handle ($KC_HOMELAB / $KC_WORKBENCH / $KC_DPPROD
+    / $KC_NEBULA). There is NO default cluster by design — a missing handle is a
+    clear error, never a silent wrong-cluster.
+  * Read-only: only queries the backend's read API. No writes, ever.
+  * Bounded timeouts on every kubectl / HTTP call; the port-forward is torn down
+    on success, error, AND signal (guaranteed cleanup).
+
+Backends: prometheus (/api/v1/query[_range]), loki (/loki/api/v1/query_range),
+pyroscope (/pyroscope/render). Output: a readable table, or --json.
+
+Design mirrors scripts/bar-status-poll: the network/kubectl transport is a thin
+injectable shell around PURE parse/guard/render functions, so the whole
+decision surface (cluster mapping, preset resolution, the silent-zero guard,
+table/JSON shaping, port-forward cleanup) is unit-tested offline with no live
+cluster (scripts/tests/test_obs_read.py).
+
+Examples
+--------
+    obs-read --list-presets
+    obs-read --cluster dpprod --preset dp-5xx-rate
+    obs-read --cluster dpprod --preset dp-trpc-errors --since 30m
+    obs-read --cluster homelab --backend prometheus --query 'up{job="kubelet"}'
+    obs-read --cluster dpprod --preset dp-code-breakdown --json
+"""
+from __future__ import annotations
+
+import argparse
+import contextlib
+import json
+import os
+import re
+import signal
+import socket
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+from dataclasses import dataclass, field
+
+# --------------------------------------------------------------------------- #
+# Cluster -> kubeconfig env handle (NO default; a missing handle is an error)
+# --------------------------------------------------------------------------- #
+# These are the pre-exported handles from .zshenv (see devrc CLAUDE.md). The tool
+# reads the *path* out of the env var so it can never guess a cluster: an unset /
+# empty handle -> a loud refusal, not a silent fall-through to some other cluster.
+CLUSTER_KUBECONFIG_ENV = {
+    "homelab": "KC_HOMELAB",
+    "workbench": "KC_WORKBENCH",
+    "dpprod": "KC_DPPROD",
+    "nebula": "KC_NEBULA",
+}
+
+
+# --------------------------------------------------------------------------- #
+# Backends (real service wiring, surveyed from the repos)
+# --------------------------------------------------------------------------- #
+@dataclass(frozen=True)
+class Backend:
+    namespace: str
+    service: str          # kubectl svc/<service>
+    remote_port: int      # svc port to forward to
+    ready_path: str       # HTTP readiness probe on the forwarded port
+    default_kind: str     # "instant" | "range" | "profile"
+
+
+# Sources for the wiring:
+#   prometheus svc/port/ns : homelab + dpprod both use the kube-prometheus-stack
+#     chart -> svc/kube-prometheus-stack-prometheus:9090 in ns monitoring
+#     ($DATAPACKET/.claude/skills/investigate-dp-errors/SKILL.md:35;
+#      $HOMELAB QUICKSTART.md:165).
+#   loki       : svc/loki-gateway:80 in ns monitoring, query api /loki/api/v1
+#     ($DATAPACKET/.claude/skills/investigate-dp-errors/SKILL.md:29;
+#      $HOMELAB clusters/homelab/.../observability/loki.yaml + alloy push url).
+#   pyroscope  : svc/pyroscope:4040 in ns monitoring
+#     ($DATAPACKET/.claude/skills/pyroscope/SKILL.md:18 "svc pyroscope:4040";
+#      $HOMELAB clusters/homelab/.../observability/pyroscope.yaml port 4040).
+BACKENDS = {
+    "prometheus": Backend("monitoring", "kube-prometheus-stack-prometheus",
+                          9090, "/-/ready", "instant"),
+    "loki": Backend("monitoring", "loki-gateway", 80, "/ready", "range"),
+    "pyroscope": Backend("monitoring", "pyroscope", 4040, "/ready", "profile"),
+}
+
+
+# --------------------------------------------------------------------------- #
+# Preset library (seeded from REAL surveyed queries; honestly tagged)
+# --------------------------------------------------------------------------- #
+# validated=True  => the query text was lifted (verbatim / near-verbatim) from a
+#                    real source file in the repos; `source` is that file:line.
+# validated=False => a standard/built-in query NOT lifted from a surveyed session
+#                    (still real metrics, but call it what it is); `note` explains.
+@dataclass(frozen=True)
+class Preset:
+    name: str
+    backend: str
+    query: str
+    kind: str
+    validated: bool
+    source: str
+    note: str = ""
+    cluster_hint: str = ""   # advisory only; --cluster is always explicit
+    # absence_ok: an EMPTY result is the healthy/expected state for this preset
+    # (e.g. "no alerts firing"), so an empty match renders a calm "OK — nothing
+    # matched" instead of the ⚠ silent-zero banner. Keep this OFF for presets
+    # where empty almost always means a wrong label (the default).
+    absence_ok: bool = False
+
+
+PRESETS: list[Preset] = [
+    # --- Prometheus / Traefik error-rate family (dpprod) --------------------
+    Preset("dp-5xx-rate", "prometheus",
+           'sum(rate(traefik_service_requests_total{code=~"5..",'
+           'service=~".*civitai-dp-prod.*"}[30m]))',
+           "instant", True,
+           "$DATAPACKET/.claude/skills/investigate-dp-errors/SKILL.md:45",
+           "civitai-dp-prod 5xx request rate (per second) over 30m.",
+           "dpprod"),
+    Preset("dp-total-rate", "prometheus",
+           'sum(rate(traefik_service_requests_total{'
+           'service=~".*civitai-dp-prod.*"}[30m]))',
+           "instant", True,
+           "$DATAPACKET/.claude/skills/investigate-dp-errors/SKILL.md:54",
+           "civitai-dp-prod total request rate (per second) over 30m.",
+           "dpprod"),
+    Preset("dp-5xx-ratio", "prometheus",
+           'sum(rate(traefik_service_requests_total{code=~"5..",'
+           'service=~".*civitai-dp-prod.*"}[5m])) / '
+           'sum(rate(traefik_service_requests_total{'
+           'service=~".*civitai-dp-prod.*"}[5m]))',
+           "instant", True,
+           "$DATAPACKET/.claude/skills/investigate-dp-errors/SKILL.md:511",
+           "civitai-dp-prod 5xx ratio (5xx / total) over 5m. Healthy <0.0005. "
+           "The two-line 5xx/total division at :511-512 combined into one expr.",
+           "dpprod"),
+    Preset("dp-code-breakdown", "prometheus",
+           'sum by (code) (rate(traefik_service_requests_total{'
+           'service=~".*civitai-dp-prod.*"}[5m]))',
+           "instant", True,
+           "$DATAPACKET/.claude/skills/investigate-dp-errors/SKILL.md:518",
+           "civitai-dp-prod request rate broken down by HTTP code (200/403/5xx).",
+           "dpprod"),
+    Preset("dp-db-read-fallback", "prometheus",
+           "sum(increase(db_read_fallback_total[30m]))",
+           "instant", True,
+           "$DATAPACKET/.claude/skills/investigate-dp-errors/SKILL.md:72",
+           "dbReadFallback increase over 30m (replica-lag indicator; want ~0).",
+           "dpprod"),
+    Preset("dp-healthcheck-p99", "prometheus",
+           "histogram_quantile(0.99, sum by(name,le)(rate("
+           "civitai_app_healthcheck_duration_seconds_bucket{"
+           'namespace="civitai-dp-prod"}[5m])))*1000',
+           "instant", True,
+           "$DATAPACKET/.claude/skills/heap-snapshot/SKILL.md:48",
+           "Per-healthcheck p99 latency (ms); sysRedis ~3300ms = the wedge tell.",
+           "dpprod"),
+    Preset("dp-signals-api-p99", "prometheus",
+           "histogram_quantile(0.99, sum by (le) (rate("
+           "traefik_service_request_duration_seconds_bucket{"
+           'service=~"civitai-signals.*signals-new-api.*"}[5m])))',
+           "instant", True,
+           "$DATAPACKET/.claude/skills/civitai-signals/SKILL.md:294",
+           "signals-new-api p99 request duration (seconds) over 5m.",
+           "dpprod"),
+
+    # --- Loki / LogQL family (dpprod) ---------------------------------------
+    Preset("dp-trpc-errors", "loki",
+           '{namespace="civitai-dp-prod"} |~ "_axiom" |~ "TRPCError"',
+           "range", True,
+           "$DATAPACKET/.claude/skills/investigate-dp-errors/SKILL.md:99",
+           "TRPC error log lines (the _axiom stdout mirror). Use --since to widen.",
+           "dpprod"),
+    Preset("dp-traefik-500-by-path", "loki",
+           'sum by (path) (count_over_time({namespace="traefik"} '
+           '|= "civitai-dp-prod" |~ ` 500 ` '
+           '| pattern `<_> <_> <_> [<_>] "<method> <path> <_>" <code> <_>` '
+           '[30m]))',
+           "range", True,
+           "$DATAPACKET/.claude/skills/investigate-dp-errors/SKILL.md:271",
+           "Traefik access-log 500s grouped by request PATH (which endpoint is "
+           "500ing) — verbatim `sum by (path)` from the source.",
+           "dpprod"),
+
+    # --- Pyroscope (dpprod) -------------------------------------------------
+    Preset("dp-cpu-profile", "pyroscope",
+           'process_cpu:cpu:nanoseconds:cpu:nanoseconds{'
+           'service_name="civitai-dp-prod"}',
+           "profile", False,
+           "$DATAPACKET/.claude/skills/pyroscope/SKILL.md:18 (service selector)",
+           "On-CPU profile top frames. The {service_name=...} selector is real; "
+           "the exact profile-type prefix + /pyroscope/render endpoint are "
+           "UNVALIDATED here (the skill drives it via `profilecli`, not render) "
+           "— treat the top-frames output as best-effort.",
+           "dpprod"),
+
+    # --- Homelab (standard built-in series; NOT lifted from a session query) -
+    Preset("homelab-alerts-firing", "prometheus",
+           'sum by (alertname, severity) (ALERTS{alertstate="firing",'
+           'severity=~"warning|critical"})',
+           "instant", False,
+           "Prometheus built-in ALERTS synthetic series",
+           "Firing warning|critical alerts. ALERTS is a genuine Prometheus "
+           "built-in series, but this exact query was NOT lifted from a surveyed "
+           "session — verify labels for your stack. Empty = nothing firing "
+           "(healthy), so this is an expected-absence preset (no silent-zero "
+           "banner).",
+           "homelab", absence_ok=True),
+    Preset("pod-cpu-cores", "prometheus",
+           "sort_desc(sum by (pod) (rate("
+           'container_cpu_usage_seconds_total{container!=""}[5m])))',
+           "instant", False,
+           "Standard cAdvisor container_cpu_usage_seconds_total series",
+           "Per-pod CPU (cores) top-down — single-pod saturation hunt. cAdvisor "
+           "metric is universally present, but this query was NOT lifted from a "
+           "surveyed session; narrow with a namespace label in --query for real "
+           "use.",
+           ""),
+]
+
+PRESETS_BY_NAME = {p.name: p for p in PRESETS}
+
+WARN_BANNER = (
+    "⚠ QUERY MATCHED NOTHING — likely a wrong label/service name, NOT a "
+    "confirmed zero.\n  Check the metric/label/service exists (typo? wrong "
+    "cluster? metric not scraped?).\n  This is the silent-zero trap: an empty "
+    "result is NOT the same as a real 0."
+)
+
+
+# --------------------------------------------------------------------------- #
+# Pure helpers
+# --------------------------------------------------------------------------- #
+def _num(s):
+    """Coerce a Prometheus/Loki string value to int/float, else return it raw."""
+    if isinstance(s, (int, float)):
+        return s
+    if s is None:
+        return None
+    try:
+        f = float(s)
+    except (TypeError, ValueError):
+        return s
+    if f != f:            # NaN -> keep as the string so it is visible
+        return "NaN"
+    return int(f) if f.is_integer() else f
+
+
+def _fmt_labels(labels: dict) -> str:
+    """Render a metric/stream label set compactly and deterministically."""
+    if not isinstance(labels, dict) or not labels:
+        return "{}"
+    parts = ["%s=%s" % (k, labels[k]) for k in sorted(labels)]
+    return "{" + ", ".join(parts) + "}"
+
+
+def parse_duration(s) -> int:
+    """'30m'/'2h'/'1d'/'90s'/'45' -> seconds (bare int = seconds). Raises on junk."""
+    if isinstance(s, (int, float)):
+        return int(s)
+    m = re.fullmatch(r"\s*(\d+)\s*([smhd]?)\s*", str(s))
+    if not m:
+        raise ValueError("bad duration %r (use e.g. 30m, 2h, 1d, 90s)" % (s,))
+    n = int(m.group(1))
+    return n * {"": 1, "s": 1, "m": 60, "h": 3600, "d": 86400}[m.group(2)]
+
+
+# --------------------------------------------------------------------------- #
+# Result model + PURE parse/guard (the silent-zero guard lives here)
+# --------------------------------------------------------------------------- #
+@dataclass
+class QueryResult:
+    backend: str
+    result_type: str
+    columns: list[str]
+    rows: list[dict]
+    matched_nothing: bool
+    detail: str = ""            # short human note (e.g. "matched, value is 0")
+    extra: dict = field(default_factory=dict)
+
+
+def _all_values_zero(rows: list[dict], key: str = "value") -> bool:
+    vals = [r.get(key) for r in rows if r.get(key) is not None]
+    return bool(vals) and all(v == 0 for v in vals)
+
+
+def parse_prometheus(payload) -> QueryResult:
+    """Prometheus /api/v1/query[_range] JSON -> QueryResult.
+
+    matched_nothing iff the result set is EMPTY (zero series). A non-empty result
+    whose value(s) are 0 is a REAL zero and does NOT trip the guard.
+    """
+    if not isinstance(payload, dict) or payload.get("status") != "success":
+        raise ValueError("prometheus response not status=success: %s"
+                         % (str(payload)[:200],))
+    data = payload.get("data", {}) or {}
+    rtype = data.get("resultType", "")
+    result = data.get("result", [])
+
+    if rtype == "scalar":
+        v = result if isinstance(result, list) else []
+        val = _num(v[1]) if len(v) == 2 else None
+        rows = [{"metric": "(scalar)", "value": val}]
+        return QueryResult("prometheus", rtype, ["metric", "value"], rows,
+                           matched_nothing=(val is None))
+    if rtype == "string":
+        v = result if isinstance(result, list) else []
+        val = v[1] if len(v) == 2 else None
+        rows = [{"metric": "(string)", "value": val}]
+        return QueryResult("prometheus", rtype, ["metric", "value"], rows,
+                           matched_nothing=(val is None))
+
+    rows = []
+    for series in (result or []):
+        if not isinstance(series, dict):
+            continue
+        name = _fmt_labels(series.get("metric", {}))
+        if rtype == "matrix":
+            values = series.get("values", []) or []
+            last = values[-1] if values else None
+            val = _num(last[1]) if isinstance(last, list) and len(last) == 2 else None
+            rows.append({"metric": name, "value": val, "points": len(values)})
+        else:  # vector (default)
+            v = series.get("value")
+            val = _num(v[1]) if isinstance(v, list) and len(v) == 2 else None
+            rows.append({"metric": name, "value": val})
+
+    cols = ["metric", "value"] + (["points"] if rtype == "matrix" else [])
+    matched_nothing = (len(rows) == 0)
+    detail = ""
+    if not matched_nothing and _all_values_zero(rows):
+        detail = "matched %d series; value(s) are 0 — a REAL zero" % len(rows)
+    return QueryResult("prometheus", rtype or "vector", cols, rows,
+                       matched_nothing, detail)
+
+
+def parse_loki(payload) -> QueryResult:
+    """Loki /loki/api/v1/query_range JSON -> QueryResult.
+
+    resultType 'streams' -> log lines; 'matrix' -> a metric query (sum by /
+    count_over_time). matched_nothing iff there are no streams/series with data.
+    """
+    if not isinstance(payload, dict) or payload.get("status") != "success":
+        raise ValueError("loki response not status=success: %s"
+                         % (str(payload)[:200],))
+    data = payload.get("data", {}) or {}
+    rtype = data.get("resultType", "")
+    result = data.get("result", []) or []
+
+    if rtype == "matrix":
+        rows = []
+        for series in result:
+            if not isinstance(series, dict):
+                continue
+            name = _fmt_labels(series.get("metric", {}))
+            values = series.get("values", []) or []
+            last = values[-1] if values else None
+            val = _num(last[1]) if isinstance(last, list) and len(last) == 2 else None
+            rows.append({"metric": name, "value": val, "points": len(values)})
+        matched_nothing = (len(rows) == 0)
+        detail = ""
+        if not matched_nothing and _all_values_zero(rows):
+            detail = "matched %d series; value(s) are 0 — a REAL zero" % len(rows)
+        return QueryResult("loki", "matrix", ["metric", "value", "points"],
+                           rows, matched_nothing, detail)
+
+    # streams (default log query)
+    rows = []
+    total_lines = 0
+    for stream in result:
+        if not isinstance(stream, dict):
+            continue
+        name = _fmt_labels(stream.get("stream", {}))
+        values = stream.get("values", []) or []
+        total_lines += len(values)
+        sample = ""
+        if values:
+            last = values[-1]
+            if isinstance(last, list) and len(last) == 2:
+                sample = str(last[1])[:120]
+        rows.append({"stream": name, "lines": len(values), "sample": sample})
+    matched_nothing = (total_lines == 0)
+    detail = "" if matched_nothing else "%d log line(s) across %d stream(s)" % (
+        total_lines, len(rows))
+    return QueryResult("loki", "streams", ["stream", "lines", "sample"], rows,
+                       matched_nothing, detail, extra={"total_lines": total_lines})
+
+
+def parse_pyroscope(payload, top: int = 15) -> QueryResult:
+    """Pyroscope /pyroscope/render flamebearer JSON -> top self-time frames.
+
+    matched_nothing iff the profile has no samples (numTicks == 0) or resolves to
+    no non-root frames — the empty-profile trap (wrong service_name / no data in
+    window). Sums `self` per name index across all levels (offset-encoding is
+    irrelevant to a per-name self sum).
+    """
+    if not isinstance(payload, dict):
+        raise ValueError("pyroscope response is not a JSON object")
+    fb = payload.get("flamebearer", {}) or {}
+    names = fb.get("names", []) or []
+    levels = fb.get("levels", []) or []
+    num_ticks = fb.get("numTicks", 0) or 0
+
+    self_by_name: dict[str, int] = {}
+    for level in levels:
+        if not isinstance(level, list):
+            continue
+        for i in range(0, len(level) - 3, 4):
+            self_ticks = level[i + 2]
+            name_idx = level[i + 3]
+            if not isinstance(name_idx, int) or not (0 <= name_idx < len(names)):
+                continue
+            try:
+                self_by_name[names[name_idx]] = (
+                    self_by_name.get(names[name_idx], 0) + int(self_ticks))
+            except (TypeError, ValueError):
+                continue
+
+    frames = [(nm, s) for nm, s in self_by_name.items()
+              if nm != "total" and s > 0]
+    frames.sort(key=lambda x: -x[1])
+    rows = [{"function": nm, "self_samples": s,
+             "self_pct": round(100.0 * s / num_ticks, 2) if num_ticks else 0.0}
+            for nm, s in frames[:top]]
+
+    matched_nothing = (num_ticks == 0 or len(rows) == 0)
+    detail = "" if matched_nothing else "%d samples; top %d frames" % (
+        num_ticks, len(rows))
+    return QueryResult("pyroscope", "profile",
+                       ["function", "self_samples", "self_pct"], rows,
+                       matched_nothing, detail, extra={"num_ticks": num_ticks})
+
+
+PARSERS = {
+    "prometheus": parse_prometheus,
+    "loki": parse_loki,
+    "pyroscope": parse_pyroscope,
+}
+
+
+# --------------------------------------------------------------------------- #
+# PURE render
+# --------------------------------------------------------------------------- #
+def render_table(qr: QueryResult) -> str:
+    """A simple aligned table for the matched rows (no color, deterministic)."""
+    cols = qr.columns
+    header = [c.upper() for c in cols]
+    body = []
+    for r in qr.rows:
+        body.append([_cell(r.get(c)) for c in cols])
+    widths = [len(h) for h in header]
+    for row in body:
+        for i, cell in enumerate(row):
+            widths[i] = max(widths[i], len(cell))
+    # cap very wide columns (e.g. loki sample / long label sets)
+    widths = [min(w, 80) for w in widths]
+
+    def fmt(row):
+        return "  ".join(c[:widths[i]].ljust(widths[i]) for i, c in enumerate(row))
+
+    lines = [fmt(header), fmt(["-" * w for w in widths])]
+    lines += [fmt(row) for row in body]
+    return "\n".join(lines)
+
+
+def _cell(v) -> str:
+    if v is None:
+        return "-"
+    if isinstance(v, float):
+        return ("%.6g" % v)
+    return str(v)
+
+
+def render(qr: QueryResult, as_json: bool, query: str, cluster: str,
+           backend: str, absence_ok: bool = False) -> tuple[str, str]:
+    """-> (stdout_text, stderr_text). The silent-zero warning goes to STDERR so
+    it is prominent and survives piping stdout to a parser. When absence_ok is
+    set (an expected-absence preset like "no alerts firing"), an empty result is
+    the HEALTHY state and renders a calm OK instead of the ⚠ suspicious-zero
+    banner — so the guard keeps its credibility for the queries where empty
+    really is a red flag."""
+    if as_json:
+        out = {
+            "cluster": cluster,
+            "backend": backend,
+            "query": query,
+            "result_type": qr.result_type,
+            "matched_nothing": qr.matched_nothing,
+            "row_count": len(qr.rows),
+            "detail": qr.detail,
+            "rows": qr.rows,
+        }
+        if qr.extra:
+            out["extra"] = qr.extra
+        if qr.matched_nothing:
+            if absence_ok:
+                out["status"] = "ok-absent"
+                out["note_absence"] = ("expected-absence preset: empty result is "
+                                       "the healthy state (nothing firing / no "
+                                       "matches), NOT a suspicious zero.")
+            else:
+                out["warning"] = ("QUERY MATCHED NOTHING — likely a wrong "
+                                  "label/service name, NOT a confirmed zero.")
+        return json.dumps(out, indent=2, default=str), ""
+
+    if qr.matched_nothing:
+        if absence_ok:
+            return ("✓ OK — nothing firing / no matches (expected-absence "
+                    "preset; empty is the healthy state).", "")
+        stderr = ("\n" + "!" * 72 + "\n" + WARN_BANNER + "\n" + "!" * 72)
+        stdout = "(no series / no rows matched — see the warning above)"
+        return stdout, stderr
+
+    parts = [render_table(qr)]
+    if qr.detail:
+        parts.append("\nnote: " + qr.detail)
+    return "\n".join(parts), ""
+
+
+# --------------------------------------------------------------------------- #
+# Cluster / preset resolution
+# --------------------------------------------------------------------------- #
+def resolve_kubeconfig(cluster: str, env=None, check_exists: bool = True) -> str:
+    """cluster -> kubeconfig path via the env handle. Loud on a missing handle;
+    NEVER guesses a cluster."""
+    e = os.environ if env is None else env
+    if cluster not in CLUSTER_KUBECONFIG_ENV:
+        raise ValueError(
+            "unknown cluster %r; choose one of: %s"
+            % (cluster, ", ".join(sorted(CLUSTER_KUBECONFIG_ENV))))
+    handle = CLUSTER_KUBECONFIG_ENV[cluster]
+    path = e.get(handle)
+    if not path:
+        raise ValueError(
+            "cluster %r maps to $%s, which is unset/empty — no kubeconfig for "
+            "that cluster on this host. Refusing to guess a cluster." %
+            (cluster, handle))
+    if check_exists and not os.path.exists(path):
+        raise ValueError(
+            "kubeconfig for cluster %r not found at %s ($%s)."
+            % (cluster, path, handle))
+    return path
+
+
+def resolve_query(args) -> tuple[str, str, str]:
+    """-> (backend, query, kind) from --preset OR --query/--backend."""
+    if args.preset:
+        p = PRESETS_BY_NAME.get(args.preset)
+        if p is None:
+            raise ValueError(
+                "unknown preset %r; run --list-presets" % (args.preset,))
+        return p.backend, p.query, p.kind
+    if args.query:
+        if not args.backend:
+            raise ValueError("--query requires --backend "
+                             "(prometheus|loki|pyroscope)")
+        if args.backend not in BACKENDS:
+            raise ValueError("unknown backend %r" % (args.backend,))
+        kind = args.kind or BACKENDS[args.backend].default_kind
+        return args.backend, args.query, kind
+    raise ValueError("give either --preset NAME or --query 'EXPR' (+ --backend)")
+
+
+# --------------------------------------------------------------------------- #
+# URL building (pure)
+# --------------------------------------------------------------------------- #
+def build_url(backend: str, port: int, query: str, kind: str,
+              since_s: int, step_s: int = 60, limit: int = 1000,
+              now: float | None = None) -> str:
+    base = "http://127.0.0.1:%d" % port
+    now = int(now if now is not None else time.time())
+    start = now - since_s
+    if backend == "prometheus":
+        if kind == "range":
+            qs = urllib.parse.urlencode({
+                "query": query, "start": start, "end": now, "step": "%ds" % step_s})
+            return base + "/api/v1/query_range?" + qs
+        qs = urllib.parse.urlencode({"query": query})
+        return base + "/api/v1/query?" + qs
+    if backend == "loki":
+        # Loki wants ns timestamps for query_range.
+        qs = urllib.parse.urlencode({
+            "query": query, "start": start * 1_000_000_000,
+            "end": now * 1_000_000_000, "limit": limit, "direction": "backward"})
+        return base + "/loki/api/v1/query_range?" + qs
+    if backend == "pyroscope":
+        qs = urllib.parse.urlencode({
+            "query": query, "from": "now-%ds" % since_s, "until": "now",
+            "format": "json"})
+        return base + "/pyroscope/render?" + qs
+    raise ValueError("unknown backend %r" % (backend,))
+
+
+# --------------------------------------------------------------------------- #
+# Transport (the only non-pure part; injectable for tests)
+# --------------------------------------------------------------------------- #
+def _free_port() -> int:
+    # KNOWN LIMITATION (TOCTOU): we pick a free port, close the socket, then hand
+    # the number to kubectl — a racing process could grab it in between. In
+    # practice the window is sub-ms and kubectl fails loudly (surfaced via the
+    # captured stderr on early-exit) if the port is taken, so this is left as a
+    # documented known limitation rather than a bind-and-hold handoff.
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()
+    return port
+
+
+def _http_get(url: str, timeout: float = 15.0) -> dict:
+    req = urllib.request.Request(url, headers={"Accept": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return json.loads(resp.read().decode("utf-8", "replace"))
+    except urllib.error.HTTPError as e:
+        # Prometheus/Loki return the actual parse/validation error in the BODY on
+        # a 4xx (e.g. a malformed PromQL -> 400 + {"error":"..."}). urllib raises
+        # before the caller can read it, so surface the body here — otherwise the
+        # user sees a bare "HTTP Error 400" with no cause.
+        body = ""
+        with contextlib.suppress(Exception):
+            body = e.read().decode("utf-8", "replace")
+        msg = (body.strip()[:500] or str(e.reason))
+        raise RuntimeError("backend returned HTTP %s: %s" % (e.code, msg)) from None
+
+
+def _drain_stderr(proc) -> str:
+    """Best-effort last non-empty line of a Popen's stderr pipe (for diagnosing
+    an early exit). '' if there is no stderr stream / nothing to read."""
+    stream = getattr(proc, "stderr", None)
+    if stream is None:
+        return ""
+    try:
+        data = stream.read()
+    except Exception:  # noqa: BLE001 — diagnostics must never raise
+        return ""
+    if isinstance(data, bytes):
+        data = data.decode("utf-8", "replace")
+    lines = [ln for ln in (data or "").splitlines() if ln.strip()]
+    return lines[-1].strip()[:300] if lines else ""
+
+
+def _wait_ready(port: int, ready_path: str, timeout: float, proc=None) -> None:
+    """Poll the backend's readiness endpoint until it answers or we time out.
+    Raises if the port-forward process dies early or the deadline passes."""
+    deadline = time.monotonic() + timeout
+    url = "http://127.0.0.1:%d%s" % (port, ready_path)
+    last = None
+    while time.monotonic() < deadline:
+        if proc is not None and proc.poll() is not None:
+            # Surface kubectl's own error (missing svc/ns, RBAC denial, port in
+            # use) instead of a bare "exited early" the user can't act on.
+            why = _drain_stderr(proc)
+            raise RuntimeError("kubectl port-forward exited early"
+                               + (": " + why if why else ""))
+        try:
+            with urllib.request.urlopen(url, timeout=2):
+                return  # 2xx/3xx -> tunnel up and backend answering
+        except urllib.error.HTTPError:
+            # A 4xx/5xx still proves the port-forward tunnel carries HTTP and the
+            # backend is reachable — the readiness *path* just varies by backend
+            # (e.g. the loki-gateway nginx returns 404 on /ready). That is READY
+            # enough to run the query; do NOT keep polling a responsive server.
+            return
+        except Exception as e:  # noqa: BLE001 — connection not up yet; keep polling
+            last = e
+        time.sleep(0.2)
+    raise TimeoutError("backend not ready on 127.0.0.1:%d%s in %.0fs (%s)"
+                       % (port, ready_path, timeout, last))
+
+
+def _kill_process_group(proc) -> None:
+    """SIGTERM the whole process GROUP of `proc`. kubectl is launched with
+    start_new_session=True so it (and any grandchild it spawns) sits in its own
+    session/group — killing the group reaps the tunnel even if a plain
+    proc.terminate() on the direct child would orphan a grandchild. No-op when
+    the proc has no real pid (an injected fake in tests)."""
+    pid = getattr(proc, "pid", None)
+    if pid is None:
+        return
+    os.killpg(os.getpgid(pid), signal.SIGTERM)
+
+
+@contextlib.contextmanager
+def _sigterm_raises():
+    """Within this block, SIGTERM raises SystemExit instead of the default silent
+    interpreter kill — so an enclosing `with PortForward(...)` __exit__ (and any
+    finally) actually RUNS and the port-forward is torn down. Restores the prior
+    handler on exit. No-op off the main thread (signal.signal is illegal there),
+    where the process-group kill in _terminate is the backstop anyway."""
+    installed = False
+    prev = None
+
+    def _raise(signum, _frame):
+        raise SystemExit(128 + signum)
+
+    try:
+        prev = signal.signal(signal.SIGTERM, _raise)
+        installed = True
+    except (ValueError, OSError):
+        pass
+    try:
+        yield
+    finally:
+        if installed:
+            with contextlib.suppress(Exception):
+                signal.signal(signal.SIGTERM, prev)
+
+
+class PortForward:
+    """Bounded, guaranteed-cleanup `kubectl port-forward` context manager.
+
+    Opens svc/<service>:<remote_port> on a fresh local port, waits for the
+    backend's readiness endpoint, yields the local port, and ALWAYS terminates
+    the forward on exit (success, exception, SIGINT, or — via _sigterm_raises in
+    query_backend — SIGTERM). The kubectl child is started in its OWN session
+    (start_new_session=True) and torn down by killing that process GROUP, so a
+    signal can never orphan the tunnel. popen/wait_ready are injectable so the
+    whole lifecycle (incl. cleanup-on-error and the KUBECONFIG override) is
+    unit-tested offline.
+    """
+
+    def __init__(self, kubeconfig: str, backend: Backend, *,
+                 popen=subprocess.Popen, wait_ready=_wait_ready,
+                 startup_timeout: float = 10.0):
+        self.kubeconfig = kubeconfig
+        self.backend = backend
+        self._popen = popen
+        self._wait_ready = wait_ready
+        self._startup_timeout = startup_timeout
+        self.proc = None
+        self.local_port = None
+
+    def __enter__(self) -> int:
+        self.local_port = _free_port()
+        # The KUBECONFIG override IS the "can't hit the ambient/wrong cluster"
+        # guarantee: whatever KUBECONFIG is in the ambient env, this forces the
+        # named cluster's kubeconfig for the kubectl child. start_new_session
+        # puts kubectl in its own process group so _terminate can killpg it.
+        env = dict(os.environ, KUBECONFIG=self.kubeconfig)
+        argv = ["kubectl", "-n", self.backend.namespace, "port-forward",
+                "svc/%s" % self.backend.service,
+                "%d:%d" % (self.local_port, self.backend.remote_port)]
+        self.proc = self._popen(
+            argv, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, env=env,
+            start_new_session=True)
+        try:
+            self._wait_ready(self.local_port, self.backend.ready_path,
+                             self._startup_timeout, self.proc)
+        except BaseException:
+            self._terminate()
+            raise
+        return self.local_port
+
+    def __exit__(self, *exc):
+        self._terminate()
+        return False
+
+    def _terminate(self):
+        proc = self.proc
+        self.proc = None
+        if proc is None:
+            return
+        # Kill the process GROUP first (reaps kubectl + any grandchild), then the
+        # direct child as a belt-and-braces fallback. All best-effort.
+        with contextlib.suppress(Exception):
+            _kill_process_group(proc)
+        with contextlib.suppress(Exception):
+            proc.terminate()
+        with contextlib.suppress(Exception):
+            proc.wait(timeout=3)
+
+
+def query_backend(kubeconfig: str, backend: str, query: str, kind: str,
+                  since_s: int, *, pf_factory=PortForward, http_get=_http_get,
+                  http_timeout: float = 15.0) -> dict:
+    """Own the full port-forward -> query -> teardown cycle; return raw JSON.
+
+    Wrapped in _sigterm_raises so a SIGTERM during the query runs the
+    port-forward's __exit__ (SIGTERM's default disposition would otherwise kill
+    the interpreter WITHOUT running the context manager, leaking the tunnel)."""
+    b = BACKENDS[backend]
+    with _sigterm_raises():
+        with pf_factory(kubeconfig, b) as port:
+            url = build_url(backend, port, query, kind, since_s)
+            return http_get(url, timeout=http_timeout)
+
+
+# --------------------------------------------------------------------------- #
+# CLI
+# --------------------------------------------------------------------------- #
+def _list_presets() -> str:
+    lines = ["Presets (validated = query lifted from a real surveyed source):",
+             ""]
+    for p in PRESETS:
+        tag = "validated" if p.validated else "UNVALIDATED"
+        hint = (" [%s]" % p.cluster_hint) if p.cluster_hint else ""
+        lines.append("  %-24s %-11s %-10s%s" % (p.name, p.backend, tag, hint))
+        lines.append("      %s" % p.note)
+        lines.append("      source: %s" % p.source)
+        lines.append("")
+    lines.append("Ad-hoc: --backend prometheus|loki|pyroscope --query 'EXPR'")
+    return "\n".join(lines)
+
+
+def build_arg_parser() -> argparse.ArgumentParser:
+    ap = argparse.ArgumentParser(
+        prog="obs-read",
+        description="Deterministic, cluster-aware observability query tool with "
+                    "a loud silent-zero guard.")
+    ap.add_argument("--cluster", choices=sorted(CLUSTER_KUBECONFIG_ENV),
+                    help="target cluster (REQUIRED; no default — maps to a "
+                         "$KC_* kubeconfig handle).")
+    ap.add_argument("--backend", choices=sorted(BACKENDS),
+                    help="backend for --query (preset carries its own).")
+    ap.add_argument("--preset", help="named preset (see --list-presets).")
+    ap.add_argument("--query", help="raw PromQL/LogQL/pyroscope selector.")
+    ap.add_argument("--kind", choices=["instant", "range", "profile"],
+                    help="override query kind for --query (default per backend).")
+    ap.add_argument("--since", default="30m",
+                    help="lookback window for range/profile queries (e.g. 30m, "
+                         "2h, 1d). Default 30m.")
+    ap.add_argument("--json", action="store_true", help="structured JSON output.")
+    ap.add_argument("--list-presets", action="store_true",
+                    help="list the preset library and exit.")
+    ap.add_argument("--timeout", type=float, default=15.0,
+                    help="HTTP query timeout seconds (default 15).")
+    return ap
+
+
+def main(argv=None, *, pf_factory=PortForward, http_get=_http_get,
+         env=None, check_exists=True) -> int:
+    ap = build_arg_parser()
+    args = ap.parse_args(argv)
+
+    if args.list_presets:
+        print(_list_presets())
+        return 0
+
+    if not args.cluster:
+        print("obs-read: --cluster is REQUIRED (no default cluster by design). "
+              "Choose one of: %s" % ", ".join(sorted(CLUSTER_KUBECONFIG_ENV)),
+              file=sys.stderr)
+        return 2
+
+    try:
+        backend, query, kind = resolve_query(args)
+        kubeconfig = resolve_kubeconfig(args.cluster, env=env,
+                                        check_exists=check_exists)
+        since_s = parse_duration(args.since)
+    except ValueError as e:
+        print("obs-read: %s" % e, file=sys.stderr)
+        return 2
+
+    # advisory: preset cluster hint vs the explicit --cluster
+    p = PRESETS_BY_NAME.get(args.preset or "")
+    if p and p.cluster_hint and p.cluster_hint != args.cluster:
+        print("obs-read: note — preset %r is usually run against %r, you chose "
+              "%r." % (p.name, p.cluster_hint, args.cluster), file=sys.stderr)
+
+    try:
+        payload = query_backend(kubeconfig, backend, query, kind, since_s,
+                                 pf_factory=pf_factory, http_get=http_get,
+                                 http_timeout=args.timeout)
+    except Exception as e:  # noqa: BLE001 — surface transport failures cleanly
+        print("obs-read: query transport failed: %s" % e, file=sys.stderr)
+        return 1
+
+    try:
+        qr = PARSERS[backend](payload)
+    except ValueError as e:
+        print("obs-read: could not parse %s response: %s" % (backend, e),
+              file=sys.stderr)
+        return 1
+
+    absence_ok = bool(p and p.absence_ok)
+    stdout, stderr = render(qr, args.json, query, args.cluster, backend,
+                            absence_ok=absence_ok)
+    if stderr:
+        print(stderr, file=sys.stderr)
+    if stdout:
+        print(stdout)
+    # KNOWN LIMITATION: a matched-nothing result still exits 0 (the warning is on
+    # stderr). Changing exit semantics silently would break existing pipelines,
+    # so it is left as-is; scripts that must fail on empty should check the
+    # `matched_nothing`/`warning` fields in --json output.
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
