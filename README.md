@@ -43,6 +43,9 @@ If you cloned devrc somewhere other than `~/workspace`, set `DEVRC_DIR`:
 export DEVRC_DIR="$HOME/other-path/devrc"
 ```
 
+For the secrets/env files a host needs (paths, key names, where to obtain each)
+and the new-host bootstrap order, see [`SECRETS.md`](./SECRETS.md).
+
 ## Updating
 
 ```sh
