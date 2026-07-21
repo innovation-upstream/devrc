@@ -28,11 +28,14 @@
 # rebuild / reboot leaves the host on its DIRECT route until Zach connects.
 #
 # KILLSWITCH + SPLIT-TUNNEL live in the conf's PostUp/PreDown (→ scripts/airvpn-updown),
-# so they are armed ONLY while the tunnel is up and replicate the old Mullvad
-# bypasses exactly: VPN endpoint via the original gateway, 192.168.50.1 (LAN
-# router/DNS), LAN 192.168.50.0/24 direct, and the nebula Hetzner lighthouse
-# 5.161.118.55 (mail/mesh survives). Fail-closed: while up, non-tunnel egress that
-# isn't an explicit bypass is dropped.
+# armed ONLY while the tunnel is up. Split-tunnel bypass ROUTES: VPN endpoint via the
+# original gateway, the LAN router/DNS + LAN 192.168.50.0/24 direct, and the nebula
+# lighthouse. The KILLSWITCH is fail-closed but POLICES ONLY THE PHYSICAL UPLINK
+# (`oifname != <phys> drop-by-default`): loopback, the tunnel, the nebula overlay
+# (nebula.mesh) and the k3s CNI (cni0/flannel.1 → pods/services) egress non-physical
+# ifaces and are always allowed — this host runs k3s + is reached over nebula, so an
+# enumerate-every-internal-net allow-list was fragile (it dropped the overlay, then
+# the cluster). Uplink-only policing is leak-equivalent and needs no rule per new net.
 #
 # ---- PostUp/PreDown to append to /etc/wireguard/airvpn.conf [Interface] -------
 #   PostUp   = /etc/nixos/i3blocks-scripts/airvpn-updown up %i

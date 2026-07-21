@@ -62,6 +62,12 @@ case "$cmd" in
     down)
         # Best-effort: down even if partially up; never fail the menu on a no-op.
         wg-quick down "$WG_IFACE" || true
+        # If the iface was already gone, wg-quick errors BEFORE running the conf's
+        # PostDown, so the killswitch table can be ORPHANED — still dropping uplink
+        # traffic with no tunnel. Tear it down explicitly (idempotent; a no-op when
+        # PostDown already ran). Table name kept in lock-step with airvpn-updown.
+        nft delete table inet airvpn_ks 2>/dev/null || true
+        rm -f /run/airvpn-gateway /run/airvpn-iface 2>/dev/null || true
         ;;
     status)
         # Read-only. Empty output if the interface isn't up.
