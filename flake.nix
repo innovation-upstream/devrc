@@ -12,11 +12,16 @@
   outputs = { self, nixpkgs, home-manager, ... }:
     let
       system = "x86_64-linux";
-      pkgs = nixpkgs.legacyPackages.${system};
+      # Explicit allowUnfree so unfree pkgs (elixir-ls, playwright browsers)
+      # build without relying on an ambient NIXPKGS_ALLOW_UNFREE / --impure.
+      pkgs = import nixpkgs {
+        inherit system;
+        config.allowUnfree = true;
+      };
     in
     {
       homeConfigurations."zach" = home-manager.lib.homeManagerConfiguration {
-        pkgs = nixpkgs.legacyPackages.${system};
+        inherit pkgs;
         extraSpecialArgs = { isNixOS = true; };
         modules = [
           ./nix/home.nix

@@ -13,7 +13,7 @@ with pkgs; [
   rust-analyzer
 
   # Node.js / TypeScript
-  nodejs_20
+  nodejs_26
   typescript
   vscode-langservers-extracted # HTML/CSS/JSON LSPs
   typescript-language-server
