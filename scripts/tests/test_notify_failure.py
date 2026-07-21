@@ -12,6 +12,7 @@ Two contracts under test:
     notify-send with the failed unit name in the summary.
 """
 import os
+import shutil
 import subprocess
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -24,7 +25,10 @@ def _make_fake_notify_send(dir_path):
     stub = os.path.join(dir_path, "notify-send")
     # $@ / %s\n are literal bash; only `out` is interpolated (via concatenation
     # so no Python %-formatting touches the bash body).
-    body = "#!/usr/bin/env bash\nprintf '%s\\n' \"$@\" > '" + out + "'\n"
+    # Resolve bash to an absolute path: the nix flake-check sandbox has no
+    # /usr/bin/env, so a `#!/usr/bin/env bash` stub would fail to exec there.
+    _bash = shutil.which("bash") or "/bin/bash"
+    body = "#!" + _bash + "\nprintf '%s\\n' \"$@\" > '" + out + "'\n"
     with open(stub, "w") as fh:
         fh.write(body)
     os.chmod(stub, 0o755)
