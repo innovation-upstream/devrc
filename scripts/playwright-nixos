@@ -1,0 +1,93 @@
+#!/usr/bin/env bash
+# playwright-nixos — drive Playwright with the NIXPKGS-provided Chromium so it
+# actually launches on this NixOS host.
+#
+# WHY: Playwright's own download (~/.cache/ms-playwright/chromium-*/…/chrome) is
+# a generic-linux dynamically-linked ELF. NixOS has no global /lib ld-linux, so
+# stub-ld refuses it — the browser dies at spawn with exitCode=127 (and, when an
+# FHS/patchelf half-fix is in play, the classic `GLIBC_ABI_GNU2_TLS not found`).
+# Net effect: every headless-Chromium e2e / OAuth / click-path check is undrivable.
+#
+# FIX: use the browsers that nixpkgs already patched for NixOS
+# (playwright-driver.browsers), pointed to via PLAYWRIGHT_BROWSERS_PATH, and skip
+# Playwright's host-requirements probe + its (broken) auto-download.
+#
+# VERSION-MATCH GOTCHA (important): Playwright pins one exact Chromium *build*
+# per release. The nixpkgs `playwright-driver` version MUST match the npm
+# `playwright` (or `@playwright/test` / `playwright-core`) version in your project,
+# or Playwright looks for a build number the nix bundle doesn't contain and refuses
+# to launch. This wrapper prints the nixpkgs driver version so you can pin npm to it,
+# and WARNS if it detects a mismatched local install.
+#
+# USAGE:
+#   playwright-nixos <cmd> [args...]   run <cmd> with the browser env exported
+#                                        e.g. playwright-nixos node e2e.mjs
+#                                             playwright-nixos npx playwright test
+#   playwright-nixos --env             print `export …` lines (eval it, or feed an
+#                                        MCP server / skill the same vars)
+#   playwright-nixos --version         print the nixpkgs driver version to pin npm to
+#   playwright-nixos                   (no args) print the resolved env + guidance
+#
+# Needs no home-manager switch — it resolves the browser bundle from nixpkgs on
+# demand (nix caches it after the first realise).
+set -euo pipefail
+
+FLAKE="nixpkgs"
+
+# Resolve (and realise, cached) the NixOS-patched browser bundle + driver version.
+BROWSERS="$(nix build --no-link --print-out-paths "${FLAKE}#playwright-driver.browsers" 2>/dev/null | head -n1 || true)"
+DRIVER_VER="$(nix eval --raw "${FLAKE}#playwright-driver.version" 2>/dev/null || echo unknown)"
+
+if [[ -z "$BROWSERS" || ! -d "$BROWSERS" ]]; then
+  echo "playwright-nixos: could not resolve ${FLAKE}#playwright-driver.browsers" >&2
+  echo "  try: nix build ${FLAKE}#playwright-driver.browsers" >&2
+  exit 1
+fi
+
+export PLAYWRIGHT_BROWSERS_PATH="$BROWSERS"
+export PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS=true
+export PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
+
+# Best-effort version-match warning against a local npm install, if present.
+warn_version_mismatch() {
+  local pkg_json v
+  for pkg_json in \
+      "$PWD/node_modules/playwright-core/package.json" \
+      "$PWD/node_modules/playwright/package.json" \
+      "$PWD/node_modules/@playwright/test/package.json"; do
+    if [[ -f "$pkg_json" ]]; then
+      v="$(node -e "process.stdout.write(require('$pkg_json').version)" 2>/dev/null || true)"
+      if [[ -n "$v" && "$v" != "$DRIVER_VER" && "$DRIVER_VER" != "unknown" ]]; then
+        echo "playwright-nixos: WARNING — npm playwright $v != nixpkgs driver $DRIVER_VER" >&2
+        echo "  Chromium build numbers won't align; browser may refuse to launch." >&2
+        echo "  Pin npm to the driver:  npm install playwright@$DRIVER_VER" >&2
+      fi
+      return 0
+    fi
+  done
+}
+
+print_env() {
+  echo "export PLAYWRIGHT_BROWSERS_PATH=$PLAYWRIGHT_BROWSERS_PATH"
+  echo "export PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS=$PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS"
+  echo "export PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=$PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD"
+}
+
+case "${1:-}" in
+  --version) echo "$DRIVER_VER"; exit 0 ;;
+  --env)     print_env; exit 0 ;;
+  "")
+    echo "# playwright-nixos — nixpkgs Chromium for Playwright on NixOS"
+    echo "# nixpkgs driver version (pin npm playwright to this): $DRIVER_VER"
+    echo "#"
+    print_env
+    echo "#"
+    echo "# run a script:   playwright-nixos node e2e.mjs"
+    echo "# run PW test:    playwright-nixos npx playwright test"
+    echo "# export in shell: eval \"\$(playwright-nixos --env)\""
+    exit 0
+    ;;
+esac
+
+warn_version_mismatch
+exec "$@"
