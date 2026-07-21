@@ -57,6 +57,7 @@ HERMETIC_DIRS=(
   scripts/session-analysis/session_insight/tests
   scripts/mail-actions/tests
   scripts/repo-cos/tests
+  scripts/task-spec-drafter/tests
 )
 
 # --- DEV-HOST-ONLY set ---------------------------------------------------------

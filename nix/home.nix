@@ -772,4 +772,92 @@ in
       WantedBy = [ "timers.target" ];
     };
   };
+
+  # Seed the task-spec-drafter env file with safe defaults (DRAFTER_MODE=shadow)
+  # if it does not exist yet. It holds no secrets today, but is chmod 600 and kept
+  # OUT of the nix store so DRAFTER_MODE flips (shadow -> on) are a one-line edit +
+  # switch, no code change — mirrors the activity-collector env seeding above.
+  home.activation.taskSpecDrafterEnv = lib.hm.dag.entryAfter ["writeBoundary"] ''
+    envFile="$HOME/.claude/task-spec-drafter.env"
+    if [ ! -e "$envFile" ]; then
+      mkdir -p "$HOME/.claude"
+      cp ${../scripts/task-spec-drafter/task-spec-drafter.env.example} "$envFile"
+      chmod 600 "$envFile"
+      echo "task-spec-drafter: seeded $envFile from the example (DRAFTER_MODE=shadow)"
+    fi
+  '';
+
+  # Deep-context task-spec drafter — DAILY, SHADOW-first (scripts/task-spec-drafter/).
+  # A verifier/triage layer over the ClickUp "To Schedule" queue: per-ticket it runs
+  # a headless `claude -p` deep-context pass (ENRICH -> VERIFY vs live git/PRs/metrics
+  # -> CLASSIFY -> DRAFT only genuine TASKs; a deterministic safety gate force-escalates
+  # security/money/destructive tickets to NEEDS-DECISION). It emits a triage queue and
+  # EMAILS the day's digest (the review surface) reusing repo-cos's DKIM-signed relay.
+  #
+  # SHADOW by default (DRAFTER_MODE in ~/.claude/task-spec-drafter.env, seeded above):
+  # it writes the queue + emails the digest + LOGS "would POST to clawgate" and
+  # dispatches NOTHING / POSTs NOTHING to clawgate / mutates no repo/cluster until the
+  # env flag flips to `on`. Delta-scoping keeps each daily run cheap (only new/changed
+  # tickets); the first run baselines the backlog (see the README).
+  #
+  # WORKBENCH-ONLY (serverMode), same rationale as repo-cos / mail-actions-archive: the
+  # civitai checkout + prod kubeconfig + clickup skill CLI + the `claude` CLI (ambient
+  # auth) all live here, and this host has direct LAN access to the cluster APIs the
+  # verify step + email relay reach.
+  #
+  # Minimal user-unit env, so PATH is explicit. The pipeline needs profile-installed
+  # CLIs that are NOT in devrc's flake — `claude` (headless reasoning) and `gh` (PR
+  # checks) come from the home-manager profile — so %h/.nix-profile/bin + the system
+  # profile are on PATH ahead of the pinned deterministic tools (node for the clickup
+  # CLI, git, kubectl, jq, curl, python3, coreutils). KUBECONFIG for the per-ticket
+  # claude pass is set by drafter.sh itself (it exports the prod kubeconfig per call);
+  # REPO_COS_PROD_KUBECONFIG here is the relay kubeconfig for the digest email.
+  systemd.user.services.task-spec-drafter = lib.mkIf serverMode {
+    Unit = {
+      Description = "Deep-context task-spec drafter (ClickUp triage, daily, shadow-first)";
+      After = [ "network-online.target" ];
+      Wants = [ "network-online.target" ];
+      OnFailure = [ "notify-failure@%n.service" ];
+    };
+    Service = {
+      Type = "oneshot";
+      # Each ticket runs a headless claude pass with real tool calls; daily cadence
+      # tolerates an occasional long run. Bound: the FIRST (empty-state) run is the
+      # worst case — it processes at most DRAFTER_MAX_TICKETS (default 25) and
+      # baselines the rest, so 25 × DRAFTER_TIMEOUT(240s) = 6000s. 7200s clears that
+      # with headroom (steady-state delta runs are a handful of tickets). If you
+      # raise the cap or per-ticket timeout, raise this to match so a run never gets
+      # SIGTERM'd mid-loop (which would strand the digest + fire a failure toast).
+      TimeoutStartSec = 7200;
+      Nice = 10;
+      Environment = [
+        # claude + gh live in the HM profile (not devrc's flake) -> profile bins
+        # first, then the system profile (curl), then the pinned deterministic tools.
+        "PATH=%h/.nix-profile/bin:/run/current-system/sw/bin:${lib.makeBinPath [ pkgs.nodejs_26 pkgs.git pkgs.kubectl pkgs.jq pkgs.curl pkgs.python312 pkgs.bash pkgs.coreutils pkgs.gnugrep pkgs.gnused pkgs.gawk ]}"
+        "HOME=%h"
+        # Relay kubeconfig for the digest email (reuses repo-cos's postfix relay).
+        "REPO_COS_PROD_KUBECONFIG=%h/workspace/homelab-talos/production-kubeconfig"
+      ];
+      ExecStart = "${pkgs.bash}/bin/bash %h/workspace/devrc/scripts/task-spec-drafter/drafter.sh";
+      # Re-run with fresh code after a script-only edit (cf. X-Restart-Triggers above).
+      X-Restart-Triggers = [ "${../scripts/task-spec-drafter/drafter.sh}" ];
+    };
+  };
+
+  # Timer: fire the drafter daily at 08:00 local. Persistent=true catches up a
+  # single missed run (host asleep at 08:00) on the next wake. Shadow-by-default,
+  # so enabling it changes nothing externally until DRAFTER_MODE=on.
+  systemd.user.timers.task-spec-drafter = lib.mkIf serverMode {
+    Unit = {
+      Description = "Daily timer for the deep-context task-spec drafter";
+    };
+    Timer = {
+      OnCalendar = "*-*-* 08:00:00";
+      Persistent = true;
+      RandomizedDelaySec = 300;
+    };
+    Install = {
+      WantedBy = [ "timers.target" ];
+    };
+  };
 }

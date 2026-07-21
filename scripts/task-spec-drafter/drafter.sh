@@ -64,11 +64,27 @@
 #   CLICKUP_VIEW_ID       triage view (def 6-901111220963-1 = "To Schedule")
 #   CLAWGATE_API_URL / CLAWGATE_HOOK_TOKEN — reused from ~/.claude/clawgate.env
 #
+#   DRAFTER_EMAIL         on|off — email the day's digest (the review surface, def on)
+#   DRAFTER_EMAIL_TO      digest recipient (def owner)
+#   DRAFTER_EMAIL_DRYRUN  1 -> render the digest email to a file, send NOTHING (proofs)
+#   REPO_COS_PROD_KUBECONFIG — relay kubeconfig for the digest send (reuses repo-cos)
+#
+# === REVIEW SURFACE: daily email digest ====================================
+# On every run that processes ≥1 ticket, the human summary (counts + per-ticket
+# classification + one-line why + drafted spec for TASKs) is EMAILED (reusing
+# repo-cos's DKIM-signed postfix relay). In SHADOW this is the whole point: the
+# triage lands in Zach's inbox to adjudicate, while clawgate/dispatch stay silent.
+#
 set -uo pipefail
 
 # --- locate self + companions ----------------------------------------------
-SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Unset CDPATH + silence cd: with CDPATH set in the caller's env, a relative
+# `cd` prints the resolved dir to stdout, which the command substitution would
+# capture as a spurious extra line and corrupt SELF_DIR. (The systemd unit env
+# has no CDPATH, but be robust for hand-runs too.)
+SELF_DIR="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
 PROMPT_FILE="$SELF_DIR/drafter-prompt.md"
+SEND_HELPER="$SELF_DIR/send_digest.py"
 CLICKUP_CLI="${CLICKUP_CLI:-$HOME/.claude/skills/clickup/query.mjs}"
 CLICKUP_ACCOUNTS="${CLICKUP_ACCOUNTS:-$HOME/.claude/skills/clickup/accounts.json}"
 
@@ -93,13 +109,42 @@ HOST="${CLAUDE_HOST:-$(hostname 2>/dev/null || echo unknown)}"
 CIVITAI_REPO="${CIVITAI_REPO:-/home/zach/workspace/civit/civitai}"
 PROD_KUBECONFIG="${PROD_KUBECONFIG:-/home/zach/workspace/civit/datapacket-talos/prod-kubeconfig}"
 
-# Tight READ-ONLY allowlist for the headless pipeline pass. Only verbs that read
-# state appear here — no apply/edit/delete/scale/commit/push/comment. This is the
-# enforcement complement to the prompt's HARD CONSTRAINTS. Override via env if a
-# verification source needs a verb not listed.
-DRAFTER_ALLOWED_TOOLS="${DRAFTER_ALLOWED_TOOLS:-Read,Glob,Grep,WebFetch,Bash(node *query.mjs get*),Bash(node *query.mjs comments*),Bash(node *query.mjs search*),Bash(git -C * log*),Bash(git -C * show*),Bash(git -C * diff*),Bash(git -C * grep*),Bash(git log*),Bash(gh pr list*),Bash(gh pr view*),Bash(gh search*),Bash(gh api*),Bash(kubectl get*),Bash(kubectl logs*),Bash(kubectl describe*),Bash(kubectl top*),Bash(curl -s*),Bash(grep*),Bash(rg*),Bash(jq*),Bash(cat*),Bash(echo*),Bash(date*),Bash(env*)}"
+# --- daily email digest (the SHADOW review surface) ------------------------
+# Fires in BOTH shadow and on: the day's triage is emailed so Zach adjudicates
+# from his inbox. Reuses repo-cos's DKIM-signed postfix relay (send_digest.py ->
+# repo-cos/email_send.py), so the relay needs REPO_COS_PROD_KUBECONFIG + kubectl.
+#   DRAFTER_EMAIL         on|off — send the digest email at all      (def on)
+#   DRAFTER_EMAIL_TO      recipient                                   (def owner)
+#   DRAFTER_EMAIL_DRYRUN  1 -> render the email to a file, send NOTHING (proof runs)
+DRAFTER_EMAIL="${DRAFTER_EMAIL:-on}"
+DRAFTER_EMAIL_TO="${DRAFTER_EMAIL_TO:-zachlowden1@gmail.com}"
+DRAFTER_EMAIL_DRYRUN="${DRAFTER_EMAIL_DRYRUN:-0}"
+# Relay kubeconfig for the email path (production cluster; same one repo-cos uses).
+export REPO_COS_PROD_KUBECONFIG="${REPO_COS_PROD_KUBECONFIG:-$HOME/workspace/homelab-talos/production-kubeconfig}"
+
+# Tight READ-ONLY allowlist for the headless pipeline pass. Only verbs that READ
+# state appear here — no apply/edit/delete/scale/commit/push/comment.
+#
+# SECURITY: the per-ticket pass reasons over UNTRUSTED civitai *client* ticket text
+# (title + body + comments) with NO --permission-mode plan, so allowlisted tools
+# EXECUTE unprompted. A prompt-injected ticket must not be able to reach a WRITE.
+# Therefore every entry is a read-only verb only, and specifically NOT:
+#   * `Bash(gh api*)`  — dropped: allows `gh api -X POST/PATCH/DELETE` (mutations).
+#                        PR/commit reality is verified via gh pr list/view/search.
+#   * `Bash(curl -s*)` — dropped: allows `curl -X POST -d …` to any URL (mutation +
+#                        exfil). Live-state verification degrades to kubectl
+#                        get/logs/top (pod/cronjob running-vs-suspended), which
+#                        covers the primary "is it still firing / intentionally
+#                        off?" axis; ad-hoc Prometheus/Alertmanager HTTP reads go.
+#   * `Bash(env*)`     — dropped: the pass inherits drafter.sh's env, which sources
+#                        ~/.claude/clawgate.env (CLAWGATE_HOOK_TOKEN); no dumping it.
+# Override DRAFTER_ALLOWED_TOOLS via env ONLY with read-only verbs.
+DRAFTER_ALLOWED_TOOLS="${DRAFTER_ALLOWED_TOOLS:-Read,Glob,Grep,WebFetch,Bash(node *query.mjs get*),Bash(node *query.mjs comments*),Bash(node *query.mjs search*),Bash(git -C * log*),Bash(git -C * show*),Bash(git -C * diff*),Bash(git -C * grep*),Bash(git log*),Bash(gh pr list*),Bash(gh pr view*),Bash(gh search*),Bash(kubectl get*),Bash(kubectl logs*),Bash(kubectl describe*),Bash(kubectl top*),Bash(grep*),Bash(rg*),Bash(jq*),Bash(cat*),Bash(echo*),Bash(date*)}"
 
 mkdir -p "$DRAFTER_OUT_DIR" 2>/dev/null || true
+# The delta-state file may live outside OUT_DIR (e.g. ~/.local/state/...); make
+# sure its parent exists so update_state's atomic .tmp+mv never fails.
+mkdir -p "$(dirname "$DRAFTER_STATE_FILE")" 2>/dev/null || true
 log() { printf '[%s] %s\n' "$(date '+%F %T')" "$*" | tee -a "$DRAFTER_LOG_FILE" >&2; }
 
 # === DETERMINISTIC SAFETY-ESCALATION GATE ==================================
@@ -426,6 +471,39 @@ N_TASK="$(jq -r 'select(.classification=="TASK")|.ticket_id' "$QUEUE_JSONL" | gr
 N_DEC="$(jq -r 'select(.classification=="NEEDS-DECISION" or (.safety_flag|length>0))|.ticket_id' "$QUEUE_JSONL" | grep -c . || true)"
 N_VER="$(jq -r 'select(.classification=="VERIFY")|.ticket_id' "$QUEUE_JSONL" | grep -c . || true)"
 SUMMARY_LINE="$N_TASK genuine TASK, $N_DEC needs-decision, $N_VER verify (of $PROCESSED inbound)"
+
+# --- daily digest email (the SHADOW review surface) ------------------------
+# Emails the human summary (QUEUE_SUMMARY: counts + per-ticket classification +
+# one-line why + drafted spec for TASKs + suppressed one-liners) so Zach reviews
+# the day's triage in his inbox. Fires in BOTH shadow and on — it is the review
+# surface regardless of mode; it NEVER dispatches or mutates anything. Best-effort:
+# a send failure logs + continues (never wedges / fails the run). Reuses repo-cos's
+# relay via send_digest.py; DRAFTER_EMAIL_DRYRUN=1 renders to a file, sends nothing.
+if { [ "$DRAFTER_EMAIL" = "on" ] || [ "$DRAFTER_EMAIL" = "1" ]; } \
+   && command -v python3 >/dev/null 2>&1 && [ -f "$SEND_HELPER" ]; then
+  MODE_TAG="$([ "$DRAFTER_MODE" = "shadow" ] && echo SHADOW || echo LIVE)"
+  EMAIL_SUBJECT="task-drafter $MODE_TAG digest — $N_TASK would-dispatch, $N_DEC need-decision"
+  if [ "$DRAFTER_EMAIL_DRYRUN" = "1" ]; then
+    DIGEST_RENDER="$DRAFTER_OUT_DIR/digest-email-$RUN_TS.txt"
+    if python3 "$SEND_HELPER" --subject "$EMAIL_SUBJECT" --body-file "$QUEUE_SUMMARY" \
+         --to "$DRAFTER_EMAIL_TO" --dry-run --out "$DIGEST_RENDER" >>"$DRAFTER_LOG_FILE" 2>&1; then
+      log "digest email DRY-RUN rendered -> $DIGEST_RENDER (nothing sent): $EMAIL_SUBJECT"
+    else
+      log "digest email dry-run render FAILED (best-effort; see log)"
+    fi
+  else
+    if python3 "$SEND_HELPER" --subject "$EMAIL_SUBJECT" --body-file "$QUEUE_SUMMARY" \
+         --to "$DRAFTER_EMAIL_TO" >>"$DRAFTER_LOG_FILE" 2>&1; then
+      log "digest emailed to $DRAFTER_EMAIL_TO: $EMAIL_SUBJECT"
+    else
+      log "digest email FAILED (best-effort; queue still written): $EMAIL_SUBJECT"
+    fi
+  fi
+elif [ "$DRAFTER_EMAIL" = "on" ] || [ "$DRAFTER_EMAIL" = "1" ]; then
+  log "digest email skipped: python3 or send helper unavailable (queue still written)"
+else
+  log "digest email disabled (DRAFTER_EMAIL=$DRAFTER_EMAIL)"
+fi
 
 # Build a compact context array: one line per action-worthy item.
 CONTEXT_JSON="$(jq -sc '
