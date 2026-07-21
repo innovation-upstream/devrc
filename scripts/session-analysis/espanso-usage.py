@@ -140,6 +140,12 @@ SNIPPETS = {
     ":csc":   ("path", ["civitai-spine-controller"], [], False),
     ":cpk":   ("path", ["datapacket-talos/prod-kubeconfig"], [], False),
     ":subk":  ("path", ["submodel-dc-03-a-kubeconfig"], [], False),
+    # ssh connect — pasted into a terminal, never appears in a transcript
+    # (not text-detectable; keylog is the only fire signal, same as :aep)
+    ":sshwn": ("ssh", None, [], False),
+    ":sshwl": ("ssh", None, [], False),
+    ":sshln": ("ssh", None, [], False),
+    ":sshll": ("ssh", None, [], False),
     # workflow prompts (current expansions)
     ":eos":     ("prompt", ["identify skills that may need updating"], [], False),
     ":acq":     ("prompt", ["recommend anything you think would be useful to include"], [], False),
