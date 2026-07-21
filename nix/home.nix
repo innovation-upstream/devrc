@@ -218,6 +218,10 @@ in
       "x-scheme-handler/https" = "brave-browser.desktop";
       "x-scheme-handler/about" = "brave-browser.desktop";
       "x-scheme-handler/unknown" = "brave-browser.desktop";
+      # Default file manager: nemo (the repo's packaged nemo-with-extensions;
+      # cf. the GTK_THEME=Adwaita-dark nemo alias). Own inode/directory so
+      # "open folder" resolves declaratively rather than via desktop-file scan.
+      "inode/directory" = "nemo.desktop";
     };
   };
 
