@@ -85,23 +85,37 @@ if grep -q 'airvpn-host.nix' "${CONFIG}"; then
   echo "  -> import already present — skipping."
 else
   cp "${CONFIG}" "${CONFIG}.bak.airvpn-host"
-  # Guard: only auto-insert when there is EXACTLY ONE `imports = [` list. If a nested
-  # module list (e.g. home-manager.users.zach = { imports = [ ... ]; }) also matches,
-  # `0,/re/` would anchor on whichever comes first and could inject the SYSTEM module
-  # into the wrong list → a cryptic eval failure. Refuse to guess instead.
-  n_imports="$(grep -cE '^[[:space:]]*imports[[:space:]]*=[[:space:]]*\[' "${CONFIG}" || true)"
+  # Guard: only auto-wire when there is EXACTLY ONE `imports =` assignment. If a
+  # nested module list also declares imports (e.g. home-manager.users.zach =
+  # { imports = [ ... ]; }), we can't tell which is the top-level system list →
+  # refuse to guess rather than inject into the wrong one (a cryptic eval failure).
+  n_imports="$(grep -cE '^[[:space:]]*imports[[:space:]]*=' "${CONFIG}" || true)"
   if [[ "${n_imports}" != "1" ]]; then
-    echo "  -> ERROR: found ${n_imports} single-line 'imports = [' list(s) in ${CONFIG}." >&2
+    echo "  -> ERROR: found ${n_imports} 'imports =' assignment(s) in ${CONFIG}." >&2
     echo "     Refusing to guess which is the top-level system list. Add" >&2
     echo "       ./airvpn-host.nix" >&2
     echo "     to the top-level imports list manually, then re-run." >&2
     exit 1
   fi
-  # Insert ./airvpn-host.nix as the first entry of that imports = [ ... ] list,
-  # preserving the leading indentation (empty-regex reuse keeps the address's \1 group).
-  sed -i '0,/^\(\s*\)imports\s*=\s*\[/s//&\n\1  .\/airvpn-host.nix/' "${CONFIG}"
+  # Insert ./airvpn-host.nix right after the list-opener '[' CHARACTER, handling
+  # BOTH `imports = [ ./x.nix ];` (opener + entries on one line) and a split
+  # `imports =` / `[ ... ` (opener on a following line). Splitting on the '[' char
+  # (not after the whole line) keeps the new entry INSIDE the list in both shapes.
+  # awk arms on the imports assignment, then rewrites the first line carrying '['.
+  awk '
+    !ins && /^[[:space:]]*imports[[:space:]]*=/ { arm = 1 }
+    arm && !ins && index($0, "[") > 0 {
+      p = index($0, "[")
+      print substr($0, 1, p) "\n      ./airvpn-host.nix" substr($0, p + 1)
+      ins = 1; arm = 0; next
+    }
+    { print }
+  ' "${CONFIG}" > "${CONFIG}.tmp.airvpn"
+  # Overwrite via cat (not mv) to preserve the file inode / 0644 root:root perms.
+  cat "${CONFIG}.tmp.airvpn" > "${CONFIG}"
+  rm -f "${CONFIG}.tmp.airvpn"
   if ! grep -q 'airvpn-host.nix' "${CONFIG}"; then
-    echo "  -> ERROR: could not find an 'imports = [' list to extend." >&2
+    echo "  -> ERROR: could not wire the import automatically." >&2
     echo "     Add   ./airvpn-host.nix   to imports in ${CONFIG} manually, then re-run." >&2
     cp "${CONFIG}.bak.airvpn-host" "${CONFIG}"
     exit 1
