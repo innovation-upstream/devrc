@@ -61,13 +61,20 @@ def load(path):
 
 
 def _cc(payload) -> str:
-    """Short country label for the pill: country_code upper, else first-2 of name."""
+    """Short country label for the pill: the connected SERVER's country_code (else
+    its name), falling back to the observed EXIT country when the server's is unknown
+    (a hostname endpoint like `ca3.vpn.airdns.org` doesn't map to a manifest server,
+    so `country_code` is null while ipinfo still gives us `exit_country`). Without the
+    fallback the active pill renders a useless `??`."""
     cc = payload.get("country_code")
     if isinstance(cc, str) and cc.strip():
         return cc.strip().upper()[:3]
     name = payload.get("country")
     if isinstance(name, str) and name.strip():
         return name.strip()[:2].upper()
+    exit_cc = payload.get("exit_country")
+    if isinstance(exit_cc, str) and exit_cc.strip():
+        return exit_cc.strip().upper()[:3]
     return "??"
 
 

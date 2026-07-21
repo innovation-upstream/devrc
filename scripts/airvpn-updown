@@ -18,11 +18,18 @@
 #   * 192.168.50.1 (LAN router / DNS upstream) + the LAN 192.168.50.0/24 direct,
 #   * the nebula Hetzner lighthouse (discovery/relay).
 #
-# KILLSWITCH (fail-closed) — POLICES ONLY THE PHYSICAL UPLINK. The chain's first
-# rule is `oifname != <phys> accept`, so everything leaving via a NON-physical
-# interface is ALWAYS allowed: loopback, the airvpn tunnel, the nebula overlay
-# (nebula.mesh), and the k3s CNI (cni0 / flannel.1 → the pod & service CIDRs). Only
-# traffic egressing the physical uplink is filtered, and there only wg's own
+# KILLSWITCH (fail-closed) — POLICES ALL PHYSICAL NICs. The chain's first rule is
+# `oifname != { <all physical NICs> } accept`, so everything leaving via a
+# NON-physical interface is ALWAYS allowed: loopback, the airvpn tunnel, the nebula
+# overlay (nebula.mesh), and the k3s CNI (cni0 / flannel.1 → the pod & service
+# CIDRs). The physical set is derived from /sys/class/net/*/device (hardware
+# presence), NOT the default route — so it covers a MULTI-HOMED host (eth + wifi +
+# usb; this workbench has 3 NICs) AND a NIC that gains a default route AFTER PostUp,
+# both of which a single-`$PHYS` guard would leak (#126 audit 🟡). If NO physical NIC
+# is found (near-impossible with a live tunnel), it FAILS CLOSED (allow internal
+# ifaces only, drop the rest) rather than the old fail-OPEN `exit 0` that left the
+# tunnel up with no killswitch. Only traffic egressing a physical NIC is filtered,
+# and there only wg's own
 # encrypted packets (fwmark), the LAN, nebula's own transport (matched by SOCKET
 # OWNER — `meta skuid nebula-mesh` — NOT a port, because nebula runs listen.port:0
 # and binds a RANDOM source port; a `udp sport 4242` rule matched nothing and let
@@ -64,9 +71,49 @@ KS_TABLE="airvpn_ks"
 
 log() { logger -t airvpn-updown "$*" 2>/dev/null || echo "airvpn-updown: $*" >&2; }
 
+# Blanket FAIL-CLOSED ruleset — installed only if the main killswitch nft load
+# fails, so an nft error can never leave the uplink UNFILTERED (fail-open). Minimal
+# on purpose (no dynamic PHYS_SET / fwmark / EP substitution that could be what
+# broke the main load): allow internal ifaces + nebula (skuid) + LAN + lighthouse,
+# drop the rest. Keeps the operator reachable while still stopping an internet leak.
+arm_failclosed() {
+    nft add table inet "$KS_TABLE" 2>/dev/null || true
+    nft flush table inet "$KS_TABLE" 2>/dev/null || true
+    nft -f - <<FB || log "FALLBACK nft load ALSO FAILED — uplink is NOT filtered!"
+table inet ${KS_TABLE} {
+    chain out {
+        type filter hook output priority 0; policy accept;
+        oifname { "lo", "${IFACE}", "nebula.mesh", "cni0", "flannel.1", "docker0" } accept
+        meta skuid "${NEBULA_USER}" accept
+        ip daddr ${LAN_SUBNET} accept
+        ip daddr ${NEBULA_LIGHTHOUSE} accept
+        drop
+    }
+}
+FB
+}
+
 # Original default gateway + physical iface (the default route NOT via the tunnel).
+# Used for the split-tunnel bypass ROUTES (they need one specific gateway).
 orig_gw()   { ip -o route show default 2>/dev/null | grep -v "dev ${IFACE}" | awk '{print $3}' | head -1; }
 orig_if()   { ip -o route show default 2>/dev/null | grep -v "dev ${IFACE}" | awk '{print $5}' | head -1; }
+
+# ALL physical NICs (hardware devices), one name per line. `/sys/class/net/<if>/
+# device` exists only for real hardware (PCI/USB) NICs; virtual ifaces (lo, wg/
+# airvpn, nebula.mesh tun, cni0 bridge, flannel.1 vxlan, docker0, veth*) have no
+# such symlink. Derived from hardware presence (not the default route) so it covers
+# multi-homed hosts and a NIC that gets routed after PostUp. NOTE: the policed set
+# (below) UNIONS this with the live default-route egress iface — because a
+# bridge/bond/VLAN uplink (br0, bond0, eth1.100) carries internet but has NO device
+# symlink, so hardware-presence ALONE would trust (leak) it (#128 audit 🟡).
+phys_ifaces() {
+    local d n
+    for d in /sys/class/net/*/device; do
+        [[ -e "$d" ]] || continue
+        n="${d%/device}"
+        basename "$n"
+    done
+}
 
 # The connected peer endpoint IP (for the endpoint bypass /32).
 endpoint_ip() {
@@ -76,54 +123,73 @@ endpoint_ip() {
 case "$action" in
     up)
         GW="$(orig_gw)"; PHYS="$(orig_if)"
-        if [[ -z "$GW" || -z "$PHYS" ]]; then
-            log "could not determine original gateway/iface — aborting bypass setup"
-            exit 0   # never fail the tunnel bring-up
+        # Policed set = ALL hardware NICs UNION the live default-route egress iface(s)
+        # (excluding the tunnel). The union closes the bridge/bond/VLAN blind spot: those
+        # carry internet but have no /sys device, so hardware-presence alone would leak
+        # them; adding the actual egress iface polices whatever the default route uses.
+        mapfile -t PHYS_SET < <(
+            { phys_ifaces
+              ip -o route show default 2>/dev/null | grep -v "dev ${IFACE}" | awk '{print $5}'
+            } | sort -u)
+
+        # --- split-tunnel bypass routes (need ONE gateway; skip + warn if absent,
+        #     but STILL arm the killswitch below so we never fail OPEN) -------------
+        if [[ -n "$GW" && -n "$PHYS" ]]; then
+            echo "$GW"   > "$GW_FILE"
+            echo "$PHYS" > "$IFACE_FILE"
+            EP="$(endpoint_ip)"
+            [[ -n "$EP" ]] && ip route replace "$EP" via "$GW" dev "$PHYS" 2>/dev/null || true
+            ip route replace "$LAN_ROUTER"        via "$GW" dev "$PHYS" 2>/dev/null || true
+            ip route replace "$NEBULA_LIGHTHOUSE" via "$GW" dev "$PHYS" 2>/dev/null || true
+            # LAN /24 stays direct via the connected route; assert it explicitly too.
+            ip route replace "$LAN_SUBNET" dev "$PHYS" scope link 2>/dev/null || true
+        else
+            EP=""
+            log "WARNING: no default gateway/iface — split-tunnel bypass routes NOT set; arming killswitch anyway (fail-closed)"
         fi
-        echo "$GW"   > "$GW_FILE"
-        echo "$PHYS" > "$IFACE_FILE"
 
-        EP="$(endpoint_ip)"
-        # --- split-tunnel bypass routes (MAIN table /32s beat the tunnel default) --
-        [[ -n "$EP" ]] && ip route replace "$EP" via "$GW" dev "$PHYS" 2>/dev/null || true
-        ip route replace "$LAN_ROUTER"       via "$GW" dev "$PHYS" 2>/dev/null || true
-        ip route replace "$NEBULA_LIGHTHOUSE" via "$GW" dev "$PHYS" 2>/dev/null || true
-        # LAN /24 stays direct via the connected route; assert it explicitly too.
-        ip route replace "$LAN_SUBNET" dev "$PHYS" scope link 2>/dev/null || true
-
-        # --- fail-closed killswitch (nftables) -----------------------------------
+        # --- fail-closed killswitch (nftables) — polices ALL physical NICs --------
         FWMARK="$(wg show "$IFACE" fwmark 2>/dev/null)"   # e.g. 0xca6c
+        # Build rule 1 (the uplink guard). NORMAL: accept everything NOT egressing a
+        # physical NIC (durable + covers every physical uplink). DEGRADED (no physical
+        # NIC found — near-impossible with a live tunnel): FAIL CLOSED, allow only the
+        # known-internal ifaces and drop the rest, rather than leave the killswitch
+        # open. `oifname` matches by NAME, so listing an absent iface is harmless.
+        if [[ ${#PHYS_SET[@]} -gt 0 ]]; then
+            _set="$(printf '"%s", ' "${PHYS_SET[@]}")"
+            UPLINK_GUARD="oifname != { ${_set%, } } accept"
+        else
+            log "ERROR: no physical uplink NIC found — arming FAIL-CLOSED killswitch (internal ifaces only)"
+            UPLINK_GUARD='oifname { "lo", "'"${IFACE}"'", "nebula.mesh", "cni0", "flannel.1", "docker0" } accept'
+        fi
         nft add table inet "$KS_TABLE" 2>/dev/null || true
         nft flush table inet "$KS_TABLE" 2>/dev/null || true
-        nft -f - <<NFT || log "killswitch nft load failed (traffic NOT fail-closed)"
+        nft -f - <<NFT || { log "killswitch nft load FAILED — installing blanket fail-closed fallback"; arm_failclosed; }
 table inet ${KS_TABLE} {
     chain out {
         type filter hook output priority 0; policy accept;
-        # Police ONLY the physical uplink. Loopback, the tunnel, the nebula overlay
-        # (nebula.mesh) and the k3s CNI (cni0/flannel.1 → pods/services) all egress a
-        # NON-physical iface and are always allowed — durable: new internal nets need
-        # no rule. See the header for why this is leak-equivalent to a default-drop.
-        oifname != "${PHYS}" accept
-        # On the uplink, allow only the legitimate un-tunnelled flows; drop the rest.
+        # Rule 1: allow all NON-physical egress (loopback, tunnel, nebula.mesh, CNI,
+        # docker, veth). Durable — new internal nets need no rule. See the header.
+        ${UPLINK_GUARD}
+        # On a physical NIC, allow only the legitimate un-tunnelled flows; drop rest.
         $( [[ -n "$FWMARK" && "$FWMARK" != "off" ]] && echo "meta mark ${FWMARK} accept" )
         ip daddr ${LAN_SUBNET} accept
         meta skuid "${NEBULA_USER}" accept
         ip daddr ${NEBULA_LIGHTHOUSE} accept
         $( [[ -n "$EP" ]] && echo "ip daddr ${EP} accept" )
-        ip daddr ${GW} accept
+        $( [[ -n "$GW" ]] && echo "ip daddr ${GW} accept" )
         # link-local + multicast housekeeping stay allowed
         ip6 daddr fe80::/10 accept
         ip daddr 224.0.0.0/4 accept
-        # anything else egressing the uplink un-tunnelled -> DROP (fail-closed)
+        # anything else egressing a physical NIC un-tunnelled -> DROP (fail-closed)
         drop
     }
 }
 NFT
-        log "up: killswitch armed (fwmark=${FWMARK:-none}), bypasses gw=$GW ep=${EP:-?}"
+        log "up: killswitch armed (fwmark=${FWMARK:-none}) policing [${PHYS_SET[*]:-FAIL-CLOSED}], gw=${GW:-none} ep=${EP:-?}"
         ;;
     down)
         nft delete table inet "$KS_TABLE" 2>/dev/null || true
-        GW="$(cat "$GW_FILE" 2>/dev/null || true)"
         for dst in "$NEBULA_LIGHTHOUSE" "$LAN_ROUTER"; do
             ip route del "$dst" 2>/dev/null || true
         done

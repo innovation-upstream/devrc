@@ -304,6 +304,15 @@ def test_render_up_unknown_marks_but_stays_neutral():
     assert r["state"] == "Idle" and r["text"] == "CA?"
 
 
+def test_render_up_falls_back_to_exit_country_when_server_unknown():
+    # Active tunnel to a HOSTNAME endpoint (e.g. ca3.vpn.airdns.org): the poller
+    # can't map it to a manifest server so country_code/country are null, but ipinfo
+    # still gives exit_country. Must show the exit CC, not a useless '??' -> '???'.
+    r = blk.render({"up": True, "country_code": None, "country": None,
+                    "exit_country": "ca", "verdict": "unknown"})
+    assert r["state"] == "Idle" and r["text"] == "CA?"
+
+
 def test_render_leak_is_critical():
     r = blk.render({"up": True, "country_code": "ca", "verdict": "leak"})
     assert r["state"] == "Critical" and r["text"] == "LEAK"
