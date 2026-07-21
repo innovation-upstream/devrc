@@ -12,24 +12,29 @@
 #     PostUp   = /etc/nixos/i3blocks-scripts/airvpn-updown up %i
 #     PreDown  = /etc/nixos/i3blocks-scripts/airvpn-updown down %i
 #
-# It REPLICATES the old (commented) Mullvad host wg-quick split-tunnel bypasses:
-#   * bypass the VPN ENDPOINT itself via the original gateway (wg-quick's fwmark
-#     already exempts wg's own encrypted packets; this /32 is belt-and-suspenders
-#     + is what a `switch` refreshes),
-#   * bypass 192.168.50.1 (LAN router / DNS upstream),
-#   * keep the LAN 192.168.50.0/24 direct (it already is — connected route),
-#   * keep the NEBULA OVERLAY alive so the operator is not locked out: this host is
-#     reached over nebula (overlay 10.42.0.0/24 on nebula.mesh, e.g. 10.42.0.30) AND
-#     the homelab/mail automation rides the same overlay. The killswitch therefore
-#     exempts BOTH layers — the decrypted side (oifname nebula.mesh + daddr
-#     10.42.0.0/24) AND nebula's own ENCRYPTED transport (udp sport 4242, covering
-#     punchy direct peers as well as the lighthouse) — NOT just the lighthouse /32.
-#     (Exempting only the lighthouse preserves nebula DISCOVERY but drops the overlay
-#     DATA plane → a Connect over the nebula path would sever the operator's session
-#     with no in-band Disconnect. Fixed 2026-07-18 after the PR #118 audit.)
-# The KILLSWITCH is fail-closed: while up, any output that would leave the box
-# NOT through the tunnel (and isn't one of the explicit bypasses / LAN) is dropped,
-# so a tunnel drop can't silently leak traffic onto the direct link.
+# SPLIT-TUNNEL BYPASS ROUTES (main-table /32s that beat the tunnel default):
+#   * the VPN ENDPOINT via the original gateway (so the handshake isn't routed into
+#     the tunnel; also what a `switch` refreshes),
+#   * 192.168.50.1 (LAN router / DNS upstream) + the LAN 192.168.50.0/24 direct,
+#   * the nebula Hetzner lighthouse (discovery/relay).
+#
+# KILLSWITCH (fail-closed) — POLICES ONLY THE PHYSICAL UPLINK. The chain's first
+# rule is `oifname != <phys> accept`, so everything leaving via a NON-physical
+# interface is ALWAYS allowed: loopback, the airvpn tunnel, the nebula overlay
+# (nebula.mesh), and the k3s CNI (cni0 / flannel.1 → the pod & service CIDRs). Only
+# traffic egressing the physical uplink is filtered, and there only wg's own
+# encrypted packets (fwmark), the LAN, nebula's own transport (matched by SOCKET
+# OWNER — `meta skuid nebula-mesh` — NOT a port, because nebula runs listen.port:0
+# and binds a RANDOM source port; a `udp sport 4242` rule matched nothing and let
+# the direct-punched overlay to an off-LAN peer get dropped → lockout, PR #126 audit
+# 2026-07-21), the lighthouse, and the endpoint/gateway are allowed — else DROPPED.
+#   Why this shape: the ONLY path by which host traffic can leak un-tunnelled is the
+#   physical uplink, so that is the only thing worth policing. Enumerating internal
+#   networks to ALLOW them (the old model) was both unnecessary and fragile — it
+#   dropped the nebula overlay (PR #118 audit, 2026-07-18) and then the k3s cluster
+#   (apiserver→pod replies dropped → CoreDNS/Traefik/Flux CrashLooped, 2026-07-21).
+#   Policing the uplink is leak-equivalent AND immune to any future internal network
+#   (a new CNI, overlay, bridge, …) with no new rule.
 #
 # wg-quick uses fwmark routing (Table=auto): the main table keeps the physical
 # default route, unmarked traffic is sent to the wg table via `ip rule`, and
@@ -41,16 +46,17 @@ set -uo pipefail
 action="${1:-}"
 IFACE="${2:-airvpn}"
 
-# The split-tunnel bypass destinations (mirror the old Mullvad conf).
+# The split-tunnel bypass destinations (mirror the old Mullvad conf). Everything
+# INTERNAL (nebula overlay, k3s pod/service CIDRs, CNI bridges) needs no entry here:
+# it egresses a non-physical iface and the killswitch only polices the uplink.
 LAN_ROUTER="192.168.50.1"          # LAN router / DNS upstream
 NEBULA_LIGHTHOUSE="5.161.118.55"   # Hetzner nebula lighthouse (discovery/relay)
 LAN_SUBNET="192.168.50.0/24"       # LAN kept direct
-# Nebula OVERLAY exemptions — without these a Connect over nebula locks the operator
-# out (this host is reached at 10.42.0.30 on nebula.mesh; homelab/mail automation
-# rides the overlay too). Exempt the decrypted tun + subnet AND the encrypted UDP.
-NEBULA_IFACE="nebula.mesh"         # decrypted overlay tun (return traffic to peers)
-NEBULA_SUBNET="10.42.0.0/24"       # nebula overlay subnet (SSH/agent + homelab access)
-NEBULA_PORT="4242"                 # nebula encrypted transport (punchy direct + lighthouse)
+# Nebula binds listen.port:0 → a RANDOM source port, so match its transport by the
+# SOCKET OWNER instead of a port. This covers punchy DIRECT peers (to a remote
+# operator's public IP) + relay + lighthouse regardless of port. `id -un` the nebula
+# service user; fall back to the known default if it can't be resolved.
+NEBULA_USER="$(id -un nebula-mesh 2>/dev/null || echo nebula-mesh)"
 
 GW_FILE="/run/airvpn-gateway"
 IFACE_FILE="/run/airvpn-iface"
@@ -93,22 +99,23 @@ case "$action" in
 table inet ${KS_TABLE} {
     chain out {
         type filter hook output priority 0; policy accept;
-        oifname "${IFACE}" accept
-        oifname "lo" accept
-        oifname "${NEBULA_IFACE}" accept
+        # Police ONLY the physical uplink. Loopback, the tunnel, the nebula overlay
+        # (nebula.mesh) and the k3s CNI (cni0/flannel.1 → pods/services) all egress a
+        # NON-physical iface and are always allowed — durable: new internal nets need
+        # no rule. See the header for why this is leak-equivalent to a default-drop.
+        oifname != "${PHYS}" accept
+        # On the uplink, allow only the legitimate un-tunnelled flows; drop the rest.
         $( [[ -n "$FWMARK" && "$FWMARK" != "off" ]] && echo "meta mark ${FWMARK} accept" )
         ip daddr ${LAN_SUBNET} accept
-        ip daddr ${NEBULA_SUBNET} accept
-        udp sport ${NEBULA_PORT} accept
+        meta skuid "${NEBULA_USER}" accept
         ip daddr ${NEBULA_LIGHTHOUSE} accept
         $( [[ -n "$EP" ]] && echo "ip daddr ${EP} accept" )
         ip daddr ${GW} accept
         # link-local + multicast housekeeping stay allowed
         ip6 daddr fe80::/10 accept
         ip daddr 224.0.0.0/4 accept
-        # anything else that would egress un-tunnelled -> DROP (fail-closed)
-        meta nfproto ipv4 drop
-        meta nfproto ipv6 drop
+        # anything else egressing the uplink un-tunnelled -> DROP (fail-closed)
+        drop
     }
 }
 NFT
