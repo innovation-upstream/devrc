@@ -20,6 +20,16 @@
       };
     in
     {
+      # Pinned Playwright driver + browsers, built from THIS flake's locked
+      # (allowUnfree) nixpkgs — the single source of truth shared by both
+      # Playwright paths so they can never diverge on a channel bump:
+      #   • scripts/playwright-nixos resolves `<repo>#playwright-driver.browsers`
+      #     (+ `.version`) — NOT the ambient `nixpkgs#…` registry, which tracks
+      #     the moving unstable channel.
+      #   • nix/sessionVariables.nix (Recipe 2 / the Playwright MCP) exports the
+      #     same `pkgs.playwright-driver.browsers`.
+      packages.${system}.playwright-driver = pkgs.playwright-driver;
+
       homeConfigurations."zach" = home-manager.lib.homeManagerConfiguration {
         inherit pkgs;
         extraSpecialArgs = { isNixOS = true; };

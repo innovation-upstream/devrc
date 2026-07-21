@@ -11,6 +11,20 @@ DB-baseline *proxies* for verification.
 (`playwright-driver.browsers`) via `PLAYWRIGHT_BROWSERS_PATH`, and skip Playwright's
 host-requirements probe + its (broken) auto-download.
 
+## One pinned source of truth
+
+Both paths resolve the browser bundle from **this repo's flake** (the
+`flake.lock`-pinned, `allowUnfree` nixpkgs), never the ambient `nixpkgs#…`
+registry (which tracks the moving unstable channel and would silently drift):
+
+- `flake.nix` exposes `packages.<system>.playwright-driver = pkgs.playwright-driver`.
+- `scripts/playwright-nixos` builds `<repo>#playwright-driver.browsers` (+ reads
+  `.version`) — self-locating via `readlink -f "$0"` so it uses the flake it ships in.
+- `nix/sessionVariables.nix` exports the same `pkgs.playwright-driver.browsers`.
+
+So the wrapper, interactive shells, and the MCP all get the **identical** Chromium
+build; a channel bump can't split them.
+
 ## The version-match gotcha
 
 Playwright pins **one exact Chromium build per release**. The npm `playwright` /
@@ -21,6 +35,11 @@ doesn't contain and refuses to launch.
 - Get the version to pin to: `scripts/playwright-nixos --version` (currently **1.61.1**).
 - Pin npm to it: `npm install playwright@$(scripts/playwright-nixos --version)`.
 - The wrapper WARNS if it detects a mismatched local `node_modules` install.
+- It also WARNS on **MCP build skew**: it compares the Chromium build the Playwright
+  MCP already fetched (`~/.cache/ms-playwright/chromium-<N>`) against the build the
+  pinned bundle provides; a mismatch means the MCP (Recipe 2) would fail to launch even
+  though the wrapper works — bump the flake's `playwright-driver` (or the MCP's
+  `playwright-core`) so the two build numbers agree.
 
 ## Recipe 1 — the wrapper (switch-free; for agents / CI / one-offs)
 
@@ -71,6 +90,14 @@ per-command wrapper. Non-interactive `zsh -c` still won't see it → use Recipe 
   OAuth / run-page checks can now run in-session instead of DB-baseline proxies.
 - Drive them via **Recipe 1** inside a session, or the **Playwright MCP** after a
   switch (Recipe 2).
+
+## Known limitation
+
+Because the browser bundle is now a `home.sessionVariables` value + a flake package,
+**every `home-manager switch` realises the ~hundreds-of-MB nixpkgs browser bundle** as
+a build-time dependency (first switch per host; then cached). On a network-constrained
+host (e.g. the laptop on a slow link) that first switch can be slow or fail to fetch —
+it's a one-time cost per host, but worth knowing.
 
 ## Verified
 

@@ -32,15 +32,24 @@
 # demand (nix caches it after the first realise).
 set -euo pipefail
 
-FLAKE="nixpkgs"
+# SINGLE SOURCE OF TRUTH: resolve the browser bundle from THIS repo's flake
+# (the flake.lock-pinned nixpkgs), NOT the ambient `nixpkgs#…` registry — the
+# registry tracks the moving unstable channel, so it would silently drift out of
+# sync with the HM export (nix/sessionVariables.nix), which uses the pinned
+# `pkgs.playwright-driver.browsers`. Both paths must resolve to ONE build.
+# The `playwright-driver` flake output (flake.nix) exposes both `.browsers` and
+# `.version` from that locked, allowUnfree pkgs.
+SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
+REPO="$(cd "$(dirname "$SCRIPT_PATH")/.." && pwd)"    # <repo>/scripts/.. = repo root
+FLAKEREF="${REPO}#playwright-driver"
 
 # Resolve (and realise, cached) the NixOS-patched browser bundle + driver version.
-BROWSERS="$(nix build --no-link --print-out-paths "${FLAKE}#playwright-driver.browsers" 2>/dev/null | head -n1 || true)"
-DRIVER_VER="$(nix eval --raw "${FLAKE}#playwright-driver.version" 2>/dev/null || echo unknown)"
+BROWSERS="$(nix build --no-link --print-out-paths "${FLAKEREF}.browsers" 2>/dev/null | head -n1 || true)"
+DRIVER_VER="$(nix eval --raw "${FLAKEREF}.version" 2>/dev/null || echo unknown)"
 
 if [[ -z "$BROWSERS" || ! -d "$BROWSERS" ]]; then
-  echo "playwright-nixos: could not resolve ${FLAKE}#playwright-driver.browsers" >&2
-  echo "  try: nix build ${FLAKE}#playwright-driver.browsers" >&2
+  echo "playwright-nixos: could not resolve ${FLAKEREF}.browsers from $REPO" >&2
+  echo "  try: nix build \"${FLAKEREF}.browsers\"" >&2
   exit 1
 fi
 
@@ -67,6 +76,23 @@ warn_version_mismatch() {
   done
 }
 
+# Deterministic MCP-alignment check (addresses the Recipe 2 blind spot): the
+# Playwright MCP ships its OWN playwright-core and, when it honours
+# PLAYWRIGHT_BROWSERS_PATH, looks up ITS pinned Chromium *build number* inside the
+# nix bundle. Compare the build the MCP already downloaded (~/.cache/ms-playwright
+# /chromium-<N>) against the build the pinned bundle provides; a mismatch means the
+# MCP would fail to launch after a switch even though this wrapper works.
+warn_mcp_build_skew() {
+  local nix_build mcp_build
+  nix_build="$(basename "$(echo "$BROWSERS"/chromium-* 2>/dev/null | tr ' ' '\n' | grep -m1 -E '/chromium-[0-9]+$')" 2>/dev/null || true)"
+  mcp_build="$(basename "$(echo "$HOME"/.cache/ms-playwright/chromium-* 2>/dev/null | tr ' ' '\n' | grep -m1 -E '/chromium-[0-9]+$')" 2>/dev/null || true)"
+  if [[ -n "$nix_build" && -n "$mcp_build" && "$nix_build" != "$mcp_build" ]]; then
+    echo "playwright-nixos: WARNING — Playwright MCP expects $mcp_build but the pinned bundle provides $nix_build" >&2
+    echo "  The MCP (Recipe 2) may fail to launch; bump the flake's playwright-driver to match the MCP," >&2
+    echo "  or the MCP's playwright-core to a version whose build == the pinned one." >&2
+  fi
+}
+
 print_env() {
   echo "export PLAYWRIGHT_BROWSERS_PATH=$PLAYWRIGHT_BROWSERS_PATH"
   echo "export PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS=$PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS"
@@ -90,4 +116,5 @@ case "${1:-}" in
 esac
 
 warn_version_mismatch
+warn_mcp_build_skew
 exec "$@"
