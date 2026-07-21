@@ -207,17 +207,41 @@ until `DRAFTER_MODE=on`. Delta-scoping keeps the daily run cheap (a handful of
 tickets), and the first scheduled run baselines the backlog (see
 [First-run behavior](#first-run-behavior-important)).
 
-### NixOS note (why imperative, not home-manager — yet)
+### NixOS note (home-manager, SHADOW soak)
 
-This is NixOS, but the timer is installed **imperatively** (`systemctl --user
-enable`, which symlinks the unit) **on purpose**: this is an experimental shadow
-tool and the imperative path is reversible and zero-commitment. **Do not bake it
-into `nix/home-manager` yet** — it isn't proven. The productionization step, once
-shadow proves out, is `systemd.user.services`/`systemd.user.timers` in the
-home-manager config (declarative, with `services.<…>` units pointing at this same
-`drafter.sh`), plus moving `~/.claude/task-spec-drafter.env` into a managed file.
-That's the "graduate to declarative" task, deferred until the adjudication ratio
-justifies it.
+The timer is now wired **declaratively in home-manager** (`nix/home.nix`,
+`systemd.user.services.task-spec-drafter` + its timer), **workbench-only**
+(`lib.mkIf serverMode`, the same host gate as `repo-cos` / `mail-actions-archive`),
+**daily at 08:00**, with `OnFailure=notify-failure@%n.service` (a broken run
+toasts) and PATH exposing the `claude`/`gh` profile CLIs + `node`/`git`/`kubectl`/
+`jq`/`curl`/`python3`. The env file is **seeded once** by a `home.activation` hook
+(`~/.claude/task-spec-drafter.env`, chmod 600, never clobbered) so `DRAFTER_MODE`
+lives outside the nix store — flipping **shadow → on** is a one-line edit + a
+`home-manager switch`, no code change. The imperative `systemctl --user enable`
+path in `systemd/*.{service,timer}` is kept as a documented fallback but the HM
+unit is authoritative on the workbench.
+
+It runs in **SHADOW**: enabling the timer changes nothing externally — it writes
+the queue, **emails the daily digest** (below), and only *logs* "would POST to
+clawgate". It dispatches nothing and POSTs nothing to clawgate until the env flag
+flips to `on`. Graduation past shadow still waits on the adjudication ratio.
+
+### Daily email digest (the SHADOW review surface)
+
+Each run that processes ≥1 ticket **emails Zach the day's triage** — the human
+summary (classification counts + per-ticket classification + one-line why + the
+drafted spec for genuine `TASK`s + the suppressed `FYI`/`STALE-close`/
+`ALREADY-DONE` one-liners). Subject: `task-drafter SHADOW digest — N
+would-dispatch, M need-decision`. This is the whole point of the soak: adjudicate
+the queue from the inbox while clawgate/dispatch stay silent.
+
+The send **reuses repo-cos's DKIM-signed postfix relay** (`send_digest.py` loads
+`repo-cos/email_send.py` by explicit importlib path — no new mailer), so it needs
+`REPO_COS_PROD_KUBECONFIG` + `kubectl` (a production-cluster port-forward). It is
+**best-effort**: a relay hiccup logs + continues, never wedging the run. Knobs:
+`DRAFTER_EMAIL=on|off`, `DRAFTER_EMAIL_TO`, and `DRAFTER_EMAIL_DRYRUN=1` (render
+the email to `$DRAFTER_OUT_DIR/digest-email-<ts>.txt` and send **nothing** — used
+for proof runs).
 
 ### Disable / kill-switch
 

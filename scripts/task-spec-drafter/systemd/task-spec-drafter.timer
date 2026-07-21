@@ -1,11 +1,12 @@
-# Daily run, ~09:15 local, a bit before standup-triage's 10:30 slot so the queue
-# is fresh when you glance at it. Persistent=true catches up if the machine was
-# off at the scheduled time (it's a daily cadence; nothing auto-dispatches).
+# Daily run at 08:00 local (matches the home-manager unit in nix/home.nix, which
+# is the authoritative install path on the workbench; this imperative unit is the
+# reversible fallback documented in the README). Persistent=true catches up if the
+# machine was off at the scheduled time (daily cadence; nothing auto-dispatches).
 [Unit]
 Description=Daily timer for the deep-context task-spec drafter
 
 [Timer]
-OnCalendar=*-*-* 09:15:00
+OnCalendar=*-*-* 08:00:00
 Persistent=true
 RandomizedDelaySec=300
 Unit=task-spec-drafter.service
