@@ -286,6 +286,15 @@ in
     executable = true;
   };
 
+  # systemd-unit failure handler: the ExecStart of the notify-failure@ template
+  # unit below. Emits a sticky desktop toast pointing at the failed unit's
+  # journal (headless-safe: logs + exits 0 when no X/dunst). Symlinked from the
+  # repo so both hosts stay in sync (like cpu-monitor.sh above).
+  home.file.".config/notify-failure/notify-failure.sh" = {
+    source = ../scripts/notify-failure.sh;
+    executable = true;
+  };
+
   # Activity-telemetry collector: hot-path emit helper + daemon. Symlinked from
   # the repo so both hosts stay in sync. Config (CLICKHOUSE_URL/credentials) lives
   # in ~/.config/activity-collector/env — created below, NOT in the nix store.
@@ -367,6 +376,36 @@ in
     source = ../scripts/claude-hooks/shell-env-nudge.py;
   };
 
+  # Reusable failure-notification TEMPLATE unit. The important user units below
+  # (+ bar-status-poll in graphical.nix) carry OnFailure=notify-failure@%n.service,
+  # so when one enters the `failed` state systemd instantiates this with the failed
+  # unit's name (%i) and the handler fires a desktop toast pointing at its journal.
+  # This is the observability backstop: Zach reasons THROUGH these agents, so a
+  # silently-dead timer/collector is the worst failure mode — make it loud.
+  #
+  # Installed on EVERY host (a template is inert until instanced); the toast itself
+  # is gated on the graphical host by only exporting NOTIFY_FAILURE_GRAPHICAL=1
+  # there (mirrors how dunst/espanso key off `graphical`). On a headless host the
+  # handler logs to the journal and exits 0 — it never errors (an erroring
+  # OnFailure handler is itself an invisible failure). Minimal user-unit env, so
+  # PATH is explicit: bash + coreutils (tr/id/head) + procps (pgrep) + gnugrep +
+  # libnotify (notify-send), exactly the cpu-monitor toast toolchain.
+  systemd.user.services."notify-failure@" = {
+    Unit = {
+      Description = "Desktop toast when the user unit %i fails";
+    };
+    Service = {
+      Type = "oneshot";
+      Environment = [
+        "PATH=${lib.makeBinPath [ pkgs.bash pkgs.coreutils pkgs.procps pkgs.gnugrep pkgs.libnotify ]}"
+      ] ++ lib.optional graphical "NOTIFY_FAILURE_GRAPHICAL=1";
+      ExecStart = "${pkgs.bash}/bin/bash %h/.config/notify-failure/notify-failure.sh %i";
+      # Re-run with fresh handler code after a script-only edit (cf. the
+      # X-Restart-Triggers rationale on the collector units below).
+      X-Restart-Triggers = [ "${../scripts/notify-failure.sh}" ];
+    };
+  };
+
   systemd.user.services.cpu-monitor = {
     Unit = {
       Description = "Desktop alert on sustained high CPU load";
@@ -405,6 +444,7 @@ in
       Description = "Personal activity-telemetry collector → ClickHouse";
       # No graphical-session dep: this must run in headless/server mode too.
       After = [ "network.target" ];
+      OnFailure = [ "notify-failure@%n.service" ];
     };
     Service = {
       Type = "simple";
@@ -444,6 +484,7 @@ in
   systemd.user.services.claude-activity-source = {
     Unit = {
       Description = "Tail Claude Code transcripts → activity spool (prompts + session summaries)";
+      OnFailure = [ "notify-failure@%n.service" ];
     };
     Service = {
       Type = "oneshot";
@@ -491,6 +532,7 @@ in
       # Requires a live X session (RECORD + active-window context).
       After = [ "graphical-session.target" ];
       PartOf = [ "graphical-session.target" ];
+      OnFailure = [ "notify-failure@%n.service" ];
     };
     Service = {
       Type = "simple";
@@ -524,6 +566,7 @@ in
       # Requires a live i3 (IPC socket); tracks the graphical session.
       After = [ "graphical-session.target" ];
       PartOf = [ "graphical-session.target" ];
+      OnFailure = [ "notify-failure@%n.service" ];
     };
     Service = {
       Type = "simple";
@@ -639,6 +682,7 @@ in
       Description = "Mail-actions invoice archiver → minio-archive (deterministic, daily)";
       After = [ "network-online.target" ];
       Wants = [ "network-online.target" ];
+      OnFailure = [ "notify-failure@%n.service" ];
     };
     Service = {
       Type = "oneshot";
@@ -702,6 +746,7 @@ in
       Description = "Repo chief-of-staff — weekly repo-scan → LLM proposals → email digest";
       After = [ "network-online.target" ];
       Wants = [ "network-online.target" ];
+      OnFailure = [ "notify-failure@%n.service" ];
     };
     Service = {
       Type = "oneshot";

@@ -471,6 +471,9 @@ lib.mkIf isNixOS {
       Description = "Poll clawgate/mail/alerts/civitai/media/airvpn → ~/.cache/bar-status for the i3 bar";
       After = [ "network-online.target" ];
       Wants = [ "network-online.target" ];
+      # Toast on failure (the notify-failure@ template lives in home.nix, installed
+      # on every host). This is the workbench, so the toast actually fires here.
+      OnFailure = [ "notify-failure@%n.service" ];
     };
     Service = {
       Type = "oneshot";

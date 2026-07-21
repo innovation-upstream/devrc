@@ -94,9 +94,39 @@ PRS_CACHE = os.path.join(CACHE_DIR, "open-prs.json")
 PRS_LOCK = os.path.join(CACHE_DIR, "prs-refresh.lock")
 PRS_TTL = 120
 PRS_GH_TIMEOUT = 12      # per-repo `gh pr list` bound (background path, fail-safe)
+# Local-health telemetry-freshness (single cheap ClickHouse aggregate) — same
+# TTL-cache + detached-background-refresh mechanism as the PR sweep, so the CH
+# round-trip never runs on the (fast, every-few-seconds) popup render path.
+TELEM_CACHE = os.path.join(CACHE_DIR, "telemetry-freshness.json")
+TELEM_LOCK = os.path.join(CACHE_DIR, "telem-refresh.lock")
+TELEM_TTL = 60           # seconds — freshness moves slowly; a stale-ish read is fine
+TELEM_QUERY_TIMEOUT = 3.0  # short bound: a glanceable dashboard must never hang
+# Expected telemetry sources (the `source` column values in activity.events). A
+# source present here but ABSENT from the query result is shown as "—" (possibly
+# dead / just idle). Extra sources returned by the query are appended dimly.
+TELEM_SOURCES = ("zsh", "tmux", "keys", "i3", "browser", "claude")
+# Key timer-backed services whose last-run health is surfaced in Local health.
+# Rendered by their short label; workbench-only ones (repo-cos/mail-actions) show
+# "absent" on the laptop where the unit is not installed (LoadState=not-found).
+LOCAL_HEALTH_UNITS = (
+    ("repo-cos.service", "repo-cos"),
+    ("mail-actions-archive.service", "mail-archive"),
+    ("bar-status-poll.service", "bar-poll"),
+    ("claude-activity-source.service", "claude-src"),
+    ("activity-collector.service", "collector"),
+)
+# The collector's own env file is the SAME endpoint/creds the telemetry writer
+# uses on this host — reuse it (NOT a hardcoded endpoint). chquery (the shared
+# CH client) is loaded by explicit path, fail-safe (CHQUERY_PATH set below, once
+# DEVRC_DIR is defined).
+ACTIVITY_ENV = os.path.join(HOME, ".config", "activity-collector", "env")
 DEVRC_DIR = os.environ.get("DEVRC_DIR") or os.path.join(HOME, "workspace", "devrc")
 ISCAN_SCRIPT = os.path.join(DEVRC_DIR, "scripts", "session-analysis", "initiative-scan.py")
 CLAWGATE_ENV = os.path.join(HOME, ".claude", "clawgate.env")
+# Shared ClickHouse client (validation/chquery.py) — loaded by explicit path for
+# the Local-health telemetry-freshness query. Reuses the collector's env for the
+# endpoint/creds; never hardcodes a new one.
+CHQUERY_PATH = os.path.join(DEVRC_DIR, "scripts", "validation", "chquery.py")
 
 # Scratchpad codename table — THE single source of truth for session<->codename
 # (scripts/tmux-scratch-slots.sh). Mirror how the bash/py consumers resolve it:
@@ -254,6 +284,113 @@ def fetch_repo_open_prs(repo_dir, timeout=PRS_GH_TIMEOUT):
         return data if isinstance(data, list) else None
     except Exception:
         return None
+
+
+def fetch_failed_user_units(timeout=3):
+    """Raw `systemctl --user --failed` (plain, no legend) output, or None on ANY
+    failure (systemctl missing, no user manager, timeout). Fail-safe."""
+    try:
+        out = subprocess.run(
+            ["systemctl", "--user", "--failed", "--plain", "--no-legend",
+             "--no-pager"],
+            capture_output=True, text=True, timeout=timeout)
+        if out.returncode != 0:
+            return None
+        return out.stdout
+    except Exception:
+        return None
+
+
+def fetch_unit_show(unit, timeout=3):
+    """Raw `systemctl --user show <unit>` for the health-relevant properties, or
+    None on ANY failure. The keys are parsed by parse_systemctl_show."""
+    try:
+        out = subprocess.run(
+            ["systemctl", "--user", "show", unit,
+             "-p", "LoadState", "-p", "ActiveState", "-p", "SubState",
+             "-p", "Result", "-p", "ExecMainExitTimestampMonotonic",
+             "-p", "ExecMainStartTimestampMonotonic"],
+            capture_output=True, text=True, timeout=timeout)
+        if out.returncode != 0:
+            return None
+        return out.stdout
+    except Exception:
+        return None
+
+
+def read_uptime():
+    """Seconds since boot (/proc/uptime), or None. Used to turn a unit's
+    ExecMainExitTimestampMonotonic (µs since boot) into a tz-free wall age."""
+    try:
+        with open("/proc/uptime", "r") as fh:
+            return float(fh.read().split()[0])
+    except Exception:
+        return None
+
+
+def _load_chquery():
+    """Import scripts/validation/chquery.py by explicit path (no sys.path games,
+    mirroring how bar-status-poll loads _db.py). Returns the module.
+
+    The module MUST be registered in sys.modules under its spec name before
+    exec_module: chquery uses @dataclass, and dataclass resolution looks the
+    defining module up in sys.modules (a dynamic import that skips this raises
+    'NoneType has no __dict__')."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("_ao_chquery", CHQUERY_PATH)
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def read_env_file(path):
+    """Parse a KEY=VALUE env file (# comments, blank lines) → dict. {} on failure.
+    Same shape the collector/systemd EnvironmentFile uses."""
+    env = {}
+    try:
+        with open(path, "r") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                k, v = line.split("=", 1)
+                env[k.strip()] = v.strip()
+    except Exception:
+        return {}
+    return env
+
+
+def query_telemetry_freshness(timeout=TELEM_QUERY_TIMEOUT):
+    """Single cheap CH aggregate: seconds since the last row per `source`.
+
+    dateDiff is computed SERVER-side (max(ts) vs now(), both server-UTC) so the
+    result is tz- and local-clock-independent; a 2-day WHERE bounds the scan.
+    Reuses chquery + the collector's env file (the SAME endpoint/creds the
+    telemetry writer uses on this host — never a hardcoded one). Returns
+    {source: age_secs}; RAISES on any failure (unconfigured / unreachable) —
+    the caller (refresh_telemetry_cache) turns that into an error marker."""
+    Q = _load_chquery()
+    env = dict(os.environ)
+    for k, v in read_env_file(ACTIVITY_ENV).items():
+        env.setdefault(k, v)      # explicit env wins; the file fills the gaps
+    conn = Q.CHConn.from_env(env)  # raises if CLICKHOUSE_URL is absent
+    conn.timeout = float(timeout)
+    client = Q.CHClient(conn)
+    sql = (
+        "SELECT source, dateDiff('second', max(ts), now()) AS age_secs "
+        "FROM %s WHERE ts > now() - INTERVAL 2 DAY "
+        "GROUP BY source ORDER BY source" % conn.fq_table)
+    rows = client.rows(sql)
+    out = {}
+    for r in rows:
+        s = r.get("source")
+        if s:
+            try:
+                out[str(s)] = int(r.get("age_secs") or 0)
+            except (TypeError, ValueError):
+                continue
+    return out
 
 
 # ===========================================================================
@@ -527,6 +664,89 @@ def _session_label(session: str, codenames: dict | None) -> str:
     return (codenames or {}).get(session, session)
 
 
+# --- Local health (failed units + timer last-runs + telemetry freshness) ----
+_UNIT_SUFFIXES = (".service", ".timer", ".socket", ".mount", ".path", ".scope",
+                  ".slice", ".target", ".device", ".automount", ".swap")
+
+
+def parse_failed_units(raw) -> list:
+    """First column of `systemctl --user --failed --plain` → [unit, …]. []-safe.
+
+    Each non-blank line's leading token is the unit id (UNIT LOAD ACTIVE SUB …);
+    only tokens ending in a known unit suffix are kept, so a stray header/legend
+    line never leaks in. None/'' → []."""
+    if not raw:
+        return []
+    units = []
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        tok = line.split()[0]
+        if tok.endswith(_UNIT_SUFFIXES):
+            units.append(tok)
+    return units
+
+
+def parse_systemctl_show(raw) -> dict:
+    """`systemctl show` KEY=VALUE block → dict. {} on None/empty. Never raises."""
+    d = {}
+    if not raw:
+        return d
+    for line in raw.splitlines():
+        if "=" in line:
+            k, v = line.split("=", 1)
+            d[k.strip()] = v.strip()
+    return d
+
+
+def _mono_age(show, key, uptime):
+    """Wall age (s) of a monotonic-usec timestamp field vs `uptime`. None if the
+    field is 0/absent or uptime is unknown. tz-free."""
+    try:
+        m = int((show or {}).get(key))
+    except (TypeError, ValueError):
+        return None
+    if m > 0 and uptime is not None:
+        return max(0.0, float(uptime) - m / 1e6)
+    return None
+
+
+def unit_health_row(unit, label, show, uptime=None) -> dict:
+    """Pure: a parsed `systemctl show` dict → a Local-health row.
+
+    Returns {unit, label, present, ok, running, age_secs, result, active}. A unit
+    not installed on this host (LoadState in {not-found, masked} / empty show) is
+    present=False → rendered "absent" (e.g. workbench-only units on the laptop).
+    `ok` is tri-state: True (Result=success), False (ActiveState=failed or a
+    non-success Result), None (unknown). `running` marks a live daemon
+    (ActiveState=active + SubState=running); for those age_secs is the START age
+    (how long it's been up), otherwise it is the last-run COMPLETION age (from the
+    exit timestamp) — None if it has never completed."""
+    present = bool(show)
+    load = (show or {}).get("LoadState")
+    if not present or load in ("not-found", "masked"):
+        return {"unit": unit, "label": label, "present": False, "ok": None,
+                "running": False, "age_secs": None, "result": None, "active": None}
+    result = show.get("Result") or ""
+    active = show.get("ActiveState") or ""
+    sub = show.get("SubState") or ""
+    running = active in ("active", "activating") and sub == "running"
+    if running:
+        age = _mono_age(show, "ExecMainStartTimestampMonotonic", uptime)
+    else:
+        age = _mono_age(show, "ExecMainExitTimestampMonotonic", uptime)
+    if active == "failed" or (result and result != "success"):
+        ok = False
+    elif result == "success" or running:
+        ok = True
+    else:
+        ok = None
+    return {"unit": unit, "label": label, "present": True, "ok": ok,
+            "running": running, "age_secs": age, "result": result,
+            "active": active}
+
+
 # ---------------------------------------------------------------------------
 # Formatting helpers
 # ---------------------------------------------------------------------------
@@ -680,6 +900,96 @@ def render_health(alerts, civitai) -> list:
     return lines
 
 
+# Telemetry freshness colour bands (seconds): a source that has emitted recently
+# is GREEN; a longer gap is YELLOW; a stale/absent one is DIM. NOTE these are
+# intentionally generous — keys/i3/browser only emit while you're active, so a
+# quiet source is not necessarily broken; this view flags "is the layer alive",
+# not "are you at the keyboard". A totally dead collector shows every source DIM.
+_TELEM_FRESH = 1800      # < 30m  → green
+_TELEM_STALE = 10800     # < 3h   → yellow, else dim
+
+
+def render_local_health(failed_units, unit_rows, freshness, now=None) -> list:
+    """Local health: failed user units + key timer last-runs + per-source
+    telemetry freshness. Read-only + fail-safe — every input degrades gracefully
+    (systemctl n/a, a unit absent, telemetry unreachable) to a calm line."""
+    lines = [_header("Local health", AQUA)]
+
+    # 1. Failed user units (None = systemctl unavailable; [] = all healthy).
+    if failed_units is None:
+        lines.append("   %s  %s" % (paint("%-12s" % "units", BLUE),
+                                    paint("— systemctl n/a", DIMMER)))
+    elif not isinstance(failed_units, (list, tuple)) or not failed_units:
+        lines.append("   %s  %s" % (paint("%-12s" % "units", BLUE),
+                                    paint("✓ all user units healthy", GREEN)))
+    else:
+        lines.append("   %s  %s" % (
+            paint("%-12s" % "units", BLUE),
+            paint("✗ %d failed: %s" % (
+                len(failed_units),
+                _truncate(", ".join(str(u) for u in failed_units), 44)),
+                RED, bold=True)))
+
+    # 2. Key timer-backed services — last-run result + age.
+    rows = unit_rows if isinstance(unit_rows, (list, tuple)) else []
+    for r in rows:
+        if not isinstance(r, dict):
+            continue
+        label = r.get("label") or r.get("unit") or "?"
+        if not r.get("present"):
+            lines.append("   %s  %s" % (
+                paint("%-12s" % _truncate(label, 12), BLUE),
+                paint("— absent", DIMMER)))
+            continue
+        if r.get("ok") is True:
+            mark, mcol, bold = ("running" if r.get("running") else "ok"), GREEN, False
+        elif r.get("ok") is False:
+            mark, mcol, bold = (r.get("result") or "failed"), RED, True
+        else:
+            mark, mcol, bold = (r.get("active") or "?"), YELLOW, False
+        if r.get("age_secs") is None:
+            age = paint("never run", DIMMER)
+        elif r.get("running"):
+            age = paint("up " + rel_age(r["age_secs"]), DIMMER)
+        else:
+            age = paint(rel_age(r["age_secs"]) + " ago", DIMMER)
+        lines.append("   %s  %s  %s" % (
+            paint("%-12s" % _truncate(label, 12), BLUE),
+            paint("%-11s" % _truncate(mark, 11), mcol, bold=bold),
+            age))
+
+    # 3. Per-source telemetry freshness (from the TTL-cached CH aggregate).
+    lines.append(_render_telemetry_line(freshness))
+    return lines
+
+
+def _render_telemetry_line(freshness) -> str:
+    """One 'telemetry  zsh 1m  tmux 1m  keys 3m  …' line, or an 'unreachable'/
+    'off' fallback. `freshness` is the cached payload {sources:{src:age}} | {error}
+    | None."""
+    label = paint("%-12s" % "telemetry", BLUE)
+    if not isinstance(freshness, dict) or freshness.get("error") \
+            or "sources" not in freshness:
+        return "   %s  %s" % (label, paint("unreachable", YELLOW))
+    sources = freshness.get("sources") or {}
+    if not sources:
+        return "   %s  %s" % (label, paint("no rows (telemetry off?)", YELLOW))
+    parts = []
+    for s in TELEM_SOURCES:
+        if s in sources:
+            age = sources[s]
+            col = (GREEN if age < _TELEM_FRESH
+                   else (YELLOW if age < _TELEM_STALE else DIM))
+            parts.append(paint("%s %s" % (s, rel_age(age)), col))
+        else:
+            parts.append(paint("%s —" % s, DIM))
+    # Any unexpected extra sources returned by the query, appended dimly.
+    for s in sorted(sources):
+        if s not in TELEM_SOURCES:
+            parts.append(paint("%s %s" % (s, rel_age(sources[s])), DIM))
+    return "   %s  %s" % (label, "  ".join(parts))
+
+
 def render_done(initiatives, freshness="", limit=6) -> list:
     lines = [_header("Recently done", GREEN, freshness)]
     merged = [i for i in initiatives if (i.get("merged_prs") or 0) > 0]
@@ -814,6 +1124,69 @@ def maybe_refresh_prs(now=None):
             pass
 
 
+def refresh_telemetry_cache(now=None):
+    """Worker (run via `agent-ops --refresh-telemetry`): run the single CH
+    freshness aggregate and atomically write ~/.cache/agent-ops/
+    telemetry-freshness.json as {generated, sources:{src:age}} or
+    {generated, error}. Never raises; always drops the refresh lock."""
+    now = now or time.time()
+    try:
+        os.makedirs(CACHE_DIR, exist_ok=True)
+    except Exception:
+        return
+    payload = {"generated": now}
+    try:
+        payload["sources"] = query_telemetry_freshness()
+    except Exception as e:  # unconfigured / unreachable → error marker
+        payload["error"] = str(e)[:200]
+    try:
+        tmp = TELEM_CACHE + ".tmp"
+        with open(tmp, "w") as fh:
+            json.dump(payload, fh)
+        os.replace(tmp, TELEM_CACHE)
+    except Exception:
+        pass
+    finally:
+        try:
+            os.remove(TELEM_LOCK)
+        except Exception:
+            pass
+
+
+def maybe_refresh_telemetry(now=None):
+    """Kick a detached `agent-ops --refresh-telemetry` if the freshness cache is
+    stale and no refresh is already running. Never blocks; the CH round-trip only
+    ever happens in the detached worker, never on the popup render path."""
+    now = now or time.time()
+    try:
+        os.makedirs(CACHE_DIR, exist_ok=True)
+    except Exception:
+        return
+    cache_age = file_age_secs(TELEM_CACHE, now)
+    if cache_age is not None and cache_age < TELEM_TTL:
+        return
+    lock_age = file_age_secs(TELEM_LOCK, now)
+    if lock_age is not None and lock_age < ISCAN_LOCK_TTL:
+        return
+    if not os.path.exists(CHQUERY_PATH):
+        return  # no client available → leave the cache empty (renders unreachable)
+    try:
+        open(TELEM_LOCK, "w").close()
+    except Exception:
+        return
+    try:
+        subprocess.Popen(
+            [sys.executable, os.path.abspath(__file__), "--refresh-telemetry"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            start_new_session=True)
+    except Exception:
+        try:
+            os.remove(TELEM_LOCK)
+        except Exception:
+            pass
+
+
 # ===========================================================================
 # Frame assembly + interactive loop
 # ===========================================================================
@@ -840,11 +1213,25 @@ def build_body_lines(width: int) -> list:
 
     maybe_refresh_initiatives()
     maybe_refresh_prs()
+    maybe_refresh_telemetry()
     scan = read_json(ISCAN_CACHE)
     initiatives = flatten_initiatives(scan)
     fresh = initiatives_freshness()
     pr_rows = flatten_open_prs(read_json(PRS_CACHE))
     prs_fresh = initiatives_freshness(cache=PRS_CACHE, lock=PRS_LOCK)
+
+    # Local health: failed user units + key timer last-runs are cheap/local, so
+    # they run inline; the telemetry-freshness CH query is served from its TTL
+    # cache (refreshed in the background above), never inline.
+    failed_raw = fetch_failed_user_units()
+    failed_units = None if failed_raw is None else parse_failed_units(failed_raw)
+    uptime = read_uptime()
+    unit_rows = [
+        unit_health_row(unit, label, parse_systemctl_show(fetch_unit_show(unit)),
+                        uptime)
+        for unit, label in LOCAL_HEALTH_UNITS
+    ]
+    telemetry = read_json(TELEM_CACHE)
 
     blocks = [
         render_blocked(clawgate, mail, titles),
@@ -852,6 +1239,7 @@ def build_body_lines(width: int) -> list:
         render_prs(pr_rows, prs_fresh),
         render_momentum(initiatives, fresh),
         render_health(alerts, civitai),
+        render_local_health(failed_units, unit_rows, telemetry),
         render_done(initiatives, fresh),
     ]
     lines = []
@@ -1000,6 +1388,11 @@ def main(argv=None):
     if "--refresh-prs" in argv:
         # Internal: the detached background open-PR sweep (spawned by maybe_refresh_prs).
         refresh_prs_cache()
+        return 0
+    if "--refresh-telemetry" in argv:
+        # Internal: the detached telemetry-freshness CH query (spawned by
+        # maybe_refresh_telemetry).
+        refresh_telemetry_cache()
         return 0
     if "--once" in argv:
         # Non-interactive single frame — handy for capture-pane / debugging.
