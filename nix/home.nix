@@ -206,6 +206,21 @@ in
     "${home}/.npm-packages/bin"
   ];
 
+  # Default browser: Brave (Chromium-based). Declaratively own the web
+  # scheme/mime handlers so both hosts agree; matches the $mod+b i3 launcher
+  # and the activity-collector's BROWSER_APP=brave labelling.
+  xdg.mimeApps = {
+    enable = true;
+    defaultApplications = {
+      "text/html" = "brave-browser.desktop";
+      "application/xhtml+xml" = "brave-browser.desktop";
+      "x-scheme-handler/http" = "brave-browser.desktop";
+      "x-scheme-handler/https" = "brave-browser.desktop";
+      "x-scheme-handler/about" = "brave-browser.desktop";
+      "x-scheme-handler/unknown" = "brave-browser.desktop";
+    };
+  };
+
   # Symlink tmux scripts
   home.file.".config/tmux/idle-update.sh" = {
     source = ../scripts/tmux-idle-update.sh;
