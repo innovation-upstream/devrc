@@ -822,8 +822,13 @@ in
     Service = {
       Type = "oneshot";
       # Each ticket runs a headless claude pass with real tool calls; daily cadence
-      # tolerates an occasional long run. DRAFTER_MAX_TICKETS caps the first run.
-      TimeoutStartSec = 3600;
+      # tolerates an occasional long run. Bound: the FIRST (empty-state) run is the
+      # worst case — it processes at most DRAFTER_MAX_TICKETS (default 25) and
+      # baselines the rest, so 25 × DRAFTER_TIMEOUT(240s) = 6000s. 7200s clears that
+      # with headroom (steady-state delta runs are a handful of tickets). If you
+      # raise the cap or per-ticket timeout, raise this to match so a run never gets
+      # SIGTERM'd mid-loop (which would strand the digest + fire a failure toast).
+      TimeoutStartSec = 7200;
       Nice = 10;
       Environment = [
         # claude + gh live in the HM profile (not devrc's flake) -> profile bins

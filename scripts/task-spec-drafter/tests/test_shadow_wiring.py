@@ -52,6 +52,34 @@ def test_shadow_branch_exits_before_send():
     assert 'exit 0' in seg.split('# on: actually notify clawgate', 1)[0]
 
 
+# --- read-only allowlist (no write-capable verbs reachable under injection) ----
+
+def _allowlist(src: str) -> str:
+    """Extract the DRAFTER_ALLOWED_TOOLS default value."""
+    line = next(l for l in src.splitlines() if l.startswith("DRAFTER_ALLOWED_TOOLS="))
+    return line
+
+
+def test_allowlist_has_no_write_capable_verbs():
+    """The headless pass reasons over untrusted client ticket text with no plan
+    mode, so a write-capable allowlist entry is an injection→mutation path. These
+    must NOT be present."""
+    al = _allowlist(_read(_DRAFTER))
+    assert "gh api" not in al, "gh api* allows `gh api -X POST/PATCH/DELETE`"
+    assert "curl" not in al, "curl -s* allows `curl -X POST -d …`"
+    assert "Bash(env" not in al, "env* dumps the inherited CLAWGATE_HOOK_TOKEN"
+
+
+def test_allowlist_keeps_readonly_verification_verbs():
+    al = _allowlist(_read(_DRAFTER))
+    for verb in (
+        "Bash(git -C * log*)", "Bash(git -C * show*)",
+        "Bash(gh pr list*)", "Bash(gh pr view*)",
+        "Bash(kubectl get*)", "Bash(node *query.mjs get*)",
+    ):
+        assert verb in al, f"missing read-only verification verb {verb}"
+
+
 # --- deterministic safety gate ------------------------------------------------
 
 def test_safety_gate_forces_needs_decision():
@@ -101,6 +129,16 @@ def test_hm_unit_has_onfailure_and_execstart():
     assert 'OnFailure = [ "notify-failure@%n.service" ]' in block
     assert "scripts/task-spec-drafter/drafter.sh" in block
     assert "REPO_COS_PROD_KUBECONFIG" in block
+
+
+def test_hm_unit_timeout_covers_first_run():
+    """TimeoutStartSec must clear the worst-case first run
+    (DRAFTER_MAX_TICKETS 25 × DRAFTER_TIMEOUT 240s = 6000s) so it isn't SIGTERM'd
+    mid-loop."""
+    nix = _read(_HOME_NIX)
+    block = nix.split("systemd.user.services.task-spec-drafter", 1)[1].split(
+        "systemd.user.timers.task-spec-drafter", 1)[0]
+    assert "TimeoutStartSec = 7200" in block
 
 
 def test_hm_seeds_shadow_env():

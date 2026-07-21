@@ -122,11 +122,24 @@ DRAFTER_EMAIL_DRYRUN="${DRAFTER_EMAIL_DRYRUN:-0}"
 # Relay kubeconfig for the email path (production cluster; same one repo-cos uses).
 export REPO_COS_PROD_KUBECONFIG="${REPO_COS_PROD_KUBECONFIG:-$HOME/workspace/homelab-talos/production-kubeconfig}"
 
-# Tight READ-ONLY allowlist for the headless pipeline pass. Only verbs that read
-# state appear here — no apply/edit/delete/scale/commit/push/comment. This is the
-# enforcement complement to the prompt's HARD CONSTRAINTS. Override via env if a
-# verification source needs a verb not listed.
-DRAFTER_ALLOWED_TOOLS="${DRAFTER_ALLOWED_TOOLS:-Read,Glob,Grep,WebFetch,Bash(node *query.mjs get*),Bash(node *query.mjs comments*),Bash(node *query.mjs search*),Bash(git -C * log*),Bash(git -C * show*),Bash(git -C * diff*),Bash(git -C * grep*),Bash(git log*),Bash(gh pr list*),Bash(gh pr view*),Bash(gh search*),Bash(gh api*),Bash(kubectl get*),Bash(kubectl logs*),Bash(kubectl describe*),Bash(kubectl top*),Bash(curl -s*),Bash(grep*),Bash(rg*),Bash(jq*),Bash(cat*),Bash(echo*),Bash(date*),Bash(env*)}"
+# Tight READ-ONLY allowlist for the headless pipeline pass. Only verbs that READ
+# state appear here — no apply/edit/delete/scale/commit/push/comment.
+#
+# SECURITY: the per-ticket pass reasons over UNTRUSTED civitai *client* ticket text
+# (title + body + comments) with NO --permission-mode plan, so allowlisted tools
+# EXECUTE unprompted. A prompt-injected ticket must not be able to reach a WRITE.
+# Therefore every entry is a read-only verb only, and specifically NOT:
+#   * `Bash(gh api*)`  — dropped: allows `gh api -X POST/PATCH/DELETE` (mutations).
+#                        PR/commit reality is verified via gh pr list/view/search.
+#   * `Bash(curl -s*)` — dropped: allows `curl -X POST -d …` to any URL (mutation +
+#                        exfil). Live-state verification degrades to kubectl
+#                        get/logs/top (pod/cronjob running-vs-suspended), which
+#                        covers the primary "is it still firing / intentionally
+#                        off?" axis; ad-hoc Prometheus/Alertmanager HTTP reads go.
+#   * `Bash(env*)`     — dropped: the pass inherits drafter.sh's env, which sources
+#                        ~/.claude/clawgate.env (CLAWGATE_HOOK_TOKEN); no dumping it.
+# Override DRAFTER_ALLOWED_TOOLS via env ONLY with read-only verbs.
+DRAFTER_ALLOWED_TOOLS="${DRAFTER_ALLOWED_TOOLS:-Read,Glob,Grep,WebFetch,Bash(node *query.mjs get*),Bash(node *query.mjs comments*),Bash(node *query.mjs search*),Bash(git -C * log*),Bash(git -C * show*),Bash(git -C * diff*),Bash(git -C * grep*),Bash(git log*),Bash(gh pr list*),Bash(gh pr view*),Bash(gh search*),Bash(kubectl get*),Bash(kubectl logs*),Bash(kubectl describe*),Bash(kubectl top*),Bash(grep*),Bash(rg*),Bash(jq*),Bash(cat*),Bash(echo*),Bash(date*)}"
 
 mkdir -p "$DRAFTER_OUT_DIR" 2>/dev/null || true
 # The delta-state file may live outside OUT_DIR (e.g. ~/.local/state/...); make

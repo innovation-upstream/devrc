@@ -23,6 +23,9 @@ Type=oneshot
 # Adjust the path if devrc lives elsewhere on this host.
 ExecStart=/home/zach/workspace/devrc/scripts/task-spec-drafter/drafter.sh
 # Long because each ticket runs a headless claude pass; the timer is daily so an
-# occasional long run is fine. Tune down via DRAFTER_MAX_TICKETS for cheap runs.
-TimeoutStartSec=3600
+# occasional long run is fine. Worst case = first (empty-state) run: at most
+# DRAFTER_MAX_TICKETS(25) × DRAFTER_TIMEOUT(240s) = 6000s, so 7200s clears it with
+# headroom. Raise this if you raise the cap/per-ticket timeout. Matches the
+# home-manager unit (nix/home.nix), which is authoritative on the workbench.
+TimeoutStartSec=7200
 Nice=10

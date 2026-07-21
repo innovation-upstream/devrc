@@ -48,6 +48,38 @@ def test_dry_run_renders_to_file_and_sends_nothing(tmp_path):
     assert "do the thing" in rendered  # the body is carried verbatim
 
 
+def test_dry_run_uses_distinct_drafter_identity(tmp_path):
+    """The digest must NOT reuse repo-cos's From/Reply-To (a reply to those routes
+    into repo-cos's feedback parser). It sends as task-drafter@ and points replies
+    at Zach's own inbox."""
+    body = tmp_path / "d.md"
+    body.write_text("x\n", encoding="utf-8")
+    out = tmp_path / "r.txt"
+    r = _run(["--subject", "s", "--body-file", str(body), "--dry-run", "--out", str(out)])
+    assert r.returncode == 0, r.stderr
+    rendered = out.read_text(encoding="utf-8")
+    assert "From: task-drafter <task-drafter@mail.zacx.dev>" in rendered
+    assert "Reply-To: zachlowden1@gmail.com" in rendered
+    # explicitly NOT repo-cos's identity
+    assert "repo-cos@mail.zacx.dev" not in rendered
+    assert "repo-cos@inbox.zacx.dev" not in rendered
+
+
+def test_identity_env_overrides(tmp_path):
+    body = tmp_path / "d.md"
+    body.write_text("x\n", encoding="utf-8")
+    out = tmp_path / "r.txt"
+    r = _run(
+        ["--subject", "s", "--body-file", str(body), "--dry-run", "--out", str(out)],
+        env_extra={"DRAFTER_EMAIL_FROM": "custom <c@x.dev>",
+                   "DRAFTER_EMAIL_REPLY_TO": "reply@x.dev"},
+    )
+    assert r.returncode == 0, r.stderr
+    rendered = out.read_text(encoding="utf-8")
+    assert "From: custom <c@x.dev>" in rendered
+    assert "Reply-To: reply@x.dev" in rendered
+
+
 def test_dry_run_via_env_flag_to_stdout(tmp_path):
     body = tmp_path / "digest.md"
     body.write_text("BODYMARKER\n", encoding="utf-8")

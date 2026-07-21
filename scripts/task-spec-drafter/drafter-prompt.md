@@ -14,7 +14,8 @@ NEVER draft a confident task you could not verify the intent of.
   edit/merge/push any repo, do not mutate the cluster. No `clickup ... comment`,
   no `gh pr ...` mutations, no `kubectl apply/delete/edit/scale`, no `git commit`.
   You may only READ: `clickup get/comments`, `git log`, `gh pr list/view --search`,
-  `kubectl get/logs` (read verbs) + Prometheus/Alertmanager reads.
+  `kubectl get/logs/describe/top` (read verbs only). No `gh api` and no `curl` —
+  they are not on the allowlist and will not run.
 - **Do not dispatch anything.** You only produce the record below.
 - **SAFETY RULE (the meili-cron lesson):** if you cannot verify *why* something
   is or isn't being done — i.e. you can't confirm whether the work is wanted,
@@ -38,10 +39,11 @@ other tickets may be referenced for CORRELATE but are not yours to classify here
   `git -C ... log --all --grep '<keyword>'`,
   `gh -R civitai/civitai pr list --search '<keyword>' --state all --limit 20`,
   `gh -R civitai/civitai pr view <n>`.
-- **Live metrics/alerts:** `KUBECONFIG=/home/zach/workspace/civit/datapacket-talos/prod-kubeconfig`
-  then `kubectl get pods/cronjobs/...`, `kubectl logs ...`, and query
-  Alertmanager/Prometheus if reachable. Use to answer "is this still firing?",
-  "is this component running or suspended?".
+- **Live cluster state:** `KUBECONFIG=/home/zach/workspace/civit/datapacket-talos/prod-kubeconfig`
+  then `kubectl get pods/cronjobs/...`, `kubectl logs ...`, `kubectl describe ...`,
+  `kubectl top ...` (read-only). Use to answer "is this component running or
+  suspended?", "is the workload healthy / erroring?". (No HTTP `curl` to
+  Prometheus/Alertmanager — not on the allowlist; rely on kubectl for live state.)
 
 Use these tools liberally — the WHOLE point is to cross-check the ticket against
 live reality before classifying. A title-only read is the FAILURE mode (it would
