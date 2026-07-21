@@ -528,9 +528,150 @@ def test_build_frame_failsafe(monkeypatch):
     monkeypatch.setattr(ao, "own_pid_chain", lambda: set())
     monkeypatch.setattr(ao, "maybe_refresh_initiatives", lambda *a, **k: None)
     monkeypatch.setattr(ao, "maybe_refresh_prs", lambda *a, **k: None)
+    monkeypatch.setattr(ao, "maybe_refresh_telemetry", lambda *a, **k: None)
     monkeypatch.setattr(ao, "enrich_clawgate_titles", lambda *a, **k: [])
+    # Local-health fetches must not touch systemctl / the network in the sandbox.
+    monkeypatch.setattr(ao, "fetch_failed_user_units", lambda *a, **k: None)
+    monkeypatch.setattr(ao, "fetch_unit_show", lambda *a, **k: None)
+    monkeypatch.setattr(ao, "read_uptime", lambda *a, **k: None)
     frame = ao.build_frame(100)
     body = plain(frame)
     for section in ("BLOCKED ON ME", "ACTIVE AGENT RUNS", "IN FLIGHT",
-                    "MOMENTUM", "HEALTH", "RECENTLY DONE"):
+                    "MOMENTUM", "HEALTH", "LOCAL HEALTH", "RECENTLY DONE"):
         assert section in body
+
+
+# ---------------------------------------------------------------------------
+# Local health — parse_failed_units / parse_systemctl_show / unit_health_row
+# ---------------------------------------------------------------------------
+def test_parse_failed_units_extracts_unit_column():
+    raw = (
+        "keylog.service       loaded failed failed X11 keystroke collector\n"
+        "repo-cos.timer       loaded failed failed Weekly timer\n"
+        "\n"
+    )
+    assert ao.parse_failed_units(raw) == ["keylog.service", "repo-cos.timer"]
+
+
+def test_parse_failed_units_failsafe():
+    assert ao.parse_failed_units(None) == []
+    assert ao.parse_failed_units("") == []
+    # a stray non-unit line (e.g. a legend) is ignored
+    assert ao.parse_failed_units("0 loaded units listed.") == []
+
+
+def test_parse_systemctl_show_keyvalues():
+    raw = "LoadState=loaded\nActiveState=failed\nResult=exit-code\n"
+    d = ao.parse_systemctl_show(raw)
+    assert d["LoadState"] == "loaded"
+    assert d["ActiveState"] == "failed"
+    assert d["Result"] == "exit-code"
+    assert ao.parse_systemctl_show(None) == {}
+
+
+def test_unit_health_row_oneshot_success():
+    show = {"LoadState": "loaded", "ActiveState": "inactive", "SubState": "dead",
+            "Result": "success", "ExecMainExitTimestampMonotonic": "1000000"}
+    r = ao.unit_health_row("repo-cos.service", "repo-cos", show, uptime=3601)
+    assert r["present"] and r["ok"] is True and r["running"] is False
+    # 3601s uptime - 1_000_000us(=1s) exit → ~3600s (1h) ago
+    assert 3590 <= r["age_secs"] <= 3601
+
+
+def test_unit_health_row_running_daemon_uses_start_age():
+    show = {"LoadState": "loaded", "ActiveState": "active", "SubState": "running",
+            "Result": "success", "ExecMainStartTimestampMonotonic": "1000000",
+            "ExecMainExitTimestampMonotonic": "0"}
+    r = ao.unit_health_row("activity-collector.service", "collector", show,
+                           uptime=7201)
+    assert r["running"] is True and r["ok"] is True
+    assert 7190 <= r["age_secs"] <= 7201   # up ~2h (start age, not exit)
+
+
+def test_unit_health_row_failed():
+    show = {"LoadState": "loaded", "ActiveState": "failed", "SubState": "failed",
+            "Result": "exit-code", "ExecMainExitTimestampMonotonic": "1000000"}
+    r = ao.unit_health_row("keylog.service", "keylog", show, uptime=100)
+    assert r["ok"] is False and r["result"] == "exit-code"
+
+
+def test_unit_health_row_absent_when_not_found():
+    r = ao.unit_health_row("mail-actions-archive.service", "mail-archive",
+                           {"LoadState": "not-found"}, uptime=100)
+    assert r["present"] is False and r["ok"] is None and r["age_secs"] is None
+    # an empty show (systemctl failed) is also absent
+    assert ao.unit_health_row("x.service", "x", {}, uptime=100)["present"] is False
+
+
+def test_unit_health_row_never_run_unknown():
+    # loaded but never started (oneshot before first fire): no exit ts, inactive.
+    show = {"LoadState": "loaded", "ActiveState": "inactive", "SubState": "dead",
+            "Result": "success", "ExecMainExitTimestampMonotonic": "0"}
+    r = ao.unit_health_row("mail-actions-archive.service", "mail-archive", show,
+                           uptime=None)
+    assert r["present"] is True and r["age_secs"] is None
+
+
+# ---------------------------------------------------------------------------
+# Local health — render_local_health / _render_telemetry_line
+# ---------------------------------------------------------------------------
+def _row(label, **kw):
+    base = {"unit": label + ".service", "label": label, "present": True,
+            "ok": True, "running": False, "age_secs": 60, "result": "success",
+            "active": "inactive"}
+    base.update(kw)
+    return base
+
+
+def test_render_local_health_all_healthy():
+    fresh = {"sources": {"zsh": 30, "tmux": 45, "keys": 5, "i3": 12,
+                         "browser": 300, "claude": 90}, "generated": 0}
+    out = plain(ao.render_local_health([], [_row("repo-cos")], fresh))
+    text = "\n".join(out)
+    assert "LOCAL HEALTH" in text
+    assert "all user units healthy" in text
+    assert "repo-cos" in text and "ok" in text
+    # every expected source appears in the telemetry line
+    for src in ("zsh", "tmux", "keys", "i3", "browser", "claude"):
+        assert src in text
+
+
+def test_render_local_health_failed_and_absent():
+    out = plain(ao.render_local_health(
+        ["keylog.service"],
+        [_row("bad", ok=False, result="exit-code"),
+         _row("gone", present=False, ok=None, age_secs=None)],
+        None))
+    text = "\n".join(out)
+    assert "1 failed: keylog.service" in text
+    assert "exit-code" in text
+    assert "absent" in text
+    # None cache → telemetry unreachable
+    assert "unreachable" in text
+
+
+def test_render_local_health_systemctl_na():
+    out = plain(ao.render_local_health(None, [], {"error": "x", "generated": 0}))
+    text = "\n".join(out)
+    assert "systemctl n/a" in text
+    assert "unreachable" in text
+
+
+def test_render_telemetry_line_missing_source_shown_dim():
+    # keys/browser absent from the result → shown as "keys —"/"browser —"
+    line = plain(ao._render_telemetry_line(
+        {"sources": {"zsh": 10, "tmux": 20, "i3": 5, "claude": 8},
+         "generated": 0}))
+    assert "keys —" in line and "browser —" in line
+    assert "zsh" in line and "tmux" in line
+
+
+def test_render_telemetry_line_no_rows():
+    line = plain(ao._render_telemetry_line({"sources": {}, "generated": 0}))
+    assert "telemetry off" in line or "no rows" in line
+
+
+def test_render_local_health_never_raises_on_junk():
+    # totally malformed inputs must degrade, never raise
+    ao.render_local_health("junk", "junk", "junk")
+    ao.render_local_health(None, None, None)
