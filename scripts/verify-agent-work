@@ -1,0 +1,913 @@
+#!/usr/bin/env python3
+"""verify-agent-work — deterministic, repo-aware post-agent verification gate.
+
+Zach works entirely through dispatched subagents. The recurring failure this
+gate closes: an agent claims "build green / committed / done" but
+
+  (a) a proxy command hid a real error (`vite build` does NOT typecheck — a
+      green build hid live `tsc` errors),
+  (b) the agent "committed but stopped before finishing" (dirty tree / unpushed
+      commits contradict the "done" claim), or
+  (c) a stale worktree `node_modules` symlink produced a flood of false
+      "cannot find module" LSP errors that were mistaken for real code errors.
+
+This is the CHEAP MECHANICAL structural gate: it re-runs the AUTHORITATIVE
+per-stack check CI would run (never a proxy) plus git-completeness and the
+stale-deps footgun, and prints ONE verdict whose output Claude reads INSTEAD of
+trusting the agent's prose. It is NOT an LLM/adversarial review (that's
+`/audit-pr`) and NOT e2e/behaviour verification (that's the `verify` skill).
+
+CORE INVARIANT (anti-false-green): a stack that is DETECTED but whose
+authoritative gate did NOT actually execute is reported as INCOMPLETE and makes
+the overall verdict non-PASS with a non-zero exit — a gate that could not run is
+never silently counted as green. A repo with NO stack present (nothing to
+verify) is still a legitimate PASS. The distinction is *detected-but-unrun*
+(bad, non-zero) vs *not-present* (fine).
+
+SECURITY / TRUST: this gate runs the TARGET repo's OWN build/test commands and
+honours a repo-local `.verify-agent.json` — that is arbitrary code execution BY
+DESIGN. Do NOT run it against a repo whose contents or `.verify-agent.json` you
+do not trust; it will execute them. Per this repo's CLAUDE.md, agent-handed
+worktrees and fuzzyclaw task data are UNTRUSTED — treat a worktree you did not
+create the same way (inspect before verifying).
+
+Read-only w.r.t. the repo contents (never writes/commits/installs), except for
+running those build/test commands.
+
+Usage:
+  verify-agent-work [TARGET] [--json] [--strict] [--no-gh] [--timeout SECS]
+    TARGET     repo / worktree path to verify (default: cwd).
+    --json     emit a structured result to stdout (machine-readable).
+    --strict   ALSO promote advisory WARN checks (dirty tree / unpushed) to
+               hard failures. (INCOMPLETE is ALWAYS a hard non-pass, strict or
+               not.)
+    --no-gh    skip the best-effort `gh` open-PR lookup.
+    --timeout  per-gate-command timeout in seconds (default: 600).
+
+Exit code:
+  0  every detected stack's gate ran and PASSed (WARNs allowed unless --strict).
+  1  any hard non-pass — a gate FAILed, or a detected stack was INCOMPLETE
+     (gate could not run), or (with --strict) any WARN.
+  2  usage/setup error (bad target).
+
+Config (optional): a repo-local `.verify-agent.json` (in TARGET root) can
+override the command run for a stack or skip a stack entirely:
+  {
+    "skip": ["nix"],
+    "ts":     {"typecheck": "pnpm run typecheck", "test": "pnpm test"},
+    "go":     {"build": "go build ./...", "vet": "go vet ./...", "test": "go test ./...", "race": false},
+    "python": {"lint": "ruff check .", "test": "pytest -q"}, "nix": {"check": "nix flake check"}
+  }
+Any key omitted keeps the auto-detected default; a stack in "skip" is not run
+(and does not count against the verdict).
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import shutil
+import subprocess
+import sys
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Callable, Optional
+
+# --------------------------------------------------------------------------- #
+# result model
+# --------------------------------------------------------------------------- #
+
+PASS = "PASS"
+FAIL = "FAIL"
+INCOMPLETE = "INCOMPLETE"  # detected stack, gate could NOT run → hard non-pass
+WARN = "WARN"
+SKIP = "SKIP"
+
+# States that make the overall verdict a hard non-pass (non-zero exit).
+# INCOMPLETE is unconditional; WARN only under --strict.
+_NONPASS = {FAIL, INCOMPLETE}
+
+
+@dataclass
+class Check:
+    name: str
+    status: str
+    summary: str
+    detail: str = ""
+    output: str = ""
+
+    def to_dict(self) -> dict:
+        d = {"name": self.name, "status": self.status, "summary": self.summary}
+        if self.detail:
+            d["detail"] = self.detail
+        if self.output:
+            d["output"] = self.output
+        return d
+
+
+@dataclass
+class Result:
+    target: str
+    stacks: list = field(default_factory=list)
+    checks: list = field(default_factory=list)
+    strict: bool = False
+
+    def _statuses(self) -> set:
+        return {c.status for c in self.checks}
+
+    @property
+    def hard_fail(self) -> bool:
+        fail_states = set(_NONPASS)
+        if self.strict:
+            fail_states.add(WARN)
+        return bool(self._statuses() & fail_states)
+
+    @property
+    def exit_code(self) -> int:
+        return 1 if self.hard_fail else 0
+
+    @property
+    def verdict(self) -> str:
+        s = self._statuses()
+        if FAIL in s:
+            return FAIL
+        if INCOMPLETE in s:
+            return INCOMPLETE
+        if self.strict and WARN in s:
+            return FAIL
+        return PASS
+
+    def to_dict(self) -> dict:
+        return {
+            "target": self.target,
+            "verdict": self.verdict,
+            "exit_code": self.exit_code,
+            "strict": self.strict,
+            "stacks": self.stacks,
+            "checks": [c.to_dict() for c in self.checks],
+        }
+
+
+# --------------------------------------------------------------------------- #
+# stack detection (pure, filesystem-only)
+# --------------------------------------------------------------------------- #
+
+
+def detect_stacks(path: Path) -> dict:
+    """Return {stack: metadata} for every stack whose marker files are present.
+
+    Only stacks actually present in TARGET are returned — a repo that
+    legitimately lacks one is never hard-failed for its absence.
+    """
+    stacks: dict = {}
+
+    pkg = path / "package.json"
+    if pkg.is_file():
+        meta: dict = {"scripts": {}, "expects_node_modules": False}
+        data: dict = {}
+        try:
+            data = json.loads(pkg.read_text())
+            meta["scripts"] = data.get("scripts", {}) or {}
+            meta["expects_node_modules"] = bool(
+                data.get("dependencies") or data.get("devDependencies")
+            )
+        except (json.JSONDecodeError, OSError):
+            meta["parse_error"] = True
+        meta["has_tsconfig"] = (path / "tsconfig.json").is_file()
+        meta["package_manager"] = detect_package_manager(path)
+        meta["workspace_globs"] = _collect_workspace_globs(path, data)
+        meta["is_workspace_root"] = bool(meta["workspace_globs"])
+        stacks["ts"] = meta
+
+    if (path / "go.mod").is_file():
+        stacks["go"] = {}
+
+    py_markers = [
+        (path / "pyproject.toml").is_file(),
+        (path / "requirements.txt").is_file(),
+        (path / "setup.py").is_file(),
+        (path / "setup.cfg").is_file(),
+    ]
+    if any(py_markers):
+        stacks["python"] = {
+            "has_pytest": _detect_pytest(path),
+            "has_ruff": _detect_ruff(path),
+        }
+
+    if (path / "flake.nix").is_file():
+        stacks["nix"] = {}
+
+    return stacks
+
+
+def detect_package_manager(path: Path) -> str:
+    if (path / "pnpm-lock.yaml").is_file():
+        return "pnpm"
+    if (path / "yarn.lock").is_file():
+        return "yarn"
+    if (path / "package-lock.json").is_file():
+        return "npm"
+    if (path / "bun.lockb").is_file():
+        return "bun"
+    return "npm"  # safe default runner
+
+
+def _collect_workspace_globs(path: Path, pkg_data: dict) -> list:
+    """Workspace member globs from package.json / pnpm-workspace.yaml / lerna."""
+    globs: list = []
+    ws = pkg_data.get("workspaces")
+    if isinstance(ws, list):
+        globs += [g for g in ws if isinstance(g, str)]
+    elif isinstance(ws, dict):
+        globs += [g for g in ws.get("packages", []) if isinstance(g, str)]
+
+    pw = path / "pnpm-workspace.yaml"
+    if pw.is_file():
+        globs += _parse_pnpm_workspace(pw)
+
+    lerna = path / "lerna.json"
+    if lerna.is_file():
+        try:
+            ld = json.loads(lerna.read_text())
+            globs += [g for g in ld.get("packages", []) if isinstance(g, str)]
+        except (json.JSONDecodeError, OSError):
+            pass
+    return globs
+
+
+def _parse_pnpm_workspace(pw: Path) -> list:
+    """Minimal YAML: collect `- glob` entries under a top-level `packages:` key."""
+    globs: list = []
+    in_pkgs = False
+    try:
+        lines = pw.read_text().splitlines()
+    except OSError:
+        return globs
+    for line in lines:
+        s = line.strip()
+        if s.startswith("packages:"):
+            in_pkgs = True
+            continue
+        if in_pkgs:
+            if s.startswith("- "):
+                globs.append(s[2:].strip().strip("'\""))
+            elif s and not s.startswith("#") and line[:1] not in (" ", "\t"):
+                in_pkgs = False  # left the packages block
+    return globs
+
+
+def _detect_pytest(path: Path) -> bool:
+    if (path / "tests").is_dir() or (path / "test").is_dir():
+        return True
+    pp = path / "pyproject.toml"
+    if pp.is_file():
+        try:
+            txt = pp.read_text()
+        except OSError:
+            return False
+        if "[tool.pytest" in txt or "pytest" in txt:
+            return True
+    if (path / "pytest.ini").is_file() or (path / "tox.ini").is_file():
+        return True
+    return False
+
+
+def _detect_ruff(path: Path) -> bool:
+    if (path / "ruff.toml").is_file() or (path / ".ruff.toml").is_file():
+        return True
+    pp = path / "pyproject.toml"
+    if pp.is_file():
+        try:
+            return "[tool.ruff" in pp.read_text()
+        except OSError:
+            return False
+    return False
+
+
+# --------------------------------------------------------------------------- #
+# config
+# --------------------------------------------------------------------------- #
+
+
+def load_config(path: Path) -> dict:
+    cfg = path / ".verify-agent.json"
+    if not cfg.is_file():
+        return {}
+    try:
+        data = json.loads(cfg.read_text())
+        return data if isinstance(data, dict) else {}
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+
+# --------------------------------------------------------------------------- #
+# stale-worktree node_modules footgun
+# --------------------------------------------------------------------------- #
+
+
+def check_node_modules(path: Path, ts_meta: dict) -> Optional[Check]:
+    """Attribute a missing/broken node_modules to the ENVIRONMENT, not to code.
+
+    Returns a WARN Check when node_modules is unusable (so a flood of "cannot
+    find module" is NOT mistaken for real code errors), or None when it is
+    usable / not required. When it returns a Check the TS gate is treated as
+    INCOMPLETE (it genuinely could not run) — never as a green SKIP.
+    """
+    if not ts_meta.get("expects_node_modules"):
+        return None  # nothing to install → no footgun
+    nm = path / "node_modules"
+    if nm.is_symlink():
+        target = os.path.realpath(nm)
+        if not os.path.exists(target):
+            return Check(
+                "env:node_modules",
+                WARN,
+                "node_modules is a BROKEN symlink (stale worktree footgun)",
+                detail=(
+                    f"{nm} -> {os.readlink(nm)} (target missing). Any "
+                    "'cannot find module' errors are an ENV issue, not code. "
+                    "Re-install deps in this worktree."
+                ),
+            )
+        return None  # symlink resolves — usable
+    if not nm.exists():
+        return Check(
+            "env:node_modules",
+            WARN,
+            "node_modules absent though package.json declares deps",
+            detail=(
+                "Dependencies are not installed in this target. A 'cannot find "
+                "module' flood here is an ENV issue, not real code errors. "
+                "Install deps, then re-run."
+            ),
+        )
+    return None  # real directory present → usable
+
+
+# --------------------------------------------------------------------------- #
+# git-completeness ("committed but stopped" failure)
+# --------------------------------------------------------------------------- #
+
+_GIT_TIMEOUT = 30
+
+
+def _git(path: Path, *args: str) -> subprocess.CompletedProcess:
+    try:
+        return subprocess.run(
+            ["git", "-C", str(path), *args],
+            capture_output=True,
+            text=True,
+            timeout=_GIT_TIMEOUT,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        # bounded so a hung/absent git can't wedge the gate; caller treats a
+        # non-zero rc as "unknown".
+        return subprocess.CompletedProcess(args, returncode=124, stdout="", stderr="")
+
+
+def git_state(path: Path) -> dict:
+    """Read-only snapshot of the target's git state."""
+    inside = _git(path, "rev-parse", "--is-inside-work-tree")
+    if inside.returncode != 0 or inside.stdout.strip() != "true":
+        return {"is_repo": False}
+
+    st: dict = {"is_repo": True}
+    st["branch"] = _git(path, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
+
+    porcelain = _git(path, "status", "--porcelain").stdout
+    lines = [ln for ln in porcelain.splitlines() if ln.strip()]
+    st["untracked"] = sum(1 for ln in lines if ln.startswith("??"))
+    st["tracked_changes"] = sum(1 for ln in lines if not ln.startswith("??"))
+    st["dirty"] = bool(lines)
+
+    upstream = _git(path, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}")
+    if upstream.returncode == 0 and upstream.stdout.strip():
+        st["upstream"] = upstream.stdout.strip()
+        counts = _git(path, "rev-list", "--left-right", "--count", "@{u}...HEAD")
+        if counts.returncode == 0 and counts.stdout.strip():
+            behind, ahead = counts.stdout.split()
+            st["behind"] = int(behind)
+            st["ahead"] = int(ahead)
+        else:
+            st["behind"] = 0
+            st["ahead"] = 0
+    else:
+        st["upstream"] = None
+        head = _git(path, "rev-parse", "--verify", "HEAD")
+        st["has_commits"] = head.returncode == 0
+    return st
+
+
+def check_git(state: dict, path: Path, use_gh: bool = True) -> list:
+    if not state.get("is_repo"):
+        return [Check("git", SKIP, "target is not a git repository")]
+
+    checks = []
+    branch = state.get("branch", "?")
+
+    if state.get("dirty"):
+        parts = []
+        if state.get("tracked_changes"):
+            parts.append(f"{state['tracked_changes']} uncommitted change(s)")
+        if state.get("untracked"):
+            parts.append(f"{state['untracked']} untracked file(s)")
+        checks.append(
+            Check(
+                "git:clean-tree",
+                WARN,
+                "working tree is DIRTY — contradicts a 'done/committed' claim",
+                detail=f"[{branch}] " + ", ".join(parts),
+            )
+        )
+    else:
+        checks.append(Check("git:clean-tree", PASS, f"working tree clean [{branch}]"))
+
+    if state.get("upstream"):
+        ahead = state.get("ahead", 0)
+        behind = state.get("behind", 0)
+        if ahead:
+            checks.append(
+                Check(
+                    "git:pushed",
+                    WARN,
+                    f"{ahead} commit(s) NOT pushed to {state['upstream']}",
+                    detail=(
+                        f"[{branch}] ahead {ahead}"
+                        + (f", behind {behind}" if behind else "")
+                    ),
+                )
+            )
+        else:
+            checks.append(
+                Check("git:pushed", PASS, f"in sync with {state['upstream']}")
+            )
+    else:
+        if state.get("has_commits"):
+            checks.append(
+                Check(
+                    "git:pushed",
+                    WARN,
+                    "branch has NO upstream — commits are not pushed anywhere",
+                    detail=f"[{branch}] set an upstream and push, or confirm intentional",
+                )
+            )
+        else:
+            checks.append(Check("git:pushed", SKIP, "no commits / no upstream yet"))
+
+    if use_gh:
+        checks.append(_check_pr(path, branch))
+    return checks
+
+
+def _check_pr(path: Path, branch: str) -> Check:
+    try:
+        res = subprocess.run(
+            [
+                "gh", "pr", "list", "--head", branch, "--state", "open",
+                "--json", "number,url,title",
+            ],
+            cwd=str(path),
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return Check("git:pr", SKIP, "gh unavailable — open-PR lookup skipped")
+    if res.returncode != 0:
+        return Check("git:pr", SKIP, "gh open-PR lookup failed (no repo/auth?)")
+    try:
+        prs = json.loads(res.stdout or "[]")
+    except json.JSONDecodeError:
+        return Check("git:pr", SKIP, "gh returned unparseable output")
+    if prs:
+        pr = prs[0]
+        return Check(
+            "git:pr", PASS, f"open PR #{pr['number']} for {branch}", detail=pr["url"]
+        )
+    return Check("git:pr", WARN, f"no open PR for branch {branch}")
+
+
+# --------------------------------------------------------------------------- #
+# per-stack authoritative gate plan
+# --------------------------------------------------------------------------- #
+
+
+@dataclass
+class GateSpec:
+    name: str
+    cmd: list
+    cwd: Path
+    tool: str = ""  # binary that must exist on PATH for this gate to run
+
+
+def _first_tok(cmd: str) -> str:
+    parts = cmd.split()
+    return parts[0] if parts else ""
+
+
+def _shell(cmd: str) -> list:
+    return ["bash", "-c", cmd]
+
+
+def _run_script(pm: str, script: str) -> list:
+    if pm == "npm":
+        return ["npm", "run", script]
+    return [pm, "run", script]  # pnpm / yarn / bun: `<pm> run <script>`
+
+
+def _exec_tsc(pm: str) -> list:
+    if pm == "pnpm":
+        return ["pnpm", "exec", "tsc", "--noEmit"]
+    if pm == "yarn":
+        return ["yarn", "tsc", "--noEmit"]
+    if pm == "bun":
+        return ["bunx", "tsc", "--noEmit"]
+    return ["npx", "--no-install", "tsc", "--noEmit"]
+
+
+def _ts_unit_specs(unit: Path, label: str, pm: str, scripts: dict, has_tsconfig: bool) -> list:
+    """Resolvable authoritative gates for ONE package dir (root or workspace member)."""
+    suffix = f"[{label}]" if label else ""
+    specs: list = []
+    if "typecheck" in scripts:
+        specs.append(GateSpec(f"ts:typecheck{suffix}", _run_script(pm, "typecheck"), unit, tool=pm))
+    elif has_tsconfig:
+        cmd = _exec_tsc(pm)
+        specs.append(GateSpec(f"ts:typecheck{suffix}", cmd, unit, tool=cmd[0]))
+    if "test" in scripts:
+        specs.append(GateSpec(f"ts:test{suffix}", _run_script(pm, "test"), unit, tool=pm))
+    return specs
+
+
+def _read_pkg_scripts(unit: Path) -> dict:
+    try:
+        data = json.loads((unit / "package.json").read_text())
+    except (json.JSONDecodeError, OSError):
+        return {}
+    return data.get("scripts", {}) or {}
+
+
+def _resolve_workspace_dirs(path: Path, globs: list) -> list:
+    dirs: list = []
+    seen: set = set()
+    for g in globs:
+        g = g.strip().strip("'\"")
+        if not g or g.startswith("!"):
+            continue
+        try:
+            matches = path.glob(g)
+        except (ValueError, OSError):
+            continue
+        for p in matches:
+            if not (p.is_dir() and (p / "package.json").is_file()):
+                continue
+            if "node_modules" in p.parts:
+                continue
+            rp = p.resolve()
+            if rp not in seen:
+                seen.add(rp)
+                dirs.append(p)
+    return sorted(dirs)
+
+
+def _plan_ts(path: Path, meta: dict, config: dict) -> list:
+    ov = config.get("ts") or {}
+    tc_ov, tt_ov = ov.get("typecheck"), ov.get("test")
+    if tc_ov or tt_ov:  # explicit config is authoritative — don't second-guess
+        specs = []
+        if tc_ov:
+            specs.append(GateSpec("ts:typecheck", _shell(tc_ov), path, tool=_first_tok(tc_ov)))
+        if tt_ov:
+            specs.append(GateSpec("ts:test", _shell(tt_ov), path, tool=_first_tok(tt_ov)))
+        return specs
+
+    pm = meta.get("package_manager", "npm")
+    root_specs = _ts_unit_specs(path, "", pm, meta.get("scripts", {}), meta.get("has_tsconfig"))
+    if root_specs:
+        return root_specs
+
+    # No root-level gate — fan out across workspace members if this is a monorepo
+    # root, so a workspaces repo with no root typecheck/test script is not a
+    # silent green.
+    if meta.get("is_workspace_root"):
+        specs = []
+        for member in _resolve_workspace_dirs(path, meta.get("workspace_globs", [])):
+            m_scripts = _read_pkg_scripts(member)
+            m_tsconfig = (member / "tsconfig.json").is_file()
+            specs.extend(_ts_unit_specs(member, member.name, pm, m_scripts, m_tsconfig))
+        return specs
+    return []
+
+
+def _cgo_available(config: dict) -> bool:
+    ge = config.get("go") or {}
+    if "race" in ge:
+        return bool(ge["race"])
+    if os.environ.get("CGO_ENABLED") == "0":
+        return False
+    return any(shutil.which(c) for c in ("cc", "gcc", "clang"))
+
+
+def _nested_go_modules(path: Path) -> list:
+    mods: list = []
+    root = os.path.abspath(path)
+    for dirpath, dirnames, filenames in os.walk(path):
+        dirnames[:] = [
+            d for d in dirnames
+            if d not in (".git", "node_modules", "vendor", "testdata") and not d.startswith(".")
+        ]
+        if os.path.abspath(dirpath) == root:
+            continue
+        if "go.mod" in filenames:
+            mods.append(Path(dirpath))
+            dirnames[:] = []  # a module's own `./...` covers its subdirs
+    return sorted(mods)
+
+
+def _plan_python(path: Path, meta: dict, config: dict) -> list:
+    ov = config.get("python") or {}
+    specs: list = []
+    lint = ov.get("lint")
+    if lint:
+        specs.append(GateSpec("python:lint", _shell(lint), path, tool=_first_tok(lint)))
+    elif meta.get("has_ruff"):
+        specs.append(GateSpec("python:lint", ["ruff", "check", "."], path, tool="ruff"))
+    test = ov.get("test")
+    if test:
+        specs.append(GateSpec("python:test", _shell(test), path, tool=_first_tok(test)))
+    elif meta.get("has_pytest"):
+        specs.append(GateSpec("python:test", ["python", "-m", "pytest", "-q"], path, tool="python"))
+    return specs
+
+
+def build_gate_plan(path: Path, stacks: dict, config: dict, node_ok: bool) -> tuple:
+    """Return (specs, aux_checks).
+
+    `specs` are the authoritative commands to run. `aux_checks` carries SKIP
+    notes AND — critically — an INCOMPLETE check for any DETECTED stack whose
+    gate could not be resolved/run, so such a stack never counts as green.
+    Pure: computes WHAT to run without running anything.
+    """
+    skip_stacks = set(config.get("skip", []) or [])
+    specs: list = []
+    aux: list = []
+
+    def ov(stack: str, key: str) -> Optional[str]:
+        return (config.get(stack) or {}).get(key)
+
+    # -- TypeScript / JS ---------------------------------------------------- #
+    if "ts" in stacks and "ts" not in skip_stacks:
+        meta = stacks["ts"]
+        if not node_ok:
+            aux.append(
+                Check(
+                    "ts",
+                    INCOMPLETE,
+                    "TS gate could NOT run — dependencies not installed (see env:node_modules)",
+                    detail="install deps in this worktree, then re-run; UNVERIFIED, not a pass",
+                )
+            )
+        else:
+            ts_specs = _plan_ts(path, meta, config)
+            if ts_specs:
+                specs.extend(ts_specs)
+            else:
+                aux.append(
+                    Check(
+                        "ts",
+                        INCOMPLETE,
+                        "detected package.json but NO runnable authoritative gate found",
+                        detail=(
+                            "no typecheck/test script, no tsconfig.json"
+                            + (", no workspace member with one" if meta.get("is_workspace_root") else "")
+                            + " — add a gate or \"skip\":[\"ts\"] in .verify-agent.json"
+                        ),
+                    )
+                )
+
+    # -- Go ----------------------------------------------------------------- #
+    if "go" in stacks and "go" not in skip_stacks:
+        race = _cgo_available(config)
+        if not race:
+            aux.append(
+                Check("go:race", SKIP, "cgo unavailable → running `go test` WITHOUT -race")
+            )
+        modules = [path] + _nested_go_modules(path)
+        for mod in modules:
+            label = "" if mod == path else f"[{os.path.relpath(mod, path)}]"
+            build_cmd = ov("go", "build") or "go build ./..."
+            vet_cmd = ov("go", "vet") or "go vet ./..."
+            test_cmd = ov("go", "test") or ("go test -race ./..." if race else "go test ./...")
+            specs.append(GateSpec(f"go:build{label}", _shell(build_cmd), mod, tool="go"))
+            specs.append(GateSpec(f"go:vet{label}", _shell(vet_cmd), mod, tool="go"))
+            specs.append(GateSpec(f"go:test{label}", _shell(test_cmd), mod, tool="go"))
+
+    # -- Python ------------------------------------------------------------- #
+    if "python" in stacks and "python" not in skip_stacks:
+        py_specs = _plan_python(path, stacks["python"], config)
+        if py_specs:
+            specs.extend(py_specs)
+        else:
+            aux.append(
+                Check(
+                    "python",
+                    INCOMPLETE,
+                    "detected python project but NO runnable gate (no ruff config, no pytest config)",
+                    detail="add ruff/pytest, set python.lint/test, or skip 'python' in .verify-agent.json",
+                )
+            )
+
+    # -- Nix ---------------------------------------------------------------- #
+    if "nix" in stacks and "nix" not in skip_stacks:
+        chk = ov("nix", "check")
+        if chk:
+            specs.append(GateSpec("nix:check", _shell(chk), path, tool=_first_tok(chk)))
+        else:
+            # default: the CHEAP authoritative parse. `nix flake check` is the
+            # fuller gate — enable via config.
+            specs.append(
+                GateSpec(
+                    "nix:parse",
+                    ["nix-instantiate", "--parse", str(path / "flake.nix")],
+                    path,
+                    tool="nix-instantiate",
+                )
+            )
+
+    return specs, aux
+
+
+# --------------------------------------------------------------------------- #
+# gate execution
+# --------------------------------------------------------------------------- #
+
+_MAX_OUTPUT_LINES = 40
+
+_MISSING_TOOL_HINT = (
+    "toolchain missing where the gate ran — this stack is UNVERIFIED, not a "
+    "pass; run the gate where the toolchain is available (or install it)"
+)
+
+
+def _truncate(text: str, max_lines: int = _MAX_OUTPUT_LINES) -> str:
+    text = text.rstrip("\n")
+    if not text:
+        return ""
+    lines = text.splitlines()
+    if len(lines) <= max_lines:
+        return text
+    hidden = len(lines) - max_lines
+    return f"... [{hidden} earlier line(s) truncated] ...\n" + "\n".join(lines[-max_lines:])
+
+
+def run_gate(spec: GateSpec, timeout: int = 600) -> Check:
+    tool = spec.tool or (spec.cmd[0] if spec.cmd else "")
+    # A DETECTED stack whose toolchain is absent did NOT get verified → INCOMPLETE
+    # (never a WARN-to-green). Pre-check so a `bash -c` wrapper can't hide it.
+    if tool and shutil.which(tool) is None:
+        return Check(spec.name, INCOMPLETE, f"tool not found: {tool} — gate did not run", detail=_MISSING_TOOL_HINT)
+    try:
+        res = subprocess.run(
+            spec.cmd, cwd=str(spec.cwd), capture_output=True, text=True, timeout=timeout
+        )
+    except FileNotFoundError:
+        return Check(spec.name, INCOMPLETE, f"tool not found: {tool} — gate did not run", detail=_MISSING_TOOL_HINT)
+    except subprocess.TimeoutExpired:
+        return Check(spec.name, FAIL, f"TIMEOUT after {timeout}s: {' '.join(spec.cmd)}")
+    combined = (res.stdout or "") + (res.stderr or "")
+    if res.returncode == 0:
+        return Check(spec.name, PASS, f"$ {' '.join(spec.cmd)}")
+    if res.returncode == 127:  # command-not-found inside a shell wrapper
+        return Check(
+            spec.name,
+            INCOMPLETE,
+            f"exit 127 (command not found): $ {' '.join(spec.cmd)}",
+            detail=_MISSING_TOOL_HINT,
+            output=_truncate(combined),
+        )
+    return Check(
+        spec.name,
+        FAIL,
+        f"exit {res.returncode}: $ {' '.join(spec.cmd)}",
+        output=_truncate(combined),
+    )
+
+
+# --------------------------------------------------------------------------- #
+# orchestration
+# --------------------------------------------------------------------------- #
+
+
+def verify(
+    target: Path,
+    use_gh: bool = True,
+    strict: bool = False,
+    timeout: int = 600,
+    gate_runner: Callable[[GateSpec, int], Check] = run_gate,
+) -> Result:
+    target = target.resolve()
+    result = Result(target=str(target), strict=strict)
+
+    stacks = detect_stacks(target)
+    result.stacks = sorted(stacks.keys())
+    config = load_config(target)
+
+    # 1. env footgun (stale node_modules) — attributed to ENV; makes the TS gate
+    #    INCOMPLETE (it could not run), handled in build_gate_plan via node_ok.
+    node_ok = True
+    if "ts" in stacks:
+        nm_check = check_node_modules(target, stacks["ts"])
+        if nm_check is not None:
+            result.checks.append(nm_check)
+            node_ok = False
+
+    # 2. git completeness.
+    result.checks.extend(check_git(git_state(target), target, use_gh=use_gh))
+
+    # 3. authoritative per-stack gates (+ INCOMPLETE aux for unrun detected stacks).
+    specs, aux = build_gate_plan(target, stacks, config, node_ok)
+    result.checks.extend(aux)
+    for spec in specs:
+        result.checks.append(gate_runner(spec, timeout))
+
+    return result
+
+
+# --------------------------------------------------------------------------- #
+# rendering
+# --------------------------------------------------------------------------- #
+
+_ICON = {PASS: "PASS", FAIL: "FAIL", INCOMPLETE: "INCP", WARN: "WARN", SKIP: "skip"}
+
+
+def render_text(result: Result) -> str:
+    lines = [
+        f"verify-agent-work: {result.target}",
+        f"stacks: {', '.join(result.stacks) if result.stacks else '(none detected)'}",
+        "",
+    ]
+    for c in result.checks:
+        lines.append(f"  [{_ICON.get(c.status, c.status):4}] {c.name:22} {c.summary}")
+        if c.detail:
+            lines.append(f"         {c.detail}")
+        for oln in c.output.splitlines():
+            lines.append(f"         | {oln}")
+    lines.append("")
+    n_fail = sum(1 for c in result.checks if c.status == FAIL)
+    n_incp = sum(1 for c in result.checks if c.status == INCOMPLETE)
+    n_warn = sum(1 for c in result.checks if c.status == WARN)
+    v = result.verdict
+    if v == PASS:
+        lines.append(f"VERDICT: PASS ({n_warn} warning(s))")
+    elif v == INCOMPLETE:
+        lines.append(
+            f"VERDICT: INCOMPLETE — {n_incp} detected stack(s) could NOT be verified "
+            "(non-zero exit). This is NOT a pass; do not trust an agent 'done' claim."
+        )
+    else:
+        reason = f"{n_fail} hard failure(s)"
+        if n_incp:
+            reason += f" + {n_incp} unverified stack(s)"
+        if result.strict and n_warn:
+            reason += f" + {n_warn} warning(s) [strict]"
+        lines.append(f"VERDICT: FAIL — {reason}. Do NOT trust an agent 'done' claim over this.")
+    return "\n".join(lines)
+
+
+# --------------------------------------------------------------------------- #
+# cli
+# --------------------------------------------------------------------------- #
+
+
+def main(argv: Optional[list] = None) -> int:
+    p = argparse.ArgumentParser(
+        prog="verify-agent-work",
+        description="Deterministic post-agent verification gate.",
+    )
+    p.add_argument("target", nargs="?", default=".", help="repo/worktree path (default: cwd)")
+    p.add_argument("--json", action="store_true", help="emit structured JSON")
+    p.add_argument("--strict", action="store_true", help="also promote WARN to hard fail")
+    p.add_argument("--no-gh", action="store_true", help="skip the gh open-PR lookup")
+    p.add_argument("--timeout", type=int, default=600, help="per-gate timeout (s)")
+    args = p.parse_args(argv)
+
+    target = Path(args.target)
+    if not target.exists():
+        print(f"verify-agent-work: target does not exist: {target}", file=sys.stderr)
+        return 2
+    if not target.is_dir():
+        print(f"verify-agent-work: target is not a directory: {target}", file=sys.stderr)
+        return 2
+
+    result = verify(target, use_gh=not args.no_gh, strict=args.strict, timeout=args.timeout)
+
+    if args.json:
+        print(json.dumps(result.to_dict(), indent=2))
+    else:
+        print(render_text(result))
+    return result.exit_code
+
+
+if __name__ == "__main__":
+    sys.exit(main())
