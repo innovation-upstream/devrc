@@ -23,8 +23,11 @@
 # interface is ALWAYS allowed: loopback, the airvpn tunnel, the nebula overlay
 # (nebula.mesh), and the k3s CNI (cni0 / flannel.1 → the pod & service CIDRs). Only
 # traffic egressing the physical uplink is filtered, and there only wg's own
-# encrypted packets (fwmark), the LAN, the nebula transport (udp sport 4242) +
-# lighthouse, and the endpoint/gateway are allowed — everything else is DROPPED.
+# encrypted packets (fwmark), the LAN, nebula's own transport (matched by SOCKET
+# OWNER — `meta skuid nebula-mesh` — NOT a port, because nebula runs listen.port:0
+# and binds a RANDOM source port; a `udp sport 4242` rule matched nothing and let
+# the direct-punched overlay to an off-LAN peer get dropped → lockout, PR #126 audit
+# 2026-07-21), the lighthouse, and the endpoint/gateway are allowed — else DROPPED.
 #   Why this shape: the ONLY path by which host traffic can leak un-tunnelled is the
 #   physical uplink, so that is the only thing worth policing. Enumerating internal
 #   networks to ALLOW them (the old model) was both unnecessary and fragile — it
@@ -49,7 +52,11 @@ IFACE="${2:-airvpn}"
 LAN_ROUTER="192.168.50.1"          # LAN router / DNS upstream
 NEBULA_LIGHTHOUSE="5.161.118.55"   # Hetzner nebula lighthouse (discovery/relay)
 LAN_SUBNET="192.168.50.0/24"       # LAN kept direct
-NEBULA_PORT="4242"                 # nebula ENCRYPTED transport out the uplink (punchy + lighthouse)
+# Nebula binds listen.port:0 → a RANDOM source port, so match its transport by the
+# SOCKET OWNER instead of a port. This covers punchy DIRECT peers (to a remote
+# operator's public IP) + relay + lighthouse regardless of port. `id -un` the nebula
+# service user; fall back to the known default if it can't be resolved.
+NEBULA_USER="$(id -un nebula-mesh 2>/dev/null || echo nebula-mesh)"
 
 GW_FILE="/run/airvpn-gateway"
 IFACE_FILE="/run/airvpn-iface"
@@ -100,7 +107,7 @@ table inet ${KS_TABLE} {
         # On the uplink, allow only the legitimate un-tunnelled flows; drop the rest.
         $( [[ -n "$FWMARK" && "$FWMARK" != "off" ]] && echo "meta mark ${FWMARK} accept" )
         ip daddr ${LAN_SUBNET} accept
-        udp sport ${NEBULA_PORT} accept
+        meta skuid "${NEBULA_USER}" accept
         ip daddr ${NEBULA_LIGHTHOUSE} accept
         $( [[ -n "$EP" ]] && echo "ip daddr ${EP} accept" )
         ip daddr ${GW} accept
