@@ -10,12 +10,14 @@ let
   # there (same trap the i3 bar hit — see graphical.nix). serverMode now gates ONLY
   # server-side task enablement; graphical services key off `graphical` below.
   serverMode = builtins.pathExists "${home}/.server-mode";
-  # Initiatives-sync (Phase 1) master switch — OFF by default so a routine deploy
-  # (ship.sh / home-manager switch) can NEVER silently enable the still-unvalidated
-  # prod-write timer. The service definition is left in place regardless (so it can be
-  # started by hand); only the TIMER is wired into timers.target when this is true.
-  # FLIP TO true after the first SUPERVISED live write validates the DDL/insert path.
-  enableInitiativesSync = false;
+  # Initiatives-sync (Phase 1) master switch — gates only whether the TIMER is wired
+  # into timers.target; the service definition is always emitted (so it can be started
+  # by hand). Kept OFF through the initial supervised validation so a routine deploy
+  # (ship.sh / home-manager switch) could never silently enable an unvalidated
+  # prod-write timer. ENABLED now: the first supervised live write validated the
+  # DDL/insert path (snapshot #1 wrote 23 rows to prod, telemetry-on, and the DSN role
+  # is confirmed to have CREATE SCHEMA). The timer runs hourly (see the timer below).
+  enableInitiativesSync = true;
   # Graphical host = runs X/i3 (both current NixOS hosts do; only a genuinely headless
   # box would not). Approximated as isNixOS, mirroring graphical.nix — deliberately NOT
   # !serverMode, which is true on the graphical workbench.
@@ -741,16 +743,17 @@ in
   # homelab kubeconfig points at 192.168.50.94:6443 (direct LAN, no proxy), which
   # only this host has; the laptop is nebula-only and its run would just fail noisily.
   #
-  # ⚠ OPEN FOLLOW-UP: CLICKHOUSE_* creds are deliberately NOT injected here yet, so
-  # the timer currently runs the scan TELEMETRY-OFF (still writes a useful handoff+
-  # git+session snapshot; momentum/ev degrade). Provisioning those creds into the
-  # unit env is a separate task — see the PR. Do NOT enable/deploy this before Zach
-  # has eyeballed `sync.py --dry-run` output.
+  # CLICKHOUSE_* creds are provisioned by the wrapper at RUN TIME via a sops decrypt
+  # (NO plaintext secret at rest — same recipe as the /initiatives slash command), so
+  # the scan runs TELEMETRY-ON. The decrypt is fully best-effort and degrades to
+  # telemetry-off if the age key / homelab repo / sops / decrypt is unavailable, so it
+  # can never fail the sync. `sops` is put on the unit PATH below for exactly this.
   #
   # Minimal user-unit env, so PATH is explicit: nix (nix-shell) + git + gh (the
-  # scan's branch/PR reads) + kubectl (the port-forward) + coreutils/sed/grep, and
-  # NIX_PATH so `nix-shell -p` resolves <nixpkgs>. The wrapper's nix-shell adds
-  # psycopg2 (the DB write) + requests (the scan's ClickHouse read).
+  # scan's branch/PR reads) + kubectl (the port-forward) + sops (the run-time reader
+  # cred decrypt) + coreutils/sed/grep, and NIX_PATH so `nix-shell -p` resolves
+  # <nixpkgs>. The wrapper's nix-shell adds psycopg2 (the DB write) + requests (the
+  # scan's ClickHouse read).
   systemd.user.services.initiatives-sync = lib.mkIf serverMode {
     Unit = {
       Description = "Initiatives sync — initiative-scan → homelab mailbox Postgres (initiatives schema)";
@@ -764,7 +767,7 @@ in
       # cgroup is killed and the timer re-arms on the next OnUnitActiveSec.
       TimeoutStartSec = 300;
       Environment = [
-        "PATH=${lib.makeBinPath [ pkgs.nix pkgs.git pkgs.gh pkgs.kubectl pkgs.bash pkgs.coreutils pkgs.gnused pkgs.gnugrep ]}"
+        "PATH=${lib.makeBinPath [ pkgs.nix pkgs.git pkgs.gh pkgs.kubectl pkgs.sops pkgs.bash pkgs.coreutils pkgs.gnused pkgs.gnugrep ]}"
         "NIX_PATH=nixpkgs=/nix/var/nix/profiles/per-user/root/channels/nixos"
         "KUBECONFIG=%h/workspace/homelab-talos/homelab-kubeconfig"
         # Explicit host tag — user units do NOT source .zshenv, so resolve_host()
