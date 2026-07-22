@@ -59,7 +59,10 @@ MAILDB_PATH = Path(__file__).resolve().parents[1] / "mail-actions" / "_db.py"
 # `mail_actions`. `snapshots` = one row per sync run; `initiative_snapshot` = one
 # row per initiative per run (append-only). `current` = DISTINCT ON latest per
 # (repo, slug), which tolerates a partially-failed snapshot (older rows survive).
-SCHEMA_DDL = """
+#
+# The child FK is ON DELETE CASCADE so the 90-day retention prune (delete old
+# `snapshots`) removes the child `initiative_snapshot` rows with them.
+TABLES_DDL = """
 CREATE SCHEMA IF NOT EXISTS initiatives;
 
 CREATE TABLE IF NOT EXISTS initiatives.snapshots (
@@ -72,7 +75,7 @@ CREATE TABLE IF NOT EXISTS initiatives.snapshots (
 
 CREATE TABLE IF NOT EXISTS initiatives.initiative_snapshot (
     id                   serial PRIMARY KEY,
-    snapshot_id          int REFERENCES initiatives.snapshots(id),
+    snapshot_id          int REFERENCES initiatives.snapshots(id) ON DELETE CASCADE,
     host                 text,
     repo                 text,
     slug                 text,
@@ -93,6 +96,23 @@ CREATE TABLE IF NOT EXISTS initiatives.initiative_snapshot (
     docs                 jsonb
 );
 
+-- Support the `current` view's DISTINCT ON (repo, slug) … JOIN snapshots …
+-- ORDER BY repo, slug, captured_at DESC, plus the FK join / retention scans.
+CREATE INDEX IF NOT EXISTS initiative_snapshot_repo_slug_snap_idx
+    ON initiatives.initiative_snapshot (repo, slug, snapshot_id);
+CREATE INDEX IF NOT EXISTS initiative_snapshot_snapshot_id_idx
+    ON initiatives.initiative_snapshot (snapshot_id);
+CREATE INDEX IF NOT EXISTS snapshots_captured_at_idx
+    ON initiatives.snapshots (captured_at);
+"""
+
+# The `current` view is guarded separately (see ensure_schema): re-running
+# CREATE OR REPLACE VIEW takes an ACCESS EXCLUSIVE lock every time, so we only
+# (re)create it when it's absent or its version marker differs. Bump VIEW_VERSION
+# whenever VIEW_DDL changes so a deploy recreates it.
+VIEW_VERSION = "v1"
+VIEW_COMMENT = f"initiatives-sync view {VIEW_VERSION}"
+VIEW_DDL = """
 CREATE OR REPLACE VIEW initiatives.current AS
 SELECT DISTINCT ON (i.repo, i.slug)
        i.*, s.captured_at
@@ -100,6 +120,14 @@ SELECT DISTINCT ON (i.repo, i.slug)
   JOIN initiatives.snapshots s ON s.id = i.snapshot_id
  ORDER BY i.repo, i.slug, s.captured_at DESC;
 """
+
+# Arbitrary constant key for the schema advisory lock (pg_advisory_xact_lock), so a
+# manual run can't race the timer on the not-fully-race-safe CREATE … IF NOT EXISTS.
+SCHEMA_LOCK_KEY = 0x1417_1717
+
+# Append-only retention: prune snapshots (and, via ON DELETE CASCADE, their child
+# rows) older than this on every write, so the shared prod DB doesn't grow unbounded.
+RETENTION_DAYS = 90
 
 # Column order for the per-initiative insert (snapshot_id is prepended at write time).
 ROW_COLUMNS = [
@@ -215,14 +243,22 @@ def resolve_host() -> str:
 # --------------------------------------------------------------------------- #
 # I/O — the scan subprocess, the DB import, schema DDL, and the write
 # --------------------------------------------------------------------------- #
-def run_scan(days: int, scan_path: Path = SCAN_PATH, env: dict | None = None) -> dict:
+# Ceiling on the (expensive) scan so a manual invocation with a hung gh/kubectl can't
+# hang forever — systemd's TimeoutStartSec only covers the timer path.
+SCAN_TIMEOUT_SEC = 240
+
+
+def run_scan(days: int, scan_path: Path = SCAN_PATH, env: dict | None = None,
+             timeout: int = SCAN_TIMEOUT_SEC) -> dict:
     """Shell out to initiative-scan.py --days N --json (NO --tmux) and parse stdout.
 
     Runs with the SAME interpreter (sys.executable) so the nix-shell python that has
     `requests` is used for the scan's ClickHouse read. Inherits the environment
-    (CLICKHOUSE_* etc.); the scan degrades to telemetry-off if they're unset."""
+    (CLICKHOUSE_* etc.); the scan degrades to telemetry-off if they're unset. Bounded
+    by `timeout` seconds so a hung gh/kubectl child can't wedge a manual run."""
     cmd = [sys.executable, str(scan_path), "--days", str(days), "--json"]
-    out = subprocess.check_output(cmd, text=True, env=env or os.environ.copy())
+    out = subprocess.check_output(cmd, text=True, env=env or os.environ.copy(),
+                                  timeout=timeout)
     return json.loads(out)
 
 
@@ -241,10 +277,44 @@ def _import_maildb():
 
 
 def ensure_schema(conn) -> None:
-    """Create the schema/tables/view idempotently (self-migrating, additive-only)."""
+    """Create the schema/tables/indexes/view idempotently (self-migrating, additive-only).
+
+    Wrapped in a transaction-scoped advisory lock so a manual run racing the timer
+    can't collide on the not-fully-race-safe CREATE … IF NOT EXISTS. The `current`
+    view is only (re)created when absent or its version marker differs — steady state
+    skips re-taking ACCESS EXCLUSIVE on it every run."""
     with conn.cursor() as cur:
-        cur.execute(SCHEMA_DDL)
+        # Serialize concurrent schema setup (released at COMMIT below).
+        cur.execute("SELECT pg_advisory_xact_lock(%s)", (SCHEMA_LOCK_KEY,))
+        cur.execute(TABLES_DDL)
+
+        # View guard: (re)create only when missing or the version marker differs.
+        cur.execute("SELECT to_regclass('initiatives.current')")
+        exists = cur.fetchone()[0] is not None
+        need_view = True
+        if exists:
+            cur.execute(
+                "SELECT obj_description('initiatives.current'::regclass, 'pg_class')")
+            row = cur.fetchone()
+            need_view = (row[0] if row else None) != VIEW_COMMENT
+        if need_view:
+            cur.execute(VIEW_DDL)
+            cur.execute("COMMENT ON VIEW initiatives.current IS %s", (VIEW_COMMENT,))
     conn.commit()
+
+
+def prune_old_snapshots(conn, retain_days: int = RETENTION_DAYS) -> int:
+    """Delete snapshots older than `retain_days` (child rows cascade). Returns the
+    number of snapshots removed. Keeps the append-only store bounded on shared prod."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "DELETE FROM initiatives.snapshots "
+            "WHERE captured_at < now() - make_interval(days => %s)",
+            (retain_days,),
+        )
+        n = cur.rowcount
+    conn.commit()
+    return n
 
 
 def write_snapshot(conn, meta: dict, rows: list[dict]) -> int:
@@ -365,6 +435,10 @@ def main(argv=None) -> int:
     host = resolve_host()
     try:
         report = run_scan(a.days)
+    except subprocess.TimeoutExpired:
+        print(f"error: initiative-scan timed out after {SCAN_TIMEOUT_SEC}s",
+              file=sys.stderr)
+        return 1
     except subprocess.CalledProcessError as exc:
         print(f"error: initiative-scan failed (exit {exc.returncode})", file=sys.stderr)
         return 1
@@ -383,10 +457,12 @@ def main(argv=None) -> int:
     with MailDB() as db:
         ensure_schema(db.conn)
         snapshot_id = write_snapshot(db.conn, meta, rows)
+        pruned = prune_old_snapshots(db.conn)
 
     tel = "on" if meta["telemetry_available"] else "OFF (handoff+git only)"
+    pruned_note = f", pruned {pruned} snapshot(s) >{RETENTION_DAYS}d" if pruned else ""
     print(f"initiatives-sync: wrote snapshot #{snapshot_id} — {len(rows)} initiative "
-          f"rows (host={host}, days={a.days}, telemetry {tel})")
+          f"rows (host={host}, days={a.days}, telemetry {tel}){pruned_note}")
     return 0
 
 

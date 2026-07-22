@@ -15,7 +15,7 @@ import sync  # noqa: E402
 
 
 # A representative scan `--json` initiative (the shape sync.py consumes). Epochs are
-# UNIX seconds; 2026-07-13 12:00:00Z == 1768305600.0.
+# UNIX seconds; 2026-07-13 12:00:00Z == 1783944000.0.
 _TOUCH_EPOCH = 1783944000.0  # 2026-07-13 12:00:00 UTC
 _TELEM_EPOCH = 1783857600.0  # 2026-07-12 12:00:00 UTC
 
@@ -241,3 +241,140 @@ def test_render_dry_run_flags_telemetry_off():
     text = sync.render_dry_run(meta, rows)
     assert "telemetry OFF" in text
     assert "rows to insert: 0" in text
+
+
+# --------------------------------------------------------------------------- #
+# I/O SQL tests via a fake psycopg2 connection (no port-forward, no Postgres).
+# Assert on the emitted SQL: the advisory lock, index DDL, the view guard, the
+# retention DELETE, and the snapshot/JSONB insert shape.
+# --------------------------------------------------------------------------- #
+class _FakeCursor:
+    def __init__(self, conn):
+        self._conn = conn
+        self.rowcount = 0
+        self._result = None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def execute(self, sql, params=None):
+        norm = " ".join(sql.split())
+        self._conn.executed.append((norm, params))
+        self.rowcount = 0
+        self._result = None
+        if "to_regclass('initiatives.current')" in norm:
+            self._result = (self._conn.view_regclass,)
+        elif "obj_description" in norm:
+            self._result = (self._conn.view_comment,)
+        elif "RETURNING id" in norm:
+            self._result = (self._conn.next_snapshot_id,)
+        elif norm.startswith("DELETE FROM initiatives.snapshots"):
+            self.rowcount = self._conn.delete_rowcount
+
+    def fetchone(self):
+        return self._result
+
+
+class _FakeConn:
+    def __init__(self, *, view_regclass=None, view_comment=None,
+                 next_snapshot_id=1, delete_rowcount=0):
+        self.executed = []
+        self.commits = 0
+        self.view_regclass = view_regclass
+        self.view_comment = view_comment
+        self.next_snapshot_id = next_snapshot_id
+        self.delete_rowcount = delete_rowcount
+
+    def cursor(self, cursor_factory=None):
+        return _FakeCursor(self)
+
+    def commit(self):
+        self.commits += 1
+
+
+def _sqls(conn):
+    return [s for s, _ in conn.executed]
+
+
+def test_ensure_schema_takes_advisory_lock_first():
+    conn = _FakeConn()
+    sync.ensure_schema(conn)
+    first_sql, first_params = conn.executed[0]
+    assert "pg_advisory_xact_lock" in first_sql
+    assert first_params == (sync.SCHEMA_LOCK_KEY,)
+    assert conn.commits == 1
+
+
+def test_ensure_schema_creates_indexes():
+    conn = _FakeConn()
+    sync.ensure_schema(conn)
+    joined = " ".join(_sqls(conn))
+    assert "initiative_snapshot_repo_slug_snap_idx" in joined
+    assert "(repo, slug, snapshot_id)" in joined
+    assert "initiative_snapshot_snapshot_id_idx" in joined
+    assert "snapshots_captured_at_idx" in joined
+
+
+def test_ensure_schema_fk_cascades():
+    conn = _FakeConn()
+    sync.ensure_schema(conn)
+    joined = " ".join(_sqls(conn))
+    assert "REFERENCES initiatives.snapshots(id) ON DELETE CASCADE" in joined
+
+
+def test_ensure_schema_creates_view_when_absent():
+    conn = _FakeConn(view_regclass=None)
+    sync.ensure_schema(conn)
+    joined = " ".join(_sqls(conn))
+    assert "CREATE OR REPLACE VIEW initiatives.current" in joined
+    assert "COMMENT ON VIEW initiatives.current" in joined
+
+
+def test_ensure_schema_skips_view_when_present_and_version_matches():
+    conn = _FakeConn(view_regclass="initiatives.current",
+                     view_comment=sync.VIEW_COMMENT)
+    sync.ensure_schema(conn)
+    joined = " ".join(_sqls(conn))
+    assert "CREATE OR REPLACE VIEW initiatives.current" not in joined
+
+
+def test_ensure_schema_recreates_view_when_version_differs():
+    conn = _FakeConn(view_regclass="initiatives.current",
+                     view_comment="initiatives-sync view v0")
+    sync.ensure_schema(conn)
+    joined = " ".join(_sqls(conn))
+    assert "CREATE OR REPLACE VIEW initiatives.current" in joined
+
+
+def test_prune_old_snapshots_issues_cascade_delete_and_returns_count():
+    conn = _FakeConn(delete_rowcount=3)
+    n = sync.prune_old_snapshots(conn, retain_days=90)
+    assert n == 3
+    sql, params = conn.executed[-1]
+    assert sql.startswith("DELETE FROM initiatives.snapshots")
+    assert "captured_at < now() - make_interval(days => %s)" in sql
+    assert params == (90,)
+    assert conn.commits == 1
+
+
+def test_write_snapshot_inserts_snapshot_then_rows_with_jsonb():
+    from psycopg2.extras import Json
+    conn = _FakeConn(next_snapshot_id=7)
+    meta, rows = sync.report_to_rows(_fixture_report(), host="workbench")
+    snap_id = sync.write_snapshot(conn, meta, rows)
+    assert snap_id == 7
+    # first insert = the snapshots row (RETURNING id), with meta values
+    snap_sql, snap_params = conn.executed[0]
+    assert "INSERT INTO initiatives.snapshots" in snap_sql
+    assert snap_params == ("workbench", 4, True)
+    # then one initiative_snapshot insert carrying snapshot_id + JSONB-wrapped fields
+    row_sql, row_params = conn.executed[1]
+    assert "INSERT INTO initiatives.initiative_snapshot" in row_sql
+    assert row_params[0] == 7  # snapshot_id prepended
+    # open_prs / open_investigations / docs are wrapped in psycopg2 Json
+    jsonb_count = sum(1 for p in row_params if isinstance(p, Json))
+    assert jsonb_count == 3
+    assert conn.commits == 1
