@@ -724,6 +724,68 @@ in
     };
   };
 
+  # Initiatives consolidation (PHASE 1) — periodic sync of the on-demand
+  # initiative-scan into the homelab `mailbox` Postgres (initiatives schema), so
+  # later apps (a live viewer + a router) query a durable, live store instead of
+  # re-running the expensive scan. The wrapper (scripts/initiatives/run-sync.sh)
+  # shells out to initiative-scan.py --json and writes one append-only snapshot via
+  # a kubectl port-forward — SAME cluster-access shape as mail-actions-archive.
+  #
+  # WORKBENCH-ONLY (gated on serverMode), identical rationale to the archiver: the
+  # homelab kubeconfig points at 192.168.50.94:6443 (direct LAN, no proxy), which
+  # only this host has; the laptop is nebula-only and its run would just fail noisily.
+  #
+  # ⚠ OPEN FOLLOW-UP: CLICKHOUSE_* creds are deliberately NOT injected here yet, so
+  # the timer currently runs the scan TELEMETRY-OFF (still writes a useful handoff+
+  # git+session snapshot; momentum/ev degrade). Provisioning those creds into the
+  # unit env is a separate task — see the PR. Do NOT enable/deploy this before Zach
+  # has eyeballed `sync.py --dry-run` output.
+  #
+  # Minimal user-unit env, so PATH is explicit: nix (nix-shell) + git + gh (the
+  # scan's branch/PR reads) + kubectl (the port-forward) + coreutils/sed/grep, and
+  # NIX_PATH so `nix-shell -p` resolves <nixpkgs>. The wrapper's nix-shell adds
+  # psycopg2 (the DB write) + requests (the scan's ClickHouse read).
+  systemd.user.services.initiatives-sync = lib.mkIf serverMode {
+    Unit = {
+      Description = "Initiatives sync — initiative-scan → homelab mailbox Postgres (initiatives schema)";
+      After = [ "network-online.target" ];
+      Wants = [ "network-online.target" ];
+      OnFailure = [ "notify-failure@%n.service" ];
+    };
+    Service = {
+      Type = "oneshot";
+      # Hard ceiling so a half-hung kubectl / scan can't wedge the timer; the
+      # cgroup is killed and the timer re-arms on the next OnUnitActiveSec.
+      TimeoutStartSec = 300;
+      Environment = [
+        "PATH=${lib.makeBinPath [ pkgs.nix pkgs.git pkgs.gh pkgs.kubectl pkgs.bash pkgs.coreutils pkgs.gnused pkgs.gnugrep ]}"
+        "NIX_PATH=nixpkgs=/nix/var/nix/profiles/per-user/root/channels/nixos"
+        "KUBECONFIG=%h/workspace/homelab-talos/homelab-kubeconfig"
+        "HOME=%h"
+      ];
+      ExecStart = "${pkgs.bash}/bin/bash %h/workspace/devrc/scripts/initiatives/run-sync.sh";
+      # Re-run the unit when the wrapper changes (cf. X-Restart-Triggers above).
+      X-Restart-Triggers = [ "${../scripts/initiatives/run-sync.sh}" ];
+    };
+  };
+
+  # Timer: fire the sync ~every 15 min. OnUnitActiveSec re-arms after each run so a
+  # slow sync never overlaps itself; OnStartupSec gives one prompt run after login.
+  # (No Persistent — it only applies to OnCalendar timers, not monotonic ones.)
+  # Workbench-only, same as its service (serverMode).
+  systemd.user.timers.initiatives-sync = lib.mkIf serverMode {
+    Unit = {
+      Description = "Periodic timer for the initiatives → Postgres sync";
+    };
+    Timer = {
+      OnStartupSec = "2min";
+      OnUnitActiveSec = "15min";
+    };
+    Install = {
+      WantedBy = [ "timers.target" ];
+    };
+  };
+
   # Repo chief-of-staff — WEEKLY: deterministic scan of Zach's repos for improvement
   # signals (TODO/FIXME, skipped tests, `latest` tags, churn, large files) → cheap LLM
   # synthesis (OpenRouter) → ranked proposal digest EMAILED. The "agents bring me ideas"
