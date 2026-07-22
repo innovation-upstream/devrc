@@ -10,6 +10,12 @@ let
   # there (same trap the i3 bar hit — see graphical.nix). serverMode now gates ONLY
   # server-side task enablement; graphical services key off `graphical` below.
   serverMode = builtins.pathExists "${home}/.server-mode";
+  # Initiatives-sync (Phase 1) master switch — OFF by default so a routine deploy
+  # (ship.sh / home-manager switch) can NEVER silently enable the still-unvalidated
+  # prod-write timer. The service definition is left in place regardless (so it can be
+  # started by hand); only the TIMER is wired into timers.target when this is true.
+  # FLIP TO true after the first SUPERVISED live write validates the DDL/insert path.
+  enableInitiativesSync = false;
   # Graphical host = runs X/i3 (both current NixOS hosts do; only a genuinely headless
   # box would not). Approximated as isNixOS, mirroring graphical.nix — deliberately NOT
   # !serverMode, which is true on the graphical workbench.
@@ -761,6 +767,10 @@ in
         "PATH=${lib.makeBinPath [ pkgs.nix pkgs.git pkgs.gh pkgs.kubectl pkgs.bash pkgs.coreutils pkgs.gnused pkgs.gnugrep ]}"
         "NIX_PATH=nixpkgs=/nix/var/nix/profiles/per-user/root/channels/nixos"
         "KUBECONFIG=%h/workspace/homelab-talos/homelab-kubeconfig"
+        # Explicit host tag — user units do NOT source .zshenv, so resolve_host()
+        # would otherwise only land on "workbench" by falling through
+        # gethostname()=="nixos". Explicit here so a future laptop copy can't mis-tag.
+        "ACTIVITY_HOST=workbench"
         "HOME=%h"
       ];
       ExecStart = "${pkgs.bash}/bin/bash %h/workspace/devrc/scripts/initiatives/run-sync.sh";
@@ -769,17 +779,24 @@ in
     };
   };
 
-  # Timer: fire the sync ~every 15 min. OnUnitActiveSec re-arms after each run so a
-  # slow sync never overlaps itself; OnStartupSec gives one prompt run after login.
-  # (No Persistent — it only applies to OnCalendar timers, not monotonic ones.)
-  # Workbench-only, same as its service (serverMode).
-  systemd.user.timers.initiatives-sync = lib.mkIf serverMode {
+  # Timer: fire the sync ~hourly. The scan is EXPENSIVE (git-log across all repos +
+  # transcript parse + ClickHouse + `gh pr list` open+merged per repo + a kubectl
+  # port-forward) and its inputs change on an hours scale, so hourly is the right
+  # cadence. OnUnitActiveSec re-arms after each run so a slow sync never overlaps
+  # itself; OnStartupSec gives one prompt run after login. (No Persistent — it only
+  # applies to OnCalendar timers, not monotonic ones.)
+  #
+  # DOUBLE-GATED: serverMode (workbench-only, LAN access) AND enableInitiativesSync
+  # (the OFF-by-default master switch in the let-block above). With the switch false
+  # the timer unit is not emitted at all, so NO deploy can wire it into timers.target
+  # until the first supervised live write validates the write path.
+  systemd.user.timers.initiatives-sync = lib.mkIf (serverMode && enableInitiativesSync) {
     Unit = {
       Description = "Periodic timer for the initiatives → Postgres sync";
     };
     Timer = {
       OnStartupSec = "2min";
-      OnUnitActiveSec = "15min";
+      OnUnitActiveSec = "1h";
     };
     Install = {
       WantedBy = [ "timers.target" ];
