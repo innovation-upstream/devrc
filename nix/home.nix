@@ -10,6 +10,12 @@ let
   # there (same trap the i3 bar hit — see graphical.nix). serverMode now gates ONLY
   # server-side task enablement; graphical services key off `graphical` below.
   serverMode = builtins.pathExists "${home}/.server-mode";
+  # Initiatives-sync (Phase 1) master switch — OFF by default so a routine deploy
+  # (ship.sh / home-manager switch) can NEVER silently enable the still-unvalidated
+  # prod-write timer. The service definition is left in place regardless (so it can be
+  # started by hand); only the TIMER is wired into timers.target when this is true.
+  # FLIP TO true after the first SUPERVISED live write validates the DDL/insert path.
+  enableInitiativesSync = false;
   # Graphical host = runs X/i3 (both current NixOS hosts do; only a genuinely headless
   # box would not). Approximated as isNixOS, mirroring graphical.nix — deliberately NOT
   # !serverMode, which is true on the graphical workbench.
@@ -718,6 +724,79 @@ in
     Timer = {
       OnCalendar = "*-*-* 06:00:00";
       Persistent = true;
+    };
+    Install = {
+      WantedBy = [ "timers.target" ];
+    };
+  };
+
+  # Initiatives consolidation (PHASE 1) — periodic sync of the on-demand
+  # initiative-scan into the homelab `mailbox` Postgres (initiatives schema), so
+  # later apps (a live viewer + a router) query a durable, live store instead of
+  # re-running the expensive scan. The wrapper (scripts/initiatives/run-sync.sh)
+  # shells out to initiative-scan.py --json and writes one append-only snapshot via
+  # a kubectl port-forward — SAME cluster-access shape as mail-actions-archive.
+  #
+  # WORKBENCH-ONLY (gated on serverMode), identical rationale to the archiver: the
+  # homelab kubeconfig points at 192.168.50.94:6443 (direct LAN, no proxy), which
+  # only this host has; the laptop is nebula-only and its run would just fail noisily.
+  #
+  # ⚠ OPEN FOLLOW-UP: CLICKHOUSE_* creds are deliberately NOT injected here yet, so
+  # the timer currently runs the scan TELEMETRY-OFF (still writes a useful handoff+
+  # git+session snapshot; momentum/ev degrade). Provisioning those creds into the
+  # unit env is a separate task — see the PR. Do NOT enable/deploy this before Zach
+  # has eyeballed `sync.py --dry-run` output.
+  #
+  # Minimal user-unit env, so PATH is explicit: nix (nix-shell) + git + gh (the
+  # scan's branch/PR reads) + kubectl (the port-forward) + coreutils/sed/grep, and
+  # NIX_PATH so `nix-shell -p` resolves <nixpkgs>. The wrapper's nix-shell adds
+  # psycopg2 (the DB write) + requests (the scan's ClickHouse read).
+  systemd.user.services.initiatives-sync = lib.mkIf serverMode {
+    Unit = {
+      Description = "Initiatives sync — initiative-scan → homelab mailbox Postgres (initiatives schema)";
+      After = [ "network-online.target" ];
+      Wants = [ "network-online.target" ];
+      OnFailure = [ "notify-failure@%n.service" ];
+    };
+    Service = {
+      Type = "oneshot";
+      # Hard ceiling so a half-hung kubectl / scan can't wedge the timer; the
+      # cgroup is killed and the timer re-arms on the next OnUnitActiveSec.
+      TimeoutStartSec = 300;
+      Environment = [
+        "PATH=${lib.makeBinPath [ pkgs.nix pkgs.git pkgs.gh pkgs.kubectl pkgs.bash pkgs.coreutils pkgs.gnused pkgs.gnugrep ]}"
+        "NIX_PATH=nixpkgs=/nix/var/nix/profiles/per-user/root/channels/nixos"
+        "KUBECONFIG=%h/workspace/homelab-talos/homelab-kubeconfig"
+        # Explicit host tag — user units do NOT source .zshenv, so resolve_host()
+        # would otherwise only land on "workbench" by falling through
+        # gethostname()=="nixos". Explicit here so a future laptop copy can't mis-tag.
+        "ACTIVITY_HOST=workbench"
+        "HOME=%h"
+      ];
+      ExecStart = "${pkgs.bash}/bin/bash %h/workspace/devrc/scripts/initiatives/run-sync.sh";
+      # Re-run the unit when the wrapper changes (cf. X-Restart-Triggers above).
+      X-Restart-Triggers = [ "${../scripts/initiatives/run-sync.sh}" ];
+    };
+  };
+
+  # Timer: fire the sync ~hourly. The scan is EXPENSIVE (git-log across all repos +
+  # transcript parse + ClickHouse + `gh pr list` open+merged per repo + a kubectl
+  # port-forward) and its inputs change on an hours scale, so hourly is the right
+  # cadence. OnUnitActiveSec re-arms after each run so a slow sync never overlaps
+  # itself; OnStartupSec gives one prompt run after login. (No Persistent — it only
+  # applies to OnCalendar timers, not monotonic ones.)
+  #
+  # DOUBLE-GATED: serverMode (workbench-only, LAN access) AND enableInitiativesSync
+  # (the OFF-by-default master switch in the let-block above). With the switch false
+  # the timer unit is not emitted at all, so NO deploy can wire it into timers.target
+  # until the first supervised live write validates the write path.
+  systemd.user.timers.initiatives-sync = lib.mkIf (serverMode && enableInitiativesSync) {
+    Unit = {
+      Description = "Periodic timer for the initiatives → Postgres sync";
+    };
+    Timer = {
+      OnStartupSec = "2min";
+      OnUnitActiveSec = "1h";
     };
     Install = {
       WantedBy = [ "timers.target" ];

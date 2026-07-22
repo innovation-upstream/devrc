@@ -56,6 +56,7 @@ HERMETIC_DIRS=(
   scripts/session-analysis/tests
   scripts/session-analysis/session_insight/tests
   scripts/mail-actions/tests
+  scripts/initiatives/tests
   scripts/repo-cos/tests
   scripts/task-spec-drafter/tests
 )
