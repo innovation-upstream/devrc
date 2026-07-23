@@ -370,24 +370,33 @@ def test_ensure_schema_creates_view_when_absent():
     conn = _FakeConn(view_regclass=None)
     sync.ensure_schema(conn)
     joined = " ".join(_sqls(conn))
-    assert "CREATE OR REPLACE VIEW initiatives.current" in joined
+    assert "CREATE VIEW initiatives.current" in joined
     assert "COMMENT ON VIEW initiatives.current" in joined
 
 
 def test_ensure_schema_skips_view_when_present_and_version_matches():
+    # Marker matches -> NEITHER a DROP nor a CREATE (steady state is a no-op).
     conn = _FakeConn(view_regclass="initiatives.current",
                      view_comment=sync.VIEW_COMMENT)
     sync.ensure_schema(conn)
     joined = " ".join(_sqls(conn))
-    assert "CREATE OR REPLACE VIEW initiatives.current" not in joined
+    assert "CREATE VIEW initiatives.current" not in joined
+    assert "DROP VIEW IF EXISTS initiatives.current" not in joined
 
 
 def test_ensure_schema_recreates_view_when_version_differs():
+    # Marker differs -> DROP VIEW IF EXISTS must come BEFORE the CREATE VIEW (CREATE OR
+    # REPLACE can't reorder columns after the v2 `summary` append, so we drop+create).
     conn = _FakeConn(view_regclass="initiatives.current",
                      view_comment="initiatives-sync view v0")
     sync.ensure_schema(conn)
-    joined = " ".join(_sqls(conn))
-    assert "CREATE OR REPLACE VIEW initiatives.current" in joined
+    sqls = _sqls(conn)
+    joined = " ".join(sqls)
+    assert "CREATE OR REPLACE VIEW" not in joined  # never the shape-locked form
+    assert "CREATE VIEW initiatives.current" in joined
+    drop_i = next(i for i, s in enumerate(sqls) if "DROP VIEW IF EXISTS initiatives.current" in s)
+    create_i = next(i for i, s in enumerate(sqls) if "CREATE VIEW initiatives.current" in s)
+    assert drop_i < create_i
 
 
 # --- the `latest` view (viewer's ghost-free source) ------------------------- #
@@ -395,7 +404,7 @@ def test_ensure_schema_creates_latest_view_when_absent():
     conn = _FakeConn(latest_regclass=None)
     sync.ensure_schema(conn)
     joined = " ".join(_sqls(conn))
-    assert "CREATE OR REPLACE VIEW initiatives.latest" in joined
+    assert "CREATE VIEW initiatives.latest" in joined
     assert "COMMENT ON VIEW initiatives.latest" in joined
     # rows from the most recent snapshot only (the ghost-free semantic)
     assert "WHERE i.snapshot_id = (SELECT max(id) FROM initiatives.snapshots)" in joined
@@ -406,15 +415,19 @@ def test_ensure_schema_skips_latest_view_when_present_and_version_matches():
                      latest_comment=sync.LATEST_VIEW_COMMENT)
     sync.ensure_schema(conn)
     joined = " ".join(_sqls(conn))
-    assert "CREATE OR REPLACE VIEW initiatives.latest" not in joined
+    assert "CREATE VIEW initiatives.latest" not in joined
+    assert "DROP VIEW IF EXISTS initiatives.latest" not in joined
 
 
 def test_ensure_schema_recreates_latest_view_when_version_differs():
     conn = _FakeConn(latest_regclass="initiatives.latest",
                      latest_comment="initiatives-sync view latest v0")
     sync.ensure_schema(conn)
-    joined = " ".join(_sqls(conn))
-    assert "CREATE OR REPLACE VIEW initiatives.latest" in joined
+    sqls = _sqls(conn)
+    assert "CREATE OR REPLACE VIEW" not in " ".join(sqls)
+    drop_i = next(i for i, s in enumerate(sqls) if "DROP VIEW IF EXISTS initiatives.latest" in s)
+    create_i = next(i for i, s in enumerate(sqls) if "CREATE VIEW initiatives.latest" in s)
+    assert drop_i < create_i
 
 
 def test_ensure_schema_manages_both_views_independently():
@@ -424,8 +437,9 @@ def test_ensure_schema_manages_both_views_independently():
                      latest_regclass=None)
     sync.ensure_schema(conn)
     joined = " ".join(_sqls(conn))
-    assert "CREATE OR REPLACE VIEW initiatives.current" not in joined
-    assert "CREATE OR REPLACE VIEW initiatives.latest" in joined
+    assert "CREATE VIEW initiatives.current" not in joined
+    assert "DROP VIEW IF EXISTS initiatives.current" not in joined
+    assert "CREATE VIEW initiatives.latest" in joined
     assert conn.commits == 1  # still one commit for the whole schema pass
 
 
