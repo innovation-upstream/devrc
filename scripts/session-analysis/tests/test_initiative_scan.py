@@ -1382,6 +1382,108 @@ def test_attribute_recent_messages_dedupes_identical_boilerplate():
     assert inis[0]["recent_messages"] == [{"text": boiler, "ts": 200.0}]
 
 
+def test_attribute_recent_messages_sibling_genesis_credits_only_most_specific():
+    # THE core precision fix. A session whose genesis names the SPECIFIC child handoff
+    # must credit its message to ONLY that child — NOT the generic `app-blocks` sibling
+    # (whose `handoff-app-blocks` name is a prefix SUBSTRING of the child's filename).
+    repo = "/r"
+    generic = {"slug": "app-blocks", "repo": repo,
+               "docs": [{"path": "/r/claudedocs/handoff-app-blocks.md", "date": None}]}
+    child = {"slug": "app-blocks-comfy-cloud-scaffold", "repo": repo,
+             "docs": [{"path": "/r/claudedocs/handoff-app-blocks-comfy-cloud-scaffold.md",
+                       "date": None}]}
+    inis = [generic, child]
+    records = [{"genesis": "resume handoff-app-blocks-comfy-cloud-scaffold.md",
+                "mtime": 1.0, "cwd": None, "branch": None,
+                "turns": [{"text": "wire the comfy cloud scaffold", "ts": 500.0}]}]
+    isc.attribute_recent_messages(inis, records, [repo])
+    assert generic["recent_messages"] == []                       # NOT duplicated onto generic
+    assert [m["text"] for m in child["recent_messages"]] == ["wire the comfy cloud scaffold"]
+
+
+def test_attribute_recent_messages_three_prefix_siblings_single_credit():
+    # generic + TWO specific children all prefix-share `app-blocks`; a child-named genesis
+    # lands on exactly ONE (the named child), never the generic OR the other sibling.
+    repo = "/r"
+    generic = {"slug": "app-blocks", "repo": repo,
+               "docs": [{"path": "/r/claudedocs/handoff-app-blocks.md", "date": None}]}
+    scaffold = {"slug": "app-blocks-comfy-cloud-scaffold", "repo": repo,
+                "docs": [{"path":
+                          "/r/claudedocs/handoff-app-blocks-comfy-cloud-scaffold.md",
+                          "date": None}]}
+    review = {"slug": "app-blocks-agentic-review-arc", "repo": repo,
+              "docs": [{"path": "/r/claudedocs/handoff-app-blocks-agentic-review-arc.md",
+                        "date": None}]}
+    inis = [generic, scaffold, review]
+    records = [{"genesis": "continue handoff-app-blocks-agentic-review-arc.md",
+                "mtime": 1.0, "cwd": None, "branch": None,
+                "turns": [{"text": "close the review arc", "ts": 500.0}]}]
+    isc.attribute_recent_messages(inis, records, [repo])
+    assert generic["recent_messages"] == []
+    assert scaffold["recent_messages"] == []
+    assert [m["text"] for m in review["recent_messages"]] == ["close the review arc"]
+
+
+def test_attribute_recent_messages_generic_genesis_credits_generic_not_child():
+    # A genesis naming ONLY the generic handoff credits the generic. The child does NOT
+    # match (its longer `handoff-app-blocks-comfy-cloud-scaffold` name is not a substring of
+    # the short generic genesis), so the single-best rule has just one candidate — no
+    # accidental diversion to a child the session never referenced.
+    repo = "/r"
+    generic = {"slug": "app-blocks", "repo": repo,
+               "docs": [{"path": "/r/claudedocs/handoff-app-blocks.md", "date": None}]}
+    child = {"slug": "app-blocks-comfy-cloud-scaffold", "repo": repo,
+             "docs": [{"path": "/r/claudedocs/handoff-app-blocks-comfy-cloud-scaffold.md",
+                       "date": None}]}
+    inis = [generic, child]
+    records = [{"genesis": "resume handoff-app-blocks.md", "mtime": 1.0,
+                "cwd": None, "branch": None,
+                "turns": [{"text": "generic app-blocks work", "ts": 500.0}]}]
+    isc.attribute_recent_messages(inis, records, [repo])
+    assert [m["text"] for m in generic["recent_messages"]] == ["generic app-blocks work"]
+    assert child["recent_messages"] == []
+
+
+def test_attribute_recent_messages_tiebreak_longer_slug_wins():
+    # Two candidates with the SAME slug-token count: the tie-break (longer raw slug, then
+    # lexical — `_specificity_key`, mirroring best_matching_initiative) decides the winner.
+    repo = "/r"
+    # both have 2 meaningful tokens ({red, panda} vs {red, pandas}) — different raw lengths.
+    a = {"slug": "red-panda", "repo": repo,
+         "docs": [{"path": "/r/claudedocs/handoff-red-panda.md", "date": None}]}
+    b = {"slug": "red-pandas", "repo": repo,
+         "docs": [{"path": "/r/claudedocs/handoff-red-pandas.md", "date": None}]}
+    inis = [a, b]
+    # Genesis names BOTH handoffs -> both are candidates; longer raw slug ("red-pandas") wins.
+    records = [{"genesis": "handoff-red-panda.md and handoff-red-pandas.md", "mtime": 1.0,
+                "cwd": None, "branch": None,
+                "turns": [{"text": "which panda", "ts": 500.0}]}]
+    isc.attribute_recent_messages(inis, records, [repo])
+    assert a["recent_messages"] == []
+    assert [m["text"] for m in b["recent_messages"]] == ["which panda"]
+    # Confirm the tie-break agrees with _specificity_key directly.
+    assert isc._specificity_key(b) > isc._specificity_key(a)
+
+
+def test_attribute_recent_messages_single_credit_does_not_change_session_counts():
+    # SCOPE GUARD: the message single-credit fix must NOT touch attribute_sessions —
+    # `session_count` (the displayed `sess:` count) still MULTI-credits prefix siblings.
+    repo = "/r"
+    generic = {"slug": "app-blocks", "repo": repo,
+               "docs": [{"path": "/r/claudedocs/handoff-app-blocks.md", "date": None}]}
+    child = {"slug": "app-blocks-comfy-cloud-scaffold", "repo": repo,
+             "docs": [{"path": "/r/claudedocs/handoff-app-blocks-comfy-cloud-scaffold.md",
+                       "date": None}]}
+    inis = [generic, child]
+    genesis = [{"text": "resume handoff-app-blocks-comfy-cloud-scaffold.md", "mtime": 10.0}]
+    isc.attribute_sessions(inis, genesis)
+    # BOTH still counted (unchanged multi-credit) — the child filename contains the generic
+    # `handoff-app-blocks` substring, so the generic's session_count is 1, not diverted.
+    assert generic["session_count"] == 1
+    assert child["session_count"] == 1
+    assert generic["last_session"] == 10.0 and child["last_session"] == 10.0
+
+
 # --------------------------------------------------------------------------- #
 # Recent commit subjects
 # --------------------------------------------------------------------------- #

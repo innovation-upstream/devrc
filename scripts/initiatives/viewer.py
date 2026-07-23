@@ -55,6 +55,7 @@ import html
 import importlib.util
 import json
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -270,6 +271,50 @@ def _norm_docs(docs) -> list[dict]:
     return out
 
 
+# Card-FACE prompt filtering (Phase A precision, Problem 2). The stored
+# `recent_messages` list is kept COMPLETE (the card expand shows it verbatim, and Phase B
+# will consume it) — only the SINGLE line shown on the card FACE is filtered to the
+# most-recent SUBSTANTIVE prompt, skipping low-signal boilerplate like `dispatch` /
+# `proceed` / `yes` that says nothing about what an initiative IS.
+FACE_MIN_CHARS = 15
+# Exact-match (post-normalization) trivial prompts: agent-pipeline ritual words / bare
+# acks that carry no topic. An explicit set so tuning FACE_MIN_CHARS can never let one of
+# these through.
+TRIVIAL_PROMPTS = frozenset({
+    "dispatch", "proceed", "submitted", "yes", "y", "go", "ok", "okay",
+    "continue", "merged", "done", "next", "sure", "approved", "lgtm",
+})
+
+
+def _is_trivial_prompt(text: str) -> bool:
+    """A low-signal card-FACE prompt: an exact known boilerplate ack (`dispatch`/`proceed`/
+    `yes`…) or too short to describe the work (< FACE_MIN_CHARS). Punctuation-insensitive +
+    case-folded, so `Proceed.` and `dispatch!` both count. PURE — used ONLY for FACE
+    selection; the stored `recent_messages` list is never filtered by it."""
+    norm = re.sub(r"[^a-z0-9]+", "", (text or "").lower())
+    if not norm:
+        return True
+    if norm in TRIVIAL_PROMPTS:
+        return True
+    return len((text or "").strip()) < FACE_MIN_CHARS
+
+
+def pick_face_message(recent_messages: list[dict]) -> dict | None:
+    """The single message to show on a card's FACE: the most-recent SUBSTANTIVE prompt.
+
+    `recent_messages` is newest-first (as stored). Returns the first non-trivial one
+    (`_is_trivial_prompt`); if EVERY message is trivial, falls back to the most-recent one
+    (never blank when there's any message). None only for an empty list. The full list is
+    left intact for the expand — this only picks the face line."""
+    msgs = [m for m in (recent_messages or []) if isinstance(m, dict)]
+    if not msgs:
+        return None
+    for m in msgs:
+        if not _is_trivial_prompt(str(m.get("text") or "")):
+            return m
+    return msgs[0]
+
+
 def _initiative_view(ini: dict, now: datetime) -> dict:
     """One store row (+ any attached tmux_sessions) -> a flat, template-ready view dict."""
     momentum = ini.get("momentum") or "unknown"
@@ -280,6 +325,12 @@ def _initiative_view(ini: dict, now: datetime) -> dict:
     # not stored). First title if a session is open, else "".
     tmux_tasks = [str(t) for t in (ini.get("tmux_tasks") or []) if str(t).strip()]
     repo = ini.get("repo")
+    # The COMPLETE recent-prompt list (newest-first, as stored) — the expand renders it
+    # verbatim. The card FACE shows only `face_message` (the most-recent substantive one).
+    recent_messages = [
+        {"text": str(m.get("text") or ""), "ts": m.get("ts")}
+        for m in (ini.get("recent_messages") or []) if isinstance(m, dict)
+    ]
     return {
         "slug": ini.get("slug") or "(no slug)",
         "repo": repo or "",
@@ -311,10 +362,11 @@ def _initiative_view(ini: dict, now: datetime) -> dict:
         # Phase A card-legibility signals. `recent_messages` = the user's own recent
         # prompts (newest-first, from the store); `recent_commits` = recent commit
         # subjects; `live_task` = the open tmux session's task (render-time overlay).
-        "recent_messages": [
-            {"text": str(m.get("text") or ""), "ts": m.get("ts")}
-            for m in (ini.get("recent_messages") or []) if isinstance(m, dict)
-        ],
+        "recent_messages": recent_messages,
+        # The single most-recent SUBSTANTIVE prompt for the card FACE (boilerplate like
+        # `dispatch`/`proceed` skipped; falls back to the newest when all are trivial).
+        # `recent_messages` above stays complete for the expand.
+        "face_message": pick_face_message(recent_messages),
         "recent_commits": [str(x) for x in (ini.get("recent_commits") or [])],
         "live_task": tmux_tasks[0] if tmux_tasks else "",
     }
@@ -656,7 +708,9 @@ _JS = r"""
 
   function matchQ(v, q){
     if(!q) return true;
-    var msg = (v.recent_messages && v.recent_messages[0] && v.recent_messages[0].text) || '';
+    // Search the FULL recent-message list (not just the face line) so a card is findable
+    // by any of its prompts, even the ones filtered off the face.
+    var msg = (v.recent_messages || []).map(function(m){ return (m && m.text) || ''; }).join(' ');
     var hay = ((v.slug||'') + ' ' + (v.title||'') + ' ' + (v.summary||'') + ' ' +
                (v.repo_name||'') + ' ' + (v.momentum||'') + ' ' + msg + ' ' +
                (v.live_task||'')).toLowerCase();
@@ -762,13 +816,15 @@ _JS = r"""
 
     if(v.summary) c.appendChild(el('div', 'summary', v.summary));
 
-    // The user's own most-recent prompt — the highest-signal "what is this" line
-    // (summary + latest message read well together). textContent-only, never innerHTML.
-    var msgs = v.recent_messages || [];
-    if(msgs.length && msgs[0] && msgs[0].text){
+    // The user's own most-recent SUBSTANTIVE prompt — the highest-signal "what is this"
+    // line (summary + latest message read well together). `face_message` skips low-signal
+    // boilerplate (dispatch/proceed/yes); the expand still shows the full recent_messages
+    // list. textContent-only, never innerHTML.
+    var face = v.face_message;
+    if(face && face.text){
       var m = el('div', 'msg');
       m.appendChild(el('span', 'lbl', 'you ›'));
-      m.appendChild(document.createTextNode(' ' + msgs[0].text));
+      m.appendChild(document.createTextNode(' ' + face.text));
       c.appendChild(m);
     }
 

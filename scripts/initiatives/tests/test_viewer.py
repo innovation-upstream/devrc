@@ -689,3 +689,69 @@ def test_model_to_json_flat_includes_recent_fields():
     v = j["flat"][0]
     assert v["recent_messages"] == [{"text": "m", "ts": 1.0}]
     assert v["recent_commits"] == ["c"]
+
+
+# --- Card-FACE substantive-prompt selection (Problem 2) --------------------- #
+def test_is_trivial_prompt_flags_boilerplate_and_short():
+    for triv in ["dispatch", "Proceed.", "yes", "go", " submitted ", "OK", "merged",
+                 "continue", "done", "y", ""]:
+        assert viewer._is_trivial_prompt(triv), triv
+    for real in ["relabel the node as web", "fix bad-eyes then launch round 3",
+                 "wire the comfy cloud scaffold"]:
+        assert not viewer._is_trivial_prompt(real), real
+
+
+def test_pick_face_message_skips_boilerplate_for_first_substantive():
+    # newest-first list whose newest entries are boilerplate → face is the first real one.
+    msgs = [
+        {"text": "dispatch", "ts": 500.0},
+        {"text": "proceed", "ts": 400.0},
+        {"text": "relabel the node as web", "ts": 300.0},
+        {"text": "older substantive prompt here", "ts": 200.0},
+    ]
+    assert viewer.pick_face_message(msgs) == {"text": "relabel the node as web", "ts": 300.0}
+
+
+def test_pick_face_message_falls_back_when_all_trivial():
+    msgs = [{"text": "dispatch", "ts": 500.0}, {"text": "yes", "ts": 400.0}]
+    # every message trivial → fall back to the most-recent (never blank).
+    assert viewer.pick_face_message(msgs) == {"text": "dispatch", "ts": 500.0}
+
+
+def test_pick_face_message_empty_is_none():
+    assert viewer.pick_face_message([]) is None
+    assert viewer.pick_face_message(None) is None
+
+
+def test_view_face_message_is_substantive_but_full_list_intact():
+    # The card FACE skips the boilerplate; the stored recent_messages list stays COMPLETE
+    # (unfiltered) for the expand + Phase B.
+    rows = [_row(slug="s", recent_messages=[
+        {"text": "dispatch", "ts": 500.0},
+        {"text": "submitted", "ts": 450.0},
+        {"text": "close the review arc for app-blocks", "ts": 300.0},
+    ])]
+    v = viewer.build_model(rows, now=NOW)["flat"][0]
+    assert v["face_message"] == {"text": "close the review arc for app-blocks", "ts": 300.0}
+    # full list preserved verbatim (all three, boilerplate included), newest-first.
+    assert [m["text"] for m in v["recent_messages"]] == [
+        "dispatch", "submitted", "close the review arc for app-blocks"]
+
+
+def test_view_face_message_none_when_no_messages():
+    v = viewer.build_model([_row(slug="s")], now=NOW)["flat"][0]
+    assert v["face_message"] is None
+
+
+def test_render_html_face_shows_substantive_not_boilerplate():
+    # The card FACE line (you › …) must render the substantive prompt, while the boilerplate
+    # still rides along in the JSON island (for the expand). We assert the JS reads
+    # face_message for the face, and the substantive text is present in the payload.
+    rows = [_row(slug="s", recent_messages=[
+        {"text": "dispatch", "ts": 500.0},
+        {"text": "wire the comfy cloud scaffold", "ts": 300.0},
+    ])]
+    html = viewer.render_html(viewer.build_model(rows, now=NOW))
+    assert "wire the comfy cloud scaffold" in html           # substantive prompt in payload
+    assert '"face_message"' in html                            # the face field is embedded
+    assert "v.face_message" in html                            # the card reads it for the face
