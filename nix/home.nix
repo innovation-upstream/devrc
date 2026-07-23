@@ -806,6 +806,62 @@ in
     };
   };
 
+  # Initiatives consolidation (PHASE 3) — the LIVE WEB VIEWER over the Phase-1 store.
+  # A long-running stdlib-http.server (scripts/initiatives/viewer.py, launched by
+  # run-viewer.sh) that renders the current initiatives from `initiatives.latest`
+  # (ghost-free: newest snapshot only) grouped by repo, with momentum badges,
+  # next-step, open PRs, and a LIVE tmux overlay read from THIS host at render time.
+  # It is the durable, browser-viewable counterpart to the ephemeral agent-ops TUI.
+  #
+  # WORKBENCH-ONLY (gated on serverMode), same rationale as the sync: the homelab
+  # kubeconfig is direct-LAN only here, AND the viewer must run on the host whose
+  # tmux server it reads (the live overlay). It binds a workbench-LAN address
+  # (192.168.50.94:8899) — internal work data, deliberately NOT wired into the public
+  # homelab gateway. Public exposure would be a later, explicit choice.
+  #
+  # UNLIKE the sync it needs NO ClickHouse/sops creds (it only READS the already-synced
+  # store — no telemetry query), so it's enabled directly under serverMode with no
+  # off-by-default master switch: it's read-only and low-risk. Crash-loop safety is in
+  # the CODE, not the unit — every store read is per-request and a DB outage renders an
+  # error page while the process keeps serving, so Restart=on-failure only ever fires on
+  # a genuine process crash (e.g. the port already bound), backed off by RestartSec.
+  #
+  # Minimal user-unit env, so PATH is explicit: nix (nix-shell) + kubectl (the
+  # port-forward) + git (the scan's repo/worktree discovery for the overlay) + tmux (the
+  # live pane read) + bash/coreutils, and NIX_PATH so `nix-shell -p` resolves <nixpkgs>.
+  # The wrapper's nix-shell adds psycopg2 (the DB read) + requests (the scan import).
+  systemd.user.services.initiatives-viewer = lib.mkIf serverMode {
+    Unit = {
+      Description = "Initiatives live web viewer — initiatives.latest + live tmux overlay";
+      After = [ "network-online.target" ];
+      Wants = [ "network-online.target" ];
+      OnFailure = [ "notify-failure@%n.service" ];
+    };
+    Service = {
+      Type = "simple";
+      Environment = [
+        "PATH=${lib.makeBinPath [ pkgs.nix pkgs.kubectl pkgs.git pkgs.tmux pkgs.bash pkgs.coreutils pkgs.gnused pkgs.gnugrep ]}"
+        "NIX_PATH=nixpkgs=/nix/var/nix/profiles/per-user/root/channels/nixos"
+        "KUBECONFIG=%h/workspace/homelab-talos/homelab-kubeconfig"
+        "INITIATIVES_VIEWER_HOST=192.168.50.94"
+        "INITIATIVES_VIEWER_PORT=8899"
+        "HOME=%h"
+      ];
+      ExecStart = "${pkgs.bash}/bin/bash %h/workspace/devrc/scripts/initiatives/run-viewer.sh";
+      # Only ever restarts on a real crash (see the crash-loop note above); back off so a
+      # persistently-unbindable port doesn't spin.
+      Restart = "on-failure";
+      RestartSec = "10s";
+      X-Restart-Triggers = [
+        "${../scripts/initiatives/run-viewer.sh}"
+        "${../scripts/initiatives/viewer.py}"
+      ];
+    };
+    Install = {
+      WantedBy = [ "default.target" ];
+    };
+  };
+
   # Repo chief-of-staff — WEEKLY: deterministic scan of Zach's repos for improvement
   # signals (TODO/FIXME, skipped tests, `latest` tags, churn, large files) → cheap LLM
   # synthesis (OpenRouter) → ranked proposal digest EMAILED. The "agents bring me ideas"

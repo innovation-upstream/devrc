@@ -106,10 +106,15 @@ CREATE INDEX IF NOT EXISTS snapshots_captured_at_idx
     ON initiatives.snapshots (captured_at);
 """
 
-# The `current` view is guarded separately (see ensure_schema): re-running
+# The views are guarded separately (see ensure_schema / _ensure_view): re-running
 # CREATE OR REPLACE VIEW takes an ACCESS EXCLUSIVE lock every time, so we only
-# (re)create it when it's absent or its version marker differs. Bump VIEW_VERSION
-# whenever VIEW_DDL changes so a deploy recreates it.
+# (re)create a view when it's absent or its version marker differs. Bump the
+# matching *_VERSION whenever its DDL changes so a deploy recreates it.
+#
+# `current` — newest row per (repo, slug) across ALL history. This deliberately
+# includes initiatives that have aged out of the scan's N-day window (until the
+# 90-day retention prunes them): the ROUTER wants to match a signal against
+# recently-dormant work, so ghosts are a feature there.
 VIEW_VERSION = "v1"
 VIEW_COMMENT = f"initiatives-sync view {VIEW_VERSION}"
 VIEW_DDL = """
@@ -119,6 +124,21 @@ SELECT DISTINCT ON (i.repo, i.slug)
   FROM initiatives.initiative_snapshot i
   JOIN initiatives.snapshots s ON s.id = i.snapshot_id
  ORDER BY i.repo, i.slug, s.captured_at DESC;
+"""
+
+# `latest` — rows from the MOST RECENT snapshot only. This is the correct view for
+# a live VIEWER: it shows exactly what the last scan saw, with NO aged-out ghosts
+# (an initiative that dropped out of the scan's window simply isn't in the newest
+# snapshot, so it disappears here even though `current` still carries it). Carries
+# `captured_at` so the viewer can render an "updated Xm ago" freshness footer.
+LATEST_VIEW_VERSION = "v1"
+LATEST_VIEW_COMMENT = f"initiatives-sync view latest {LATEST_VIEW_VERSION}"
+LATEST_VIEW_DDL = """
+CREATE OR REPLACE VIEW initiatives.latest AS
+SELECT i.*, s.captured_at
+  FROM initiatives.initiative_snapshot i
+  JOIN initiatives.snapshots s ON s.id = i.snapshot_id
+ WHERE i.snapshot_id = (SELECT max(id) FROM initiatives.snapshots);
 """
 
 # Arbitrary constant key for the schema advisory lock (pg_advisory_xact_lock), so a
@@ -276,30 +296,40 @@ def _import_maildb():
     return mod.MailDB
 
 
+def _ensure_view(cur, view: str, ddl: str, comment: str) -> None:
+    """(Re)create a guarded view ONLY when it's missing or its version marker differs.
+
+    CREATE OR REPLACE VIEW takes an ACCESS EXCLUSIVE lock every run, so we gate it on
+    a version-marker `COMMENT ON VIEW`: steady state (view present, marker matches)
+    does nothing. `view` is a trusted module constant (never user input) so
+    interpolating it into the introspection SQL is safe. Bump the view's *_VERSION to
+    force a recreate after a hand-edit to its DDL."""
+    cur.execute(f"SELECT to_regclass('{view}')")
+    exists = cur.fetchone()[0] is not None
+    need_view = True
+    if exists:
+        cur.execute(f"SELECT obj_description('{view}'::regclass, 'pg_class')")
+        row = cur.fetchone()
+        need_view = (row[0] if row else None) != comment
+    if need_view:
+        cur.execute(ddl)
+        cur.execute(f"COMMENT ON VIEW {view} IS %s", (comment,))
+
+
 def ensure_schema(conn) -> None:
-    """Create the schema/tables/indexes/view idempotently (self-migrating, additive-only).
+    """Create the schema/tables/indexes/views idempotently (self-migrating, additive-only).
 
     Wrapped in a transaction-scoped advisory lock so a manual run racing the timer
-    can't collide on the not-fully-race-safe CREATE … IF NOT EXISTS. The `current`
-    view is only (re)created when absent or its version marker differs — steady state
-    skips re-taking ACCESS EXCLUSIVE on it every run."""
+    can't collide on the not-fully-race-safe CREATE … IF NOT EXISTS. Each view
+    (`current` for the router, `latest` for the viewer) is only (re)created when
+    absent or its version marker differs — steady state skips re-taking ACCESS
+    EXCLUSIVE on either every run."""
     with conn.cursor() as cur:
         # Serialize concurrent schema setup (released at COMMIT below).
         cur.execute("SELECT pg_advisory_xact_lock(%s)", (SCHEMA_LOCK_KEY,))
         cur.execute(TABLES_DDL)
-
-        # View guard: (re)create only when missing or the version marker differs.
-        cur.execute("SELECT to_regclass('initiatives.current')")
-        exists = cur.fetchone()[0] is not None
-        need_view = True
-        if exists:
-            cur.execute(
-                "SELECT obj_description('initiatives.current'::regclass, 'pg_class')")
-            row = cur.fetchone()
-            need_view = (row[0] if row else None) != VIEW_COMMENT
-        if need_view:
-            cur.execute(VIEW_DDL)
-            cur.execute("COMMENT ON VIEW initiatives.current IS %s", (VIEW_COMMENT,))
+        _ensure_view(cur, "initiatives.current", VIEW_DDL, VIEW_COMMENT)
+        _ensure_view(cur, "initiatives.latest", LATEST_VIEW_DDL, LATEST_VIEW_COMMENT)
     conn.commit()
 
 
