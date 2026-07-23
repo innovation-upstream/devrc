@@ -367,7 +367,7 @@ in
     force = true;
   };
   # Slash-commands — recursively symlinked so each command lands individually at
-  # ~/.claude/commands/<name>.md (and sc/load.md) as a read-only store symlink.
+  # ~/.claude/commands/<name>.md as a read-only store symlink.
   # Edit in devrc/claude/commands/ then switch; both hosts stay in lockstep.
   home.file.".claude/commands" = {
     source = ../claude/commands;

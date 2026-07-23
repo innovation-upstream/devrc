@@ -58,7 +58,7 @@ Derived from auditing high-volume projects (datapacket-talos, civitai, kubeclaw-
 - **Write tool over heredoc-to-file**: Create/overwrite files with the Write tool, never `cat >file <<EOF` / `tee file <<EOF`. The heredoc body is paid for twice (the tool call AND the echoed result) and litters /tmp. A PreToolUse hook now blocks large ones.
 - **Read before Edit**: A file must be Read in-session before Edit/Write or the call errors and burns a round-trip.
 - **Don't re-read what's already in context**: never re-Read a file you've already read this session — use context or Edit directly.
-- **Read large files surgically**: use `offset`/`limit` or serena symbol tools (`find_symbol`, `get_symbols_overview`) instead of full-file reads.
+- **Read large files surgically**: use `offset`/`limit`, or Grep/Glob to locate the relevant symbol, instead of full-file reads.
 - **Don't Read binaries**: skip `.png`/`.jpg`/`.pdf`/etc. unless you must see the image.
 
 ✅ `Write` tool to create `/tmp/build.sh`; Read `foo.go` once, then Edit it
@@ -79,7 +79,7 @@ Derived from auditing 232 sessions: 1,712 preventable errors + a ~1,000× redund
 ## Tool Optimization 🟢
 **Triggers**: multi-step operations, search, complex tasks
 
-- **Best tool for the job** (MCP > native > basic): Grep over bash grep, Glob over find, serena symbol tools for code navigation, context7 for library docs.
+- **Best tool for the job** (MCP > native > basic): Grep over bash grep, Glob over find, context7 for library docs.
 - **Parallelize** independent operations in one message; batch reads/edits; sequential only for true dependencies.
 - **Delegate** complex multi-step work (>3 steps) to subagents.
 
