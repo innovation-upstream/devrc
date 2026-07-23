@@ -223,12 +223,27 @@ def cmd_scan(args) -> int:
         print(f"ERROR: synthesis failed: {exc}", file=sys.stderr)
         return 1
 
+    # ---- SURFACE-ONLY initiative routing (best-effort; NEVER breaks the digest) ----
+    # Tag each synthesized proposal with the EXISTING initiative it relates to (if any)
+    # so the digest shows a `↳ relates to: <slug>` breadcrumb. Loads the Phase-1 store
+    # ONCE (a kubectl port-forward) and ranks in memory. Wrapped so a router/store/import
+    # failure logs a warning and proceeds with NO tags — the digest sends exactly as before.
+    related = []
+    try:
+        import routing
+        related = routing.related_for(result.proposals)
+    except Exception as exc:  # noqa: BLE001 - best-effort: never break the digest
+        print(f"  ! initiative routing failed (proceeding without tags): {exc}",
+              file=sys.stderr)
+        related = []
+
     body = digest.render(
         result.proposals,
         candidate_count=len(cand_dicts),
         approx_tokens=result.approx_prompt_tokens,
         excluded_repos=excluded_names,
         dismissed_count=len(dismissed_recs),
+        related=related,
     )
     print(f"  synthesis: model={result.model} candidates={len(cand_dicts)} "
           f"proposals={len(result.proposals)} ~prompt_tokens={result.approx_prompt_tokens} "

@@ -45,13 +45,18 @@ def render(proposals: list, *, today: date | None = None,
            candidate_count: int | None = None,
            approx_tokens: int | None = None,
            excluded_repos: list | None = None,
-           dismissed_count: int | None = None) -> str:
+           dismissed_count: int | None = None,
+           related: list | None = None) -> str:
     """Render proposals (llm.Proposal objects) into a compact skimmable digest.
 
     Empty proposal list is handled explicitly (honest 'nothing surfaced' message rather
     than a blank email). `excluded_repos` (deterministically dropped from the scan) is
     surfaced as a footer so Zach sees the state and can reply "resume <repo>" to undo it.
-    `dismissed_count` (per-recommendation dismissals) is surfaced as a terse footer line."""
+    `dismissed_count` (per-recommendation dismissals) is surfaced as a terse footer line.
+    `related` (optional, index-aligned to `proposals`) is a SURFACE-ONLY initiative slug
+    per proposal (or None) from the router — rendered as a `↳ relates to: <slug>`
+    breadcrumb under the title, omitted where there's no confident match. Purely
+    informational: it drives no action and a missing/short list just means no tags."""
     d = today or date.today()
     excl_footer = _excluded_footer(excluded_repos)
     dism_footer = _dismissed_footer(dismissed_count)
@@ -82,6 +87,9 @@ def render(proposals: list, *, today: date | None = None,
         ci = "✅ CI-verifiable" if p.ci_verifiable else "○ needs judgement"
         eff = EFFORT_LABEL.get(p.effort, p.effort)
         lines.append(f"{i}. {p.title}  [{p.repo}]")
+        rel = related[i - 1] if related is not None and i - 1 < len(related) else None
+        if rel:
+            lines.append(f"   ↳ relates to: {rel}")
         lines.append(f"   why:      {p.why}")
         lines.append(f"   effort:   {eff}   {ci}")
         if p.approach:
