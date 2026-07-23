@@ -80,6 +80,7 @@ CREATE TABLE IF NOT EXISTS initiatives.initiative_snapshot (
     repo                 text,
     slug                 text,
     title                text,
+    summary              text,
     doc_date             date,
     momentum             text,
     last_touch           timestamptz,
@@ -95,6 +96,12 @@ CREATE TABLE IF NOT EXISTS initiatives.initiative_snapshot (
     open_investigations  jsonb,
     docs                 jsonb
 );
+
+-- Additive migration for pre-existing installs: CREATE TABLE IF NOT EXISTS won't add
+-- a column to a table that already exists, so bring `summary` (nullable, deterministic
+-- goal/what-this-is line) in explicitly. Idempotent — a no-op once the column exists.
+ALTER TABLE initiatives.initiative_snapshot
+    ADD COLUMN IF NOT EXISTS summary text;
 
 -- Support the `current` view's DISTINCT ON (repo, slug) … JOIN snapshots …
 -- ORDER BY repo, slug, captured_at DESC, plus the FK join / retention scans.
@@ -115,7 +122,10 @@ CREATE INDEX IF NOT EXISTS snapshots_captured_at_idx
 # includes initiatives that have aged out of the scan's N-day window (until the
 # 90-day retention prunes them): the ROUTER wants to match a signal against
 # recently-dormant work, so ghosts are a feature there.
-VIEW_VERSION = "v1"
+# v2: the base table gained a `summary` column. A view's `SELECT i.*` is expanded to
+# an explicit column list AT CREATE TIME (Postgres freezes it), so the new column does
+# NOT appear until the view is recreated — bump the marker to force that on deploy.
+VIEW_VERSION = "v2"
 VIEW_COMMENT = f"initiatives-sync view {VIEW_VERSION}"
 VIEW_DDL = """
 CREATE OR REPLACE VIEW initiatives.current AS
@@ -131,7 +141,8 @@ SELECT DISTINCT ON (i.repo, i.slug)
 # (an initiative that dropped out of the scan's window simply isn't in the newest
 # snapshot, so it disappears here even though `current` still carries it). Carries
 # `captured_at` so the viewer can render an "updated Xm ago" freshness footer.
-LATEST_VIEW_VERSION = "v1"
+# v2: recreate to expose the new `summary` column (see VIEW_VERSION note above).
+LATEST_VIEW_VERSION = "v2"
 LATEST_VIEW_COMMENT = f"initiatives-sync view latest {LATEST_VIEW_VERSION}"
 LATEST_VIEW_DDL = """
 CREATE OR REPLACE VIEW initiatives.latest AS
@@ -151,7 +162,7 @@ RETENTION_DAYS = 90
 
 # Column order for the per-initiative insert (snapshot_id is prepended at write time).
 ROW_COLUMNS = [
-    "host", "repo", "slug", "title", "doc_date", "momentum", "last_touch",
+    "host", "repo", "slug", "title", "summary", "doc_date", "momentum", "last_touch",
     "next_step", "commits", "commits_unknown", "merged_prs", "open_prs",
     "session_count", "telem_events", "telem_last", "current_doc",
     "open_investigations", "docs",
@@ -211,6 +222,7 @@ def _initiative_to_row(ini: dict, host: str) -> dict:
         "repo": ini.get("repo"),
         "slug": ini.get("slug"),
         "title": ini.get("title"),
+        "summary": ini.get("summary"),
         "doc_date": _to_date(ini.get("date")),
         "momentum": ini.get("momentum"),
         "last_touch": _epoch_to_dt(ini.get("last_touch")),

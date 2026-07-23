@@ -782,12 +782,14 @@ in
     };
   };
 
-  # Timer: fire the sync ~hourly. The scan is EXPENSIVE (git-log across all repos +
-  # transcript parse + ClickHouse + `gh pr list` open+merged per repo + a kubectl
-  # port-forward) and its inputs change on an hours scale, so hourly is the right
-  # cadence. OnUnitActiveSec re-arms after each run so a slow sync never overlaps
-  # itself; OnStartupSec gives one prompt run after login. (No Persistent — it only
-  # applies to OnCalendar timers, not monotonic ones.)
+  # Timer: fire the sync ~every 15min so the store is "realtime enough" (the live tmux
+  # overlay is already render-time live; this keeps momentum/PRs/next-step fresh). The
+  # scan is EXPENSIVE (git-log across all repos + transcript parse + ClickHouse +
+  # `gh pr list` open+merged per repo + a kubectl port-forward), but 4×/hr keeps `gh`
+  # well under the 5000/hr rate limit. OnUnitActiveSec re-arms after each run so a slow
+  # sync never overlaps itself; OnStartupSec gives one prompt run after login. (No
+  # Persistent — it only applies to OnCalendar timers, not monotonic ones.) The ↻ button
+  # in the viewer forces an out-of-band sync on demand (single-flighted + debounced).
   #
   # DOUBLE-GATED: serverMode (workbench-only, LAN access) AND enableInitiativesSync
   # (the OFF-by-default master switch in the let-block above). With the switch false
@@ -799,7 +801,7 @@ in
     };
     Timer = {
       OnStartupSec = "2min";
-      OnUnitActiveSec = "1h";
+      OnUnitActiveSec = "15min";
     };
     Install = {
       WantedBy = [ "timers.target" ];
@@ -820,17 +822,23 @@ in
   # kube-apiserver/NodePorts and is not assignable here) — internal work data, deliberately
   # NOT wired into the public homelab gateway. Public exposure would be a later, explicit choice.
   #
-  # UNLIKE the sync it needs NO ClickHouse/sops creds (it only READS the already-synced
-  # store — no telemetry query), so it's enabled directly under serverMode with no
-  # off-by-default master switch: it's read-only and low-risk. Crash-loop safety is in
-  # the CODE, not the unit — every store read is per-request and a DB outage renders an
-  # error page while the process keeps serving, so Restart=on-failure only ever fires on
-  # a genuine process crash (e.g. the port already bound), backed off by RestartSec.
+  # For READS it needs NO ClickHouse/sops creds (it only reads the already-synced store).
+  # BUT the ↻ refresh button shells out to run-sync.sh (POST /refresh → a subprocess),
+  # which re-runs the FULL sync — so the viewer unit's PATH now also carries `sops` (the
+  # run-time ClickHouse reader-cred decrypt → telemetry-on) and `gh` (the scan's PR reads);
+  # KUBECONFIG + NIX_PATH are already set. Without sops/gh a refresh still works but the
+  # produced snapshot degrades to telemetry-off / no-PR (best-effort, never fails).
+  # It's enabled directly under serverMode with no off-by-default master switch: reads are
+  # low-risk and the refresh is single-flighted + debounced (~60s) in the code. Crash-loop
+  # safety is in the CODE, not the unit — every store read is per-request and a DB outage
+  # renders an error page while the process keeps serving, so Restart=on-failure only ever
+  # fires on a genuine process crash (e.g. the port already bound), backed off by RestartSec.
   #
   # Minimal user-unit env, so PATH is explicit: nix (nix-shell) + kubectl (the
-  # port-forward) + git (the scan's repo/worktree discovery for the overlay) + tmux (the
-  # live pane read) + bash/coreutils, and NIX_PATH so `nix-shell -p` resolves <nixpkgs>.
-  # The wrapper's nix-shell adds psycopg2 (the DB read) + requests (the scan import).
+  # port-forward) + git (repo/worktree discovery + the sops-decrypt's git show) + tmux (the
+  # live pane read) + sops + gh (the refresh subprocess's sync) + bash/coreutils/sed/grep,
+  # and NIX_PATH so `nix-shell -p` resolves <nixpkgs>. The wrapper's nix-shell adds
+  # psycopg2 (the DB read) + requests (the scan import).
   systemd.user.services.initiatives-viewer = lib.mkIf serverMode {
     Unit = {
       Description = "Initiatives live web viewer — initiatives.latest + live tmux overlay";
@@ -841,9 +849,10 @@ in
     Service = {
       Type = "simple";
       Environment = [
-        "PATH=${lib.makeBinPath [ pkgs.nix pkgs.kubectl pkgs.git pkgs.tmux pkgs.bash pkgs.coreutils pkgs.gnused pkgs.gnugrep ]}"
+        "PATH=${lib.makeBinPath [ pkgs.nix pkgs.kubectl pkgs.git pkgs.tmux pkgs.sops pkgs.gh pkgs.bash pkgs.coreutils pkgs.gnused pkgs.gnugrep ]}"
         "NIX_PATH=nixpkgs=/nix/var/nix/profiles/per-user/root/channels/nixos"
         "KUBECONFIG=%h/workspace/homelab-talos/homelab-kubeconfig"
+        "ACTIVITY_HOST=workbench"
         "INITIATIVES_VIEWER_HOST=192.168.50.250"
         "INITIATIVES_VIEWER_PORT=8899"
         "HOME=%h"
