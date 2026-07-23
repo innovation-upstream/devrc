@@ -39,7 +39,7 @@ def _raw_with_pdf(from_addr, subject, filename):
 class FakeMailDB:
     """Mirrors _db.MailDB's run surface, in memory; rows may carry a `raw` value."""
 
-    def __init__(self, rows):
+    def __init__(self, rows, initiatives=None):
         self._mail = {}
         for r in rows:
             r = dict(r)
@@ -49,6 +49,11 @@ class FakeMailDB:
             self._mail[r["id"]] = r
         self.actions = {}
         self.commits = 0
+        # Surface-only initiative router: the once-per-run current-initiatives set.
+        self._initiatives = list(initiatives or [])
+
+    def fetch_current_initiatives(self):
+        return list(self._initiatives)
 
     def __enter__(self):
         return self
@@ -285,3 +290,119 @@ def test_summary_reports_invoice_and_superseded_counters(monkeypatch, capsys):
     assert summary["superseded"] == 1
     assert summary["action_required"] == 1   # the thread's newest (T1)
     assert summary["survivors"] == 3
+
+
+# --------------------------------------------------------------------------- #
+# Surface-only initiative routing (Phase 2) — cmd_run integration.
+# --------------------------------------------------------------------------- #
+# The current-initiatives fixture set (only slug/repo/title are read by the router).
+_INITIATIVES = [
+    {"slug": "clawgate-chat-polish", "repo": "/repo/devrc",
+     "title": "Clawgate chat polish"},
+    {"slug": "activity-telemetry", "repo": "/repo/devrc",
+     "title": "Activity telemetry pipeline"},
+]
+
+
+def test_confident_match_tags_action_and_counts_routed(monkeypatch, capsys):
+    # Subject shares clawgate/chat/polish with the slug → a confident router match.
+    rows = [
+        {"id": 30, "message_id": "<cg@x>", "from_addr": "sender@example.com",
+         "subject": "Re: clawgate chat polish feedback", "received_at": 100,
+         "category": "personal", "headers": {}, "text_body": "thoughts?"},
+    ]
+    db = FakeMailDB(rows, initiatives=_INITIATIVES)
+    _run(monkeypatch, db, CountingLLM(action_required=True))
+
+    # The inserted action carries the routed slug (surface-only tag).
+    assert db.actions[30]["related_initiative"] == "clawgate-chat-polish"
+
+
+def test_confident_match_reports_routed_in_summary(monkeypatch, capsys):
+    rows = [
+        {"id": 31, "message_id": "<cg2@x>", "from_addr": "sender@example.com",
+         "subject": "clawgate chat polish", "received_at": 100,
+         "category": "personal", "headers": {}, "text_body": "x"},
+    ]
+    db = FakeMailDB(rows, initiatives=_INITIATIVES)
+    import json as _json
+    import _db
+    monkeypatch.setattr(_db, "MailDB", lambda *a, **k: db)
+    monkeypatch.setattr(llm, "extract", CountingLLM(action_required=True))
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    args = types.SimpleNamespace(dry_run=False, limit=150, model=None,
+                                 emit_clawgate=False, json=True)
+    extract.cmd_run(args)
+    summary = _json.loads(capsys.readouterr().out)
+    assert summary["routed"] == 1
+    assert summary["action_required"] == 1
+
+
+def test_non_confident_subject_leaves_action_untagged(monkeypatch, capsys):
+    # No meaningful token overlap with any initiative → no tag, routed stays 0.
+    rows = [
+        {"id": 32, "message_id": "<nc@x>", "from_addr": "sender@example.com",
+         "subject": "Your parcel has shipped", "received_at": 100,
+         "category": "personal", "headers": {}, "text_body": "tracking"},
+    ]
+    db = FakeMailDB(rows, initiatives=_INITIATIVES)
+    _run(monkeypatch, db, CountingLLM(action_required=True))
+    assert db.actions[32]["related_initiative"] is None
+
+
+def test_empty_initiative_store_leaves_action_untagged(monkeypatch, capsys):
+    # Phase-1 sync not deployed → fetch_current_initiatives() returns [] → no tag,
+    # and the extraction proceeds exactly as before.
+    rows = [
+        {"id": 33, "message_id": "<es@x>", "from_addr": "sender@example.com",
+         "subject": "clawgate chat polish", "received_at": 100,
+         "category": "personal", "headers": {}, "text_body": "x"},
+    ]
+    db = FakeMailDB(rows, initiatives=[])
+    _run(monkeypatch, db, CountingLLM(action_required=True))
+    assert db.actions[33]["related_initiative"] is None
+    assert db._mail[33]["labels"] == ["action-required"]
+
+
+def test_router_exception_is_swallowed_extraction_continues(monkeypatch, capsys):
+    # A hard failure inside the router (e.g. the scan matcher blowing up) must NEVER
+    # break extraction — the action is still inserted, untagged.
+    rows = [
+        {"id": 34, "message_id": "<ex@x>", "from_addr": "sender@example.com",
+         "subject": "clawgate chat polish", "received_at": 100,
+         "category": "personal", "headers": {}, "text_body": "x"},
+    ]
+    db = FakeMailDB(rows, initiatives=_INITIATIVES)
+
+    def _boom():
+        raise RuntimeError("router import exploded")
+
+    monkeypatch.setattr(extract, "_route", _boom)
+    _run(monkeypatch, db, CountingLLM(action_required=True))
+
+    # Extraction completed: action inserted + labelled, just with NO tag.
+    assert set(db.actions) == {34}
+    assert db.actions[34]["related_initiative"] is None
+    assert db._mail[34]["labels"] == ["action-required"]
+    # The failure was reported to stderr, not raised.
+    assert "initiative routing failed" in capsys.readouterr().err
+
+
+def test_store_read_failure_is_swallowed(monkeypatch, capsys):
+    # fetch_current_initiatives() itself raising must degrade to no-tag, not crash.
+    rows = [
+        {"id": 35, "message_id": "<sr@x>", "from_addr": "sender@example.com",
+         "subject": "clawgate chat polish", "received_at": 100,
+         "category": "personal", "headers": {}, "text_body": "x"},
+    ]
+    db = FakeMailDB(rows, initiatives=_INITIATIVES)
+
+    def _boom():
+        raise RuntimeError("store read exploded")
+
+    monkeypatch.setattr(db, "fetch_current_initiatives", _boom)
+    _run(monkeypatch, db, CountingLLM(action_required=True))
+
+    assert db.actions[35]["related_initiative"] is None
+    assert db._mail[35]["labels"] == ["action-required"]
+    assert "initiative store read failed" in capsys.readouterr().err

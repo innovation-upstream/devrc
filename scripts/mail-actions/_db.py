@@ -158,6 +158,7 @@ class MailDB:
                     reason      text,
                     status      text DEFAULT 'open',
                     thread_key  text,
+                    related_initiative text,
                     created_at  timestamptz DEFAULT now()
                 )
                 """
@@ -168,6 +169,15 @@ class MailDB:
             cur.execute(
                 "ALTER TABLE mail_actions "
                 "ADD COLUMN IF NOT EXISTS thread_key text"
+            )
+            # Idempotent migration for the surface-only initiative router tag
+            # (Phase-2 wiring). Additive + nullable: legacy rows, and any action with
+            # no confident routed initiative, keep this NULL. Nothing keys off it — it
+            # is pure display metadata (the queue's "relates to: <slug>" line), so a
+            # router/DB failure never affects extraction or the existing columns.
+            cur.execute(
+                "ALTER TABLE mail_actions "
+                "ADD COLUMN IF NOT EXISTS related_initiative text"
             )
         self._c.commit()
 
@@ -247,10 +257,29 @@ class MailDB:
         with self._c.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(
                 "SELECT id, mail_id, from_addr, subject, received_at, who, ask, "
-                "deadline, amount, confidence, status, created_at "
+                "deadline, amount, confidence, status, related_initiative, created_at "
                 "FROM mail_actions WHERE status = 'open' ORDER BY created_at DESC"
             )
             return cur.fetchall()
+
+    def fetch_current_initiatives(self):
+        """Best-effort read of `initiatives.current` (Phase-1 store) → list of
+        {slug, repo, title} for the surface-only mail→initiative router.
+
+        Reuses THIS already-open mailbox connection instead of `route.load_current()`
+        opening a SECOND kubectl port-forward to the same DB. Strictly best-effort:
+        if the `initiatives` schema/view is absent (the sync isn't deployed on this
+        host), returns [] via a `to_regclass` guard — routing is display-only and must
+        never break extraction. Any harder failure propagates to the caller's
+        try/except, which also degrades to no-tag."""
+        with self._c.cursor() as cur:
+            cur.execute("SELECT to_regclass('initiatives.current')")
+            reg = cur.fetchone()
+            if reg is None or reg[0] is None:
+                return []
+        with self._c.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("SELECT slug, repo, title FROM initiatives.current")
+            return [dict(r) for r in cur.fetchall()]
 
     # -- writes ------------------------------------------------------------
     def mark_processed(self, mail_id: int, label: str) -> None:
@@ -294,16 +323,19 @@ class MailDB:
         working; cmd_run always supplies it now."""
         params = dict(row)
         params.setdefault("thread_key", None)
+        params.setdefault("related_initiative", None)
         with self._c.cursor() as cur:
             cur.execute(
                 """
                 INSERT INTO mail_actions
                     (mail_id, message_id, from_addr, subject, received_at,
-                     who, ask, deadline, amount, confidence, reason, thread_key)
+                     who, ask, deadline, amount, confidence, reason, thread_key,
+                     related_initiative)
                 VALUES
                     (%(mail_id)s, %(message_id)s, %(from_addr)s, %(subject)s,
                      %(received_at)s, %(who)s, %(ask)s, %(deadline)s, %(amount)s,
-                     %(confidence)s, %(reason)s, %(thread_key)s)
+                     %(confidence)s, %(reason)s, %(thread_key)s,
+                     %(related_initiative)s)
                 ON CONFLICT (mail_id) DO NOTHING
                 """,
                 params,

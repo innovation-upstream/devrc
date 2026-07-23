@@ -39,6 +39,7 @@ Env: OPENROUTER_API_KEY (Stage 2), KUBECONFIG (DB), CLAWGATE_HOOK_TOKEN (optiona
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import os
 import sys
@@ -55,9 +56,59 @@ DEFAULT_LIMIT = 150
 EST_USD_PER_1K_TOKENS = 0.0002
 EST_TOKENS_PER_MAIL = 1500  # system+subject+truncated body+output, order of magnitude
 
+# The initiatives router (Phase 2). Loaded by EXPLICIT importlib path — NOT by
+# adding scripts/initiatives/ to sys.path: mail-actions' own `llm.py` shadows other
+# modules, so putting sibling dirs on the path is a known trap (see repo CLAUDE.md /
+# repo-cos). route.py imports only stdlib at module scope, so a standalone load is
+# safe; its scan matcher is imported lazily inside rank_matches.
+ROUTE_PATH = Path(__file__).resolve().parents[1] / "initiatives" / "route.py"
+_route_mod = None
+
 
 def _est_cost(n: int) -> float:
     return n * EST_TOKENS_PER_MAIL / 1000.0 * EST_USD_PER_1K_TOKENS
+
+
+def _route():
+    """Load scripts/initiatives/route.py by explicit path and cache it.
+
+    Lazy so merely importing `extract` costs nothing; the module only materialises
+    the first time a run actually routes. Raises on a genuinely broken load — the
+    caller wraps this in try/except so a failure degrades to no tag, never a crash."""
+    global _route_mod
+    if _route_mod is None:
+        spec = importlib.util.spec_from_file_location("mail_actions_route", ROUTE_PATH)
+        if spec is None or spec.loader is None:
+            raise ImportError(f"cannot load {ROUTE_PATH}")
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        _route_mod = mod
+    return _route_mod
+
+
+def related_initiative_slug(subject, initiatives, repo=None):
+    """Surface-only: the slug of the initiative this mail action relates to, or None.
+
+    PURE-ish + strictly best-effort. Ranks the mail `subject` against the once-loaded
+    `initiatives.current` set via the shared router and returns `ranked[0]['slug']`
+    ONLY when that top row is `confident` — the router's own qualification bar. A
+    non-confident top row, an empty store, an empty subject, or ANY exception in the
+    routing path all yield None so the action is queued untagged and extraction
+    proceeds exactly as before. This never acts — it only labels.
+
+    `initiatives` is the list from `MailDB.fetch_current_initiatives()`; pass it in
+    (loaded ONCE per run) rather than reading the store per action."""
+    if not subject or not initiatives:
+        return None
+    try:
+        route = _route()
+        ranked = route.rank_matches(subject, initiatives, repo=repo, limit=1)
+        if ranked and ranked[0].get("confident"):
+            return ranked[0].get("slug")
+    except Exception as exc:  # noqa: BLE001 — routing is display-only, never fatal
+        print(f"  ! initiative routing failed (subject={subject!r}): {exc}",
+              file=sys.stderr)
+    return None
 
 
 def _partition(rows):
@@ -216,6 +267,16 @@ def cmd_run(args) -> int:
                   "Use --dry-run for the filter-only pass.", file=sys.stderr)
             return 2
 
+        # Surface-only initiative routing (Phase 2): load the current-initiatives set
+        # ONCE per run (reusing the open connection — no 2nd port-forward), then tag
+        # each new action with its confident match in memory. Best-effort: any failure
+        # here leaves `initiatives` empty and every action goes out untagged.
+        try:
+            initiatives = db.fetch_current_initiatives()
+        except Exception as exc:  # noqa: BLE001 — routing is display-only, never fatal
+            print(f"  ! initiative store read failed: {exc}", file=sys.stderr)
+            initiatives = []
+
         actions = 0
         fyis = 0
         invoices = 0
@@ -223,6 +284,7 @@ def cmd_run(args) -> int:
         sent = 0
         errors = 0
         emitted = 0
+        routed = 0
         seen_threads: set[str] = set()
         # Survivors arrive most-recent-first (fetch_unprocessed ORDER BY received_at
         # DESC), so the FIRST survivor seen for a thread is the latest message — the
@@ -269,6 +331,11 @@ def cmd_run(args) -> int:
                 continue
 
             if ex.action_required:
+                # Surface-only: which existing initiative (if any) this thread relates
+                # to. Best-effort, in memory against the once-loaded set; None → no tag.
+                related = related_initiative_slug(r.get("subject"), initiatives)
+                if related:
+                    routed += 1
                 # Feature 1: a NEWER message's action retires the older OPEN action for
                 # this thread (cross-run, persisted). Guarded by received_at so an older
                 # message can't supersede a newer open action.
@@ -283,12 +350,13 @@ def cmd_run(args) -> int:
                     "subject": r.get("subject"),
                     "received_at": r.get("received_at"),
                     "thread_key": tkey or None,
+                    "related_initiative": related,
                     **ex.as_row(),
                 })
                 db.mark_processed(r["id"], "action-required")
                 actions += 1
                 if inserted and args.emit_clawgate:
-                    emitted += _emit_clawgate(r, ex)
+                    emitted += _emit_clawgate(r, ex, related)
             else:
                 db.mark_processed(r["id"], "fyi")
                 fyis += 1
@@ -306,6 +374,7 @@ def cmd_run(args) -> int:
             "superseded": superseded,
             "sent": sent,
             "closed": closed,
+            "routed": routed,
             "extract_errors": errors,
             "clawgate_emitted": emitted,
             "est_llm_cost_usd": round(_est_cost(len(survivors)), 4),
@@ -317,12 +386,16 @@ def cmd_run(args) -> int:
         return 0
 
 
-def _emit_clawgate(r, ex) -> int:
+def _emit_clawgate(r, ex, related=None) -> int:
     try:
         from clawgate import emit_task
+        source_ref = f"mail#{r['id']} {r.get('from_addr')}"
+        if related:
+            # Surface-only: show the related initiative on the clawgate card too.
+            source_ref += f" · relates to: {related}"
         ok = emit_task(
             who=ex.who, ask=ex.ask, deadline=ex.deadline, amount=ex.amount,
-            source_ref=f"mail#{r['id']} {r.get('from_addr')}",
+            source_ref=source_ref,
         )
         return 1 if ok else 0
     except Exception as exc:  # noqa: BLE001
@@ -496,6 +569,8 @@ def cmd_list(args) -> int:
             meta.append(f"deadline={r['deadline']}")
         if r.get("amount"):
             meta.append(f"amount={r['amount']}")
+        if r.get("related_initiative"):
+            meta.append(f"relates to: {r['related_initiative']}")
         meta.append(f"from={r['from_addr']}")
         meta.append(f"mail#{r['mail_id']}")
         print(f"        {'  '.join(meta)}")
@@ -525,6 +600,8 @@ def _print_run(s) -> None:
     print(f"  superseded:       {s.get('superseded', 0)}")
     print(f"  sent (owner):     {s.get('sent', 0)}")
     print(f"  closed (owner):   {s.get('closed', 0)}")
+    if s.get("routed"):
+        print(f"  routed (init.):   {s['routed']}")
     if s["extract_errors"]:
         print(f"  extract errors:   {s['extract_errors']}")
     if s.get("clawgate_emitted"):

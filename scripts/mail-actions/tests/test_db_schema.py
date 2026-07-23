@@ -28,7 +28,13 @@ class FakeCursor:
         self._conn.executed.append((" ".join(sql.split()), params))
         # let a test preload a rowcount/result for the next fetch
         self.rowcount = self._conn.next_rowcount
-        self._result = self._conn.next_result
+        # A multi-query method (e.g. fetch_current_initiatives issues a to_regclass
+        # guard THEN a SELECT) can preload a per-execute result queue; otherwise every
+        # execute sees the single `next_result`.
+        if self._conn.result_queue:
+            self._result = self._conn.result_queue.pop(0)
+        else:
+            self._result = self._conn.next_result
 
     def fetchall(self):
         return self._result
@@ -43,6 +49,7 @@ class FakeConn:
         self.commits = 0
         self.next_rowcount = 0
         self.next_result = []
+        self.result_queue = []
 
     def cursor(self, cursor_factory=None):
         return FakeCursor(self)
@@ -71,6 +78,10 @@ def test_ensure_schema_issues_add_column_migration():
     # ... AND the idempotent migration for the pre-existing live table is issued.
     assert any("ALTER TABLE mail_actions ADD COLUMN IF NOT EXISTS thread_key text" in s
                for s in sqls)
+    # ... AND the additive surface-only initiative-router column migration.
+    assert any(
+        "ALTER TABLE mail_actions ADD COLUMN IF NOT EXISTS related_initiative text" in s
+        for s in sqls)
     assert conn.commits == 1
 
 
@@ -89,7 +100,23 @@ def test_insert_action_includes_thread_key_column_and_param():
     assert params["thread_key"] == "tk1"
 
 
-def test_insert_action_defaults_thread_key_null_when_absent():
+def test_insert_action_includes_related_initiative_column_and_param():
+    db, conn = _db_with_conn()
+    conn.next_rowcount = 1
+    ok = db.insert_action({
+        "mail_id": 3, "message_id": "<m>", "from_addr": "a@b.com", "subject": "s",
+        "received_at": 100, "who": "w", "ask": "a", "deadline": None, "amount": None,
+        "confidence": 0.9, "reason": "r", "thread_key": "tk1",
+        "related_initiative": "clawgate-chat-polish",
+    })
+    assert ok is True
+    sql, params = conn.executed[-1]
+    assert "related_initiative" in sql
+    assert "%(related_initiative)s" in sql
+    assert params["related_initiative"] == "clawgate-chat-polish"
+
+
+def test_insert_action_defaults_thread_key_and_related_null_when_absent():
     db, conn = _db_with_conn()
     conn.next_rowcount = 1
     db.insert_action({
@@ -99,6 +126,28 @@ def test_insert_action_defaults_thread_key_null_when_absent():
     })
     _sql, params = conn.executed[-1]
     assert params["thread_key"] is None
+    assert params["related_initiative"] is None
+
+
+def test_fetch_current_initiatives_absent_view_returns_empty():
+    db, conn = _db_with_conn()
+    # to_regclass('initiatives.current') → NULL when the Phase-1 sync isn't deployed.
+    conn.next_result = [(None,)]
+    assert db.fetch_current_initiatives() == []
+    sql, _ = conn.executed[-1]
+    assert "to_regclass('initiatives.current')" in sql
+
+
+def test_fetch_current_initiatives_reads_view_when_present():
+    db, conn = _db_with_conn()
+    # Execute #1 (to_regclass) → a non-NULL regclass tuple; execute #2 (SELECT) → rows.
+    row = {"slug": "clawgate-chat-polish", "repo": "/r/devrc",
+           "title": "Clawgate chat polish"}
+    conn.result_queue = [[("initiatives.current",)], [row]]
+    rows = db.fetch_current_initiatives()
+    assert rows == [row]
+    sql, _ = conn.executed[-1]
+    assert "SELECT slug, repo, title FROM initiatives.current" in sql
 
 
 def test_supersede_open_actions_sql_has_timestamp_guard():
