@@ -117,6 +117,22 @@ ANY_H2_RE = re.compile(r"^##\s+")
 LIST_ITEM_RE = re.compile(r"^\s*(?:\d+[.)]|[-*])\s+(.*\S)\s*$")
 H3_RE = re.compile(r"^###\s+(.*\S)\s*$")
 
+# Explicit "what this is" markers for parse_summary. Inline form
+# ("**Goal:** …", "Objective: …", "- **Summary:** …") captures the trailing text;
+# the section-heading form ("## Goal", "## Status") points at the paragraph beneath.
+# Optional list marker + optional bold/italic wrappers around the keyword and value.
+SUMMARY_INLINE_RE = re.compile(
+    r"^\s*(?:[-*+]\s+)?[*_]{0,3}\s*(?:goal|objective|summary|status|tl;?dr)"
+    r"\s*[*_]{0,3}\s*:\s*[*_]{0,3}\s*(.*)$",
+    re.I,
+)
+SUMMARY_HEADING_RE = re.compile(
+    r"^#{1,6}\s+(?:goal|objective|summary|status|tl;?dr)\b", re.I)
+# A markdown horizontal rule / thematic break (---, ***, ___).
+HRULE_RE = re.compile(r"^\s*([-*_])(?:\s*\1){2,}\s*$")
+# Cap on the extracted summary length (chars), so a card stays legible.
+SUMMARY_MAX = 200
+
 
 # --------------------------------------------------------------------------- #
 # Pure logic (unit-tested without live infra)
@@ -210,6 +226,107 @@ def _flatten_md(s: str) -> str:
     s = re.sub(r"`(.+?)`", r"\1", s)
     s = re.sub(r"(?<!\*)\*(?!\*)(.+?)\*", r"\1", s)
     return " ".join(s.split())
+
+
+def parse_all_next_steps(text: str) -> list[str]:
+    """EVERY ranked item under the `## Next steps` section (not just the first).
+
+    Companion to `parse_next_step` (which returns only the lead item) — the live
+    viewer's expanded card wants the full list. Same template rules: collect every
+    list item (`1.` / `-` / `*`) until the next H2, leading marker stripped and inline
+    markdown flattened. Empty list if there's no Next-steps section or no items.
+    """
+    lines = text.splitlines()
+    in_section = False
+    out: list[str] = []
+    for line in lines:
+        if NEXT_STEPS_RE.match(line):
+            in_section = True
+            continue
+        if in_section:
+            if ANY_H2_RE.match(line):
+                break
+            m = LIST_ITEM_RE.match(line)
+            if m:
+                out.append(_flatten_md(m.group(1)))
+    return out
+
+
+def _cap_summary(s: str) -> str | None:
+    """Trim + collapse; cap at SUMMARY_MAX chars on a word boundary (adds '…'). None if blank."""
+    s = s.strip()
+    if not s:
+        return None
+    if len(s) <= SUMMARY_MAX:
+        return s
+    cut = s[:SUMMARY_MAX].rstrip()
+    sp = cut.rfind(" ")
+    if sp >= int(SUMMARY_MAX * 0.6):
+        cut = cut[:sp].rstrip()
+    return cut + "…"
+
+
+def _strip_list_marker(s: str) -> str:
+    m = LIST_ITEM_RE.match(s)
+    return m.group(1) if m else s
+
+
+def _first_prose_paragraph(lines: list[str], start: int) -> str | None:
+    """First prose block at/after `start`: skip blanks/headings/rules (and a leading
+    list block), then join consecutive non-blank prose lines until a blank/heading/rule.
+    A leading list marker on the block's first line is stripped. None if no prose."""
+    i, n = start, len(lines)
+    while i < n:
+        s = lines[i].strip()
+        if s and not s.startswith("#") and not HRULE_RE.match(lines[i]):
+            break
+        i += 1
+    if i >= n:
+        return None
+    buf: list[str] = []
+    while i < n:
+        s = lines[i].strip()
+        if not s or s.startswith("#") or HRULE_RE.match(lines[i]):
+            break
+        buf.append(_strip_list_marker(s) if not buf else s)
+        i += 1
+    return " ".join(buf) if buf else None
+
+
+def parse_summary(text: str) -> str | None:
+    """A deterministic 1-2 line "what this is" for a handoff (NO LLM).
+
+    Preference order:
+      1. An explicit inline marker — `**Goal:** …`, `Objective: …`, `Summary: …`,
+         `Status: …`, `TL;DR: …` (optionally a list item / bold) — takes its trailing
+         text; if the marker line has no trailing text (e.g. `**Goal:**` alone) or is a
+         `## Goal` / `## Status` section heading, takes the first prose paragraph beneath.
+      2. Fallback: the first non-heading, non-blank prose paragraph after the leading
+         `# ` title (or the top of the doc if there's no title).
+    Markdown is flattened, whitespace collapsed, and the result capped at ~200 chars.
+    None only when the doc has no prose at all.
+    """
+    lines = text.splitlines()
+    for i, line in enumerate(lines):
+        m = SUMMARY_INLINE_RE.match(line)
+        if m:
+            val = m.group(1).strip()
+            if val:
+                return _cap_summary(_flatten_md(val))
+            para = _first_prose_paragraph(lines, i + 1)
+            if para:
+                return _cap_summary(_flatten_md(para))
+        elif SUMMARY_HEADING_RE.match(line):
+            para = _first_prose_paragraph(lines, i + 1)
+            if para:
+                return _cap_summary(_flatten_md(para))
+    start = 0
+    for i, line in enumerate(lines):
+        if line.startswith("# "):
+            start = i + 1
+            break
+    para = _first_prose_paragraph(lines, start)
+    return _cap_summary(_flatten_md(para)) if para else None
 
 
 # Ultra-common tokens that would over-match if used as an initiative fingerprint.
@@ -448,6 +565,7 @@ def cluster_handoffs(docs: list[dict]) -> list[dict]:
             "repo": repo,
             "slug": slug,
             "title": cur["title"],
+            "summary": cur["summary"],
             "date": cur["date"],
             "doc_mtime": cur["mtime"],
             "next_step": cur["next_step"],
@@ -628,6 +746,7 @@ def read_handoff(path: str) -> dict:
         "date": date,
         "mtime": _safe_mtime(path),
         "title": parse_handoff_title(text) or slug,
+        "summary": parse_summary(text),
         "next_step": parse_next_step(text),
         "open_investigations": parse_open_investigations(text),
     }
@@ -1446,6 +1565,8 @@ def render(report: dict, now: float | None = None) -> str:
             out.append(head)
             if ini.get("title") and ini["title"] != ini["slug"]:
                 out.append(f"        “{ini['title']}”")
+            if ini.get("summary"):
+                out.append(f"        » {ini['summary'][:160]}")
             for pr in ini.get("open_prs", []):
                 out.append(f"        OPEN PR #{pr['number']}: {pr['title'][:80]}")
             ns = ini.get("next_step")

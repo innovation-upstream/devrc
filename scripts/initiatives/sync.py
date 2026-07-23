@@ -80,6 +80,7 @@ CREATE TABLE IF NOT EXISTS initiatives.initiative_snapshot (
     repo                 text,
     slug                 text,
     title                text,
+    summary              text,
     doc_date             date,
     momentum             text,
     last_touch           timestamptz,
@@ -96,6 +97,12 @@ CREATE TABLE IF NOT EXISTS initiatives.initiative_snapshot (
     docs                 jsonb
 );
 
+-- Additive migration for pre-existing installs: CREATE TABLE IF NOT EXISTS won't add
+-- a column to a table that already exists, so bring `summary` (nullable, deterministic
+-- goal/what-this-is line) in explicitly. Idempotent — a no-op once the column exists.
+ALTER TABLE initiatives.initiative_snapshot
+    ADD COLUMN IF NOT EXISTS summary text;
+
 -- Support the `current` view's DISTINCT ON (repo, slug) … JOIN snapshots …
 -- ORDER BY repo, slug, captured_at DESC, plus the FK join / retention scans.
 CREATE INDEX IF NOT EXISTS initiative_snapshot_repo_slug_snap_idx
@@ -106,19 +113,23 @@ CREATE INDEX IF NOT EXISTS snapshots_captured_at_idx
     ON initiatives.snapshots (captured_at);
 """
 
-# The views are guarded separately (see ensure_schema / _ensure_view): re-running
-# CREATE OR REPLACE VIEW takes an ACCESS EXCLUSIVE lock every time, so we only
-# (re)create a view when it's absent or its version marker differs. Bump the
-# matching *_VERSION whenever its DDL changes so a deploy recreates it.
+# The views are guarded separately (see ensure_schema / _ensure_view): a recreate is
+# DROP VIEW IF EXISTS + CREATE VIEW (NOT CREATE OR REPLACE — it can't reorder columns,
+# which the v2 `summary` append does; see _ensure_view) and takes an ACCESS EXCLUSIVE
+# lock, so we only (re)create a view when it's absent or its version marker differs.
+# Bump the matching *_VERSION whenever its DDL changes so a deploy recreates it.
 #
 # `current` — newest row per (repo, slug) across ALL history. This deliberately
 # includes initiatives that have aged out of the scan's N-day window (until the
 # 90-day retention prunes them): the ROUTER wants to match a signal against
 # recently-dormant work, so ghosts are a feature there.
-VIEW_VERSION = "v1"
+# v2: the base table gained a `summary` column. A view's `SELECT i.*` is expanded to
+# an explicit column list AT CREATE TIME (Postgres freezes it), so the new column does
+# NOT appear until the view is recreated — bump the marker to force that on deploy.
+VIEW_VERSION = "v2"
 VIEW_COMMENT = f"initiatives-sync view {VIEW_VERSION}"
 VIEW_DDL = """
-CREATE OR REPLACE VIEW initiatives.current AS
+CREATE VIEW initiatives.current AS
 SELECT DISTINCT ON (i.repo, i.slug)
        i.*, s.captured_at
   FROM initiatives.initiative_snapshot i
@@ -131,10 +142,11 @@ SELECT DISTINCT ON (i.repo, i.slug)
 # (an initiative that dropped out of the scan's window simply isn't in the newest
 # snapshot, so it disappears here even though `current` still carries it). Carries
 # `captured_at` so the viewer can render an "updated Xm ago" freshness footer.
-LATEST_VIEW_VERSION = "v1"
+# v2: recreate to expose the new `summary` column (see VIEW_VERSION note above).
+LATEST_VIEW_VERSION = "v2"
 LATEST_VIEW_COMMENT = f"initiatives-sync view latest {LATEST_VIEW_VERSION}"
 LATEST_VIEW_DDL = """
-CREATE OR REPLACE VIEW initiatives.latest AS
+CREATE VIEW initiatives.latest AS
 SELECT i.*, s.captured_at
   FROM initiatives.initiative_snapshot i
   JOIN initiatives.snapshots s ON s.id = i.snapshot_id
@@ -151,7 +163,7 @@ RETENTION_DAYS = 90
 
 # Column order for the per-initiative insert (snapshot_id is prepended at write time).
 ROW_COLUMNS = [
-    "host", "repo", "slug", "title", "doc_date", "momentum", "last_touch",
+    "host", "repo", "slug", "title", "summary", "doc_date", "momentum", "last_touch",
     "next_step", "commits", "commits_unknown", "merged_prs", "open_prs",
     "session_count", "telem_events", "telem_last", "current_doc",
     "open_investigations", "docs",
@@ -211,6 +223,7 @@ def _initiative_to_row(ini: dict, host: str) -> dict:
         "repo": ini.get("repo"),
         "slug": ini.get("slug"),
         "title": ini.get("title"),
+        "summary": ini.get("summary"),
         "doc_date": _to_date(ini.get("date")),
         "momentum": ini.get("momentum"),
         "last_touch": _epoch_to_dt(ini.get("last_touch")),
@@ -299,11 +312,20 @@ def _import_maildb():
 def _ensure_view(cur, view: str, ddl: str, comment: str) -> None:
     """(Re)create a guarded view ONLY when it's missing or its version marker differs.
 
-    CREATE OR REPLACE VIEW takes an ACCESS EXCLUSIVE lock every run, so we gate it on
-    a version-marker `COMMENT ON VIEW`: steady state (view present, marker matches)
-    does nothing. `view` is a trusted module constant (never user input) so
-    interpolating it into the introspection SQL is safe. Bump the view's *_VERSION to
-    force a recreate after a hand-edit to its DDL."""
+    Uses DROP VIEW IF EXISTS + CREATE VIEW, NOT CREATE OR REPLACE VIEW: `CREATE OR
+    REPLACE` cannot reorder or rename an existing view's output columns, and the v2
+    schema appends `summary` to `initiative_snapshot`, so `SELECT i.*, s.captured_at`
+    now places `summary` before `captured_at` — Postgres would reject the replace with
+    `cannot change name of view column "captured_at" to "summary"` and, since the whole
+    ensure_schema runs in one advisory-locked transaction, roll the ENTIRE sync back
+    (freezing an existing v1 store). Dropping first sidesteps the column-shape lock.
+    Safe: nothing depends on `latest`/`current` and they don't depend on each other.
+
+    Still gated on a version-marker `COMMENT ON VIEW` so the DROP+CREATE (ACCESS
+    EXCLUSIVE) only runs when the marker actually changes — steady state (view present,
+    marker matches) does nothing. `view` is a trusted module constant (never user input)
+    so interpolating it into the introspection/DROP SQL is safe. Bump the view's
+    *_VERSION to force a recreate after a hand-edit to its DDL."""
     cur.execute(f"SELECT to_regclass('{view}')")
     exists = cur.fetchone()[0] is not None
     need_view = True
@@ -312,6 +334,7 @@ def _ensure_view(cur, view: str, ddl: str, comment: str) -> None:
         row = cur.fetchone()
         need_view = (row[0] if row else None) != comment
     if need_view:
+        cur.execute(f"DROP VIEW IF EXISTS {view}")
         cur.execute(ddl)
         cur.execute(f"COMMENT ON VIEW {view} IS %s", (comment,))
 

@@ -26,8 +26,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # default so the wrapper works when invoked from an interactive shell.
 export KUBECONFIG="${KUBECONFIG:-${HOME}/workspace/homelab-talos/homelab-kubeconfig}"
 
-# Bind address/port — workbench-LAN by default; override to 127.0.0.1 for local-only.
-HOST="${INITIATIVES_VIEWER_HOST:-192.168.50.94}"
+# Bind address/port — the workbench's OWN LAN IP (eth1) by default; override to 127.0.0.1
+# for local-only. NOT 192.168.50.94 — that is a homelab node (kube-apiserver/NodePorts),
+# not assignable here; the systemd unit sets INITIATIVES_VIEWER_HOST=192.168.50.250 too.
+HOST="${INITIATIVES_VIEWER_HOST:-192.168.50.250}"
 PORT="${INITIATIVES_VIEWER_PORT:-8899}"
 
 exec nix-shell -p 'python3.withPackages(p:[p.psycopg2 p.requests])' \

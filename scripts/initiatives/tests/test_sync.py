@@ -25,6 +25,7 @@ def _fixture_initiative(**over):
         "repo": "/home/zach/workspace/devrc",
         "slug": "initiatives-consolidation",
         "title": "Initiatives consolidation Phase 1",
+        "summary": "Consolidate the scan output into a durable Postgres store.",
         "date": "2026-07-13",
         "doc_mtime": 1768300000.0,
         "next_step": "eyeball the dry-run output",
@@ -169,6 +170,22 @@ def test_momentum_and_scalars_pass_through():
     assert r["commits"] == 7 and r["merged_prs"] == 2
     assert r["session_count"] == 3 and r["telem_events"] == 42
     assert r["commits_unknown"] is False
+
+
+def test_summary_passes_through_and_defaults_to_none():
+    _meta, rows = sync.report_to_rows(_fixture_report(), host="workbench")
+    assert rows[0]["summary"] == "Consolidate the scan output into a durable Postgres store."
+    ini = _fixture_initiative()
+    ini.pop("summary", None)
+    _m, rows2 = sync.report_to_rows(_fixture_report(by_repo={"/r": [ini]}), host="workbench")
+    assert rows2[0]["summary"] is None  # nullable column — no default fabricated
+
+
+def test_summary_is_in_row_columns_after_title():
+    # Order-independent for the INSERT (explicit column list), but keep it adjacent to
+    # title for readability, and ensure it IS one of the written columns.
+    assert "summary" in sync.ROW_COLUMNS
+    assert sync.ROW_COLUMNS.index("summary") == sync.ROW_COLUMNS.index("title") + 1
 
 
 def test_commits_unknown_true_passes_through():
@@ -325,6 +342,23 @@ def test_ensure_schema_creates_indexes():
     assert "snapshots_captured_at_idx" in joined
 
 
+def test_ensure_schema_adds_summary_column_additively():
+    # Fresh installs get the column in CREATE TABLE; pre-existing tables get it via an
+    # idempotent ADD COLUMN IF NOT EXISTS (CREATE TABLE IF NOT EXISTS won't add a column).
+    conn = _FakeConn()
+    sync.ensure_schema(conn)
+    joined = " ".join(_sqls(conn))
+    assert "summary text" in joined  # in CREATE TABLE
+    assert "ADD COLUMN IF NOT EXISTS summary text" in joined  # additive migration
+
+
+def test_view_versions_bumped_so_summary_column_is_exposed():
+    # A view's SELECT i.* is frozen at create time; bumping the marker forces a recreate
+    # so the new `summary` column surfaces on initiatives.latest / .current.
+    assert sync.VIEW_VERSION == "v2"
+    assert sync.LATEST_VIEW_VERSION == "v2"
+
+
 def test_ensure_schema_fk_cascades():
     conn = _FakeConn()
     sync.ensure_schema(conn)
@@ -336,24 +370,33 @@ def test_ensure_schema_creates_view_when_absent():
     conn = _FakeConn(view_regclass=None)
     sync.ensure_schema(conn)
     joined = " ".join(_sqls(conn))
-    assert "CREATE OR REPLACE VIEW initiatives.current" in joined
+    assert "CREATE VIEW initiatives.current" in joined
     assert "COMMENT ON VIEW initiatives.current" in joined
 
 
 def test_ensure_schema_skips_view_when_present_and_version_matches():
+    # Marker matches -> NEITHER a DROP nor a CREATE (steady state is a no-op).
     conn = _FakeConn(view_regclass="initiatives.current",
                      view_comment=sync.VIEW_COMMENT)
     sync.ensure_schema(conn)
     joined = " ".join(_sqls(conn))
-    assert "CREATE OR REPLACE VIEW initiatives.current" not in joined
+    assert "CREATE VIEW initiatives.current" not in joined
+    assert "DROP VIEW IF EXISTS initiatives.current" not in joined
 
 
 def test_ensure_schema_recreates_view_when_version_differs():
+    # Marker differs -> DROP VIEW IF EXISTS must come BEFORE the CREATE VIEW (CREATE OR
+    # REPLACE can't reorder columns after the v2 `summary` append, so we drop+create).
     conn = _FakeConn(view_regclass="initiatives.current",
                      view_comment="initiatives-sync view v0")
     sync.ensure_schema(conn)
-    joined = " ".join(_sqls(conn))
-    assert "CREATE OR REPLACE VIEW initiatives.current" in joined
+    sqls = _sqls(conn)
+    joined = " ".join(sqls)
+    assert "CREATE OR REPLACE VIEW" not in joined  # never the shape-locked form
+    assert "CREATE VIEW initiatives.current" in joined
+    drop_i = next(i for i, s in enumerate(sqls) if "DROP VIEW IF EXISTS initiatives.current" in s)
+    create_i = next(i for i, s in enumerate(sqls) if "CREATE VIEW initiatives.current" in s)
+    assert drop_i < create_i
 
 
 # --- the `latest` view (viewer's ghost-free source) ------------------------- #
@@ -361,7 +404,7 @@ def test_ensure_schema_creates_latest_view_when_absent():
     conn = _FakeConn(latest_regclass=None)
     sync.ensure_schema(conn)
     joined = " ".join(_sqls(conn))
-    assert "CREATE OR REPLACE VIEW initiatives.latest" in joined
+    assert "CREATE VIEW initiatives.latest" in joined
     assert "COMMENT ON VIEW initiatives.latest" in joined
     # rows from the most recent snapshot only (the ghost-free semantic)
     assert "WHERE i.snapshot_id = (SELECT max(id) FROM initiatives.snapshots)" in joined
@@ -372,15 +415,19 @@ def test_ensure_schema_skips_latest_view_when_present_and_version_matches():
                      latest_comment=sync.LATEST_VIEW_COMMENT)
     sync.ensure_schema(conn)
     joined = " ".join(_sqls(conn))
-    assert "CREATE OR REPLACE VIEW initiatives.latest" not in joined
+    assert "CREATE VIEW initiatives.latest" not in joined
+    assert "DROP VIEW IF EXISTS initiatives.latest" not in joined
 
 
 def test_ensure_schema_recreates_latest_view_when_version_differs():
     conn = _FakeConn(latest_regclass="initiatives.latest",
                      latest_comment="initiatives-sync view latest v0")
     sync.ensure_schema(conn)
-    joined = " ".join(_sqls(conn))
-    assert "CREATE OR REPLACE VIEW initiatives.latest" in joined
+    sqls = _sqls(conn)
+    assert "CREATE OR REPLACE VIEW" not in " ".join(sqls)
+    drop_i = next(i for i, s in enumerate(sqls) if "DROP VIEW IF EXISTS initiatives.latest" in s)
+    create_i = next(i for i, s in enumerate(sqls) if "CREATE VIEW initiatives.latest" in s)
+    assert drop_i < create_i
 
 
 def test_ensure_schema_manages_both_views_independently():
@@ -390,8 +437,9 @@ def test_ensure_schema_manages_both_views_independently():
                      latest_regclass=None)
     sync.ensure_schema(conn)
     joined = " ".join(_sqls(conn))
-    assert "CREATE OR REPLACE VIEW initiatives.current" not in joined
-    assert "CREATE OR REPLACE VIEW initiatives.latest" in joined
+    assert "CREATE VIEW initiatives.current" not in joined
+    assert "DROP VIEW IF EXISTS initiatives.current" not in joined
+    assert "CREATE VIEW initiatives.latest" in joined
     assert conn.commits == 1  # still one commit for the whole schema pass
 
 
@@ -424,3 +472,8 @@ def test_write_snapshot_inserts_snapshot_then_rows_with_jsonb():
     jsonb_count = sum(1 for p in row_params if isinstance(p, Json))
     assert jsonb_count == 3
     assert conn.commits == 1
+    # the summary column is in the INSERT list, and its value lands at the matching index
+    assert "summary" in row_sql
+    # row_params = [snapshot_id] + ROW_COLUMNS values, so summary is at its ROW_COLUMNS idx + 1
+    summary_idx = sync.ROW_COLUMNS.index("summary") + 1
+    assert row_params[summary_idx] == "Consolidate the scan output into a durable Postgres store."

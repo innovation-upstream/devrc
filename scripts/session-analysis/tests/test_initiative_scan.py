@@ -104,6 +104,70 @@ def test_next_step_section_ends_at_next_h2():
     assert isc.parse_next_step(doc) is None
 
 
+def test_all_next_steps_returns_every_item_flattened():
+    steps = isc.parse_all_next_steps(NEXT_DOC)
+    assert steps == ["Ship the extractor on the live mail table — highest leverage.",
+                     "Lower: rotate the OpenRouter key."]
+
+
+def test_all_next_steps_stops_at_next_h2_and_empty_without_section():
+    doc = "## Next steps\n- a\n- b\n\n## Gotchas\n- not counted\n"
+    assert isc.parse_all_next_steps(doc) == ["a", "b"]
+    assert isc.parse_all_next_steps("## Goal\nx\n") == []
+
+
+# --------------------------------------------------------------------------- #
+# Summary / goal extraction (parse_summary)
+# --------------------------------------------------------------------------- #
+def test_summary_inline_bold_goal_marker():
+    doc = ("# Handoff — X, 2026-07-22\n\n"
+           "**Goal:** consolidate the scan output into a durable store.\n\n"
+           "## Status\nsomething else\n")
+    assert isc.parse_summary(doc) == "consolidate the scan output into a durable store."
+
+
+def test_summary_plain_objective_marker_flattens_markdown():
+    assert isc.parse_summary("Objective: build **the** thing `fast`\n") == "build the thing fast"
+
+
+def test_summary_status_heading_takes_paragraph_beneath():
+    doc = "# T\n\n## Status\n\nWe are mid-flight on the migration.\n\n## Next steps\n1. x\n"
+    assert isc.parse_summary(doc) == "We are mid-flight on the migration."
+
+
+def test_summary_empty_marker_falls_to_paragraph_beneath():
+    doc = "# T\n\n**Goal:**\n\nDeferred goal paragraph here.\n"
+    assert isc.parse_summary(doc) == "Deferred goal paragraph here."
+
+
+def test_summary_first_paragraph_fallback_when_no_marker():
+    doc = "# Title only heading\n\nResumed from the earlier handoff and shipped the thing.\n"
+    assert isc.parse_summary(doc) == "Resumed from the earlier handoff and shipped the thing."
+
+
+def test_summary_none_when_no_prose():
+    assert isc.parse_summary("# Only a title\n") is None
+    assert isc.parse_summary("") is None
+
+
+def test_summary_caps_length_with_ellipsis():
+    s = isc.parse_summary("Goal: " + "word " * 80)
+    assert s is not None
+    assert len(s) <= isc.SUMMARY_MAX + 1  # +1 for the trailing ellipsis
+    assert s.endswith("…")
+
+
+def test_summary_carried_through_read_handoff_and_cluster(tmp_path):
+    repo = tmp_path / "repo"
+    (repo / "claudedocs").mkdir(parents=True)
+    doc = repo / "claudedocs" / "handoff-thing-2026-07-20.md"
+    doc.write_text("# Thing — 2026-07-20\n\n**Goal:** do the thing well.\n")
+    parsed = isc.read_handoff(str(doc))
+    assert parsed["summary"] == "do the thing well."
+    inis = isc.cluster_handoffs([parsed])
+    assert inis[0]["summary"] == "do the thing well."
+
+
 # --------------------------------------------------------------------------- #
 # Open-investigations section (newer template)
 # --------------------------------------------------------------------------- #
@@ -142,10 +206,11 @@ def test_open_inv_doc_still_parses_next_step():
 # --------------------------------------------------------------------------- #
 # Dated-variant clustering
 # --------------------------------------------------------------------------- #
-def _doc(repo, slug, date, mtime, title="t", next_step="ns", path=None):
+def _doc(repo, slug, date, mtime, title="t", next_step="ns", path=None, summary="s"):
     return {
         "repo": repo, "slug": slug, "date": date, "mtime": mtime,
-        "title": title, "next_step": next_step, "open_investigations": [],
+        "title": title, "summary": summary, "next_step": next_step,
+        "open_investigations": [],
         "path": path or f"{repo}/claudedocs/handoff-{slug}-{date}.md",
     }
 

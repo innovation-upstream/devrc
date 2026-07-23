@@ -25,6 +25,7 @@ def _row(**over):
         "slug": "initiatives-viewer",
         "repo": "/home/zach/workspace/devrc",
         "title": "Initiatives consolidation Phase 3",
+        "summary": "A live web viewer over the initiatives store.",
         "momentum": "active",
         "last_touch": NOW - timedelta(minutes=30),
         "next_step": "wire the systemd unit",
@@ -36,6 +37,8 @@ def _row(**over):
         "telem_events": 42,
         "current_doc": "/home/zach/workspace/devrc/claudedocs/handoff-x.md",
         "open_investigations": ["does the tmux overlay hold under refresh churn?"],
+        "docs": [{"path": "/home/zach/workspace/devrc/claudedocs/handoff-x.md",
+                  "date": "2026-07-22"}],
         "captured_at": NOW - timedelta(minutes=6),
     }
     r.update(over)
@@ -144,28 +147,43 @@ def test_build_model_none_repo_becomes_unknown_group():
     assert model["repos"][0]["name"] == "(unknown repo)"
 
 
-# --- HTML render ------------------------------------------------------------ #
-def test_render_html_contains_slug_badge_tmux_and_footer():
+# --- HTML render (JSON island + inline JS; cards are rendered client-side) --- #
+def test_render_html_embeds_data_and_controls():
     rows = [_row(slug="initiatives-viewer")]
     rows[0]["tmux_sessions"] = {"Vapor-2"}
     model = viewer.build_model(rows, now=NOW)
     html = viewer.render_html(model)
-    assert "initiatives-viewer" in html            # a slug
-    assert "●" in html and "active" in html         # a momentum badge glyph + label
-    assert "[tmux:Vapor-2]" in html                 # a tmux tag
-    assert "wire the systemd unit" in html          # the next-step
-    assert "#138" in html                           # the open PR
-    assert "hourly sync" in html                    # the footer
-    assert "2026-07-22 11:54 UTC" in html           # captured_at in the footer
-    assert 'http-equiv="refresh"' in html           # auto-refresh wired
     assert html.startswith("<!doctype html>")
+    # the data the page builds from is embedded as a JSON island
+    assert 'id="idata"' in html
+    assert "initiatives-viewer" in html            # a slug (in the payload)
+    assert "feat: viewer" in html                  # the OPEN PR TITLE, not a bare number
+    assert "A live web viewer over the initiatives store." in html  # the summary
+    assert "Vapor-2" in html                        # a tmux session in the payload
+    # the flat/grouped toggle + search + refresh chrome
+    assert 'id="view-flat"' in html and 'id="view-grouped"' in html
+    assert 'id="search"' in html and 'id="refresh"' in html
+    # inline JS (no external assets) with the auto-refresh interval interpolated
+    assert "localStorage" in html
+    assert str(viewer.REFRESH_SECONDS * 1000) in html
 
 
-def test_render_html_escapes_untrusted_text():
+def test_render_html_escapes_untrusted_text_in_json_island():
+    # Untrusted text is embedded in a <script type=application/json> island; markup must
+    # be neutralized so it can't break out of the script element (\uXXXX is valid JSON).
     model = viewer.build_model([_row(title="<script>alert(1)</script>")], now=NOW)
     html = viewer.render_html(model)
-    assert "<script>alert(1)</script>" not in html
-    assert "&lt;script&gt;" in html
+    assert "<script>alert(1)</script>" not in html   # never raw
+    assert "u003cscript" in html                      # neutralized as <
+
+
+def test_render_html_footer_split_is_honest_not_hourly():
+    # The confusing "updated 1 hour ago / hourly sync" footer is gone; the JS renders a
+    # live-vs-snapshot split from captured_age.
+    model = viewer.build_model([_row(slug="a")], now=NOW)
+    html = viewer.render_html(model)
+    assert "hourly sync" not in html
+    assert "store synced" in html and "live sessions" in html
 
 
 def test_render_html_error_page_when_store_unreachable():
@@ -175,10 +193,12 @@ def test_render_html_error_page_when_store_unreachable():
     assert html.startswith("<!doctype html>")
 
 
-def test_render_html_empty_model_shows_empty_message():
+def test_render_html_empty_model_embeds_empty_payload():
     model = viewer.build_model([], now=NOW)
     html = viewer.render_html(model)
-    assert "No initiatives" in html
+    # payload reflects an empty snapshot; the JS renders the "No initiatives" message
+    assert '"total": 0' in html or '"total":0' in html
+    assert "No initiatives" in html  # the client-side empty message string
 
 
 # --- JSON payload ----------------------------------------------------------- #
@@ -289,3 +309,305 @@ def test_attach_tmux_absent_when_no_tmux_server(monkeypatch):
 
     monkeypatch.setattr(viewer, "_scan", lambda: _FakeScan)
     assert viewer.attach_tmux([_row(slug="ok")]) is False
+
+
+# --- flat view + enriched view fields (Feedback 1 + 3) ---------------------- #
+def test_build_model_flat_orders_by_last_touch_desc():
+    rows = [
+        _row(slug="old", repo="/ws/a", last_touch=NOW - timedelta(days=3)),
+        _row(slug="newest", repo="/ws/b", last_touch=NOW - timedelta(minutes=2)),
+        _row(slug="mid", repo="/ws/a", last_touch=NOW - timedelta(hours=5)),
+    ]
+    model = viewer.build_model(rows, now=NOW)
+    assert [v["slug"] for v in model["flat"]] == ["newest", "mid", "old"]
+
+
+def test_flat_view_carries_repo_label_summary_and_pr_titles():
+    model = viewer.build_model([_row(slug="s")], now=NOW)
+    v = model["flat"][0]
+    assert v["repo"] == "/home/zach/workspace/devrc"
+    assert v["repo_name"] == "devrc"                      # repo label for the flat card
+    assert v["summary"] == "A live web viewer over the initiatives store."
+    assert v["open_prs"] == [{"number": 138, "title": "feat: viewer"}]  # titles, not bare #
+    assert v["docs"] == [{"path": "/home/zach/workspace/devrc/claudedocs/handoff-x.md",
+                          "date": "2026-07-22"}]
+
+
+def test_flat_none_last_touch_sorts_last():
+    rows = [_row(slug="dated", last_touch=NOW - timedelta(days=1)),
+            _row(slug="undated", last_touch=None)]
+    model = viewer.build_model(rows, now=NOW)
+    assert [v["slug"] for v in model["flat"]] == ["dated", "undated"]
+
+
+def test_model_to_json_includes_flat():
+    model = viewer.build_model([_row(slug="a")], now=NOW)
+    j = viewer.model_to_json(model, None)
+    assert "flat" in j and j["flat"][0]["slug"] == "a"
+    err = viewer.model_to_json(None, "boom")
+    assert err["flat"] == [] and err["repos"] == []
+
+
+# --- detail parse + path-traversal guard (Feedback 3.3) --------------------- #
+def test_parse_doc_detail_extracts_sections():
+    text = ("# Handoff — thing, 2026-07-22\n\n"
+            "**Goal:** build the thing.\n\n"
+            "## Next steps\n1. first step\n2. second step\n\n"
+            "## Open investigations\n### an open bug\n")
+    d = viewer.parse_doc_detail(text)
+    assert d["summary"] == "build the thing."
+    assert d["next_steps"] == ["first step", "second step"]  # FULL list, not just the lead
+    assert d["open_investigations"] == ["an open bug"]
+
+
+def test_read_doc_detail_live_reads_a_fixture_handoff(tmp_path):
+    repo = tmp_path / "repo"
+    (repo / "claudedocs").mkdir(parents=True)
+    doc = repo / "claudedocs" / "handoff-x-2026-07-22.md"
+    doc.write_text("# X\n\n**Goal:** do X.\n\n## Next steps\n1. a\n2. b\n")
+    out = viewer.read_doc_detail_live(str(repo), str(doc), repos=[str(repo)])
+    assert out["summary"] == "do X." and out["next_steps"] == ["a", "b"]
+
+
+def test_read_doc_detail_live_resolves_repo_allowlist_when_repos_omitted(tmp_path, monkeypatch):
+    # With repos omitted, the reader must resolve the known-repo allowlist (not skip it):
+    # an EMPTY allowlist -> the repo isn't allowed -> None (the guard actually runs).
+    repo = tmp_path / "repo"
+    (repo / "claudedocs").mkdir(parents=True)
+    doc = repo / "claudedocs" / "handoff-x.md"
+    doc.write_text("# X\n\n**Goal:** do X.\n")
+    monkeypatch.setattr(viewer, "_discover_repos_safe", lambda: [])
+    assert viewer.read_doc_detail_live(str(repo), str(doc)) is None
+    # and when discovery includes the repo, the read succeeds
+    monkeypatch.setattr(viewer, "_discover_repos_safe", lambda: [str(repo)])
+    assert viewer.read_doc_detail_live(str(repo), str(doc))["summary"] == "do X."
+
+
+def test_read_doc_detail_live_caps_read_size(tmp_path, monkeypatch):
+    # A pathological file is truncated at MAX_DOC_BYTES so it can't spike memory: content
+    # beyond the cap (here a Next-steps section) is not parsed.
+    repo = tmp_path / "repo"
+    (repo / "claudedocs").mkdir(parents=True)
+    doc = repo / "claudedocs" / "handoff-x.md"
+    doc.write_text("**Goal:** short goal.\n" + ("X" * 5000) +
+                   "\n## Next steps\n1. SHOULD_NOT_APPEAR\n")
+    monkeypatch.setattr(viewer, "MAX_DOC_BYTES", 40)
+    out = viewer.read_doc_detail_live(str(repo), str(doc), repos=[str(repo)])
+    assert out["summary"] == "short goal."
+    assert out["next_steps"] == []  # truncated away before the Next-steps section
+
+
+def test_safe_doc_path_containment_and_traversal(tmp_path):
+    repo = tmp_path / "repo"
+    (repo / "claudedocs").mkdir(parents=True)
+    doc = repo / "claudedocs" / "handoff-x.md"
+    doc.write_text("hi")
+    # a real file under <repo>/claudedocs/ from a known repo resolves
+    assert viewer.safe_doc_path(str(repo), str(doc), [str(repo)]) is not None
+    # a traversal out of claudedocs/ is rejected
+    escape = str(repo / "claudedocs" / ".." / ".." / "etc" / "passwd")
+    assert viewer.safe_doc_path(str(repo), escape, [str(repo)]) is None
+    # an unknown repo is rejected
+    assert viewer.safe_doc_path(str(repo), str(doc), ["/some/other/repo"]) is None
+    # a missing file is rejected
+    assert viewer.safe_doc_path(str(repo), str(repo / "claudedocs" / "nope.md"),
+                                [str(repo)]) is None
+
+
+def test_build_detail_overlays_live_over_snapshot():
+    model = viewer.build_model([_row(slug="s")], now=NOW)
+    live = {"summary": "fresh summary", "next_steps": ["live 1", "live 2"],
+            "open_investigations": ["live inv"]}
+    d = viewer.build_detail(model, None, "/home/zach/workspace/devrc", "s",
+                            doc_reader=lambda repo, doc: live)
+    assert d["ok"] is True and d["live"] is True
+    assert d["summary"] == "fresh summary"
+    assert d["next_steps"] == ["live 1", "live 2"]          # FULL live list
+    assert d["open_investigations"] == ["live inv"]
+    assert d["open_prs"] == [{"number": 138, "title": "feat: viewer"}]
+
+
+def test_build_detail_falls_back_to_snapshot_when_live_read_fails():
+    model = viewer.build_model([_row(slug="s")], now=NOW)
+    d = viewer.build_detail(model, None, "/home/zach/workspace/devrc", "s",
+                            doc_reader=lambda repo, doc: None)
+    assert d["live"] is False
+    assert d["next_steps"] == ["wire the systemd unit"]     # snapshot's single next-step
+    assert d["open_investigations"] == ["does the tmux overlay hold under refresh churn?"]
+
+
+def test_build_detail_unknown_initiative_is_not_ok():
+    model = viewer.build_model([_row(slug="s")], now=NOW)
+    assert viewer.build_detail(model, None, "/nope", "nope")["ok"] is False
+    assert viewer.build_detail(None, "db down", "/r", "s")["ok"] is False
+
+
+# --- RefreshController: single-flight + debounce (Feedback 2) --------------- #
+def _clock():
+    c = {"t": 1000.0}
+    return c, (lambda: c["t"])
+
+
+def test_refresh_runs_then_debounces_within_window():
+    c, now_fn = _clock()
+    calls = {"n": 0}
+
+    def runner(script, timeout):
+        calls["n"] += 1
+        return 0, ""
+
+    rc = viewer.RefreshController(runner=runner, now_fn=now_fn, min_interval=60)
+    r1 = rc.refresh()
+    assert r1["status"] == "synced" and calls["n"] == 1
+    c["t"] = 1005.0
+    r2 = rc.refresh()                       # 5s later → debounced, NOT re-run
+    assert r2["status"] == "debounced" and calls["n"] == 1
+    assert "just synced" in r2["message"]
+    c["t"] = 1100.0
+    r3 = rc.refresh()                       # past the window → runs again
+    assert r3["status"] == "synced" and calls["n"] == 2
+
+
+def test_refresh_single_flighted_while_running():
+    c, now_fn = _clock()
+    rc = viewer.RefreshController(runner=lambda s, t: (0, ""), now_fn=now_fn)
+    rc._running = True                      # simulate an in-flight sync
+    assert rc.refresh()["status"] == "in_progress"
+
+
+def test_refresh_reports_error_on_nonzero_rc_without_leaking_stderr():
+    c, now_fn = _clock()
+    rc = viewer.RefreshController(runner=lambda s, t: (1, "secret /path/to/key stderr"),
+                                 now_fn=now_fn)
+    r = rc.refresh()
+    assert r["ok"] is False and r["status"] == "error"
+    # the runner's stderr tail must NOT be returned to the (unauthenticated) client
+    assert "detail" not in r
+    assert "secret" not in json.dumps(r)
+
+
+def test_refresh_swallows_runner_exception():
+    c, now_fn = _clock()
+
+    def runner(script, timeout):
+        raise RuntimeError("spawn failed")
+
+    rc = viewer.RefreshController(runner=runner, now_fn=now_fn)
+    r = rc.refresh()
+    assert r["status"] == "error" and "detail" not in r
+    # after a failure, _running is reset so a later refresh can proceed
+    assert rc._running is False
+
+
+def test_refresh_timeout_from_runner_is_error_and_resets_running():
+    import subprocess as _sp
+    c, now_fn = _clock()
+
+    def runner(script, timeout):
+        raise _sp.TimeoutExpired(cmd="bash", timeout=timeout)
+
+    rc = viewer.RefreshController(runner=runner, now_fn=now_fn)
+    assert rc.refresh()["status"] == "error"
+    assert rc._running is False
+
+
+# --- routing: POST /refresh + GET /api/initiative -------------------------- #
+class _FakeProviderWithInvalidate:
+    def __init__(self, model=None, error=None):
+        self._model = model
+        self._error = error
+        self.invalidated = 0
+
+    def snapshot(self):
+        return self._model, self._error
+
+    def invalidate(self):
+        self.invalidated += 1
+
+
+class _CountingController:
+    def __init__(self, result):
+        self._result = result
+        self.calls = 0
+
+    def refresh(self):
+        self.calls += 1
+        return self._result
+
+
+def test_route_refresh_synced_invalidates_provider():
+    prov = _FakeProviderWithInvalidate()
+    ctrl = _CountingController({"ok": True, "status": "synced", "message": "sync complete"})
+    status, ctype, body = viewer.route_request("/refresh", prov, method="POST",
+                                               refresh_controller=ctrl)
+    assert status == 200 and "application/json" in ctype
+    assert ctrl.calls == 1 and prov.invalidated == 1
+    assert json.loads(body)["status"] == "synced"
+
+
+def test_route_refresh_debounced_does_not_invalidate():
+    prov = _FakeProviderWithInvalidate()
+    ctrl = _CountingController({"ok": True, "status": "debounced",
+                               "message": "just synced 5s ago"})
+    status, _ctype, body = viewer.route_request("/refresh", prov, method="POST",
+                                                refresh_controller=ctrl)
+    assert status == 200 and prov.invalidated == 0
+
+
+def test_route_refresh_in_progress_is_409():
+    prov = _FakeProviderWithInvalidate()
+    ctrl = _CountingController({"ok": False, "status": "in_progress", "message": "busy"})
+    status, _ctype, _body = viewer.route_request("/refresh", prov, method="POST",
+                                                 refresh_controller=ctrl)
+    assert status == 409
+
+
+def test_route_refresh_without_controller_is_503():
+    prov = _FakeProviderWithInvalidate()
+    status, _ctype, _body = viewer.route_request("/refresh", prov, method="POST",
+                                                 refresh_controller=None)
+    assert status == 503
+
+
+def test_route_get_on_refresh_path_is_404():
+    # /refresh is POST-only; a GET falls through to the 404 (not the refresh handler).
+    prov = _FakeProviderWithInvalidate()
+    status, _c, _b = viewer.route_request("/refresh", prov, method="GET")
+    assert status == 404
+
+
+def test_route_detail_endpoint_returns_initiative():
+    model = viewer.build_model([_row(slug="s")], now=NOW)
+    prov = _FakeProviderWithInvalidate(model=model)
+    status, ctype, body = viewer.route_request(
+        "/api/initiative", prov, method="GET",
+        query={"repo": ["/home/zach/workspace/devrc"], "slug": ["s"]})
+    assert status == 200 and "application/json" in ctype
+    payload = json.loads(body)
+    assert payload["ok"] is True and payload["slug"] == "s"
+
+
+def test_route_detail_unknown_is_404():
+    model = viewer.build_model([_row(slug="s")], now=NOW)
+    prov = _FakeProviderWithInvalidate(model=model)
+    status, _c, body = viewer.route_request("/api/initiative", prov, method="GET",
+                                            query={"repo": ["/x"], "slug": ["y"]})
+    assert status == 404 and json.loads(body)["ok"] is False
+
+
+# --- DataProvider.invalidate ------------------------------------------------ #
+def test_provider_invalidate_forces_reload():
+    calls = {"n": 0}
+
+    def loader():
+        calls["n"] += 1
+        return [_row(slug="x")]
+
+    prov = viewer.DataProvider(ttl=999, loader=loader, tmux=lambda rows: True,
+                               now_fn=lambda: NOW)
+    prov.snapshot()
+    prov.snapshot()
+    assert calls["n"] == 1          # cached
+    prov.invalidate()
+    prov.snapshot()
+    assert calls["n"] == 2          # re-read after invalidate
