@@ -815,9 +815,10 @@ in
   #
   # WORKBENCH-ONLY (gated on serverMode), same rationale as the sync: the homelab
   # kubeconfig is direct-LAN only here, AND the viewer must run on the host whose
-  # tmux server it reads (the live overlay). It binds a workbench-LAN address
-  # (192.168.50.94:8899) — internal work data, deliberately NOT wired into the public
-  # homelab gateway. Public exposure would be a later, explicit choice.
+  # tmux server it reads (the live overlay). It binds the workbench's OWN LAN address
+  # (192.168.50.250:8899, eth1 — NOT 192.168.50.94, which is a homelab node hosting the
+  # kube-apiserver/NodePorts and is not assignable here) — internal work data, deliberately
+  # NOT wired into the public homelab gateway. Public exposure would be a later, explicit choice.
   #
   # UNLIKE the sync it needs NO ClickHouse/sops creds (it only READS the already-synced
   # store — no telemetry query), so it's enabled directly under serverMode with no
@@ -843,7 +844,7 @@ in
         "PATH=${lib.makeBinPath [ pkgs.nix pkgs.kubectl pkgs.git pkgs.tmux pkgs.bash pkgs.coreutils pkgs.gnused pkgs.gnugrep ]}"
         "NIX_PATH=nixpkgs=/nix/var/nix/profiles/per-user/root/channels/nixos"
         "KUBECONFIG=%h/workspace/homelab-talos/homelab-kubeconfig"
-        "INITIATIVES_VIEWER_HOST=192.168.50.94"
+        "INITIATIVES_VIEWER_HOST=192.168.50.250"
         "INITIATIVES_VIEWER_PORT=8899"
         "HOME=%h"
       ];
