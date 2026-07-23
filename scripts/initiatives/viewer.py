@@ -112,6 +112,10 @@ CACHE_TTL_SECONDS = 5.0
 REFRESH_MIN_INTERVAL = 60.0
 REFRESH_TIMEOUT = 300
 
+# Upper bound on a live handoff read (GET /api/initiative). Handoffs are KBs; this caps
+# a pathological/huge file so the detail read can't spike the viewer's memory.
+MAX_DOC_BYTES = 512 * 1024
+
 
 # --------------------------------------------------------------------------- #
 # Lazy imports of the two borrowed modules (single-sourced; not reimplemented).
@@ -430,12 +434,20 @@ def _safe_resolve(p: str) -> Path | None:
 def read_doc_detail_live(repo: str, current_doc: str,
                          repos: list[str] | None = None) -> dict | None:
     """I/O: validate the handoff path, read it off disk, and parse its sections. None on a
-    failed guard / missing file / read error (the caller falls back to the stored fields)."""
+    failed guard / missing file / read error (the caller falls back to the stored fields).
+
+    When `repos` is not supplied, resolves it from `_discover_repos_safe()` so the
+    known-repo allowlist in `safe_doc_path` ACTUALLY runs (best-effort — if the scan
+    can't load, discovery is None and only realpath-containment guards the read). The
+    read is bounded to `MAX_DOC_BYTES` so a pathological file can't spike memory."""
+    if repos is None:
+        repos = _discover_repos_safe()
     path = safe_doc_path(repo, current_doc, repos)
     if path is None:
         return None
     try:
-        text = path.read_text(errors="replace")
+        with path.open("r", errors="replace") as f:
+            text = f.read(MAX_DOC_BYTES)  # bounded read (handoffs are KBs; cap is generous)
     except OSError:
         return None
     try:

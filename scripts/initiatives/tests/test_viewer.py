@@ -369,6 +369,34 @@ def test_read_doc_detail_live_reads_a_fixture_handoff(tmp_path):
     assert out["summary"] == "do X." and out["next_steps"] == ["a", "b"]
 
 
+def test_read_doc_detail_live_resolves_repo_allowlist_when_repos_omitted(tmp_path, monkeypatch):
+    # With repos omitted, the reader must resolve the known-repo allowlist (not skip it):
+    # an EMPTY allowlist -> the repo isn't allowed -> None (the guard actually runs).
+    repo = tmp_path / "repo"
+    (repo / "claudedocs").mkdir(parents=True)
+    doc = repo / "claudedocs" / "handoff-x.md"
+    doc.write_text("# X\n\n**Goal:** do X.\n")
+    monkeypatch.setattr(viewer, "_discover_repos_safe", lambda: [])
+    assert viewer.read_doc_detail_live(str(repo), str(doc)) is None
+    # and when discovery includes the repo, the read succeeds
+    monkeypatch.setattr(viewer, "_discover_repos_safe", lambda: [str(repo)])
+    assert viewer.read_doc_detail_live(str(repo), str(doc))["summary"] == "do X."
+
+
+def test_read_doc_detail_live_caps_read_size(tmp_path, monkeypatch):
+    # A pathological file is truncated at MAX_DOC_BYTES so it can't spike memory: content
+    # beyond the cap (here a Next-steps section) is not parsed.
+    repo = tmp_path / "repo"
+    (repo / "claudedocs").mkdir(parents=True)
+    doc = repo / "claudedocs" / "handoff-x.md"
+    doc.write_text("**Goal:** short goal.\n" + ("X" * 5000) +
+                   "\n## Next steps\n1. SHOULD_NOT_APPEAR\n")
+    monkeypatch.setattr(viewer, "MAX_DOC_BYTES", 40)
+    out = viewer.read_doc_detail_live(str(repo), str(doc), repos=[str(repo)])
+    assert out["summary"] == "short goal."
+    assert out["next_steps"] == []  # truncated away before the Next-steps section
+
+
 def test_safe_doc_path_containment_and_traversal(tmp_path):
     repo = tmp_path / "repo"
     (repo / "claudedocs").mkdir(parents=True)
