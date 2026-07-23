@@ -196,6 +196,25 @@ operator backfills them, e.g.:
 -- (done by the operator during verification; new rows get it automatically)
 ```
 
+`ensure_schema` also adds `related_initiative text` via
+`ALTER TABLE mail_actions ADD COLUMN IF NOT EXISTS related_initiative text`
+(idempotent, additive, nullable — see "Initiative routing (surface-only)" below).
+
+### Initiative routing (surface-only)
+
+Each newly-extracted action is tagged, best-effort, with the **existing initiative
+it relates to** (if any). The run loads the Phase-1 store's `initiatives.current`
+view ONCE (`MailDB.fetch_current_initiatives()`, reusing the open connection — no
+second port-forward) and, for each action, ranks the mail **subject** against it via
+the shared router `scripts/initiatives/route.py` (loaded by explicit importlib path —
+NOT on `sys.path`, to avoid the `llm.py` shadow trap). The top match is taken **only
+when `ranked[0]["confident"]`**; the slug lands in `related_initiative` and surfaces
+as `relates to: <slug>` in `extract.py list` and on the clawgate card. Strictly
+display-only: it never dispatches or acts. The whole path is wrapped so **any router
+or store failure logs a warning and the action is queued untagged** — extraction
+behaves exactly as before. When the `initiatives` schema/view is absent (Phase-1 sync
+not deployed on the host), the store read returns `[]` and every action is untagged.
+
 ## Invoice archiver (`archive-invoices`)
 
 A **separate, deterministic** loop (no LLM) that mines the inbox for **PDF invoice
