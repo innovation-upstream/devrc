@@ -267,6 +267,10 @@ class _FakeCursor:
         self._result = None
         if "to_regclass('initiatives.current')" in norm:
             self._result = (self._conn.view_regclass,)
+        elif "to_regclass('initiatives.latest')" in norm:
+            self._result = (self._conn.latest_regclass,)
+        elif "obj_description" in norm and "initiatives.latest" in norm:
+            self._result = (self._conn.latest_comment,)
         elif "obj_description" in norm:
             self._result = (self._conn.view_comment,)
         elif "RETURNING id" in norm:
@@ -280,11 +284,14 @@ class _FakeCursor:
 
 class _FakeConn:
     def __init__(self, *, view_regclass=None, view_comment=None,
+                 latest_regclass=None, latest_comment=None,
                  next_snapshot_id=1, delete_rowcount=0):
         self.executed = []
         self.commits = 0
         self.view_regclass = view_regclass
         self.view_comment = view_comment
+        self.latest_regclass = latest_regclass
+        self.latest_comment = latest_comment
         self.next_snapshot_id = next_snapshot_id
         self.delete_rowcount = delete_rowcount
 
@@ -347,6 +354,45 @@ def test_ensure_schema_recreates_view_when_version_differs():
     sync.ensure_schema(conn)
     joined = " ".join(_sqls(conn))
     assert "CREATE OR REPLACE VIEW initiatives.current" in joined
+
+
+# --- the `latest` view (viewer's ghost-free source) ------------------------- #
+def test_ensure_schema_creates_latest_view_when_absent():
+    conn = _FakeConn(latest_regclass=None)
+    sync.ensure_schema(conn)
+    joined = " ".join(_sqls(conn))
+    assert "CREATE OR REPLACE VIEW initiatives.latest" in joined
+    assert "COMMENT ON VIEW initiatives.latest" in joined
+    # rows from the most recent snapshot only (the ghost-free semantic)
+    assert "WHERE i.snapshot_id = (SELECT max(id) FROM initiatives.snapshots)" in joined
+
+
+def test_ensure_schema_skips_latest_view_when_present_and_version_matches():
+    conn = _FakeConn(latest_regclass="initiatives.latest",
+                     latest_comment=sync.LATEST_VIEW_COMMENT)
+    sync.ensure_schema(conn)
+    joined = " ".join(_sqls(conn))
+    assert "CREATE OR REPLACE VIEW initiatives.latest" not in joined
+
+
+def test_ensure_schema_recreates_latest_view_when_version_differs():
+    conn = _FakeConn(latest_regclass="initiatives.latest",
+                     latest_comment="initiatives-sync view latest v0")
+    sync.ensure_schema(conn)
+    joined = " ".join(_sqls(conn))
+    assert "CREATE OR REPLACE VIEW initiatives.latest" in joined
+
+
+def test_ensure_schema_manages_both_views_independently():
+    # current present+matching (skip), latest absent (create) — the two guards don't
+    # interfere with one another.
+    conn = _FakeConn(view_regclass="initiatives.current", view_comment=sync.VIEW_COMMENT,
+                     latest_regclass=None)
+    sync.ensure_schema(conn)
+    joined = " ".join(_sqls(conn))
+    assert "CREATE OR REPLACE VIEW initiatives.current" not in joined
+    assert "CREATE OR REPLACE VIEW initiatives.latest" in joined
+    assert conn.commits == 1  # still one commit for the whole schema pass
 
 
 def test_prune_old_snapshots_issues_cascade_delete_and_returns_count():
