@@ -45,6 +45,12 @@ def _fixture_initiative(**over):
         "telem_last": _TELEM_EPOCH,
         "last_touch": _TOUCH_EPOCH,
         "momentum": "active",
+        "recent_messages": [
+            {"text": "add the recent_commits column and bump the view", "ts": _TOUCH_EPOCH},
+            {"text": "eyeball the dry-run before writing", "ts": _TELEM_EPOCH},
+        ],
+        "recent_commits": ["feat: enrich cards with recent messages",
+                           "fix: dedupe pooled turns"],
     }
     ini.update(over)
     return ini
@@ -186,6 +192,32 @@ def test_summary_is_in_row_columns_after_title():
     # title for readability, and ensure it IS one of the written columns.
     assert "summary" in sync.ROW_COLUMNS
     assert sync.ROW_COLUMNS.index("summary") == sync.ROW_COLUMNS.index("title") + 1
+
+
+def test_recent_messages_and_commits_pass_through():
+    _meta, rows = sync.report_to_rows(_fixture_report(), host="workbench")
+    r = rows[0]
+    assert r["recent_messages"] == [
+        {"text": "add the recent_commits column and bump the view", "ts": _TOUCH_EPOCH},
+        {"text": "eyeball the dry-run before writing", "ts": _TELEM_EPOCH},
+    ]
+    assert r["recent_commits"] == ["feat: enrich cards with recent messages",
+                                   "fix: dedupe pooled turns"]
+
+
+def test_recent_fields_default_to_empty_list_when_absent():
+    ini = _fixture_initiative()
+    ini.pop("recent_messages", None)
+    ini.pop("recent_commits", None)
+    _meta, rows = sync.report_to_rows(_fixture_report(by_repo={"/r": [ini]}), host="workbench")
+    assert rows[0]["recent_messages"] == []
+    assert rows[0]["recent_commits"] == []
+
+
+def test_recent_columns_are_written_and_jsonb():
+    assert "recent_messages" in sync.ROW_COLUMNS
+    assert "recent_commits" in sync.ROW_COLUMNS
+    assert {"recent_messages", "recent_commits"} <= sync.JSONB_COLUMNS
 
 
 def test_commits_unknown_true_passes_through():
@@ -352,11 +384,47 @@ def test_ensure_schema_adds_summary_column_additively():
     assert "ADD COLUMN IF NOT EXISTS summary text" in joined  # additive migration
 
 
-def test_view_versions_bumped_so_summary_column_is_exposed():
+def test_view_versions_bumped_so_new_columns_are_exposed():
     # A view's SELECT i.* is frozen at create time; bumping the marker forces a recreate
-    # so the new `summary` column surfaces on initiatives.latest / .current.
-    assert sync.VIEW_VERSION == "v2"
-    assert sync.LATEST_VIEW_VERSION == "v2"
+    # so base-table columns added later (summary=v2; recent_messages/recent_commits=v3)
+    # surface on initiatives.latest / .current. v3 is the card-legibility bump.
+    assert sync.VIEW_VERSION == "v3"
+    assert sync.LATEST_VIEW_VERSION == "v3"
+    assert sync.VIEW_COMMENT == "initiatives-sync view v3"
+    assert sync.LATEST_VIEW_COMMENT == "initiatives-sync view latest v3"
+
+
+def test_ensure_schema_adds_recent_columns_additively():
+    # Fresh installs get the columns in CREATE TABLE; pre-existing tables get them via
+    # idempotent ADD COLUMN IF NOT EXISTS (the exact v2→v3 additive migration).
+    conn = _FakeConn()
+    sync.ensure_schema(conn)
+    joined = " ".join(_sqls(conn))  # whitespace-normalized by the fake cursor
+    assert "recent_messages jsonb" in joined  # in CREATE TABLE
+    assert "recent_commits jsonb" in joined
+    assert "ADD COLUMN IF NOT EXISTS recent_messages jsonb" in joined
+    assert "ADD COLUMN IF NOT EXISTS recent_commits jsonb" in joined
+
+
+def test_ensure_schema_v2_to_v3_recreates_both_views_drop_before_create():
+    # The migration trap: appending recent_messages/recent_commits reorders the views'
+    # `SELECT i.*, s.captured_at` columns, which CREATE OR REPLACE VIEW rejects. Simulate
+    # a live v2 store (both views present, marked v2) and assert the v3 marker mismatch
+    # fires DROP-before-CREATE on BOTH views (never the shape-locked CREATE OR REPLACE).
+    conn = _FakeConn(view_regclass="initiatives.current",
+                     view_comment="initiatives-sync view v2",
+                     latest_regclass="initiatives.latest",
+                     latest_comment="initiatives-sync view latest v2")
+    sync.ensure_schema(conn)
+    sqls = _sqls(conn)
+    assert "CREATE OR REPLACE VIEW" not in " ".join(sqls)
+    for view in ("initiatives.current", "initiatives.latest"):
+        drop_i = next(i for i, s in enumerate(sqls)
+                      if f"DROP VIEW IF EXISTS {view}" in s)
+        create_i = next(i for i, s in enumerate(sqls)
+                        if f"CREATE VIEW {view}" in s)
+        assert drop_i < create_i, f"{view}: DROP must precede CREATE"
+    assert conn.commits == 1
 
 
 def test_ensure_schema_fk_cascades():
@@ -468,9 +536,10 @@ def test_write_snapshot_inserts_snapshot_then_rows_with_jsonb():
     row_sql, row_params = conn.executed[1]
     assert "INSERT INTO initiatives.initiative_snapshot" in row_sql
     assert row_params[0] == 7  # snapshot_id prepended
-    # open_prs / open_investigations / docs are wrapped in psycopg2 Json
+    # open_prs / open_investigations / docs / recent_messages / recent_commits are each
+    # wrapped in psycopg2 Json (5 JSONB columns after the v3 card-legibility add).
     jsonb_count = sum(1 for p in row_params if isinstance(p, Json))
-    assert jsonb_count == 3
+    assert jsonb_count == 5
     assert conn.commits == 1
     # the summary column is in the INSERT list, and its value lands at the matching index
     assert "summary" in row_sql

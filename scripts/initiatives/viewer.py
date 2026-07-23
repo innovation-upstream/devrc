@@ -85,7 +85,7 @@ RUN_SYNC_PATH = Path(__file__).resolve().parent / "run-sync.sh"
 DISPLAY_COLUMNS = [
     "slug", "repo", "title", "summary", "momentum", "last_touch", "next_step", "commits",
     "commits_unknown", "merged_prs", "open_prs", "session_count", "telem_events",
-    "current_doc", "open_investigations", "docs",
+    "current_doc", "open_investigations", "docs", "recent_messages", "recent_commits",
 ]
 
 # Momentum ordering + badges — SAME ranks/glyphs the scan uses (active→stalled→unknown).
@@ -276,6 +276,9 @@ def _initiative_view(ini: dict, now: datetime) -> dict:
     glyph, label = momentum_badge(momentum)
     open_prs = ini.get("open_prs") or []
     tmux = sorted(ini.get("tmux_sessions") or [])
+    # The matched live pane's task summary (render-time tmux overlay, viewer-side only —
+    # not stored). First title if a session is open, else "".
+    tmux_tasks = [str(t) for t in (ini.get("tmux_tasks") or []) if str(t).strip()]
     repo = ini.get("repo")
     return {
         "slug": ini.get("slug") or "(no slug)",
@@ -305,6 +308,15 @@ def _initiative_view(ini: dict, now: datetime) -> dict:
         ],
         "docs": _norm_docs(ini.get("docs")),
         "tmux_sessions": tmux,
+        # Phase A card-legibility signals. `recent_messages` = the user's own recent
+        # prompts (newest-first, from the store); `recent_commits` = recent commit
+        # subjects; `live_task` = the open tmux session's task (render-time overlay).
+        "recent_messages": [
+            {"text": str(m.get("text") or ""), "ts": m.get("ts")}
+            for m in (ini.get("recent_messages") or []) if isinstance(m, dict)
+        ],
+        "recent_commits": [str(x) for x in (ini.get("recent_commits") or [])],
+        "live_task": tmux_tasks[0] if tmux_tasks else "",
     }
 
 
@@ -496,6 +508,11 @@ def build_detail(model: dict | None, error: str | None, repo: str, slug: str,
         "docs": view.get("docs") or [],
         "next_steps": [view["next_step"]] if view.get("next_step") else [],
         "open_investigations": view["open_investigations"],
+        # Phase A signals flow through the detail endpoint too (stored on the view — the
+        # live handoff read below never overrides them).
+        "recent_messages": view.get("recent_messages") or [],
+        "recent_commits": view.get("recent_commits") or [],
+        "live_task": view.get("live_task") or "",
         "live": False,
     }
 
@@ -575,6 +592,15 @@ header .meta{color:var(--gray);font-size:.85rem}
   padding:.02rem .4rem}
 .age{color:var(--gray);font-size:.82rem;margin-left:auto}
 .summary{margin-top:.3rem;color:var(--fg);font-size:.86rem}
+.msg{margin-top:.3rem;color:var(--fg);font-size:.86rem;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.msg .lbl{color:var(--aqua);margin-right:.2rem}
+.live-task{margin-top:.25rem;color:var(--green);font-size:.84rem;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.live-task .lbl{color:var(--green);font-weight:bold;margin-right:.2rem}
+.commit{margin-top:.25rem;color:var(--gray);font-size:.8rem;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.commit .lbl{color:var(--blue);margin-right:.2rem}
 .tags{margin-top:.3rem;display:flex;flex-wrap:wrap;gap:.35rem;align-items:center}
 .tag{font-size:.78rem;padding:.05rem .4rem;border-radius:3px;background:var(--bg2);color:var(--fg2)}
 .tag.tmux{background:#665c54;color:var(--green)}
@@ -630,8 +656,10 @@ _JS = r"""
 
   function matchQ(v, q){
     if(!q) return true;
+    var msg = (v.recent_messages && v.recent_messages[0] && v.recent_messages[0].text) || '';
     var hay = ((v.slug||'') + ' ' + (v.title||'') + ' ' + (v.summary||'') + ' ' +
-               (v.repo_name||'') + ' ' + (v.momentum||'')).toLowerCase();
+               (v.repo_name||'') + ' ' + (v.momentum||'') + ' ' + msg + ' ' +
+               (v.live_task||'')).toLowerCase();
     return hay.indexOf(q) !== -1;
   }
 
@@ -649,6 +677,17 @@ _JS = r"""
       return;
     }
     if(d.summary) det.appendChild(el('div', 'detail-summary', d.summary));
+    if(d.live_task){
+      det.appendChild(el('div', 'detail-h', 'Live session'));
+      det.appendChild(el('div', 'detail-summary', d.live_task));
+    }
+    var rmsgs = d.recent_messages || (v && v.recent_messages) || [];
+    if(rmsgs.length){
+      det.appendChild(el('div', 'detail-h', 'Recent messages'));
+      var ulm = el('ul', 'detail-list');
+      rmsgs.forEach(function(m){ ulm.appendChild(el('li', null, (m && m.text) || '')); });
+      det.appendChild(ulm);
+    }
     var ns = d.next_steps || [];
     if(ns.length){
       det.appendChild(el('div', 'detail-h', 'Next steps'));
@@ -662,6 +701,13 @@ _JS = r"""
       var ul2 = el('ul', 'detail-list');
       oi.forEach(function(s){ ul2.appendChild(el('li', null, s)); });
       det.appendChild(ul2);
+    }
+    var rcom = d.recent_commits || (v && v.recent_commits) || [];
+    if(rcom.length){
+      det.appendChild(el('div', 'detail-h', 'Recent commits'));
+      var ulc = el('ul', 'detail-list');
+      rcom.forEach(function(s){ ulc.appendChild(el('li', null, s)); });
+      det.appendChild(ulc);
     }
     var prs = d.open_prs || (v && v.open_prs) || [];
     if(prs.length){
@@ -716,6 +762,24 @@ _JS = r"""
 
     if(v.summary) c.appendChild(el('div', 'summary', v.summary));
 
+    // The user's own most-recent prompt — the highest-signal "what is this" line
+    // (summary + latest message read well together). textContent-only, never innerHTML.
+    var msgs = v.recent_messages || [];
+    if(msgs.length && msgs[0] && msgs[0].text){
+      var m = el('div', 'msg');
+      m.appendChild(el('span', 'lbl', 'you ›'));
+      m.appendChild(document.createTextNode(' ' + msgs[0].text));
+      c.appendChild(m);
+    }
+
+    // A live tmux session's task summary (render-time overlay), when one is open.
+    if(v.live_task){
+      var lt = el('div', 'live-task');
+      lt.appendChild(el('span', 'lbl', 'live ›'));
+      lt.appendChild(document.createTextNode(' ' + v.live_task));
+      c.appendChild(lt);
+    }
+
     var tags = el('div', 'tags');
     (v.tmux_sessions || []).forEach(function(s){
       tags.appendChild(el('span', 'tag tmux', '[tmux:' + s + ']'));
@@ -731,6 +795,15 @@ _JS = r"""
       commits + ' commits · ' + v.merged_prs + ' merged · ' +
       v.session_count + ' sess · ' + v.telem_events + ' ev'));
     c.appendChild(tags);
+
+    // A small hint of the most-recent commit subject, when present.
+    var rc = v.recent_commits || [];
+    if(rc.length && rc[0]){
+      var cm = el('div', 'commit');
+      cm.appendChild(el('span', 'lbl', 'commit ›'));
+      cm.appendChild(document.createTextNode(' ' + rc[0]));
+      c.appendChild(cm);
+    }
 
     if(v.next_step){
       var nx = el('div', 'next');

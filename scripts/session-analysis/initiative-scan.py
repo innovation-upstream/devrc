@@ -107,6 +107,15 @@ COMMAND_ARGS = re.compile(r"<command-args>(.*?)</command-args>", re.S)
 HARNESS = ("<task-notification>", "<task-reminder>", "<post-tool-use", "<bash-",
            "<user-prompt-submit", "<local-command-stdout>")
 
+# Recent-user-message + recent-commit surfacing (Phase A card legibility). Zach works
+# entirely via agents, so his own recent prompts are the highest-signal "what is this"
+# for an initiative. These are collected DETERMINISTICALLY (no LLM) — a later Phase B
+# may add an LLM recap on top, so the raw fields are kept cleanly reusable.
+RECENT_TURNS_PER_SESSION = 5        # last-N genuine user turns kept per attributed session
+RECENT_MESSAGES_PER_INITIATIVE = 5  # top-N (newest) messages surfaced per initiative
+RECENT_MESSAGE_MAX_CHARS = 200      # per-message truncation so a card stays legible
+RECENT_COMMITS_PER_INITIATIVE = 5   # most-recent commit subjects surfaced per initiative
+
 # A YYYY-MM-DD date anywhere in a handoff filename stem.
 DATE_RE = re.compile(r"(\d{4}-\d{2}-\d{2})")
 # "## Next steps" with any trailing decoration (the template varies a little).
@@ -896,6 +905,44 @@ def git_commits_in_window(repo: str, branch: str, since_days: int,
     return (len(epochs), float(max(epochs)))
 
 
+def git_recent_commit_subjects(repo: str, branch: str, since_days: int,
+                               default_branch: str | None = None,
+                               limit: int = RECENT_COMMITS_PER_INITIATIVE
+                               ) -> list[tuple[float, str]]:
+    """[(epoch, subject)] for the most-recent commits UNIQUE to `branch` in the window,
+    newest-first, capped at `limit`.
+
+    Mirrors git_commits_in_window's ref resolution + default-branch exclusion EXACTLY
+    (so a feature branch is credited only with ITS OWN subjects, not the whole trunk),
+    just capturing `%s` subjects instead of counting. The default branch (unsegmented
+    catch-all) and an unresolvable ref both yield []. A NUL (`%x00`) field separator so a
+    subject containing whitespace/tabs can't split the parse."""
+    if default_branch and branch.lower() == default_branch.lower():
+        return []
+    target = _resolve_branch_ref(repo, branch)
+    if target is None:
+        return []
+    cmd = ["git", "-C", repo, "log", target, "--no-merges",
+           f"--since={since_days} days ago", "--format=%ct%x00%s"]
+    if default_branch and default_branch.lower() != branch.lower():
+        excludes = []
+        for ref in (default_branch, f"origin/{default_branch}"):
+            if _ref_exists(repo, ref) and ref not in excludes:
+                excludes.append(ref)
+        if excludes:
+            cmd += ["--not", *excludes]
+    out = _run(cmd)
+    res: list[tuple[float, str]] = []
+    for ln in out.splitlines():
+        if "\x00" not in ln:
+            continue
+        cts, subj = ln.split("\x00", 1)
+        cts, subj = cts.strip(), subj.strip()
+        if cts.isdigit() and subj:
+            res.append((float(cts), subj))
+    return res[:limit]
+
+
 def gh_open_prs(repo: str) -> list[dict]:
     """OPEN PRs as [{number, title, headRefName}] — empty on any failure."""
     out = _run([
@@ -969,32 +1016,45 @@ def _clean_turn(raw: str) -> str:
     return t
 
 
-def session_genesis_refs(projects_root: str, since_days: int) -> list[dict]:
-    """For each transcript touched in the window, return its genesis text + mtime.
-
-    [{text, mtime}] over the FIRST genuine user turn per session. Used to attribute
-    a session to an initiative when the genesis names `handoff-<slug>.md`.
-    """
-    cutoff = time.time() - since_days * DAY
-    out = []
-    for path in glob.glob(os.path.join(projects_root, "**", "*.jsonl"), recursive=True):
-        if "/subagents/" in path or "/wf_" in path:
-            continue
-        mt = _safe_mtime(path)
-        if mt < cutoff:
-            continue
-        text = _first_user_turn(path)
-        if text:
-            out.append({"text": text, "mtime": mt})
-    return out
+def _extract_user_text(content) -> str | None:
+    """The text of a user message's `content` (str form, or the first text block of a
+    list form). None when there's no text block. Shared by every transcript reader so
+    genesis + recent-turn extraction agree on what a user turn's text IS."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        for b in content:
+            if isinstance(b, dict) and b.get("type") == "text":
+                return b.get("text", "")
+    return None
 
 
-def _first_user_turn(path: str) -> str | None:
+def _truncate(s: str, n: int) -> str:
+    """Trim/ellipsize a string to at most `n` chars (with a trailing … when cut)."""
+    s = (s or "").strip()
+    return s if len(s) <= n else s[: max(0, n - 1)].rstrip() + "…"
+
+
+def _read_session_turns(path: str, n: int) -> dict | None:
+    """Parse ONE transcript into {genesis, turns, cwd, branch}, or None if it has no
+    genuine user turn.
+
+    - genesis: the FIRST genuine user turn text (the SAME rule _first_user_turn used —
+      skips harness/system-reminder/command/interrupt/caveat noise via _clean_turn).
+    - turns: [{text, ts}] for the LAST `n` genuine user turns (oldest→newest), each
+      cleaned; `ts` is the turn's UTC epoch (from its ISO `timestamp`), or None.
+    - cwd / branch: from the MOST-RECENT turn that carries them (each user turn records
+      `cwd` + `gitBranch`) — used by the branch/cwd attribution fallback.
+    Reads the file ONCE (transcript reads are the costly part of the scan)."""
     try:
         with open(path, errors="replace") as f:
             lines = f.readlines()
     except OSError:
         return None
+    genesis: str | None = None
+    turns: list[dict] = []
+    cwd: str | None = None
+    branch: str | None = None
     for line in lines:
         line = line.strip()
         if not line:
@@ -1008,15 +1068,7 @@ def _first_user_turn(path: str) -> str | None:
         msg = obj.get("message") or {}
         if msg.get("role") != "user":
             continue
-        content = msg.get("content")
-        raw = None
-        if isinstance(content, str):
-            raw = content
-        elif isinstance(content, list):
-            for b in content:
-                if isinstance(b, dict) and b.get("type") == "text":
-                    raw = b.get("text", "")
-                    break
+        raw = _extract_user_text(msg.get("content"))
         if not raw:
             continue
         txt = _clean_turn(raw)
@@ -1024,8 +1076,132 @@ def _first_user_turn(path: str) -> str | None:
             continue
         if txt.startswith("[Request interrupted") or txt.startswith("Caveat: The messages below"):
             continue
-        return txt
-    return None
+        if genesis is None:
+            genesis = txt
+        turns.append({"text": txt, "ts": _iso_to_epoch(obj.get("timestamp"))})
+        c = obj.get("cwd")
+        if c:
+            cwd = c
+        b = obj.get("gitBranch")
+        if b:
+            branch = b
+    if genesis is None:
+        return None
+    return {"genesis": genesis, "turns": turns[-n:] if n > 0 else [],
+            "cwd": cwd, "branch": branch}
+
+
+def _first_user_turn(path: str) -> str | None:
+    """The first genuine user turn of a transcript (back-compat thin wrapper)."""
+    rec = _read_session_turns(path, 1)
+    return rec["genesis"] if rec else None
+
+
+def collect_session_records(projects_root: str, since_days: int,
+                            n: int = RECENT_TURNS_PER_SESSION) -> list[dict]:
+    """Walk every transcript touched in the window ONCE; per session return
+    {genesis, mtime, cwd, branch, turns}.
+
+    The SUPERSET of session_genesis_refs: it additionally carries the last-`n` user
+    turns (recent-message attribution) and the session's cwd/branch (the branch/cwd
+    attribution fallback). One walk feeds BOTH attribute_sessions and
+    attribute_recent_messages so transcripts aren't read twice."""
+    cutoff = time.time() - since_days * DAY
+    out: list[dict] = []
+    for path in glob.glob(os.path.join(projects_root, "**", "*.jsonl"), recursive=True):
+        if "/subagents/" in path or "/wf_" in path:
+            continue
+        mt = _safe_mtime(path)
+        if mt < cutoff:
+            continue
+        rec = _read_session_turns(path, n)
+        if rec is None:
+            continue
+        rec["mtime"] = mt
+        out.append(rec)
+    return out
+
+
+def session_genesis_refs(projects_root: str, since_days: int) -> list[dict]:
+    """[{text, mtime}] over each in-window session's genesis (first genuine user turn).
+
+    A thin adapter over collect_session_records so the transcript walk is single-sourced
+    (attribute_sessions still consumes exactly this shape)."""
+    return [{"text": r["genesis"], "mtime": r["mtime"]}
+            for r in collect_session_records(projects_root, since_days, n=1)]
+
+
+def attribute_recent_messages(initiatives: list[dict], records: list[dict],
+                              repos: list[str], wt_map: dict[str, str] | None = None,
+                              keep: int = RECENT_MESSAGES_PER_INITIATIVE,
+                              max_chars: int = RECENT_MESSAGE_MAX_CHARS) -> None:
+    """Mutate each initiative with `recent_messages` = [{text, ts}], newest-first, top-N.
+
+    Bring the conversation onto the card: surface the user's OWN recent prompts. A
+    session's recent user turns are credited to an initiative when EITHER:
+      • genesis  — its genesis text names a handoff of the initiative (the SAME rule as
+        attribute_sessions; a genesis naming two handoffs credits both), OR
+      • branch+cwd — its gitBranch is the initiative's most-specific match
+        (best_matching_initiative) AND its cwd resolves to the initiative's repo
+        (resolve_cwd_repo) — catching feature-branch sessions the genesis missed.
+    Both predicates are the SAME ones the scan already uses for session/telemetry
+    attribution (no new scheme). Turns are pooled across the initiative's attributed
+    sessions, sorted by timestamp DESC (a None ts sorts last), de-duplicated, truncated,
+    and the top-N kept."""
+    wt_map = wt_map or {}
+    inis_by_repo: dict[str, list[dict]] = {}
+    names_by_id: dict[int, set[str]] = {}
+    acc: dict[int, list[dict]] = {}
+    for ini in initiatives:
+        ini["recent_messages"] = []
+        inis_by_repo.setdefault(ini["repo"], []).append(ini)
+        names = {os.path.basename(d["path"]).lower() for d in ini.get("docs", [])}
+        names.add(f"handoff-{ini.get('slug', '').lower()}")
+        names_by_id[id(ini)] = names
+        acc[id(ini)] = []
+
+    for r in records:
+        turns = r.get("turns") or []
+        if not turns:
+            continue
+        credited: set[int] = set()
+        genesis = (r.get("genesis") or "").lower()
+        if genesis:
+            for ini in initiatives:
+                if any(nm in genesis for nm in names_by_id[id(ini)]):
+                    credited.add(id(ini))
+        branch = (r.get("branch") or "").strip()
+        repo = resolve_cwd_repo(r.get("cwd"), repos, wt_map)
+        if branch and repo is not None:
+            best = best_matching_initiative(branch, inis_by_repo.get(repo, []))
+            if best is not None:
+                credited.add(id(best))
+        for iid in credited:
+            acc[iid].extend(turns)
+
+    for ini in initiatives:
+        # Newest-first; a None ts sorts after any real ts (present-flag as primary key).
+        pooled = sorted(acc[id(ini)],
+                        key=lambda m: (m.get("ts") is not None, m.get("ts") or 0.0),
+                        reverse=True)
+        seen: set = set()
+        msgs: list[dict] = []
+        for m in pooled:
+            text = (m.get("text") or "").strip()
+            if not text:
+                continue
+            # De-dupe on the DISPLAYED (truncated) text so identical card lines collapse
+            # to one — automated agent sessions (e.g. the task-spec drafter) re-inject the
+            # same boilerplate prompt across many sessions; showing it once is enough. The
+            # newest occurrence wins (pooled is already sorted DESC).
+            disp = _truncate(text, max_chars)
+            if disp in seen:
+                continue
+            seen.add(disp)
+            msgs.append({"text": disp, "ts": m.get("ts")})
+            if len(msgs) >= keep:
+                break
+        ini["recent_messages"] = msgs
 
 
 def attribute_sessions(initiatives: list[dict], genesis: list[dict]) -> None:
@@ -1325,6 +1501,7 @@ def match_tmux_to_initiatives(initiatives: list[dict], panes: list[dict],
     """
     for ini in initiatives:
         ini.setdefault("tmux_sessions", set())
+        ini.setdefault("tmux_tasks", [])
     by_repo: dict[str, list[dict]] = {}
     for ini in initiatives:
         by_repo.setdefault(ini["repo"], []).append(ini)
@@ -1337,6 +1514,11 @@ def match_tmux_to_initiatives(initiatives: list[dict], panes: list[dict],
         ini = best_title_match(ptoks, eligible) if ptoks else None
         if ini is not None:
             ini["tmux_sessions"].add(pane_id(pane, codenames))
+            # Surface the matched pane's title (the live session's task summary) so a
+            # viewer can render a `live: <task>` line. De-duped, insertion-ordered.
+            task = (pane.get("title") or "").strip()
+            if task and task not in ini["tmux_tasks"]:
+                ini["tmux_tasks"].append(task)
         elif pane.get("command", "") == "claude":
             unmatched.append({"id": pane_id(pane, codenames),
                               "title": pane.get("title", ""),
@@ -1359,6 +1541,9 @@ def attribute_git(initiatives: list[dict], days: int) -> None:
     default_cache: dict[str, str | None] = {}
     open_pr_cache: dict[str, list[dict]] = {}
     merged_pr_cache: dict[str, list[dict]] = {}
+    # (epoch, subject) pairs per initiative, pooled across its matching branches; the
+    # top-N newest become `recent_commits` after the per-repo pass.
+    commit_subs: dict[int, list[tuple[float, str]]] = {}
 
     # Group initiatives by repo so "best match" is decided within a repo's own slugs.
     by_repo: dict[str, list[dict]] = {}
@@ -1370,6 +1555,7 @@ def attribute_git(initiatives: list[dict], days: int) -> None:
         ini["last_commit"] = None
         ini["open_prs"] = []
         ini["merged_prs"] = 0
+        ini["recent_commits"] = []
 
     for repo, repo_inis in by_repo.items():
         if repo not in branch_cache:
@@ -1386,6 +1572,9 @@ def attribute_git(initiatives: list[dict], days: int) -> None:
             if ini is None:
                 continue
             ini["matching_branches"].append(b)
+            subs = git_recent_commit_subjects(repo, b, days, default_branch)
+            if subs:
+                commit_subs.setdefault(id(ini), []).extend(subs)
             c, lc = git_commits_in_window(repo, b, days, default_branch)
             if c is None:
                 ini["commits_unknown"] = True  # unresolvable ref — don't fake 0
@@ -1410,6 +1599,9 @@ def attribute_git(initiatives: list[dict], days: int) -> None:
         # "commits:?" only when we have NO confident count at all (every matching
         # branch was unresolvable) — a partial count stays a number.
         ini["commits_unknown"] = ini["commits_unknown"] and ini["commits"] == 0
+        # The newest commit subjects across all matching branches (deterministic hint).
+        pooled = sorted(commit_subs.get(id(ini), []), key=lambda t: t[0], reverse=True)
+        ini["recent_commits"] = [s for _ts, s in pooled[:RECENT_COMMITS_PER_INITIATIVE]]
 
 
 # --------------------------------------------------------------------------- #
@@ -1429,14 +1621,22 @@ def build_report(days: int, repos: list[str] | None = None,
     initiatives = load_initiatives(repos)
 
     attribute_git(initiatives, days)
-    genesis = session_genesis_refs(projects_root, days)
+
+    # ONE transcript walk feeds both session-count attribution AND recent-message
+    # surfacing (transcripts are the costly read; genesis is derived from the records).
+    records = collect_session_records(projects_root, days)
+    genesis = [{"text": r["genesis"], "mtime": r["mtime"]} for r in records]
     attribute_sessions(initiatives, genesis)
+
+    # Resolve cwds living in linked worktrees back to their canonical repo so worktree
+    # sessions/telemetry attribute to the parent and `(unknown repo)` shrinks. Computed
+    # unconditionally now: message attribution's branch/cwd fallback needs it too (agents
+    # run in isolated worktrees), and telemetry/tmux reuse the same map below.
+    wt_map = worktree_canonical_map(repos)
+    attribute_recent_messages(initiatives, records, repos, wt_map)
 
     telem_rows = fetch_telemetry(client, days) if client is not None else None
     telemetry_available = telem_rows is not None
-    # Resolve cwds living in linked worktrees back to their canonical repo so
-    # worktree telemetry attributes to the parent and `(unknown repo)` shrinks.
-    wt_map = worktree_canonical_map(repos) if (telem_rows or include_tmux) else {}
     catchall = attribute_telemetry(initiatives, telem_rows, repos, wt_map)
 
     tmux_unmatched: list[dict] = []
@@ -1567,6 +1767,12 @@ def render(report: dict, now: float | None = None) -> str:
                 out.append(f"        “{ini['title']}”")
             if ini.get("summary"):
                 out.append(f"        » {ini['summary'][:160]}")
+            msgs = ini.get("recent_messages") or []
+            if msgs:
+                out.append(f"        you › {msgs[0].get('text', '')[:160]}")
+            rc = ini.get("recent_commits") or []
+            if rc:
+                out.append(f"        commit › {rc[0][:100]}")
             for pr in ini.get("open_prs", []):
                 out.append(f"        OPEN PR #{pr['number']}: {pr['title'][:80]}")
             ns = ini.get("next_step")

@@ -611,3 +611,81 @@ def test_provider_invalidate_forces_reload():
     prov.invalidate()
     prov.snapshot()
     assert calls["n"] == 2          # re-read after invalidate
+
+
+# --- Phase A card-legibility fields: recent messages / commits / live task -- #
+def test_view_carries_recent_messages_commits_and_live_task():
+    rows = [_row(slug="s",
+                 recent_messages=[{"text": "enrich the cards with my prompts", "ts": 300.0},
+                                  {"text": "older prompt", "ts": 100.0}],
+                 recent_commits=["feat: enrich cards", "fix: dedupe turns"])]
+    rows[0]["tmux_tasks"] = ["Bring the conversation onto the card"]
+    v = viewer.build_model(rows, now=NOW)["flat"][0]
+    assert v["recent_messages"] == [
+        {"text": "enrich the cards with my prompts", "ts": 300.0},
+        {"text": "older prompt", "ts": 100.0}]
+    assert v["recent_commits"] == ["feat: enrich cards", "fix: dedupe turns"]
+    assert v["live_task"] == "Bring the conversation onto the card"
+
+
+def test_view_defaults_recent_fields_when_absent():
+    v = viewer.build_model([_row(slug="s")], now=NOW)["flat"][0]
+    assert v["recent_messages"] == []
+    assert v["recent_commits"] == []
+    assert v["live_task"] == ""
+
+
+def test_view_live_task_is_first_tmux_task():
+    rows = [_row(slug="s")]
+    rows[0]["tmux_tasks"] = ["primary task", "secondary task"]
+    v = viewer.build_model(rows, now=NOW)["flat"][0]
+    assert v["live_task"] == "primary task"
+
+
+def test_view_recent_messages_coerces_and_drops_non_dicts():
+    rows = [_row(slug="s",
+                 recent_messages=[{"text": 123, "ts": None}, "junk", {"nope": 1}])]
+    v = viewer.build_model(rows, now=NOW)["flat"][0]
+    # non-dicts dropped; text str-coerced; a dict without text -> ""
+    assert v["recent_messages"] == [{"text": "123", "ts": None}, {"text": "", "ts": None}]
+
+
+def test_render_html_embeds_recent_message_and_commit():
+    rows = [_row(slug="s",
+                 recent_messages=[{"text": "the most recent prompt line", "ts": 1.0}],
+                 recent_commits=["feat: a recent commit subject"])]
+    html = viewer.render_html(viewer.build_model(rows, now=NOW))
+    assert "the most recent prompt line" in html       # latest message in the JSON island
+    assert "feat: a recent commit subject" in html      # commit subject in the payload
+    assert "you \\u203a" in html or "you ›" in html      # card-face renders the you › line
+
+
+def test_render_html_neutralizes_untrusted_prompt_text():
+    # a prompt containing markup must be neutralized in the JSON island (never raw).
+    rows = [_row(slug="s",
+                 recent_messages=[{"text": "<img src=x onerror=alert(1)>", "ts": 1.0}])]
+    html = viewer.render_html(viewer.build_model(rows, now=NOW))
+    assert "<img src=x onerror=alert(1)>" not in html   # never raw markup
+    assert "u003cimg" in html                            # neutralized as <
+
+
+def test_build_detail_carries_recent_fields_and_live_task():
+    rows = [_row(slug="s",
+                 recent_messages=[{"text": "detail prompt", "ts": 5.0}],
+                 recent_commits=["chore: bump"])]
+    rows[0]["tmux_tasks"] = ["open live task"]
+    model = viewer.build_model(rows, now=NOW)
+    d = viewer.build_detail(model, None, "/home/zach/workspace/devrc", "s",
+                            doc_reader=lambda repo, doc: None)  # no live overlay
+    assert d["recent_messages"] == [{"text": "detail prompt", "ts": 5.0}]
+    assert d["recent_commits"] == ["chore: bump"]
+    assert d["live_task"] == "open live task"
+
+
+def test_model_to_json_flat_includes_recent_fields():
+    rows = [_row(slug="a",
+                 recent_messages=[{"text": "m", "ts": 1.0}], recent_commits=["c"])]
+    j = viewer.model_to_json(viewer.build_model(rows, now=NOW), None)
+    v = j["flat"][0]
+    assert v["recent_messages"] == [{"text": "m", "ts": 1.0}]
+    assert v["recent_commits"] == ["c"]
