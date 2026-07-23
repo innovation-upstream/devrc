@@ -447,11 +447,15 @@ def test_refresh_single_flighted_while_running():
     assert rc.refresh()["status"] == "in_progress"
 
 
-def test_refresh_reports_error_on_nonzero_rc():
+def test_refresh_reports_error_on_nonzero_rc_without_leaking_stderr():
     c, now_fn = _clock()
-    rc = viewer.RefreshController(runner=lambda s, t: (1, "boom"), now_fn=now_fn)
+    rc = viewer.RefreshController(runner=lambda s, t: (1, "secret /path/to/key stderr"),
+                                 now_fn=now_fn)
     r = rc.refresh()
     assert r["ok"] is False and r["status"] == "error"
+    # the runner's stderr tail must NOT be returned to the (unauthenticated) client
+    assert "detail" not in r
+    assert "secret" not in json.dumps(r)
 
 
 def test_refresh_swallows_runner_exception():
@@ -461,8 +465,21 @@ def test_refresh_swallows_runner_exception():
         raise RuntimeError("spawn failed")
 
     rc = viewer.RefreshController(runner=runner, now_fn=now_fn)
-    assert rc.refresh()["status"] == "error"
+    r = rc.refresh()
+    assert r["status"] == "error" and "detail" not in r
     # after a failure, _running is reset so a later refresh can proceed
+    assert rc._running is False
+
+
+def test_refresh_timeout_from_runner_is_error_and_resets_running():
+    import subprocess as _sp
+    c, now_fn = _clock()
+
+    def runner(script, timeout):
+        raise _sp.TimeoutExpired(cmd="bash", timeout=timeout)
+
+    rc = viewer.RefreshController(runner=runner, now_fn=now_fn)
+    assert rc.refresh()["status"] == "error"
     assert rc._running is False
 
 

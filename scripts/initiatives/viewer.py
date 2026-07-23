@@ -55,6 +55,7 @@ import html
 import importlib.util
 import json
 import os
+import signal
 import subprocess
 import sys
 import threading
@@ -901,14 +902,42 @@ def render_html(model: dict | None, error: str | None = None,
 # --------------------------------------------------------------------------- #
 # Refresh controller — single-flight + debounced subprocess sync (the ↻ button).
 # --------------------------------------------------------------------------- #
+def _kill_process_group(proc) -> None:
+    """SIGTERM then (if it lingers) SIGKILL the process's WHOLE group; reap it. Best-effort."""
+    try:
+        pgid = os.getpgid(proc.pid)
+    except (ProcessLookupError, OSError):
+        return
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        try:
+            os.killpg(pgid, sig)
+        except (ProcessLookupError, OSError):
+            return
+        try:
+            proc.wait(timeout=5)
+            return
+        except subprocess.TimeoutExpired:
+            continue
+
+
 def _run_sync_subprocess(script: Path, timeout: int) -> tuple[int, str]:
     """Run run-sync.sh as a subprocess (it does its own nix-shell + sops + scan + write).
     Returns (returncode, trailing-stderr). Inherits the viewer unit's env (KUBECONFIG,
-    PATH incl. sops/gh/kubectl)."""
-    proc = subprocess.run(["bash", str(script)], capture_output=True, text=True,
-                          timeout=timeout)
-    err = (proc.stderr or "").strip()
-    return proc.returncode, err[-500:]
+    PATH incl. sops/gh/kubectl).
+
+    Runs in its OWN session/process group (`start_new_session=True`) so a timeout can kill
+    the ENTIRE tree — subprocess.run's timeout would SIGKILL only the `bash` child, orphaning
+    the `nix-shell → python sync.py → kubectl port-forward` grandchildren (which would then
+    pile up under the next refresh/timer sync). On TimeoutExpired we SIGTERM/SIGKILL the whole
+    group and re-raise (the controller turns it into an error result)."""
+    proc = subprocess.Popen(["bash", str(script)], stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE, text=True, start_new_session=True)
+    try:
+        _out, err = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        _kill_process_group(proc)
+        raise
+    return proc.returncode, (err or "").strip()[-500:]
 
 
 class RefreshController:
@@ -954,8 +983,11 @@ class RefreshController:
                 self._last_at = self._now()
         if rc == 0:
             return {"ok": True, "status": "synced", "message": "sync complete"}
-        return {"ok": False, "status": "error",
-                "message": f"sync failed (rc={rc})", "detail": err}
+        # Log the stderr tail server-side (journal) — do NOT return it to the
+        # unauthenticated client (avoid leaking internal paths/creds hints).
+        if err:
+            sys.stderr.write(f"viewer: refresh sync failed (rc={rc}): {err}\n")
+        return {"ok": False, "status": "error", "message": f"sync failed (rc={rc})"}
 
 
 # --------------------------------------------------------------------------- #
@@ -1018,6 +1050,10 @@ def route_request(path: str, provider, method: str = "GET", query: dict | None =
         return 200, "text/plain; charset=utf-8", b"ok\n"
 
     if method == "POST" and path == "/refresh":
+        # Deliberately UNAUTHENTICATED: the viewer binds LAN/localhost only (not the public
+        # gateway), so /refresh is LAN-trusted by design (Zach's call). Abuse is bounded by
+        # the controller's single-flight + ~60s debounce + the sync's own idempotency —
+        # NOT by auth/token/localhost-gating (intentionally none).
         if refresh_controller is None:
             return (503, "application/json; charset=utf-8",
                     json.dumps({"ok": False, "status": "disabled",
