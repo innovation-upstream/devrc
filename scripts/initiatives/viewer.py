@@ -51,6 +51,7 @@ On NixOS run under:
 from __future__ import annotations
 
 import argparse
+import contextlib
 import html
 import importlib.util
 import json
@@ -180,19 +181,56 @@ def load_latest() -> list[dict]:
         with db.conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             try:
                 cur.execute(f"SELECT {cols}, captured_at FROM initiatives.latest")
-                return [dict(r) for r in cur.fetchall()]
+                rows = [dict(r) for r in cur.fetchall()]
             except psycopg2.Error:
                 # View absent (or otherwise unqueryable): the transaction is now aborted,
                 # so roll back before the fallback query on the same connection.
                 db.conn.rollback()
-            icols = ", ".join(f"i.{c}" for c in DISPLAY_COLUMNS)
-            cur.execute(
-                f"SELECT {icols}, s.captured_at "
-                "FROM initiatives.initiative_snapshot i "
-                "JOIN initiatives.snapshots s ON s.id = i.snapshot_id "
-                "WHERE i.snapshot_id = (SELECT max(id) FROM initiatives.snapshots)"
-            )
-            return [dict(r) for r in cur.fetchall()]
+                icols = ", ".join(f"i.{c}" for c in DISPLAY_COLUMNS)
+                cur.execute(
+                    f"SELECT {icols}, s.captured_at "
+                    "FROM initiatives.initiative_snapshot i "
+                    "JOIN initiatives.snapshots s ON s.id = i.snapshot_id "
+                    "WHERE i.snapshot_id = (SELECT max(id) FROM initiatives.snapshots)"
+                )
+                rows = [dict(r) for r in cur.fetchall()]
+            attach_recaps(db.conn, rows)
+            return rows
+
+
+def attach_recaps(conn, rows: list[dict]) -> bool:
+    """Best-effort: LEFT-JOIN the standalone `initiatives.recaps` cache onto the loaded
+    rows by (repo, slug), setting each row's `recap` (None when absent). Kept OUT of the
+    `latest`/`current` views on purpose (recap is a per-(repo,slug) cache that persists
+    across snapshots, not a per-snapshot column) — so the viewer joins it here instead.
+
+    Strictly additive + fail-soft: if the recaps table doesn't exist yet (Phase B not
+    deployed) or the read errors, every row simply keeps `recap=None` and the card falls
+    back to `summary`. A `to_regclass` guard + a rollback on error keep the connection
+    usable. Returns True if recaps were attached, False otherwise."""
+    import psycopg2
+    import psycopg2.extras
+
+    for r in rows:
+        r.setdefault("recap", None)
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT to_regclass('initiatives.recaps')")
+            reg = cur.fetchone()
+            if reg is None or reg[0] is None:
+                return False
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("SELECT repo, slug, recap FROM initiatives.recaps")
+            by_key = {(r["repo"], r["slug"]): r["recap"] for r in cur.fetchall()}
+    except psycopg2.Error:
+        with contextlib.suppress(Exception):
+            conn.rollback()
+        return False
+    for r in rows:
+        recap = by_key.get((r.get("repo"), r.get("slug")))
+        if recap:
+            r["recap"] = recap
+    return True
 
 
 def attach_tmux(initiatives: list[dict]) -> bool:
@@ -337,6 +375,11 @@ def _initiative_view(ini: dict, now: datetime) -> dict:
         "repo_name": _short_repo(repo),
         "title": ini.get("title") or "",
         "summary": (ini.get("summary") or "").strip(),
+        # The LLM recap (Phase B) — the primary "what this is" line on the card FACE, with
+        # `summary` as the fallback when no recap exists yet. From the standalone recaps
+        # cache, attached in load_latest; untrusted text (rendered via the JSON island +
+        # textContent, like everything else).
+        "recap": (ini.get("recap") or "").strip(),
         "momentum": momentum,
         "momentum_rank": MOMENTUM_RANK.get(momentum, 9),
         "badge_glyph": glyph,
@@ -657,7 +700,6 @@ header .meta{color:var(--gray);font-size:.85rem}
 .tag{font-size:.78rem;padding:.05rem .4rem;border-radius:3px;background:var(--bg2);color:var(--fg2)}
 .tag.tmux{background:#665c54;color:var(--green)}
 .tag.pr{background:var(--bg2);color:var(--blue)}
-.tag.stat{background:transparent;color:var(--gray);padding-left:0}
 .next{margin-top:.3rem;color:var(--fg2);font-size:.86rem}
 .next b{color:var(--orange);font-weight:normal}
 .detail{margin-top:.5rem;padding-top:.5rem;border-top:1px dotted var(--bg2)}
@@ -711,9 +753,9 @@ _JS = r"""
     // Search the FULL recent-message list (not just the face line) so a card is findable
     // by any of its prompts, even the ones filtered off the face.
     var msg = (v.recent_messages || []).map(function(m){ return (m && m.text) || ''; }).join(' ');
-    var hay = ((v.slug||'') + ' ' + (v.title||'') + ' ' + (v.summary||'') + ' ' +
-               (v.repo_name||'') + ' ' + (v.momentum||'') + ' ' + msg + ' ' +
-               (v.live_task||'')).toLowerCase();
+    var hay = ((v.slug||'') + ' ' + (v.title||'') + ' ' + (v.recap||'') + ' ' +
+               (v.summary||'') + ' ' + (v.repo_name||'') + ' ' + (v.momentum||'') + ' ' +
+               msg + ' ' + (v.live_task||'')).toLowerCase();
     return hay.indexOf(q) !== -1;
   }
 
@@ -814,7 +856,10 @@ _JS = r"""
     row1.appendChild(el('span', 'age', 'updated ' + v.age + ' ago'));
     c.appendChild(row1);
 
-    if(v.summary) c.appendChild(el('div', 'summary', v.summary));
+    // The primary "what this is" line: the LLM recap when present, else the deterministic
+    // handoff summary (never blank when either exists). textContent-only via el().
+    var primary = v.recap || v.summary;
+    if(primary) c.appendChild(el('div', 'summary', primary));
 
     // The user's own most-recent SUBSTANTIVE prompt — the highest-signal "what is this"
     // line (summary + latest message read well together). `face_message` skips low-signal
@@ -846,10 +891,9 @@ _JS = r"""
       if(p.title) t.title = p.title;
       tags.appendChild(t);
     });
-    var commits = v.commits_unknown ? '?' : v.commits;
-    tags.appendChild(el('span', 'tag stat',
-      commits + ' commits · ' + v.merged_prs + ' merged · ' +
-      v.session_count + ' sess · ' + v.telem_events + ' ev'));
+    // The numeric stat strip (commit/merged/session/event counts) is intentionally
+    // OMITTED — low-signal on the card. PR titles + the commit subject below stay (they
+    // are descriptive, not bare counts).
     c.appendChild(tags);
 
     // A small hint of the most-recent commit subject, when present.

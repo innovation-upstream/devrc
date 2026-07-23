@@ -434,6 +434,29 @@ def test_ensure_schema_fk_cascades():
     assert "REFERENCES initiatives.snapshots(id) ON DELETE CASCADE" in joined
 
 
+def test_ensure_schema_creates_recaps_table_without_touching_views():
+    # Phase B2: the standalone recaps cache is created under the SAME advisory-locked
+    # transaction — but it is NOT a view, so it must NOT bump/recreate the view markers.
+    conn = _FakeConn(view_regclass="initiatives.current", view_comment=sync.VIEW_COMMENT,
+                     latest_regclass="initiatives.latest",
+                     latest_comment=sync.LATEST_VIEW_COMMENT)
+    sync.ensure_schema(conn)
+    sqls = _sqls(conn)
+    joined = " ".join(sqls)
+    assert "CREATE TABLE IF NOT EXISTS initiatives.recaps" in joined
+    assert "PRIMARY KEY (repo, slug)" in joined
+    # the recaps DDL runs AFTER the advisory lock (inside the guarded schema txn)
+    lock_i = next(i for i, s in enumerate(sqls) if "pg_advisory_xact_lock" in s)
+    recaps_i = next(i for i, s in enumerate(sqls)
+                    if "CREATE TABLE IF NOT EXISTS initiatives.recaps" in s)
+    assert lock_i < recaps_i
+    # views are present + version-matched → NEITHER view is dropped/recreated by this pass
+    assert "DROP VIEW IF EXISTS initiatives.current" not in joined
+    assert "DROP VIEW IF EXISTS initiatives.latest" not in joined
+    assert "CREATE VIEW" not in joined
+    assert conn.commits == 1
+
+
 def test_ensure_schema_creates_view_when_absent():
     conn = _FakeConn(view_regclass=None)
     sync.ensure_schema(conn)
