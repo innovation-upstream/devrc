@@ -94,14 +94,23 @@ CREATE TABLE IF NOT EXISTS initiatives.initiative_snapshot (
     telem_last           timestamptz,
     current_doc          text,
     open_investigations  jsonb,
-    docs                 jsonb
+    docs                 jsonb,
+    recent_messages      jsonb,
+    recent_commits       jsonb
 );
 
 -- Additive migration for pre-existing installs: CREATE TABLE IF NOT EXISTS won't add
--- a column to a table that already exists, so bring `summary` (nullable, deterministic
--- goal/what-this-is line) in explicitly. Idempotent — a no-op once the column exists.
+-- a column to a table that already exists, so bring the nullable, deterministic display
+-- columns in explicitly. Idempotent — a no-op once each column exists.
+--   summary          — the parsed goal/what-this-is line (v2).
+--   recent_messages  — the user's own recent prompts [{text, ts}] newest-first (v3).
+--   recent_commits   — recent commit subjects [str] newest-first (v3).
 ALTER TABLE initiatives.initiative_snapshot
     ADD COLUMN IF NOT EXISTS summary text;
+ALTER TABLE initiatives.initiative_snapshot
+    ADD COLUMN IF NOT EXISTS recent_messages jsonb;
+ALTER TABLE initiatives.initiative_snapshot
+    ADD COLUMN IF NOT EXISTS recent_commits jsonb;
 
 -- Support the `current` view's DISTINCT ON (repo, slug) … JOIN snapshots …
 -- ORDER BY repo, slug, captured_at DESC, plus the FK join / retention scans.
@@ -123,10 +132,14 @@ CREATE INDEX IF NOT EXISTS snapshots_captured_at_idx
 # includes initiatives that have aged out of the scan's N-day window (until the
 # 90-day retention prunes them): the ROUTER wants to match a signal against
 # recently-dormant work, so ghosts are a feature there.
-# v2: the base table gained a `summary` column. A view's `SELECT i.*` is expanded to
-# an explicit column list AT CREATE TIME (Postgres freezes it), so the new column does
-# NOT appear until the view is recreated — bump the marker to force that on deploy.
-VIEW_VERSION = "v2"
+# A view's `SELECT i.*` is expanded to an explicit column list AT CREATE TIME (Postgres
+# freezes it), so a base-table column added later does NOT appear until the view is
+# recreated — bump the marker to force a guarded DROP+CREATE on deploy.
+#   v2: the base table gained `summary`.
+#   v3: the base table gained `recent_messages` + `recent_commits`. Appending them
+#       reorders `SELECT i.*, s.captured_at` (captured_at shifts right), which CREATE OR
+#       REPLACE VIEW rejects ("cannot change name of view column") — hence DROP+CREATE.
+VIEW_VERSION = "v3"
 VIEW_COMMENT = f"initiatives-sync view {VIEW_VERSION}"
 VIEW_DDL = """
 CREATE VIEW initiatives.current AS
@@ -142,8 +155,9 @@ SELECT DISTINCT ON (i.repo, i.slug)
 # (an initiative that dropped out of the scan's window simply isn't in the newest
 # snapshot, so it disappears here even though `current` still carries it). Carries
 # `captured_at` so the viewer can render an "updated Xm ago" freshness footer.
-# v2: recreate to expose the new `summary` column (see VIEW_VERSION note above).
-LATEST_VIEW_VERSION = "v2"
+# v3: recreate to expose `summary` (v2) + `recent_messages`/`recent_commits` (v3) — see
+# the VIEW_VERSION note above for why this is DROP+CREATE, not CREATE OR REPLACE.
+LATEST_VIEW_VERSION = "v3"
 LATEST_VIEW_COMMENT = f"initiatives-sync view latest {LATEST_VIEW_VERSION}"
 LATEST_VIEW_DDL = """
 CREATE VIEW initiatives.latest AS
@@ -166,10 +180,11 @@ ROW_COLUMNS = [
     "host", "repo", "slug", "title", "summary", "doc_date", "momentum", "last_touch",
     "next_step", "commits", "commits_unknown", "merged_prs", "open_prs",
     "session_count", "telem_events", "telem_last", "current_doc",
-    "open_investigations", "docs",
+    "open_investigations", "docs", "recent_messages", "recent_commits",
 ]
 # Columns stored as JSONB (wrapped in psycopg2.extras.Json at write time).
-JSONB_COLUMNS = {"open_prs", "open_investigations", "docs"}
+JSONB_COLUMNS = {"open_prs", "open_investigations", "docs",
+                 "recent_messages", "recent_commits"}
 
 
 # --------------------------------------------------------------------------- #
@@ -238,6 +253,11 @@ def _initiative_to_row(ini: dict, host: str) -> dict:
         "current_doc": ini.get("current_doc"),
         "open_investigations": ini.get("open_investigations") or [],
         "docs": ini.get("docs") or [],
+        # Deterministic card-legibility signals (Phase A): the user's own recent prompts
+        # ([{text, ts}] newest-first) + recent commit subjects ([str] newest-first). Kept
+        # as-is (raw) so a later Phase B LLM recap can reuse them.
+        "recent_messages": ini.get("recent_messages") or [],
+        "recent_commits": ini.get("recent_commits") or [],
     }
 
 

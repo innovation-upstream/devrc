@@ -688,7 +688,9 @@ def test_build_report_end_to_end_no_telemetry(tmp_path, monkeypatch):
     monkeypatch.setattr(isc, "gh_open_prs", lambda r: [
         {"number": 42, "title": "mail extractor", "headRefName": "feat/mail-automation"}])
     monkeypatch.setattr(isc, "gh_merged_prs", lambda r, d: [])
-    monkeypatch.setattr(isc, "session_genesis_refs", lambda root, d: [])
+    # build_report now single-walks transcripts via collect_session_records (genesis is
+    # derived from it); stub that so the orchestration test stays hermetic.
+    monkeypatch.setattr(isc, "collect_session_records", lambda root, d, n=5: [])
 
     now = 2_000.0  # last_commit at 1000 -> age 1000s -> active
     report = isc.build_report(2, repos=[str(repo)], client=None, now=now)
@@ -717,7 +719,9 @@ def test_render_emits_trunk_catchall(monkeypatch, tmp_path):
     monkeypatch.setattr(isc, "git_default_branch", lambda r: "main")
     monkeypatch.setattr(isc, "gh_open_prs", lambda r: [])
     monkeypatch.setattr(isc, "gh_merged_prs", lambda r, d: [])
-    monkeypatch.setattr(isc, "session_genesis_refs", lambda root, d: [])
+    # build_report now single-walks transcripts via collect_session_records (genesis is
+    # derived from it); stub that so the orchestration test stays hermetic.
+    monkeypatch.setattr(isc, "collect_session_records", lambda root, d, n=5: [])
 
     class FakeClient:
         def rows(self, sql):
@@ -1039,7 +1043,9 @@ def test_build_report_tmux_annotates_and_lists_unmatched(tmp_path, monkeypatch):
     monkeypatch.setattr(isc, "git_default_branch", lambda r: "main")
     monkeypatch.setattr(isc, "gh_open_prs", lambda r: [])
     monkeypatch.setattr(isc, "gh_merged_prs", lambda r, d: [])
-    monkeypatch.setattr(isc, "session_genesis_refs", lambda root, d: [])
+    # build_report now single-walks transcripts via collect_session_records (genesis is
+    # derived from it); stub that so the orchestration test stays hermetic.
+    monkeypatch.setattr(isc, "collect_session_records", lambda root, d, n=5: [])
     # Isolate the window/unmatched logic from the real codename table (tested apart).
     monkeypatch.setattr(isc, "load_scratch_codenames", lambda *a, **k: {})
 
@@ -1073,7 +1079,9 @@ def test_build_report_tmux_applies_codenames(tmp_path, monkeypatch):
     monkeypatch.setattr(isc, "git_default_branch", lambda r: "main")
     monkeypatch.setattr(isc, "gh_open_prs", lambda r: [])
     monkeypatch.setattr(isc, "gh_merged_prs", lambda r, d: [])
-    monkeypatch.setattr(isc, "session_genesis_refs", lambda root, d: [])
+    # build_report now single-walks transcripts via collect_session_records (genesis is
+    # derived from it); stub that so the orchestration test stays hermetic.
+    monkeypatch.setattr(isc, "collect_session_records", lambda root, d, n=5: [])
     monkeypatch.setattr(isc, "load_scratch_codenames", lambda *a, **k: {"scratch4": "Vapor"})
 
     panes = [{"session": "scratch4", "window": "2", "cwd": str(repo),
@@ -1093,7 +1101,9 @@ def test_build_report_tmux_no_session_marker(tmp_path, monkeypatch):
     monkeypatch.setattr(isc, "git_default_branch", lambda r: "main")
     monkeypatch.setattr(isc, "gh_open_prs", lambda r: [])
     monkeypatch.setattr(isc, "gh_merged_prs", lambda r, d: [])
-    monkeypatch.setattr(isc, "session_genesis_refs", lambda root, d: [])
+    # build_report now single-walks transcripts via collect_session_records (genesis is
+    # derived from it); stub that so the orchestration test stays hermetic.
+    monkeypatch.setattr(isc, "collect_session_records", lambda root, d, n=5: [])
 
     # No panes at all -> initiative shows [no session].
     report = isc.build_report(14, repos=[str(repo)], client=None,
@@ -1113,7 +1123,9 @@ def test_build_report_tmux_suppressed_when_no_server(tmp_path, monkeypatch):
     monkeypatch.setattr(isc, "git_default_branch", lambda r: "main")
     monkeypatch.setattr(isc, "gh_open_prs", lambda r: [])
     monkeypatch.setattr(isc, "gh_merged_prs", lambda r, d: [])
-    monkeypatch.setattr(isc, "session_genesis_refs", lambda root, d: [])
+    # build_report now single-walks transcripts via collect_session_records (genesis is
+    # derived from it); stub that so the orchestration test stays hermetic.
+    monkeypatch.setattr(isc, "collect_session_records", lambda root, d, n=5: [])
     monkeypatch.setattr(isc, "collect_tmux_panes", lambda: [])  # no server
 
     # panes=None -> live read path; collect returns [] -> column disabled.
@@ -1146,7 +1158,9 @@ def _stub_no_external_io(monkeypatch):
     monkeypatch.setattr(isc, "git_default_branch", lambda r: "main")
     monkeypatch.setattr(isc, "gh_open_prs", lambda r: [])
     monkeypatch.setattr(isc, "gh_merged_prs", lambda r, d: [])
-    monkeypatch.setattr(isc, "session_genesis_refs", lambda root, d: [])
+    # build_report now single-walks transcripts via collect_session_records (genesis is
+    # derived from it); stub that so the orchestration test stays hermetic.
+    monkeypatch.setattr(isc, "collect_session_records", lambda root, d, n=5: [])
 
 
 def test_build_report_windows_out_stale_dated_handoff(tmp_path, monkeypatch):
@@ -1190,3 +1204,257 @@ def test_build_report_keeps_stale_handoff_with_live_session(tmp_path, monkeypatc
     assert len(inis) == 1 and inis[0]["slug"] == "oldwork"
     assert inis[0]["momentum"] == "active"        # live session => touched now
     assert inis[0]["tmux_sessions"] == ["main:8-1"]
+
+
+# --------------------------------------------------------------------------- #
+# Recent user-message extraction + attribution (Phase A card legibility)
+# --------------------------------------------------------------------------- #
+import json as _json  # noqa: E402
+
+
+def _jsonl_user(text, ts, cwd="/home/u/workspace/devrc", branch="feat/x"):
+    """One transcript user-turn line (mirrors the real ~/.claude JSONL shape)."""
+    return _json.dumps({
+        "type": "user", "timestamp": ts, "cwd": cwd, "gitBranch": branch,
+        "message": {"role": "user", "content": text},
+    })
+
+
+def _write_transcript(path, entries):
+    path.write_text("\n".join(entries) + "\n")
+
+
+def test_read_session_turns_collects_turns_with_ts_cwd_branch(tmp_path):
+    p = tmp_path / "s.jsonl"
+    _write_transcript(p, [
+        _jsonl_user("<system-reminder>noise</system-reminder>   ", "2026-07-20T10:00:00Z"),
+        _jsonl_user("read handoff-foo.md and start", "2026-07-20T10:01:00Z", branch="feat/foo"),
+        _jsonl_user("do the next thing", "2026-07-20T10:02:00Z", branch="feat/foo"),
+        _jsonl_user("[Request interrupted by user]", "2026-07-20T10:03:00Z"),
+        _jsonl_user("third real turn", "2026-07-20T10:04:00Z", branch="feat/foo-2"),
+    ])
+    rec = isc._read_session_turns(str(p), 5)
+    # genesis = FIRST genuine turn (the system-reminder + interrupt turns are skipped).
+    assert rec["genesis"] == "read handoff-foo.md and start"
+    assert [t["text"] for t in rec["turns"]] == [
+        "read handoff-foo.md and start", "do the next thing", "third real turn"]
+    assert rec["turns"][0]["ts"] is not None  # ISO timestamp parsed to epoch
+    # cwd/branch come from the MOST-RECENT turn that carried them.
+    assert rec["cwd"] == "/home/u/workspace/devrc"
+    assert rec["branch"] == "feat/foo-2"
+
+
+def test_read_session_turns_keeps_only_last_n(tmp_path):
+    p = tmp_path / "s.jsonl"
+    _write_transcript(p, [
+        _jsonl_user(f"turn {i}", f"2026-07-20T10:0{i}:00Z") for i in range(6)])
+    rec = isc._read_session_turns(str(p), 2)
+    assert rec["genesis"] == "turn 0"                 # genesis independent of the window
+    assert [t["text"] for t in rec["turns"]] == ["turn 4", "turn 5"]  # last 2 only
+
+
+def test_read_session_turns_none_without_genuine_turn(tmp_path):
+    p = tmp_path / "s.jsonl"
+    _write_transcript(p, [_jsonl_user("<system-reminder>only noise</system-reminder>",
+                                      "2026-07-20T10:00:00Z")])
+    assert isc._read_session_turns(str(p), 5) is None
+
+
+def test_read_session_turns_extracts_list_content(tmp_path):
+    # content as a list of blocks -> the first text block is the turn text.
+    line = _json.dumps({
+        "type": "user", "timestamp": "2026-07-20T10:00:00Z",
+        "cwd": "/r", "gitBranch": "feat/y",
+        "message": {"role": "user",
+                    "content": [{"type": "text", "text": "block-form message"}]},
+    })
+    p = tmp_path / "s.jsonl"
+    _write_transcript(p, [line])
+    rec = isc._read_session_turns(str(p), 5)
+    assert rec["turns"][0]["text"] == "block-form message"
+
+
+def test_first_user_turn_returns_genesis(tmp_path):
+    p = tmp_path / "s.jsonl"
+    _write_transcript(p, [
+        _jsonl_user("<system-reminder>x</system-reminder>", "2026-07-20T10:00:00Z"),
+        _jsonl_user("the real first message", "2026-07-20T10:01:00Z"),
+        _jsonl_user("second", "2026-07-20T10:02:00Z"),
+    ])
+    assert isc._first_user_turn(str(p)) == "the real first message"
+
+
+def test_collect_session_records_skips_subagents_and_old(tmp_path):
+    root = tmp_path
+    good = root / "proj" / "a.jsonl"
+    good.parent.mkdir(parents=True)
+    _write_transcript(good, [_jsonl_user("hello world", "2026-07-20T10:00:00Z")])
+    sub = root / "subagents" / "b.jsonl"
+    sub.parent.mkdir(parents=True)
+    _write_transcript(sub, [_jsonl_user("sub msg", "2026-07-20T10:00:00Z")])
+    recs = isc.collect_session_records(str(root), 3650)  # wide window -> the good one in
+    genes = [r["genesis"] for r in recs]
+    assert "hello world" in genes
+    assert "sub msg" not in genes          # /subagents/ path excluded
+    # a very tight window excludes even the just-written file (mtime older than cutoff=now)
+    assert isc.collect_session_records(str(root), 0) == []
+
+
+def test_session_genesis_refs_derives_from_records(tmp_path):
+    p = tmp_path / "proj" / "a.jsonl"
+    p.parent.mkdir(parents=True)
+    _write_transcript(p, [
+        _jsonl_user("genesis line", "2026-07-20T10:00:00Z"),
+        _jsonl_user("later line", "2026-07-20T10:01:00Z"),
+    ])
+    refs = isc.session_genesis_refs(str(tmp_path), 3650)
+    assert len(refs) == 1
+    assert refs[0]["text"] == "genesis line"     # genesis, not the last turn
+    assert "mtime" in refs[0]
+
+
+def test_attribute_recent_messages_genesis_pool_desc_truncate():
+    inis = [{"slug": "foo-bar", "repo": "/r",
+             "docs": [{"path": "/r/claudedocs/handoff-foo-bar-2026-07-20.md",
+                       "date": "2026-07-20"}]}]
+    long = "y" * 250
+    records = [
+        {"genesis": "resume handoff-foo-bar-2026-07-20.md", "mtime": 1.0,
+         "cwd": None, "branch": None,
+         "turns": [{"text": "older msg", "ts": 100.0}, {"text": long, "ts": 300.0}]},
+        {"genesis": "continue handoff-foo-bar per slug", "mtime": 2.0,
+         "cwd": None, "branch": None,
+         "turns": [{"text": "newest msg", "ts": 400.0}]},
+        {"genesis": "unrelated session about weather", "mtime": 3.0,
+         "cwd": None, "branch": None,
+         "turns": [{"text": "should not appear", "ts": 999.0}]},
+    ]
+    isc.attribute_recent_messages(inis, records, ["/r"], keep=5)
+    texts = [m["text"] for m in inis[0]["recent_messages"]]
+    assert texts[0] == "newest msg"                 # DESC by ts (400 > 300 > 100)
+    assert texts[1].endswith("…") and len(texts[1]) == 200  # truncated to 200 chars
+    assert texts[2] == "older msg"
+    assert "should not appear" not in texts         # unattributed session excluded
+
+
+def test_attribute_recent_messages_branch_cwd_fallback():
+    # genesis does NOT name the handoff, but branch+cwd match -> still credited.
+    repo = "/home/u/workspace/devrc"
+    inis = [{"slug": "app-blocks", "repo": repo, "docs": []}]
+    records = [{"genesis": "just start working", "mtime": 1.0,
+                "cwd": repo, "branch": "feat/app-blocks",
+                "turns": [{"text": "branch-matched msg", "ts": 500.0}]}]
+    isc.attribute_recent_messages(inis, records, [repo])
+    assert [m["text"] for m in inis[0]["recent_messages"]] == ["branch-matched msg"]
+
+
+def test_attribute_recent_messages_branch_cwd_wrong_repo_no_credit():
+    # right branch token, WRONG cwd/repo -> no cross-repo credit (mirrors telemetry).
+    devrc, civit = "/home/u/workspace/devrc", "/home/u/workspace/civit/dp"
+    inis = [{"slug": "faro-rum-widening", "repo": civit, "docs": []}]
+    records = [{"genesis": "start", "mtime": 1.0, "cwd": devrc,
+                "branch": "feat/faro-rum-widening",
+                "turns": [{"text": "x", "ts": 1.0}]}]
+    isc.attribute_recent_messages(inis, records, [devrc, civit])
+    assert inis[0]["recent_messages"] == []
+
+
+def test_attribute_recent_messages_empty_when_no_records():
+    inis = [{"slug": "x", "repo": "/r", "docs": []}]
+    isc.attribute_recent_messages(inis, [], ["/r"])
+    assert inis[0]["recent_messages"] == []
+
+
+def test_attribute_recent_messages_dedupes_identical_boilerplate():
+    # Automated agent sessions re-inject the SAME prompt across many sessions; identical
+    # displayed lines collapse to ONE (newest ts wins), not N duplicate card rows.
+    repo = "/r"
+    inis = [{"slug": "drafter", "repo": repo,
+             "docs": [{"path": "/r/claudedocs/handoff-drafter.md", "date": None}]}]
+    boiler = "# task-spec drafter pipeline — you are the drafter"
+    records = [
+        {"genesis": "start handoff-drafter", "mtime": 1.0, "cwd": None, "branch": None,
+         "turns": [{"text": boiler, "ts": 100.0}]},
+        {"genesis": "start handoff-drafter", "mtime": 2.0, "cwd": None, "branch": None,
+         "turns": [{"text": boiler, "ts": 200.0}]},
+    ]
+    isc.attribute_recent_messages(inis, records, [repo])
+    assert inis[0]["recent_messages"] == [{"text": boiler, "ts": 200.0}]
+
+
+# --------------------------------------------------------------------------- #
+# Recent commit subjects
+# --------------------------------------------------------------------------- #
+def test_git_recent_commit_subjects_parses_and_excludes_default(monkeypatch):
+    monkeypatch.setattr(isc, "_resolve_branch_ref", lambda r, b: b)
+    monkeypatch.setattr(isc, "_ref_exists", lambda r, ref: ref == "main")
+    seen = {}
+
+    def fake_run(cmd, timeout=20.0):
+        seen["cmd"] = cmd
+        return "1783000200\x00feat: two words\n1783000100\x00fix: one\n"
+
+    monkeypatch.setattr(isc, "_run", fake_run)
+    out = isc.git_recent_commit_subjects("/r", "feat/x", 7, "main", limit=5)
+    assert out == [(1783000200.0, "feat: two words"), (1783000100.0, "fix: one")]
+    assert "--not" in seen["cmd"] and "main" in seen["cmd"]  # default excluded
+    assert any("%ct%x00%s" in c for c in seen["cmd"])        # NUL-separated format
+
+
+def test_git_recent_commit_subjects_caps_at_limit(monkeypatch):
+    monkeypatch.setattr(isc, "_resolve_branch_ref", lambda r, b: b)
+    monkeypatch.setattr(isc, "_ref_exists", lambda r, ref: False)
+    monkeypatch.setattr(isc, "_run",
+                        lambda cmd, timeout=20.0: "".join(
+                            f"{1000 + i}\x00subject {i}\n" for i in range(10)))
+    out = isc.git_recent_commit_subjects("/r", "feat/x", 7, "main", limit=3)
+    assert len(out) == 3
+
+
+def test_git_recent_commit_subjects_default_branch_and_unresolvable_empty(monkeypatch):
+    assert isc.git_recent_commit_subjects("/r", "main", 7, "main") == []  # default branch
+    monkeypatch.setattr(isc, "_resolve_branch_ref", lambda r, b: None)
+    assert isc.git_recent_commit_subjects("/r", "feat/x", 7, "main") == []  # no such ref
+
+
+def test_attribute_git_populates_recent_commits(monkeypatch):
+    repo = "/home/u/workspace/devrc"
+    inis = [{"slug": "mail-automation", "repo": repo}]
+    monkeypatch.setattr(isc, "git_branches", lambda r: ["feat/mail-automation", "main"])
+    monkeypatch.setattr(isc, "git_default_branch", lambda r: "main")
+    monkeypatch.setattr(isc, "git_commits_in_window", lambda r, b, d, db=None: (2, 1000.0))
+    monkeypatch.setattr(isc, "gh_open_prs", lambda r: [])
+    monkeypatch.setattr(isc, "gh_merged_prs", lambda r, d: [])
+    monkeypatch.setattr(
+        isc, "git_recent_commit_subjects",
+        lambda r, b, d, db=None, limit=5:
+            [(300.0, "newer subject"), (100.0, "older subject")]
+            if b == "feat/mail-automation" else [])
+    isc.attribute_git(inis, 7)
+    assert inis[0]["recent_commits"] == ["newer subject", "older subject"]  # newest-first
+
+
+# --------------------------------------------------------------------------- #
+# tmux task titles (the render-time `live: <task>` signal)
+# --------------------------------------------------------------------------- #
+def test_match_tmux_populates_tmux_tasks():
+    civit = "/home/u/workspace/civit/dp"
+    inis = [{"slug": "faro-rum-widening", "title": "Faro RUM widening", "repo": civit}]
+    panes = [{"session": "scratch4", "window": "2", "cwd": civit, "command": "claude",
+              "title": "Wire Faro to main civitai app"}]
+    isc.match_tmux_to_initiatives(inis, panes, [civit], codenames={"scratch4": "Vapor"})
+    assert inis[0]["tmux_tasks"] == ["Wire Faro to main civitai app"]
+    assert inis[0]["tmux_sessions"] == {"Vapor-2"}
+
+
+def test_match_tmux_tasks_dedupe_and_absent_when_unmatched():
+    civit = "/home/u/workspace/civit/dp"
+    inis = [{"slug": "sysredis-buffer", "title": "sysRedis buffer", "repo": civit}]
+    panes = [
+        {"session": "8", "window": "2", "cwd": civit, "command": "claude",
+         "title": "Continue sysredis buffer work"},
+        {"session": "8", "window": "2", "cwd": civit, "command": "claude",
+         "title": "Continue sysredis buffer work"},  # identical title -> de-duped
+    ]
+    isc.match_tmux_to_initiatives(inis, panes, [civit])
+    assert inis[0]["tmux_tasks"] == ["Continue sysredis buffer work"]
