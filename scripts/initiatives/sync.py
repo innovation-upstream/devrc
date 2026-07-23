@@ -45,6 +45,11 @@ import sys
 from datetime import date, datetime, timezone
 from pathlib import Path
 
+# Sibling module (same directory) — the LLM recap cache (Phase B2). A plain import
+# resolves both as a script (sys.path[0] = this dir) and under the tests (which add the
+# initiatives dir to sys.path). Kept pure-logic vs I/O internally; see recap.py.
+import recap  # noqa: E402
+
 # The scan we shell out to (the data-source contract). Absolute so systemd/nix-shell
 # invocations (any cwd) resolve it; the scan manages its OWN sys.path internally.
 SCAN_PATH = Path(__file__).resolve().parents[1] / "session-analysis" / "initiative-scan.py"
@@ -371,6 +376,11 @@ def ensure_schema(conn) -> None:
         # Serialize concurrent schema setup (released at COMMIT below).
         cur.execute("SELECT pg_advisory_xact_lock(%s)", (SCHEMA_LOCK_KEY,))
         cur.execute(TABLES_DDL)
+        # The standalone LLM-recap cache table (Phase B2). Created here, under the SAME
+        # advisory lock, so the viewer's LEFT JOIN is always valid — but it is NOT part of
+        # the snapshot/views (no view-marker bump), so it persists across snapshots as a
+        # true cache. See recap.py.
+        recap.create_recaps_table(cur)
         _ensure_view(cur, "initiatives.current", VIEW_DDL, VIEW_COMMENT)
         _ensure_view(cur, "initiatives.latest", LATEST_VIEW_DDL, LATEST_VIEW_COMMENT)
     conn.commit()
@@ -529,13 +539,19 @@ def main(argv=None) -> int:
     MailDB = _import_maildb()
     with MailDB() as db:
         ensure_schema(db.conn)
+        # Best-effort recap (re)generation BEFORE the write. Fully non-breaking: a model
+        # outage/slow/error is caught inside and the connection rolled back, so the
+        # UNCONDITIONAL write_snapshot below always runs. No-op (beyond the table) until
+        # INITIATIVES_RECAP_ENABLED is set + the B1 vLLM service is wired.
+        recap_stats = recap.maybe_sync_recaps(db.conn, rows)
         snapshot_id = write_snapshot(db.conn, meta, rows)
         pruned = prune_old_snapshots(db.conn)
 
     tel = "on" if meta["telemetry_available"] else "OFF (handoff+git only)"
     pruned_note = f", pruned {pruned} snapshot(s) >{RETENTION_DAYS}d" if pruned else ""
     print(f"initiatives-sync: wrote snapshot #{snapshot_id} — {len(rows)} initiative "
-          f"rows (host={host}, days={a.days}, telemetry {tel}){pruned_note}")
+          f"rows (host={host}, days={a.days}, telemetry {tel}){pruned_note}"
+          f"{recap.format_recap_note(recap_stats)}")
     return 0
 
 

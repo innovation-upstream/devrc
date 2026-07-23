@@ -691,6 +691,131 @@ def test_model_to_json_flat_includes_recent_fields():
     assert v["recent_commits"] == ["c"]
 
 
+# --- Phase B: LLM recap as the primary "what this is" line ------------------- #
+def test_view_carries_recap_and_defaults_empty():
+    v = viewer.build_model([_row(slug="s", recap="A one-line plain recap.")],
+                           now=NOW)["flat"][0]
+    assert v["recap"] == "A one-line plain recap."
+    # absent recap normalizes to "" (so the JS `v.recap || v.summary` falls back cleanly)
+    v2 = viewer.build_model([_row(slug="s2")], now=NOW)["flat"][0]
+    assert v2["recap"] == ""
+
+
+def test_model_to_json_flat_includes_recap():
+    j = viewer.model_to_json(
+        viewer.build_model([_row(slug="a", recap="the recap")], now=NOW), None)
+    assert j["flat"][0]["recap"] == "the recap"
+
+
+def test_js_uses_recap_as_primary_line_with_summary_fallback():
+    # The card FACE prefers the recap and falls back to the deterministic summary.
+    assert "v.recap || v.summary" in viewer._JS
+
+
+def test_js_stat_strip_is_removed():
+    # The numeric stat strip (N commits · N merged · N sess · N ev) is gone from the card.
+    assert "tag stat" not in viewer._JS
+    assert " commits · " not in viewer._JS
+    assert " merged · " not in viewer._JS
+    assert " sess · " not in viewer._JS
+    # …and its dead CSS rule is removed too.
+    assert ".tag.stat" not in viewer._CSS
+
+
+def test_render_html_embeds_recap_when_present():
+    rows = [_row(slug="s", recap="A homelab-served recap of where this stands.",
+                 summary="the deterministic summary")]
+    html = viewer.render_html(viewer.build_model(rows, now=NOW))
+    assert "A homelab-served recap of where this stands." in html   # recap in the payload
+    # the JS selection (recap-over-summary) is present in the page
+    assert "v.recap || v.summary" in html
+
+
+def test_render_html_falls_back_to_summary_when_no_recap():
+    rows = [_row(slug="s", summary="deterministic summary fallback line")]
+    html = viewer.render_html(viewer.build_model(rows, now=NOW))
+    assert "deterministic summary fallback line" in html   # summary still embedded
+    # recap key present-but-empty in the payload (never breaks the fallback)
+    j = viewer.model_to_json(viewer.build_model(rows, now=NOW), None)
+    assert j["flat"][0]["recap"] == ""
+
+
+def test_render_html_neutralizes_untrusted_recap_text():
+    rows = [_row(slug="s", recap="<script>alert('recap')</script>")]
+    html = viewer.render_html(viewer.build_model(rows, now=NOW))
+    assert "<script>alert('recap')</script>" not in html   # never raw
+    assert "u003cscript" in html                            # neutralized as <
+
+
+# --- attach_recaps (I/O: LEFT-JOIN the standalone recaps cache) -------------- #
+class _RecapCursor:
+    def __init__(self, conn):
+        self._conn = conn
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def execute(self, sql, params=None):
+        norm = " ".join(sql.split())
+        self._conn.executed.append(norm)
+        if self._conn.raise_on and self._conn.raise_on in norm:
+            import psycopg2
+            raise psycopg2.Error("recaps read failed")
+
+    def fetchone(self):
+        return (self._conn.regclass,)
+
+    def fetchall(self):
+        return list(self._conn.recap_rows)
+
+
+class _RecapConn:
+    def __init__(self, regclass="initiatives.recaps", recap_rows=(), raise_on=None):
+        self.regclass = regclass
+        self.recap_rows = recap_rows
+        self.raise_on = raise_on
+        self.executed = []
+        self.rollbacks = 0
+
+    def cursor(self, cursor_factory=None):
+        return _RecapCursor(self)
+
+    def rollback(self):
+        self.rollbacks += 1
+
+
+def test_attach_recaps_joins_by_repo_slug():
+    rows = [{"repo": "/r", "slug": "a"}, {"repo": "/r", "slug": "b"}]
+    conn = _RecapConn(recap_rows=[
+        {"repo": "/r", "slug": "a", "recap": "recap for a"},
+        {"repo": "/r", "slug": "b", "recap": None},   # a row with no recap yet
+    ])
+    ok = viewer.attach_recaps(conn, rows)
+    assert ok is True
+    assert rows[0]["recap"] == "recap for a"
+    assert rows[1]["recap"] is None   # NULL recap → stays None (card falls back to summary)
+
+
+def test_attach_recaps_absent_table_leaves_recap_none():
+    rows = [{"repo": "/r", "slug": "a"}]
+    conn = _RecapConn(regclass=None)   # to_regclass → NULL (table not created yet)
+    ok = viewer.attach_recaps(conn, rows)
+    assert ok is False
+    assert rows[0]["recap"] is None    # never blank/missing → fallback to summary works
+
+
+def test_attach_recaps_db_error_rolls_back_and_is_fail_soft():
+    rows = [{"repo": "/r", "slug": "a"}]
+    conn = _RecapConn(raise_on="SELECT repo, slug, recap")
+    ok = viewer.attach_recaps(conn, rows)
+    assert ok is False
+    assert conn.rollbacks == 1
+    assert rows[0]["recap"] is None
+
+
 # --- Card-FACE substantive-prompt selection (Problem 2) --------------------- #
 def test_is_trivial_prompt_flags_boilerplate_and_short():
     for triv in ["dispatch", "Proceed.", "yes", "go", " submitted ", "OK", "merged",

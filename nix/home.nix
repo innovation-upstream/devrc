@@ -774,6 +774,15 @@ in
         # would otherwise only land on "workbench" by falling through
         # gethostname()=="nixos". Explicit here so a future laptop copy can't mis-tag.
         "ACTIVITY_HOST=workbench"
+        # Phase B — LLM recap generation (best-effort; the sync NEVER fails if the model
+        # is down/slow — cards fall back to the deterministic summary). Points at the
+        # homelab vLLM (ns promptver, svc/vllm-recap:8000, served model "recap"); the
+        # generator kubectl-port-forwards to it on an ephemeral local port.
+        "INITIATIVES_RECAP_ENABLED=1"
+        "RECAP_NAMESPACE=promptver"
+        "RECAP_SERVICE=svc/vllm-recap"
+        "RECAP_SERVICE_PORT=8000"
+        "RECAP_MODEL=recap"
         "HOME=%h"
       ];
       ExecStart = "${pkgs.bash}/bin/bash %h/workspace/devrc/scripts/initiatives/run-sync.sh";
