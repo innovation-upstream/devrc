@@ -467,6 +467,16 @@ def branch_matches_slug(branch: str, slug: str) -> bool:
     return set(slug_toks).issubset(btoks)
 
 
+def _specificity_key(ini: dict) -> tuple:
+    """Ranking key for "most-specific initiative": most slug tokens, then longest raw
+    slug, then lexical. This is the EXACT tie-break `best_matching_initiative` awards
+    branch/PR/telemetry credit by; factored out so message single-crediting
+    (attribute_recent_messages) ranks siblings identically instead of inventing a
+    second rule."""
+    slug = ini.get("slug", "")
+    return (len(slug_tokens(slug)), len(slug), slug)
+
+
 def best_matching_initiative(branch: str, initiatives: list[dict]) -> dict | None:
     """Pick the single most-specific initiative whose slug matches `branch`.
 
@@ -474,19 +484,14 @@ def best_matching_initiative(branch: str, initiatives: list[dict]) -> dict | Non
     return the one with the MOST slug tokens (longest / most-specific), so a
     branch like `app-blocks-followups` is credited to the `app-blocks-followups`
     initiative, NOT also to the broader `app-blocks` sibling. Ties (equal token
-    count) are broken by the longer raw slug, then lexically, for determinism.
-    None if nothing matches.
+    count) are broken by the longer raw slug, then lexically, for determinism
+    (`_specificity_key`). None if nothing matches.
     """
     candidates = [ini for ini in initiatives
                   if branch_matches_slug(branch, ini.get("slug", ""))]
     if not candidates:
         return None
-    return max(
-        candidates,
-        key=lambda ini: (len(slug_tokens(ini.get("slug", ""))),
-                         len(ini.get("slug", "")),
-                         ini.get("slug", "")),
-    )
+    return max(candidates, key=_specificity_key)
 
 
 def classify_momentum(last_ts: float | None, now: float | None = None) -> str:
@@ -1138,16 +1143,23 @@ def attribute_recent_messages(initiatives: list[dict], records: list[dict],
     """Mutate each initiative with `recent_messages` = [{text, ts}], newest-first, top-N.
 
     Bring the conversation onto the card: surface the user's OWN recent prompts. A
-    session's recent user turns are credited to an initiative when EITHER:
+    session is a candidate for an initiative when EITHER:
       • genesis  — its genesis text names a handoff of the initiative (the SAME rule as
-        attribute_sessions; a genesis naming two handoffs credits both), OR
+        attribute_sessions), OR
       • branch+cwd — its gitBranch is the initiative's most-specific match
         (best_matching_initiative) AND its cwd resolves to the initiative's repo
         (resolve_cwd_repo) — catching feature-branch sessions the genesis missed.
     Both predicates are the SAME ones the scan already uses for session/telemetry
-    attribution (no new scheme). Turns are pooled across the initiative's attributed
-    sessions, sorted by timestamp DESC (a None ts sorts last), de-duplicated, truncated,
-    and the top-N kept."""
+    attribution (no new scheme).
+
+    SINGLE-BEST-CREDIT: unlike session_count (attribute_sessions), a session's MESSAGES
+    are credited to exactly ONE initiative — its MOST-SPECIFIC candidate (`_specificity_key`,
+    the same ranking `best_matching_initiative` uses for branch/PR/telemetry credit). This
+    is what stops a session whose genesis names `handoff-app-blocks-comfy-cloud-scaffold.md`
+    from ALSO crediting the generic `app-blocks` sibling (whose `handoff-app-blocks` name is
+    a prefix substring) — the prompt would otherwise show on every prefix-sharing sibling.
+    Turns for the winning initiative are pooled across its attributed sessions, sorted by
+    timestamp DESC (a None ts sorts last), de-duplicated, truncated, and the top-N kept."""
     wt_map = wt_map or {}
     inis_by_repo: dict[str, list[dict]] = {}
     names_by_id: dict[int, set[str]] = {}
@@ -1164,20 +1176,25 @@ def attribute_recent_messages(initiatives: list[dict], records: list[dict],
         turns = r.get("turns") or []
         if not turns:
             continue
-        credited: set[int] = set()
+        candidates: list[dict] = []
         genesis = (r.get("genesis") or "").lower()
         if genesis:
             for ini in initiatives:
                 if any(nm in genesis for nm in names_by_id[id(ini)]):
-                    credited.add(id(ini))
+                    candidates.append(ini)
         branch = (r.get("branch") or "").strip()
         repo = resolve_cwd_repo(r.get("cwd"), repos, wt_map)
         if branch and repo is not None:
             best = best_matching_initiative(branch, inis_by_repo.get(repo, []))
             if best is not None:
-                credited.add(id(best))
-        for iid in credited:
-            acc[iid].extend(turns)
+                candidates.append(best)  # a repeat of a genesis candidate is harmless to max
+        if not candidates:
+            continue
+        # Single-best-credit: the session's messages go to its MOST-SPECIFIC candidate
+        # only (same ranking as best_matching_initiative), so sibling slugs sharing a
+        # prefix don't each surface the same prompt.
+        winner = max(candidates, key=_specificity_key)
+        acc[id(winner)].extend(turns)
 
     for ini in initiatives:
         # Newest-first; a None ts sorts after any real ts (present-flag as primary key).
