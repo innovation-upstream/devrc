@@ -1046,11 +1046,11 @@ def test_provider_passes_unmatched_through_to_model():
 
 
 # --------------------------------------------------------------------------- #
-# "By recency" view — the 3rd toggle mode. Bucketing is CLIENT-SIDE JS (the buckets are in
-# the viewer's BROWSER-LOCAL timezone, only known client-side), factored into the DOM-free
-# `viewer._RECENCY_JS` snippet so these tests exercise the REAL code via node — not a Python
-# replica. The Python side (build_model/model_to_json) is UNCHANGED; `last_touch` already
-# ships to the client as an ISO string, so no server-side render-model change was needed.
+# "By recency" view — the 3rd toggle mode (and the DEFAULT view). Bucketing is CLIENT-SIDE JS,
+# ROLLING now-relative windows on the age `now - last_touch` (tz-independent duration math),
+# factored into the DOM-free `viewer._RECENCY_JS` snippet so these tests exercise the REAL code
+# via node — not a Python replica. The Python side (build_model/model_to_json) is UNCHANGED;
+# `last_touch` already ships to the client as an ISO string, so no server-side change was needed.
 # --------------------------------------------------------------------------- #
 import os as _os                # noqa: E402
 import shutil as _shutil        # noqa: E402
@@ -1088,65 +1088,60 @@ def _bucket_of(ts_ms, now_ms, tz="UTC"):
     return _node_recency(body, tz=tz)
 
 
-def test_recency_bucket_boundaries_utc():
-    # now = 2026-07-22T12:00:00Z; all cutoffs are LOCAL midnights (UTC here). Assert every
-    # boundary lands on the right side: just-before/after midnight, yesterday edge, week edge.
+_H_MS = 3600000       # 1 hour in ms
+_D_MS = 86400000      # 1 day in ms
+
+
+def test_recency_bucket_boundaries_rolling():
+    # Rolling now-relative windows on the AGE (now - ts): each edge is EXCLUSIVE on the narrow
+    # side, so exactly-1h/24h/72h/7d ages fall to the NEXT-wider bucket. Assert both sides of
+    # every boundary (just-under stays, exactly-on tips over).
     now = _epoch_ms(2026, 7, 22, 12)
-    assert _bucket_of(_epoch_ms(2026, 7, 22, 0, 0, 0), now) == "today"       # midnight today
-    assert _bucket_of(now, now) == "today"                                   # noon today
-    assert _bucket_of(_epoch_ms(2026, 7, 21, 23, 59, 59), now) == "yesterday"  # 1s before midnight
-    assert _bucket_of(_epoch_ms(2026, 7, 21, 12), now) == "yesterday"        # yesterday noon
-    assert _bucket_of(_epoch_ms(2026, 7, 21, 0, 0, 0), now) == "yesterday"   # yesterday midnight
-    assert _bucket_of(_epoch_ms(2026, 7, 20, 23, 59, 59), now) == "week"     # 1s before yest edge
-    assert _bucket_of(_epoch_ms(2026, 7, 18, 12), now) == "week"             # mid this week
-    assert _bucket_of(_epoch_ms(2026, 7, 15, 0, 0, 0), now) == "week"        # 7-days-ago midnight
-    assert _bucket_of(_epoch_ms(2026, 7, 14, 23, 59, 59), now) == "older"    # 1s before week edge
-    assert _bucket_of(_epoch_ms(2026, 7, 1, 12), now) == "older"             # well older
-    assert _bucket_of(None, now) == "unknown"                                # missing last_touch
+    assert _bucket_of(now, now) == "hour"                        # age 0
+    assert _bucket_of(now - (_H_MS - 1000), now) == "hour"       # 59m59s -> still < 1h
+    assert _bucket_of(now - _H_MS, now) == "day"                 # exactly 1h -> 24h window
+    assert _bucket_of(now - (24 * _H_MS - 1000), now) == "day"   # just under 24h
+    assert _bucket_of(now - 24 * _H_MS, now) == "three_days"     # exactly 24h -> 72h window
+    assert _bucket_of(now - (72 * _H_MS - 1000), now) == "three_days"  # just under 72h
+    assert _bucket_of(now - 72 * _H_MS, now) == "week"           # exactly 72h -> 7d window
+    assert _bucket_of(now - (7 * _D_MS - 1000), now) == "week"   # just under 7d
+    assert _bucket_of(now - 7 * _D_MS, now) == "older"           # exactly 7d -> older
+    assert _bucket_of(now - 30 * _D_MS, now) == "older"          # well older
+    assert _bucket_of(None, now) == "unknown"                    # missing last_touch
 
 
-def test_recency_bucket_is_browser_local_tz():
-    # The SAME absolute instant buckets differently by the viewer's local tz — proving the
-    # cutoffs are LOCAL midnights, not UTC. now = 2026-07-22T03:00Z (= 2026-07-21 23:00 EDT);
-    # ts = 2026-07-21T05:00Z (= 2026-07-21 01:00 EDT). UTC -> yesterday; New York -> today.
+def test_recency_bucket_is_tz_independent():
+    # Rolling windows are pure now-ts DURATION math, so the SAME absolute instants bucket
+    # IDENTICALLY regardless of the viewer's local tz — the old calendar/local-midnight scheme
+    # was tz-sensitive; this proves that sensitivity is gone (no local-midnight/DST math left).
     now = _epoch_ms(2026, 7, 22, 3)
-    ts = _epoch_ms(2026, 7, 21, 5)
-    assert _bucket_of(ts, now, tz="UTC") == "yesterday"
-    assert _bucket_of(ts, now, tz="America/New_York") == "today"
-
-
-def test_recency_bucket_is_dst_safe():
-    # Local-calendar arithmetic (new Date(y,mo,d-n)) not fixed-24h subtraction, so a midnight
-    # cutoff can't drift across a DST transition. now = 2026-11-02 12:00 EST (day after the
-    # Nov-1 fall-back, a 25h day); ts = 2026-11-01 00:30 EST is genuinely YESTERDAY — a naive
-    # todayStart-24h boundary would land at Nov-1 01:00 and misfile it as "week".
-    body = ("var now = new Date(2026,10,2,12,0,0).getTime();"
-            "var ts  = new Date(2026,10,1,0,30,0).getTime();"
-            "console.log(JSON.stringify(recencyBucketKey(ts, now)));")
-    assert _node_recency(body, tz="America/New_York") == "yesterday"
+    ts = now - 22 * _H_MS   # 22h old -> 'day' in every timezone
+    for tz in ("UTC", "America/New_York", "Asia/Kolkata"):
+        assert _bucket_of(ts, now, tz=tz) == "day"
 
 
 def test_recency_bucketize_omits_empty_and_preserves_input_order():
     # bucketize a search-filtered, already-DESC flat list: assert (1) buckets come out in
-    # today->yesterday->week->older->unknown order, (2) an empty bucket (no yesterday item)
-    # is OMITTED, (3) within-bucket order preserves the DESC input (the caller feeds data.flat,
-    # which build_model already sorts last_touch-DESC), (4) a null last_touch -> unknown, last.
+    # hour->day->three_days->week->older->unknown order, (2) empty buckets (no 'day'/'week'
+    # item here) are OMITTED, (3) within-bucket order preserves the DESC input (the caller feeds
+    # data.flat, which build_model already sorts last_touch-DESC), (4) null last_touch -> unknown, last.
     now = _epoch_ms(2026, 7, 22, 12)
     views = [
-        {"slug": "a1", "last_touch": _iso(2026, 7, 22, 10)},   # today   (newer)
-        {"slug": "a2", "last_touch": _iso(2026, 7, 22, 2)},    # today   (older)
-        {"slug": "w1", "last_touch": _iso(2026, 7, 18, 12)},   # week
-        {"slug": "o1", "last_touch": _iso(2026, 7, 1, 12)},    # older
-        {"slug": "u1", "last_touch": None},                    # unknown (null)
+        {"slug": "h1", "last_touch": _iso(2026, 7, 22, 11, 50)},  # hour       (10m, newer)
+        {"slug": "h2", "last_touch": _iso(2026, 7, 22, 11, 10)},  # hour       (50m, older)
+        {"slug": "t1", "last_touch": _iso(2026, 7, 20, 12)},      # three_days (48h)
+        {"slug": "o1", "last_touch": _iso(2026, 7, 1, 12)},       # older
+        {"slug": "u1", "last_touch": None},                       # unknown (null)
     ]
     body = ("var NOW=%d; var VIEWS=%s;"
             "console.log(JSON.stringify(bucketizeRecency(VIEWS, NOW).map(function(g){"
             "return {key:g.key, slugs:g.items.map(function(v){return v.slug;})};})));"
             ) % (now, json.dumps(views))
     got = _node_recency(body)
-    assert [g["key"] for g in got] == ["today", "week", "older", "unknown"]  # yesterday omitted
-    assert got[0]["slugs"] == ["a1", "a2"]  # within-bucket DESC input order preserved
-    assert got[1]["slugs"] == ["w1"]
+    # 'day' and 'week' omitted (no items); order is narrowest->widest then unknown last.
+    assert [g["key"] for g in got] == ["hour", "three_days", "older", "unknown"]
+    assert got[0]["slugs"] == ["h1", "h2"]  # within-bucket DESC input order preserved
+    assert got[1]["slugs"] == ["t1"]
     assert got[2]["slugs"] == ["o1"]
     assert got[3]["slugs"] == ["u1"]        # unknown bucket last
 
@@ -1156,10 +1151,10 @@ def test_recency_bucketize_parses_space_separated_last_touch():
     # (NOT ISO 'T'). bucketize must normalize it so it buckets correctly in EVERY engine (not
     # just V8) — a naive new Date(space-string) returns NaN in Firefox → everything 'unknown'.
     now = _epoch_ms(2026, 7, 22, 12)
-    views = [{"slug": "s", "last_touch": "2026-07-22 10:00:00.123456+00:00"}]  # today, space-sep
+    views = [{"slug": "s", "last_touch": "2026-07-22 10:00:00.123456+00:00"}]  # 2h old, space-sep
     body = ("console.log(JSON.stringify(bucketizeRecency(%s, %d).map(function(g){"
             "return g.key;})));") % (json.dumps(views), now)
-    assert _node_recency(body) == ["today"]
+    assert _node_recency(body) == ["day"]   # 2h -> 'day' (Past 24 hours); normalized correctly
 
 
 def test_recency_bucketize_all_empty_returns_no_buckets():
@@ -1177,16 +1172,25 @@ def test_render_html_has_three_way_toggle():
     assert 'id="view-flat"' in html
     assert 'id="view-grouped"' in html
     assert 'id="view-recency"' in html
-    # Bucket labels are embedded (RECENCY_BUCKETS in the inlined snippet).
-    assert "Earlier this week" in html and "Yesterday" in html and "Older" in html
+    # Rolling-bucket labels are embedded (RECENCY_BUCKETS in the inlined snippet).
+    assert "Past hour" in html and "Past 24 hours" in html and "Older" in html
 
 
-def test_js_recency_toggle_default_and_persistence():
+def test_js_recency_is_default_and_storage_key_bumped():
     js = viewer._JS
-    # default flat: an unknown/legacy stored value falls back via the VALID_VIEWS allowlist.
-    assert "VALID_VIEWS" in js and "VALID_VIEWS[storedView] ? storedView : 'flat'" in js
-    # the recency choice is persisted under the SAME key as flat/grouped.
+    # The resolved default view is now 'recency' (was 'flat'); an unknown/legacy stored value
+    # falls back via the VALID_VIEWS allowlist to recency.
+    assert "VALID_VIEWS" in js and "VALID_VIEWS[storedView] ? storedView : 'recency'" in js
+    assert "VALID_VIEWS[storedView] ? storedView : 'flat'" not in js
+    # The storage key was bumped to a v2 name: a browser that persisted the OLD default ('flat')
+    # under the v1 key reads NOTHING under the v2 key (localStorage is per-key), so storedView is
+    # null and it falls to the recency default rather than being pinned to the stale 'flat'.
+    assert "VIEW_KEY = 'initiatives-view-v2'" in js
+    assert "VIEW_KEY = 'initiatives-view'" not in js   # the v1 key is fully gone (no stale read)
+    # the choice is still persisted, and flat/grouped stay selectable + sticky.
     assert "localStorage.setItem(VIEW_KEY, 'recency')" in js
+    assert "localStorage.setItem(VIEW_KEY, 'flat')" in js
+    assert "localStorage.setItem(VIEW_KEY, 'grouped')" in js
     # the snippet was inlined (placeholder substituted), so the page can call it.
     assert "__RECENCY_JS__" not in js
     assert "bucketizeRecency" in js and "recencyBucketKey" in js
