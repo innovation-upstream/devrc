@@ -1206,6 +1206,36 @@ def test_build_report_keeps_stale_handoff_with_live_session(tmp_path, monkeypatc
     assert inis[0]["tmux_sessions"] == ["main:8-1"]
 
 
+def test_build_report_last_session_from_user_turn_not_mtime(tmp_path, monkeypatch):
+    # HOT-PATH GUARD for the false-active bug: build_report inlines the genesis dict from
+    # collect_session_records; it MUST carry last_user_ts so last_session times from the
+    # last genuine user turn, not the transcript's fs-mtime (which Claude Code bumps on an
+    # in-place metadata rewrite with zero new work). Pre-fix, mtime (~30m ago) read active;
+    # post-fix, the 20-day-old last user turn reads stalled. The exact clawgate-chat-polish
+    # case, exercised through the real build_report path (not just attribute_sessions).
+    import calendar
+    now = float(calendar.timegm((2026, 7, 25, 0, 0, 0, 0, 0, 0)))
+    repo = tmp_path / "r"
+    (repo / "claudedocs").mkdir(parents=True)
+    (repo / "claudedocs" / "handoff-widget-2026-07-01.md").write_text(
+        "# Handoff: widget\n## Next steps\n1. go\n")   # dated 07-01 -> doc freshness stalled too
+    _stub_no_external_io(monkeypatch)
+    old_turn = now - 20 * isc.DAY                       # ~2026-07-05, a genuine old interaction
+    rec = {"genesis": "resume handoff-widget-2026-07-01.md",
+           "mtime": now - 1800,                         # in-place-rewrite bump: ~30m ago
+           "last_user_ts": old_turn,
+           "cwd": str(repo), "branch": "main",
+           "turns": [{"text": "resume handoff-widget-2026-07-01.md", "ts": old_turn}]}
+    monkeypatch.setattr(isc, "collect_session_records", lambda root, d, n=5: [rec])
+
+    report = isc.build_report(30, repos=[str(repo)], client=None, now=now)
+    ini = report["by_repo"][str(repo)][0]
+    assert ini["slug"] == "widget"
+    assert ini["session_count"] == 1                    # attribution unchanged
+    assert ini["last_session"] == old_turn              # NOT rec["mtime"]
+    assert ini["momentum"] == "stalled"                 # would be "active" off the mtime
+
+
 # --------------------------------------------------------------------------- #
 # Recent user-message extraction + attribution (Phase A card legibility)
 # --------------------------------------------------------------------------- #
@@ -1311,6 +1341,116 @@ def test_session_genesis_refs_derives_from_records(tmp_path):
     assert len(refs) == 1
     assert refs[0]["text"] == "genesis line"     # genesis, not the last turn
     assert "mtime" in refs[0]
+
+
+# --------------------------------------------------------------------------- #
+# last_user_ts — momentum from the last genuine user turn, NOT transcript mtime.
+# (Claude Code rewrites .jsonl in place for metadata → mtime bumps with zero new
+#  work → an idle session reads as freshly touched → false `active`. Mirrors the
+#  doc_touch_epoch mtime-avoidance fix.)
+# --------------------------------------------------------------------------- #
+def test_read_session_turns_carries_last_user_ts(tmp_path):
+    # last_user_ts = MAX epoch across ALL genuine user turns, independent of the
+    # n-turn window and of the (noise) turns that get skipped.
+    p = tmp_path / "s.jsonl"
+    _write_transcript(p, [
+        _jsonl_user("<system-reminder>noise</system-reminder>", "2026-07-05T09:59:00Z"),
+        _jsonl_user("read handoff-foo.md and start", "2026-07-05T10:00:00Z"),
+        _jsonl_user("do the next thing", "2026-07-05T10:05:00Z"),
+    ])
+    rec = isc._read_session_turns(str(p), 1)   # tiny window; last_user_ts must ignore it
+    assert rec["last_user_ts"] == isc._iso_to_epoch("2026-07-05T10:05:00Z")
+    assert len(rec["turns"]) == 1              # window kept only the last turn
+
+
+def test_read_session_turns_last_user_ts_none_without_timestamp(tmp_path):
+    # A genuine turn whose `timestamp` is absent -> last_user_ts None (fallback path),
+    # but the record is still returned (genesis present).
+    line = _json.dumps({"type": "user",
+                        "message": {"role": "user", "content": "a real turn, no ts"}})
+    p = tmp_path / "s.jsonl"
+    _write_transcript(p, [line])
+    rec = isc._read_session_turns(str(p), 5)
+    assert rec is not None and rec["genesis"] == "a real turn, no ts"
+    assert rec["last_user_ts"] is None
+
+
+def test_session_genesis_refs_carries_last_user_ts_below_mtime(tmp_path):
+    # The clawgate reproduction at the walk level: the file's mtime is "now" (just
+    # written) but its last genuine user turn is 18 days old -> last_user_ts is the
+    # OLD epoch, far below mtime.
+    p = tmp_path / "proj" / "a.jsonl"
+    p.parent.mkdir(parents=True)
+    _write_transcript(p, [
+        _jsonl_user("resume handoff-clawgate-chat-polish-2026-07-05.md", "2026-07-05T10:00:00Z"),
+        _jsonl_user("last real turn that day", "2026-07-05T11:00:00Z"),
+    ])
+    refs = isc.session_genesis_refs(str(tmp_path), 3650)
+    assert len(refs) == 1
+    assert refs[0]["last_user_ts"] == isc._iso_to_epoch("2026-07-05T11:00:00Z")
+    # file was just created -> its mtime is "now", strictly newer than the 2026-07-05 turn.
+    assert refs[0]["mtime"] > refs[0]["last_user_ts"]
+
+
+def test_attribute_sessions_times_last_session_from_user_turn_not_mtime():
+    # The exact clawgate-chat-polish bug: mtime bumped to ~53m ago by an in-place
+    # rewrite, but the last genuine user turn was 18d ago. last_session must be the
+    # OLD user-turn epoch (-> stalled), NOT the recent mtime (-> false active).
+    now = isc._iso_to_epoch("2026-07-23T10:00:00Z")
+    old_turn = isc._iso_to_epoch("2026-07-05T10:00:00Z")   # 18 days before `now`
+    recent_mtime = now - 53 * 60                            # in-place-rewrite bump
+    inis = [{"slug": "clawgate-chat-polish", "docs": [
+        {"path": "/r/claudedocs/handoff-clawgate-chat-polish-2026-07-05.md",
+         "date": "2026-07-05"}]}]
+    genesis = [{"text": "resume handoff-clawgate-chat-polish-2026-07-05.md",
+                "mtime": recent_mtime, "last_user_ts": old_turn}]
+    isc.attribute_sessions(inis, genesis)
+    assert inis[0]["session_count"] == 1
+    assert inis[0]["last_session"] == old_turn              # NOT recent_mtime
+    assert isc.classify_momentum(inis[0]["last_session"], now) == "stalled"
+
+
+def test_attribute_sessions_recent_user_turn_stays_active():
+    # A genuinely-recent session (last user turn ~1h ago) still classifies active.
+    now = isc._iso_to_epoch("2026-07-23T10:00:00Z")
+    recent_turn = now - 3600
+    inis = [{"slug": "live-work", "docs": [
+        {"path": "/r/claudedocs/handoff-live-work-2026-07-23.md", "date": "2026-07-23"}]}]
+    genesis = [{"text": "read handoff-live-work-2026-07-23.md",
+                "mtime": now, "last_user_ts": recent_turn}]
+    isc.attribute_sessions(inis, genesis)
+    assert inis[0]["last_session"] == recent_turn
+    assert isc.classify_momentum(inis[0]["last_session"], now) == "active"
+
+
+def test_attribute_sessions_falls_back_to_mtime_without_user_ts():
+    # No parseable user-turn ts (last_user_ts absent/None) -> fall back to mtime,
+    # the only remaining signal (session still counts).
+    inis = [{"slug": "edge", "docs": [
+        {"path": "/r/claudedocs/handoff-edge.md", "date": None}]}]
+    # one session carries a real user-turn ts, one only a mtime (no last_user_ts key)
+    genesis = [
+        {"text": "resume handoff-edge.md", "mtime": 5000.0, "last_user_ts": None},
+        {"text": "resume handoff-edge.md again", "mtime": 9000.0},   # key absent -> .get None
+    ]
+    isc.attribute_sessions(inis, genesis)
+    assert inis[0]["session_count"] == 2
+    assert inis[0]["last_session"] == 9000.0    # newest mtime wins via fallback
+
+
+def test_attribute_sessions_session_count_independent_of_ts_source():
+    # SCOPE GUARD: switching last_session's timestamp source does NOT change session_count
+    # — a mix of ts-bearing and ts-less matching sessions all still count.
+    inis = [{"slug": "cnt", "docs": [
+        {"path": "/r/claudedocs/handoff-cnt.md", "date": None}]}]
+    genesis = [
+        {"text": "resume handoff-cnt.md", "mtime": 1.0, "last_user_ts": 100.0},
+        {"text": "resume handoff-cnt.md", "mtime": 2.0, "last_user_ts": None},
+        {"text": "resume handoff-cnt.md", "mtime": 3.0},           # no key
+        {"text": "unrelated", "mtime": 4.0, "last_user_ts": 400.0},
+    ]
+    isc.attribute_sessions(inis, genesis)
+    assert inis[0]["session_count"] == 3        # three matched, one unrelated
 
 
 def test_attribute_recent_messages_genesis_pool_desc_truncate():
