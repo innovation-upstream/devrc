@@ -14,6 +14,14 @@ but stopped" (dirty tree / unpushed commits), or a stale worktree `node_modules`
 symlink produced a flood of false "cannot find module" errors. Run the
 deterministic gate and read ITS output.
 
+Same trap via **injected `<new-diagnostics>` / LSP errors after a subagent
+finishes** — they are frequently **stale**, not a real break. Tell: a `go.mod`
+"updates needed / go mod tidy" warning plus an `undefined: <symbol>` cascade
+across many files (often symbols from a *different* branch after a checkout /
+worktree switch) — the LSP indexing a transient/mixed tree. The gate (a fresh
+`go build`/`vet`/`test`) is the arbiter; run it before acting on a "done" claim,
+**especially right after branch/worktree switches**.
+
 This is the **cheap mechanical structural gate**. It is NOT `/audit-pr`
 (adversarial LLM review) and NOT the `verify` skill (e2e behaviour). Use those
 too when warranted — this one is the fast, always-run floor.
@@ -63,6 +71,12 @@ reads as green. A repo with **no** stack present is a legitimate PASS.
 - **Go** (`go.mod`): `go build ./...` + `go vet ./...` + `go test ./...`
   (adds `-race` when cgo + a C compiler are available; falls back without `-race`
   and says so otherwise). Nested `go.mod` modules are each built too.
+  - **Private module deps** (e.g. `civitai-manager` → `github.com/civitai/cli`):
+    export **`GOPRIVATE`** (e.g. `GOPRIVATE=github.com/civitai/*`, or the repo's
+    private prefixes derived from `go.mod`) before running the gate. Without it the
+    build fails *verifying* against `sum.golang.org` (usually a `500`). That is an
+    **ENV/config problem, not a real build failure** — set GOPRIVATE so a private-dep
+    fetch/sum error isn't mis-reported as FAIL/INCOMPLETE.
 - **Python** (`pyproject`/`requirements`): `ruff check` + `pytest` when configured;
   a detected python project with neither ⇒ **INCOMPLETE**.
 - **Nix** (`flake.nix`): `nix-instantiate --parse` by default; `nix flake check`

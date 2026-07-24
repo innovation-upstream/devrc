@@ -16,6 +16,8 @@ Target: `$ARGUMENTS`. Resolve it:
 
 Dispatch a subagent (read-only — it must NOT modify files or merge) to audit the change against this checklist. Have it actually read the diff and the surrounding code it touches, not just the PR description.
 
+**Always run this on high-yield change-classes** — web/HTTP endpoints, concurrency reworks, filesystem/quarantine/trash moves, DB migrations, and anything security/auth/path-gating. These reliably hide real, deploy-blocking bugs (shutdown data-loss, trash-path overwrite, scanner match-path scope-creep, unauthenticated arbitrary-path scan, a git `core.fsmonitor` RCE all surfaced this way). If the branch has a **private Go module dep**, the auditor may need `GOPRIVATE` set (e.g. `GOPRIVATE=github.com/civitai/*`) to build/inspect it — a sum-db `500` there is env, not a code defect.
+
 **Audit for:**
 1. **Risks** — what could break in production from this change.
 2. **Regressions** — existing behaviour this silently alters or removes.
