@@ -128,14 +128,30 @@ ANTI_CONFABULATION_CONTRACT = (
 
 RECAP_INSTRUCTIONS = (
     "You summarize one software initiative for a status board. Produce a plain-language "
-    "recap of ONE to TWO sentences: what the initiative is and where it currently "
-    "stands. Requirements: present tense; terse and concrete; describe the substance "
-    "directly — do NOT open with meta like \"This initiative…\" / \"The goal is…\"; no "
-    "preamble, no bullet points, no markdown, no quotes around the output. Return ONLY "
-    "the recap text."
+    "recap of ONE to TWO sentences: what the initiative is (the actual work / system) "
+    "and where it currently stands. "
+    "Describe the WORK ITSELF, never the paperwork about it. You MUST NEVER mention or "
+    "describe a handoff doc, a resume/canonical doc, a markdown or notes file, any "
+    "filename, the word \"supersedes\", or the existence of documentation — the recap is "
+    "about the feature / system and its status, NOT about any document that tracks it. "
+    "If the only context is doc-meta (e.g. one file superseding another, a \"resume "
+    "doc\"), write from whatever substantive work IS present, or a single honest clause "
+    "about the work — never \"this is a doc that…\" or a reference to the document. "
+    "Requirements: present tense; terse and concrete; describe the substance directly — "
+    "do NOT open with meta like \"This initiative…\" / \"The goal is…\"; no preamble, no "
+    "bullet points, no markdown, no quotes around the output. Return ONLY the recap text."
 )
 
 SYSTEM_PROMPT = RECAP_INSTRUCTIONS + "\n\n" + ANTI_CONFABULATION_CONTRACT
+
+# A short, deterministic fingerprint of the prompt text (system message). Folding it into
+# `input_hash` means any edit to SYSTEM_PROMPT (tightening the instructions, or the
+# anti-confabulation contract) changes EVERY initiative's hash → the whole recap cache is
+# busted and the next sync regenerates all recaps under the new prompt. This is automatic:
+# no manual version bump to remember (a stale RECAP_PROMPT_VERSION constant is the classic
+# way to serve recaps from an old prompt forever). Only a prefix is used — full 256-bit
+# collision resistance is irrelevant for a cache key.
+_PROMPT_FINGERPRINT = hashlib.sha256(SYSTEM_PROMPT.encode("utf-8")).hexdigest()[:16]
 
 
 def recap_context(ini: dict) -> dict:
@@ -174,15 +190,25 @@ def _pr_text(p) -> str:
     return str(p or "").strip()
 
 
-def input_hash(ctx: dict) -> str:
-    """PURE + STABLE: a sha256 over the context fields that define "what / where it
-    stands". Order-INDEPENDENT for the set-like fields (open_investigations / open_prs
-    are sorted) and for dict-key order (sort_keys), so a mere reordering never triggers a
-    regenerate; a genuine content change (a new/edited message, commit, next-step,
-    summary, momentum, investigation, or PR) DOES. `recent_messages`/`recent_commits`
-    keep their newest-first order — a reorder there implies added/removed content, which
-    is exactly a change we want to re-recap."""
+def input_hash(ctx: dict, model: str = "") -> str:
+    """PURE + STABLE: a sha256 over everything that determines the generated recap — the
+    context fields that define "what / where it stands", PLUS the prompt fingerprint and
+    the served `model`. Order-INDEPENDENT for the set-like fields (open_investigations /
+    open_prs are sorted) and for dict-key order (sort_keys), so a mere reordering never
+    triggers a regenerate; a genuine content change (a new/edited message, commit,
+    next-step, summary, momentum, investigation, or PR) DOES. `recent_messages`/
+    `recent_commits` keep their newest-first order — a reorder there implies added/removed
+    content, which is exactly a change we want to re-recap.
+
+    Folding the prompt fingerprint and model in means a PROMPT edit (see
+    `_PROMPT_FINGERPRINT`) or a MODEL swap also busts the cache, so the next sync
+    regenerates every recap under the new prompt/model instead of serving stale output
+    from the old one. Everything else stays deterministic (the same sorted-fields /
+    sort_keys properties), so an unchanged prompt + model + context yields a stable hash
+    (a cache hit)."""
     canonical = {
+        "prompt": _PROMPT_FINGERPRINT,
+        "model": (model or "").strip(),
         "momentum": ctx.get("momentum", ""),
         "summary": ctx.get("summary", ""),
         "next_step": ctx.get("next_step", ""),
@@ -377,7 +403,7 @@ def sync_recaps(conn, rows: list[dict], *, client, model: str) -> dict:
                 stats["skipped"] += 1
                 continue
             ctx = recap_context(r)
-            ihash = input_hash(ctx)
+            ihash = input_hash(ctx, model=model)
             prev = cached.get((repo, slug))
             if prev and prev.get("input_hash") == ihash and prev.get("recap"):
                 stats["cached"] += 1  # unchanged → reuse the cached recap, no model call

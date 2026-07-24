@@ -81,6 +81,47 @@ def test_input_hash_ignores_message_timestamps_only_text_matters():
 
 
 # --------------------------------------------------------------------------- #
+# input_hash — the cache key also folds in the PROMPT and the served MODEL, so a
+# prompt edit or a model swap busts the cache and forces a regenerate on next sync.
+# --------------------------------------------------------------------------- #
+def test_prompt_fingerprint_derives_deterministically_from_system_prompt():
+    # The fingerprint is a stable sha256 prefix of SYSTEM_PROMPT — so ANY edit to the
+    # prompt text changes the fingerprint (and therefore every input_hash).
+    import hashlib
+    expected = hashlib.sha256(recap.SYSTEM_PROMPT.encode("utf-8")).hexdigest()[:16]
+    assert recap._PROMPT_FINGERPRINT == expected
+
+
+def test_input_hash_changes_when_the_prompt_changes(monkeypatch):
+    # (a) A change to SYSTEM_PROMPT (surfaced via its fingerprint) changes input_hash for
+    # the SAME context → the next sync sees a hash mismatch and regenerates.
+    ctx = recap.recap_context(_fixture_ini())
+    before = recap.input_hash(ctx)
+    monkeypatch.setattr(recap, "_PROMPT_FINGERPRINT", "0000tightenedfp")
+    after = recap.input_hash(ctx)
+    assert before != after
+
+
+def test_input_hash_is_stable_when_prompt_and_model_unchanged():
+    # (b) Unchanged prompt + model + context → identical hash (a cache hit, no regen).
+    a = recap.input_hash(recap.recap_context(_fixture_ini()), model="qwen")
+    b = recap.input_hash(recap.recap_context(_fixture_ini()), model="qwen")
+    assert a == b
+
+
+def test_input_hash_changes_when_the_model_changes():
+    # A model swap must also bust the cache → regenerate under the new served model.
+    ctx = recap.recap_context(_fixture_ini())
+    assert recap.input_hash(ctx, model="qwen-7b") != recap.input_hash(ctx, model="qwen-14b")
+
+
+def test_input_hash_default_model_is_empty_string():
+    # No model given == model="" (stable default; the two calls agree).
+    ctx = recap.recap_context(_fixture_ini())
+    assert recap.input_hash(ctx) == recap.input_hash(ctx, model="")
+
+
+# --------------------------------------------------------------------------- #
 # recap_context — extraction / normalization
 # --------------------------------------------------------------------------- #
 def test_recap_context_extracts_message_text_and_formats_prs():
@@ -121,6 +162,18 @@ def test_build_messages_carries_anti_confabulation_contract():
     assert "ONE to TWO sentences" in sys_text
     assert "present tense" in sys_text
     assert "do NOT open with meta" in sys_text
+
+
+def test_prompt_forbids_describing_the_handoff_doc_not_the_work():
+    # (c) The tightened prompt must instruct the model to describe the WORK, never the
+    # handoff/doc/markdown file — the fix for recaps like "Supersedes handoff-….md".
+    sys_text = recap.build_messages(recap.recap_context(_fixture_ini()))[0]["content"]
+    low = sys_text.lower()
+    assert "never" in low
+    assert "handoff" in low
+    assert "supersedes" in low          # the specific meta phrasing to suppress
+    assert "documentation" in low
+    assert "the work itself" in low     # positive framing: describe the work
 
 
 def test_build_messages_user_content_includes_only_provided_context():
@@ -233,7 +286,7 @@ def test_upsert_recap_uses_on_conflict_do_update():
 # --------------------------------------------------------------------------- #
 def test_sync_recaps_cache_hit_skips_the_model_and_upsert():
     ini = _fixture_ini()
-    ihash = recap.input_hash(recap.recap_context(ini))
+    ihash = recap.input_hash(recap.recap_context(ini), model="m")
     conn = _FakeConn(recaps_rows=[(ini["repo"], ini["slug"], "cached recap", ihash)])
     client = _FakeClient()
     stats = recap.sync_recaps(conn, [ini], client=client, model="m")
@@ -259,7 +312,8 @@ def test_sync_recaps_regenerates_when_hash_differs():
                      if "INSERT INTO initiatives.recaps" in s)
     assert params[0] == ini["repo"] and params[1] == ini["slug"]
     assert params[2] == "fresh recap text"
-    assert params[3] == recap.input_hash(recap.recap_context(ini))
+    # the stored hash folds in the served model (the same model sync_recaps ran with)
+    assert params[3] == recap.input_hash(recap.recap_context(ini), model="m")
     assert params[4] == "m"
 
 
