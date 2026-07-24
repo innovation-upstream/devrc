@@ -144,6 +144,75 @@ def test_tool_blocked_on_me_empty_when_nothing_waiting():
     assert assistant.tool_blocked_on_me(calm)["initiatives"] == []
 
 
+# --- precision: blocked-scan reads ONLY status + next_step, not purpose/recall text ------
+def test_blocking_hits_scans_only_status_and_next_step():
+    # A marker present ONLY in identity/summary (the durable purpose / recall text) must NOT
+    # flag the initiative — those describe purpose, not what's actually pending on the user.
+    v = _view("purpose-only", "Purpose only", "/repo/x",
+              status="fix(x): harden per audit", next_step="",
+              identity="decision-ready cards for Zach to review and sign-off",
+              summary="waiting on you is the whole point of this project")
+    assert assistant._blocking_hits(v) == []
+    assert assistant._BLOCKED_FIELDS == ("status", "next_step")
+
+
+def test_blocked_markers_pruned_of_process_prose():
+    # The leaky descriptive/process markers are gone; the genuine wait markers remain.
+    for leaked in ("for zach to", "eyeball", "human deploys", "human verif", "you deploy"):
+        assert leaked not in assistant.BLOCKED_MARKERS, leaked
+    for genuine in ("awaiting", "blocked on", "your call", "your input", "your review",
+                    "your sign-off", "your go-ahead", "waiting on you", "waiting for you",
+                    "waiting on zach", "needs you", "needs zach", "pending your",
+                    "up to zach"):
+        assert genuine in assistant.BLOCKED_MARKERS, genuine
+
+
+# --- REGRESSION: the real logged false positive (task-spec-drafter) ----------------------
+# Diagnosed from a live "whats blocked on me" ask that wrongly returned task-spec-drafter
+# alongside the genuine spend-analytics. Two leaks: (1) the scan read `identity` (whose
+# purpose text "…cards for Zach to adjudicate…" matched the marker "for zach to"), and
+# (2) that marker was itself descriptive prose. Both are now closed.
+TASK_SPEC_DRAFTER = _view(
+    "task-spec-drafter", "Task-spec drafter", "/repo/devrc",
+    status="fix(task-spec-drafter): harden per audit — read-only allowlist, "
+           "spec-only writes, no dispatch",
+    next_step="",  # no explicit next-step → nothing genuinely pending on the user
+    identity="an autonomous loop that turns signals into decision-ready cards "
+             "for Zach to adjudicate")
+SPEND_ANALYTICS = _view(
+    "spend-analytics", "Spend analytics", "/repo/devrc",
+    status="blocked: awaiting the monthly $ figure from Zach for the Cloudflare line",
+    next_step="awaiting the monthly $ figure from Zach", age="5h", minutes_ago=300)
+
+
+def test_regression_task_spec_drafter_not_blocked_but_spend_analytics_is():
+    res = assistant.tool_blocked_on_me([TASK_SPEC_DRAFTER, SPEND_ANALYTICS])
+    slugs = _slugs(res["initiatives"])
+    assert "task-spec-drafter" not in slugs          # the false positive is gone
+    assert slugs == ["spend-analytics"]              # ONLY the genuine block remains
+    assert "awaiting" in res["markers"]["spend-analytics"]
+
+
+def test_regression_blocked_facts_reason_comes_from_real_text_only():
+    # The model must be handed the REAL awaiting-text as grounding — never a fabricated
+    # "fix the issues per the audit" cause. Assert the facts carry the initiative's own
+    # status/next_step and no invented narrative.
+    facts = assistant.build_facts(
+        assistant.tool_blocked_on_me([TASK_SPEC_DRAFTER, SPEND_ANALYTICS]))
+    assert [f["slug"] for f in facts["initiatives"]] == ["spend-analytics"]
+    spend = facts["initiatives"][0]
+    assert "awaiting the monthly $ figure from Zach" in spend["next_step"]
+    blob = json.dumps(facts).lower()
+    assert "fix the issues" not in blob and "per the audit" not in blob
+
+
+def test_synth_system_forbids_inventing_a_blocking_reason():
+    # The anti-confab contract for blocked_on_me lives in the synthesis system prompt.
+    sysprompt = assistant._SYNTH_SYSTEM.lower()
+    assert "do not invent a cause" in sysprompt or "do not invent" in sysprompt
+    assert "next_step/status" in sysprompt
+
+
 def test_tool_by_momentum():
     assert _slugs(assistant.tool_by_momentum(VIEWS, "stalled")["initiatives"]) == \
         ["sysredis-buffer"]
