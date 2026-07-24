@@ -40,9 +40,17 @@ Reuse (do not reimplement):
   - the model client: `recap.VllmClient` + `recap.recap_config` (the OpenAI-compatible
     call over the kubectl port-forward, same endpoint the recap generator uses).
 
+Every ask is AUDIT-LOGGED (best-effort) to a standalone `initiatives.assistant_log` table
+the assistant owns — the question, classified intent/target, cited sources, answer, model
+id, whether the model was used, and latency — so asks are reviewable after the fact. The
+log write can NEVER change or break the answer (the assistant stays read-only w.r.t.
+initiatives state); a DB/table failure degrades to a stderr warning. `assistant.py log`
+prints the recent asks for review.
+
 CLI:
     assistant.py "what's blocked on me?"
     assistant.py --json "status of clawgate"
+    assistant.py log [--limit N] [--json]     # review recent asks (the audit log)
 On NixOS (for the live read/model) run under:
     nix-shell -p "python3.withPackages(p:[p.psycopg2 p.requests])" \
       --run 'python scripts/initiatives/assistant.py "what am I working on?"'
@@ -55,6 +63,7 @@ import json
 import os
 import re
 import sys
+import time
 from pathlib import Path
 
 # Sibling modules in this same directory. route/viewer/recap are imported LAZILY (inside
@@ -64,10 +73,14 @@ from pathlib import Path
 _ROUTE_PATH = Path(__file__).resolve().parent / "route.py"
 _RECAP_PATH = Path(__file__).resolve().parent / "recap.py"
 _VIEWER_PATH = Path(__file__).resolve().parent / "viewer.py"
+# The shared mailbox-Postgres helper (kubectl port-forward + psycopg2 + DSN-from-secret) —
+# ONLY used by the audit-log write/read path (the pure Q&A core never touches it).
+_MAILDB_PATH = Path(__file__).resolve().parents[1] / "mail-actions" / "_db.py"
 
 _route_mod = None
 _recap_mod = None
 _viewer_mod = None
+_maildb_mod = None
 
 
 def _load_sibling(path: Path, mod_name: str):
@@ -104,6 +117,23 @@ def _viewer():
     if _viewer_mod is None:
         _viewer_mod = _load_sibling(_VIEWER_PATH, "initiatives_assistant_viewer")
     return _viewer_mod
+
+
+def _maildb():
+    """Load MailDB from mail-actions/_db.py by EXPLICIT importlib path (NOT via sys.path —
+    its sibling llm.py shadows other modules; documented in the repo CLAUDE.md). Mirrors
+    sync.py / viewer.py. Invoked ONLY on the audit-log write/read path, never the pure
+    Q&A core (so a plain import of `assistant` stays free of psycopg2/kubectl)."""
+    global _maildb_mod
+    if _maildb_mod is None:
+        spec = importlib.util.spec_from_file_location(
+            "initiatives_assistant_maildb", _MAILDB_PATH)
+        if spec is None or spec.loader is None:
+            raise ImportError(f"cannot load {_MAILDB_PATH}")
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        _maildb_mod = mod.MailDB
+    return _maildb_mod
 
 
 # --------------------------------------------------------------------------- #
@@ -780,35 +810,22 @@ def _run(question: str, views: list[dict], unmatched: list[dict] | None,
     answer = None
     if client is not None:
         answer = _synthesize(question, intent, result, client)
+    used_model = answer is not None  # True only when the model actually phrased the answer
     if not answer:
         answer = render_plain(intent, info, result)
+    # `target` + `used_model` are additive fields (the audit log records them; the /api/ask
+    # JSON gains them harmlessly). The public {ok, question, intent, answer, sources}
+    # contract is unchanged.
     return {"ok": True, "question": question, "intent": intent,
+            "target": info.get("target") or "", "used_model": used_model,
             "answer": answer, "sources": sources}
 
 
-def ask(question: str, *, views: list[dict] | None = None,
-        unmatched: list[dict] | None = None, loader=None,
-        client=None, client_factory=None, env=None) -> dict:
-    """Answer a natural-language question about the initiatives. READ-ONLY.
-
-    Returns {ok, question, intent, answer, sources}. `sources` is [{slug, repo}] — the
-    initiatives the answer is grounded in (deterministic, from the tool result).
-
-    Injection points (all optional; production uses none):
-      views/unmatched — pre-loaded initiative views (the viewer passes its cached model's
-                        `flat`/`live_unmatched` to avoid a second DB read). If omitted,
-                        loaded via `loader` (default: `load_initiatives`).
-      client          — an already-open model client (tests). Used directly, no lifecycle.
-      client_factory  — callable() -> a context-manager client (production opens/closes the
-                        vLLM port-forward around the whole ask). Default: env-configured.
-      env             — env dict for the model config (default os.environ).
-
-    Degradation: an unreachable store -> a clear error result; an unreachable/unset model
-    -> the deterministic renderer over the real tool output. Never raises."""
-    question = (question or "").strip()[:_QUESTION_MAX]
-    if not question:
-        return _error_result(question, "Ask a question about your initiatives.")
-
+def _answer(question: str, *, views, unmatched, loader,
+            client, client_factory, env) -> dict:
+    """Produce the answer result dict (everything after the empty-question guard). Split
+    out of `ask` so the one audit-log point wraps EXACTLY the answer production — the
+    measured latency is the time to answer, not the time to log."""
     if views is None:
         loader = loader or load_initiatives
         try:
@@ -839,6 +856,244 @@ def ask(question: str, *, views: list[dict] | None = None,
         return _run(question, views, unmatched, None)
 
 
+def ask(question: str, *, views: list[dict] | None = None,
+        unmatched: list[dict] | None = None, loader=None,
+        client=None, client_factory=None, env=None, log_writer=None) -> dict:
+    """Answer a natural-language question about the initiatives. READ-ONLY.
+
+    Returns {ok, question, intent, answer, sources} (plus additive `target`/`used_model`).
+    `sources` is [{slug, repo}] — the initiatives the answer is grounded in (deterministic,
+    from the tool result).
+
+    Every non-empty ask is AUDIT-LOGGED best-effort (see `_emit_log`): a one-line stderr
+    note plus one row in `initiatives.assistant_log`. The log write NEVER changes or breaks
+    the answer — the assistant stays read-only w.r.t. initiatives state; the audit table is
+    a separate append-only telemetry table it owns. This covers BOTH the CLI and the
+    viewer's `POST /api/ask`, since both route through here.
+
+    Injection points (all optional; production uses none):
+      views/unmatched — pre-loaded initiative views (the viewer passes its cached model's
+                        `flat`/`live_unmatched` to avoid a second DB read). If omitted,
+                        loaded via `loader` (default: `load_initiatives`).
+      client          — an already-open model client (tests). Used directly, no lifecycle.
+      client_factory  — callable() -> a context-manager client (production opens/closes the
+                        vLLM port-forward around the whole ask). Default: env-configured.
+      env             — env dict for the model config (default os.environ).
+      log_writer      — callable(row) that persists one audit row (tests inject a capture);
+                        default opens the mailbox DB via the shared port-forward.
+
+    Degradation: an unreachable store -> a clear error result; an unreachable/unset model
+    -> the deterministic renderer over the real tool output. Never raises."""
+    started = time.monotonic()
+    question = (question or "").strip()[:_QUESTION_MAX]
+    if not question:
+        # A degenerate/empty ask isn't a real question — nothing worth auditing.
+        return _error_result(question, "Ask a question about your initiatives.")
+
+    result = _answer(question, views=views, unmatched=unmatched, loader=loader,
+                     client=client, client_factory=client_factory, env=env)
+    _emit_log(result, question=question, started=started, env=env, log_writer=log_writer)
+    return result
+
+
+# --------------------------------------------------------------------------- #
+# Audit log — a STANDALONE, append-only telemetry table the assistant OWNS. Every ask
+# (CLI + /api/ask) records the question, classified intent/target, cited sources, answer,
+# model id, whether the model was actually used, and latency. It is NOT referenced by any
+# view (same low-risk class as `initiatives.recaps`) — so NO view migration / version bump.
+# The write is BEST-EFFORT: it can never change or break the answer, and the assistant
+# stays read-only w.r.t. initiatives STATE (this is separate append-only telemetry it owns,
+# not a mutation of initiatives data). No write/dispatch capability is added.
+# --------------------------------------------------------------------------- #
+# `CREATE SCHEMA IF NOT EXISTS` is included so the assistant's self-heal write works even
+# if the sync has NEVER run (it must not depend on the sync). Idempotent everywhere; a
+# no-op once the schema/table exist. The DSN role has CREATE (SCHEMA) — see the handoff.
+ASSISTANT_LOG_DDL = """
+CREATE SCHEMA IF NOT EXISTS initiatives;
+
+CREATE TABLE IF NOT EXISTS initiatives.assistant_log (
+    id          serial PRIMARY KEY,
+    ts          timestamptz DEFAULT now(),
+    question    text,
+    intent      text,
+    target      text,
+    sources     jsonb,
+    answer      text,
+    model       text,
+    used_model  boolean,
+    latency_ms  int,
+    host        text
+);
+"""
+
+
+def create_assistant_log_table(cur) -> None:
+    """Idempotently create the standalone audit-log table (+ its schema) on an OPEN cursor.
+
+    Called BOTH from `sync.ensure_schema` (proactive, under its advisory lock) AND from the
+    assistant's own write path (self-heal on first write) — so the assistant NEVER depends
+    on the sync having run. STANDALONE table: not part of any view, so there is NO
+    view-version bump here (mirrors `recap.create_recaps_table`)."""
+    cur.execute(ASSISTANT_LOG_DDL)
+
+
+def _host() -> str:
+    """Host tag for an audit row. `ACTIVITY_HOST` wins (both devrc hosts are hostname
+    `nixos`, so the raw hostname can't disambiguate); else a meaningful gethostname(); else
+    'workbench' (this runs workbench-only today). Mirrors sync.resolve_host without coupling
+    the assistant to the sync module."""
+    env = os.environ.get("ACTIVITY_HOST", "").strip()
+    if env:
+        return env
+    import socket
+    hn = socket.gethostname().strip()
+    if hn and hn != "nixos":
+        return hn
+    return "workbench"
+
+
+def _configured_model(env=None):
+    """The configured `RECAP_MODEL` id for the audit row, or None when unset/placeholder
+    (in which case no model is called and `used_model` is False). Pure w.r.t. `env`; never
+    raises (a config hiccup just logs no model id)."""
+    try:
+        recap = _recap()
+        cfg = recap.recap_config(env if env is not None else os.environ)
+        model = (cfg.get("model") or "").strip()
+        if not model or model == recap.RECAP_MODEL:
+            return None
+        return model
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _build_log_row(result: dict, question: str, latency_ms: int, env) -> dict:
+    """Project an answer result (+ timing) into one audit-log row dict. Pure — no I/O."""
+    return {
+        "question": question,
+        "intent": result.get("intent") or "",
+        "target": result.get("target") or "",
+        "sources": result.get("sources") or [],
+        "answer": result.get("answer") or "",
+        "model": _configured_model(env),
+        "used_model": bool(result.get("used_model")),
+        "latency_ms": latency_ms,
+        "host": _host(),
+    }
+
+
+def _stderr_note(row: dict) -> None:
+    """A concise one-line stderr log per ask so it shows in the viewer journal for quick
+    live debugging (emitted even when the DB write is skipped)."""
+    print(
+        f"assistant: q={_trim(row['question'], 80)!r} intent={row['intent']} "
+        f"sources={len(row['sources'])} used_model={row['used_model']} "
+        f"{row['latency_ms']}ms",
+        file=sys.stderr,
+    )
+
+
+def _write_log_row(row: dict, *, ready_timeout: float = 8.0) -> None:
+    """Append one audit row to `initiatives.assistant_log` via the shared mailbox-Postgres
+    helper (the same kubectl port-forward the viewer uses). Self-heals the table first, so
+    it works before the first sync. Raises on any DB failure — the caller (`_emit_log`)
+    swallows it best-effort. The short `ready_timeout` bounds a broken port-forward so an
+    ask can never hang on logging."""
+    from psycopg2.extras import Json  # local: the pure/answer path needs no psycopg2
+
+    MailDB = _maildb()
+    with MailDB(ready_timeout=ready_timeout) as db:
+        conn = db.conn
+        with conn.cursor() as cur:
+            create_assistant_log_table(cur)
+            cur.execute(
+                "INSERT INTO initiatives.assistant_log "
+                "(question, intent, target, sources, answer, model, used_model, "
+                "latency_ms, host) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
+                (row["question"], row["intent"], row["target"], Json(row["sources"]),
+                 row["answer"], row["model"], row["used_model"], row["latency_ms"],
+                 row["host"]),
+            )
+        conn.commit()
+
+
+def _emit_log(result: dict, *, question: str, started: float, env, log_writer) -> None:
+    """Best-effort audit of one ask: a one-line stderr note (always) + one DB row (best-
+    effort). NEVER raises and NEVER alters `result` — a DB outage / missing table / failed
+    create is swallowed with a stderr warning and the answer is returned unchanged. Latency
+    is measured to HERE (answer produced), before the log write, so logging cost is excluded."""
+    latency_ms = max(0, int((time.monotonic() - started) * 1000))
+    try:
+        row = _build_log_row(result, question, latency_ms, env)
+    except Exception as exc:  # noqa: BLE001 - building the row must never break the answer
+        print(f"assistant: audit-log build failed ({type(exc).__name__})", file=sys.stderr)
+        return
+    _stderr_note(row)
+    writer = log_writer or _write_log_row
+    try:
+        writer(row)
+    except Exception as exc:  # noqa: BLE001 - DB down / table missing → drop the row, log it
+        print(f"assistant: audit-log write skipped ({type(exc).__name__}: {exc})",
+              file=sys.stderr)
+
+
+# --------------------------------------------------------------------------- #
+# Reading the audit log — the primary consumer for reviewing what was answered.
+# --------------------------------------------------------------------------- #
+def read_log(limit: int = 20, *, reader=None) -> list[dict]:
+    """The most recent audit rows (newest first) from `initiatives.assistant_log`.
+
+    `reader(limit) -> list[dict]` is injectable for tests; the default opens the mailbox DB
+    via the shared port-forward. Returns [] if the table doesn't exist yet."""
+    if reader is not None:
+        return reader(limit)
+    return _read_log_rows(limit)
+
+
+def _read_log_rows(limit: int) -> list[dict]:
+    import psycopg2.extras
+
+    MailDB = _maildb()
+    with MailDB() as db:
+        conn = db.conn
+        with conn.cursor() as cur:
+            cur.execute("SELECT to_regclass('initiatives.assistant_log')")
+            if cur.fetchone()[0] is None:
+                return []
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                "SELECT id, ts, question, intent, target, sources, answer, model, "
+                "used_model, latency_ms, host FROM initiatives.assistant_log "
+                "ORDER BY id DESC LIMIT %s",
+                (limit,),
+            )
+            return [dict(r) for r in cur.fetchall()]
+
+
+def format_log(rows: list[dict]) -> str:
+    """PURE: render audit rows into a readable review block (ts, intent/target, source
+    count, model-used, latency, then the question + answer + cited slugs)."""
+    if not rows:
+        return "No assistant asks logged yet."
+    out: list[str] = []
+    for r in rows:
+        ts = str(r.get("ts") or "")[:19]
+        srcs = r.get("sources") or []
+        tgt = str(r.get("target") or "")
+        head = (f"{ts}  [{r.get('intent') or '?'}]"
+                f"{(' → ' + tgt) if tgt else ''}  "
+                f"{len(srcs)} src · model={'yes' if r.get('used_model') else 'no'} · "
+                f"{r.get('latency_ms', 0)}ms")
+        out.append(head)
+        out.append(f"  Q: {_trim(r.get('question'), 200)}")
+        out.append(f"  A: {_trim(r.get('answer'), 300)}")
+        slugs = [s.get("slug", "?") for s in srcs if isinstance(s, dict)]
+        if slugs:
+            out.append("  sources: " + ", ".join(slugs))
+        out.append("")
+    return "\n".join(out).rstrip()
+
+
 # --------------------------------------------------------------------------- #
 # CLI
 # --------------------------------------------------------------------------- #
@@ -863,6 +1118,16 @@ def parse_args(argv=None) -> argparse.Namespace:
 
 
 def main(argv=None) -> int:
+    """Dispatch: `assistant.py log [...]` reads the audit log; anything else is a question
+    (`assistant.py "what's blocked on me?"`, unchanged & backward-compatible — a quoted
+    question is a single argv token, never the bare word "log")."""
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if argv and argv[0] == "log":
+        return _main_log(argv[1:])
+    return _main_ask(argv)
+
+
+def _main_ask(argv) -> int:
     a = parse_args(argv)
     res = ask(a.question)
     if a.json:
@@ -870,6 +1135,28 @@ def main(argv=None) -> int:
     else:
         print(_render_cli(res))
     return 0 if res.get("ok") else 1
+
+
+def _main_log(argv) -> int:
+    p = argparse.ArgumentParser(
+        prog="assistant.py log",
+        description="Show the most recent assistant asks (the audit log) — review what was "
+                    "asked/answered, evaluate grounding, debug.")
+    p.add_argument("--limit", type=int, default=20,
+                   help="how many recent asks to show (default 20)")
+    p.add_argument("--json", action="store_true", help="emit the rows as JSON")
+    a = p.parse_args(argv)
+    try:
+        rows = read_log(limit=max(1, a.limit))
+    except Exception as exc:  # noqa: BLE001 - the store may be unreachable
+        print(f"error: couldn't read the assistant log ({type(exc).__name__}: {exc})",
+              file=sys.stderr)
+        return 1
+    if a.json:
+        print(json.dumps(rows, indent=2, ensure_ascii=False, default=str))
+    else:
+        print(format_log(rows))
+    return 0
 
 
 if __name__ == "__main__":

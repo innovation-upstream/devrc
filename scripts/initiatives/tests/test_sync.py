@@ -457,6 +457,27 @@ def test_ensure_schema_creates_recaps_table_without_touching_views():
     assert conn.commits == 1
 
 
+def test_ensure_schema_creates_assistant_log_table_without_touching_views():
+    # The assistant's standalone audit-log table is created under the SAME advisory-locked
+    # transaction as recaps — idempotent, and NOT a view (so no view-marker bump/recreate).
+    conn = _FakeConn(view_regclass="initiatives.current", view_comment=sync.VIEW_COMMENT,
+                     latest_regclass="initiatives.latest",
+                     latest_comment=sync.LATEST_VIEW_COMMENT)
+    sync.ensure_schema(conn)
+    sqls = _sqls(conn)
+    joined = " ".join(sqls)
+    assert "CREATE TABLE IF NOT EXISTS initiatives.assistant_log" in joined
+    # created AFTER the advisory lock (inside the guarded schema txn)
+    lock_i = next(i for i, s in enumerate(sqls) if "pg_advisory_xact_lock" in s)
+    log_i = next(i for i, s in enumerate(sqls)
+                 if "CREATE TABLE IF NOT EXISTS initiatives.assistant_log" in s)
+    assert lock_i < log_i
+    # standalone → NEITHER view is dropped/recreated by this pass
+    assert "DROP VIEW IF EXISTS initiatives.current" not in joined
+    assert "DROP VIEW IF EXISTS initiatives.latest" not in joined
+    assert conn.commits == 1
+
+
 def test_ensure_schema_creates_view_when_absent():
     conn = _FakeConn(view_regclass=None)
     sync.ensure_schema(conn)

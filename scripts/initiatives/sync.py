@@ -49,6 +49,12 @@ from pathlib import Path
 # resolves both as a script (sys.path[0] = this dir) and under the tests (which add the
 # initiatives dir to sys.path). Kept pure-logic vs I/O internally; see recap.py.
 import recap  # noqa: E402
+# The read-only Q&A assistant OWNS the standalone `initiatives.assistant_log` audit table;
+# we create it here too (proactively, under the same advisory lock) so a viewer/CLI ask has
+# it from the first sync — but the assistant ALSO self-heals it on write, so it never
+# depends on this sync having run. Plain import (stdlib-only at its top level; its
+# viewer/recap/route siblings load lazily), resolves like `import recap` above.
+import assistant  # noqa: E402
 
 # The scan we shell out to (the data-source contract). Absolute so systemd/nix-shell
 # invocations (any cwd) resolve it; the scan manages its OWN sys.path internally.
@@ -381,6 +387,9 @@ def ensure_schema(conn) -> None:
         # the snapshot/views (no view-marker bump), so it persists across snapshots as a
         # true cache. See recap.py.
         recap.create_recaps_table(cur)
+        # The assistant's standalone audit-log table (like recaps: NOT in any view, so no
+        # view-marker bump). Idempotent; created under the same advisory lock.
+        assistant.create_assistant_log_table(cur)
         _ensure_view(cur, "initiatives.current", VIEW_DDL, VIEW_COMMENT)
         _ensure_view(cur, "initiatives.latest", LATEST_VIEW_DDL, LATEST_VIEW_COMMENT)
     conn.commit()
