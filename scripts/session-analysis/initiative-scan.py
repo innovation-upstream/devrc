@@ -389,6 +389,29 @@ def text_tokens(s: str) -> list[str]:
     return toks
 
 
+def initiative_fingerprint(ini: dict) -> list[str]:
+    """The token fingerprint used to attach FREE TEXT (a tmux pane title / router
+    signal) to an initiative: its SLUG tokens, or — when the slug is date-only /
+    degenerate and yields NO slug tokens — the handoff TITLE tokens as a fallback.
+
+    Why: a bare-date slug (e.g. `handoff-2026-07-21.md` → slug `2026-07-21`) has ZERO
+    `slug_tokens` (dates are dropped), so it can never match its own live panes on the
+    slug fingerprint — it is structurally invisible to `best_title_match`. Falling back
+    to TITLE tokens gives such an initiative *some* fingerprint.
+
+    Precision: STRICTLY ADDITIVE — it only grants matching ability to initiatives that
+    currently match NOTHING (a non-empty slug is returned unchanged, so every existing
+    match is byte-identical). The caller's df/uniqueness gate still applies to the
+    fallback tokens, so a date-only initiative can only claim a pane on a token NO
+    eligible sibling shares; and `best_title_match` ranks a real-slug fingerprint ABOVE
+    a title fallback, so a fallback can never steal a pane from a real-slug match.
+    """
+    toks = slug_tokens(ini.get("slug", ""))
+    if toks:
+        return toks
+    return text_tokens(ini.get("title") or "")
+
+
 def resolve_cwd_repo(cwd: str | None, repos: list[str],
                      wt_map: dict[str, str] | None = None) -> str | None:
     """Map a working directory to its CANONICAL repo, or None.
@@ -1487,20 +1510,33 @@ def pane_id(pane: dict, codenames: dict[str, str] | None = None) -> str:
 def best_title_match(pane_toks: set[str], initiatives: list[dict]) -> dict | None:
     """Pick the initiative whose slug/title best overlaps a pane title's tokens.
 
-    Scored as (# slug-token overlaps, # extra title-token overlaps). Slug tokens are
-    the initiative fingerprint (clawgate, sysredis, wedge, tekton, bitdex); the pane
-    title is first stripped of generic action verbs (`TITLE_STOP` in `text_tokens`),
-    so a pane can't be linked on "resume"/"review"/"monitor" alone. A candidate
-    qualifies with ≥2 slug-token overlaps, OR ≥1 slug-token overlap on a token UNIQUE
-    to that initiative among the eligible set, OR ≥2 title-token overlaps. The
-    uniqueness gate is what stops a pane linking on ONE token SHARED across siblings
-    (e.g. "grafana" in both grafana-alert-drift and alert-chaos-grafana-sqlite) while
-    still allowing a single distinctive token (faro, tekton) to match. Best by
-    (slug_overlap, title_overlap), then longer slug, then lexically, for determinism.
+    Scored as (# fingerprint overlaps, # extra title-token overlaps). The fingerprint
+    is the initiative's SLUG tokens (clawgate, sysredis, wedge, tekton, bitdex) — or,
+    for a date-only/degenerate slug with NO slug tokens, its TITLE tokens
+    (`initiative_fingerprint`, so a bare-date initiative like `2026-07-21` isn't
+    structurally unmatchable). The pane title is first stripped of generic action verbs
+    (`TITLE_STOP` in `text_tokens`), so a pane can't be linked on "resume"/"review"/
+    "monitor" alone. A candidate qualifies with ≥2 fingerprint overlaps, OR ≥1
+    fingerprint overlap on a token UNIQUE to that initiative among the eligible set, OR
+    ≥2 title-token overlaps. The uniqueness gate is what stops a pane linking on ONE
+    token SHARED across siblings (e.g. "grafana" in both grafana-alert-drift and
+    alert-chaos-grafana-sqlite) while still allowing a single distinctive token (faro,
+    tekton) to match.
+
+    Ranked by (real-slug-fingerprint?, fingerprint_overlap, title_overlap, longer slug,
+    lexical). The leading real-slug flag guarantees a real SLUG match always outranks a
+    date-only TITLE-fallback match, so the fallback can only fill a gap — never steal a
+    pane a real-slug initiative would have won. Among real-slug initiatives the flag is
+    constant, so their ordering is byte-identical to before.
 
     LIMITATION: a genuinely multi-topic pane title is attributed to its single
     strongest match and may miss a co-hosted sibling; bag-of-words can't disambiguate.
-    Heuristic — read it as "which session is likely on this", not a proof.
+    A pane whose ONLY overlap is a token SHARED across a sibling family (df>1) is
+    deliberately left UNMATCHED by the uniqueness gate — attaching it to one sibling by
+    recency was evaluated and REJECTED: on live data it is structurally indistinguishable
+    from a false match on a generic client/domain token (see the handoff), and a wrong
+    tag costs more than a miss. Heuristic — read it as "which session is likely on this",
+    not a proof.
     """
     # Document frequency of each token across the eligible set, so a single-token
     # match can require that token to be UNIQUE (df == 1) to this initiative.
@@ -1511,17 +1547,18 @@ def best_title_match(pane_toks: set[str], initiatives: list[dict]) -> dict | Non
             df[t] = df.get(t, 0) + 1
 
     best: dict | None = None
-    best_key: tuple = (0, 0, 0, "")
+    best_key: tuple = (0, 0, 0, 0, "")
     for ini in initiatives:
-        slug_t = set(slug_tokens(ini.get("slug", "")))
+        fp_t = set(initiative_fingerprint(ini))
         title_t = set(text_tokens(ini.get("title") or ""))
-        slug_hits = pane_toks & slug_t
-        slug_overlap = len(slug_hits)
-        title_overlap = len(pane_toks & (title_t - slug_t))
-        unique_single = slug_overlap == 1 and df.get(next(iter(slug_hits)), 1) == 1
-        if not (slug_overlap >= 2 or unique_single or title_overlap >= 2):
+        fp_hits = pane_toks & fp_t
+        fp_overlap = len(fp_hits)
+        title_overlap = len(pane_toks & (title_t - fp_t))
+        unique_single = fp_overlap == 1 and df.get(next(iter(fp_hits)), 1) == 1
+        if not (fp_overlap >= 2 or unique_single or title_overlap >= 2):
             continue
-        key = (slug_overlap, title_overlap,
+        is_real_slug = 1 if slug_tokens(ini.get("slug", "")) else 0
+        key = (is_real_slug, fp_overlap, title_overlap,
                len(ini.get("slug", "")), ini.get("slug", ""))
         if key > best_key:
             best_key = key

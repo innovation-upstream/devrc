@@ -859,8 +859,114 @@ def test_best_title_match_distinctive_token_beats_generic(monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
+# initiative_fingerprint — slug tokens, or title tokens for a date-only slug
+# --------------------------------------------------------------------------- #
+def test_initiative_fingerprint_uses_slug_tokens_for_a_real_slug():
+    # A normal slug is unchanged — the fingerprint IS its slug tokens (byte-identical
+    # to slug_tokens), so every existing match keeps its exact behaviour.
+    ini = {"slug": "clawgate-agent-loop", "title": "Something else entirely"}
+    assert isc.initiative_fingerprint(ini) == isc.slug_tokens("clawgate-agent-loop")
+    assert isc.initiative_fingerprint(ini) == ["clawgate", "agent", "loop"]
+
+
+def test_initiative_fingerprint_falls_back_to_title_for_date_only_slug():
+    # A bare-date slug yields ZERO slug tokens -> fall back to the TITLE tokens so the
+    # initiative isn't structurally unmatchable (the ComfyUI handoff-2026-07-21 case).
+    ini = {"slug": "2026-07-21",
+           "title": "Session Handoff — ComfyUI NSFW realism pipeline"}
+    assert isc.slug_tokens("2026-07-21") == []  # premise: date-only -> no slug tokens
+    assert isc.initiative_fingerprint(ini) == isc.text_tokens(ini["title"])
+    assert "comfyui" in isc.initiative_fingerprint(ini)
+
+
+# --------------------------------------------------------------------------- #
+# best_title_match — date-only-slug fingerprint fallback (recall Fix #1)
+# --------------------------------------------------------------------------- #
+def test_best_title_match_date_only_slug_links_on_unique_title_token():
+    # The live ComfyUI case: a date-only slug ('2026-07-21') matches its own pane via a
+    # TITLE token ('comfyui') that is UNIQUE among the eligible set (df==1).
+    inis = [
+        {"slug": "2026-07-21",
+         "title": "Session Handoff — ComfyUI NSFW realism pipeline"},
+        {"slug": "sysredis-buffer", "title": "sysRedis buffer soft-dependency"},
+    ]
+    toks = set(isc.text_tokens("Run ComfyUI preference optimization loop end-to-end"))
+    assert isc.best_title_match(toks, inis)["slug"] == "2026-07-21"
+
+
+def test_best_title_match_date_only_slug_ignores_unrelated_pane():
+    # A date-only slug must NOT grab a pane it has no topical overlap with — the
+    # fallback only ADDS matches on real title-token overlap, never blanket-claims.
+    inis = [
+        {"slug": "2026-07-21",
+         "title": "Session Handoff — ComfyUI NSFW realism pipeline"},
+    ]
+    toks = set(isc.text_tokens("Fix hands in walk/portrait output with detailer"))
+    assert isc.best_title_match(toks, inis) is None
+
+
+def test_best_title_match_date_only_slug_shared_title_token_does_not_link():
+    # The df/uniqueness gate STILL guards the title fallback: when the only overlapping
+    # title token is SHARED (df>1), the date-only slug does NOT link on it (precision).
+    inis = [
+        {"slug": "2026-07-21", "title": "ComfyUI pipeline realism"},
+        {"slug": "comfyui-runner", "title": "comfyui runner"},
+    ]
+    toks = set(isc.text_tokens("ComfyUI status"))  # only the SHARED 'comfyui' overlaps
+    assert isc.best_title_match(toks, inis) is None
+
+
+def test_best_title_match_real_slug_outranks_date_only_title_fallback():
+    # PRECISION GUARD: when a real-SLUG initiative and a date-only TITLE-fallback
+    # initiative both match a contested pane, the real slug wins — a fallback fingerprint
+    # can never STEAL a pane a real-slug initiative would have claimed.
+    inis = [
+        {"slug": "2026-07-21", "title": "ComfyUI pipeline realism"},   # date-only
+        {"slug": "comfyui-pipeline", "title": "comfyui pipeline"},     # real slug
+    ]
+    toks = set(isc.text_tokens("comfyui pipeline run"))
+    assert isc.best_title_match(toks, inis)["slug"] == "comfyui-pipeline"
+
+
+def test_best_title_match_sibling_shared_prefix_token_stays_unmatched():
+    # DELIBERATE precision decision (recall Fix #2 DEFERRED): a pane whose ONLY overlap
+    # is a token SHARED across a sibling family (df>1) stays UNMATCHED. Attaching it to
+    # the most-recently-touched sibling by recency was evaluated and rejected — on live
+    # data that rule is structurally indistinguishable from a false match on a generic
+    # client/domain token, and a wrong tag costs more than a miss.
+    inis = [
+        {"slug": "remix-session", "title": "Remix — session handoff"},
+        {"slug": "remix-hardening-session", "title": "Remix — hardening"},
+        {"slug": "remix-platform", "title": "Remix platform"},
+        {"slug": "remix-templates", "title": "Remix render templates"},
+    ]
+    toks = set(isc.text_tokens("Resume remix 0.18 work and verify live feed"))
+    assert isc.best_title_match(toks, inis) is None
+
+
+# --------------------------------------------------------------------------- #
 # match_tmux_to_initiatives — attach live sessions, scoped by repo
 # --------------------------------------------------------------------------- #
+def test_match_tmux_date_only_slug_initiative_attaches_its_pane():
+    # End-to-end: a date-only-slug initiative (ComfyUI handoff-2026-07-21) in its own
+    # repo attaches its live pane via the title-token fingerprint fallback, and a
+    # topically-unrelated pane in the same repo stays unmatched.
+    comfy = "/home/u/workspace/fast/comfyui"
+    inis = [{"slug": "2026-07-21",
+             "title": "Session Handoff — ComfyUI NSFW realism pipeline",
+             "repo": comfy}]
+    panes = [
+        {"session": "scratch6", "window": "4", "cwd": comfy, "command": "claude",
+         "title": "Run ComfyUI preference optimization loop end-to-end"},
+        {"session": "scratch6", "window": "5", "cwd": comfy, "command": "claude",
+         "title": "Fix hands in walk/portrait output with detailer and LoRA"},
+    ]
+    unmatched = isc.match_tmux_to_initiatives(inis, panes, [comfy],
+                                              codenames={"scratch6": "Pool"})
+    assert inis[0]["tmux_sessions"] == {"Pool-4"}
+    assert [u["id"] for u in unmatched] == ["Pool-5"]  # the hands pane has no overlap
+
+
 def test_match_tmux_attaches_session_scoped_by_repo():
     devrc, civit = "/home/u/workspace/devrc", "/home/u/workspace/civit/dp"
     inis = [

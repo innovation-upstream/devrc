@@ -199,3 +199,24 @@ def test_empty_store_returns_empty_and_new_work():
 def test_empty_signal_matches_nothing():
     ranked = route.rank_matches("", [CLAWGATE, TEKTON])
     assert ranked == []
+
+
+# --------------------------------------------------------------------------- #
+# Date-only-slug fingerprint fallback (mirrors the scan's recall Fix #1)
+# --------------------------------------------------------------------------- #
+def test_date_only_slug_routes_via_title_fingerprint():
+    # A bare-date slug has no slug tokens; the router falls back to TITLE tokens so a
+    # signal can still route to it on a unique title token (df==1).
+    date_ini = _ini("2026-07-21", "ComfyUI NSFW realism pipeline")
+    ranked = route.rank_matches("run comfyui preference loop", [date_ini, SYSREDIS])
+    assert ranked and ranked[0]["slug"] == "2026-07-21"
+    assert ranked[0]["confident"] is True
+
+
+def test_real_slug_outranks_date_only_title_fallback():
+    # Precision guard mirrored from best_title_match: a real-SLUG match ranks ABOVE a
+    # date-only TITLE-fallback match for a contested signal.
+    date_ini = _ini("2026-07-21", "ComfyUI pipeline realism")
+    real = _ini("comfyui-pipeline", "comfyui pipeline")
+    ranked = route.rank_matches("comfyui pipeline run", [date_ini, real])
+    assert ranked[0]["slug"] == "comfyui-pipeline"
