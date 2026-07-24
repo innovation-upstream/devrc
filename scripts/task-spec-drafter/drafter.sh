@@ -130,7 +130,11 @@ export REPO_COS_PROD_KUBECONFIG="${REPO_COS_PROD_KUBECONFIG:-$HOME/workspace/hom
 # EXECUTE unprompted. A prompt-injected ticket must not be able to reach a WRITE.
 # Therefore every entry is a read-only verb only, and specifically NOT:
 #   * `Bash(gh api*)`  — dropped: allows `gh api -X POST/PATCH/DELETE` (mutations).
-#                        PR/commit reality is verified via gh pr list/view/search.
+#                        Kept OUT even though the model reaches for it: a prefix
+#                        glob cannot forbid `-X POST` while allowing the GET
+#                        default, so the whole verb is an injection→mutation path.
+#                        Merge/PR reality is verified via `gh pr
+#                        list/view/checks/search` + the git plumbing verbs below.
 #   * `Bash(curl -s*)` — dropped: allows `curl -X POST -d …` to any URL (mutation +
 #                        exfil). Live-state verification degrades to kubectl
 #                        get/logs/top (pod/cronjob running-vs-suspended), which
@@ -138,8 +142,28 @@ export REPO_COS_PROD_KUBECONFIG="${REPO_COS_PROD_KUBECONFIG:-$HOME/workspace/hom
 #                        off?" axis; ad-hoc Prometheus/Alertmanager HTTP reads go.
 #   * `Bash(env*)`     — dropped: the pass inherits drafter.sh's env, which sources
 #                        ~/.claude/clawgate.env (CLAWGATE_HOOK_TOKEN); no dumping it.
+#
+# READ-ONLY MERGE/REF PLUMBING (added 2026-07): the pass kept burning headless
+# calls on "is commit X merged / on trunk?" because the answer verbs were not
+# allowlisted → "requires approval" → dead in headless. Added below, each
+# justified as strictly read-only (no object/ref mutation possible in the
+# allowed shape):
+#   * `git -C * branch --contains*` — lists branches containing a commit. NARROWED
+#       to `branch --contains` ON PURPOSE: a bare `branch*` glob would also match
+#       `git branch <name>` (creates) and `git branch -d/-D <name>` (deletes) —
+#       both WRITES. Those write forms do not start with `branch --contains`, so
+#       they can never match this entry.
+#   * `git -C * rev-parse* / rev-list* / merge-base* / for-each-ref* / ls-files*
+#       / cat-file* / ls-remote*` — pure readers (resolve refs → SHA, list commit
+#       ranges/counts, `merge-base --is-ancestor` for the merged check, enumerate
+#       refs, list tracked files, inspect objects, query a remote's refs). None
+#       has a write mode.
+#   * `git -C * symbolic-ref --short*` — NARROWED: bare `symbolic-ref HEAD <ref>`
+#       (2-arg) REPOINTS HEAD (a write); `--short <ref>` only reads the target,
+#       so pin the read form.
+#   * `gh pr checks*` — read-only CI check-run status for a PR (no mutation).
 # Override DRAFTER_ALLOWED_TOOLS via env ONLY with read-only verbs.
-DRAFTER_ALLOWED_TOOLS="${DRAFTER_ALLOWED_TOOLS:-Read,Glob,Grep,WebFetch,Bash(node *query.mjs get*),Bash(node *query.mjs comments*),Bash(node *query.mjs search*),Bash(git -C * log*),Bash(git -C * show*),Bash(git -C * diff*),Bash(git -C * grep*),Bash(git log*),Bash(gh pr list*),Bash(gh pr view*),Bash(gh search*),Bash(kubectl get*),Bash(kubectl logs*),Bash(kubectl describe*),Bash(kubectl top*),Bash(grep*),Bash(rg*),Bash(jq*),Bash(cat*),Bash(echo*),Bash(date*)}"
+DRAFTER_ALLOWED_TOOLS="${DRAFTER_ALLOWED_TOOLS:-Read,Glob,Grep,WebFetch,Bash(node *query.mjs get*),Bash(node *query.mjs comments*),Bash(node *query.mjs search*),Bash(git -C * log*),Bash(git -C * show*),Bash(git -C * diff*),Bash(git -C * grep*),Bash(git -C * branch --contains*),Bash(git -C * rev-parse*),Bash(git -C * rev-list*),Bash(git -C * merge-base*),Bash(git -C * for-each-ref*),Bash(git -C * symbolic-ref --short*),Bash(git -C * ls-files*),Bash(git -C * cat-file*),Bash(git -C * ls-remote*),Bash(git log*),Bash(gh pr list*),Bash(gh pr view*),Bash(gh pr checks*),Bash(gh search*),Bash(kubectl get*),Bash(kubectl logs*),Bash(kubectl describe*),Bash(kubectl top*),Bash(grep*),Bash(rg*),Bash(jq*),Bash(cat*),Bash(echo*),Bash(date*)}"
 
 mkdir -p "$DRAFTER_OUT_DIR" 2>/dev/null || true
 # The delta-state file may live outside OUT_DIR (e.g. ~/.local/state/...); make

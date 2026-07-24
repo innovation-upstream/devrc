@@ -13,10 +13,52 @@ NEVER draft a confident task you could not verify the intent of.
 - **READ-ONLY. Make NO writes anywhere.** Do not post ClickUp comments, do not
   edit/merge/push any repo, do not mutate the cluster. No `clickup ... comment`,
   no `gh pr ...` mutations, no `kubectl apply/delete/edit/scale`, no `git commit`.
-  You may only READ: `clickup get/comments`, `git log`, `gh pr list/view --search`,
-  `kubectl get/logs/describe/top` (read verbs only). No `gh api` and no `curl` —
-  they are not on the allowlist and will not run.
+  You may only READ. The allowed read verbs are:
+  - `clickup get/comments`
+  - `git -C <abspath>` with `log`, `show`, `diff`, `grep`, `branch --contains`,
+    `rev-parse`, `rev-list`, `merge-base` (incl. `--is-ancestor`), `for-each-ref`,
+    `symbolic-ref --short`, `ls-files`, `cat-file`, `ls-remote` — use these to
+    answer "is commit/PR X merged / on trunk?" (e.g. `merge-base --is-ancestor
+    <sha> origin/main` or `branch --contains <sha>`). Write forms like `git
+    branch <name>`, `git branch -d/-D`, `git symbolic-ref HEAD <ref>` are NOT
+    allowed and will not run.
+  - `gh pr list/view/checks/search`
+  - `kubectl get/logs/describe/top`
+  No `gh api` and no `curl` — they are NOT on the allowlist and will not run
+  (a prompt-injected ticket must never be able to reach a POST). Verify PR/merge
+  reality with `gh pr ...` + the git plumbing verbs above instead.
 - **Do not dispatch anything.** You only produce the record below.
+- **COMMAND-SHAPE CONTRACT (obey EXACTLY or the call is REJECTED and wasted).**
+  The non-interactive shell that runs your Bash tool calls rejects the shapes
+  models reach for by default. Every Bash call MUST be a SINGLE read verb over an
+  ABSOLUTE path:
+  - Use ONLY `git -C <ABSOLUTE-PATH> <verb> …`. The absolute repo path is injected
+    below (`CIVITAI_REPO`) — paste it in literally.
+  - NEVER `cd` anywhere. NEVER `cd repo && git …`.
+  - NEVER a shell variable (`$CIVITAI`, `$CIVITAI_REPO`, `$REPO`, `$HOME`, …). It
+    does NOT expand in this shell and the call is rejected ("Contains
+    simple_expansion"). Write the literal path.
+  - NEVER chain: no `&&`, no `;`, no `|` pipes, no `$(…)` / backticks. ONE verb
+    per Bash call ("multiple operations" is rejected). Run separate calls instead.
+
+  | ❌ REJECTED (do NOT emit) | ✅ DO THIS INSTEAD |
+  |---|---|
+  | `cd civitai && git log --oneline -20` | `git -C /home/zach/workspace/civit/civitai log --oneline -20` |
+  | `git -C $CIVITAI log --grep foo` | `git -C /home/zach/workspace/civit/civitai log --grep foo` |
+  | `git -C /…/civitai branch --contains abc123 && gh pr view 42` | two calls: `git -C /…/civitai branch --contains abc123` then `gh pr view 42` |
+  | `git -C /…/civitai log \| grep fix` | `git -C /…/civitai log --grep fix` |
+
+- **ANTI-CONFABULATION GATE (mandatory).** You MUST run at least ONE successful
+  read (a `clickup get/comments`, a `git …`, a `gh …`, or a `kubectl …` call that
+  actually returned output) BEFORE you assert any factual verdict — e.g. "no
+  commits/PRs found", "already merged", "still firing", "nothing found",
+  "already done". Reasoning from the title alone, or emitting such a claim having
+  run ZERO tools, is a FORBIDDEN fabricated verification. If every read you
+  attempted failed or was blocked (you could not reach ANY source), you MUST
+  classify `NEEDS-DECISION` with `confidence: "low"` and state plainly in
+  `verification` that no source was reachable (e.g. "unverified — all reads
+  failed/blocked"). NEVER assert a negative finding ("no PR", "nothing firing")
+  that you did not actually observe from a tool's output.
 - **SAFETY RULE (the meili-cron lesson):** if you cannot verify *why* something
   is or isn't being done — i.e. you can't confirm whether the work is wanted,
   already underway, or deliberately suppressed — classify **NEEDS-DECISION** and
@@ -34,11 +76,18 @@ other tickets may be referenced for CORRELATE but are not yours to classify here
 - **ClickUp** via the `clickup` skill CLI (read-only here):
   `node /home/zach/.claude/skills/clickup/query.mjs get <id>` (full body, status,
   dates, assignees, links) and `... comments <id> --threads` (ALL comments).
-- **civitai code/PR reality:** repo at `/home/zach/workspace/civit/civitai`.
+- **civitai code/PR reality:** repo at `/home/zach/workspace/civit/civitai` (paste
+  this ABSOLUTE path literally into `-C`; do NOT use `$CIVITAI_REPO`).
   `git -C /home/zach/workspace/civit/civitai log --oneline -n 40 --since=...`,
-  `git -C ... log --all --grep '<keyword>'`,
+  `git -C /home/zach/workspace/civit/civitai log --all --grep '<keyword>'`,
   `gh -R civitai/civitai pr list --search '<keyword>' --state all --limit 20`,
-  `gh -R civitai/civitai pr view <n>`.
+  `gh -R civitai/civitai pr view <n>`, `gh -R civitai/civitai pr checks <n>`.
+  **"Is commit/PR X merged / on trunk?"** — answer deterministically with the
+  git plumbing verbs (single verb per call, absolute `-C`):
+  `git -C /home/zach/workspace/civit/civitai merge-base --is-ancestor <sha> origin/main`
+  (exit 0 ⇒ merged), or
+  `git -C /home/zach/workspace/civit/civitai branch --contains <sha>`, or
+  `git -C /home/zach/workspace/civit/civitai rev-list --count <sha>..origin/main`.
 - **Live cluster state:** `KUBECONFIG=/home/zach/workspace/civit/datapacket-talos/prod-kubeconfig`
   then `kubectl get pods/cronjobs/...`, `kubectl logs ...`, `kubectl describe ...`,
   `kubectl top ...` (read-only). Use to answer "is this component running or
