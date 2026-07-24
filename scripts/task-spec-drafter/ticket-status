@@ -28,12 +28,25 @@ boundary:
     parse as an option.
   * Every subprocess is an argv ARRAY — never a shell string, never shell=True,
     never `bash -c`. No untrusted value can inject `&&`/`;`/`|`/`$()`/redirects.
-  * git is ALWAYS scoped with `-C <resolved-repo>` where the repo comes ONLY from
-    operator config (`--repo` / `$CIVITAI_REPO` / the built-in default) — NEVER
-    from a positional/untrusted arg. There is no code path where a search term or
-    ticket-id becomes the `-C` path (closes the audit's `-C <any path>` note).
-  * The only network egress is `git fetch <origin>` to the repo's own configured
-    remote, bounded by a timeout. gh reads degrade to "unavailable" offline.
+  * git is ALWAYS scoped with `-C <resolved-repo>`. Which repo is a SECURITY
+    decision, because the untrusted drafter path auto-runs this wrapper over
+    injected ticket text that can smuggle in a `--repo <path>` OPTION:
+      - LOCK (drafter path, bulletproof): if `TICKET_STATUS_LOCK_REPO` is set,
+        `--repo` is IGNORED entirely and the locked path is used. drafter.sh sets
+        this to `$CIVITAI_REPO`, so injected options cannot steer the repo.
+      - ROOT-ALLOWLIST (standalone path): without the lock, `--repo` must resolve
+        INSIDE an allowlisted root (default: the configured `$CIVITAI_REPO`;
+        extend via `TICKET_STATUS_ALLOWED_REPO_ROOTS`, ':'-separated). Anything
+        outside is REFUSED (rc 2). This closes two proven attacks: (1) RCE — a
+        `--repo` pointed at a PLANTED checkout whose own git config
+        (`remote.origin.uploadpack` / `core.sshCommand`) EXECUTES on the internal
+        `git fetch`; (2) cross-repo info-disclosure — `--repo <another repo>`
+        reading a different client's commit subjects/branches into the LLM context.
+  * The internal `git fetch` additionally runs with the fetch-time exec config
+    NEUTRALISED (`remote.origin.uploadpack` reset, `protocol.ext.allow=never`,
+    `core.fsmonitor=`) as defense-in-depth even for the pinned repo.
+  * The only network egress is that `git fetch <origin>` to the repo's own
+    configured remote, bounded by a timeout. gh reads degrade to "unavailable".
 
 OUTPUT
 ------
@@ -137,15 +150,63 @@ def git(repo: str, *args: str, timeout: int = DEFAULT_GIT_TIMEOUT) -> subprocess
     return _run([GIT_BIN, "-C", repo, *args], timeout)
 
 
-# --- repo / trunk resolution (operator config only) ---------------------------
-def resolve_repo(repo_arg: str | None) -> str:
-    repo = os.path.realpath(repo_arg or DEFAULT_REPO)
+# --- repo / trunk resolution -------------------------------------------------
+# WHICH repo we scope git to is a SECURITY decision: the untrusted drafter path
+# auto-runs this wrapper over injected ticket text that can smuggle a `--repo
+# <path>` option, and a `--repo` pointed at a planted checkout is RCE (its own git
+# config execs on `git fetch`) plus cross-repo info-disclosure. Two layers pin it.
+def _allowed_roots() -> list[str]:
+    """Roots a standalone `--repo` may resolve inside. Always includes the
+    configured default repo; operators/tests extend via
+    TICKET_STATUS_ALLOWED_REPO_ROOTS (':'-separated)."""
+    roots = [DEFAULT_REPO]
+    extra = os.environ.get("TICKET_STATUS_ALLOWED_REPO_ROOTS", "")
+    roots += [r for r in extra.split(os.pathsep) if r]
+    return [os.path.realpath(r) for r in roots]
+
+
+def _within_roots(path: str, roots: list[str]) -> bool:
+    p = os.path.realpath(path)
+    for r in roots:
+        if p == r or p.startswith(r + os.sep):
+            return True
+    return False
+
+
+def _verify_git_worktree(repo: str) -> None:
     if not os.path.isdir(repo):
         raise InputError(f"repo not found: {repo}")
     r = git(repo, "rev-parse", "--is-inside-work-tree")
     if r.returncode != 0 or r.stdout.strip() != "true":
         raise InputError(f"not a git work tree: {repo}")
-    return repo
+
+
+def resolve_repo(repo_arg: str | None) -> tuple[str, list[str]]:
+    """Return (resolved_repo, warnings). Enforces the lock env (drafter path) and
+    the root allowlist (standalone path) — see the module docstring."""
+    warnings: list[str] = []
+    lock = os.environ.get("TICKET_STATUS_LOCK_REPO", "").strip()
+    if lock:
+        # Drafter / locked path: IGNORE any caller --repo entirely.
+        repo = os.path.realpath(lock)
+        if repo_arg is not None and os.path.realpath(repo_arg) != repo:
+            warnings.append(
+                "ignored --repo: repo is locked to the configured path via "
+                "TICKET_STATUS_LOCK_REPO (untrusted callers cannot steer it)"
+            )
+        _verify_git_worktree(repo)
+        return repo, warnings
+    # Standalone path: --repo (or default) must resolve INSIDE an allowed root.
+    repo = os.path.realpath(repo_arg or DEFAULT_REPO)
+    roots = _allowed_roots()
+    if not _within_roots(repo, roots):
+        raise InputError(
+            f"repo {repo!r} is outside the allowed roots {roots}; refused. "
+            "Set TICKET_STATUS_ALLOWED_REPO_ROOTS to permit it, or "
+            "TICKET_STATUS_LOCK_REPO to pin one."
+        )
+    _verify_git_worktree(repo)
+    return repo, warnings
 
 
 def resolve_trunk(repo: str, trunk_arg: str) -> tuple[str | None, list[str]]:
@@ -171,7 +232,25 @@ def refresh(repo: str, do_fetch: bool, fetch_timeout: int) -> tuple[bool, list[s
     if not do_fetch:
         warnings.append("fetch skipped (--no-fetch): results reflect the local clone only")
         return False, warnings
-    r = git(repo, "fetch", "--quiet", "--no-tags", "origin", timeout=fetch_timeout)
+    # Defense-in-depth: neutralise the fetch-time exec config even for the pinned
+    # repo, so a compromised-but-legit repo config can't run code on fetch.
+    #   --upload-pack=git-upload-pack -> the fetch-flag override that actually wins
+    #        over a poisoned `remote.origin.uploadpack` on LOCAL transport (verified:
+    #        `-c remote.origin.uploadpack=` does NOT override it; the fetch flag
+    #        does). This was the PROVEN RCE vector.
+    #   protocol.ext.allow=never -> block ext:: helper execution
+    #   core.fsmonitor=          -> disable the fsmonitor hook
+    # (core.sshCommand is intentionally NOT overridden — an empty value would break
+    #  a legitimate ssh remote; the repo pin/root-allowlist is the real guard for
+    #  the ssh-remote case.)
+    r = git(
+        repo,
+        "-c", "protocol.ext.allow=never",
+        "-c", "core.fsmonitor=",
+        "fetch", "--upload-pack=git-upload-pack",
+        "--quiet", "--no-tags", "origin",
+        timeout=fetch_timeout,
+    )
     if r.returncode != 0:
         warnings.append(
             "git fetch origin failed (offline / no remote?): results may be STALE "
@@ -304,8 +383,10 @@ def compute_verdict(prior_art: list[dict], prs: list[dict], branches: list[str])
 # --- orchestration ------------------------------------------------------------
 def probe(ticket_id: str, terms: list[str], repo_arg: str | None, trunk_arg: str,
           do_fetch: bool, fetch_timeout: int) -> dict:
-    repo = resolve_repo(repo_arg)
-    clone_fresh, warnings = refresh(repo, do_fetch, fetch_timeout)
+    repo, warnings = resolve_repo(repo_arg)
+    fresh, fw = refresh(repo, do_fetch, fetch_timeout)
+    clone_fresh = fresh
+    warnings += fw
     trunk, tw = resolve_trunk(repo, trunk_arg)
     warnings += tw
     behind = behind_trunk(repo, trunk)
@@ -474,15 +555,24 @@ def parse_args(argv: list[str]) -> dict:
             i += 1
             if i >= len(argv):
                 raise InputError("--trunk requires a ref")
+            # The trunk ref is an untrusted-reachable value flowing to git; a
+            # leading '-' could be parsed as a flag, so reject it (mirrors terms).
+            if argv[i].startswith("-"):
+                raise InputError(f"--trunk {argv[i]!r} rejected: a ref must not start with '-'")
             out["trunk"] = argv[i]
         elif a == "--fetch-timeout":
             i += 1
             if i >= len(argv):
                 raise InputError("--fetch-timeout requires an integer")
             try:
-                out["fetch_timeout"] = int(argv[i])
+                ft = int(argv[i])
             except ValueError:
                 raise InputError("--fetch-timeout must be an integer")
+            # int() silently accepts a leading '-'; a non-positive timeout is
+            # meaningless and would bypass the leading-dash intent — reject it.
+            if ft <= 0:
+                raise InputError("--fetch-timeout must be a positive integer")
+            out["fetch_timeout"] = ft
         elif a.startswith("-") and a != "-":
             # Unknown option OR an untrusted token trying to look like a flag.
             raise InputError(f"unknown/rejected option {a!r} (terms must not start with '-')")

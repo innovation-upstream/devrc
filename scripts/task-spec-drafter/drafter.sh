@@ -109,6 +109,13 @@ HOST="${CLAUDE_HOST:-$(hostname 2>/dev/null || echo unknown)}"
 # Exported so the deterministic `ticket-status` wrapper (invoked by the pass)
 # scopes its git -C to the SAME configured repo as the rest of the pipeline.
 export CIVITAI_REPO="${CIVITAI_REPO:-/home/zach/workspace/civit/civitai}"
+# SECURITY: PIN the wrapper's repo on the drafter path. The pass auto-runs
+# ticket-status over UNTRUSTED ticket text with no --permission-mode plan, so
+# injected content could otherwise ride in a `--repo <planted-checkout>` option —
+# which is RCE (the planted repo's own git config execs on `git fetch`) and
+# cross-repo info-disclosure. With this lock set, the wrapper IGNORES any --repo
+# and uses only $CIVITAI_REPO, so no injected option can steer which repo it reads.
+export TICKET_STATUS_LOCK_REPO="$CIVITAI_REPO"
 PROD_KUBECONFIG="${PROD_KUBECONFIG:-/home/zach/workspace/civit/datapacket-talos/prod-kubeconfig}"
 
 # --- daily email digest (the SHADOW review surface) ------------------------

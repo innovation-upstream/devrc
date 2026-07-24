@@ -83,6 +83,41 @@ def repo(tmp_path):
             "merged_sha": merged_sha, "unmerged_sha": unmerged_sha}
 
 
+@pytest.fixture()
+def poison_repo(tmp_path):
+    """A real git repo whose OWN config execs a marker on `git fetch` — the exact
+    RCE the audit proved (`remote.origin.uploadpack = 'touch <marker>; ...'` on a
+    local/file remote runs locally). Used to prove the pin/root-allowlist refuse it
+    and that the fetch-config neutralisation defangs it even when pinned."""
+    porigin = tmp_path / "porigin.git"
+    pwork = tmp_path / "poison"
+    marker = tmp_path / "PWNED"
+    subprocess.run(["git", "init", "-q", "--bare", str(porigin)], env=_GIT_ENV, check=True)
+    subprocess.run(["git", "init", "-q", str(pwork)], env=_GIT_ENV, check=True)
+    _git(pwork, "remote", "add", "origin", str(porigin))
+    _git(pwork, "checkout", "-q", "-b", "main")
+    _commit(pwork, "CU 86abc123 planted", "p.txt")
+    _git(pwork, "push", "-q", "origin", "main")
+    # poison the repo's own config: fetch will run this uploadpack command locally
+    _git(pwork, "config", "remote.origin.uploadpack", f"touch {marker}; git-upload-pack")
+    return {"work": pwork, "origin": porigin, "marker": marker}
+
+
+def _bare_fetch_fires(poison) -> bool:
+    """Sanity control: does a plain `git fetch origin` (NO neutralisation) actually
+    trip the poisoned config on this git build? If not, the fixture can't prove the
+    guard, so the dependent test skips."""
+    m = poison["marker"]
+    if m.exists():
+        m.unlink()
+    subprocess.run(["git", "-C", str(poison["work"]), "fetch", "--quiet", "origin"],
+                   env=_GIT_ENV, capture_output=True, text=True)
+    fired = m.exists()
+    if fired:
+        m.unlink()
+    return fired
+
+
 def _fake_gh(tmp_path, payload):
     """A fake `gh` that ignores its args and prints FAKE_GH_OUT. Shebang uses the
     absolute running interpreter so it resolves in the offline nix sandbox."""
@@ -93,11 +128,25 @@ def _fake_gh(tmp_path, payload):
     return p, json.dumps(payload)
 
 
-def _run_cli(repo_path, *args, gh="/nonexistent-gh", gh_out=None, fetch=False):
+def _run_cli(repo_path, *args, gh="/nonexistent-gh", gh_out=None, fetch=False,
+             allowed_roots="__parent__", lock_repo=None, with_repo=True):
     env = {**os.environ, "TICKET_STATUS_GH": str(gh)}
+    env.pop("TICKET_STATUS_LOCK_REPO", None)
+    env.pop("TICKET_STATUS_ALLOWED_REPO_ROOTS", None)
     if gh_out is not None:
         env["FAKE_GH_OUT"] = gh_out
-    argv = [sys.executable, str(_SCRIPT), *args, "--repo", str(repo_path)]
+    # By default, allow the temp repo (outside the built-in civitai root) so the
+    # behavioural tests can point --repo at it. Tests can override the roots or set
+    # a lock to exercise the pin.
+    if allowed_roots == "__parent__":
+        allowed_roots = str(Path(repo_path).parent)
+    if allowed_roots is not None:
+        env["TICKET_STATUS_ALLOWED_REPO_ROOTS"] = str(allowed_roots)
+    if lock_repo is not None:
+        env["TICKET_STATUS_LOCK_REPO"] = str(lock_repo)
+    argv = [sys.executable, str(_SCRIPT), *args]
+    if with_repo:
+        argv += ["--repo", str(repo_path)]
     if not fetch:
         argv.append("--no-fetch")
     return subprocess.run(argv, capture_output=True, text=True, env=env)
@@ -335,22 +384,102 @@ def test_no_shell_true_or_bash_c_in_source():
 
 
 def test_invalid_repo_config_errors_cleanly(tmp_path):
-    r = subprocess.run([sys.executable, str(_SCRIPT), "86abc123",
-                        "--repo", str(tmp_path / "nope"), "--no-fetch"],
-                       capture_output=True, text=True,
-                       env={**os.environ, "TICKET_STATUS_GH": "/nogh"})
+    r = _run_cli(tmp_path / "nope", "86abc123", allowed_roots=str(tmp_path))
     assert r.returncode == 2
     assert "repo not found" in r.stderr
 
 
 def test_non_git_dir_rejected(tmp_path):
     (tmp_path / "plain").mkdir()
-    r = subprocess.run([sys.executable, str(_SCRIPT), "86abc123",
-                        "--repo", str(tmp_path / "plain"), "--no-fetch"],
-                       capture_output=True, text=True,
-                       env={**os.environ, "TICKET_STATUS_GH": "/nogh"})
+    r = _run_cli(tmp_path / "plain", "86abc123", allowed_roots=str(tmp_path))
     assert r.returncode == 2
     assert "not a git work tree" in r.stderr
+
+
+# ============================================================================
+# SECURITY (audit round) — --repo is attacker-reachable on the drafter path
+# ============================================================================
+def test_repo_outside_allowed_roots_is_refused(repo, tmp_path):
+    """A standalone `--repo` pointing outside the allowed roots (another repo, a
+    planted checkout) is REFUSED — closes cross-repo info-disclosure + RCE-via-
+    planted-config, since we never even fetch it."""
+    other = tmp_path / "somewhere-else"
+    r = _run_cli(repo["work"], "86abc123", allowed_roots=str(other))
+    assert r.returncode == 2
+    assert "outside the allowed roots" in r.stderr
+    assert r.stdout == ""
+
+
+def test_repo_within_allowed_roots_still_works(repo):
+    """`--repo` inside an allowed root works for interactive/standalone use."""
+    d = _json_cli(repo["work"], "86abc123")  # default allowed_roots = parent
+    assert d["repo"] == os.path.realpath(str(repo["work"]))
+    assert d["verdict"] == "ALREADY-DONE"
+
+
+def test_lock_env_ignores_repo_option(repo, tmp_path):
+    """LOCK (drafter path): with TICKET_STATUS_LOCK_REPO set, a caller `--repo
+    <anything>` is IGNORED and the locked repo is used — injected options cannot
+    steer which repo is read."""
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    d = _json_cli(elsewhere, "86abc123", lock_repo=repo["work"], allowed_roots=None,
+                  with_repo=True)
+    assert d["repo"] == os.path.realpath(str(repo["work"]))
+    assert any("ignored --repo" in w for w in d["warnings"])
+
+
+def test_lock_env_ignores_poison_repo_no_exec(repo, poison_repo):
+    """RCE finding, LOCK layer: lock to the CLEAN repo, pass `--repo <poison>` — the
+    poison repo is ignored and never fetched, so its config never execs."""
+    if poison_repo["marker"].exists():
+        poison_repo["marker"].unlink()
+    d = _json_cli(poison_repo["work"], "86abc123", lock_repo=repo["work"],
+                  allowed_roots=None, fetch=True)
+    assert d["repo"] == os.path.realpath(str(repo["work"]))
+    assert not poison_repo["marker"].exists(), "poison config executed — RCE not blocked"
+
+
+def test_poison_repo_refused_without_lock_no_exec(repo, poison_repo, tmp_path):
+    """RCE finding, ROOT-ALLOWLIST layer: a `--repo <poison>` outside the allowed
+    roots is refused BEFORE any fetch, so nothing execs."""
+    if poison_repo["marker"].exists():
+        poison_repo["marker"].unlink()
+    # allow only the clean repo dir itself; poison is a sibling, so it's outside.
+    r = _run_cli(poison_repo["work"], "86abc123",
+                 allowed_roots=str(repo["work"]), fetch=True)
+    assert r.returncode == 2
+    assert "outside the allowed roots" in r.stderr
+    assert not poison_repo["marker"].exists()
+
+
+def test_fetch_config_neutralised_even_when_pinned(poison_repo):
+    """Defense-in-depth: even when the poison repo is the PINNED/locked target, the
+    fetch runs with the exec config neutralised, so it must NOT exec the marker.
+    Skips if the fixture's poison doesn't fire under a plain fetch on this git."""
+    if not _bare_fetch_fires(poison_repo):
+        pytest.skip("poisoned uploadpack did not fire under a plain fetch on this git build")
+    # sanity: the control just proved a bare fetch DOES fire; now the wrapper must not
+    assert not poison_repo["marker"].exists()
+    d = _json_cli(poison_repo["work"], "86abc123", lock_repo=poison_repo["work"],
+                  allowed_roots=None, fetch=True)
+    assert not poison_repo["marker"].exists(), \
+        "fetch executed poisoned uploadpack despite neutralisation"
+    # still produced an answer from the (now-fetched) pinned repo
+    assert d["verdict"] in ("ALREADY-DONE", "PARTIAL", "NOT-FOUND")
+
+
+def test_trunk_leading_dash_rejected(repo):
+    r = _run_cli(repo["work"], "86abc123", "--trunk", "-x")
+    assert r.returncode == 2
+    assert "must not start with '-'" in r.stderr
+
+
+def test_fetch_timeout_nonpositive_rejected(repo):
+    for bad in ("-5", "0"):
+        r = _run_cli(repo["work"], "86abc123", "--fetch-timeout", bad)
+        assert r.returncode == 2, f"expected rejection for --fetch-timeout {bad}"
+        assert "positive integer" in r.stderr
 
 
 # ============================================================================
@@ -374,6 +503,13 @@ def test_wrapper_allowlist_entry_is_fixed_path_prefix():
     al = _allowlist_line()
     assert "$SELF_DIR/ticket-status" in al
     assert "Bash($SELF_DIR/ticket-status*)" in al
+
+
+def test_drafter_pins_wrapper_repo_via_lock_env():
+    """The drafter must set TICKET_STATUS_LOCK_REPO so injected `--repo` options in
+    ticket text cannot steer the wrapper's repo (RCE + cross-repo disclosure)."""
+    src = _DRAFTER.read_text(encoding="utf-8")
+    assert 'export TICKET_STATUS_LOCK_REPO="$CIVITAI_REPO"' in src
 
 
 def test_wrapper_addition_did_not_reintroduce_write_or_rce_verbs():
