@@ -85,6 +85,7 @@ though Haiku alone did not flag them.**
 |---|---|
 | `scripts/task-spec-drafter/drafter.sh` | Orchestrator — fetches the queue, runs the per-ticket headless pass, writes the shadow queue, routes to clawgate (shadow/on). |
 | `scripts/task-spec-drafter/drafter-prompt.md` | The five-step pipeline prompt (the LLM reasoning core). Read-only HARD CONSTRAINTS up top. |
+| `scripts/task-spec-drafter/ticket-status` | **Deterministic** prior-art / merge-status probe (NO LLM). One allowlisted command the pass runs FIRST instead of hand-rolling ticket→code `git log`/`merge-base`/`gh`: validates the untrusted ticket-id + terms, greps the `CU <id>` commit convention, checks merged-to-trunk, fetches for freshness, and emits `{verdict: ALREADY-DONE\|PARTIAL\|NOT-FOUND, …}` JSON. The safe boundary that lets the allowlist drop hand-rolled git. |
 | `scripts/task-spec-drafter/task-spec-drafter.env.example` | Copy to `~/.claude/task-spec-drafter.env`. Master knob `DRAFTER_MODE`. |
 | `scripts/task-spec-drafter/systemd/*.{service,timer}` | Daily user timer (09:15 local). |
 
