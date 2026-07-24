@@ -546,15 +546,21 @@ class VllmClient:
             time.sleep(0.25)
         raise TimeoutError(f"vLLM port-forward to {host}:{port} not ready in time")
 
-    def generate(self, messages: list[dict]) -> str:
-        """POST an OpenAI chat-completions request; return choices[0].message.content."""
+    def generate(self, messages: list[dict], *, max_tokens: int | None = None,
+                 temperature: float | None = None) -> str:
+        """POST an OpenAI chat-completions request; return choices[0].message.content.
+
+        `max_tokens`/`temperature` are keyword-only overrides (default to the recap
+        module constants tuned for a 1-line recap) — the assistant passes a larger
+        `max_tokens` for a chat answer and 0 temperature for JSON classification. Existing
+        callers (sync_recaps) pass neither and get the unchanged recap behaviour."""
         if not self._url:
             raise RuntimeError("VllmClient used outside its context manager")
         body = json.dumps({
             "model": self._cfg["model"],
             "messages": messages,
-            "temperature": RECAP_TEMPERATURE,
-            "max_tokens": RECAP_MAX_TOKENS,
+            "temperature": RECAP_TEMPERATURE if temperature is None else temperature,
+            "max_tokens": RECAP_MAX_TOKENS if max_tokens is None else max_tokens,
             "stream": False,
         }).encode("utf-8")
         req = urllib.request.Request(

@@ -1,0 +1,401 @@
+"""Unit tests for the READ-ONLY initiatives assistant (scripts/initiatives/assistant.py).
+
+Hermetic: no live DB, no live model. The pure core (intent classification, the tool
+queries, the plain renderer, the fact projection, sources) is exercised with fixture
+initiative "views"; the assistant loop is exercised with an injected FAKE model client and
+injected views, so nothing here opens a port-forward or hits ClickHouse/Postgres/vLLM.
+
+`assistant` lazily loads its `route` sibling (the scan's token matcher) via importlib for
+the status_of/route tools — the same import test_route.py relies on, available in the
+hermetic pytest sandbox. No viewer/recap module is loaded (handoff read + model are
+injected).
+"""
+import json
+import sys
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+import assistant  # noqa: E402
+
+
+# --------------------------------------------------------------------------- #
+# Fixture initiative "views" — the shape viewer.build_model's `flat` produces.
+# --------------------------------------------------------------------------- #
+NOW = datetime(2026, 7, 24, 12, 0, 0, tzinfo=timezone.utc)
+
+
+def _view(slug, title, repo, *, momentum="active", status="", next_step="",
+          summary="", identity="", age="1h", minutes_ago=60,
+          live_tasks=None, tmux_sessions=None, current_doc=""):
+    return {
+        "slug": slug, "title": title, "repo": repo, "repo_name": repo.rsplit("/", 1)[-1],
+        "momentum": momentum, "status": status, "next_step": next_step,
+        "summary": summary, "identity": identity, "age": age,
+        "last_touch": NOW - timedelta(minutes=minutes_ago),
+        "open_prs": [], "live_tasks": live_tasks or [], "live_task": (live_tasks or [""])[0],
+        "tmux_sessions": tmux_sessions or [], "current_doc": current_doc,
+    }
+
+
+CLAWGATE = _view("clawgate-agent-loop", "Clawgate agent loop close", "/repo/devrc",
+                 status="awaiting Zach's go-ahead on the phase-7 cutover",
+                 next_step="cut over phase 7", age="20m", minutes_ago=20)
+SYSREDIS = _view("sysredis-buffer", "Redis sentinel failover hardening", "/repo/homelab",
+                 momentum="stalled", next_step="resume the sentinel failover soak",
+                 age="9d", minutes_ago=60 * 24 * 9)
+REMIX = _view("remix-session", "Remix session platform", "/repo/remix",
+              momentum="slowing", status="exploring age-gating and moderation",
+              age="2d", minutes_ago=60 * 48)
+TAXES = _view("taxes-archiver", "Tax invoice archiver", "/repo/devrc",
+              next_step="your call on the invoice archive format", age="3h",
+              minutes_ago=180)
+COMFY = _view("2026-07-21", "ComfyUI realism pipeline", "/repo/civitai",
+              live_tasks=["running preference round 3"], tmux_sessions=["8-1"],
+              age="45m", minutes_ago=45)
+
+VIEWS = [CLAWGATE, SYSREDIS, REMIX, TAXES, COMFY]
+UNMATCHED = [{"id": "Pool2", "title": "dp-500 sweep", "repo": "/repo/datapacket",
+              "repo_name": "datapacket"}]
+
+
+def _slugs(items):
+    return [i["slug"] for i in items]
+
+
+# --------------------------------------------------------------------------- #
+# Intent classification (pure, deterministic)
+# --------------------------------------------------------------------------- #
+def test_classify_blocked_on_me_variants():
+    for q in ["what's blocked on me?", "what is waiting on me right now",
+              "anything need my input?", "what needs my call"]:
+        assert assistant.classify_intent(q)["intent"] == "blocked_on_me", q
+
+
+def test_classify_momentum_buckets():
+    assert assistant.classify_intent("what's stalled?")["intent"] == "stalled"
+    assert assistant.classify_intent("anything slowing down")["intent"] == "slowing"
+    assert assistant.classify_intent("what am I working on")["intent"] == "active"
+
+
+def test_classify_status_of_extracts_target():
+    info = assistant.classify_intent("what's the status of clawgate")
+    assert info["intent"] == "status_of"
+    assert info["target"] == "clawgate"
+
+
+def test_classify_where_did_i_leave_extracts_target():
+    info = assistant.classify_intent("where did I leave off with sysredis buffer")
+    assert info["intent"] == "status_of"
+    assert "sysredis" in info["target"]
+
+
+def test_classify_route_extracts_signal():
+    info = assistant.classify_intent("which initiative does the redis failover work belong to")
+    assert info["intent"] == "route"
+    assert "redis" in info["target"]
+
+
+def test_classify_handoff_extracts_target():
+    info = assistant.classify_intent("read the handoff for clawgate")
+    assert info["intent"] == "handoff"
+    assert info["target"] == "clawgate"
+
+
+def test_classify_live_sessions_and_most_recent():
+    assert assistant.classify_intent("what's running right now")["intent"] == "live_sessions"
+    assert assistant.classify_intent("what did I touch most recently")["intent"] == "most_recent"
+
+
+def test_classify_unknown_falls_back_to_overview():
+    assert assistant.classify_intent("hello there friend")["intent"] == "overview"
+    assert assistant.classify_intent("")["intent"] == "overview"
+
+
+# --------------------------------------------------------------------------- #
+# Tools (pure, over fixture views)
+# --------------------------------------------------------------------------- #
+def test_tool_blocked_on_me_filters_on_markers():
+    res = assistant.tool_blocked_on_me(VIEWS)
+    # clawgate ("awaiting …") + taxes ("your call …") are blocked; the rest are not.
+    assert set(_slugs(res["initiatives"])) == {"clawgate-agent-loop", "taxes-archiver"}
+    assert "awaiting" in res["markers"]["clawgate-agent-loop"]
+    assert "your call" in res["markers"]["taxes-archiver"]
+
+
+def test_tool_blocked_on_me_empty_when_nothing_waiting():
+    calm = [_view("calm-a", "Calm A", "/repo/x", status="all merged and shipped"),
+            _view("calm-b", "Calm B", "/repo/x", next_step="keep soaking")]
+    assert assistant.tool_blocked_on_me(calm)["initiatives"] == []
+
+
+def test_tool_by_momentum():
+    assert _slugs(assistant.tool_by_momentum(VIEWS, "stalled")["initiatives"]) == \
+        ["sysredis-buffer"]
+    assert _slugs(assistant.tool_by_momentum(VIEWS, "slowing")["initiatives"]) == \
+        ["remix-session"]
+    active = _slugs(assistant.tool_by_momentum(VIEWS, "active")["initiatives"])
+    assert set(active) == {"clawgate-agent-loop", "taxes-archiver", "2026-07-21"}
+
+
+def test_tool_most_recent_orders_by_last_touch():
+    res = assistant.tool_most_recent(VIEWS, n=3)
+    # clawgate (20m) is newest, then comfyui (45m), then taxes (3h).
+    assert _slugs(res["initiatives"]) == ["clawgate-agent-loop", "2026-07-21", "taxes-archiver"]
+
+
+def test_tool_status_of_resolves_named_initiative_via_matcher():
+    res = assistant.tool_status_of(VIEWS, "clawgate")
+    assert res["initiatives"][0]["slug"] == "clawgate-agent-loop"
+
+
+def test_tool_status_of_substring_fallback_below_token_bar():
+    # "taxes" isn't a slug/title token of taxes-archiver's title ("Tax invoice archiver"),
+    # so the token matcher may miss — the substring fallback still resolves it by slug.
+    res = assistant.tool_status_of(VIEWS, "taxes")
+    assert any(v["slug"] == "taxes-archiver" for v in res["initiatives"])
+
+
+def test_tool_status_of_unknown_returns_empty():
+    assert assistant.tool_status_of(VIEWS, "nonexistent-xyz")["initiatives"] == []
+
+
+def test_tool_route_delegates_to_route_module():
+    res = assistant.tool_route(VIEWS, "harden the redis sentinel failover soak")
+    assert res["ranked"][0]["slug"] == "sysredis-buffer"
+    assert res["ranked"][0]["confident"] is True
+    assert "sysredis-buffer" in res["verdict"]
+
+
+def test_tool_route_matches_route_rank_matches_exactly():
+    # route_signal must be a faithful delegate — same ranking route.rank_matches gives.
+    route = assistant._route()
+    signal = "harden the redis sentinel failover soak"
+    assert assistant.tool_route(VIEWS, signal)["ranked"] == \
+        route.rank_matches(signal, VIEWS, limit=5)
+
+
+def test_tool_live_sessions_lists_tied_plus_untracked():
+    res = assistant.tool_live_sessions(VIEWS, UNMATCHED)
+    assert _slugs(res["initiatives"]) == ["2026-07-21"]
+    assert len(res["untracked"]) == 1
+
+
+def test_tool_by_repo_groups_and_scopes():
+    grouped = assistant.tool_by_repo(VIEWS)
+    assert set(grouped["groups"]) == {"devrc", "homelab", "remix", "civitai"}
+    scoped = assistant.tool_by_repo(VIEWS, "devrc")
+    assert set(_slugs(scoped["initiatives"])) == {"clawgate-agent-loop", "taxes-archiver"}
+
+
+def test_tool_read_handoff_uses_injected_reader_and_resolves_name():
+    captured = {}
+
+    def reader(repo, current_doc):
+        captured["repo"] = repo
+        return {"summary": "the durable goal", "next_steps": ["do X", "do Y"],
+                "open_investigations": []}
+
+    res = assistant.tool_read_handoff(VIEWS, "clawgate", reader=reader)
+    assert res["initiative"]["slug"] == "clawgate-agent-loop"
+    assert res["detail"]["summary"] == "the durable goal"
+    assert captured["repo"] == "/repo/devrc"
+
+
+def test_tool_read_handoff_unknown_initiative():
+    res = assistant.tool_read_handoff(VIEWS, "nope-xyz", reader=lambda r, d: None)
+    assert res["initiative"] is None
+
+
+# --------------------------------------------------------------------------- #
+# Sources (deterministic citation — the anti-confabulation anchor)
+# --------------------------------------------------------------------------- #
+def test_sources_from_filter_result():
+    res = assistant.tool_blocked_on_me(VIEWS)
+    srcs = assistant.sources_of(res)
+    assert {s["slug"] for s in srcs} == {"clawgate-agent-loop", "taxes-archiver"}
+    assert {s["repo"] for s in srcs} == {"devrc"}
+
+
+def test_sources_from_route_result():
+    res = assistant.tool_route(VIEWS, "redis sentinel failover")
+    assert any(s["slug"] == "sysredis-buffer" for s in assistant.sources_of(res))
+
+
+def test_sources_from_handoff_result():
+    res = assistant.tool_read_handoff(VIEWS, "clawgate", reader=lambda r, d: {})
+    srcs = assistant.sources_of(res)
+    assert _slugs(srcs) == ["clawgate-agent-loop"]
+
+
+# --------------------------------------------------------------------------- #
+# Deterministic renderer (graceful-degradation path)
+# --------------------------------------------------------------------------- #
+def test_render_plain_blocked_lists_initiatives():
+    out = assistant.render_plain("blocked_on_me", {},
+                                 assistant.tool_blocked_on_me(VIEWS))
+    assert "clawgate-agent-loop" in out and "taxes-archiver" in out
+
+
+def test_render_plain_blocked_empty():
+    out = assistant.render_plain("blocked_on_me", {},
+                                 assistant.tool_blocked_on_me([]))
+    assert "Nothing" in out
+
+
+def test_render_plain_status_of_not_found():
+    out = assistant.render_plain("status_of", {"target": "ghost"},
+                                 assistant.tool_status_of(VIEWS, "ghost"))
+    assert "Couldn't find" in out and "ghost" in out
+
+
+def test_render_plain_route_shows_verdict():
+    out = assistant.render_plain("route", {},
+                                 assistant.tool_route(VIEWS, "redis sentinel failover"))
+    assert "sysredis-buffer" in out
+
+
+# --------------------------------------------------------------------------- #
+# build_facts — compact + only tool-derived (nothing to confabulate from)
+# --------------------------------------------------------------------------- #
+def test_build_facts_caps_and_projects():
+    facts = assistant.build_facts(assistant.tool_overview(VIEWS))
+    assert facts["count"] == len(VIEWS)
+    slugs = {f["slug"] for f in facts["initiatives"]}
+    assert slugs == {v["slug"] for v in VIEWS}
+
+
+def test_build_facts_blocked_carries_reason():
+    facts = assistant.build_facts(assistant.tool_blocked_on_me(VIEWS))
+    claw = next(f for f in facts["initiatives"] if f["slug"] == "clawgate-agent-loop")
+    assert "awaiting" in claw["waiting_on_you_because"]
+
+
+# --------------------------------------------------------------------------- #
+# The assistant loop with a FAKE model client (intent -> tool -> grounded answer)
+# --------------------------------------------------------------------------- #
+class _FakeClient:
+    """Routes generate() by the system prompt: the classify call (JSON) vs the synthesis
+    call (a phrased answer). Records the DATA it was given so a test can assert grounding."""
+
+    def __init__(self, *, synth="here is a grounded answer", classify_json=None):
+        self._synth = synth
+        self._classify_json = classify_json
+        self.synth_calls = 0
+        self.classify_calls = 0
+        self.last_data = None
+
+    def generate(self, messages, *, max_tokens=None, temperature=None):
+        sys_prompt = messages[0]["content"]
+        if sys_prompt.startswith("Classify"):
+            self.classify_calls += 1
+            return self._classify_json or '{"intent": "overview", "target": ""}'
+        self.synth_calls += 1
+        # capture the DATA json handed to the model
+        user = messages[1]["content"]
+        self.last_data = user
+        return self._synth
+
+
+def test_ask_intent_to_tool_to_model_answer():
+    client = _FakeClient(synth="clawgate-agent-loop and taxes-archiver await you.")
+    res = assistant.ask("what's blocked on me?", views=VIEWS, unmatched=UNMATCHED,
+                        client=client)
+    assert res["ok"] is True
+    assert res["intent"] == "blocked_on_me"
+    assert res["answer"] == "clawgate-agent-loop and taxes-archiver await you."
+    assert {s["slug"] for s in res["sources"]} == {"clawgate-agent-loop", "taxes-archiver"}
+    assert client.synth_calls == 1
+    # a confidently-classified question must NOT invoke the model classifier
+    assert client.classify_calls == 0
+
+
+def test_ask_anticonfab_sources_come_from_tool_not_model():
+    # The model FABRICATES an initiative in its prose; sources must still be ONLY the real
+    # tool output (the auditability anchor). The invented slug never enters sources.
+    client = _FakeClient(synth="You should look at ghost-initiative, it is on fire!")
+    res = assistant.ask("what's stalled?", views=VIEWS, client=client)
+    src_slugs = {s["slug"] for s in res["sources"]}
+    assert "ghost-initiative" not in src_slugs
+    assert src_slugs == {"sysredis-buffer"}   # the only real stalled initiative
+
+
+def test_ask_model_refines_overview_fallback():
+    # A fuzzily-worded question deterministic can't parse -> overview; the model maps it to
+    # blocked_on_me and the RIGHT tool runs.
+    client = _FakeClient(synth="two things await you",
+                         classify_json='{"intent": "blocked_on_me", "target": ""}')
+    res = assistant.ask("hey any hot potatoes on my plate", views=VIEWS, client=client)
+    assert res["intent"] == "blocked_on_me"
+    assert client.classify_calls == 1
+    assert {s["slug"] for s in res["sources"]} == {"clawgate-agent-loop", "taxes-archiver"}
+
+
+def test_ask_data_handed_to_model_is_grounded():
+    client = _FakeClient()
+    assistant.ask("what's stalled?", views=VIEWS, client=client)
+    data = json.loads(client.last_data.split("DATA (the only facts you may use):\n", 1)[1])
+    # the model only ever sees the real stalled initiative — nothing else to confabulate.
+    assert [f["slug"] for f in data["initiatives"]] == ["sysredis-buffer"]
+
+
+# --------------------------------------------------------------------------- #
+# Best-effort degradation
+# --------------------------------------------------------------------------- #
+def test_ask_no_model_uses_deterministic_render():
+    res = assistant.ask("what's blocked on me?", views=VIEWS, client=None,
+                        client_factory=lambda: None)
+    assert res["ok"] is True
+    assert res["intent"] == "blocked_on_me"
+    # deterministic renderer output (no model) still names the real initiatives
+    assert "clawgate-agent-loop" in res["answer"]
+    assert {s["slug"] for s in res["sources"]} == {"clawgate-agent-loop", "taxes-archiver"}
+
+
+def test_ask_model_error_degrades_to_deterministic():
+    class Boom:
+        def generate(self, *a, **k):
+            raise RuntimeError("vllm timeout")
+
+    res = assistant.ask("what's stalled?", views=VIEWS, client=Boom())
+    assert res["ok"] is True
+    assert "sysredis-buffer" in res["answer"]  # deterministic fallback ran
+
+
+def test_ask_store_unreachable_is_graceful_error():
+    def boom_loader():
+        raise ConnectionError("port-forward failed")
+
+    res = assistant.ask("what's active?", loader=boom_loader)
+    assert res["ok"] is False
+    assert res["intent"] == "error"
+    assert res["sources"] == []
+    assert "read-only" in res["answer"]
+
+
+def test_ask_empty_question_is_handled():
+    res = assistant.ask("   ", views=VIEWS)
+    assert res["ok"] is False
+    assert res["sources"] == []
+
+
+def test_ask_client_factory_failure_degrades():
+    def bad_factory():
+        raise RuntimeError("cannot open port-forward")
+
+    res = assistant.ask("what's stalled?", views=VIEWS, client_factory=bad_factory)
+    assert res["ok"] is True
+    assert "sysredis-buffer" in res["answer"]
+
+
+# --------------------------------------------------------------------------- #
+# Model-config gating (no live call)
+# --------------------------------------------------------------------------- #
+def test_default_client_none_when_model_unconfigured():
+    assert assistant._default_client({}) is None  # no RECAP_MODEL -> no client
+
+
+def test_default_client_none_on_placeholder_model():
+    recap = assistant._recap()
+    assert assistant._default_client({"RECAP_MODEL": recap.RECAP_MODEL}) is None

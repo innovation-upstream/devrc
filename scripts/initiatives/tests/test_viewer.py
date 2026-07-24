@@ -1261,3 +1261,126 @@ def test_js_recency_render_branch_present():
     assert "bucketizeRecency(rviews, Date.now())" in viewer._JS
     # the repo label shows in recency too (repo isn't the section header there).
     assert "state.view !== 'grouped'" in viewer._JS
+
+
+# --------------------------------------------------------------------------- #
+# Read-only Q&A sidebar — POST /api/ask + the chat pane render (Phase 1 assistant)
+# --------------------------------------------------------------------------- #
+def test_parse_ask_question_variants():
+    assert viewer._parse_ask_question(b'{"question": "what is blocked?"}') == "what is blocked?"
+    assert viewer._parse_ask_question(b'{"question": "  padded  "}') == "padded"
+    assert viewer._parse_ask_question(b'{"nope": 1}') == ""       # missing key
+    assert viewer._parse_ask_question(b'not json') == ""          # unparseable
+    assert viewer._parse_ask_question(b'{"question": 5}') == ""   # non-string
+    assert viewer._parse_ask_question(b"") == ""                  # empty body
+    assert viewer._parse_ask_question(None) == ""
+
+
+def test_route_ask_calls_asker_and_returns_answer():
+    seen = {}
+
+    def asker(q):
+        seen["q"] = q
+        return {"ok": True, "intent": "blocked_on_me",
+                "answer": "clawgate-agent-loop awaits you.",
+                "sources": [{"slug": "clawgate-agent-loop", "repo": "devrc"}]}
+
+    status, ctype, body = viewer.route_request(
+        "/api/ask", _FakeProvider(), method="POST",
+        body=b'{"question": "what is blocked on me?"}', asker=asker)
+    assert status == 200
+    assert "application/json" in ctype
+    payload = json.loads(body)
+    assert payload["ok"] is True
+    assert payload["answer"] == "clawgate-agent-loop awaits you."
+    assert payload["sources"][0]["slug"] == "clawgate-agent-loop"
+    assert payload["intent"] == "blocked_on_me"
+    assert seen["q"] == "what is blocked on me?"
+
+
+def test_route_ask_missing_question_400():
+    status, _ctype, body = viewer.route_request(
+        "/api/ask", _FakeProvider(), method="POST", body=b'{}', asker=lambda q: {})
+    assert status == 400
+    assert json.loads(body)["ok"] is False
+
+
+def test_route_ask_no_asker_503():
+    status, _ctype, body = viewer.route_request(
+        "/api/ask", _FakeProvider(), method="POST",
+        body=b'{"question": "x"}', asker=None)
+    assert status == 503
+    assert json.loads(body)["ok"] is False
+
+
+def test_route_ask_asker_error_is_caught_200():
+    def boom(q):
+        raise RuntimeError("assistant exploded")
+
+    status, _ctype, body = viewer.route_request(
+        "/api/ask", _FakeProvider(), method="POST",
+        body=b'{"question": "x"}', asker=boom)
+    assert status == 200                       # never 500s the request
+    payload = json.loads(body)
+    assert payload["ok"] is False
+    assert payload["sources"] == []
+
+
+def test_route_ask_is_get_safe_404():
+    # /api/ask is POST-only; a GET falls through to the 404 (no read side effect).
+    status, _ctype, _body = viewer.route_request("/api/ask", _FakeProvider(), method="GET")
+    assert status == 404
+
+
+def test_default_ask_errors_when_store_unreachable():
+    # default_ask must degrade (not raise) when the provider snapshot has no model.
+    res = viewer.default_ask("what's blocked?", _FakeProvider(error="db down"))
+    assert res["ok"] is False
+    assert res["sources"] == []
+
+
+def test_default_ask_passes_provider_views_to_assistant(monkeypatch):
+    # default_ask reuses the provider's CACHED snapshot (no second DB read) and hands the
+    # flat views + live_unmatched straight to assistant.ask.
+    model = viewer.build_model([_row(slug="a-slug")], now=NOW)
+    captured = {}
+
+    class _StubAssistant:
+        def ask(self, question, *, views=None, unmatched=None):
+            captured["question"] = question
+            captured["views"] = views
+            captured["unmatched"] = unmatched
+            return {"ok": True, "answer": "ok", "sources": [], "intent": "overview"}
+
+    monkeypatch.setattr(viewer, "_assistant", lambda: _StubAssistant())
+    res = viewer.default_ask("what's up", _FakeProvider(model=model))
+    assert res["answer"] == "ok"
+    assert captured["question"] == "what's up"
+    assert [v["slug"] for v in captured["views"]] == ["a-slug"]
+
+
+def test_render_html_includes_chat_pane_and_ask_wiring():
+    model = viewer.build_model([_row(slug="s")], now=NOW)
+    html = viewer.render_html(model, None)
+    # the toggle button + the sidebar element + the input/form are present
+    assert 'id="ask-toggle"' in html
+    assert 'id="chat"' in html and 'class="chat"' in html
+    assert 'id="chat-input"' in html and 'id="chat-form"' in html
+    # the client posts to the read-only endpoint and renders sources
+    assert "/api/ask" in viewer._JS
+    assert "renderSources" in viewer._JS
+    # the input is disabled while a request is in flight (debounce/lockout)
+    assert "chatInput.disabled = true" in viewer._JS
+    assert "askInFlight" in viewer._JS
+
+
+def test_render_html_chat_answer_uses_textContent_not_innerhtml():
+    # untrusted answer/source text must be written via textContent (XSS discipline).
+    assert "aEl.textContent = j.answer" in viewer._JS
+
+
+def test_chat_pane_absent_from_error_page():
+    # the graceful error page has no JS/model island — and no chat pane wiring.
+    html = viewer.render_html(None, "OperationalError")
+    assert 'id="chat"' not in html
+    assert "store unreachable" in html

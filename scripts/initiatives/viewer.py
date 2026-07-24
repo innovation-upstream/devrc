@@ -161,6 +161,47 @@ def _import_maildb():
     return mod.MailDB
 
 
+# The sibling read-only Q&A assistant (POST /api/ask). Loaded by EXPLICIT importlib path
+# (not a top-level `import assistant`) so the viewer<->assistant pair has no import cycle
+# and merely importing the viewer stays cheap. assistant itself lazily loads the viewer
+# only for its handoff reader, so the answer path here (which passes pre-loaded views) does
+# not re-enter this module.
+ASSISTANT_PATH = Path(__file__).resolve().parent / "assistant.py"
+_assistant_mod = None
+
+# Cap the POST body the server will read for /api/ask (a question is a short string; this
+# guards against a client streaming an unbounded body).
+MAX_ASK_BODY_BYTES = 64 * 1024
+
+
+def _assistant():
+    global _assistant_mod
+    if _assistant_mod is None:
+        spec = importlib.util.spec_from_file_location(
+            "initiatives_viewer_assistant", ASSISTANT_PATH)
+        if spec is None or spec.loader is None:
+            raise ImportError(f"cannot load {ASSISTANT_PATH}")
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        _assistant_mod = mod
+    return _assistant_mod
+
+
+def default_ask(question: str, provider) -> dict:
+    """Answer a question with the READ-ONLY assistant, reusing the provider's CACHED
+    snapshot (its `flat` views + `live_unmatched`) so no second DB port-forward is opened,
+    plus the env-configured local model (`vllm-recap`). Best-effort: a store-read error
+    surfaces as the assistant's graceful error result; a model outage degrades to the
+    deterministic answer. There is NO write/dispatch path here — the assistant only reads."""
+    model, error = provider.snapshot()
+    if model is None:
+        return {"ok": False, "intent": "error", "sources": [],
+                "answer": f"Couldn't read the initiatives store ({error or 'no data'})."}
+    return _assistant().ask(
+        question, views=model.get("flat", []),
+        unmatched=model.get("live_unmatched", []))
+
+
 # --------------------------------------------------------------------------- #
 # I/O — read the store, then attach the live tmux overlay.
 # --------------------------------------------------------------------------- #
@@ -856,6 +897,45 @@ header .meta{color:var(--gray);font-size:.85rem}
 footer{margin-top:1.5rem;padding-top:.6rem;border-top:1px solid var(--bg2);
   color:var(--gray);font-size:.8rem}
 footer .live{color:var(--green)}
+/* The read-only Q&A sidebar (💬 ask). A fixed right-hand panel, hidden until toggled;
+   gruvbox to match the cards. Untrusted answer text is textContent-only in the JS. */
+.abtn{background:var(--bg1);color:var(--yellow);border:1px solid var(--bg2);border-radius:4px;
+  padding:.3rem .7rem;cursor:pointer;font:inherit;font-size:.82rem}
+.abtn:hover{background:var(--bg2)}
+.abtn.active{background:var(--yellow);color:var(--bg)}
+.chat{position:fixed;top:0;right:0;bottom:0;width:min(30rem,92vw);z-index:20;
+  background:var(--bg);border-left:1px solid var(--bg2);box-shadow:-8px 0 24px #0006;
+  display:flex;flex-direction:column;padding:.8rem}
+.chat[hidden]{display:none}
+.chat-head{display:flex;align-items:center;gap:.5rem;border-bottom:1px solid var(--bg2);
+  padding-bottom:.5rem;margin-bottom:.5rem}
+.chat-title{color:var(--yellow);font-weight:bold;font-size:.9rem}
+.chat-x{margin-left:auto;background:var(--bg1);color:var(--fg2);border:1px solid var(--bg2);
+  border-radius:4px;padding:.15rem .5rem;cursor:pointer;font:inherit;font-size:.8rem}
+.chat-x:hover{background:var(--bg2);color:var(--red)}
+.chat-log{flex:1;overflow-y:auto;display:flex;flex-direction:column;gap:.7rem;padding:.2rem 0}
+.chat-empty{color:var(--gray);font-size:.82rem;padding:.6rem .2rem}
+.qa{display:flex;flex-direction:column;gap:.25rem}
+.qa .q{color:var(--aqua);font-size:.84rem;white-space:pre-wrap;word-break:break-word}
+.qa .q .who{color:var(--gray);margin-right:.3rem}
+.qa .a{color:var(--fg);font-size:.86rem;white-space:pre-wrap;word-break:break-word;
+  background:var(--bg1);border-left:3px solid var(--green);border-radius:4px;padding:.4rem .55rem}
+.qa .a.pending{color:var(--gray);border-left-color:var(--gray);font-style:italic}
+.qa .a.err{border-left-color:var(--red)}
+.qa .srcs{display:flex;flex-wrap:wrap;gap:.3rem;margin-top:.1rem}
+.qa .src{font-size:.74rem;padding:.03rem .4rem;border-radius:3px;background:var(--bg2);
+  color:var(--blue)}
+.qa .srcs .lbl{color:var(--gray);font-size:.74rem}
+.chat-form{display:flex;gap:.4rem;margin-top:.5rem}
+.chat-input{flex:1;background:var(--bg1);color:var(--fg);border:1px solid var(--bg2);
+  border-radius:4px;padding:.4rem .55rem;font:inherit;font-size:.84rem}
+.chat-input:focus{outline:1px solid var(--yellow)}
+.chat-input:disabled{opacity:.6}
+.chat-send{background:var(--bg1);color:var(--green);border:1px solid var(--bg2);
+  border-radius:4px;padding:.4rem .8rem;cursor:pointer;font:inherit;font-size:.84rem}
+.chat-send:hover:not(:disabled){background:var(--bg2)}
+.chat-send:disabled{opacity:.55;cursor:progress}
+.chat-hint{color:var(--gray);font-size:.72rem;margin-top:.4rem;text-align:center}
 """.strip()
 
 
@@ -1333,6 +1413,114 @@ _JS = r"""
   searchInput.addEventListener('input', function(){ state.q = searchInput.value; render(); });
   btnRefresh.addEventListener('click', doRefresh);
 
+  // ---- Read-only Q&A sidebar (💬 ask) -------------------------------------------------
+  // Single-turn: POST the question to /api/ask, render the grounded answer + the sources
+  // (which initiatives it drew from). All untrusted server text via textContent (el()).
+  var askToggle = document.getElementById('ask-toggle');
+  var chat = document.getElementById('chat');
+  var chatClose = document.getElementById('chat-close');
+  var chatLog = document.getElementById('chat-log');
+  var chatForm = document.getElementById('chat-form');
+  var chatInput = document.getElementById('chat-input');
+  var chatSend = document.getElementById('chat-send');
+  var askInFlight = false;
+
+  function chatEmptyHint(){
+    if(chatLog.children.length === 0){
+      chatLog.appendChild(el('div', 'chat-empty',
+        'Ask about your initiatives — e.g. “what’s blocked on me?”, “status of clawgate”, ' +
+        '“what’s stalled?”, or “which initiative does <thing> belong to?”. Read-only.'));
+    }
+  }
+  function clearEmptyHint(){
+    var h = chatLog.querySelector('.chat-empty');
+    if(h) chatLog.removeChild(h);
+  }
+  function openChat(){
+    chat.hidden = false;
+    askToggle.classList.add('active');
+    chatEmptyHint();
+    chatInput.focus();
+  }
+  function closeChat(){
+    chat.hidden = true;
+    askToggle.classList.remove('active');
+  }
+  if(askToggle) askToggle.addEventListener('click', function(){
+    if(chat.hidden) openChat(); else closeChat();
+  });
+  if(chatClose) chatClose.addEventListener('click', closeChat);
+  document.addEventListener('keydown', function(ev){
+    if(ev.key === 'Escape' && !chat.hidden) closeChat();
+  });
+
+  function renderSources(container, sources){
+    if(!sources || !sources.length) return;
+    var wrap = el('div', 'srcs');
+    wrap.appendChild(el('span', 'lbl', 'sources:'));
+    sources.forEach(function(s){
+      var label = (s && s.slug) ? s.slug : '?';
+      if(s && s.repo) label += ' · ' + s.repo;
+      wrap.appendChild(el('span', 'src', label));
+    });
+    container.appendChild(wrap);
+  }
+
+  function submitQuestion(q){
+    if(askInFlight || !q) return;
+    askInFlight = true;
+    clearEmptyHint();
+    chatInput.value = '';
+    chatInput.disabled = true;
+    chatSend.disabled = true;
+
+    var block = el('div', 'qa');
+    var qEl = el('div', 'q');
+    qEl.appendChild(el('span', 'who', 'you ›'));
+    qEl.appendChild(document.createTextNode(' ' + q));
+    block.appendChild(qEl);
+    var aEl = el('div', 'a pending', 'thinking…');
+    block.appendChild(aEl);
+    chatLog.appendChild(block);
+    chatLog.scrollTop = chatLog.scrollHeight;
+
+    fetch('/api/ask', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({question: q})
+    })
+      .then(function(r){ return r.json().then(function(j){ return {code: r.status, j: j}; }); })
+      .then(function(res){
+        var j = res.j || {};
+        aEl.classList.remove('pending');
+        if(j.answer){
+          aEl.textContent = j.answer;
+        } else {
+          aEl.classList.add('err');
+          aEl.textContent = j.error ? ('error: ' + j.error) : 'no answer';
+        }
+        if(j.ok === false && j.answer) aEl.classList.add('err');
+        renderSources(block, j.sources);
+      })
+      .catch(function(){
+        aEl.classList.remove('pending');
+        aEl.classList.add('err');
+        aEl.textContent = 'request failed — is the viewer still up?';
+      })
+      .then(function(){
+        askInFlight = false;
+        chatInput.disabled = false;
+        chatSend.disabled = false;
+        chatInput.focus();
+        chatLog.scrollTop = chatLog.scrollHeight;
+      });
+  }
+
+  if(chatForm) chatForm.addEventListener('submit', function(ev){
+    ev.preventDefault();
+    submitQuestion((chatInput.value || '').trim());
+  });
+
   setInterval(function(){ refetch().catch(function(){}); }, __REFRESH_MS__);
 
   searchInput.value = state.q;
@@ -1402,13 +1590,34 @@ def render_html(model: dict | None, error: str | None = None,
         '<button id="refresh" class="rbtn" type="button" '
         'title="run a fresh sync now">↻ refresh</button>'
         '<span id="refresh-msg" class="rmsg"></span>'
+        '<button id="ask-toggle" class="abtn" type="button" '
+        'title="ask a read-only question about your initiatives">💬 ask</button>'
         '</div>'
         '</header>'
+    )
+    # The read-only Q&A sidebar (collapsible; hidden until toggled). A transcript of
+    # single-turn Q&A + an input. Untrusted answer/source text is written via textContent
+    # in the JS (never innerHTML), same discipline as the cards.
+    chat = (
+        '<aside id="chat" class="chat" hidden aria-label="initiatives assistant">'
+        '<div class="chat-head">'
+        '<span class="chat-title">ask · read-only</span>'
+        '<button id="chat-close" class="chat-x" type="button" title="close">✕</button>'
+        '</div>'
+        '<div id="chat-log" class="chat-log"></div>'
+        '<form id="chat-form" class="chat-form">'
+        '<input id="chat-input" class="chat-input" type="text" autocomplete="off" '
+        'spellcheck="false" placeholder="what\'s blocked on me?" '
+        'aria-label="ask the initiatives assistant">'
+        '<button id="chat-send" class="chat-send" type="submit">send</button>'
+        '</form>'
+        '<div class="chat-hint">read-only · answers cite the initiatives they use</div>'
+        '</aside>'
     )
     js = _JS.replace("__REFRESH_MS__", str(int(refresh) * 1000))
     return (
         head + header +
-        '<main id="app"></main>'
+        '<main id="app"></main>' + chat +
         '<footer id="foot"></footer>'
         '<script id="idata" type="application/json">' + payload + '</script>'
         '<script>' + js + '</script>'
@@ -1558,16 +1767,44 @@ class DataProvider:
 # HTTP layer — a thin BaseHTTPRequestHandler over a pure `route_request`.
 # --------------------------------------------------------------------------- #
 def route_request(path: str, provider, method: str = "GET", query: dict | None = None,
-                  refresh_controller=None) -> tuple[int, str, bytes]:
-    """PURE-ish request router: (path, provider, method, query, refresh) -> (status,
-    content_type, body bytes). Separated from the socket handler so it's unit-testable
-    with a fake provider / controller (no server, no DB, no subprocess).
+                  refresh_controller=None, body: bytes | None = None,
+                  asker=None) -> tuple[int, str, bytes]:
+    """PURE-ish request router: (path, provider, method, query, refresh, body, asker) ->
+    (status, content_type, body bytes). Separated from the socket handler so it's unit-
+    testable with a fake provider / controller / asker (no server, no DB, no subprocess).
 
     `/healthz` is deliberately store-independent (PROCESS liveness). `POST /refresh` runs
     a single-flighted+debounced sync then invalidates the provider cache on success.
-    `/api/initiative` returns one initiative's live detail."""
+    `/api/initiative` returns one initiative's live detail. `POST /api/ask` runs the
+    READ-ONLY Q&A assistant (`asker(question)`) — it never mutates or dispatches."""
     if path == "/healthz":
         return 200, "text/plain; charset=utf-8", b"ok\n"
+
+    if method == "POST" and path == "/api/ask":
+        # READ-ONLY natural-language Q&A over the store. Same LAN trust model as the rest of
+        # the viewer (no new auth) — but there is NO write path: the assistant only reads the
+        # initiatives store + calls the local model to phrase an answer. Deliberately
+        # unauthenticated, LAN-bound (Zach's call), abuse bounded by the input cap + the
+        # assistant's own read-only nature.
+        question = _parse_ask_question(body)
+        if not question:
+            return (400, "application/json; charset=utf-8",
+                    json.dumps({"ok": False, "error": "missing 'question'"}).encode("utf-8"))
+        if asker is None:
+            return (503, "application/json; charset=utf-8",
+                    json.dumps({"ok": False, "error": "assistant unavailable"}).encode("utf-8"))
+        try:
+            result = asker(question)
+        except Exception as exc:  # noqa: BLE001 - never let an ask error kill the request
+            sys.stderr.write(f"viewer: /api/ask failed: {type(exc).__name__}: {exc}\n")
+            result = {"ok": False, "answer": "the assistant hit an error answering that.",
+                      "sources": [], "intent": "error"}
+        payload = {"ok": bool(result.get("ok", True)),
+                   "answer": result.get("answer", ""),
+                   "sources": result.get("sources", []),
+                   "intent": result.get("intent")}
+        return (200, "application/json; charset=utf-8",
+                json.dumps(payload, ensure_ascii=False, default=str).encode("utf-8"))
 
     if method == "POST" and path == "/refresh":
         # Deliberately UNAUTHENTICATED: the viewer binds LAN/localhost only (not the public
@@ -1619,38 +1856,60 @@ def _first_qs(query: dict, name: str) -> str:
     return v if isinstance(v, str) else ""
 
 
-def make_handler(provider, refresh_controller=None):
-    """Build a BaseHTTPRequestHandler subclass bound to `provider` + `refresh_controller`."""
+def _parse_ask_question(body: bytes | None) -> str:
+    """Extract the `question` string from a JSON POST body. "" on any parse failure /
+    non-string / empty — the route turns that into a 400. Pure + defensive."""
+    if not body:
+        return ""
+    try:
+        obj = json.loads(body.decode("utf-8", errors="replace"))
+    except (ValueError, AttributeError):
+        return ""
+    if not isinstance(obj, dict):
+        return ""
+    q = obj.get("question")
+    return q.strip() if isinstance(q, str) else ""
+
+
+def make_handler(provider, refresh_controller=None, asker=None):
+    """Build a BaseHTTPRequestHandler subclass bound to `provider` + `refresh_controller`
+    + `asker` (the READ-ONLY Q&A callable for POST /api/ask; defaults to `default_ask`
+    over this provider). `asker` is injectable so the route is testable without a model."""
+    if asker is None:
+        asker = lambda q: default_ask(q, provider)  # noqa: E731
 
     class Handler(BaseHTTPRequestHandler):
         server_version = "initiatives-viewer/2.0"
 
-        def _serve(self, write_body: bool, method: str) -> None:
+        def _serve(self, write_body: bool, method: str, body: bytes | None = None) -> None:
             parsed = urlparse(self.path)
             query = parse_qs(parsed.query)
             try:
-                status, ctype, body = route_request(
+                status, ctype, resp = route_request(
                     parsed.path, provider, method=method, query=query,
-                    refresh_controller=refresh_controller)
+                    refresh_controller=refresh_controller, body=body, asker=asker)
             except Exception as exc:  # noqa: BLE001 - never let a handler error kill the thread
                 status, ctype = 500, "text/plain; charset=utf-8"
-                body = f"internal error: {type(exc).__name__}: {exc}\n".encode("utf-8")
+                resp = f"internal error: {type(exc).__name__}: {exc}\n".encode("utf-8")
             self.send_response(status)
             self.send_header("Content-Type", ctype)
-            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Content-Length", str(len(resp)))
             self.send_header("Cache-Control", "no-store")
             self.end_headers()
             if write_body:
-                self.wfile.write(body)
+                self.wfile.write(resp)
 
-        def _drain_body(self) -> None:
-            """Consume any request body so the connection stays usable (POST /refresh)."""
+        def _read_body(self) -> bytes:
+            """Read the request body (capped at MAX_ASK_BODY_BYTES) so it can be parsed
+            (POST /api/ask) AND the connection stays usable. An over-cap body is truncated
+            — the JSON parse then simply fails and the route 400s."""
             try:
                 n = int(self.headers.get("Content-Length", 0) or 0)
             except ValueError:
                 n = 0
-            if n > 0:
-                self.rfile.read(n)
+            if n <= 0:
+                return b""
+            return self.rfile.read(min(n, MAX_ASK_BODY_BYTES))
 
         def do_GET(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler contract
             self._serve(write_body=True, method="GET")
@@ -1659,8 +1918,8 @@ def make_handler(provider, refresh_controller=None):
             self._serve(write_body=False, method="GET")
 
         def do_POST(self) -> None:  # noqa: N802
-            self._drain_body()
-            self._serve(write_body=True, method="POST")
+            body = self._read_body()
+            self._serve(write_body=True, method="POST", body=body)
 
         def log_message(self, fmt, *args) -> None:  # quiet: one compact line to stderr
             sys.stderr.write("viewer: %s - %s\n" % (self.address_string(), fmt % args))
