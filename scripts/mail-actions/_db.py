@@ -1,11 +1,24 @@
 #!/usr/bin/env python3
 """DB access for the mail-actions extractor.
 
-The mailbox Postgres lives in the homelab cluster and is only reachable in-cluster
-(ClusterIP `mailbox-postgres:5432`). We bridge to it by starting a `kubectl
-port-forward` on an ephemeral local port, connecting with psycopg2 over 127.0.0.1,
-and tearing the forward down on exit. Reads AND writes go through this so email
-bodies are passed as bound parameters — never shell-escaped into `psql -c`.
+The mailbox Postgres lives in the homelab cluster. Two connection modes:
+
+  * **Port-forward (default, OFF-cluster).** The workbench tools (sync/viewer/recap/
+    mail-actions) run outside the cluster, where the DB is only reachable in-cluster
+    (ClusterIP `mailbox-postgres:5432`). We bridge to it by starting a `kubectl
+    port-forward` on an ephemeral local port, connecting with psycopg2 over 127.0.0.1,
+    and tearing the forward down on exit. This is the default when no direct-mode env
+    var is set — existing consumers keep working unchanged.
+
+  * **Direct (IN-cluster).** A long-lived in-cluster consumer (e.g. the initiatives
+    agent pod) reaches `mailbox-postgres.mailbox.svc.cluster.local:5432` directly and
+    must NOT spawn a `kubectl port-forward` per query. Opt in by setting `MAILBOX_PG_HOST`
+    (the service host) — optionally with `MAILBOX_PG_PORT` (default 5432) — or the
+    explicit `MAILBOX_PG_DIRECT=1` flag (which then uses the DSN's own host). No kubectl,
+    no subprocess. See `_direct_target()` for the exact env contract.
+
+Reads AND writes go through this so email bodies are passed as bound parameters —
+never shell-escaped into `psql -c`.
 
 Usage:
     with MailDB() as db:
@@ -13,9 +26,13 @@ Usage:
         db.mark_processed(mail_id, label="fyi")
 
 Requires in PATH/env:
-    KUBECONFIG  — homelab kubeconfig
-    kubectl     — on PATH
+    KUBECONFIG  — homelab kubeconfig (port-forward mode only; unused in direct mode)
+    kubectl     — on PATH        (port-forward mode only; unused in direct mode)
     psycopg2    — python dep (psycopg2-binary is fine); see README for nix-shell.
+
+Credentials (user/password/dbname) come from an explicit `MAILBOX_PG_DSN` env / `dsn=`
+arg when provided, else the k8s secret `mailbox-postgres-auth` (port-forward mode).
+Direct-mode consumers typically pass the full DSN via `MAILBOX_PG_DSN`.
 """
 from __future__ import annotations
 
@@ -67,20 +84,56 @@ def _read_dsn_from_secret() -> str:
     return base64.b64decode(out).decode().strip()
 
 
-def _rewrite_dsn_host(dsn: str, host: str, port: int) -> dict:
-    """Parse a postgres:// DSN and return psycopg2 connect kwargs pointing at host:port."""
+def _dsn_connect_kwargs(dsn: str, *, host: str | None = None,
+                        port: int | None = None) -> dict:
+    """Parse a postgres:// DSN → psycopg2 connect kwargs.
+
+    `host`/`port` OVERRIDE the DSN's own host/port when provided (the port-forward path
+    passes host="127.0.0.1", port=<local>; direct mode may pass an in-cluster service
+    host). When an override is None the DSN's own value is kept — so a fully-specified
+    direct DSN connects as written. Falls back to port 5432 if neither the override nor
+    the DSN specify one. Credential/dbname parsing is shared by both modes."""
     u = urlparse(dsn)
     if u.scheme not in ("postgres", "postgresql"):
         raise ValueError(f"unexpected DSN scheme: {u.scheme!r}")
     dbname = (u.path or "/").lstrip("/") or "mailbox"
     return {
-        "host": host,
-        "port": port,
+        "host": host if host is not None else u.hostname,
+        "port": port if port is not None else (u.port or 5432),
         "user": u.username,
         "password": u.password,
         "dbname": dbname,
         "connect_timeout": 10,
     }
+
+
+def _truthy(val: str | None) -> bool:
+    return (val or "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _direct_target() -> tuple[str | None, int | None] | None:
+    """Decide whether to connect DIRECTLY (no kubectl port-forward), and to where.
+
+    Returns None → use the default port-forward path (off-cluster workbench tools).
+    Returns (host_override, port_override) → connect directly, where either element may
+    be None to mean "keep the DSN's own value". Direct mode is opted into by env:
+
+      * `MAILBOX_PG_HOST` set → direct; connect to that host (e.g. the in-cluster
+        `mailbox-postgres.mailbox.svc.cluster.local`). `MAILBOX_PG_PORT` overrides the
+        port (default: the DSN's port, else 5432).
+      * `MAILBOX_PG_DIRECT` truthy (1/true/yes/on) → direct using the DSN's OWN host/port
+        (for a consumer that already supplies a fully-direct `MAILBOX_PG_DSN`);
+        `MAILBOX_PG_HOST`/`PORT` still override if also set.
+
+    Neither set → None (port-forward). This is purely additive: existing `MailDB()`
+    callers set no such env, so they keep port-forwarding unchanged."""
+    host = os.environ.get("MAILBOX_PG_HOST") or None
+    direct = _truthy(os.environ.get("MAILBOX_PG_DIRECT"))
+    if not host and not direct:
+        return None
+    port_s = os.environ.get("MAILBOX_PG_PORT")
+    port = int(port_s) if port_s and port_s.strip() else None
+    return host, port
 
 
 class MailDB:
@@ -94,6 +147,18 @@ class MailDB:
 
     # -- lifecycle ---------------------------------------------------------
     def __enter__(self) -> "MailDB":
+        direct = _direct_target()
+        if direct is not None:
+            # In-cluster consumer: connect straight to the service, no port-forward.
+            # Credentials still come from the DSN (explicit env/arg, else the secret).
+            dsn = self._dsn or _read_dsn_from_secret()
+            host_override, port_override = direct
+            kwargs = _dsn_connect_kwargs(dsn, host=host_override, port=port_override)
+            self.conn = psycopg2.connect(**kwargs)
+            self.conn.autocommit = False
+            return self
+
+        # Default (off-cluster): bridge via an ephemeral kubectl port-forward.
         dsn = self._dsn or _read_dsn_from_secret()
         local_port = _free_local_port()
         self._pf = subprocess.Popen(
@@ -105,7 +170,7 @@ class MailDB:
             stderr=subprocess.PIPE,
         )
         self._wait_for_port("127.0.0.1", local_port)
-        kwargs = _rewrite_dsn_host(dsn, "127.0.0.1", local_port)
+        kwargs = _dsn_connect_kwargs(dsn, host="127.0.0.1", port=local_port)
         self.conn = psycopg2.connect(**kwargs)
         self.conn.autocommit = False
         return self
