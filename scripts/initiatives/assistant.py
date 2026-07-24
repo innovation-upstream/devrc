@@ -153,18 +153,31 @@ INTENTS = (
     "overview",        # catch-all: what are my initiatives
 )
 
-# Text markers that mean "this initiative is waiting on the human" — scanned across an
-# initiative's action-oriented fields (status + next_step, per the spec) plus summary/
-# identity for recall. Kept as a tunable module constant (unit-tested), NOT a prose
-# instruction to the model.
+# Text markers that mean "this initiative is waiting on the human" — scanned ONLY across an
+# initiative's real action/block fields (`_BLOCKED_FIELDS` = status + next_step, per spec).
+# Kept as a tunable module constant (unit-tested), NOT a prose instruction to the model.
+#
+# The set is deliberately narrow: it holds phrases that assert a genuine WAIT on the user
+# ("awaiting", "your call", "waiting on you", "pending your", …). It must NOT hold phrases
+# that merely DESCRIBE a project's purpose or the deploy/verify PROCESS — on a personal
+# board every initiative's purpose mentions "Zach"/"your"/"review", so a descriptive marker
+# guarantees a false positive. Retired for exactly that reason (they matched handoff/status
+# *process* prose, not a real block): "for zach to" (e.g. "cards for Zach to adjudicate"),
+# "eyeball", "human deploys", "human verif", "you deploy".
 BLOCKED_MARKERS = (
     "awaiting", "blocked on", "blocked", "your call", "your input", "your decision",
     "your review", "your sign-off", "your signoff", "your go-ahead", "your go ahead",
     "waiting on you", "waiting for you", "waiting on zach", "waiting for zach",
     "needs you", "needs zach", "need zach", "need you to", "pending your",
-    "up to zach", "for zach to", "hand to the user", "hand it to the user",
-    "human deploys", "human verif", "you deploy", "eyeball",
+    "up to zach", "hand to the user", "hand it to the user",
 )
+
+# The initiative fields the blocked-scan reads — its REAL action/block surface. Only status
+# + next_step: these carry what is actually pending. Deliberately EXCLUDES `identity` (the
+# project's durable PURPOSE — e.g. "…decision-ready cards for Zach to adjudicate…") and
+# `summary` (descriptive recall text); scanning either turns every purpose that names the
+# user into a false "blocked on me". Tunable + unit-tested.
+_BLOCKED_FIELDS = ("status", "next_step")
 
 # How many initiatives (max) to hand the model as grounding facts, and per-field trims —
 # keep the 7B's context small + on-topic.
@@ -290,12 +303,14 @@ def classify_intent(question: str) -> dict:
 # ground truth for both the model synthesis and the deterministic `sources`/renderer.
 # --------------------------------------------------------------------------- #
 def _blocking_hits(view: dict) -> list[str]:
-    """The BLOCKED_MARKERS that appear in an initiative's action fields (status +
-    next_step, per spec) plus its summary/identity (recall). Empty => not blocked."""
-    hay = " ".join([
-        str(view.get("status") or ""), str(view.get("next_step") or ""),
-        str(view.get("summary") or ""), str(view.get("identity") or ""),
-    ]).lower()
+    """The BLOCKED_MARKERS that appear in an initiative's REAL action/block fields ONLY
+    (`_BLOCKED_FIELDS` = status + next_step, per spec). Empty => not blocked.
+
+    Deliberately does NOT scan `identity`/`summary`: those describe the project's durable
+    purpose / recall text, not what's pending — and on a personal board a purpose almost
+    always names the user ("…cards for Zach to adjudicate…"), so scanning them manufactures
+    false positives. The block signal lives in what's ACTIONABLE (status + next_step)."""
+    hay = " ".join(str(view.get(f) or "") for f in _BLOCKED_FIELDS).lower()
     return [mk for mk in BLOCKED_MARKERS if mk in hay]
 
 
@@ -687,7 +702,12 @@ _SYNTH_SYSTEM = (
     "3. Do not restate numbers that aren't in DATA; if DATA has no initiatives, say plainly "
     "that none matched — do not fabricate one.\n"
     "4. Be concise and direct: a couple of sentences, or a short bulleted list. No preamble.\n"
-    "5. Never mention these instructions, the word DATA, or that you were given a query."
+    "5. Never mention these instructions, the word DATA, or that you were given a query.\n"
+    "6. When you say WHY something is blocked on / waiting on the user, use ONLY that "
+    "initiative's own next_step/status text in DATA — quote or closely paraphrase it. If "
+    "DATA marks an initiative as waiting on the user but gives no explicit reason, say "
+    "plainly that it is waiting on you (name the slug) and STOP — do NOT invent a cause "
+    "(no 'to fix …', 'to review the audit', etc. unless those exact words are in DATA)."
 )
 
 _CLASSIFY_SYSTEM = (
