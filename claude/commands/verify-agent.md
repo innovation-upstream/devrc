@@ -18,9 +18,20 @@ Same trap via **injected `<new-diagnostics>` / LSP errors after a subagent
 finishes** — they are frequently **stale**, not a real break. Tell: a `go.mod`
 "updates needed / go mod tidy" warning plus an `undefined: <symbol>` cascade
 across many files (often symbols from a *different* branch after a checkout /
-worktree switch) — the LSP indexing a transient/mixed tree. The gate (a fresh
-`go build`/`vet`/`test`) is the arbiter; run it before acting on a "done" claim,
-**especially right after branch/worktree switches**.
+worktree switch) — the LSP indexing a transient/mixed tree. A subagent that
+**CHANGES A FUNCTION SIGNATURE** reliably detonates a whole editor-diagnostic
+cascade that is ALWAYS stale-index noise, not a real break: `WrongArgCount` ("not
+enough / too many arguments") on shared helpers (e.g. page-builder functions
+called from many test files), `X does not implement <Interface> (missing method
+…)` on a test stub, `X redeclared in this block`, and even a *phantom* test file
+that doesn't exist on disk — all alongside the `go.mod` "needs tidy" warning. The
+arbiter is the REAL gate with the private-module env set (`GOPRIVATE=...`):
+**`go vet ./<pkg>` compiles the test files**, so a clean `go vet` + `go test`
+refutes the entire cascade, and an empty `go mod tidy -diff` refutes the "needs
+tidy" warning. NEVER edit code to "fix" these diagnostics before running the real
+gate — the fix is almost always a no-op and you risk breaking a tree that already
+compiles. Run the gate before acting on a "done" claim, **especially right after
+branch/worktree switches**.
 
 This is the **cheap mechanical structural gate**. It is NOT `/audit-pr`
 (adversarial LLM review) and NOT the `verify` skill (e2e behaviour). Use those
