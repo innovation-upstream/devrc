@@ -810,12 +810,75 @@ footer .live{color:var(--green)}
 """.strip()
 
 
-# The whole page's client-side behaviour: parse the embedded JSON, render flat|grouped,
-# filter by search, expand a card (live detail fetch), refresh (POST /refresh), and
-# auto-refresh the data in place. Vanilla JS, no framework, no external assets. Untrusted
-# text is written via textContent (never innerHTML) so it can't inject markup.
+# PURE, DOM-FREE recency-bucketing logic — kept in its OWN snippet so the node test can
+# `eval` it standalone (SINGLE source of truth: `_JS` embeds this verbatim via the
+# __RECENCY_JS__ placeholder). Buckets an initiative's `last_touch` epoch into a recency
+# key relative to a supplied "now", both in MILLISECONDS, in the BROWSER's LOCAL timezone.
+#
+# Boundaries (newest→oldest; all cutoffs are LOCAL midnights, so a card flips buckets the
+# instant local midnight passes — matching the "updated Xm ago" the card already shows):
+#   today      ts >= local-midnight-today
+#   yesterday  local-midnight-yesterday   <= ts < local-midnight-today
+#   week       local-midnight-7-days-ago  <= ts < local-midnight-yesterday   ("earlier this week")
+#   older      ts <  local-midnight-7-days-ago                               (> ~7 local days)
+#   unknown    ts is null / NaN                                              (guard; shouldn't happen)
+# Using `new Date(y, mo, d - n)` (LOCAL-calendar arithmetic) rather than subtracting fixed
+# 24h spans makes the cutoffs DST-safe — a midnight boundary can't drift an hour across a
+# spring-forward/fall-back transition. `bucketizeRecency` groups a PRE-FILTERED, ALREADY
+# last_touch-DESC-sorted view list into ordered, NON-EMPTY buckets, preserving input order
+# within each bucket (so within-bucket order stays newest-first) — the one unit the render
+# path and the node test both exercise.
+_RECENCY_JS = r"""
+var RECENCY_BUCKETS = [
+  {key:'today',     label:'Today'},
+  {key:'yesterday', label:'Yesterday'},
+  {key:'week',      label:'Earlier this week'},
+  {key:'older',     label:'Older'},
+  {key:'unknown',   label:'Unknown'}
+];
+function recencyBucketKey(tsMs, nowMs){
+  if(tsMs == null || isNaN(tsMs)) return 'unknown';
+  var now = new Date(nowMs);
+  var y = now.getFullYear(), mo = now.getMonth(), d = now.getDate();
+  if(tsMs >= new Date(y, mo, d).getTime())     return 'today';
+  if(tsMs >= new Date(y, mo, d - 1).getTime()) return 'yesterday';
+  if(tsMs >= new Date(y, mo, d - 7).getTime()) return 'week';
+  return 'older';
+}
+function parseLastTouch(raw){
+  // `last_touch` is serialized server-side via json default=str → a SPACE-separated
+  // "YYYY-MM-DD HH:MM:SS.ffffff+00:00" (NOT ISO-8601 'T'). V8 parses that leniently but the
+  // ECMAScript date parse of a non-standard string is engine-defined (Firefox returns NaN),
+  // so normalize the space→'T' to a valid ISO string before Date() — robust in every engine.
+  if(!raw) return null;
+  var t = new Date(String(raw).replace(' ', 'T')).getTime();
+  return isNaN(t) ? null : t;
+}
+function bucketizeRecency(views, nowMs){
+  var groups = {};
+  views.forEach(function(v){
+    var ts = parseLastTouch(v.last_touch);
+    var b = recencyBucketKey(ts, nowMs);
+    (groups[b] = groups[b] || []).push(v);
+  });
+  var out = [];
+  RECENCY_BUCKETS.forEach(function(bk){
+    var items = groups[bk.key];
+    if(items && items.length) out.push({key:bk.key, label:bk.label, items:items});
+  });
+  return out;
+}
+""".strip()
+
+
+# The whole page's client-side behaviour: parse the embedded JSON, render
+# flat|grouped|recency, filter by search, expand a card (live detail fetch), refresh (POST
+# /refresh), and auto-refresh the data in place. Vanilla JS, no framework, no external
+# assets. Untrusted text is written via textContent (never innerHTML) so it can't inject
+# markup. The __RECENCY_JS__ placeholder is substituted at module load with _RECENCY_JS.
 _JS = r"""
 (function(){
+  __RECENCY_JS__
   var el0 = document.getElementById('idata');
   var data;
   try { data = JSON.parse(el0.textContent); }
@@ -823,8 +886,11 @@ _JS = r"""
 
   var VIEW_KEY = 'initiatives-view';
   var UNMATCHED_KEY = 'initiatives-unmatched-collapsed';
-  var state = { view: (localStorage.getItem(VIEW_KEY) === 'grouped') ? 'grouped' : 'flat',
-                q: '' };
+  // 3-way view toggle: 'flat' (default) | 'grouped' (by repo) | 'recency' (by last_touch
+  // bucket, LOCAL tz). Persisted in localStorage; an unknown/legacy value falls back to flat.
+  var VALID_VIEWS = {flat:1, grouped:1, recency:1};
+  var storedView = localStorage.getItem(VIEW_KEY);
+  var state = { view: VALID_VIEWS[storedView] ? storedView : 'flat', q: '' };
   // The catch-all "live sessions" section is collapsible; remember the user's choice.
   // Default EXPANDED (the whole point is to see every running thread) — set to '1' to collapse.
   var unmatchedCollapsed = localStorage.getItem(UNMATCHED_KEY) === '1';
@@ -836,6 +902,7 @@ _JS = r"""
   var footer = document.getElementById('foot');
   var btnFlat = document.getElementById('view-flat');
   var btnGrouped = document.getElementById('view-grouped');
+  var btnRecency = document.getElementById('view-recency');
   var btnRefresh = document.getElementById('refresh');
   var refreshMsg = document.getElementById('refresh-msg');
   var countEl = document.getElementById('count');
@@ -947,7 +1014,9 @@ _JS = r"""
                         v.badge_glyph + ' ' + v.badge_label));
     row1.appendChild(el('span', 'slug', v.slug));
     if(v.title) row1.appendChild(el('span', 'title', v.title));
-    if(state.view === 'flat' && v.repo_name)
+    // Show the repo label whenever repo isn't the section header — i.e. flat AND recency
+    // (both mix repos in one stream); grouped uses the repo as its section heading instead.
+    if(state.view !== 'grouped' && v.repo_name)
       row1.appendChild(el('span', 'repo-label', v.repo_name));
     row1.appendChild(el('span', 'age', 'updated ' + v.age + ' ago'));
     c.appendChild(row1);
@@ -1080,6 +1149,7 @@ _JS = r"""
   function updateChrome(){
     btnFlat.classList.toggle('active', state.view === 'flat');
     btnGrouped.classList.toggle('active', state.view === 'grouped');
+    if(btnRecency) btnRecency.classList.toggle('active', state.view === 'recency');
     if(countEl){
       var txt = (data.total || 0) + ' in flight across ' + (data.repo_count || 0) + ' repos';
       var nu = (data.live_unmatched || []).length;
@@ -1110,6 +1180,20 @@ _JS = r"""
         if(matchQ(v, q)){ wrap.appendChild(card(v)); shown++; }
       });
       app.appendChild(wrap);
+    } else if(state.view === 'recency'){
+      // Group the (search-filtered) flat stream into LOCAL-tz recency buckets. `data.flat`
+      // is already last_touch-DESC, and bucketizeRecency preserves that order within each
+      // bucket, so cards stay newest-first per bucket. Empty buckets are omitted. Headers
+      // read like the repo-group headers (label + count) — same `.repo`/`.count` styling.
+      var rviews = (data.flat || []).filter(function(v){ return matchQ(v, q); });
+      bucketizeRecency(rviews, Date.now()).forEach(function(g){
+        var sec = el('section', 'repo');
+        var h = el('h2', null, g.label);
+        h.appendChild(el('span', 'count', String(g.items.length)));
+        sec.appendChild(h);
+        g.items.forEach(function(v){ sec.appendChild(card(v)); shown++; });
+        app.appendChild(sec);
+      });
     } else {
       (data.repos || []).forEach(function(g){
         var vis = (g.initiatives || []).filter(function(v){ return matchQ(v, q); });
@@ -1164,6 +1248,9 @@ _JS = r"""
   btnGrouped.addEventListener('click', function(){
     state.view = 'grouped'; localStorage.setItem(VIEW_KEY, 'grouped'); render();
   });
+  if(btnRecency) btnRecency.addEventListener('click', function(){
+    state.view = 'recency'; localStorage.setItem(VIEW_KEY, 'recency'); render();
+  });
   searchInput.addEventListener('input', function(){ state.q = searchInput.value; render(); });
   btnRefresh.addEventListener('click', doRefresh);
 
@@ -1173,6 +1260,10 @@ _JS = r"""
   render();
 })();
 """.strip()
+
+# Inline the pure recency-bucketing snippet into the page JS (single source of truth: the
+# node test evals _RECENCY_JS directly, the page runs this substituted copy).
+_JS = _JS.replace("__RECENCY_JS__", _RECENCY_JS)
 
 
 def _e(s) -> str:
@@ -1225,6 +1316,7 @@ def render_html(model: dict | None, error: str | None = None,
         '<div class="toggle" role="group" aria-label="view">'
         '<button id="view-flat" class="tbtn" type="button">flat</button>'
         '<button id="view-grouped" class="tbtn" type="button">grouped</button>'
+        '<button id="view-recency" class="tbtn" type="button">recency</button>'
         '</div>'
         '<input id="search" class="search" type="search" placeholder="filter…" '
         'autocomplete="off" spellcheck="false" aria-label="filter initiatives">'
