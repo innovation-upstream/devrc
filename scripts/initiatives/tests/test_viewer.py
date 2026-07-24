@@ -292,23 +292,40 @@ def test_provider_returns_error_tuple_on_loader_failure():
 
 def test_attach_tmux_is_best_effort_on_scan_failure(monkeypatch):
     # The live tmux overlay is a nicety: if importing/using the scan blows up, attach_tmux
-    # must swallow it, return False, and leave the rows untouched (no crash, overlay absent).
+    # must swallow it, return [] (no unmatched), and leave the rows untouched (overlay absent).
     def boom():
         raise RuntimeError("scan import failed")
 
     monkeypatch.setattr(viewer, "_scan", boom)
     rows = [_row(slug="ok")]
-    assert viewer.attach_tmux(rows) is False
+    assert viewer.attach_tmux(rows) == []
     assert "tmux_sessions" not in rows[0]  # untouched
 
 
 def test_attach_tmux_absent_when_no_tmux_server(monkeypatch):
-    # No panes = no tmux server on this host → overlay absent (False), not an error.
+    # No panes = no tmux server on this host → overlay absent ([] unmatched), not an error.
     class _FakeScan:
         collect_tmux_panes = staticmethod(lambda: [])
 
     monkeypatch.setattr(viewer, "_scan", lambda: _FakeScan)
-    assert viewer.attach_tmux([_row(slug="ok")]) is False
+    assert viewer.attach_tmux([_row(slug="ok")]) == []
+
+
+def test_attach_tmux_returns_unmatched_from_scan(monkeypatch):
+    # attach_tmux passes through the unmatched list `match_tmux_to_initiatives` returns
+    # (the live claude panes that mapped to no initiative) — verbatim, no reimplementation.
+    unmatched = [{"id": "Pool-6", "title": "some uncovered work", "repo": "/r"}]
+
+    class _FakeScan:
+        collect_tmux_panes = staticmethod(lambda: [{"session": "x"}])
+        discover_repos = staticmethod(lambda: ["/r"])
+        worktree_canonical_map = staticmethod(lambda repos: {})
+        load_scratch_codenames = staticmethod(lambda: {})
+        match_tmux_to_initiatives = staticmethod(
+            lambda inis, panes, repos, wt, cn: unmatched)
+
+    monkeypatch.setattr(viewer, "_scan", lambda: _FakeScan)
+    assert viewer.attach_tmux([_row(slug="ok")]) == unmatched
 
 
 # --- flat view + enriched view fields (Feedback 1 + 3) ---------------------- #
@@ -880,3 +897,149 @@ def test_render_html_face_shows_substantive_not_boilerplate():
     assert "wire the comfy cloud scaffold" in html           # substantive prompt in payload
     assert '"face_message"' in html                            # the face field is embedded
     assert "v.face_message" in html                            # the card reads it for the face
+
+
+# --- live_unmatched: the "everything else running" catch-all ----------------- #
+def _um(id_, title="some work", repo="/home/zach/workspace/devrc"):
+    """One `match_tmux_to_initiatives` unmatched pane (id/title/repo)."""
+    return {"id": id_, "title": title, "repo": repo}
+
+
+def test_build_live_unmatched_shape_dedup_and_sort():
+    um = [
+        _um("main:8-4", "civ work", repo="/home/zach/workspace/civitai"),
+        _um("Pool-6", "devrc work A"),
+        _um("Pool-6", "devrc work A"),          # exact dup (id+title) → dropped
+        _um("main:8-2", "devrc work B"),
+    ]
+    out = viewer.build_live_unmatched(um)
+    # de-duped
+    assert len(out) == 3
+    # view shape
+    assert out[0].keys() >= {"id", "title", "repo", "repo_name"}
+    # sorted by repo_name then the scan's natural session key: civitai first, then within
+    # devrc capitalized codenames sort ahead of the lowercase `main:` sessions (mirrors the
+    # scan's `_tmux_session_sort_key`, so the CLI + viewer order sessions identically).
+    assert [(v["repo_name"], v["id"]) for v in out] == [
+        ("civitai", "main:8-4"),
+        ("devrc", "Pool-6"),
+        ("devrc", "main:8-2"),
+    ]
+
+
+def test_build_live_unmatched_natural_numeric_order():
+    # window numbers sort by VALUE, not lexically (8-2 before 8-10; Pool2 before Pool10);
+    # capitalized codenames (Pool…) sort ahead of lowercase `main:` — the scan's ordering.
+    um = [_um("main:8-10"), _um("main:8-2"), _um("Pool10"), _um("Pool2")]
+    ids = [v["id"] for v in viewer.build_live_unmatched(um)]
+    assert ids == ["Pool2", "Pool10", "main:8-2", "main:8-10"]
+
+
+def test_build_live_unmatched_none_repo_becomes_unknown():
+    out = viewer.build_live_unmatched([_um("x-1", "orphan", repo=None)])
+    assert out[0]["repo"] == ""
+    assert out[0]["repo_name"] == "(unknown repo)"
+
+
+def test_build_live_unmatched_coerces_non_list_and_junk():
+    # a fake tmux hook returning a bool (or None) → [] (no section); non-dict entries dropped.
+    assert viewer.build_live_unmatched(True) == []
+    assert viewer.build_live_unmatched(None) == []
+    assert viewer.build_live_unmatched(["junk", 3, _um("ok-1")]) == [
+        {"id": "ok-1", "title": "some work", "repo": "/home/zach/workspace/devrc",
+         "repo_name": "devrc"}]
+
+
+def test_build_model_carries_live_unmatched():
+    model = viewer.build_model([_row(slug="s")], now=NOW,
+                               unmatched=[_um("Pool-6", "uncovered thread")])
+    assert model["live_unmatched"] == [
+        {"id": "Pool-6", "title": "uncovered thread",
+         "repo": "/home/zach/workspace/devrc", "repo_name": "devrc"}]
+
+
+def test_build_model_live_unmatched_defaults_empty():
+    # no unmatched arg (and a non-list) → empty list, never missing/raising.
+    assert viewer.build_model([_row(slug="s")], now=NOW)["live_unmatched"] == []
+    assert viewer.build_model([_row(slug="s")], now=NOW,
+                              unmatched=True)["live_unmatched"] == []
+
+
+def test_model_to_json_includes_live_unmatched_ok_and_error():
+    model = viewer.build_model([_row(slug="a")], now=NOW, unmatched=[_um("Vapor-1", "t")])
+    j = viewer.model_to_json(model, None)
+    assert j["live_unmatched"] == [
+        {"id": "Vapor-1", "title": "t", "repo": "/home/zach/workspace/devrc",
+         "repo_name": "devrc"}]
+    # error branch always carries an empty list so the JS never sees undefined.
+    assert viewer.model_to_json(None, "store down")["live_unmatched"] == []
+
+
+def test_render_html_renders_live_unmatched_section_and_escapes():
+    model = viewer.build_model([_row(slug="s")], now=NOW, unmatched=[
+        _um("Pool-6", "<script>alert('u')</script>", repo="/home/zach/workspace/civitai")])
+    html = viewer.render_html(model)
+    # the section + its data ride the JSON island + JS (rendered client-side)
+    assert "Live sessions — not tied to an initiative" in html
+    assert "renderUnmatched" in html
+    assert '"live_unmatched"' in html
+    assert "Pool-6" in html                              # session id in the payload
+    assert "<script>alert('u')</script>" not in html     # untrusted title never raw
+    assert "u003cscript" in html                         # neutralized in the island
+
+
+def test_render_html_no_section_when_live_unmatched_empty():
+    # empty list → the JSON island carries [] and the JS early-returns (no section rows).
+    model = viewer.build_model([_row(slug="s")], now=NOW, unmatched=[])
+    j = viewer.model_to_json(model, None)
+    assert j["live_unmatched"] == []
+    html = viewer.render_html(model)
+    assert '"live_unmatched": []' in html or '"live_unmatched":[]' in html
+    # the renderer guards on length (no rows → no <section>)
+    assert "if(!rows.length) return;" in viewer._JS
+
+
+# --- multi-pane cosmetic: show ALL matched live tasks, not just the first ----- #
+def test_view_live_tasks_lists_all_matched_panes():
+    # An initiative matched by MORE than one live pane must surface EVERY task, while
+    # live_task (first) stays for the detail endpoint / back-compat.
+    rows = [_row(slug="next-session")]
+    rows[0]["tmux_tasks"] = ["Continue dp-prod performance…", "Pick up dp-prod 500 arc…"]
+    v = viewer.build_model(rows, now=NOW)["flat"][0]
+    assert v["live_task"] == "Continue dp-prod performance…"
+    assert v["live_tasks"] == ["Continue dp-prod performance…", "Pick up dp-prod 500 arc…"]
+
+
+def test_view_live_tasks_defaults_empty():
+    v = viewer.build_model([_row(slug="s")], now=NOW)["flat"][0]
+    assert v["live_tasks"] == []
+
+
+def test_js_card_renders_all_live_tasks():
+    # the card iterates the full live_tasks list (one line per session), not a single line.
+    assert "v.live_tasks" in viewer._JS
+    assert "ltasks.forEach" in viewer._JS
+
+
+def test_build_detail_carries_live_tasks():
+    rows = [_row(slug="s")]
+    rows[0]["tmux_tasks"] = ["task one", "task two"]
+    model = viewer.build_model(rows, now=NOW)
+    d = viewer.build_detail(model, None, "/home/zach/workspace/devrc", "s",
+                            doc_reader=lambda repo, doc: None)
+    assert d["live_tasks"] == ["task one", "task two"]
+
+
+def test_provider_passes_unmatched_through_to_model():
+    # the DataProvider must thread attach_tmux's unmatched return into build_model so the
+    # section is populated from the live tmux read (not silently dropped, as it was before).
+    def tmux(rows):
+        return [_um("Vapor-9", "a live uncovered thread")]
+
+    prov = viewer.DataProvider(ttl=60, loader=lambda: [_row(slug="s")], tmux=tmux,
+                               now_fn=lambda: NOW)
+    model, error = prov.snapshot()
+    assert error is None
+    assert model["live_unmatched"] == [
+        {"id": "Vapor-9", "title": "a live uncovered thread",
+         "repo": "/home/zach/workspace/devrc", "repo_name": "devrc"}]
