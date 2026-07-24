@@ -111,10 +111,32 @@ def test_allowlist_adds_merge_status_readonly_verbs():
         "Bash(git -C * symbolic-ref --short*)",
         "Bash(git -C * ls-files*)",
         "Bash(git -C * cat-file*)",
-        "Bash(git -C * ls-remote*)",
         "Bash(gh pr checks*)",
     ):
         assert verb in al, f"missing read-only merge/ref verb {verb}"
+
+
+def test_allowlist_has_no_arbitrary_command_flag_verbs():
+    """RCE guard (security audit, 2026-07). `git ls-remote --upload-pack=<cmd>`
+    (also `-o <cmd>`) EXECUTES <cmd> locally before the transport resolves; the
+    trailing-`*` glob permits that suffix with no $VAR/&&/;/|/redirect, so it
+    slips past the harness filters AND matches the glob AND auto-executes (no
+    plan mode) over untrusted client ticket text. A prefix glob CANNOT forbid the
+    exec flags, so the whole verb is unsafe to allowlist — same class that keeps
+    `gh api` out. Block re-adding any git subcommand that accepts a
+    remote-helper / exec flag (`--upload-pack`/`--receive-pack`/`--exec`/`-o`)."""
+    al = _allowlist(_read(_DRAFTER))
+    # The specific verb the audit proved, plus its exec-flag siblings — none of
+    # these git subcommands may appear as an allowlist entry.
+    for verb in ("ls-remote", "fetch", "clone", "pull", "push", "daemon",
+                 "archive", "remote", "submodule"):
+        assert f"git -C * {verb}" not in al, (
+            f"git {verb}* accepts an arbitrary-command flag "
+            f"(--upload-pack/--receive-pack/--exec) — a prefix glob can't forbid it; RCE"
+        )
+    # And no raw exec-flag token should ever be baked into an allowlist entry.
+    for flag in ("--upload-pack", "--receive-pack", "--exec"):
+        assert flag not in al, f"exec flag {flag} must never appear in the allowlist"
 
 
 # --- prompt: command-shape contract (headless calls kept getting rejected) ----

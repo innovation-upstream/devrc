@@ -17,7 +17,7 @@ NEVER draft a confident task you could not verify the intent of.
   - `clickup get/comments`
   - `git -C <abspath>` with `log`, `show`, `diff`, `grep`, `branch --contains`,
     `rev-parse`, `rev-list`, `merge-base` (incl. `--is-ancestor`), `for-each-ref`,
-    `symbolic-ref --short`, `ls-files`, `cat-file`, `ls-remote` — use these to
+    `symbolic-ref --short`, `ls-files`, `cat-file` — use these to
     answer "is commit/PR X merged / on trunk?" (e.g. `merge-base --is-ancestor
     <sha> origin/main` or `branch --contains <sha>`). Write forms like `git
     branch <name>`, `git branch -d/-D`, `git symbolic-ref HEAD <ref>` are NOT
