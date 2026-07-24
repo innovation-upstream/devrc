@@ -1043,3 +1043,159 @@ def test_provider_passes_unmatched_through_to_model():
     assert model["live_unmatched"] == [
         {"id": "Vapor-9", "title": "a live uncovered thread",
          "repo": "/home/zach/workspace/devrc", "repo_name": "devrc"}]
+
+
+# --------------------------------------------------------------------------- #
+# "By recency" view — the 3rd toggle mode. Bucketing is CLIENT-SIDE JS (the buckets are in
+# the viewer's BROWSER-LOCAL timezone, only known client-side), factored into the DOM-free
+# `viewer._RECENCY_JS` snippet so these tests exercise the REAL code via node — not a Python
+# replica. The Python side (build_model/model_to_json) is UNCHANGED; `last_touch` already
+# ships to the client as an ISO string, so no server-side render-model change was needed.
+# --------------------------------------------------------------------------- #
+import os as _os                # noqa: E402
+import shutil as _shutil        # noqa: E402
+import subprocess as _subprocess  # noqa: E402
+
+
+def _epoch_ms(y, mo, d, h=0, mi=0, s=0):
+    """A UTC wall-clock -> epoch milliseconds (an absolute instant, tz-independent)."""
+    return int(datetime(y, mo, d, h, mi, s, tzinfo=timezone.utc).timestamp() * 1000)
+
+
+def _iso(y, mo, d, h=0, mi=0, s=0):
+    """A UTC wall-clock -> the ISO-8601 string the JSON island carries for `last_touch`."""
+    return datetime(y, mo, d, h, mi, s, tzinfo=timezone.utc).isoformat()
+
+
+def _node_recency(body, tz="UTC"):
+    """Eval `viewer._RECENCY_JS` + `body` (which console.logs a JSON value) under node with a
+    fixed TZ; return the parsed stdout. Skips if node isn't on PATH — the bucketing is JS, so
+    node is the only way to exercise the ACTUAL page code rather than re-implementing it."""
+    node = _shutil.which("node")
+    if not node:
+        import pytest
+        pytest.skip("node not on PATH — recency-bucketing JS untested this run")
+    src = viewer._RECENCY_JS + "\n" + body
+    out = _subprocess.run([node, "-e", src], capture_output=True, text=True,
+                          env=dict(_os.environ, TZ=tz), timeout=30)
+    assert out.returncode == 0, out.stderr
+    return json.loads(out.stdout)
+
+
+def _bucket_of(ts_ms, now_ms, tz="UTC"):
+    body = "console.log(JSON.stringify(recencyBucketKey(%s, %d)));" % (
+        "null" if ts_ms is None else str(ts_ms), now_ms)
+    return _node_recency(body, tz=tz)
+
+
+def test_recency_bucket_boundaries_utc():
+    # now = 2026-07-22T12:00:00Z; all cutoffs are LOCAL midnights (UTC here). Assert every
+    # boundary lands on the right side: just-before/after midnight, yesterday edge, week edge.
+    now = _epoch_ms(2026, 7, 22, 12)
+    assert _bucket_of(_epoch_ms(2026, 7, 22, 0, 0, 0), now) == "today"       # midnight today
+    assert _bucket_of(now, now) == "today"                                   # noon today
+    assert _bucket_of(_epoch_ms(2026, 7, 21, 23, 59, 59), now) == "yesterday"  # 1s before midnight
+    assert _bucket_of(_epoch_ms(2026, 7, 21, 12), now) == "yesterday"        # yesterday noon
+    assert _bucket_of(_epoch_ms(2026, 7, 21, 0, 0, 0), now) == "yesterday"   # yesterday midnight
+    assert _bucket_of(_epoch_ms(2026, 7, 20, 23, 59, 59), now) == "week"     # 1s before yest edge
+    assert _bucket_of(_epoch_ms(2026, 7, 18, 12), now) == "week"             # mid this week
+    assert _bucket_of(_epoch_ms(2026, 7, 15, 0, 0, 0), now) == "week"        # 7-days-ago midnight
+    assert _bucket_of(_epoch_ms(2026, 7, 14, 23, 59, 59), now) == "older"    # 1s before week edge
+    assert _bucket_of(_epoch_ms(2026, 7, 1, 12), now) == "older"             # well older
+    assert _bucket_of(None, now) == "unknown"                                # missing last_touch
+
+
+def test_recency_bucket_is_browser_local_tz():
+    # The SAME absolute instant buckets differently by the viewer's local tz — proving the
+    # cutoffs are LOCAL midnights, not UTC. now = 2026-07-22T03:00Z (= 2026-07-21 23:00 EDT);
+    # ts = 2026-07-21T05:00Z (= 2026-07-21 01:00 EDT). UTC -> yesterday; New York -> today.
+    now = _epoch_ms(2026, 7, 22, 3)
+    ts = _epoch_ms(2026, 7, 21, 5)
+    assert _bucket_of(ts, now, tz="UTC") == "yesterday"
+    assert _bucket_of(ts, now, tz="America/New_York") == "today"
+
+
+def test_recency_bucket_is_dst_safe():
+    # Local-calendar arithmetic (new Date(y,mo,d-n)) not fixed-24h subtraction, so a midnight
+    # cutoff can't drift across a DST transition. now = 2026-11-02 12:00 EST (day after the
+    # Nov-1 fall-back, a 25h day); ts = 2026-11-01 00:30 EST is genuinely YESTERDAY — a naive
+    # todayStart-24h boundary would land at Nov-1 01:00 and misfile it as "week".
+    body = ("var now = new Date(2026,10,2,12,0,0).getTime();"
+            "var ts  = new Date(2026,10,1,0,30,0).getTime();"
+            "console.log(JSON.stringify(recencyBucketKey(ts, now)));")
+    assert _node_recency(body, tz="America/New_York") == "yesterday"
+
+
+def test_recency_bucketize_omits_empty_and_preserves_input_order():
+    # bucketize a search-filtered, already-DESC flat list: assert (1) buckets come out in
+    # today->yesterday->week->older->unknown order, (2) an empty bucket (no yesterday item)
+    # is OMITTED, (3) within-bucket order preserves the DESC input (the caller feeds data.flat,
+    # which build_model already sorts last_touch-DESC), (4) a null last_touch -> unknown, last.
+    now = _epoch_ms(2026, 7, 22, 12)
+    views = [
+        {"slug": "a1", "last_touch": _iso(2026, 7, 22, 10)},   # today   (newer)
+        {"slug": "a2", "last_touch": _iso(2026, 7, 22, 2)},    # today   (older)
+        {"slug": "w1", "last_touch": _iso(2026, 7, 18, 12)},   # week
+        {"slug": "o1", "last_touch": _iso(2026, 7, 1, 12)},    # older
+        {"slug": "u1", "last_touch": None},                    # unknown (null)
+    ]
+    body = ("var NOW=%d; var VIEWS=%s;"
+            "console.log(JSON.stringify(bucketizeRecency(VIEWS, NOW).map(function(g){"
+            "return {key:g.key, slugs:g.items.map(function(v){return v.slug;})};})));"
+            ) % (now, json.dumps(views))
+    got = _node_recency(body)
+    assert [g["key"] for g in got] == ["today", "week", "older", "unknown"]  # yesterday omitted
+    assert got[0]["slugs"] == ["a1", "a2"]  # within-bucket DESC input order preserved
+    assert got[1]["slugs"] == ["w1"]
+    assert got[2]["slugs"] == ["o1"]
+    assert got[3]["slugs"] == ["u1"]        # unknown bucket last
+
+
+def test_recency_bucketize_parses_space_separated_last_touch():
+    # last_touch ships as json default=str → a SPACE-separated "YYYY-MM-DD HH:MM:SS...+00:00"
+    # (NOT ISO 'T'). bucketize must normalize it so it buckets correctly in EVERY engine (not
+    # just V8) — a naive new Date(space-string) returns NaN in Firefox → everything 'unknown'.
+    now = _epoch_ms(2026, 7, 22, 12)
+    views = [{"slug": "s", "last_touch": "2026-07-22 10:00:00.123456+00:00"}]  # today, space-sep
+    body = ("console.log(JSON.stringify(bucketizeRecency(%s, %d).map(function(g){"
+            "return g.key;})));") % (json.dumps(views), now)
+    assert _node_recency(body) == ["today"]
+
+
+def test_recency_bucketize_all_empty_returns_no_buckets():
+    # No initiatives -> no bucket sections at all (the render then shows the "No initiatives"
+    # empty state, same as flat/grouped).
+    now = _epoch_ms(2026, 7, 22, 12)
+    body = "console.log(JSON.stringify(bucketizeRecency([], %d)));" % now
+    assert _node_recency(body) == []
+
+
+# --- the 3-way toggle: default + persistence (client-side markers) ---------- #
+def test_render_html_has_three_way_toggle():
+    # The toggle grew a third button; flat + grouped keep their ids/labels unchanged.
+    html = viewer.render_html(viewer.build_model([_row(slug="s")], now=NOW))
+    assert 'id="view-flat"' in html
+    assert 'id="view-grouped"' in html
+    assert 'id="view-recency"' in html
+    # Bucket labels are embedded (RECENCY_BUCKETS in the inlined snippet).
+    assert "Earlier this week" in html and "Yesterday" in html and "Older" in html
+
+
+def test_js_recency_toggle_default_and_persistence():
+    js = viewer._JS
+    # default flat: an unknown/legacy stored value falls back via the VALID_VIEWS allowlist.
+    assert "VALID_VIEWS" in js and "VALID_VIEWS[storedView] ? storedView : 'flat'" in js
+    # the recency choice is persisted under the SAME key as flat/grouped.
+    assert "localStorage.setItem(VIEW_KEY, 'recency')" in js
+    # the snippet was inlined (placeholder substituted), so the page can call it.
+    assert "__RECENCY_JS__" not in js
+    assert "bucketizeRecency" in js and "recencyBucketKey" in js
+
+
+def test_js_recency_render_branch_present():
+    # render() has a dedicated recency branch that buckets the filtered flat stream and
+    # renders one section per non-empty bucket (label + count header, .repo styling).
+    assert "state.view === 'recency'" in viewer._JS
+    assert "bucketizeRecency(rviews, Date.now())" in viewer._JS
+    # the repo label shows in recency too (repo isn't the section header there).
+    assert "state.view !== 'grouped'" in viewer._JS
