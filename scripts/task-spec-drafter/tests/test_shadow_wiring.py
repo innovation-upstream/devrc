@@ -15,6 +15,7 @@ from pathlib import Path
 
 _HERE = Path(__file__).resolve().parent
 _DRAFTER = _HERE.parent / "drafter.sh"
+_PROMPT = _HERE.parent / "drafter-prompt.md"
 _ENV_EXAMPLE = _HERE.parent / "task-spec-drafter.env.example"
 _HOME_NIX = _HERE.parents[2] / "nix" / "home.nix"
 
@@ -68,6 +69,21 @@ def test_allowlist_has_no_write_capable_verbs():
     assert "gh api" not in al, "gh api* allows `gh api -X POST/PATCH/DELETE`"
     assert "curl" not in al, "curl -s* allows `curl -X POST -d …`"
     assert "Bash(env" not in al, "env* dumps the inherited CLAWGATE_HOOK_TOKEN"
+    # The merge/ref-status verbs added for the headless-runtime fix must be
+    # NARROWED to their read-only shape — the broad globs would also match the
+    # write forms of the same command, so those broad globs must be ABSENT:
+    assert "Bash(git -C * branch*)" not in al, (
+        "broad `git -C * branch*` glob matches `git branch <name>`/`-d/-D` (writes); "
+        "only the read-only `branch --contains*` form is allowed"
+    )
+    assert "Bash(git -C * symbolic-ref*)" not in al, (
+        "broad `git -C * symbolic-ref*` glob matches 2-arg `symbolic-ref HEAD <ref>` "
+        "(repoints HEAD, a write); only `symbolic-ref --short*` is allowed"
+    )
+    # sanity: no obviously-mutating git verbs anywhere in the allowlist.
+    for bad in ("push", "commit", "git -C * apply", "git -C * reset",
+                "git -C * checkout", "git -C * tag", "git -C * update-ref"):
+        assert bad not in al, f"write-capable verb leaked into allowlist: {bad}"
 
 
 def test_allowlist_keeps_readonly_verification_verbs():
@@ -78,6 +94,98 @@ def test_allowlist_keeps_readonly_verification_verbs():
         "Bash(kubectl get*)", "Bash(node *query.mjs get*)",
     ):
         assert verb in al, f"missing read-only verification verb {verb}"
+
+
+def test_allowlist_adds_merge_status_readonly_verbs():
+    """The headless-runtime fix: the drafter kept burning calls on "is X merged /
+    on trunk?" because the answer verbs weren't allowlisted → "requires approval".
+    These read-only merge/ref verbs (each in its narrowest safe shape) must now be
+    present so the check runs non-interactively."""
+    al = _allowlist(_read(_DRAFTER))
+    for verb in (
+        "Bash(git -C * branch --contains*)",
+        "Bash(git -C * rev-parse*)",
+        "Bash(git -C * rev-list*)",
+        "Bash(git -C * merge-base*)",
+        "Bash(git -C * for-each-ref*)",
+        "Bash(git -C * symbolic-ref --short*)",
+        "Bash(git -C * ls-files*)",
+        "Bash(git -C * cat-file*)",
+        "Bash(gh pr checks*)",
+    ):
+        assert verb in al, f"missing read-only merge/ref verb {verb}"
+
+
+def test_allowlist_has_no_arbitrary_command_flag_verbs():
+    """RCE guard (security audit, 2026-07). `git ls-remote --upload-pack=<cmd>`
+    (also `-o <cmd>`) EXECUTES <cmd> locally before the transport resolves; the
+    trailing-`*` glob permits that suffix with no $VAR/&&/;/|/redirect, so it
+    slips past the harness filters AND matches the glob AND auto-executes (no
+    plan mode) over untrusted client ticket text. A prefix glob CANNOT forbid the
+    exec flags, so the whole verb is unsafe to allowlist — same class that keeps
+    `gh api` out. Block re-adding any git subcommand that accepts a
+    remote-helper / exec flag (`--upload-pack`/`--receive-pack`/`--exec`/`-o`)."""
+    al = _allowlist(_read(_DRAFTER))
+    # The specific verb the audit proved, plus its exec-flag siblings — none of
+    # these git subcommands may appear as an allowlist entry.
+    for verb in ("ls-remote", "fetch", "clone", "pull", "push", "daemon",
+                 "archive", "remote", "submodule"):
+        assert f"git -C * {verb}" not in al, (
+            f"git {verb}* accepts an arbitrary-command flag "
+            f"(--upload-pack/--receive-pack/--exec) — a prefix glob can't forbid it; RCE"
+        )
+    # And no raw exec-flag token should ever be baked into an allowlist entry.
+    for flag in ("--upload-pack", "--receive-pack", "--exec"):
+        assert flag not in al, f"exec flag {flag} must never appear in the allowlist"
+
+
+# --- prompt: command-shape contract (headless calls kept getting rejected) ----
+
+def _norm(s: str) -> str:
+    """Collapse all runs of whitespace to single spaces so phrase assertions are
+    robust to markdown line-wrapping."""
+    return " ".join(s.split())
+
+
+def test_prompt_has_command_shape_contract():
+    """The harness rejects the shapes the model defaults to ($VAR expansion,
+    cd, compound &&/pipes). The prompt must carry a loud contract forbidding them
+    and mandating a single `git -C <abspath>` verb per call."""
+    p = _norm(_read(_PROMPT))
+    assert "COMMAND-SHAPE CONTRACT" in p
+    # forbids cd
+    assert "NEVER `cd`" in p or "NEVER `cd repo" in p
+    # forbids shell-variable expansion (with the concrete $CIVITAI example)
+    assert "$CIVITAI" in p
+    assert "simple_expansion" in p, "should name the exact rejection the harness emits"
+    # forbids compound / pipes, mandates ONE verb per call
+    assert "&&" in p and "pipes" in p
+    assert "ONE verb per Bash call" in p or "ONE read verb per" in p
+    # mandates the git -C <abspath> single-verb shape
+    assert "git -C <ABSOLUTE-PATH>" in p
+    # a concrete REJECTED→DO-THIS table exists
+    assert "REJECTED" in p and "INSTEAD" in p
+
+
+def test_prompt_has_anticonfab_gate():
+    """One drafter run emitted a "nothing found" verdict having run ZERO tools —
+    a fabricated verification. The prompt must hard-require ≥1 successful read
+    before any factual verdict, and route the no-read case to a low-confidence
+    NEEDS-DECISION instead of asserting a negative finding."""
+    p = _norm(_read(_PROMPT))
+    assert "ANTI-CONFABULATION GATE" in p
+    assert "at least ONE successful read" in p or "at least one successful read" in p.lower()
+    # the honest no-read path is NEEDS-DECISION + low confidence, not a false negative
+    assert "NEEDS-DECISION" in p
+    assert 'confidence: "low"' in p or "confidence: low" in p
+    assert "no source was reachable" in p or "all reads failed" in p
+
+
+def test_prompt_still_forbids_gh_api_and_curl():
+    """The expanded read verbs must not have quietly re-permitted the mutation
+    paths the design excludes."""
+    p = _norm(_read(_PROMPT))
+    assert "No `gh api` and no `curl`" in p
 
 
 # --- deterministic safety gate ------------------------------------------------
