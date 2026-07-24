@@ -1,0 +1,967 @@
+{
+  "n_test": 8,
+  "n_train": 10,
+  "judge_failures": 0,
+  "timings_sec": {
+    "baseline": 3.688096523284912,
+    "dspy_zeroshot": 15.428189754486084,
+    "dspy_zeroshot_cot": 21.865782737731934,
+    "dspy_bootstrap_optimize": 9.201992273330688,
+    "dspy_bootstrap_cot_optimize": 10.671806335449219
+  },
+  "llm_calls": {
+    "dspy_zeroshot": 8,
+    "dspy_zeroshot_cot": 8,
+    "dspy_bootstrap_optimize": 4,
+    "dspy_bootstrap_demos_kept": 4,
+    "dspy_bootstrap_cot_optimize": 4
+  },
+  "weights": {
+    "describes_work": 0.3,
+    "concision": 0.15,
+    "faithfulness": 0.35,
+    "status_awareness": 0.2
+  },
+  "results": [
+    {
+      "system": "baseline",
+      "aggregate": {
+        "composite": 0.9325,
+        "describes_work": 1.0,
+        "concision": 1.0,
+        "faithfulness": 0.95,
+        "status_awareness": 0.75
+      },
+      "items": [
+        {
+          "slug": "remix-session",
+          "momentum": "active",
+          "recap": "Active development focusing on UX changes and testing connectors.",
+          "composite": 0.83,
+          "dims": {
+            "describes_work": 1.0,
+            "concision": 1.0,
+            "faithfulness": 0.8,
+            "status_awareness": 0.5
+          },
+          "detail": {
+            "doc_meta_hits": [],
+            "n_sentences": 1,
+            "concision_flags": [],
+            "fabricated_numbers": [],
+            "judge_faithfulness_raw": 0.8,
+            "judge_ok": true,
+            "faithfulness_reason": "The recap accurately mentions active development but invents the focus on UX changes and testing connectors without direct support from the context.",
+            "status_reason": "The recap does not clearly convey the current standing of the project, such as whether it is in progress, shipped, blocked, or stalled."
+          }
+        },
+        {
+          "slug": "remix-platform",
+          "momentum": "slowing",
+          "recap": "Built a new personal video-remix platform from scratch, now live at remix.zacx.dev.",
+          "composite": 0.83,
+          "dims": {
+            "describes_work": 1.0,
+            "concision": 1.0,
+            "faithfulness": 0.8,
+            "status_awareness": 0.5
+          },
+          "detail": {
+            "doc_meta_hits": [],
+            "n_sentences": 1,
+            "concision_flags": [],
+            "fabricated_numbers": [],
+            "judge_faithfulness_raw": 0.8,
+            "judge_ok": true,
+            "faithfulness_reason": "The recap omits the authentication requirement ('Authelia-gated') and the fact that the platform is still under development.",
+            "status_reason": "The recap does not convey the current standing of the project, which is still in progress."
+          }
+        },
+        {
+          "slug": "next-session",
+          "momentum": "active",
+          "recap": "Continue the dp-prod perf/reliability arc. Verify the #3266 CPU fix (#3322) at the next early-PM-UTC peak.",
+          "composite": 1.0,
+          "dims": {
+            "describes_work": 1.0,
+            "concision": 1.0,
+            "faithfulness": 1.0,
+            "status_awareness": 1.0
+          },
+          "detail": {
+            "doc_meta_hits": [],
+            "n_sentences": 2,
+            "concision_flags": [],
+            "fabricated_numbers": [],
+            "judge_faithfulness_raw": 1.0,
+            "judge_ok": true,
+            "faithfulness_reason": "All claims are directly supported by the context.",
+            "status_reason": "The recap clearly indicates that the work is in progress and specifies the next step."
+          }
+        },
+        {
+          "slug": "app-blocks-arc-complete",
+          "momentum": "slowing",
+          "recap": "The big App Blocks arc is shipped end-to-end; everything is merged.",
+          "composite": 1.0,
+          "dims": {
+            "describes_work": 1.0,
+            "concision": 1.0,
+            "faithfulness": 1.0,
+            "status_awareness": 1.0
+          },
+          "detail": {
+            "doc_meta_hits": [],
+            "n_sentences": 1,
+            "concision_flags": [],
+            "fabricated_numbers": [],
+            "judge_faithfulness_raw": 1.0,
+            "judge_ok": true,
+            "faithfulness_reason": "Both claims are directly supported by the context.",
+            "status_reason": "The recap accurately reflects that the work is shipped and merged."
+          }
+        },
+        {
+          "slug": "remix-templates",
+          "momentum": "slowing",
+          "recap": "Feature: user-selectable render templates for the remix video app.",
+          "composite": 0.7999999999999999,
+          "dims": {
+            "describes_work": 1.0,
+            "concision": 1.0,
+            "faithfulness": 1.0,
+            "status_awareness": 0.0
+          },
+          "detail": {
+            "doc_meta_hits": [],
+            "n_sentences": 1,
+            "concision_flags": [],
+            "fabricated_numbers": [],
+            "judge_faithfulness_raw": 1.0,
+            "judge_ok": true,
+            "faithfulness_reason": "All claims are directly supported by the context.",
+            "status_reason": "The recap does not convey the current standing of the work."
+          }
+        },
+        {
+          "slug": "initiatives-consolidation",
+          "momentum": "active",
+          "recap": "Active; dual-host merge deferred. Consolidating on-demand initiative-scan.py output into a durable, queryable database.",
+          "composite": 1.0,
+          "dims": {
+            "describes_work": 1.0,
+            "concision": 1.0,
+            "faithfulness": 1.0,
+            "status_awareness": 1.0
+          },
+          "detail": {
+            "doc_meta_hits": [],
+            "n_sentences": 2,
+            "concision_flags": [],
+            "fabricated_numbers": [],
+            "judge_faithfulness_raw": 1.0,
+            "judge_ok": true,
+            "faithfulness_reason": "All claims are directly supported by the context.",
+            "status_reason": "Clearly conveys that the work is active and the next step is deferred dual-host merge."
+          }
+        },
+        {
+          "slug": "clawgate-chat-polish",
+          "momentum": "active",
+          "recap": "Continue the clawgate \"USE + SOAK\" phase: keep soaking, dispatch task #64, and do a feedback pass on the 0.7.66 chat.",
+          "composite": 1.0,
+          "dims": {
+            "describes_work": 1.0,
+            "concision": 1.0,
+            "faithfulness": 1.0,
+            "status_awareness": 1.0
+          },
+          "detail": {
+            "doc_meta_hits": [],
+            "n_sentences": 1,
+            "concision_flags": [],
+            "fabricated_numbers": [],
+            "judge_faithfulness_raw": 1.0,
+            "judge_ok": true,
+            "faithfulness_reason": "All claims and numbers are directly supported by the context.",
+            "status_reason": "The recap clearly conveys that the work is in progress and specifies the next steps as per the context."
+          }
+        },
+        {
+          "slug": "dp-prod-rightsizing-node-drain",
+          "momentum": "stalled",
+          "recap": "Stalled; next step is to drain a web node, verify CPU request fit, then proceed with cordon+drain.",
+          "composite": 1.0,
+          "dims": {
+            "describes_work": 1.0,
+            "concision": 1.0,
+            "faithfulness": 1.0,
+            "status_awareness": 1.0
+          },
+          "detail": {
+            "doc_meta_hits": [],
+            "n_sentences": 1,
+            "concision_flags": [],
+            "fabricated_numbers": [],
+            "judge_faithfulness_raw": 1.0,
+            "judge_ok": true,
+            "faithfulness_reason": "All claims are directly supported by the context.",
+            "status_reason": "Clearly conveys the current standing as stalled and accurately describes the next steps."
+          }
+        }
+      ]
+    },
+    {
+      "system": "dspy_zeroshot",
+      "aggregate": {
+        "composite": 0.9049999999999999,
+        "describes_work": 1.0,
+        "concision": 1.0,
+        "faithfulness": 0.95,
+        "status_awareness": 0.6125
+      },
+      "items": [
+        {
+          "slug": "remix-session",
+          "momentum": "active",
+          "recap": "Feedback is being processed to update the 'clip it' button UX to 'stash this', which will add items to the user's stash by reference.",
+          "composite": 0.7999999999999999,
+          "dims": {
+            "describes_work": 1.0,
+            "concision": 1.0,
+            "faithfulness": 1.0,
+            "status_awareness": 0.0
+          },
+          "detail": {
+            "doc_meta_hits": [],
+            "n_sentences": 1,
+            "concision_flags": [],
+            "fabricated_numbers": [],
+            "judge_faithfulness_raw": 1.0,
+            "judge_ok": true,
+            "faithfulness_reason": "The recap accurately reflects the recent message about updating the 'clip it' button UX.",
+            "status_reason": "The recap does not convey the current standing of the project."
+          }
+        },
+        {
+          "slug": "remix-platform",
+          "momentum": "slowing",
+          "recap": "Built a personal video-remix platform from scratch, now live at remix.zacx.dev.",
+          "composite": 0.83,
+          "dims": {
+            "describes_work": 1.0,
+            "concision": 1.0,
+            "faithfulness": 0.8,
+            "status_awareness": 0.5
+          },
+          "detail": {
+            "doc_meta_hits": [],
+            "n_sentences": 1,
+            "concision_flags": [],
+            "fabricated_numbers": [],
+            "judge_faithfulness_raw": 0.8,
+            "judge_ok": true,
+            "faithfulness_reason": "The recap omits the fact that the platform was built from zero to a working compositional editor, and it doesn't mention Authelia-gating.",
+            "status_reason": "The recap does not convey the current standing of the project, which is slowing down according to the context."
+          }
+        },
+        {
+          "slug": "next-session",
+          "momentum": "active",
+          "recap": "Verify the CPU fix and check initial results.",
+          "composite": 1.0,
+          "dims": {
+            "describes_work": 1.0,
+            "concision": 1.0,
+            "faithfulness": 1.0,
+            "status_awareness": 1.0
+          },
+          "detail": {
+            "doc_meta_hits": [],
+            "n_sentences": 1,
+            "concision_flags": [],
+            "fabricated_numbers": [],
+            "judge_faithfulness_raw": 1.0,
+            "judge_ok": true,
+            "faithfulness_reason": "Both claims are directly supported by the context.",
+            "status_reason": "The recap clearly indicates ongoing work and the next step, aligning with the context."
+          }
+        },
+        {
+          "slug": "app-blocks-arc-complete",
+          "momentum": "slowing",
+          "recap": "The big App Blocks arc is shipped end-to-end; the civitai host PRs are merged and await the next release cut.",
+          "composite": 1.0,
+          "dims": {
+            "describes_work": 1.0,
+            "concision": 1.0,
+            "faithfulness": 1.0,
+            "status_awareness": 1.0
+          },
+          "detail": {
+            "doc_meta_hits": [],
+            "n_sentences": 1,
+            "concision_flags": [],
+            "fabricated_numbers": [],
+            "judge_faithfulness_raw": 1.0,
+            "judge_ok": true,
+            "faithfulness_reason": "All claims are directly supported by the context.",
+            "status_reason": "The recap accurately reflects the shipped status and pending next release as per the context."
+          }
+        },
+        {
+          "slug": "remix-templates",
+          "momentum": "slowing",
+          "recap": "Feature: user-selectable render templates for the remix video app are being developed.",
+          "composite": 0.8999999999999999,
+          "dims": {
+            "describes_work": 1.0,
+            "concision": 1.0,
+            "faithfulness": 1.0,
+            "status_awareness": 0.5
+          },
+          "detail": {
+            "doc_meta_hits": [],
+            "n_sentences": 1,
+            "concision_flags": [],
+            "fabricated_numbers": [],
+            "judge_faithfulness_raw": 1.0,
+            "judge_ok": true,
+            "faithfulness_reason": "All claims are supported by the context.",
+            "status_reason": "The recap does not clearly convey the current standing of the work."
+          }
+        },
+        {
+          "slug": "initiatives-consolidation",
+          "momentum": "active",
+          "recap": "Consolidate the on-demand initiative-scan.py output into a durable, queryable database.",
+          "composite": 0.7999999999999999,
+          "dims": {
+            "describes_work": 1.0,
+            "concision": 1.0,
+            "faithfulness": 1.0,
+            "status_awareness": 0.0
+          },
+          "detail": {
+            "doc_meta_hits": [],
+            "n_sentences": 1,
+            "concision_flags": [],
+            "fabricated_numbers": [],
+            "judge_faithfulness_raw": 1.0,
+            "judge_ok": true,
+            "faithfulness_reason": "All claims are directly supported by the context.",
+            "status_reason": "The recap does not convey the current standing or next steps."
+          }
+        },
+        {
+          "slug": "clawgate-chat-polish",
+          "momentum": "active",
+          "recap": "Continue the clawgate \"USE + SOAK\" phase by addressing e2e suite flakes and polishing the agent-chat UX.",
+          "composite": 0.9099999999999999,
+          "dims": {
+            "describes_work": 1.0,
+            "concision": 1.0,
+            "faithfulness": 0.8,
+            "status_awareness": 0.9
+          },
+          "detail": {
+            "doc_meta_hits": [],
+            "n_sentences": 1,
+            "concision_flags": [],
+            "fabricated_numbers": [],
+            "judge_faithfulness_raw": 0.8,
+            "judge_ok": true,
+            "faithfulness_reason": "The recap accurately mentions continuing the clawgate 'USE + SOAK' phase and polishing the agent-chat UX, but it omits the specific task #64 and the need to resist building new loop features.",
+            "status_reason": "The recap correctly indicates that the work is ongoing and provides a clear sense of the current standing, though it does not explicitly state the current status as 'in progress'."
+          }
+        },
+        {
+          "slug": "dp-prod-rightsizing-node-drain",
+          "momentum": "stalled",
+          "recap": "Reclaim CPU requests to allow draining one web node, aligning with the original rightsizing goal.",
+          "composite": 1.0,
+          "dims": {
+            "describes_work": 1.0,
+            "concision": 1.0,
+            "faithfulness": 1.0,
+            "status_awareness": 1.0
+          },
+          "detail": {
+            "doc_meta_hits": [],
+            "n_sentences": 1,
+            "concision_flags": [],
+            "fabricated_numbers": [],
+            "judge_faithfulness_raw": 1.0,
+            "judge_ok": true,
+            "faithfulness_reason": "All claims are directly supported by the context.",
+            "status_reason": "Clearly conveys that the work is stalled but aligning with the original rightsizing goal."
+          }
+        }
+      ]
+    },
+    {
+      "system": "dspy_zeroshot_cot",
+      "aggregate": {
+        "composite": 0.896875,
+        "describes_work": 1.0,
+        "concision": 1.0,
+        "faithfulness": 0.8625,
+        "status_awareness": 0.725
+      },
+      "items": [
+        {
+          "slug": "remix-session",
+          "momentum": "active",
+          "recap": "Updating the 'clip it' button UX by changing the text to 'stash this' and adding functionality to save items as sources.",
+          "composite": 0.7999999999999999,
+          "dims": {
+            "describes_work": 1.0,
+            "concision": 1.0,
+            "faithfulness": 1.0,
+            "status_awareness": 0.0
+          },
+          "detail": {
+            "doc_meta_hits": [],
+            "n_sentences": 1,
+            "concision_flags": [],
+            "fabricated_numbers": [],
+            "judge_faithfulness_raw": 1.0,
+            "judge_ok": true,
+            "faithfulness_reason": "The recap accurately reflects the recent message about updating the 'clip it' button UX.",
+            "status_reason": "The recap does not convey the current standing of the project."
+          }
+        },
+        {
+          "slug": "remix-platform",
+          "momentum": "slowing",
+          "recap": "Built a functional video-remix platform, needing audit fixes and deployment.",
+          "composite": 0.725,
+          "dims": {
+            "describes_work": 1.0,
+            "concision": 1.0,
+            "faithfulness": 0.5,
+            "status_awareness": 0.5
+          },
+          "detail": {
+            "doc_meta_hits": [],
+            "n_sentences": 1,
+            "concision_flags": [],
+            "fabricated_numbers": [],
+            "judge_faithfulness_raw": 0.5,
+            "judge_ok": true,
+            "faithfulness_reason": "The recap mentions building a functional video-remix platform, which is partially correct but omits the fact that it was built from zero to a working compositional editor. It also incorrectly states t",
+            "status_reason": "The recap does not clearly convey the current standing of the project, as it suggests the platform is not yet functional, whereas the context indicates it is."
+          }
+        },
+        {
+          "slug": "next-session",
+          "momentum": "active",
+          "recap": "Verify the CPU fix during the early morning peak.",
+          "composite": 1.0,
+          "dims": {
+            "describes_work": 1.0,
+            "concision": 1.0,
+            "faithfulness": 1.0,
+            "status_awareness": 1.0
+          },
+          "detail": {
+            "doc_meta_hits": [],
+            "n_sentences": 1,
+            "concision_flags": [],
+            "fabricated_numbers": [],
+            "judge_faithfulness_raw": 1.0,
+            "judge_ok": true,
+            "faithfulness_reason": "All claims are supported by the context.",
+            "status_reason": "The recap clearly indicates the next step as verifying the CPU fix during the early morning peak."
+          }
+        },
+        {
+          "slug": "app-blocks-arc-complete",
+          "momentum": "slowing",
+          "recap": "The App Blocks arc is complete but needs defined next steps.",
+          "composite": 1.0,
+          "dims": {
+            "describes_work": 1.0,
+            "concision": 1.0,
+            "faithfulness": 1.0,
+            "status_awareness": 1.0
+          },
+          "detail": {
+            "doc_meta_hits": [],
+            "n_sentences": 1,
+            "concision_flags": [],
+            "fabricated_numbers": [],
+            "judge_faithfulness_raw": 1.0,
+            "judge_ok": true,
+            "faithfulness_reason": "All claims are supported by the context.",
+            "status_reason": "Indicates the current standing as complete but needing defined next steps."
+          }
+        },
+        {
+          "slug": "remix-templates",
+          "momentum": "slowing",
+          "recap": "Developing user-selectable render templates for the remix video app, with ongoing work on rendering templates and fixes.",
+          "composite": 1.0,
+          "dims": {
+            "describes_work": 1.0,
+            "concision": 1.0,
+            "faithfulness": 1.0,
+            "status_awareness": 1.0
+          },
+          "detail": {
+            "doc_meta_hits": [],
+            "n_sentences": 1,
+            "concision_flags": [],
+            "fabricated_numbers": [],
+            "judge_faithfulness_raw": 1.0,
+            "judge_ok": true,
+            "faithfulness_reason": "All claims are supported by the context.",
+            "status_reason": "The recap accurately reflects the ongoing nature of the work based on recent commits."
+          }
+        },
+        {
+          "slug": "initiatives-consolidation",
+          "momentum": "active",
+          "recap": "Consolidate on-demand scan output into a durable, queryable database.",
+          "composite": 0.85,
+          "dims": {
+            "describes_work": 1.0,
+            "concision": 1.0,
+            "faithfulness": 0.8,
+            "status_awareness": 0.6
+          },
+          "detail": {
+            "doc_meta_hits": [],
+            "n_sentences": 1,
+            "concision_flags": [],
+            "fabricated_numbers": [],
+            "judge_faithfulness_raw": 0.8,
+            "judge_ok": true,
+            "faithfulness_reason": "The recap omits the dual-host merge next step and the fact that Phase 1 is workbench-only.",
+            "status_reason": "The recap does not convey the current standing of the project, such as being active or the need to defer the dual-host merge."
+          }
+        },
+        {
+          "slug": "clawgate-chat-polish",
+          "momentum": "active",
+          "recap": "Continuing soak testing for clawgate, improving agent-chat UX and ensuring full test coverage.",
+          "composite": 0.9099999999999999,
+          "dims": {
+            "describes_work": 1.0,
+            "concision": 1.0,
+            "faithfulness": 0.8,
+            "status_awareness": 0.9
+          },
+          "detail": {
+            "doc_meta_hits": [],
+            "n_sentences": 1,
+            "concision_flags": [],
+            "fabricated_numbers": [],
+            "judge_faithfulness_raw": 0.8,
+            "judge_ok": true,
+            "faithfulness_reason": "The recap accurately mentions continuing soak testing and improving agent-chat UX, but it omits the specific tasks like dispatch task #64 and the structured transcript.",
+            "status_reason": "The recap correctly indicates that the work is ongoing and in progress, aligning with the active momentum described in the context."
+          }
+        },
+        {
+          "slug": "dp-prod-rightsizing-node-drain",
+          "momentum": "stalled",
+          "recap": "Reclaiming resources to drain one of five overloaded web nodes, but stalled due to metrics-server issues and API floor validations.",
+          "composite": 0.89,
+          "dims": {
+            "describes_work": 1.0,
+            "concision": 1.0,
+            "faithfulness": 0.8,
+            "status_awareness": 0.8
+          },
+          "detail": {
+            "doc_meta_hits": [],
+            "n_sentences": 1,
+            "concision_flags": [],
+            "fabricated_numbers": [],
+            "judge_faithfulness_raw": 0.8,
+            "judge_ok": true,
+            "faithfulness_reason": "The recap accurately mentions the goal of reclaiming resources and draining one of five overloaded web nodes, but it incorrectly states that the initiative is stalled due to metrics-server issues and ",
+            "status_reason": "The recap correctly indicates that the work is stalled, but it misattributes the reason for the stall, which is not accurate according to the context."
+          }
+        }
+      ]
+    },
+    {
+      "system": "dspy_bootstrap",
+      "aggregate": {
+        "composite": 0.94625,
+        "describes_work": 1.0,
+        "concision": 1.0,
+        "faithfulness": 0.975,
+        "status_awareness": 0.775
+      },
+      "items": [
+        {
+          "slug": "remix-session",
+          "momentum": "active",
+          "recap": "Explore is temporarily unavailable due to content security policy issues; working on testing connectors and resolving API key access for PMVHaven.",
+          "composite": 1.0,
+          "dims": {
+            "describes_work": 1.0,
+            "concision": 1.0,
+            "faithfulness": 1.0,
+            "status_awareness": 1.0
+          },
+          "detail": {
+            "doc_meta_hits": [],
+            "n_sentences": 1,
+            "concision_flags": [],
+            "fabricated_numbers": [],
+            "judge_faithfulness_raw": 1.0,
+            "judge_ok": true,
+            "faithfulness_reason": "All claims are supported by the context.",
+            "status_reason": "Clearly conveys that Explore is temporarily unavailable and indicates ongoing work."
+          }
+        },
+        {
+          "slug": "remix-platform",
+          "momentum": "slowing",
+          "recap": "Build a self-hosted Supabase instance for the remix platform.",
+          "composite": 0.7999999999999999,
+          "dims": {
+            "describes_work": 1.0,
+            "concision": 1.0,
+            "faithfulness": 1.0,
+            "status_awareness": 0.0
+          },
+          "detail": {
+            "doc_meta_hits": [],
+            "n_sentences": 1,
+            "concision_flags": [],
+            "fabricated_numbers": [],
+            "judge_faithfulness_raw": 1.0,
+            "judge_ok": true,
+            "faithfulness_reason": "The recap accurately reflects a recent commit mentioned in the context.",
+            "status_reason": "The recap does not convey the current standing of the project."
+          }
+        },
+        {
+          "slug": "next-session",
+          "momentum": "active",
+          "recap": "Continue the dp-prod perf/reliability arc by verifying the CPU fix at the next early-PM-UTC peak.",
+          "composite": 1.0,
+          "dims": {
+            "describes_work": 1.0,
+            "concision": 1.0,
+            "faithfulness": 1.0,
+            "status_awareness": 1.0
+          },
+          "detail": {
+            "doc_meta_hits": [],
+            "n_sentences": 1,
+            "concision_flags": [],
+            "fabricated_numbers": [],
+            "judge_faithfulness_raw": 1.0,
+            "judge_ok": true,
+            "faithfulness_reason": "All claims are directly supported by the context.",
+            "status_reason": "The recap clearly indicates the next step as continuing the arc and verifying the fix, which aligns with the context."
+          }
+        },
+        {
+          "slug": "app-blocks-arc-complete",
+          "momentum": "slowing",
+          "recap": "The big App Blocks arc is fully shipped.",
+          "composite": 1.0,
+          "dims": {
+            "describes_work": 1.0,
+            "concision": 1.0,
+            "faithfulness": 1.0,
+            "status_awareness": 1.0
+          },
+          "detail": {
+            "doc_meta_hits": [],
+            "n_sentences": 1,
+            "concision_flags": [],
+            "fabricated_numbers": [],
+            "judge_faithfulness_raw": 1.0,
+            "judge_ok": true,
+            "faithfulness_reason": "All claims are directly supported by the context.",
+            "status_reason": "The recap accurately reflects the shipped status as stated in the context."
+          }
+        },
+        {
+          "slug": "remix-templates",
+          "momentum": "slowing",
+          "recap": "Implement user-selectable render templates for the remix video app.",
+          "composite": 0.83,
+          "dims": {
+            "describes_work": 1.0,
+            "concision": 1.0,
+            "faithfulness": 0.8,
+            "status_awareness": 0.5
+          },
+          "detail": {
+            "doc_meta_hits": [],
+            "n_sentences": 1,
+            "concision_flags": [],
+            "fabricated_numbers": [],
+            "judge_faithfulness_raw": 0.8,
+            "judge_ok": true,
+            "faithfulness_reason": "The recap omits the detail that users can pick one or more templates at create-time, and it doesn't mention the multi-clip layouts and transitions.",
+            "status_reason": "The recap does not convey the current standing of the work, which is slowing down according to the context."
+          }
+        },
+        {
+          "slug": "initiatives-consolidation",
+          "momentum": "active",
+          "recap": "Consolidate initiative-scan.py output into a durable, queryable Postgres database.",
+          "composite": 0.94,
+          "dims": {
+            "describes_work": 1.0,
+            "concision": 1.0,
+            "faithfulness": 1.0,
+            "status_awareness": 0.7
+          },
+          "detail": {
+            "doc_meta_hits": [],
+            "n_sentences": 1,
+            "concision_flags": [],
+            "fabricated_numbers": [],
+            "judge_faithfulness_raw": 1.0,
+            "judge_ok": true,
+            "faithfulness_reason": "All claims are directly supported by the context.",
+            "status_reason": "The recap does not explicitly state the current standing of the work."
+          }
+        },
+        {
+          "slug": "clawgate-chat-polish",
+          "momentum": "active",
+          "recap": "Continue the clawgate soak phase with agent-chat UX polish and green the e2e suite.",
+          "composite": 1.0,
+          "dims": {
+            "describes_work": 1.0,
+            "concision": 1.0,
+            "faithfulness": 1.0,
+            "status_awareness": 1.0
+          },
+          "detail": {
+            "doc_meta_hits": [],
+            "n_sentences": 1,
+            "concision_flags": [],
+            "fabricated_numbers": [],
+            "judge_faithfulness_raw": 1.0,
+            "judge_ok": true,
+            "faithfulness_reason": "All claims are directly supported by the context.",
+            "status_reason": "Clearly conveys that the work is in progress and specifies the current tasks."
+          }
+        },
+        {
+          "slug": "dp-prod-rightsizing-node-drain",
+          "momentum": "stalled",
+          "recap": "Drain a web node to free up CPU request headroom and fit the load on the remaining nodes.",
+          "composite": 1.0,
+          "dims": {
+            "describes_work": 1.0,
+            "concision": 1.0,
+            "faithfulness": 1.0,
+            "status_awareness": 1.0
+          },
+          "detail": {
+            "doc_meta_hits": [],
+            "n_sentences": 1,
+            "concision_flags": [],
+            "fabricated_numbers": [],
+            "judge_faithfulness_raw": 1.0,
+            "judge_ok": true,
+            "faithfulness_reason": "All claims are directly supported by the context.",
+            "status_reason": "Clearly conveys that the work is in progress and the next step is to drain a web node."
+          }
+        }
+      ]
+    },
+    {
+      "system": "dspy_bootstrap_cot",
+      "aggregate": {
+        "composite": 0.95625,
+        "describes_work": 1.0,
+        "concision": 1.0,
+        "faithfulness": 0.975,
+        "status_awareness": 0.825
+      },
+      "items": [
+        {
+          "slug": "remix-session",
+          "momentum": "active",
+          "recap": "Addressing feedback and resolving issues with the containers/remix application, which is public at aigeum.com.",
+          "composite": 1.0,
+          "dims": {
+            "describes_work": 1.0,
+            "concision": 1.0,
+            "faithfulness": 1.0,
+            "status_awareness": 1.0
+          },
+          "detail": {
+            "doc_meta_hits": [],
+            "n_sentences": 1,
+            "concision_flags": [],
+            "fabricated_numbers": [],
+            "judge_faithfulness_raw": 1.0,
+            "judge_ok": true,
+            "faithfulness_reason": "All claims are supported by the context.",
+            "status_reason": "The recap clearly states that the work is in progress and provides details consistent with the context."
+          }
+        },
+        {
+          "slug": "remix-platform",
+          "momentum": "slowing",
+          "recap": "Build a personal video-remix platform from scratch, now live at remix.zacx.dev.",
+          "composite": 0.85,
+          "dims": {
+            "describes_work": 1.0,
+            "concision": 1.0,
+            "faithfulness": 0.8,
+            "status_awareness": 0.6
+          },
+          "detail": {
+            "doc_meta_hits": [],
+            "n_sentences": 1,
+            "concision_flags": [],
+            "fabricated_numbers": [],
+            "judge_faithfulness_raw": 0.8,
+            "judge_ok": true,
+            "faithfulness_reason": "The recap accurately mentions building a personal video-remix platform from scratch and its live status, but it omits the Authelia-gating detail.",
+            "status_reason": "The recap does not convey the current standing of the project, which is slowing down according to the context."
+          }
+        },
+        {
+          "slug": "next-session",
+          "momentum": "active",
+          "recap": "Continuing dp-prod performance and reliability improvements by verifying the CPU fix at the next early-PM-UTC peak.",
+          "composite": 1.0,
+          "dims": {
+            "describes_work": 1.0,
+            "concision": 1.0,
+            "faithfulness": 1.0,
+            "status_awareness": 1.0
+          },
+          "detail": {
+            "doc_meta_hits": [],
+            "n_sentences": 1,
+            "concision_flags": [],
+            "fabricated_numbers": [],
+            "judge_faithfulness_raw": 1.0,
+            "judge_ok": true,
+            "faithfulness_reason": "All claims are supported by the context.",
+            "status_reason": "The recap clearly indicates that the work is in progress and specifies the next step."
+          }
+        },
+        {
+          "slug": "app-blocks-arc-complete",
+          "momentum": "slowing",
+          "recap": "The App Blocks arc is fully shipped end-to-end.",
+          "composite": 1.0,
+          "dims": {
+            "describes_work": 1.0,
+            "concision": 1.0,
+            "faithfulness": 1.0,
+            "status_awareness": 1.0
+          },
+          "detail": {
+            "doc_meta_hits": [],
+            "n_sentences": 1,
+            "concision_flags": [],
+            "fabricated_numbers": [],
+            "judge_faithfulness_raw": 1.0,
+            "judge_ok": true,
+            "faithfulness_reason": "All claims are directly supported by the context.",
+            "status_reason": "The recap clearly states that the App Blocks arc is fully shipped, which aligns with the context."
+          }
+        },
+        {
+          "slug": "remix-templates",
+          "momentum": "slowing",
+          "recap": "Develop user-selectable render templates for the remix video app, allowing multi-clip layouts and transitions.",
+          "composite": 0.7999999999999999,
+          "dims": {
+            "describes_work": 1.0,
+            "concision": 1.0,
+            "faithfulness": 1.0,
+            "status_awareness": 0.0
+          },
+          "detail": {
+            "doc_meta_hits": [],
+            "n_sentences": 1,
+            "concision_flags": [],
+            "fabricated_numbers": [],
+            "judge_faithfulness_raw": 1.0,
+            "judge_ok": true,
+            "faithfulness_reason": "All claims are directly supported by the context.",
+            "status_reason": "The recap does not indicate that the work is in progress or any other status."
+          }
+        },
+        {
+          "slug": "initiatives-consolidation",
+          "momentum": "active",
+          "recap": "Consolidate the on-demand initiative-scan.py output into a durable, queryable database, with ongoing work on Phase 1 and addressing aged-out initiatives.",
+          "composite": 1.0,
+          "dims": {
+            "describes_work": 1.0,
+            "concision": 1.0,
+            "faithfulness": 1.0,
+            "status_awareness": 1.0
+          },
+          "detail": {
+            "doc_meta_hits": [],
+            "n_sentences": 1,
+            "concision_flags": [],
+            "fabricated_numbers": [],
+            "judge_faithfulness_raw": 1.0,
+            "judge_ok": true,
+            "faithfulness_reason": "All claims are directly supported by the context.",
+            "status_reason": "The recap accurately reflects the current standing as work continues on Phase 1 and addresses an open investigation."
+          }
+        },
+        {
+          "slug": "clawgate-chat-polish",
+          "momentum": "active",
+          "recap": "Continue the clawgate soak phase, polish the agent-chat UX, and address e2e suite flakes while resisting new loop features.",
+          "composite": 1.0,
+          "dims": {
+            "describes_work": 1.0,
+            "concision": 1.0,
+            "faithfulness": 1.0,
+            "status_awareness": 1.0
+          },
+          "detail": {
+            "doc_meta_hits": [],
+            "n_sentences": 1,
+            "concision_flags": [],
+            "fabricated_numbers": [],
+            "judge_faithfulness_raw": 1.0,
+            "judge_ok": true,
+            "faithfulness_reason": "All claims are directly supported by the context.",
+            "status_reason": "Clearly conveys that the work is in progress and specifies the current tasks and next steps."
+          }
+        },
+        {
+          "slug": "dp-prod-rightsizing-node-drain",
+          "momentum": "stalled",
+          "recap": "Drain a web node to free up CPU request headroom and allow one of the 5 fixed web nodes to be reclaimed, achieving the original rightsizing goal.",
+          "composite": 1.0,
+          "dims": {
+            "describes_work": 1.0,
+            "concision": 1.0,
+            "faithfulness": 1.0,
+            "status_awareness": 1.0
+          },
+          "detail": {
+            "doc_meta_hits": [],
+            "n_sentences": 1,
+            "concision_flags": [],
+            "fabricated_numbers": [],
+            "judge_faithfulness_raw": 1.0,
+            "judge_ok": true,
+            "faithfulness_reason": "All claims are directly supported by the context.",
+            "status_reason": "Clearly conveys that the work is in progress towards the original rightsizing goal."
+          }
+        }
+      ]
+    }
+  ]
+}
