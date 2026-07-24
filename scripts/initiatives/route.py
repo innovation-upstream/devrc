@@ -151,6 +151,7 @@ def rank_matches(signal_text: str, initiatives: list[dict],
     scan = _scan()
     text_tokens = scan.text_tokens
     slug_tokens = scan.slug_tokens
+    fingerprint = scan.initiative_fingerprint
 
     signal_toks = set(text_tokens(signal_text or ""))
 
@@ -171,7 +172,10 @@ def rank_matches(signal_text: str, initiatives: list[dict],
 
     results: list[dict] = []
     for ini in candidates:
-        slug_t = set(slug_tokens(ini.get("slug", "") or ""))
+        # Fingerprint = slug tokens, or TITLE tokens for a date-only/degenerate slug
+        # (initiative_fingerprint) — so a bare-date initiative in the store isn't
+        # structurally unroutable. Strictly additive; a real slug is unchanged.
+        slug_t = set(fingerprint(ini))
         title_t = set(text_tokens(ini.get("title") or ""))
         slug_hits = signal_toks & slug_t
         title_hits = signal_toks & (title_t - slug_t)
@@ -194,12 +198,15 @@ def rank_matches(signal_text: str, initiatives: list[dict],
             "confident": confident,
         })
 
-    # Rank: confident first, then the same tie-breaks best_title_match uses
+    # Rank: confident first, then the same tie-breaks best_title_match uses — a
+    # real-SLUG fingerprint outranks a date-only TITLE fallback, then
     # (slug_overlap, title_overlap, slug length, slug lexical) — so the top confident
     # row is exactly what best_title_match would have returned for this signal.
+    def _real_slug(slug: str | None) -> int:
+        return 1 if slug_tokens(slug or "") else 0
     results.sort(
-        key=lambda r: (r["confident"], r["slug_overlap"], r["title_overlap"],
-                       len(r["slug"] or ""), r["slug"] or ""),
+        key=lambda r: (r["confident"], _real_slug(r["slug"]), r["slug_overlap"],
+                       r["title_overlap"], len(r["slug"] or ""), r["slug"] or ""),
         reverse=True,
     )
     if limit is not None and limit >= 0:
