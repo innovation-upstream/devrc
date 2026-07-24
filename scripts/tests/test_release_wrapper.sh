@@ -3,6 +3,15 @@
 # Extracts just the `_release_run` synchronous core (between the marker comments)
 # and drives it with fake `git`/`npm`/`notify-send` binaries on $PATH, asserting
 # ordering + arguments via a shared order-log the stubs append to.
+#
+# NOT unit-tested here (inherently environment-bound, verified by reading the
+# code + `zsh -n`): the `/dev/tty` completion write and the `</dev/null &!`
+# stdin-detached backgrounding in `release` — both need a real controlling tty /
+# job-control shell. What IS covered: the civitai-repo guard, fetch→release
+# ordering, the low/critical notify branches (proving the failure branch is
+# taken and carries the rc), the concurrency lock (a second concurrent run
+# refuses without calling npm), and that the lock is released after a run so a
+# later run proceeds.
 #   run: bash scripts/tests/test_release_wrapper.sh
 set -uo pipefail
 
@@ -92,6 +101,32 @@ has      "npm was invoked"            "$OUT" "npm run release"
 contains "critical-urgency notify"   "$OUT" "notify -u critical"
 contains "notify mentions rc=3"       "$OUT" "rc=3"
 lacks    "low notify NOT fired on failure" "$OUT" "notify -u low ✅ civitai release complete"
+
+# lock dir lives beside the log (default: $HOME/.cache/civitai-release/.lock)
+LOCK="$HOME/.cache/civitai-release/.lock"
+
+echo "== case 4: lock is released after a run (cases 2/3 already ran) =="
+[ ! -d "$LOCK" ] && pass "lock not held after a completed run" || fail "lock leaked after run: $LOCK"
+
+echo "== case 5: lock already held → refuses, never calls npm =="
+reset_log
+export FAKE_REPO_ROOT="$SANDBOX/civitai"
+mkdir -p "$LOCK"   # simulate a concurrent release holding the lock
+NPM_RC=0 _release_run >/dev/null 2>&1; rc=$?
+[ "$rc" -ne 0 ] && pass "returns non-zero when lock is held" || fail "returns non-zero when lock is held (got $rc)"
+OUT=$(cat "$ORDER_LOG")
+lacks "npm not invoked while lock held" "$OUT" "npm run release"
+[ -d "$LOCK" ] && pass "pre-existing lock left intact (not stolen)" || fail "pre-existing lock was removed"
+rmdir "$LOCK" 2>/dev/null
+
+echo "== case 6: after the lock is freed, a subsequent run proceeds =="
+reset_log
+export FAKE_REPO_ROOT="$SANDBOX/civitai"
+NPM_RC=0 _release_run >/dev/null 2>&1; rc=$?
+[ "$rc" -eq 0 ] && pass "run proceeds once lock is free" || fail "run proceeds once lock is free (got $rc)"
+OUT=$(cat "$ORDER_LOG")
+has "npm invoked on the follow-up run" "$OUT" "npm run release"
+[ ! -d "$LOCK" ] && pass "lock released again after follow-up run" || fail "lock leaked after follow-up run"
 
 echo
 if [ "$FAIL" -eq 0 ]; then echo "ALL PASS"; exit 0; else echo "FAILURES"; exit 1; fi
