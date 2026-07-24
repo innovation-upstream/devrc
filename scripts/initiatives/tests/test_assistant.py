@@ -15,9 +15,23 @@ import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import assistant  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _capture_log(monkeypatch):
+    """Neutralize the audit-log DB writer for EVERY test in this file: capture the rows in
+    a list instead of opening a kubectl port-forward (keeps the suite hermetic + fast, and
+    lets the logging tests assert on what was written). `ask()` routes to the module-level
+    `_write_log_row` when no `log_writer` is injected, so patching it here covers all asks."""
+    rows: list[dict] = []
+    monkeypatch.setattr(assistant, "_write_log_row",
+                        lambda row, **_kw: rows.append(row))
+    return rows
 
 
 # --------------------------------------------------------------------------- #
@@ -399,3 +413,139 @@ def test_default_client_none_when_model_unconfigured():
 def test_default_client_none_on_placeholder_model():
     recap = assistant._recap()
     assert assistant._default_client({"RECAP_MODEL": recap.RECAP_MODEL}) is None
+
+
+# --------------------------------------------------------------------------- #
+# Audit logging — every ask writes one row, best-effort, without breaking the answer.
+# --------------------------------------------------------------------------- #
+def test_ask_writes_audit_log_row_with_correct_fields(_capture_log):
+    client = _FakeClient(synth="clawgate-agent-loop and taxes-archiver await you.")
+    res = assistant.ask("what's blocked on me?", views=VIEWS, unmatched=UNMATCHED,
+                        client=client)
+    assert len(_capture_log) == 1
+    row = _capture_log[0]
+    assert row["question"] == "what's blocked on me?"
+    assert row["intent"] == "blocked_on_me"
+    assert row["answer"] == res["answer"]
+    assert {s["slug"] for s in row["sources"]} == {"clawgate-agent-loop", "taxes-archiver"}
+    assert row["used_model"] is True            # the fake client phrased the answer
+    assert row["model"] is None                 # no RECAP_MODEL configured in the sandbox
+    assert isinstance(row["latency_ms"], int) and row["latency_ms"] >= 0
+    assert row["host"]                          # a host tag is always present
+
+
+def test_ask_log_records_intent_target_for_status_of(_capture_log):
+    client = _FakeClient(synth="clawgate is awaiting the go-ahead")
+    assistant.ask("status of clawgate", views=VIEWS, client=client)
+    row = _capture_log[-1]
+    assert row["intent"] == "status_of"
+    assert row["target"] == "clawgate"
+
+
+def test_ask_log_used_model_false_on_deterministic_answer(_capture_log):
+    assistant.ask("what's blocked on me?", views=VIEWS, client=None,
+                  client_factory=lambda: None)
+    assert _capture_log[-1]["used_model"] is False
+
+
+def test_ask_empty_question_is_not_logged(_capture_log):
+    assistant.ask("   ", views=VIEWS)
+    assert _capture_log == []                    # a degenerate ask records nothing
+
+
+def test_ask_answer_intact_when_log_write_fails(monkeypatch):
+    # A DB/log failure must NEVER propagate or change the answer (best-effort, non-breaking).
+    def boom(row, **_kw):
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr(assistant, "_write_log_row", boom)
+    client = _FakeClient(synth="two things await you")
+    res = assistant.ask("what's blocked on me?", views=VIEWS, client=client)
+    assert res["ok"] is True
+    assert res["answer"] == "two things await you"
+    assert {s["slug"] for s in res["sources"]} == {"clawgate-agent-loop", "taxes-archiver"}
+
+
+def test_ask_uses_injected_log_writer_over_default(_capture_log):
+    captured = []
+    assistant.ask("what's stalled?", views=VIEWS, client=None,
+                  client_factory=lambda: None, log_writer=captured.append)
+    # the injected writer wins; the module default (fixture capture) is untouched
+    assert len(captured) == 1 and captured[0]["intent"] == "stalled"
+    assert _capture_log == []
+
+
+# --------------------------------------------------------------------------- #
+# The audit-log table DDL + creation (standalone, idempotent, no view bump).
+# --------------------------------------------------------------------------- #
+def test_assistant_log_ddl_is_idempotent():
+    ddl = assistant.ASSISTANT_LOG_DDL
+    assert "CREATE TABLE IF NOT EXISTS initiatives.assistant_log" in ddl
+    assert "CREATE SCHEMA IF NOT EXISTS initiatives" in ddl   # self-heal without the sync
+    for col in ("question", "intent", "target", "sources", "answer", "model",
+                "used_model", "latency_ms", "host"):
+        assert col in ddl
+
+
+def test_create_assistant_log_table_executes_ddl():
+    executed = []
+
+    class _Cur:
+        def execute(self, sql, params=None):
+            executed.append(sql)
+
+    assistant.create_assistant_log_table(_Cur())
+    assert any("initiatives.assistant_log" in s for s in executed)
+
+
+# --------------------------------------------------------------------------- #
+# Reading the audit log — the review subcommand.
+# --------------------------------------------------------------------------- #
+_LOG_ROW = {
+    "ts": datetime(2026, 7, 24, 12, 0, 0, tzinfo=timezone.utc),
+    "question": "what's blocked on me?", "intent": "blocked_on_me", "target": "",
+    "sources": [{"slug": "clawgate-agent-loop", "repo": "devrc"}],
+    "answer": "clawgate-agent-loop awaits you.", "model": None, "used_model": True,
+    "latency_ms": 42, "host": "workbench",
+}
+
+
+def test_format_log_renders_rows():
+    out = assistant.format_log([_LOG_ROW])
+    assert "blocked_on_me" in out
+    assert "what's blocked on me?" in out
+    assert "clawgate-agent-loop awaits you." in out
+    assert "clawgate-agent-loop" in out          # cited source slug
+    assert "model=yes" in out
+
+
+def test_format_log_empty():
+    assert "No assistant asks" in assistant.format_log([])
+
+
+def test_read_log_uses_injected_reader():
+    seen = {}
+
+    def reader(limit):
+        seen["limit"] = limit
+        return [_LOG_ROW]
+
+    rows = assistant.read_log(limit=5, reader=reader)
+    assert seen["limit"] == 5
+    assert rows[0]["question"] == "what's blocked on me?"
+
+
+def test_main_log_subcommand_reads_and_formats(monkeypatch, capsys):
+    monkeypatch.setattr(assistant, "_read_log_rows", lambda limit: [_LOG_ROW])
+    rc = assistant.main(["log"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "blocked_on_me" in out and "what's blocked on me?" in out
+
+
+def test_main_log_subcommand_json(monkeypatch, capsys):
+    monkeypatch.setattr(assistant, "_read_log_rows", lambda limit: [_LOG_ROW])
+    rc = assistant.main(["log", "--json"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert json.loads(out)[0]["intent"] == "blocked_on_me"
