@@ -813,36 +813,39 @@ footer .live{color:var(--green)}
 # PURE, DOM-FREE recency-bucketing logic — kept in its OWN snippet so the node test can
 # `eval` it standalone (SINGLE source of truth: `_JS` embeds this verbatim via the
 # __RECENCY_JS__ placeholder). Buckets an initiative's `last_touch` epoch into a recency
-# key relative to a supplied "now", both in MILLISECONDS, in the BROWSER's LOCAL timezone.
+# key relative to a supplied "now", both in MILLISECONDS.
 #
-# Boundaries (newest→oldest; all cutoffs are LOCAL midnights, so a card flips buckets the
-# instant local midnight passes — matching the "updated Xm ago" the card already shows):
-#   today      ts >= local-midnight-today
-#   yesterday  local-midnight-yesterday   <= ts < local-midnight-today
-#   week       local-midnight-7-days-ago  <= ts < local-midnight-yesterday   ("earlier this week")
-#   older      ts <  local-midnight-7-days-ago                               (> ~7 local days)
-#   unknown    ts is null / NaN                                              (guard; shouldn't happen)
-# Using `new Date(y, mo, d - n)` (LOCAL-calendar arithmetic) rather than subtracting fixed
-# 24h spans makes the cutoffs DST-safe — a midnight boundary can't drift an hour across a
-# spring-forward/fall-back transition. `bucketizeRecency` groups a PRE-FILTERED, ALREADY
-# last_touch-DESC-sorted view list into ordered, NON-EMPTY buckets, preserving input order
-# within each bucket (so within-bucket order stays newest-first) — the one unit the render
-# path and the node test both exercise.
+# Buckets are ROLLING now-relative windows on the AGE `now - last_touch` — each card lands
+# in the NARROWEST window its age falls into (newest→oldest):
+#   hour       age <  1h                             (Past hour)
+#   day        age <  24h    (i.e. 1h ≤ age < 24h)   (Past 24 hours)
+#   three_days age <  72h                            (Past 3 days)
+#   week       age <  7d                             (Past week)
+#   older      age >= 7d                             (Older)
+#   unknown    ts is null / NaN                      (guard; shouldn't happen)
+# Rolling windows are pure DURATION math (`now - ts` vs fixed spans), so — unlike the old
+# calendar/local-midnight scheme — they are timezone- AND DST-independent: no local-midnight
+# or `new Date(y,mo,d-n)` arithmetic is needed, and the same age buckets identically in every
+# viewer's tz. `bucketizeRecency` groups a PRE-FILTERED, ALREADY last_touch-DESC-sorted view
+# list into ordered, NON-EMPTY buckets, preserving input order within each bucket (so
+# within-bucket order stays newest-first) — the one unit the render path and node test exercise.
 _RECENCY_JS = r"""
+var HOUR_MS = 3600000, DAY_MS = 86400000;
 var RECENCY_BUCKETS = [
-  {key:'today',     label:'Today'},
-  {key:'yesterday', label:'Yesterday'},
-  {key:'week',      label:'Earlier this week'},
-  {key:'older',     label:'Older'},
-  {key:'unknown',   label:'Unknown'}
+  {key:'hour',       label:'Past hour'},
+  {key:'day',        label:'Past 24 hours'},
+  {key:'three_days', label:'Past 3 days'},
+  {key:'week',       label:'Past week'},
+  {key:'older',      label:'Older'},
+  {key:'unknown',    label:'Unknown'}
 ];
 function recencyBucketKey(tsMs, nowMs){
   if(tsMs == null || isNaN(tsMs)) return 'unknown';
-  var now = new Date(nowMs);
-  var y = now.getFullYear(), mo = now.getMonth(), d = now.getDate();
-  if(tsMs >= new Date(y, mo, d).getTime())     return 'today';
-  if(tsMs >= new Date(y, mo, d - 1).getTime()) return 'yesterday';
-  if(tsMs >= new Date(y, mo, d - 7).getTime()) return 'week';
+  var age = nowMs - tsMs;
+  if(age < HOUR_MS)      return 'hour';        // < 1h
+  if(age < 24 * HOUR_MS) return 'day';         // < 24h
+  if(age < 72 * HOUR_MS) return 'three_days';  // < 72h
+  if(age < 7 * DAY_MS)   return 'week';         // < 7d
   return 'older';
 }
 function parseLastTouch(raw){
@@ -884,13 +887,17 @@ _JS = r"""
   try { data = JSON.parse(el0.textContent); }
   catch(e){ data = {ok:false, error:'bad payload', repos:[], flat:[], live_unmatched:[]}; }
 
-  var VIEW_KEY = 'initiatives-view';
+  // v2 storage key: bumped from 'initiatives-view' when the default flipped flat→recency, so
+  // browsers that persisted the OLD default ('flat') under the v1 key start fresh on the new
+  // 'recency' default instead of being pinned to a stale stored 'flat'. (An explicit later
+  // choice is still remembered under the v2 key.)
+  var VIEW_KEY = 'initiatives-view-v2';
   var UNMATCHED_KEY = 'initiatives-unmatched-collapsed';
-  // 3-way view toggle: 'flat' (default) | 'grouped' (by repo) | 'recency' (by last_touch
-  // bucket, LOCAL tz). Persisted in localStorage; an unknown/legacy value falls back to flat.
+  // 3-way view toggle: 'recency' (by last_touch, DEFAULT) | 'flat' | 'grouped' (by repo).
+  // Persisted in localStorage; an unknown/legacy value falls back to the recency default.
   var VALID_VIEWS = {flat:1, grouped:1, recency:1};
   var storedView = localStorage.getItem(VIEW_KEY);
-  var state = { view: VALID_VIEWS[storedView] ? storedView : 'flat', q: '' };
+  var state = { view: VALID_VIEWS[storedView] ? storedView : 'recency', q: '' };
   // The catch-all "live sessions" section is collapsible; remember the user's choice.
   // Default EXPANDED (the whole point is to see every running thread) — set to '1' to collapse.
   var unmatchedCollapsed = localStorage.getItem(UNMATCHED_KEY) === '1';
@@ -1181,9 +1188,9 @@ _JS = r"""
       });
       app.appendChild(wrap);
     } else if(state.view === 'recency'){
-      // Group the (search-filtered) flat stream into LOCAL-tz recency buckets. `data.flat`
-      // is already last_touch-DESC, and bucketizeRecency preserves that order within each
-      // bucket, so cards stay newest-first per bucket. Empty buckets are omitted. Headers
+      // Group the (search-filtered) flat stream into rolling now-relative recency buckets.
+      // `data.flat` is already last_touch-DESC, and bucketizeRecency preserves that order within
+      // each bucket, so cards stay newest-first per bucket. Empty buckets are omitted. Headers
       // read like the repo-group headers (label + count) — same `.repo`/`.count` styling.
       var rviews = (data.flat || []).filter(function(v){ return matchQ(v, q); });
       bucketizeRecency(rviews, Date.now()).forEach(function(g){
