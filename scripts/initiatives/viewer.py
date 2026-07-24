@@ -200,18 +200,25 @@ def load_latest() -> list[dict]:
 
 def attach_recaps(conn, rows: list[dict]) -> bool:
     """Best-effort: LEFT-JOIN the standalone `initiatives.recaps` cache onto the loaded
-    rows by (repo, slug), setting each row's `recap` (None when absent). Kept OUT of the
-    `latest`/`current` views on purpose (recap is a per-(repo,slug) cache that persists
-    across snapshots, not a per-snapshot column) — so the viewer joins it here instead.
+    rows by (repo, slug), setting each row's `identity` / `status` (and the legacy `recap`,
+    None when absent). Kept OUT of the `latest`/`current` views on purpose (the recap cache
+    persists per-(repo,slug) across snapshots, not as a per-snapshot column) — so the viewer
+    joins it here instead. `identity` is the primary "what this is" line (fallback chain
+    identity → recap → summary); `status` is the secondary "current: …" line.
 
     Strictly additive + fail-soft: if the recaps table doesn't exist yet (Phase B not
-    deployed) or the read errors, every row simply keeps `recap=None` and the card falls
-    back to `summary`. A `to_regclass` guard + a rollback on error keep the connection
-    usable. Returns True if recaps were attached, False otherwise."""
+    deployed) or the read errors, every row simply keeps identity/status/recap=None and the
+    card falls back to `summary`. The identity/status columns may also be absent on a store
+    written by the pre-split code (before the additive ALTERs ran); we transparently fall
+    back to selecting just `recap` so an un-migrated store still renders its old recap. A
+    `to_regclass` guard + a rollback on error keep the connection usable. Returns True if
+    any recap fields were attached, False otherwise."""
     import psycopg2
     import psycopg2.extras
 
     for r in rows:
+        r.setdefault("identity", None)
+        r.setdefault("status", None)
         r.setdefault("recap", None)
     try:
         with conn.cursor() as cur:
@@ -219,18 +226,47 @@ def attach_recaps(conn, rows: list[dict]) -> bool:
             reg = cur.fetchone()
             if reg is None or reg[0] is None:
                 return False
-        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            cur.execute("SELECT repo, slug, recap FROM initiatives.recaps")
-            by_key = {(r["repo"], r["slug"]): r["recap"] for r in cur.fetchall()}
+        by_key = _read_recap_rows(conn)
     except psycopg2.Error:
         with contextlib.suppress(Exception):
             conn.rollback()
         return False
     for r in rows:
-        recap = by_key.get((r.get("repo"), r.get("slug")))
-        if recap:
-            r["recap"] = recap
+        rec = by_key.get((r.get("repo"), r.get("slug")))
+        if not rec:
+            continue
+        if rec.get("identity"):
+            r["identity"] = rec["identity"]
+        if rec.get("status"):
+            r["status"] = rec["status"]
+        if rec.get("recap"):
+            r["recap"] = rec["recap"]
     return True
+
+
+def _read_recap_rows(conn) -> dict:
+    """Read the recaps cache -> {(repo, slug): {"identity","status","recap"}}. Prefers the
+    identity/status columns (the split store); if they don't exist yet (pre-split store,
+    before the additive ALTERs ran) the SELECT errors, so we roll back and fall back to the
+    legacy `recap`-only shape (identity/status = None → viewer falls back to summary)."""
+    import psycopg2
+    import psycopg2.extras
+
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("SELECT repo, slug, identity, status, recap "
+                        "FROM initiatives.recaps")
+            return {(r["repo"], r["slug"]): {
+                "identity": r.get("identity"), "status": r.get("status"),
+                "recap": r.get("recap")} for r in cur.fetchall()}
+    except psycopg2.Error:
+        with contextlib.suppress(Exception):
+            conn.rollback()
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("SELECT repo, slug, recap FROM initiatives.recaps")
+            return {(r["repo"], r["slug"]): {
+                "identity": None, "status": None, "recap": r.get("recap")}
+                for r in cur.fetchall()}
 
 
 def attach_tmux(initiatives: list[dict]) -> list[dict]:
@@ -377,10 +413,16 @@ def _initiative_view(ini: dict, now: datetime) -> dict:
         "repo_name": _short_repo(repo),
         "title": ini.get("title") or "",
         "summary": (ini.get("summary") or "").strip(),
-        # The LLM recap (Phase B) — the primary "what this is" line on the card FACE, with
-        # `summary` as the fallback when no recap exists yet. From the standalone recaps
-        # cache, attached in load_latest; untrusted text (rendered via the JSON island +
+        # The LLM recap split (Phase B). `identity` = the STABLE "what this is" line
+        # (sourced from the handoff description, cached on the handoff hash — the primary
+        # card line); `status` = the VOLATILE "current: …" line (sourced from recent
+        # activity). Fallback chain for the primary line is identity → recap → summary, so
+        # a card is never blank during rollout. `recap` = the legacy single-field recap
+        # (identity mirror), kept for back-compat. All from the standalone recaps cache
+        # (attached in load_latest); untrusted text (rendered via the JSON island +
         # textContent, like everything else).
+        "identity": (ini.get("identity") or "").strip(),
+        "status": (ini.get("status") or "").strip(),
         "recap": (ini.get("recap") or "").strip(),
         "momentum": momentum,
         "momentum_rank": MOMENTUM_RANK.get(momentum, 9),
@@ -669,6 +711,11 @@ def build_detail(model: dict | None, error: str | None, repo: str, slug: str,
         "slug": view["slug"],
         "title": view["title"],
         "summary": view.get("summary") or "",
+        # The recap split flows through the detail endpoint too (from the view; the live
+        # handoff read below refreshes `summary`/`next_steps`, never identity/status).
+        "identity": view.get("identity") or "",
+        "status": view.get("status") or "",
+        "recap": view.get("recap") or "",
         "current_doc": view.get("current_doc") or "",
         "open_prs": view["open_prs"],
         "docs": view.get("docs") or [],
@@ -759,6 +806,8 @@ header .meta{color:var(--gray);font-size:.85rem}
   padding:.02rem .4rem}
 .age{color:var(--gray);font-size:.82rem;margin-left:auto}
 .summary{margin-top:.3rem;color:var(--fg);font-size:.86rem}
+.status{margin-top:.2rem;color:var(--fg2);font-size:.84rem}
+.status .lbl{color:var(--yellow);margin-right:.2rem}
 .msg{margin-top:.3rem;color:var(--fg);font-size:.86rem;
   white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .msg .lbl{color:var(--aqua);margin-right:.2rem}
@@ -921,8 +970,9 @@ _JS = r"""
     // Search the FULL recent-message list (not just the face line) so a card is findable
     // by any of its prompts, even the ones filtered off the face.
     var msg = (v.recent_messages || []).map(function(m){ return (m && m.text) || ''; }).join(' ');
-    var hay = ((v.slug||'') + ' ' + (v.title||'') + ' ' + (v.recap||'') + ' ' +
-               (v.summary||'') + ' ' + (v.repo_name||'') + ' ' + (v.momentum||'') + ' ' +
+    var hay = ((v.slug||'') + ' ' + (v.title||'') + ' ' + (v.identity||'') + ' ' +
+               (v.status||'') + ' ' + (v.recap||'') + ' ' + (v.summary||'') + ' ' +
+               (v.repo_name||'') + ' ' + (v.momentum||'') + ' ' +
                msg + ' ' + (v.live_task||'')).toLowerCase();
     return hay.indexOf(q) !== -1;
   }
@@ -940,7 +990,17 @@ _JS = r"""
       det.appendChild(el('div', 'detail-err', (d && d.error) || 'detail unavailable'));
       return;
     }
-    if(d.summary) det.appendChild(el('div', 'detail-summary', d.summary));
+    // Lead with the STABLE identity ("what this is"), falling back to the (possibly
+    // live-refreshed) handoff summary; then the VOLATILE status ("current: …") beneath it.
+    var lead = d.identity || (v && v.identity) || d.summary;
+    if(lead) det.appendChild(el('div', 'detail-summary', lead));
+    var dstatus = d.status || (v && v.status) || '';
+    if(dstatus){
+      var stx = el('div', 'status');
+      stx.appendChild(el('span', 'lbl', 'current ›'));
+      stx.appendChild(document.createTextNode(' ' + dstatus));
+      det.appendChild(stx);
+    }
     var dtasks = (d.live_tasks && d.live_tasks.length) ? d.live_tasks
                  : (d.live_task ? [d.live_task] : []);
     if(dtasks.length){
@@ -1028,10 +1088,22 @@ _JS = r"""
     row1.appendChild(el('span', 'age', 'updated ' + v.age + ' ago'));
     c.appendChild(row1);
 
-    // The primary "what this is" line: the LLM recap when present, else the deterministic
-    // handoff summary (never blank when either exists). textContent-only via el().
-    var primary = v.recap || v.summary;
+    // The primary "what this is" line: the STABLE identity recap when present, else the
+    // legacy single recap, else the deterministic handoff summary (fallback chain
+    // identity → recap → summary, so a card is never blank during rollout). textContent
+    // only via el().
+    var primary = v.identity || v.recap || v.summary;
     if(primary) c.appendChild(el('div', 'summary', primary));
+
+    // The secondary "current: …" line: the VOLATILE status recap (what's in progress /
+    // recently done / blocked). Omitted when empty. Sits directly under the identity line
+    // so "what it is" reads first, "what's happening now" second. textContent-only.
+    if(v.status){
+      var st = el('div', 'status');
+      st.appendChild(el('span', 'lbl', 'current ›'));
+      st.appendChild(document.createTextNode(' ' + v.status));
+      c.appendChild(st);
+    }
 
     // The user's own most-recent SUBSTANTIVE prompt — the highest-signal "what is this"
     // line (summary + latest message read well together). `face_message` skips low-signal

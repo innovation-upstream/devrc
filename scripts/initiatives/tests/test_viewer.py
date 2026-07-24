@@ -708,25 +708,39 @@ def test_model_to_json_flat_includes_recent_fields():
     assert v["recent_commits"] == ["c"]
 
 
-# --- Phase B: LLM recap as the primary "what this is" line ------------------- #
-def test_view_carries_recap_and_defaults_empty():
-    v = viewer.build_model([_row(slug="s", recap="A one-line plain recap.")],
-                           now=NOW)["flat"][0]
-    assert v["recap"] == "A one-line plain recap."
-    # absent recap normalizes to "" (so the JS `v.recap || v.summary` falls back cleanly)
+# --- Phase B: identity (primary) + status (secondary) recap split ----------- #
+def test_view_carries_identity_status_recap_and_defaults_empty():
+    v = viewer.build_model(
+        [_row(slug="s", identity="A durable Postgres store for the initiatives ledger.",
+              status="finishing the recap identity/status split.",
+              recap="legacy recap line")],
+        now=NOW)["flat"][0]
+    assert v["identity"] == "A durable Postgres store for the initiatives ledger."
+    assert v["status"] == "finishing the recap identity/status split."
+    assert v["recap"] == "legacy recap line"
+    # all three normalize to "" when absent (so the JS fallback chain is clean)
     v2 = viewer.build_model([_row(slug="s2")], now=NOW)["flat"][0]
-    assert v2["recap"] == ""
+    assert v2["identity"] == "" and v2["status"] == "" and v2["recap"] == ""
 
 
-def test_model_to_json_flat_includes_recap():
+def test_model_to_json_flat_includes_identity_and_status():
     j = viewer.model_to_json(
-        viewer.build_model([_row(slug="a", recap="the recap")], now=NOW), None)
-    assert j["flat"][0]["recap"] == "the recap"
+        viewer.build_model([_row(slug="a", identity="what it is", status="what's now")],
+                           now=NOW), None)
+    assert j["flat"][0]["identity"] == "what it is"
+    assert j["flat"][0]["status"] == "what's now"
 
 
-def test_js_uses_recap_as_primary_line_with_summary_fallback():
-    # The card FACE prefers the recap and falls back to the deterministic summary.
-    assert "v.recap || v.summary" in viewer._JS
+def test_js_uses_identity_recap_summary_fallback_chain_for_primary():
+    # The card FACE primary line prefers identity, then the legacy recap, then summary.
+    assert "v.identity || v.recap || v.summary" in viewer._JS
+
+
+def test_js_renders_status_as_secondary_current_line():
+    # A dedicated secondary "current ›" line, gated on v.status (omitted when empty).
+    assert "if(v.status){" in viewer._JS
+    assert "current ›" in viewer._JS
+    assert ".status .lbl" in viewer._CSS
 
 
 def test_js_stat_strip_is_removed():
@@ -739,29 +753,51 @@ def test_js_stat_strip_is_removed():
     assert ".tag.stat" not in viewer._CSS
 
 
-def test_render_html_embeds_recap_when_present():
-    rows = [_row(slug="s", recap="A homelab-served recap of where this stands.",
+def test_render_html_leads_with_identity_and_shows_status():
+    rows = [_row(slug="s",
+                 identity="A homelab-served recap of what this fundamentally is.",
+                 status="currently blocked on the vLLM endpoint.",
                  summary="the deterministic summary")]
     html = viewer.render_html(viewer.build_model(rows, now=NOW))
-    assert "A homelab-served recap of where this stands." in html   # recap in the payload
-    # the JS selection (recap-over-summary) is present in the page
-    assert "v.recap || v.summary" in html
+    assert "A homelab-served recap of what this fundamentally is." in html  # identity
+    assert "currently blocked on the vLLM endpoint." in html                # status
+    assert "v.identity || v.recap || v.summary" in html                     # fallback chain
 
 
-def test_render_html_falls_back_to_summary_when_no_recap():
+def test_render_html_falls_back_to_summary_when_no_identity_or_recap():
     rows = [_row(slug="s", summary="deterministic summary fallback line")]
     html = viewer.render_html(viewer.build_model(rows, now=NOW))
     assert "deterministic summary fallback line" in html   # summary still embedded
-    # recap key present-but-empty in the payload (never breaks the fallback)
+    # identity/status/recap keys present-but-empty (never breaks the fallback)
     j = viewer.model_to_json(viewer.build_model(rows, now=NOW), None)
-    assert j["flat"][0]["recap"] == ""
+    v = j["flat"][0]
+    assert v["identity"] == "" and v["status"] == "" and v["recap"] == ""
 
 
-def test_render_html_neutralizes_untrusted_recap_text():
-    rows = [_row(slug="s", recap="<script>alert('recap')</script>")]
+def test_render_html_neutralizes_untrusted_identity_and_status_text():
+    rows = [_row(slug="s", identity="<script>alert('id')</script>",
+                 status="<script>alert('st')</script>")]
     html = viewer.render_html(viewer.build_model(rows, now=NOW))
-    assert "<script>alert('recap')</script>" not in html   # never raw
-    assert "u003cscript" in html                            # neutralized as <
+    assert "<script>alert('id')</script>" not in html   # never raw
+    assert "<script>alert('st')</script>" not in html
+    assert "u003cscript" in html                         # neutralized as <
+
+
+def test_regression_remix_identity_is_platform_status_carries_cloudflare():
+    # The remix case: the LLM identity (from the handoff) is about the video-remix
+    # platform; the tangential "cloudflare" workstream lives ONLY in status. The card's
+    # PRIMARY line is the platform identity; cloudflare never appears in the primary.
+    rows = [_row(
+        slug="remix-session",
+        identity="A video-remix platform where users explore, stash, and render clips.",
+        status="reducing cloudflare reliance in the render pipeline.",
+        summary="Active development focusing on cloudflare reliance.")]
+    v = viewer.build_model(rows, now=NOW)["flat"][0]
+    # primary line (identity) is the platform; cloudflare is NOT in it
+    assert "video-remix platform" in v["identity"]
+    assert "cloudflare" not in v["identity"].lower()
+    # cloudflare only appears in the (secondary) status line
+    assert "cloudflare" in v["status"].lower()
 
 
 # --- attach_recaps (I/O: LEFT-JOIN the standalone recaps cache) -------------- #
@@ -804,32 +840,54 @@ class _RecapConn:
         self.rollbacks += 1
 
 
-def test_attach_recaps_joins_by_repo_slug():
+def test_attach_recaps_joins_identity_status_and_recap():
     rows = [{"repo": "/r", "slug": "a"}, {"repo": "/r", "slug": "b"}]
     conn = _RecapConn(recap_rows=[
-        {"repo": "/r", "slug": "a", "recap": "recap for a"},
-        {"repo": "/r", "slug": "b", "recap": None},   # a row with no recap yet
+        {"repo": "/r", "slug": "a", "identity": "what a is",
+         "status": "a in progress", "recap": "legacy a"},
+        {"repo": "/r", "slug": "b", "identity": None,
+         "status": None, "recap": None},   # a row with nothing generated yet
     ])
     ok = viewer.attach_recaps(conn, rows)
     assert ok is True
-    assert rows[0]["recap"] == "recap for a"
-    assert rows[1]["recap"] is None   # NULL recap → stays None (card falls back to summary)
+    assert rows[0]["identity"] == "what a is"
+    assert rows[0]["status"] == "a in progress"
+    assert rows[0]["recap"] == "legacy a"
+    # NULLs stay None → card falls back to summary / omits status
+    assert rows[1]["identity"] is None and rows[1]["status"] is None
 
 
-def test_attach_recaps_absent_table_leaves_recap_none():
+def test_attach_recaps_absent_table_leaves_fields_none():
     rows = [{"repo": "/r", "slug": "a"}]
     conn = _RecapConn(regclass=None)   # to_regclass → NULL (table not created yet)
     ok = viewer.attach_recaps(conn, rows)
     assert ok is False
+    assert rows[0]["identity"] is None and rows[0]["status"] is None
     assert rows[0]["recap"] is None    # never blank/missing → fallback to summary works
 
 
-def test_attach_recaps_db_error_rolls_back_and_is_fail_soft():
+def test_attach_recaps_falls_back_to_legacy_recap_only_schema():
+    # A store written by the PRE-SPLIT code has no identity/status columns: the primary
+    # SELECT errors, and attach transparently falls back to selecting just `recap`.
     rows = [{"repo": "/r", "slug": "a"}]
-    conn = _RecapConn(raise_on="SELECT repo, slug, recap")
+    conn = _RecapConn(
+        raise_on="SELECT repo, slug, identity, status, recap",
+        recap_rows=[{"repo": "/r", "slug": "a", "recap": "old-schema recap"}])
+    ok = viewer.attach_recaps(conn, rows)
+    assert ok is True
+    assert rows[0]["recap"] == "old-schema recap"   # legacy recap still shown
+    assert rows[0]["identity"] is None and rows[0]["status"] is None
+    assert conn.rollbacks == 1                        # rolled back before the fallback
+
+
+def test_attach_recaps_db_error_rolls_back_and_is_fail_soft():
+    # BOTH selects fail (table unreadable entirely) → fail-soft, all fields None.
+    rows = [{"repo": "/r", "slug": "a"}]
+    conn = _RecapConn(raise_on="FROM initiatives.recaps")
     ok = viewer.attach_recaps(conn, rows)
     assert ok is False
-    assert conn.rollbacks == 1
+    assert conn.rollbacks >= 1
+    assert rows[0]["identity"] is None and rows[0]["status"] is None
     assert rows[0]["recap"] is None
 
 
