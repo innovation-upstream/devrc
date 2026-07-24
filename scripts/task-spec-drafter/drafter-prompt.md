@@ -73,6 +73,22 @@ other tickets may be referenced for CORRELATE but are not yours to classify here
 
 ## Tooling available
 
+- **`ticket-status` — the DETERMINISTIC prior-art / merge-status probe (USE THIS
+  FIRST).** A fixed, allowlisted wrapper that answers "is this ticket already done
+  / where does it live / is it merged to trunk?" deterministically, with NO
+  hand-rolled git. It runs the ticket-id commit-convention search (`CU <id>`), the
+  merged-to-trunk check, branch/PR lookups, and a freshness `git fetch` for you,
+  and emits JSON: `{verdict: ALREADY-DONE|PARTIAL|NOT-FOUND, prior_art:[…],
+  prs:[…], branches:[…], clone_fresh, behind_trunk, evidence:[…]}`. Run it as the
+  FIRST verification step and **prefer its JSON verdict over hand-rolling
+  `git log`/`merge-base`/`gh` yourself**:
+
+      /home/zach/workspace/devrc/scripts/task-spec-drafter/ticket-status <ticket-id>
+
+  (single verb, absolute path, obeys the command-shape contract). Optionally pass a
+  few plain keyword terms after the id. It only READS + fetches the civitai origin;
+  it makes no writes. Fall back to the raw git verbs below only to dig deeper into a
+  commit `ticket-status` surfaced.
 - **ClickUp** via the `clickup` skill CLI (read-only here):
   `node /home/zach/.claude/skills/clickup/query.mjs get <id>` (full body, status,
   dates, assignees, links) and `... comments <id> --threads` (ALL comments).
@@ -104,8 +120,11 @@ have crashed Meilisearch).
    created date + last-activity (compute AGE in days) + assignees + any linked
    tickets/PRs/URLs. Never reason from the title alone.
 2. **VERIFY current state** — cross-check vs reality on the axes that apply:
-   - *Already fixed?* search civitai git log / PRs for the referenced behavior;
-     if a merged PR addresses it, note the PR # + merge date.
+   - *Already fixed?* **Run `ticket-status <ticket-id>` FIRST** and read its
+     `verdict` + `prior_art`/`prs` — that is the deterministic answer to "already
+     done / merged to trunk?" (prefer it over hand-rolled `git log`/`gh`). Only
+     dig into a specific commit with the raw git verbs if you need more than it
+     surfaced; if a merged PR addresses it, note the PR # + merge date.
    - *Still happening?* check live metrics/alerts — is the alert still firing, is
      the bad behavior still observable?
    - *Intentionally off / constrained?* check whether the component is suspended,

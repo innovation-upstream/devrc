@@ -106,7 +106,16 @@ API_URL="${CLAWGATE_API_URL:-http://192.168.50.250:30302}"
 HOOK_TOKEN="${CLAWGATE_HOOK_TOKEN:-}"
 HOST="${CLAUDE_HOST:-$(hostname 2>/dev/null || echo unknown)}"
 
-CIVITAI_REPO="${CIVITAI_REPO:-/home/zach/workspace/civit/civitai}"
+# Exported so the deterministic `ticket-status` wrapper (invoked by the pass)
+# scopes its git -C to the SAME configured repo as the rest of the pipeline.
+export CIVITAI_REPO="${CIVITAI_REPO:-/home/zach/workspace/civit/civitai}"
+# SECURITY: PIN the wrapper's repo on the drafter path. The pass auto-runs
+# ticket-status over UNTRUSTED ticket text with no --permission-mode plan, so
+# injected content could otherwise ride in a `--repo <planted-checkout>` option —
+# which is RCE (the planted repo's own git config execs on `git fetch`) and
+# cross-repo info-disclosure. With this lock set, the wrapper IGNORES any --repo
+# and uses only $CIVITAI_REPO, so no injected option can steer which repo it reads.
+export TICKET_STATUS_LOCK_REPO="$CIVITAI_REPO"
 PROD_KUBECONFIG="${PROD_KUBECONFIG:-/home/zach/workspace/civit/datapacket-talos/prod-kubeconfig}"
 
 # --- daily email digest (the SHADOW review surface) ------------------------
@@ -175,8 +184,18 @@ export REPO_COS_PROD_KUBECONFIG="${REPO_COS_PROD_KUBECONFIG:-$HOME/workspace/hom
 #    cannot be safely allowlisted — DROP it, don't narrow it. Its only use ("is X
 #    merged / on trunk?") is already covered by merge-base --is-ancestor /
 #    branch --contains / rev-list. Do NOT re-add it (test guards this).
+#
+# ✅ `ticket-status` (added 2026-07): the DETERMINISTIC prior-art/merge-status
+#    wrapper (this dir's `ticket-status`). It replaces the hand-rolled ticket→code
+#    prior-art + merge search the pass ran on EVERY ticket (44+22 sessions of toil,
+#    and the driver behind the permission-block storm + the RCE-prone ls-remote
+#    allowlist expansion above). The entry pins the wrapper's FIXED absolute path
+#    (`$SELF_DIR/ticket-status*`) — because it is a fixed script, the pass cannot
+#    inject flags into git THROUGH it: the wrapper validates the (untrusted) ticket
+#    id + terms and controls exactly what git runs. This is the safe boundary the
+#    audit called for; prefer it over hand-rolled git in the prompt.
 # Override DRAFTER_ALLOWED_TOOLS via env ONLY with read-only verbs.
-DRAFTER_ALLOWED_TOOLS="${DRAFTER_ALLOWED_TOOLS:-Read,Glob,Grep,WebFetch,Bash(node *query.mjs get*),Bash(node *query.mjs comments*),Bash(node *query.mjs search*),Bash(git -C * log*),Bash(git -C * show*),Bash(git -C * diff*),Bash(git -C * grep*),Bash(git -C * branch --contains*),Bash(git -C * rev-parse*),Bash(git -C * rev-list*),Bash(git -C * merge-base*),Bash(git -C * for-each-ref*),Bash(git -C * symbolic-ref --short*),Bash(git -C * ls-files*),Bash(git -C * cat-file*),Bash(git log*),Bash(gh pr list*),Bash(gh pr view*),Bash(gh pr checks*),Bash(gh search*),Bash(kubectl get*),Bash(kubectl logs*),Bash(kubectl describe*),Bash(kubectl top*),Bash(grep*),Bash(rg*),Bash(jq*),Bash(cat*),Bash(echo*),Bash(date*)}"
+DRAFTER_ALLOWED_TOOLS="${DRAFTER_ALLOWED_TOOLS:-Read,Glob,Grep,WebFetch,Bash($SELF_DIR/ticket-status*),Bash(node *query.mjs get*),Bash(node *query.mjs comments*),Bash(node *query.mjs search*),Bash(git -C * log*),Bash(git -C * show*),Bash(git -C * diff*),Bash(git -C * grep*),Bash(git -C * branch --contains*),Bash(git -C * rev-parse*),Bash(git -C * rev-list*),Bash(git -C * merge-base*),Bash(git -C * for-each-ref*),Bash(git -C * symbolic-ref --short*),Bash(git -C * ls-files*),Bash(git -C * cat-file*),Bash(git log*),Bash(gh pr list*),Bash(gh pr view*),Bash(gh pr checks*),Bash(gh search*),Bash(kubectl get*),Bash(kubectl logs*),Bash(kubectl describe*),Bash(kubectl top*),Bash(grep*),Bash(rg*),Bash(jq*),Bash(cat*),Bash(echo*),Bash(date*)}"
 
 mkdir -p "$DRAFTER_OUT_DIR" 2>/dev/null || true
 # The delta-state file may live outside OUT_DIR (e.g. ~/.local/state/...); make
@@ -394,6 +413,7 @@ title: $TNAME
 current_status: $TSTATUS
 
 Environment for your tools:
+  TICKET_STATUS (run FIRST for prior-art/merge verdict): $SELF_DIR/ticket-status $TID
   CLICKUP_CLI: node $CLICKUP_CLI get $TID   |   node $CLICKUP_CLI comments $TID --threads
   CIVITAI_REPO: $CIVITAI_REPO
   PROD_KUBECONFIG: $PROD_KUBECONFIG
