@@ -864,6 +864,15 @@ in
         "ACTIVITY_HOST=workbench"
         "INITIATIVES_VIEWER_HOST=192.168.50.250"
         "INITIATIVES_VIEWER_PORT=8899"
+        # Local model for the read-only Q&A sidebar (POST /api/ask): the SAME homelab vLLM
+        # the recap generator uses (ns promptver, svc/vllm-recap:8000, served model "recap").
+        # The assistant opens/tears down a kubectl port-forward per ask; a model outage
+        # degrades to the deterministic answer, so this is best-effort.
+        "INITIATIVES_RECAP_ENABLED=1"
+        "RECAP_NAMESPACE=promptver"
+        "RECAP_SERVICE=svc/vllm-recap"
+        "RECAP_SERVICE_PORT=8000"
+        "RECAP_MODEL=recap"
         "HOME=%h"
       ];
       ExecStart = "${pkgs.bash}/bin/bash %h/workspace/devrc/scripts/initiatives/run-viewer.sh";
