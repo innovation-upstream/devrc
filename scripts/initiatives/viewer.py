@@ -233,27 +233,29 @@ def attach_recaps(conn, rows: list[dict]) -> bool:
     return True
 
 
-def attach_tmux(initiatives: list[dict]) -> bool:
-    """Attach live tmux sessions to each initiative (mutates `tmux_sessions`). Returns
-    True if the overlay was applied, False if absent (no tmux server / any failure).
+def attach_tmux(initiatives: list[dict]) -> list[dict]:
+    """Attach live tmux sessions to each initiative (mutates `tmux_sessions`/`tmux_tasks`)
+    and RETURN the list of live claude panes that matched NO initiative (each
+    `{"id", "title", "repo"}`) — the "everything else running" catch-all the board must
+    surface honestly. Returns `[]` if the overlay is absent (no tmux server / any failure).
 
     Reuses the scan's machinery verbatim: `collect_tmux_panes` reads THIS host's panes,
-    `match_tmux_to_initiatives` links each pane's title to an initiative in its repo. The
-    viewer must run ON the host whose tmux we want to see (that's where its systemd unit
-    lives). Fully best-effort — no tmux server, no scan import, any error → overlay simply
-    absent, never fatal."""
+    `match_tmux_to_initiatives` links each pane's title to an initiative in its repo AND
+    returns the unmatched claude panes (live work the ledger doesn't cover — a new thread
+    or a handoff not yet written). The viewer must run ON the host whose tmux we want to
+    see (that's where its systemd unit lives). Fully best-effort — no tmux server, no scan
+    import, any error → overlay absent + empty unmatched, never fatal."""
     try:
         scan = _scan()
         panes = scan.collect_tmux_panes()
         if not panes:
-            return False  # no tmux server on this host → overlay absent (not an error)
+            return []  # no tmux server on this host → overlay absent (not an error)
         repos = scan.discover_repos()
         wt_map = scan.worktree_canonical_map(repos)
         codenames = scan.load_scratch_codenames()
-        scan.match_tmux_to_initiatives(initiatives, panes, repos, wt_map, codenames)
-        return True
+        return scan.match_tmux_to_initiatives(initiatives, panes, repos, wt_map, codenames)
     except Exception:  # noqa: BLE001 - the overlay is a nicety, never a hard dependency
-        return False
+        return []
 
 
 # --------------------------------------------------------------------------- #
@@ -411,7 +413,12 @@ def _initiative_view(ini: dict, now: datetime) -> dict:
         # `recent_messages` above stays complete for the expand.
         "face_message": pick_face_message(recent_messages),
         "recent_commits": [str(x) for x in (ini.get("recent_commits") or [])],
+        # `live_task` = the first matched pane's task (kept for the detail endpoint +
+        # back-compat); `live_tasks` = ALL matched panes' tasks so an initiative hosting
+        # MORE than one live session shows every session's task (one line each), not just
+        # the first. Both derive from the same de-duped `tmux_tasks` overlay.
         "live_task": tmux_tasks[0] if tmux_tasks else "",
+        "live_tasks": tmux_tasks,
     }
 
 
@@ -422,14 +429,74 @@ def _flat_sort_key(v: dict):
     return (-ts, v["momentum_rank"], v["slug"])
 
 
-def build_model(rows: list[dict], now: datetime | None = None) -> dict:
+def _session_natural_key(sess_id: str) -> tuple:
+    """Order `<session>-<window>` ids naturally: '1','8-1','8-3','Pool2','Pool10'.
+
+    Mirrors the scan's `_tmux_session_sort_key` (peel a trailing `-<window>`, then split
+    the session into a non-digit prefix + numeric suffix so a numeric tail sorts by VALUE
+    and the window index tiebreaks). Kept LOCAL so `build_model` stays pure — no scan
+    import in the render transform (it is unit-tested with no scan / requests / psycopg2)."""
+    name = sess_id or ""
+    win = -1
+    session = name
+    mw = re.match(r"^(.*)-(\d+)$", name)
+    if mw:
+        session, win = mw.group(1), int(mw.group(2))
+    m = re.match(r"^(.*?)(\d*)$", session)
+    prefix = m.group(1) if m else session
+    num = int(m.group(2)) if (m and m.group(2)) else -1
+    return (prefix, num, win, name)
+
+
+def _unmatched_view(u: dict) -> dict:
+    """One unmatched live claude pane (`{"id","title","repo"}` from
+    `match_tmux_to_initiatives`) -> a flat, template-ready view dict. `repo` is the full
+    path (as the scan returns it, possibly None); `repo_name` is the short label used for
+    the grouped section header (matches the initiative cards' repo label)."""
+    repo = u.get("repo")
+    return {
+        "id": str(u.get("id") or "?"),
+        "title": (str(u.get("title") or "")).strip(),
+        "repo": repo or "",
+        "repo_name": _short_repo(repo),
+    }
+
+
+def build_live_unmatched(unmatched) -> list[dict]:
+    """PURE: the `match_tmux_to_initiatives` unmatched list -> the render model's
+    `live_unmatched`: de-duped (by id+title, like the CLI section) view dicts, sorted by
+    repo then natural session id so the page can group them by repo. A non-list input
+    (e.g. a fake tmux hook returning a bool, or None) yields `[]` — the section then
+    simply doesn't render."""
+    if not isinstance(unmatched, list):
+        return []
+    seen: set = set()
+    out: list[dict] = []
+    for u in unmatched:
+        if not isinstance(u, dict):
+            continue
+        v = _unmatched_view(u)
+        dedupe_key = (v["id"], v["title"])
+        if dedupe_key in seen:
+            continue
+        seen.add(dedupe_key)
+        out.append(v)
+    out.sort(key=lambda v: (v["repo_name"].lower(), _session_natural_key(v["id"])))
+    return out
+
+
+def build_model(rows: list[dict], now: datetime | None = None,
+                unmatched=None) -> dict:
     """PURE: store rows (+ any attached tmux) -> BOTH a grouped and a flat render model.
 
     `repos` groups initiatives by repo (within a repo: momentum then recency; repos
     ordered by their most-active initiative then name). `flat` is one stream of ALL
     initiatives ordered most-recently-active first (the default view; each card carries
-    a repo label). `captured_at` (the snapshot's freshness) drives the footer. An empty
-    row list yields an empty (but well-formed) model — never raises."""
+    a repo label). `live_unmatched` is the "everything else running" catch-all: live
+    claude panes that matched NO initiative (from `attach_tmux`), so the board shows ALL
+    running threads (the tagged initiatives + the uncovered sessions), not just the tagged
+    few. `captured_at` (the snapshot's freshness) drives the footer. An empty row list
+    yields an empty (but well-formed) model — never raises."""
     now = now or datetime.now(timezone.utc)
 
     # The snapshot freshness = the newest captured_at across the rows (they should all
@@ -459,6 +526,7 @@ def build_model(rows: list[dict], now: datetime | None = None) -> dict:
     repos.sort(key=lambda g: (g["best_rank"], g["name"]))
 
     flat = sorted(views, key=_flat_sort_key)
+    live_unmatched = build_live_unmatched(unmatched)
 
     return {
         "generated_at": now,
@@ -468,13 +536,15 @@ def build_model(rows: list[dict], now: datetime | None = None) -> dict:
         "repo_count": len(repos),
         "repos": repos,
         "flat": flat,
+        "live_unmatched": live_unmatched,
     }
 
 
 def model_to_json(model: dict | None, error: str | None) -> dict:
     """The `/api/initiatives.json` payload (datetimes isoformatted via json default=str)."""
     if error is not None or model is None:
-        return {"ok": False, "error": error or "no data", "repos": [], "flat": []}
+        return {"ok": False, "error": error or "no data", "repos": [], "flat": [],
+                "live_unmatched": []}
     return {
         "ok": True,
         "generated_at": model["generated_at"],
@@ -484,6 +554,7 @@ def model_to_json(model: dict | None, error: str | None) -> dict:
         "repo_count": model["repo_count"],
         "repos": model["repos"],
         "flat": model["flat"],
+        "live_unmatched": model.get("live_unmatched", []),
     }
 
 
@@ -608,6 +679,7 @@ def build_detail(model: dict | None, error: str | None, repo: str, slug: str,
         "recent_messages": view.get("recent_messages") or [],
         "recent_commits": view.get("recent_commits") or [],
         "live_task": view.get("live_task") or "",
+        "live_tasks": view.get("live_tasks") or [],
         "live": False,
     }
 
@@ -711,6 +783,24 @@ header .meta{color:var(--gray);font-size:.85rem}
 .detail-doc{color:var(--gray);font-size:.78rem;margin-top:.35rem;word-break:break-all}
 .detail-err{color:var(--red);font-size:.82rem}
 .empty{color:var(--gray);padding:2rem 0}
+/* "Live sessions — not tied to an initiative": the everything-else-running catch-all.
+   Visually SECONDARY to the initiatives (dimmer, denser) but scannable at 30+ rows. */
+.unmatched{margin:1.6rem 0 0;border-top:1px solid var(--bg2);padding-top:.8rem}
+.unmatched > h2{font-size:.9rem;margin:0;color:var(--fg2);cursor:pointer;
+  display:flex;align-items:baseline;gap:.4rem;user-select:none}
+.unmatched > h2:hover{color:var(--fg)}
+.unmatched > h2 .chev{color:var(--gray);font-size:.75rem;width:.8rem}
+.unmatched > h2 .count{color:var(--gray);font-weight:normal;font-size:.8rem}
+.unmatched > h2 .hint{color:var(--gray);font-weight:normal;font-size:.75rem;margin-left:.2rem}
+.unmatched-body{margin-top:.6rem}
+.u-repo{margin:0 0 .5rem}
+.u-repo > h3{font-size:.8rem;margin:0 0 .2rem;color:var(--aqua);font-weight:normal}
+.u-repo > h3 .count{color:var(--gray);margin-left:.35rem}
+.u-row{display:flex;align-items:baseline;gap:.5rem;padding:.05rem 0 .05rem .6rem;
+  font-size:.82rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.u-id{color:var(--green);flex:0 0 auto}
+.u-title{color:var(--fg2);overflow:hidden;text-overflow:ellipsis}
+.u-title.untitled{color:var(--gray);font-style:italic}
 .err{background:#442222;border:1px solid var(--red);color:var(--fg);
   padding:1rem;border-radius:4px}
 .err b{color:var(--red)}
@@ -729,11 +819,15 @@ _JS = r"""
   var el0 = document.getElementById('idata');
   var data;
   try { data = JSON.parse(el0.textContent); }
-  catch(e){ data = {ok:false, error:'bad payload', repos:[], flat:[]}; }
+  catch(e){ data = {ok:false, error:'bad payload', repos:[], flat:[], live_unmatched:[]}; }
 
   var VIEW_KEY = 'initiatives-view';
+  var UNMATCHED_KEY = 'initiatives-unmatched-collapsed';
   var state = { view: (localStorage.getItem(VIEW_KEY) === 'grouped') ? 'grouped' : 'flat',
                 q: '' };
+  // The catch-all "live sessions" section is collapsible; remember the user's choice.
+  // Default EXPANDED (the whole point is to see every running thread) — set to '1' to collapse.
+  var unmatchedCollapsed = localStorage.getItem(UNMATCHED_KEY) === '1';
   var expanded = {};     // key -> true
   var detailCache = {};  // key -> detail payload
 
@@ -773,9 +867,11 @@ _JS = r"""
       return;
     }
     if(d.summary) det.appendChild(el('div', 'detail-summary', d.summary));
-    if(d.live_task){
-      det.appendChild(el('div', 'detail-h', 'Live session'));
-      det.appendChild(el('div', 'detail-summary', d.live_task));
+    var dtasks = (d.live_tasks && d.live_tasks.length) ? d.live_tasks
+                 : (d.live_task ? [d.live_task] : []);
+    if(dtasks.length){
+      det.appendChild(el('div', 'detail-h', dtasks.length > 1 ? 'Live sessions' : 'Live session'));
+      dtasks.forEach(function(t){ det.appendChild(el('div', 'detail-summary', t)); });
     }
     var rmsgs = d.recent_messages || (v && v.recent_messages) || [];
     if(rmsgs.length){
@@ -873,13 +969,17 @@ _JS = r"""
       c.appendChild(m);
     }
 
-    // A live tmux session's task summary (render-time overlay), when one is open.
-    if(v.live_task){
+    // Live tmux session task summaries (render-time overlay). When an initiative hosts
+    // MORE than one live session, show EVERY session's task (one line each), not just the
+    // first — `live_tasks` is the full de-duped list (`live_task` is only its first item).
+    var ltasks = (v.live_tasks && v.live_tasks.length) ? v.live_tasks
+                 : (v.live_task ? [v.live_task] : []);
+    ltasks.forEach(function(task){
       var lt = el('div', 'live-task');
       lt.appendChild(el('span', 'lbl', 'live ›'));
-      lt.appendChild(document.createTextNode(' ' + v.live_task));
+      lt.appendChild(document.createTextNode(' ' + task));
       c.appendChild(lt);
-    }
+    });
 
     var tags = el('div', 'tags');
     (v.tmux_sessions || []).forEach(function(s){
@@ -925,11 +1025,69 @@ _JS = r"""
     return c;
   }
 
+  function matchUnmatched(u, q){
+    if(!q) return true;
+    var hay = ((u.id||'') + ' ' + (u.title||'') + ' ' + (u.repo_name||'')).toLowerCase();
+    return hay.indexOf(q) !== -1;
+  }
+
+  // The "everything else running" catch-all: live claude sessions that map to NO
+  // initiative. Grouped by repo, collapsible, visually secondary. Rendered BELOW the
+  // initiatives so the board honestly shows ALL running threads. Empty list → no section.
+  function renderUnmatched(q){
+    var rows = (data.live_unmatched || []).filter(function(u){ return matchUnmatched(u, q); });
+    if(!rows.length) return;  // nothing uncovered (or all filtered out) → no section
+
+    var sec = el('section', 'unmatched');
+    var h = el('h2');
+    h.appendChild(el('span', 'chev', unmatchedCollapsed ? '▸' : '▾'));
+    h.appendChild(document.createTextNode('Live sessions — not tied to an initiative'));
+    h.appendChild(el('span', 'count', '(' + rows.length + ')'));
+    h.appendChild(el('span', 'hint', 'open work the ledger doesn’t cover'));
+    sec.appendChild(h);
+
+    var body = el('div', 'unmatched-body');
+    body.style.display = unmatchedCollapsed ? 'none' : 'block';
+    // rows arrive pre-sorted by (repo, session) so same-repo runs are contiguous → group.
+    var curRepo = null, group = null;
+    rows.forEach(function(u){
+      var name = u.repo_name || '(unknown repo)';
+      if(name !== curRepo){
+        curRepo = name;
+        group = el('div', 'u-repo');
+        var rh = el('h3', null, name);
+        group.appendChild(rh);
+        body.appendChild(group);
+      }
+      var row = el('div', 'u-row');
+      row.appendChild(el('span', 'u-id', '[' + (u.id || '?') + ']'));
+      var title = (u.title || '').trim();
+      row.appendChild(el('span', 'u-title' + (title ? '' : ' untitled'),
+                         title || '(untitled)'));
+      group.appendChild(row);
+    });
+    sec.appendChild(body);
+
+    h.addEventListener('click', function(){
+      unmatchedCollapsed = !unmatchedCollapsed;
+      localStorage.setItem(UNMATCHED_KEY, unmatchedCollapsed ? '1' : '0');
+      body.style.display = unmatchedCollapsed ? 'none' : 'block';
+      sec.querySelector('.chev').textContent = unmatchedCollapsed ? '▸' : '▾';
+    });
+    app.appendChild(sec);
+  }
+
   function updateChrome(){
     btnFlat.classList.toggle('active', state.view === 'flat');
     btnGrouped.classList.toggle('active', state.view === 'grouped');
-    if(countEl) countEl.textContent =
-      (data.total || 0) + ' in flight across ' + (data.repo_count || 0) + ' repos';
+    if(countEl){
+      var txt = (data.total || 0) + ' in flight across ' + (data.repo_count || 0) + ' repos';
+      var nu = (data.live_unmatched || []).length;
+      // Surface the uncovered live sessions in the header so the board's honesty is visible
+      // at a glance (tagged initiatives + N untracked live threads).
+      if(nu) txt += ' · ' + nu + ' live session' + (nu === 1 ? '' : 's') + ' untracked';
+      countEl.textContent = txt;
+    }
     footer.innerHTML = '';
     footer.appendChild(el('span', 'live', 'live sessions ● realtime'));
     var age = data.captured_age ? (data.captured_age + ' ago') : 'unknown';
@@ -969,6 +1127,9 @@ _JS = r"""
         q ? ('No initiatives match "' + state.q + '".')
           : 'No initiatives in the latest snapshot.'));
     }
+    // The catch-all live-sessions section renders BELOW the initiatives (honestly showing
+    // every running thread, not just the tagged few). Respects the same search filter.
+    renderUnmatched(q);
     updateChrome();
   }
 
@@ -1210,8 +1371,11 @@ class DataProvider:
                 return self._cached
             try:
                 rows = self._loader()
-                self._tmux(rows)  # best-effort; mutates rows in place
-                result: tuple[dict | None, str | None] = (build_model(rows, self._now()), None)
+                # best-effort; mutates rows in place AND returns the live claude panes that
+                # matched no initiative (build_model coerces a non-list to [] → no section).
+                unmatched = self._tmux(rows)
+                result: tuple[dict | None, str | None] = (
+                    build_model(rows, self._now(), unmatched=unmatched), None)
             except Exception as exc:  # noqa: BLE001 - any read failure → graceful error page
                 result = (None, f"{type(exc).__name__}: {exc}")
             self._cached = result
