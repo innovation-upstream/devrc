@@ -1,0 +1,359 @@
+{
+  "source": "scan-days30.json",
+  "train": [
+    {
+      "slug": "spend-analytics",
+      "repo": "/home/zach/workspace/civit/datapacket-talos",
+      "momentum": "active",
+      "ctx": {
+        "momentum": "active",
+        "summary": "Turn the cloud-spend exporter into a spend + unit-economics/profitability layer on the Grafana Cloud Spend dashboard (/d/cloud-spend): cost per provider over time, spike/dip alerts, cost of paid vs…",
+        "next_step": "Cloudflare — awaiting the monthly $ figure from Zach. One-line manual StaticProvider add (CLOUDFLARE_MONTHLY_USD via sops set), like Submodel/OpenAI/Anthropic. No API (deprecated).",
+        "open_investigations": [],
+        "recent_messages": [
+          "check prs",
+          "month-to-date current is $3,855.43 USD",
+          "merge the PR, salad org: 'civitai'",
+          "1. skip valdi (retired), do salad (salad_cloud_user_2YCwSxYEYBGFXvW4jXFPd355HShv0YBgQoE3KZ5B5hl1yz31R)\n2. yes, dispatch\n3. yes, dispatch",
+          "1. skip valdi (retired), do salad\n2. yes, dispatch\n3. yes, dispatch"
+        ],
+        "recent_commits": [],
+        "open_prs": []
+      }
+    },
+    {
+      "slug": "app-blocks-ux",
+      "repo": "/home/zach/workspace/civit/datapacket-talos",
+      "momentum": "slowing",
+      "ctx": {
+        "momentum": "slowing",
+        "summary": "Polish the site-side /apps UX and clear the pre-GA gates, keeping everything dark/mod-gated and keeping apps-GA decoupled from payout-GA. Source-of-truth status doc:…",
+        "next_step": "Apps-GA decision (Zach/leadership). It's now decoupled from payout — apps can open ahead of payouts. The flip = un-draft #2707 (reward visible:true + drop /apps deIndex) + widen app-blocks-enabled (+app-blocks-pages-enabled) Flipt flags mod→public + site-wide blue=SFW. Security review DONE, flag-gate hydration DONE. Never auto-flip — leadership call.",
+        "open_investigations": [],
+        "recent_messages": [
+          "give me the kickoff message to copy paste to next session",
+          "review work done this session and identify skills that may need updating, then update those skills and any relevant docs, then write the handoff to proceed in next session",
+          "merged and deployed. ship the cli"
+        ],
+        "recent_commits": [
+          "fix(app-blocks): skip the edge redirect for review-sandbox builds + assert no-store on the 302",
+          "feat(app-blocks): edge-redirect page apps' top-level navigation to the host route",
+          "docs(app-blocks): dev-testers soft-launch + review-sandbox closure + CLI v0.1.37; session handoff",
+          "fix(app-blocks/review-sandbox): validate-manifest stamps iframe.src to the review host in review-mode",
+          "feat(app-blocks): port mod-review-sandbox build lane onto live Flux infra"
+        ],
+        "open_prs": []
+      }
+    },
+    {
+      "slug": "task-spec-drafter",
+      "repo": "/home/zach/workspace/devrc",
+      "momentum": "slowing",
+      "ctx": {
+        "momentum": "slowing",
+        "summary": "Repo/threads: spans devrc (harness), civit/datapacket-talos (ADS, A-1), homelab-talos/ZacxDev/homelab-infra (the drafter agent). The living ledger is ~/.claude/skills/close-the-loop/STATE.md (read…",
+        "next_step": "",
+        "open_investigations": [],
+        "recent_messages": [
+          "# Deep-context task-spec drafter — per-ticket pipeline\n\nYou are the **deep-context task-spec drafter** running NON-INTERACTIVELY (headless\n`claude -p`) over ONE ClickUp ticket. Your job is to be a **…",
+          "why so slow",
+          "check",
+          "do we need to update the clawgate skill",
+          "do 1"
+        ],
+        "recent_commits": [
+          "fix(task-spec-drafter): harden per audit — read-only allowlist, distinct mail id, timeout",
+          "feat(task-spec-drafter): wire into home-manager on the workbench (SHADOW)"
+        ],
+        "open_prs": []
+      }
+    },
+    {
+      "slug": "tekton-control-plane-ha",
+      "repo": "/home/zach/workspace/civit/datapacket-talos",
+      "momentum": "stalled",
+      "ctx": {
+        "momentum": "stalled",
+        "summary": "A civitai monorepo tag (v5.0.1977) silently never built. Root-caused to the Tekton build control plane and hardened it durably. Both fixes are shipped, deployed, and verified; what remains is the…",
+        "next_step": "Finish the fork reconcile (Phase 2/3 above) — the in-flight work.",
+        "open_investigations": [
+          "Root cause: node talos-uvh-ow7 flaps NotReady (UNRESOLVED — the actual trigger)"
+        ],
+        "recent_messages": [],
+        "recent_commits": [
+          "fix(tekton): HA control plane — webhook HPA floor 2 + controller replicas 2 + PDBs (chart already ships anti-affinity)"
+        ],
+        "open_prs": []
+      }
+    },
+    {
+      "slug": "activity-telemetry",
+      "repo": "/home/zach/workspace/devrc",
+      "momentum": "stalled",
+      "ctx": {
+        "momentum": "stalled",
+        "summary": "Two personal self-instrumentation systems, both now BUILT and LIVE: (1) the activity-telemetry pipeline (where time/attention/reading goes, 6 sources → ClickHouse → Grafana), and (2) a self-hosted…",
+        "next_step": "THE FORK is now live and on TRUSTWORTHY data. The measurement layer is correct + complete + guarded. Recommendation carried into the decision: STOP on activity and pivot to email automation on the live mail table (the original \"heavy automation\" goal — triage, task/receipt extraction, digests, alerting). The activity thread has hit diminishing returns; further mining risks a well-instrumented saw-sharpen. A thin weekly LLM digest over the (now-true) activity data is the only remaining activity-side option if a digest is actually wanted — but it's a cap, not a new altitude.",
+        "open_investigations": [],
+        "recent_messages": [
+          "give me the kickoff message to copy paste to next session",
+          "1. ship it\n2. fix staleness",
+          "review work done this session and identify skills that may need updating, then update those skills and any relevant docs, then write the handoff to proceed in next session",
+          "yes",
+          "sandbox creds:\nAPI Login ID\n2RpL5rQ9t753\n\nTransaction Key\n6gRPN9478g9xsX8F"
+        ],
+        "recent_commits": [],
+        "open_prs": []
+      }
+    },
+    {
+      "slug": "mail-automation",
+      "repo": "/home/zach/workspace/devrc",
+      "momentum": "stalled",
+      "ctx": {
+        "momentum": "stalled",
+        "summary": "Resumed from handoff-qa-automation-2026-06-29.md, which queued email automation on the live mail table as the original-but-untouched \"heavy automation\" goal. Picked it up and shipped it end-to-end:…",
+        "next_step": "Next close-the-loop run should pick a NEW thread — this loop is closed. A still-pending verifier from the prior thread: run activity-scan --days 7 (~a week out) to see if manual vetr/naida QA browser-time dropped.",
+        "open_investigations": [],
+        "recent_messages": [
+          "give me the kickoff message to copy paste to next session",
+          "yes",
+          "how does it handle me approving things in the response?",
+          "yes, use subagent, ensure test coverage"
+        ],
+        "recent_commits": [],
+        "open_prs": []
+      }
+    },
+    {
+      "slug": "harness-tuning",
+      "repo": "/home/zach/workspace/homelab-talos",
+      "momentum": "stalled",
+      "ctx": {
+        "momentum": "stalled",
+        "summary": "Reduce friction across Zach's multi-host Claude Code fleet (token waste, repetition, prose-vs-deterministic, config drift) so attention is freed for the product north-star (civitai / App Blocks).…",
+        "next_step": "spine-controller: decide fix-forward vs rollback. Not urgent (prod up on old pods) but blocks any new spine-controller deploy. /verify-deploy or investigate civitai/civitai-spine-controller diff v2.16.15→v2.17.3 around Kiota client setup.",
+        "open_investigations": [],
+        "recent_messages": [
+          "it's been a few days",
+          "jjjkjj",
+          "we now also have email data available in the homelab cluster via mail-receiver",
+          "did we add stop hooks?",
+          "recommend"
+        ],
+        "recent_commits": [],
+        "open_prs": []
+      }
+    },
+    {
+      "slug": "repo-cos-selfhosted-complete",
+      "repo": "/home/zach/workspace/devrc",
+      "momentum": "stalled",
+      "ctx": {
+        "momentum": "stalled",
+        "summary": "Continued the \"agents bring me ideas / CEO model\" loop (repo-cos). This session took it from \"works, Gmail-based\" to fully self-hosted + feature-complete: the digest sends from Zach's own relay,…",
+        "next_step": "Dispatch clawgate Task #39 (the approved devrc collector-tests) → closes approve→implement→PR for real = the artifact/outcome verifier finishing.",
+        "open_investigations": [],
+        "recent_messages": [
+          "give me the kickoff message to copy paste to next session",
+          "This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.\n\nSummary:\n1. Primary Request and Intent:\n   Thi…",
+          "57 was already dispatched and completed (that was the run i generated the last round of feedback from). review work done this session and identify skills that may need updating, then update those ski…",
+          "57 was already dispatched and completed, lets do antoher test run",
+          "- in the task card the provisioning badge overlaps\n- in agent chat the provisioning indicator worked, and showed my message when done, but it doesn't show any indicator that the agent is working (the…"
+        ],
+        "recent_commits": [],
+        "open_prs": []
+      }
+    },
+    {
+      "slug": "app-blocks-session",
+      "repo": "/home/zach/workspace/civit/datapacket-talos",
+      "momentum": "stalled",
+      "ctx": {
+        "momentum": "stalled",
+        "summary": "Productionize App Blocks: make blocks work on civitai.red, process an 8-item feedback round, and give marketplace listings cover images (dev-upload + autogenerated fallback). Everything below is…",
+        "next_step": "Merge talos #314 (skill docs) — low-risk, makes next session's app-blocks/pr-previews skills current.",
+        "open_investigations": [],
+        "recent_messages": [
+          "merged and deployed is rolling out, we'll continue in next session. review work done this session and identify skills that may need updating, then update those skills and any relevant docs, then writ…",
+          "yes, use subagent",
+          "the build completes but it doesn't render: GET https://review-c4b4351a969e31b4.civit.ai/assets/index-DtcxNzop.js net::ERR_ABORTED 401",
+          "clicked",
+          "merged and deployed"
+        ],
+        "recent_commits": [],
+        "open_prs": []
+      }
+    },
+    {
+      "slug": "dp-prod-500-floor-resume",
+      "repo": "/home/zach/workspace/civit/datapacket-talos",
+      "momentum": "stalled",
+      "ctx": {
+        "momentum": "stalled",
+        "summary": "Drive the civitai-dp-prod HTTP-500 floor toward 0. Floor is already very low (~0.0018% / 1h); the work is attributing the diffuse trickle to specific classes and fixing/reclassifying each. Ground…",
+        "next_step": "#2816 empirical bake-check — multi-hour post-18:50 window (recipe above). Code+deploy already confirmed; this is just the statistical \"0\".",
+        "open_investigations": [],
+        "recent_messages": [
+          "review work done this session and identify skills that may need updating, then update those skills and any relevant docs, then write the handoff to proceed in next session",
+          "yes",
+          "GET /api/og stands out as very slow, low call count but if possible lets optimize it so the panel is clean",
+          "merged"
+        ],
+        "recent_commits": [],
+        "open_prs": []
+      }
+    }
+  ],
+  "test": [
+    {
+      "slug": "remix-session",
+      "repo": "/home/zach/workspace/homelab-talos",
+      "momentum": "active",
+      "ctx": {
+        "momentum": "active",
+        "summary": "Supersedes claudedocs/handoff-2026-07-20-remix-session.md. App: containers/remix/ (workbench cluster, ns remix, self-hosted Supabase ns supabase). Public at aigeum.com. Ops reference: the remix…",
+        "next_step": "",
+        "open_investigations": [],
+        "recent_messages": [
+          "dispatch to process feedback:\n'clip it' button ux change:\n- change copy to 'stash this'\n- clicking should add the item to my aigeum stash as a source (by reference)\n  - it should show a toast 'added…",
+          "Loading the image '<URL>' violates the following Content Security Policy directive: \"img-src 'self' data: blob: <URL>\". The action has been blocked.\nexplore:1 Loading media from  'https://image-b2.ci…",
+          "i see Explore is temporarily unavailable.",
+          "how can i test the connectors",
+          "i dont see a way to get an api key for pmvhaven, i got permission from them to download via their cdn though as long as we respect ratelimits"
+        ],
+        "recent_commits": [],
+        "open_prs": []
+      }
+    },
+    {
+      "slug": "remix-platform",
+      "repo": "/home/zach/workspace/homelab-talos",
+      "momentum": "slowing",
+      "ctx": {
+        "momentum": "slowing",
+        "summary": "A very long session. The through-line: built an entire new personal video-remix platform (containers/remix/) from zero to a working compositional editor, live at remix.zacx.dev (Authelia-gated), and…",
+        "next_step": "",
+        "open_investigations": [],
+        "recent_messages": [
+          "//exit",
+          "write it to a file",
+          "give me the kickoff message to copy paste to next session",
+          "review work done this session and identify skills that may need updating, then dispatch subagent to update those skills and any relevant docs, then write the handoff to proceed in next session",
+          "When it lands, apply audit fixes then merge and deploy"
+        ],
+        "recent_commits": [
+          "feat(workbench): self-hosted Supabase for the remix platform"
+        ],
+        "open_prs": []
+      }
+    },
+    {
+      "slug": "next-session",
+      "repo": "/home/zach/workspace/civit/datapacket-talos",
+      "momentum": "active",
+      "ctx": {
+        "momentum": "active",
+        "summary": "Read-first. Prior arc detail: handoff-next-session-2026-07-21.md. This = current state + what's next.",
+        "next_step": "",
+        "open_investigations": [],
+        "recent_messages": [
+          "check initial results",
+          "Continue the dp-prod perf/reliability arc. Read\nclaudedocs/handoff-next-session-2026-07-23.md first. #1: verify the #3266 CPU fix\n(#3322) at the next early-PM-UTC peak — confirm the release carries i…"
+        ],
+        "recent_commits": [],
+        "open_prs": []
+      }
+    },
+    {
+      "slug": "app-blocks-arc-complete",
+      "repo": "/home/zach/workspace/civit/datapacket-talos",
+      "momentum": "slowing",
+      "ctx": {
+        "momentum": "slowing",
+        "summary": "> The big App Blocks arc is shipped end-to-end. Read this handoff + the app-blocks skill (updated this session). Everything below is MERGED; the civitai host PRs serve on the next release cut…",
+        "next_step": "",
+        "open_investigations": [],
+        "recent_messages": [],
+        "recent_commits": [],
+        "open_prs": []
+      }
+    },
+    {
+      "slug": "remix-templates",
+      "repo": "/home/zach/workspace/homelab-talos",
+      "momentum": "slowing",
+      "ctx": {
+        "momentum": "slowing",
+        "summary": "Feature: user-selectable render templates for the remix video app — pick one or more templates at create-time, each fans out into its own rendered remix. Multi-clip layouts + transitions (portrait…",
+        "next_step": "",
+        "open_investigations": [],
+        "recent_messages": [],
+        "recent_commits": [
+          "docs(remix): skill first-class render templates + phase ladder",
+          "fix(remix): cover-crop manual crop in grid cells (no anamorphic stretch)",
+          "feat(remix): grid render templates (Phase 2) — GridFilter engine + presets",
+          "fix(remix): clamp per-junction xfade transition to clip length",
+          "feat(remix): render-templates engine (PR A)"
+        ],
+        "open_prs": []
+      }
+    },
+    {
+      "slug": "initiatives-consolidation",
+      "repo": "/home/zach/workspace/devrc",
+      "momentum": "active",
+      "ctx": {
+        "momentum": "active",
+        "summary": "consolidate the on-demand initiative-scan.py output into a durable, queryable",
+        "next_step": "Dual-host merge (deferred). Phase 1 is workbench-only. Do NOT naively sum a laptop push:",
+        "open_investigations": [
+          "current view accumulates aged-out (\"ghost\") initiatives"
+        ],
+        "recent_messages": [],
+        "recent_commits": [
+          "fix(initiatives): off-by-default timer flag, hourly cadence, explicit host tag",
+          "fix(initiatives): indexes, 90d retention, advisory-locked/guarded DDL, scan timeout",
+          "feat(initiatives): Phase 1 — sync initiative-scan into mailbox Postgres"
+        ],
+        "open_prs": []
+      }
+    },
+    {
+      "slug": "clawgate-chat-polish",
+      "repo": "/home/zach/workspace/devrc",
+      "momentum": "active",
+      "ctx": {
+        "momentum": "active",
+        "summary": "Continue the clawgate \"USE + SOAK\" phase: the Task→Dispatch→agent→PR loop is proven; this session was soak-driven agent-chat UX polish + a structured transcript + greening the e2e suite. Keep USING…",
+        "next_step": "Keep soaking — dispatch task #64 (.shellcheckrc), do a feedback pass on the 0.7.66 chat (input flush / working-bubble scroll / no NO_REPL). Resist building new loop features.",
+        "open_investigations": [
+          "e2e full-suite flakes under high box load (not a code regression)"
+        ],
+        "recent_messages": [
+          "yes implement and ship, ensure compelte test coverage",
+          "Continue the clawgate agent-chat / soak work. Canonical handoff (read first):\n    ~/workspace/devrc/claudedocs/handoff-clawgate-chat-polish-2026-07-05.md\n  Live pin 0.7.66; e2e green (73/2). Next: di…"
+        ],
+        "recent_commits": [],
+        "open_prs": []
+      }
+    },
+    {
+      "slug": "dp-prod-rightsizing-node-drain",
+      "repo": "/home/zach/workspace/civit/datapacket-talos",
+      "momentum": "stalled",
+      "ctx": {
+        "momentum": "stalled",
+        "summary": "Reclaim the over-provisioning on civitai-dp-prod (CPU requests + HPA floors) so one of the 5 fixed web nodes can be drained/reclaimed — the original rightsizing goal. This session did the request +…",
+        "next_step": "DRAIN a web node — the payoff. Freed CPU-request headroom (nodes 50–73%) should now let one of the 5 web nodes' load fit on the other 4. This is the goal all the cuts were building toward. Verify the target node's requests fit on the remaining 4 first (kubectl describe node CPU-request %), then cordon+drain, watch for Pending. Reversible: uncordon.",
+        "open_investigations": [
+          "metrics-server crashloop — fix applied, BAKE not yet complete",
+          "API floor = 60 — validated at near-peak, NOT yet at full weekly peak"
+        ],
+        "recent_messages": [],
+        "recent_commits": [],
+        "open_prs": []
+      }
+    }
+  ]
+}
