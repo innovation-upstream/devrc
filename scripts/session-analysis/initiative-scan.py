@@ -1041,13 +1041,20 @@ def _truncate(s: str, n: int) -> str:
 
 
 def _read_session_turns(path: str, n: int) -> dict | None:
-    """Parse ONE transcript into {genesis, turns, cwd, branch}, or None if it has no
-    genuine user turn.
+    """Parse ONE transcript into {genesis, turns, last_user_ts, cwd, branch}, or None if
+    it has no genuine user turn.
 
     - genesis: the FIRST genuine user turn text (the SAME rule _first_user_turn used —
       skips harness/system-reminder/command/interrupt/caveat noise via _clean_turn).
     - turns: [{text, ts}] for the LAST `n` genuine user turns (oldest→newest), each
       cleaned; `ts` is the turn's UTC epoch (from its ISO `timestamp`), or None.
+    - last_user_ts: the MAX UTC epoch across ALL genuine user turns (independent of the
+      `n`-turn window) — the "last real interaction" time. This is the momentum-safe
+      touch signal: unlike the transcript's filesystem mtime it is NOT bumped when
+      Claude Code rewrites the .jsonl in place for metadata maintenance (title/mode/
+      permission), which otherwise makes an idle session read as freshly touched. None
+      only when NO genuine turn carried a parseable `timestamp` (rare/edge). Mirrors the
+      `doc_touch_epoch` rule that avoids mtime for the same class of bulk-rewrite reason.
     - cwd / branch: from the MOST-RECENT turn that carries them (each user turn records
       `cwd` + `gitBranch`) — used by the branch/cwd attribution fallback.
     Reads the file ONCE (transcript reads are the costly part of the scan)."""
@@ -1058,6 +1065,7 @@ def _read_session_turns(path: str, n: int) -> dict | None:
         return None
     genesis: str | None = None
     turns: list[dict] = []
+    last_user_ts: float | None = None
     cwd: str | None = None
     branch: str | None = None
     for line in lines:
@@ -1083,7 +1091,10 @@ def _read_session_turns(path: str, n: int) -> dict | None:
             continue
         if genesis is None:
             genesis = txt
-        turns.append({"text": txt, "ts": _iso_to_epoch(obj.get("timestamp"))})
+        ts = _iso_to_epoch(obj.get("timestamp"))
+        turns.append({"text": txt, "ts": ts})
+        if ts is not None:
+            last_user_ts = ts if last_user_ts is None else max(last_user_ts, ts)
         c = obj.get("cwd")
         if c:
             cwd = c
@@ -1093,7 +1104,7 @@ def _read_session_turns(path: str, n: int) -> dict | None:
     if genesis is None:
         return None
     return {"genesis": genesis, "turns": turns[-n:] if n > 0 else [],
-            "cwd": cwd, "branch": branch}
+            "last_user_ts": last_user_ts, "cwd": cwd, "branch": branch}
 
 
 def _first_user_turn(path: str) -> str | None:
@@ -1128,11 +1139,15 @@ def collect_session_records(projects_root: str, since_days: int,
 
 
 def session_genesis_refs(projects_root: str, since_days: int) -> list[dict]:
-    """[{text, mtime}] over each in-window session's genesis (first genuine user turn).
+    """[{text, mtime, last_user_ts}] over each in-window session's genesis (first genuine
+    user turn).
 
     A thin adapter over collect_session_records so the transcript walk is single-sourced
-    (attribute_sessions still consumes exactly this shape)."""
-    return [{"text": r["genesis"], "mtime": r["mtime"]}
+    (attribute_sessions still consumes exactly this shape). `last_user_ts` (the last
+    genuine user-turn epoch) is carried alongside `mtime` so attribute_sessions can time
+    `last_session` from real interaction, not the mtime that in-place .jsonl rewrites bump."""
+    return [{"text": r["genesis"], "mtime": r["mtime"],
+             "last_user_ts": r.get("last_user_ts")}
             for r in collect_session_records(projects_root, since_days, n=1)]
 
 
@@ -1227,6 +1242,15 @@ def attribute_sessions(initiatives: list[dict], genesis: list[dict]) -> None:
     A session belongs to an initiative when its genesis text mentions
     `handoff-<slug>` (slug or any dated variant filename of the cluster). Counted
     per initiative independently — a genesis naming two handoffs counts for both.
+
+    `last_session` is timed from each session's LAST genuine user-turn epoch
+    (`last_user_ts`), NOT its transcript filesystem mtime: Claude Code rewrites the
+    .jsonl in place for metadata maintenance (title/mode/permission) with zero new work,
+    bumping mtime and making an idle session masquerade as freshly touched → false
+    `active` momentum. This mirrors `doc_touch_epoch`, which avoids mtime for the same
+    bulk-rewrite reason. FALLBACK: a session with no parseable user-turn ts (rare — a
+    genuine turn whose `timestamp` was absent/unparseable) contributes its `mtime`, the
+    only remaining signal; `session_count` is unaffected either way.
     """
     for ini in initiatives:
         names = {os.path.basename(d["path"]).lower() for d in ini["docs"]}
@@ -1237,7 +1261,10 @@ def attribute_sessions(initiatives: list[dict], genesis: list[dict]) -> None:
             low = g["text"].lower()
             if any(n in low for n in names):
                 count += 1
-                last = newest_touch(last, g["mtime"])
+                touch = g.get("last_user_ts")
+                if touch is None:
+                    touch = g.get("mtime")
+                last = newest_touch(last, touch)
         ini["session_count"] = count
         ini["last_session"] = last
 
@@ -1642,7 +1669,8 @@ def build_report(days: int, repos: list[str] | None = None,
     # ONE transcript walk feeds both session-count attribution AND recent-message
     # surfacing (transcripts are the costly read; genesis is derived from the records).
     records = collect_session_records(projects_root, days)
-    genesis = [{"text": r["genesis"], "mtime": r["mtime"]} for r in records]
+    genesis = [{"text": r["genesis"], "mtime": r["mtime"],
+                "last_user_ts": r.get("last_user_ts")} for r in records]
     attribute_sessions(initiatives, genesis)
 
     # Resolve cwds living in linked worktrees back to their canonical repo so worktree
