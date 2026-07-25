@@ -864,10 +864,23 @@ in
         "ACTIVITY_HOST=workbench"
         "INITIATIVES_VIEWER_HOST=192.168.50.250"
         "INITIATIVES_VIEWER_PORT=8899"
-        # Local model for the read-only Q&A sidebar (POST /api/ask): the SAME homelab vLLM
-        # the recap generator uses (ns promptver, svc/vllm-recap:8000, served model "recap").
-        # The assistant opens/tears down a kubectl port-forward per ask; a model outage
-        # degrades to the deterministic answer, so this is best-effort.
+        # PRIMARY /api/ask path (Phase 1 initiatives agent): the model-driven OpenClaw devpod
+        # (homelab ns devpod-initiatives, svc/initiatives-devpod:18789, openclaw/initiatives,
+        # DeepSeek V4 Pro). The MODEL selects which deterministic skill-tool(s) to run (incl.
+        # multiple for compound questions); the viewer reaches it via a kubectl port-forward
+        # (same homelab reach as the store) + a gateway token derived from the in-cluster
+        # HOOKS_TOKEN secret. On ANY failure it FALLS BACK to the deterministic assistant
+        # below — so the sidebar always answers.
+        "INITIATIVES_AGENT_ENABLED=1"
+        "AGENT_NAMESPACE=devpod-initiatives"
+        "AGENT_SERVICE=svc/initiatives-devpod"
+        "AGENT_PORT=18789"
+        "AGENT_MODEL=openclaw/initiatives"
+        "AGENT_SECRET=initiatives-agent-secrets"
+        # FALLBACK model for /api/ask when the agent is unreachable: the deterministic regex
+        # assistant phrases over the SAME homelab vLLM the recap generator uses (ns promptver,
+        # svc/vllm-recap:8000, served model "recap"). Best-effort; a model outage degrades to
+        # the plain deterministic renderer.
         "INITIATIVES_RECAP_ENABLED=1"
         "RECAP_NAMESPACE=promptver"
         "RECAP_SERVICE=svc/vllm-recap"
@@ -883,6 +896,7 @@ in
       X-Restart-Triggers = [
         "${../scripts/initiatives/run-viewer.sh}"
         "${../scripts/initiatives/viewer.py}"
+        "${../scripts/initiatives/agent_client.py}"
       ];
     };
     Install = {

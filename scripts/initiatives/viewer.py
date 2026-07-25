@@ -202,6 +202,53 @@ def default_ask(question: str, provider) -> dict:
         unmatched=model.get("live_unmatched", []))
 
 
+# The initiatives AGENT client (POST /api/ask → the OpenClaw devpod gateway). Loaded by
+# explicit importlib path (same convention as the assistant), lazily so a viewer without the
+# agent enabled pays nothing. The agent is an UPGRADE over `default_ask`: when
+# INITIATIVES_AGENT_ENABLED is set it drives the answer via the model-selects-tools devpod;
+# on ANY failure `agent_ask` returns None and we fall back to the deterministic assistant.
+AGENT_CLIENT_PATH = Path(__file__).resolve().parent / "agent_client.py"
+_agent_client_mod = None
+
+
+def _agent_client():
+    global _agent_client_mod
+    if _agent_client_mod is None:
+        spec = importlib.util.spec_from_file_location(
+            "initiatives_viewer_agent_client", AGENT_CLIENT_PATH)
+        if spec is None or spec.loader is None:
+            raise ImportError(f"cannot load {AGENT_CLIENT_PATH}")
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        _agent_client_mod = mod
+    return _agent_client_mod
+
+
+def build_asker(provider, env=None):
+    """Build the `POST /api/ask` callable. When the agent is disabled (env), returns None so
+    `make_handler` uses `default_ask` (the deterministic regex assistant). When enabled,
+    returns an asker that tries the AGENT first (reusing the provider's cached views for the
+    grounded `sources`) and FALLS BACK to `default_ask` if the agent is unreachable — the
+    viewer always answers, degrading gracefully devpod-down."""
+    env = os.environ if env is None else env
+    agent = _agent_client()
+    if not agent.agent_config(env)["enabled"]:
+        return None
+
+    def asker(question: str) -> dict:
+        model, _err = provider.snapshot()
+        views = model.get("flat", []) if model else []
+        result = None
+        try:
+            result = agent.agent_ask(question, views=views, env=env)
+        except Exception as exc:  # noqa: BLE001 - the agent path must never break /api/ask
+            sys.stderr.write(f"viewer: agent_ask raised ({type(exc).__name__}: {exc}); "
+                             f"falling back to the deterministic assistant\n")
+        return result if result is not None else default_ask(question, provider)
+
+    return asker
+
+
 # --------------------------------------------------------------------------- #
 # I/O — read the store, then attach the live tmux overlay.
 # --------------------------------------------------------------------------- #
@@ -1932,7 +1979,12 @@ def serve(host: str, port: int, provider: DataProvider | None = None,
     """Start the blocking HTTP server on host:port with a threaded handler."""
     provider = provider or DataProvider()
     refresh_controller = refresh_controller or RefreshController()
-    httpd = ThreadingHTTPServer((host, port), make_handler(provider, refresh_controller))
+    # asker=None ⇒ make_handler defaults to the deterministic regex assistant. When
+    # INITIATIVES_AGENT_ENABLED is set, build_asker returns the agent-backed asker (with a
+    # graceful fall-back to that same deterministic path).
+    asker = build_asker(provider)
+    httpd = ThreadingHTTPServer((host, port),
+                                make_handler(provider, refresh_controller, asker=asker))
     httpd.daemon_threads = True
     sys.stderr.write(f"viewer: serving on http://{host}:{port}/ "
                      f"(/, /healthz, /api/initiatives.json, /api/initiative, POST /refresh)\n")
