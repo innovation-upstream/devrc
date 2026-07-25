@@ -346,8 +346,11 @@ def q_commands(win: int, host: str | None = None) -> str:
 
 def q_cwd_sessions(win: int, match: str, host: str | None = None) -> str:
     lit = Q.sql_quote(match.lower())
+    # Alias the aggregate to `last_ts`, NOT `ts`: aliasing max(ts) AS ts shadows
+    # the raw `ts` column, so the WHERE `ts>now()` binds to the aggregate →
+    # ClickHouse ILLEGAL_AGGREGATION. gather() normalises `last_ts`→`ts` on read.
     return (
-        "SELECT session AS session, max(ts) AS ts FROM activity.events "
+        "SELECT session AS session, max(ts) AS last_ts FROM activity.events "
         f"WHERE source='claude' AND ts>now()-{win} "
         f"AND position(lower(cwd), {lit}) > 0{_host_filter(host)} "
         "GROUP BY session"
@@ -355,12 +358,24 @@ def q_cwd_sessions(win: int, match: str, host: str | None = None) -> str:
 
 
 def q_insights(win: int, host: str | None = None) -> str:
+    # `max(ts) AS last_ts` not `AS ts` — see q_cwd_sessions: an aggregate aliased
+    # to the raw column name `ts` shadows it in WHERE → ILLEGAL_AGGREGATION.
     return (
         "SELECT session, argMax(toString(payload), ingested_at) AS payload, "
-        "max(ts) AS ts FROM activity.events "
+        "max(ts) AS last_ts FROM activity.events "
         f"WHERE source='claude' AND kind='session-insight' AND ts>now()-{win}"
         f"{_host_filter(host)} GROUP BY session"
     )
+
+
+def _norm_last_ts(rows: list[dict]) -> list[dict]:
+    """Map the `last_ts` aggregate alias back to `ts` so the shared aggregators
+    (which read `r.get("ts")`) work unchanged. The alias is `last_ts` in SQL only
+    to avoid shadowing the raw `ts` column in the WHERE clause."""
+    for r in rows:
+        if "last_ts" in r:
+            r["ts"] = r["last_ts"]
+    return rows
 
 
 # --------------------------------------------------------------------------- #
@@ -382,13 +397,13 @@ def gather(client, days: int, insight_days: int, dead_days: int,
     try:
         tool_rows = client.rows(q_tool_invocations(fetch_win, host))
         cmd_rows = client.rows(q_commands(fetch_win, host))
-        insight_rows = client.rows(q_insights(iwin, host))
+        insight_rows = _norm_last_ts(client.rows(q_insights(iwin, host)))
         # cwd-detected items each get their own filtered query.
         cwd_rows: dict = {}
         for item in REGISTRY:
             if item["via"] == "cwd":
-                cwd_rows[item["id"]] = client.rows(
-                    q_cwd_sessions(fetch_win, item["match"], host))
+                cwd_rows[item["id"]] = _norm_last_ts(client.rows(
+                    q_cwd_sessions(fetch_win, item["match"], host)))
     except Exception as e:  # noqa: BLE001 — telemetry optional; degrade cleanly
         raise TelemetryUnavailable(str(e)) from e
 
