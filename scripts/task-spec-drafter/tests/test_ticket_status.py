@@ -529,3 +529,73 @@ def test_prompt_still_has_command_shape_and_anticonfab_guards():
     p = " ".join(_PROMPT.read_text(encoding="utf-8").split())
     assert "COMMAND-SHAPE CONTRACT" in p
     assert "ANTI-CONFABULATION GATE" in p
+
+
+# ============================================================================
+# adoption telemetry (Part A instrumentation)
+# ============================================================================
+def _load_collector():
+    coll = _HERE.parent.parent / "collector"
+    sys.path.insert(0, str(coll))
+    import collector as C  # noqa: PLC0415
+    return C
+
+
+def _read_last_event(spool_dir, C):
+    line = (Path(spool_dir) / "current.log").read_text().strip().splitlines()[-1]
+    return C.parse_line(line), line
+
+
+def test_verdict_to_outcome_mapping():
+    assert ts.verdict_to_outcome("ALREADY-DONE") == "already-done"
+    assert ts.verdict_to_outcome("PARTIAL") == "partial"
+    assert ts.verdict_to_outcome("NOT-FOUND") == "not-found"
+    assert ts.verdict_to_outcome("???") == "error"
+
+
+def _run_with_spool(spool_dir, repo_path, *args, lock_repo=None):
+    env = {**os.environ, "TICKET_STATUS_GH": "/nonexistent-gh",
+           "ACTIVITY_SPOOL_DIR": str(spool_dir)}
+    env.pop("TICKET_STATUS_LOCK_REPO", None)
+    env["TICKET_STATUS_ALLOWED_REPO_ROOTS"] = str(Path(repo_path).parent)
+    if lock_repo is not None:
+        env["TICKET_STATUS_LOCK_REPO"] = str(lock_repo)
+    argv = [sys.executable, str(_SCRIPT), *args, "--repo", str(repo_path), "--no-fetch"]
+    return subprocess.run(argv, capture_output=True, text=True, env=env)
+
+
+def test_main_emits_already_done_and_privacy(repo, tmp_path):
+    """End-to-end: emits already-done + ticket_id, and NEVER the search term/body."""
+    C = _load_collector()
+    spool = tmp_path / "spool"
+    # A sensitive free-text search term that MUST NOT reach the telemetry store.
+    r = _run_with_spool(spool, repo["work"], "86abc123", "MYSECRETTERM")
+    assert r.returncode == 0, r.stderr
+    ev, raw = _read_last_event(spool, C)
+    assert ev["source"] == "tool" and ev["text"] == "ticket-status"
+    p = json.loads(ev["payload"])
+    assert p["outcome"] == "already-done"
+    assert p["verdict"] == "already-done"
+    assert p["ticket_id"] == "86abc123"
+    # PRIVACY: the term must not appear anywhere in the emitted event / raw line.
+    assert "MYSECRETTERM" not in json.dumps(ev)
+    assert "MYSECRETTERM" not in raw
+
+
+def test_main_emits_not_found(repo, tmp_path):
+    C = _load_collector()
+    spool = tmp_path / "spool"
+    r = _run_with_spool(spool, repo["work"], "ZZ00000")
+    assert r.returncode == 0, r.stderr
+    ev, _ = _read_last_event(spool, C)
+    assert json.loads(ev["payload"])["outcome"] == "not-found"
+
+
+def test_rejected_ticket_id_emits_nothing(repo, tmp_path):
+    """A ticket-id that fails validation is REJECTED before any emit — the
+    unvalidated (attacker-controlled) id must never reach telemetry."""
+    C = _load_collector()  # noqa: F841 — imported for parity; no line expected
+    spool = tmp_path / "spool"
+    r = _run_with_spool(spool, repo["work"], "bad/id;rm")
+    assert r.returncode == 2  # rejected input
+    assert not (spool / "current.log").exists()

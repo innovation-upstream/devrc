@@ -587,6 +587,38 @@ def parse_args(argv: list[str]) -> dict:
     return out
 
 
+# --- adoption telemetry (best-effort; NEVER changes the verdict or exit code) --
+_VERDICT_OUTCOME = {
+    "ALREADY-DONE": "already-done", "PARTIAL": "partial", "NOT-FOUND": "not-found",
+}
+
+
+def verdict_to_outcome(verdict: str) -> str:
+    """Map the deterministic verdict to the adoption outcome enum. Pure."""
+    return _VERDICT_OUTCOME.get(verdict, "error")
+
+
+def _emit_adoption(outcome: str, ticket_id: str | None, duration_ms=None) -> None:
+    """Best-effort adoption event. dims carry ONLY the verdict + the (already
+    VALIDATED) ticket-id — NEVER the free-text search terms or any ticket body.
+    Fully swallowed; telemetry never breaks the tool.
+
+    `ticket_id` is passed ONLY after validate_ticket_id has accepted it, so a
+    rejected/attacker-controlled raw id never reaches the telemetry store.
+    """
+    try:
+        sys.path.insert(0, os.path.join(
+            os.path.dirname(os.path.realpath(__file__)), "..", "collector"))
+        import invocation  # noqa: PLC0415
+        dims = {"verdict": outcome}
+        if ticket_id:
+            dims["ticket_id"] = ticket_id
+        invocation.emit_invocation(
+            "ticket-status", outcome, dims=dims, duration_ms=duration_ms)
+    except Exception:  # noqa: BLE001 — defence-in-depth around the helper
+        pass
+
+
 def main(argv: list[str]) -> int:
     try:
         args = parse_args(argv)
@@ -595,7 +627,11 @@ def main(argv: list[str]) -> int:
             sys.stdout.write(_USAGE)
             return 0
         sys.stderr.write(f"ticket-status: {exc}\n")
+        # No emit: input was REJECTED before validation, so there is no safe
+        # (validated) ticket-id to attribute — never emit unvalidated input.
         return 2
+    import time
+    _t0 = time.monotonic()
     try:
         result = probe(
             args["ticket_id"], args["terms"], args["repo"], args["trunk"],
@@ -603,7 +639,12 @@ def main(argv: list[str]) -> int:
         )
     except InputError as exc:
         sys.stderr.write(f"ticket-status: {exc}\n")
+        # ticket-id is already validated here; verdict is an error outcome.
+        _emit_adoption("error", args["ticket_id"],
+                       int((time.monotonic() - _t0) * 1000))
         return 2
+    _emit_adoption(verdict_to_outcome(result["verdict"]), args["ticket_id"],
+                   int((time.monotonic() - _t0) * 1000))
     if args["fmt"] == "text":
         sys.stdout.write(render_text(result) + "\n")
     else:

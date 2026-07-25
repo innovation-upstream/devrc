@@ -635,3 +635,78 @@ def test_main_json_smoke(tmp_path, capsys):
     parsed = json.loads(out)
     assert parsed["target"].endswith(tmp_path.name)
     assert rc == parsed["exit_code"]
+
+
+# --------------------------------------------------------------------------- #
+# adoption telemetry (Part A instrumentation)
+# --------------------------------------------------------------------------- #
+def _mk_result(verdict_checks, stacks=None, strict=False):
+    """Build a Result whose verdict/git-flags are driven by injected checks."""
+    r = vaw.Result(target="/x", strict=strict)
+    r.stacks = stacks or []
+    r.checks = verdict_checks
+    return r
+
+
+def test_adoption_event_pass():
+    r = _mk_result([vaw.Check("git:clean-tree", vaw.PASS, "clean")], stacks=["python"])
+    outcome, dims = vaw.adoption_event(r)
+    assert outcome == "pass"
+    assert dims["stacks"] == ["python"]
+    assert dims["git_dirty"] is False and dims["git_unpushed"] is False
+
+
+def test_adoption_event_fail_maps_and_flags_git():
+    r = _mk_result([
+        vaw.Check("go:test", vaw.FAIL, "boom"),
+        vaw.Check("git:clean-tree", vaw.WARN, "dirty"),
+        vaw.Check("git:pushed", vaw.WARN, "unpushed"),
+    ], stacks=["go"])
+    outcome, dims = vaw.adoption_event(r)
+    assert outcome == "fail"
+    assert dims["git_dirty"] is True and dims["git_unpushed"] is True
+
+
+def test_adoption_event_incomplete():
+    r = _mk_result([vaw.Check("ts", vaw.INCOMPLETE, "no gate")], stacks=["ts"])
+    outcome, _ = vaw.adoption_event(r)
+    assert outcome == "incomplete"
+
+
+def test_main_emits_invocation_to_spool(tmp_path, monkeypatch):
+    """End-to-end: a real run writes exactly ONE well-formed invocation event."""
+    monkeypatch.setenv("ACTIVITY_SPOOL_DIR", str(tmp_path))
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_repo(repo)
+    write(repo / "README.md", "hi")
+    commit_all(repo)
+    rc = vaw.main([str(repo), "--no-gh"])
+    assert rc == 0  # clean repo, no stacks -> PASS
+
+    coll = Path(__file__).resolve().parents[1] / "collector"
+    sys.path.insert(0, str(coll))
+    import collector as C  # noqa: PLC0415
+    line = (tmp_path / "current.log").read_text().strip().splitlines()[-1]
+    ev = C.parse_line(line)
+    assert ev["source"] == "tool" and ev["kind"] == "invocation"
+    assert ev["text"] == "verify-agent-work"
+    p = json.loads(ev["payload"])
+    assert p["tool"] == "verify-agent-work" and p["outcome"] == "pass"
+    assert p["stacks"] == []
+
+
+def test_emit_failure_never_changes_exit_or_output(tmp_path, monkeypatch, capsys):
+    """BEST-EFFORT: an unwritable spool must NOT change the verdict/exit/output."""
+    afile = tmp_path / "afile"
+    afile.write_text("x")  # parent-is-a-file -> spool mkdir raises -> swallowed
+    monkeypatch.setenv("ACTIVITY_SPOOL_DIR", str(afile / "spool"))
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_repo(repo)
+    write(repo / "README.md", "hi")
+    commit_all(repo)
+    rc = vaw.main([str(repo), "--json", "--no-gh"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert json.loads(out)["verdict"] == vaw.PASS

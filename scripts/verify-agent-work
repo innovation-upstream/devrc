@@ -876,6 +876,46 @@ def render_text(result: Result) -> str:
 
 
 # --------------------------------------------------------------------------- #
+# adoption telemetry (best-effort; NEVER changes the verdict or exit code)
+# --------------------------------------------------------------------------- #
+
+_VERDICT_OUTCOME = {PASS: "pass", FAIL: "fail", INCOMPLETE: "incomplete"}
+
+
+def adoption_event(result: "Result") -> tuple:
+    """Map a verify Result to (outcome, dims) for the invocation event. Pure.
+
+    outcome is the lowercase verdict (pass|fail|incomplete). dims carry ONLY safe
+    low-cardinality signal: the detected stack names + two git-state booleans —
+    never file contents, output, or repo paths.
+    """
+    outcome = _VERDICT_OUTCOME.get(result.verdict, "fail")
+    git_dirty = any(c.name == "git:clean-tree" and c.status == WARN for c in result.checks)
+    git_unpushed = any(c.name == "git:pushed" and c.status == WARN for c in result.checks)
+    dims = {
+        "stacks": list(result.stacks),
+        "git_dirty": git_dirty,
+        "git_unpushed": git_unpushed,
+        "strict": bool(result.strict),
+    }
+    return outcome, dims
+
+
+def _emit_adoption(result: "Result", duration_ms: Optional[int] = None) -> None:
+    """Best-effort adoption event. Fully swallowed — telemetry never breaks the gate."""
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parent / "collector"))
+        import invocation  # noqa: PLC0415
+        outcome, dims = adoption_event(result)
+        invocation.emit_invocation(
+            "verify-agent-work", outcome, dims=dims,
+            duration_ms=duration_ms, exit_code=result.exit_code,
+        )
+    except Exception:  # noqa: BLE001 — defence-in-depth around the helper
+        pass
+
+
+# --------------------------------------------------------------------------- #
 # cli
 # --------------------------------------------------------------------------- #
 
@@ -900,7 +940,10 @@ def main(argv: Optional[list] = None) -> int:
         print(f"verify-agent-work: target is not a directory: {target}", file=sys.stderr)
         return 2
 
+    import time
+    _t0 = time.monotonic()
     result = verify(target, use_gh=not args.no_gh, strict=args.strict, timeout=args.timeout)
+    _emit_adoption(result, duration_ms=int((time.monotonic() - _t0) * 1000))
 
     if args.json:
         print(json.dumps(result.to_dict(), indent=2))
