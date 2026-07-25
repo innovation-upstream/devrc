@@ -63,11 +63,18 @@ def test_aggregate_tool_counts_outcomes_and_trend():
         _tool_row("verify-agent-work", "pass", 10),
         _tool_row("obs-read", "ok", 1),           # different tool -> ignored
     ]
-    agg = A.aggregate_tool(rows, "verify-agent-work", NOW, 7 * DAY)
+    agg = A.aggregate_tool(rows, "verify-agent-work", NOW, 14 * DAY)
     assert agg["total"] == 3
     assert agg["outcomes"] == {"pass": 2, "fail": 1}
     assert agg["recent"] == 2 and agg["prior"] == 1
     assert agg["trend"] == "up"
+
+
+def test_aggregate_tool_excludes_rows_outside_window():
+    # A wider dead-window fetch can return older rows; counts stay scoped to win.
+    rows = [_tool_row("obs-read", "ok", 3), _tool_row("obs-read", "ok", 20)]
+    agg = A.aggregate_tool(rows, "obs-read", NOW, 14 * DAY)
+    assert agg["total"] == 1  # the 20-day-old row is excluded from counts
 
 
 def test_aggregate_command_prefix_match():
@@ -76,14 +83,29 @@ def test_aggregate_command_prefix_match():
         {"text": "/verify-agent", "ts": _ts(10)},
         {"text": "/obs-read foo", "ts": _ts(1)},   # different prefix -> ignored
     ]
-    agg = A.aggregate_command(rows, ["/verify-agent"], NOW, 7 * DAY)
+    agg = A.aggregate_command(rows, ["/verify-agent"], NOW, 14 * DAY)
     assert agg["total"] == 2 and agg["recent"] == 1 and agg["prior"] == 1
     assert agg["trend"] == "flat"
 
 
+def test_command_matches_is_tight():
+    # A near-miss command must NOT be counted as the tracked one.
+    assert A.command_matches("/obs-read", ["/obs-read"]) is True
+    assert A.command_matches("/obs-read foo", ["/obs-read"]) is True
+    assert A.command_matches("/obs-read-foo", ["/obs-read"]) is False
+    assert A.command_matches("/obs-readnow", ["/obs-read"]) is False
+
+
+def test_aggregate_command_does_not_subsume_suffix():
+    rows = [{"text": "/obs-read-foo bar", "ts": _ts(1)},
+            {"text": "/obs-read real", "ts": _ts(1)}]
+    agg = A.aggregate_command(rows, ["/obs-read"], NOW, 14 * DAY)
+    assert agg["total"] == 1  # only the genuine /obs-read counts
+
+
 def test_aggregate_cwd_counts_sessions():
     rows = [{"session": "s1", "ts": _ts(1)}, {"session": "s2", "ts": _ts(10)}]
-    agg = A.aggregate_cwd(rows, NOW, 7 * DAY)
+    agg = A.aggregate_cwd(rows, NOW, 14 * DAY)
     assert agg["total"] == 2 and agg["recent"] == 1 and agg["prior"] == 1
 
 
@@ -95,7 +117,7 @@ def test_aggregate_friction_two_windows():
          "payload": json.dumps({"friction_counts": {"permission_block": 5}})},
         {"session": "c", "ts": _ts(2), "payload": json.dumps({"unreadable": True})},
     ]
-    fr = A.aggregate_friction(rows, NOW, 7 * DAY)
+    fr = A.aggregate_friction(rows, NOW, 14 * DAY)
     assert fr["recent"] == {"permission_block": 2, "wrong_approach": 1}
     assert fr["prior"] == {"permission_block": 5, "wrong_approach": 0}
     assert fr["deltas"]["permission_block"] == -3
@@ -176,6 +198,21 @@ def test_gather_dead_subwindow():
     items = _by_id(data)
     assert items["obs-read"]["dead"] is True
     assert items["verify-agent-work"]["dead"] is False  # recent use
+
+
+def test_gather_dead_days_larger_than_days_is_honest():
+    """A tool used 20d ago: DEAD over 14 days, but NOT dead when --dead-days=25
+    (the fetch must span the wider dead window, not silently clamp to --days)."""
+    tool_rows = [_tool_row("obs-read", "ok", 20)]  # only use is 20 days ago
+    client = FakeClient(tool_rows, [], [], [])
+    # default dead window == days: 0 uses in last 14d -> DEAD, and total(win)==0.
+    d14 = _by_id(A.gather(client, days=14, insight_days=30, dead_days=14, now=NOW))
+    assert d14["obs-read"]["total"] == 0
+    assert d14["obs-read"]["dead"] is True
+    # wider dead window sees the 20-day-old use -> NOT dead (count still 0 in win).
+    d25 = _by_id(A.gather(client, days=14, insight_days=30, dead_days=25, now=NOW))
+    assert d25["obs-read"]["total"] == 0
+    assert d25["obs-read"]["dead"] is False
 
 
 def test_gather_friction_section():

@@ -83,13 +83,17 @@ def build_fields(tool, outcome, dims=None, duration_ms=None, exit_code=None) -> 
 
     `outcome` and the flattened `dims` live in the JSON `payload`; the tool name
     is ALSO put in `text` so the report can group by tool without parsing JSON.
+    Every field (tool/outcome/text AND the dims) is length-capped so the
+    defence-in-depth bound covers the whole event, not just the dims.
     """
-    payload = {"tool": str(tool), "outcome": str(outcome)}
+    tool_s = str(tool)[:_MAX_VALUE_LEN]
+    outcome_s = str(outcome)[:_MAX_VALUE_LEN]
+    payload = {"tool": tool_s, "outcome": outcome_s}
     payload.update(sanitize_dims(dims))
     fields: dict = {
         "source": SOURCE,
         "kind": KIND,
-        "text": str(tool),
+        "text": tool_s,
         "payload": json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
     }
     if duration_ms is not None:

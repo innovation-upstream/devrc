@@ -60,6 +60,18 @@ def test_sanitize_preserves_bools_and_numbers():
     assert out["git_dirty"] is True and out["n"] == 3 and out["none"] is None
 
 
+def test_build_fields_caps_tool_outcome_and_text():
+    # Defence-in-depth must cover EVERY field, not only dims: an oversized tool /
+    # outcome (a would-be leak vector) is truncated in payload AND the text column.
+    huge_tool = "t" * 500
+    huge_outcome = "o" * 500
+    f = INV.build_fields(huge_tool, huge_outcome, dims={"cluster": "x"})
+    assert len(f["text"]) <= INV._MAX_VALUE_LEN
+    p = json.loads(f["payload"])
+    assert len(p["tool"]) <= INV._MAX_VALUE_LEN
+    assert len(p["outcome"]) <= INV._MAX_VALUE_LEN
+
+
 # --------------------------------------------------------------------------- #
 # emit_invocation -> temp spool -> daemon round-trip
 # --------------------------------------------------------------------------- #

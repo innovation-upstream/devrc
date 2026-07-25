@@ -591,6 +591,24 @@ def test_main_emits_not_found(repo, tmp_path):
     assert json.loads(ev["payload"])["outcome"] == "not-found"
 
 
+def test_error_path_emits_only_validated_id(tmp_path):
+    """SECURITY (error path): a probe InputError (repo not found) must emit ONLY
+    the validated ticket-id + outcome:error — never the free-text term, the repo
+    PATH, or the exception text."""
+    C = _load_collector()
+    spool = tmp_path / "spool"
+    missing = tmp_path / "SECRETPATH_repo"     # nonexistent -> probe InputError
+    r = _run_with_spool(spool, missing, "86abc123", "SECRETTERM")
+    assert r.returncode == 2, r.stderr
+    ev, raw = _read_last_event(spool, C)
+    p = json.loads(ev["payload"])
+    assert p["outcome"] == "error" and p["verdict"] == "error"
+    assert p["ticket_id"] == "86abc123"
+    for secret in ("SECRETTERM", "SECRETPATH_repo", "not found"):
+        assert secret not in raw, f"{secret} leaked into raw spool line"
+        assert secret not in json.dumps(ev), f"{secret} leaked into event"
+
+
 def test_rejected_ticket_id_emits_nothing(repo, tmp_path):
     """A ticket-id that fails validation is REJECTED before any emit — the
     unvalidated (attacker-controlled) id must never reach telemetry."""

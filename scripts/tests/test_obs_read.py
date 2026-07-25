@@ -740,6 +740,36 @@ def test_main_emits_error_on_transport_failure(capsys, tmp_path, monkeypatch):
     assert p["outcome"] == "error"
 
 
+def test_privacy_error_path_leaks_neither_query_nor_exception(capsys, tmp_path,
+                                                              monkeypatch):
+    """SECURITY (error path): a secret-bearing --query AND a transport exception
+    whose message carries a secret must NOT reach the emitted event — the error
+    path records ONLY {tool,outcome:error,cluster,backend,preset:adhoc}."""
+    import base64 as _b64
+    monkeypatch.setenv("ACTIVITY_SPOOL_DIR", str(tmp_path))
+    kc = tmp_path / "kc"
+    kc.write_text("x")
+
+    def boom(url, timeout=15.0):
+        raise RuntimeError("connect failed: secret_token=hunter2")
+
+    rc = obs.main(["--cluster", "homelab", "--backend", "prometheus",
+                   "--query", 'super_secret_metric{apikey="AKIA_LEAK"}'],
+                  pf_factory=_fake_pf(None), http_get=boom,
+                  env={"KC_HOMELAB": str(kc)})
+    assert rc == 1
+    ev, raw = _read_last_event(tmp_path)
+    p = json.loads(ev["payload"])
+    assert p["outcome"] == "error" and p["preset"] == "adhoc"
+    assert p["cluster"] == "homelab" and p["backend"] == "prometheus"
+    decoded = _b64.b64decode(raw.split("b64:payload=")[1].split("\t")[0])
+    blob = json.dumps(ev)
+    for secret in ("super_secret_metric", "AKIA_LEAK", "hunter2", "secret_token"):
+        assert secret not in blob, f"{secret} leaked into decoded event"
+        assert secret not in raw, f"{secret} leaked into raw spool line"
+        assert secret.encode() not in decoded, f"{secret} leaked into payload"
+
+
 def test_privacy_preset_query_text_not_leaked(capsys, tmp_path, monkeypatch):
     """SECURITY: the emitted event must carry the preset NAME, never the PromQL."""
     monkeypatch.setenv("ACTIVITY_SPOOL_DIR", str(tmp_path))

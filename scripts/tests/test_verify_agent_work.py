@@ -696,6 +696,37 @@ def test_main_emits_invocation_to_spool(tmp_path, monkeypatch):
     assert p["stacks"] == []
 
 
+def test_emitted_event_has_no_build_output_or_paths(tmp_path, monkeypatch):
+    """SECURITY: on a fail/incomplete verdict the emitted event must carry ONLY
+    the bounded stack set + git booleans — never build/test OUTPUT, the failing
+    file path, or the repo/target path."""
+    monkeypatch.setenv("ACTIVITY_SPOOL_DIR", str(tmp_path))
+    r = vaw.Result(target="/home/zach/secret-repo/worktree", strict=False)
+    r.stacks = ["ts", "go"]
+    r.checks = [
+        vaw.Check("go:test", vaw.FAIL, "exit 1: $ go test ./...",
+                  detail="/home/zach/secret-repo/worktree",
+                  output="SECRET_BUILD_OUTPUT panic /home/zach/secret-repo/worktree/main.go:42"),
+        vaw.Check("git:clean-tree", vaw.WARN, "dirty"),
+    ]
+    vaw._emit_adoption(r, duration_ms=1)
+
+    coll = Path(__file__).resolve().parents[1] / "collector"
+    sys.path.insert(0, str(coll))
+    import collector as C  # noqa: PLC0415
+    raw = (tmp_path / "current.log").read_text().strip().splitlines()[-1]
+    ev = C.parse_line(raw)
+    p = json.loads(ev["payload"])
+    assert p["outcome"] == "fail"
+    # payload keys are ONLY the allow-listed set — no output/detail/path fields.
+    assert set(p.keys()) <= {"tool", "outcome", "stacks", "git_dirty",
+                             "git_unpushed", "strict"}
+    assert set(p["stacks"]) <= {"ts", "go", "python", "nix"}
+    for secret in ("SECRET_BUILD_OUTPUT", "secret-repo", "main.go", "panic", "worktree"):
+        assert secret not in raw, f"{secret} leaked into raw spool line"
+        assert secret not in json.dumps(ev), f"{secret} leaked into event"
+
+
 def test_emit_failure_never_changes_exit_or_output(tmp_path, monkeypatch, capsys):
     """BEST-EFFORT: an unwritable spool must NOT change the verdict/exit/output."""
     afile = tmp_path / "afile"

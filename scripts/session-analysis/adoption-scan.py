@@ -205,8 +205,18 @@ def _trend(recent: int, prior: int) -> str:
 # --------------------------------------------------------------------------- #
 # Per-item aggregation (pure — the whole decision surface is unit-tested)
 # --------------------------------------------------------------------------- #
-def aggregate_tool(rows: list[dict], tool: str, now: float, half_s: float) -> dict:
-    """Aggregate `source=tool kind=invocation` rows for ONE tool name."""
+def command_matches(text: str, prefixes: list[str]) -> bool:
+    """True iff a slash-command line IS one of `prefixes` (bare or with args).
+    Tight on purpose: `/obs-read-foo` must NOT count as `/obs-read`. Pure."""
+    t = (text or "").strip()
+    return any(t == pre or t.startswith(pre + " ") for pre in prefixes)
+
+
+def aggregate_tool(rows: list[dict], tool: str, now: float, win: float) -> dict:
+    """Aggregate `source=tool kind=invocation` rows for ONE tool name, counting
+    ONLY events within the adoption window `win` (rows from a wider dead-window
+    fetch are excluded from counts/trend). Trend halves are win/2."""
+    half_s = win / 2.0
     total = 0
     outcomes: Counter = Counter()
     recent = prior = 0
@@ -215,10 +225,13 @@ def aggregate_tool(rows: list[dict], tool: str, now: float, half_s: float) -> di
         name = r.get("tool") or r.get("text") or p.get("tool")
         if name != tool:
             continue
+        e = ch_ts_to_epoch(r.get("ts"))
+        if e is None or (now - e) > win:
+            continue  # outside the --days window (may be in the wider fetch)
         total += 1
         outcome = p.get("outcome") or "unknown"
         outcomes[outcome] += 1
-        b = _half(ch_ts_to_epoch(r.get("ts")), now, half_s)
+        b = _half(e, now, half_s)
         if b == "recent":
             recent += 1
         elif b == "prior":
@@ -228,17 +241,20 @@ def aggregate_tool(rows: list[dict], tool: str, now: float, half_s: float) -> di
 
 
 def aggregate_command(rows: list[dict], prefixes: list[str], now: float,
-                      half_s: float) -> dict:
-    """Aggregate message-stream `command` rows whose text matches a slash prefix."""
+                      win: float) -> dict:
+    """Aggregate message-stream `command` rows whose text IS one of the slash
+    prefixes, within the adoption window `win`."""
+    half_s = win / 2.0
     total = 0
     recent = prior = 0
     for r in rows:
-        text = (r.get("text") or "").strip()
-        if not any(text == pre or text.startswith(pre + " ") or
-                   text.startswith(pre) for pre in prefixes):
+        if not command_matches(r.get("text"), prefixes):
+            continue
+        e = ch_ts_to_epoch(r.get("ts"))
+        if e is None or (now - e) > win:
             continue
         total += 1
-        b = _half(ch_ts_to_epoch(r.get("ts")), now, half_s)
+        b = _half(e, now, half_s)
         if b == "recent":
             recent += 1
         elif b == "prior":
@@ -247,13 +263,18 @@ def aggregate_command(rows: list[dict], prefixes: list[str], now: float,
             "trend": _trend(recent, prior)}
 
 
-def aggregate_cwd(rows: list[dict], now: float, half_s: float) -> dict:
-    """Aggregate the (already cwd-filtered) session rows for a cwd-detected item.
-    Each row is one session that touched the item's cwd."""
-    total = len(rows)
+def aggregate_cwd(rows: list[dict], now: float, win: float) -> dict:
+    """Aggregate the (already cwd-filtered) session rows for a cwd-detected item,
+    within the adoption window `win`. Each row is one session touching the cwd."""
+    half_s = win / 2.0
+    total = 0
     recent = prior = 0
     for r in rows:
-        b = _half(ch_ts_to_epoch(r.get("ts")), now, half_s)
+        e = ch_ts_to_epoch(r.get("ts"))
+        if e is None or (now - e) > win:
+            continue
+        total += 1
+        b = _half(e, now, half_s)
         if b == "recent":
             recent += 1
         elif b == "prior":
@@ -262,9 +283,11 @@ def aggregate_cwd(rows: list[dict], now: float, half_s: float) -> dict:
             "trend": _trend(recent, prior)}
 
 
-def aggregate_friction(insight_rows: list[dict], now: float, half_s: float) -> dict:
-    """Sum the tracked friction categories over two windows (recent vs prior half).
-    DIRECTIONAL only — confounded by different tickets/models across the windows."""
+def aggregate_friction(insight_rows: list[dict], now: float, iwin: float) -> dict:
+    """Sum the tracked friction categories over two windows (recent vs prior half
+    of the insight window `iwin`). DIRECTIONAL only — confounded by different
+    tickets/models across the windows."""
+    half_s = iwin / 2.0
     recent = {k: 0 for k in FRICTION_TRACKED}
     prior = {k: 0 for k in FRICTION_TRACKED}
     sess_recent = sess_prior = 0
@@ -350,20 +373,22 @@ def gather(client, days: int, insight_days: int, dead_days: int,
     now = time.time() if now is None else now
     win = window_seconds(days)
     iwin = window_seconds(insight_days)
-    half = win / 2.0
-    ihalf = iwin / 2.0
     dead_s = window_seconds(dead_days)
+    # The fetch must span BOTH windows so a dead_days LARGER than days is honest
+    # (otherwise a bigger --dead-days is silently clamped to the fetch). Counts
+    # stay scoped to `win` inside the aggregators; DEAD uses the full dead window.
+    fetch_win = max(win, dead_s)
 
     try:
-        tool_rows = client.rows(q_tool_invocations(win, host))
-        cmd_rows = client.rows(q_commands(win, host))
+        tool_rows = client.rows(q_tool_invocations(fetch_win, host))
+        cmd_rows = client.rows(q_commands(fetch_win, host))
         insight_rows = client.rows(q_insights(iwin, host))
         # cwd-detected items each get their own filtered query.
         cwd_rows: dict = {}
         for item in REGISTRY:
             if item["via"] == "cwd":
                 cwd_rows[item["id"]] = client.rows(
-                    q_cwd_sessions(win, item["match"], host))
+                    q_cwd_sessions(fetch_win, item["match"], host))
     except Exception as e:  # noqa: BLE001 — telemetry optional; degrade cleanly
         raise TelemetryUnavailable(str(e)) from e
 
@@ -371,22 +396,20 @@ def gather(client, days: int, insight_days: int, dead_days: int,
     for item in REGISTRY:
         via = item["via"]
         if via == "tool":
-            agg = aggregate_tool(tool_rows, item["tool"], now, half)
+            agg = aggregate_tool(tool_rows, item["tool"], now, win)
         elif via == "command":
-            agg = aggregate_command(cmd_rows, item["prefixes"], now, half)
+            agg = aggregate_command(cmd_rows, item["prefixes"], now, win)
         elif via == "cwd":
-            agg = aggregate_cwd(cwd_rows.get(item["id"], []), now, half)
+            agg = aggregate_cwd(cwd_rows.get(item["id"], []), now, win)
         else:
             agg = {"total": 0, "outcomes": {}, "recent": 0, "prior": 0,
                    "trend": "flat"}
 
-        # DEAD = zero uses within the dead-days window. When dead_days == days
-        # the whole window is the dead window (total==0); otherwise re-bucket.
-        if dead_s >= win:
-            dead = agg["total"] == 0
-        else:
-            dead = _count_within(_item_ts(item, tool_rows, cmd_rows, cwd_rows),
-                                 now, dead_s) == 0
+        # DEAD = zero uses within the dead-days window, computed over the FULL
+        # fetched set (which spans dead_s), so it is correct whether dead_days is
+        # smaller, equal to, or larger than days.
+        dead = _count_within(_item_ts(item, tool_rows, cmd_rows, cwd_rows),
+                             now, dead_s) == 0
 
         impact = {o: agg["outcomes"].get(o, 0) for o in item.get("impact_outcomes", [])}
         items.append({
@@ -397,7 +420,7 @@ def gather(client, days: int, insight_days: int, dead_days: int,
             "impact": impact, "impact_label": item.get("impact_label", ""),
         })
 
-    friction = aggregate_friction(insight_rows, now, ihalf)
+    friction = aggregate_friction(insight_rows, now, iwin)
 
     return {
         "days": days, "insight_days": insight_days, "dead_days": dead_days,
@@ -422,7 +445,7 @@ def _item_ts(item, tool_rows, cmd_rows, cwd_rows) -> list:
     if item["via"] == "command":
         pres = item["prefixes"]
         return [r.get("ts") for r in cmd_rows
-                if any((r.get("text") or "").strip().startswith(pre) for pre in pres)]
+                if command_matches(r.get("text"), pres)]
     if item["via"] == "cwd":
         return [r.get("ts") for r in cwd_rows.get(item["id"], [])]
     return []
