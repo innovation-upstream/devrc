@@ -98,11 +98,15 @@ for d in "${DIRS[@]}"; do
   run_pytest "$d"
 done
 
-# The claude-hooks nudge test is a hand-rolled script (asserts + sys.exit, not
-# pytest-collectable) — run it directly. Hermetic (pure string logic + a
+# The claude-hooks tests are hand-rolled scripts (asserts + sys.exit, not
+# pytest-collectable) — run them directly. Hermetic (pure string logic + a
 # subprocess of the hook itself). Always part of the hermetic set.
-HOOK_TEST="scripts/claude-hooks/tests/test_shell_env_nudge.py"
-if [ -f "$HOOK_TEST" ]; then
+HOOK_TESTS=(
+  "scripts/claude-hooks/tests/test_shell_env_nudge.py"
+  "scripts/claude-hooks/tests/test_claude_notify.py"
+)
+for HOOK_TEST in "${HOOK_TESTS[@]}"; do
+  [ -f "$HOOK_TEST" ] || continue
   echo "=== script $HOOK_TEST ==="
   if python "$HOOK_TEST"; then
     RESULTS+=("PASS  $HOOK_TEST (script)")
@@ -111,7 +115,7 @@ if [ -f "$HOOK_TEST" ]; then
     fail=1
   fi
   echo
-fi
+done
 
 echo "======================== SUMMARY ($SET set) ========================"
 for r in "${RESULTS[@]}"; do echo "  $r"; done

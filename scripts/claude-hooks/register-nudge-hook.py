@@ -1,11 +1,19 @@
 #!/usr/bin/env python3
-"""Idempotently register the PostToolUse nudge hooks in ~/.claude/settings.json.
+"""Idempotently register the devrc-managed Claude Code hooks in ~/.claude/settings.json.
 
 settings.json is per-host and unmanaged (holds permissions/allowlists/secrets), so the
 hook *scripts* are symlinked by home-manager but their *registration* is applied by
-running this once per host. Safe to re-run: it adds only the entries that are missing.
+running this once per host. Safe to re-run: it adds only the entries that are missing
+and NEVER clobbers hooks it doesn't own (clawgate PermissionRequest/Stop, bash-guard,
+tmux hooks, etc. are preserved — this only ever appends).
 
-Run on each host after a home-manager switch that adds a new nudge hook:
+Registers:
+  * PostToolUse(Bash): audit-pr-nudge.py, shell-env-nudge.py
+  * UserPromptSubmit / Stop / SubagentStop: claude-notify.py (the turn-finished
+    notifier — a best-effort side-effect hook, appended alongside any existing
+    Stop/clawgate-stop/tmux hooks).
+
+Run on each host after a home-manager switch that adds a new hook:
     python3 ~/workspace/devrc/scripts/claude-hooks/register-nudge-hook.py
 """
 import json, os, sys
@@ -13,33 +21,54 @@ import json, os, sys
 SETTINGS = os.path.expanduser("~/.claude/settings.json")
 
 # PostToolUse(Bash) nudge hooks to ensure are registered.
-CMDS = [
+POST_BASH_CMDS = [
     "python3 ~/.claude/hooks/audit-pr-nudge.py",
     "python3 ~/.claude/hooks/shell-env-nudge.py",
 ]
+
+# The turn-finished notifier fires on these three events (single script,
+# dispatched on the event name in its stdin payload).
+NOTIFY_CMD = "python3 ~/.claude/hooks/claude-notify.py"
+NOTIFY_EVENTS = ["UserPromptSubmit", "Stop", "SubagentStop"]
 
 with open(SETTINGS) as f:
     data = json.load(f)
 
 hooks = data.setdefault("hooks", {})
-post = hooks.setdefault("PostToolUse", [])
-
-registered = {h.get("command") for entry in post for h in entry.get("hooks", [])}
-
 added = []
-for cmd in CMDS:
-    if cmd in registered:
+
+
+def registered_commands(event_arrays):
+    """All command strings already present across an event's entry list."""
+    return {h.get("command") for entry in event_arrays for h in entry.get("hooks", [])}
+
+
+# --- PostToolUse(Bash) nudge hooks (append-only, matcher=Bash) ---------------
+post = hooks.setdefault("PostToolUse", [])
+post_registered = registered_commands(post)
+for cmd in POST_BASH_CMDS:
+    if cmd in post_registered:
         continue
     post.append({"matcher": "Bash", "hooks": [{"type": "command", "command": cmd}]})
-    added.append(cmd)
+    added.append("PostToolUse(Bash): " + cmd)
+
+# --- claude-notify on the three turn-boundary events (append-only) -----------
+# Preserve every existing entry on each event array (e.g. a clawgate-stop-hook or
+# a tmux Stop hook) — only add claude-notify where it's missing.
+for event in NOTIFY_EVENTS:
+    arr = hooks.setdefault(event, [])
+    if NOTIFY_CMD in registered_commands(arr):
+        continue
+    arr.append({"hooks": [{"type": "command", "command": NOTIFY_CMD}]})
+    added.append("%s: %s" % (event, NOTIFY_CMD))
 
 if not added:
-    print("all nudge hooks already registered — no change")
+    print("all devrc-managed hooks already registered — no change")
     sys.exit(0)
 
 with open(SETTINGS, "w") as f:
     json.dump(data, f, indent=2)
     f.write("\n")
-print("registered PostToolUse(Bash) hooks:")
+print("registered hooks:")
 for c in added:
     print("  +", c)
