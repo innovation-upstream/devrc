@@ -91,13 +91,13 @@ in
           { trigger = ":acq"; replace = "ask me clarifying questions and recommend anything you think would be useful to include"; label = "Ask clarifying questions + suggest additions"; search_terms = ["ask" "clarify" "clarifying" "questions" "elicit" "scope" "include"]; }
           { trigger = ":ds"; replace = "dispatch subagent to "; label = "Dispatch subagent to…"; search_terms = ["dispatch" "subagent" "delegate"]; }
           { trigger = ":rns"; replace = "recommend next steps"; label = "Recommend next steps"; search_terms = ["next" "recommend" "steps" "whats next"]; }
-          { trigger = ":rnx"; replace = "recommend next steps ranked by leverage (impact vs effort); call out the single highest-value move and any quick wins"; label = "Next steps ranked by leverage"; search_terms = ["next" "steps" "ranked" "leverage" "impact" "deep"]; }
-          { trigger = ":pst"; replace = "proceed, use subagent, ensure test coverage"; label = "Proceed with subagent + test coverage"; search_terms = ["proceed" "subagent" "test" "coverage" "verify" "dispatch" "yes"]; }
           { trigger = ":kickoff"; replace = "give me the kickoff message to copy paste to next session"; label = "Kickoff message for next session"; search_terms = ["kickoff" "kick off" "next session" "copy paste" "handoff" "message"]; }
-          { trigger = ":nday"; replace = "it's the next day, check"; label = "Next-day re-check"; search_terms = ["next day" "check" "days" "resume" "morning"]; }
-          { trigger = ":fhrs"; replace = "it's been a few hours, check"; label = "Few-hours re-check"; search_terms = ["hours" "check" "elapsed" "resume"]; }
-          { trigger = ":fdays"; replace = "it's been a few days, check"; label = "Few-days re-check"; search_terms = ["days" "check" "elapsed" "resume"]; }
-          { trigger = ":aep"; replace = "/audit-pr "; label = "Audit PR (→ /audit-pr)"; search_terms = ["audit" "pr" "review" "adversarial"]; }
+          # (removed 2026-07-25 via /espanso-audit — 0 keylog fires over the 9-day
+          #  window + active short-form hand-typing, steering redundant with RULES.md /
+          #  slash-commands: :rnx [leverage-ranking is in RULES; short :rns is what fires],
+          #  :pst [subagent+test-coverage is the standing RULES default; "proceed, dispatch"
+          #  hand-typed 40+×], :aep [/audit-pr invoked directly 39×], and the re-check trio
+          #  :nday/:fhrs/:fdays [hand-typed "its been a few days, check" instead])
 
           { trigger = ":cc"; replace = "${workspace}/civit/civitai "; label = "civitai main repo path"; search_terms = ["civitai" "repo" "web"]; }
           { trigger = ":cdp"; replace = "${workspace}/civit/datapacket-talos "; label = "civitai datapacket-talos path"; search_terms = ["civitai"]; }

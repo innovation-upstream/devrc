@@ -147,17 +147,14 @@ SNIPPETS = {
     ":sshln": ("ssh", None, [], False),
     ":sshll": ("ssh", None, [], False),
     # workflow prompts (current expansions)
+    # (removed 2026-07-25 via /espanso-audit — 0 keylog fires + short-form
+    #  hand-typing, steering redundant with RULES.md/slash-commands:
+    #  :rnx :pst :aep :nday :fhrs :fdays)
     ":eos":     ("prompt", ["identify skills that may need updating"], [], False),
     ":acq":     ("prompt", ["recommend anything you think would be useful to include"], [], False),
     ":ds":      ("prompt", ["dispatch subagent to"], ["adversarially audit the PR", "identify skills that may need updating"], True),
-    ":aep":     ("prompt", None, [], False),
     ":rns":     ("prompt", ["recommend next steps"], ["ranked by leverage"], True),
-    ":rnx":     ("prompt", ["recommend next steps ranked by leverage"], [], False),
-    ":pst":     ("prompt", ["proceed, use subagent, ensure test coverage"], [], True),
     ":kickoff": ("prompt", ["kickoff message to copy paste to next session"], [], False),
-    ":nday":    ("prompt", ["it's the next day, check"], [], True),
-    ":fhrs":    ("prompt", ["it's been a few hours, check"], [], True),
-    ":fdays":   ("prompt", ["it's been a few days, check"], [], True),
     # utilities / typo-correction — output not distinguishable
     ":uuid":     ("util", None, [], False),
     ":clip":     ("util", None, [], False),
