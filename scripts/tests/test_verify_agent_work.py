@@ -635,3 +635,109 @@ def test_main_json_smoke(tmp_path, capsys):
     parsed = json.loads(out)
     assert parsed["target"].endswith(tmp_path.name)
     assert rc == parsed["exit_code"]
+
+
+# --------------------------------------------------------------------------- #
+# adoption telemetry (Part A instrumentation)
+# --------------------------------------------------------------------------- #
+def _mk_result(verdict_checks, stacks=None, strict=False):
+    """Build a Result whose verdict/git-flags are driven by injected checks."""
+    r = vaw.Result(target="/x", strict=strict)
+    r.stacks = stacks or []
+    r.checks = verdict_checks
+    return r
+
+
+def test_adoption_event_pass():
+    r = _mk_result([vaw.Check("git:clean-tree", vaw.PASS, "clean")], stacks=["python"])
+    outcome, dims = vaw.adoption_event(r)
+    assert outcome == "pass"
+    assert dims["stacks"] == ["python"]
+    assert dims["git_dirty"] is False and dims["git_unpushed"] is False
+
+
+def test_adoption_event_fail_maps_and_flags_git():
+    r = _mk_result([
+        vaw.Check("go:test", vaw.FAIL, "boom"),
+        vaw.Check("git:clean-tree", vaw.WARN, "dirty"),
+        vaw.Check("git:pushed", vaw.WARN, "unpushed"),
+    ], stacks=["go"])
+    outcome, dims = vaw.adoption_event(r)
+    assert outcome == "fail"
+    assert dims["git_dirty"] is True and dims["git_unpushed"] is True
+
+
+def test_adoption_event_incomplete():
+    r = _mk_result([vaw.Check("ts", vaw.INCOMPLETE, "no gate")], stacks=["ts"])
+    outcome, _ = vaw.adoption_event(r)
+    assert outcome == "incomplete"
+
+
+def test_main_emits_invocation_to_spool(tmp_path, monkeypatch):
+    """End-to-end: a real run writes exactly ONE well-formed invocation event."""
+    monkeypatch.setenv("ACTIVITY_SPOOL_DIR", str(tmp_path))
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_repo(repo)
+    write(repo / "README.md", "hi")
+    commit_all(repo)
+    rc = vaw.main([str(repo), "--no-gh"])
+    assert rc == 0  # clean repo, no stacks -> PASS
+
+    coll = Path(__file__).resolve().parents[1] / "collector"
+    sys.path.insert(0, str(coll))
+    import collector as C  # noqa: PLC0415
+    line = (tmp_path / "current.log").read_text().strip().splitlines()[-1]
+    ev = C.parse_line(line)
+    assert ev["source"] == "tool" and ev["kind"] == "invocation"
+    assert ev["text"] == "verify-agent-work"
+    p = json.loads(ev["payload"])
+    assert p["tool"] == "verify-agent-work" and p["outcome"] == "pass"
+    assert p["stacks"] == []
+
+
+def test_emitted_event_has_no_build_output_or_paths(tmp_path, monkeypatch):
+    """SECURITY: on a fail/incomplete verdict the emitted event must carry ONLY
+    the bounded stack set + git booleans — never build/test OUTPUT, the failing
+    file path, or the repo/target path."""
+    monkeypatch.setenv("ACTIVITY_SPOOL_DIR", str(tmp_path))
+    r = vaw.Result(target="/home/zach/secret-repo/worktree", strict=False)
+    r.stacks = ["ts", "go"]
+    r.checks = [
+        vaw.Check("go:test", vaw.FAIL, "exit 1: $ go test ./...",
+                  detail="/home/zach/secret-repo/worktree",
+                  output="SECRET_BUILD_OUTPUT panic /home/zach/secret-repo/worktree/main.go:42"),
+        vaw.Check("git:clean-tree", vaw.WARN, "dirty"),
+    ]
+    vaw._emit_adoption(r, duration_ms=1)
+
+    coll = Path(__file__).resolve().parents[1] / "collector"
+    sys.path.insert(0, str(coll))
+    import collector as C  # noqa: PLC0415
+    raw = (tmp_path / "current.log").read_text().strip().splitlines()[-1]
+    ev = C.parse_line(raw)
+    p = json.loads(ev["payload"])
+    assert p["outcome"] == "fail"
+    # payload keys are ONLY the allow-listed set — no output/detail/path fields.
+    assert set(p.keys()) <= {"tool", "outcome", "stacks", "git_dirty",
+                             "git_unpushed", "strict"}
+    assert set(p["stacks"]) <= {"ts", "go", "python", "nix"}
+    for secret in ("SECRET_BUILD_OUTPUT", "secret-repo", "main.go", "panic", "worktree"):
+        assert secret not in raw, f"{secret} leaked into raw spool line"
+        assert secret not in json.dumps(ev), f"{secret} leaked into event"
+
+
+def test_emit_failure_never_changes_exit_or_output(tmp_path, monkeypatch, capsys):
+    """BEST-EFFORT: an unwritable spool must NOT change the verdict/exit/output."""
+    afile = tmp_path / "afile"
+    afile.write_text("x")  # parent-is-a-file -> spool mkdir raises -> swallowed
+    monkeypatch.setenv("ACTIVITY_SPOOL_DIR", str(afile / "spool"))
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_repo(repo)
+    write(repo / "README.md", "hi")
+    commit_all(repo)
+    rc = vaw.main([str(repo), "--json", "--no-gh"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert json.loads(out)["verdict"] == vaw.PASS

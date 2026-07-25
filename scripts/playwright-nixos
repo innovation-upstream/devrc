@@ -47,7 +47,28 @@ FLAKEREF="${REPO}#playwright-driver"
 BROWSERS="$(nix build --no-link --print-out-paths "${FLAKEREF}.browsers" 2>/dev/null | head -n1 || true)"
 DRIVER_VER="$(nix eval --raw "${FLAKEREF}.version" 2>/dev/null || echo unknown)"
 
+# --- adoption telemetry (best-effort; NEVER changes exit code or output) -------
+# Emit ONE invocation event via the sibling `emit` binary. Bounded by a timeout
+# and `|| true`, and skipped entirely if `emit` is absent — telemetry must never
+# affect whether/how the wrapped command runs. dims carry ONLY the driver
+# version + a mode flag; no query/URL/secret ever leaves here.
+_emit_invocation() {
+  local outcome="$1" mode="$2"
+  local emit_bin="${REPO}/scripts/collector/emit"
+  [[ -x "$emit_bin" ]] || return 0
+  local to=""
+  command -v timeout >/dev/null 2>&1 && to="timeout 5"
+  # shellcheck disable=SC2086
+  $to "$emit_bin" source=tool kind=invocation \
+      b64:text=playwright-nixos \
+      b64:tool=playwright-nixos \
+      "b64:outcome=$outcome" \
+      "b64:driver=$DRIVER_VER" \
+      "b64:mode=$mode" >/dev/null 2>&1 || true
+}
+
 if [[ -z "$BROWSERS" || ! -d "$BROWSERS" ]]; then
+  _emit_invocation error resolve-error
   echo "playwright-nixos: could not resolve ${FLAKEREF}.browsers from $REPO" >&2
   echo "  try: nix build \"${FLAKEREF}.browsers\"" >&2
   exit 1
@@ -117,4 +138,8 @@ esac
 
 warn_version_mismatch
 warn_mcp_build_skew
+# Emit BEFORE exec — exec replaces this process, so "ok" here means the wrapper
+# resolved the NixOS browser bundle and is about to launch the command (we can't
+# observe the child's own exit code from a replaced process).
+_emit_invocation ok exec
 exec "$@"

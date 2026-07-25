@@ -668,6 +668,153 @@ def test_main_list_presets(capsys):
 
 
 # =========================================================================== #
+# adoption telemetry (Part A instrumentation)
+# =========================================================================== #
+def _read_last_event(spool_dir):
+    coll = SCRIPTS / "collector"
+    sys.path.insert(0, str(coll))
+    import collector as C  # noqa: PLC0415
+    text = (Path(spool_dir) / "current.log").read_text().strip()
+    line = text.splitlines()[-1]
+    return C.parse_line(line), line
+
+
+def test_invocation_outcome_mapping():
+    assert obs.invocation_outcome(False, False) == "ok"
+    assert obs.invocation_outcome(True, False) == "matched-nothing"
+    # expected-absence preset: empty is healthy -> ok, not a caught silent-zero
+    assert obs.invocation_outcome(True, True) == "ok"
+
+
+def test_main_emits_ok_invocation(capsys, tmp_path, monkeypatch):
+    monkeypatch.setenv("ACTIVITY_SPOOL_DIR", str(tmp_path))
+    kc = tmp_path / "kc"
+    kc.write_text("x")
+
+    def fake_http(url, timeout=15.0):
+        return prom_vector([({"code": "200"}, "10")])
+
+    rc = obs.main(["--cluster", "dpprod", "--preset", "dp-code-breakdown"],
+                  pf_factory=_fake_pf(None), http_get=fake_http,
+                  env={"KC_DPPROD": str(kc)})
+    assert rc == 0
+    ev, _ = _read_last_event(tmp_path)
+    assert ev["source"] == "tool" and ev["text"] == "obs-read"
+    p = json.loads(ev["payload"])
+    assert p["outcome"] == "ok"
+    assert p["cluster"] == "dpprod" and p["backend"] == "prometheus"
+    assert p["preset"] == "dp-code-breakdown"
+
+
+def test_main_emits_matched_nothing(capsys, tmp_path, monkeypatch):
+    monkeypatch.setenv("ACTIVITY_SPOOL_DIR", str(tmp_path))
+    kc = tmp_path / "kc"
+    kc.write_text("x")
+
+    def fake_http(url, timeout=15.0):
+        return prom_empty()
+
+    rc = obs.main(["--cluster", "dpprod", "--preset", "dp-5xx-rate"],
+                  pf_factory=_fake_pf(None), http_get=fake_http,
+                  env={"KC_DPPROD": str(kc)})
+    assert rc == 0
+    ev, _ = _read_last_event(tmp_path)
+    p = json.loads(ev["payload"])
+    assert p["outcome"] == "matched-nothing"
+
+
+def test_main_emits_error_on_transport_failure(capsys, tmp_path, monkeypatch):
+    monkeypatch.setenv("ACTIVITY_SPOOL_DIR", str(tmp_path))
+    kc = tmp_path / "kc"
+    kc.write_text("x")
+
+    def boom(url, timeout=15.0):
+        raise RuntimeError("kubectl exited early")
+
+    rc = obs.main(["--cluster", "dpprod", "--preset", "dp-5xx-rate"],
+                  pf_factory=_fake_pf(None), http_get=boom,
+                  env={"KC_DPPROD": str(kc)})
+    assert rc == 1
+    ev, _ = _read_last_event(tmp_path)
+    p = json.loads(ev["payload"])
+    assert p["outcome"] == "error"
+
+
+def test_privacy_error_path_leaks_neither_query_nor_exception(capsys, tmp_path,
+                                                              monkeypatch):
+    """SECURITY (error path): a secret-bearing --query AND a transport exception
+    whose message carries a secret must NOT reach the emitted event — the error
+    path records ONLY {tool,outcome:error,cluster,backend,preset:adhoc}."""
+    import base64 as _b64
+    monkeypatch.setenv("ACTIVITY_SPOOL_DIR", str(tmp_path))
+    kc = tmp_path / "kc"
+    kc.write_text("x")
+
+    def boom(url, timeout=15.0):
+        raise RuntimeError("connect failed: secret_token=hunter2")
+
+    rc = obs.main(["--cluster", "homelab", "--backend", "prometheus",
+                   "--query", 'super_secret_metric{apikey="AKIA_LEAK"}'],
+                  pf_factory=_fake_pf(None), http_get=boom,
+                  env={"KC_HOMELAB": str(kc)})
+    assert rc == 1
+    ev, raw = _read_last_event(tmp_path)
+    p = json.loads(ev["payload"])
+    assert p["outcome"] == "error" and p["preset"] == "adhoc"
+    assert p["cluster"] == "homelab" and p["backend"] == "prometheus"
+    decoded = _b64.b64decode(raw.split("b64:payload=")[1].split("\t")[0])
+    blob = json.dumps(ev)
+    for secret in ("super_secret_metric", "AKIA_LEAK", "hunter2", "secret_token"):
+        assert secret not in blob, f"{secret} leaked into decoded event"
+        assert secret not in raw, f"{secret} leaked into raw spool line"
+        assert secret.encode() not in decoded, f"{secret} leaked into payload"
+
+
+def test_privacy_preset_query_text_not_leaked(capsys, tmp_path, monkeypatch):
+    """SECURITY: the emitted event must carry the preset NAME, never the PromQL."""
+    monkeypatch.setenv("ACTIVITY_SPOOL_DIR", str(tmp_path))
+    kc = tmp_path / "kc"
+    kc.write_text("x")
+
+    def fake_http(url, timeout=15.0):
+        return prom_vector([({"code": "500"}, "1")])
+
+    rc = obs.main(["--cluster", "dpprod", "--preset", "dp-5xx-rate"],
+                  pf_factory=_fake_pf(None), http_get=fake_http,
+                  env={"KC_DPPROD": str(kc)})
+    assert rc == 0
+    ev, raw_line = _read_last_event(tmp_path)
+    # The preset's PromQL contains this metric; it must NOT appear anywhere in
+    # the emitted (decoded) event OR the raw spool line.
+    assert "traefik_service_requests_total" not in json.dumps(ev)
+    import base64 as _b64
+    decoded = _b64.b64decode(raw_line.split("b64:payload=")[1].split("\t")[0])
+    assert b"traefik_service_requests_total" not in decoded
+    assert json.loads(ev["payload"])["preset"] == "dp-5xx-rate"
+
+
+def test_privacy_adhoc_query_text_not_leaked(capsys, tmp_path, monkeypatch):
+    """SECURITY: a raw --query must be recorded as 'adhoc', never verbatim."""
+    monkeypatch.setenv("ACTIVITY_SPOOL_DIR", str(tmp_path))
+    kc = tmp_path / "kc"
+    kc.write_text("x")
+
+    def fake_http(url, timeout=15.0):
+        return prom_vector([({}, "1")])
+
+    rc = obs.main(["--cluster", "homelab", "--backend", "prometheus",
+                   "--query", 'super_secret_metric{token="hunter2"}'],
+                  pf_factory=_fake_pf(None), http_get=fake_http,
+                  env={"KC_HOMELAB": str(kc)})
+    assert rc == 0
+    ev, _ = _read_last_event(tmp_path)
+    p = json.loads(ev["payload"])
+    assert p["preset"] == "adhoc"
+    blob = json.dumps(ev)
+    assert "super_secret_metric" not in blob and "hunter2" not in blob
+
+
+# =========================================================================== #
 # CLI smoke via subprocess (offline paths only)
 # =========================================================================== #
 def test_cli_list_presets_subprocess():

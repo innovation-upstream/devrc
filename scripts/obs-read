@@ -811,6 +811,45 @@ def query_backend(kubeconfig: str, backend: str, query: str, kind: str,
 
 
 # --------------------------------------------------------------------------- #
+# adoption telemetry (best-effort; NEVER changes exit code or output)
+# --------------------------------------------------------------------------- #
+def invocation_outcome(matched_nothing: bool, absence_ok: bool) -> str:
+    """Map a query result to the adoption outcome enum. Pure.
+
+    A matched-nothing result is the silent-zero trap this tool exists to catch —
+    it is reported as `matched-nothing` so adoption-scan can count silent-zeros
+    caught. But for an expected-absence preset (e.g. "no alerts firing") an empty
+    result is the HEALTHY state, so it counts as `ok`, not a caught silent-zero.
+    """
+    if matched_nothing and not absence_ok:
+        return "matched-nothing"
+    return "ok"
+
+
+def _emit_adoption(outcome: str, cluster, backend, preset,
+                   duration_ms=None) -> None:
+    """Best-effort adoption event. dims carry ONLY the cluster/backend/preset
+    NAMES — NEVER the --query text or any label values. Fully swallowed."""
+    try:
+        sys.path.insert(0, os.path.join(
+            os.path.dirname(os.path.realpath(__file__)), "collector"))
+        import invocation  # noqa: PLC0415
+        invocation.emit_invocation(
+            "obs-read", outcome,
+            dims={
+                "cluster": cluster or "",
+                "backend": backend or "",
+                # preset NAME only (from our fixed library) or the literal
+                # "adhoc" sentinel — the raw --query text is NEVER emitted.
+                "preset": preset if preset else "adhoc",
+            },
+            duration_ms=duration_ms,
+        )
+    except Exception:  # noqa: BLE001 — defence-in-depth around the helper
+        pass
+
+
+# --------------------------------------------------------------------------- #
 # CLI
 # --------------------------------------------------------------------------- #
 def _list_presets() -> str:
@@ -882,12 +921,17 @@ def main(argv=None, *, pf_factory=PortForward, http_get=_http_get,
         print("obs-read: note — preset %r is usually run against %r, you chose "
               "%r." % (p.name, p.cluster_hint, args.cluster), file=sys.stderr)
 
+    import time
+    _t0 = time.monotonic()
+    _dur = lambda: int((time.monotonic() - _t0) * 1000)  # noqa: E731
+
     try:
         payload = query_backend(kubeconfig, backend, query, kind, since_s,
                                  pf_factory=pf_factory, http_get=http_get,
                                  http_timeout=args.timeout)
     except Exception as e:  # noqa: BLE001 — surface transport failures cleanly
         print("obs-read: query transport failed: %s" % e, file=sys.stderr)
+        _emit_adoption("error", args.cluster, backend, args.preset, _dur())
         return 1
 
     try:
@@ -895,9 +939,12 @@ def main(argv=None, *, pf_factory=PortForward, http_get=_http_get,
     except ValueError as e:
         print("obs-read: could not parse %s response: %s" % (backend, e),
               file=sys.stderr)
+        _emit_adoption("error", args.cluster, backend, args.preset, _dur())
         return 1
 
     absence_ok = bool(p and p.absence_ok)
+    _emit_adoption(invocation_outcome(qr.matched_nothing, absence_ok),
+                   args.cluster, backend, args.preset, _dur())
     stdout, stderr = render(qr, args.json, query, args.cluster, backend,
                             absence_ok=absence_ok)
     if stderr:

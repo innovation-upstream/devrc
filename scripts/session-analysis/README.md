@@ -11,7 +11,22 @@ gracefully when telemetry is unconfigured/unreachable.
 | `activity-scan.py` | "where workflow time goes + what to automate" (repeated commands, bottlenecks, attention). |
 | `initiative-scan.py` | cross-repo initiative + progress ledger (handoff docs + git + telemetry). `/initiatives`. |
 | `insights.py` | telemetry-native Claude Code insights report (successor to the built-in `/insights`). |
+| `adoption-scan.py` | which shipped "gametape" tools are actually USED + YIELDING vs DEAD (adoption + outcome-mix + drafter friction trend). `/adoption-scan`. |
 | `session_insight/` | **Layer B** qualitative-facet extractor (this dir). |
+
+## Tool adoption telemetry (`source=tool`, `kind=invocation`)
+
+The instrumented tools each emit ONE best-effort `source=tool kind=invocation`
+event per run via `collector/invocation.py` (`emit_invocation`) — tool name in
+`text`, `{tool, outcome, ...safe dims}` in `payload`, plus `duration_ms` /
+`exit_code`. `adoption-scan.py` reads these (+ the `/verify-agent` `/obs-read`
+message-stream commands + the drafter's cwd sessions + `session-insight` friction)
+into an adoption/impact report. **Privacy:** only the tool name, a low-cardinality
+`outcome` enum, and safe NAMES (preset/cluster/verdict/version) are emitted —
+NEVER raw queries, ticket terms, bodies, or secrets. **Best-effort:** the emit
+never changes a tool's exit code/output; an absent collector is a clean no-op.
+Instrumented today: `verify-agent-work`, `obs-read`, `ticket-status`,
+`playwright-nixos`. Add a row to `adoption-scan.py`'s `REGISTRY` when you ship more.
 
 ## Claude-session telemetry layers (`source=claude`)
 
