@@ -1374,9 +1374,22 @@ def test_render_html_includes_chat_pane_and_ask_wiring():
     assert "askInFlight" in viewer._JS
 
 
-def test_render_html_chat_answer_uses_textContent_not_innerhtml():
-    # untrusted answer/source text must be written via textContent (XSS discipline).
-    assert "aEl.textContent = j.answer" in viewer._JS
+def test_render_html_chat_answer_rendered_via_xss_safe_markdown():
+    # The agent answer now renders MARKDOWN via mdToHtml (which HTML-ESCAPES first), written
+    # through innerHTML — NOT raw model text. The question stays plain (createTextNode).
+    assert "aEl.innerHTML = mdToHtml(answer)" in viewer._JS
+    # mdToHtml escapes before transforming, so no raw model text can reach innerHTML.
+    assert "function mdToHtml(" in viewer._JS
+    assert "function mdEscape(" in viewer._JS
+    # the streaming client posts to the SSE endpoint.
+    assert "/api/ask/stream" in viewer._JS
+
+
+def test_render_html_chat_streams_and_renders_sources():
+    # streaming client: reads the response body, parses SSE frames, renders sources on done.
+    assert "res.body.getReader()" in viewer._JS
+    assert "TextDecoder" in viewer._JS
+    assert "renderSources(block, msg.sources)" in viewer._JS
 
 
 def test_chat_pane_absent_from_error_page():

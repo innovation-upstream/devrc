@@ -210,6 +210,39 @@ class AgentGateway:
             data = json.loads(resp.read().decode("utf-8"))
         return (data["choices"][0]["message"]["content"] or "").strip()
 
+    def chat_stream(self, question: str):
+        """POST one user turn with `stream:True`; YIELD each non-empty `delta.content` piece
+        as it arrives. Reads the response as an OpenAI-style SSE line stream (`data: {json}`
+        lines, terminated by `data: [DONE]`). Blank/keep-alive lines and any single line that
+        fails to parse are skipped (best-effort) so one malformed frame can't abort the turn."""
+        if not self._url:
+            raise RuntimeError("AgentGateway used outside its context manager")
+        body = json.dumps({
+            "model": self._cfg["model"],
+            "messages": [{"role": "user", "content": question}],
+            "stream": True,
+        }).encode("utf-8")
+        req = urllib.request.Request(
+            self._url, data=body, method="POST",
+            headers={"Content-Type": "application/json",
+                     "Accept": "text/event-stream",
+                     "Authorization": f"Bearer {self._token}"},
+        )
+        with urllib.request.urlopen(req, timeout=self._cfg["timeout"]) as resp:
+            for raw in resp:  # the urlopen response is a file-like → iterate SSE lines
+                line = raw.decode("utf-8", errors="replace").strip()
+                if not line or not line.startswith("data:"):
+                    continue
+                payload = line[len("data:"):].strip()
+                if payload == "[DONE]":
+                    break
+                try:
+                    delta = json.loads(payload)["choices"][0]["delta"].get("content")
+                except (ValueError, KeyError, IndexError, TypeError):
+                    continue
+                if delta:
+                    yield delta
+
 
 # --------------------------------------------------------------------------- #
 # Deterministic sources — slug-match the answer against the store's known slugs.
@@ -281,6 +314,63 @@ def agent_ask(question: str, *, views: list[dict] | None = None, env: dict | Non
     _log_agent_ask(result, question=question, started=started, model=cfg["model"],
                    env=env, log_writer=log_writer)
     return result
+
+
+def agent_stream(question: str, *, views: list[dict] | None = None, env: dict | None = None,
+                 gateway_factory=None, log_writer=None):
+    """STREAMING sibling of `agent_ask`: ask the initiatives agent and return a GENERATOR that
+    yields `{"delta": piece}` frames as the answer streams in, then a final
+    `{"done": True, "sources": [...], "answer": "..."}` frame. Returns **None** (not a
+    generator) when the agent is disabled, the question is blank, or the gateway/token SETUP
+    fails — the SAME "fall back to the deterministic assistant" signal `agent_ask` uses.
+
+    The gateway is acquired EAGERLY (before returning the generator) so a setup failure surfaces
+    as None here rather than crashing mid-stream. The returned generator owns the gateway's
+    lifecycle: a `finally` tears the port-forward down even if the consumer abandons the
+    generator early. On a successful, non-empty stream it audit-logs to `initiatives.assistant_log`
+    (reusing `agent_ask`'s write path); an EMPTY stream is not logged and yields a done frame
+    with an empty answer so the caller can fall back.
+
+    `gateway_factory(cfg, token)` and `log_writer(row)` are injectable for tests (no kubectl / DB)."""
+    cfg = agent_config(env)
+    if not cfg["enabled"]:
+        return None
+    question = (question or "").strip()
+    if not question:
+        return None
+    try:
+        token = gateway_token(_read_hooks_token(cfg))
+        factory = gateway_factory or (lambda c, t: AgentGateway(c, t))
+        gw = factory(cfg, token)
+        gw.__enter__()
+    except Exception as exc:  # noqa: BLE001 - setup unreachable/slow → None (regex fallback)
+        sys.stderr.write(f"agent_client: agent_stream setup failed ({type(exc).__name__}: {exc}) "
+                         f"— falling back to the deterministic assistant\n")
+        return None
+
+    def _gen():
+        started = time.monotonic()
+        full: list[str] = []
+        try:
+            for piece in gw.chat_stream(question):
+                if piece:
+                    full.append(piece)
+                    yield {"delta": piece}
+        finally:
+            # ALWAYS close the port-forward — even if the consumer breaks/abandons the generator
+            # (GeneratorExit) or chat_stream raised mid-way.
+            with contextlib.suppress(Exception):
+                gw.__exit__(None, None, None)
+        answer = "".join(full)
+        sources = extract_sources(answer, views or [])
+        if full:
+            result = {"ok": True, "question": question, "intent": "agent", "target": "",
+                      "used_model": True, "answer": answer, "sources": sources}
+            _log_agent_ask(result, question=question, started=started, model=cfg["model"],
+                           env=env, log_writer=log_writer)
+        yield {"done": True, "sources": sources, "answer": answer}
+
+    return _gen()
 
 
 def _log_agent_ask(result: dict, *, question: str, started: float, model: str,

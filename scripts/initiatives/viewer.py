@@ -249,6 +249,52 @@ def build_asker(provider, env=None):
     return asker
 
 
+def build_stream_asker(provider, env=None):
+    """Build the `POST /api/ask/stream` callable — the STREAMING sibling of `build_asker`.
+    Returns `stream_asker(question) -> Iterator[dict]`, a generator yielding SSE-shaped frames
+    (`{"delta": ...}` chunks then a final `{"done": True, "sources": [...], "answer": ...}`).
+
+    When the agent is enabled and answers, its token-by-token stream is threaded through. When
+    the agent is disabled, unreachable, raises, OR returns an EMPTY answer, it falls back to the
+    deterministic `default_ask` — emitted as a SINGLE `{delta}` + `{done}` so the browser path
+    is uniform (it always streams) and the sidebar ALWAYS answers, devpod-down. Returned
+    UNCONDITIONALLY (never None) — the fallback makes the endpoint always usable."""
+    env = os.environ if env is None else env
+    agent = _agent_client()
+
+    def stream_asker(question: str):
+        model, _err = provider.snapshot()
+        views = model.get("flat", []) if model else []
+        gen = None
+        try:
+            gen = agent.agent_stream(question, views=views, env=env)
+        except Exception as exc:  # noqa: BLE001 - the agent path must never break the endpoint
+            sys.stderr.write(f"viewer: agent_stream raised ({type(exc).__name__}: {exc}); "
+                             f"falling back to the deterministic assistant\n")
+            gen = None
+        if gen is not None:
+            produced = False
+            for chunk in gen:
+                if chunk.get("delta"):
+                    produced = True
+                    yield chunk
+                elif chunk.get("done"):
+                    if produced or chunk.get("answer"):
+                        yield chunk
+                        return
+                    # EMPTY agent answer → fall through to the deterministic fallback below.
+                    break
+                else:
+                    yield chunk
+        # Fallback: agent disabled, gen is None, raised, or produced an empty answer.
+        res = default_ask(question, provider)
+        yield {"delta": res.get("answer", "")}
+        yield {"done": True, "sources": res.get("sources", []),
+               "answer": res.get("answer", ""), "intent": res.get("intent")}
+
+    return stream_asker
+
+
 # --------------------------------------------------------------------------- #
 # I/O — read the store, then attach the live tmux overlay.
 # --------------------------------------------------------------------------- #
@@ -969,6 +1015,20 @@ footer .live{color:var(--green)}
   background:var(--bg1);border-left:3px solid var(--green);border-radius:4px;padding:.4rem .55rem}
 .qa .a.pending{color:var(--gray);border-left-color:var(--gray);font-style:italic}
 .qa .a.err{border-left-color:var(--red)}
+.qa .a p{margin:.3rem 0}
+.qa .a p:first-child{margin-top:0}
+.qa .a p:last-child{margin-bottom:0}
+.qa .a ul,.qa .a ol{margin:.3rem 0;padding-left:1.2rem}
+.qa .a li{margin:.12rem 0}
+.qa .a h4{color:var(--yellow);font-size:.9rem;margin:.45rem 0 .2rem}
+.qa .a strong{color:var(--fg);font-weight:bold}
+.qa .a em{font-style:italic}
+.qa .a a{color:var(--blue);text-decoration:underline}
+.qa .a code{background:var(--bg2);border-radius:3px;padding:.02rem .3rem;font-size:.82em;
+  font-family:"JetBrains Mono",ui-monospace,Menlo,Consolas,monospace}
+.qa .a pre{background:var(--bg2);border-radius:4px;padding:.4rem .55rem;overflow-x:auto;
+  margin:.4rem 0}
+.qa .a pre code{background:none;padding:0}
 .qa .srcs{display:flex;flex-wrap:wrap;gap:.3rem;margin-top:.1rem}
 .qa .src{font-size:.74rem;padding:.03rem .4rem;border-radius:3px;background:var(--bg2);
   color:var(--blue)}
@@ -1050,6 +1110,80 @@ function bucketizeRecency(views, nowMs){
 """.strip()
 
 
+# PURE, DOM-FREE markdown→HTML renderer for the Q&A answer — kept in its OWN snippet (like
+# _RECENCY_JS) so the node test can eval it directly, exercising the ACTUAL page code rather
+# than a Python replica. XSS discipline: the source is HTML-ESCAPED FIRST, then a LIMITED,
+# fixed transform set runs on the already-escaped text — so model text can NEVER emit an
+# unescaped tag. Only http/https links become anchors (a `javascript:` URL stays inert text).
+# Substituted into _JS at the __MARKDOWN_JS__ placeholder at module load.
+_MARKDOWN_JS = r"""
+function mdEscape(s){
+  return String(s == null ? '' : s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+function mdToHtml(src){
+  if(src == null) return '';
+  var text = mdEscape(src);
+  // Pull fenced ```code``` and inline `code` OUT first (as placeholders) so the inline
+  // bold/italic/link transforms never touch code spans. Content is already HTML-escaped.
+  var blocks = [], inlines = [];
+  text = text.replace(/```[^\n]*\n?([\s\S]*?)```/g, function(m, code){
+    blocks.push(code.replace(/\n+$/, ''));
+    return '@@CB' + (blocks.length - 1) + '@@';
+  });
+  text = text.replace(/`([^`\n]+)`/g, function(m, code){
+    inlines.push(code);
+    return '@@IC' + (inlines.length - 1) + '@@';
+  });
+  function inline(s){
+    s = s.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+    s = s.replace(/__([^_]+)__/g, '<strong>$1</strong>');
+    s = s.replace(/\*([^*\n]+)\*/g, '<em>$1</em>');
+    s = s.replace(/\b_([^_\n]+)_\b/g, '<em>$1</em>');
+    // links: ONLY http/https become anchors; the href was HTML-escaped above (safe in attr).
+    s = s.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, function(m, label, href){
+      return '<a href="' + href + '" target="_blank" rel="noopener">' + label + '</a>';
+    });
+    return s;
+  }
+  var lines = text.split('\n'), out = [], para = [], listType = null;
+  function flushPara(){ if(para.length){ out.push('<p>' + para.join('<br>') + '</p>'); para = []; } }
+  function closeList(){ if(listType){ out.push('</' + listType + '>'); listType = null; } }
+  for(var i = 0; i < lines.length; i++){
+    var ln = lines[i], t = ln.trim();
+    var h = ln.match(/^(#{1,4})\s+(.*)$/);
+    var ul = ln.match(/^\s*[-*]\s+(.*)$/);
+    var ol = ln.match(/^\s*\d+\.\s+(.*)$/);
+    if(/^@@CB\d+@@$/.test(t)){        // a fenced code block on its own line
+      flushPara(); closeList(); out.push(t);
+    } else if(h){
+      flushPara(); closeList(); out.push('<h4>' + inline(h[2]) + '</h4>');
+    } else if(ul){
+      flushPara();
+      if(listType !== 'ul'){ closeList(); out.push('<ul>'); listType = 'ul'; }
+      out.push('<li>' + inline(ul[1]) + '</li>');
+    } else if(ol){
+      flushPara();
+      if(listType !== 'ol'){ closeList(); out.push('<ol>'); listType = 'ol'; }
+      out.push('<li>' + inline(ol[1]) + '</li>');
+    } else if(t === ''){
+      flushPara(); closeList();
+    } else {
+      closeList(); para.push(inline(ln));
+    }
+  }
+  flushPara(); closeList();
+  var html = out.join('');
+  html = html.replace(/@@CB(\d+)@@/g, function(m, n){
+    return '<pre><code>' + blocks[+n] + '</code></pre>'; });
+  html = html.replace(/@@IC(\d+)@@/g, function(m, n){
+    return '<code>' + inlines[+n] + '</code>'; });
+  return html;
+}
+""".strip()
+
+
 # The whole page's client-side behaviour: parse the embedded JSON, render
 # flat|grouped|recency, filter by search, expand a card (live detail fetch), refresh (POST
 # /refresh), and auto-refresh the data in place. Vanilla JS, no framework, no external
@@ -1058,6 +1192,7 @@ function bucketizeRecency(views, nowMs){
 _JS = r"""
 (function(){
   __RECENCY_JS__
+  __MARKDOWN_JS__
   var el0 = document.getElementById('idata');
   var data;
   try { data = JSON.parse(el0.textContent); }
@@ -1531,36 +1666,82 @@ _JS = r"""
     chatLog.appendChild(block);
     chatLog.scrollTop = chatLog.scrollHeight;
 
-    fetch('/api/ask', {
+    // STREAM the answer token-by-token from the SSE endpoint. Each SSE event is a
+    // `data: {json}\n\n` frame: {delta} appends+re-renders the (markdown) answer, {done}
+    // renders the grounded sources, {error} marks the bubble. The rendered answer goes
+    // through mdToHtml (which ESCAPES first) — never raw model text into innerHTML. The
+    // `you ›` question stays plain text (createTextNode above).
+    var answer = '', gotDelta = false, srcsDone = false, settled = false;
+
+    function applyDelta(piece){
+      if(piece == null) return;
+      if(!gotDelta){ aEl.classList.remove('pending'); gotDelta = true; }
+      answer += piece;
+      aEl.innerHTML = mdToHtml(answer);
+      chatLog.scrollTop = chatLog.scrollHeight;
+    }
+    function markErr(text){
+      aEl.classList.remove('pending');
+      aEl.classList.add('err');
+      if(!answer) aEl.textContent = text;
+    }
+    function handleEvent(chunk){
+      var line = chunk;
+      if(line.indexOf('data:') === 0) line = line.slice(5);
+      line = line.replace(/^\s+/, '');
+      if(!line) return;
+      var msg;
+      try { msg = JSON.parse(line); } catch(e){ return; }
+      if(msg.delta != null) applyDelta(msg.delta);
+      if(msg.error){ markErr('error: ' + msg.error); }
+      if(msg.done){
+        aEl.classList.remove('pending');
+        if(answer) aEl.innerHTML = mdToHtml(answer);
+        else if(!gotDelta) markErr('no answer');
+        if(!srcsDone){ renderSources(block, msg.sources); srcsDone = true; }
+      }
+    }
+    function settle(){
+      if(settled) return; settled = true;
+      askInFlight = false;
+      chatInput.disabled = false;
+      chatSend.disabled = false;
+      chatInput.focus();
+      chatLog.scrollTop = chatLog.scrollHeight;
+    }
+
+    fetch('/api/ask/stream', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({question: q})
-    })
-      .then(function(r){ return r.json().then(function(j){ return {code: r.status, j: j}; }); })
-      .then(function(res){
-        var j = res.j || {};
-        aEl.classList.remove('pending');
-        if(j.answer){
-          aEl.textContent = j.answer;
-        } else {
-          aEl.classList.add('err');
-          aEl.textContent = j.error ? ('error: ' + j.error) : 'no answer';
-        }
-        if(j.ok === false && j.answer) aEl.classList.add('err');
-        renderSources(block, j.sources);
-      })
-      .catch(function(){
-        aEl.classList.remove('pending');
-        aEl.classList.add('err');
-        aEl.textContent = 'request failed — is the viewer still up?';
-      })
-      .then(function(){
-        askInFlight = false;
-        chatInput.disabled = false;
-        chatSend.disabled = false;
-        chatInput.focus();
-        chatLog.scrollTop = chatLog.scrollHeight;
-      });
+    }).then(function(res){
+      if(!res.ok){ markErr('request failed'); settle(); return; }
+      // No ReadableStream support → read the whole body, split into SSE frames (degrade).
+      if(!res.body || !res.body.getReader){
+        return res.text().then(function(t){
+          t.split('\n\n').forEach(handleEvent); settle();
+        });
+      }
+      var reader = res.body.getReader(), decoder = new TextDecoder(), buffer = '';
+      function pump(){
+        return reader.read().then(function(r){
+          if(r.done){
+            if(buffer.trim()) handleEvent(buffer);
+            settle();
+            return;
+          }
+          buffer += decoder.decode(r.value, {stream: true});
+          var parts = buffer.split('\n\n');
+          buffer = parts.pop();
+          parts.forEach(handleEvent);
+          return pump();
+        });
+      }
+      return pump();
+    }).catch(function(){
+      markErr('request failed — is the viewer still up?');
+      settle();
+    });
   }
 
   if(chatForm) chatForm.addEventListener('submit', function(ev){
@@ -1578,6 +1759,7 @@ _JS = r"""
 # Inline the pure recency-bucketing snippet into the page JS (single source of truth: the
 # node test evals _RECENCY_JS directly, the page runs this substituted copy).
 _JS = _JS.replace("__RECENCY_JS__", _RECENCY_JS)
+_JS = _JS.replace("__MARKDOWN_JS__", _MARKDOWN_JS)
 
 
 def _e(s) -> str:
@@ -1918,10 +2100,12 @@ def _parse_ask_question(body: bytes | None) -> str:
     return q.strip() if isinstance(q, str) else ""
 
 
-def make_handler(provider, refresh_controller=None, asker=None):
+def make_handler(provider, refresh_controller=None, asker=None, stream_asker=None):
     """Build a BaseHTTPRequestHandler subclass bound to `provider` + `refresh_controller`
     + `asker` (the READ-ONLY Q&A callable for POST /api/ask; defaults to `default_ask`
-    over this provider). `asker` is injectable so the route is testable without a model."""
+    over this provider) + `stream_asker` (the STREAMING generator for POST /api/ask/stream;
+    None ⇒ that endpoint 503s). Both askers are injectable so the routes are testable without
+    a model."""
     if asker is None:
         asker = lambda q: default_ask(q, provider)  # noqa: E731
 
@@ -1966,7 +2150,55 @@ def make_handler(provider, refresh_controller=None, asker=None):
 
         def do_POST(self) -> None:  # noqa: N802
             body = self._read_body()
+            if urlparse(self.path).path == "/api/ask/stream":
+                self._serve_ask_stream(body)
+                return
             self._serve(write_body=True, method="POST", body=body)
+
+        def _send_json(self, status: int, obj: dict) -> None:
+            payload = json.dumps(obj, ensure_ascii=False, default=str).encode("utf-8")
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(payload)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def _serve_ask_stream(self, body: bytes | None) -> None:
+            """STREAM the READ-ONLY Q&A answer as Server-Sent Events (token-by-token).
+            Same LAN trust model + read-only nature as POST /api/ask — no auth, no write path;
+            abuse bounded by the input cap + the assistant's read-only design (Zach's call).
+            The non-stream POST /api/ask JSON contract is UNCHANGED for curl/tests/other callers."""
+            question = _parse_ask_question(body)
+            if not question:
+                self._send_json(400, {"ok": False, "error": "missing 'question'"})
+                return
+            if stream_asker is None:
+                self._send_json(503, {"ok": False, "error": "assistant unavailable"})
+                return
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("X-Accel-Buffering", "no")   # defeat any reverse-proxy buffering
+            self.send_header("Connection", "close")
+            self.end_headers()
+
+            def sse(obj) -> None:
+                self.wfile.write(
+                    ("data: " + json.dumps(obj, ensure_ascii=False, default=str) + "\n\n")
+                    .encode("utf-8"))
+                self.wfile.flush()
+
+            try:
+                for chunk in stream_asker(question):
+                    sse(chunk)
+            except Exception as exc:  # noqa: BLE001 - never let a stream error kill the thread
+                sys.stderr.write(
+                    f"viewer: /api/ask/stream failed: {type(exc).__name__}: {exc}\n")
+                try:
+                    sse({"error": type(exc).__name__})
+                except Exception:  # noqa: BLE001 - client likely hung up; nothing to do
+                    pass
 
         def log_message(self, fmt, *args) -> None:  # quiet: one compact line to stderr
             sys.stderr.write("viewer: %s - %s\n" % (self.address_string(), fmt % args))
@@ -1983,11 +2215,14 @@ def serve(host: str, port: int, provider: DataProvider | None = None,
     # INITIATIVES_AGENT_ENABLED is set, build_asker returns the agent-backed asker (with a
     # graceful fall-back to that same deterministic path).
     asker = build_asker(provider)
-    httpd = ThreadingHTTPServer((host, port),
-                                make_handler(provider, refresh_controller, asker=asker))
+    stream_asker = build_stream_asker(provider)
+    httpd = ThreadingHTTPServer(
+        (host, port),
+        make_handler(provider, refresh_controller, asker=asker, stream_asker=stream_asker))
     httpd.daemon_threads = True
     sys.stderr.write(f"viewer: serving on http://{host}:{port}/ "
-                     f"(/, /healthz, /api/initiatives.json, /api/initiative, POST /refresh)\n")
+                     f"(/, /healthz, /api/initiatives.json, /api/initiative, POST /refresh, "
+                     f"POST /api/ask, POST /api/ask/stream)\n")
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
