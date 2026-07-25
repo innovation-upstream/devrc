@@ -227,6 +227,48 @@ def test_commits_unknown_true_passes_through():
     assert rows[0]["commits_unknown"] is True
 
 
+# --- session-first discovery columns (v4) ----------------------------------- #
+def test_discovery_columns_in_row_columns():
+    assert "source" in sync.ROW_COLUMNS
+    assert "undocumented" in sync.ROW_COLUMNS
+    # scalar (text/boolean) — NOT JSONB-wrapped.
+    assert "source" not in sync.JSONB_COLUMNS
+    assert "undocumented" not in sync.JSONB_COLUMNS
+
+
+def test_source_and_undocumented_pass_through():
+    ini = _fixture_initiative(source="session", undocumented=True)
+    _meta, rows = sync.report_to_rows(_fixture_report(by_repo={"/r": [ini]}),
+                                      host="workbench")
+    assert rows[0]["source"] == "session"
+    assert rows[0]["undocumented"] is True
+
+
+def test_session_only_initiative_yields_a_clean_row():
+    # A session-derived initiative degrades the doc-only fields to safe nulls; the row must
+    # be complete (every ROW_COLUMN present) so the store insert can't crash on a missing key.
+    ini = {
+        "repo": "/home/zach/workspace/civit/civitai-manager",
+        "slug": "comfyui-nsfw-pipeline-realism",
+        "title": "ComfyUI NSFW realism pipeline",
+        "summary": "ComfyUI NSFW realism pipeline",
+        "date": None, "momentum": "active", "last_touch": _TOUCH_EPOCH,
+        "next_step": None, "commits": 0, "commits_unknown": False, "merged_prs": 0,
+        "open_prs": [], "session_count": 1, "telem_events": 0, "telem_last": None,
+        "current_doc": None, "open_investigations": [], "docs": [],
+        "recent_messages": [{"text": "run the loop", "ts": _TOUCH_EPOCH}],
+        "recent_commits": [], "source": "session", "undocumented": True,
+        "session_ids": ["sess-1"],
+    }
+    _meta, rows = sync.report_to_rows(_fixture_report(by_repo={"/r": [ini]}),
+                                      host="workbench")
+    r = rows[0]
+    assert set(sync.ROW_COLUMNS) <= set(r)           # EVERY stored column present
+    assert r["current_doc"] is None and r["doc_date"] is None and r["next_step"] is None
+    assert r["source"] == "session" and r["undocumented"] is True
+    assert r["summary"] == "ComfyUI NSFW realism pipeline"
+
+
 def test_missing_int_fields_default_to_zero():
     ini = _fixture_initiative()
     for k in ("commits", "merged_prs", "session_count", "telem_events"):
@@ -386,12 +428,42 @@ def test_ensure_schema_adds_summary_column_additively():
 
 def test_view_versions_bumped_so_new_columns_are_exposed():
     # A view's SELECT i.* is frozen at create time; bumping the marker forces a recreate
-    # so base-table columns added later (summary=v2; recent_messages/recent_commits=v3)
-    # surface on initiatives.latest / .current. v3 is the card-legibility bump.
-    assert sync.VIEW_VERSION == "v3"
-    assert sync.LATEST_VIEW_VERSION == "v3"
-    assert sync.VIEW_COMMENT == "initiatives-sync view v3"
-    assert sync.LATEST_VIEW_COMMENT == "initiatives-sync view latest v3"
+    # so base-table columns added later (summary=v2; recent_messages/recent_commits=v3;
+    # source/undocumented=v4) surface on initiatives.latest / .current. v4 is the
+    # session-first discovery bump.
+    assert sync.VIEW_VERSION == "v4"
+    assert sync.LATEST_VIEW_VERSION == "v4"
+    assert sync.VIEW_COMMENT == "initiatives-sync view v4"
+    assert sync.LATEST_VIEW_COMMENT == "initiatives-sync view latest v4"
+
+
+def test_ensure_schema_adds_discovery_columns_additively():
+    # Fresh installs get source/undocumented in CREATE TABLE; pre-existing tables get them
+    # via idempotent ADD COLUMN IF NOT EXISTS (the v3->v4 additive migration).
+    conn = _FakeConn()
+    sync.ensure_schema(conn)
+    joined = " ".join(_sqls(conn))
+    assert "source text" in joined
+    assert "undocumented boolean" in joined
+    assert "ADD COLUMN IF NOT EXISTS source text" in joined
+    assert "ADD COLUMN IF NOT EXISTS undocumented boolean" in joined
+
+
+def test_ensure_schema_v3_to_v4_recreates_both_views_drop_before_create():
+    # v3->v4 appends source/undocumented, reordering `SELECT i.*, s.captured_at` — the same
+    # CREATE-OR-REPLACE-rejects trap as v2->v3, so the marker mismatch must DROP-then-CREATE.
+    conn = _FakeConn(view_regclass="initiatives.current",
+                     view_comment="initiatives-sync view v3",
+                     latest_regclass="initiatives.latest",
+                     latest_comment="initiatives-sync view latest v3")
+    sync.ensure_schema(conn)
+    sqls = _sqls(conn)
+    assert "CREATE OR REPLACE VIEW" not in " ".join(sqls)
+    for view in ("initiatives.current", "initiatives.latest"):
+        drop_i = next(i for i, s in enumerate(sqls) if f"DROP VIEW IF EXISTS {view}" in s)
+        create_i = next(i for i, s in enumerate(sqls) if f"CREATE VIEW {view}" in s)
+        assert drop_i < create_i, f"{view}: DROP must precede CREATE"
+    assert conn.commits == 1
 
 
 def test_ensure_schema_adds_recent_columns_additively():
