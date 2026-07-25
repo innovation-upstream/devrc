@@ -275,3 +275,18 @@ def test_main_unavailable_exits_zero(monkeypatch, capsys):
 
 def test_main_bad_days_exits_two(capsys):
     assert A.main(["--days", "0"]) == 2
+
+
+def test_aggregating_queries_do_not_shadow_ts_column():
+    """Regression: aliasing an aggregate as `max(ts) AS ts` shadows the raw `ts`
+    column, so the WHERE `ts>now()` binds to the aggregate → ClickHouse
+    ILLEGAL_AGGREGATION (a live 500 hermetic mocks can't catch). The two GROUP BY
+    queries must alias to `last_ts`, and only those two carry that alias."""
+    for sql in (A.q_insights(3600), A.q_cwd_sessions(3600, "task-spec-drafter")):
+        assert "max(ts) AS ts " not in sql and "max(ts) AS ts\n" not in sql
+        assert "max(ts) AS last_ts" in sql
+        # the WHERE still filters on the raw column, unshadowed
+        assert "ts>now()-" in sql
+    # a normalised row exposes `ts` for the shared aggregators
+    assert A._norm_last_ts([{"session": "s", "last_ts": "2026-01-01 00:00:00"}])[0]["ts"] \
+        == "2026-01-01 00:00:00"
