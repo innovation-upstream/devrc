@@ -1806,3 +1806,400 @@ def test_match_tmux_tasks_dedupe_and_absent_when_unmatched():
     ]
     isc.match_tmux_to_initiatives(inis, panes, [civit])
     assert inis[0]["tmux_tasks"] == ["Continue sysredis buffer work"]
+
+
+# =========================================================================== #
+# Session-first initiative discovery (the flip: sessions make an initiative
+# exist; a handoff doc is an OPTIONAL title-matched anchor).
+# =========================================================================== #
+
+# The sacred output contract: every initiative dict (doc- OR session-derived) MUST
+# carry this exact key set (sync.write_snapshot does positional r[c] over ROW_COLUMNS).
+CONTRACT_KEYS = {
+    "repo", "slug", "title", "summary", "date", "momentum", "last_touch", "next_step",
+    "commits", "commits_unknown", "merged_prs", "open_prs", "session_count",
+    "telem_events", "telem_last", "current_doc", "open_investigations", "docs",
+    "recent_messages", "recent_commits",
+}
+
+
+def _sess(ai_title, *, n_turns=10, session_id="s0", cwd="/home/u/workspace/devrc",
+          last_user_ts=1000.0, genesis="genesis text", last_prompt=None,
+          branch=None, turns=None, repo=None):
+    """A session record shaped like collect_session_records output."""
+    rec = {"ai_title": ai_title, "last_prompt": last_prompt, "genesis": genesis,
+           "n_turns": n_turns, "session_id": session_id, "cwd": cwd,
+           "last_user_ts": last_user_ts, "mtime": last_user_ts, "branch": branch,
+           "turns": turns if turns is not None else [{"text": genesis, "ts": last_user_ts}]}
+    if repo is not None:
+        rec["repo"] = repo
+    return rec
+
+
+# --------------------------------------------------------------------------- #
+# topic_tokens — precedence aiTitle > last-prompt > genesis
+# --------------------------------------------------------------------------- #
+def test_topic_tokens_prefers_ai_title():
+    rec = _sess("ComfyUI realism pipeline", last_prompt="mail automation",
+                genesis="something else entirely")
+    assert isc.topic_tokens(rec) == frozenset({"comfyui", "realism", "pipeline"})
+
+
+def test_topic_tokens_falls_back_to_last_prompt_then_genesis():
+    assert isc.topic_tokens(_sess(None, last_prompt="mail automation shipping",
+                                   genesis="unrelated")) == frozenset(
+        {"mail", "automation", "shipping"})
+    assert isc.topic_tokens(_sess(None, last_prompt=None,
+                                   genesis="sysredis buffer soak")) == frozenset(
+        {"sysredis", "buffer", "soak"})
+
+
+# --------------------------------------------------------------------------- #
+# session_eligible — the noise floor
+# --------------------------------------------------------------------------- #
+def test_session_eligible_requires_ai_title():
+    assert not isc.session_eligible(_sess(None, n_turns=9), corroborated=True)
+    assert not isc.session_eligible(_sess("   ", n_turns=9), corroborated=True)
+
+
+def test_session_eligible_requires_min_topic_tokens():
+    # A single meaningful token (clawgate) is below MIN_TOPIC_TOKENS=2.
+    assert not isc.session_eligible(_sess("Clawgate", n_turns=9), corroborated=True)
+    assert isc.session_eligible(_sess("Clawgate approval flow", n_turns=9),
+                                corroborated=False)
+
+
+def test_session_eligible_turns_or_corroboration():
+    short = _sess("ComfyUI realism pipeline", n_turns=2)
+    assert not isc.session_eligible(short, corroborated=False)  # <MIN turns, no corroboration
+    assert isc.session_eligible(short, corroborated=True)       # ...rescued by corroboration
+    assert isc.session_eligible(
+        _sess("ComfyUI realism pipeline", n_turns=isc.MIN_SESSION_TURNS),
+        corroborated=False)                                     # ...or enough turns
+
+
+def test_session_corroborated_is_feature_branch_only():
+    # git corroboration = a real non-trunk feature branch (topic-specific), NOT repo-level.
+    assert isc.session_corroborated(_sess("x y", branch="feat/comfyui-pipeline"))
+    assert not isc.session_corroborated(_sess("x y", branch="main"))
+    assert not isc.session_corroborated(_sess("x y", branch=None))
+
+
+def test_build_session_groups_short_session_rescued_by_feature_branch():
+    # A short (<MIN_SESSION_TURNS) session on a feature branch still seeds a group; the same
+    # short session on trunk does not (the narrowed, per-session corroboration).
+    on_branch = _sess("ComfyUI realism pipeline", session_id="a", repo=R, n_turns=2,
+                      branch="feat/comfyui")
+    on_trunk = _sess("Sysredis buffer soak", session_id="b", repo=R, n_turns=2,
+                     branch="main")
+    groups = isc.build_session_groups([on_branch, on_trunk])
+    assert {g["slug"] for g in groups} == {"comfyui-pipeline-realism"}
+
+
+# --------------------------------------------------------------------------- #
+# Grouping — exact, drift-merge, sibling-family stays split
+# --------------------------------------------------------------------------- #
+R = "/home/u/workspace/devrc"
+
+
+def test_build_session_groups_identical_topics_form_one_group():
+    recs = [_sess("ComfyUI realism pipeline", session_id="a", repo=R),
+            _sess("ComfyUI realism pipeline", session_id="b", repo=R)]
+    groups = isc.build_session_groups(recs, corroborated_repos=set())
+    assert len(groups) == 1
+    assert groups[0]["session_ids"] == {"a", "b"}
+    assert groups[0]["slug"] == "comfyui-pipeline-realism"
+
+
+def test_build_session_groups_title_drift_merges_on_distinctive_shared_token():
+    # {comfyui,realism,pipeline} vs {comfyui,nsfw,pipeline}: shared {comfyui,pipeline}
+    # each appear in only these 2 groups (df==2) -> distinctive -> MERGE.
+    recs = [_sess("ComfyUI realism pipeline", session_id="a", repo=R),
+            _sess("ComfyUI NSFW pipeline", session_id="b", repo=R)]
+    groups = isc.build_session_groups(recs, corroborated_repos=set())
+    assert len(groups) == 1
+    assert groups[0]["session_ids"] == {"a", "b"}
+    assert groups[0]["slug"] == "comfyui-nsfw-pipeline-realism"
+
+
+def test_build_session_groups_sibling_family_stays_split():
+    # Three app-blocks siblings all share {app,blocks} (df==3 > 2 -> NOT distinctive), so
+    # they do NOT fuse — the deliberate conservative bar (don't merge app-blocks siblings).
+    recs = [_sess("App blocks soft launch", session_id="a", repo=R),
+            _sess("App blocks followups review", session_id="b", repo=R),
+            _sess("App blocks readiness polish", session_id="c", repo=R)]
+    groups = isc.build_session_groups(recs, corroborated_repos=set())
+    assert len(groups) == 3
+
+
+def test_build_session_groups_slug_stable_across_session_order():
+    a = _sess("ComfyUI realism pipeline", session_id="a", repo=R)
+    b = _sess("ComfyUI NSFW pipeline", session_id="b", repo=R)
+    g1 = isc.build_session_groups([a, b], corroborated_repos=set())
+    g2 = isc.build_session_groups([b, a], corroborated_repos=set())
+    assert g1[0]["slug"] == g2[0]["slug"]          # sorted-token slug is order-independent
+
+
+def test_build_session_groups_scoped_per_repo():
+    # Same topic tokens in two different repos stay two groups (no cross-repo fuse).
+    recs = [_sess("ComfyUI realism pipeline", session_id="a", repo="/r/one"),
+            _sess("ComfyUI realism pipeline", session_id="b", repo="/r/two")]
+    groups = isc.build_session_groups(recs, corroborated_repos=set())
+    assert len(groups) == 2
+
+
+def test_build_session_groups_drops_ineligible_and_repoless():
+    recs = [_sess(None, session_id="noai", repo=R),                  # no ai-title
+            _sess("Clawgate", session_id="short", repo=R),           # <2 tokens
+            _sess("ComfyUI realism pipeline", session_id="x", repo=None)]  # no repo
+    assert isc.build_session_groups(recs, corroborated_repos=set()) == []
+
+
+# --------------------------------------------------------------------------- #
+# _make_group_initiative — full contract set, newest-session title/summary
+# --------------------------------------------------------------------------- #
+def test_make_group_initiative_carries_full_contract_and_newest_title():
+    recs = [_sess("Old ComfyUI title", session_id="a", last_user_ts=100.0, repo=R),
+            _sess("ComfyUI realism pipeline", session_id="b", last_user_ts=900.0, repo=R)]
+    groups = isc.build_session_groups(recs, corroborated_repos=set())
+    ini = groups[0]
+    assert CONTRACT_KEYS <= set(ini)                       # FULL contract key set present
+    assert ini["source"] == "session" and ini["undocumented"] is True
+    assert ini["current_doc"] is None and ini["docs"] == [] and ini["date"] is None
+    assert ini["title"] == "ComfyUI realism pipeline"      # newest session's raw ai-title
+    assert ini["summary"] == "ComfyUI realism pipeline"    # summary from ai-title (not blank)
+
+
+# --------------------------------------------------------------------------- #
+# git_toplevel + discover_repos union with session/telem cwds
+# --------------------------------------------------------------------------- #
+def test_git_toplevel_returns_realpath_or_none(monkeypatch):
+    monkeypatch.setattr(isc, "_run", lambda cmd, timeout=20.0: "/home/u/workspace/devrc\n")
+    # non-existent path -> realpath is a no-op, so it round-trips unchanged.
+    assert isc.git_toplevel("/home/u/workspace/devrc/scripts") == "/home/u/workspace/devrc"
+    monkeypatch.setattr(isc, "_run", lambda cmd, timeout=20.0: "")  # not a repo
+    assert isc.git_toplevel("/home/u") is None
+    assert isc.git_toplevel(None) is None
+
+
+def test_discover_repos_unions_session_cwds(monkeypatch, tmp_path):
+    # A repo with NO handoff/doc glob hit still surfaces via a session cwd's git toplevel.
+    doc_repo = tmp_path / "hasdoc"
+    (doc_repo / "claudedocs").mkdir(parents=True)
+    (doc_repo / "claudedocs" / "handoff-x.md").write_text("# x\n")
+    sess_repo = str(tmp_path / "civit" / "civitai-manager")
+
+    monkeypatch.setattr(isc, "git_toplevel",
+                        lambda cwd: sess_repo if cwd and cwd.startswith(sess_repo) else None)
+    monkeypatch.setattr(isc, "_git_common_dir", lambda p: None)  # treat each as own repo
+
+    repos = isc.discover_repos(str(tmp_path),
+                               session_cwds=[sess_repo + "/sub"], telem_cwds=[])
+    assert str(doc_repo) in repos          # doc-glob source
+    assert sess_repo in repos              # session-cwd source (invisible to doc glob)
+
+
+def test_discover_repos_no_cwds_is_backward_compatible(monkeypatch, tmp_path):
+    # Called with no cwds (viewer/route) -> doc-glob set only, dedup unchanged.
+    plain = tmp_path / "loose"
+    (plain / "claudedocs").mkdir(parents=True)
+    monkeypatch.setattr(isc, "_candidate_repo_dirs", lambda ws: [str(plain)])
+    monkeypatch.setattr(isc, "_git_common_dir", lambda p: None)
+    assert isc.discover_repos(str(tmp_path)) == [str(plain)]
+
+
+# --------------------------------------------------------------------------- #
+# read_handoff / _doc_is_handoff_structured — the anti-flood structural gate
+# --------------------------------------------------------------------------- #
+def test_read_handoff_flags_handoff_and_structure(tmp_path):
+    repo = tmp_path / "r"
+    (repo / "claudedocs").mkdir(parents=True)
+    h = repo / "claudedocs" / "handoff-thing.md"
+    h.write_text("# Handoff: thing\n## Next steps\n1. go\n")
+    d = isc.read_handoff(str(h))
+    assert d["is_handoff"] is True and d["handoff_structured"] is True
+
+
+def test_doc_is_handoff_structured_variants():
+    assert isc._doc_is_handoff_structured("random notes\n", is_handoff=False) is False
+    assert isc._doc_is_handoff_structured("random notes\n", is_handoff=True) is True
+    assert isc._doc_is_handoff_structured("# Session Handoff\nprose\n", is_handoff=False)
+    assert isc._doc_is_handoff_structured("## Next steps\n1. do it\n", is_handoff=False)
+    assert not isc._doc_is_handoff_structured("# Design doc\n## Goals\nx\n", is_handoff=False)
+
+
+# --------------------------------------------------------------------------- #
+# combine_docs_and_groups — anchor / standalone / dormant-doc gating
+# --------------------------------------------------------------------------- #
+def _group(ai_title, repo=R, session_id="g0", last_user_ts=900.0):
+    return isc.build_session_groups(
+        [_sess(ai_title, session_id=session_id, repo=repo, last_user_ts=last_user_ts)],
+        corroborated_repos=set())[0]
+
+
+def test_combine_doc_anchors_group_overlays_and_keeps_doc_slug():
+    doc = isc._new_initiative(
+        repo=R, slug="mail-automation", title="Mail automation",
+        summary="doc summary", next_step="ship it", current_doc="/r/handoff-mail.md",
+        docs=[{"path": "/r/handoff-mail.md", "date": None}], source="doc")
+    grp = _group("Mail automation shipping polish", session_id="sX")
+    out = isc.combine_docs_and_groups([doc], [], [grp])
+    assert out == [doc]                                    # group folded into the doc
+    assert doc["source"] == "both" and doc["undocumented"] is False
+    assert doc["slug"] == "mail-automation"                # doc slug preserved (byte-identical)
+    assert "sX" in doc["session_ids"]                      # session credited to the doc
+    assert doc["summary"] == "doc summary"                 # doc fields win (overlay)
+
+
+def test_combine_group_with_no_doc_stands_alone_undocumented():
+    grp = _group("ComfyUI realism pipeline", session_id="sY")
+    out = isc.combine_docs_and_groups([], [], [grp])
+    assert out == [grp]
+    assert grp["source"] == "session" and grp["undocumented"] is True
+    assert grp["current_doc"] is None
+    assert grp["summary"] == "ComfyUI realism pipeline"    # card face from ai-title
+
+
+def test_combine_dormant_nonhandoff_doc_kept_only_if_structured():
+    structured = isc._doc_to_initiative({
+        "repo": R, "slug": "SESSION-HANDOFF", "title": "Session Handoff notes",
+        "summary": "s", "date": None, "mtime": 1.0, "next_step": "go",
+        "open_investigations": [], "path": "/r/claudedocs/SESSION-HANDOFF.md",
+        "is_handoff": False, "handoff_structured": True})
+    plain = isc._doc_to_initiative({
+        "repo": R, "slug": "DESIGN", "title": "Design", "summary": "s", "date": None,
+        "mtime": 1.0, "next_step": None, "open_investigations": [],
+        "path": "/r/claudedocs/DESIGN.md", "is_handoff": False,
+        "handoff_structured": False})
+    out = isc.combine_docs_and_groups([], [structured, plain], [])
+    slugs = {i["slug"] for i in out}
+    assert "SESSION-HANDOFF" in slugs      # handoff-structured -> kept (dormant, source=doc)
+    assert "DESIGN" not in slugs           # unstructured + unanchored -> dropped (anti-flood)
+
+
+def test_combine_anchor_overrides_structural_gate_for_nonhandoff_doc():
+    # An UNSTRUCTURED non-handoff doc that a session ANCHORS is kept (source=both).
+    design = isc._doc_to_initiative({
+        "repo": R, "slug": "COMFYUI-DESIGN", "title": "ComfyUI integration design",
+        "summary": "s", "date": None, "mtime": 1.0, "next_step": None,
+        "open_investigations": [], "path": "/r/claudedocs/COMFYUI-DESIGN.md",
+        "is_handoff": False, "handoff_structured": False})
+    grp = _group("ComfyUI integration pipeline", session_id="sZ")
+    out = isc.combine_docs_and_groups([], [design], [grp])
+    assert design in out and design["source"] == "both"
+    assert "sZ" in design["session_ids"]
+
+
+# --------------------------------------------------------------------------- #
+# session_ids crediting in attribution
+# --------------------------------------------------------------------------- #
+def test_attribute_sessions_credits_by_session_membership():
+    ini = {"slug": "comfyui-nsfw-pipeline", "docs": [], "session_ids": {"sA"}}
+    genesis = [{"text": "totally unrelated genesis", "mtime": 1.0,
+                "last_user_ts": 500.0, "session_id": "sA"},
+               {"text": "another unrelated", "mtime": 2.0,
+                "last_user_ts": 700.0, "session_id": "sB"}]
+    isc.attribute_sessions([ini], genesis)
+    assert ini["session_count"] == 1        # only sA belongs (by membership, not genesis text)
+    assert ini["last_session"] == 500.0
+
+
+def test_attribute_recent_messages_credits_by_session_membership():
+    ini = {"slug": "comfyui-nsfw-pipeline", "repo": R, "docs": [], "session_ids": {"sA"}}
+    records = [_sess("ComfyUI realism pipeline", session_id="sA", repo=R,
+                     genesis="no handoff named here", cwd=None, branch=None,
+                     turns=[{"text": "wire the comfy pipeline", "ts": 500.0}])]
+    isc.attribute_recent_messages([ini], records, [R])
+    assert [m["text"] for m in ini["recent_messages"]] == ["wire the comfy pipeline"]
+
+
+# --------------------------------------------------------------------------- #
+# _read_session_turns — ai-title / last-prompt / n_turns capture
+# --------------------------------------------------------------------------- #
+def test_read_session_turns_captures_ai_title_last_prompt_and_n_turns(tmp_path):
+    p = tmp_path / "s.jsonl"
+    lines = [
+        _json.dumps({"type": "ai-title", "aiTitle": "Old title", "sessionId": "sid"}),
+        _jsonl_user("first real turn", "2026-07-20T10:00:00Z"),
+        _json.dumps({"type": "last-prompt", "lastPrompt": "the last prompt text"}),
+        _jsonl_user("second real turn", "2026-07-20T10:01:00Z"),
+        _json.dumps({"type": "ai-title", "aiTitle": "ComfyUI realism pipeline"}),
+        _jsonl_user("third real turn", "2026-07-20T10:02:00Z"),
+    ]
+    _write_transcript(p, lines)
+    rec = isc._read_session_turns(str(p), 5)
+    assert rec["ai_title"] == "ComfyUI realism pipeline"   # LAST ai-title wins
+    assert rec["last_prompt"] == "the last prompt text"
+    assert rec["n_turns"] == 3                             # genuine user turns only
+
+
+def test_collect_session_records_sets_session_id_from_filename(tmp_path):
+    root = tmp_path
+    f = root / "proj" / "abc-123.jsonl"
+    f.parent.mkdir(parents=True)
+    _write_transcript(f, [_jsonl_user("hello", "2026-07-20T10:00:00Z")])
+    recs = isc.collect_session_records(str(root), 3650)
+    assert recs[0]["session_id"] == "abc-123"
+
+
+# --------------------------------------------------------------------------- #
+# End-to-end: a repo with NO handoff doc + a resolving session -> ONE
+# session-derived initiative carrying the FULL contract key set.
+# --------------------------------------------------------------------------- #
+def test_build_report_session_only_initiative_full_contract(tmp_path, monkeypatch):
+    import calendar
+    now = float(calendar.timegm((2026, 7, 25, 0, 0, 0, 0, 0, 0)))
+    repo = tmp_path / "civit" / "civitai-manager"
+    repo.mkdir(parents=True)                               # NO claudedocs/ at all
+    monkeypatch.setattr(isc, "git_branches", lambda r: [])
+    monkeypatch.setattr(isc, "git_default_branch", lambda r: "main")
+    monkeypatch.setattr(isc, "gh_open_prs", lambda r: [])
+    monkeypatch.setattr(isc, "gh_merged_prs", lambda r, d: [])
+    monkeypatch.setattr(isc, "worktree_canonical_map", lambda repos: {})
+
+    rec = _sess("ComfyUI NSFW realism pipeline", session_id="sess-1",
+                cwd=str(repo), last_user_ts=now - 3600, n_turns=10,
+                genesis="start the comfyui work",
+                turns=[{"text": "run the comfyui optimization loop", "ts": now - 3600}])
+    monkeypatch.setattr(isc, "collect_session_records", lambda root, d, n=5: [rec])
+
+    report = isc.build_report(14, repos=[str(repo)], client=None, now=now)
+    inis = report["by_repo"][str(repo)]
+    assert len(inis) == 1
+    ini = inis[0]
+    assert CONTRACT_KEYS <= set(ini)                       # FULL contract set — no missing key
+    assert ini["source"] == "session" and ini["undocumented"] is True
+    assert ini["slug"] == "comfyui-nsfw-pipeline-realism"
+    assert ini["title"] == "ComfyUI NSFW realism pipeline"
+    assert ini["session_count"] == 1                       # credited via session_ids
+    assert ini["momentum"] == "active"                     # last user turn ~1h ago
+    assert ini["session_ids"] == ["sess-1"]                # set -> sorted list in the report
+    assert [m["text"] for m in ini["recent_messages"]] == ["run the comfyui optimization loop"]
+
+
+def test_build_report_session_anchors_existing_handoff_slug_unchanged(tmp_path, monkeypatch):
+    # A session on the SAME topic as an existing handoff must anchor it (source=both) and
+    # leave the handoff's byte-identical slug/doc intact — the hard no-churn guarantee.
+    import calendar
+    now = float(calendar.timegm((2026, 7, 25, 0, 0, 0, 0, 0, 0)))
+    repo = tmp_path / "devrc"
+    (repo / "claudedocs").mkdir(parents=True)
+    (repo / "claudedocs" / "handoff-mail-automation-2026-07-24.md").write_text(NEXT_DOC)
+    monkeypatch.setattr(isc, "git_branches", lambda r: [])
+    monkeypatch.setattr(isc, "git_default_branch", lambda r: "main")
+    monkeypatch.setattr(isc, "gh_open_prs", lambda r: [])
+    monkeypatch.setattr(isc, "gh_merged_prs", lambda r, d: [])
+    monkeypatch.setattr(isc, "worktree_canonical_map", lambda repos: {})
+
+    rec = _sess("Mail automation shipping polish", session_id="sess-9",
+                cwd=str(repo), last_user_ts=now - 3600, n_turns=10,
+                genesis="continue mail automation")
+    monkeypatch.setattr(isc, "collect_session_records", lambda root, d, n=5: [rec])
+
+    report = isc.build_report(14, repos=[str(repo)], client=None, now=now)
+    inis = report["by_repo"][str(repo)]
+    assert len(inis) == 1                                  # NOT duplicated into a 2nd card
+    ini = inis[0]
+    assert ini["slug"] == "mail-automation"                # byte-identical handoff slug
+    assert ini["source"] == "both"                         # doc anchored the session group
+    assert ini["session_ids"] == ["sess-9"]

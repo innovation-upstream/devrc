@@ -116,12 +116,37 @@ RECENT_MESSAGES_PER_INITIATIVE = 5  # top-N (newest) messages surfaced per initi
 RECENT_MESSAGE_MAX_CHARS = 200      # per-message truncation so a card stays legible
 RECENT_COMMITS_PER_INITIATIVE = 5   # most-recent commit subjects surfaced per initiative
 
+# Session-first initiative discovery (the flip from handoff-doc-only discovery): an
+# active Claude SESSION, grouped by (repo, topic), is what makes an initiative EXIST; a
+# handoff doc (any filename) is an OPTIONAL title-matched anchor, not a prerequisite. A
+# session seeds/joins a group only when it clears this deterministic noise floor — it has
+# an ai-title AND >= MIN_TOPIC_TOKENS meaningful topic tokens AND (>= MIN_SESSION_TURNS
+# genuine user turns OR git corroboration — see below). Tunable module constants so the
+# flood-vs-recall trade-off is one edit away (see the on-real-data validation).
+#
+# NOISE-FLOOR TUNING (validated on 14d of real transcripts, 206 sessions): the design's
+# repo-level telemetry corroboration was measured to NULLIFY the turn floor in the
+# firehose repo (datapacket-talos — where nearly every session runs, so the repo is always
+# "corroborated"), letting ephemeral one-off sessions ("Yes, dispatch", "commit and push")
+# mint initiatives. So MIN_SESSION_TURNS was raised 3->8 AND corroboration was NARROWED
+# from repo-level to a PER-SESSION signal: the session did work on a real (non-trunk)
+# feature branch. That is topic-specific git corroboration — it rescues a short session
+# that is clearly tracked work without blanket-admitting every short session in an active
+# repo. A wrong initiative costs more than a missed one (the scan's precision stance).
+MIN_TOPIC_TOKENS = 2   # a session's ai-title must yield at least this many topic tokens
+MIN_SESSION_TURNS = 8  # ...and this many genuine user turns, unless git-corroborated
+
 # A YYYY-MM-DD date anywhere in a handoff filename stem.
 DATE_RE = re.compile(r"(\d{4}-\d{2}-\d{2})")
 # "## Next steps" with any trailing decoration (the template varies a little).
 NEXT_STEPS_RE = re.compile(r"^##+\s+next steps\b", re.I)
 OPEN_INV_RE = re.compile(r"^##+\s+open investigations\b", re.I)
 ANY_H2_RE = re.compile(r"^##\s+")
+# A heading naming this doc as a handoff/session-handoff — the structural marker that
+# lets a NON-`handoff-*.md` file (e.g. `SESSION-HANDOFF.md`) still stand alone as a
+# documented-but-dormant initiative even when no live session anchors it. Kept narrow
+# (the word "handoff") so 38 misc `claudedocs/*.md` don't flood the ledger.
+HANDOFF_HEADING_RE = re.compile(r"^#{1,6}\s+.*\bhandoff\b", re.I)
 # A leading list marker: "1. ", "1) ", "- ", "* ".
 LIST_ITEM_RE = re.compile(r"^\s*(?:\d+[.)]|[-*])\s+(.*\S)\s*$")
 H3_RE = re.compile(r"^###\s+(.*\S)\s*$")
@@ -583,12 +608,61 @@ def rel_age(ts: float | None, now: float | None = None) -> str:
     return f"{int(s // (7 * DAY))}w"
 
 
+# The CONTRACT: every initiative dict — doc-derived OR session-derived — MUST carry
+# this exact key set with these types, because sync.write_snapshot does a positional
+# `r[c]` over ROW_COLUMNS and a missing key crashes the store insert. Building EVERY
+# initiative through this one function is what guarantees no key can be silently missed;
+# doc-only fields degrade to safe defaults for a session-only initiative. `source`,
+# `undocumented`, `session_ids`, `_topic_tokens`, `handoff_structured` are discovery
+# metadata (NOT stored — sync's report_to_rows only reads the named contract keys).
+def _new_initiative(repo: str, slug: str, title: str | None, *,
+                    summary: str | None = None, date: str | None = None,
+                    doc_mtime: float | None = None, next_step: str | None = None,
+                    open_investigations: list | None = None,
+                    current_doc: str | None = None, docs: list | None = None,
+                    source: str = "doc", undocumented: bool = False,
+                    session_ids: set | None = None) -> dict:
+    return {
+        # --- stored contract keys -------------------------------------------- #
+        "repo": repo,
+        "slug": slug,
+        "title": title,
+        "summary": summary,
+        "date": date,
+        "next_step": next_step,
+        "open_investigations": list(open_investigations or []),
+        "current_doc": current_doc,
+        "docs": list(docs or []),
+        # attribution defaults — overwritten unconditionally by attribute_* / momentum,
+        # but pre-set so an initiative that skips a pass never lacks a contract key.
+        "momentum": "unknown",
+        "last_touch": None,
+        "commits": 0,
+        "commits_unknown": False,
+        "merged_prs": 0,
+        "open_prs": [],
+        "session_count": 0,
+        "telem_events": 0,
+        "telem_last": None,
+        "recent_messages": [],
+        "recent_commits": [],
+        # --- internal / freshness (already emitted today; sync ignores) ------- #
+        "doc_mtime": doc_mtime,
+        # --- discovery metadata (Commit A: emitted in --json, NOT stored) ----- #
+        "source": source,          # "doc" | "session" | "both"
+        "undocumented": undocumented,
+        "session_ids": set(session_ids or ()),
+    }
+
+
 def cluster_handoffs(docs: list[dict]) -> list[dict]:
     """Group parsed handoff docs by (repo, base_slug); newest doc = current state.
 
     `docs` items have: repo, slug, date (str|None), mtime (float), title, next_step,
     open_investigations, path. Returns one initiative dict per cluster, carrying the
-    newest doc's parsed fields + a list of all member doc paths/dates.
+    newest doc's parsed fields + a list of all member doc paths/dates. Slug is the
+    filename base slug (byte-identical across runs) — this is the hard stability
+    guarantee the store/recaps depend on.
     """
     groups: dict[tuple, list[dict]] = {}
     for d in docs:
@@ -598,18 +672,12 @@ def cluster_handoffs(docs: list[dict]) -> list[dict]:
     for (repo, slug), members in groups.items():
         members.sort(key=_doc_sort_key, reverse=True)
         cur = members[0]
-        initiatives.append({
-            "repo": repo,
-            "slug": slug,
-            "title": cur["title"],
-            "summary": cur["summary"],
-            "date": cur["date"],
-            "doc_mtime": cur["mtime"],
-            "next_step": cur["next_step"],
-            "open_investigations": cur["open_investigations"],
-            "current_doc": cur["path"],
-            "docs": [{"path": m["path"], "date": m["date"]} for m in members],
-        })
+        initiatives.append(_new_initiative(
+            repo=repo, slug=slug, title=cur["title"], summary=cur["summary"],
+            date=cur["date"], doc_mtime=cur["mtime"], next_step=cur["next_step"],
+            open_investigations=cur["open_investigations"], current_doc=cur["path"],
+            docs=[{"path": m["path"], "date": m["date"]} for m in members],
+            source="doc"))
     return initiatives
 
 
@@ -631,6 +699,180 @@ def sort_initiatives(initiatives: list[dict]) -> list[dict]:
         key=lambda i: (MOMENTUM_RANK.get(i.get("momentum", "unknown"), 9),
                        -(i.get("last_touch") or 0)),
     )
+
+
+# --------------------------------------------------------------------------- #
+# Session-first discovery — group active Claude sessions into initiatives
+# (deterministic, no LLM; reuses text_tokens + the best_title_match df bar).
+# --------------------------------------------------------------------------- #
+def topic_tokens(rec: dict) -> frozenset:
+    """The TOPIC fingerprint of a session: `text_tokens` of its ai-title (Claude Code's
+    auto-title), falling back to its last-prompt then genesis.
+
+    ai-title is the human-readable "what is this session about" that Claude Code writes
+    into the transcript (`{"type":"ai-title","aiTitle":…}`) — the highest-signal topic
+    identifier with NO LLM call. The same `text_tokens` used for pane/title matching, so
+    a session groups with a handoff/pane on word equality (dates/verbs/stop/short dropped).
+    """
+    src = rec.get("ai_title") or rec.get("last_prompt") or rec.get("genesis") or ""
+    return frozenset(text_tokens(src))
+
+
+def session_corroborated(rec: dict) -> bool:
+    """Per-session git corroboration: did this session do work on a real (non-trunk)
+    feature branch? A tracked feature branch is strong evidence of a real initiative
+    (vs a throwaway on trunk/main). Narrower than repo-level telemetry corroboration,
+    which floods a firehose repo (see the noise-floor tuning note)."""
+    b = (rec.get("branch") or "").strip()
+    if not b:
+        return False
+    return b.lower() not in {x.lower() for x in TRUNK_BRANCHES}
+
+
+def session_eligible(rec: dict, corroborated: bool) -> bool:
+    """Does a session clear the noise floor to seed/join a group? (deterministic).
+
+    Requires an ai-title AND >= MIN_TOPIC_TOKENS topic tokens AND (>= MIN_SESSION_TURNS
+    genuine user turns OR `corroborated`). `corroborated` is the caller's git-corroboration
+    verdict (`session_corroborated`) — a short but branch-tracked session still qualifies,
+    while a short throwaway on trunk needs the full turn count.
+    """
+    if not (rec.get("ai_title") or "").strip():
+        return False
+    if len(topic_tokens(rec)) < MIN_TOPIC_TOKENS:
+        return False
+    if int(rec.get("n_turns") or 0) >= MIN_SESSION_TURNS:
+        return True
+    return corroborated
+
+
+def _should_merge_groups(a: frozenset, b: frozenset, df: dict[str, int]) -> bool:
+    """Merge two same-repo session groups (title drift) iff they share a repo-DISTINCTIVE
+    token — one present in <= 2 of the repo's exact groups (i.e. essentially only this
+    pair). A shared token always has df >= 2, so `df <= 2` means "unique to this pair".
+
+    This is the CONSERVATIVE reading of best_title_match's bar: a family of siblings that
+    all share a generic prefix (`app-blocks`, `app-blocks-followups`, `app-blocks-ux` →
+    {app,blocks} shared with df=3) does NOT fuse, because {app,blocks} appear in >2 groups;
+    but genuine title drift (`ComfyUI realism pipeline` vs `ComfyUI NSFW pipeline`, sharing
+    {comfyui,pipeline} present only in those two) does. Deliberately stricter than a raw
+    ">=2 shared tokens" bar — a wrong fuse silently merges two distinct initiatives, which
+    costs more than leaving near-duplicates split (matches the scan's precision stance).
+    """
+    shared = a & b
+    return any(df.get(t, 0) <= 2 for t in shared)
+
+
+def _merge_group_indices(tok_sets: list[frozenset], df: dict[str, int]) -> list[list[int]]:
+    """Union-find over a repo's exact-group token sets; returns lists of member indices.
+
+    Pairs that clear `_should_merge_groups` are unioned (transitively — a drift CHAIN
+    A~B~C folds all three). Deterministic: `tok_sets` is pre-sorted by the caller and the
+    O(n^2) pass is order-independent given fixed df."""
+    parent = list(range(len(tok_sets)))
+
+    def find(i: int) -> int:
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    for i in range(len(tok_sets)):
+        for j in range(i + 1, len(tok_sets)):
+            if _should_merge_groups(tok_sets[i], tok_sets[j], df):
+                parent[find(i)] = find(j)
+
+    clusters: dict[int, list[int]] = {}
+    for i in range(len(tok_sets)):
+        clusters.setdefault(find(i), []).append(i)
+    return list(clusters.values())
+
+
+def _make_group_initiative(repo: str, records: list[dict],
+                           union_tokens: frozenset) -> dict:
+    """One merged session group -> a session-derived initiative (the FULL contract set).
+
+    slug = the sorted merged token set ("-".join) — stable across runs and session order.
+    title/summary come from the group's MOST-RECENT session's raw ai-title (so the card
+    face isn't blank). `session_ids` credits the group's sessions in attribution even
+    though no genesis/handoff names its token-slug. source="session", undocumented=True —
+    a later doc anchor may flip these to "both"."""
+    def _rec_ts(r: dict) -> float:
+        return r.get("last_user_ts") or r.get("mtime") or 0.0
+
+    newest = max(records, key=_rec_ts)
+    slug = "-".join(sorted(union_tokens))
+    ai_title = (newest.get("ai_title") or "").strip()
+    session_ids = {r["session_id"] for r in records if r.get("session_id")}
+    ini = _new_initiative(
+        repo=repo, slug=slug, title=ai_title or slug,
+        summary=_cap_summary(ai_title) if ai_title else None,
+        source="session", undocumented=True, session_ids=session_ids)
+    ini["_topic_tokens"] = frozenset(union_tokens)
+    return ini
+
+
+def build_session_groups(records: list[dict],
+                         corroborated_repos: set[str] | None = None) -> list[dict]:
+    """Group in-window Claude sessions into session-derived initiatives (per repo).
+
+    Two deterministic passes (per the discovery design):
+      1. EXACT — eligible sessions with an identical topic-token set (same repo) group.
+      2. MERGE — same-repo exact-groups sharing a repo-distinctive token fold together
+         (title drift; `_should_merge_groups`), via union-find.
+    Each record must already carry a resolved `repo` (None → skipped) plus ai_title /
+    last_prompt / genesis / n_turns / session_id / last_user_ts / mtime / branch. Corroboration
+    is PER-SESSION (`session_corroborated` — a real feature branch), NOT repo-level (which was
+    measured to flood the firehose repo); `corroborated_repos` is accepted for signature
+    compatibility but no longer widens eligibility. Returns session-derived initiative dicts
+    (source="session"); anchoring to docs happens later.
+    """
+    eligible = [r for r in records
+                if r.get("repo")
+                and session_eligible(r, session_corroborated(r))]
+
+    # Pass 1: exact groups keyed (repo, topic_tokens).
+    exact: dict[tuple, list[dict]] = {}
+    for r in eligible:
+        exact.setdefault((r["repo"], topic_tokens(r)), []).append(r)
+
+    # Pass 2: per-repo union-find merge on repo-distinctive shared tokens.
+    keys_by_repo: dict[str, list[frozenset]] = {}
+    for (repo, toks) in exact:
+        keys_by_repo.setdefault(repo, []).append(toks)
+
+    groups: list[dict] = []
+    for repo, tok_sets in keys_by_repo.items():
+        tok_sets = sorted(tok_sets, key=lambda s: sorted(s))  # deterministic order
+        df: dict[str, int] = {}
+        for s in tok_sets:
+            for t in s:
+                df[t] = df.get(t, 0) + 1
+        for member_idxs in _merge_group_indices(tok_sets, df):
+            member_records: list[dict] = []
+            union_tokens: set = set()
+            for i in member_idxs:
+                member_records.extend(exact[(repo, tok_sets[i])])
+                union_tokens |= tok_sets[i]
+            groups.append(_make_group_initiative(repo, member_records,
+                                                 frozenset(union_tokens)))
+    return groups
+
+
+def _doc_is_handoff_structured(text: str, is_handoff: bool) -> bool:
+    """Does a doc STRUCTURALLY look like a handoff (so a NON-`handoff-*.md` file may stand
+    alone as a documented-dormant initiative)? True for any `handoff-*.md`, or a doc with a
+    parseable Next-steps item, or a heading naming it a handoff. Narrow on purpose — it
+    gates the ~38 misc `claudedocs/*.md` out of the ledger unless a live session anchors
+    them (an anchor overrides this gate)."""
+    if is_handoff:
+        return True
+    if parse_next_step(text) is not None:
+        return True
+    for line in text.splitlines():
+        if HANDOFF_HEADING_RE.match(line):
+            return True
+    return False
 
 
 # --------------------------------------------------------------------------- #
@@ -690,25 +932,51 @@ def _canonical_repo_for_group(candidates: list[str], common_dir: str) -> str:
     return sorted(candidates)[0]
 
 
-def discover_repos(workspace: str = WORKSPACE) -> list[str]:
-    """Dirs under ~/workspace (and one nested level) that hold handoff docs.
+def git_toplevel(cwd: str | None) -> str | None:
+    """`git -C cwd rev-parse --show-toplevel` (realpath'd), or None if `cwd` is not inside
+    a git worktree. A cwd of a bare `~` / non-repo dir yields no toplevel → None → dropped,
+    so session/telemetry activity that isn't in a repo can't mint a phantom repo."""
+    if not cwd:
+        return None
+    out = _run(["git", "-C", cwd, "rev-parse", "--show-toplevel"]).strip()
+    if not out:
+        return None
+    try:
+        return os.path.realpath(out)
+    except OSError:
+        return out
 
-    Collapses git worktrees to their canonical repo: candidate dirs that are
-    worktrees of the SAME repository (same `git rev-parse --git-common-dir`) are
-    grouped, and ONE canonical repo per group is kept (the main worktree, or its
-    toplevel, see `_canonical_repo_for_group`). A candidate that isn't a git repo
-    at all (no common-dir) falls back to being its own repo, so a plain dir with a
-    `claudedocs/` still surfaces.
-    """
-    return _dedup_worktrees(_candidate_repo_dirs(workspace))
+
+def discover_repos(workspace: str = WORKSPACE,
+                   session_cwds: list[str] | None = None,
+                   telem_cwds: list[str] | None = None) -> list[str]:
+    """The repo universe = UNION of three sources, worktree-collapsed to canonical repos:
+
+      1. dirs with any TOP-LEVEL `claudedocs/*.md` (top + one nested level under
+         ~/workspace) — the historical doc-glob set, now ANY `*.md` not only `handoff-*`;
+      2. `git_toplevel` of every in-window Claude-session cwd (session-first discovery —
+         this is what surfaces a repo like `civit/civitai-manager` whose handoff doc is
+         named `SESSION-HANDOFF.md`, invisible to the doc glob);
+      3. `git_toplevel` of every telemetry cwd.
+
+    Worktrees of the SAME repository (same `git rev-parse --git-common-dir`) collapse to
+    ONE canonical repo (`_dedup_worktrees`); a non-git candidate survives as its own repo.
+    Backward-compatible: called with no cwds (viewer/route) it returns the doc-glob set."""
+    cands: set[str] = set(_candidate_repo_dirs(workspace))
+    for cwd in set(session_cwds or ()) | set(telem_cwds or ()):
+        top = git_toplevel(cwd)
+        if top:
+            cands.add(top)
+    return _dedup_worktrees(sorted(cands))
 
 
 def _candidate_repo_dirs(workspace: str) -> list[str]:
-    """Raw candidate repo dirs (pre-dedup): parents of any handoff doc."""
+    """Raw candidate repo dirs (pre-dedup): parents of any top-level `claudedocs/*.md`
+    (top + one nested level; subdir files under claudedocs/ are ignored)."""
     cands: set[str] = set()
     patterns = [
-        os.path.join(workspace, "*", "claudedocs", "handoff-*.md"),
-        os.path.join(workspace, "*", "*", "claudedocs", "handoff-*.md"),
+        os.path.join(workspace, "*", "claudedocs", "*.md"),
+        os.path.join(workspace, "*", "*", "claudedocs", "*.md"),
     ]
     for pat in patterns:
         for p in glob.glob(pat):
@@ -769,9 +1037,12 @@ def _git_worktree_paths(repo: str) -> list[str]:
 
 
 def read_handoff(path: str) -> dict:
-    """Parse one handoff doc into its initiative-registry fields."""
+    """Parse one doc (ANY top-level `claudedocs/*.md`, not just `handoff-*.md`) into its
+    initiative-registry fields. `is_handoff` / `handoff_structured` let the caller decide
+    whether a NON-handoff-named doc may stand alone (see `_doc_is_handoff_structured`)."""
     name = os.path.basename(path)
     slug, date = parse_handoff_filename(name)
+    is_handoff = name.startswith("handoff-") or name == "handoff.md"
     try:
         text = Path(path).read_text(errors="replace")
     except Exception:
@@ -786,6 +1057,8 @@ def read_handoff(path: str) -> dict:
         "summary": parse_summary(text),
         "next_step": parse_next_step(text),
         "open_investigations": parse_open_investigations(text),
+        "is_handoff": is_handoff,
+        "handoff_structured": _doc_is_handoff_structured(text, is_handoff),
     }
 
 
@@ -797,12 +1070,78 @@ def _safe_mtime(path: str) -> float:
 
 
 def load_initiatives(repos: list[str]) -> list[dict]:
-    """Discover + parse + cluster handoffs across the given repos."""
+    """Discover + parse + cluster `handoff-*.md` docs across the given repos.
+
+    Deliberately still `handoff-*.md` ONLY (not every `*.md`): these are the canonical
+    handoff registry whose base-slug clustering must stay BYTE-IDENTICAL for the store /
+    recaps. Non-handoff `claudedocs/*.md` are handled by `load_extra_doc_initiatives` so
+    they only surface when a session anchors them (or they're handoff-structured)."""
     docs = []
     for repo in repos:
         for path in sorted(glob.glob(os.path.join(repo, "claudedocs", "handoff-*.md"))):
             docs.append(read_handoff(path))
     return cluster_handoffs(docs)
+
+
+def _doc_to_initiative(d: dict, source: str = "doc") -> dict:
+    """One parsed non-handoff doc -> a single-doc initiative (full contract set)."""
+    ini = _new_initiative(
+        repo=d["repo"], slug=d["slug"], title=d["title"], summary=d["summary"],
+        date=d["date"], doc_mtime=d["mtime"], next_step=d["next_step"],
+        open_investigations=d["open_investigations"], current_doc=d["path"],
+        docs=[{"path": d["path"], "date": d["date"]}], source=source)
+    ini["handoff_structured"] = bool(d.get("handoff_structured"))
+    return ini
+
+
+def load_extra_doc_initiatives(repos: list[str]) -> list[dict]:
+    """Non-`handoff-*.md` top-level `claudedocs/*.md` as one initiative per doc.
+
+    These are ANCHOR CANDIDATES for session groups (a matching group flips one to
+    source="both" and enriches its card) and, when handoff-structured, can stand alone as
+    documented-dormant initiatives. Kept separate from the handoff cluster so existing
+    handoff slugs never change. Skips the `handoff-*` files owned by `load_initiatives`."""
+    out: list[dict] = []
+    for repo in repos:
+        for path in sorted(glob.glob(os.path.join(repo, "claudedocs", "*.md"))):
+            name = os.path.basename(path)
+            if name.startswith("handoff-") or name == "handoff.md":
+                continue
+            out.append(_doc_to_initiative(read_handoff(path)))
+    return out
+
+
+def combine_docs_and_groups(doc_inis: list[dict], extra_inis: list[dict],
+                            groups: list[dict]) -> list[dict]:
+    """Fuse doc initiatives with session-derived groups (docs ENRICH, don't create).
+
+    For each session group, find its single best-overlapping doc/extra initiative in the
+    SAME repo (`best_title_match` with the group's topic tokens as the query — the inverse
+    indexing of the design's phrasing, chosen so a group adopts exactly one anchor slug
+    unambiguously; the qualification bar is identical). On a match the group folds into
+    that doc initiative (session_ids merged, source="both", adopting the doc's slug); with
+    no match the group stands alone (source="session", undocumented). A non-handoff extra
+    is dropped unless it was anchored OR is handoff-structured (the anti-flood gate).
+    Handoff-cluster doc initiatives always survive here (the momentum window filters later).
+    """
+    docs_by_repo: dict[str, list[dict]] = {}
+    for d in doc_inis + extra_inis:
+        docs_by_repo.setdefault(d["repo"], []).append(d)
+
+    standalone: list[dict] = []
+    for grp in groups:
+        cands = docs_by_repo.get(grp["repo"], [])
+        anchor = best_title_match(set(grp.get("_topic_tokens") or ()), cands) if cands else None
+        if anchor is not None:
+            anchor["session_ids"] |= grp.get("session_ids") or set()
+            anchor["source"] = "both"
+            anchor["undocumented"] = False
+        else:
+            standalone.append(grp)
+
+    kept_extras = [d for d in extra_inis
+                   if d["source"] == "both" or d.get("handoff_structured")]
+    return doc_inis + kept_extras + standalone
 
 
 # --------------------------------------------------------------------------- #
@@ -1064,8 +1403,15 @@ def _truncate(s: str, n: int) -> str:
 
 
 def _read_session_turns(path: str, n: int) -> dict | None:
-    """Parse ONE transcript into {genesis, turns, last_user_ts, cwd, branch}, or None if
-    it has no genuine user turn.
+    """Parse ONE transcript into {genesis, turns, last_user_ts, cwd, branch, ai_title,
+    last_prompt, n_turns}, or None if it has no genuine user turn.
+
+    Session-first discovery additions (all deterministic, no LLM):
+    - ai_title: the LAST `{"type":"ai-title","aiTitle":…}` line — Claude Code's
+      human-readable auto-title, the topic signal groups form on (`topic_tokens`).
+    - last_prompt: the LAST `{"type":"last-prompt","lastPrompt":…}` line (topic fallback).
+    - n_turns: the TOTAL count of genuine user turns (independent of the `n`-turn window),
+      so the MIN_SESSION_TURNS noise floor can gate short throwaway sessions.
 
     - genesis: the FIRST genuine user turn text (the SAME rule _first_user_turn used —
       skips harness/system-reminder/command/interrupt/caveat noise via _clean_turn).
@@ -1091,6 +1437,9 @@ def _read_session_turns(path: str, n: int) -> dict | None:
     last_user_ts: float | None = None
     cwd: str | None = None
     branch: str | None = None
+    ai_title: str | None = None
+    last_prompt: str | None = None
+    n_turns = 0
     for line in lines:
         line = line.strip()
         if not line:
@@ -1099,7 +1448,18 @@ def _read_session_turns(path: str, n: int) -> dict | None:
             obj = json.loads(line)
         except json.JSONDecodeError:
             continue
-        if obj.get("type") != "user" or obj.get("isMeta") or obj.get("isSidechain"):
+        otype = obj.get("type")
+        if otype == "ai-title":
+            at = obj.get("aiTitle")
+            if at:
+                ai_title = at  # LAST ai-title wins (the title as it currently stands)
+            continue
+        if otype == "last-prompt":
+            lp = obj.get("lastPrompt")
+            if lp:
+                last_prompt = lp
+            continue
+        if otype != "user" or obj.get("isMeta") or obj.get("isSidechain"):
             continue
         msg = obj.get("message") or {}
         if msg.get("role") != "user":
@@ -1114,6 +1474,7 @@ def _read_session_turns(path: str, n: int) -> dict | None:
             continue
         if genesis is None:
             genesis = txt
+        n_turns += 1
         ts = _iso_to_epoch(obj.get("timestamp"))
         turns.append({"text": txt, "ts": ts})
         if ts is not None:
@@ -1127,7 +1488,8 @@ def _read_session_turns(path: str, n: int) -> dict | None:
     if genesis is None:
         return None
     return {"genesis": genesis, "turns": turns[-n:] if n > 0 else [],
-            "last_user_ts": last_user_ts, "cwd": cwd, "branch": branch}
+            "last_user_ts": last_user_ts, "cwd": cwd, "branch": branch,
+            "ai_title": ai_title, "last_prompt": last_prompt, "n_turns": n_turns}
 
 
 def _first_user_turn(path: str) -> str | None:
@@ -1157,6 +1519,10 @@ def collect_session_records(projects_root: str, since_days: int,
         if rec is None:
             continue
         rec["mtime"] = mt
+        # The transcript filename stem IS the sessionId — the stable per-session key that
+        # credits a session-derived group's sessions in attribution (no genesis names a
+        # session-only token-slug).
+        rec["session_id"] = Path(path).stem
         out.append(rec)
     return out
 
@@ -1170,7 +1536,8 @@ def session_genesis_refs(projects_root: str, since_days: int) -> list[dict]:
     genuine user-turn epoch) is carried alongside `mtime` so attribute_sessions can time
     `last_session` from real interaction, not the mtime that in-place .jsonl rewrites bump."""
     return [{"text": r["genesis"], "mtime": r["mtime"],
-             "last_user_ts": r.get("last_user_ts")}
+             "last_user_ts": r.get("last_user_ts"),
+             "session_id": r.get("session_id")}
             for r in collect_session_records(projects_root, since_days, n=1)]
 
 
@@ -1201,6 +1568,7 @@ def attribute_recent_messages(initiatives: list[dict], records: list[dict],
     wt_map = wt_map or {}
     inis_by_repo: dict[str, list[dict]] = {}
     names_by_id: dict[int, set[str]] = {}
+    sid_index: dict[str, dict] = {}
     acc: dict[int, list[dict]] = {}
     for ini in initiatives:
         ini["recent_messages"] = []
@@ -1208,6 +1576,8 @@ def attribute_recent_messages(initiatives: list[dict], records: list[dict],
         names = {os.path.basename(d["path"]).lower() for d in ini.get("docs", [])}
         names.add(f"handoff-{ini.get('slug', '').lower()}")
         names_by_id[id(ini)] = names
+        for sid in (ini.get("session_ids") or ()):
+            sid_index[sid] = ini  # a sessionId belongs to exactly one group -> one ini
         acc[id(ini)] = []
 
     for r in records:
@@ -1220,6 +1590,11 @@ def attribute_recent_messages(initiatives: list[dict], records: list[dict],
             for ini in initiatives:
                 if any(nm in genesis for nm in names_by_id[id(ini)]):
                     candidates.append(ini)
+        # Session-membership: a session-derived initiative's own sessions (their turns are
+        # its recent_messages) — the genesis/branch predicates can't see a token-slug.
+        si = sid_index.get(r.get("session_id"))
+        if si is not None:
+            candidates.append(si)
         branch = (r.get("branch") or "").strip()
         repo = resolve_cwd_repo(r.get("cwd"), repos, wt_map)
         if branch and repo is not None:
@@ -1276,13 +1651,17 @@ def attribute_sessions(initiatives: list[dict], genesis: list[dict]) -> None:
     only remaining signal; `session_count` is unaffected either way.
     """
     for ini in initiatives:
-        names = {os.path.basename(d["path"]).lower() for d in ini["docs"]}
+        names = {os.path.basename(d["path"]).lower() for d in ini.get("docs", [])}
         names.add(f"handoff-{ini['slug'].lower()}")
+        # Session-derived (and doc-anchored "both") initiatives credit sessions by
+        # membership too: a session-only token-slug appears in NO genesis, so genesis-name
+        # matching alone would leave it with session_count=0. `session_ids` closes that.
+        sids = ini.get("session_ids") or set()
         count = 0
         last = None
         for g in genesis:
             low = g["text"].lower()
-            if any(n in low for n in names):
+            if any(n in low for n in names) or g.get("session_id") in sids:
                 count += 1
                 touch = g.get("last_user_ts")
                 if touch is None:
@@ -1694,31 +2073,53 @@ def build_report(days: int, repos: list[str] | None = None,
                  panes: list[dict] | None = None) -> dict:
     """Fuse the three sources into a ranked, per-repo report dict.
 
-    `client` may be None (telemetry skipped). `repos` None -> auto-discover.
-    `include_tmux` links live tmux sessions to initiatives; `panes` overrides the
-    live `collect_tmux_panes()` read (for tests / reproducibility).
+    `client` may be None (telemetry skipped). `repos` None -> auto-discover from the
+    session/telemetry cwds + doc globs (session-first discovery). `include_tmux` links
+    live tmux sessions to initiatives; `panes` overrides the live `collect_tmux_panes()`
+    read (for tests / reproducibility).
     """
-    repos = repos if repos is not None else discover_repos()
-    initiatives = load_initiatives(repos)
+    now_epoch = now if now is not None else time.time()
+
+    # SESSIONS FIRST — discovery consumes their cwds. A transcript-read failure must NOT
+    # crash discovery: degrade to the old doc-glob repo set (records treated as empty).
+    try:
+        records = collect_session_records(projects_root, days)
+    except Exception as e:  # noqa: BLE001 — degrade, never crash discovery
+        print(f"  (session read failed, discovery degrades to docs: {e})", file=sys.stderr)
+        records = []
+
+    # Telemetry rows also feed discovery (a repo touched only via telemetry still surfaces).
+    telem_rows = fetch_telemetry(client, days) if client is not None else None
+    telemetry_available = telem_rows is not None
+
+    if repos is None:
+        session_cwds = [r.get("cwd") for r in records if r.get("cwd")]
+        telem_cwds = [row.get("cwd") for row in (telem_rows or []) if row.get("cwd")]
+        repos = discover_repos(session_cwds=session_cwds, telem_cwds=telem_cwds)
+
+    # Resolve cwds living in linked worktrees back to their canonical repo so worktree
+    # sessions/telemetry attribute to the parent and `(unknown repo)` shrinks.
+    wt_map = worktree_canonical_map(repos)
+
+    # Resolve each session's repo (corroboration is now per-session, from the branch).
+    for r in records:
+        r["repo"] = resolve_cwd_repo(r.get("cwd"), repos, wt_map)
+
+    # Build initiatives: session groups (the driver) + doc anchors/dormant docs.
+    groups = build_session_groups(records)
+    doc_inis = load_initiatives(repos)                 # handoff-*.md clusters (slugs frozen)
+    extra_inis = load_extra_doc_initiatives(repos)     # non-handoff docs (anchor candidates)
+    initiatives = combine_docs_and_groups(doc_inis, extra_inis, groups)
 
     attribute_git(initiatives, days)
 
-    # ONE transcript walk feeds both session-count attribution AND recent-message
-    # surfacing (transcripts are the costly read; genesis is derived from the records).
-    records = collect_session_records(projects_root, days)
+    # ONE transcript walk feeds session-count attribution AND recent-message surfacing.
     genesis = [{"text": r["genesis"], "mtime": r["mtime"],
-                "last_user_ts": r.get("last_user_ts")} for r in records]
+                "last_user_ts": r.get("last_user_ts"),
+                "session_id": r.get("session_id")} for r in records]
     attribute_sessions(initiatives, genesis)
-
-    # Resolve cwds living in linked worktrees back to their canonical repo so worktree
-    # sessions/telemetry attribute to the parent and `(unknown repo)` shrinks. Computed
-    # unconditionally now: message attribution's branch/cwd fallback needs it too (agents
-    # run in isolated worktrees), and telemetry/tmux reuse the same map below.
-    wt_map = worktree_canonical_map(repos)
     attribute_recent_messages(initiatives, records, repos, wt_map)
 
-    telem_rows = fetch_telemetry(client, days) if client is not None else None
-    telemetry_available = telem_rows is not None
     catchall = attribute_telemetry(initiatives, telem_rows, repos, wt_map)
 
     tmux_unmatched: list[dict] = []
@@ -1738,7 +2139,6 @@ def build_report(days: int, repos: list[str] | None = None,
     # from the handoff's AUTHORED date (doc_touch_epoch), not filesystem mtime, which
     # a bulk git checkout clobbers. A LIVE tmux session on the initiative counts as
     # touched-now — open work is active regardless of how old its handoff is.
-    now_epoch = now if now is not None else time.time()
     for ini in initiatives:
         live_session = now_epoch if ini.get("tmux_sessions") else None
         ini["last_touch"] = newest_touch(
@@ -1765,6 +2165,13 @@ def build_report(days: int, repos: list[str] | None = None,
         for ini in initiatives:
             ini["tmux_sessions"] = sorted(ini.get("tmux_sessions", set()),
                                           key=_tmux_session_sort_key)
+    # `session_ids` is a set through attribution; emit a stable sorted list. `_topic_tokens`
+    # is an internal grouping/anchoring artifact — drop it from the emitted payload.
+    for ini in initiatives:
+        ini.pop("_topic_tokens", None)
+        sids = ini.get("session_ids")
+        if isinstance(sids, (set, frozenset)):
+            ini["session_ids"] = sorted(sids)
 
     by_repo: dict[str, list[dict]] = {}
     for ini in initiatives:
@@ -1931,14 +2338,18 @@ def main(argv=None) -> int:
         print("error: --days must be positive", file=sys.stderr)
         return 2
 
+    repos: list[str] | None
     if a.repo:
         repo = os.path.abspath(os.path.expanduser(a.repo))
-        if not os.path.isdir(os.path.join(repo, "claudedocs")):
-            print(f"error: {repo} has no claudedocs/ dir", file=sys.stderr)
+        top = git_toplevel(repo)
+        if top is None:
+            print(f"error: {repo} is not inside a git repo", file=sys.stderr)
             return 2
-        repos = [repo]
+        repos = [top]
     else:
-        repos = discover_repos()
+        # None -> build_report auto-discovers from the session/telemetry cwds + doc globs
+        # (session-first), which it can only do AFTER it has fetched those cwds.
+        repos = None
 
     client = None
     try:
