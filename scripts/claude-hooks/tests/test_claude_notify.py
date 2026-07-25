@@ -75,6 +75,14 @@ def start_file(home, sid):
     return os.path.join(home, ".cache", "claude-notify", sid + ".start")
 
 
+def lastnotify_file(home, sid):
+    return os.path.join(home, ".cache", "claude-notify", sid + ".lastnotify")
+
+
+def count(hay, needle):
+    return hay.count(needle)
+
+
 def read_stub(stub_log):
     if not os.path.isfile(stub_log):
         return ""
@@ -188,6 +196,78 @@ with tempfile.TemporaryDirectory() as tmp:
     check("6: SubagentStop exit 0", p.returncode == 0)
     check("6: SubagentStop notifies", "dunstify" in log and "subagent finished" in log)
     check("6: SubagentStop keeps start file for parent Stop", os.path.isfile(sf))
+    check("6: SubagentStop writes lastnotify marker", os.path.isfile(lastnotify_file(home, sid)))
+
+# --- Test 7: burst of SubagentStops collapses to ONE ping (cooldown) ---------
+with tempfile.TemporaryDirectory() as tmp:
+    home, stub_log, env = make_env(tmp)
+    sid = "sess-7"
+    sf = start_file(home, sid)
+    os.makedirs(os.path.dirname(sf))
+    with open(sf, "w") as f:                # parent turn started 120s ago (> threshold)
+        f.write(str(time.time() - 120))
+    # Two SubagentStops in quick succession (default cooldown = threshold = 60s).
+    p1 = run(env, {"hook_event_name": "SubagentStop", "session_id": sid,
+                   "cwd": "/home/zach/workspace/civit/example", "stop_hook_active": False})
+    p2 = run(env, {"hook_event_name": "SubagentStop", "session_id": sid,
+                   "cwd": "/home/zach/workspace/civit/example", "stop_hook_active": False})
+    log = read_stub(stub_log)
+    check("7: both SubagentStops exit 0", p1.returncode == 0 and p2.returncode == 0)
+    check("7: burst collapses to ONE notification (not two)", count(log, "dunstify") == 1)
+    check("7: start file still present after subagents", os.path.isfile(sf))
+
+# --- Test 8: a Stop within the cooldown after a SubagentStop does NOT re-notify
+with tempfile.TemporaryDirectory() as tmp:
+    home, stub_log, env = make_env(tmp)
+    sid = "sess-8"
+    sf = start_file(home, sid)
+    os.makedirs(os.path.dirname(sf))
+    with open(sf, "w") as f:
+        f.write(str(time.time() - 120))
+    p1 = run(env, {"hook_event_name": "SubagentStop", "session_id": sid,
+                   "cwd": "/home/zach/workspace/civit/example", "stop_hook_active": False})
+    p2 = run(env, {"hook_event_name": "Stop", "session_id": sid,
+                   "cwd": "/home/zach/workspace/civit/example", "stop_hook_active": False})
+    log = read_stub(stub_log)
+    check("8: SubagentStop then Stop -> exactly ONE notification", count(log, "dunstify") == 1)
+    check("8: Stop still consumes the start file", not os.path.isfile(sf))
+    check("8: Stop cleans up the lastnotify marker", not os.path.isfile(lastnotify_file(home, sid)))
+
+# --- Test 8b: cooldown is PER-SESSION (session A's marker doesn't gate B) -----
+with tempfile.TemporaryDirectory() as tmp:
+    home, stub_log, env = make_env(tmp)
+    cache = os.path.join(home, ".cache", "claude-notify")
+    os.makedirs(cache)
+    # Session A just notified (recent marker); session B has its own long turn.
+    with open(lastnotify_file(home, "sess-A"), "w") as f:
+        f.write(str(time.time()))
+    sfb = start_file(home, "sess-B")
+    with open(sfb, "w") as f:
+        f.write(str(time.time() - 120))
+    p = run(env, {"hook_event_name": "Stop", "session_id": "sess-B",
+                  "cwd": "/home/zach/workspace/civit/example", "stop_hook_active": False})
+    log = read_stub(stub_log)
+    check("8b: session B notifies despite session A's recent marker (per-session)",
+          count(log, "dunstify") == 1)
+
+# --- Test 9: a Stop AFTER the cooldown has elapsed DOES notify ---------------
+with tempfile.TemporaryDirectory() as tmp:
+    home, stub_log, env = make_env(tmp)
+    sid = "sess-9"
+    cache = os.path.join(home, ".cache", "claude-notify")
+    os.makedirs(cache)
+    sf = start_file(home, sid)
+    with open(sf, "w") as f:
+        f.write(str(time.time() - 200))
+    # Prior notification was 120s ago — older than the 60s cooldown, so re-notify.
+    with open(lastnotify_file(home, sid), "w") as f:
+        f.write(str(time.time() - 120))
+    p = run(env, {"hook_event_name": "Stop", "session_id": sid,
+                  "cwd": "/home/zach/workspace/civit/example", "stop_hook_active": False})
+    log = read_stub(stub_log)
+    check("9: Stop after cooldown elapsed DOES notify", count(log, "dunstify") == 1)
+    check("9: Stop consumes start file + lastnotify", not os.path.isfile(sf)
+          and not os.path.isfile(lastnotify_file(home, sid)))
 
 print()
 if failures:

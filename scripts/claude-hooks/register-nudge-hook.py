@@ -16,7 +16,7 @@ Registers:
 Run on each host after a home-manager switch that adds a new hook:
     python3 ~/workspace/devrc/scripts/claude-hooks/register-nudge-hook.py
 """
-import json, os, sys
+import json, os, sys, tempfile
 
 SETTINGS = os.path.expanduser("~/.claude/settings.json")
 
@@ -66,9 +66,23 @@ if not added:
     print("all devrc-managed hooks already registered — no change")
     sys.exit(0)
 
-with open(SETTINGS, "w") as f:
-    json.dump(data, f, indent=2)
-    f.write("\n")
+# Atomic write: settings.json gates permissions, so a crash mid-write must never
+# leave it truncated/corrupt. Write a temp file in the same dir, then os.replace
+# (atomic rename on the same filesystem) so readers only ever see the old file
+# or the fully-written new one.
+d = os.path.dirname(SETTINGS) or "."
+fd, tmp = tempfile.mkstemp(dir=d, prefix=".settings.", suffix=".tmp")
+try:
+    with os.fdopen(fd, "w") as f:
+        json.dump(data, f, indent=2)
+        f.write("\n")
+    os.replace(tmp, SETTINGS)
+except Exception:
+    try:
+        os.remove(tmp)
+    except OSError:
+        pass
+    raise
 print("registered hooks:")
 for c in added:
     print("  +", c)

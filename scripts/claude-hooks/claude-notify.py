@@ -29,8 +29,11 @@ session. Any internal error is swallowed. Worst case == the hook not existing.
 
 Kill-switch: CLAUDE_NOTIFY=off (or 0/false/no) disables it for a session.
 Config env:
-  CLAUDE_NOTIFY_MIN_SECONDS  threshold in seconds (default 60)
-  CLAUDE_NOTIFY              off/0/false/no -> disabled
+  CLAUDE_NOTIFY_MIN_SECONDS       threshold in seconds (default 60)
+  CLAUDE_NOTIFY_COOLDOWN_SECONDS  min seconds between pings per session
+                                  (default = the threshold) — collapses a burst
+                                  of parallel SubagentStops into one ping.
+  CLAUDE_NOTIFY                   off/0/false/no -> disabled
   CLAWGATE_API_URL           clawgate base URL (else read from clawgate.env)
   CLAWGATE_HOOK_TOKEN        clawgate machine bearer token (else clawgate.env)
 """
@@ -46,7 +49,7 @@ CACHE_DIR = os.path.join(HOME, ".cache", "claude-notify")
 CLAWGATE_ENV = os.path.join(HOME, ".claude", "clawgate.env")
 LOG_FILE = os.path.join(HOME, ".claude", "claude-notify.log")
 DEFAULT_THRESHOLD = 60
-STALE_SECONDS = 24 * 60 * 60  # prune start files older than 1 day
+STALE_SECONDS = 24 * 60 * 60  # prune start/lastnotify files older than 1 day
 
 
 def log(msg):
@@ -68,6 +71,17 @@ def threshold():
         return DEFAULT_THRESHOLD
 
 
+def cooldown():
+    """Min seconds between notifications for one session. Defaults to the
+    threshold. Collapses a burst of parallel SubagentStops (N subagents ->
+    N+1 pings) down to one ping while a genuinely spread-out sequence still
+    pings each time it clears the cooldown."""
+    try:
+        return float(os.environ.get("CLAUDE_NOTIFY_COOLDOWN_SECONDS", threshold()))
+    except Exception:
+        return threshold()
+
+
 def safe_session_id(sid):
     """Sanitize a session id for use as a filename (never traverse)."""
     keep = [c for c in (sid or "") if c.isalnum() or c in "-_"]
@@ -78,12 +92,16 @@ def start_path(sid):
     return os.path.join(CACHE_DIR, safe_session_id(sid) + ".start")
 
 
+def lastnotify_path(sid):
+    return os.path.join(CACHE_DIR, safe_session_id(sid) + ".lastnotify")
+
+
 def prune_stale():
-    """Best-effort: drop start files older than a day (crashed/abandoned turns)."""
+    """Best-effort: drop start/lastnotify files older than a day (crashed/abandoned turns)."""
     try:
         now = time.time()
         for name in os.listdir(CACHE_DIR):
-            if not name.endswith(".start"):
+            if not (name.endswith(".start") or name.endswith(".lastnotify")):
                 continue
             p = os.path.join(CACHE_DIR, name)
             try:
@@ -243,20 +261,54 @@ def handle():
         return
 
     elapsed = time.time() - start
+    lp = lastnotify_path(session)
 
-    # Stop always ends the turn: consume the start file regardless of threshold.
-    # SubagentStop leaves it in place (the parent turn continues).
+    # Read the cooldown marker BEFORE any Stop cleanup, so a Stop that follows a
+    # just-fired SubagentStop can still see the marker and suppress itself.
+    now = time.time()
+    within_cooldown = False
+    try:
+        if os.path.isfile(lp):
+            with open(lp) as f:
+                last = float(f.read().strip())
+            within_cooldown = (now - last) < cooldown()
+    except Exception:  # fail-open: unreadable marker -> treat as not cooling down
+        within_cooldown = False
+
+    # Stop always ends the turn: consume the start file (and its lastnotify
+    # sibling) regardless of threshold/cooldown. SubagentStop leaves them in
+    # place (the parent turn continues).
     if event == "Stop":
-        try:
-            os.remove(sp)
-        except Exception:
-            pass
+        for p in (sp, lp):
+            try:
+                os.remove(p)
+            except Exception:
+                pass
 
     if elapsed < threshold():
         return
 
+    # Per-session notification cooldown: a burst of parallel SubagentStops (N
+    # subagents past the parent threshold would otherwise fire N+1 pings)
+    # collapses to ONE ping; a Stop right after that SubagentStop is likewise
+    # suppressed if within the cooldown. A genuinely spread-out sequence
+    # (>cooldown apart) still pings each time.
+    if within_cooldown:
+        return
+
     do_notify.elapsed_str = fmt_elapsed(elapsed)
     do_notify(event, cwd, session)
+
+    # Record this notification time so the next event within the cooldown is
+    # suppressed. Only meaningful for SubagentStop (the parent turn continues);
+    # on Stop the turn is over and the marker was already removed above, so skip
+    # the write to avoid orphaning a marker with no start file.
+    if event != "Stop":
+        try:
+            with open(lp, "w") as f:
+                f.write(str(now))
+        except Exception:
+            pass
 
 
 def main():
