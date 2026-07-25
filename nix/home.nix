@@ -389,6 +389,31 @@ in
   home.file.".claude/hooks/shell-env-nudge.py" = {
     source = ../scripts/claude-hooks/shell-env-nudge.py;
   };
+  # claude-notify is the turn-finished notifier: on UserPromptSubmit/Stop/SubagentStop
+  # it fires a desktop toast (or, headless, a clawgate phone push as FALLBACK) when a
+  # turn ran >= threshold (default 60s). Telemetry shows Claude runs mostly on the
+  # headless workbench (98x/14d vs 8x on the laptop) with the long waits there
+  # (306min vs 41min) — exactly where the phone-push fallback earns its keep. Script
+  # delivered here to BOTH hosts; the 3 settings.json events are registered per-host
+  # by register-nudge-hook.py (settings.json is per-host/unmanaged).
+  home.file.".claude/hooks/claude-notify.py" = {
+    source = ../scripts/claude-hooks/claude-notify.py;
+  };
+
+  # This hook previously existed only as a PLAIN local file on the laptop
+  # (~/.claude/hooks/claude-notify.py + test_claude_notify.py). home-manager's
+  # store symlink above would collide with that non-symlink and fail
+  # checkLinkTargets on the first switch. Remove the stale NON-symlink copies
+  # (and the now-managed-elsewhere test) before the link check runs. Guarded on
+  # `! -L` so a legitimately-managed store symlink is never touched — this only
+  # ever removes a hand-placed regular file.
+  home.activation.dropStaleClaudeNotify = lib.hm.dag.entryBefore ["checkLinkTargets"] ''
+    for f in "$HOME/.claude/hooks/claude-notify.py" "$HOME/.claude/hooks/test_claude_notify.py"; do
+      if [ -e "$f" ] && [ ! -L "$f" ]; then
+        $DRY_RUN_CMD rm -f "$f"
+      fi
+    done
+  '';
 
   # Reusable failure-notification TEMPLATE unit. The important user units below
   # (+ bar-status-poll in graphical.nix) carry OnFailure=notify-failure@%n.service,
