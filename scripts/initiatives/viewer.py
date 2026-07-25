@@ -90,6 +90,13 @@ DISPLAY_COLUMNS = [
     "current_doc", "open_investigations", "docs", "recent_messages", "recent_commits",
 ]
 
+# Session-derived discovery columns (added by the scan+sync `v4` migration): `undocumented`
+# is TRUE for session-only cards (no handoff doc); `source` is `doc|session|both`. They are
+# OPTIONAL — an un-migrated store (pre-`v4` `latest` view, or a base table without the ALTERs)
+# simply lacks them, so the viewer detects their presence and SELECTs them only when they
+# exist, defaulting `undocumented=False` (→ the card renders in the main board, nothing lost).
+OPTIONAL_COLUMNS = ["undocumented", "source"]
+
 # Momentum ordering + badges — SAME ranks/glyphs the scan uses (active→stalled→unknown).
 MOMENTUM_RANK = {"active": 0, "slowing": 1, "stalled": 2, "unknown": 3}
 MOMENTUM_BADGE = {
@@ -309,18 +316,22 @@ def load_latest() -> list[dict]:
     import psycopg2
     import psycopg2.extras
 
-    cols = ", ".join(DISPLAY_COLUMNS)
     MailDB = _import_maildb()
     with MailDB() as db:
         with db.conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             try:
+                # Select the optional discovery columns ONLY when the `latest` view actually
+                # exposes them (post-`v4` migration), so a pre-migration view doesn't error.
+                opt = _present_columns(cur, "latest", OPTIONAL_COLUMNS)
+                cols = ", ".join(DISPLAY_COLUMNS + opt)
                 cur.execute(f"SELECT {cols}, captured_at FROM initiatives.latest")
                 rows = [dict(r) for r in cur.fetchall()]
             except psycopg2.Error:
                 # View absent (or otherwise unqueryable): the transaction is now aborted,
                 # so roll back before the fallback query on the same connection.
                 db.conn.rollback()
-                icols = ", ".join(f"i.{c}" for c in DISPLAY_COLUMNS)
+                base_opt = _present_columns(cur, "initiative_snapshot", OPTIONAL_COLUMNS)
+                icols = ", ".join(f"i.{c}" for c in DISPLAY_COLUMNS + base_opt)
                 cur.execute(
                     f"SELECT {icols}, s.captured_at "
                     "FROM initiatives.initiative_snapshot i "
@@ -330,6 +341,23 @@ def load_latest() -> list[dict]:
                 rows = [dict(r) for r in cur.fetchall()]
             attach_recaps(db.conn, rows)
             return rows
+
+
+def _present_columns(cur, relation: str, wanted: list[str]) -> list[str]:
+    """Return the subset of `wanted` columns that ACTUALLY exist on `initiatives.<relation>`
+    (a table or a view — `information_schema.columns` covers both), preserving `wanted`'s
+    order. Used to add the optional discovery columns to the SELECT only when the store has
+    been migrated to expose them; on an un-migrated store the set is empty and the query
+    stays exactly as it was. `information_schema` always exists, so this never aborts the
+    transaction the way SELECTing a missing column would."""
+    cur.execute(
+        "SELECT column_name FROM information_schema.columns "
+        "WHERE table_schema = 'initiatives' AND table_name = %s "
+        "AND column_name = ANY(%s)",
+        (relation, list(wanted)),
+    )
+    have = {r[0] if not isinstance(r, dict) else r["column_name"] for r in cur.fetchall()}
+    return [c for c in wanted if c in have]
 
 
 def attach_recaps(conn, rows: list[dict]) -> bool:
@@ -595,6 +623,13 @@ def _initiative_view(ini: dict, now: datetime) -> dict:
         # the first. Both derive from the same de-duped `tmux_tasks` overlay.
         "live_task": tmux_tasks[0] if tmux_tasks else "",
         "live_tasks": tmux_tasks,
+        # Session-first discovery flags (v4). `undocumented` TRUE = a session-only card (no
+        # handoff doc) → the SPA routes it to the collapsed "Emerging / undocumented" lane
+        # instead of the main board; `source` (doc|session|both) is the provenance. Both
+        # default to the "documented" reading when a row predates the migration (missing key
+        # → undocumented False), so an un-migrated store shows everything in the main board.
+        "undocumented": bool(ini.get("undocumented")),
+        "source": str(ini.get("source") or ""),
     }
 
 
@@ -984,6 +1019,20 @@ header .meta{color:var(--gray);font-size:.85rem}
 .u-id{color:var(--green);flex:0 0 auto}
 .u-title{color:var(--fg2);overflow:hidden;text-overflow:ellipsis}
 .u-title.untitled{color:var(--gray);font-style:italic}
+/* "Emerging / undocumented": session-only cards (no handoff doc). Visually SECONDARY to the
+   documented board — a subtle dashed divider, a dimmer/gray header — and collapsed by default.
+   The caret + count read as one obviously-clickable control (whole h2 is the hit target). */
+.emerging{margin:1.8rem 0 0;border-top:1px dashed var(--bg2);padding-top:.8rem}
+.emerging > h2{font-size:.9rem;margin:0;color:var(--gray);cursor:pointer;
+  display:flex;align-items:baseline;gap:.4rem;user-select:none}
+.emerging > h2:hover{color:var(--fg2)}
+.emerging > h2 .chev{color:var(--yellow);font-size:.75rem;width:.8rem}
+.emerging > h2 .count{color:var(--gray);font-weight:normal;font-size:.8rem}
+.emerging-cap{color:var(--gray);font-size:.75rem;margin:.25rem 0 .1rem 1.2rem;font-style:italic}
+.emerging-body{margin-top:.6rem}
+/* Cards in the lane read a touch dimmer than the main board (still legible on hover/expand). */
+.emerging-body .ini{opacity:.85}
+.emerging-body .ini:hover,.emerging-body .ini.open{opacity:1}
 .err{background:#442222;border:1px solid var(--red);color:var(--fg);
   padding:1rem;border-radius:4px}
 .err b{color:var(--red)}
@@ -1110,6 +1159,25 @@ function bucketizeRecency(views, nowMs){
 """.strip()
 
 
+# PURE, DOM-FREE partition of the flat initiative stream into the MAIN board vs. the
+# "Emerging / undocumented" lane — kept in its OWN snippet (like _RECENCY_JS) so the node
+# test evals it directly, exercising the ACTUAL page code. A card is EMERGING iff its
+# `undocumented` flag is truthy (a session-only, doc-less card the scan auto-discovered);
+# everything else (documented / enriched: source doc|both, or a pre-migration card with the
+# flag absent → falsy) stays in `documented`. Input order is preserved within each list, so a
+# last_touch-DESC input yields a last_touch-DESC emerging lane (newest-first) for free.
+# Substituted into _JS at the __PARTITION_JS__ placeholder at module load.
+_PARTITION_JS = r"""
+function partitionInitiatives(views){
+  var documented = [], emerging = [];
+  (views || []).forEach(function(v){
+    if(v && v.undocumented) emerging.push(v); else documented.push(v);
+  });
+  return {documented: documented, emerging: emerging};
+}
+""".strip()
+
+
 # PURE, DOM-FREE markdown→HTML renderer for the Q&A answer — kept in its OWN snippet (like
 # _RECENCY_JS) so the node test can eval it directly, exercising the ACTUAL page code rather
 # than a Python replica. XSS discipline: the source is HTML-ESCAPED FIRST, then a LIMITED,
@@ -1192,6 +1260,7 @@ function mdToHtml(src){
 _JS = r"""
 (function(){
   __RECENCY_JS__
+  __PARTITION_JS__
   __MARKDOWN_JS__
   var el0 = document.getElementById('idata');
   var data;
@@ -1204,6 +1273,9 @@ _JS = r"""
   // choice is still remembered under the v2 key.)
   var VIEW_KEY = 'initiatives-view-v2';
   var UNMATCHED_KEY = 'initiatives-unmatched-collapsed';
+  // The "Emerging / undocumented" lane (session-only cards) is COLLAPSED by default — it is a
+  // triage bucket, secondary to the documented board. Only an explicit '1' opens it.
+  var EMERGING_KEY = 'EMERGING_OPEN';
   // 3-way view toggle: 'recency' (by last_touch, DEFAULT) | 'flat' | 'grouped' (by repo).
   // Persisted in localStorage; an unknown/legacy value falls back to the recency default.
   var VALID_VIEWS = {flat:1, grouped:1, recency:1};
@@ -1212,6 +1284,10 @@ _JS = r"""
   // The catch-all "live sessions" section is collapsible; remember the user's choice.
   // Default EXPANDED (the whole point is to see every running thread) — set to '1' to collapse.
   var unmatchedCollapsed = localStorage.getItem(UNMATCHED_KEY) === '1';
+  // Emerging lane collapsed unless the user opened it before (default false = collapsed).
+  var emergingOpen = localStorage.getItem(EMERGING_KEY) === '1';
+  // Documented-only totals for the header (recomputed each render; exclude the emerging lane).
+  var docTotal = 0, docRepoTotal = 0, emergingTotal = 0;
   var expanded = {};     // key -> true
   var detailCache = {};  // key -> detail payload
 
@@ -1487,16 +1563,51 @@ _JS = r"""
     app.appendChild(sec);
   }
 
+  // The "Emerging / undocumented" lane: session-only cards the scan auto-discovered that have
+  // NO handoff doc. Rendered as a SEPARATE, muted, collapsed-by-default section below the main
+  // board so it never dilutes the documented ledger, but nothing is dropped (Zach triages it).
+  // Uses the SAME card renderer as the board so momentum/age/live-session/next-step all render.
+  // Input `all` is already last_touch-DESC (from the flat stream), so cards stay newest-first.
+  function renderEmerging(q, all){
+    if(!all || !all.length) return;   // no session-only cards → no lane at all
+    var rows = all.filter(function(v){ return matchQ(v, q); });
+
+    var sec = el('section', 'emerging');
+    var h = el('h2');
+    h.appendChild(el('span', 'chev', emergingOpen ? '▾' : '▸'));
+    h.appendChild(document.createTextNode('Emerging / undocumented'));
+    h.appendChild(el('span', 'count', '(' + rows.length + ')'));
+    sec.appendChild(h);
+    sec.appendChild(el('div', 'emerging-cap',
+      'Active Claude sessions without a handoff doc — auto-detected, may include one-offs.'));
+
+    var body = el('div', 'emerging-body');
+    body.style.display = emergingOpen ? 'block' : 'none';
+    rows.forEach(function(v){ body.appendChild(card(v)); });
+    sec.appendChild(body);
+
+    h.addEventListener('click', function(){
+      emergingOpen = !emergingOpen;
+      localStorage.setItem(EMERGING_KEY, emergingOpen ? '1' : '0');
+      body.style.display = emergingOpen ? 'block' : 'none';
+      sec.querySelector('.chev').textContent = emergingOpen ? '▾' : '▸';
+    });
+    app.appendChild(sec);
+  }
+
   function updateChrome(){
     btnFlat.classList.toggle('active', state.view === 'flat');
     btnGrouped.classList.toggle('active', state.view === 'grouped');
     if(btnRecency) btnRecency.classList.toggle('active', state.view === 'recency');
     if(countEl){
-      var txt = (data.total || 0) + ' in flight across ' + (data.repo_count || 0) + ' repos';
+      // Counts reflect the MAIN board only — emerging (session-only) cards are excluded
+      // (surfaced separately, so the "in flight" number stays the documented ledger).
+      var txt = docTotal + ' in flight across ' + docRepoTotal + ' repos';
       var nu = (data.live_unmatched || []).length;
       // Surface the uncovered live sessions in the header so the board's honesty is visible
       // at a glance (tagged initiatives + N untracked live threads).
       if(nu) txt += ' · ' + nu + ' live session' + (nu === 1 ? '' : 's') + ' untracked';
+      if(emergingTotal) txt += ' · ' + emergingTotal + ' emerging';
       countEl.textContent = txt;
     }
     footer.innerHTML = '';
@@ -1509,24 +1620,39 @@ _JS = r"""
   function render(){
     app.innerHTML = '';
     if(!data.ok){
+      docTotal = 0; docRepoTotal = 0; emergingTotal = 0;
       app.appendChild(el('div', 'err', 'store unreachable: ' + (data.error || '')));
       updateChrome();
       return;
     }
     var q = state.q.trim().toLowerCase();
+    // Split the flat stream: DOCUMENTED/enriched cards drive the main board (all three views
+    // + the header counts); EMERGING (session-only, undocumented) cards go to their own
+    // collapsed lane below. Nothing is dropped — Zach triages the lane himself.
+    var parts = partitionInitiatives(data.flat || []);
+    var docFlat = parts.documented;
+    var emergingAll = parts.emerging;
+    // Header totals count the documented board only (unfiltered), so they read as the ledger
+    // size regardless of the search box. Distinct repos among the documented cards.
+    docTotal = docFlat.length;
+    var repoSet = {};
+    docFlat.forEach(function(v){ repoSet[v.repo || ''] = 1; });
+    docRepoTotal = Object.keys(repoSet).length;
+    emergingTotal = emergingAll.length;
+
     var shown = 0;
     if(state.view === 'flat'){
       var wrap = el('div', 'flat');
-      (data.flat || []).forEach(function(v){
+      docFlat.forEach(function(v){
         if(matchQ(v, q)){ wrap.appendChild(card(v)); shown++; }
       });
       app.appendChild(wrap);
     } else if(state.view === 'recency'){
-      // Group the (search-filtered) flat stream into rolling now-relative recency buckets.
-      // `data.flat` is already last_touch-DESC, and bucketizeRecency preserves that order within
-      // each bucket, so cards stay newest-first per bucket. Empty buckets are omitted. Headers
-      // read like the repo-group headers (label + count) — same `.repo`/`.count` styling.
-      var rviews = (data.flat || []).filter(function(v){ return matchQ(v, q); });
+      // Group the (search-filtered) DOCUMENTED stream into rolling now-relative recency
+      // buckets. `docFlat` inherits data.flat's last_touch-DESC order and bucketizeRecency
+      // preserves it within each bucket, so cards stay newest-first per bucket. Empty buckets
+      // are omitted. Headers read like the repo-group headers (label + count).
+      var rviews = docFlat.filter(function(v){ return matchQ(v, q); });
       bucketizeRecency(rviews, Date.now()).forEach(function(g){
         var sec = el('section', 'repo');
         var h = el('h2', null, g.label);
@@ -1537,7 +1663,11 @@ _JS = r"""
       });
     } else {
       (data.repos || []).forEach(function(g){
-        var vis = (g.initiatives || []).filter(function(v){ return matchQ(v, q); });
+        // Exclude emerging cards from the grouped board too (they live in the lane); a group
+        // that is entirely emerging/filtered simply doesn't render.
+        var vis = (g.initiatives || []).filter(function(v){
+          return !v.undocumented && matchQ(v, q);
+        });
         if(!vis.length) return;
         var sec = el('section', 'repo');
         var h = el('h2', null, g.name);
@@ -1547,11 +1677,14 @@ _JS = r"""
         app.appendChild(sec);
       });
     }
-    if(shown === 0){
+    if(shown === 0 && !emergingAll.length){
       app.appendChild(el('div', 'empty',
         q ? ('No initiatives match "' + state.q + '".')
           : 'No initiatives in the latest snapshot.'));
     }
+    // The "Emerging / undocumented" lane renders BELOW the main board (session-only cards the
+    // scan auto-discovered). Collapsed by default; respects the same search filter when open.
+    renderEmerging(q, emergingAll);
     // The catch-all live-sessions section renders BELOW the initiatives (honestly showing
     // every running thread, not just the tagged few). Respects the same search filter.
     renderUnmatched(q);
@@ -1759,6 +1892,7 @@ _JS = r"""
 # Inline the pure recency-bucketing snippet into the page JS (single source of truth: the
 # node test evals _RECENCY_JS directly, the page runs this substituted copy).
 _JS = _JS.replace("__RECENCY_JS__", _RECENCY_JS)
+_JS = _JS.replace("__PARTITION_JS__", _PARTITION_JS)
 _JS = _JS.replace("__MARKDOWN_JS__", _MARKDOWN_JS)
 
 

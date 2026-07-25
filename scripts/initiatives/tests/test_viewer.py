@@ -1264,6 +1264,126 @@ def test_js_recency_render_branch_present():
 
 
 # --------------------------------------------------------------------------- #
+# "Emerging / undocumented" lane — session-only cards (undocumented=True) are carried
+# through the model and segregated into a separate collapsed lane in the SPA.
+# --------------------------------------------------------------------------- #
+def test_view_carries_undocumented_and_source():
+    # A session-only card (the v4 discovery flags present on the row) flows through
+    # build_model -> the flat view dict verbatim.
+    rows = [_row(slug="s", undocumented=True, source="session")]
+    v = viewer.build_model(rows, now=NOW)["flat"][0]
+    assert v["undocumented"] is True
+    assert v["source"] == "session"
+
+
+def test_view_undocumented_defaults_false_when_absent():
+    # GRACEFUL DEGRADATION: an un-migrated row (pre-v4, no `undocumented`/`source` keys) is
+    # treated as DOCUMENTED (undocumented False, source "") — so it stays in the main board.
+    row = _row(slug="s")
+    assert "undocumented" not in row and "source" not in row
+    v = viewer.build_model([row], now=NOW)["flat"][0]
+    assert v["undocumented"] is False
+    assert v["source"] == ""
+
+
+def test_view_undocumented_coerces_truthy_to_bool():
+    # The store column is a real bool, but coerce defensively (a 1/None/"" row never leaks a
+    # non-bool into the JSON island).
+    assert viewer.build_model([_row(slug="a", undocumented=1)], now=NOW)["flat"][0][
+        "undocumented"] is True
+    assert viewer.build_model([_row(slug="b", undocumented=None)], now=NOW)["flat"][0][
+        "undocumented"] is False
+
+
+def test_model_to_json_includes_undocumented_and_source():
+    # The /api/initiatives.json payload carries the flags on every flat entry (the SPA reads
+    # them to partition the board vs. the lane).
+    rows = [_row(slug="doc", undocumented=False, source="doc"),
+            _row(slug="emg", undocumented=True, source="session")]
+    j = viewer.model_to_json(viewer.build_model(rows, now=NOW), None)
+    flags = {e["slug"]: (e["undocumented"], e["source"]) for e in j["flat"]}
+    assert flags["doc"] == (False, "doc")
+    assert flags["emg"] == (True, "session")
+
+
+def _node_partition(views):
+    """Eval `viewer._PARTITION_JS` under node against `views`; return {doc:[slug...],
+    emg:[slug...]}. Skips if node isn't on PATH (the partition is JS, so node exercises the
+    ACTUAL page code rather than a Python replica — same pattern as `_node_recency`)."""
+    node = _shutil.which("node")
+    if not node:
+        import pytest
+        pytest.skip("node not on PATH — emerging-lane partition JS untested this run")
+    body = (
+        "var VIEWS = " + json.dumps(views) + ";\n"
+        "var p = partitionInitiatives(VIEWS);\n"
+        "console.log(JSON.stringify({"
+        "doc: p.documented.map(function(v){return v.slug;}),"
+        "emg: p.emerging.map(function(v){return v.slug;})}));"
+    )
+    out = _subprocess.run([node, "-e", viewer._PARTITION_JS + "\n" + body],
+                          capture_output=True, text=True, timeout=30)
+    assert out.returncode == 0, out.stderr
+    return json.loads(out.stdout)
+
+
+def test_js_partition_splits_undocumented_into_emerging():
+    # The pure partition helper (node-eval'd) routes undocumented cards to `emerging` and the
+    # rest to `documented`, preserving input order. A MISSING/falsy flag → documented (so a
+    # pre-migration payload keeps every card on the main board).
+    got = _node_partition([
+        {"slug": "a", "undocumented": False},
+        {"slug": "b", "undocumented": True},
+        {"slug": "c"},                       # flag absent → documented
+        {"slug": "d", "undocumented": True},
+    ])
+    assert got["doc"] == ["a", "c"]
+    assert got["emg"] == ["b", "d"]
+
+
+def test_js_partition_all_documented_when_no_flags():
+    # An un-migrated payload (no undocumented flags anywhere) → empty emerging lane, everything
+    # on the main board.
+    got = _node_partition([{"slug": "a"}, {"slug": "b"}])
+    assert got["doc"] == ["a", "b"]
+    assert got["emg"] == []
+
+
+def test_js_emerging_lane_wired_and_excluded_from_main_board():
+    # The SPA source has the lane wiring: it partitions the flat stream, renders the DOCUMENTED
+    # subset in the three views, and the emerging cards in a separate collapsed lane. These
+    # markers assert the DOM rendering (no headless-DOM harness here) stays wired; the pure
+    # partition is unit-tested above via node.
+    js = viewer._JS
+    assert "__PARTITION_JS__" not in js            # snippet inlined
+    assert "partitionInitiatives(data.flat" in js  # render partitions the flat stream
+    assert "parts.documented" in js and "parts.emerging" in js
+    # flat + recency views render the documented subset (not data.flat) so emerging is excluded.
+    assert "docFlat.forEach" in js
+    assert "rviews = docFlat.filter" in js
+    # grouped view also excludes undocumented cards from each repo group.
+    assert "!v.undocumented && matchQ(v, q)" in js
+    # the lane itself: separate section, collapsed-by-default localStorage key, caption.
+    assert "function renderEmerging" in js
+    assert "EMERGING_KEY = 'EMERGING_OPEN'" in js
+    assert "localStorage.getItem(EMERGING_KEY) === '1'" in js   # default collapsed
+    assert "Emerging / undocumented" in js
+    assert "without a handoff doc" in js            # the one-line caption
+    # header counts are the documented totals (emerging excluded from the main-board count).
+    assert "docTotal = docFlat.length" in js
+
+
+def test_render_html_embeds_emerging_lane_markers():
+    # A rendered page carries the lane's label + caption text (so a mixed doc/session snapshot
+    # renders the segregated lane client-side).
+    rows = [_row(slug="doc"), _row(slug="emg", undocumented=True, source="session")]
+    html = viewer.render_html(viewer.build_model(rows, now=NOW))
+    assert "Emerging / undocumented" in html
+    assert "auto-detected, may include one-offs" in html
+    assert ".emerging" in html                      # the lane CSS is present
+
+
+# --------------------------------------------------------------------------- #
 # Read-only Q&A sidebar — POST /api/ask + the chat pane render (Phase 1 assistant)
 # --------------------------------------------------------------------------- #
 def test_parse_ask_question_variants():
