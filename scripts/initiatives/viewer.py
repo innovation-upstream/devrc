@@ -2324,8 +2324,11 @@ def route_request(path: str, provider, method: str = "GET", query: dict | None =
             return (404, "application/json; charset=utf-8",
                     json.dumps({"ok": False,
                                 "error": f"no initiative matching slug={slug!r}"}).encode("utf-8"))
-        dispatch = dispatcher if dispatcher is not None else _dispatch().dispatch_initiative
         try:
+            # Resolve the lazy sibling INSIDE the try so a dispatch.py import failure degrades
+            # to a graceful 502 (not the outer handler's caught-500) — honouring the contract
+            # in this branch's header comment that a dispatch failure never 500s uncaught.
+            dispatch = dispatcher if dispatcher is not None else _dispatch().dispatch_initiative
             result = dispatch(view)
         except Exception as exc:  # noqa: BLE001 - never let a dispatch error kill the request
             sys.stderr.write(f"viewer: /api/dispatch failed: {type(exc).__name__}: {exc}\n")

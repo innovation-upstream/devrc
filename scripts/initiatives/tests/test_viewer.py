@@ -1641,3 +1641,40 @@ def test_route_dispatch_502_when_dispatcher_raises():
         body=_dispatch_body("devrc", "disp-slug"), dispatcher=boom)
     assert status == 502  # never a 500 — wrapped like /api/ask
     assert json.loads(body)["ok"] is False
+
+
+def test_route_dispatch_lazy_load_path_used_when_no_dispatcher(monkeypatch):
+    """With NO injected dispatcher (the LIVE serve() path), the route lazily resolves the
+    sibling `dispatch.py` via `_dispatch().dispatch_initiative`. Exercises that real path."""
+    prov, _ = _dispatch_provider()
+    seen = {}
+
+    class _FakeDispatchMod:
+        @staticmethod
+        def dispatch_initiative(view):
+            seen["slug"] = view["slug"]
+            return {"ok": True, "task_id": 5, "error": None}
+
+    monkeypatch.setattr(viewer, "_dispatch", lambda: _FakeDispatchMod)
+    status, _c, body = viewer.route_request(
+        "/api/dispatch", prov, method="POST",
+        body=_dispatch_body("devrc", "disp-slug"))  # dispatcher defaults to None → lazy load
+    assert status == 200
+    assert json.loads(body) == {"ok": True, "task_id": 5}
+    assert seen["slug"] == "disp-slug"
+
+
+def test_route_dispatch_502_when_lazy_load_import_fails(monkeypatch):
+    """A dispatch.py import failure must degrade to a graceful 502, NOT the outer handler's
+    caught-500 — the resolution sits INSIDE the try (regression guard for that fix)."""
+    prov, _ = _dispatch_provider()
+
+    def _boom_import():
+        raise ImportError("cannot load dispatch.py")
+
+    monkeypatch.setattr(viewer, "_dispatch", _boom_import)
+    status, _c, body = viewer.route_request(
+        "/api/dispatch", prov, method="POST",
+        body=_dispatch_body("devrc", "disp-slug"))  # no dispatcher → lazy load raises
+    assert status == 502  # NOT 500 — the lazy resolution is wrapped
+    assert json.loads(body)["ok"] is False
