@@ -172,6 +172,77 @@ def test_host_with_port_allowed():
 
 
 # --------------------------------------------------------------------------- #
+# Command-delivery channel auth: /poll (extension long-poll) and /result must
+# enforce the SAME host + bearer gate as /health and /cmd. These are the two
+# endpoints that actually move commands, so they get direct coverage rather
+# than being tested only transitively. The guard runs before any polling/body
+# work, so a rejected request returns immediately (no poll_timeout wait).
+# --------------------------------------------------------------------------- #
+def test_poll_missing_token_401():
+    srv, _ = _serve()
+    try:
+        status, body = _req(srv, "GET", "/poll", token=None)
+        assert status == 401
+        assert body["error"] == "unauthorized"
+    finally:
+        srv.shutdown(); srv.server_close()
+
+
+def test_poll_wrong_token_401():
+    srv, _ = _serve()
+    try:
+        status, body = _req(srv, "GET", "/poll", token="nope")
+        assert status == 401
+        assert body["error"] == "unauthorized"
+    finally:
+        srv.shutdown(); srv.server_close()
+
+
+def test_poll_bad_host_403():
+    srv, _ = _serve()
+    try:
+        status, body = _req(srv, "GET", "/poll", host="evil.example.com")
+        assert status == 403
+        assert body["error"] == "bad_host"
+    finally:
+        srv.shutdown(); srv.server_close()
+
+
+def test_result_missing_token_401():
+    srv, _ = _serve()
+    try:
+        status, body = _req(srv, "POST", "/result",
+                            {"id": "x", "ok": True, "data": {}}, token=None)
+        assert status == 401
+        assert body["error"] == "unauthorized"
+    finally:
+        srv.shutdown(); srv.server_close()
+
+
+def test_result_wrong_token_401():
+    srv, _ = _serve()
+    try:
+        status, body = _req(srv, "POST", "/result",
+                            {"id": "x", "ok": True, "data": {}}, token="nope")
+        assert status == 401
+        assert body["error"] == "unauthorized"
+    finally:
+        srv.shutdown(); srv.server_close()
+
+
+def test_result_bad_host_403():
+    srv, _ = _serve()
+    try:
+        status, body = _req(srv, "POST", "/result",
+                            {"id": "x", "ok": True, "data": {}},
+                            host="evil.example.com")
+        assert status == 403
+        assert body["error"] == "bad_host"
+    finally:
+        srv.shutdown(); srv.server_close()
+
+
+# --------------------------------------------------------------------------- #
 # /health connection state
 # --------------------------------------------------------------------------- #
 def test_health_no_extension():

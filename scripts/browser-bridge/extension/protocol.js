@@ -34,6 +34,36 @@ export function errorEnvelope(id, error) {
   return { id, ok: false, error: String(error) };
 }
 
+// Compile a user `eval` snippet into a single callable, choosing between the
+// expression form (`return (src)`) and the statement form (`src`) WITHOUT ever
+// executing a side effect twice.
+//
+// The distinction that matters: a *construction* SyntaxError means the
+// expression-wrapped body could not be PARSED (e.g. `src` is a statement like
+// `const x = 1;`), so we legitimately fall back to the statement form. A
+// *runtime* throw only happens later, when the returned function is CALLED — it
+// must propagate as the op error and must NOT trigger a second execution of an
+// already-run side effect. By deciding the form at PARSE time and returning one
+// function, the caller invokes it exactly once.
+//
+// `FunctionCtor` is injectable for unit testing; production passes the real
+// `Function`. NOTE: service_worker.js's injected `eval` executor mirrors this
+// logic inline (an injected function can't import this module) — keep in sync.
+export function compileEval(src, FunctionCtor = Function) {
+  try {
+    // Parses the expression-wrapped form. A SyntaxError here is a *parse*
+    // failure — never a side effect (the body is not executed by construction).
+    return FunctionCtor(`return (${src})`);
+  } catch (e) {
+    if (e instanceof SyntaxError) {
+      // Expression form is unparseable → compile the statement form instead.
+      // (If THAT is also a SyntaxError it propagates — genuinely invalid JS.)
+      return FunctionCtor(src);
+    }
+    throw e;
+  }
+}
+
 // Reconnect / re-poll backoff after a transport error, capped. Attempt 0 → base.
 // Deterministic (no jitter) so it is unit-testable; the SW adds a small random
 // jitter at call time.

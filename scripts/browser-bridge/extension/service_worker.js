@@ -65,13 +65,24 @@ const OPS = {
       world: "MAIN",
       args: [cmd.js],
       func: (src) => {
-        // eslint-disable-next-line no-new-func
-        const v = new Function(`return (${src})`);
-        try { return v(); } catch (_e) {
-          // Fall back to statement execution (no return value).
+        // Decide expression-vs-statement form by whether the expression-wrapped
+        // body PARSES — WITHOUT executing it — then call the chosen fn exactly
+        // once. A construction SyntaxError → fall back to the statement form; a
+        // runtime throw from calling the fn must propagate (never re-run a side
+        // effect). Mirrors protocol.js compileEval — keep the two in sync.
+        let fn;
+        try {
           // eslint-disable-next-line no-new-func
-          return new Function(src)();
+          fn = new Function(`return (${src})`);
+        } catch (e) {
+          if (e instanceof SyntaxError) {
+            // eslint-disable-next-line no-new-func
+            fn = new Function(src);   // statement form (no return value)
+          } else {
+            throw e;
+          }
         }
+        return fn();
       },
     });
     return { url: tab.url, value: inj.result };

@@ -47,23 +47,55 @@ _curl() {
   if [ -n "$body" ]; then
     args+=(-H "Content-Type: application/json" --data "$body")
   fi
-  curl "${args[@]}" "${BASE}${path}" || die "curl failed talking to ${BASE}${path}"
+  # NOTE: a failure here would only `die` the command-substitution subshell, so
+  # every caller wraps `$(_curl …)` in `|| die` to actually propagate the exit.
+  curl "${args[@]}" "${BASE}${path}"
 }
 
-# cmd_op OP [EXTRA_JSON_FIELDS] — POST /cmd, print result JSON, exit on error.
+# op_error RESP — for a 200 /cmd response, print the extension's op-level error
+# string when the wrapped envelope reports ok:false, else print nothing. Exits 2
+# (with no stdout) if the response cannot be parsed as JSON.
+op_error() {
+  printf '%s' "$1" | python3 -c '
+import json, sys
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    sys.exit(2)
+r = d.get("result") if isinstance(d, dict) else None
+if isinstance(r, dict) and r.get("ok") is False:
+    sys.stdout.write(str(r.get("error") or "unknown error"))
+'
+}
+
+# cmd_op OP [EXTRA_JSON_FIELDS] — POST /cmd, print the result JSON on a genuine
+# success; exit non-zero with a readable message on a transport, HTTP, OR
+# op-level (result.ok:false) error.
 cmd_op() {
   local op="$1" extra="${2:-}"
   local body="{\"op\":\"${op}\"${extra:+,${extra}}}"
   local raw HTTP_CODE resp
-  raw="$(_curl POST /cmd "$body")"
+  raw="$(_curl POST /cmd "$body")" || die "curl failed talking to ${BASE}/cmd"
   HTTP_CODE="${raw##*$'\n'}"; resp="${raw%$'\n'*}"
   case "$HTTP_CODE" in
-    200) printf '%s' "$resp" ;;
+    200) : ;;  # HTTP ok — still must inspect the inner op result below.
     503) echo "$resp" >&2; die "no extension connected — load the browser-bridge extension in Brave (see SKILL.md)" ;;
     504) echo "$resp" >&2; die "timeout waiting for the extension to answer (is Brave focused / responsive?)" ;;
     401) die "unauthorized — token mismatch (re-paste the token in the extension options)" ;;
     *)   echo "$resp" >&2; die "HTTP $HTTP_CODE from /cmd" ;;
   esac
+  # A 200 wraps the extension's envelope: {"ok":true,"result":<envelope>}. When
+  # the op THREW in the page the envelope is {…,"ok":false,"error":…}; surface
+  # that as a non-zero exit instead of printing a "successful" error JSON.
+  local oe rc
+  oe="$(op_error "$resp")"; rc=$?
+  if [ "$rc" -ne 0 ]; then
+    echo "$resp" >&2; die "could not parse the server response from /cmd"
+  fi
+  if [ -n "$oe" ]; then
+    die "op '$op' failed in the browser: $oe"
+  fi
+  printf '%s' "$resp"
 }
 
 # JSON-escape a string via python (available everywhere here; avoids jq dep).
@@ -72,7 +104,7 @@ json_str() { python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "$1"; 
 sub="${1:-}"; shift || true
 case "$sub" in
   health)
-    raw="$(_curl GET /health)"
+    raw="$(_curl GET /health)" || die "curl failed talking to ${BASE}/health"
     HTTP_CODE="${raw##*$'\n'}"; resp="${raw%$'\n'*}"
     [ "$HTTP_CODE" = "200" ] || { echo "$resp" >&2; die "HTTP $HTTP_CODE from /health"; }
     printf '%s\n' "$resp" | pretty
@@ -94,14 +126,20 @@ case "$sub" in
     cmd_op nav "\"url\":${url}" | pretty
     ;;
   screenshot)
-    resp="$(cmd_op screenshot)"
+    # cmd_op runs in a command substitution, so its `die`/exit can't propagate
+    # on its own — `|| exit 1` forwards an op/transport error to the caller.
+    resp="$(cmd_op screenshot)" || exit 1
     if [ $# -ge 1 ]; then
       # Extract the base64 payload of the data URL and write a .png.
       out="$1"
       printf '%s' "$resp" | python3 -c '
 import json,sys,base64,re
 d=json.load(sys.stdin)
-url=d["result"]["data"]["dataUrl"]
+try:
+    url=d["result"]["data"]["dataUrl"]
+except (KeyError, TypeError):
+    sys.stderr.write("browser: screenshot response missing image data\n")
+    sys.exit(1)
 b64=re.sub(r"^data:image/[^;]+;base64,","",url)
 open(sys.argv[1],"wb").write(base64.b64decode(b64))
 print(sys.argv[1])
