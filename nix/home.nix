@@ -347,6 +347,14 @@ in
     source = ../scripts/collector/browser-ext;
     recursive = true;
   };
+  # browser-bridge server (SIBLING to the activity receiver above — a *command*
+  # channel that lets a Claude skill drive the live Brave tab, NOT telemetry).
+  # Deployed as a single-file symlink into ~/.config/browser-bridge/ so the
+  # runtime-created, writable ~/.config/browser-bridge/token can live alongside
+  # the read-only nix-store server.py (symlinking the whole dir would collide
+  # with that token file). server.py is stdlib-only + standalone (no sibling
+  # imports), so unlike the receiver it has NO don't-.resolve() import quirk.
+  home.file.".config/browser-bridge/server.py".source = ../scripts/browser-bridge/server.py;
   # i3 focus collector. Reuses keylog's spool_emit (the v1 line format), so
   # keylog/ must be present alongside it (it always is — shipped above).
   home.file.".config/activity-collector/i3" = {
@@ -658,6 +666,40 @@ in
       # Tracks browser-ext AND keylog, because the receiver reuses keylog's
       # spool_emit (single source of truth for the v1 line format).
       X-Restart-Triggers = [ "${../scripts/collector/browser-ext}" "${../scripts/collector/keylog}" ];
+    };
+    Install = {
+      WantedBy = [ "default.target" ];
+    };
+  };
+
+  # browser-bridge — loopback rendezvous server that lets a Claude Code skill
+  # drive the user's LIVE Brave tab (getHtml/eval/tabs/nav/screenshot) via the
+  # browser-bridge MV3 extension. SIBLING to browser-activity-receiver above;
+  # modelled on it exactly (loopback env, python312, X-Restart-Triggers so a
+  # `home-manager switch` restarts on a script change, WantedBy default.target).
+  # Bound to 127.0.0.1 only + bearer-token auth (token auto-created 0600 at
+  # ~/.config/browser-bridge/token on first start). Staged + enabled but inert
+  # until the unpacked extension is loaded in Brave (see the `browser` skill).
+  systemd.user.services.browser-bridge = {
+    Unit = {
+      Description = "Browser bridge (loopback command channel → live Brave tab)";
+      After = [ "network.target" ];
+    };
+    Service = {
+      Type = "simple";
+      Environment = [
+        "PATH=${lib.makeBinPath [ pkgs.python312 pkgs.coreutils ]}"
+        # Bind loopback only; never reachable off-host.
+        "BROWSER_BRIDGE_HOST=127.0.0.1"
+        # Distinct from the activity receiver's 8787.
+        "BROWSER_BRIDGE_PORT=8788"
+      ];
+      ExecStart = "${pkgs.python312}/bin/python3 %h/.config/browser-bridge/server.py";
+      Restart = "always";
+      RestartSec = 10;
+      # Restart on a script-only change (cf. the receiver above). server.py is
+      # standalone, so only its own path needs tracking.
+      X-Restart-Triggers = [ "${../scripts/browser-bridge/server.py}" ];
     };
     Install = {
       WantedBy = [ "default.target" ];

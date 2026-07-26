@@ -1,0 +1,28 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Browser Bridge — setup</title>
+  <style>
+    body { font: 14px system-ui, sans-serif; max-width: 32rem; margin: 2rem auto; padding: 0 1rem; }
+    label { display: block; margin: 1rem 0 0.25rem; font-weight: 600; }
+    input { width: 100%; padding: 0.5rem; box-sizing: border-box; font-family: monospace; }
+    button { margin-top: 1rem; padding: 0.5rem 1rem; }
+    #status { margin-top: 1rem; color: green; }
+    code { background: #eee; padding: 0 0.25rem; }
+  </style>
+</head>
+<body>
+  <h1>Browser Bridge setup</h1>
+  <p>Paste the bearer token from
+    <code>~/.config/browser-bridge/token</code> and the port the
+    <code>browser-bridge</code> service listens on (default 8788).</p>
+  <label for="port">Port</label>
+  <input id="port" type="text" placeholder="8788" />
+  <label for="token">Token</label>
+  <input id="token" type="text" placeholder="paste token here" />
+  <button id="save">Save</button>
+  <div id="status"></div>
+  <script src="options.js"></script>
+</body>
+</html>

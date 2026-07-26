@@ -52,6 +52,7 @@ HERMETIC_DIRS=(
   scripts/collector/claude/tests
   scripts/collector/i3/tests
   scripts/collector/browser-ext/tests
+  scripts/browser-bridge/tests
   scripts/validation/tests
   scripts/session-analysis/tests
   scripts/session-analysis/session_insight/tests

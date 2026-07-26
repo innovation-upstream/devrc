@@ -1,0 +1,119 @@
+#!/usr/bin/env bash
+# browser — Claude-facing entrypoint for the browser-bridge command channel.
+#
+# Talks to the loopback rendezvous server (scripts/browser-bridge/server.py) over
+# HTTP with the bearer token from ~/.config/browser-bridge/token, which forwards
+# the command to the browser-bridge MV3 extension running in the user's live,
+# logged-in Brave session.
+#
+# Subcommands:
+#   browser health            — is an extension connected?
+#   browser html              — outerHTML of the active tab (+ url, title)
+#   browser eval '<js>'       — run JS in the active tab, return its value
+#   browser tabs              — list open tabs
+#   browser nav <url>         — navigate the active tab to <url>
+#   browser screenshot [path] — captureVisibleTab; prints data URL, or writes a
+#                               .png to <path> if given
+#
+# Output is JSON on stdout (pretty-printed if `jq` is present). Exit non-zero on
+# transport/HTTP error so a caller can branch.
+set -uo pipefail
+
+HOST="${BROWSER_BRIDGE_HOST:-127.0.0.1}"
+PORT="${BROWSER_BRIDGE_PORT:-8788}"
+TOKEN_FILE="${BROWSER_BRIDGE_TOKEN_FILE:-$HOME/.config/browser-bridge/token}"
+BASE="http://${HOST}:${PORT}"
+
+die() { echo "browser: $*" >&2; exit 1; }
+
+[ -r "$TOKEN_FILE" ] || die "token file not found/readable: $TOKEN_FILE (is the browser-bridge service running?)"
+TOKEN="$(tr -d '[:space:]' < "$TOKEN_FILE")"
+[ -n "$TOKEN" ] || die "token file is empty: $TOKEN_FILE"
+
+command -v curl >/dev/null 2>&1 || die "curl not found on PATH"
+
+pretty() {
+  if command -v jq >/dev/null 2>&1; then jq .; else cat; fi
+}
+
+# _curl METHOD PATH [JSON_BODY] — emits `<body>\n<http_code>` to stdout. The
+# caller splits it (globals can't cross the command-substitution subshell).
+_curl() {
+  local method="$1" path="$2" body="${3:-}"
+  local args=(-sS -m 60 -X "$method"
+    -H "Authorization: Bearer ${TOKEN}"
+    -H "Host: 127.0.0.1"
+    -w '\n%{http_code}')
+  if [ -n "$body" ]; then
+    args+=(-H "Content-Type: application/json" --data "$body")
+  fi
+  curl "${args[@]}" "${BASE}${path}" || die "curl failed talking to ${BASE}${path}"
+}
+
+# cmd_op OP [EXTRA_JSON_FIELDS] — POST /cmd, print result JSON, exit on error.
+cmd_op() {
+  local op="$1" extra="${2:-}"
+  local body="{\"op\":\"${op}\"${extra:+,${extra}}}"
+  local raw HTTP_CODE resp
+  raw="$(_curl POST /cmd "$body")"
+  HTTP_CODE="${raw##*$'\n'}"; resp="${raw%$'\n'*}"
+  case "$HTTP_CODE" in
+    200) printf '%s' "$resp" ;;
+    503) echo "$resp" >&2; die "no extension connected — load the browser-bridge extension in Brave (see SKILL.md)" ;;
+    504) echo "$resp" >&2; die "timeout waiting for the extension to answer (is Brave focused / responsive?)" ;;
+    401) die "unauthorized — token mismatch (re-paste the token in the extension options)" ;;
+    *)   echo "$resp" >&2; die "HTTP $HTTP_CODE from /cmd" ;;
+  esac
+}
+
+# JSON-escape a string via python (available everywhere here; avoids jq dep).
+json_str() { python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "$1"; }
+
+sub="${1:-}"; shift || true
+case "$sub" in
+  health)
+    raw="$(_curl GET /health)"
+    HTTP_CODE="${raw##*$'\n'}"; resp="${raw%$'\n'*}"
+    [ "$HTTP_CODE" = "200" ] || { echo "$resp" >&2; die "HTTP $HTTP_CODE from /health"; }
+    printf '%s\n' "$resp" | pretty
+    ;;
+  html)
+    cmd_op getHtml | pretty
+    ;;
+  eval)
+    [ $# -ge 1 ] || die "usage: browser eval '<js>'"
+    js="$(json_str "$1")"
+    cmd_op eval "\"js\":${js}" | pretty
+    ;;
+  tabs)
+    cmd_op tabs | pretty
+    ;;
+  nav)
+    [ $# -ge 1 ] || die "usage: browser nav <url>"
+    url="$(json_str "$1")"
+    cmd_op nav "\"url\":${url}" | pretty
+    ;;
+  screenshot)
+    resp="$(cmd_op screenshot)"
+    if [ $# -ge 1 ]; then
+      # Extract the base64 payload of the data URL and write a .png.
+      out="$1"
+      printf '%s' "$resp" | python3 -c '
+import json,sys,base64,re
+d=json.load(sys.stdin)
+url=d["result"]["data"]["dataUrl"]
+b64=re.sub(r"^data:image/[^;]+;base64,","",url)
+open(sys.argv[1],"wb").write(base64.b64decode(b64))
+print(sys.argv[1])
+' "$out"
+    else
+      printf '%s\n' "$resp" | pretty
+    fi
+    ;;
+  ""|-h|--help|help)
+    grep -E '^#( |$)' "$0" | sed -E 's/^# ?//'
+    ;;
+  *)
+    die "unknown subcommand: $sub (try: health html eval tabs nav screenshot)"
+    ;;
+esac
