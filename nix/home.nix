@@ -87,17 +87,18 @@ in
           # Workflows
           # (:whn removed 2026-07-06 — 0 fires over the audit window, superseded by
           #  /handoff + :eos which ends "…then write the handoff to proceed in next session")
-          { trigger = ":eos"; replace = "review work done this session and identify skills that may need updating, then dispatch subagent to update those skills and any relevant docs, then write the handoff to proceed in next session"; label = "End-of-session ritual: review → update skills/docs → handoff"; search_terms = ["end" "session" "wrap" "handoff" "skills" "review" "update" "docs" "ritual"]; }
+          { trigger = ":eos"; replace = "reflect on work done this session and identify skills that may need updating, then dispatch subagent to update those skills and any relevant docs, then write the handoff to proceed in next session"; label = "End-of-session ritual: review → update skills/docs → handoff"; search_terms = ["end" "session" "wrap" "handoff" "skills" "review" "update" "docs" "ritual"]; }
           { trigger = ":acq"; replace = "ask me clarifying questions and recommend anything you think would be useful to include"; label = "Ask clarifying questions + suggest additions"; search_terms = ["ask" "clarify" "clarifying" "questions" "elicit" "scope" "include"]; }
-          { trigger = ":ds"; replace = "dispatch subagent to "; label = "Dispatch subagent to…"; search_terms = ["dispatch" "subagent" "delegate"]; }
-          { trigger = ":rns"; replace = "recommend next steps"; label = "Recommend next steps"; search_terms = ["next" "recommend" "steps" "whats next"]; }
           { trigger = ":kickoff"; replace = "give me the kickoff message to copy paste to next session"; label = "Kickoff message for next session"; search_terms = ["kickoff" "kick off" "next session" "copy paste" "handoff" "message"]; }
-          # (removed 2026-07-25 via /espanso-audit — 0 keylog fires over the 9-day
-          #  window + active short-form hand-typing, steering redundant with RULES.md /
-          #  slash-commands: :rnx [leverage-ranking is in RULES; short :rns is what fires],
-          #  :pst [subagent+test-coverage is the standing RULES default; "proceed, dispatch"
-          #  hand-typed 40+×], :aep [/audit-pr invoked directly 39×], and the re-check trio
-          #  :nday/:fhrs/:fdays [hand-typed "its been a few days, check" instead])
+          # Removed 2026-07-25 via /espanso-audit — all keylog-evidence-backed:
+          #  ZERO-FIRE set — 0 keylog fires + short-form hand-typing; steering already in
+          #   RULES.md / slash-commands: :rnx, :pst ("proceed, dispatch" typed 40+×),
+          #   :aep (/audit-pr invoked directly 39×), re-check trio :nday/:fhrs/:fdays.
+          #  TYPING-TOIL set — keylog typing-stream shows the shortcut EXISTED but the long
+          #   form was hand-typed instead (trigger→habit transfer failed; short mid-sentence
+          #   prefixes don't stick for a search-first espanso user):
+          #   :ds (1 fire vs 94 hand-typed; duplicates the RULES "dispatch subagent" default),
+          #   :rns (1 vs 20; overlaps /resume). See claudedocs/espanso-typing-toil-2026-07-25.md.
 
           { trigger = ":cc"; replace = "${workspace}/civit/civitai "; label = "civitai main repo path"; search_terms = ["civitai" "repo" "web"]; }
           { trigger = ":cdp"; replace = "${workspace}/civit/datapacket-talos "; label = "civitai datapacket-talos path"; search_terms = ["civitai"]; }
