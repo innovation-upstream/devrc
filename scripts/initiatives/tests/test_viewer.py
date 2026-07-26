@@ -1517,3 +1517,127 @@ def test_chat_pane_absent_from_error_page():
     html = viewer.render_html(None, "OperationalError")
     assert 'id="chat"' not in html
     assert "store unreachable" in html
+
+
+# --------------------------------------------------------------------------- #
+# recommend_next_step — build_model attaches a grounded recommendation per view.
+# --------------------------------------------------------------------------- #
+def test_build_model_attaches_recommended_next_step_from_handoff():
+    # _row has next_step="wire the systemd unit" → basis handoff (priority 1).
+    model = viewer.build_model([_row(slug="rec-doc")], now=NOW)
+    v = model["flat"][0]
+    assert v["recommended_next_step"] == {"text": "wire the systemd unit", "basis": "handoff"}
+
+
+def test_build_model_recommended_next_step_falls_to_open_pr_without_next_step():
+    # No parsed next_step, but an open PR → an inferred open-pr recommendation (the Emerging gap).
+    model = viewer.build_model(
+        [_row(slug="rec-pr", next_step="", open_investigations=[],
+              open_prs=[{"number": 9, "title": "feat: thing"}])], now=NOW)
+    rec = model["flat"][0]["recommended_next_step"]
+    assert rec["basis"] == "open-pr"
+    assert "#9" in rec["text"]
+
+
+def test_build_model_recommended_next_step_none_when_no_signal():
+    model = viewer.build_model(
+        [_row(slug="rec-none", next_step="", open_prs=[], open_investigations=[],
+              summary="", momentum="active")], now=NOW)
+    assert model["flat"][0]["recommended_next_step"] is None
+
+
+def test_api_json_carries_recommended_next_step():
+    model = viewer.build_model([_row(slug="rec-json")], now=NOW)
+    payload = viewer.model_to_json(model, None)
+    assert payload["flat"][0]["recommended_next_step"]["basis"] == "handoff"
+
+
+# --------------------------------------------------------------------------- #
+# POST /api/dispatch — create a clawgate Task (injected dispatcher; no network).
+# --------------------------------------------------------------------------- #
+def _dispatch_provider(slug="disp-slug"):
+    model = viewer.build_model([_row(slug=slug)], now=NOW)
+    return _FakeProvider(model=model), model
+
+
+def _dispatch_body(repo, slug):
+    return json.dumps({"repo": repo, "slug": slug}).encode("utf-8")
+
+
+def test_route_dispatch_happy_path_200_with_injected_dispatcher():
+    prov, model = _dispatch_provider()
+    seen = {}
+
+    def dispatcher(view):
+        seen["slug"] = view["slug"]
+        return {"ok": True, "task_id": 77, "error": None}
+
+    status, ctype, body = viewer.route_request(
+        "/api/dispatch", prov, method="POST",
+        body=_dispatch_body("/home/zach/workspace/devrc", "disp-slug"),
+        dispatcher=dispatcher)
+    assert status == 200
+    payload = json.loads(body)
+    assert payload == {"ok": True, "task_id": 77}
+    assert seen["slug"] == "disp-slug"  # the resolved view was handed to the dispatcher
+
+
+def test_route_dispatch_matches_on_repo_name_too():
+    prov, _ = _dispatch_provider()
+    status, _c, body = viewer.route_request(
+        "/api/dispatch", prov, method="POST",
+        body=_dispatch_body("devrc", "disp-slug"),  # repo_name, not the full path
+        dispatcher=lambda v: {"ok": True, "task_id": 1, "error": None})
+    assert status == 200
+    assert json.loads(body)["ok"] is True
+
+
+def test_route_dispatch_400_on_missing_fields():
+    prov, _ = _dispatch_provider()
+    status, _c, body = viewer.route_request(
+        "/api/dispatch", prov, method="POST", body=_dispatch_body("", ""),
+        dispatcher=lambda v: {"ok": True, "task_id": 1, "error": None})
+    assert status == 400
+    assert json.loads(body)["ok"] is False
+
+
+def test_route_dispatch_404_on_unknown_slug():
+    prov, _ = _dispatch_provider()
+    called = {"n": 0}
+
+    def dispatcher(view):
+        called["n"] += 1
+        return {"ok": True, "task_id": 1, "error": None}
+
+    status, _c, body = viewer.route_request(
+        "/api/dispatch", prov, method="POST",
+        body=_dispatch_body("devrc", "no-such-slug"), dispatcher=dispatcher)
+    assert status == 404
+    assert json.loads(body)["ok"] is False
+    assert called["n"] == 0  # never dispatched for an unknown initiative
+
+
+def test_route_dispatch_502_on_dispatch_failure():
+    prov, _ = _dispatch_provider()
+    status, _c, body = viewer.route_request(
+        "/api/dispatch", prov, method="POST",
+        body=_dispatch_body("devrc", "disp-slug"),
+        dispatcher=lambda v: {"ok": False, "task_id": None,
+                              "error": "clawgate unreachable"})
+    assert status == 502
+    payload = json.loads(body)
+    assert payload["ok"] is False
+    assert payload["error"] == "clawgate unreachable"
+
+
+def test_route_dispatch_502_when_dispatcher_raises():
+    prov, _ = _dispatch_provider()
+
+    def boom(view):
+        raise RuntimeError("kaboom")
+
+    status, _c, body = viewer.route_request(
+        "/api/dispatch", prov, method="POST",
+        body=_dispatch_body("devrc", "disp-slug"), dispatcher=boom)
+    assert status == 502  # never a 500 — wrapped like /api/ask
+    assert json.loads(body)["ok"] is False

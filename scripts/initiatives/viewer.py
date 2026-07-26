@@ -77,6 +77,13 @@ VALIDATION_DIR = Path(__file__).resolve().parents[1] / "validation"
 # The shared mailbox-Postgres helper (kubectl port-forward + psycopg2 + DSN-from-secret).
 MAILDB_PATH = Path(__file__).resolve().parents[1] / "mail-actions" / "_db.py"
 
+# The pure, stdlib-only grounded next-step recommender (attached to each view in build_model).
+NEXTSTEP_PATH = Path(__file__).resolve().parent / "nextstep.py"
+
+# The clawgate dispatcher (POST /api/dispatch → create a Task). Viewer-side ONLY: the clawgate
+# token lives here (LAN-bound, Zach's user), NOT in the in-cluster devpod. Loaded lazily.
+DISPATCH_PATH = Path(__file__).resolve().parent / "dispatch.py"
+
 # The sync wrapper the ↻ refresh button shells out to (it already does the nix-shell +
 # sops cred decrypt + scan + store write). Running it as a subprocess sidesteps the
 # `systemctl --user`-from-a-service dbus/XDG_RUNTIME_DIR complexity.
@@ -166,6 +173,42 @@ def _import_maildb():
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod.MailDB
+
+
+# The pure next-step recommender, loaded by EXPLICIT importlib path (the package's sibling
+# cross-load convention — NOT sys.path). Lazy + cached so a `build_model` over N views loads
+# it once. nextstep.py is stdlib-only + PURE, so a standalone load is free of side effects.
+_nextstep_mod = None
+
+
+def _nextstep():
+    global _nextstep_mod
+    if _nextstep_mod is None:
+        spec = importlib.util.spec_from_file_location("initiatives_viewer_nextstep", NEXTSTEP_PATH)
+        if spec is None or spec.loader is None:
+            raise ImportError(f"cannot load {NEXTSTEP_PATH}")
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        _nextstep_mod = mod
+    return _nextstep_mod
+
+
+_dispatch_mod = None
+
+
+def _dispatch():
+    """Load the clawgate dispatcher sibling by EXPLICIT importlib path (same convention).
+    Lazy so a viewer that never dispatches pays nothing and doesn't need dispatch.py present
+    at import; `dispatch.dispatch_initiative` is the POST /api/dispatch entry point."""
+    global _dispatch_mod
+    if _dispatch_mod is None:
+        spec = importlib.util.spec_from_file_location("initiatives_viewer_dispatch", DISPATCH_PATH)
+        if spec is None or spec.loader is None:
+            raise ImportError(f"cannot load {DISPATCH_PATH}")
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        _dispatch_mod = mod
+    return _dispatch_mod
 
 
 # The sibling read-only Q&A assistant (POST /api/ask). Loaded by EXPLICIT importlib path
@@ -569,7 +612,7 @@ def _initiative_view(ini: dict, now: datetime) -> dict:
         {"text": str(m.get("text") or ""), "ts": m.get("ts")}
         for m in (ini.get("recent_messages") or []) if isinstance(m, dict)
     ]
-    return {
+    view = {
         "slug": ini.get("slug") or "(no slug)",
         "repo": repo or "",
         "repo_name": _short_repo(repo),
@@ -631,6 +674,16 @@ def _initiative_view(ini: dict, now: datetime) -> dict:
         "undocumented": bool(ini.get("undocumented")),
         "source": str(ini.get("source") or ""),
     }
+    # A GROUNDED, read-only next-step recommendation derived from the just-assembled view
+    # (reads next_step/open_prs/open_investigations/face_message/status/momentum). None when
+    # no field supports one. Targets the "Emerging" gap: session-only cards have no parsed
+    # `next_step`, so this suggests one from real signal. `recommend_next_step` is PURE +
+    # never raises; a load hiccup degrades to None (the card just shows no suggestion).
+    try:
+        view["recommended_next_step"] = _nextstep().recommend_next_step(view)
+    except Exception:  # noqa: BLE001 - a recommendation is additive; never break the render
+        view["recommended_next_step"] = None
+    return view
 
 
 def _flat_sort_key(v: dict):
@@ -992,6 +1045,19 @@ header .meta{color:var(--gray);font-size:.85rem}
 .tag.pr{background:var(--bg2);color:var(--blue)}
 .next{margin-top:.3rem;color:var(--fg2);font-size:.86rem}
 .next b{color:var(--orange);font-weight:normal}
+/* A GROUNDED but INFERRED next-step suggestion (only on cards with no documented next_step —
+   i.e. the Emerging gap). Visually distinct from a real `next` line: the label reads "(suggested)"
+   and a muted italic hint names where it was grounded, so it never masquerades as a written step. */
+.next.suggested b{color:var(--yellow)}
+.next .hint{color:var(--gray);font-style:italic;font-size:.78rem;margin-left:.4rem}
+.dispatch-btn{margin-top:.35rem;font:inherit;font-size:.78rem;cursor:pointer;
+  background:var(--bg2);color:var(--aqua);border:1px solid var(--bg2);border-radius:3px;
+  padding:.1rem .5rem}
+.dispatch-btn:hover:not(:disabled){border-color:var(--aqua)}
+.dispatch-btn:disabled{cursor:default;opacity:.7}
+.dispatch-status{margin-left:.5rem;color:var(--gray);font-size:.78rem}
+.dispatch-status.err{color:var(--red)}
+.dispatch-status.ok{color:var(--green)}
 .detail{margin-top:.5rem;padding-top:.5rem;border-top:1px dotted var(--bg2)}
 .detail-summary{color:var(--fg);font-size:.86rem;margin-bottom:.4rem}
 .detail-h{color:var(--orange);font-size:.8rem;margin:.4rem 0 .15rem;text-transform:uppercase;
@@ -1322,6 +1388,44 @@ _JS = r"""
     return e;
   }
 
+  // basis -> a short human hint (mirrors nextstep.basis_label, so the card + the card body
+  // read identically). Unknown basis → '' (no hint shown).
+  var BASIS_HINTS = {
+    'handoff': 'from your handoff', 'open-pr': 'from an open PR',
+    'investigation': 'from an open investigation', 'focus': 'from your last prompt',
+    'status': 'from current status', 'stalled': 'stalled'
+  };
+  function basisHint(basis){ return BASIS_HINTS[basis] || ''; }
+
+  // POST /api/dispatch {repo, slug} → create a clawgate Task for this initiative's suggested
+  // next step. Disables the button + shows an inline status. The clawgate token lives on the
+  // viewer (server-side); nothing RUNS until Zach taps "Dispatch" inside clawgate.
+  function dispatchNextStep(v, btn, dstat){
+    btn.disabled = true;
+    dstat.className = 'dispatch-status';
+    dstat.textContent = 'dispatching…';
+    fetch('/api/dispatch', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({repo: v.repo, slug: v.slug})
+    }).then(function(r){ return r.json().then(function(j){ return {ok: r.ok, j: j}; }); })
+      .then(function(res){
+        if(res.ok && res.j && res.j.ok){
+          dstat.className = 'dispatch-status ok';
+          dstat.textContent = 'task #' + res.j.task_id +
+            ' created — tap Dispatch in clawgate to run';
+        } else {
+          dstat.className = 'dispatch-status err';
+          dstat.textContent = (res.j && res.j.error) || 'dispatch failed';
+          btn.disabled = false;  // allow a retry on failure
+        }
+      })
+      .catch(function(){
+        dstat.className = 'dispatch-status err';
+        dstat.textContent = 'dispatch failed (network)';
+        btn.disabled = false;
+      });
+  }
+
   function renderDetail(det, d, v){
     det.innerHTML = '';
     if(!d || !d.ok){
@@ -1496,6 +1600,32 @@ _JS = r"""
       nx.appendChild(el('b', null, 'next'));
       nx.appendChild(document.createTextNode(' › ' + v.next_step));
       c.appendChild(nx);
+    }
+
+    // GROUNDED (but inferred) next-step suggestion — shown ONLY when there is no documented
+    // `next_step` (the Emerging gap). Rendered distinctly ("next (suggested) ›") with a muted
+    // hint naming where it was grounded. All text via el()/textContent — never innerHTML.
+    var rec = v.recommended_next_step;
+    if(!v.next_step && rec && rec.text){
+      var sg = el('div', 'next suggested');
+      sg.appendChild(el('b', null, 'next (suggested)'));
+      sg.appendChild(document.createTextNode(' › ' + rec.text));
+      var hint = basisHint(rec.basis);
+      if(hint) sg.appendChild(el('span', 'hint', hint));
+      c.appendChild(sg);
+
+      // One-tap dispatch of the suggested step to a clawgate Task (only when a suggestion
+      // exists). Two human gates: this button, then "Dispatch" inside clawgate itself.
+      var drow = el('div');
+      var btn = el('button', 'dispatch-btn', 'Dispatch next step');
+      var dstat = el('span', 'dispatch-status');
+      btn.addEventListener('click', function(ev){
+        ev.stopPropagation();  // don't toggle the card expand
+        dispatchNextStep(v, btn, dstat);
+      });
+      drow.appendChild(btn);
+      drow.appendChild(dstat);
+      c.appendChild(drow);
     }
 
     var det = el('div', 'detail');
@@ -2131,15 +2261,19 @@ class DataProvider:
 # --------------------------------------------------------------------------- #
 def route_request(path: str, provider, method: str = "GET", query: dict | None = None,
                   refresh_controller=None, body: bytes | None = None,
-                  asker=None) -> tuple[int, str, bytes]:
-    """PURE-ish request router: (path, provider, method, query, refresh, body, asker) ->
-    (status, content_type, body bytes). Separated from the socket handler so it's unit-
-    testable with a fake provider / controller / asker (no server, no DB, no subprocess).
+                  asker=None, dispatcher=None) -> tuple[int, str, bytes]:
+    """PURE-ish request router: (path, provider, method, query, refresh, body, asker,
+    dispatcher) -> (status, content_type, body bytes). Separated from the socket handler so
+    it's unit-testable with a fake provider / controller / asker / dispatcher (no server, no
+    DB, no subprocess, no network).
 
     `/healthz` is deliberately store-independent (PROCESS liveness). `POST /refresh` runs
     a single-flighted+debounced sync then invalidates the provider cache on success.
     `/api/initiative` returns one initiative's live detail. `POST /api/ask` runs the
-    READ-ONLY Q&A assistant (`asker(question)`) — it never mutates or dispatches."""
+    READ-ONLY Q&A assistant (`asker(question)`) — it never mutates or dispatches. `POST
+    /api/dispatch` (`dispatcher(view)`) is the ONE write-adjacent endpoint: it creates a
+    clawgate Task for an initiative's grounded next step — but nothing runs until Zach taps
+    Dispatch inside clawgate (a second human gate), and the clawgate token is server-side."""
     if path == "/healthz":
         return 200, "text/plain; charset=utf-8", b"ok\n"
 
@@ -2168,6 +2302,40 @@ def route_request(path: str, provider, method: str = "GET", query: dict | None =
                    "intent": result.get("intent")}
         return (200, "application/json; charset=utf-8",
                 json.dumps(payload, ensure_ascii=False, default=str).encode("utf-8"))
+
+    if method == "POST" and path == "/api/dispatch":
+        # Create a clawgate Task for an initiative's GROUNDED next step. Same LAN-trust model
+        # as /refresh (no new auth): the viewer binds LAN/localhost only, and the clawgate
+        # token is SERVER-SIDE (viewer-held), never exposed to the browser or the in-cluster
+        # devpod. This is write-ADJACENT, not a state mutation: it only enqueues an adjudicable
+        # Task card — Zach still taps "Dispatch" inside clawgate (a second human gate) before
+        # anything runs. Wrapped like /api/ask so a dispatch failure never 500s uncaught.
+        repo, slug = _parse_dispatch_body(body)
+        if not repo or not slug:
+            return (400, "application/json; charset=utf-8",
+                    json.dumps({"ok": False, "error": "missing 'repo'/'slug'"}).encode("utf-8"))
+        model, _err = provider.snapshot()
+        flat = (model or {}).get("flat", []) if model else []
+        view = next(
+            (v for v in flat if v.get("slug") == slug
+             and (repo == v.get("repo") or repo == v.get("repo_name"))),
+            None)
+        if view is None:
+            return (404, "application/json; charset=utf-8",
+                    json.dumps({"ok": False,
+                                "error": f"no initiative matching slug={slug!r}"}).encode("utf-8"))
+        dispatch = dispatcher if dispatcher is not None else _dispatch().dispatch_initiative
+        try:
+            result = dispatch(view)
+        except Exception as exc:  # noqa: BLE001 - never let a dispatch error kill the request
+            sys.stderr.write(f"viewer: /api/dispatch failed: {type(exc).__name__}: {exc}\n")
+            result = {"ok": False, "task_id": None, "error": f"{type(exc).__name__}"}
+        if result.get("ok"):
+            return (200, "application/json; charset=utf-8",
+                    json.dumps({"ok": True, "task_id": result.get("task_id")}).encode("utf-8"))
+        return (502, "application/json; charset=utf-8",
+                json.dumps({"ok": False,
+                            "error": result.get("error") or "dispatch failed"}).encode("utf-8"))
 
     if method == "POST" and path == "/refresh":
         # Deliberately UNAUTHENTICATED: the viewer binds LAN/localhost only (not the public
@@ -2234,12 +2402,32 @@ def _parse_ask_question(body: bytes | None) -> str:
     return q.strip() if isinstance(q, str) else ""
 
 
-def make_handler(provider, refresh_controller=None, asker=None, stream_asker=None):
+def _parse_dispatch_body(body: bytes | None) -> tuple[str, str]:
+    """Extract `(repo, slug)` from a JSON POST body for POST /api/dispatch. ("", "") on any
+    parse failure / non-string / empty — the route turns a missing field into a 400. Pure +
+    defensive (mirrors _parse_ask_question)."""
+    if not body:
+        return "", ""
+    try:
+        obj = json.loads(body.decode("utf-8", errors="replace"))
+    except (ValueError, AttributeError):
+        return "", ""
+    if not isinstance(obj, dict):
+        return "", ""
+    repo = obj.get("repo")
+    slug = obj.get("slug")
+    return (repo.strip() if isinstance(repo, str) else "",
+            slug.strip() if isinstance(slug, str) else "")
+
+
+def make_handler(provider, refresh_controller=None, asker=None, stream_asker=None,
+                 dispatcher=None):
     """Build a BaseHTTPRequestHandler subclass bound to `provider` + `refresh_controller`
     + `asker` (the READ-ONLY Q&A callable for POST /api/ask; defaults to `default_ask`
     over this provider) + `stream_asker` (the STREAMING generator for POST /api/ask/stream;
-    None ⇒ that endpoint 503s). Both askers are injectable so the routes are testable without
-    a model."""
+    None ⇒ that endpoint 503s) + `dispatcher` (the POST /api/dispatch callable `view ->
+    {ok,task_id,error}`; None ⇒ the route lazily loads `dispatch.dispatch_initiative`). All
+    are injectable so the routes are testable without a model / network / clawgate token."""
     if asker is None:
         asker = lambda q: default_ask(q, provider)  # noqa: E731
 
@@ -2252,7 +2440,8 @@ def make_handler(provider, refresh_controller=None, asker=None, stream_asker=Non
             try:
                 status, ctype, resp = route_request(
                     parsed.path, provider, method=method, query=query,
-                    refresh_controller=refresh_controller, body=body, asker=asker)
+                    refresh_controller=refresh_controller, body=body, asker=asker,
+                    dispatcher=dispatcher)
             except Exception as exc:  # noqa: BLE001 - never let a handler error kill the thread
                 status, ctype = 500, "text/plain; charset=utf-8"
                 resp = f"internal error: {type(exc).__name__}: {exc}\n".encode("utf-8")
@@ -2356,7 +2545,7 @@ def serve(host: str, port: int, provider: DataProvider | None = None,
     httpd.daemon_threads = True
     sys.stderr.write(f"viewer: serving on http://{host}:{port}/ "
                      f"(/, /healthz, /api/initiatives.json, /api/initiative, POST /refresh, "
-                     f"POST /api/ask, POST /api/ask/stream)\n")
+                     f"POST /api/ask, POST /api/ask/stream, POST /api/dispatch)\n")
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
