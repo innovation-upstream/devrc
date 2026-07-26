@@ -147,13 +147,13 @@ SNIPPETS = {
     ":sshln": ("ssh", None, [], False),
     ":sshll": ("ssh", None, [], False),
     # workflow prompts (current expansions)
-    # (removed 2026-07-25 via /espanso-audit — 0 keylog fires + short-form
-    #  hand-typing, steering redundant with RULES.md/slash-commands:
-    #  :rnx :pst :aep :nday :fhrs :fdays)
+    # (removed 2026-07-25 via /espanso-audit — all keylog-evidence-backed:
+    #  zero-fire: :rnx :pst :aep :nday :fhrs :fdays;
+    #  typing-toil (shortcut existed but long form hand-typed instead):
+    #  :ds [1 fire vs 94 typed], :rns [1 vs 20] —
+    #  see claudedocs/espanso-typing-toil-2026-07-25.md)
     ":eos":     ("prompt", ["identify skills that may need updating"], [], False),
     ":acq":     ("prompt", ["recommend anything you think would be useful to include"], [], False),
-    ":ds":      ("prompt", ["dispatch subagent to"], ["adversarially audit the PR", "identify skills that may need updating"], True),
-    ":rns":     ("prompt", ["recommend next steps"], ["ranked by leverage"], True),
     ":kickoff": ("prompt", ["kickoff message to copy paste to next session"], [], False),
     # utilities / typo-correction — output not distinguishable
     ":uuid":     ("util", None, [], False),
