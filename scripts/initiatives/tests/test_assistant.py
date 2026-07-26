@@ -618,3 +618,96 @@ def test_main_log_subcommand_json(monkeypatch, capsys):
     assert rc == 0
     out = capsys.readouterr().out
     assert json.loads(out)[0]["intent"] == "blocked_on_me"
+
+
+# --------------------------------------------------------------------------- #
+# recommend_next_step — the grounded next-step chat tool (Phase-2a).
+# --------------------------------------------------------------------------- #
+def test_classify_recommend_next_step_phrasings():
+    for q in ("what should I work on next on clawgate",
+              "what do I do next for clawgate",
+              "recommend a next step for clawgate",
+              "suggest next step on clawgate",
+              "next step for clawgate"):
+        assert assistant.classify_intent(q)["intent"] == "recommend_next_step", q
+
+
+def test_classify_recommend_next_step_does_not_shadow_status_of():
+    # "status of X" and "where did I leave X" must STILL classify as status_of, not the new
+    # recommend intent (the recommend patterns are narrower and sit just before status_of).
+    assert assistant.classify_intent("status of clawgate")["intent"] == "status_of"
+    assert assistant.classify_intent(
+        "where did I leave off with clawgate")["intent"] == "status_of"
+
+
+def test_classify_recommend_extracts_target():
+    info = assistant.classify_intent("what should I work on next on the clawgate agent loop")
+    assert info["intent"] == "recommend_next_step"
+    assert "clawgate" in info["target"]
+
+
+def test_tool_recommend_next_step_found_grounds_on_handoff():
+    res = assistant.tool_recommend_next_step(VIEWS, "clawgate")
+    assert res["kind"] == "recommend_next_step"
+    assert res["initiative"]["slug"] == "clawgate-agent-loop"
+    # CLAWGATE has a next_step → basis handoff, text is the parsed step verbatim.
+    assert res["recommendation"] == {"text": "cut over phase 7", "basis": "handoff"}
+
+
+def test_tool_recommend_next_step_not_found():
+    res = assistant.tool_recommend_next_step(VIEWS, "nonexistent-xyz")
+    assert res["kind"] == "recommend_next_step"
+    assert res["initiative"] is None
+    assert res["recommendation"] is None
+
+
+def test_run_tool_dispatches_recommend_next_step():
+    res = assistant.run_tool("recommend_next_step", {"target": "clawgate"}, VIEWS, UNMATCHED)
+    assert res["kind"] == "recommend_next_step"
+
+
+def test_build_facts_recommend_next_step_found():
+    res = assistant.tool_recommend_next_step(VIEWS, "clawgate")
+    facts = assistant.build_facts(res)
+    assert facts["kind"] == "recommend_next_step"
+    assert facts["found"] is True
+    assert facts["recommendation"] == {"text": "cut over phase 7", "basis": "handoff"}
+    assert facts["initiative"]["slug"] == "clawgate-agent-loop"
+    # grounded_context carries the REAL fields the model may phrase over.
+    assert facts["grounded_context"]["status"].startswith("awaiting")
+    assert facts["grounded_context"]["next_step"] == "cut over phase 7"
+    json.dumps(facts, default=str)  # must be serializable
+
+
+def test_build_facts_recommend_next_step_not_found():
+    facts = assistant.build_facts(
+        assistant.tool_recommend_next_step(VIEWS, "nonexistent-xyz"))
+    assert facts["found"] is False
+    assert facts["recommendation"] is None
+
+
+def test_sources_recommend_next_step_cites_the_one_initiative():
+    res = assistant.tool_recommend_next_step(VIEWS, "clawgate")
+    srcs = assistant.sources_of(res)
+    assert len(srcs) == 1
+    assert srcs[0]["slug"] == "clawgate-agent-loop"
+
+
+def test_sources_recommend_next_step_empty_when_not_found():
+    res = assistant.tool_recommend_next_step(VIEWS, "nonexistent-xyz")
+    assert assistant.sources_of(res) == []
+
+
+def test_render_plain_recommend_next_step_found():
+    res = assistant.tool_recommend_next_step(VIEWS, "clawgate")
+    out = assistant.render_plain("recommend_next_step", {"target": "clawgate"}, res)
+    assert "clawgate-agent-loop" in out
+    assert "cut over phase 7" in out
+    assert "from your handoff" in out  # basis hint
+
+
+def test_render_plain_recommend_next_step_not_found():
+    res = assistant.tool_recommend_next_step(VIEWS, "ghost")
+    out = assistant.render_plain("recommend_next_step", {"target": "ghost"}, res)
+    assert "don't have enough" in out
+    assert "ghost" in out

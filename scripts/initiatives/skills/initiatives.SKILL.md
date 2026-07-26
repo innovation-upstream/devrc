@@ -44,6 +44,11 @@ Get the exact catalog anytime with: `python3 .../query.py --list`.
 
 ### Tools (with --target)
 - **status_of --target "NAME"** — current status / where he left off on ONE named initiative.
+- **recommend_next_step --target "NAME"** — the recommended logical NEXT STEP for ONE named
+  initiative, grounded in its handoff next-step / open PRs / open investigations / your last
+  prompt / status. `facts.recommendation` is `{text, basis}` (or null when nothing grounds
+  one — then say so, don't invent a step); `facts.grounded_context` holds the real fields it
+  drew from. Use for "what should I do next on X".
 - **read_handoff --target "NAME"** — deep detail / handoff for ONE named initiative.
 - **route --target "SIGNAL TEXT"** — which EXISTING initiative a new idea/task/signal belongs
   to (triage). Returns a ranked verdict; "no confident match" means likely new work.

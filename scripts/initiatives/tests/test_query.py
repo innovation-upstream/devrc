@@ -261,3 +261,33 @@ def test_run_query_propagates_loader_error_for_main_to_wrap():
     # run_query itself raises (main() is what converts it to the ok:false contract).
     with pytest.raises(ConnectionError):
         query.run_query("active", "", loader=_boom_loader)
+
+
+# --------------------------------------------------------------------------- #
+# recommend_next_step — the Phase-2a grounded next-step tool in the agent catalog.
+# --------------------------------------------------------------------------- #
+def test_recommend_next_step_in_catalog_and_takes_target():
+    assert "recommend_next_step" in query._TOOLS
+    takes_target, desc = query._TOOLS["recommend_next_step"]
+    assert takes_target is True
+    assert "next step" in desc.lower()
+    assert query._TOOL_TO_INTENT["recommend_next_step"] == "recommend_next_step"
+
+
+def test_recommend_next_step_grounded_shape():
+    out = query.run_query("recommend_next_step", "cutover", loader=_loader)
+    assert out["ok"] is True
+    assert out["tool"] == "recommend_next_step"
+    # BLOCKED fixture has next_step="cut over phase 7" → grounded handoff recommendation.
+    assert out["facts"]["found"] is True
+    assert out["facts"]["recommendation"] == {"text": "cut over phase 7", "basis": "handoff"}
+    assert _slugs(out["sources"]) == {"cutover-gate"}
+    json.dumps(out, default=str)
+
+
+def test_recommend_next_step_not_found_is_grounded_empty():
+    out = query.run_query("recommend_next_step", "nonexistent-xyz", loader=_loader)
+    assert out["ok"] is True
+    assert out["facts"]["found"] is False
+    assert out["facts"]["recommendation"] is None
+    assert out["sources"] == []

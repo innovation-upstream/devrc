@@ -73,6 +73,8 @@ from pathlib import Path
 _ROUTE_PATH = Path(__file__).resolve().parent / "route.py"
 _RECAP_PATH = Path(__file__).resolve().parent / "recap.py"
 _VIEWER_PATH = Path(__file__).resolve().parent / "viewer.py"
+# The pure, stdlib-only grounded next-step recommender (the `recommend_next_step` tool).
+_NEXTSTEP_PATH = Path(__file__).resolve().parent / "nextstep.py"
 # The shared mailbox-Postgres helper (kubectl port-forward + psycopg2 + DSN-from-secret) —
 # ONLY used by the audit-log write/read path (the pure Q&A core never touches it).
 _MAILDB_PATH = Path(__file__).resolve().parents[1] / "mail-actions" / "_db.py"
@@ -80,6 +82,7 @@ _MAILDB_PATH = Path(__file__).resolve().parents[1] / "mail-actions" / "_db.py"
 _route_mod = None
 _recap_mod = None
 _viewer_mod = None
+_nextstep_mod = None
 _maildb_mod = None
 
 
@@ -119,6 +122,13 @@ def _viewer():
     return _viewer_mod
 
 
+def _nextstep():
+    global _nextstep_mod
+    if _nextstep_mod is None:
+        _nextstep_mod = _load_sibling(_NEXTSTEP_PATH, "initiatives_assistant_nextstep")
+    return _nextstep_mod
+
+
 def _maildb():
     """Load MailDB from mail-actions/_db.py by EXPLICIT importlib path (NOT via sys.path —
     its sibling llm.py shadows other modules; documented in the repo CLAUDE.md). Mirrors
@@ -147,6 +157,7 @@ INTENTS = (
     "most_recent",     # what did I touch last / most recently active
     "live_sessions",   # what's running right now (live tmux)
     "status_of",       # status of / where did I leave <named initiative>   (-> target)
+    "recommend_next_step",  # what should I do next on <named initiative>    (-> target)
     "by_repo",         # what's in <repo> / group by repo                    (-> target?)
     "route",           # which initiative does <X> belong to / triage <X>    (-> target)
     "handoff",         # read the handoff / more detail on <named initiative> (-> target)
@@ -254,6 +265,13 @@ _PATTERNS: list[tuple[re.Pattern, str, bool]] = [
     (re.compile(r"last (?:touched|worked on|active)", re.I), "most_recent", False),
     (re.compile(r"what did i (?:last|just)\b", re.I), "most_recent", False),
     (re.compile(r"\blatest\b", re.I), "most_recent", False),
+    # -- recommend the next step on a NAMED initiative (capture the name). BEFORE status_of
+    #    so "what should I work on next on X" / "next step for X" win over a status read. --
+    (re.compile(r"what (?:should|do) i (?:work on|do) next (?:on|for|with)\s+(.+)", re.I),
+     "recommend_next_step", True),
+    (re.compile(r"(?:recommend|suggest)\s+(?:a\s+)?next step (?:for|on)\s+(.+)", re.I),
+     "recommend_next_step", True),
+    (re.compile(r"next step (?:for|on)\s+(.+)", re.I), "recommend_next_step", True),
     # -- status of a NAMED initiative (capture the name) --
     (re.compile(r"status(?:\s+of|\s+on)\s+(.+)", re.I), "status_of", True),
     (re.compile(r"state of\s+(.+)", re.I), "status_of", True),
@@ -387,6 +405,27 @@ def tool_status_of(views: list[dict], target: str) -> dict:
             "initiatives": matched[:5], "ranked": ranked}
 
 
+def tool_recommend_next_step(views: list[dict], target: str) -> dict:
+    """Resolve the named initiative (via tool_status_of — SAME single-sourced name matcher),
+    then derive its GROUNDED next-step recommendation (nextstep.recommend_next_step). The
+    recommendation text is a close paraphrase/quote of a real view field, never invented; None
+    when no field supports one. Read-only; never mutates or dispatches (that's the viewer's
+    /api/dispatch endpoint, behind two human gates)."""
+    resolved = tool_status_of(views, target)
+    inis = resolved["initiatives"]
+    if not inis:
+        return {"kind": "recommend_next_step", "target": target,
+                "initiative": None, "recommendation": None}
+    v = inis[0]
+    recommendation = None
+    try:
+        recommendation = _nextstep().recommend_next_step(v)
+    except Exception:  # noqa: BLE001 - a recommendation is best-effort; degrade to None
+        recommendation = None
+    return {"kind": "recommend_next_step", "target": target,
+            "initiative": v, "recommendation": recommendation}
+
+
 def tool_route(views: list[dict], signal: str) -> dict:
     """Delegate to route.rank_matches: which existing initiative(s) does this signal
     belong to? Returns the ranking + the verdict (confident match vs likely new work)."""
@@ -455,6 +494,8 @@ def run_tool(intent: str, info: dict, views: list[dict],
         return tool_by_repo(views, target)
     if intent == "status_of":
         return tool_status_of(views, target)
+    if intent == "recommend_next_step":
+        return tool_recommend_next_step(views, target)
     if intent == "route":
         return tool_route(views, target)
     if intent == "handoff":
@@ -483,7 +524,7 @@ def sources_of(result: dict) -> list[dict]:
     if kind == "route":
         for r in result.get("ranked", []):
             _add(r.get("slug"), r.get("repo"))
-    elif kind == "handoff":
+    elif kind in ("handoff", "recommend_next_step"):
         v = result.get("initiative")
         if v:
             _add(v.get("slug"), v.get("repo"))
@@ -541,6 +582,33 @@ def build_facts(result: dict) -> dict:
             "open_investigations":
                 [_trim(s, 200) for s in (detail.get("open_investigations") or [])][:6],
         }
+    if kind == "recommend_next_step":
+        v = result.get("initiative")
+        if not v:
+            return {"kind": kind, "target": result.get("target"), "found": False,
+                    "initiative": None, "recommendation": None}
+        rec = result.get("recommendation") or None
+        rec_fact = None
+        if rec:
+            rec_fact = {"text": _trim(rec.get("text"), _FACT_TEXT_TRIM),
+                        "basis": rec.get("basis")}
+        # grounded_context = the REAL fields the recommendation was (or could be) drawn from —
+        # the model phrases over THESE, inventing nothing. Only include fields that exist.
+        face = v.get("face_message")
+        face_text = _trim(face.get("text"), _FACT_TEXT_TRIM) if isinstance(face, dict) else ""
+        ctx = {
+            "next_step": _trim(v.get("next_step"), _FACT_TEXT_TRIM),
+            "status": _trim(v.get("status"), _FACT_TEXT_TRIM),
+            "face_message": face_text,
+            "open_investigations":
+                [_trim(s, 200) for s in (v.get("open_investigations") or [])][:4],
+            "open_prs": [{"number": p.get("number"), "title": _trim(p.get("title"), 120)}
+                         for p in (v.get("open_prs") or []) if isinstance(p, dict)][:4],
+        }
+        ctx = {k: val for k, val in ctx.items() if val not in ("", None, [], {})}
+        return {"kind": kind, "target": result.get("target"), "found": True,
+                "initiative": _fact(v), "recommendation": rec_fact,
+                "grounded_context": ctx}
     if kind == "live_sessions":
         return {
             "kind": kind,
@@ -646,6 +714,19 @@ def render_plain(intent: str, info: dict, result: dict) -> str:
             out.append("Other possible matches: "
                        + ", ".join(v.get("slug") for v in inis[1:]))
         return "\n".join(out)
+
+    if kind == "recommend_next_step":
+        v = result.get("initiative")
+        rec = result.get("recommendation") or None
+        if not v or not rec or not str(rec.get("text") or "").strip():
+            return (f"I don't have enough on '{result.get('target')}' to recommend a "
+                    "next step.")
+        repo = v.get("repo_name") or _short(v.get("repo"))
+        hint = _nextstep().basis_label(rec.get("basis"))
+        head = f"Recommended next step for {v.get('slug')}"
+        if repo:
+            head += f" ({repo})"
+        return f"{head}: {rec.get('text')}" + (f" ({hint})." if hint else ".")
 
     if kind == "route":
         ranked = result.get("ranked", [])
