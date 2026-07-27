@@ -40,6 +40,10 @@ _MARKER_QUOTE_CHARS = frozenset("'\"`")
 # candidate the LLM can drop, not a correctness bug).
 SKIP_PATTERNS: tuple[tuple[str, re.Pattern], ...] = (
     ("pytest.skip", re.compile(r"@pytest\.mark\.(skip|skipif|xfail)")),
+    # `pytest.skip(...)` is overloaded like the JS `.skip(` below: a bare body call is a
+    # disabled test → flag; but the `if <cond>: pytest.skip("dep missing")` form is a
+    # runtime guard that RUNS in CI (dep present) → `_is_conditional_py_skip` post-filters
+    # it out in `scan_skipped_tests` (a module-level `allow_module_level=True` skip stays).
     ("pytest.skip-call", re.compile(r"pytest\.skip\(")),
     # NB: `(it|describe|test).skip(` is overloaded. The *block-modifier* form
     # (`it.skip('name', fn)`, `describe.skip('suite', ...)`) is a genuinely DISABLED
@@ -51,6 +55,9 @@ SKIP_PATTERNS: tuple[tuple[str, re.Pattern], ...] = (
     # the conditional one in `scan_skipped_tests` (see it for the first-arg heuristic).
     ("js.skip", re.compile(r"\b(it|describe|test)\.skip\(")),
     ("js.xfail", re.compile(r"\.(only)\(")),  # .only leaves the rest un-run — same smell
+    # `t.Skip(`/`t.Skipf(`/`t.SkipNow(`: a top-of-func skip is disabled → flag; but the
+    # `if <cond> { t.Skip(…) }` form (e.g. clawgate `if dsn == "" { t.Skip(…) }`) is a
+    # graceful-degradation guard that RUNS in CI → `_is_conditional_go_skip` post-filters.
     ("go.skip", re.compile(r"\bt\.Skip(f|Now)?\(")),
     ("rust.ignore", re.compile(r"#\[ignore")),
     ("unittest.skip", re.compile(r"@unittest\.skip")),
@@ -279,6 +286,109 @@ def _is_conditional_js_skip(line: str) -> bool:
     return True       # first arg is a condition expression → conditional runtime guard
 
 
+# ---- Go / Python: conditional graceful-degradation guard vs disabled test -----
+#
+# Same conditional-vs-disabled distinction as `_is_conditional_js_skip`, generalized
+# to the two languages that flag `t.Skip(...)` / `pytest.skip(...)` unconditionally.
+# The false positive we must kill: a skip nested inside an `if <cond>:` runtime guard
+# that skips ONLY when an optional dependency is absent (so the test RUNS in CI where
+# the dep is present) — that's correct code, not a "re-enable me" fix.
+#
+# Real recurring cases that motivated this:
+#   • Go — clawgate `internal/agents/pgstore_test.go`:
+#         if dsn == "" {
+#             t.Skip("set CLAWGATE_TEST_DATABASE_URL to run the Postgres-backed test")
+#         }
+#     Runs in CI (DB present); skips locally when the DSN is unset. Flagged every week.
+#   • Python — devrc optional-dep guards:
+#         if not node:
+#             pytest.skip("node not on PATH")
+#         if ET._yaml is None:
+#             pytest.skip("PyYAML not available")
+#
+# Both use the enclosing-block opener, not the skip's own first arg (unlike JS), so
+# these helpers take the full `lines` list + the skip's 0-based index for context.
+#
+# CONSERVATIVE / recall-biased rule (both helpers): only an `if`/`elif`/`else`/`else if`
+# opener is treated as "conditional" (→ DROP). If the nearest shallower enclosing line is
+# anything else (`for`/`with`/`try`/`func`/`def`/`describe`/…) we do NOT treat it as
+# conditional → KEEP/flag. A rare `if > with > skip` nesting therefore stays flagged —
+# that's the safe direction: a flagged real conditional guard is the false positive we
+# want gone, but a KEPT genuinely-disabled test is only a candidate the LLM can drop.
+
+
+def _enclosing_opener(lines: list[str], idx: int) -> str | None:
+    """Return the nearest preceding non-blank line whose indentation is STRICTLY LESS
+    than line `idx`'s — i.e. the immediately-enclosing block opener. `idx` is 0-based.
+    Returns None if no shallower line precedes it (skip is at column 0 / file top)."""
+    def _indent(s: str) -> int:
+        return len(s) - len(s.lstrip())
+
+    target = _indent(lines[idx])
+    for j in range(idx - 1, -1, -1):
+        prev = lines[j]
+        if not prev.strip():
+            continue  # skip blank lines
+        if _indent(prev) < target:
+            return prev
+    return None
+
+
+# Go: an `if …{` / `} else if …{` / `} else {` opener (brace-and-indent based, no parse).
+_GO_IF_OPENER_RE = re.compile(r"^\s*(if\b|}\s*else\b)")
+
+# Python: an `if …:` / `elif …:` / `else:` opener (indent based, no parse).
+_PY_IF_OPENER_RE = re.compile(r"^\s*(if|elif)\b.*:\s*$|^\s*else\s*:\s*$")
+
+
+def _is_conditional_go_skip(lines: list[str], idx: int) -> bool:
+    """True when a Go `t.Skip(`/`t.Skipf(`/`t.SkipNow(` at line `idx` (0-based) is the
+    *conditional* graceful-degradation form — nested inside an `if <cond> { … }` guard —
+    rather than an unconditional top-of-function disabled test.
+
+    Two shapes, only one is a real "re-enable me" candidate:
+      • conditional guard — the skip's immediately-enclosing opener is `if …{` or
+        `} else if …{` (or a `} else {` in an if-chain): `if dsn == "" { t.Skip(…) }`
+        (the real clawgate `pgstore_test.go` case). The test RUNS when the condition is
+        false (the DB/dep is present in CI) → NOT disabled → must NEVER be flagged → DROP.
+      • unconditional disabled test — the enclosing opener is the `func …{` itself, so a
+        bare top-of-func `t.Skip("not implemented yet")` with no `if` between it and the
+        function signature. Genuinely disabled → a CI-verifiable candidate → KEEP/flag.
+
+    Heuristic: find the nearest preceding line shallower than the skip (its enclosing
+    block opener); return True iff that opener is an `if`/`} else if`/`} else` line."""
+    opener = _enclosing_opener(lines, idx)
+    if opener is None:
+        return False  # skip at top-level indentation — treat as unconditional → KEEP
+    return bool(_GO_IF_OPENER_RE.match(opener))
+
+
+def _is_conditional_py_skip(lines: list[str], idx: int) -> bool:
+    """True when a Python `pytest.skip(`/`self.skipTest(` at line `idx` (0-based) is the
+    *conditional* form — nested under an `if <cond>:` / `elif …:` / `else:` runtime guard
+    — rather than an unconditional disabled test.
+
+    Two shapes, only one is a real candidate:
+      • conditional guard — the enclosing opener is `if …:` / `elif …:` / `else:`:
+        `if not node:\n    pytest.skip("node not on PATH")` (the real devrc optional-dep
+        case), `if ET._yaml is None:\n    pytest.skip("PyYAML not available")`. The test
+        RUNS when the dep is present (in CI) → NOT disabled → must NEVER be flagged → DROP.
+      • unconditional disabled test — the enclosing opener is the `def …:` itself, so a
+        bare `pytest.skip("wip")` directly in the function body → genuinely disabled →
+        KEEP/flag.
+
+    Exception: a MODULE-LEVEL skip — `pytest.skip("…", allow_module_level=True)` — is an
+    intentional whole-module skip = a real signal, so KEEP it regardless of any enclosing
+    `if` (a module-level skip is idiomatically written under an `if <cond>:` import guard,
+    but it's still a deliberate "this module is off" marker worth surfacing)."""
+    if "allow_module_level" in lines[idx]:
+        return False  # intentional whole-module skip → a real signal → KEEP
+    opener = _enclosing_opener(lines, idx)
+    if opener is None:
+        return False  # skip at module top-level — treat as unconditional → KEEP
+    return bool(_PY_IF_OPENER_RE.match(opener))
+
+
 def scan_skipped_tests(root: Path, repo: str, cap: int) -> list[Candidate]:
     """Line-scan for skip/xfail/ignore markers across languages. A skipped test is a
     concrete, CI-verifiable fix — bias the LLM toward these."""
@@ -296,9 +406,16 @@ def scan_skipped_tests(root: Path, repo: str, cap: int) -> list[Candidate]:
                 continue
             for label, pat in SKIP_PATTERNS:
                 if pat.search(line):
-                    # A conditional `test.skip(<cond>, …)` is a runtime guard that runs
-                    # in CI, not a disabled test — never a candidate. See the helper.
+                    # Structure-aware post-filters: a conditional guard runs in CI, so
+                    # it's never a disabled-test candidate. `i` is 1-based → idx = i-1.
+                    # • JS: a conditional `test.skip(<cond>, …)` (first-arg heuristic).
                     if label == "js.skip" and _is_conditional_js_skip(line):
+                        continue
+                    # • Go: an `if <cond> { t.Skip(…) }` graceful-degradation guard.
+                    if label == "go.skip" and _is_conditional_go_skip(lines, i - 1):
+                        continue
+                    # • Python: an `if <cond>: pytest.skip(…)` optional-dep guard.
+                    if label == "pytest.skip-call" and _is_conditional_py_skip(lines, i - 1):
                         continue
                     res.append(Candidate(
                         repo, "skipped_test", _rel(root, p), i,
