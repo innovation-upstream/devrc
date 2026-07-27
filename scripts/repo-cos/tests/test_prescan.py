@@ -4,7 +4,9 @@ per-repo capping, churn/large/lockfile signals, and global interleave cap.
 All fixtures are built on a real temp directory tree (tmp_path) so the file-walk,
 line-numbering, and ordering are exercised end-to-end without any network or git remote.
 """
+import os
 import shutil
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -20,6 +22,237 @@ def _write(root: Path, rel: str, content: str) -> Path:
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(content)
     return p
+
+
+# ---- git fixtures for fetch-before-scan --------------------------------------
+# Hermetic: a bare "remote" + a clone whose working tree DRIFTS behind origin. No
+# network. `origin/HEAD` is set explicitly so `_default_branch` resolves via symbolic-ref.
+
+_HAS_GIT = shutil.which("git") is not None
+requires_git = pytest.mark.skipif(not _HAS_GIT, reason="git not on PATH")
+
+
+def _git(root: Path, *args: str) -> None:
+    subprocess.run(["git", "-C", str(root), *args], check=True,
+                   capture_output=True, text=True)
+
+
+def _init_clone(tmp_path: Path, *, branch: str = "main") -> tuple[Path, Path]:
+    """Create a bare remote + a clone with one pushed commit on `branch`. origin/HEAD is
+    pointed at `branch`. Returns (clone_path, bare_path)."""
+    bare = tmp_path / "remote.git"
+    clone = tmp_path / "clone"
+    subprocess.run(["git", "init", "--quiet", "--bare", str(bare)], check=True,
+                   capture_output=True, text=True)
+    subprocess.run(["git", "clone", "--quiet", str(bare), str(clone)], check=True,
+                   capture_output=True, text=True)
+    _git(clone, "config", "user.email", "t@t")
+    _git(clone, "config", "user.name", "t")
+    _write(clone, "seed.py", "x = 1  # seed\n")
+    _git(clone, "add", "seed.py")
+    _git(clone, "commit", "--quiet", "-m", "seed")
+    _git(clone, "push", "--quiet", "origin", f"HEAD:{branch}")
+    # make `branch` the local + tracked branch and point origin/HEAD at it
+    _git(clone, "branch", "-M", branch)
+    _git(clone, "branch", f"--set-upstream-to=origin/{branch}", branch)
+    _git(clone, "remote", "set-head", "origin", branch)
+    return clone, bare
+
+
+def _push_drift(tmp_path: Path, bare: Path, rel: str, content: str, *,
+                branch: str = "main") -> None:
+    """Commit a NEW file to `origin/<branch>` that the `clone` working tree lacks — via a
+    throwaway second clone — so the primary clone is genuinely 'behind'."""
+    other = tmp_path / "pusher"
+    # Fresh clone per call so the pusher path is a throwaway; recreate it each time.
+    shutil.rmtree(other, ignore_errors=True)
+    subprocess.run(["git", "clone", "--quiet", str(bare), str(other)], check=True,
+                   capture_output=True, text=True)
+    _git(other, "config", "user.email", "t@t")
+    _git(other, "config", "user.name", "t")
+    # The bare's symbolic HEAD may not point at `branch`, so base the new commit on the
+    # existing `origin/<branch>` tip explicitly — otherwise we'd commit an unrelated root
+    # commit and the push would be a non-fast-forward.
+    _git(other, "checkout", "-B", branch, f"origin/{branch}")
+    _write(other, rel, content)
+    _git(other, "add", rel)
+    _git(other, "commit", "--quiet", "-m", "drift commit")
+    _git(other, "push", "--quiet", "origin", f"HEAD:{branch}")
+
+
+# ---- fetch-before-scan: fresh-ref materialization ----------------------------
+
+@requires_git
+def test_default_branch_resolves_via_origin_head(tmp_path):
+    clone, _ = _init_clone(tmp_path, branch="trunk")
+    assert prescan._default_branch(clone) == "trunk"
+
+
+@requires_git
+def test_resolve_scan_root_fresh_ref_sees_committed_drift(tmp_path):
+    # The working tree does NOT have drift.py, but origin/main does. Fresh-ref mode must
+    # scan the fetched ref, so the marker in drift.py appears.
+    clone, bare = _init_clone(tmp_path)
+    _push_drift(tmp_path, bare, "drift.py", "# TODO drifted marker\n")
+    assert not (clone / "drift.py").exists()  # working tree is genuinely behind
+
+    scan_path, mode, cleanup = prescan.resolve_scan_root(clone, fetch=True)
+    try:
+        assert mode == "fresh-ref (origin/main)"
+        assert Path(scan_path) != clone           # a temp worktree, not the real repo
+        assert (Path(scan_path) / "drift.py").exists()
+    finally:
+        cleanup()
+    # cleanup removed the temp worktree and left no bookkeeping behind
+    assert not Path(scan_path).exists()
+    wt = subprocess.run(["git", "-C", str(clone), "worktree", "list"],
+                        capture_output=True, text=True).stdout
+    assert str(scan_path) not in wt
+
+
+@requires_git
+def test_scan_repo_fresh_uses_real_repo_name_not_tempdir(tmp_path):
+    # #1 correctness requirement: evidence refs carry the REAL repo basename even though
+    # the scanned tree is a temp worktree with a random name.
+    clone, bare = _init_clone(tmp_path)
+    _push_drift(tmp_path, bare, "drift.py", "# TODO drifted marker\n")
+
+    rs = prescan.scan_repo_fresh(str(clone), fetch=True)
+    assert rs.error is None
+    assert rs.mode == "fresh-ref (origin/main)"
+    assert rs.repo == clone.name          # NOT the temp dir name
+    markers = [c for c in rs.candidates if c.kind == "marker"]
+    assert any(c.file == "drift.py" for c in markers)   # saw the committed-but-undrifted content
+    for c in rs.candidates:
+        assert c.repo == clone.name
+        assert c.ref.startswith(f"{clone.name}/")       # every ref uses the real name
+        assert "repo-cos-wt-" not in c.ref              # never the temp worktree path
+
+
+@requires_git
+def test_scan_repo_fresh_leaves_working_tree_untouched(tmp_path):
+    clone, bare = _init_clone(tmp_path)
+    _push_drift(tmp_path, bare, "drift.py", "# TODO drifted marker\n")
+    head_before = subprocess.run(["git", "-C", str(clone), "rev-parse", "HEAD"],
+                                 capture_output=True, text=True).stdout.strip()
+    branch_before = subprocess.run(
+        ["git", "-C", str(clone), "rev-parse", "--abbrev-ref", "HEAD"],
+        capture_output=True, text=True).stdout.strip()
+
+    prescan.scan_repo_fresh(str(clone), fetch=True)
+
+    # working tree still behind (drift never checked out), HEAD + branch unchanged,
+    # and no leftover linked worktrees.
+    assert not (clone / "drift.py").exists()
+    head_after = subprocess.run(["git", "-C", str(clone), "rev-parse", "HEAD"],
+                                capture_output=True, text=True).stdout.strip()
+    assert head_after == head_before
+    branch_after = subprocess.run(
+        ["git", "-C", str(clone), "rev-parse", "--abbrev-ref", "HEAD"],
+        capture_output=True, text=True).stdout.strip()
+    assert branch_after == branch_before
+    wt = subprocess.run(["git", "-C", str(clone), "worktree", "list"],
+                        capture_output=True, text=True).stdout
+    assert wt.count("\n") == 1  # only the main worktree remains
+
+
+@requires_git
+def test_no_fetch_scans_working_tree_not_ref(tmp_path):
+    # --no-fetch must skip fetch/worktree entirely → scan the working tree, so the
+    # origin-only drift is NOT seen.
+    clone, bare = _init_clone(tmp_path)
+    _push_drift(tmp_path, bare, "drift.py", "# TODO drifted marker\n")
+    _write(clone, "local.py", "# TODO local marker\n")  # only in the working tree
+
+    scan_path, mode, cleanup = prescan.resolve_scan_root(clone, fetch=False)
+    try:
+        assert mode == "working-tree fallback (--no-fetch)"
+        assert Path(scan_path) == clone
+    finally:
+        cleanup()
+
+    rs = prescan.scan_repo_fresh(str(clone), fetch=False)
+    files = {c.file for c in rs.candidates if c.kind == "marker"}
+    assert "local.py" in files       # working-tree content seen
+    assert "drift.py" not in files   # origin-only content NOT seen
+
+
+@requires_git
+def test_churn_works_against_fresh_ref_worktree(tmp_path):
+    # scan_churn shells out to `git log` — a linked worktree is a real git dir, so churn
+    # must still return the committed history (regression guard).
+    clone, bare = _init_clone(tmp_path)
+    # Push several commits touching the same file so it clears the >=3 hotspot threshold.
+    for i in range(4):
+        _push_drift(tmp_path, bare, "hot.py", f"# rev {i}\n")
+    scan_path, mode, cleanup = prescan.resolve_scan_root(clone, fetch=True)
+    try:
+        assert mode == "fresh-ref (origin/main)"
+        churn = prescan.scan_churn(Path(scan_path), clone.name, cap=10)
+        assert any(c.file == "hot.py" for c in churn)
+    finally:
+        cleanup()
+
+
+@requires_git
+def test_stale_lock_fires_against_working_tree_mtime_in_fresh_mode(tmp_path):
+    # REGRESSION GUARD: a fresh worktree stamps ALL files mtime=now, which would hide
+    # stale lockfiles. scan_repo_fresh must scan stale_lock against the ORIGINAL working
+    # tree (real mtimes), so a genuinely-old committed lockfile still fires.
+    clone, bare = _init_clone(tmp_path)
+    lock = _write(clone, "poetry.lock", "old\n")
+    _git(clone, "add", "poetry.lock")
+    _git(clone, "commit", "--quiet", "-m", "add lock")
+    _git(clone, "push", "--quiet", "origin", "HEAD:main")
+    old = time.time() - 400 * 86400
+    os.utime(lock, (old, old))  # make the WORKING-TREE copy genuinely old
+
+    rs = prescan.scan_repo_fresh(str(clone), fetch=True)
+    assert rs.mode == "fresh-ref (origin/main)"
+    stale = [c for c in rs.candidates if c.kind == "stale_lock"]
+    assert any(c.file == "poetry.lock" for c in stale), \
+        "stale_lock regressed to fresh-worktree mtime (should read the working tree)"
+
+
+# ---- fetch-before-scan: fallbacks --------------------------------------------
+
+def test_resolve_scan_root_non_git_dir_falls_back(tmp_path):
+    # A plain (non-git) directory → working-tree fallback, no crash. Keeps the 214
+    # existing non-git-fixture tests on the direct path.
+    _write(tmp_path, "a.py", "# TODO x\n")
+    scan_path, mode, cleanup = prescan.resolve_scan_root(tmp_path, fetch=True)
+    try:
+        assert Path(scan_path) == tmp_path
+        assert mode == "working-tree fallback (not a git repo)"
+    finally:
+        cleanup()
+
+
+def test_scan_repo_fresh_non_git_dir_scans_working_tree(tmp_path):
+    _write(tmp_path, "a.py", "# TODO real marker\n")
+    rs = prescan.scan_repo_fresh(str(tmp_path), fetch=True)
+    assert rs.error is None
+    assert rs.mode.startswith("working-tree fallback")
+    assert rs.repo == tmp_path.name
+    assert any(c.file == "a.py" for c in rs.candidates)
+
+
+def test_scan_repo_fresh_missing_dir_sets_error():
+    rs = prescan.scan_repo_fresh("/nonexistent/path/xyz")
+    assert rs.error is not None
+    assert rs.candidates == []
+
+
+def test_scan_all_fetch_false_scans_working_tree(tmp_path):
+    # non-git fixture dirs with fetch=False behave exactly like the legacy scan_all.
+    r1 = tmp_path / "r1"
+    r2 = tmp_path / "r2"
+    for r in (r1, r2):
+        _write(r, "a.py", "".join(f"# TODO {i}\n" for i in range(20)))
+    capped, scans = prescan.scan_all([str(r1), str(r2)], limit_candidates=5, fetch=False)
+    assert len(capped) == 5
+    assert len(scans) == 2
+    assert all(s.mode.startswith("working-tree fallback") for s in scans)
 
 
 # ---- markers ------------------------------------------------------------------

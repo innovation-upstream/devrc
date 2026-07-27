@@ -405,8 +405,8 @@ def test_scan_dismiss_filters_candidate_but_keeps_repo(tmp_path, monkeypatch):
     seen = {}
     orig = scan.prescan.scan_all
 
-    def spy_scan_all(repos, limit, caps=None):
-        return orig(repos, limit, caps)
+    def spy_scan_all(repos, limit, caps=None, *, fetch=True):
+        return orig(repos, limit, caps, fetch=fetch)
     monkeypatch.setattr(scan.prescan, "scan_all", spy_scan_all)
 
     def fake_synth(cands, *, top, model, feedback=None):

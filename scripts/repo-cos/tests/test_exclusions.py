@@ -369,9 +369,9 @@ def test_scan_reply_excludes_repo_from_synthesis(tmp_path, monkeypatch):
     seen = {}
     orig_scan_all = scan.prescan.scan_all
 
-    def spy_scan_all(repos, limit, caps=None):
+    def spy_scan_all(repos, limit, caps=None, *, fetch=True):
         seen["repos"] = list(repos)
-        return orig_scan_all(repos, limit, caps)
+        return orig_scan_all(repos, limit, caps, fetch=fetch)
 
     monkeypatch.setattr(scan.prescan, "scan_all", spy_scan_all)
     monkeypatch.setattr(llm, "synthesize",
@@ -434,9 +434,9 @@ def test_scan_no_feedback_skips_exclusion_parse(tmp_path, monkeypatch):
     seen = {}
     orig_scan_all = scan.prescan.scan_all
 
-    def spy_scan_all(repos, limit, caps=None):
+    def spy_scan_all(repos, limit, caps=None, *, fetch=True):
         seen["repos"] = list(repos)
-        return orig_scan_all(repos, limit, caps)
+        return orig_scan_all(repos, limit, caps, fetch=fetch)
     monkeypatch.setattr(scan.prescan, "scan_all", spy_scan_all)
     monkeypatch.setattr(llm, "synthesize",
                         lambda cands, *, top, model, feedback=None:
