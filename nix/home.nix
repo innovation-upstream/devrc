@@ -834,7 +834,13 @@ in
       Type = "oneshot";
       # Hard ceiling so a half-hung kubectl / scan can't wedge the timer; the
       # cgroup is killed and the timer re-arms on the next OnUnitActiveSec.
-      TimeoutStartSec = 300;
+      # 600s (not 300) gives the ONE-TIME cold-recap batch headroom after the
+      # 14d window widen surfaced ~60+ newly-stalled cards (2 vLLM recaps each,
+      # committed at batch end BEFORE write_snapshot) — warm runs stay ~6-15s and
+      # the 15-min OnUnitActiveSec interval is untouched, so a 10-min ceiling can't
+      # overlap. (Proper hardening — recap after snapshot / per-card commit — is a
+      # follow-up; this removes the first-run snapshot-loss risk the audit flagged.)
+      TimeoutStartSec = 600;
       Environment = [
         "PATH=${lib.makeBinPath [ pkgs.nix pkgs.git pkgs.gh pkgs.kubectl pkgs.sops pkgs.bash pkgs.coreutils pkgs.gnused pkgs.gnugrep ]}"
         "NIX_PATH=nixpkgs=/nix/var/nix/profiles/per-user/root/channels/nixos"
