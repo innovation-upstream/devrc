@@ -538,6 +538,70 @@ def test_cmd_unknown_target_404():
         a.stop(); srv.shutdown(); srv.server_close()
 
 
+def test_poll_superseded_returns_409_not_204():
+    """A blocked /poll whose connection is displaced by a NEWER connection sharing
+    its routing key returns the DISTINCT `409 superseded` signal — never the idle
+    `204`. This is what lets the extension back off instead of hot re-polling
+    (the mutual-supersede livelock fix). Still bearer+Host guarded: this path is
+    only reachable AFTER _guard, and the auth/host tests above cover /poll."""
+    srv, _ = _serve(poll_timeout=5.0)
+    res = {}
+
+    def poll(iid, key):
+        res[iid] = _req(srv, "GET", "/poll", headers=_poll_hdrs(iid, key))
+
+    ta = threading.Thread(target=poll, args=("old", "dup"), daemon=True)
+    ta.start()
+    try:
+        # "old" is registered + blocked in its long-poll.
+        assert _wait_instances(srv, 1) is not None
+        # "new" (different auto-id, same key) supersedes it.
+        tb = threading.Thread(target=poll, args=("new", "dup"), daemon=True)
+        tb.start()
+        ta.join(3)
+        assert "old" in res, "superseded poll never returned"
+        status, body = res["old"]
+        assert status == 409, f"expected 409 superseded, got {status}"
+        assert body["error"] == "superseded"
+    finally:
+        srv.shutdown(); srv.server_close()
+
+
+def test_supersede_logged_once_per_displacement_not_per_poll(monkeypatch):
+    """The supersede is logged ONCE, at the displacement site — the superseded
+    connection's own returning poll must NOT log (a backing-off loser can't flood
+    journald). Deterministic proof of the no-churn contract (the extension's own
+    back-off is only manually verifiable; the server side is unit-tested here)."""
+    reg = S.Registry()
+    events = []
+    monkeypatch.setattr(S, "log", lambda ev, **k: events.append((ev, k)))
+
+    got = {}
+
+    def poll_old():
+        got["old"] = reg.poll("old", "dup", 2.0)
+
+    t = threading.Thread(target=poll_old, daemon=True)
+    t.start()
+    # Wait until "old" is registered AND actively blocked in its poll.
+    deadline = time.time() + 3
+    while time.time() < deadline:
+        with reg._cond:
+            inst = reg._instances.get("dup")
+            if inst is not None and inst.active_polls > 0:
+                break
+        time.sleep(0.01)
+    # A NEW connection claims the key → supersede "old" (ONE displacement event).
+    reg.poll("new", "dup", 0.05)
+    t.join(2)
+
+    # The superseded connection got the DISTINCT sentinel, not an idle None.
+    assert got["old"] is S.SUPERSEDED
+    supersede_logs = [e for e in events if e[0] == "supersede"]
+    assert len(supersede_logs) == 1, \
+        f"expected exactly ONE supersede log, got {len(supersede_logs)}: {supersede_logs}"
+
+
 def test_cmd_same_label_supersede_routes_to_newest():
     """A NEW connection with the SAME label supersedes the old one at that key
     (they share a routing key); the old connection is dropped and a command

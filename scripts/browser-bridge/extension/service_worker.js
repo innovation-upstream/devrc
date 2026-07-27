@@ -20,6 +20,8 @@
 import {
   ALLOWED_OPS, validateCommand, resultEnvelope, errorEnvelope, nextBackoffMs,
   pollHeaders, resultWithInstance,
+  classifyPollStatus, POLL_COMMAND, POLL_IDLE, POLL_SUPERSEDED,
+  POLL_UNAUTHORIZED, SUPERSEDE_BACKOFF_MS,
 } from "./protocol.js";
 
 const DEFAULT_PORT = 8788;
@@ -155,16 +157,45 @@ async function activeTabSnapshot() {
 }
 
 // --- long-poll loop -------------------------------------------------------- //
+// pollOnce returns a tagged result: { kind } where kind ∈ POLL_IDLE /
+// POLL_SUPERSEDED, or { kind: POLL_COMMAND, cmd } — so the loop can tell the
+// distinct "you were superseded" signal (409) apart from a normal idle 204.
 async function pollOnce(cfg) {
   const active = await activeTabSnapshot();
   const res = await fetch(`${base(cfg.port)}/poll`, {
     // Identify this instance so the server routes only its commands here.
     headers: { ...authHeaders(cfg.token), ...pollHeaders(cfg.instanceId, cfg.label, active) },
   });
-  if (res.status === 204) return null;          // idle timeout → re-poll
-  if (res.status === 401) throw new Error("unauthorized");
-  if (!res.ok) throw new Error(`poll_${res.status}`);
-  return res.json();
+  const kind = classifyPollStatus(res.status);
+  if (kind === POLL_COMMAND) return { kind, cmd: await res.json() };
+  if (kind === POLL_IDLE) return { kind };          // idle timeout → re-poll
+  if (kind === POLL_SUPERSEDED) return { kind };     // displaced → back off hard
+  if (kind === POLL_UNAUTHORIZED) throw new Error("unauthorized");
+  throw new Error(`poll_${res.status}`);
+}
+
+// Persist a "superseded" flag (for the options page to surface) + warn once.
+// Never throws — a storage failure must not wedge the loop. We only WRITE on a
+// state change so a steady-state loser doesn't spam storage.
+async function setSuperseded(cfg) {
+  try {
+    const { superseded } = await chrome.storage.local.get("superseded");
+    if (!superseded) {
+      await chrome.storage.local.set({ superseded: true, supersededSince: Date.now() });
+      // eslint-disable-next-line no-console
+      console.warn(
+        "[browser-bridge] superseded by another instance sharing this routing key" +
+        (cfg.label ? ` ("${cfg.label}")` : "") +
+        " — give each Brave profile a UNIQUE label in the extension options.");
+    }
+  } catch (e) { /* ignore */ }
+}
+
+async function clearSuperseded() {
+  try {
+    const { superseded } = await chrome.storage.local.get("superseded");
+    if (superseded) await chrome.storage.local.set({ superseded: false, supersededSince: 0 });
+  } catch (e) { /* ignore */ }
 }
 
 async function postResult(cfg, envelope) {
@@ -186,10 +217,21 @@ async function loop() {
       const cfg = await config();
       if (!cfg.token) { await sleep(5000); continue; }
       try {
-        const cmd = await pollOnce(cfg);
+        const r = await pollOnce(cfg);
         attempt = 0;                             // healthy round-trip
-        if (cmd) {
-          const envelope = await execute(cmd);
+        if (r.kind === POLL_SUPERSEDED) {
+          // Another instance on this host claimed our routing key (a duplicate
+          // LABEL, or a storage reset). Surface it and BACK OFF HARD instead of
+          // hot re-registering — otherwise the two same-label workers mutually
+          // supersede at loopback speed (a livelock). Auto-recovers if the other
+          // instance goes away; the human fix is a unique label per profile.
+          await setSuperseded(cfg);
+          await sleep(SUPERSEDE_BACKOFF_MS + Math.floor(Math.random() * 1000));
+          continue;
+        }
+        await clearSuperseded();
+        if (r.kind === POLL_COMMAND && r.cmd) {
+          const envelope = await execute(r.cmd);
           await postResult(cfg, envelope);
         }
       } catch (e) {

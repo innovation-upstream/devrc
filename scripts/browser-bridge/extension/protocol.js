@@ -72,6 +72,38 @@ export function nextBackoffMs(attempt, baseMs = 1000, capMs = 30000) {
   return Math.min(capMs, baseMs * Math.pow(2, n));
 }
 
+// --- poll-response classification ----------------------------------------- //
+// The server answers GET /poll with exactly one of these shapes; classifying by
+// status keeps the SW loop's branching pure + unit-testable:
+//   200 + command JSON        → execute it                       (POLL_COMMAND)
+//   204 (no body)             → idle keepalive; re-poll promptly  (POLL_IDLE)
+//   409 + {error:"superseded"}→ THIS connection was displaced by a newer one
+//        sharing its routing key (a duplicate LABEL on this host, or a storage
+//        reset). Must NOT hot re-poll — back off hard, else two same-label
+//        profiles mutually supersede at loopback speed (a livelock). POLL_SUPERSEDED
+//   401                       → bad/absent bearer token          (POLL_UNAUTHORIZED)
+//   anything else             → transport error (null → generic nextBackoffMs)
+export const POLL_COMMAND = "command";
+export const POLL_IDLE = "idle";
+export const POLL_SUPERSEDED = "superseded";
+export const POLL_UNAUTHORIZED = "unauthorized";
+
+export function classifyPollStatus(status) {
+  switch (status) {
+    case 200: return POLL_COMMAND;
+    case 204: return POLL_IDLE;
+    case 409: return POLL_SUPERSEDED;
+    case 401: return POLL_UNAUTHORIZED;
+    default: return null;
+  }
+}
+
+// How long a SUPERSEDED instance waits before re-attempting registration. Long
+// enough that two same-label profiles can't hot-loop (loopback re-polls would be
+// microseconds apart); short enough to auto-recover if the other instance goes
+// away. The real fix is a UNIQUE label per profile — surfaced in the options/log.
+export const SUPERSEDE_BACKOFF_MS = 30000;
+
 // --- multi-instance registration (mirrors server.py) ---------------------- //
 // The server keeps a registry of connected instances keyed by a routing key =
 // label (if set) else the stable auto-id. The extension identifies itself on
@@ -84,15 +116,27 @@ export function pollRequestPayload(instanceId, label) {
   return { instanceId: String(instanceId || ""), label: label ? String(label) : "" };
 }
 
+// Cap a header-bound string BEFORE percent-encoding. A pathological multi-KB
+// active-tab url/title could otherwise blow past http.server's ~64KB header-line
+// limit and fail the whole poll; 2048 raw chars is generous and safe. This is a
+// LENGTH bound only — encodeURIComponent still does the header-injection defence
+// (no raw CR/LF can survive), so the two are orthogonal.
+export const MAX_HEADER_VALUE_CHARS = 2048;
+export function capHeaderValue(s, max = MAX_HEADER_VALUE_CHARS) {
+  const str = String(s == null ? "" : s);
+  return str.length > max ? str.slice(0, max) : str;
+}
+
 // Request headers the SW sends on /poll to identify its instance. Label +
-// active-tab strings are URL-encoded (HTTP header values must be ASCII-safe);
-// the server decodes them. Empty values are omitted so a bare instance registers
-// cleanly. `active` is an optional { url, title } for cheap /health enrichment.
+// active-tab strings are capped then URL-encoded (HTTP header values must be
+// ASCII-safe AND bounded); the server decodes them. Empty values are omitted so
+// a bare instance registers cleanly. `active` is an optional { url, title } for
+// cheap /health enrichment.
 export function pollHeaders(instanceId, label, active) {
   const h = { "X-Bridge-Instance-Id": String(instanceId || "") };
-  if (label) h["X-Bridge-Label"] = encodeURIComponent(String(label));
-  if (active && active.url) h["X-Bridge-Active-Url"] = encodeURIComponent(String(active.url));
-  if (active && active.title) h["X-Bridge-Active-Title"] = encodeURIComponent(String(active.title));
+  if (label) h["X-Bridge-Label"] = encodeURIComponent(capHeaderValue(label));
+  if (active && active.url) h["X-Bridge-Active-Url"] = encodeURIComponent(capHeaderValue(active.url));
+  if (active && active.title) h["X-Bridge-Active-Title"] = encodeURIComponent(capHeaderValue(active.title));
   return h;
 }
 

@@ -57,8 +57,15 @@ design when two profiles were connected).
   routing key that already has a live connection, the old one is dropped and any
   in-flight command on it resolves to a `superseded` error (no orphaned waiter).
   This handles a duplicate/stale connection cleanly. ⚠ Two *different* profiles
-  sharing one label is a misconfiguration — they will alternately supersede each
-  other; give each profile a unique label.
+  sharing one label is a misconfiguration — **give each profile a unique label.**
+  The displaced connection's own `/poll` gets a **distinct `409 superseded`
+  signal** (not the idle `204`), on which the extension **backs off ~30s** (and
+  surfaces a "superseded — set a unique label" state) rather than re-registering
+  instantly. That deliberately breaks what would otherwise be a mutual-supersede
+  **livelock** (two same-label workers re-polling at loopback speed, burning CPU
+  and flooding the journal). The supersede is logged **once per displacement**,
+  never per poll. (The server-side signal + once-logging are unit-tested; the
+  extension's back-off can only be verified in a real browser — see below.)
 - **Wire protocol.** `/poll` carries the instance identity in the
   `X-Bridge-Instance-Id` / `X-Bridge-Label` headers (+ optional
   `X-Bridge-Active-Url`/`-Title` for cheap `instances`/`health` enrichment);
@@ -148,8 +155,11 @@ fake extension, `503`/`504` no-extension/timeout paths, unknown-op + bad-JSON
 errors, request↔reply id correlation (incl. out-of-order), and the multi-instance
 registry: routing by key, independent queues (no cross-delivery), the ambiguity
 error, unknown-target, label-vs-auto-id key resolution, supersede-on-duplicate
-(incl. an in-flight command resolving to `superseded` with no orphaned waiter),
-legacy no-handshake back-compat, and an icon sanity check (each declared PNG
+(incl. an in-flight command resolving to `superseded` with no orphaned waiter,
+the displaced poll returning the distinct `409 superseded` signal instead of the
+idle `204`, and the supersede being logged exactly once per displacement — the
+no-churn/livelock-fix contract), legacy no-handshake back-compat, and an icon
+sanity check (each declared PNG
 exists and its IHDR size matches). The chrome.* glue in `service_worker.js`
 genuinely needs a real browser and is covered by the manual checklist in
 `extension/README.md`.

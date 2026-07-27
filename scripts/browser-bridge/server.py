@@ -43,6 +43,11 @@ each with its OWN command queue. Routing:
     a routing key that already has a live connection, the old one is dropped —
     any in-flight command on it resolves to a `superseded` error (no orphaned
     waiter). This is what fixes 2× contention from a duplicate/stale connection.
+    A superseded connection's own blocked `/poll` returns a **distinct signal**
+    (`409 superseded`, NOT the idle `204`) so the extension can back off hard
+    instead of hot re-registering — two profiles that share a label would
+    otherwise mutually supersede at loopback speed (a livelock). The supersede is
+    logged ONCE per displacement (at the displacement site), never per poll.
   * Targeting from the skill: exactly one instance → no `target` needed
     (back-compat). More than one and no `target` → an `ambiguous_instance` error
     listing the instances (never a silent pick). Unknown `target` →
@@ -100,6 +105,14 @@ CONNECT_STALE_S = 40.0
 # Synthetic routing key for a legacy extension that polls without a handshake
 # (no X-Bridge-Instance-Id). All such polls collapse onto one unnamed instance.
 LEGACY_INSTANCE_ID = "legacy"
+
+# Sentinel returned by Registry.poll() when THIS connection was superseded by a
+# newer connection that claimed its routing key (a duplicate LABEL on this host,
+# or a storage reset). DISTINCT from None (idle timeout) so the HTTP layer can
+# answer with a distinct signal (409, not the idle 204) and the extension can
+# back off hard instead of hot re-registering (which would livelock two
+# same-label profiles at loopback speed).
+SUPERSEDED = object()
 
 # Request headers the extension uses to identify its instance on /poll.
 HDR_INSTANCE_ID = "X-Bridge-Instance-Id"
@@ -277,7 +290,9 @@ class Registry:
              active_tab=None):
         """Long-poll for `instance_id`/`label`: register the instance, then block
         up to `wait_timeout` for ITS next command. Returns the command dict (with
-        its id) or None on timeout / if this connection got superseded."""
+        its id), None on idle timeout, or the SUPERSEDED sentinel if this
+        connection got displaced by a newer one sharing its routing key (the HTTP
+        layer maps that to a distinct 409 so the extension backs off — not 204)."""
         with self._cond:
             inst = self._register_locked(instance_id, label, active_tab)
             inst.active_polls += 1
@@ -286,7 +301,7 @@ class Registry:
                 deadline = self._clock() + wait_timeout
                 while True:
                     if inst.superseded:
-                        return None
+                        return SUPERSEDED
                     if inst.outbox:
                         return inst.outbox.popleft()
                     remaining = deadline - self._clock()
@@ -520,7 +535,15 @@ def make_handler(registry: Registry, token: str, cmd_timeout: float,
                 instance_id, label, active = self._poll_identity()
                 cmd = registry.poll(instance_id, label, poll_timeout,
                                     active_tab=active)
-                if cmd is None:
+                if cmd is SUPERSEDED:
+                    # Distinct from the idle 204: THIS connection was displaced by
+                    # a newer one sharing its routing key (duplicate label). Still
+                    # bearer+Host guarded (we are past _guard). The extension must
+                    # back off — not hot re-poll — to avoid a mutual-supersede
+                    # livelock. Not logged here (logged once at the displacement
+                    # site) so a backing-off loser never floods the journal.
+                    self._send(409, {"ok": False, "error": "superseded"})
+                elif cmd is None:
                     self._send(204)
                 else:
                     log("dispatch", id=cmd.get("id"), op=cmd.get("op"),

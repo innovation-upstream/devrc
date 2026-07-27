@@ -12,6 +12,9 @@ import {
   ALLOWED_OPS, REQUIRED_FIELDS, validateCommand, resultEnvelope, errorEnvelope,
   nextBackoffMs, compileEval,
   pollRequestPayload, pollHeaders, resultWithInstance,
+  classifyPollStatus, POLL_COMMAND, POLL_IDLE, POLL_SUPERSEDED,
+  POLL_UNAUTHORIZED, SUPERSEDE_BACKOFF_MS,
+  capHeaderValue, MAX_HEADER_VALUE_CHARS,
 } from "../extension/protocol.js";
 
 test("op set mirrors the server contract", () => {
@@ -139,6 +142,46 @@ test("pollHeaders includes an encoded active tab when provided", () => {
     { url: "https://x.test/a b", title: "Hi & Bye" });
   assert.equal(h["X-Bridge-Active-Url"], encodeURIComponent("https://x.test/a b"));
   assert.equal(h["X-Bridge-Active-Title"], encodeURIComponent("Hi & Bye"));
+});
+
+// --- poll-response classification: the distinct supersede signal ------------ //
+test("classifyPollStatus distinguishes command / idle / superseded / auth", () => {
+  assert.equal(classifyPollStatus(200), POLL_COMMAND);
+  assert.equal(classifyPollStatus(204), POLL_IDLE);
+  // 409 must be its OWN kind — NOT lumped with idle 204 (that was the livelock).
+  assert.equal(classifyPollStatus(409), POLL_SUPERSEDED);
+  assert.notEqual(POLL_SUPERSEDED, POLL_IDLE);
+  assert.equal(classifyPollStatus(401), POLL_UNAUTHORIZED);
+  // Anything else is a transport error → generic backoff, not a poll signal.
+  assert.equal(classifyPollStatus(500), null);
+  assert.equal(classifyPollStatus(503), null);
+});
+
+test("SUPERSEDE_BACKOFF_MS is a hard back-off, not a hot loop", () => {
+  // Must be far above the sub-millisecond re-poll cadence that livelocks two
+  // same-label profiles; at/above the transport backoff cap is comfortably safe.
+  assert.ok(SUPERSEDE_BACKOFF_MS >= 10000,
+    `SUPERSEDE_BACKOFF_MS too small: ${SUPERSEDE_BACKOFF_MS}`);
+});
+
+// --- Fix 2: active-tab header length cap ------------------------------------ //
+test("capHeaderValue truncates only when over the cap", () => {
+  assert.equal(capHeaderValue("short"), "short");
+  assert.equal(capHeaderValue("x".repeat(3000)).length, MAX_HEADER_VALUE_CHARS);
+  assert.equal(capHeaderValue(null), "");
+  assert.equal(capHeaderValue(undefined), "");
+});
+
+test("pollHeaders caps a pathological url/title before encoding", () => {
+  const bigUrl = "https://x.test/" + "a".repeat(5000);
+  const bigTitle = "T".repeat(5000);
+  const h = pollHeaders("uuid-1", "", { url: bigUrl, title: bigTitle });
+  // Decoded length is bounded so the header line can't exceed http.server's limit.
+  assert.equal(decodeURIComponent(h["X-Bridge-Active-Url"]).length, MAX_HEADER_VALUE_CHARS);
+  assert.equal(decodeURIComponent(h["X-Bridge-Active-Title"]).length, MAX_HEADER_VALUE_CHARS);
+  // Still header-injection-safe: percent-encoded, no raw CR/LF survives.
+  assert.ok(!/[\r\n]/.test(h["X-Bridge-Active-Url"]));
+  assert.ok(!/[\r\n]/.test(h["X-Bridge-Active-Title"]));
 });
 
 test("resultWithInstance stamps the instanceId onto the envelope", () => {

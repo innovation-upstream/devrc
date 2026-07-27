@@ -51,7 +51,11 @@ else a stable auto-id; labels must be unique per host).
   unknown key errors.
 - **Newest supersedes:** a fresh connection for an already-held key drops the old
   one; an in-flight command on the dropped connection returns a `superseded`
-  error — just retry.
+  error — just retry. The displaced connection's own `/poll` gets a distinct
+  `409 superseded` (not the idle `204`) and the extension **backs off ~30s** (and
+  shows a "superseded — set a unique label" state) instead of re-registering
+  instantly, so two profiles sharing a label can't mutual-supersede in a tight
+  loop. If you see `superseded` steadily, two profiles share a label → fix it.
 
 ## Security contract (why it's safe)
 
