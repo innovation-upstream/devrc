@@ -17,15 +17,35 @@
 // README — you paste the token from ~/.config/browser-bridge/token). Defaults
 // to port 8788.
 
-import { ALLOWED_OPS, validateCommand, resultEnvelope, errorEnvelope, nextBackoffMs }
-  from "./protocol.js";
+import {
+  ALLOWED_OPS, validateCommand, resultEnvelope, errorEnvelope, nextBackoffMs,
+  pollHeaders, resultWithInstance,
+} from "./protocol.js";
 
 const DEFAULT_PORT = 8788;
 let running = false;
 
+// The stable per-profile auto-id: generated ONCE and persisted in
+// chrome.storage.local so it survives service-worker restarts/reloads within
+// this Brave profile. It is the routing key when no user label is set, and the
+// server treats a new auto-id on an existing key as a supersede.
+async function instanceId() {
+  let { instanceId } = await chrome.storage.local.get("instanceId");
+  if (!instanceId) {
+    instanceId = crypto.randomUUID();
+    await chrome.storage.local.set({ instanceId });
+  }
+  return instanceId;
+}
+
 async function config() {
-  const { port, token } = await chrome.storage.local.get(["port", "token"]);
-  return { port: port || DEFAULT_PORT, token: token || "" };
+  const { port, token, label } = await chrome.storage.local.get(["port", "token", "label"]);
+  return {
+    port: port || DEFAULT_PORT,
+    token: token || "",
+    label: label || "",
+    instanceId: await instanceId(),
+  };
 }
 
 function base(port) {
@@ -124,9 +144,23 @@ async function execute(cmd) {
   }
 }
 
+// Best-effort active-tab snapshot for cheap /health + `browser instances`
+// enrichment. Never throws — a query failure just omits the tab info.
+async function activeTabSnapshot() {
+  try {
+    const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+    if (tab) return { url: tab.url, title: tab.title };
+  } catch (e) { /* ignore */ }
+  return null;
+}
+
 // --- long-poll loop -------------------------------------------------------- //
-async function pollOnce({ port, token }) {
-  const res = await fetch(`${base(port)}/poll`, { headers: authHeaders(token) });
+async function pollOnce(cfg) {
+  const active = await activeTabSnapshot();
+  const res = await fetch(`${base(cfg.port)}/poll`, {
+    // Identify this instance so the server routes only its commands here.
+    headers: { ...authHeaders(cfg.token), ...pollHeaders(cfg.instanceId, cfg.label, active) },
+  });
   if (res.status === 204) return null;          // idle timeout → re-poll
   if (res.status === 401) throw new Error("unauthorized");
   if (!res.ok) throw new Error(`poll_${res.status}`);
@@ -137,7 +171,8 @@ async function postResult(cfg, envelope) {
   await fetch(`${base(cfg.port)}/result`, {
     method: "POST",
     headers: authHeaders(cfg.token),
-    body: JSON.stringify(envelope),
+    // Stamp our instanceId so the server scopes the reply to this instance.
+    body: JSON.stringify(resultWithInstance(envelope, cfg.instanceId)),
   });
 }
 

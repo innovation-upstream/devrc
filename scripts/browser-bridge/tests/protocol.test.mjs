@@ -11,6 +11,7 @@ import assert from "node:assert/strict";
 import {
   ALLOWED_OPS, REQUIRED_FIELDS, validateCommand, resultEnvelope, errorEnvelope,
   nextBackoffMs, compileEval,
+  pollRequestPayload, pollHeaders, resultWithInstance,
 } from "../extension/protocol.js";
 
 test("op set mirrors the server contract", () => {
@@ -110,4 +111,43 @@ test("compileEval propagates a non-SyntaxError construction failure without fall
   };
   assert.throws(() => compileEval("whatever", fakeCtor), RangeError);
   assert.deepEqual(calls, ["return (whatever)"], "must not try the statement form");
+});
+
+// --- multi-instance registration payload shape (mirrors server.py) ---------- //
+test("pollRequestPayload carries a stable {instanceId,label} shape", () => {
+  assert.deepEqual(pollRequestPayload("uuid-1", "work"),
+    { instanceId: "uuid-1", label: "work" });
+  // Empty/absent label normalises to "" (the server then keys on the auto-id).
+  assert.deepEqual(pollRequestPayload("uuid-2", ""),
+    { instanceId: "uuid-2", label: "" });
+  assert.deepEqual(pollRequestPayload("uuid-3"),
+    { instanceId: "uuid-3", label: "" });
+});
+
+test("pollHeaders identifies the instance and URL-encodes the label", () => {
+  const bare = pollHeaders("uuid-1", "");
+  assert.deepEqual(bare, { "X-Bridge-Instance-Id": "uuid-1" });
+  // A label with a space/unicode must be percent-encoded (header values are ASCII).
+  const labelled = pollHeaders("uuid-1", "my work");
+  assert.equal(labelled["X-Bridge-Instance-Id"], "uuid-1");
+  assert.equal(labelled["X-Bridge-Label"], "my%20work");
+  assert.equal(labelled["X-Bridge-Active-Url"], undefined);
+});
+
+test("pollHeaders includes an encoded active tab when provided", () => {
+  const h = pollHeaders("uuid-1", "work",
+    { url: "https://x.test/a b", title: "Hi & Bye" });
+  assert.equal(h["X-Bridge-Active-Url"], encodeURIComponent("https://x.test/a b"));
+  assert.equal(h["X-Bridge-Active-Title"], encodeURIComponent("Hi & Bye"));
+});
+
+test("resultWithInstance stamps the instanceId onto the envelope", () => {
+  const env = resultEnvelope("cid-1", { html: "x" });
+  const stamped = resultWithInstance(env, "uuid-9");
+  assert.equal(stamped.instanceId, "uuid-9");
+  assert.equal(stamped.id, "cid-1");
+  assert.equal(stamped.ok, true);
+  assert.deepEqual(stamped.data, { html: "x" });
+  // Original envelope is not mutated.
+  assert.equal(env.instanceId, undefined);
 });

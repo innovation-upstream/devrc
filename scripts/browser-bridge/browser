@@ -6,8 +6,19 @@
 # the command to the browser-bridge MV3 extension running in the user's live,
 # logged-in Brave session.
 #
+# Multiple Brave profiles can each run the extension; the server keeps a registry
+# of connected instances keyed by a routing key (the profile's label, else its
+# stable auto-id). Use --instance to target one explicitly:
+#
+#   browser [--instance <key>] <subcommand>
+#
+# With exactly ONE instance connected, --instance is optional (back-compat). With
+# more than one and no --instance, a command ERRORS (it never guesses) and lists
+# the connected instances — pick one with --instance <key>.
+#
 # Subcommands:
-#   browser health            — is an extension connected?
+#   browser health            — connected instances + count (per-instance)
+#   browser instances         — list connected instances as JSON (key/label/url)
 #   browser html              — outerHTML of the active tab (+ url, title)
 #   browser eval '<js>'       — run JS in the active tab, return its value
 #   browser tabs              — list open tabs
@@ -23,8 +34,18 @@ HOST="${BROWSER_BRIDGE_HOST:-127.0.0.1}"
 PORT="${BROWSER_BRIDGE_PORT:-8788}"
 TOKEN_FILE="${BROWSER_BRIDGE_TOKEN_FILE:-$HOME/.config/browser-bridge/token}"
 BASE="http://${HOST}:${PORT}"
+INSTANCE=""   # routing key set via --instance <key> (empty → single-instance)
 
 die() { echo "browser: $*" >&2; exit 1; }
+
+# Parse a leading --instance <key> / --instance=<key> (before the subcommand).
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --instance) shift; [ $# -ge 1 ] || die "usage: browser --instance <key> <subcommand>"; INSTANCE="$1"; shift ;;
+    --instance=*) INSTANCE="${1#--instance=}"; shift ;;
+    *) break ;;
+  esac
+done
 
 [ -r "$TOKEN_FILE" ] || die "token file not found/readable: $TOKEN_FILE (is the browser-bridge service running?)"
 TOKEN="$(tr -d '[:space:]' < "$TOKEN_FILE")"
@@ -34,6 +55,26 @@ command -v curl >/dev/null 2>&1 || die "curl not found on PATH"
 
 pretty() {
   if command -v jq >/dev/null 2>&1; then jq .; else cat; fi
+}
+
+# render_instances — read a JSON blob on stdin ({"instances":[...]} or a bare
+# array) and print one readable line per instance: "<key>  [label]  <active url>".
+render_instances() {
+  python3 -c '
+import json, sys
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+insts = d.get("instances") if isinstance(d, dict) else d
+for i in (insts or []):
+    key = i.get("key", "?")
+    label = i.get("label") or ""
+    tab = i.get("activeTab") or {}
+    url = tab.get("url") or ""
+    sys.stderr.write(f"  - {key}" + (f"  (label: {label})" if label else "") +
+                     (f"  {url}" if url else "") + "\n")
+'
 }
 
 # _curl METHOD PATH [JSON_BODY] — emits `<body>\n<http_code>` to stdout. The
@@ -70,10 +111,13 @@ if isinstance(r, dict) and r.get("ok") is False:
 
 # cmd_op OP [EXTRA_JSON_FIELDS] — POST /cmd, print the result JSON on a genuine
 # success; exit non-zero with a readable message on a transport, HTTP, OR
-# op-level (result.ok:false) error.
+# op-level (result.ok:false) error. Honours the global --instance (INSTANCE) by
+# adding a routing "target" to the command body.
 cmd_op() {
   local op="$1" extra="${2:-}"
-  local body="{\"op\":\"${op}\"${extra:+,${extra}}}"
+  local tgt=""
+  if [ -n "$INSTANCE" ]; then tgt=",\"target\":$(json_str "$INSTANCE")"; fi
+  local body="{\"op\":\"${op}\"${extra:+,${extra}}${tgt}}"
   local raw HTTP_CODE resp
   raw="$(_curl POST /cmd "$body")" || die "curl failed talking to ${BASE}/cmd"
   HTTP_CODE="${raw##*$'\n'}"; resp="${raw%$'\n'*}"
@@ -82,6 +126,24 @@ cmd_op() {
     503) echo "$resp" >&2; die "no extension connected — load the browser-bridge extension in Brave (see SKILL.md)" ;;
     504) echo "$resp" >&2; die "timeout waiting for the extension to answer (is Brave focused / responsive?)" ;;
     401) die "unauthorized — token mismatch (re-paste the token in the extension options)" ;;
+    409)
+      # ambiguous_instance (>1 connected, no --instance) or superseded.
+      if printf '%s' "$resp" | grep -q '"ambiguous_instance"'; then
+        echo "browser: multiple instances connected — specify one with --instance <key>:" >&2
+        printf '%s' "$resp" | render_instances
+        exit 1
+      fi
+      echo "$resp" >&2
+      die "instance superseded by a newer connection with the same key — retry"
+      ;;
+    404)
+      if printf '%s' "$resp" | grep -q '"unknown_instance"'; then
+        echo "browser: no connected instance matches --instance '${INSTANCE}'. Connected:" >&2
+        printf '%s' "$resp" | render_instances
+        exit 1
+      fi
+      echo "$resp" >&2; die "HTTP 404 from /cmd"
+      ;;
     *)   echo "$resp" >&2; die "HTTP $HTTP_CODE from /cmd" ;;
   esac
   # A 200 wraps the extension's envelope: {"ok":true,"result":<envelope>}. When
@@ -108,6 +170,13 @@ case "$sub" in
     HTTP_CODE="${raw##*$'\n'}"; resp="${raw%$'\n'*}"
     [ "$HTTP_CODE" = "200" ] || { echo "$resp" >&2; die "HTTP $HTTP_CODE from /health"; }
     printf '%s\n' "$resp" | pretty
+    ;;
+  instances)
+    raw="$(_curl GET /instances)" || die "curl failed talking to ${BASE}/instances"
+    HTTP_CODE="${raw##*$'\n'}"; resp="${raw%$'\n'*}"
+    [ "$HTTP_CODE" = "200" ] || { echo "$resp" >&2; die "HTTP $HTTP_CODE from /instances"; }
+    # Emit the instances array as JSON on stdout.
+    printf '%s' "$resp" | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin).get("instances", []), indent=2))'
     ;;
   html)
     cmd_op getHtml | pretty
@@ -152,6 +221,6 @@ print(sys.argv[1])
     grep -E '^#( |$)' "$0" | sed -E 's/^# ?//'
     ;;
   *)
-    die "unknown subcommand: $sub (try: health html eval tabs nav screenshot)"
+    die "unknown subcommand: $sub (try: health instances html eval tabs nav screenshot)"
     ;;
 esac

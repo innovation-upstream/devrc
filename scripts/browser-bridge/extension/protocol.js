@@ -71,3 +71,32 @@ export function nextBackoffMs(attempt, baseMs = 1000, capMs = 30000) {
   const n = Math.max(0, attempt | 0);
   return Math.min(capMs, baseMs * Math.pow(2, n));
 }
+
+// --- multi-instance registration (mirrors server.py) ---------------------- //
+// The server keeps a registry of connected instances keyed by a routing key =
+// label (if set) else the stable auto-id. The extension identifies itself on
+// EVERY /poll via headers, and echoes its instanceId in the /result body so the
+// server can scope the reply. These helpers keep that wire shape pure + testable.
+
+// The logical registration payload: a stable auto-id + the optional user label.
+// `label` is normalised to "" when unset so the shape is stable.
+export function pollRequestPayload(instanceId, label) {
+  return { instanceId: String(instanceId || ""), label: label ? String(label) : "" };
+}
+
+// Request headers the SW sends on /poll to identify its instance. Label +
+// active-tab strings are URL-encoded (HTTP header values must be ASCII-safe);
+// the server decodes them. Empty values are omitted so a bare instance registers
+// cleanly. `active` is an optional { url, title } for cheap /health enrichment.
+export function pollHeaders(instanceId, label, active) {
+  const h = { "X-Bridge-Instance-Id": String(instanceId || "") };
+  if (label) h["X-Bridge-Label"] = encodeURIComponent(String(label));
+  if (active && active.url) h["X-Bridge-Active-Url"] = encodeURIComponent(String(active.url));
+  if (active && active.title) h["X-Bridge-Active-Title"] = encodeURIComponent(String(active.title));
+  return h;
+}
+
+// Stamp the instanceId onto a result envelope so /result is instance-scoped.
+export function resultWithInstance(envelope, instanceId) {
+  return { ...envelope, instanceId: String(instanceId || "") };
+}
