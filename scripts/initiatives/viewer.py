@@ -104,7 +104,7 @@ DISPLAY_COLUMNS = [
 # ALTERs) simply lacks them, so the viewer detects their presence and SELECTs them only when
 # they exist, defaulting `undocumented=False`/`opening_message=""` (→ the card renders in the
 # main board with no `start ›` line, nothing lost).
-OPTIONAL_COLUMNS = ["undocumented", "source", "opening_message"]
+OPTIONAL_COLUMNS = ["undocumented", "source", "opening_message", "search_text"]
 
 # Momentum ordering + badges — SAME ranks/glyphs the scan uses (active→stalled→unknown).
 MOMENTUM_RANK = {"active": 0, "slowing": 1, "stalled": 2, "unknown": 3}
@@ -678,6 +678,11 @@ def _initiative_view(ini: dict, now: datetime) -> dict:
         # The thread's ORIGIN (genesis) prompt (v5) — the card's `start ›` line. Empty on a
         # pre-v5 store (OPTIONAL_COLUMNS: missing key → "") so the line simply isn't rendered.
         "opening_message": str(ini.get("opening_message") or "").strip(),
+        # SEARCH-ONLY (v6): the user's full turn text across the session(s). Fed to the
+        # client-side search blob (matchQ) so a keyword typed mid-session is findable, but
+        # NEVER rendered on the card (it's the whole session — the card already shows the
+        # opening + latest). "" on a pre-v6 store (OPTIONAL_COLUMNS: missing key → "").
+        "search_text": str(ini.get("search_text") or ""),
     }
     # A GROUNDED, read-only next-step recommendation derived from the just-assembled view
     # (reads next_step/open_prs/open_investigations/face_message/status/momentum). None when
@@ -1256,22 +1261,103 @@ function partitionInitiatives(views){
 
 # PURE, DOM-FREE card-search predicate — kept in its OWN snippet (like _RECENCY_JS) so the
 # node test evals it directly, exercising the ACTUAL page code rather than a Python replica.
-# `q` is the ALREADY-lowercased, trimmed query. Empty query → every card matches. Otherwise a
-# case-insensitive substring test over a per-card blob: slug, title, summary + the recap split
-# (identity/status/recap), the ORIGIN prompt (`opening_message`), EVERY recent-message text
-# (so a card is findable by any prompt, not just the face line), the parsed/suggested
-# next_step, repo_name, momentum, and the live tmux task. Substituted into _JS at the
-# __MATCH_JS__ placeholder at module load. Used for BOTH the main board and the Emerging lane.
+# `q` is the ALREADY-lowercased, trimmed query (matchQ still re-normalizes internally so it is
+# correct standalone). Empty query → every card matches. Otherwise a per-card blob is built
+# from: slug, title, summary + the recap split (identity/status/recap), the ORIGIN prompt
+# (`opening_message`), EVERY recent-message text (so a card is findable by any prompt, not just
+# the face line), the SEARCH-ONLY full session text (`search_text` — a keyword typed mid-session
+# is findable even though it's never rendered), the parsed/suggested next_step, repo_name,
+# momentum, and the live tmux task. Substituted into _JS at the __MATCH_JS__ placeholder at
+# module load. Used for BOTH the main board and the Emerging lane.
+#
+# The matcher is FUZZY but a strict SUPERSET of the old exact/substring test (so "404"/"img"
+# still work): query is split into whitespace tokens, and a card matches iff EVERY token
+# matches the blob, where a token matches if ANY of — (1) it is a SUBSTRING of the blob (the
+# fast path / old behaviour); (2) for tokens ≥4 chars, its Levenshtein edit distance to SOME
+# blob word is ≤ min(2, floor(len/4)) (typo tolerance); (3) for tokens ≥4 chars, it is an
+# ordered SUBSEQUENCE of some blob word (partial-typing tolerance, e.g. "annce" ⊂
+# "announcement"). Tokens <4 chars use substring only (avoid noise). Both query and blob are
+# lowercased + diacritic-stripped. The blob's distinct words are tokenized ONCE per card per
+# query (bounded), and Levenshtein early-exits past the cap, so it stays fast over ~41 cards ×
+# a ~6KB blob. It errs toward the exact/substring path — it does NOT match everything.
 _MATCH_JS = r"""
 function matchQ(v, q){
   if(!q) return true;
+  function norm(s){
+    s = String(s == null ? '' : s).toLowerCase();
+    return s.normalize ? s.normalize('NFD').replace(/[\u0300-\u036f]/g, '') : s;
+  }
   var msg = (v.recent_messages || []).map(function(m){ return (m && m.text) || ''; }).join(' ');
-  var hay = ((v.slug||'') + ' ' + (v.title||'') + ' ' + (v.identity||'') + ' ' +
+  var hay = norm((v.slug||'') + ' ' + (v.title||'') + ' ' + (v.identity||'') + ' ' +
              (v.status||'') + ' ' + (v.recap||'') + ' ' + (v.summary||'') + ' ' +
              (v.opening_message||'') + ' ' + (v.next_step||'') + ' ' +
              (v.repo_name||'') + ' ' + (v.momentum||'') + ' ' +
-             msg + ' ' + (v.live_task||'')).toLowerCase();
-  return hay.indexOf(q) !== -1;
+             msg + ' ' + (v.search_text||'') + ' ' + (v.live_task||''));
+  var tokens = norm(q).split(/\s+/).filter(Boolean);
+  if(!tokens.length) return true;   // whitespace-only query → all cards (parity with empty)
+  // Bounded Levenshtein: true iff edit-distance(a,b) <= max, early-exiting once a whole DP
+  // row exceeds max (any monotone path to the corner passes through that row, so the final
+  // distance can only be ≥ that row's minimum).
+  function withinEdit(a, b, max){
+    var la = a.length, lb = b.length;
+    if(Math.abs(la - lb) > max) return false;
+    var prev = new Array(lb + 1);
+    for(var j = 0; j <= lb; j++) prev[j] = j;
+    for(var i = 1; i <= la; i++){
+      var cur = new Array(lb + 1);
+      cur[0] = i;
+      var rowMin = cur[0];
+      var ca = a.charCodeAt(i - 1);
+      for(var jj = 1; jj <= lb; jj++){
+        var cost = ca === b.charCodeAt(jj - 1) ? 0 : 1;
+        var del = prev[jj] + 1, ins = cur[jj - 1] + 1, sub = prev[jj - 1] + cost;
+        var mn = del < ins ? del : ins; if(sub < mn) mn = sub;
+        cur[jj] = mn;
+        if(mn < rowMin) rowMin = mn;
+      }
+      if(rowMin > max) return false;
+      prev = cur;
+    }
+    return prev[lb] <= max;
+  }
+  // Is `t` an ordered subsequence of word `w`?
+  function isSubseq(t, w){
+    if(t.length > w.length) return false;
+    var i = 0;
+    for(var j = 0; j < w.length && i < t.length; j++){
+      if(t.charCodeAt(i) === w.charCodeAt(j)) i++;
+    }
+    return i === t.length;
+  }
+  // Distinct blob words, computed lazily ONCE per card per query and bounded.
+  var wordSet = null;
+  function words(){
+    if(wordSet) return wordSet;
+    wordSet = [];
+    var seen = Object.create(null);
+    var parts = hay.split(/[^a-z0-9]+/);
+    for(var k = 0; k < parts.length && wordSet.length < 4000; k++){
+      var w = parts[k];
+      if(w && !seen[w]){ seen[w] = 1; wordSet.push(w); }
+    }
+    return wordSet;
+  }
+  function tokenMatches(t){
+    if(hay.indexOf(t) !== -1) return true;   // fast path: substring (exact/partial) — old behaviour
+    if(t.length < 4) return false;           // short tokens: substring only (avoid fuzzy noise)
+    var cap = Math.min(2, Math.floor(t.length / 4));
+    var ws = words();
+    for(var k = 0; k < ws.length; k++){
+      var w = ws[k];
+      if(cap > 0 && withinEdit(t, w, cap)) return true;
+      if(isSubseq(t, w)) return true;
+    }
+    return false;
+  }
+  for(var i = 0; i < tokens.length; i++){
+    if(!tokenMatches(tokens[i])) return false;   // AND across tokens
+  }
+  return true;
 }
 """.strip()
 

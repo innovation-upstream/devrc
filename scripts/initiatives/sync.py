@@ -110,7 +110,8 @@ CREATE TABLE IF NOT EXISTS initiatives.initiative_snapshot (
     recent_commits       jsonb,
     source               text,
     undocumented         boolean,
-    opening_message      text
+    opening_message      text,
+    search_text          text
 );
 
 -- Additive migration for pre-existing installs: CREATE TABLE IF NOT EXISTS won't add
@@ -123,6 +124,9 @@ CREATE TABLE IF NOT EXISTS initiatives.initiative_snapshot (
 --   undocumented     — true for a session-derived initiative with no anchoring doc (v4).
 --   opening_message  — the thread's ORIGIN (genesis) prompt, so a card shows where it
 --                      began even when the ai-title drifted (v5).
+--   search_text      — SEARCH-ONLY full text: the user's OWN turn texts across the WHOLE
+--                      session(s) so a keyword typed mid-session is findable (v6). Never
+--                      rendered — the viewer only feeds it to the client-side search blob.
 ALTER TABLE initiatives.initiative_snapshot
     ADD COLUMN IF NOT EXISTS summary text;
 ALTER TABLE initiatives.initiative_snapshot
@@ -135,6 +139,8 @@ ALTER TABLE initiatives.initiative_snapshot
     ADD COLUMN IF NOT EXISTS undocumented boolean;
 ALTER TABLE initiatives.initiative_snapshot
     ADD COLUMN IF NOT EXISTS opening_message text;
+ALTER TABLE initiatives.initiative_snapshot
+    ADD COLUMN IF NOT EXISTS search_text text;
 
 -- Support the `current` view's DISTINCT ON (repo, slug) … JOIN snapshots …
 -- ORDER BY repo, slug, captured_at DESC, plus the FK join / retention scans.
@@ -167,7 +173,9 @@ CREATE INDEX IF NOT EXISTS snapshots_captured_at_idx
 #       column-reorder reason -> same guarded DROP+CREATE.
 #   v5: the base table gained `opening_message` (the thread's origin/genesis prompt).
 #       Appending it reorders `SELECT i.*, s.captured_at` again -> same guarded DROP+CREATE.
-VIEW_VERSION = "v5"
+#   v6: the base table gained `search_text` (the search-only full-text index). Appending it
+#       reorders `SELECT i.*, s.captured_at` once more -> same guarded DROP+CREATE.
+VIEW_VERSION = "v6"
 VIEW_COMMENT = f"initiatives-sync view {VIEW_VERSION}"
 VIEW_DDL = """
 CREATE VIEW initiatives.current AS
@@ -186,7 +194,8 @@ SELECT DISTINCT ON (i.repo, i.slug)
 # v4: recreate to expose `source` + `undocumented` (v4) on top of v2/v3 — see the
 # VIEW_VERSION note above for why this is DROP+CREATE, not CREATE OR REPLACE.
 # v5: recreate to expose `opening_message` (the origin/genesis prompt) — same DROP+CREATE.
-LATEST_VIEW_VERSION = "v5"
+# v6: recreate to expose `search_text` (the search-only full-text index) — same DROP+CREATE.
+LATEST_VIEW_VERSION = "v6"
 LATEST_VIEW_COMMENT = f"initiatives-sync view latest {LATEST_VIEW_VERSION}"
 LATEST_VIEW_DDL = """
 CREATE VIEW initiatives.latest AS
@@ -210,7 +219,7 @@ ROW_COLUMNS = [
     "next_step", "commits", "commits_unknown", "merged_prs", "open_prs",
     "session_count", "telem_events", "telem_last", "current_doc",
     "open_investigations", "docs", "recent_messages", "recent_commits",
-    "source", "undocumented", "opening_message",
+    "source", "undocumented", "opening_message", "search_text",
 ]
 # Columns stored as JSONB (wrapped in psycopg2.extras.Json at write time).
 JSONB_COLUMNS = {"open_prs", "open_investigations", "docs",
@@ -297,6 +306,10 @@ def _initiative_to_row(ini: dict, host: str) -> dict:
         # handoff already describes them; the earliest session's genesis for a session group.
         # Nullable text: a pre-v5 scan (no key) writes NULL, and the viewer treats it as "".
         "opening_message": ini.get("opening_message") or "",
+        # SEARCH-ONLY full-text index (v6) — the user's own turn texts across the whole
+        # session(s); "" for doc-anchored initiatives with no session of their own. Nullable:
+        # a pre-v6 scan (no key) writes NULL, and the viewer treats it as "" (never rendered).
+        "search_text": ini.get("search_text") or "",
     }
 
 

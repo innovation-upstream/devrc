@@ -151,6 +151,12 @@ ENABLE_TITLE_DRIFT_MERGE = False
 # Cap on a surfaced opening (genesis) prompt (chars) so a card's `start ›` line stays legible.
 OPENING_MAX = 300
 
+# Cap on a session's `search_text` (chars) — the FULL concatenation of the user's own turn
+# texts across the WHOLE session, kept SEARCH-ONLY (never rendered) so a keyword the user typed
+# in a MIDDLE turn is findable even though the card only displays the opening + last-N turns.
+# Hard-truncated at this cap (no ellipsis — it's an index blob, not display prose).
+SEARCH_TEXT_MAX = 6000
+
 # A YYYY-MM-DD date anywhere in a handoff filename stem.
 DATE_RE = re.compile(r"(\d{4}-\d{2}-\d{2})")
 # "## Next steps" with any trailing decoration (the template varies a little).
@@ -329,6 +335,24 @@ def _cap_opening(s: str | None) -> str:
     if sp >= int(OPENING_MAX * 0.6):
         cut = cut[:sp].rstrip()
     return cut + "…"
+
+
+def _merge_search_texts(texts) -> str:
+    """Join several sessions' `search_text` blobs into one, DEDUPING identical lines
+    (order-preserving) and HARD-capping at SEARCH_TEXT_MAX. Search-only prose — the raw
+    user-turn texts of a group's sessions, never synthesized. "" when nothing survives.
+
+    Line-level dedup keeps a merged/anchored initiative's index from ballooning with the
+    same turn repeated across sessions that share history, and keeps concat idempotent (a
+    doc adopting the same group twice can't double it)."""
+    seen: set[str] = set()
+    out: list[str] = []
+    for t in texts:
+        for line in (t or "").split("\n"):
+            if line and line not in seen:
+                seen.add(line)
+                out.append(line)
+    return "\n".join(out)[:SEARCH_TEXT_MAX]
 
 
 def _strip_list_marker(s: str) -> str:
@@ -653,7 +677,7 @@ def _new_initiative(repo: str, slug: str, title: str | None, *,
                     current_doc: str | None = None, docs: list | None = None,
                     source: str = "doc", undocumented: bool = False,
                     session_ids: set | None = None,
-                    opening_message: str = "") -> dict:
+                    opening_message: str = "", search_text: str = "") -> dict:
     return {
         # --- stored contract keys -------------------------------------------- #
         "repo": repo,
@@ -667,6 +691,11 @@ def _new_initiative(repo: str, slug: str, title: str | None, *,
         # "" for doc/extra initiatives (their handoff summary already describes them); set
         # from the earliest session's genesis for a session-derived group.
         "opening_message": opening_message,
+        # SEARCH-ONLY full-text index: the concatenation of the user's OWN turn texts across
+        # the WHOLE session(s) (capped at SEARCH_TEXT_MAX). NEVER rendered — it exists so a
+        # keyword typed in a MIDDLE turn (not in the opening or last-N surfaced turns) still
+        # matches the card. "" for doc/extra initiatives that anchor no session of their own.
+        "search_text": search_text,
         "open_investigations": list(open_investigations or []),
         "current_doc": current_doc,
         "docs": list(docs or []),
@@ -845,11 +874,15 @@ def _make_group_initiative(repo: str, records: list[dict],
     slug = "-".join(sorted(union_tokens))
     ai_title = (newest.get("ai_title") or "").strip()
     session_ids = {r["session_id"] for r in records if r.get("session_id")}
+    # SEARCH-ONLY full text: pool the FULL user-turn text of EVERY session in the group
+    # (chronological, so the merged index reads oldest→newest), dedup lines, re-cap.
+    search_text = _merge_search_texts(
+        r.get("search_text") or "" for r in sorted(records, key=_rec_ts))
     ini = _new_initiative(
         repo=repo, slug=slug, title=ai_title or slug,
         summary=_cap_summary(ai_title) if ai_title else None,
         source="session", undocumented=True, session_ids=session_ids,
-        opening_message=opening)
+        opening_message=opening, search_text=search_text)
     ini["_topic_tokens"] = frozenset(union_tokens)
     # Internal (dropped before emit): the genesis ts, so a doc anchor folding SEVERAL groups
     # can adopt the EARLIEST opening deterministically (combine_docs_and_groups).
@@ -1201,6 +1234,13 @@ def combine_docs_and_groups(doc_inis: list[dict], extra_inis: list[dict],
                     if anchor.get("_adopt_ts") is None or grp_ts < anchor["_adopt_ts"]:
                         anchor["_adopt_open"] = grp_open
                         anchor["_adopt_ts"] = grp_ts
+            # SEARCH-ONLY: every folding group contributes its full-text index to the doc.
+            # Accumulated (not earliest-wins like opening) as (ts, text) so the merge reads
+            # oldest→newest deterministically regardless of group iteration order.
+            grp_search = grp.get("search_text") or ""
+            if grp_search.strip():
+                anchor.setdefault("_adopt_search", []).append(
+                    (grp.get("_opening_ts") or 0.0, grp_search))
         else:
             standalone.append(grp)
 
@@ -1210,6 +1250,12 @@ def combine_docs_and_groups(doc_inis: list[dict], extra_inis: list[dict],
         d.pop("_adopt_ts", None)
         if adopted and not (d.get("opening_message") or "").strip():
             d["opening_message"] = adopted
+        # Append the folded groups' full text onto the doc's own search_text (doc default ""),
+        # ordered oldest→newest, dedup + re-cap via _merge_search_texts.
+        adopt_search = d.pop("_adopt_search", None)
+        if adopt_search:
+            ordered = [t for _ts, t in sorted(adopt_search, key=lambda x: x[0])]
+            d["search_text"] = _merge_search_texts([d.get("search_text") or ""] + ordered)
 
     kept_extras = [d for d in extra_inis
                    if d["source"] == "both" or d.get("handoff_structured")]
@@ -1506,6 +1552,7 @@ def _read_session_turns(path: str, n: int) -> dict | None:
         return None
     genesis: str | None = None
     turns: list[dict] = []
+    search_parts: list[str] = []   # EVERY genuine user turn's text (search_text, not last-n)
     last_user_ts: float | None = None
     cwd: str | None = None
     branch: str | None = None
@@ -1547,6 +1594,9 @@ def _read_session_turns(path: str, n: int) -> dict | None:
         if genesis is None:
             genesis = txt
         n_turns += 1
+        # search_text: the user's OWN words across the WHOLE session (every genuine turn,
+        # not just the last-n window kept for display) — search-only, capped on return.
+        search_parts.append(txt)
         ts = _iso_to_epoch(obj.get("timestamp"))
         turns.append({"text": txt, "ts": ts})
         if ts is not None:
@@ -1560,6 +1610,7 @@ def _read_session_turns(path: str, n: int) -> dict | None:
     if genesis is None:
         return None
     return {"genesis": genesis, "turns": turns[-n:] if n > 0 else [],
+            "search_text": "\n".join(search_parts)[:SEARCH_TEXT_MAX],
             "last_user_ts": last_user_ts, "cwd": cwd, "branch": branch,
             "ai_title": ai_title, "last_prompt": last_prompt, "n_turns": n_turns}
 

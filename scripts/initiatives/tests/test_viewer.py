@@ -1344,6 +1344,43 @@ def test_render_html_embeds_opening_message_in_json_island():
     assert "the origin ask" in html
 
 
+# --------------------------------------------------------------------------- #
+# search_text — the SEARCH-ONLY full-text index (v6): fed to matchQ, NEVER rendered.
+# --------------------------------------------------------------------------- #
+def test_view_carries_search_text():
+    rows = [_row(slug="s",
+                 search_text="//open\nit's an announcement image, 404ing is a big blast radius")]
+    v = viewer.build_model(rows, now=NOW)["flat"][0]
+    assert "announcement" in v["search_text"]
+
+
+def test_view_search_text_defaults_empty_when_absent():
+    # GRACEFUL DEGRADATION: a pre-v6 row (OPTIONAL_COLUMNS didn't select it) has no key -> "".
+    row = _row(slug="s")
+    assert "search_text" not in row
+    v = viewer.build_model([row], now=NOW)["flat"][0]
+    assert v["search_text"] == ""
+
+
+def test_search_text_is_an_optional_column():
+    # OPTIONAL so an un-migrated store (view/table without the column) degrades cleanly.
+    assert "search_text" in viewer.OPTIONAL_COLUMNS
+
+
+def test_search_text_fed_to_match_blob_but_not_rendered_on_card():
+    # It feeds the client-side search predicate...
+    assert "v.search_text" in viewer._MATCH_JS
+    # ...and its ONLY reference in the whole page bundle is the matcher — the card DOM-builder
+    # never touches it, so the full session text is searched but never displayed on the card.
+    assert viewer._JS.count("v.search_text") == 1
+    # It reaches the client (JSON island) so matchQ can use it, but nothing renders it: the
+    # card-building code (`function card(`) does not mention search_text between its bounds.
+    js = viewer._JS
+    ci = js.index("function card(")
+    card_body = js[ci:ci + 6000]
+    assert "search_text" not in card_body
+
+
 def _node_partition(views):
     """Eval `viewer._PARTITION_JS` under node against `views`; return {doc:[slug...],
     emg:[slug...]}. Skips if node isn't on PATH (the partition is JS, so node exercises the
@@ -1441,14 +1478,97 @@ def test_js_matchq_filters_on_title_summary_and_opening_and_latest():
     assert _node_match(views, "nonexistent-token") == []
 
 
+# --------------------------------------------------------------------------- #
+# matchQ — FUZZY search over the full-text blob (v6). A strict SUPERSET of the old
+# substring test, node-eval'd so the ACTUAL page predicate runs (not a Python replica).
+# --------------------------------------------------------------------------- #
+def _fuzzy_views():
+    # Card A: the announcement keyword lives ONLY in search_text (a mid-session turn), NOT in
+    # the opening/title/latest — exactly the miss the old substring-over-last-5 blob had.
+    return [
+        {"slug": "img-cacher", "title": "image cacher", "repo_name": "civit/datapacket-talos",
+         "opening_message": "//image-cacher investigate why this 404s",
+         "recent_messages": [{"text": "dispatch a fix"}, {"text": "check the canary"}],
+         "search_text": ("//image-cacher investigate why this 404s\n"
+                         "it's an announcement image, 404ing is a large blast radius\n"
+                         "dispatch to scope a solution for the announcement pointer issue")},
+        {"slug": "mail", "title": "Mail automation", "summary": "invoice archiver",
+         "opening_message": "//kick off mail", "recent_messages": [{"text": "ship extractor"}],
+         "search_text": "ship the extractor and archive the invoices"},
+    ]
+
+
+def test_js_matchq_substring_fast_path_preserved():
+    # The old exact/substring behaviour is intact (regression guard for "404"/"img").
+    v = _fuzzy_views()
+    assert _node_match(v, "404") == ["img-cacher"]        # appears in search_text + opening
+    assert _node_match(v, "img") == ["img-cacher"]        # substring of "image"/slug
+    assert _node_match(v, "invoices") == ["mail"]
+    assert _node_match(v, "MAIL") == ["mail"]             # case-insensitive
+
+
+def test_js_matchq_indexes_mid_session_keyword_via_search_text():
+    # THE FIX: a keyword typed in a MIDDLE turn (only in search_text) now matches, where the
+    # old opening+last-5 blob missed it.
+    v = _fuzzy_views()
+    assert _node_match(v, "announcement") == ["img-cacher"]
+
+
+def test_js_matchq_fuzzy_typo_tolerance():
+    v = _fuzzy_views()
+    # single-deletion typo (edit distance 1) still finds "announcement"
+    assert _node_match(v, "annoucement") == ["img-cacher"]
+    # transposition-ish / substitution within the len-based cap
+    assert _node_match(v, "anouncement") == ["img-cacher"]
+
+
+def test_js_matchq_subsequence_partial_typing():
+    v = _fuzzy_views()
+    # "annce" is an ordered subsequence of "announcement" (partial typing)
+    assert _node_match(v, "annce") == ["img-cacher"]
+
+
+def test_js_matchq_short_tokens_do_not_overmatch():
+    # Tokens <4 chars are substring-only — no fuzzy noise. "xyz" is nowhere; "an" (<4) must
+    # NOT fuzzy-explode onto the announcement card (it isn't a substring of that blob token
+    # boundary-free... it IS a substring "an" appears — so use a genuinely absent short token).
+    v = _fuzzy_views()
+    assert _node_match(v, "zzq") == []          # 3 chars, absent -> no match, no fuzzy
+    assert _node_match(v, "qxz") == []
+
+
+def test_js_matchq_multi_token_and_semantics():
+    v = _fuzzy_views()
+    # BOTH tokens must match SOME card for it to qualify (AND). "announcement" is only on
+    # img-cacher, "invoices" only on mail -> no single card has both.
+    assert _node_match(v, "announcement invoices") == []
+    # both tokens on the SAME card -> matches
+    assert _node_match(v, "announcement pointer") == ["img-cacher"]
+    # one exact + one fuzzy token, same card
+    assert _node_match(v, "404 annoucement") == ["img-cacher"]
+
+
+def test_js_matchq_empty_and_whitespace_query_matches_all():
+    v = _fuzzy_views()
+    assert set(_node_match(v, "")) == {"img-cacher", "mail"}
+    assert set(_node_match(v, "   ")) == {"img-cacher", "mail"}
+
+
+def test_js_matchq_diacritic_insensitive():
+    v = [{"slug": "café", "title": "Café résumé pipeline", "search_text": ""}]
+    assert _node_match(v, "cafe") == ["café"]       # query without accents matches accented blob
+    assert _node_match(v, "resume") == ["café"]
+
+
 def test_js_matchq_is_wired_and_inlined_once():
     js = viewer._JS
     assert "__MATCH_JS__" not in js                 # snippet inlined
     assert "function matchQ" in js                  # the predicate is present in the page
     assert js.count("function matchQ") == 1         # exactly once (not the old inline copy too)
-    # the blob now includes the origin prompt + the parsed next-step
+    # the blob now includes the origin prompt + the parsed next-step + the full-text index
     assert "v.opening_message" in viewer._MATCH_JS
     assert "v.next_step" in viewer._MATCH_JS
+    assert "v.search_text" in viewer._MATCH_JS
     # the search input is debounced and a "N shown / M" count is wired
     assert "setTimeout(function(){ state.q = searchInput.value; render(); }, 150)" in js
     assert "shown / " in js

@@ -429,12 +429,12 @@ def test_ensure_schema_adds_summary_column_additively():
 def test_view_versions_bumped_so_new_columns_are_exposed():
     # A view's SELECT i.* is frozen at create time; bumping the marker forces a recreate
     # so base-table columns added later (summary=v2; recent_messages/recent_commits=v3;
-    # source/undocumented=v4; opening_message=v5) surface on initiatives.latest / .current.
-    # v5 is the origin/genesis-prompt bump.
-    assert sync.VIEW_VERSION == "v5"
-    assert sync.LATEST_VIEW_VERSION == "v5"
-    assert sync.VIEW_COMMENT == "initiatives-sync view v5"
-    assert sync.LATEST_VIEW_COMMENT == "initiatives-sync view latest v5"
+    # source/undocumented=v4; opening_message=v5; search_text=v6) surface on
+    # initiatives.latest / .current. v6 is the search-only full-text bump.
+    assert sync.VIEW_VERSION == "v6"
+    assert sync.LATEST_VIEW_VERSION == "v6"
+    assert sync.VIEW_COMMENT == "initiatives-sync view v6"
+    assert sync.LATEST_VIEW_COMMENT == "initiatives-sync view latest v6"
 
 
 def test_ensure_schema_adds_discovery_columns_additively():
@@ -491,9 +491,53 @@ def test_ensure_schema_v4_to_v5_recreates_both_views_drop_before_create():
     assert conn.commits == 1
 
 
-def test_ensure_schema_v5_steady_state_does_not_recreate_views():
-    # When both views already carry the v5 marker, ensure_schema must NOT re-DROP them (no
-    # needless ACCESS EXCLUSIVE churn on every sync).
+def test_search_text_in_row_columns_and_not_jsonb():
+    assert "search_text" in sync.ROW_COLUMNS
+    assert "search_text" not in sync.JSONB_COLUMNS  # plain text, not JSONB
+    # It is the LAST column (appended), which is what reorders the view -> the v6 recreate.
+    assert sync.ROW_COLUMNS[-1] == "search_text"
+
+
+def test_search_text_passes_through_and_defaults_empty():
+    r = sync._initiative_to_row(
+        _fixture_initiative(search_text="//open\nit's an announcement image"),
+        host="workbench")
+    assert r["search_text"] == "//open\nit's an announcement image"
+    # A pre-v6 scan omits the key entirely -> stored as "" (never None; viewer reads "").
+    r2 = sync._initiative_to_row(_fixture_initiative(), host="workbench")
+    assert "search_text" not in _fixture_initiative()   # the fixture has no key by default
+    assert r2["search_text"] == ""
+
+
+def test_ensure_schema_adds_search_text_column_additively():
+    # Fresh installs get search_text in CREATE TABLE; pre-existing tables get it via an
+    # idempotent ADD COLUMN IF NOT EXISTS (the v5->v6 additive migration).
+    conn = _FakeConn()
+    sync.ensure_schema(conn)
+    joined = " ".join(_sqls(conn))
+    assert "search_text" in joined  # column named in CREATE TABLE
+    assert "ADD COLUMN IF NOT EXISTS search_text text" in joined  # additive migration
+
+
+def test_ensure_schema_v5_to_v6_recreates_both_views_drop_before_create():
+    # v5->v6 appends search_text, reordering `SELECT i.*, s.captured_at` — the same
+    # CREATE-OR-REPLACE-rejects trap as earlier bumps, so the marker mismatch DROP-then-CREATEs.
+    conn = _FakeConn(view_regclass="initiatives.current",
+                     view_comment="initiatives-sync view v5",
+                     latest_regclass="initiatives.latest",
+                     latest_comment="initiatives-sync view latest v5")
+    sync.ensure_schema(conn)
+    sqls = _sqls(conn)
+    assert "CREATE OR REPLACE VIEW" not in " ".join(sqls)
+    for view in ("initiatives.current", "initiatives.latest"):
+        drop_i = next(i for i, s in enumerate(sqls) if f"DROP VIEW IF EXISTS {view}" in s)
+        create_i = next(i for i, s in enumerate(sqls) if f"CREATE VIEW {view}" in s)
+        assert drop_i < create_i, f"{view}: DROP must precede CREATE"
+    assert conn.commits == 1
+
+
+def test_ensure_schema_v6_steady_state_does_not_recreate_views():
+    # When both views already carry the v6 marker, ensure_schema must NOT re-DROP them.
     conn = _FakeConn(view_regclass="initiatives.current", view_comment=sync.VIEW_COMMENT,
                      latest_regclass="initiatives.latest",
                      latest_comment=sync.LATEST_VIEW_COMMENT)

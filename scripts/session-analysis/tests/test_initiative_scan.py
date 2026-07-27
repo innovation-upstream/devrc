@@ -1819,17 +1819,18 @@ CONTRACT_KEYS = {
     "repo", "slug", "title", "summary", "date", "momentum", "last_touch", "next_step",
     "commits", "commits_unknown", "merged_prs", "open_prs", "session_count",
     "telem_events", "telem_last", "current_doc", "open_investigations", "docs",
-    "recent_messages", "recent_commits", "opening_message",
+    "recent_messages", "recent_commits", "opening_message", "search_text",
 }
 
 
 def _sess(ai_title, *, n_turns=10, session_id="s0", cwd="/home/u/workspace/devrc",
           last_user_ts=1000.0, genesis="genesis text", last_prompt=None,
-          branch=None, turns=None, repo=None):
+          branch=None, turns=None, repo=None, search_text=None):
     """A session record shaped like collect_session_records output."""
     rec = {"ai_title": ai_title, "last_prompt": last_prompt, "genesis": genesis,
            "n_turns": n_turns, "session_id": session_id, "cwd": cwd,
            "last_user_ts": last_user_ts, "mtime": last_user_ts, "branch": branch,
+           "search_text": search_text if search_text is not None else genesis,
            "turns": turns if turns is not None else [{"text": genesis, "ts": last_user_ts}]}
     if repo is not None:
         rec["repo"] = repo
@@ -2084,6 +2085,127 @@ def test_combine_anchored_doc_keeps_its_own_opening():
 
 
 # --------------------------------------------------------------------------- #
+# search_text — the SEARCH-ONLY full user-turn index (v6). All the user's own turns
+# across the WHOLE session, so a keyword typed in a MIDDLE turn is findable even though
+# the card only surfaces the opening + last-N. NEVER synthesized — real turn text or "".
+# --------------------------------------------------------------------------- #
+def test_read_session_turns_search_text_collects_ALL_turns_not_just_last_n(tmp_path):
+    # A keyword ONLY in a MIDDLE turn lands in search_text but NOT in genesis / the last-N turns.
+    p = tmp_path / "s.jsonl"
+    _write_transcript(p, [
+        _jsonl_user("//image-cacher investigate why this 404s", "2026-07-20T10:00:00Z"),
+        _jsonl_user("it's an announcement image, 404ing is a large blast radius",
+                    "2026-07-20T10:01:00Z"),  # an EARLY-MIDDLE turn (outside the last-5 window)
+        _jsonl_user("dig into the cache headers", "2026-07-20T10:02:00Z"),
+        _jsonl_user("dispatch a fix", "2026-07-20T10:03:00Z"),
+        _jsonl_user("check the canary", "2026-07-20T10:04:00Z"),
+        _jsonl_user("looks good, ship", "2026-07-20T10:05:00Z"),
+        _jsonl_user("merge it", "2026-07-20T10:06:00Z"),
+    ])
+    rec = isc._read_session_turns(str(p), 5)   # display window = last 5
+    # search_text carries EVERY genuine turn, joined by newlines, oldest->newest.
+    assert rec["search_text"].startswith("//image-cacher investigate why this 404s")
+    assert "announcement" in rec["search_text"]
+    # ...but "announcement" is NOT in genesis (first turn) nor in the surfaced last-5 turns.
+    assert "announcement" not in rec["genesis"]
+    assert "announcement" not in " ".join(t["text"] for t in rec["turns"])
+    assert rec["search_text"].count("\n") == 6   # 7 turns -> 6 separators
+
+
+def test_read_session_turns_search_text_skips_harness_noise(tmp_path):
+    # search_text is the SAME cleaned/genuine turns as `turns` — noise turns are excluded.
+    p = tmp_path / "s.jsonl"
+    _write_transcript(p, [
+        _jsonl_user("<system-reminder>noise</system-reminder>", "2026-07-20T10:00:00Z"),
+        _jsonl_user("real opening ask", "2026-07-20T10:01:00Z"),
+        _jsonl_user("[Request interrupted by user]", "2026-07-20T10:02:00Z"),
+        _jsonl_user("real second ask", "2026-07-20T10:03:00Z"),
+    ])
+    rec = isc._read_session_turns(str(p), 5)
+    assert rec["search_text"] == "real opening ask\nreal second ask"
+    assert "system-reminder" not in rec["search_text"]
+    assert "Request interrupted" not in rec["search_text"]
+
+
+def test_read_session_turns_search_text_hard_capped(tmp_path):
+    p = tmp_path / "s.jsonl"
+    _write_transcript(p, [
+        _jsonl_user("x" * 5000, "2026-07-20T10:00:00Z"),
+        _jsonl_user("y" * 5000, "2026-07-20T10:01:00Z"),
+    ])
+    rec = isc._read_session_turns(str(p), 5)
+    assert len(rec["search_text"]) == isc.SEARCH_TEXT_MAX   # hard truncation, no ellipsis
+    assert not rec["search_text"].endswith("…")
+
+
+def test_new_initiative_search_text_defaults_empty():
+    doc = isc._new_initiative(repo=R, slug="mail-automation", title="Mail automation",
+                              source="doc")
+    assert doc["search_text"] == ""
+
+
+def test_group_search_text_concatenates_all_sessions_and_dedups():
+    # A merged group pools EVERY session's search_text (oldest->newest), dedup lines, re-cap.
+    recs = [_sess("ComfyUI realism pipeline", session_id="new", last_user_ts=900.0, repo=R,
+                  genesis="newer ask", search_text="newer ask\nshared line"),
+            _sess("ComfyUI realism pipeline", session_id="old", last_user_ts=100.0, repo=R,
+                  genesis="older ask", search_text="older ask\nshared line\nannouncement here")]
+    grp = isc.build_session_groups(recs, corroborated_repos=set())[0]
+    st = grp["search_text"]
+    assert "announcement here" in st              # a mid-session keyword from one session
+    assert "older ask" in st and "newer ask" in st
+    assert st.count("shared line") == 1           # dedup across sessions
+    assert st.index("older ask") < st.index("newer ask")   # oldest->newest ordering
+
+
+def test_group_search_text_recapped_at_max():
+    recs = [_sess("ComfyUI realism pipeline", session_id="a", last_user_ts=100.0, repo=R,
+                  search_text="a" * 5000),
+            _sess("ComfyUI realism pipeline", session_id="b", last_user_ts=200.0, repo=R,
+                  search_text="b" * 5000)]
+    grp = isc.build_session_groups(recs, corroborated_repos=set())[0]
+    assert len(grp["search_text"]) == isc.SEARCH_TEXT_MAX
+
+
+def test_combine_anchored_doc_adopts_folded_group_search_text():
+    # A doc (default search_text "") gains the folding group's full-text index.
+    doc = isc._new_initiative(
+        repo=R, slug="mail-automation", title="Mail automation",
+        current_doc="/r/handoff-mail.md",
+        docs=[{"path": "/r/handoff-mail.md", "date": None}], source="doc")
+    assert doc["search_text"] == ""
+    grp = _group("Mail automation shipping polish", session_id="sX",
+                 search_text="kick off\nthe announcement pointer fix")
+    isc.combine_docs_and_groups([doc], [], [grp])
+    assert "announcement pointer fix" in doc["search_text"]
+    assert "_adopt_search" not in doc            # internal accumulator cleaned up
+
+
+def test_combine_multiple_groups_concat_search_text_ordered_and_recapped():
+    doc = isc._new_initiative(repo=R, slug="mail-automation", title="Mail automation",
+                              docs=[{"path": "/r/handoff-mail.md", "date": None}],
+                              current_doc="/r/handoff-mail.md", source="doc")
+    late = _group("Mail automation polish", session_id="late", last_user_ts=900.0,
+                  search_text="LATER session words")
+    early = _group("Mail automation shipping", session_id="early", last_user_ts=100.0,
+                   search_text="EARLIER session words")
+    # Pass newest-first to prove the merge orders by ts, not iteration order.
+    isc.combine_docs_and_groups([doc], [], [late, early])
+    st = doc["search_text"]
+    assert "EARLIER session words" in st and "LATER session words" in st
+    assert st.index("EARLIER") < st.index("LATER")   # oldest->newest, deterministic
+
+
+def test_doc_only_initiative_search_text_defaults_empty():
+    # A doc/extra initiative with no session keeps search_text "" through _doc_to_initiative.
+    d = {"repo": R, "slug": "notes", "title": "Some notes", "summary": None, "date": None,
+         "mtime": 100.0, "next_step": None, "open_investigations": [],
+         "path": "/r/claudedocs/notes.md"}
+    ini = isc._doc_to_initiative(d)
+    assert ini["search_text"] == ""
+
+
+# --------------------------------------------------------------------------- #
 # git_toplevel + discover_repos union with session/telem cwds
 # --------------------------------------------------------------------------- #
 def test_git_toplevel_returns_realpath_or_none(monkeypatch):
@@ -2144,9 +2266,10 @@ def test_doc_is_handoff_structured_variants():
 # --------------------------------------------------------------------------- #
 # combine_docs_and_groups — anchor / standalone / dormant-doc gating
 # --------------------------------------------------------------------------- #
-def _group(ai_title, repo=R, session_id="g0", last_user_ts=900.0):
+def _group(ai_title, repo=R, session_id="g0", last_user_ts=900.0, search_text=None):
     return isc.build_session_groups(
-        [_sess(ai_title, session_id=session_id, repo=repo, last_user_ts=last_user_ts)],
+        [_sess(ai_title, session_id=session_id, repo=repo, last_user_ts=last_user_ts,
+               search_text=search_text)],
         corroborated_repos=set())[0]
 
 
