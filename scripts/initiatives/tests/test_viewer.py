@@ -1528,6 +1528,17 @@ def test_js_matchq_subsequence_partial_typing():
     assert _node_match(v, "annce") == ["img-cacher"]
 
 
+def test_js_matchq_4char_subsequence_does_not_overmatch():
+    # Subsequence tolerance is gated at >=5 chars: a 4-char token must NOT match via
+    # subsequence (it over-matches noisily, e.g. "test" ⊂ "greatest"). "rdis" is an ordered
+    # subsequence of "radius" (in the blob) but NOT a substring and edit-distance 2 > cap 1
+    # for a 4-char token — so under the tightened rule it matches NOTHING.
+    v = _fuzzy_views()
+    assert _node_match(v, "rdis") == []
+    # A 5-char subsequence of the same word still matches (partial-typing recall preserved).
+    assert _node_match(v, "rdius") == ["img-cacher"]
+
+
 def test_js_matchq_short_tokens_do_not_overmatch():
     # Tokens <4 chars are substring-only — no fuzzy noise. "xyz" is nowhere; "an" (<4) must
     # NOT fuzzy-explode onto the announcement card (it isn't a substring of that blob token

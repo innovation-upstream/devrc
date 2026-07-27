@@ -1274,9 +1274,10 @@ function partitionInitiatives(views){
 # still work): query is split into whitespace tokens, and a card matches iff EVERY token
 # matches the blob, where a token matches if ANY of — (1) it is a SUBSTRING of the blob (the
 # fast path / old behaviour); (2) for tokens ≥4 chars, its Levenshtein edit distance to SOME
-# blob word is ≤ min(2, floor(len/4)) (typo tolerance); (3) for tokens ≥4 chars, it is an
+# blob word is ≤ min(2, floor(len/4)) (typo tolerance); (3) for tokens ≥5 chars, it is an
 # ordered SUBSEQUENCE of some blob word (partial-typing tolerance, e.g. "annce" ⊂
-# "announcement"). Tokens <4 chars use substring only (avoid noise). Both query and blob are
+# "announcement"). Tokens <4 chars use substring only (avoid noise); 4-char tokens allow
+# substring + edit-distance but NOT subsequence (which over-matches at that length). Both query and blob are
 # lowercased + diacritic-stripped. The blob's distinct words are tokenized ONCE per card per
 # query (bounded), and Levenshtein early-exits past the cap, so it stays fast over ~41 cards ×
 # a ~6KB blob. It errs toward the exact/substring path — it does NOT match everything.
@@ -1346,11 +1347,15 @@ function matchQ(v, q){
     if(hay.indexOf(t) !== -1) return true;   // fast path: substring (exact/partial) — old behaviour
     if(t.length < 4) return false;           // short tokens: substring only (avoid fuzzy noise)
     var cap = Math.min(2, Math.floor(t.length / 4));
+    // Subsequence tolerance only for tokens >= 5: 4-char subsequences over-match noisily
+    // (e.g. "test" ⊂ "greatest", "acme" ⊂ "acknowledgement"). Edit-distance still covers
+    // 4-char typos; subsequence is for partial-typing longer words ("annce" ⊂ "announcement").
+    var allowSub = t.length >= 5;
     var ws = words();
     for(var k = 0; k < ws.length; k++){
       var w = ws[k];
       if(cap > 0 && withinEdit(t, w, cap)) return true;
-      if(isSubseq(t, w)) return true;
+      if(allowSub && isSubseq(t, w)) return true;
     }
     return false;
   }
