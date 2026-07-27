@@ -31,7 +31,48 @@ Three actors, one loopback meeting point:
 2. **`extension/`** — a standalone MV3 extension. Its service worker long-polls
    `GET /poll`, executes the op against the active tab, and posts the result.
 3. **`browser`** — the bash skill entrypoint Claude calls (`html`, `eval`,
-   `tabs`, `nav`, `screenshot`, `health`).
+   `tabs`, `nav`, `screenshot`, `health`, `instances`).
+
+### Multiple instances per host
+
+More than one Brave profile can each run the extension and be driven
+independently. The server keeps a **registry of connected instances**, each with
+its **own command queue** — a command for one profile is never delivered to
+another's `/poll` (this is what fixes the 2× contention of the old single-queue
+design when two profiles were connected).
+
+- **Routing key.** Each instance has a stable auto-id (`crypto.randomUUID()`,
+  persisted by the extension in `chrome.storage.local`) and an optional user
+  **label** (set in the extension options). The effective routing key = the
+  label if set, else the auto-id. **Labels are the human key and must be unique
+  per host.**
+- **Targeting.** With exactly one instance connected, no flag is needed
+  (back-compat). With more than one and no `--instance`, a command **errors** and
+  lists the connected instances (it never guesses). `browser --instance <key>
+  <op>` targets one explicitly (the key matches either the label or the auto-id);
+  an unknown key errors. `--instance` works for every op.
+- **`browser instances`** lists the connected instances (routing key, label,
+  auto-id, active-tab url/title) as JSON. `/health` also reports them.
+- **Newest supersedes.** If a NEW connection (different auto-id) registers for a
+  routing key that already has a live connection, the old one is dropped and any
+  in-flight command on it resolves to a `superseded` error (no orphaned waiter).
+  This handles a duplicate/stale connection cleanly. ⚠ Two *different* profiles
+  sharing one label is a misconfiguration — **give each profile a unique label.**
+  The displaced connection's own `/poll` gets a **distinct `409 superseded`
+  signal** (not the idle `204`), on which the extension **backs off ~30s** (and
+  surfaces a "superseded — set a unique label" state) rather than re-registering
+  instantly. That deliberately breaks what would otherwise be a mutual-supersede
+  **livelock** (two same-label workers re-polling at loopback speed, burning CPU
+  and flooding the journal). The supersede is logged **once per displacement**,
+  never per poll. (The server-side signal + once-logging are unit-tested; the
+  extension's back-off can only be verified in a real browser — see below.)
+- **Wire protocol.** `/poll` carries the instance identity in the
+  `X-Bridge-Instance-Id` / `X-Bridge-Label` headers (+ optional
+  `X-Bridge-Active-Url`/`-Title` for cheap `instances`/`health` enrichment);
+  `/result` echoes its `instanceId` in the body; `/cmd` accepts an optional
+  `target`. All of these stay bearer-authed and Host-checked — the security gate
+  is unchanged. A legacy extension that polls with no identity is assigned one
+  synthetic instance (`LEGACY_INSTANCE_ID`) so it still works unnamed.
 
 ### Transport: HTTP long-poll (not WebSocket)
 
@@ -76,7 +117,25 @@ must run in whatever tab is active). This can be scoped down later; noted in
 
 Server envelope: `POST /cmd` → `200 {"ok":true,"result":{id,ok,data}}`, or a
 structured error: `503 extension_not_connected`, `504 timeout`,
-`400 unknown_op|missing_field:<f>`, `401 unauthorized`, `403 bad_host`.
+`409 ambiguous_instance` (>1 connected, no `target`), `409 superseded`,
+`404 unknown_instance`, `400 unknown_op|missing_field:<f>`, `401 unauthorized`,
+`403 bad_host`.
+
+`GET /health` → `{"ok":true,"extension_connected":bool,"count":N,"instances":[{key,label,instanceId,activeTab},…]}`.
+`GET /instances` → `{"ok":true,"count":N,"instances":[…]}`.
+
+## Icon
+
+A gruvbox-tinted **bridge / chain-link** glyph (blue loopback node linked to the
+yellow browser node on a dark rounded field). Source is
+`extension/icons/icon.svg`; the committed PNGs (`icon-16/32/48/128.png`) are
+rasterised from it and wired into `manifest.json` (`icons` + `action.default_icon`).
+Regenerate after editing the SVG:
+
+```bash
+cd extension/icons
+nix-shell -p librsvg --run 'for s in 16 32 48 128; do rsvg-convert -w $s -h $s icon.svg -o icon-$s.png; done'
+```
 
 ## Running the tests
 
@@ -90,11 +149,20 @@ nix-shell -p nodejs --run "node --test scripts/browser-bridge/tests/protocol.tes
 
 The Python suite (`tests/test_server.py`) also runs as part of
 `scripts/run-tests.sh` (it's in the hermetic set). It covers: token gen + `0600`
-perms, `401`/`403` gates, `/health` connection state, a `/cmd` round-trip against
-an in-process fake extension, `503`/`504` no-extension/timeout paths, unknown-op
-+ bad-JSON errors, and request↔reply id correlation (incl. out-of-order replies).
-The chrome.* glue in `service_worker.js` genuinely needs a real browser and is
-covered by the manual checklist in `extension/README.md`.
+perms, `401`/`403` gates (incl. the instance-scoped `/poll` + `/result`),
+per-instance `/health` + `/instances`, a `/cmd` round-trip against an in-process
+fake extension, `503`/`504` no-extension/timeout paths, unknown-op + bad-JSON
+errors, request↔reply id correlation (incl. out-of-order), and the multi-instance
+registry: routing by key, independent queues (no cross-delivery), the ambiguity
+error, unknown-target, label-vs-auto-id key resolution, supersede-on-duplicate
+(incl. an in-flight command resolving to `superseded` with no orphaned waiter,
+the displaced poll returning the distinct `409 superseded` signal instead of the
+idle `204`, and the supersede being logged exactly once per displacement — the
+no-churn/livelock-fix contract), legacy no-handshake back-compat, and an icon
+sanity check (each declared PNG
+exists and its IHDR size matches). The chrome.* glue in `service_worker.js`
+genuinely needs a real browser and is covered by the manual checklist in
+`extension/README.md`.
 
 ## Deploy (nix)
 
@@ -120,6 +188,20 @@ systemctl --user status browser-bridge
    `scripts/browser-bridge/browser html | grep -i <your-name-or-account-marker>` —
    seeing logged-in-only markup **proves it's the live authenticated session**,
    not a fresh fetch.
+
+### Verifying multiple instances
+
+1. In a **second** Brave profile, load the same unpacked extension and pair it
+   (token + port).
+2. Give each profile a **unique label** in the extension options (e.g. `work`
+   and `personal`), Save, and reload each extension card.
+3. `scripts/browser-bridge/browser instances` → both show up (keys `work` /
+   `personal`, each with its active-tab url).
+4. `scripts/browser-bridge/browser html` with both connected → **errors** and
+   lists the instances (it won't guess).
+5. `scripts/browser-bridge/browser --instance work html` → returns the `work`
+   profile's active tab; `--instance personal html` → the other. That per-tab
+   difference confirms targeting.
 
 ⚠ After editing anything in `extension/`, click the **reload** ↻ on the
 extension card in `brave://extensions` — Brave does not hot-reload unpacked

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """browser-bridge server — loopback rendezvous between a Claude skill and the
-live Brave browser.
+live Brave browser(s).
 
 This is a SIBLING to the activity-collector's `browser-ext/receiver.py`, NOT a
 modification of it. Where the receiver is a one-way telemetry sink (extension
@@ -25,11 +25,43 @@ rendezvous is then pure `http.server` + `threading` and is FULLY unit-testable
 with stdlib alone against an in-process fake extension — no new pip deps, mirror-
 ing the receiver's stdlib-only footprint (the nix unit pins python312).
 
+Multiple instances (per host)
+-----------------------------
+More than one Brave profile on the same host can each run the extension and be
+driven independently. The server keeps a **registry of connected instances**,
+each with its OWN command queue. Routing:
+
+  * Each instance has a stable auto-id (`crypto.randomUUID()` persisted by the
+    extension in `chrome.storage.local`) and an optional user **label**. The
+    effective **routing key** = label if non-empty, else the auto-id. Labels are
+    the human key and must be unique per host.
+  * `/poll` (extension long-poll) identifies the instance via the
+    `X-Bridge-Instance-Id` / `X-Bridge-Label` headers; `/result` echoes its
+    `instanceId` in the JSON body; `/cmd` (skill) may carry an optional `target`
+    routing key. A command is only ever delivered to ITS instance's `/poll`.
+  * **Newest supersedes:** if a NEW connection (different auto-id) registers for
+    a routing key that already has a live connection, the old one is dropped —
+    any in-flight command on it resolves to a `superseded` error (no orphaned
+    waiter). This is what fixes 2× contention from a duplicate/stale connection.
+    A superseded connection's own blocked `/poll` returns a **distinct signal**
+    (`409 superseded`, NOT the idle `204`) so the extension can back off hard
+    instead of hot re-registering — two profiles that share a label would
+    otherwise mutually supersede at loopback speed (a livelock). The supersede is
+    logged ONCE per displacement (at the displacement site), never per poll.
+  * Targeting from the skill: exactly one instance → no `target` needed
+    (back-compat). More than one and no `target` → an `ambiguous_instance` error
+    listing the instances (never a silent pick). Unknown `target` →
+    `unknown_instance`. A `target` matches either the routing key or the auto-id.
+  * **Back-compat:** an older extension that polls WITHOUT an instance id (no
+    handshake) is assigned a single synthetic auto-id (`LEGACY_INSTANCE_ID`) so
+    it still works as one unnamed instance — it never crashes the registry.
+
 Security contract (defeats DNS-rebinding / local malware reaching the socket):
   * Binds 127.0.0.1 only (env `BROWSER_BRIDGE_HOST`, default 127.0.0.1).
   * Bearer-token auth on EVERY endpoint — skill requests and the extension's
-    long-poll alike. The secret lives in `~/.config/browser-bridge/token`,
-    created 0600 with `secrets.token_urlsafe` on first run. 401 otherwise.
+    long-poll / result POST alike, including the new instance-scoped params. The
+    secret lives in `~/.config/browser-bridge/token`, created 0600 with
+    `secrets.token_urlsafe` on first run. 401 otherwise.
   * Host-header allowlist: only 127.0.0.1 / localhost / ::1 accepted (403
     otherwise) — a DNS-rebind victim page hits us with a foreign Host header.
 
@@ -51,6 +83,7 @@ import time
 from collections import deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib.parse import unquote, urlsplit
 
 # --- protocol contract (shared with extension/protocol.js — keep in sync) ---- #
 # The op set the bridge accepts. Both sides validate against this exact set; the
@@ -68,6 +101,24 @@ MAX_RESULT_BODY = 32 * 1024 * 1024  # a screenshot data URL can be a few MB.
 
 # A connection is considered "present" if a long-poll landed within this window.
 CONNECT_STALE_S = 40.0
+
+# Synthetic routing key for a legacy extension that polls without a handshake
+# (no X-Bridge-Instance-Id). All such polls collapse onto one unnamed instance.
+LEGACY_INSTANCE_ID = "legacy"
+
+# Sentinel returned by Registry.poll() when THIS connection was superseded by a
+# newer connection that claimed its routing key (a duplicate LABEL on this host,
+# or a storage reset). DISTINCT from None (idle timeout) so the HTTP layer can
+# answer with a distinct signal (409, not the idle 204) and the extension can
+# back off hard instead of hot re-registering (which would livelock two
+# same-label profiles at loopback speed).
+SUPERSEDED = object()
+
+# Request headers the extension uses to identify its instance on /poll.
+HDR_INSTANCE_ID = "X-Bridge-Instance-Id"
+HDR_LABEL = "X-Bridge-Label"
+HDR_ACTIVE_URL = "X-Bridge-Active-Url"
+HDR_ACTIVE_TITLE = "X-Bridge-Active-Title"
 
 _ALLOWED_HOSTS = frozenset({"127.0.0.1", "localhost", "::1", "[::1]"})
 
@@ -119,7 +170,7 @@ def load_or_create_token(path: Path) -> str:
 
 
 # --------------------------------------------------------------------------- #
-# Bridge — transport-agnostic rendezvous core (thread-safe, fully unit-testable)
+# Registry — transport-agnostic rendezvous core (thread-safe, unit-testable)
 # --------------------------------------------------------------------------- #
 class BridgeTimeout(Exception):
     """A submitted command was not answered within its deadline."""
@@ -129,100 +180,234 @@ class NoExtension(Exception):
     """No extension is currently connected to pick up the command."""
 
 
-class Bridge:
-    """Correlates skill commands with extension replies via ids.
+class AmbiguousInstance(Exception):
+    """More than one instance is connected and no target was specified."""
 
-    `submit()` (skill side) enqueues a command and blocks for its reply.
-    `next_command()` (extension long-poll) dequeues the next pending command.
-    `deliver_result()` (extension) completes the matching `submit()`.
+    def __init__(self, instances):
+        super().__init__("ambiguous_instance")
+        self.instances = instances
 
-    All state is guarded by a single Condition; ThreadingHTTPServer serves each
-    request in its own thread, so blocking here is safe and cheap.
+
+class UnknownInstance(Exception):
+    """A target routing key/id was given that no live instance matches."""
+
+    def __init__(self, target, instances):
+        super().__init__("unknown_instance")
+        self.target = target
+        self.instances = instances
+
+
+class BridgeSuperseded(Exception):
+    """The instance servicing an in-flight command was superseded by a newer
+    connection with the same routing key."""
+
+    def __init__(self, key):
+        super().__init__("superseded")
+        self.key = key
+
+
+class Instance:
+    """One connected extension: its own command queue + reply correlation.
+
+    All fields are guarded by the owning Registry's single Condition — never
+    mutate an Instance outside `Registry._cond`.
+    """
+
+    __slots__ = ("key", "instance_id", "label", "outbox", "results", "waiters",
+                 "active_polls", "last_poll", "active_tab", "superseded")
+
+    def __init__(self, key, instance_id, label, now):
+        self.key = key
+        self.instance_id = instance_id
+        self.label = label
+        self.outbox: deque[dict] = deque()   # commands awaiting pickup
+        self.results: dict[str, dict] = {}    # id -> result payload
+        self.waiters: set[str] = set()        # ids with a live submit() waiting
+        self.active_polls = 0
+        self.last_poll = now
+        self.active_tab = None                # {url,title} best-effort from /poll
+        self.superseded = False
+
+
+class Registry:
+    """A registry of connected extension instances, each independently routable.
+
+    `poll()` (extension long-poll) registers/refreshes an instance and dequeues
+    its next command. `submit()` (skill) routes a command to a target instance
+    and blocks for its reply. `deliver_result()` (extension) completes the
+    matching `submit()`.
+
+    ThreadingHTTPServer serves each request in its own thread; ALL shared
+    mutable state lives on the Instances in `_instances` and is guarded by the
+    single `_cond` — blocking here is safe and cheap.
     """
 
     def __init__(self, clock=time.monotonic):
         self._cond = threading.Condition()
-        self._outbox: deque[dict] = deque()   # commands awaiting pickup
-        self._results: dict[str, dict] = {}    # id -> result payload
-        self._waiters: set[str] = set()        # ids with a live submit() waiting
-        self._active_polls = 0
-        self._last_poll = 0.0
+        self._instances: dict[str, Instance] = {}   # routing key -> Instance
         self._clock = clock
 
-    # --- skill side -------------------------------------------------------- #
-    def submit(self, command: dict, timeout: float) -> dict:
-        """Enqueue `command` (a dict without id), block for its reply.
+    # --- registration ------------------------------------------------------ #
+    def _register_locked(self, instance_id: str, label: str,
+                         active_tab=None) -> Instance:
+        if not instance_id:
+            # Legacy extension with no handshake → one synthetic unnamed instance.
+            instance_id = LEGACY_INSTANCE_ID
+        key = label or instance_id
+        # A physical instance that previously registered under a DIFFERENT key
+        # (e.g. the user just set/changed its label) leaves a stale entry — drop
+        # it so it does not linger as a phantom connection.
+        for k, other in list(self._instances.items()):
+            if k != key and other.instance_id == instance_id:
+                self._supersede_locked(other, "relabeled")
+        inst = self._instances.get(key)
+        if inst is not None and inst.instance_id != instance_id:
+            # A DIFFERENT physical instance is claiming this key → newest wins.
+            self._supersede_locked(inst, "superseded")
+            inst = None
+        if inst is None:
+            inst = Instance(key, instance_id, label, self._clock())
+            self._instances[key] = inst
+        else:
+            inst.label = label
+            inst.key = key
+        if active_tab is not None:
+            inst.active_tab = active_tab
+        return inst
 
-        Raises NoExtension if nothing is connected to service it, or
-        BridgeTimeout if no reply arrives within `timeout` seconds.
-        """
-        with self._cond:
-            if not self._connected_locked():
-                raise NoExtension()
-            cid = secrets.token_hex(8)
-            cmd = dict(command)
-            cmd["id"] = cid
-            self._outbox.append(cmd)
-            self._waiters.add(cid)
-            self._cond.notify_all()  # wake a waiting poller
-            deadline = self._clock() + timeout
-            while cid not in self._results:
-                remaining = deadline - self._clock()
-                if remaining <= 0:
-                    self._waiters.discard(cid)
-                    self._drop_from_outbox_locked(cid)
-                    raise BridgeTimeout()
-                self._cond.wait(remaining)
-            self._waiters.discard(cid)
-            return self._results.pop(cid)
-
-    def _drop_from_outbox_locked(self, cid: str) -> None:
-        # Remove a still-unpicked command on timeout so a late poller never
-        # dispatches an already-abandoned request.
-        self._outbox = deque(c for c in self._outbox if c.get("id") != cid)
+    def _supersede_locked(self, inst: Instance, reason: str) -> None:
+        """Drop `inst` from the registry and wake any submit() waiting on it so
+        the in-flight command resolves to a clear error (no orphaned waiter)."""
+        inst.superseded = True
+        if self._instances.get(inst.key) is inst:
+            del self._instances[inst.key]
+        self._cond.notify_all()
+        log("supersede", key=inst.key, instance_id=inst.instance_id,
+            reason=reason)
 
     # --- extension side ---------------------------------------------------- #
-    def next_command(self, wait_timeout: float):
-        """Long-poll: block up to `wait_timeout` for the next command.
-
-        Returns the command dict (with its id) or None on timeout. Marks the
-        extension as connected for the duration + a stale window afterwards.
-        """
+    def poll(self, instance_id: str, label: str, wait_timeout: float,
+             active_tab=None):
+        """Long-poll for `instance_id`/`label`: register the instance, then block
+        up to `wait_timeout` for ITS next command. Returns the command dict (with
+        its id), None on idle timeout, or the SUPERSEDED sentinel if this
+        connection got displaced by a newer one sharing its routing key (the HTTP
+        layer maps that to a distinct 409 so the extension backs off — not 204)."""
         with self._cond:
-            self._active_polls += 1
-            self._last_poll = self._clock()
+            inst = self._register_locked(instance_id, label, active_tab)
+            inst.active_polls += 1
+            inst.last_poll = self._clock()
             try:
                 deadline = self._clock() + wait_timeout
-                while not self._outbox:
+                while True:
+                    if inst.superseded:
+                        return SUPERSEDED
+                    if inst.outbox:
+                        return inst.outbox.popleft()
                     remaining = deadline - self._clock()
                     if remaining <= 0:
                         return None
                     self._cond.wait(remaining)
-                return self._outbox.popleft()
             finally:
-                self._active_polls -= 1
-                self._last_poll = self._clock()
+                inst.active_polls -= 1
+                inst.last_poll = self._clock()
 
-    def deliver_result(self, cid: str, payload: dict) -> bool:
-        """Record a reply for `cid`. Returns False if no submit() awaits it
-        (unknown/expired id) so the extension can log-and-drop."""
+    def deliver_result(self, cid: str, payload: dict,
+                       instance_id: str = None) -> bool:
+        """Record a reply for command `cid`. If `instance_id` is given, scope the
+        lookup to that instance; otherwise (legacy) search every instance by id.
+        Returns False if no submit() awaits it (unknown/expired id)."""
         with self._cond:
-            if cid not in self._waiters:
-                return False
-            self._results[cid] = payload
-            self._cond.notify_all()
-            return True
+            candidates = []
+            if instance_id:
+                inst = self._find_locked(instance_id)
+                if inst is not None:
+                    candidates = [inst]
+            else:
+                candidates = list(self._instances.values())
+            for inst in candidates:
+                if cid in inst.waiters:
+                    inst.results[cid] = payload
+                    self._cond.notify_all()
+                    return True
+            return False
 
-    # --- health ------------------------------------------------------------ #
-    def _connected_locked(self) -> bool:
-        if self._active_polls > 0:
-            return True
-        return (self._clock() - self._last_poll) < CONNECT_STALE_S
+    # --- skill side -------------------------------------------------------- #
+    def submit(self, command: dict, timeout: float, target: str = None) -> dict:
+        """Enqueue `command` (a dict without id) to the resolved target instance
+        and block for its reply.
+
+        Raises NoExtension / AmbiguousInstance / UnknownInstance if the target
+        cannot be resolved, BridgeSuperseded if the servicing instance is
+        dropped mid-flight, or BridgeTimeout on no reply within `timeout`.
+        """
+        with self._cond:
+            inst = self._resolve_target_locked(target)
+            cid = secrets.token_hex(8)
+            cmd = dict(command)
+            cmd["id"] = cid
+            inst.outbox.append(cmd)
+            inst.waiters.add(cid)
+            self._cond.notify_all()  # wake this instance's waiting poller
+            deadline = self._clock() + timeout
+            while cid not in inst.results:
+                if inst.superseded:
+                    inst.waiters.discard(cid)
+                    raise BridgeSuperseded(inst.key)
+                remaining = deadline - self._clock()
+                if remaining <= 0:
+                    inst.waiters.discard(cid)
+                    inst.outbox = deque(c for c in inst.outbox
+                                        if c.get("id") != cid)
+                    raise BridgeTimeout()
+                self._cond.wait(remaining)
+            inst.waiters.discard(cid)
+            return inst.results.pop(cid)
+
+    # --- resolution / introspection --------------------------------------- #
+    def _live_instances_locked(self):
+        now = self._clock()
+        live = []
+        for inst in self._instances.values():
+            if inst.superseded:
+                continue
+            if inst.active_polls > 0 or (now - inst.last_poll) < CONNECT_STALE_S:
+                live.append(inst)
+        return live
+
+    def _find_locked(self, target: str):
+        for inst in self._instances.values():
+            if target in (inst.key, inst.instance_id):
+                return inst
+        return None
+
+    def _resolve_target_locked(self, target) -> Instance:
+        live = self._live_instances_locked()
+        if not live:
+            raise NoExtension()
+        if target:
+            for inst in live:
+                if target in (inst.key, inst.instance_id):
+                    return inst
+            raise UnknownInstance(target, [self._describe(i) for i in live])
+        if len(live) == 1:
+            return live[0]
+        raise AmbiguousInstance([self._describe(i) for i in live])
+
+    @staticmethod
+    def _describe(inst: Instance) -> dict:
+        return {"key": inst.key, "label": inst.label,
+                "instanceId": inst.instance_id, "activeTab": inst.active_tab}
+
+    def snapshot(self):
+        """A list of currently-live instances (key/label/instanceId/activeTab)."""
+        with self._cond:
+            return [self._describe(i) for i in self._live_instances_locked()]
 
     @property
     def connected(self) -> bool:
         with self._cond:
-            return self._connected_locked()
+            return bool(self._live_instances_locked())
 
 
 # --------------------------------------------------------------------------- #
@@ -244,10 +429,10 @@ def validate_command(body):
 # --------------------------------------------------------------------------- #
 # HTTP handler
 # --------------------------------------------------------------------------- #
-def make_handler(bridge: Bridge, token: str, cmd_timeout: float,
+def make_handler(registry: Registry, token: str, cmd_timeout: float,
                  poll_timeout: float):
     class Handler(BaseHTTPRequestHandler):
-        server_version = "browser-bridge/1"
+        server_version = "browser-bridge/2"
 
         # Suppress the default per-request stderr spam; we log structurally.
         def log_message(self, *a):  # noqa: A003
@@ -311,20 +496,58 @@ def make_handler(bridge: Bridge, token: str, cmd_timeout: float,
                 return None, "bad_json"
             return obj, None
 
+        def _poll_identity(self):
+            """(instance_id, label, active_tab) from the /poll request headers.
+
+            Missing instance id → "" (registry assigns the legacy synthetic id).
+            Label + active-tab strings are URL-encoded by the extension (header
+            values must be ASCII-safe) and decoded here.
+            """
+            instance_id = (self.headers.get(HDR_INSTANCE_ID) or "").strip()
+            raw_label = self.headers.get(HDR_LABEL) or ""
+            label = unquote(raw_label).strip() if raw_label else ""
+            au = self.headers.get(HDR_ACTIVE_URL)
+            at = self.headers.get(HDR_ACTIVE_TITLE)
+            active = None
+            if au or at:
+                active = {"url": unquote(au) if au else None,
+                          "title": unquote(at) if at else None}
+            return instance_id, label, active
+
         # --- routes -------------------------------------------------------- #
         def do_GET(self):
             if not self._guard():
                 return
-            if self.path == "/health":
+            path = urlsplit(self.path).path
+            if path == "/health":
+                insts = registry.snapshot()
                 self._send(200, {"ok": True,
-                                 "extension_connected": bridge.connected})
+                                 "extension_connected": bool(insts),
+                                 "count": len(insts),
+                                 "instances": insts})
                 return
-            if self.path == "/poll":
-                cmd = bridge.next_command(poll_timeout)
-                if cmd is None:
+            if path == "/instances":
+                insts = registry.snapshot()
+                self._send(200, {"ok": True, "count": len(insts),
+                                 "instances": insts})
+                return
+            if path == "/poll":
+                instance_id, label, active = self._poll_identity()
+                cmd = registry.poll(instance_id, label, poll_timeout,
+                                    active_tab=active)
+                if cmd is SUPERSEDED:
+                    # Distinct from the idle 204: THIS connection was displaced by
+                    # a newer one sharing its routing key (duplicate label). Still
+                    # bearer+Host guarded (we are past _guard). The extension must
+                    # back off — not hot re-poll — to avoid a mutual-supersede
+                    # livelock. Not logged here (logged once at the displacement
+                    # site) so a backing-off loser never floods the journal.
+                    self._send(409, {"ok": False, "error": "superseded"})
+                elif cmd is None:
                     self._send(204)
                 else:
-                    log("dispatch", id=cmd.get("id"), op=cmd.get("op"))
+                    log("dispatch", id=cmd.get("id"), op=cmd.get("op"),
+                        key=(label or instance_id or LEGACY_INSTANCE_ID))
                     self._send(200, cmd)
                 return
             self._send(404, {"ok": False, "error": "not_found"})
@@ -332,9 +555,10 @@ def make_handler(bridge: Bridge, token: str, cmd_timeout: float,
         def do_POST(self):
             if not self._guard():
                 return
-            if self.path == "/cmd":
+            path = urlsplit(self.path).path
+            if path == "/cmd":
                 self._handle_cmd()
-            elif self.path == "/result":
+            elif path == "/result":
                 self._handle_result()
             else:
                 self._send(404, {"ok": False, "error": "not_found"})
@@ -350,11 +574,31 @@ def make_handler(bridge: Bridge, token: str, cmd_timeout: float,
                                  "op": body.get("op") if isinstance(body, dict)
                                  else None})
                 return
+            # `target` is a skill-side routing hint, NOT part of the command the
+            # extension executes — strip it before enqueue.
+            target = body.pop("target", None)
             try:
-                result = bridge.submit(body, timeout=cmd_timeout)
+                result = registry.submit(body, timeout=cmd_timeout,
+                                         target=target)
             except NoExtension:
                 log("cmd_no_extension", op=op)
-                self._send(503, {"ok": False, "error": "extension_not_connected"})
+                self._send(503, {"ok": False,
+                                 "error": "extension_not_connected"})
+                return
+            except AmbiguousInstance as e:
+                log("cmd_ambiguous", op=op, count=len(e.instances))
+                self._send(409, {"ok": False, "error": "ambiguous_instance",
+                                 "instances": e.instances})
+                return
+            except UnknownInstance as e:
+                log("cmd_unknown_instance", op=op, target=e.target)
+                self._send(404, {"ok": False, "error": "unknown_instance",
+                                 "target": e.target, "instances": e.instances})
+                return
+            except BridgeSuperseded as e:
+                log("cmd_superseded", op=op, key=e.key)
+                self._send(409, {"ok": False, "error": "superseded",
+                                 "key": e.key})
                 return
             except BridgeTimeout:
                 log("cmd_timeout", op=op)
@@ -372,9 +616,11 @@ def make_handler(bridge: Bridge, token: str, cmd_timeout: float,
                 self._send(400, {"ok": False, "error": "missing_id"})
                 return
             cid = body["id"]
-            delivered = bridge.deliver_result(cid, body)
+            instance_id = body.get("instanceId")
+            delivered = registry.deliver_result(cid, body,
+                                                instance_id=instance_id)
             if not delivered:
-                log("result_unknown_id", id=cid)
+                log("result_unknown_id", id=cid, instance_id=instance_id)
                 self._send(200, {"ok": False, "error": "unknown_id"})
                 return
             self._send(200, {"ok": True})
@@ -385,9 +631,9 @@ def make_handler(bridge: Bridge, token: str, cmd_timeout: float,
 # --------------------------------------------------------------------------- #
 # Entrypoint
 # --------------------------------------------------------------------------- #
-def build_server(host: str, port: int, bridge: Bridge, token: str,
+def build_server(host: str, port: int, registry: Registry, token: str,
                  cmd_timeout: float, poll_timeout: float) -> ThreadingHTTPServer:
-    handler = make_handler(bridge, token, cmd_timeout, poll_timeout)
+    handler = make_handler(registry, token, cmd_timeout, poll_timeout)
     server = ThreadingHTTPServer((host, port), handler)
     server.daemon_threads = True  # let shutdown not hang on a blocked long-poll
     return server
@@ -401,8 +647,8 @@ def main(argv=None) -> int:
     token_file = default_token_file()
     token = load_or_create_token(token_file)
 
-    bridge = Bridge()
-    server = build_server(host, port, bridge, token, cmd_timeout, poll_timeout)
+    registry = Registry()
+    server = build_server(host, port, registry, token, cmd_timeout, poll_timeout)
     log("listening", host=host, port=port, token_file=str(token_file),
         cmd_timeout=cmd_timeout, poll_timeout=poll_timeout)
     try:

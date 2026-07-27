@@ -9,10 +9,37 @@ or merge them.
 
 | file | role |
 |------|------|
-| `manifest.json`     | MV3 manifest (permissions, background SW, options page) |
+| `manifest.json`     | MV3 manifest (permissions, icons, background SW, options page) |
 | `service_worker.js` | long-poll loop + chrome.* op executors (needs real Brave) |
-| `protocol.js`       | pure op-set / validation / envelope / backoff logic (unit-tested) |
-| `options.html/js`   | one-time setup: paste the bearer token + port into `chrome.storage.local` |
+| `protocol.js`       | pure op-set / validation / envelope / backoff + registration payload (unit-tested) |
+| `options.html/js`   | one-time setup: bearer token + port + optional **label** → `chrome.storage.local` |
+| `icons/icon.svg`    | gruvbox bridge/link glyph — the SVG source |
+| `icons/icon-{16,32,48,128}.png` | rasterised icons wired into the manifest (regenerate with `rsvg-convert`, see `../README.md`) |
+
+## Multiple instances (label)
+
+Each profile that loads this extension is one **instance**. On first run the SW
+generates a stable auto-id (`crypto.randomUUID()`) and persists it in
+`chrome.storage.local` (`instanceId`) — it survives reloads/restarts within that
+profile. The server routes commands per instance, keyed by the **label** (set in
+Options) if present, else the auto-id. **Give each profile a unique label** so
+`browser --instance <label>` can target it. The SW sends its identity on every
+`/poll` (via `X-Bridge-Instance-Id` / `X-Bridge-Label` headers, plus a
+best-effort active-tab snapshot for `browser instances`) and echoes its
+`instanceId` in each `/result`.
+
+**Duplicate-label safety.** If two profiles end up sharing one label (a
+misconfig), the server keeps only the newest and answers the displaced worker's
+`/poll` with a distinct `409 superseded` (not the idle `204`). On that signal the
+SW does **not** re-register instantly — it sets a `superseded` flag in
+`chrome.storage.local`, logs a `console.warn` ("superseded … give each profile a
+UNIQUE label"), and **backs off ~30 s** before trying again (it auto-recovers if
+the other instance goes away). This deliberately breaks the mutual-supersede
+**livelock** two same-label workers would otherwise spin in. The header helpers
+also **cap** the active-tab url/title to 2048 chars so a pathological URL can't
+overflow the server's header-line limit and fail the poll. (The pure classifier
++ cap live in `protocol.js` and ARE unit-tested; the back-off itself runs in the
+SW and can only be checked in a real browser — see the checklist below.)
 
 ## Load it (and reload after every change)
 
@@ -62,3 +89,12 @@ The chrome.* glue needs a real browser — verify by hand after loading:
 - [ ] `browser screenshot /tmp/shot.png` writes a real PNG of the visible tab.
 - [ ] Stop the server → `browser health` fails / `extension_connected:false`
       after the stale window; restart → it reconnects on the next poll.
+- [ ] Load the extension in a **second profile**, give each a unique label →
+      `browser instances` lists both; `browser html` (no `--instance`) errors and
+      lists them; `browser --instance <label> html` returns that profile's tab.
+- [ ] **Duplicate-label back-off:** give BOTH profiles the *same* label. One
+      worker should log `superseded … unique label` (DevTools → its service
+      worker console) and go quiet (~30 s between attempts), NOT spin — journald
+      for `browser-bridge` should show at most an occasional `supersede`, not a
+      flood. Fix one label → both settle and `browser instances` lists two again.
+- [ ] The toolbar shows the bridge/link icon (manifest `action.default_icon`).

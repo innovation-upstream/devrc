@@ -1,19 +1,22 @@
 """Tests for the browser-bridge rendezvous server.
 
 Fully HEADLESS: no Brave, no network beyond loopback. The extension is
-simulated in-process by a `FakeExtension` thread that long-polls `/poll`,
-"executes" the op (echo), and POSTs to `/result` — exercising the real HTTP
-round-trip and the request↔reply id correlation.
+simulated in-process by a `FakeExtension` thread that long-polls `/poll` (with
+its instance identity headers), "executes" the op (echo), and POSTs to
+`/result` (echoing its instanceId) — exercising the real HTTP round-trip, the
+request↔reply id correlation, AND the multi-instance registry/routing.
 
 Run: nix-shell -p python312Packages.pytest --run "pytest scripts/browser-bridge/tests"
 """
 import json
 import os
 import stat
+import struct
 import sys
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -23,24 +26,28 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import server as S  # noqa: E402
 
 TOKEN = "test-token-abc123"
+EXT_DIR = Path(__file__).resolve().parent.parent / "extension"
 
 
 # --------------------------------------------------------------------------- #
 # HTTP helpers
 # --------------------------------------------------------------------------- #
-def _req(srv, method, path, body=None, token=TOKEN, host="127.0.0.1"):
+def _req(srv, method, path, body=None, token=TOKEN, host="127.0.0.1",
+         headers=None):
     port = srv.server_address[1]
-    headers = {}
+    hdrs = {}
     if token is not None:
-        headers["Authorization"] = f"Bearer {token}"
+        hdrs["Authorization"] = f"Bearer {token}"
     if host is not None:
-        headers["Host"] = host
+        hdrs["Host"] = host
+    if headers:
+        hdrs.update(headers)
     data = None
     if body is not None:
         data = json.dumps(body).encode("utf-8")
-        headers["Content-Type"] = "application/json"
+        hdrs["Content-Type"] = "application/json"
     req = urllib.request.Request(
-        f"http://127.0.0.1:{port}{path}", data=data, headers=headers,
+        f"http://127.0.0.1:{port}{path}", data=data, headers=hdrs,
         method=method,
     )
     try:
@@ -53,45 +60,63 @@ def _req(srv, method, path, body=None, token=TOKEN, host="127.0.0.1"):
 
 
 def _serve(cmd_timeout=5.0, poll_timeout=5.0):
-    bridge = S.Bridge()
-    handler = S.make_handler(bridge, TOKEN, cmd_timeout, poll_timeout)
+    registry = S.Registry()
+    handler = S.make_handler(registry, TOKEN, cmd_timeout, poll_timeout)
     srv = S.ThreadingHTTPServer(("127.0.0.1", 0), handler)
     srv.daemon_threads = True
     t = threading.Thread(target=srv.serve_forever, daemon=True)
     t.start()
-    return srv, bridge
+    return srv, registry
 
 
 class FakeExtension(threading.Thread):
-    """Simulated extension: long-polls /poll, echoes the op back via /result."""
+    """Simulated extension: long-polls /poll (with its instance identity) and
+    echoes the op back via /result (echoing its instanceId)."""
 
-    def __init__(self, srv, executor=None, swallow=False):
+    def __init__(self, srv, instance_id="fake-1", label="", executor=None,
+                 swallow=False, active_url=None, active_title=None):
         super().__init__(daemon=True)
         self.srv = srv
+        self.instance_id = instance_id
+        self.label = label
         self.executor = executor or (lambda cmd: {"echo": cmd.get("op")})
         self.swallow = swallow  # pick up a command but never answer (→ timeout)
-        self._stop = threading.Event()
+        self.active_url = active_url
+        self.active_title = active_title
+        self._stopev = threading.Event()
+
+    def _poll_headers(self):
+        h = {S.HDR_INSTANCE_ID: self.instance_id}
+        if self.label:
+            h[S.HDR_LABEL] = urllib.parse.quote(self.label)
+        if self.active_url:
+            h[S.HDR_ACTIVE_URL] = urllib.parse.quote(self.active_url)
+        if self.active_title:
+            h[S.HDR_ACTIVE_TITLE] = urllib.parse.quote(self.active_title)
+        return h
 
     def run(self):
-        while not self._stop.is_set():
+        while not self._stopev.is_set():
             try:
-                status, cmd = _req(self.srv, "GET", "/poll")
+                status, cmd = _req(self.srv, "GET", "/poll",
+                                   headers=self._poll_headers())
             except Exception:
-                if self._stop.is_set():
+                if self._stopev.is_set():
                     return
                 continue
             if status == 204 or cmd is None:
                 continue
             if self.swallow:
                 continue
-            envelope = {"id": cmd["id"], "ok": True, "data": self.executor(cmd)}
+            envelope = {"id": cmd["id"], "ok": True,
+                        "data": self.executor(cmd), "instanceId": self.instance_id}
             try:
                 _req(self.srv, "POST", "/result", envelope)
             except Exception:
                 pass
 
     def stop(self):
-        self._stop.set()
+        self._stopev.set()
 
 
 def _wait_connected(srv, want=True, timeout=3.0):
@@ -102,6 +127,16 @@ def _wait_connected(srv, want=True, timeout=3.0):
             return True
         time.sleep(0.02)
     return False
+
+
+def _wait_instances(srv, n, timeout=3.0):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        status, body = _req(srv, "GET", "/health")
+        if status == 200 and body.get("count", 0) >= n:
+            return body
+        time.sleep(0.02)
+    return None
 
 
 # --------------------------------------------------------------------------- #
@@ -173,15 +208,23 @@ def test_host_with_port_allowed():
 
 # --------------------------------------------------------------------------- #
 # Command-delivery channel auth: /poll (extension long-poll) and /result must
-# enforce the SAME host + bearer gate as /health and /cmd. These are the two
-# endpoints that actually move commands, so they get direct coverage rather
-# than being tested only transitively. The guard runs before any polling/body
-# work, so a rejected request returns immediately (no poll_timeout wait).
+# enforce the SAME host + bearer gate as /health and /cmd — INCLUDING when the
+# new instance-scoped params are present. These are the two endpoints that
+# actually move commands, so they get direct coverage. The guard runs before any
+# polling/body work, so a rejected request returns immediately.
 # --------------------------------------------------------------------------- #
+def _poll_hdrs(instance_id="fake-1", label=""):
+    h = {S.HDR_INSTANCE_ID: instance_id}
+    if label:
+        h[S.HDR_LABEL] = urllib.parse.quote(label)
+    return h
+
+
 def test_poll_missing_token_401():
     srv, _ = _serve()
     try:
-        status, body = _req(srv, "GET", "/poll", token=None)
+        status, body = _req(srv, "GET", "/poll", token=None,
+                            headers=_poll_hdrs())
         assert status == 401
         assert body["error"] == "unauthorized"
     finally:
@@ -191,7 +234,8 @@ def test_poll_missing_token_401():
 def test_poll_wrong_token_401():
     srv, _ = _serve()
     try:
-        status, body = _req(srv, "GET", "/poll", token="nope")
+        status, body = _req(srv, "GET", "/poll", token="nope",
+                            headers=_poll_hdrs())
         assert status == 401
         assert body["error"] == "unauthorized"
     finally:
@@ -201,7 +245,8 @@ def test_poll_wrong_token_401():
 def test_poll_bad_host_403():
     srv, _ = _serve()
     try:
-        status, body = _req(srv, "GET", "/poll", host="evil.example.com")
+        status, body = _req(srv, "GET", "/poll", host="evil.example.com",
+                            headers=_poll_hdrs())
         assert status == 403
         assert body["error"] == "bad_host"
     finally:
@@ -212,7 +257,8 @@ def test_result_missing_token_401():
     srv, _ = _serve()
     try:
         status, body = _req(srv, "POST", "/result",
-                            {"id": "x", "ok": True, "data": {}}, token=None)
+                            {"id": "x", "ok": True, "data": {},
+                             "instanceId": "fake-1"}, token=None)
         assert status == 401
         assert body["error"] == "unauthorized"
     finally:
@@ -223,7 +269,8 @@ def test_result_wrong_token_401():
     srv, _ = _serve()
     try:
         status, body = _req(srv, "POST", "/result",
-                            {"id": "x", "ok": True, "data": {}}, token="nope")
+                            {"id": "x", "ok": True, "data": {},
+                             "instanceId": "fake-1"}, token="nope")
         assert status == 401
         assert body["error"] == "unauthorized"
     finally:
@@ -234,8 +281,8 @@ def test_result_bad_host_403():
     srv, _ = _serve()
     try:
         status, body = _req(srv, "POST", "/result",
-                            {"id": "x", "ok": True, "data": {}},
-                            host="evil.example.com")
+                            {"id": "x", "ok": True, "data": {},
+                             "instanceId": "fake-1"}, host="evil.example.com")
         assert status == 403
         assert body["error"] == "bad_host"
     finally:
@@ -243,30 +290,71 @@ def test_result_bad_host_403():
 
 
 # --------------------------------------------------------------------------- #
-# /health connection state
+# /health connection state (now per-instance)
 # --------------------------------------------------------------------------- #
 def test_health_no_extension():
     srv, _ = _serve()
     try:
         status, body = _req(srv, "GET", "/health")
         assert status == 200
-        assert body == {"ok": True, "extension_connected": False}
+        assert body["ok"] is True
+        assert body["extension_connected"] is False
+        assert body["count"] == 0
+        assert body["instances"] == []
     finally:
         srv.shutdown(); srv.server_close()
 
 
 def test_health_reflects_connected_extension():
     srv, _ = _serve(poll_timeout=5.0)
-    ext = FakeExtension(srv)
+    ext = FakeExtension(srv, instance_id="a", label="alpha")
     ext.start()
     try:
-        assert _wait_connected(srv, want=True), "extension never showed connected"
+        body = _wait_instances(srv, 1)
+        assert body is not None, "extension never showed connected"
+        assert body["extension_connected"] is True
+        assert body["count"] == 1
+        keys = {i["key"] for i in body["instances"]}
+        assert "alpha" in keys
     finally:
         ext.stop(); srv.shutdown(); srv.server_close()
 
 
+def test_health_per_instance_two():
+    srv, _ = _serve(poll_timeout=5.0)
+    a = FakeExtension(srv, instance_id="a", label="alpha",
+                      active_url="https://a.test", active_title="A")
+    b = FakeExtension(srv, instance_id="b", label="beta")
+    a.start(); b.start()
+    try:
+        body = _wait_instances(srv, 2)
+        assert body is not None
+        assert body["count"] == 2
+        by_key = {i["key"]: i for i in body["instances"]}
+        assert set(by_key) == {"alpha", "beta"}
+        assert by_key["alpha"]["instanceId"] == "a"
+        assert by_key["alpha"]["activeTab"]["url"] == "https://a.test"
+        assert by_key["beta"]["label"] == "beta"
+    finally:
+        a.stop(); b.stop(); srv.shutdown(); srv.server_close()
+
+
+def test_instances_endpoint():
+    srv, _ = _serve(poll_timeout=5.0)
+    a = FakeExtension(srv, instance_id="a", label="alpha")
+    a.start()
+    try:
+        assert _wait_instances(srv, 1) is not None
+        status, body = _req(srv, "GET", "/instances")
+        assert status == 200
+        assert body["count"] == 1
+        assert body["instances"][0]["key"] == "alpha"
+    finally:
+        a.stop(); srv.shutdown(); srv.server_close()
+
+
 # --------------------------------------------------------------------------- #
-# /cmd round-trip
+# /cmd round-trip (single instance, back-compat: no target needed)
 # --------------------------------------------------------------------------- #
 def test_cmd_roundtrip_getHtml():
     srv, _ = _serve()
@@ -282,6 +370,21 @@ def test_cmd_roundtrip_getHtml():
         assert status == 200
         assert body["ok"] is True
         assert body["result"]["data"]["html"] == "<html><body>hi</body></html>"
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
+def test_cmd_single_instance_no_target_ok():
+    """Exactly one connected instance → a command with NO target routes to it."""
+    srv, _ = _serve()
+    ext = FakeExtension(srv, instance_id="solo", label="only",
+                        executor=lambda c: {"who": "only"})
+    ext.start()
+    try:
+        assert _wait_instances(srv, 1) is not None
+        status, body = _req(srv, "POST", "/cmd", {"op": "tabs"})
+        assert status == 200
+        assert body["result"]["data"]["who"] == "only"
     finally:
         ext.stop(); srv.shutdown(); srv.server_close()
 
@@ -381,45 +484,350 @@ def test_unknown_path_404():
 
 
 # --------------------------------------------------------------------------- #
-# Bridge core: id correlation + concurrency (no HTTP)
+# Multi-instance routing + targeting (over real HTTP)
 # --------------------------------------------------------------------------- #
-def test_bridge_id_correlation_out_of_order():
-    """Two concurrent submits get their OWN replies even when a mock extension
-    answers them in reverse order."""
-    bridge = S.Bridge()
-    # Prime "connected".
+def test_cmd_routes_to_target_instance():
+    """With two instances connected, --instance/target routes to the named one."""
+    srv, _ = _serve(poll_timeout=5.0)
+    a = FakeExtension(srv, instance_id="a", label="alpha",
+                      executor=lambda c: {"who": "alpha"})
+    b = FakeExtension(srv, instance_id="b", label="beta",
+                      executor=lambda c: {"who": "beta"})
+    a.start(); b.start()
+    try:
+        assert _wait_instances(srv, 2) is not None
+        st, body = _req(srv, "POST", "/cmd", {"op": "tabs", "target": "alpha"})
+        assert st == 200 and body["result"]["data"]["who"] == "alpha"
+        st, body = _req(srv, "POST", "/cmd", {"op": "tabs", "target": "beta"})
+        assert st == 200 and body["result"]["data"]["who"] == "beta"
+        # Target by auto-id also works.
+        st, body = _req(srv, "POST", "/cmd", {"op": "tabs", "target": "a"})
+        assert st == 200 and body["result"]["data"]["who"] == "alpha"
+    finally:
+        a.stop(); b.stop(); srv.shutdown(); srv.server_close()
+
+
+def test_cmd_ambiguous_no_target_409():
+    """Two instances + no target → 409 ambiguous_instance, never a silent pick."""
+    srv, _ = _serve(poll_timeout=5.0)
+    a = FakeExtension(srv, instance_id="a", label="alpha")
+    b = FakeExtension(srv, instance_id="b", label="beta")
+    a.start(); b.start()
+    try:
+        assert _wait_instances(srv, 2) is not None
+        st, body = _req(srv, "POST", "/cmd", {"op": "tabs"})
+        assert st == 409
+        assert body["error"] == "ambiguous_instance"
+        keys = {i["key"] for i in body["instances"]}
+        assert keys == {"alpha", "beta"}
+    finally:
+        a.stop(); b.stop(); srv.shutdown(); srv.server_close()
+
+
+def test_cmd_unknown_target_404():
+    srv, _ = _serve(poll_timeout=5.0)
+    a = FakeExtension(srv, instance_id="a", label="alpha")
+    a.start()
+    try:
+        assert _wait_instances(srv, 1) is not None
+        st, body = _req(srv, "POST", "/cmd", {"op": "tabs", "target": "ghost"})
+        assert st == 404
+        assert body["error"] == "unknown_instance"
+        assert body["target"] == "ghost"
+    finally:
+        a.stop(); srv.shutdown(); srv.server_close()
+
+
+def test_poll_superseded_returns_409_not_204():
+    """A blocked /poll whose connection is displaced by a NEWER connection sharing
+    its routing key returns the DISTINCT `409 superseded` signal — never the idle
+    `204`. This is what lets the extension back off instead of hot re-polling
+    (the mutual-supersede livelock fix). Still bearer+Host guarded: this path is
+    only reachable AFTER _guard, and the auth/host tests above cover /poll."""
+    srv, _ = _serve(poll_timeout=5.0)
+    res = {}
+
+    def poll(iid, key):
+        res[iid] = _req(srv, "GET", "/poll", headers=_poll_hdrs(iid, key))
+
+    ta = threading.Thread(target=poll, args=("old", "dup"), daemon=True)
+    ta.start()
+    try:
+        # "old" is registered + blocked in its long-poll.
+        assert _wait_instances(srv, 1) is not None
+        # "new" (different auto-id, same key) supersedes it.
+        tb = threading.Thread(target=poll, args=("new", "dup"), daemon=True)
+        tb.start()
+        ta.join(3)
+        assert "old" in res, "superseded poll never returned"
+        status, body = res["old"]
+        assert status == 409, f"expected 409 superseded, got {status}"
+        assert body["error"] == "superseded"
+    finally:
+        srv.shutdown(); srv.server_close()
+
+
+def test_supersede_logged_once_per_displacement_not_per_poll(monkeypatch):
+    """The supersede is logged ONCE, at the displacement site — the superseded
+    connection's own returning poll must NOT log (a backing-off loser can't flood
+    journald). Deterministic proof of the no-churn contract (the extension's own
+    back-off is only manually verifiable; the server side is unit-tested here)."""
+    reg = S.Registry()
+    events = []
+    monkeypatch.setattr(S, "log", lambda ev, **k: events.append((ev, k)))
+
+    got = {}
+
+    def poll_old():
+        got["old"] = reg.poll("old", "dup", 2.0)
+
+    t = threading.Thread(target=poll_old, daemon=True)
+    t.start()
+    # Wait until "old" is registered AND actively blocked in its poll.
+    deadline = time.time() + 3
+    while time.time() < deadline:
+        with reg._cond:
+            inst = reg._instances.get("dup")
+            if inst is not None and inst.active_polls > 0:
+                break
+        time.sleep(0.01)
+    # A NEW connection claims the key → supersede "old" (ONE displacement event).
+    reg.poll("new", "dup", 0.05)
+    t.join(2)
+
+    # The superseded connection got the DISTINCT sentinel, not an idle None.
+    assert got["old"] is S.SUPERSEDED
+    supersede_logs = [e for e in events if e[0] == "supersede"]
+    assert len(supersede_logs) == 1, \
+        f"expected exactly ONE supersede log, got {len(supersede_logs)}: {supersede_logs}"
+
+
+def test_cmd_same_label_supersede_routes_to_newest():
+    """A NEW connection with the SAME label supersedes the old one at that key
+    (they share a routing key); the old connection is dropped and a command
+    routes to the survivor.
+
+    The superseded connection is modelled as *dropped/closed* (it stops polling)
+    — labels are required to be unique per host, so two connections concurrently
+    contending for one key is a misconfiguration, not steady state.
+    """
+    srv, _ = _serve(poll_timeout=0.3)
+    old = FakeExtension(srv, instance_id="old", label="dup",
+                        executor=lambda c: {"who": "old"})
+    old.start()
+    try:
+        assert _wait_instances(srv, 1) is not None
+        # Old connection is dropped (stops polling) but is still within the stale
+        # window, so it is still the registered holder of key "dup".
+        old.stop(); old.join(timeout=2)
+
+        new = FakeExtension(srv, instance_id="new", label="dup",
+                            executor=lambda c: {"who": "new"})
+        new.start()
+        # New's first poll supersedes old; the sole live holder of "dup" is now new.
+        deadline = time.time() + 3
+        while time.time() < deadline:
+            st, body = _req(srv, "GET", "/health")
+            if st == 200 and body["count"] == 1 and \
+                    body["instances"][0]["instanceId"] == "new":
+                break
+            time.sleep(0.02)
+        assert body["count"] == 1
+        assert body["instances"][0]["instanceId"] == "new"
+
+        st, body = _req(srv, "POST", "/cmd", {"op": "tabs"})
+        assert st == 200 and body["result"]["data"]["who"] == "new"
+        new.stop()
+    finally:
+        old.stop(); srv.shutdown(); srv.server_close()
+
+
+# --------------------------------------------------------------------------- #
+# Back-compat: a legacy extension that polls WITHOUT an instance id
+# --------------------------------------------------------------------------- #
+def test_legacy_no_handshake_single_instance():
+    """A poll with no X-Bridge-Instance-Id registers as one synthetic instance
+    and a no-target /cmd + a no-instanceId /result still round-trip."""
+    srv, _ = _serve(poll_timeout=5.0)
+
+    class LegacyExt(FakeExtension):
+        def _poll_headers(self):
+            return {}  # no identity headers at all
+
+        def run(self):
+            while not self._stopev.is_set():
+                try:
+                    status, cmd = _req(self.srv, "GET", "/poll")
+                except Exception:
+                    if self._stopev.is_set():
+                        return
+                    continue
+                if status == 204 or cmd is None:
+                    continue
+                # NOTE: no instanceId in the result body (old wire shape).
+                _req(self.srv, "POST", "/result",
+                     {"id": cmd["id"], "ok": True, "data": {"who": "legacy"}})
+
+    ext = LegacyExt(srv)
+    ext.start()
+    try:
+        body = _wait_instances(srv, 1)
+        assert body is not None
+        assert body["instances"][0]["key"] == S.LEGACY_INSTANCE_ID
+        st, r = _req(srv, "POST", "/cmd", {"op": "tabs"})
+        assert st == 200 and r["result"]["data"]["who"] == "legacy"
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
+# --------------------------------------------------------------------------- #
+# Registry core (no HTTP): routing, independence, supersede, key resolution
+# --------------------------------------------------------------------------- #
+def test_registry_independent_queues_no_cross_delivery():
+    """Command for instance A is never delivered to B's poll; each gets its own
+    queue and its own reply."""
+    reg = S.Registry()
+    picked_a, picked_b = [], []
+    stop = threading.Event()
+
+    def poller(iid, label, bucket):
+        while not stop.is_set():
+            cmd = reg.poll(iid, label, 0.1)
+            if cmd is not None:
+                bucket.append(cmd)
+                reg.deliver_result(cmd["id"],
+                                   {"id": cmd["id"], "ok": True,
+                                    "data": {"who": label}}, instance_id=iid)
+
+    ta = threading.Thread(target=poller, args=("a", "alpha", picked_a),
+                          daemon=True)
+    tb = threading.Thread(target=poller, args=("b", "beta", picked_b),
+                          daemon=True)
+    ta.start(); tb.start()
+    # Wait until both are registered + live.
+    deadline = time.time() + 3
+    while time.time() < deadline and len(reg.snapshot()) < 2:
+        time.sleep(0.01)
+    assert len(reg.snapshot()) == 2
+
+    r = reg.submit({"op": "tabs"}, timeout=3.0, target="alpha")
+    assert r["data"]["who"] == "alpha"
+    assert len(picked_b) == 0, "B must never see A's command"
+    assert len(picked_a) == 1
+    stop.set()
+
+
+def test_registry_key_is_label_when_set_else_autoid():
+    reg = S.Registry()
+    stop = threading.Event()
+
+    def poller(iid, label):
+        while not stop.is_set():
+            reg.poll(iid, label, 0.05)
+
+    # Labelled instance → key is the label.
+    t1 = threading.Thread(target=poller, args=("uuid-1", "work"), daemon=True)
+    # Unlabelled instance → key is the auto-id.
+    t2 = threading.Thread(target=poller, args=("uuid-2", ""), daemon=True)
+    t1.start(); t2.start()
+    deadline = time.time() + 3
+    while time.time() < deadline and len(reg.snapshot()) < 2:
+        time.sleep(0.01)
+    keys = {i["key"] for i in reg.snapshot()}
+    assert "work" in keys       # label wins
+    assert "uuid-2" in keys     # falls back to auto-id
+    stop.set()
+
+
+def test_registry_supersede_inflight_resolves_error_no_leak():
+    """Same routing key reconnects with a NEW auto-id → the old connection is
+    dropped, its in-flight submit resolves to BridgeSuperseded (no orphaned
+    waiter), and a subsequent command routes to the newcomer."""
+    reg = S.Registry()
+    picked = []
+
+    def poller_old():
+        cmd = reg.poll("old", "dup", 2.0)
+        if cmd is not None:
+            picked.append(cmd)   # picked up but NEVER delivered (in-flight)
+
+    threading.Thread(target=poller_old, daemon=True).start()
+
+    res = {}
+
+    def submit():
+        try:
+            res["v"] = reg.submit({"op": "getHtml"}, timeout=3.0, target="dup")
+        except Exception as e:  # noqa: BLE001
+            res["err"] = type(e).__name__
+
+    ts = threading.Thread(target=submit, daemon=True)
+    ts.start()
+
+    # Wait until "old" picked the command (now in-flight).
+    deadline = time.time() + 3
+    while not picked and time.time() < deadline:
+        time.sleep(0.01)
+    assert picked, "old connection never picked up the command"
+
+    # A NEW connection registers under the same key → supersede "old".
+    reg.poll("new", "dup", 0.05)
+
+    ts.join(3)
+    assert res.get("err") == "BridgeSuperseded"
+
+    # No orphaned waiter / leak: the old instance is gone; the survivor is "new".
+    with reg._cond:
+        assert "old" not in reg._instances
+        inst = reg._instances["dup"]
+        assert inst.instance_id == "new"
+        assert inst.waiters == set()
+
+    # A subsequent command routes to the newcomer.
+    def deliverer():
+        cmd = reg.poll("new", "dup", 2.0)
+        if cmd is not None:
+            reg.deliver_result(cmd["id"], {"id": cmd["id"], "ok": True,
+                                           "data": {"who": "new"}},
+                               instance_id="new")
+    threading.Thread(target=deliverer, daemon=True).start()
+    r = reg.submit({"op": "tabs"}, timeout=3.0, target="dup")
+    assert r["data"]["who"] == "new"
+
+
+def test_registry_id_correlation_out_of_order():
+    """Two concurrent submits to the SAME instance get their OWN replies even
+    when the extension answers them in reverse order."""
+    reg = S.Registry()
     poll_done = threading.Event()
+    picked = []
 
     def poller():
-        # Simulate a connected extension that stays connected long enough.
         while not poll_done.is_set():
-            cmd = bridge.next_command(0.2)
+            cmd = reg.poll("solo", "one", 0.2)
             if cmd is not None:
                 picked.append(cmd)
 
-    picked = []
-    t = threading.Thread(target=poller, daemon=True)
-    t.start()
+    threading.Thread(target=poller, daemon=True).start()
 
     results = {}
 
     def submit(tag):
-        results[tag] = bridge.submit({"op": "eval", "tag": tag}, timeout=3.0)
+        results[tag] = reg.submit({"op": "eval", "tag": tag}, timeout=3.0)
 
     s1 = threading.Thread(target=submit, args=("A",), daemon=True)
     s2 = threading.Thread(target=submit, args=("B",), daemon=True)
     s1.start(); s2.start()
 
-    # Wait until both commands are picked up.
     deadline = time.time() + 3
     while len(picked) < 2 and time.time() < deadline:
         time.sleep(0.01)
     assert len(picked) == 2
 
-    # Answer in REVERSE order.
     for cmd in reversed(picked):
-        bridge.deliver_result(cmd["id"], {"id": cmd["id"], "ok": True,
-                                          "data": {"tag": cmd["tag"]}})
+        reg.deliver_result(cmd["id"], {"id": cmd["id"], "ok": True,
+                                       "data": {"tag": cmd["tag"]}},
+                           instance_id="solo")
 
     s1.join(3); s2.join(3)
     poll_done.set()
@@ -427,15 +835,15 @@ def test_bridge_id_correlation_out_of_order():
     assert results["B"]["data"]["tag"] == "B"
 
 
-def test_bridge_submit_no_extension_raises():
-    bridge = S.Bridge()
+def test_registry_submit_no_extension_raises():
+    reg = S.Registry()
     with pytest.raises(S.NoExtension):
-        bridge.submit({"op": "getHtml"}, timeout=0.2)
+        reg.submit({"op": "getHtml"}, timeout=0.2)
 
 
-def test_bridge_deliver_unknown_id_false():
-    bridge = S.Bridge()
-    assert bridge.deliver_result("nope", {"x": 1}) is False
+def test_registry_deliver_unknown_id_false():
+    reg = S.Registry()
+    assert reg.deliver_result("nope", {"x": 1}) is False
 
 
 def test_validate_command_contract():
@@ -446,3 +854,39 @@ def test_validate_command_contract():
     assert S.validate_command({"op": "eval"})[1] == "missing_field:js"
     assert S.validate_command({"op": "bogus"})[1] == "unknown_op"
     assert S.validate_command("nope")[1] == "body_not_object"
+
+
+# --------------------------------------------------------------------------- #
+# Icon sanity — the manifest references all four sizes and each PNG's real IHDR
+# width/height matches its declared size. Stdlib only (struct — no PIL).
+# --------------------------------------------------------------------------- #
+def _png_size(path):
+    """Return (width, height) from a PNG's IHDR using stdlib struct only."""
+    data = path.read_bytes()
+    assert data[:8] == b"\x89PNG\r\n\x1a\n", f"not a PNG: {path}"
+    # 8-byte signature, then IHDR chunk: 4 len + 4 "IHDR" + 4 width + 4 height.
+    assert data[12:16] == b"IHDR", f"IHDR not first chunk: {path}"
+    width, height = struct.unpack(">II", data[16:24])
+    return width, height
+
+
+def test_manifest_icons_exist_and_match_declared_size():
+    manifest = json.loads((EXT_DIR / "manifest.json").read_text())
+    icons = manifest.get("icons")
+    assert icons, "manifest.json is missing an 'icons' map"
+    assert set(icons) == {"16", "32", "48", "128"}, \
+        "manifest icons must declare 16/32/48/128"
+    for size, rel in icons.items():
+        path = EXT_DIR / rel
+        assert path.exists(), f"declared icon missing on disk: {rel}"
+        w, h = _png_size(path)
+        assert (w, h) == (int(size), int(size)), \
+            f"{rel}: declared {size} but PNG is {w}x{h}"
+    # The MV3 toolbar action icon references the same four sizes.
+    action_icon = manifest.get("action", {}).get("default_icon", {})
+    assert set(action_icon) == {"16", "32", "48", "128"}
+
+
+def test_svg_source_present():
+    assert (EXT_DIR / "icons" / "icon.svg").exists(), \
+        "the SVG icon source must be committed alongside the PNGs"

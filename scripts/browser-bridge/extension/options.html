@@ -17,12 +17,17 @@
   <p>Paste the bearer token from
     <code>~/.config/browser-bridge/token</code> and the port the
     <code>browser-bridge</code> service listens on (default 8788).</p>
+  <label for="label">Label <span style="font-weight:400">(optional — the routing key for <code>browser --instance &lt;label&gt;</code>)</span></label>
+  <input id="label" type="text" placeholder="e.g. work, personal — must be unique per host" />
   <label for="port">Port</label>
   <input id="port" type="text" placeholder="8788" />
   <label for="token">Token</label>
   <input id="token" type="text" placeholder="paste token here" />
   <button id="save">Save</button>
   <div id="status"></div>
+  <p style="color:#666;font-size:12px">Leave the label blank to be driven by the
+    auto-generated instance id. If more than one profile connects, set a unique
+    label on each so <code>browser --instance</code> can target it.</p>
   <script src="options.js"></script>
 </body>
 </html>
