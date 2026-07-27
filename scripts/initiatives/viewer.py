@@ -598,6 +598,105 @@ def pick_face_message(recent_messages: list[dict]) -> dict | None:
     return msgs[0]
 
 
+# --------------------------------------------------------------------------- #
+# Derived triage STATE (Phase-1 board redesign). Each view is classified into ONE of
+# four states — needs_you|live|stalled|active — plus a single most-relevant `line2` for the
+# two-line collapsed card. PURE + unit-tested with fixtures (no DB).
+# --------------------------------------------------------------------------- #
+STATE_NEEDS_YOU = "needs_you"
+STATE_LIVE = "live"
+STATE_STALLED = "stalled"
+STATE_ACTIVE = "active"
+
+# The single, most-relevant collapsed-card second line is trimmed to a scannable width so the
+# card stays two lines regardless of the underlying text length. textContent-safe (the JS
+# writes it via el()/textContent, never innerHTML).
+LINE2_TRIM = 160
+
+# FALLBACK blocked-marker set — used ONLY when the assistant sibling can't be imported, so
+# `derive_state` still classifies `needs_you` offline (e.g. a pure unit test with no siblings
+# on the path). It is a VERBATIM copy of `assistant.BLOCKED_MARKERS` / `_BLOCKED_FIELDS`; a
+# parity test pins the two together so they can never drift. `assistant._blocking_hits` is the
+# SINGLE SOURCE OF TRUTH — this is only the degraded path.
+_FALLBACK_BLOCKED_MARKERS = (
+    "awaiting", "blocked on", "blocked", "your call", "your input", "your decision",
+    "your review", "your sign-off", "your signoff", "your go-ahead", "your go ahead",
+    "waiting on you", "waiting for you", "waiting on zach", "waiting for zach",
+    "needs you", "needs zach", "need zach", "need you to", "pending your",
+    "up to zach", "hand to the user", "hand it to the user",
+)
+_FALLBACK_BLOCKED_FIELDS = ("status", "next_step")
+
+
+def _fallback_blocking_hits(view: dict) -> list[str]:
+    """Local copy of `assistant._blocking_hits` for the assistant-unavailable path."""
+    hay = " ".join(str(view.get(f) or "") for f in _FALLBACK_BLOCKED_FIELDS).lower()
+    return [mk for mk in _FALLBACK_BLOCKED_MARKERS if mk in hay]
+
+
+def _blocking_hits_for(view: dict) -> list[str]:
+    """The BLOCKED markers tripped by a view's status/next_step — sourced from
+    `assistant._blocking_hits` (the SINGLE source, not re-hardcoded), degrading to the local
+    fallback copy when the assistant sibling can't load. Never raises."""
+    try:
+        return _assistant()._blocking_hits(view)
+    except Exception:  # noqa: BLE001 - the assistant is optional here; fall back to local markers
+        return _fallback_blocking_hits(view)
+
+
+def _line2_trim(text) -> str:
+    s = (text or "").strip()
+    return s if len(s) <= LINE2_TRIM else s[: LINE2_TRIM - 1].rstrip() + "…"
+
+
+def derive_state(view: dict) -> tuple[str, str]:
+    """PURE: classify a view into (state, line2). Precedence (first match wins):
+    needs_you > live > stalled > active.
+
+      - needs_you: `_blocking_hits(view)` non-empty. line2 = the status/next_step field that
+        tripped a marker (else whichever is present, else the hit phrase).
+      - live: `live_tasks`/`tmux_sessions` non-empty. line2 = "agent live: " + live_task.
+      - stalled: momentum == "stalled". line2 = "stalled <age> · last: <face/last prompt>".
+      - active: everything else. line2 = recommended_next_step.text (else next_step, else
+        status, else summary).
+
+    Unit-testable without a DB: `_blocking_hits_for` degrades to the local marker copy when
+    the assistant sibling can't load."""
+    hits = _blocking_hits_for(view)
+    if hits:
+        status = (view.get("status") or "").strip()
+        next_step = (view.get("next_step") or "").strip()
+        blocker = ""
+        for cand in (status, next_step):
+            if cand and any(mk in cand.lower() for mk in hits):
+                blocker = cand
+                break
+        blocker = blocker or status or next_step or hits[0]
+        return STATE_NEEDS_YOU, _line2_trim(blocker)
+
+    live_task = (view.get("live_task") or "").strip()
+    live_tasks = view.get("live_tasks") or []
+    if live_tasks or (view.get("tmux_sessions") or []):
+        lt = live_task or (str(live_tasks[0]).strip() if live_tasks else "")
+        return STATE_LIVE, _line2_trim("agent live: " + lt if lt else "agent live")
+
+    if (view.get("momentum") or "") == "stalled":
+        face = view.get("face_message") or {}
+        face_text = (face.get("text") if isinstance(face, dict) else "") or ""
+        if not face_text:
+            msgs = view.get("recent_messages") or []
+            if msgs and isinstance(msgs[0], dict):
+                face_text = msgs[0].get("text") or ""
+        age = view.get("age") or "—"
+        line = "stalled " + age + (" · last: " + face_text if face_text else "")
+        return STATE_STALLED, _line2_trim(line)
+
+    rec = view.get("recommended_next_step") or {}
+    text = (rec.get("text") if isinstance(rec, dict) else "") or ""
+    text = (text or view.get("next_step") or view.get("status") or view.get("summary") or "")
+    return STATE_ACTIVE, _line2_trim(text)
+
+
 def _initiative_view(ini: dict, now: datetime) -> dict:
     """One store row (+ any attached tmux_sessions) -> a flat, template-ready view dict."""
     momentum = ini.get("momentum") or "unknown"
@@ -693,6 +792,10 @@ def _initiative_view(ini: dict, now: datetime) -> dict:
         view["recommended_next_step"] = _nextstep().recommend_next_step(view)
     except Exception:  # noqa: BLE001 - a recommendation is additive; never break the render
         view["recommended_next_step"] = None
+    # Derived triage state + the single most-relevant collapsed-card line (Phase-1 board).
+    # Depends on the fields assembled above (status/next_step/live_*/momentum/face_message/
+    # recommended_next_step), so it MUST run last. PURE + never raises.
+    view["state"], view["line2"] = derive_state(view)
     return view
 
 
@@ -1021,12 +1124,29 @@ header .meta{color:var(--gray);font-size:.85rem}
 .repo > h2{font-size:.95rem;margin:0 0 .5rem;color:var(--aqua);
   border-bottom:1px dotted var(--bg2);padding-bottom:.25rem}
 .repo > h2 .count{color:var(--gray);font-weight:normal;font-size:.8rem;margin-left:.4rem}
+/* A collapsible repo section (the DEFAULT grouped view): the whole h2 is the toggle. */
+.repo.collapsible > h2{cursor:pointer;user-select:none;display:flex;align-items:baseline;gap:.4rem}
+.repo.collapsible > h2 .chev{color:var(--gray);font-size:.75rem;width:.8rem;flex:0 0 auto}
+.repo.collapsible > h2 .count{margin-left:0}
+.repo-body{margin-top:.3rem}
+/* The sticky cross-repo triage bar — filter chips that narrow every group to one state. */
+.triage{position:sticky;top:0;z-index:10;display:flex;flex-wrap:wrap;gap:.4rem;
+  background:var(--bg);border-bottom:1px solid var(--bg2);padding:.5rem 0;margin:0 0 1rem}
+.chip{background:var(--bg1);color:var(--fg2);border:1px solid var(--bg2);border-radius:999px;
+  padding:.2rem .75rem;cursor:pointer;font:inherit;font-size:.8rem;white-space:nowrap}
+.chip:hover{background:var(--bg2)}
+.chip.active{background:var(--blue);color:var(--bg);border-color:var(--blue)}
+.chip.state-needs_you.active{background:var(--red);border-color:var(--red)}
+.chip.state-live.active{background:var(--green);border-color:var(--green)}
+.chip.state-stalled.active{background:var(--yellow);border-color:var(--yellow)}
 .ini{background:var(--bg1);border-left:3px solid var(--gray);border-radius:4px;
   padding:.55rem .7rem;margin:0 0 .5rem;cursor:pointer}
 .ini:hover{background:#40393622}
-.ini.active{border-left-color:var(--green)}
-.ini.slowing{border-left-color:var(--yellow)}
-.ini.stalled{border-left-color:var(--gray)}
+/* Border-left + badge colour keyed off the DERIVED triage state (Phase-1), not momentum. */
+.ini.state-needs_you{border-left-color:var(--red)}
+.ini.state-live{border-left-color:var(--green)}
+.ini.state-active{border-left-color:var(--blue)}
+.ini.state-stalled{border-left-color:var(--gray)}
 .ini.open{outline:1px solid var(--bg2)}
 .ini .row1{display:flex;flex-wrap:wrap;align-items:baseline;gap:.5rem}
 .badge{font-weight:bold}
@@ -1034,11 +1154,26 @@ header .meta{color:var(--gray);font-size:.85rem}
 .badge.slowing{color:var(--yellow)}
 .badge.stalled{color:var(--gray)}
 .badge.unknown{color:var(--gray)}
+/* The state glyph badge on line 1 (⚠ needs_you / ● live / → active / ◑ stalled). */
+.sbadge{font-weight:bold;margin-right:.05rem}
+.sbadge.state-needs_you{color:var(--red)}
+.sbadge.state-live{color:var(--green)}
+.sbadge.state-active{color:var(--blue)}
+.sbadge.state-stalled{color:var(--yellow)}
 .slug{font-weight:bold;color:var(--fg)}
 .title{color:var(--fg2)}
 .repo-label{font-size:.75rem;color:var(--aqua);background:var(--bg2);border-radius:3px;
   padding:.02rem .4rem}
+/* A session-only (undocumented) card carries a small "emerging" badge in place of the retired
+   standalone Emerging lane — it now sits inline in its repo group. */
+.emerging-badge{font-size:.7rem;color:var(--yellow);background:var(--bg2);border-radius:3px;
+  padding:.02rem .35rem}
 .age{color:var(--gray);font-size:.82rem;margin-left:auto}
+/* Line 2 of the collapsed card: the single most-relevant line for the card's state. */
+.line2{margin-top:.3rem;color:var(--fg2);font-size:.85rem;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.line2.state-needs_you{color:var(--fg)}
+.actions{margin-top:.35rem;display:flex;align-items:center;gap:.4rem}
 .summary{margin-top:.3rem;color:var(--fg);font-size:.86rem}
 .status{margin-top:.2rem;color:var(--fg2);font-size:.84rem}
 .status .lbl{color:var(--yellow);margin-right:.2rem}
@@ -1100,20 +1235,6 @@ header .meta{color:var(--gray);font-size:.85rem}
 .u-id{color:var(--green);flex:0 0 auto}
 .u-title{color:var(--fg2);overflow:hidden;text-overflow:ellipsis}
 .u-title.untitled{color:var(--gray);font-style:italic}
-/* "Emerging / undocumented": session-only cards (no handoff doc). Visually SECONDARY to the
-   documented board — a subtle dashed divider, a dimmer/gray header — and collapsed by default.
-   The caret + count read as one obviously-clickable control (whole h2 is the hit target). */
-.emerging{margin:1.8rem 0 0;border-top:1px dashed var(--bg2);padding-top:.8rem}
-.emerging > h2{font-size:.9rem;margin:0;color:var(--gray);cursor:pointer;
-  display:flex;align-items:baseline;gap:.4rem;user-select:none}
-.emerging > h2:hover{color:var(--fg2)}
-.emerging > h2 .chev{color:var(--yellow);font-size:.75rem;width:.8rem}
-.emerging > h2 .count{color:var(--gray);font-weight:normal;font-size:.8rem}
-.emerging-cap{color:var(--gray);font-size:.75rem;margin:.25rem 0 .1rem 1.2rem;font-style:italic}
-.emerging-body{margin-top:.6rem}
-/* Cards in the lane read a touch dimmer than the main board (still legible on hover/expand). */
-.emerging-body .ini{opacity:.85}
-.emerging-body .ini:hover,.emerging-body .ini.open{opacity:1}
 .err{background:#442222;border:1px solid var(--red);color:var(--fg);
   padding:1rem;border-radius:4px}
 .err b{color:var(--red)}
@@ -1240,21 +1361,55 @@ function bucketizeRecency(views, nowMs){
 """.strip()
 
 
-# PURE, DOM-FREE partition of the flat initiative stream into the MAIN board vs. the
-# "Emerging / undocumented" lane — kept in its OWN snippet (like _RECENCY_JS) so the node
-# test evals it directly, exercising the ACTUAL page code. A card is EMERGING iff its
-# `undocumented` flag is truthy (a session-only, doc-less card the scan auto-discovered);
-# everything else (documented / enriched: source doc|both, or a pre-migration card with the
-# flag absent → falsy) stays in `documented`. Input order is preserved within each list, so a
-# last_touch-DESC input yields a last_touch-DESC emerging lane (newest-first) for free.
-# Substituted into _JS at the __PARTITION_JS__ placeholder at module load.
-_PARTITION_JS = r"""
-function partitionInitiatives(views){
-  var documented = [], emerging = [];
-  (views || []).forEach(function(v){
-    if(v && v.undocumented) emerging.push(v); else documented.push(v);
+# PURE, DOM-FREE state-filter predicate for the sticky triage bar — kept in its OWN snippet
+# (like _MATCH_JS) so the node test evals it directly, exercising the ACTUAL page code. `sf` is
+# the active triage state ('' or 'all' → every card matches; otherwise the card's derived
+# `state` must equal it). Composes with `matchQ` (AND) in render. Substituted into _JS at the
+# __STATEFILTER_JS__ placeholder at module load.
+_STATEFILTER_JS = r"""
+function matchState(v, sf){
+  if(!sf || sf === 'all') return true;   // "All" (or no filter) → every card
+  return !!v && v.state === sf;
+}
+""".strip()
+
+
+# PURE, DOM-FREE grouping of the flat initiative stream into collapsible repo sections — kept
+# in its OWN snippet so the node test evals it directly (no parseLastTouch/DOM dependency). The
+# input `views` is ALREADY last_touch-DESC (build_model's `flat`), so: (a) cards within a repo
+# are STABLE-sorted by state precedence (needs_you→live→active→stalled), recency preserved for
+# ties; (b) repos are ordered by their `needs_you` count DESC, then by most-recent activity —
+# which is just the index of the repo's FIRST card in the DESC stream (smaller = more recent).
+# `undocumented` cards are NOT segregated (the standalone Emerging lane is retired); they group
+# with their repo and the SPA badges them. Substituted into _JS at the __GROUP_JS__ placeholder.
+_GROUP_JS = r"""
+function stateRank(v){
+  var order = {needs_you:0, live:1, active:2, stalled:3};
+  var r = v ? order[v.state] : undefined;
+  return (r == null) ? 2 : r;   // unknown/legacy state sorts with 'active'
+}
+function stateSort(items){
+  // Stable sort by state rank (decorate with the original index so equal ranks keep the
+  // input's recency order regardless of the engine's Array.sort stability).
+  return items.map(function(v, i){ return [stateRank(v), i, v]; })
+    .sort(function(a, b){ return (a[0] - b[0]) || (a[1] - b[1]); })
+    .map(function(t){ return t[2]; });
+}
+function groupByRepo(views){
+  var groups = {}, order = [];
+  (views || []).forEach(function(v, i){
+    var name = (v && v.repo_name) || '(unknown repo)';
+    if(!groups[name]){ groups[name] = {name:name, items:[], needs:0, firstIdx:i}; order.push(name); }
+    groups[name].items.push(v);
+    if(v && v.state === 'needs_you') groups[name].needs++;
   });
-  return {documented: documented, emerging: emerging};
+  var out = order.map(function(n){ return groups[n]; });
+  out.forEach(function(g){ g.items = stateSort(g.items); });
+  out.sort(function(a, b){
+    if(b.needs !== a.needs) return b.needs - a.needs;   // most needs_you first
+    return a.firstIdx - b.firstIdx;                     // then most-recent activity (DESC stream)
+  });
+  return out;
 }
 """.strip()
 
@@ -1449,7 +1604,8 @@ function mdToHtml(src){
 _JS = r"""
 (function(){
   __RECENCY_JS__
-  __PARTITION_JS__
+  __STATEFILTER_JS__
+  __GROUP_JS__
   __MATCH_JS__
   __MARKDOWN_JS__
   var el0 = document.getElementById('idata');
@@ -1457,31 +1613,51 @@ _JS = r"""
   try { data = JSON.parse(el0.textContent); }
   catch(e){ data = {ok:false, error:'bad payload', repos:[], flat:[], live_unmatched:[]}; }
 
-  // v2 storage key: bumped from 'initiatives-view' when the default flipped flat→recency, so
-  // browsers that persisted the OLD default ('flat') under the v1 key start fresh on the new
-  // 'recency' default instead of being pinned to a stale stored 'flat'. (An explicit later
-  // choice is still remembered under the v2 key.)
-  var VIEW_KEY = 'initiatives-view-v2';
+  // v3 storage key: bumped when the DEFAULT view flipped recency→grouped (Phase-1 board
+  // redesign). A browser that persisted an OLD default under the v1/v2 key reads NOTHING under
+  // the v3 key, so it starts fresh on the new 'grouped' default instead of being pinned to a
+  // stale 'flat'/'recency'. An explicit later choice is still remembered under the v3 key.
+  var VIEW_KEY = 'initiatives-view-v3';
   var UNMATCHED_KEY = 'initiatives-unmatched-collapsed';
-  // The "Emerging / undocumented" lane (session-only cards) is COLLAPSED by default — it is a
-  // triage bucket, secondary to the documented board. Only an explicit '1' opens it.
-  var EMERGING_KEY = 'EMERGING_OPEN';
-  // 3-way view toggle: 'recency' (by last_touch, DEFAULT) | 'flat' | 'grouped' (by repo).
-  // Persisted in localStorage; an unknown/legacy value falls back to the recency default.
+  // Per-repo collapse state for the grouped view: a JSON map {repoName: 1} of COLLAPSED repos
+  // (absent = expanded, the default). A search/triage filter can force a section open WITHOUT
+  // touching this stored preference.
+  var REPO_COLLAPSE_KEY = 'initiatives-repo-collapsed';
+  // 3-way view toggle: 'grouped' (by repo, DEFAULT) | 'flat' | 'recency' (by last_touch).
+  // Persisted in localStorage; an unknown/legacy value falls back to the grouped default.
   var VALID_VIEWS = {flat:1, grouped:1, recency:1};
   var storedView = localStorage.getItem(VIEW_KEY);
-  var state = { view: VALID_VIEWS[storedView] ? storedView : 'recency', q: '' };
+  var state = { view: VALID_VIEWS[storedView] ? storedView : 'grouped', q: '', triage: '' };
   // The catch-all "live sessions" section is collapsible; remember the user's choice.
   // Default EXPANDED (the whole point is to see every running thread) — set to '1' to collapse.
   var unmatchedCollapsed = localStorage.getItem(UNMATCHED_KEY) === '1';
-  // Emerging lane collapsed unless the user opened it before (default false = collapsed).
-  var emergingOpen = localStorage.getItem(EMERGING_KEY) === '1';
-  // Documented-only totals for the header (recomputed each render; exclude the emerging lane).
+  // Header totals (recomputed each render). docTotal/docRepoTotal now count ALL initiatives
+  // (the standalone Emerging lane is retired — undocumented cards live inline); emergingTotal is
+  // just the "N emerging" header stat; stateCounts drives the summary + the triage chips.
   var docTotal = 0, docRepoTotal = 0, emergingTotal = 0;
+  var stateCounts = {needs_you:0, live:0, active:0, stalled:0};
   var expanded = {};     // key -> true
   var detailCache = {};  // key -> detail payload
 
+  // Per-repo collapse persistence (grouped view). Default expanded; a filter can force-open.
+  function readRepoCollapsed(){
+    try { return JSON.parse(localStorage.getItem(REPO_COLLAPSE_KEY) || '{}') || {}; }
+    catch(e){ return {}; }
+  }
+  function isRepoCollapsed(name){ return !!readRepoCollapsed()[name]; }
+  function setRepoCollapsed(name, collapsed){
+    var m = readRepoCollapsed();
+    if(collapsed) m[name] = 1; else delete m[name];
+    try { localStorage.setItem(REPO_COLLAPSE_KEY, JSON.stringify(m)); } catch(e){}
+  }
+
+  // The derived-state glyphs/labels for the two-line card + the triage chips (mirrors the
+  // Python STATE_* precedence). ⚠ needs_you · ● live · → active · ◑ stalled.
+  var STATE_GLYPH = {needs_you:'⚠', live:'●', active:'→', stalled:'◑'};
+  var STATE_LABEL = {needs_you:'needs you', live:'live', active:'active', stalled:'stalled'};
+
   var app = document.getElementById('app');
+  var triageBar = document.getElementById('triage');
   var searchInput = document.getElementById('search');
   var footer = document.getElementById('foot');
   var btnFlat = document.getElementById('view-flat');
@@ -1558,6 +1734,23 @@ _JS = r"""
       stx.appendChild(document.createTextNode(' ' + dstatus));
       det.appendChild(stx);
     }
+    // The thread's ORIGIN prompt (start ›) + the latest substantive prompt (you ›) — moved OFF
+    // the collapsed two-line card into the expanded region (Phase-1), nothing lost. Sourced
+    // from the view (`v`); the live handoff read never refreshes them. textContent-only.
+    var dopen = (v && v.opening_message) || '';
+    if(dopen){
+      var op = el('div', 'start');
+      op.appendChild(el('span', 'lbl', 'start ›'));
+      op.appendChild(document.createTextNode(' ' + dopen));
+      det.appendChild(op);
+    }
+    var dface = v && v.face_message;
+    if(dface && dface.text){
+      var fm = el('div', 'msg');
+      fm.appendChild(el('span', 'lbl', 'you ›'));
+      fm.appendChild(document.createTextNode(' ' + dface.text));
+      det.appendChild(fm);
+    }
     var dtasks = (d.live_tasks && d.live_tasks.length) ? d.live_tasks
                  : (d.live_task ? [d.live_task] : []);
     if(dtasks.length){
@@ -1628,122 +1821,50 @@ _JS = r"""
       .catch(function(){ renderDetail(det, {ok:false, error:'detail unavailable'}, v); });
   }
 
+  // A TWO-LINE collapsed card (Phase-1 board redesign). Line 1 = state glyph + slug + title +
+  // repo label (non-grouped views) + emerging badge + age. Line 2 = the single most-relevant
+  // `v.line2` for the card's state, plus the Phase-1 action (the EXISTING dispatch, only when a
+  // grounded recommendation exists). Everything else — the identity/current/start/you/live
+  // lines, next-steps, investigations, PRs, commits, docs — moves to the click-to-expand detail
+  // (loadDetail/renderDetail), nothing lost. Untrusted text is textContent-only via el().
   function card(v){
     var k = key(v);
-    var c = el('div', 'ini ' + (v.momentum || 'unknown'));
+    var st = v.state || 'active';
+    var c = el('div', 'ini state-' + st);
     c.setAttribute('data-key', k);
 
+    // LINE 1.
     var row1 = el('div', 'row1');
-    row1.appendChild(el('span', 'badge ' + (v.momentum || 'unknown'),
-                        v.badge_glyph + ' ' + v.badge_label));
+    var sb = el('span', 'sbadge state-' + st, STATE_GLYPH[st] || '→');
+    sb.title = STATE_LABEL[st] || st;
+    row1.appendChild(sb);
     row1.appendChild(el('span', 'slug', v.slug));
     if(v.title) row1.appendChild(el('span', 'title', v.title));
-    // Show the repo label whenever repo isn't the section header — i.e. flat AND recency
-    // (both mix repos in one stream); grouped uses the repo as its section heading instead.
+    // The repo label shows whenever repo isn't the section header — i.e. flat AND recency; the
+    // grouped (default) view uses the repo as its collapsible section heading instead.
     if(state.view !== 'grouped' && v.repo_name)
       row1.appendChild(el('span', 'repo-label', v.repo_name));
-    row1.appendChild(el('span', 'age', 'updated ' + v.age + ' ago'));
+    // A session-only (undocumented) card is badged inline (the standalone Emerging lane is
+    // retired); it groups with its repo like any other card.
+    if(v.undocumented) row1.appendChild(el('span', 'emerging-badge', 'emerging'));
+    row1.appendChild(el('span', 'age', v.age));
     c.appendChild(row1);
 
-    // The primary "what this is" line: the STABLE identity recap when present, else the
-    // legacy single recap, else the deterministic handoff summary (fallback chain
-    // identity → recap → summary, so a card is never blank during rollout). textContent
-    // only via el().
-    var primary = v.identity || v.recap || v.summary;
-    if(primary) c.appendChild(el('div', 'summary', primary));
-
-    // The secondary "current: …" line: the VOLATILE status recap (what's in progress /
-    // recently done / blocked). Omitted when empty. Sits directly under the identity line
-    // so "what it is" reads first, "what's happening now" second. textContent-only.
-    if(v.status){
-      var st = el('div', 'status');
-      st.appendChild(el('span', 'lbl', 'current ›'));
-      st.appendChild(document.createTextNode(' ' + v.status));
-      c.appendChild(st);
+    // LINE 2: the single most-relevant line for this state (server-derived `v.line2`).
+    if(v.line2){
+      var l2 = el('div', 'line2 state-' + st);
+      l2.appendChild(document.createTextNode(v.line2));
+      c.appendChild(l2);
     }
 
-    // The thread's ORIGIN (genesis) prompt — the ORIGINAL ask that started the initiative
-    // (v5). Shown between "what's happening now" (current ›) and the latest prompt (you ›),
-    // so the card reads identity → current → start → you. Omitted when empty (pre-v5 store or
-    // a doc initiative with no folded session). textContent-only, never innerHTML.
-    if(v.opening_message){
-      var op = el('div', 'start');
-      op.appendChild(el('span', 'lbl', 'start ›'));
-      op.appendChild(document.createTextNode(' ' + v.opening_message));
-      c.appendChild(op);
-    }
-
-    // The user's own most-recent SUBSTANTIVE prompt — the highest-signal "what is this"
-    // line (summary + latest message read well together). `face_message` skips low-signal
-    // boilerplate (dispatch/proceed/yes); the expand still shows the full recent_messages
-    // list. textContent-only, never innerHTML.
-    var face = v.face_message;
-    if(face && face.text){
-      var m = el('div', 'msg');
-      m.appendChild(el('span', 'lbl', 'you ›'));
-      m.appendChild(document.createTextNode(' ' + face.text));
-      c.appendChild(m);
-    }
-
-    // Live tmux session task summaries (render-time overlay). When an initiative hosts
-    // MORE than one live session, show EVERY session's task (one line each), not just the
-    // first — `live_tasks` is the full de-duped list (`live_task` is only its first item).
-    var ltasks = (v.live_tasks && v.live_tasks.length) ? v.live_tasks
-                 : (v.live_task ? [v.live_task] : []);
-    ltasks.forEach(function(task){
-      var lt = el('div', 'live-task');
-      lt.appendChild(el('span', 'lbl', 'live ›'));
-      lt.appendChild(document.createTextNode(' ' + task));
-      c.appendChild(lt);
-    });
-
-    var tags = el('div', 'tags');
-    (v.tmux_sessions || []).forEach(function(s){
-      tags.appendChild(el('span', 'tag tmux', '[tmux:' + s + ']'));
-    });
-    (v.open_prs || []).forEach(function(p){
-      var label = (p.number != null ? ('#' + p.number) : 'PR') + (p.title ? (' ' + p.title) : '');
-      var t = el('span', 'tag pr', label);
-      if(p.title) t.title = p.title;
-      tags.appendChild(t);
-    });
-    // The numeric stat strip (commit/merged/session/event counts) is intentionally
-    // OMITTED — low-signal on the card. PR titles + the commit subject below stay (they
-    // are descriptive, not bare counts).
-    c.appendChild(tags);
-
-    // A small hint of the most-recent commit subject, when present.
-    var rc = v.recent_commits || [];
-    if(rc.length && rc[0]){
-      var cm = el('div', 'commit');
-      cm.appendChild(el('span', 'lbl', 'commit ›'));
-      cm.appendChild(document.createTextNode(' ' + rc[0]));
-      c.appendChild(cm);
-    }
-
-    if(v.next_step){
-      var nx = el('div', 'next');
-      nx.appendChild(el('b', null, 'next'));
-      nx.appendChild(document.createTextNode(' › ' + v.next_step));
-      c.appendChild(nx);
-    }
-
-    // GROUNDED (but inferred) next-step suggestion — shown ONLY when there is no documented
-    // `next_step` (the Emerging gap). Rendered distinctly ("next (suggested) ›") with a muted
-    // hint naming where it was grounded. All text via el()/textContent — never innerHTML.
+    // Phase-1 ACTION: the EXISTING dispatch, shown whenever a grounded recommendation exists
+    // (reuses dispatchNextStep + POST /api/dispatch VERBATIM). Two human gates remain: this
+    // button, then "Dispatch" inside clawgate. NO resolve/drop/done/open here (Phase 2/3).
     var rec = v.recommended_next_step;
-    if(!v.next_step && rec && rec.text){
-      var sg = el('div', 'next suggested');
-      sg.appendChild(el('b', null, 'next (suggested)'));
-      sg.appendChild(document.createTextNode(' › ' + rec.text));
-      var hint = basisHint(rec.basis);
-      if(hint) sg.appendChild(el('span', 'hint', hint));
-      c.appendChild(sg);
-
-      // One-tap dispatch of the suggested step to a clawgate Task (only when a suggestion
-      // exists). Two human gates: this button, then "Dispatch" inside clawgate itself.
-      var drow = el('div');
-      var btn = el('button', 'dispatch-btn', 'Dispatch next step');
+    if(rec && rec.text){
+      var drow = el('div', 'actions');
+      var btn = el('button', 'dispatch-btn', '⤴ dispatch');
+      btn.title = rec.text + (basisHint(rec.basis) ? '  (' + basisHint(rec.basis) + ')' : '');
       var dstat = el('span', 'dispatch-status');
       btn.addEventListener('click', function(ev){
         ev.stopPropagation();  // don't toggle the card expand
@@ -1754,6 +1875,7 @@ _JS = r"""
       c.appendChild(drow);
     }
 
+    // Click the card → expand to today's FULL detail (loadDetail fetches /api/initiative).
     var det = el('div', 'detail');
     det.style.display = 'none';
     c.appendChild(det);
@@ -1819,43 +1941,33 @@ _JS = r"""
     app.appendChild(sec);
   }
 
-  // The "Emerging / undocumented" lane: session-only cards the scan auto-discovered that have
-  // NO handoff doc. Rendered as a SEPARATE, muted, collapsed-by-default section below the main
-  // board so it never dilutes the documented ledger, but nothing is dropped (Zach triages it).
-  // Uses the SAME card renderer as the board so momentum/age/live-session/next-step all render.
-  // Input `all` is already last_touch-DESC (from the flat stream), so cards stay newest-first.
-  function renderEmerging(q, all){
-    if(!all || !all.length) return;   // no session-only cards → no lane at all
-    var rows = all.filter(function(v){ return matchQ(v, q); });
-
-    // While a search is ACTIVE and it matches cards in this lane, force the lane open so the
-    // matches are visible — otherwise a hit inside the collapsed Emerging lane stays hidden
-    // (the count would say "N shown" with the card invisible). This does NOT persist to
-    // EMERGING_KEY, so clearing the search restores the user's saved collapsed preference.
-    var filtering = !!(q && q.length);
-    var showBody = emergingOpen || (filtering && rows.length > 0);
-
-    var sec = el('section', 'emerging');
-    var h = el('h2');
-    h.appendChild(el('span', 'chev', showBody ? '▾' : '▸'));
-    h.appendChild(document.createTextNode('Emerging / undocumented'));
-    h.appendChild(el('span', 'count', '(' + rows.length + ')'));
-    sec.appendChild(h);
-    sec.appendChild(el('div', 'emerging-cap',
-      'Active Claude sessions without a handoff doc — auto-detected, may include one-offs.'));
-
-    var body = el('div', 'emerging-body');
-    body.style.display = showBody ? 'block' : 'none';
-    rows.forEach(function(v){ body.appendChild(card(v)); });
-    sec.appendChild(body);
-
-    h.addEventListener('click', function(){
-      emergingOpen = !emergingOpen;
-      localStorage.setItem(EMERGING_KEY, emergingOpen ? '1' : '0');
-      body.style.display = emergingOpen ? 'block' : 'none';
-      sec.querySelector('.chev').textContent = emergingOpen ? '▾' : '▸';
+  // The sticky cross-repo triage bar: [⚠ Needs you N] [● Live N] [◑ Stalled N] [ All ]. Clicking
+  // a chip filters EVERY repo group to cards of that state (composes with search, AND); "All"
+  // clears it. Counts come from `stateCounts` (the full data set). Rebuilt each render so the
+  // counts + the active highlight stay live. Only numbers/fixed labels — no untrusted text.
+  function renderTriage(){
+    if(!triageBar) return;
+    triageBar.innerHTML = '';
+    var active = state.triage || '';
+    var chips = [
+      {k:'needs_you', label:'Needs you', n:stateCounts.needs_you},
+      {k:'live',      label:'Live',      n:stateCounts.live},
+      {k:'stalled',   label:'Stalled',   n:stateCounts.stalled},
+      {k:'',          label:'All',       n:null}
+    ];
+    chips.forEach(function(ch){
+      var on = (ch.k === '') ? (active === '' || active === 'all') : (active === ch.k);
+      var b = el('button', 'chip state-' + (ch.k || 'all') + (on ? ' active' : ''), null);
+      b.type = 'button';
+      var glyph = STATE_GLYPH[ch.k];
+      var txt = (glyph ? glyph + ' ' : '') + ch.label + (ch.n != null ? ' ' + ch.n : '');
+      b.textContent = txt;
+      b.addEventListener('click', function(){
+        state.triage = ch.k;
+        render();
+      });
+      triageBar.appendChild(b);
     });
-    app.appendChild(sec);
   }
 
   function updateChrome(){
@@ -1863,14 +1975,13 @@ _JS = r"""
     btnGrouped.classList.toggle('active', state.view === 'grouped');
     if(btnRecency) btnRecency.classList.toggle('active', state.view === 'recency');
     if(countEl){
-      // Counts reflect the MAIN board only — emerging (session-only) cards are excluded
-      // (surfaced separately, so the "in flight" number stays the documented ledger).
-      var txt = docTotal + ' in flight across ' + docRepoTotal + ' repos';
-      var nu = (data.live_unmatched || []).length;
-      // Surface the uncovered live sessions in the header so the board's honesty is visible
-      // at a glance (tagged initiatives + N untracked live threads).
-      if(nu) txt += ' · ' + nu + ' live session' + (nu === 1 ? '' : 's') + ' untracked';
+      // Live state counts (Phase-1): N need you · N live · N active · N stalled, computed over
+      // the rendered set. The "N emerging" stat + N untracked live sessions ride along.
+      var txt = stateCounts.needs_you + ' need you · ' + stateCounts.live + ' live · ' +
+                stateCounts.active + ' active · ' + stateCounts.stalled + ' stalled';
       if(emergingTotal) txt += ' · ' + emergingTotal + ' emerging';
+      var nu = (data.live_unmatched || []).length;
+      if(nu) txt += ' · ' + nu + ' untracked';
       countEl.textContent = txt;
     }
     footer.innerHTML = '';
@@ -1884,38 +1995,43 @@ _JS = r"""
     app.innerHTML = '';
     if(!data.ok){
       docTotal = 0; docRepoTotal = 0; emergingTotal = 0;
+      stateCounts = {needs_you:0, live:0, active:0, stalled:0};
+      renderTriage();
       app.appendChild(el('div', 'err', 'store unreachable: ' + (data.error || '')));
       updateChrome();
       return;
     }
     var q = state.q.trim().toLowerCase();
-    // Split the flat stream: DOCUMENTED/enriched cards drive the main board (all three views
-    // + the header counts); EMERGING (session-only, undocumented) cards go to their own
-    // collapsed lane below. Nothing is dropped — Zach triages the lane himself.
-    var parts = partitionInitiatives(data.flat || []);
-    var docFlat = parts.documented;
-    var emergingAll = parts.emerging;
-    // Header totals count the documented board only (unfiltered), so they read as the ledger
-    // size regardless of the search box. Distinct repos among the documented cards.
-    docTotal = docFlat.length;
-    var repoSet = {};
-    docFlat.forEach(function(v){ repoSet[v.repo || ''] = 1; });
-    docRepoTotal = Object.keys(repoSet).length;
-    emergingTotal = emergingAll.length;
+    var sf = state.triage || '';
+    var all = data.flat || [];   // every initiative (documented + emerging inline)
 
+    // State counts over the FULL set — drive the summary header + the triage chips.
+    var counts = {needs_you:0, live:0, active:0, stalled:0};
+    all.forEach(function(v){ if(counts[v.state] != null) counts[v.state]++; });
+    stateCounts = counts;
+
+    // Header totals: all initiatives, distinct repos, + the emerging stat.
+    docTotal = all.length;
+    var repoSet = {};
+    all.forEach(function(v){ repoSet[v.repo || ''] = 1; });
+    docRepoTotal = Object.keys(repoSet).length;
+    emergingTotal = all.filter(function(v){ return v && v.undocumented; }).length;
+
+    renderTriage();
+
+    // A card is visible iff it matches BOTH the search query AND the triage state (compose).
+    function visible(v){ return matchQ(v, q) && matchState(v, sf); }
+    var filtering = !!(q || sf);
     var shown = 0;
+
     if(state.view === 'flat'){
       var wrap = el('div', 'flat');
-      docFlat.forEach(function(v){
-        if(matchQ(v, q)){ wrap.appendChild(card(v)); shown++; }
-      });
+      all.forEach(function(v){ if(visible(v)){ wrap.appendChild(card(v)); shown++; } });
       app.appendChild(wrap);
     } else if(state.view === 'recency'){
-      // Group the (search-filtered) DOCUMENTED stream into rolling now-relative recency
-      // buckets. `docFlat` inherits data.flat's last_touch-DESC order and bucketizeRecency
-      // preserves it within each bucket, so cards stay newest-first per bucket. Empty buckets
-      // are omitted. Headers read like the repo-group headers (label + count).
-      var rviews = docFlat.filter(function(v){ return matchQ(v, q); });
+      // Bucket the (filtered) flat stream into rolling now-relative recency windows. `all`
+      // inherits data.flat's last_touch-DESC order and bucketizeRecency preserves it.
+      var rviews = all.filter(visible);
       bucketizeRecency(rviews, Date.now()).forEach(function(g){
         var sec = el('section', 'repo');
         var h = el('h2', null, g.label);
@@ -1925,36 +2041,41 @@ _JS = r"""
         app.appendChild(sec);
       });
     } else {
-      (data.repos || []).forEach(function(g){
-        // Exclude emerging cards from the grouped board too (they live in the lane); a group
-        // that is entirely emerging/filtered simply doesn't render.
-        var vis = (g.initiatives || []).filter(function(v){
-          return !v.undocumented && matchQ(v, q);
-        });
-        if(!vis.length) return;
-        var sec = el('section', 'repo');
-        var h = el('h2', null, g.name);
-        h.appendChild(el('span', 'count', String(vis.length)));
+      // GROUPED (default): collapsible repo sections, ordered by needs_you-count then recency,
+      // cards within a repo by state precedence. Under an active filter a section with matches
+      // AUTO-EXPANDS (not persisted) and one with zero matches HIDES entirely.
+      groupByRepo(all).forEach(function(g){
+        var vis = g.items.filter(visible);
+        if(!vis.length) return;   // no matches under the filter → hide the section
+        var collapsed = isRepoCollapsed(g.name);
+        var open = !collapsed || (filtering && vis.length > 0);
+        var sec = el('section', 'repo collapsible');
+        var h = el('h2');
+        h.appendChild(el('span', 'chev', open ? '▾' : '▸'));
+        h.appendChild(document.createTextNode(g.name));
+        h.appendChild(el('span', 'count', '(' + vis.length + ')'));
         sec.appendChild(h);
-        vis.forEach(function(v){ sec.appendChild(card(v)); shown++; });
+        var body = el('div', 'repo-body');
+        body.style.display = open ? 'block' : 'none';
+        vis.forEach(function(v){ body.appendChild(card(v)); shown++; });
+        sec.appendChild(body);
+        h.addEventListener('click', function(){
+          var c = !isRepoCollapsed(g.name);   // flip the STORED preference
+          setRepoCollapsed(g.name, c);
+          body.style.display = c ? 'none' : 'block';
+          h.querySelector('.chev').textContent = c ? '▸' : '▾';
+        });
         app.appendChild(sec);
       });
     }
-    // "N shown / M" reflects EVERY searchable card (main board + emerging lane) so the count
-    // is honest even when the query only matches cards inside the collapsed lane. `shown` is
-    // the matched board cards; the emerging lane is filtered by the SAME matchQ.
-    var emergingShown = emergingAll.filter(function(v){ return matchQ(v, q); }).length;
-    var totalCards = docFlat.length + emergingAll.length;
-    var totalShown = shown + emergingShown;
-    if(totalShown === 0 && !q){
+
+    var totalCards = all.length;
+    if(shown === 0 && !filtering){
       app.appendChild(el('div', 'empty', 'No initiatives in the latest snapshot.'));
-    } else if(totalShown === 0){
-      app.appendChild(el('div', 'empty', 'No initiatives match "' + state.q + '".'));
+    } else if(shown === 0){
+      app.appendChild(el('div', 'empty', 'No initiatives match the current filter.'));
     }
-    updateSearchCount(totalShown, totalCards, q);
-    // The "Emerging / undocumented" lane renders BELOW the main board (session-only cards the
-    // scan auto-discovered). Collapsed by default; respects the same search filter when open.
-    renderEmerging(q, emergingAll);
+    updateSearchCount(shown, totalCards, filtering);
     // The catch-all live-sessions section renders BELOW the initiatives (honestly showing
     // every running thread, not just the tagged few). Respects the same search filter.
     renderUnmatched(q);
@@ -2178,7 +2299,8 @@ _JS = r"""
 # Inline the pure recency-bucketing snippet into the page JS (single source of truth: the
 # node test evals _RECENCY_JS directly, the page runs this substituted copy).
 _JS = _JS.replace("__RECENCY_JS__", _RECENCY_JS)
-_JS = _JS.replace("__PARTITION_JS__", _PARTITION_JS)
+_JS = _JS.replace("__STATEFILTER_JS__", _STATEFILTER_JS)
+_JS = _JS.replace("__GROUP_JS__", _GROUP_JS)
 _JS = _JS.replace("__MATCH_JS__", _MATCH_JS)
 _JS = _JS.replace("__MARKDOWN_JS__", _MARKDOWN_JS)
 
@@ -2266,8 +2388,10 @@ def render_html(model: dict | None, error: str | None = None,
         '</aside>'
     )
     js = _JS.replace("__REFRESH_MS__", str(int(refresh) * 1000))
+    # The sticky cross-repo triage bar (chips populated client-side from the live state counts).
+    triage = '<nav id="triage" class="triage" aria-label="triage filters"></nav>'
     return (
-        head + header +
+        head + header + triage +
         '<main id="app"></main>' + chat +
         '<footer id="foot"></footer>'
         '<script id="idata" type="application/json">' + payload + '</script>'

@@ -731,15 +731,16 @@ def test_model_to_json_flat_includes_identity_and_status():
     assert j["flat"][0]["status"] == "what's now"
 
 
-def test_js_uses_identity_recap_summary_fallback_chain_for_primary():
-    # The card FACE primary line prefers identity, then the legacy recap, then summary.
-    assert "v.identity || v.recap || v.summary" in viewer._JS
+def test_js_detail_leads_with_identity_fallback():
+    # The identity ("what this is") line moved OFF the two-line collapsed card into the expanded
+    # detail, which leads with the recap identity and falls back to the handoff summary.
+    assert "d.identity || (v && v.identity) || d.summary" in viewer._JS
 
 
-def test_js_renders_status_as_secondary_current_line():
-    # A dedicated secondary "current ›" line, gated on v.status (omitted when empty).
-    assert "if(v.status){" in viewer._JS
+def test_js_renders_status_as_current_line_in_detail():
+    # The volatile "current ›" status line moved into the expanded detail (off the collapsed card).
     assert "current ›" in viewer._JS
+    assert "d.status || (v && v.status)" in viewer._JS
     assert ".status .lbl" in viewer._CSS
 
 
@@ -759,9 +760,9 @@ def test_render_html_leads_with_identity_and_shows_status():
                  status="currently blocked on the vLLM endpoint.",
                  summary="the deterministic summary")]
     html = viewer.render_html(viewer.build_model(rows, now=NOW))
-    assert "A homelab-served recap of what this fundamentally is." in html  # identity
-    assert "currently blocked on the vLLM endpoint." in html                # status
-    assert "v.identity || v.recap || v.summary" in html                     # fallback chain
+    assert "A homelab-served recap of what this fundamentally is." in html  # identity (in island)
+    assert "currently blocked on the vLLM endpoint." in html                # status (in island)
+    assert "d.identity || (v && v.identity) || d.summary" in html           # detail lead chain
 
 
 def test_render_html_falls_back_to_summary_when_no_identity_or_recap():
@@ -1073,10 +1074,10 @@ def test_view_live_tasks_defaults_empty():
     assert v["live_tasks"] == []
 
 
-def test_js_card_renders_all_live_tasks():
-    # the card iterates the full live_tasks list (one line per session), not a single line.
-    assert "v.live_tasks" in viewer._JS
-    assert "ltasks.forEach" in viewer._JS
+def test_js_detail_renders_all_live_tasks():
+    # the live tmux session tasks moved into the expanded detail (one line per session).
+    assert "d.live_tasks" in viewer._JS
+    assert "dtasks.forEach" in viewer._JS
 
 
 def test_build_detail_carries_live_tasks():
@@ -1234,18 +1235,20 @@ def test_render_html_has_three_way_toggle():
     assert "Past hour" in html and "Past 24 hours" in html and "Older" in html
 
 
-def test_js_recency_is_default_and_storage_key_bumped():
+def test_js_grouped_is_default_and_storage_key_bumped():
     js = viewer._JS
-    # The resolved default view is now 'recency' (was 'flat'); an unknown/legacy stored value
-    # falls back via the VALID_VIEWS allowlist to recency.
-    assert "VALID_VIEWS" in js and "VALID_VIEWS[storedView] ? storedView : 'recency'" in js
+    # The resolved default view is now 'grouped' (Phase-1 board redesign; was 'recency'); an
+    # unknown/legacy stored value falls back via the VALID_VIEWS allowlist to grouped.
+    assert "VALID_VIEWS" in js and "VALID_VIEWS[storedView] ? storedView : 'grouped'" in js
+    assert "VALID_VIEWS[storedView] ? storedView : 'recency'" not in js
     assert "VALID_VIEWS[storedView] ? storedView : 'flat'" not in js
-    # The storage key was bumped to a v2 name: a browser that persisted the OLD default ('flat')
-    # under the v1 key reads NOTHING under the v2 key (localStorage is per-key), so storedView is
-    # null and it falls to the recency default rather than being pinned to the stale 'flat'.
-    assert "VIEW_KEY = 'initiatives-view-v2'" in js
+    # The storage key was bumped to v3: a browser that persisted an OLD default ('flat'/'recency')
+    # under the v1/v2 key reads NOTHING under the v3 key, so storedView is null and it falls to
+    # the grouped default rather than being pinned to a stale view.
+    assert "VIEW_KEY = 'initiatives-view-v3'" in js
+    assert "VIEW_KEY = 'initiatives-view-v2'" not in js
     assert "VIEW_KEY = 'initiatives-view'" not in js   # the v1 key is fully gone (no stale read)
-    # the choice is still persisted, and flat/grouped stay selectable + sticky.
+    # the choice is still persisted, and all three views stay selectable + sticky.
     assert "localStorage.setItem(VIEW_KEY, 'recency')" in js
     assert "localStorage.setItem(VIEW_KEY, 'flat')" in js
     assert "localStorage.setItem(VIEW_KEY, 'grouped')" in js
@@ -1379,49 +1382,6 @@ def test_search_text_fed_to_match_blob_but_not_rendered_on_card():
     ci = js.index("function card(")
     card_body = js[ci:ci + 6000]
     assert "search_text" not in card_body
-
-
-def _node_partition(views):
-    """Eval `viewer._PARTITION_JS` under node against `views`; return {doc:[slug...],
-    emg:[slug...]}. Skips if node isn't on PATH (the partition is JS, so node exercises the
-    ACTUAL page code rather than a Python replica — same pattern as `_node_recency`)."""
-    node = _shutil.which("node")
-    if not node:
-        import pytest
-        pytest.skip("node not on PATH — emerging-lane partition JS untested this run")
-    body = (
-        "var VIEWS = " + json.dumps(views) + ";\n"
-        "var p = partitionInitiatives(VIEWS);\n"
-        "console.log(JSON.stringify({"
-        "doc: p.documented.map(function(v){return v.slug;}),"
-        "emg: p.emerging.map(function(v){return v.slug;})}));"
-    )
-    out = _subprocess.run([node, "-e", viewer._PARTITION_JS + "\n" + body],
-                          capture_output=True, text=True, timeout=30)
-    assert out.returncode == 0, out.stderr
-    return json.loads(out.stdout)
-
-
-def test_js_partition_splits_undocumented_into_emerging():
-    # The pure partition helper (node-eval'd) routes undocumented cards to `emerging` and the
-    # rest to `documented`, preserving input order. A MISSING/falsy flag → documented (so a
-    # pre-migration payload keeps every card on the main board).
-    got = _node_partition([
-        {"slug": "a", "undocumented": False},
-        {"slug": "b", "undocumented": True},
-        {"slug": "c"},                       # flag absent → documented
-        {"slug": "d", "undocumented": True},
-    ])
-    assert got["doc"] == ["a", "c"]
-    assert got["emg"] == ["b", "d"]
-
-
-def test_js_partition_all_documented_when_no_flags():
-    # An un-migrated payload (no undocumented flags anywhere) → empty emerging lane, everything
-    # on the main board.
-    got = _node_partition([{"slug": "a"}, {"slug": "b"}])
-    assert got["doc"] == ["a", "b"]
-    assert got["emg"] == []
 
 
 def _node_match(views, q):
@@ -1586,38 +1546,39 @@ def test_js_matchq_is_wired_and_inlined_once():
     assert "function updateSearchCount" in js
 
 
-def test_js_emerging_lane_wired_and_excluded_from_main_board():
-    # The SPA source has the lane wiring: it partitions the flat stream, renders the DOCUMENTED
-    # subset in the three views, and the emerging cards in a separate collapsed lane. These
-    # markers assert the DOM rendering (no headless-DOM harness here) stays wired; the pure
-    # partition is unit-tested above via node.
+def test_js_grouping_and_inline_emerging_wired():
+    # Phase-1: the standalone Emerging lane + the doc/emerging partition are RETIRED. Undocumented
+    # cards render inline in their repo group with an "emerging" badge; grouping is client-side,
+    # collapsible, and the search/triage filters compose. These markers assert the DOM wiring
+    # stays intact (the pure helpers groupByRepo/matchState are node-tested below).
     js = viewer._JS
-    assert "__PARTITION_JS__" not in js            # snippet inlined
-    assert "partitionInitiatives(data.flat" in js  # render partitions the flat stream
-    assert "parts.documented" in js and "parts.emerging" in js
-    # flat + recency views render the documented subset (not data.flat) so emerging is excluded.
-    assert "docFlat.forEach" in js
-    assert "rviews = docFlat.filter" in js
-    # grouped view also excludes undocumented cards from each repo group.
-    assert "!v.undocumented && matchQ(v, q)" in js
-    # the lane itself: separate section, collapsed-by-default localStorage key, caption.
-    assert "function renderEmerging" in js
-    assert "EMERGING_KEY = 'EMERGING_OPEN'" in js
-    assert "localStorage.getItem(EMERGING_KEY) === '1'" in js   # default collapsed
-    assert "Emerging / undocumented" in js
-    assert "without a handoff doc" in js            # the one-line caption
-    # header counts are the documented totals (emerging excluded from the main-board count).
-    assert "docTotal = docFlat.length" in js
+    assert "__GROUP_JS__" not in js and "__STATEFILTER_JS__" not in js   # snippets inlined
+    assert "function groupByRepo" in js and "function matchState" in js
+    # grouped (default) view builds collapsible sections from the flat stream, client-side.
+    assert "groupByRepo(all)" in js
+    assert "repo collapsible" in js
+    assert "REPO_COLLAPSE_KEY = 'initiatives-repo-collapsed'" in js
+    # the standalone lane + partition are gone; undocumented cards get an inline badge instead.
+    assert "partitionInitiatives" not in js
+    assert "renderEmerging" not in js
+    assert "emerging-badge" in js
+    assert "v.undocumented) row1.appendChild" in js
+    # flat + recency render the full FILTERED stream (no documented/emerging split anymore).
+    assert "all.forEach(function(v){ if(visible(v))" in js
+    assert "rviews = all.filter(visible)" in js
+    # search + triage compose (AND) via the single `visible` predicate.
+    assert "matchQ(v, q) && matchState(v, sf)" in js
 
 
-def test_render_html_embeds_emerging_lane_markers():
-    # A rendered page carries the lane's label + caption text (so a mixed doc/session snapshot
-    # renders the segregated lane client-side).
+def test_render_html_embeds_inline_emerging_badge_not_lane():
+    # A mixed doc/session snapshot renders session-only cards INLINE with an "emerging" badge —
+    # the standalone "Emerging / undocumented" lane is gone.
     rows = [_row(slug="doc"), _row(slug="emg", undocumented=True, source="session")]
     html = viewer.render_html(viewer.build_model(rows, now=NOW))
-    assert "Emerging / undocumented" in html
-    assert "auto-detected, may include one-offs" in html
-    assert ".emerging" in html                      # the lane CSS is present
+    assert "emerging-badge" in html                 # the inline badge (CSS + JS)
+    assert "Emerging / undocumented" not in html    # the retired lane header is gone
+    assert "auto-detected, may include one-offs" not in html
+    assert ".emerging{" not in html                 # the retired lane CSS block is gone
 
 
 # --------------------------------------------------------------------------- #
@@ -1915,3 +1876,442 @@ def test_route_dispatch_502_when_lazy_load_import_fails(monkeypatch):
         body=_dispatch_body("devrc", "disp-slug"))  # no dispatcher → lazy load raises
     assert status == 502  # NOT 500 — the lazy resolution is wrapped
     assert json.loads(body)["ok"] is False
+
+
+# =========================================================================== #
+# Phase-1 board redesign — derived triage state, two-line cards, repo grouping,
+# the sticky triage bar, and inline emerging cards.
+# =========================================================================== #
+
+# --- derive_state: the pure classifier (state + line2). No DB. ---------------- #
+def _view(**over):
+    """A minimal view dict (the shape derive_state consumes)."""
+    v = {"slug": "s", "status": "", "next_step": "", "summary": "", "momentum": "active",
+         "age": "3h", "live_task": "", "live_tasks": [], "tmux_sessions": [],
+         "face_message": None, "recent_messages": [], "recommended_next_step": None}
+    v.update(over)
+    return v
+
+
+def test_derive_state_needs_you_from_blocked_marker():
+    st, line2 = viewer.derive_state(_view(status="awaiting your review before merge"))
+    assert st == "needs_you"
+    assert line2 == "awaiting your review before merge"
+
+
+def test_derive_state_needs_you_beats_stalled_and_live():
+    # needs_you is top precedence: a stalled+live card that ALSO has a blocker is needs_you.
+    v = _view(status="blocked on your decision", momentum="stalled",
+              live_tasks=["running thing"], tmux_sessions=["Pool-1"])
+    st, line2 = viewer.derive_state(v)
+    assert st == "needs_you"
+    assert "blocked on your decision" in line2
+
+
+def test_derive_state_needs_you_line2_prefers_field_with_marker():
+    # the blocker line is the field that actually tripped a marker (next_step here, not status).
+    v = _view(status="just a status note", next_step="pending your go-ahead")
+    st, line2 = viewer.derive_state(v)
+    assert st == "needs_you"
+    assert line2 == "pending your go-ahead"
+
+
+def test_derive_state_live_beats_stalled_and_active():
+    v = _view(momentum="stalled", live_task="canary rollout", live_tasks=["canary rollout"])
+    st, line2 = viewer.derive_state(v)
+    assert st == "live"
+    assert line2 == "agent live: canary rollout"
+
+
+def test_derive_state_live_from_tmux_sessions_only():
+    v = _view(tmux_sessions=["main:8-1"])   # a session but no task text
+    st, line2 = viewer.derive_state(v)
+    assert st == "live"
+    assert line2 == "agent live"
+
+
+def test_derive_state_stalled_line2_uses_age_and_face():
+    v = _view(momentum="stalled", age="3w",
+              face_message={"text": "pick up the migration", "ts": 1.0})
+    st, line2 = viewer.derive_state(v)
+    assert st == "stalled"
+    assert line2 == "stalled 3w · last: pick up the migration"
+
+
+def test_derive_state_stalled_falls_back_to_recent_message():
+    v = _view(momentum="stalled", age="2w", face_message=None,
+              recent_messages=[{"text": "the last thing I said", "ts": 1.0}])
+    st, line2 = viewer.derive_state(v)
+    assert st == "stalled"
+    assert "the last thing I said" in line2
+
+
+def test_derive_state_stalled_no_face_is_bare_age():
+    v = _view(momentum="stalled", age="5w")
+    st, line2 = viewer.derive_state(v)
+    assert st == "stalled" and line2 == "stalled 5w"
+
+
+def test_derive_state_active_uses_recommended_then_next_step_then_status_then_summary():
+    assert viewer.derive_state(
+        _view(recommended_next_step={"text": "wire the unit", "basis": "handoff"})) == (
+        "active", "wire the unit")
+    assert viewer.derive_state(_view(next_step="do the thing")) == ("active", "do the thing")
+    assert viewer.derive_state(_view(status="in progress")) == ("active", "in progress")
+    assert viewer.derive_state(_view(summary="a summary line")) == ("active", "a summary line")
+
+
+def test_derive_state_line2_trimmed_to_bound():
+    _st, line2 = viewer.derive_state(_view(next_step="x" * 500))
+    assert len(line2) <= viewer.LINE2_TRIM
+    assert line2.endswith("…")
+
+
+def test_derive_state_fallback_when_assistant_unavailable(monkeypatch):
+    # assistant sibling can't load → derive_state still classifies needs_you via the local copy.
+    def boom():
+        raise ImportError("assistant unavailable")
+
+    monkeypatch.setattr(viewer, "_assistant", boom)
+    st, line2 = viewer.derive_state(_view(next_step="pending your go-ahead"))
+    assert st == "needs_you"
+    assert "pending your go-ahead" in line2
+    # a non-blocked view still classifies (active) on the fallback path.
+    assert viewer.derive_state(_view(next_step="ship it"))[0] == "active"
+
+
+def test_fallback_blocking_hits_parity_with_assistant():
+    # PARITY: the local fallback marker set + fields are a VERBATIM copy of assistant's, pinned
+    # so they can never drift (assistant._blocking_hits is the single source of truth).
+    assistant = viewer._assistant()
+    assert viewer._FALLBACK_BLOCKED_MARKERS == assistant.BLOCKED_MARKERS
+    assert viewer._FALLBACK_BLOCKED_FIELDS == assistant._BLOCKED_FIELDS
+
+
+def test_fallback_blocking_hits_matches_assistant_on_samples():
+    # Belt-and-suspenders: fallback hits equal assistant._blocking_hits on real views.
+    assistant = viewer._assistant()
+    for v in [_view(status="awaiting your review"), _view(next_step="ship it"),
+              _view(status="blocked on you", next_step="pending your call")]:
+        assert viewer._fallback_blocking_hits(v) == assistant._blocking_hits(v)
+
+
+def test_blocking_hits_for_uses_assistant_as_single_source(monkeypatch):
+    # _blocking_hits_for delegates to assistant._blocking_hits (not a re-hardcoded copy).
+    seen = {}
+
+    class _StubAssistant:
+        @staticmethod
+        def _blocking_hits(v):
+            seen["called"] = True
+            return ["sentinel-marker"]
+
+    monkeypatch.setattr(viewer, "_assistant", lambda: _StubAssistant)
+    assert viewer._blocking_hits_for(_view()) == ["sentinel-marker"]
+    assert seen["called"] is True
+
+
+# --- _initiative_view / build_model attach state + line2 --------------------- #
+def test_build_model_attaches_state_and_line2():
+    v = viewer.build_model([_row(slug="s")], now=NOW)["flat"][0]
+    assert v["state"] == "active"                    # default _row: active + a documented next_step
+    assert v["line2"] == "wire the systemd unit"     # recommended_next_step.text
+
+
+def test_build_model_state_needs_you_from_blocked_status():
+    v = viewer.build_model([_row(slug="s", status="awaiting your sign-off")], now=NOW)["flat"][0]
+    assert v["state"] == "needs_you"
+    assert "awaiting your sign-off" in v["line2"]
+
+
+def test_build_model_state_live_from_tmux_task():
+    rows = [_row(slug="s")]
+    rows[0]["tmux_tasks"] = ["a live task"]
+    v = viewer.build_model(rows, now=NOW)["flat"][0]
+    assert v["state"] == "live"
+    assert v["line2"] == "agent live: a live task"
+
+
+def test_build_model_state_stalled():
+    v = viewer.build_model(
+        [_row(slug="s", momentum="stalled", next_step="",
+              last_touch=NOW - timedelta(days=21))], now=NOW)["flat"][0]
+    assert v["state"] == "stalled"
+    assert v["line2"].startswith("stalled ")
+
+
+def test_build_model_state_graceful_with_missing_fields():
+    # a minimal row (no status/next_step/momentum) still classifies + never raises.
+    v = viewer.build_model([_row(slug="s", momentum=None, next_step="", summary="")],
+                           now=NOW)["flat"][0]
+    assert v["state"] in ("active", "needs_you", "live", "stalled")
+    assert isinstance(v["line2"], str)
+
+
+def test_model_to_json_flat_includes_state_and_line2():
+    j = viewer.model_to_json(viewer.build_model([_row(slug="a")], now=NOW), None)
+    assert j["flat"][0]["state"] == "active"
+    assert j["flat"][0]["line2"] == "wire the systemd unit"
+
+
+def test_state_counts_over_fixture_set():
+    # the summary-header counts are a tally over the derived per-card state; assert the data
+    # side is right over a mixed fixture (the JS render() just sums these).
+    from collections import Counter
+    rows = [
+        _row(slug="a", status="awaiting your review"),                     # needs_you
+        _row(slug="b"),                                                     # active
+        _row(slug="c", momentum="stalled", next_step="",
+             last_touch=NOW - timedelta(days=30)),                         # stalled
+    ]
+    live = _row(slug="d")
+    live["tmux_tasks"] = ["running"]                                       # live
+    rows.append(live)
+    flat = viewer.build_model(rows, now=NOW)["flat"]
+    counts = Counter(v["state"] for v in flat)
+    assert counts["needs_you"] == 1
+    assert counts["live"] == 1
+    assert counts["active"] == 1
+    assert counts["stalled"] == 1
+
+
+# --- triage state-filter predicate (node-eval matchState) -------------------- #
+def _node_statefilter(views, sf):
+    node = _shutil.which("node")
+    if not node:
+        import pytest
+        pytest.skip("node not on PATH — triage matchState JS untested this run")
+    body = (
+        "var VIEWS = " + json.dumps(views) + ";\n"
+        "var SF = " + json.dumps(sf) + ";\n"
+        "console.log(JSON.stringify(VIEWS.filter(function(v){ return matchState(v, SF); })"
+        ".map(function(v){ return v.slug; })));"
+    )
+    out = _subprocess.run([node, "-e", viewer._STATEFILTER_JS + "\n" + body],
+                          capture_output=True, text=True, timeout=30)
+    assert out.returncode == 0, out.stderr
+    return json.loads(out.stdout)
+
+
+def test_js_matchstate_filters_each_chip():
+    views = [{"slug": "n", "state": "needs_you"}, {"slug": "l", "state": "live"},
+             {"slug": "a", "state": "active"}, {"slug": "s", "state": "stalled"}]
+    assert _node_statefilter(views, "needs_you") == ["n"]
+    assert _node_statefilter(views, "live") == ["l"]
+    assert _node_statefilter(views, "stalled") == ["s"]
+    assert _node_statefilter(views, "active") == ["a"]
+
+
+def test_js_matchstate_all_and_empty_show_everything():
+    views = [{"slug": "n", "state": "needs_you"}, {"slug": "a", "state": "active"}]
+    assert _node_statefilter(views, "") == ["n", "a"]
+    assert _node_statefilter(views, "all") == ["n", "a"]
+
+
+def test_js_triage_and_search_compose_and():
+    # the page's `visible` predicate is matchQ(v,q) && matchState(v,sf); node-eval BOTH to prove
+    # they AND: only the card that is needs_you AND matches the query survives.
+    node = _shutil.which("node")
+    if not node:
+        import pytest
+        pytest.skip("node not on PATH — compose test untested this run")
+    views = [{"slug": "clawgate", "state": "needs_you", "title": "clawgate release"},
+             {"slug": "mail", "state": "needs_you", "title": "mail automation"},
+             {"slug": "civ", "state": "active", "title": "clawgate adjacent"}]
+    body = (
+        "var VIEWS = " + json.dumps(views) + ";\n"
+        "var Q = 'clawgate'; var SF = 'needs_you';\n"
+        "function visible(v){ return matchQ(v, Q) && matchState(v, SF); }\n"
+        "console.log(JSON.stringify(VIEWS.filter(visible).map(function(v){return v.slug;})));"
+    )
+    src = viewer._MATCH_JS + "\n" + viewer._STATEFILTER_JS + "\n" + body
+    out = _subprocess.run([node, "-e", src], capture_output=True, text=True, timeout=30)
+    assert out.returncode == 0, out.stderr
+    assert json.loads(out.stdout) == ["clawgate"]   # civ matches Q but not SF; mail vice-versa
+
+
+# --- repo grouping (node-eval groupByRepo) ----------------------------------- #
+def _node_group(views):
+    node = _shutil.which("node")
+    if not node:
+        import pytest
+        pytest.skip("node not on PATH — groupByRepo JS untested this run")
+    body = (
+        "var VIEWS = " + json.dumps(views) + ";\n"
+        "console.log(JSON.stringify(groupByRepo(VIEWS).map(function(g){"
+        "return {name:g.name, needs:g.needs, slugs:g.items.map(function(v){return v.slug;})};})));"
+    )
+    out = _subprocess.run([node, "-e", viewer._GROUP_JS + "\n" + body],
+                          capture_output=True, text=True, timeout=30)
+    assert out.returncode == 0, out.stderr
+    return json.loads(out.stdout)
+
+
+def test_js_group_by_repo_sections_counts_and_needs_ordering():
+    views = [
+        {"slug": "d-active", "repo_name": "devrc", "state": "active"},
+        {"slug": "d-needs",  "repo_name": "devrc", "state": "needs_you"},
+        {"slug": "h-active", "repo_name": "homelab", "state": "active"},
+    ]
+    got = _node_group(views)
+    # devrc has a needs_you → sorts ahead of homelab (needs-count DESC).
+    assert [g["name"] for g in got] == ["devrc", "homelab"]
+    devrc = next(g for g in got if g["name"] == "devrc")
+    assert devrc["needs"] == 1
+    # within a repo, needs_you sorts before active (state precedence).
+    assert devrc["slugs"] == ["d-needs", "d-active"]
+
+
+def test_js_group_repo_order_by_recency_when_no_needs():
+    # no needs_you anywhere → repos order by most-recent activity = first appearance in the DESC
+    # flat stream (hot before cold).
+    views = [
+        {"slug": "h1", "repo_name": "hot", "state": "active"},
+        {"slug": "c1", "repo_name": "cold", "state": "active"},
+        {"slug": "h2", "repo_name": "hot", "state": "stalled"},
+    ]
+    got = _node_group(views)
+    assert [g["name"] for g in got] == ["hot", "cold"]
+
+
+def test_js_group_within_repo_full_state_precedence_then_recency():
+    views = [
+        {"slug": "active1", "repo_name": "r", "state": "active"},
+        {"slug": "stalled1", "repo_name": "r", "state": "stalled"},
+        {"slug": "live1", "repo_name": "r", "state": "live"},
+        {"slug": "needs1", "repo_name": "r", "state": "needs_you"},
+        {"slug": "active2", "repo_name": "r", "state": "active"},
+    ]
+    got = _node_group(views)
+    # needs_you → live → active (recency preserved: active1 before active2) → stalled.
+    assert got[0]["slugs"] == ["needs1", "live1", "active1", "active2", "stalled1"]
+
+
+def test_js_group_undocumented_not_segregated():
+    # Undocumented cards group with their repo (no separate lane) — ordinary cards here.
+    views = [
+        {"slug": "doc", "repo_name": "r", "state": "active", "undocumented": False},
+        {"slug": "emg", "repo_name": "r", "state": "active", "undocumented": True},
+    ]
+    got = _node_group(views)
+    assert len(got) == 1
+    assert set(got[0]["slugs"]) == {"doc", "emg"}
+
+
+def test_js_group_unknown_repo_name_bucketed():
+    got = _node_group([{"slug": "x", "state": "active"}])   # no repo_name
+    assert got[0]["name"] == "(unknown repo)"
+
+
+# --- two-line collapsed card render (source markers) ------------------------- #
+def _card_body():
+    js = viewer._JS
+    ci = js.index("function card(")
+    return js[ci:js.index("function matchUnmatched(")]
+
+
+def test_js_card_is_two_line_with_badge_slug_age_and_emerging():
+    body = _card_body()
+    # LINE 1: state badge glyph + slug + age (+ emerging badge when undocumented).
+    assert "sbadge state-" in body and "STATE_GLYPH[st]" in body
+    assert "el('span', 'slug', v.slug)" in body
+    assert "el('span', 'age', v.age)" in body
+    assert "if(v.undocumented) row1.appendChild(el('span', 'emerging-badge', 'emerging'))" in body
+    # LINE 2: the single state line, textContent-only.
+    assert "'line2 state-'" in body and "v.line2" in body
+    assert "createTextNode(v.line2)" in body
+
+
+def test_js_card_moved_lines_not_on_collapsed_card():
+    # the current/start/you/live + identity lines are NOT on the collapsed card (moved to detail).
+    body = _card_body()
+    assert "v.opening_message" not in body    # start -> detail
+    assert "v.face_message" not in body       # you -> detail
+    assert "live-task" not in body            # live -> detail
+    assert "v.identity" not in body           # identity/summary primary -> detail
+    assert "'current" not in body             # status current -> detail
+    assert "v.tmux_sessions" not in body      # tmux tags -> gone from the card
+
+
+def test_js_card_dispatch_only_when_recommendation_exists():
+    body = _card_body()
+    # the Phase-1 action is gated on a grounded recommendation, reusing dispatchNextStep verbatim.
+    assert "if(rec && rec.text){" in body
+    assert "dispatch-btn" in body and "dispatch" in body
+    assert "dispatchNextStep(v, btn, dstat)" in body
+    assert "ev.stopPropagation()" in body     # the button click doesn't toggle expand
+    assert "if(ev.target.closest('a')) return;" in body   # link-guard kept
+
+
+def test_render_html_two_line_card_and_detail_moved_lines():
+    # a rendered page ships the two-line card markers AND the moved lines living in the detail.
+    html = viewer.render_html(viewer.build_model([_row(slug="s")], now=NOW))
+    assert "STATE_GLYPH" in html and "v.line2" in html            # two-line card
+    assert "d.identity || (v && v.identity) || d.summary" in html  # identity in detail
+    assert "start" in html and "you" in html                       # start/you labels in detail
+
+
+# --- collapse / auto-expand-on-match wiring ---------------------------------- #
+def test_js_repo_sections_collapsible_and_auto_expand():
+    js = viewer._JS
+    assert "REPO_COLLAPSE_KEY = 'initiatives-repo-collapsed'" in js
+    assert "function isRepoCollapsed(" in js and "function setRepoCollapsed(" in js
+    assert "repo collapsible" in js                          # collapsible section
+    assert "isRepoCollapsed(g.name)" in js                   # remembers per-repo state
+    # a filter force-opens a collapsed section that has matches (NOT persisted).
+    assert "!collapsed || (filtering && vis.length > 0)" in js
+    # a section with zero matches under a filter is hidden entirely.
+    assert "if(!vis.length) return;" in js
+    assert "var filtering = !!(q || sf);" in js              # search OR triage = filtering
+
+
+# --- sticky triage bar (markers + smoke) ------------------------------------- #
+def test_js_triage_bar_wired():
+    js = viewer._JS
+    assert "function renderTriage(" in js
+    assert "state.triage" in js
+    # the four chips: Needs you / Live / Stalled / All.
+    assert "label:'Needs you'" in js and "label:'Live'" in js
+    assert "label:'Stalled'" in js and "label:'All'" in js
+    # counts come from stateCounts; a chip click sets state.triage and re-renders.
+    assert "stateCounts.needs_you" in js
+    assert "state.triage = ch.k" in js
+
+
+def test_render_html_has_sticky_triage_bar_container():
+    html = viewer.render_html(viewer.build_model([_row(slug="s")], now=NOW))
+    assert 'id="triage"' in html and 'class="triage"' in html
+    assert ".triage{position:sticky" in html                 # the sticky CSS
+
+
+def test_render_html_summary_header_shows_state_counts():
+    html = viewer.render_html(viewer.build_model([_row(slug="s")], now=NOW))
+    # the header count text is the state tally (client-side, from stateCounts).
+    assert "' need you · '" in html and "' live · '" in html
+    assert "' active · '" in html and "' stalled'" in html
+
+
+# --- render smoke: no exceptions; page has the key Phase-1 surfaces ---------- #
+def test_render_smoke_triage_repo_section_and_state_badge():
+    rows = [_row(slug="a", status="awaiting your review"),   # needs_you
+            _row(slug="b")]                                   # active
+    html = viewer.render_html(viewer.build_model(rows, now=NOW), None)
+    assert html.startswith("<!doctype html>")
+    assert 'id="triage"' in html                              # the sticky triage bar container
+    assert "groupByRepo(all)" in html                         # repo-section rendering
+    assert "repo collapsible" in html                         # collapsible section
+    assert "⚠" in html and "◑" in html              # the needs_you / stalled glyphs
+    assert "Needs you" in html and "Stalled" in html          # triage chip labels
+
+
+# --- regressions: preserved endpoints/behaviours ----------------------------- #
+def test_regression_dispatch_button_still_posts_to_api_dispatch():
+    assert "fetch('/api/dispatch'" in viewer._JS
+    assert "function dispatchNextStep(" in viewer._JS
+
+
+def test_regression_ask_and_store_error_paths_intact():
+    assert "/api/ask" in viewer._JS
+    err = viewer.render_html(None, "OperationalError: connection refused")
+    assert "store unreachable" in err
+    assert 'id="triage"' not in err   # the error page has no triage bar / SPA
