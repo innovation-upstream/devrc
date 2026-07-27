@@ -109,7 +109,8 @@ CREATE TABLE IF NOT EXISTS initiatives.initiative_snapshot (
     recent_messages      jsonb,
     recent_commits       jsonb,
     source               text,
-    undocumented         boolean
+    undocumented         boolean,
+    opening_message      text
 );
 
 -- Additive migration for pre-existing installs: CREATE TABLE IF NOT EXISTS won't add
@@ -120,6 +121,8 @@ CREATE TABLE IF NOT EXISTS initiatives.initiative_snapshot (
 --   recent_commits   — recent commit subjects [str] newest-first (v3).
 --   source           — "doc" | "session" | "both": how the initiative was discovered (v4).
 --   undocumented     — true for a session-derived initiative with no anchoring doc (v4).
+--   opening_message  — the thread's ORIGIN (genesis) prompt, so a card shows where it
+--                      began even when the ai-title drifted (v5).
 ALTER TABLE initiatives.initiative_snapshot
     ADD COLUMN IF NOT EXISTS summary text;
 ALTER TABLE initiatives.initiative_snapshot
@@ -130,6 +133,8 @@ ALTER TABLE initiatives.initiative_snapshot
     ADD COLUMN IF NOT EXISTS source text;
 ALTER TABLE initiatives.initiative_snapshot
     ADD COLUMN IF NOT EXISTS undocumented boolean;
+ALTER TABLE initiatives.initiative_snapshot
+    ADD COLUMN IF NOT EXISTS opening_message text;
 
 -- Support the `current` view's DISTINCT ON (repo, slug) … JOIN snapshots …
 -- ORDER BY repo, slug, captured_at DESC, plus the FK join / retention scans.
@@ -160,7 +165,9 @@ CREATE INDEX IF NOT EXISTS snapshots_captured_at_idx
 #       REPLACE VIEW rejects ("cannot change name of view column") — hence DROP+CREATE.
 #   v4: the base table gained `source` + `undocumented` (session-first discovery). Same
 #       column-reorder reason -> same guarded DROP+CREATE.
-VIEW_VERSION = "v4"
+#   v5: the base table gained `opening_message` (the thread's origin/genesis prompt).
+#       Appending it reorders `SELECT i.*, s.captured_at` again -> same guarded DROP+CREATE.
+VIEW_VERSION = "v5"
 VIEW_COMMENT = f"initiatives-sync view {VIEW_VERSION}"
 VIEW_DDL = """
 CREATE VIEW initiatives.current AS
@@ -178,7 +185,8 @@ SELECT DISTINCT ON (i.repo, i.slug)
 # `captured_at` so the viewer can render an "updated Xm ago" freshness footer.
 # v4: recreate to expose `source` + `undocumented` (v4) on top of v2/v3 — see the
 # VIEW_VERSION note above for why this is DROP+CREATE, not CREATE OR REPLACE.
-LATEST_VIEW_VERSION = "v4"
+# v5: recreate to expose `opening_message` (the origin/genesis prompt) — same DROP+CREATE.
+LATEST_VIEW_VERSION = "v5"
 LATEST_VIEW_COMMENT = f"initiatives-sync view latest {LATEST_VIEW_VERSION}"
 LATEST_VIEW_DDL = """
 CREATE VIEW initiatives.latest AS
@@ -202,7 +210,7 @@ ROW_COLUMNS = [
     "next_step", "commits", "commits_unknown", "merged_prs", "open_prs",
     "session_count", "telem_events", "telem_last", "current_doc",
     "open_investigations", "docs", "recent_messages", "recent_commits",
-    "source", "undocumented",
+    "source", "undocumented", "opening_message",
 ]
 # Columns stored as JSONB (wrapped in psycopg2.extras.Json at write time).
 JSONB_COLUMNS = {"open_prs", "open_investigations", "docs",
@@ -285,6 +293,10 @@ def _initiative_to_row(ini: dict, host: str) -> dict:
         # writes NULL, and the viewer/router treat missing as "doc"/false.
         "source": ini.get("source"),
         "undocumented": bool(ini.get("undocumented")),
+        # The thread's ORIGIN (genesis) prompt (v5) — "" for doc-anchored initiatives whose
+        # handoff already describes them; the earliest session's genesis for a session group.
+        # Nullable text: a pre-v5 scan (no key) writes NULL, and the viewer treats it as "".
+        "opening_message": ini.get("opening_message") or "",
     }
 
 

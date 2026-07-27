@@ -136,6 +136,21 @@ RECENT_COMMITS_PER_INITIATIVE = 5   # most-recent commit subjects surfaced per i
 MIN_TOPIC_TOKENS = 2   # a session's ai-title must yield at least this many topic tokens
 MIN_SESSION_TURNS = 8  # ...and this many genuine user turns, unless git-corroborated
 
+# Title-drift MERGE — Pass-2 of build_session_groups (union-find folding same-repo exact
+# groups that share a repo-distinctive token; `_should_merge_groups`/`_merge_group_indices`).
+# DISABLED by default. On real transcripts the TRANSITIVE union (a drift CHAIN A~B~C folds
+# all three) produced token-SALAD "Emerging" cards: several unrelated sessions that each
+# shared a single distinctive token pairwise fused into one unrecognizable mega-slug
+# (e.g. `both-connect-delete-dispatch-drive-flow-offsite-security-web`), and a session whose
+# ai-title drifted got absorbed instead of standing on its own. With it OFF each Pass-1 EXACT
+# (repo, topic-token) group becomes its own initiative, and the surfaced `opening_message`
+# (the genesis prompt) keeps each one legible regardless of title drift. Flip to True to
+# restore the old drift-merge behaviour — the Pass-2 helpers are kept intact, just gated.
+ENABLE_TITLE_DRIFT_MERGE = False
+
+# Cap on a surfaced opening (genesis) prompt (chars) so a card's `start ›` line stays legible.
+OPENING_MAX = 300
+
 # A YYYY-MM-DD date anywhere in a handoff filename stem.
 DATE_RE = re.compile(r"(\d{4}-\d{2}-\d{2})")
 # "## Next steps" with any trailing decoration (the template varies a little).
@@ -296,6 +311,22 @@ def _cap_summary(s: str) -> str | None:
     cut = s[:SUMMARY_MAX].rstrip()
     sp = cut.rfind(" ")
     if sp >= int(SUMMARY_MAX * 0.6):
+        cut = cut[:sp].rstrip()
+    return cut + "…"
+
+
+def _cap_opening(s: str | None) -> str:
+    """Trim + collapse a genesis prompt; cap at OPENING_MAX chars on a word boundary (adds
+    '…'). Returns "" for blank/None (the `opening_message` contract default) — NEVER None, so
+    the field is always a string that flows cleanly through the store + viewer."""
+    s = (s or "").strip()
+    if not s:
+        return ""
+    if len(s) <= OPENING_MAX:
+        return s
+    cut = s[:OPENING_MAX].rstrip()
+    sp = cut.rfind(" ")
+    if sp >= int(OPENING_MAX * 0.6):
         cut = cut[:sp].rstrip()
     return cut + "…"
 
@@ -621,7 +652,8 @@ def _new_initiative(repo: str, slug: str, title: str | None, *,
                     open_investigations: list | None = None,
                     current_doc: str | None = None, docs: list | None = None,
                     source: str = "doc", undocumented: bool = False,
-                    session_ids: set | None = None) -> dict:
+                    session_ids: set | None = None,
+                    opening_message: str = "") -> dict:
     return {
         # --- stored contract keys -------------------------------------------- #
         "repo": repo,
@@ -630,6 +662,11 @@ def _new_initiative(repo: str, slug: str, title: str | None, *,
         "summary": summary,
         "date": date,
         "next_step": next_step,
+        # The thread's ORIGIN prompt (a real genesis, never invented; trimmed to OPENING_MAX
+        # chars) — surfaced on the card's `start ›` line so titling accuracy stops mattering.
+        # "" for doc/extra initiatives (their handoff summary already describes them); set
+        # from the earliest session's genesis for a session-derived group.
+        "opening_message": opening_message,
         "open_investigations": list(open_investigations or []),
         "current_doc": current_doc,
         "docs": list(docs or []),
@@ -801,14 +838,22 @@ def _make_group_initiative(repo: str, records: list[dict],
         return r.get("last_user_ts") or r.get("mtime") or 0.0
 
     newest = max(records, key=_rec_ts)
+    # The EARLIEST session's genesis is the original ask that started the thread — surfaced
+    # as `opening_message` so a drifted ai-title never makes the card unrecognizable.
+    earliest = min(records, key=_rec_ts)
+    opening = _cap_opening(earliest.get("genesis"))
     slug = "-".join(sorted(union_tokens))
     ai_title = (newest.get("ai_title") or "").strip()
     session_ids = {r["session_id"] for r in records if r.get("session_id")}
     ini = _new_initiative(
         repo=repo, slug=slug, title=ai_title or slug,
         summary=_cap_summary(ai_title) if ai_title else None,
-        source="session", undocumented=True, session_ids=session_ids)
+        source="session", undocumented=True, session_ids=session_ids,
+        opening_message=opening)
     ini["_topic_tokens"] = frozenset(union_tokens)
+    # Internal (dropped before emit): the genesis ts, so a doc anchor folding SEVERAL groups
+    # can adopt the EARLIEST opening deterministically (combine_docs_and_groups).
+    ini["_opening_ts"] = _rec_ts(earliest)
     return ini
 
 
@@ -819,7 +864,9 @@ def build_session_groups(records: list[dict],
     Two deterministic passes (per the discovery design):
       1. EXACT — eligible sessions with an identical topic-token set (same repo) group.
       2. MERGE — same-repo exact-groups sharing a repo-distinctive token fold together
-         (title drift; `_should_merge_groups`), via union-find.
+         (title drift; `_should_merge_groups`), via union-find. GATED behind
+         `ENABLE_TITLE_DRIFT_MERGE` (default False): the transitive union produced
+         token-salad Emerging cards, so by default each Pass-1 exact group stands alone.
     Each record must already carry a resolved `repo` (None → skipped) plus ai_title /
     last_prompt / genesis / n_turns / session_id / last_user_ts / mtime / branch. Corroboration
     is PER-SESSION (`session_corroborated` — a real feature branch), NOT repo-level (which was
@@ -844,6 +891,12 @@ def build_session_groups(records: list[dict],
     groups: list[dict] = []
     for repo, tok_sets in keys_by_repo.items():
         tok_sets = sorted(tok_sets, key=lambda s: sorted(s))  # deterministic order
+        if not ENABLE_TITLE_DRIFT_MERGE:
+            # Pass-2 OFF (default): each EXACT group is its own initiative — no drift-merge
+            # union, so distinct sessions can't fuse into a token-salad card.
+            for toks in tok_sets:
+                groups.append(_make_group_initiative(repo, exact[(repo, toks)], toks))
+            continue
         df: dict[str, int] = {}
         for s in tok_sets:
             for t in s:
@@ -1136,8 +1189,27 @@ def combine_docs_and_groups(doc_inis: list[dict], extra_inis: list[dict],
             anchor["session_ids"] |= grp.get("session_ids") or set()
             anchor["source"] = "both"
             anchor["undocumented"] = False
+            # An anchored doc adopts the folding session group's ORIGIN prompt IF the doc
+            # carries none of its own — so the card still shows where the thread began. When
+            # several groups fold into one doc, the EARLIEST genesis (min `_opening_ts`) wins,
+            # so the result is independent of group iteration order (deterministic). The temp
+            # `_adopt_*` keys are applied after the loop and never emitted.
+            if not (anchor.get("opening_message") or "").strip():
+                grp_open = grp.get("opening_message") or ""
+                if grp_open.strip():
+                    grp_ts = grp.get("_opening_ts") or 0.0
+                    if anchor.get("_adopt_ts") is None or grp_ts < anchor["_adopt_ts"]:
+                        anchor["_adopt_open"] = grp_open
+                        anchor["_adopt_ts"] = grp_ts
         else:
             standalone.append(grp)
+
+    # Apply the earliest-wins adopted opening to each doc that had none of its own.
+    for d in doc_inis + extra_inis:
+        adopted = d.pop("_adopt_open", None)
+        d.pop("_adopt_ts", None)
+        if adopted and not (d.get("opening_message") or "").strip():
+            d["opening_message"] = adopted
 
     kept_extras = [d for d in extra_inis
                    if d["source"] == "both" or d.get("handoff_structured")]
@@ -2169,6 +2241,7 @@ def build_report(days: int, repos: list[str] | None = None,
     # is an internal grouping/anchoring artifact — drop it from the emitted payload.
     for ini in initiatives:
         ini.pop("_topic_tokens", None)
+        ini.pop("_opening_ts", None)  # internal genesis-ts (earliest-wins adoption); not stored
         sids = ini.get("session_ids")
         if isinstance(sids, (set, frozenset)):
             ini["session_ids"] = sorted(sids)

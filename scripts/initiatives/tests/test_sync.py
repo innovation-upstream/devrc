@@ -429,12 +429,12 @@ def test_ensure_schema_adds_summary_column_additively():
 def test_view_versions_bumped_so_new_columns_are_exposed():
     # A view's SELECT i.* is frozen at create time; bumping the marker forces a recreate
     # so base-table columns added later (summary=v2; recent_messages/recent_commits=v3;
-    # source/undocumented=v4) surface on initiatives.latest / .current. v4 is the
-    # session-first discovery bump.
-    assert sync.VIEW_VERSION == "v4"
-    assert sync.LATEST_VIEW_VERSION == "v4"
-    assert sync.VIEW_COMMENT == "initiatives-sync view v4"
-    assert sync.LATEST_VIEW_COMMENT == "initiatives-sync view latest v4"
+    # source/undocumented=v4; opening_message=v5) surface on initiatives.latest / .current.
+    # v5 is the origin/genesis-prompt bump.
+    assert sync.VIEW_VERSION == "v5"
+    assert sync.LATEST_VIEW_VERSION == "v5"
+    assert sync.VIEW_COMMENT == "initiatives-sync view v5"
+    assert sync.LATEST_VIEW_COMMENT == "initiatives-sync view latest v5"
 
 
 def test_ensure_schema_adds_discovery_columns_additively():
@@ -447,6 +447,59 @@ def test_ensure_schema_adds_discovery_columns_additively():
     assert "undocumented boolean" in joined
     assert "ADD COLUMN IF NOT EXISTS source text" in joined
     assert "ADD COLUMN IF NOT EXISTS undocumented boolean" in joined
+
+
+def test_opening_message_in_row_columns_and_not_jsonb():
+    assert "opening_message" in sync.ROW_COLUMNS
+    assert "opening_message" not in sync.JSONB_COLUMNS  # plain text, not JSONB
+
+
+def test_opening_message_passes_through_and_defaults_empty():
+    r = sync._initiative_to_row(_fixture_initiative(opening_message="//the origin ask"),
+                                host="workbench")
+    assert r["opening_message"] == "//the origin ask"
+    # A pre-v5 scan omits the key entirely -> stored as "" (never None crashes; viewer reads "").
+    r2 = sync._initiative_to_row(_fixture_initiative(), host="workbench")
+    assert "opening_message" not in _fixture_initiative()   # the fixture has no key by default
+    assert r2["opening_message"] == ""
+
+
+def test_ensure_schema_adds_opening_message_column_additively():
+    # Fresh installs get opening_message in CREATE TABLE; pre-existing tables get it via an
+    # idempotent ADD COLUMN IF NOT EXISTS (the v4->v5 additive migration).
+    conn = _FakeConn()
+    sync.ensure_schema(conn)
+    joined = " ".join(_sqls(conn))
+    assert "opening_message text" in joined  # in CREATE TABLE
+    assert "ADD COLUMN IF NOT EXISTS opening_message text" in joined  # additive migration
+
+
+def test_ensure_schema_v4_to_v5_recreates_both_views_drop_before_create():
+    # v4->v5 appends opening_message, reordering `SELECT i.*, s.captured_at` — the same
+    # CREATE-OR-REPLACE-rejects trap as earlier bumps, so the marker mismatch DROP-then-CREATEs.
+    conn = _FakeConn(view_regclass="initiatives.current",
+                     view_comment="initiatives-sync view v4",
+                     latest_regclass="initiatives.latest",
+                     latest_comment="initiatives-sync view latest v4")
+    sync.ensure_schema(conn)
+    sqls = _sqls(conn)
+    assert "CREATE OR REPLACE VIEW" not in " ".join(sqls)
+    for view in ("initiatives.current", "initiatives.latest"):
+        drop_i = next(i for i, s in enumerate(sqls) if f"DROP VIEW IF EXISTS {view}" in s)
+        create_i = next(i for i, s in enumerate(sqls) if f"CREATE VIEW {view}" in s)
+        assert drop_i < create_i, f"{view}: DROP must precede CREATE"
+    assert conn.commits == 1
+
+
+def test_ensure_schema_v5_steady_state_does_not_recreate_views():
+    # When both views already carry the v5 marker, ensure_schema must NOT re-DROP them (no
+    # needless ACCESS EXCLUSIVE churn on every sync).
+    conn = _FakeConn(view_regclass="initiatives.current", view_comment=sync.VIEW_COMMENT,
+                     latest_regclass="initiatives.latest",
+                     latest_comment=sync.LATEST_VIEW_COMMENT)
+    sync.ensure_schema(conn)
+    assert "DROP VIEW IF EXISTS initiatives.current" not in " ".join(_sqls(conn))
+    assert "DROP VIEW IF EXISTS initiatives.latest" not in " ".join(_sqls(conn))
 
 
 def test_ensure_schema_v3_to_v4_recreates_both_views_drop_before_create():

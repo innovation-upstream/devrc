@@ -1306,6 +1306,44 @@ def test_model_to_json_includes_undocumented_and_source():
     assert flags["emg"] == (True, "session")
 
 
+# --------------------------------------------------------------------------- #
+# opening_message — the thread's origin (genesis) prompt on the card's `start ›` line
+# --------------------------------------------------------------------------- #
+def test_view_carries_opening_message():
+    rows = [_row(slug="s", opening_message="//image-cacher investigate why this 404s")]
+    v = viewer.build_model(rows, now=NOW)["flat"][0]
+    assert v["opening_message"] == "//image-cacher investigate why this 404s"
+
+
+def test_view_opening_message_defaults_empty_when_absent():
+    # GRACEFUL DEGRADATION: a pre-v5 row (OPTIONAL_COLUMNS didn't select it) has no key -> "".
+    row = _row(slug="s")
+    assert "opening_message" not in row
+    v = viewer.build_model([row], now=NOW)["flat"][0]
+    assert v["opening_message"] == ""
+
+
+def test_opening_message_is_an_optional_column():
+    # It's OPTIONAL so an un-migrated store (view/table without the column) degrades cleanly.
+    assert "opening_message" in viewer.OPTIONAL_COLUMNS
+
+
+def test_card_renders_start_line_and_css_present():
+    # The SPA card renders a `start ›` line from v.opening_message, with matching CSS.
+    js = viewer._JS
+    assert "v.opening_message" in js
+    assert "start ›" in js
+    css = viewer._CSS
+    assert ".start" in css and ".start .lbl" in css
+
+
+def test_render_html_embeds_opening_message_in_json_island():
+    rows = [_row(slug="s", opening_message="//the origin ask")]
+    html = viewer.render_html(viewer.build_model(rows, now=NOW))
+    assert '"opening_message"' in html
+    assert "the origin ask" in html
+
+
 def _node_partition(views):
     """Eval `viewer._PARTITION_JS` under node against `views`; return {doc:[slug...],
     emg:[slug...]}. Skips if node isn't on PATH (the partition is JS, so node exercises the
@@ -1347,6 +1385,74 @@ def test_js_partition_all_documented_when_no_flags():
     got = _node_partition([{"slug": "a"}, {"slug": "b"}])
     assert got["doc"] == ["a", "b"]
     assert got["emg"] == []
+
+
+def _node_match(views, q):
+    """Eval `viewer._MATCH_JS` (the pure card-search predicate) under node against `views`
+    with query `q`; return the slugs that match. Skips if node isn't on PATH — same pattern
+    as `_node_partition`, so the ACTUAL page predicate is exercised (not a Python replica).
+
+    matchQ's contract is that `q` arrives ALREADY trimmed+lowercased (the page does
+    `state.q.trim().toLowerCase()` before calling it), so this helper applies the SAME
+    normalization — exercising the real query pipeline (normalize → predicate)."""
+    node = _shutil.which("node")
+    if not node:
+        import pytest
+        pytest.skip("node not on PATH — search matchQ JS untested this run")
+    body = (
+        "var VIEWS = " + json.dumps(views) + ";\n"
+        "var Q = (" + json.dumps(q) + ").trim().toLowerCase();\n"
+        "console.log(JSON.stringify(VIEWS.filter(function(v){ return matchQ(v, Q); })"
+        ".map(function(v){ return v.slug; })));"
+    )
+    out = _subprocess.run([node, "-e", viewer._MATCH_JS + "\n" + body],
+                          capture_output=True, text=True, timeout=30)
+    assert out.returncode == 0, out.stderr
+    return json.loads(out.stdout)
+
+
+def test_js_matchq_empty_query_matches_all():
+    got = _node_match([{"slug": "a"}, {"slug": "b"}], "")
+    assert got == ["a", "b"]
+
+
+def test_js_matchq_filters_on_title_summary_and_opening_and_latest():
+    views = [
+        {"slug": "cacher", "title": "Web delete flow dispatch",
+         "opening_message": "//image-cacher investigate why this 404s",
+         "recent_messages": [{"text": "check the delete flow"}]},
+        {"slug": "mail", "title": "Mail automation", "summary": "invoice archiver",
+         "opening_message": "", "recent_messages": [{"text": "ship the extractor"}]},
+        {"slug": "clawgate", "next_step": "cut a release", "repo_name": "devrc",
+         "recent_messages": []},
+    ]
+    # matches the ORIGIN prompt of the first card even though its TITLE drifted away from it
+    assert _node_match(views, "image-cacher") == ["cacher"]
+    assert _node_match(views, "404s") == ["cacher"]
+    # matches a LATEST message text
+    assert _node_match(views, "extractor") == ["mail"]
+    # matches summary / title / next_step / repo_name
+    assert _node_match(views, "invoice") == ["mail"]
+    assert _node_match(views, "automation") == ["mail"]
+    assert _node_match(views, "release") == ["clawgate"]
+    assert _node_match(views, "devrc") == ["clawgate"]
+    # case-insensitive + no match
+    assert _node_match(views, "MAIL") == ["mail"]
+    assert _node_match(views, "nonexistent-token") == []
+
+
+def test_js_matchq_is_wired_and_inlined_once():
+    js = viewer._JS
+    assert "__MATCH_JS__" not in js                 # snippet inlined
+    assert "function matchQ" in js                  # the predicate is present in the page
+    assert js.count("function matchQ") == 1         # exactly once (not the old inline copy too)
+    # the blob now includes the origin prompt + the parsed next-step
+    assert "v.opening_message" in viewer._MATCH_JS
+    assert "v.next_step" in viewer._MATCH_JS
+    # the search input is debounced and a "N shown / M" count is wired
+    assert "setTimeout(function(){ state.q = searchInput.value; render(); }, 150)" in js
+    assert "shown / " in js
+    assert "function updateSearchCount" in js
 
 
 def test_js_emerging_lane_wired_and_excluded_from_main_board():

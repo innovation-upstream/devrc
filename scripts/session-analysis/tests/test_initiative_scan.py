@@ -1819,7 +1819,7 @@ CONTRACT_KEYS = {
     "repo", "slug", "title", "summary", "date", "momentum", "last_touch", "next_step",
     "commits", "commits_unknown", "merged_prs", "open_prs", "session_count",
     "telem_events", "telem_last", "current_doc", "open_investigations", "docs",
-    "recent_messages", "recent_commits",
+    "recent_messages", "recent_commits", "opening_message",
 }
 
 
@@ -1911,15 +1911,48 @@ def test_build_session_groups_identical_topics_form_one_group():
     assert groups[0]["slug"] == "comfyui-pipeline-realism"
 
 
-def test_build_session_groups_title_drift_merges_on_distinctive_shared_token():
-    # {comfyui,realism,pipeline} vs {comfyui,nsfw,pipeline}: shared {comfyui,pipeline}
-    # each appear in only these 2 groups (df==2) -> distinctive -> MERGE.
+def test_build_session_groups_title_drift_does_not_merge_by_default():
+    # DEFAULT (ENABLE_TITLE_DRIFT_MERGE=False): {comfyui,realism,pipeline} vs
+    # {comfyui,nsfw,pipeline} share the distinctive {comfyui,pipeline} but STILL stand as two
+    # separate EXACT-group initiatives — Pass-2 drift-merge is off (it produced token salad).
+    assert isc.ENABLE_TITLE_DRIFT_MERGE is False           # the shipped default
+    recs = [_sess("ComfyUI realism pipeline", session_id="a", repo=R),
+            _sess("ComfyUI NSFW pipeline", session_id="b", repo=R)]
+    groups = isc.build_session_groups(recs, corroborated_repos=set())
+    assert {g["slug"] for g in groups} == {"comfyui-pipeline-realism",
+                                           "comfyui-nsfw-pipeline"}
+    assert {tuple(sorted(g["session_ids"])) for g in groups} == {("a",), ("b",)}
+
+
+def test_build_session_groups_title_drift_merges_when_enabled(monkeypatch):
+    # With the flag flipped back ON the OLD union-find drift-merge still fuses the pair on the
+    # distinctive shared {comfyui,pipeline} (df==2) — the behaviour is preserved, just gated.
+    monkeypatch.setattr(isc, "ENABLE_TITLE_DRIFT_MERGE", True)
     recs = [_sess("ComfyUI realism pipeline", session_id="a", repo=R),
             _sess("ComfyUI NSFW pipeline", session_id="b", repo=R)]
     groups = isc.build_session_groups(recs, corroborated_repos=set())
     assert len(groups) == 1
     assert groups[0]["session_ids"] == {"a", "b"}
     assert groups[0]["slug"] == "comfyui-nsfw-pipeline-realism"
+
+
+def test_build_session_groups_transitive_salad_split_by_default_merged_when_enabled(monkeypatch):
+    # The token-SALAD regression: three sessions that pairwise share a single distinctive token
+    # (web~delete via {web}, delete~dispatch via {delete}, dispatch~flow via {dispatch}) would,
+    # under the transitive union, ALL fuse into one unrecognizable mega-slug. Default OFF keeps
+    # them as THREE distinct exact-group initiatives (assert the slugs stay separate)...
+    recs = [_sess("web delete", session_id="a", repo=R),
+            _sess("delete dispatch", session_id="b", repo=R),
+            _sess("dispatch flow", session_id="c", repo=R)]
+    groups = isc.build_session_groups(recs, corroborated_repos=set())
+    assert {g["slug"] for g in groups} == {"delete-web", "delete-dispatch", "dispatch-flow"}
+    assert len(groups) == 3
+    # ...while flipping the flag back ON reproduces the old single salad-merged card.
+    monkeypatch.setattr(isc, "ENABLE_TITLE_DRIFT_MERGE", True)
+    merged = isc.build_session_groups(recs, corroborated_repos=set())
+    assert len(merged) == 1
+    assert merged[0]["session_ids"] == {"a", "b", "c"}
+    assert merged[0]["slug"] == "delete-dispatch-flow-web"     # the sorted-union token salad
 
 
 def test_build_session_groups_sibling_family_stays_split():
@@ -1959,15 +1992,95 @@ def test_build_session_groups_drops_ineligible_and_repoless():
 # _make_group_initiative — full contract set, newest-session title/summary
 # --------------------------------------------------------------------------- #
 def test_make_group_initiative_carries_full_contract_and_newest_title():
-    recs = [_sess("Old ComfyUI title", session_id="a", last_user_ts=100.0, repo=R),
+    # Same topic tokens (one EXACT group) but different RAW ai-titles (word order): the newest
+    # session's raw ai-title drives the card face even though grouping is token-identical.
+    recs = [_sess("ComfyUI pipeline realism", session_id="a", last_user_ts=100.0, repo=R),
             _sess("ComfyUI realism pipeline", session_id="b", last_user_ts=900.0, repo=R)]
     groups = isc.build_session_groups(recs, corroborated_repos=set())
+    assert len(groups) == 1                                # token-identical -> one exact group
     ini = groups[0]
     assert CONTRACT_KEYS <= set(ini)                       # FULL contract key set present
+    assert ini["session_ids"] == {"a", "b"}
     assert ini["source"] == "session" and ini["undocumented"] is True
     assert ini["current_doc"] is None and ini["docs"] == [] and ini["date"] is None
     assert ini["title"] == "ComfyUI realism pipeline"      # newest session's raw ai-title
     assert ini["summary"] == "ComfyUI realism pipeline"    # summary from ai-title (not blank)
+
+
+# --------------------------------------------------------------------------- #
+# opening_message — the thread's origin (genesis) prompt surfaced on every initiative
+# --------------------------------------------------------------------------- #
+def test_group_opening_message_is_earliest_session_genesis():
+    # A multi-session EXACT group's opening_message is the EARLIEST session's genesis (the
+    # original ask), NOT the newest — even though the title/summary come from the newest.
+    recs = [_sess("ComfyUI realism pipeline", session_id="new", last_user_ts=900.0,
+                  genesis="most recent ask, should NOT win", repo=R),
+            _sess("ComfyUI realism pipeline", session_id="old", last_user_ts=100.0,
+                  genesis="//image-cacher investigate why this 404s", repo=R)]
+    groups = isc.build_session_groups(recs, corroborated_repos=set())
+    assert len(groups) == 1
+    assert groups[0]["opening_message"] == "//image-cacher investigate why this 404s"
+
+
+def test_group_opening_message_trimmed_to_cap():
+    long = "x " * 400                                       # ~800 chars, > OPENING_MAX
+    grp = isc.build_session_groups(
+        [_sess("ComfyUI realism pipeline", session_id="a", repo=R, genesis=long)],
+        corroborated_repos=set())[0]
+    assert len(grp["opening_message"]) <= isc.OPENING_MAX + 1   # +1 for the ellipsis
+    assert grp["opening_message"].endswith("…")
+
+
+def test_doc_initiative_opening_message_defaults_empty():
+    # Doc/extra initiatives carry no genesis of their own — opening_message defaults to "".
+    doc = isc._new_initiative(repo=R, slug="mail-automation", title="Mail automation",
+                              summary="doc summary", source="doc")
+    assert doc["opening_message"] == ""
+
+
+def test_combine_anchored_doc_adopts_folded_group_opening_when_empty():
+    # An anchored doc with NO opening of its own adopts the folding session group's genesis,
+    # so the card still shows where the thread began.
+    doc = isc._new_initiative(
+        repo=R, slug="mail-automation", title="Mail automation", summary="doc summary",
+        current_doc="/r/handoff-mail.md",
+        docs=[{"path": "/r/handoff-mail.md", "date": None}], source="doc")
+    assert doc["opening_message"] == ""
+    grp = _group("Mail automation shipping polish", session_id="sX")
+    grp["opening_message"] = "//kick off the mail automation build"
+    out = isc.combine_docs_and_groups([doc], [], [grp])
+    assert out == [doc]
+    assert doc["source"] == "both"
+    assert doc["opening_message"] == "//kick off the mail automation build"
+
+
+def test_combine_anchored_doc_earliest_group_opening_wins():
+    # Two groups fold into the same doc; the EARLIEST genesis (min _opening_ts) wins, so the
+    # adoption is independent of group iteration order (deterministic).
+    doc = isc._new_initiative(repo=R, slug="mail-automation", title="Mail automation",
+                              docs=[{"path": "/r/handoff-mail.md", "date": None}],
+                              current_doc="/r/handoff-mail.md", source="doc")
+    late = _group("Mail automation polish", session_id="late", last_user_ts=900.0)
+    late["opening_message"] = "the later ask"
+    early = _group("Mail automation shipping", session_id="early", last_user_ts=100.0)
+    early["opening_message"] = "the original ask"
+    # Pass them newest-first to prove ts (not order) decides.
+    out = isc.combine_docs_and_groups([doc], [], [late, early])
+    assert out == [doc]
+    assert doc["opening_message"] == "the original ask"
+    assert "_opening_ts" not in doc and "_adopt_open" not in doc  # internals cleaned up
+
+
+def test_combine_anchored_doc_keeps_its_own_opening():
+    # A doc that already carries an opening_message is NOT overwritten by a folded group.
+    doc = isc._new_initiative(repo=R, slug="mail-automation", title="Mail automation",
+                              docs=[{"path": "/r/handoff-mail.md", "date": None}],
+                              current_doc="/r/handoff-mail.md", source="doc",
+                              opening_message="the doc's own origin line")
+    grp = _group("Mail automation shipping polish", session_id="sX")
+    grp["opening_message"] = "a folded group's origin"
+    isc.combine_docs_and_groups([doc], [], [grp])
+    assert doc["opening_message"] == "the doc's own origin line"
 
 
 # --------------------------------------------------------------------------- #

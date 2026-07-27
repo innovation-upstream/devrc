@@ -97,12 +97,14 @@ DISPLAY_COLUMNS = [
     "current_doc", "open_investigations", "docs", "recent_messages", "recent_commits",
 ]
 
-# Session-derived discovery columns (added by the scan+sync `v4` migration): `undocumented`
-# is TRUE for session-only cards (no handoff doc); `source` is `doc|session|both`. They are
-# OPTIONAL — an un-migrated store (pre-`v4` `latest` view, or a base table without the ALTERs)
-# simply lacks them, so the viewer detects their presence and SELECTs them only when they
-# exist, defaulting `undocumented=False` (→ the card renders in the main board, nothing lost).
-OPTIONAL_COLUMNS = ["undocumented", "source"]
+# Session-derived discovery columns (added by the scan+sync `v4`/`v5` migrations):
+# `undocumented` is TRUE for session-only cards (no handoff doc); `source` is
+# `doc|session|both`; `opening_message` is the thread's origin/genesis prompt (v5). They are
+# OPTIONAL — an un-migrated store (pre-migration `latest` view, or a base table without the
+# ALTERs) simply lacks them, so the viewer detects their presence and SELECTs them only when
+# they exist, defaulting `undocumented=False`/`opening_message=""` (→ the card renders in the
+# main board with no `start ›` line, nothing lost).
+OPTIONAL_COLUMNS = ["undocumented", "source", "opening_message"]
 
 # Momentum ordering + badges — SAME ranks/glyphs the scan uses (active→stalled→unknown).
 MOMENTUM_RANK = {"active": 0, "slowing": 1, "stalled": 2, "unknown": 3}
@@ -673,6 +675,9 @@ def _initiative_view(ini: dict, now: datetime) -> dict:
         # → undocumented False), so an un-migrated store shows everything in the main board.
         "undocumented": bool(ini.get("undocumented")),
         "source": str(ini.get("source") or ""),
+        # The thread's ORIGIN (genesis) prompt (v5) — the card's `start ›` line. Empty on a
+        # pre-v5 store (OPTIONAL_COLUMNS: missing key → "") so the line simply isn't rendered.
+        "opening_message": str(ini.get("opening_message") or "").strip(),
     }
     # A GROUNDED, read-only next-step recommendation derived from the just-assembled view
     # (reads next_step/open_prs/open_investigations/face_message/status/momentum). None when
@@ -998,6 +1003,8 @@ header .meta{color:var(--gray);font-size:.85rem}
 .search{background:var(--bg1);color:var(--fg);border:1px solid var(--bg2);border-radius:4px;
   padding:.3rem .55rem;font:inherit;font-size:.82rem;min-width:12rem}
 .search:focus{outline:1px solid var(--blue)}
+.search-count{color:var(--gray);font-size:.76rem;white-space:nowrap}
+.search-count.none{color:var(--orange)}
 .rbtn{background:var(--bg1);color:var(--aqua);border:1px solid var(--bg2);border-radius:4px;
   padding:.3rem .7rem;cursor:pointer;font:inherit;font-size:.82rem}
 .rbtn:hover:not(:disabled){background:var(--bg2)}
@@ -1030,6 +1037,9 @@ header .meta{color:var(--gray);font-size:.85rem}
 .summary{margin-top:.3rem;color:var(--fg);font-size:.86rem}
 .status{margin-top:.2rem;color:var(--fg2);font-size:.84rem}
 .status .lbl{color:var(--yellow);margin-right:.2rem}
+.start{margin-top:.25rem;color:var(--fg2);font-size:.84rem;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.start .lbl{color:var(--orange);margin-right:.2rem}
 .msg{margin-top:.3rem;color:var(--fg);font-size:.86rem;
   white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .msg .lbl{color:var(--aqua);margin-right:.2rem}
@@ -1244,6 +1254,28 @@ function partitionInitiatives(views){
 """.strip()
 
 
+# PURE, DOM-FREE card-search predicate — kept in its OWN snippet (like _RECENCY_JS) so the
+# node test evals it directly, exercising the ACTUAL page code rather than a Python replica.
+# `q` is the ALREADY-lowercased, trimmed query. Empty query → every card matches. Otherwise a
+# case-insensitive substring test over a per-card blob: slug, title, summary + the recap split
+# (identity/status/recap), the ORIGIN prompt (`opening_message`), EVERY recent-message text
+# (so a card is findable by any prompt, not just the face line), the parsed/suggested
+# next_step, repo_name, momentum, and the live tmux task. Substituted into _JS at the
+# __MATCH_JS__ placeholder at module load. Used for BOTH the main board and the Emerging lane.
+_MATCH_JS = r"""
+function matchQ(v, q){
+  if(!q) return true;
+  var msg = (v.recent_messages || []).map(function(m){ return (m && m.text) || ''; }).join(' ');
+  var hay = ((v.slug||'') + ' ' + (v.title||'') + ' ' + (v.identity||'') + ' ' +
+             (v.status||'') + ' ' + (v.recap||'') + ' ' + (v.summary||'') + ' ' +
+             (v.opening_message||'') + ' ' + (v.next_step||'') + ' ' +
+             (v.repo_name||'') + ' ' + (v.momentum||'') + ' ' +
+             msg + ' ' + (v.live_task||'')).toLowerCase();
+  return hay.indexOf(q) !== -1;
+}
+""".strip()
+
+
 # PURE, DOM-FREE markdown→HTML renderer for the Q&A answer — kept in its OWN snippet (like
 # _RECENCY_JS) so the node test can eval it directly, exercising the ACTUAL page code rather
 # than a Python replica. XSS discipline: the source is HTML-ESCAPED FIRST, then a LIMITED,
@@ -1327,6 +1359,7 @@ _JS = r"""
 (function(){
   __RECENCY_JS__
   __PARTITION_JS__
+  __MATCH_JS__
   __MARKDOWN_JS__
   var el0 = document.getElementById('idata');
   var data;
@@ -1366,20 +1399,11 @@ _JS = r"""
   var btnRefresh = document.getElementById('refresh');
   var refreshMsg = document.getElementById('refresh-msg');
   var countEl = document.getElementById('count');
+  var searchCountEl = document.getElementById('search-count');
 
   function key(v){ return (v.repo || '') + '::' + (v.slug || ''); }
 
-  function matchQ(v, q){
-    if(!q) return true;
-    // Search the FULL recent-message list (not just the face line) so a card is findable
-    // by any of its prompts, even the ones filtered off the face.
-    var msg = (v.recent_messages || []).map(function(m){ return (m && m.text) || ''; }).join(' ');
-    var hay = ((v.slug||'') + ' ' + (v.title||'') + ' ' + (v.identity||'') + ' ' +
-               (v.status||'') + ' ' + (v.recap||'') + ' ' + (v.summary||'') + ' ' +
-               (v.repo_name||'') + ' ' + (v.momentum||'') + ' ' +
-               msg + ' ' + (v.live_task||'')).toLowerCase();
-    return hay.indexOf(q) !== -1;
-  }
+  // matchQ (the pure card-search predicate) is inlined from the _MATCH_JS snippet above.
 
   function el(tag, cls, txt){
     var e = document.createElement(tag);
@@ -1545,6 +1569,17 @@ _JS = r"""
       st.appendChild(el('span', 'lbl', 'current ›'));
       st.appendChild(document.createTextNode(' ' + v.status));
       c.appendChild(st);
+    }
+
+    // The thread's ORIGIN (genesis) prompt — the ORIGINAL ask that started the initiative
+    // (v5). Shown between "what's happening now" (current ›) and the latest prompt (you ›),
+    // so the card reads identity → current → start → you. Omitted when empty (pre-v5 store or
+    // a doc initiative with no folded session). textContent-only, never innerHTML.
+    if(v.opening_message){
+      var op = el('div', 'start');
+      op.appendChild(el('span', 'lbl', 'start ›'));
+      op.appendChild(document.createTextNode(' ' + v.opening_message));
+      c.appendChild(op);
     }
 
     // The user's own most-recent SUBSTANTIVE prompt — the highest-signal "what is this"
@@ -1807,11 +1842,18 @@ _JS = r"""
         app.appendChild(sec);
       });
     }
-    if(shown === 0 && !emergingAll.length){
-      app.appendChild(el('div', 'empty',
-        q ? ('No initiatives match "' + state.q + '".')
-          : 'No initiatives in the latest snapshot.'));
+    // "N shown / M" reflects EVERY searchable card (main board + emerging lane) so the count
+    // is honest even when the query only matches cards inside the collapsed lane. `shown` is
+    // the matched board cards; the emerging lane is filtered by the SAME matchQ.
+    var emergingShown = emergingAll.filter(function(v){ return matchQ(v, q); }).length;
+    var totalCards = docFlat.length + emergingAll.length;
+    var totalShown = shown + emergingShown;
+    if(totalShown === 0 && !q){
+      app.appendChild(el('div', 'empty', 'No initiatives in the latest snapshot.'));
+    } else if(totalShown === 0){
+      app.appendChild(el('div', 'empty', 'No initiatives match "' + state.q + '".'));
     }
+    updateSearchCount(totalShown, totalCards, q);
     // The "Emerging / undocumented" lane renders BELOW the main board (session-only cards the
     // scan auto-discovered). Collapsed by default; respects the same search filter when open.
     renderEmerging(q, emergingAll);
@@ -1819,6 +1861,16 @@ _JS = r"""
     // every running thread, not just the tagged few). Respects the same search filter.
     renderUnmatched(q);
     updateChrome();
+  }
+
+  // The small "N shown / M" indicator next to the search box. Only shown while a query is
+  // active (empty query = the whole board, so no count needed); a zero-match query flags the
+  // 'none' state (color cue) alongside the "no matches" empty state the board already renders.
+  function updateSearchCount(shownN, total, q){
+    if(!searchCountEl) return;
+    if(!q){ searchCountEl.textContent = ''; searchCountEl.className = 'search-count'; return; }
+    searchCountEl.textContent = shownN + ' shown / ' + total;
+    searchCountEl.className = 'search-count' + (shownN === 0 ? ' none' : '');
   }
 
   function refetch(){
@@ -1855,7 +1907,13 @@ _JS = r"""
   if(btnRecency) btnRecency.addEventListener('click', function(){
     state.view = 'recency'; localStorage.setItem(VIEW_KEY, 'recency'); render();
   });
-  searchInput.addEventListener('input', function(){ state.q = searchInput.value; render(); });
+  // Debounce the filter (~150ms) so a fast typist doesn't re-render the whole board on every
+  // keystroke; the input value is the source of truth so the last keystroke always wins.
+  var searchTimer = null;
+  searchInput.addEventListener('input', function(){
+    if(searchTimer) clearTimeout(searchTimer);
+    searchTimer = setTimeout(function(){ state.q = searchInput.value; render(); }, 150);
+  });
   btnRefresh.addEventListener('click', doRefresh);
 
   // ---- Read-only Q&A sidebar (💬 ask) -------------------------------------------------
@@ -2023,6 +2081,7 @@ _JS = r"""
 # node test evals _RECENCY_JS directly, the page runs this substituted copy).
 _JS = _JS.replace("__RECENCY_JS__", _RECENCY_JS)
 _JS = _JS.replace("__PARTITION_JS__", _PARTITION_JS)
+_JS = _JS.replace("__MATCH_JS__", _MATCH_JS)
 _JS = _JS.replace("__MARKDOWN_JS__", _MARKDOWN_JS)
 
 
@@ -2080,6 +2139,7 @@ def render_html(model: dict | None, error: str | None = None,
         '</div>'
         '<input id="search" class="search" type="search" placeholder="filter…" '
         'autocomplete="off" spellcheck="false" aria-label="filter initiatives">'
+        '<span id="search-count" class="search-count" aria-live="polite"></span>'
         '<button id="refresh" class="rbtn" type="button" '
         'title="run a fresh sync now">↻ refresh</button>'
         '<span id="refresh-msg" class="rmsg"></span>'
