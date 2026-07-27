@@ -449,6 +449,190 @@ def test_skipped_go_detected(tmp_path):
     assert any(c.line == 2 and "go.skip" in c.text for c in cands)
 
 
+# ---- skipped Go/Python: conditional graceful-degradation guard vs disabled ----
+# Generalizes #107's JS conditional-vs-disabled distinction to Go (`if <cond> { t.Skip }`)
+# and Python (`if <cond>: pytest.skip`). Motivated by recurring false positives: the
+# clawgate `pgstore_test.go` `if dsn == "" { t.Skip(…) }` DB guard and devrc optional-dep
+# guards (`if not node: pytest.skip("node not on PATH")`) — both RUN in CI, not disabled.
+
+def test_conditional_go_skip_not_flagged(tmp_path):
+    # The real clawgate case + t.Skipf / t.SkipNow siblings inside an `if` → NOT flagged.
+    _write(tmp_path, "pg_test.go",
+           "func TestPG(t *testing.T) {\n"
+           "\tdsn := os.Getenv(\"DB\")\n"
+           "\tif dsn == \"\" {\n"
+           "\t\tt.Skip(\"set DB to run\")\n"
+           "\t}\n"
+           "}\n"
+           "func TestPGf(t *testing.T) {\n"
+           "\tif dsn == \"\" {\n"
+           "\t\tt.Skipf(\"set %s\", \"DB\")\n"
+           "\t}\n"
+           "}\n"
+           "func TestPGNow(t *testing.T) {\n"
+           "\tif dsn == \"\" {\n"
+           "\t\tt.SkipNow()\n"
+           "\t}\n"
+           "}\n")
+    cands = prescan.scan_skipped_tests(tmp_path, "repo", cap=10)
+    assert cands == []
+
+
+def test_conditional_go_skip_else_if_not_flagged(tmp_path):
+    # A skip in an `else if` / `else` chain is still a conditional guard → NOT flagged.
+    _write(tmp_path, "chain_test.go",
+           "func TestChain(t *testing.T) {\n"
+           "\tif a {\n"
+           "\t\tdoThing()\n"
+           "\t} else if b {\n"
+           "\t\tt.Skip(\"b path unsupported\")\n"
+           "\t} else {\n"
+           "\t\tt.Skip(\"default path unsupported\")\n"
+           "\t}\n"
+           "}\n")
+    cands = prescan.scan_skipped_tests(tmp_path, "repo", cap=10)
+    assert cands == []
+
+
+def test_unconditional_go_skip_still_flagged(tmp_path):
+    # A bare top-of-func t.Skip (enclosing opener is the `func`, not an `if`) → flagged.
+    _write(tmp_path, "wip_test.go",
+           "func TestWip(t *testing.T) {\n"
+           "\tt.Skip(\"not implemented yet\")\n"
+           "}\n")
+    cands = prescan.scan_skipped_tests(tmp_path, "repo", cap=10)
+    assert [c.line for c in cands] == [2]
+    assert "go.skip" in cands[0].text
+
+
+def test_go_skip_under_non_if_block_still_flagged(tmp_path):
+    # Conservative rule: a `for`/`with`-style enclosing block is NOT treated as
+    # conditional, so a skip nested under it stays flagged (recall-biased, safe direction).
+    _write(tmp_path, "loop_test.go",
+           "func TestLoop(t *testing.T) {\n"
+           "\tfor _, c := range cases {\n"
+           "\t\tt.Skip(\"todo per-case\")\n"
+           "\t}\n"
+           "}\n")
+    cands = prescan.scan_skipped_tests(tmp_path, "repo", cap=10)
+    assert [c.line for c in cands] == [3]
+
+
+def test_conditional_go_skip_helper():
+    lines = [
+        "func TestPG(t *testing.T) {\n",   # 0
+        "\tif dsn == \"\" {\n",             # 1
+        "\t\tt.Skip(\"set DB\")\n",        # 2  → conditional
+        "\t}\n",                            # 3
+        "\tt.Skip(\"unconditional\")\n",  # 4  → enclosing opener is func → NOT conditional
+        "}\n",                              # 5
+    ]
+    assert prescan._is_conditional_go_skip(lines, 2) is True
+    assert prescan._is_conditional_go_skip(lines, 4) is False
+
+
+def test_conditional_py_skip_not_flagged(tmp_path):
+    # The real devrc optional-dep cases → NOT flagged.
+    _write(tmp_path, "test_dep.py",
+           "def test_node():\n"
+           "    if not node:\n"
+           "        pytest.skip(\"node not on PATH\")\n"
+           "\n"
+           "def test_yaml():\n"
+           "    if ET._yaml is None:\n"
+           "        pytest.skip(\"PyYAML not available\")\n")
+    cands = prescan.scan_skipped_tests(tmp_path, "repo", cap=10)
+    assert cands == []
+
+
+def test_unconditional_py_skip_still_flagged(tmp_path):
+    # A bare pytest.skip in the function body (enclosing opener is the `def`) → flagged.
+    _write(tmp_path, "test_wip.py",
+           "def test_y():\n"
+           "    pytest.skip(\"wip\")\n")
+    cands = prescan.scan_skipped_tests(tmp_path, "repo", cap=10)
+    assert [c.line for c in cands] == [2]
+    assert "pytest.skip" in cands[0].text
+
+
+def test_module_level_py_skip_still_flagged(tmp_path):
+    # `allow_module_level=True` is an intentional whole-module skip = a real signal →
+    # KEEP even though it sits under an `if <cond>:` import guard.
+    _write(tmp_path, "test_mod.py",
+           "import pytest\n"
+           "if sys.version_info < (3, 12):\n"
+           "    pytest.skip(\"needs 3.12\", allow_module_level=True)\n")
+    cands = prescan.scan_skipped_tests(tmp_path, "repo", cap=10)
+    assert any(c.line == 3 and "pytest.skip" in c.text for c in cands)
+
+
+def test_py_mark_skip_decorator_still_flagged(tmp_path):
+    # The `@pytest.mark.skip` decorator form is unconditional → still flagged (matched by
+    # the `pytest.skip` pattern, untouched by the conditional post-filter).
+    _write(tmp_path, "test_dec.py",
+           "@pytest.mark.skip(reason='flaky')\n"
+           "def test_a():\n"
+           "    pass\n")
+    cands = prescan.scan_skipped_tests(tmp_path, "repo", cap=10)
+    assert [c.line for c in cands] == [1]
+    assert "pytest.skip" in cands[0].text
+
+
+def test_py_skip_under_non_if_block_still_flagged(tmp_path):
+    # Conservative rule (Python): a `with`/`for` enclosing block is not conditional, so a
+    # skip nested under it stays flagged.
+    _write(tmp_path, "test_with.py",
+           "def test_w():\n"
+           "    with ctx():\n"
+           "        pytest.skip(\"todo inside ctx\")\n")
+    cands = prescan.scan_skipped_tests(tmp_path, "repo", cap=10)
+    assert [c.line for c in cands] == [3]
+
+
+def test_conditional_py_skip_helper():
+    lines = [
+        "def test_x():\n",                        # 0
+        "    if not node:\n",                      # 1
+        "        pytest.skip(\"no node\")\n",     # 2  → conditional
+        "    pytest.skip(\"bare\")\n",            # 3  → enclosing opener is def → NOT cond.
+        "pytest.skip(\"m\", allow_module_level=True)\n",  # 4 → module-level → NOT cond.
+    ]
+    assert prescan._is_conditional_py_skip(lines, 2) is True
+    assert prescan._is_conditional_py_skip(lines, 3) is False
+    assert prescan._is_conditional_py_skip(lines, 4) is False
+
+
+def test_conditional_go_py_dropped_alongside_js(tmp_path):
+    # Regression guard: #107's JS path still works next to the new Go/Python filters —
+    # in a mixed tree, each language drops its conditional guard but keeps its disabled test.
+    _write(tmp_path, "mix.spec.ts",
+           "test.skip(!dockerAvailable(), 'guard');\n"
+           "it.skip('disabled thing', () => {});\n")
+    _write(tmp_path, "mix_test.go",
+           "func TestA(t *testing.T) {\n"
+           "\tif dsn == \"\" {\n"
+           "\t\tt.Skip(\"guard\")\n"
+           "\t}\n"
+           "}\n"
+           "func TestB(t *testing.T) {\n"
+           "\tt.Skip(\"disabled\")\n"
+           "}\n")
+    _write(tmp_path, "test_mix.py",
+           "def test_a():\n"
+           "    if not dep:\n"
+           "        pytest.skip(\"guard\")\n"
+           "def test_b():\n"
+           "    pytest.skip(\"disabled\")\n")
+    cands = prescan.scan_skipped_tests(tmp_path, "repo", cap=20)
+    flagged = {(c.file, c.line) for c in cands}
+    assert ("mix.spec.ts", 2) in flagged      # JS disabled kept
+    assert ("mix.spec.ts", 1) not in flagged  # JS guard dropped
+    assert ("mix_test.go", 7) in flagged      # Go disabled kept
+    assert ("mix_test.go", 3) not in flagged  # Go guard dropped
+    assert ("test_mix.py", 5) in flagged      # Py disabled kept
+    assert ("test_mix.py", 3) not in flagged  # Py guard dropped
+
+
 def test_skipped_rust_ignore_detected(tmp_path):
     _write(tmp_path, "lib.rs", "#[ignore]\n#[test]\nfn t() {}\n")
     cands = prescan.scan_skipped_tests(tmp_path, "repo", cap=10)
