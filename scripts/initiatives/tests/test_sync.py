@@ -759,3 +759,13 @@ def test_write_snapshot_inserts_snapshot_then_rows_with_jsonb():
     # row_params = [snapshot_id] + ROW_COLUMNS values, so summary is at its ROW_COLUMNS idx + 1
     summary_idx = sync.ROW_COLUMNS.index("summary") + 1
     assert row_params[summary_idx] == "Consolidate the scan output into a durable Postgres store."
+
+
+# --- lookback window: widened 4 -> 14 days so stalled (>=7d) work surfaces --- #
+def test_sync_days_default_is_14_for_stalled_visibility():
+    # The default trailing window is 14d: a 4d window never included genuinely-stalled work
+    # (>=7d since last touch). Momentum buckets are ABSOLUTE last-touch ages, so widening just
+    # includes more, correctly bucketed. Pin the default so an accidental revert is caught.
+    assert sync.parse_args([]).days == 14
+    # still overridable on the CLI.
+    assert sync.parse_args(["--days", "4"]).days == 4

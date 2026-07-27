@@ -24,8 +24,11 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # a default so the wrapper works when invoked from an interactive shell.
 export KUBECONFIG="${KUBECONFIG:-${HOME}/workspace/homelab-talos/homelab-kubeconfig}"
 
-# Trailing window (default 4, matching the ledger); overridable via env for tuning.
-DAYS="${INITIATIVES_SYNC_DAYS:-4}"
+# Trailing window: 14d so genuinely-stalled work (≥7d since last touch) actually surfaces for
+# triage — a 4d window never included it. Momentum buckets are absolute last-touch ages
+# (<2d active / 2-7d slowing / ≥7d stalled), so a wider window just includes more, correctly
+# bucketed. Overridable via env for tuning.
+DAYS="${INITIATIVES_SYNC_DAYS:-14}"
 
 # --- ClickHouse reader creds — runtime sops decrypt (NO plaintext secret at rest) ---
 # Mirrors the /initiatives slash command: decrypt the activity reader password from the

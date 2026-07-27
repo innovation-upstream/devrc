@@ -550,9 +550,11 @@ def parse_args(argv=None) -> argparse.Namespace:
     p = argparse.ArgumentParser(
         description="Sync initiative-scan --json into the mailbox Postgres "
                     "(initiatives schema).")
-    p.add_argument("--days", type=int, default=4,
-                   help="trailing window passed to initiative-scan (default 4, "
-                        "matching the ledger default)")
+    p.add_argument("--days", type=int, default=14,
+                   help="trailing window passed to initiative-scan (default 14d so "
+                        "genuinely-stalled work — ≥7d since last touch — surfaces for triage; "
+                        "momentum buckets are absolute last-touch ages, so a wider window just "
+                        "includes more, correctly bucketed)")
     p.add_argument("--dry-run", action="store_true",
                    help="do everything EXCEPT the DB write; print the rows that "
                         "WOULD be inserted (table + count + full JSON)")

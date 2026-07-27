@@ -1899,13 +1899,22 @@ def test_derive_state_needs_you_from_blocked_marker():
     assert line2 == "awaiting your review before merge"
 
 
-def test_derive_state_needs_you_beats_stalled_and_live():
-    # needs_you is top precedence: a stalled+live card that ALSO has a blocker is needs_you.
+def test_derive_state_needs_you_beats_stalled():
+    # needs_you is top precedence: a stalled card that ALSO has a blocker is needs_you (v2).
     v = _view(status="blocked on your decision", momentum="stalled",
               live_tasks=["running thing"], tmux_sessions=["Pool-1"])
     st, line2 = viewer.derive_state(v)
     assert st == "needs_you"
     assert "blocked on your decision" in line2
+    assert viewer.derive_live(v) is True   # live is an independent overlay, not the state
+
+
+def test_derive_state_stalled_beats_slowing_beats_active():
+    # v2 precedence among the momentum states: stalled > slowing > active.
+    assert viewer.derive_state(_view(momentum="stalled"))[0] == "stalled"
+    assert viewer.derive_state(_view(momentum="slowing"))[0] == "slowing"
+    assert viewer.derive_state(_view(momentum="active"))[0] == "active"
+    assert viewer.derive_state(_view(momentum=None))[0] == "active"   # unknown → active
 
 
 def test_derive_state_needs_you_line2_prefers_field_with_marker():
@@ -1916,26 +1925,46 @@ def test_derive_state_needs_you_line2_prefers_field_with_marker():
     assert line2 == "pending your go-ahead"
 
 
-def test_derive_state_live_beats_stalled_and_active():
-    v = _view(momentum="stalled", live_task="canary rollout", live_tasks=["canary rollout"])
+def test_derive_state_live_is_a_badge_not_a_state():
+    # v2: `live` NO LONGER overrides the state. A stalled card that's also live classifies as
+    # stalled, carries the live badge, and its line2 stays the actionable next-step (not "agent
+    # live: …"). This is the whole point of the decouple (19 agents no longer hijack the board).
+    v = _view(momentum="stalled", next_step="finish the canary rollout",
+              live_task="canary rollout", live_tasks=["canary rollout"])
     st, line2 = viewer.derive_state(v)
-    assert st == "live"
-    assert line2 == "agent live: canary rollout"
+    assert st == "stalled"
+    assert viewer.derive_live(v) is True
+    assert line2 == "finish the canary rollout"   # actionable, NOT "agent live: …"
 
 
-def test_derive_state_live_from_tmux_sessions_only():
-    v = _view(tmux_sessions=["main:8-1"])   # a session but no task text
-    st, line2 = viewer.derive_state(v)
-    assert st == "live"
-    assert line2 == "agent live"
+def test_derive_live_from_tmux_sessions_or_tasks_only():
+    assert viewer.derive_live(_view(tmux_sessions=["main:8-1"])) is True
+    assert viewer.derive_live(_view(live_tasks=["a task"])) is True
+    assert viewer.derive_live(_view()) is False   # no live signal → no badge
 
 
-def test_derive_state_stalled_line2_uses_age_and_face():
+def test_derive_state_stalled_line2_uses_last_activity_when_no_action():
+    # v2: with no rec/next_step, a stalled card's line2 is "last: <face/last prompt>" (the age is
+    # on line 1 now, so line2 stays actionable/informative, not a "stalled <age>" restatement).
     v = _view(momentum="stalled", age="3w",
               face_message={"text": "pick up the migration", "ts": 1.0})
     st, line2 = viewer.derive_state(v)
     assert st == "stalled"
-    assert line2 == "stalled 3w · last: pick up the migration"
+    assert line2 == "last: pick up the migration"
+
+
+def test_derive_state_slowing_line2_uses_last_activity():
+    v = _view(momentum="slowing", face_message={"text": "cooling off here", "ts": 1.0})
+    st, line2 = viewer.derive_state(v)
+    assert st == "slowing"
+    assert line2 == "last: cooling off here"
+
+
+def test_derive_state_stalled_line2_prefers_actionable_next_step():
+    # a stalled card WITH a next-step shows the ACTION (not "last: …").
+    v = _view(momentum="stalled", next_step="resume the migration",
+              face_message={"text": "old prompt", "ts": 1.0})
+    assert viewer.derive_state(v) == ("stalled", "resume the migration")
 
 
 def test_derive_state_stalled_falls_back_to_recent_message():
@@ -1946,10 +1975,12 @@ def test_derive_state_stalled_falls_back_to_recent_message():
     assert "the last thing I said" in line2
 
 
-def test_derive_state_stalled_no_face_is_bare_age():
+def test_derive_state_stalled_no_signal_line2_empty():
+    # v2: a stalled card with no rec/next_step/face/status/summary → line2 is "" (the age is on
+    # line 1; nothing actionable to show).
     v = _view(momentum="stalled", age="5w")
     st, line2 = viewer.derive_state(v)
-    assert st == "stalled" and line2 == "stalled 5w"
+    assert st == "stalled" and line2 == ""
 
 
 def test_derive_state_active_uses_recommended_then_next_step_then_status_then_summary():
@@ -2019,25 +2050,60 @@ def test_build_model_attaches_state_and_line2():
 
 
 def test_build_model_state_needs_you_from_blocked_status():
+    # a blocked status → needs_you; line2 is the actionable next-step (default _row's next_step).
     v = viewer.build_model([_row(slug="s", status="awaiting your sign-off")], now=NOW)["flat"][0]
+    assert v["state"] == "needs_you"
+    assert v["line2"] == "wire the systemd unit"
+
+
+def test_build_model_state_needs_you_line2_blocker_when_no_action():
+    # with no next_step/rec, a needs_you card's line2 falls back to the blocker text.
+    v = viewer.build_model(
+        [_row(slug="s", status="awaiting your sign-off", next_step="",
+              open_investigations=[], open_prs=[])], now=NOW)["flat"][0]
     assert v["state"] == "needs_you"
     assert "awaiting your sign-off" in v["line2"]
 
 
-def test_build_model_state_live_from_tmux_task():
+def test_build_model_live_is_badge_state_unchanged():
+    # v2: a live tmux task sets the `live` overlay badge but does NOT change the state (active
+    # here, from momentum). line2 stays the actionable next-step.
     rows = [_row(slug="s")]
     rows[0]["tmux_tasks"] = ["a live task"]
     v = viewer.build_model(rows, now=NOW)["flat"][0]
-    assert v["state"] == "live"
-    assert v["line2"] == "agent live: a live task"
+    assert v["state"] == "active"
+    assert v["live"] is True
+    assert v["line2"] == "wire the systemd unit"
+
+
+def test_build_model_state_slowing_is_distinct():
+    # "slowing" is now its OWN state (not collapsed into active).
+    v = viewer.build_model([_row(slug="s", momentum="slowing")], now=NOW)["flat"][0]
+    assert v["state"] == "slowing"
 
 
 def test_build_model_state_stalled():
+    # Full pipeline: a stalled card with a recent prompt → state stalled, no live badge, and an
+    # ACTIONABLE line2 (the grounded "Continue where you left off" recommendation from nextstep,
+    # which outranks the bare "last:" fallback — line2 is always actionable in v2).
     v = viewer.build_model(
-        [_row(slug="s", momentum="stalled", next_step="",
-              last_touch=NOW - timedelta(days=21))], now=NOW)["flat"][0]
+        [_row(slug="s", momentum="stalled", next_step="", open_investigations=[], open_prs=[],
+              last_touch=NOW - timedelta(days=21),
+              recent_messages=[{"text": "the last thing", "ts": 1.0}])], now=NOW)["flat"][0]
     assert v["state"] == "stalled"
-    assert v["line2"].startswith("stalled ")
+    assert v["live"] is False
+    assert v["line2"] == "Continue where you left off: the last thing"
+
+
+def test_build_model_state_stalled_signalless_gets_resume_or_drop_line2():
+    # A stalled card with NO next_step/pr/investigation/face → nextstep's "stalled" resume-or-drop
+    # recommendation grounds line2 (still actionable). Age is on line 1.
+    v = viewer.build_model(
+        [_row(slug="s", momentum="stalled", next_step="", open_investigations=[], open_prs=[],
+              summary="", recent_messages=[], last_touch=NOW - timedelta(days=21))],
+        now=NOW)["flat"][0]
+    assert v["state"] == "stalled"
+    assert "resume or drop" in v["line2"]
 
 
 def test_build_model_state_graceful_with_missing_fields():
@@ -2048,31 +2114,54 @@ def test_build_model_state_graceful_with_missing_fields():
     assert isinstance(v["line2"], str)
 
 
-def test_model_to_json_flat_includes_state_and_line2():
-    j = viewer.model_to_json(viewer.build_model([_row(slug="a")], now=NOW), None)
+def test_model_to_json_flat_includes_state_line2_and_live():
+    rows = [_row(slug="a")]
+    rows[0]["tmux_tasks"] = ["running"]
+    j = viewer.model_to_json(viewer.build_model(rows, now=NOW), None)
     assert j["flat"][0]["state"] == "active"
     assert j["flat"][0]["line2"] == "wire the systemd unit"
+    assert j["flat"][0]["live"] is True   # the overlay badge flag reaches the client
+
+
+def test_build_model_derive_state_per_row_isolation(monkeypatch):
+    # Part D: a bad row must degrade ONE card (safe active/empty/no-live default), not break the
+    # whole render — mirroring the recommend_next_step guard.
+    real = viewer.derive_state
+
+    def flaky(view):
+        if view.get("slug") == "boom":
+            raise RuntimeError("bad row")
+        return real(view)
+
+    monkeypatch.setattr(viewer, "derive_state", flaky)
+    flat = viewer.build_model([_row(slug="boom"), _row(slug="ok")], now=NOW)["flat"]
+    by = {v["slug"]: v for v in flat}
+    assert by["boom"]["state"] == "active" and by["boom"]["line2"] == "" and by["boom"]["live"] is False
+    assert by["ok"]["state"] == "active"   # the healthy row is unaffected
 
 
 def test_state_counts_over_fixture_set():
-    # the summary-header counts are a tally over the derived per-card state; assert the data
-    # side is right over a mixed fixture (the JS render() just sums these).
+    # the summary-header counts are a tally over the derived per-card state (mutually exclusive)
+    # + the `live` overlay (which OVERLAPS the states). Assert the data side over a mixed fixture.
     from collections import Counter
     rows = [
         _row(slug="a", status="awaiting your review"),                     # needs_you
         _row(slug="b"),                                                     # active
-        _row(slug="c", momentum="stalled", next_step="",
+        _row(slug="c", momentum="slowing"),                                # slowing (cooling)
+        _row(slug="e", momentum="stalled", next_step="",
              last_touch=NOW - timedelta(days=30)),                         # stalled
     ]
     live = _row(slug="d")
-    live["tmux_tasks"] = ["running"]                                       # live
+    live["tmux_tasks"] = ["running"]                                       # active + LIVE badge
     rows.append(live)
     flat = viewer.build_model(rows, now=NOW)["flat"]
     counts = Counter(v["state"] for v in flat)
     assert counts["needs_you"] == 1
-    assert counts["live"] == 1
-    assert counts["active"] == 1
+    assert counts["slowing"] == 1
     assert counts["stalled"] == 1
+    assert counts["active"] == 2                       # b and d (d is live but still active)
+    # live is an OVERLAP, counted by the badge (only d here), independent of state.
+    assert sum(1 for v in flat if v["live"]) == 1
 
 
 # --- triage state-filter predicate (node-eval matchState) -------------------- #
@@ -2094,16 +2183,23 @@ def _node_statefilter(views, sf):
 
 
 def test_js_matchstate_filters_each_chip():
-    views = [{"slug": "n", "state": "needs_you"}, {"slug": "l", "state": "live"},
-             {"slug": "a", "state": "active"}, {"slug": "s", "state": "stalled"}]
+    # v2: needs_you/stalled/slowing/active filter by STATE; `live` filters by the overlay BADGE
+    # (regardless of state). Here `a` is active AND live, `s` is stalled AND live.
+    views = [{"slug": "n", "state": "needs_you", "live": False},
+             {"slug": "s", "state": "stalled", "live": True},
+             {"slug": "w", "state": "slowing", "live": False},
+             {"slug": "a", "state": "active", "live": True}]
     assert _node_statefilter(views, "needs_you") == ["n"]
-    assert _node_statefilter(views, "live") == ["l"]
     assert _node_statefilter(views, "stalled") == ["s"]
+    assert _node_statefilter(views, "slowing") == ["w"]
     assert _node_statefilter(views, "active") == ["a"]
+    # Live filters by badge → BOTH the stalled+live and active+live cards, across states.
+    assert _node_statefilter(views, "live") == ["s", "a"]
 
 
 def test_js_matchstate_all_and_empty_show_everything():
-    views = [{"slug": "n", "state": "needs_you"}, {"slug": "a", "state": "active"}]
+    views = [{"slug": "n", "state": "needs_you", "live": False},
+             {"slug": "a", "state": "active", "live": True}]
     assert _node_statefilter(views, "") == ["n", "a"]
     assert _node_statefilter(views, "all") == ["n", "a"]
 
@@ -2175,16 +2271,16 @@ def test_js_group_repo_order_by_recency_when_no_needs():
 
 
 def test_js_group_within_repo_full_state_precedence_then_recency():
+    # v2 precedence: needs_you → stalled → slowing → active (recency preserved within a state).
     views = [
         {"slug": "active1", "repo_name": "r", "state": "active"},
+        {"slug": "slowing1", "repo_name": "r", "state": "slowing"},
         {"slug": "stalled1", "repo_name": "r", "state": "stalled"},
-        {"slug": "live1", "repo_name": "r", "state": "live"},
         {"slug": "needs1", "repo_name": "r", "state": "needs_you"},
         {"slug": "active2", "repo_name": "r", "state": "active"},
     ]
     got = _node_group(views)
-    # needs_you → live → active (recency preserved: active1 before active2) → stalled.
-    assert got[0]["slugs"] == ["needs1", "live1", "active1", "active2", "stalled1"]
+    assert got[0]["slugs"] == ["needs1", "stalled1", "slowing1", "active1", "active2"]
 
 
 def test_js_group_undocumented_not_segregated():
@@ -2270,12 +2366,61 @@ def test_js_triage_bar_wired():
     js = viewer._JS
     assert "function renderTriage(" in js
     assert "state.triage" in js
-    # the four chips: Needs you / Live / Stalled / All.
-    assert "label:'Needs you'" in js and "label:'Live'" in js
-    assert "label:'Stalled'" in js and "label:'All'" in js
+    # v2: FIVE chips — Needs you / Stalled / Cooling / Live / All.
+    assert "label:'Needs you'" in js and "label:'Stalled'" in js
+    assert "label:'Cooling'" in js and "label:'Live'" in js and "label:'All'" in js
+    # the Cooling chip filters the `slowing` state; Live filters by the overlay badge.
+    assert "k:'slowing'" in js
+    assert "if(sf === 'live') return !!v && !!v.live;" in js
     # counts come from stateCounts; a chip click sets state.triage and re-renders.
-    assert "stateCounts.needs_you" in js
+    assert "stateCounts.needs_you" in js and "stateCounts.slowing" in js
     assert "state.triage = ch.k" in js
+
+
+def test_js_live_is_badge_not_state():
+    js = viewer._JS
+    # `live` is decoupled: it's an overlay BADGE keyed off v.live, never a state value.
+    assert "STATE_GLYPH = {needs_you:'⚠', stalled:'◑', slowing:'~', active:'→'}" in js
+    assert "LIVE_GLYPH = '●'" in js
+    # the card renders the badge from v.live (independent of state).
+    body = _card_body()
+    assert "if(v.live){" in body
+    assert "live-badge" in body
+    assert "LIVE_GLYPH + ' live'" in body
+    # a live card carries an `is-live` class but its state class is still the momentum state.
+    assert "'ini state-' + st + (v.live ? ' is-live' : '')" in body
+
+
+def test_js_slowing_state_has_distinct_glyph_and_color():
+    # the restored "cooling"/slowing cue: distinct glyph (~) + yellow, in both JS + CSS.
+    js, css = viewer._JS, viewer._CSS
+    assert "slowing:'~'" in js
+    assert "slowing:'cooling'" in js       # STATE_LABEL
+    assert ".sbadge.state-slowing{color:var(--yellow)}" in css
+    assert ".ini.state-slowing{border-left-color:var(--yellow)}" in css
+
+
+def test_css_state_colors_match_momentum_semantics():
+    css = viewer._CSS
+    # needs_you=orange, stalled=gray, slowing=yellow, active=blue; live badge=green.
+    assert ".ini.state-needs_you{border-left-color:var(--orange)}" in css
+    assert ".ini.state-stalled{border-left-color:var(--gray)}" in css
+    assert ".ini.state-active{border-left-color:var(--blue)}" in css
+    assert ".live-badge{" in css and "color:var(--green)" in css
+    # the retired live-as-state CSS is gone.
+    assert ".ini.state-live{" not in css
+    assert ".sbadge.state-live{" not in css
+
+
+def test_render_html_live_card_shows_badge_and_state_class():
+    # a live+active card renders with the state-active class AND the live badge in the payload.
+    rows = [_row(slug="s")]
+    rows[0]["tmux_tasks"] = ["running now"]
+    m = viewer.build_model(rows, now=NOW)
+    assert m["flat"][0]["live"] is True and m["flat"][0]["state"] == "active"
+    html = viewer.render_html(m)
+    assert '"live": true' in html or '"live":true' in html   # the badge flag in the JSON island
+    assert "LIVE_GLYPH" in html                               # the badge renderer ships
 
 
 def test_render_html_has_sticky_triage_bar_container():
@@ -2286,9 +2431,11 @@ def test_render_html_has_sticky_triage_bar_container():
 
 def test_render_html_summary_header_shows_state_counts():
     html = viewer.render_html(viewer.build_model([_row(slug="s")], now=NOW))
-    # the header count text is the state tally (client-side, from stateCounts).
-    assert "' need you · '" in html and "' live · '" in html
-    assert "' active · '" in html and "' stalled'" in html
+    # the header count text is the state tally (client-side, from stateCounts): v2 order is
+    # need you · stalled · cooling · live · active (live is the overlap).
+    assert "' need you · '" in html and "' stalled · '" in html
+    assert "' cooling · '" in html and "' live · '" in html
+    assert "' active'" in html
 
 
 # --- render smoke: no exceptions; page has the key Phase-1 surfaces ---------- #

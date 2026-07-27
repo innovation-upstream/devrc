@@ -599,14 +599,19 @@ def pick_face_message(recent_messages: list[dict]) -> dict | None:
 
 
 # --------------------------------------------------------------------------- #
-# Derived triage STATE (Phase-1 board redesign). Each view is classified into ONE of
-# four states — needs_you|live|stalled|active — plus a single most-relevant `line2` for the
-# two-line collapsed card. PURE + unit-tested with fixtures (no DB).
+# Derived triage STATE (board redesign, state model v2). Each view is classified into ONE of
+# FOUR mutually-exclusive states — needs_you|stalled|slowing|active — plus a single, always-
+# ACTIONABLE `line2`. "live" is DELIBERATELY NOT a state (the owner runs ~19 concurrent agents,
+# so a `live` state hijacked the whole board): it is an independent OVERLAY BADGE (`view["live"]`)
+# shown on line 1 regardless of the underlying state. PURE + unit-tested with fixtures (no DB).
 # --------------------------------------------------------------------------- #
 STATE_NEEDS_YOU = "needs_you"
-STATE_LIVE = "live"
 STATE_STALLED = "stalled"
+STATE_SLOWING = "slowing"
 STATE_ACTIVE = "active"
+
+# Precedence order for grouping/sorting (first = highest). Mirrors the JS `stateRank`.
+STATE_PRECEDENCE = (STATE_NEEDS_YOU, STATE_STALLED, STATE_SLOWING, STATE_ACTIVE)
 
 # The single, most-relevant collapsed-card second line is trimmed to a scannable width so the
 # card stays two lines regardless of the underlying text length. textContent-safe (the JS
@@ -649,52 +654,81 @@ def _line2_trim(text) -> str:
     return s if len(s) <= LINE2_TRIM else s[: LINE2_TRIM - 1].rstrip() + "…"
 
 
-def derive_state(view: dict) -> tuple[str, str]:
-    """PURE: classify a view into (state, line2). Precedence (first match wins):
-    needs_you > live > stalled > active.
+def derive_live(view: dict) -> bool:
+    """The independent LIVE overlay: True when the initiative has any live tmux session/task.
+    NOT a state — a live card still classifies by its underlying momentum/block state; this is
+    a badge shown alongside. Decoupled so ~19 concurrent agents don't hijack the board."""
+    return bool((view.get("live_tasks") or []) or (view.get("tmux_sessions") or []))
 
-      - needs_you: `_blocking_hits(view)` non-empty. line2 = the status/next_step field that
-        tripped a marker (else whichever is present, else the hit phrase).
-      - live: `live_tasks`/`tmux_sessions` non-empty. line2 = "agent live: " + live_task.
-      - stalled: momentum == "stalled". line2 = "stalled <age> · last: <face/last prompt>".
-      - active: everything else. line2 = recommended_next_step.text (else next_step, else
-        status, else summary).
 
-    Unit-testable without a DB: `_blocking_hits_for` degrades to the local marker copy when
-    the assistant sibling can't load."""
-    hits = _blocking_hits_for(view)
-    if hits:
-        status = (view.get("status") or "").strip()
-        next_step = (view.get("next_step") or "").strip()
-        blocker = ""
-        for cand in (status, next_step):
-            if cand and any(mk in cand.lower() for mk in hits):
-                blocker = cand
-                break
-        blocker = blocker or status or next_step or hits[0]
-        return STATE_NEEDS_YOU, _line2_trim(blocker)
+def _blocker_text(view: dict, hits: list[str]) -> str:
+    """The status/next_step field that tripped a BLOCKED marker (else whichever is present,
+    else the hit phrase). Used as a needs_you line2 fallback."""
+    status = (view.get("status") or "").strip()
+    next_step = (view.get("next_step") or "").strip()
+    for cand in (status, next_step):
+        if cand and any(mk in cand.lower() for mk in hits):
+            return cand
+    return status or next_step or (hits[0] if hits else "")
 
-    live_task = (view.get("live_task") or "").strip()
-    live_tasks = view.get("live_tasks") or []
-    if live_tasks or (view.get("tmux_sessions") or []):
-        lt = live_task or (str(live_tasks[0]).strip() if live_tasks else "")
-        return STATE_LIVE, _line2_trim("agent live: " + lt if lt else "agent live")
 
-    if (view.get("momentum") or "") == "stalled":
-        face = view.get("face_message") or {}
-        face_text = (face.get("text") if isinstance(face, dict) else "") or ""
-        if not face_text:
-            msgs = view.get("recent_messages") or []
-            if msgs and isinstance(msgs[0], dict):
-                face_text = msgs[0].get("text") or ""
-        age = view.get("age") or "—"
-        line = "stalled " + age + (" · last: " + face_text if face_text else "")
-        return STATE_STALLED, _line2_trim(line)
+def _face_or_last_prompt(view: dict) -> str:
+    """The card's face message text, or the newest recent-message text — the "last activity"
+    fallback for a stalled/slowing card's line2."""
+    face = view.get("face_message") or {}
+    face_text = (face.get("text") if isinstance(face, dict) else "") or ""
+    if not face_text:
+        msgs = view.get("recent_messages") or []
+        if msgs and isinstance(msgs[0], dict):
+            face_text = msgs[0].get("text") or ""
+    return face_text
 
+
+def _derive_line2(view: dict, state: str, hits: list[str]) -> str:
+    """The single, always-ACTIONABLE second line (state model v2 — live never overrides it):
+      recommended_next_step.text → next_step → (needs_you) blocker text →
+      (stalled/slowing) "last: <face/last prompt>" → status → summary.
+    Trimmed to LINE2_TRIM, textContent-safe."""
     rec = view.get("recommended_next_step") or {}
     text = (rec.get("text") if isinstance(rec, dict) else "") or ""
-    text = (text or view.get("next_step") or view.get("status") or view.get("summary") or "")
-    return STATE_ACTIVE, _line2_trim(text)
+    if not text:
+        text = (view.get("next_step") or "").strip()
+    if not text and state == STATE_NEEDS_YOU:
+        text = _blocker_text(view, hits)
+    if not text and state in (STATE_STALLED, STATE_SLOWING):
+        face = _face_or_last_prompt(view)
+        if face:
+            text = "last: " + face
+    if not text:
+        text = (view.get("status") or "").strip()
+    if not text:
+        text = (view.get("summary") or "").strip()
+    return _line2_trim(text)
+
+
+def derive_state(view: dict) -> tuple[str, str]:
+    """PURE: classify a view into (state, line2). Precedence (first match wins):
+    needs_you > stalled > slowing > active. `live` is NOT here — it's a separate badge
+    (`derive_live`) so a fleet of concurrent agents doesn't dominate the board.
+
+      - needs_you: `_blocking_hits(view)` non-empty.
+      - stalled:   momentum == "stalled" (≥7d since last touch — absolute age bucket).
+      - slowing:   momentum == "slowing" (2–7d — the restored yellow "cooling" cue).
+      - active:    everything else.
+
+    `line2` is ALWAYS the actionable next-step (see `_derive_line2`). Unit-testable without a
+    DB: `_blocking_hits_for` degrades to the local marker copy when the assistant can't load."""
+    hits = _blocking_hits_for(view)
+    momentum = view.get("momentum") or ""
+    if hits:
+        state = STATE_NEEDS_YOU
+    elif momentum == "stalled":
+        state = STATE_STALLED
+    elif momentum == "slowing":
+        state = STATE_SLOWING
+    else:
+        state = STATE_ACTIVE
+    return state, _derive_line2(view, state, hits)
 
 
 def _initiative_view(ini: dict, now: datetime) -> dict:
@@ -792,10 +826,15 @@ def _initiative_view(ini: dict, now: datetime) -> dict:
         view["recommended_next_step"] = _nextstep().recommend_next_step(view)
     except Exception:  # noqa: BLE001 - a recommendation is additive; never break the render
         view["recommended_next_step"] = None
-    # Derived triage state + the single most-relevant collapsed-card line (Phase-1 board).
-    # Depends on the fields assembled above (status/next_step/live_*/momentum/face_message/
-    # recommended_next_step), so it MUST run last. PURE + never raises.
-    view["state"], view["line2"] = derive_state(view)
+    # Derived triage state (needs_you|stalled|slowing|active) + the always-actionable line2 +
+    # the independent `live` overlay badge. Depends on the fields assembled above, so it MUST
+    # run last. Guarded per-row (mirrors the recommend_next_step guard) so a future bad row
+    # degrades ONE card to a safe default instead of failing the whole render.
+    try:
+        view["state"], view["line2"] = derive_state(view)
+        view["live"] = derive_live(view)
+    except Exception:  # noqa: BLE001 - per-row isolation: never let one row break build_model
+        view["state"], view["line2"], view["live"] = STATE_ACTIVE, "", False
     return view
 
 
@@ -1136,17 +1175,21 @@ header .meta{color:var(--gray);font-size:.85rem}
   padding:.2rem .75rem;cursor:pointer;font:inherit;font-size:.8rem;white-space:nowrap}
 .chip:hover{background:var(--bg2)}
 .chip.active{background:var(--blue);color:var(--bg);border-color:var(--blue)}
-.chip.state-needs_you.active{background:var(--red);border-color:var(--red)}
+/* Chip active colours mirror the momentum semantics: needs_you=orange, stalled=gray,
+   cooling=yellow, live=green (the overlay). */
+.chip.state-needs_you.active{background:var(--orange);border-color:var(--orange)}
+.chip.state-stalled.active{background:var(--gray);border-color:var(--gray)}
+.chip.state-slowing.active{background:var(--yellow);border-color:var(--yellow)}
 .chip.state-live.active{background:var(--green);border-color:var(--green)}
-.chip.state-stalled.active{background:var(--yellow);border-color:var(--yellow)}
 .ini{background:var(--bg1);border-left:3px solid var(--gray);border-radius:4px;
   padding:.55rem .7rem;margin:0 0 .5rem;cursor:pointer}
 .ini:hover{background:#40393622}
-/* Border-left + badge colour keyed off the DERIVED triage state (Phase-1), not momentum. */
-.ini.state-needs_you{border-left-color:var(--red)}
-.ini.state-live{border-left-color:var(--green)}
-.ini.state-active{border-left-color:var(--blue)}
+/* Border-left + badge colour keyed off the DERIVED triage state (v2): needs_you=orange,
+   stalled=gray, slowing/cooling=yellow, active=blue. `live` is a separate overlay badge. */
+.ini.state-needs_you{border-left-color:var(--orange)}
 .ini.state-stalled{border-left-color:var(--gray)}
+.ini.state-slowing{border-left-color:var(--yellow)}
+.ini.state-active{border-left-color:var(--blue)}
 .ini.open{outline:1px solid var(--bg2)}
 .ini .row1{display:flex;flex-wrap:wrap;align-items:baseline;gap:.5rem}
 .badge{font-weight:bold}
@@ -1154,16 +1197,18 @@ header .meta{color:var(--gray);font-size:.85rem}
 .badge.slowing{color:var(--yellow)}
 .badge.stalled{color:var(--gray)}
 .badge.unknown{color:var(--gray)}
-/* The state glyph badge on line 1 (⚠ needs_you / ● live / → active / ◑ stalled). */
+/* The state glyph badge on line 1 (⚠ needs_you / ◑ stalled / ~ slowing / → active). */
 .sbadge{font-weight:bold;margin-right:.05rem}
-.sbadge.state-needs_you{color:var(--red)}
-.sbadge.state-live{color:var(--green)}
+.sbadge.state-needs_you{color:var(--orange)}
+.sbadge.state-stalled{color:var(--gray)}
+.sbadge.state-slowing{color:var(--yellow)}
 .sbadge.state-active{color:var(--blue)}
-.sbadge.state-stalled{color:var(--yellow)}
 .slug{font-weight:bold;color:var(--fg)}
 .title{color:var(--fg2)}
 .repo-label{font-size:.75rem;color:var(--aqua);background:var(--bg2);border-radius:3px;
   padding:.02rem .4rem}
+/* The `● live` overlay badge — INDEPENDENT of state (green), shown when an agent is running. */
+.live-badge{font-size:.72rem;color:var(--green);font-weight:bold}
 /* A session-only (undocumented) card carries a small "emerging" badge in place of the retired
    standalone Emerging lane — it now sits inline in its repo group. */
 .emerging-badge{font-size:.7rem;color:var(--yellow);background:var(--bg2);border-radius:3px;
@@ -1363,12 +1408,14 @@ function bucketizeRecency(views, nowMs){
 
 # PURE, DOM-FREE state-filter predicate for the sticky triage bar — kept in its OWN snippet
 # (like _MATCH_JS) so the node test evals it directly, exercising the ACTUAL page code. `sf` is
-# the active triage state ('' or 'all' → every card matches; otherwise the card's derived
-# `state` must equal it). Composes with `matchQ` (AND) in render. Substituted into _JS at the
-# __STATEFILTER_JS__ placeholder at module load.
+# the active triage filter: '' or 'all' → every card; 'live' → the LIVE OVERLAY (card has the
+# `live` badge, regardless of its state); otherwise the card's derived `state` must equal it
+# (needs_you|stalled|slowing|active). Composes with `matchQ` (AND) in render. Substituted into
+# _JS at the __STATEFILTER_JS__ placeholder at module load.
 _STATEFILTER_JS = r"""
 function matchState(v, sf){
   if(!sf || sf === 'all') return true;   // "All" (or no filter) → every card
+  if(sf === 'live') return !!v && !!v.live;   // Live filters by the overlay badge, not state
   return !!v && v.state === sf;
 }
 """.strip()
@@ -1377,16 +1424,16 @@ function matchState(v, sf){
 # PURE, DOM-FREE grouping of the flat initiative stream into collapsible repo sections — kept
 # in its OWN snippet so the node test evals it directly (no parseLastTouch/DOM dependency). The
 # input `views` is ALREADY last_touch-DESC (build_model's `flat`), so: (a) cards within a repo
-# are STABLE-sorted by state precedence (needs_you→live→active→stalled), recency preserved for
-# ties; (b) repos are ordered by their `needs_you` count DESC, then by most-recent activity —
+# are STABLE-sorted by state precedence (needs_you→stalled→slowing→active), recency preserved
+# for ties; (b) repos are ordered by their `needs_you` count DESC, then by most-recent activity —
 # which is just the index of the repo's FIRST card in the DESC stream (smaller = more recent).
 # `undocumented` cards are NOT segregated (the standalone Emerging lane is retired); they group
 # with their repo and the SPA badges them. Substituted into _JS at the __GROUP_JS__ placeholder.
 _GROUP_JS = r"""
 function stateRank(v){
-  var order = {needs_you:0, live:1, active:2, stalled:3};
+  var order = {needs_you:0, stalled:1, slowing:2, active:3};
   var r = v ? order[v.state] : undefined;
-  return (r == null) ? 2 : r;   // unknown/legacy state sorts with 'active'
+  return (r == null) ? 3 : r;   // unknown/legacy state sorts with 'active'
 }
 function stateSort(items){
   // Stable sort by state rank (decorate with the original index so equal ranks keep the
@@ -1631,11 +1678,11 @@ _JS = r"""
   // The catch-all "live sessions" section is collapsible; remember the user's choice.
   // Default EXPANDED (the whole point is to see every running thread) — set to '1' to collapse.
   var unmatchedCollapsed = localStorage.getItem(UNMATCHED_KEY) === '1';
-  // Header totals (recomputed each render). docTotal/docRepoTotal now count ALL initiatives
-  // (the standalone Emerging lane is retired — undocumented cards live inline); emergingTotal is
-  // just the "N emerging" header stat; stateCounts drives the summary + the triage chips.
-  var docTotal = 0, docRepoTotal = 0, emergingTotal = 0;
-  var stateCounts = {needs_you:0, live:0, active:0, stalled:0};
+  // Header stats (recomputed each render). `emergingTotal` is the "N emerging" stat; `stateCounts`
+  // drives the summary header + the triage chips — the four states are MUTUALLY EXCLUSIVE, plus
+  // `live` (the overlay badge) which OVERLAPS them.
+  var emergingTotal = 0;
+  var stateCounts = {needs_you:0, stalled:0, slowing:0, active:0, live:0};
   var expanded = {};     // key -> true
   var detailCache = {};  // key -> detail payload
 
@@ -1651,10 +1698,13 @@ _JS = r"""
     try { localStorage.setItem(REPO_COLLAPSE_KEY, JSON.stringify(m)); } catch(e){}
   }
 
-  // The derived-state glyphs/labels for the two-line card + the triage chips (mirrors the
-  // Python STATE_* precedence). ⚠ needs_you · ● live · → active · ◑ stalled.
-  var STATE_GLYPH = {needs_you:'⚠', live:'●', active:'→', stalled:'◑'};
-  var STATE_LABEL = {needs_you:'needs you', live:'live', active:'active', stalled:'stalled'};
+  // The derived-state glyphs/labels for the two-line card + the triage chips (mirrors the Python
+  // STATE_* precedence + the momentum colours the owner knows). ⚠ needs_you (orange) · ◑ stalled
+  // (gray) · ~ slowing/"cooling" (yellow) · → active (blue/green). `● live` is the SEPARATE green
+  // overlay badge, not a state.
+  var STATE_GLYPH = {needs_you:'⚠', stalled:'◑', slowing:'~', active:'→'};
+  var STATE_LABEL = {needs_you:'needs you', stalled:'stalled', slowing:'cooling', active:'active'};
+  var LIVE_GLYPH = '●';
 
   var app = document.getElementById('app');
   var triageBar = document.getElementById('triage');
@@ -1830,10 +1880,10 @@ _JS = r"""
   function card(v){
     var k = key(v);
     var st = v.state || 'active';
-    var c = el('div', 'ini state-' + st);
+    var c = el('div', 'ini state-' + st + (v.live ? ' is-live' : ''));
     c.setAttribute('data-key', k);
 
-    // LINE 1.
+    // LINE 1: state glyph + slug + title + repo label + emerging badge + `● live` overlay + age.
     var row1 = el('div', 'row1');
     var sb = el('span', 'sbadge state-' + st, STATE_GLYPH[st] || '→');
     sb.title = STATE_LABEL[st] || st;
@@ -1844,6 +1894,13 @@ _JS = r"""
     // grouped (default) view uses the repo as its collapsible section heading instead.
     if(state.view !== 'grouped' && v.repo_name)
       row1.appendChild(el('span', 'repo-label', v.repo_name));
+    // The `● live` overlay badge — INDEPENDENT of state (an agent is running on this initiative
+    // right now), so a needs_you/stalled/active card all show it when live.
+    if(v.live){
+      var lb = el('span', 'live-badge', LIVE_GLYPH + ' live');
+      lb.title = 'a live agent session is running on this initiative';
+      row1.appendChild(lb);
+    }
     // A session-only (undocumented) card is badged inline (the standalone Emerging lane is
     // retired); it groups with its repo like any other card.
     if(v.undocumented) row1.appendChild(el('span', 'emerging-badge', 'emerging'));
@@ -1941,26 +1998,27 @@ _JS = r"""
     app.appendChild(sec);
   }
 
-  // The sticky cross-repo triage bar: [⚠ Needs you N] [● Live N] [◑ Stalled N] [ All ]. Clicking
-  // a chip filters EVERY repo group to cards of that state (composes with search, AND); "All"
-  // clears it. Counts come from `stateCounts` (the full data set). Rebuilt each render so the
-  // counts + the active highlight stay live. Only numbers/fixed labels — no untrusted text.
+  // The sticky cross-repo triage bar: [⚠ Needs you N] [◑ Stalled N] [~ Cooling N] [● Live N]
+  // [ All ]. Needs-you/Stalled/Cooling filter by `state`; LIVE filters by the overlay BADGE (a
+  // card counts as live regardless of its state); "All" clears. Each composes (AND) with search.
+  // Counts come from `stateCounts` (the full data set; live OVERLAPS the mutually-exclusive
+  // states). Rebuilt each render so counts + the active highlight stay live. No untrusted text.
   function renderTriage(){
     if(!triageBar) return;
     triageBar.innerHTML = '';
     var active = state.triage || '';
     var chips = [
-      {k:'needs_you', label:'Needs you', n:stateCounts.needs_you},
-      {k:'live',      label:'Live',      n:stateCounts.live},
-      {k:'stalled',   label:'Stalled',   n:stateCounts.stalled},
-      {k:'',          label:'All',       n:null}
+      {k:'needs_you', glyph:STATE_GLYPH.needs_you, label:'Needs you', n:stateCounts.needs_you},
+      {k:'stalled',   glyph:STATE_GLYPH.stalled,   label:'Stalled',   n:stateCounts.stalled},
+      {k:'slowing',   glyph:STATE_GLYPH.slowing,   label:'Cooling',   n:stateCounts.slowing},
+      {k:'live',      glyph:LIVE_GLYPH,            label:'Live',      n:stateCounts.live},
+      {k:'',          glyph:'',                    label:'All',       n:null}
     ];
     chips.forEach(function(ch){
       var on = (ch.k === '') ? (active === '' || active === 'all') : (active === ch.k);
       var b = el('button', 'chip state-' + (ch.k || 'all') + (on ? ' active' : ''), null);
       b.type = 'button';
-      var glyph = STATE_GLYPH[ch.k];
-      var txt = (glyph ? glyph + ' ' : '') + ch.label + (ch.n != null ? ' ' + ch.n : '');
+      var txt = (ch.glyph ? ch.glyph + ' ' : '') + ch.label + (ch.n != null ? ' ' + ch.n : '');
       b.textContent = txt;
       b.addEventListener('click', function(){
         state.triage = ch.k;
@@ -1975,10 +2033,12 @@ _JS = r"""
     btnGrouped.classList.toggle('active', state.view === 'grouped');
     if(btnRecency) btnRecency.classList.toggle('active', state.view === 'recency');
     if(countEl){
-      // Live state counts (Phase-1): N need you · N live · N active · N stalled, computed over
-      // the rendered set. The "N emerging" stat + N untracked live sessions ride along.
-      var txt = stateCounts.needs_you + ' need you · ' + stateCounts.live + ' live · ' +
-                stateCounts.active + ' active · ' + stateCounts.stalled + ' stalled';
+      // Summary counts (state model v2): N need you · N stalled · N cooling · N live · N active.
+      // The four states are mutually exclusive; `live` is the OVERLAY badge (overlaps them). The
+      // "N emerging" stat + N untracked live sessions ride along.
+      var txt = stateCounts.needs_you + ' need you · ' + stateCounts.stalled + ' stalled · ' +
+                stateCounts.slowing + ' cooling · ' + stateCounts.live + ' live · ' +
+                stateCounts.active + ' active';
       if(emergingTotal) txt += ' · ' + emergingTotal + ' emerging';
       var nu = (data.live_unmatched || []).length;
       if(nu) txt += ' · ' + nu + ' untracked';
@@ -1994,8 +2054,8 @@ _JS = r"""
   function render(){
     app.innerHTML = '';
     if(!data.ok){
-      docTotal = 0; docRepoTotal = 0; emergingTotal = 0;
-      stateCounts = {needs_you:0, live:0, active:0, stalled:0};
+      emergingTotal = 0;
+      stateCounts = {needs_you:0, stalled:0, slowing:0, active:0, live:0};
       renderTriage();
       app.appendChild(el('div', 'err', 'store unreachable: ' + (data.error || '')));
       updateChrome();
@@ -2005,16 +2065,14 @@ _JS = r"""
     var sf = state.triage || '';
     var all = data.flat || [];   // every initiative (documented + emerging inline)
 
-    // State counts over the FULL set — drive the summary header + the triage chips.
-    var counts = {needs_you:0, live:0, active:0, stalled:0};
-    all.forEach(function(v){ if(counts[v.state] != null) counts[v.state]++; });
+    // State counts over the FULL set — drive the summary header + the triage chips. The four
+    // states are mutually exclusive; `live` OVERLAPS them (counted by the overlay badge).
+    var counts = {needs_you:0, stalled:0, slowing:0, active:0, live:0};
+    all.forEach(function(v){
+      if(counts[v.state] != null) counts[v.state]++;
+      if(v && v.live) counts.live++;
+    });
     stateCounts = counts;
-
-    // Header totals: all initiatives, distinct repos, + the emerging stat.
-    docTotal = all.length;
-    var repoSet = {};
-    all.forEach(function(v){ repoSet[v.repo || ''] = 1; });
-    docRepoTotal = Object.keys(repoSet).length;
     emergingTotal = all.filter(function(v){ return v && v.undocumented; }).length;
 
     renderTriage();
