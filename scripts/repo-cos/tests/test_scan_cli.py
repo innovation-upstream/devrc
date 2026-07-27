@@ -225,3 +225,32 @@ def test_scan_feedback_fetch_failure_proceeds(tmp_path, monkeypatch):
 def test_no_feedback_flag_default_false():
     args = scan.build_parser().parse_args([])
     assert args.no_feedback is False
+
+
+def test_no_fetch_flag_default_false():
+    args = scan.build_parser().parse_args([])
+    assert args.no_fetch is False
+
+
+def test_no_fetch_flag_threads_into_scan_all(tmp_path, monkeypatch):
+    # --no-fetch must reach prescan.scan_all as fetch=False (working-tree scan).
+    _write(tmp_path, "a.py", "# TODO fix the thing\n")
+    seen = {}
+    real_scan_all = scan.prescan.scan_all
+
+    def spy(repos, limit, caps=None, *, fetch=True):
+        seen["fetch"] = fetch
+        return real_scan_all(repos, limit, caps, fetch=fetch)
+
+    monkeypatch.setattr(scan.prescan, "scan_all", spy)
+    args = scan.build_parser().parse_args(
+        ["--no-llm", "--no-fetch", "--repos", str(tmp_path)])
+    rc = scan.cmd_scan(args)
+    assert rc == 0
+    assert seen["fetch"] is False
+
+    # and the default (no flag) threads fetch=True
+    seen.clear()
+    args = scan.build_parser().parse_args(["--no-llm", "--repos", str(tmp_path)])
+    scan.cmd_scan(args)
+    assert seen["fetch"] is True

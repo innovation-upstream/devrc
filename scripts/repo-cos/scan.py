@@ -174,7 +174,17 @@ def cmd_scan(args) -> int:
               file=sys.stderr)
         return 2
 
-    candidates, scans = prescan.scan_all(repos, args.limit_candidates)
+    # Fetch each repo + scan at origin/<default-branch> by default so the digest reflects
+    # the up-to-date COMMITTED state, not a drifted local checkout (which re-proposes
+    # already-merged work + cites stale line numbers). --no-fetch forces the working-tree
+    # scan (offline/testing/speed). This NEVER mutates any working tree — see prescan.
+    candidates, scans = prescan.scan_all(
+        repos, args.limit_candidates, fetch=not args.no_fetch)
+
+    # Surface which tree each repo was scanned against — `fresh-ref (origin/<branch>)`
+    # vs `working-tree fallback (<reason>)` — so a silent drift-to-fallback is visible.
+    for s in scans:
+        print(f"  scan: {s.repo}: {s.mode}", file=sys.stderr)
 
     # ---- SUPPRESSED-RECOMMENDATION FILTER (drop suppressed proposals BEFORE the LLM) ----
     # A recommendation Zach replied "skip" (→ excl_state["dismissed"]) OR "approve" (→
@@ -411,6 +421,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--no-feedback", action="store_true",
                    help="skip pulling last week's emailed reply into synthesis AND the "
                         "deterministic exclusion parse (stateless run; for clean/testing)")
+    p.add_argument("--no-fetch", action="store_true",
+                   help="scan the working tree as-is instead of git-fetching + scanning "
+                        "at origin/<default-branch> (offline/testing/speed; default: fetch)")
     p.add_argument("--show-exclusions", action="store_true",
                    help="print the current deterministic repo-exclusion state and exit")
     p.add_argument("--repos", default=None,
