@@ -1828,9 +1828,16 @@ _JS = r"""
     if(!all || !all.length) return;   // no session-only cards → no lane at all
     var rows = all.filter(function(v){ return matchQ(v, q); });
 
+    // While a search is ACTIVE and it matches cards in this lane, force the lane open so the
+    // matches are visible — otherwise a hit inside the collapsed Emerging lane stays hidden
+    // (the count would say "N shown" with the card invisible). This does NOT persist to
+    // EMERGING_KEY, so clearing the search restores the user's saved collapsed preference.
+    var filtering = !!(q && q.length);
+    var showBody = emergingOpen || (filtering && rows.length > 0);
+
     var sec = el('section', 'emerging');
     var h = el('h2');
-    h.appendChild(el('span', 'chev', emergingOpen ? '▾' : '▸'));
+    h.appendChild(el('span', 'chev', showBody ? '▾' : '▸'));
     h.appendChild(document.createTextNode('Emerging / undocumented'));
     h.appendChild(el('span', 'count', '(' + rows.length + ')'));
     sec.appendChild(h);
@@ -1838,7 +1845,7 @@ _JS = r"""
       'Active Claude sessions without a handoff doc — auto-detected, may include one-offs.'));
 
     var body = el('div', 'emerging-body');
-    body.style.display = emergingOpen ? 'block' : 'none';
+    body.style.display = showBody ? 'block' : 'none';
     rows.forEach(function(v){ body.appendChild(card(v)); });
     sec.appendChild(body);
 
