@@ -1719,6 +1719,25 @@ function matchState(v, sf){
 """.strip()
 
 
+# PURE, DOM-FREE auto-widen predicate — kept in its OWN snippet (like _STATEFILTER_JS) so the
+# node test evals it directly against the ACTUAL page code. Answers: should the active state
+# filter auto-widen to All for this query? True iff a query is active under a NON-All state
+# filter that hides EVERY match, yet the query DOES match some card under All. Returns false when
+# the query matches nothing even under All (a real no-result, not a filter artifact) — we never
+# abandon the user's filter for a typo. Depends on matchQ (_MATCH_JS) + matchState
+# (_STATEFILTER_JS); both are in scope where this is inlined. Substituted into _JS at the
+# __WIDENFILTER_JS__ placeholder at module load.
+_WIDENFILTER_JS = r"""
+function shouldWidenFilter(all, q, sf){
+  if(!q || !sf || sf === 'all') return false;
+  var i;
+  for(i=0;i<all.length;i++){ if(matchQ(all[i],q) && matchState(all[i],sf)) return false; } // filter has a hit → keep
+  for(i=0;i<all.length;i++){ if(matchQ(all[i],q)) return true; }                             // hits exist under All → widen
+  return false;                                                                              // no hits anywhere → keep
+}
+""".strip()
+
+
 # PURE, DOM-FREE Phase-2 archive-lifecycle predicates — kept in their OWN snippet (like
 # _STATEFILTER_JS) so the node test evals them directly, exercising the ACTUAL page code.
 # `dropEligible(v)` gates the `[drop]` action to STALLED + SLOWING(cooling) cards only (every
@@ -2248,6 +2267,7 @@ _JS = r"""
 (function(){
   __RECENCY_JS__
   __STATEFILTER_JS__
+  __WIDENFILTER_JS__
   __ARCHIVE_JS__
   __ACTIONS_JS__
   __AGO_JS__
@@ -3083,6 +3103,12 @@ _JS = r"""
     var sf = state.triage || '';
     var all = data.flat || [];   // every initiative (documented + emerging inline)
 
+    // AUTO-WIDEN: a query under a state filter that hides ALL its matches reads as a broken search
+    // box (dogfood-5). If widening to All would surface hits, drop the filter (sticky) so the chip
+    // highlight also moves to All via the renderTriage() below. Only widens when it demonstrably helps.
+    var widenedToAll = shouldWidenFilter(all, q, sf);
+    if(widenedToAll){ state.triage = ''; sf = ''; }
+
     // State counts over the FULL set — drive the summary header + the triage chips. The four
     // states are mutually exclusive; `live` OVERLAPS them (counted by the overlay badge).
     var counts = {needs_you:0, stalled:0, slowing:0, active:0, live:0};
@@ -3184,7 +3210,7 @@ _JS = r"""
     } else if(shown === 0){
       app.appendChild(el('div', 'empty', 'No initiatives match the current filter.'));
     }
-    updateSearchCount(shown, totalCards, filtering);
+    updateSearchCount(shown, totalCards, filtering, widenedToAll);
     // Live sessions are shown by the pinned "Live now" strip at the TOP (renderLiveNow, called at
     // the head of render) — no second below-the-board catch-all section any more.
     updateChrome();
@@ -3193,10 +3219,12 @@ _JS = r"""
   // The small "N shown / M" indicator next to the search box. Only shown while a query is
   // active (empty query = the whole board, so no count needed); a zero-match query flags the
   // 'none' state (color cue) alongside the "no matches" empty state the board already renders.
-  function updateSearchCount(shownN, total, q){
+  function updateSearchCount(shownN, total, q, widened){
     if(!searchCountEl) return;
     if(!q){ searchCountEl.textContent = ''; searchCountEl.className = 'search-count'; return; }
-    searchCountEl.textContent = shownN + ' shown / ' + total;
+    var txt = shownN + ' shown / ' + total;
+    if(widened && q) txt += ' · filter widened to All';   // dogfood-5: surface the auto-widen (not silent)
+    searchCountEl.textContent = txt;
     searchCountEl.className = 'search-count' + (shownN === 0 ? ' none' : '');
   }
 
@@ -3422,6 +3450,7 @@ _JS = r"""
 # node test evals _RECENCY_JS directly, the page runs this substituted copy).
 _JS = _JS.replace("__RECENCY_JS__", _RECENCY_JS)
 _JS = _JS.replace("__STATEFILTER_JS__", _STATEFILTER_JS)
+_JS = _JS.replace("__WIDENFILTER_JS__", _WIDENFILTER_JS)
 _JS = _JS.replace("__ARCHIVE_JS__", _ARCHIVE_JS)
 _JS = _JS.replace("__ACTIONS_JS__", _ACTIONS_JS)
 _JS = _JS.replace("__AGO_JS__", _AGO_JS)

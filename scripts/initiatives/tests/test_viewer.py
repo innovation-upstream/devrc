@@ -2369,6 +2369,49 @@ def test_js_triage_and_search_compose_and():
     assert json.loads(out.stdout) == ["clawgate"]   # civ matches Q but not SF; mail vice-versa
 
 
+# --- auto-widen predicate (node-eval shouldWidenFilter) ---------------------- #
+def _node_should_widen(views, q, sf):
+    """Eval the REAL shouldWidenFilter (with matchQ + matchState in scope, exactly as the page
+    inlines them) and return its boolean verdict."""
+    node = _shutil.which("node")
+    if not node:
+        import pytest
+        pytest.skip("node not on PATH — shouldWidenFilter JS untested this run")
+    body = (
+        "var ALL = " + json.dumps(views) + ";\n"
+        "var Q = " + json.dumps(q) + "; var SF = " + json.dumps(sf) + ";\n"
+        "console.log(JSON.stringify(shouldWidenFilter(ALL, Q, SF)));"
+    )
+    src = (viewer._MATCH_JS + "\n" + viewer._STATEFILTER_JS + "\n" +
+           viewer._WIDENFILTER_JS + "\n" + body)
+    out = _subprocess.run([node, "-e", src], capture_output=True, text=True, timeout=30)
+    assert out.returncode == 0, out.stderr
+    return json.loads(out.stdout)
+
+
+def test_should_widen_filter():
+    # Fixture: `redis` matches ONLY active cards; `clawgate` matches a needs_you card. matchQ reads
+    # the title blob; matchState reads v.state — so each card carries a state.
+    views = [
+        {"slug": "redis", "title": "redis cache", "state": "active"},
+        {"slug": "clawgate", "title": "clawgate release", "state": "needs_you"},
+        {"slug": "mail", "title": "mail automation", "state": "active"},
+    ]
+    # (a) query + a state filter that HAS a hit under it → no widen (the filter isn't hiding hits).
+    assert _node_should_widen(views, "clawgate", "needs_you") is False
+    # (b) the dogfood-5 case: "redis" under needs_you (no needs_you card matches) but an ACTIVE card
+    #     matches → widen to All.
+    assert _node_should_widen(views, "redis", "needs_you") is True
+    # (c) a query matching NOTHING even under All + a state filter → keep the filter (honest
+    #     no-result / typo, not a filter artifact).
+    assert _node_should_widen(views, "zzznomatch", "needs_you") is False
+    # (d) empty query with any filter → never widen.
+    assert _node_should_widen(views, "", "needs_you") is False
+    # (e) no state filter ('' or 'all') → never widen (nothing to widen from).
+    assert _node_should_widen(views, "redis", "") is False
+    assert _node_should_widen(views, "redis", "all") is False
+
+
 # --- repo grouping (node-eval groupByRepo) ----------------------------------- #
 def _node_group(views):
     node = _shutil.which("node")
@@ -4633,6 +4676,7 @@ def _node_render_board(flat, q="", sf="", view="grouped"):
         " coolingChev: coolingChev, appOrder: appOrder, activeGroups: activeGroups, search: _searchArgs}));\n"
     )
     program = (_DOM_SHIM + "\n" + viewer._MATCH_JS + "\n" + viewer._STATEFILTER_JS + "\n" +
+               viewer._WIDENFILTER_JS + "\n" +   # render() now calls shouldWidenFilter → keep it in scope
                viewer._GROUP_JS + "\n" + slice_ + "\n" + driver)
     out = _subprocess.run([node, "-e", program], capture_output=True, text=True, timeout=30)
     assert out.returncode == 0, out.stderr
