@@ -690,7 +690,12 @@ def test_build_report_end_to_end_no_telemetry(tmp_path, monkeypatch):
     monkeypatch.setattr(isc, "gh_merged_prs", lambda r, d: [])
     # build_report now single-walks transcripts via collect_session_records (genesis is
     # derived from it); stub that so the orchestration test stays hermetic.
-    monkeypatch.setattr(isc, "collect_session_records", lambda root, d, n=5: [])
+    # SESSIONS-ONLY board: a doc no longer creates a card on its own — a session must
+    # anchor it. This session's ai-title overlaps the handoff slug (mail+automation), so
+    # it folds into the handoff (source="both") and the mail-automation card exists.
+    sess = _sess("Mail automation extractor polish", session_id="s1", cwd=str(repo),
+                 last_user_ts=1_500.0, n_turns=10)
+    monkeypatch.setattr(isc, "collect_session_records", lambda root, d, n=5: [sess])
 
     now = 2_000.0  # last_commit at 1000 -> age 1000s -> active
     report = isc.build_report(2, repos=[str(repo)], client=None, now=now)
@@ -700,6 +705,7 @@ def test_build_report_end_to_end_no_telemetry(tmp_path, monkeypatch):
     assert len(inis) == 1
     ini = inis[0]
     assert ini["slug"] == "mail-automation"
+    assert ini["source"] == "both"                # doc anchored by the session, not pure-doc
     assert ini["commits"] == 3
     assert ini["momentum"] == "active"
     assert ini["open_prs"] == [{"number": 42, "title": "mail extractor"}]
@@ -1151,7 +1157,11 @@ def test_build_report_tmux_annotates_and_lists_unmatched(tmp_path, monkeypatch):
     monkeypatch.setattr(isc, "gh_merged_prs", lambda r, d: [])
     # build_report now single-walks transcripts via collect_session_records (genesis is
     # derived from it); stub that so the orchestration test stays hermetic.
-    monkeypatch.setattr(isc, "collect_session_records", lambda root, d, n=5: [])
+    # SESSIONS-ONLY board: a session must anchor the handoff for its card to exist
+    # (docs no longer float). This session's ai-title overlaps mail+automation.
+    sess = _sess("Mail automation extractor polish", session_id="s1", cwd=str(repo),
+                 last_user_ts=1_900.0, n_turns=10)
+    monkeypatch.setattr(isc, "collect_session_records", lambda root, d, n=5: [sess])
     # Isolate the window/unmatched logic from the real codename table (tested apart).
     monkeypatch.setattr(isc, "load_scratch_codenames", lambda *a, **k: {})
 
@@ -1187,7 +1197,10 @@ def test_build_report_tmux_applies_codenames(tmp_path, monkeypatch):
     monkeypatch.setattr(isc, "gh_merged_prs", lambda r, d: [])
     # build_report now single-walks transcripts via collect_session_records (genesis is
     # derived from it); stub that so the orchestration test stays hermetic.
-    monkeypatch.setattr(isc, "collect_session_records", lambda root, d, n=5: [])
+    # SESSIONS-ONLY: anchor the handoff with a matching session so its card exists.
+    sess = _sess("Mail automation extractor polish", session_id="s1", cwd=str(repo),
+                 last_user_ts=1_900.0, n_turns=10)
+    monkeypatch.setattr(isc, "collect_session_records", lambda root, d, n=5: [sess])
     monkeypatch.setattr(isc, "load_scratch_codenames", lambda *a, **k: {"scratch4": "Vapor"})
 
     panes = [{"session": "scratch4", "window": "2", "cwd": str(repo),
@@ -1209,7 +1222,11 @@ def test_build_report_tmux_no_session_marker(tmp_path, monkeypatch):
     monkeypatch.setattr(isc, "gh_merged_prs", lambda r, d: [])
     # build_report now single-walks transcripts via collect_session_records (genesis is
     # derived from it); stub that so the orchestration test stays hermetic.
-    monkeypatch.setattr(isc, "collect_session_records", lambda root, d, n=5: [])
+    # SESSIONS-ONLY: anchor the lonely handoff with a matching session so a card exists
+    # (its slug is a single unique token, so a 1-token overlap anchors it).
+    sess = _sess("Lonely task cleanup", session_id="s1", cwd=str(repo),
+                 last_user_ts=1_900.0, n_turns=10)
+    monkeypatch.setattr(isc, "collect_session_records", lambda root, d, n=5: [sess])
 
     # No panes at all -> initiative shows [no session].
     report = isc.build_report(14, repos=[str(repo)], client=None,
@@ -1269,9 +1286,11 @@ def _stub_no_external_io(monkeypatch):
     monkeypatch.setattr(isc, "collect_session_records", lambda root, d, n=5: [])
 
 
-def test_build_report_windows_out_stale_dated_handoff(tmp_path, monkeypatch):
-    # The reported bug: an old, done handoff whose fs-mtime got bulk-clobbered to
-    # "recent" must NOT surface in a short window — its AUTHORED date is what counts.
+def test_build_report_windows_out_by_session_recency_not_doc_date(tmp_path, monkeypatch):
+    # SESSIONS-ONLY windowing: the board keeps/drops a card by its SESSION recency, not
+    # the handoff's date/mtime. Two handoffs, each anchored by a session — one session
+    # touched 1d ago (in a 4d window), one touched 19d ago (out of 4d, in 30d). The docs'
+    # authored dates are deliberately NOT the windowing signal any more.
     import calendar
     now = float(calendar.timegm((2026, 7, 5, 0, 0, 0, 0, 0, 0)))
     repo = tmp_path / "r"
@@ -1279,8 +1298,15 @@ def test_build_report_windows_out_stale_dated_handoff(tmp_path, monkeypatch):
     (repo / "claudedocs" / "handoff-fresh-2026-07-04.md").write_text(
         "# Handoff: fresh\n## Next steps\n1. go\n")
     (repo / "claudedocs" / "handoff-stale-2026-06-16.md").write_text(
-        "# Handoff: stale\n## Next steps\n1. go\n")  # fs-mtime real-now, but dated 06-16
+        "# Handoff: stale\n## Next steps\n1. go\n")
     _stub_no_external_io(monkeypatch)
+    # Anchoring sessions (single-token unique slugs -> a 1-token overlap anchors each).
+    fresh_sess = _sess("Fresh feature build", session_id="sf", cwd=str(repo),
+                       last_user_ts=now - isc.DAY, n_turns=10)
+    stale_sess = _sess("Stale cleanup task", session_id="ss", cwd=str(repo),
+                       last_user_ts=now - 19 * isc.DAY, n_turns=10)
+    monkeypatch.setattr(isc, "collect_session_records",
+                        lambda root, d, n=5: [fresh_sess, stale_sess])
 
     fresh_only = isc.build_report(4, repos=[str(repo)], client=None, now=now)
     assert {i["slug"] for i in fresh_only["by_repo"].get(str(repo), [])} == {"fresh"}
@@ -1288,11 +1314,14 @@ def test_build_report_windows_out_stale_dated_handoff(tmp_path, monkeypatch):
     # Widen the window and the stale one resurfaces (not dropped, just out-of-window).
     both = isc.build_report(30, repos=[str(repo)], client=None, now=now)
     assert {i["slug"] for i in both["by_repo"].get(str(repo), [])} == {"fresh", "stale"}
+    # Both are session-anchored -> source is "both", never pure "doc".
+    assert {i["source"] for i in both["by_repo"][str(repo)]} == {"both"}
 
 
-def test_build_report_keeps_stale_handoff_with_live_session(tmp_path, monkeypatch):
-    # An old handoff still being worked (a live tmux session on it) stays — and reads
-    # active — even though its authored date is far outside the window.
+def test_build_report_live_pane_without_session_is_unmatched_not_a_card(tmp_path, monkeypatch):
+    # SESSIONS-ONLY: a live tmux pane is NOT a Claude session record — on its own it can no
+    # longer resurrect a stale, session-less handoff into a card. With no anchoring session,
+    # the doc is dropped and the live pane surfaces as UNMATCHED (the Live-now feed) instead.
     import calendar
     now = float(calendar.timegm((2026, 7, 5, 0, 0, 0, 0, 0, 0)))
     repo = tmp_path / "r"
@@ -1307,8 +1336,36 @@ def test_build_report_keeps_stale_handoff_with_live_session(tmp_path, monkeypatc
     report = isc.build_report(4, repos=[str(repo)], client=None, now=now,
                               include_tmux=True, panes=panes)
     inis = report["by_repo"].get(str(repo), [])
+    assert inis == []                                     # session-less handoff -> no card
+    # ...but the live pane is still visible, as an unmatched live session (Live-now source).
+    assert any(u["id"] == "main:8-1" for u in report["tmux_unmatched"])
+
+
+def test_build_report_stale_handoff_with_live_session_stays_active(tmp_path, monkeypatch):
+    # An old handoff still being worked (a Claude session anchors it) stays — and reads
+    # active — because a LIVE tmux pane on it counts as touched-now, even though both its
+    # authored date AND its last user-turn are far outside the window.
+    import calendar
+    now = float(calendar.timegm((2026, 7, 5, 0, 0, 0, 0, 0, 0)))
+    repo = tmp_path / "r"
+    (repo / "claudedocs").mkdir(parents=True)
+    (repo / "claudedocs" / "handoff-oldwork-2026-05-01.md").write_text(
+        "# Handoff: oldwork\n## Next steps\n1. go\n")
+    _stub_no_external_io(monkeypatch)
+    monkeypatch.setattr(isc, "load_scratch_codenames", lambda *a, **k: {})
+    # Session anchors the handoff but its last turn is ancient (30d ago, outside the 4d
+    # window) -> only the LIVE pane keeps it in-window and active.
+    sess = _sess("Oldwork migration task", session_id="s1", cwd=str(repo),
+                 last_user_ts=now - 30 * isc.DAY, n_turns=10)
+    monkeypatch.setattr(isc, "collect_session_records", lambda root, d, n=5: [sess])
+
+    panes = [{"session": "8", "window": "1", "cwd": str(repo), "command": "claude",
+              "title": "Continue oldwork task"}]
+    report = isc.build_report(4, repos=[str(repo)], client=None, now=now,
+                              include_tmux=True, panes=panes)
+    inis = report["by_repo"].get(str(repo), [])
     assert len(inis) == 1 and inis[0]["slug"] == "oldwork"
-    assert inis[0]["momentum"] == "active"        # live session => touched now
+    assert inis[0]["momentum"] == "active"        # live pane => touched now
     assert inis[0]["tmux_sessions"] == ["main:8-1"]
 
 
@@ -1327,11 +1384,13 @@ def test_build_report_last_session_from_user_turn_not_mtime(tmp_path, monkeypatc
         "# Handoff: widget\n## Next steps\n1. go\n")   # dated 07-01 -> doc freshness stalled too
     _stub_no_external_io(monkeypatch)
     old_turn = now - 20 * isc.DAY                       # ~2026-07-05, a genuine old interaction
-    rec = {"genesis": "resume handoff-widget-2026-07-01.md",
-           "mtime": now - 1800,                         # in-place-rewrite bump: ~30m ago
-           "last_user_ts": old_turn,
-           "cwd": str(repo), "branch": "main",
-           "turns": [{"text": "resume handoff-widget-2026-07-01.md", "ts": old_turn}]}
+    # A session whose ai-title anchors the widget handoff (source=both). Its fs-mtime was
+    # bumped to ~30m ago by an in-place metadata rewrite, but its last genuine user turn is
+    # 20d old — momentum must read from the turn, not the mtime.
+    rec = _sess("Widget rendering task", session_id="s1", cwd=str(repo), branch="main",
+                last_user_ts=old_turn, n_turns=10, genesis="resume handoff-widget",
+                turns=[{"text": "resume handoff-widget", "ts": old_turn}])
+    rec["mtime"] = now - 1800                           # in-place-rewrite bump: ~30m ago
     monkeypatch.setattr(isc, "collect_session_records", lambda root, d, n=5: [rec])
 
     report = isc.build_report(30, repos=[str(repo)], client=None, now=now)
@@ -2296,7 +2355,9 @@ def test_combine_group_with_no_doc_stands_alone_undocumented():
     assert grp["summary"] == "ComfyUI realism pipeline"    # card face from ai-title
 
 
-def test_combine_dormant_nonhandoff_doc_kept_only_if_structured():
+def test_combine_dormant_nonhandoff_docs_all_dropped_when_unanchored():
+    # SESSIONS-ONLY: with NO session anchoring them, EVERY doc/extra is dropped — even a
+    # handoff-structured one. A doc never creates a card on its own any more.
     structured = isc._doc_to_initiative({
         "repo": R, "slug": "SESSION-HANDOFF", "title": "Session Handoff notes",
         "summary": "s", "date": None, "mtime": 1.0, "next_step": "go",
@@ -2308,9 +2369,7 @@ def test_combine_dormant_nonhandoff_doc_kept_only_if_structured():
         "path": "/r/claudedocs/DESIGN.md", "is_handoff": False,
         "handoff_structured": False})
     out = isc.combine_docs_and_groups([], [structured, plain], [])
-    slugs = {i["slug"] for i in out}
-    assert "SESSION-HANDOFF" in slugs      # handoff-structured -> kept (dormant, source=doc)
-    assert "DESIGN" not in slugs           # unstructured + unanchored -> dropped (anti-flood)
+    assert out == []                       # no session behind either -> neither emitted
 
 
 def test_combine_anchor_overrides_structural_gate_for_nonhandoff_doc():
@@ -2439,3 +2498,110 @@ def test_build_report_session_anchors_existing_handoff_slug_unchanged(tmp_path, 
     assert ini["slug"] == "mail-automation"                # byte-identical handoff slug
     assert ini["source"] == "both"                         # doc anchored the session group
     assert ini["session_ids"] == ["sess-9"]
+
+
+# --------------------------------------------------------------------------- #
+# SESSIONS-ONLY board: docs enrich but never create/float/time a card
+# --------------------------------------------------------------------------- #
+def test_build_report_unanchored_handoff_is_not_emitted(tmp_path, monkeypatch):
+    # A handoff with NO session behind it must NOT become a card (owner: "sessions only").
+    import calendar
+    now = float(calendar.timegm((2026, 7, 25, 0, 0, 0, 0, 0, 0)))
+    repo = tmp_path / "devrc"
+    (repo / "claudedocs").mkdir(parents=True)
+    (repo / "claudedocs" / "handoff-mail-automation-2026-07-24.md").write_text(NEXT_DOC)
+    monkeypatch.setattr(isc, "git_branches", lambda r: [])
+    monkeypatch.setattr(isc, "git_default_branch", lambda r: "main")
+    monkeypatch.setattr(isc, "gh_open_prs", lambda r: [])
+    monkeypatch.setattr(isc, "gh_merged_prs", lambda r, d: [])
+    monkeypatch.setattr(isc, "worktree_canonical_map", lambda repos: {})
+    monkeypatch.setattr(isc, "collect_session_records", lambda root, d, n=5: [])  # no sessions
+
+    report = isc.build_report(14, repos=[str(repo)], client=None, now=now)
+    assert report["by_repo"].get(str(repo), []) == []      # pure-doc card dropped
+
+
+def test_build_report_both_card_adopts_doc_summary_and_next_step(tmp_path, monkeypatch):
+    # A session that best-title-matches a handoff becomes source="both" AND adopts the
+    # handoff's summary/next_step for the expanded card detail (enrichment preserved).
+    import calendar
+    now = float(calendar.timegm((2026, 7, 25, 0, 0, 0, 0, 0, 0)))
+    repo = tmp_path / "devrc"
+    (repo / "claudedocs").mkdir(parents=True)
+    (repo / "claudedocs" / "handoff-mail-automation-2026-07-24.md").write_text(NEXT_DOC)
+    monkeypatch.setattr(isc, "git_branches", lambda r: [])
+    monkeypatch.setattr(isc, "git_default_branch", lambda r: "main")
+    monkeypatch.setattr(isc, "gh_open_prs", lambda r: [])
+    monkeypatch.setattr(isc, "gh_merged_prs", lambda r, d: [])
+    monkeypatch.setattr(isc, "worktree_canonical_map", lambda repos: {})
+    sess = _sess("Mail automation shipping polish", session_id="sess-9", cwd=str(repo),
+                 last_user_ts=now - 3600, n_turns=10)
+    monkeypatch.setattr(isc, "collect_session_records", lambda root, d, n=5: [sess])
+
+    report = isc.build_report(14, repos=[str(repo)], client=None, now=now)
+    ini = report["by_repo"][str(repo)][0]
+    assert ini["source"] == "both"
+    assert ini["summary"] == "Automate the inbox."        # adopted from the handoff Goal
+    assert ini["next_step"].startswith("Ship the extractor")  # adopted from the handoff
+    assert ini["session_ids"] == ["sess-9"]
+
+
+def test_build_report_both_card_timed_by_session_not_doc_mtime(tmp_path, monkeypatch):
+    # THE timing guarantee: a `both` card whose handoff is FRESH (dateless -> fs mtime,
+    # written just now) but whose last SESSION turn is 3 days old must read the SESSION
+    # age (slowing), never the doc mtime (which would read active). last_touch must equal
+    # the session turn exactly — proving doc mtime no longer contributes.
+    import calendar
+    now = float(calendar.timegm((2026, 7, 25, 0, 0, 0, 0, 0, 0)))
+    repo = tmp_path / "devrc"
+    (repo / "claudedocs").mkdir(parents=True)
+    # Dateless handoff -> doc_touch_epoch falls back to fs mtime (which is real-now, fresh).
+    (repo / "claudedocs" / "handoff-mail-automation.md").write_text(NEXT_DOC)
+    monkeypatch.setattr(isc, "git_branches", lambda r: [])
+    monkeypatch.setattr(isc, "git_default_branch", lambda r: "main")
+    monkeypatch.setattr(isc, "gh_open_prs", lambda r: [])
+    monkeypatch.setattr(isc, "gh_merged_prs", lambda r, d: [])
+    monkeypatch.setattr(isc, "worktree_canonical_map", lambda repos: {})
+    old_turn = now - 3 * isc.DAY
+    sess = _sess("Mail automation shipping polish", session_id="sess-9", cwd=str(repo),
+                 last_user_ts=old_turn, n_turns=10)
+    monkeypatch.setattr(isc, "collect_session_records", lambda root, d, n=5: [sess])
+
+    report = isc.build_report(14, repos=[str(repo)], client=None, now=now)
+    ini = report["by_repo"][str(repo)][0]
+    assert ini["source"] == "both"
+    assert ini["last_touch"] == old_turn                  # SESSION turn, NOT the fresh doc mtime
+    assert ini["momentum"] == "slowing"                   # 3d old; would be "active" off doc mtime
+
+
+def test_build_report_source_distribution_has_no_pure_doc(tmp_path, monkeypatch):
+    # A mixed repo: one session anchors a handoff (both), one standalone session
+    # (session), one handoff with no session (dropped). The emitted `source` set is
+    # exactly {session, both} — zero pure `doc`.
+    import calendar
+    now = float(calendar.timegm((2026, 7, 25, 0, 0, 0, 0, 0, 0)))
+    repo = tmp_path / "devrc"
+    (repo / "claudedocs").mkdir(parents=True)
+    (repo / "claudedocs" / "handoff-mail-automation-2026-07-24.md").write_text(NEXT_DOC)
+    (repo / "claudedocs" / "handoff-orphan-doc-2026-07-24.md").write_text(
+        "# Handoff: orphan doc\n## Next steps\n1. go\n")   # NO session -> must be dropped
+    monkeypatch.setattr(isc, "git_branches", lambda r: [])
+    monkeypatch.setattr(isc, "git_default_branch", lambda r: "main")
+    monkeypatch.setattr(isc, "gh_open_prs", lambda r: [])
+    monkeypatch.setattr(isc, "gh_merged_prs", lambda r, d: [])
+    monkeypatch.setattr(isc, "worktree_canonical_map", lambda repos: {})
+    anchoring = _sess("Mail automation shipping polish", session_id="s-both",
+                      cwd=str(repo), last_user_ts=now - 3600, n_turns=10)
+    standalone = _sess("Grafana alert drift dashboards", session_id="s-solo",
+                       cwd=str(repo), last_user_ts=now - 3600, n_turns=10)
+    monkeypatch.setattr(isc, "collect_session_records",
+                        lambda root, d, n=5: [anchoring, standalone])
+
+    report = isc.build_report(14, repos=[str(repo)], client=None, now=now)
+    inis = report["by_repo"][str(repo)]
+    slugs = {i["slug"] for i in inis}
+    sources = {i["source"] for i in inis}
+    assert sources == {"session", "both"}                 # zero pure "doc"
+    assert "doc" not in sources
+    assert "orphan-doc" not in slugs                      # unanchored handoff dropped
+    assert "mail-automation" in slugs                     # anchored handoff survives as both

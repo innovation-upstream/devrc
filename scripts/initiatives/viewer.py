@@ -1406,24 +1406,24 @@ header .meta{color:var(--gray);font-size:.85rem}
 .detail-doc{color:var(--gray);font-size:.78rem;margin-top:.35rem;word-break:break-all}
 .detail-err{color:var(--red);font-size:.82rem}
 .empty{color:var(--gray);padding:2rem 0}
-/* "Live sessions — not tied to an initiative": the everything-else-running catch-all.
-   Visually SECONDARY to the initiatives (dimmer, denser) but scannable at 30+ rows. */
-.unmatched{margin:1.6rem 0 0;border-top:1px solid var(--bg2);padding-top:.8rem}
-.unmatched > h2{font-size:.9rem;margin:0;color:var(--fg2);cursor:pointer;
-  display:flex;align-items:baseline;gap:.4rem;user-select:none}
-.unmatched > h2:hover{color:var(--fg)}
-.unmatched > h2 .chev{color:var(--gray);font-size:.75rem;width:.8rem}
-.unmatched > h2 .count{color:var(--gray);font-weight:normal;font-size:.8rem}
-.unmatched > h2 .hint{color:var(--gray);font-weight:normal;font-size:.75rem;margin-left:.2rem}
-.unmatched-body{margin-top:.6rem}
-.u-repo{margin:0 0 .5rem}
-.u-repo > h3{font-size:.8rem;margin:0 0 .2rem;color:var(--aqua);font-weight:normal}
-.u-repo > h3 .count{color:var(--gray);margin-left:.35rem}
-.u-row{display:flex;align-items:baseline;gap:.5rem;padding:.05rem 0 .05rem .6rem;
-  font-size:.82rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.u-id{color:var(--green);flex:0 0 auto}
-.u-title{color:var(--fg2);overflow:hidden;text-overflow:ellipsis}
-.u-title.untitled{color:var(--gray);font-style:italic}
+/* The pinned "Live now" strip — EVERY currently-running live session, matched or not. Visually
+   PRIMARY (a green-accented top strip), the first thing seen; dense + scannable at 30+ rows.
+   Always expanded (no chevron). Hidden entirely when there are no live sessions. */
+.livenow{margin:.4rem 0 1rem;background:var(--bg1);border:1px solid var(--bg2);
+  border-left:3px solid var(--green);border-radius:4px;padding:.6rem .8rem}
+.livenow > h2{font-size:.92rem;margin:0 0 .5rem;color:var(--fg);
+  display:flex;align-items:baseline;gap:.4rem}
+.livenow > h2 .ln-dot{color:var(--green);font-weight:bold}
+.livenow > h2 .count{color:var(--gray);font-weight:normal;font-size:.82rem}
+.livenow-body{display:flex;flex-direction:column;gap:.1rem}
+.ln-row{display:flex;align-items:baseline;gap:.5rem;padding:.05rem 0;
+  font-size:.84rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.ln-task{color:var(--fg);overflow:hidden;text-overflow:ellipsis;flex:1 1 auto}
+.ln-repo{color:var(--aqua);flex:0 0 auto;font-size:.78rem}
+.ln-slug{color:var(--green);flex:0 0 auto;font-size:.78rem}
+.ln-id{color:var(--gray);flex:0 0 auto;font-size:.78rem}
+/* An unmatched (below-floor / brand-new) live row reads slightly dimmer than a matched one. */
+.ln-row.unmatched .ln-task{color:var(--fg2)}
 .err{background:#442222;border:1px solid var(--red);color:var(--fg);
   padding:1rem;border-radius:4px}
 .err b{color:var(--red)}
@@ -1680,6 +1680,54 @@ function groupByRepo(views){
 """.strip()
 
 
+# PURE, DOM-FREE "Live now" builder — kept in its OWN snippet (like _GROUP_JS) so the node test
+# evals it directly, exercising the ACTUAL page code (not a Python replica). Substituted into _JS
+# at the __LIVENOW_JS__ placeholder at module load; `renderLiveNow` (in the main body) renders
+# its output.
+#
+# `buildLiveNow(flat, unmatched)` = the UNION of EVERY currently-running live tmux Claude session,
+# so the pinned Live-now strip shows them ALL, matched or not:
+#   (1) every card's `live_tasks` (matched panes) — tagged with that card's slug + repo, and
+#   (2) `live_unmatched` (panes tied to NO card — the below-floor / brand-new sessions) — untagged.
+# De-duped by (task, repo) so a task shown on a card and echoed as unmatched appears once (the
+# matched, slug-tagged row wins because matched rows are pushed FIRST). Sorted by repo, then
+# matched-before-unmatched, then task — dense + scannable like the old unmatched rows. Non-array
+# inputs degrade to [] (the section then simply doesn't render).
+_LIVENOW_JS = r"""
+function buildLiveNow(flat, unmatched){
+  var rows = [], seen = {};
+  function push(task, repo, slug, matched, id){
+    var t = String(task == null ? '' : task).trim();
+    if(!t) return;                                   // a session with no task text is not a row
+    var rn = String(repo == null ? '' : repo).trim() || '(unknown repo)';
+    var k = JSON.stringify([t.toLowerCase(), rn.toLowerCase()]);
+    if(seen[k]) return;                              // same task+repo once (matched wins, pushed first)
+    seen[k] = 1;
+    rows.push({task:t, repo_name:rn, slug:String(slug||''), matched:!!matched, id:String(id||'')});
+  }
+  (Array.isArray(flat) ? flat : []).forEach(function(v){
+    if(!v) return;
+    (Array.isArray(v.live_tasks) ? v.live_tasks : []).forEach(function(t){
+      push(t, v.repo_name, v.slug, true, '');
+    });
+  });
+  (Array.isArray(unmatched) ? unmatched : []).forEach(function(u){
+    if(!u) return;
+    push(u.title, u.repo_name, '', false, u.id);
+  });
+  rows.sort(function(a, b){
+    var ar = a.repo_name.toLowerCase(), br = b.repo_name.toLowerCase();
+    if(ar < br) return -1;
+    if(ar > br) return 1;
+    if(a.matched !== b.matched) return a.matched ? -1 : 1;   // matched (slug-tagged) first
+    var at = a.task.toLowerCase(), bt = b.task.toLowerCase();
+    return at < bt ? -1 : (at > bt ? 1 : 0);
+  });
+  return rows;
+}
+""".strip()
+
+
 # PURE, DOM-FREE card-search predicate — kept in its OWN snippet (like _RECENCY_JS) so the
 # node test evals it directly, exercising the ACTUAL page code rather than a Python replica.
 # `q` is the ALREADY-lowercased, trimmed query (matchQ still re-normalizes internally so it is
@@ -1874,6 +1922,7 @@ _JS = r"""
   __ARCHIVE_JS__
   __ACTIONS_JS__
   __GROUP_JS__
+  __LIVENOW_JS__
   __MATCH_JS__
   __MARKDOWN_JS__
   var el0 = document.getElementById('idata');
@@ -1886,7 +1935,6 @@ _JS = r"""
   // the v3 key, so it starts fresh on the new 'grouped' default instead of being pinned to a
   // stale 'flat'/'recency'. An explicit later choice is still remembered under the v3 key.
   var VIEW_KEY = 'initiatives-view-v3';
-  var UNMATCHED_KEY = 'initiatives-unmatched-collapsed';
   // Per-repo collapse state for the grouped view: a JSON map {repoName: 1} of COLLAPSED repos
   // (absent = expanded, the default). A search/triage filter can force a section open WITHOUT
   // touching this stored preference.
@@ -1899,9 +1947,6 @@ _JS = r"""
   // hides the board and renders the archived list instead. Not persisted (a per-visit view).
   var state = { view: VALID_VIEWS[storedView] ? storedView : 'grouped', q: '', triage: '',
                 doneMode: false };
-  // The catch-all "live sessions" section is collapsible; remember the user's choice.
-  // Default EXPANDED (the whole point is to see every running thread) — set to '1' to collapse.
-  var unmatchedCollapsed = localStorage.getItem(UNMATCHED_KEY) === '1';
   // Header stats (recomputed each render). `emergingTotal` is the "N emerging" stat; `stateCounts`
   // drives the summary header + the triage chips — the four states are MUTUALLY EXCLUSIVE, plus
   // `live` (the overlay badge) which OVERLAPS them.
@@ -1931,6 +1976,7 @@ _JS = r"""
   var LIVE_GLYPH = '●';
 
   var app = document.getElementById('app');
+  var liveNowEl = document.getElementById('livenow');
   var triageBar = document.getElementById('triage');
   var searchInput = document.getElementById('search');
   var footer = document.getElementById('foot');
@@ -2268,63 +2314,44 @@ _JS = r"""
     return c;
   }
 
-  function matchUnmatched(u, q){
-    if(!q) return true;
-    var hay = ((u.id||'') + ' ' + (u.title||'') + ' ' + (u.repo_name||'')).toLowerCase();
-    return hay.indexOf(q) !== -1;
-  }
-
-  // The "everything else running" catch-all: live claude sessions that map to NO
-  // initiative. Grouped by repo, collapsible, visually secondary. Rendered BELOW the
-  // initiatives so the board honestly shows ALL running threads. Empty list → no section.
-  function renderUnmatched(q){
-    var rows = (data.live_unmatched || []).filter(function(u){ return matchUnmatched(u, q); });
-    if(!rows.length) return;  // nothing uncovered (or all filtered out) → no section
-
-    var sec = el('section', 'unmatched');
+  // The pinned, ALWAYS-EXPANDED "Live now" strip. Rendered into #livenow (ABOVE the board, NOT
+  // into `app`, so it survives app.innerHTML resets and is the first thing seen). Shows EVERY
+  // currently-running live tmux Claude session — matched to a card (slug-tagged) OR below-floor /
+  // unmatched — via buildLiveNow's union+dedup. NOT collapsible and NOT search-filtered: it is a
+  // live status header, always current. Empty (no live panes) → the strip hides. All untrusted
+  // text via textContent (el()), never innerHTML.
+  function renderLiveNow(){
+    if(!liveNowEl) return;
+    liveNowEl.innerHTML = '';
+    var rows = buildLiveNow(data.flat || [], data.live_unmatched || []);
+    if(!rows.length){ liveNowEl.style.display = 'none'; return; }
+    liveNowEl.style.display = 'block';
     var h = el('h2');
-    h.appendChild(el('span', 'chev', unmatchedCollapsed ? '▸' : '▾'));
-    h.appendChild(document.createTextNode('Live sessions — not tied to an initiative'));
+    h.appendChild(el('span', 'ln-dot', LIVE_GLYPH));
+    h.appendChild(document.createTextNode(' Live now'));
     h.appendChild(el('span', 'count', '(' + rows.length + ')'));
-    h.appendChild(el('span', 'hint', 'open work the ledger doesn’t cover'));
-    sec.appendChild(h);
-
-    var body = el('div', 'unmatched-body');
-    body.style.display = unmatchedCollapsed ? 'none' : 'block';
-    // rows arrive pre-sorted by (repo, session) so same-repo runs are contiguous → group.
-    var curRepo = null, group = null;
-    rows.forEach(function(u){
-      var name = u.repo_name || '(unknown repo)';
-      if(name !== curRepo){
-        curRepo = name;
-        group = el('div', 'u-repo');
-        var rh = el('h3', null, name);
-        group.appendChild(rh);
-        body.appendChild(group);
+    liveNowEl.appendChild(h);
+    var body = el('div', 'livenow-body');
+    rows.forEach(function(r){
+      var row = el('div', 'ln-row' + (r.matched ? '' : ' unmatched'));
+      row.appendChild(el('span', 'ln-task', r.task));
+      row.appendChild(el('span', 'ln-repo', r.repo_name));
+      if(r.slug){
+        row.appendChild(el('span', 'ln-slug', r.slug));   // matched → its initiative (reference)
+      } else if(r.id){
+        row.appendChild(el('span', 'ln-id', r.id));        // unmatched → the live pane id
       }
-      var row = el('div', 'u-row');
-      row.appendChild(el('span', 'u-id', '[' + (u.id || '?') + ']'));
-      var title = (u.title || '').trim();
-      row.appendChild(el('span', 'u-title' + (title ? '' : ' untitled'),
-                         title || '(untitled)'));
-      group.appendChild(row);
+      body.appendChild(row);
     });
-    sec.appendChild(body);
-
-    h.addEventListener('click', function(){
-      unmatchedCollapsed = !unmatchedCollapsed;
-      localStorage.setItem(UNMATCHED_KEY, unmatchedCollapsed ? '1' : '0');
-      body.style.display = unmatchedCollapsed ? 'none' : 'block';
-      sec.querySelector('.chev').textContent = unmatchedCollapsed ? '▸' : '▾';
-    });
-    app.appendChild(sec);
+    liveNowEl.appendChild(body);
   }
 
-  // The sticky cross-repo triage bar: [⚠ Needs you N] [◑ Stalled N] [~ Cooling N] [● Live N]
-  // [ All ]. Needs-you/Stalled/Cooling filter by `state`; LIVE filters by the overlay BADGE (a
-  // card counts as live regardless of its state); "All" clears. Each composes (AND) with search.
-  // Counts come from `stateCounts` (the full data set; live OVERLAPS the mutually-exclusive
-  // states). Rebuilt each render so counts + the active highlight stay live. No untrusted text.
+  // The sticky cross-repo triage bar: [⚠ Needs you N] [◑ Stalled N] [~ Cooling N] [ All ]. The
+  // old [● Live N] chip is RETIRED — the pinned "Live now" strip above the board is the first-class
+  // home for live sessions now, so a redundant triage chip only fragmented the view. Needs-you/
+  // Stalled/Cooling filter by `state`; "All" clears. Each composes (AND) with search. Counts come
+  // from `stateCounts` (the full data set). Rebuilt each render so counts + the active highlight
+  // stay live. No untrusted text.
   function renderTriage(){
     if(!triageBar) return;
     triageBar.innerHTML = '';
@@ -2333,11 +2360,10 @@ _JS = r"""
       {k:'needs_you', glyph:STATE_GLYPH.needs_you, label:'Needs you', n:stateCounts.needs_you},
       {k:'stalled',   glyph:STATE_GLYPH.stalled,   label:'Stalled',   n:stateCounts.stalled},
       {k:'slowing',   glyph:STATE_GLYPH.slowing,   label:'Cooling',   n:stateCounts.slowing},
-      {k:'live',      glyph:LIVE_GLYPH,            label:'Live',      n:stateCounts.live},
       {k:'',          glyph:'',                    label:'All',       n:null}
     ];
     chips.forEach(function(ch){
-      // A state/live/All chip is only visually active when NOT in Done mode (Done takes over).
+      // A state/All chip is only visually active when NOT in Done mode (Done takes over).
       var on = !state.doneMode &&
         ((ch.k === '') ? (active === '' || active === 'all') : (active === ch.k));
       var b = el('button', 'chip state-' + (ch.k || 'all') + (on ? ' active' : ''), null);
@@ -2423,15 +2449,15 @@ _JS = r"""
     btnGrouped.classList.toggle('active', state.view === 'grouped');
     if(btnRecency) btnRecency.classList.toggle('active', state.view === 'recency');
     if(countEl){
-      // Summary counts (state model v2): N need you · N stalled · N cooling · N live · N active.
-      // The four states are mutually exclusive; `live` is the OVERLAY badge (overlaps them). The
-      // "N emerging" stat + N untracked live sessions ride along.
+      // Summary counts: N need you · N stalled · N cooling · N active. The four states are
+      // mutually exclusive. The "N emerging" stat + the "N live now" pane count (the same union
+      // the pinned Live-now strip shows — EVERY running session, matched or not) ride along; the
+      // old "N live" (card-badge) / "N untracked" split is folded into the single "live now".
       var txt = stateCounts.needs_you + ' need you · ' + stateCounts.stalled + ' stalled · ' +
-                stateCounts.slowing + ' cooling · ' + stateCounts.live + ' live · ' +
-                stateCounts.active + ' active';
+                stateCounts.slowing + ' cooling · ' + stateCounts.active + ' active';
       if(emergingTotal) txt += ' · ' + emergingTotal + ' emerging';
-      var nu = (data.live_unmatched || []).length;
-      if(nu) txt += ' · ' + nu + ' untracked';
+      var lnN = buildLiveNow(data.flat || [], data.live_unmatched || []).length;
+      if(lnN) txt += ' · ' + lnN + ' live now';
       countEl.textContent = txt;
     }
     footer.innerHTML = '';
@@ -2443,6 +2469,9 @@ _JS = r"""
 
   function render(){
     app.innerHTML = '';
+    // The pinned "Live now" strip is refreshed FIRST and lives OUTSIDE `app`, so it stays at the
+    // very top, always expanded, regardless of the board view / Done mode / an error state.
+    renderLiveNow();
     if(!data.ok){
       emergingTotal = 0;
       stateCounts = {needs_you:0, stalled:0, slowing:0, active:0, live:0};
@@ -2527,9 +2556,8 @@ _JS = r"""
       app.appendChild(el('div', 'empty', 'No initiatives match the current filter.'));
     }
     updateSearchCount(shown, totalCards, filtering);
-    // The catch-all live-sessions section renders BELOW the initiatives (honestly showing
-    // every running thread, not just the tagged few). Respects the same search filter.
-    renderUnmatched(q);
+    // Live sessions are shown by the pinned "Live now" strip at the TOP (renderLiveNow, called at
+    // the head of render) — no second below-the-board catch-all section any more.
     updateChrome();
   }
 
@@ -2756,6 +2784,7 @@ _JS = _JS.replace("__STATEFILTER_JS__", _STATEFILTER_JS)
 _JS = _JS.replace("__ARCHIVE_JS__", _ARCHIVE_JS)
 _JS = _JS.replace("__ACTIONS_JS__", _ACTIONS_JS)
 _JS = _JS.replace("__GROUP_JS__", _GROUP_JS)
+_JS = _JS.replace("__LIVENOW_JS__", _LIVENOW_JS)
 _JS = _JS.replace("__MATCH_JS__", _MATCH_JS)
 _JS = _JS.replace("__MARKDOWN_JS__", _MARKDOWN_JS)
 
@@ -2843,10 +2872,14 @@ def render_html(model: dict | None, error: str | None = None,
         '</aside>'
     )
     js = _JS.replace("__REFRESH_MS__", str(int(refresh) * 1000))
+    # The pinned, ALWAYS-EXPANDED "Live now (N)" strip — every currently-running live tmux Claude
+    # session, matched to a card or not. First thing seen (above the triage bar); populated
+    # client-side by renderLiveNow from the JSON island (flat + live_unmatched).
+    livenow = '<section id="livenow" class="livenow" aria-label="live sessions"></section>'
     # The sticky cross-repo triage bar (chips populated client-side from the live state counts).
     triage = '<nav id="triage" class="triage" aria-label="triage filters"></nav>'
     return (
-        head + header + triage +
+        head + header + livenow + triage +
         '<main id="app"></main>' + chat +
         '<footer id="foot"></footer>'
         '<script id="idata" type="application/json">' + payload + '</script>'

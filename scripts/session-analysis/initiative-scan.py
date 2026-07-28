@@ -1199,16 +1199,24 @@ def load_extra_doc_initiatives(repos: list[str]) -> list[dict]:
 
 def combine_docs_and_groups(doc_inis: list[dict], extra_inis: list[dict],
                             groups: list[dict]) -> list[dict]:
-    """Fuse doc initiatives with session-derived groups (docs ENRICH, don't create).
+    """Fuse doc initiatives with session-derived groups — SESSIONS ONLY (docs ENRICH,
+    never create/float).
 
     For each session group, find its single best-overlapping doc/extra initiative in the
     SAME repo (`best_title_match` with the group's topic tokens as the query — the inverse
     indexing of the design's phrasing, chosen so a group adopts exactly one anchor slug
     unambiguously; the qualification bar is identical). On a match the group folds into
-    that doc initiative (session_ids merged, source="both", adopting the doc's slug); with
-    no match the group stands alone (source="session", undocumented). A non-handoff extra
-    is dropped unless it was anchored OR is handoff-structured (the anti-flood gate).
-    Handoff-cluster doc initiatives always survive here (the momentum window filters later).
+    that doc initiative (session_ids merged, source="both", adopting the doc's
+    slug/summary/next_step/open_investigations for the expanded detail); with no match the
+    group stands alone (source="session", undocumented).
+
+    SESSIONS-ONLY EMIT (owner decision): a card is EMITTED only when a session backs it.
+    Every doc/extra initiative that did NOT get anchored by a session (i.e. stayed
+    source="doc") is DROPPED here — a handoff with no live session behind it must never
+    become a card, and (handled in `main`) a doc's mtime must never time a card. Docs
+    still ANCHOR + ENRICH (a matched handoff flips its group to source="both" and lends
+    its summary/next_step), but a standalone doc no longer floats to the board. Net: the
+    returned `source` set is exactly {session, both} — zero pure `doc`.
     """
     docs_by_repo: dict[str, list[dict]] = {}
     for d in doc_inis + extra_inis:
@@ -1257,9 +1265,14 @@ def combine_docs_and_groups(doc_inis: list[dict], extra_inis: list[dict],
             ordered = [t for _ts, t in sorted(adopt_search, key=lambda x: x[0])]
             d["search_text"] = _merge_search_texts([d.get("search_text") or ""] + ordered)
 
-    kept_extras = [d for d in extra_inis
-                   if d["source"] == "both" or d.get("handoff_structured")]
-    return doc_inis + kept_extras + standalone
+    # SESSIONS-ONLY: keep a doc/extra initiative ONLY when a session anchored it
+    # (source flipped to "both"). Un-anchored handoff clusters (source="doc") and
+    # standalone / handoff-structured extras that no session touched are DROPPED — a
+    # doc never creates a card. `standalone` are the un-anchored session groups
+    # (source="session"). Result: source ∈ {both, session} only.
+    kept_docs = [d for d in doc_inis if d["source"] == "both"]
+    kept_extras = [d for d in extra_inis if d["source"] == "both"]
+    return kept_docs + kept_extras + standalone
 
 
 # --------------------------------------------------------------------------- #
@@ -2258,17 +2271,19 @@ def build_report(days: int, repos: list[str] | None = None,
             tmux_unmatched = match_tmux_to_initiatives(initiatives, live_panes, repos,
                                                        wt_map, codenames)
 
-    # Compute momentum from the MAX of every touch signal. Note doc freshness comes
-    # from the handoff's AUTHORED date (doc_touch_epoch), not filesystem mtime, which
-    # a bulk git checkout clobbers. A LIVE tmux session on the initiative counts as
-    # touched-now — open work is active regardless of how old its handoff is.
+    # Compute momentum from the MAX of every SESSION-DERIVED touch signal. The board is
+    # sessions-only, so timing is sessions-only too: a doc's mtime/authored-date
+    # (doc_touch_epoch) must NEVER set last_touch — a `both` card whose handoff was just
+    # rewritten but whose last session turn was 3 days ago has to read ~3 days, not
+    # "minutes". So doc freshness is deliberately OMITTED here (it only ever anchored/
+    # enriched a card; it never times one). A LIVE tmux session on the initiative counts
+    # as touched-now — open work is active regardless of how old its handoff is.
     for ini in initiatives:
         live_session = now_epoch if ini.get("tmux_sessions") else None
         ini["last_touch"] = newest_touch(
             ini.get("last_commit"),
             ini.get("telem_last"),
             ini.get("last_session"),
-            doc_touch_epoch(ini),
             live_session,
         )
         ini["momentum"] = classify_momentum(ini["last_touch"], now)

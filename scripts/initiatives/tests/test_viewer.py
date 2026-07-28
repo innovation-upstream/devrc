@@ -1034,28 +1034,34 @@ def test_model_to_json_includes_live_unmatched_ok_and_error():
     assert viewer.model_to_json(None, "store down")["live_unmatched"] == []
 
 
-def test_render_html_renders_live_unmatched_section_and_escapes():
+def test_render_html_livenow_strip_pinned_and_escapes():
+    # The pinned "Live now" strip: its data rides the JSON island (live_unmatched here) and it is
+    # rendered client-side by renderLiveNow/buildLiveNow into the #livenow container at the top.
     model = viewer.build_model([_row(slug="s")], now=NOW, unmatched=[
         _um("Pool-6", "<script>alert('u')</script>", repo="/home/zach/workspace/civitai")])
     html = viewer.render_html(model)
-    # the section + its data ride the JSON island + JS (rendered client-side)
-    assert "Live sessions — not tied to an initiative" in html
-    assert "renderUnmatched" in html
+    assert 'id="livenow"' in html                        # the pinned container element
+    assert "function renderLiveNow(" in html             # rendered client-side
+    assert "function buildLiveNow(" in html              # union+dedup builder shipped
+    assert "renderUnmatched" not in html                 # the old catch-all is gone
+    assert "Live sessions — not tied to an initiative" not in html
     assert '"live_unmatched"' in html
     assert "Pool-6" in html                              # session id in the payload
     assert "<script>alert('u')</script>" not in html     # untrusted title never raw
     assert "u003cscript" in html                         # neutralized in the island
+    # #livenow appears in the body BEFORE the sticky triage bar (first thing seen).
+    assert html.index('id="livenow"') < html.index('id="triage"')
 
 
-def test_render_html_no_section_when_live_unmatched_empty():
-    # empty list → the JSON island carries [] and the JS early-returns (no section rows).
+def test_render_html_livenow_hides_when_no_live_sessions():
+    # No live panes → renderLiveNow hides the strip (buildLiveNow returns []) — no empty section.
     model = viewer.build_model([_row(slug="s")], now=NOW, unmatched=[])
     j = viewer.model_to_json(model, None)
     assert j["live_unmatched"] == []
     html = viewer.render_html(model)
     assert '"live_unmatched": []' in html or '"live_unmatched":[]' in html
-    # the renderer guards on length (no rows → no <section>)
-    assert "if(!rows.length) return;" in viewer._JS
+    # the renderer hides the strip when there are no rows
+    assert "if(!rows.length){ liveNowEl.style.display = 'none'; return; }" in viewer._JS
 
 
 # --- multi-pane cosmetic: show ALL matched live tasks, not just the first ----- #
@@ -2303,7 +2309,7 @@ def test_js_group_unknown_repo_name_bucketed():
 def _card_body():
     js = viewer._JS
     ci = js.index("function card(")
-    return js[ci:js.index("function matchUnmatched(")]
+    return js[ci:js.index("function renderLiveNow(")]
 
 
 def test_js_card_is_two_line_with_badge_slug_age_and_emerging():
@@ -2370,12 +2376,13 @@ def test_js_triage_bar_wired():
     js = viewer._JS
     assert "function renderTriage(" in js
     assert "state.triage" in js
-    # v2: FIVE chips — Needs you / Stalled / Cooling / Live / All.
+    # v3: FOUR chips — Needs you / Stalled / Cooling / All. The old [● Live N] chip is RETIRED
+    # (the pinned Live-now strip replaces it).
     assert "label:'Needs you'" in js and "label:'Stalled'" in js
-    assert "label:'Cooling'" in js and "label:'Live'" in js and "label:'All'" in js
-    # the Cooling chip filters the `slowing` state; Live filters by the overlay badge.
+    assert "label:'Cooling'" in js and "label:'All'" in js
+    assert "label:'Live'" not in js                       # the Live triage chip is gone
+    # the Cooling chip filters the `slowing` state.
     assert "k:'slowing'" in js
-    assert "if(sf === 'live') return !!v && !!v.live;" in js
     # counts come from stateCounts; a chip click sets state.triage and re-renders.
     assert "stateCounts.needs_you" in js and "stateCounts.slowing" in js
     assert "state.triage = ch.k" in js
@@ -2435,11 +2442,13 @@ def test_render_html_has_sticky_triage_bar_container():
 
 def test_render_html_summary_header_shows_state_counts():
     html = viewer.render_html(viewer.build_model([_row(slug="s")], now=NOW))
-    # the header count text is the state tally (client-side, from stateCounts): v2 order is
-    # need you · stalled · cooling · live · active (live is the overlap).
+    # the header count text is the state tally (client-side, from stateCounts): v3 order is
+    # need you · stalled · cooling · active, plus a "N live now" pane count that rides along.
     assert "' need you · '" in html and "' stalled · '" in html
-    assert "' cooling · '" in html and "' live · '" in html
+    assert "' cooling · '" in html
     assert "' active'" in html
+    assert "' live · '" not in html            # the old card-badge "N live" stat is retired
+    assert "' live now'" in html               # replaced by the Live-now pane union count
 
 
 # --- render smoke: no exceptions; page has the key Phase-1 surfaces ---------- #
@@ -3053,3 +3062,156 @@ def test_regression_ask_sidebar_still_opens_and_submits_from_its_own_button():
     assert "if(chat.hidden) openChat(); else closeChat();" in js
     assert "chatForm.addEventListener('submit'" in js               # the form submit intact
     assert "submitQuestion((chatInput.value || '').trim())" in js
+
+
+# --------------------------------------------------------------------------- #
+# SESSIONS-ONLY board: the pinned "Live now" strip (buildLiveNow union+dedup),
+# retiring the collapsed catch-all + the ● Live triage chip. buildLiveNow is
+# node-eval'd (the ACTUAL page builder, not a Python replica) like groupByRepo/matchQ.
+# --------------------------------------------------------------------------- #
+def _node_livenow(flat, unmatched):
+    node = _shutil.which("node")
+    if not node:
+        import pytest
+        pytest.skip("node not on PATH — buildLiveNow JS untested this run")
+    body = (
+        "var FLAT = " + json.dumps(flat) + ";\n"
+        "var UM = " + json.dumps(unmatched) + ";\n"
+        "console.log(JSON.stringify(buildLiveNow(FLAT, UM)));"
+    )
+    out = _subprocess.run([node, "-e", viewer._LIVENOW_JS + "\n" + body],
+                          capture_output=True, text=True, timeout=30)
+    assert out.returncode == 0, out.stderr
+    return json.loads(out.stdout)
+
+
+def test_js_livenow_unions_every_live_pane_count_is_total():
+    # EVERY live pane shows: matched cards' live_tasks + the unmatched (below-floor) panes.
+    flat = [
+        {"slug": "aa", "repo_name": "devrc", "live_tasks": ["task one", "task two"]},
+        {"slug": "bb", "repo_name": "civitai", "live_tasks": ["task three"]},
+        {"slug": "cc", "repo_name": "homelab", "live_tasks": []},   # a card with no live pane
+    ]
+    unmatched = [
+        {"id": "Pool-6", "title": "below-floor work", "repo_name": "devrc"},
+        {"id": "x-1", "title": "brand new thread", "repo_name": "homelab"},
+    ]
+    rows = _node_livenow(flat, unmatched)
+    # 3 matched tasks + 2 unmatched panes = 5 rows == total live panes.
+    assert len(rows) == 5
+    tasks = sorted(r["task"] for r in rows)
+    assert tasks == sorted(["task one", "task two", "task three",
+                            "below-floor work", "brand new thread"])
+    # matched rows carry their initiative slug; unmatched rows do not.
+    by_task = {r["task"]: r for r in rows}
+    assert by_task["task one"]["slug"] == "aa" and by_task["task one"]["matched"] is True
+    assert by_task["task three"]["slug"] == "bb"
+    assert by_task["below-floor work"]["slug"] == "" and by_task["below-floor work"]["matched"] is False
+    assert by_task["below-floor work"]["id"] == "Pool-6"
+
+
+def test_js_livenow_below_floor_unmatched_session_appears():
+    # A brand-new / below-the-initiative-floor session (only in live_unmatched, no card) is
+    # still shown in Live-now — the whole point of the pinned strip.
+    rows = _node_livenow([], [{"id": "z-1", "title": "short new session", "repo_name": "devrc"}])
+    assert len(rows) == 1
+    assert rows[0]["task"] == "short new session"
+    assert rows[0]["matched"] is False and rows[0]["slug"] == ""
+
+
+def test_js_livenow_matched_rows_show_slug():
+    rows = _node_livenow(
+        [{"slug": "mycard", "repo_name": "devrc", "live_tasks": ["do the thing"]}], [])
+    assert rows == [{"task": "do the thing", "repo_name": "devrc", "slug": "mycard",
+                     "matched": True, "id": ""}]
+
+
+def test_js_livenow_dedups_same_task_and_repo_matched_wins():
+    # A task echoed on a card AND as unmatched (same task+repo) collapses to ONE row — the
+    # matched, slug-tagged one (matched rows are pushed first). Repeated tasks on a card dedup too.
+    flat = [{"slug": "aa", "repo_name": "devrc", "live_tasks": ["dup task", "dup task"]}]
+    unmatched = [{"id": "P-1", "title": "dup task", "repo_name": "devrc"}]
+    rows = _node_livenow(flat, unmatched)
+    assert len(rows) == 1
+    assert rows[0]["slug"] == "aa" and rows[0]["matched"] is True
+    # same task text but a DIFFERENT repo is a distinct row (dedup is task+repo, not task alone).
+    rows2 = _node_livenow(
+        [{"slug": "aa", "repo_name": "devrc", "live_tasks": ["shared task"]}],
+        [{"id": "P-1", "title": "shared task", "repo_name": "civitai"}])
+    assert len(rows2) == 2
+
+
+def test_js_livenow_sorted_by_repo_then_matched_then_task():
+    flat = [{"slug": "z", "repo_name": "devrc", "live_tasks": ["zeta"]}]
+    unmatched = [{"id": "a-1", "title": "alpha", "repo_name": "devrc"},
+                 {"id": "c-1", "title": "gamma", "repo_name": "civitai"}]
+    rows = _node_livenow(flat, unmatched)
+    # civitai (repo) sorts before devrc; within devrc the matched row (zeta) precedes the
+    # unmatched (alpha) despite alpha sorting first alphabetically.
+    assert [(r["repo_name"], r["task"]) for r in rows] == [
+        ("civitai", "gamma"), ("devrc", "zeta"), ("devrc", "alpha")]
+
+
+def test_js_livenow_non_array_and_empty_inputs_are_safe():
+    assert _node_livenow([], []) == []
+    # a task with no text is not a row.
+    assert _node_livenow([{"slug": "a", "repo_name": "devrc", "live_tasks": ["", "  "]}], []) == []
+
+
+def test_js_livenow_null_inputs_return_empty():
+    # buildLiveNow(null,null) / (true,3) → [] (a fake tmux hook returning junk can't crash it).
+    node = _shutil.which("node")
+    if not node:
+        import pytest
+        pytest.skip("node not on PATH — buildLiveNow JS untested this run")
+    body = "console.log(JSON.stringify([buildLiveNow(null,null), buildLiveNow(true,3)]));"
+    out = _subprocess.run([node, "-e", viewer._LIVENOW_JS + "\n" + body],
+                          capture_output=True, text=True, timeout=30)
+    assert out.returncode == 0, out.stderr
+    assert json.loads(out.stdout) == [[], []]
+
+
+def test_js_old_unmatched_catchall_is_removed():
+    js = viewer._JS
+    assert "renderUnmatched" not in js            # the collapsed catch-all fn is gone
+    assert "matchUnmatched" not in js             # its search predicate is gone
+    assert "Live sessions — not tied to an initiative" not in js
+    assert "function renderLiveNow(" in js        # replaced by the pinned strip
+    assert "function buildLiveNow(" in js
+
+
+def test_render_smoke_livenow_matched_unmatched_and_no_doc_card():
+    # A sessions-only board: a standalone session card + a doc-anchored `both` card that has a
+    # LIVE pane, plus a below-floor unmatched live session. render must not raise; the pinned
+    # #livenow strip is present ABOVE the board; the old catch-all + Live chip are gone; the
+    # JSON island carries NO source=="doc" card (the store is sessions-only now).
+    both = _row(slug="mail-automation", source="both",
+                tmux_tasks=["Ship the mail extractor"])          # a live pane on a `both` card
+    session = _row(slug="comfyui-pipeline", source="session", repo="/home/zach/workspace/civitai",
+                   title="ComfyUI pipeline", tmux_tasks=[])       # a session-only card, no live pane
+    model = viewer.build_model([both, session], now=NOW,
+                               unmatched=[_um("Pool-9", "below-floor exploration")])
+    html = viewer.render_html(model, None)
+    assert html.startswith("<!doctype html>")                    # rendered, no exception
+    assert 'id="livenow"' in html
+    assert html.index('id="livenow"') < html.index('id="triage"')  # pinned above the triage bar
+    assert "renderUnmatched" not in html                         # old catch-all gone
+    assert "label:'Live'" not in html                            # ● Live triage chip gone
+    # the sessions-only island carries session/both sources but NO pure doc card.
+    assert '"source": "doc"' not in html and '"source":"doc"' not in html
+    assert '"source": "both"' in html and '"source": "session"' in html
+    # the live pane + the unmatched session both reach the client (island) for buildLiveNow.
+    assert "Ship the mail extractor" in html                     # a matched live_task
+    assert "below-floor exploration" in html                     # an unmatched live session
+
+
+def test_build_model_is_source_agnostic_and_tolerant_of_legacy_doc_row():
+    # The store is sessions-only, but the viewer must stay TOLERANT: a stray legacy source="doc"
+    # row (or a row with no source key) still builds a card without crashing (no filtering here —
+    # sessions-only is enforced upstream in the scan, not re-litigated in the pure render layer).
+    rows = [_row(slug="legacy", source="doc"), _row(slug="nosrc")]
+    rows[1].pop("source", None)
+    model = viewer.build_model(rows, now=NOW)
+    slugs = {v["slug"] for v in model["flat"]}
+    assert slugs == {"legacy", "nosrc"}
+    assert next(v for v in model["flat"] if v["slug"] == "nosrc")["source"] == ""
