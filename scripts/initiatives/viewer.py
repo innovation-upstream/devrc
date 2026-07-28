@@ -1358,6 +1358,21 @@ header .meta{color:var(--gray);font-size:.85rem}
 .repo.collapsible > h2 .chev{color:var(--gray);font-size:.75rem;width:.8rem;flex:0 0 auto}
 .repo.collapsible > h2 .count{margin-left:0}
 .repo-body{margin-top:.3rem}
+/* §3 (change C) — the PINNED "⚠ Needs you" section at the very top of the board body. Orange-
+   accented to match the needs_you state so what needs the owner reads as the escalation it is.
+   NOT collapsible (it's the whole point of the page); hidden entirely when nothing needs you. */
+.needsyou{margin:.2rem 0 1.2rem;padding:.2rem .7rem .3rem;border-left:3px solid var(--orange);
+  background:var(--bg1);border-radius:4px}
+.needsyou[hidden]{display:none}
+.needsyou > h2{font-size:.95rem;margin:.35rem 0 .5rem;color:var(--orange);
+  border-bottom:1px dotted var(--bg2);padding-bottom:.25rem}
+.needsyou > h2 .count{color:var(--gray);font-weight:normal;font-size:.8rem;margin-left:.4rem}
+/* §6 (change C) — the COLLAPSED "~ Cooling" fold at the BOTTOM, holding cooling + stalled cards.
+   Reuses the collapsible repo chrome (`.repo.collapsible`) but carries a yellow (cooling) accent
+   and its own collapse persistence (data-fold, not per-repo). Default collapsed. */
+.repo.cooling{border-left:3px solid var(--yellow);border-radius:4px;padding:.2rem .7rem;
+  background:var(--bg1)}
+.repo.cooling > h2{color:var(--yellow);border-bottom:1px dotted var(--bg2)}
 /* The sticky cross-repo triage bar — filter chips that narrow every group to one state. */
 .triage{position:sticky;top:0;z-index:10;display:flex;flex-wrap:wrap;gap:.4rem;
   background:var(--bg);border-bottom:1px solid var(--bg2);padding:.5rem 0;margin:0 0 1rem}
@@ -1523,9 +1538,12 @@ header .meta{color:var(--gray);font-size:.85rem}
    glanceable. Hidden entirely when there are no live sessions. */
 .livenow{margin:.4rem 0 1rem;background:var(--bg1);border:1px solid var(--bg2);
   border-left:3px solid var(--green);border-radius:4px;padding:.6rem .8rem}
-.livenow > h2{font-size:.92rem;margin:0 0 .5rem;color:var(--fg);
-  display:flex;align-items:baseline;gap:.4rem}
+.livenow > h2{font-size:.92rem;margin:0;color:var(--fg);
+  display:flex;align-items:baseline;gap:.4rem;cursor:pointer;user-select:none}
+/* When the strip is OPEN (showing rows) the header keeps a gap under it; collapsed = a bare line. */
+.livenow.open > h2{margin:0 0 .5rem}
 .livenow > h2 .ln-dot{color:var(--green);font-weight:bold}
+.livenow > h2 .ln-chev{color:var(--gray);font-size:.75rem;flex:0 0 auto;margin-left:auto}
 .livenow > h2 .count{color:var(--gray);font-weight:normal;font-size:.82rem}
 .livenow-body{display:flex;flex-direction:column;gap:.1rem}
 /* A row keeps task + age + repo/slug CLOSE together (task doesn't stretch to the full width and
@@ -2272,6 +2290,18 @@ _JS = r"""
     try { localStorage.setItem(REPO_COLLAPSE_KEY, JSON.stringify(m)); } catch(e){}
   }
 
+  // §6 (change C) — the bottom "~ Cooling" fold collapse state. DEFAULT COLLAPSED (the cooling +
+  // stalled cards are deferred noise): stored as a single flag, distinct from the per-repo map. A
+  // search / a Cooling|Stalled chip force-opens it (auto-expand), without touching this preference.
+  var COOLING_COLLAPSE_KEY = 'initiatives-cooling-collapsed';
+  function isCoolingCollapsed(){
+    // Absent → collapsed (default). Only an explicit '0' (the user expanded it) reads as open.
+    try { return localStorage.getItem(COOLING_COLLAPSE_KEY) !== '0'; } catch(e){ return true; }
+  }
+  function setCoolingCollapsed(collapsed){
+    try { localStorage.setItem(COOLING_COLLAPSE_KEY, collapsed ? '1' : '0'); } catch(e){}
+  }
+
   // The derived-state glyphs/labels for the two-line card + the triage chips (mirrors the Python
   // STATE_* precedence + the momentum colours the owner knows). ⚠ needs_you (orange) · ◑ stalled
   // (gray) · ~ slowing/"cooling" (yellow) · → active (blue/green). `● live` is the SEPARATE green
@@ -2282,6 +2312,7 @@ _JS = r"""
 
   var app = document.getElementById('app');
   var liveNowEl = document.getElementById('livenow');
+  var needsYouEl = document.getElementById('needsyou');   // §3 pinned needs-you section (change C)
   var triageBar = document.getElementById('triage');
   var searchInput = document.getElementById('search');
   var footer = document.getElementById('foot');
@@ -2532,8 +2563,11 @@ _JS = r"""
       target = find();
       if(!target) return false;
     }
-    // If the card sits in a COLLAPSED grouped repo-section, expand that section first so the card
-    // is visible (the card element always exists — only the body's display is toggled).
+    // If the card sits in a COLLAPSED collapsible section — a grouped repo section OR the §6
+    // "~ Cooling" fold — expand that section first so the card is visible (the card element always
+    // exists; only the body's display is toggled). Both use `.repo.collapsible` + `.repo-body`, so
+    // ONE lookup covers them; the enclosing h2's data attr says which persistence to flip
+    // (data-repo → per-repo map; data-fold="cooling" → the cooling flag).
     var body = target.closest ? target.closest('.repo-body') : null;
     if(body && body.style && body.style.display === 'none'){
       body.style.display = 'block';
@@ -2544,7 +2578,9 @@ _JS = r"""
       if(sec){
         var h2 = sec.querySelector ? sec.querySelector('h2') : null;
         var nm = h2 && h2.dataset ? h2.dataset.repo : null;
+        var fold = h2 && h2.dataset ? h2.dataset.fold : null;
         if(nm) setRepoCollapsed(nm, false);
+        else if(fold === 'cooling') setCoolingCollapsed(false);
       }
     }
     // Open the card detail via the SAME expand path the card click uses.
@@ -2708,27 +2744,42 @@ _JS = r"""
     return c;
   }
 
-  // The pinned "Live now" strip. Rendered into #livenow (ABOVE the board, NOT into `app`, so it
-  // survives app.innerHTML resets and is the first thing seen). Shows currently-running live tmux
-  // Claude sessions — matched to a card (slug-tagged) OR below-floor / unmatched — via buildLiveNow's
-  // union+dedup, sorted most-recently-active first with a per-row freshness age. To keep the board
-  // GLANCEABLE (the triage chips + first cards must sit near the top, not below a 30-row wall) it
-  // COLLAPSES to the top LIVE_PREVIEW_N by default; a "＋(N−6) more ▸" toggle expands to the full
-  // sorted list and back. The expand state persists in localStorage (LIVENOW_KEY), default COLLAPSED.
-  // Header stays "● Live now (N)" with N = the TOTAL live count. Empty (no live panes) → the strip
-  // hides. All untrusted text via textContent (el()), never innerHTML.
+  // §4 (change C) — the "Live now" strip. Rendered into #livenow (ABOVE the board, NOT into `app`,
+  // so it survives app.innerHTML resets), it shows currently-running live tmux Claude sessions —
+  // matched to a card (slug-tagged) OR below-floor / unmatched — via buildLiveNow's union+dedup,
+  // sorted most-recently-active first with a per-row freshness age.
+  //
+  // TWO-LEVEL COLLAPSE (it must no longer be the biggest/brightest thing — three blind reviewers
+  // said it buried "Needs you"):
+  //   (a) OUTER: collapsed to a ONE-LINE header ("● Live now (N) ▸") by DEFAULT — clicking the
+  //       header toggles it open/closed; persisted in localStorage (LIVENOW_OPEN_KEY, default
+  //       COLLAPSED). An active search/triage filter AUTO-EXPANDS it (so filtered live rows are
+  //       visible, mirroring the section auto-expand).
+  //   (b) INNER (only when open): the top LIVE_PREVIEW_N rows, with a "＋(N−6) more ▸ / ▾ show
+  //       fewer" toggle to the full sorted list (persisted in LIVENOW_MORE_KEY).
+  // Header "● Live now (N)" with N = the (filtered) live count. Empty (no live panes) → hidden.
+  // All untrusted text via textContent (el()), never innerHTML.
   var LIVE_PREVIEW_N = 6;
-  var LIVENOW_KEY = 'initiatives-livenow-expanded';
-  function liveNowExpanded(){
-    try { return localStorage.getItem(LIVENOW_KEY) === '1'; } catch(e){ return false; }
+  var LIVENOW_OPEN_KEY = 'initiatives-livenow-open';    // OUTER collapse (header-only vs rows), default closed
+  var LIVENOW_MORE_KEY = 'initiatives-livenow-expanded'; // INNER top-6 vs full (kept from the prior build)
+  function liveNowOpen(){
+    try { return localStorage.getItem(LIVENOW_OPEN_KEY) === '1'; } catch(e){ return false; }
   }
-  function setLiveNowExpanded(v){
-    try { if(v) localStorage.setItem(LIVENOW_KEY, '1'); else localStorage.removeItem(LIVENOW_KEY); }
+  function setLiveNowOpen(v){
+    try { if(v) localStorage.setItem(LIVENOW_OPEN_KEY, '1'); else localStorage.removeItem(LIVENOW_OPEN_KEY); }
+    catch(e){}
+  }
+  function liveNowMoreExpanded(){
+    try { return localStorage.getItem(LIVENOW_MORE_KEY) === '1'; } catch(e){ return false; }
+  }
+  function setLiveNowMoreExpanded(v){
+    try { if(v) localStorage.setItem(LIVENOW_MORE_KEY, '1'); else localStorage.removeItem(LIVENOW_MORE_KEY); }
     catch(e){}
   }
   function renderLiveNow(){
     if(!liveNowEl) return;
     liveNowEl.innerHTML = '';
+    liveNowEl.classList.remove('open');
     var allRows = buildLiveNow(data.flat || [], data.live_unmatched || []);
     // Fix #2: the ACTIVE board filter ALSO scopes the strip. The search query always applies; the
     // triage state applies EXCEPT in Done mode (there the state chips read inactive, so only the
@@ -2743,17 +2794,31 @@ _JS = r"""
     if(!rows.length){ liveNowEl.style.display = 'none'; return; }   // empty (or empty-under-filter) → hide
     liveNowEl.style.display = 'block';
     var total = rows.length;                                   // the FILTERED count drives preview + more
-    var extra = total - LIVE_PREVIEW_N;
-    var expanded = liveNowExpanded();
-    var shown = (expanded || extra <= 0) ? rows : rows.slice(0, LIVE_PREVIEW_N);
+    // OUTER collapse: header-only by default; a filter forces it open so filtered rows are visible.
+    var open = liveNowOpen() || filtering;
     var h = el('h2');
+    h.setAttribute('role', 'button');
+    h.setAttribute('tabindex', '0');
+    h.title = open ? 'collapse live sessions' : 'expand live sessions';
     h.appendChild(el('span', 'ln-dot', LIVE_GLYPH));
     h.appendChild(document.createTextNode(' Live now'));
     // N = the (filtered) live count; while a filter narrows it, show "(shown of all)" so the
     // scoping is legible; unfiltered → the plain total.
     var countTxt = filtering ? ('(' + total + ' of ' + allRows.length + ')') : ('(' + total + ')');
     h.appendChild(el('span', 'count', countTxt));
+    h.appendChild(el('span', 'ln-chev', open ? '▾' : '▸'));
+    // Clicking the header toggles the STORED open pref (a filter still force-opens until cleared).
+    function toggleOpen(){ setLiveNowOpen(!liveNowOpen()); renderLiveNow(); }
+    h.addEventListener('click', toggleOpen);
+    h.addEventListener('keydown', function(ev){
+      if(ev.key === 'Enter' || ev.key === ' ' || ev.key === 'Spacebar'){ ev.preventDefault(); toggleOpen(); }
+    });
     liveNowEl.appendChild(h);
+    if(!open){ return; }   // COLLAPSED → the one-line header only (no rows, no ＋more)
+    liveNowEl.classList.add('open');
+    var extra = total - LIVE_PREVIEW_N;
+    var expanded = liveNowMoreExpanded();
+    var shown = (expanded || extra <= 0) ? rows : rows.slice(0, LIVE_PREVIEW_N);
     var body = el('div', 'livenow-body');
     shown.forEach(function(r){
       // A MATCHED row (carries slug + the full repo path) is a clickable affordance: every live
@@ -2790,7 +2855,7 @@ _JS = r"""
       more.type = 'button';
       more.textContent = expanded ? '▾ show fewer' : ('＋' + extra + ' more ▸');
       more.addEventListener('click', function(){
-        setLiveNowExpanded(!expanded);
+        setLiveNowMoreExpanded(!expanded);
         renderLiveNow();
       });
       liveNowEl.appendChild(more);
@@ -2926,15 +2991,69 @@ _JS = r"""
       ' · click a card to expand'));
   }
 
+  // §3 (change C) — render the PINNED "⚠ Needs you (N)" section into #needsyou (which sits ABOVE
+  // the Live-now strip). `cards` is the needs_you subset of data.flat; `visibleFn` composes the
+  // active search+state filter; `show` gates it by the triage chip (only when Needs-you / All).
+  // The needs_you cards are PROMOTED here and rendered EXACTLY ONCE (never repeated in the repo
+  // groups below). Empty / filtered-away → hidden. Returns the count rendered (for "N shown").
+  function hideNeedsYou(){ if(needsYouEl){ needsYouEl.hidden = true; needsYouEl.innerHTML = ''; } }
+  function renderNeedsYou(cards, visibleFn, show){
+    if(!needsYouEl) return 0;
+    needsYouEl.innerHTML = '';
+    var vis = show ? cards.filter(visibleFn) : [];
+    if(!vis.length){ needsYouEl.hidden = true; return 0; }
+    needsYouEl.hidden = false;
+    var h = el('h2');
+    h.appendChild(document.createTextNode(STATE_GLYPH.needs_you + ' Needs you'));
+    h.appendChild(el('span', 'count', '(' + vis.length + ')'));
+    needsYouEl.appendChild(h);
+    vis.forEach(function(v){ needsYouEl.appendChild(card(v)); });
+    return vis.length;
+  }
+
+  // §6 (change C) — render the bottom "~ Cooling (N)" fold: the cooling(slowing) + stalled cards
+  // deferred out of the main board so the default view leads with what needs the owner. A single
+  // collapsible section (reuses the `.repo.collapsible` chrome + focusCard's expand path via
+  // `.repo-body`), COLLAPSED by default (its own persistence, data-fold="cooling"); a search or a
+  // Cooling/Stalled chip (`filtering`) force-opens it. `show` gates it by the triage chip. Cards
+  // are state-sorted (stalled before cooling). Returns the count rendered (for "N shown").
+  function renderCooling(cards, visibleFn, show, filtering){
+    if(!show) return 0;
+    var vis = cards.filter(visibleFn);
+    if(!vis.length) return 0;
+    var open = !isCoolingCollapsed() || filtering;
+    var sec = el('section', 'repo collapsible cooling');
+    var h = el('h2');
+    // data-fold lets focusCard re-persist THIS fold as expanded when it jumps into it (vs a repo).
+    if(h.dataset) h.dataset.fold = 'cooling'; else h.setAttribute('data-fold', 'cooling');
+    h.appendChild(el('span', 'chev', open ? '▾' : '▸'));
+    h.appendChild(document.createTextNode(STATE_GLYPH.slowing + ' Cooling'));
+    h.appendChild(el('span', 'count', '(' + vis.length + ')'));
+    sec.appendChild(h);
+    var body = el('div', 'repo-body');
+    body.style.display = open ? 'block' : 'none';
+    stateSort(vis).forEach(function(v){ body.appendChild(card(v)); });
+    sec.appendChild(body);
+    h.addEventListener('click', function(){
+      var c = !isCoolingCollapsed();   // flip the STORED preference
+      setCoolingCollapsed(c);
+      body.style.display = c ? 'none' : 'block';
+      h.querySelector('.chev').textContent = c ? '▸' : '▾';
+    });
+    app.appendChild(sec);
+    return vis.length;
+  }
+
   function render(){
     app.innerHTML = '';
-    // The pinned "Live now" strip is refreshed FIRST and lives OUTSIDE `app`, so it stays at the
-    // very top, always expanded, regardless of the board view / Done mode / an error state.
+    // The "Live now" strip is refreshed FIRST and lives OUTSIDE `app` (in #livenow), so it stays
+    // put across app.innerHTML resets / Done mode / an error state. It's now collapsed by default.
     renderLiveNow();
     if(!data.ok){
       emergingTotal = 0;
       stateCounts = {needs_you:0, stalled:0, slowing:0, active:0, live:0};
       renderTriage();
+      hideNeedsYou();
       app.appendChild(el('div', 'err', 'store unreachable: ' + (data.error || '')));
       updateChrome();
       return;
@@ -2955,60 +3074,89 @@ _JS = r"""
 
     renderTriage();
 
-    // Done MODE: hide the board, render the archived list instead (search still composes).
-    if(state.doneMode){ renderDoneView(q); updateChrome(); return; }
+    // Done MODE: hide the board (+ the pinned needs-you section), render the archived list instead.
+    if(state.doneMode){ hideNeedsYou(); renderDoneView(q); updateChrome(); return; }
 
     // A card is visible iff it matches BOTH the search query AND the triage state (compose).
     function visible(v){ return matchQ(v, q) && matchState(v, sf); }
     var filtering = !!(q || sf);
-    var shown = 0;
 
-    if(state.view === 'flat'){
-      var wrap = el('div', 'flat');
-      all.forEach(function(v){ if(visible(v)){ wrap.appendChild(card(v)); shown++; } });
-      app.appendChild(wrap);
-    } else if(state.view === 'recency'){
-      // Bucket the (filtered) flat stream into rolling now-relative recency windows. `all`
-      // inherits data.flat's last_touch-DESC order and bucketizeRecency preserves it.
-      var rviews = all.filter(visible);
-      bucketizeRecency(rviews, Date.now()).forEach(function(g){
-        var sec = el('section', 'repo');
-        var h = el('h2', null, g.label);
-        h.appendChild(el('span', 'count', String(g.items.length)));
-        sec.appendChild(h);
-        g.items.forEach(function(v){ sec.appendChild(card(v)); shown++; });
-        app.appendChild(sec);
-      });
-    } else {
-      // GROUPED (default): collapsible repo sections, ordered by needs_you-count then recency,
-      // cards within a repo by state precedence. Under an active filter a section with matches
-      // AUTO-EXPANDS (not persisted) and one with zero matches HIDES entirely.
-      groupByRepo(all).forEach(function(g){
-        var vis = g.items.filter(visible);
-        if(!vis.length) return;   // no matches under the filter → hide the section
-        var collapsed = isRepoCollapsed(g.name);
-        var open = !collapsed || (filtering && vis.length > 0);
-        var sec = el('section', 'repo collapsible');
-        var h = el('h2');
-        // data-repo lets focusCard re-persist this section as expanded when it jumps into it.
-        if(h.dataset) h.dataset.repo = g.name; else h.setAttribute('data-repo', g.name);
-        h.appendChild(el('span', 'chev', open ? '▾' : '▸'));
-        h.appendChild(document.createTextNode(g.name));
-        h.appendChild(el('span', 'count', '(' + vis.length + ')'));
-        sec.appendChild(h);
-        var body = el('div', 'repo-body');
-        body.style.display = open ? 'block' : 'none';
-        vis.forEach(function(v){ body.appendChild(card(v)); shown++; });
-        sec.appendChild(body);
-        h.addEventListener('click', function(){
-          var c = !isRepoCollapsed(g.name);   // flip the STORED preference
-          setRepoCollapsed(g.name, c);
-          body.style.display = c ? 'none' : 'block';
-          h.querySelector('.chev').textContent = c ? '▸' : '▾';
+    // ── change C: LEAD WITH ATTENTION ──────────────────────────────────────────────────────
+    // Partition every card by its (single) state so each renders in EXACTLY ONE section:
+    //   §3 needs_you  → the PINNED top section (#needsyou, promoted — NOT in the repo groups)
+    //   §5 active     → the MAIN repo-grouped board (active ONLY)
+    //   §6 cooling    → the COLLAPSED bottom fold (cooling/slowing + stalled)
+    var needsYou = [], active = [], cooling = [];
+    all.forEach(function(v){
+      var st = v && v.state;
+      if(st === 'needs_you') needsYou.push(v);
+      else if(st === 'stalled' || st === 'slowing') cooling.push(v);
+      else active.push(v);   // active + any legacy/unknown state
+    });
+
+    // The triage chip drives WHICH sections show: Needs-you→§3 only; Active→§5 only;
+    // Cooling/Stalled→§6 only; All ('' / 'all', the default)→every section. Search composes
+    // WITHIN whatever's shown (via `visible`), and auto-expands collapsed sections with matches.
+    var noStateFilter = (sf === '' || sf === 'all');
+    var showNeeds   = noStateFilter || sf === 'needs_you';
+    var showActive  = noStateFilter || sf === 'active';
+    var showCooling = noStateFilter || sf === 'slowing' || sf === 'stalled';
+
+    var shown = 0;
+    // §3 — the pinned needs-you section, rendered into #needsyou ABOVE the Live-now strip.
+    shown += renderNeedsYou(needsYou, visible, showNeeds);
+
+    // §5 — the MAIN board = ACTIVE cards ONLY, in the selected view layout.
+    if(showActive){
+      if(state.view === 'flat'){
+        var wrap = el('div', 'flat');
+        active.forEach(function(v){ if(visible(v)){ wrap.appendChild(card(v)); shown++; } });
+        app.appendChild(wrap);
+      } else if(state.view === 'recency'){
+        // Bucket the (filtered) active stream into rolling now-relative recency windows. `active`
+        // inherits data.flat's last_touch-DESC order and bucketizeRecency preserves it.
+        var rviews = active.filter(visible);
+        bucketizeRecency(rviews, Date.now()).forEach(function(g){
+          var sec = el('section', 'repo');
+          var h = el('h2', null, g.label);
+          h.appendChild(el('span', 'count', String(g.items.length)));
+          sec.appendChild(h);
+          g.items.forEach(function(v){ sec.appendChild(card(v)); shown++; });
+          app.appendChild(sec);
         });
-        app.appendChild(sec);
-      });
+      } else {
+        // GROUPED (default): collapsible repo sections over the ACTIVE cards. Under an active
+        // filter a section with matches AUTO-EXPANDS (not persisted); one with zero matches HIDES.
+        groupByRepo(active).forEach(function(g){
+          var vis = g.items.filter(visible);
+          if(!vis.length) return;   // no matches under the filter → hide the section
+          var collapsed = isRepoCollapsed(g.name);
+          var open = !collapsed || (filtering && vis.length > 0);
+          var sec = el('section', 'repo collapsible');
+          var h = el('h2');
+          // data-repo lets focusCard re-persist this section as expanded when it jumps into it.
+          if(h.dataset) h.dataset.repo = g.name; else h.setAttribute('data-repo', g.name);
+          h.appendChild(el('span', 'chev', open ? '▾' : '▸'));
+          h.appendChild(document.createTextNode(g.name));
+          h.appendChild(el('span', 'count', '(' + vis.length + ')'));
+          sec.appendChild(h);
+          var body = el('div', 'repo-body');
+          body.style.display = open ? 'block' : 'none';
+          vis.forEach(function(v){ body.appendChild(card(v)); shown++; });
+          sec.appendChild(body);
+          h.addEventListener('click', function(){
+            var c = !isRepoCollapsed(g.name);   // flip the STORED preference
+            setRepoCollapsed(g.name, c);
+            body.style.display = c ? 'none' : 'block';
+            h.querySelector('.chev').textContent = c ? '▸' : '▾';
+          });
+          app.appendChild(sec);
+        });
+      }
     }
+
+    // §6 — the bottom "~ Cooling" fold (cooling + stalled), collapsed by default.
+    shown += renderCooling(cooling, visible, showCooling, filtering);
 
     var totalCards = all.length;
     if(shown === 0 && !filtering){
@@ -3343,9 +3491,16 @@ def render_html(model: dict | None, error: str | None = None,
     # The sticky cross-repo triage bar (chips populated client-side from the live state counts) —
     # the FIRST actionable thing now.
     triage = '<nav id="triage" class="triage" aria-label="triage filters"></nav>'
-    # The pinned, ALWAYS-EXPANDED "Live now (N)" strip — every currently-running live tmux Claude
-    # session, matched to a card or not. Now sits BELOW the triage bar (reorder only — behavior is
-    # unchanged: still top-6, activity-sorted, clickable, ＋N more); populated client-side by
+    # §3 (change C — lead with attention): the PINNED "⚠ Needs you (N)" section. Rendered client-
+    # side (renderNeedsYou) into #needsyou, which sits directly under the triage bar and ABOVE the
+    # Live-now strip, so the one thing that needs the OWNER is the FIRST board content — not the
+    # (now-collapsed) Live-now firehose that three blind reviewers said buried it. The needs_you
+    # cards (blocked + risk) are PROMOTED here and NOT repeated in the repo groups below (each card
+    # renders exactly once). Empty / filtered-away → hidden. Full two-line cards + actions + expand.
+    needsyou = '<section id="needsyou" class="needsyou" aria-label="needs you" hidden></section>'
+    # §4: the "Live now (N)" strip — now COLLAPSED to a one-line header by DEFAULT (click to expand
+    # to the top-6 + ＋more; persisted, default collapsed; auto-expands under a filter). It sits
+    # BELOW the needs-you section — no longer the biggest/brightest thing. Populated client-side by
     # renderLiveNow from the JSON island (flat + live_unmatched), and scoped by the active filter.
     livenow = '<section id="livenow" class="livenow" aria-label="live sessions"></section>'
     # A compact, muted legend decoding the state glyphs + badges for a first-time viewer. Static
@@ -3359,7 +3514,7 @@ def render_html(model: dict | None, error: str | None = None,
         '</div>'
     )
     return (
-        head + header + triage + livenow + legend +
+        head + header + triage + needsyou + livenow + legend +
         '<main id="app"></main>' + chat +
         '<footer id="foot"></footer>'
         '<script id="idata" type="application/json">' + payload + '</script>'

@@ -259,6 +259,84 @@ def test_regression_task_spec_drafter_not_blocked_but_spend_analytics_is():
     assert "awaiting" in res["markers"]["spend-analytics"]
 
 
+# --------------------------------------------------------------------------- #
+# Change A — the board⟷chat consistency bug: `tool_blocked_on_me` must return the SAME set the
+# board's `Needs you` chip counts (blocked WAITS + live-risk SEVERITY), distinguishing the two.
+# A card that carries only a severity risk (no "blocked/awaiting" wait marker) used to be
+# counted by the chip but MISSED by the chat — the trust bug this change closes.
+# --------------------------------------------------------------------------- #
+# A pure severity-risk card: an active 5xx incident in `status`, NO blocked/awaiting wait marker.
+RISK_5XX = _view("img-499", "Image edge 499s", "/repo/civitai",
+                 status="the 5xx errors are still happening after the rollout",
+                 next_step="", age="6h", minutes_ago=360)
+# A card that trips BOTH a blocked wait AND a severity marker — reason must resolve to "blocked".
+BOTH = _view("both-signals", "Both signals", "/repo/devrc",
+             status="awaiting your call — the outage is still happening", next_step="",
+             age="2h", minutes_ago=120)
+
+
+def test_tool_blocked_on_me_includes_severity_risk_not_just_blocked():
+    # A blocked wait (spend-analytics) AND a pure severity risk (img-499) are BOTH returned —
+    # the risk card is no longer silently dropped while the board chip counts it.
+    res = assistant.tool_blocked_on_me([SPEND_ANALYTICS, RISK_5XX])
+    slugs = set(_slugs(res["initiatives"]))
+    assert slugs == {"spend-analytics", "img-499"}
+    # The reason distinguishes them: a wait vs a live risk.
+    assert res["reasons"]["spend-analytics"] == "blocked"
+    assert res["reasons"]["img-499"] == "risk"
+    # markers follow the reason (blocked hits for the wait, severity phrases for the risk).
+    assert "awaiting" in res["markers"]["spend-analytics"]
+    assert "5xx" in res["markers"]["img-499"] or "still happening" in res["markers"]["img-499"]
+
+
+def test_tool_blocked_on_me_reason_blocked_wins_when_both_trip():
+    # When a card trips BOTH a wait and a severity marker, "blocked" wins (the more actionable
+    # framing) — mirrors viewer.derive_needs_reason. Markers are the blocked hits, not severity.
+    res = assistant.tool_blocked_on_me([BOTH])
+    assert res["reasons"]["both-signals"] == "blocked"
+    assert "your call" in res["markers"]["both-signals"]
+
+
+def test_build_facts_blocked_distinguishes_wait_vs_risk():
+    facts = assistant.build_facts(
+        assistant.tool_blocked_on_me([SPEND_ANALYTICS, RISK_5XX]))
+    by_slug = {f["slug"]: f for f in facts["initiatives"]}
+    # The wait card: attention_reason "waiting on you" + a waiting_on_you_because, NO risk field.
+    wait = by_slug["spend-analytics"]
+    assert wait["attention_reason"] == "waiting on you"
+    assert "awaiting" in wait["waiting_on_you_because"]
+    assert "live_risk_because" not in wait
+    # The risk card: attention_reason "live risk" + a live_risk_because, NO wait field.
+    risk = by_slug["img-499"]
+    assert risk["attention_reason"] == "live risk"
+    assert "live_risk_because" in risk
+    assert "waiting_on_you_because" not in risk
+
+
+def test_render_plain_blocked_splits_waits_and_risks():
+    out = assistant.render_plain(
+        "blocked_on_me", {}, assistant.tool_blocked_on_me([SPEND_ANALYTICS, RISK_5XX]))
+    assert "need your attention" in out
+    assert "Waiting on you (1)" in out and "spend-analytics" in out
+    assert "Live risks (1)" in out and "img-499" in out
+
+
+def test_render_plain_blocked_empty_still_says_nothing():
+    out = assistant.render_plain("blocked_on_me", {}, assistant.tool_blocked_on_me([]))
+    assert "Nothing" in out
+
+
+def test_blocked_on_me_matches_board_needs_you_set():
+    # THE trust bug, pinned: the chat's `tool_blocked_on_me` set MUST equal the board's
+    # `Needs you` set (viewer.derive_state == "needs_you"), over a mixed fixture that includes a
+    # pure severity-risk card, a wait, a both-card, and non-attention cards. Same predicate.
+    import viewer  # importable in the hermetic sandbox (psycopg2/requests are lazy)
+    mixed = [SPEND_ANALYTICS, RISK_5XX, BOTH, SYSREDIS, REMIX, COMFY]
+    board = {v["slug"] for v in mixed if viewer.derive_state(v)[0] == "needs_you"}
+    tool = set(_slugs(assistant.tool_blocked_on_me(mixed)["initiatives"]))
+    assert board == tool == {"spend-analytics", "img-499", "both-signals"}
+
+
 def test_regression_blocked_facts_reason_comes_from_real_text_only():
     # The model must be handed the REAL awaiting-text as grounding — never a fabricated
     # "fix the issues per the audit" cause. Assert the facts carry the initiative's own

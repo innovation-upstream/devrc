@@ -79,9 +79,13 @@ def test_investigation_ranks_above_focus_and_status():
 
 # --- priority 4: face_message (last prompt) --------------------------------- #
 def test_focus_basis_from_face_message():
+    # Change B: the recommendation leads with the BARE prompt — the repeated "Continue where you
+    # left off:" filler lead-in was dropped (it prefixed ~40 cards, killing scannability). The
+    # `basis` ("from your last prompt") + the dispatch header frame WHERE it came from.
     rec = nextstep.recommend_next_step(_view(face_message={"text": "explore the router"}))
     assert rec["basis"] == "focus"
-    assert rec["text"] == "Continue where you left off: explore the router"
+    assert rec["text"] == "explore the router"
+    assert "Continue where you left off" not in rec["text"]
 
 
 def test_focus_ranks_above_status():
@@ -91,8 +95,11 @@ def test_focus_ranks_above_status():
 
 # --- priority 5: status ----------------------------------------------------- #
 def test_status_basis():
+    # Change B: bare status text — the "Follow up on:" filler lead-in was dropped (same
+    # repeated-noise reason as the focus basis); the `basis` supplies the framing.
     rec = nextstep.recommend_next_step(_view(status="exploring age-gating"))
-    assert rec == {"text": "Follow up on: exploring age-gating", "basis": "status"}
+    assert rec == {"text": "exploring age-gating", "basis": "status"}
+    assert "Follow up on" not in rec["text"]
 
 
 # --- priority 6: stalled ---------------------------------------------------- #

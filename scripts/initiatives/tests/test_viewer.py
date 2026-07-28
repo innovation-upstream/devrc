@@ -1604,8 +1604,9 @@ def test_js_grouping_and_inline_emerging_wired():
     js = viewer._JS
     assert "__GROUP_JS__" not in js and "__STATEFILTER_JS__" not in js   # snippets inlined
     assert "function groupByRepo" in js and "function matchState" in js
-    # grouped (default) view builds collapsible sections from the flat stream, client-side.
-    assert "groupByRepo(all)" in js
+    # grouped (default) view builds collapsible sections client-side — change C: over the ACTIVE
+    # cards only (needs_you promoted to the pinned §3 section; cooling/stalled deferred to §6).
+    assert "groupByRepo(active)" in js
     assert "repo collapsible" in js
     assert "REPO_COLLAPSE_KEY = 'initiatives-repo-collapsed'" in js
     # the standalone lane + partition are gone; undocumented cards get an inline badge instead.
@@ -1613,9 +1614,10 @@ def test_js_grouping_and_inline_emerging_wired():
     assert "renderEmerging" not in js
     assert "emerging-badge" in js
     assert "if(v.undocumented){" in js and "row1.appendChild(eb)" in js   # inline badge (+tooltip)
-    # flat + recency render the full FILTERED stream (no documented/emerging split anymore).
-    assert "all.forEach(function(v){ if(visible(v))" in js
-    assert "rviews = all.filter(visible)" in js
+    # flat + recency render the FILTERED stream — change C: the ACTIVE cards (§5); needs_you is
+    # promoted to the pinned §3 section and cooling/stalled to the §6 fold (each card once).
+    assert "active.forEach(function(v){ if(visible(v))" in js
+    assert "rviews = active.filter(visible)" in js
     # search + triage compose (AND) via the single `visible` predicate.
     assert "matchQ(v, q) && matchState(v, sf)" in js
 
@@ -2223,15 +2225,17 @@ def test_build_model_state_slowing_is_distinct():
 
 def test_build_model_state_stalled():
     # Full pipeline: a stalled card with a recent prompt → state stalled, no live badge, and an
-    # ACTIONABLE line2 (the grounded "Continue where you left off" recommendation from nextstep,
-    # which outranks the bare "last:" fallback — line2 is always actionable in v2).
+    # ACTIONABLE line2 (the grounded "focus" recommendation from nextstep, which outranks the bare
+    # "last:" fallback — line2 is always actionable in v2). Change B: the recommendation leads with
+    # the BARE prompt (the "Continue where you left off:" filler prefix was dropped).
     v = viewer.build_model(
         [_row(slug="s", momentum="stalled", next_step="", open_investigations=[], open_prs=[],
               last_touch=NOW - timedelta(days=21),
               recent_messages=[{"text": "the last thing", "ts": 1.0}])], now=NOW)["flat"][0]
     assert v["state"] == "stalled"
     assert v["live"] is False
-    assert v["line2"] == "Continue where you left off: the last thing"
+    assert v["line2"] == "the last thing"
+    assert "Continue where you left off" not in v["line2"]
 
 
 def test_build_model_state_stalled_signalless_gets_resume_or_drop_line2():
@@ -2857,7 +2861,7 @@ def test_render_smoke_triage_repo_section_and_state_badge():
     html = viewer.render_html(viewer.build_model(rows, now=NOW), None)
     assert html.startswith("<!doctype html>")
     assert 'id="triage"' in html                              # the sticky triage bar container
-    assert "groupByRepo(all)" in html                         # repo-section rendering
+    assert "groupByRepo(active)" in html                      # repo-section rendering (active only, §5)
     assert "repo collapsible" in html                         # collapsible section
     assert "⚠" in html and "◑" in html              # the needs_you / stalled glyphs
     assert "Needs you" in html and "Stalled" in html          # triage chip labels
@@ -3227,7 +3231,8 @@ def test_js_done_chip_and_view_wired():
     assert "'✓ Done ' + archivedN" in js                           # the [✓ Done N] chip
     assert "chip state-done" in js
     assert "function renderDoneView(" in js
-    assert "if(state.doneMode){ renderDoneView(q)" in js           # render branches into it
+    # render branches into Done mode (change C: also hides the pinned §3 needs-you section).
+    assert "if(state.doneMode){ hideNeedsYou(); renderDoneView(q)" in js
     assert "data.archived" in js
     assert "'↺ unarchive'" in js                                   # the Done-view restore button
     assert "N archived" not in js and "' archived'" in js          # the header stat
@@ -3665,14 +3670,20 @@ def test_js_livenow_dedup_matched_wins_with_activity():
     assert rows[0]["slug"] == "aa" and rows[0]["matched"] is True
 
 
-# --- renderLiveNow: collapse to top-N + expand/collapse toggle (DOM-shim eval) - #
-def _node_render_livenow(flat, unmatched, clicks=0, q="", sf="", done=False):
-    """Eval the ACTUAL renderLiveNow (+ its collapse helpers) under a tiny DOM/localStorage shim,
-    optionally clicking the "＋N more" toggle `clicks` times, and return a per-render summary
-    [{display, rowCount, count, more}] plus the persisted expand flag. `q`/`sf`/`done` seed the
-    board `state` so the Live-now filter-scoping (fix #2) is exercised through the REAL renderLiveNow
-    + the REAL liveRowVisible/matchQ/matchState (prepended below). Exercises the real page code
-    (like _node_group), not a Python replica."""
+# --- renderLiveNow: TWO-LEVEL collapse (one-line default → top-6 → all) DOM-shim eval - #
+def _node_render_livenow(flat, unmatched, clicks=0, q="", sf="", done=False,
+                         open=False, header_clicks=0):
+    """Eval the ACTUAL renderLiveNow (+ its collapse helpers) under a tiny DOM/localStorage shim.
+
+    Change C — the strip is COLLAPSED to a ONE-LINE header by DEFAULT (no rows); it opens on a
+    header click or under a filter, then the inner "＋N more" toggles top-6 ↔ all. Kwargs:
+      open=True     → seed the OUTER open flag so rows render without a header click.
+      header_clicks → click the header this many times (toggling outer open/closed).
+      clicks        → click the inner "＋N more" this many times (only meaningful when open).
+      q/sf/done     → seed the board state so filter-scoping + auto-open run through the REAL
+                      renderLiveNow + liveRowVisible/matchQ/matchState (prepended below).
+    Returns per-render summaries [{display, rowCount, count, more, chev, open}] + the persisted
+    outer-open (`stored`) and inner-more (`storedMore`) flags. Exercises the real page code."""
     node = _shutil.which("node")
     if not node:
         import pytest
@@ -3692,7 +3703,11 @@ function _mk(tag){
   Object.defineProperty(e, 'children', {get: function(){ return e._kids; }});
   e.appendChild = function(c){ e._kids.push(c); return c; };
   e.addEventListener = function(ev, fn){ e._h[ev] = fn; };
-  e.setAttribute = function(k, v){ e._attrs[k] = String(v); };   // clickable matched rows set role/tabindex
+  e.setAttribute = function(k, v){ e._attrs[k] = String(v); };   // clickable rows / header set role/tabindex
+  e.classList = {
+    add: function(c){ var s = String(e.className || '').split(/\s+/).filter(Boolean); if(s.indexOf(c) < 0){ s.push(c); } e.className = s.join(' '); },
+    remove: function(c){ e.className = String(e.className || '').split(/\s+/).filter(function(x){ return x && x !== c; }).join(' '); }
+  };
   return e;
 }
 var _live = _mk('section');
@@ -3714,13 +3729,19 @@ function _summ(){
   });
   var rowCount = 0;
   if(body){ body.children.forEach(function(c){ if(String(c.className || '').indexOf('ln-row') === 0) rowCount++; }); }
-  var count = '';
-  if(header){ header.children.forEach(function(c){ if(c.className === 'count') count = c.textContent; }); }
-  return {display: liveNowEl.style.display, rowCount: rowCount, count: count, more: more ? more.textContent : null};
+  var count = '', chev = '';
+  if(header){ header.children.forEach(function(c){ if(c.className === 'count') count = c.textContent; if(c.className === 'ln-chev') chev = c.textContent; }); }
+  return {display: liveNowEl.style.display, rowCount: rowCount, count: count,
+          more: more ? more.textContent : null, chev: chev, open: !!body};
 }
 function _clickMore(){
   var kids = liveNowEl.children, i;
   for(i = 0; i < kids.length; i++){ if(kids[i].className === 'ln-more'){ kids[i]._h.click(); return true; } }
+  return false;
+}
+function _clickHeader(){
+  var kids = liveNowEl.children, i;
+  for(i = 0; i < kids.length; i++){ if(kids[i].tag === 'h2'){ kids[i]._h.click(); return true; } }
   return false;
 }
 """
@@ -3728,12 +3749,16 @@ function _clickMore(){
         "var FLAT = " + json.dumps(flat) + ";\n"
         "var UM = " + json.dumps(unmatched) + ";\n"
         "data.flat = FLAT; data.live_unmatched = UM;\n"
-        "var state = {q: " + json.dumps(q) + ", triage: " + json.dumps(sf) +
+        + ("_store['initiatives-livenow-open'] = '1';\n" if open else "")
+        + "var state = {q: " + json.dumps(q) + ", triage: " + json.dumps(sf) +
         ", doneMode: " + ("true" if done else "false") + "};\n"
         "var OUT = [];\n"
         "renderLiveNow(); OUT.push(_summ());\n"
+        "for(var hh = 0; hh < " + str(int(header_clicks)) + "; hh++){ _clickHeader(); OUT.push(_summ()); }\n"
         "for(var i = 0; i < " + str(int(clicks)) + "; i++){ _clickMore(); OUT.push(_summ()); }\n"
-        "console.log(JSON.stringify({renders: OUT, stored: _store['initiatives-livenow-expanded'] || null}));"
+        "console.log(JSON.stringify({renders: OUT, "
+        "stored: _store['initiatives-livenow-open'] || null, "
+        "storedMore: _store['initiatives-livenow-expanded'] || null}));"
     )
     # renderLiveNow now calls liveRowVisible → matchQ/matchState; prepend those pure snippets so the
     # REAL page predicates run (not a replica), same as the board's visible().
@@ -3751,33 +3776,49 @@ def _many_unmatched(n):
              "activity_ts": _NOW_SEC - i} for i in range(n)]
 
 
-def test_render_livenow_collapses_to_top6_by_default():
+def test_render_livenow_collapsed_one_line_by_default():
+    # Change C: the strip is a ONE-LINE header by default — no rows, chevron ▸, count = TOTAL.
     res = _node_render_livenow([], _many_unmatched(9))
     r0 = res["renders"][0]
-    assert r0["display"] == "block"
-    assert r0["rowCount"] == 6                       # only the top-6 render by default
-    assert r0["count"] == "(9)"                      # header N = TOTAL live, not the shown slice
-    assert r0["more"] == "＋3 more ▸"       # ＋3 more ▸  (9 − 6)
-    assert res["stored"] is None                     # default COLLAPSED → nothing persisted
+    assert r0["display"] == "block"                  # visible (there ARE live sessions) …
+    assert r0["open"] is False                       # … but collapsed to just the header
+    assert r0["rowCount"] == 0                        # no rows rendered while collapsed
+    assert r0["chev"] == "▸"                          # collapsed chevron
+    assert r0["count"] == "(9)"                       # header N = TOTAL live count
+    assert r0["more"] is None                         # no ＋more affordance while collapsed
+    assert res["stored"] is None                      # default COLLAPSED → nothing persisted
 
 
-def test_render_livenow_expand_shows_all_then_collapses_and_persists():
-    res = _node_render_livenow([], _many_unmatched(9), clicks=2)
+def test_render_livenow_header_click_expands_to_top6_and_persists():
+    # Clicking the header opens the strip to the top-6 (+ ＋more) and persists the outer-open flag.
+    res = _node_render_livenow([], _many_unmatched(9), header_clicks=1)
+    collapsed, opened = res["renders"]
+    assert collapsed["rowCount"] == 0 and collapsed["open"] is False   # default one-line
+    assert opened["open"] is True
+    assert opened["rowCount"] == 6                     # expands to the top-6
+    assert opened["chev"] == "▾"                       # open chevron
+    assert opened["count"] == "(9)"
+    assert opened["more"] == "＋3 more ▸"      # 9 − 6
+    assert res["stored"] == "1"                        # outer-open persisted (default was collapsed)
+
+
+def test_render_livenow_inner_more_shows_all_then_collapses():
+    # With the strip OPEN, the inner "＋N more" toggles top-6 ↔ all (its own persisted flag).
+    res = _node_render_livenow([], _many_unmatched(9), open=True, clicks=2)
     first, expanded, collapsed = res["renders"]
-    assert first["rowCount"] == 6                     # collapsed
-    assert expanded["rowCount"] == 9                  # click 1 → all rows
-    assert expanded["more"] == "▾ show fewer"    # ▾ show fewer
-    assert collapsed["rowCount"] == 6                 # click 2 → back to top-6
+    assert first["rowCount"] == 6                      # open → top-6
+    assert expanded["rowCount"] == 9                   # ＋more click 1 → all rows
+    assert expanded["more"] == "▾ show fewer"
+    assert collapsed["rowCount"] == 6                  # click 2 → back to top-6
     assert collapsed["more"] == "＋3 more ▸"
-    # the FINAL state is collapsed → the localStorage flag was cleared (removeItem), not left '1'.
-    assert res["stored"] is None
+    assert res["storedMore"] is None                   # final = top-6 → the inner flag was cleared
 
 
-def test_render_livenow_no_toggle_when_at_or_below_six():
-    res = _node_render_livenow([], _many_unmatched(6))
+def test_render_livenow_no_more_toggle_when_at_or_below_six():
+    res = _node_render_livenow([], _many_unmatched(6), open=True)
     r0 = res["renders"][0]
     assert r0["rowCount"] == 6
-    assert r0["more"] is None                         # exactly 6 → no "more" affordance
+    assert r0["more"] is None                          # exactly 6 → no "more" affordance
 
 
 def test_render_livenow_hidden_when_empty():
@@ -3786,12 +3827,24 @@ def test_render_livenow_hidden_when_empty():
     assert res["renders"][0]["rowCount"] == 0
 
 
+def test_render_livenow_auto_opens_under_filter():
+    # A search/triage filter FORCE-OPENS the collapsed strip so the filtered rows are visible
+    # (mirrors the section auto-expand) — no header click needed.
+    flat = [{"slug": "clawgate", "repo": "/r/devrc", "repo_name": "devrc", "state": "active",
+             "live_tasks_meta": [{"task": "soak clawgate", "activity_ts": _NOW_SEC - 10}]}]
+    res = _node_render_livenow(flat, [], q="clawgate")
+    r0 = res["renders"][0]
+    assert r0["open"] is True and r0["rowCount"] == 1
+    assert r0["chev"] == "▾"
+
+
 def test_render_livenow_untrusted_text_is_textcontent_not_parsed():
     # A task carrying markup is stored as textContent verbatim (el() uses textContent, never
-    # innerHTML) — the shim proves the string is not parsed into child nodes.
+    # innerHTML) — the shim proves the string is not parsed into child nodes. (open=True to render
+    # the row now that the strip is collapsed by default.)
     res = _node_render_livenow(
         [], [{"id": "x-1", "title": "<script>alert(1)</script>", "repo_name": "devrc",
-              "activity_ts": _NOW_SEC - 30}])
+              "activity_ts": _NOW_SEC - 30}], open=True)
     assert res["renders"][0]["rowCount"] == 1         # the markup became ONE text row, not DOM
 
 
@@ -3950,11 +4003,13 @@ def _js_slice(a, b):
     return js[js.index(a):js.index(b)]
 
 
-def _node_focus_card(view, key, *, collapsed=True, target_key=None, in_flat=True):
-    """Build a fake board (a collapsed grouped repo-section > .repo-body > .ini card > .detail),
+def _node_focus_card(view, key, *, collapsed=True, target_key=None, in_flat=True, fold=None):
+    """Build a fake board (a collapsed collapsible section > .repo-body > .ini card > .detail),
     then eval the REAL key() + REAL focusCard() and call focusCard(view.repo, view.slug). Returns a
     summary of every side effect. `target_key` is the data-key stamped on the card (defaults to the
-    same key so it matches); pass a different one to exercise the not-found path."""
+    same key so it matches); pass a different one to exercise the not-found path. `fold='cooling'`
+    builds the §6 Cooling fold (h2 carries data-fold, not data-repo) so focusCard's fold-expand
+    (setCoolingCollapsed) path is exercised instead of the per-repo one."""
     node = _shutil.which("node")
     if not node:
         import pytest
@@ -3963,12 +4018,17 @@ def _node_focus_card(view, key, *, collapsed=True, target_key=None, in_flat=True
     src = (_js_slice("function key(v)", "function el(tag") +
            "\n" + _js_slice("function focusCard(", "function card("))
     flat = [view] if in_flat else []
+    # The enclosing h2's data attr decides which persistence focusCard flips: data-fold → the
+    # cooling flag (setCoolingCollapsed); else data-repo → the per-repo map (setRepoCollapsed).
+    h2_data = ("_h2.dataset.fold = 'cooling';" if fold == "cooling"
+               else "_h2.dataset.repo = " + json.dumps(view.get("repo_name") or "") + ";")
     driver = (
         "var expanded = {}, detailCache = {};\n"
         "var data = {flat: " + json.dumps(flat) + "};\n"
         "var _loadCalls = [], _setCollapse = [];\n"
         "function loadDetail(v, det){ _loadCalls.push({slug: v && v.slug, repo: v && v.repo, isDetail: det === _det}); }\n"
         "function setRepoCollapsed(name, c){ _setCollapse.push([name, c]); }\n"
+        "function setCoolingCollapsed(c){ _setCollapse.push(['cooling', c]); }\n"
         # Simulate an ACTIVE triage filter / Done mode / search + a render() so focusCard's
         # "card hidden by a filter" fallback (clear filters, re-render, retry) is exercisable.
         "var state = {doneMode: true, triage: 'active', q: 'zzz'};\n"
@@ -3976,7 +4036,7 @@ def _node_focus_card(view, key, *, collapsed=True, target_key=None, in_flat=True
         "var _renderCalls = 0;\n"
         "function render(){ _renderCalls++; }\n"
         "var _sec = _mk('section'); _sec.className = 'repo collapsible'; _root.appendChild(_sec);\n"
-        "var _h2 = _mk('h2'); _h2.dataset.repo = " + json.dumps(view.get("repo_name") or "") + "; _sec.appendChild(_h2);\n"
+        "var _h2 = _mk('h2'); " + h2_data + " _sec.appendChild(_h2);\n"
         "var _chev = _mk('span'); _chev.className = 'chev'; _chev.textContent = " + ("'\\u25b8'" if collapsed else "'\\u25be'") + "; _h2.appendChild(_chev);\n"
         "var _body = _mk('div'); _body.className = 'repo-body'; _body.style.display = " + ("'none'" if collapsed else "'block'") + "; _sec.appendChild(_body);\n"
         "var _card = _mk('div'); _card.className = 'ini state-active'; _card.setAttribute('data-key', " + json.dumps(tkey) + "); _body.appendChild(_card);\n"
@@ -4068,6 +4128,9 @@ def _node_livenow_click(flat, unmatched):
         "var liveNowEl = document.getElementById('livenow');\n"
         "var data = {flat: " + json.dumps(flat) + ", live_unmatched: " + json.dumps(unmatched) + "};\n"
         "var state = {q: '', triage: '', doneMode: false};\n"   # no active filter → all live rows
+        # change C: the strip is collapsed by default — seed the outer-open flag so the rows render
+        # and the click-wiring is exercised (this test is about the row wiring, not the collapse).
+        "localStorage.setItem('initiatives-livenow-open', '1');\n"
         "renderLiveNow();\n"
         "var rows = liveNowEl.querySelectorAll('.ln-row');\n"
         "var summ = rows.map(function(row){\n"
@@ -4270,8 +4333,9 @@ def test_render_livenow_scoped_by_search_query_updates_count_and_rows():
                      summary="invoice archiver")]
     um = [{"id": "z1", "title": "grafana explore", "repo_name": "civitai", "repo": "/r/civitai",
            "activity_ts": _NOW_SEC - 30}]
-    # no filter → all three rows, plain "(3)".
-    base = _node_render_livenow(flat, um)["renders"][0]
+    # no filter → all three rows, plain "(3)". (open=True: the strip is collapsed by default now —
+    # change C — so open it to observe the unscoped rows; the scoping under a filter is below.)
+    base = _node_render_livenow(flat, um, open=True)["renders"][0]
     assert base["rowCount"] == 3 and base["count"] == "(3)" and base["display"] == "block"
     # search "clawgate" → only the clawgate matched row; count shows the filtered "(1 of 3)".
     q = _node_render_livenow(flat, um, q="clawgate")["renders"][0]
@@ -4290,7 +4354,9 @@ def test_render_livenow_scoped_by_triage_chip():
     r = _node_render_livenow(flat, um, sf="needs_you")["renders"][0]
     assert r["rowCount"] == 1 and r["count"] == "(1 of 3)"
     # in Done mode the state chips read inactive → the triage state must NOT scope the strip.
-    r2 = _node_render_livenow(flat, um, sf="needs_you", done=True)["renders"][0]
+    # (open=True to observe the rows: Done mode clears the filter, so the strip is collapsed by
+    # default; opened, it shows all 3 unscoped — proving the state chip didn't narrow it.)
+    r2 = _node_render_livenow(flat, um, sf="needs_you", done=True, open=True)["renders"][0]
     assert r2["rowCount"] == 3 and r2["count"] == "(3)"
 
 
@@ -4403,9 +4469,12 @@ def test_state_partition_guarantees_chip_sum_equals_total():
 
 
 def test_render_html_triage_precedes_livenow_in_dom():
-    # fix #1: the sticky triage bar leads; the Live-now firehose is demoted below it.
+    # fix #1 + change C: header → triage → needs-you (§3, pinned) → live-now (demoted, collapsed)
+    # → legend → app. The pinned needs-you container sits BETWEEN the triage bar and the Live-now
+    # strip, so what needs the owner is the FIRST board content, above the (now-collapsed) firehose.
     html = viewer.render_html(viewer.build_model([_row(slug="s")], now=NOW))
-    assert html.index("<header") < html.index('id="triage"') < html.index('id="livenow"')
+    assert html.index("<header") < html.index('id="triage"') < html.index('id="needsyou"')
+    assert html.index('id="needsyou"') < html.index('id="livenow"')
     assert html.index('id="livenow"') < html.index('id="legend"') < html.index('id="app"')
     assert ".triage{position:sticky" in html          # triage stays sticky after the move
 
@@ -4475,3 +4544,218 @@ def test_render_smoke_dogfood2_all_four_fixes_present():
     assert "— badges (orthogonal)" in html
     # #4: destructive drop styling.
     assert "'archive-btn drop destructive', 'drop'" in html and ".archive-btn.destructive{" in html
+
+
+# --------------------------------------------------------------------------- #
+# CHANGE C — "lead with attention": the board is restructured so the DEFAULT view surfaces
+# what needs the owner FIRST and folds the noise. The REAL render() (+ renderNeedsYou /
+# renderCooling) is node-eval'd under the DOM shim over fixture views; card() is stubbed to a
+# minimal `.ini` carrying data-key + data-state so we can assert WHICH section each card lands
+# in (pinned §3 needs-you / §5 active repo groups / §6 collapsed cooling fold) — each card
+# EXACTLY ONCE. Structure, not styling: the pure card DOM is covered by the card-actions tests.
+# --------------------------------------------------------------------------- #
+def _bv(slug, state, repo="devrc", title=None, **extra):
+    """A minimal board view for the render harness: enough for card()/matchQ/matchState/
+    groupByRepo (slug, repo path + short name, derived state, a title for search)."""
+    v = {"slug": slug, "repo": "/r/" + repo, "repo_name": repo, "state": state,
+         "title": title or (slug + " work"), "summary": "", "live": False}
+    v.update(extra)
+    return v
+
+
+# A fixture spanning every section: 2 needs_you (one a severity risk), 2 active (2 repos),
+# 1 cooling(slowing) + 1 stalled (the §6 fold).
+_BOARD = [
+    _bv("spend", "needs_you", "devrc", title="spend analytics"),
+    _bv("img499", "needs_you", "civitai", title="image 499s", needs_reason="severity"),
+    _bv("clawgate", "active", "devrc", title="clawgate release"),
+    _bv("sentinel", "active", "homelab", title="redis sentinel"),
+    _bv("cooljob", "slowing", "devrc", title="cooling quicksilver"),
+    _bv("dormant", "stalled", "homelab", title="dormant thing"),
+]
+
+
+def _node_render_board(flat, q="", sf="", view="grouped"):
+    """Eval the REAL render() (+ renderNeedsYou/renderCooling/hideNeedsYou) under the DOM shim with
+    a STUBBED card() (a `.ini` element carrying data-key + data-state) and stubbed chrome, then
+    report which section each card landed in, the app-child order, the cooling fold's open/chev,
+    and the captured `updateSearchCount` args. Prepends the REAL matchQ/matchState/groupByRepo so
+    the section-gating + grouping run through the ACTUAL page code."""
+    node = _shutil.which("node")
+    if not node:
+        import pytest
+        pytest.skip("node not on PATH — render() board structure untested this run")
+    slice_ = _js_slice("function hideNeedsYou(", "function updateSearchCount(")
+    driver = (
+        "var app = _mk('main'); _root.appendChild(app);\n"
+        "var needsYouEl = _mk('section'); _root.appendChild(needsYouEl);\n"
+        "var STATE_GLYPH = {needs_you:'\\u26a0', stalled:'\\u25d1', slowing:'~', active:'\\u2192'};\n"
+        "var STATE_LABEL = {needs_you:'needs you', stalled:'stalled', slowing:'cooling', active:'active'};\n"
+        "function key(v){ return (v.repo||'') + '::' + (v.slug||''); }\n"
+        "function card(v){ var e = _mk('div'); e.className = 'ini state-' + (v.state||'active');"
+        " e.setAttribute('data-key', key(v)); e.setAttribute('data-state', v.state||'active'); return e; }\n"
+        "function renderLiveNow(){} function renderTriage(){} function updateChrome(){}\n"
+        "var _searchArgs = null;\n"
+        "function updateSearchCount(shownN, total, qq){ _searchArgs = {shown: shownN, total: total, filtering: !!qq}; }\n"
+        "function isRepoCollapsed(){ return false; } function setRepoCollapsed(){}\n"
+        "function isCoolingCollapsed(){ return localStorage.getItem('initiatives-cooling-collapsed') !== '0'; }\n"
+        "function setCoolingCollapsed(c){ localStorage.setItem('initiatives-cooling-collapsed', c ? '1' : '0'); }\n"
+        "function bucketizeRecency(views, now){ return [{label: 'recent', items: views}]; }\n"
+        "var stateCounts = {}, emergingTotal = 0;\n"
+        "var data = {ok: true, flat: " + json.dumps(flat) + ", live_unmatched: [], archived: []};\n"
+        "var state = {view: " + json.dumps(view) + ", q: " + json.dumps(q) +
+        ", triage: " + json.dumps(sf) + ", doneMode: false};\n"
+        "render();\n"
+        "function _keys(nodes){ return nodes.map(function(n){ return n.getAttribute('data-key'); }); }\n"
+        "var needsKeys = _keys(needsYouEl.querySelectorAll('.ini'));\n"
+        "var coolingSec = app.querySelector('.cooling');\n"
+        "var coolingKeys = coolingSec ? _keys(coolingSec.querySelectorAll('.ini')) : [];\n"
+        "var activeKeys = []; app.querySelectorAll('.ini').forEach(function(n){ if(!n.closest('.cooling')) activeKeys.push(n.getAttribute('data-key')); });\n"
+        "var appOrder = app.children.map(function(k){ return k.className; });\n"
+        "var coolingBody = coolingSec ? coolingSec.querySelector('.repo-body') : null;\n"
+        "var coolingOpen = coolingBody ? (coolingBody.style.display !== 'none') : null;\n"
+        "var coolingChev = coolingSec ? (coolingSec.querySelector('.chev') ? coolingSec.querySelector('.chev').textContent : null) : null;\n"
+        "var activeGroups = 0; app.children.forEach(function(k){ if(String(k.className).indexOf('cooling') < 0 && String(k.className).indexOf('repo') >= 0) activeGroups++; });\n"
+        "console.log(JSON.stringify({needsHidden: !!needsYouEl.hidden, needsKeys: needsKeys,"
+        " activeKeys: activeKeys, coolingKeys: coolingKeys, coolingOpen: coolingOpen,"
+        " coolingChev: coolingChev, appOrder: appOrder, activeGroups: activeGroups, search: _searchArgs}));\n"
+    )
+    program = (_DOM_SHIM + "\n" + viewer._MATCH_JS + "\n" + viewer._STATEFILTER_JS + "\n" +
+               viewer._GROUP_JS + "\n" + slice_ + "\n" + driver)
+    out = _subprocess.run([node, "-e", program], capture_output=True, text=True, timeout=30)
+    assert out.returncode == 0, out.stderr
+    return json.loads(out.stdout)
+
+
+def _sk(keys):
+    """The slugs from a list of `repo::slug` data-keys."""
+    return sorted(k.split("::")[1] for k in keys)
+
+
+def test_board_needs_you_pinned_active_grouped_cooling_folded():
+    r = _node_render_board(_BOARD)
+    # §3: the two needs_you cards land in the pinned section (NOT hidden).
+    assert r["needsHidden"] is False
+    assert _sk(r["needsKeys"]) == ["img499", "spend"]
+    # §5: ONLY the active cards form the repo groups.
+    assert _sk(r["activeKeys"]) == ["clawgate", "sentinel"]
+    # §6: cooling(slowing) + stalled land in the collapsed bottom fold.
+    assert _sk(r["coolingKeys"]) == ["cooljob", "dormant"]
+
+
+def test_board_no_card_duplicated_across_sections():
+    r = _node_render_board(_BOARD)
+    allk = r["needsKeys"] + r["activeKeys"] + r["coolingKeys"]
+    assert len(allk) == len(set(allk))                    # each card rendered EXACTLY once
+    assert sorted(_sk(allk)) == ["clawgate", "cooljob", "dormant", "img499", "sentinel", "spend"]
+    # a needs_you card is ABSENT from the repo groups + the cooling fold (promoted, not repeated).
+    assert not (set(r["needsKeys"]) & set(r["activeKeys"]))
+    assert not (set(r["needsKeys"]) & set(r["coolingKeys"]))
+
+
+def test_board_dom_order_active_groups_then_cooling_last():
+    # Within #app the ACTIVE repo groups come first and the §6 cooling fold is the LAST child.
+    r = _node_render_board(_BOARD)
+    assert r["activeGroups"] == 2                          # two active repo groups (devrc, homelab)
+    assert "cooling" in r["appOrder"][-1]                  # cooling fold is last
+    assert all("cooling" not in c for c in r["appOrder"][:-1])   # everything before it is active
+
+
+def test_board_cooling_collapsed_by_default():
+    r = _node_render_board(_BOARD)
+    assert r["coolingOpen"] is False                       # body hidden by default …
+    assert r["coolingChev"] == "\u25b8"                    # … ▸ collapsed chevron
+    assert len(r["coolingKeys"]) == 2                      # but the cards ARE rendered (in the DOM)
+
+
+def test_board_search_auto_expands_cooling_fold():
+    # A query matching only a cooling card force-opens the fold (auto-expand) so the match shows.
+    r = _node_render_board(_BOARD, q="quicksilver")
+    assert r["coolingOpen"] is True and r["coolingChev"] == "\u25be"
+    assert _sk(r["coolingKeys"]) == ["cooljob"]            # only the matching cooling card
+    assert r["activeKeys"] == [] and r["needsKeys"] == []  # non-matching sections empty
+
+
+def test_board_chip_needs_you_shows_only_pinned_section():
+    r = _node_render_board(_BOARD, sf="needs_you")
+    assert _sk(r["needsKeys"]) == ["img499", "spend"]
+    assert r["activeKeys"] == [] and r["coolingKeys"] == []   # active + cooling hidden
+
+
+def test_board_chip_active_shows_only_active_groups():
+    r = _node_render_board(_BOARD, sf="active")
+    assert r["needsHidden"] is True and r["needsKeys"] == []
+    assert _sk(r["activeKeys"]) == ["clawgate", "sentinel"]
+    assert r["coolingKeys"] == []
+
+
+def test_board_chip_cooling_shows_only_cooling_expanded():
+    # The Cooling chip shows §6 (expanded), scoped to slowing; the Stalled chip → only stalled.
+    cool = _node_render_board(_BOARD, sf="slowing")
+    assert cool["needsKeys"] == [] and cool["activeKeys"] == []
+    assert _sk(cool["coolingKeys"]) == ["cooljob"] and cool["coolingOpen"] is True
+    stall = _node_render_board(_BOARD, sf="stalled")
+    assert _sk(stall["coolingKeys"]) == ["dormant"] and stall["coolingOpen"] is True
+
+
+def test_board_shown_count_is_honest_across_all_sections():
+    # The "N shown" count spans §3 + §5 + §6 (every rendered card), and total = the full set.
+    r = _node_render_board(_BOARD)
+    rendered = len(r["needsKeys"]) + len(r["activeKeys"]) + len(r["coolingKeys"])
+    assert r["search"]["shown"] == rendered == len(_BOARD)
+    assert r["search"]["total"] == len(_BOARD)
+    assert r["search"]["filtering"] is False
+
+
+def test_board_flat_view_applies_needs_first_and_cooling_fold():
+    # The flat view keeps the same treatment: needs pinned (§3), active flat (§5), cooling folded.
+    r = _node_render_board(_BOARD, view="flat")
+    assert _sk(r["needsKeys"]) == ["img499", "spend"]
+    assert _sk(r["activeKeys"]) == ["clawgate", "sentinel"]
+    assert _sk(r["coolingKeys"]) == ["cooljob", "dormant"]
+
+
+# --- focusCard reaches a card in the collapsed §6 Cooling fold (data-fold path) --------------
+def test_focus_card_expands_collapsed_cooling_fold():
+    r = _node_focus_card(_FVIEW, _FKEY, collapsed=True, fold="cooling")
+    assert r["ret"] is True
+    assert r["bodyDisplay"] == "block"                     # the collapsed fold was expanded …
+    assert r["chev"] == "\u25be"                           # … chevron flipped to ▾
+    assert r["setCollapse"] == [["cooling", False]]        # persisted via setCoolingCollapsed, NOT per-repo
+    assert r["expandedSet"] is True and r["detailDisplay"] == "block"   # the card opened
+
+
+# --- render smoke: the real page ships every §3/§4/§6 surface + the risk cue ------------------
+def test_render_smoke_lead_with_attention_structure():
+    rows = [
+        _row(slug="risk-card", status="the 5xx errors are still happening", next_step="",
+             last_touch=NOW - timedelta(hours=2)),                 # needs_you via SEVERITY (⚠ risk)
+        _row(slug="blocked-card", status="awaiting your review", next_step="",
+             last_touch=NOW - timedelta(hours=1)),                 # needs_you via a WAIT
+        _row(slug="active-card", last_touch=NOW - timedelta(minutes=30)),   # active
+        _row(slug="cooling-card", momentum="slowing",
+             last_touch=NOW - timedelta(days=3)),                  # cooling
+        _row(slug="stalled-card", momentum="stalled",
+             last_touch=NOW - timedelta(days=21)),                 # stalled
+    ]
+    rows[2]["tmux_tasks"] = ["live active task"]                   # a live matched pane
+    model = viewer.build_model(rows, now=NOW,
+                               unmatched=[_um("Pool-1", "an unmatched live session")])
+    html = viewer.render_html(model, None)
+    assert html.startswith("<!doctype html>")                     # rendered, no exception
+    # container order: header → triage → needs-you (§3) → live-now (§4) → legend → app.
+    assert html.index('id="triage"') < html.index('id="needsyou"') < html.index('id="livenow"')
+    # §3/§6 render functions + §5 active-only grouping are wired.
+    assert "function renderNeedsYou(" in html and "function renderCooling(" in html
+    assert "groupByRepo(active)" in html
+    assert "STATE_GLYPH.needs_you + ' Needs you'" in html         # the pinned §3 heading
+    assert "STATE_GLYPH.slowing + ' Cooling'" in html             # the §6 fold heading
+    # §4 Live-now collapses by DEFAULT (outer open flag, default off).
+    assert "LIVENOW_OPEN_KEY = 'initiatives-livenow-open'" in html
+    assert "if(!open){ return; }" in html                         # collapsed → header only
+    # the ⚠ risk cue for a severity-promoted needs_you card is present in the card builder.
+    assert "'risk-cue', '\u26a0 risk'" in html
+    # the model still marks the severity card needs_you with reason severity (board == chat set).
+    flat = {v["slug"]: v for v in model["flat"]}
+    assert flat["risk-card"]["state"] == "needs_you" and flat["risk-card"]["needs_reason"] == "severity"
+    assert flat["blocked-card"]["state"] == "needs_you" and flat["blocked-card"]["needs_reason"] == "blocked"

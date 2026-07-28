@@ -374,15 +374,32 @@ def _severity_hits(view: dict) -> list[str]:
 
 
 def tool_blocked_on_me(views: list[dict]) -> dict:
-    """Initiatives whose status/next_step (etc.) say they are waiting on the human."""
+    """The initiatives that NEED the human — the SAME set the board's `Needs you` chip counts.
+
+    A card is included when its status/next_step trips a BLOCKED marker (a genuine WAIT on the
+    user) OR a SEVERITY marker (an active, unresolved RISK). This mirrors the viewer's
+    `needs_you` state (`derive_state` = `_blocking_hits` OR `_severity_hits`) EXACTLY, so the
+    chat answer to "what needs my attention / blocked on me" agrees with the board rather than
+    (as before) returning only the blocked subset while the chip counted a 5xx-risk card too.
+
+    Each hit carries a `reason` — "blocked" (waiting on you) vs "risk" (a live risk surfaced for
+    you) — distinguished so the wording/facts read honestly. "blocked" wins when BOTH trip
+    (a real wait is the more actionable framing), matching `viewer.derive_needs_reason`. The
+    `markers` map carries the phrases that tripped (blocked hits preferred, else severity)."""
     hits = []
     for v in views:
-        marks = _blocking_hits(v)
-        if marks:
-            hits.append({"view": v, "markers": marks})
+        blocking = _blocking_hits(v)
+        severity = _severity_hits(v)
+        if not (blocking or severity):
+            continue
+        # blocked wins when both trip (mirrors viewer.derive_needs_reason); markers follow suit.
+        reason = "blocked" if blocking else "risk"
+        hits.append({"view": v, "markers": blocking or severity, "reason": reason})
     hits.sort(key=lambda h: _recency_key(h["view"]))
-    return {"kind": "blocked_on_me", "initiatives": [h["view"] for h in hits],
-            "markers": {h["view"].get("slug"): h["markers"] for h in hits}}
+    return {"kind": "blocked_on_me",
+            "initiatives": [h["view"] for h in hits],
+            "markers": {h["view"].get("slug"): h["markers"] for h in hits},
+            "reasons": {h["view"].get("slug"): h["reason"] for h in hits}}
 
 
 def tool_by_momentum(views: list[dict], momentum: str) -> dict:
@@ -656,6 +673,28 @@ def build_facts(result: dict) -> dict:
             "live_initiatives": [_fact(v) for v in result.get("initiatives", [])[:_MODEL_FACT_CAP]],
             "untracked_session_count": len(result.get("untracked", [])),
         }
+    if kind == "blocked_on_me":
+        # Surface the ATTENTION REASON per card so the model phrases it honestly: a "blocked"
+        # card is *waiting on you* (its wait text → waiting_on_you_because), a "risk" card is a
+        # *live risk* surfaced for you (its risk phrase → live_risk_because). The two reasons are
+        # kept distinct — never collapsed into one "blocked" framing — so the synthesis doesn't
+        # call a 5xx risk a "wait on your input". Reason/markers are tool-derived (ground truth).
+        inis = result.get("initiatives", [])
+        reasons = result.get("reasons") or {}
+        out_inis = []
+        for v in inis[:_MODEL_FACT_CAP]:
+            slug = v.get("slug")
+            reason = reasons.get(slug) or "blocked"
+            marks = markers.get(slug)
+            f = _fact(v)
+            f["attention_reason"] = "live risk" if reason == "risk" else "waiting on you"
+            if marks:
+                if reason == "risk":
+                    f["live_risk_because"] = ", ".join(marks)
+                else:
+                    f["waiting_on_you_because"] = ", ".join(marks)
+            out_inis.append(f)
+        return {"kind": kind, "count": len(inis), "initiatives": out_inis}
     # filter / momentum / status_of / most_recent / overview / by_repo
     inis = result.get("initiatives", [])
     facts = {
@@ -693,10 +732,21 @@ def render_plain(intent: str, info: dict, result: dict) -> str:
     inis = result.get("initiatives", [])
 
     if kind == "blocked_on_me":
+        # The SAME set the board's `Needs you` chip counts (blocked waits + live risks). Split the
+        # two so the answer reads honestly: a "waiting on you" card needs your input/decision; a
+        # "live risk" card is an active, unresolved problem surfaced for you (not a wait).
         if not inis:
-            return "Nothing looks blocked on you right now."
-        lines = [f"{len(inis)} initiative(s) look blocked on you:"]
-        lines += [f"  • {_one_line(v)}" for v in inis]
+            return "Nothing needs your attention right now."
+        reasons = result.get("reasons") or {}
+        blocked = [v for v in inis if reasons.get(v.get("slug")) != "risk"]
+        risks = [v for v in inis if reasons.get(v.get("slug")) == "risk"]
+        lines = [f"{len(inis)} initiative(s) need your attention:"]
+        if blocked:
+            lines.append(f"Waiting on you ({len(blocked)}):")
+            lines += [f"  • {_one_line(v)}" for v in blocked]
+        if risks:
+            lines.append(f"Live risks ({len(risks)}):")
+            lines += [f"  • {_one_line(v)}" for v in risks]
         return "\n".join(lines)
 
     if kind in ("active", "slowing", "stalled"):
@@ -829,7 +879,14 @@ _SYNTH_SYSTEM = (
     "initiative's own next_step/status text in DATA — quote or closely paraphrase it. If "
     "DATA marks an initiative as waiting on the user but gives no explicit reason, say "
     "plainly that it is waiting on you (name the slug) and STOP — do NOT invent a cause "
-    "(no 'to fix …', 'to review the audit', etc. unless those exact words are in DATA)."
+    "(no 'to fix …', 'to review the audit', etc. unless those exact words are in DATA).\n"
+    "7. For a blocked_on_me answer, DATA gives each initiative an `attention_reason`: "
+    "'waiting on you' (a card awaiting your input/decision — its reason is in "
+    "waiting_on_you_because) vs 'live risk' (an active, unresolved problem surfaced for you — "
+    "its reason is in live_risk_because). Honour that distinction in your wording: describe a "
+    "'waiting on you' card as awaiting your input and a 'live risk' card as an active risk that "
+    "needs your attention. Never call a live risk a 'wait on your input', and never call a wait "
+    "a 'risk'. Both belong in the same answer — they are the full set that needs you."
 )
 
 _CLASSIFY_SYSTEM = (

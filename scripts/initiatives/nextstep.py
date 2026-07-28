@@ -89,16 +89,22 @@ def recommend_next_step(view: dict) -> dict | None:
     if investigations:
         return {"text": _trim(f"Resolve: {investigations[0]}"), "basis": "investigation"}
 
-    # 4. The user's most-recent substantive prompt — pick the thread back up.
+    # 4. The user's most-recent substantive prompt — pick the thread back up. `text` is the BARE
+    #    prompt (no "Continue where you left off:" lead-in): ~40 cards all led with that identical
+    #    filler, which killed scannability. WHERE it came from is framed by `basis`
+    #    (basis_label="from your last prompt") on the card/chat, and by the dispatch body's own
+    #    "📌 next step / RESUME" header — so leading with the actual content is correct everywhere.
     face = view.get("face_message")
     face_text = (face.get("text") or "").strip() if isinstance(face, dict) else ""
     if face_text:
-        return {"text": _trim(f"Continue where you left off: {face_text}"), "basis": "focus"}
+        return {"text": _trim(face_text), "basis": "focus"}
 
-    # 5. The current status line — follow up on whatever it describes.
+    # 5. The current status line — follow up on whatever it describes. `text` is the BARE status
+    #    (no "Follow up on:" lead-in — same repeated-noise reason as focus above); `basis`
+    #    ("from current status") supplies the framing.
     status = (view.get("status") or "").strip()
     if status:
-        return {"text": _trim(f"Follow up on: {status}"), "basis": "status"}
+        return {"text": _trim(status), "basis": "status"}
 
     # 6. Nothing actionable, but it's stalled — surface the resume-or-drop decision (only when
     #    we have an `age` to ground "last touched N ago"; otherwise there is nothing to say).
