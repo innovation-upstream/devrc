@@ -178,8 +178,18 @@ class FakeExtension(threading.Thread):
             self.dispatched.append(cmd)
             if self.swallow:
                 continue
-            envelope = {"id": cmd["id"], "ok": True,
-                        "data": self.executor(cmd), "instanceId": self.instance_id}
+            data = self.executor(cmd)
+            # An executor may model an op-level FAILURE (the op threw in the page
+            # / the target tab is gone) by returning {"__error__": "<msg>"} — the
+            # fake then emits the extension's ok:false error envelope instead of a
+            # success envelope. A plain dict stays a success `data` payload.
+            if isinstance(data, dict) and "__error__" in data:
+                envelope = {"id": cmd["id"], "ok": False,
+                            "error": data["__error__"],
+                            "instanceId": self.instance_id}
+            else:
+                envelope = {"id": cmd["id"], "ok": True, "data": data,
+                            "instanceId": self.instance_id}
             try:
                 _req(self.srv, "POST", "/result", envelope)
             except Exception:
@@ -1628,3 +1638,266 @@ def test_owner_ttl_reclaim_falls_back_to_active_not_close():
         assert all(c["op"] != "close" for c in dispatched)    # tab NOT closed
     finally:
         stop.set()
+
+
+# --------------------------------------------------------------------------- #
+# Fix 1 — self-heal when an owned tab is gone
+#
+# When the user manually closes an owned BACKGROUND tab, the next tab-scoped op
+# dispatches the stale tabId → the extension returns `owned_tab_gone` (ok:false).
+# The session must DROP its ownership so the next command self-heals to the
+# active-tab fallback (instead of staying wedged to the dead tab for OWNER_TTL),
+# and `close` must clear the mapping even when the remove reports the tab gone.
+# --------------------------------------------------------------------------- #
+def _tab_gone_exec(open_ids, gone):
+    """Executor: `open` hands out the next id; a tab-scoped op whose injected
+    tabId is in the mutable `gone` set returns an `owned_tab_gone` error envelope;
+    otherwise it echoes the injected tabId (None → active-tab fallback)."""
+    it = iter(open_ids)
+
+    def _exec(cmd):
+        if cmd["op"] == "open":
+            return {"tabId": next(it), "url": cmd.get("url")}
+        tid = cmd.get("tabId")
+        if tid is not None and tid in gone:
+            return {"__error__": "owned_tab_gone"}
+        if cmd["op"] == "close":
+            return {"closed": tid}
+        return {"tabId": tid, "op": cmd["op"]}
+    return _exec
+
+
+def test_is_tab_gone_helper():
+    assert S._is_tab_gone("owned_tab_gone") is True
+    assert S._is_tab_gone("No tab with id: 42.") is True   # chrome's raw message
+    assert S._is_tab_gone("something_else") is False
+    assert S._is_tab_gone(None) is False
+    assert S._is_tab_gone(123) is False
+
+
+def test_owned_tab_gone_drops_ownership_and_self_heals():
+    """A tab-scoped op that fails with `owned_tab_gone` for the session's OWNED
+    tab drops the mapping; the NEXT op falls back to the active tab (no tabId)."""
+    srv, reg = _serve()
+    gone = set()
+    ext = FakeExtension(srv, instance_id="solo", label="only",
+                        executor=_tab_gone_exec([101], gone))
+    ext.start()
+    try:
+        assert _wait_connected(srv, want=True)
+        _cmd(srv, {"op": "open"}, session="A")
+        assert reg.owners_snapshot() == {("only", "A"): 101}
+        # The user closes tab 101 out-of-band.
+        gone.add(101)
+        st, body = _cmd(srv, {"op": "getHtml"}, session="A")
+        assert st == 200                          # HTTP ok; op-level failure
+        assert body["result"]["ok"] is False
+        assert body["result"]["error"] == "owned_tab_gone"
+        assert reg.owners_snapshot() == {}        # ownership self-healed (dropped)
+        # Next op now falls back to the active tab (no tabId injected).
+        st, body = _cmd(srv, {"op": "getHtml"}, session="A")
+        assert st == 200 and body["result"]["ok"] is True
+        assert body["result"]["data"]["tabId"] is None
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
+def test_close_drops_ownership_even_when_tab_already_gone():
+    """`close` clears the mapping UNCONDITIONALLY — even when the extension
+    reports the tab already gone (remove → ok:false). Without this, a tab the
+    user closed out-of-band could never be cleared and wedged the session."""
+    srv, reg = _serve()
+    gone = set()
+    ext = FakeExtension(srv, instance_id="solo", label="only",
+                        executor=_tab_gone_exec([101], gone))
+    ext.start()
+    try:
+        assert _wait_connected(srv, want=True)
+        _cmd(srv, {"op": "open"}, session="A")
+        assert reg.owners_snapshot() == {("only", "A"): 101}
+        gone.add(101)                              # closed out-of-band
+        st, body = _cmd(srv, {"op": "close"}, session="A")
+        assert st == 200
+        assert body["result"]["ok"] is False       # remove reported it gone
+        assert reg.owners_snapshot() == {}          # mapping cleared regardless
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
+def test_explicit_tab_gone_does_not_evict_owned_mapping():
+    """An explicit --tab to a DIFFERENT (gone) tab must NOT evict the session's
+    healthy owned mapping — only the session's OWN owned tab going gone self-heals."""
+    srv, reg = _serve()
+    gone = {999}
+    ext = FakeExtension(srv, instance_id="solo", label="only",
+                        executor=_tab_gone_exec([101], gone))
+    ext.start()
+    try:
+        assert _wait_connected(srv, want=True)
+        _cmd(srv, {"op": "open"}, session="A")      # owns 101
+        # Target an unrelated, already-gone tab 999 via --tab.
+        st, body = _req(srv, "POST", "/cmd", {"op": "getHtml", "tab": 999},
+                        headers={S.HDR_SESSION_ID: "A"})
+        assert st == 200 and body["result"]["ok"] is False
+        assert body["result"]["error"] == "owned_tab_gone"
+        # The session's own tab (101) is untouched.
+        assert reg.owners_snapshot() == {("only", "A"): 101}
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
+# --------------------------------------------------------------------------- #
+# Fix 2 — a double `open` must not orphan a real tab
+#
+# A second `open` from a session used to overwrite its ownership with a brand-new
+# tabId, orphaning the FIRST real tab (no ownership → never closed → leaked). The
+# server now passes the owned tabId as `reuseTabId`; the extension returns the
+# SAME tab when it is still live (idempotent), and only opens fresh when gone.
+# --------------------------------------------------------------------------- #
+def _open_reuse_exec(new_ids, live):
+    """Model the SW `open` reuse logic: honour `reuseTabId` when that tab is still
+    in the mutable `live` set (idempotent), else create the next new id. `close`
+    removes from `live`; other ops echo their injected tabId."""
+    it = iter(new_ids)
+
+    def _exec(cmd):
+        if cmd["op"] == "open":
+            reuse = cmd.get("reuseTabId")
+            if reuse is not None and reuse in live:
+                return {"tabId": reuse, "url": cmd.get("url"), "reused": True}
+            tid = next(it)
+            live.add(tid)
+            return {"tabId": tid, "url": cmd.get("url")}
+        if cmd["op"] == "close":
+            live.discard(cmd.get("tabId"))
+            return {"closed": cmd.get("tabId")}
+        return {"tabId": cmd.get("tabId"), "op": cmd["op"]}
+    return _exec
+
+
+def test_double_open_is_idempotent_no_orphan():
+    """A second `open` returns the EXISTING owned tab (reused) — no second real
+    tab is created, so the first tab is never orphaned/leaked."""
+    srv, reg = _serve()
+    live = set()
+    ext = FakeExtension(srv, instance_id="solo", label="only",
+                        executor=_open_reuse_exec([101, 202], live))
+    ext.start()
+    try:
+        assert _wait_connected(srv, want=True)
+        st, body = _cmd(srv, {"op": "open"}, session="A")
+        assert body["result"]["data"]["tabId"] == 101
+        assert live == {101}
+        # Second open by the SAME session → the server injects reuseTabId=101 and
+        # the extension returns the SAME live tab (no new 202 tab created).
+        st, body = _cmd(srv, {"op": "open"}, session="A")
+        assert st == 200
+        assert body["result"]["data"]["tabId"] == 101
+        assert body["result"]["data"].get("reused") is True
+        assert live == {101}, "a second real tab was created → orphaned/leaked"
+        assert reg.owners_snapshot() == {("only", "A"): 101}
+        # The server injected the reuse hint on the second open.
+        opens = [c for c in ext.dispatched if c["op"] == "open"]
+        assert opens[1].get("reuseTabId") == 101
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
+def test_open_after_owned_tab_gone_opens_fresh():
+    """If the previously-owned tab is GONE, `open` creates a fresh tab and the
+    ownership updates to it (the stale mapping is replaced, not reused)."""
+    srv, reg = _serve()
+    live = set()
+    ext = FakeExtension(srv, instance_id="solo", label="only",
+                        executor=_open_reuse_exec([101, 202], live))
+    ext.start()
+    try:
+        assert _wait_connected(srv, want=True)
+        _cmd(srv, {"op": "open"}, session="A")       # owns 101
+        live.discard(101)                            # user closed it out-of-band
+        st, body = _cmd(srv, {"op": "open"}, session="A")
+        assert st == 200
+        assert body["result"]["data"]["tabId"] == 202    # fresh tab
+        assert body["result"]["data"].get("reused") is None
+        assert reg.owners_snapshot() == {("only", "A"): 202}
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
+# --------------------------------------------------------------------------- #
+# Fix 3 — a malformed `tab` from a raw API caller is a clean 400, never a 500
+# --------------------------------------------------------------------------- #
+def test_coerce_tab_helper():
+    assert S._coerce_tab(5) == (5, None)
+    assert S._coerce_tab(0) == (0, None)
+    assert S._coerce_tab("77") == (77, None)
+    assert S._coerce_tab([1, 2]) == (None, "bad_tab")
+    assert S._coerce_tab({"x": 1}) == (None, "bad_tab")
+    assert S._coerce_tab(True) == (None, "bad_tab")      # bool is not a tab id
+    assert S._coerce_tab(1.5) == (None, "bad_tab")
+    assert S._coerce_tab(-3) == (None, "bad_tab")
+    assert S._coerce_tab("x") == (None, "bad_tab")
+
+
+def test_malformed_tab_returns_400_bad_tab_not_500():
+    """A raw token-holder POSTing an unhashable `tab` (list/dict) gets a clean
+    400 bad_tab — never an uncaught TypeError → 500."""
+    srv, _ = _serve()
+    ext = FakeExtension(srv, instance_id="solo", label="only")
+    ext.start()
+    try:
+        assert _wait_connected(srv, want=True)
+        for bad in ([1, 2], {"x": 1}, True, 1.5, "nope"):
+            st, body = _req(srv, "POST", "/cmd", {"op": "getHtml", "tab": bad})
+            assert st == 400, f"tab={bad!r} → {st}"
+            assert body["error"] == "bad_tab"
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
+def test_numeric_string_tab_is_coerced_and_routes():
+    """A valid numeric-string `tab` is coerced to an int and routes normally."""
+    srv, _ = _serve()
+    ext = FakeExtension(srv, instance_id="solo", label="only",
+                        executor=lambda c: {"tabId": c.get("tabId")})
+    ext.start()
+    try:
+        assert _wait_connected(srv, want=True)
+        st, body = _req(srv, "POST", "/cmd", {"op": "getHtml", "tab": "5"},
+                        headers={S.HDR_SESSION_ID: "A"})
+        assert st == 200
+        assert body["result"]["data"]["tabId"] == 5
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
+# --------------------------------------------------------------------------- #
+# Fix 4 — explicit --tab overrides owned-tab routing (the subagent escape hatch)
+#
+# Sibling subagents of one parent share a session id (CLAUDE_CODE_SESSION_ID +
+# $TMUX_PANE are inherited, and no subagent-unique env var exists), so they would
+# own the SAME tab. The robust isolation is explicit tab handles: each driver
+# `open`s and then threads its OWN --tab on every op. This asserts --tab fully
+# overrides the session-ownership mapping so two same-session drivers never collide.
+# --------------------------------------------------------------------------- #
+def test_explicit_tab_overrides_owned_mapping():
+    srv, reg = _serve()
+    ext = FakeExtension(srv, instance_id="solo", label="only",
+                        executor=_tab_echo_exec([101]))
+    ext.start()
+    try:
+        assert _wait_connected(srv, want=True)
+        _cmd(srv, {"op": "open"}, session="A")          # session A owns tab 101
+        # An explicit --tab 999 must target 999, NOT the owned 101.
+        st, body = _req(srv, "POST", "/cmd", {"op": "getHtml", "tab": 999},
+                        headers={S.HDR_SESSION_ID: "A"})
+        assert st == 200
+        assert body["result"]["data"]["tabId"] == 999, \
+            "--tab must override the session's owned-tab routing"
+        # The override does not disturb the owned mapping.
+        assert reg.owners_snapshot() == {("only", "A"): 101}
+        # And with no --tab the same session still routes to its owned tab.
+        st, body = _cmd(srv, {"op": "getHtml"}, session="A")
+        assert body["result"]["data"]["tabId"] == 101
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()

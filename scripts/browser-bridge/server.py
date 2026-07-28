@@ -589,6 +589,15 @@ class Registry:
             inst = self._resolve_target_locked(target)
             tab_id, tab_key = self._effective_tab_locked(inst, op, session_id,
                                                          tab)
+            # Idempotent `open`: if this session already owns a tab on the target
+            # instance, hand the extension that tabId as `reuseTabId`. The SW
+            # returns the SAME tab when it is still live (no second real tab → no
+            # orphaned/leaked tab) and only creates a fresh one when the old tab
+            # is gone (owned_tab_gone) — so a double `open` never orphans a tab.
+            reuse_tab_id = None
+            if op == "open" and session_id is not None and tab is None:
+                reuse_tab_id = self._owned_tab_locked(inst.key, session_id,
+                                                      touch=False)
             deadline = self._clock() + timeout
             ticket = object()
             if tab_key is not None:
@@ -609,6 +618,8 @@ class Registry:
                 cmd["id"] = cid
                 if tab_id is not None:
                     cmd["tabId"] = tab_id
+                if reuse_tab_id is not None:
+                    cmd["reuseTabId"] = reuse_tab_id
                 inst.outbox.append(cmd)
                 inst.waiters.add(cid)
                 self._cond.notify_all()  # wake this instance's waiting poller
@@ -643,22 +654,47 @@ class Registry:
 
     def _record_ownership_locked(self, inst, op, session_id, tab_id,
                                  result) -> None:
-        """After a successful op, update the session's ownership: `open` records
-        the newly-created tabId; `close` drops the mapping (the tab is gone)."""
+        """After an op, reconcile the session's ownership mapping.
+
+        `open` records the (re)used tabId; `close` drops the mapping; a
+        tab-scoped op whose OWNED tab turns out to be gone drops the stale
+        mapping so the session self-heals to the active-tab fallback.
+        """
         if session_id is None or not isinstance(result, dict):
             return
-        if result.get("ok") is False:
-            return  # op threw in the page → don't record/drop on a failure
+        okey = (inst.key, session_id)
+        failed = result.get("ok") is False
+        # `close` drops ownership UNCONDITIONALLY: the session asked to end its
+        # tab, so the desired end-state is "no mapping" whether the remove
+        # succeeded OR the tab was already gone (idempotent). Otherwise a tab the
+        # user closed out-of-band would wedge the session to a dead id until the
+        # TTL reclaimed it, and `close` could never clear it (remove → ok:false).
+        if op == "close":
+            if self._owners.pop(okey, None) is not None:
+                log("owner_close", key=inst.key, session=session_id,
+                    tab=tab_id, ok=(not failed))
+            return
+        if failed:
+            # Self-heal: a tab-scoped op that failed because ITS owned tab is
+            # gone → drop the stale mapping so the NEXT command falls back to the
+            # active tab instead of re-dispatching to the dead tabId for up to
+            # OWNER_TTL. Only evict when the dispatched tab IS the session's owned
+            # tab — an explicit --tab to some other gone tab must not evict a
+            # healthy owned mapping.
+            if _is_tab_gone(result.get("error")):
+                o = self._owners.get(okey)
+                if o is not None and o["tab_id"] == tab_id:
+                    del self._owners[okey]
+                    log("owner_tab_gone", key=inst.key, session=session_id,
+                        tab=tab_id)
+            return  # op threw in the page → nothing else to record
         if op == "open":
             data = result.get("data")
             tid = data.get("tabId") if isinstance(data, dict) else None
             if isinstance(tid, int):
-                self._owners[(inst.key, session_id)] = {
+                self._owners[okey] = {
                     "tab_id": tid, "last_seen": self._clock()}
                 log("owner_open", key=inst.key, session=session_id, tab=tid)
-        elif op == "close":
-            self._owners.pop((inst.key, session_id), None)
-            log("owner_close", key=inst.key, session=session_id, tab=tab_id)
         elif op == "tabs":
             # Annotate the listing with which tab (if any) THIS session owns, so
             # `browser tabs` can flag it. Metadata only (a tabId, never content).
@@ -711,6 +747,41 @@ class Registry:
     def connected(self) -> bool:
         with self._cond:
             return bool(self._live_instances_locked())
+
+
+# --------------------------------------------------------------------------- #
+# Small scalar guards (module-level so they're directly unit-testable)
+# --------------------------------------------------------------------------- #
+def _is_tab_gone(err) -> bool:
+    """True if an op-level error string signals the target tab no longer exists.
+
+    The extension raises a clean `owned_tab_gone` (its `chrome.tabs.get` on the
+    injected tabId failed); we also match chrome's raw "No tab with id" message
+    defensively so an older/edge extension build still triggers the self-heal.
+    """
+    if not isinstance(err, str):
+        return False
+    e = err.lower()
+    return "owned_tab_gone" in e or "no tab with id" in e
+
+
+def _coerce_tab(tab):
+    """Coerce a raw `tab` request field to a non-negative int tab id.
+
+    Returns (tab_id, None) on success or (None, "bad_tab") on an invalid value.
+    A raw token-holder could POST `{"op":"getHtml","tab":[1,2]}`; an unhashable
+    `tab` would blow up the per-tab turnstile key with an uncaught TypeError → a
+    500. This is the server-side safety net (the `browser` CLI already validates
+    `--tab` is numeric) so a malformed `tab` yields a clean 400 instead. `bool`
+    is rejected explicitly (it is an `int` subclass but never a real tab id).
+    """
+    if isinstance(tab, bool):
+        return None, "bad_tab"
+    if isinstance(tab, int):
+        return (tab, None) if tab >= 0 else (None, "bad_tab")
+    if isinstance(tab, str) and tab.isdigit():
+        return int(tab), None
+    return None, "bad_tab"
 
 
 # --------------------------------------------------------------------------- #
@@ -888,6 +959,15 @@ def make_handler(registry: Registry, token: str, cmd_timeout: float,
             # gated this request in _guard).
             target = body.pop("target", None)
             tab = body.pop("tab", None)
+            if tab is not None:
+                # Guard a malformed `tab` from a raw token-holder (the CLI already
+                # validates --tab is numeric): a non-scalar would make an
+                # unhashable turnstile key → an uncaught TypeError → 500. Coerce
+                # to an int here; an invalid value is a clean 400, not a 500.
+                tab, terr = _coerce_tab(tab)
+                if terr:
+                    self._send(400, {"ok": False, "error": terr})
+                    return
             session_id = self.headers.get(HDR_SESSION_ID) or None
             outcome, exit_code, domain = "ok", 0, ""
             # `release` is server-side: drop the session's ownership without ever

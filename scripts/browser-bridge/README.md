@@ -127,7 +127,9 @@ Server envelope: `POST /cmd` → `200 {"ok":true,"result":{id,ok,data}}`, or a
 structured error: `503 extension_not_connected`, `504 timeout`,
 `409 ambiguous_instance` (>1 connected, no `target`), `409 no_owned_tab`
 (`close` with nothing owned), `409 superseded`, `404 unknown_instance`,
-`400 unknown_op|missing_field:<f>`, `401 unauthorized`, `403 bad_host`.
+`400 unknown_op|missing_field:<f>`, `400 bad_tab` (a non-numeric/non-scalar
+`tab` from a raw caller — the CLI already validates `--tab`), `401 unauthorized`,
+`403 bad_host`.
 
 ## Session isolation (concurrent-session tab clobbering)
 
@@ -148,14 +150,36 @@ per-session (multi-step **workflow**) isolation did not.
   PPID (the Claude Code process, stable across a session's calls). It is used for
   **routing only** and is **never** trusted for auth — bearer + Host still gate
   every request. If two sessions ever resolve the same id they share a tab
-  (documented degradation — no worse than before; a subagent inherits its
-  parent's `CLAUDE_CODE_SESSION_ID`, so it shares the parent's tab).
+  (documented degradation — no worse than before).
+- **⚠ Sibling subagents share identity (known limitation).** Per-session
+  isolation covers concurrent **top-level** sessions, NOT sibling subagents of
+  one parent. Empirically (dumped from inside two parallel subagents) a subagent
+  inherits the **parent's** `CLAUDE_CODE_SESSION_ID` *and* runs in the same
+  `$TMUX_PANE`, and the harness injects **no** subagent-unique, stable env var
+  (no agentId/taskId/tool-use id is visible to the subagent's own shell), so two
+  sibling subagents derive the SAME session id and would own the same tab. The
+  robust fix is **explicit tab handles**: each such driver runs `browser open`
+  (which returns a real `tabId`) and then threads its OWN `--tab <id>` on every
+  subsequent op. An explicit `--tab` **overrides** owned-tab routing entirely, so
+  two indistinguishable drivers never collide. See SKILL.md → Concurrent drivers.
 - **Ownership.** `browser open [url]` creates a tab (background, `active:false`,
   so parallel sessions don't fight over the foreground) and the server records
   `(instance_key, session_id) -> tabId`. That session's tab-scoped ops then route
   to its tab; a session with **no** owned tab falls back to the active tab (the
   one-shot read path). `--tab <id>` overrides explicitly. `browser close` closes
   the tab + drops ownership; `browser release` drops ownership only.
+- **Idempotent `open` (no orphaned tab).** A second `open` from a session that
+  already owns a **live** tab returns that SAME tab (the server passes the owned
+  tabId as `reuseTabId`; the extension reuses it) instead of creating a second
+  real tab — so a double `open` never orphans/leaks the first tab. If the owned
+  tab is **gone**, `open` transparently creates a fresh one.
+- **Self-heal on a vanished owned tab.** If the user manually closes an owned
+  background tab, the next tab-scoped op dispatches the stale tabId and the
+  extension returns `owned_tab_gone` (ok:false). The server then **drops** that
+  session's ownership so the NEXT command self-heals to the active-tab fallback
+  (instead of staying wedged to the dead tab until the TTL reclaims it). `browser
+  close` clears the mapping **unconditionally** — even when the tab was already
+  gone — and the extension treats an already-gone close as success (idempotent).
 - **FIFO on remaining contention.** With isolation most sessions use different
   tabs and don't contend. When two commands DO target the same tab (both active,
   or one `--tab`s another's owned tab) they are serialized **FIFO in arrival
@@ -257,10 +281,17 @@ per-tab FIFO serialization (same-tab commands serialize in arrival order,
 different tabs don't block, a queued command still honours `cmd_timeout`), TTL
 reclaim (injected clock — released, not closed), the `no_owned_tab` error, the
 session id being routing-only (bearer/Host still enforced), and backward-compat
-(single session, no open → unchanged active-tab dispatch). Current totals: **72
-Python** (`test_server.py`) + **22 node** (`protocol.test.mjs`). The chrome.* glue
-in `service_worker.js` genuinely needs a real browser and is covered by the
-manual checklist in `extension/README.md`.
+(single session, no open → unchanged active-tab dispatch). It also covers the
+**self-heal + idempotency hardening**: an `owned_tab_gone` op dropping the stale
+ownership (self-heal to active-tab) while an unrelated `--tab` gone tab does NOT
+evict a healthy mapping, `close` clearing ownership even when the tab was already
+gone, an idempotent double `open` returning the reused tab (no orphan) vs opening
+fresh when the owned tab is gone, a malformed `tab` (list/dict/bool) returning a
+clean `400 bad_tab` instead of a 500 (+ the `_coerce_tab`/`_is_tab_gone` helper
+units), and an explicit `--tab` overriding owned-tab routing (the subagent
+escape hatch). Current totals: **82 Python** (`test_server.py`) + **22 node**
+(`protocol.test.mjs`). The chrome.* glue in `service_worker.js` genuinely needs a
+real browser and is covered by the manual checklist in `extension/README.md`.
 
 ## Deploy (nix)
 

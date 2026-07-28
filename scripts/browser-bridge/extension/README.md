@@ -31,8 +31,16 @@ back this:
   returns the real `tabId`. It creates the tab in the **background** (`active:
   false`) so parallel sessions each opening a tab don't fight over the
   foreground; the server records it as that session's owned tab.
+  **Idempotent re-open:** when the server passes `reuseTabId` (the session already
+  owns a tab), the SW `chrome.tabs.get(reuseTabId)`s it and returns that SAME tab
+  (`{tabId, url, reused:true}`) when it's still live — so a double `open` does NOT
+  create a second tab that would be orphaned/leaked. If the reuse tab is gone,
+  the SW falls through and creates a fresh one.
 - **`close`** → `chrome.tabs.remove(tabId)` (the server injects the owned tabId;
-  the SW errors `missing_tabId` if it's absent).
+  the SW errors `missing_tabId` if it's absent). **Idempotent:** if the tab was
+  already closed out-of-band, `chrome.tabs.remove` rejects and the SW returns
+  `{closed:tabId, alreadyGone:true}` (a success) so the server cleanly drops the
+  stale ownership rather than surfacing a spurious error.
 
 **Screenshot of a background owned tab:** `chrome.tabs.captureVisibleTab` only
 captures the **visible** tab of a window. If the target tab isn't active the SW
@@ -41,8 +49,9 @@ short visible flicker, but it never silently screenshots the wrong tab. A target
 tab that is already visible is captured directly with no flicker.
 
 If an owned tab was closed out-of-band, `chrome.tabs.get` throws and the op
-returns an `owned_tab_gone` error envelope (the server's TTL will later reclaim
-the stale ownership).
+returns an `owned_tab_gone` error envelope. On that signal the **server drops the
+session's ownership immediately** (self-heal → the next op falls back to the
+active tab), rather than waiting for the TTL to reclaim it.
 
 ## Multiple instances (label)
 
@@ -128,6 +137,17 @@ The chrome.* glue needs a real browser — verify by hand after loading:
 - [ ] `browser open https://example.com` opens a NEW background tab and returns
       its `tabId`; a following `browser html` reads THAT tab (not the previously
       active one); `browser close` closes it.
+- [ ] **Idempotent open (no orphan):** `browser open` twice in one session →
+      the second returns the SAME `tabId` (`reused:true`), and `brave://` shows
+      only ONE new tab (not two). `browser close` then closes that single tab.
+- [ ] **Self-heal:** `browser open` a tab, then close it MANUALLY in Brave. The
+      next `browser html` returns an `owned_tab_gone` error; the one AFTER that
+      succeeds against the active tab (ownership was auto-dropped). `browser open`
+      again creates a fresh owned tab.
+- [ ] **Subagent escape hatch:** two concurrent drivers that share a session id
+      (e.g. sibling subagents) each `browser open`, capture the `tabId`, and run
+      every op with `browser --tab <id> …`. Confirm each reads/navigates only its
+      OWN tab — the explicit `--tab` overrides the shared owned-tab routing.
 - [ ] `browser screenshot` of a background owned tab briefly flickers it to the
       foreground, captures it, and restores the tab that was active before.
 - [ ] **Two-session isolation (the fix):** open two Claude sessions (each in its

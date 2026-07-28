@@ -71,9 +71,17 @@ die() { echo "browser: $*" >&2; exit 1; }
 #   4. a random token cached under the controlling process tree (keyed by the
 #      shell's PPID = the Claude Code process managing the Bash tool, stable
 #      across a session's calls), persisted so repeated calls read the same id.
-# DEGRADATION: if two sessions ever resolve the SAME id (e.g. both fall through
-# to the same PPID token, or a subagent inherits its parent's
-# CLAUDE_CODE_SESSION_ID), they SHARE a tab — no worse than the pre-fix behaviour.
+# DEGRADATION: if two drivers ever resolve the SAME id they SHARE a tab — no
+# worse than the pre-fix behaviour. This is NOT hypothetical for one case:
+# **sibling subagents of one parent share identity.** Empirically (dumped from
+# inside two parallel subagents) a subagent inherits the PARENT's
+# CLAUDE_CODE_SESSION_ID *and* runs in the same $TMUX_PANE, and the harness
+# injects NO subagent-unique, stable env var (no agentId/taskId/tool-use id is
+# visible to the subagent's own shell). So per-session isolation covers concurrent
+# TOP-LEVEL sessions, NOT sibling subagents of one parent. ESCAPE HATCH: two
+# drivers that may share a session id should each `open` and then pass the
+# returned `--tab <id>` explicitly on every subsequent op — an explicit --tab
+# overrides owned-tab routing entirely, so they never collide. See SKILL.md.
 derive_session_id() {
   if [ -n "${CLAUDE_CODE_SESSION_ID:-}" ]; then printf 'claude:%s' "$CLAUDE_CODE_SESSION_ID"; return; fi
   if [ -n "${CLAUDE_SESSION_ID:-}" ];      then printf 'claude:%s' "$CLAUDE_SESSION_ID"; return; fi

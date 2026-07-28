@@ -172,7 +172,20 @@ const OPS = {
   // Create a NEW tab for the calling session to own. active:false so parallel
   // sessions don't fight over the foreground when each opens its own tab. The
   // server records this real tabId as the session's owned tab.
+  //
+  // Idempotent re-open: when the server passes `reuseTabId` (the session already
+  // owns a tab), reuse THAT tab if it is still live instead of creating a second
+  // one — otherwise a double `open` would orphan the first real tab (no ownership
+  // → never closed → leaked). If the reuse tab is gone, fall through and open a
+  // fresh one (open-after-owned-tab-gone).
   async open(cmd) {
+    if (cmd && cmd.reuseTabId != null) {
+      try {
+        const existing = await chrome.tabs.get(cmd.reuseTabId);
+        return { tabId: existing.id, url: existing.url || "about:blank",
+                 reused: true };
+      } catch (e) { /* owned tab gone → open a fresh one below */ }
+    }
     const tab = await chrome.tabs.create({
       url: (cmd && cmd.url) ? cmd.url : "about:blank",
       active: false,
@@ -181,11 +194,18 @@ const OPS = {
   },
 
   // Close the session's owned tab (the server injects its tabId). The server
-  // drops the ownership mapping on success.
+  // drops the ownership mapping on success. Idempotent: if the tab was already
+  // closed out-of-band, `chrome.tabs.remove` rejects — treat that as success
+  // (the desired end-state, tab absent, already holds) so the session's stale
+  // ownership is cleanly dropped instead of surfacing a spurious error.
   async close(cmd) {
     if (!cmd || cmd.tabId == null) throw new Error("missing_tabId");
-    await chrome.tabs.remove(cmd.tabId);
-    return { closed: cmd.tabId };
+    try {
+      await chrome.tabs.remove(cmd.tabId);
+      return { closed: cmd.tabId };
+    } catch (e) {
+      return { closed: cmd.tabId, alreadyGone: true };
+    }
   },
 };
 
