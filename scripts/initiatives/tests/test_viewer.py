@@ -1049,8 +1049,8 @@ def test_render_html_livenow_strip_pinned_and_escapes():
     assert "Pool-6" in html                              # session id in the payload
     assert "<script>alert('u')</script>" not in html     # untrusted title never raw
     assert "u003cscript" in html                         # neutralized in the island
-    # #livenow appears in the body BEFORE the sticky triage bar (first thing seen).
-    assert html.index('id="livenow"') < html.index('id="triage"')
+    # Fix #1 reorder: the sticky triage bar now leads; #livenow sits BELOW it (demoted firehose).
+    assert html.index('id="triage"') < html.index('id="livenow"')
 
 
 def test_render_html_livenow_hides_when_no_live_sessions():
@@ -2447,8 +2447,10 @@ def test_js_group_unknown_repo_name_bucketed():
 def test_render_html_has_glyph_legend():
     html = viewer.render_html(viewer.build_model([_row(slug="s")], now=NOW))
     assert 'id="legend"' in html and 'class="legend"' in html
-    # the legend decodes every state glyph + the live/done badges, one muted line.
-    assert "⚠ needs you · → active · ~ cooling · ◑ stalled · ● live · ✓ done" in html
+    # the legend decodes every state glyph AND (fix #3) labels ● live / emerging as orthogonal
+    # BADGES vs the mutually-exclusive state chips, in one muted line.
+    assert "⚠ needs you · → active · ~ cooling · ◑ stalled — states (pick one via a chip) · " \
+           "● live · emerging — badges (orthogonal) · ✓ done" in html
     assert ".legend{" in viewer._CSS
 
 
@@ -2762,15 +2764,17 @@ def test_js_triage_bar_wired():
     js = viewer._JS
     assert "function renderTriage(" in js
     assert "state.triage" in js
-    # v3: FOUR chips — Needs you / Stalled / Cooling / All. The old [● Live N] chip is RETIRED
-    # (the pinned Live-now strip replaces it).
+    # Fix #3: FIVE state chips — Needs you / Stalled / Cooling / Active / All — so ALL four
+    # mutually-exclusive states are filterable (Active was added). The old [● Live N] chip stays
+    # RETIRED (● live is an orthogonal badge, not a state).
     assert "label:'Needs you'" in js and "label:'Stalled'" in js
-    assert "label:'Cooling'" in js and "label:'All'" in js
+    assert "label:'Cooling'" in js and "label:'Active'" in js and "label:'All'" in js
     assert "label:'Live'" not in js                       # the Live triage chip is gone
-    # the Cooling chip filters the `slowing` state.
-    assert "k:'slowing'" in js
+    # the Cooling chip filters the `slowing` state; the Active chip filters `active`.
+    assert "k:'slowing'" in js and "k:'active'" in js
     # counts come from stateCounts; a chip click sets state.triage and re-renders.
     assert "stateCounts.needs_you" in js and "stateCounts.slowing" in js
+    assert "stateCounts.active" in js                     # the new Active chip's count
     assert "state.triage = ch.k" in js
 
 
@@ -2826,15 +2830,22 @@ def test_render_html_has_sticky_triage_bar_container():
     assert ".triage{position:sticky" in html                 # the sticky CSS
 
 
-def test_render_html_summary_header_shows_state_counts():
+def test_render_html_summary_header_is_single_taxonomy_note_not_state_counts():
+    # Fix #3: the header no longer duplicates the STATE tally — those counts live SOLELY on the
+    # triage chips. The header carries only the orthogonal, non-state totals: N initiatives (·
+    # N live · N emerging as badges). No number appears twice in two taxonomies.
     html = viewer.render_html(viewer.build_model([_row(slug="s")], now=NOW))
-    # the header count text is the state tally (client-side, from stateCounts): v3 order is
-    # need you · stalled · cooling · active, plus a "N live now" pane count that rides along.
-    assert "' need you · '" in html and "' stalled · '" in html
-    assert "' cooling · '" in html
-    assert "' active'" in html
-    assert "' live · '" not in html            # the old card-badge "N live" stat is retired
-    assert "' live now'" in html               # replaced by the Live-now pane union count
+    # the new note builder (client-side, from data.flat + stateCounts.live + emergingTotal)
+    assert "' initiative'" in html and "(totalN === 1 ? '' : 's')" in html
+    assert "stateCounts.live" in html and "' live'" in html
+    assert "emergingTotal" in html and "' emerging'" in html
+    # the old header STATE strip is GONE (now only on the chips)
+    assert "' need you · '" not in html
+    assert "' stalled · '" not in html
+    assert "' cooling · '" not in html
+    assert "' live now'" not in html           # the header no longer restates the Live-now count
+    # updateChrome no longer recomputes buildLiveNow for a header stat (the strip owns it)
+    assert "var lnN = buildLiveNow(" not in html
 
 
 # --- render smoke: no exceptions; page has the key Phase-1 surfaces ---------- #
@@ -3197,7 +3208,7 @@ def test_js_archive_actions_and_snippet_wired():
     # every card gets [✓ done]; stalled/cooling ALSO get [drop] via dropEligible(v)
     assert "'archive-btn done', '✓ done'" in js
     assert "if(dropEligible(v)){" in js
-    assert "'archive-btn drop', 'drop'" in js
+    assert "'archive-btn drop destructive', 'drop'" in js   # fix #4: drop is destructively styled
     assert "archiveCard(v, doneBtn, astat, 'done', c)" in js
     assert "archiveCard(v, dropBtn, astat, 'dropped', c)" in js
     # the write endpoints + never-clobber-on-failure retry
@@ -3653,11 +3664,13 @@ def test_js_livenow_dedup_matched_wins_with_activity():
 
 
 # --- renderLiveNow: collapse to top-N + expand/collapse toggle (DOM-shim eval) - #
-def _node_render_livenow(flat, unmatched, clicks=0):
+def _node_render_livenow(flat, unmatched, clicks=0, q="", sf="", done=False):
     """Eval the ACTUAL renderLiveNow (+ its collapse helpers) under a tiny DOM/localStorage shim,
     optionally clicking the "＋N more" toggle `clicks` times, and return a per-render summary
-    [{display, rowCount, count, more}] plus the persisted expand flag. Exercises the real page
-    code (like _node_group), not a Python replica."""
+    [{display, rowCount, count, more}] plus the persisted expand flag. `q`/`sf`/`done` seed the
+    board `state` so the Live-now filter-scoping (fix #2) is exercised through the REAL renderLiveNow
+    + the REAL liveRowVisible/matchQ/matchState (prepended below). Exercises the real page code
+    (like _node_group), not a Python replica."""
     node = _shutil.which("node")
     if not node:
         import pytest
@@ -3672,11 +3685,12 @@ var localStorage = {
   removeItem: function(k){ delete _store[k]; }
 };
 function _mk(tag){
-  var e = {tag: tag, className: '', textContent: '', type: '', style: {}, _kids: [], _h: {}};
+  var e = {tag: tag, className: '', textContent: '', title: '', type: '', style: {}, _attrs: {}, _kids: [], _h: {}};
   Object.defineProperty(e, 'innerHTML', {set: function(v){ if(v === '') e._kids = []; }, get: function(){ return ''; }});
   Object.defineProperty(e, 'children', {get: function(){ return e._kids; }});
   e.appendChild = function(c){ e._kids.push(c); return c; };
   e.addEventListener = function(ev, fn){ e._h[ev] = fn; };
+  e.setAttribute = function(k, v){ e._attrs[k] = String(v); };   // clickable matched rows set role/tabindex
   return e;
 }
 var _live = _mk('section');
@@ -3712,12 +3726,17 @@ function _clickMore(){
         "var FLAT = " + json.dumps(flat) + ";\n"
         "var UM = " + json.dumps(unmatched) + ";\n"
         "data.flat = FLAT; data.live_unmatched = UM;\n"
+        "var state = {q: " + json.dumps(q) + ", triage: " + json.dumps(sf) +
+        ", doneMode: " + ("true" if done else "false") + "};\n"
         "var OUT = [];\n"
         "renderLiveNow(); OUT.push(_summ());\n"
         "for(var i = 0; i < " + str(int(clicks)) + "; i++){ _clickMore(); OUT.push(_summ()); }\n"
         "console.log(JSON.stringify({renders: OUT, stored: _store['initiatives-livenow-expanded'] || null}));"
     )
-    program = shim + "\n" + viewer._LIVENOW_JS + "\n" + slice_ + "\n" + driver
+    # renderLiveNow now calls liveRowVisible → matchQ/matchState; prepend those pure snippets so the
+    # REAL page predicates run (not a replica), same as the board's visible().
+    program = (shim + "\n" + viewer._MATCH_JS + "\n" + viewer._STATEFILTER_JS + "\n" +
+               viewer._LIVEFILTER_JS + "\n" + viewer._LIVENOW_JS + "\n" + slice_ + "\n" + driver)
     out = _subprocess.run([node, "-e", program], capture_output=True, text=True, timeout=30)
     assert out.returncode == 0, out.stderr
     return json.loads(out.stdout)
@@ -3809,7 +3828,7 @@ def test_render_smoke_livenow_matched_unmatched_and_no_doc_card():
     html = viewer.render_html(model, None)
     assert html.startswith("<!doctype html>")                    # rendered, no exception
     assert 'id="livenow"' in html
-    assert html.index('id="livenow"') < html.index('id="triage"')  # pinned above the triage bar
+    assert html.index('id="triage"') < html.index('id="livenow"')  # fix #1: triage leads, livenow below
     assert "renderUnmatched" not in html                         # old catch-all gone
     assert "label:'Live'" not in html                            # ● Live triage chip gone
     # the sessions-only island carries session/both sources but NO pure doc card.
@@ -4046,6 +4065,7 @@ def _node_livenow_click(flat, unmatched):
         "function focusCard(repo, slug){ _focus.push([repo, slug]); }\n"
         "var liveNowEl = document.getElementById('livenow');\n"
         "var data = {flat: " + json.dumps(flat) + ", live_unmatched: " + json.dumps(unmatched) + "};\n"
+        "var state = {q: '', triage: '', doneMode: false};\n"   # no active filter → all live rows
         "renderLiveNow();\n"
         "var rows = liveNowEl.querySelectorAll('.ln-row');\n"
         "var summ = rows.map(function(row){\n"
@@ -4067,8 +4087,9 @@ def _node_livenow_click(flat, unmatched):
         "  console.log(JSON.stringify({rows: summ, focus: _focus, prevented: null, afterOther: 0}));\n"
         "}\n"
     )
-    out = _subprocess.run([node, "-e", _DOM_SHIM + "\n" + viewer._LIVENOW_JS + "\n" + slice_ + "\n" + driver],
-                          capture_output=True, text=True, timeout=30)
+    program = (_DOM_SHIM + "\n" + viewer._MATCH_JS + "\n" + viewer._STATEFILTER_JS + "\n" +
+               viewer._LIVEFILTER_JS + "\n" + viewer._LIVENOW_JS + "\n" + slice_ + "\n" + driver)
+    out = _subprocess.run([node, "-e", program], capture_output=True, text=True, timeout=30)
     assert out.returncode == 0, out.stderr
     return json.loads(out.stdout)
 
@@ -4140,3 +4161,315 @@ def test_render_smoke_matched_live_card_carries_click_target_in_island():
     assert any(m["task"] == "cut the clawgate release" for m in v.get("live_tasks_meta", []))
     assert "function focusCard(repo, slug)" in html
     assert "'role', 'button'" in html                                # clickable row wiring shipped
+
+
+# =========================================================================== #
+# Dogfood-2 UX fixes (2nd blind review):
+#   #1 lead with triage (needs-you), demote Live-now; emphasize the Needs-you chip
+#   #2 the active search/triage filter ALSO scopes the Live-now strip (real bug)
+#   #3 one taxonomy: the chips own the state counts (+ new Active chip); the header
+#      keeps only orthogonal initiatives/live/emerging; the legend labels the badges
+#   #4 style [drop] as destructive + separated from the safe actions
+# node-eval'd where the logic is JS so the ACTUAL page code runs (not a replica).
+# =========================================================================== #
+
+# --- #2: liveRowVisible — the pure Live-now filter-scoping predicate (node-eval) --- #
+def _node_live_row_visible(rows, flat, q, sf):
+    """Eval the REAL liveRowVisible (with matchQ + matchState in scope, exactly as the page inlines
+    them) against buildLiveNow-shaped `rows` + the card views `flat`; return the tasks that pass."""
+    node = _shutil.which("node")
+    if not node:
+        import pytest
+        pytest.skip("node not on PATH — liveRowVisible untested this run")
+    body = (
+        "var ROWS = " + json.dumps(rows) + ";\n"
+        "var FLAT = " + json.dumps(flat) + ";\n"
+        "var Q = " + json.dumps(q) + ", SF = " + json.dumps(sf) + ";\n"
+        "console.log(JSON.stringify(ROWS.filter(function(r){ return liveRowVisible(r, FLAT, Q, SF); })"
+        ".map(function(r){ return r.task; })));"
+    )
+    src = (viewer._MATCH_JS + "\n" + viewer._STATEFILTER_JS + "\n" +
+           viewer._LIVEFILTER_JS + "\n" + body)
+    out = _subprocess.run([node, "-e", src], capture_output=True, text=True, timeout=30)
+    assert out.returncode == 0, out.stderr
+    return json.loads(out.stdout)
+
+
+# a small board: two matched live rows (each tied to a card view) + one unmatched live row.
+_LRV_FLAT = [
+    {"slug": "clawgate", "repo": "/r/devrc", "repo_name": "devrc",
+     "title": "clawgate release", "summary": "cut the release", "state": "active"},
+    {"slug": "mailbox", "repo": "/r/devrc", "repo_name": "devrc",
+     "title": "mail automation", "summary": "invoice archiver", "state": "needs_you"},
+]
+_LRV_ROWS = [
+    {"task": "soak clawgate", "repo": "/r/devrc", "repo_name": "devrc", "slug": "clawgate", "matched": True},
+    {"task": "run extractor", "repo": "/r/devrc", "repo_name": "devrc", "slug": "mailbox", "matched": True},
+    {"task": "explore grafana dashboards", "repo": "/r/civitai", "repo_name": "civitai",
+     "slug": "", "matched": False},
+]
+
+
+def test_live_row_visible_no_filter_keeps_every_row():
+    assert _node_live_row_visible(_LRV_ROWS, _LRV_FLAT, "", "") == \
+        ["soak clawgate", "run extractor", "explore grafana dashboards"]
+    assert _node_live_row_visible(_LRV_ROWS, _LRV_FLAT, "", "all") == \
+        ["soak clawgate", "run extractor", "explore grafana dashboards"]
+
+
+def test_live_row_visible_matched_row_uses_its_card_view_not_the_task_text():
+    # "clawgate" is in the clawgate VIEW (title), NOT in the mailbox view nor the unmatched task →
+    # only the clawgate matched row survives (its own task text "soak clawgate" is irrelevant here).
+    assert _node_live_row_visible(_LRV_ROWS, _LRV_FLAT, "clawgate", "") == ["soak clawgate"]
+    # "invoice" lives in the mailbox view summary only.
+    assert _node_live_row_visible(_LRV_ROWS, _LRV_FLAT, "invoice", "") == ["run extractor"]
+
+
+def test_live_row_visible_unmatched_row_matches_query_against_task_text():
+    # "grafana" only appears in the UNMATCHED row's task → only it survives (no card to consult).
+    assert _node_live_row_visible(_LRV_ROWS, _LRV_FLAT, "grafana", "") == ["explore grafana dashboards"]
+    # a query in NO row hides all.
+    assert _node_live_row_visible(_LRV_ROWS, _LRV_FLAT, "zzznope", "") == []
+
+
+def test_live_row_visible_triage_state_scopes_matched_and_excludes_unmatched():
+    # a state chip keeps only matched rows whose card view is in that state; unmatched rows (no
+    # state) are always excluded under a state filter.
+    assert _node_live_row_visible(_LRV_ROWS, _LRV_FLAT, "", "needs_you") == ["run extractor"]
+    assert _node_live_row_visible(_LRV_ROWS, _LRV_FLAT, "", "active") == ["soak clawgate"]
+
+
+def test_live_row_visible_composes_query_and_state_like_the_board():
+    # clawgate matches the query but is `active`, so a needs_you chip hides it (compose = AND),
+    # exactly as the board's visible(v) = matchQ && matchState.
+    assert _node_live_row_visible(_LRV_ROWS, _LRV_FLAT, "clawgate", "needs_you") == []
+
+
+def test_live_row_visible_matched_row_with_no_card_falls_back_to_task_text():
+    # a matched row whose slug/repo isn't in flat (view not found) degrades to a task-text match
+    # rather than vanishing — so a just-appeared live pane isn't silently dropped.
+    rows = [{"task": "ghost task", "repo": "/r/none", "repo_name": "none", "slug": "ghost", "matched": True}]
+    assert _node_live_row_visible(rows, _LRV_FLAT, "ghost", "") == ["ghost task"]
+    assert _node_live_row_visible(rows, _LRV_FLAT, "nope", "") == []
+    # but under a STATE filter a stateless view-less row is still excluded.
+    assert _node_live_row_visible(rows, _LRV_FLAT, "", "active") == []
+
+
+# --- #2: the scoping THROUGH the real renderLiveNow (count + hide + top-6 of filtered) --- #
+def _lv_card(slug, title, state, task, ts, summary=""):
+    return {"slug": slug, "repo": "/r/devrc", "repo_name": "devrc", "title": title,
+            "summary": summary, "state": state,
+            "live_tasks_meta": [{"task": task, "activity_ts": ts}]}
+
+
+def test_render_livenow_scoped_by_search_query_updates_count_and_rows():
+    flat = [_lv_card("clawgate", "clawgate release", "active", "soak clawgate", _NOW_SEC - 10),
+            _lv_card("mailbox", "mail automation", "needs_you", "run extractor", _NOW_SEC - 20,
+                     summary="invoice archiver")]
+    um = [{"id": "z1", "title": "grafana explore", "repo_name": "civitai", "repo": "/r/civitai",
+           "activity_ts": _NOW_SEC - 30}]
+    # no filter → all three rows, plain "(3)".
+    base = _node_render_livenow(flat, um)["renders"][0]
+    assert base["rowCount"] == 3 and base["count"] == "(3)" and base["display"] == "block"
+    # search "clawgate" → only the clawgate matched row; count shows the filtered "(1 of 3)".
+    q = _node_render_livenow(flat, um, q="clawgate")["renders"][0]
+    assert q["rowCount"] == 1 and q["count"] == "(1 of 3)" and q["display"] == "block"
+    # a query matching NOTHING hides the strip entirely.
+    none = _node_render_livenow(flat, um, q="zzznope")["renders"][0]
+    assert none["display"] == "none" and none["rowCount"] == 0
+
+
+def test_render_livenow_scoped_by_triage_chip():
+    flat = [_lv_card("clawgate", "clawgate release", "active", "soak clawgate", _NOW_SEC - 10),
+            _lv_card("mailbox", "mail automation", "needs_you", "run extractor", _NOW_SEC - 20)]
+    um = [{"id": "z1", "title": "grafana explore", "repo_name": "civitai", "repo": "/r/civitai",
+           "activity_ts": _NOW_SEC - 30}]
+    # the needs_you chip → only the mailbox matched row (unmatched excluded, active excluded).
+    r = _node_render_livenow(flat, um, sf="needs_you")["renders"][0]
+    assert r["rowCount"] == 1 and r["count"] == "(1 of 3)"
+    # in Done mode the state chips read inactive → the triage state must NOT scope the strip.
+    r2 = _node_render_livenow(flat, um, sf="needs_you", done=True)["renders"][0]
+    assert r2["rowCount"] == 3 and r2["count"] == "(3)"
+
+
+def test_render_livenow_preview_is_top6_of_the_filtered_set():
+    # 8 cards matching "alpha" + 3 matching "beta"; searching "alpha" leaves 8 → top-6 preview,
+    # "＋2 more ▸", and the count reflects the FILTERED 8 (of 11).
+    flat = [_lv_card("a" + str(i), "alpha card " + str(i), "active", "alpha task " + str(i),
+                     _NOW_SEC - i) for i in range(8)]
+    flat += [_lv_card("b" + str(i), "beta card " + str(i), "active", "beta task " + str(i),
+                      _NOW_SEC - 100 - i) for i in range(3)]
+    res = _node_render_livenow(flat, [], q="alpha")["renders"][0]
+    assert res["rowCount"] == 6                       # top-6 of the FILTERED set
+    assert res["count"] == "(8 of 11)"                # filtered 8 of 11 total
+    assert res["more"] == "＋2 more ▸"           # 8 − 6 = 2, over the filtered set
+
+
+# --- #1: reorder (triage before live-now) + Needs-you chip emphasis (renderTriage) --- #
+def _node_render_triage(counts, archived_n=0, triage="", done=False):
+    """Eval the ACTUAL renderTriage under a DOM shim; return [{cls, text}] per chip in DOM order.
+    Exercises the real chip-building code (labels, counts, the fix-#1 `attn` emphasis)."""
+    node = _shutil.which("node")
+    if not node:
+        import pytest
+        pytest.skip("node not on PATH — renderTriage untested this run")
+    slice_ = _js_slice("function renderTriage(", "function renderDoneView(")
+    shim = r"""
+function _mk(tag){
+  var e = {tag: tag, className: '', textContent: '', type: '', _kids: [], _h: {}};
+  Object.defineProperty(e, 'innerHTML', {set: function(v){ if(v === '') e._kids = []; }, get: function(){ return ''; }});
+  Object.defineProperty(e, 'children', {get: function(){ return e._kids; }});
+  e.appendChild = function(c){ e._kids.push(c); return c; };
+  e.addEventListener = function(ev, fn){ e._h[ev] = fn; };
+  return e;
+}
+var _triage = _mk('nav');
+var document = { createElement: function(t){ return _mk(t); },
+  getElementById: function(id){ return id === 'triage' ? _triage : null; } };
+function el(tag, cls, txt){ var e = document.createElement(tag); if(cls) e.className = cls; if(txt != null) e.textContent = txt; return e; }
+var triageBar = document.getElementById('triage');
+function render(){}   // a chip click calls render(); stubbed (we only inspect the built chips)
+"""
+    driver = (
+        "var STATE_GLYPH = {needs_you:'⚠', stalled:'◑', slowing:'~', active:'→'};\n"
+        "var stateCounts = " + json.dumps(counts) + ";\n"
+        "var state = {triage: " + json.dumps(triage) + ", doneMode: " +
+        ("true" if done else "false") + "};\n"
+        "var data = {archived: new Array(" + str(int(archived_n)) + ")};\n"
+        "renderTriage();\n"
+        "console.log(JSON.stringify(triageBar.children.map(function(c){"
+        " return {cls: c.className, text: c.textContent}; })));"
+    )
+    out = _subprocess.run([node, "-e", shim + "\n" + slice_ + "\n" + driver],
+                          capture_output=True, text=True, timeout=30)
+    assert out.returncode == 0, out.stderr
+    return json.loads(out.stdout)
+
+
+def _chip(chips, label_frag):
+    return next(c for c in chips if label_frag in c["text"])
+
+
+def test_render_triage_has_active_chip_with_its_count():
+    chips = _node_render_triage({"needs_you": 2, "stalled": 3, "slowing": 4, "active": 5, "live": 1}, archived_n=7)
+    # fix #3: FIVE state chips + All + Done, in order.
+    labels = [c["text"] for c in chips]
+    assert any("Needs you 2" in t for t in labels)
+    assert any("Stalled 3" in t for t in labels)
+    assert any("Cooling 4" in t for t in labels)
+    assert any("Active 5" in t for t in labels)     # the NEW Active chip carries stateCounts.active
+    assert any(t.strip() == "All" for t in labels)
+    assert any("Done 7" in t for t in labels)
+    # the Active chip is a real state filter (state-active class), not a badge.
+    assert "state-active" in _chip(chips, "Active")["cls"]
+
+
+def test_render_triage_state_chip_counts_are_mutually_exclusive_and_sum_to_total():
+    # given mutually-exclusive counts, the four state chips display exactly those counts and sum to
+    # the total — the chips are now the single source of the state tally (fix #3).
+    counts = {"needs_you": 2, "stalled": 3, "slowing": 4, "active": 6, "live": 9}
+    chips = _node_render_triage(counts)
+
+    def _n(frag):
+        return int(_chip(chips, frag)["text"].split()[-1])
+    assert _n("Needs you") == 2 and _n("Stalled") == 3 and _n("Cooling") == 4 and _n("Active") == 6
+    assert _n("Needs you") + _n("Stalled") + _n("Cooling") + _n("Active") == 15   # == the total
+
+
+def test_render_triage_needs_you_chip_is_emphasized_only_when_nonzero():
+    # fix #1: the Needs-you chip gets the prominent `attn` class when there IS something needing
+    # you (>0), and NOT when zero — drawing the eye without auto-applying the filter.
+    hot = _node_render_triage({"needs_you": 3, "stalled": 0, "slowing": 0, "active": 1, "live": 0})
+    assert "attn" in _chip(hot, "Needs you")["cls"]
+    cold = _node_render_triage({"needs_you": 0, "stalled": 2, "slowing": 0, "active": 1, "live": 0})
+    assert "attn" not in _chip(cold, "Needs you")["cls"]
+    # emphasis is EXCLUSIVE to Needs-you — other chips never carry it.
+    assert all("attn" not in c["cls"] for c in hot if "Needs you" not in c["text"])
+
+
+def test_state_partition_guarantees_chip_sum_equals_total():
+    # the JS chip counting (counts[v.state]++) sums to total IFF every card has exactly one of the
+    # four states — assert that data invariant on build_model so the mutual-exclusivity holds.
+    rows = [_row(slug="nu", status="awaiting your review"),   # needs_you-ish
+            _row(slug="cool", momentum="slowing"),            # slowing
+            _row(slug="act", momentum="active"),              # active
+            _row(slug="act2")]                                # active (default)
+    model = viewer.build_model(rows, now=NOW)
+    states = [v["state"] for v in model["flat"]]
+    assert all(s in {"needs_you", "stalled", "slowing", "active"} for s in states)
+    assert len(states) == len(model["flat"])          # exactly one state per card → chips sum to total
+
+
+def test_render_html_triage_precedes_livenow_in_dom():
+    # fix #1: the sticky triage bar leads; the Live-now firehose is demoted below it.
+    html = viewer.render_html(viewer.build_model([_row(slug="s")], now=NOW))
+    assert html.index("<header") < html.index('id="triage"') < html.index('id="livenow"')
+    assert html.index('id="livenow"') < html.index('id="legend"') < html.index('id="app"')
+    assert ".triage{position:sticky" in html          # triage stays sticky after the move
+
+
+def test_render_html_needs_you_chip_emphasis_wired():
+    html = viewer.render_html(viewer.build_model([_row(slug="s")], now=NOW))
+    assert "ch.k === 'needs_you' && ch.n > 0" in html   # the emphasis gate
+    assert ".chip.state-needs_you.attn{" in html        # the filled-orange + pulse CSS
+    assert "@keyframes chipPulse{" in html
+
+
+# --- #4: [drop] styled destructive + separated, two-tap still archives --------- #
+def test_dogfood2_fix4_drop_is_destructive_and_separated_in_css_and_wiring():
+    js, css = viewer._JS, viewer._CSS
+    assert "'archive-btn drop destructive', 'drop'" in js         # destructive class on the drop button
+    assert "armConfirm(dropBtn, {armedLabel: 'drop?'" in js       # two-tap confirm preserved
+    assert "archiveCard(v, dropBtn, astat, 'dropped', c)" in js   # fires the real archive on confirm
+    block = css.split(".archive-btn.destructive{")[1].split("}")[0]
+    assert "border-color:var(--red)" in block                     # persistent red border
+    assert "margin-left:" in block                                # visual separation from safe actions
+    # [done] stays benign (green), NOT destructive.
+    assert "'archive-btn done', '✓ done'" in js
+    assert "'archive-btn done destructive'" not in js
+
+
+def test_dogfood2_fix4_drop_two_tap_fires_archive_via_real_armconfirm():
+    # the REAL armConfirm (from _CONFIRM_JS) on a destructive-classed drop button: first tap arms
+    # (no archive), second tap fires the real archiveCard → /api/archive with reason 'dropped'.
+    got = _node_confirm(
+        "var posts = [];"
+        "function archiveCard(v, btn, stat, reason, cardEl){ posts.push({reason: reason, url: '/api/archive'}); }"
+        "var b = new FakeBtn('drop');"
+        "b.classList.add('archive-btn'); b.classList.add('drop'); b.classList.add('destructive');"
+        "armConfirm(b, {armedLabel:'drop?', restLabel:'drop', timers:{set:fakeSet, clear:fakeClear},"
+        " onConfirm:function(){ archiveCard({}, b, {}, 'dropped', {}); }});"
+        "var ev = {stopPropagation:function(){}};"
+        "b.dispatch('click', ev);"                     # arm — must NOT archive
+        "var afterArm = posts.length;"
+        "b.dispatch('click', ev);"                     # confirm — fires the real archive
+        "console.log(JSON.stringify({afterArm: afterArm, posts: posts,"
+        " destructive: b.classList.contains('destructive'), label: b.textContent}));")
+    assert got["afterArm"] == 0                                   # first tap only ARMS
+    assert got["posts"] == [{"reason": "dropped", "url": "/api/archive"}]   # 2nd tap → real archive
+    assert got["destructive"] is True                            # the button carries the destructive class
+    assert got["label"] == "drop"                                # disarmed back to the rest label
+
+
+# --- render smoke covering all four fixes on ONE page ------------------------- #
+def test_render_smoke_dogfood2_all_four_fixes_present():
+    rows = [_row(slug="needs", status="awaiting your review"),   # (aims) needs_you
+            _row(slug="cooling", momentum="slowing"),            # slowing → drop-eligible
+            _row(slug="act")]                                    # active
+    rows[2]["tmux_tasks"] = ["live active task"]                 # a live matched pane
+    model = viewer.build_model(rows, now=NOW,
+                               unmatched=[_um("Pool-1", "an unmatched live session")])
+    html = viewer.render_html(model, None)
+    assert html.startswith("<!doctype html>")                    # rendered, no exception
+    # #1: triage leads, Live-now demoted below it; Needs-you emphasis shipped.
+    assert html.index('id="triage"') < html.index('id="livenow"')
+    assert "ch.k === 'needs_you' && ch.n > 0" in html and ".chip.state-needs_you.attn{" in html
+    # #2: the Live-now strip is scoped by the active filter (liveRowVisible wired into renderLiveNow).
+    assert "function liveRowVisible(" in html
+    assert "liveRowVisible(r, data.flat || [], q, sf)" in html
+    # #3: one taxonomy — header note (no state strip) + the Active chip + legend badge labels.
+    assert "' initiative'" in html and "' need you · '" not in html
+    assert "label:'Active'" in html
+    assert "— badges (orthogonal)" in html
+    # #4: destructive drop styling.
+    assert "'archive-btn drop destructive', 'drop'" in html and ".archive-btn.destructive{" in html

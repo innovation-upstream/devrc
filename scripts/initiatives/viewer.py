@@ -1371,9 +1371,17 @@ header .meta{color:var(--gray);font-size:.85rem}
 .chip.state-stalled.active{background:var(--gray);border-color:var(--gray)}
 .chip.state-slowing.active{background:var(--yellow);border-color:var(--yellow)}
 .chip.state-live.active{background:var(--green);border-color:var(--green)}
-/* Compact, muted glyph legend under the triage bar — decodes the state glyphs + badges for a
-   first-time viewer. Secondary text; wraps on a narrow viewport. */
-.legend{color:var(--gray);font-size:.74rem;margin:-.4rem 0 1rem;line-height:1.5}
+/* Fix #1: when items NEED you (>0), the Needs-you chip is emphasized (filled orange + a subtle
+   pulse) so the escalation draws the eye — WITHOUT auto-applying the filter. Normal when 0. */
+.chip.state-needs_you.attn{background:var(--orange);border-color:var(--orange);color:var(--bg);
+  font-weight:bold;animation:chipPulse 2.2s ease-in-out infinite}
+@keyframes chipPulse{0%,100%{box-shadow:0 0 0 0 rgba(254,128,25,.55)}
+  50%{box-shadow:0 0 0 5px rgba(254,128,25,0)}}
+@media (prefers-reduced-motion: reduce){.chip.state-needs_you.attn{animation:none}}
+/* Compact, muted glyph legend under the Live-now strip (fix #1 reorder) — decodes the state
+   glyphs and LABELS ● live / emerging as orthogonal badges (fix #3). Secondary text; wraps on a
+   narrow viewport. */
+.legend{color:var(--gray);font-size:.74rem;margin:0 0 1rem;line-height:1.5}
 /* The `⚠ risk` cue on a card promoted to needs_you by an ACTIVE RISK (severity), distinct from
    a blocked wait. Small, orange, low-key so it reads as a badge not a headline. */
 .risk-cue{font-size:.68rem;color:var(--orange);border:1px solid var(--orange);border-radius:3px;
@@ -1480,6 +1488,11 @@ header .meta{color:var(--gray);font-size:.85rem}
 .archive-btn.done:hover:not(:disabled){border-color:var(--green)}
 .archive-btn.drop{color:var(--red)}
 .archive-btn.drop:hover:not(:disabled){border-color:var(--red)}
+/* Fix #4: [drop] is the ONE destructive action — a persistent red border (not just on hover) +
+   a left gap that separates it from the safe [resume]/[dispatch] so it's never flush against
+   them, cutting misclicks even with the two-tap confirm. The armed first-tap still flips orange. */
+.archive-btn.destructive{border-color:var(--red);margin-left:.7rem}
+.archive-btn.destructive:hover:not(:disabled){background:var(--red);color:var(--bg);border-color:var(--red)}
 .archive-btn.unarchive{color:var(--aqua)}
 .archive-btn.unarchive:hover:not(:disabled){border-color:var(--aqua)}
 .archive-status{margin-left:.4rem;color:var(--gray);font-size:.78rem}
@@ -1976,6 +1989,46 @@ function buildLiveNow(flat, unmatched, nowMs){
 """.strip()
 
 
+# PURE, DOM-FREE per-row predicate that scopes the pinned Live-now strip to the ACTIVE board
+# filter (dogfood-2 fix #2: typing in search / clicking a triage chip must narrow Live-now too,
+# not leave it fully populated — which read as "the filter is half-broken"). Kept in its OWN
+# snippet (like _STATEFILTER_JS) so the node test evals it directly against the ACTUAL page code.
+# `r` is a buildLiveNow row (task, repo, repo_name, slug, matched). `flat` is data.flat (the card
+# views). `q` is the already-lowercased+trimmed query; `sf` the active triage state ('' / 'all' =
+# no state filter). Rules:
+#   - no active filter (no q AND no state) → every live row shows (unchanged behaviour).
+#   - a MATCHED row (slug + repo → a card in `flat`) reuses the board's `visible(v)` =
+#     matchQ(v,q) && matchState(v,sf), so the strip scopes IDENTICALLY to the cards.
+#   - an UNMATCHED row (no card, or matched-but-view-not-found) has no state, so a triage-state
+#     filter EXCLUDES it; only the search query applies, as a plain substring over task + repo text.
+# Depends on matchQ (_MATCH_JS) + matchState (_STATEFILTER_JS); the node test evals
+# _MATCH_JS + _STATEFILTER_JS + _LIVEFILTER_JS. Substituted into _JS at __LIVEFILTER_JS__.
+_LIVEFILTER_JS = r"""
+function liveRowVisible(r, flat, q, sf){
+  if(!r) return false;
+  var hasQ = !!q;
+  var hasSf = !!(sf && sf !== 'all');
+  if(!hasQ && !hasSf) return true;                 // no active filter → every live row shows
+  if(r.matched && r.slug){
+    var v = null, fl = Array.isArray(flat) ? flat : [];
+    for(var i = 0; i < fl.length; i++){
+      if(fl[i] && fl[i].slug === r.slug &&
+         String(fl[i].repo == null ? '' : fl[i].repo) === String(r.repo == null ? '' : r.repo)){
+        v = fl[i]; break;
+      }
+    }
+    if(v) return matchQ(v, q) && matchState(v, sf);   // reuse the board's card predicate verbatim
+  }
+  // unmatched (or view-not-found) row: no state → a triage-state filter hides it; query is a
+  // substring over task + repo text (spec: "match the query against its task/repo text").
+  if(hasSf) return false;
+  var hay = (String(r.task == null ? '' : r.task) + ' ' +
+             String(r.repo_name == null ? '' : r.repo_name)).toLowerCase();
+  return hay.indexOf(q) !== -1;
+}
+""".strip()
+
+
 # PURE, DOM-FREE card-search predicate — kept in its OWN snippet (like _RECENCY_JS) so the
 # node test evals it directly, exercising the ACTUAL page code rather than a Python replica.
 # `q` is the ALREADY-lowercased, trimmed query (matchQ still re-normalizes internally so it is
@@ -2175,6 +2228,7 @@ _JS = r"""
   __GROUP_JS__
   __LIVENOW_JS__
   __MATCH_JS__
+  __LIVEFILTER_JS__
   __MARKDOWN_JS__
   var el0 = document.getElementById('idata');
   var data;
@@ -2627,8 +2681,10 @@ _JS = r"""
         drow.appendChild(doneBtn);
       } else if(a.kind === 'drop'){
         // [drop] — archive as dropped (stalled + cooling only, via cardActions/dropEligible).
-        // Also DESTRUCTIVE + adjacent to [resume] → TWO-TAP confirm (arms to 'drop?').
-        var dropBtn = el('button', 'archive-btn drop', 'drop');
+        // Fix #4: the ONE truly DESTRUCTIVE action → the `destructive` class gives it a persistent
+        // red border + a left gap so it's never flush against the safe [resume]/[dispatch]. Still
+        // TWO-TAP (arms to 'drop?') via armConfirm; [done] stays a lighter benign-archive cue.
+        var dropBtn = el('button', 'archive-btn drop destructive', 'drop');
         dropBtn.title = 'drop — archive this initiative as dropped. Click twice to confirm.';
         armConfirm(dropBtn, {armedLabel: 'drop?', restLabel: 'drop',
           onConfirm: function(){ archiveCard(v, dropBtn, astat, 'dropped', c); }});
@@ -2673,17 +2729,30 @@ _JS = r"""
   function renderLiveNow(){
     if(!liveNowEl) return;
     liveNowEl.innerHTML = '';
-    var rows = buildLiveNow(data.flat || [], data.live_unmatched || []);
-    if(!rows.length){ liveNowEl.style.display = 'none'; return; }
+    var allRows = buildLiveNow(data.flat || [], data.live_unmatched || []);
+    // Fix #2: the ACTIVE board filter ALSO scopes the strip. The search query always applies; the
+    // triage state applies EXCEPT in Done mode (there the state chips read inactive, so only the
+    // query filters — matching renderDoneView). Matched rows reuse the card's visible() predicate
+    // (liveRowVisible), unmatched rows match the query text (a state filter hides them).
+    var q = (state.q || '').trim().toLowerCase();
+    var sf = state.doneMode ? '' : (state.triage || '');
+    var filtering = !!(q || (sf && sf !== 'all'));
+    var rows = filtering
+      ? allRows.filter(function(r){ return liveRowVisible(r, data.flat || [], q, sf); })
+      : allRows;
+    if(!rows.length){ liveNowEl.style.display = 'none'; return; }   // empty (or empty-under-filter) → hide
     liveNowEl.style.display = 'block';
-    var total = rows.length;
+    var total = rows.length;                                   // the FILTERED count drives preview + more
     var extra = total - LIVE_PREVIEW_N;
     var expanded = liveNowExpanded();
     var shown = (expanded || extra <= 0) ? rows : rows.slice(0, LIVE_PREVIEW_N);
     var h = el('h2');
     h.appendChild(el('span', 'ln-dot', LIVE_GLYPH));
     h.appendChild(document.createTextNode(' Live now'));
-    h.appendChild(el('span', 'count', '(' + total + ')'));   // N = TOTAL live, not the shown slice
+    // N = the (filtered) live count; while a filter narrows it, show "(shown of all)" so the
+    // scoping is legible; unfiltered → the plain total.
+    var countTxt = filtering ? ('(' + total + ' of ' + allRows.length + ')') : ('(' + total + ')');
+    h.appendChild(el('span', 'count', countTxt));
     liveNowEl.appendChild(h);
     var body = el('div', 'livenow-body');
     shown.forEach(function(r){
@@ -2728,12 +2797,14 @@ _JS = r"""
     }
   }
 
-  // The sticky cross-repo triage bar: [⚠ Needs you N] [◑ Stalled N] [~ Cooling N] [ All ]. The
-  // old [● Live N] chip is RETIRED — the pinned "Live now" strip above the board is the first-class
-  // home for live sessions now, so a redundant triage chip only fragmented the view. Needs-you/
-  // Stalled/Cooling filter by `state`; "All" clears. Each composes (AND) with search. Counts come
-  // from `stateCounts` (the full data set). Rebuilt each render so counts + the active highlight
-  // stay live. No untrusted text.
+  // The sticky cross-repo triage bar: [⚠ Needs you N] [◑ Stalled N] [~ Cooling N] [→ Active N]
+  // [ All ] [✓ Done N]. Fix #3: the chips are the SINGLE source of state counts + filters — ALL
+  // four mutually-exclusive states (needs_you/stalled/slowing="cooling"/active) are filterable
+  // chips now (Active was added), so the header no longer duplicates them. The old [● Live N] chip
+  // stays RETIRED — `● live` / `emerging` are ORTHOGONAL badges, not states (see the legend), and
+  // the pinned "Live now" strip is their home. Needs-you/Stalled/Cooling/Active filter by `state`;
+  // "All" clears. Each composes (AND) with search. Counts come from `stateCounts` (the full data
+  // set). Rebuilt each render so counts + the active highlight stay live. No untrusted text.
   function renderTriage(){
     if(!triageBar) return;
     triageBar.innerHTML = '';
@@ -2742,13 +2813,18 @@ _JS = r"""
       {k:'needs_you', glyph:STATE_GLYPH.needs_you, label:'Needs you', n:stateCounts.needs_you},
       {k:'stalled',   glyph:STATE_GLYPH.stalled,   label:'Stalled',   n:stateCounts.stalled},
       {k:'slowing',   glyph:STATE_GLYPH.slowing,   label:'Cooling',   n:stateCounts.slowing},
+      {k:'active',    glyph:STATE_GLYPH.active,     label:'Active',    n:stateCounts.active},
       {k:'',          glyph:'',                    label:'All',       n:null}
     ];
     chips.forEach(function(ch){
       // A state/All chip is only visually active when NOT in Done mode (Done takes over).
       var on = !state.doneMode &&
         ((ch.k === '') ? (active === '' || active === 'all') : (active === ch.k));
-      var b = el('button', 'chip state-' + (ch.k || 'all') + (on ? ' active' : ''), null);
+      var cls = 'chip state-' + (ch.k || 'all') + (on ? ' active' : '');
+      // Fix #1: when something NEEDS you (>0), the Needs-you chip is emphasized (filled orange +
+      // subtle pulse) so the escalation draws the eye. The filter is NOT auto-applied — only lit.
+      if(ch.k === 'needs_you' && ch.n > 0) cls += ' attn';
+      var b = el('button', cls, null);
       b.type = 'button';
       var txt = (ch.glyph ? ch.glyph + ' ' : '') + ch.label + (ch.n != null ? ' ' + ch.n : '');
       b.textContent = txt;
@@ -2831,15 +2907,16 @@ _JS = r"""
     btnGrouped.classList.toggle('active', state.view === 'grouped');
     if(btnRecency) btnRecency.classList.toggle('active', state.view === 'recency');
     if(countEl){
-      // Summary counts: N need you · N stalled · N cooling · N active. The four states are
-      // mutually exclusive. The "N emerging" stat + the "N live now" pane count (the same union
-      // the pinned Live-now strip shows — EVERY running session, matched or not) ride along; the
-      // old "N live" (card-badge) / "N untracked" split is folded into the single "live now".
-      var txt = stateCounts.needs_you + ' need you · ' + stateCounts.stalled + ' stalled · ' +
-                stateCounts.slowing + ' cooling · ' + stateCounts.active + ' active';
+      // Fix #3: the header carries ONLY the orthogonal, non-state totals now — the mutually-
+      // exclusive STATE counts (need-you/stalled/cooling/active) live SOLELY on the triage chips,
+      // so no number appears twice in two taxonomies. `live`/`emerging` are orthogonal BADGES (a
+      // card can be any state AND live/emerging) counted at the card level here, labeled as badges
+      // in the legend; the Live-now strip owns its own session count. All three numbers are CARD
+      // counts (one consistent unit), so they read cleanly next to the chip state tally.
+      var totalN = (data.flat || []).length;
+      var txt = totalN + ' initiative' + (totalN === 1 ? '' : 's');
+      if(stateCounts.live) txt += ' · ' + stateCounts.live + ' live';
       if(emergingTotal) txt += ' · ' + emergingTotal + ' emerging';
-      var lnN = buildLiveNow(data.flat || [], data.live_unmatched || []).length;
-      if(lnN) txt += ' · ' + lnN + ' live now';
       countEl.textContent = txt;
     }
     footer.innerHTML = '';
@@ -3174,6 +3251,7 @@ _JS = _JS.replace("__CONFIRM_JS__", _CONFIRM_JS)
 _JS = _JS.replace("__GROUP_JS__", _GROUP_JS)
 _JS = _JS.replace("__LIVENOW_JS__", _LIVENOW_JS)
 _JS = _JS.replace("__MATCH_JS__", _MATCH_JS)
+_JS = _JS.replace("__LIVEFILTER_JS__", _LIVEFILTER_JS)
 _JS = _JS.replace("__MARKDOWN_JS__", _MARKDOWN_JS)
 
 
@@ -3260,21 +3338,29 @@ def render_html(model: dict | None, error: str | None = None,
         '</aside>'
     )
     js = _JS.replace("__REFRESH_MS__", str(int(refresh) * 1000))
-    # The pinned, ALWAYS-EXPANDED "Live now (N)" strip — every currently-running live tmux Claude
-    # session, matched to a card or not. First thing seen (above the triage bar); populated
-    # client-side by renderLiveNow from the JSON island (flat + live_unmatched).
-    livenow = '<section id="livenow" class="livenow" aria-label="live sessions"></section>'
-    # The sticky cross-repo triage bar (chips populated client-side from the live state counts).
+    # Fix #1: lead with what NEEDS you, demote the Live-now firehose. Order is header → triage
+    # (moved UP, directly under the header; STILL sticky) → Live-now strip → legend → cards. Two
+    # blind reviewers said leading with the (least-actionable) Live-now wall buried "Needs you".
+    # The sticky cross-repo triage bar (chips populated client-side from the live state counts) —
+    # the FIRST actionable thing now.
     triage = '<nav id="triage" class="triage" aria-label="triage filters"></nav>'
+    # The pinned, ALWAYS-EXPANDED "Live now (N)" strip — every currently-running live tmux Claude
+    # session, matched to a card or not. Now sits BELOW the triage bar (reorder only — behavior is
+    # unchanged: still top-6, activity-sorted, clickable, ＋N more); populated client-side by
+    # renderLiveNow from the JSON island (flat + live_unmatched), and scoped by the active filter.
+    livenow = '<section id="livenow" class="livenow" aria-label="live sessions"></section>'
     # A compact, muted legend decoding the state glyphs + badges for a first-time viewer. Static
-    # server-rendered text (no untrusted data) — sits just under the triage bar.
+    # server-rendered text (no untrusted data). Fix #3: it now LABELS ● live / emerging as
+    # orthogonal BADGES (a card can be any state AND live/emerging) vs the mutually-exclusive
+    # state chips — so the two taxonomies read cleanly. Sits under the Live-now strip.
     legend = (
         '<div id="legend" class="legend" aria-label="glyph legend">'
-        '⚠ needs you · → active · ~ cooling · ◑ stalled · ● live · ✓ done'
+        '⚠ needs you · → active · ~ cooling · ◑ stalled — states (pick one via a chip) · '
+        '● live · emerging — badges (orthogonal) · ✓ done'
         '</div>'
     )
     return (
-        head + header + livenow + triage + legend +
+        head + header + triage + livenow + legend +
         '<main id="app"></main>' + chat +
         '<footer id="foot"></footer>'
         '<script id="idata" type="application/json">' + payload + '</script>'
