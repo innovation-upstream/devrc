@@ -124,6 +124,38 @@ structured error: `503 extension_not_connected`, `504 timeout`,
 `GET /health` → `{"ok":true,"extension_connected":bool,"count":N,"instances":[{key,label,instanceId,activeTab},…]}`.
 `GET /instances` → `{"ok":true,"count":N,"instances":[…]}`.
 
+## Telemetry (activity pipeline)
+
+Each **handled command** (`getHtml`/`eval`/`tabs`/`nav`/`screenshot`, incl. its
+error/ambiguous outcomes) emits **one** event into the personal
+activity-telemetry pipeline, so browser-skill usage is first-class self-telemetry
+in ClickHouse `activity.events`:
+
+- **`source="browser-bridge"`, `kind="cmd"`** — a *distinct* source from the
+  collector's `browser` (nav/scroll) source; the two are kept separate.
+- **Fields:** `text` = the active-tab bare **domain** (or the op when no domain),
+  `duration_ms` = server-side latency, `exit_code` = 0/1, and a tiny `payload`
+  JSON `{op, key, outcome[, domain]}` (`key` = the `--instance` routing target,
+  empty for the implicit single-instance case; `outcome` ∈
+  `ok|no_extension|ambiguous|unknown_instance|superseded|timeout`).
+- **METADATA-ONLY (privacy):** it emits **only** the op name, instance key,
+  outcome, latency, and the active tab's **bare domain** — **never** the eval
+  source, page HTML, screenshot bytes/data-URLs, a full URL with path/query, or
+  any page content.
+- **Best-effort / fire-and-forget:** emitting runs **after** the HTTP response is
+  sent and can never delay or break a command — a missing collector, unwritable
+  spool, or any exception is swallowed and the command still succeeds. No new
+  deps: it reuses the collector's `scripts/collector/keylog/spool_emit.py`
+  (single source of truth for the v1 line format), located by its stable
+  absolute repo path (`~/workspace/devrc/…`) because `server.py` is deployed as a
+  flat `/nix/store` symlink so `__file__` can't find the sibling collector tree.
+- `health`/`instances`/`poll`/`result` are noise and deliberately do **not** emit.
+
+Feeds the `activity.events` table (and, once its registry learns the source,
+`adoption-scan`). The live end-to-end check (needs the running collector + real
+Brave): run any `browser` command, then confirm a `source='browser-bridge'` row
+landed in `activity.events`.
+
 ## Icon
 
 A gruvbox-tinted **bridge / chain-link** glyph (blue loopback node linked to the

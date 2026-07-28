@@ -38,6 +38,13 @@ tmux focus hooks   ─┼─► emit (pure shell, hot path) ─► spool/current
   Both tailers share `claude/_shared.py` (ts/project/emit/root/iter helpers) and run
   on the same 5-min `claude-activity-source` timer (both hosts).
   Layer B (`kind=session-insight`, qualitative goal/outcome/friction) is a later PR.
+- **External emitters** (write to the same spool, live outside this dir):
+  `browser-ext/receiver.py` (`source=browser, kind=nav` — page nav/scroll from the
+  collector's MV3 extension) and the **browser-bridge server**
+  (`scripts/browser-bridge/server.py`, `source=browser-bridge, kind=cmd` — one
+  best-effort, metadata-only event per Claude-driven browser command:
+  op/instance-key/outcome/latency + bare domain, **never** page content). Both
+  reuse `keylog/spool_emit.py` for the v1 line format.
 - `tests/` — pytest unit + round-trip coverage (mocks the HTTP endpoint).
 
 ## Spool / emit line contract (v1)
