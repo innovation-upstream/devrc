@@ -167,6 +167,59 @@ def test_blocked_markers_pruned_of_process_prose():
         assert genuine in assistant.BLOCKED_MARKERS, genuine
 
 
+# --------------------------------------------------------------------------- #
+# Severity signal — an ACTIVE, UNRESOLVED risk promotes a card to needs_you even when it
+# carries no "blocked/awaiting" wait marker. Scanned over the SAME narrow status/next_step
+# surface as the blocked-scan, so an infra card that merely NAMES prod can't trip it.
+# --------------------------------------------------------------------------- #
+def test_severity_hits_flags_active_unresolved_problems():
+    # A live risk in status (499s still happening) → flagged; the marker is reported.
+    v = _view("img-499", "Image edge 499s", "/repo/civitai",
+              status="the 499s are still happening after the rollout", next_step="")
+    marks499 = assistant._severity_hits(v)
+    assert "still happening" in marks499 and "499s" in marks499
+    # A disk risk in next_step → flagged.
+    v2 = _view("disk", "Disk pressure", "/repo/homelab",
+               status="", next_step="node is almost out of space — disk full imminent")
+    marks = assistant._severity_hits(v2)
+    assert "out of space" in marks and "disk full" in marks
+
+
+def test_severity_hits_does_not_flag_benign_prod_mentions():
+    # The whole precision point: a card that merely deployed/mentions prod is NOT a risk.
+    for status in ("deployed to prod, soaking", "shipped the prod rollout, all green",
+                   "client-facing prod dashboard work", "monitoring prod, nothing on fire"):
+        v = _view("calm", "Calm", "/repo/x", status=status, next_step="keep soaking")
+        assert assistant._severity_hits(v) == [], status
+
+
+def test_severity_hits_scans_only_status_and_next_step():
+    # A severity phrase present ONLY in identity/summary must NOT flag (mirrors the blocked-scan
+    # precision guard) — those are purpose/recall text, not what's actively broken.
+    v = _view("purpose", "Purpose", "/repo/x", status="fix(x): tidy up", next_step="",
+              identity="a project about 5xx outage triage and crashloop recovery",
+              summary="disk full and data loss were the original motivation")
+    assert assistant._severity_hits(v) == []
+
+
+def test_severity_markers_curated_for_precision():
+    # Broad topic words that would over-match every infra card are EXCLUDED; the concrete
+    # active-failure signals are present. Bare "oom" (matches room/zoom) is excluded.
+    for broad in ("prod", "regression", "growing", "client-facing", "slow", "oom"):
+        assert broad not in assistant.SEVERITY_MARKERS, broad
+    for genuine in ("still happening", "still failing", "unresolved", "out of space",
+                    "disk full", "5xx", "499s", "outage", "crashloop", "data loss",
+                    "flapping", "oomkill"):
+        assert genuine in assistant.SEVERITY_MARKERS, genuine
+
+
+def test_severity_bare_oom_word_does_not_false_positive():
+    # Regression guard: "room"/"zoom" must not trip a severity hit (only oomkill/oom-kill do).
+    v = _view("mtg", "Meeting notes", "/repo/x",
+              status="need more room in the zoom call for the boomer cohort", next_step="")
+    assert assistant._severity_hits(v) == []
+
+
 # --- REGRESSION: the real logged false positive (task-spec-drafter) ----------------------
 # Diagnosed from a live "whats blocked on me" ask that wrongly returned task-spec-drafter
 # alongside the genuine spend-analytics. Two leaks: (1) the scan read `identity` (whose

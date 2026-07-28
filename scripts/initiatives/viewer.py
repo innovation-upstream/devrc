@@ -677,11 +677,32 @@ _FALLBACK_BLOCKED_MARKERS = (
 )
 _FALLBACK_BLOCKED_FIELDS = ("status", "next_step")
 
+# FALLBACK severity-marker set — the same degraded-path role as `_FALLBACK_BLOCKED_MARKERS`,
+# used ONLY when the assistant sibling can't be imported so `derive_state` can still promote a
+# genuinely-urgent card to `needs_you` offline. A VERBATIM copy of `assistant.SEVERITY_MARKERS`
+# / `_BLOCKED_FIELDS`; a parity test pins the two together so they can never drift.
+# `assistant._severity_hits` is the SINGLE SOURCE OF TRUTH — this is only the degraded path.
+_FALLBACK_SEVERITY_MARKERS = (
+    "still happening", "still failing", "still broken", "still down", "still erroring",
+    "unresolved", "not resolved",
+    "out of space", "almost out of space", "disk full",
+    "5xx", "499s", "500s", "502", "503", "504",
+    "outage", "crashloop", "crash-loop", "oomkill", "oom-kill", "data loss",
+    "flapping", "prod is down", "down in prod",
+)
+_FALLBACK_SEVERITY_FIELDS = ("status", "next_step")
+
 
 def _fallback_blocking_hits(view: dict) -> list[str]:
     """Local copy of `assistant._blocking_hits` for the assistant-unavailable path."""
     hay = " ".join(str(view.get(f) or "") for f in _FALLBACK_BLOCKED_FIELDS).lower()
     return [mk for mk in _FALLBACK_BLOCKED_MARKERS if mk in hay]
+
+
+def _fallback_severity_hits(view: dict) -> list[str]:
+    """Local copy of `assistant._severity_hits` for the assistant-unavailable path."""
+    hay = " ".join(str(view.get(f) or "") for f in _FALLBACK_SEVERITY_FIELDS).lower()
+    return [mk for mk in _FALLBACK_SEVERITY_MARKERS if mk in hay]
 
 
 def _blocking_hits_for(view: dict) -> list[str]:
@@ -692,6 +713,17 @@ def _blocking_hits_for(view: dict) -> list[str]:
         return _assistant()._blocking_hits(view)
     except Exception:  # noqa: BLE001 - the assistant is optional here; fall back to local markers
         return _fallback_blocking_hits(view)
+
+
+def _severity_hits_for(view: dict) -> list[str]:
+    """The SEVERITY markers tripped by a view's status/next_step — sourced from
+    `assistant._severity_hits` (the SINGLE source, not re-hardcoded), degrading to the local
+    fallback copy when the assistant sibling can't load. Never raises. A non-empty result
+    promotes the card to `needs_you` even when no blocked-marker is present."""
+    try:
+        return _assistant()._severity_hits(view)
+    except Exception:  # noqa: BLE001 - the assistant is optional here; fall back to local markers
+        return _fallback_severity_hits(view)
 
 
 def _line2_trim(text) -> str:
@@ -751,21 +783,41 @@ def _derive_line2(view: dict, state: str, hits: list[str]) -> str:
     return _line2_trim(text)
 
 
+def derive_needs_reason(view: dict) -> str:
+    """PURE: WHY a card is `needs_you` — "blocked" (a genuine wait on the human) vs "severity"
+    (an active, unresolved RISK surfaced by SEVERITY_MARKERS), else "" (not needs_you).
+
+    "blocked" wins when both trip: a real wait is the more actionable framing, and the card's
+    line2 already leads with the blocker text. Consumed by build_model → the card's `⚠ risk`
+    cue + tooltip so a severity-promoted card reads distinctly from a blocked one."""
+    if _blocking_hits_for(view):
+        return "blocked"
+    if _severity_hits_for(view):
+        return "severity"
+    return ""
+
+
 def derive_state(view: dict) -> tuple[str, str]:
     """PURE: classify a view into (state, line2). Precedence (first match wins):
     needs_you > stalled > slowing > active. `live` is NOT here — it's a separate badge
     (`derive_live`) so a fleet of concurrent agents doesn't dominate the board.
 
-      - needs_you: `_blocking_hits(view)` non-empty.
+      - needs_you: `_blocking_hits(view)` OR `_severity_hits(view)` non-empty. The severity
+                   path promotes a genuinely-urgent live risk (a client-facing prod disk
+                   filling, a week-old "499s still happening") that would otherwise sit
+                   silently in `cooling` with "Needs you 0".
       - stalled:   momentum == "stalled" (≥7d since last touch — absolute age bucket).
       - slowing:   momentum == "slowing" (2–7d — the restored yellow "cooling" cue).
       - active:    everything else.
 
-    `line2` is ALWAYS the actionable next-step (see `_derive_line2`). Unit-testable without a
-    DB: `_blocking_hits_for` degrades to the local marker copy when the assistant can't load."""
-    hits = _blocking_hits_for(view)
+    `line2` is ALWAYS the actionable next-step (see `_derive_line2`) — for a needs_you card it
+    leads with the field that tripped a marker (blocked hits preferred, else severity). Unit-
+    testable without a DB: the `*_for` helpers degrade to the local marker copies offline."""
+    blocked = _blocking_hits_for(view)
+    severity = _severity_hits_for(view)
+    hits = blocked or severity   # line2 blocker text prefers the genuine wait, else the risk
     momentum = view.get("momentum") or ""
-    if hits:
+    if blocked or severity:
         state = STATE_NEEDS_YOU
     elif momentum == "stalled":
         state = STATE_STALLED
@@ -890,8 +942,12 @@ def _initiative_view(ini: dict, now: datetime) -> dict:
     try:
         view["state"], view["line2"] = derive_state(view)
         view["live"] = derive_live(view)
+        # WHY a needs_you card needs you: "blocked" (a real wait) vs "severity" (an active
+        # risk promoted by SEVERITY_MARKERS) vs "" — drives the card's distinct `⚠ risk` cue.
+        view["needs_reason"] = derive_needs_reason(view)
     except Exception:  # noqa: BLE001 - per-row isolation: never let one row break build_model
         view["state"], view["line2"], view["live"] = STATE_ACTIVE, "", False
+        view["needs_reason"] = ""
     return view
 
 
@@ -1316,6 +1372,21 @@ header .meta{color:var(--gray);font-size:.85rem}
 .chip.state-stalled.active{background:var(--gray);border-color:var(--gray)}
 .chip.state-slowing.active{background:var(--yellow);border-color:var(--yellow)}
 .chip.state-live.active{background:var(--green);border-color:var(--green)}
+/* Compact, muted glyph legend under the triage bar — decodes the state glyphs + badges for a
+   first-time viewer. Secondary text; wraps on a narrow viewport. */
+.legend{color:var(--gray);font-size:.74rem;margin:-.4rem 0 1rem;line-height:1.5}
+/* The `⚠ risk` cue on a card promoted to needs_you by an ACTIVE RISK (severity), distinct from
+   a blocked wait. Small, orange, low-key so it reads as a badge not a headline. */
+.risk-cue{font-size:.68rem;color:var(--orange);border:1px solid var(--orange);border-radius:3px;
+  padding:0 .25rem;margin-left:.35rem;white-space:nowrap;font-weight:bold}
+/* The "match: …snippet…" reason line shown on a visible card while a search query is active. */
+.match-reason{margin-top:.25rem;color:var(--gray);font-size:.76rem;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.match-reason .mr-lbl{color:var(--gray);font-weight:bold;margin-right:.1rem}
+.match-reason .mr-fuzzy{font-style:italic;color:var(--gray)}
+/* An ARMED destructive button (first tap of the two-tap confirm) — highlighted so the pending
+   confirm is obvious; reverts on the second tap / blur / timeout. */
+.archive-btn.armed{background:var(--orange);color:var(--bg);border-color:var(--orange);font-weight:bold}
 .ini{background:var(--bg1);border-left:3px solid var(--gray);border-radius:4px;
   padding:.55rem .7rem;margin:0 0 .5rem;cursor:pointer}
 .ini:hover{background:#40393622}
@@ -1683,6 +1754,102 @@ function askResolve(v){
 """.strip()
 
 
+# PURE, DOM-FREE relative-age → "X ago" suffix helper. Kept in its OWN snippet so the node test
+# evals it directly (exercising the ACTUAL page code). Guards the "now"/"just now" case so a
+# just-synced store reads "just now" instead of the nonsensical "now ago"; a falsy age → the
+# neutral "unknown". Substituted into _JS at the __AGO_JS__ placeholder at module load.
+_AGO_JS = r"""
+function withAgo(age){
+  if(!age) return 'unknown';                    // no timestamp → neutral, never "undefined ago"
+  if(age === 'now' || age === 'just now') return 'just now';   // <1m sync: "just now", NOT "now ago"
+  return age + ' ago';                          // normal case: "5m ago", "3h ago", "2d ago"
+}
+""".strip()
+
+
+# PURE-ish, DOM-free "why did this card match the search" helper. Kept in its OWN snippet so the
+# node test evals it directly. `matchSnippet(v, q)` returns {fuzzy:false, text:<window>} when the
+# (already-lowercased) query is a SUBSTRING of some card field, {fuzzy:true} when the card only
+# matched fuzzily (matchQ passed but no field literally contains the query), or null when there
+# is no active query. `snippetWindow` centres a ~60-char ellipsized window on the hit. The field
+# order mirrors the spec: title → summary → status → opening → next_step → search_text (hidden
+# full session text) → latest recent-message. Substituted into _JS at the __SNIPPET_JS__ marker.
+_SNIPPET_JS = r"""
+function snippetWindow(text, q, width){
+  var s = String(text == null ? '' : text);
+  var idx = s.toLowerCase().indexOf(q);
+  if(idx === -1) return null;                    // no substring hit in this field
+  width = width || 60;
+  var pad = Math.max(0, Math.floor((width - q.length) / 2));
+  var start = Math.max(0, idx - pad);
+  var end = Math.min(s.length, idx + q.length + pad);
+  var seg = s.slice(start, end).replace(/\s+/g, ' ').trim();   // collapse whitespace for display
+  if(start > 0) seg = '…' + seg;                 // ellipsize a clipped left edge
+  if(end < s.length) seg = seg + '…';            // …and a clipped right edge
+  return seg;
+}
+function matchSnippet(v, q){
+  if(!v || q == null) return null;
+  q = String(q).trim().toLowerCase();
+  if(!q) return null;                            // only while a query is active
+  var latest = '';
+  var msgs = (v.recent_messages || []);
+  if(msgs.length){ var m = msgs[msgs.length - 1]; latest = (m && m.text) || ''; }
+  var fields = [v.title, v.summary, v.status, v.opening_message, v.next_step,
+                v.search_text, latest];
+  for(var i = 0; i < fields.length; i++){
+    var win = snippetWindow(fields[i], q, 60);
+    if(win !== null) return {fuzzy: false, text: win};   // first substring hit wins
+  }
+  return {fuzzy: true};                          // matchQ said yes but no literal substring
+}
+""".strip()
+
+
+# PURE, DOM-based two-tap confirm for a destructive button. Kept in its OWN snippet so the node
+# test evals it against a DOM-shim button + injectable timers. First click ARMS the button
+# (label → `armedLabel`, `.armed` class) and starts a ~`windowMs` disarm timer; a second click
+# WHILE armed disarms + runs `onConfirm`; a `blur` (focus leaves — i.e. clicking elsewhere) or
+# the timeout disarms back to `restLabel`. Buttons fire `click` on Enter/Space natively, so this
+# is keyboard-safe. `onConfirm` runs the EXISTING action (e.g. archiveCard) VERBATIM — nothing
+# about /api/archive changes. Substituted into _JS at the __CONFIRM_JS__ placeholder.
+_CONFIRM_JS = r"""
+function armConfirm(btn, opts){
+  opts = opts || {};
+  var armedLabel = opts.armedLabel || 'confirm?';
+  var restLabel = (opts.restLabel != null) ? opts.restLabel : btn.textContent;
+  var windowMs = opts.windowMs || 3000;
+  var onConfirm = opts.onConfirm || function(){};
+  var setT = (opts.timers && opts.timers.set) ||
+             (typeof setTimeout !== 'undefined' ? setTimeout : null);
+  var clrT = (opts.timers && opts.timers.clear) ||
+             (typeof clearTimeout !== 'undefined' ? clearTimeout : null);
+  var armed = false, timer = null;
+  function disarm(){
+    if(!armed) return;
+    armed = false;
+    if(timer != null && clrT){ clrT(timer); }
+    timer = null;
+    btn.textContent = restLabel;
+    if(btn.classList) btn.classList.remove('armed');
+  }
+  function arm(){
+    armed = true;
+    btn.textContent = armedLabel;
+    if(btn.classList) btn.classList.add('armed');
+    if(setT) timer = setT(disarm, windowMs);
+  }
+  btn.addEventListener('click', function(ev){
+    if(ev && ev.stopPropagation) ev.stopPropagation();   // never toggle the card expand
+    if(armed){ disarm(); onConfirm(ev); }                // second tap → fire the real action
+    else { arm(); }                                       // first tap → arm + await confirm
+  });
+  btn.addEventListener('blur', function(){ disarm(); });  // clicking elsewhere disarms
+  return {arm: arm, disarm: disarm, isArmed: function(){ return armed; }};
+}
+""".strip()
+
+
 # PURE, DOM-FREE grouping of the flat initiative stream into collapsible repo sections — kept
 # in its OWN snippet so the node test evals it directly (no parseLastTouch/DOM dependency). The
 # input `views` is ALREADY last_touch-DESC (build_model's `flat`), so: (a) cards within a repo
@@ -2003,6 +2170,9 @@ _JS = r"""
   __STATEFILTER_JS__
   __ARCHIVE_JS__
   __ACTIONS_JS__
+  __AGO_JS__
+  __SNIPPET_JS__
+  __CONFIRM_JS__
   __GROUP_JS__
   __LIVENOW_JS__
   __MATCH_JS__
@@ -2354,10 +2524,21 @@ _JS = r"""
     // LINE 1: state glyph + slug + title + repo label + emerging badge + `● live` overlay + age.
     var row1 = el('div', 'row1');
     var sb = el('span', 'sbadge state-' + st, STATE_GLYPH[st] || '→');
-    sb.title = STATE_LABEL[st] || st;
+    // Glyph tooltip = the state label, plus WHY a needs_you card needs you (blocked wait vs an
+    // active risk promoted by SEVERITY_MARKERS) so the cue is discoverable on hover.
+    sb.title = (STATE_LABEL[st] || st) +
+      (v.needs_reason === 'severity' ? ' · active risk' :
+       (v.needs_reason === 'blocked' ? ' · blocked on you' : ''));
     row1.appendChild(sb);
     row1.appendChild(el('span', 'slug', v.slug));
     if(v.title) row1.appendChild(el('span', 'title', v.title));
+    // SEVERITY cue: a card promoted to needs_you by an ACTIVE RISK (not a wait) carries a small
+    // `⚠ risk` chip, distinct from the blocked line, so the reason reads at a glance.
+    if(v.needs_reason === 'severity'){
+      var rc = el('span', 'risk-cue', '⚠ risk');
+      rc.title = 'active, unresolved risk detected in this card’s status/next-step — surfaced for your attention';
+      row1.appendChild(rc);
+    }
     // The repo label shows whenever repo isn't the section header — i.e. flat AND recency; the
     // grouped (default) view uses the repo as its collapsible section heading instead.
     if(state.view !== 'grouped' && v.repo_name)
@@ -2371,7 +2552,11 @@ _JS = r"""
     }
     // A session-only (undocumented) card is badged inline (the standalone Emerging lane is
     // retired); it groups with its repo like any other card.
-    if(v.undocumented) row1.appendChild(el('span', 'emerging-badge', 'emerging'));
+    if(v.undocumented){
+      var eb = el('span', 'emerging-badge', 'emerging');
+      eb.title = 'session-only — discovered from live sessions/telemetry, no handoff doc yet';
+      row1.appendChild(eb);
+    }
     row1.appendChild(el('span', 'age', v.age));
     c.appendChild(row1);
 
@@ -2380,6 +2565,20 @@ _JS = r"""
       var l2 = el('div', 'line2 state-' + st);
       l2.appendChild(document.createTextNode(v.line2));
       c.appendChild(l2);
+    }
+
+    // SEARCH MATCH REASON — while a query is active, show WHY this (visible) card matched: a
+    // ~60-char window around the first substring hit (matchSnippet scans title/summary/status/
+    // opening/next-step/hidden-session-text/latest-message), else "(fuzzy match)" when matchQ
+    // passed but nothing literally contains the query. Best-effort, textContent-only, query-gated.
+    var mq = state.q.trim().toLowerCase();
+    if(mq){
+      var ms = matchSnippet(v, mq);
+      var mr = el('div', 'match-reason');
+      mr.appendChild(el('span', 'mr-lbl', 'match: '));
+      if(ms && !ms.fuzzy){ mr.appendChild(document.createTextNode(ms.text)); }
+      else { mr.appendChild(el('span', 'mr-fuzzy', '(fuzzy match)')); }
+      c.appendChild(mr);
     }
 
     // ACTIONS row — Phase 3: STATE-MATCHED, driven by the pure `cardActions(v)` map (node-tested):
@@ -2419,22 +2618,21 @@ _JS = r"""
         drow.appendChild(btn);
         drow.appendChild(dstat);
       } else if(a.kind === 'done'){
-        // [✓ done] — archive (done for now; resurfaces on new activity).
+        // [✓ done] — archive (done for now; resurfaces on new activity). DESTRUCTIVE (it sits
+        // next to [resume]), so it's TWO-TAP: first click arms ('done?'), a second within ~3s
+        // fires; blur/timeout disarms. armConfirm owns the arm/confirm; the action is unchanged.
         var doneBtn = el('button', 'archive-btn done', '✓ done');
-        doneBtn.title = 'archive — done for now (reappears if this initiative sees new activity)';
-        doneBtn.addEventListener('click', function(ev){
-          ev.stopPropagation();
-          archiveCard(v, doneBtn, astat, 'done', c);
-        });
+        doneBtn.title = 'archive — done for now (reappears if this initiative sees new activity). Click twice to confirm.';
+        armConfirm(doneBtn, {armedLabel: 'done?', restLabel: '✓ done',
+          onConfirm: function(){ archiveCard(v, doneBtn, astat, 'done', c); }});
         drow.appendChild(doneBtn);
       } else if(a.kind === 'drop'){
         // [drop] — archive as dropped (stalled + cooling only, via cardActions/dropEligible).
+        // Also DESTRUCTIVE + adjacent to [resume] → TWO-TAP confirm (arms to 'drop?').
         var dropBtn = el('button', 'archive-btn drop', 'drop');
-        dropBtn.title = 'drop — archive this initiative as dropped';
-        dropBtn.addEventListener('click', function(ev){
-          ev.stopPropagation();
-          archiveCard(v, dropBtn, astat, 'dropped', c);
-        });
+        dropBtn.title = 'drop — archive this initiative as dropped. Click twice to confirm.';
+        armConfirm(dropBtn, {armedLabel: 'drop?', restLabel: 'drop',
+          onConfirm: function(){ archiveCard(v, dropBtn, astat, 'dropped', c); }});
         drow.appendChild(dropBtn);
       }
     });
@@ -2610,7 +2808,7 @@ _JS = r"""
         r1.appendChild(el('span', 'slug', a.slug || '(no slug)'));
         if(a.title) r1.appendChild(el('span', 'title', a.title));
         if(a.reason) r1.appendChild(el('span', 'reason reason-' + a.reason, a.reason));
-        r1.appendChild(el('span', 'age', (a.archived_age ? a.archived_age + ' ago' : '—')));
+        r1.appendChild(el('span', 'age', (a.archived_age ? withAgo(a.archived_age) : '—')));
         rowEl.appendChild(r1);
         var act = el('div', 'actions');
         var ub = el('button', 'archive-btn unarchive', '↺ unarchive');
@@ -2647,8 +2845,9 @@ _JS = r"""
     }
     footer.innerHTML = '';
     footer.appendChild(el('span', 'live', 'live sessions ● realtime'));
-    var age = data.captured_age ? (data.captured_age + ' ago') : 'unknown';
-    footer.appendChild(document.createTextNode(' · store synced ' + age +
+    // withAgo guards the "now" case so a just-synced store reads "store synced just now",
+    // NOT the nonsensical "store synced now ago"; a missing age → "unknown".
+    footer.appendChild(document.createTextNode(' · store synced ' + withAgo(data.captured_age) +
       ' · click a card to expand'));
   }
 
@@ -2970,6 +3169,9 @@ _JS = _JS.replace("__RECENCY_JS__", _RECENCY_JS)
 _JS = _JS.replace("__STATEFILTER_JS__", _STATEFILTER_JS)
 _JS = _JS.replace("__ARCHIVE_JS__", _ARCHIVE_JS)
 _JS = _JS.replace("__ACTIONS_JS__", _ACTIONS_JS)
+_JS = _JS.replace("__AGO_JS__", _AGO_JS)
+_JS = _JS.replace("__SNIPPET_JS__", _SNIPPET_JS)
+_JS = _JS.replace("__CONFIRM_JS__", _CONFIRM_JS)
 _JS = _JS.replace("__GROUP_JS__", _GROUP_JS)
 _JS = _JS.replace("__LIVENOW_JS__", _LIVENOW_JS)
 _JS = _JS.replace("__MATCH_JS__", _MATCH_JS)
@@ -3065,8 +3267,15 @@ def render_html(model: dict | None, error: str | None = None,
     livenow = '<section id="livenow" class="livenow" aria-label="live sessions"></section>'
     # The sticky cross-repo triage bar (chips populated client-side from the live state counts).
     triage = '<nav id="triage" class="triage" aria-label="triage filters"></nav>'
+    # A compact, muted legend decoding the state glyphs + badges for a first-time viewer. Static
+    # server-rendered text (no untrusted data) — sits just under the triage bar.
+    legend = (
+        '<div id="legend" class="legend" aria-label="glyph legend">'
+        '⚠ needs you · → active · ~ cooling · ◑ stalled · ● live · ✓ done'
+        '</div>'
+    )
     return (
-        head + header + livenow + triage +
+        head + header + livenow + triage + legend +
         '<main id="app"></main>' + chat +
         '<footer id="foot"></footer>'
         '<script id="idata" type="application/json">' + payload + '</script>'

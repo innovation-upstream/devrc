@@ -1421,11 +1421,13 @@ def test_search_text_is_an_optional_column():
 def test_search_text_fed_to_match_blob_but_not_rendered_on_card():
     # It feeds the client-side search predicate...
     assert "v.search_text" in viewer._MATCH_JS
-    # ...and its ONLY reference in the whole page bundle is the matcher — the card DOM-builder
-    # never touches it, so the full session text is searched but never displayed on the card.
-    assert viewer._JS.count("v.search_text") == 1
-    # It reaches the client (JSON island) so matchQ can use it, but nothing renders it: the
-    # card-building code (`function card(`) does not mention search_text between its bounds.
+    # ...and the match-REASON snippet finder (Fix 3) may quote a ~60-char WINDOW of it to explain
+    # a hidden-field hit — but the FULL session text is never dumped on the card. So the only two
+    # references are the matcher + the snippet finder; the card DOM-builder never touches it.
+    assert "v.search_text" in viewer._SNIPPET_JS
+    assert viewer._JS.count("v.search_text") == 2
+    # It reaches the client (JSON island) so matchQ/matchSnippet can use it, but the card-building
+    # code (`function card(`) does not reference search_text directly (only via matchSnippet()).
     js = viewer._JS
     ci = js.index("function card(")
     card_body = js[ci:ci + 6000]
@@ -1610,7 +1612,7 @@ def test_js_grouping_and_inline_emerging_wired():
     assert "partitionInitiatives" not in js
     assert "renderEmerging" not in js
     assert "emerging-badge" in js
-    assert "v.undocumented) row1.appendChild" in js
+    assert "if(v.undocumented){" in js and "row1.appendChild(eb)" in js   # inline badge (+tooltip)
     # flat + recency render the full FILTERED stream (no documented/emerging split anymore).
     assert "all.forEach(function(v){ if(visible(v))" in js
     assert "rviews = all.filter(visible)" in js
@@ -2090,6 +2092,95 @@ def test_blocking_hits_for_uses_assistant_as_single_source(monkeypatch):
     assert seen["called"] is True
 
 
+# --- severity-aware needs_you (fix 5) ---------------------------------------- #
+def test_severity_hits_for_flags_active_risk_status():
+    # A live risk in status ("499s still happening" / "disk full") is flagged by the severity
+    # scan, sourced from assistant._severity_hits.
+    v = _view(status="the 499s are still happening in prod", next_step="")
+    hits = viewer._severity_hits_for(v)
+    assert "still happening" in hits and "499s" in hits
+    v2 = _view(status="", next_step="node is out of space — disk full")
+    assert "out of space" in viewer._severity_hits_for(v2)
+
+
+def test_severity_hits_for_does_not_flag_benign_prod_mention():
+    # A card that merely deployed to prod is NOT a severity risk (precision).
+    assert viewer._severity_hits_for(_view(status="deployed to prod, soaking")) == []
+
+
+def test_fallback_severity_hits_parity_with_assistant():
+    # PARITY: the viewer-side fallback severity markers + fields are a VERBATIM copy of
+    # assistant.SEVERITY_MARKERS / _BLOCKED_FIELDS, pinned so they can never drift.
+    assistant = viewer._assistant()
+    assert viewer._FALLBACK_SEVERITY_MARKERS == assistant.SEVERITY_MARKERS
+    assert viewer._FALLBACK_SEVERITY_FIELDS == assistant._BLOCKED_FIELDS
+
+
+def test_fallback_severity_hits_matches_assistant_on_samples():
+    assistant = viewer._assistant()
+    for v in [_view(status="the 499s are still happening"), _view(next_step="disk full"),
+              _view(status="deployed to prod")]:
+        assert viewer._fallback_severity_hits(v) == assistant._severity_hits(v)
+
+
+def test_severity_hits_for_uses_fallback_when_assistant_unavailable(monkeypatch):
+    # assistant can't load → severity scan degrades to the local marker copy (never raises).
+    monkeypatch.setattr(viewer, "_assistant",
+                        lambda: (_ for _ in ()).throw(ImportError("nope")))
+    assert "crashloop" in viewer._severity_hits_for(_view(status="pod is in crashloop"))
+
+
+def test_derive_state_needs_you_from_severity_only_with_distinct_reason():
+    # A card with an active risk but NO blocked-marker is promoted to needs_you, and its reason
+    # is "severity" (distinct from a blocked wait) — so the card can render a `⚠ risk` cue.
+    v = _view(status="the 499s are still happening", momentum="slowing")
+    st, line2 = viewer.derive_state(v)
+    assert st == "needs_you"                      # promoted OUT of "cooling"/slowing
+    assert "still happening" in line2 or "499s" in line2
+    assert viewer.derive_needs_reason(v) == "severity"
+
+
+def test_derive_needs_reason_blocked_wins_over_severity():
+    # When BOTH a wait and a risk are present, the reason is "blocked" (the more actionable
+    # framing); a pure wait → "blocked"; a pure risk → "severity"; neither → "".
+    both = _view(status="awaiting your call — and the 499s are still happening")
+    assert viewer.derive_needs_reason(both) == "blocked"
+    assert viewer.derive_needs_reason(_view(status="awaiting your review")) == "blocked"
+    assert viewer.derive_needs_reason(_view(next_step="disk full")) == "severity"
+    assert viewer.derive_needs_reason(_view(status="all green")) == ""
+
+
+def test_derive_needs_reason_severity_via_fallback(monkeypatch):
+    # The reason still resolves on the assistant-unavailable path (fallback markers).
+    monkeypatch.setattr(viewer, "_assistant",
+                        lambda: (_ for _ in ()).throw(ImportError("nope")))
+    assert viewer.derive_needs_reason(_view(status="service outage ongoing")) == "severity"
+
+
+def test_build_model_sets_needs_reason_and_severity_promotes_needs_you():
+    # End-to-end through build_model: a severity-only row lands state=needs_you + reason=severity,
+    # so the [⚠ Needs you N] chip count (which counts state==needs_you) includes it.
+    rows = [_row(slug="risk", status="the 499s are still happening", momentum="slowing"),
+            _row(slug="calm", status="deployed to prod, soaking", momentum="active")]
+    m = viewer.build_model(rows, now=NOW)
+    by = {v["slug"]: v for v in m["flat"]}
+    assert by["risk"]["state"] == "needs_you"
+    assert by["risk"]["needs_reason"] == "severity"
+    assert by["calm"]["state"] == "active"
+    assert by["calm"]["needs_reason"] == ""
+    # the chip count is derived from state==needs_you on the client; assert the server data it
+    # reads includes the severity-promoted card.
+    assert sum(1 for v in m["flat"] if v["state"] == "needs_you") == 1
+
+
+def test_render_html_severity_card_ships_risk_cue():
+    # a severity-promoted card ships needs_reason in the JSON island + the `⚠ risk` cue renderer.
+    rows = [_row(slug="risk", status="disk full on the prod node", momentum="active")]
+    html = viewer.render_html(viewer.build_model(rows, now=NOW))
+    assert '"needs_reason": "severity"' in html or '"needs_reason":"severity"' in html
+    assert "risk-cue" in html and "⚠ risk" in html
+
+
 # --- _initiative_view / build_model attach state + line2 --------------------- #
 def test_build_model_attaches_state_and_line2():
     v = viewer.build_model([_row(slug="s")], now=NOW)["flat"][0]
@@ -2347,6 +2438,257 @@ def test_js_group_unknown_repo_name_bucketed():
     assert got[0]["name"] == "(unknown repo)"
 
 
+# =========================================================================== #
+# Dogfood usability fixes — legend, footer "just now", search snippet reason,
+# two-tap confirm, severity cue. (node-eval'd where the logic is JS.)
+# =========================================================================== #
+
+# --- Fix 1: glyph/badge legend + tooltips ------------------------------------ #
+def test_render_html_has_glyph_legend():
+    html = viewer.render_html(viewer.build_model([_row(slug="s")], now=NOW))
+    assert 'id="legend"' in html and 'class="legend"' in html
+    # the legend decodes every state glyph + the live/done badges, one muted line.
+    assert "⚠ needs you · → active · ~ cooling · ◑ stalled · ● live · ✓ done" in html
+    assert ".legend{" in viewer._CSS
+
+
+def test_js_card_glyph_and_badge_tooltips():
+    body = _card_body()
+    # state glyph carries a title (state label + WHY for a needs_you card).
+    assert "sb.title = (STATE_LABEL[st] || st)" in body
+    assert "' · active risk'" in body and "' · blocked on you'" in body
+    # the emerging badge is now hover-explained; the live badge already had a title.
+    assert "eb.title = 'session-only" in body
+    assert "lb.title = 'a live agent session is running on this initiative'" in body
+
+
+# --- Fix 2: footer "store synced just now" (no "now ago") -------------------- #
+def _node_withago(age):
+    node = _shutil.which("node")
+    if not node:
+        import pytest
+        pytest.skip("node not on PATH — withAgo JS untested this run")
+    body = "console.log(JSON.stringify(withAgo(" + json.dumps(age) + ")));"
+    out = _subprocess.run([node, "-e", viewer._AGO_JS + "\n" + body],
+                          capture_output=True, text=True, timeout=30)
+    assert out.returncode == 0, out.stderr
+    return json.loads(out.stdout)
+
+
+def test_js_withago_guards_now_and_formats_ago():
+    assert _node_withago("now") == "just now"          # THE bug: no more "now ago"
+    assert _node_withago("just now") == "just now"
+    assert _node_withago("5m") == "5m ago"
+    assert _node_withago("3h") == "3h ago"
+    assert _node_withago("2d") == "2d ago"
+    assert _node_withago("") == "unknown"              # falsy → neutral, never "undefined ago"
+    assert _node_withago(None) == "unknown"
+
+
+def test_js_footer_uses_withago_not_bare_ago():
+    js = viewer._JS
+    # the footer + the Done-view age both route through withAgo (the "now ago" guard).
+    assert "store synced ' + withAgo(data.captured_age)" in js
+    assert "(a.archived_age ? withAgo(a.archived_age) : '—')" in js
+    # the old bare-concat footer bug is gone.
+    assert "data.captured_age + ' ago'" not in js
+
+
+# --- Fix 3: search match-reason snippet -------------------------------------- #
+def _node_snippet(view, q):
+    node = _shutil.which("node")
+    if not node:
+        import pytest
+        pytest.skip("node not on PATH — matchSnippet JS untested this run")
+    body = ("console.log(JSON.stringify(matchSnippet(" + json.dumps(view) + ", "
+            + json.dumps(q) + ")));")
+    out = _subprocess.run([node, "-e", viewer._SNIPPET_JS + "\n" + body],
+                          capture_output=True, text=True, timeout=30)
+    assert out.returncode == 0, out.stderr
+    return json.loads(out.stdout)
+
+
+def test_js_snippet_substring_window_ellipsized():
+    long = ("alpha beta gamma delta epsilon the-needle-here zeta eta theta iota kappa "
+            "lambda mu nu xi omicron pi")
+    res = _node_snippet({"summary": long}, "needle")
+    assert res["fuzzy"] is False
+    assert "needle" in res["text"]
+    assert res["text"].startswith("…") and res["text"].endswith("…")   # clipped both edges
+    assert len(res["text"]) < len(long)                                # it's a window
+
+
+def test_js_snippet_matches_on_hidden_search_text_field():
+    # a hit that lives ONLY in the hidden search_text (never rendered) is still explained.
+    res = _node_snippet({"title": "Image cacher", "search_text": "mid-session mention of quicksilver"},
+                        "quicksilver")
+    assert res["fuzzy"] is False and "quicksilver" in res["text"]
+
+
+def test_js_snippet_matches_on_latest_message():
+    res = _node_snippet(
+        {"recent_messages": [{"text": "old turn"}, {"text": "ship the extractor now"}]},
+        "extractor")
+    assert res["fuzzy"] is False and "extractor" in res["text"]
+
+
+def test_js_snippet_fuzzy_only_when_no_substring():
+    # matchQ can match fuzzily (typo/subsequence) with NO literal substring anywhere → the card
+    # shows "(fuzzy match)" instead of a window. matchSnippet returns {fuzzy:true}.
+    res = _node_snippet({"title": "announcement banner"}, "annce")
+    assert res["fuzzy"] is True
+
+
+def test_js_snippet_null_when_no_query_and_no_crash_on_empty():
+    assert _node_snippet({"title": "x"}, "") is None        # no active query → nothing
+    assert _node_snippet({}, "anything") == {"fuzzy": True}  # empty view → no crash, fuzzy
+
+
+def test_js_card_renders_match_reason_only_under_query():
+    body = _card_body()
+    assert "var mq = state.q.trim().toLowerCase();" in body
+    assert "if(mq){" in body
+    assert "matchSnippet(v, mq)" in body
+    assert "'match: '" in body
+    assert "'(fuzzy match)'" in body
+    assert "createTextNode(ms.text)" in body    # substring window is textContent-only
+
+
+# --- Fix 4: two-tap confirm on destructive actions --------------------------- #
+def _fake_btn(label):
+    """A minimal DOM-button shim for node-eval: textContent, classList, addEventListener +
+    a dispatch(evtType) helper. Rendered as a JS source snippet the test injects."""
+    return (
+        "function FakeBtn(label){ this.textContent = label; var self = this;"
+        " this._h = {}; this._classes = {};"
+        " this.classList = { add:function(c){ self._classes[c]=1; },"
+        "   remove:function(c){ delete self._classes[c]; },"
+        "   contains:function(c){ return !!self._classes[c]; } };"
+        " this.addEventListener = function(t, fn){ (self._h[t] = self._h[t] || []).push(fn); };"
+        " this.dispatch = function(t, ev){ (self._h[t]||[]).forEach(function(fn){ fn(ev); }); };"
+        "}"
+    )
+
+
+def _node_confirm(script_body):
+    node = _shutil.which("node")
+    if not node:
+        import pytest
+        pytest.skip("node not on PATH — armConfirm JS untested this run")
+    # a controllable fake-timer harness so the test drives the ~3s disarm deterministically.
+    harness = (
+        "var TIMERS = []; var NEXT = 1;"
+        "function fakeSet(fn, ms){ var id = NEXT++; TIMERS.push({id:id, fn:fn}); return id; }"
+        "function fakeClear(id){ TIMERS = TIMERS.filter(function(t){ return t.id !== id; }); }"
+        "function fireTimers(){ var t = TIMERS; TIMERS = []; t.forEach(function(x){ x.fn(); }); }"
+    )
+    src = viewer._CONFIRM_JS + "\n" + _fake_btn("") + "\n" + harness + "\n" + script_body
+    out = _subprocess.run([node, "-e", src], capture_output=True, text=True, timeout=30)
+    assert out.returncode == 0, out.stderr
+    return json.loads(out.stdout)
+
+
+def test_js_confirm_first_click_arms_no_action():
+    got = _node_confirm(
+        "var fired = 0; var b = new FakeBtn('✓ done');"
+        "armConfirm(b, {armedLabel:'done?', restLabel:'✓ done',"
+        " timers:{set:fakeSet, clear:fakeClear}, onConfirm:function(){ fired++; }});"
+        "b.dispatch('click', {stopPropagation:function(){}});"
+        "console.log(JSON.stringify({label:b.textContent, armed:b.classList.contains('armed'),"
+        " fired:fired}));")
+    assert got == {"label": "done?", "armed": True, "fired": 0}   # armed, NOT executed
+
+
+def test_js_confirm_second_click_fires_action():
+    got = _node_confirm(
+        "var fired = 0; var b = new FakeBtn('drop');"
+        "armConfirm(b, {armedLabel:'drop?', restLabel:'drop',"
+        " timers:{set:fakeSet, clear:fakeClear}, onConfirm:function(){ fired++; }});"
+        "var ev = {stopPropagation:function(){}};"
+        "b.dispatch('click', ev);"      # arm
+        "b.dispatch('click', ev);"      # confirm
+        "console.log(JSON.stringify({label:b.textContent, armed:b.classList.contains('armed'),"
+        " fired:fired}));")
+    assert got == {"label": "drop", "armed": False, "fired": 1}   # fired once, disarmed back
+
+
+def test_js_confirm_timeout_disarms_without_firing():
+    got = _node_confirm(
+        "var fired = 0; var b = new FakeBtn('✓ done');"
+        "armConfirm(b, {armedLabel:'done?', restLabel:'✓ done',"
+        " timers:{set:fakeSet, clear:fakeClear}, onConfirm:function(){ fired++; }});"
+        "b.dispatch('click', {stopPropagation:function(){}});"   # arm
+        "fireTimers();"                                          # ~3s elapse → disarm
+        "console.log(JSON.stringify({label:b.textContent, armed:b.classList.contains('armed'),"
+        " fired:fired}));")
+    assert got == {"label": "✓ done", "armed": False, "fired": 0}   # reverted, never fired
+
+
+def test_js_confirm_blur_disarms():
+    got = _node_confirm(
+        "var fired = 0; var b = new FakeBtn('drop');"
+        "armConfirm(b, {armedLabel:'drop?', restLabel:'drop',"
+        " timers:{set:fakeSet, clear:fakeClear}, onConfirm:function(){ fired++; }});"
+        "b.dispatch('click', {stopPropagation:function(){}});"   # arm
+        "b.dispatch('blur');"                                    # click elsewhere → disarm
+        "console.log(JSON.stringify({label:b.textContent, armed:b.classList.contains('armed'),"
+        " fired:fired}));")
+    assert got == {"label": "drop", "armed": False, "fired": 0}
+
+
+def test_js_confirm_rearm_after_disarm_keyboard_safe():
+    # after a timeout-disarm, a fresh click re-arms (a native button click fires on Enter/Space,
+    # so this is keyboard-safe by construction — same code path as a mouse click).
+    got = _node_confirm(
+        "var fired = 0; var b = new FakeBtn('drop');"
+        "armConfirm(b, {armedLabel:'drop?', restLabel:'drop',"
+        " timers:{set:fakeSet, clear:fakeClear}, onConfirm:function(){ fired++; }});"
+        "var ev = {stopPropagation:function(){}};"
+        "b.dispatch('click', ev); fireTimers();"   # arm then timeout-disarm
+        "b.dispatch('click', ev);"                 # re-arm
+        "b.dispatch('click', ev);"                 # confirm
+        "console.log(JSON.stringify({label:b.textContent, fired:fired}));")
+    assert got == {"label": "drop", "fired": 1}
+
+
+def test_js_card_wires_two_tap_confirm_on_done_and_drop():
+    body = _card_body()
+    # done + drop route through armConfirm (NOT a bare addEventListener→archive), and the real
+    # archive action is unchanged (still archiveCard with the same reason).
+    assert "armConfirm(doneBtn, {armedLabel: 'done?'" in body
+    assert "armConfirm(dropBtn, {armedLabel: 'drop?'" in body
+    assert "archiveCard(v, doneBtn, astat, 'done', c)" in body
+    assert "archiveCard(v, dropBtn, astat, 'dropped', c)" in body
+    # resolve + dispatch stay SINGLE-tap (human-gated downstream): no armConfirm on them.
+    assert "armConfirm(rbtn" not in body and "armConfirm(btn" not in body
+
+
+def test_render_html_ships_armed_confirm_css():
+    html = viewer.render_html(viewer.build_model([_row(slug="s", momentum="stalled")], now=NOW))
+    assert ".archive-btn.armed{" in html
+    assert "function armConfirm(" in html   # the confirm helper ships to the page
+
+
+def test_render_smoke_all_five_fixes_present_on_one_page():
+    # ONE rendered page carries: the legend, a severity-flagged card (JSON island), the armed-
+    # confirm machinery + CSS, the search-snippet renderer, and the withAgo footer guard.
+    rows = [_row(slug="risk", status="the 499s are still happening", momentum="slowing"),
+            _row(slug="cool", status="deployed to prod", momentum="slowing")]
+    html = viewer.render_html(viewer.build_model(rows, now=NOW))
+    # 1. legend
+    assert 'id="legend"' in html and "⚠ needs you · → active" in html
+    # 2. footer withAgo guard (no "now ago")
+    assert "withAgo(data.captured_age)" in html and "data.captured_age + ' ago'" not in html
+    # 3. search snippet renderer + 'match:' label
+    assert "matchSnippet(v, mq)" in html and "'match: '" in html
+    # 4. armed two-tap confirm
+    assert "function armConfirm(" in html and ".archive-btn.armed{" in html
+    assert "armConfirm(dropBtn, {armedLabel: 'drop?'" in html
+    # 5. severity: the promoted card ships needs_reason=severity + the risk cue renderer
+    assert '"needs_reason": "severity"' in html or '"needs_reason":"severity"' in html
+    assert "risk-cue" in html and "⚠ risk" in html
+
+
 # --- two-line collapsed card render (source markers) ------------------------- #
 def _card_body():
     js = viewer._JS
@@ -2360,7 +2702,9 @@ def test_js_card_is_two_line_with_badge_slug_age_and_emerging():
     assert "sbadge state-" in body and "STATE_GLYPH[st]" in body
     assert "el('span', 'slug', v.slug)" in body
     assert "el('span', 'age', v.age)" in body
-    assert "if(v.undocumented) row1.appendChild(el('span', 'emerging-badge', 'emerging'))" in body
+    # emerging badge is rendered inline (now with a hover tooltip) when undocumented.
+    assert "if(v.undocumented){" in body
+    assert "el('span', 'emerging-badge', 'emerging')" in body
     # LINE 2: the single state line, textContent-only.
     assert "'line2 state-'" in body and "v.line2" in body
     assert "createTextNode(v.line2)" in body
@@ -3049,9 +3393,12 @@ def test_js_actions_snippet_inlined_and_wired():
     # askResolve reuses the EXISTING sidebar open + submit (no new endpoint).
     assert "openChat();" in viewer._ACTIONS_JS
     assert "submitQuestion(q);" in viewer._ACTIONS_JS
-    # every action button stops propagation so a click never toggles the card expand.
+    # every action button stops propagation so a click never toggles the card expand. resolve +
+    # dispatch stop it inline in the card body; done + drop now stop it INSIDE armConfirm (the
+    # two-tap confirm click handler), so their guard moved there — behaviour is preserved.
     cbody = _card_body()
-    assert cbody.count("ev.stopPropagation()") >= 4                # resolve + dispatch + done + drop
+    assert cbody.count("ev.stopPropagation()") >= 2                # resolve + dispatch (inline)
+    assert "ev.stopPropagation()" in viewer._CONFIRM_JS            # done + drop (via armConfirm)
 
 
 def test_css_resolve_button_styled():

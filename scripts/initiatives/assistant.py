@@ -190,6 +190,30 @@ BLOCKED_MARKERS = (
 # user into a false "blocked on me". Tunable + unit-tested.
 _BLOCKED_FIELDS = ("status", "next_step")
 
+# Text markers that mean "this initiative carries an ACTIVE, UNRESOLVED risk that should
+# surface for the human EVEN IF it isn't phrased as a wait" — a client-facing prod disk filling
+# up, a week-old "499s still happening". Scanned over the SAME narrow action/block surface as
+# the blocked-scan (`_BLOCKED_FIELDS` = status + next_step) — NOT identity/summary — so a card
+# that merely NAMES prod in its purpose can't trip it. A severity hit promotes a card to
+# `needs_you` alongside the blocked-scan.
+#
+# CURATED FOR PRECISION. Every marker asserts an ACTIVE, UNRESOLVED problem — a state phrase
+# ("still happening/failing/broken/down", "unresolved", "out of space"), a concrete incident
+# class ("crashloop", "outage", "oomkill", "data loss", "flapping"), or an HTTP 5xx/499 error
+# family. Deliberately EXCLUDES broad words that describe a topic rather than a live failure —
+# bare "prod", "regression", "growing", "client-facing", "slow" — which would flag every infra
+# card that merely mentions production. Bare "oom" is excluded too (matches "room"/"zoom");
+# only the "oomkill"/"oom-kill" forms are kept. Kept as a tunable module constant + unit-tested
+# (like BLOCKED_MARKERS); a viewer-side VERBATIM copy is parity-pinned by a test.
+SEVERITY_MARKERS = (
+    "still happening", "still failing", "still broken", "still down", "still erroring",
+    "unresolved", "not resolved",
+    "out of space", "almost out of space", "disk full",
+    "5xx", "499s", "500s", "502", "503", "504",
+    "outage", "crashloop", "crash-loop", "oomkill", "oom-kill", "data loss",
+    "flapping", "prod is down", "down in prod",
+)
+
 # How many initiatives (max) to hand the model as grounding facts, and per-field trims —
 # keep the 7B's context small + on-topic.
 _MODEL_FACT_CAP = 14
@@ -330,6 +354,18 @@ def _blocking_hits(view: dict) -> list[str]:
     false positives. The block signal lives in what's ACTIONABLE (status + next_step)."""
     hay = " ".join(str(view.get(f) or "") for f in _BLOCKED_FIELDS).lower()
     return [mk for mk in BLOCKED_MARKERS if mk in hay]
+
+
+def _severity_hits(view: dict) -> list[str]:
+    """The SEVERITY_MARKERS that appear in an initiative's REAL action/block fields ONLY
+    (`_BLOCKED_FIELDS` = status + next_step, per spec). Empty => no active risk detected.
+
+    Mirrors `_blocking_hits` exactly (same narrow surface, same substring scan) but over the
+    curated active-risk vocabulary. Scanning ONLY status/next_step — never identity/summary —
+    is what keeps it precise: an infra card whose PURPOSE names prod does not trip a severity
+    hit; only a card whose CURRENT status/next-step reports a live, unresolved failure does."""
+    hay = " ".join(str(view.get(f) or "") for f in _BLOCKED_FIELDS).lower()
+    return [mk for mk in SEVERITY_MARKERS if mk in hay]
 
 
 def tool_blocked_on_me(views: list[dict]) -> dict:
