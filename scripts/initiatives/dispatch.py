@@ -171,16 +171,34 @@ def build_task_title(view: dict) -> str:
     return title[:TITLE_MAX]
 
 
+def _task_lead(view: dict) -> str:
+    """The card's LEAD line — STATE-AWARE (Phase 3). A `stalled`/`slowing` initiative leads with
+    a RESUME framing built from the view's REAL `state`/`age` (never invented): a stalled card
+    reads `… — this stalled <age> initiative:`, a cooling (`slowing`) card `… — this cooling
+    initiative:`. Every other state (`active`/`needs_you`/unknown) keeps the generic next-step
+    heading. PURE — sourced only from the view; the grounded evidence below is unchanged."""
+    v = view or {}
+    state = str(v.get("state") or "").strip()
+    age = str(v.get("age") or "").strip()
+    if state == "stalled":
+        label = f"stalled {age}".strip() if age else "stalled"
+        return f"**📌 initiatives · RESUME** — this {label} initiative:"
+    if state == "slowing":
+        return "**📌 initiatives · RESUME** — this cooling initiative:"
+    return "**📌 initiatives · next step**"
+
+
 def build_task_body(view: dict, recommendation: dict | None) -> str:
-    """A clean markdown card for the clawgate Task: the grounded recommendation (bold) + a
-    line noting its basis (a *parsed handoff step* vs an *inferred* suggestion), then grounded
-    context sourced ONLY from the view (repo, momentum+age, status, last prompt, open
-    investigations, open PRs) and a trailing source line (slug/repo + the handoff doc path).
-    NO invented content, NO raw json dump."""
+    """A clean markdown card for the clawgate Task: a STATE-AWARE lead (`_task_lead` — a RESUME
+    framing for stalled/cooling initiatives, else the generic next-step heading), the grounded
+    recommendation (bold) + a line noting its basis (a *parsed handoff step* vs an *inferred*
+    suggestion), then grounded context sourced ONLY from the view (repo, momentum+age, status,
+    last prompt, open investigations, open PRs) and a trailing source line (slug/repo + the
+    handoff doc path). NO invented content, NO raw json dump."""
     v = view or {}
     ns = _nextstep()
 
-    out: list[str] = ["**📌 initiatives · next step**", ""]
+    out: list[str] = [_task_lead(v), ""]
 
     rec = recommendation or {}
     text = str(rec.get("text") or "").strip()

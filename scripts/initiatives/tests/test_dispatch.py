@@ -131,6 +131,61 @@ def test_build_task_body_no_crash_on_missing_fields():
     assert "No grounded next step" in body
 
 
+# --- build_task_body: Phase-3 STATE-AWARE lead (resume framing) -------------- #
+def test_task_lead_is_state_aware():
+    # stalled → RESUME lead carrying the real age; slowing → cooling RESUME lead; else generic.
+    assert dispatch._task_lead(_view(state="stalled", age="9d")) == \
+        "**📌 initiatives · RESUME** — this stalled 9d initiative:"
+    assert dispatch._task_lead(_view(state="slowing", age="3d")) == \
+        "**📌 initiatives · RESUME** — this cooling initiative:"
+    assert dispatch._task_lead(_view(state="active")) == "**📌 initiatives · next step**"
+    assert dispatch._task_lead(_view(state="needs_you")) == "**📌 initiatives · next step**"
+    # stalled with no age still resolves to a clean lead (no dangling number).
+    assert dispatch._task_lead(_view(state="stalled", age="")) == \
+        "**📌 initiatives · RESUME** — this stalled initiative:"
+
+
+def test_build_task_body_stalled_leads_with_resume_and_keeps_evidence():
+    v = _view(state="stalled", momentum="stalled", age="9d", status="mid-cutover",
+              open_prs=[{"number": 138, "title": "feat: viewer"}],
+              current_doc="/home/zach/workspace/devrc/claudedocs/handoff-x.md")
+    rec = {"text": "Review/land open PR #138 feat: viewer", "basis": "open-pr"}
+    body = dispatch.build_task_body(v, rec)
+    # RESUME lead (with age) INSTEAD of the generic heading …
+    assert body.startswith("**📌 initiatives · RESUME** — this stalled 9d initiative:")
+    assert "📌 initiatives · next step" not in body
+    # … but every grounded field is still present, unchanged.
+    assert "**Review/land open PR #138 feat: viewer**" in body   # the recommendation
+    assert "mid-cutover" in body                                  # status
+    assert "#138 feat: viewer" in body                           # open PR line
+    assert "emerging-thing" in body                              # source slug
+    assert "handoff-x.md" in body                               # source doc
+
+
+def test_build_task_body_slowing_leads_with_cooling_resume():
+    v = _view(state="slowing", momentum="slowing", age="3d")
+    body = dispatch.build_task_body(v, {"text": "pick the loop back up", "basis": "focus"})
+    assert body.startswith("**📌 initiatives · RESUME** — this cooling initiative:")
+    assert "**pick the loop back up**" in body
+    assert "📌 initiatives · next step" not in body
+
+
+def test_build_task_body_active_and_needs_you_keep_generic_lead():
+    for st in ("active", "needs_you"):
+        body = dispatch.build_task_body(_view(state=st, age="2h"),
+                                        {"text": "wire it", "basis": "handoff"})
+        assert body.startswith("**📌 initiatives · next step**")
+        assert "RESUME" not in body
+        assert "**wire it**" in body
+
+
+def test_build_task_body_state_aware_never_raises_on_missing_fields():
+    # a stalled view with NO age / no rec still renders a clean RESUME card (no crash, no invention).
+    body = dispatch.build_task_body({"state": "stalled", "slug": "x"}, None)
+    assert body.startswith("**📌 initiatives · RESUME** — this stalled initiative:")
+    assert "No grounded next step" in body
+
+
 # --- _post / post_task (injected network) ----------------------------------- #
 _CREDS = {"CLAWGATE_API_URL": "https://cg.example", "CLAWGATE_HOOK_TOKEN": "tok"}
 

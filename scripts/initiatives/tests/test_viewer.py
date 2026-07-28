@@ -2331,9 +2331,13 @@ def test_js_card_moved_lines_not_on_collapsed_card():
 
 def test_js_card_dispatch_only_when_recommendation_exists():
     body = _card_body()
-    # the Phase-1 action is gated on a grounded recommendation, reusing dispatchNextStep verbatim.
-    assert "if(rec && rec.text){" in body
-    assert "dispatch-btn" in body and "dispatch" in body
+    # Phase-3: the action row is driven by the pure cardActions(v) map; the dispatch/resume button
+    # is emitted ONLY as a kind:'dispatch' descriptor (cardActions emits it iff a grounded rec
+    # exists), reusing dispatchNextStep + the label VERBATIM. (The gating itself is proven by the
+    # node-eval cardActions tests below — this pins the DOM wiring.)
+    assert "cardActions(v).forEach(" in body
+    assert "a.kind === 'dispatch'" in body
+    assert "el('button', 'dispatch-btn', a.label)" in body
     assert "dispatchNextStep(v, btn, dstat)" in body
     assert "ev.stopPropagation()" in body     # the button click doesn't toggle expand
     assert "if(ev.target.closest('a')) return;" in body   # link-guard kept
@@ -2848,3 +2852,204 @@ def test_render_smoke_archive_suppression_and_done_chip_count():
     # harmless stale row (never auto-deleted), so it appears in BOTH the board and Done; the
     # chip count is len(archived). Sorted newest archived_at first (slug tiebreak on equal ts).
     assert [a["slug"] for a in payload["archived"]] == ["resurfaced-one", "suppressed-done"]
+
+
+# --------------------------------------------------------------------------- #
+# Phase 3 — STATE-MATCHED card actions (dispatch.py state-aware body is covered
+# in test_dispatch.py; here: the pure JS action MAP + the [resolve] ask helpers,
+# node-eval'd so the ACTUAL page code runs — plus DOM-wiring markers + smoke).
+# --------------------------------------------------------------------------- #
+def _node_card_actions(views):
+    """Eval `viewer._ARCHIVE_JS + viewer._ACTIONS_JS` (cardActions depends on dropEligible)
+    against `views`; return, per view, the ordered list of `kind`/`label` action descriptors.
+    Skips if node isn't on PATH — same pattern as the other node-eval predicates, so the ACTUAL
+    page mapping is exercised (not a Python replica)."""
+    node = _shutil.which("node")
+    if not node:
+        import pytest
+        pytest.skip("node not on PATH — cardActions JS untested this run")
+    body = (
+        "var VIEWS = " + json.dumps(views) + ";\n"
+        "console.log(JSON.stringify(VIEWS.map(function(v){ return cardActions(v); })));"
+    )
+    src = viewer._ARCHIVE_JS + "\n" + viewer._ACTIONS_JS + "\n" + body
+    out = _subprocess.run([node, "-e", src], capture_output=True, text=True, timeout=30)
+    assert out.returncode == 0, out.stderr
+    return json.loads(out.stdout)
+
+
+def _kinds(actions):
+    return [a["kind"] for a in actions]
+
+
+_REC = {"text": "wire it", "basis": "handoff"}
+
+
+def test_js_card_actions_needs_you_has_resolve_and_conditional_dispatch():
+    # needs_you WITH a grounded rec → [resolve, dispatch, done]; WITHOUT → [resolve, done].
+    with_rec, without = _node_card_actions([
+        {"slug": "n1", "state": "needs_you", "recommended_next_step": _REC},
+        {"slug": "n2", "state": "needs_you", "recommended_next_step": None},
+    ])
+    assert _kinds(with_rec) == ["resolve", "dispatch", "done"]
+    assert _kinds(without) == ["resolve", "done"]
+    # the needs_you dispatch keeps the plain '⤴ dispatch' label (some blocks are agent-fixable).
+    assert with_rec[1]["label"] == "⤴ dispatch"
+
+
+def test_js_card_actions_stalled_and_slowing_relabel_resume_plus_drop():
+    # stalled/slowing → [resume?, drop, done]; the dispatch button is relabeled '⤴ resume'.
+    stalled, slowing, no_rec = _node_card_actions([
+        {"slug": "s", "state": "stalled", "recommended_next_step": _REC},
+        {"slug": "w", "state": "slowing", "recommended_next_step": _REC},
+        {"slug": "s2", "state": "stalled", "recommended_next_step": None},
+    ])
+    assert _kinds(stalled) == ["dispatch", "drop", "done"]
+    assert _kinds(slowing) == ["dispatch", "drop", "done"]
+    assert stalled[0]["label"] == "⤴ resume"
+    assert slowing[0]["label"] == "⤴ resume"
+    # no rec → the resume button is dropped, but [drop] + [done] remain.
+    assert _kinds(no_rec) == ["drop", "done"]
+
+
+def test_js_card_actions_active_is_dispatch_and_done_no_resolve_no_drop():
+    active, no_rec, legacy = _node_card_actions([
+        {"slug": "a", "state": "active", "recommended_next_step": _REC},
+        {"slug": "a2", "state": "active", "recommended_next_step": None},
+        {"slug": "u"},   # no state → treated as active (legacy/unknown)
+    ])
+    assert _kinds(active) == ["dispatch", "done"]
+    assert active[0]["label"] == "⤴ dispatch"
+    assert _kinds(no_rec) == ["done"]
+    assert _kinds(legacy) == ["done"]
+    # [resolve] is ONLY on needs_you; [drop] ONLY on stalled/slowing.
+    for acts in (active, no_rec, legacy):
+        assert "resolve" not in _kinds(acts)
+        assert "drop" not in _kinds(acts)
+
+
+def test_js_resolve_absent_on_non_needs_you_cards():
+    rows = _node_card_actions([
+        {"slug": "n", "state": "needs_you", "recommended_next_step": _REC},
+        {"slug": "s", "state": "stalled", "recommended_next_step": _REC},
+        {"slug": "w", "state": "slowing", "recommended_next_step": _REC},
+        {"slug": "a", "state": "active", "recommended_next_step": _REC},
+    ])
+    has_resolve = ["resolve" in _kinds(acts) for acts in rows]
+    assert has_resolve == [True, False, False, False]
+
+
+def _node_resolve_question(slug):
+    node = _shutil.which("node")
+    if not node:
+        import pytest
+        pytest.skip("node not on PATH — resolveQuestion JS untested this run")
+    body = ("console.log(JSON.stringify(resolveQuestion(" + json.dumps(slug) + ")));")
+    out = _subprocess.run([node, "-e", viewer._ACTIONS_JS + "\n" + body],
+                          capture_output=True, text=True, timeout=30)
+    assert out.returncode == 0, out.stderr
+    return json.loads(out.stdout)
+
+
+def test_js_resolve_question_is_grounded_prefill_from_slug():
+    assert _node_resolve_question("clawgate-agent-loop") == \
+        "What's blocking clawgate-agent-loop and what should I do to resolve it?"
+    # missing/empty slug degrades cleanly (no "undefined" in the string).
+    assert _node_resolve_question("") == "What's blocking  and what should I do to resolve it?"
+
+
+def test_js_ask_resolve_opens_sidebar_and_submits_the_prefilled_question():
+    # askResolve reuses the EXISTING ask flow: it opens the sidebar (openChat), prefills the
+    # chat input, and submits VIA submitQuestion — the same path the form submit uses. We stub
+    # those closures in module scope and assert the composed question reaches submit.
+    node = _shutil.which("node")
+    if not node:
+        import pytest
+        pytest.skip("node not on PATH — askResolve JS untested this run")
+    harness = (
+        "var opened = false; var submitted = []; var chatInput = {};\n"
+        "function openChat(){ opened = true; }\n"
+        "function submitQuestion(q){ submitted.push(q); }\n"
+        "askResolve({slug: 'clawgate-agent-loop'});\n"
+        "console.log(JSON.stringify({opened: opened, submitted: submitted,"
+        " inputValue: chatInput.value}));"
+    )
+    out = _subprocess.run([node, "-e", viewer._ACTIONS_JS + "\n" + harness],
+                          capture_output=True, text=True, timeout=30)
+    assert out.returncode == 0, out.stderr
+    res = json.loads(out.stdout)
+    q = "What's blocking clawgate-agent-loop and what should I do to resolve it?"
+    assert res["opened"] is True                 # sidebar opened (reused open path)
+    assert res["submitted"] == [q]               # submitted through the existing chat-submit path
+    assert res["inputValue"] == q                # the input was prefilled with the same question
+
+
+def test_js_actions_snippet_inlined_and_wired():
+    js = viewer._JS
+    assert "__ACTIONS_JS__" not in js                              # snippet inlined
+    assert js.count("function cardActions") == 1
+    assert js.count("function resolveQuestion") == 1
+    assert js.count("function askResolve") == 1
+    # the card action row is driven by the pure map + the [resolve] ask helper.
+    assert "cardActions(v).forEach(" in js
+    assert "el('button', 'resolve-btn', 'resolve')" in js          # the [resolve] button
+    assert "askResolve(v)" in js                                   # wired to the ask flow
+    assert "el('button', 'dispatch-btn', a.label)" in js           # dispatch/resume share wiring
+    # askResolve reuses the EXISTING sidebar open + submit (no new endpoint).
+    assert "openChat();" in viewer._ACTIONS_JS
+    assert "submitQuestion(q);" in viewer._ACTIONS_JS
+    # every action button stops propagation so a click never toggles the card expand.
+    cbody = _card_body()
+    assert cbody.count("ev.stopPropagation()") >= 4                # resolve + dispatch + done + drop
+
+
+def test_css_resolve_button_styled():
+    css = viewer._CSS
+    assert ".resolve-btn{" in css
+    assert ".resolve-btn:hover:not(:disabled){border-color:var(--yellow)}" in css
+
+
+def test_js_resolve_no_server_route_added():
+    # [resolve] is a CLIENT-SIDE convenience over the EXISTING ask flow — it must reuse
+    # /api/ask/stream (via submitQuestion), NOT introduce a new endpoint.
+    js = viewer._JS
+    assert "/api/resolve" not in js
+    assert "fetch('/api/ask/stream'" in js                         # the reused ask endpoint
+
+
+# --- render smoke: one card per state → render_html has the state-matched wiring --- #
+def test_render_smoke_one_card_per_state_has_resolve_resume_dispatch():
+    rows = [
+        _row(slug="needsyou-card", status="awaiting your review",       # needs_you
+             last_touch=NOW - timedelta(hours=1)),
+        _row(slug="stalled-card", momentum="stalled",                   # stalled
+             last_touch=NOW - timedelta(days=9)),
+        _row(slug="slowing-card", momentum="slowing",                   # slowing/cooling
+             last_touch=NOW - timedelta(days=3)),
+        _row(slug="active-card", last_touch=NOW - timedelta(hours=2)),  # active
+    ]
+    model = viewer.build_model(rows, now=NOW)
+    # the states derived as expected (drives the client action map).
+    by_slug = {v["slug"]: v for v in model["flat"]}
+    assert by_slug["needsyou-card"]["state"] == "needs_you"
+    assert by_slug["stalled-card"]["state"] == "stalled"
+    assert by_slug["slowing-card"]["state"] == "slowing"
+    assert by_slug["active-card"]["state"] == "active"
+
+    html = viewer.render_html(model, None)
+    assert html.startswith("<!doctype html>")                       # rendered, no exception
+    # the state-matched action wiring ships on the page: the [resolve] button, the shared
+    # dispatch/resume button, and the pure map that decides which appears per state.
+    assert "el('button', 'resolve-btn', 'resolve')" in html
+    assert "el('button', 'dispatch-btn', a.label)" in html
+    assert "'⤴ resume'" in html and "'⤴ dispatch'" in html
+    assert "function cardActions" in html
+
+
+def test_regression_ask_sidebar_still_opens_and_submits_from_its_own_button():
+    # The [resolve] reuse must NOT regress the sidebar's own toggle/submit wiring.
+    js = viewer._JS
+    assert "askToggle.addEventListener('click'" in js               # 💬 ask toggle intact
+    assert "if(chat.hidden) openChat(); else closeChat();" in js
+    assert "chatForm.addEventListener('submit'" in js               # the form submit intact
+    assert "submitQuestion((chatInput.value || '').trim())" in js

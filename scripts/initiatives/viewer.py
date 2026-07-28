@@ -1364,6 +1364,13 @@ header .meta{color:var(--gray);font-size:.85rem}
 .dispatch-status{margin-left:.5rem;color:var(--gray);font-size:.78rem}
 .dispatch-status.err{color:var(--red)}
 .dispatch-status.ok{color:var(--green)}
+/* Phase-3 [resolve] — on needs_you cards; opens the read-only ask sidebar prefilled with the
+   blocker question. Yellow tint (matches the sidebar's chat-title) to read as "ask", distinct
+   from the aqua dispatch + muted archive buttons. */
+.resolve-btn{font:inherit;font-size:.78rem;cursor:pointer;background:var(--bg2);
+  color:var(--yellow);border:1px solid var(--bg2);border-radius:3px;padding:.1rem .5rem}
+.resolve-btn:hover:not(:disabled){border-color:var(--yellow)}
+.resolve-btn:disabled{cursor:default;opacity:.7}
 /* Phase-2 card lifecycle actions: [✓ done] (archive) on every card, [drop] on stalled/cooling
    cards, and [↺ unarchive] in the Done view. Muted by default so they don't compete with the
    card content; the done tint is green, drop is red, matching the "done vs abandon" semantics. */
@@ -1573,6 +1580,62 @@ function matchArchived(a, q){
   var hay = ((a && a.slug || '') + ' ' + (a && a.title || '') + ' ' +
              (a && a.reason || '') + ' ' + (a && a.repo_name || '')).toLowerCase();
   return hay.indexOf(q) !== -1;
+}
+""".strip()
+
+
+# PURE, DOM-FREE Phase-3 STATE-MATCHED action MAP + the [resolve] ask helpers — kept in their
+# OWN snippet (like _ARCHIVE_JS) so the node tests eval them directly, exercising the ACTUAL
+# page code (not a replica). Depends on `dropEligible` (from _ARCHIVE_JS, inlined just above),
+# so it is substituted AFTER __ARCHIVE_JS__ and node-eval'd as `_ARCHIVE_JS + _ACTIONS_JS`.
+#
+#   cardActions(v) -> the ordered action descriptors for a card, keyed off its derived `state`
+#                     (the explicit state→actions MAP; `?` = only when a grounded rec exists):
+#                       needs_you        -> [resolve] [⤴ dispatch?] [✓ done]
+#                       stalled/slowing  -> [⤴ resume?] [drop] [✓ done]   (dropEligible)
+#                       active (+legacy) -> [⤴ dispatch?] [✓ done]
+#                     The dispatch button is the SAME action either way (same /api/dispatch
+#                     wiring); only its LABEL flips to '⤴ resume' on stalled/cooling cards.
+#   resolveQuestion(slug) -> the grounded, prefilled question a [resolve] click asks the sidebar.
+#   askResolve(v)  -> open the EXISTING ask sidebar (openChat), prefill resolveQuestion(v.slug),
+#                     and submit it through the EXISTING chat-submit path (submitQuestion) so the
+#                     SSE stream + markdown render happen exactly as a normal ask. Rationale: a
+#                     block usually needs Zach's DECISION, so [resolve] routes him to the read-only
+#                     agent's grounded synthesis of the blocker + resolution path; if it's
+#                     agent-fixable he still has [⤴ dispatch]. Pure client-side convenience over
+#                     the ask flow — NO new endpoint. (openChat/chatInput/submitQuestion are IIFE
+#                     closures defined later; JS hoisting + call-time resolution makes this safe,
+#                     and the node test stubs them to assert the composed question hits submit.)
+_ACTIONS_JS = r"""
+function cardActions(v){
+  var st = (v && v.state) || 'active';
+  var hasRec = !!(v && v.recommended_next_step && v.recommended_next_step.text);
+  if(st === 'needs_you'){
+    var a = [{kind:'resolve'}];
+    if(hasRec) a.push({kind:'dispatch', label:'⤴ dispatch'});
+    a.push({kind:'done'});
+    return a;
+  }
+  if(dropEligible(v)){                     // stalled or slowing (cooling)
+    var b = [];
+    if(hasRec) b.push({kind:'dispatch', label:'⤴ resume'});
+    b.push({kind:'drop'});
+    b.push({kind:'done'});
+    return b;
+  }
+  var c = [];                              // active (and any legacy/unknown state)
+  if(hasRec) c.push({kind:'dispatch', label:'⤴ dispatch'});
+  c.push({kind:'done'});
+  return c;
+}
+function resolveQuestion(slug){
+  return "What's blocking " + (slug || '') + " and what should I do to resolve it?";
+}
+function askResolve(v){
+  openChat();                              // reuse the sidebar open path (same as 💬 ask)
+  var q = resolveQuestion(v && v.slug);
+  chatInput.value = q;                     // prefill the grounded question (textContent-safe input)
+  submitQuestion(q);                       // reuse the existing chat-submit (SSE stream + md render)
 }
 """.strip()
 
@@ -1809,6 +1872,7 @@ _JS = r"""
   __RECENCY_JS__
   __STATEFILTER_JS__
   __ARCHIVE_JS__
+  __ACTIONS_JS__
   __GROUP_JS__
   __MATCH_JS__
   __MARKDOWN_JS__
@@ -2131,42 +2195,62 @@ _JS = r"""
       c.appendChild(l2);
     }
 
-    // ACTIONS row (always present in Phase 2). Left→right: the EXISTING dispatch (only when a
-    // grounded recommendation exists; reuses dispatchNextStep + POST /api/dispatch VERBATIM),
-    // then [✓ done] (archive — EVERY card), then [drop] (archive reason=dropped — only STALLED +
-    // COOLING cards, via the tested dropEligible predicate). [resolve] for needs_you is Phase 3.
+    // ACTIONS row — Phase 3: STATE-MATCHED, driven by the pure `cardActions(v)` map (node-tested):
+    //   needs_you       -> [resolve] [⤴ dispatch?] [✓ done]
+    //   stalled/slowing -> [⤴ resume?] [drop] [✓ done]   (resume = dispatch, resume-framed body)
+    //   active          -> [⤴ dispatch?] [✓ done]        ("?" = only when a grounded rec exists)
+    // Every button: textContent-only label + stopPropagation (never toggles expand). The
+    // dispatch/resume + done/drop wiring reuses dispatchNextStep + archiveCard (POST
+    // /api/dispatch + /api/archive) VERBATIM — only the dispatch LABEL flips by state; [resolve]
+    // opens + submits the EXISTING ask sidebar (no new endpoint). in-flight/error UX lives on
+    // the reused handlers (dispatch/archive) and the sidebar (resolve).
     var drow = el('div', 'actions');
     var astat = el('span', 'archive-status');   // shared inline status for the done/drop buttons
     var rec = v.recommended_next_step;
-    if(rec && rec.text){
-      var btn = el('button', 'dispatch-btn', '⤴ dispatch');
-      btn.title = rec.text + (basisHint(rec.basis) ? '  (' + basisHint(rec.basis) + ')' : '');
-      var dstat = el('span', 'dispatch-status');
-      btn.addEventListener('click', function(ev){
-        ev.stopPropagation();  // don't toggle the card expand
-        dispatchNextStep(v, btn, dstat);
-      });
-      drow.appendChild(btn);
-      drow.appendChild(dstat);
-    }
-    // [✓ done] — archive (done for now; resurfaces on new activity).
-    var doneBtn = el('button', 'archive-btn done', '✓ done');
-    doneBtn.title = 'archive — done for now (reappears if this initiative sees new activity)';
-    doneBtn.addEventListener('click', function(ev){
-      ev.stopPropagation();
-      archiveCard(v, doneBtn, astat, 'done', c);
+    cardActions(v).forEach(function(a){
+      if(a.kind === 'resolve'){
+        // [resolve] — route Zach to the read-only agent's grounded synthesis of the blocker +
+        // resolution path (open+prefill+submit the EXISTING ask sidebar). If it's agent-fixable
+        // he still has [⤴ dispatch]. The sidebar owns the in-flight/error UX for this action.
+        var rbtn = el('button', 'resolve-btn', 'resolve');
+        rbtn.title = 'ask the read-only agent what is blocking this and how to resolve it';
+        rbtn.addEventListener('click', function(ev){
+          ev.stopPropagation();  // don't toggle the card expand
+          askResolve(v);
+        });
+        drow.appendChild(rbtn);
+      } else if(a.kind === 'dispatch'){
+        // [⤴ dispatch] (active/needs_you) / [⤴ resume] (stalled/cooling) — SAME endpoint + wiring;
+        // only the label (a.label) + the server-side task-body framing (dispatch.py) vary.
+        var btn = el('button', 'dispatch-btn', a.label);
+        btn.title = rec.text + (basisHint(rec.basis) ? '  (' + basisHint(rec.basis) + ')' : '');
+        var dstat = el('span', 'dispatch-status');
+        btn.addEventListener('click', function(ev){
+          ev.stopPropagation();  // don't toggle the card expand
+          dispatchNextStep(v, btn, dstat);
+        });
+        drow.appendChild(btn);
+        drow.appendChild(dstat);
+      } else if(a.kind === 'done'){
+        // [✓ done] — archive (done for now; resurfaces on new activity).
+        var doneBtn = el('button', 'archive-btn done', '✓ done');
+        doneBtn.title = 'archive — done for now (reappears if this initiative sees new activity)';
+        doneBtn.addEventListener('click', function(ev){
+          ev.stopPropagation();
+          archiveCard(v, doneBtn, astat, 'done', c);
+        });
+        drow.appendChild(doneBtn);
+      } else if(a.kind === 'drop'){
+        // [drop] — archive as dropped (stalled + cooling only, via cardActions/dropEligible).
+        var dropBtn = el('button', 'archive-btn drop', 'drop');
+        dropBtn.title = 'drop — archive this initiative as dropped';
+        dropBtn.addEventListener('click', function(ev){
+          ev.stopPropagation();
+          archiveCard(v, dropBtn, astat, 'dropped', c);
+        });
+        drow.appendChild(dropBtn);
+      }
     });
-    drow.appendChild(doneBtn);
-    // [drop] — archive as dropped (stalled + cooling only).
-    if(dropEligible(v)){
-      var dropBtn = el('button', 'archive-btn drop', 'drop');
-      dropBtn.title = 'drop — archive this initiative as dropped';
-      dropBtn.addEventListener('click', function(ev){
-        ev.stopPropagation();
-        archiveCard(v, dropBtn, astat, 'dropped', c);
-      });
-      drow.appendChild(dropBtn);
-    }
     drow.appendChild(astat);
     c.appendChild(drow);
 
@@ -2670,6 +2754,7 @@ _JS = r"""
 _JS = _JS.replace("__RECENCY_JS__", _RECENCY_JS)
 _JS = _JS.replace("__STATEFILTER_JS__", _STATEFILTER_JS)
 _JS = _JS.replace("__ARCHIVE_JS__", _ARCHIVE_JS)
+_JS = _JS.replace("__ACTIONS_JS__", _ACTIONS_JS)
 _JS = _JS.replace("__GROUP_JS__", _GROUP_JS)
 _JS = _JS.replace("__MATCH_JS__", _MATCH_JS)
 _JS = _JS.replace("__MARKDOWN_JS__", _MARKDOWN_JS)
