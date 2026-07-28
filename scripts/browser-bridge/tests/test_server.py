@@ -8,6 +8,7 @@ request↔reply id correlation, AND the multi-instance registry/routing.
 
 Run: nix-shell -p python312Packages.pytest --run "pytest scripts/browser-bridge/tests"
 """
+import base64
 import json
 import os
 import stat
@@ -27,6 +28,73 @@ import server as S  # noqa: E402
 
 TOKEN = "test-token-abc123"
 EXT_DIR = Path(__file__).resolve().parent.parent / "extension"
+
+# The in-repo activity spool emitter (single source of truth for the v1 line
+# format). scripts/browser-bridge/tests/ -> parent.parent.parent == scripts/.
+SPOOL_EMIT_PY = (Path(__file__).resolve().parent.parent.parent
+                 / "collector" / "keylog" / "spool_emit.py")
+
+
+# --------------------------------------------------------------------------- #
+# Telemetry (browser-bridge -> activity spool) test scaffolding
+# --------------------------------------------------------------------------- #
+def _parse_spool_line(line: str) -> dict:
+    """Decode ONE v1 spool line into a field dict (base64 keys decoded)."""
+    parts = line.rstrip("\n").split("\t")
+    assert parts and parts[0] == "v1", f"not a v1 line: {line!r}"
+    out = {}
+    for kv in parts[1:]:
+        key, _, val = kv.partition("=")
+        if key.startswith("b64:"):
+            out[key[4:]] = base64.b64decode(val).decode("utf-8")
+        else:
+            out[key] = val
+    return out
+
+
+def _log_file(spool_dir) -> Path:
+    return Path(spool_dir) / "current.log"
+
+
+def _read_events(spool_dir) -> list:
+    f = _log_file(spool_dir)
+    if not f.exists():
+        return []
+    return [_parse_spool_line(ln) for ln in f.read_text().splitlines()
+            if ln.strip()]
+
+
+def _wait_events(spool_dir, n=1, timeout=3.0) -> list:
+    """Poll the spool for >=n events (the emit runs off the critical path, after
+    the HTTP response, so it lands slightly after /cmd returns)."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        evs = _read_events(spool_dir)
+        if len(evs) >= n:
+            return evs
+        time.sleep(0.02)
+    return _read_events(spool_dir)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_activity_spool(tmp_path, monkeypatch):
+    """Protect the REAL activity spool: EVERY test's telemetry writes go to a
+    per-test temp dir, and the lazy emitter cache is reset so each test loads it
+    fresh under the current env."""
+    monkeypatch.setenv("ACTIVITY_SPOOL_DIR", str(tmp_path / "activity-spool"))
+    monkeypatch.setattr(S, "_spool_emit_mod", None)
+    monkeypatch.setattr(S, "_spool_emit_tried", False)
+
+
+@pytest.fixture
+def telemetry(tmp_path, monkeypatch):
+    """Pin the bridge telemetry emitter at the in-repo spool_emit (hermetic — no
+    dependency on the host's ~/workspace checkout) and return the temp spool dir
+    that `_isolate_activity_spool` pointed ACTIVITY_SPOOL_DIR at."""
+    monkeypatch.setattr(S, "_SPOOL_EMIT_PATH", SPOOL_EMIT_PY)
+    monkeypatch.setattr(S, "_spool_emit_mod", None)
+    monkeypatch.setattr(S, "_spool_emit_tried", False)
+    return tmp_path / "activity-spool"
 
 
 # --------------------------------------------------------------------------- #
@@ -890,3 +958,260 @@ def test_manifest_icons_exist_and_match_declared_size():
 def test_svg_source_present():
     assert (EXT_DIR / "icons" / "icon.svg").exists(), \
         "the SVG icon source must be committed alongside the PNGs"
+
+
+# --------------------------------------------------------------------------- #
+# Activity telemetry: every handled command emits ONE metadata-only,
+# best-effort event into the activity spool (source=browser-bridge, kind=cmd).
+# All headless — writes to a temp spool dir, never ClickHouse/network/Brave.
+# --------------------------------------------------------------------------- #
+def test_domain_from_result_bare_host_only():
+    """Only a bare hostname is ever derived — never a path/query/port, and a
+    screenshot data: URL yields nothing."""
+    d = S._domain_from_result
+    assert d({"data": {"url": "https://mail.google.com/mail/u/0?tok=SECRET"}}) \
+        == "mail.google.com"
+    assert d({"url": "https://x.test:8443/p?q=1"}) == "x.test"
+    assert d({"data": {"url": "data:image/png;base64,AAAABBBB"}}) == ""
+    assert d({"data": {"dataUrl": "data:image/png;base64,AAAA"}}) == ""
+    assert d({"data": {"tabs": []}}) == ""
+    assert d({}) == ""
+    assert d(None) == ""
+    assert d("not-a-dict") == ""
+
+
+def test_cmd_ok_emits_one_metadata_event(telemetry):
+    spool_dir = telemetry
+    srv, _ = _serve()
+    ext = FakeExtension(
+        srv, executor=lambda c: {"url": "https://mail.google.com/mail/u/0?t=rm",
+                                 "html": "<html>hi</html>"})
+    ext.start()
+    try:
+        assert _wait_connected(srv, want=True)
+        st, body = _req(srv, "POST", "/cmd", {"op": "getHtml"})
+        assert st == 200
+        evs = _wait_events(spool_dir, 1)
+        assert len(evs) == 1, f"expected exactly one event, got {evs}"
+        e = evs[0]
+        assert e["source"] == "browser-bridge"
+        assert e["kind"] == "cmd"
+        assert e["exit_code"] == "0"
+        assert int(e["duration_ms"]) >= 0        # latency present
+        assert e["text"] == "mail.google.com"    # text = bare domain
+        p = json.loads(e["payload"])
+        assert p == {"op": "getHtml", "key": "", "outcome": "ok",
+                     "domain": "mail.google.com"}
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
+def test_cmd_ok_no_url_uses_op_as_text_and_omits_domain(telemetry):
+    """A result with no url (e.g. tabs) → text falls back to the op, and the
+    payload carries no domain key."""
+    spool_dir = telemetry
+    srv, _ = _serve()
+    ext = FakeExtension(srv, executor=lambda c: {"tabs": [{"id": 1}]})
+    ext.start()
+    try:
+        assert _wait_connected(srv, want=True)
+        st, _ = _req(srv, "POST", "/cmd", {"op": "tabs"})
+        assert st == 200
+        e = _wait_events(spool_dir, 1)[0]
+        assert e["text"] == "tabs"
+        p = json.loads(e["payload"])
+        assert p["op"] == "tabs" and p["outcome"] == "ok"
+        assert "domain" not in p
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
+def test_cmd_emits_routing_key_from_target(telemetry):
+    """The instance routing key (the skill's --instance target) is recorded."""
+    spool_dir = telemetry
+    srv, _ = _serve(poll_timeout=5.0)
+    a = FakeExtension(srv, instance_id="a", label="alpha",
+                      executor=lambda c: {"who": "a"})
+    b = FakeExtension(srv, instance_id="b", label="beta",
+                      executor=lambda c: {"who": "b"})
+    a.start(); b.start()
+    try:
+        assert _wait_instances(srv, 2) is not None
+        st, _ = _req(srv, "POST", "/cmd", {"op": "tabs", "target": "alpha"})
+        assert st == 200
+        e = _wait_events(spool_dir, 1)[0]
+        p = json.loads(e["payload"])
+        assert p["key"] == "alpha"
+        assert p["outcome"] == "ok"
+    finally:
+        a.stop(); b.stop(); srv.shutdown(); srv.server_close()
+
+
+def test_cmd_no_extension_emits_error_outcome(telemetry):
+    """An error dispatch (no extension) still emits, with a nonzero exit_code and
+    the error outcome — no domain (no result)."""
+    spool_dir = telemetry
+    srv, _ = _serve()
+    try:
+        st, _ = _req(srv, "POST", "/cmd", {"op": "tabs"})
+        assert st == 503
+        e = _wait_events(spool_dir, 1)[0]
+        assert e["exit_code"] == "1"
+        p = json.loads(e["payload"])
+        assert p["op"] == "tabs"
+        assert p["outcome"] == "no_extension"
+        assert "domain" not in p
+    finally:
+        srv.shutdown(); srv.server_close()
+
+
+def test_cmd_ambiguous_emits_ambiguous_outcome(telemetry):
+    """An ambiguous dispatch (>1 instance, no target) emits outcome=ambiguous."""
+    spool_dir = telemetry
+    srv, _ = _serve(poll_timeout=5.0)
+    a = FakeExtension(srv, instance_id="a", label="alpha")
+    b = FakeExtension(srv, instance_id="b", label="beta")
+    a.start(); b.start()
+    try:
+        assert _wait_instances(srv, 2) is not None
+        st, _ = _req(srv, "POST", "/cmd", {"op": "tabs"})
+        assert st == 409
+        e = _wait_events(spool_dir, 1)[0]
+        assert e["exit_code"] == "1"
+        p = json.loads(e["payload"])
+        assert p["outcome"] == "ambiguous"
+        assert p["op"] == "tabs"
+    finally:
+        a.stop(); b.stop(); srv.shutdown(); srv.server_close()
+
+
+def test_cmd_timeout_emits_timeout_outcome(telemetry):
+    spool_dir = telemetry
+    srv, _ = _serve(cmd_timeout=0.5, poll_timeout=5.0)
+    ext = FakeExtension(srv, swallow=True)
+    ext.start()
+    try:
+        assert _wait_connected(srv, want=True)
+        st, _ = _req(srv, "POST", "/cmd", {"op": "getHtml"})
+        assert st == 504
+        e = _wait_events(spool_dir, 1)[0]
+        assert e["exit_code"] == "1"
+        assert json.loads(e["payload"])["outcome"] == "timeout"
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
+def test_emitted_event_is_metadata_only_no_page_content(telemetry):
+    """PRIVACY: even when the command carries an eval source marker AND the
+    result carries HTML, an eval return value, a screenshot data-URL, and a full
+    URL with a secret query, NONE of that appears in the emitted event — only
+    op/key/outcome/duration + the BARE domain."""
+    spool_dir = telemetry
+    srv, _ = _serve()
+    marker_js = "SECRET_EVAL_MARKER_deadbeef()"
+    secret_data_url = "data:image/png;base64,SCREENSHOTSECRETBYTESxyz=="
+    secret_html = "<html>SECRET_HTML_BODY_TOKEN</html>"
+    secret_query = "SUPERSECRETQUERY"
+
+    def executor(cmd):
+        # The extension echoes a rich result incl. sensitive fields + a full URL
+        # with a query string. The command itself carried the eval marker.
+        return {"url": f"https://mail.google.com/mail/u/0?token={secret_query}",
+                "value": "EVAL_RETURN_SECRET", "html": secret_html,
+                "dataUrl": secret_data_url}
+
+    ext = FakeExtension(srv, executor=executor)
+    ext.start()
+    try:
+        assert _wait_connected(srv, want=True)
+        st, body = _req(srv, "POST", "/cmd", {"op": "eval", "js": marker_js})
+        assert st == 200
+        # Sanity: the sensitive material genuinely WAS in the round-trip.
+        assert body["result"]["data"]["value"] == "EVAL_RETURN_SECRET"
+        evs = _wait_events(spool_dir, 1)
+        assert len(evs) == 1
+        e = evs[0]
+        # The fully-decoded event (every field incl. the b64 payload) leaks none.
+        decoded_blob = "\t".join(f"{k}={v}" for k, v in e.items())
+        # The RAW spool bytes too — defeats any base64-hidden copy.
+        raw = _log_file(spool_dir).read_text()
+        for secret in (marker_js, "SECRET_EVAL_MARKER", "EVAL_RETURN_SECRET",
+                       secret_html, "SECRET_HTML_BODY_TOKEN", secret_data_url,
+                       "SCREENSHOTSECRETBYTES", secret_query, "token="):
+            assert secret not in decoded_blob, f"leaked in event: {secret}"
+            assert secret not in raw, f"leaked in raw spool: {secret}"
+        # What IS recorded: op + the bare domain, nothing else sensitive.
+        p = json.loads(e["payload"])
+        assert p["op"] == "eval"
+        assert p["outcome"] == "ok"
+        assert p["domain"] == "mail.google.com"   # host only — no path/query
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
+def test_cmd_succeeds_when_emitter_raises(monkeypatch):
+    """BEST-EFFORT: if the emitter itself raises, the command STILL returns its
+    normal successful result — no 500, no exception into the handler."""
+    class Boom:
+        def emit(self, *a, **k):
+            raise RuntimeError("spool exploded")
+
+    monkeypatch.setattr(S, "_load_spool_emit", lambda: Boom())
+    srv, _ = _serve()
+    ext = FakeExtension(srv, executor=lambda c: {"url": "https://x.test"})
+    ext.start()
+    try:
+        assert _wait_connected(srv, want=True)
+        st, body = _req(srv, "POST", "/cmd", {"op": "getHtml"})
+        assert st == 200
+        assert body["ok"] is True
+        assert body["result"]["data"]["url"] == "https://x.test"
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
+def test_cmd_succeeds_when_spool_unwritable(telemetry, monkeypatch, tmp_path):
+    """BEST-EFFORT: an unwritable spool path never breaks a command."""
+    blocker = tmp_path / "not-a-dir"
+    blocker.write_text("x")  # a regular file where a dir is expected
+    monkeypatch.setenv("ACTIVITY_SPOOL_DIR", str(blocker / "spool"))
+    srv, _ = _serve()
+    ext = FakeExtension(srv, executor=lambda c: {"url": "https://x.test"})
+    ext.start()
+    try:
+        assert _wait_connected(srv, want=True)
+        st, body = _req(srv, "POST", "/cmd", {"op": "getHtml"})
+        assert st == 200
+        assert body["ok"] is True
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
+def test_health_and_instances_do_not_emit(telemetry):
+    """health / instances (and the extension's /poll) are noise — no events."""
+    spool_dir = telemetry
+    srv, _ = _serve(poll_timeout=5.0)
+    ext = FakeExtension(srv, instance_id="a", label="alpha")
+    ext.start()
+    try:
+        assert _wait_instances(srv, 1) is not None   # exercises /poll repeatedly
+        _req(srv, "GET", "/health")
+        _req(srv, "GET", "/instances")
+        time.sleep(0.2)  # give any erroneous emit a chance to land
+        assert _read_events(spool_dir) == []
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
+def test_emit_cmd_event_noop_when_emitter_missing(monkeypatch):
+    """emit_cmd_event is a silent no-op (never raises) when the emitter can't be
+    loaded — the collector not being checked out just disables telemetry."""
+    monkeypatch.setattr(S, "_load_spool_emit", lambda: None)
+    S.emit_cmd_event(op="tabs", key="", outcome="ok", duration_ms=1)
+
+
+def test_load_spool_emit_missing_path_returns_none(monkeypatch, tmp_path):
+    monkeypatch.setattr(S, "_SPOOL_EMIT_PATH", tmp_path / "nope.py")
+    monkeypatch.setattr(S, "_spool_emit_mod", None)
+    monkeypatch.setattr(S, "_spool_emit_tried", False)
+    assert S._load_spool_emit() is None

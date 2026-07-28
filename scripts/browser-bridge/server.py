@@ -133,6 +133,116 @@ def log(event: str, **fields) -> None:
 
 
 # --------------------------------------------------------------------------- #
+# Activity telemetry (best-effort, fire-and-forget, METADATA-ONLY)
+# --------------------------------------------------------------------------- #
+# Each handled command emits ONE event into the personal activity pipeline
+# (source="browser-bridge", kind="cmd") so browser-skill usage is first-class
+# self-telemetry — queryable in ClickHouse activity.events. This is a DISTINCT
+# source from the collector's `browser` (nav/scroll) source; keep them separate.
+#
+# PRIVACY CONTRACT (do not weaken): we emit ONLY metadata — the op name, the
+# instance routing key, the outcome, the server-side latency, and (best-effort)
+# the active tab's BARE DOMAIN. We NEVER emit the eval source, page HTML,
+# screenshot bytes/data-URLs, a full URL with path/query, or any page content.
+# The payload stays tiny.
+#
+# BEST-EFFORT CONTRACT (do not weaken): emitting must never affect command
+# handling. The emitter is discovered lazily by absolute path and every failure
+# mode (missing module, unwritable spool, any exception) is swallowed — the
+# browser command still succeeds. It runs OFF the critical path (after the HTTP
+# response is sent) and only does a local spool append (no network, no fork), so
+# it can neither delay nor break a request.
+
+# The activity spool emitter (scripts/collector/keylog/spool_emit.py) is the
+# single source of truth for the v1 spool line format, so we DON'T hand-roll it.
+# server.py is deployed as a FLAT single-file /nix/store symlink by home-manager,
+# so Path(__file__) does NOT sit next to the collector tree (and .resolve() would
+# only make that worse — cf. the receiver's documented no-.resolve() gotcha). We
+# therefore locate the emitter by its stable ABSOLUTE repo path (identical on
+# both hosts) and degrade gracefully if it is absent (collector not checked out →
+# telemetry simply off). BROWSER_BRIDGE_SPOOL_EMIT overrides the path (tests).
+_SPOOL_EMIT_PATH = Path(
+    os.environ.get("BROWSER_BRIDGE_SPOOL_EMIT")
+    or (Path.home() / "workspace" / "devrc" / "scripts" / "collector"
+        / "keylog" / "spool_emit.py")
+)
+_spool_emit_mod = None
+_spool_emit_tried = False
+
+
+def _load_spool_emit():
+    """Import the activity spool emitter by absolute path, once. Returns the
+    module or None (best-effort — a missing/broken emitter just disables
+    telemetry, never raises)."""
+    global _spool_emit_mod, _spool_emit_tried
+    if _spool_emit_tried:
+        return _spool_emit_mod
+    _spool_emit_tried = True
+    try:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "browser_bridge_spool_emit", str(_SPOOL_EMIT_PATH))
+        if spec is None or spec.loader is None:
+            return None
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        _spool_emit_mod = mod
+    except Exception:  # noqa: BLE001 — telemetry is strictly best-effort.
+        _spool_emit_mod = None
+    return _spool_emit_mod
+
+
+def _domain_from_result(result) -> str:
+    """BARE hostname from a command result envelope, for telemetry only.
+
+    Reads ONLY a `url`-named field (never HTML/screenshot bytes) and returns its
+    hostname component — NO scheme, NO path, NO query, NO port. A data: URL (a
+    screenshot) has no hostname → "". Any problem → "".
+    """
+    try:
+        url = None
+        if isinstance(result, dict):
+            data = result.get("data")
+            if isinstance(data, dict) and isinstance(data.get("url"), str):
+                url = data["url"]
+            elif isinstance(result.get("url"), str):
+                url = result["url"]
+        if not url:
+            return ""
+        return urlsplit(url).hostname or ""
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def emit_cmd_event(op: str, key: str, outcome: str, duration_ms: int,
+                   domain: str = "", exit_code: int = 0) -> None:
+    """Append ONE metadata-only activity event for a handled command.
+
+    Best-effort + fire-and-forget: any failure is swallowed so telemetry can
+    never break command handling. See the PRIVACY / BEST-EFFORT contracts above.
+    """
+    try:
+        se = _load_spool_emit()
+        if se is None:
+            return
+        # METADATA ONLY — op/key/outcome/(bare)domain. Never page content.
+        payload = {"op": op, "key": key, "outcome": outcome}
+        if domain:
+            payload["domain"] = domain
+        se.emit({
+            "source": "browser-bridge",
+            "kind": "cmd",
+            "text": domain or op,
+            "duration_ms": int(duration_ms),
+            "exit_code": int(exit_code),
+            "payload": json.dumps(payload, ensure_ascii=False,
+                                  separators=(",", ":")),
+        })
+    except Exception:  # noqa: BLE001 — strictly best-effort.
+        pass
+
+
+# --------------------------------------------------------------------------- #
 # Token
 # --------------------------------------------------------------------------- #
 def default_token_file() -> Path:
@@ -564,12 +674,16 @@ def make_handler(registry: Registry, token: str, cmd_timeout: float,
                 self._send(404, {"ok": False, "error": "not_found"})
 
         def _handle_cmd(self):
+            t0 = time.monotonic()
             body, err = self._read_body(MAX_CMD_BODY)
             if err:
+                # Malformed request — never reached an instance; not a real op
+                # dispatch, so no telemetry (as with health/instances/poll).
                 self._send(400, {"ok": False, "error": err})
                 return
             op, verr = validate_command(body)
             if verr:
+                # Invalid/unknown op — not one of the five real ops → no event.
                 self._send(400, {"ok": False, "error": verr,
                                  "op": body.get("op") if isinstance(body, dict)
                                  else None})
@@ -577,35 +691,45 @@ def make_handler(registry: Registry, token: str, cmd_timeout: float,
             # `target` is a skill-side routing hint, NOT part of the command the
             # extension executes — strip it before enqueue.
             target = body.pop("target", None)
+            outcome, exit_code, domain = "ok", 0, ""
             try:
                 result = registry.submit(body, timeout=cmd_timeout,
                                          target=target)
             except NoExtension:
+                outcome, exit_code = "no_extension", 1
                 log("cmd_no_extension", op=op)
                 self._send(503, {"ok": False,
                                  "error": "extension_not_connected"})
-                return
             except AmbiguousInstance as e:
+                outcome, exit_code = "ambiguous", 1
                 log("cmd_ambiguous", op=op, count=len(e.instances))
                 self._send(409, {"ok": False, "error": "ambiguous_instance",
                                  "instances": e.instances})
-                return
             except UnknownInstance as e:
+                outcome, exit_code = "unknown_instance", 1
                 log("cmd_unknown_instance", op=op, target=e.target)
                 self._send(404, {"ok": False, "error": "unknown_instance",
                                  "target": e.target, "instances": e.instances})
-                return
             except BridgeSuperseded as e:
+                outcome, exit_code = "superseded", 1
                 log("cmd_superseded", op=op, key=e.key)
                 self._send(409, {"ok": False, "error": "superseded",
                                  "key": e.key})
-                return
             except BridgeTimeout:
+                outcome, exit_code = "timeout", 1
                 log("cmd_timeout", op=op)
                 self._send(504, {"ok": False, "error": "timeout"})
-                return
-            log("cmd_ok", op=op)
-            self._send(200, {"ok": True, "result": result})
+            else:
+                domain = _domain_from_result(result)
+                log("cmd_ok", op=op)
+                self._send(200, {"ok": True, "result": result})
+            # Off the critical path: the HTTP response is already sent. Metadata-
+            # only + best-effort — cannot delay or break the command (the key is
+            # the skill's routing target, empty for the implicit single-instance
+            # case). See emit_cmd_event / the PRIVACY + BEST-EFFORT contracts.
+            emit_cmd_event(op=op, key=(target or ""), outcome=outcome,
+                           duration_ms=int((time.monotonic() - t0) * 1000),
+                           domain=domain, exit_code=exit_code)
 
         def _handle_result(self):
             body, err = self._read_body(MAX_RESULT_BODY)

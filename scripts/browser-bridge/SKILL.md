@@ -65,6 +65,17 @@ else a stable auto-id; labels must be unique per host).
   reads it; a web page can't. Defeats DNS-rebinding.
 - **Host-header allowlist** — only `127.0.0.1`/`localhost`/`::1`.
 
+## Telemetry (metadata-only)
+
+Every handled command emits one **best-effort** activity event
+(`source=browser-bridge`, `kind=cmd`) into the personal telemetry pipeline
+(`activity.events`), so browser-skill usage is queryable / visible to
+`adoption-scan`. It records **only** metadata — op, instance key, outcome,
+latency, and the active tab's **bare domain** — **never** the eval source, page
+HTML, screenshot bytes, full URLs, or any page content. It runs off the critical
+path and can never delay or break a command. Nothing you need to do; noted so you
+know browser usage is being counted. Details: `README.md` → Telemetry.
+
 ## Before you rely on it
 
 1. `browser health` — if `extension_connected:false` or it errors, the extension
