@@ -1,11 +1,16 @@
-# Insights ↔ telemetry unification — 2026-07-11
+# Insights ↔ telemetry unification — SHIPPED (status as of 2026-07-28)
 
 Unify the Claude Code "insights" system with the personal activity-telemetry
 pipeline, so session insight lives durably in the authed homelab ClickHouse
 `activity.events` (versioned, cross-host, queryable) instead of the built-in
 `/insights` ephemeral, per-host, non-versioned `~/.claude/usage-data/` cache whose
 LLM layer even CONFABULATED friction (invented a false "500 output-token maximum"
-story). This is a **two-PR initiative**; PR-1 is done.
+story — verified against transcripts: the sessions it blamed were full 1,300–2,750
+line transcripts with zero token-limit markers; the analyzer hit ITS OWN limit and
+invented the reason).
+
+**STATUS: COMPLETE + LIVE.** Both PRs merged, shipped to both hosts, verified live.
+This doc is now the durable record + the "what's left" list for a future session.
 
 ## The 3-layer architecture (`activity.events`, `source=claude`)
 - **Message stream** — `kind=prompt|command`. One event per genuine user turn /
@@ -14,89 +19,103 @@ story). This is a **two-PR initiative**; PR-1 is done.
   per session; `payload` = whole-transcript rollup (tool counts, input/output +
   cache-read/cache-creation tokens, langs, git commits/pushes, churn, durations,
   interruptions, tool errors + categories, task/mcp/web flags, models, start/end
-  ts). Emitter: `scripts/collector/claude/session-tailer.py`. **NO LLM.** ← shipped
-  in PR-1 (post-review hardening dropped `first_prompt`/`message_hours` — see below).
-- **Layer B — qualitative facets** — `kind=session-insight`. goal/outcome/friction
-  + automation_opportunity/recurring_toil/workflow_gap. ← PR-2 (not built).
+  ts). Emitter: `scripts/collector/claude/session-tailer.py`. **NO LLM.** LIVE on
+  the 5-min `claude-activity-source` timer, both hosts.
+- **Layer B — LLM qualitative facets** — `kind=session-insight`. underlying_goal /
+  outcome / session_type / claude_helpfulness / friction + the purpose-aligned
+  `automation_opportunity` / `recurring_toil` / `workflow_gap`. Package
+  `scripts/session-analysis/session_insight/`. **Session-driven** (the live Claude
+  session running the `activity` skill does the extraction — NO `claude -p`, no
+  external API), **manual/on-demand only**. Anti-confabulation contract: Layer A
+  counts are injected as ground-truth FACTS the model may not restate/invent;
+  `unreadable` flagged honestly.
 
-## What PR-1 shipped (branch `feat/insights-telemetry-unify-pr1`)
-- **`scripts/collector/claude/session-tailer.py`** — the Layer A emitter (sibling
-  of tailer.py). Parses each transcript fully, emits one `session-summary`.
-- **`scripts/collector/claude/_shared.py`** — shared ts/project/emit/root/
-  iter-transcript helpers; tailer.py refactored to import them (behaviour
-  identical — its 18 tests still pass).
-- **home-manager wiring** — `claude-activity-source` oneshot now runs BOTH tailers
-  (two `ExecStart` lines) on the same 5-min timer, both hosts. `nix/home.nix`.
-- **`scripts/session-analysis/insights.py`** — telemetry-native report
-  (`--days 14`/`--json`/`--host`/`--html`). Reads Layer A rollups (argMax-latest)
-  + the message stream; degrades gracefully when telemetry is off. Successor to
-  the built-in `/insights`. Honest: shows `unreadable` sessions, never fabricates;
-  OUTCOMES section renders Layer B if present else "qualitative layer pending (PR-2)".
-- **validation** — two invariants added (`invariants.py`): `session_summary_wellformed`
-  (payload has required keys) + `session_summary_no_orphans` (settled Layer-A-era
-  prompt sessions all have a summary; vacuous pre-deploy).
-- **tests** — `tests/test_session_tailer.py` (17), `tests/test_insights.py` (13),
-  invariant tests (+4). Full repo suite: **323 passed**.
-- **docs** — collector/validation READMEs + CLAUDE.md Layout updated.
+Report: `scripts/session-analysis/insights.py [--days 14] [--insight-days 30]
+[--json] [--host H] [--html PATH]` fuses A + B + the message stream. It is the
+telemetry-native **successor to the built-in `/insights`** — the built-in can't be
+overridden but is no longer the source of truth (it confabulates). Don't reconcile
+against its numbers.
+
+## What shipped
+- **PR #93** (Layer A rollups + `insights.py` + `_shared.py` refactor of tailer.py +
+  2 validation invariants + home-manager wiring). Merged, shipped. Live-verified:
+  **373 `session-summary` rows** landed on first backfill; report TOOLS/LANGUAGES/
+  tokens sections populate. The honest-tokens fix mattered — input reads ~20.2B
+  (12.8M fresh + 19.7B cache-read + 560M cache-write); the old `input_tokens`-only
+  metric was ~1,580× low.
+- **PR #96** (Layer B session-insight extractor + report OUTCOMES + leverage-ranked
+  automation/toil/gap sections). Merged, shipped. `select.py`→`selection.py` (stdlib
+  shadow), payload bounded < PIPE_BUF, staging 0700/0600 + per-session purge on emit,
+  vendored-secret-pattern drift test. Live-verified: extract→write→report round-trip.
+- **Separate this session:** `~/.claude/hooks/bash-guard.py` gained a secret/IP
+  **publish-sink** scanner (private-key block unconditional; API/token patterns +
+  public IPs blocked only in `git commit`/`gh pr|issue|release|gist` sinks; internal
+  IPs + `$VAR` creds untouched). Per-host hook, 17/17 tests. Noted in the
+  `harness-audit-tooling` memory.
 
 ## Read contract (IMPORTANT)
-`activity.events` is append-only and a session grows until it ends, so its summary
-CHANGES and re-emits (only when its transcript signature — mtime-ns + size —
-changes). A session therefore accumulates several `session-summary` rows over its
-life. **Consumers take the latest per session with `argMax(<field>, ingested_at)`
-grouped by `session`.** State file (per-transcript signature):
-`~/.local/state/activity/session-summary-state.json` (env: `CLAUDE_SUMMARY_STATE`).
+`activity.events` is append-only; a session grows until it ends, so its summary/
+insight re-emits (Layer A: when the transcript signature mtime-ns+size changes).
+**Consumers take the latest per session with `argMax(<field>, ingested_at)` grouped
+by `session`.** State files: `~/.local/state/activity/session-summary-state.json`
+(Layer A). Layer B staging/results under `~/.local/state/activity/insights/`
+(0700; scrubbed inputs purged per-session on successful `write`).
 
-## Verified / NOT verified
-- Emitter unit-tested + **dry-run verified end-to-end**: `session-tailer.py` →
-  real `emit` → `collector.parse_line` round-trips a well-formed `session-summary`
-  (all payload keys correct).
-- `insights.py` **run against LIVE ClickHouse** (reader creds): message-stream
-  sections populate from real data (4816 prompts / 143 commands / 14d); Layer A
-  sections empty (0 `session-summary` rows — none exist until deploy). Query fixed
-  during verification: an `argMax(ts,…) AS ts` alias shadowed the `ts` column in
-  WHERE (ILLEGAL_AGGREGATION) → renamed to `session_ts`.
-- **NOT deployed / not switched.** No live `session-summary` rows exist until
-  `ship.sh` converges both hosts. Do NOT `home-manager switch` from the agent.
+## First extraction run — what the data produced (8 sessions, 2026-07-11)
+Layer B over 8 sessions (mostly B2/civitai incidents) surfaced, leverage-ranked:
+- **Dominant: config-as-code gap for the storage/CDN layer** (config_gap ×5) — CORS
+  rules, Cloudflare cache/firewall rules, ingestion egress-IP allowlisting, the OTLP
+  `service.instance.id` gap — all managed OUT-OF-BAND, not in git, recurring across
+  incidents. **This is the highest-leverage follow-up the data points at.**
+- **B2-incident tooling = repeated toil** — ~18 throwaway probe scripts, hand-launched
+  k8s diagnostic Jobs, re-derived Class-B breakdowns across ≥3 incident sessions →
+  a reusable CF+Prometheus incident toolkit + a b2-throttle runbook. (NOTE: a later
+  session shipped the `obs-read` skill, which addresses the "port-forward → PromQL →
+  python parse → teardown" part of this.)
+- deploy-then-verify soak loop + pod-triage sequence — both hand-assembled per
+  incident, both scriptable.
 
-## PR-2 plan (next) — see full spec: claudedocs/spec-insights-telemetry-pr2-2026-07-11.md
-- **Owned qualitative extractor driven by the LIVE Claude Code session** (NOT
-  `claude -p`, NOT an external API — decision locked with Zach). Deterministic
-  Python does the plumbing (select settled+un-extracted sessions → secret-scrub →
-  attach Layer A rollup as GROUND TRUTH → write staging inputs; then validate +
-  `emit` the results); the session running the `activity` skill performs the
-  extraction step (inline, or Agent-tool fan-out for a backlog). Emits
-  `kind=session-insight` with the ENRICHED schema — goal, outcome, friction PLUS
-  `automation_opportunity`, `recurring_toil`, `workflow_gap`. **MANUAL** only
-  (operated via the `activity` skill; no timer). Anti-confabulation contract:
-  the model may NOT invent/restate counts (kills the built-in's "500-token max"
-  failure) and must flag `unreadable` honestly.
-- Fold outcomes into `insights.py` OUTCOMES (already reads `session-insight` if
-  present) + document in the `activity` skill.
-- Consider back-emitting Layer A over the existing transcript history once on
-  first deploy (the tailer already handles all sessions; a first timer fire will
-  summarize every transcript on disk).
+## Operating it / how to extract more (next session)
+Via the `activity` skill (its Layer B section has the full flow + a new "Operating
+the backlog" subsection with these lessons). Quick version:
+```bash
+# reader creds — NOTE the --input-type yaml gotcha on the process-substitution:
+export CLICKHOUSE_URL=http://192.168.50.94:30123 CLICKHOUSE_USER=activity_reader
+export CLICKHOUSE_PASSWORD=$(SOPS_AGE_KEY_FILE=~/workspace/homelab-talos/.secrets/age.key \
+  sops -d --input-type yaml --extract '["stringData"]["reader-password"]' \
+  <(git -C ~/workspace/homelab-talos show origin/trunk:clusters/homelab/apps/activity/secrets.enc.yaml))
+python3 scripts/session-analysis/session_insight/cli.py status --json     # ~90 pending
+python3 scripts/session-analysis/session_insight/cli.py prepare --days 30 --limit 6 --json
+# extract: monster sessions (250–280 chunks) → ONE subagent each, SAMPLE (first/last/spread),
+#          never read all chunks (counts come from ground_truth); small ones batch several/subagent
+python3 scripts/session-analysis/session_insight/cli.py write --run-id <id> --json
+python3 scripts/session-analysis/insights.py --days 30
+```
 
-## PR-2 / follow-up considerations
-- **Post-review hardening (on the PR-1 branch, additive commits):** `--host` query
-  alias-shadow fixed (`argMax(host,…) AS sess_host`, mirroring the earlier `ts`
-  fix); first-run backfill hardened — `save_state()` now checkpoints incrementally
-  (every 25 emits) so a SIGTERM mid-backfill resumes instead of re-storming, and
-  the oneshot got `TimeoutStartSec=600`; `input_tokens` no longer masquerades as
-  total input (cache-read + cache-creation now summed and rendered honestly);
-  `first_prompt` (unscrubbed raw-prompt leak surface) and `message_hours`
-  (unbounded, unread) DROPPED from the rollup; sidechain skip moved ahead of the
-  duration min/max.
-- **Re-emit storm for long-lived sessions (deferred):** a session re-emits its FULL
-  summary on every 5-min tick while it keeps growing (signature changes on each new
-  turn). For a long-lived session that is a lot of near-duplicate `session-summary`
-  rows. `argMax`-latest read contract makes this correct but wasteful. Address later
-  via **emit-on-settle** (only emit once a session has been idle N minutes) and/or a
-  **ClickHouse TTL** on `session-summary` rows so superseded rollups age out.
-- **`first_prompt` reintroduction:** deferred to PR-2, and only once the secret
-  scrubber exists (PR-2 owns free-text scrubbing before any raw prompt hits CH).
+## What's left (next session, priority order)
+1. **Backlog extraction** — ~90 sessions still lack Layer B. Extract in bounded
+   batches (`--limit ~6`, real cost = the operating session's tokens). Each batch
+   makes the OUTCOMES + automation/toil/gap report more meaningful.
+2. **Act on the dominant finding** — config-as-code for the storage/CDN layer
+   (Cloudflare/B2 rules → git/IaC). This is the concrete, evidence-backed leverage
+   the whole exercise produced; could become its own scoped effort.
+3. **Deferred Layer A hardening — re-emit storm:** a long-lived session re-emits its
+   FULL summary every 5-min tick (signature changes each turn) → many near-duplicate
+   rows. `argMax`-latest keeps reads correct but it's wasteful. Address via
+   **emit-on-settle** (emit once idle N min) and/or a **ClickHouse TTL** on
+   `session-summary` rows so superseded rollups age out.
+4. **Scrubber scope:** Layer B's scrubber catches only PREFIXED secret shapes; a bare
+   token (no recognizable prefix) survives into on-disk staging (0600, purged after
+   emit; reaches ClickHouse only if the model quotes it into a summary). Widen the
+   patterns if this matters. (Same regexes as the bash-guard hook — keep in sync; a
+   drift test exists.)
+5. **`first_prompt` reintroduction** — dropped from Layer A for the leak surface; only
+   reintroduce once a robust free-text scrubber exists.
 
-## Deploy (when merged)
-`~/workspace/devrc/scripts/ship.sh` converges both hosts; the 5-min timer then
-starts emitting `session-summary`. Sanity: `insights.py --days 14` should start
-showing non-empty TOOLS/LANGUAGES/tokens within ~5 min.
+## Where things live
+- Layer A: `scripts/collector/claude/session-tailer.py` + `_shared.py`; wiring `nix/home.nix`.
+- Layer B: `scripts/session-analysis/session_insight/` (schema/scrub/selection/prepare/
+  consolidate/write/cli + tests); spec `claudedocs/spec-insights-telemetry-pr2-2026-07-11.md`.
+- Report: `scripts/session-analysis/insights.py`. Validation: `scripts/validation/invariants.py`.
+- Ops: the `activity` skill (per-host `~/.claude/skills/activity/SKILL.md`). CLAUDE.md
+  Layout bullet + `scripts/session-analysis/README.md` document the 3 layers.
