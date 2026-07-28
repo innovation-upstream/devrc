@@ -127,8 +127,8 @@ def _req(srv, method, path, body=None, token=TOKEN, host="127.0.0.1",
         return e.code, (json.loads(raw) if raw else None)
 
 
-def _serve(cmd_timeout=5.0, poll_timeout=5.0):
-    registry = S.Registry()
+def _serve(cmd_timeout=5.0, poll_timeout=5.0, registry=None):
+    registry = registry if registry is not None else S.Registry()
     handler = S.make_handler(registry, TOKEN, cmd_timeout, poll_timeout)
     srv = S.ThreadingHTTPServer(("127.0.0.1", 0), handler)
     srv.daemon_threads = True
@@ -151,6 +151,7 @@ class FakeExtension(threading.Thread):
         self.swallow = swallow  # pick up a command but never answer (→ timeout)
         self.active_url = active_url
         self.active_title = active_title
+        self.dispatched = []    # every command this fake picked up (for assertions)
         self._stopev = threading.Event()
 
     def _poll_headers(self):
@@ -174,10 +175,21 @@ class FakeExtension(threading.Thread):
                 continue
             if status == 204 or cmd is None:
                 continue
+            self.dispatched.append(cmd)
             if self.swallow:
                 continue
-            envelope = {"id": cmd["id"], "ok": True,
-                        "data": self.executor(cmd), "instanceId": self.instance_id}
+            data = self.executor(cmd)
+            # An executor may model an op-level FAILURE (the op threw in the page
+            # / the target tab is gone) by returning {"__error__": "<msg>"} — the
+            # fake then emits the extension's ok:false error envelope instead of a
+            # success envelope. A plain dict stays a success `data` payload.
+            if isinstance(data, dict) and "__error__" in data:
+                envelope = {"id": cmd["id"], "ok": False,
+                            "error": data["__error__"],
+                            "instanceId": self.instance_id}
+            else:
+                envelope = {"id": cmd["id"], "ok": True, "data": data,
+                            "instanceId": self.instance_id}
             try:
                 _req(self.srv, "POST", "/result", envelope)
             except Exception:
@@ -865,7 +877,12 @@ def test_registry_supersede_inflight_resolves_error_no_leak():
 
 def test_registry_id_correlation_out_of_order():
     """Two concurrent submits to the SAME instance get their OWN replies even
-    when the extension answers them in reverse order."""
+    when the extension answers them in reverse order.
+
+    They target DIFFERENT tabs so both are concurrently in-flight — commands to
+    the SAME tab now serialize FIFO (per-tab isolation), so only distinct tabs
+    can be simultaneously outstanding. The transport's cid correlation is what's
+    under test here and is unchanged."""
     reg = S.Registry()
     poll_done = threading.Event()
     picked = []
@@ -881,7 +898,9 @@ def test_registry_id_correlation_out_of_order():
     results = {}
 
     def submit(tag):
-        results[tag] = reg.submit({"op": "eval", "tag": tag}, timeout=3.0)
+        # Distinct tabs (1 for A, 2 for B) → independent tab-FIFO turnstiles.
+        results[tag] = reg.submit({"op": "eval", "tag": tag}, timeout=3.0,
+                                  tab=(1 if tag == "A" else 2))
 
     s1 = threading.Thread(target=submit, args=("A",), daemon=True)
     s2 = threading.Thread(target=submit, args=("B",), daemon=True)
@@ -916,12 +935,18 @@ def test_registry_deliver_unknown_id_false():
 
 def test_validate_command_contract():
     # The op set is the shared contract with extension/protocol.js.
-    assert set(S.ALLOWED_OPS) == {"getHtml", "eval", "tabs", "nav", "screenshot"}
+    assert set(S.ALLOWED_OPS) == {"getHtml", "eval", "tabs", "nav", "screenshot",
+                                  "open", "close"}
     assert S.validate_command({"op": "tabs"}) == ("tabs", None)
     assert S.validate_command({"op": "eval", "js": "1"})[0] == "eval"
     assert S.validate_command({"op": "eval"})[1] == "missing_field:js"
     assert S.validate_command({"op": "bogus"})[1] == "unknown_op"
     assert S.validate_command("nope")[1] == "body_not_object"
+    # open/close (dispatched) and release (server-side) are all accepted ops.
+    assert S.validate_command({"op": "open"}) == ("open", None)
+    assert S.validate_command({"op": "close"}) == ("close", None)
+    assert S.validate_command({"op": "release"}) == ("release", None)
+    assert "release" in S.SERVER_OPS and "release" not in S.ALLOWED_OPS
 
 
 # --------------------------------------------------------------------------- #
@@ -1215,3 +1240,664 @@ def test_load_spool_emit_missing_path_returns_none(monkeypatch, tmp_path):
     monkeypatch.setattr(S, "_spool_emit_mod", None)
     monkeypatch.setattr(S, "_spool_emit_tried", False)
     assert S._load_spool_emit() is None
+
+
+# --------------------------------------------------------------------------- #
+# Per-session tab isolation (the concurrent-session clobber fix)
+#
+# The clobber was SEMANTIC: every op targeted the ONE shared active tab, so two
+# sessions' multi-step workflows interleaved on it. Fix: a session `open`s its own
+# tab; the server records `(instance_key, session_id) -> tabId` and routes that
+# session's tab-scoped ops to ITS tab. These are all headless — an in-process
+# FakeExtension that ECHOES the dispatched tabId models "which tab did the op hit".
+# --------------------------------------------------------------------------- #
+def _wait_until(pred, timeout=3.0):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if pred():
+            return True
+        time.sleep(0.005)
+    return pred()
+
+
+def _tab_echo_exec(open_ids):
+    """Executor: `open` returns the next id from `open_ids`; every other op echoes
+    back the tabId the SERVER injected (None → active-tab fallback) + the op."""
+    it = iter(open_ids)
+
+    def _exec(cmd):
+        if cmd["op"] == "open":
+            return {"tabId": next(it), "url": cmd.get("url")}
+        if cmd["op"] == "close":
+            return {"closed": cmd.get("tabId")}
+        return {"tabId": cmd.get("tabId"), "op": cmd["op"]}
+    return _exec
+
+
+def _cmd(srv, body, session=None):
+    hdrs = {S.HDR_SESSION_ID: session} if session is not None else None
+    return _req(srv, "POST", "/cmd", body, headers=hdrs)
+
+
+# --- ownership: open records (instance,session)->tabId --------------------- #
+def test_open_records_ownership_and_returns_tabid():
+    srv, reg = _serve()
+    ext = FakeExtension(srv, instance_id="solo", label="only",
+                        executor=_tab_echo_exec([101]))
+    ext.start()
+    try:
+        assert _wait_connected(srv, want=True)
+        st, body = _cmd(srv, {"op": "open", "url": "https://a.test"}, session="A")
+        assert st == 200
+        assert body["result"]["data"]["tabId"] == 101
+        assert reg.owners_snapshot() == {("only", "A"): 101}
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
+def test_two_sessions_get_distinct_ownership():
+    srv, reg = _serve()
+    ext = FakeExtension(srv, instance_id="solo", label="only",
+                        executor=_tab_echo_exec([101, 202]))
+    ext.start()
+    try:
+        assert _wait_connected(srv, want=True)
+        assert _cmd(srv, {"op": "open"}, session="A")[1]["result"]["data"]["tabId"] == 101
+        assert _cmd(srv, {"op": "open"}, session="B")[1]["result"]["data"]["tabId"] == 202
+        assert reg.owners_snapshot() == {("only", "A"): 101, ("only", "B"): 202}
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
+# --- routing: a session's ops carry ITS owned tabId ------------------------ #
+def test_owned_session_ops_route_to_its_tab():
+    srv, _ = _serve()
+    ext = FakeExtension(srv, instance_id="solo", label="only",
+                        executor=_tab_echo_exec([101]))
+    ext.start()
+    try:
+        assert _wait_connected(srv, want=True)
+        _cmd(srv, {"op": "open"}, session="A")
+        for op in ("getHtml", "eval", "nav"):
+            b = {"op": op}
+            if op == "eval":
+                b["js"] = "1"
+            if op == "nav":
+                b["url"] = "https://x.test"
+            st, body = _cmd(srv, b, session="A")
+            assert st == 200, (op, body)
+            assert body["result"]["data"]["tabId"] == 101, \
+                f"{op} must route to A's owned tab 101"
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
+def test_no_owned_tab_falls_back_to_active():
+    """A session that never `open`ed → no tabId injected (extension uses the
+    active tab). This preserves the one-shot 'read the tab I have open' path."""
+    srv, _ = _serve()
+    ext = FakeExtension(srv, instance_id="solo", label="only",
+                        executor=lambda c: {"hasTab": ("tabId" in c), "op": c["op"]})
+    ext.start()
+    try:
+        assert _wait_connected(srv, want=True)
+        st, body = _cmd(srv, {"op": "getHtml"}, session="Z")   # session, but no open
+        assert st == 200
+        assert body["result"]["data"]["hasTab"] is False
+        # And the dispatched command genuinely carried no tabId.
+        assert all("tabId" not in c for c in ext.dispatched)
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
+def test_explicit_tab_override():
+    srv, _ = _serve()
+    ext = FakeExtension(srv, instance_id="solo", label="only",
+                        executor=_tab_echo_exec([]))
+    ext.start()
+    try:
+        assert _wait_connected(srv, want=True)
+        # No open at all, but --tab 77 forces the target.
+        st, body = _req(srv, "POST", "/cmd", {"op": "getHtml", "tab": 77},
+                        headers={S.HDR_SESSION_ID: "A"})
+        assert st == 200
+        assert body["result"]["data"]["tabId"] == 77
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
+# --- THE BUG: two sessions interleave without clobbering ------------------- #
+def test_two_sessions_interleaved_never_clobber():
+    """Session A and B each own a tab; interleaved nav+read ops each dispatch
+    against their OWN tabId — the clobber (A reads B's page) cannot happen."""
+    srv, _ = _serve()
+    ext = FakeExtension(srv, instance_id="solo", label="only",
+                        executor=_tab_echo_exec([101, 202]))
+    ext.start()
+    try:
+        assert _wait_connected(srv, want=True)
+        _cmd(srv, {"op": "open", "url": "https://a.test"}, session="A")
+        _cmd(srv, {"op": "open", "url": "https://b.test"}, session="B")
+        # Interleave: A nav, B nav, A read, B read.
+        assert _cmd(srv, {"op": "nav", "url": "https://a2.test"}, session="A")[1]["result"]["data"]["tabId"] == 101
+        assert _cmd(srv, {"op": "nav", "url": "https://b2.test"}, session="B")[1]["result"]["data"]["tabId"] == 202
+        assert _cmd(srv, {"op": "getHtml"}, session="A")[1]["result"]["data"]["tabId"] == 101
+        assert _cmd(srv, {"op": "getHtml"}, session="B")[1]["result"]["data"]["tabId"] == 202
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
+# --- close / release ------------------------------------------------------- #
+def test_close_drops_ownership_and_dispatches_remove():
+    srv, reg = _serve()
+    ext = FakeExtension(srv, instance_id="solo", label="only",
+                        executor=_tab_echo_exec([101]))
+    ext.start()
+    try:
+        assert _wait_connected(srv, want=True)
+        _cmd(srv, {"op": "open"}, session="A")
+        assert reg.owners_snapshot() == {("only", "A"): 101}
+        st, body = _cmd(srv, {"op": "close"}, session="A")
+        assert st == 200
+        assert body["result"]["data"]["closed"] == 101
+        assert reg.owners_snapshot() == {}
+        # A close-shaped command (op=close, tabId=owned) was dispatched.
+        close_cmds = [c for c in ext.dispatched if c["op"] == "close"]
+        assert len(close_cmds) == 1 and close_cmds[0]["tabId"] == 101
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
+def test_close_without_owned_tab_409_no_owned_tab():
+    srv, _ = _serve()
+    ext = FakeExtension(srv, instance_id="solo", label="only")
+    ext.start()
+    try:
+        assert _wait_connected(srv, want=True)
+        st, body = _cmd(srv, {"op": "close"}, session="A")   # never opened
+        assert st == 409
+        assert body["error"] == "no_owned_tab"
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
+def test_release_drops_ownership_without_dispatch():
+    srv, reg = _serve()
+    ext = FakeExtension(srv, instance_id="solo", label="only",
+                        executor=_tab_echo_exec([101]))
+    ext.start()
+    try:
+        assert _wait_connected(srv, want=True)
+        _cmd(srv, {"op": "open"}, session="A")
+        assert reg.owners_snapshot() == {("only", "A"): 101}
+        st, body = _cmd(srv, {"op": "release"}, session="A")
+        assert st == 200
+        assert body["result"]["data"]["released"] == 1
+        assert reg.owners_snapshot() == {}
+        # release is server-side: the extension NEVER saw a release/close command.
+        assert all(c["op"] not in ("release", "close") for c in ext.dispatched)
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
+def test_tabs_annotates_owned_tab_id():
+    srv, _ = _serve()
+    ext = FakeExtension(srv, instance_id="solo", label="only",
+                        executor=_tab_echo_exec([101]))
+    ext.start()
+    try:
+        assert _wait_connected(srv, want=True)
+        _cmd(srv, {"op": "open"}, session="A")
+        st, body = _cmd(srv, {"op": "tabs"}, session="A")
+        assert st == 200
+        assert body["result"]["data"]["ownedTabId"] == 101
+        # A different session owns nothing here → None.
+        st, body = _cmd(srv, {"op": "tabs"}, session="B")
+        assert body["result"]["data"]["ownedTabId"] is None
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
+# --- backward compatibility ------------------------------------------------ #
+def test_backward_compat_no_session_no_open_unchanged():
+    """A SINGLE session with NO session header and NO open behaves EXACTLY as
+    before: active-tab dispatch, no tabId injected."""
+    srv, _ = _serve()
+    ext = FakeExtension(srv, instance_id="solo", label="only",
+                        executor=lambda c: {"hasTab": ("tabId" in c)})
+    ext.start()
+    try:
+        assert _wait_connected(srv, want=True)
+        st, body = _req(srv, "POST", "/cmd", {"op": "getHtml"})   # no X-Session-Id
+        assert st == 200
+        assert body["result"]["data"]["hasTab"] is False
+        assert all("tabId" not in c for c in ext.dispatched)
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
+# --- security: the session id is routing-only, never trusted for auth ------ #
+def test_cmd_with_session_still_enforces_auth_and_host():
+    srv, _ = _serve()
+    try:
+        # Wrong bearer + a session header → still 401 (session never grants auth).
+        st, body = _req(srv, "POST", "/cmd", {"op": "getHtml"}, token="nope",
+                        headers={S.HDR_SESSION_ID: "A"})
+        assert st == 401 and body["error"] == "unauthorized"
+        # Bad Host + a session header → still 403.
+        st, body = _req(srv, "POST", "/cmd", {"op": "getHtml"},
+                        host="evil.example.com",
+                        headers={S.HDR_SESSION_ID: "A"})
+        assert st == 403 and body["error"] == "bad_host"
+    finally:
+        srv.shutdown(); srv.server_close()
+
+
+# --- per-tab FIFO serialization (Registry-level, deterministic) ------------ #
+def _register_live(reg, iid="solo", key="one"):
+    """Register a live instance via one idle poll (leaves last_poll recent so it
+    counts live within CONNECT_STALE_S) and return its Instance."""
+    reg.poll(iid, key, 0.01)
+    with reg._cond:
+        return reg._instances[key]
+
+
+def test_same_tab_commands_serialize_fifo():
+    """Two commands targeting the SAME tab are granted in arrival order: the
+    second does not even enqueue until the first completes."""
+    reg = S.Registry()
+    inst = _register_live(reg)
+
+    r1 = {}
+
+    def sub1():
+        r1["v"] = reg.submit({"op": "getHtml"}, 5.0, session_id="s1", tab=5)
+
+    threading.Thread(target=sub1, daemon=True).start()
+    assert _wait_until(lambda: len(inst.waiters) == 1), "cmd1 never enqueued"
+    cid1 = next(iter(inst.waiters))
+
+    # A second command to the SAME tab (5) must be FIFO-gated (not enqueued yet).
+    threading.Thread(
+        target=lambda: reg.submit({"op": "getHtml"}, 5.0, session_id="s2", tab=5),
+        daemon=True).start()
+    time.sleep(0.15)
+    assert inst.waiters == {cid1}, "second same-tab command must NOT enqueue while cmd1 is in-flight"
+
+    # Complete cmd1 → its turn is released → cmd2 enqueues.
+    reg.deliver_result(cid1, {"id": cid1, "ok": True, "data": {}},
+                       instance_id="solo")
+    assert _wait_until(lambda: inst.waiters and next(iter(inst.waiters)) != cid1), \
+        "cmd2 must enqueue once cmd1 completed"
+    cid2 = next(iter(inst.waiters))
+    reg.deliver_result(cid2, {"id": cid2, "ok": True, "data": {}},
+                       instance_id="solo")
+
+
+def test_different_tab_commands_do_not_block():
+    """A command to a DIFFERENT tab enqueues immediately, even while another tab's
+    command is in flight (no false serialization across tabs)."""
+    reg = S.Registry()
+    inst = _register_live(reg)
+
+    def sub1():
+        reg.submit({"op": "getHtml"}, 5.0, session_id="s1", tab=5)
+
+    threading.Thread(target=sub1, daemon=True).start()
+    assert _wait_until(lambda: len(inst.waiters) == 1)
+    cid1 = next(iter(inst.waiters))
+
+    # Different tab (6) — must enqueue right away (→ 2 waiters), not wait for cid1.
+    threading.Thread(
+        target=lambda: reg.submit({"op": "getHtml"}, 5.0, session_id="s2", tab=6),
+        daemon=True).start()
+    assert _wait_until(lambda: len(inst.waiters) == 2), \
+        "a different-tab command must not be blocked by cmd1"
+    for cid in list(inst.waiters):
+        reg.deliver_result(cid, {"id": cid, "ok": True, "data": {}},
+                           instance_id="solo")
+
+
+def test_fifo_queued_command_respects_cmd_timeout():
+    """A command queued behind an in-flight one on the same tab still times out
+    at cmd_timeout (a queued command can never block forever)."""
+    reg = S.Registry()
+    inst = _register_live(reg)
+
+    def sub1():
+        # Never delivered → holds the tab turn until ITS own timeout.
+        try:
+            reg.submit({"op": "getHtml"}, 5.0, session_id="s1", tab=5)
+        except S.BridgeTimeout:
+            pass
+
+    threading.Thread(target=sub1, daemon=True).start()
+    assert _wait_until(lambda: len(inst.waiters) == 1)
+
+    r2 = {}
+
+    def sub2():
+        try:
+            reg.submit({"op": "getHtml"}, 0.3, session_id="s2", tab=5)
+        except Exception as e:  # noqa: BLE001
+            r2["err"] = type(e).__name__
+
+    t2 = threading.Thread(target=sub2, daemon=True)
+    t2.start()
+    t2.join(3)
+    assert r2.get("err") == "BridgeTimeout", \
+        "a FIFO-queued command must still honour cmd_timeout"
+
+
+# --- TTL reclaim: released, NOT closed ------------------------------------- #
+def test_owner_ttl_reclaims_without_closing(monkeypatch):
+    """Ownership idle past the TTL is RELEASED (mapping dropped) using an injected
+    clock — never a real Date.now(). Reclaim must NOT dispatch a close."""
+    clock = [1000.0]
+    reg = S.Registry(clock=lambda: clock[0], owner_ttl=10.0)
+    with reg._cond:
+        reg._owners[("k", "s")] = {"tab_id": 42, "last_seen": clock[0]}
+    assert reg.owners_snapshot() == {("k", "s"): 42}
+
+    events = []
+    monkeypatch.setattr(S, "log", lambda ev, **kw: events.append(ev))
+    clock[0] += 11.0                      # advance past the idle TTL
+    assert reg.owners_snapshot() == {}    # reclaimed on the next touch
+    assert "owner_reclaim" in events
+
+
+def test_owner_ttl_reclaim_falls_back_to_active_not_close():
+    """After a session's ownership expires, its next op routes with NO injected
+    tabId (active-tab fallback) and NO close is ever dispatched — the real tab is
+    left open. Registry-level with an injected clock (no real Date.now())."""
+    clock = [1000.0]
+    reg = S.Registry(clock=lambda: clock[0], owner_ttl=10.0)
+
+    dispatched = []
+    stop = threading.Event()
+
+    def poller():
+        while not stop.is_set():
+            cmd = reg.poll("solo", "one", 0.05)
+            if cmd is not None and cmd is not S.SUPERSEDED:
+                dispatched.append(cmd)
+                reg.deliver_result(cmd["id"], {"id": cmd["id"], "ok": True,
+                                               "data": {}}, instance_id="solo")
+
+    threading.Thread(target=poller, daemon=True).start()
+    try:
+        assert _wait_until(lambda: len(reg.snapshot()) == 1)
+        # Model an owned tab, then let it go idle past the TTL.
+        with reg._cond:
+            reg._owners[("one", "S")] = {"tab_id": 55, "last_seen": clock[0]}
+        clock[0] += 11.0                  # past owner TTL (10), within stale (40)
+        reg.submit({"op": "getHtml"}, 3.0, session_id="S")   # no tab arg
+        assert reg.owners_snapshot() == {}                    # ownership reclaimed
+        assert dispatched, "the op was never dispatched"
+        assert all("tabId" not in c for c in dispatched)      # active-tab fallback
+        assert all(c["op"] != "close" for c in dispatched)    # tab NOT closed
+    finally:
+        stop.set()
+
+
+# --------------------------------------------------------------------------- #
+# Fix 1 — self-heal when an owned tab is gone
+#
+# When the user manually closes an owned BACKGROUND tab, the next tab-scoped op
+# dispatches the stale tabId → the extension returns `owned_tab_gone` (ok:false).
+# The session must DROP its ownership so the next command self-heals to the
+# active-tab fallback (instead of staying wedged to the dead tab for OWNER_TTL),
+# and `close` must clear the mapping even when the remove reports the tab gone.
+# --------------------------------------------------------------------------- #
+def _tab_gone_exec(open_ids, gone):
+    """Executor: `open` hands out the next id; a tab-scoped op whose injected
+    tabId is in the mutable `gone` set returns an `owned_tab_gone` error envelope;
+    otherwise it echoes the injected tabId (None → active-tab fallback)."""
+    it = iter(open_ids)
+
+    def _exec(cmd):
+        if cmd["op"] == "open":
+            return {"tabId": next(it), "url": cmd.get("url")}
+        tid = cmd.get("tabId")
+        if tid is not None and tid in gone:
+            return {"__error__": "owned_tab_gone"}
+        if cmd["op"] == "close":
+            return {"closed": tid}
+        return {"tabId": tid, "op": cmd["op"]}
+    return _exec
+
+
+def test_is_tab_gone_helper():
+    assert S._is_tab_gone("owned_tab_gone") is True
+    assert S._is_tab_gone("No tab with id: 42.") is True   # chrome's raw message
+    assert S._is_tab_gone("something_else") is False
+    assert S._is_tab_gone(None) is False
+    assert S._is_tab_gone(123) is False
+
+
+def test_owned_tab_gone_drops_ownership_and_self_heals():
+    """A tab-scoped op that fails with `owned_tab_gone` for the session's OWNED
+    tab drops the mapping; the NEXT op falls back to the active tab (no tabId)."""
+    srv, reg = _serve()
+    gone = set()
+    ext = FakeExtension(srv, instance_id="solo", label="only",
+                        executor=_tab_gone_exec([101], gone))
+    ext.start()
+    try:
+        assert _wait_connected(srv, want=True)
+        _cmd(srv, {"op": "open"}, session="A")
+        assert reg.owners_snapshot() == {("only", "A"): 101}
+        # The user closes tab 101 out-of-band.
+        gone.add(101)
+        st, body = _cmd(srv, {"op": "getHtml"}, session="A")
+        assert st == 200                          # HTTP ok; op-level failure
+        assert body["result"]["ok"] is False
+        assert body["result"]["error"] == "owned_tab_gone"
+        assert reg.owners_snapshot() == {}        # ownership self-healed (dropped)
+        # Next op now falls back to the active tab (no tabId injected).
+        st, body = _cmd(srv, {"op": "getHtml"}, session="A")
+        assert st == 200 and body["result"]["ok"] is True
+        assert body["result"]["data"]["tabId"] is None
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
+def test_close_drops_ownership_even_when_tab_already_gone():
+    """`close` clears the mapping UNCONDITIONALLY — even when the extension
+    reports the tab already gone (remove → ok:false). Without this, a tab the
+    user closed out-of-band could never be cleared and wedged the session."""
+    srv, reg = _serve()
+    gone = set()
+    ext = FakeExtension(srv, instance_id="solo", label="only",
+                        executor=_tab_gone_exec([101], gone))
+    ext.start()
+    try:
+        assert _wait_connected(srv, want=True)
+        _cmd(srv, {"op": "open"}, session="A")
+        assert reg.owners_snapshot() == {("only", "A"): 101}
+        gone.add(101)                              # closed out-of-band
+        st, body = _cmd(srv, {"op": "close"}, session="A")
+        assert st == 200
+        assert body["result"]["ok"] is False       # remove reported it gone
+        assert reg.owners_snapshot() == {}          # mapping cleared regardless
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
+def test_explicit_tab_gone_does_not_evict_owned_mapping():
+    """An explicit --tab to a DIFFERENT (gone) tab must NOT evict the session's
+    healthy owned mapping — only the session's OWN owned tab going gone self-heals."""
+    srv, reg = _serve()
+    gone = {999}
+    ext = FakeExtension(srv, instance_id="solo", label="only",
+                        executor=_tab_gone_exec([101], gone))
+    ext.start()
+    try:
+        assert _wait_connected(srv, want=True)
+        _cmd(srv, {"op": "open"}, session="A")      # owns 101
+        # Target an unrelated, already-gone tab 999 via --tab.
+        st, body = _req(srv, "POST", "/cmd", {"op": "getHtml", "tab": 999},
+                        headers={S.HDR_SESSION_ID: "A"})
+        assert st == 200 and body["result"]["ok"] is False
+        assert body["result"]["error"] == "owned_tab_gone"
+        # The session's own tab (101) is untouched.
+        assert reg.owners_snapshot() == {("only", "A"): 101}
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
+# --------------------------------------------------------------------------- #
+# Fix 2 — a double `open` must not orphan a real tab
+#
+# A second `open` from a session used to overwrite its ownership with a brand-new
+# tabId, orphaning the FIRST real tab (no ownership → never closed → leaked). The
+# server now passes the owned tabId as `reuseTabId`; the extension returns the
+# SAME tab when it is still live (idempotent), and only opens fresh when gone.
+# --------------------------------------------------------------------------- #
+def _open_reuse_exec(new_ids, live):
+    """Model the SW `open` reuse logic: honour `reuseTabId` when that tab is still
+    in the mutable `live` set (idempotent), else create the next new id. `close`
+    removes from `live`; other ops echo their injected tabId."""
+    it = iter(new_ids)
+
+    def _exec(cmd):
+        if cmd["op"] == "open":
+            reuse = cmd.get("reuseTabId")
+            if reuse is not None and reuse in live:
+                return {"tabId": reuse, "url": cmd.get("url"), "reused": True}
+            tid = next(it)
+            live.add(tid)
+            return {"tabId": tid, "url": cmd.get("url")}
+        if cmd["op"] == "close":
+            live.discard(cmd.get("tabId"))
+            return {"closed": cmd.get("tabId")}
+        return {"tabId": cmd.get("tabId"), "op": cmd["op"]}
+    return _exec
+
+
+def test_double_open_is_idempotent_no_orphan():
+    """A second `open` returns the EXISTING owned tab (reused) — no second real
+    tab is created, so the first tab is never orphaned/leaked."""
+    srv, reg = _serve()
+    live = set()
+    ext = FakeExtension(srv, instance_id="solo", label="only",
+                        executor=_open_reuse_exec([101, 202], live))
+    ext.start()
+    try:
+        assert _wait_connected(srv, want=True)
+        st, body = _cmd(srv, {"op": "open"}, session="A")
+        assert body["result"]["data"]["tabId"] == 101
+        assert live == {101}
+        # Second open by the SAME session → the server injects reuseTabId=101 and
+        # the extension returns the SAME live tab (no new 202 tab created).
+        st, body = _cmd(srv, {"op": "open"}, session="A")
+        assert st == 200
+        assert body["result"]["data"]["tabId"] == 101
+        assert body["result"]["data"].get("reused") is True
+        assert live == {101}, "a second real tab was created → orphaned/leaked"
+        assert reg.owners_snapshot() == {("only", "A"): 101}
+        # The server injected the reuse hint on the second open.
+        opens = [c for c in ext.dispatched if c["op"] == "open"]
+        assert opens[1].get("reuseTabId") == 101
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
+def test_open_after_owned_tab_gone_opens_fresh():
+    """If the previously-owned tab is GONE, `open` creates a fresh tab and the
+    ownership updates to it (the stale mapping is replaced, not reused)."""
+    srv, reg = _serve()
+    live = set()
+    ext = FakeExtension(srv, instance_id="solo", label="only",
+                        executor=_open_reuse_exec([101, 202], live))
+    ext.start()
+    try:
+        assert _wait_connected(srv, want=True)
+        _cmd(srv, {"op": "open"}, session="A")       # owns 101
+        live.discard(101)                            # user closed it out-of-band
+        st, body = _cmd(srv, {"op": "open"}, session="A")
+        assert st == 200
+        assert body["result"]["data"]["tabId"] == 202    # fresh tab
+        assert body["result"]["data"].get("reused") is None
+        assert reg.owners_snapshot() == {("only", "A"): 202}
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
+# --------------------------------------------------------------------------- #
+# Fix 3 — a malformed `tab` from a raw API caller is a clean 400, never a 500
+# --------------------------------------------------------------------------- #
+def test_coerce_tab_helper():
+    assert S._coerce_tab(5) == (5, None)
+    assert S._coerce_tab(0) == (0, None)
+    assert S._coerce_tab("77") == (77, None)
+    assert S._coerce_tab([1, 2]) == (None, "bad_tab")
+    assert S._coerce_tab({"x": 1}) == (None, "bad_tab")
+    assert S._coerce_tab(True) == (None, "bad_tab")      # bool is not a tab id
+    assert S._coerce_tab(1.5) == (None, "bad_tab")
+    assert S._coerce_tab(-3) == (None, "bad_tab")
+    assert S._coerce_tab("x") == (None, "bad_tab")
+
+
+def test_malformed_tab_returns_400_bad_tab_not_500():
+    """A raw token-holder POSTing an unhashable `tab` (list/dict) gets a clean
+    400 bad_tab — never an uncaught TypeError → 500."""
+    srv, _ = _serve()
+    ext = FakeExtension(srv, instance_id="solo", label="only")
+    ext.start()
+    try:
+        assert _wait_connected(srv, want=True)
+        for bad in ([1, 2], {"x": 1}, True, 1.5, "nope"):
+            st, body = _req(srv, "POST", "/cmd", {"op": "getHtml", "tab": bad})
+            assert st == 400, f"tab={bad!r} → {st}"
+            assert body["error"] == "bad_tab"
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
+def test_numeric_string_tab_is_coerced_and_routes():
+    """A valid numeric-string `tab` is coerced to an int and routes normally."""
+    srv, _ = _serve()
+    ext = FakeExtension(srv, instance_id="solo", label="only",
+                        executor=lambda c: {"tabId": c.get("tabId")})
+    ext.start()
+    try:
+        assert _wait_connected(srv, want=True)
+        st, body = _req(srv, "POST", "/cmd", {"op": "getHtml", "tab": "5"},
+                        headers={S.HDR_SESSION_ID: "A"})
+        assert st == 200
+        assert body["result"]["data"]["tabId"] == 5
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
+# --------------------------------------------------------------------------- #
+# Fix 4 — explicit --tab overrides owned-tab routing (the subagent escape hatch)
+#
+# Sibling subagents of one parent share a session id (CLAUDE_CODE_SESSION_ID +
+# $TMUX_PANE are inherited, and no subagent-unique env var exists), so they would
+# own the SAME tab. The robust isolation is explicit tab handles: each driver
+# `open`s and then threads its OWN --tab on every op. This asserts --tab fully
+# overrides the session-ownership mapping so two same-session drivers never collide.
+# --------------------------------------------------------------------------- #
+def test_explicit_tab_overrides_owned_mapping():
+    srv, reg = _serve()
+    ext = FakeExtension(srv, instance_id="solo", label="only",
+                        executor=_tab_echo_exec([101]))
+    ext.start()
+    try:
+        assert _wait_connected(srv, want=True)
+        _cmd(srv, {"op": "open"}, session="A")          # session A owns tab 101
+        # An explicit --tab 999 must target 999, NOT the owned 101.
+        st, body = _req(srv, "POST", "/cmd", {"op": "getHtml", "tab": 999},
+                        headers={S.HDR_SESSION_ID: "A"})
+        assert st == 200
+        assert body["result"]["data"]["tabId"] == 999, \
+            "--tab must override the session's owned-tab routing"
+        # The override does not disturb the owned mapping.
+        assert reg.owners_snapshot() == {("only", "A"): 101}
+        # And with no --tab the same session still routes to its owned tab.
+        st, body = _cmd(srv, {"op": "getHtml"}, session="A")
+        assert body["result"]["data"]["tabId"] == 101
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()

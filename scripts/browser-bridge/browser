@@ -10,21 +10,38 @@
 # of connected instances keyed by a routing key (the profile's label, else its
 # stable auto-id). Use --instance to target one explicitly:
 #
-#   browser [--instance <key>] <subcommand>
+#   browser [--instance <key>] [--tab <id>] <subcommand>
 #
 # With exactly ONE instance connected, --instance is optional (back-compat). With
 # more than one and no --instance, a command ERRORS (it never guesses) and lists
 # the connected instances — pick one with --instance <key>.
 #
+# Per-session tab isolation (fixes concurrent-session clobbering):
+#   Two Claude sessions driving one browser used to interleave on ONE shared
+#   active tab. Now each session can `open` its OWN tab; the server records the
+#   ownership under a stable per-session id (X-Session-Id header, derived from
+#   CLAUDE_CODE_SESSION_ID → $TMUX_PANE → a per-process-tree token — see
+#   derive_session_id below) and routes that session's html/eval/nav/screenshot/
+#   close to ITS tab. A session that never `open`ed falls back to the active tab
+#   (the one-shot read path — inherently safe). `--tab <id>` overrides the target
+#   tab explicitly. Ownership has an idle TTL; on expiry it is RELEASED but the
+#   real Brave tab is NOT closed (only `browser close` closes it).
+#
 # Subcommands:
 #   browser health            — connected instances + count (per-instance)
 #   browser instances         — list connected instances as JSON (key/label/url)
-#   browser html              — outerHTML of the active tab (+ url, title)
-#   browser eval '<js>'       — run JS in the active tab, return its value
-#   browser tabs              — list open tabs
-#   browser nav <url>         — navigate the active tab to <url>
+#   browser open [url]        — open a NEW tab this session owns (default about:blank);
+#                               subsequent ops route to it. Prints its tabId.
+#   browser close             — close this session's owned tab + drop ownership
+#   browser release           — drop ownership WITHOUT closing the tab
+#   browser html              — outerHTML of the owned/active tab (+ url, title)
+#   browser eval '<js>'       — run JS in the owned/active tab, return its value
+#   browser tabs              — list open tabs (flags this session's owned tab)
+#   browser nav <url>         — navigate the owned/active tab to <url>
 #   browser screenshot [path] — captureVisibleTab; prints data URL, or writes a
-#                               .png to <path> if given
+#                               .png to <path> if given (a background owned tab is
+#                               briefly foregrounded to capture, then restored)
+#   browser --print-session-id — print the derived per-session id and exit
 #
 # Output is JSON on stdout (pretty-printed if `jq` is present). Exit non-zero on
 # transport/HTTP error so a caller can branch.
@@ -35,17 +52,65 @@ PORT="${BROWSER_BRIDGE_PORT:-8788}"
 TOKEN_FILE="${BROWSER_BRIDGE_TOKEN_FILE:-$HOME/.config/browser-bridge/token}"
 BASE="http://${HOST}:${PORT}"
 INSTANCE=""   # routing key set via --instance <key> (empty → single-instance)
+TAB=""        # explicit tab id set via --tab <id> (overrides owned/active routing)
 
 die() { echo "browser: $*" >&2; exit 1; }
 
-# Parse a leading --instance <key> / --instance=<key> (before the subcommand).
+# derive_session_id — a STABLE identifier for THIS Claude session, identical
+# across the many `browser` invocations one session makes (each is a fresh
+# `bash` process, so it must come from the environment / process tree, not shell
+# state). Sent as X-Session-Id on every /cmd so the server can route this session
+# to its OWN owned tab. Namespaced by source so ids from different sources can't
+# collide. Fallback chain (most→least reliable), documented in README/SKILL:
+#   1. CLAUDE_CODE_SESSION_ID — Claude Code's own session UUID (present since the
+#      2.1.x CLI; verified stable across every Bash-tool call in a session). Best.
+#   2. CLAUDE_SESSION_ID — defensive alternate spelling, in case a CLI build
+#      renames the var.
+#   3. $TMUX_PANE — the user runs each session in its own tmux pane, so the pane
+#      id is a good per-session proxy when no Claude var is exported.
+#   4. a random token cached under the controlling process tree (keyed by the
+#      shell's PPID = the Claude Code process managing the Bash tool, stable
+#      across a session's calls), persisted so repeated calls read the same id.
+# DEGRADATION: if two drivers ever resolve the SAME id they SHARE a tab — no
+# worse than the pre-fix behaviour. This is NOT hypothetical for one case:
+# **sibling subagents of one parent share identity.** Empirically (dumped from
+# inside two parallel subagents) a subagent inherits the PARENT's
+# CLAUDE_CODE_SESSION_ID *and* runs in the same $TMUX_PANE, and the harness
+# injects NO subagent-unique, stable env var (no agentId/taskId/tool-use id is
+# visible to the subagent's own shell). So per-session isolation covers concurrent
+# TOP-LEVEL sessions, NOT sibling subagents of one parent. ESCAPE HATCH: two
+# drivers that may share a session id should each `open` and then pass the
+# returned `--tab <id>` explicitly on every subsequent op — an explicit --tab
+# overrides owned-tab routing entirely, so they never collide. See SKILL.md.
+derive_session_id() {
+  if [ -n "${CLAUDE_CODE_SESSION_ID:-}" ]; then printf 'claude:%s' "$CLAUDE_CODE_SESSION_ID"; return; fi
+  if [ -n "${CLAUDE_SESSION_ID:-}" ];      then printf 'claude:%s' "$CLAUDE_SESSION_ID"; return; fi
+  if [ -n "${TMUX_PANE:-}" ];              then printf 'tmux:%s' "$TMUX_PANE"; return; fi
+  local dir="${XDG_RUNTIME_DIR:-/tmp}/browser-bridge"
+  local f="${dir}/session-${PPID}"
+  if [ -r "$f" ]; then cat "$f"; return; fi
+  local rnd; rnd="$(head -c8 /dev/urandom 2>/dev/null | od -An -tx1 | tr -d ' \n')"
+  [ -n "$rnd" ] || rnd="$$"
+  local tok="ppid:${PPID}:${rnd}"
+  mkdir -p "$dir" 2>/dev/null || true
+  ( umask 077; printf '%s' "$tok" > "$f" ) 2>/dev/null || true
+  printf '%s' "$tok"
+}
+
+# Parse leading global flags (--instance / --tab / --print-session-id) before the
+# subcommand. --print-session-id short-circuits (no server/token needed).
 while [ $# -gt 0 ]; do
   case "$1" in
     --instance) shift; [ $# -ge 1 ] || die "usage: browser --instance <key> <subcommand>"; INSTANCE="$1"; shift ;;
     --instance=*) INSTANCE="${1#--instance=}"; shift ;;
+    --tab) shift; [ $# -ge 1 ] || die "usage: browser --tab <id> <subcommand>"; TAB="$1"; shift ;;
+    --tab=*) TAB="${1#--tab=}"; shift ;;
+    --print-session-id) derive_session_id; echo; exit 0 ;;
     *) break ;;
   esac
 done
+
+SESSION_ID="$(derive_session_id)"
 
 [ -r "$TOKEN_FILE" ] || die "token file not found/readable: $TOKEN_FILE (is the browser-bridge service running?)"
 TOKEN="$(tr -d '[:space:]' < "$TOKEN_FILE")"
@@ -81,9 +146,12 @@ for i in (insts or []):
 # caller splits it (globals can't cross the command-substitution subshell).
 _curl() {
   local method="$1" path="$2" body="${3:-}"
+  # X-Session-Id routes this session to its owned tab. It is ROUTING-ONLY — the
+  # server never trusts it for auth (bearer + Host still gate every request).
   local args=(-sS -m 60 -X "$method"
     -H "Authorization: Bearer ${TOKEN}"
     -H "Host: 127.0.0.1"
+    -H "X-Session-Id: ${SESSION_ID}"
     -w '\n%{http_code}')
   if [ -n "$body" ]; then
     args+=(-H "Content-Type: application/json" --data "$body")
@@ -117,7 +185,13 @@ cmd_op() {
   local op="$1" extra="${2:-}"
   local tgt=""
   if [ -n "$INSTANCE" ]; then tgt=",\"target\":$(json_str "$INSTANCE")"; fi
-  local body="{\"op\":\"${op}\"${extra:+,${extra}}${tgt}}"
+  # --tab injects an explicit numeric tab override (validated as an integer).
+  local tabf=""
+  if [ -n "$TAB" ]; then
+    case "$TAB" in (*[!0-9]*|"") die "--tab must be a numeric tab id (got: $TAB)";; esac
+    tabf=",\"tab\":${TAB}"
+  fi
+  local body="{\"op\":\"${op}\"${extra:+,${extra}}${tgt}${tabf}}"
   local raw HTTP_CODE resp
   raw="$(_curl POST /cmd "$body")" || die "curl failed talking to ${BASE}/cmd"
   HTTP_CODE="${raw##*$'\n'}"; resp="${raw%$'\n'*}"
@@ -127,11 +201,14 @@ cmd_op() {
     504) echo "$resp" >&2; die "timeout waiting for the extension to answer (is Brave focused / responsive?)" ;;
     401) die "unauthorized — token mismatch (re-paste the token in the extension options)" ;;
     409)
-      # ambiguous_instance (>1 connected, no --instance) or superseded.
+      # ambiguous_instance (>1 connected, no --instance), no_owned_tab, or superseded.
       if printf '%s' "$resp" | grep -q '"ambiguous_instance"'; then
         echo "browser: multiple instances connected — specify one with --instance <key>:" >&2
         printf '%s' "$resp" | render_instances
         exit 1
+      fi
+      if printf '%s' "$resp" | grep -q '"no_owned_tab"'; then
+        die "this session owns no tab to close — run 'browser open [url]' first (or pass --tab <id>)"
       fi
       echo "$resp" >&2
       die "instance superseded by a newer connection with the same key — retry"
@@ -178,6 +255,21 @@ case "$sub" in
     # Emit the instances array as JSON on stdout.
     printf '%s' "$resp" | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin).get("instances", []), indent=2))'
     ;;
+  open)
+    # Optional url; default about:blank. Records this session's owned tab.
+    if [ $# -ge 1 ]; then
+      url="$(json_str "$1")"
+      cmd_op open "\"url\":${url}" | pretty
+    else
+      cmd_op open | pretty
+    fi
+    ;;
+  close)
+    cmd_op close | pretty
+    ;;
+  release)
+    cmd_op release | pretty
+    ;;
   html)
     cmd_op getHtml | pretty
     ;;
@@ -221,6 +313,6 @@ print(sys.argv[1])
     grep -E '^#( |$)' "$0" | sed -E 's/^# ?//'
     ;;
   *)
-    die "unknown subcommand: $sub (try: health instances html eval tabs nav screenshot)"
+    die "unknown subcommand: $sub (try: health instances open close release html eval tabs nav screenshot)"
     ;;
 esac

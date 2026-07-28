@@ -58,18 +58,34 @@ function authHeaders(token) {
   return { Authorization: `Bearer ${token}`, "Content-Type": "application/json" };
 }
 
-// --- active-tab helpers ---------------------------------------------------- //
+// --- tab-targeting helpers ------------------------------------------------- //
 async function activeTab() {
   const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
   if (!tab) throw new Error("no_active_tab");
   return tab;
 }
 
+// The tab an op runs against. When the server injected a `tabId` (the caller
+// owns a tab, or passed --tab), use THAT tab — this is the per-session isolation
+// that stops two Claude sessions from clobbering one shared active tab. With no
+// tabId (a one-shot read by a session that never `open`ed), fall back to the
+// active tab — exactly the historical behaviour.
+async function targetTab(cmd) {
+  if (cmd && cmd.tabId != null) {
+    try {
+      return await chrome.tabs.get(cmd.tabId);
+    } catch (e) {
+      throw new Error("owned_tab_gone");   // the tab was closed out-of-band
+    }
+  }
+  return activeTab();
+}
+
 // --- op executors ---------------------------------------------------------- //
 // Each returns the op-specific `data` object; throws on failure (→ errorEnvelope).
 const OPS = {
-  async getHtml() {
-    const tab = await activeTab();
+  async getHtml(cmd) {
+    const tab = await targetTab(cmd);
     const [inj] = await chrome.scripting.executeScript({
       target: { tabId: tab.id },
       func: () => document.documentElement.outerHTML,
@@ -78,7 +94,7 @@ const OPS = {
   },
 
   async eval(cmd) {
-    const tab = await activeTab();
+    const tab = await targetTab(cmd);
     // chrome.scripting runs in an ISOLATED world; `js` is evaluated and its
     // completion value returned. Wrapped so a bare expression or a statement
     // block both work. Result must be JSON-serialisable (structured clone).
@@ -121,17 +137,75 @@ const OPS = {
   },
 
   async nav(cmd) {
-    const tab = await activeTab();
+    const tab = await targetTab(cmd);
     await chrome.tabs.update(tab.id, { url: cmd.url });
     return { tabId: tab.id, url: cmd.url };
   },
 
-  async screenshot() {
-    const tab = await activeTab();
-    const dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, {
-      format: "png",
+  async screenshot(cmd) {
+    const tab = await targetTab(cmd);
+    // captureVisibleTab only ever captures the VISIBLE tab of its window. If the
+    // caller's owned tab is in the background, capturing it requires briefly
+    // bringing it to the foreground. We do exactly that — activate → capture →
+    // restore the previously-active tab — so we never SILENTLY screenshot the
+    // wrong tab. This causes a brief visible flicker in that window (documented).
+    if (tab.active) {
+      const dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, { format: "png" });
+      return { url: tab.url, dataUrl };
+    }
+    let prevActiveId = null;
+    try {
+      const [prev] = await chrome.tabs.query({ active: true, windowId: tab.windowId });
+      prevActiveId = prev ? prev.id : null;
+      await chrome.tabs.update(tab.id, { active: true });
+      const dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, { format: "png" });
+      return { url: tab.url, dataUrl };
+    } finally {
+      // Restore focus to the tab that was active before, so a background
+      // screenshot doesn't permanently steal the user's foreground tab.
+      if (prevActiveId != null && prevActiveId !== tab.id) {
+        try { await chrome.tabs.update(prevActiveId, { active: true }); } catch (e) { /* ignore */ }
+      }
+    }
+  },
+
+  // Create a NEW tab for the calling session to own. active:false so parallel
+  // sessions don't fight over the foreground when each opens its own tab. The
+  // server records this real tabId as the session's owned tab.
+  //
+  // Idempotent re-open: when the server passes `reuseTabId` (the session already
+  // owns a tab), reuse THAT tab if it is still live instead of creating a second
+  // one — otherwise a double `open` would orphan the first real tab (no ownership
+  // → never closed → leaked). If the reuse tab is gone, fall through and open a
+  // fresh one (open-after-owned-tab-gone).
+  async open(cmd) {
+    if (cmd && cmd.reuseTabId != null) {
+      try {
+        const existing = await chrome.tabs.get(cmd.reuseTabId);
+        return { tabId: existing.id, url: existing.url || "about:blank",
+                 reused: true };
+      } catch (e) { /* owned tab gone → open a fresh one below */ }
+    }
+    const tab = await chrome.tabs.create({
+      url: (cmd && cmd.url) ? cmd.url : "about:blank",
+      active: false,
     });
-    return { url: tab.url, dataUrl };
+    return { tabId: tab.id, url: tab.url || (cmd && cmd.url) || "about:blank" };
+  },
+
+  // Close the session's owned tab (the server injects its tabId). The server
+  // drops the ownership mapping on success. Idempotent: if the tab was already
+  // closed out-of-band, `chrome.tabs.remove` rejects — treat that as success
+  // (the desired end-state, tab absent, already holds) so the session's stale
+  // ownership is cleanly dropped instead of surfacing a spurious error.
+  async close(cmd) {
+    if (!cmd || cmd.tabId == null) throw new Error("missing_tabId");
+    try {
+      await chrome.tabs.remove(cmd.tabId);
+      return { closed: cmd.tabId };
+    } catch (e) {
+      return { closed: cmd.tabId, alreadyGone: true };
+    }
   },
 };
 

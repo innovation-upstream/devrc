@@ -86,11 +86,25 @@ from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
 # --- protocol contract (shared with extension/protocol.js — keep in sync) ---- #
-# The op set the bridge accepts. Both sides validate against this exact set; the
-# JS side mirrors it in extension/protocol.js (asserted by the extension test).
-ALLOWED_OPS = ("getHtml", "eval", "tabs", "nav", "screenshot")
+# The op set the bridge accepts and DISPATCHES to the extension. Both sides
+# validate against this exact set; the JS side mirrors it in
+# extension/protocol.js (asserted by the extension test). `open`/`close` were
+# added for per-session tab isolation (see the Session isolation block below).
+ALLOWED_OPS = ("getHtml", "eval", "tabs", "nav", "screenshot", "open", "close")
 
-# Per-op required fields (skill-supplied). Absent → 400 bad_request.
+# Ops handled ENTIRELY server-side (never dispatched to the extension). `release`
+# relinquishes a session's owned-tab mapping without touching the real Brave tab.
+# Not part of the shared JS contract (the extension never sees these).
+SERVER_OPS = ("release",)
+
+# Ops that act on ONE specific tab and therefore participate in per-tab FIFO
+# serialization (see Registry.submit). `open` (creates a tab), `tabs` (lists all)
+# and `release` (server-side) do NOT contend for a single tab.
+TAB_SCOPED_OPS = frozenset({"getHtml", "eval", "nav", "screenshot", "close"})
+
+# Per-op required fields (skill-supplied). Absent → 400 bad_request. NOTE: `close`
+# takes NO skill-supplied field — the server injects the caller's owned tabId (or
+# a --tab override); it errors with `no_owned_tab` if the session owns nothing.
 REQUIRED_FIELDS = {
     "eval": ("js",),
     "nav": ("url",),
@@ -101,6 +115,36 @@ MAX_RESULT_BODY = 32 * 1024 * 1024  # a screenshot data URL can be a few MB.
 
 # A connection is considered "present" if a long-poll landed within this window.
 CONNECT_STALE_S = 40.0
+
+# Session isolation (fixes concurrent-session tab clobbering)
+# ----------------------------------------------------------
+# Every op historically targeted "the active tab of the last-focused window", so
+# two Claude sessions driving one browser instance interleaved on ONE shared tab
+# (A does `nav X` then `getHtml`; B does `nav Y` in between; A reads Y). The
+# transport was already correct (cid-correlated, no cross-delivery) — the clobber
+# was SEMANTIC: no per-session (multi-step workflow) tab isolation.
+#
+# Fix: a session may `open` its OWN tab; the server records
+# `(instance_key, session_id) -> owned_tab_id` and routes that session's
+# tab-scoped ops (html/eval/nav/screenshot/close) to ITS tab. A session with no
+# owned tab falls back to the active tab (the one-shot "read the tab I have open"
+# path — a single read, inherently safe). `--tab <id>` overrides explicitly.
+#
+# The session_id is supplied by the `browser` skill on EVERY /cmd via the
+# X-Session-Id header (derived from CLAUDE_CODE_SESSION_ID, else $TMUX_PANE, else
+# a per-process-tree token — see the skill). It is used for ROUTING ONLY and is
+# NEVER trusted for auth (bearer + Host still gate every request). If two sessions
+# somehow present the SAME id they would share a tab (documented degradation).
+#
+# Ownership has an idle TTL: a session that stops calling has its mapping
+# reclaimed (released) so dead sessions don't leak ownership forever. Reclaim
+# RELEASES ownership but deliberately does NOT close the real Brave tab (never
+# yank a visible tab out from under the user); explicit `browser close` closes it.
+HDR_SESSION_ID = "X-Session-Id"
+
+# Idle seconds after which a session's tab ownership is reclaimed (released, NOT
+# closed). Refreshed on every op the session routes through its owned tab.
+OWNER_TTL_S = float(os.environ.get("BROWSER_BRIDGE_OWNER_TTL", "900"))
 
 # Synthetic routing key for a legacy extension that polls without a handshake
 # (no X-Bridge-Instance-Id). All such polls collapse onto one unnamed instance.
@@ -316,6 +360,11 @@ class BridgeSuperseded(Exception):
         self.key = key
 
 
+class NoOwnedTab(Exception):
+    """A `close` was issued by a session that owns no tab on the target instance
+    (and gave no explicit --tab). Nothing to close → a clear error, not a guess."""
+
+
 class Instance:
     """One connected extension: its own command queue + reply correlation.
 
@@ -352,10 +401,19 @@ class Registry:
     single `_cond` — blocking here is safe and cheap.
     """
 
-    def __init__(self, clock=time.monotonic):
+    def __init__(self, clock=time.monotonic, owner_ttl=OWNER_TTL_S):
         self._cond = threading.Condition()
         self._instances: dict[str, Instance] = {}   # routing key -> Instance
         self._clock = clock
+        # Per-session tab ownership: (instance_key, session_id) -> {tab_id, last_seen}.
+        # Guarded by _cond like everything else. An idle TTL reclaims dead sessions.
+        self._owners: dict[tuple, dict] = {}
+        self._owner_ttl = owner_ttl
+        # Per-tab FIFO turnstiles: tab_key -> deque of arrival-ordered tickets.
+        # A command holding a tab_key's HEAD ticket is the one allowed to be
+        # in-flight; the rest block (in arrival order) until it completes. Only
+        # commands that target the SAME tab contend; different tabs never block.
+        self._tab_queues: dict[tuple, deque] = {}
 
     # --- registration ------------------------------------------------------ #
     def _register_locked(self, instance_id: str, label: str,
@@ -394,6 +452,71 @@ class Registry:
         self._cond.notify_all()
         log("supersede", key=inst.key, instance_id=inst.instance_id,
             reason=reason)
+
+    # --- per-session tab ownership ---------------------------------------- #
+    def _reap_owners_locked(self) -> None:
+        """Reclaim (release, do NOT close) ownership for sessions idle past the
+        TTL. Called on every ownership touch so dead sessions never leak."""
+        now = self._clock()
+        dead = [k for k, o in self._owners.items()
+                if now - o["last_seen"] > self._owner_ttl]
+        for k in dead:
+            del self._owners[k]
+            log("owner_reclaim", key=k[0], session=k[1])
+
+    def _owned_tab_locked(self, inst_key: str, session_id, *, touch: bool):
+        """Return the tab_id this (instance, session) owns, or None. If `touch`,
+        refresh its idle timer (any op that routes through the tab keeps it
+        alive). Reaps expired owners first so a just-expired mapping reads None."""
+        self._reap_owners_locked()
+        if session_id is None:
+            return None
+        o = self._owners.get((inst_key, session_id))
+        if o is None:
+            return None
+        if touch:
+            o["last_seen"] = self._clock()
+        return o["tab_id"]
+
+    def _effective_tab_locked(self, inst, op, session_id, tab):
+        """Resolve (tab_id, tab_key) for a command.
+
+        tab_id is what gets injected into the dispatched command (None → the
+        extension uses the active tab). tab_key is the per-tab FIFO turnstile key
+        (None → the op does not contend for a single tab). Raises NoOwnedTab for a
+        `close` that has neither an explicit --tab nor an owned tab.
+        """
+        owned = self._owned_tab_locked(inst.key, session_id, touch=True)
+        if op not in TAB_SCOPED_OPS:
+            # open (creates a tab) / tabs (lists all): never injected, never gated.
+            return None, None
+        resolved = tab if tab is not None else owned
+        if op == "close" and resolved is None:
+            raise NoOwnedTab()
+        # Active-tab ops with no concrete tab still share ONE physical tab per
+        # instance, so they serialize under a synthetic "active" key.
+        tab_key = (inst.key, resolved if resolved is not None else "active")
+        return resolved, tab_key
+
+    def release_session(self, session_id) -> int:
+        """Drop ALL tab ownership held by `session_id` (across every instance)
+        WITHOUT closing any real tab. Returns how many mappings were released."""
+        if session_id is None:
+            return 0
+        with self._cond:
+            keys = [k for k in self._owners if k[1] == session_id]
+            for k in keys:
+                del self._owners[k]
+            if keys:
+                log("owner_release", session=session_id, count=len(keys))
+            return len(keys)
+
+    def owners_snapshot(self):
+        """Test/introspection helper: {(key,session): tab_id} of live owners
+        (expired ones reaped first)."""
+        with self._cond:
+            self._reap_owners_locked()
+            return {k: o["tab_id"] for k, o in self._owners.items()}
 
     # --- extension side ---------------------------------------------------- #
     def poll(self, instance_id: str, label: str, wait_timeout: float,
@@ -443,36 +566,142 @@ class Registry:
             return False
 
     # --- skill side -------------------------------------------------------- #
-    def submit(self, command: dict, timeout: float, target: str = None) -> dict:
+    def submit(self, command: dict, timeout: float, target: str = None,
+               session_id=None, tab=None) -> dict:
         """Enqueue `command` (a dict without id) to the resolved target instance
         and block for its reply.
 
+        Session isolation: if the calling `session_id` OWNS a tab on the target
+        instance (or `tab` is an explicit override), tab-scoped ops route to that
+        tabId; otherwise they fall back to the active tab. Tab-scoped commands
+        that target the SAME tab are serialized FIFO in arrival order (`open`
+        creates a tab and `tabs` lists all — neither contends). `open`/`close`
+        also record/drop the session's ownership on success.
+
         Raises NoExtension / AmbiguousInstance / UnknownInstance if the target
-        cannot be resolved, BridgeSuperseded if the servicing instance is
-        dropped mid-flight, or BridgeTimeout on no reply within `timeout`.
+        cannot be resolved, NoOwnedTab for a `close` with nothing to close,
+        BridgeSuperseded if the servicing instance is dropped mid-flight, or
+        BridgeTimeout on no reply within `timeout` (the upper bound that keeps a
+        FIFO-queued command from blocking forever).
         """
+        op = command.get("op")
         with self._cond:
             inst = self._resolve_target_locked(target)
-            cid = secrets.token_hex(8)
-            cmd = dict(command)
-            cmd["id"] = cid
-            inst.outbox.append(cmd)
-            inst.waiters.add(cid)
-            self._cond.notify_all()  # wake this instance's waiting poller
+            tab_id, tab_key = self._effective_tab_locked(inst, op, session_id,
+                                                         tab)
+            # Idempotent `open`: if this session already owns a tab on the target
+            # instance, hand the extension that tabId as `reuseTabId`. The SW
+            # returns the SAME tab when it is still live (no second real tab → no
+            # orphaned/leaked tab) and only creates a fresh one when the old tab
+            # is gone (owned_tab_gone) — so a double `open` never orphans a tab.
+            reuse_tab_id = None
+            if op == "open" and session_id is not None and tab is None:
+                reuse_tab_id = self._owned_tab_locked(inst.key, session_id,
+                                                      touch=False)
             deadline = self._clock() + timeout
-            while cid not in inst.results:
-                if inst.superseded:
-                    inst.waiters.discard(cid)
-                    raise BridgeSuperseded(inst.key)
-                remaining = deadline - self._clock()
-                if remaining <= 0:
-                    inst.waiters.discard(cid)
-                    inst.outbox = deque(c for c in inst.outbox
-                                        if c.get("id") != cid)
-                    raise BridgeTimeout()
-                self._cond.wait(remaining)
-            inst.waiters.discard(cid)
-            return inst.results.pop(cid)
+            ticket = object()
+            if tab_key is not None:
+                self._tab_queues.setdefault(tab_key, deque()).append(ticket)
+            try:
+                # (1) Wait for this tab's FIFO turn (no-op when tab_key is None).
+                if tab_key is not None:
+                    while self._tab_queues[tab_key][0] is not ticket:
+                        if inst.superseded:
+                            raise BridgeSuperseded(inst.key)
+                        remaining = deadline - self._clock()
+                        if remaining <= 0:
+                            raise BridgeTimeout()
+                        self._cond.wait(remaining)
+                # (2) Our turn: enqueue the command (with the resolved tabId).
+                cid = secrets.token_hex(8)
+                cmd = dict(command)
+                cmd["id"] = cid
+                if tab_id is not None:
+                    cmd["tabId"] = tab_id
+                if reuse_tab_id is not None:
+                    cmd["reuseTabId"] = reuse_tab_id
+                inst.outbox.append(cmd)
+                inst.waiters.add(cid)
+                self._cond.notify_all()  # wake this instance's waiting poller
+                while cid not in inst.results:
+                    if inst.superseded:
+                        inst.waiters.discard(cid)
+                        raise BridgeSuperseded(inst.key)
+                    remaining = deadline - self._clock()
+                    if remaining <= 0:
+                        inst.waiters.discard(cid)
+                        inst.outbox = deque(c for c in inst.outbox
+                                            if c.get("id") != cid)
+                        raise BridgeTimeout()
+                    self._cond.wait(remaining)
+                inst.waiters.discard(cid)
+                result = inst.results.pop(cid)
+                self._record_ownership_locked(inst, op, session_id, tab_id,
+                                              result)
+                return result
+            finally:
+                # (3) Leave the turnstile and wake the next in line.
+                if tab_key is not None:
+                    q = self._tab_queues.get(tab_key)
+                    if q is not None:
+                        try:
+                            q.remove(ticket)
+                        except ValueError:
+                            pass
+                        if not q:
+                            del self._tab_queues[tab_key]
+                    self._cond.notify_all()
+
+    def _record_ownership_locked(self, inst, op, session_id, tab_id,
+                                 result) -> None:
+        """After an op, reconcile the session's ownership mapping.
+
+        `open` records the (re)used tabId; `close` drops the mapping; a
+        tab-scoped op whose OWNED tab turns out to be gone drops the stale
+        mapping so the session self-heals to the active-tab fallback.
+        """
+        if session_id is None or not isinstance(result, dict):
+            return
+        okey = (inst.key, session_id)
+        failed = result.get("ok") is False
+        # `close` drops ownership UNCONDITIONALLY: the session asked to end its
+        # tab, so the desired end-state is "no mapping" whether the remove
+        # succeeded OR the tab was already gone (idempotent). Otherwise a tab the
+        # user closed out-of-band would wedge the session to a dead id until the
+        # TTL reclaimed it, and `close` could never clear it (remove → ok:false).
+        if op == "close":
+            if self._owners.pop(okey, None) is not None:
+                log("owner_close", key=inst.key, session=session_id,
+                    tab=tab_id, ok=(not failed))
+            return
+        if failed:
+            # Self-heal: a tab-scoped op that failed because ITS owned tab is
+            # gone → drop the stale mapping so the NEXT command falls back to the
+            # active tab instead of re-dispatching to the dead tabId for up to
+            # OWNER_TTL. Only evict when the dispatched tab IS the session's owned
+            # tab — an explicit --tab to some other gone tab must not evict a
+            # healthy owned mapping.
+            if _is_tab_gone(result.get("error")):
+                o = self._owners.get(okey)
+                if o is not None and o["tab_id"] == tab_id:
+                    del self._owners[okey]
+                    log("owner_tab_gone", key=inst.key, session=session_id,
+                        tab=tab_id)
+            return  # op threw in the page → nothing else to record
+        if op == "open":
+            data = result.get("data")
+            tid = data.get("tabId") if isinstance(data, dict) else None
+            if isinstance(tid, int):
+                self._owners[okey] = {
+                    "tab_id": tid, "last_seen": self._clock()}
+                log("owner_open", key=inst.key, session=session_id, tab=tid)
+        elif op == "tabs":
+            # Annotate the listing with which tab (if any) THIS session owns, so
+            # `browser tabs` can flag it. Metadata only (a tabId, never content).
+            data = result.get("data")
+            if isinstance(data, dict):
+                data["ownedTabId"] = self._owned_tab_locked(
+                    inst.key, session_id, touch=False)
 
     # --- resolution / introspection --------------------------------------- #
     def _live_instances_locked(self):
@@ -521,6 +750,41 @@ class Registry:
 
 
 # --------------------------------------------------------------------------- #
+# Small scalar guards (module-level so they're directly unit-testable)
+# --------------------------------------------------------------------------- #
+def _is_tab_gone(err) -> bool:
+    """True if an op-level error string signals the target tab no longer exists.
+
+    The extension raises a clean `owned_tab_gone` (its `chrome.tabs.get` on the
+    injected tabId failed); we also match chrome's raw "No tab with id" message
+    defensively so an older/edge extension build still triggers the self-heal.
+    """
+    if not isinstance(err, str):
+        return False
+    e = err.lower()
+    return "owned_tab_gone" in e or "no tab with id" in e
+
+
+def _coerce_tab(tab):
+    """Coerce a raw `tab` request field to a non-negative int tab id.
+
+    Returns (tab_id, None) on success or (None, "bad_tab") on an invalid value.
+    A raw token-holder could POST `{"op":"getHtml","tab":[1,2]}`; an unhashable
+    `tab` would blow up the per-tab turnstile key with an uncaught TypeError → a
+    500. This is the server-side safety net (the `browser` CLI already validates
+    `--tab` is numeric) so a malformed `tab` yields a clean 400 instead. `bool`
+    is rejected explicitly (it is an `int` subclass but never a real tab id).
+    """
+    if isinstance(tab, bool):
+        return None, "bad_tab"
+    if isinstance(tab, int):
+        return (tab, None) if tab >= 0 else (None, "bad_tab")
+    if isinstance(tab, str) and tab.isdigit():
+        return int(tab), None
+    return None, "bad_tab"
+
+
+# --------------------------------------------------------------------------- #
 # Command validation
 # --------------------------------------------------------------------------- #
 def validate_command(body):
@@ -528,7 +792,7 @@ def validate_command(body):
     if not isinstance(body, dict):
         return None, "body_not_object"
     op = body.get("op")
-    if op not in ALLOWED_OPS:
+    if op not in ALLOWED_OPS and op not in SERVER_OPS:
         return None, "unknown_op"
     for field in REQUIRED_FIELDS.get(op, ()):
         if not body.get(field):
@@ -688,13 +952,43 @@ def make_handler(registry: Registry, token: str, cmd_timeout: float,
                                  "op": body.get("op") if isinstance(body, dict)
                                  else None})
                 return
-            # `target` is a skill-side routing hint, NOT part of the command the
-            # extension executes — strip it before enqueue.
+            # `target`/`tab` are skill-side routing hints, NOT part of the command
+            # the extension executes — strip them before enqueue. `session_id`
+            # (X-Session-Id header) routes to the caller's owned tab; it is used
+            # for ROUTING ONLY and is NEVER trusted for auth (bearer + Host already
+            # gated this request in _guard).
             target = body.pop("target", None)
+            tab = body.pop("tab", None)
+            if tab is not None:
+                # Guard a malformed `tab` from a raw token-holder (the CLI already
+                # validates --tab is numeric): a non-scalar would make an
+                # unhashable turnstile key → an uncaught TypeError → 500. Coerce
+                # to an int here; an invalid value is a clean 400, not a 500.
+                tab, terr = _coerce_tab(tab)
+                if terr:
+                    self._send(400, {"ok": False, "error": terr})
+                    return
+            session_id = self.headers.get(HDR_SESSION_ID) or None
             outcome, exit_code, domain = "ok", 0, ""
+            # `release` is server-side: drop the session's ownership without ever
+            # touching the real Brave tab or the extension.
+            if op == "release":
+                n = registry.release_session(session_id)
+                self._send(200, {"ok": True, "result": {
+                    "id": None, "ok": True, "data": {"released": n}}})
+                emit_cmd_event(
+                    op=op, key=(target or ""), outcome="ok",
+                    duration_ms=int((time.monotonic() - t0) * 1000),
+                    domain="", exit_code=0)
+                return
             try:
                 result = registry.submit(body, timeout=cmd_timeout,
-                                         target=target)
+                                         target=target, session_id=session_id,
+                                         tab=tab)
+            except NoOwnedTab:
+                outcome, exit_code = "no_owned_tab", 1
+                log("cmd_no_owned_tab", op=op)
+                self._send(409, {"ok": False, "error": "no_owned_tab"})
             except NoExtension:
                 outcome, exit_code = "no_extension", 1
                 log("cmd_no_extension", op=op)

@@ -4,7 +4,11 @@
 // asserted by protocol.test.mjs and documented in ../../README.md).
 
 // The command ops the bridge understands. MUST equal server.py ALLOWED_OPS.
-export const ALLOWED_OPS = ["getHtml", "eval", "tabs", "nav", "screenshot"];
+// `open` (create a per-session tab) and `close` (remove it) back the per-session
+// tab-isolation model; the server injects the target `tabId` on tab-scoped ops.
+export const ALLOWED_OPS = [
+  "getHtml", "eval", "tabs", "nav", "screenshot", "open", "close",
+];
 
 // Per-op required fields (mirrors server.py REQUIRED_FIELDS). The server already
 // validates these, but the SW re-checks so a hand-crafted command can't wedge it.

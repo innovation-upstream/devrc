@@ -21,21 +21,69 @@ Full architecture, security model, and deploy: `scripts/browser-bridge/README.md
 `scripts/browser-bridge/browser <subcommand>` (JSON on stdout, pretty-printed if
 `jq` is present):
 
-Prefix any op with `--instance <key>` to target a specific connected profile:
-`browser --instance work html`.
+Prefix any op with `--instance <key>` to target a specific connected profile
+(`browser --instance work html`) and/or `--tab <id>` to target an explicit tab.
 
 | command | does |
 |---------|------|
 | `browser health`            | connected instances + count: `{"ok":true,"extension_connected":bool,"count":N,"instances":[…]}` |
 | `browser instances`         | list connected instances as JSON (routing key, label, instanceId, active-tab url/title) |
-| `browser [--instance K] html`              | active tab `outerHTML` (+ url, title) |
-| `browser [--instance K] eval '<js>'`       | run JS in the active tab, return its value |
-| `browser [--instance K] tabs`              | list open tabs |
-| `browser [--instance K] nav <url>`         | navigate the active tab to `<url>` |
-| `browser [--instance K] screenshot [path]` | captureVisibleTab; prints the data URL, or writes a `.png` to `path` |
+| `browser [--instance K] open [url]`        | open a NEW tab THIS session owns (default `about:blank`, created in the background); records ownership; returns its `tabId`. Use for multi-step work. |
+| `browser [--instance K] close`             | close this session's owned tab and drop ownership |
+| `browser [--instance K] release`           | drop ownership WITHOUT closing the tab |
+| `browser [--instance K] [--tab T] html`              | `outerHTML` of the owned tab (else the active tab) |
+| `browser [--instance K] [--tab T] eval '<js>'`       | run JS in the owned/active tab, return its value |
+| `browser [--instance K] tabs`              | list open tabs (`.data.ownedTabId` flags this session's owned tab) |
+| `browser [--instance K] [--tab T] nav <url>`         | navigate the owned/active tab to `<url>` |
+| `browser [--instance K] [--tab T] screenshot [path]` | captureVisibleTab; prints the data URL, or writes a `.png` to `path` |
+| `browser --print-session-id`               | print the derived per-session id (debug) and exit |
 
 Result payloads land under `.result.data` in the JSON (the envelope is
 `{"ok":true,"result":{"id","ok","data":{...}}}`).
+
+## Per-session tab isolation (use `open` for multi-step work)
+
+Two Claude sessions driving one browser used to interleave on the ONE shared
+active tab (session A `nav`s, session B `nav`s in between, A reads B's page).
+Now each session can own its own tab:
+
+- **Multi-step workflow → `browser open <url>` first.** The server records this
+  session's owned tab (keyed by a stable per-session id sent automatically on
+  every request) and routes your subsequent `html`/`eval`/`nav`/`screenshot`/
+  `close` to it — a parallel session doing the same on its own tab can't clobber
+  you. Finish with `browser close` (closes the tab) or `browser release` (keeps
+  the tab, drops ownership).
+- **One-shot read → just `browser html` (no `open`).** With no owned tab, ops
+  fall back to the active tab — the historical "read the tab the user has open"
+  behaviour, which is a single read and inherently safe.
+- **`--tab <id>`** targets a specific tab explicitly (overrides owned/active).
+- **Double `open` is safe (idempotent).** Calling `browser open` again in a
+  session that already owns a **live** tab returns that SAME tabId (it does not
+  leak a second tab). If the owned tab was closed, `open` makes a fresh one.
+- **Self-heal.** If the user manually closes your owned tab, the next op fails
+  with `owned_tab_gone` and the bridge drops your ownership — your NEXT command
+  automatically falls back to the active tab. `browser close` always clears the
+  mapping, even if the tab was already gone.
+- **Session id source:** `CLAUDE_CODE_SESSION_ID` → `$TMUX_PANE` → a
+  per-process-tree token (see README). It is routing-only, never trusted for
+  auth. If two drivers ever resolve the same id they share a tab (degrades to
+  the old behaviour — no worse).
+- **⚠ Concurrent drivers that may share a session id (subagents): pass explicit
+  `--tab`.** Sibling subagents of ONE parent share identity — a subagent inherits
+  the parent's `CLAUDE_CODE_SESSION_ID` and the same `$TMUX_PANE`, and there is NO
+  subagent-unique env var — so two parallel subagents derive the SAME session id
+  and would own the SAME tab (re-introducing the clobber). Per-session isolation
+  only separates concurrent **top-level** sessions. When you spawn concurrent
+  drivers that each drive the browser, have EACH one `browser open` (capture the
+  returned `tabId`) and then pass its OWN `--tab <id>` on **every** subsequent op
+  (`browser --tab <id> nav …`, `--tab <id> html`, …). An explicit `--tab`
+  overrides owned-tab routing entirely, so indistinguishable drivers never
+  collide. (Each `close`s its own `--tab <id>` at the end.)
+- **Contention → FIFO, not failure.** If two sessions DO target the same tab
+  (both active, or one `--tab`s another's tab), the commands queue in arrival
+  order (bounded by `cmd_timeout`) rather than fail.
+- **Lifecycle:** idle ownership is reclaimed after a TTL, which RELEASES it but
+  does NOT close the real Brave tab (only `browser close` closes it).
 
 ## Multiple instances (per host)
 
@@ -91,9 +139,14 @@ know browser usage is being counted. Details: `README.md` → Telemetry.
 - `503 extension_not_connected` → extension not loaded/paired, or Brave closed.
 - `504 timeout` → extension picked it up but didn't answer (tab unresponsive).
 - `409 ambiguous_instance` → >1 instance connected and no `--instance` — pick one.
+- `409 no_owned_tab` → `close` with nothing to close — run `browser open` first (or `--tab`).
 - `409 superseded` → the instance was replaced by a newer connection; retry.
 - `404 unknown_instance` → the `--instance` key matches no connected instance.
 - `400 unknown_op` / `missing_field:url|js` → bad command.
+- `400 bad_tab` → a non-numeric `tab` (only reachable via a raw API POST; the CLI
+  already validates `--tab`).
+- `owned_tab_gone` (op-level, in `.result`) → your owned tab was closed; ownership
+  is auto-dropped, so just re-issue (it falls back to the active tab / re-`open`).
 - `401 unauthorized` → token mismatch (re-paste in the extension options).
 
 ## Gotcha: reload the unpacked extension after any change

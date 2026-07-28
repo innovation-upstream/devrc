@@ -111,15 +111,95 @@ must run in whatever tab is active). This can be scoped down later; noted in
 |----|---------|---------|
 | `getHtml`    | `chrome.scripting` → `document.documentElement.outerHTML` | `{url,title,html}` |
 | `eval`       | `chrome.scripting.executeScript` (MAIN world) of `js`     | `{url,value}` |
-| `tabs`       | `chrome.tabs.query({})`                                   | `{tabs:[...]}` |
-| `nav`        | `chrome.tabs.update(active,{url})`                        | `{tabId,url}` |
+| `tabs`       | `chrome.tabs.query({})`                                   | `{tabs:[...],ownedTabId}` |
+| `nav`        | `chrome.tabs.update(tab,{url})`                           | `{tabId,url}` |
 | `screenshot` | `chrome.tabs.captureVisibleTab` (png)                     | `{url,dataUrl}` |
+| `open`       | `chrome.tabs.create({url,active:false})`                 | `{tabId,url}` |
+| `close`      | `chrome.tabs.remove(tabId)`                               | `{closed:tabId}` |
+
+`open`/`close` are dispatched to the extension; `release` (drop ownership, don't
+close the tab) is handled server-side and never reaches the extension. The
+tab-scoped ops (`getHtml`/`eval`/`nav`/`screenshot`/`close`) run against the
+calling session's owned tab when it has one (see Session isolation), else the
+active tab.
 
 Server envelope: `POST /cmd` → `200 {"ok":true,"result":{id,ok,data}}`, or a
 structured error: `503 extension_not_connected`, `504 timeout`,
-`409 ambiguous_instance` (>1 connected, no `target`), `409 superseded`,
-`404 unknown_instance`, `400 unknown_op|missing_field:<f>`, `401 unauthorized`,
+`409 ambiguous_instance` (>1 connected, no `target`), `409 no_owned_tab`
+(`close` with nothing owned), `409 superseded`, `404 unknown_instance`,
+`400 unknown_op|missing_field:<f>`, `400 bad_tab` (a non-numeric/non-scalar
+`tab` from a raw caller — the CLI already validates `--tab`), `401 unauthorized`,
 `403 bad_host`.
+
+## Session isolation (concurrent-session tab clobbering)
+
+The transport is correct (each `/cmd` gets a unique cid, a FIFO outbox, and a
+cid-correlated reply — no cross-delivery). The old clobber was **semantic**:
+every op targeted "the active tab of the last-focused window", so two Claude
+sessions driving one instance interleaved on **one shared tab** (A `nav X` then
+`getHtml`; B `nav Y` in between; A reads Y). Command-level serialization existed;
+per-session (multi-step **workflow**) isolation did not.
+
+**Fix — a per-session owned tab:**
+
+- **Per-session id.** The `browser` skill sends a stable `X-Session-Id` on every
+  `/cmd`, derived (in order) from `CLAUDE_CODE_SESSION_ID` (Claude Code's own
+  session UUID — identical across every Bash-tool call in a session, verified on
+  the 2.1.x CLI) → `CLAUDE_SESSION_ID` (defensive alternate) → `$TMUX_PANE` (each
+  session runs in its own tmux pane) → a random token cached under the shell's
+  PPID (the Claude Code process, stable across a session's calls). It is used for
+  **routing only** and is **never** trusted for auth — bearer + Host still gate
+  every request. If two sessions ever resolve the same id they share a tab
+  (documented degradation — no worse than before).
+- **⚠ Sibling subagents share identity (known limitation).** Per-session
+  isolation covers concurrent **top-level** sessions, NOT sibling subagents of
+  one parent. Empirically (dumped from inside two parallel subagents) a subagent
+  inherits the **parent's** `CLAUDE_CODE_SESSION_ID` *and* runs in the same
+  `$TMUX_PANE`, and the harness injects **no** subagent-unique, stable env var
+  (no agentId/taskId/tool-use id is visible to the subagent's own shell), so two
+  sibling subagents derive the SAME session id and would own the same tab. The
+  robust fix is **explicit tab handles**: each such driver runs `browser open`
+  (which returns a real `tabId`) and then threads its OWN `--tab <id>` on every
+  subsequent op. An explicit `--tab` **overrides** owned-tab routing entirely, so
+  two indistinguishable drivers never collide. See SKILL.md → Concurrent drivers.
+- **Ownership.** `browser open [url]` creates a tab (background, `active:false`,
+  so parallel sessions don't fight over the foreground) and the server records
+  `(instance_key, session_id) -> tabId`. That session's tab-scoped ops then route
+  to its tab; a session with **no** owned tab falls back to the active tab (the
+  one-shot read path). `--tab <id>` overrides explicitly. `browser close` closes
+  the tab + drops ownership; `browser release` drops ownership only.
+- **Idempotent `open` (no orphaned tab).** A second `open` from a session that
+  already owns a **live** tab returns that SAME tab (the server passes the owned
+  tabId as `reuseTabId`; the extension reuses it) instead of creating a second
+  real tab — so a double `open` never orphans/leaks the first tab. If the owned
+  tab is **gone**, `open` transparently creates a fresh one.
+- **Self-heal on a vanished owned tab.** If the user manually closes an owned
+  background tab, the next tab-scoped op dispatches the stale tabId and the
+  extension returns `owned_tab_gone` (ok:false). The server then **drops** that
+  session's ownership so the NEXT command self-heals to the active-tab fallback
+  (instead of staying wedged to the dead tab until the TTL reclaims it). `browser
+  close` clears the mapping **unconditionally** — even when the tab was already
+  gone — and the extension treats an already-gone close as success (idempotent).
+- **FIFO on remaining contention.** With isolation most sessions use different
+  tabs and don't contend. When two commands DO target the same tab (both active,
+  or one `--tab`s another's owned tab) they are serialized **FIFO in arrival
+  order** — competing commands **queue** (blocking) rather than fail-fast,
+  bounded by `cmd_timeout` so a queued command can't block forever. Commands to
+  **different** tabs never block each other.
+- **Lifecycle (reversible — flag for veto).** Ownership has an idle TTL
+  (`BROWSER_BRIDGE_OWNER_TTL`, default 900 s). On expiry the mapping is
+  **released** so a dead session doesn't leak ownership, but the real Brave tab
+  is deliberately **NOT closed** (never yank a visible tab out from under the
+  user) — only an explicit `browser close` closes it.
+- **Screenshot caveat (honest).** `captureVisibleTab` only ever captures the
+  **visible** tab of a window. Screenshotting a session's **background** owned
+  tab therefore briefly activates it → captures → restores the previously-active
+  tab (a short visible flicker in that window), so we never silently capture the
+  wrong tab. A screenshot of an owned tab that is already visible is unaffected.
+- **Backward-compat.** A single session with no `open` (and even no
+  `X-Session-Id`) behaves exactly as before: active-tab ops, no `tabId` injected.
+  The multi-instance `--instance` targeting, ambiguity/supersede semantics, and
+  telemetry are unchanged.
 
 `GET /health` → `{"ok":true,"extension_connected":bool,"count":N,"instances":[{key,label,instanceId,activeTab},…]}`.
 `GET /instances` → `{"ok":true,"count":N,"instances":[…]}`.
@@ -191,10 +271,27 @@ error, unknown-target, label-vs-auto-id key resolution, supersede-on-duplicate
 the displaced poll returning the distinct `409 superseded` signal instead of the
 idle `204`, and the supersede being logged exactly once per displacement — the
 no-churn/livelock-fix contract), legacy no-handshake back-compat, and an icon
-sanity check (each declared PNG
-exists and its IHDR size matches). The chrome.* glue in `service_worker.js`
-genuinely needs a real browser and is covered by the manual checklist in
-`extension/README.md`.
+sanity check (each declared PNG exists and its IHDR size matches). It also covers
+**session isolation**: `open` recording `(instance,session)->tabId`, two sessions
+getting distinct ownership, ops routing to the owning session's tabId (and the
+interleaved-two-sessions clobber test), the active-tab fallback + `--tab`
+override, `close`/`release` (drop ownership; `close` dispatches a remove-shaped
+command, `release` never touches the extension), `tabs` ownedTabId annotation,
+per-tab FIFO serialization (same-tab commands serialize in arrival order,
+different tabs don't block, a queued command still honours `cmd_timeout`), TTL
+reclaim (injected clock — released, not closed), the `no_owned_tab` error, the
+session id being routing-only (bearer/Host still enforced), and backward-compat
+(single session, no open → unchanged active-tab dispatch). It also covers the
+**self-heal + idempotency hardening**: an `owned_tab_gone` op dropping the stale
+ownership (self-heal to active-tab) while an unrelated `--tab` gone tab does NOT
+evict a healthy mapping, `close` clearing ownership even when the tab was already
+gone, an idempotent double `open` returning the reused tab (no orphan) vs opening
+fresh when the owned tab is gone, a malformed `tab` (list/dict/bool) returning a
+clean `400 bad_tab` instead of a 500 (+ the `_coerce_tab`/`_is_tab_gone` helper
+units), and an explicit `--tab` overriding owned-tab routing (the subagent
+escape hatch). Current totals: **82 Python** (`test_server.py`) + **22 node**
+(`protocol.test.mjs`). The chrome.* glue in `service_worker.js` genuinely needs a
+real browser and is covered by the manual checklist in `extension/README.md`.
 
 ## Deploy (nix)
 
