@@ -893,7 +893,9 @@ _CLASSIFY_SYSTEM = (
     "Classify the user's question about their work initiatives into exactly ONE intent and "
     "extract an optional target. Respond with ONLY a compact JSON object of the form "
     '{"intent": "...", "target": "..."} and nothing else.\n'
-    "Valid intents: blocked_on_me (waiting on the user), active (in-flight work), slowing, "
+    "Valid intents: blocked_on_me (NEEDS the user's attention — waiting on their input OR an "
+    "active live risk/incident; use for 'blocked on me', 'needs my attention', 'at risk'), "
+    "active (in-flight work), slowing, "
     "stalled, most_recent (last touched), live_sessions (running now), status_of (a specific "
     "named initiative — put its name in target), by_repo (put the repo name in target), route "
     "(which initiative does something belong to — put that something in target), handoff (deep "

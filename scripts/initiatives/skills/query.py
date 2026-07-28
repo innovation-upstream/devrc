@@ -74,7 +74,7 @@ _TOOL_TO_INTENT = {
 
 # Which tools consume --target, and a one-line description for the agent-facing catalog.
 _TOOLS = {
-    "blocked_on_me":  (False, "Initiatives waiting on Zach — his input/call/decision/review (what's blocked on him)."),
+    "blocked_on_me":  (False, "Initiatives that NEED Zach's attention — either waiting on his input/call/decision/review (blocked on him) OR carrying an active live RISK (an unresolved 5xx/outage/disk/crashloop-type problem). Use for 'what's blocked on me', 'what needs my attention', 'what's at risk / on fire'."),
     "active":         (False, "Initiatives with active momentum — in-flight / what he's currently working on."),
     "slowing":        (False, "Initiatives losing momentum / cooling / slowing down."),
     "stalled":        (False, "Initiatives that are stalled / stuck / gone quiet / dormant."),
