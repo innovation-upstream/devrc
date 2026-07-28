@@ -86,6 +86,9 @@ class TelemetryUnavailable(Exception):
 #                    slash-command prefix(es).
 #   via="cwd"     -> match `source=claude` sessions whose cwd names the item
 #                    (best-effort/heuristic — used for the autonomous drafter).
+#   via="source"  -> GENERIC: match an arbitrary `(source, kind)` pair (e.g.
+#                    browser-bridge/cmd), counting by outcome. Any future emit-
+#                    instrumented subsystem is added with a registry line, no code.
 # `impact_outcomes` are the outcomes that evidence a REAL catch (value signal),
 # with `impact_label` explaining what a hit means. opt_in items are the ones
 # whose adoption is fragile (a human has to choose to invoke them).
@@ -139,6 +142,14 @@ REGISTRY = [
         "label": "task-spec-drafter — autonomous weekly ticket drafter (cwd, heuristic)",
         "via": "cwd", "match": DRAFTER_CWD_MATCH, "opt_in": False,
         "outcomes": [], "impact_outcomes": [], "impact_label": "",
+    },
+    {
+        "id": "browser-bridge",
+        "label": "browser — drive live Brave",
+        "via": "source", "source": "browser-bridge", "kind": "cmd",
+        "opt_in": False,  # emitted automatically per browser command, not opt-in
+        "outcomes": ["ok", "error", "ambiguous"],
+        "impact_outcomes": [], "impact_label": "",
     },
 ]
 
@@ -283,6 +294,40 @@ def aggregate_cwd(rows: list[dict], now: float, win: float) -> dict:
             "trend": _trend(recent, prior)}
 
 
+def aggregate_source(rows: list[dict], now: float, win: float,
+                     outcome_field: str = "outcome") -> dict:
+    """Aggregate generic emit-instrumented `source=<X> kind=<Y>` rows (already
+    filtered to one (source,kind) pair by the query), counting ONLY events within
+    the adoption window `win`. Mirrors `aggregate_tool`'s shape: a window count,
+    an outcome breakdown, and a recent-vs-prior trend (halves are win/2).
+
+    Outcome comes from `payload.<outcome_field>`; if that field is absent it falls
+    back to the row's `exit_code` (0 -> "ok", anything else -> "error"). This is
+    the reusable matcher — any future emit-instrumented subsystem is added with a
+    REGISTRY line (via="source", source=..., kind=...), no new code."""
+    half_s = win / 2.0
+    total = 0
+    outcomes: Counter = Counter()
+    recent = prior = 0
+    for r in rows:
+        e = ch_ts_to_epoch(r.get("ts"))
+        if e is None or (now - e) > win:
+            continue  # outside the --days window (may be in the wider fetch)
+        total += 1
+        p = parse_payload(r.get("payload"))
+        outcome = p.get(outcome_field)
+        if not outcome:
+            outcome = "ok" if r.get("exit_code") in (0, "0") else "error"
+        outcomes[outcome] += 1
+        b = _half(e, now, half_s)
+        if b == "recent":
+            recent += 1
+        elif b == "prior":
+            prior += 1
+    return {"total": total, "outcomes": dict(outcomes),
+            "recent": recent, "prior": prior, "trend": _trend(recent, prior)}
+
+
 def aggregate_friction(insight_rows: list[dict], now: float, iwin: float) -> dict:
     """Sum the tracked friction categories over two windows (recent vs prior half
     of the insight window `iwin`). DIRECTIONAL only — confounded by different
@@ -357,6 +402,19 @@ def q_cwd_sessions(win: int, match: str, host: str | None = None) -> str:
     )
 
 
+def q_source(win: int, source: str, kind: str, host: str | None = None) -> str:
+    """Rows for a generic emit-instrumented `(source, kind)` pair in the window.
+    Same column set / `_host_filter` pattern as q_tool_invocations — the outcome
+    lives inside `payload` (parsed by aggregate_source), exit_code is the fallback."""
+    return (
+        "SELECT text AS text, toString(payload) AS payload, "
+        "exit_code, duration_ms, ts, host "
+        "FROM activity.events "
+        f"WHERE source={Q.sql_quote(source)} AND kind={Q.sql_quote(kind)} "
+        f"AND ts>now()-{win}{_host_filter(host)}"
+    )
+
+
 def q_insights(win: int, host: str | None = None) -> str:
     # `max(ts) AS last_ts` not `AS ts` — see q_cwd_sessions: an aggregate aliased
     # to the raw column name `ts` shadows it in WHERE → ILLEGAL_AGGREGATION.
@@ -404,6 +462,15 @@ def gather(client, days: int, insight_days: int, dead_days: int,
             if item["via"] == "cwd":
                 cwd_rows[item["id"]] = _norm_last_ts(client.rows(
                     q_cwd_sessions(fetch_win, item["match"], host)))
+        # via="source" items: one query per DISTINCT (source, kind) pair, keyed by
+        # that pair so multiple registry items sharing a pair reuse the fetch.
+        source_rows: dict = {}
+        for item in REGISTRY:
+            if item["via"] == "source":
+                pair = (item["source"], item["kind"])
+                if pair not in source_rows:
+                    source_rows[pair] = client.rows(
+                        q_source(fetch_win, item["source"], item["kind"], host))
     except Exception as e:  # noqa: BLE001 — telemetry optional; degrade cleanly
         raise TelemetryUnavailable(str(e)) from e
 
@@ -416,6 +483,10 @@ def gather(client, days: int, insight_days: int, dead_days: int,
             agg = aggregate_command(cmd_rows, item["prefixes"], now, win)
         elif via == "cwd":
             agg = aggregate_cwd(cwd_rows.get(item["id"], []), now, win)
+        elif via == "source":
+            agg = aggregate_source(
+                source_rows.get((item["source"], item["kind"]), []), now, win,
+                item.get("outcome_field", "outcome"))
         else:
             agg = {"total": 0, "outcomes": {}, "recent": 0, "prior": 0,
                    "trend": "flat"}
@@ -423,8 +494,9 @@ def gather(client, days: int, insight_days: int, dead_days: int,
         # DEAD = zero uses within the dead-days window, computed over the FULL
         # fetched set (which spans dead_s), so it is correct whether dead_days is
         # smaller, equal to, or larger than days.
-        dead = _count_within(_item_ts(item, tool_rows, cmd_rows, cwd_rows),
-                             now, dead_s) == 0
+        dead = _count_within(
+            _item_ts(item, tool_rows, cmd_rows, cwd_rows, source_rows),
+            now, dead_s) == 0
 
         impact = {o: agg["outcomes"].get(o, 0) for o in item.get("impact_outcomes", [])}
         items.append({
@@ -447,7 +519,7 @@ def gather(client, days: int, insight_days: int, dead_days: int,
     }
 
 
-def _item_ts(item, tool_rows, cmd_rows, cwd_rows) -> list:
+def _item_ts(item, tool_rows, cmd_rows, cwd_rows, source_rows=None) -> list:
     """Ts strings attributable to `item` (for the sub-window DEAD re-bucket)."""
     if item["via"] == "tool":
         out = []
@@ -463,6 +535,9 @@ def _item_ts(item, tool_rows, cmd_rows, cwd_rows) -> list:
                 if command_matches(r.get("text"), pres)]
     if item["via"] == "cwd":
         return [r.get("ts") for r in cwd_rows.get(item["id"], [])]
+    if item["via"] == "source":
+        rows = (source_rows or {}).get((item["source"], item["kind"]), [])
+        return [r.get("ts") for r in rows]
     return []
 
 
