@@ -2897,9 +2897,11 @@ _JS = r"""
     ];
     chips.forEach(function(ch){
       // Fix #4: hide a zero-count STATE chip (e.g. "Stalled 0", "Cooling 0") — it's noise. ALWAYS
-      // show `Needs you` (even at 0 — "0 needs you" is a meaningful all-clear) and `All`. A hidden
+      // show `Needs you` (even at 0 — "0 needs you" is a meaningful all-clear), `All`, AND the
+      // CURRENTLY-ACTIVE chip (else filtering to a state whose count later drops to 0 would hide the
+      // one chip showing you're filtered — leaving an empty board with no active indicator). A hidden
       // chip reappears automatically when its count rises above 0 (renderTriage rebuilds each render).
-      if(ch.k !== 'needs_you' && ch.k !== '' && ch.n === 0) return;
+      if(ch.k !== 'needs_you' && ch.k !== '' && ch.n === 0 && !(active === ch.k && !state.doneMode)) return;
       // A state/All chip is only visually active when NOT in Done mode (Done takes over).
       var on = !state.doneMode &&
         ((ch.k === '') ? (active === '' || active === 'all') : (active === ch.k));

@@ -4899,6 +4899,21 @@ def test_triage_needs_you_always_shown_even_at_zero():
     assert labels == ["\u26a0 Needs you 0", "All"]           # every other state chip hidden at 0
 
 
+def test_triage_active_chip_stays_visible_when_filtered_to_a_now_empty_state():
+    # audit soft-trap: if you FILTER to a state (triage='stalled') and its count later drops to 0,
+    # the Stalled chip must STAY (highlighted) — else the active-filter indicator vanishes leaving an
+    # empty board with no chip. Fix: always show the currently-active chip even at 0.
+    chips = _node_render_triage({"needs_you": 0, "stalled": 0, "slowing": 5, "active": 5, "live": 0},
+                                triage="stalled")
+    stalled = _chip(chips, "Stalled")
+    assert stalled["text"].strip().endswith("Stalled 0")     # shown despite 0 …
+    assert " active" in (" " + stalled["cls"] + " ")         # … and carries the active-filter highlight
+    # a NON-active zero chip is still hidden (only the active one is rescued).
+    other = _node_render_triage({"needs_you": 0, "stalled": 0, "slowing": 5, "active": 5, "live": 0},
+                                triage="slowing")
+    assert not any("Stalled" in c["text"] for c in other)
+
+
 def test_triage_done_chip_hidden_at_zero_and_shown_when_archived():
     counts = {"needs_you": 1, "stalled": 1, "slowing": 1, "active": 1, "live": 0}
     none = _node_render_triage(counts, archived_n=0)
