@@ -1326,6 +1326,10 @@ header .meta{color:var(--gray);font-size:.85rem}
 .ini.state-slowing{border-left-color:var(--yellow)}
 .ini.state-active{border-left-color:var(--blue)}
 .ini.open{outline:1px solid var(--bg2)}
+/* Brief highlight when a card is jumped-to from the Live-now strip (focusCard) — fades on its own
+   after ~1s so the eye lands on it without a lingering distraction. */
+.ini.flash{animation:iniFlash 1s ease-out}
+@keyframes iniFlash{0%{background:#504945}100%{background:var(--bg1)}}
 .ini .row1{display:flex;flex-wrap:wrap;align-items:baseline;gap:.5rem}
 .badge{font-weight:bold}
 .badge.active{color:var(--green)}
@@ -1453,6 +1457,12 @@ header .meta{color:var(--gray);font-size:.85rem}
 .ln-slug{color:var(--green);flex:0 0 auto;font-size:.78rem}
 /* An unmatched (below-floor / brand-new) live row reads slightly dimmer than a matched one. */
 .ln-row.unmatched .ln-task{color:var(--fg2)}
+/* A matched row is clickable — it jumps to + opens its card (focusCard). Cursor + hover cue +
+   a visible keyboard-focus ring so it reads as an affordance. */
+.ln-row.clickable{cursor:pointer;border-radius:3px;margin:0 -.3rem;padding-left:.3rem;padding-right:.3rem}
+.ln-row.clickable:hover{background:#40393622}
+.ln-row.clickable:hover .ln-task{text-decoration:underline}
+.ln-row.clickable:focus{outline:1px solid var(--bg2);outline-offset:1px}
 /* The "＋N more ▸" / "▾ show fewer" collapse toggle — a small muted affordance, not a button box. */
 .ln-more{margin-top:.35rem;background:none;border:none;color:var(--aqua);cursor:pointer;
   font:inherit;font-size:.78rem;padding:.1rem 0}
@@ -1752,31 +1762,35 @@ function liveAgeStr(ts, nowMs){
 function buildLiveNow(flat, unmatched, nowMs){
   if(nowMs == null) nowMs = Date.now();
   var rows = [], seen = {};
-  function push(task, repo, slug, matched, id, ts){
+  // repoName is the SHORT display label (dedup + the ln-repo pill); repoPath is the FULL repo
+  // path — carried so a MATCHED row can rebuild the card's `key()` (repo+'::'+slug) and
+  // focusCard can jump to it. Unmatched rows carry it too but have no slug, so aren't clickable.
+  function push(task, repoName, repoPath, slug, matched, id, ts){
     var t = String(task == null ? '' : task).trim();
     if(!t) return;                                   // a session with no task text is not a row
-    var rn = String(repo == null ? '' : repo).trim() || '(unknown repo)';
+    var rn = String(repoName == null ? '' : repoName).trim() || '(unknown repo)';
     var k = JSON.stringify([t.toLowerCase(), rn.toLowerCase()]);
     if(seen[k]) return;                              // same task+repo once (matched wins, pushed first)
     seen[k] = 1;
     var tn = (ts == null || ts === '' || !isFinite(Number(ts))) ? null : Number(ts);
-    rows.push({task:t, repo_name:rn, slug:String(slug||''), matched:!!matched,
+    rows.push({task:t, repo_name:rn, repo:String(repoPath == null ? '' : repoPath),
+               slug:String(slug||''), matched:!!matched,
                id:String(id||''), activity_ts:tn, age:liveAgeStr(tn, nowMs)});
   }
   (Array.isArray(flat) ? flat : []).forEach(function(v){
     if(!v) return;
     var meta = Array.isArray(v.live_tasks_meta) ? v.live_tasks_meta : null;
     if(meta){
-      meta.forEach(function(m){ if(m) push(m.task, v.repo_name, v.slug, true, '', m.activity_ts); });
+      meta.forEach(function(m){ if(m) push(m.task, v.repo_name, v.repo, v.slug, true, '', m.activity_ts); });
     } else {                                         // pre-meta payload: strings, no activity
       (Array.isArray(v.live_tasks) ? v.live_tasks : []).forEach(function(t){
-        push(t, v.repo_name, v.slug, true, '', null);
+        push(t, v.repo_name, v.repo, v.slug, true, '', null);
       });
     }
   });
   (Array.isArray(unmatched) ? unmatched : []).forEach(function(u){
     if(!u) return;
-    push(u.title, u.repo_name, '', false, u.id, u.activity_ts);
+    push(u.title, u.repo_name, u.repo, '', false, u.id, u.activity_ts);
   });
   rows.sort(function(a, b){
     var an = a.activity_ts == null, bn = b.activity_ts == null;
@@ -2266,6 +2280,53 @@ _JS = r"""
       .catch(function(){ renderDetail(det, {ok:false, error:'detail unavailable'}, v); });
   }
 
+  // Jump to + OPEN a card from elsewhere on the page (the Live-now strip). Every live session is
+  // now a first-class card, so a matched Live-now row can focus its card. `repo`+`slug` come from
+  // the row; we rebuild the SAME `key()` the cards index on (repo+'::'+slug), locate the card by
+  // its `data-key`, expand its grouped repo-section if collapsed, scroll it into view, and open
+  // its detail via the EXACT expand path card()'s click uses (expanded[k]=true; show .detail;
+  // loadDetail(v, det)) — reused verbatim, never reimplemented. A brief `.flash` lands the eye.
+  // Returns true iff a card was found (no-op + false otherwise — e.g. the two untitled sessions).
+  function focusCard(repo, slug){
+    var k = key({repo: repo, slug: slug});
+    // The real view object (so loadDetail/renderDetail get the SAME v the card was built from).
+    var v = (data.flat || []).filter(function(x){ return key(x) === k; })[0];
+    var cards = document.querySelectorAll ? document.querySelectorAll('.ini') : [];
+    var target = null;
+    for(var i = 0; i < cards.length; i++){
+      if(cards[i].getAttribute && cards[i].getAttribute('data-key') === k){ target = cards[i]; break; }
+    }
+    if(!target) return false;
+    // If the card sits in a COLLAPSED grouped repo-section, expand that section first so the card
+    // is visible (the card element always exists — only the body's display is toggled).
+    var body = target.closest ? target.closest('.repo-body') : null;
+    if(body && body.style && body.style.display === 'none'){
+      body.style.display = 'block';
+      var sec = body.closest ? body.closest('.repo.collapsible') : null;
+      var chev = sec && sec.querySelector ? sec.querySelector('.chev') : null;
+      if(chev) chev.textContent = '▾';
+      // Persist the section as expanded (mirror the header-click) so a re-render keeps it open.
+      if(sec){
+        var h2 = sec.querySelector ? sec.querySelector('h2') : null;
+        var nm = h2 && h2.dataset ? h2.dataset.repo : null;
+        if(nm) setRepoCollapsed(nm, false);
+      }
+    }
+    // Open the card detail via the SAME expand path the card click uses.
+    var det = target.querySelector ? target.querySelector('.detail') : null;
+    if(det && !expanded[k]){
+      expanded[k] = true;
+      det.style.display = 'block';
+      target.classList.add('open');
+      loadDetail(v || {repo: repo, slug: slug}, det);
+    }
+    if(target.scrollIntoView) target.scrollIntoView({behavior: 'smooth', block: 'center'});
+    // Brief highlight so the eye lands on the jumped-to card (~1s), self-clearing.
+    target.classList.add('flash');
+    setTimeout(function(){ target.classList.remove('flash'); }, 1000);
+    return true;
+  }
+
   // A TWO-LINE collapsed card (Phase-1 board redesign). Line 1 = state glyph + slug + title +
   // repo label (non-grouped views) + emerging badge + age. Line 2 = the single most-relevant
   // `v.line2` for the card's state, plus the Phase-1 action (the EXISTING dispatch, only when a
@@ -2417,7 +2478,24 @@ _JS = r"""
     liveNowEl.appendChild(h);
     var body = el('div', 'livenow-body');
     shown.forEach(function(r){
-      var row = el('div', 'ln-row' + (r.matched ? '' : ' unmatched'));
+      // A MATCHED row (carries slug + the full repo path) is a clickable affordance: every live
+      // session is a first-class card now, so clicking the row jumps to + opens that card via
+      // focusCard(repo, slug) — reusing the cards' `key()` + expand path. Unmatched rows (no slug
+      // → no card to open, e.g. an untitled session) stay non-clickable + muted.
+      var clickable = !!(r.matched && r.slug);
+      var row = el('div', 'ln-row' + (r.matched ? '' : ' unmatched') + (clickable ? ' clickable' : ''));
+      if(clickable){
+        row.setAttribute('role', 'button');
+        row.setAttribute('tabindex', '0');
+        row.title = 'open this session’s card';
+        (function(repo, slug){
+          function go(){ focusCard(repo, slug); }
+          row.addEventListener('click', go);
+          row.addEventListener('keydown', function(ev){
+            if(ev.key === 'Enter' || ev.key === ' ' || ev.key === 'Spacebar'){ ev.preventDefault(); go(); }
+          });
+        })(r.repo, r.slug);
+      }
       row.appendChild(el('span', 'ln-task', r.task));
       if(r.age){ row.appendChild(el('span', 'ln-age', '· ' + r.age)); }   // small muted freshness
       // repo + (matched) slug grouped close to the task, not pushed to the far right. The cryptic
@@ -2626,6 +2704,8 @@ _JS = r"""
         var open = !collapsed || (filtering && vis.length > 0);
         var sec = el('section', 'repo collapsible');
         var h = el('h2');
+        // data-repo lets focusCard re-persist this section as expanded when it jumps into it.
+        if(h.dataset) h.dataset.repo = g.name; else h.setAttribute('data-repo', g.name);
         h.appendChild(el('span', 'chev', open ? '▾' : '▸'));
         h.appendChild(document.createTextNode(g.name));
         h.appendChild(el('span', 'count', '(' + vis.length + ')'));

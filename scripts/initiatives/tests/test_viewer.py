@@ -3164,10 +3164,28 @@ def test_js_livenow_below_floor_unmatched_session_appears():
 
 def test_js_livenow_matched_rows_show_slug():
     rows = _node_livenow(
-        [{"slug": "mycard", "repo_name": "devrc", "live_tasks": ["do the thing"]}], [])
-    # A pre-meta (strings-only) payload → activity_ts null, age "" (no freshness signal).
-    assert rows == [{"task": "do the thing", "repo_name": "devrc", "slug": "mycard",
+        [{"slug": "mycard", "repo_name": "devrc", "repo": "/home/zach/workspace/devrc",
+          "live_tasks": ["do the thing"]}], [])
+    # A pre-meta (strings-only) payload → activity_ts null, age "" (no freshness signal). The
+    # matched row also carries the FULL repo path (so focusCard can rebuild the card's key()).
+    assert rows == [{"task": "do the thing", "repo_name": "devrc",
+                     "repo": "/home/zach/workspace/devrc", "slug": "mycard",
                      "matched": True, "id": "", "activity_ts": None, "age": ""}]
+
+
+def test_js_livenow_matched_row_carries_full_repo_path_for_focus():
+    # A matched row threads the card's FULL `repo` path (not the short repo_name) so focusCard can
+    # rebuild key()=repo+'::'+slug. Meta + pre-meta payloads both carry it; unmatched rows carry ''.
+    rows = _node_livenow(
+        [{"slug": "mycard", "repo_name": "devrc", "repo": "/home/zach/workspace/devrc",
+          "live_tasks_meta": [{"task": "meta task", "activity_ts": None}]}],
+        [{"id": "z-1", "title": "orphan", "repo_name": "civitai", "repo": "/home/zach/workspace/civitai"}])
+    by_task = {r["task"]: r for r in rows}
+    assert by_task["meta task"]["repo"] == "/home/zach/workspace/devrc"
+    assert by_task["meta task"]["slug"] == "mycard" and by_task["meta task"]["matched"] is True
+    # unmatched carries its repo path too but no slug → focusCard won't treat it as clickable.
+    assert by_task["orphan"]["repo"] == "/home/zach/workspace/civitai"
+    assert by_task["orphan"]["slug"] == ""
 
 
 def test_js_livenow_dedups_same_task_and_repo_matched_wins():
@@ -3488,3 +3506,265 @@ def test_build_model_is_source_agnostic_and_tolerant_of_legacy_doc_row():
     slugs = {v["slug"] for v in model["flat"]}
     assert slugs == {"legacy", "nosrc"}
     assert next(v for v in model["flat"] if v["slug"] == "nosrc")["source"] == ""
+
+
+# --------------------------------------------------------------------------- #
+# EVERY SESSION A CLICKABLE CARD: the Live-now strip's matched rows jump to +
+# open their card via focusCard(repo, slug). Both the REAL focusCard and the REAL
+# renderLiveNow row-wiring are node-eval'd under a richer DOM shim (querySelector/
+# closest/classList/dataset) so the ACTUAL page code is exercised, not a replica.
+# --------------------------------------------------------------------------- #
+# A small DOM shim with parent-tracking + simple selector matching (.cls / .a.b / tag /
+# [name="v"]) so closest()/querySelector(All)/classList/dataset behave enough to drive
+# focusCard + the clickable row wiring. setTimeout STORES (never fires) so the ~1s `.flash`
+# is still present when we inspect. Shared by the two harnesses below.
+_DOM_SHIM = r"""
+var _timeouts = [];
+function setTimeout(fn, ms){ _timeouts.push(fn); return _timeouts.length; }
+var _store = {};
+var localStorage = {
+  getItem: function(k){ return (k in _store) ? _store[k] : null; },
+  setItem: function(k, v){ _store[k] = String(v); },
+  removeItem: function(k){ delete _store[k]; }
+};
+function _classSet(node){ return String(node.className == null ? '' : node.className).split(/\s+/).filter(Boolean); }
+function _matchSel(node, sel){
+  sel = String(sel).trim();
+  if(sel.charAt(0) === '['){
+    var m = sel.match(/^\[([^=\]]+)(?:="?([^"\]]*)"?)?\]$/);
+    if(!m) return false;
+    return node.getAttribute && node.getAttribute(m[1]) === (m[2] == null ? '' : m[2]);
+  }
+  var parts = sel.split('.');
+  var tag = parts[0], classes = [];
+  for(var i = 1; i < parts.length; i++){ if(parts[i]) classes.push(parts[i]); }
+  if(tag && String(node.tag).toLowerCase() !== tag.toLowerCase()) return false;
+  var cs = _classSet(node);
+  for(var j = 0; j < classes.length; j++){ if(cs.indexOf(classes[j]) < 0) return false; }
+  return true;
+}
+function _mk(tag){
+  var e = {tag: tag, className: '', textContent: '', title: '', type: '',
+           style: {}, dataset: {}, _attrs: {}, _kids: [], _h: {}, parent: null, _scrolled: false};
+  Object.defineProperty(e, 'innerHTML', {set: function(v){ if(v === '') e._kids = []; }, get: function(){ return ''; }});
+  Object.defineProperty(e, 'children', {get: function(){ return e._kids; }});
+  e.appendChild = function(c){ c.parent = e; e._kids.push(c); return c; };
+  e.addEventListener = function(ev, fn){ e._h[ev] = fn; };
+  e.setAttribute = function(k, v){ e._attrs[k] = String(v); if(k === 'data-repo') e.dataset.repo = String(v); if(k === 'data-key') e._attrs['data-key'] = String(v); };
+  e.getAttribute = function(k){ return (k in e._attrs) ? e._attrs[k] : null; };
+  e.classList = {
+    add: function(c){ var s = _classSet(e); if(s.indexOf(c) < 0){ s.push(c); e.className = s.join(' '); } },
+    remove: function(c){ e.className = _classSet(e).filter(function(x){ return x !== c; }).join(' '); },
+    contains: function(c){ return _classSet(e).indexOf(c) >= 0; }
+  };
+  e.scrollIntoView = function(){ e._scrolled = true; };
+  e.querySelectorAll = function(sel){ var out = []; (function walk(n){ (n._kids || []).forEach(function(k){ if(_matchSel(k, sel)) out.push(k); walk(k); }); })(e); return out; };
+  e.querySelector = function(sel){ var r = e.querySelectorAll(sel); return r.length ? r[0] : null; };
+  e.closest = function(sel){ var n = e; while(n){ if(_matchSel(n, sel)) return n; n = n.parent; } return null; };
+  return e;
+}
+var _root = _mk('body');
+var _live = _mk('section');
+var document = {
+  createElement: function(t){ return _mk(t); },
+  createTextNode: function(t){ return {text: String(t), _text: true, className: undefined, tag: undefined, _kids: []}; },
+  querySelectorAll: function(sel){ return _root.querySelectorAll(sel); },
+  querySelector: function(sel){ return _root.querySelector(sel); },
+  getElementById: function(id){ return id === 'livenow' ? _live : null; }
+};
+var LIVE_GLYPH = '●';
+function el(tag, cls, txt){ var e = document.createElement(tag); if(cls) e.className = cls; if(txt != null) e.textContent = txt; return e; }
+"""
+
+
+def _js_slice(a, b):
+    js = viewer._JS
+    return js[js.index(a):js.index(b)]
+
+
+def _node_focus_card(view, key, *, collapsed=True, target_key=None, in_flat=True):
+    """Build a fake board (a collapsed grouped repo-section > .repo-body > .ini card > .detail),
+    then eval the REAL key() + REAL focusCard() and call focusCard(view.repo, view.slug). Returns a
+    summary of every side effect. `target_key` is the data-key stamped on the card (defaults to the
+    same key so it matches); pass a different one to exercise the not-found path."""
+    node = _shutil.which("node")
+    if not node:
+        import pytest
+        pytest.skip("node not on PATH — focusCard untested this run")
+    tkey = key if target_key is None else target_key
+    src = (_js_slice("function key(v)", "function el(tag") +
+           "\n" + _js_slice("function focusCard(", "function card("))
+    flat = [view] if in_flat else []
+    driver = (
+        "var expanded = {}, detailCache = {};\n"
+        "var data = {flat: " + json.dumps(flat) + "};\n"
+        "var _loadCalls = [], _setCollapse = [];\n"
+        "function loadDetail(v, det){ _loadCalls.push({slug: v && v.slug, repo: v && v.repo, isDetail: det === _det}); }\n"
+        "function setRepoCollapsed(name, c){ _setCollapse.push([name, c]); }\n"
+        "var _sec = _mk('section'); _sec.className = 'repo collapsible'; _root.appendChild(_sec);\n"
+        "var _h2 = _mk('h2'); _h2.dataset.repo = " + json.dumps(view.get("repo_name") or "") + "; _sec.appendChild(_h2);\n"
+        "var _chev = _mk('span'); _chev.className = 'chev'; _chev.textContent = " + ("'\\u25b8'" if collapsed else "'\\u25be'") + "; _h2.appendChild(_chev);\n"
+        "var _body = _mk('div'); _body.className = 'repo-body'; _body.style.display = " + ("'none'" if collapsed else "'block'") + "; _sec.appendChild(_body);\n"
+        "var _card = _mk('div'); _card.className = 'ini state-active'; _card.setAttribute('data-key', " + json.dumps(tkey) + "); _body.appendChild(_card);\n"
+        "var _det = _mk('div'); _det.className = 'detail'; _det.style.display = 'none'; _card.appendChild(_det);\n"
+        "var _ret = focusCard(" + json.dumps(view["repo"]) + ", " + json.dumps(view["slug"]) + ");\n"
+        "console.log(JSON.stringify({ret: _ret, key: key(" + json.dumps({"repo": view["repo"], "slug": view["slug"]}) + "),"
+        " bodyDisplay: _body.style.display, chev: _chev.textContent, expandedSet: !!expanded[" + json.dumps(key) + "],"
+        " detailDisplay: _det.style.display, cardOpen: _card.classList.contains('open'),"
+        " flash: _card.classList.contains('flash'), scrolled: _card._scrolled,"
+        " loadCalls: _loadCalls, setCollapse: _setCollapse}));\n"
+    )
+    out = _subprocess.run([node, "-e", _DOM_SHIM + "\n" + src + "\n" + driver],
+                          capture_output=True, text=True, timeout=30)
+    assert out.returncode == 0, out.stderr
+    return json.loads(out.stdout)
+
+
+_FVIEW = {"repo": "/home/zach/workspace/devrc", "repo_name": "devrc", "slug": "clawgate-release",
+          "title": "Clawgate release", "summary": "cut a release"}
+_FKEY = "/home/zach/workspace/devrc::clawgate-release"
+
+
+def test_focus_card_expands_section_opens_detail_and_scrolls():
+    r = _node_focus_card(_FVIEW, _FKEY, collapsed=True)
+    assert r["ret"] is True
+    assert r["key"] == _FKEY                       # focusCard reused the SAME key(repo::slug)
+    assert r["bodyDisplay"] == "block"             # collapsed section was expanded first
+    assert r["chev"] == "▾"                   # chevron flipped ▸ -> ▾
+    assert r["setCollapse"] == [["devrc", False]]  # persisted the section as expanded
+    assert r["expandedSet"] is True                # the card-expand path set expanded[key]
+    assert r["detailDisplay"] == "block"           # .detail shown
+    assert r["cardOpen"] is True                   # 'open' class added (same as a card click)
+    assert r["scrolled"] is True                   # scrollIntoView called
+    assert r["flash"] is True                      # brief highlight applied (setTimeout not fired)
+    # loadDetail was called VERBATIM with the real view from data.flat + the card's own .detail.
+    assert len(r["loadCalls"]) == 1
+    assert r["loadCalls"][0]["slug"] == "clawgate-release"
+    assert r["loadCalls"][0]["repo"] == "/home/zach/workspace/devrc"
+    assert r["loadCalls"][0]["isDetail"] is True
+
+
+def test_focus_card_already_expanded_section_still_opens_detail():
+    # Section already open → focusCard doesn't touch the chevron/persist, but still opens the card.
+    r = _node_focus_card(_FVIEW, _FKEY, collapsed=False)
+    assert r["ret"] is True
+    assert r["bodyDisplay"] == "block"
+    assert r["setCollapse"] == []                  # not collapsed → no re-persist
+    assert r["expandedSet"] is True and r["detailDisplay"] == "block"
+
+
+def test_focus_card_no_matching_card_is_a_safe_noop():
+    # A row whose card can't be found (e.g. the two untitled sessions with no card) → false, no throw.
+    r = _node_focus_card(_FVIEW, _FKEY, target_key="/other/repo::nope")
+    assert r["ret"] is False
+    assert r["expandedSet"] is False and r["setCollapse"] == [] and r["scrolled"] is False
+
+
+def _node_livenow_click(flat, unmatched):
+    """Eval the REAL renderLiveNow (with a stubbed focusCard capturing its args) under the DOM
+    shim, render, then report each row's clickability and fire the first clickable row's click +
+    keydown handlers. Exercises the actual row-wiring, not a replica."""
+    node = _shutil.which("node")
+    if not node:
+        import pytest
+        pytest.skip("node not on PATH — renderLiveNow click-wiring untested this run")
+    slice_ = _js_slice("var LIVE_PREVIEW_N", "function renderTriage(")
+    driver = (
+        "var _focus = [];\n"
+        "function focusCard(repo, slug){ _focus.push([repo, slug]); }\n"
+        "var liveNowEl = document.getElementById('livenow');\n"
+        "var data = {flat: " + json.dumps(flat) + ", live_unmatched: " + json.dumps(unmatched) + "};\n"
+        "renderLiveNow();\n"
+        "var rows = liveNowEl.querySelectorAll('.ln-row');\n"
+        "var summ = rows.map(function(row){\n"
+        "  var task = ''; (row._kids || []).forEach(function(k){ if(k.className === 'ln-task') task = k.textContent; });\n"
+        "  return {task: task, clickable: row.classList.contains('clickable'), role: row.getAttribute('role'),\n"
+        "          tabindex: row.getAttribute('tabindex'), title: row.title,\n"
+        "          hasClick: !!row._h.click, hasKeydown: !!row._h.keydown};\n"
+        "});\n"
+        "var clickable = null; for(var i = 0; i < rows.length; i++){ if(rows[i].classList.contains('clickable')){ clickable = rows[i]; break; } }\n"
+        "if(clickable){\n"
+        "  clickable._h.click();\n"
+        "  var prevented = false;\n"
+        "  clickable._h.keydown({key: 'Enter', preventDefault: function(){ prevented = true; }});\n"
+        "  clickable._h.keydown({key: ' ', preventDefault: function(){}});\n"          # Space also activates
+        "  clickable._h.keydown({key: 'a', preventDefault: function(){}});\n"          # other key: no-op
+        "  var afterOther = _focus.length;\n"
+        "  console.log(JSON.stringify({rows: summ, focus: _focus, prevented: prevented, afterOther: afterOther}));\n"
+        "} else {\n"
+        "  console.log(JSON.stringify({rows: summ, focus: _focus, prevented: null, afterOther: 0}));\n"
+        "}\n"
+    )
+    out = _subprocess.run([node, "-e", _DOM_SHIM + "\n" + viewer._LIVENOW_JS + "\n" + slice_ + "\n" + driver],
+                          capture_output=True, text=True, timeout=30)
+    assert out.returncode == 0, out.stderr
+    return json.loads(out.stdout)
+
+
+def test_render_livenow_matched_row_is_clickable_and_wired_to_focus_card():
+    flat = [{"slug": "clawgate-release", "repo": "/home/zach/workspace/devrc", "repo_name": "devrc",
+             "live_tasks_meta": [{"task": "cut the release", "activity_ts": None}]}]
+    res = _node_livenow_click(flat, [])
+    assert len(res["rows"]) == 1
+    row = res["rows"][0]
+    assert row["clickable"] is True and row["role"] == "button" and row["tabindex"] == "0"
+    assert row["hasClick"] is True and row["hasKeydown"] is True and row["title"]
+    # click → focusCard(full repo path, slug); Enter + Space each activate too; 'a' does not.
+    # Enter is preventDefault'd (so Space doesn't scroll the page).
+    assert res["focus"][0] == ["/home/zach/workspace/devrc", "clawgate-release"]
+    assert len(res["focus"]) == 3               # click + Enter + Space (NOT the 'a' key)
+    assert res["afterOther"] == 3               # the non-activation key added nothing
+    assert res["prevented"] is True
+    assert all(f == ["/home/zach/workspace/devrc", "clawgate-release"] for f in res["focus"])
+
+
+def test_render_livenow_unmatched_row_is_not_clickable():
+    # An unmatched row (no slug → no card to open) is NOT clickable/focusable — no focusCard wiring.
+    res = _node_livenow_click([], [{"id": "z-1", "title": "untitled session",
+                                    "repo_name": "civitai", "repo": "/home/zach/workspace/civitai"}])
+    assert len(res["rows"]) == 1
+    row = res["rows"][0]
+    assert row["clickable"] is False and row["role"] is None and row["tabindex"] is None
+    assert row["hasClick"] is False and row["hasKeydown"] is False
+    assert res["focus"] == []
+
+
+def test_render_livenow_clickable_row_text_is_textcontent_only():
+    # XSS: a matched row carrying markup keeps it as textContent (el() never innerHTML) even though
+    # the row is now an interactive element.
+    flat = [{"slug": "x", "repo": "/r", "repo_name": "r",
+             "live_tasks_meta": [{"task": "<img src=x onerror=alert(1)>", "activity_ts": None}]}]
+    res = _node_livenow_click(flat, [])
+    assert res["rows"][0]["task"] == "<img src=x onerror=alert(1)>"   # verbatim string, not parsed
+    assert res["rows"][0]["clickable"] is True
+
+
+def test_focus_card_and_clickable_wiring_present_in_js_source():
+    js = viewer._JS
+    assert "function focusCard(repo, slug)" in js
+    # focusCard reuses the shared key() and the card-expand path (loadDetail) VERBATIM.
+    assert "key({repo: repo, slug: slug})" in js
+    assert "loadDetail(v || {repo: repo, slug: slug}, det)" in js
+    assert "expanded[k] = true" in js and ".detail" in js
+    # renderLiveNow wires matched rows to focusCard(repo, slug) with role/tabindex + keyboard.
+    r = _js_slice("function renderLiveNow(", "function renderTriage(")
+    assert "focusCard(repo, slug)" in r
+    assert "'role', 'button'" in r and "'tabindex', '0'" in r
+    assert "keydown" in r and "clickable" in r
+
+
+def test_render_smoke_matched_live_card_carries_click_target_in_island():
+    # End-to-end render: a live matched card sits in the JSON island with its repo+slug (the
+    # click target focusCard rebuilds key() from) and its live task; render_html doesn't raise and
+    # ships the focusCard + clickable wiring. The card exists to jump to.
+    card = _row(slug="clawgate-release", repo="/home/zach/workspace/devrc",
+                tmux_tasks=["cut the clawgate release"])
+    model = viewer.build_model([card], now=NOW)
+    html = viewer.render_html(model, None)
+    assert html.startswith("<!doctype html>")
+    j = viewer.model_to_json(model, None)
+    v = next(x for x in j["flat"] if x["slug"] == "clawgate-release")
+    assert v["repo"] == "/home/zach/workspace/devrc"                 # the key() target lives on the card
+    assert any(m["task"] == "cut the clawgate release" for m in v.get("live_tasks_meta", []))
+    assert "function focusCard(repo, slug)" in html
+    assert "'role', 'button'" in html                                # clickable row wiring shipped

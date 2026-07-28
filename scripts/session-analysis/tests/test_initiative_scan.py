@@ -2015,13 +2015,29 @@ def test_session_eligible_requires_min_topic_tokens():
                                 corroborated=False)
 
 
-def test_session_eligible_turns_or_corroboration():
+def test_min_session_turns_is_one():
+    # Owner decision (2026-07-27): every titled session is a first-class card — the turn floor was
+    # dropped 8 -> 1. MIN_TOPIC_TOKENS is untouched (a card still needs a >=2-token title).
+    assert isc.MIN_SESSION_TURNS == 1
+    assert isc.MIN_TOPIC_TOKENS == 2
+
+
+def test_session_eligible_one_turn_titled_session_now_admitted():
+    # A short (few-turn) session with an ai-title + >=2 topic tokens is now eligible on its own,
+    # regardless of corroboration — at floor 8 the 2-turn session was excluded; at floor 1 it is
+    # a first-class card.
     short = _sess("ComfyUI realism pipeline", n_turns=2)
-    assert not isc.session_eligible(short, corroborated=False)  # <MIN turns, no corroboration
-    assert isc.session_eligible(short, corroborated=True)       # ...rescued by corroboration
-    assert isc.session_eligible(
-        _sess("ComfyUI realism pipeline", n_turns=isc.MIN_SESSION_TURNS),
-        corroborated=False)                                     # ...or enough turns
+    assert isc.session_eligible(short, corroborated=False)      # was EXCLUDED at the old 8-floor
+    assert isc.session_eligible(_sess("ComfyUI realism pipeline", n_turns=1), corroborated=False)
+
+
+def test_session_eligible_below_floor_still_needs_corroboration():
+    # The git-corroboration rescue path is intact for anything BELOW the floor: a 0-turn record
+    # (< MIN_SESSION_TURNS=1) is eligible only when corroborated (real sessions carry >=1 turn, so
+    # in practice every titled session now clears the floor outright).
+    zero = _sess("ComfyUI realism pipeline", n_turns=0)
+    assert not isc.session_eligible(zero, corroborated=False)
+    assert isc.session_eligible(zero, corroborated=True)
 
 
 def test_session_corroborated_is_feature_branch_only():
@@ -2031,12 +2047,24 @@ def test_session_corroborated_is_feature_branch_only():
     assert not isc.session_corroborated(_sess("x y", branch=None))
 
 
-def test_build_session_groups_short_session_rescued_by_feature_branch():
-    # A short (<MIN_SESSION_TURNS) session on a feature branch still seeds a group; the same
-    # short session on trunk does not (the narrowed, per-session corroboration).
+def test_build_session_groups_short_trunk_session_now_admitted():
+    # At the dropped floor (MIN_SESSION_TURNS=1) a short session seeds a group on its own — even on
+    # trunk, no feature-branch corroboration needed — because every titled session is a first-class
+    # card now. At floor 8 the trunk short session was excluded (only the branch one survived).
     on_branch = _sess("ComfyUI realism pipeline", session_id="a", repo=R, n_turns=2,
                       branch="feat/comfyui")
     on_trunk = _sess("Sysredis buffer soak", session_id="b", repo=R, n_turns=2,
+                     branch="main")
+    groups = isc.build_session_groups([on_branch, on_trunk])
+    assert {g["slug"] for g in groups} == {"comfyui-pipeline-realism", "buffer-soak-sysredis"}
+
+
+def test_build_session_groups_below_floor_still_needs_corroboration():
+    # BELOW the floor of 1 (a 0-turn record) the per-session git corroboration still gates: the
+    # feature-branch one seeds a group, the trunk one does not. Guards that the rescue path lives.
+    on_branch = _sess("ComfyUI realism pipeline", session_id="a", repo=R, n_turns=0,
+                      branch="feat/comfyui")
+    on_trunk = _sess("Sysredis buffer soak", session_id="b", repo=R, n_turns=0,
                      branch="main")
     groups = isc.build_session_groups([on_branch, on_trunk])
     assert {g["slug"] for g in groups} == {"comfyui-pipeline-realism"}

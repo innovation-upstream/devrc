@@ -134,7 +134,15 @@ RECENT_COMMITS_PER_INITIATIVE = 5   # most-recent commit subjects surfaced per i
 # that is clearly tracked work without blanket-admitting every short session in an active
 # repo. A wrong initiative costs more than a missed one (the scan's precision stance).
 MIN_TOPIC_TOKENS = 2   # a session's ai-title must yield at least this many topic tokens
-MIN_SESSION_TURNS = 8  # ...and this many genuine user turns, unless git-corroborated
+# EVERY SESSION IS A FIRST-CLASS CARD (owner decision, 2026-07-27): the turn floor is
+# dropped 8->1. The flood the floor once guarded — repo-level telemetry corroboration
+# admitting every ephemeral session in a firehose repo — was ALREADY retired in favour of
+# per-session branch corroboration (`session_corroborated`), so the floor no longer
+# defends against that. Combined with the sessions-only window (5d) and doc-noise removal
+# the admitted set stays bounded (~63 cards at 5d). A session is now eligible on an
+# ai-title + >=MIN_TOPIC_TOKENS topic tokens + a resolved repo, regardless of turn count;
+# MIN_TOPIC_TOKENS STAYS 2 (a card still needs a >=2-token title to be meaningful).
+MIN_SESSION_TURNS = 1  # every titled session with >=MIN_TOPIC_TOKENS tokens is a card
 
 # Title-drift MERGE — Pass-2 of build_session_groups (union-find folding same-repo exact
 # groups that share a repo-distinctive token; `_should_merge_groups`/`_merge_group_indices`).
