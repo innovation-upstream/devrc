@@ -2907,15 +2907,14 @@ _JS = r"""
     btnGrouped.classList.toggle('active', state.view === 'grouped');
     if(btnRecency) btnRecency.classList.toggle('active', state.view === 'recency');
     if(countEl){
-      // Fix #3: the header carries ONLY the orthogonal, non-state totals now — the mutually-
-      // exclusive STATE counts (need-you/stalled/cooling/active) live SOLELY on the triage chips,
-      // so no number appears twice in two taxonomies. `live`/`emerging` are orthogonal BADGES (a
-      // card can be any state AND live/emerging) counted at the card level here, labeled as badges
-      // in the legend; the Live-now strip owns its own session count. All three numbers are CARD
-      // counts (one consistent unit), so they read cleanly next to the chip state tally.
+      // Fix #3: the header carries ONLY the orthogonal, non-state totals — the mutually-exclusive
+      // STATE counts (need-you/stalled/cooling/active) live SOLELY on the triage chips, so no number
+      // appears twice in two taxonomies. The "live" count is owned SOLELY by the `Live now (N)` strip
+      // below (a SESSION count) — the header deliberately does NOT repeat a card-level "N live", which
+      // would be a different number under the same word (audit 2026-07-28 dual-"live" confusion).
+      // `emerging` is an orthogonal card-level badge, labeled as a badge in the legend.
       var totalN = (data.flat || []).length;
       var txt = totalN + ' initiative' + (totalN === 1 ? '' : 's');
-      if(stateCounts.live) txt += ' · ' + stateCounts.live + ' live';
       if(emergingTotal) txt += ' · ' + emergingTotal + ' emerging';
       countEl.textContent = txt;
     }

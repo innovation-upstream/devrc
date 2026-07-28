@@ -2831,19 +2831,21 @@ def test_render_html_has_sticky_triage_bar_container():
 
 
 def test_render_html_summary_header_is_single_taxonomy_note_not_state_counts():
-    # Fix #3: the header no longer duplicates the STATE tally — those counts live SOLELY on the
-    # triage chips. The header carries only the orthogonal, non-state totals: N initiatives (·
-    # N live · N emerging as badges). No number appears twice in two taxonomies.
+    # Fix #3 + dual-"live" audit fix: the header no longer duplicates the STATE tally (those live
+    # SOLELY on the triage chips) NOR restates a "live" count (that's owned solely by the Live-now
+    # strip's session count — the header carried a card-level "N live" = a DIFFERENT number under the
+    # same word). The header now carries only: N initiatives · N emerging. No number appears twice.
     html = viewer.render_html(viewer.build_model([_row(slug="s")], now=NOW))
-    # the new note builder (client-side, from data.flat + stateCounts.live + emergingTotal)
     assert "' initiative'" in html and "(totalN === 1 ? '' : 's')" in html
-    assert "stateCounts.live" in html and "' live'" in html
     assert "emergingTotal" in html and "' emerging'" in html
     # the old header STATE strip is GONE (now only on the chips)
     assert "' need you · '" not in html
     assert "' stalled · '" not in html
     assert "' cooling · '" not in html
     assert "' live now'" not in html           # the header no longer restates the Live-now count
+    # the header no longer builds a card-level "N live" note (the dual-"live" confusion) — the
+    # Live-now strip's session count is the single "live" number now.
+    assert "stateCounts.live + ' live'" not in html
     # updateChrome no longer recomputes buildLiveNow for a header stat (the strip owns it)
     assert "var lnN = buildLiveNow(" not in html
 
