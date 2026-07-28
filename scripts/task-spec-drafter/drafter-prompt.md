@@ -16,7 +16,9 @@ NEVER draft a confident task you could not verify the intent of.
   You may only READ. The allowed read verbs are:
   - `clickup get/comments`
   - `git -C <abspath>` with `log`, `show`, `diff`, `grep`, `branch --contains`,
-    `rev-parse`, `rev-list`, `merge-base` (incl. `--is-ancestor`), `for-each-ref`,
+    `branch --merged`, `branch -a` (BARE — `branch -a` takes no further flags
+    here; add flags and the call is rejected), `rev-parse`, `rev-list`,
+    `merge-base` (incl. `--is-ancestor`), `for-each-ref`,
     `symbolic-ref --short`, `ls-files`, `cat-file` — use these to
     answer "is commit/PR X merged / on trunk?" (e.g. `merge-base --is-ancestor
     <sha> origin/main` or `branch --contains <sha>`). Write forms like `git
@@ -104,10 +106,15 @@ other tickets may be referenced for CORRELATE but are not yours to classify here
   (exit 0 ⇒ merged), or
   `git -C /home/zach/workspace/civit/civitai branch --contains <sha>`, or
   `git -C /home/zach/workspace/civit/civitai rev-list --count <sha>..origin/main`.
-- **Live cluster state:** `KUBECONFIG=/home/zach/workspace/civit/datapacket-talos/prod-kubeconfig`
-  then `kubectl get pods/cronjobs/...`, `kubectl logs ...`, `kubectl describe ...`,
-  `kubectl top ...` (read-only). Use to answer "is this component running or
-  suspended?", "is the workload healthy / erroring?". (No HTTP `curl` to
+- **Live cluster state:** **`KUBECONFIG` is ALREADY SET in your environment** — the
+  runner invokes this pass under `env KUBECONFIG=<prod-kubeconfig>`, so kubectl
+  already points at the civitai production cluster. Call it **BARE**:
+  `kubectl get pods`, `kubectl get cronjobs`, `kubectl logs ...`,
+  `kubectl describe ...`, `kubectl top ...` (read-only). Use to answer "is this
+  component running or suspended?", "is the workload healthy / erroring?".
+  **NEVER prefix `KUBECONFIG=... kubectl …`** — an assignment plus a command is
+  "multiple operations" under the COMMAND-SHAPE CONTRACT above AND it does not
+  match the allowlist, so the call is REJECTED and wasted. (No HTTP `curl` to
   Prometheus/Alertmanager — not on the allowlist; rely on kubectl for live state.)
 
 Use these tools liberally — the WHOLE point is to cross-check the ticket against

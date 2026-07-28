@@ -172,6 +172,54 @@ export REPO_COS_PROD_KUBECONFIG="${REPO_COS_PROD_KUBECONFIG:-$HOME/workspace/hom
 #       so pin the read form.
 #   * `gh pr checks*` — read-only CI check-run status for a PR (no mutation).
 #
+# 🔧 `gh -R * pr list|view|checks*` (added 2026-07-28): the allowlist only carried
+#    the BARE `gh pr <verb>*` prefixes, but drafter-prompt.md mandates the
+#    `-R civitai/civitai` form (the civitai repo is NOT the headless pass's cwd, so
+#    `-R` is required for gh to resolve a repo at all). `-R civitai/civitai` sits
+#    BETWEEN `gh` and the subcommand, so a bare `gh pr view*` PREFIX pattern can
+#    never match it → every prompt-mandated gh call was rejected with "This command
+#    requires approval", unanswerable in headless. Proven in transcript
+#    1d05e840-82be-4ec8-9c3d-806631443aa1: `gh -R civitai/civitai pr view 2811`
+#    → "This command requires approval", while sibling `git -C <path> log …` calls
+#    matched `Bash(git -C * log*)` and ran. Broken since the allowlist landed
+#    (2026-06-23). Fixed by mirroring the mid-pattern `*` the git entries already
+#    use. Only the three READ verbs get the `-R` form — list/view/checks. A test
+#    (`tests/test_allowlist_covers_prompt_shapes.py`) now asserts every command
+#    shape the prompt mandates matches an allowlist entry.
+#    ⚠ residual, PRE-EXISTING class (shared with every `git -C *` entry): a `*` in
+#    the MIDDLE of a pattern matches spaces too, so a crafted argument containing
+#    the literal substring ` pr view` could carry a different gh subcommand past
+#    the glob. The tighter alternative is the concrete `gh -R civitai/civitai pr
+#    view*` (a strict prefix, no mid-glob), at the cost of pinning the repo. Left
+#    general to match the existing `git -C *` convention — revisit if the pass is
+#    ever pointed at untrusted repo names.
+#
+# 🔧 `git -C * branch --merged*` + EXACT `git -C * branch -a` / `branch --all`
+#    (added 2026-07-28): the pass also burned calls on `branch -a` / `branch
+#    --merged` (11 blocked calls measured across 81 drafter transcripts) because
+#    only `branch --contains*` was allowlisted. Widened, but NOT symmetrically —
+#    the two forms have DIFFERENT safety properties, verified empirically on a
+#    scratch repo (git 2.x):
+#      * `branch --merged*` is SAFE with a trailing glob: `--merged` structurally
+#        pins git to LIST mode, so every write flag appended after it is refused
+#        by git itself with a usage error (rc=129) — verified for `-d`, `-D`,
+#        `-m`, `-c`, `-u`, `--unset-upstream`, `--edit-description`. There is no
+#        write reachable through `branch --merged …`.
+#      * `branch -a*` is NOT SAFE and was deliberately NOT added: `-a` does NOT
+#        pin list mode. PROVEN WRITES that a `-a*` glob would admit:
+#          `git branch -a -m <old> <new>`            → RENAMES the branch (rc=0)
+#          `git branch -a --set-upstream-to=<b> <br>` → WRITES branch config (rc=0)
+#        (git only cross-checks `-a` against `-d/-D`, not against `-m/-c/-u`.)
+#        So `-a` is allowlisted ONLY in its EXACT, argument-less form — no
+#        trailing `*` — which cannot carry a write flag. Suffix-injection against
+#        the exact form was probed too: any command ENDING in ` branch -a` that
+#        also carries a write verb is rejected by git ("cannot use -a with -d",
+#        "too many arguments for a rename operation", "too many arguments to set
+#        new upstream"). Do NOT "simplify" these two back into `branch -a*`.
+#    Deliberately still NOT allowlisted (measured, low volume, outside the
+#    drafter's verification remit): `git status`, `git describe`, `git remote`,
+#    `git reflog`, `git tag`.
+#
 # ⛔ `git -C * ls-remote*` was REMOVED (security audit, 2026-07): it is an RCE, not
 #    a read. `git ls-remote --upload-pack=<cmd>` (or `-o <cmd>`) EXECUTES <cmd>
 #    LOCALLY before the transport resolves (proven live: `git -C /tmp ls-remote
@@ -195,7 +243,7 @@ export REPO_COS_PROD_KUBECONFIG="${REPO_COS_PROD_KUBECONFIG:-$HOME/workspace/hom
 #    id + terms and controls exactly what git runs. This is the safe boundary the
 #    audit called for; prefer it over hand-rolled git in the prompt.
 # Override DRAFTER_ALLOWED_TOOLS via env ONLY with read-only verbs.
-DRAFTER_ALLOWED_TOOLS="${DRAFTER_ALLOWED_TOOLS:-Read,Glob,Grep,WebFetch,Bash($SELF_DIR/ticket-status*),Bash(node *query.mjs get*),Bash(node *query.mjs comments*),Bash(node *query.mjs search*),Bash(git -C * log*),Bash(git -C * show*),Bash(git -C * diff*),Bash(git -C * grep*),Bash(git -C * branch --contains*),Bash(git -C * rev-parse*),Bash(git -C * rev-list*),Bash(git -C * merge-base*),Bash(git -C * for-each-ref*),Bash(git -C * symbolic-ref --short*),Bash(git -C * ls-files*),Bash(git -C * cat-file*),Bash(git log*),Bash(gh pr list*),Bash(gh pr view*),Bash(gh pr checks*),Bash(gh search*),Bash(kubectl get*),Bash(kubectl logs*),Bash(kubectl describe*),Bash(kubectl top*),Bash(grep*),Bash(rg*),Bash(jq*),Bash(cat*),Bash(echo*),Bash(date*)}"
+DRAFTER_ALLOWED_TOOLS="${DRAFTER_ALLOWED_TOOLS:-Read,Glob,Grep,WebFetch,Bash($SELF_DIR/ticket-status*),Bash(node *query.mjs get*),Bash(node *query.mjs comments*),Bash(node *query.mjs search*),Bash(git -C * log*),Bash(git -C * show*),Bash(git -C * diff*),Bash(git -C * grep*),Bash(git -C * branch --contains*),Bash(git -C * branch --merged*),Bash(git -C * branch -a),Bash(git -C * branch --all),Bash(git -C * rev-parse*),Bash(git -C * rev-list*),Bash(git -C * merge-base*),Bash(git -C * for-each-ref*),Bash(git -C * symbolic-ref --short*),Bash(git -C * ls-files*),Bash(git -C * cat-file*),Bash(git log*),Bash(gh pr list*),Bash(gh pr view*),Bash(gh pr checks*),Bash(gh -R * pr list*),Bash(gh -R * pr view*),Bash(gh -R * pr checks*),Bash(gh search*),Bash(kubectl get*),Bash(kubectl logs*),Bash(kubectl describe*),Bash(kubectl top*),Bash(grep*),Bash(rg*),Bash(jq*),Bash(cat*),Bash(echo*),Bash(date*)}"
 
 mkdir -p "$DRAFTER_OUT_DIR" 2>/dev/null || true
 # The delta-state file may live outside OUT_DIR (e.g. ~/.local/state/...); make
