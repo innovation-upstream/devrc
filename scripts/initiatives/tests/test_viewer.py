@@ -2451,11 +2451,18 @@ def test_js_group_unknown_repo_name_bucketed():
 def test_render_html_has_glyph_legend():
     html = viewer.render_html(viewer.build_model([_row(slug="s")], now=NOW))
     assert 'id="legend"' in html and 'class="legend"' in html
-    # the legend decodes every state glyph AND (fix #3) labels ● live / emerging as orthogonal
-    # BADGES vs the mutually-exclusive state chips, in one muted line.
-    assert "⚠ needs you · → active · ~ cooling · ◑ stalled — states (pick one via a chip) · " \
-           "● live · emerging — badges (orthogonal) · ✓ done" in html
-    assert ".legend{" in viewer._CSS
+    # the legend decodes every state glyph AND (fix #2) explains the two taxonomies: STATES are
+    # mutually-exclusive (one per card, filtered via the chips), BADGES are overlays a card can also
+    # carry — with each badge spelled out in plain language (no bare "orthogonal" jargon).
+    assert "⚠ needs you · → active · ~ cooling · ◑ stalled." in html
+    assert "one per card" in html and "pick one with the chips" in html
+    assert "an agent is running on it right now" in html     # ● live, in words
+    assert "a session with no handoff doc yet" in html       # emerging, in words
+    assert "orthogonal" not in html                          # the jargon is gone
+    # Fix #2: the legend RULE itself is the readable secondary size (.85rem), NOT the old ~10px
+    # (.74rem) muted line that a blind reviewer couldn't read.
+    assert ".legend{color:var(--gray);font-size:.85rem" in viewer._CSS
+    assert ".legend{color:var(--gray);font-size:.74rem" not in viewer._CSS
 
 
 def test_js_card_glyph_and_badge_tooltips():
@@ -2838,10 +2845,13 @@ def test_render_html_summary_header_is_single_taxonomy_note_not_state_counts():
     # Fix #3 + dual-"live" audit fix: the header no longer duplicates the STATE tally (those live
     # SOLELY on the triage chips) NOR restates a "live" count (that's owned solely by the Live-now
     # strip's session count — the header carried a card-level "N live" = a DIFFERENT number under the
-    # same word). The header now carries only: N initiatives · N emerging. No number appears twice.
+    # same word). Fix #3 ALSO dropped the "· N emerging" stat (there's no emerging LANE, only a
+    # per-card badge). The header now carries ONLY: N initiatives.
     html = viewer.render_html(viewer.build_model([_row(slug="s")], now=NOW))
     assert "' initiative'" in html and "(totalN === 1 ? '' : 's')" in html
-    assert "emergingTotal" in html and "' emerging'" in html
+    # Fix #3: no "emerging" stat is BUILT into the header note anymore.
+    assert "' emerging'" not in html          # the header no longer appends the emerging count
+    assert "emergingTotal" not in html        # the now-dead reference is removed entirely
     # the old header STATE strip is GONE (now only on the chips)
     assert "' need you · '" not in html
     assert "' stalled · '" not in html
@@ -3784,7 +3794,7 @@ def test_render_livenow_collapsed_one_line_by_default():
     assert r0["open"] is False                       # … but collapsed to just the header
     assert r0["rowCount"] == 0                        # no rows rendered while collapsed
     assert r0["chev"] == "▸"                          # collapsed chevron
-    assert r0["count"] == "(9)"                       # header N = TOTAL live count
+    assert r0["count"] == "— 9 sessions"              # fix #1: header N is SESSIONS, not initiatives
     assert r0["more"] is None                         # no ＋more affordance while collapsed
     assert res["stored"] is None                      # default COLLAPSED → nothing persisted
 
@@ -3797,7 +3807,7 @@ def test_render_livenow_header_click_expands_to_top6_and_persists():
     assert opened["open"] is True
     assert opened["rowCount"] == 6                     # expands to the top-6
     assert opened["chev"] == "▾"                       # open chevron
-    assert opened["count"] == "(9)"
+    assert opened["count"] == "— 9 sessions"           # fix #1: sessions-labeled
     assert opened["more"] == "＋3 more ▸"      # 9 − 6
     assert res["stored"] == "1"                        # outer-open persisted (default was collapsed)
 
@@ -3970,6 +3980,7 @@ function _mk(tag){
   Object.defineProperty(e, 'innerHTML', {set: function(v){ if(v === '') e._kids = []; }, get: function(){ return ''; }});
   Object.defineProperty(e, 'children', {get: function(){ return e._kids; }});
   e.appendChild = function(c){ c.parent = e; e._kids.push(c); return c; };
+  e.removeChild = function(c){ e._kids = e._kids.filter(function(k){ return k !== c; }); if(c) c.parent = null; return c; };
   e.addEventListener = function(ev, fn){ e._h[ev] = fn; };
   e.setAttribute = function(k, v){ e._attrs[k] = String(v); if(k === 'data-repo') e.dataset.repo = String(v); if(k === 'data-key') e._attrs['data-key'] = String(v); };
   e.getAttribute = function(k){ return (k in e._attrs) ? e._attrs[k] : null; };
@@ -4336,10 +4347,10 @@ def test_render_livenow_scoped_by_search_query_updates_count_and_rows():
     # no filter → all three rows, plain "(3)". (open=True: the strip is collapsed by default now —
     # change C — so open it to observe the unscoped rows; the scoping under a filter is below.)
     base = _node_render_livenow(flat, um, open=True)["renders"][0]
-    assert base["rowCount"] == 3 and base["count"] == "(3)" and base["display"] == "block"
-    # search "clawgate" → only the clawgate matched row; count shows the filtered "(1 of 3)".
+    assert base["rowCount"] == 3 and base["count"] == "— 3 sessions" and base["display"] == "block"
+    # search "clawgate" → only the clawgate matched row; count shows the filtered "1 of 3 sessions".
     q = _node_render_livenow(flat, um, q="clawgate")["renders"][0]
-    assert q["rowCount"] == 1 and q["count"] == "(1 of 3)" and q["display"] == "block"
+    assert q["rowCount"] == 1 and q["count"] == "— 1 of 3 sessions" and q["display"] == "block"
     # a query matching NOTHING hides the strip entirely.
     none = _node_render_livenow(flat, um, q="zzznope")["renders"][0]
     assert none["display"] == "none" and none["rowCount"] == 0
@@ -4352,12 +4363,12 @@ def test_render_livenow_scoped_by_triage_chip():
            "activity_ts": _NOW_SEC - 30}]
     # the needs_you chip → only the mailbox matched row (unmatched excluded, active excluded).
     r = _node_render_livenow(flat, um, sf="needs_you")["renders"][0]
-    assert r["rowCount"] == 1 and r["count"] == "(1 of 3)"
+    assert r["rowCount"] == 1 and r["count"] == "— 1 of 3 sessions"
     # in Done mode the state chips read inactive → the triage state must NOT scope the strip.
     # (open=True to observe the rows: Done mode clears the filter, so the strip is collapsed by
     # default; opened, it shows all 3 unscoped — proving the state chip didn't narrow it.)
     r2 = _node_render_livenow(flat, um, sf="needs_you", done=True, open=True)["renders"][0]
-    assert r2["rowCount"] == 3 and r2["count"] == "(3)"
+    assert r2["rowCount"] == 3 and r2["count"] == "— 3 sessions"
 
 
 def test_render_livenow_preview_is_top6_of_the_filtered_set():
@@ -4369,7 +4380,7 @@ def test_render_livenow_preview_is_top6_of_the_filtered_set():
                       _NOW_SEC - 100 - i) for i in range(3)]
     res = _node_render_livenow(flat, [], q="alpha")["renders"][0]
     assert res["rowCount"] == 6                       # top-6 of the FILTERED set
-    assert res["count"] == "(8 of 11)"                # filtered 8 of 11 total
+    assert res["count"] == "— 8 of 11 sessions"       # filtered 8 of 11 total, sessions-labeled
     assert res["more"] == "＋2 more ▸"           # 8 − 6 = 2, over the filtered set
 
 
@@ -4538,10 +4549,11 @@ def test_render_smoke_dogfood2_all_four_fixes_present():
     # #2: the Live-now strip is scoped by the active filter (liveRowVisible wired into renderLiveNow).
     assert "function liveRowVisible(" in html
     assert "liveRowVisible(r, data.flat || [], q, sf)" in html
-    # #3: one taxonomy — header note (no state strip) + the Active chip + legend badge labels.
-    assert "' initiative'" in html and "' need you · '" not in html
+    # #3: one taxonomy — header note (no state strip, no "emerging" stat) + the Active chip +
+    # the legend's plain-language badge explanations.
+    assert "' initiative'" in html and "' need you · '" not in html and "' emerging'" not in html
     assert "label:'Active'" in html
-    assert "— badges (orthogonal)" in html
+    assert "an agent is running on it right now" in html and "no handoff doc yet" in html
     # #4: destructive drop styling.
     assert "'archive-btn drop destructive', 'drop'" in html and ".archive-btn.destructive{" in html
 
@@ -4759,3 +4771,272 @@ def test_render_smoke_lead_with_attention_structure():
     flat = {v["slug"]: v for v in model["flat"]}
     assert flat["risk-card"]["state"] == "needs_you" and flat["risk-card"]["needs_reason"] == "severity"
     assert flat["blocked-card"]["state"] == "needs_you" and flat["blocked-card"]["needs_reason"] == "blocked"
+
+
+# =========================================================================== #
+# 4th-dogfood VOCAB-CLARITY fixes — disambiguate live/active, legibleize the
+# legend, drop the phantom "N emerging" header stat, hide zero-count chips, and
+# a "drafting…" affordance on the streaming answer. (node-eval'd where the logic
+# is JS, exercising the ACTUAL page code — not a Python replica.)
+# =========================================================================== #
+
+# --- Fix #1: the Live-now header spells the count out as SESSIONS -------------- #
+def test_livenow_header_reads_sessions_singular_and_plural():
+    # unfiltered: the header count is now "— N session(s)" (SESSIONS, not initiatives), so it can't
+    # be conflated with the `→ Active N` chip (initiatives) or the `● live` card badge (one agent).
+    one = _node_render_livenow(
+        [], [{"id": "s0", "title": "only one", "repo_name": "devrc", "activity_ts": _NOW_SEC}],
+        open=True)["renders"][0]
+    assert one["count"] == "— 1 session"                 # singular
+    many = _node_render_livenow([], _many_unmatched(4), open=True)["renders"][0]
+    assert many["count"] == "— 4 sessions"               # plural
+
+
+def test_livenow_header_filtered_count_says_k_of_n_sessions():
+    # under a filter the header reads "k of N sessions" so the narrowing is legible AND labeled.
+    flat = [_lv_card("clawgate", "clawgate release", "active", "soak clawgate", _NOW_SEC - 10),
+            _lv_card("mailbox", "mail automation", "needs_you", "run extractor", _NOW_SEC - 20)]
+    um = [{"id": "z1", "title": "grafana explore", "repo_name": "civitai", "repo": "/r/civitai",
+           "activity_ts": _NOW_SEC - 30}]
+    q = _node_render_livenow(flat, um, q="clawgate")["renders"][0]
+    assert q["count"] == "— 1 of 3 sessions"
+
+
+def test_js_livenow_count_is_session_labeled_not_bare_number():
+    js = viewer._JS
+    assert "' session' + (total === 1 ? '' : 's')" in js     # unfiltered: "— N session(s)"
+    assert "' of ' + allRows.length + ' sessions'" in js      # filtered: "— k of N sessions"
+    assert "('(' + total + ')')" not in js                    # the old bare "(N)" count is retired
+    assert "('(' + total + ' of ' + allRows.length + ')')" not in js
+
+
+# --- Fix #2: a legible legend that explains STATE glyphs vs overlay BADGES ----- #
+def test_legend_explains_states_vs_badges_and_is_readable():
+    html = viewer.render_html(viewer.build_model([_row(slug="s")], now=NOW))
+    assert 'id="legend"' in html
+    # the two taxonomies, spelled out (no bare "orthogonal" jargon).
+    assert "States" in html and "one per card" in html and "pick one with the chips" in html
+    assert "Badges" in html
+    assert "● live" in html and "an agent is running on it right now" in html   # ● live, in words
+    assert "emerging" in html and "a session with no handoff doc yet" in html   # emerging, in words
+    assert "orthogonal" not in html
+    # readable: the legend RULE is normal secondary size (.85rem), not the old ~10px (.74rem) line.
+    assert ".legend{color:var(--gray);font-size:.85rem" in viewer._CSS
+    assert ".legend{color:var(--gray);font-size:.74rem" not in viewer._CSS
+    assert ".legend .lg-h{" in viewer._CSS and ".legend .lg-b{" in viewer._CSS
+
+
+# --- Fix #3: no phantom "N emerging" header stat (no emerging LANE exists) ------ #
+def test_header_drops_emerging_stat_but_keeps_card_badge_and_legend():
+    rows = [_row(slug="doc"), _row(slug="emg", undocumented=True, source="session")]
+    html = viewer.render_html(viewer.build_model(rows, now=NOW))
+    # #3: the header note no longer BUILDS an emerging count, and the now-dead var is gone entirely.
+    assert "' emerging'" not in html and "emergingTotal" not in html
+    # the header still builds "N initiative(s)".
+    assert "' initiative'" in html and "(totalN === 1 ? '' : 's')" in html
+    # the per-card emerging badge (CSS + JS) survives …
+    assert "emerging-badge" in html and "el('span', 'emerging-badge', 'emerging')" in html
+    # … and its legend entry still explains it.
+    assert "a session with no handoff doc yet" in html
+
+
+# --- Fix #4: hide zero-count chips (except Needs-you + All), Done only when >0 -- #
+def _node_triage_click(counts, archived_n, click_frag):
+    """Eval the ACTUAL renderTriage under a DOM shim, click the (shown) chip whose text contains
+    `click_frag`, and report the resulting board state — proving a shown chip still FILTERS after
+    the zero-count chips are hidden. Exercises the real chip build + click wiring."""
+    node = _shutil.which("node")
+    if not node:
+        import pytest
+        pytest.skip("node not on PATH — renderTriage click untested this run")
+    slice_ = _js_slice("function renderTriage(", "function renderDoneView(")
+    shim = r"""
+function _mk(tag){
+  var e = {tag: tag, className: '', textContent: '', type: '', _kids: [], _h: {}};
+  Object.defineProperty(e, 'innerHTML', {set: function(v){ if(v === '') e._kids = []; }, get: function(){ return ''; }});
+  Object.defineProperty(e, 'children', {get: function(){ return e._kids; }});
+  e.appendChild = function(c){ e._kids.push(c); return c; };
+  e.addEventListener = function(ev, fn){ e._h[ev] = fn; };
+  return e;
+}
+var _triage = _mk('nav');
+var document = { createElement: function(t){ return _mk(t); },
+  getElementById: function(id){ return id === 'triage' ? _triage : null; } };
+function el(tag, cls, txt){ var e = document.createElement(tag); if(cls) e.className = cls; if(txt != null) e.textContent = txt; return e; }
+var triageBar = document.getElementById('triage');
+var _renders = 0; function render(){ _renders++; }
+"""
+    driver = (
+        "var STATE_GLYPH = {needs_you:'\\u26a0', stalled:'\\u25d1', slowing:'~', active:'\\u2192'};\n"
+        "var stateCounts = " + json.dumps(counts) + ";\n"
+        "var state = {triage: '', doneMode: false};\n"
+        "var data = {archived: new Array(" + str(int(archived_n)) + ")};\n"
+        "renderTriage();\n"
+        "var clicked = false;\n"
+        "triageBar.children.forEach(function(c){ if(!clicked && String(c.textContent).indexOf("
+        + json.dumps(click_frag) + ") >= 0){ c._h.click(); clicked = true; } });\n"
+        "console.log(JSON.stringify({clicked: clicked, triage: state.triage,"
+        " doneMode: state.doneMode, renders: _renders}));\n"
+    )
+    out = _subprocess.run([node, "-e", shim + "\n" + slice_ + "\n" + driver],
+                          capture_output=True, text=True, timeout=30)
+    assert out.returncode == 0, out.stderr
+    return json.loads(out.stdout)
+
+
+def test_triage_hides_zero_state_chips_keeps_needsyou_and_all():
+    # the spec's calm-moment row: Stalled 0 hidden; Needs-you (even at 0) + Cooling/Active + All shown.
+    chips = _node_render_triage({"needs_you": 0, "stalled": 0, "slowing": 21, "active": 22, "live": 0})
+    labels = [c["text"].strip() for c in chips]
+    assert not any("Stalled" in t for t in labels)          # zero Stalled → hidden
+    assert labels == ["\u26a0 Needs you 0", "~ Cooling 21", "\u2192 Active 22", "All"]
+
+
+def test_triage_needs_you_always_shown_even_at_zero():
+    # "0 needs you" is a meaningful all-clear → the Needs-you chip is NEVER hidden, and neither is All.
+    chips = _node_render_triage({"needs_you": 0, "stalled": 0, "slowing": 0, "active": 0, "live": 0})
+    labels = [c["text"].strip() for c in chips]
+    assert labels == ["\u26a0 Needs you 0", "All"]           # every other state chip hidden at 0
+
+
+def test_triage_done_chip_hidden_at_zero_and_shown_when_archived():
+    counts = {"needs_you": 1, "stalled": 1, "slowing": 1, "active": 1, "live": 0}
+    none = _node_render_triage(counts, archived_n=0)
+    assert not any("Done" in c["text"] for c in none)        # 0 archived → no Done chip
+    some = _node_render_triage(counts, archived_n=3)
+    assert any("Done 3" in c["text"] for c in some)          # >0 → the Done chip reappears
+
+
+def test_triage_hidden_zero_chip_reappears_when_count_rises():
+    zero = _node_render_triage({"needs_you": 0, "stalled": 0, "slowing": 0, "active": 3, "live": 0})
+    assert not any("Stalled" in c["text"] for c in zero)
+    assert not any("Cooling" in c["text"] for c in zero)
+    risen = _node_render_triage({"needs_you": 0, "stalled": 4, "slowing": 0, "active": 3, "live": 0})
+    assert any("Stalled 4" in c["text"] for c in risen)      # reappears the moment it's > 0
+
+
+def test_triage_shown_chip_still_filters_after_zeros_hidden():
+    # a SHOWN chip (Cooling) still applies its state filter after the zero chips are hidden.
+    r = _node_triage_click({"needs_you": 0, "stalled": 0, "slowing": 21, "active": 22, "live": 0},
+                           0, "Cooling")
+    assert r["clicked"] is True
+    assert r["triage"] == "slowing" and r["doneMode"] is False and r["renders"] == 1
+
+
+def test_js_triage_zero_chip_gate_wired():
+    js = viewer._JS
+    assert "ch.k !== 'needs_you' && ch.k !== '' && ch.n === 0" in js   # the hide-zero-chip gate
+    assert "if(archivedN > 0 || state.doneMode){" in js               # the Done chip gate
+
+
+# --- Fix #5: a "drafting…" affordance on the streaming answer bubble ------------ #
+def _node_submit_question(mode):
+    """Eval the ACTUAL submitQuestion under the shared DOM shim with a synchronous, manually-driven
+    fake fetch (so we can inspect the bubble mid-stream). `mode='ok'` streams delta→delta→done+sources;
+    `mode='error'` returns a non-OK response. Returns snap1 (right after submit, before the response
+    resolves) + snap2 (after it resolves)."""
+    node = _shutil.which("node")
+    if not node:
+        import pytest
+        pytest.skip("node not on PATH — submitQuestion drafting untested this run")
+    slice_ = _js_slice("function submitQuestion(", "if(chatForm) chatForm.addEventListener")
+    sse = ('data: {"delta":"Hello "}\n\n'
+           'data: {"delta":"world"}\n\n'
+           'data: {"done":true,"sources":[{"path":"handoff.md","line":3}]}\n\n')
+    shim = (
+        "var askInFlight = false;\n"
+        "function clearEmptyHint(){}\n"
+        "var chatInput = { value: 'hi', disabled: false, focus: function(){} };\n"
+        "var chatSend = { disabled: false };\n"
+        "var chatLog = _mk('div');\n"
+        "var MD = [];\n"
+        "function mdToHtml(s){ MD.push(s); return '<p>' + s + '</p>'; }\n"
+        "var SOURCES = 'UNSET';\n"
+        "function renderSources(block, sources){ SOURCES = sources; block.appendChild(el('div', 'srcs')); }\n"
+        "function _SP(v){ return { then: function(f){ f(v); return { catch: function(){} }; } }; }\n"
+        "var _RESHANDLER = null;\n"
+        "function fetch(url, opts){ return { then: function(f){ _RESHANDLER = f;"
+        " return { catch: function(){ return this; } }; } }; }\n"
+    )
+    fake_res = ("var fakeRes = { ok:true, body:null, text:function(){ return _SP("
+                + json.dumps(sse) + "); } };"
+                if mode == "ok" else
+                "var fakeRes = { ok:false, body:null };")
+    driver = (
+        "submitQuestion('hi');\n"
+        "var block = chatLog.children[0];\n"
+        "function _q(sel){ return block.querySelector(sel); }\n"
+        "var aBubble = _q('.a');\n"
+        "var snap1 = { drafting: !!_q('.drafting'), dot: !!_q('.dd'),"
+        " pending: aBubble.classList.contains('pending'), aText: aBubble.textContent };\n"
+        + fake_res + "\n"
+        "_RESHANDLER(fakeRes);\n"
+        "var snap2 = { drafting: !!_q('.drafting'), err: !!_q('.err'), srcs: SOURCES, md: MD,"
+        " srcsNode: !!_q('.srcs'), aPending: aBubble.classList.contains('pending'),"
+        " aText: aBubble.textContent, askInFlight: askInFlight, inputDisabled: chatInput.disabled };\n"
+        "console.log(JSON.stringify({snap1: snap1, snap2: snap2}));\n"
+    )
+    program = _DOM_SHIM + "\n" + shim + "\n" + slice_ + "\n" + driver
+    out = _subprocess.run([node, "-e", program], capture_output=True, text=True, timeout=30)
+    assert out.returncode == 0, out.stderr
+    return json.loads(out.stdout)
+
+
+def test_submit_question_pending_bubble_carries_drafting_indicator():
+    s1 = _node_submit_question("ok")["snap1"]
+    assert s1["drafting"] is True       # the "still coming" caption is pinned on the pending bubble
+    assert s1["dot"] is True            # with a pulsing ● dot
+    assert s1["pending"] is True and s1["aText"] == "thinking…"
+
+
+def test_submit_question_done_clears_drafting_and_renders_answer_and_sources():
+    s2 = _node_submit_question("ok")["snap2"]
+    assert s2["drafting"] is False                    # removed on the `done` frame
+    assert s2["err"] is False
+    assert "Hello world" in s2["md"]                  # accumulated answer finalized via mdToHtml
+    assert s2["srcsNode"] is True and s2["srcs"] == [{"path": "handoff.md", "line": 3}]
+    assert s2["aPending"] is False
+    assert s2["askInFlight"] is False and s2["inputDisabled"] is False   # stream settled
+
+
+def test_submit_question_error_path_also_clears_drafting():
+    r = _node_submit_question("error")
+    assert r["snap1"]["drafting"] is True             # present while pending …
+    s2 = r["snap2"]
+    assert s2["drafting"] is False                    # … the error path clears it too
+    assert s2["err"] is True and s2["aText"] == "request failed"
+    assert s2["askInFlight"] is False                 # settled
+
+
+def test_js_submit_question_drafting_wiring_markers():
+    js = viewer._JS
+    assert "function clearDrafting(" in js
+    assert "el('div', 'drafting')" in js and "' drafting\u2026'" in js
+    # cleared on all three settle paths: the `done` frame, an error, and the stream closing (settle).
+    assert js.count("clearDrafting()") >= 3
+    assert ".qa .drafting{" in viewer._CSS and "@keyframes draftPulse{" in viewer._CSS
+
+
+# --- render smoke: all five vocab-clarity fixes present on ONE rendered page ---- #
+def test_render_smoke_vocab_clarity_all_five_on_one_page():
+    rows = [_row(slug="emg", undocumented=True, source="session"),
+            _row(slug="act")]
+    rows[1]["tmux_tasks"] = ["live task"]
+    model = viewer.build_model(rows, now=NOW, unmatched=[_um("Pool-1", "loose session")])
+    html = viewer.render_html(model, None)
+    assert html.startswith("<!doctype html>")                              # rendered, no exception
+    # #1 the Live-now count is session-labeled
+    assert "' session' + (total === 1 ? '' : 's')" in html
+    # #2 a readable legend explaining STATES vs BADGES
+    assert "an agent is running on it right now" in html and "no handoff doc yet" in html
+    assert ".legend{color:var(--gray);font-size:.85rem" in html
+    # #3 no phantom "emerging" header stat / dead var
+    assert "' emerging'" not in html and "emergingTotal" not in html
+    # #4 the zero-chip hiding gates
+    assert "ch.k !== 'needs_you' && ch.k !== '' && ch.n === 0" in html
+    assert "if(archivedN > 0 || state.doneMode){" in html
+    # #5 the drafting indicator wiring
+    assert "function clearDrafting(" in html and "' drafting\u2026'" in html
+    assert ".qa .drafting{" in html
+    # regression: the per-card emerging badge + the ask sidebar's citation render survive.
+    assert "emerging-badge" in html and "function renderSources(" in html

@@ -1393,10 +1393,13 @@ header .meta{color:var(--gray);font-size:.85rem}
 @keyframes chipPulse{0%,100%{box-shadow:0 0 0 0 rgba(254,128,25,.55)}
   50%{box-shadow:0 0 0 5px rgba(254,128,25,0)}}
 @media (prefers-reduced-motion: reduce){.chip.state-needs_you.attn{animation:none}}
-/* Compact, muted glyph legend under the Live-now strip (fix #1 reorder) — decodes the state
-   glyphs and LABELS ● live / emerging as orthogonal badges (fix #3). Secondary text; wraps on a
-   narrow viewport. */
-.legend{color:var(--gray);font-size:.74rem;margin:0 0 1rem;line-height:1.5}
+/* The glyph/badge legend under the Live-now strip — decodes the state glyphs AND explains the
+   two taxonomies (mutually-exclusive STATES vs overlay BADGES) in plain, readable secondary text
+   (was a ~10px muted line a blind reviewer couldn't read). Normal secondary size; wraps cleanly. */
+.legend{color:var(--gray);font-size:.85rem;margin:0 0 1rem;line-height:1.55;max-width:74ch}
+.legend .lg-line{margin:.15rem 0}
+.legend .lg-h{color:var(--fg2);font-weight:bold}
+.legend .lg-b{color:var(--fg);font-weight:bold}
 /* The `⚠ risk` cue on a card promoted to needs_you by an ACTIVE RISK (severity), distinct from
    a blocked wait. Small, orange, low-key so it reads as a badge not a headline. */
 .risk-cue{font-size:.68rem;color:var(--orange);border:1px solid var(--orange);border-radius:3px;
@@ -1599,6 +1602,13 @@ footer .live{color:var(--green)}
   background:var(--bg1);border-left:3px solid var(--green);border-radius:4px;padding:.4rem .55rem}
 .qa .a.pending{color:var(--gray);border-left-color:var(--gray);font-style:italic}
 .qa .a.err{border-left-color:var(--red)}
+/* Fix #5: the "still coming" caption pinned under the streaming answer bubble until the stream
+   settles — a pulsing green dot + "drafting…" so the interim isn't read as a complete answer. */
+.qa .drafting{color:var(--gray);font-size:.78rem;font-style:italic;display:flex;
+  align-items:center;gap:.3rem;margin-top:.05rem}
+.qa .drafting .dd{color:var(--green);font-style:normal;animation:draftPulse 1.1s ease-in-out infinite}
+@keyframes draftPulse{0%,100%{opacity:.25}50%{opacity:1}}
+@media (prefers-reduced-motion: reduce){.qa .drafting .dd{animation:none}}
 .qa .a p{margin:.3rem 0}
 .qa .a p:first-child{margin-top:0}
 .qa .a p:last-child{margin-bottom:0}
@@ -2270,10 +2280,10 @@ _JS = r"""
   // hides the board and renders the archived list instead. Not persisted (a per-visit view).
   var state = { view: VALID_VIEWS[storedView] ? storedView : 'grouped', q: '', triage: '',
                 doneMode: false };
-  // Header stats (recomputed each render). `emergingTotal` is the "N emerging" stat; `stateCounts`
-  // drives the summary header + the triage chips — the four states are MUTUALLY EXCLUSIVE, plus
-  // `live` (the overlay badge) which OVERLAPS them.
-  var emergingTotal = 0;
+  // Header stats (recomputed each render). `stateCounts` drives the triage chips — the four states
+  // are MUTUALLY EXCLUSIVE, plus `live` (the overlay badge) which OVERLAPS them. (Fix #3 retired the
+  // "N emerging" header stat: there is no emerging LANE to jump to, only a per-card badge, so a
+  // newcomer was hunting for a section that isn't there — the badge + legend entry stay.)
   var stateCounts = {needs_you:0, stalled:0, slowing:0, active:0, live:0};
   var expanded = {};     // key -> true
   var detailCache = {};  // key -> detail payload
@@ -2802,9 +2812,13 @@ _JS = r"""
     h.title = open ? 'collapse live sessions' : 'expand live sessions';
     h.appendChild(el('span', 'ln-dot', LIVE_GLYPH));
     h.appendChild(document.createTextNode(' Live now'));
-    // N = the (filtered) live count; while a filter narrows it, show "(shown of all)" so the
-    // scoping is legible; unfiltered → the plain total.
-    var countTxt = filtering ? ('(' + total + ' of ' + allRows.length + ')') : ('(' + total + ')');
+    // Fix #1 (vocab): the number is SESSIONS, not initiatives. Three things read as "live/active" —
+    // this Live-now SESSION count, the `→ Active` chip (INITIATIVES with active momentum), and the
+    // `● live` card badge (an agent running on ONE initiative) — so the header spells out
+    // "session(s)". Filtered → "k of N sessions" so the scoping stays legible.
+    var countTxt = filtering
+      ? ('— ' + total + ' of ' + allRows.length + ' sessions')
+      : ('— ' + total + ' session' + (total === 1 ? '' : 's'));
     h.appendChild(el('span', 'count', countTxt));
     h.appendChild(el('span', 'ln-chev', open ? '▾' : '▸'));
     // Clicking the header toggles the STORED open pref (a filter still force-opens until cleared).
@@ -2882,6 +2896,10 @@ _JS = r"""
       {k:'',          glyph:'',                    label:'All',       n:null}
     ];
     chips.forEach(function(ch){
+      // Fix #4: hide a zero-count STATE chip (e.g. "Stalled 0", "Cooling 0") — it's noise. ALWAYS
+      // show `Needs you` (even at 0 — "0 needs you" is a meaningful all-clear) and `All`. A hidden
+      // chip reappears automatically when its count rises above 0 (renderTriage rebuilds each render).
+      if(ch.k !== 'needs_you' && ch.k !== '' && ch.n === 0) return;
       // A state/All chip is only visually active when NOT in Done mode (Done takes over).
       var on = !state.doneMode &&
         ((ch.k === '') ? (active === '' || active === 'all') : (active === ch.k));
@@ -2901,16 +2919,19 @@ _JS = r"""
       triageBar.appendChild(b);
     });
     // The [✓ Done N] chip — a MODE (not a state filter): it hides the board and renders the
-    // archived list. N = the archived count. No untrusted text.
+    // archived list. N = the archived count. Fix #4: hidden when N is 0 (nothing archived → nothing
+    // to view); kept while the Done view is open so it never strands. No untrusted text.
     var archivedN = (data.archived || []).length;
-    var donB = el('button', 'chip state-done' + (state.doneMode ? ' active' : ''), null);
-    donB.type = 'button';
-    donB.textContent = '✓ Done ' + archivedN;
-    donB.addEventListener('click', function(){
-      state.doneMode = true;
-      render();
-    });
-    triageBar.appendChild(donB);
+    if(archivedN > 0 || state.doneMode){
+      var donB = el('button', 'chip state-done' + (state.doneMode ? ' active' : ''), null);
+      donB.type = 'button';
+      donB.textContent = '✓ Done ' + archivedN;
+      donB.addEventListener('click', function(){
+        state.doneMode = true;
+        render();
+      });
+      triageBar.appendChild(donB);
+    }
   }
 
   // The Done view — the archived initiatives (from data.archived, server-sorted newest-first),
@@ -2972,16 +2993,15 @@ _JS = r"""
     btnGrouped.classList.toggle('active', state.view === 'grouped');
     if(btnRecency) btnRecency.classList.toggle('active', state.view === 'recency');
     if(countEl){
-      // Fix #3: the header carries ONLY the orthogonal, non-state totals — the mutually-exclusive
-      // STATE counts (need-you/stalled/cooling/active) live SOLELY on the triage chips, so no number
-      // appears twice in two taxonomies. The "live" count is owned SOLELY by the `Live now (N)` strip
-      // below (a SESSION count) — the header deliberately does NOT repeat a card-level "N live", which
-      // would be a different number under the same word (audit 2026-07-28 dual-"live" confusion).
-      // `emerging` is an orthogonal card-level badge, labeled as a badge in the legend.
+      // The header carries ONLY the single non-state total: N initiatives. The mutually-exclusive
+      // STATE counts (need-you/stalled/cooling/active) live SOLELY on the triage chips, and the
+      // "live" count is owned SOLELY by the `Live now — N sessions` strip below (a SESSION count) —
+      // the header deliberately does NOT repeat a card-level "N live", which would be a different
+      // number under the same word (audit 2026-07-28 dual-"live" confusion). Fix #3 ALSO dropped the
+      // "· N emerging" stat: there is no emerging LANE, only a per-card badge, so a newcomer was
+      // hunting for a section that isn't there. `emerging` stays a card badge, explained in the legend.
       var totalN = (data.flat || []).length;
-      var txt = totalN + ' initiative' + (totalN === 1 ? '' : 's');
-      if(emergingTotal) txt += ' · ' + emergingTotal + ' emerging';
-      countEl.textContent = txt;
+      countEl.textContent = totalN + ' initiative' + (totalN === 1 ? '' : 's');
     }
     footer.innerHTML = '';
     footer.appendChild(el('span', 'live', 'live sessions ● realtime'));
@@ -3050,7 +3070,6 @@ _JS = r"""
     // put across app.innerHTML resets / Done mode / an error state. It's now collapsed by default.
     renderLiveNow();
     if(!data.ok){
-      emergingTotal = 0;
       stateCounts = {needs_you:0, stalled:0, slowing:0, active:0, live:0};
       renderTriage();
       hideNeedsYou();
@@ -3070,7 +3089,6 @@ _JS = r"""
       if(v && v.live) counts.live++;
     });
     stateCounts = counts;
-    emergingTotal = all.filter(function(v){ return v && v.undocumented; }).length;
 
     renderTriage();
 
@@ -3293,6 +3311,15 @@ _JS = r"""
     block.appendChild(qEl);
     var aEl = el('div', 'a pending', 'thinking…');
     block.appendChild(aEl);
+    // Fix #5: a clear "still coming" affordance while the SSE stream is open. The interim first
+    // sentence otherwise reads as a thin FINAL answer (a first-timer dismisses it), so we pin a
+    // pulsing `● drafting…` caption on the pending bubble and REMOVE it the moment the stream
+    // settles — the `done` frame, an error, or the connection closing (settle()).
+    var draftEl = el('div', 'drafting');
+    draftEl.appendChild(el('span', 'dd', '●'));
+    draftEl.appendChild(document.createTextNode(' drafting…'));
+    block.appendChild(draftEl);
+    function clearDrafting(){ if(draftEl){ block.removeChild(draftEl); draftEl = null; } }
     chatLog.appendChild(block);
     chatLog.scrollTop = chatLog.scrollHeight;
 
@@ -3311,6 +3338,7 @@ _JS = r"""
       chatLog.scrollTop = chatLog.scrollHeight;
     }
     function markErr(text){
+      clearDrafting();
       aEl.classList.remove('pending');
       aEl.classList.add('err');
       if(!answer) aEl.textContent = text;
@@ -3325,6 +3353,7 @@ _JS = r"""
       if(msg.delta != null) applyDelta(msg.delta);
       if(msg.error){ markErr('error: ' + msg.error); }
       if(msg.done){
+        clearDrafting();
         aEl.classList.remove('pending');
         if(answer) aEl.innerHTML = mdToHtml(answer);
         else if(!gotDelta) markErr('no answer');
@@ -3333,6 +3362,7 @@ _JS = r"""
     }
     function settle(){
       if(settled) return; settled = true;
+      clearDrafting();   // safety net: the stream closed without a `done` frame
       askInFlight = false;
       chatInput.disabled = false;
       chatSend.disabled = false;
@@ -3503,14 +3533,22 @@ def render_html(model: dict | None, error: str | None = None,
     # BELOW the needs-you section — no longer the biggest/brightest thing. Populated client-side by
     # renderLiveNow from the JSON island (flat + live_unmatched), and scoped by the active filter.
     livenow = '<section id="livenow" class="livenow" aria-label="live sessions"></section>'
-    # A compact, muted legend decoding the state glyphs + badges for a first-time viewer. Static
-    # server-rendered text (no untrusted data). Fix #3: it now LABELS ● live / emerging as
-    # orthogonal BADGES (a card can be any state AND live/emerging) vs the mutually-exclusive
-    # state chips — so the two taxonomies read cleanly. Sits under the Live-now strip.
+    # The legend decoding the state glyphs + badges for a first-time viewer. Static server-rendered
+    # text (no untrusted data). Fix #2 (vocab clarity): READABLE (normal secondary size, wraps) and
+    # it spells out the two taxonomies — the STATE glyphs/chips are mutually-exclusive (one per card,
+    # filter via the chips) while the BADGES are overlays a card can ALSO carry: `● live` = an agent
+    # is running on it right now, `emerging` = a session with no handoff doc yet. No "orthogonal"
+    # jargon on its own. Sits under the Live-now strip.
     legend = (
         '<div id="legend" class="legend" aria-label="glyph legend">'
-        '⚠ needs you · → active · ~ cooling · ◑ stalled — states (pick one via a chip) · '
-        '● live · emerging — badges (orthogonal) · ✓ done'
+        '<div class="lg-line"><span class="lg-h">States</span> '
+        '(one per card — pick one with the chips above): '
+        '⚠ needs you · → active · ~ cooling · ◑ stalled.</div>'
+        '<div class="lg-line"><span class="lg-h">Badges</span> '
+        '(extra labels a card can also carry, on top of its state): '
+        '<span class="lg-b">● live</span> = an agent is running on it right now · '
+        '<span class="lg-b">emerging</span> = a session with no handoff doc yet · '
+        '✓ done = archived.</div>'
         '</div>'
     )
     return (
