@@ -762,10 +762,10 @@ def test_write_snapshot_inserts_snapshot_then_rows_with_jsonb():
 
 
 # --- lookback window: widened 4 -> 14 days so stalled (>=7d) work surfaces --- #
-def test_sync_days_default_is_14_for_stalled_visibility():
-    # The default trailing window is 14d: a 4d window never included genuinely-stalled work
-    # (>=7d since last touch). Momentum buckets are ABSOLUTE last-touch ages, so widening just
-    # includes more, correctly bucketed. Pin the default so an accidental revert is caught.
-    assert sync.parse_args([]).days == 14
+def test_sync_days_default_is_5_tight_recent_board():
+    # The default trailing window is 5d — a tight, recent, low-clutter board (Zach's call).
+    # Momentum buckets are ABSOLUTE last-touch ages, so at 5d "cooling"/slowing (2-5d) is the
+    # going-quiet triage signal and "stalled" (>=7d) is empty. Pin the default to catch a revert.
+    assert sync.parse_args([]).days == 5
     # still overridable on the CLI.
     assert sync.parse_args(["--days", "4"]).days == 4

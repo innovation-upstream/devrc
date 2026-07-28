@@ -50,7 +50,7 @@ Populate the password from SOPS (homelab-talos trunk):
 
 Usage:
   initiative-scan.py [--days N] [--json] [--repo PATH] [--tmux]
-  --days   trailing window in days (default 14)
+  --days   trailing window in days (default 5)
   --json   machine-readable output (the raw per-initiative data)
   --repo   restrict to a single repo path (default: auto-discover under ~/workspace)
   --tmux   link each initiative to the live tmux session(s) hosting it (matches the
@@ -2448,7 +2448,7 @@ def _short_repo(repo: str) -> str:
 def parse_args(argv=None) -> argparse.Namespace:
     p = argparse.ArgumentParser(
         description="Durable cross-session initiative tracker (handoff docs + git + telemetry).")
-    p.add_argument("--days", type=int, default=14, help="trailing window in days (default 14)")
+    p.add_argument("--days", type=int, default=5, help="trailing window in days (default 5)")
     p.add_argument("--json", action="store_true", help="machine-readable output")
     p.add_argument("--repo", default=None, help="restrict to a single repo path")
     p.add_argument("--tmux", action="store_true",
