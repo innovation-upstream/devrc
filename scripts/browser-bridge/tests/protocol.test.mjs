@@ -18,11 +18,32 @@ import {
 } from "../extension/protocol.js";
 
 test("op set mirrors the server contract", () => {
-  // If this changes, server.py ALLOWED_OPS must change in lockstep.
+  // If this changes, server.py ALLOWED_OPS must change in lockstep. `open`/`close`
+  // back the per-session tab-isolation model (`release` is server-side only, so
+  // it is deliberately NOT in the shared op set).
   assert.deepEqual(
     [...ALLOWED_OPS].sort(),
-    ["eval", "getHtml", "nav", "screenshot", "tabs"],
+    ["close", "eval", "getHtml", "nav", "open", "screenshot", "tabs"],
   );
+});
+
+test("validateCommand accepts the tab-isolation ops (open/close)", () => {
+  // open takes an OPTIONAL url; close takes no skill-supplied field (the server
+  // injects the owned tabId) — so a bare op validates for both.
+  assert.deepEqual(validateCommand({ op: "open" }), { ok: true });
+  assert.deepEqual(validateCommand({ op: "open", url: "https://x.test" }), { ok: true });
+  assert.deepEqual(validateCommand({ op: "close" }), { ok: true });
+  // A server-injected tabId on a tab-scoped op is accepted (never rejected).
+  assert.deepEqual(validateCommand({ op: "getHtml", tabId: 42 }), { ok: true });
+  assert.deepEqual(validateCommand({ op: "nav", url: "https://x", tabId: 7 }), { ok: true });
+});
+
+test("open/close result envelopes carry their tab payloads", () => {
+  // The wire shapes the SW returns for the new ops.
+  assert.deepEqual(resultEnvelope("cid", { tabId: 101, url: "about:blank" }),
+    { id: "cid", ok: true, data: { tabId: 101, url: "about:blank" } });
+  assert.deepEqual(resultEnvelope("cid", { closed: 101 }),
+    { id: "cid", ok: true, data: { closed: 101 } });
 });
 
 test("validateCommand accepts a bare op", () => {
