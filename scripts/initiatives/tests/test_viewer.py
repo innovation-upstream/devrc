@@ -2094,11 +2094,11 @@ def test_blocking_hits_for_uses_assistant_as_single_source(monkeypatch):
 
 # --- severity-aware needs_you (fix 5) ---------------------------------------- #
 def test_severity_hits_for_flags_active_risk_status():
-    # A live risk in status ("499s still happening" / "disk full") is flagged by the severity
-    # scan, sourced from assistant._severity_hits.
-    v = _view(status="the 499s are still happening in prod", next_step="")
+    # A live risk in status (a 5xx incident still happening / "disk full") is flagged by the
+    # severity scan, sourced from assistant._severity_hits (phrase markers; bare HTTP codes dropped).
+    v = _view(status="the 5xx errors are still happening in prod", next_step="")
     hits = viewer._severity_hits_for(v)
-    assert "still happening" in hits and "499s" in hits
+    assert "still happening" in hits and "5xx" in hits
     v2 = _view(status="", next_step="node is out of space — disk full")
     assert "out of space" in viewer._severity_hits_for(v2)
 

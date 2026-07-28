@@ -173,16 +173,27 @@ def test_blocked_markers_pruned_of_process_prose():
 # surface as the blocked-scan, so an infra card that merely NAMES prod can't trip it.
 # --------------------------------------------------------------------------- #
 def test_severity_hits_flags_active_unresolved_problems():
-    # A live risk in status (499s still happening) → flagged; the marker is reported.
+    # A live risk in status (a 5xx incident still happening) → flagged via the phrase marker.
+    # (The bare "499s"/HTTP-code markers were dropped for precision — the phrase catches it.)
     v = _view("img-499", "Image edge 499s", "/repo/civitai",
-              status="the 499s are still happening after the rollout", next_step="")
-    marks499 = assistant._severity_hits(v)
-    assert "still happening" in marks499 and "499s" in marks499
+              status="the 5xx errors are still happening after the rollout", next_step="")
+    marks = assistant._severity_hits(v)
+    assert "still happening" in marks and "5xx" in marks
     # A disk risk in next_step → flagged.
     v2 = _view("disk", "Disk pressure", "/repo/homelab",
                status="", next_step="node is almost out of space — disk full imminent")
-    marks = assistant._severity_hits(v2)
-    assert "out of space" in marks and "disk full" in marks
+    marks2 = assistant._severity_hits(v2)
+    assert "out of space" in marks2 and "disk full" in marks2
+
+
+def test_severity_hits_no_false_positive_on_numbers_or_versions():
+    # Precision guard (audit 2026-07-28): the dropped bare numeric HTTP codes used to substring-
+    # match record counts / versions / durations. None of these benign statuses may flag.
+    for status in ("processed 15024 pending rows", "released v1.502.0 to prod",
+                   "the job ran for 2499s", "bumped quota to 5040 users",
+                   "3 unresolved review comments to address"):
+        v = _view("calm", "Calm", "/repo/x", status=status, next_step="")
+        assert assistant._severity_hits(v) == [], status
 
 
 def test_severity_hits_does_not_flag_benign_prod_mentions():
@@ -205,10 +216,12 @@ def test_severity_hits_scans_only_status_and_next_step():
 def test_severity_markers_curated_for_precision():
     # Broad topic words that would over-match every infra card are EXCLUDED; the concrete
     # active-failure signals are present. Bare "oom" (matches room/zoom) is excluded.
-    for broad in ("prod", "regression", "growing", "client-facing", "slow", "oom"):
+    # Broad topic words, bare oom, AND the FP-prone bare numeric HTTP codes + "unresolved" are OUT.
+    for broad in ("prod", "regression", "growing", "client-facing", "slow", "oom",
+                  "499s", "500s", "502", "503", "504", "unresolved", "not resolved"):
         assert broad not in assistant.SEVERITY_MARKERS, broad
-    for genuine in ("still happening", "still failing", "unresolved", "out of space",
-                    "disk full", "5xx", "499s", "outage", "crashloop", "data loss",
+    for genuine in ("still happening", "still failing", "out of space",
+                    "disk full", "5xx", "outage", "crashloop", "data loss",
                     "flapping", "oomkill"):
         assert genuine in assistant.SEVERITY_MARKERS, genuine
 

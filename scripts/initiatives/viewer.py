@@ -684,9 +684,8 @@ _FALLBACK_BLOCKED_FIELDS = ("status", "next_step")
 # `assistant._severity_hits` is the SINGLE SOURCE OF TRUTH — this is only the degraded path.
 _FALLBACK_SEVERITY_MARKERS = (
     "still happening", "still failing", "still broken", "still down", "still erroring",
-    "unresolved", "not resolved",
     "out of space", "almost out of space", "disk full",
-    "5xx", "499s", "500s", "502", "503", "504",
+    "5xx",
     "outage", "crashloop", "crash-loop", "oomkill", "oom-kill", "data loss",
     "flapping", "prod is down", "down in prod",
 )

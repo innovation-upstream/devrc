@@ -197,19 +197,24 @@ _BLOCKED_FIELDS = ("status", "next_step")
 # that merely NAMES prod in its purpose can't trip it. A severity hit promotes a card to
 # `needs_you` alongside the blocked-scan.
 #
-# CURATED FOR PRECISION. Every marker asserts an ACTIVE, UNRESOLVED problem — a state phrase
-# ("still happening/failing/broken/down", "unresolved", "out of space"), a concrete incident
-# class ("crashloop", "outage", "oomkill", "data loss", "flapping"), or an HTTP 5xx/499 error
-# family. Deliberately EXCLUDES broad words that describe a topic rather than a live failure —
-# bare "prod", "regression", "growing", "client-facing", "slow" — which would flag every infra
-# card that merely mentions production. Bare "oom" is excluded too (matches "room"/"zoom");
-# only the "oomkill"/"oom-kill" forms are kept. Kept as a tunable module constant + unit-tested
-# (like BLOCKED_MARKERS); a viewer-side VERBATIM copy is parity-pinned by a test.
+# CURATED FOR PRECISION (matched as case-insensitive SUBSTRINGS, so every marker must be
+# unambiguous on its own). Every marker asserts an ACTIVE, UNRESOLVED problem — a state phrase
+# ("still happening/failing/broken/down"), a concrete incident class ("crashloop", "outage",
+# "oomkill", "data loss", "flapping"), a disk-exhaustion phrase, or the unambiguous "5xx" error
+# family. Deliberately EXCLUDES:
+#   * broad topic words ("prod", "regression", "growing", "client-facing", "slow"),
+#   * bare "oom" (matches "room"/"zoom") — only "oomkill"/"oom-kill" kept,
+#   * bare numeric HTTP codes ("502"/"503"/"504"/"499s"/"500s") — substring-matched, they
+#     false-positive on record counts / PR#s / versions / durations ("15024", "v1.502.0",
+#     "2499s"), so they're OUT; a real 5xx/499 incident is caught by "5xx" or by a phrase
+#     marker ("499s still happening" → "still happening"), audit 2026-07-28,
+#   * "unresolved"/"not resolved" — too common in benign text ("unresolved review comments").
+# Kept as a tunable module constant + unit-tested (like BLOCKED_MARKERS); a viewer-side VERBATIM
+# copy is parity-pinned by a test.
 SEVERITY_MARKERS = (
     "still happening", "still failing", "still broken", "still down", "still erroring",
-    "unresolved", "not resolved",
     "out of space", "almost out of space", "disk full",
-    "5xx", "499s", "500s", "502", "503", "504",
+    "5xx",
     "outage", "crashloop", "crash-loop", "oomkill", "oom-kill", "data loss",
     "flapping", "prod is down", "down in prod",
 )
