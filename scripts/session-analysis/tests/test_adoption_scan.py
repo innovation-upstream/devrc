@@ -37,6 +37,20 @@ def _tool_row(tool, outcome, age_days):
             "payload": json.dumps({"tool": tool, "outcome": outcome})}
 
 
+def _bb_row(outcome, age_days, *, op="eval", domain="example.com",
+            exit_code=0, include_outcome=True):
+    """A `source=browser-bridge kind=cmd` row as the code sees it on read.
+    `include_outcome=False` drops the payload outcome to exercise the exit_code
+    fallback path in aggregate_source."""
+    payload = {"op": op, "key": "default"}
+    if include_outcome:
+        payload["outcome"] = outcome
+    if domain:
+        payload["domain"] = domain
+    return {"text": domain or op, "exit_code": exit_code, "duration_ms": 12,
+            "ts": _ts(age_days), "payload": json.dumps(payload)}
+
+
 # --------------------------------------------------------------------------- #
 # pure helpers
 # --------------------------------------------------------------------------- #
@@ -109,6 +123,64 @@ def test_aggregate_cwd_counts_sessions():
     assert agg["total"] == 2 and agg["recent"] == 1 and agg["prior"] == 1
 
 
+# --------------------------------------------------------------------------- #
+# aggregate_source (generic (source,kind) matcher — browser-bridge)
+# --------------------------------------------------------------------------- #
+def test_aggregate_source_counts_outcomes_and_trend():
+    rows = [
+        _bb_row("ok", 1),
+        _bb_row("error", 1, exit_code=1),
+        _bb_row("ambiguous", 1, exit_code=1),
+        _bb_row("ok", 10),  # prior half
+    ]
+    agg = A.aggregate_source(rows, NOW, 14 * DAY)
+    assert agg["total"] == 4
+    assert agg["outcomes"] == {"ok": 2, "error": 1, "ambiguous": 1}
+    assert agg["recent"] == 3 and agg["prior"] == 1
+    assert agg["trend"] == "up"
+
+
+def test_aggregate_source_excludes_rows_outside_window():
+    rows = [_bb_row("ok", 3), _bb_row("ok", 20)]
+    agg = A.aggregate_source(rows, NOW, 14 * DAY)
+    assert agg["total"] == 1  # 20-day-old row excluded from counts
+
+
+def test_aggregate_source_exit_code_fallback_when_outcome_absent():
+    # payload without an `outcome` field -> derive from exit_code (0=ok,else=error)
+    rows = [
+        _bb_row("", 1, include_outcome=False, exit_code=0),
+        _bb_row("", 1, include_outcome=False, exit_code=1),
+        _bb_row("", 1, include_outcome=False, exit_code="0"),  # str form
+    ]
+    agg = A.aggregate_source(rows, NOW, 14 * DAY)
+    assert agg["outcomes"] == {"ok": 2, "error": 1}
+
+
+def test_aggregate_source_custom_outcome_field():
+    rows = [{"text": "x", "exit_code": 0, "duration_ms": 1, "ts": _ts(1),
+             "payload": json.dumps({"status": "weird"})}]
+    agg = A.aggregate_source(rows, NOW, 14 * DAY, outcome_field="status")
+    assert agg["outcomes"] == {"weird": 1}
+
+
+def test_aggregate_source_empty_is_flat_and_zero():
+    agg = A.aggregate_source([], NOW, 14 * DAY)
+    assert agg["total"] == 0 and agg["trend"] == "flat"
+    assert agg["outcomes"] == {}
+
+
+def test_q_source_builds_expected_sql():
+    sql = A.q_source(1209600, "browser-bridge", "cmd", host="workbench")
+    assert "source='browser-bridge'" in sql
+    assert "kind='cmd'" in sql
+    assert "FROM activity.events" in sql
+    assert "ts>now()-1209600" in sql
+    assert "AND host='workbench'" in sql
+    # no host -> no host filter
+    assert "host=" not in A.q_source(3600, "browser-bridge", "cmd")
+
+
 def test_aggregate_friction_two_windows():
     rows = [
         {"session": "a", "ts": _ts(1),
@@ -130,9 +202,11 @@ def test_aggregate_friction_two_windows():
 # gather() end-to-end via a fake client
 # --------------------------------------------------------------------------- #
 class FakeClient:
-    def __init__(self, tool_rows, cmd_rows, insight_rows, cwd_rows):
+    def __init__(self, tool_rows, cmd_rows, insight_rows, cwd_rows,
+                 source_rows=None):
         self._tool, self._cmd, self._ins, self._cwd = (
             tool_rows, cmd_rows, insight_rows, cwd_rows)
+        self._source = source_rows or []
 
     def rows(self, sql):
         if "kind='invocation'" in sql:
@@ -141,6 +215,10 @@ class FakeClient:
             return self._ins
         if "position(lower(cwd)" in sql:
             return self._cwd
+        if "source='browser-bridge'" in sql:
+            return self._source
+        if "kind='command'" in sql:
+            return self._cmd
         return self._cmd
 
 
@@ -160,7 +238,12 @@ def _sample_client():
          "payload": json.dumps({"friction_counts": {"permission_block": 5}})},
     ]
     cwd_rows = [{"session": "d1", "ts": _ts(1)}]
-    return FakeClient(tool_rows, cmd_rows, insight_rows, cwd_rows)
+    source_rows = [
+        _bb_row("ok", 1),
+        _bb_row("error", 1, exit_code=1),
+        _bb_row("ok", 10),
+    ]
+    return FakeClient(tool_rows, cmd_rows, insight_rows, cwd_rows, source_rows)
 
 
 def _by_id(data):
@@ -178,6 +261,39 @@ def test_gather_per_item_counts_and_outcomes():
     assert vaw["impact"] == {"fail": 1, "incomplete": 0}
     assert items["cmd:verify-agent"]["total"] == 1
     assert items["task-spec-drafter"]["total"] == 1
+
+
+def test_gather_browser_bridge_flows_through():
+    """The generic via="source" browser-bridge item lands in the result dict with
+    the right id/label/via/opt_in and outcome-broken-down counts."""
+    data = A.gather(_sample_client(), days=14, insight_days=30, dead_days=14, now=NOW)
+    bb = _by_id(data)["browser-bridge"]
+    assert bb["via"] == "source"
+    assert bb["label"] == "browser — drive live Brave"
+    assert bb["opt_in"] is False
+    assert bb["total"] == 3  # 2 ok (1d + 10d) + 1 error (1d)
+    assert bb["outcomes"] == {"ok": 2, "error": 1}
+    assert bb["recent"] == 2 and bb["prior"] == 1
+    assert bb["trend"] == "up"
+    assert bb["dead"] is False
+
+
+def test_gather_browser_bridge_dead_when_no_rows():
+    """Zero browser-bridge rows -> the item reports DEAD like any other."""
+    client = FakeClient([_tool_row("obs-read", "ok", 1)], [], [], [], source_rows=[])
+    bb = _by_id(A.gather(client, days=14, insight_days=30, dead_days=14, now=NOW))[
+        "browser-bridge"]
+    assert bb["total"] == 0
+    assert bb["dead"] is True
+
+
+def test_gather_browser_bridge_dead_subwindow():
+    """Only use 10d ago -> alive over 14d, DEAD under a 3d dead window."""
+    client = FakeClient([], [], [], [], source_rows=[_bb_row("ok", 10)])
+    alive = _by_id(A.gather(client, days=14, insight_days=30, dead_days=14, now=NOW))
+    assert alive["browser-bridge"]["dead"] is False
+    dead = _by_id(A.gather(client, days=14, insight_days=30, dead_days=3, now=NOW))
+    assert dead["browser-bridge"]["dead"] is True
 
 
 def test_gather_dead_flag_fires_at_zero_and_not_when_used():
@@ -243,6 +359,8 @@ def test_render_has_sections():
     assert "## DRAFTER FRICTION TREND" in text
     assert "DEAD" in text
     assert "CAVEATS" in text
+    # the generic via="source" browser-bridge item renders in the ADOPTION table
+    assert "browser — drive live Brave" in text
 
 
 # --------------------------------------------------------------------------- #
