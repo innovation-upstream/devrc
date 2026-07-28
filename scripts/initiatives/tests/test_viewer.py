@@ -959,9 +959,9 @@ def test_render_html_face_shows_substantive_not_boilerplate():
 
 
 # --- live_unmatched: the "everything else running" catch-all ----------------- #
-def _um(id_, title="some work", repo="/home/zach/workspace/devrc"):
-    """One `match_tmux_to_initiatives` unmatched pane (id/title/repo)."""
-    return {"id": id_, "title": title, "repo": repo}
+def _um(id_, title="some work", repo="/home/zach/workspace/devrc", activity_ts=None):
+    """One `match_tmux_to_initiatives` unmatched pane (id/title/repo/activity_ts)."""
+    return {"id": id_, "title": title, "repo": repo, "activity_ts": activity_ts}
 
 
 def test_build_live_unmatched_shape_dedup_and_sort():
@@ -1006,7 +1006,7 @@ def test_build_live_unmatched_coerces_non_list_and_junk():
     assert viewer.build_live_unmatched(None) == []
     assert viewer.build_live_unmatched(["junk", 3, _um("ok-1")]) == [
         {"id": "ok-1", "title": "some work", "repo": "/home/zach/workspace/devrc",
-         "repo_name": "devrc"}]
+         "repo_name": "devrc", "activity_ts": None}]
 
 
 def test_build_model_carries_live_unmatched():
@@ -1014,7 +1014,7 @@ def test_build_model_carries_live_unmatched():
                                unmatched=[_um("Pool-6", "uncovered thread")])
     assert model["live_unmatched"] == [
         {"id": "Pool-6", "title": "uncovered thread",
-         "repo": "/home/zach/workspace/devrc", "repo_name": "devrc"}]
+         "repo": "/home/zach/workspace/devrc", "repo_name": "devrc", "activity_ts": None}]
 
 
 def test_build_model_live_unmatched_defaults_empty():
@@ -1029,7 +1029,7 @@ def test_model_to_json_includes_live_unmatched_ok_and_error():
     j = viewer.model_to_json(model, None)
     assert j["live_unmatched"] == [
         {"id": "Vapor-1", "title": "t", "repo": "/home/zach/workspace/devrc",
-         "repo_name": "devrc"}]
+         "repo_name": "devrc", "activity_ts": None}]
     # error branch always carries an empty list so the JS never sees undefined.
     assert viewer.model_to_json(None, "store down")["live_unmatched"] == []
 
@@ -1095,6 +1095,48 @@ def test_build_detail_carries_live_tasks():
     assert d["live_tasks"] == ["task one", "task two"]
 
 
+# --- activity_ts on the live overlay (Live-now freshness sort) --------------- #
+def test_view_live_tasks_meta_carries_activity_ts_and_is_backcompat():
+    rows = [_row(slug="s")]
+    rows[0]["tmux_tasks"] = ["fresh task", "no-activity task"]
+    rows[0]["tmux_task_activity"] = {"fresh task": 1722000000}   # 2nd task has no entry
+    v = viewer.build_model(rows, now=NOW)["flat"][0]
+    # BACK-COMPAT: the string list + first-task field the ● live badge / detail read are unchanged.
+    assert v["live_tasks"] == ["fresh task", "no-activity task"]
+    assert v["live_task"] == "fresh task"
+    assert v["live"] is True                                     # the live overlay badge still fires
+    # meta aligned + ordered the same; a task with no activity entry → None.
+    assert v["live_tasks_meta"] == [
+        {"task": "fresh task", "activity_ts": 1722000000},
+        {"task": "no-activity task", "activity_ts": None}]
+
+
+def test_view_live_tasks_meta_defaults_empty_and_coerces_bad_activity():
+    # No tmux overlay → empty meta. A non-integer activity value coerces to None (never raises).
+    assert viewer.build_model([_row(slug="s")], now=NOW)["flat"][0]["live_tasks_meta"] == []
+    rows = [_row(slug="s")]
+    rows[0]["tmux_tasks"] = ["t"]
+    rows[0]["tmux_task_activity"] = {"t": "not-an-int"}
+    v = viewer.build_model(rows, now=NOW)["flat"][0]
+    assert v["live_tasks_meta"] == [{"task": "t", "activity_ts": None}]
+
+
+def test_unmatched_view_carries_activity_ts():
+    out = viewer.build_live_unmatched([_um("Pool-6", "below-floor", activity_ts=1722000000)])
+    assert out[0]["activity_ts"] == 1722000000
+    # a non-integer / missing activity coerces to None.
+    out2 = viewer.build_live_unmatched([_um("Pool-7", "x", activity_ts="bad")])
+    assert out2[0]["activity_ts"] is None
+
+
+def test_model_to_json_flat_carries_live_tasks_meta():
+    rows = [_row(slug="a")]
+    rows[0]["tmux_tasks"] = ["live one"]
+    rows[0]["tmux_task_activity"] = {"live one": 1722000000}
+    j = viewer.model_to_json(viewer.build_model(rows, now=NOW), None)
+    assert j["flat"][0]["live_tasks_meta"] == [{"task": "live one", "activity_ts": 1722000000}]
+
+
 def test_provider_passes_unmatched_through_to_model():
     # the DataProvider must thread attach_tmux's unmatched return into build_model so the
     # section is populated from the live tmux read (not silently dropped, as it was before).
@@ -1107,7 +1149,7 @@ def test_provider_passes_unmatched_through_to_model():
     assert error is None
     assert model["live_unmatched"] == [
         {"id": "Vapor-9", "title": "a live uncovered thread",
-         "repo": "/home/zach/workspace/devrc", "repo_name": "devrc"}]
+         "repo": "/home/zach/workspace/devrc", "repo_name": "devrc", "activity_ts": None}]
 
 
 # --------------------------------------------------------------------------- #
@@ -3069,15 +3111,16 @@ def test_regression_ask_sidebar_still_opens_and_submits_from_its_own_button():
 # retiring the collapsed catch-all + the ● Live triage chip. buildLiveNow is
 # node-eval'd (the ACTUAL page builder, not a Python replica) like groupByRepo/matchQ.
 # --------------------------------------------------------------------------- #
-def _node_livenow(flat, unmatched):
+def _node_livenow(flat, unmatched, now_ms=None):
     node = _shutil.which("node")
     if not node:
         import pytest
         pytest.skip("node not on PATH — buildLiveNow JS untested this run")
+    now_arg = "null" if now_ms is None else str(int(now_ms))
     body = (
         "var FLAT = " + json.dumps(flat) + ";\n"
         "var UM = " + json.dumps(unmatched) + ";\n"
-        "console.log(JSON.stringify(buildLiveNow(FLAT, UM)));"
+        "console.log(JSON.stringify(buildLiveNow(FLAT, UM, " + now_arg + ")));"
     )
     out = _subprocess.run([node, "-e", viewer._LIVENOW_JS + "\n" + body],
                           capture_output=True, text=True, timeout=30)
@@ -3122,8 +3165,9 @@ def test_js_livenow_below_floor_unmatched_session_appears():
 def test_js_livenow_matched_rows_show_slug():
     rows = _node_livenow(
         [{"slug": "mycard", "repo_name": "devrc", "live_tasks": ["do the thing"]}], [])
+    # A pre-meta (strings-only) payload → activity_ts null, age "" (no freshness signal).
     assert rows == [{"task": "do the thing", "repo_name": "devrc", "slug": "mycard",
-                     "matched": True, "id": ""}]
+                     "matched": True, "id": "", "activity_ts": None, "age": ""}]
 
 
 def test_js_livenow_dedups_same_task_and_repo_matched_wins():
@@ -3171,6 +3215,212 @@ def test_js_livenow_null_inputs_return_empty():
     assert json.loads(out.stdout) == [[], []]
 
 
+# --- activity-sort + freshness age (buildLiveNow / liveAgeStr, node-eval'd) --- #
+_NOW_SEC = 1_722_000_000
+_NOW_MS = _NOW_SEC * 1000
+
+
+def _node_live_age(pairs):
+    """Eval liveAgeStr over [(ts, now_ms), …] → the list of age strings (the ACTUAL page fn)."""
+    node = _shutil.which("node")
+    if not node:
+        import pytest
+        pytest.skip("node not on PATH — liveAgeStr JS untested this run")
+    body = ("var P = " + json.dumps(pairs) + ";\n"
+            "console.log(JSON.stringify(P.map(function(p){ return liveAgeStr(p[0], p[1]); })));")
+    out = _subprocess.run([node, "-e", viewer._LIVENOW_JS + "\n" + body],
+                          capture_output=True, text=True, timeout=30)
+    assert out.returncode == 0, out.stderr
+    return json.loads(out.stdout)
+
+
+def test_js_live_age_formatter_m_h_d():
+    ages = _node_live_age([
+        [_NOW_SEC - 10, _NOW_MS],            # <60s → now
+        [_NOW_SEC - 4 * 60, _NOW_MS],        # 4m
+        [_NOW_SEC - 2 * 3600, _NOW_MS],      # 2h
+        [_NOW_SEC - 34 * 3600, _NOW_MS],     # 34h (hours don't roll to days at 24h)
+        [_NOW_SEC - 5 * 86400, _NOW_MS],     # 5d
+        [_NOW_SEC - 3 * 7 * 86400, _NOW_MS], # 3w
+        [None, _NOW_MS],                     # no activity → ''
+        [_NOW_SEC + 999, _NOW_MS],           # future (clock skew) → clamps to now
+    ])
+    assert ages == ["now", "4m", "2h", "34h", "5d", "3w", "", "now"]
+
+
+def test_js_livenow_sorts_by_activity_desc_null_last_with_ages():
+    # A 4m-old row precedes a 34h-old row; a null-activity row sorts LAST. Each row carries its age.
+    flat = [
+        {"slug": "stale", "repo_name": "devrc",
+         "live_tasks_meta": [{"task": "idle 34h", "activity_ts": _NOW_SEC - 34 * 3600}]},
+        {"slug": "hot", "repo_name": "devrc",
+         "live_tasks_meta": [{"task": "fresh 4m", "activity_ts": _NOW_SEC - 4 * 60}]},
+        {"slug": "mid", "repo_name": "civitai",
+         "live_tasks_meta": [{"task": "warm 2h", "activity_ts": _NOW_SEC - 2 * 3600}]},
+    ]
+    unmatched = [{"id": "z-1", "title": "no activity", "repo_name": "homelab", "activity_ts": None}]
+    rows = _node_livenow(flat, unmatched, now_ms=_NOW_MS)
+    assert [r["task"] for r in rows] == ["fresh 4m", "warm 2h", "idle 34h", "no activity"]
+    ages = {r["task"]: r["age"] for r in rows}
+    assert ages == {"fresh 4m": "4m", "warm 2h": "2h", "idle 34h": "34h", "no activity": ""}
+
+
+def test_js_livenow_null_activity_falls_to_repo_task_tiebreak():
+    # With NO activity anywhere (all null) the sort degrades to the stable (repo, matched, task)
+    # tiebreak — the pre-activity ordering, so a pre-meta payload still reads sensibly.
+    flat = [{"slug": "z", "repo_name": "devrc", "live_tasks": ["zeta"]}]
+    unmatched = [{"id": "a-1", "title": "alpha", "repo_name": "devrc"},
+                 {"id": "c-1", "title": "gamma", "repo_name": "civitai"}]
+    rows = _node_livenow(flat, unmatched, now_ms=_NOW_MS)
+    assert [(r["repo_name"], r["task"]) for r in rows] == [
+        ("civitai", "gamma"), ("devrc", "zeta"), ("devrc", "alpha")]
+
+
+def test_js_livenow_dedup_matched_wins_with_activity():
+    # dedup (task+repo) still keeps the matched, slug-tagged row (pushed first) even when the
+    # unmatched twin carries its own activity_ts.
+    flat = [{"slug": "aa", "repo_name": "devrc",
+             "live_tasks_meta": [{"task": "dup", "activity_ts": _NOW_SEC - 60}]}]
+    unmatched = [{"id": "P-1", "title": "dup", "repo_name": "devrc", "activity_ts": _NOW_SEC - 5}]
+    rows = _node_livenow(flat, unmatched, now_ms=_NOW_MS)
+    assert len(rows) == 1
+    assert rows[0]["slug"] == "aa" and rows[0]["matched"] is True
+
+
+# --- renderLiveNow: collapse to top-N + expand/collapse toggle (DOM-shim eval) - #
+def _node_render_livenow(flat, unmatched, clicks=0):
+    """Eval the ACTUAL renderLiveNow (+ its collapse helpers) under a tiny DOM/localStorage shim,
+    optionally clicking the "＋N more" toggle `clicks` times, and return a per-render summary
+    [{display, rowCount, count, more}] plus the persisted expand flag. Exercises the real page
+    code (like _node_group), not a Python replica."""
+    node = _shutil.which("node")
+    if not node:
+        import pytest
+        pytest.skip("node not on PATH — renderLiveNow untested this run")
+    js = viewer._JS
+    slice_ = js[js.index("var LIVE_PREVIEW_N"):js.index("function renderTriage(")]
+    shim = r"""
+var _store = {};
+var localStorage = {
+  getItem: function(k){ return (k in _store) ? _store[k] : null; },
+  setItem: function(k, v){ _store[k] = String(v); },
+  removeItem: function(k){ delete _store[k]; }
+};
+function _mk(tag){
+  var e = {tag: tag, className: '', textContent: '', type: '', style: {}, _kids: [], _h: {}};
+  Object.defineProperty(e, 'innerHTML', {set: function(v){ if(v === '') e._kids = []; }, get: function(){ return ''; }});
+  Object.defineProperty(e, 'children', {get: function(){ return e._kids; }});
+  e.appendChild = function(c){ e._kids.push(c); return c; };
+  e.addEventListener = function(ev, fn){ e._h[ev] = fn; };
+  return e;
+}
+var _live = _mk('section');
+var document = {
+  createElement: function(t){ return _mk(t); },
+  createTextNode: function(t){ return {text: String(t), _text: true, className: undefined}; },
+  getElementById: function(id){ return id === 'livenow' ? _live : null; }
+};
+var LIVE_GLYPH = '●';
+function el(tag, cls, txt){ var e = document.createElement(tag); if(cls) e.className = cls; if(txt != null) e.textContent = txt; return e; }
+var liveNowEl = document.getElementById('livenow');
+var data = {flat: [], live_unmatched: []};   // populated by the driver (FLAT/UM defined there)
+function _summ(){
+  var body = null, more = null, header = null;
+  liveNowEl.children.forEach(function(k){
+    if(k.className === 'livenow-body') body = k;
+    else if(k.className === 'ln-more') more = k;
+    else if(k.tag === 'h2') header = k;
+  });
+  var rowCount = 0;
+  if(body){ body.children.forEach(function(c){ if(String(c.className || '').indexOf('ln-row') === 0) rowCount++; }); }
+  var count = '';
+  if(header){ header.children.forEach(function(c){ if(c.className === 'count') count = c.textContent; }); }
+  return {display: liveNowEl.style.display, rowCount: rowCount, count: count, more: more ? more.textContent : null};
+}
+function _clickMore(){
+  var kids = liveNowEl.children, i;
+  for(i = 0; i < kids.length; i++){ if(kids[i].className === 'ln-more'){ kids[i]._h.click(); return true; } }
+  return false;
+}
+"""
+    driver = (
+        "var FLAT = " + json.dumps(flat) + ";\n"
+        "var UM = " + json.dumps(unmatched) + ";\n"
+        "data.flat = FLAT; data.live_unmatched = UM;\n"
+        "var OUT = [];\n"
+        "renderLiveNow(); OUT.push(_summ());\n"
+        "for(var i = 0; i < " + str(int(clicks)) + "; i++){ _clickMore(); OUT.push(_summ()); }\n"
+        "console.log(JSON.stringify({renders: OUT, stored: _store['initiatives-livenow-expanded'] || null}));"
+    )
+    program = shim + "\n" + viewer._LIVENOW_JS + "\n" + slice_ + "\n" + driver
+    out = _subprocess.run([node, "-e", program], capture_output=True, text=True, timeout=30)
+    assert out.returncode == 0, out.stderr
+    return json.loads(out.stdout)
+
+
+def _many_unmatched(n):
+    # n live rows with DESCENDING activity so the sort order is deterministic (row i is the i-th
+    # freshest); enough to exceed LIVE_PREVIEW_N (6).
+    return [{"id": "s-" + str(i), "title": "task " + str(i), "repo_name": "devrc",
+             "activity_ts": _NOW_SEC - i} for i in range(n)]
+
+
+def test_render_livenow_collapses_to_top6_by_default():
+    res = _node_render_livenow([], _many_unmatched(9))
+    r0 = res["renders"][0]
+    assert r0["display"] == "block"
+    assert r0["rowCount"] == 6                       # only the top-6 render by default
+    assert r0["count"] == "(9)"                      # header N = TOTAL live, not the shown slice
+    assert r0["more"] == "＋3 more ▸"       # ＋3 more ▸  (9 − 6)
+    assert res["stored"] is None                     # default COLLAPSED → nothing persisted
+
+
+def test_render_livenow_expand_shows_all_then_collapses_and_persists():
+    res = _node_render_livenow([], _many_unmatched(9), clicks=2)
+    first, expanded, collapsed = res["renders"]
+    assert first["rowCount"] == 6                     # collapsed
+    assert expanded["rowCount"] == 9                  # click 1 → all rows
+    assert expanded["more"] == "▾ show fewer"    # ▾ show fewer
+    assert collapsed["rowCount"] == 6                 # click 2 → back to top-6
+    assert collapsed["more"] == "＋3 more ▸"
+    # the FINAL state is collapsed → the localStorage flag was cleared (removeItem), not left '1'.
+    assert res["stored"] is None
+
+
+def test_render_livenow_no_toggle_when_at_or_below_six():
+    res = _node_render_livenow([], _many_unmatched(6))
+    r0 = res["renders"][0]
+    assert r0["rowCount"] == 6
+    assert r0["more"] is None                         # exactly 6 → no "more" affordance
+
+
+def test_render_livenow_hidden_when_empty():
+    res = _node_render_livenow([], [])
+    assert res["renders"][0]["display"] == "none"
+    assert res["renders"][0]["rowCount"] == 0
+
+
+def test_render_livenow_untrusted_text_is_textcontent_not_parsed():
+    # A task carrying markup is stored as textContent verbatim (el() uses textContent, never
+    # innerHTML) — the shim proves the string is not parsed into child nodes.
+    res = _node_render_livenow(
+        [], [{"id": "x-1", "title": "<script>alert(1)</script>", "repo_name": "devrc",
+              "activity_ts": _NOW_SEC - 30}])
+    assert res["renders"][0]["rowCount"] == 1         # the markup became ONE text row, not DOM
+
+
+def test_render_livenow_row_has_age_and_meta_but_no_session_id():
+    # Row structure: ln-task + ln-age (·) + ln-meta(ln-repo[+ln-slug]); the cryptic tmux codename
+    # (ln-id) is DROPPED for unmatched rows. Pinned via a JS-source check on the render fn.
+    js = viewer._JS
+    r = js[js.index("function renderLiveNow("):js.index("function renderTriage(")]
+    assert "el('span', 'ln-age', '· ' + r.age)" in r     # small muted "· <age>"
+    assert "el('span', 'ln-meta')" in r                        # repo/slug grouped together
+    assert "el('span', 'ln-repo', r.repo_name)" in r
+    assert "el('span', 'ln-slug', r.slug)" in r
+    assert "ln-id" not in r                                     # session codename dropped
+
+
 def test_js_old_unmatched_catchall_is_removed():
     js = viewer._JS
     assert "renderUnmatched" not in js            # the collapsed catch-all fn is gone
@@ -3203,6 +3453,29 @@ def test_render_smoke_livenow_matched_unmatched_and_no_doc_card():
     # the live pane + the unmatched session both reach the client (island) for buildLiveNow.
     assert "Ship the mail extractor" in html                     # a matched live_task
     assert "below-floor exploration" in html                     # an unmatched live session
+
+
+def test_render_smoke_livenow_mixed_activity_ts_serializes_cleanly():
+    # A board with MIXED freshness — a fresh matched pane, a 34h-idle matched pane, and a
+    # null-activity unmatched pane — must render without raising and carry the activity_ts on
+    # BOTH the matched (live_tasks_meta) and the unmatched island rows so buildLiveNow can sort.
+    now_sec = int(NOW.timestamp())
+    fresh = _row(slug="clawgate", repo="/home/zach/workspace/devrc")
+    fresh["tmux_tasks"] = ["fresh clawgate soak"]
+    fresh["tmux_task_activity"] = {"fresh clawgate soak": now_sec - 240}          # 4m
+    stale = _row(slug="grafana", repo="/home/zach/workspace/civitai", title="grafana")
+    stale["tmux_tasks"] = ["idle grafana build"]
+    stale["tmux_task_activity"] = {"idle grafana build": now_sec - 34 * 3600}     # 34h
+    model = viewer.build_model([fresh, stale], now=NOW, unmatched=[
+        _um("Pool-9", "brand new thread", activity_ts=None)])                     # null activity
+    html = viewer.render_html(model, None)                                        # must not raise
+    assert html.startswith("<!doctype html>")
+    j = viewer.model_to_json(model, None)
+    metas = {m["task"]: m["activity_ts"]
+             for v in j["flat"] for m in v.get("live_tasks_meta", [])}
+    assert metas["fresh clawgate soak"] == now_sec - 240
+    assert metas["idle grafana build"] == now_sec - 34 * 3600
+    assert j["live_unmatched"][0]["activity_ts"] is None
 
 
 def test_build_model_is_source_agnostic_and_tolerant_of_legacy_doc_row():

@@ -571,6 +571,15 @@ def rel_age(dt, now: datetime) -> str:
     return f"{int(days / 7)}w"
 
 
+def _epoch_or_none(v) -> int | None:
+    """Coerce a tmux `activity_ts` (epoch seconds) to an int, or None on any non-integer
+    (missing / blank / bad value from an older tmux). Keeps the Live-now sort key robust."""
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return None
+
+
 def momentum_badge(momentum: str | None) -> tuple[str, str]:
     """(glyph, label) for a momentum value; falls back to the 'unknown' badge."""
     return MOMENTUM_BADGE.get(momentum or "unknown", MOMENTUM_BADGE["unknown"])
@@ -776,6 +785,10 @@ def _initiative_view(ini: dict, now: datetime) -> dict:
     # The matched live pane's task summary (render-time tmux overlay, viewer-side only —
     # not stored). First title if a session is open, else "".
     tmux_tasks = [str(t) for t in (ini.get("tmux_tasks") or []) if str(t).strip()]
+    # Parallel `{task: activity_ts}` overlay from the scan (epoch seconds of the pane's last
+    # window activity). Used to build `live_tasks_meta` so Live-now can sort by freshness +
+    # show a per-row age WITHOUT changing the back-compat `live_tasks` string list.
+    tmux_task_activity = ini.get("tmux_task_activity") or {}
     repo = ini.get("repo")
     # The COMPLETE recent-prompt list (newest-first, as stored) — the expand renders it
     # verbatim. The card FACE shows only `face_message` (the most-recent substantive one).
@@ -837,6 +850,14 @@ def _initiative_view(ini: dict, now: datetime) -> dict:
         # the first. Both derive from the same de-duped `tmux_tasks` overlay.
         "live_task": tmux_tasks[0] if tmux_tasks else "",
         "live_tasks": tmux_tasks,
+        # Activity-carrying mirror of `live_tasks` (aligned + ordered the same): each entry is
+        # {task, activity_ts} so buildLiveNow can sort the pinned strip by freshness and label
+        # each row with a relative age. `activity_ts` is epoch seconds or None (older tmux).
+        # `live_tasks` (strings) stays the back-compat field the `● live` badge/detail read.
+        "live_tasks_meta": [
+            {"task": t, "activity_ts": _epoch_or_none(tmux_task_activity.get(t))}
+            for t in tmux_tasks
+        ],
         # Session-first discovery flags (v4). `undocumented` TRUE = a session-only card (no
         # handoff doc) → the SPA routes it to the collapsed "Emerging / undocumented" lane
         # instead of the main board; `source` (doc|session|both) is the provenance. Both
@@ -911,6 +932,9 @@ def _unmatched_view(u: dict) -> dict:
         "title": (str(u.get("title") or "")).strip(),
         "repo": repo or "",
         "repo_name": _short_repo(repo),
+        # Epoch seconds of the pane's last window activity (or None) — feeds Live-now's
+        # freshness sort + per-row age, exactly like a matched row's live_tasks_meta.
+        "activity_ts": _epoch_or_none(u.get("activity_ts")),
     }
 
 
@@ -1406,9 +1430,10 @@ header .meta{color:var(--gray);font-size:.85rem}
 .detail-doc{color:var(--gray);font-size:.78rem;margin-top:.35rem;word-break:break-all}
 .detail-err{color:var(--red);font-size:.82rem}
 .empty{color:var(--gray);padding:2rem 0}
-/* The pinned "Live now" strip — EVERY currently-running live session, matched or not. Visually
-   PRIMARY (a green-accented top strip), the first thing seen; dense + scannable at 30+ rows.
-   Always expanded (no chevron). Hidden entirely when there are no live sessions. */
+/* The pinned "Live now" strip — currently-running live sessions, matched or not, sorted
+   most-recently-active first. Visually PRIMARY (a green-accented top strip), the first thing seen;
+   COLLAPSED to the top few rows by default (a "＋N more" toggle expands) so the board stays
+   glanceable. Hidden entirely when there are no live sessions. */
 .livenow{margin:.4rem 0 1rem;background:var(--bg1);border:1px solid var(--bg2);
   border-left:3px solid var(--green);border-radius:4px;padding:.6rem .8rem}
 .livenow > h2{font-size:.92rem;margin:0 0 .5rem;color:var(--fg);
@@ -1416,14 +1441,22 @@ header .meta{color:var(--gray);font-size:.85rem}
 .livenow > h2 .ln-dot{color:var(--green);font-weight:bold}
 .livenow > h2 .count{color:var(--gray);font-weight:normal;font-size:.82rem}
 .livenow-body{display:flex;flex-direction:column;gap:.1rem}
-.ln-row{display:flex;align-items:baseline;gap:.5rem;padding:.05rem 0;
-  font-size:.84rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.ln-task{color:var(--fg);overflow:hidden;text-overflow:ellipsis;flex:1 1 auto}
+/* A row keeps task + age + repo/slug CLOSE together (task doesn't stretch to the full width and
+   shove the repo to the far right); the task truncates with an ellipsis when long. */
+.ln-row{display:flex;align-items:baseline;gap:.4rem;padding:.05rem 0;
+  font-size:.84rem;white-space:nowrap;overflow:hidden}
+.ln-task{color:var(--fg);overflow:hidden;text-overflow:ellipsis;
+  flex:0 1 auto;min-width:0;max-width:min(62ch,70%)}
+.ln-age{color:var(--gray);flex:0 0 auto;font-size:.76rem}
+.ln-meta{display:inline-flex;align-items:baseline;gap:.4rem;flex:0 0 auto}
 .ln-repo{color:var(--aqua);flex:0 0 auto;font-size:.78rem}
 .ln-slug{color:var(--green);flex:0 0 auto;font-size:.78rem}
-.ln-id{color:var(--gray);flex:0 0 auto;font-size:.78rem}
 /* An unmatched (below-floor / brand-new) live row reads slightly dimmer than a matched one. */
 .ln-row.unmatched .ln-task{color:var(--fg2)}
+/* The "＋N more ▸" / "▾ show fewer" collapse toggle — a small muted affordance, not a button box. */
+.ln-more{margin-top:.35rem;background:none;border:none;color:var(--aqua);cursor:pointer;
+  font:inherit;font-size:.78rem;padding:.1rem 0}
+.ln-more:hover{color:var(--fg);text-decoration:underline}
 .err{background:#442222;border:1px solid var(--red);color:var(--fg);
   padding:1rem;border-radius:4px}
 .err b{color:var(--red)}
@@ -1685,38 +1718,73 @@ function groupByRepo(views){
 # at the __LIVENOW_JS__ placeholder at module load; `renderLiveNow` (in the main body) renders
 # its output.
 #
-# `buildLiveNow(flat, unmatched)` = the UNION of EVERY currently-running live tmux Claude session,
-# so the pinned Live-now strip shows them ALL, matched or not:
-#   (1) every card's `live_tasks` (matched panes) — tagged with that card's slug + repo, and
-#   (2) `live_unmatched` (panes tied to NO card — the below-floor / brand-new sessions) — untagged.
+# `buildLiveNow(flat, unmatched, nowMs)` = the UNION of EVERY currently-running live tmux Claude
+# session, so the pinned Live-now strip shows them ALL, matched or not:
+#   (1) every card's `live_tasks_meta` (matched panes, {task, activity_ts}) — tagged with that
+#       card's slug + repo (falls back to the bare `live_tasks` string list on a pre-meta payload), and
+#   (2) `live_unmatched` (panes tied to NO card — the below-floor / brand-new sessions) — untagged,
+#       each carrying its own `activity_ts`.
 # De-duped by (task, repo) so a task shown on a card and echoed as unmatched appears once (the
-# matched, slug-tagged row wins because matched rows are pushed FIRST). Sorted by repo, then
-# matched-before-unmatched, then task — dense + scannable like the old unmatched rows. Non-array
-# inputs degrade to [] (the section then simply doesn't render).
+# matched, slug-tagged row wins because matched rows are pushed FIRST). Each row carries its
+# `activity_ts` (epoch seconds, or null) and a relative `age` string (m/h/d/w) computed vs `nowMs`
+# (defaults to Date.now()). Sorted by activity_ts DESC (most-recently-active first); a null activity
+# sorts LAST; ties break by (repo, matched-first, task) — so freshness leads, then it reads dense +
+# scannable like before. Non-array inputs degrade to [] (the section then simply doesn't render).
 _LIVENOW_JS = r"""
-function buildLiveNow(flat, unmatched){
+function liveAgeStr(ts, nowMs){
+  // Compact m/h/d/w freshness. Hours are shown up to 48h (NOT rolled to days at 24h) so a
+  // genuinely-stale pane reads '34h' rather than a coarse '1d' — the whole point of the age is to
+  // make idle-vs-fresh obvious at a glance. null / non-positive → '' (the row shows no age).
+  if(ts == null) return '';
+  var t = Number(ts);
+  if(!isFinite(t) || t <= 0) return '';
+  var secs = (nowMs / 1000) - t;
+  if(secs < 0) secs = 0;                              // clock skew → clamp to 'now'
+  if(secs < 60) return 'now';
+  var mins = secs / 60;
+  if(mins < 60) return Math.floor(mins) + 'm';
+  var hours = mins / 60;
+  if(hours < 48) return Math.floor(hours) + 'h';
+  var days = hours / 24;
+  if(days < 14) return Math.floor(days) + 'd';
+  return Math.floor(days / 7) + 'w';
+}
+function buildLiveNow(flat, unmatched, nowMs){
+  if(nowMs == null) nowMs = Date.now();
   var rows = [], seen = {};
-  function push(task, repo, slug, matched, id){
+  function push(task, repo, slug, matched, id, ts){
     var t = String(task == null ? '' : task).trim();
     if(!t) return;                                   // a session with no task text is not a row
     var rn = String(repo == null ? '' : repo).trim() || '(unknown repo)';
     var k = JSON.stringify([t.toLowerCase(), rn.toLowerCase()]);
     if(seen[k]) return;                              // same task+repo once (matched wins, pushed first)
     seen[k] = 1;
-    rows.push({task:t, repo_name:rn, slug:String(slug||''), matched:!!matched, id:String(id||'')});
+    var tn = (ts == null || ts === '' || !isFinite(Number(ts))) ? null : Number(ts);
+    rows.push({task:t, repo_name:rn, slug:String(slug||''), matched:!!matched,
+               id:String(id||''), activity_ts:tn, age:liveAgeStr(tn, nowMs)});
   }
   (Array.isArray(flat) ? flat : []).forEach(function(v){
     if(!v) return;
-    (Array.isArray(v.live_tasks) ? v.live_tasks : []).forEach(function(t){
-      push(t, v.repo_name, v.slug, true, '');
-    });
+    var meta = Array.isArray(v.live_tasks_meta) ? v.live_tasks_meta : null;
+    if(meta){
+      meta.forEach(function(m){ if(m) push(m.task, v.repo_name, v.slug, true, '', m.activity_ts); });
+    } else {                                         // pre-meta payload: strings, no activity
+      (Array.isArray(v.live_tasks) ? v.live_tasks : []).forEach(function(t){
+        push(t, v.repo_name, v.slug, true, '', null);
+      });
+    }
   });
   (Array.isArray(unmatched) ? unmatched : []).forEach(function(u){
     if(!u) return;
-    push(u.title, u.repo_name, '', false, u.id);
+    push(u.title, u.repo_name, '', false, u.id, u.activity_ts);
   });
   rows.sort(function(a, b){
-    var ar = a.repo_name.toLowerCase(), br = b.repo_name.toLowerCase();
+    var an = a.activity_ts == null, bn = b.activity_ts == null;
+    if(an !== bn) return an ? 1 : -1;                        // null activity sorts LAST
+    if(!an && a.activity_ts !== b.activity_ts){
+      return b.activity_ts - a.activity_ts;                  // most-recent (larger epoch) first
+    }
+    var ar = a.repo_name.toLowerCase(), br = b.repo_name.toLowerCase();   // stable tiebreak
     if(ar < br) return -1;
     if(ar > br) return 1;
     if(a.matched !== b.matched) return a.matched ? -1 : 1;   // matched (slug-tagged) first
@@ -2314,36 +2382,63 @@ _JS = r"""
     return c;
   }
 
-  // The pinned, ALWAYS-EXPANDED "Live now" strip. Rendered into #livenow (ABOVE the board, NOT
-  // into `app`, so it survives app.innerHTML resets and is the first thing seen). Shows EVERY
-  // currently-running live tmux Claude session — matched to a card (slug-tagged) OR below-floor /
-  // unmatched — via buildLiveNow's union+dedup. NOT collapsible and NOT search-filtered: it is a
-  // live status header, always current. Empty (no live panes) → the strip hides. All untrusted
-  // text via textContent (el()), never innerHTML.
+  // The pinned "Live now" strip. Rendered into #livenow (ABOVE the board, NOT into `app`, so it
+  // survives app.innerHTML resets and is the first thing seen). Shows currently-running live tmux
+  // Claude sessions — matched to a card (slug-tagged) OR below-floor / unmatched — via buildLiveNow's
+  // union+dedup, sorted most-recently-active first with a per-row freshness age. To keep the board
+  // GLANCEABLE (the triage chips + first cards must sit near the top, not below a 30-row wall) it
+  // COLLAPSES to the top LIVE_PREVIEW_N by default; a "＋(N−6) more ▸" toggle expands to the full
+  // sorted list and back. The expand state persists in localStorage (LIVENOW_KEY), default COLLAPSED.
+  // Header stays "● Live now (N)" with N = the TOTAL live count. Empty (no live panes) → the strip
+  // hides. All untrusted text via textContent (el()), never innerHTML.
+  var LIVE_PREVIEW_N = 6;
+  var LIVENOW_KEY = 'initiatives-livenow-expanded';
+  function liveNowExpanded(){
+    try { return localStorage.getItem(LIVENOW_KEY) === '1'; } catch(e){ return false; }
+  }
+  function setLiveNowExpanded(v){
+    try { if(v) localStorage.setItem(LIVENOW_KEY, '1'); else localStorage.removeItem(LIVENOW_KEY); }
+    catch(e){}
+  }
   function renderLiveNow(){
     if(!liveNowEl) return;
     liveNowEl.innerHTML = '';
     var rows = buildLiveNow(data.flat || [], data.live_unmatched || []);
     if(!rows.length){ liveNowEl.style.display = 'none'; return; }
     liveNowEl.style.display = 'block';
+    var total = rows.length;
+    var extra = total - LIVE_PREVIEW_N;
+    var expanded = liveNowExpanded();
+    var shown = (expanded || extra <= 0) ? rows : rows.slice(0, LIVE_PREVIEW_N);
     var h = el('h2');
     h.appendChild(el('span', 'ln-dot', LIVE_GLYPH));
     h.appendChild(document.createTextNode(' Live now'));
-    h.appendChild(el('span', 'count', '(' + rows.length + ')'));
+    h.appendChild(el('span', 'count', '(' + total + ')'));   // N = TOTAL live, not the shown slice
     liveNowEl.appendChild(h);
     var body = el('div', 'livenow-body');
-    rows.forEach(function(r){
+    shown.forEach(function(r){
       var row = el('div', 'ln-row' + (r.matched ? '' : ' unmatched'));
       row.appendChild(el('span', 'ln-task', r.task));
-      row.appendChild(el('span', 'ln-repo', r.repo_name));
-      if(r.slug){
-        row.appendChild(el('span', 'ln-slug', r.slug));   // matched → its initiative (reference)
-      } else if(r.id){
-        row.appendChild(el('span', 'ln-id', r.id));        // unmatched → the live pane id
-      }
+      if(r.age){ row.appendChild(el('span', 'ln-age', '· ' + r.age)); }   // small muted freshness
+      // repo + (matched) slug grouped close to the task, not pushed to the far right. The cryptic
+      // tmux session codename (r.id) is DROPPED — repo + task is the signal; the id is low-value.
+      var meta = el('span', 'ln-meta');
+      meta.appendChild(el('span', 'ln-repo', r.repo_name));
+      if(r.slug){ meta.appendChild(el('span', 'ln-slug', r.slug)); }   // matched → its initiative
+      row.appendChild(meta);
       body.appendChild(row);
     });
     liveNowEl.appendChild(body);
+    if(extra > 0){
+      var more = el('button', 'ln-more');
+      more.type = 'button';
+      more.textContent = expanded ? '▾ show fewer' : ('＋' + extra + ' more ▸');
+      more.addEventListener('click', function(){
+        setLiveNowExpanded(!expanded);
+        renderLiveNow();
+      });
+      liveNowEl.appendChild(more);
+    }
   }
 
   // The sticky cross-repo triage bar: [⚠ Needs you N] [◑ Stalled N] [~ Cooling N] [ All ]. The

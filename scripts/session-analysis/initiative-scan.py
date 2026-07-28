@@ -1946,8 +1946,8 @@ def _num(v, default=0):
 # Live tmux sessions (I/O, optional) — which scratch session hosts an initiative
 # --------------------------------------------------------------------------- #
 def collect_tmux_panes() -> list[dict]:
-    """Every live tmux pane as [{session, window, cwd, command, title}] (empty if no
-    server).
+    """Every live tmux pane as [{session, window, cwd, command, activity_ts, title}]
+    (empty if no server).
 
     Zach runs many named scratchpad tmux sessions in parallel (`8`, `scratch7`,
     `wheat`), each often with SEVERAL windows on DIFFERENT initiatives; a claude pane
@@ -1957,19 +1957,35 @@ def collect_tmux_panes() -> list[dict]:
     disambiguate two initiatives in one session. Best-effort: `_run` returns "" when
     the tmux binary is missing or no server is running, so this yields [] and callers
     degrade to [no session].
+
+    `activity_ts` is `#{window_activity}` — the epoch (seconds) of the pane's window's
+    last activity — parsed to an int so the Live-now strip can sort most-recently-active
+    first and show a per-row freshness age. It is deliberately the LAST fixed field
+    (before the free-text title) so a title containing a literal tab can't shift it; a
+    missing/blank/non-integer value (older tmux without `#{window_activity}`, or a parse
+    failure) degrades to `None` so the sort key is simply absent — never a crash.
     """
     out = _run(["tmux", "list-panes", "-a", "-F",
                 "#{session_name}\t#{window_index}\t#{pane_current_path}"
-                "\t#{pane_current_command}\t#{pane_title}"])
+                "\t#{pane_current_command}\t#{window_activity}\t#{pane_title}"])
     panes: list[dict] = []
     for ln in out.splitlines():
         if not ln.strip():
             continue
         parts = ln.split("\t")
-        while len(parts) < 5:
+        while len(parts) < 6:
             parts.append("")
-        panes.append({"session": parts[0], "window": parts[1], "cwd": parts[2],
-                      "command": parts[3], "title": parts[4]})
+        # Fields 0-4 are tab-free (session/window/cwd/command/window_activity); the title
+        # is last and may itself contain tabs, so re-join the remainder rather than truncate.
+        session, window, cwd, command, act_raw = parts[0], parts[1], parts[2], parts[3], parts[4]
+        title = "\t".join(parts[5:])
+        act = (act_raw or "").strip()
+        try:
+            activity_ts: int | None = int(act) if act else None
+        except ValueError:
+            activity_ts = None
+        panes.append({"session": session, "window": window, "cwd": cwd,
+                      "command": command, "activity_ts": activity_ts, "title": title})
     return panes
 
 
@@ -2098,6 +2114,10 @@ def match_tmux_to_initiatives(initiatives: list[dict], panes: list[dict],
     for ini in initiatives:
         ini.setdefault("tmux_sessions", set())
         ini.setdefault("tmux_tasks", [])
+        # Parallel `{task: activity_ts}` overlay (first-write-wins, aligned with the
+        # tmux_tasks dedup) so a viewer can sort each live task by its pane's freshness
+        # WITHOUT changing the back-compat `tmux_tasks` string list. Missing → absent.
+        ini.setdefault("tmux_task_activity", {})
     by_repo: dict[str, list[dict]] = {}
     for ini in initiatives:
         by_repo.setdefault(ini["repo"], []).append(ini)
@@ -2115,10 +2135,12 @@ def match_tmux_to_initiatives(initiatives: list[dict], panes: list[dict],
             task = (pane.get("title") or "").strip()
             if task and task not in ini["tmux_tasks"]:
                 ini["tmux_tasks"].append(task)
+                ini["tmux_task_activity"][task] = pane.get("activity_ts")
         elif pane.get("command", "") == "claude":
             unmatched.append({"id": pane_id(pane, codenames),
                               "title": pane.get("title", ""),
-                              "repo": repo})
+                              "repo": repo,
+                              "activity_ts": pane.get("activity_ts")})
     return unmatched
 
 

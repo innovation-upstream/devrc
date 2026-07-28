@@ -1053,6 +1053,55 @@ def test_match_tmux_same_window_dedups():
     assert inis[0]["tmux_sessions"] == {"main:8-2"}
 
 
+def test_match_tmux_threads_activity_ts_to_matched_and_unmatched():
+    # activity_ts flows onto BOTH a matched task (via tmux_task_activity) AND the unmatched entry.
+    devrc = "/home/u/workspace/devrc"
+    inis = [{"slug": "clawgate-chat-polish", "title": "clawgate chat polish", "repo": devrc}]
+    panes = [
+        {"session": "1", "window": "3", "cwd": devrc, "command": "claude",
+         "title": "clawgate chat polish soak", "activity_ts": 1722000500},
+        {"session": "scratchX", "window": "1", "cwd": devrc, "command": "claude",
+         "title": "brand new unrelated thread", "activity_ts": 1722000900},
+    ]
+    unmatched = isc.match_tmux_to_initiatives(inis, panes, [devrc])
+    assert inis[0]["tmux_tasks"] == ["clawgate chat polish soak"]
+    assert inis[0]["tmux_task_activity"] == {"clawgate chat polish soak": 1722000500}
+    assert len(unmatched) == 1
+    assert unmatched[0]["title"] == "brand new unrelated thread"
+    assert unmatched[0]["activity_ts"] == 1722000900
+
+
+def test_match_tmux_missing_activity_ts_threads_none():
+    # A pane dict without activity_ts (older tmux / degraded read) threads None, never KeyErrors.
+    devrc = "/home/u/workspace/devrc"
+    inis = [{"slug": "clawgate-chat-polish", "title": "clawgate chat polish", "repo": devrc}]
+    panes = [
+        {"session": "1", "window": "3", "cwd": devrc, "command": "claude",
+         "title": "clawgate chat polish soak"},                      # no activity_ts key
+        {"session": "scratchX", "window": "1", "cwd": devrc, "command": "claude",
+         "title": "unrelated thread"},                               # no activity_ts key
+    ]
+    unmatched = isc.match_tmux_to_initiatives(inis, panes, [devrc])
+    assert inis[0]["tmux_task_activity"] == {"clawgate chat polish soak": None}
+    assert unmatched[0]["activity_ts"] is None
+
+
+def test_match_tmux_task_activity_first_write_wins():
+    # Two panes with the SAME matched task text: tmux_tasks dedups to one, and its activity_ts
+    # is the FIRST pane's (aligned with the insertion-ordered dedup).
+    civit = "/home/u/workspace/civit/dp"
+    inis = [{"slug": "sysredis-buffer", "title": "sysRedis buffer", "repo": civit}]
+    panes = [
+        {"session": "8", "window": "2", "cwd": civit, "command": "claude",
+         "title": "Continue sysredis buffer work", "activity_ts": 111},
+        {"session": "8", "window": "2", "cwd": civit, "command": "claude",
+         "title": "Continue sysredis buffer work", "activity_ts": 999},
+    ]
+    isc.match_tmux_to_initiatives(inis, panes, [civit])
+    assert inis[0]["tmux_tasks"] == ["Continue sysredis buffer work"]
+    assert inis[0]["tmux_task_activity"] == {"Continue sysredis buffer work": 111}
+
+
 def test_pane_id_formats_session_window():
     # Un-codenamed session -> marked main: (persistent "main tmux").
     assert isc.pane_id({"session": "8", "window": "1"}) == "main:8-1"
@@ -1127,15 +1176,52 @@ def test_tmux_session_sort_key_handles_main_and_codename_ids():
 # collect_tmux_panes — parsing the tab-delimited tmux output
 # --------------------------------------------------------------------------- #
 def test_collect_tmux_panes_parses_and_handles_empty_title(monkeypatch):
-    out = ("1\t1\t/home/u/workspace/devrc\tclaude\tContinue clawgate loop\n"
-           "scratch5\t2\t/home/u/taxes/2025\tzsh\t\n")  # empty title -> ""
+    # Fields: session, window, cwd, command, window_activity, title.
+    out = ("1\t1\t/home/u/workspace/devrc\tclaude\t1721990000\tContinue clawgate loop\n"
+           "scratch5\t2\t/home/u/taxes/2025\tzsh\t1721980000\t\n")  # empty title -> ""
     monkeypatch.setattr(isc, "_run", lambda cmd, timeout=20.0: out)
     panes = isc.collect_tmux_panes()
     assert panes[0] == {"session": "1", "window": "1",
                         "cwd": "/home/u/workspace/devrc",
-                        "command": "claude", "title": "Continue clawgate loop"}
+                        "command": "claude", "activity_ts": 1721990000,
+                        "title": "Continue clawgate loop"}
     assert panes[1]["window"] == "2"
     assert panes[1]["title"] == ""
+    assert panes[1]["activity_ts"] == 1721980000
+
+
+def test_collect_tmux_panes_parses_window_activity_as_int(monkeypatch):
+    out = "wheat\t3\t/home/u/workspace/civitai\tclaude\t1722000123\tSoak the faro rollout\n"
+    monkeypatch.setattr(isc, "_run", lambda cmd, timeout=20.0: out)
+    (pane,) = isc.collect_tmux_panes()
+    assert pane["activity_ts"] == 1722000123
+    assert isinstance(pane["activity_ts"], int)
+
+
+def test_collect_tmux_panes_missing_or_bad_activity_degrades_to_none(monkeypatch):
+    # Older tmux (no #{window_activity} → blank 5th field) OR a non-integer value must NOT
+    # crash and must degrade to activity_ts=None so the Live-now sort key is simply absent.
+    out = ("a\t1\t/r\tclaude\t\tblank activity\n"          # blank → None
+           "b\t2\t/r\tclaude\tnot-an-int\tbad activity\n"  # non-int → None
+           # An OLD 5-field line (no activity field at all): the 5th field is read as activity
+           # (here 'legacy title' → non-int → None) and the title degrades to "" — never a crash.
+           "c\t3\t/r\tclaude\tlegacy title\n")
+    monkeypatch.setattr(isc, "_run", lambda cmd, timeout=20.0: out)
+    panes = isc.collect_tmux_panes()
+    assert [p["activity_ts"] for p in panes] == [None, None, None]
+    assert panes[0]["title"] == "blank activity"
+    assert panes[1]["title"] == "bad activity"
+    assert panes[2]["title"] == ""   # 5-field legacy line: no crash, title empty
+
+
+def test_collect_tmux_panes_title_with_tab_is_preserved(monkeypatch):
+    # The title is the LAST field and may contain a literal tab; it must be re-joined, not
+    # truncated, and must not shift the (tab-free) activity field.
+    out = "s\t1\t/r\tclaude\t1722000000\ttask\twith\ttabs\n"
+    monkeypatch.setattr(isc, "_run", lambda cmd, timeout=20.0: out)
+    (pane,) = isc.collect_tmux_panes()
+    assert pane["activity_ts"] == 1722000000
+    assert pane["title"] == "task\twith\ttabs"
 
 
 def test_collect_tmux_panes_empty_when_no_server(monkeypatch):
