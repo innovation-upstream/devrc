@@ -2462,3 +2462,389 @@ def test_regression_ask_and_store_error_paths_intact():
     err = viewer.render_html(None, "OperationalError: connection refused")
     assert "store unreachable" in err
     assert 'id="triage"' not in err   # the error page has no triage bar / SPA
+
+
+# =========================================================================== #
+# Phase 2 — the archive / done lifecycle (manual done/drop + resurface + Done view).
+# =========================================================================== #
+
+# --- build_model: suppression + resurface + the Done-view list -------------- #
+def _archived_row(slug, archived_at, *, repo="/home/zach/workspace/devrc",
+                  title="", reason="done"):
+    return {"repo": repo, "slug": slug, "title": title, "reason": reason,
+            "archived_at": archived_at}
+
+
+def test_build_model_suppresses_archived_with_no_new_activity():
+    # 'gone' was archived AFTER its last activity → last_touch <= archived_at → hidden from the
+    # board, the flat stream, and the counts. 'live' is untouched.
+    rows = [_row(slug="live", last_touch=NOW - timedelta(hours=1)),
+            _row(slug="gone", last_touch=NOW - timedelta(days=3))]
+    archived = [_archived_row("gone", NOW - timedelta(days=1), title="Gone")]
+    model = viewer.build_model(rows, now=NOW, archived=archived)
+    slugs = [v["slug"] for v in model["flat"]]
+    assert slugs == ["live"]                      # 'gone' suppressed
+    assert model["total"] == 1                    # count excludes the suppressed card
+    # and it is absent from every repo group too
+    grouped = [v["slug"] for g in model["repos"] for v in g["initiatives"]]
+    assert "gone" not in grouped
+
+
+def test_build_model_resurfaces_archived_card_on_new_activity():
+    # 'back' has activity STRICTLY newer than when it was archived → it resurfaces on the board.
+    rows = [_row(slug="back", last_touch=NOW - timedelta(hours=1))]
+    archived = [_archived_row("back", NOW - timedelta(days=1))]
+    model = viewer.build_model(rows, now=NOW, archived=archived)
+    assert [v["slug"] for v in model["flat"]] == ["back"]
+    assert model["total"] == 1
+
+
+def test_build_model_boundary_last_touch_equals_archived_at_is_suppressed():
+    # last_touch == archived_at → NOT strictly newer → still suppressed (resurface is '>').
+    at = NOW - timedelta(days=1)
+    rows = [_row(slug="edge", last_touch=at)]
+    model = viewer.build_model(rows, now=NOW, archived=[_archived_row("edge", at)])
+    assert model["flat"] == []
+
+
+def test_build_model_store_unreachable_suppresses_nothing():
+    rows = [_row(slug="a"), _row(slug="b")]
+    # archived=None (the read failed / store had nothing) → nothing hidden, board renders.
+    model = viewer.build_model(rows, now=NOW, archived=None)
+    assert {v["slug"] for v in model["flat"]} == {"a", "b"}
+    assert model["archived"] == []
+
+
+def test_build_model_archived_view_includes_aged_out_card_newest_first():
+    # The Done view carries the FULL archived set — including 'aged' which is NOT in `latest`
+    # (so its title is sourced from the archived row) — sorted newest archived_at first.
+    rows = [_row(slug="present", last_touch=NOW - timedelta(days=5))]
+    archived = [
+        _archived_row("present", NOW - timedelta(days=2), title="Present", reason="done"),
+        _archived_row("aged", NOW - timedelta(days=1), title="Aged out", reason="dropped"),
+    ]
+    model = viewer.build_model(rows, now=NOW, archived=archived)
+    done = model["archived"]
+    assert [a["slug"] for a in done] == ["aged", "present"]   # newest archived_at first
+    aged = done[0]
+    assert aged["title"] == "Aged out" and aged["reason"] == "dropped"
+    assert aged["repo_name"] == "devrc" and aged["archived_age"]   # rendered label present
+    assert model["total"] == 0                                    # 'present' is suppressed
+
+
+def test_model_to_json_carries_archived_list():
+    rows = [_row(slug="x", last_touch=NOW - timedelta(days=5))]
+    archived = [_archived_row("x", NOW - timedelta(days=1), title="X")]
+    payload = viewer.model_to_json(viewer.build_model(rows, now=NOW, archived=archived), None)
+    assert payload["ok"] is True
+    assert [a["slug"] for a in payload["archived"]] == ["x"]
+    assert payload["flat"] == []                               # suppressed off the board
+    # the error payload still has an archived key (so the client never reads undefined)
+    assert viewer.model_to_json(None, "boom")["archived"] == []
+
+
+# --- DataProvider normalizes the (rows, archived) loader shape --------------- #
+def test_provider_threads_archived_from_tuple_loader():
+    rows = [_row(slug="p", last_touch=NOW - timedelta(days=5))]
+    archived = [_archived_row("p", NOW - timedelta(days=1), title="P")]
+    prov = viewer.DataProvider(ttl=60, loader=lambda: (rows, archived),
+                               tmux=lambda r: True, now_fn=lambda: NOW)
+    model, err = prov.snapshot()
+    assert err is None
+    assert model["flat"] == []                                # suppressed
+    assert [a["slug"] for a in model["archived"]] == ["p"]
+
+
+def test_provider_legacy_list_loader_still_works():
+    # A loader that returns just rows (no archived) → archived=[] → nothing suppressed.
+    prov = viewer.DataProvider(ttl=60, loader=lambda: [_row(slug="q")],
+                               tmux=lambda r: True, now_fn=lambda: NOW)
+    model, err = prov.snapshot()
+    assert err is None and [v["slug"] for v in model["flat"]] == ["q"]
+    assert model["archived"] == []
+
+
+# --- _parse_archive_body ----------------------------------------------------- #
+def test_parse_archive_body_extracts_fields():
+    body = json.dumps({"repo": " /r ", "slug": " s ", "reason": " dropped "}).encode()
+    assert viewer._parse_archive_body(body) == ("/r", "s", "dropped")
+
+
+def test_parse_archive_body_missing_and_bad():
+    assert viewer._parse_archive_body(None) == ("", "", "")
+    assert viewer._parse_archive_body(b"not json") == ("", "", "")
+    assert viewer._parse_archive_body(json.dumps({"repo": "/r"}).encode()) == ("/r", "", "")
+
+
+# --- POST /api/archive + /api/unarchive routes (injected archiver) ----------- #
+def _archive_provider(slug="arch-slug"):
+    model = viewer.build_model([_row(slug=slug)], now=NOW)
+    return _FakeProviderWithInvalidate(model=model)
+
+
+def _archive_body(repo, slug, reason=None):
+    b = {"repo": repo, "slug": slug}
+    if reason is not None:
+        b["reason"] = reason
+    return json.dumps(b).encode("utf-8")
+
+
+def test_route_archive_happy_path_200_and_invalidates():
+    prov = _archive_provider()
+    seen = {}
+
+    def archiver(repo, slug, title, reason):
+        seen.update(repo=repo, slug=slug, title=title, reason=reason)
+        return {"ok": True}
+
+    status, ctype, body = viewer.route_request(
+        "/api/archive", prov, method="POST",
+        body=_archive_body("/home/zach/workspace/devrc", "arch-slug", "done"),
+        archiver=archiver)
+    assert status == 200 and json.loads(body) == {"ok": True}
+    assert prov.invalidated == 1                       # the card drops from the board at once
+    assert seen["slug"] == "arch-slug"
+    assert seen["reason"] == "done"
+    assert seen["title"] == "Initiatives consolidation Phase 3"   # resolved from the snapshot
+
+
+def test_route_archive_resolves_title_and_defaults_reason_to_done():
+    prov = _archive_provider()
+    seen = {}
+
+    def archiver(repo, slug, title, reason):
+        seen["reason"] = reason
+        return {"ok": True}
+
+    # no reason in the body → the route substitutes "done"
+    viewer.route_request("/api/archive", prov, method="POST",
+                         body=_archive_body("devrc", "arch-slug"), archiver=archiver)
+    assert seen["reason"] == "done"
+
+
+def test_route_archive_drop_passes_reason_dropped():
+    prov = _archive_provider()
+    seen = {}
+    viewer.route_request("/api/archive", prov, method="POST",
+                         body=_archive_body("devrc", "arch-slug", "dropped"),
+                         archiver=lambda r, s, t, reason: seen.update(reason=reason) or {"ok": True})
+    assert seen["reason"] == "dropped"
+
+
+def test_route_archive_matches_on_repo_name_too():
+    prov = _archive_provider()
+    status, _c, body = viewer.route_request(
+        "/api/archive", prov, method="POST",
+        body=_archive_body("devrc", "arch-slug", "done"),   # short repo_name, not full path
+        archiver=lambda r, s, t, reason: {"ok": True})
+    assert status == 200 and json.loads(body)["ok"] is True
+
+
+def test_route_archive_400_on_missing_fields():
+    prov = _archive_provider()
+    status, _c, body = viewer.route_request(
+        "/api/archive", prov, method="POST", body=_archive_body("", ""),
+        archiver=lambda r, s, t, reason: {"ok": True})
+    assert status == 400 and json.loads(body)["ok"] is False
+    assert prov.invalidated == 0
+
+
+def test_route_archive_502_on_store_failure():
+    prov = _archive_provider()
+    status, _c, body = viewer.route_request(
+        "/api/archive", prov, method="POST",
+        body=_archive_body("devrc", "arch-slug"),
+        archiver=lambda r, s, t, reason: {"ok": False, "error": "OperationalError"})
+    assert status == 502 and json.loads(body)["error"] == "OperationalError"
+    assert prov.invalidated == 0                       # nothing changed → don't drop the cache
+
+
+def test_route_archive_502_when_archiver_raises():
+    prov = _archive_provider()
+
+    def boom(repo, slug, title, reason):
+        raise RuntimeError("kaboom")
+
+    status, _c, body = viewer.route_request(
+        "/api/archive", prov, method="POST",
+        body=_archive_body("devrc", "arch-slug"), archiver=boom)
+    assert status == 502                               # never a 500 — wrapped like /api/dispatch
+    assert json.loads(body)["ok"] is False
+
+
+def test_route_archive_works_even_when_title_not_in_snapshot():
+    # archiving a slug not present in the current snapshot → title resolves to "" (no crash).
+    prov = _archive_provider(slug="something-else")
+    seen = {}
+    status, _c, _b = viewer.route_request(
+        "/api/archive", prov, method="POST",
+        body=_archive_body("devrc", "arch-slug"),
+        archiver=lambda r, s, t, reason: seen.update(title=t) or {"ok": True})
+    assert status == 200 and seen["title"] == ""
+
+
+def test_route_archive_lazy_load_used_when_no_archiver(monkeypatch):
+    prov = _archive_provider()
+    seen = {}
+
+    class _FakeArchiveMod:
+        @staticmethod
+        def archive(repo, slug, title, reason):
+            seen.update(slug=slug, reason=reason)
+            return {"ok": True}
+
+    monkeypatch.setattr(viewer, "_archive", lambda: _FakeArchiveMod)
+    status, _c, body = viewer.route_request(
+        "/api/archive", prov, method="POST",
+        body=_archive_body("devrc", "arch-slug", "dropped"))   # archiver defaults None → lazy
+    assert status == 200 and json.loads(body) == {"ok": True}
+    assert seen == {"slug": "arch-slug", "reason": "dropped"}
+
+
+def test_route_unarchive_happy_path_200_and_invalidates():
+    prov = _archive_provider()
+    seen = {}
+    status, _c, body = viewer.route_request(
+        "/api/unarchive", prov, method="POST",
+        body=_archive_body("devrc", "arch-slug"),
+        unarchiver=lambda r, s: seen.update(repo=r, slug=s) or {"ok": True})
+    assert status == 200 and json.loads(body) == {"ok": True}
+    assert prov.invalidated == 1 and seen["slug"] == "arch-slug"
+
+
+def test_route_unarchive_400_on_missing_fields():
+    prov = _archive_provider()
+    status, _c, body = viewer.route_request(
+        "/api/unarchive", prov, method="POST", body=_archive_body("", ""),
+        unarchiver=lambda r, s: {"ok": True})
+    assert status == 400 and json.loads(body)["ok"] is False
+
+
+def test_route_unarchive_502_on_failure_and_never_500_on_raise():
+    prov = _archive_provider()
+    status, _c, _b = viewer.route_request(
+        "/api/unarchive", prov, method="POST",
+        body=_archive_body("devrc", "arch-slug"),
+        unarchiver=lambda r, s: {"ok": False, "error": "boom"})
+    assert status == 502
+
+    def raiser(r, s):
+        raise RuntimeError("x")
+    status2, _c2, body2 = viewer.route_request(
+        "/api/unarchive", prov, method="POST",
+        body=_archive_body("devrc", "arch-slug"), unarchiver=raiser)
+    assert status2 == 502 and json.loads(body2)["ok"] is False
+
+
+# --- JS: node-eval the Phase-2 pure predicates (dropEligible + matchArchived) - #
+def _node_drop_eligible(views):
+    node = _shutil.which("node")
+    if not node:
+        import pytest
+        pytest.skip("node not on PATH — dropEligible JS untested this run")
+    body = (
+        "var VIEWS = " + json.dumps(views) + ";\n"
+        "console.log(JSON.stringify(VIEWS.filter(dropEligible)"
+        ".map(function(v){ return v.slug; })));"
+    )
+    out = _subprocess.run([node, "-e", viewer._ARCHIVE_JS + "\n" + body],
+                          capture_output=True, text=True, timeout=30)
+    assert out.returncode == 0, out.stderr
+    return json.loads(out.stdout)
+
+
+def test_js_drop_eligible_only_stalled_and_slowing():
+    views = [{"slug": "n", "state": "needs_you"}, {"slug": "s", "state": "stalled"},
+             {"slug": "w", "state": "slowing"}, {"slug": "a", "state": "active"},
+             {"slug": "u"}]   # no state → not drop-eligible
+    assert _node_drop_eligible(views) == ["s", "w"]
+
+
+def _node_match_archived(rows, q):
+    node = _shutil.which("node")
+    if not node:
+        import pytest
+        pytest.skip("node not on PATH — matchArchived JS untested this run")
+    body = (
+        "var ROWS = " + json.dumps(rows) + ";\n"
+        "var Q = (" + json.dumps(q) + ").trim().toLowerCase();\n"
+        "console.log(JSON.stringify(ROWS.filter(function(a){ return matchArchived(a, Q); })"
+        ".map(function(a){ return a.slug; })));"
+    )
+    out = _subprocess.run([node, "-e", viewer._ARCHIVE_JS + "\n" + body],
+                          capture_output=True, text=True, timeout=30)
+    assert out.returncode == 0, out.stderr
+    return json.loads(out.stdout)
+
+
+def test_js_match_archived_filters_done_view():
+    rows = [{"slug": "clawgate", "title": "release cut", "reason": "done",
+             "repo_name": "devrc"},
+            {"slug": "mail", "title": "invoice archiver", "reason": "dropped",
+             "repo_name": "devrc"}]
+    assert _node_match_archived(rows, "") == ["clawgate", "mail"]     # empty → all
+    assert _node_match_archived(rows, "release") == ["clawgate"]      # title
+    assert _node_match_archived(rows, "dropped") == ["mail"]          # reason
+    assert _node_match_archived(rows, "MAIL") == ["mail"]             # case-insensitive slug
+    assert _node_match_archived(rows, "nope") == []
+
+
+# --- JS wiring markers (the DOM code that isn't a pure node-eval predicate) --- #
+def test_js_archive_actions_and_snippet_wired():
+    js = viewer._JS
+    assert "__ARCHIVE_JS__" not in js                              # snippet inlined
+    assert js.count("function dropEligible") == 1
+    assert js.count("function matchArchived") == 1
+    # every card gets [✓ done]; stalled/cooling ALSO get [drop] via dropEligible(v)
+    assert "'archive-btn done', '✓ done'" in js
+    assert "if(dropEligible(v)){" in js
+    assert "'archive-btn drop', 'drop'" in js
+    assert "archiveCard(v, doneBtn, astat, 'done', c)" in js
+    assert "archiveCard(v, dropBtn, astat, 'dropped', c)" in js
+    # the write endpoints + never-clobber-on-failure retry
+    assert "fetch('/api/archive'" in js
+    assert "fetch('/api/unarchive'" in js
+    assert "function archiveCard(" in js and "function unarchiveCard(" in js
+    # the dispatch button is preserved alongside the new actions
+    assert "fetch('/api/dispatch'" in js
+
+
+def test_js_done_chip_and_view_wired():
+    js = viewer._JS
+    assert "state.doneMode" in js
+    assert "'✓ Done ' + archivedN" in js                           # the [✓ Done N] chip
+    assert "chip state-done" in js
+    assert "function renderDoneView(" in js
+    assert "if(state.doneMode){ renderDoneView(q)" in js           # render branches into it
+    assert "data.archived" in js
+    assert "'↺ unarchive'" in js                                   # the Done-view restore button
+    assert "N archived" not in js and "' archived'" in js          # the header stat
+
+
+# --- render smoke: an archived+suppressed card is absent, resurfaced present -- #
+def test_render_smoke_archive_suppression_and_done_chip_count():
+    rows = [_row(slug="visible-active", last_touch=NOW - timedelta(hours=1)),
+            _row(slug="suppressed-done", last_touch=NOW - timedelta(days=4)),
+            _row(slug="resurfaced-one", last_touch=NOW - timedelta(hours=2))]
+    archived = [
+        # suppressed: archived AFTER its last activity → hidden
+        _archived_row("suppressed-done", NOW - timedelta(days=1), title="Suppressed"),
+        # resurfaced: archived BEFORE its (newer) last activity → shows on the board
+        _archived_row("resurfaced-one", NOW - timedelta(days=1), title="Resurfaced"),
+    ]
+    model = viewer.build_model(rows, now=NOW, archived=archived)
+    html = viewer.render_html(model, None)
+    assert html.startswith("<!doctype html>")                      # rendered, no exception
+    # the JSON island (the board data) omits the suppressed card and keeps the resurfaced one
+    island = html.split('id="idata" type="application/json">')[1].split("</script>")[0]
+    payload = json.loads(island.replace("\\u003c", "<").replace("\\u003e", ">")
+                         .replace("\\u0026", "&").replace("\\u2028", " ").replace("\\u2029", " "))
+    board_slugs = {v["slug"] for v in payload["flat"]}
+    assert "suppressed-done" not in board_slugs                    # suppressed absent from board
+    assert "resurfaced-one" in board_slugs                         # resurfaced present on board
+    assert "visible-active" in board_slugs
+    assert payload["total"] == 2                                   # counts exclude the suppressed
+    # The Done view is the FULL archived set (list_archived) — the resurfaced card keeps its
+    # harmless stale row (never auto-deleted), so it appears in BOTH the board and Done; the
+    # chip count is len(archived). Sorted newest archived_at first (slug tiebreak on equal ts).
+    assert [a["slug"] for a in payload["archived"]] == ["resurfaced-one", "suppressed-done"]

@@ -84,6 +84,11 @@ NEXTSTEP_PATH = Path(__file__).resolve().parent / "nextstep.py"
 # token lives here (LAN-bound, Zach's user), NOT in the in-cluster devpod. Loaded lazily.
 DISPATCH_PATH = Path(__file__).resolve().parent / "dispatch.py"
 
+# The standalone archived-lifecycle store (POST /api/archive + /api/unarchive → the board's
+# manual "done / drop" cleanup). Viewer-side ONLY (full mailbox creds, same path as the
+# assistant-log write). Loaded lazily by explicit importlib path (the sibling convention).
+ARCHIVE_PATH = Path(__file__).resolve().parent / "archive.py"
+
 # The sync wrapper the ↻ refresh button shells out to (it already does the nix-shell +
 # sops cred decrypt + scan + store write). Running it as a subprocess sidesteps the
 # `systemctl --user`-from-a-service dbus/XDG_RUNTIME_DIR complexity.
@@ -211,6 +216,25 @@ def _dispatch():
         spec.loader.exec_module(mod)
         _dispatch_mod = mod
     return _dispatch_mod
+
+
+_archive_mod = None
+
+
+def _archive():
+    """Load the standalone archived-lifecycle sibling (`archive.py`) by EXPLICIT importlib path
+    (same convention as `_dispatch`). Lazy so a viewer that never archives pays nothing and
+    doesn't need archive.py present at import; `archive.archive/unarchive/read_archived` back
+    the POST /api/archive + /api/unarchive endpoints and the board's read-time join."""
+    global _archive_mod
+    if _archive_mod is None:
+        spec = importlib.util.spec_from_file_location("initiatives_viewer_archive", ARCHIVE_PATH)
+        if spec is None or spec.loader is None:
+            raise ImportError(f"cannot load {ARCHIVE_PATH}")
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        _archive_mod = mod
+    return _archive_mod
 
 
 # The sibling read-only Q&A assistant (POST /api/ask). Loaded by EXPLICIT importlib path
@@ -350,14 +374,20 @@ def build_stream_asker(provider, env=None):
 # --------------------------------------------------------------------------- #
 # I/O — read the store, then attach the live tmux overlay.
 # --------------------------------------------------------------------------- #
-def load_latest() -> list[dict]:
-    """Read the current initiatives from `initiatives.latest` → list of row dicts.
+def load_latest() -> tuple[list[dict], list[dict]]:
+    """Read the current initiatives from `initiatives.latest` → `(rows, archived)`.
 
     Prefers the `latest` view (newest snapshot only, no ghosts). If that view doesn't
     exist yet (before the next sync recreates the schema), transparently falls back to
     an inline `WHERE snapshot_id=(SELECT max(id) …)` query over the base table — the
     same rows the view would return. Raises on an unreachable store; the provider turns
-    that into a graceful error page rather than crashing the server."""
+    that into a graceful error page rather than crashing the server.
+
+    `archived` is the standalone `initiatives.archived` set, read on the SAME connection
+    (like `attach_recaps`) so the board opens no second port-forward. It's BEST-EFFORT: a
+    missing table / read hiccup degrades to `[]` (nothing suppressed, board still renders);
+    only the `latest`/base read raises. `build_model` joins it in to suppress archived cards
+    and to feed the Done view."""
     import psycopg2
     import psycopg2.extras
 
@@ -385,7 +415,13 @@ def load_latest() -> list[dict]:
                 )
                 rows = [dict(r) for r in cur.fetchall()]
             attach_recaps(db.conn, rows)
-            return rows
+            # The archived set, read on the SAME connection (best-effort → [] on any hiccup,
+            # so a store that has never been archived-into still renders the full board).
+            try:
+                archived = _archive().read_archived(db.conn)
+            except Exception:  # noqa: BLE001 - archived read is additive; never break load
+                archived = []
+            return rows, archived
 
 
 def _present_columns(cur, relation: str, wanted: list[str]) -> list[str]:
@@ -901,8 +937,66 @@ def build_live_unmatched(unmatched) -> list[dict]:
     return out
 
 
+def _archived_map(archived) -> dict[tuple, datetime | None]:
+    """`archived` rows -> `{(repo, slug): archived_at}` (UTC-coerced). A non-list (a loader
+    that couldn't read the set) yields `{}` → nothing suppressed. PURE + defensive."""
+    out: dict[tuple, datetime | None] = {}
+    if not isinstance(archived, list):
+        return out
+    for a in archived:
+        if not isinstance(a, dict):
+            continue
+        out[(a.get("repo"), a.get("slug"))] = _as_utc(a.get("archived_at"))
+    return out
+
+
+def _is_suppressed(row: dict, archived_map: dict) -> bool:
+    """A card is SUPPRESSED from the board iff it is archived AND has had no new activity
+    since it was archived (`last_touch <= archived_at`). If `last_touch > archived_at` the
+    initiative RESURFACES (not suppressed) — archive means "done for now", not "delete". An
+    archived row with no usable `archived_at` (None) stays suppressed (best it can do). PURE."""
+    arch_at = archived_map.get((row.get("repo"), row.get("slug")), "__absent__")
+    if arch_at == "__absent__":
+        return False   # not archived
+    if arch_at is None:
+        return True    # archived but no timestamp → keep it suppressed
+    last_touch = _as_utc(row.get("last_touch"))
+    if last_touch is None:
+        return True    # archived, no activity signal → suppressed
+    return last_touch <= arch_at   # resurface iff activity is STRICTLY newer than the archive
+
+
+def build_archived_view(archived, now: datetime) -> list[dict]:
+    """PURE: the `initiatives.archived` rows -> the Done view's render list (newest archived
+    first). Each row carries a repo label + a relative "archived Xd ago" age. Untrusted text
+    (title/slug/reason) is rendered via textContent in the JS, like every other card. A
+    non-list input yields `[]`."""
+    if not isinstance(archived, list):
+        return []
+    out: list[dict] = []
+    for a in archived:
+        if not isinstance(a, dict):
+            continue
+        arch_at = _as_utc(a.get("archived_at"))
+        out.append({
+            "repo": a.get("repo") or "",
+            "repo_name": _short_repo(a.get("repo")),
+            "slug": a.get("slug") or "(no slug)",
+            "title": (a.get("title") or "").strip(),
+            "reason": (a.get("reason") or "").strip(),
+            "archived_at": arch_at,
+            "archived_age": rel_age(arch_at, now) if arch_at else None,
+        })
+    # Newest archived first; a None archived_at sorts last, slug as a stable tiebreak.
+    out.sort(key=lambda a: (
+        -(a["archived_at"].timestamp() if a["archived_at"] else float("-inf")),
+        a["slug"],
+    ))
+    return out
+
+
 def build_model(rows: list[dict], now: datetime | None = None,
-                unmatched=None) -> dict:
+                unmatched=None, archived=None) -> dict:
     """PURE: store rows (+ any attached tmux) -> BOTH a grouped and a flat render model.
 
     `repos` groups initiatives by repo (within a repo: momentum then recency; repos
@@ -912,13 +1006,26 @@ def build_model(rows: list[dict], now: datetime | None = None,
     claude panes that matched NO initiative (from `attach_tmux`), so the board shows ALL
     running threads (the tagged initiatives + the uncovered sessions), not just the tagged
     few. `captured_at` (the snapshot's freshness) drives the footer. An empty row list
-    yields an empty (but well-formed) model — never raises."""
+    yields an empty (but well-formed) model — never raises.
+
+    `archived` is the standalone archived set (Phase 2). Archived cards with no new activity
+    since archiving are SUPPRESSED from `repos`/`flat` (and thus the counts + triage chips);
+    an archived card whose `last_touch` advanced past its `archived_at` RESURFACES. The full
+    archived set (including cards that have aged out of `latest`) rides along as `archived`
+    for the board's Done view. A missing/empty set suppresses nothing."""
     now = now or datetime.now(timezone.utc)
 
+    archived_map = _archived_map(archived)
+
     # The snapshot freshness = the newest captured_at across the rows (they should all
-    # share one snapshot, but max() is robust to a mixed read).
+    # share one snapshot, but max() is robust to a mixed read). Computed over ALL rows
+    # (freshness is a property of the snapshot, independent of per-card suppression).
     captured_ats = [_as_utc(r.get("captured_at")) for r in rows]
     captured_at = max((c for c in captured_ats if c is not None), default=None)
+
+    # Drop archived-not-resurfaced rows BEFORE building views, so they are absent from the
+    # repo groups, the flat stream, and every state count / triage chip consistently.
+    rows = [r for r in rows if not _is_suppressed(r, archived_map)]
 
     views = [_initiative_view(r, now) for r in rows]
 
@@ -953,6 +1060,9 @@ def build_model(rows: list[dict], now: datetime | None = None,
         "repos": repos,
         "flat": flat,
         "live_unmatched": live_unmatched,
+        # The Done view's data (the FULL archived set, newest first) — separate from the
+        # board (`repos`/`flat`), which has the archived cards suppressed.
+        "archived": build_archived_view(archived, now),
     }
 
 
@@ -960,7 +1070,7 @@ def model_to_json(model: dict | None, error: str | None) -> dict:
     """The `/api/initiatives.json` payload (datetimes isoformatted via json default=str)."""
     if error is not None or model is None:
         return {"ok": False, "error": error or "no data", "repos": [], "flat": [],
-                "live_unmatched": []}
+                "live_unmatched": [], "archived": []}
     return {
         "ok": True,
         "generated_at": model["generated_at"],
@@ -971,6 +1081,7 @@ def model_to_json(model: dict | None, error: str | None) -> dict:
         "repos": model["repos"],
         "flat": model["flat"],
         "live_unmatched": model.get("live_unmatched", []),
+        "archived": model.get("archived", []),
     }
 
 
@@ -1253,6 +1364,32 @@ header .meta{color:var(--gray);font-size:.85rem}
 .dispatch-status{margin-left:.5rem;color:var(--gray);font-size:.78rem}
 .dispatch-status.err{color:var(--red)}
 .dispatch-status.ok{color:var(--green)}
+/* Phase-2 card lifecycle actions: [✓ done] (archive) on every card, [drop] on stalled/cooling
+   cards, and [↺ unarchive] in the Done view. Muted by default so they don't compete with the
+   card content; the done tint is green, drop is red, matching the "done vs abandon" semantics. */
+.archive-btn{font:inherit;font-size:.78rem;cursor:pointer;background:var(--bg2);
+  color:var(--fg2);border:1px solid var(--bg2);border-radius:3px;padding:.1rem .5rem}
+.archive-btn:hover:not(:disabled){border-color:var(--fg2)}
+.archive-btn:disabled{cursor:default;opacity:.7}
+.archive-btn.done{color:var(--green)}
+.archive-btn.done:hover:not(:disabled){border-color:var(--green)}
+.archive-btn.drop{color:var(--red)}
+.archive-btn.drop:hover:not(:disabled){border-color:var(--red)}
+.archive-btn.unarchive{color:var(--aqua)}
+.archive-btn.unarchive:hover:not(:disabled){border-color:var(--aqua)}
+.archive-status{margin-left:.4rem;color:var(--gray);font-size:.78rem}
+.archive-status.err{color:var(--red)}
+/* The Done chip (a MODE, not a state filter) + its active tint. */
+.chip.state-done.active{background:var(--green);border-color:var(--green)}
+/* The Done view: the archived list, grouped by repo like the board. */
+.done-head{display:flex;align-items:baseline;gap:.6rem;margin:0 0 1rem}
+.done-head .done-title{font-weight:bold;color:var(--fg)}
+.done-head .done-stat{color:var(--gray);font-size:.85rem}
+.done-card{background:var(--bg1);border-left:3px solid var(--green);border-radius:4px;
+  padding:.55rem .7rem;margin:0 0 .5rem}
+.done-card .reason{font-size:.7rem;color:var(--fg2);background:var(--bg2);border-radius:3px;
+  padding:.02rem .4rem}
+.done-card .reason.reason-dropped{color:var(--red)}
 .detail{margin-top:.5rem;padding-top:.5rem;border-top:1px dotted var(--bg2)}
 .detail-summary{color:var(--fg);font-size:.86rem;margin-bottom:.4rem}
 .detail-h{color:var(--orange);font-size:.8rem;margin:.4rem 0 .15rem;text-transform:uppercase;
@@ -1417,6 +1554,25 @@ function matchState(v, sf){
   if(!sf || sf === 'all') return true;   // "All" (or no filter) → every card
   if(sf === 'live') return !!v && !!v.live;   // Live filters by the overlay badge, not state
   return !!v && v.state === sf;
+}
+""".strip()
+
+
+# PURE, DOM-FREE Phase-2 archive-lifecycle predicates — kept in their OWN snippet (like
+# _STATEFILTER_JS) so the node test evals them directly, exercising the ACTUAL page code.
+# `dropEligible(v)` gates the `[drop]` action to STALLED + SLOWING(cooling) cards only (every
+# card gets `[✓ done]`; only these two also get `[drop]`). `matchArchived(a, q)` is the Done
+# view's search predicate (slug/title/reason/repo). Substituted into _JS at the __ARCHIVE_JS__
+# placeholder at module load; the page calls the SAME functions so the tests aren't a replica.
+_ARCHIVE_JS = r"""
+function dropEligible(v){
+  return !!v && (v.state === 'stalled' || v.state === 'slowing');
+}
+function matchArchived(a, q){
+  if(!q) return true;
+  var hay = ((a && a.slug || '') + ' ' + (a && a.title || '') + ' ' +
+             (a && a.reason || '') + ' ' + (a && a.repo_name || '')).toLowerCase();
+  return hay.indexOf(q) !== -1;
 }
 """.strip()
 
@@ -1652,6 +1808,7 @@ _JS = r"""
 (function(){
   __RECENCY_JS__
   __STATEFILTER_JS__
+  __ARCHIVE_JS__
   __GROUP_JS__
   __MATCH_JS__
   __MARKDOWN_JS__
@@ -1674,7 +1831,10 @@ _JS = r"""
   // Persisted in localStorage; an unknown/legacy value falls back to the grouped default.
   var VALID_VIEWS = {flat:1, grouped:1, recency:1};
   var storedView = localStorage.getItem(VIEW_KEY);
-  var state = { view: VALID_VIEWS[storedView] ? storedView : 'grouped', q: '', triage: '' };
+  // `doneMode` is the Phase-2 "Done" view MODE (the [✓ Done N] chip) — NOT a triage state; it
+  // hides the board and renders the archived list instead. Not persisted (a per-visit view).
+  var state = { view: VALID_VIEWS[storedView] ? storedView : 'grouped', q: '', triage: '',
+                doneMode: false };
   // The catch-all "live sessions" section is collapsible; remember the user's choice.
   // Default EXPANDED (the whole point is to see every running thread) — set to '1' to collapse.
   var unmatchedCollapsed = localStorage.getItem(UNMATCHED_KEY) === '1';
@@ -1763,6 +1923,63 @@ _JS = r"""
       .catch(function(){
         dstat.className = 'dispatch-status err';
         dstat.textContent = 'dispatch failed (network)';
+        btn.disabled = false;
+      });
+  }
+
+  // POST /api/archive {repo, slug, reason} → hide+remember the card (done / drop). On success
+  // the card is removed from the DOM for instant feedback and the board is refetched so the
+  // counts, triage chips, and Done-chip count reconcile (the server now suppresses it). The
+  // write is server-side (mailbox creds); the card resurfaces automatically on new activity.
+  function archiveCard(v, btn, stat, reason, cardEl){
+    btn.disabled = true;
+    stat.className = 'archive-status';
+    stat.textContent = reason === 'dropped' ? 'dropping…' : 'archiving…';
+    fetch('/api/archive', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({repo: v.repo, slug: v.slug, reason: reason})
+    }).then(function(r){ return r.json().then(function(j){ return {ok: r.ok, j: j}; }); })
+      .then(function(res){
+        if(res.ok && res.j && res.j.ok){
+          if(cardEl && cardEl.parentNode) cardEl.parentNode.removeChild(cardEl);
+          refetch();  // re-read → counts/chips/Done-count reconcile (card now suppressed)
+        } else {
+          stat.className = 'archive-status err';
+          stat.textContent = (res.j && res.j.error) || 'archive failed';
+          btn.disabled = false;  // allow a retry on failure
+        }
+      })
+      .catch(function(){
+        stat.className = 'archive-status err';
+        stat.textContent = 'archive failed (network)';
+        btn.disabled = false;
+      });
+  }
+
+  // POST /api/unarchive {repo, slug} → restore an archived initiative to the board (the Done
+  // view's [↺ unarchive]). On success remove the row from the Done view + refetch so it
+  // reappears on the board and the Done-chip count drops.
+  function unarchiveCard(a, btn, stat, rowEl){
+    btn.disabled = true;
+    stat.className = 'archive-status';
+    stat.textContent = 'unarchiving…';
+    fetch('/api/unarchive', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({repo: a.repo, slug: a.slug})
+    }).then(function(r){ return r.json().then(function(j){ return {ok: r.ok, j: j}; }); })
+      .then(function(res){
+        if(res.ok && res.j && res.j.ok){
+          if(rowEl && rowEl.parentNode) rowEl.parentNode.removeChild(rowEl);
+          refetch();
+        } else {
+          stat.className = 'archive-status err';
+          stat.textContent = (res.j && res.j.error) || 'unarchive failed';
+          btn.disabled = false;
+        }
+      })
+      .catch(function(){
+        stat.className = 'archive-status err';
+        stat.textContent = 'unarchive failed (network)';
         btn.disabled = false;
       });
   }
@@ -1914,12 +2131,14 @@ _JS = r"""
       c.appendChild(l2);
     }
 
-    // Phase-1 ACTION: the EXISTING dispatch, shown whenever a grounded recommendation exists
-    // (reuses dispatchNextStep + POST /api/dispatch VERBATIM). Two human gates remain: this
-    // button, then "Dispatch" inside clawgate. NO resolve/drop/done/open here (Phase 2/3).
+    // ACTIONS row (always present in Phase 2). Left→right: the EXISTING dispatch (only when a
+    // grounded recommendation exists; reuses dispatchNextStep + POST /api/dispatch VERBATIM),
+    // then [✓ done] (archive — EVERY card), then [drop] (archive reason=dropped — only STALLED +
+    // COOLING cards, via the tested dropEligible predicate). [resolve] for needs_you is Phase 3.
+    var drow = el('div', 'actions');
+    var astat = el('span', 'archive-status');   // shared inline status for the done/drop buttons
     var rec = v.recommended_next_step;
     if(rec && rec.text){
-      var drow = el('div', 'actions');
       var btn = el('button', 'dispatch-btn', '⤴ dispatch');
       btn.title = rec.text + (basisHint(rec.basis) ? '  (' + basisHint(rec.basis) + ')' : '');
       var dstat = el('span', 'dispatch-status');
@@ -1929,8 +2148,27 @@ _JS = r"""
       });
       drow.appendChild(btn);
       drow.appendChild(dstat);
-      c.appendChild(drow);
     }
+    // [✓ done] — archive (done for now; resurfaces on new activity).
+    var doneBtn = el('button', 'archive-btn done', '✓ done');
+    doneBtn.title = 'archive — done for now (reappears if this initiative sees new activity)';
+    doneBtn.addEventListener('click', function(ev){
+      ev.stopPropagation();
+      archiveCard(v, doneBtn, astat, 'done', c);
+    });
+    drow.appendChild(doneBtn);
+    // [drop] — archive as dropped (stalled + cooling only).
+    if(dropEligible(v)){
+      var dropBtn = el('button', 'archive-btn drop', 'drop');
+      dropBtn.title = 'drop — archive this initiative as dropped';
+      dropBtn.addEventListener('click', function(ev){
+        ev.stopPropagation();
+        archiveCard(v, dropBtn, astat, 'dropped', c);
+      });
+      drow.appendChild(dropBtn);
+    }
+    drow.appendChild(astat);
+    c.appendChild(drow);
 
     // Click the card → expand to today's FULL detail (loadDetail fetches /api/initiative).
     var det = el('div', 'detail');
@@ -2015,17 +2253,85 @@ _JS = r"""
       {k:'',          glyph:'',                    label:'All',       n:null}
     ];
     chips.forEach(function(ch){
-      var on = (ch.k === '') ? (active === '' || active === 'all') : (active === ch.k);
+      // A state/live/All chip is only visually active when NOT in Done mode (Done takes over).
+      var on = !state.doneMode &&
+        ((ch.k === '') ? (active === '' || active === 'all') : (active === ch.k));
       var b = el('button', 'chip state-' + (ch.k || 'all') + (on ? ' active' : ''), null);
       b.type = 'button';
       var txt = (ch.glyph ? ch.glyph + ' ' : '') + ch.label + (ch.n != null ? ' ' + ch.n : '');
       b.textContent = txt;
       b.addEventListener('click', function(){
+        state.doneMode = false;   // any board chip exits the Done view
         state.triage = ch.k;
         render();
       });
       triageBar.appendChild(b);
     });
+    // The [✓ Done N] chip — a MODE (not a state filter): it hides the board and renders the
+    // archived list. N = the archived count. No untrusted text.
+    var archivedN = (data.archived || []).length;
+    var donB = el('button', 'chip state-done' + (state.doneMode ? ' active' : ''), null);
+    donB.type = 'button';
+    donB.textContent = '✓ Done ' + archivedN;
+    donB.addEventListener('click', function(){
+      state.doneMode = true;
+      render();
+    });
+    triageBar.appendChild(donB);
+  }
+
+  // The Done view — the archived initiatives (from data.archived, server-sorted newest-first),
+  // grouped by repo like the board. Each row shows title + slug + reason + "archived Xd ago"
+  // and an [↺ unarchive] button. Search (matchArchived) composes. All untrusted text via
+  // textContent (el()). Unarchiving removes the row and refetches (it reappears on the board).
+  function renderDoneView(q){
+    var allArch = data.archived || [];
+    var rows = allArch.filter(function(a){ return matchArchived(a, q); });
+    var head = el('div', 'done-head');
+    head.appendChild(el('span', 'done-title', 'Done · archived'));
+    head.appendChild(el('span', 'done-stat', allArch.length + ' archived'));
+    app.appendChild(head);
+    if(!rows.length){
+      app.appendChild(el('div', 'empty',
+        allArch.length ? 'No archived initiatives match the filter.' : 'Nothing archived yet.'));
+      updateSearchCount(0, allArch.length, !!q);
+      return;
+    }
+    // Group by repo, preserving the server's newest-first order (first-seen repo = most recent).
+    var groups = {}, order = [];
+    rows.forEach(function(a){
+      var name = a.repo_name || '(unknown repo)';
+      if(!groups[name]){ groups[name] = []; order.push(name); }
+      groups[name].push(a);
+    });
+    order.forEach(function(name){
+      var sec = el('section', 'repo');
+      var h = el('h2', null, name);
+      h.appendChild(el('span', 'count', '(' + groups[name].length + ')'));
+      sec.appendChild(h);
+      groups[name].forEach(function(a){
+        var rowEl = el('div', 'done-card');
+        var r1 = el('div', 'row1');
+        r1.appendChild(el('span', 'slug', a.slug || '(no slug)'));
+        if(a.title) r1.appendChild(el('span', 'title', a.title));
+        if(a.reason) r1.appendChild(el('span', 'reason reason-' + a.reason, a.reason));
+        r1.appendChild(el('span', 'age', (a.archived_age ? a.archived_age + ' ago' : '—')));
+        rowEl.appendChild(r1);
+        var act = el('div', 'actions');
+        var ub = el('button', 'archive-btn unarchive', '↺ unarchive');
+        var ustat = el('span', 'archive-status');
+        ub.addEventListener('click', function(ev){
+          ev.stopPropagation();
+          unarchiveCard(a, ub, ustat, rowEl);
+        });
+        act.appendChild(ub);
+        act.appendChild(ustat);
+        rowEl.appendChild(act);
+        sec.appendChild(rowEl);
+      });
+      app.appendChild(sec);
+    });
+    updateSearchCount(rows.length, allArch.length, !!q);
   }
 
   function updateChrome(){
@@ -2076,6 +2382,9 @@ _JS = r"""
     emergingTotal = all.filter(function(v){ return v && v.undocumented; }).length;
 
     renderTriage();
+
+    // Done MODE: hide the board, render the archived list instead (search still composes).
+    if(state.doneMode){ renderDoneView(q); updateChrome(); return; }
 
     // A card is visible iff it matches BOTH the search query AND the triage state (compose).
     function visible(v){ return matchQ(v, q) && matchState(v, sf); }
@@ -2176,13 +2485,15 @@ _JS = r"""
   }
 
   btnFlat.addEventListener('click', function(){
-    state.view = 'flat'; localStorage.setItem(VIEW_KEY, 'flat'); render();
+    state.doneMode = false; state.view = 'flat'; localStorage.setItem(VIEW_KEY, 'flat'); render();
   });
   btnGrouped.addEventListener('click', function(){
-    state.view = 'grouped'; localStorage.setItem(VIEW_KEY, 'grouped'); render();
+    state.doneMode = false; state.view = 'grouped';
+    localStorage.setItem(VIEW_KEY, 'grouped'); render();
   });
   if(btnRecency) btnRecency.addEventListener('click', function(){
-    state.view = 'recency'; localStorage.setItem(VIEW_KEY, 'recency'); render();
+    state.doneMode = false; state.view = 'recency';
+    localStorage.setItem(VIEW_KEY, 'recency'); render();
   });
   // Debounce the filter (~150ms) so a fast typist doesn't re-render the whole board on every
   // keystroke; the input value is the source of truth so the last keystroke always wins.
@@ -2358,6 +2669,7 @@ _JS = r"""
 # node test evals _RECENCY_JS directly, the page runs this substituted copy).
 _JS = _JS.replace("__RECENCY_JS__", _RECENCY_JS)
 _JS = _JS.replace("__STATEFILTER_JS__", _STATEFILTER_JS)
+_JS = _JS.replace("__ARCHIVE_JS__", _ARCHIVE_JS)
 _JS = _JS.replace("__GROUP_JS__", _GROUP_JS)
 _JS = _JS.replace("__MATCH_JS__", _MATCH_JS)
 _JS = _JS.replace("__MARKDOWN_JS__", _MARKDOWN_JS)
@@ -2583,12 +2895,19 @@ class DataProvider:
             if self._cached is not None and (time.monotonic() - self._fetched_at) < self._ttl:
                 return self._cached
             try:
-                rows = self._loader()
+                loaded = self._loader()
+                # load_latest returns `(rows, archived)`; a legacy/injected loader may return
+                # just `rows` (archived → [], nothing suppressed). Normalize either shape.
+                if isinstance(loaded, tuple):
+                    rows, archived = loaded
+                else:
+                    rows, archived = loaded, []
                 # best-effort; mutates rows in place AND returns the live claude panes that
                 # matched no initiative (build_model coerces a non-list to [] → no section).
                 unmatched = self._tmux(rows)
                 result: tuple[dict | None, str | None] = (
-                    build_model(rows, self._now(), unmatched=unmatched), None)
+                    build_model(rows, self._now(), unmatched=unmatched, archived=archived),
+                    None)
             except Exception as exc:  # noqa: BLE001 - any read failure → graceful error page
                 result = (None, f"{type(exc).__name__}: {exc}")
             self._cached = result
@@ -2601,7 +2920,8 @@ class DataProvider:
 # --------------------------------------------------------------------------- #
 def route_request(path: str, provider, method: str = "GET", query: dict | None = None,
                   refresh_controller=None, body: bytes | None = None,
-                  asker=None, dispatcher=None) -> tuple[int, str, bytes]:
+                  asker=None, dispatcher=None, archiver=None,
+                  unarchiver=None) -> tuple[int, str, bytes]:
     """PURE-ish request router: (path, provider, method, query, refresh, body, asker,
     dispatcher) -> (status, content_type, body bytes). Separated from the socket handler so
     it's unit-testable with a fake provider / controller / asker / dispatcher (no server, no
@@ -2679,6 +2999,68 @@ def route_request(path: str, provider, method: str = "GET", query: dict | None =
         return (502, "application/json; charset=utf-8",
                 json.dumps({"ok": False,
                             "error": result.get("error") or "dispatch failed"}).encode("utf-8"))
+
+    if method == "POST" and path == "/api/archive":
+        # ARCHIVE (hide + remember) an initiative — the board's manual "done / drop" cleanup.
+        # Same LAN-trust model as /api/dispatch (no new auth): the viewer binds LAN/localhost
+        # only, and this write goes through the SERVER-SIDE mailbox creds (never the browser).
+        # Unlike a snapshot mutation this is a REVERSIBLE board-state toggle — the card
+        # reappears on new activity, or via the Done view's `[↺ unarchive]`. Wrapped like
+        # /api/dispatch so an archive failure never 500s uncaught (502 on a store failure).
+        repo, slug, reason = _parse_archive_body(body)
+        if not repo or not slug:
+            return (400, "application/json; charset=utf-8",
+                    json.dumps({"ok": False, "error": "missing 'repo'/'slug'"}).encode("utf-8"))
+        # Resolve the card's title from the current snapshot so the Done view can render an
+        # aged-out card later. Best-effort — a title miss just stores "".
+        model, _err = provider.snapshot()
+        flat = (model or {}).get("flat", []) if model else []
+        view = next(
+            (v for v in flat if v.get("slug") == slug
+             and (repo == v.get("repo") or repo == v.get("repo_name"))),
+            None)
+        title = (view or {}).get("title", "") if view else ""
+        try:
+            do_archive = archiver if archiver is not None else _archive().archive
+            result = do_archive(repo, slug, title, reason or "done")
+        except Exception as exc:  # noqa: BLE001 - never let an archive error kill the request
+            sys.stderr.write(f"viewer: /api/archive failed: {type(exc).__name__}: {exc}\n")
+            result = {"ok": False, "error": f"{type(exc).__name__}"}
+        if result.get("ok"):
+            # Drop the provider cache so the archived card leaves the board immediately.
+            try:
+                provider.invalidate()
+            except Exception:  # noqa: BLE001 - a missing invalidate() must not 500
+                pass
+            return (200, "application/json; charset=utf-8",
+                    json.dumps({"ok": True}).encode("utf-8"))
+        return (502, "application/json; charset=utf-8",
+                json.dumps({"ok": False,
+                            "error": result.get("error") or "archive failed"}).encode("utf-8"))
+
+    if method == "POST" and path == "/api/unarchive":
+        # UNARCHIVE (restore to the board) an initiative — the Done view's `[↺ unarchive]`.
+        # Same LAN-trust + wrapped-never-500 contract as /api/archive.
+        repo, slug, _reason = _parse_archive_body(body)
+        if not repo or not slug:
+            return (400, "application/json; charset=utf-8",
+                    json.dumps({"ok": False, "error": "missing 'repo'/'slug'"}).encode("utf-8"))
+        try:
+            do_unarchive = unarchiver if unarchiver is not None else _archive().unarchive
+            result = do_unarchive(repo, slug)
+        except Exception as exc:  # noqa: BLE001 - never let an unarchive error kill the request
+            sys.stderr.write(f"viewer: /api/unarchive failed: {type(exc).__name__}: {exc}\n")
+            result = {"ok": False, "error": f"{type(exc).__name__}"}
+        if result.get("ok"):
+            try:
+                provider.invalidate()
+            except Exception:  # noqa: BLE001 - a missing invalidate() must not 500
+                pass
+            return (200, "application/json; charset=utf-8",
+                    json.dumps({"ok": True}).encode("utf-8"))
+        return (502, "application/json; charset=utf-8",
+                json.dumps({"ok": False,
+                            "error": result.get("error") or "unarchive failed"}).encode("utf-8"))
 
     if method == "POST" and path == "/refresh":
         # Deliberately UNAUTHENTICATED: the viewer binds LAN/localhost only (not the public
@@ -2763,14 +3145,38 @@ def _parse_dispatch_body(body: bytes | None) -> tuple[str, str]:
             slug.strip() if isinstance(slug, str) else "")
 
 
+def _parse_archive_body(body: bytes | None) -> tuple[str, str, str]:
+    """Extract `(repo, slug, reason)` from a JSON POST body for POST /api/archive and
+    /api/unarchive. `reason` is optional (defaults to "" here; the archive route substitutes
+    "done"); a missing repo/slug becomes ("", "", …) → the route 400s. Pure + defensive
+    (mirrors _parse_dispatch_body)."""
+    if not body:
+        return "", "", ""
+    try:
+        obj = json.loads(body.decode("utf-8", errors="replace"))
+    except (ValueError, AttributeError):
+        return "", "", ""
+    if not isinstance(obj, dict):
+        return "", "", ""
+    repo = obj.get("repo")
+    slug = obj.get("slug")
+    reason = obj.get("reason")
+    return (repo.strip() if isinstance(repo, str) else "",
+            slug.strip() if isinstance(slug, str) else "",
+            reason.strip() if isinstance(reason, str) else "")
+
+
 def make_handler(provider, refresh_controller=None, asker=None, stream_asker=None,
-                 dispatcher=None):
+                 dispatcher=None, archiver=None, unarchiver=None):
     """Build a BaseHTTPRequestHandler subclass bound to `provider` + `refresh_controller`
     + `asker` (the READ-ONLY Q&A callable for POST /api/ask; defaults to `default_ask`
     over this provider) + `stream_asker` (the STREAMING generator for POST /api/ask/stream;
     None ⇒ that endpoint 503s) + `dispatcher` (the POST /api/dispatch callable `view ->
-    {ok,task_id,error}`; None ⇒ the route lazily loads `dispatch.dispatch_initiative`). All
-    are injectable so the routes are testable without a model / network / clawgate token."""
+    {ok,task_id,error}`; None ⇒ the route lazily loads `dispatch.dispatch_initiative`) +
+    `archiver`/`unarchiver` (the POST /api/archive + /api/unarchive callables
+    `(repo,slug,...) -> {ok,error}`; None ⇒ the route lazily loads `archive.archive` /
+    `archive.unarchive`). All are injectable so the routes are testable without a model /
+    network / clawgate token / Postgres."""
     if asker is None:
         asker = lambda q: default_ask(q, provider)  # noqa: E731
 
@@ -2784,7 +3190,7 @@ def make_handler(provider, refresh_controller=None, asker=None, stream_asker=Non
                 status, ctype, resp = route_request(
                     parsed.path, provider, method=method, query=query,
                     refresh_controller=refresh_controller, body=body, asker=asker,
-                    dispatcher=dispatcher)
+                    dispatcher=dispatcher, archiver=archiver, unarchiver=unarchiver)
             except Exception as exc:  # noqa: BLE001 - never let a handler error kill the thread
                 status, ctype = 500, "text/plain; charset=utf-8"
                 resp = f"internal error: {type(exc).__name__}: {exc}\n".encode("utf-8")
@@ -2888,7 +3294,8 @@ def serve(host: str, port: int, provider: DataProvider | None = None,
     httpd.daemon_threads = True
     sys.stderr.write(f"viewer: serving on http://{host}:{port}/ "
                      f"(/, /healthz, /api/initiatives.json, /api/initiative, POST /refresh, "
-                     f"POST /api/ask, POST /api/ask/stream, POST /api/dispatch)\n")
+                     f"POST /api/ask, POST /api/ask/stream, POST /api/dispatch, "
+                     f"POST /api/archive, POST /api/unarchive)\n")
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:

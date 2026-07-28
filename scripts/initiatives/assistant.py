@@ -870,9 +870,16 @@ def load_initiatives() -> tuple[list[dict], list[dict]]:
     viewer renders (so the tools operate on one shape). Read-only. Raises on an unreachable
     store (ask() turns that into a graceful error result)."""
     viewer = _viewer()
-    rows = viewer.load_latest()
+    # `load_latest` returns `(rows, archived)`; a legacy/patched build may return just rows.
+    loaded = viewer.load_latest()
+    if isinstance(loaded, tuple):
+        rows, archived = loaded
+    else:
+        rows, archived = loaded, []
     unmatched = viewer.attach_tmux(rows)  # best-effort; mutates rows, returns unmatched panes
-    model = viewer.build_model(rows, unmatched=unmatched)
+    # Thread `archived` through so the assistant sees the SAME board the viewer does (archived-
+    # not-resurfaced initiatives are suppressed from `flat`), keeping the two answers consistent.
+    model = viewer.build_model(rows, unmatched=unmatched, archived=archived)
     return model.get("flat", []), model.get("live_unmatched", [])
 
 
