@@ -2291,12 +2291,24 @@ _JS = r"""
     var k = key({repo: repo, slug: slug});
     // The real view object (so loadDetail/renderDetail get the SAME v the card was built from).
     var v = (data.flat || []).filter(function(x){ return key(x) === k; })[0];
-    var cards = document.querySelectorAll ? document.querySelectorAll('.ini') : [];
-    var target = null;
-    for(var i = 0; i < cards.length; i++){
-      if(cards[i].getAttribute && cards[i].getAttribute('data-key') === k){ target = cards[i]; break; }
+    if(!v) return false;   // no card exists for this session at all — nothing to focus
+    var find = function(){
+      var cards = document.querySelectorAll ? document.querySelectorAll('.ini') : [];
+      for(var i = 0; i < cards.length; i++){
+        if(cards[i].getAttribute && cards[i].getAttribute('data-key') === k) return cards[i];
+      }
+      return null;
+    };
+    var target = find();
+    if(!target){
+      // The card exists in the data but is HIDDEN by an active triage filter / Done mode / search —
+      // a clickable row must never silently no-op, so clear those, re-render, and retry.
+      state.doneMode = false; state.triage = ''; state.q = '';
+      if(typeof searchInput !== 'undefined' && searchInput){ searchInput.value = ''; }
+      if(typeof render === 'function'){ render(); }
+      target = find();
+      if(!target) return false;
     }
-    if(!target) return false;
     // If the card sits in a COLLAPSED grouped repo-section, expand that section first so the card
     // is visible (the card element always exists — only the body's display is toggled).
     var body = target.closest ? target.closest('.repo-body') : null;

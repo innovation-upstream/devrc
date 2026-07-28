@@ -3601,6 +3601,12 @@ def _node_focus_card(view, key, *, collapsed=True, target_key=None, in_flat=True
         "var _loadCalls = [], _setCollapse = [];\n"
         "function loadDetail(v, det){ _loadCalls.push({slug: v && v.slug, repo: v && v.repo, isDetail: det === _det}); }\n"
         "function setRepoCollapsed(name, c){ _setCollapse.push([name, c]); }\n"
+        # Simulate an ACTIVE triage filter / Done mode / search + a render() so focusCard's
+        # "card hidden by a filter" fallback (clear filters, re-render, retry) is exercisable.
+        "var state = {doneMode: true, triage: 'active', q: 'zzz'};\n"
+        "var searchInput = {value: 'zzz'};\n"
+        "var _renderCalls = 0;\n"
+        "function render(){ _renderCalls++; }\n"
         "var _sec = _mk('section'); _sec.className = 'repo collapsible'; _root.appendChild(_sec);\n"
         "var _h2 = _mk('h2'); _h2.dataset.repo = " + json.dumps(view.get("repo_name") or "") + "; _sec.appendChild(_h2);\n"
         "var _chev = _mk('span'); _chev.className = 'chev'; _chev.textContent = " + ("'\\u25b8'" if collapsed else "'\\u25be'") + "; _h2.appendChild(_chev);\n"
@@ -3612,6 +3618,8 @@ def _node_focus_card(view, key, *, collapsed=True, target_key=None, in_flat=True
         " bodyDisplay: _body.style.display, chev: _chev.textContent, expandedSet: !!expanded[" + json.dumps(key) + "],"
         " detailDisplay: _det.style.display, cardOpen: _card.classList.contains('open'),"
         " flash: _card.classList.contains('flash'), scrolled: _card._scrolled,"
+        " stateAfter: {doneMode: state.doneMode, triage: state.triage, q: state.q},"
+        " searchVal: searchInput.value, renderCalls: _renderCalls,"
         " loadCalls: _loadCalls, setCollapse: _setCollapse}));\n"
     )
     out = _subprocess.run([node, "-e", _DOM_SHIM + "\n" + src + "\n" + driver],
@@ -3658,6 +3666,23 @@ def test_focus_card_no_matching_card_is_a_safe_noop():
     r = _node_focus_card(_FVIEW, _FKEY, target_key="/other/repo::nope")
     assert r["ret"] is False
     assert r["expandedSet"] is False and r["setCollapse"] == [] and r["scrolled"] is False
+
+
+def test_focus_card_hidden_by_filter_clears_state_and_rerenders():
+    # The card exists in data.flat but is filtered out of the DOM (active triage chip / Done mode /
+    # search). focusCard must CLEAR those + re-render so the click is never a silent no-op. Here the
+    # card carries a mismatched data-key so it stays "not found" after the (no-op) shim render, but
+    # we assert focusCard cleared the filter state and invoked render() to try to un-hide it.
+    r = _node_focus_card(_FVIEW, _FKEY, target_key="/other/repo::nope")
+    assert r["stateAfter"] == {"doneMode": False, "triage": "", "q": ""}
+    assert r["searchVal"] == "" and r["renderCalls"] == 1
+
+
+def test_focus_card_found_first_try_leaves_filters_untouched():
+    # The normal case (card already visible): focusCard must NOT clear filters or re-render.
+    r = _node_focus_card(_FVIEW, _FKEY, collapsed=True)
+    assert r["ret"] is True and r["renderCalls"] == 0
+    assert r["stateAfter"] == {"doneMode": True, "triage": "active", "q": "zzz"}
 
 
 def _node_livenow_click(flat, unmatched):
