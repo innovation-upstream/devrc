@@ -104,42 +104,54 @@ Prefix any op with `--instance <key>` to target a specific connected profile
 | `browser [--instance K] release`           | drop ownership WITHOUT closing the tab |
 | `browser [--instance K] [--tab T] html`              | `outerHTML` of the owned tab (else the active tab) |
 | `browser [--instance K] [--tab T] text [selector] [--max-bytes N]` | **cheap read** — visible `innerText` of the owned/active tab (optional CSS `selector`), whitespace-normalized + byte-capped (default 32768; `0`=uncapped; a truncation note is appended). ~98% smaller than `html` — prefer it |
-| `browser [--instance K] [--tab T] [--frame F] eval '<js>'` | run JS in the owned/active tab, return its value (`--frame` runs it inside a cross-origin frame — CDP, isolated world) |
+| `browser [--instance K] [--tab T] [--frame F] eval '<js>'` | run JS in the owned/active tab, return its value (`--frame` runs it INSIDE a cross-origin OOPIF via `chrome.scripting`, isolated world) |
 | `browser [--instance K] tabs`              | list open tabs (`.data.ownedTabId` flags this session's owned tab) |
 | `browser [--instance K] [--tab T] nav <url>`         | navigate the owned/active tab to `<url>` |
 | `browser [--instance K] [--tab T] screenshot [path] [--fullpage]` | screenshot via **CDP `Page.captureScreenshot`** — **works on a BACKGROUND/occluded tab** and on each profile's own tab (a foreground tab uses the cheap captureVisibleTab fast path). `--fullpage` grabs the whole scrollable document. Prints the data URL, or writes a `.png` to `path` |
-| `browser [--instance K] [--tab T] frames`  | list the tab's frames (`frameId`/`url`/`name`), **including cross-origin iframes** — pick one for `--frame` |
-| `browser [--instance K] [--tab T] [--frame F] click <selector>` | **TRUSTED** CDP click at the element's center |
-| `browser [--instance K] [--tab T] [--frame F] type <text> [--selector S]` | **TRUSTED** CDP text input (focus `--selector` first if given) |
-| `browser [--instance K] [--tab T] [--frame F] key <Enter\|Tab\|Escape\|Backspace\|Delete\|Arrow*\|Home\|End\|Page*> [--selector S]` | dispatch one **TRUSTED** key to the focused element |
+| `browser [--instance K] [--tab T] frames`  | list the tab's frames (`frameId`/`url`/`parentFrameId`) via `chrome.webNavigation`, **INCLUDING cross-origin OUT-OF-PROCESS iframes (OOPIFs)** — pick a numeric `frameId` (or url-substring) for `--frame` |
+| `browser [--instance K] [--tab T] [--frame F] click <selector>` | click the element's center — **TRUSTED** CDP on the top frame; **SYNTHETIC** (`chrome.scripting`) inside a cross-origin `--frame` |
+| `browser [--instance K] [--tab T] [--frame F] type <text> [--selector S]` | text input — **TRUSTED** CDP top frame; **SYNTHETIC** in-frame (focus `--selector` first if given) |
+| `browser [--instance K] [--tab T] [--frame F] key <Enter\|Tab\|Escape\|Backspace\|Delete\|Arrow*\|Home\|End\|Page*> [--selector S]` | dispatch one bounded key — **TRUSTED** CDP top frame; **SYNTHETIC** in-frame |
 | `browser [--instance K] agent "<goal>" [flags]` | run the **autonomous opencode browser-agent** in its OWN isolated tab against `<goal>`; returns a compact `{answer,evidence,steps_used,status}` (see below) |
 | `browser --print-session-id`               | print the derived per-session id (debug) and exit |
 
-`--frame <F>` (a `frameId` from `frames`, or a URL substring) routes a
-`text`/`html`/`eval`/`click`/`type`/`key` INTO that (possibly cross-origin) frame.
-A frame-scoped `eval`/read runs in an **isolated world** (DOM-capable; it does not
-see that frame's page globals).
+`--frame <F>` (a **numeric** `frameId` from `frames`, or a URL substring) routes a
+`text`/`html`/`eval`/`click`/`type`/`key` INTO that frame via `chrome.scripting` —
+which reaches CROSS-ORIGIN out-of-process iframes (OOPIFs). A frame-scoped `eval`/read
+runs in an **isolated world** (DOM-capable; it does not see that frame's page globals).
+In-frame `click`/`type`/`key` dispatch **SYNTHETIC** events (`isTrusted:false`, the
+reachable OOPIF path — drives most apps); the result carries `trusted:false` for
+`--frame` input and `trusted:true` for top-frame CDP input.
 
 Result payloads land under `.result.data` in the JSON (the envelope is
 `{"ok":true,"result":{"id","ok","data":{...}}}`).
 
-## CDP ops (chrome.debugger): any-frame reads + trusted input + background screenshots
+## Frame ops (webNavigation + scripting) & CDP ops (debugger)
 
-`frames`/`click`/`type`/`key`, `--frame` reads, and `screenshot` use the Chrome
-DevTools Protocol via the `debugger` permission. They fix three real limitations:
+`frames` + `--frame` reach cross-origin OUT-OF-PROCESS iframes (OOPIFs) via
+`chrome.webNavigation` + `chrome.scripting`; `screenshot` + TOP-frame trusted input use
+the Chrome DevTools Protocol (`debugger` permission). Together they fix three real
+limitations:
 
 1. **Screenshot a BACKGROUND / occluded tab** (and each profile's own tab) — CDP
    `Page.captureScreenshot` does not need the tab to be the on-screen foreground
    tab, so the old i3 "not visible on-screen" limitation is gone for the normal
    path. (`--fullpage` grabs the whole scrollable document.)
-2. **Read INTO a cross-origin iframe** — `browser --tab T frames` lists the frames
-   (e.g. `model-benchmarking.civit.ai` inside `civitai.com`); then
-   `browser --tab T --frame <id-or-url> text` reads inside it. Plain `text`/`html`/
-   `eval` still see only the top frame.
-3. **Drive an app with trusted input** — `click`/`type`/`key` dispatch real
-   `isTrusted` events (reach an in-app tab, fill a field, submit a generation).
+2. **Read/drive INTO a CROSS-ORIGIN iframe (the OOPIF fix)** — `browser --tab T frames`
+   now LISTS the cross-origin frame (e.g. `model-benchmarking.civit.ai` inside
+   `civitai.com`) because `chrome.webNavigation.getAllFrames` enumerates OOPIFs that
+   CDP `Page.getFrameTree` could not; then `browser --tab T --frame <numericId-or-url>
+   text` reads inside it and `--frame … click/type/key` drives an in-app control (via
+   `chrome.scripting` injection). Plain `text`/`html`/`eval` still see only the top
+   frame.
+3. **Drive an app's TOP frame with trusted input** — top-frame `click`/`type`/`key`
+   dispatch real `isTrusted` events via CDP. (In a cross-origin `--frame`, input is
+   SYNTHETIC — see above.)
 
 **Security model (built in — this is the point):**
+- **Frame enumeration + injection are STRICTLY own-tab-scoped.** `getAllFrames` and
+  `executeScript` are tab-scoped, so a model-supplied `--frame` can only ever resolve
+  to / inject into a frame of the session's owned/`--tab` tab — never another tab.
 - **CDP attach is STRICTLY own-tab-scoped.** The server routes a CDP op only to the
   session's owned/`--tab` tab; the extension attaches `chrome.debugger` ONLY to that
   tab and **refuses to attach to a privileged surface** (`chrome://`, extension,

@@ -47,22 +47,30 @@
 #                               occluded tab and on each profile's own tab; a
 #                               foreground tab uses the cheap captureVisibleTab fast
 #                               path. --fullpage grabs the whole scrollable document.
-#   browser frames            — list the tab's frames (frameId/url/name), incl.
-#                               cross-origin iframes (CDP) — pick one for --frame
+#   browser frames            — list the tab's frames (frameId/url/parentFrameId),
+#                               INCLUDING cross-origin OUT-OF-PROCESS iframes (via
+#                               chrome.webNavigation) — pick a numeric frameId (or
+#                               url-substring) for --frame
 #   browser [--frame <f>] click <selector>
-#                             — TRUSTED CDP click at the element's center
+#                             — click the element's center (TRUSTED CDP on the top
+#                               frame; SYNTHETIC in a cross-origin --frame)
 #   browser [--frame <f>] type <text> [--selector <sel>]
-#                             — TRUSTED CDP text input (focus --selector first if given)
+#                             — text input (TRUSTED CDP top frame; SYNTHETIC in-frame);
+#                               focus --selector first if given
 #   browser [--frame <f>] key <Enter|Tab|Escape|...> [--selector <sel>]
-#                             — dispatch one TRUSTED key to the focused element
+#                             — dispatch one bounded key (TRUSTED CDP top frame;
+#                               SYNTHETIC in-frame)
 #   browser agent "<goal>"    — run the autonomous opencode browser-agent in its
 #                               OWN isolated tab against <goal> (see browser-agent)
 #   browser --print-session-id — print the derived per-session id and exit
 #
 # Global flags (before the subcommand): --instance <key>, --tab <id>,
 #   --frame <frameId|url-substring> (route a read/click INTO a cross-origin frame).
-# The CDP ops (screenshot/frames/click/type/key + --frame reads) use chrome.debugger
-# and attach ONLY to the owned/target tab (a privileged chrome://—etc. tab is refused).
+# Frame enumeration + --frame reads/input use chrome.webNavigation + chrome.scripting,
+# which reach CROSS-ORIGIN out-of-process iframes (OOPIFs) that CDP getFrameTree could
+# NOT see. `screenshot` still uses chrome.debugger (CDP), attaching ONLY to the owned/
+# target tab (a privileged chrome://—etc. tab is refused). In-frame input is SYNTHETIC
+# (isTrusted:false); top-frame input stays TRUSTED (CDP Input.*).
 #
 # Output is JSON on stdout (pretty-printed if `jq` is present). Exit non-zero on
 # transport/HTTP error so a caller can branch.
@@ -215,7 +223,8 @@ cmd_op() {
     case "$TAB" in (*[!0-9]*|"") die "--tab must be a numeric tab id (got: $TAB)";; esac
     tabf=",\"tab\":${TAB}"
   fi
-  # --frame routes a read/click INTO a specific (cross-origin) frame via CDP. The
+  # --frame routes a read/click INTO a specific (cross-origin OOPIF) frame; the
+  # extension resolves it via chrome.webNavigation + injects via chrome.scripting. The
   # server forwards it verbatim to the extension; ops that ignore it are unaffected.
   local framef=""
   if [ -n "$FRAME" ]; then framef=",\"frame\":$(json_str "$FRAME")"; fi
@@ -380,20 +389,22 @@ print(sys.argv[1])
     fi
     ;;
   frames)
-    # List the owned/active tab's frames (frameId/url/name) so you can pick one for
-    # --frame. Cross-origin iframes are included (via CDP Page.getFrameTree).
+    # List the owned/active tab's frames (frameId/url/parentFrameId) so you can pick
+    # one for --frame. Cross-origin OUT-OF-PROCESS iframes ARE included (via
+    # chrome.webNavigation.getAllFrames — CDP Page.getFrameTree missed them).
     cmd_op frames | pretty
     ;;
   click)
-    # browser [--frame <f>] click <selector> — TRUSTED CDP click at the element's
-    # center (frame-aware via the global --frame).
+    # browser [--frame <f>] click <selector> — click the element's center. Top frame:
+    # TRUSTED CDP. Cross-origin --frame: SYNTHETIC click injected via chrome.scripting.
     [ $# -ge 1 ] || die "usage: browser [--frame <f>] click <css-selector>"
     sel="$(json_str "$1")"
     cmd_op click "\"selector\":${sel}" | pretty
     ;;
   type)
-    # browser [--frame <f>] type <text> [--selector <sel>] — TRUSTED CDP text input
-    # into the focused element (or --selector first).
+    # browser [--frame <f>] type <text> [--selector <sel>] — text input into the
+    # focused element (or --selector first). Top frame: TRUSTED CDP. Cross-origin
+    # --frame: SYNTHETIC input (set value + input/change) via chrome.scripting.
     txt=""; tsel=""
     while [ $# -gt 0 ]; do
       case "$1" in

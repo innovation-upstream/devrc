@@ -22,12 +22,15 @@ import {
   pollHeaders, resultWithInstance, normalizeText, TEXT_MAX_BYTES_DEFAULT,
   classifyPollStatus, POLL_COMMAND, POLL_IDLE, POLL_SUPERSEDED,
   POLL_UNAUTHORIZED, SUPERSEDE_BACKOFF_MS, captureWithRetry,
-  // CDP (chrome.debugger) helpers — the pure, unit-tested decision layer.
-  CDP_VERSION, withCdpSession, assertTabCdpReady,
-  flattenFrameTree, resolveFrame, keyEventParams,
-  clickPoint, boxModelOrigin, frameEvalExpressions, isCdpSyntaxError,
-  cdpExceptionText, frameHtmlExpression, frameTextExpression,
-  elementRectExpression, focusExpression, fullPageClip,
+  // CDP (chrome.debugger) helpers — still used for screenshots + TOP-frame trusted
+  // input (the pure, unit-tested decision layer).
+  CDP_VERSION, withCdpSession, assertTabCdpReady, keyEventParams,
+  clickPoint, cdpExceptionText, elementRectExpression, focusExpression, fullPageClip,
+  // OOPIF-capable frame enumeration/injection (chrome.webNavigation + chrome.scripting):
+  // reaches cross-origin out-of-process iframes where CDP getFrameTree could not.
+  normalizeWebNavFrames, resolveWebNavFrameId,
+  frameReadHtmlFn, frameReadTextFn, frameEvalFn,
+  frameClickFn, frameTypeFn, frameKeyFn,
 } from "./protocol.js";
 
 const DEFAULT_PORT = 8788;
@@ -141,42 +144,35 @@ async function cdpEval(send, contextId, expression) {
   return res.result ? res.result.value : undefined;
 }
 
-// Frame-scoped `eval`: try the expression form, fall back to the statement form on a
-// SyntaxError (mirrors compileEval), running in the frame's isolated world.
-async function cdpFrameEval(send, contextId, js) {
-  const { expression, fallback } = frameEvalExpressions(js);
-  let res = await send("Runtime.evaluate",
-    { expression, contextId, returnByValue: true, awaitPromise: true });
-  if (res.exceptionDetails && isCdpSyntaxError(res.exceptionDetails)) {
-    res = await send("Runtime.evaluate",
-      { expression: fallback, contextId, returnByValue: true, awaitPromise: true });
-  }
-  if (res.exceptionDetails) throw new Error(cdpExceptionText(res.exceptionDetails));
-  return res.result ? res.result.value : undefined;
+// --- OOPIF-capable frame glue (chrome.webNavigation + chrome.scripting) ------- //
+// Enumerate ALL of `tabId`'s frames — same-process AND cross-origin OOPIFs — as the
+// compact metadata list the `frames` op returns. getAllFrames is tab-scoped, so the
+// list can only ever describe frames of THIS tab (the security scope for `--frame`).
+async function framesForTab(tabId) {
+  const raw = await chrome.webNavigation.getAllFrames({ tabId });
+  return normalizeWebNavFrames(raw || []);
 }
 
-// Resolve a `--frame <sel>` into an isolated-world execution context so a read/click
-// runs INSIDE that (possibly cross-origin) frame. Returns { executionContextId,
-// frameId, isMain, ownerOffset } — ownerOffset is the frame's on-page origin (for a
-// sub-frame, from DOM.getBoxModel on its owner element; {0,0} for the main frame).
-async function resolveFrameContext(send, frameSel) {
-  await send("Page.enable");
-  const { frameTree } = await send("Page.getFrameTree");
-  const frames = flattenFrameTree(frameTree);
-  const frame = resolveFrame(frames, frameSel);           // throws frame_not_found
-  const isMain = frames.length > 0 && frames[0].frameId === frame.frameId;
-  const { executionContextId } = await send("Page.createIsolatedWorld",
-    { frameId: frame.frameId, worldName: "browser_bridge" });
-  let ownerOffset = { x: 0, y: 0 };
-  if (!isMain) {
-    // A sub-frame's element coords are frame-local; offset them by the iframe
-    // element's on-page box so Input.dispatchMouseEvent lands in the right place.
-    await send("DOM.enable");
-    const { backendNodeId } = await send("DOM.getFrameOwner", { frameId: frame.frameId });
-    const { model } = await send("DOM.getBoxModel", { backendNodeId });
-    ownerOffset = boxModelOrigin(model);
-  }
-  return { executionContextId, frameId: frame.frameId, isMain, ownerOffset };
+// Resolve a caller `--frame <sel>` to a NUMERIC webNavigation frameId within `tabId`.
+// Throws frame_not_found / frame_not_specified. Confined to this tab by construction.
+async function resolveFrameId(tabId, frameSel) {
+  const frames = await framesForTab(tabId);
+  return resolveWebNavFrameId(frames, frameSel);
+}
+
+// Inject `func(...args)` INTO one resolved frame (by numeric frameId) of `tabId` via
+// chrome.scripting — the OOPIF-reaching path (works on a cross-origin frame given the
+// extension's <all_urls> host permission), no chrome.debugger/banner. Returns the
+// injected function's (structured-cloned) result. A frameId is confined to `tabId`;
+// executeScript cannot escape the target tab's frames.
+async function execInFrame(tabId, frameId, func, args) {
+  const results = await chrome.scripting.executeScript({
+    target: { tabId, frameIds: [frameId] },
+    func,
+    args: args || [],
+  });
+  const inj = Array.isArray(results) ? results[0] : undefined;
+  return inj ? inj.result : undefined;
 }
 
 // --- op executors ---------------------------------------------------------- //
@@ -184,12 +180,11 @@ async function resolveFrameContext(send, frameSel) {
 const OPS = {
   async getHtml(cmd) {
     const tab = await targetTab(cmd);
-    // --frame → read the outerHTML INSIDE the chosen (cross-origin) frame via CDP.
+    // --frame → read the outerHTML INSIDE the chosen (cross-origin OOPIF) frame via
+    // chrome.scripting (reaches an out-of-process iframe; no debugger banner).
     if (cmd && cmd.frame) {
-      const html = await withCdp(tab.id, tab.url, async (send) => {
-        const { executionContextId } = await resolveFrameContext(send, cmd.frame);
-        return cdpEval(send, executionContextId, frameHtmlExpression());
-      });
+      const frameId = await resolveFrameId(tab.id, cmd.frame);
+      const html = await execInFrame(tab.id, frameId, frameReadHtmlFn, []);
       return { url: tab.url, title: tab.title, html, frame: cmd.frame };
     }
     // No frame → the lighter chrome.scripting top-frame read (no debugger banner).
@@ -210,12 +205,11 @@ const OPS = {
     const sel = (cmd && typeof cmd.selector === "string") ? cmd.selector : "";
     const cap = (cmd && cmd.maxBytes != null)
       ? cmd.maxBytes : TEXT_MAX_BYTES_DEFAULT;
-    // --frame → read innerText INSIDE the chosen (cross-origin) frame via CDP.
+    // --frame → read innerText INSIDE the chosen (cross-origin OOPIF) frame via
+    // chrome.scripting (reaches an out-of-process iframe; no debugger banner).
     if (cmd && cmd.frame) {
-      const raw = await withCdp(tab.id, tab.url, async (send) => {
-        const { executionContextId } = await resolveFrameContext(send, cmd.frame);
-        return cdpEval(send, executionContextId, frameTextExpression(sel));
-      });
+      const frameId = await resolveFrameId(tab.id, cmd.frame);
+      const raw = await execInFrame(tab.id, frameId, frameReadTextFn, [sel]);
       const { text, truncated } = normalizeText(raw, cap);
       return { url: tab.url, title: tab.title, text, truncated, frame: cmd.frame };
     }
@@ -233,13 +227,12 @@ const OPS = {
 
   async eval(cmd) {
     const tab = await targetTab(cmd);
-    // --frame → evaluate INSIDE the chosen (cross-origin) frame's isolated world
-    // via CDP (DOM-capable; no access to that frame's page globals — documented).
+    // --frame → evaluate INSIDE the chosen (cross-origin OOPIF) frame via
+    // chrome.scripting. Runs in the frame's ISOLATED world (DOM-capable; no access to
+    // that frame's page globals — documented, matches the prior CDP semantics).
     if (cmd && cmd.frame) {
-      const value = await withCdp(tab.id, tab.url, async (send) => {
-        const { executionContextId } = await resolveFrameContext(send, cmd.frame);
-        return cdpFrameEval(send, executionContextId, cmd.js);
-      });
+      const frameId = await resolveFrameId(tab.id, cmd.frame);
+      const value = await execInFrame(tab.id, frameId, frameEvalFn, [cmd.js]);
       return { url: tab.url, value, frame: cmd.frame };
     }
     // chrome.scripting runs in an ISOLATED world; `js` is evaluated and its
@@ -322,37 +315,39 @@ const OPS = {
     return { url: tab.url, dataUrl, via: "cdp" };
   },
 
-  // List the target tab's frames (frameId/url/name/parentId) via CDP
-  // Page.getFrameTree — so a caller can discover a cross-origin iframe and then
-  // read/click INTO it with `--frame <frameId|url-substring>`. Metadata only.
+  // List the target tab's frames ({frameId,url,parentFrameId}) via
+  // chrome.webNavigation.getAllFrames — which, UNLIKE CDP Page.getFrameTree,
+  // enumerates OUT-OF-PROCESS (cross-origin) iframes too. So a caller can discover a
+  // cross-origin OOPIF and read/click INTO it with `--frame <frameId|url-substring>`.
+  // Metadata only (numeric frameId + url + parent) — never frame content. No debugger.
   async frames(cmd) {
     const tab = await targetTab(cmd);
-    const frames = await withCdp(tab.id, tab.url, async (send) => {
-      await send("Page.enable");
-      const { frameTree } = await send("Page.getFrameTree");
-      return flattenFrameTree(frameTree);
-    });
+    const frames = await framesForTab(tab.id);
     return { url: tab.url, title: tab.title, frames };
   },
 
-  // TRUSTED click on `selector` (optionally inside `--frame`). Resolves the element
-  // box via getBoundingClientRect (in the frame's isolated world), offsets by the
-  // frame's on-page origin for a sub-frame, then dispatches a real press+release
-  // via CDP Input.dispatchMouseEvent — an isTrusted click the page can't tell from
-  // a human's. `selector` is validated present by server/SW REQUIRED_FIELDS.
+  // Click `selector`. TWO paths, by design:
+  //   * `--frame` (cross-origin OOPIF): inject a SYNTHETIC click into the resolved
+  //     frame via chrome.scripting (the only path that reaches an OOPIF). The
+  //     dispatched events are `isTrusted:false` — honestly reported as trusted:false —
+  //     but drive the vast majority of apps (which listen for ordinary click/input).
+  //   * TOP frame (no `--frame`): the CDP Input.dispatchMouseEvent path — a real
+  //     `isTrusted` press+release the page can't tell from a human's (unchanged).
+  // `selector` is validated present by server/SW REQUIRED_FIELDS.
   async click(cmd) {
     const tab = await targetTab(cmd);
     const selector = String(cmd.selector);
+    if (cmd.frame) {
+      const frameId = await resolveFrameId(tab.id, cmd.frame);
+      const res = await execInFrame(tab.id, frameId, frameClickFn, [selector]);
+      if (!res || res.ok === false) throw new Error(`element_not_found:${selector}`);
+      return { url: tab.url, clicked: selector, x: res.x, y: res.y,
+               frame: cmd.frame, trusted: false };
+    }
     const point = await withCdp(tab.id, tab.url, async (send) => {
-      let ctxId, offset = { x: 0, y: 0 };
-      if (cmd.frame) {
-        const fc = await resolveFrameContext(send, cmd.frame);
-        ctxId = fc.executionContextId;
-        offset = fc.ownerOffset;
-      }
-      const rect = await cdpEval(send, ctxId, elementRectExpression(selector));
+      const rect = await cdpEval(send, undefined, elementRectExpression(selector));
       if (!rect) throw new Error(`element_not_found:${selector}`);
-      const p = clickPoint(rect, offset);
+      const p = clickPoint(rect, { x: 0, y: 0 });
       const mouse = (type) => send("Input.dispatchMouseEvent",
         { type, x: p.x, y: p.y, button: "left", buttons: 1, clickCount: 1 });
       await mouse("mousePressed");
@@ -360,38 +355,52 @@ const OPS = {
       return p;
     });
     return { url: tab.url, clicked: selector, x: point.x, y: point.y,
-             frame: cmd.frame || null };
+             frame: null, trusted: true };
   },
 
-  // Type `text` into the focused element (optionally focus `--selector` first,
-  // optionally inside `--frame`) via CDP Input.insertText — a trusted input event.
-  // Returns only the LENGTH typed, never echoes the text back (privacy + telemetry).
+  // Type `text` (optionally focus `--selector` first). `--frame` → SYNTHETIC input
+  // (focus + set value + input/change) injected into the cross-origin OOPIF via
+  // chrome.scripting (trusted:false — the reachable OOPIF path). TOP frame → CDP
+  // Input.insertText, a trusted input event (unchanged). Returns only the LENGTH
+  // typed, never echoes the text back (privacy + telemetry).
   async type(cmd) {
     const tab = await targetTab(cmd);
     const text = String(cmd.text);
+    if (cmd.frame) {
+      const frameId = await resolveFrameId(tab.id, cmd.frame);
+      const res = await execInFrame(tab.id, frameId, frameTypeFn,
+        [cmd.selector || "", text]);
+      if (!res || res.ok === false) throw new Error(`element_not_found:${cmd.selector}`);
+      return { url: tab.url, typed: text.length, frame: cmd.frame, trusted: false };
+    }
     await withCdp(tab.id, tab.url, async (send) => {
-      let ctxId;
-      if (cmd.frame) ctxId = (await resolveFrameContext(send, cmd.frame)).executionContextId;
       if (cmd.selector) {
-        const ok = await cdpEval(send, ctxId, focusExpression(cmd.selector));
+        const ok = await cdpEval(send, undefined, focusExpression(cmd.selector));
         if (!ok) throw new Error(`element_not_found:${cmd.selector}`);
       }
       await send("Input.insertText", { text });
     });
-    return { url: tab.url, typed: text.length, frame: cmd.frame || null };
+    return { url: tab.url, typed: text.length, frame: null, trusted: true };
   },
 
-  // Dispatch a single bounded key (Enter/Tab/Escape/arrows/…) to the focused element
-  // (optionally focus `--selector` first, optionally inside `--frame`) via CDP
-  // Input.dispatchKeyEvent (keyDown+keyUp). An unknown key is refused BEFORE attach.
+  // Dispatch one bounded key (Enter/Tab/Escape/arrows/…). The key name is resolved +
+  // validated by keyEventParams FIRST — an unknown key is refused BEFORE any injection
+  // or attach (the bounded-key surface is preserved on both paths). `--frame` →
+  // SYNTHETIC keydown/keyup injected into the cross-origin OOPIF via chrome.scripting
+  // (trusted:false — the reachable OOPIF path). TOP frame → CDP Input.dispatchKeyEvent,
+  // a trusted key event (unchanged).
   async key(cmd) {
     const tab = await targetTab(cmd);
-    const p = keyEventParams(cmd.key);   // throws unknown_key (no attach on refusal)
+    const p = keyEventParams(cmd.key);   // throws unknown_key (no injection/attach on refusal)
+    if (cmd.frame) {
+      const frameId = await resolveFrameId(tab.id, cmd.frame);
+      const res = await execInFrame(tab.id, frameId, frameKeyFn, [cmd.selector || "", p]);
+      if (!res || res.ok === false) throw new Error(`element_not_found:${cmd.selector}`);
+      return { url: tab.url, key: p.key, frame: cmd.frame, trusted: false };
+    }
     await withCdp(tab.id, tab.url, async (send) => {
-      let ctxId;
-      if (cmd.frame) ctxId = (await resolveFrameContext(send, cmd.frame)).executionContextId;
       if (cmd.selector) {
-        const ok = await cdpEval(send, ctxId, focusExpression(cmd.selector));
+        const ok = await cdpEval(send, undefined, focusExpression(cmd.selector));
         if (!ok) throw new Error(`element_not_found:${cmd.selector}`);
       }
       const base = { key: p.key, code: p.code,
@@ -400,7 +409,7 @@ const OPS = {
         { type: p.text ? "keyDown" : "rawKeyDown", ...base, ...(p.text ? { text: p.text } : {}) });
       await send("Input.dispatchKeyEvent", { type: "keyUp", ...base });
     });
-    return { url: tab.url, key: p.key, frame: cmd.frame || null };
+    return { url: tab.url, key: p.key, frame: null, trusted: true };
   },
 
   // Create a NEW tab for the calling session to own. active:false so parallel
@@ -557,26 +566,35 @@ function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-// --- MV3 keepalive: restart the loop on install / startup / alarm ---------- //
-chrome.runtime.onInstalled.addListener(() => loop());
-chrome.runtime.onStartup.addListener(() => loop());
-chrome.alarms.create("bridge-keepalive", { periodInMinutes: 1 });
-chrome.alarms.onAlarm.addListener((a) => {
-  if (a.name === "bridge-keepalive") loop();
-});
-
-// If Chrome detaches our debugger out-of-band (tab crash/close, DevTools opened, or
-// the user hitting the "an extension is debugging this browser" banner's Cancel),
-// drop the tracked attach so we never think we still hold it. withCdp already
-// always-detaches per op; this is the belt-and-braces for an external detach.
-if (chrome.debugger && chrome.debugger.onDetach) {
-  chrome.debugger.onDetach.addListener((source) => {
-    if (source && source.tabId != null) cdpAttached.delete(source.tabId);
+// --- MV3 keepalive + background wiring -------------------------------------- //
+// All the real-browser side effects (event listeners, the keepalive alarm, and the
+// immediate loop kick) are grouped here so a unit test can import this module for its
+// pure OPS glue WITHOUT starting the poll loop or requiring chrome.runtime/alarms:
+// set `globalThis.BROWSER_BRIDGE_NO_AUTOSTART = true` before importing.
+function startBackground() {
+  chrome.runtime.onInstalled.addListener(() => loop());
+  chrome.runtime.onStartup.addListener(() => loop());
+  chrome.alarms.create("bridge-keepalive", { periodInMinutes: 1 });
+  chrome.alarms.onAlarm.addListener((a) => {
+    if (a.name === "bridge-keepalive") loop();
   });
+  // If Chrome detaches our debugger out-of-band (tab crash/close, DevTools opened, or
+  // the user hitting the "an extension is debugging this browser" banner's Cancel),
+  // drop the tracked attach so we never think we still hold it. withCdp already
+  // always-detaches per op; this is the belt-and-braces for an external detach.
+  if (chrome.debugger && chrome.debugger.onDetach) {
+    chrome.debugger.onDetach.addListener((source) => {
+      if (source && source.tabId != null) cdpAttached.delete(source.tabId);
+    });
+  }
+  // Kick immediately when the worker is first evaluated.
+  loop();
 }
 
-// Kick immediately when the worker is first evaluated.
-loop();
+if (!(typeof globalThis !== "undefined" && globalThis.BROWSER_BRIDGE_NO_AUTOSTART)) {
+  startBackground();
+}
 
-// Exported for reuse / potential future tests (no-op in the browser).
+// Exported for reuse / unit tests (the frame glue is exercised against a mocked
+// chrome in tests/service_worker.test.mjs).
 export { execute, OPS, ALLOWED_OPS };

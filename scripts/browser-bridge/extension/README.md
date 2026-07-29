@@ -127,23 +127,40 @@ SW and can only be checked in a real browser — see the checklist below.)
 click the **reload** ↻ button on the extension's card in `brave://extensions`,
 or the service worker keeps running the old code.
 
-> **MANDATORY reload after the CDP change:** the manifest now requests the
-> `debugger` permission (for the CDP ops — screenshot/frames/click/type/key +
-> `--frame` reads). A permission change is NOT hot-applied — reload the unpacked
-> extension in `brave://extensions`, and Brave may prompt you to **re-confirm the
-> new `debugger` permission**. Until you do, the CDP ops fail.
+> **MANDATORY reload after a permission change:** the manifest requests the
+> `debugger` permission (screenshot + TOP-frame trusted input) AND the
+> `webNavigation` permission (OOPIF-capable `frames` enumeration). A permission
+> change is NOT hot-applied — reload the unpacked extension in `brave://extensions`,
+> and Brave may prompt you to **re-confirm the new permissions**. Until you do, the
+> affected ops fail.
 
 ## Permissions (maximal — can be scoped later)
 
-`scripting`, `tabs`, `activeTab`, `alarms`, `storage`, `debugger`, and
-`host_permissions: ["<all_urls>"]`. `<all_urls>` + `scripting` is what lets the
-worker run in whatever tab is active. If you only ever drive a known set of
+`scripting`, `tabs`, `activeTab`, `alarms`, `storage`, `debugger`,
+`webNavigation`, and `host_permissions: ["<all_urls>"]`. `<all_urls>` + `scripting`
+is what lets the worker run in whatever tab is active — and, crucially, inject INTO a
+cross-origin out-of-process iframe (OOPIF). If you only ever drive a known set of
 sites, scope `host_permissions` to those origins and reload.
 
-### `debugger` — the CDP ops (screenshot/frames/click/type/key + `--frame`)
+### `webNavigation` + `scripting` — OOPIF-capable frames + `--frame` reads/input
+
+`frames` enumerates via **`chrome.webNavigation.getAllFrames`** and `--frame`
+reads/input inject via **`chrome.scripting.executeScript({target:{frameIds:[id]}})`**.
+This is the fix for the cross-origin-iframe gap: CDP `Page.getFrameTree` from the top
+tab target only sees SAME-PROCESS frames, so a cross-origin OOPIF (its own renderer
+under site isolation) was invisible — `frames` couldn't list it and `--frame` couldn't
+target it. `getAllFrames` enumerates OOPIFs; `scripting` injects into them (given
+`<all_urls>`), NO debugger banner. The frame identifier is the **numeric webNavigation
+`frameId`** (or a URL substring). In-frame input events are **SYNTHETIC**
+(`isTrusted:false`) — the reachable OOPIF path, and enough to drive most apps; TOP-frame
+input stays CDP-**trusted**.
+
+### `debugger` — screenshots + TOP-frame trusted input
 
 `chrome.debugger` is the biggest-blast-radius permission, so the CDP layer is
-tightly bounded (all decision logic is pure + unit-tested in `protocol.js`):
+tightly bounded (all decision logic is pure + unit-tested in `protocol.js`). It is now
+used ONLY for `screenshot` (works on a background/occluded tab) and TOP-frame trusted
+`click`/`type`/`key` (no `--frame`):
 
 - **Own-tab attach ONLY.** A CDP op attaches `chrome.debugger` ONLY to the
   server-injected owned/`--tab` tab, and **refuses to attach to a privileged
@@ -156,8 +173,9 @@ tightly bounded (all decision logic is pure + unit-tested in `protocol.js`):
 - **Typed commands only.** The SW maps each bounded op to a FIXED set of CDP methods;
   there is NO generic "run this CDP method" endpoint reachable by a caller/model.
 - **Banner tradeoff:** Brave shows "an extension is debugging this browser" while a
-  CDP op runs. Attach is per-op to keep that window tiny; simple top-frame
-  `text`/`html`/`eval`/foreground-`screenshot` take the non-CDP path (no banner).
+  CDP op runs. Attach is per-op to keep that window tiny; `text`/`html`/`eval`
+  (top-frame AND `--frame`), `frames`, `--frame` input, and foreground-`screenshot`
+  all take the non-CDP path (no banner).
 
 ## Stable extension ID (optional)
 
@@ -221,13 +239,17 @@ The chrome.* glue needs a real browser — verify by hand after loading:
 - [ ] **Two profiles each screenshot independently:** two Brave profiles (distinct
       labels), each `open` + `screenshot --tab <id>` its own tab → each writes its
       OWN tab's PNG even though only one profile is foreground.
-- [ ] **Read INTO a cross-origin iframe:** open a page with a cross-origin iframe
-      (e.g. `civitai.com` embedding `model-benchmarking.civit.ai`). `browser --tab
-      <id> frames` lists the iframe; `browser --tab <id> --frame <frameId-or-url>
-      text` returns the iframe's innerText (plain `text` shows only the top frame).
-- [ ] **Trusted click drives an in-app control:** `browser --tab <id> [--frame <f>]
-      click "<selector>"` reaches an in-app tab/button; `type`/`key Enter` fill +
-      submit. Confirm the app reacts as to a human click.
+- [ ] **Read INTO a CROSS-ORIGIN (OOPIF) iframe:** open a page embedding a
+      cross-origin iframe (e.g. `civitai.com/apps/run/model-benchmarking` embedding
+      `model-benchmarking.civit.ai`). `browser --tab <id> frames` MUST now LIST the
+      cross-origin `model-benchmarking.civit.ai` frame (the whole point — CDP
+      getFrameTree missed it); `browser --tab <id> --frame <numericId-or-url> text`
+      returns THAT frame's innerText (plain `text` shows only the top frame).
+- [ ] **Drive an in-app control INSIDE the cross-origin iframe:** `browser --tab <id>
+      --frame <f> click "<selector>"` reaches a control inside the OOPIF; `--frame <f>
+      type`/`--frame <f> key Enter` fill + submit. Input is SYNTHETIC in-frame
+      (isTrusted:false) — confirm the app reacts. Top-frame (no `--frame`) input stays
+      CDP-trusted.
 - [ ] **CDP attach is refused on a privileged tab:** point `--tab` at a
       `chrome://`/extension page and run a CDP op → it fails with
       `cdp_attach_refused:<scheme>` and NEVER attaches the debugger.
