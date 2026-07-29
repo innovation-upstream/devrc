@@ -65,12 +65,38 @@ Prefix any op with `--instance <key>` to target a specific connected profile
 | `browser [--instance K] [--tab T] eval '<js>'`       | run JS in the owned/active tab, return its value |
 | `browser [--instance K] tabs`              | list open tabs (`.data.ownedTabId` flags this session's owned tab) |
 | `browser [--instance K] [--tab T] nav <url>`         | navigate the owned/active tab to `<url>` |
-| `browser [--instance K] [--tab T] screenshot [path]` | captureVisibleTab; prints the data URL, or writes a `.png` to `path`. A BACKGROUND owned tab is briefly activated, **settled until painted (~350ms), then captured with a bounded retry** on a transient `image readback failed` — retries are **spaced ≥~600ms to respect Chrome's ~2/sec `captureVisibleTab` quota** (`MAX_CAPTURE_VISIBLE_TAB_CALLS_PER_SECOND`; a faster retry re-trips it) (needs an extension **reload** to take effect) |
+| `browser [--instance K] [--tab T] screenshot [path]` | **VISIBLE-tab op only** — captureVisibleTab; prints the data URL, or writes a `.png` to `path`. A background/owned tab is briefly activated + settled + captured with a bounded quota-spaced retry (best-effort), but **on i3 it commonly fails** — see the note below. Use `text`/`html`/`eval` for a background tab |
 | `browser [--instance K] agent "<goal>" [flags]` | run the **autonomous opencode browser-agent** in its OWN isolated tab against `<goal>`; returns a compact `{answer,evidence,steps_used,status}` (see below) |
 | `browser --print-session-id`               | print the derived per-session id (debug) and exit |
 
 Result payloads land under `.result.data` in the JSON (the envelope is
 `{"ok":true,"result":{"id","ok","data":{...}}}`).
+
+### ⚠ `screenshot` is a VISIBLE-tab op (background tabs are NOT supported on i3)
+
+`chrome.captureVisibleTab` captures the **on-screen composited pixels of the
+window's foreground tab** — it fundamentally cannot capture a tab that isn't
+visible on-screen. The bridge makes a best-effort attempt to foreground a
+background/owned tab before capturing, but on the user's **i3 tiling WM** an
+owned/agent tab's Brave window is often not raised (Chrome can't force i3 to raise
+it), so the tab never composites and the capture fails. After the quota-spaced
+retries are exhausted you get a **clear, actionable error** (non-zero exit), not
+the opaque `image readback failed`:
+
+```
+op 'screenshot' failed in the browser: screenshot unavailable: the target tab is
+not visible on-screen (background or occluded window). captureVisibleTab can only
+capture the foreground tab; bring the tab to the foreground, or use
+'text'/'html'/'eval' which work on background tabs.
+```
+
+- **Screenshots of the ACTUAL foreground tab work fine** (the tab the user is
+  looking at). Occluded/background tabs cannot be captured this way.
+- **For a background/owned tab, use `text` / `html` / `eval`** — they read the tab
+  directly regardless of whether it is on-screen. Don't loop retrying screenshots.
+- *(Future option, NOT implemented: a `chrome.debugger` + CDP
+  `Page.captureScreenshot` path could capture an off-screen tab, but it needs the
+  `debugger` permission and shows a debug banner — deliberately out of scope.)*
 
 ## `browser agent "<goal>"` — autonomous read/navigate in an isolated tab
 
@@ -252,6 +278,10 @@ know browser usage is being counted. Details: `README.md` → Telemetry.
   already validates `--tab`).
 - `owned_tab_gone` (op-level, in `.result`) → your owned tab was closed; ownership
   is auto-dropped, so just re-issue (it falls back to the active tab / re-`open`).
+- `screenshot unavailable: … not visible on-screen …` (op-level, in `.result`,
+  after the retries are exhausted) → the target tab is background/occluded and
+  `captureVisibleTab` cannot capture it (see the screenshot note above). Do NOT
+  retry the screenshot — use `text`/`html`/`eval`, or foreground the tab.
 - `401 unauthorized` → token mismatch (re-paste in the extension options).
 
 ## Gotcha: reload the unpacked extension after any change

@@ -23,12 +23,17 @@ fetch). Your tab is FIXED: you cannot choose or change which tab you act on.
 | `browser(op="html")`                   | read raw `outerHTML` — LAST RESORT (100s of KB; it will drown you) |
 | `browser(op="eval", js="…")`           | evaluate a small JS expression in the page and get its value |
 | `browser(op="nav", url="…")`           | navigate your tab to `<url>` |
-| `browser(op="screenshot")`             | capture the visible tab (you get only a note, not the image) |
+| `browser(op="screenshot")`             | capture the visible tab (you get only a note, not the image) — **often unavailable to you** (see below) |
 
 ## Rules
 - **Prefer `op="text"` over `op="html"`.** `text` returns clean innerText (~KB).
   `html` returns hundreds of KB and wastes your budget — only use it (or `eval`)
   if `text` is genuinely insufficient.
+- **Do NOT rely on `op="screenshot"`.** Your tab is a BACKGROUND tab, and
+  `captureVisibleTab` can only capture the on-screen foreground tab — so a
+  screenshot of your tab is usually `unavailable` ("not visible on-screen"). Read
+  the page with `text`/`html`/`eval` instead; don't waste steps retrying a
+  screenshot. (You never see the image anyway — only a note.)
 - **Stay on the allowed domains** given in the task. A `nav` to a denied domain
   is refused by the tool.
 - **Work in as few steps as possible.** You have a hard budget of **__STEPS__**

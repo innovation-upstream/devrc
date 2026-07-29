@@ -41,9 +41,12 @@
 #   browser eval '<js>'       — run JS in the owned/active tab, return its value
 #   browser tabs              — list open tabs (flags this session's owned tab)
 #   browser nav <url>         — navigate the owned/active tab to <url>
-#   browser screenshot [path] — captureVisibleTab; prints data URL, or writes a
-#                               .png to <path> if given (a background owned tab is
-#                               briefly foregrounded to capture, then restored)
+#   browser screenshot [path] — captureVisibleTab (VISIBLE/foreground tab only);
+#                               prints data URL, or writes a .png to <path>. A
+#                               background/owned tab is foregrounded best-effort;
+#                               on an occluded/non-foreground window it fails with
+#                               a clear "not visible on-screen" error — use
+#                               text/html/eval for a background tab
 #   browser agent "<goal>"    — run the autonomous opencode browser-agent in its
 #                               OWN isolated tab against <goal> (see browser-agent)
 #   browser --print-session-id — print the derived per-session id and exit
