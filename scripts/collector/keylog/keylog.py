@@ -359,27 +359,40 @@ def main(argv=None) -> int:
     max_chars = int(os.environ.get("KEYLOG_MAX_CHARS", "4096"))
     poll = float(os.environ.get("KEYLOG_POLL_SECONDS", "0.5"))
 
-    logger = KeyLogger(spool_dir, idle_seconds, max_chars)
+    # Imported here rather than at module scope to keep Xlib a lazy dependency
+    # (KeyLogger.__init__ does the same), but hoisted OUT of the handler below so
+    # we never run an import while already handling an exception.
+    # ConnectionClosedError: the X server went away mid-session, out of the RECORD
+    # loop. DisplayConnectionError: it was already gone when we tried to connect —
+    # the SAME lifecycle event, just observed one restart later (Restart=always
+    # brings us back ~10s after a teardown exit, and the connect then fails).
+    # Neither is a fault. Note OSError covers the bare-socket case; ConnectionError
+    # is a subclass of it, so listing it too would be redundant.
+    from Xlib.error import ConnectionClosedError, DisplayConnectionError
+
+    X_GONE = (ConnectionClosedError, DisplayConnectionError, OSError)
+
     print(
         f"keylog: spool={spool_dir} idle={idle_seconds}s max_chars={max_chars}",
         file=sys.stderr, flush=True,
     )
+    logger = None
     try:
+        # Construction opens the two X connections, so it must sit INSIDE the
+        # guard — otherwise a teardown-time start still exits non-zero and toasts.
+        logger = KeyLogger(spool_dir, idle_seconds, max_chars)
         logger.run(poll_seconds=poll)
     except KeyboardInterrupt:
-        logger.stop()
+        if logger is not None:
+            logger.stop()
     except Exception as exc:
-        # The X server going away (logout, display-manager restart, X crash) is
-        # an expected lifecycle event, not a fault: python-xlib surfaces it as
-        # ConnectionClosedError / a bare socket error out of the RECORD loop.
-        # Let it exit 0 so PartOf=graphical-session.target tears us down quietly
-        # instead of tripping OnFailure= and toasting a phantom failure. Any
-        # OTHER exception is a real bug and still exits non-zero.
-        from Xlib.error import ConnectionClosedError
-
-        if not isinstance(exc, (ConnectionClosedError, ConnectionError, OSError)):
+        # Exit 0 on an expected X lifecycle event so PartOf=graphical-session.target
+        # tears us down quietly instead of tripping OnFailure= and toasting a
+        # phantom failure. Any OTHER exception is a real bug and still exits
+        # non-zero, so genuine breakage still pages.
+        if not isinstance(exc, X_GONE):
             raise
-        print(f"keylog: X connection closed — exiting cleanly: {exc}",
+        print(f"keylog: X unavailable — exiting cleanly: {exc!r}",
               file=sys.stderr, flush=True)
     return 0
 

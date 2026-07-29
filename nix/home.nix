@@ -545,9 +545,18 @@ in
       TimeoutStartSec = 600;
       # Session teardown (logout/reboot) SIGTERMs this oneshot mid-scan, which
       # systemd records as Failed with result 'signal' → a phantom OnFailure
-      # toast for a perfectly normal shutdown. The tailers checkpoint state, so
-      # an interrupted run just resumes next tick. Treat SIGTERM as success; a
-      # real crash still exits non-zero and still notifies.
+      # toast for a perfectly normal shutdown. Treat SIGTERM as success; a real
+      # crash still exits non-zero and still notifies (an OOM kill is SIGKILL,
+      # not SIGTERM, so it is unaffected).
+      #
+      # CAVEAT — the two tailers are NOT equally safe to interrupt.
+      # session-tailer.py checkpoints incrementally, so a SIGTERM'd run resumes.
+      # tailer.py does NOT: it saves state once, after its whole loop, so an
+      # interrupted run re-emits everything it already emitted. Those are
+      # source=claude kind=prompt|command rows, which (unlike kind=session-summary)
+      # have no argMax dedupe on read, so the duplicates inflate counts. That
+      # hazard predates this setting, but suppressing the toast removes the only
+      # signal it just happened — fix by checkpointing tailer.py incrementally.
       SuccessExitStatus = "TERM";
       Environment = [
         "PATH=${lib.makeBinPath [ pkgs.python312 pkgs.coreutils pkgs.bash ]}"
