@@ -28,6 +28,13 @@ import os
 import sys
 from pathlib import Path
 
+# Ensure symlink dir is on sys.path BEFORE importing _shared.
+# Python resolves script symlinks for sys.path[0], but Path(__file__).parent
+# preserves the symlink path — use it so _shared resolves keylog correctly.
+_dir = str(Path(__file__).parent)
+if _dir not in sys.path:
+    sys.path.insert(0, _dir)
+
 import _shared as S  # noqa: E402
 
 

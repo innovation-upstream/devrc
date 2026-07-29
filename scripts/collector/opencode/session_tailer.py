@@ -26,6 +26,11 @@ import re
 import sys
 from pathlib import Path
 
+# Ensure symlink dir is on sys.path BEFORE importing _shared.
+_dir = str(Path(__file__).parent)
+if _dir not in sys.path:
+    sys.path.insert(0, _dir)
+
 import _shared as S  # noqa: E402
 
 
