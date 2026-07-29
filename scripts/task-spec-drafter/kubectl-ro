@@ -101,23 +101,43 @@ takes_value() {
 # Identity / endpoint / TLS / file-writing / non-terminating flags. Refused
 # ANYWHERE in argv, in both `--flag value` and `--flag=value` spellings.
 # `--kubeconfig` is handled separately: pinned, not refused.
+#
+# `--raw` is refused because it defeats every OBJECT-level control below: it takes
+# an arbitrary API path, so `get --raw /api/v1/namespaces/x/secrets` reads Secrets
+# that `get secret` refuses — and the pinned kubeconfig is cluster-admin. The
+# is_secret_token() check cannot catch it either, since `${1%%/*}` on a leading-slash
+# path strips to the empty string. The drafter has no use for raw API paths (it reads
+# pods / cronjobs / logs / describe / top), so the whole flag goes.
 is_forbidden_flag() {
   case "$1" in
     --server|-s|--token|--as|--as-group|--as-uid|--username|--password\
     |--client-certificate|--client-key|--certificate-authority\
     |--insecure-skip-tls-verify|--insecure-skip-tls-verify-backend\
     |--tls-server-name|--context|--cluster|--user|--cache-dir|--profile\
-    |--profile-output|--log-file|--follow|-f|--watch|-w|--watch-only)
+    |--profile-output|--log-file|--follow|-f|--watch|-w|--watch-only\
+    |--raw)
       return 0 ;;
     *) return 1 ;;
   esac
 }
 
+# Matches `secret`, `secrets`, `secret/foo`, `secrets.v1.` — and ALSO any `secrets`
+# segment inside a slash path. The leading-`${1%%/*}` form alone stripped a path like
+# `/api/v1/namespaces/x/secrets` to the empty string and matched nothing, which is how
+# `--raw` used to read Secrets past this check. `--raw` is now refused outright, but
+# check every segment so the next path-bearing flag can't reopen it.
 is_secret_token() {
+  local seg
   case "${1%%/*}" in
     secret|secrets|secret.v1.|secrets.v1.) return 0 ;;
-    *) return 1 ;;
   esac
+  local IFS=/
+  for seg in $1; do
+    case "${seg%%.*}" in
+      secret|secrets) return 0 ;;
+    esac
+  done
+  return 1
 }
 
 args=("$@")

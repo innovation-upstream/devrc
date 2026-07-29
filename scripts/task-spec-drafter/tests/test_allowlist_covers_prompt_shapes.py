@@ -1676,3 +1676,48 @@ def test_kubectl_ro_refuses_to_be_repointed_at_another_cluster():
         ["--kubeconfig=/tmp/kubectl-ro-test.conf", "get", "pods"]
     )
     assert rc == 0 and reached, "the runner's own pinned --kubeconfig was refused"
+
+
+def test_kubectl_ro_refuses_raw_api_paths_and_secret_reads():
+    """`--raw` took an arbitrary API path, which defeated the Secret block entirely:
+    `get --raw /api/v1/namespaces/x/secrets` returned Secrets that `get secret`
+    refuses — against a cluster-admin kubeconfig. is_secret_token() could not catch it
+    either, because `${1%%/*}` on a leading-slash path strips to the empty string.
+
+    Found by auditing the wrapper's runtime behaviour, NOT by any pattern test — the
+    allow/deny patterns are identical either way. Hence this test.
+    """
+    for argv in (
+        ["get", "--raw", "/api/v1/secrets"],
+        ["get", "--raw=/api/v1/secrets"],
+        ["get", "--raw", "/api/v1/namespaces/kube-system/secrets"],
+        ["get", "--raw", "/api/v1/nodes"],          # refused as a flag, not per-path
+    ):
+        rc, reached = _run_wrapper(argv)
+        assert rc != 0 and not reached, f"--raw reached kubectl: {' '.join(argv)}"
+
+    # Secret objects, including as a slash path, stay refused independently of --raw
+    for argv in (
+        ["get", "secret"],
+        ["get", "secrets", "-A", "-o", "yaml"],
+        ["describe", "secret", "my-tls"],
+        ["get", "secret/my-tls"],
+        ["get", "/api/v1/namespaces/x/secrets"],
+    ):
+        rc, reached = _run_wrapper(argv)
+        assert rc != 0 and not reached, f"a Secret read reached kubectl: {' '.join(argv)}"
+
+    # and the everyday reads are untouched by both controls
+    for argv in (["get", "pods"], ["get", "cronjobs", "-A"],
+                 ["logs", "-n", "x", "pod", "--tail=50"], ["top", "pods"]):
+        rc, reached = _run_wrapper(argv)
+        assert rc == 0 and reached, f"a legitimate read was refused: {' '.join(argv)}"
+
+
+def test_kubectl_ro_has_no_fail_open_path():
+    """No argv shape may reach kubectl without passing the read-verb check."""
+    for argv in ([], ["--help"], ["-h"], ["--version"], ["-n", "prod"], ["--"]):
+        rc, reached = _run_wrapper(argv)
+        assert rc != 0 and not reached, (
+            f"wrapper reached kubectl with no validated verb: {argv!r}"
+        )
