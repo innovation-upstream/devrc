@@ -2740,9 +2740,9 @@ _JS = r"""
         // [✓ done] — archive (done for now; resurfaces on new activity). DESTRUCTIVE (it sits
         // next to [resume]), so it's TWO-TAP: first click arms ('done?'), a second within ~3s
         // fires; blur/timeout disarms. armConfirm owns the arm/confirm; the action is unchanged.
-        var doneBtn = el('button', 'archive-btn done', '✓ done');
-        doneBtn.title = 'archive — done for now (reappears if this initiative sees new activity). Click twice to confirm.';
-        armConfirm(doneBtn, {armedLabel: 'done?', restLabel: '✓ done',
+        var doneBtn = el('button', 'archive-btn done', '⤓ archive');
+        doneBtn.title = 'archive — set aside for now (reappears if this initiative sees new activity). Click twice to confirm.';
+        armConfirm(doneBtn, {armedLabel: 'archive?', restLabel: '⤓ archive',
           onConfirm: function(){ archiveCard(v, doneBtn, astat, 'done', c); }});
         drow.appendChild(doneBtn);
       } else if(a.kind === 'drop'){
@@ -2947,7 +2947,7 @@ _JS = r"""
     if(archivedN > 0 || state.doneMode){
       var donB = el('button', 'chip state-done' + (state.doneMode ? ' active' : ''), null);
       donB.type = 'button';
-      donB.textContent = '✓ Done ' + archivedN;
+      donB.textContent = '✓ Archived ' + archivedN;
       donB.addEventListener('click', function(){
         state.doneMode = true;
         render();
@@ -2964,7 +2964,7 @@ _JS = r"""
     var allArch = data.archived || [];
     var rows = allArch.filter(function(a){ return matchArchived(a, q); });
     var head = el('div', 'done-head');
-    head.appendChild(el('span', 'done-title', 'Done · archived'));
+    head.appendChild(el('span', 'done-title', 'Archived'));
     head.appendChild(el('span', 'done-stat', allArch.length + ' archived'));
     app.appendChild(head);
     if(!rows.length){
@@ -3579,7 +3579,7 @@ def render_html(model: dict | None, error: str | None = None,
         '(extra labels a card can also carry, on top of its state): '
         '<span class="lg-b">● live</span> = an agent is running on it right now · '
         '<span class="lg-b">emerging</span> = a session with no handoff doc yet · '
-        '✓ done = archived.</div>'
+        '⤓ archive = set aside (reappears on new activity).</div>'
         '</div>'
     )
     return (

@@ -2646,13 +2646,13 @@ def _node_confirm(script_body):
 
 def test_js_confirm_first_click_arms_no_action():
     got = _node_confirm(
-        "var fired = 0; var b = new FakeBtn('✓ done');"
-        "armConfirm(b, {armedLabel:'done?', restLabel:'✓ done',"
+        "var fired = 0; var b = new FakeBtn('⤓ archive');"
+        "armConfirm(b, {armedLabel:'archive?', restLabel:'⤓ archive',"
         " timers:{set:fakeSet, clear:fakeClear}, onConfirm:function(){ fired++; }});"
         "b.dispatch('click', {stopPropagation:function(){}});"
         "console.log(JSON.stringify({label:b.textContent, armed:b.classList.contains('armed'),"
         " fired:fired}));")
-    assert got == {"label": "done?", "armed": True, "fired": 0}   # armed, NOT executed
+    assert got == {"label": "archive?", "armed": True, "fired": 0}   # armed, NOT executed
 
 
 def test_js_confirm_second_click_fires_action():
@@ -2670,14 +2670,14 @@ def test_js_confirm_second_click_fires_action():
 
 def test_js_confirm_timeout_disarms_without_firing():
     got = _node_confirm(
-        "var fired = 0; var b = new FakeBtn('✓ done');"
-        "armConfirm(b, {armedLabel:'done?', restLabel:'✓ done',"
+        "var fired = 0; var b = new FakeBtn('⤓ archive');"
+        "armConfirm(b, {armedLabel:'archive?', restLabel:'⤓ archive',"
         " timers:{set:fakeSet, clear:fakeClear}, onConfirm:function(){ fired++; }});"
         "b.dispatch('click', {stopPropagation:function(){}});"   # arm
         "fireTimers();"                                          # ~3s elapse → disarm
         "console.log(JSON.stringify({label:b.textContent, armed:b.classList.contains('armed'),"
         " fired:fired}));")
-    assert got == {"label": "✓ done", "armed": False, "fired": 0}   # reverted, never fired
+    assert got == {"label": "⤓ archive", "armed": False, "fired": 0}   # reverted, never fired
 
 
 def test_js_confirm_blur_disarms():
@@ -2711,7 +2711,7 @@ def test_js_card_wires_two_tap_confirm_on_done_and_drop():
     body = _card_body()
     # done + drop route through armConfirm (NOT a bare addEventListener→archive), and the real
     # archive action is unchanged (still archiveCard with the same reason).
-    assert "armConfirm(doneBtn, {armedLabel: 'done?'" in body
+    assert "armConfirm(doneBtn, {armedLabel: 'archive?'" in body
     assert "armConfirm(dropBtn, {armedLabel: 'drop?'" in body
     assert "archiveCard(v, doneBtn, astat, 'done', c)" in body
     assert "archiveCard(v, dropBtn, astat, 'dropped', c)" in body
@@ -3264,8 +3264,8 @@ def test_js_archive_actions_and_snippet_wired():
     assert "__ARCHIVE_JS__" not in js                              # snippet inlined
     assert js.count("function dropEligible") == 1
     assert js.count("function matchArchived") == 1
-    # every card gets [✓ done]; stalled/cooling ALSO get [drop] via dropEligible(v)
-    assert "'archive-btn done', '✓ done'" in js
+    # every card gets [⤓ archive]; stalled/cooling ALSO get [drop] via dropEligible(v)
+    assert "'archive-btn done', '⤓ archive'" in js
     assert "if(dropEligible(v)){" in js
     assert "'archive-btn drop destructive', 'drop'" in js   # fix #4: drop is destructively styled
     assert "archiveCard(v, doneBtn, astat, 'done', c)" in js
@@ -3281,7 +3281,7 @@ def test_js_archive_actions_and_snippet_wired():
 def test_js_done_chip_and_view_wired():
     js = viewer._JS
     assert "state.doneMode" in js
-    assert "'✓ Done ' + archivedN" in js                           # the [✓ Done N] chip
+    assert "'✓ Archived ' + archivedN" in js                       # the [✓ Archived N] chip
     assert "chip state-done" in js
     assert "function renderDoneView(" in js
     # render branches into Done mode (change C: also hides the pinned §3 needs-you section).
@@ -4474,14 +4474,14 @@ def _chip(chips, label_frag):
 
 def test_render_triage_has_active_chip_with_its_count():
     chips = _node_render_triage({"needs_you": 2, "stalled": 3, "slowing": 4, "active": 5, "live": 1}, archived_n=7)
-    # fix #3: FIVE state chips + All + Done, in order.
+    # fix #3: FIVE state chips + All + Archived, in order.
     labels = [c["text"] for c in chips]
     assert any("Needs you 2" in t for t in labels)
     assert any("Stalled 3" in t for t in labels)
     assert any("Cooling 4" in t for t in labels)
     assert any("Active 5" in t for t in labels)     # the NEW Active chip carries stateCounts.active
     assert any(t.strip() == "All" for t in labels)
-    assert any("Done 7" in t for t in labels)
+    assert any("Archived 7" in t for t in labels)
     # the Active chip is a real state filter (state-active class), not a badge.
     assert "state-active" in _chip(chips, "Active")["cls"]
 
@@ -4550,7 +4550,7 @@ def test_dogfood2_fix4_drop_is_destructive_and_separated_in_css_and_wiring():
     assert "border-color:var(--red)" in block                     # persistent red border
     assert "margin-left:" in block                                # visual separation from safe actions
     # [done] stays benign (green), NOT destructive.
-    assert "'archive-btn done', '✓ done'" in js
+    assert "'archive-btn done', '⤓ archive'" in js
     assert "'archive-btn done destructive'" not in js
 
 
@@ -4961,9 +4961,9 @@ def test_triage_active_chip_stays_visible_when_filtered_to_a_now_empty_state():
 def test_triage_done_chip_hidden_at_zero_and_shown_when_archived():
     counts = {"needs_you": 1, "stalled": 1, "slowing": 1, "active": 1, "live": 0}
     none = _node_render_triage(counts, archived_n=0)
-    assert not any("Done" in c["text"] for c in none)        # 0 archived → no Done chip
+    assert not any("Archived" in c["text"] for c in none)    # 0 archived → no Archived chip
     some = _node_render_triage(counts, archived_n=3)
-    assert any("Done 3" in c["text"] for c in some)          # >0 → the Done chip reappears
+    assert any("Archived 3" in c["text"] for c in some)      # >0 → the Archived chip reappears
 
 
 def test_triage_hidden_zero_chip_reappears_when_count_rises():
