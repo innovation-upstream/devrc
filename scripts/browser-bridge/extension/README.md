@@ -42,26 +42,45 @@ back this:
   `{closed:tabId, alreadyGone:true}` (a success) so the server cleanly drops the
   stale ownership rather than surfacing a spurious error.
 
-**Screenshot of a background owned tab:** `chrome.tabs.captureVisibleTab` only
-captures the **visible** tab of a window. If the target tab isn't active the SW
-briefly activates it, **settles** until it has painted, captures, then
-**restores** the previously-active tab — a short visible flicker, but it never
-silently screenshots the wrong tab. A target tab that is already visible is
-captured directly with no flicker.
+**Screenshot is a VISIBLE-tab op (fundamental limitation):**
+`chrome.tabs.captureVisibleTab` captures the **on-screen composited pixels of the
+window's foreground tab** — it fundamentally **cannot** capture a tab that isn't
+visible on-screen. The **actual foreground tab** captures fine. For a target tab
+that isn't active the SW makes a **best-effort** attempt — briefly activate,
+**settle** until painted, capture, then **restore** the previously-active tab (a
+short flicker, never silently the wrong tab). **On i3 this commonly fails,**
+though: activating a tab does NOT guarantee its Brave *window* is raised (Chrome
+can't force i3 to raise a window), so an owned/background tab's window is often
+off-screen, the tab never composites, and the capture keeps returning
+`"image readback failed"` no matter how many times we retry — a **permanent**
+condition for that tab, not the transient paint race the retry recovers.
+**Use `text`/`html`/`eval` for a background tab** (incl. the `browser agent`'s OWN
+background tab); those read the tab regardless of visibility.
 
-*Background-tab settle + retry (robustness):* a JUST-activated background tab
-hasn't painted its first frame yet, so a bare `captureVisibleTab` returns
-`"image readback failed"`. The SW therefore (1) waits for the tab to reach
-`status:"complete"` **plus a paint settle (~350ms)** so the FIRST capture
-usually succeeds, and (2) **retries** the capture on a transient error (bounded —
-a few tries). **Retries respect Chrome's ~2/sec `captureVisibleTab` quota:** the
-API is throttled to ~2 calls/sec (~500ms), so retries are **spaced ≥~600ms**
-apart (a quota hit — `MAX_CAPTURE_VISIBLE_TAB_CALLS_PER_SECOND` — waits a full
-~1s window) — a faster retry would just re-trip the quota instead of recovering.
-This matters because `browser agent` screenshots run in the agent's OWN
-background tab. **Reload the extension** after changing this to take effect. The
-classifier
-(`isTransientCaptureError`), the retry (`captureWithRetry`), the settle
+*Background-tab settle + retry (transient recovery):* a JUST-activated tab that IS
+visible but hasn't painted its first frame returns `"image readback failed"`. The
+SW (1) waits for the tab to reach `status:"complete"` **plus a paint settle
+(~350ms)** so the FIRST capture usually succeeds, and (2) **retries** on a
+transient error (bounded — a few tries). **Retries respect Chrome's ~2/sec
+`captureVisibleTab` quota:** the API is throttled to ~2 calls/sec (~500ms), so
+retries are **spaced ≥~600ms** apart (a quota hit —
+`MAX_CAPTURE_VISIBLE_TAB_CALLS_PER_SECOND` — waits a full ~1s window) — a faster
+retry would just re-trip the quota instead of recovering.
+
+*Exhausted-retry → clear, actionable error:* when the quota-spaced retries are
+**exhausted** on a persistent readback error (the occluded-window case above), the
+op maps it via `mapCaptureFailure` to a caller-actionable message
+(`screenshot unavailable: the target tab is not visible on-screen … use
+'text'/'html'/'eval' which work on background tabs`) instead of the opaque
+`image readback failed`. The mapping runs **only post-exhaustion** (a readback a
+retry could still recover is never wrongly reported "unavailable"), and the quota
+error keeps its own message. *(Future opt-in, NOT implemented: a `chrome.debugger`
++ CDP `Page.captureScreenshot` path could capture an off-screen tab, but it needs
+the `debugger` permission and shows a debug banner.)*
+
+**Reload the extension** after changing this to take effect. The classifier
+(`isTransientCaptureError` / `isOcclusionCaptureError`), the retry
+(`captureWithRetry`), the error mapping (`mapCaptureFailure`), the settle
 (`waitForCaptureReady`) and the activate→capture→restore orchestration
 (`screenshotWithRestore`, restore on success AND failure) are pure + unit-tested
 in `protocol.js`; `service_worker.js` supplies the chrome.* side effects.
@@ -166,14 +185,19 @@ The chrome.* glue needs a real browser — verify by hand after loading:
       (e.g. sibling subagents) each `browser open`, capture the `tabId`, and run
       every op with `browser --tab <id> …`. Confirm each reads/navigates only its
       OWN tab — the explicit `--tab` overrides the shared owned-tab routing.
-- [ ] `browser screenshot` of a background owned tab briefly flickers it to the
-      foreground, captures it, and restores the tab that was active before. It
-      **succeeds even on the first shot of a fresh background tab** with **NO
-      `MAX_CAPTURE_VISIBLE_TAB_CALLS_PER_SECOND` quota error** (the paint settle +
-      the ≥~600ms-spaced retry defeat both the old `image readback failed` and the
-      quota trip): `browser --instance <key> open <url>` → `browser --instance
-      <key> --tab <id> screenshot /tmp/x.png` writes a real PNG (was flaky before
-      this fix — reload the extension first so the new spacing is live).
+- [ ] **Visible-tab screenshot works:** focus a normal tab, `browser screenshot
+      /tmp/vis.png` writes a real PNG of that foreground tab.
+- [ ] **Background/occluded-tab screenshot returns the CLEAR error (i3):**
+      `browser --instance <key> open <url>` → `browser --instance <key> --tab <id>
+      screenshot /tmp/x.png`. On i3 (the owned tab's window isn't raised) this
+      should fail — after the quota-spaced retries — with the **actionable**
+      `screenshot unavailable: … not visible on-screen … use 'text'/'html'/'eval'`
+      message and a **non-zero exit**, NOT the opaque `image readback failed` (and
+      NOT a `MAX_CAPTURE_VISIBLE_TAB_CALLS_PER_SECOND` quota dump). Reload the
+      extension first so the new mapping is live. (If the owned tab's window HAPPENS
+      to be composited/visible, it may instead write a PNG — that path still works;
+      the point is the failure is now a clear, actionable message.) Read that tab
+      with `browser --tab <id> text` instead — it works regardless of visibility.
 - [ ] **Two-session isolation (the fix):** open two Claude sessions (each in its
       own tmux pane). In each, `browser open` a DIFFERENT url, then interleave
       `browser nav …` / `browser html` between the sessions. Confirm neither

@@ -127,7 +127,7 @@ must run in whatever tab is active). This can be scoped down later; noted in
 | `eval`       | `chrome.scripting.executeScript` (MAIN world) of `js`     | `{url,value}` |
 | `tabs`       | `chrome.tabs.query({})`                                   | `{tabs:[...],ownedTabId}` |
 | `nav`        | `chrome.tabs.update(tab,{url})`                           | `{tabId,url}` |
-| `screenshot` | `chrome.tabs.captureVisibleTab` (png)                     | `{url,dataUrl}` |
+| `screenshot` | `chrome.tabs.captureVisibleTab` (png) — **visible/foreground tab only** (a background/occluded tab fails with a clear "not visible on-screen" error; see the screenshot caveat) | `{url,dataUrl}` |
 | `open`       | `chrome.tabs.create({url,active:false})`                 | `{tabId,url}` |
 | `close`      | `chrome.tabs.remove(tabId)`                               | `{closed:tabId}` |
 
@@ -253,25 +253,50 @@ per-session (multi-step **workflow**) isolation did not.
   **released** so a dead session doesn't leak ownership, but the real Brave tab
   is deliberately **NOT closed** (never yank a visible tab out from under the
   user) — only an explicit `browser close` closes it.
-- **Screenshot caveat (honest).** `captureVisibleTab` only ever captures the
-  **visible** tab of a window. Screenshotting a session's **background** owned
-  tab therefore briefly activates it → **settles until painted** → captures (with
-  retry) → restores the previously-active tab (a short visible flicker in that
-  window), so we never silently capture the wrong tab. A screenshot of an owned
-  tab that is already visible is unaffected. **Background-tab settle + retry:** a
-  just-activated background tab hasn't painted its first frame, so a bare capture
-  returns `"image readback failed"`; the SW waits for `status:"complete"` + a
-  paint settle (~350ms) so the FIRST capture usually wins, then **retries** on a
-  transient error. Retries **respect Chrome's ~2/sec `captureVisibleTab` quota**
-  (spaced ≥~600ms; a `MAX_CAPTURE_VISIBLE_TAB_CALLS_PER_SECOND` hit waits a ~1s
-  window) — a faster retry would re-trip the quota instead of recovering (needs
-  an extension **reload** to take effect). This hardens the
-  `browser agent` path, which screenshots in its OWN background tab. The classify
-  + retry + settle + activate→capture→restore logic is pure and unit-tested in
-  `extension/protocol.js` (`isTransientCaptureError` / `captureWithRetry` /
-  `waitForCaptureReady` / `screenshotWithRestore`); the capture itself needs real
-  Brave, so it stays on the manual checklist. Like any `extension/` change, it
-  only takes effect after a manual extension **reload** in `brave://extensions`.
+- **Screenshot is a VISIBLE-tab op (fundamental limitation, honest).**
+  `captureVisibleTab` captures the **on-screen composited pixels of a window's
+  foreground tab** — it fundamentally **cannot** capture a tab that isn't visible
+  on-screen. Screenshotting the **actual foreground tab** works fine. For a
+  session's **background/owned** tab the bridge makes a **best-effort** attempt —
+  briefly activate → **settle until painted** → capture (with retry) → restore the
+  previously-active tab (a short flicker) — so it never silently captures the wrong
+  tab. **But on the user's i3 tiling WM this commonly fails:** activating a tab does
+  NOT guarantee its Brave *window* is raised/composited (Chrome can't force i3 to
+  raise a window), so an owned/agent tab's window is often off-screen, the tab never
+  composites, and the capture keeps returning `"image readback failed"` no matter
+  how many times we retry. This is a **permanent condition for that tab, not the
+  transient paint race** the retry recovers.
+  - **Settle + retry (transient recovery):** a just-activated tab that IS visible
+    but momentarily unpainted returns `"image readback failed"` on the first try;
+    the SW waits for `status:"complete"` + a paint settle (~350ms) so the FIRST
+    capture usually wins, then **retries** on a transient error. Retries **respect
+    Chrome's ~2/sec `captureVisibleTab` quota** (spaced ≥~600ms; a
+    `MAX_CAPTURE_VISIBLE_TAB_CALLS_PER_SECOND` hit waits a ~1s window) — a faster
+    retry would re-trip the quota instead of recovering.
+  - **Exhausted-retry → clear, actionable error (not the opaque chrome string).**
+    When the quota-spaced retries are **exhausted** on a persistent readback error
+    (the occluded-window case above), the op maps it to a caller-actionable message
+    — `screenshot unavailable: the target tab is not visible on-screen (background
+    or occluded window). captureVisibleTab can only capture the foreground tab;
+    bring the tab to the foreground, or use 'text'/'html'/'eval' which work on
+    background tabs.` — instead of `image readback failed`. It is returned as the op
+    error (non-zero exit via the normal envelope). This is distinct from the
+    transient case: a readback a retry could still recover is NOT reported as
+    "unavailable" (the mapping runs only post-exhaustion), and the **quota error
+    keeps its own message** (it is a throttle, not an occlusion).
+  - **Use `text` / `html` / `eval` for a background tab** — they read the tab
+    directly regardless of whether it is on-screen, so an agent/owned tab (e.g. the
+    `browser agent`'s OWN background tab) should read, not screenshot.
+  - *Future opt-in (NOT implemented):* a `chrome.debugger` + CDP
+    `Page.captureScreenshot` path COULD capture an off-screen tab, but it needs the
+    `debugger` permission and shows a debug banner — deliberately out of scope.
+  - The classify + retry + settle + activate→capture→restore logic **and the
+    exhausted-retry error mapping** are pure and unit-tested in
+    `extension/protocol.js` (`isTransientCaptureError` / `captureWithRetry` /
+    `waitForCaptureReady` / `screenshotWithRestore` / `isOcclusionCaptureError` /
+    `mapCaptureFailure`); the capture itself needs real Brave, so it stays on the
+    manual checklist. Like any `extension/` change, it only takes effect after a
+    manual extension **reload** in `brave://extensions`.
 - **Backward-compat.** A single session with no `open` (and even no
   `X-Session-Id`) behaves exactly as before: active-tab ops, no `tabId` injected.
   The multi-instance `--instance` targeting, ambiguity/supersede semantics, and
@@ -589,10 +614,14 @@ The **`browser agent`** slice, all headless (NO live model, NO Brave, NO bridge)
   ONE `--continue` retry then `blocked`, no-retry on a hard error.
 
 Current totals: **138 Python** (`test_server.py` 100 + `test_browser_agent_parse.py`
-14 + `test_browser_agent.py` 24) + **68 node** (`protocol.test.mjs` 47 +
-`browser_tool.test.mjs` 21) — the 18 added `protocol.test.mjs` cases cover the
-screenshot settle+retry decision logic (`isTransientCaptureError` /
-`captureWithRetry` / `waitForCaptureReady` / `screenshotWithRestore`). The live browser-driving loop (real DeepSeek + real
+14 + `test_browser_agent.py` 24) + **82 node** (`protocol.test.mjs` 58 +
+`browser_tool.test.mjs` 24) — the `protocol.test.mjs` cases cover the screenshot
+settle+retry decision logic (`isTransientCaptureError` / `captureWithRetry` /
+`waitForCaptureReady` / `screenshotWithRestore`) **and the exhausted-retry error
+mapping** (`isOcclusionCaptureError` / `mapCaptureFailure`): a persistent readback
+(retries exhausted) → the actionable "not visible on-screen" message, a transient
+readback that a spaced retry recovers still succeeds (no premature "unavailable"),
+and the #182 quota error keeps its own message. The live browser-driving loop (real DeepSeek + real
 Brave) canNOT run in CI; the chrome.* glue in `service_worker.js` and the
 end-to-end agent run are covered by the manual checklists (`extension/README.md` +
 "opencode browser-agent" above). The two `opencode debug agent` checks under

@@ -186,6 +186,55 @@ export function isCaptureQuotaError(err) {
   return !!s && s.includes(CAPTURE_QUOTA_PATTERN);
 }
 
+// --- fundamental limitation: captureVisibleTab needs an ON-SCREEN tab -------- //
+// captureVisibleTab captures the on-screen COMPOSITED pixels of a window's
+// visible tab. On the user's i3 tiling WM an owned/agent tab is intentionally
+// NOT foregrounded, and activating it does NOT guarantee its Brave WINDOW is
+// raised/composited (Chrome can't force i3 to raise a window). So the tab may
+// never composite and the GPU read-back keeps returning "image readback failed"
+// no matter how many times we retry — this is a PERMANENT condition for that tab,
+// NOT the paint race the settle+retry recovers. Once the spaced retries are spent
+// (a genuinely transient readback would already have succeeded on a retry), a
+// readback error means the tab is simply not visible on-screen.
+const OCCLUSION_CAPTURE_PATTERNS = ["image readback failed", "readback"];
+
+// The actionable error surfaced to the caller when a screenshot cannot be
+// captured because the target tab is not visible on-screen (background / occluded
+// window). Names the alternative ops that DO work on a background tab so the
+// caller/agent acts instead of blindly retrying a capture that cannot succeed.
+export const SCREENSHOT_NOT_VISIBLE_MESSAGE =
+  "screenshot unavailable: the target tab is not visible on-screen (background " +
+  "or occluded window). captureVisibleTab can only capture the foreground tab; " +
+  "bring the tab to the foreground, or use 'text'/'html'/'eval' which work on " +
+  "background tabs.";
+
+// True when `err` looks like the readback/occlusion failure (a GPU read-back with
+// no pixels) — but NOT the per-second quota error, which is a distinct, genuinely
+// transient throttle that keeps its own message (#182). Matched case-insensitively.
+// Intended to be checked only AFTER the retry budget is exhausted: a transient
+// readback that a spaced retry could recover has already succeeded by then, so a
+// match here means the tab is persistently not compositing → the limitation above.
+export function isOcclusionCaptureError(err) {
+  const s = errText(err);
+  if (!s) return false;
+  if (isCaptureQuotaError(err)) return false; // a quota hit is not an occlusion
+  return OCCLUSION_CAPTURE_PATTERNS.some((p) => s.includes(p));
+}
+
+// Map a POST-RETRY (exhausted-budget) capture failure to the error string the
+// caller sees. A readback/occlusion failure that survived every spaced retry is
+// the fundamental "tab not visible on-screen" limitation → the actionable
+// SCREENSHOT_NOT_VISIBLE_MESSAGE. Everything else (the quota error, a
+// permission/URL error, owned_tab_gone, …) passes through UNCHANGED so its own
+// specific cause is preserved. MUST be applied ONLY after the retries are
+// exhausted — never on an error a retry could still recover (that would wrongly
+// claim "unavailable"). Pure + unit-tested; service_worker.js applies it in the
+// screenshot op's catch, which by construction runs only post-retry.
+export function mapCaptureFailure(err) {
+  if (isOcclusionCaptureError(err)) return SCREENSHOT_NOT_VISIBLE_MESSAGE;
+  return String((err && err.message != null) ? err.message : err);
+}
+
 const defaultSleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // Call `capture()` (→ Promise<dataUrl>) with a bounded retry on a TRANSIENT

@@ -19,6 +19,7 @@ import {
   isTransientCaptureError, isCaptureQuotaError, captureWithRetry,
   waitForCaptureReady, screenshotWithRestore, CAPTURE_MAX_ATTEMPTS,
   CAPTURE_RETRY_BASE_MS, CAPTURE_QUOTA_WAIT_MS, CAPTURE_SETTLE_MS,
+  isOcclusionCaptureError, mapCaptureFailure, SCREENSHOT_NOT_VISIBLE_MESSAGE,
 } from "../extension/protocol.js";
 
 test("op set mirrors the server contract", () => {
@@ -511,4 +512,111 @@ test("screenshotWithRestore swallows a restore failure but returns the capture r
   // A failing restore must NOT mask the successful capture.
   const out = await screenshotWithRestore(deps);
   assert.equal(out, "data:png");
+});
+
+// --- exhausted-retry error mapping: the fundamental captureVisibleTab/i3 limit -- //
+// captureVisibleTab needs an ON-SCREEN composited tab. On i3 an owned/background
+// tab's window may never be raised, so a readback error PERSISTS past every spaced
+// retry. Once exhausted, that must surface as a CLEAR, actionable message — not the
+// opaque "image readback failed" — while a genuinely transient readback (recovered
+// by a retry) and the #182 quota error keep their existing behaviour.
+
+test("isOcclusionCaptureError matches a persistent readback failure but NOT the quota error", () => {
+  assert.equal(isOcclusionCaptureError(new Error("Failed to capture tab: image readback failed")), true);
+  assert.equal(isOcclusionCaptureError("image readback failed"), true);
+  assert.equal(isOcclusionCaptureError("GPU readback error"), true);
+  assert.equal(isOcclusionCaptureError("IMAGE READBACK FAILED"), true); // case-insensitive
+  // The per-second quota error is its OWN thing (#182) — never re-mapped to occlusion,
+  // even when a message happens to mention both (quota wins).
+  assert.equal(isOcclusionCaptureError(new Error(
+    "This request exceeds the MAX_CAPTURE_VISIBLE_TAB_CALLS_PER_SECOND quota.")), false);
+  assert.equal(isOcclusionCaptureError(
+    "IMAGE readback FAILED as MAX_CAPTURE_VISIBLE_TAB_CALLS_PER_SECOND"), false);
+  // Permanent/unknown/empty errors are not occlusion errors either.
+  assert.equal(isOcclusionCaptureError("Cannot access contents of the page"), false);
+  assert.equal(isOcclusionCaptureError("owned_tab_gone"), false);
+  assert.equal(isOcclusionCaptureError(""), false);
+  assert.equal(isOcclusionCaptureError(null), false);
+  assert.equal(isOcclusionCaptureError(undefined), false);
+});
+
+test("SCREENSHOT_NOT_VISIBLE_MESSAGE is actionable and points at the working ops", () => {
+  // The message must be human/agent-actionable: name the cause AND the alternative.
+  assert.match(SCREENSHOT_NOT_VISIBLE_MESSAGE, /not visible on-screen/);
+  assert.match(SCREENSHOT_NOT_VISIBLE_MESSAGE, /background or occluded/);
+  assert.match(SCREENSHOT_NOT_VISIBLE_MESSAGE, /captureVisibleTab can only capture the foreground tab/);
+  assert.match(SCREENSHOT_NOT_VISIBLE_MESSAGE, /'text'\/'html'\/'eval'/);
+  // It is NOT the raw chrome error.
+  assert.doesNotMatch(SCREENSHOT_NOT_VISIBLE_MESSAGE, /image readback failed/i);
+});
+
+test("mapCaptureFailure: a persistent readback → the actionable not-visible message", () => {
+  assert.equal(mapCaptureFailure(new Error("Failed to capture tab: image readback failed")),
+    SCREENSHOT_NOT_VISIBLE_MESSAGE);
+  assert.equal(mapCaptureFailure("image readback failed"), SCREENSHOT_NOT_VISIBLE_MESSAGE);
+});
+
+test("mapCaptureFailure: the quota error passes through UNCHANGED (#182 stays)", () => {
+  const quota = "This request exceeds the MAX_CAPTURE_VISIBLE_TAB_CALLS_PER_SECOND quota.";
+  assert.equal(mapCaptureFailure(new Error(quota)), quota);
+  assert.equal(mapCaptureFailure(quota), quota);
+});
+
+test("mapCaptureFailure: permission / owned_tab_gone errors pass through UNCHANGED", () => {
+  assert.equal(mapCaptureFailure(new Error("Cannot access contents of the page")),
+    "Cannot access contents of the page");
+  assert.equal(mapCaptureFailure("owned_tab_gone"), "owned_tab_gone");
+});
+
+// Mirror the SW screenshot op: capture wrapped in captureWithRetry inside
+// screenshotWithRestore, and the exhausted error mapped in the op's catch. This
+// proves the DECISION path end-to-end (no chrome.* needed) — the piece that turns
+// a real occluded-tab capture into the clear message.
+async function screenshotOp(deps, retryOpts = {}) {
+  try {
+    return await screenshotWithRestore({
+      ...deps,
+      capture: () => captureWithRetry(deps.capture, { sleep: noSleep, ...retryOpts }),
+    });
+  } catch (e) {
+    throw new Error(mapCaptureFailure(e));
+  }
+}
+
+test("screenshot op: persistent readback (retries exhausted) → the actionable not-visible error", async () => {
+  let calls = 0;
+  const { deps } = spyDeps({
+    capture: async () => { calls++; throw new Error("Failed to capture tab: image readback failed"); },
+  });
+  await assert.rejects(() => screenshotOp(deps), (e) => {
+    assert.equal(e.message, SCREENSHOT_NOT_VISIBLE_MESSAGE, "maps to the actionable message");
+    assert.doesNotMatch(e.message, /image readback failed/, "not the raw chrome error");
+    return true;
+  });
+  // It only claims "unavailable" AFTER the full retry budget is spent.
+  assert.equal(calls, CAPTURE_MAX_ATTEMPTS, "exhausted every retry before giving up");
+});
+
+test("screenshot op: a transient readback that a retry recovers still SUCCEEDS (no premature 'unavailable')", async () => {
+  let calls = 0;
+  const { deps } = spyDeps({
+    capture: async () => {
+      calls++;
+      if (calls < 2) throw new Error("image readback failed"); // one transient miss
+      return "data:png;ok";
+    },
+  });
+  const out = await screenshotOp(deps);
+  assert.equal(out, "data:png;ok", "the spaced retry wins → real screenshot, not the error");
+  assert.equal(calls, 2, "recovered on the retry");
+});
+
+test("screenshot op: a persistent quota error surfaces the QUOTA message, not the not-visible one", async () => {
+  const quota = "This request exceeds the MAX_CAPTURE_VISIBLE_TAB_CALLS_PER_SECOND quota.";
+  const { deps } = spyDeps({ capture: async () => { throw new Error(quota); } });
+  await assert.rejects(() => screenshotOp(deps), (e) => {
+    assert.equal(e.message, quota, "quota error is preserved (#182)");
+    assert.notEqual(e.message, SCREENSHOT_NOT_VISIBLE_MESSAGE);
+    return true;
+  });
 });

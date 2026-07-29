@@ -23,6 +23,7 @@ import {
   classifyPollStatus, POLL_COMMAND, POLL_IDLE, POLL_SUPERSEDED,
   POLL_UNAUTHORIZED, SUPERSEDE_BACKOFF_MS,
   captureWithRetry, waitForCaptureReady, screenshotWithRestore,
+  mapCaptureFailure,
 } from "./protocol.js";
 
 const DEFAULT_PORT = 8788;
@@ -167,42 +168,62 @@ const OPS = {
 
   async screenshot(cmd) {
     const tab = await targetTab(cmd);
-    // captureVisibleTab only ever captures the VISIBLE tab of its window. If the
-    // caller's owned tab is in the background, capturing it requires briefly
-    // bringing it to the foreground. We do exactly that — activate → SETTLE →
-    // capture (with retry) → restore the previously-active tab — so we never
-    // SILENTLY screenshot the wrong tab. This causes a brief visible flicker in
-    // that window (documented).
+    // captureVisibleTab only ever captures the VISIBLE (composited, on-screen) tab
+    // of its window. If the caller's owned tab is in the background we make a
+    // BEST-EFFORT attempt to bring it forward — activate → SETTLE → capture (with
+    // retry) → restore the previously-active tab — so we never SILENTLY screenshot
+    // the wrong tab. This causes a brief visible flicker in that window (documented).
     //
-    // A JUST-activated background tab hasn't painted its first frame yet, so a
-    // bare captureVisibleTab returns "image readback failed". So for the
-    // background path we (1) wait for the tab to reach `status:"complete"` + a
-    // paint settle (so the FIRST capture usually succeeds — no retry needed), and
-    // (2) retry the capture on a transient error. CRITICAL: Chrome throttles
-    // captureVisibleTab to ~2/sec (MAX_CAPTURE_VISIBLE_TAB_CALLS_PER_SECOND), so
-    // the retry backoff spaces attempts ≥~600ms (a quota hit waits a full ~1s
-    // window) — a faster retry would re-trip the quota. Both the settle and the
-    // spaced retry, plus the activate→capture→restore orchestration (restore on
-    // success AND failure), are pure + unit-tested in protocol.js — keep this in
-    // sync with them.
+    // FUNDAMENTAL LIMITATION (i3): activating a tab does NOT guarantee its Brave
+    // WINDOW is raised/composited — on the user's i3 tiling WM an owned/agent tab's
+    // window is often not on-screen, and Chrome can't force i3 to raise it. Then the
+    // tab never composites and captureVisibleTab keeps returning "image readback
+    // failed" no matter how we retry. So the settle + spaced retry below recover a
+    // genuinely TRANSIENT paint race (a tab that IS visible but momentarily
+    // unpainted), and when they're EXHAUSTED on a persistent readback error we map
+    // it to a CLEAR "tab not visible on-screen" message (mapCaptureFailure) instead
+    // of the opaque "image readback failed" — the caller should use text/html/eval,
+    // which work on a background tab. (A future opt-in chrome.debugger + CDP
+    // Page.captureScreenshot path COULD capture an off-screen tab, but it needs the
+    // debugger permission + shows a debug banner — deliberately out of scope here.)
+    //
+    // A JUST-activated background tab hasn't painted its first frame yet, so a bare
+    // captureVisibleTab returns "image readback failed". So for the background path
+    // we (1) wait for the tab to reach `status:"complete"` + a paint settle (so the
+    // FIRST capture usually succeeds — no retry needed), and (2) retry the capture on
+    // a transient error. CRITICAL: Chrome throttles captureVisibleTab to ~2/sec
+    // (MAX_CAPTURE_VISIBLE_TAB_CALLS_PER_SECOND), so the retry backoff spaces attempts
+    // ≥~600ms (a quota hit waits a full ~1s window) — a faster retry would re-trip the
+    // quota. The settle, the spaced retry, the activate→capture→restore orchestration
+    // (restore on success AND failure), and the exhausted-retry error mapping are all
+    // pure + unit-tested in protocol.js — keep this in sync with them.
     const capture = () =>
       chrome.tabs.captureVisibleTab(tab.windowId, { format: "png" });
-    const dataUrl = await screenshotWithRestore({
-      isActive: !!tab.active,
-      targetId: tab.id,
-      // The visible-tab path is a hot GPU capture too — retry it as well (cheap,
-      // and it hardens against a rare transient readback even when already active).
-      capture: () => captureWithRetry(capture),
-      getPrevActiveId: async () => {
-        const [prev] = await chrome.tabs.query({ active: true, windowId: tab.windowId });
-        return prev ? prev.id : null;
-      },
-      activate: (id) => chrome.tabs.update(id, { active: true }),
-      waitReady: () => waitForCaptureReady(async () => {
-        try { return (await chrome.tabs.get(tab.id)).status; } catch (e) { return null; }
-      }),
-      restore: (id) => chrome.tabs.update(id, { active: true }),
-    });
+    let dataUrl;
+    try {
+      dataUrl = await screenshotWithRestore({
+        isActive: !!tab.active,
+        targetId: tab.id,
+        // The visible-tab path is a hot GPU capture too — retry it as well (cheap,
+        // and it hardens against a rare transient readback even when already active).
+        capture: () => captureWithRetry(capture),
+        getPrevActiveId: async () => {
+          const [prev] = await chrome.tabs.query({ active: true, windowId: tab.windowId });
+          return prev ? prev.id : null;
+        },
+        activate: (id) => chrome.tabs.update(id, { active: true }),
+        waitReady: () => waitForCaptureReady(async () => {
+          try { return (await chrome.tabs.get(tab.id)).status; } catch (e) { return null; }
+        }),
+        restore: (id) => chrome.tabs.update(id, { active: true }),
+      });
+    } catch (e) {
+      // Reached only AFTER captureWithRetry exhausted its spaced retries (a
+      // recoverable transient readback would have resolved above). A persistent
+      // readback/occlusion error → the actionable "not visible on-screen" message;
+      // every other error (quota, permission, owned_tab_gone) passes through.
+      throw new Error(mapCaptureFailure(e));
+    }
     return { url: tab.url, dataUrl };
   },
 
