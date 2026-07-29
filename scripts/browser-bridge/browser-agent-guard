@@ -1,0 +1,150 @@
+#!/usr/bin/env bash
+# browser-agent-guard — the guardrail shim the opencode browser-agent runs INSTEAD
+# of the real `browser` CLI. The `browser agent` wrapper symlinks this as `browser`
+# into a scratch `bin/` that it puts FIRST on the agent's PATH, so every `browser
+# …` the cheap model runs actually lands here first. This is the deterministic,
+# structural enforcement point for the C.3 guardrails — belt-and-suspenders on top
+# of opencode's own bash-permission allowlist:
+#
+#   1. OWN-TAB ISOLATION — the command MUST carry `--tab <BAG_TAB>` and that tab
+#      MUST equal the wrapper's owned tab. Any other tab (or no tab) is refused,
+#      so the agent can NEVER touch the user's active tab. (Structural: the agent
+#      has no way to name another tab that the guard will pass through.)
+#   2. OP ALLOWLIST — only read/navigate ops (nav/text/html/eval/screenshot).
+#      open/close/tabs/release/health/instances are refused (the wrapper owns the
+#      tab lifecycle; `tabs` would leak other tabs' URLs).
+#   3. DENY/ALLOW DOMAINS — a `nav` to a denied host (or, with an allowlist set,
+#      to a non-allowed host) is refused; `eval` is scanned best-effort for a
+#      denied host substring.
+#   4. DRY-RUN — with BAG_DRY_RUN=1, a form-submitting/navigating op (nav/eval) is
+#      LOGGED and a synthetic result returned WITHOUT executing it.
+#
+# Every decision is appended to BAG_TRANSCRIPT (if set) for the audit trail. On a
+# refusal the shim prints a clear op-level error JSON to stdout and exits non-zero
+# so the model sees the failure (and the wrapper's transcript records it).
+#
+# Config (env, set by the wrapper):
+#   BAG_TAB           (required) the owned tab id every op must target
+#   BAG_REAL_BROWSER  (required) path to the real `browser` CLI to exec
+#   BAG_INSTANCE      optional instance routing key (prepended as --instance)
+#   BAG_ALLOW_DOMAINS space-separated allowlist (empty → allow all but deny)
+#   BAG_DENY_DOMAINS  space-separated denylist
+#   BAG_DRY_RUN       "1" → intercept nav/eval (log, don't execute)
+#   BAG_ALLOWED_OPS   space-separated op allowlist (default: nav text html eval screenshot)
+#   BAG_TRANSCRIPT    optional path to append one JSON audit line per invocation
+set -uo pipefail
+
+BAG_TAB="${BAG_TAB:-}"
+BAG_REAL_BROWSER="${BAG_REAL_BROWSER:-}"
+BAG_INSTANCE="${BAG_INSTANCE:-}"
+BAG_ALLOW_DOMAINS="${BAG_ALLOW_DOMAINS:-}"
+BAG_DENY_DOMAINS="${BAG_DENY_DOMAINS:-}"
+BAG_DRY_RUN="${BAG_DRY_RUN:-0}"
+BAG_ALLOWED_OPS="${BAG_ALLOWED_OPS:-nav text html eval screenshot}"
+BAG_TRANSCRIPT="${BAG_TRANSCRIPT:-}"
+
+audit() {
+  # Append a metadata-only JSON audit line (never page content) if a transcript
+  # path is configured. Best-effort — never fails the shim.
+  [ -n "$BAG_TRANSCRIPT" ] || return 0
+  python3 - "$BAG_TRANSCRIPT" "$1" "$2" "${3:-}" 2>/dev/null <<'PY' || true
+import json, sys, time
+path, decision, op, detail = (sys.argv + ["", "", "", ""])[1:5]
+with open(path, "a", encoding="utf-8") as f:
+    f.write(json.dumps({"ts": round(time.time(), 3), "guard": decision,
+                        "op": op, "detail": detail},
+                       ensure_ascii=False, separators=(",", ":")) + "\n")
+PY
+}
+
+refuse() {  # <op> <reason>
+  local op="$1" reason="$2"
+  audit "refused" "$op" "$reason"
+  printf '{"ok":false,"error":"browser-agent-guard: %s"}\n' "$reason" >&2
+  printf '{"ok":false,"error":"guard_refused:%s"}\n' "$reason"
+  exit 3
+}
+
+[ -n "$BAG_TAB" ] || refuse "?" "BAG_TAB_unset"
+[ -n "$BAG_REAL_BROWSER" ] || refuse "?" "BAG_REAL_BROWSER_unset"
+
+# --- parse args: pull out --tab / --instance, then op + its args ------------- #
+seen_tab=""
+op=""
+declare -a opargs=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --tab) shift; seen_tab="${1:-}";;
+    --tab=*) seen_tab="${1#--tab=}";;
+    --instance) shift; : "${1:-}";;   # ignore the agent's instance; wrapper sets it
+    --instance=*) : ;;
+    *)
+      if [ -z "$op" ]; then op="$1"; else opargs+=("$1"); fi
+      ;;
+  esac
+  shift
+done
+
+# 1. OWN-TAB ISOLATION — the command must target exactly the owned tab.
+[ -n "$seen_tab" ] || refuse "${op:-?}" "missing_--tab"
+[ "$seen_tab" = "$BAG_TAB" ] || refuse "${op:-?}" "wrong_tab_${seen_tab}_expected_${BAG_TAB}"
+
+# 2. OP ALLOWLIST.
+case " $BAG_ALLOWED_OPS " in
+  *" $op "*) : ;;
+  *) refuse "${op:-?}" "op_not_allowed_${op}" ;;
+esac
+
+# --- domain helpers ---------------------------------------------------------- #
+_host() { python3 -c 'import sys,urllib.parse as u; print((u.urlsplit(sys.argv[1]).hostname or "").lower())' "$1" 2>/dev/null; }
+
+_host_denied() {  # <host> → 0 (denied) / 1 (ok)
+  local host="$1" d
+  [ -n "$host" ] || return 1
+  for d in $BAG_DENY_DOMAINS; do
+    d="$(printf '%s' "$d" | tr 'A-Z' 'a-z')"
+    [ -n "$d" ] || continue
+    if [ "$host" = "$d" ] || [ "${host%".$d"}" != "$host" ]; then return 0; fi
+  done
+  if [ -n "${BAG_ALLOW_DOMAINS// }" ]; then
+    for d in $BAG_ALLOW_DOMAINS; do
+      d="$(printf '%s' "$d" | tr 'A-Z' 'a-z')"
+      [ -n "$d" ] || continue
+      if [ "$host" = "$d" ] || [ "${host%".$d"}" != "$host" ]; then return 1; fi
+    done
+    return 0   # allowlist set + host matched none → treated as denied
+  fi
+  return 1
+}
+
+# 3. DOMAIN ENFORCEMENT.
+if [ "$op" = "nav" ]; then
+  target="${opargs[0]:-}"
+  [ -n "$target" ] || refuse nav "nav_missing_url"
+  host="$(_host "$target")"
+  if _host_denied "$host"; then refuse nav "domain_blocked_${host}"; fi
+elif [ "$op" = "eval" ]; then
+  # Best-effort: refuse an eval that references a denied host (heuristic — a cheap
+  # model can't be perfectly sandboxed, but a literal denied domain in the JS is
+  # caught). nav is the real navigation surface; this is defence in depth.
+  js="${opargs[*]:-}"
+  for d in $BAG_DENY_DOMAINS; do
+    [ -n "$d" ] || continue
+    case "$js" in *"$d"*) refuse eval "eval_references_blocked_${d}";; esac
+  done
+fi
+
+# 4. DRY-RUN — intercept navigating / form-submitting ops.
+if [ "$BAG_DRY_RUN" = "1" ] && { [ "$op" = "nav" ] || [ "$op" = "eval" ]; }; then
+  audit "dry_run" "$op" "${opargs[0]:-}"
+  printf '{"ok":true,"result":{"id":null,"ok":true,"data":{"dryRun":true,"op":"%s"}}}\n' "$op"
+  exit 0
+fi
+
+# Pass through to the real CLI, forcing the owned tab (and instance) ourselves.
+audit "exec" "$op" "${opargs[0]:-}"
+declare -a fwd=()
+[ -n "$BAG_INSTANCE" ] && fwd+=(--instance "$BAG_INSTANCE")
+fwd+=(--tab "$BAG_TAB" "$op")
+[ "${#opargs[@]}" -gt 0 ] && fwd+=("${opargs[@]}")
+exec "$BAG_REAL_BROWSER" "${fwd[@]}"

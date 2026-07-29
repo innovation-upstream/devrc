@@ -1,0 +1,190 @@
+#!/usr/bin/env bash
+# browser-agent — run the autonomous opencode "browser-agent" in its OWN isolated
+# Brave tab against a natural-language goal, and return a compact structured
+# result (never raw HTML). Invoked as `browser agent "<goal>"` (the `browser` CLI
+# execs this) or directly.
+#
+#   browser agent "<goal>" [--instance K] [--allow-domains a,b] [--deny-domains c,d]
+#                          [--steps N] [--timeout S] [--dry-run]
+#
+# What it does (design C.2/C.3 — see README "opencode browser-agent"):
+#   1. `open`s a NEW tab on instance K (its OWN tab) and captures the tabId.
+#   2. Runs `opencode run --format json -m <deepseek> --agent browser-agent --auto`
+#      in a scratch --dir, with a per-run agent def whose bash permission allows
+#      ONLY `browser --tab <tabId> *` (own-tab lock) and a guard shim (named
+#      `browser`, first on PATH) that RE-enforces own-tab + deny-domains + dry-run.
+#   3. Enforces a wall-clock --timeout with a hard kill (`timeout --kill-after`).
+#   4. Closes the owned tab on EVERY exit path (success/timeout/error/tab-gone).
+#   5. Parses opencode's final message as the required schema
+#      {"answer","evidence":[…],"steps_used","status":"ok|partial|blocked"};
+#      on malformed output it re-invokes ONCE (`--continue`) demanding ONLY the
+#      JSON, then gives up with a `blocked` result (no infinite retry).
+#
+# Privacy: page content the agent reads is sent to OpenRouter/DeepSeek (accepted
+# — see README). The OpenRouter key must already be in opencode's auth store
+# (~/.local/share/opencode/auth.json); this script adds NO key.
+#
+# Test seams (env overrides): BROWSER_AGENT_OPENCODE (opencode binary),
+# BROWSER_AGENT_BROWSER_BIN (real browser CLI), BROWSER_AGENT_MODEL,
+# BROWSER_AGENT_TEMPLATE (agent md template), BROWSER_AGENT_KEEP_SCRATCH=1.
+set -uo pipefail
+
+HERE="$(cd "$(dirname "$0")" && pwd)"
+BROWSER_BIN="${BROWSER_AGENT_BROWSER_BIN:-$HERE/browser}"
+GUARD="$HERE/browser-agent-guard"
+PARSER="$HERE/browser-agent-parse.py"
+TEMPLATE="${BROWSER_AGENT_TEMPLATE:-$HERE/opencode/browser-agent.md}"
+OPENCODE_BIN="${BROWSER_AGENT_OPENCODE:-opencode}"
+MODEL="${BROWSER_AGENT_MODEL:-openrouter/deepseek/deepseek-v4-flash}"
+
+die() { echo "browser-agent: $*" >&2; exit 2; }
+
+# Emit a compact schema result on stdout and exit (0 for ok/partial, 1 for
+# blocked). NEVER prints raw page content — only the structured schema.
+emit_result() {  # <schema-json>
+  printf '%s\n' "$1"
+  case "$1" in
+    *'"status":"ok"'*|*'"status": "ok"'*) exit 0 ;;
+    *'"status":"partial"'*|*'"status": "partial"'*) exit 0 ;;
+    *) exit 1 ;;
+  esac
+}
+
+blocked() {  # <reason> [steps_used]
+  local reason="$1" steps="${2:-0}"
+  emit_result "$(python3 -c '
+import json,sys
+print(json.dumps({"answer": sys.argv[1], "evidence": [],
+                  "steps_used": int(sys.argv[2]), "status": "blocked"},
+                 separators=(",",":")))' "$reason" "$steps")"
+}
+
+# --- parse args -------------------------------------------------------------- #
+GOAL=""; INSTANCE=""; ALLOW=""; DENY=""; STEPS=12; TIMEOUT=120; DRYRUN=0
+_csv_to_ws() { printf '%s' "$1" | tr ',' ' '; }
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --instance) shift; [ $# -ge 1 ] || die "usage: --instance <key>"; INSTANCE="$1" ;;
+    --instance=*) INSTANCE="${1#--instance=}" ;;
+    --allow-domains) shift; [ $# -ge 1 ] || die "usage: --allow-domains a,b"; ALLOW="$(_csv_to_ws "$1")" ;;
+    --allow-domains=*) ALLOW="$(_csv_to_ws "${1#--allow-domains=}")" ;;
+    --deny-domains) shift; [ $# -ge 1 ] || die "usage: --deny-domains a,b"; DENY="$(_csv_to_ws "$1")" ;;
+    --deny-domains=*) DENY="$(_csv_to_ws "${1#--deny-domains=}")" ;;
+    --steps) shift; [ $# -ge 1 ] || die "usage: --steps N"; STEPS="$1" ;;
+    --steps=*) STEPS="${1#--steps=}" ;;
+    --timeout) shift; [ $# -ge 1 ] || die "usage: --timeout S"; TIMEOUT="$1" ;;
+    --timeout=*) TIMEOUT="${1#--timeout=}" ;;
+    --dry-run) DRYRUN=1 ;;
+    -h|--help) grep -E '^#( |$)' "$0" | sed -E 's/^# ?//'; exit 0 ;;
+    --) shift; [ $# -ge 1 ] && GOAL="$1"; break ;;
+    -*) die "unknown flag: $1" ;;
+    *) [ -z "$GOAL" ] || die "only one goal is accepted (got extra: $1)"; GOAL="$1" ;;
+  esac
+  shift
+done
+
+[ -n "$GOAL" ] || die "a goal is required: browser agent \"<goal>\""
+case "$STEPS" in (*[!0-9]*|"") die "--steps must be a positive integer (got: $STEPS)";; esac
+[ "$STEPS" -ge 1 ] 2>/dev/null || die "--steps must be >= 1 (got: $STEPS)"
+case "$TIMEOUT" in (*[!0-9]*|"") die "--timeout must be a positive integer of seconds (got: $TIMEOUT)";; esac
+[ "$TIMEOUT" -ge 1 ] 2>/dev/null || die "--timeout must be >= 1 (got: $TIMEOUT)"
+[ -f "$TEMPLATE" ] || die "agent template not found: $TEMPLATE"
+[ -x "$GUARD" ] || die "guard shim not found/executable: $GUARD"
+[ -r "$PARSER" ] || die "parser not found: $PARSER"
+
+# opencode must be present BEFORE we open any tab — so a missing binary can never
+# leave an orphaned tab.
+command -v "$OPENCODE_BIN" >/dev/null 2>&1 || die "opencode not found on PATH ('$OPENCODE_BIN') — install it or set BROWSER_AGENT_OPENCODE"
+
+# --- open the agent's own tab ------------------------------------------------ #
+declare -a bflags=()
+[ -n "$INSTANCE" ] && bflags+=(--instance "$INSTANCE")
+open_resp="$("$BROWSER_BIN" "${bflags[@]}" open about:blank 2>/dev/null)" \
+  || die "failed to open a tab (is the browser-bridge extension connected? try: browser health)"
+TAB="$(printf '%s' "$open_resp" | python3 -c 'import json,sys
+try:
+    print(json.load(sys.stdin)["result"]["data"]["tabId"])
+except Exception:
+    pass')"
+case "$TAB" in (*[!0-9]*|"") die "could not determine the opened tabId from: $open_resp";; esac
+
+# From here on a tab exists — guarantee it is closed on EVERY exit path.
+_closed=0
+cleanup() {
+  [ "$_closed" = "1" ] && return 0
+  _closed=1
+  "$BROWSER_BIN" "${bflags[@]}" --tab "$TAB" close >/dev/null 2>&1 || true
+}
+trap cleanup EXIT INT TERM
+
+# --- scratch: per-run agent def (own-tab-locked) + guard shim as `browser` ---- #
+SCRATCH="$(mktemp -d "${TMPDIR:-/tmp}/browser-agent.XXXXXX")"
+[ "${BROWSER_AGENT_KEEP_SCRATCH:-0}" = "1" ] || \
+  trap 'cleanup; rm -rf "$SCRATCH" 2>/dev/null || true' EXIT INT TERM
+mkdir -p "$SCRATCH/bin" "$SCRATCH/.opencode/agents" "$SCRATCH/.opencode/agent"
+ln -sf "$GUARD" "$SCRATCH/bin/browser"
+
+# Template the committed agent def: bake the OWN tab id + step budget + model into
+# the frontmatter permission (`browser --tab <TAB> *`) and the harness body.
+AGENT_MD="$SCRATCH/.opencode/agents/browser-agent.md"
+sed -e "s/__TAB_ID__/$TAB/g" -e "s/__STEPS__/$STEPS/g" \
+    -e "s#__MODEL__#$MODEL#g" "$TEMPLATE" > "$AGENT_MD"
+# Some opencode versions read `.opencode/agent/` (singular) — write both.
+cp "$AGENT_MD" "$SCRATCH/.opencode/agent/browser-agent.md"
+
+TRANSCRIPT1="$SCRATCH/opencode-transcript.jsonl"
+TRANSCRIPT2="$SCRATCH/opencode-transcript.retry.jsonl"
+ERRLOG="$SCRATCH/opencode.err"
+GUARD_LOG="$SCRATCH/guard-audit.jsonl"
+
+# The per-run task message: goal + the tab constraint + domain rules + the schema
+# reminder. (The static harness — single-tool contract, prefer `text`, schema —
+# lives in the agent md body.)
+MSG="$(cat <<EOF
+Goal: $GOAL
+
+Your browser tab id is $TAB. EVERY browser command you run MUST be exactly:
+  browser --tab $TAB <op> [args]
+(any other command or any other --tab value is DENIED and will fail).
+Allowed ops: nav <url> | text [selector] | html | eval '<js>'. PREFER \`text\`.
+Allowed domains: ${ALLOW:-<any>}. Denied domains: ${DENY:-<none>}.
+Hard budget: $STEPS steps. When finished, reply with ONLY the JSON object:
+{"answer":"<concise>","evidence":["<quote-or-url>"],"steps_used":<int>,"status":"ok|partial|blocked"}
+EOF
+)"
+
+run_opencode() {  # <transcript-out> [continue] — returns opencode's exit code
+  local out="$1" cont="${2:-}"
+  local -a oc=(run --format json -m "$MODEL" --agent browser-agent --auto --dir "$SCRATCH")
+  [ "$cont" = "continue" ] && oc+=(--continue)
+  local -a msg=("$MSG")
+  [ "$cont" = "continue" ] && msg=("Return ONLY the required JSON schema object and nothing else: {\"answer\":\"…\",\"evidence\":[…],\"steps_used\":<int>,\"status\":\"ok|partial|blocked\"}")
+  PATH="$SCRATCH/bin:$PATH" \
+  BAG_TAB="$TAB" BAG_REAL_BROWSER="$BROWSER_BIN" BAG_INSTANCE="$INSTANCE" \
+  BAG_ALLOW_DOMAINS="$ALLOW" BAG_DENY_DOMAINS="$DENY" BAG_DRY_RUN="$DRYRUN" \
+  BAG_TRANSCRIPT="$GUARD_LOG" \
+    timeout --kill-after=5 "$TIMEOUT" "$OPENCODE_BIN" "${oc[@]}" "${msg[@]}" \
+      >"$out" 2>>"$ERRLOG"
+}
+
+# --- attempt 1 --------------------------------------------------------------- #
+run_opencode "$TRANSCRIPT1"; rc1=$?
+if [ "$rc1" = "124" ]; then
+  blocked "opencode timed out after ${TIMEOUT}s" "$STEPS"
+fi
+if schema="$(python3 "$PARSER" "$TRANSCRIPT1" 2>/dev/null)"; then
+  emit_result "$schema"
+fi
+# A non-zero (non-timeout) opencode exit with no parseable schema is a hard error
+# — surface it as `blocked`, no retry (the retry is only for a COMPLETED run whose
+# final message was malformed).
+if [ "$rc1" != "0" ]; then
+  blocked "opencode exited $rc1 without a valid result (see $ERRLOG)" "$STEPS"
+fi
+
+# --- attempt 2 (retry once on malformed-but-completed) ----------------------- #
+run_opencode "$TRANSCRIPT2" continue; rc2=$?
+if [ "$rc2" != "124" ] && schema="$(python3 "$PARSER" "$TRANSCRIPT2" 2>/dev/null)"; then
+  emit_result "$schema"
+fi
+blocked "opencode returned no valid schema after one retry" "$STEPS"

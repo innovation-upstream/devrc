@@ -98,7 +98,10 @@ from urllib.parse import unquote, urlsplit
 # validate against this exact set; the JS side mirrors it in
 # extension/protocol.js (asserted by the extension test). `open`/`close` were
 # added for per-session tab isolation (see the Session isolation block below).
-ALLOWED_OPS = ("getHtml", "eval", "tabs", "nav", "screenshot", "open", "close")
+# `text` is a cheap read (visible innerText, optional CSS selector + byte cap) —
+# a ~98% token cut vs getHtml, dispatched + tab-scoped exactly like getHtml.
+ALLOWED_OPS = ("getHtml", "text", "eval", "tabs", "nav", "screenshot",
+               "open", "close")
 
 # Ops handled ENTIRELY server-side (never dispatched to the extension). `release`
 # relinquishes a session's owned-tab mapping without touching the real Brave tab.
@@ -108,7 +111,8 @@ SERVER_OPS = ("release",)
 # Ops that act on ONE specific tab and therefore participate in per-tab FIFO
 # serialization (see Registry.submit). `open` (creates a tab), `tabs` (lists all)
 # and `release` (server-side) do NOT contend for a single tab.
-TAB_SCOPED_OPS = frozenset({"getHtml", "eval", "nav", "screenshot", "close"})
+TAB_SCOPED_OPS = frozenset({"getHtml", "text", "eval", "nav", "screenshot",
+                            "close"})
 
 # Per-op required fields (skill-supplied). Absent → 400 bad_request. NOTE: `close`
 # takes NO skill-supplied field — the server injects the caller's owned tabId (or

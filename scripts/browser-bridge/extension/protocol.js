@@ -6,8 +6,11 @@
 // The command ops the bridge understands. MUST equal server.py ALLOWED_OPS.
 // `open` (create a per-session tab) and `close` (remove it) back the per-session
 // tab-isolation model; the server injects the target `tabId` on tab-scoped ops.
+// `text` is a CHEAP read: it returns the tab's visible innerText (optionally
+// scoped to a CSS selector) instead of full outerHTML — a ~98% token cut vs
+// `getHtml`, so a cheap model (the opencode browser-agent) doesn't drown in HTML.
 export const ALLOWED_OPS = [
-  "getHtml", "eval", "tabs", "nav", "screenshot", "open", "close",
+  "getHtml", "text", "eval", "tabs", "nav", "screenshot", "open", "close",
 ];
 
 // Per-op required fields (mirrors server.py REQUIRED_FIELDS). The server already
@@ -36,6 +39,45 @@ export function resultEnvelope(id, data) {
 // A failure envelope for command `id` (op threw / unsupported in this browser).
 export function errorEnvelope(id, error) {
   return { id, ok: false, error: String(error) };
+}
+
+// --- `text` op: cheap innerText extraction + normalization ------------------ //
+// Default byte cap for the `text` op. Generous for a read (~32 KB ≈ ~8K tokens)
+// but bounds a pathological page so a cheap model isn't flooded. The CLI passes
+// this by default; a caller can override via `--max-bytes` (0 → uncapped).
+export const TEXT_MAX_BYTES_DEFAULT = 32 * 1024;
+
+// Normalize raw innerText for return: collapse runs of blank lines (3+ newlines
+// → a single blank line), strip trailing whitespace per line, trim the ends,
+// THEN byte-cap. Pure + unit-tested (no chrome.* needed); the SW calls this on
+// the injected innerText result. `maxBytes<=0` disables the cap. When truncation
+// happens the returned text ends with a `\n…[truncated N bytes]` note and
+// `truncated` is the number of bytes dropped (0 when untruncated).
+//
+// Byte-accurate truncation uses the UTF-8 encoding (a multi-byte char is never
+// split): we cut at a code-point boundary at or under the byte budget.
+export function normalizeText(raw, maxBytes = TEXT_MAX_BYTES_DEFAULT) {
+  let s = String(raw == null ? "" : raw);
+  // Normalize newlines, strip per-line trailing spaces, collapse blank runs.
+  s = s.replace(/\r\n?/g, "\n")
+       .replace(/[ \t]+\n/g, "\n")
+       .replace(/\n{3,}/g, "\n\n")
+       .trim();
+  const cap = Number(maxBytes) || 0;
+  if (cap <= 0) return { text: s, truncated: 0 };
+  const enc = new TextEncoder();
+  const full = enc.encode(s);
+  if (full.length <= cap) return { text: s, truncated: 0 };
+  // Largest prefix whose UTF-8 encoding fits the cap (binary search over the
+  // string length → never splits a multi-byte char).
+  let lo = 0, hi = s.length;
+  while (lo < hi) {
+    const mid = Math.ceil((lo + hi) / 2);
+    if (enc.encode(s.slice(0, mid)).length <= cap) lo = mid; else hi = mid - 1;
+  }
+  const kept = s.slice(0, lo);
+  const dropped = full.length - enc.encode(kept).length;
+  return { text: `${kept}\n…[truncated ${dropped} bytes]`, truncated: dropped };
 }
 
 // Compile a user `eval` snippet into a single callable, choosing between the

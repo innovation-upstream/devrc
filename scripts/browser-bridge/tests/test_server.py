@@ -938,8 +938,11 @@ def test_registry_deliver_unknown_id_false():
 
 def test_validate_command_contract():
     # The op set is the shared contract with extension/protocol.js.
-    assert set(S.ALLOWED_OPS) == {"getHtml", "eval", "tabs", "nav", "screenshot",
-                                  "open", "close"}
+    assert set(S.ALLOWED_OPS) == {"getHtml", "text", "eval", "tabs", "nav",
+                                  "screenshot", "open", "close"}
+    # `text` is a dispatched, tab-scoped, cheap-read op with NO required field.
+    assert S.validate_command({"op": "text"}) == ("text", None)
+    assert "text" in S.TAB_SCOPED_OPS
     assert S.validate_command({"op": "tabs"}) == ("tabs", None)
     assert S.validate_command({"op": "eval", "js": "1"})[0] == "eval"
     assert S.validate_command({"op": "eval"})[1] == "missing_field:js"
@@ -950,6 +953,79 @@ def test_validate_command_contract():
     assert S.validate_command({"op": "close"}) == ("close", None)
     assert S.validate_command({"op": "release"}) == ("release", None)
     assert "release" in S.SERVER_OPS and "release" not in S.ALLOWED_OPS
+
+
+# --------------------------------------------------------------------------- #
+# `text` op (B1 cheap read): dispatched + tab-scoped exactly like getHtml, its
+# selector/maxBytes pass through to the extension, and its telemetry stays
+# metadata-only (the page text is NEVER emitted). Headless — the FakeExtension
+# echoes; the real innerText/normalization is unit-tested in protocol.test.mjs.
+# --------------------------------------------------------------------------- #
+def test_text_routes_to_owned_session_tab():
+    """A session that `open`ed has its `text` op routed to ITS owned tabId — i.e.
+    `text` is tab-scoped just like getHtml/eval/nav."""
+    srv, _ = _serve()
+    ext = FakeExtension(srv, instance_id="solo", label="only",
+                        executor=_tab_echo_exec([101]))
+    ext.start()
+    try:
+        assert _wait_connected(srv, want=True)
+        _cmd(srv, {"op": "open"}, session="A")
+        st, body = _cmd(srv, {"op": "text"}, session="A")
+        assert st == 200
+        assert body["result"]["data"]["tabId"] == 101, \
+            "text must route to the session's owned tab (tab-scoped)"
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
+def test_text_passes_selector_and_maxbytes_to_extension():
+    """selector + maxBytes are forwarded verbatim to the extension command (they
+    are not skill-side routing hints like target/tab)."""
+    srv, _ = _serve()
+    ext = FakeExtension(srv, instance_id="solo", label="only",
+                        executor=lambda c: {"url": "https://x.test",
+                                            "title": "X", "text": "hello"})
+    ext.start()
+    try:
+        assert _wait_connected(srv, want=True)
+        st, _ = _req(srv, "POST", "/cmd",
+                     {"op": "text", "selector": "main", "maxBytes": 1024})
+        assert st == 200
+        text_cmds = [c for c in ext.dispatched if c["op"] == "text"]
+        assert len(text_cmds) == 1
+        assert text_cmds[0]["selector"] == "main"
+        assert text_cmds[0]["maxBytes"] == 1024
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
+def test_text_telemetry_is_metadata_only(telemetry):
+    """PRIVACY: a `text` result carries page text, but telemetry emits ONLY the
+    op + the bare domain — never the extracted text content."""
+    spool_dir = telemetry
+    srv, _ = _serve()
+    secret_text = "SECRET_PAGE_TEXT_deadbeef the quick brown fox"
+    ext = FakeExtension(
+        srv, executor=lambda c: {"url": "https://news.ycombinator.com/",
+                                 "title": "HN", "text": secret_text})
+    ext.start()
+    try:
+        assert _wait_connected(srv, want=True)
+        st, body = _req(srv, "POST", "/cmd", {"op": "text"})
+        assert st == 200
+        assert body["result"]["data"]["text"] == secret_text   # round-trip sanity
+        e = _wait_events(spool_dir, 1)[0]
+        p = json.loads(e["payload"])
+        assert p["op"] == "text"
+        assert p["outcome"] == "ok"
+        assert p["domain"] == "news.ycombinator.com"
+        assert e["text"] == "news.ycombinator.com"              # bare domain only
+        raw = _log_file(spool_dir).read_text()
+        assert "SECRET_PAGE_TEXT" not in raw, "text content leaked into telemetry"
+        assert "quick brown fox" not in raw
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
 
 
 # --------------------------------------------------------------------------- #
@@ -2211,3 +2287,91 @@ def test_browser_cli_backs_off_on_429(tmp_path):
             f"expected a back-off message on stderr, got: {r.stderr!r}"
     finally:
         srv.shutdown(); srv.server_close()
+
+
+# --------------------------------------------------------------------------- #
+# Skill side: `browser text [selector] [--max-bytes N]` builds the right /cmd
+# body (op=text + selector + maxBytes). Runs the REAL bash entrypoint against an
+# in-process fake server that CAPTURES the posted body and returns a canned
+# result. Skipped where curl is unavailable.
+# --------------------------------------------------------------------------- #
+class _CaptureCmdServer:
+    """A minimal /cmd server that records the last posted body and answers with a
+    canned success envelope (so the CLI's `text` subcommand exits 0)."""
+
+    def __init__(self):
+        self.bodies = []
+
+    def handler(self):
+        outer = self
+
+        class _H(S.BaseHTTPRequestHandler):
+            def log_message(self, *a):  # noqa: A003
+                pass
+
+            def do_POST(self):
+                ln = int(self.headers.get("Content-Length") or 0)
+                raw = self.rfile.read(ln) if ln else b"{}"
+                try:
+                    outer.bodies.append(json.loads(raw))
+                except ValueError:
+                    outer.bodies.append(None)
+                payload = json.dumps({"ok": True, "result": {
+                    "id": "x", "ok": True,
+                    "data": {"url": "https://x.test", "title": "X",
+                             "text": "hello world"}}}).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+
+        return _H
+
+
+def _run_browser(args, tmp_path):
+    srv_state = _CaptureCmdServer()
+    srv = S.ThreadingHTTPServer(("127.0.0.1", 0), srv_state.handler())
+    srv.daemon_threads = True
+    port = srv.server_address[1]
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    tokf = tmp_path / "token"
+    tokf.write_text("smoke-token\n")
+    env = dict(os.environ)
+    env.update(BROWSER_BRIDGE_HOST="127.0.0.1", BROWSER_BRIDGE_PORT=str(port),
+               BROWSER_BRIDGE_TOKEN_FILE=str(tokf))
+    try:
+        r = subprocess.run([str(BROWSER_BIN), *args], env=env,
+                           capture_output=True, text=True, timeout=30)
+        return r, srv_state.bodies
+    finally:
+        srv.shutdown(); srv.server_close()
+
+
+@pytest.mark.skipif(shutil.which("curl") is None, reason="curl not on PATH")
+def test_browser_cli_text_default_maxbytes_no_selector(tmp_path):
+    r, bodies = _run_browser(["text"], tmp_path)
+    assert r.returncode == 0, r.stderr
+    assert bodies, "no /cmd body captured"
+    b = bodies[-1]
+    assert b["op"] == "text"
+    assert b["maxBytes"] == 32768          # the documented default cap
+    assert "selector" not in b             # no selector given → field omitted
+
+
+@pytest.mark.skipif(shutil.which("curl") is None, reason="curl not on PATH")
+def test_browser_cli_text_selector_and_maxbytes(tmp_path):
+    r, bodies = _run_browser(["text", "main.content", "--max-bytes", "500"],
+                             tmp_path)
+    assert r.returncode == 0, r.stderr
+    b = bodies[-1]
+    assert b["op"] == "text"
+    assert b["selector"] == "main.content"
+    assert b["maxBytes"] == 500
+
+
+@pytest.mark.skipif(shutil.which("curl") is None, reason="curl not on PATH")
+def test_browser_cli_text_rejects_bad_maxbytes(tmp_path):
+    r, _ = _run_browser(["text", "--max-bytes", "not-a-number"], tmp_path)
+    assert r.returncode != 0
+    assert "max-bytes" in r.stderr.lower()

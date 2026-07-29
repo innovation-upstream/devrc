@@ -61,14 +61,48 @@ Prefix any op with `--instance <key>` to target a specific connected profile
 | `browser [--instance K] close`             | close this session's owned tab and drop ownership |
 | `browser [--instance K] release`           | drop ownership WITHOUT closing the tab |
 | `browser [--instance K] [--tab T] html`              | `outerHTML` of the owned tab (else the active tab) |
+| `browser [--instance K] [--tab T] text [selector] [--max-bytes N]` | **cheap read** — visible `innerText` of the owned/active tab (optional CSS `selector`), whitespace-normalized + byte-capped (default 32768; `0`=uncapped; a truncation note is appended). ~98% smaller than `html` — prefer it |
 | `browser [--instance K] [--tab T] eval '<js>'`       | run JS in the owned/active tab, return its value |
 | `browser [--instance K] tabs`              | list open tabs (`.data.ownedTabId` flags this session's owned tab) |
 | `browser [--instance K] [--tab T] nav <url>`         | navigate the owned/active tab to `<url>` |
 | `browser [--instance K] [--tab T] screenshot [path]` | captureVisibleTab; prints the data URL, or writes a `.png` to `path` |
+| `browser [--instance K] agent "<goal>" [flags]` | run the **autonomous opencode browser-agent** in its OWN isolated tab against `<goal>`; returns a compact `{answer,evidence,steps_used,status}` (see below) |
 | `browser --print-session-id`               | print the derived per-session id (debug) and exit |
 
 Result payloads land under `.result.data` in the JSON (the envelope is
 `{"ok":true,"result":{"id","ok","data":{...}}}`).
+
+## `browser agent "<goal>"` — autonomous read/navigate in an isolated tab
+
+Offload an open-ended "go read X and tell me Y" browsing task to a **cheap
+autonomous agent** (opencode + DeepSeek `deepseek-v4-flash` via OpenRouter) so it
+never burns YOUR context on transient page HTML — only a compact structured
+result comes back.
+
+```bash
+browser agent "go to news.ycombinator.com and report the top 3 story titles" \
+  [--instance K] [--allow-domains a.com,b.com] [--deny-domains x.com] \
+  [--steps N] [--timeout S] [--dry-run]
+```
+
+- **Output (stdout):** one compact JSON object — never raw HTML:
+  `{"answer":"…","evidence":["…"],"steps_used":N,"status":"ok|partial|blocked"}`.
+  Exit 0 for `ok`/`partial`, non-zero for `blocked`/errors.
+- **Own isolated tab (structural safety).** The wrapper `open`s a NEW background
+  tab, and the agent is **permission-locked + guard-shimmed** so it can ONLY run
+  `browser --tab <that-tab> …` — it can never touch your active tab. The tab is
+  closed on EVERY exit path (success, timeout, error).
+- **Guardrails:** a step budget (`--steps`, default 12), a wall-clock `--timeout`
+  (default 120s) with a hard kill, `--deny-domains`/`--allow-domains` enforced by
+  the guard shim (a denied `nav` is refused), and `--dry-run` (intercepts
+  navigating/form-submitting ops — logs, doesn't execute). The full opencode JSON
+  transcript + guard audit are kept in a scratch dir.
+- **⚠ Privacy:** the pages the agent reads are sent to **OpenRouter/DeepSeek**.
+  Do NOT point it at high-secret authenticated pages casually.
+- **Prereqs:** `opencode` on PATH with the OpenRouter key already in its auth
+  store (`~/.local/share/opencode/auth.json`), the extension connected, and the
+  agent def symlinked (see README → Deploy). If any is missing you get a clean
+  error and no orphaned tab.
 
 ## Per-session tab isolation (use `open` for multi-step work)
 
