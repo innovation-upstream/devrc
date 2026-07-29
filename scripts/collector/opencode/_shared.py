@@ -254,7 +254,10 @@ def spool_emit(fields: dict, spool_dir: Path | None = None) -> str:
     except ModuleNotFoundError:
         # Fallback: direct import when keylog is on sys.path as a directory
         import sys
-        keylog_dir = str(Path(__file__).resolve().parent.parent / "keylog")
+        # NOTE: do NOT .resolve() — nix store symlinks resolve INTO the
+        # nix store, losing the ~/.config/activity-collector/ prefix.
+        # __file__ is always absolute in Python 3, so parent traversal works.
+        keylog_dir = str(Path(__file__).parent.parent / "keylog")
         if keylog_dir not in sys.path:
             sys.path.insert(0, keylog_dir)
         mod = importlib.import_module("spool_emit")
