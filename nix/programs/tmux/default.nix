@@ -1,7 +1,7 @@
 { pkgs, ... }:
 let
   inherit (pkgs) lib;
-  # Generate the 12 scratchpad popup toggles from the canonical slot table
+  # Generate the scratchpad popup toggles from the canonical slot table
   # (scripts/tmux-scratch-slots.sh) instead of hardcoding them — with their
   # per-slot color + codename — in .tmux.conf. One source of truth: the same file
   # the tmux HUDs source and initiative-scan.py parses. Add/rename a scratchpad by

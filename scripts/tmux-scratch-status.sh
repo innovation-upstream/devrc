@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Scratch slot indicator for tmux status-left.
-# Renders the 12 scratch slots as their hotkey letter, colored to match the
+# Renders the 20 scratch slots as their hotkey letter, colored to match the
 # popup border color set in .tmux.conf, so the status bar acts as a legend
 # mapping popup color -> hotkey.
 #

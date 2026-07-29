@@ -32,4 +32,12 @@ SCRATCH_SLOTS=(
     "scratch10:N:#928374:Nickel"
     "scratch11:w:#ebdbb2:wheat"
     "scratch12:W:#af3a03:Walnut"
+    "scratch13:m:#fabd2f:lemon"
+    "scratch14:M:#fb4934:ember"
+    "scratch15:i:#8ec07c:fern"
+    "scratch16:I:#a89984:ash"
+    "scratch17:u:#8f3f71:rose"
+    "scratch18:U:#3c3836:obsidian"
+    "scratch19:y:#076678:teal"
+    "scratch20:Y:#79740e:tiger"
 )

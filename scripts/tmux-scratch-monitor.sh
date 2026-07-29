@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Monitor popup: live HUD of the last N lines from all 12 scratch sessions.
+# Monitor popup: live HUD of the last N lines from all scratch sessions.
 # Bound to Alt+m. Auto-refreshes every REFRESH seconds. Dismiss with q/Esc.
 #
 # Each section renders:
