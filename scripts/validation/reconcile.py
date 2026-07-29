@@ -169,6 +169,30 @@ def reconcile_claude(client: CHClient, projects_dir: Path, since_epoch: float) -
                  matched=matched, missing=missing, extra=extra)
 
 
+def reconcile_opencode(client: CHClient, db_path: Path | None = None,
+                       since_epoch: float = 0) -> Recon:
+    """Reconcile OpenCode events against the SQLite DB."""
+    ref_sessions = RS.read_opencode_sessions(db_path)
+    ref_messages = RS.read_opencode_messages(db_path)
+    # Use message count as the reconciliation metric (prompt + assistant-turn)
+    ref_n = len(ref_messages)
+    table = client.conn.fq_table
+    try:
+        rows = client.rows(
+            f"SELECT kind, count() AS cnt FROM {table} "
+            f"WHERE source='opencode' AND ts >= {sql_quote(_dt(since_epoch))} "
+            f"GROUP BY kind"
+        )
+    except Exception as exc:
+        return Recon("opencode", skipped=True, reason=f"query error: {exc}")
+    coll_n = sum(int(r.get("cnt", 0)) for r in rows)
+    if coll_n == 0 and ref_n == 0:
+        return Recon("opencode", skipped=True, reason="no opencode data on either side")
+    matched, missing, extra = reconcile_counts(coll_n, ref_n)
+    return Recon("opencode", collected=coll_n, reference=ref_n,
+                 matched=matched, missing=missing, extra=extra)
+
+
 # --------------------------------------------------------------------------- #
 def _dt(epoch: float) -> str:
     """Epoch → local wall-clock 'YYYY-MM-DD HH:MM:SS' (matches stored ts space)."""
@@ -186,6 +210,7 @@ def default_paths() -> dict:
         "tmux_tasks": home / ".tmux/tasks",
         "tmux_activity": home / ".tmux/activity",
         "claude_projects": home / ".claude/projects",
+        "opencode_db": home / ".local" / "share" / "opencode" / "opencode-stable.db",
     }
 
 
@@ -198,6 +223,7 @@ def run_reconcile(client: CHClient, window_hours: float = 24.0,
         reconcile_browser(client, p["browser_history"], since),
         reconcile_tmux(client, p["tmux_tasks"], p["tmux_activity"], since),
         reconcile_claude(client, p["claude_projects"], since),
+        reconcile_opencode(client, p.get("opencode_db"), since),
     ]
 
 
