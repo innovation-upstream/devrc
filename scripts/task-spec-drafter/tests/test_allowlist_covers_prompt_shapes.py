@@ -40,6 +40,24 @@ Code's `Bash(<pattern>)` glob matching, and assert:
 So adding a new command shape to the prompt without allowlisting it FAILS here,
 with a message telling you to either allowlist it or declare it a counter-example.
 Pure text analysis over the committed sources — hermetic, nothing is executed.
+
+Scope of that guarantee, stated honestly
+----------------------------------------
+The extractor scans fenced ``` blocks, indented code blocks and inline `code`
+spans, and SUBSTITUTES `<placeholder>` args rather than skipping them — an earlier
+version did neither, and a command hidden in a fence or written as
+`git … reflog expire <ref>` slipped through unchecked (see
+`test_extractor_sees_fenced_and_placeholder_commands`, which locks both out).
+
+It still, by design, does NOT check:
+  * spans containing `$VAR`, `|`, `&&`, `;` — those are rejected by the harness's
+    COMMAND-SHAPE guard, not by the allowlist, so they're a different contract;
+  * verb ENUMERATIONS (`gh pr list/view/checks/search`) and bare fragments, which
+    are documentation rather than calls;
+  * prose instructions that never appear as a formatted command.
+So this is a strong guard against *drift in the prompt's command examples* — not a
+proof that the allowlist is safe in general. The exclusion tests below carry that
+second, independent burden.
 """
 import re
 from pathlib import Path
@@ -83,7 +101,7 @@ def _pattern_to_regex(pattern: str) -> re.Pattern:
     could never match `gh -R civitai/civitai pr view 2811`.
     """
     return re.compile("".join(".*" if part == "*" else re.escape(part)
-                              for part in re.split(r"(\*)", pattern)))
+                              for part in re.split(r"(\*)", pattern)), re.S)
 
 
 def _matching_entries(command: str) -> list[str]:
@@ -104,7 +122,10 @@ def _matches(command: str) -> bool:
 # invocation as `node …/query.mjs …`, which is what actually runs.
 _HEADS = ("git ", "gh ", "kubectl ", "node ", "/home/")
 
-# Angle-bracket placeholders -> a concrete value, so the example can be matched.
+# Angle-bracket placeholders -> a benign concrete value. Placeholders are the
+# NORMAL way this prompt writes commands (`<n>`, `<sha>`, `<keyword>`), so they are
+# SUBSTITUTED, never used as a reason to skip the span — dropping them would let an
+# unallowlisted shape hide behind a placeholder.
 _PLACEHOLDERS = {
     "<ABSOLUTE-PATH>": _CIVITAI,
     "<abspath>": _CIVITAI,
@@ -117,21 +138,25 @@ _PLACEHOLDERS = {
     "<id>": "86abcd123",
     "<n>": "2811",
 }
+# Any other `<...>` placeholder the prompt introduces later.
+_ANY_PLACEHOLDER = re.compile(r"<[^<>\s]{1,40}>")
+# Elisions ("and more args here" / an abbreviated path). Removed rather than
+# substituted: they carry no shape information.
+_ELISION = re.compile(r"…|\.\.\.")
 
 
 def _substitute(span: str) -> str:
     out = " ".join(span.split())
     for k, v in _PLACEHOLDERS.items():
         out = out.replace(k, v)
-    return out
+    out = _ANY_PLACEHOLDER.sub("PLACEHOLDER", out)
+    out = _ELISION.sub("", out)
+    return " ".join(out.split())
 
 
 def _is_concrete_command(cmd: str) -> bool:
     """Keep only spans that are a *runnable* example, not prose or a verb list."""
     if not cmd.startswith(_HEADS):
-        return False
-    # Unresolved placeholder / elision -> it's a schematic, not a concrete call.
-    if any(t in cmd for t in ("<", ">", "…", "...")):
         return False
     # `$VAR` examples are the prompt's shell-expansion counter-examples; the
     # harness's shape guard rejects them ("Contains simple_expansion"), NOT the
@@ -156,22 +181,43 @@ def _is_concrete_command(cmd: str) -> bool:
     return True
 
 
-def _prompt_commands() -> set[str]:
-    """All concrete command examples in the prompt (inline-code + indented code)."""
-    text = _PROMPT.read_text(encoding="utf-8")
-    # Indented code blocks (4+ spaces) — e.g. the ticket-status invocation.
-    spans = [l.strip() for l in text.splitlines()
-             if l.startswith("    ") and l.strip() and not l.strip().startswith("|")]
-    # Inline code spans. Markdown wraps them across lines (`git\n  branch <name>`),
-    # which breaks naive backtick pairing, so unwrap first. Fenced ``` blocks are
-    # stripped beforehand or their triple backticks corrupt the pairing.
-    unwrapped = " ".join(re.sub(r"```.*?```", " ", text, flags=re.S).split())
+_FENCE = re.compile(r"^[ \t]*```[^\n]*\n(.*?)^[ \t]*```", re.S | re.M)
+
+
+def _extract_commands(text: str) -> set[str]:
+    """Every concrete command example in a markdown document.
+
+    Three sources, ALL of which are scanned — a command hidden in any one of them
+    must not escape the contract:
+      1. fenced ``` blocks (an earlier version STRIPPED these, so a `kubectl delete
+         pod web-0` inside a fence was invisible to the test — closed here),
+      2. indented (4-space) code blocks,
+      3. inline `code` spans.
+    """
+    spans: list[str] = []
+    # 1. fenced blocks — line by line.
+    for block in _FENCE.findall(text):
+        spans += [l.strip() for l in block.splitlines() if l.strip()]
+    # 2. indented code blocks (4+ spaces), e.g. the ticket-status invocation.
+    spans += [l.strip() for l in text.splitlines()
+              if l.startswith("    ") and l.strip() and not l.strip().startswith("|")]
+    # 3. inline code spans. Markdown wraps them across lines (`git\n  branch
+    #    <name>`), which breaks naive backtick pairing, so unwrap first; fences are
+    #    removed for THIS pass only (already harvested above) because their triple
+    #    backticks would corrupt the pairing.
+    unwrapped = " ".join(_FENCE.sub(" ", text).replace("```", " ").split())
     spans += re.findall(r"`([^`]+)`", unwrapped)
+
     found = set()
     for span in spans:
         cmd = _substitute(span)
         if _is_concrete_command(cmd):
             found.add(cmd)
+    return found
+
+
+def _prompt_commands() -> set[str]:
+    found = _extract_commands(_PROMPT.read_text(encoding="utf-8"))
     assert len(found) >= 10, f"extraction looks broken, only found {found}"
     return found
 
@@ -181,6 +227,7 @@ def _prompt_commands() -> set[str]:
 # only extracted commands allowed to match nothing.
 KNOWN_UNMATCHED = {
     "gh api",                                  # mutation path (`gh api -X POST`)
+    "gh pr",                                   # `gh pr ...` mutations, forbidden
     "git commit",                              # write
     "git branch tmpbranch",                    # `git branch <name>` — creates
     "git symbolic-ref HEAD refs/heads/main",   # repoints HEAD — a write
@@ -232,6 +279,44 @@ def test_gh_dash_R_regression():
         "gh -R civitai/talos-infra pr list --state merged --limit 20",
     ):
         assert _matches(cmd), f"prompt-mandated gh call is NOT allowlisted: {cmd}"
+
+
+def test_gh_repo_is_pinned_never_wildcarded():
+    """A mid-pattern `*` compiles to `.*` in an ANCHORED, whitespace-normalised,
+    DOTALL regex — it matches ACROSS SPACES, and the entry fires if the literal
+    ` pr view` appears ANYWHERE after the wildcard. Position is NOT enforced. So
+    `Bash(gh -R * pr view*)` would ALLOW gh WRITE verbs whenever the smuggled
+    substring appears in a later argument (e.g. a --body the model is quoting from
+    untrusted ticket text). Pinning the repo removes the mid-pattern wildcard, which
+    restores a strict prefix in which the verb is positional."""
+    al = _allowlist_line()
+    for banned in ("Bash(gh -R * pr list*)", "Bash(gh -R * pr view*)",
+                   "Bash(gh -R * pr checks*)", "Bash(gh -R *"):
+        assert banned not in al, (
+            f"{banned} re-introduces the mid-pattern wildcard — it admits "
+            "`gh -R <repo> pr comment … --body \"… pr view …\"` (a WRITE). "
+            "Pin the repo instead."
+        )
+    # Smuggle shapes CONFIRMED to be ALLOWed by the wildcard entry (each re-checked
+    # against `Bash(gh -R * pr <verb>*)` before being listed here). Note the
+    # smuggled substring must be SPACE-preceded, so it hides naturally inside any
+    # prose argument the model quotes out of untrusted ticket text.
+    for cmd in (
+        'gh -R civitai/civitai pr comment 2811 --body "see pr view 42"',
+        'gh -R civitai/civitai pr merge 2811 --body "see pr list"',
+        'gh -R civitai/civitai pr close 2811 --comment "closing per pr view 42"',
+        'gh -R civitai/civitai pr edit 2811 --title "dup of pr view 42"',
+        'gh -R civitai/civitai pr review 2811 --approve --body "green pr checks"',
+        'gh -R civitai/civitai issue create --title "tracks pr view 42"',
+        'gh -R civitai/talos-infra pr merge 9 --body "see pr list"',
+        # These two were NOT reachable even under the wildcard (`gh secret set`
+        # fails the `gh -R ` prefix; `--body "pr list"` lacks the leading space) —
+        # kept as belt-and-braces, not as evidence of the old hole.
+        'gh secret set FOO --body "a pr list"',
+        'gh -R civitai/civitai pr merge 2811 --body "pr list"',
+    ):
+        hits = _matching_entries(cmd)
+        assert not hits, f"gh WRITE verb smuggled past allowlist entries {hits}: {cmd}"
 
 
 def test_bare_gh_forms_still_work():
@@ -333,6 +418,40 @@ def test_deliberate_exclusions_match_nothing():
     ):
         hits = _matching_entries(cmd)
         assert not hits, f"EXCLUDED command matches allowlist entries {hits}: {cmd}"
+
+
+def test_extractor_sees_fenced_and_placeholder_commands():
+    """Guard the guard, part 2. The anti-drift test is only worth its claim if a
+    newly-added prompt command CANNOT hide from the extractor. Two evasions were
+    found and are locked out here:
+      (a) commands inside a ```-fenced block (fences used to be stripped first),
+      (b) commands written with `<placeholder>` args — which is the NORMAL style in
+          this prompt — used to be discarded as "not concrete".
+    Both must now be extracted AND flagged as unallowlisted."""
+    doc = (
+        "Use these:\n\n"
+        "```bash\n"
+        "kubectl delete pod web-0\n"
+        "gh -R civitai/civitai pr view 2811\n"
+        "```\n\n"
+        "Also run `git -C /home/zach/workspace/civit/civitai reflog expire <ref>`\n"
+        "and `git -C /home/zach/workspace/civit/civitai log --oneline -5`.\n"
+    )
+    found = _extract_commands(doc)
+    assert "kubectl delete pod web-0" in found, "fenced-block command escaped extraction"
+    assert "git -C /home/zach/workspace/civit/civitai reflog expire refs/heads/main" in found, (
+        "placeholder command escaped extraction"
+    )
+    # ...and the extractor's verdict must be that they are NOT runnable.
+    unmatched = {c for c in found if not _matches(c)}
+    assert "kubectl delete pod web-0" in unmatched
+    assert "git -C /home/zach/workspace/civit/civitai reflog expire refs/heads/main" in unmatched
+    # while the legitimate shapes in the same doc are matched
+    assert "gh -R civitai/civitai pr view 2811" not in unmatched
+    assert "git -C /home/zach/workspace/civit/civitai log --oneline -5" not in unmatched
+    # An unknown placeholder name must not smuggle a shape through either.
+    assert _extract_commands("`kubectl delete pod <podname>`") == {
+        "kubectl delete pod PLACEHOLDER"}
 
 
 def test_ticket_status_wrapper_is_allowlisted():
