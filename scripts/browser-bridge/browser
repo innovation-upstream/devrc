@@ -200,6 +200,16 @@ cmd_op() {
     503) echo "$resp" >&2; die "no extension connected — load the browser-bridge extension in Brave (see SKILL.md)" ;;
     504) echo "$resp" >&2; die "timeout waiting for the extension to answer (is Brave focused / responsive?)" ;;
     401) die "unauthorized — token mismatch (re-paste the token in the extension options)" ;;
+    429)
+      # rate_limited / queue_full — the per-instance concurrency backstop is
+      # shedding load (see SKILL.md → Concurrency). Exit non-zero so a runaway
+      # loop gets a hard, detectable back-off signal (that IS the point).
+      echo "$resp" >&2
+      if printf '%s' "$resp" | grep -q '"queue_full"'; then
+        die "queue full — too many concurrent browser ops on this instance; back off and retry"
+      fi
+      die "rate-limited — browser ops issued too fast; back off and retry (a bare high-rate eval loop is throttled — see SKILL.md Concurrency)"
+      ;;
     409)
       # ambiguous_instance (>1 connected, no --instance), no_owned_tab, or superseded.
       if printf '%s' "$resp" | grep -q '"ambiguous_instance"'; then
