@@ -236,7 +236,7 @@ def run(db_path: Path | None = None) -> int:
 
 
 if __name__ == "__main__":
-    _dir = str(Path(__file__).resolve().parent)
+    _dir = str(Path(__file__).parent)
     if _dir not in sys.path:
         sys.path.insert(0, _dir)
     raise SystemExit(run())

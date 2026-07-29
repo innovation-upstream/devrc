@@ -15,7 +15,7 @@ from pathlib import Path
 
 def _add_opencode_to_path() -> None:
     """Ensure the opencode package directory is on sys.path for imports."""
-    _dir = str(Path(__file__).resolve().parent)
+    _dir = str(Path(__file__).parent)
     if _dir not in sys.path:
         sys.path.insert(0, _dir)
 
