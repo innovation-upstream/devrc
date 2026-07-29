@@ -1,0 +1,8 @@
+# Managed skills ship as read-only store symlinks (see nix/home.nix). Keep this
+# tree pure skill CONTENT — never commit installed-project cruft or secrets.
+node_modules/
+*.env
+accounts.json
+*.key
+*.pem
+.git/

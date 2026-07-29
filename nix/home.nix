@@ -375,7 +375,9 @@ in
   # NOTE: now read-only symlinks into the nix store → edit `devrc/claude/*.md`
   # (or devrc/claude/commands/*.md) then `home-manager switch` (or ship.sh),
   # NOT `~/.claude/*.md` directly.
-  # CLAUDE.md and skills/ stay per-host/mutable (host-specific + frequently edited).
+  # CLAUDE.md stays per-host/mutable (host-specific). skills/ are now MANAGED like
+  # commands/ (read-only store symlinks, below) so they ship to all hosts — edit in
+  # devrc/claude/skills/ then `home-manager switch` (or ship.sh), NOT ~/.claude/skills/.
   home.file.".claude/RULES.md" = {
     source = ../claude/RULES.md;
     force = true;  # overwrite the pre-existing unmanaged file on first switch
@@ -389,6 +391,15 @@ in
   # Edit in devrc/claude/commands/ then switch; both hosts stay in lockstep.
   home.file.".claude/commands" = {
     source = ../claude/commands;
+    recursive = true;
+    force = true;
+  };
+  # Skills — same pattern as commands: each file under devrc/claude/skills/<name>/
+  # lands as a read-only store symlink at ~/.claude/skills/<name>/, so skills ship
+  # to all hosts in lockstep. Edit in devrc/claude/skills/ then switch. (Previously
+  # per-host/mutable, which meant a skill edited on one host never reached the other.)
+  home.file.".claude/skills" = {
+    source = ../claude/skills;
     recursive = true;
     force = true;
   };
