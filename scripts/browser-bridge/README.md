@@ -8,6 +8,19 @@ It is a **sibling** to the activity-collector's `scripts/collector/browser-ext/`
 (a one-way telemetry sink). browser-bridge is a *command* channel and does not
 touch the collector or its extension.
 
+## Quick start / binary path
+
+The executable lives at
+`~/workspace/devrc/scripts/browser-bridge/browser` (also
+`~/.claude/skills/browser/browser` if the skill dir is symlinked):
+
+```bash
+BB=~/workspace/devrc/scripts/browser-bridge/browser
+$BB health                              # connected instances + count
+$BB --instance <key> open <url>         # open a NEW tab this session owns → tabId
+$BB --instance <key> --tab <id> html    # act on a specific tab
+```
+
 ## Architecture
 
 ```
@@ -129,7 +142,48 @@ structured error: `503 extension_not_connected`, `504 timeout`,
 (`close` with nothing owned), `409 superseded`, `404 unknown_instance`,
 `400 unknown_op|missing_field:<f>`, `400 bad_tab` (a non-numeric/non-scalar
 `tab` from a raw caller — the CLI already validates `--tab`), `401 unauthorized`,
-`403 bad_host`.
+`403 bad_host`, `429 rate_limited|queue_full` (the per-instance concurrency
+backstop — see below; body carries a `retry_after` hint).
+
+## Concurrency backstop (per-instance rate limit + queue cap)
+
+The extension is a **single serial connection**, and the transport used to accept
+`/cmd` dispatches with **no backpressure**. An audit found a 44,061-event storm —
+**43,991 `eval`s in one hour (~13/sec sustained)** from an unisolated fleet/loop —
+that saturated one instance's queue and ballooned latency from ~10 ms to ~5.5 s.
+
+To bound that damage the server enforces two **per-instance** limits (the
+extension is the bottleneck, so throttling instance A never affects instance B):
+
+- **Token-bucket rate limit** on accepted `/cmd` dispatches: `BROWSER_BRIDGE_RATE_PER_SEC`
+  sustained (default **5/sec**), `BROWSER_BRIDGE_BURST` burst (default **20**). A
+  dispatch that would exceed the bucket is **rejected** (never silently queued).
+  `RATE_PER_SEC=0` disables it (power-user unlimited).
+- **Queue-depth cap** `BROWSER_BRIDGE_MAX_QUEUE` (default **32**): if an instance's
+  pending (admitted-but-unfinished) command count is at the cap, new `/cmd` are
+  rejected until it drains — this bounds the latency tail. `MAX_QUEUE=0` disables it.
+
+A rejected dispatch returns **HTTP 429** `{"ok":false,"error":"rate_limited"|"queue_full","retry_after":<s>}`
+(caller-visible backpressure). The `browser` CLI prints a back-off message and
+exits non-zero, so a runaway loop gets a hard, detectable signal. **The defaults
+do not hurt legitimate use:** an interactive/agent workflow is a handful of ops
+per burst (well under burst 20 and depth 32); only a sustained high-rate flood is
+throttled.
+
+The admission check runs **under the existing lock**, is lock-free of any blocking
+wait, and rejects **before** the command joins the per-tab FIFO turnstile — so it
+can neither deadlock nor wedge the turnstile (a rejection returns immediately,
+leaving no orphaned waiter). The audited concurrency core (single `Condition`, no
+lock held across a blocking wait, turnstile self-releases in `finally`) is
+unchanged.
+
+**Observability (so the next storm is attributable):** a throttle both `log()`s a
+distinct `{"event":"throttled","key":…,"reason":…,"sess":…}` line AND emits a
+telemetry event (`outcome="throttled"`, `payload.reason`) into `activity.events`.
+`payload.sess` is a **coarse, non-reversible** fingerprint (first 8 hex of
+sha256 of the `X-Session-Id`) — enough to attribute a flood to a session without
+storing the raw id, kept metadata-only (no page content). This is the ONLY event
+that carries the session hash.
 
 ## Session isolation (concurrent-session tab clobbering)
 
@@ -289,7 +343,16 @@ gone, an idempotent double `open` returning the reused tab (no orphan) vs openin
 fresh when the owned tab is gone, a malformed `tab` (list/dict/bool) returning a
 clean `400 bad_tab` instead of a 500 (+ the `_coerce_tab`/`_is_tab_gone` helper
 units), and an explicit `--tab` overriding owned-tab routing (the subagent
-escape hatch). Current totals: **82 Python** (`test_server.py`) + **22 node**
+escape hatch). It also covers the **per-instance concurrency backstop**: the
+token-bucket admission (burst passes then `rate_limited`, refill-over-fake-time
+resume, cap-at-burst), the queue-depth cap (`queue_full` at `MAX_QUEUE`, drain
+resumes), strict per-instance isolation (throttling A never throttles B), the
+disable path (rate=0/max_queue=0 → unlimited), a rejected submit leaving NO
+turnstile/waiter residue (no deadlock), the HTTP `429 rate_limited` + throttle
+telemetry event (metadata-only, a COARSE non-reversible session hash — never the
+raw id), the HTTP `429 queue_full`, that the production defaults never throttle a
+normal small burst, and the `browser` CLI backing off (non-zero exit) on a 429.
+Current totals: **92 Python** (`test_server.py`) + **22 node**
 (`protocol.test.mjs`). The chrome.* glue in `service_worker.js` genuinely needs a
 real browser and is covered by the manual checklist in `extension/README.md`.
 

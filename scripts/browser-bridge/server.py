@@ -71,9 +71,15 @@ Config (env):
     BROWSER_BRIDGE_TOKEN_FILE    token path (default ~/.config/browser-bridge/token)
     BROWSER_BRIDGE_CMD_TIMEOUT   seconds a /cmd waits for a result (default 20)
     BROWSER_BRIDGE_POLL_TIMEOUT  seconds a /poll blocks before 204 (default 25)
+    BROWSER_BRIDGE_RATE_PER_SEC  per-instance sustained /cmd dispatch rate
+                                 (token-bucket refill, default 5; 0 → unlimited)
+    BROWSER_BRIDGE_BURST         per-instance token-bucket burst size (default 20)
+    BROWSER_BRIDGE_MAX_QUEUE     per-instance pending-command cap (default 32;
+                                 0 → unlimited). Over-cap /cmd → HTTP 429.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import secrets
@@ -145,6 +151,20 @@ HDR_SESSION_ID = "X-Session-Id"
 # Idle seconds after which a session's tab ownership is reclaimed (released, NOT
 # closed). Refreshed on every op the session routes through its owned tab.
 OWNER_TTL_S = float(os.environ.get("BROWSER_BRIDGE_OWNER_TTL", "900"))
+
+# Concurrency backstop (bounds the damage a runaway caller can do to the SINGLE
+# serial extension connection — the audited 44K-eval storm saturated one queue
+# with no backpressure). Enforced PER-INSTANCE (the extension is the bottleneck):
+#   * a token-bucket RATE limit on accepted /cmd dispatches, and
+#   * a MAX_QUEUE cap on an instance's pending (admitted-but-unfinished) commands.
+# Defaults are GENEROUS: a handful of ops per burst is NEVER throttled; only a
+# sustained high-rate flood (e.g. the observed ~13/sec) is. Escape hatches for
+# power users: RATE_PER_SEC=0 disables the rate limit, MAX_QUEUE=0 disables the
+# depth cap. An over-limit dispatch is REJECTED with HTTP 429 (caller-visible
+# backpressure) — never silently queued forever.
+RATE_PER_SEC = float(os.environ.get("BROWSER_BRIDGE_RATE_PER_SEC", "5"))
+BURST = float(os.environ.get("BROWSER_BRIDGE_BURST", "20"))
+MAX_QUEUE = int(os.environ.get("BROWSER_BRIDGE_MAX_QUEUE", "32"))
 
 # Synthetic routing key for a legacy extension that polls without a handshake
 # (no X-Bridge-Instance-Id). All such polls collapse onto one unnamed instance.
@@ -258,12 +278,26 @@ def _domain_from_result(result) -> str:
         return ""
 
 
+def _session_hash(session_id) -> str:
+    """A COARSE, non-reversible fingerprint of a session id: first 8 hex of its
+    sha256. Used ONLY in the throttle telemetry event so a flood is attributable
+    to a session in activity.events WITHOUT ever storing the raw routing id
+    (which is itself never page content, but is still an opaque handle we keep
+    out of telemetry). Empty id → "" (nothing to attribute)."""
+    if not session_id:
+        return ""
+    return hashlib.sha256(session_id.encode("utf-8")).hexdigest()[:8]
+
+
 def emit_cmd_event(op: str, key: str, outcome: str, duration_ms: int,
-                   domain: str = "", exit_code: int = 0) -> None:
+                   domain: str = "", exit_code: int = 0, extra: dict = None) -> None:
     """Append ONE metadata-only activity event for a handled command.
 
     Best-effort + fire-and-forget: any failure is swallowed so telemetry can
     never break command handling. See the PRIVACY / BEST-EFFORT contracts above.
+    `extra` merges additional METADATA-ONLY keys into the payload (used by the
+    throttle path for {reason, sess} — a fixed reason string + a coarse session
+    hash, never page content).
     """
     try:
         se = _load_spool_emit()
@@ -273,6 +307,8 @@ def emit_cmd_event(op: str, key: str, outcome: str, duration_ms: int,
         payload = {"op": op, "key": key, "outcome": outcome}
         if domain:
             payload["domain"] = domain
+        if extra:
+            payload.update(extra)
         se.emit({
             "source": "browser-bridge",
             "kind": "cmd",
@@ -365,6 +401,21 @@ class NoOwnedTab(Exception):
     (and gave no explicit --tab). Nothing to close → a clear error, not a guess."""
 
 
+class RateLimited(Exception):
+    """A /cmd dispatch was rejected by the per-instance concurrency backstop —
+    either the token bucket is empty (`reason="rate_limited"`) or the instance's
+    pending-command depth is at the cap (`reason="queue_full"`). Maps to HTTP 429
+    with a `retry_after` hint. Raised (and returned) IMMEDIATELY — it never joins
+    the turnstile or blocks, so a runaway caller gets fast, deterministic
+    backpressure and can never wedge the FIFO turnstile."""
+
+    def __init__(self, reason, retry_after, key):
+        super().__init__(reason)
+        self.reason = reason
+        self.retry_after = retry_after
+        self.key = key
+
+
 class Instance:
     """One connected extension: its own command queue + reply correlation.
 
@@ -373,9 +424,10 @@ class Instance:
     """
 
     __slots__ = ("key", "instance_id", "label", "outbox", "results", "waiters",
-                 "active_polls", "last_poll", "active_tab", "superseded")
+                 "active_polls", "last_poll", "active_tab", "superseded",
+                 "pending", "rl_tokens", "rl_last")
 
-    def __init__(self, key, instance_id, label, now):
+    def __init__(self, key, instance_id, label, now, burst=0.0):
         self.key = key
         self.instance_id = instance_id
         self.label = label
@@ -386,6 +438,14 @@ class Instance:
         self.last_poll = now
         self.active_tab = None                # {url,title} best-effort from /poll
         self.superseded = False
+        # Concurrency backstop (per-instance, guarded by the Registry's _cond):
+        #   pending   = admitted /cmd dispatches not yet completed (depth cap).
+        #   rl_tokens = token-bucket balance; starts FULL so the whole burst is
+        #               available immediately, refilled at rate_per_sec up to
+        #               `burst`. rl_last = last refill clock reading.
+        self.pending = 0
+        self.rl_tokens = float(burst)
+        self.rl_last = now
 
 
 class Registry:
@@ -401,10 +461,16 @@ class Registry:
     single `_cond` — blocking here is safe and cheap.
     """
 
-    def __init__(self, clock=time.monotonic, owner_ttl=OWNER_TTL_S):
+    def __init__(self, clock=time.monotonic, owner_ttl=OWNER_TTL_S,
+                 rate_per_sec=RATE_PER_SEC, burst=BURST, max_queue=MAX_QUEUE):
         self._cond = threading.Condition()
         self._instances: dict[str, Instance] = {}   # routing key -> Instance
         self._clock = clock
+        # Per-instance concurrency backstop knobs (see the RATE_PER_SEC block).
+        # rate_per_sec<=0 → rate limit off; max_queue<=0 → depth cap off.
+        self._rate_per_sec = float(rate_per_sec)
+        self._burst = float(burst)
+        self._max_queue = int(max_queue)
         # Per-session tab ownership: (instance_key, session_id) -> {tab_id, last_seen}.
         # Guarded by _cond like everything else. An idle TTL reclaims dead sessions.
         self._owners: dict[tuple, dict] = {}
@@ -434,7 +500,8 @@ class Registry:
             self._supersede_locked(inst, "superseded")
             inst = None
         if inst is None:
-            inst = Instance(key, instance_id, label, self._clock())
+            inst = Instance(key, instance_id, label, self._clock(),
+                            burst=self._burst)
             self._instances[key] = inst
         else:
             inst.label = label
@@ -565,6 +632,41 @@ class Registry:
                     return True
             return False
 
+    # --- concurrency backstop (per-instance rate limit + queue-depth cap) --- #
+    def _admit_locked(self, inst: Instance):
+        """Decide whether `inst` may accept ANOTHER /cmd dispatch RIGHT NOW.
+
+        Runs UNDER `_cond` (caller holds it) and is lock-free of any blocking
+        wait — it either admits (bumps `inst.pending`, spends one token) or
+        rejects immediately. Returns None to admit, or `(reason, retry_after)`
+        to reject (`reason` ∈ {"queue_full","rate_limited"}). Order: the cheap,
+        side-effect-free depth cap first (bounds the latency tail), THEN the
+        token bucket (which mutates the balance) — so a queue-full rejection
+        never wastes a token. Both knobs independently disable at <= 0.
+
+        STRICTLY PER-INSTANCE: every Instance owns its own `pending`/`rl_tokens`,
+        so throttling instance A can never throttle instance B.
+        """
+        # Queue-depth cap: bound pending (admitted-but-unfinished) commands so a
+        # flood can't grow the latency tail unboundedly (the audited 10ms→5.5s).
+        if self._max_queue > 0 and inst.pending >= self._max_queue:
+            return ("queue_full", 1.0)
+        # Token bucket: refill by elapsed*rate (capped at burst), spend one.
+        if self._rate_per_sec > 0:
+            now = self._clock()
+            elapsed = now - inst.rl_last
+            if elapsed > 0:
+                inst.rl_tokens = min(self._burst,
+                                     inst.rl_tokens + elapsed * self._rate_per_sec)
+                inst.rl_last = now
+            if inst.rl_tokens < 1.0:
+                # Time until the next whole token is available — a Retry-After hint.
+                retry = (1.0 - inst.rl_tokens) / self._rate_per_sec
+                return ("rate_limited", retry)
+            inst.rl_tokens -= 1.0
+        inst.pending += 1
+        return None
+
     # --- skill side -------------------------------------------------------- #
     def submit(self, command: dict, timeout: float, target: str = None,
                session_id=None, tab=None) -> dict:
@@ -589,6 +691,16 @@ class Registry:
             inst = self._resolve_target_locked(target)
             tab_id, tab_key = self._effective_tab_locked(inst, op, session_id,
                                                          tab)
+            # Concurrency backstop: admit (or 429) BEFORE joining the turnstile,
+            # so a rejected command never enqueues, never waits, and can't wedge
+            # the FIFO. Placed AFTER target/tab resolution so their own errors
+            # (no_extension / ambiguous / no_owned_tab) win — those never reached
+            # the extension, so they don't spend a token or a queue slot. Admit
+            # bumps inst.pending; the finally below releases it on every exit.
+            verdict = self._admit_locked(inst)
+            if verdict is not None:
+                reason, retry_after = verdict
+                raise RateLimited(reason, retry_after, inst.key)
             # Idempotent `open`: if this session already owns a tab on the target
             # instance, hand the extension that tabId as `reuseTabId`. The SW
             # returns the SAME tab when it is still live (no second real tab → no
@@ -640,6 +752,10 @@ class Registry:
                                               result)
                 return result
             finally:
+                # Release the admitted queue slot (balances _admit_locked's
+                # pending bump) on EVERY exit — normal return, timeout, or
+                # supersede — so the depth cap can never leak a phantom slot.
+                inst.pending -= 1
                 # (3) Leave the turnstile and wake the next in line.
                 if tab_key is not None:
                     q = self._tab_queues.get(tab_key)
@@ -985,6 +1101,23 @@ def make_handler(registry: Registry, token: str, cmd_timeout: float,
                 result = registry.submit(body, timeout=cmd_timeout,
                                          target=target, session_id=session_id,
                                          tab=tab)
+            except RateLimited as e:
+                # Per-instance concurrency backstop tripped. Distinct structured
+                # log + a telemetry event carrying a COARSE session hash so the
+                # NEXT storm is attributable in activity.events without storing
+                # the raw session id (the audit couldn't attribute the 44K flood).
+                # Returns immediately (no turnstile impact) — caller-visible 429
+                # backpressure with a Retry-After-style hint in the body.
+                sess = _session_hash(session_id)
+                log("throttled", op=op, key=e.key, reason=e.reason, sess=sess)
+                self._send(429, {"ok": False, "error": e.reason,
+                                 "retry_after": round(e.retry_after, 3)})
+                emit_cmd_event(
+                    op=op, key=(target or ""), outcome="throttled",
+                    duration_ms=int((time.monotonic() - t0) * 1000),
+                    domain="", exit_code=1,
+                    extra={"reason": e.reason, "sess": sess})
+                return
             except NoOwnedTab:
                 outcome, exit_code = "no_owned_tab", 1
                 log("cmd_no_owned_tab", op=op)

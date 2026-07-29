@@ -9,10 +9,13 @@ request↔reply id correlation, AND the multi-instance registry/routing.
 Run: nix-shell -p python312Packages.pytest --run "pytest scripts/browser-bridge/tests"
 """
 import base64
+import hashlib
 import json
 import os
+import shutil
 import stat
 import struct
+import subprocess
 import sys
 import threading
 import time
@@ -1901,3 +1904,262 @@ def test_explicit_tab_overrides_owned_mapping():
         assert body["result"]["data"]["tabId"] == 101
     finally:
         ext.stop(); srv.shutdown(); srv.server_close()
+
+
+# --------------------------------------------------------------------------- #
+# Fix 5 — per-instance concurrency backstop (rate limit + queue-depth cap)
+#
+# Motivation: an audit found a 44,061-event storm (43,991 evals in one hour,
+# ~13/sec sustained) that saturated the SINGLE serial extension connection with
+# NO backpressure (latency 10ms→5.5s). The server now enforces, PER-INSTANCE, a
+# token-bucket rate limit + a pending-command depth cap; an over-limit /cmd is
+# rejected with HTTP 429 (caller-visible backpressure). The admission decision
+# (`_admit_locked`) is unit-tested directly with an INJECTED clock (scripts forbid
+# real-time nondeterminism), plus HTTP round-trips prove the 429 + telemetry.
+# --------------------------------------------------------------------------- #
+def _mk_instance(reg, key="k", burst=0.0, now=0.0):
+    """A bare Instance for direct _admit_locked unit tests (no HTTP/registry)."""
+    return S.Instance(key, key, "", now, burst=burst)
+
+
+def _instance_pending(reg):
+    with reg._cond:
+        return sum(i.pending for i in reg._instances.values())
+
+
+# --- token bucket: burst passes, then rate_limited (frozen clock) ---------- #
+def test_admit_token_bucket_burst_then_rate_limited():
+    """Within `burst`, admits pass; the next over the empty bucket → rate_limited.
+    Frozen clock ⇒ no refill ⇒ deterministic."""
+    clock = [100.0]
+    reg = S.Registry(clock=lambda: clock[0], rate_per_sec=5.0, burst=3,
+                     max_queue=1000)
+    inst = _mk_instance(reg, burst=3, now=clock[0])
+    with reg._cond:
+        for i in range(3):
+            assert reg._admit_locked(inst) is None, f"burst slot {i} must admit"
+        verdict = reg._admit_locked(inst)
+    assert verdict is not None
+    reason, retry_after = verdict
+    assert reason == "rate_limited"
+    assert retry_after > 0                 # a positive Retry-After-style hint
+    assert inst.pending == 3               # ONLY the 3 admitted bumped pending
+
+
+# --- token bucket refills over (fake) time → dispatches resume ------------- #
+def test_admit_token_bucket_refills_over_time():
+    clock = [100.0]
+    reg = S.Registry(clock=lambda: clock[0], rate_per_sec=5.0, burst=2,
+                     max_queue=1000)
+    inst = _mk_instance(reg, burst=2, now=clock[0])
+    with reg._cond:
+        assert reg._admit_locked(inst) is None
+        assert reg._admit_locked(inst) is None
+        assert reg._admit_locked(inst)[0] == "rate_limited"   # bucket empty
+        clock[0] += 0.2                                       # +1 token @5/sec
+        assert reg._admit_locked(inst) is None                # resumed
+        assert reg._admit_locked(inst)[0] == "rate_limited"   # empty again
+        clock[0] += 100.0                                     # long idle
+        # Refill is CAPPED at `burst` (2) — no unbounded accrual.
+        assert reg._admit_locked(inst) is None
+        assert reg._admit_locked(inst) is None
+        assert reg._admit_locked(inst)[0] == "rate_limited"
+
+
+# --- queue-depth cap: fill to MAX_QUEUE → queue_full; drain resumes -------- #
+def test_admit_queue_depth_cap():
+    """Rate limit disabled so ONLY the depth cap is exercised."""
+    reg = S.Registry(rate_per_sec=0, max_queue=2)
+    inst = _mk_instance(reg, burst=0)
+    with reg._cond:
+        assert reg._admit_locked(inst) is None    # pending 1
+        assert reg._admit_locked(inst) is None    # pending 2
+        verdict = reg._admit_locked(inst)         # 2 >= cap 2 → queue_full
+        assert verdict is not None and verdict[0] == "queue_full"
+        assert inst.pending == 2                  # a rejection does NOT bump pending
+        inst.pending -= 1                         # a command completes (drains)
+        assert reg._admit_locked(inst) is None    # slot freed → resumes
+
+
+# --- strict per-instance isolation ----------------------------------------- #
+def test_admit_is_strictly_per_instance():
+    """Throttling instance A must NOT throttle instance B — independent buckets
+    AND independent pending."""
+    reg = S.Registry(rate_per_sec=5.0, burst=1, max_queue=1)
+    a = _mk_instance(reg, key="a", burst=1)
+    b = _mk_instance(reg, key="b", burst=1)
+    with reg._cond:
+        assert reg._admit_locked(a) is None                       # a: token+slot
+        assert reg._admit_locked(a)[0] in ("rate_limited", "queue_full")
+        assert reg._admit_locked(b) is None                       # b unaffected
+        assert a.pending == 1 and b.pending == 1
+
+
+# --- disable path (rate=0 AND max_queue=0) never throttles ----------------- #
+def test_admit_disabled_never_throttles():
+    reg = S.Registry(rate_per_sec=0, max_queue=0)
+    inst = _mk_instance(reg, burst=0)
+    with reg._cond:
+        for _ in range(1000):
+            assert reg._admit_locked(inst) is None
+    assert inst.pending == 1000
+
+
+# --- a rejected submit leaves NO turnstile/waiter residue (no deadlock) ---- #
+def test_rate_limited_submit_leaves_no_turnstile_residue():
+    """A rejected submit raises RateLimited IMMEDIATELY and leaves no residue —
+    no tab-queue ticket, no waiter, pending balanced — so it can neither wedge
+    the FIFO turnstile nor leak a queue slot."""
+    reg = S.Registry(rate_per_sec=0.001, burst=1, max_queue=1000)  # ~no refill
+    inst = _register_live(reg)
+    stop = threading.Event()
+
+    def deliverer():
+        while not stop.is_set():
+            cmd = reg.poll("solo", "one", 0.05)
+            if cmd is not None and cmd is not S.SUPERSEDED:
+                reg.deliver_result(cmd["id"], {"id": cmd["id"], "ok": True,
+                                               "data": {}}, instance_id="solo")
+
+    threading.Thread(target=deliverer, daemon=True).start()
+    try:
+        reg.submit({"op": "getHtml"}, 3.0, session_id="s1", tab=5)  # spends token
+        with pytest.raises(S.RateLimited) as ei:
+            reg.submit({"op": "getHtml"}, 3.0, session_id="s2", tab=5)
+        assert ei.value.reason == "rate_limited"
+        assert ei.value.key == "one"
+        with reg._cond:
+            assert inst.waiters == set()      # no leaked waiter
+            assert reg._tab_queues == {}      # no leaked turnstile ticket
+            assert inst.pending == 0          # admitted slot released
+    finally:
+        stop.set()
+
+
+# --- HTTP: burst over the bucket → 429 rate_limited + throttle telemetry --- #
+def test_cmd_rate_limited_returns_429_and_emits_throttle(telemetry):
+    """Over-burst /cmd → HTTP 429 rate_limited (with a retry_after hint), a
+    DISTINCT throttle telemetry event that is metadata-only and carries a COARSE
+    session hash (never the raw id), and the server stays responsive (no wedge)."""
+    spool_dir = telemetry
+    reg = S.Registry(rate_per_sec=0.001, burst=2, max_queue=1000)  # ~no refill
+    srv, _ = _serve(registry=reg)
+    ext = FakeExtension(srv, executor=lambda c: {"url": "https://x.test"})
+    ext.start()
+    try:
+        assert _wait_connected(srv, want=True)
+        assert _req(srv, "POST", "/cmd", {"op": "getHtml"})[0] == 200   # burst 1
+        assert _req(srv, "POST", "/cmd", {"op": "getHtml"})[0] == 200   # burst 2
+        st, body = _cmd(srv, {"op": "getHtml"}, session="floodsession")  # over
+        assert st == 429
+        assert body["error"] == "rate_limited"
+        assert body["retry_after"] > 0
+        # 3 events: 2 ok + 1 throttled.
+        evs = _wait_events(spool_dir, 3)
+        throttled = [e for e in evs
+                     if json.loads(e["payload"]).get("outcome") == "throttled"]
+        assert len(throttled) == 1, f"expected one throttle event, got {evs}"
+        p = json.loads(throttled[0]["payload"])
+        assert p["op"] == "getHtml"
+        assert p["reason"] == "rate_limited"
+        # Attribution is a COARSE, non-reversible hash of X-Session-Id — NOT raw.
+        assert p["sess"] == hashlib.sha256(b"floodsession").hexdigest()[:8]
+        raw = _log_file(spool_dir).read_text()
+        assert "floodsession" not in raw          # raw session id NEVER stored
+        # No deadlock: the server still answers after shedding load.
+        assert _req(srv, "GET", "/health")[0] == 200
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
+# --- HTTP: pending at MAX_QUEUE → next /cmd is 429 queue_full (immediate) --- #
+def test_cmd_queue_full_returns_429():
+    """Two stuck (un-answered) in-flight commands fill an instance's pending to
+    MAX_QUEUE; the next /cmd is rejected FAST with 429 queue_full (it does not
+    block behind the queue). Rate disabled so ONLY the cap fires."""
+    reg = S.Registry(rate_per_sec=0, max_queue=2)
+    srv, _ = _serve(cmd_timeout=5.0, poll_timeout=5.0, registry=reg)
+    ext = FakeExtension(srv, swallow=True)     # picks up but never answers
+    ext.start()
+    try:
+        assert _wait_connected(srv, want=True)
+        for t in (1, 2):     # different tabs → both admitted + pending
+            threading.Thread(
+                target=lambda tt=t: _req(srv, "POST", "/cmd",
+                                         {"op": "getHtml", "tab": tt}),
+                daemon=True).start()
+        assert _wait_until(lambda: _instance_pending(reg) >= 2), \
+            "two in-flight commands never filled the queue"
+        t0 = time.time()
+        st, body = _req(srv, "POST", "/cmd", {"op": "getHtml", "tab": 3})
+        assert st == 429 and body["error"] == "queue_full"
+        assert time.time() - t0 < 2.0, "queue_full must reject immediately"
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
+# --- default knobs never throttle a legitimate small burst ----------------- #
+def test_default_knobs_do_not_throttle_normal_use():
+    """With PRODUCTION defaults, a normal workflow (open + a handful of ops) is
+    NEVER throttled — the storm-only guarantee for legit use."""
+    reg = S.Registry()   # default rate=5/s, burst=20, max_queue=32
+    srv, _ = _serve(registry=reg)
+    ext = FakeExtension(srv, instance_id="solo", label="only",
+                        executor=_tab_echo_exec([101]))
+    ext.start()
+    try:
+        assert _wait_connected(srv, want=True)
+        assert _cmd(srv, {"op": "open"}, session="A")[0] == 200
+        for _ in range(10):            # 10 rapid ops, well under burst 20
+            st, _b = _cmd(srv, {"op": "getHtml"}, session="A")
+            assert st == 200, "a normal small burst must never be throttled"
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
+# --------------------------------------------------------------------------- #
+# Skill side: a 429 from /cmd makes the `browser` CLI print a back-off message
+# and exit non-zero (the runaway-loop backpressure signal). Runs the REAL bash
+# entrypoint against an in-process fake server that always answers /cmd with 429.
+# Skipped where curl is unavailable (the CLI shells out to curl).
+# --------------------------------------------------------------------------- #
+BROWSER_BIN = Path(__file__).resolve().parent.parent / "browser"
+
+
+@pytest.mark.skipif(shutil.which("curl") is None, reason="curl not on PATH")
+def test_browser_cli_backs_off_on_429(tmp_path):
+    class _H(S.BaseHTTPRequestHandler):
+        def log_message(self, *a):  # noqa: A003
+            pass
+
+        def do_POST(self):
+            ln = int(self.headers.get("Content-Length") or 0)
+            if ln:
+                self.rfile.read(ln)
+            payload = json.dumps({"ok": False, "error": "rate_limited",
+                                  "retry_after": 1.5}).encode("utf-8")
+            self.send_response(429)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+    srv = S.ThreadingHTTPServer(("127.0.0.1", 0), _H)
+    srv.daemon_threads = True
+    port = srv.server_address[1]
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    tokf = tmp_path / "token"
+    tokf.write_text("smoke-token\n")
+    env = dict(os.environ)
+    env.update(BROWSER_BRIDGE_HOST="127.0.0.1",
+               BROWSER_BRIDGE_PORT=str(port),
+               BROWSER_BRIDGE_TOKEN_FILE=str(tokf))
+    try:
+        r = subprocess.run([str(BROWSER_BIN), "eval", "1+1"], env=env,
+                           capture_output=True, text=True, timeout=30)
+        assert r.returncode != 0, "a 429 must make the CLI exit non-zero"
+        low = r.stderr.lower()
+        assert "rate-limited" in low or "back off" in low, \
+            f"expected a back-off message on stderr, got: {r.stderr!r}"
+    finally:
+        srv.shutdown(); srv.server_close()

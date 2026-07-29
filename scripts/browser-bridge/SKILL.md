@@ -3,6 +3,35 @@ name: browser
 description: Drive the user's LIVE, logged-in Brave browser from Claude Code — read the active tab's HTML, run JS in it, list/navigate tabs, and screenshot the visible tab — via the local token-authenticated browser-bridge (loopback rendezvous server + MV3 extension). Use when the user asks you to look at / read / scrape / interact with a page THEY have open, act on an authenticated site they're logged into, check what's on their screen in Brave, navigate their browser, or grab a screenshot of their current tab. NOT for headless fetching of public URLs (use WebFetch) — this is specifically their real, authenticated session.
 ---
 
+```
+~/workspace/devrc/scripts/browser-bridge/browser <subcommand>
+```
+
+**Run it by that exact path** (also `~/.claude/skills/browser/browser` if the
+skill dir is symlinked). Don't hunt for it under `~/.claude/skills/...`.
+
+## Quick start / binary path
+
+```bash
+BB=~/workspace/devrc/scripts/browser-bridge/browser   # ← the executable
+$BB health                          # is an extension connected?
+$BB --instance <key> open <url>     # open a NEW tab this session owns
+$BB --instance <key> --tab <id> html   # act on a specific tab
+```
+
+## Concurrency / don't do this
+
+- **Concurrent drivers (esp. sibling subagents) → each `open` and thread its own
+  `--tab <id>`.** Sibling subagents of one parent SHARE a session id (they
+  inherit `CLAUDE_CODE_SESSION_ID` + `$TMUX_PANE`), so without explicit `--tab`
+  they fight over the SAME active tab. Have each driver `browser open` (capture
+  the returned `tabId`) and pass `--tab <id>` on every subsequent op.
+- **Do NOT run a bare high-rate `eval` loop** (no `--instance`/`open`). It shares
+  the one active tab AND saturates the single serial extension connection; the
+  server now **rate-limits** it and returns **HTTP 429** (`rate_limited` /
+  `queue_full`) — the `browser` CLI prints a back-off message and exits non-zero.
+  Batch what you need into fewer `eval`s, or space them out.
+
 # browser — drive the live Brave session
 
 `browser-bridge` lets you operate the user's **real, logged-in Brave** browser.
@@ -138,6 +167,13 @@ know browser usage is being counted. Details: `README.md` → Telemetry.
 
 - `503 extension_not_connected` → extension not loaded/paired, or Brave closed.
 - `504 timeout` → extension picked it up but didn't answer (tab unresponsive).
+- `429 rate_limited` / `429 queue_full` → the per-instance concurrency backstop is
+  shedding load — you're dispatching too fast / too many at once. **Back off and
+  retry** (the body carries a `retry_after` seconds hint). A normal handful of ops
+  is never throttled; this only fires on a sustained flood. Knobs (env, on the
+  server): `BROWSER_BRIDGE_RATE_PER_SEC` (default 5, sustained/sec; 0 = unlimited),
+  `BROWSER_BRIDGE_BURST` (default 20), `BROWSER_BRIDGE_MAX_QUEUE` (default 32, 0 =
+  unlimited).
 - `409 ambiguous_instance` → >1 instance connected and no `--instance` — pick one.
 - `409 no_owned_tab` → `close` with nothing to close — run `browser open` first (or `--tab`).
 - `409 superseded` → the instance was replaced by a newer connection; retry.
