@@ -109,31 +109,28 @@ case "$TIMEOUT" in (*[!0-9]*|"") die "--timeout must be a positive integer of se
 # leave an orphaned tab.
 command -v "$OPENCODE_BIN" >/dev/null 2>&1 || die "opencode not found on PATH ('$OPENCODE_BIN') — install it or set BROWSER_AGENT_OPENCODE"
 
-# --- open the agent's own tab ------------------------------------------------ #
 declare -a bflags=()
 [ -n "$INSTANCE" ] && bflags+=(--instance "$INSTANCE")
-open_resp="$("$BROWSER_BIN" "${bflags[@]}" open about:blank 2>/dev/null)" \
-  || die "failed to open a tab (is the browser-bridge extension connected? try: browser health)"
-TAB="$(printf '%s' "$open_resp" | python3 -c 'import json,sys
-try:
-    print(json.load(sys.stdin)["result"]["data"]["tabId"])
-except Exception:
-    pass')"
-case "$TAB" in (*[!0-9]*|"") die "could not determine the opened tabId from: $open_resp";; esac
 
-# From here on a tab exists — guarantee it is closed on EVERY exit path.
+# --- scratch: per-run agent def (bash denied) + the typed `browser` custom tool - #
+# Built BEFORE any tab is opened so the fail-closed tool-set gate (below) can
+# resolve the templated agent def AND a gate failure leaks NO tab.
+SCRATCH="$(mktemp -d "${TMPDIR:-/tmp}/browser-agent.XXXXXX")"
+TAB=""            # set once the tab is actually opened (below the gate)
 _closed=0
+# Close the owned tab (if one was opened) on EVERY exit path, then drop scratch.
+# `cleanup` no-ops before a tab exists, so a gate-fail exit closes nothing.
 cleanup() {
   [ "$_closed" = "1" ] && return 0
   _closed=1
+  [ -n "$TAB" ] || return 0
   "$BROWSER_BIN" "${bflags[@]}" --tab "$TAB" close >/dev/null 2>&1 || true
 }
-trap cleanup EXIT INT TERM
-
-# --- scratch: per-run agent def (bash denied) + the typed `browser` custom tool - #
-SCRATCH="$(mktemp -d "${TMPDIR:-/tmp}/browser-agent.XXXXXX")"
-[ "${BROWSER_AGENT_KEEP_SCRATCH:-0}" = "1" ] || \
-  trap 'cleanup; rm -rf "$SCRATCH" 2>/dev/null || true' EXIT INT TERM
+_cleanup_all() {
+  cleanup
+  [ "${BROWSER_AGENT_KEEP_SCRATCH:-0}" = "1" ] || rm -rf "$SCRATCH" 2>/dev/null || true
+}
+trap _cleanup_all EXIT INT TERM
 mkdir -p "$SCRATCH/.opencode/agents" "$SCRATCH/.opencode/agent" \
          "$SCRATCH/.opencode/tools" "$SCRATCH/.opencode/tool"
 
@@ -152,6 +149,51 @@ AGENT_MD="$SCRATCH/.opencode/agents/browser-agent.md"
 sed -e "s/__STEPS__/$STEPS/g" -e "s#__MODEL__#$MODEL#g" "$TEMPLATE" > "$AGENT_MD"
 # Some opencode versions read `.opencode/agent/` (singular) — write both.
 cp "$AGENT_MD" "$SCRATCH/.opencode/agent/browser-agent.md"
+
+# --- fail-closed tool-set gate (runtime verification, model-free) ------------ #
+# Before spending ANY model token — and before opening a tab — verify opencode
+# ACTUALLY resolved browser-agent to a BROWSER-ONLY tool set. `opencode debug
+# agent` is a read-only config dump (no model spend) that emits the resolved
+# `tools` map; we refuse to run unless `browser:true` AND every host tool
+# (bash/read/edit/write/webfetch/…) is present AND false. On any opencode
+# version/config where the host-tool denial did NOT take (browser tool missing on
+# an unsupported version, or a host tool still enabled), this turns a latent
+# "runs unconfined" landmine into a loud, safe refusal. `debug agent` has no
+# --dir, so we resolve the templated def by running in the scratch project dir.
+gate_out="$(cd "$SCRATCH" && "$OPENCODE_BIN" debug agent browser-agent 2>/dev/null)" || \
+  die "tool-set gate: 'opencode debug agent browser-agent' failed to run — cannot confirm a browser-only tool set (unsupported opencode version? see README 'opencode version requirement'); refusing to run"
+printf '%s' "$gate_out" | python3 -c '
+import json, sys
+# Confirm the resolved tool set is browser-ONLY. Fail closed (exit!=0) on ANY
+# uncertainty: unparseable output, missing `browser`, `browser` not true, a host
+# tool still true, or a host tool absent (absence must NOT read as "disabled").
+try:
+    tools = json.load(sys.stdin)["tools"]
+    assert isinstance(tools, dict)
+except Exception as e:
+    sys.stderr.write("unparseable debug-agent tool set: %s\n" % e); sys.exit(3)
+if tools.get("browser") is not True:
+    sys.stderr.write("browser tool not enabled (browser=%r)\n" % tools.get("browser")); sys.exit(4)
+enabled = sorted(k for k, v in tools.items() if k != "browser" and v is True)
+if enabled:
+    sys.stderr.write("host tools still enabled: %s\n" % ",".join(enabled)); sys.exit(5)
+required_false = ["bash", "read", "edit", "write", "webfetch"]
+missing = [t for t in required_false if t not in tools]
+if missing:
+    sys.stderr.write("cannot confirm host tools disabled (absent: %s)\n" % ",".join(missing)); sys.exit(6)
+sys.exit(0)
+' || die "tool-set gate FAILED: opencode did not resolve browser-agent to a browser-ONLY tool set — the host-tool denial did not take on this opencode version/config. Refusing to run the model unconfined (see README 'runtime tool-set gate' / 'opencode version requirement')"
+
+# --- open the agent's own tab ------------------------------------------------ #
+# Opened AFTER the gate so a gate-fail leaks no tab.
+open_resp="$("$BROWSER_BIN" "${bflags[@]}" open about:blank 2>/dev/null)" \
+  || die "failed to open a tab (is the browser-bridge extension connected? try: browser health)"
+TAB="$(printf '%s' "$open_resp" | python3 -c 'import json,sys
+try:
+    print(json.load(sys.stdin)["result"]["data"]["tabId"])
+except Exception:
+    pass')"
+case "$TAB" in (*[!0-9]*|"") die "could not determine the opened tabId from: $open_resp";; esac
 
 TRANSCRIPT1="$SCRATCH/opencode-transcript.jsonl"
 TRANSCRIPT2="$SCRATCH/opencode-transcript.retry.jsonl"

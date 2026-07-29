@@ -10,8 +10,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
-  OP_TO_SERVER, ALLOWED_OPS_DEFAULT, TEXT_MAX_BYTES_DEFAULT,
-  BrowserToolRefusal, hostOf, hostDenied, allowedOpsFromEnv, forcedTab,
+  OP_TO_SERVER, ALLOWED_OPS_DEFAULT, TEXT_MAX_BYTES_DEFAULT, NAV_ALLOWED_SCHEMES,
+  BrowserToolRefusal, hostOf, navSchemeOf, hostDenied, allowedOpsFromEnv, forcedTab,
   buildRequest, summarizeResult, runBrowserOp,
 } from "../opencode/tools/browser_tool_impl.mjs";
 
@@ -134,6 +134,62 @@ test("buildRequest: nav respects an allowlist (non-allowed host refused)", () =>
     baseEnv({ BROWSER_AGENT_ALLOW_DOMAINS: "wikipedia.org" }), TOK), /domain_blocked/);
   assert.ok(buildRequest({ op: "nav", url: "https://en.wikipedia.org/wiki/X" },
     baseEnv({ BROWSER_AGENT_ALLOW_DOMAINS: "wikipedia.org" }), TOK));
+});
+
+// --------------------------------------------------------------------------- //
+// Fix #180-1 — a `nav` to any non-http(s) scheme is refused (allowlist bypass)
+// --------------------------------------------------------------------------- //
+test("navSchemeOf extracts a lowercased scheme; junk → ''", () => {
+  assert.deepEqual(NAV_ALLOWED_SCHEMES, ["http:", "https:"]);
+  assert.equal(navSchemeOf("HTTPS://Example.com/x"), "https:");
+  assert.equal(navSchemeOf("file:///etc/passwd"), "file:");
+  assert.equal(navSchemeOf("JavaScript:alert(1)"), "javascript:");
+  assert.equal(navSchemeOf("example.com"), "");        // no scheme → unparseable
+  assert.equal(navSchemeOf(undefined), "");
+});
+
+test("buildRequest: nav to a non-http(s) scheme is refused (bypasses domain confinement)", () => {
+  for (const [url, scheme] of [
+    ["file:///etc/passwd", "file:"],
+    ["data:text/html,<script>alert(1)</script>", "data:"],
+    ["about:blank", "about:"],
+    ["javascript:alert(document.cookie)", "javascript:"],
+    ["chrome://settings", "chrome:"],
+    ["view-source:https://example.com", "view-source:"],
+  ]) {
+    assert.throws(
+      // NB: even with a permissive allowlist these must be refused on scheme alone.
+      () => buildRequest({ op: "nav", url },
+        baseEnv({ BROWSER_AGENT_ALLOW_DOMAINS: "example.com" }), TOK),
+      (e) => e instanceof BrowserToolRefusal &&
+        e.reason === `nav_scheme_denied:${scheme}`,
+      `nav to ${url} must be refused as nav_scheme_denied:${scheme}`);
+  }
+  // An unparseable / schemeless target is refused too (no confirmable scheme).
+  assert.throws(() => buildRequest({ op: "nav", url: "not a url" }, baseEnv(), TOK),
+    (e) => e instanceof BrowserToolRefusal && /nav_scheme_denied:<none>/.test(e.reason));
+  // The scheme gate fires BEFORE host allow/deny — a denied http(s) host still
+  // reports domain_blocked (scheme ok), a file: URL reports the scheme refusal.
+  assert.throws(() => buildRequest({ op: "nav", url: "https://other.com" },
+    baseEnv({ BROWSER_AGENT_ALLOW_DOMAINS: "wikipedia.org" }), TOK), /domain_blocked/);
+});
+
+test("runBrowserOp: a non-http(s) nav is refused before any fetch (live + dry-run)", async () => {
+  const f = fetchStub();
+  for (const url of ["file:///etc/passwd", "data:text/html,x", "about:blank",
+                     "javascript:alert(1)"]) {
+    await assert.rejects(() => run({ op: "nav", url }, baseEnv(), f),
+      /nav_scheme_denied/, `${url} must be refused pre-bridge`);
+  }
+  assert.equal(f.calls.length, 0, "no scheme-denied nav may reach the bridge");
+  // A normal https nav still passes the allowlist and DOES reach the bridge.
+  const out = await run({ op: "nav", url: "https://en.wikipedia.org/wiki/X" },
+    baseEnv({ BROWSER_AGENT_ALLOW_DOMAINS: "wikipedia.org" }),
+    fetchStub({ nav: { url: "https://en.wikipedia.org/wiki/X", title: "X" } }));
+  assert.match(out, /"ok":true/);
+  // Dry-run nav also refuses a file: scheme (can't "preview" a scheme bypass).
+  await assert.rejects(() => run({ op: "nav", url: "file:///etc/passwd" },
+    baseEnv({ BROWSER_AGENT_DRY_RUN: "1" }), f), /nav_scheme_denied/);
 });
 
 test("buildRequest: eval requires js + best-effort refuses a denied-host reference", () => {

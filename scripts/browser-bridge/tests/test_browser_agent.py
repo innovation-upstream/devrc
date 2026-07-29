@@ -102,6 +102,29 @@ def _fake_opencode(path: Path) -> Path:
     return _write_exec(path, r'''#!/usr/bin/env python3
 import json, os, sys, time
 argv = sys.argv[1:]
+
+# `opencode debug agent browser-agent` — the wrapper's fail-closed tool-set gate.
+# Answer with a resolved `tools` map (model-free); NEVER touch FAKE_OC_LOG /
+# FAKE_OC_ENV (those count/inspect only the real `run`). FAKE_OC_GATE_MODE drives
+# the shape so tests can prove the gate fails closed.
+if argv[:2] == ["debug", "agent"]:
+    gate = os.environ.get("FAKE_OC_GATE_MODE", "ok")
+    if gate == "fail":               # `debug agent` itself errors (bad/unsupported)
+        sys.stderr.write("fake debug agent failed\n"); sys.exit(1)
+    if gate == "unparseable":        # output is not JSON → gate must fail closed
+        print("<not json>"); sys.exit(0)
+    tools = {"bash": False, "read": False, "edit": False, "write": False,
+             "webfetch": False, "glob": False, "grep": False, "task": False,
+             "browser": True}
+    if gate == "hosttool":           # a host tool leaked back on → must refuse
+        tools["bash"] = True
+    elif gate == "nobrowser":        # custom tool absent (unsupported ver) → refuse
+        del tools["browser"]
+    elif gate == "missing_hosttool": # bash omitted → can't confirm → refuse
+        del tools["bash"]
+    print(json.dumps({"name": "browser-agent", "tools": tools}))
+    sys.exit(0)
+
 cont = "--continue" in argv
 # The task message is the last positional (after all flags/values we know).
 msg = argv[-1] if argv else ""
@@ -326,6 +349,41 @@ def test_no_shell_string_path_remains(rig):
     msg = argv[-1]
     assert "browser --tab" not in msg, "the model must not be given a shell command"
     assert "op=" in msg, "the model must be pointed at the typed tool"
+
+
+# --------------------------------------------------------------------------- #
+# Fail-closed tool-set gate: BEFORE opening a tab or spending a model token, the
+# wrapper runs `opencode debug agent` and refuses to run unless the resolved tool
+# set is browser-ONLY. This is what makes an un-upgraded / other opencode version
+# SAFE — it refuses rather than running the model unconfined.
+# --------------------------------------------------------------------------- #
+def test_gate_passes_when_browser_only(rig):
+    """Default gate output (browser:true, all host tools false) → the run proceeds
+    normally (tab opened, opencode `run` invoked)."""
+    r = rig.run(["read the page"], mode="ok")           # FAKE_OC_GATE_MODE defaults ok
+    assert r.returncode == 0, r.stderr
+    assert len(_oc_calls(rig.oc_log)) >= 1, "the model run must proceed when the gate passes"
+    opens = [c for c in _browser_calls(rig.frb_log) if c["op"] == "open"]
+    assert len(opens) == 1
+
+
+@pytest.mark.parametrize("gate_mode,needle", [
+    ("hosttool", "tool-set gate"),          # a host tool (bash) still enabled
+    ("nobrowser", "tool-set gate"),         # the custom browser tool is absent
+    ("unparseable", "tool-set gate"),       # debug output is not parseable
+    ("missing_hosttool", "tool-set gate"),  # bash omitted → can't confirm disabled
+    ("fail", "tool-set gate"),              # `opencode debug agent` itself failed
+])
+def test_gate_fails_closed(rig, gate_mode, needle):
+    """On ANY tool set the gate can't positively confirm as browser-only, the
+    wrapper `die`s (rc=2), NEVER invokes the model, and — because the gate runs
+    BEFORE the tab is opened — leaks NO tab (nothing to orphan)."""
+    r = rig.run(["read the page"], mode="ok",
+                extra_env={"FAKE_OC_GATE_MODE": gate_mode})
+    assert r.returncode == 2, r.stdout + r.stderr
+    assert needle in r.stderr.lower() or needle in r.stderr, r.stderr
+    assert _oc_calls(rig.oc_log) == [], "the model must NEVER run when the gate fails"
+    assert _browser_calls(rig.frb_log) == [], "no tab may be opened when the gate fails"
 
 
 # --------------------------------------------------------------------------- #

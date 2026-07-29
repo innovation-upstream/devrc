@@ -103,13 +103,28 @@ browser agent "go to news.ycombinator.com and report the top 3 story titles" \
     glob and the shell performed the redirect → a hostile page could induce the
     model to write to a sourced dotfile → host RCE. The typed tool removes the
     shell entirely, so there is no `>`/`;`/`|`/`$()` surface to abuse.
+- **Runtime fail-closed tool-set gate (makes an un-upgraded opencode SAFE):**
+  before opening a tab or spending a model token, the wrapper runs `opencode debug
+  agent browser-agent` (a read-only, **model-free** config dump) and refuses to run
+  (`die`, model never invoked) unless the resolved `tools` map is browser-ONLY —
+  `browser:true` AND every host tool (`bash`/`read`/`edit`/`write`/`webfetch`)
+  present AND `false`. Any uncertainty (unparseable output, `browser` absent, a
+  host tool `true`, or a host tool absent) fails closed. Different opencode
+  versions resolve the deny differently (workbench 1.17.20, laptop 1.18.4), so this
+  is the one place the fail-closed property is *verified at runtime* rather than
+  trusted — on a version where the host-tool denial didn't take, `browser agent`
+  refuses instead of running the model unconfined. The gate runs BEFORE the tab is
+  opened, so a gate failure leaks no tab.
 - **Guardrails:** a step budget (`--steps`, default 12), a wall-clock `--timeout`
   (default 120s) enforced with a **process-group kill** (`setsid` + kill the whole
   group, so no opencode child survives), `--deny-domains`/`--allow-domains`
   enforced INSIDE the tool (a denied `nav` is refused before it reaches the
-  bridge), and `--dry-run` (intercepts `nav`/`eval` — logs, doesn't execute). The
-  full opencode JSON transcript + a metadata-only tool audit are kept in a scratch
-  dir. **Deny is best-effort** (see note below).
+  bridge), a **non-http(s) nav scheme hard-denial** (a `nav` to `file:`/`data:`/
+  `about:`/`javascript:`/`chrome:`/… is refused as `nav_scheme_denied:<scheme>`
+  before any fetch — those have no host and would otherwise bypass
+  `--allow-domains`), and `--dry-run` (intercepts `nav`/`eval` — logs, doesn't
+  execute). The full opencode JSON transcript + a metadata-only tool audit are kept
+  in a scratch dir. **Domain deny is best-effort** (see note below).
 - **⚠ Privacy:** the pages the agent reads are sent to **OpenRouter/DeepSeek**.
   Do NOT point it at high-secret authenticated pages casually.
 - **⚠ Domain deny is a mitigation, not a guarantee.** The tool refuses a `nav` to

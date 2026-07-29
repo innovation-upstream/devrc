@@ -68,6 +68,27 @@ export function hostOf(url) {
   }
 }
 
+// The ONLY schemes a `nav` may target. Anything else — file:, data:, about:,
+// javascript:, chrome:, blob:, view-source:, … — has an EMPTY hostname, so the
+// host allow/deny gate (hostDenied) treats it as "no host → not gated" and would
+// let it through, bypassing the operator's `--allow-domains` confinement. Such a
+// URL could load attacker HTML in the owned tab, run inline script, or (if the
+// browser's file-URL toggle is on) read a local file. So a non-http(s) nav is
+// refused OUTRIGHT, before any bridge fetch, regardless of the allow/deny lists
+// (PR #180 hardening 1).
+export const NAV_ALLOWED_SCHEMES = Object.freeze(["http:", "https:"]);
+
+// The lowercased URL scheme (protocol, incl. the trailing ":"), or "" if the URL
+// does not parse (an unparseable/relative nav target has no confirmable scheme →
+// it is refused just like a disallowed scheme).
+export function navSchemeOf(url) {
+  try {
+    return (new URL(String(url)).protocol || "").toLowerCase();
+  } catch {
+    return "";
+  }
+}
+
 function _matches(host, domain) {
   // host equals the domain, or is a subdomain of it (`.example.com`).
   return host === domain || host.endsWith("." + domain);
@@ -131,6 +152,13 @@ export function buildRequest(args, env, token) {
   if (op === "nav") {
     const url = args && args.url;
     if (!url) throw new BrowserToolRefusal("nav_missing_url");
+    // Scheme gate FIRST: a non-http(s) target (file:/data:/about:/javascript:/…)
+    // has no host and would slip past the domain confinement — refuse it here,
+    // before host allow/deny is even consulted.
+    const scheme = navSchemeOf(url);
+    if (!NAV_ALLOWED_SCHEMES.includes(scheme)) {
+      throw new BrowserToolRefusal(`nav_scheme_denied:${scheme || "<none>"}`);
+    }
     const host = hostOf(url);
     if (hostDenied(host, allowList, denyList)) {
       throw new BrowserToolRefusal(`domain_blocked:${host || url}`);
@@ -225,6 +253,10 @@ export async function runBrowserOp(args, opts = {}) {
     // Enforce domain policy on a dry-run nav too (so a dry-run can't "preview" a
     // denied domain and mislead).
     if (op === "nav") {
+      const scheme = navSchemeOf(args && args.url);
+      if (!NAV_ALLOWED_SCHEMES.includes(scheme)) {
+        throw new BrowserToolRefusal(`nav_scheme_denied:${scheme || "<none>"}`);
+      }
       const host = hostOf(args && args.url);
       if (hostDenied(host, _list(env.BROWSER_AGENT_ALLOW_DOMAINS),
                      _list(env.BROWSER_AGENT_DENY_DOMAINS))) {

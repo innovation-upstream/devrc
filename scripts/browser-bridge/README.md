@@ -353,6 +353,25 @@ optional `selector`/`url`/`js`/`maxBytes` — **never a shell command string**.
   browser: allow}`. Verified with `opencode debug agent browser-agent`: the
   resolved tool set is `{bash:false, read:false, edit:false, write:false,
   webfetch:false, …, browser:true}` — only the typed tool is enabled.
+- **Runtime fail-closed tool-set gate (this is what makes an un-upgraded /
+  other opencode version SAFE).** The denial above is a *property of the resolved
+  config*, and different opencode versions resolve it differently (workbench is
+  1.17.20, laptop 1.18.4). So BEFORE opening a tab or spending a single model
+  token, the wrapper runs `opencode debug agent browser-agent` (a **read-only,
+  model-free config dump**) in the scratch project and parses the resolved `tools`
+  map. It **refuses to run** (`die`, non-zero, model never invoked) unless
+  `browser:true` **AND** every host tool (`bash`/`read`/`edit`/`write`/`webfetch`)
+  is present **AND** `false`. Any uncertainty fails closed: unparseable output, a
+  missing `browser` (custom tool not loaded on an unsupported version), a host
+  tool still `true`, **or** a host tool absent from the output (absence must not
+  read as "disabled"). This turns the version-skew from a latent "runs unconfined"
+  landmine into a loud, safe refusal — on any opencode where the host-tool denial
+  did not take, `browser agent` refuses rather than running the model with a shell.
+  Because the gate runs **before** the tab is opened, a gate failure leaks no tab.
+  *opencode version requirement:* an opencode whose `debug agent` reports a
+  browser-only tool set (verified on 1.18.4; the resolved `tools` map above). If a
+  future/other version can't be confirmed browser-only, upgrade — the gate will
+  refuse until it can.
 - **The model cannot choose the tab / instance / domain policy.** The wrapper
   FORCES them on the tool via env (`BROWSER_AGENT_TAB`/`_INSTANCE`/
   `_ALLOW_DOMAINS`/`_DENY_DOMAINS`/`_DRY_RUN`, + inherited `BROWSER_BRIDGE_*`).
@@ -360,12 +379,21 @@ optional `selector`/`url`/`js`/`maxBytes` — **never a shell command string**.
   overrides the server's owned-tab routing, so the model can never target another
   tab. Enforcement (op allowlist + domain deny + forced tab) lives IN the tool
   (`browser_tool_impl.mjs`), unit-tested in `browser_tool.test.mjs`.
-- **Deny is best-effort.** The tool refuses a `nav` to a denied host (and scans an
-  `eval` for a literal denied host), but it cannot see a page's own client-side
-  redirect after an allowed nav — the bridge navigates and the tool only sees the
-  op it issued. `--deny-domains` is defence in depth, not a guarantee; the real
-  isolation is the own-tab lock. *Follow-up:* server-side enforcement against the
-  tab's resolved post-nav URL would make it binding.
+- **Non-http(s) nav schemes are DENIED.** A `nav` is refused before any bridge
+  fetch unless its scheme is `http:`/`https:`. `file:`/`data:`/`about:`/
+  `javascript:`/`chrome:`/`blob:`/… all have an empty hostname, so the host
+  allow/deny gate would treat them as "no host → not gated" and let them slip past
+  the operator's `--allow-domains` confinement (loading attacker HTML in the owned
+  tab, running inline script, or — with the browser's file-URL toggle on — reading
+  a local file). The refusal reason is `nav_scheme_denied:<scheme>`; an
+  unparseable/schemeless target is refused too (`nav_scheme_denied:<none>`). This
+  is a hard gate, independent of the allow/deny lists.
+- **Domain deny is best-effort.** For http(s) navs the tool refuses a `nav` to a
+  denied host (and scans an `eval` for a literal denied host), but it cannot see a
+  page's own client-side redirect after an allowed nav — the bridge navigates and
+  the tool only sees the op it issued. `--deny-domains` is defence in depth, not a
+  guarantee; the real isolation is the own-tab lock. *Follow-up:* server-side
+  enforcement against the tab's resolved post-nav URL would make it binding.
 - The `browser` tool talks to the loopback bridge over HTTP directly (bearer +
   `Host: 127.0.0.1` + `X-Session-Id` + the forced `tab`) — **zero subprocess, zero
   shell**. A metadata-only audit line per op (`#173`) goes to a scratch
