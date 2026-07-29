@@ -22,6 +22,7 @@ import {
   pollHeaders, resultWithInstance, normalizeText, TEXT_MAX_BYTES_DEFAULT,
   classifyPollStatus, POLL_COMMAND, POLL_IDLE, POLL_SUPERSEDED,
   POLL_UNAUTHORIZED, SUPERSEDE_BACKOFF_MS,
+  captureWithRetry, waitForCaptureReady, screenshotWithRestore,
 } from "./protocol.js";
 
 const DEFAULT_PORT = 8788;
@@ -168,27 +169,37 @@ const OPS = {
     const tab = await targetTab(cmd);
     // captureVisibleTab only ever captures the VISIBLE tab of its window. If the
     // caller's owned tab is in the background, capturing it requires briefly
-    // bringing it to the foreground. We do exactly that — activate → capture →
-    // restore the previously-active tab — so we never SILENTLY screenshot the
-    // wrong tab. This causes a brief visible flicker in that window (documented).
-    if (tab.active) {
-      const dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, { format: "png" });
-      return { url: tab.url, dataUrl };
-    }
-    let prevActiveId = null;
-    try {
-      const [prev] = await chrome.tabs.query({ active: true, windowId: tab.windowId });
-      prevActiveId = prev ? prev.id : null;
-      await chrome.tabs.update(tab.id, { active: true });
-      const dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, { format: "png" });
-      return { url: tab.url, dataUrl };
-    } finally {
-      // Restore focus to the tab that was active before, so a background
-      // screenshot doesn't permanently steal the user's foreground tab.
-      if (prevActiveId != null && prevActiveId !== tab.id) {
-        try { await chrome.tabs.update(prevActiveId, { active: true }); } catch (e) { /* ignore */ }
-      }
-    }
+    // bringing it to the foreground. We do exactly that — activate → SETTLE →
+    // capture (with retry) → restore the previously-active tab — so we never
+    // SILENTLY screenshot the wrong tab. This causes a brief visible flicker in
+    // that window (documented).
+    //
+    // A JUST-activated background tab hasn't painted its first frame yet, so a
+    // bare captureVisibleTab returns "image readback failed". So for the
+    // background path we (1) wait for the tab to reach `status:"complete"` + a
+    // short paint settle, and (2) retry the capture on the transient readback
+    // error. Both the settle and the retry, plus the activate→capture→restore
+    // orchestration (restore on success AND failure), are pure + unit-tested in
+    // protocol.js — keep this in sync with them.
+    const capture = () =>
+      chrome.tabs.captureVisibleTab(tab.windowId, { format: "png" });
+    const dataUrl = await screenshotWithRestore({
+      isActive: !!tab.active,
+      targetId: tab.id,
+      // The visible-tab path is a hot GPU capture too — retry it as well (cheap,
+      // and it hardens against a rare transient readback even when already active).
+      capture: () => captureWithRetry(capture),
+      getPrevActiveId: async () => {
+        const [prev] = await chrome.tabs.query({ active: true, windowId: tab.windowId });
+        return prev ? prev.id : null;
+      },
+      activate: (id) => chrome.tabs.update(id, { active: true }),
+      waitReady: () => waitForCaptureReady(async () => {
+        try { return (await chrome.tabs.get(tab.id)).status; } catch (e) { return null; }
+      }),
+      restore: (id) => chrome.tabs.update(id, { active: true }),
+    });
+    return { url: tab.url, dataUrl };
   },
 
   // Create a NEW tab for the calling session to own. active:false so parallel
