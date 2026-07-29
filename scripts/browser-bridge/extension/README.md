@@ -52,10 +52,15 @@ captured directly with no flicker.
 *Background-tab settle + retry (robustness):* a JUST-activated background tab
 hasn't painted its first frame yet, so a bare `captureVisibleTab` returns
 `"image readback failed"`. The SW therefore (1) waits for the tab to reach
-`status:"complete"` **plus a short paint settle** before capturing, and (2)
-**retries** the capture on the transient readback error (bounded — a few tries
-with a short linear back-off) before giving up. This matters because `browser
-agent` screenshots run in the agent's OWN background tab. The classifier
+`status:"complete"` **plus a paint settle (~350ms)** so the FIRST capture
+usually succeeds, and (2) **retries** the capture on a transient error (bounded —
+a few tries). **Retries respect Chrome's ~2/sec `captureVisibleTab` quota:** the
+API is throttled to ~2 calls/sec (~500ms), so retries are **spaced ≥~600ms**
+apart (a quota hit — `MAX_CAPTURE_VISIBLE_TAB_CALLS_PER_SECOND` — waits a full
+~1s window) — a faster retry would just re-trip the quota instead of recovering.
+This matters because `browser agent` screenshots run in the agent's OWN
+background tab. **Reload the extension** after changing this to take effect. The
+classifier
 (`isTransientCaptureError`), the retry (`captureWithRetry`), the settle
 (`waitForCaptureReady`) and the activate→capture→restore orchestration
 (`screenshotWithRestore`, restore on success AND failure) are pure + unit-tested
@@ -163,10 +168,12 @@ The chrome.* glue needs a real browser — verify by hand after loading:
       OWN tab — the explicit `--tab` overrides the shared owned-tab routing.
 - [ ] `browser screenshot` of a background owned tab briefly flickers it to the
       foreground, captures it, and restores the tab that was active before. It
-      **succeeds even on the first shot of a fresh background tab** (the settle +
-      retry defeats the old `image readback failed`): `browser --instance <key>
-      open <url>` → `browser --instance <key> --tab <id> screenshot /tmp/x.png`
-      writes a real PNG (was flaky before this fix).
+      **succeeds even on the first shot of a fresh background tab** with **NO
+      `MAX_CAPTURE_VISIBLE_TAB_CALLS_PER_SECOND` quota error** (the paint settle +
+      the ≥~600ms-spaced retry defeat both the old `image readback failed` and the
+      quota trip): `browser --instance <key> open <url>` → `browser --instance
+      <key> --tab <id> screenshot /tmp/x.png` writes a real PNG (was flaky before
+      this fix — reload the extension first so the new spacing is live).
 - [ ] **Two-session isolation (the fix):** open two Claude sessions (each in its
       own tmux pane). In each, `browser open` a DIFFERENT url, then interleave
       `browser nav …` / `browser html` between the sessions. Confirm neither

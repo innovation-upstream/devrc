@@ -16,8 +16,9 @@ import {
   POLL_UNAUTHORIZED, SUPERSEDE_BACKOFF_MS,
   capHeaderValue, MAX_HEADER_VALUE_CHARS,
   normalizeText, TEXT_MAX_BYTES_DEFAULT,
-  isTransientCaptureError, captureWithRetry, waitForCaptureReady,
-  screenshotWithRestore, CAPTURE_MAX_ATTEMPTS,
+  isTransientCaptureError, isCaptureQuotaError, captureWithRetry,
+  waitForCaptureReady, screenshotWithRestore, CAPTURE_MAX_ATTEMPTS,
+  CAPTURE_RETRY_BASE_MS, CAPTURE_QUOTA_WAIT_MS, CAPTURE_SETTLE_MS,
 } from "../extension/protocol.js";
 
 test("op set mirrors the server contract", () => {
@@ -286,6 +287,31 @@ test("isTransientCaptureError classifies the readback race as retry-worthy", () 
   assert.equal(isTransientCaptureError("IMAGE READBACK FAILED"), true);
 });
 
+test("isTransientCaptureError classifies the per-second capture quota as retry-worthy", () => {
+  // The observed live failure (PR #181 regression): a too-fast retry trips the
+  // ~2/sec captureVisibleTab quota. It is TRANSIENT — waiting out the window
+  // recovers it, so it must be retried (with the spaced backoff below).
+  assert.equal(isTransientCaptureError(new Error(
+    "This request exceeds the MAX_CAPTURE_VISIBLE_TAB_CALLS_PER_SECOND quota.")), true);
+  assert.equal(isTransientCaptureError(
+    "This request exceeds the MAX_CAPTURE_VISIBLE_TAB_CALLS_PER_SECOND quota."), true);
+  // Case-insensitive (Chrome could vary the surrounding prose).
+  assert.equal(isTransientCaptureError(
+    "exceeds the max_capture_visible_tab_calls_per_second quota"), true);
+});
+
+test("isCaptureQuotaError isolates the quota error from other transient errors", () => {
+  // Only the quota error is a quota error — a plain readback race is NOT (it
+  // takes the shorter backoff, not the full quota-window wait).
+  assert.equal(isCaptureQuotaError(new Error(
+    "This request exceeds the MAX_CAPTURE_VISIBLE_TAB_CALLS_PER_SECOND quota.")), true);
+  assert.equal(isCaptureQuotaError("IMAGE readback FAILED as MAX_CAPTURE_VISIBLE_TAB_CALLS_PER_SECOND"), true);
+  assert.equal(isCaptureQuotaError("image readback failed"), false);
+  assert.equal(isCaptureQuotaError("Cannot access contents of the page"), false);
+  assert.equal(isCaptureQuotaError(""), false);
+  assert.equal(isCaptureQuotaError(null), false);
+});
+
 test("isTransientCaptureError treats permanent/unknown errors as NON-transient (fail closed)", () => {
   // A permission/URL error must NOT be retried (it would just burn cmd_timeout).
   assert.equal(isTransientCaptureError(new Error(
@@ -295,6 +321,18 @@ test("isTransientCaptureError treats permanent/unknown errors as NON-transient (
   assert.equal(isTransientCaptureError(""), false);
   assert.equal(isTransientCaptureError(null), false);
   assert.equal(isTransientCaptureError(undefined), false);
+});
+
+test("capture spacing constants respect Chrome's ~2/sec captureVisibleTab quota", () => {
+  // The core regression guard as a constant invariant: the FIRST retry (base·1)
+  // and the quota-window wait must BOTH be ≥~600ms — faster than that re-trips
+  // MAX_CAPTURE_VISIBLE_TAB_CALLS_PER_SECOND (the ~2/sec ≈ 500ms window).
+  assert.ok(CAPTURE_RETRY_BASE_MS >= 600, `first-retry gap ${CAPTURE_RETRY_BASE_MS}ms must be ≥600ms`);
+  assert.ok(CAPTURE_QUOTA_WAIT_MS >= 600, `quota wait ${CAPTURE_QUOTA_WAIT_MS}ms must be ≥600ms`);
+  // And the whole retry budget stays well under the server cmd_timeout (20s):
+  // worst case = base·1 + base·2 (+ settle) with 3 attempts.
+  const worst = CAPTURE_RETRY_BASE_MS * 1 + CAPTURE_RETRY_BASE_MS * 2;
+  assert.ok(worst < 20000, `retry budget ${worst}ms must stay under the 20s cmd_timeout`);
 });
 
 test("captureWithRetry: a transient failure then success resolves (retries, then wins)", async () => {
@@ -308,7 +346,46 @@ test("captureWithRetry: a transient failure then success resolves (retries, then
   const out = await captureWithRetry(capture, { sleep: (ms) => { sleeps.push(ms); } });
   assert.equal(out, "data:png;ok");
   assert.equal(calls, 2, "one retry after the transient failure");
-  assert.deepEqual(sleeps, [150], "one linear backoff before the retry");
+  assert.deepEqual(sleeps, [CAPTURE_RETRY_BASE_MS], "one spaced backoff before the retry");
+  // The regression guard: the retry is spaced ≥ the quota window, so a 2nd
+  // capture never fires inside the ~2/sec captureVisibleTab quota window.
+  assert.ok(sleeps[0] >= 600, `retry gap ${sleeps[0]}ms must be ≥600ms (quota window)`);
+});
+
+test("captureWithRetry: every retry gap is ≥ the quota window (core spacing regression)", async () => {
+  // Persistent readback race → drains the whole attempt budget. Assert EACH gap
+  // between capture attempts is ≥~600ms — proving no two captures can land in
+  // one ~2/sec quota window (the PR #181 bug fired a 2nd capture 150ms later).
+  const sleeps = [];
+  const capture = async () => { throw new Error("image readback failed"); };
+  await assert.rejects(
+    () => captureWithRetry(capture, { sleep: (ms) => { sleeps.push(ms); } }),
+    /image readback failed/);
+  // maxAttempts=3 → two inter-attempt gaps.
+  assert.equal(sleeps.length, CAPTURE_MAX_ATTEMPTS - 1);
+  for (const gap of sleeps) {
+    assert.ok(gap >= 600, `every capture-attempt gap (${gap}ms) must be ≥600ms`);
+  }
+  // Linear spacing: base·1 then base·2.
+  assert.deepEqual(sleeps, [CAPTURE_RETRY_BASE_MS, CAPTURE_RETRY_BASE_MS * 2]);
+});
+
+test("captureWithRetry: a quota error waits a FULL quota window, then the retry succeeds", async () => {
+  // The exact live failure: attempt 1 trips the ~2/sec quota; the retry must
+  // wait out the window (≥~1s) so it doesn't immediately re-trip it, then win.
+  let calls = 0;
+  const sleeps = [];
+  const capture = async () => {
+    calls++;
+    if (calls < 2) throw new Error(
+      "This request exceeds the MAX_CAPTURE_VISIBLE_TAB_CALLS_PER_SECOND quota.");
+    return "data:png;ok";
+  };
+  const out = await captureWithRetry(capture, { sleep: (ms) => { sleeps.push(ms); } });
+  assert.equal(out, "data:png;ok");
+  assert.equal(calls, 2, "one retry after the quota error");
+  assert.deepEqual(sleeps, [CAPTURE_QUOTA_WAIT_MS], "waited a full quota window before retrying");
+  assert.ok(sleeps[0] >= 1000, `quota wait ${sleeps[0]}ms must be ≥~1s window`);
 });
 
 test("captureWithRetry: a persistent transient error fails after exactly N attempts", async () => {
@@ -343,6 +420,17 @@ test("waitForCaptureReady polls until 'complete', then applies the paint settle"
   // Two poll waits (while loading) + one final settle wait.
   assert.deepEqual(sleeps, [100, 100, 150]);
   assert.equal(i, 3, "stopped polling as soon as it read 'complete'");
+});
+
+test("waitForCaptureReady applies a real paint settle by DEFAULT (first-capture success → no retry)", async () => {
+  // The paint settle exists so the FIRST capture usually succeeds — dodging a
+  // retry (hence any quota risk). Lock the default settle at a meaningful ≥250ms
+  // (Chrome fires 'complete' before first paint) and prove it is actually waited.
+  assert.ok(CAPTURE_SETTLE_MS >= 250, `default paint settle ${CAPTURE_SETTLE_MS}ms must be ≥250ms`);
+  const sleeps = [];
+  await waitForCaptureReady(async () => "complete",
+    { sleep: (ms) => { sleeps.push(ms); }, now: () => 0 });
+  assert.deepEqual(sleeps, [CAPTURE_SETTLE_MS], "already-complete tab still waits the default settle");
 });
 
 test("waitForCaptureReady stops at the timeout even if never 'complete' (no hang)", async () => {

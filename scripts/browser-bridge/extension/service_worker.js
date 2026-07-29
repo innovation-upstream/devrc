@@ -177,10 +177,14 @@ const OPS = {
     // A JUST-activated background tab hasn't painted its first frame yet, so a
     // bare captureVisibleTab returns "image readback failed". So for the
     // background path we (1) wait for the tab to reach `status:"complete"` + a
-    // short paint settle, and (2) retry the capture on the transient readback
-    // error. Both the settle and the retry, plus the activate→capture→restore
-    // orchestration (restore on success AND failure), are pure + unit-tested in
-    // protocol.js — keep this in sync with them.
+    // paint settle (so the FIRST capture usually succeeds — no retry needed), and
+    // (2) retry the capture on a transient error. CRITICAL: Chrome throttles
+    // captureVisibleTab to ~2/sec (MAX_CAPTURE_VISIBLE_TAB_CALLS_PER_SECOND), so
+    // the retry backoff spaces attempts ≥~600ms (a quota hit waits a full ~1s
+    // window) — a faster retry would re-trip the quota. Both the settle and the
+    // spaced retry, plus the activate→capture→restore orchestration (restore on
+    // success AND failure), are pure + unit-tested in protocol.js — keep this in
+    // sync with them.
     const capture = () =>
       chrome.tabs.captureVisibleTab(tab.windowId, { format: "png" });
     const dataUrl = await screenshotWithRestore({
