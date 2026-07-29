@@ -19,27 +19,37 @@ fetch). Your tab is FIXED: you cannot choose or change which tab you act on.
 
 | call | does |
 |---|---|
-| `browser(op="text")` (opt. `selector`) | read the page's **visible innerText** — **PREFER THIS** |
-| `browser(op="html")`                   | read raw `outerHTML` — LAST RESORT (100s of KB; it will drown you) |
-| `browser(op="eval", js="…")`           | evaluate a small JS expression in the page and get its value |
+| `browser(op="text")` (opt. `selector`, `frame`) | read the page's **visible innerText** — **PREFER THIS** |
+| `browser(op="html")` (opt. `frame`)    | read raw `outerHTML` — LAST RESORT (100s of KB; it will drown you) |
+| `browser(op="eval", js="…")` (opt. `frame`) | evaluate a small JS expression in the page and get its value |
 | `browser(op="nav", url="…")`           | navigate your tab to `<url>` |
-| `browser(op="screenshot")`             | capture the visible tab (you get only a note, not the image) — **often unavailable to you** (see below) |
+| `browser(op="screenshot")`             | capture YOUR tab (you get only a note, not the image) — now works even though your tab is in the background (CDP) |
+| `browser(op="frames")`                 | list your tab's frames (frameId/url/name), **including cross-origin iframes** — pick one to pass as `frame` |
+| `browser(op="click", selector="…")` (opt. `frame`) | **trusted** click at the element's center |
+| `browser(op="type", text="…")` (opt. `selector`, `frame`) | **trusted** text input (focus `selector` first if given) |
+| `browser(op="key", key="Enter")` (opt. `selector`, `frame`) | dispatch one **trusted** key (Enter/Tab/Escape/Arrow*/…) |
 
 ## Rules
 - **Prefer `op="text"` over `op="html"`.** `text` returns clean innerText (~KB).
   `html` returns hundreds of KB and wastes your budget — only use it (or `eval`)
   if `text` is genuinely insufficient.
-- **Do NOT rely on `op="screenshot"`.** Your tab is a BACKGROUND tab, and
-  `captureVisibleTab` can only capture the on-screen foreground tab — so a
-  screenshot of your tab is usually `unavailable` ("not visible on-screen"). Read
-  the page with `text`/`html`/`eval` instead; don't waste steps retrying a
-  screenshot. (You never see the image anyway — only a note.)
+- **Reading a cross-origin iframe:** `op="text"`/`html`/`eval` see only the TOP
+  frame by default. If the content you need is inside an embedded app/iframe, call
+  `op="frames"` first, pick the frame (by `frameId` or a url-substring), then pass
+  it as `frame` on your read (`browser(op="text", frame="<id-or-url>")`).
+- **Driving the app:** use `op="click"` to reach an in-app tab/button, `op="type"`
+  to fill a field, and `op="key"` (e.g. `Enter`) to submit. These are TRUSTED
+  input events. Pass `frame` when the control lives inside a cross-origin iframe.
+- **`op="screenshot"` now works on your (background) tab** via CDP — but you still
+  only get a NOTE, never the image, so it rarely helps you answer. Read with
+  `text`/`html`/`eval` instead; don't spend steps on a screenshot unless asked.
 - **Stay on the allowed domains** given in the task. A `nav` to a denied domain
   is refused by the tool.
 - **Work in as few steps as possible.** You have a hard budget of **__STEPS__**
   steps. Read what you need, then answer.
 - There is no `open`/`close`/`tabs` — you already have your tab, and the harness
-  manages its lifecycle. Any op other than the five above is refused.
+  manages its lifecycle. Your CDP ops (screenshot/frames/click/type/key) can ONLY
+  touch YOUR tab; there is no raw-CDP/command escape. Any op not listed above is refused.
 
 ## Your final answer (required)
 When you are done, respond with **ONE JSON object and NOTHING else**, matching

@@ -26,16 +26,30 @@ import { homedir } from "node:os";
 // Ops the agent may request → the server-side op name the bridge understands.
 // (Mirrors the `browser` CLI's own mapping; NO open/close/tabs/release — the
 // wrapper owns the tab lifecycle and `tabs` would leak other tabs' URLs.)
+//
+// The CDP ops (frames/click/type/key + `--frame` reads) are here so the agent can
+// DRIVE an app (reach an in-app tab, submit a generation) and read INTO a
+// cross-origin iframe. CRITICAL (RCE-class invariant, PR #180 lineage): these are
+// BOUNDED TYPED ops only. There is NO `cdp`/`method`/`params` op — the model can
+// never send an arbitrary CDP command (Page.navigate file://, Runtime.evaluate for
+// exfil, Browser.*, Target.*, Fetch.*). buildRequest below constructs the wire body
+// field-by-field from a WHITELIST, so any extra arg the model smuggles (a `cdp`, a
+// `tab`, a `method`) is silently dropped, never forwarded. Keep it a whitelist.
 export const OP_TO_SERVER = Object.freeze({
   text: "text",
   html: "getHtml",
   eval: "eval",
   nav: "nav",
   screenshot: "screenshot",
+  frames: "frames",
+  click: "click",
+  type: "type",
+  key: "key",
 });
 
 export const ALLOWED_OPS_DEFAULT = Object.freeze([
   "text", "html", "eval", "nav", "screenshot",
+  "frames", "click", "type", "key",
 ]);
 
 export const TEXT_MAX_BYTES_DEFAULT = 32768;
@@ -123,6 +137,15 @@ export function forcedTab(env) {
   return Number(raw);
 }
 
+// Forward an optional `--frame` (frameId or url-substring) so a read/click runs
+// INSIDE a cross-origin frame. A TYPED scalar only — it selects a frame, it is NOT
+// a CDP command. Bounded to a length so a pathological value can't bloat the body.
+function _addFrame(body, args) {
+  if (args && args.frame != null && args.frame !== "") {
+    body.frame = String(args.frame).slice(0, 512);
+  }
+}
+
 function _coerceMaxBytes(v) {
   if (v === undefined || v === null || v === "") return TEXT_MAX_BYTES_DEFAULT;
   const n = Number(v);
@@ -176,11 +199,30 @@ export function buildRequest(args, env, token) {
       if (jl.includes(d)) throw new BrowserToolRefusal(`eval_references_blocked:${d}`);
     }
     body.js = String(js);
+    _addFrame(body, args);
   } else if (op === "text") {
     if (args && args.selector) body.selector = String(args.selector);
     body.maxBytes = _coerceMaxBytes(args ? args.maxBytes : undefined);
+    _addFrame(body, args);
+  } else if (op === "html") {
+    _addFrame(body, args);
+  } else if (op === "click") {
+    if (!args || !args.selector) throw new BrowserToolRefusal("click_missing_selector");
+    body.selector = String(args.selector);
+    _addFrame(body, args);
+  } else if (op === "type") {
+    const text = args && args.text;
+    if (text == null || text === "") throw new BrowserToolRefusal("type_missing_text");
+    body.text = String(text);
+    if (args && args.selector) body.selector = String(args.selector);
+    _addFrame(body, args);
+  } else if (op === "key") {
+    if (!args || !args.key) throw new BrowserToolRefusal("key_missing_key");
+    body.key = String(args.key);
+    if (args && args.selector) body.selector = String(args.selector);
+    _addFrame(body, args);
   }
-  // html / screenshot: no extra fields.
+  // frames / screenshot: no extra typed fields (the tab is forced by env).
 
   const host = env.BROWSER_BRIDGE_HOST || "127.0.0.1";
   const port = env.BROWSER_BRIDGE_PORT || "8788";
@@ -215,6 +257,21 @@ export function summarizeResult(op, envelope) {
     return JSON.stringify({ ok: true, screenshot: true, bytes: du.length,
       note: du.slice(0, SCREENSHOT_NOTE_MAX) ? "captured" : "empty" });
   }
+  if (op === "frames") {
+    // Compact frame metadata (frameId/url/name) so the model can pick a --frame.
+    return JSON.stringify(Array.isArray(data.frames) ? data.frames : data);
+  }
+  if (op === "click") {
+    return JSON.stringify({ ok: true, clicked: data.clicked ?? null,
+      x: data.x ?? null, y: data.y ?? null });
+  }
+  if (op === "type") {
+    // Never echo the typed text back to the model context — only the length.
+    return JSON.stringify({ ok: true, typed: data.typed ?? null });
+  }
+  if (op === "key") {
+    return JSON.stringify({ ok: true, key: data.key ?? null });
+  }
   return JSON.stringify(data);
 }
 
@@ -246,7 +303,12 @@ export async function runBrowserOp(args, opts = {}) {
   // the browser (mirrors the retired guard's --dry-run). Still enforces the op
   // allowlist + forced tab first, so a bad op/tab is refused even in dry-run.
   const dry = String(env.BROWSER_AGENT_DRY_RUN || "") === "1";
-  if (dry && (op === "nav" || op === "eval")) {
+  // Intercept the MUTATING ops (navigate / evaluate / trusted input) so a dry-run
+  // never actually drives the browser, while still enforcing the op allowlist +
+  // forced tab (a bad op/tab is refused even in dry-run).
+  const MUTATING = op === "nav" || op === "eval" ||
+                   op === "click" || op === "type" || op === "key";
+  if (dry && MUTATING) {
     const allowed = allowedOpsFromEnv(env);
     if (!allowed.includes(op)) throw new BrowserToolRefusal(`op_not_allowed:${op}`);
     forcedTab(env); // refuse a disowned tab even in dry-run

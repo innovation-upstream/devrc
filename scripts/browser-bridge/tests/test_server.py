@@ -939,7 +939,8 @@ def test_registry_deliver_unknown_id_false():
 def test_validate_command_contract():
     # The op set is the shared contract with extension/protocol.js.
     assert set(S.ALLOWED_OPS) == {"getHtml", "text", "eval", "tabs", "nav",
-                                  "screenshot", "open", "close"}
+                                  "screenshot", "open", "close",
+                                  "frames", "click", "type", "key"}
     # `text` is a dispatched, tab-scoped, cheap-read op with NO required field.
     assert S.validate_command({"op": "text"}) == ("text", None)
     assert "text" in S.TAB_SCOPED_OPS
@@ -2375,3 +2376,231 @@ def test_browser_cli_text_rejects_bad_maxbytes(tmp_path):
     r, _ = _run_browser(["text", "--max-bytes", "not-a-number"], tmp_path)
     assert r.returncode != 0
     assert "max-bytes" in r.stderr.lower()
+
+
+# --------------------------------------------------------------------------- #
+# CDP (chrome.debugger) ops: frames / click / type / key + --frame reads.
+# The server stays op-agnostic about CDP mechanics — it validates the op set,
+# tab-scopes + routes to the owned/target tab, and forwards the typed params
+# (frame/selector/text/key) verbatim to the extension. These assert exactly that,
+# plus the metadata-only telemetry + rate-limit coverage for the new ops. The
+# real chrome.debugger attach/detach behaviour is unit-tested in protocol.js /
+# cdp_protocol.test.mjs and verified manually against live Brave (see the PR body).
+# --------------------------------------------------------------------------- #
+def test_cdp_ops_registered_in_contract():
+    """frames/click/type/key are dispatchable + tab-scoped, with required fields."""
+    for op in ("frames", "click", "type", "key"):
+        assert op in S.ALLOWED_OPS, f"{op} must be an allowed op"
+        assert op in S.TAB_SCOPED_OPS, f"{op} must be tab-scoped (acts on one tab)"
+    assert S.REQUIRED_FIELDS["click"] == ("selector",)
+    assert S.REQUIRED_FIELDS["type"] == ("text",)
+    assert S.REQUIRED_FIELDS["key"] == ("key",)
+    # frames takes no skill-supplied field.
+    assert "frames" not in S.REQUIRED_FIELDS
+
+
+def test_click_requires_selector_400():
+    srv, _ = _serve()
+    ext = FakeExtension(srv)
+    ext.start()
+    try:
+        assert _wait_connected(srv, want=True)
+        st, body = _req(srv, "POST", "/cmd", {"op": "click"})
+        assert st == 400
+        assert body["error"] == "missing_field:selector"
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
+def test_type_requires_text_400():
+    srv, _ = _serve()
+    ext = FakeExtension(srv)
+    ext.start()
+    try:
+        assert _wait_connected(srv, want=True)
+        st, body = _req(srv, "POST", "/cmd", {"op": "type"})
+        assert st == 400
+        assert body["error"] == "missing_field:text"
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
+def test_key_requires_key_400():
+    srv, _ = _serve()
+    ext = FakeExtension(srv)
+    ext.start()
+    try:
+        assert _wait_connected(srv, want=True)
+        st, body = _req(srv, "POST", "/cmd", {"op": "key"})
+        assert st == 400
+        assert body["error"] == "missing_field:key"
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
+def test_cdp_ops_route_to_owned_session_tab():
+    """frames/click/type/key are tab-scoped → they route to the session's owned tab
+    (the CDP attach on the extension side is thereby confined to the owned tab)."""
+    srv, _ = _serve()
+    ext = FakeExtension(srv, instance_id="solo", label="only",
+                        executor=_tab_echo_exec([101]))
+    ext.start()
+    try:
+        assert _wait_connected(srv, want=True)
+        _cmd(srv, {"op": "open"}, session="A")
+        for body in ({"op": "frames"}, {"op": "click", "selector": "#go"},
+                     {"op": "type", "text": "hi"}, {"op": "key", "key": "Enter"}):
+            st, resp = _cmd(srv, body, session="A")
+            assert st == 200, (body, resp)
+            assert resp["result"]["data"]["tabId"] == 101, \
+                f"{body['op']} must route to A's owned tab 101"
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
+def test_cdp_params_forwarded_verbatim():
+    """frame/selector/text/key are forwarded to the extension command untouched
+    (they are typed op params, not skill-side routing hints like target/tab)."""
+    srv, _ = _serve()
+    ext = FakeExtension(srv, instance_id="solo", label="only",
+                        executor=lambda c: {"url": "https://x.test", "ok": True})
+    ext.start()
+    try:
+        assert _wait_connected(srv, want=True)
+        _req(srv, "POST", "/cmd",
+             {"op": "click", "selector": "#run", "frame": "model-benchmarking"})
+        _req(srv, "POST", "/cmd", {"op": "type", "text": "a prompt", "selector": "#p"})
+        _req(srv, "POST", "/cmd", {"op": "key", "key": "Enter"})
+        _req(srv, "POST", "/cmd", {"op": "text", "frame": "F1"})
+        by_op = {c["op"]: c for c in ext.dispatched}
+        assert by_op["click"]["selector"] == "#run"
+        assert by_op["click"]["frame"] == "model-benchmarking"
+        assert by_op["type"]["text"] == "a prompt"
+        assert by_op["type"]["selector"] == "#p"
+        assert by_op["key"]["key"] == "Enter"
+        assert by_op["text"]["frame"] == "F1"
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
+def test_frames_telemetry_metadata_only(telemetry):
+    """PRIVACY: a `frames` result lists frame URLs (incl. cross-origin ones), but
+    telemetry emits ONLY the op + the bare TOP-LEVEL domain — never the frame URLs."""
+    spool_dir = telemetry
+    srv, _ = _serve()
+    ext = FakeExtension(srv, executor=lambda c: {
+        "url": "https://civitai.com/",
+        "frames": [
+            {"frameId": "MAIN", "url": "https://civitai.com/", "name": ""},
+            {"frameId": "F1", "name": "bench",
+             "url": "https://model-benchmarking.civit.ai/secret-app-path?token=abc"},
+        ]})
+    ext.start()
+    try:
+        assert _wait_connected(srv, want=True)
+        st, body = _req(srv, "POST", "/cmd", {"op": "frames"})
+        assert st == 200
+        # round-trip sanity: the caller DOES get the frame list back.
+        assert body["result"]["data"]["frames"][1]["frameId"] == "F1"
+        e = _wait_events(spool_dir, 1)[0]
+        p = json.loads(e["payload"])
+        assert p["op"] == "frames"
+        assert p["outcome"] == "ok"
+        assert p["domain"] == "civitai.com"       # bare TOP-LEVEL domain only
+        raw = _log_file(spool_dir).read_text()
+        assert "model-benchmarking" not in raw, "a frame URL leaked into telemetry"
+        assert "secret-app-path" not in raw
+        assert "token=abc" not in raw
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
+def test_type_telemetry_no_typed_text(telemetry):
+    """PRIVACY: `type` telemetry never carries the typed text — only op/domain."""
+    spool_dir = telemetry
+    srv, _ = _serve()
+    ext = FakeExtension(srv, executor=lambda c: {"url": "https://civitai.com/",
+                                                 "typed": len(c.get("text", ""))})
+    ext.start()
+    try:
+        assert _wait_connected(srv, want=True)
+        st, _ = _req(srv, "POST", "/cmd",
+                     {"op": "type", "text": "SECRET_PROMPT_cafef00d"})
+        assert st == 200
+        e = _wait_events(spool_dir, 1)[0]
+        assert json.loads(e["payload"])["op"] == "type"
+        raw = _log_file(spool_dir).read_text()
+        assert "SECRET_PROMPT" not in raw, "typed text leaked into telemetry"
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
+def test_cdp_op_counts_against_rate_limit():
+    """A CDP op (frames) is a normal dispatch → it spends a token-bucket slot, so a
+    sustained CDP flood is throttled with 429 exactly like eval/text (#178)."""
+    reg = S.Registry(rate_per_sec=1.0, burst=2.0)
+    srv, _ = _serve(registry=reg)
+    ext = FakeExtension(srv, instance_id="solo", label="only",
+                        executor=lambda c: {"url": "https://x.test", "frames": []})
+    ext.start()
+    try:
+        assert _wait_connected(srv, want=True)
+        codes = [_req(srv, "POST", "/cmd", {"op": "frames"})[0] for _ in range(6)]
+        assert 429 in codes, f"a CDP-op flood must eventually 429; got {codes}"
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
+@pytest.mark.skipif(shutil.which("curl") is None, reason="curl not on PATH")
+def test_browser_cli_frames(tmp_path):
+    r, bodies = _run_browser(["frames"], tmp_path)
+    assert r.returncode == 0, r.stderr
+    assert bodies[-1]["op"] == "frames"
+
+
+@pytest.mark.skipif(shutil.which("curl") is None, reason="curl not on PATH")
+def test_browser_cli_click_and_frame_flag(tmp_path):
+    r, bodies = _run_browser(["--frame", "model-benchmarking", "click", "#run"],
+                             tmp_path)
+    assert r.returncode == 0, r.stderr
+    b = bodies[-1]
+    assert b["op"] == "click"
+    assert b["selector"] == "#run"
+    assert b["frame"] == "model-benchmarking"   # global --frame threaded into body
+
+
+@pytest.mark.skipif(shutil.which("curl") is None, reason="curl not on PATH")
+def test_browser_cli_type_with_selector(tmp_path):
+    r, bodies = _run_browser(["type", "hello there", "--selector", "#prompt"],
+                             tmp_path)
+    assert r.returncode == 0, r.stderr
+    b = bodies[-1]
+    assert b["op"] == "type"
+    assert b["text"] == "hello there"
+    assert b["selector"] == "#prompt"
+
+
+@pytest.mark.skipif(shutil.which("curl") is None, reason="curl not on PATH")
+def test_browser_cli_key(tmp_path):
+    r, bodies = _run_browser(["key", "Enter"], tmp_path)
+    assert r.returncode == 0, r.stderr
+    assert bodies[-1]["op"] == "key"
+    assert bodies[-1]["key"] == "Enter"
+
+
+@pytest.mark.skipif(shutil.which("curl") is None, reason="curl not on PATH")
+def test_browser_cli_click_requires_selector(tmp_path):
+    r, _ = _run_browser(["click"], tmp_path)
+    assert r.returncode != 0
+    assert "selector" in r.stderr.lower()
+
+
+@pytest.mark.skipif(shutil.which("curl") is None, reason="curl not on PATH")
+def test_browser_cli_screenshot_fullpage_flag(tmp_path):
+    # --fullpage is threaded into the command body; a path arg still works too.
+    r, bodies = _run_browser(["screenshot", "--fullpage"], tmp_path)
+    # The canned capture server returns a text payload (no dataUrl), but the CLI
+    # only writes a file when a path is given; with no path it pretty-prints → exit 0.
+    assert r.returncode == 0, r.stderr
+    assert bodies[-1]["op"] == "screenshot"
+    assert bodies[-1]["fullpage"] is True

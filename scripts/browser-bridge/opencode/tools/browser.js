@@ -16,21 +16,34 @@ import { runBrowserOp } from "./browser_tool_impl.mjs"
 
 export default tool({
   description:
-    "Read or navigate YOUR ONE assigned browser tab. Call with a typed `op` " +
-    "(no shell). ops: 'text' (visible innerText — PREFER THIS), 'html' (raw " +
-    "outerHTML — huge, last resort), 'eval' (run a small JS expression, pass " +
-    "`js`), 'nav' (navigate, pass `url`), 'screenshot'. You cannot choose the " +
-    "tab — it is fixed to the one you were given. Stay on the allowed domains.",
+    "Read, navigate, or DRIVE your ONE assigned browser tab. Call with a typed " +
+    "`op` (no shell; there is NO raw-CDP/command surface). ops: 'text' (visible " +
+    "innerText — PREFER THIS), 'html' (raw outerHTML — huge, last resort), 'eval' " +
+    "(run a small JS expression, pass `js`), 'nav' (navigate, pass `url`), " +
+    "'screenshot', 'frames' (list the tab's frames incl. cross-origin iframes — " +
+    "pick one for `frame`), 'click' (TRUSTED click, pass `selector`), 'type' " +
+    "(TRUSTED text input, pass `text`, optional `selector`), 'key' (one key: " +
+    "Enter/Tab/Escape/Backspace/Delete/Arrow*/Home/End/Page*, optional `selector`). " +
+    "text/html/eval/click/type/key accept `frame` (a frameId or url-substring from " +
+    "`frames`) to act INSIDE a cross-origin iframe. You cannot choose the tab — it " +
+    "is fixed to the one you were given. Stay on the allowed domains.",
   args: {
     op: tool.schema
-      .enum(["text", "html", "eval", "nav", "screenshot"])
+      .enum(["text", "html", "eval", "nav", "screenshot",
+             "frames", "click", "type", "key"])
       .describe("the operation to perform on your tab"),
     selector: tool.schema.string().optional()
-      .describe("op=text: optional CSS selector to scope the innerText read"),
+      .describe("op=text/click/type/key: CSS selector (click target / focus / scope)"),
     url: tool.schema.string().optional()
       .describe("op=nav: the URL to navigate your tab to"),
     js: tool.schema.string().optional()
       .describe("op=eval: a small JS expression to evaluate in the page"),
+    text: tool.schema.string().optional()
+      .describe("op=type: the text to insert into the focused/selected element"),
+    key: tool.schema.string().optional()
+      .describe("op=key: one key name (Enter, Tab, Escape, ArrowDown, …)"),
+    frame: tool.schema.string().optional()
+      .describe("optional: a frameId or url-substring (from op=frames) to act INSIDE that frame"),
     maxBytes: tool.schema.number().optional()
       .describe("op=text: cap the returned text in bytes (default 32768, 0=uncapped)"),
   },

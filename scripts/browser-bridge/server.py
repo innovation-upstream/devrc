@@ -100,8 +100,14 @@ from urllib.parse import unquote, urlsplit
 # added for per-session tab isolation (see the Session isolation block below).
 # `text` is a cheap read (visible innerText, optional CSS selector + byte cap) —
 # a ~98% token cut vs getHtml, dispatched + tab-scoped exactly like getHtml.
+# `frames`/`click`/`type`/`key` are the CDP (chrome.debugger) ops (PR: browser-bridge
+# CDP): `frames` enumerates a tab's frames; `click`/`type`/`key` dispatch TRUSTED
+# input; and a `--frame` param routes a read (getHtml/text/eval) INTO a cross-origin
+# frame. They dispatch + tab-scope exactly like the existing tab-scoped ops. The
+# server stays op-agnostic about the CDP mechanics — it only routes to the owned/
+# target tab and forwards the typed params (frame/selector/text/key) to the extension.
 ALLOWED_OPS = ("getHtml", "text", "eval", "tabs", "nav", "screenshot",
-               "open", "close")
+               "open", "close", "frames", "click", "type", "key")
 
 # Ops handled ENTIRELY server-side (never dispatched to the extension). `release`
 # relinquishes a session's owned-tab mapping without touching the real Brave tab.
@@ -112,7 +118,7 @@ SERVER_OPS = ("release",)
 # serialization (see Registry.submit). `open` (creates a tab), `tabs` (lists all)
 # and `release` (server-side) do NOT contend for a single tab.
 TAB_SCOPED_OPS = frozenset({"getHtml", "text", "eval", "nav", "screenshot",
-                            "close"})
+                            "close", "frames", "click", "type", "key"})
 
 # Per-op required fields (skill-supplied). Absent → 400 bad_request. NOTE: `close`
 # takes NO skill-supplied field — the server injects the caller's owned tabId (or
@@ -120,6 +126,9 @@ TAB_SCOPED_OPS = frozenset({"getHtml", "text", "eval", "nav", "screenshot",
 REQUIRED_FIELDS = {
     "eval": ("js",),
     "nav": ("url",),
+    "click": ("selector",),   # CDP trusted click needs the element selector
+    "type": ("text",),        # CDP trusted type needs the text to insert
+    "key": ("key",),          # CDP key event needs the key name
 }
 
 MAX_CMD_BODY = 256 * 1024      # a command is tiny (op + a url / a js snippet).

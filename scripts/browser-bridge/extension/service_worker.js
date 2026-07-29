@@ -21,9 +21,12 @@ import {
   ALLOWED_OPS, validateCommand, resultEnvelope, errorEnvelope, nextBackoffMs,
   pollHeaders, resultWithInstance, normalizeText, TEXT_MAX_BYTES_DEFAULT,
   classifyPollStatus, POLL_COMMAND, POLL_IDLE, POLL_SUPERSEDED,
-  POLL_UNAUTHORIZED, SUPERSEDE_BACKOFF_MS,
-  captureWithRetry, waitForCaptureReady, screenshotWithRestore,
-  mapCaptureFailure,
+  POLL_UNAUTHORIZED, SUPERSEDE_BACKOFF_MS, captureWithRetry,
+  // CDP (chrome.debugger) helpers — the pure, unit-tested decision layer.
+  CDP_VERSION, withCdpSession, flattenFrameTree, resolveFrame, keyEventParams,
+  clickPoint, boxModelOrigin, frameEvalExpressions, isCdpSyntaxError,
+  cdpExceptionText, frameHtmlExpression, frameTextExpression,
+  elementRectExpression, focusExpression, fullPageClip,
 } from "./protocol.js";
 
 const DEFAULT_PORT = 8788;
@@ -83,11 +86,102 @@ async function targetTab(cmd) {
   return activeTab();
 }
 
+// --- CDP (chrome.debugger) glue -------------------------------------------- //
+// The pure, security-relevant CDP logic (attach-scope validation, always-detach
+// orchestration, frame/key/coord math, typed-op-only surface) lives in protocol.js
+// and is unit-tested there. This is the thin chrome.debugger side-effect layer.
+//
+// Tabs we currently hold a chrome.debugger attach on. `withCdp` is the ONLY code
+// that attaches and it ALWAYS detaches (withCdpSession's finally), so this set is
+// normally empty between ops; chrome.debugger.onDetach clears it if Chrome detaches
+// us out-of-band (tab crash/close, or the user hitting the debug banner's Cancel).
+const cdpAttached = new Set();
+
+function sendCdp(target, method, params) {
+  return chrome.debugger.sendCommand(target, method, params || {});
+}
+
+// Attach chrome.debugger to `tabId`, run `run(send)`, and ALWAYS detach. `url` is
+// the target tab's URL, validated BEFORE attach by withCdpSession (a privileged /
+// other-surface tab is refused, never attached — the STRICT attach-scope invariant).
+async function withCdp(tabId, url, run) {
+  const target = { tabId };
+  return withCdpSession({
+    url,
+    attach: async () => {
+      await chrome.debugger.attach(target, CDP_VERSION);
+      cdpAttached.add(tabId);
+    },
+    detach: async () => {
+      cdpAttached.delete(tabId);
+      await chrome.debugger.detach(target);
+    },
+    run: () => run((method, params) => sendCdp(target, method, params)),
+  });
+}
+
+// Evaluate `expression` in a specific execution context (an isolated world) via CDP
+// Runtime.evaluate; returns its value. `contextId` undefined → the tab's DEFAULT
+// (top-frame) context (JSON drops the undefined key). Throws on a runtime exception.
+async function cdpEval(send, contextId, expression) {
+  const res = await send("Runtime.evaluate",
+    { expression, contextId, returnByValue: true, awaitPromise: true });
+  if (res.exceptionDetails) throw new Error(cdpExceptionText(res.exceptionDetails));
+  return res.result ? res.result.value : undefined;
+}
+
+// Frame-scoped `eval`: try the expression form, fall back to the statement form on a
+// SyntaxError (mirrors compileEval), running in the frame's isolated world.
+async function cdpFrameEval(send, contextId, js) {
+  const { expression, fallback } = frameEvalExpressions(js);
+  let res = await send("Runtime.evaluate",
+    { expression, contextId, returnByValue: true, awaitPromise: true });
+  if (res.exceptionDetails && isCdpSyntaxError(res.exceptionDetails)) {
+    res = await send("Runtime.evaluate",
+      { expression: fallback, contextId, returnByValue: true, awaitPromise: true });
+  }
+  if (res.exceptionDetails) throw new Error(cdpExceptionText(res.exceptionDetails));
+  return res.result ? res.result.value : undefined;
+}
+
+// Resolve a `--frame <sel>` into an isolated-world execution context so a read/click
+// runs INSIDE that (possibly cross-origin) frame. Returns { executionContextId,
+// frameId, isMain, ownerOffset } — ownerOffset is the frame's on-page origin (for a
+// sub-frame, from DOM.getBoxModel on its owner element; {0,0} for the main frame).
+async function resolveFrameContext(send, frameSel) {
+  await send("Page.enable");
+  const { frameTree } = await send("Page.getFrameTree");
+  const frames = flattenFrameTree(frameTree);
+  const frame = resolveFrame(frames, frameSel);           // throws frame_not_found
+  const isMain = frames.length > 0 && frames[0].frameId === frame.frameId;
+  const { executionContextId } = await send("Page.createIsolatedWorld",
+    { frameId: frame.frameId, worldName: "browser_bridge" });
+  let ownerOffset = { x: 0, y: 0 };
+  if (!isMain) {
+    // A sub-frame's element coords are frame-local; offset them by the iframe
+    // element's on-page box so Input.dispatchMouseEvent lands in the right place.
+    await send("DOM.enable");
+    const { backendNodeId } = await send("DOM.getFrameOwner", { frameId: frame.frameId });
+    const { model } = await send("DOM.getBoxModel", { backendNodeId });
+    ownerOffset = boxModelOrigin(model);
+  }
+  return { executionContextId, frameId: frame.frameId, isMain, ownerOffset };
+}
+
 // --- op executors ---------------------------------------------------------- //
 // Each returns the op-specific `data` object; throws on failure (→ errorEnvelope).
 const OPS = {
   async getHtml(cmd) {
     const tab = await targetTab(cmd);
+    // --frame → read the outerHTML INSIDE the chosen (cross-origin) frame via CDP.
+    if (cmd && cmd.frame) {
+      const html = await withCdp(tab.id, tab.url, async (send) => {
+        const { executionContextId } = await resolveFrameContext(send, cmd.frame);
+        return cdpEval(send, executionContextId, frameHtmlExpression());
+      });
+      return { url: tab.url, title: tab.title, html, frame: cmd.frame };
+    }
+    // No frame → the lighter chrome.scripting top-frame read (no debugger banner).
     const [inj] = await chrome.scripting.executeScript({
       target: { tabId: tab.id },
       func: () => document.documentElement.outerHTML,
@@ -103,6 +197,17 @@ const OPS = {
   async text(cmd) {
     const tab = await targetTab(cmd);
     const sel = (cmd && typeof cmd.selector === "string") ? cmd.selector : "";
+    const cap = (cmd && cmd.maxBytes != null)
+      ? cmd.maxBytes : TEXT_MAX_BYTES_DEFAULT;
+    // --frame → read innerText INSIDE the chosen (cross-origin) frame via CDP.
+    if (cmd && cmd.frame) {
+      const raw = await withCdp(tab.id, tab.url, async (send) => {
+        const { executionContextId } = await resolveFrameContext(send, cmd.frame);
+        return cdpEval(send, executionContextId, frameTextExpression(sel));
+      });
+      const { text, truncated } = normalizeText(raw, cap);
+      return { url: tab.url, title: tab.title, text, truncated, frame: cmd.frame };
+    }
     const [inj] = await chrome.scripting.executeScript({
       target: { tabId: tab.id },
       args: [sel],
@@ -111,14 +216,21 @@ const OPS = {
         return el ? el.innerText : "";
       },
     });
-    const cap = (cmd && cmd.maxBytes != null)
-      ? cmd.maxBytes : TEXT_MAX_BYTES_DEFAULT;
     const { text, truncated } = normalizeText(inj.result, cap);
     return { url: tab.url, title: tab.title, text, truncated };
   },
 
   async eval(cmd) {
     const tab = await targetTab(cmd);
+    // --frame → evaluate INSIDE the chosen (cross-origin) frame's isolated world
+    // via CDP (DOM-capable; no access to that frame's page globals — documented).
+    if (cmd && cmd.frame) {
+      const value = await withCdp(tab.id, tab.url, async (send) => {
+        const { executionContextId } = await resolveFrameContext(send, cmd.frame);
+        return cdpFrameEval(send, executionContextId, cmd.js);
+      });
+      return { url: tab.url, value, frame: cmd.frame };
+    }
     // chrome.scripting runs in an ISOLATED world; `js` is evaluated and its
     // completion value returned. Wrapped so a bare expression or a statement
     // block both work. Result must be JSON-serialisable (structured clone).
@@ -166,65 +278,118 @@ const OPS = {
     return { tabId: tab.id, url: cmd.url };
   },
 
+  // Screenshot the owned/target tab. PRIMARY path is CDP Page.captureScreenshot,
+  // which captures a BACKGROUND / occluded / non-foreground tab (the whole point —
+  // it fixes the captureVisibleTab "can only grab the foreground tab" limitation,
+  // and lets two profiles each screenshot their own tab). A FAST path keeps the
+  // cheap, banner-free captureVisibleTab for a tab that IS already visible (and not
+  // --fullpage); any failure there falls through to the CDP path. `--fullpage`
+  // captures the whole scrollable document (CDP only). Attach is REFUSED on a
+  // privileged tab (assertCdpAttachable inside withCdp) before any attach.
   async screenshot(cmd) {
     const tab = await targetTab(cmd);
-    // captureVisibleTab only ever captures the VISIBLE (composited, on-screen) tab
-    // of its window. If the caller's owned tab is in the background we make a
-    // BEST-EFFORT attempt to bring it forward — activate → SETTLE → capture (with
-    // retry) → restore the previously-active tab — so we never SILENTLY screenshot
-    // the wrong tab. This causes a brief visible flicker in that window (documented).
-    //
-    // FUNDAMENTAL LIMITATION (i3): activating a tab does NOT guarantee its Brave
-    // WINDOW is raised/composited — on the user's i3 tiling WM an owned/agent tab's
-    // window is often not on-screen, and Chrome can't force i3 to raise it. Then the
-    // tab never composites and captureVisibleTab keeps returning "image readback
-    // failed" no matter how we retry. So the settle + spaced retry below recover a
-    // genuinely TRANSIENT paint race (a tab that IS visible but momentarily
-    // unpainted), and when they're EXHAUSTED on a persistent readback error we map
-    // it to a CLEAR "tab not visible on-screen" message (mapCaptureFailure) instead
-    // of the opaque "image readback failed" — the caller should use text/html/eval,
-    // which work on a background tab. (A future opt-in chrome.debugger + CDP
-    // Page.captureScreenshot path COULD capture an off-screen tab, but it needs the
-    // debugger permission + shows a debug banner — deliberately out of scope here.)
-    //
-    // A JUST-activated background tab hasn't painted its first frame yet, so a bare
-    // captureVisibleTab returns "image readback failed". So for the background path
-    // we (1) wait for the tab to reach `status:"complete"` + a paint settle (so the
-    // FIRST capture usually succeeds — no retry needed), and (2) retry the capture on
-    // a transient error. CRITICAL: Chrome throttles captureVisibleTab to ~2/sec
-    // (MAX_CAPTURE_VISIBLE_TAB_CALLS_PER_SECOND), so the retry backoff spaces attempts
-    // ≥~600ms (a quota hit waits a full ~1s window) — a faster retry would re-trip the
-    // quota. The settle, the spaced retry, the activate→capture→restore orchestration
-    // (restore on success AND failure), and the exhausted-retry error mapping are all
-    // pure + unit-tested in protocol.js — keep this in sync with them.
-    const capture = () =>
-      chrome.tabs.captureVisibleTab(tab.windowId, { format: "png" });
-    let dataUrl;
-    try {
-      dataUrl = await screenshotWithRestore({
-        isActive: !!tab.active,
-        targetId: tab.id,
-        // The visible-tab path is a hot GPU capture too — retry it as well (cheap,
-        // and it hardens against a rare transient readback even when already active).
-        capture: () => captureWithRetry(capture),
-        getPrevActiveId: async () => {
-          const [prev] = await chrome.tabs.query({ active: true, windowId: tab.windowId });
-          return prev ? prev.id : null;
-        },
-        activate: (id) => chrome.tabs.update(id, { active: true }),
-        waitReady: () => waitForCaptureReady(async () => {
-          try { return (await chrome.tabs.get(tab.id)).status; } catch (e) { return null; }
-        }),
-        restore: (id) => chrome.tabs.update(id, { active: true }),
-      });
-    } catch (e) {
-      // Reached only AFTER captureWithRetry exhausted its spaced retries (a
-      // recoverable transient readback would have resolved above). A persistent
-      // readback/occlusion error → the actionable "not visible on-screen" message;
-      // every other error (quota, permission, owned_tab_gone) passes through.
-      throw new Error(mapCaptureFailure(e));
+    const fullpage = !!(cmd && cmd.fullpage);
+    if (tab.active && !fullpage) {
+      // Fast path — no debugger attach/banner. Chrome throttles captureVisibleTab to
+      // ~2/sec; captureWithRetry spaces the (rare) retry ≥ the quota window.
+      try {
+        const dataUrl = await captureWithRetry(() =>
+          chrome.tabs.captureVisibleTab(tab.windowId, { format: "png" }));
+        return { url: tab.url, dataUrl, via: "captureVisibleTab" };
+      } catch (e) { /* fall through to the CDP path (works off-screen) */ }
     }
-    return { url: tab.url, dataUrl };
+    const dataUrl = await withCdp(tab.id, tab.url, async (send) => {
+      const params = { format: "png" };
+      if (fullpage) {
+        const metrics = await send("Page.getLayoutMetrics");
+        params.clip = fullPageClip(metrics);
+        params.captureBeyondViewport = true;
+      }
+      const { data } = await send("Page.captureScreenshot", params);
+      return `data:image/png;base64,${data}`;
+    });
+    return { url: tab.url, dataUrl, via: "cdp" };
+  },
+
+  // List the target tab's frames (frameId/url/name/parentId) via CDP
+  // Page.getFrameTree — so a caller can discover a cross-origin iframe and then
+  // read/click INTO it with `--frame <frameId|url-substring>`. Metadata only.
+  async frames(cmd) {
+    const tab = await targetTab(cmd);
+    const frames = await withCdp(tab.id, tab.url, async (send) => {
+      await send("Page.enable");
+      const { frameTree } = await send("Page.getFrameTree");
+      return flattenFrameTree(frameTree);
+    });
+    return { url: tab.url, title: tab.title, frames };
+  },
+
+  // TRUSTED click on `selector` (optionally inside `--frame`). Resolves the element
+  // box via getBoundingClientRect (in the frame's isolated world), offsets by the
+  // frame's on-page origin for a sub-frame, then dispatches a real press+release
+  // via CDP Input.dispatchMouseEvent — an isTrusted click the page can't tell from
+  // a human's. `selector` is validated present by server/SW REQUIRED_FIELDS.
+  async click(cmd) {
+    const tab = await targetTab(cmd);
+    const selector = String(cmd.selector);
+    const point = await withCdp(tab.id, tab.url, async (send) => {
+      let ctxId, offset = { x: 0, y: 0 };
+      if (cmd.frame) {
+        const fc = await resolveFrameContext(send, cmd.frame);
+        ctxId = fc.executionContextId;
+        offset = fc.ownerOffset;
+      }
+      const rect = await cdpEval(send, ctxId, elementRectExpression(selector));
+      if (!rect) throw new Error(`element_not_found:${selector}`);
+      const p = clickPoint(rect, offset);
+      const mouse = (type) => send("Input.dispatchMouseEvent",
+        { type, x: p.x, y: p.y, button: "left", buttons: 1, clickCount: 1 });
+      await mouse("mousePressed");
+      await mouse("mouseReleased");
+      return p;
+    });
+    return { url: tab.url, clicked: selector, x: point.x, y: point.y,
+             frame: cmd.frame || null };
+  },
+
+  // Type `text` into the focused element (optionally focus `--selector` first,
+  // optionally inside `--frame`) via CDP Input.insertText — a trusted input event.
+  // Returns only the LENGTH typed, never echoes the text back (privacy + telemetry).
+  async type(cmd) {
+    const tab = await targetTab(cmd);
+    const text = String(cmd.text);
+    await withCdp(tab.id, tab.url, async (send) => {
+      let ctxId;
+      if (cmd.frame) ctxId = (await resolveFrameContext(send, cmd.frame)).executionContextId;
+      if (cmd.selector) {
+        const ok = await cdpEval(send, ctxId, focusExpression(cmd.selector));
+        if (!ok) throw new Error(`element_not_found:${cmd.selector}`);
+      }
+      await send("Input.insertText", { text });
+    });
+    return { url: tab.url, typed: text.length, frame: cmd.frame || null };
+  },
+
+  // Dispatch a single bounded key (Enter/Tab/Escape/arrows/…) to the focused element
+  // (optionally focus `--selector` first, optionally inside `--frame`) via CDP
+  // Input.dispatchKeyEvent (keyDown+keyUp). An unknown key is refused BEFORE attach.
+  async key(cmd) {
+    const tab = await targetTab(cmd);
+    const p = keyEventParams(cmd.key);   // throws unknown_key (no attach on refusal)
+    await withCdp(tab.id, tab.url, async (send) => {
+      let ctxId;
+      if (cmd.frame) ctxId = (await resolveFrameContext(send, cmd.frame)).executionContextId;
+      if (cmd.selector) {
+        const ok = await cdpEval(send, ctxId, focusExpression(cmd.selector));
+        if (!ok) throw new Error(`element_not_found:${cmd.selector}`);
+      }
+      const base = { key: p.key, code: p.code,
+                     windowsVirtualKeyCode: p.keyCode, nativeVirtualKeyCode: p.keyCode };
+      await send("Input.dispatchKeyEvent",
+        { type: p.text ? "keyDown" : "rawKeyDown", ...base, ...(p.text ? { text: p.text } : {}) });
+      await send("Input.dispatchKeyEvent", { type: "keyUp", ...base });
+    });
+    return { url: tab.url, key: p.key, frame: cmd.frame || null };
   },
 
   // Create a NEW tab for the calling session to own. active:false so parallel
@@ -388,6 +553,16 @@ chrome.alarms.create("bridge-keepalive", { periodInMinutes: 1 });
 chrome.alarms.onAlarm.addListener((a) => {
   if (a.name === "bridge-keepalive") loop();
 });
+
+// If Chrome detaches our debugger out-of-band (tab crash/close, DevTools opened, or
+// the user hitting the "an extension is debugging this browser" banner's Cancel),
+// drop the tracked attach so we never think we still hold it. withCdp already
+// always-detaches per op; this is the belt-and-braces for an external detach.
+if (chrome.debugger && chrome.debugger.onDetach) {
+  chrome.debugger.onDetach.addListener((source) => {
+    if (source && source.tabId != null) cdpAttached.delete(source.tabId);
+  });
+}
 
 // Kick immediately when the worker is first evaluated.
 loop();
