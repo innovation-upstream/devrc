@@ -75,6 +75,8 @@ Derived from auditing 232 sessions: 1,712 preventable errors + a ~1,000× redund
 - **NixOS: no apt/dnf** — for a missing tool (pandoc, pdftoppm/poppler, openpyxl, …) run it under `nix-shell -p <pkg> --run "..."` proactively; don't run bare, fail, then retry.
 - **Don't re-emit git orientation** — the harness shows branch + status at session start; read that instead of `cd repo && echo === && git status` (this preamble ran ~1,000× last audit window). When you genuinely need fresh state, one compact `git status -s && git log --oneline -3`.
 - **Quote globs meant literally** — zsh aborts on unmatched globs (`no matches found`); quote patterns and kubectl `custom-columns=...[0]...` values.
+- **`gh secret set` has NO `--body-file`** — omit `--body` entirely and it reads the value from **stdin** (`gh secret set NAME < file`). That's also the safe way: a secret in `--body` is exposed in argv/history.
+- **GitHub sudo-mode re-auth cannot be automated** — creating a PAT (or any sudo-mode action) in the browser always stops at a passkey/TOTP/password gate. Hand that step to the user with exact instructions instead of burning turns trying to drive it.
 
 ## Tool Optimization 🟢
 **Triggers**: multi-step operations, search, complex tasks

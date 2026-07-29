@@ -29,6 +29,32 @@ Dispatch a subagent (read-only — it must NOT modify files or merge) to audit t
 8. **Leaks** — secrets, PII, resource/handle/memory leaks, over-broad permissions.
 9. **Second-order consequences** — ripple effects on other services, callers, data, cost, load.
 
+## After the fixes: RE-AUDIT THE DELTA (don't assume closure)
+
+**A fix round frequently introduces the next finding.** One `civitai-manager`
+feature took **five rounds**: a dead button → fixing it exposed a silent
+wrong-file install → fixing *that* introduced a type-check regression that refused
+legitimate LoCon installs. Every one was caught pre-merge, and **none of them by
+the mechanical gate**.
+
+So once an audit's findings are fixed, dispatch a **delta re-audit** — diff the fix
+commits against the **previously-audited tip** (`git diff <audited-sha>..HEAD`),
+not the whole PR again. Especially when the fix touched the same code path.
+
+Ask the re-auditor to:
+- state **per prior finding**: actually fixed / partially / not / **made worse**;
+- hunt specifically for **regressions the fix round itself introduced** (the new
+  guard that's too strict, the new branch that's unreachable, the narrowed type
+  check that now rejects a legitimate case);
+- treat "the author says it's fixed" as a claim to verify against the diff.
+
+Stop when a round produces no new findings — not when the author says it's done.
+
+**A finding about the PR *description* gets corrected PUBLICLY.** If the audit
+shows the PR body misstates what the change does, post a **PR comment** saying so
+rather than silently editing the body — a reviewer may already have read (and
+believed) the wrong version.
+
 ## Output
 
 Findings grouped by severity (🔴 deploy-blocking / 🟡 should-fix / 🟢 nit), each with file:line and a one-line "why it matters". End with a clear **verdict**: safe to merge / merge after fixing 🔴 / needs rework. No marketing language; flag uncertainty honestly. Do not merge — report only.

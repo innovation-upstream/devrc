@@ -14,6 +14,14 @@ but stopped" (dirty tree / unpushed commits), or a stale worktree `node_modules`
 symlink produced a flood of false "cannot find module" errors. Run the
 deterministic gate and read ITS output.
 
+**The agent's gate being green is not evidence yours will be** — this is the whole
+premise, and it fires in practice. Twice in one session on `civitai-manager` a
+subagent reported a green gate while the **committed** tree was red: once because
+it ran the gate *before* a `main` merge landed under it, once from plain timing
+luck — **the agent's `-race` leg passed and mine failed on the very same commit**.
+So: re-run the authoritative gate **yourself**, **on the committed tree**, **after**
+any merge/rebase. An agent quoting its own passing output changes nothing.
+
 Same trap via **injected `<new-diagnostics>` / LSP errors after a subagent
 finishes** — they are frequently **stale**, not a real break. Tell: a `go.mod`
 "updates needed / go mod tidy" warning plus an `undefined: <symbol>` cascade
@@ -117,6 +125,28 @@ Exit code is non-zero on any hard non-pass (FAIL or INCOMPLETE).
 5. **PASS** is the mechanical floor, not proof of behaviour — for a nontrivial
    runtime change still drive the actual flow (`verify` skill) before claiming
    it works.
+
+## When the gate goes red: do NOT attribute a flake from one sample
+
+Flakes on this box are **load-sensitive** — several agents saturating the machine
+change the outcome. A worked example of getting this wrong: `go test -race
+-count=5` failed on a branch and passed on `main`, and I concluded "the branch
+introduced a regression." Wrong. The same test later passed **30/30 on an idle
+box**, and had been failing ~50% **on `main`** while the machine was loaded. One
+run per ref is noise, not attribution.
+
+- **Before blaming a ref**: run `-count=10` **repeatedly on BOTH refs**, ideally
+  under comparable load. Prefer an **independent clone/worktree of the other ref**
+  over reasoning from a single run or from memory of an earlier run.
+- **Tell for the common class**: a test that **passes without `-race` and fails
+  with it** is usually **an assertion racing an async goroutine**, not a data race.
+  Check for an actual `WARNING: DATA RACE` in the output before calling it one.
+- **The deterministic fix for that class**: **park the fake/seam** (have it block
+  and return a release func) so the async work *cannot* settle before the
+  assertion, and assert synchronously against state the handler publishes **under
+  its mutex before spawning**. Do **NOT** add sleeps, and do **NOT** weaken the
+  assertion to also accept the settled state — that deletes the coverage instead of
+  fixing the race.
 
 Provenance honesty: this gate proves the authoritative checks pass and the tree
 is complete; it does NOT prove the feature behaves correctly.

@@ -19,6 +19,48 @@ $BB --instance <key> open <url>     # open a NEW tab this session owns
 $BB --instance <key> --tab <id> html   # act on a specific tab
 ```
 
+## ⚠ The LOADED extension may be older than this doc
+
+The CLI is always current; the **extension build running in Brave is not**. Brave
+does not hot-reload unpacked extensions, so the live service worker can be far
+behind. Symptom, seen for real:
+
+```
+$ browser --instance work open https://example.com
+op 'open' failed in the browser: unknown_op
+```
+
+**`open` answering `unknown_op` means the loaded extension predates owned-tab
+support** — the whole "per-session tab isolation" section below is unavailable
+until the user reloads it. Don't debug the server; **tell the user to click reload
+↻ on the card in `brave://extensions`**. Meanwhile work without `open`: run
+`browser tabs`, pick an existing tab, and pass `--tab <id>` on every op (or just
+read the active tab for a one-shot). Same reasoning for any op that answers
+`unknown_op`.
+
+## `eval` gotchas — a `null` result does NOT mean the bridge is down
+
+- **`eval` evaluates ONE EXPRESSION, not a script.** A multi-statement body
+  (`window.scrollBy(0,1400); "ok"`) returns **`null` with no error** — it looks
+  like a broken bridge and isn't. Wrap it: `(function(){ window.scrollBy(0,1400);
+  return "ok" })()`, or use the comma operator.
+- **`eval` can't run on `chrome://` / `brave://` URLs** — expect `Cannot access a
+  chrome:// URL` (and a `null` result).
+- **Strict page CSP silently blocks the injected script — notably GitHub.** On a
+  GitHub page even `document.title` comes back `null`, no error. **Use `html` /
+  `text` there — they work**, because they don't inject script.
+
+So on a `null`: first suspect a multi-statement body, then page CSP; fall back to
+`text`/`html` before concluding the bridge is down.
+
+## The user is USING this browser
+
+It's their live session, not a scratch VM. Don't `nav` a tab that may hold unsaved
+work (a half-typed comment, a form, a logged-in console) — prefer a
+`chrome://newtab`/obviously disposable tab, or `open` your own when the extension
+supports it. If you focus a window to capture it, **restore their focus
+afterwards** (`i3-msg '[id="<prev-winid>"] focus'`).
+
 ## Concurrency / don't do this
 
 - **Concurrent drivers (esp. sibling subagents) → each `open` and thread its own
@@ -90,10 +132,51 @@ capture the foreground tab; bring the tab to the foreground, or use
 'text'/'html'/'eval' which work on background tabs.
 ```
 
+On an **older extension build** the same condition surfaces as the raw, opaque
+form — treat it identically, it is not a bug to chase:
+
+```
+op 'screenshot' failed in the browser: Failed to capture tab: image readback failed
+```
+
+`captureVisibleTab` can only read pixels that are actually **composited**, so this
+fires whenever the target window isn't genuinely visible: on another i3 workspace,
+occluded by another window, or not the active tab within its own window.
+
 - **Screenshots of the ACTUAL foreground tab work fine** (the tab the user is
   looking at). Occluded/background tabs cannot be captured this way.
 - **For a background/owned tab, use `text` / `html` / `eval`** — they read the tab
   directly regardless of whether it is on-screen. Don't loop retrying screenshots.
+
+### The X-server fallback that DOES work (reliable path for screenshots)
+
+When you genuinely need pixels, bypass the extension and capture the X window:
+
+```sh
+# 1. The Bash tool has NO X env by default — without this xdotool silently
+#    "sees" zero windows and every search returns nothing.
+export DISPLAY=:0 XAUTHORITY=/home/zach/.Xauthority
+
+# 2. Find the window by PAGE TITLE, not by class — several Brave windows exist
+#    and class-matching gives you an arbitrary one.
+nix-shell -p xdotool --run 'xdotool search --name "<page title fragment>"'
+
+# 3. Make it VISIBLE — focusing its workspace is not enough.
+i3-msg '[id="<winid>"] focus'
+
+# 4. Capture (settle first; the compositor needs a beat after the raise).
+nix-shell -p xdotool maim --run 'xdotool sleep 2; maim -i <winid> out.png'
+nix-shell -p imagemagick --run 'magick out.png -crop WxH+X+Y +repage cropped.png'
+```
+
+Two traps that produce a confidently-wrong result:
+
+- **A window on the focused workspace can still be *behind* another window** — the
+  capture then comes back blank/dark while `maim` exits 0. **Verify by LOOKING at
+  the image**, never by trusting the exit code.
+- **`maim -i <winid>` captures whatever tab is active in that window**, which may
+  not be the tab you just `nav`ed. After navigating, re-find the window **by the
+  new page title** so you're capturing the tab you think you are.
 - *(Future option, NOT implemented: a `chrome.debugger` + CDP
   `Page.captureScreenshot` path could capture an off-screen tab, but it needs the
   `debugger` permission and shows a debug banner — deliberately out of scope.)*
@@ -274,6 +357,12 @@ know browser usage is being counted. Details: `README.md` → Telemetry.
 - `409 superseded` → the instance was replaced by a newer connection; retry.
 - `404 unknown_instance` → the `--instance` key matches no connected instance.
 - `400 unknown_op` / `missing_field:url|js` → bad command.
+- `op '<op>' failed in the browser: unknown_op` (op-level — the CLI knows the op
+  but the **extension** doesn't) → the loaded extension is an older build. Ask the
+  user to reload it in `brave://extensions`; use `tabs` + `--tab <id>` meanwhile.
+- `Failed to capture tab: image readback failed` (older builds' spelling of the
+  screenshot error) → same cause as below: the window isn't composited. Use the
+  X-server fallback above.
 - `400 bad_tab` → a non-numeric `tab` (only reachable via a raw API POST; the CLI
   already validates `--tab`).
 - `owned_tab_gone` (op-level, in `.result`) → your owned tab was closed; ownership
