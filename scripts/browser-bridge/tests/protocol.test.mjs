@@ -20,15 +20,23 @@ import {
   waitForCaptureReady, screenshotWithRestore, CAPTURE_MAX_ATTEMPTS,
   CAPTURE_RETRY_BASE_MS, CAPTURE_QUOTA_WAIT_MS, CAPTURE_SETTLE_MS,
   isOcclusionCaptureError, mapCaptureFailure, SCREENSHOT_NOT_VISIBLE_MESSAGE,
+  // CDP (chrome.debugger) helpers.
+  CDP_VERSION, isCdpAttachableUrl, assertCdpAttachable, cdpSchemeOf,
+  withCdpSession, flattenFrameTree, resolveFrame, keyEventParams, KEY_EVENTS,
+  clickPoint, boxModelOrigin, frameEvalExpressions, isCdpSyntaxError,
+  cdpExceptionText, frameHtmlExpression, frameTextExpression,
+  elementRectExpression, focusExpression, fullPageClip,
 } from "../extension/protocol.js";
 
 test("op set mirrors the server contract", () => {
   // If this changes, server.py ALLOWED_OPS must change in lockstep. `open`/`close`
   // back the per-session tab-isolation model (`release` is server-side only, so
-  // it is deliberately NOT in the shared op set). `text` is the cheap-read op.
+  // it is deliberately NOT in the shared op set). `text` is the cheap-read op;
+  // frames/click/type/key are the CDP (chrome.debugger) ops.
   assert.deepEqual(
     [...ALLOWED_OPS].sort(),
-    ["close", "eval", "getHtml", "nav", "open", "screenshot", "tabs", "text"],
+    ["click", "close", "eval", "frames", "getHtml", "key", "nav",
+     "open", "screenshot", "tabs", "text", "type"],
   );
 });
 
@@ -78,9 +86,29 @@ test("validateCommand rejects unknown op / non-object", () => {
   assert.equal(validateCommand("nope").error, "body_not_object");
 });
 
+test("validateCommand enforces the CDP ops' required fields", () => {
+  // frames needs nothing; click needs selector; type needs text; key needs key.
+  assert.deepEqual(validateCommand({ op: "frames" }), { ok: true });
+  assert.deepEqual(validateCommand({ op: "frames", tabId: 3 }), { ok: true });
+  assert.deepEqual(validateCommand({ op: "click", selector: "#go" }), { ok: true });
+  assert.deepEqual(validateCommand({ op: "click" }),
+    { ok: false, error: "missing_field:selector" });
+  assert.deepEqual(validateCommand({ op: "type", text: "hi" }), { ok: true });
+  assert.deepEqual(validateCommand({ op: "type" }),
+    { ok: false, error: "missing_field:text" });
+  assert.deepEqual(validateCommand({ op: "key", key: "Enter" }), { ok: true });
+  assert.deepEqual(validateCommand({ op: "key" }),
+    { ok: false, error: "missing_field:key" });
+  // A --frame is an optional field on a read op (never required).
+  assert.deepEqual(validateCommand({ op: "text", frame: "app" }), { ok: true });
+});
+
 test("REQUIRED_FIELDS matches the ops that need args", () => {
   assert.deepEqual(REQUIRED_FIELDS.eval, ["js"]);
   assert.deepEqual(REQUIRED_FIELDS.nav, ["url"]);
+  assert.deepEqual(REQUIRED_FIELDS.click, ["selector"]);
+  assert.deepEqual(REQUIRED_FIELDS.type, ["text"]);
+  assert.deepEqual(REQUIRED_FIELDS.key, ["key"]);
 });
 
 test("result / error envelopes carry the id", () => {

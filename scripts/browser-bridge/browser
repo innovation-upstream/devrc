@@ -41,15 +41,28 @@
 #   browser eval '<js>'       — run JS in the owned/active tab, return its value
 #   browser tabs              — list open tabs (flags this session's owned tab)
 #   browser nav <url>         — navigate the owned/active tab to <url>
-#   browser screenshot [path] — captureVisibleTab (VISIBLE/foreground tab only);
-#                               prints data URL, or writes a .png to <path>. A
-#                               background/owned tab is foregrounded best-effort;
-#                               on an occluded/non-foreground window it fails with
-#                               a clear "not visible on-screen" error — use
-#                               text/html/eval for a background tab
+#   browser screenshot [path] [--fullpage]
+#                             — screenshot the owned/active tab via CDP
+#                               (Page.captureScreenshot) — WORKS on a background/
+#                               occluded tab and on each profile's own tab; a
+#                               foreground tab uses the cheap captureVisibleTab fast
+#                               path. --fullpage grabs the whole scrollable document.
+#   browser frames            — list the tab's frames (frameId/url/name), incl.
+#                               cross-origin iframes (CDP) — pick one for --frame
+#   browser [--frame <f>] click <selector>
+#                             — TRUSTED CDP click at the element's center
+#   browser [--frame <f>] type <text> [--selector <sel>]
+#                             — TRUSTED CDP text input (focus --selector first if given)
+#   browser [--frame <f>] key <Enter|Tab|Escape|...> [--selector <sel>]
+#                             — dispatch one TRUSTED key to the focused element
 #   browser agent "<goal>"    — run the autonomous opencode browser-agent in its
 #                               OWN isolated tab against <goal> (see browser-agent)
 #   browser --print-session-id — print the derived per-session id and exit
+#
+# Global flags (before the subcommand): --instance <key>, --tab <id>,
+#   --frame <frameId|url-substring> (route a read/click INTO a cross-origin frame).
+# The CDP ops (screenshot/frames/click/type/key + --frame reads) use chrome.debugger
+# and attach ONLY to the owned/target tab (a privileged chrome://—etc. tab is refused).
 #
 # Output is JSON on stdout (pretty-printed if `jq` is present). Exit non-zero on
 # transport/HTTP error so a caller can branch.
@@ -61,6 +74,7 @@ TOKEN_FILE="${BROWSER_BRIDGE_TOKEN_FILE:-$HOME/.config/browser-bridge/token}"
 BASE="http://${HOST}:${PORT}"
 INSTANCE=""   # routing key set via --instance <key> (empty → single-instance)
 TAB=""        # explicit tab id set via --tab <id> (overrides owned/active routing)
+FRAME=""      # --frame <frameId|url-substring>: route a read/click INTO that frame (CDP)
 
 die() { echo "browser: $*" >&2; exit 1; }
 
@@ -113,6 +127,8 @@ while [ $# -gt 0 ]; do
     --instance=*) INSTANCE="${1#--instance=}"; shift ;;
     --tab) shift; [ $# -ge 1 ] || die "usage: browser --tab <id> <subcommand>"; TAB="$1"; shift ;;
     --tab=*) TAB="${1#--tab=}"; shift ;;
+    --frame) shift; [ $# -ge 1 ] || die "usage: browser --frame <frameId|url-substring> <subcommand>"; FRAME="$1"; shift ;;
+    --frame=*) FRAME="${1#--frame=}"; shift ;;
     --print-session-id) derive_session_id; echo; exit 0 ;;
     *) break ;;
   esac
@@ -199,7 +215,11 @@ cmd_op() {
     case "$TAB" in (*[!0-9]*|"") die "--tab must be a numeric tab id (got: $TAB)";; esac
     tabf=",\"tab\":${TAB}"
   fi
-  local body="{\"op\":\"${op}\"${extra:+,${extra}}${tgt}${tabf}}"
+  # --frame routes a read/click INTO a specific (cross-origin) frame via CDP. The
+  # server forwards it verbatim to the extension; ops that ignore it are unaffected.
+  local framef=""
+  if [ -n "$FRAME" ]; then framef=",\"frame\":$(json_str "$FRAME")"; fi
+  local body="{\"op\":\"${op}\"${extra:+,${extra}}${tgt}${tabf}${framef}}"
   local raw HTTP_CODE resp
   raw="$(_curl POST /cmd "$body")" || die "curl failed talking to ${BASE}/cmd"
   HTTP_CODE="${raw##*$'\n'}"; resp="${raw%$'\n'*}"
@@ -325,12 +345,24 @@ case "$sub" in
     cmd_op nav "\"url\":${url}" | pretty
     ;;
   screenshot)
+    # browser screenshot [path] [--fullpage]
+    # CDP Page.captureScreenshot is the primary path → works on a BACKGROUND/occluded
+    # tab (and each profile's own tab); the visible-tab fast path is used only when
+    # the tab is already foreground. --fullpage captures the whole scrollable document.
+    full=""; out=""
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --fullpage) full="\"fullpage\":true"; shift ;;
+        --) shift; break ;;
+        -*) die "browser screenshot: unknown flag: $1 (try: --fullpage)" ;;
+        *) [ -z "$out" ] || die "browser screenshot takes at most one path (got extra: $1)"; out="$1"; shift ;;
+      esac
+    done
     # cmd_op runs in a command substitution, so its `die`/exit can't propagate
     # on its own — `|| exit 1` forwards an op/transport error to the caller.
-    resp="$(cmd_op screenshot)" || exit 1
-    if [ $# -ge 1 ]; then
+    resp="$(cmd_op screenshot "$full")" || exit 1
+    if [ -n "$out" ]; then
       # Extract the base64 payload of the data URL and write a .png.
-      out="$1"
       printf '%s' "$resp" | python3 -c '
 import json,sys,base64,re
 d=json.load(sys.stdin)
@@ -346,6 +378,54 @@ print(sys.argv[1])
     else
       printf '%s\n' "$resp" | pretty
     fi
+    ;;
+  frames)
+    # List the owned/active tab's frames (frameId/url/name) so you can pick one for
+    # --frame. Cross-origin iframes are included (via CDP Page.getFrameTree).
+    cmd_op frames | pretty
+    ;;
+  click)
+    # browser [--frame <f>] click <selector> — TRUSTED CDP click at the element's
+    # center (frame-aware via the global --frame).
+    [ $# -ge 1 ] || die "usage: browser [--frame <f>] click <css-selector>"
+    sel="$(json_str "$1")"
+    cmd_op click "\"selector\":${sel}" | pretty
+    ;;
+  type)
+    # browser [--frame <f>] type <text> [--selector <sel>] — TRUSTED CDP text input
+    # into the focused element (or --selector first).
+    txt=""; tsel=""
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --selector) shift; [ $# -ge 1 ] || die "usage: browser type <text> [--selector <sel>]"; tsel="$1"; shift ;;
+        --selector=*) tsel="${1#--selector=}"; shift ;;
+        --) shift; break ;;
+        -*) die "browser type: unknown flag: $1 (try: --selector <sel>)" ;;
+        *) [ -z "$txt" ] || die "browser type takes one text arg (got extra: $1)"; txt="$1"; shift ;;
+      esac
+    done
+    [ -n "$txt" ] || die "usage: browser [--frame <f>] type <text> [--selector <sel>]"
+    extra="\"text\":$(json_str "$txt")"
+    if [ -n "$tsel" ]; then extra="${extra},\"selector\":$(json_str "$tsel")"; fi
+    cmd_op type "$extra" | pretty
+    ;;
+  key)
+    # browser [--frame <f>] key <Enter|Tab|Escape|Backspace|Delete|Arrow*|Home|End|Page*>
+    #         [--selector <sel>] — dispatch one TRUSTED key to the focused element.
+    ksel=""; kname=""
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --selector) shift; [ $# -ge 1 ] || die "usage: browser key <name> [--selector <sel>]"; ksel="$1"; shift ;;
+        --selector=*) ksel="${1#--selector=}"; shift ;;
+        --) shift; break ;;
+        -*) die "browser key: unknown flag: $1 (try: --selector <sel>)" ;;
+        *) [ -z "$kname" ] || die "browser key takes one key name (got extra: $1)"; kname="$1"; shift ;;
+      esac
+    done
+    [ -n "$kname" ] || die "usage: browser [--frame <f>] key <Enter|Tab|Escape|...> [--selector <sel>]"
+    extra="\"key\":$(json_str "$kname")"
+    if [ -n "$ksel" ]; then extra="${extra},\"selector\":$(json_str "$ksel")"; fi
+    cmd_op key "$extra" | pretty
     ;;
   agent)
     # Hand off to the sibling browser-agent wrapper (autonomous opencode agent in
@@ -363,6 +443,6 @@ print(sys.argv[1])
     grep -E '^#( |$)' "$0" | sed -E 's/^# ?//'
     ;;
   *)
-    die "unknown subcommand: $sub (try: health instances open close release html text eval tabs nav screenshot agent)"
+    die "unknown subcommand: $sub (try: health instances open close release html text eval tabs nav screenshot frames click type key agent)"
     ;;
 esac

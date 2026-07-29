@@ -9,8 +9,13 @@
 // `text` is a CHEAP read: it returns the tab's visible innerText (optionally
 // scoped to a CSS selector) instead of full outerHTML — a ~98% token cut vs
 // `getHtml`, so a cheap model (the opencode browser-agent) doesn't drown in HTML.
+// `frames`/`click`/`type`/`key` are the CDP (chrome.debugger) ops added for
+// any-frame reads + TRUSTED input (see the CDP section lower in this file):
+// `frames` lists the tab's frames, `click`/`type`/`key` dispatch trusted input,
+// and `--frame` routes a read (getHtml/text/eval) INTO a chosen cross-origin frame.
 export const ALLOWED_OPS = [
   "getHtml", "text", "eval", "tabs", "nav", "screenshot", "open", "close",
+  "frames", "click", "type", "key",
 ];
 
 // Per-op required fields (mirrors server.py REQUIRED_FIELDS). The server already
@@ -18,6 +23,9 @@ export const ALLOWED_OPS = [
 export const REQUIRED_FIELDS = {
   eval: ["js"],
   nav: ["url"],
+  click: ["selector"],
+  type: ["text"],
+  key: ["key"],
 };
 
 // Validate an inbound command dict. Returns { ok:true } or { ok:false, error }.
@@ -324,6 +332,234 @@ export async function screenshotWithRestore(deps) {
       try { await deps.restore(prevActiveId); } catch (e) { /* ignore */ }
     }
   }
+}
+
+// --- CDP (chrome.debugger) ops: any-frame reads + trusted input ------------- //
+// The `debugger` permission is the biggest-blast-radius permission the bridge
+// holds, so ALL of the security-relevant CDP decision logic is pure + unit-tested
+// HERE (the SW is only the thin chrome.debugger glue). The three invariants this
+// section enforces, all provable without a real browser:
+//   1. STRICT attach scope — a CDP op only ever attaches to a real WEB page
+//      (http/https); a chrome://, extension, devtools, or file: tab is REFUSED
+//      before any attach (assertCdpAttachable). Combined with the server routing a
+//      CDP op only to the caller's owned/target tab (and the agent's tab being
+//      FORCED), the model can never attach chrome.debugger to another tab/profile.
+//   2. ALWAYS detach — withCdpSession runs attach→op→detach with the detach in a
+//      finally, so a thrown op still detaches (no leaked attachment / stuck banner).
+//   3. TYPED ops only — there is NO generic "run this CDP method" surface here; the
+//      SW maps each bounded op (frames/click/type/key/frame-read/screenshot) to a
+//      FIXED set of CDP commands. The model supplies only typed scalars, never a
+//      CDP method/params — so arbitrary CDP (Page.navigate file://, Browser.*, …)
+//      is unreachable. Keep it that way: never add a passthrough executor.
+
+// The CDP version the bridge attaches with (Chrome's stable protocol channel).
+export const CDP_VERSION = "1.3";
+
+// The ONLY URL schemes chrome.debugger may attach to: real web content. The
+// browser's own pages (chrome:/brave:/edge:/about:), other extensions
+// (chrome-extension:), the devtools (devtools:), and local files (file:) are
+// privileged surfaces we must never let the autonomous, hostile-page-reading agent
+// drive — and Chrome blocks most of them anyway. Enforced BEFORE attach.
+export const CDP_ATTACHABLE_SCHEMES = Object.freeze(["http:", "https:"]);
+
+// The lowercased scheme of a URL (incl. trailing ":"), or "" when unparseable.
+export function cdpSchemeOf(url) {
+  try { return (new URL(String(url)).protocol || "").toLowerCase(); }
+  catch { return ""; }
+}
+
+// True iff `url` is a real web page the bridge may attach chrome.debugger to.
+export function isCdpAttachableUrl(url) {
+  return CDP_ATTACHABLE_SCHEMES.includes(cdpSchemeOf(url));
+}
+
+// Throw a clear refusal (BEFORE any attach) when the target tab is not an
+// attachable web page. The message names the offending scheme so the caller sees
+// WHY (e.g. the active tab was chrome://newtab). This is invariant #1 above and is
+// asserted by the unit tests without needing a real browser.
+export function assertCdpAttachable(url) {
+  if (!isCdpAttachableUrl(url)) {
+    throw new Error(`cdp_attach_refused:${cdpSchemeOf(url) || "<no-scheme>"}`);
+  }
+}
+
+// Orchestrate a CDP op with a per-op attach→run→ALWAYS-detach lifecycle, every
+// chrome.debugger side effect INJECTED so the invariants are unit-testable without
+// a real browser:
+//   * the target URL is validated BEFORE attach — a privileged/other tab is refused
+//     and `attach` is NEVER called (invariant #1);
+//   * `detach` ALWAYS runs — on success AND on any error `run` throws (invariant #2)
+//     — so a debugger attachment can never leak (a leak = a stuck banner + an open
+//     surface);
+//   * a `detach` failure (tab already gone / already detached) is swallowed so it
+//     never masks the real result or the real error.
+// `deps`: { url, attach():Promise, run():Promise<result>, detach():Promise }.
+export async function withCdpSession(deps) {
+  assertCdpAttachable(deps.url);        // BEFORE attach — refuse privileged/other tab
+  await deps.attach();
+  try {
+    return await deps.run();
+  } finally {
+    try { await deps.detach(); } catch (e) { /* already detached / tab gone */ }
+  }
+}
+
+// Flatten a CDP Page.getFrameTree result into a compact [{frameId,url,name,parentId}]
+// list (depth-first, main frame first). METADATA only — frame id/url/name, never
+// frame CONTENT. Pure so the `frames` op's shaping is unit-tested without a browser.
+export function flattenFrameTree(frameTree) {
+  const out = [];
+  const walk = (node, parentId) => {
+    if (!node || !node.frame) return;
+    const f = node.frame;
+    out.push({ frameId: f.id, url: f.url || "", name: f.name || "",
+               parentId: parentId || null });
+    for (const child of node.childFrames || []) walk(child, f.id);
+  };
+  walk(frameTree);
+  return out;
+}
+
+// Resolve a caller `--frame <sel>` against a flattened frame list. `sel` may be an
+// exact frameId OR a URL substring (case-insensitive). Returns the matched frame's
+// {frameId,url,name,...} or throws `frame_not_found:<sel>`. Exact frameId wins over
+// a substring; among substring matches the FIRST (main-frame-first order) wins,
+// deterministically. An empty sel is a caller bug (the SW only calls this when a
+// frame IS targeted) → frame_not_specified.
+export function resolveFrame(frames, sel) {
+  const s = String(sel == null ? "" : sel);
+  if (!s) throw new Error("frame_not_specified");
+  for (const f of frames) if (f.frameId === s) return f;
+  const low = s.toLowerCase();
+  for (const f of frames) if ((f.url || "").toLowerCase().includes(low)) return f;
+  throw new Error(`frame_not_found:${s}`);
+}
+
+// The bounded key NAME → CDP Input.dispatchKeyEvent params map. Deliberately small:
+// the nav/edit keys an agent needs to drive an app (submit, tab between fields,
+// dismiss, delete, arrows/paging). An unknown key is REFUSED (keeps the surface
+// bounded — no arbitrary key injection). Printable text goes through `type`, not here.
+export const KEY_EVENTS = Object.freeze({
+  Enter:      { key: "Enter", code: "Enter", keyCode: 13, text: "\r" },
+  Tab:        { key: "Tab", code: "Tab", keyCode: 9 },
+  Escape:     { key: "Escape", code: "Escape", keyCode: 27 },
+  Backspace:  { key: "Backspace", code: "Backspace", keyCode: 8 },
+  Delete:     { key: "Delete", code: "Delete", keyCode: 46 },
+  ArrowUp:    { key: "ArrowUp", code: "ArrowUp", keyCode: 38 },
+  ArrowDown:  { key: "ArrowDown", code: "ArrowDown", keyCode: 40 },
+  ArrowLeft:  { key: "ArrowLeft", code: "ArrowLeft", keyCode: 37 },
+  ArrowRight: { key: "ArrowRight", code: "ArrowRight", keyCode: 39 },
+  Home:       { key: "Home", code: "Home", keyCode: 36 },
+  End:        { key: "End", code: "End", keyCode: 35 },
+  PageUp:     { key: "PageUp", code: "PageUp", keyCode: 33 },
+  PageDown:   { key: "PageDown", code: "PageDown", keyCode: 34 },
+});
+
+// A few case-insensitive aliases so a caller need not match the exact casing.
+const KEY_ALIASES = { esc: "Escape", del: "Delete", return: "Enter" };
+
+// Resolve a caller key name to its CDP event params (exact → alias → case-insensitive
+// canonical). Throws `unknown_key:<name>` for anything outside the bounded set.
+export function keyEventParams(name) {
+  const raw = String(name == null ? "" : name).trim();
+  if (!raw) throw new Error("unknown_key:<none>");
+  if (KEY_EVENTS[raw]) return KEY_EVENTS[raw];
+  const low = raw.toLowerCase();
+  if (KEY_ALIASES[low] && KEY_EVENTS[KEY_ALIASES[low]]) return KEY_EVENTS[KEY_ALIASES[low]];
+  for (const k of Object.keys(KEY_EVENTS)) if (k.toLowerCase() === low) return KEY_EVENTS[k];
+  throw new Error(`unknown_key:${raw}`);
+}
+
+// The click point for an element given its bounding rect (viewport coords in the
+// element's OWN frame) plus the origin offset of that frame within the top-level
+// viewport ({x,y}; {0,0} for the top frame). getBoundingClientRect is frame-local,
+// while Input.dispatchMouseEvent takes TOP-LEVEL viewport coords — so a click inside
+// a cross-origin iframe must add the iframe's on-page origin. Returns the element
+// CENTER, rounded. Pure; the SW supplies the rect (Runtime.evaluate in the frame)
+// and the frame origin (DOM.getBoxModel on the frame owner).
+export function clickPoint(rect, frameOffset) {
+  const off = frameOffset || { x: 0, y: 0 };
+  const x = (off.x || 0) + (rect.x || 0) + (rect.width || 0) / 2;
+  const y = (off.y || 0) + (rect.y || 0) + (rect.height || 0) / 2;
+  return { x: Math.round(x), y: Math.round(y) };
+}
+
+// Extract the top-left origin {x,y} of a CDP DOM.getBoxModel content quad
+// ([x1,y1,x2,y2,x3,y3,x4,y4], clockwise from top-left, top-level viewport CSS px).
+// Used to offset a click into a sub-frame. Pure.
+export function boxModelOrigin(model) {
+  const q = model && model.content;
+  if (Array.isArray(q) && q.length >= 2) return { x: q[0], y: q[1] };
+  return { x: 0, y: 0 };
+}
+
+// Wrap a user `eval` snippet for CDP Runtime.evaluate (which takes an EXPRESSION
+// string, not a function). Returns { expression, fallback }: try `expression`
+// first; if CDP reports a SyntaxError, retry `fallback` (the statement form).
+// Mirrors compileEval's expression-vs-statement duality for the frame path (the
+// non-frame path still uses chrome.scripting). Pure + unit-tested.
+export function frameEvalExpressions(src) {
+  const s = String(src == null ? "" : src);
+  return {
+    expression: `(function(){ return (${s}) })()`,
+    fallback: `(function(){ ${s} })()`,
+  };
+}
+
+// True when a CDP Runtime.evaluate exceptionDetails describes a SyntaxError (so the
+// caller retries the statement-form fallback). Checks the structured className then
+// the text, case-insensitively. Pure.
+export function isCdpSyntaxError(exceptionDetails) {
+  if (!exceptionDetails) return false;
+  const ex = exceptionDetails.exception || {};
+  if (String(ex.className || "").toLowerCase() === "syntaxerror") return true;
+  const t = `${exceptionDetails.text || ""} ${ex.description || ""}`.toLowerCase();
+  return t.includes("syntaxerror");
+}
+
+// Extract a human error string from a CDP Runtime.evaluate exceptionDetails.
+export function cdpExceptionText(exceptionDetails) {
+  if (!exceptionDetails) return "eval_failed";
+  const ex = exceptionDetails.exception || {};
+  return String(ex.description || exceptionDetails.text || "eval_failed");
+}
+
+// Frame-scoped read/probe expression builders (run in the frame's isolated world
+// via CDP Runtime.evaluate). Pure string builders so the SW stays thin + testable.
+export function frameHtmlExpression() {
+  return "document.documentElement.outerHTML";
+}
+export function frameTextExpression(selector) {
+  const sel = selector ? JSON.stringify(String(selector)) : '""';
+  return `(function(s){var el=s?document.querySelector(s):document.body;` +
+         `return el?el.innerText:"";})(${sel})`;
+}
+// Element-rect probe for click: scroll into view, return the frame-local bounding
+// rect (or null when the selector matches nothing).
+export function elementRectExpression(selector) {
+  const sel = JSON.stringify(String(selector));
+  return `(function(s){var el=document.querySelector(s);if(!el)return null;` +
+         `el.scrollIntoView({block:"center",inline:"center"});` +
+         `var r=el.getBoundingClientRect();` +
+         `return {x:r.x,y:r.y,width:r.width,height:r.height};})(${sel})`;
+}
+// Focus probe for `type` with a selector: focus the element, return whether it existed.
+export function focusExpression(selector) {
+  const sel = JSON.stringify(String(selector));
+  return `(function(s){var el=document.querySelector(s);if(!el)return false;` +
+         `el.focus();return true;})(${sel})`;
+}
+
+// The full-page screenshot clip from a CDP Page.getLayoutMetrics result. Uses the
+// css content size (the full scrollable document) so `--fullpage` captures beyond
+// the viewport. Pure; returns a clip suitable for Page.captureScreenshot.
+export function fullPageClip(layoutMetrics) {
+  const m = layoutMetrics || {};
+  const size = m.cssContentSize || m.contentSize || {};
+  return { x: 0, y: 0,
+           width: Math.ceil(size.width || 0),
+           height: Math.ceil(size.height || 0),
+           scale: 1 };
 }
 
 // --- poll-response classification ----------------------------------------- //

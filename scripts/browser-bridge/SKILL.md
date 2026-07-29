@@ -104,53 +104,70 @@ Prefix any op with `--instance <key>` to target a specific connected profile
 | `browser [--instance K] release`           | drop ownership WITHOUT closing the tab |
 | `browser [--instance K] [--tab T] html`              | `outerHTML` of the owned tab (else the active tab) |
 | `browser [--instance K] [--tab T] text [selector] [--max-bytes N]` | **cheap read** — visible `innerText` of the owned/active tab (optional CSS `selector`), whitespace-normalized + byte-capped (default 32768; `0`=uncapped; a truncation note is appended). ~98% smaller than `html` — prefer it |
-| `browser [--instance K] [--tab T] eval '<js>'`       | run JS in the owned/active tab, return its value |
+| `browser [--instance K] [--tab T] [--frame F] eval '<js>'` | run JS in the owned/active tab, return its value (`--frame` runs it inside a cross-origin frame — CDP, isolated world) |
 | `browser [--instance K] tabs`              | list open tabs (`.data.ownedTabId` flags this session's owned tab) |
 | `browser [--instance K] [--tab T] nav <url>`         | navigate the owned/active tab to `<url>` |
-| `browser [--instance K] [--tab T] screenshot [path]` | **VISIBLE-tab op only** — captureVisibleTab; prints the data URL, or writes a `.png` to `path`. A background/owned tab is briefly activated + settled + captured with a bounded quota-spaced retry (best-effort), but **on i3 it commonly fails** — see the note below. Use `text`/`html`/`eval` for a background tab |
+| `browser [--instance K] [--tab T] screenshot [path] [--fullpage]` | screenshot via **CDP `Page.captureScreenshot`** — **works on a BACKGROUND/occluded tab** and on each profile's own tab (a foreground tab uses the cheap captureVisibleTab fast path). `--fullpage` grabs the whole scrollable document. Prints the data URL, or writes a `.png` to `path` |
+| `browser [--instance K] [--tab T] frames`  | list the tab's frames (`frameId`/`url`/`name`), **including cross-origin iframes** — pick one for `--frame` |
+| `browser [--instance K] [--tab T] [--frame F] click <selector>` | **TRUSTED** CDP click at the element's center |
+| `browser [--instance K] [--tab T] [--frame F] type <text> [--selector S]` | **TRUSTED** CDP text input (focus `--selector` first if given) |
+| `browser [--instance K] [--tab T] [--frame F] key <Enter\|Tab\|Escape\|Backspace\|Delete\|Arrow*\|Home\|End\|Page*> [--selector S]` | dispatch one **TRUSTED** key to the focused element |
 | `browser [--instance K] agent "<goal>" [flags]` | run the **autonomous opencode browser-agent** in its OWN isolated tab against `<goal>`; returns a compact `{answer,evidence,steps_used,status}` (see below) |
 | `browser --print-session-id`               | print the derived per-session id (debug) and exit |
+
+`--frame <F>` (a `frameId` from `frames`, or a URL substring) routes a
+`text`/`html`/`eval`/`click`/`type`/`key` INTO that (possibly cross-origin) frame.
+A frame-scoped `eval`/read runs in an **isolated world** (DOM-capable; it does not
+see that frame's page globals).
 
 Result payloads land under `.result.data` in the JSON (the envelope is
 `{"ok":true,"result":{"id","ok","data":{...}}}`).
 
-### ⚠ `screenshot` is a VISIBLE-tab op (background tabs are NOT supported on i3)
+## CDP ops (chrome.debugger): any-frame reads + trusted input + background screenshots
 
-`chrome.captureVisibleTab` captures the **on-screen composited pixels of the
-window's foreground tab** — it fundamentally cannot capture a tab that isn't
-visible on-screen. The bridge makes a best-effort attempt to foreground a
-background/owned tab before capturing, but on the user's **i3 tiling WM** an
-owned/agent tab's Brave window is often not raised (Chrome can't force i3 to raise
-it), so the tab never composites and the capture fails. After the quota-spaced
-retries are exhausted you get a **clear, actionable error** (non-zero exit), not
-the opaque `image readback failed`:
+`frames`/`click`/`type`/`key`, `--frame` reads, and `screenshot` use the Chrome
+DevTools Protocol via the `debugger` permission. They fix three real limitations:
 
-```
-op 'screenshot' failed in the browser: screenshot unavailable: the target tab is
-not visible on-screen (background or occluded window). captureVisibleTab can only
-capture the foreground tab; bring the tab to the foreground, or use
-'text'/'html'/'eval' which work on background tabs.
-```
+1. **Screenshot a BACKGROUND / occluded tab** (and each profile's own tab) — CDP
+   `Page.captureScreenshot` does not need the tab to be the on-screen foreground
+   tab, so the old i3 "not visible on-screen" limitation is gone for the normal
+   path. (`--fullpage` grabs the whole scrollable document.)
+2. **Read INTO a cross-origin iframe** — `browser --tab T frames` lists the frames
+   (e.g. `model-benchmarking.civit.ai` inside `civitai.com`); then
+   `browser --tab T --frame <id-or-url> text` reads inside it. Plain `text`/`html`/
+   `eval` still see only the top frame.
+3. **Drive an app with trusted input** — `click`/`type`/`key` dispatch real
+   `isTrusted` events (reach an in-app tab, fill a field, submit a generation).
 
-On an **older extension build** the same condition surfaces as the raw, opaque
-form — treat it identically, it is not a bug to chase:
+**Security model (built in — this is the point):**
+- **CDP attach is STRICTLY own-tab-scoped.** The server routes a CDP op only to the
+  session's owned/`--tab` tab; the extension attaches `chrome.debugger` ONLY to that
+  tab and **refuses to attach to a privileged surface** (`chrome://`, extension,
+  `devtools:`, `file:`) — the attach is validated *before* it happens. The
+  autonomous agent's tab is FORCED, so it can never attach to another tab/profile.
+- **NO raw-CDP passthrough.** The agent's typed tool exposes ONLY the bounded ops
+  with typed scalars — there is no `cdp`/`method`/`params` field, so the model can
+  never send an arbitrary CDP command (no `Page.navigate file://`, no `Browser.*`,
+  no exfil `Runtime.evaluate`). Arbitrary CDP would reintroduce an RCE-class hole.
+- **Always detach.** Every CDP op is attach→run→**detach** (a `finally`, so a thrown
+  op still detaches) — no leaked attachment / stuck banner. An out-of-band detach is
+  handled too.
+- **Metadata-only telemetry** still holds: op/domain only — never frame URLs, typed
+  text, eval source, or screenshot bytes.
 
-```
-op 'screenshot' failed in the browser: Failed to capture tab: image readback failed
-```
+**Tradeoff — the debug banner:** while a CDP op runs, Brave shows an "an extension
+is debugging this browser" banner. Attach is per-op (attach → run → detach) to keep
+that window tiny; a simple top-frame `text`/`html`/`eval`/foreground-`screenshot`
+takes the lighter non-CDP path and shows no banner.
 
-`captureVisibleTab` can only read pixels that are actually **composited**, so this
-fires whenever the target window isn't genuinely visible: on another i3 workspace,
-occluded by another window, or not the active tab within its own window.
+> **After updating the extension you MUST reload it** (the manifest gained the
+> `debugger` permission) — see the reload section below; Brave may prompt to
+> re-confirm the new permission.
 
-- **Screenshots of the ACTUAL foreground tab work fine** (the tab the user is
-  looking at). Occluded/background tabs cannot be captured this way.
-- **For a background/owned tab, use `text` / `html` / `eval`** — they read the tab
-  directly regardless of whether it is on-screen. Don't loop retrying screenshots.
+### The X-server fallback (still available for a genuinely un-composited window)
 
-### The X-server fallback that DOES work (reliable path for screenshots)
-
-When you genuinely need pixels, bypass the extension and capture the X window:
+If a window is on another i3 workspace and even CDP capture is unsatisfactory, you
+can still bypass the extension and capture the X window directly:
 
 ```sh
 # 1. The Bash tool has NO X env by default — without this xdotool silently
