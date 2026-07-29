@@ -2,16 +2,16 @@
 # Scratch slot indicator for tmux status-left.
 # Renders the 20 scratch slots as their hotkey letter, colored to match the
 # popup border color set in .tmux.conf, so the status bar acts as a legend
-# mapping popup color -> hotkey.
+# mapping popup color -> hotkey. First 6 (g/G/v/V/p/P) are excluded — the
+# original slots predate the legend and don't need visual reminder.
 #
 # A leading ● flags slots that have a window waiting for user input
 # (status="waiting" in fuzzyclaw's task state, filtered against currently
 # existing tmux windows so stale entries don't trigger).
 #
 # Output examples:
-#   g G v V p P     — all slots exist, nothing waiting
-#   g ●G v V p P    — Gold (scratch2) has a waiting prompt
-#   g G v V p P     — slot dimmed (gray) when session doesn't exist
+#   o O n N w W m M i I u U y Y     — all slots exist, nothing waiting
+#   o ●O n N w W m M i I u U y Y    — Orchid has a waiting prompt
 
 # Scratchpad slot table (session:key:color:name) — sourced from the ONE source of
 # truth in scratch-slots.sh, then joined for awk (the name field is ignored here).
@@ -49,7 +49,7 @@ tmux list-sessions -F '#{session_name}' 2>/dev/null \
     { exists[$1] = 1 }
     END {
         sep = ""
-        for (i = 1; i <= n; i++) {
+        for (i = 7; i <= n; i++) {
             s = sess[i]
             if (s in exists) {
                 style  = color[s] ",bold"                              # slot color, bold
