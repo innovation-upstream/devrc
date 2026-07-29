@@ -73,7 +73,9 @@ Config (env):
     BROWSER_BRIDGE_POLL_TIMEOUT  seconds a /poll blocks before 204 (default 25)
     BROWSER_BRIDGE_RATE_PER_SEC  per-instance sustained /cmd dispatch rate
                                  (token-bucket refill, default 5; 0 → unlimited)
-    BROWSER_BRIDGE_BURST         per-instance token-bucket burst size (default 20)
+    BROWSER_BRIDGE_BURST         per-instance token-bucket burst size (default 20;
+                                 clamped to >=1 when RATE_PER_SEC>0, else a <1
+                                 burst would rate_limit EVERY /cmd forever)
     BROWSER_BRIDGE_MAX_QUEUE     per-instance pending-command cap (default 32;
                                  0 → unlimited). Over-cap /cmd → HTTP 429.
 """
@@ -470,6 +472,16 @@ class Registry:
         # rate_per_sec<=0 → rate limit off; max_queue<=0 → depth cap off.
         self._rate_per_sec = float(rate_per_sec)
         self._burst = float(burst)
+        # A sub-1 burst while the rate limit is ACTIVE (rate>0) can never hold a
+        # whole token, so `rl_tokens < 1.0` is ALWAYS true → EVERY /cmd returns
+        # rate_limited forever (a silent total lockout). Clamp it to a sane floor
+        # of 1: a burst<1 with rate>0 is a misconfiguration, NOT a disable path
+        # (RATE_PER_SEC=0 is the intended "unlimited" escape hatch, honoured
+        # regardless of burst). Log once so the operator sees the correction.
+        if self._rate_per_sec > 0 and self._burst < 1:
+            log("browser_bridge_burst_clamped", requested=self._burst,
+                clamped=1.0, rate_per_sec=self._rate_per_sec)
+            self._burst = 1.0
         self._max_queue = int(max_queue)
         # Per-session tab ownership: (instance_key, session_id) -> {tab_id, last_seen}.
         # Guarded by _cond like everything else. An idle TTL reclaims dead sessions.
@@ -637,8 +649,11 @@ class Registry:
         """Decide whether `inst` may accept ANOTHER /cmd dispatch RIGHT NOW.
 
         Runs UNDER `_cond` (caller holds it) and is lock-free of any blocking
-        wait — it either admits (bumps `inst.pending`, spends one token) or
-        rejects immediately. Returns None to admit, or `(reason, retry_after)`
+        wait — it either admits (spends one token) or rejects immediately. On
+        admit the CALLER bumps `inst.pending` as the first line of its try (so
+        the increment is structurally paired with the releasing finally — see
+        `submit`); this method only spends the token and checks the depth cap.
+        Returns None to admit, or `(reason, retry_after)`
         to reject (`reason` ∈ {"queue_full","rate_limited"}). Order: the cheap,
         side-effect-free depth cap first (bounds the latency tail), THEN the
         token bucket (which mutates the balance) — so a queue-full rejection
@@ -664,7 +679,8 @@ class Registry:
                 retry = (1.0 - inst.rl_tokens) / self._rate_per_sec
                 return ("rate_limited", retry)
             inst.rl_tokens -= 1.0
-        inst.pending += 1
+        # Admit. The queue slot (inst.pending) is claimed by the caller inside
+        # its try, so the increment can never outlive its releasing finally.
         return None
 
     # --- skill side -------------------------------------------------------- #
@@ -695,8 +711,9 @@ class Registry:
             # so a rejected command never enqueues, never waits, and can't wedge
             # the FIFO. Placed AFTER target/tab resolution so their own errors
             # (no_extension / ambiguous / no_owned_tab) win — those never reached
-            # the extension, so they don't spend a token or a queue slot. Admit
-            # bumps inst.pending; the finally below releases it on every exit.
+            # the extension, so they don't spend a token or a queue slot. On
+            # admit the queue slot (inst.pending) is claimed inside the try
+            # below, structurally paired with the finally that releases it.
             verdict = self._admit_locked(inst)
             if verdict is not None:
                 reason, retry_after = verdict
@@ -715,6 +732,16 @@ class Registry:
             if tab_key is not None:
                 self._tab_queues.setdefault(tab_key, deque()).append(ticket)
             try:
+                # Claim the admitted queue slot NOW — the FIRST statement inside
+                # the try whose finally releases it (`inst.pending -= 1`). Pairing
+                # the increment with its decrement in one try/finally makes the
+                # balance structurally leak-proof: ANY raise below (BridgeTimeout,
+                # BridgeSuperseded, a resolution error, or future code) still
+                # unwinds through the finally, so a phantom `pending` slot can
+                # never be stranded (which would eventually wedge the depth cap
+                # into a permanent queue_full). Still under `_cond` and before any
+                # wait, so the depth cap observes the bump atomically.
+                inst.pending += 1
                 # (1) Wait for this tab's FIFO turn (no-op when tab_key is None).
                 if tab_key is not None:
                     while self._tab_queues[tab_key][0] is not ticket:

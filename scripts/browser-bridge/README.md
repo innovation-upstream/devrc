@@ -158,7 +158,10 @@ extension is the bottleneck, so throttling instance A never affects instance B):
 - **Token-bucket rate limit** on accepted `/cmd` dispatches: `BROWSER_BRIDGE_RATE_PER_SEC`
   sustained (default **5/sec**), `BROWSER_BRIDGE_BURST` burst (default **20**). A
   dispatch that would exceed the bucket is **rejected** (never silently queued).
-  `RATE_PER_SEC=0` disables it (power-user unlimited).
+  `RATE_PER_SEC=0` disables it (power-user unlimited). When rate-limiting is
+  active (`RATE_PER_SEC>0`), `BURST` is **clamped to ≥1** — a sub-1 burst can
+  never hold a whole token, so it would silently rate_limit *every* `/cmd`
+  forever; use `RATE_PER_SEC=0`, not a 0 burst, to disable throttling.
 - **Queue-depth cap** `BROWSER_BRIDGE_MAX_QUEUE` (default **32**): if an instance's
   pending (admitted-but-unfinished) command count is at the cap, new `/cmd` are
   rejected until it drains — this bounds the latency tail. `MAX_QUEUE=0` disables it.

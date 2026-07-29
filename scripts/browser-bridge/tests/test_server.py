@@ -1938,6 +1938,7 @@ def test_admit_token_bucket_burst_then_rate_limited():
     with reg._cond:
         for i in range(3):
             assert reg._admit_locked(inst) is None, f"burst slot {i} must admit"
+            inst.pending += 1              # caller (submit) claims the slot
         verdict = reg._admit_locked(inst)
     assert verdict is not None
     reason, retry_after = verdict
@@ -1972,8 +1973,11 @@ def test_admit_queue_depth_cap():
     reg = S.Registry(rate_per_sec=0, max_queue=2)
     inst = _mk_instance(reg, burst=0)
     with reg._cond:
+        # The caller (submit) bumps pending on each admit; the depth cap reads it.
         assert reg._admit_locked(inst) is None    # pending 1
+        inst.pending += 1
         assert reg._admit_locked(inst) is None    # pending 2
+        inst.pending += 1
         verdict = reg._admit_locked(inst)         # 2 >= cap 2 → queue_full
         assert verdict is not None and verdict[0] == "queue_full"
         assert inst.pending == 2                  # a rejection does NOT bump pending
@@ -1990,8 +1994,10 @@ def test_admit_is_strictly_per_instance():
     b = _mk_instance(reg, key="b", burst=1)
     with reg._cond:
         assert reg._admit_locked(a) is None                       # a: token+slot
+        a.pending += 1                                            # caller claims slot
         assert reg._admit_locked(a)[0] in ("rate_limited", "queue_full")
         assert reg._admit_locked(b) is None                       # b unaffected
+        b.pending += 1
         assert a.pending == 1 and b.pending == 1
 
 
@@ -2002,6 +2008,7 @@ def test_admit_disabled_never_throttles():
     with reg._cond:
         for _ in range(1000):
             assert reg._admit_locked(inst) is None
+            inst.pending += 1                     # caller (submit) claims the slot
     assert inst.pending == 1000
 
 
@@ -2034,6 +2041,47 @@ def test_rate_limited_submit_leaves_no_turnstile_residue():
             assert inst.pending == 0          # admitted slot released
     finally:
         stop.set()
+
+
+# --- Fix 1: BURST<1 with rate>0 must NOT silently brick the instance -------- #
+def test_burst_below_one_with_rate_does_not_lock_out():
+    """A sub-1 burst while RATE_PER_SEC>0 used to permanently brick the instance:
+    rl_tokens started at 0 and the refill cap was min(0,…)=0, so `rl_tokens<1.0`
+    was ALWAYS true → EVERY /cmd returned rate_limited forever (silent lockout).
+    The burst is now clamped to a floor of 1 so a normal command is admitted."""
+    for bad_burst in (0, 0.5):
+        reg = S.Registry(rate_per_sec=5.0, burst=bad_burst)
+        assert reg._burst == 1.0                  # clamped up to the sane floor
+        inst = _register_live(reg)                # created with the clamped burst
+        with reg._cond:
+            # First admit must PASS (full bucket of 1) — not rate_limited forever.
+            assert reg._admit_locked(inst) is None
+    # RATE_PER_SEC=0 (unlimited) is the real disable path — honoured regardless
+    # of burst, so a 0 burst there is left untouched (no spurious clamp/log).
+    reg0 = S.Registry(rate_per_sec=0, burst=0)
+    assert reg0._burst == 0.0
+
+
+# --- Fix 2: a post-admission raise must not leak the pending slot ----------- #
+def test_pending_slot_released_on_post_admission_raise(monkeypatch):
+    """The pending increment lives INSIDE the try whose finally releases it, so
+    a raise AFTER admission but BEFORE the turnstile completes cannot strand a
+    `pending` slot (which would eventually wedge the depth cap into a permanent
+    queue_full). Force such a raise mid-submit (token_hex blows up) and assert
+    the balance returns to 0 and no turnstile ticket leaks."""
+    reg = S.Registry(rate_per_sec=0, max_queue=1000)   # admit always succeeds
+    inst = _register_live(reg)
+
+    def _boom(*a, **k):
+        raise RuntimeError("forced post-admission failure")
+    # token_hex is called inside submit's try, AFTER pending is bumped.
+    monkeypatch.setattr(S.secrets, "token_hex", _boom)
+
+    with pytest.raises(RuntimeError):
+        reg.submit({"op": "getHtml"}, 3.0)   # admitted, then raises past the bump
+    with reg._cond:
+        assert inst.pending == 0             # released by the finally, no leak
+        assert reg._tab_queues == {}         # no leaked turnstile ticket either
 
 
 # --- HTTP: burst over the bucket → 429 rate_limited + throttle telemetry --- #

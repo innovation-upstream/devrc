@@ -172,8 +172,9 @@ know browser usage is being counted. Details: `README.md` → Telemetry.
   retry** (the body carries a `retry_after` seconds hint). A normal handful of ops
   is never throttled; this only fires on a sustained flood. Knobs (env, on the
   server): `BROWSER_BRIDGE_RATE_PER_SEC` (default 5, sustained/sec; 0 = unlimited),
-  `BROWSER_BRIDGE_BURST` (default 20), `BROWSER_BRIDGE_MAX_QUEUE` (default 32, 0 =
-  unlimited).
+  `BROWSER_BRIDGE_BURST` (default 20; clamped to ≥1 when rate>0 — a <1 burst
+  would rate_limit every /cmd forever), `BROWSER_BRIDGE_MAX_QUEUE` (default 32,
+  0 = unlimited).
 - `409 ambiguous_instance` → >1 instance connected and no `--instance` — pick one.
 - `409 no_owned_tab` → `close` with nothing to close — run `browser open` first (or `--tab`).
 - `409 superseded` → the instance was replaced by a newer connection; retry.
