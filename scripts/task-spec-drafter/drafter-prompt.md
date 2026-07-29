@@ -32,8 +32,11 @@ NEVER draft a confident task you could not verify the intent of.
     search history with `git -C <abspath> log --grep <term>` / `log -S <term>`.
     **`--output=` is denied on every git verb** (it overwrites an arbitrary file);
     read command output normally instead.
-  - `gh pr list/view/checks/search`
-  - `kubectl get/logs/describe/top`
+  - `gh pr list/view/checks/search`, and `gh -R civitai/civitai issue view <n>`
+    (read-only; use it when a ticket cites a GitHub issue number)
+  - `kubectl-ro get/logs/describe/top` — the read-only kubectl wrapper, invoked by
+    its literal absolute path (see "Live cluster state" below). **Bare `kubectl` is
+    BLOCKED**; a `kubectl …` call is rejected and wasted.
   No `gh api` and no `curl` — they are NOT on the allowlist and will not run
   (a prompt-injected ticket must never be able to reach a POST). Verify PR/merge
   reality with `gh pr ...` + the git plumbing verbs above instead.
@@ -60,7 +63,7 @@ NEVER draft a confident task you could not verify the intent of.
   | `git -C /home/zach/workspace/civit/civitai grep meili` | `git -C /home/zach/workspace/civit/civitai log -S meili --oneline` (or the `Grep` tool) |
 
 - **ANTI-CONFABULATION GATE (mandatory).** You MUST run at least ONE successful
-  read (a `clickup get/comments`, a `git …`, a `gh …`, or a `kubectl …` call that
+  read (a `clickup get/comments`, a `git …`, a `gh …`, or a `kubectl-ro …` call that
   actually returned output) BEFORE you assert any factual verdict — e.g. "no
   commits/PRs found", "already merged", "still firing", "nothing found",
   "already done". Reasoning from the title alone, or emitting such a claim having
@@ -115,16 +118,30 @@ other tickets may be referenced for CORRELATE but are not yours to classify here
   (exit 0 ⇒ merged), or
   `git -C /home/zach/workspace/civit/civitai branch --contains <sha>`, or
   `git -C /home/zach/workspace/civit/civitai rev-list --count <sha>..origin/main`.
-- **Live cluster state:** **`KUBECONFIG` is ALREADY SET in your environment** — the
-  runner invokes this pass under `env KUBECONFIG=<prod-kubeconfig>`, so kubectl
-  already points at the civitai production cluster. Call it **BARE**:
-  `kubectl get pods`, `kubectl get cronjobs`, `kubectl logs ...`,
-  `kubectl describe ...`, `kubectl top ...` (read-only). Use to answer "is this
+- **Live cluster state — use `kubectl-ro`, NOT `kubectl`.** Bare `kubectl` is
+  BLOCKED and every such call is REJECTED and wasted. Run the wrapper instead, by
+  its literal absolute path:
+
+      /home/zach/workspace/devrc/scripts/task-spec-drafter/kubectl-ro get pods
+      /home/zach/workspace/devrc/scripts/task-spec-drafter/kubectl-ro get cronjobs -n <ns>
+      /home/zach/workspace/devrc/scripts/task-spec-drafter/kubectl-ro logs -n <ns> <pod> --tail=50
+      /home/zach/workspace/devrc/scripts/task-spec-drafter/kubectl-ro describe <kind> <name> -n <ns>
+      /home/zach/workspace/devrc/scripts/task-spec-drafter/kubectl-ro top pods
+
+  It takes the SAME arguments as kubectl and passes them straight through; only
+  `get`, `logs`, `describe` and `top` are permitted. Use it to answer "is this
   component running or suspended?", "is the workload healthy / erroring?".
-  **NEVER prefix `KUBECONFIG=... kubectl …`** — an assignment plus a command is
-  "multiple operations" under the COMMAND-SHAPE CONTRACT above AND it does not
-  match the allowlist, so the call is REJECTED and wasted. (No HTTP `curl` to
-  Prometheus/Alertmanager — not on the allowlist; rely on kubectl for live state.)
+  **`KUBECONFIG` is ALREADY SET in your environment** — the runner invokes this
+  pass under `env KUBECONFIG=<prod-kubeconfig>`, so it already points at the
+  civitai production cluster. **NEVER prefix `KUBECONFIG=... `** — an assignment
+  plus a command is "multiple operations" under the COMMAND-SHAPE CONTRACT above
+  AND it does not match the allowlist, so the call is REJECTED and wasted.
+  Also refused by the wrapper (do not try): any other verb, `--kubeconfig`
+  pointing anywhere else, `--server`/`--token`/`--as`/`--context`/
+  `--insecure-skip-tls-verify`, reading `secret`/`secrets`, and the
+  never-terminating `--follow`/`--watch`. (No HTTP `curl` to
+  Prometheus/Alertmanager — not on the allowlist; rely on `kubectl-ro` for live
+  state.)
 
 Use these tools liberally — the WHOLE point is to cross-check the ticket against
 live reality before classifying. A title-only read is the FAILURE mode (it would
