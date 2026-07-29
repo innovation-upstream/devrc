@@ -8,7 +8,11 @@
 #                          [--steps N] [--timeout S] [--dry-run]
 #
 # What it does (see README "opencode browser-agent"):
-#   1. `open`s a NEW tab on instance K (its OWN tab) and captures the tabId.
+#   1. `open`s a NEW tab on instance K (its OWN tab), captures the tabId, and
+#      PROBES it (cheap `eval '1'`, no model tokens) to confirm the tab is
+#      live/owned before proceeding — re-opening (bounded retry) if a post-reload
+#      transient left the tab gone (owned_tab_gone), so the model never gets a
+#      doomed tabId.
 #   2. Runs `opencode run --format json -m <deepseek> --agent browser-agent --auto`
 #      in a scratch --dir. The agent def DENIES every built-in tool (bash, edit,
 #      read, webfetch, …) and ALLOWS only ONE custom, TYPED tool: `browser`
@@ -36,7 +40,8 @@
 # Test seams (env overrides): BROWSER_AGENT_OPENCODE (opencode binary),
 # BROWSER_AGENT_BROWSER_BIN (real browser CLI for open/close), BROWSER_AGENT_MODEL,
 # BROWSER_AGENT_TEMPLATE (agent md template), BROWSER_AGENT_TOOL_DIR (dir holding
-# browser.js + browser_tool_impl.mjs), BROWSER_AGENT_KEEP_SCRATCH=1.
+# browser.js + browser_tool_impl.mjs), BROWSER_AGENT_KEEP_SCRATCH=1,
+# BROWSER_AGENT_READY_ATTEMPTS / BROWSER_AGENT_READY_BACKOFF (open→readiness retry).
 set -uo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -184,16 +189,70 @@ if missing:
 sys.exit(0)
 ' || die "tool-set gate FAILED: opencode did not resolve browser-agent to a browser-ONLY tool set — the host-tool denial did not take on this opencode version/config. Refusing to run the model unconfined (see README 'runtime tool-set gate' / 'opencode version requirement')"
 
-# --- open the agent's own tab ------------------------------------------------ #
+# --- open the agent's own tab (with a pre-flight readiness retry) ------------ #
 # Opened AFTER the gate so a gate-fail leaks no tab.
-open_resp="$("$BROWSER_BIN" "${bflags[@]}" open about:blank 2>/dev/null)" \
-  || die "failed to open a tab (is the browser-bridge extension connected? try: browser health)"
-TAB="$(printf '%s' "$open_resp" | python3 -c 'import json,sys
+#
+# Post-reload transient: right after the extension is reloaded, the service
+# worker's tab-tracking isn't settled yet, so the tab we just `open`ed can
+# VANISH before the model's first op — opencode then returns status:"blocked"
+# with op_failed:owned_tab_gone and the run wastes tokens. So before spending
+# ANY model token, VERIFY the freshly-opened tab is actually live/owned with a
+# CHEAP, metadata-only probe (`eval '1'` → returns 1, NO page content). If the
+# probe reports the tab is gone, close the stale tab (best-effort) and re-open —
+# bounded retry with a short backoff to let the SW settle. Only a probe-passing
+# owned tab is ever handed to opencode.
+READY_ATTEMPTS="${BROWSER_AGENT_READY_ATTEMPTS:-3}"   # test seam
+READY_BACKOFF="${BROWSER_AGENT_READY_BACKOFF:-0.4}"   # test seam (seconds)
+
+_open_tab() {  # open a fresh owned tab; set global TAB; die on a hard open failure
+  local open_resp
+  open_resp="$("$BROWSER_BIN" "${bflags[@]}" open about:blank 2>/dev/null)" \
+    || die "failed to open a tab (is the browser-bridge extension connected? try: browser health)"
+  TAB="$(printf '%s' "$open_resp" | python3 -c 'import json,sys
 try:
     print(json.load(sys.stdin)["result"]["data"]["tabId"])
 except Exception:
     pass')"
-case "$TAB" in (*[!0-9]*|"") die "could not determine the opened tabId from: $open_resp";; esac
+  case "$TAB" in (*[!0-9]*|"") die "could not determine the opened tabId from: $open_resp";; esac
+}
+
+# _probe_tab — model-free readiness check of the CURRENT owned tab ($TAB). Runs a
+# harmless `eval '1'` (returns 1; NO page content). Returns:
+#   0 → tab is live/usable (probe passed)
+#   1 → tab is GONE (owned_tab_gone / "no tab with id") — re-open and retry
+#   2 → some OTHER error (hard failure — surfaced via PROBE_OUT)
+# The probe's stdout+stderr are captured into PROBE_OUT and NEVER reach the
+# wrapper's own stdout, so an op-error dump can't pollute the final JSON result.
+PROBE_OUT=""
+_probe_tab() {
+  PROBE_OUT="$("$BROWSER_BIN" "${bflags[@]}" --tab "$TAB" eval '1' 2>&1)"
+  local rc=$?
+  [ "$rc" = "0" ] && return 0
+  case "$PROBE_OUT" in
+    *owned_tab_gone*|*"no tab with id"*|*"No tab with id"*) return 1 ;;
+    *) return 2 ;;
+  esac
+}
+
+_open_tab
+_attempt=1
+while : ; do
+  _probe_tab; _prc=$?
+  [ "$_prc" = "0" ] && break                    # tab is ready — proceed
+  if [ "$_prc" = "2" ]; then                     # a non-tab-gone probe error is hard
+    die "readiness probe failed unexpectedly on tab $TAB: ${PROBE_OUT}"
+  fi
+  # _prc == 1: the freshly-opened tab is already gone (post-reload transient).
+  if [ "$_attempt" -ge "$READY_ATTEMPTS" ]; then
+    die "browser tab not ready after ${READY_ATTEMPTS} attempts — is the extension loaded/connected? try again"
+  fi
+  # Close the stale (gone) tab best-effort, then re-open a fresh one after a
+  # short backoff so the service worker's tab-tracking can settle.
+  "$BROWSER_BIN" "${bflags[@]}" --tab "$TAB" close >/dev/null 2>&1 || true
+  _attempt=$((_attempt + 1))
+  sleep "$READY_BACKOFF" 2>/dev/null || true
+  _open_tab
+done
 
 TRANSCRIPT1="$SCRATCH/opencode-transcript.jsonl"
 TRANSCRIPT2="$SCRATCH/opencode-transcript.retry.jsonl"

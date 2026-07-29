@@ -56,6 +56,10 @@ def _fake_browser(path: Path) -> Path:
     - `--print-session-id`           → prints a stable fake id.
     - `[--instance K] open [url]`     → prints {result:{data:{tabId:FRB_TABID}}}
       (or exits 1 if FRB_OPEN_FAIL=1).
+    - `[--instance K] --tab N eval …` → the wrapper's readiness PROBE. Succeeds by
+      default; if FRB_PROBE_FAIL_TIMES>0 the FIRST that-many probe calls instead
+      mimic a tab-gone op error (stderr `owned_tab_gone`, exit 1) — the counter is
+      persisted in FRB_PROBE_COUNT so retries advance it.
     - `[--instance K] --tab N <op> …` → prints a canned success envelope.
     Every invocation is appended (one JSON line) to $FRB_LOG for assertions.
     """
@@ -86,6 +90,24 @@ if op == "open":
     tabid = int(os.environ.get("FRB_TABID", "4242"))
     print(json.dumps({"ok": True, "result": {"id": "x", "ok": True,
           "data": {"tabId": tabid, "url": "about:blank"}}}))
+    sys.exit(0)
+if op == "eval":
+    # The wrapper's cheap readiness probe. Optionally fail the first N calls with
+    # a tab-gone op error (as the real `browser` CLI surfaces owned_tab_gone: a
+    # message on stderr + non-zero exit) to exercise the open->probe->reopen loop.
+    fail_times = int(os.environ.get("FRB_PROBE_FAIL_TIMES", "0"))
+    cf = os.environ.get("FRB_PROBE_COUNT")
+    cur = 0
+    if cf and os.path.exists(cf):
+        try: cur = int(open(cf).read().strip() or "0")
+        except ValueError: cur = 0
+    if cf:
+        open(cf, "w").write(str(cur + 1))
+    if cur < fail_times:
+        sys.stderr.write("browser: op 'eval' failed in the browser: owned_tab_gone\\n")
+        sys.exit(1)
+    print(json.dumps({"ok": True, "result": {"id": "x", "ok": True,
+          "data": {"value": 1}}}))
     sys.exit(0)
 print(json.dumps({"ok": True, "result": {"id": "x", "ok": True,
       "data": {"url": "https://x.test", "title": "X", "text": "page text"}}}))
@@ -196,18 +218,23 @@ def rig(tmp_path):
     frb_log = tmp_path / "frb.log"
     oc_log = tmp_path / "oc.log"
     oc_env = tmp_path / "oc_env.log"
+    probe_count = tmp_path / "probe.count"
     scratch_root = tmp_path / "scratch"; scratch_root.mkdir()
 
     def run(args, mode="ok", extra_env=None, timeout=60, open_fail=False,
-            tabid=TAB_ID):
+            tabid=TAB_ID, probe_fail=0):
         env = dict(os.environ)
         env.update(
             BROWSER_AGENT_OPENCODE=str(focode),
             BROWSER_AGENT_BROWSER_BIN=str(fbrowser),
             FAKE_OC_MODE=mode, FAKE_OC_LOG=str(oc_log), FAKE_OC_ENV=str(oc_env),
             FRB_LOG=str(frb_log), FRB_TABID=str(tabid),
+            FRB_PROBE_FAIL_TIMES=str(probe_fail), FRB_PROBE_COUNT=str(probe_count),
             TMPDIR=str(scratch_root),
             BROWSER_AGENT_KEEP_SCRATCH="1",
+            # Keep the open->readiness-retry backoff near-zero so the retry tests
+            # don't sleep (the real default is ~0.4s to let the SW settle).
+            BROWSER_AGENT_READY_BACKOFF="0.01",
             PATH=f"{bind}:{env.get('PATH','')}",
         )
         if open_fail:
@@ -438,6 +465,77 @@ def test_open_failure_clean_error(rig):
     assert "failed to open a tab" in r.stderr.lower()
     # A failed open leaves nothing to close (only the open attempt was logged).
     assert [c for c in _browser_calls(rig.frb_log) if c["op"] == "close"] == []
+
+
+# --------------------------------------------------------------------------- #
+# Pre-flight tab-readiness retry: after opening its own tab, the wrapper PROBES
+# it (cheap `eval '1'`, no model tokens) to confirm the tab is live/owned before
+# invoking opencode. Right after an extension reload the service worker's tab
+# tracking isn't settled, so the just-opened tab can vanish (owned_tab_gone); the
+# wrapper must re-open (bounded retry) so the model never gets a doomed tabId.
+# --------------------------------------------------------------------------- #
+def test_readiness_probe_passes_first_try_single_open(rig):
+    """Happy path: the probe passes on the first attempt → EXACTLY one open, one
+    probe, no needless extra opens, then opencode is invoked."""
+    r = rig.run(["read the page"], mode="ok")           # probe_fail defaults 0
+    assert r.returncode == 0, r.stderr
+    calls = _browser_calls(rig.frb_log)
+    opens = [c for c in calls if c["op"] == "open"]
+    probes = [c for c in calls if c["op"] == "eval"]
+    assert len(opens) == 1, f"expected exactly one open, got {len(opens)}"
+    assert len(probes) == 1, f"expected exactly one readiness probe, got {len(probes)}"
+    assert probes[0]["tab"] == str(TAB_ID), "the probe must target the opened tab"
+    assert len(_oc_calls(rig.oc_log)) == 1, "opencode must be invoked once the probe passes"
+
+
+def test_readiness_reopens_on_transient_tab_gone(rig):
+    """First probe reports owned_tab_gone (post-reload transient), the retry's
+    probe passes → the wrapper re-opens, the probe passes, and opencode IS
+    invoked and the run proceeds to a normal result."""
+    r = rig.run(["read the page"], mode="ok", probe_fail=1)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert json.loads(r.stdout.strip()) == SCHEMA_OK
+    calls = _browser_calls(rig.frb_log)
+    opens = [c for c in calls if c["op"] == "open"]
+    probes = [c for c in calls if c["op"] == "eval"]
+    assert len(opens) == 2, f"expected a re-open after the transient, got {len(opens)} opens"
+    assert len(probes) == 2, f"expected two probes (fail then pass), got {len(probes)}"
+    # The stale (gone) tab is closed best-effort before re-opening.
+    closes = [c for c in calls if c["op"] == "close"]
+    assert len(closes) >= 1, "the stale tab must be closed best-effort before re-opening"
+    assert len(_oc_calls(rig.oc_log)) == 1, "opencode must run once the tab is ready"
+
+
+def test_readiness_all_attempts_fail_no_token_spend(rig):
+    """Every probe reports tab-gone → the wrapper dies NON-ZERO with a clear
+    message, NEVER invokes opencode (no token spend), and leaves NO tab open
+    (cleanup closed the last owned tab)."""
+    r = rig.run(["read the page"], mode="ok", probe_fail=99)
+    assert r.returncode != 0, r.stdout + r.stderr
+    assert "not ready after" in r.stderr.lower()
+    # The clear error must NOT be a raw op-error dump on stdout, and no JSON result
+    # (a doomed run must not print a fake schema).
+    assert "owned_tab_gone" not in r.stdout, "the probe's op-error must not leak to stdout"
+    assert r.stdout.strip() == "", "a readiness failure must not print a schema result"
+    assert _oc_calls(rig.oc_log) == [], "opencode must NEVER run when the tab never gets ready"
+    calls = _browser_calls(rig.frb_log)
+    assert len([c for c in calls if c["op"] == "open"]) == 3, "should try open 3 times (bounded)"
+    # No orphan: every opened tab was closed (2 stale closes in-loop + 1 on cleanup).
+    opens = [c for c in calls if c["op"] == "open"]
+    closes = [c for c in calls if c["op"] == "close"]
+    assert len(closes) >= len(opens), "every opened tab must be closed (no orphan)"
+
+
+def test_readiness_failure_still_closes_tab_no_orphan(rig):
+    """A readiness-failure exit path must still run cleanup — the last owned tab
+    is closed, so nothing is orphaned, and the error is human-readable."""
+    r = rig.run(["read the page"], mode="ok", probe_fail=99)
+    assert r.returncode != 0
+    calls = _browser_calls(rig.frb_log)
+    # The last-owned tab (TAB_ID) must appear in a close call (cleanup trap).
+    assert any(c["op"] == "close" and c["tab"] == str(TAB_ID) for c in calls), \
+        "cleanup must close the last owned tab on a readiness-failure exit"
+    assert "extension loaded/connected" in r.stderr.lower(), "the error must be actionable"
 
 
 # --------------------------------------------------------------------------- #
