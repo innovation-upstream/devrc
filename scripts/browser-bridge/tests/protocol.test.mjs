@@ -16,6 +16,8 @@ import {
   POLL_UNAUTHORIZED, SUPERSEDE_BACKOFF_MS,
   capHeaderValue, MAX_HEADER_VALUE_CHARS,
   normalizeText, TEXT_MAX_BYTES_DEFAULT,
+  isTransientCaptureError, captureWithRetry, waitForCaptureReady,
+  screenshotWithRestore, CAPTURE_MAX_ATTEMPTS,
 } from "../extension/protocol.js";
 
 test("op set mirrors the server contract", () => {
@@ -269,4 +271,156 @@ test("normalizeText with a zero/undefined cap does not truncate", () => {
 
 test("TEXT_MAX_BYTES_DEFAULT is the documented 32 KB default", () => {
   assert.equal(TEXT_MAX_BYTES_DEFAULT, 32 * 1024);
+});
+
+// --- screenshot: settle + retry decision logic (background-tab robustness) --- //
+// A never-sleep clock/sleep so the retry + settle loops run instantly under test.
+const noSleep = async () => {};
+
+test("isTransientCaptureError classifies the readback race as retry-worthy", () => {
+  // The exact observed message, its bare form, and any readback phrasing → true.
+  assert.equal(isTransientCaptureError(new Error("Failed to capture tab: image readback failed")), true);
+  assert.equal(isTransientCaptureError("image readback failed"), true);
+  assert.equal(isTransientCaptureError("GPU readback error"), true);
+  // Case-insensitive.
+  assert.equal(isTransientCaptureError("IMAGE READBACK FAILED"), true);
+});
+
+test("isTransientCaptureError treats permanent/unknown errors as NON-transient (fail closed)", () => {
+  // A permission/URL error must NOT be retried (it would just burn cmd_timeout).
+  assert.equal(isTransientCaptureError(new Error(
+    "Cannot access contents of the page. Extension manifest must request permission")), false);
+  assert.equal(isTransientCaptureError("owned_tab_gone"), false);
+  // Empty / nullish / unclassifiable → false.
+  assert.equal(isTransientCaptureError(""), false);
+  assert.equal(isTransientCaptureError(null), false);
+  assert.equal(isTransientCaptureError(undefined), false);
+});
+
+test("captureWithRetry: a transient failure then success resolves (retries, then wins)", async () => {
+  let calls = 0;
+  const sleeps = [];
+  const capture = async () => {
+    calls++;
+    if (calls < 2) throw new Error("image readback failed");
+    return "data:png;ok";
+  };
+  const out = await captureWithRetry(capture, { sleep: (ms) => { sleeps.push(ms); } });
+  assert.equal(out, "data:png;ok");
+  assert.equal(calls, 2, "one retry after the transient failure");
+  assert.deepEqual(sleeps, [150], "one linear backoff before the retry");
+});
+
+test("captureWithRetry: a persistent transient error fails after exactly N attempts", async () => {
+  let calls = 0;
+  const capture = async () => { calls++; throw new Error("image readback failed"); };
+  await assert.rejects(() => captureWithRetry(capture, { sleep: noSleep }), /image readback failed/);
+  assert.equal(calls, CAPTURE_MAX_ATTEMPTS, "gives up after the bounded attempt budget");
+});
+
+test("captureWithRetry: a NON-transient error propagates immediately (no retries)", async () => {
+  let calls = 0;
+  const capture = async () => { calls++; throw new Error("Cannot access contents of the page"); };
+  await assert.rejects(() => captureWithRetry(capture, { sleep: noSleep }), /Cannot access/);
+  assert.equal(calls, 1, "a permanent error is not retried");
+});
+
+test("captureWithRetry: first-try success does not sleep or retry", async () => {
+  let calls = 0, slept = 0;
+  const out = await captureWithRetry(async () => { calls++; return "ok"; },
+    { sleep: () => { slept++; } });
+  assert.equal(out, "ok");
+  assert.equal(calls, 1);
+  assert.equal(slept, 0);
+});
+
+test("waitForCaptureReady polls until 'complete', then applies the paint settle", async () => {
+  const statuses = ["loading", "loading", "complete"];
+  let i = 0;
+  const sleeps = [];
+  await waitForCaptureReady(async () => statuses[i++],
+    { sleep: (ms) => { sleeps.push(ms); }, pollMs: 100, settleMs: 150, now: () => 0 });
+  // Two poll waits (while loading) + one final settle wait.
+  assert.deepEqual(sleeps, [100, 100, 150]);
+  assert.equal(i, 3, "stopped polling as soon as it read 'complete'");
+});
+
+test("waitForCaptureReady stops at the timeout even if never 'complete' (no hang)", async () => {
+  let t = 0;                                  // fake monotonic clock
+  const now = () => t;
+  const sleeps = [];
+  await waitForCaptureReady(async () => "loading", {
+    now, pollMs: 100, settleMs: 0, timeoutMs: 250,
+    sleep: (ms) => { sleeps.push(ms); t += ms; },   // advance the clock per sleep
+  });
+  // Polls at t=0,100,200 (each <250 → sleep); at t=300≥250 it bails — bounded,
+  // never hangs on a stuck tab.
+  assert.deepEqual(sleeps, [100, 100, 100]);
+});
+
+test("waitForCaptureReady tolerates a getStatus that throws (treats as not-ready)", async () => {
+  let t = 0;
+  await assert.doesNotReject(() => waitForCaptureReady(
+    async () => { throw new Error("owned_tab_gone"); },
+    { now: () => t, pollMs: 50, settleMs: 0, timeoutMs: 100,
+      sleep: (ms) => { t += ms; } }));
+});
+
+// --- screenshotWithRestore: activate→capture→restore orchestration ---------- //
+function spyDeps(overrides = {}) {
+  const log = [];
+  const deps = {
+    isActive: false,
+    targetId: 42,
+    capture: async () => { log.push("capture"); return "data:png"; },
+    getPrevActiveId: async () => { log.push("getPrev"); return 7; },
+    activate: async (id) => { log.push(`activate:${id}`); },
+    waitReady: async () => { log.push("wait"); },
+    restore: async (id) => { log.push(`restore:${id}`); },
+    ...overrides,
+  };
+  return { deps, log };
+}
+
+test("screenshotWithRestore (visible tab): captures with NO activate/restore flicker", async () => {
+  const { deps, log } = spyDeps({ isActive: true });
+  const out = await screenshotWithRestore(deps);
+  assert.equal(out, "data:png");
+  assert.deepEqual(log, ["capture"], "already-visible → direct capture only");
+});
+
+test("screenshotWithRestore (background tab): activate→wait→capture→restore in order", async () => {
+  const { deps, log } = spyDeps();
+  const out = await screenshotWithRestore(deps);
+  assert.equal(out, "data:png");
+  assert.deepEqual(log, ["getPrev", "activate:42", "wait", "capture", "restore:7"]);
+});
+
+test("screenshotWithRestore restores the previous tab even when capture FAILS", async () => {
+  const { deps, log } = spyDeps({
+    capture: async () => { log.push("capture"); throw new Error("image readback failed"); },
+  });
+  await assert.rejects(() => screenshotWithRestore(deps), /image readback failed/);
+  // The restore MUST still run on the failure path (finally), and the original
+  // error is what propagates.
+  assert.deepEqual(log, ["getPrev", "activate:42", "wait", "capture", "restore:7"]);
+});
+
+test("screenshotWithRestore does not restore when there was no previous tab", async () => {
+  const { deps, log } = spyDeps({ getPrevActiveId: async () => { log.push("getPrev"); return null; } });
+  await screenshotWithRestore(deps);
+  assert.ok(!log.some((l) => l.startsWith("restore")), "nothing to restore → no restore call");
+});
+
+test("screenshotWithRestore does not restore when the previous tab IS the target", async () => {
+  const { deps, log } = spyDeps({ getPrevActiveId: async () => { log.push("getPrev"); return 42; } });
+  await screenshotWithRestore(deps);
+  assert.ok(!log.some((l) => l.startsWith("restore")), "prev===target → no needless restore");
+});
+
+test("screenshotWithRestore swallows a restore failure but returns the capture result", async () => {
+  const { deps } = spyDeps({ restore: async () => { throw new Error("restore boom"); } });
+  // A failing restore must NOT mask the successful capture.
+  const out = await screenshotWithRestore(deps);
+  assert.equal(out, "data:png");
 });

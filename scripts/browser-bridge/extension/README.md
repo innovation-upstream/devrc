@@ -44,9 +44,22 @@ back this:
 
 **Screenshot of a background owned tab:** `chrome.tabs.captureVisibleTab` only
 captures the **visible** tab of a window. If the target tab isn't active the SW
-briefly activates it, captures, then **restores** the previously-active tab — a
-short visible flicker, but it never silently screenshots the wrong tab. A target
-tab that is already visible is captured directly with no flicker.
+briefly activates it, **settles** until it has painted, captures, then
+**restores** the previously-active tab — a short visible flicker, but it never
+silently screenshots the wrong tab. A target tab that is already visible is
+captured directly with no flicker.
+
+*Background-tab settle + retry (robustness):* a JUST-activated background tab
+hasn't painted its first frame yet, so a bare `captureVisibleTab` returns
+`"image readback failed"`. The SW therefore (1) waits for the tab to reach
+`status:"complete"` **plus a short paint settle** before capturing, and (2)
+**retries** the capture on the transient readback error (bounded — a few tries
+with a short linear back-off) before giving up. This matters because `browser
+agent` screenshots run in the agent's OWN background tab. The classifier
+(`isTransientCaptureError`), the retry (`captureWithRetry`), the settle
+(`waitForCaptureReady`) and the activate→capture→restore orchestration
+(`screenshotWithRestore`, restore on success AND failure) are pure + unit-tested
+in `protocol.js`; `service_worker.js` supplies the chrome.* side effects.
 
 If an owned tab was closed out-of-band, `chrome.tabs.get` throws and the op
 returns an `owned_tab_gone` error envelope. On that signal the **server drops the
@@ -149,7 +162,11 @@ The chrome.* glue needs a real browser — verify by hand after loading:
       every op with `browser --tab <id> …`. Confirm each reads/navigates only its
       OWN tab — the explicit `--tab` overrides the shared owned-tab routing.
 - [ ] `browser screenshot` of a background owned tab briefly flickers it to the
-      foreground, captures it, and restores the tab that was active before.
+      foreground, captures it, and restores the tab that was active before. It
+      **succeeds even on the first shot of a fresh background tab** (the settle +
+      retry defeats the old `image readback failed`): `browser --instance <key>
+      open <url>` → `browser --instance <key> --tab <id> screenshot /tmp/x.png`
+      writes a real PNG (was flaky before this fix).
 - [ ] **Two-session isolation (the fix):** open two Claude sessions (each in its
       own tmux pane). In each, `browser open` a DIFFERENT url, then interleave
       `browser nav …` / `browser html` between the sessions. Confirm neither

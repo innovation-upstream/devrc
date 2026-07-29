@@ -255,9 +255,20 @@ per-session (multi-step **workflow**) isolation did not.
   user) — only an explicit `browser close` closes it.
 - **Screenshot caveat (honest).** `captureVisibleTab` only ever captures the
   **visible** tab of a window. Screenshotting a session's **background** owned
-  tab therefore briefly activates it → captures → restores the previously-active
-  tab (a short visible flicker in that window), so we never silently capture the
-  wrong tab. A screenshot of an owned tab that is already visible is unaffected.
+  tab therefore briefly activates it → **settles until painted** → captures (with
+  retry) → restores the previously-active tab (a short visible flicker in that
+  window), so we never silently capture the wrong tab. A screenshot of an owned
+  tab that is already visible is unaffected. **Background-tab settle + retry:** a
+  just-activated background tab hasn't painted its first frame, so a bare capture
+  returns `"image readback failed"`; the SW waits for `status:"complete"` + a
+  short paint settle, then **retries** the capture on that transient error (a few
+  bounded tries with a short back-off) before giving up. This hardens the
+  `browser agent` path, which screenshots in its OWN background tab. The classify
+  + retry + settle + activate→capture→restore logic is pure and unit-tested in
+  `extension/protocol.js` (`isTransientCaptureError` / `captureWithRetry` /
+  `waitForCaptureReady` / `screenshotWithRestore`); the capture itself needs real
+  Brave, so it stays on the manual checklist. Like any `extension/` change, it
+  only takes effect after a manual extension **reload** in `brave://extensions`.
 - **Backward-compat.** A single session with no `open` (and even no
   `X-Session-Id`) behaves exactly as before: active-tab ops, no `tabId` injected.
   The multi-instance `--instance` targeting, ambiguity/supersede semantics, and
@@ -574,9 +585,11 @@ The **`browser agent`** slice, all headless (NO live model, NO Brave, NO bridge)
   inherited-group straggler → asserted reaped, no orphan); schema parse + EXACTLY
   ONE `--continue` retry then `blocked`, no-retry on a hard error.
 
-Current totals: **132 Python** (`test_server.py` 100 + `test_browser_agent_parse.py`
-14 + `test_browser_agent.py` 18) + **50 node** (`protocol.test.mjs` 29 +
-`browser_tool.test.mjs` 21). The live browser-driving loop (real DeepSeek + real
+Current totals: **138 Python** (`test_server.py` 100 + `test_browser_agent_parse.py`
+14 + `test_browser_agent.py` 24) + **68 node** (`protocol.test.mjs` 47 +
+`browser_tool.test.mjs` 21) — the 18 added `protocol.test.mjs` cases cover the
+screenshot settle+retry decision logic (`isTransientCaptureError` /
+`captureWithRetry` / `waitForCaptureReady` / `screenshotWithRestore`). The live browser-driving loop (real DeepSeek + real
 Brave) canNOT run in CI; the chrome.* glue in `service_worker.js` and the
 end-to-end agent run are covered by the manual checklists (`extension/README.md` +
 "opencode browser-agent" above). The two `opencode debug agent` checks under

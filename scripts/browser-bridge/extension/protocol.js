@@ -118,6 +118,122 @@ export function nextBackoffMs(attempt, baseMs = 1000, capMs = 30000) {
   return Math.min(capMs, baseMs * Math.pow(2, n));
 }
 
+// --- screenshot capture: settle + retry (background-tab robustness) --------- //
+// captureVisibleTab of a JUST-activated background tab often fails with
+// "Failed to capture tab: image readback failed": the tab has been made active
+// but Chrome hasn't painted its first frame yet, so the GPU read-back has no
+// pixels. It is TRANSIENT — a short settle + a retry almost always succeeds.
+// The decision logic (classify + retry loop + the activate→settle→capture→restore
+// orchestration) is pure and injectable here; service_worker.js supplies the real
+// chrome.* side effects. Keep the SW's screenshot op in sync with this.
+
+export const CAPTURE_MAX_ATTEMPTS = 3;      // total capture tries before giving up
+export const CAPTURE_RETRY_BASE_MS = 150;   // linear backoff: 150ms, 300ms, …
+export const CAPTURE_SETTLE_MS = 150;       // paint settle after 'complete'
+export const CAPTURE_READY_TIMEOUT_MS = 2000; // cap on the status poll
+export const CAPTURE_READY_POLL_MS = 100;   // status re-poll cadence
+
+// Transient (retry-worthy) capture failures — the GPU/paint race, NOT a
+// permanent permission/URL error (retrying THOSE just burns the cmd_timeout).
+// Matched case-insensitively against the error message. Kept deliberately narrow.
+const TRANSIENT_CAPTURE_PATTERNS = [
+  "image readback failed",   // the observed background-tab race
+  "readback",                // any GPU read-back failure phrasing
+];
+
+// True when `err`'s message looks like a transient capture failure worth a retry.
+// Accepts an Error, a string, or anything stringifiable; unknown/empty → false
+// (fail closed: an unclassifiable error is treated as permanent, not retried).
+export function isTransientCaptureError(err) {
+  const msg = (err && err.message != null) ? err.message : err;
+  const s = String(msg == null ? "" : msg).toLowerCase();
+  if (!s) return false;
+  return TRANSIENT_CAPTURE_PATTERNS.some((p) => s.includes(p));
+}
+
+const defaultSleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// Call `capture()` (→ Promise<dataUrl>) with a bounded retry on a TRANSIENT
+// failure. A non-transient error propagates IMMEDIATELY (no wasted retries); a
+// transient error backs off (linear: base, 2·base, …) and retries up to
+// `maxAttempts` total, then the last error propagates. `sleep` is injectable for
+// tests. Returns whatever `capture()` resolves to on the first success.
+export async function captureWithRetry(capture, opts = {}) {
+  const maxAttempts = opts.maxAttempts || CAPTURE_MAX_ATTEMPTS;
+  const baseMs = opts.baseMs == null ? CAPTURE_RETRY_BASE_MS : opts.baseMs;
+  const sleep = opts.sleep || defaultSleep;
+  let lastErr;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      return await capture();
+    } catch (e) {
+      lastErr = e;
+      // Permanent error, or out of attempts → give up now.
+      if (!isTransientCaptureError(e) || attempt === maxAttempts) throw e;
+      await sleep(baseMs * attempt);
+    }
+  }
+  throw lastErr; // unreachable (loop always returns or throws) — belt & braces
+}
+
+// Wait until a just-activated tab is painted enough to capture. Polls
+// `getStatus()` (→ the tab's `status`, e.g. "complete"/"loading") until it reads
+// "complete" or the timeout elapses, THEN waits a short settle — because
+// chrome fires "complete" slightly BEFORE the first paint, so a tab that is
+// already "complete" can still read back empty without the settle. All timing +
+// the status read are injectable so this is unit-testable with a fake clock.
+export async function waitForCaptureReady(getStatus, opts = {}) {
+  const timeoutMs = opts.timeoutMs == null ? CAPTURE_READY_TIMEOUT_MS : opts.timeoutMs;
+  const pollMs = opts.pollMs == null ? CAPTURE_READY_POLL_MS : opts.pollMs;
+  const settleMs = opts.settleMs == null ? CAPTURE_SETTLE_MS : opts.settleMs;
+  const sleep = opts.sleep || defaultSleep;
+  const now = opts.now || (() => Date.now());
+  const start = now();
+  // eslint-disable-next-line no-constant-condition
+  while (true) {
+    let status;
+    try { status = await getStatus(); } catch (e) { status = null; }
+    if (status === "complete") break;
+    if (now() - start >= timeoutMs) break; // don't hang past the budget
+    await sleep(pollMs);
+  }
+  if (settleMs > 0) await sleep(settleMs);
+}
+
+// Orchestrate a screenshot with the activate→settle→capture→restore dance, with
+// every chrome.* side effect INJECTED so the (important) invariant — the
+// previously-active tab is restored on BOTH the success AND the failure path,
+// and an already-visible tab is captured WITHOUT any activate/flicker — is
+// unit-testable. `deps`:
+//   isActive          : boolean  — is the target tab already the visible tab
+//   targetId          : the target tab's id
+//   capture()         : Promise<dataUrl> (the caller wraps this in captureWithRetry)
+//   getPrevActiveId() : Promise<id|null> — the tab active BEFORE we activate
+//   activate(id)      : Promise — bring the target tab to the foreground
+//   waitReady()       : Promise — settle until painted (waitForCaptureReady)
+//   restore(id)       : Promise — re-activate the previously-active tab
+// service_worker.js builds `deps` from the real chrome.* APIs.
+export async function screenshotWithRestore(deps) {
+  if (deps.isActive) {
+    // Already visible → capture directly, no needless activate/flicker.
+    return deps.capture();
+  }
+  let prevActiveId = null;
+  try {
+    prevActiveId = await deps.getPrevActiveId();
+    await deps.activate(deps.targetId);
+    await deps.waitReady();
+    return await deps.capture();
+  } finally {
+    // Restore focus to the previously-active tab on EVERY path (success AND
+    // failure) so a background screenshot never leaves the user's foreground
+    // changed. Never let a restore failure mask the real result/error.
+    if (prevActiveId != null && prevActiveId !== deps.targetId) {
+      try { await deps.restore(prevActiveId); } catch (e) { /* ignore */ }
+    }
+  }
+}
+
 // --- poll-response classification ----------------------------------------- //
 // The server answers GET /poll with exactly one of these shapes; classifying by
 // status keeps the SW loop's branching pure + unit-testable:
