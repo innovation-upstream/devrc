@@ -15,16 +15,26 @@ import {
   classifyPollStatus, POLL_COMMAND, POLL_IDLE, POLL_SUPERSEDED,
   POLL_UNAUTHORIZED, SUPERSEDE_BACKOFF_MS,
   capHeaderValue, MAX_HEADER_VALUE_CHARS,
+  normalizeText, TEXT_MAX_BYTES_DEFAULT,
 } from "../extension/protocol.js";
 
 test("op set mirrors the server contract", () => {
   // If this changes, server.py ALLOWED_OPS must change in lockstep. `open`/`close`
   // back the per-session tab-isolation model (`release` is server-side only, so
-  // it is deliberately NOT in the shared op set).
+  // it is deliberately NOT in the shared op set). `text` is the cheap-read op.
   assert.deepEqual(
     [...ALLOWED_OPS].sort(),
-    ["close", "eval", "getHtml", "nav", "open", "screenshot", "tabs"],
+    ["close", "eval", "getHtml", "nav", "open", "screenshot", "tabs", "text"],
   );
+});
+
+test("validateCommand accepts the cheap-read `text` op (bare + selector)", () => {
+  // `text` has no required field — a bare op validates; selector/maxBytes are
+  // optional command fields the server passes through to the extension.
+  assert.deepEqual(validateCommand({ op: "text" }), { ok: true });
+  assert.deepEqual(validateCommand({ op: "text", selector: "main", maxBytes: 1024 }),
+    { ok: true });
+  assert.deepEqual(validateCommand({ op: "text", tabId: 9 }), { ok: true });
 });
 
 test("validateCommand accepts the tab-isolation ops (open/close)", () => {
@@ -214,4 +224,49 @@ test("resultWithInstance stamps the instanceId onto the envelope", () => {
   assert.deepEqual(stamped.data, { html: "x" });
   // Original envelope is not mutated.
   assert.equal(env.instanceId, undefined);
+});
+
+// --- `text` op: innerText normalization + byte cap (pure logic) ------------- //
+test("normalizeText collapses blank-line runs and trims", () => {
+  // 3+ consecutive newlines collapse to ONE blank line; trailing per-line spaces
+  // are stripped; the whole thing is trimmed. CRLF is normalized to LF.
+  const { text, truncated } = normalizeText("  hi  \n\n\n\n\nthere  \r\n\r\n\r\n end  \n\n");
+  assert.equal(text, "hi\n\nthere\n\n end");
+  assert.equal(truncated, 0);
+});
+
+test("normalizeText leaves short text unchanged (no truncation note)", () => {
+  const { text, truncated } = normalizeText("short body", 32 * 1024);
+  assert.equal(text, "short body");
+  assert.equal(truncated, 0);
+  assert.ok(!text.includes("truncated"));
+});
+
+test("normalizeText truncates over the byte cap and appends the note", () => {
+  const raw = "x".repeat(1000);
+  const { text, truncated } = normalizeText(raw, 100);
+  assert.ok(text.startsWith("x".repeat(100)), "keeps a 100-byte prefix");
+  assert.match(text, /\n…\[truncated 900 bytes\]$/);
+  assert.equal(truncated, 900);
+});
+
+test("normalizeText byte-cap never splits a multi-byte char", () => {
+  // 'é' is 2 UTF-8 bytes. A cap of 3 must keep exactly 1 'é' (2 bytes), not a
+  // half char. The kept prefix must still decode cleanly.
+  const raw = "é".repeat(10);           // 20 UTF-8 bytes
+  const { text, truncated } = normalizeText(raw, 3);
+  const body = text.split("\n…")[0];    // the kept prefix, before the note
+  assert.equal(body, "é");              // 2 bytes kept (≤3), not a split char
+  assert.equal(new TextEncoder().encode(body).length, 2);
+  assert.equal(truncated, 18);
+});
+
+test("normalizeText with a zero/undefined cap does not truncate", () => {
+  const raw = "y".repeat(5000);
+  assert.equal(normalizeText(raw, 0).truncated, 0);
+  assert.equal(normalizeText(raw, 0).text.length, 5000);
+});
+
+test("TEXT_MAX_BYTES_DEFAULT is the documented 32 KB default", () => {
+  assert.equal(TEXT_MAX_BYTES_DEFAULT, 32 * 1024);
 });

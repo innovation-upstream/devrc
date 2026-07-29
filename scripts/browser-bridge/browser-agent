@@ -1,0 +1,290 @@
+#!/usr/bin/env bash
+# browser-agent — run the autonomous opencode "browser-agent" in its OWN isolated
+# Brave tab against a natural-language goal, and return a compact structured
+# result (never raw HTML). Invoked as `browser agent "<goal>"` (the `browser` CLI
+# execs this) or directly.
+#
+#   browser agent "<goal>" [--instance K] [--allow-domains a,b] [--deny-domains c,d]
+#                          [--steps N] [--timeout S] [--dry-run]
+#
+# What it does (see README "opencode browser-agent"):
+#   1. `open`s a NEW tab on instance K (its OWN tab) and captures the tabId.
+#   2. Runs `opencode run --format json -m <deepseek> --agent browser-agent --auto`
+#      in a scratch --dir. The agent def DENIES every built-in tool (bash, edit,
+#      read, webfetch, …) and ALLOWS only ONE custom, TYPED tool: `browser`
+#      (opencode/tools/browser.js, copied into the scratch project). The model
+#      calls it with structured args (op + optional selector/url/js) — it has NO
+#      shell, so there is NO `>`/`;`/`|`/`$()` surface (this is the PR #180 RCE
+#      fix: a shell output-redirect `browser … >> ~/.zshenv` used to ride the
+#      allowed bash command through opencode's wildcard glob → host RCE).
+#   3. FORCES the owned tab + instance + domain policy on the tool via env
+#      (BROWSER_AGENT_TAB/…): the model cannot choose the tab or reach a denied
+#      domain — enforcement lives IN the tool (browser_tool_impl.mjs), which POSTs
+#      straight to the loopback bridge (no subprocess).
+#   4. Enforces a wall-clock --timeout with a PROCESS-GROUP kill (`setsid` + kill
+#      the whole group) so no opencode child can survive a timeout.
+#   5. Closes the owned tab on EVERY exit path (success/timeout/error/tab-gone).
+#   6. Parses opencode's final message as the required schema
+#      {"answer","evidence":[…],"steps_used","status":"ok|partial|blocked"};
+#      on malformed output it re-invokes ONCE (`--continue`) demanding ONLY the
+#      JSON, then gives up with a `blocked` result (no infinite retry).
+#
+# Privacy: page content the agent reads is sent to OpenRouter/DeepSeek (accepted
+# — see README). The OpenRouter key must already be in opencode's auth store
+# (~/.local/share/opencode/auth.json); this script adds NO key.
+#
+# Test seams (env overrides): BROWSER_AGENT_OPENCODE (opencode binary),
+# BROWSER_AGENT_BROWSER_BIN (real browser CLI for open/close), BROWSER_AGENT_MODEL,
+# BROWSER_AGENT_TEMPLATE (agent md template), BROWSER_AGENT_TOOL_DIR (dir holding
+# browser.js + browser_tool_impl.mjs), BROWSER_AGENT_KEEP_SCRATCH=1.
+set -uo pipefail
+
+HERE="$(cd "$(dirname "$0")" && pwd)"
+BROWSER_BIN="${BROWSER_AGENT_BROWSER_BIN:-$HERE/browser}"
+PARSER="$HERE/browser-agent-parse.py"
+TEMPLATE="${BROWSER_AGENT_TEMPLATE:-$HERE/opencode/browser-agent.md}"
+TOOL_DIR="${BROWSER_AGENT_TOOL_DIR:-$HERE/opencode/tools}"
+TOOL_JS="$TOOL_DIR/browser.js"
+TOOL_IMPL="$TOOL_DIR/browser_tool_impl.mjs"
+OPENCODE_BIN="${BROWSER_AGENT_OPENCODE:-opencode}"
+MODEL="${BROWSER_AGENT_MODEL:-openrouter/deepseek/deepseek-v4-flash}"
+
+die() { echo "browser-agent: $*" >&2; exit 2; }
+
+# Emit a compact schema result on stdout and exit (0 for ok/partial, 1 for
+# blocked). NEVER prints raw page content — only the structured schema.
+emit_result() {  # <schema-json>
+  printf '%s\n' "$1"
+  case "$1" in
+    *'"status":"ok"'*|*'"status": "ok"'*) exit 0 ;;
+    *'"status":"partial"'*|*'"status": "partial"'*) exit 0 ;;
+    *) exit 1 ;;
+  esac
+}
+
+blocked() {  # <reason> [steps_used]
+  local reason="$1" steps="${2:-0}"
+  emit_result "$(python3 -c '
+import json,sys
+print(json.dumps({"answer": sys.argv[1], "evidence": [],
+                  "steps_used": int(sys.argv[2]), "status": "blocked"},
+                 separators=(",",":")))' "$reason" "$steps")"
+}
+
+# --- parse args -------------------------------------------------------------- #
+GOAL=""; INSTANCE=""; ALLOW=""; DENY=""; STEPS=12; TIMEOUT=120; DRYRUN=0
+_csv_to_ws() { printf '%s' "$1" | tr ',' ' '; }
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --instance) shift; [ $# -ge 1 ] || die "usage: --instance <key>"; INSTANCE="$1" ;;
+    --instance=*) INSTANCE="${1#--instance=}" ;;
+    --allow-domains) shift; [ $# -ge 1 ] || die "usage: --allow-domains a,b"; ALLOW="$(_csv_to_ws "$1")" ;;
+    --allow-domains=*) ALLOW="$(_csv_to_ws "${1#--allow-domains=}")" ;;
+    --deny-domains) shift; [ $# -ge 1 ] || die "usage: --deny-domains a,b"; DENY="$(_csv_to_ws "$1")" ;;
+    --deny-domains=*) DENY="$(_csv_to_ws "${1#--deny-domains=}")" ;;
+    --steps) shift; [ $# -ge 1 ] || die "usage: --steps N"; STEPS="$1" ;;
+    --steps=*) STEPS="${1#--steps=}" ;;
+    --timeout) shift; [ $# -ge 1 ] || die "usage: --timeout S"; TIMEOUT="$1" ;;
+    --timeout=*) TIMEOUT="${1#--timeout=}" ;;
+    --dry-run) DRYRUN=1 ;;
+    -h|--help) grep -E '^#( |$)' "$0" | sed -E 's/^# ?//'; exit 0 ;;
+    --) shift; [ $# -ge 1 ] && GOAL="$1"; break ;;
+    -*) die "unknown flag: $1" ;;
+    *) [ -z "$GOAL" ] || die "only one goal is accepted (got extra: $1)"; GOAL="$1" ;;
+  esac
+  shift
+done
+
+[ -n "$GOAL" ] || die "a goal is required: browser agent \"<goal>\""
+case "$STEPS" in (*[!0-9]*|"") die "--steps must be a positive integer (got: $STEPS)";; esac
+[ "$STEPS" -ge 1 ] 2>/dev/null || die "--steps must be >= 1 (got: $STEPS)"
+case "$TIMEOUT" in (*[!0-9]*|"") die "--timeout must be a positive integer of seconds (got: $TIMEOUT)";; esac
+[ "$TIMEOUT" -ge 1 ] 2>/dev/null || die "--timeout must be >= 1 (got: $TIMEOUT)"
+[ -f "$TEMPLATE" ] || die "agent template not found: $TEMPLATE"
+[ -r "$TOOL_JS" ] || die "custom tool not found: $TOOL_JS"
+[ -r "$TOOL_IMPL" ] || die "custom tool impl not found: $TOOL_IMPL"
+[ -r "$PARSER" ] || die "parser not found: $PARSER"
+
+# opencode must be present BEFORE we open any tab — so a missing binary can never
+# leave an orphaned tab.
+command -v "$OPENCODE_BIN" >/dev/null 2>&1 || die "opencode not found on PATH ('$OPENCODE_BIN') — install it or set BROWSER_AGENT_OPENCODE"
+
+declare -a bflags=()
+[ -n "$INSTANCE" ] && bflags+=(--instance "$INSTANCE")
+
+# --- scratch: per-run agent def (bash denied) + the typed `browser` custom tool - #
+# Built BEFORE any tab is opened so the fail-closed tool-set gate (below) can
+# resolve the templated agent def AND a gate failure leaks NO tab.
+SCRATCH="$(mktemp -d "${TMPDIR:-/tmp}/browser-agent.XXXXXX")"
+TAB=""            # set once the tab is actually opened (below the gate)
+_closed=0
+# Close the owned tab (if one was opened) on EVERY exit path, then drop scratch.
+# `cleanup` no-ops before a tab exists, so a gate-fail exit closes nothing.
+cleanup() {
+  [ "$_closed" = "1" ] && return 0
+  _closed=1
+  [ -n "$TAB" ] || return 0
+  "$BROWSER_BIN" "${bflags[@]}" --tab "$TAB" close >/dev/null 2>&1 || true
+}
+_cleanup_all() {
+  cleanup
+  [ "${BROWSER_AGENT_KEEP_SCRATCH:-0}" = "1" ] || rm -rf "$SCRATCH" 2>/dev/null || true
+}
+trap _cleanup_all EXIT INT TERM
+mkdir -p "$SCRATCH/.opencode/agents" "$SCRATCH/.opencode/agent" \
+         "$SCRATCH/.opencode/tools" "$SCRATCH/.opencode/tool"
+
+# Copy the committed TYPED tool (+ its pure-logic sibling) into the scratch
+# project so opencode loads exactly ONE tool, `browser`. Write to both `tools/`
+# (opencode 1.18.4) and `tool/` (defensive against version skew). The `.mjs`
+# sibling is imported by browser.js but is NOT itself registered as a tool
+# (opencode globs `*.{ts,js}` only — verified on 1.18.4).
+cp "$TOOL_JS" "$TOOL_IMPL" "$SCRATCH/.opencode/tools/"
+cp "$TOOL_JS" "$TOOL_IMPL" "$SCRATCH/.opencode/tool/"
+
+# Template the committed agent def: bake the step budget + model in. The tab is
+# NOT templated any more — it is FORCED on the tool via env (below), so the model
+# has no way to name a tab at all.
+AGENT_MD="$SCRATCH/.opencode/agents/browser-agent.md"
+sed -e "s/__STEPS__/$STEPS/g" -e "s#__MODEL__#$MODEL#g" "$TEMPLATE" > "$AGENT_MD"
+# Some opencode versions read `.opencode/agent/` (singular) — write both.
+cp "$AGENT_MD" "$SCRATCH/.opencode/agent/browser-agent.md"
+
+# --- fail-closed tool-set gate (runtime verification, model-free) ------------ #
+# Before spending ANY model token — and before opening a tab — verify opencode
+# ACTUALLY resolved browser-agent to a BROWSER-ONLY tool set. `opencode debug
+# agent` is a read-only config dump (no model spend) that emits the resolved
+# `tools` map; we refuse to run unless `browser:true` AND every host tool
+# (bash/read/edit/write/webfetch/…) is present AND false. On any opencode
+# version/config where the host-tool denial did NOT take (browser tool missing on
+# an unsupported version, or a host tool still enabled), this turns a latent
+# "runs unconfined" landmine into a loud, safe refusal. `debug agent` has no
+# --dir, so we resolve the templated def by running in the scratch project dir.
+gate_out="$(cd "$SCRATCH" && "$OPENCODE_BIN" debug agent browser-agent 2>/dev/null)" || \
+  die "tool-set gate: 'opencode debug agent browser-agent' failed to run — cannot confirm a browser-only tool set (unsupported opencode version? see README 'opencode version requirement'); refusing to run"
+printf '%s' "$gate_out" | python3 -c '
+import json, sys
+# Confirm the resolved tool set is browser-ONLY. Fail closed (exit!=0) on ANY
+# uncertainty: unparseable output, missing `browser`, `browser` not true, a host
+# tool still true, or a host tool absent (absence must NOT read as "disabled").
+try:
+    tools = json.load(sys.stdin)["tools"]
+    assert isinstance(tools, dict)
+except Exception as e:
+    sys.stderr.write("unparseable debug-agent tool set: %s\n" % e); sys.exit(3)
+if tools.get("browser") is not True:
+    sys.stderr.write("browser tool not enabled (browser=%r)\n" % tools.get("browser")); sys.exit(4)
+enabled = sorted(k for k, v in tools.items() if k != "browser" and v is True)
+if enabled:
+    sys.stderr.write("host tools still enabled: %s\n" % ",".join(enabled)); sys.exit(5)
+required_false = ["bash", "read", "edit", "write", "webfetch"]
+missing = [t for t in required_false if t not in tools]
+if missing:
+    sys.stderr.write("cannot confirm host tools disabled (absent: %s)\n" % ",".join(missing)); sys.exit(6)
+sys.exit(0)
+' || die "tool-set gate FAILED: opencode did not resolve browser-agent to a browser-ONLY tool set — the host-tool denial did not take on this opencode version/config. Refusing to run the model unconfined (see README 'runtime tool-set gate' / 'opencode version requirement')"
+
+# --- open the agent's own tab ------------------------------------------------ #
+# Opened AFTER the gate so a gate-fail leaks no tab.
+open_resp="$("$BROWSER_BIN" "${bflags[@]}" open about:blank 2>/dev/null)" \
+  || die "failed to open a tab (is the browser-bridge extension connected? try: browser health)"
+TAB="$(printf '%s' "$open_resp" | python3 -c 'import json,sys
+try:
+    print(json.load(sys.stdin)["result"]["data"]["tabId"])
+except Exception:
+    pass')"
+case "$TAB" in (*[!0-9]*|"") die "could not determine the opened tabId from: $open_resp";; esac
+
+TRANSCRIPT1="$SCRATCH/opencode-transcript.jsonl"
+TRANSCRIPT2="$SCRATCH/opencode-transcript.retry.jsonl"
+ERRLOG="$SCRATCH/opencode.err"
+AUDIT_LOG="$SCRATCH/tool-audit.jsonl"
+TIMED_OUT_MARKER="$SCRATCH/.timed_out"
+
+# The stable per-session id the tool sends as X-Session-Id (matches the id our
+# `open` used; routing is overridden by the forced tab anyway — this is only for
+# audit-trail consistency). Sanitize: drop anything that isn't a plain id (a fake
+# browser in tests may echo JSON here).
+SESSION_ID="$("$BROWSER_BIN" --print-session-id 2>/dev/null || true)"
+case "$SESSION_ID" in (*[[:space:]{}\"]*|"") SESSION_ID="" ;; esac
+
+# The per-run task message: goal + the tab constraint + domain rules + the schema
+# reminder. (The static harness — single-tool contract, prefer `text`, schema —
+# lives in the agent md body.)
+MSG="$(cat <<EOF
+Goal: $GOAL
+
+You have ONE tool: \`browser\`. Call it with a TYPED op (never a shell command):
+  browser(op="text"[, selector])  — read the page's visible text (PREFER THIS)
+  browser(op="html")              — raw HTML (huge; last resort)
+  browser(op="eval", js="…")      — evaluate a small JS expression
+  browser(op="nav", url="…")      — navigate your tab
+  browser(op="screenshot")        — capture your tab
+Your tab is FIXED — you cannot choose it. Allowed domains: ${ALLOW:-<any>}. Denied: ${DENY:-<none>}.
+Hard budget: $STEPS steps. When finished, reply with ONLY the JSON object:
+{"answer":"<concise>","evidence":["<quote-or-url>"],"steps_used":<int>,"status":"ok|partial|blocked"}
+EOF
+)"
+
+run_opencode() {  # <transcript-out> [continue] — returns opencode's exit code (124 on timeout)
+  local out="$1" cont="${2:-}"
+  local -a oc=(run --format json -m "$MODEL" --agent browser-agent --auto --dir "$SCRATCH")
+  [ "$cont" = "continue" ] && oc+=(--continue)
+  local -a msg=("$MSG")
+  [ "$cont" = "continue" ] && msg=("Return ONLY the required JSON schema object and nothing else: {\"answer\":\"…\",\"evidence\":[…],\"steps_used\":<int>,\"status\":\"ok|partial|blocked\"}")
+  rm -f "$TIMED_OUT_MARKER"
+  # The model's ONLY action surface is the custom `browser` tool; it reads these
+  # from env and FORCES them (the model cannot set the tab/instance/domain policy).
+  # BROWSER_BRIDGE_* are inherited so the tool hits the same loopback bridge.
+  # Run opencode as its OWN session/process-group leader (setsid) so a --timeout
+  # can reap the WHOLE group — opencode may spawn helper children, and killing
+  # only the direct pid (what `timeout` does) can orphan them.
+  BROWSER_AGENT_TAB="$TAB" BROWSER_AGENT_INSTANCE="$INSTANCE" \
+  BROWSER_AGENT_ALLOW_DOMAINS="$ALLOW" BROWSER_AGENT_DENY_DOMAINS="$DENY" \
+  BROWSER_AGENT_DRY_RUN="$DRYRUN" BROWSER_AGENT_AUDIT="$AUDIT_LOG" \
+  BROWSER_AGENT_SESSION_ID="$SESSION_ID" \
+    setsid "$OPENCODE_BIN" "${oc[@]}" "${msg[@]}" >"$out" 2>>"$ERRLOG" </dev/null &
+  local leader=$!               # setsid makes opencode the group leader → PGID == leader
+  # Watchdog: after $TIMEOUT, mark + TERM opencode's whole group, then (grace) KILL
+  # it. Run the watchdog itself under `setsid` (its own group) with stdio to
+  # /dev/null so (a) it never holds this wrapper's stdout pipe — a leaked `sleep`
+  # holding the pipe would hang the caller's capture — and (b) we can reap the
+  # watchdog AND its inner `sleep` as one group when opencode exits normally.
+  setsid bash -c '
+    sleep "$1"; : > "$2"
+    kill -TERM -"$3" 2>/dev/null; sleep 5; kill -KILL -"$3" 2>/dev/null
+  ' _ "$TIMEOUT" "$TIMED_OUT_MARKER" "$leader" >/dev/null 2>&1 </dev/null &
+  local wd=$!                   # watchdog group leader → PGID == wd
+  wait "$leader" 2>/dev/null; local rc=$?
+  # Normal exit: reap the watchdog's whole group (incl. its pending `sleep`).
+  # Either way, defensively reap any straggler still in OPENCODE's group (a
+  # detached child), so nothing survives this run.
+  kill -KILL -"$wd" 2>/dev/null; wait "$wd" 2>/dev/null || true
+  kill -KILL -"$leader" 2>/dev/null || true
+  # Report a timeout only when the watchdog fired AND the process died by signal
+  # (rc>128) — this avoids a race calling a clean/near-simultaneous exit a timeout.
+  if [ -f "$TIMED_OUT_MARKER" ] && [ "$rc" -gt 128 ]; then return 124; fi
+  return "$rc"
+}
+
+# --- attempt 1 --------------------------------------------------------------- #
+run_opencode "$TRANSCRIPT1"; rc1=$?
+if [ "$rc1" = "124" ]; then
+  blocked "opencode timed out after ${TIMEOUT}s" "$STEPS"
+fi
+if schema="$(python3 "$PARSER" "$TRANSCRIPT1" 2>/dev/null)"; then
+  emit_result "$schema"
+fi
+# A non-zero (non-timeout) opencode exit with no parseable schema is a hard error
+# — surface it as `blocked`, no retry (the retry is only for a COMPLETED run whose
+# final message was malformed).
+if [ "$rc1" != "0" ]; then
+  blocked "opencode exited $rc1 without a valid result (see $ERRLOG)" "$STEPS"
+fi
+
+# --- attempt 2 (retry once on malformed-but-completed) ----------------------- #
+run_opencode "$TRANSCRIPT2" continue; rc2=$?
+if [ "$rc2" != "124" ] && schema="$(python3 "$PARSER" "$TRANSCRIPT2" 2>/dev/null)"; then
+  emit_result "$schema"
+fi
+blocked "opencode returned no valid schema after one retry" "$STEPS"

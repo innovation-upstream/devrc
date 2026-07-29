@@ -19,7 +19,7 @@
 
 import {
   ALLOWED_OPS, validateCommand, resultEnvelope, errorEnvelope, nextBackoffMs,
-  pollHeaders, resultWithInstance,
+  pollHeaders, resultWithInstance, normalizeText, TEXT_MAX_BYTES_DEFAULT,
   classifyPollStatus, POLL_COMMAND, POLL_IDLE, POLL_SUPERSEDED,
   POLL_UNAUTHORIZED, SUPERSEDE_BACKOFF_MS,
 } from "./protocol.js";
@@ -91,6 +91,28 @@ const OPS = {
       func: () => document.documentElement.outerHTML,
     });
     return { url: tab.url, title: tab.title, html: inj.result };
+  },
+
+  // Cheap read: the tab's VISIBLE innerText (optionally scoped to a CSS
+  // selector), normalized + byte-capped in protocol.js. ~98% smaller than
+  // getHtml's outerHTML — what the opencode browser-agent reads with. The
+  // injected fn returns RAW innerText; normalizeText does the whitespace
+  // collapse + cap out here (so it stays pure + unit-tested).
+  async text(cmd) {
+    const tab = await targetTab(cmd);
+    const sel = (cmd && typeof cmd.selector === "string") ? cmd.selector : "";
+    const [inj] = await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      args: [sel],
+      func: (s) => {
+        const el = s ? document.querySelector(s) : document.body;
+        return el ? el.innerText : "";
+      },
+    });
+    const cap = (cmd && cmd.maxBytes != null)
+      ? cmd.maxBytes : TEXT_MAX_BYTES_DEFAULT;
+    const { text, truncated } = normalizeText(inj.result, cap);
+    return { url: tab.url, title: tab.title, text, truncated };
   },
 
   async eval(cmd) {

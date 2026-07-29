@@ -61,14 +61,82 @@ Prefix any op with `--instance <key>` to target a specific connected profile
 | `browser [--instance K] close`             | close this session's owned tab and drop ownership |
 | `browser [--instance K] release`           | drop ownership WITHOUT closing the tab |
 | `browser [--instance K] [--tab T] html`              | `outerHTML` of the owned tab (else the active tab) |
+| `browser [--instance K] [--tab T] text [selector] [--max-bytes N]` | **cheap read** — visible `innerText` of the owned/active tab (optional CSS `selector`), whitespace-normalized + byte-capped (default 32768; `0`=uncapped; a truncation note is appended). ~98% smaller than `html` — prefer it |
 | `browser [--instance K] [--tab T] eval '<js>'`       | run JS in the owned/active tab, return its value |
 | `browser [--instance K] tabs`              | list open tabs (`.data.ownedTabId` flags this session's owned tab) |
 | `browser [--instance K] [--tab T] nav <url>`         | navigate the owned/active tab to `<url>` |
 | `browser [--instance K] [--tab T] screenshot [path]` | captureVisibleTab; prints the data URL, or writes a `.png` to `path` |
+| `browser [--instance K] agent "<goal>" [flags]` | run the **autonomous opencode browser-agent** in its OWN isolated tab against `<goal>`; returns a compact `{answer,evidence,steps_used,status}` (see below) |
 | `browser --print-session-id`               | print the derived per-session id (debug) and exit |
 
 Result payloads land under `.result.data` in the JSON (the envelope is
 `{"ok":true,"result":{"id","ok","data":{...}}}`).
+
+## `browser agent "<goal>"` — autonomous read/navigate in an isolated tab
+
+Offload an open-ended "go read X and tell me Y" browsing task to a **cheap
+autonomous agent** (opencode + DeepSeek `deepseek-v4-flash` via OpenRouter) so it
+never burns YOUR context on transient page HTML — only a compact structured
+result comes back.
+
+```bash
+browser agent "go to news.ycombinator.com and report the top 3 story titles" \
+  [--instance K] [--allow-domains a.com,b.com] [--deny-domains x.com] \
+  [--steps N] [--timeout S] [--dry-run]
+```
+
+- **Output (stdout):** one compact JSON object — never raw HTML:
+  `{"answer":"…","evidence":["…"],"steps_used":N,"status":"ok|partial|blocked"}`.
+  Exit 0 for `ok`/`partial`, non-zero for `blocked`/errors.
+- **Own isolated tab + NO shell (structural safety).** The wrapper `open`s a NEW
+  background tab and gives the agent exactly ONE capability: a TYPED custom tool
+  `browser` (opencode/tools/browser.js). The agent def **denies bash and every
+  other built-in tool**, so the model has no shell at all — it calls the tool with
+  structured args (`op` + optional `selector`/`url`/`js`), never a command string.
+  The tab, instance, and `--deny/--allow-domains` are **forced on the tool via env
+  the wrapper sets** — the model cannot choose the tab or reach a denied domain.
+  The tab is closed on EVERY exit path (success, timeout, error).
+  - **WHY typed, not bash (the PR #180 RCE fix):** the earlier design gave the
+    agent opencode's bash tool scoped to `browser --tab <id> *`. A shell OUTPUT
+    REDIRECT (`browser --tab N eval '…' >> ~/.zshenv`) is not a separate command
+    node, so it rode the allowed `browser` command through opencode's wildcard
+    glob and the shell performed the redirect → a hostile page could induce the
+    model to write to a sourced dotfile → host RCE. The typed tool removes the
+    shell entirely, so there is no `>`/`;`/`|`/`$()` surface to abuse.
+- **Runtime fail-closed tool-set gate (makes an un-upgraded opencode SAFE):**
+  before opening a tab or spending a model token, the wrapper runs `opencode debug
+  agent browser-agent` (a read-only, **model-free** config dump) and refuses to run
+  (`die`, model never invoked) unless the resolved `tools` map is browser-ONLY —
+  `browser:true` AND every host tool (`bash`/`read`/`edit`/`write`/`webfetch`)
+  present AND `false`. Any uncertainty (unparseable output, `browser` absent, a
+  host tool `true`, or a host tool absent) fails closed. Different opencode
+  versions resolve the deny differently (workbench 1.17.20, laptop 1.18.4), so this
+  is the one place the fail-closed property is *verified at runtime* rather than
+  trusted — on a version where the host-tool denial didn't take, `browser agent`
+  refuses instead of running the model unconfined. The gate runs BEFORE the tab is
+  opened, so a gate failure leaks no tab.
+- **Guardrails:** a step budget (`--steps`, default 12), a wall-clock `--timeout`
+  (default 120s) enforced with a **process-group kill** (`setsid` + kill the whole
+  group, so no opencode child survives), `--deny-domains`/`--allow-domains`
+  enforced INSIDE the tool (a denied `nav` is refused before it reaches the
+  bridge), a **non-http(s) nav scheme hard-denial** (a `nav` to `file:`/`data:`/
+  `about:`/`javascript:`/`chrome:`/… is refused as `nav_scheme_denied:<scheme>`
+  before any fetch — those have no host and would otherwise bypass
+  `--allow-domains`), and `--dry-run` (intercepts `nav`/`eval` — logs, doesn't
+  execute). The full opencode JSON transcript + a metadata-only tool audit are kept
+  in a scratch dir. **Domain deny is best-effort** (see note below).
+- **⚠ Privacy:** the pages the agent reads are sent to **OpenRouter/DeepSeek**.
+  Do NOT point it at high-secret authenticated pages casually.
+- **⚠ Domain deny is a mitigation, not a guarantee.** The tool refuses a `nav` to
+  a denied host, but it cannot see a page's own client-side redirect (meta-refresh
+  / `location=` after an allowed nav) — the bridge navigates the tab and the tool
+  only sees the op it issued. Treat `--deny-domains` as best-effort defence in
+  depth; the real isolation is the own-tab lock. (Follow-up: server-side
+  enforcement against the tab's resolved post-nav URL would make it binding.)
+- **Prereqs:** `opencode` on PATH with the OpenRouter key already in its auth
+  store (`~/.local/share/opencode/auth.json`), the extension connected, and BOTH
+  the agent def AND the custom tool symlinked into opencode's config (see README →
+  Deploy). If any is missing you get a clean error and no orphaned tab.
 
 ## Per-session tab isolation (use `open` for multi-step work)
 

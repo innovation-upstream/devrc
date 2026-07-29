@@ -123,6 +123,7 @@ must run in whatever tab is active). This can be scoped down later; noted in
 | op | maps to | returns |
 |----|---------|---------|
 | `getHtml`    | `chrome.scripting` → `document.documentElement.outerHTML` | `{url,title,html}` |
+| `text`       | `chrome.scripting` → `(selector?document.querySelector(selector):document.body).innerText`, normalized + byte-capped (`selector`/`maxBytes` optional) | `{url,title,text,truncated}` |
 | `eval`       | `chrome.scripting.executeScript` (MAIN world) of `js`     | `{url,value}` |
 | `tabs`       | `chrome.tabs.query({})`                                   | `{tabs:[...],ownedTabId}` |
 | `nav`        | `chrome.tabs.update(tab,{url})`                           | `{tabId,url}` |
@@ -132,9 +133,13 @@ must run in whatever tab is active). This can be scoped down later; noted in
 
 `open`/`close` are dispatched to the extension; `release` (drop ownership, don't
 close the tab) is handled server-side and never reaches the extension. The
-tab-scoped ops (`getHtml`/`eval`/`nav`/`screenshot`/`close`) run against the
-calling session's owned tab when it has one (see Session isolation), else the
-active tab.
+tab-scoped ops (`getHtml`/`text`/`eval`/`nav`/`screenshot`/`close`) run against
+the calling session's owned tab when it has one (see Session isolation), else the
+active tab. `text` is the **cheap read**: it returns visible `innerText` (~KB)
+rather than full `outerHTML` (~100s of KB) — the read the opencode browser-agent
+uses. The `text` whitespace-normalization + byte-cap live in
+`extension/protocol.js` (`normalizeText`, unit-tested); a `--max-bytes` cap
+(default 32 KB, `0`=uncapped) truncates with a `…[truncated N bytes]` note.
 
 Server envelope: `POST /cmd` → `200 {"ok":true,"result":{id,ok,data}}`, or a
 structured error: `503 extension_not_connected`, `504 timeout`,
@@ -293,6 +298,190 @@ Feeds the `activity.events` table (and, once its registry learns the source,
 Brave): run any `browser` command, then confirm a `source='browser-bridge'` row
 landed in `activity.events`.
 
+## opencode browser-agent (`browser agent "<goal>"`)
+
+An **autonomous** read/navigate agent that offloads open-ended "go read X, tell
+me Y" browsing off Claude's context onto a **cheap** model. `browser agent
+"<goal>"` (→ the `browser-agent` wrapper) drives opencode headlessly against
+DeepSeek `deepseek-v4-flash` (via OpenRouter) in the agent's OWN isolated Brave
+tab and returns a compact structured result — never raw HTML.
+
+```
+browser agent "<goal>" [--instance K] [--allow-domains …] [--deny-domains …]
+                       [--steps N] [--timeout S] [--dry-run]
+```
+
+**Flow (the wrapper, `browser-agent`):**
+
+1. `open`s a NEW background tab on instance K and captures its `tabId` (the
+   agent's OWN tab — reuses the #175 `open`+`--tab` isolation).
+2. Runs `opencode run --format json -m openrouter/deepseek/deepseek-v4-flash
+   --agent browser-agent --auto` in a scratch `--dir`, under a **wall-clock
+   `--timeout` enforced with a PROCESS-GROUP kill** (`setsid` + `kill -<pgid>`, so
+   no opencode child can survive a timeout — the old `timeout --kill-after` only
+   killed the direct pid and could orphan a detached child).
+3. **Parses opencode's final message** as the required schema
+   `{"answer":str,"evidence":[str],"steps_used":int,"status":"ok|partial|blocked"}`.
+   On a completed-but-malformed run it re-invokes **exactly once** (`--continue`,
+   demanding ONLY the JSON); still malformed → returns `{"status":"blocked",…}`.
+   No infinite retry. A hard opencode error (non-zero exit) or a `--timeout` kill
+   → `blocked` with no retry.
+4. Closes the owned tab on **every** exit path (success / timeout / error /
+   tab-gone) — no leaked tabs.
+
+**The action surface: ONE typed tool, NO shell (the PR #180 RCE fix).**
+
+The agent's entire capability is a single **custom opencode tool**, `browser`
+(`opencode/tools/browser.js` + its pure-logic sibling `browser_tool_impl.mjs`,
+copied into the scratch project's `.opencode/tools/` per run). The model calls it
+with TYPED arguments — `op` ∈ {`text`,`html`,`eval`,`nav`,`screenshot`} plus
+optional `selector`/`url`/`js`/`maxBytes` — **never a shell command string**.
+
+- **Why this replaced the bash tool.** The MVP gave the agent opencode's *bash*
+  tool, permission-scoped to `browser --tab <id> *`. opencode denies by matching
+  each shell *command* node against the deny rule, so chaining (`;`/`&&`/`|`/
+  `$()`/backticks) was blocked — but a shell OUTPUT REDIRECTION
+  (`browser --tab N eval '…' >> ~/.zshenv`) is **not a separate command node**: it
+  attaches to the allowed `browser` command, so the wildcard glob matched it and
+  the shell performed the redirect. A hostile page could induce the autonomous
+  model to append attacker text to a sourced dotfile (`~/.zshenv`, sourced by
+  every `zsh -c` incl. Claude's Bash tool) → **host RCE**. The raw-shell surface
+  was the root cause; a typed tool eliminates it — there is no command string, so
+  no `>`/`>>`/`;`/`|`/`$()`/backtick surface exists at all.
+- **bash (and edit/read/webfetch/…) fully DENIED.** The per-run agent def
+  (templated from `opencode/browser-agent.md`) sets `permission: {"*": deny,
+  browser: allow}`. Verified with `opencode debug agent browser-agent`: the
+  resolved tool set is `{bash:false, read:false, edit:false, write:false,
+  webfetch:false, …, browser:true}` — only the typed tool is enabled.
+- **Runtime fail-closed tool-set gate (this is what makes an un-upgraded /
+  other opencode version SAFE).** The denial above is a *property of the resolved
+  config*, and different opencode versions resolve it differently (workbench is
+  1.17.20, laptop 1.18.4). So BEFORE opening a tab or spending a single model
+  token, the wrapper runs `opencode debug agent browser-agent` (a **read-only,
+  model-free config dump**) in the scratch project and parses the resolved `tools`
+  map. It **refuses to run** (`die`, non-zero, model never invoked) unless
+  `browser:true` **AND** every host tool (`bash`/`read`/`edit`/`write`/`webfetch`)
+  is present **AND** `false`. Any uncertainty fails closed: unparseable output, a
+  missing `browser` (custom tool not loaded on an unsupported version), a host
+  tool still `true`, **or** a host tool absent from the output (absence must not
+  read as "disabled"). This turns the version-skew from a latent "runs unconfined"
+  landmine into a loud, safe refusal — on any opencode where the host-tool denial
+  did not take, `browser agent` refuses rather than running the model with a shell.
+  Because the gate runs **before** the tab is opened, a gate failure leaks no tab.
+  *opencode version requirement:* an opencode whose `debug agent` reports a
+  browser-only tool set (verified on 1.18.4; the resolved `tools` map above). If a
+  future/other version can't be confirmed browser-only, upgrade — the gate will
+  refuse until it can.
+- **The model cannot choose the tab / instance / domain policy.** The wrapper
+  FORCES them on the tool via env (`BROWSER_AGENT_TAB`/`_INSTANCE`/
+  `_ALLOW_DOMAINS`/`_DENY_DOMAINS`/`_DRY_RUN`, + inherited `BROWSER_BRIDGE_*`).
+  The tool reads the forced tab and posts it explicitly — an explicit `--tab`
+  overrides the server's owned-tab routing, so the model can never target another
+  tab. Enforcement (op allowlist + domain deny + forced tab) lives IN the tool
+  (`browser_tool_impl.mjs`), unit-tested in `browser_tool.test.mjs`.
+- **Non-http(s) nav schemes are DENIED.** A `nav` is refused before any bridge
+  fetch unless its scheme is `http:`/`https:`. `file:`/`data:`/`about:`/
+  `javascript:`/`chrome:`/`blob:`/… all have an empty hostname, so the host
+  allow/deny gate would treat them as "no host → not gated" and let them slip past
+  the operator's `--allow-domains` confinement (loading attacker HTML in the owned
+  tab, running inline script, or — with the browser's file-URL toggle on — reading
+  a local file). The refusal reason is `nav_scheme_denied:<scheme>`; an
+  unparseable/schemeless target is refused too (`nav_scheme_denied:<none>`). This
+  is a hard gate, independent of the allow/deny lists.
+- **Domain deny is best-effort.** For http(s) navs the tool refuses a `nav` to a
+  denied host (and scans an `eval` for a literal denied host), but it cannot see a
+  page's own client-side redirect after an allowed nav — the bridge navigates and
+  the tool only sees the op it issued. `--deny-domains` is defence in depth, not a
+  guarantee; the real isolation is the own-tab lock. *Follow-up:* server-side
+  enforcement against the tab's resolved post-nav URL would make it binding.
+- The `browser` tool talks to the loopback bridge over HTTP directly (bearer +
+  `Host: 127.0.0.1` + `X-Session-Id` + the forced `tab`) — **zero subprocess, zero
+  shell**. A metadata-only audit line per op (`#173`) goes to a scratch
+  `tool-audit.jsonl` (op + decision + host — never page content).
+
+**Harness (the agent-md body):** a strict single-tool contract, "prefer `text`
+over `html`", the step budget, the required final-answer schema, and the domain
+rules — so a cheap model is reliable *by construction*.
+
+**opencode JSON envelope (verified live, opencode 1.18.4):** `--format json`
+emits **newline-delimited JSON events** (NOT one document): `{"type":"step_start",
+…}`, `{"type":"text","part":{"type":"text","text":"…"}}`, `{"type":"step_finish",
+"part":{…,"tokens":{…},"cost":…}}`. The assistant answer is in the `text` parts;
+`browser-agent-parse.py` concatenates them and extracts the last balanced schema
+object (defensive across the laptop 1.18.4 / workbench 1.17.20 version skew).
+
+**Cost / latency (est.):** ~$0.005–0.008 and ~10–25 s per task on
+`deepseek-v4-flash` (cold-start opencode can take longer — hence the generous
+120 s default `--timeout`); vs ~$0.75+ and a context-burn if the same loop ran in
+Claude. **Privacy:** the pages the agent reads go to OpenRouter/DeepSeek —
+consciously accepted; don't route high-secret pages casually.
+
+### Deploy (per host — operator step; NOT done by the wrapper)
+
+The wrapper is self-contained EXCEPT it needs (1) `opencode` on PATH, (2) the
+OpenRouter key already in opencode's auth store (`~/.local/share/opencode/auth.json`
+on both hosts — do NOT add a key). It writes BOTH the per-run agent def AND the
+typed tool into its scratch `--dir`, so a live run needs no global install. For
+interactive use (`opencode --agent browser-agent`), also symlink the canonical def
+**and** the tool into opencode's config dir:
+
+```bash
+mkdir -p ~/.config/opencode/agents ~/.config/opencode/tools
+ln -sf ~/workspace/devrc/scripts/browser-bridge/opencode/browser-agent.md \
+       ~/.config/opencode/agents/browser-agent.md
+# BOTH tool files — browser.js is the tool; browser_tool_impl.mjs is its
+# (non-tool) pure-logic sibling, imported by it. opencode globs `*.{ts,js}` so the
+# .mjs is NOT registered as a tool, but it MUST sit alongside browser.js.
+ln -sf ~/workspace/devrc/scripts/browser-bridge/opencode/tools/browser.js \
+       ~/.config/opencode/tools/browser.js
+ln -sf ~/workspace/devrc/scripts/browser-bridge/opencode/tools/browser_tool_impl.mjs \
+       ~/.config/opencode/tools/browser_tool_impl.mjs
+```
+
+(The global def keeps the `__STEPS__`/`__MODEL__` placeholders — inert on its own;
+the wrapper substitutes them per run.)
+
+**⚠ opencode version skew (workbench 1.17.20 vs laptop 1.18.4).** The custom-tool
+mechanism (`.opencode/tools/*.js`, `permission: {"*": deny, …}`) is **verified on
+1.18.4** (laptop) via `opencode debug agent browser-agent` (resolved tools show
+`bash:false … browser:true`) and an end-to-end `opencode debug agent … --tool
+browser` run against a fake bridge. It is **NOT verified on 1.17.20** (workbench) —
+custom-tool support and the tool-dir name may differ. Mitigations: the wrapper
+writes the tool to BOTH `.opencode/tools/` and `.opencode/tool/`; but if 1.17.20
+does not support project custom tools at all, `browser agent` will not work there.
+**Recommend upgrading workbench to ≥1.18.4** (`opencode upgrade`) before relying on
+`browser agent` on that host, and re-running the `opencode debug agent` check.
+
+### Manual live check (the one step that needs real Brave + a real model — CANNOT run in CI)
+
+The unit tests use a **mocked opencode/bridge** (no live model, no Brave — that
+loop can't run in CI). Two deterministic checks CAN be run on a host with opencode
+installed (no model, no Brave) and are the fastest way to confirm the security
+contract after a change:
+
+```bash
+# (a) the agent is bash-DENIED and only the typed tool is enabled (resolve, no model):
+S=$(mktemp -d); mkdir -p "$S/.opencode/agents" "$S/.opencode/tools"
+sed -e 's/__STEPS__/12/g' -e 's#__MODEL__#openrouter/deepseek/deepseek-v4-flash#g' \
+  scripts/browser-bridge/opencode/browser-agent.md > "$S/.opencode/agents/browser-agent.md"
+cp scripts/browser-bridge/opencode/tools/browser.js \
+   scripts/browser-bridge/opencode/tools/browser_tool_impl.mjs "$S/.opencode/tools/"
+( cd "$S" && opencode debug agent browser-agent ) | python3 -c \
+  'import json,sys; t=json.load(sys.stdin)["tools"]; assert t["bash"] is False and t["browser"] is True; print("OK: bash denied, only browser enabled")'
+# (b) the tool refuses a bad op / disowned tab (executes the tool, no model, no bridge):
+( cd "$S" && opencode debug agent browser-agent --tool browser --params '{"op":"open"}' ) 2>&1 | grep op_not_allowed
+```
+
+To verify the **full** end-to-end (needs real Brave + a real model):
+
+1. Deploy the agent def AND the tool (see Deploy above); `browser health` →
+   `extension_connected:true`.
+2. `browser agent "go to news.ycombinator.com and report the top 3 story titles"`.
+3. Assert: a NEW background tab opened (NOT your active tab), it navigated +
+   read via the typed `browser` tool, it returned the compact schema with 3
+   titles, your active tab was untouched, and the tab was closed afterwards. Check
+   the scratch `tool-audit.jsonl` records only op/decision metadata (no page text).
+
 ## Icon
 
 A gruvbox-tinted **bridge / chain-link** glyph (blue loopback node linked to the
@@ -355,9 +544,44 @@ turnstile/waiter residue (no deadlock), the HTTP `429 rate_limited` + throttle
 telemetry event (metadata-only, a COARSE non-reversible session hash — never the
 raw id), the HTTP `429 queue_full`, that the production defaults never throttle a
 normal small burst, and the `browser` CLI backing off (non-zero exit) on a 429.
-Current totals: **92 Python** (`test_server.py`) + **22 node**
-(`protocol.test.mjs`). The chrome.* glue in `service_worker.js` genuinely needs a
-real browser and is covered by the manual checklist in `extension/README.md`.
+It also covers the **`text` cheap-read op** (dispatched + tab-scoped like
+getHtml; selector/maxBytes passthrough; the CLI subcommand's default/selector/cap
+arg parsing; and telemetry staying metadata-only — the page text never emitted)
+and the `normalizeText` whitespace-collapse + UTF-8-safe byte-cap (node).
+
+The **`browser agent`** slice, all headless (NO live model, NO Brave, NO bridge):
+
+- `browser_tool.test.mjs` (node) — the AUTHORITATIVE coverage for the TYPED-tool
+  RCE fix (`opencode/tools/browser_tool_impl.mjs`, `fetchImpl`/`readToken` mocked):
+  the op allowlist (open/close/tabs/release refused), the FORCED tab (the model
+  cannot override it — there is no tab arg), domain deny on `nav` (+ allowlist mode
+  + the best-effort `eval` scan), the request shape (bearer / `Host` / `X-Session-Id`
+  / mapped op / forced tab / instance target), `text` selector+maxBytes, the
+  dry-run intercept, an op-level bridge failure surfacing as a refusal, and the
+  screenshot no-blob rule.
+- `test_browser_agent_parse.py` (python) — the opencode-transcript → schema parser
+  (real-shaped stream, tool-event ignore, embedded-in-prose, multi text-part
+  concat, last-schema-wins, brace-in-string, no-JSON/missing-keys → none,
+  loose-field normalization, exit codes).
+- `test_browser_agent.py` (python, fake `opencode` + fake `browser` CLI) — the
+  wrapper lifecycle + security wiring: arg parsing; own-tab open→close on EVERY
+  exit path (success/timeout-kill/opencode-error/open-failure); the agent def
+  DENYING bash and allowing ONLY the custom tool (`"*": deny` + `browser: allow`,
+  no `browser --tab … *`, no `bash:`); the typed tool being copied into the scratch
+  project; the wrapper FORCING tab/instance/domain policy on the tool via env; NO
+  shell-string path remaining (no PATH shim, the task message points at the typed
+  tool); the **process-group kill on timeout** (a fake opencode forks an
+  inherited-group straggler → asserted reaped, no orphan); schema parse + EXACTLY
+  ONE `--continue` retry then `blocked`, no-retry on a hard error.
+
+Current totals: **132 Python** (`test_server.py` 100 + `test_browser_agent_parse.py`
+14 + `test_browser_agent.py` 18) + **50 node** (`protocol.test.mjs` 29 +
+`browser_tool.test.mjs` 21). The live browser-driving loop (real DeepSeek + real
+Brave) canNOT run in CI; the chrome.* glue in `service_worker.js` and the
+end-to-end agent run are covered by the manual checklists (`extension/README.md` +
+"opencode browser-agent" above). The two `opencode debug agent` checks under
+"Manual live check" verify the bash-denied / typed-tool-only contract on a host
+WITHOUT a model.
 
 ## Deploy (nix)
 
