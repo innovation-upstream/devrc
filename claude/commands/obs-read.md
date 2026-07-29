@@ -7,8 +7,9 @@ allowed-tools: Bash
 
 # /obs-read — deterministic observability queries with a silent-zero guard
 
-Runs `scripts/obs-read`, which owns the whole `kubectl port-forward -> query ->
-teardown` cycle against **Prometheus / Loki / Pyroscope** on an explicit cluster,
+Runs **`~/workspace/devrc/scripts/obs-read`**, which owns the whole
+`kubectl port-forward -> query -> teardown` cycle against
+**Prometheus / Loki / Pyroscope** on an explicit cluster,
 parses the result into a readable table (or `--json`), and — the whole point —
 makes the **silent-zero** trap impossible to miss: an empty result set is
 rendered as a LOUD warning, never as a clean `0`, while a series whose value is
@@ -23,18 +24,27 @@ genuinely 0 renders normally.
   success, error, and signal.
 
 ## Usage
+
+🔴 **Use the ABSOLUTE path — `obs-read` is NOT on `$PATH`, and it lives in the
+`devrc` repo, not in whatever repo you are working in.** A bare `scripts/obs-read`
+resolves against the current repo and fails there (this sent a 2026-07-27 session
+back to a hand-rolled `kubectl port-forward`). It is a self-contained script and
+runs correctly from any cwd.
+
 ```bash
+OBS=~/workspace/devrc/scripts/obs-read
+
 # discover the preset library (validated vs unvalidated + source)
-scripts/obs-read --list-presets
+$OBS --list-presets
 
 # a surveyed, validated preset
-scripts/obs-read --cluster dpprod --preset dp-5xx-rate
-scripts/obs-read --cluster dpprod --preset dp-code-breakdown --json
-scripts/obs-read --cluster dpprod --preset dp-trpc-errors --since 1h
+$OBS --cluster dpprod --preset dp-5xx-rate
+$OBS --cluster dpprod --preset dp-code-breakdown --json
+$OBS --cluster dpprod --preset dp-trpc-errors --since 1h
 
 # ad-hoc raw query (must name the backend)
-scripts/obs-read --cluster homelab --backend prometheus --query 'sum(up)'
-scripts/obs-read --cluster homelab --backend loki --query '{namespace="monitoring"}' --since 5m
+$OBS --cluster homelab --backend prometheus --query 'sum(up)'
+$OBS --cluster homelab --backend loki --query '{namespace="monitoring"}' --since 5m
 ```
 
 ## The silent-zero guard
@@ -59,7 +69,9 @@ validated preset; treat unvalidated ones as starting points.
 
 ## Notes
 - Operated deterministically — no LLM in the path. Extend the preset library or
-  wiring in `scripts/obs-read`; tests are `scripts/tests/test_obs_read.py`.
+  wiring in `~/workspace/devrc/scripts/obs-read`; tests are
+  `~/workspace/devrc/scripts/tests/test_obs_read.py`. (Both paths are in the
+  **devrc** repo — every relative path in this doc is relative to that clone.)
 - `--since` applies to range/profile queries (Loki, Pyroscope, `--kind range`).
 - Signal-safe teardown: kubectl runs in its own session and is torn down by
   killing the process group on success/error/SIGINT/SIGTERM (no leaked tunnel).
