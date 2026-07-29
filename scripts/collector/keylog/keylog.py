@@ -368,6 +368,19 @@ def main(argv=None) -> int:
         logger.run(poll_seconds=poll)
     except KeyboardInterrupt:
         logger.stop()
+    except Exception as exc:
+        # The X server going away (logout, display-manager restart, X crash) is
+        # an expected lifecycle event, not a fault: python-xlib surfaces it as
+        # ConnectionClosedError / a bare socket error out of the RECORD loop.
+        # Let it exit 0 so PartOf=graphical-session.target tears us down quietly
+        # instead of tripping OnFailure= and toasting a phantom failure. Any
+        # OTHER exception is a real bug and still exits non-zero.
+        from Xlib.error import ConnectionClosedError
+
+        if not isinstance(exc, (ConnectionClosedError, ConnectionError, OSError)):
+            raise
+        print(f"keylog: X connection closed — exiting cleanly: {exc}",
+              file=sys.stderr, flush=True)
     return 0
 
 

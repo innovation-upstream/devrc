@@ -543,6 +543,12 @@ in
       # room — session-tailer.py also now checkpoints its state incrementally so
       # an interrupted run still resumes rather than restarts.
       TimeoutStartSec = 600;
+      # Session teardown (logout/reboot) SIGTERMs this oneshot mid-scan, which
+      # systemd records as Failed with result 'signal' → a phantom OnFailure
+      # toast for a perfectly normal shutdown. The tailers checkpoint state, so
+      # an interrupted run just resumes next tick. Treat SIGTERM as success; a
+      # real crash still exits non-zero and still notifies.
+      SuccessExitStatus = "TERM";
       Environment = [
         "PATH=${lib.makeBinPath [ pkgs.python312 pkgs.coreutils pkgs.bash ]}"
       ];
