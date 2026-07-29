@@ -114,21 +114,43 @@ under prompt injection. Two structural rules, both learned the hard way and both
 test-guarded (`tests/test_allowlist_covers_prompt_shapes.py`):
 
 1. **No mid-pattern wildcard.** `*` compiles to `.*` in an anchored,
-   whitespace-normalised, DOTALL regex, so it matches *across spaces*. A
-   `Bash(git -C * log*)` entry therefore allowed anything between `-C ` and
-   ` log` — which is exactly where git's global options go, giving
-   `git -C <repo> -c diff.external=<cmd> log -p --ext-diff` → arbitrary code
-   execution. The `-C` repo path and the `gh -R` repo are now **pinned literals**.
+   whitespace-normalised, DOTALL regex, so it matches *across spaces*. A wildcard
+   sitting between a binary and its subcommand is therefore not "one token" — it
+   is the slot where that program's **own options** go. Three real holes of this
+   exact shape have existed here:
+   | entry | what it admitted |
+   |---|---|
+   | `Bash(git -C * log*)` | `git -C R -c diff.external=<cmd> log -p --ext-diff` → RCE |
+   | `Bash(node *query.mjs get*)` | `node -e '<arbitrary JS>' query.mjs get 1` → RCE |
+   | `Bash(gh -R * pr view*)` | `gh -R R pr merge N --body "… pr view …"` → a write |
+
+   The `git -C` path, the `node` script path and the `gh -R` repo are all now
+   **pinned literals**. `test_no_entry_carries_a_mid_pattern_wildcard` enforces
+   this for every binary, whitespace-proof.
 2. **A prefix pattern cannot forbid a suffix.** Any verb with a "run this
    command" flag *after* the subcommand is unfixable by narrowing and is
    **dropped**: `ls-remote` (`--upload-pack`), `git grep` (`-O` /
-   `--open-files-in-pager`), `gh api`, `curl`. Where the verb must be kept
-   (`log`/`show`/`diff`/`rev-list` all accept `--output=<file>`, an
-   arbitrary-path arbitrary-content write), a **`--disallowedTools` deny layer**
-   (`DRAFTER_DENIED_TOOLS`) closes the flag — deny overrides allow.
+   `--open-files-in-pager`), `gh api`, `curl`.
 
-The durable answer is to keep moving raw git behind fixed wrappers like
-`ticket-status`, which validate their own arguments.
+Where such a verb must be kept — `log`/`show`/`diff`/`rev-list` all accept
+`--output=<file>`, an arbitrary-path arbitrary-content write — a
+**`--disallowedTools` deny layer** (`DRAFTER_DENIED_TOOLS`) raises the bar.
+
+> ⚠ **The deny layer is not a boundary.** It is **bypassable by quoting**:
+> `git … '--output=X' …` executes where `git … --output=X …` is denied (verified
+> by execution). The deny regex needs a literal space before the flag and the
+> harness de-quotes only the first token, while bash strips the quote before git
+> sees it. The **boundary is the pinned allow list**; the deny layer only makes
+> the residual harder to reach by accident. `test_deny_layer_is_bypassable_by_quoting`
+> asserts this weakness on purpose so the docs can't drift back to "closed".
+
+Treat the allowlist as **reduced, not proven safe**. The durable answer is to keep
+moving raw git behind fixed wrappers like `ticket-status`, which validate their
+own arguments in code we control.
+
+A **runtime guard** aborts the run if `CIVITAI_REPO` is pointed at a repo with no
+pinned entry — otherwise every git read is rejected (unanswerable in headless) and
+the pass emits confident records built on zero verification.
 
 ## Delta-scoping (cheap continuous runs)
 

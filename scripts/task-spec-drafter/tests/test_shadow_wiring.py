@@ -102,10 +102,17 @@ def test_allowlist_has_no_write_capable_verbs():
 def test_allowlist_keeps_readonly_verification_verbs():
     al = _allowlist(_read(_DRAFTER))
     for verb in (
-        "Bash(gh pr list*)", "Bash(gh pr view*)",
-        "Bash(kubectl get*)", "Bash(node *query.mjs get*)",
+        "Bash(gh pr list*)", "Bash(gh pr view*)", "Bash(kubectl get*)",
+        # PINNED to the literal script path — `Bash(node *query.mjs get*)` was the
+        # same mid-glob RCE as `git -C *`: `node -e '<js>' query.mjs get 1` matched
+        # it and node ran the `-e` payload (verified end-to-end via `claude -p`).
+        "Bash(node /home/zach/.claude/skills/clickup/query.mjs get*)",
     ):
         assert verb in al, f"missing read-only verification verb {verb}"
+    assert "Bash(node *query.mjs" not in al, (
+        "the clickup CLI entry must pin the literal script path — a wildcard "
+        "before it admits `node -e '<arbitrary JS>' query.mjs get 1`"
+    )
     # git reads survive the RCE fix — in their PINNED form, for every repo the
     # drafter is allowed to touch.
     for path in _PINNED_PATHS:
