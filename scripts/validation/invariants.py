@@ -59,7 +59,7 @@ DERIVED_ATTENTION_TOL = 0.02
 DERIVED_ATTENTION_WINDOW_HOURS = 48
 
 EXPECTED_HOSTS = {"workbench", "laptop"}
-EXPECTED_SOURCES = {"zsh", "tmux", "keys", "browser", "claude", "i3"}
+EXPECTED_SOURCES = {"zsh", "tmux", "keys", "browser", "claude", "i3", "opencode"}
 
 # Layer-A session-summary invariants (scripts/collector/claude/session-tailer.py).
 # Required payload keys every well-formed session-summary rollup must carry (a

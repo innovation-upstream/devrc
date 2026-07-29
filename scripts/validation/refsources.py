@@ -25,6 +25,7 @@ import json
 import re
 import shutil
 import sqlite3
+import sys
 import tempfile
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
@@ -251,3 +252,78 @@ def count_claude_user_msgs(jsonl_paths: list[Path],
                 continue
             total += 1
     return total
+
+
+# --------------------------------------------------------------------------- #
+# OpenCode sessions / messages (reads the same SQLite DB the collector reads)
+# --------------------------------------------------------------------------- #
+def _opencode_import():
+    """Lazy-import the opencode collector _shared module."""
+    import importlib
+    collector_dir = str(Path(__file__).resolve().parent.parent / "collector" / "opencode")
+    if collector_dir not in sys.path:
+        sys.path.insert(0, collector_dir)
+    return importlib.import_module("_shared")
+
+
+def read_opencode_sessions(db_path: Path | None = None) -> list[dict]:
+    """Read OpenCode sessions → list of session-summary-shaped event dicts.
+
+    Opens the OpenCode SQLite DB (via _shared.opencode_db_path() if no path
+    given), queries all sessions, and returns dicts matching the
+    session-summary event shape emitted by session_tailer.py.
+    """
+    S = _opencode_import()
+    db = S.get_db(db_path)
+    if db is None:
+        return []
+    try:
+        events = []
+        for sess in S.iter_sessions(db):
+            directory = sess.get("directory") or ""
+            events.append({
+                "source": "opencode",
+                "kind": "session-summary",
+                "session": sess["id"],
+                "project": S.project_basename(directory),
+                "cwd": directory,
+                "ts": S.to_ch_ts(sess["time_created"]),
+                "app": "opencode",
+            })
+        return events
+    finally:
+        db.close()
+
+
+def read_opencode_messages(db_path: Path | None = None) -> list[dict]:
+    """Read OpenCode messages → list of prompt/assistant-turn event dicts.
+
+    Opens the OpenCode SQLite DB, walks all sessions/messages, and returns
+    dicts matching the message-stream event shape emitted by tailer.py.
+    """
+    S = _opencode_import()
+    db = S.get_db(db_path)
+    if db is None:
+        return []
+    try:
+        events = []
+        for sess in S.iter_sessions(db):
+            directory = sess.get("directory") or ""
+            project = S.project_basename(directory)
+            for msg in S.iter_messages(db, sess["id"]):
+                role = msg.get("role")
+                if role not in ("user", "assistant"):
+                    continue
+                kind = "prompt" if role == "user" else "assistant-turn"
+                events.append({
+                    "source": "opencode",
+                    "kind": kind,
+                    "session": msg["session_id"],
+                    "project": project,
+                    "cwd": directory,
+                    "ts": S.to_ch_ts(msg["time_created"]),
+                    "app": "opencode",
+                })
+        return events
+    finally:
+        db.close()
