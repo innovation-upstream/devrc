@@ -334,6 +334,14 @@ in
     recursive = true;
   };
 
+  # OpenCode activity source (6th source): tailer that scans OpenCode
+  # transcripts and emits events via the shared emit helper. Driven by a
+  # systemd user timer (below).
+  home.file.".config/activity-collector/opencode" = {
+    source = ../scripts/collector/opencode;
+    recursive = true;
+  };
+
   # GUI activity collectors (keylogger + browser receiver). The whole module
   # dir is symlinked recursively so the daemons can import their sibling modules
   # (keymap/chunker/winctx/spool_emit). The browser receiver reuses keylog's
@@ -574,6 +582,43 @@ in
   systemd.user.timers.claude-activity-source = {
     Unit = {
       Description = "Periodic timer for the Claude Code activity source";
+    };
+    Timer = {
+      OnStartupSec = "1min";
+      OnUnitActiveSec = "5min";
+      Persistent = true;
+    };
+    Install = {
+      WantedBy = [ "timers.target" ];
+    };
+  };
+
+  # OpenCode activity source (6th source): tail OpenCode transcripts and emit
+  # prompts + session summaries as source=opencode events via the shared emit
+  # helper. Same pattern as the Claude source — a periodic oneshot driven by its
+  # own timer (below).
+  systemd.user.services.opencode-activity-source = {
+    Unit = {
+      Description = "Tail OpenCode transcripts → activity spool (prompts + session summaries)";
+      OnFailure = [ "notify-failure@%n.service" ];
+    };
+    Service = {
+      Type = "oneshot";
+      TimeoutStartSec = 600;
+      SuccessExitStatus = "TERM";
+      Environment = [
+        "PATH=${lib.makeBinPath [ pkgs.python312 pkgs.coreutils pkgs.bash ]}"
+      ];
+      ExecStart = [
+        "${pkgs.python312}/bin/python3 %h/.config/activity-collector/opencode/tailer.py"
+        "${pkgs.python312}/bin/python3 %h/.config/activity-collector/opencode/session_tailer.py"
+      ];
+    };
+  };
+
+  systemd.user.timers.opencode-activity-source = {
+    Unit = {
+      Description = "Periodic timer for the OpenCode activity source";
     };
     Timer = {
       OnStartupSec = "1min";
