@@ -35,6 +35,7 @@ Config (env)
 from __future__ import annotations
 
 import sys
+import time
 from pathlib import Path
 
 # spool_emit lives in the sibling keylog/ dir (single source of truth for the
@@ -46,6 +47,12 @@ sys.path.insert(0, str(_HERE.parent / "keylog"))
 import spool_emit as SE  # noqa: E402
 
 SOURCE = "i3"
+
+# A clean i3.main() return sooner than this is treated as a fault rather than a
+# normal i3 restart (see the exit path in main()). Real sessions last hours; the
+# shortest legitimate one observed in 30 days of journal was ~17s, during session
+# startup — so this sits well below that while still catching a hot restart loop.
+MIN_SESSION_SECONDS = 5.0
 
 
 def _text(v) -> str:
@@ -220,6 +227,7 @@ def main(argv=None) -> int:
     print(f"i3source: spool={spool_dir} — subscribed to window/workspace focus",
           file=sys.stderr, flush=True)
 
+    started = time.monotonic()
     try:
         # Blocks dispatching events until i3 exits/restarts (main loop returns or
         # raises). Either way we fall through and exit so systemd restarts us and
@@ -230,10 +238,22 @@ def main(argv=None) -> int:
     except Exception as exc:
         print(f"i3source: event loop ended: {exc}", file=sys.stderr, flush=True)
         return 1
-    # Clean return from i3.main() means i3 went away (restart/exit). Non-zero so
-    # systemd brings us back to re-subscribe.
+    # Clean return from i3.main() means i3 went away (restart/exit) — normally an
+    # expected lifecycle event, not a fault, so exit 0: Restart=always still brings
+    # us back to re-subscribe, but OnFailure= (dunst toast) stays quiet.
+    #
+    # UNLESS it returned almost immediately. A stale/half-open I3SOCK can accept a
+    # connect and then hand back a loop that ends at once; at RestartSec=10 that is
+    # a silent restart loop with i3 telemetry dead and nothing ever latching to
+    # failed (StartLimitBurst is never reached at this restart rate). Treat a
+    # too-short session as the fault it is, so a real breakage still pages.
+    uptime = time.monotonic() - started
+    if uptime < MIN_SESSION_SECONDS:
+        print(f"i3source: i3 loop ended after only {uptime:.1f}s — treating as a fault",
+              file=sys.stderr, flush=True)
+        return 1
     print("i3source: i3 connection closed — exiting for restart", file=sys.stderr, flush=True)
-    return 1
+    return 0
 
 
 if __name__ == "__main__":
