@@ -2134,6 +2134,16 @@ def match_tmux_to_initiatives(initiatives: list[dict], panes: list[dict],
     for pane in panes:
         ptoks = set(text_tokens(pane.get("title", "")))
         repo = resolve_cwd_repo(pane.get("cwd"), repos, wt_map)
+        # The repo-NAME tokens (civitai-manager -> {civitai, manager}) are the GROUPING key, not
+        # a distinguishing topic: every session AND initiative in the repo carries them. A generic
+        # pane title that merely names the repo ("Continue civitai-manager development work") would
+        # otherwise clear best_title_match's `title_overlap >= 2` gate against ANY same-repo
+        # initiative on the repo-name tokens alone and falsely badge it live (this mis-tagged the
+        # SECURITY-AUDIT card onto a session doing unrelated packaging work). Strip them so a pane
+        # must share a DISTINGUISHING word to attach; a pane left with no distinguishing token
+        # falls through to `unmatched` (an honest "live but not tied to an initiative" miss).
+        if repo is not None:
+            ptoks -= set(text_tokens(os.path.basename(repo)))
         eligible = by_repo.get(repo, []) if repo is not None else []
         ini = best_title_match(ptoks, eligible) if ptoks else None
         if ini is not None:

@@ -961,9 +961,13 @@ def test_match_tmux_date_only_slug_initiative_attaches_its_pane():
     inis = [{"slug": "2026-07-21",
              "title": "Session Handoff — ComfyUI NSFW realism pipeline",
              "repo": comfy}]
+    # The matching pane must share a DISTINGUISHING title token (nsfw/realism/pipeline), NOT just
+    # the repo name "comfyui" — repo-name tokens are stripped before matching (see
+    # match_tmux_to_initiatives), so a pane that only NAMES the repo no longer attaches. This
+    # exercises the date-only-slug TITLE-fingerprint fallback on a real topic word.
     panes = [
         {"session": "scratch6", "window": "4", "cwd": comfy, "command": "claude",
-         "title": "Run ComfyUI preference optimization loop end-to-end"},
+         "title": "Run the ComfyUI NSFW realism pipeline optimization loop"},
         {"session": "scratch6", "window": "5", "cwd": comfy, "command": "claude",
          "title": "Fix hands in walk/portrait output with detailer and LoRA"},
     ]
@@ -1006,6 +1010,37 @@ def test_match_tmux_wrong_repo_does_not_cross_credit():
     assert len(unmatched) == 1
     assert unmatched[0]["id"] == "main:scratchX-1"
     assert unmatched[0]["repo"] == devrc
+
+
+def test_match_tmux_generic_repo_named_pane_does_not_false_match():
+    # A generic pane that only NAMES the repo ("Continue civitai-manager development work") must
+    # NOT attach to a same-repo initiative on the repo-name tokens alone (civitai/manager) — it
+    # shares no DISTINGUISHING word with the Security Audit initiative, so it stays unmatched
+    # (surfaced as a live-but-untied session) instead of falsely badging that card live.
+    civit = "/home/u/workspace/civit/civitai-manager"
+    inis = [{"slug": "SECURITY-AUDIT-v0.1.64",
+             "title": "Security Audit — civitai-manager v0.1.64 (holistic / cross-cutting)",
+             "repo": civit}]
+    panes = [{"session": "scratch6", "window": "1", "cwd": civit, "command": "claude",
+              "title": "Continue civitai-manager development work"}]
+    unmatched = isc.match_tmux_to_initiatives(inis, panes, [civit])
+    assert inis[0]["tmux_sessions"] == set()
+    assert len(unmatched) == 1
+    assert unmatched[0]["repo"] == civit
+
+
+def test_match_tmux_distinguishing_token_matches_despite_repo_name():
+    # Stripping repo-name tokens must NOT break a legit match: a pane sharing DISTINGUISHING
+    # tokens ("holistic"/"cross"/"cutting") still attaches even though it also names the repo.
+    civit = "/home/u/workspace/civit/civitai-manager"
+    inis = [{"slug": "SECURITY-AUDIT-v0.1.64",
+             "title": "Security Audit — civitai-manager v0.1.64 (holistic / cross-cutting)",
+             "repo": civit}]
+    panes = [{"session": "scratch6", "window": "1", "cwd": civit, "command": "claude",
+              "title": "Resume civitai-manager holistic cross-cutting hardening"}]
+    unmatched = isc.match_tmux_to_initiatives(inis, panes, [civit])
+    assert inis[0]["tmux_sessions"] == {"main:scratch6-1"}
+    assert unmatched == []
 
 
 def test_match_tmux_non_claude_unmatched_pane_ignored():
