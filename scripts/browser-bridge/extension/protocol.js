@@ -119,48 +119,87 @@ export function nextBackoffMs(attempt, baseMs = 1000, capMs = 30000) {
 }
 
 // --- screenshot capture: settle + retry (background-tab robustness) --------- //
-// captureVisibleTab of a JUST-activated background tab often fails with
-// "Failed to capture tab: image readback failed": the tab has been made active
-// but Chrome hasn't painted its first frame yet, so the GPU read-back has no
-// pixels. It is TRANSIENT — a short settle + a retry almost always succeeds.
-// The decision logic (classify + retry loop + the activate→settle→capture→restore
-// orchestration) is pure and injectable here; service_worker.js supplies the real
-// chrome.* side effects. Keep the SW's screenshot op in sync with this.
+// captureVisibleTab of a JUST-activated background tab can fail two ways, both
+// TRANSIENT:
+//   1. "Failed to capture tab: image readback failed" — the tab was made active
+//      but Chrome hasn't painted its first frame yet, so the GPU read-back has
+//      no pixels.
+//   2. "This request exceeds the MAX_CAPTURE_VISIBLE_TAB_CALLS_PER_SECOND quota."
+//      — Chrome throttles captureVisibleTab to ~2 calls/sec (≈500ms spacing). A
+//      retry fired too soon after the first attempt trips this.
+// CRITICAL SPACING INVARIANT: retries must be spaced ≥ the quota window, else the
+// retry meant to recover a readback error just trips the quota error instead
+// (the original PR #181 bug: a 150ms backoff fired a 2nd capture inside the same
+// 1s quota window). So the retry backoff is ≥~600ms and a quota hit waits a full
+// ~1s window before the next attempt.
+// The decision logic (classify + spaced retry loop + the
+// activate→settle→capture→restore orchestration) is pure and injectable here;
+// service_worker.js supplies the real chrome.* side effects. Keep the SW's
+// screenshot op in sync with this.
 
 export const CAPTURE_MAX_ATTEMPTS = 3;      // total capture tries before giving up
-export const CAPTURE_RETRY_BASE_MS = 150;   // linear backoff: 150ms, 300ms, …
-export const CAPTURE_SETTLE_MS = 150;       // paint settle after 'complete'
+// Linear backoff base. MUST be ≥ Chrome's captureVisibleTab quota window
+// (~2/sec ≈ 500ms) with margin, so two capture attempts never land inside one
+// quota window: attempt-1 retry waits base·1 (700ms), attempt-2 waits base·2.
+export const CAPTURE_RETRY_BASE_MS = 700;
+// After a quota error specifically, wait AT LEAST a full quota window (~1s) so
+// the next attempt is safely outside it (belt-and-braces over the base spacing).
+export const CAPTURE_QUOTA_WAIT_MS = 1000;
+// Paint settle after 'complete'. Chrome fires "complete" slightly BEFORE the
+// first paint, so this settle (≈350ms) lets the FIRST capture usually succeed —
+// avoiding a retry (hence any quota risk) in the common case.
+export const CAPTURE_SETTLE_MS = 350;
 export const CAPTURE_READY_TIMEOUT_MS = 2000; // cap on the status poll
 export const CAPTURE_READY_POLL_MS = 100;   // status re-poll cadence
 
-// Transient (retry-worthy) capture failures — the GPU/paint race, NOT a
-// permanent permission/URL error (retrying THOSE just burns the cmd_timeout).
-// Matched case-insensitively against the error message. Kept deliberately narrow.
+// Transient (retry-worthy) capture failures — the GPU/paint race and the
+// per-second capture quota, NOT a permanent permission/URL error (retrying THOSE
+// just burns the cmd_timeout). Matched case-insensitively against the error
+// message. Kept deliberately narrow.
 const TRANSIENT_CAPTURE_PATTERNS = [
-  "image readback failed",   // the observed background-tab race
+  "image readback failed",   // the observed background-tab paint race
   "readback",                // any GPU read-back failure phrasing
+  "max_capture_visible_tab_calls_per_second", // the ~2/sec capture quota
 ];
+
+// The per-second capture quota substring (matched case-insensitively). A quota
+// hit needs a longer wait (a full quota window) than a plain readback retry.
+const CAPTURE_QUOTA_PATTERN = "max_capture_visible_tab_calls_per_second";
+
+function errText(err) {
+  const msg = (err && err.message != null) ? err.message : err;
+  return String(msg == null ? "" : msg).toLowerCase();
+}
 
 // True when `err`'s message looks like a transient capture failure worth a retry.
 // Accepts an Error, a string, or anything stringifiable; unknown/empty → false
 // (fail closed: an unclassifiable error is treated as permanent, not retried).
 export function isTransientCaptureError(err) {
-  const msg = (err && err.message != null) ? err.message : err;
-  const s = String(msg == null ? "" : msg).toLowerCase();
+  const s = errText(err);
   if (!s) return false;
   return TRANSIENT_CAPTURE_PATTERNS.some((p) => s.includes(p));
+}
+
+// True when `err` is specifically the per-second captureVisibleTab quota error.
+export function isCaptureQuotaError(err) {
+  const s = errText(err);
+  return !!s && s.includes(CAPTURE_QUOTA_PATTERN);
 }
 
 const defaultSleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // Call `capture()` (→ Promise<dataUrl>) with a bounded retry on a TRANSIENT
 // failure. A non-transient error propagates IMMEDIATELY (no wasted retries); a
-// transient error backs off (linear: base, 2·base, …) and retries up to
-// `maxAttempts` total, then the last error propagates. `sleep` is injectable for
-// tests. Returns whatever `capture()` resolves to on the first success.
+// transient error backs off and retries up to `maxAttempts` total, then the last
+// error propagates. The backoff SPACES attempts ≥ Chrome's captureVisibleTab
+// quota window (linear base·attempt, base ≥~600ms) so a retry never re-trips the
+// per-second quota; a quota error waits at least a full window (`quotaWaitMs`).
+// `sleep` is injectable for tests. Returns whatever `capture()` resolves to on
+// the first success.
 export async function captureWithRetry(capture, opts = {}) {
   const maxAttempts = opts.maxAttempts || CAPTURE_MAX_ATTEMPTS;
   const baseMs = opts.baseMs == null ? CAPTURE_RETRY_BASE_MS : opts.baseMs;
+  const quotaWaitMs = opts.quotaWaitMs == null ? CAPTURE_QUOTA_WAIT_MS : opts.quotaWaitMs;
   const sleep = opts.sleep || defaultSleep;
   let lastErr;
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
@@ -170,7 +209,11 @@ export async function captureWithRetry(capture, opts = {}) {
       lastErr = e;
       // Permanent error, or out of attempts → give up now.
       if (!isTransientCaptureError(e) || attempt === maxAttempts) throw e;
-      await sleep(baseMs * attempt);
+      // Space the next attempt ≥ the quota window. Linear base·attempt is already
+      // ≥ a window; a quota hit waits at least a full window on top of that.
+      let delay = baseMs * attempt;
+      if (isCaptureQuotaError(e)) delay = Math.max(delay, quotaWaitMs);
+      await sleep(delay);
     }
   }
   throw lastErr; // unreachable (loop always returns or throws) — belt & braces

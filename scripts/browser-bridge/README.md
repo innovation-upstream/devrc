@@ -261,8 +261,11 @@ per-session (multi-step **workflow**) isolation did not.
   tab that is already visible is unaffected. **Background-tab settle + retry:** a
   just-activated background tab hasn't painted its first frame, so a bare capture
   returns `"image readback failed"`; the SW waits for `status:"complete"` + a
-  short paint settle, then **retries** the capture on that transient error (a few
-  bounded tries with a short back-off) before giving up. This hardens the
+  paint settle (~350ms) so the FIRST capture usually wins, then **retries** on a
+  transient error. Retries **respect Chrome's ~2/sec `captureVisibleTab` quota**
+  (spaced ≥~600ms; a `MAX_CAPTURE_VISIBLE_TAB_CALLS_PER_SECOND` hit waits a ~1s
+  window) — a faster retry would re-trip the quota instead of recovering (needs
+  an extension **reload** to take effect). This hardens the
   `browser agent` path, which screenshots in its OWN background tab. The classify
   + retry + settle + activate→capture→restore logic is pure and unit-tested in
   `extension/protocol.js` (`isTransientCaptureError` / `captureWithRetry` /

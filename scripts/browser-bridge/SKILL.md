@@ -65,7 +65,7 @@ Prefix any op with `--instance <key>` to target a specific connected profile
 | `browser [--instance K] [--tab T] eval '<js>'`       | run JS in the owned/active tab, return its value |
 | `browser [--instance K] tabs`              | list open tabs (`.data.ownedTabId` flags this session's owned tab) |
 | `browser [--instance K] [--tab T] nav <url>`         | navigate the owned/active tab to `<url>` |
-| `browser [--instance K] [--tab T] screenshot [path]` | captureVisibleTab; prints the data URL, or writes a `.png` to `path`. A BACKGROUND owned tab is briefly activated, **settled until painted, then captured with a bounded retry** on the transient `image readback failed` (needs an extension **reload** to take effect) |
+| `browser [--instance K] [--tab T] screenshot [path]` | captureVisibleTab; prints the data URL, or writes a `.png` to `path`. A BACKGROUND owned tab is briefly activated, **settled until painted (~350ms), then captured with a bounded retry** on a transient `image readback failed` — retries are **spaced ≥~600ms to respect Chrome's ~2/sec `captureVisibleTab` quota** (`MAX_CAPTURE_VISIBLE_TAB_CALLS_PER_SECOND`; a faster retry re-trips it) (needs an extension **reload** to take effect) |
 | `browser [--instance K] agent "<goal>" [flags]` | run the **autonomous opencode browser-agent** in its OWN isolated tab against `<goal>`; returns a compact `{answer,evidence,steps_used,status}` (see below) |
 | `browser --print-session-id`               | print the derived per-session id (debug) and exit |
 
