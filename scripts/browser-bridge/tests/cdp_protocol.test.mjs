@@ -14,7 +14,15 @@ import {
   keyEventParams, KEY_EVENTS, clickPoint, boxModelOrigin, frameEvalExpressions,
   isCdpSyntaxError, cdpExceptionText, frameHtmlExpression, frameTextExpression,
   elementRectExpression, focusExpression, fullPageClip,
+  promiseWithTimeout, assertTabCdpReady, TAB_DISCARDED_MESSAGE,
+  CDP_ATTACH_TIMEOUT_MS, CDP_COMMAND_TIMEOUT_MS, CDP_OP_BUDGET_MS,
 } from "../extension/protocol.js";
+
+// A promise that NEVER settles — models a hung chrome.debugger call (the wedge).
+const NEVER = () => new Promise(() => {});
+// Tiny, injected budgets so the timeout tests settle in milliseconds and PROVE
+// they bound by the (tiny) budget, NOT the 20s server cmd_timeout.
+const FAST = { attachMs: 20, commandMs: 20, budgetMs: 60 };
 
 test("CDP_VERSION is the stable 1.3 protocol channel", () => {
   assert.equal(CDP_VERSION, "1.3");
@@ -205,4 +213,133 @@ test("fullPageClip uses the css content size for a full-document capture", () =>
   assert.deepEqual(clip, { x: 0, y: 0, width: 1200, height: 5401, scale: 1 });
   assert.equal(fullPageClip({ contentSize: { width: 800, height: 600 } }).width, 800);
   assert.deepEqual(fullPageClip({}), { x: 0, y: 0, width: 0, height: 0, scale: 1 });
+});
+
+// --- SW-side CDP timeouts: a hung chrome.debugger call must NOT wedge the SW --- //
+// Root cause fixed here: a chrome.debugger.attach / sendCommand / detach that never
+// resolves (a discarded background tab has no renderer) left the SW's command
+// handler blocked on an unresolved await forever → the /poll loop never resumed →
+// the instance dropped. Every CDP call is now raced against a bounded timeout so
+// the op SETTLES and control returns to the poll loop.
+
+test("timeout budgets are chosen well under the 20s server cmd_timeout", () => {
+  for (const ms of [CDP_ATTACH_TIMEOUT_MS, CDP_COMMAND_TIMEOUT_MS, CDP_OP_BUDGET_MS]) {
+    assert.ok(ms > 0 && ms < 20000, `budget ${ms} must be >0 and < the 20s server timeout`);
+  }
+});
+
+test("promiseWithTimeout: a hung promise rejects with cdp_timeout:<label> (settles, not hangs)", async () => {
+  await assert.rejects(promiseWithTimeout(NEVER(), 10, "attach"), /^Error: cdp_timeout:attach$/);
+  // A promise that settles on its own wins the race unchanged (value + error).
+  assert.equal(await promiseWithTimeout(Promise.resolve(7), 1000, "x"), 7);
+  await assert.rejects(promiseWithTimeout(Promise.reject(new Error("boom")), 1000, "x"), /boom/);
+  // ms<=0 disables the bound (returns the value as-is, no timer).
+  assert.equal(await promiseWithTimeout(Promise.resolve(3), 0, "x"), 3);
+});
+
+test("withCdpSession: a HUNG attach rejects with cdp_timeout within the attach budget — no hang, best-effort detach", async () => {
+  let ran = false, detached = false;
+  const started = Date.now();
+  await assert.rejects(withCdpSession({
+    url: "https://x.test",
+    timeouts: FAST,
+    attach: NEVER,                              // attach never resolves
+    detach: async () => { detached = true; },
+    send: async () => ({}),
+    run: (send) => { ran = true; return send("Page.enable"); },
+  }), /cdp_timeout:attach/);
+  assert.equal(ran, false, "run must NOT start when attach never resolved");
+  assert.equal(detached, true, "a timed-out attach must still best-effort detach (no leaked session)");
+  assert.ok(Date.now() - started < 5000, "must settle by the tiny budget, not the 20s server timeout");
+});
+
+test("withCdpSession: a HUNG CDP command (e.g. Page.getFrameTree) rejects bounded + always detaches", async () => {
+  let detached = false;
+  await assert.rejects(withCdpSession({
+    url: "https://x.test",
+    timeouts: FAST,
+    attach: async () => {},
+    detach: async () => { detached = true; },
+    send: NEVER,                                // Page.getFrameTree never resolves
+    run: (send) => send("Page.getFrameTree"),
+  }), /cdp_timeout:Page\.getFrameTree/);
+  assert.equal(detached, true, "detach must run so no debugger session leaks after a hung command");
+});
+
+test("NO-WEDGE: a hung CDP op settles so the very NEXT op is processed (the core regression)", async () => {
+  // Op 1 hangs in a command → it must SETTLE (reject) and detach, returning control.
+  let detach1 = false;
+  await assert.rejects(withCdpSession({
+    url: "https://x.test", timeouts: FAST,
+    attach: async () => {}, detach: async () => { detach1 = true; },
+    send: NEVER, run: (send) => send("Page.getFrameTree"),
+  }), /cdp_timeout/);
+  assert.equal(detach1, true);
+  // Op 2, issued immediately after, runs normally — proving op 1 did NOT block the
+  // handler (in production this is the /poll loop continuing to the next command).
+  const out = await withCdpSession({
+    url: "https://x.test", timeouts: FAST,
+    attach: async () => {}, detach: async () => {},
+    send: async (m) => ({ ran: m }), run: (send) => send("Page.enable"),
+  });
+  assert.deepEqual(out, { ran: "Page.enable" }, "the next op must be processed after a hung one");
+});
+
+test("withCdpSession: a HUNG detach cannot re-wedge the finally — the op still settles", async () => {
+  const started = Date.now();
+  const out = await withCdpSession({
+    url: "https://x.test",
+    timeouts: FAST,
+    attach: async () => {},
+    detach: NEVER,                              // detach itself hangs
+    send: async () => "OK",
+    run: (send) => send("Page.captureScreenshot"),
+  });
+  assert.equal(out, "OK", "a hung detach must not block the op's already-computed result");
+  assert.ok(Date.now() - started < 5000, "the bounded detach lets the handler return quickly");
+});
+
+test("withCdpSession: the overall op BUDGET backstops a run that never settles", async () => {
+  await assert.rejects(withCdpSession({
+    url: "https://x.test",
+    timeouts: FAST,
+    attach: async () => {},
+    detach: async () => {},
+    send: async () => ({}),
+    run: NEVER,                                 // run resolves to a never-settling promise
+  }), /cdp_timeout:op/);
+});
+
+test("withCdpSession: per-command timeout wraps the send handed to run", async () => {
+  // The `send` given to run is the WRAPPED one — a slow command trips commandMs.
+  await assert.rejects(withCdpSession({
+    url: "https://x.test",
+    timeouts: { attachMs: 50, commandMs: 15, budgetMs: 500 },
+    attach: async () => {}, detach: async () => {},
+    send: NEVER, run: (send) => send("DOM.getBoxModel"),
+  }), /cdp_timeout:DOM\.getBoxModel/);
+});
+
+// --- discarded / unloaded tab (the probable root cause) --------------------- //
+test("assertTabCdpReady: a discarded/unloaded tab fails FAST (no attach on a dead renderer)", () => {
+  assert.throws(() => assertTabCdpReady({ discarded: true }),
+    new RegExp("tab_discarded"));
+  assert.throws(() => assertTabCdpReady({ status: "unloaded" }), /tab_discarded/);
+  assert.throws(() => assertTabCdpReady(null), /owned_tab_gone/);
+  // A live tab passes (any non-discarded status incl. loading/complete/undefined).
+  assert.doesNotThrow(() => assertTabCdpReady({ discarded: false, status: "complete" }));
+  assert.doesNotThrow(() => assertTabCdpReady({ status: "loading" }));
+  assert.doesNotThrow(() => assertTabCdpReady({}));
+  assert.ok(/reload the tab|foreground/.test(TAB_DISCARDED_MESSAGE),
+    "the message must tell the caller how to recover");
+});
+
+test("withCdpSession still enforces security: a privileged url is REFUSED before attach (unchanged)", async () => {
+  let attached = false;
+  await assert.rejects(withCdpSession({
+    url: "chrome://newtab", timeouts: FAST,
+    attach: async () => { attached = true; },
+    detach: async () => {}, send: async () => ({}), run: (s) => s("Page.enable"),
+  }), /cdp_attach_refused/);
+  assert.equal(attached, false, "the timeout wiring must not weaken the attach-scope invariant");
 });

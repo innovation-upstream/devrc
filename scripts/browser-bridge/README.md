@@ -609,7 +609,11 @@ nix-shell -p nodejs --run "node --test scripts/browser-bridge/tests/*.test.mjs"
 The CDP (chrome.debugger) ops are covered deterministically without a real browser:
 `tests/cdp_protocol.test.mjs` unit-tests the pure decision layer (attach-scope
 refuse-before-attach, always-detach on success/error/detach-failure, frame
-enumeration/resolution, key/coordinate math, injection-safe expression builders);
+enumeration/resolution, key/coordinate math, injection-safe expression builders,
+and the **SW-side CDP timeouts**: a hung attach/command/detach settles with a
+`cdp_timeout:<phase>` error within a bounded budget — never wedging the poll loop
+— a discarded/unloaded tab fails fast with `tab_discarded`, and the no-wedge
+guarantee that the next op is still processed after a hung one);
 `tests/browser_tool.test.mjs` proves the typed tool forces the own-tab, forwards
 only whitelisted typed fields, and **drops any smuggled `cdp`/`method`/`params`
 field** (the RCE-class regression guard); `tests/test_server.py` proves the new ops
@@ -687,9 +691,9 @@ The **`browser agent`** slice, all headless (NO live model, NO Brave, NO bridge)
   inherited-group straggler → asserted reaped, no orphan); schema parse + EXACTLY
   ONE `--continue` retry then `blocked`, no-retry on a hard error.
 
-Current totals: **138 Python** (`test_server.py` 100 + `test_browser_agent_parse.py`
-14 + `test_browser_agent.py` 24) + **82 node** (`protocol.test.mjs` 58 +
-`browser_tool.test.mjs` 24) — the `protocol.test.mjs` cases cover the screenshot
+Current totals: **157 Python** (`test_server.py` 115 + `test_browser_agent_parse.py`
+14 + `test_browser_agent.py` 28) + **121 node** (`protocol.test.mjs` 59 +
+`browser_tool.test.mjs` 33 + `cdp_protocol.test.mjs` 29) — the `protocol.test.mjs` cases cover the screenshot
 settle+retry decision logic (`isTransientCaptureError` / `captureWithRetry` /
 `waitForCaptureReady` / `screenshotWithRestore`) **and the exhausted-retry error
 mapping** (`isOcclusionCaptureError` / `mapCaptureFailure`): a persistent readback
