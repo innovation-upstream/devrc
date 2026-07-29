@@ -2508,6 +2508,75 @@ def test_render_html_has_glyph_legend():
     assert ".legend{color:var(--gray);font-size:.74rem" not in viewer._CSS
 
 
+def test_legend_hidden_by_default_and_toggled_by_a_question_button():
+    # Redesign #3: the legend is reference material, not a wall between the strip and the cards — it
+    # starts HIDDEN and is revealed by a small `?` toggle at the end of the triage chip row.
+    html = viewer.render_html(viewer.build_model([_row(slug="s")], now=NOW))
+    # the legend div carries the `hidden` attribute in the server-rendered shell.
+    assert '<div id="legend" class="legend" aria-label="glyph legend" hidden>' in html
+    # renderTriage builds + appends the `?` toggle and wires it to flip #legend's hidden attribute.
+    js = viewer._JS
+    assert "el('button', 'legend-toggle', '?')" in js
+    assert "lg.hidden = !lg.hidden" in js
+    assert "triageBar.appendChild(legT);" in js               # appended each render, like the chips
+    # a muted style for the toggle exists.
+    assert ".legend-toggle{" in viewer._CSS
+
+
+def _node_legend_toggle_flips_hidden():
+    """Eval the REAL renderTriage under a DOM shim carrying a #legend element (hidden), click the
+    `?` toggle, and report #legend.hidden before/after — proving the toggle actually flips it."""
+    node = _shutil.which("node")
+    if not node:
+        import pytest
+        pytest.skip("node not on PATH — legend toggle wiring untested this run")
+    slice_ = _js_slice("function renderTriage(", "function renderDoneView(")
+    shim = r"""
+function _mk(tag){
+  var e = {tag: tag, className: '', textContent: '', type: '', title: '', hidden: false, _kids: [], _h: {}};
+  Object.defineProperty(e, 'innerHTML', {set: function(v){ if(v === '') e._kids = []; }, get: function(){ return ''; }});
+  Object.defineProperty(e, 'children', {get: function(){ return e._kids; }});
+  e.appendChild = function(c){ e._kids.push(c); return c; };
+  e.addEventListener = function(ev, fn){ e._h[ev] = fn; };
+  return e;
+}
+var _triage = _mk('nav');
+var _legend = _mk('div'); _legend.hidden = true;
+var document = { createElement: function(t){ return _mk(t); },
+  getElementById: function(id){ return id === 'triage' ? _triage : (id === 'legend' ? _legend : null); } };
+function el(tag, cls, txt){ var e = document.createElement(tag); if(cls) e.className = cls; if(txt != null) e.textContent = txt; return e; }
+var triageBar = document.getElementById('triage');
+function render(){}
+"""
+    driver = (
+        "var STATE_GLYPH = {needs_you:'⚠', stalled:'◑', slowing:'~', active:'→'};\n"
+        "var stateCounts = {needs_you:1, stalled:0, slowing:0, active:1, live:0};\n"
+        "var state = {triage: '', doneMode: false};\n"
+        "var data = {archived: []};\n"
+        "renderTriage();\n"
+        "var toggle = triageBar.children.filter(function(c){ return c.className === 'legend-toggle'; })[0];\n"
+        "var before = _legend.hidden;\n"
+        "toggle._h.click();\n"
+        "var afterOnce = _legend.hidden;\n"
+        "toggle._h.click();\n"
+        "var afterTwice = _legend.hidden;\n"
+        "console.log(JSON.stringify({present: !!toggle, text: toggle && toggle.textContent, "
+        "before: before, afterOnce: afterOnce, afterTwice: afterTwice}));"
+    )
+    out = _subprocess.run([node, "-e", shim + "\n" + slice_ + "\n" + driver],
+                          capture_output=True, text=True, timeout=30)
+    assert out.returncode == 0, out.stderr
+    return json.loads(out.stdout)
+
+
+def test_legend_toggle_button_flips_legend_hidden():
+    r = _node_legend_toggle_flips_hidden()
+    assert r["present"] is True and r["text"] == "?"   # the `?` toggle is appended to the chip row
+    assert r["before"] is True                          # #legend starts hidden
+    assert r["afterOnce"] is False                      # first click reveals it
+    assert r["afterTwice"] is True                      # second click hides it again
+
+
 def test_js_card_glyph_and_badge_tooltips():
     body = _card_body()
     # state glyph carries a title (state label + WHY for a needs_you card).
@@ -3782,10 +3851,10 @@ function _summ(){
   });
   var rowCount = 0;
   if(body){ body.children.forEach(function(c){ if(String(c.className || '').indexOf('ln-row') === 0) rowCount++; }); }
-  var count = '', chev = '';
-  if(header){ header.children.forEach(function(c){ if(c.className === 'count') count = c.textContent; if(c.className === 'ln-chev') chev = c.textContent; }); }
+  var count = '', chev = '', head = '';
+  if(header){ header.children.forEach(function(c){ if(c.className === 'count') count = c.textContent; if(c.className === 'ln-chev') chev = c.textContent; head += (c._text ? c.text : (c.textContent || '')); }); }
   return {display: liveNowEl.style.display, rowCount: rowCount, count: count,
-          more: more ? more.textContent : null, chev: chev, open: !!body};
+          more: more ? more.textContent : null, chev: chev, open: !!body, head: head};
 }
 function _clickMore(){
   var kids = liveNowEl.children, i;
@@ -3802,7 +3871,7 @@ function _clickHeader(){
         "var FLAT = " + json.dumps(flat) + ";\n"
         "var UM = " + json.dumps(unmatched) + ";\n"
         "data.flat = FLAT; data.live_unmatched = UM;\n"
-        + ("_store['initiatives-livenow-open'] = '1';\n" if open else "")
+        + ("_store['initiatives-livenow-open-v2'] = '1';\n" if open else "")
         + "var state = {q: " + json.dumps(q) + ", triage: " + json.dumps(sf) +
         ", doneMode: " + ("true" if done else "false") + "};\n"
         "var OUT = [];\n"
@@ -3810,7 +3879,7 @@ function _clickHeader(){
         "for(var hh = 0; hh < " + str(int(header_clicks)) + "; hh++){ _clickHeader(); OUT.push(_summ()); }\n"
         "for(var i = 0; i < " + str(int(clicks)) + "; i++){ _clickMore(); OUT.push(_summ()); }\n"
         "console.log(JSON.stringify({renders: OUT, "
-        "stored: _store['initiatives-livenow-open'] || null, "
+        "stored: _store['initiatives-livenow-open-v2'] || null, "
         "storedMore: _store['initiatives-livenow-expanded'] || null}));"
     )
     # renderLiveNow now calls liveRowVisible → matchQ/matchState; prepend those pure snippets so the
@@ -3830,16 +3899,37 @@ def _many_unmatched(n):
 
 
 def test_render_livenow_collapsed_one_line_by_default():
-    # Change C: the strip is a ONE-LINE header by default — no rows, chevron ▸, count = TOTAL.
+    # Redesign: the collapsed default is a ONE-LINE summary — "● N live · newest: <task>… ▸" — the
+    # strip and the cards are the SAME sessions, so collapsed it's just a headline; the cards are the
+    # detailed list. No rows, chevron ▸, and the count span carries the NEWEST session's task.
     res = _node_render_livenow([], _many_unmatched(9))
     r0 = res["renders"][0]
     assert r0["display"] == "block"                  # visible (there ARE live sessions) …
     assert r0["open"] is False                       # … but collapsed to just the header
     assert r0["rowCount"] == 0                        # no rows rendered while collapsed
     assert r0["chev"] == "▸"                          # collapsed chevron
-    assert r0["count"] == "— 9 sessions"              # fix #1: header N is SESSIONS, not initiatives
+    # collapsed header text = "● 9 live · newest: task 0" (row 0 of _many_unmatched is the freshest).
+    assert "9 live" in r0["head"]                     # count reads "N live", not "Live now — N sessions"
+    assert "Live now" not in r0["head"]               # the old wording is gone from the collapsed line
+    assert r0["count"] == "· newest: task 0"          # newest task, untruncated (< 40 chars)
     assert r0["more"] is None                         # no ＋more affordance while collapsed
     assert res["stored"] is None                      # default COLLAPSED → nothing persisted
+
+
+def test_render_livenow_collapsed_newest_task_truncated_at_40():
+    # A long newest task is truncated to ~40 chars + a trailing ellipsis (only when actually cut);
+    # untrusted text stays textContent (el()), never innerHTML.
+    long_task = "x" * 60
+    um = [{"id": "s-0", "title": long_task, "repo_name": "devrc", "activity_ts": _NOW_SEC}]
+    res = _node_render_livenow([], um)
+    r0 = res["renders"][0]
+    assert r0["open"] is False
+    assert r0["count"] == "· newest: " + ("x" * 40) + "…"   # cut to 40 + ellipsis
+    # a short task is NOT ellipsized.
+    short = [{"id": "s-0", "title": "short task", "repo_name": "devrc", "activity_ts": _NOW_SEC}]
+    r_short = _node_render_livenow([], short)["renders"][0]
+    assert r_short["count"] == "· newest: short task"
+    assert "…" not in r_short["count"]
 
 
 def test_render_livenow_header_click_expands_to_top6_and_persists():
@@ -4184,7 +4274,7 @@ def _node_livenow_click(flat, unmatched):
         "var state = {q: '', triage: '', doneMode: false};\n"   # no active filter → all live rows
         # change C: the strip is collapsed by default — seed the outer-open flag so the rows render
         # and the click-wiring is exercised (this test is about the row wiring, not the collapse).
-        "localStorage.setItem('initiatives-livenow-open', '1');\n"
+        "localStorage.setItem('initiatives-livenow-open-v2', '1');\n"
         "renderLiveNow();\n"
         "var rows = liveNowEl.querySelectorAll('.ln-row');\n"
         "var summ = rows.map(function(row){\n"
@@ -4459,7 +4549,10 @@ function render(){}   // a chip click calls render(); stubbed (we only inspect t
         ("true" if done else "false") + "};\n"
         "var data = {archived: new Array(" + str(int(archived_n)) + ")};\n"
         "renderTriage();\n"
-        "console.log(JSON.stringify(triageBar.children.map(function(c){"
+        # the trailing `?` legend-toggle is NOT a state chip → drop it so the chip assertions below
+        # (labels/counts) see only the chips (the toggle is covered by its own test).
+        "console.log(JSON.stringify(triageBar.children.filter(function(c){"
+        " return c.className !== 'legend-toggle'; }).map(function(c){"
         " return {cls: c.className, text: c.textContent}; })));"
     )
     out = _subprocess.run([node, "-e", shim + "\n" + slice_ + "\n" + driver],
@@ -4717,6 +4810,41 @@ def test_board_dom_order_active_groups_then_cooling_last():
     assert all("cooling" not in c for c in r["appOrder"][:-1])   # everything before it is active
 
 
+def test_board_grouped_view_floats_live_cards_to_top_of_repo_group():
+    # Redesign #2: in the GROUPED (default) view, live-badged cards float to the TOP of their repo
+    # group (they're the same sessions the Live-now strip lists). The sort is STABLE — non-live cards
+    # keep their prior order within the partition. Three active cards in ONE repo, the middle one live.
+    fixture = [
+        _bv("older_active", "active", "devrc", title="older", live=False),
+        _bv("live_one",     "active", "devrc", title="live one", live=True),
+        _bv("mid_active",   "active", "devrc", title="mid", live=False),
+    ]
+    r = _node_render_board(fixture)                        # grouped view (default)
+    # activeKeys is DOM order (querySelectorAll). Live floats first; the two non-live keep older→mid.
+    order = [k.split("::")[1] for k in r["activeKeys"]]
+    assert order == ["live_one", "older_active", "mid_active"]
+
+
+def test_board_flat_view_does_not_reorder_live_first():
+    # The live-first float is GROUPED-ONLY: the flat view keeps insertion (last_touch-desc) order.
+    fixture = [
+        _bv("older_active", "active", "devrc", title="older", live=False),
+        _bv("live_one",     "active", "devrc", title="live one", live=True),
+        _bv("mid_active",   "active", "devrc", title="mid", live=False),
+    ]
+    r = _node_render_board(fixture, view="flat")
+    order = [k.split("::")[1] for k in r["activeKeys"]]
+    assert order == ["older_active", "live_one", "mid_active"]   # untouched insertion order
+
+
+def test_board_grouped_live_first_sort_comparator_present_and_grouped_only():
+    # Guard the exact comparator + that it's applied ONLY in the grouped branch (not flat/recency).
+    js = viewer._JS
+    assert "vis.sort(function(a,b){ return (b && b.live ? 1 : 0) - (a && a.live ? 1 : 0); });" in js
+    # the flat/recency branches iterate their own arrays and never call this comparator on them.
+    assert "active.forEach(function(v){ if(visible(v)){ wrap.appendChild(card(v)); shown++; } });" in js
+
+
 def test_board_cooling_collapsed_by_default():
     r = _node_render_board(_BOARD)
     assert r["coolingOpen"] is False                       # body hidden by default …
@@ -4807,7 +4935,7 @@ def test_render_smoke_lead_with_attention_structure():
     assert "STATE_GLYPH.needs_you + ' Needs you'" in html         # the pinned §3 heading
     assert "STATE_GLYPH.slowing + ' Cooling'" in html             # the §6 fold heading
     # §4 Live-now collapses by DEFAULT (outer open flag, default off).
-    assert "LIVENOW_OPEN_KEY = 'initiatives-livenow-open'" in html
+    assert "LIVENOW_OPEN_KEY = 'initiatives-livenow-open-v2'" in html
     assert "if(!open){ return; }" in html                         # collapsed → header only
     # the ⚠ risk cue for a severity-promoted needs_you card is present in the card builder.
     assert "'risk-cue', '\u26a0 risk'" in html

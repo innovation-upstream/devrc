@@ -1400,6 +1400,8 @@ header .meta{color:var(--gray);font-size:.85rem}
 .legend .lg-line{margin:.15rem 0}
 .legend .lg-h{color:var(--fg2);font-weight:bold}
 .legend .lg-b{color:var(--fg);font-weight:bold}
+.legend-toggle{background:none;border:1px solid var(--gray);color:var(--gray);border-radius:50%;width:1.5rem;height:1.5rem;line-height:1;padding:0;cursor:pointer;font-size:.82rem;margin-left:.4rem;flex:0 0 auto}
+.legend-toggle:hover{color:var(--fg);border-color:var(--fg2)}
 /* The `⚠ risk` cue on a card promoted to needs_you by an ACTIVE RISK (severity), distinct from
    a blocked wait. Small, orange, low-key so it reads as a badge not a headline. */
 .risk-cue{font-size:.68rem;color:var(--orange);border:1px solid var(--orange);border-radius:3px;
@@ -2790,7 +2792,7 @@ _JS = r"""
   // Header "● Live now (N)" with N = the (filtered) live count. Empty (no live panes) → hidden.
   // All untrusted text via textContent (el()), never innerHTML.
   var LIVE_PREVIEW_N = 6;
-  var LIVENOW_OPEN_KEY = 'initiatives-livenow-open';    // OUTER collapse (header-only vs rows), default closed
+  var LIVENOW_OPEN_KEY = 'initiatives-livenow-open-v2'; // OUTER collapse (header-only vs rows), default closed (v2: reset everyone back to collapsed after the one-line-summary redesign)
   var LIVENOW_MORE_KEY = 'initiatives-livenow-expanded'; // INNER top-6 vs full (kept from the prior build)
   function liveNowOpen(){
     try { return localStorage.getItem(LIVENOW_OPEN_KEY) === '1'; } catch(e){ return false; }
@@ -2831,16 +2833,32 @@ _JS = r"""
     h.setAttribute('tabindex', '0');
     h.title = open ? 'collapse live sessions' : 'expand live sessions';
     h.appendChild(el('span', 'ln-dot', LIVE_GLYPH));
-    h.appendChild(document.createTextNode(' Live now'));
-    // Fix #1 (vocab): the number is SESSIONS, not initiatives. Three things read as "live/active" —
-    // this Live-now SESSION count, the `→ Active` chip (INITIATIVES with active momentum), and the
-    // `● live` card badge (an agent running on ONE initiative) — so the header spells out
-    // "session(s)". Filtered → "k of N sessions" so the scoping stays legible.
-    var countTxt = filtering
-      ? ('— ' + total + ' of ' + allRows.length + ' sessions')
-      : ('— ' + total + ' session' + (total === 1 ? '' : 's'));
-    h.appendChild(el('span', 'count', countTxt));
-    h.appendChild(el('span', 'ln-chev', open ? '▾' : '▸'));
+    if(!open){
+      // COLLAPSED (unfiltered default — a filter always force-opens): a SINGLE line
+      //   "● N live · newest: <task truncated ~40>… ▸"
+      // The strip and the cards show the SAME sessions, so collapsed it's just a one-line summary;
+      // the cards are the detailed list. newest = allRows[0] (already most-recent-first). The task
+      // is UNTRUSTED → textContent only (el()), never innerHTML; truncate to 40 chars + a trailing
+      // ellipsis only when actually cut.
+      h.appendChild(document.createTextNode(' ' + total + ' live'));
+      var newestTask = (allRows[0] && allRows[0].task) ? String(allRows[0].task) : '';
+      if(newestTask){
+        var newestShort = newestTask.length > 40 ? (newestTask.slice(0, 40) + '…') : newestTask;
+        h.appendChild(el('span', 'count', '· newest: ' + newestShort));
+      }
+      h.appendChild(el('span', 'ln-chev', '▸'));
+    } else {
+      h.appendChild(document.createTextNode(' Live now'));
+      // Fix #1 (vocab): the number is SESSIONS, not initiatives. Three things read as "live/active" —
+      // this Live-now SESSION count, the `→ Active` chip (INITIATIVES with active momentum), and the
+      // `● live` card badge (an agent running on ONE initiative) — so the header spells out
+      // "session(s)". Filtered → "k of N sessions" so the scoping stays legible.
+      var countTxt = filtering
+        ? ('— ' + total + ' of ' + allRows.length + ' sessions')
+        : ('— ' + total + ' session' + (total === 1 ? '' : 's'));
+      h.appendChild(el('span', 'count', countTxt));
+      h.appendChild(el('span', 'ln-chev', '▾'));
+    }
     // Clicking the header toggles the STORED open pref (a filter still force-opens until cleared).
     function toggleOpen(){ setLiveNowOpen(!liveNowOpen()); renderLiveNow(); }
     h.addEventListener('click', toggleOpen);
@@ -2954,6 +2972,16 @@ _JS = r"""
       });
       triageBar.appendChild(donB);
     }
+    // A muted `?` at the END of the chip row toggles the glyph legend (#legend), which is hidden by
+    // DEFAULT — the glyph meanings are reference material, not something to wall off the board with.
+    // Re-appended each render like the chips; it is NOT a state-filter chip (no state.triage wiring).
+    var legT = el('button', 'legend-toggle', '?');
+    legT.type = 'button';
+    legT.title = 'what do the glyphs mean?';
+    legT.addEventListener('click', function(){
+      var lg = document.getElementById('legend'); if(lg) lg.hidden = !lg.hidden;
+    });
+    triageBar.appendChild(legT);
   }
 
   // The Done view — the archived initiatives (from data.archived, server-sorted newest-first),
@@ -3175,6 +3203,11 @@ _JS = r"""
         // filter a section with matches AUTO-EXPANDS (not persisted); one with zero matches HIDES.
         groupByRepo(active).forEach(function(g){
           var vis = g.items.filter(visible);
+          // Float live-badged cards to the TOP of the repo group (they're the same sessions the
+          // Live-now strip lists, so surface them where the detail lives). V8's sort is stable, so
+          // the non-live cards keep their last_touch-desc order within the partition. Grouped view
+          // ONLY — flat keeps insertion order, recency is already time-sorted (live rises naturally).
+          vis.sort(function(a,b){ return (b && b.live ? 1 : 0) - (a && a.live ? 1 : 0); });
           if(!vis.length) return;   // no matches under the filter → hide the section
           var collapsed = isRepoCollapsed(g.name);
           var open = !collapsed || (filtering && vis.length > 0);
@@ -3571,7 +3604,7 @@ def render_html(model: dict | None, error: str | None = None,
     # is running on it right now, `emerging` = a session with no handoff doc yet. No "orthogonal"
     # jargon on its own. Sits under the Live-now strip.
     legend = (
-        '<div id="legend" class="legend" aria-label="glyph legend">'
+        '<div id="legend" class="legend" aria-label="glyph legend" hidden>'
         '<div class="lg-line"><span class="lg-h">States</span> '
         '(one per card — pick one with the chips above): '
         '⚠ needs you · → active · ~ cooling · ◑ stalled.</div>'
