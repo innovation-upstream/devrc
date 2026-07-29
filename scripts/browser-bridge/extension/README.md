@@ -127,12 +127,37 @@ SW and can only be checked in a real browser — see the checklist below.)
 click the **reload** ↻ button on the extension's card in `brave://extensions`,
 or the service worker keeps running the old code.
 
+> **MANDATORY reload after the CDP change:** the manifest now requests the
+> `debugger` permission (for the CDP ops — screenshot/frames/click/type/key +
+> `--frame` reads). A permission change is NOT hot-applied — reload the unpacked
+> extension in `brave://extensions`, and Brave may prompt you to **re-confirm the
+> new `debugger` permission**. Until you do, the CDP ops fail.
+
 ## Permissions (maximal — can be scoped later)
 
-`scripting`, `tabs`, `activeTab`, `alarms`, `storage`, and
+`scripting`, `tabs`, `activeTab`, `alarms`, `storage`, `debugger`, and
 `host_permissions: ["<all_urls>"]`. `<all_urls>` + `scripting` is what lets the
 worker run in whatever tab is active. If you only ever drive a known set of
 sites, scope `host_permissions` to those origins and reload.
+
+### `debugger` — the CDP ops (screenshot/frames/click/type/key + `--frame`)
+
+`chrome.debugger` is the biggest-blast-radius permission, so the CDP layer is
+tightly bounded (all decision logic is pure + unit-tested in `protocol.js`):
+
+- **Own-tab attach ONLY.** A CDP op attaches `chrome.debugger` ONLY to the
+  server-injected owned/`--tab` tab, and **refuses to attach to a privileged
+  surface** (`chrome://`, `chrome-extension://`, `devtools:`, `file:`) — validated
+  *before* the attach (`assertCdpAttachable`). The autonomous agent's tab is forced,
+  so it can never attach to another tab/profile.
+- **Always detach.** Every op is attach→run→**detach** (a `finally`, so a thrown op
+  still detaches); `chrome.debugger.onDetach` clears an out-of-band detach. No
+  leaked attachment / stuck banner.
+- **Typed commands only.** The SW maps each bounded op to a FIXED set of CDP methods;
+  there is NO generic "run this CDP method" endpoint reachable by a caller/model.
+- **Banner tradeoff:** Brave shows "an extension is debugging this browser" while a
+  CDP op runs. Attach is per-op to keep that window tiny; simple top-frame
+  `text`/`html`/`eval`/foreground-`screenshot` take the non-CDP path (no banner).
 
 ## Stable extension ID (optional)
 
@@ -186,18 +211,28 @@ The chrome.* glue needs a real browser — verify by hand after loading:
       every op with `browser --tab <id> …`. Confirm each reads/navigates only its
       OWN tab — the explicit `--tab` overrides the shared owned-tab routing.
 - [ ] **Visible-tab screenshot works:** focus a normal tab, `browser screenshot
-      /tmp/vis.png` writes a real PNG of that foreground tab.
-- [ ] **Background/occluded-tab screenshot returns the CLEAR error (i3):**
-      `browser --instance <key> open <url>` → `browser --instance <key> --tab <id>
-      screenshot /tmp/x.png`. On i3 (the owned tab's window isn't raised) this
-      should fail — after the quota-spaced retries — with the **actionable**
-      `screenshot unavailable: … not visible on-screen … use 'text'/'html'/'eval'`
-      message and a **non-zero exit**, NOT the opaque `image readback failed` (and
-      NOT a `MAX_CAPTURE_VISIBLE_TAB_CALLS_PER_SECOND` quota dump). Reload the
-      extension first so the new mapping is live. (If the owned tab's window HAPPENS
-      to be composited/visible, it may instead write a PNG — that path still works;
-      the point is the failure is now a clear, actionable message.) Read that tab
-      with `browser --tab <id> text` instead — it works regardless of visibility.
+      /tmp/vis.png` writes a real PNG of that foreground tab (captureVisibleTab fast
+      path — no debugger banner).
+- [ ] **Background-tab screenshot now WORKS (CDP):** `browser --instance <key> open
+      <url>` → `browser --instance <key> --tab <id> screenshot /tmp/bg.png`. Even on
+      i3 with the owned tab's window NOT raised, CDP `Page.captureScreenshot` writes
+      a real PNG (a brief "an extension is debugging this browser" banner flashes).
+      `--fullpage` captures the whole scrollable document.
+- [ ] **Two profiles each screenshot independently:** two Brave profiles (distinct
+      labels), each `open` + `screenshot --tab <id>` its own tab → each writes its
+      OWN tab's PNG even though only one profile is foreground.
+- [ ] **Read INTO a cross-origin iframe:** open a page with a cross-origin iframe
+      (e.g. `civitai.com` embedding `model-benchmarking.civit.ai`). `browser --tab
+      <id> frames` lists the iframe; `browser --tab <id> --frame <frameId-or-url>
+      text` returns the iframe's innerText (plain `text` shows only the top frame).
+- [ ] **Trusted click drives an in-app control:** `browser --tab <id> [--frame <f>]
+      click "<selector>"` reaches an in-app tab/button; `type`/`key Enter` fill +
+      submit. Confirm the app reacts as to a human click.
+- [ ] **CDP attach is refused on a privileged tab:** point `--tab` at a
+      `chrome://`/extension page and run a CDP op → it fails with
+      `cdp_attach_refused:<scheme>` and NEVER attaches the debugger.
+- [ ] **No leaked debugger banner:** after any CDP op completes (success OR error),
+      the "an extension is debugging this browser" banner disappears (always-detach).
 - [ ] **Two-session isolation (the fix):** open two Claude sessions (each in its
       own tmux pane). In each, `browser open` a DIFFERENT url, then interleave
       `browser nav …` / `browser html` between the sessions. Confirm neither

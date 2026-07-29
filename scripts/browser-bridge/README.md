@@ -115,8 +115,10 @@ it (DNS-rebinding). Two independent gates defeat that:
   anything else → `403`. A rebind victim page carries a foreign `Host`.
 
 The extension holds `<all_urls>` host permissions + `scripting` (maximal — it
-must run in whatever tab is active). This can be scoped down later; noted in
-`extension/README.md`.
+must run in whatever tab is active) and, for the CDP ops, the `debugger`
+permission. This can be scoped down later; noted in `extension/README.md`. The CDP
+layer's own bounded security model (own-tab-only attach, no raw-CDP passthrough,
+always-detach) is in the **CDP ops** section below.
 
 ## Ops
 
@@ -127,13 +129,22 @@ must run in whatever tab is active). This can be scoped down later; noted in
 | `eval`       | `chrome.scripting.executeScript` (MAIN world) of `js`     | `{url,value}` |
 | `tabs`       | `chrome.tabs.query({})`                                   | `{tabs:[...],ownedTabId}` |
 | `nav`        | `chrome.tabs.update(tab,{url})`                           | `{tabId,url}` |
-| `screenshot` | `chrome.tabs.captureVisibleTab` (png) — **visible/foreground tab only** (a background/occluded tab fails with a clear "not visible on-screen" error; see the screenshot caveat) | `{url,dataUrl}` |
+| `screenshot` | **CDP `Page.captureScreenshot`** (png) — works on a BACKGROUND/occluded tab + each profile's own tab; a foreground tab uses the cheap `captureVisibleTab` fast path. `fullpage` grabs the whole document | `{url,dataUrl,via}` |
 | `open`       | `chrome.tabs.create({url,active:false})`                 | `{tabId,url}` |
 | `close`      | `chrome.tabs.remove(tabId)`                               | `{closed:tabId}` |
+| `frames`     | **CDP `Page.getFrameTree`** — the tab's frames incl. cross-origin iframes | `{url,title,frames:[{frameId,url,name,parentId}]}` |
+| `click`      | **CDP** `getBoundingClientRect` → `Input.dispatchMouseEvent` press+release (trusted) at the element center; `selector` required, `frame` optional | `{url,clicked,x,y,frame}` |
+| `type`       | **CDP `Input.insertText`** (trusted); `text` required, `selector`/`frame` optional (focus first) | `{url,typed,frame}` |
+| `key`        | **CDP `Input.dispatchKeyEvent`** (keyDown+keyUp) for one bounded key; `key` required | `{url,key,frame}` |
 
 `open`/`close` are dispatched to the extension; `release` (drop ownership, don't
-close the tab) is handled server-side and never reaches the extension. The
-tab-scoped ops (`getHtml`/`text`/`eval`/`nav`/`screenshot`/`close`) run against
+close the tab) is handled server-side and never reaches the extension.
+`frames`/`click`/`type`/`key` + a `--frame` on `getHtml`/`text`/`eval` are the
+**CDP (chrome.debugger) ops** (see the CDP section below). `--frame <frameId|
+url-substring>` routes a read/click INTO that (possibly cross-origin) frame via a
+CDP isolated-world `Runtime.evaluate`. The tab-scoped ops
+(`getHtml`/`text`/`eval`/`nav`/`screenshot`/`close`/`frames`/`click`/`type`/`key`)
+run against
 the calling session's owned tab when it has one (see Session isolation), else the
 active tab. `text` is the **cheap read**: it returns visible `innerText` (~KB)
 rather than full `outerHTML` (~100s of KB) — the read the opencode browser-agent
@@ -149,6 +160,53 @@ structured error: `503 extension_not_connected`, `504 timeout`,
 `tab` from a raw caller — the CLI already validates `--tab`), `401 unauthorized`,
 `403 bad_host`, `429 rate_limited|queue_full` (the per-instance concurrency
 backstop — see below; body carries a `retry_after` hint).
+
+## CDP ops (chrome.debugger): any-frame reads, trusted input, background screenshots
+
+`frames`/`click`/`type`/`key`, `--frame` reads, and `screenshot` use the Chrome
+DevTools Protocol via the extension's `debugger` permission. They fix three real
+agent failures: (1) `captureVisibleTab` could only grab the foreground tab (can't
+screenshot a background tab or two profiles); (2) `text`/`html`/`eval` saw only the
+top frame (the target app is a cross-origin iframe); (3) there was no trusted-input
+primitive to drive an app.
+
+**Design — per-op attach → run → always-detach.** The extension attaches
+`chrome.debugger` for the single op, runs a FIXED set of CDP methods, and detaches
+in a `finally` (so a thrown op still detaches). This keeps the "an extension is
+debugging this browser" banner window tiny and prevents a leaked attachment.
+`chrome.debugger.onDetach` clears an out-of-band detach (tab crash/close, banner
+Cancel). All decision logic (attach-scope validation, the always-detach
+orchestration `withCdpSession`, frame enumeration/resolution, the key/coordinate
+math, the frame read-expression builders) is **pure + unit-tested** in
+`extension/protocol.js` (`../tests/cdp_protocol.test.mjs`); `service_worker.js` is
+only the thin `chrome.debugger` side-effect glue.
+
+**Security model — the `debugger` permission is the biggest blast radius, so:**
+
+1. **STRICT own-tab attach scope.** The server tab-scopes a CDP op and routes it
+   ONLY to the caller's owned/`--tab` tab; the extension attaches `chrome.debugger`
+   ONLY to that injected tab and **refuses to attach to a privileged surface**
+   (`chrome://`, `chrome-extension://`, `devtools:`, `file:`, …) — validated
+   *before* the attach (`assertCdpAttachable`, `cdp_attach_refused:<scheme>`). For
+   the autonomous agent the tab is FORCED (env, not model-chosen), so it can never
+   attach to another tab, another profile, or the user's active tab.
+2. **NO raw-CDP passthrough to the model.** The opencode typed tool exposes ONLY the
+   bounded ops with typed scalars (`op`, `selector`, `text`, `key`, `frame`, `js`,
+   `url`, `maxBytes`). There is **no `cdp`/`method`/`params` field** — the model can
+   never send an arbitrary CDP command (`Page.navigate file://`, `Browser.*`,
+   `Target.*`, exfil `Runtime.evaluate`). `buildRequest` constructs the wire body
+   from a **whitelist**, so any smuggled field is dropped, never forwarded. This
+   preserves the PR #180 RCE-closed property (typed ops only, no command string).
+   The extension likewise has no generic "run this CDP method" endpoint.
+3. **Always detach** (per-op `finally` + `onDetach`) — no leaked attachment.
+4. **Metadata-only telemetry** (see below) is unchanged: op/domain only — never
+   frame URLs, typed text, eval source, or screenshot bytes. CDP ops count against
+   the per-instance rate limit (#178).
+
+**Tradeoff:** a CDP op briefly shows Brave's debug banner. A simple top-frame
+`text`/`html`/`eval` or a foreground `screenshot` takes the lighter non-CDP path
+(no banner). **The manifest gained the `debugger` permission → the extension needs
+a manual reload** (and Brave may re-prompt for the permission).
 
 ## Concurrency backstop (per-instance rate limit + queue cap)
 
@@ -307,10 +365,10 @@ per-session (multi-step **workflow**) isolation did not.
 
 ## Telemetry (activity pipeline)
 
-Each **handled command** (`getHtml`/`eval`/`tabs`/`nav`/`screenshot`, incl. its
-error/ambiguous outcomes) emits **one** event into the personal
-activity-telemetry pipeline, so browser-skill usage is first-class self-telemetry
-in ClickHouse `activity.events`:
+Each **handled command** (`getHtml`/`text`/`eval`/`tabs`/`nav`/`screenshot`/
+`frames`/`click`/`type`/`key`, incl. its error/ambiguous outcomes) emits **one**
+event into the personal activity-telemetry pipeline, so browser-skill usage is
+first-class self-telemetry in ClickHouse `activity.events`:
 
 - **`source="browser-bridge"`, `kind="cmd"`** — a *distinct* source from the
   collector's `browser` (nav/scroll) source; the two are kept separate.
@@ -322,7 +380,9 @@ in ClickHouse `activity.events`:
 - **METADATA-ONLY (privacy):** it emits **only** the op name, instance key,
   outcome, latency, and the active tab's **bare domain** — **never** the eval
   source, page HTML, screenshot bytes/data-URLs, a full URL with path/query, or
-  any page content.
+  any page content. For the CDP ops this specifically means **no frame URLs**
+  (only the bare top-level domain), **no typed text** (`type`), and no click
+  selector — the domain is derived only from the result's top-level `url`.
 - **Best-effort / fire-and-forget:** emitting runs **after** the HTTP response is
   sent and can never delay or break a command — a missing collector, unwritable
   spool, or any exception is swallowed and the command still succeeds. No new
@@ -373,8 +433,10 @@ browser agent "<goal>" [--instance K] [--allow-domains …] [--deny-domains …]
 The agent's entire capability is a single **custom opencode tool**, `browser`
 (`opencode/tools/browser.js` + its pure-logic sibling `browser_tool_impl.mjs`,
 copied into the scratch project's `.opencode/tools/` per run). The model calls it
-with TYPED arguments — `op` ∈ {`text`,`html`,`eval`,`nav`,`screenshot`} plus
-optional `selector`/`url`/`js`/`maxBytes` — **never a shell command string**.
+with TYPED arguments — `op` ∈ {`text`,`html`,`eval`,`nav`,`screenshot`,`frames`,
+`click`,`type`,`key`} plus optional `selector`/`url`/`js`/`text`/`key`/`frame`/
+`maxBytes` — **never a shell command string, and never a raw-CDP `cdp`/`method`
+field** (the CDP ops are bounded typed ops only; see the CDP security model above).
 
 - **Why this replaced the bash tool.** The MVP gave the agent opencode's *bash*
   tool, permission-scoped to `browser --tab <id> *`. opencode denies by matching
@@ -540,9 +602,21 @@ nix-shell -p librsvg --run 'for s in 16 32 48 128; do rsvg-convert -w $s -h $s i
 # Python (server.py) — headless, no Brave, no network beyond loopback:
 nix-shell -p python312Packages.pytest --run "pytest scripts/browser-bridge/tests"
 
-# Extension protocol logic (pure, no chrome.* runtime):
-nix-shell -p nodejs --run "node --test scripts/browser-bridge/tests/protocol.test.mjs"
+# Extension protocol logic + CDP helpers + typed tool (pure, no chrome.* runtime):
+nix-shell -p nodejs --run "node --test scripts/browser-bridge/tests/*.test.mjs"
 ```
+
+The CDP (chrome.debugger) ops are covered deterministically without a real browser:
+`tests/cdp_protocol.test.mjs` unit-tests the pure decision layer (attach-scope
+refuse-before-attach, always-detach on success/error/detach-failure, frame
+enumeration/resolution, key/coordinate math, injection-safe expression builders);
+`tests/browser_tool.test.mjs` proves the typed tool forces the own-tab, forwards
+only whitelisted typed fields, and **drops any smuggled `cdp`/`method`/`params`
+field** (the RCE-class regression guard); `tests/test_server.py` proves the new ops
+are dispatched + tab-scoped, enforce required fields, forward `frame`/`selector`/
+`text`/`key` verbatim, keep telemetry metadata-only (no frame URLs / typed text),
+and count against the rate limit. The real chrome.debugger attach/detach behaviour
+needs live Brave — see **Manual live check** below.
 
 The Python suite (`tests/test_server.py`) also runs as part of
 `scripts/run-tests.sh` (it's in the hermetic set). It covers: token gen + `0600`
