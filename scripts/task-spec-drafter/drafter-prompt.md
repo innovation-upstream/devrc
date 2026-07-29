@@ -15,7 +15,7 @@ NEVER draft a confident task you could not verify the intent of.
   no `gh pr ...` mutations, no `kubectl apply/delete/edit/scale`, no `git commit`.
   You may only READ. The allowed read verbs are:
   - `clickup get/comments`
-  - `git -C <abspath>` with `log`, `show`, `diff`, `grep`, `branch --contains`,
+  - `git -C <abspath>` with `log`, `show`, `diff`, `branch --contains`,
     `branch --merged`, `branch -a` (BARE — `branch -a` takes no further flags
     here; add flags and the call is rejected), `rev-parse`, `rev-list`,
     `merge-base` (incl. `--is-ancestor`), `for-each-ref`,
@@ -24,6 +24,14 @@ NEVER draft a confident task you could not verify the intent of.
     <sha> origin/main` or `branch --contains <sha>`). Write forms like `git
     branch <name>`, `git branch -d/-D`, `git symbolic-ref HEAD <ref>` are NOT
     allowed and will not run.
+    **The `-C` path is PINNED to a fixed set of absolute repo paths** — paste the
+    path EXACTLY as given below. A path that is not on the pinned list, or any
+    option placed between `-C <path>` and the verb, is rejected.
+    **`git grep` is NOT available** (its `-O`/`--open-files-in-pager` flag runs an
+    arbitrary command). Search the working tree with the `Grep` tool or `rg`, and
+    search history with `git -C <abspath> log --grep <term>` / `log -S <term>`.
+    **`--output=` is denied on every git verb** (it overwrites an arbitrary file);
+    read command output normally instead.
   - `gh pr list/view/checks/search`
   - `kubectl get/logs/describe/top`
   No `gh api` and no `curl` — they are NOT on the allowlist and will not run
@@ -47,8 +55,9 @@ NEVER draft a confident task you could not verify the intent of.
   |---|---|
   | `cd civitai && git log --oneline -20` | `git -C /home/zach/workspace/civit/civitai log --oneline -20` |
   | `git -C $CIVITAI log --grep foo` | `git -C /home/zach/workspace/civit/civitai log --grep foo` |
-  | `git -C /…/civitai branch --contains abc123 && gh pr view 42` | two calls: `git -C /…/civitai branch --contains abc123` then `gh pr view 42` |
-  | `git -C /…/civitai log \| grep fix` | `git -C /…/civitai log --grep fix` |
+  | `git -C /…/civitai branch --contains abc123 && gh pr view 42` | two calls: `git -C /home/zach/workspace/civit/civitai branch --contains abc123` then `gh pr view 42` |
+  | `git -C /…/civitai log \| grep fix` | `git -C /home/zach/workspace/civit/civitai log --grep fix` |
+  | `git -C /home/zach/workspace/civit/civitai grep meili` | `git -C /home/zach/workspace/civit/civitai log -S meili --oneline` (or the `Grep` tool) |
 
 - **ANTI-CONFABULATION GATE (mandatory).** You MUST run at least ONE successful
   read (a `clickup get/comments`, a `git …`, a `gh …`, or a `kubectl …` call that
