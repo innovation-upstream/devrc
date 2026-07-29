@@ -102,7 +102,12 @@ def test_allowlist_has_no_write_capable_verbs():
 def test_allowlist_keeps_readonly_verification_verbs():
     al = _allowlist(_read(_DRAFTER))
     for verb in (
-        "Bash(gh pr list*)", "Bash(gh pr view*)", "Bash(kubectl get*)",
+        "Bash(gh pr list*)", "Bash(gh pr view*)",
+        # kubectl moved behind the fixed `kubectl-ro` wrapper — a `Bash(kubectl
+        # <verb>:*)` rule is a PREFIX rule and kubectl takes its global flags
+        # BEFORE the verb, so `kubectl -n prod delete …` walked past every one of
+        # them. Direct kubectl is now denied wholesale.
+        "Bash($SELF_DIR/kubectl-ro *)",
         # PINNED to the literal script path — `Bash(node *query.mjs get*)` was the
         # same mid-glob RCE as `git -C *`: `node -e '<js>' query.mjs get 1` matched
         # it and node ran the `-e` payload (verified end-to-end via `claude -p`).

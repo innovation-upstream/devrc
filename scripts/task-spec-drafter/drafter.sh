@@ -268,6 +268,20 @@ export REPO_COS_PROD_KUBECONFIG="${REPO_COS_PROD_KUBECONFIG:-$HOME/workspace/hom
 #    id + terms and controls exactly what git runs. This is the safe boundary the
 #    audit called for; prefer it over hand-rolled git in the prompt.
 #
+# ✅ `kubectl-ro` (added 2026-07-29; REPLACES `Bash(kubectl get|logs|describe|top*)`)
+#    — the second fixed wrapper, and it exists for exactly the reason
+#    `ticket-status` does. kubectl accepts its GLOBAL FLAGS BEFORE the verb, and a
+#    permission rule is a PREFIX rule, so NO set of `Bash(kubectl <verb>:*)` rules
+#    can constrain the verb: `kubectl -n prod delete deploy web` slips past every
+#    one of them (this was a live bypass in the first cut of this change, caught in
+#    review — see the DENY_KUBECTL note below). The wrapper validates the verb
+#    wherever it sits, refuses identity/endpoint/TLS overrides, pins
+#    `--kubeconfig` to the runner's own, refuses Secret reads, and refuses the
+#    non-terminating `--follow`/`--watch`. Direct `kubectl` is then DENIED
+#    wholesale; the wrapper is a different command word, so it survives. All 30
+#    real kubectl invocations in the 8-day transcript window pass it unchanged
+#    (`tests/test_kubectl_ro.py` replays them against a stubbed kubectl).
+#
 # ⛔⛔ RCE CLASS: `git -C * <verb>*` ADMITTED GLOBAL OPTIONS — the `-C` path is now
 #    PINNED to literal absolute repo paths (2026-07-28). This was live from
 #    2026-06-23 until this commit; it is NOT something PR #177 introduced.
@@ -419,25 +433,45 @@ export REPO_COS_PROD_KUBECONFIG="${REPO_COS_PROD_KUBECONFIG:-$HOME/workspace/hom
 #        individually, so `git log && python3 -c …` is denied on the second half.
 #    RESIDUAL, stated plainly: an ABSOLUTE-PATH invocation
 #    (`/run/current-system/sw/bin/python3 -c …`) does NOT match `Bash(python3:*)`.
-#    It is not a bypass TODAY only because it matches no ALLOW rule either — every
-#    allow rule (ours and settings.json's) is a bare-name prefix and the matcher
-#    does NOT basename-normalise the command word, so the absolute-path form is
-#    rejected as "requires approval". That is a property of the CURRENT
-#    settings.json, not something this file enforces. If an absolute-path allow
-#    entry is ever added there, these denies do not cover it. `Bash(*/python3*)`
-#    style denies were considered and REJECTED: `*` is `.*` in a DOTALL anchored
-#    regex, so `*/curl*` also denies `rg 's3://curl x' <repo>` — an over-broad deny
-#    silently loses a read in an unattended run, which is the failure mode PR #177
-#    existed to fix.
-#    Two more things a deny list cannot reach, for the record:
-#      * REDIRECTIONS are stripped before matching (`commandWithoutRedirections`),
-#        so no deny pattern can see `> ~/.zshenv`. The allowlisted `echo*`/`cat*`
-#        entries are the exposure there; unchanged by this pass.
-#      * `WebFetch` is allowlisted and is itself an egress channel. Unchanged here.
+#    It is not a bypass TODAY only because it matches no ALLOW rule either. Note
+#    the precise reason — it is NOT "every allow rule is a bare-name prefix",
+#    which is false (74 of the 262 rules in the union carry a path or a `VAR=`
+#    prefix, e.g. `Bash(./node_modules/.bin/task-master:*)`). It is that NONE of
+#    the union's rules names an interpreter/egress binary by absolute path, and
+#    the matcher does not basename-normalise the command word, so the
+#    absolute-path spelling matches nothing and is rejected as "requires
+#    approval". That is a property of the CURRENT settings.json, not something
+#    this file enforces. `Bash(*/python3*)` style denies were considered and
+#    REJECTED: `*` is `.*` in a DOTALL anchored regex, so `*/curl*` also denies
+#    `rg 's3://curl x' <repo>` — an over-broad deny silently loses a read in an
+#    unattended run, which is the failure mode PR #177 existed to fix.
+#
+#    THE REAL RESIDUAL IS READ-THEN-EXFIL, NOT WRITE. Getting this the right way
+#    round matters, because the first version of this comment had it backwards:
+#      * NOT a hole: `echo x > ~/.zshenv`. Redirections are stripped before RULE
+#        matching, so no deny pattern can see them — but an INDEPENDENT layer
+#        (`fko`→`eqy`→`yYr`→`glt`) checks redirect TARGETS, requires an Edit/Write
+#        path allow rule for the target, and hard-flags `~/.zshenv`, `~/.bashrc`
+#        and `~/.claude/**`. The pass has no Edit/Write grant, so redirect writes
+#        do not auto-execute.
+#      * IS a complete chain: `cat`, `grep` and `rg` are allowlisted and read ANY
+#        file the user can read (kubeconfigs, `~/.claude/clawgate.env`,
+#        `/proc/self/environ`), and `WebFetch` is allowlisted with NO domain
+#        restriction. Read-secret → exfil-by-URL needs nothing else, and no deny
+#        rule in this file touches it. Closing it means narrowing the READ tools
+#        (a `Read`/`Grep` path restriction, a WebFetch domain allowlist), which is
+#        a separate change.
+#    Worth knowing when reading transcripts: the CLI also AUTO-ALLOWS a fixed set
+#    of read-only commands with no rule at all (`gvd`→`tvd`: `head`, `tail`, `wc`,
+#    `cut`, `diff`, `stat`, `id`, `uname`, `ls`, `cd`, `jq`, `find`, `docker ps`).
+#    That is why corpus commands like `git … | head -200` ran while `head` appears
+#    in no allowlist. Deny is evaluated BEFORE that path (`wko` short-circuits
+#    ahead of `gvd`), so denying `find` still takes effect.
 #    So this layer REDUCES the inherited surface. It does not PROVE safety, and the
-#    durable fix remains a fixed wrapper in the style of `ticket-status`.
+#    durable fix remains a fixed wrapper in the style of `ticket-status` /
+#    `kubectl-ro`.
 # Override DRAFTER_ALLOWED_TOOLS via env ONLY with read-only verbs.
-DRAFTER_ALLOWED_TOOLS="${DRAFTER_ALLOWED_TOOLS:-Read,Glob,Grep,WebFetch,Bash($SELF_DIR/ticket-status*),Bash(node /home/zach/.claude/skills/clickup/query.mjs get*),Bash(node /home/zach/.claude/skills/clickup/query.mjs comments*),Bash(node /home/zach/.claude/skills/clickup/query.mjs search*),Bash(git -C /home/zach/workspace/civit/civitai log*),Bash(git -C /home/zach/workspace/civit/civitai show*),Bash(git -C /home/zach/workspace/civit/civitai diff*),Bash(git -C /home/zach/workspace/civit/civitai branch --contains*),Bash(git -C /home/zach/workspace/civit/civitai branch --merged*),Bash(git -C /home/zach/workspace/civit/civitai branch -a),Bash(git -C /home/zach/workspace/civit/civitai branch --all),Bash(git -C /home/zach/workspace/civit/civitai rev-parse*),Bash(git -C /home/zach/workspace/civit/civitai rev-list*),Bash(git -C /home/zach/workspace/civit/civitai merge-base*),Bash(git -C /home/zach/workspace/civit/civitai for-each-ref*),Bash(git -C /home/zach/workspace/civit/civitai symbolic-ref --short*),Bash(git -C /home/zach/workspace/civit/civitai ls-files*),Bash(git -C /home/zach/workspace/civit/civitai cat-file*),Bash(git -C /home/zach/workspace/civit/datapacket-talos log*),Bash(git -C /home/zach/workspace/civit/datapacket-talos show*),Bash(git -C /home/zach/workspace/civit/datapacket-talos diff*),Bash(git -C /home/zach/workspace/civit/datapacket-talos branch --contains*),Bash(git -C /home/zach/workspace/civit/datapacket-talos branch --merged*),Bash(git -C /home/zach/workspace/civit/datapacket-talos branch -a),Bash(git -C /home/zach/workspace/civit/datapacket-talos branch --all),Bash(git -C /home/zach/workspace/civit/datapacket-talos rev-parse*),Bash(git -C /home/zach/workspace/civit/datapacket-talos rev-list*),Bash(git -C /home/zach/workspace/civit/datapacket-talos merge-base*),Bash(git -C /home/zach/workspace/civit/datapacket-talos for-each-ref*),Bash(git -C /home/zach/workspace/civit/datapacket-talos symbolic-ref --short*),Bash(git -C /home/zach/workspace/civit/datapacket-talos ls-files*),Bash(git -C /home/zach/workspace/civit/datapacket-talos cat-file*),Bash(git -C /home/zach/workspace/homelab-talos log*),Bash(git -C /home/zach/workspace/homelab-talos show*),Bash(git -C /home/zach/workspace/homelab-talos diff*),Bash(git -C /home/zach/workspace/homelab-talos branch --contains*),Bash(git -C /home/zach/workspace/homelab-talos branch --merged*),Bash(git -C /home/zach/workspace/homelab-talos branch -a),Bash(git -C /home/zach/workspace/homelab-talos branch --all),Bash(git -C /home/zach/workspace/homelab-talos rev-parse*),Bash(git -C /home/zach/workspace/homelab-talos rev-list*),Bash(git -C /home/zach/workspace/homelab-talos merge-base*),Bash(git -C /home/zach/workspace/homelab-talos for-each-ref*),Bash(git -C /home/zach/workspace/homelab-talos symbolic-ref --short*),Bash(git -C /home/zach/workspace/homelab-talos ls-files*),Bash(git -C /home/zach/workspace/homelab-talos cat-file*),Bash(git log*),Bash(gh pr list*),Bash(gh pr view*),Bash(gh pr checks*),Bash(gh -R civitai/civitai pr list*),Bash(gh -R civitai/civitai pr view*),Bash(gh -R civitai/civitai pr checks*),Bash(gh -R civitai/civitai issue view*),Bash(gh -R civitai/talos-infra pr list*),Bash(gh -R civitai/talos-infra pr view*),Bash(gh -R civitai/talos-infra pr checks*),Bash(gh -R civitai/talos-infra issue view*),Bash(gh search*),Bash(kubectl get*),Bash(kubectl logs*),Bash(kubectl describe*),Bash(kubectl top*),Bash(grep*),Bash(rg*),Bash(jq*),Bash(cat*),Bash(echo*),Bash(date*)}"
+DRAFTER_ALLOWED_TOOLS="${DRAFTER_ALLOWED_TOOLS:-Read,Glob,Grep,WebFetch,Bash($SELF_DIR/ticket-status*),Bash(node /home/zach/.claude/skills/clickup/query.mjs get*),Bash(node /home/zach/.claude/skills/clickup/query.mjs comments*),Bash(node /home/zach/.claude/skills/clickup/query.mjs search*),Bash(git -C /home/zach/workspace/civit/civitai log*),Bash(git -C /home/zach/workspace/civit/civitai show*),Bash(git -C /home/zach/workspace/civit/civitai diff*),Bash(git -C /home/zach/workspace/civit/civitai branch --contains*),Bash(git -C /home/zach/workspace/civit/civitai branch --merged*),Bash(git -C /home/zach/workspace/civit/civitai branch -a),Bash(git -C /home/zach/workspace/civit/civitai branch --all),Bash(git -C /home/zach/workspace/civit/civitai rev-parse*),Bash(git -C /home/zach/workspace/civit/civitai rev-list*),Bash(git -C /home/zach/workspace/civit/civitai merge-base*),Bash(git -C /home/zach/workspace/civit/civitai for-each-ref*),Bash(git -C /home/zach/workspace/civit/civitai symbolic-ref --short*),Bash(git -C /home/zach/workspace/civit/civitai ls-files*),Bash(git -C /home/zach/workspace/civit/civitai cat-file*),Bash(git -C /home/zach/workspace/civit/datapacket-talos log*),Bash(git -C /home/zach/workspace/civit/datapacket-talos show*),Bash(git -C /home/zach/workspace/civit/datapacket-talos diff*),Bash(git -C /home/zach/workspace/civit/datapacket-talos branch --contains*),Bash(git -C /home/zach/workspace/civit/datapacket-talos branch --merged*),Bash(git -C /home/zach/workspace/civit/datapacket-talos branch -a),Bash(git -C /home/zach/workspace/civit/datapacket-talos branch --all),Bash(git -C /home/zach/workspace/civit/datapacket-talos rev-parse*),Bash(git -C /home/zach/workspace/civit/datapacket-talos rev-list*),Bash(git -C /home/zach/workspace/civit/datapacket-talos merge-base*),Bash(git -C /home/zach/workspace/civit/datapacket-talos for-each-ref*),Bash(git -C /home/zach/workspace/civit/datapacket-talos symbolic-ref --short*),Bash(git -C /home/zach/workspace/civit/datapacket-talos ls-files*),Bash(git -C /home/zach/workspace/civit/datapacket-talos cat-file*),Bash(git -C /home/zach/workspace/homelab-talos log*),Bash(git -C /home/zach/workspace/homelab-talos show*),Bash(git -C /home/zach/workspace/homelab-talos diff*),Bash(git -C /home/zach/workspace/homelab-talos branch --contains*),Bash(git -C /home/zach/workspace/homelab-talos branch --merged*),Bash(git -C /home/zach/workspace/homelab-talos branch -a),Bash(git -C /home/zach/workspace/homelab-talos branch --all),Bash(git -C /home/zach/workspace/homelab-talos rev-parse*),Bash(git -C /home/zach/workspace/homelab-talos rev-list*),Bash(git -C /home/zach/workspace/homelab-talos merge-base*),Bash(git -C /home/zach/workspace/homelab-talos for-each-ref*),Bash(git -C /home/zach/workspace/homelab-talos symbolic-ref --short*),Bash(git -C /home/zach/workspace/homelab-talos ls-files*),Bash(git -C /home/zach/workspace/homelab-talos cat-file*),Bash(git log*),Bash(gh pr list*),Bash(gh pr view*),Bash(gh pr checks*),Bash(gh -R civitai/civitai pr list*),Bash(gh -R civitai/civitai pr view*),Bash(gh -R civitai/civitai pr checks*),Bash(gh -R civitai/civitai issue view*),Bash(gh -R civitai/talos-infra pr list*),Bash(gh -R civitai/talos-infra pr view*),Bash(gh -R civitai/talos-infra pr checks*),Bash(gh -R civitai/talos-infra issue view*),Bash(gh search*),Bash($SELF_DIR/kubectl-ro *),Bash(grep*),Bash(rg*),Bash(jq*),Bash(cat*),Bash(echo*),Bash(date*)}"
 
 # DENY layer (`--disallowedTools`) — see the 🛡 and 🔒 notes above.
 # Deny OVERRIDES allow, from EVERY source (our --allowedTools AND the per-host
@@ -472,10 +506,21 @@ DRAFTER_DENY_EXEC='Bash(python:*),Bash(python2:*),Bash(python3:*),Bash(python3.*
 
 #   Shell re-entry, eval, and the "run this other program" utilities. `source:*`,
 #   `find:*` (`-exec`/`-fprintf`) and `xargs:*` are all LIVE grants in
-#   settings.json. `env`/`printenv` are denied because the pass inherits
-#   drafter.sh's environment, which sources ~/.claude/clawgate.env
-#   (CLAWGATE_HOOK_TOKEN) — the same reason `Bash(env*)` was kept off the allowlist.
-DRAFTER_DENY_SHELL='Bash(bash:*),Bash(sh:*),Bash(zsh:*),Bash(ksh:*),Bash(dash:*),Bash(ash:*),Bash(fish:*),Bash(csh:*),Bash(tcsh:*),Bash(busybox:*),Bash(eval:*),Bash(exec:*),Bash(source:*),Bash(command:*),Bash(builtin:*),Bash(env:*),Bash(printenv:*),Bash(xargs:*),Bash(find:*),Bash(watch:*),Bash(strace:*),Bash(ltrace:*),Bash(gdb:*),Bash(nsenter:*),Bash(unshare:*),Bash(chroot:*),Bash(setsid:*),Bash(nohup:*),Bash(flock:*),Bash(script:*),Bash(expect:*),Bash(tmux:*),Bash(screen:*),Bash(at:*),Bash(batch:*),Bash(crontab:*),Bash(systemd-run:*)'
+#   settings.json. `sort:*` is a LIVE grant too and belongs here rather than with
+#   the readers: `sort -S 1 --compress-program=/bin/sh <file>` EXECUTES the file's
+#   contents (confirmed by execution in review).
+#   ⚠ `env`/`printenv` are listed for tidiness, NOT as a secret-containment
+#   measure, and must not be read as one: the pass's environment carries
+#   CLAWGATE_HOOK_TOKEN, and `cat /proc/self/environ` and `jq -n env` both remain
+#   allowlisted and reach it. Environment secrecy is NOT a property this layer
+#   provides.
+#   ⚠ COST, measured, not hand-waved: `find` accounts for 56 of the 1,284 distinct
+#   commands the drafter executed across the 8-day transcript window (4.4%) — all
+#   filename searches under the civitai repo, several piping into `xargs grep`.
+#   The deny is kept anyway: `find -exec` is genuine arbitrary execution, and
+#   drafter-prompt.md already steers this work to the `Grep` tool and `rg`. This is
+#   a deliberate capability trade, not a free win.
+DRAFTER_DENY_SHELL='Bash(bash:*),Bash(sh:*),Bash(zsh:*),Bash(ksh:*),Bash(dash:*),Bash(ash:*),Bash(fish:*),Bash(csh:*),Bash(tcsh:*),Bash(busybox:*),Bash(eval:*),Bash(exec:*),Bash(source:*),Bash(command:*),Bash(builtin:*),Bash(env:*),Bash(printenv:*),Bash(xargs:*),Bash(find:*),Bash(sort:*),Bash(watch:*),Bash(strace:*),Bash(ltrace:*),Bash(gdb:*),Bash(nsenter:*),Bash(unshare:*),Bash(chroot:*),Bash(setsid:*),Bash(nohup:*),Bash(flock:*),Bash(script:*),Bash(expect:*),Bash(tmux:*),Bash(screen:*),Bash(at:*),Bash(batch:*),Bash(crontab:*),Bash(systemd-run:*)'
 
 #   Privilege escalation, containers, and cluster/host admin. `docker run:*` is a
 #   LIVE grant and `docker run --privileged -v /:/host … chroot /host` is root on
@@ -511,12 +556,30 @@ DRAFTER_DENY_WRITE='Bash(tee:*),Bash(dd:*),Bash(rm:*),Bash(rmdir:*),Bash(mv:*),B
 #   denied by its exact literal path instead of by a wildcard.
 DRAFTER_DENY_GIT='Bash(git -c *),Bash(git --exec-path*),Bash(git * --output *),Bash(git * --output=*),Bash(git * --open*),Bash(git add:*),Bash(git commit:*),Bash(git push:*),Bash(git pull:*),Bash(git fetch:*),Bash(git clone:*),Bash(git init:*),Bash(git reset:*),Bash(git clean:*),Bash(git checkout:*),Bash(git switch:*),Bash(git restore:*),Bash(git rebase:*),Bash(git merge:*),Bash(git cherry-pick:*),Bash(git revert:*),Bash(git am:*),Bash(git apply:*),Bash(git stash:*),Bash(git tag:*),Bash(git branch:*),Bash(git remote:*),Bash(git config:*),Bash(git credential:*),Bash(git update-ref:*),Bash(git rm:*),Bash(git mv:*),Bash(git gc:*),Bash(git prune:*),Bash(git reflog:*),Bash(git filter-branch:*),Bash(git notes:*),Bash(git replace:*),Bash(git worktree:*),Bash(git submodule:*),Bash(git daemon:*),Bash(git send-email:*),Bash(git difftool:*),Bash(git mergetool:*),Bash(git ls-remote:*),Bash(git archive:*),Bash(git bundle:*),Bash(git format-patch:*),Bash(git fast-import:*),Bash(git instaweb:*),Bash(git -C /home/zach/workspace/baseball-manitoba-pitch config*)'
 
-#   kubectl. `Bash(kubectl:*)` is a LIVE grant — i.e. EVERY verb, against whatever
-#   kubeconfig the unit carries (the PRODUCTION one). The allowlist only wants
-#   get/logs/describe/top, so every mutating or shell-granting verb is denied.
-#   Env-prefixed forms (`KUBECONFIG=… kubectl delete …`, also LIVE grants) are
-#   covered without a leading wildcard because deny matching strips env prefixes.
-DRAFTER_DENY_KUBECTL='Bash(kubectl apply:*),Bash(kubectl create:*),Bash(kubectl delete:*),Bash(kubectl replace:*),Bash(kubectl patch:*),Bash(kubectl edit:*),Bash(kubectl scale:*),Bash(kubectl autoscale:*),Bash(kubectl rollout:*),Bash(kubectl run:*),Bash(kubectl exec:*),Bash(kubectl attach:*),Bash(kubectl cp:*),Bash(kubectl port-forward:*),Bash(kubectl proxy:*),Bash(kubectl debug:*),Bash(kubectl drain:*),Bash(kubectl cordon:*),Bash(kubectl uncordon:*),Bash(kubectl taint:*),Bash(kubectl label:*),Bash(kubectl annotate:*),Bash(kubectl set:*),Bash(kubectl expose:*),Bash(kubectl certificate:*),Bash(kubectl auth:*),Bash(kubectl config:*),Bash(kubectl plugin:*),Bash(kubectl apply-set:*)'
+#   kubectl — DENIED WHOLESALE. `Bash(kubectl:*)` is a LIVE grant in
+#   settings.json: EVERY verb, against whatever kubeconfig the unit carries (the
+#   PRODUCTION one).
+#   ⛔ THE PER-VERB DENY LIST THAT USED TO LIVE HERE DID NOT WORK, and it is worth
+#   understanding why before anyone "restores" it. It held 29 rules of the shape
+#   `Bash(kubectl delete:*)`. Those are PREFIX rules, so they only match when the
+#   VERB COMES FIRST — but kubectl takes its global flags BEFORE the verb:
+#       kubectl delete pod -n prod api-0                  -> denied
+#       kubectl -n prod delete deploy web                 -> ALLOWED (bypass)
+#       kubectl -n x exec pod -- sh -c id                 -> ALLOWED (bypass)
+#       kubectl --kubeconfig=/prod delete ns prod         -> ALLOWED (bypass)
+#   `-n <ns>` before the verb is the most ordinary kubectl idiom there is; an
+#   injected ticket only has to phrase it that way. There is no fix inside the
+#   rule language: `Bash(kubectl:*)` would also kill get/logs, and
+#   `Bash(kubectl * delete *)` is a mid-pattern wildcard (banned here) that is
+#   quote-bypassable anyway.
+#   So the four READ verbs moved behind the fixed `kubectl-ro` wrapper (allowlisted
+#   by its literal absolute path, same pattern as `ticket-status`), which validates
+#   the verb wherever it sits, refuses identity/endpoint/TLS overrides, and pins
+#   `--kubeconfig` to the runner's own. Direct `kubectl` is then denied outright:
+#   deny beats allow from every source, and the wrapper is a different command
+#   word, so it survives. Env-prefixed forms (`KUBECONFIG=… kubectl …`, also LIVE
+#   grants) need no leading wildcard — deny matching strips env prefixes.
+DRAFTER_DENY_KUBECTL='Bash(kubectl:*)'
 
 #   gh. Insurance only: nothing currently grants these (settings.json carries just
 #   `gh pr list|view`, the allowlist adds `pr checks`, `search`, and the pinned
@@ -537,9 +600,45 @@ DRAFTER_DENY_RG='Bash(rg --pre *),Bash(rg --pre=*),Bash(rg * --pre *),Bash(rg * 
 #   that an injected ticket cannot rewrite a file directly.
 DRAFTER_DENY_TOOLS='Write,Edit,NotebookEdit'
 
-# Set DRAFTER_DENIED_TOOLS="" to disable the layer entirely (NOT recommended — it
-# is the only thing holding back the inherited settings.json grants).
-DRAFTER_DENIED_TOOLS="${DRAFTER_DENIED_TOOLS-$DRAFTER_DENY_EXEC,$DRAFTER_DENY_SHELL,$DRAFTER_DENY_PRIV,$DRAFTER_DENY_EGRESS,$DRAFTER_DENY_WRITE,$DRAFTER_DENY_GIT,$DRAFTER_DENY_KUBECTL,$DRAFTER_DENY_GH,$DRAFTER_DENY_RG,$DRAFTER_DENY_TOOLS}"
+# ⚠ `:-` not `-`. With a bare `-`, `DRAFTER_DENIED_TOOLS=` in the environment (or
+# an empty line in the env file) is a SET-BUT-EMPTY value, which the bare form
+# honours — silently disabling the entire security layer with no log line and
+# every test still green. There is no legitimate reason to run with it empty.
+DRAFTER_DENIED_TOOLS="${DRAFTER_DENIED_TOOLS:-$DRAFTER_DENY_EXEC,$DRAFTER_DENY_SHELL,$DRAFTER_DENY_PRIV,$DRAFTER_DENY_EGRESS,$DRAFTER_DENY_WRITE,$DRAFTER_DENY_GIT,$DRAFTER_DENY_KUBECTL,$DRAFTER_DENY_GH,$DRAFTER_DENY_RG,$DRAFTER_DENY_TOOLS}"
+
+# DENY-LAYER INTEGRITY GUARD — the counterpart of the PINNING COMPLETENESS GUARD
+# below. The allow list gets a runtime `case` that ABORTS when it is wrong; until
+# this guard existed the deny list got nothing, so an env override, a stray later
+# assignment, or a bad edit could strip the only thing holding back the inherited
+# `~/.claude/settings.json` grants (python3 / docker / kubectl-on-prod / curl /
+# ssh / sops) and the 08:00 run would proceed, unattended, over untrusted ticket
+# text, looking completely normal. Fail LOUD instead.
+[ -n "$DRAFTER_DENIED_TOOLS" ] || {
+  log "FATAL: DRAFTER_DENIED_TOOLS is empty — the deny layer is the ONLY control"
+  log "       over the grants claude -p unions in from ~/.claude/settings.json"
+  log "       (python3 -c, docker run --privileged, kubectl against PROD, curl,"
+  log "       ssh, sops). Refusing to run an unattended pass without it."
+  exit 1
+}
+if [ "${#DRAFTER_DENIED_TOOLS}" -lt 3000 ]; then
+  log "FATAL: DRAFTER_DENIED_TOOLS is only ${#DRAFTER_DENIED_TOOLS} chars — the"
+  log "       shipped default is ~4.8k. Something truncated or overrode it."
+  exit 1
+fi
+# Spot-check the load-bearing entries survived whatever produced the value. Each
+# of these corresponds to a LIVE grant in settings.json that is arbitrary code,
+# root, or the production cluster.
+for _deny_probe in 'Bash(python3:*)' 'Bash(docker:*)' 'Bash(kubectl:*)' \
+                   'Bash(curl:*)' 'Bash(ssh:*)' 'Bash(sops:*)' 'Bash(find:*)'; do
+  case "$DRAFTER_DENIED_TOOLS" in
+    *"$_deny_probe"*) : ;;
+    *)
+      log "FATAL: DRAFTER_DENIED_TOOLS is missing $_deny_probe — refusing to run."
+      exit 1
+      ;;
+  esac
+done
+unset _deny_probe
 
 mkdir -p "$DRAFTER_OUT_DIR" 2>/dev/null || true
 # The delta-state file may live outside OUT_DIR (e.g. ~/.local/state/...); make
@@ -797,14 +896,18 @@ Run the five-step pipeline on ticket $TID now and output ONLY the json block."
   # NB: </dev/null so the headless claude never reads the loop's stdin (the
   # ticket list); without it, claude consumes the rest of the queue and the loop
   # exits after one iteration.
-  DENY_ARGS=()
-  [ -n "$DRAFTER_DENIED_TOOLS" ] && DENY_ARGS=(--disallowedTools "$DRAFTER_DENIED_TOOLS")
+  # UNCONDITIONAL on purpose. This used to be
+  #     [ -n "$DRAFTER_DENIED_TOOLS" ] && DENY_ARGS=(--disallowedTools "$…")
+  # which meant a single flipped test (`-n` -> `-z`) silently dropped the whole
+  # deny layer with the suite still green. The value is validated by the
+  # DENY-LAYER INTEGRITY GUARD above, which aborts the run if it is empty or
+  # short, so there is nothing left for a conditional to guard against.
   RAW="$(timeout "$DRAFTER_TIMEOUT" \
     env KUBECONFIG="$PROD_KUBECONFIG" \
     claude -p "$PROMPT" \
       --model "$DRAFTER_MODEL" \
       --allowedTools "$DRAFTER_ALLOWED_TOOLS" \
-      ${DENY_ARGS[@]+"${DENY_ARGS[@]}"} \
+      --disallowedTools "$DRAFTER_DENIED_TOOLS" \
       </dev/null 2>>"$DRAFTER_LOG_FILE")"
   RC=$?
   if [ $RC -ne 0 ]; then

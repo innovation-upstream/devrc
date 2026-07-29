@@ -69,6 +69,7 @@ the real 2026-07-29 08:00 run executed successfully, because an over-broad deny 
 the failure that actually costs something in an unattended run.
 """
 import json
+import os
 import re
 from pathlib import Path
 
@@ -211,7 +212,9 @@ def _deny_patterns() -> list[str]:
 
 def _deny_tool_names() -> list[str]:
     """The non-`Bash(...)` entries (whole tools, e.g. `Write`)."""
-    body = _denylist_expanded().split("${DRAFTER_DENIED_TOOLS-", 1)[1]
+    # NOTE `:-` not `-`: the assignment deliberately uses `:-` so that an empty
+    # DRAFTER_DENIED_TOOLS in the environment cannot silently disable the layer.
+    body = _denylist_expanded().split("${DRAFTER_DENIED_TOOLS:-", 1)[1]
     body = re.sub(r"Bash\([^)]*\)", "", body)
     return [t for t in re.split(r"[,\s{}\"]+", body) if re.fullmatch(r"[A-Za-z][\w-]*", t)]
 
@@ -647,24 +650,59 @@ def test_branch_a_is_pinned_to_its_exact_argumentless_form():
         assert not _matches(cmd), f"WRITE-capable branch form is allowlisted: {cmd}"
 
 
-def test_kubectl_is_called_bare_not_kubeconfig_prefixed():
-    """drafter.sh runs the pass under `env KUBECONFIG=$PROD_KUBECONFIG`, so the
-    prompt must ask for BARE kubectl. A literal `KUBECONFIG=… kubectl …` prefix is
-    both an assignment+command ("multiple operations", rejected by the shape
-    contract) and unmatchable against `Bash(kubectl get*)`."""
+def test_live_cluster_reads_go_through_the_kubectl_ro_wrapper():
+    """Bare `kubectl` is denied wholesale and live reads go through `kubectl-ro`.
+
+    Why the wrapper instead of per-verb denies: the 29 `Bash(kubectl <verb>:*)`
+    rules are PREFIX rules, so they only match verb-first. Any global flag before
+    the verb — `kubectl -n prod delete deploy web`, the single most ordinary kubectl
+    idiom — missed every one of them, and settings.json's `Bash(kubectl:*)` then
+    allowed it against the PRODUCTION kubeconfig. A mid-wildcard deny
+    (`Bash(kubectl * delete *)`) would violate the no-mid-wildcard rule and is
+    quote-bypassable anyway. So: deny `kubectl` entirely, allow one pinned wrapper
+    that validates the verb itself.
+    """
     src = _DRAFTER.read_text(encoding="utf-8")
     assert 'env KUBECONFIG="$PROD_KUBECONFIG"' in src, (
-        "drafter.sh no longer exports KUBECONFIG into the pass — the prompt's "
-        "'KUBECONFIG is already set' guidance would become a lie"
+        "drafter.sh no longer exports KUBECONFIG into the pass — kubectl-ro relies "
+        "on inheriting it"
     )
+    wrapper = _HERE.parent / "kubectl-ro"
+    assert wrapper.is_file() and os.access(wrapper, os.X_OK), (
+        "kubectl-ro is missing or not executable"
+    )
+
+    # the wrapper is allowlisted by its literal path; bare kubectl is not runnable
+    assert _runnable(f"{wrapper} get pods")
+    for cmd in ("kubectl get pods", "kubectl get cronjobs -A", "kubectl top pods"):
+        assert not _runnable(cmd), f"bare kubectl is still runnable: {cmd}"
+
+    # the flag-before-verb bypass that motivated the wrapper must be dead
+    for cmd in (
+        "kubectl -n prod delete deploy web",
+        "kubectl -n x exec pod -- sh -c id",
+        "kubectl --kubeconfig=/prod delete ns prod",
+        "kubectl --insecure-skip-tls-verify -n prod apply -f /tmp/x.yaml",
+    ):
+        assert _denied_by(cmd), f"flag-before-verb kubectl bypass is OPEN: {cmd}"
+        assert not _runnable(cmd), f"flag-before-verb kubectl is RUNNABLE: {cmd}"
+
+    # the prompt must steer to the wrapper by absolute path, and warn off bare kubectl
     prompt = " ".join(_PROMPT.read_text(encoding="utf-8").split())
-    assert "`KUBECONFIG` is ALREADY SET in your environment" in prompt
-    assert "NEVER prefix `KUBECONFIG=... kubectl" in prompt
-    # and the prefixed form must indeed be unrunnable
-    assert not _matches(f"KUBECONFIG={_CIVITAI}/prod-kubeconfig kubectl get pods")
-    for cmd in ("kubectl get pods", "kubectl get cronjobs -A",
-                "kubectl logs deploy/web", "kubectl describe pod x", "kubectl top pods"):
-        assert _matches(cmd), f"bare read-only kubectl is NOT allowlisted: {cmd}"
+    # The prompt hardcodes the CANONICAL repo path (the drafter runs from
+    # ~/workspace/devrc, not from whatever worktree the tests run in), so match on
+    # the absolute-path suffix rather than on this checkout's location.
+    assert re.search(r"/\S*scripts/task-spec-drafter/kubectl-ro get pods", prompt), (
+        "the prompt must show the wrapper's literal ABSOLUTE path — a bare "
+        "`kubectl-ro` would not match Bash($SELF_DIR/kubectl-ro *)"
+    )
+    # (Prose references like "a `kubectl-ro …` call" are fine and expected; the
+    # guarantee that every CONCRETE command shape in the prompt is allowlisted is
+    # already enforced by test_every_prompt_mandated_shape_is_allowlisted.)
+    assert "Bare `kubectl` is" in prompt and "BLOCKED" in prompt, (
+        "the prompt must tell the model bare kubectl is blocked, or it will burn "
+        "unanswerable calls discovering it at 08:00"
+    )
 
 
 def test_deliberate_exclusions_match_nothing():
@@ -1078,9 +1116,9 @@ def test_deny_layer_does_not_block_any_prompt_mandated_shape():
         f"git -C {_CIVITAI} branch -a",
         f"git -C {_CIVITAI} merge-base --is-ancestor abc1234 origin/main",
         "gh -R civitai/civitai pr view 2811",
-        "kubectl get pods",
-        "kubectl get pods -o json",
-        "kubectl get cronjobs --output=json",
+        f"{_HERE.parent}/kubectl-ro get pods",
+        f"{_HERE.parent}/kubectl-ro get pods -o json",
+        f"{_HERE.parent}/kubectl-ro get cronjobs --output=json",
         "rg meilisearch /home/zach/workspace/civit/civitai",
         "grep -rn meili /home/zach/workspace/civit/civitai",
     ):
@@ -1109,15 +1147,53 @@ def test_runtime_guard_aborts_when_civitai_repo_is_not_pinned():
 
 
 def test_deny_layer_is_wired_into_the_claude_invocation():
-    """A deny list that is never passed to `claude -p` is decoration."""
+    """A deny list that is never passed to `claude -p` is decoration.
+
+    An audit found two one-token changes that disabled the whole layer while the
+    suite stayed green: setting `DRAFTER_DENIED_TOOLS=""` after the assignment, and
+    flipping a `[ -n … ]` wiring conditional to `[ -z … ]`. So assert the EFFECTIVE
+    wiring, not merely that the strings appear somewhere:
+
+      1. `--disallowedTools "$DRAFTER_DENIED_TOOLS"` is passed UNCONDITIONALLY —
+         no `[ -n … ]`/`[ -z … ]` guard and no optional array to expand, so there
+         is no conditional left to flip.
+      2. An integrity guard aborts the run when the value is empty or implausibly
+         short, so a truncation or hostile override cannot degrade silently.
+    """
     src = _DRAFTER.read_text(encoding="utf-8")
     assert "DRAFTER_DENIED_TOOLS" in src
-    assert "--disallowedTools" in src, (
-        "DRAFTER_DENIED_TOOLS is defined but never passed to claude -p"
+
+    # 1. passed unconditionally, on its own continuation line
+    assert re.search(
+        r'^\s*--disallowedTools "\$DRAFTER_DENIED_TOOLS" \\\s*$', src, re.M
+    ), "the deny list must be passed to claude -p unconditionally"
+    # No live DENY_ARGS array — it would reintroduce a flippable conditional. The
+    # comment block deliberately quotes the old pattern to explain why, so only
+    # non-comment lines count.
+    live = "\n".join(
+        l for l in src.splitlines() if not l.lstrip().startswith("#")
     )
-    assert '${DENY_ARGS[@]+"${DENY_ARGS[@]}"}' in src, (
-        "the deny args must be expanded under `set -u` safely"
+    assert "DENY_ARGS" not in live, (
+        "an optional DENY_ARGS array reintroduces a flippable conditional — pass "
+        "--disallowedTools unconditionally instead"
     )
+
+    # 2. the integrity guard must abort, not warn
+    assert '[ -n "$DRAFTER_DENIED_TOOLS" ] || {' in src, (
+        "no empty-value guard on the deny list"
+    )
+    assert re.search(r'\$\{#DRAFTER_DENIED_TOOLS\}"? -lt \d+', src), (
+        "no length floor on the deny list — a truncated value would pass silently"
+    )
+    guard = src.split('[ -n "$DRAFTER_DENIED_TOOLS" ] || {', 1)[1][:2000]
+    assert "FATAL" in guard and "exit 1" in guard, (
+        "the deny-integrity guard must abort the run, not just warn"
+    )
+    # and the critical denies must be probed by name at runtime
+    for probe in ("python3", "docker", "kubectl", "curl", "ssh", "sops"):
+        assert f"Bash({probe}:*)" in src, (
+            f"the runtime deny probe no longer checks Bash({probe}:*)"
+        )
 
 
 def test_ticket_status_wrapper_is_allowlisted():
@@ -1172,10 +1248,15 @@ _EVERYDAY_READS = (
     "date -u",
     "head -20",
     "tail -50",
-    "kubectl get pods -n civitai-feeds",
-    "kubectl logs -n civitai-feeds feeds-meilisearch-2-0 --tail=50",
-    "kubectl describe cronjob meilisearch-backup -n civitai-feeds",
-    "kubectl top pods",
+    # Live-cluster reads go through the kubectl-ro wrapper now: bare `kubectl` is
+    # denied wholesale (`Bash(kubectl:*)`), because the 29 per-verb prefix denies
+    # were bypassable by putting any global flag before the verb
+    # (`kubectl -n prod delete deploy web`), and settings.json's `Bash(kubectl:*)`
+    # then allowed it against the PRODUCTION kubeconfig.
+    f"{_HERE.parent}/kubectl-ro get pods -n civitai-feeds",
+    f"{_HERE.parent}/kubectl-ro logs -n civitai-feeds feeds-meilisearch-2-0 --tail=50",
+    f"{_HERE.parent}/kubectl-ro describe cronjob meilisearch-backup -n civitai-feeds",
+    f"{_HERE.parent}/kubectl-ro top pods",
 )
 
 
@@ -1449,12 +1530,40 @@ def test_regression_corpus_is_intact():
 
 def test_no_command_the_real_run_executed_becomes_denied():
     """THE regression test for this change. Replay the real run against the deny
-    list; not one of its 108 successful commands may become denied."""
-    broken = {c: _denied_by(c) for c in _corpus()["executed"] if _denied_by(c)}
+    list; not one of its 108 successful commands may lose its capability.
+
+    The bare-`kubectl` commands in the corpus ARE now denied, deliberately — that is
+    the whole point of the wrapper. Their capability is not lost, it moved: each one
+    must still be performable as `kubectl-ro <same args>`. So they are translated
+    rather than dropped, and both halves are asserted (denied bare, runnable via the
+    wrapper, and accepted by the wrapper's own verb validator). Dropping them from
+    the corpus instead would have hidden a real regression.
+    """
+    wrapper = f"{_HERE.parent}/kubectl-ro"
+    broken, moved = {}, []
+    for c in _corpus()["executed"]:
+        if re.match(r"kubectl\s", c):
+            assert _denied_by(c), f"bare kubectl should now be denied: {c}"
+            via = re.sub(r"^kubectl\s", f"{wrapper} ", c, count=1)
+            # pipes are a shape-contract matter, not an allowlist one; compare the
+            # first segment only, as the corpus preserves the pipeline as executed
+            head = via.split("|", 1)[0].strip()
+            assert not _denied_by(head), (
+                f"the wrapper form is ALSO denied, so this read really is lost: {head}"
+            )
+            assert _matches(head), f"the wrapper form is not allowlisted: {head}"
+            moved.append(c)
+            continue
+        if _denied_by(c):
+            broken[c] = _denied_by(c)
     assert not broken, (
         "the deny layer would have broken commands the real 2026-07-29 run "
-        f"executed successfully:\n" + "\n".join(f"  {c}\n    denied by {d}"
-                                                for c, d in broken.items())
+        "executed successfully:\n" + "\n".join(f"  {c}\n    denied by {d}"
+                                               for c, d in broken.items())
+    )
+    assert len(moved) == 11, (
+        f"expected the corpus's 11 bare-kubectl reads to move to the wrapper, "
+        f"translated {len(moved)} — the corpus or the wrapper changed"
     )
 
 
@@ -1473,3 +1582,97 @@ def test_corpus_rejections_stay_rejected_except_the_one_we_fixed():
         if cmd in fixed:
             continue
         assert not _runnable(cmd), f"a shape that should stay rejected is runnable: {cmd}"
+
+
+# --- kubectl-ro: RUNTIME behaviour, not just pattern matching ---------------- #
+#
+# Everything above reasons about the allow/deny PATTERNS. But kubectl-ro is now the
+# ONLY path to the cluster, so a bug in its own argument parsing is as bad as a bad
+# pattern: too strict and every live read dies unanswerably at 08:00, too loose and a
+# mutation reaches PRODUCTION. Neither shows up in a pattern test. So exercise the
+# real script, with a stub `kubectl` on PATH so nothing can reach a cluster.
+
+_WRAPPER = _HERE.parent / "kubectl-ro"
+
+
+def _run_wrapper(argv: list[str], kubeconfig: str = "/tmp/kubectl-ro-test.conf"):
+    """Invoke kubectl-ro for real against a stub kubectl. Returns (rc, reached).
+
+    `reached` is True iff the stub kubectl was actually executed — i.e. the wrapper
+    passed the call through rather than rejecting it.
+    """
+    import subprocess
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as stub:
+        Path(stub, "kubectl").write_text(
+            '#!/usr/bin/env bash\necho "KUBECTL-REACHED: $*"\n', encoding="utf-8"
+        )
+        os.chmod(Path(stub, "kubectl"), 0o755)
+        p = subprocess.run(
+            [str(_WRAPPER), *argv],
+            capture_output=True, text=True, timeout=30,
+            env={**os.environ, "PATH": f"{stub}:{os.environ['PATH']}",
+                 "KUBECONFIG": kubeconfig},
+        )
+    return p.returncode, "KUBECTL-REACHED" in (p.stdout + p.stderr)
+
+
+def test_kubectl_ro_passes_through_the_real_runs_reads():
+    """Replay the 11 bare-kubectl reads the real 2026-07-29 run executed, through
+    the wrapper. Every one must pass through — this is the guard against the wrapper
+    silently costing the drafter its live-cluster verification axis."""
+    reads = [c for c in _corpus()["executed"] if re.match(r"kubectl\s", c)]
+    assert len(reads) == 11, f"expected 11 kubectl reads in the corpus, found {len(reads)}"
+    for cmd in reads:
+        # the corpus preserves pipelines as executed; the wrapper only ever sees the
+        # kubectl segment, so compare that
+        argv = cmd.split("|", 1)[0].strip().split()[1:]
+        rc, reached = _run_wrapper(argv)
+        assert rc == 0 and reached, (
+            f"kubectl-ro REJECTED a read the real run performed successfully: "
+            f"kubectl {' '.join(argv)} (rc={rc})"
+        )
+
+
+def test_kubectl_ro_rejects_mutations_including_the_flag_before_verb_bypass():
+    """The wrapper must reject at runtime, not merely be pointed at by a pattern.
+    Includes the exact flag-before-verb shape that defeated the per-verb denies."""
+    for argv in (
+        ["delete", "pod", "web"],
+        ["-n", "prod", "delete", "deploy", "web"],      # the bypass shape
+        ["--namespace=prod", "delete", "deploy", "web"],
+        ["apply", "-f", "x.yaml"],
+        ["exec", "-it", "web", "--", "sh"],
+        ["scale", "--replicas=0", "deploy/web"],
+        ["port-forward", "svc/db", "5432"],
+        ["run", "evil", "--image=alpine"],
+        ["debug", "node/node1", "-it", "--image=alpine"],
+        ["proxy", "--port=8001"],
+        ["patch", "deploy", "web", "-p", "{}"],
+        ["cp", "/etc/passwd", "web:/tmp/x"],
+    ):
+        rc, reached = _run_wrapper(argv)
+        assert rc != 0 and not reached, (
+            f"kubectl-ro let a MUTATION through to kubectl: {' '.join(argv)}"
+        )
+
+
+def test_kubectl_ro_refuses_to_be_repointed_at_another_cluster():
+    """A read verb aimed at a different cluster is still an exfiltration primitive,
+    so --kubeconfig/--server/--token overrides must not be honoured."""
+    for argv in (
+        ["--kubeconfig=/some/other.conf", "get", "secrets", "-A"],
+        ["--server=https://evil.example", "get", "pods"],
+        ["--token=abc", "get", "pods"],
+        ["--as=system:admin", "get", "secrets"],
+    ):
+        rc, reached = _run_wrapper(argv)
+        assert rc != 0 and not reached, (
+            f"kubectl-ro honoured an identity/endpoint override: {' '.join(argv)}"
+        )
+    # the runner's own pinned kubeconfig, passed explicitly, is fine
+    rc, reached = _run_wrapper(
+        ["--kubeconfig=/tmp/kubectl-ro-test.conf", "get", "pods"]
+    )
+    assert rc == 0 and reached, "the runner's own pinned --kubeconfig was refused"

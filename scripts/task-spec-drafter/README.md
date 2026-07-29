@@ -173,10 +173,25 @@ call in a headless run is unanswerable — the read is simply lost and the pass
 emits confident records built on less evidence. `tests/fixtures/` therefore holds
 a **regression corpus**: every one of the 108 Bash commands the real 2026-07-29
 08:00 run executed successfully, replayed against the deny list by
-`test_no_command_the_real_run_executed_becomes_denied`. Re-generate it if the tool
-mix changes materially: take the `Bash` `tool_use` blocks out of that morning's
-`~/.claude/projects/-home-zach/*.jsonl` transcripts (select by file mtime date) and
-keep the ones whose `tool_result` does **not** contain `requires approval`.
+`test_no_command_the_real_run_executed_becomes_denied`.
+
+⚠ **The corpus is ONE day, and that day flattered us.** "0 false positives" is true
+for 2026-07-29 and is partly an artifact of that run happening not to use `find`.
+Replaying the **full 8-day window** (2026-07-21 → 07-29, 1,172 successful
+invocations) shows **55 (4.7%) would now be denied — all of them `find`**, spread
+07-21 ×22, 07-22 ×16, 07-23 ×14, 07-25 ×3. That deny is **kept deliberately**:
+`find -exec` is arbitrary code execution, a flag-substring deny would be
+quote-bypassable, `Glob`/`Grep` remain available, and `drafter-prompt.md` already
+steers to `Grep`/`rg` (the last `find` was four days before the corpus). But it IS a
+real capability reduction, not a free win. Note also that `find` and `sed` sit in the
+CLI's read-only auto-allow set, so they were running with no allow rule at all —
+denying `find` removes something the CLI was granting for free.
+
+**When re-generating, mine the FULL window, not one day** — the single-day method is
+what produced the blind spot above. Take the `Bash` `tool_use` blocks out of the
+`~/.claude/projects/-home-zach/*.jsonl` transcripts, keep the ones whose
+`tool_result` does **not** contain `requires approval`, and check the whole range
+rather than the most recent morning.
 
 A **runtime guard** aborts the run if `CIVITAI_REPO` is pointed at a repo with no
 pinned entry — otherwise every git read is rejected (unanswerable in headless) and
