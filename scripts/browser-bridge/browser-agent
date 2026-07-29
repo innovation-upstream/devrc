@@ -7,15 +7,24 @@
 #   browser agent "<goal>" [--instance K] [--allow-domains a,b] [--deny-domains c,d]
 #                          [--steps N] [--timeout S] [--dry-run]
 #
-# What it does (design C.2/C.3 — see README "opencode browser-agent"):
+# What it does (see README "opencode browser-agent"):
 #   1. `open`s a NEW tab on instance K (its OWN tab) and captures the tabId.
 #   2. Runs `opencode run --format json -m <deepseek> --agent browser-agent --auto`
-#      in a scratch --dir, with a per-run agent def whose bash permission allows
-#      ONLY `browser --tab <tabId> *` (own-tab lock) and a guard shim (named
-#      `browser`, first on PATH) that RE-enforces own-tab + deny-domains + dry-run.
-#   3. Enforces a wall-clock --timeout with a hard kill (`timeout --kill-after`).
-#   4. Closes the owned tab on EVERY exit path (success/timeout/error/tab-gone).
-#   5. Parses opencode's final message as the required schema
+#      in a scratch --dir. The agent def DENIES every built-in tool (bash, edit,
+#      read, webfetch, …) and ALLOWS only ONE custom, TYPED tool: `browser`
+#      (opencode/tools/browser.js, copied into the scratch project). The model
+#      calls it with structured args (op + optional selector/url/js) — it has NO
+#      shell, so there is NO `>`/`;`/`|`/`$()` surface (this is the PR #180 RCE
+#      fix: a shell output-redirect `browser … >> ~/.zshenv` used to ride the
+#      allowed bash command through opencode's wildcard glob → host RCE).
+#   3. FORCES the owned tab + instance + domain policy on the tool via env
+#      (BROWSER_AGENT_TAB/…): the model cannot choose the tab or reach a denied
+#      domain — enforcement lives IN the tool (browser_tool_impl.mjs), which POSTs
+#      straight to the loopback bridge (no subprocess).
+#   4. Enforces a wall-clock --timeout with a PROCESS-GROUP kill (`setsid` + kill
+#      the whole group) so no opencode child can survive a timeout.
+#   5. Closes the owned tab on EVERY exit path (success/timeout/error/tab-gone).
+#   6. Parses opencode's final message as the required schema
 #      {"answer","evidence":[…],"steps_used","status":"ok|partial|blocked"};
 #      on malformed output it re-invokes ONCE (`--continue`) demanding ONLY the
 #      JSON, then gives up with a `blocked` result (no infinite retry).
@@ -25,15 +34,18 @@
 # (~/.local/share/opencode/auth.json); this script adds NO key.
 #
 # Test seams (env overrides): BROWSER_AGENT_OPENCODE (opencode binary),
-# BROWSER_AGENT_BROWSER_BIN (real browser CLI), BROWSER_AGENT_MODEL,
-# BROWSER_AGENT_TEMPLATE (agent md template), BROWSER_AGENT_KEEP_SCRATCH=1.
+# BROWSER_AGENT_BROWSER_BIN (real browser CLI for open/close), BROWSER_AGENT_MODEL,
+# BROWSER_AGENT_TEMPLATE (agent md template), BROWSER_AGENT_TOOL_DIR (dir holding
+# browser.js + browser_tool_impl.mjs), BROWSER_AGENT_KEEP_SCRATCH=1.
 set -uo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 BROWSER_BIN="${BROWSER_AGENT_BROWSER_BIN:-$HERE/browser}"
-GUARD="$HERE/browser-agent-guard"
 PARSER="$HERE/browser-agent-parse.py"
 TEMPLATE="${BROWSER_AGENT_TEMPLATE:-$HERE/opencode/browser-agent.md}"
+TOOL_DIR="${BROWSER_AGENT_TOOL_DIR:-$HERE/opencode/tools}"
+TOOL_JS="$TOOL_DIR/browser.js"
+TOOL_IMPL="$TOOL_DIR/browser_tool_impl.mjs"
 OPENCODE_BIN="${BROWSER_AGENT_OPENCODE:-opencode}"
 MODEL="${BROWSER_AGENT_MODEL:-openrouter/deepseek/deepseek-v4-flash}"
 
@@ -89,7 +101,8 @@ case "$STEPS" in (*[!0-9]*|"") die "--steps must be a positive integer (got: $ST
 case "$TIMEOUT" in (*[!0-9]*|"") die "--timeout must be a positive integer of seconds (got: $TIMEOUT)";; esac
 [ "$TIMEOUT" -ge 1 ] 2>/dev/null || die "--timeout must be >= 1 (got: $TIMEOUT)"
 [ -f "$TEMPLATE" ] || die "agent template not found: $TEMPLATE"
-[ -x "$GUARD" ] || die "guard shim not found/executable: $GUARD"
+[ -r "$TOOL_JS" ] || die "custom tool not found: $TOOL_JS"
+[ -r "$TOOL_IMPL" ] || die "custom tool impl not found: $TOOL_IMPL"
 [ -r "$PARSER" ] || die "parser not found: $PARSER"
 
 # opencode must be present BEFORE we open any tab — so a missing binary can never
@@ -117,25 +130,41 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-# --- scratch: per-run agent def (own-tab-locked) + guard shim as `browser` ---- #
+# --- scratch: per-run agent def (bash denied) + the typed `browser` custom tool - #
 SCRATCH="$(mktemp -d "${TMPDIR:-/tmp}/browser-agent.XXXXXX")"
 [ "${BROWSER_AGENT_KEEP_SCRATCH:-0}" = "1" ] || \
   trap 'cleanup; rm -rf "$SCRATCH" 2>/dev/null || true' EXIT INT TERM
-mkdir -p "$SCRATCH/bin" "$SCRATCH/.opencode/agents" "$SCRATCH/.opencode/agent"
-ln -sf "$GUARD" "$SCRATCH/bin/browser"
+mkdir -p "$SCRATCH/.opencode/agents" "$SCRATCH/.opencode/agent" \
+         "$SCRATCH/.opencode/tools" "$SCRATCH/.opencode/tool"
 
-# Template the committed agent def: bake the OWN tab id + step budget + model into
-# the frontmatter permission (`browser --tab <TAB> *`) and the harness body.
+# Copy the committed TYPED tool (+ its pure-logic sibling) into the scratch
+# project so opencode loads exactly ONE tool, `browser`. Write to both `tools/`
+# (opencode 1.18.4) and `tool/` (defensive against version skew). The `.mjs`
+# sibling is imported by browser.js but is NOT itself registered as a tool
+# (opencode globs `*.{ts,js}` only — verified on 1.18.4).
+cp "$TOOL_JS" "$TOOL_IMPL" "$SCRATCH/.opencode/tools/"
+cp "$TOOL_JS" "$TOOL_IMPL" "$SCRATCH/.opencode/tool/"
+
+# Template the committed agent def: bake the step budget + model in. The tab is
+# NOT templated any more — it is FORCED on the tool via env (below), so the model
+# has no way to name a tab at all.
 AGENT_MD="$SCRATCH/.opencode/agents/browser-agent.md"
-sed -e "s/__TAB_ID__/$TAB/g" -e "s/__STEPS__/$STEPS/g" \
-    -e "s#__MODEL__#$MODEL#g" "$TEMPLATE" > "$AGENT_MD"
+sed -e "s/__STEPS__/$STEPS/g" -e "s#__MODEL__#$MODEL#g" "$TEMPLATE" > "$AGENT_MD"
 # Some opencode versions read `.opencode/agent/` (singular) — write both.
 cp "$AGENT_MD" "$SCRATCH/.opencode/agent/browser-agent.md"
 
 TRANSCRIPT1="$SCRATCH/opencode-transcript.jsonl"
 TRANSCRIPT2="$SCRATCH/opencode-transcript.retry.jsonl"
 ERRLOG="$SCRATCH/opencode.err"
-GUARD_LOG="$SCRATCH/guard-audit.jsonl"
+AUDIT_LOG="$SCRATCH/tool-audit.jsonl"
+TIMED_OUT_MARKER="$SCRATCH/.timed_out"
+
+# The stable per-session id the tool sends as X-Session-Id (matches the id our
+# `open` used; routing is overridden by the forced tab anyway — this is only for
+# audit-trail consistency). Sanitize: drop anything that isn't a plain id (a fake
+# browser in tests may echo JSON here).
+SESSION_ID="$("$BROWSER_BIN" --print-session-id 2>/dev/null || true)"
+case "$SESSION_ID" in (*[[:space:]{}\"]*|"") SESSION_ID="" ;; esac
 
 # The per-run task message: goal + the tab constraint + domain rules + the schema
 # reminder. (The static harness — single-tool contract, prefer `text`, schema —
@@ -143,28 +172,57 @@ GUARD_LOG="$SCRATCH/guard-audit.jsonl"
 MSG="$(cat <<EOF
 Goal: $GOAL
 
-Your browser tab id is $TAB. EVERY browser command you run MUST be exactly:
-  browser --tab $TAB <op> [args]
-(any other command or any other --tab value is DENIED and will fail).
-Allowed ops: nav <url> | text [selector] | html | eval '<js>'. PREFER \`text\`.
-Allowed domains: ${ALLOW:-<any>}. Denied domains: ${DENY:-<none>}.
+You have ONE tool: \`browser\`. Call it with a TYPED op (never a shell command):
+  browser(op="text"[, selector])  — read the page's visible text (PREFER THIS)
+  browser(op="html")              — raw HTML (huge; last resort)
+  browser(op="eval", js="…")      — evaluate a small JS expression
+  browser(op="nav", url="…")      — navigate your tab
+  browser(op="screenshot")        — capture your tab
+Your tab is FIXED — you cannot choose it. Allowed domains: ${ALLOW:-<any>}. Denied: ${DENY:-<none>}.
 Hard budget: $STEPS steps. When finished, reply with ONLY the JSON object:
 {"answer":"<concise>","evidence":["<quote-or-url>"],"steps_used":<int>,"status":"ok|partial|blocked"}
 EOF
 )"
 
-run_opencode() {  # <transcript-out> [continue] — returns opencode's exit code
+run_opencode() {  # <transcript-out> [continue] — returns opencode's exit code (124 on timeout)
   local out="$1" cont="${2:-}"
   local -a oc=(run --format json -m "$MODEL" --agent browser-agent --auto --dir "$SCRATCH")
   [ "$cont" = "continue" ] && oc+=(--continue)
   local -a msg=("$MSG")
   [ "$cont" = "continue" ] && msg=("Return ONLY the required JSON schema object and nothing else: {\"answer\":\"…\",\"evidence\":[…],\"steps_used\":<int>,\"status\":\"ok|partial|blocked\"}")
-  PATH="$SCRATCH/bin:$PATH" \
-  BAG_TAB="$TAB" BAG_REAL_BROWSER="$BROWSER_BIN" BAG_INSTANCE="$INSTANCE" \
-  BAG_ALLOW_DOMAINS="$ALLOW" BAG_DENY_DOMAINS="$DENY" BAG_DRY_RUN="$DRYRUN" \
-  BAG_TRANSCRIPT="$GUARD_LOG" \
-    timeout --kill-after=5 "$TIMEOUT" "$OPENCODE_BIN" "${oc[@]}" "${msg[@]}" \
-      >"$out" 2>>"$ERRLOG"
+  rm -f "$TIMED_OUT_MARKER"
+  # The model's ONLY action surface is the custom `browser` tool; it reads these
+  # from env and FORCES them (the model cannot set the tab/instance/domain policy).
+  # BROWSER_BRIDGE_* are inherited so the tool hits the same loopback bridge.
+  # Run opencode as its OWN session/process-group leader (setsid) so a --timeout
+  # can reap the WHOLE group — opencode may spawn helper children, and killing
+  # only the direct pid (what `timeout` does) can orphan them.
+  BROWSER_AGENT_TAB="$TAB" BROWSER_AGENT_INSTANCE="$INSTANCE" \
+  BROWSER_AGENT_ALLOW_DOMAINS="$ALLOW" BROWSER_AGENT_DENY_DOMAINS="$DENY" \
+  BROWSER_AGENT_DRY_RUN="$DRYRUN" BROWSER_AGENT_AUDIT="$AUDIT_LOG" \
+  BROWSER_AGENT_SESSION_ID="$SESSION_ID" \
+    setsid "$OPENCODE_BIN" "${oc[@]}" "${msg[@]}" >"$out" 2>>"$ERRLOG" </dev/null &
+  local leader=$!               # setsid makes opencode the group leader → PGID == leader
+  # Watchdog: after $TIMEOUT, mark + TERM opencode's whole group, then (grace) KILL
+  # it. Run the watchdog itself under `setsid` (its own group) with stdio to
+  # /dev/null so (a) it never holds this wrapper's stdout pipe — a leaked `sleep`
+  # holding the pipe would hang the caller's capture — and (b) we can reap the
+  # watchdog AND its inner `sleep` as one group when opencode exits normally.
+  setsid bash -c '
+    sleep "$1"; : > "$2"
+    kill -TERM -"$3" 2>/dev/null; sleep 5; kill -KILL -"$3" 2>/dev/null
+  ' _ "$TIMEOUT" "$TIMED_OUT_MARKER" "$leader" >/dev/null 2>&1 </dev/null &
+  local wd=$!                   # watchdog group leader → PGID == wd
+  wait "$leader" 2>/dev/null; local rc=$?
+  # Normal exit: reap the watchdog's whole group (incl. its pending `sleep`).
+  # Either way, defensively reap any straggler still in OPENCODE's group (a
+  # detached child), so nothing survives this run.
+  kill -KILL -"$wd" 2>/dev/null; wait "$wd" 2>/dev/null || true
+  kill -KILL -"$leader" 2>/dev/null || true
+  # Report a timeout only when the watchdog fired AND the process died by signal
+  # (rc>128) — this avoids a race calling a clean/near-simultaneous exit a timeout.
+  if [ -f "$TIMED_OUT_MARKER" ] && [ "$rc" -gt 128 ]; then return 124; fi
+  return "$rc"
 }
 
 # --- attempt 1 --------------------------------------------------------------- #

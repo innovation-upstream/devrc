@@ -66,7 +66,9 @@
           {
             # ripgrep: one repo-cos prescan test skipif's without it on PATH.
             # git: verify-agent-work tests drive real temp git repos in-sandbox.
-            nativeBuildInputs = [ pyEnv pkgs.bash pkgs.ripgrep pkgs.git ];
+            # util-linux: the browser-agent wrapper uses `setsid` for its
+            # process-group timeout kill (test_browser_agent.py exercises it).
+            nativeBuildInputs = [ pyEnv pkgs.bash pkgs.ripgrep pkgs.git pkgs.util-linux ];
           }
           ''
             cp -r ${./.} src

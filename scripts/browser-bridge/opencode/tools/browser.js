@@ -1,0 +1,44 @@
+// browser.js — the opencode custom tool that IS the browser-agent's ONLY
+// capability. opencode 1.18.4 loads `*.{ts,js}` under a project's `.opencode/tools/`
+// (verified via `opencode debug agent`); the filename becomes the tool name, so
+// this registers as the tool `browser`. The `browser-agent` wrapper copies this
+// file (plus its sibling `browser_tool_impl.mjs`) into the per-run scratch project
+// and denies EVERY other tool (bash included) in the agent def, so the model's
+// entire action surface is this one TYPED tool.
+//
+// SECURITY (PR #180 RCE fix): the model calls this with structured arguments —
+// never a shell command string — so there is no `>`/`>>`/`;`/`|`/`$()`/backtick
+// surface for the redirect-to-dotfile RCE that the raw bash tool exposed. The tab,
+// instance, and domain policy are FORCED by env the wrapper sets; the model cannot
+// influence them. All enforcement lives in `browser_tool_impl.mjs` (unit-tested).
+import { tool } from "@opencode-ai/plugin"
+import { runBrowserOp } from "./browser_tool_impl.mjs"
+
+export default tool({
+  description:
+    "Read or navigate YOUR ONE assigned browser tab. Call with a typed `op` " +
+    "(no shell). ops: 'text' (visible innerText — PREFER THIS), 'html' (raw " +
+    "outerHTML — huge, last resort), 'eval' (run a small JS expression, pass " +
+    "`js`), 'nav' (navigate, pass `url`), 'screenshot'. You cannot choose the " +
+    "tab — it is fixed to the one you were given. Stay on the allowed domains.",
+  args: {
+    op: tool.schema
+      .enum(["text", "html", "eval", "nav", "screenshot"])
+      .describe("the operation to perform on your tab"),
+    selector: tool.schema.string().optional()
+      .describe("op=text: optional CSS selector to scope the innerText read"),
+    url: tool.schema.string().optional()
+      .describe("op=nav: the URL to navigate your tab to"),
+    js: tool.schema.string().optional()
+      .describe("op=eval: a small JS expression to evaluate in the page"),
+    maxBytes: tool.schema.number().optional()
+      .describe("op=text: cap the returned text in bytes (default 32768, 0=uncapped)"),
+  },
+  async execute(args) {
+    // runBrowserOp reads the forced tab / instance / domain policy / token from
+    // process.env, enforces the op allowlist + domain deny in-process, and POSTs
+    // to the loopback bridge. It returns a compact string (or throws a refusal
+    // the model sees). Never returns raw huge blobs uninvited (screenshot → note).
+    return await runBrowserOp(args)
+  },
+})

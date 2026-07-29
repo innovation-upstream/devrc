@@ -1,12 +1,19 @@
-"""Tests for the `browser agent` wrapper (browser-agent) and its guardrail shim
-(browser-agent-guard).
+"""Tests for the `browser agent` wrapper (browser-agent).
 
-Fully HEADLESS — NO live model, NO Brave. A fake `opencode` (emits a canned
-`--format json` JSONL stream, modelled on the verified real 1.18.4 envelope) and
-a fake `browser` CLI (records every op it is asked to run, hands out a fixed
-tabId on `open`) stand in for the real binaries via env seams
-(BROWSER_AGENT_OPENCODE / BROWSER_AGENT_BROWSER_BIN). The guard shim is the REAL
-committed script; the agent-md template + parser are the REAL committed files.
+Fully HEADLESS — NO live model, NO Brave, NO bridge. A fake `opencode` (emits a
+canned `--format json` JSONL stream, modelled on the verified real 1.18.4
+envelope) and a fake `browser` CLI (records ops, hands out a fixed tabId on
+`open`) stand in for the real binaries via env seams (BROWSER_AGENT_OPENCODE /
+BROWSER_AGENT_BROWSER_BIN). The agent-md template, the committed TYPED custom tool
+(opencode/tools/browser.js + browser_tool_impl.mjs), and the parser are the REAL
+committed files.
+
+The TYPED-tool enforcement itself (op allowlist / forced tab / domain deny /
+request shape) is unit-tested in `browser_tool.test.mjs` (node) — the model's only
+action surface is that tool, and it has NO shell. These wrapper tests cover the
+lifecycle + wiring around it: arg parsing, own-tab open→close on EVERY exit path,
+the agent def denying bash / allowing only the tool, the env the wrapper forces on
+the tool, schema parse + one-retry, and the process-group kill on timeout.
 
 Run: nix-shell -p python312Packages.pytest --run "pytest scripts/browser-bridge/tests/test_browser_agent.py"
 """
@@ -22,11 +29,10 @@ import pytest
 
 BB = Path(__file__).resolve().parent.parent            # scripts/browser-bridge
 WRAPPER = BB / "browser-agent"
-GUARD = BB / "browser-agent-guard"
 
 pytestmark = pytest.mark.skipif(
     shutil.which("bash") is None or shutil.which("python3") is None,
-    reason="bash + python3 required to drive the wrapper/guard")
+    reason="bash + python3 required to drive the wrapper")
 
 TAB_ID = 4242
 SCHEMA_OK = {"answer": "The top 3 stories are A, B, C.",
@@ -44,8 +50,10 @@ def _write_exec(path: Path, content: str):
 
 
 def _fake_browser(path: Path) -> Path:
-    """A stand-in for the real `browser` CLI.
+    """A stand-in for the real `browser` CLI (used ONLY for open/close/print-session-id
+    by the wrapper — the agent's own reads go through the custom tool, not this).
 
+    - `--print-session-id`           → prints a stable fake id.
     - `[--instance K] open [url]`     → prints {result:{data:{tabId:FRB_TABID}}}
       (or exits 1 if FRB_OPEN_FAIL=1).
     - `[--instance K] --tab N <op> …` → prints a canned success envelope.
@@ -54,6 +62,8 @@ def _fake_browser(path: Path) -> Path:
     return _write_exec(path, '''#!/usr/bin/env python3
 import json, os, sys
 argv = sys.argv[1:]
+if argv and argv[0] == "--print-session-id":
+    print("claude:fake-session"); sys.exit(0)
 inst = None; tab = None; op = None; rest = []
 i = 0
 while i < len(argv):
@@ -86,10 +96,11 @@ sys.exit(0)
 def _fake_opencode(path: Path) -> Path:
     """A stand-in for `opencode`. Behaviour is driven by env FAKE_OC_MODE; every
     invocation appends a line (with whether `--continue` was present) to
-    $FAKE_OC_LOG so tests can prove the retry count. It emits a REAL-shaped
-    `--format json` JSONL stream on stdout."""
+    $FAKE_OC_LOG, and dumps the BROWSER_AGENT_* env it received to $FAKE_OC_ENV so
+    tests can prove the wrapper forced the tab/instance/domain policy. It emits a
+    REAL-shaped `--format json` JSONL stream on stdout."""
     return _write_exec(path, r'''#!/usr/bin/env python3
-import json, os, re, subprocess, sys, time
+import json, os, sys, time
 argv = sys.argv[1:]
 cont = "--continue" in argv
 # The task message is the last positional (after all flags/values we know).
@@ -98,6 +109,12 @@ log = os.environ.get("FAKE_OC_LOG")
 if log:
     with open(log, "a") as f:
         f.write(json.dumps({"continue": cont, "argv": argv}) + "\n")
+envlog = os.environ.get("FAKE_OC_ENV")
+if envlog:
+    keep = {k: v for k, v in os.environ.items()
+            if k.startswith("BROWSER_AGENT_") or k.startswith("BROWSER_BRIDGE_")}
+    with open(envlog, "a") as f:
+        f.write(json.dumps(keep) + "\n")
 
 def emit_text(s):
     print(json.dumps({"type": "step_start", "part": {"type": "step-start"}}))
@@ -113,12 +130,23 @@ def schema(status="ok", steps=2, answer="The top 3 stories are A, B, C.",
                        "evidence": evidence or ["A — 500", "B — 400", "C — 300"],
                        "steps_used": steps, "status": status})
 
-def tab_from_msg():
-    m = re.search(r"tab id is (\d+)", msg)
-    return m.group(1) if m else None
-
 mode = os.environ.get("FAKE_OC_MODE", "ok")
 if mode == "slow":
+    time.sleep(float(os.environ.get("FAKE_OC_SLEEP", "30")))
+    emit_text(schema()); sys.exit(0)
+if mode == "straggler":
+    # Fork a child that INHERITS this process's group (mimics an opencode helper
+    # child) and would OUTLIVE a naive kill of only the direct pid. It writes its
+    # pid immediately, sleeps long, then writes a "survived" marker. A correct
+    # process-GROUP kill on timeout reaps it before it can write "survived".
+    pid = os.fork()
+    if pid == 0:
+        with open(os.environ["STRAGGLER_PID"], "w") as f:
+            f.write(str(os.getpid()))
+        time.sleep(float(os.environ.get("STRAGGLER_SLEEP", "30")))
+        with open(os.environ["STRAGGLER_SURVIVED"], "w") as f:
+            f.write("survived")
+        os._exit(0)
     time.sleep(float(os.environ.get("FAKE_OC_SLEEP", "30")))
     emit_text(schema()); sys.exit(0)
 if mode == "nonzero":
@@ -127,26 +155,10 @@ if mode == "malformed":
     emit_text("I tried but here is no JSON at all."); sys.exit(0)
 if mode == "malformed_then_ok":
     if cont: emit_text(schema())
-    else: emit_text("no json yet");
+    else: emit_text("no json yet")
     sys.exit(0)
 if mode == "partial":
     emit_text(schema(status="partial")); sys.exit(0)
-if mode in ("drive_ok", "drive_wrongtab", "drive_denydomain", "drive_dryrun"):
-    tab = tab_from_msg()
-    def run_browser(*a):
-        subprocess.run(["browser", *a], capture_output=True, text=True)
-    if mode == "drive_ok":
-        run_browser("--tab", tab, "text")
-        emit_text(schema(status="ok")); sys.exit(0)
-    if mode == "drive_wrongtab":
-        run_browser("--tab", "999", "nav", "https://evil.example.com")
-        emit_text(schema(status="partial")); sys.exit(0)
-    if mode == "drive_denydomain":
-        run_browser("--tab", tab, "nav", "https://evil.example.com")
-        emit_text(schema(status="partial")); sys.exit(0)
-    if mode == "drive_dryrun":
-        run_browser("--tab", tab, "nav", "https://good.example.com")
-        emit_text(schema(status="ok")); sys.exit(0)
 # default: ok
 emit_text(schema()); sys.exit(0)
 ''')
@@ -160,6 +172,7 @@ def rig(tmp_path):
     focode = _fake_opencode(bind / "opencode")
     frb_log = tmp_path / "frb.log"
     oc_log = tmp_path / "oc.log"
+    oc_env = tmp_path / "oc_env.log"
     scratch_root = tmp_path / "scratch"; scratch_root.mkdir()
 
     def run(args, mode="ok", extra_env=None, timeout=60, open_fail=False,
@@ -168,7 +181,7 @@ def rig(tmp_path):
         env.update(
             BROWSER_AGENT_OPENCODE=str(focode),
             BROWSER_AGENT_BROWSER_BIN=str(fbrowser),
-            FAKE_OC_MODE=mode, FAKE_OC_LOG=str(oc_log),
+            FAKE_OC_MODE=mode, FAKE_OC_LOG=str(oc_log), FAKE_OC_ENV=str(oc_env),
             FRB_LOG=str(frb_log), FRB_TABID=str(tabid),
             TMPDIR=str(scratch_root),
             BROWSER_AGENT_KEEP_SCRATCH="1",
@@ -184,6 +197,7 @@ def rig(tmp_path):
 
     rig.frb_log = frb_log
     rig.oc_log = oc_log
+    rig.oc_env = oc_env
     rig.scratch_root = scratch_root
     rig.run = run
     return rig
@@ -201,10 +215,20 @@ def _oc_calls(oc_log: Path):
     return [json.loads(ln) for ln in oc_log.read_text().splitlines() if ln.strip()]
 
 
+def _oc_env(oc_env: Path):
+    if not oc_env.exists():
+        return []
+    return [json.loads(ln) for ln in oc_env.read_text().splitlines() if ln.strip()]
+
+
+def _scratch_dir(scratch_root: Path):
+    hits = list(scratch_root.glob("browser-agent.*"))
+    assert hits, "no per-run scratch dir was created"
+    return hits[0]
+
+
 def _agent_md(scratch_root: Path):
-    hits = list(scratch_root.glob("browser-agent.*/.opencode/agents/browser-agent.md"))
-    assert hits, "no per-run agent md was written"
-    return hits[0].read_text()
+    return (_scratch_dir(scratch_root) / ".opencode/agents/browser-agent.md").read_text()
 
 
 # --------------------------------------------------------------------------- #
@@ -235,20 +259,77 @@ def test_unknown_flag_rejected(rig):
     assert "unknown flag" in r.stderr.lower()
 
 
-def test_flags_parsed_and_threaded(rig):
-    """A successful run with --steps N templates that budget into the per-run
-    agent md, and locks the bash permission to the OWNED tab."""
+# --------------------------------------------------------------------------- #
+# The security contract: the agent def DENIES bash + only the custom tool is
+# allowed, and NO shell-string surface remains anywhere in the per-run def/tool.
+# --------------------------------------------------------------------------- #
+def test_agent_def_denies_bash_allows_only_custom_tool(rig):
+    """The per-run agent def must deny EVERY built-in tool (bash included) and
+    allow ONLY the typed `browser` custom tool — the crux of the PR #180 RCE fix
+    (no bash → no shell → no redirect/metacharacter surface)."""
     r = rig.run(["read the page", "--steps", "7"], mode="ok")
     assert r.returncode == 0, r.stderr
     md = _agent_md(rig.scratch_root)
-    assert "steps: 7" in md, "the --steps budget must be templated into the agent"
-    assert f"browser --tab {TAB_ID} *" in md, \
-        "the bash permission must be locked to the owned tab"
-    assert "__TAB_ID__" not in md and "__STEPS__" not in md    # fully templated
+    # The permission block denies everything then re-allows only `browser`.
+    assert '"*": deny' in md, "the agent def must deny all tools by default"
+    assert "browser: allow" in md, "only the custom browser tool may be allowed"
+    # bash must NOT be granted anywhere (no `bash:` allow, no `browser --tab … *`).
+    assert "browser --tab" not in md, "no bash/shell command permission may remain"
+    assert "bash:" not in md, "the old bash permission block must be gone"
+    # The step budget is templated; the tab is NOT in the def (forced via env).
+    assert "steps: 7" in md
+    assert str(TAB_ID) not in md, "the tab must not be baked into the def (env-forced)"
+    assert "__STEPS__" not in md and "__MODEL__" not in md    # fully templated
+
+
+def test_custom_tool_copied_into_scratch_project(rig):
+    """opencode loads a project's `.opencode/tools/*.js`; the wrapper must copy the
+    committed typed tool (+ its pure-logic sibling) in, so the model's ONLY tool is
+    `browser`."""
+    r = rig.run(["read the page"], mode="ok")
+    assert r.returncode == 0, r.stderr
+    sd = _scratch_dir(rig.scratch_root)
+    assert (sd / ".opencode/tools/browser.js").exists()
+    assert (sd / ".opencode/tools/browser_tool_impl.mjs").exists()
+
+
+def test_wrapper_forces_tab_and_domain_policy_via_env(rig):
+    """The model cannot choose the tab/instance/domain policy — the wrapper FORCES
+    them on the tool via env. Assert the exact env opencode (and thus the tool)
+    received."""
+    r = rig.run(["read the page", "--instance", "work",
+                 "--deny-domains", "evil.com,tracker.io", "--allow-domains", "wikipedia.org"],
+                mode="ok")
+    assert r.returncode == 0, r.stderr
+    envs = _oc_env(rig.oc_env)
+    assert envs, "fake opencode never recorded its env"
+    e = envs[0]
+    assert e.get("BROWSER_AGENT_TAB") == str(TAB_ID)
+    assert e.get("BROWSER_AGENT_INSTANCE") == "work"
+    assert e.get("BROWSER_AGENT_DENY_DOMAINS") == "evil.com tracker.io"
+    assert e.get("BROWSER_AGENT_ALLOW_DOMAINS") == "wikipedia.org"
+    assert e.get("BROWSER_AGENT_DRY_RUN") == "0"
+
+
+def test_no_shell_string_path_remains(rig):
+    """Belt-and-suspenders: the wrapper must not put a `browser` shim on PATH nor
+    hand the agent any shell command string. The scratch dir carries NO `bin/`
+    shim, and the task message never tells the model to run a `browser --tab …`
+    shell command."""
+    r = rig.run(["read the page"], mode="ok")
+    assert r.returncode == 0, r.stderr
+    sd = _scratch_dir(rig.scratch_root)
+    assert not (sd / "bin").exists(), "no PATH-shadow shim dir may exist"
+    # The task message (last opencode positional) must describe the TYPED tool,
+    # not a shell command line.
+    argv = _oc_calls(rig.oc_log)[0]["argv"]
+    msg = argv[-1]
+    assert "browser --tab" not in msg, "the model must not be given a shell command"
+    assert "op=" in msg, "the model must be pointed at the typed tool"
 
 
 # --------------------------------------------------------------------------- #
-# Own-tab lifecycle: open → capture tabId → inject → close on EVERY exit path
+# Own-tab lifecycle: open → capture tabId → close on EVERY exit path
 # --------------------------------------------------------------------------- #
 def test_happy_path_opens_and_closes_exactly_once(rig):
     r = rig.run(["find the top stories"], mode="ok")
@@ -272,11 +353,11 @@ def test_tab_closed_on_opencode_error(rig):
 
 def test_tab_closed_on_timeout(rig):
     t0 = time.time()
-    # --timeout 2 hard-kills the slow (30s) opencode well before its sleep ends.
+    # --timeout 2 process-group-kills the slow (30s) opencode well before its sleep.
     r = rig.run(["do it", "--timeout", "2"], mode="slow", timeout=30,
                 extra_env={"FAKE_OC_SLEEP": "30"})
     elapsed = time.time() - t0
-    assert elapsed < 20, f"wrapper did not hard-kill in time ({elapsed:.1f}s)"
+    assert elapsed < 20, f"wrapper did not kill in time ({elapsed:.1f}s)"
     out = json.loads(r.stdout.strip())
     assert out["status"] == "blocked"
     assert "timed out" in out["answer"].lower()
@@ -299,6 +380,41 @@ def test_open_failure_clean_error(rig):
     assert "failed to open a tab" in r.stderr.lower()
     # A failed open leaves nothing to close (only the open attempt was logged).
     assert [c for c in _browser_calls(rig.frb_log) if c["op"] == "close"] == []
+
+
+# --------------------------------------------------------------------------- #
+# Process-group kill on timeout — no orphaned child survives.
+# --------------------------------------------------------------------------- #
+def test_timeout_reaps_the_whole_process_group(rig, tmp_path):
+    """opencode may spawn helper children in its group; a naive per-pid `timeout`
+    kill would orphan them. The wrapper runs opencode under `setsid` and kills the
+    WHOLE group on timeout, so an inherited-group child is reaped before it can
+    write its 'survived' marker."""
+    pid_file = tmp_path / "straggler.pid"
+    survived = tmp_path / "straggler.survived"
+    r = rig.run(["do it", "--timeout", "2"], mode="straggler", timeout=30,
+                extra_env={"FAKE_OC_SLEEP": "30", "STRAGGLER_SLEEP": "30",
+                           "STRAGGLER_PID": str(pid_file),
+                           "STRAGGLER_SURVIVED": str(survived)})
+    assert json.loads(r.stdout.strip())["status"] == "blocked"
+    assert pid_file.exists(), "the straggler child never started (test rig issue)"
+    child_pid = int(pid_file.read_text().strip())
+    # Give the group-kill a moment to propagate, then assert the child is gone and
+    # never wrote its post-sleep 'survived' marker.
+    deadline = time.time() + 8
+    alive = True
+    while time.time() < deadline:
+        try:
+            os.kill(child_pid, 0)
+            time.sleep(0.2)
+        except ProcessLookupError:
+            alive = False
+            break
+        except PermissionError:
+            alive = False
+            break
+    assert not alive, f"orphaned child {child_pid} survived the timeout kill"
+    assert not survived.exists(), "the straggler outlived the timeout (wrote 'survived')"
 
 
 # --------------------------------------------------------------------------- #
@@ -339,161 +455,3 @@ def test_partial_status_is_success_exit(rig):
     r = rig.run(["do it"], mode="partial")
     assert r.returncode == 0
     assert json.loads(r.stdout.strip())["status"] == "partial"
-
-
-# --------------------------------------------------------------------------- #
-# Integration/smoke: fake opencode DRIVES the guard shim (`browser` on PATH) →
-# assert ops route to the OWNED tab only, the tab is opened+closed once, and the
-# active tab is never targeted.
-# --------------------------------------------------------------------------- #
-def test_integration_ops_route_to_owned_tab_only(rig):
-    r = rig.run(["read the page"], mode="drive_ok")
-    assert r.returncode == 0, r.stderr
-    calls = _browser_calls(rig.frb_log)
-    ops = [c for c in calls if c["op"] not in ("open", "close")]
-    assert ops, "the agent never actually drove the browser"
-    # EVERY driven op targeted the owned tab — never the active tab (no --tab).
-    assert all(c["tab"] == str(TAB_ID) for c in ops), \
-        f"an op targeted a non-owned tab: {ops}"
-    assert any(c["op"] == "text" for c in ops), "expected a `text` read"
-    assert len([c for c in calls if c["op"] == "open"]) == 1
-    assert len([c for c in calls if c["op"] == "close"]) == 1
-    assert json.loads(r.stdout.strip())["status"] == "ok"
-
-
-def test_integration_wrong_tab_is_blocked_by_guard(rig):
-    """When the model tries to touch a DIFFERENT tab, the guard refuses it — the
-    fake browser never receives an op on tab 999, so the active tab is safe."""
-    r = rig.run(["do it"], mode="drive_wrongtab")
-    calls = _browser_calls(rig.frb_log)
-    # No op ever reached the real browser on the forbidden tab.
-    assert not any(c["tab"] == "999" for c in calls), \
-        "the guard let an op through to a non-owned tab"
-    # The owned tab was still opened + closed cleanly.
-    assert len([c for c in calls if c["op"] == "open"]) == 1
-    assert len([c for c in calls if c["op"] == "close"]) == 1
-
-
-def test_integration_deny_domain_blocked_by_guard(rig):
-    r = rig.run(["do it", "--deny-domains", "evil.example.com"],
-                mode="drive_denydomain")
-    calls = _browser_calls(rig.frb_log)
-    # The nav to the denied domain never reached the real browser.
-    navs = [c for c in calls if c["op"] == "nav"]
-    assert navs == [], f"a denied-domain nav reached the browser: {navs}"
-
-
-def test_integration_dry_run_intercepts_nav(rig):
-    r = rig.run(["do it", "--dry-run"], mode="drive_dryrun")
-    calls = _browser_calls(rig.frb_log)
-    navs = [c for c in calls if c["op"] == "nav"]
-    assert navs == [], "dry-run must intercept the nav (never execute it)"
-
-
-# --------------------------------------------------------------------------- #
-# The guardrail shim (browser-agent-guard) — direct unit coverage.
-# --------------------------------------------------------------------------- #
-@pytest.fixture
-def guard_rig(tmp_path):
-    bind = tmp_path / "bin"; bind.mkdir()
-    fbrowser = _fake_browser(bind / "real-browser")
-    frb_log = tmp_path / "frb.log"
-    audit = tmp_path / "audit.jsonl"
-
-    def run(args, env=None):
-        e = dict(os.environ)
-        e.update(BAG_TAB=str(TAB_ID), BAG_REAL_BROWSER=str(fbrowser),
-                 BAG_TRANSCRIPT=str(audit), FRB_LOG=str(frb_log),
-                 FRB_TABID=str(TAB_ID))
-        if env:
-            e.update(env)
-        r = subprocess.run([str(GUARD), *args], env=e,
-                           capture_output=True, text=True, timeout=20)
-        return r
-
-    guard_rig.run = run
-    guard_rig.frb_log = frb_log
-    guard_rig.audit = audit
-    return guard_rig
-
-
-def _guard_browser_calls(frb_log):
-    return _browser_calls(frb_log)
-
-
-def test_guard_passes_owned_tab_op_through(guard_rig):
-    r = guard_rig.run(["--tab", str(TAB_ID), "text"])
-    assert r.returncode == 0, r.stderr
-    calls = _guard_browser_calls(guard_rig.frb_log)
-    assert len(calls) == 1 and calls[0]["op"] == "text"
-    assert calls[0]["tab"] == str(TAB_ID)
-
-
-def test_guard_refuses_wrong_tab(guard_rig):
-    r = guard_rig.run(["--tab", "999", "text"])
-    assert r.returncode != 0
-    assert "guard_refused" in r.stdout
-    assert _guard_browser_calls(guard_rig.frb_log) == [], "wrong-tab op must not exec"
-
-
-def test_guard_refuses_missing_tab(guard_rig):
-    r = guard_rig.run(["text"])
-    assert r.returncode != 0
-    assert "missing_--tab" in r.stdout or "missing" in r.stdout
-
-
-def test_guard_refuses_disallowed_op(guard_rig):
-    for op in ("open", "close", "tabs", "release"):
-        r = guard_rig.run(["--tab", str(TAB_ID), op])
-        assert r.returncode != 0, f"op {op} should be refused"
-    assert _guard_browser_calls(guard_rig.frb_log) == []
-
-
-def test_guard_blocks_denied_domain_nav(guard_rig):
-    r = guard_rig.run(["--tab", str(TAB_ID), "nav", "https://sub.evil.example.com/x"],
-                      env={"BAG_DENY_DOMAINS": "evil.example.com"})
-    assert r.returncode != 0
-    assert "domain_blocked" in r.stdout
-    assert _guard_browser_calls(guard_rig.frb_log) == []
-
-
-def test_guard_allows_non_denied_nav(guard_rig):
-    r = guard_rig.run(["--tab", str(TAB_ID), "nav", "https://good.example.com"],
-                      env={"BAG_DENY_DOMAINS": "evil.example.com"})
-    assert r.returncode == 0, r.stderr
-    calls = _guard_browser_calls(guard_rig.frb_log)
-    assert len(calls) == 1 and calls[0]["op"] == "nav"
-
-
-def test_guard_allowlist_blocks_non_allowed(guard_rig):
-    r = guard_rig.run(["--tab", str(TAB_ID), "nav", "https://other.example.com"],
-                      env={"BAG_ALLOW_DOMAINS": "wikipedia.org"})
-    assert r.returncode != 0
-    assert "domain_blocked" in r.stdout
-
-
-def test_guard_allowlist_permits_allowed(guard_rig):
-    r = guard_rig.run(["--tab", str(TAB_ID), "nav", "https://en.wikipedia.org/wiki/X"],
-                      env={"BAG_ALLOW_DOMAINS": "wikipedia.org"})
-    assert r.returncode == 0, r.stderr
-
-
-def test_guard_dry_run_intercepts_nav_and_eval(guard_rig):
-    for op_args in (["nav", "https://good.example.com"], ["eval", "1+1"]):
-        r = guard_rig.run(["--tab", str(TAB_ID), *op_args],
-                          env={"BAG_DRY_RUN": "1"})
-        assert r.returncode == 0, r.stderr
-        assert "dryRun" in r.stdout
-    assert _guard_browser_calls(guard_rig.frb_log) == [], \
-        "dry-run must never exec the real browser"
-    # The audit trail recorded the dry-run decisions.
-    audit = guard_rig.audit.read_text()
-    assert "dry_run" in audit
-
-
-def test_guard_eval_referencing_denied_domain_blocked(guard_rig):
-    r = guard_rig.run(["--tab", str(TAB_ID), "eval",
-                       "location.href='https://evil.example.com'"],
-                      env={"BAG_DENY_DOMAINS": "evil.example.com"})
-    assert r.returncode != 0
-    assert "eval_references_blocked" in r.stdout
