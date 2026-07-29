@@ -19,6 +19,15 @@ _PROMPT = _HERE.parent / "drafter-prompt.md"
 _ENV_EXAMPLE = _HERE.parent / "task-spec-drafter.env.example"
 _HOME_NIX = _HERE.parents[2] / "nix" / "home.nix"
 
+# The `git -C` path is PINNED (2026-07-28 RCE fix) — a wildcard there let an
+# injected ticket insert git's GLOBAL options (`-c diff.external=<cmd>`) between
+# the path and the verb. See test_allowlist_covers_prompt_shapes.py.
+_PINNED_PATHS = (
+    "/home/zach/workspace/civit/civitai",
+    "/home/zach/workspace/civit/datapacket-talos",
+    "/home/zach/workspace/homelab-talos",
+)
+
 
 def _read(p: Path) -> str:
     return p.read_text(encoding="utf-8")
@@ -71,15 +80,19 @@ def test_allowlist_has_no_write_capable_verbs():
     assert "Bash(env" not in al, "env* dumps the inherited CLAWGATE_HOOK_TOKEN"
     # The merge/ref-status verbs added for the headless-runtime fix must be
     # NARROWED to their read-only shape — the broad globs would also match the
-    # write forms of the same command, so those broad globs must be ABSENT:
-    assert "Bash(git -C * branch*)" not in al, (
-        "broad `git -C * branch*` glob matches `git branch <name>`/`-d/-D` (writes); "
-        "only the read-only `branch --contains*` form is allowed"
-    )
-    assert "Bash(git -C * symbolic-ref*)" not in al, (
-        "broad `git -C * symbolic-ref*` glob matches 2-arg `symbolic-ref HEAD <ref>` "
-        "(repoints HEAD, a write); only `symbolic-ref --short*` is allowed"
-    )
+    # write forms of the same command, so those broad globs must be ABSENT.
+    # Checked against BOTH the retired wildcard form and every pinned path, so the
+    # guard cannot go vacuous now that the `-C` path is pinned.
+    for prefix in ("git -C *",) + tuple(f"git -C {p}" for p in _PINNED_PATHS):
+        assert f"Bash({prefix} branch*)" not in al, (
+            f"broad `{prefix} branch*` glob matches `git branch <name>`/`-d/-D` "
+            "(writes); only the read-only `branch --contains*` form is allowed"
+        )
+        assert f"Bash({prefix} symbolic-ref*)" not in al, (
+            f"broad `{prefix} symbolic-ref*` glob matches 2-arg "
+            "`symbolic-ref HEAD <ref>` (repoints HEAD, a write); only "
+            "`symbolic-ref --short*` is allowed"
+        )
     # sanity: no obviously-mutating git verbs anywhere in the allowlist.
     for bad in ("push", "commit", "git -C * apply", "git -C * reset",
                 "git -C * checkout", "git -C * tag", "git -C * update-ref"):
@@ -89,11 +102,15 @@ def test_allowlist_has_no_write_capable_verbs():
 def test_allowlist_keeps_readonly_verification_verbs():
     al = _allowlist(_read(_DRAFTER))
     for verb in (
-        "Bash(git -C * log*)", "Bash(git -C * show*)",
         "Bash(gh pr list*)", "Bash(gh pr view*)",
         "Bash(kubectl get*)", "Bash(node *query.mjs get*)",
     ):
         assert verb in al, f"missing read-only verification verb {verb}"
+    # git reads survive the RCE fix — in their PINNED form, for every repo the
+    # drafter is allowed to touch.
+    for path in _PINNED_PATHS:
+        for verb in (f"Bash(git -C {path} log*)", f"Bash(git -C {path} show*)"):
+            assert verb in al, f"missing read-only verification verb {verb}"
 
 
 def test_allowlist_adds_merge_status_readonly_verbs():
@@ -102,18 +119,14 @@ def test_allowlist_adds_merge_status_readonly_verbs():
     These read-only merge/ref verbs (each in its narrowest safe shape) must now be
     present so the check runs non-interactively."""
     al = _allowlist(_read(_DRAFTER))
-    for verb in (
-        "Bash(git -C * branch --contains*)",
-        "Bash(git -C * rev-parse*)",
-        "Bash(git -C * rev-list*)",
-        "Bash(git -C * merge-base*)",
-        "Bash(git -C * for-each-ref*)",
-        "Bash(git -C * symbolic-ref --short*)",
-        "Bash(git -C * ls-files*)",
-        "Bash(git -C * cat-file*)",
-        "Bash(gh pr checks*)",
-    ):
-        assert verb in al, f"missing read-only merge/ref verb {verb}"
+    assert "Bash(gh pr checks*)" in al, "missing read-only merge/ref verb gh pr checks*"
+    for path in _PINNED_PATHS:
+        for suffix in (
+            "branch --contains*", "rev-parse*", "rev-list*", "merge-base*",
+            "for-each-ref*", "symbolic-ref --short*", "ls-files*", "cat-file*",
+        ):
+            verb = f"Bash(git -C {path} {suffix})"
+            assert verb in al, f"missing read-only merge/ref verb {verb}"
 
 
 def test_allowlist_has_no_arbitrary_command_flag_verbs():
@@ -127,13 +140,20 @@ def test_allowlist_has_no_arbitrary_command_flag_verbs():
     remote-helper / exec flag (`--upload-pack`/`--receive-pack`/`--exec`/`-o`)."""
     al = _allowlist(_read(_DRAFTER))
     # The specific verb the audit proved, plus its exec-flag siblings — none of
-    # these git subcommands may appear as an allowlist entry.
-    for verb in ("ls-remote", "fetch", "clone", "pull", "push", "daemon",
-                 "archive", "remote", "submodule"):
-        assert f"git -C * {verb}" not in al, (
-            f"git {verb}* accepts an arbitrary-command flag "
-            f"(--upload-pack/--receive-pack/--exec) — a prefix glob can't forbid it; RCE"
-        )
+    # these git subcommands may appear as an allowlist entry. `grep` joined the
+    # list on 2026-07-28: `git grep -O<cmd>` / `--open-files-in-pager=<cmd>` runs
+    # <cmd>, the flag sits AFTER the subcommand (so PINNING the -C path does not
+    # help), and git grep accepts the abbreviated `--open=<cmd>` too — verified by
+    # execution on git 2.54.0. Checked against the retired wildcard form AND every
+    # pinned path so the guard cannot go vacuous.
+    for prefix in ("git -C *",) + tuple(f"git -C {p}" for p in _PINNED_PATHS):
+        for verb in ("ls-remote", "fetch", "clone", "pull", "push", "daemon",
+                     "archive", "remote", "submodule", "grep"):
+            assert f"{prefix} {verb}" not in al, (
+                f"git {verb}* accepts an arbitrary-command flag "
+                "(--upload-pack/--receive-pack/--exec/-O) — a prefix glob can't "
+                "forbid it; RCE"
+            )
     # And no raw exec-flag token should ever be baked into an allowlist entry.
     for flag in ("--upload-pack", "--receive-pack", "--exec"):
         assert flag not in al, f"exec flag {flag} must never appear in the allowlist"

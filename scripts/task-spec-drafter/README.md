@@ -101,12 +101,34 @@ propose-only philosophy) but lives entirely in devrc.
 The VERIFY+CLASSIFY+DRAFT step is LLM reasoning over gathered context, invoked
 via headless `claude -p` once **per ticket**. It is given a **tight read-only
 allowlist** (`--allowedTools`) so its verification tools actually execute
-non-interactively — the `clickup` CLI (get/comments), `git -C civitai log/show/grep`,
-`gh pr list/view/search`, `kubectl get/logs/describe` — but **no** write verbs
-(no apply/edit/delete/scale/commit/push/comment). `--permission-mode plan` was
-rejected: it blocks tool execution, so the model reasons from the title only —
-the exact failure mode this design exists to kill. Read-only is enforced by both
-the prompt's HARD CONSTRAINTS and the allowlist.
+non-interactively — the `clickup` CLI (get/comments), `git -C <pinned repo>
+log/show/diff/…`, `gh pr list/view/search`, `kubectl get/logs/describe` — but
+**no** write verbs (no apply/edit/delete/scale/commit/push/comment).
+`--permission-mode plan` was rejected: it blocks tool execution, so the model
+reasons from the title only — the exact failure mode this design exists to kill.
+Read-only is enforced by both the prompt's HARD CONSTRAINTS and the allowlist.
+
+⚠ **The allowlist is a security control, not a convenience.** The pass reasons
+over untrusted client ticket text with no plan mode, so every entry AUTO-EXECUTES
+under prompt injection. Two structural rules, both learned the hard way and both
+test-guarded (`tests/test_allowlist_covers_prompt_shapes.py`):
+
+1. **No mid-pattern wildcard.** `*` compiles to `.*` in an anchored,
+   whitespace-normalised, DOTALL regex, so it matches *across spaces*. A
+   `Bash(git -C * log*)` entry therefore allowed anything between `-C ` and
+   ` log` — which is exactly where git's global options go, giving
+   `git -C <repo> -c diff.external=<cmd> log -p --ext-diff` → arbitrary code
+   execution. The `-C` repo path and the `gh -R` repo are now **pinned literals**.
+2. **A prefix pattern cannot forbid a suffix.** Any verb with a "run this
+   command" flag *after* the subcommand is unfixable by narrowing and is
+   **dropped**: `ls-remote` (`--upload-pack`), `git grep` (`-O` /
+   `--open-files-in-pager`), `gh api`, `curl`. Where the verb must be kept
+   (`log`/`show`/`diff`/`rev-list` all accept `--output=<file>`, an
+   arbitrary-path arbitrary-content write), a **`--disallowedTools` deny layer**
+   (`DRAFTER_DENIED_TOOLS`) closes the flag — deny overrides allow.
+
+The durable answer is to keep moving raw git behind fixed wrappers like
+`ticket-status`, which validate their own arguments.
 
 ## Delta-scoping (cheap continuous runs)
 

