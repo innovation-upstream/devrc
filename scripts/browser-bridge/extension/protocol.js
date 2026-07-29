@@ -383,24 +383,113 @@ export function assertCdpAttachable(url) {
   }
 }
 
+// The actionable error when the target tab has no live renderer to attach to.
+export const TAB_DISCARDED_MESSAGE =
+  "tab_discarded: the target tab was unloaded by Chrome (memory saver) and has no " +
+  "live renderer to attach to — reload the tab or bring it to the foreground, then retry.";
+
+// Fail FAST (before any chrome.debugger.attach) when the target tab has no live
+// renderer. A DISCARDED / unloaded tab (Chrome's memory saver evicts background
+// tabs) has no renderer process, so chrome.debugger.attach / Page.getFrameTree
+// would NEVER resolve — the observed root cause of the SW wedge. Detecting it here
+// turns an unbounded hang into an immediate, clear, actionable error (and the
+// per-call timeouts in withCdpSession are the backstop for any OTHER hang cause).
+// `owned_tab_gone` when the tab is missing entirely. Pure — the SW passes the
+// chrome.tabs.get(tabId) result; unit-tested without a real browser.
+export function assertTabCdpReady(tab) {
+  if (!tab) throw new Error("owned_tab_gone");
+  if (tab.discarded || tab.status === "unloaded") throw new Error(TAB_DISCARDED_MESSAGE);
+}
+
+// --- SW-side CDP timeouts: never let a hung chrome.debugger call wedge the SW - //
+// A chrome.debugger.attach / sendCommand / detach that NEVER resolves (the
+// classic case: the tab was DISCARDED by Chrome's memory saver, so it has no live
+// renderer and Page.* never answers) would leave the SW's command handler blocked
+// on an unresolved await FOREVER — the /poll loop never resumes and the whole
+// instance silently drops (the bug this module fixes). So EVERY chrome.debugger
+// call is raced against a bounded timeout: on timeout the op SETTLES (rejects)
+// and control returns to the poll loop; the hung underlying promise is abandoned.
+//
+// Deadlines are chosen WELL UNDER the server's cmd_timeout (default 20s) so the
+// SW returns a clear error BEFORE the server gives up AND before the next /poll is
+// starved: attach ≤ ATTACH, each command ≤ COMMAND, whole op ≤ BUDGET (a cumulative
+// backstop). All injectable via `deps.timeouts`/`deps.timers` for deterministic
+// unit tests (no real clock needed).
+export const CDP_ATTACH_TIMEOUT_MS = 8000;
+export const CDP_COMMAND_TIMEOUT_MS = 8000;
+export const CDP_OP_BUDGET_MS = 15000;
+
+// Race `promise` against a `ms` deadline. On timeout, REJECT with
+// `cdp_timeout:<label>` (the phase — attach / a CDP method / op / detach) so the
+// caller sees WHICH call hung; the underlying promise is left pending (abandoned)
+// but the returned promise SETTLES, so the awaiter is never blocked past `ms`. A
+// promise that settles on its own (resolve OR reject) wins the race and its
+// value/error passes through unchanged, and the timer is cleared so nothing lingers.
+// `ms <= 0` disables the bound (returns the promise as-is). Timers injectable.
+export function promiseWithTimeout(promise, ms, label, timers = {}) {
+  const p = Promise.resolve(promise);
+  if (!(ms > 0)) return p;
+  const setT = timers.setTimeout || setTimeout;
+  const clearT = timers.clearTimeout || clearTimeout;
+  let handle;
+  const timeout = new Promise((_, reject) => {
+    handle = setT(() => reject(new Error(`cdp_timeout:${label}`)), ms);
+  });
+  return Promise.race([p, timeout]).finally(() => clearT(handle));
+}
+
 // Orchestrate a CDP op with a per-op attach→run→ALWAYS-detach lifecycle, every
 // chrome.debugger side effect INJECTED so the invariants are unit-testable without
 // a real browser:
 //   * the target URL is validated BEFORE attach — a privileged/other tab is refused
 //     and `attach` is NEVER called (invariant #1);
-//   * `detach` ALWAYS runs — on success AND on any error `run` throws (invariant #2)
-//     — so a debugger attachment can never leak (a leak = a stuck banner + an open
-//     surface);
-//   * a `detach` failure (tab already gone / already detached) is swallowed so it
-//     never masks the real result or the real error.
-// `deps`: { url, attach():Promise, run():Promise<result>, detach():Promise }.
+//   * every chrome.debugger call is TIME-BOUNDED (attach ≤ attachMs, each command ≤
+//     commandMs via the wrapped `send` handed to `run`, whole op ≤ budgetMs) so a
+//     hung CDP call can never wedge the SW's poll loop — the op settles with a
+//     `cdp_timeout:<phase>` error instead (the no-wedge guarantee);
+//   * `detach` ALWAYS runs — on success, on any error `run` throws, AND after a
+//     timed-out/failed attach (best-effort) — so a debugger attachment can never
+//     leak (a leak = a stuck banner + an open surface) even when attach hung
+//     (invariant #2);
+//   * a `detach` failure/HANG (tab already gone / already detached / no renderer)
+//     is bounded + swallowed so it never masks the real result/error or re-wedges
+//     the finally.
+// `deps`: { url, attach():Promise, detach():Promise, send?(method,params):Promise,
+//   run(send):Promise<result>, timeouts?:{attachMs,commandMs,budgetMs}, timers? }.
+// `send` is OPTIONAL: when present, `run` is handed a timeout-WRAPPED send so each
+// CDP command is individually bounded; when absent, `run` receives undefined
+// (back-compat with call sites that don't issue commands).
 export async function withCdpSession(deps) {
   assertCdpAttachable(deps.url);        // BEFORE attach — refuse privileged/other tab
-  await deps.attach();
+  const timers = deps.timers || {};
+  const t = deps.timeouts || {};
+  const attachMs = t.attachMs == null ? CDP_ATTACH_TIMEOUT_MS : t.attachMs;
+  const commandMs = t.commandMs == null ? CDP_COMMAND_TIMEOUT_MS : t.commandMs;
+  const budgetMs = t.budgetMs == null ? CDP_OP_BUDGET_MS : t.budgetMs;
+  // Bounded, best-effort detach — used in the finally AND after a failed attach so
+  // a late-completing attach can't leak a session. Its own timeout means a hung
+  // detach can't re-wedge the handler.
+  const safeDetach = async () => {
+    try { await promiseWithTimeout(deps.detach(), commandMs, "detach", timers); }
+    catch (e) { /* already detached / tab gone / detach timed out — best effort */ }
+  };
+  // Attach, time-bounded. On timeout/failure, best-effort detach (the attach may
+  // have half-completed / may complete late) then rethrow so the op fails cleanly.
   try {
-    return await deps.run();
+    await promiseWithTimeout(deps.attach(), attachMs, "attach", timers);
+  } catch (e) {
+    await safeDetach();
+    throw e;
+  }
+  try {
+    const rawSend = deps.send;
+    const send = rawSend
+      ? (method, params) => promiseWithTimeout(rawSend(method, params), commandMs, method, timers)
+      : undefined;
+    return await promiseWithTimeout(
+      Promise.resolve(deps.run(send)), budgetMs, "op", timers);
   } finally {
-    try { await deps.detach(); } catch (e) { /* already detached / tab gone */ }
+    await safeDetach();
   }
 }
 

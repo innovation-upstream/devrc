@@ -23,7 +23,8 @@ import {
   classifyPollStatus, POLL_COMMAND, POLL_IDLE, POLL_SUPERSEDED,
   POLL_UNAUTHORIZED, SUPERSEDE_BACKOFF_MS, captureWithRetry,
   // CDP (chrome.debugger) helpers — the pure, unit-tested decision layer.
-  CDP_VERSION, withCdpSession, flattenFrameTree, resolveFrame, keyEventParams,
+  CDP_VERSION, withCdpSession, assertTabCdpReady,
+  flattenFrameTree, resolveFrame, keyEventParams,
   clickPoint, boxModelOrigin, frameEvalExpressions, isCdpSyntaxError,
   cdpExceptionText, frameHtmlExpression, frameTextExpression,
   elementRectExpression, focusExpression, fullPageClip,
@@ -109,6 +110,13 @@ async function withCdp(tabId, url, run) {
   return withCdpSession({
     url,
     attach: async () => {
+      // Fail fast on a discarded/unloaded tab (no live renderer → attach would
+      // hang forever). withCdpSession's per-call timeouts are the backstop for any
+      // other hang; this turns the common case into an immediate clear error.
+      let tab;
+      try { tab = await chrome.tabs.get(tabId); }
+      catch (e) { throw new Error("owned_tab_gone"); }
+      assertTabCdpReady(tab);
       await chrome.debugger.attach(target, CDP_VERSION);
       cdpAttached.add(tabId);
     },
@@ -116,7 +124,10 @@ async function withCdp(tabId, url, run) {
       cdpAttached.delete(tabId);
       await chrome.debugger.detach(target);
     },
-    run: () => run((method, params) => sendCdp(target, method, params)),
+    // Raw send — withCdpSession wraps it in the per-command timeout before handing
+    // it to `run`, so a single hung CDP command can't wedge the SW.
+    send: (method, params) => sendCdp(target, method, params),
+    run: (send) => run(send),
   });
 }
 
