@@ -639,6 +639,167 @@ export function focusExpression(selector) {
          `el.focus();return true;})(${sel})`;
 }
 
+// --- OOPIF-capable frame ops: chrome.webNavigation + chrome.scripting --------- //
+// WHY this replaced the CDP `Page.getFrameTree` frame path (the OOPIF bug):
+// `Page.getFrameTree` from the TOP tab target only enumerates SAME-PROCESS frames.
+// Under Chrome's site isolation a CROSS-ORIGIN iframe is an OUT-OF-PROCESS iframe
+// (OOPIF) living in a SEPARATE renderer/target, so getFrameTree from the top tab
+// silently OMITS it — `frames` could never list it and `--frame` could never
+// target it (the whole point of a cross-origin embed like model-benchmarking.civit.ai).
+//
+// The fix uses the two chrome.* APIs that ARE OOPIF-aware:
+//   * chrome.webNavigation.getAllFrames({tabId}) enumerates EVERY frame in the tab
+//     — same-process AND cross-origin OOPIFs — as {frameId:<number>, parentFrameId,
+//     url}. This is the enumeration `frames` returns and `--frame` resolves against.
+//   * chrome.scripting.executeScript({target:{tabId, frameIds:[id]}}) injects INTO a
+//     specific frame — including a cross-origin OOPIF, given the extension's
+//     <all_urls> host permission — so a frame read/click/type/key reaches the OOPIF
+//     where CDP could not, and WITHOUT the chrome.debugger banner.
+//
+// The frame IDENTIFIER is therefore the NUMERIC webNavigation frameId (NOT the old
+// CDP string frame id). Enumeration + resolution are pure + unit-tested here; the SW
+// is the thin chrome.webNavigation/chrome.scripting glue.
+
+// Map a chrome.webNavigation.getAllFrames() result to the compact, METADATA-ONLY
+// list the `frames` op returns: [{frameId:<number>, url, parentFrameId:<number>}].
+// The top frame is frameId 0 / parentFrameId -1. Entries without a numeric frameId
+// are dropped defensively. NEVER includes frame CONTENT — id/url/parent only. Pure.
+export function normalizeWebNavFrames(frames) {
+  const out = [];
+  for (const f of frames || []) {
+    if (!f || typeof f.frameId !== "number") continue;
+    out.push({
+      frameId: f.frameId,
+      url: f.url || "",
+      parentFrameId: (typeof f.parentFrameId === "number") ? f.parentFrameId : -1,
+    });
+  }
+  return out;
+}
+
+// Resolve a caller `--frame <sel>` against a normalized getAllFrames list, returning
+// the NUMERIC frameId to inject into. `sel` may be an exact numeric frameId (e.g. "0"
+// or 5 — the webNavigation id) OR a URL substring (case-insensitive). An exact
+// frameId match WINS over a substring; among substring matches the FIRST (list order)
+// wins deterministically. Throws `frame_not_found:<sel>` when nothing matches and
+// `frame_not_specified` for an empty sel (a caller bug — the SW only calls this when
+// a frame IS targeted). Tab-scoped by construction: `frames` comes from ONE tab's
+// getAllFrames, so a resolved frameId can only ever reference a frame of THAT tab —
+// a frameId belonging to another tab is simply absent → frame_not_found. Pure.
+export function resolveWebNavFrameId(frames, sel) {
+  const s = String(sel == null ? "" : sel).trim();
+  if (!s) throw new Error("frame_not_specified");
+  if (/^\d+$/.test(s)) {
+    const n = Number(s);
+    for (const f of frames || []) if (f.frameId === n) return n;
+  }
+  const low = s.toLowerCase();
+  for (const f of frames || []) {
+    if ((f.url || "").toLowerCase().includes(low)) return f.frameId;
+  }
+  throw new Error(`frame_not_found:${s}`);
+}
+
+// --- injected page functions (run INSIDE the resolved frame via executeScript) --- //
+// These are handed to chrome.scripting.executeScript as `func` (with `args`), so
+// Chrome serializes each via Function.prototype.toString and runs it in the target
+// frame — INCLUDING a cross-origin OOPIF. HARD REQUIREMENT: each must be SELF-
+// CONTAINED — reference ONLY its own parameters and page globals (document / window /
+// MouseEvent / KeyboardEvent / Event). It must close over NOTHING from this module
+// (a closed-over reference is undefined once serialized into the page). They return
+// STRUCTURED-CLONEABLE values (executeScript deep-clones the result across the
+// process boundary). Exported so their behaviour is unit-tested directly.
+//
+// TRUST NOTE (documented, honest): events these dispatch are SYNTHETIC
+// (`isTrusted === false`), NOT the CDP `Input.*` trusted events. A trusted event
+// from the top tab target cannot easily reach an OOPIF, so synthetic-in-frame is the
+// REACHABLE path for cross-origin-frame input — and it drives the vast majority of
+// web apps (which listen for ordinary click/input/keydown). The top-frame (no
+// `--frame`) input path keeps using CDP trusted events (see service_worker.js).
+
+// outerHTML of the frame's document. Self-contained.
+export function frameReadHtmlFn() {
+  return document.documentElement.outerHTML;
+}
+
+// Visible innerText of `selector` (or the whole body when empty). Self-contained;
+// the SW normalizes + byte-caps the returned raw text via normalizeText.
+export function frameReadTextFn(selector) {
+  var el = selector ? document.querySelector(selector) : document.body;
+  return el ? el.innerText : "";
+}
+
+// Evaluate `src` in the frame's (isolated-world) context and return its completion
+// value. Mirrors compileEval's expression-vs-statement duality WITHOUT double-running
+// a side effect: build the chosen form ONCE at parse time, then call it once. A
+// runtime throw propagates (executeScript rejects → the op errors). Self-contained.
+export function frameEvalFn(src) {
+  var fn;
+  try {
+    fn = new Function("return (" + src + ")");
+  } catch (e) {
+    if (e instanceof SyntaxError) fn = new Function(src);
+    else throw e;
+  }
+  return fn();
+}
+
+// Synthetic click on `selector`: scroll into view, then dispatch a realistic
+// mousedown→mouseup→click sequence AND call el.click() (covers apps that listen for
+// either). Returns {ok:true,x,y} (frame-local center) or {ok:false,error} when the
+// selector matches nothing. Self-contained.
+export function frameClickFn(selector) {
+  var el = document.querySelector(selector);
+  if (!el) return { ok: false, error: "element_not_found" };
+  el.scrollIntoView({ block: "center", inline: "center" });
+  var r = el.getBoundingClientRect();
+  var x = Math.round(r.left + r.width / 2);
+  var y = Math.round(r.top + r.height / 2);
+  var opts = { bubbles: true, cancelable: true, view: window,
+               clientX: x, clientY: y, button: 0 };
+  el.dispatchEvent(new MouseEvent("mousedown", opts));
+  el.dispatchEvent(new MouseEvent("mouseup", opts));
+  el.dispatchEvent(new MouseEvent("click", opts));
+  if (typeof el.click === "function") el.click();
+  return { ok: true, x: x, y: y };
+}
+
+// Synthetic type into `selector` (or the frame's activeElement when empty): focus,
+// set .value (or textContent for a contenteditable), then dispatch input+change so a
+// framework's listeners see the update. Returns {ok:true,typed:<len>} or
+// {ok:false,error} when a given selector matches nothing. NEVER returns the text.
+// Self-contained.
+export function frameTypeFn(selector, text) {
+  var el = selector ? document.querySelector(selector) : document.activeElement;
+  if (selector && !el) return { ok: false, error: "element_not_found" };
+  if (!el) el = document.body;
+  if (typeof el.focus === "function") el.focus();
+  if (el && "value" in el) el.value = text;
+  else if (el && el.isContentEditable) el.textContent = text;
+  el.dispatchEvent(new Event("input", { bubbles: true }));
+  el.dispatchEvent(new Event("change", { bubbles: true }));
+  return { ok: true, typed: text.length };
+}
+
+// Synthetic key dispatch to `selector` (or the frame's activeElement): keydown→
+// (keypress if the key is printable)→keyup with the pre-resolved `keyParams`
+// (from keyEventParams, so the bounded-key gate + unknown_key refusal happen in the
+// SW BEFORE injection). Returns {ok:true,key} or {ok:false,error} when a given
+// selector matches nothing. Self-contained.
+export function frameKeyFn(selector, keyParams) {
+  var el = selector ? document.querySelector(selector) : document.activeElement;
+  if (selector && !el) return { ok: false, error: "element_not_found" };
+  var target = el || document.body;
+  if (el && typeof el.focus === "function") el.focus();
+  var init = { bubbles: true, cancelable: true, key: keyParams.key,
+               code: keyParams.code, keyCode: keyParams.keyCode,
+               which: keyParams.keyCode };
+  target.dispatchEvent(new KeyboardEvent("keydown", init));
+  if (keyParams.text) target.dispatchEvent(new KeyboardEvent("keypress", init));
+  target.dispatchEvent(new KeyboardEvent("keyup", init));
+  return { ok: true, key: keyParams.key };
+}
+
 // The full-page screenshot clip from a CDP Page.getLayoutMetrics result. Uses the
 // css content size (the full scrollable document) so `--fullpage` captures beyond
 // the viewport. Pure; returns a clip suitable for Page.captureScreenshot.

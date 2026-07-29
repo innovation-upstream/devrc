@@ -132,17 +132,20 @@ always-detach) is in the **CDP ops** section below.
 | `screenshot` | **CDP `Page.captureScreenshot`** (png) — works on a BACKGROUND/occluded tab + each profile's own tab; a foreground tab uses the cheap `captureVisibleTab` fast path. `fullpage` grabs the whole document | `{url,dataUrl,via}` |
 | `open`       | `chrome.tabs.create({url,active:false})`                 | `{tabId,url}` |
 | `close`      | `chrome.tabs.remove(tabId)`                               | `{closed:tabId}` |
-| `frames`     | **CDP `Page.getFrameTree`** — the tab's frames incl. cross-origin iframes | `{url,title,frames:[{frameId,url,name,parentId}]}` |
-| `click`      | **CDP** `getBoundingClientRect` → `Input.dispatchMouseEvent` press+release (trusted) at the element center; `selector` required, `frame` optional | `{url,clicked,x,y,frame}` |
-| `type`       | **CDP `Input.insertText`** (trusted); `text` required, `selector`/`frame` optional (focus first) | `{url,typed,frame}` |
-| `key`        | **CDP `Input.dispatchKeyEvent`** (keyDown+keyUp) for one bounded key; `key` required | `{url,key,frame}` |
+| `frames`     | **`chrome.webNavigation.getAllFrames`** — the tab's frames INCLUDING cross-origin OUT-OF-PROCESS iframes (OOPIFs) | `{url,title,frames:[{frameId,url,parentFrameId}]}` |
+| `click`      | top frame: **CDP** `getBoundingClientRect` → `Input.dispatchMouseEvent` (trusted); `--frame`: **SYNTHETIC** click via `chrome.scripting`; `selector` required, `frame` optional | `{url,clicked,x,y,frame,trusted}` |
+| `type`       | top frame: **CDP `Input.insertText`** (trusted); `--frame`: **SYNTHETIC** input via `chrome.scripting`; `text` required, `selector`/`frame` optional | `{url,typed,frame,trusted}` |
+| `key`        | top frame: **CDP `Input.dispatchKeyEvent`** (trusted); `--frame`: **SYNTHETIC** key via `chrome.scripting`; one bounded key; `key` required | `{url,key,frame,trusted}` |
 
 `open`/`close` are dispatched to the extension; `release` (drop ownership, don't
 close the tab) is handled server-side and never reaches the extension.
-`frames`/`click`/`type`/`key` + a `--frame` on `getHtml`/`text`/`eval` are the
-**CDP (chrome.debugger) ops** (see the CDP section below). `--frame <frameId|
-url-substring>` routes a read/click INTO that (possibly cross-origin) frame via a
-CDP isolated-world `Runtime.evaluate`. The tab-scoped ops
+`frames` enumerates via **`chrome.webNavigation`** and a `--frame` on
+`getHtml`/`text`/`eval`/`click`/`type`/`key` injects via **`chrome.scripting`** INTO
+the resolved frame — this reaches CROSS-ORIGIN out-of-process iframes (OOPIFs) that
+CDP `Page.getFrameTree` could NOT enumerate. `--frame <numeric-frameId|url-substring>`
+selects the frame (the identifier is the numeric webNavigation `frameId`). `screenshot`
+and TOP-frame trusted input still use **CDP (chrome.debugger)** (see the CDP section
+below). The tab-scoped ops
 (`getHtml`/`text`/`eval`/`nav`/`screenshot`/`close`/`frames`/`click`/`type`/`key`)
 run against
 the calling session's owned tab when it has one (see Session isolation), else the
@@ -161,14 +164,25 @@ structured error: `503 extension_not_connected`, `504 timeout`,
 `403 bad_host`, `429 rate_limited|queue_full` (the per-instance concurrency
 backstop — see below; body carries a `retry_after` hint).
 
-## CDP ops (chrome.debugger): any-frame reads, trusted input, background screenshots
+## Frame ops (webNavigation + scripting) & CDP ops (debugger)
 
-`frames`/`click`/`type`/`key`, `--frame` reads, and `screenshot` use the Chrome
-DevTools Protocol via the extension's `debugger` permission. They fix three real
-agent failures: (1) `captureVisibleTab` could only grab the foreground tab (can't
-screenshot a background tab or two profiles); (2) `text`/`html`/`eval` saw only the
-top frame (the target app is a cross-origin iframe); (3) there was no trusted-input
-primitive to drive an app.
+**Cross-origin frames (OOPIFs) — `frames` + `--frame`.** `frames` enumerates via
+`chrome.webNavigation.getAllFrames` and `--frame` reads/input inject via
+`chrome.scripting.executeScript({target:{frameIds:[id]}})`. This fixes the
+cross-origin-iframe gap: under Chrome site isolation a cross-origin iframe is an
+OUT-OF-PROCESS iframe (OOPIF) in its own renderer, which CDP `Page.getFrameTree` from
+the top tab target does NOT enumerate — so `frames` never listed it and `--frame` could
+never target it. `getAllFrames` sees OOPIFs and `scripting` injects into them (given
+`<all_urls>`), with NO debugger banner. The frame identifier is the **numeric**
+webNavigation `frameId`. In-frame input is **SYNTHETIC** (`isTrusted:false`) — the
+reachable OOPIF path (a trusted CDP `Input.*` event from the top target can't easily
+reach an OOPIF), and enough to drive most apps.
+
+**CDP ops (`chrome.debugger`) — `screenshot` + TOP-frame trusted input.** These use the
+Chrome DevTools Protocol via the `debugger` permission. They fix two real agent
+failures: (1) `captureVisibleTab` could only grab the foreground tab (can't screenshot
+a background tab or two profiles); (2) there was no trusted-input primitive to drive an
+app's top frame.
 
 **Design — per-op attach → run → always-detach.** The extension attaches
 `chrome.debugger` for the single op, runs a FIXED set of CDP methods, and detaches
@@ -380,9 +394,10 @@ first-class self-telemetry in ClickHouse `activity.events`:
 - **METADATA-ONLY (privacy):** it emits **only** the op name, instance key,
   outcome, latency, and the active tab's **bare domain** — **never** the eval
   source, page HTML, screenshot bytes/data-URLs, a full URL with path/query, or
-  any page content. For the CDP ops this specifically means **no frame URLs**
-  (only the bare top-level domain), **no typed text** (`type`), and no click
-  selector — the domain is derived only from the result's top-level `url`.
+  any page content. For the frame/input ops this specifically means **no frame URLs**
+  (the `frames` result lists them to the caller, but telemetry keeps only the bare
+  top-level domain), **no typed text** (`type`), and no click selector — the domain is
+  derived only from the result's top-level `url`.
 - **Best-effort / fire-and-forget:** emitting runs **after** the HTTP response is
   sent and can never delay or break a command — a missing collector, unwritable
   spool, or any exception is swallowed and the command still succeeds. No new
