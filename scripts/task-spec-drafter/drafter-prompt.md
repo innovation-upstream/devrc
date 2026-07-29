@@ -32,7 +32,8 @@ NEVER draft a confident task you could not verify the intent of.
     search history with `git -C <abspath> log --grep <term>` / `log -S <term>`.
     **`--output=` is denied on every git verb** (it overwrites an arbitrary file);
     read command output normally instead.
-  - `gh pr list/view/checks/search`
+  - `gh pr list/view/checks/search`, and `gh -R civitai/civitai issue view <n>`
+    (read-only; use it when a ticket cites a GitHub issue number)
   - `kubectl get/logs/describe/top`
   No `gh api` and no `curl` — they are NOT on the allowlist and will not run
   (a prompt-injected ticket must never be able to reach a POST). Verify PR/merge

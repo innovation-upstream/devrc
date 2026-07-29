@@ -210,6 +210,15 @@ export REPO_COS_PROD_KUBECONFIG="${REPO_COS_PROD_KUBECONFIG:-$HOME/workspace/hom
 #    (`tests/test_allowlist_covers_prompt_shapes.py` also asserts every command
 #    shape the prompt mandates matches an allowlist entry.)
 #
+# 🔧 `gh -R <PINNED-REPO> issue view*` (added 2026-07-29): civitai tickets routinely
+#    cite a GitHub ISSUE rather than a PR, and `gh -R civitai/civitai issue view 3398`
+#    was the ONLY genuine allowlist gap left in the 2026-07-29 08:00 run (the other
+#    two rejections were a malformed `git -C <repo> find …` and `git -C <repo> tag
+#    -l`, neither of which should be allowlisted). `issue view` is read-only —
+#    `gh issue` mutations are separate verbs (`create`/`comment`/`edit`/`close`) and
+#    cannot be reached from an `issue view` PREFIX. Same pinned-repo convention as
+#    the `pr` entries: no mid-pattern wildcard, one entry per repo.
+#
 # 🔧 `git -C * branch --merged*` + EXACT `git -C * branch -a` / `branch --all`
 #    (added 2026-07-28): the pass also burned calls on `branch -a` / `branch
 #    --merged` (11 blocked calls measured across 81 drafter transcripts) because
@@ -324,6 +333,30 @@ export REPO_COS_PROD_KUBECONFIG="${REPO_COS_PROD_KUBECONFIG:-$HOME/workspace/hom
 #    same class. Zero capability cost — drafter-prompt.md already hands the model
 #    that exact literal path.
 #
+# ⛔⛔⛔ THE ALLOWLIST IS NOT THE ONLY GRANT: `claude -p` UNIONS `--allowedTools`
+#    WITH `~/.claude/settings.json`. Everything above reasons as if
+#    DRAFTER_ALLOWED_TOOLS were the whole permission surface. It is not. The CLI
+#    evaluates the user's `permissions.allow` rules IN ADDITION to the ones passed
+#    on the command line, and that file (per-host, NOT managed by this repo) held
+#    248 allow entries with `deny: []` and `ask: []` on 2026-07-29. So the
+#    unattended 08:00 pass — which reads UNTRUSTED civitai ticket text, carries the
+#    PRODUCTION kubeconfig, and runs as `zach` (in the `docker` group, i.e. root
+#    equivalent) — inherited far more than the read-only list above.
+#    VERIFIED BY READING THE SHIPPED RULE MATCHER (claude-code 2.1.220) plus the
+#    entries actually present in that file:
+#      Bash(python3:*)   -> `python3 -c 'import os;os.system("id")'`  = ARBITRARY CODE
+#      Bash(docker run:*)-> `docker run --privileged -v /:/host …`    = ROOT
+#      Bash(kubectl:*)   -> `kubectl delete|exec|apply …`             = PROD CLUSTER
+#      Bash(TALOSCONFIG=./talosconfig talosctl:*)                     = NODE reset/reboot
+#      also: curl, wget, nc, ssh, sops (decrypts secrets), sqlite3 (`.shell`),
+#      find (`-exec`), xargs, tee, source, git add/commit, helm, flux, k3s.
+#    `python3` is on the unit's PATH (`systemctl --user show task-spec-drafter
+#    .service -p Environment`), so this was reachable, not theoretical.
+#    ⚠ `~/.claude/settings.json` is per-host and NOT in this repo, so it cannot be
+#    fixed from here. The ONLY lever drafter.sh has is the DENY layer below —
+#    `--disallowedTools`, which the CLI evaluates BEFORE and ABOVE every allow
+#    rule, whatever its source.
+#
 # 🛡 DRAFTER_DENIED_TOOLS (`--disallowedTools`) — RAISES THE BAR, NOT A BOUNDARY.
 #    Pinning closes the PRE-subcommand slot; it cannot close POST-subcommand
 #    flags. The proven residual on the read verbs we must keep:
@@ -360,27 +393,153 @@ export REPO_COS_PROD_KUBECONFIG="${REPO_COS_PROD_KUBECONFIG:-$HOME/workspace/hom
 #    ripgrep's `-p, --pretty` — blocking a legitimate read in a headless run is
 #    the exact failure mode PR #177 existed to fix. Tests assert every
 #    prompt-mandated shape survives the deny layer.
+#
+# 🔒 WHOLE-BINARY DENIES (`Bash(<binary>:*)`) — the form used for the settings.json
+#    inheritance above, and a STRUCTURALLY stronger one than the flag denies.
+#    A flag deny (`… --output=…`) is bypassable by QUOTING (proven, above): the
+#    quote survives into the string the matcher sees but bash strips it before the
+#    program does. The FIRST TOKEN has no such gap — `rae()` in the matcher
+#    de-quotes exactly the command word before matching, so `'python3' -c …` and
+#    `"python3" -c …` both normalise back to `python3 -c …` and are denied.
+#    The `<binary>:*` spelling is a PREFIX rule, not a glob, and that matters:
+#      * it matches only `<binary>` alone or `<binary> <args>` (a real word
+#        boundary), so `Bash(sh:*)` can never swallow `shellcheck`. The glob
+#        spelling `Bash(sh*)` compiles to `^sh.*$` and WOULD.
+#      * the matcher additionally tests each rule against an `xargs `-prefixed form,
+#        so `xargs python3 -c …` is covered by the same entry.
+#    Three more matcher behaviours were read out of the shipped bundle and are what
+#    make a bare-binary deny actually hold (they are also modelled in the tests):
+#      * DENY IS EVALUATED WITH `stripAllEnvVars:true` — leading `VAR=val` prefixes
+#        are stripped before matching, so `KUBECONFIG=… kubectl delete …` is caught
+#        by `Bash(kubectl delete:*)` without needing a leading-wildcard pattern.
+#      * WRAPPER COMMANDS ARE UNWRAPPED for deny (`env`, `sudo`, `doas`, `pkexec`,
+#        `nohup`, `timeout`, `nice`, `strace`, `unshare`, `nsenter`, `command`, …),
+#        so `sudo python3 -c …` reduces to `python3 -c …`.
+#      * COMPOUND COMMANDS ARE SPLIT and every sub-command is deny-checked
+#        individually, so `git log && python3 -c …` is denied on the second half.
+#    RESIDUAL, stated plainly: an ABSOLUTE-PATH invocation
+#    (`/run/current-system/sw/bin/python3 -c …`) does NOT match `Bash(python3:*)`.
+#    It is not a bypass TODAY only because it matches no ALLOW rule either — every
+#    allow rule (ours and settings.json's) is a bare-name prefix and the matcher
+#    does NOT basename-normalise the command word, so the absolute-path form is
+#    rejected as "requires approval". That is a property of the CURRENT
+#    settings.json, not something this file enforces. If an absolute-path allow
+#    entry is ever added there, these denies do not cover it. `Bash(*/python3*)`
+#    style denies were considered and REJECTED: `*` is `.*` in a DOTALL anchored
+#    regex, so `*/curl*` also denies `rg 's3://curl x' <repo>` — an over-broad deny
+#    silently loses a read in an unattended run, which is the failure mode PR #177
+#    existed to fix.
+#    Two more things a deny list cannot reach, for the record:
+#      * REDIRECTIONS are stripped before matching (`commandWithoutRedirections`),
+#        so no deny pattern can see `> ~/.zshenv`. The allowlisted `echo*`/`cat*`
+#        entries are the exposure there; unchanged by this pass.
+#      * `WebFetch` is allowlisted and is itself an egress channel. Unchanged here.
+#    So this layer REDUCES the inherited surface. It does not PROVE safety, and the
+#    durable fix remains a fixed wrapper in the style of `ticket-status`.
 # Override DRAFTER_ALLOWED_TOOLS via env ONLY with read-only verbs.
-DRAFTER_ALLOWED_TOOLS="${DRAFTER_ALLOWED_TOOLS:-Read,Glob,Grep,WebFetch,Bash($SELF_DIR/ticket-status*),Bash(node /home/zach/.claude/skills/clickup/query.mjs get*),Bash(node /home/zach/.claude/skills/clickup/query.mjs comments*),Bash(node /home/zach/.claude/skills/clickup/query.mjs search*),Bash(git -C /home/zach/workspace/civit/civitai log*),Bash(git -C /home/zach/workspace/civit/civitai show*),Bash(git -C /home/zach/workspace/civit/civitai diff*),Bash(git -C /home/zach/workspace/civit/civitai branch --contains*),Bash(git -C /home/zach/workspace/civit/civitai branch --merged*),Bash(git -C /home/zach/workspace/civit/civitai branch -a),Bash(git -C /home/zach/workspace/civit/civitai branch --all),Bash(git -C /home/zach/workspace/civit/civitai rev-parse*),Bash(git -C /home/zach/workspace/civit/civitai rev-list*),Bash(git -C /home/zach/workspace/civit/civitai merge-base*),Bash(git -C /home/zach/workspace/civit/civitai for-each-ref*),Bash(git -C /home/zach/workspace/civit/civitai symbolic-ref --short*),Bash(git -C /home/zach/workspace/civit/civitai ls-files*),Bash(git -C /home/zach/workspace/civit/civitai cat-file*),Bash(git -C /home/zach/workspace/civit/datapacket-talos log*),Bash(git -C /home/zach/workspace/civit/datapacket-talos show*),Bash(git -C /home/zach/workspace/civit/datapacket-talos diff*),Bash(git -C /home/zach/workspace/civit/datapacket-talos branch --contains*),Bash(git -C /home/zach/workspace/civit/datapacket-talos branch --merged*),Bash(git -C /home/zach/workspace/civit/datapacket-talos branch -a),Bash(git -C /home/zach/workspace/civit/datapacket-talos branch --all),Bash(git -C /home/zach/workspace/civit/datapacket-talos rev-parse*),Bash(git -C /home/zach/workspace/civit/datapacket-talos rev-list*),Bash(git -C /home/zach/workspace/civit/datapacket-talos merge-base*),Bash(git -C /home/zach/workspace/civit/datapacket-talos for-each-ref*),Bash(git -C /home/zach/workspace/civit/datapacket-talos symbolic-ref --short*),Bash(git -C /home/zach/workspace/civit/datapacket-talos ls-files*),Bash(git -C /home/zach/workspace/civit/datapacket-talos cat-file*),Bash(git -C /home/zach/workspace/homelab-talos log*),Bash(git -C /home/zach/workspace/homelab-talos show*),Bash(git -C /home/zach/workspace/homelab-talos diff*),Bash(git -C /home/zach/workspace/homelab-talos branch --contains*),Bash(git -C /home/zach/workspace/homelab-talos branch --merged*),Bash(git -C /home/zach/workspace/homelab-talos branch -a),Bash(git -C /home/zach/workspace/homelab-talos branch --all),Bash(git -C /home/zach/workspace/homelab-talos rev-parse*),Bash(git -C /home/zach/workspace/homelab-talos rev-list*),Bash(git -C /home/zach/workspace/homelab-talos merge-base*),Bash(git -C /home/zach/workspace/homelab-talos for-each-ref*),Bash(git -C /home/zach/workspace/homelab-talos symbolic-ref --short*),Bash(git -C /home/zach/workspace/homelab-talos ls-files*),Bash(git -C /home/zach/workspace/homelab-talos cat-file*),Bash(git log*),Bash(gh pr list*),Bash(gh pr view*),Bash(gh pr checks*),Bash(gh -R civitai/civitai pr list*),Bash(gh -R civitai/civitai pr view*),Bash(gh -R civitai/civitai pr checks*),Bash(gh -R civitai/talos-infra pr list*),Bash(gh -R civitai/talos-infra pr view*),Bash(gh -R civitai/talos-infra pr checks*),Bash(gh search*),Bash(kubectl get*),Bash(kubectl logs*),Bash(kubectl describe*),Bash(kubectl top*),Bash(grep*),Bash(rg*),Bash(jq*),Bash(cat*),Bash(echo*),Bash(date*)}"
+DRAFTER_ALLOWED_TOOLS="${DRAFTER_ALLOWED_TOOLS:-Read,Glob,Grep,WebFetch,Bash($SELF_DIR/ticket-status*),Bash(node /home/zach/.claude/skills/clickup/query.mjs get*),Bash(node /home/zach/.claude/skills/clickup/query.mjs comments*),Bash(node /home/zach/.claude/skills/clickup/query.mjs search*),Bash(git -C /home/zach/workspace/civit/civitai log*),Bash(git -C /home/zach/workspace/civit/civitai show*),Bash(git -C /home/zach/workspace/civit/civitai diff*),Bash(git -C /home/zach/workspace/civit/civitai branch --contains*),Bash(git -C /home/zach/workspace/civit/civitai branch --merged*),Bash(git -C /home/zach/workspace/civit/civitai branch -a),Bash(git -C /home/zach/workspace/civit/civitai branch --all),Bash(git -C /home/zach/workspace/civit/civitai rev-parse*),Bash(git -C /home/zach/workspace/civit/civitai rev-list*),Bash(git -C /home/zach/workspace/civit/civitai merge-base*),Bash(git -C /home/zach/workspace/civit/civitai for-each-ref*),Bash(git -C /home/zach/workspace/civit/civitai symbolic-ref --short*),Bash(git -C /home/zach/workspace/civit/civitai ls-files*),Bash(git -C /home/zach/workspace/civit/civitai cat-file*),Bash(git -C /home/zach/workspace/civit/datapacket-talos log*),Bash(git -C /home/zach/workspace/civit/datapacket-talos show*),Bash(git -C /home/zach/workspace/civit/datapacket-talos diff*),Bash(git -C /home/zach/workspace/civit/datapacket-talos branch --contains*),Bash(git -C /home/zach/workspace/civit/datapacket-talos branch --merged*),Bash(git -C /home/zach/workspace/civit/datapacket-talos branch -a),Bash(git -C /home/zach/workspace/civit/datapacket-talos branch --all),Bash(git -C /home/zach/workspace/civit/datapacket-talos rev-parse*),Bash(git -C /home/zach/workspace/civit/datapacket-talos rev-list*),Bash(git -C /home/zach/workspace/civit/datapacket-talos merge-base*),Bash(git -C /home/zach/workspace/civit/datapacket-talos for-each-ref*),Bash(git -C /home/zach/workspace/civit/datapacket-talos symbolic-ref --short*),Bash(git -C /home/zach/workspace/civit/datapacket-talos ls-files*),Bash(git -C /home/zach/workspace/civit/datapacket-talos cat-file*),Bash(git -C /home/zach/workspace/homelab-talos log*),Bash(git -C /home/zach/workspace/homelab-talos show*),Bash(git -C /home/zach/workspace/homelab-talos diff*),Bash(git -C /home/zach/workspace/homelab-talos branch --contains*),Bash(git -C /home/zach/workspace/homelab-talos branch --merged*),Bash(git -C /home/zach/workspace/homelab-talos branch -a),Bash(git -C /home/zach/workspace/homelab-talos branch --all),Bash(git -C /home/zach/workspace/homelab-talos rev-parse*),Bash(git -C /home/zach/workspace/homelab-talos rev-list*),Bash(git -C /home/zach/workspace/homelab-talos merge-base*),Bash(git -C /home/zach/workspace/homelab-talos for-each-ref*),Bash(git -C /home/zach/workspace/homelab-talos symbolic-ref --short*),Bash(git -C /home/zach/workspace/homelab-talos ls-files*),Bash(git -C /home/zach/workspace/homelab-talos cat-file*),Bash(git log*),Bash(gh pr list*),Bash(gh pr view*),Bash(gh pr checks*),Bash(gh -R civitai/civitai pr list*),Bash(gh -R civitai/civitai pr view*),Bash(gh -R civitai/civitai pr checks*),Bash(gh -R civitai/civitai issue view*),Bash(gh -R civitai/talos-infra pr list*),Bash(gh -R civitai/talos-infra pr view*),Bash(gh -R civitai/talos-infra pr checks*),Bash(gh -R civitai/talos-infra issue view*),Bash(gh search*),Bash(kubectl get*),Bash(kubectl logs*),Bash(kubectl describe*),Bash(kubectl top*),Bash(grep*),Bash(rg*),Bash(jq*),Bash(cat*),Bash(echo*),Bash(date*)}"
 
-# DENY layer (`--disallowedTools`) — see the 🛡 note above. Deny OVERRIDES allow.
-# ⚠ READ THE 🛡 NOTE: this RAISES THE BAR, it is NOT a boundary — it is trivially
-# bypassable by quoting (`'--output=…'`), proven by execution. The BOUNDARY is the
-# pinned ALLOW list; this layer only makes the residual harder to reach by accident.
-# Keep it MINIMAL and ANCHORED to exact flag forms: an over-broad deny silently
-# loses reads in headless (the failure mode PR #177 existed to fix).
-#   git -c / --exec-path : belt-and-braces; pinning already removes the slot.
-#   git * --output / --output= : arbitrary-path, arbitrary-content file WRITE on
-#       log/show/diff/rev-list. Anchored to `--output ` and `--output=` so it does
-#       NOT swallow the legitimate `--output-indicator-new/old` (verified rc=0).
-#   git * --open*        : `git grep --open-files-in-pager=<cmd>` and its
-#       abbreviations. Redundant (git grep is not allowlisted at all) but free —
-#       no allowlisted git read verb has any other `--open…` option.
-#   rg --pre / --pre= / --hostname-bin : execute an arbitrary program. Anchored to
-#       the exact forms so it does NOT swallow ripgrep's `-p, --pretty` (a real
-#       flag, verified rc=0) — a bare `--pre*` blocked it.
-# Set DRAFTER_DENIED_TOOLS="" to disable the layer entirely (not recommended).
-DRAFTER_DENIED_TOOLS="${DRAFTER_DENIED_TOOLS-Bash(git -c *),Bash(git --exec-path*),Bash(git * --output *),Bash(git * --output=*),Bash(git * --open*),Bash(rg --pre *),Bash(rg --pre=*),Bash(rg * --pre *),Bash(rg * --pre=*),Bash(rg --hostname-bin *),Bash(rg --hostname-bin=*),Bash(rg * --hostname-bin *),Bash(rg * --hostname-bin=*)}"
+# DENY layer (`--disallowedTools`) — see the 🛡 and 🔒 notes above.
+# Deny OVERRIDES allow, from EVERY source (our --allowedTools AND the per-host
+# ~/.claude/settings.json the CLI unions in). It is the only lever this file has
+# over the inherited grants, so it carries two very different kinds of entry:
+#
+#   FLAG denies  (`git * --output=*`, `rg --pre *`) — narrow, anchored to exact
+#     flag spellings, and BYPASSABLE BY QUOTING. They only raise the bar on the
+#     residual of read verbs we must keep.
+#   BINARY denies (`Bash(python3:*)`) — whole binary at command position. Not
+#     quote-bypassable, env-prefix-proof, wrapper-proof, compound-proof. These are
+#     what claw back the settings.json inheritance.
+#
+# Grouped so the list stays reviewable. EVERY group must be referenced in the
+# DRAFTER_DENIED_TOOLS assembly at the bottom (a test asserts it) — an unreferenced
+# group is dead config that silently protects nothing.
+# ⚠ RULE FOR EDITORS: deny the WHOLE BINARY with the `name:*` prefix form. Do NOT
+# reach for `Bash(name*)` (glob — `sh*` also matches `shellcheck`) and do NOT add
+# leading/mid wildcards over free text (`*/curl*`, `git * add *`) — those
+# false-positive on legitimate reads, and a lost read in an unattended run is
+# unanswerable. A regression corpus of the 108 commands the 2026-07-29 08:00 run
+# executed successfully is replayed against this list in the tests.
+
+#   Interpreters, compilers and package managers = arbitrary code execution.
+#   `Bash(python3:*)` is LIVE in settings.json, which is the whole reason this
+#   group exists. `node` is deliberately NOT denied wholesale — the allowlist pins
+#   `node <clickup query.mjs> …` and the pass makes 22 of those calls per run — so
+#   only node's code-evaluating FLAGS are denied. (Checked 2026-07-29: settings.json
+#   carries no `Bash(node:*)` grant, so bare `node -e` was already unreachable;
+#   these entries keep it unreachable if that ever changes.)
+DRAFTER_DENY_EXEC='Bash(python:*),Bash(python2:*),Bash(python3:*),Bash(python3.*),Bash(pypy:*),Bash(perl:*),Bash(ruby:*),Bash(php:*),Bash(lua:*),Bash(awk:*),Bash(gawk:*),Bash(mawk:*),Bash(sed:*),Bash(deno:*),Bash(bun:*),Bash(npm:*),Bash(npx:*),Bash(pnpm:*),Bash(yarn:*),Bash(go:*),Bash(make:*),Bash(cargo:*),Bash(gcc:*),Bash(cc:*),Bash(node -e*),Bash(node --eval*),Bash(node -p*),Bash(node --print*),Bash(node -r*),Bash(node --require*),Bash(node --import*),Bash(node --loader*),Bash(node --experimental*),Bash(node -i*),Bash(node --interactive*),Bash(node --input-type*)'
+
+#   Shell re-entry, eval, and the "run this other program" utilities. `source:*`,
+#   `find:*` (`-exec`/`-fprintf`) and `xargs:*` are all LIVE grants in
+#   settings.json. `env`/`printenv` are denied because the pass inherits
+#   drafter.sh's environment, which sources ~/.claude/clawgate.env
+#   (CLAWGATE_HOOK_TOKEN) — the same reason `Bash(env*)` was kept off the allowlist.
+DRAFTER_DENY_SHELL='Bash(bash:*),Bash(sh:*),Bash(zsh:*),Bash(ksh:*),Bash(dash:*),Bash(ash:*),Bash(fish:*),Bash(csh:*),Bash(tcsh:*),Bash(busybox:*),Bash(eval:*),Bash(exec:*),Bash(source:*),Bash(command:*),Bash(builtin:*),Bash(env:*),Bash(printenv:*),Bash(xargs:*),Bash(find:*),Bash(watch:*),Bash(strace:*),Bash(ltrace:*),Bash(gdb:*),Bash(nsenter:*),Bash(unshare:*),Bash(chroot:*),Bash(setsid:*),Bash(nohup:*),Bash(flock:*),Bash(script:*),Bash(expect:*),Bash(tmux:*),Bash(screen:*),Bash(at:*),Bash(batch:*),Bash(crontab:*),Bash(systemd-run:*)'
+
+#   Privilege escalation, containers, and cluster/host admin. `docker run:*` is a
+#   LIVE grant and `docker run --privileged -v /:/host … chroot /host` is root on
+#   this box; `TALOSCONFIG=… talosctl:*` is a LIVE grant and talosctl can reset or
+#   reboot cluster NODES. `sudo`/`doas`/`pkexec` are denied even though the matcher
+#   unwraps them (belt-and-braces, and `sudo lsof:*` is granted).
+DRAFTER_DENY_PRIV='Bash(sudo:*),Bash(doas:*),Bash(pkexec:*),Bash(su:*),Bash(docker:*),Bash(podman:*),Bash(nerdctl:*),Bash(ctr:*),Bash(crictl:*),Bash(k3s:*),Bash(helm:*),Bash(flux:*),Bash(talosctl:*),Bash(systemctl:*),Bash(mount:*),Bash(umount:*),Bash(modprobe:*),Bash(insmod:*),Bash(iptables:*),Bash(nft:*),Bash(nix:*),Bash(nix-shell:*),Bash(nix-build:*),Bash(nix-env:*),Bash(nixos-rebuild:*),Bash(home-manager:*)'
+
+#   Network egress / exfiltration. `curl:*`, `wget:*`, `nc:*`, `ssh:*` are all LIVE
+#   grants. DNS tools are included because an injected ticket can simply instruct
+#   the model to encode what it just read into a hostname it looks up.
+#   (`WebFetch` remains allowlisted and is NOT closed by this — see the 🔒 note.)
+DRAFTER_DENY_EGRESS='Bash(curl:*),Bash(wget:*),Bash(nc:*),Bash(ncat:*),Bash(netcat:*),Bash(socat:*),Bash(telnet:*),Bash(ftp:*),Bash(ssh:*),Bash(scp:*),Bash(sftp:*),Bash(rsync:*),Bash(dig:*),Bash(nslookup:*),Bash(host:*),Bash(ping:*),Bash(ping6:*),Bash(openssl:*),Bash(aws:*),Bash(gcloud:*),Bash(az:*),Bash(rclone:*),Bash(s3cmd:*),Bash(mc:*)'
+
+#   File/DB writes and secret material. `tee:*`, `chmod:*`, `chown:*`, `sqlite3:*`
+#   (`.shell`/`.system` are an RCE) and `sops:*` (decrypts the repo's secrets) are
+#   LIVE grants.
+DRAFTER_DENY_WRITE='Bash(tee:*),Bash(dd:*),Bash(rm:*),Bash(rmdir:*),Bash(mv:*),Bash(cp:*),Bash(ln:*),Bash(install:*),Bash(truncate:*),Bash(shred:*),Bash(mkfifo:*),Bash(mknod:*),Bash(chmod:*),Bash(chown:*),Bash(chgrp:*),Bash(chattr:*),Bash(setfacl:*),Bash(sqlite3:*),Bash(psql:*),Bash(mysql:*),Bash(redis-cli:*),Bash(sops:*),Bash(gpg:*),Bash(age:*),Bash(ssh-keygen:*),Bash(ssh-add:*),Bash(ssh-keyscan:*),Bash(vault:*),Bash(pass:*)'
+
+#   git. The flag denies at the front are the pre-existing ones:
+#     git -c / --exec-path : belt-and-braces; pinning already removes the slot.
+#     git * --output / --output= : arbitrary-path, arbitrary-content file WRITE on
+#         log/show/diff/rev-list. Anchored to `--output ` and `--output=` so it does
+#         NOT swallow the legitimate `--output-indicator-new/old` (verified rc=0).
+#     git * --open* : `git grep --open-files-in-pager=<cmd>` and its abbreviations.
+#   The rest are BARE mutating verbs — `Bash(git add:*)` and `Bash(git commit:*)`
+#   are LIVE grants in settings.json and operate on the pass's cwd. Note these are
+#   deliberately BARE (`git add`), not `git * add *`: the drafter only ever calls
+#   `git -C <pinned path> <read verb>`, which the pinned ALLOW entries already
+#   restrict to read verbs, and a mid-pattern wildcard here would false-positive on
+#   real reads like `git -C <repo> log -S config --oneline`. The one `git -C`
+#   mutation settings.json grants is pinned to a specific foreign repo, so it is
+#   denied by its exact literal path instead of by a wildcard.
+DRAFTER_DENY_GIT='Bash(git -c *),Bash(git --exec-path*),Bash(git * --output *),Bash(git * --output=*),Bash(git * --open*),Bash(git add:*),Bash(git commit:*),Bash(git push:*),Bash(git pull:*),Bash(git fetch:*),Bash(git clone:*),Bash(git init:*),Bash(git reset:*),Bash(git clean:*),Bash(git checkout:*),Bash(git switch:*),Bash(git restore:*),Bash(git rebase:*),Bash(git merge:*),Bash(git cherry-pick:*),Bash(git revert:*),Bash(git am:*),Bash(git apply:*),Bash(git stash:*),Bash(git tag:*),Bash(git branch:*),Bash(git remote:*),Bash(git config:*),Bash(git credential:*),Bash(git update-ref:*),Bash(git rm:*),Bash(git mv:*),Bash(git gc:*),Bash(git prune:*),Bash(git reflog:*),Bash(git filter-branch:*),Bash(git notes:*),Bash(git replace:*),Bash(git worktree:*),Bash(git submodule:*),Bash(git daemon:*),Bash(git send-email:*),Bash(git difftool:*),Bash(git mergetool:*),Bash(git ls-remote:*),Bash(git archive:*),Bash(git bundle:*),Bash(git format-patch:*),Bash(git fast-import:*),Bash(git instaweb:*),Bash(git -C /home/zach/workspace/baseball-manitoba-pitch config*)'
+
+#   kubectl. `Bash(kubectl:*)` is a LIVE grant — i.e. EVERY verb, against whatever
+#   kubeconfig the unit carries (the PRODUCTION one). The allowlist only wants
+#   get/logs/describe/top, so every mutating or shell-granting verb is denied.
+#   Env-prefixed forms (`KUBECONFIG=… kubectl delete …`, also LIVE grants) are
+#   covered without a leading wildcard because deny matching strips env prefixes.
+DRAFTER_DENY_KUBECTL='Bash(kubectl apply:*),Bash(kubectl create:*),Bash(kubectl delete:*),Bash(kubectl replace:*),Bash(kubectl patch:*),Bash(kubectl edit:*),Bash(kubectl scale:*),Bash(kubectl autoscale:*),Bash(kubectl rollout:*),Bash(kubectl run:*),Bash(kubectl exec:*),Bash(kubectl attach:*),Bash(kubectl cp:*),Bash(kubectl port-forward:*),Bash(kubectl proxy:*),Bash(kubectl debug:*),Bash(kubectl drain:*),Bash(kubectl cordon:*),Bash(kubectl uncordon:*),Bash(kubectl taint:*),Bash(kubectl label:*),Bash(kubectl annotate:*),Bash(kubectl set:*),Bash(kubectl expose:*),Bash(kubectl certificate:*),Bash(kubectl auth:*),Bash(kubectl config:*),Bash(kubectl plugin:*),Bash(kubectl apply-set:*)'
+
+#   gh. Insurance only: nothing currently grants these (settings.json carries just
+#   `gh pr list|view`, the allowlist adds `pr checks`, `search`, and the pinned
+#   `-R <repo> pr|issue <read verb>` forms). They exist so a future widening of the
+#   allowlist cannot silently reach a mutation. The `-R`-interposed mutation shapes
+#   (`gh -R x pr merge …`) are NOT listed — they are structurally unreachable
+#   because the pinned entries make the verb positional, and a `gh * pr merge*`
+#   pattern would false-positive on a `--search` string.
+DRAFTER_DENY_GH='Bash(gh api:*),Bash(gh auth:*),Bash(gh secret:*),Bash(gh variable:*),Bash(gh ssh-key:*),Bash(gh gpg-key:*),Bash(gh config:*),Bash(gh alias:*),Bash(gh extension:*),Bash(gh gist:*),Bash(gh repo:*),Bash(gh release:*),Bash(gh workflow:*),Bash(gh run:*),Bash(gh cache:*),Bash(gh project:*),Bash(gh label:*),Bash(gh pr create:*),Bash(gh pr merge:*),Bash(gh pr close:*),Bash(gh pr comment:*),Bash(gh pr edit:*),Bash(gh pr review:*),Bash(gh pr ready:*),Bash(gh pr reopen:*),Bash(gh pr lock:*),Bash(gh pr unlock:*),Bash(gh issue create:*),Bash(gh issue close:*),Bash(gh issue comment:*),Bash(gh issue edit:*),Bash(gh issue delete:*),Bash(gh issue reopen:*),Bash(gh issue lock:*),Bash(gh issue transfer:*),Bash(gh issue pin:*),Bash(gh issue develop:*)'
+
+#   ripgrep: `--pre <program>` / `--hostname-bin <program>` EXECUTE that program
+#   (verified). Anchored to the exact forms so they do NOT swallow ripgrep's
+#   `-p, --pretty` (a real flag, verified rc=0) — a bare `--pre*` blocked it.
+DRAFTER_DENY_RG='Bash(rg --pre *),Bash(rg --pre=*),Bash(rg * --pre *),Bash(rg * --pre=*),Bash(rg --hostname-bin *),Bash(rg --hostname-bin=*),Bash(rg * --hostname-bin *),Bash(rg * --hostname-bin=*)'
+
+#   Non-Bash tools. The pass is granted Read/Glob/Grep/WebFetch/Bash only, but the
+#   settings.json union means an edit tool could be inherited; deny leaves no doubt
+#   that an injected ticket cannot rewrite a file directly.
+DRAFTER_DENY_TOOLS='Write,Edit,NotebookEdit'
+
+# Set DRAFTER_DENIED_TOOLS="" to disable the layer entirely (NOT recommended — it
+# is the only thing holding back the inherited settings.json grants).
+DRAFTER_DENIED_TOOLS="${DRAFTER_DENIED_TOOLS-$DRAFTER_DENY_EXEC,$DRAFTER_DENY_SHELL,$DRAFTER_DENY_PRIV,$DRAFTER_DENY_EGRESS,$DRAFTER_DENY_WRITE,$DRAFTER_DENY_GIT,$DRAFTER_DENY_KUBECTL,$DRAFTER_DENY_GH,$DRAFTER_DENY_RG,$DRAFTER_DENY_TOOLS}"
 
 mkdir -p "$DRAFTER_OUT_DIR" 2>/dev/null || true
 # The delta-state file may live outside OUT_DIR (e.g. ~/.local/state/...); make

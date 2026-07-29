@@ -136,17 +136,47 @@ Where such a verb must be kept — `log`/`show`/`diff`/`rev-list` all accept
 `--output=<file>`, an arbitrary-path arbitrary-content write — a
 **`--disallowedTools` deny layer** (`DRAFTER_DENIED_TOOLS`) raises the bar.
 
-> ⚠ **The deny layer is not a boundary.** It is **bypassable by quoting**:
+> ⚠ **A FLAG deny is not a boundary.** It is **bypassable by quoting**:
 > `git … '--output=X' …` executes where `git … --output=X …` is denied (verified
 > by execution). The deny regex needs a literal space before the flag and the
 > harness de-quotes only the first token, while bash strips the quote before git
-> sees it. The **boundary is the pinned allow list**; the deny layer only makes
-> the residual harder to reach by accident. `test_deny_layer_is_bypassable_by_quoting`
-> asserts this weakness on purpose so the docs can't drift back to "closed".
+> sees it. `test_deny_layer_is_bypassable_by_quoting` asserts this weakness on
+> purpose so the docs can't drift back to "closed".
+
+3. **The allowlist is NOT the whole permission surface.** `claude -p` **unions**
+   `--allowedTools` with the per-host `~/.claude/settings.json` — which on
+   2026-07-29 carried **248 allow entries with `deny: []`**. So the unattended
+   08:00 pass inherited, among others, `Bash(python3:*)` (→ `python3 -c '<any
+   code>'`), `Bash(docker run:*)` (→ `--privileged -v /:/host` = root, `zach` is in
+   the `docker` group), `Bash(kubectl:*)` against the **production** kubeconfig it
+   carries, plus `curl`, `wget`, `nc`, `ssh`, `sops`, `sqlite3`, `find`, `tee`,
+   `git add/commit`. That file is per-host and not managed by this repo, so the
+   **deny layer is the only lever `drafter.sh` has**, and it now also carries
+   **whole-binary denies** (`Bash(python3:*)`, `Bash(docker:*)`, …).
+
+   A **whole-binary** deny is structurally stronger than a flag deny: the matcher
+   de-quotes the *command word* before matching, strips `VAR=` prefixes, unwraps
+   `sudo`/`env`/`timeout`/`xargs`, and deny-checks **each sub-command** of a
+   compound. Use the `Bash(name:*)` **prefix** form, never `Bash(name*)` — the
+   latter is a glob (`^name.*$`) and `sh*` would also deny `shellcheck`.
+   **Residual, stated plainly:** an absolute-path invocation
+   (`/run/current-system/sw/bin/python3 -c …`) is not covered. It is not a bypass
+   today only because it matches no *allow* rule either; `*/python3*`-style denies
+   were rejected because a leading wildcard false-positives on real reads.
 
 Treat the allowlist as **reduced, not proven safe**. The durable answer is to keep
 moving raw git behind fixed wrappers like `ticket-status`, which validate their
 own arguments in code we control.
+
+**Over-restriction is the failure mode that actually bites**, because a denied
+call in a headless run is unanswerable — the read is simply lost and the pass
+emits confident records built on less evidence. `tests/fixtures/` therefore holds
+a **regression corpus**: every one of the 108 Bash commands the real 2026-07-29
+08:00 run executed successfully, replayed against the deny list by
+`test_no_command_the_real_run_executed_becomes_denied`. Re-generate it if the tool
+mix changes materially: take the `Bash` `tool_use` blocks out of that morning's
+`~/.claude/projects/-home-zach/*.jsonl` transcripts (select by file mtime date) and
+keep the ones whose `tool_result` does **not** contain `requires approval`.
 
 A **runtime guard** aborts the run if `CIVITAI_REPO` is pointed at a repo with no
 pinned entry — otherwise every git read is rejected (unanswerable in headless) and
