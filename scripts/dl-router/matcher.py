@@ -228,10 +228,16 @@ def _host_of(url: str) -> str:
         return ""
 
 
-def _filename_stem(filename: str) -> str:
+def filename_stem(filename: str) -> str:
+    """The filename minus its extension (used as a weak matching signal, and as
+    the PRIMARY signal by the backfill, where no page context exists)."""
     base = str(filename).replace("\\", "/").rsplit("/", 1)[-1]
     stem, dot, ext = base.rpartition(".")
     return stem if dot and len(ext) <= 5 else base
+
+
+# Back-compat alias for the private name used inside this module.
+_filename_stem = filename_stem
 
 
 def _contains_sequence(haystack: tuple, needle: tuple) -> bool:

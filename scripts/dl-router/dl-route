@@ -152,11 +152,12 @@ def _qbt_client(cfg):
 def cmd_backfill_plan(args) -> int:
     cfg = _cfg()
     root, index, store = _local_bits(cfg)
-    torrents, path_map = [], None
+    # None (not []) = "qBittorrent state unknown" -> the plan refuses to
+    # classify anything as movable. See backfill.plan.
+    torrents, path_map = None, None
     client, err = _qbt_client(cfg)
     if client is None:
-        print(f"note: {err} — every torrent-backed row will be SKIP",
-              file=sys.stderr)
+        print(f"note: {err} — every row will be SKIP", file=sys.stderr)
     else:
         try:
             torrents = client.torrents_info()
@@ -166,8 +167,9 @@ def cmd_backfill_plan(args) -> int:
             print(f"torrents: {len(torrents)}  path map: {path_map}",
                   file=sys.stderr)
         except qbt_mod.QbtError as exc:
-            print(f"note: qBittorrent unreachable ({exc}) — rows will be SKIP",
-                  file=sys.stderr)
+            torrents = None
+            print(f"note: qBittorrent unreachable ({exc}) — every row will be "
+                  "SKIP", file=sys.stderr)
 
     plan_obj = backfill_mod.plan(root, store=store, dir_names=index.names(),
                                  torrents=torrents, path_map=path_map,

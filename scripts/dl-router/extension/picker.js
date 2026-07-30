@@ -58,15 +58,26 @@ export function filterEntries(dirs, query, suggestNew) {
     .map((name) => ({ kind: ENTRY_DIR, name, label: name }));
 
   const proposalRaw = q ? titleCase(q) : String(suggestNew || "");
-  const entries = [];
-  if (proposalRaw && isSafeDirName(proposalRaw) && !existing.has(proposalRaw)) {
-    entries.push({
-      kind: ENTRY_NEW,
-      name: proposalRaw,
-      label: `+ new dir "${proposalRaw}"`,
-    });
+  if (!proposalRaw || !isSafeDirName(proposalRaw) || existing.has(proposalRaw)) {
+    return dirEntries;
   }
-  return entries.concat(dirEntries);
+  const proposal = {
+    kind: ENTRY_NEW,
+    name: proposalRaw,
+    label: `+ new dir "${proposalRaw}"`,
+  };
+  // Placement of the new-directory entry:
+  //   * no query      -> TOP. This is decision D6's "pre-filled top entry":
+  //                      the matcher's own proposal, one keypress to create.
+  //   * query, no hits -> TOP. Nothing else to pick, so it is the obvious
+  //                      default.
+  //   * query with hits -> BOTTOM. Otherwise typing "smith" and pressing Enter
+  //                      would CREATE "Smith" instead of selecting the
+  //                      "john-smith" being filtered for. Creation still takes
+  //                      one keypress; it just stops being the accidental
+  //                      default when an existing directory matches.
+  const onTop = !q || dirEntries.length === 0;
+  return onTop ? [proposal, ...dirEntries] : [...dirEntries, proposal];
 }
 
 export function initialState({ dirs = [], suggestNew = "", downloadId = null,

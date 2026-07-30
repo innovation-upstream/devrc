@@ -52,6 +52,21 @@
     };
   }
 
+  /**
+   * Every DOM query goes through here. A per-site rule is USER CONFIG, so a
+   * malformed selector must degrade to "no matches", never throw — and the
+   * guard belongs with the extractors rather than only in domAdapter, so the
+   * property holds for any adapter.
+   */
+  function safeQuery(dom, selector) {
+    try {
+      var out = dom.querySelectorAll(selector);
+      return out && typeof out.length === "number" ? out : [];
+    } catch (e) {
+      return [];
+    }
+  }
+
   function attr(node, name) {
     if (!node || typeof node.getAttribute !== "function") return "";
     var v = node.getAttribute(name);
@@ -66,7 +81,7 @@
   /** Open Graph + Twitter card metadata as a flat map. */
   function extractOg(dom) {
     var og = {};
-    var nodes = dom.querySelectorAll('meta[property^="og:"], meta[property^="video:"], meta[property^="article:"], meta[name^="twitter:"]');
+    var nodes = safeQuery(dom, 'meta[property^="og:"], meta[property^="video:"], meta[property^="article:"], meta[name^="twitter:"]');
     for (var i = 0; i < nodes.length; i += 1) {
       var key = attr(nodes[i], "property") || attr(nodes[i], "name");
       var val = clampText(attr(nodes[i], "content"));
@@ -114,7 +129,7 @@
 
   function extractJsonLd(dom) {
     var out = [];
-    var nodes = dom.querySelectorAll('script[type="application/ld+json"]');
+    var nodes = safeQuery(dom, 'script[type="application/ld+json"]');
     for (var i = 0; i < nodes.length; i += 1) {
       var raw = typeof nodes[i].textContent === "string" ? nodes[i].textContent : "";
       if (!raw || raw.length > MAX_JSONLD_BYTES) continue;
@@ -131,12 +146,12 @@
 
   function extractGeneric(dom) {
     var out = [];
-    var nodes = dom.querySelectorAll('[itemprop="name"]');
+    var nodes = safeQuery(dom, '[itemprop="name"]');
     for (var i = 0; i < nodes.length && out.length < MAX_TAGS; i += 1) {
       var t = clampTag(text(nodes[i]));
       if (t) out.push(t);
     }
-    var kw = dom.querySelectorAll('meta[name="keywords"]');
+    var kw = safeQuery(dom, 'meta[name="keywords"]');
     for (var j = 0; j < kw.length; j += 1) {
       var parts = attr(kw[j], "content").split(",");
       for (var p = 0; p < parts.length && out.length < MAX_TAGS; p += 1) {
@@ -154,7 +169,7 @@
     var groups = [].concat(rules.subject || [], rules.tags || []);
     for (var i = 0; i < groups.length; i += 1) {
       if (typeof groups[i] !== "string") continue;
-      var nodes = dom.querySelectorAll(groups[i]);
+      var nodes = safeQuery(dom, groups[i]);
       for (var j = 0; j < nodes.length && out.length < MAX_TAGS; j += 1) {
         var t = clampTag(text(nodes[j]) || attr(nodes[j], "content")
           || attr(nodes[j], "title"));

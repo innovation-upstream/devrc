@@ -301,7 +301,10 @@ export async function onDownloadChanged(delta) {
     }
   }
   // Keep the entry briefly so a late "change" click can still relocate.
-  setTimeout(() => state.pending.delete(delta.id), 5 * 60 * 1000);
+  // `unref` exists only under node (the test runner) — without it this timer
+  // would hold the event loop open for five minutes and hang the suite.
+  const sweep = setTimeout(() => state.pending.delete(delta.id), 5 * 60 * 1000);
+  if (sweep && typeof sweep.unref === "function") sweep.unref();
 }
 
 // --- context menus --------------------------------------------------------- //

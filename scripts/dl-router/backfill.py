@@ -27,7 +27,9 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 import qbt as qbt_mod
-from matcher import MatchContext, Matcher, norm_key
+from matcher import (
+    SCORE_ALIAS_GLOBAL, MatchContext, Matcher, filename_stem, norm_key,
+)
 from safety import UnsafeName, is_safe_dir_name, safe_rel_path
 
 ACTION_SKIP = "SKIP"
@@ -159,12 +161,27 @@ def plan(root, *, store, dir_names, matcher: Matcher | None = None,
     else:
         matcher.aliases = store.alias_map()
 
+    # `torrents=None` means the qBittorrent state is UNKNOWN (unreachable, no
+    # credentials). That is not the same as "there are no torrents": without
+    # that list we cannot prove a file is NOT a live seeding payload, and a
+    # plain rename would break seeding. So we refuse to classify anything.
+    # The same applies when torrents exist but the path map could not be
+    # derived — we then cannot tell which host file each torrent refers to.
+    qbt_known = torrents is not None
+    blocked = None
+    if not qbt_known:
+        blocked = ("qBittorrent state unknown — cannot prove a file is not a "
+                   "live torrent payload")
+    elif torrents and not path_map:
+        blocked = ("no host<->container path map derived — cannot tell which "
+                   "files are torrent-backed")
+    if blocked:
+        notes.append(f"{blocked}; every row is SKIP")
+
     torrent_index = qbt_mod.index_by_host_path(torrents or [], path_map) \
         if path_map else {}
-    if torrents and not path_map:
-        notes.append("no host<->container path map derived — every row falls "
-                     "back to SKIP for safety")
 
+    known = set(dir_names)
     rows = []
     for name in loose_root_files(root):
         full = root / name
@@ -172,20 +189,41 @@ def plan(root, *, store, dir_names, matcher: Matcher | None = None,
             size = full.stat().st_size
         except OSError:
             size = 0
-        ctx = MatchContext(filename=name, size=size)
+        stem = filename_stem(name)
+        # The backfill has NO page context — the filename is all there is. So
+        # here (and only here) the stem is fed in as a subject phrase, instead
+        # of being capped at the live path's weak filename score. The threshold
+        # is unchanged, so an opaque name still lands on SKIP.
+        ctx = MatchContext(filename=name, tags=(stem,), size=size)
         result = matcher.match(ctx)
+
+        # A hand-set alias may name a directory that does not exist yet; the
+        # manifest is the explicit review step, so propose it as NEW rather
+        # than discarding it (directories are still never created silently).
+        pending_new = None
+        alias_target = store.alias(norm_key(stem), "")
+        if (alias_target and alias_target not in known
+                and is_safe_dir_name(alias_target)
+                and result.confidence < SCORE_ALIAS_GLOBAL):
+            pending_new = alias_target
 
         torrent = torrent_index.get(os.path.normpath(str(full)))
         thash = str(torrent.get("hash", "")) if torrent else ""
         move = MOVE_QBT if torrent else MOVE_FS
 
-        if torrent and not path_map:
+        target = pending_new or result.dir
+        confidence = SCORE_ALIAS_GLOBAL if pending_new else result.confidence
+
+        if blocked:
             action = ACTION_SKIP
-            reason = "torrent-backed but no path map — cannot move safely"
+            reason = blocked
+        elif pending_new:
+            action = ACTION_NEW
+            reason = f"alias '{stem}' -> new directory '{pending_new}'"
         elif not result.auto or result.dir == matcher.other_dir:
             action = ACTION_SKIP
             reason = f"below threshold ({result.confidence:.2f}): {result.reason}"
-        elif result.dir not in set(dir_names):
+        elif result.dir not in known:
             action = ACTION_NEW
             reason = result.reason
         else:
@@ -194,8 +232,8 @@ def plan(root, *, store, dir_names, matcher: Matcher | None = None,
 
         rows.append(PlanRow(
             relpath=name, size=size,
-            proposed_dir=(result.dir if action != ACTION_SKIP else ""),
-            confidence=result.confidence, reason=reason, action=action,
+            proposed_dir=(target if action != ACTION_SKIP else ""),
+            confidence=confidence, reason=reason, action=action,
             move=move, torrent_hash=thash))
 
     return Plan(root=str(root), created_at=clock(), rows=rows, notes=notes,
