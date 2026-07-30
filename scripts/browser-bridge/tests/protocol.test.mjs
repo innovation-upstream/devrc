@@ -37,7 +37,7 @@ test("op set mirrors the server contract", () => {
   assert.deepEqual(
     [...ALLOWED_OPS].sort(),
     ["activate", "click", "close", "eval", "frames", "getHtml", "key", "nav",
-     "open", "screenshot", "tabs", "text", "type"],
+     "open", "screenshot", "tabs", "text", "type", "upload"],
   );
 });
 
@@ -119,6 +119,7 @@ test("REQUIRED_FIELDS matches the ops that need args", () => {
   assert.deepEqual(REQUIRED_FIELDS.click, ["selector"]);
   assert.deepEqual(REQUIRED_FIELDS.type, ["text"]);
   assert.deepEqual(REQUIRED_FIELDS.key, ["key"]);
+  assert.deepEqual(REQUIRED_FIELDS.upload, ["selector", "path"]);
 });
 
 test("result / error envelopes carry the id", () => {

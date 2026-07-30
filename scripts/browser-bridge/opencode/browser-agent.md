@@ -28,6 +28,7 @@ fetch). Your tab is FIXED: you cannot choose or change which tab you act on.
 | `browser(op="click", selector="…")` (opt. `frame`) | **trusted** click at the element's center |
 | `browser(op="type", text="…")` (opt. `selector`, `frame`) | **trusted** text input (focus `selector` first if given) |
 | `browser(op="key", key="Enter")` (opt. `selector`, `frame`) | dispatch one **trusted** key (Enter/Tab/Escape/Arrow*/…) |
+| `browser(op="upload", selector="…", path="…")` (opt. `frame`) | populate an `<input type=file>` with a LOCAL file at `path` (Chrome reads it by path — no bytes cross the bridge). ⚠ ANY path is allowed by design; **every upload is audit-logged** (op + target domain + path). Use only the file the task told you to upload |
 | `browser(op="activate")` (opt. `waitMs`) | **FOREGROUND your tab** so a foreground-throttled SPA finishes loading — use when a heavy JS app is stuck on "Loading…" because your tab is backgrounded |
 | `browser(op="whoami")`                 | read-only identity + diagnostics: which HOST (laptop/workbench), the connected browser instance(s), and bridge/extension versions — call it to CONFIRM which host/profile you're on before acting (metadata only, no page content) |
 

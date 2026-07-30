@@ -37,6 +37,12 @@ import {
   // context (chrome.scripting can only run a serialized FUNC — the #190 null bug).
   frameEvalExpressions, isCdpSyntaxError, matchCdpFrameId, pickOopifSessionId,
   evalValueOrThrow,
+  // hidden-tab self-announce (Gap 2): reads report the tab's visibilityState so a
+  // throttled background read can't masquerade as a real outage.
+  annotateVisibility,
+  // upload op (Gap 1): resolve a file input + hand its ABSOLUTE path to CDP
+  // DOM.setFileInputFiles (Chrome reads the file itself — no bytes cross the bridge).
+  fileInputSelectorExpression, FILE_INPUT_CHECK_FN, basenameOf,
 } from "./protocol.js";
 
 const DEFAULT_PORT = 8788;
@@ -106,6 +112,23 @@ async function targetTab(cmd) {
     }
   }
   return activeTab();
+}
+
+// Read the tab's `document.visibilityState` (top frame) so a read op can self-
+// announce a hidden/background tab (Gap 2). visibilityState reflects the TAB, and
+// an OOPIF's document follows the tab, so the top-frame read is correct for
+// --frame reads too. Best-effort: any failure (discarded tab, no host permission)
+// returns null and the read simply omits the field — it NEVER fails the read.
+async function tabVisibilityState(tabId) {
+  try {
+    const [inj] = await chrome.scripting.executeScript({
+      target: { tabId },
+      func: () => document.visibilityState,
+    });
+    return inj ? inj.result : null;
+  } catch (e) {
+    return null;
+  }
 }
 
 // --- CDP (chrome.debugger) glue -------------------------------------------- //
@@ -270,6 +293,68 @@ async function cdpFrameEval(tabId, tabUrl, frame, src) {
   });
 }
 
+// Populate the file input matched by `selector` with the ABSOLUTE local `absPath`
+// via CDP DOM.setFileInputFiles (Gap 1). Chrome reads the file itself by path (same
+// host) — so NO file bytes cross the bridge. Attaches ONLY to the owned/target tab
+// (withCdp → #187 own-tab scope + #189 bounded timeouts + discarded-tab fail-fast,
+// ALWAYS detach). `frame` (optional) routes into a SAME-PROCESS iframe (isolated
+// world) OR a cross-origin OOPIF (flat auto-attached session) — the SAME resolution
+// `eval --frame` uses. The element is resolved to a RemoteObject and VERIFIED to be
+// a real <input type=file> before anything is set. NO raw-CDP passthrough — a fixed
+// typed sequence of CDP calls. Returns [basename] (the full path never returns).
+async function cdpSetFileInput(tabId, tabUrl, frame, selector, absPath) {
+  return withCdp(tabId, tabUrl, async (send) => {
+    // Resolve the execution target for the element lookup: (sessionId, contextId).
+    // No frame → the tab's top session/default context (both undefined).
+    let sessionId;
+    let contextId;
+    if (frame) {
+      // SAME-PROCESS frame → in the top session's frame tree → isolated-world context.
+      const { frameTree } = await send("Page.getFrameTree");
+      const cdpFrameId = matchCdpFrameId(frameTree, frame.url);
+      if (cdpFrameId) {
+        const iso = await send("Page.createIsolatedWorld",
+          { frameId: cdpFrameId, worldName: "browser-bridge-upload", grantUniveralAccess: false });
+        contextId = iso.executionContextId;
+      } else {
+        // CROSS-ORIGIN OOPIF → NOT in the top frame tree → auto-attach flat, match
+        // the target session by url, evaluate in THAT session (as `eval --frame`).
+        const attached = [];
+        const onEvt = (_source, method, params) => {
+          if (method === "Target.attachedToTarget" && params && params.targetInfo) {
+            attached.push({ sessionId: params.sessionId, url: params.targetInfo.url });
+          }
+        };
+        chrome.debugger.onEvent.addListener(onEvt);
+        try {
+          await send("Target.setAutoAttach",
+            { autoAttach: true, flatten: true, waitForDebuggerOnStart: false });
+          sessionId = pickOopifSessionId(attached, frame.url);
+          if (!sessionId) throw new Error(`frame_not_found:${frame.url || frame.frameId}`);
+        } finally {
+          chrome.debugger.onEvent.removeListener(onEvt);
+        }
+      }
+    }
+    // 1. Resolve the element to a CDP RemoteObject (returnByValue:false → objectId).
+    const evalParams = { expression: fileInputSelectorExpression(selector), returnByValue: false };
+    if (contextId != null) evalParams.contextId = contextId;
+    const res = await send("Runtime.evaluate", evalParams, sessionId);
+    if (res && res.exceptionDetails) throw new Error(`element_not_found:${selector}`);
+    const objectId = res && res.result && res.result.objectId;
+    if (!objectId) throw new Error(`element_not_found:${selector}`);
+    // 2. VERIFY it is genuinely an <input type=file> before setting anything.
+    const check = await send("Runtime.callFunctionOn",
+      { objectId, functionDeclaration: FILE_INPUT_CHECK_FN, returnByValue: true }, sessionId);
+    if (!(check && check.result && check.result.value === true)) {
+      throw new Error(`not_a_file_input:${selector}`);
+    }
+    // 3. Hand the ABSOLUTE path to Chrome — it reads the file itself (no bytes here).
+    await send("DOM.setFileInputFiles", { objectId, files: [absPath] }, sessionId);
+    return [basenameOf(absPath)];
+  });
+}
+
 // --- op executors ---------------------------------------------------------- //
 // Each returns the op-specific `data` object; throws on failure (→ errorEnvelope).
 const OPS = {
@@ -279,17 +364,20 @@ const OPS = {
     // chrome.scripting (reaches an out-of-process iframe; no debugger banner).
     if (cmd && cmd.frame) {
       const frame = await resolveFrame(tab.id, cmd.frame);
+      const vis = await tabVisibilityState(tab.id);   // BEFORE the read → read stays last
       const html = await execInFrame(tab.id, frame.frameId, frameReadHtmlFn, []);
       // Report the FRAME's own url (not the top tab url) so the caller can confirm it
       // read the intended frame (#190 reported the top url for a frame read).
-      return { url: frame.url || tab.url, title: tab.title, html, frame: cmd.frame };
+      return annotateVisibility(
+        { url: frame.url || tab.url, title: tab.title, html, frame: cmd.frame }, vis);
     }
     // No frame → the lighter chrome.scripting top-frame read (no debugger banner).
+    const vis = await tabVisibilityState(tab.id);
     const [inj] = await chrome.scripting.executeScript({
       target: { tabId: tab.id },
       func: () => document.documentElement.outerHTML,
     });
-    return { url: tab.url, title: tab.title, html: inj.result };
+    return annotateVisibility({ url: tab.url, title: tab.title, html: inj.result }, vis);
   },
 
   // Cheap read: the tab's VISIBLE innerText (optionally scoped to a CSS
@@ -306,11 +394,14 @@ const OPS = {
     // chrome.scripting (reaches an out-of-process iframe; no debugger banner).
     if (cmd && cmd.frame) {
       const frame = await resolveFrame(tab.id, cmd.frame);
+      const vis = await tabVisibilityState(tab.id);   // BEFORE the read → read stays last
       const raw = await execInFrame(tab.id, frame.frameId, frameReadTextFn, [sel]);
       const { text, truncated } = normalizeText(raw, cap);
       // Report the FRAME's own url (see getHtml) so the caller confirms the right frame.
-      return { url: frame.url || tab.url, title: tab.title, text, truncated, frame: cmd.frame };
+      return annotateVisibility(
+        { url: frame.url || tab.url, title: tab.title, text, truncated, frame: cmd.frame }, vis);
     }
+    const vis = await tabVisibilityState(tab.id);
     const [inj] = await chrome.scripting.executeScript({
       target: { tabId: tab.id },
       args: [sel],
@@ -320,7 +411,7 @@ const OPS = {
       },
     });
     const { text, truncated } = normalizeText(inj.result, cap);
-    return { url: tab.url, title: tab.title, text, truncated };
+    return annotateVisibility({ url: tab.url, title: tab.title, text, truncated }, vis);
   },
 
   async eval(cmd) {
@@ -333,9 +424,14 @@ const OPS = {
     // OR OOPIF flat session) and NEVER silent-nulls (frame_not_found / frame_eval_failed).
     if (cmd && cmd.frame) {
       const frame = await resolveFrame(tab.id, cmd.frame);
+      // visibilityState is read on the TOP frame (it reflects the tab; the OOPIF's
+      // document follows the tab) via chrome.scripting — the EVAL itself still runs
+      // via CDP (the #190 fix), so this probe does not regress the eval mechanism.
+      const vis = await tabVisibilityState(tab.id);
       const value = await cdpFrameEval(tab.id, tab.url, frame, cmd.js);
-      return { url: frame.url || tab.url, value, frame: cmd.frame };
+      return annotateVisibility({ url: frame.url || tab.url, value, frame: cmd.frame }, vis);
     }
+    const vis = await tabVisibilityState(tab.id);
     // chrome.scripting runs the top-frame eval in the page's MAIN world (world:
     // "MAIN" below) — so `js` sees the page's own globals — and its completion value
     // is returned. Wrapped so a bare expression or a statement block both work.
@@ -365,7 +461,7 @@ const OPS = {
         return fn();
       },
     });
-    return { url: tab.url, value: inj.result };
+    return annotateVisibility({ url: tab.url, value: inj.result }, vis);
   },
 
   async tabs() {
@@ -425,7 +521,28 @@ const OPS = {
   async frames(cmd) {
     const tab = await targetTab(cmd);
     const frames = await framesForTab(tab.id);
-    return { url: tab.url, title: tab.title, frames };
+    const vis = await tabVisibilityState(tab.id);
+    return annotateVisibility({ url: tab.url, title: tab.title, frames }, vis);
+  },
+
+  // Populate an <input type=file> matched by `selector` with the ABSOLUTE local
+  // `path` via CDP DOM.setFileInputFiles (Gap 1). Chrome reads the file itself by
+  // path (same host) — NO file bytes cross the bridge. Own-tab-scoped + #189-bounded
+  // (cdpSetFileInput → withCdp). `--frame` routes into a same-process iframe OR a
+  // cross-origin OOPIF exactly like `eval --frame`. Verifies the element is a real
+  // file input (`not_a_file_input`) / exists (`element_not_found`). The RESULT
+  // carries only the BASENAME(s) — the full path stays server/CLI-side + audit log.
+  async upload(cmd) {
+    const tab = await targetTab(cmd);
+    const selector = String(cmd.selector);
+    const absPath = String(cmd.path);
+    if (cmd && cmd.frame) {
+      const frame = await resolveFrame(tab.id, cmd.frame);
+      const files = await cdpSetFileInput(tab.id, tab.url, frame, selector, absPath);
+      return { ok: true, selector, frame: cmd.frame, url: frame.url || tab.url, files };
+    }
+    const files = await cdpSetFileInput(tab.id, tab.url, null, selector, absPath);
+    return { ok: true, selector, frame: null, url: tab.url, files };
   },
 
   // Click `selector`. TWO paths, by design:

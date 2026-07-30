@@ -960,7 +960,16 @@ def test_validate_command_contract():
     # The op set is the shared contract with extension/protocol.js.
     assert set(S.ALLOWED_OPS) == {"getHtml", "text", "eval", "tabs", "nav",
                                   "screenshot", "open", "close",
-                                  "frames", "click", "type", "key", "activate"}
+                                  "frames", "click", "type", "key", "activate",
+                                  "upload"}
+    # `upload` is a dispatched, tab-scoped CDP op requiring selector + path.
+    assert S.validate_command({"op": "upload", "selector": "#f",
+                               "path": "/tmp/x"}) == ("upload", None)
+    assert S.validate_command({"op": "upload", "path": "/tmp/x"})[1] \
+        == "missing_field:selector"
+    assert S.validate_command({"op": "upload", "selector": "#f"})[1] \
+        == "missing_field:path"
+    assert "upload" in S.TAB_SCOPED_OPS
     # `text` is a dispatched, tab-scoped, cheap-read op with NO required field.
     assert S.validate_command({"op": "text"}) == ("text", None)
     assert "text" in S.TAB_SCOPED_OPS
@@ -3075,7 +3084,7 @@ def test_git_short_head_none_on_missing_dir(tmp_path):
 
 def test_manifest_version_reads_current():
     v = S.manifest_version(path=EXT_DIR / "manifest.json")
-    assert isinstance(v, str) and v == "0.1.0"
+    assert isinstance(v, str) and v == "0.2.0"
 
 
 def test_manifest_version_none_on_missing(tmp_path):
@@ -3260,3 +3269,263 @@ def test_browser_cli_whoami(tmp_path):
         assert out["bridge"]["extension_version_current"] == "0.1.0"
     finally:
         srv.shutdown(); srv.server_close()
+
+
+# =========================================================================== #
+# Gap 1 — `upload` op: audit-logged (op + target domain + the file PATH)
+# =========================================================================== #
+def test_upload_dispatches_and_audit_event_has_op_domain_path(telemetry):
+    """An upload dispatches to the extension (tab-scoped like the other CDP ops)
+    AND emits an AUDIT telemetry event carrying op + target domain + the file
+    PATH (local metadata — never file content). The path is required so this
+    exfil-capable action is traceable."""
+    spool_dir = telemetry
+    srv, _ = _serve()
+    ext = FakeExtension(srv, executor=lambda c: {
+        "ok": True, "selector": c.get("selector"),
+        "url": "https://civitai.com/apps/run/model-benchmarking",
+        "files": ["render.png"]})
+    ext.start()
+    try:
+        assert _wait_connected(srv, want=True)
+        st, body = _req(srv, "POST", "/cmd", {
+            "op": "upload", "selector": "#file",
+            "path": "/home/zach/pics/render.png"})
+        assert st == 200
+        # The path reached the extension (dispatched op), the basename came back.
+        assert ext.dispatched[-1]["path"] == "/home/zach/pics/render.png"
+        assert body["result"]["data"]["files"] == ["render.png"]
+        e = _wait_events(spool_dir, 1)[0]
+        assert e["exit_code"] == "0"
+        p = json.loads(e["payload"])
+        assert p["op"] == "upload"
+        assert p["outcome"] == "ok"
+        assert p["domain"] == "civitai.com"       # target domain (from the result url)
+        assert p["path"] == "/home/zach/pics/render.png"  # AUDIT: the file path
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
+def test_upload_is_tab_scoped_and_required_fields_enforced():
+    """`upload` is a tab-scoped op requiring selector + path (server-side 400)."""
+    assert "upload" in S.TAB_SCOPED_OPS
+    assert "upload" in S.ALLOWED_OPS
+    srv, _ = _serve()
+    try:
+        st, body = _req(srv, "POST", "/cmd", {"op": "upload", "path": "/x"})
+        assert st == 400 and body["error"] == "missing_field:selector"
+        st, body = _req(srv, "POST", "/cmd", {"op": "upload", "selector": "#f"})
+        assert st == 400 and body["error"] == "missing_field:path"
+    finally:
+        srv.shutdown(); srv.server_close()
+
+
+# --- CLI: path validation happens BEFORE any dispatch ---------------------- #
+@pytest.mark.skipif(shutil.which("curl") is None, reason="curl not on PATH")
+def test_browser_cli_upload_rejects_missing_and_nonfile_path(tmp_path):
+    """`browser upload` validates the path is a readable regular file and resolves
+    it to an ABSOLUTE path BEFORE any /cmd dispatch — a missing/non-file path is a
+    clear error and NEVER reaches the bridge."""
+    srv_state = _CaptureCmdServer()
+    srv = S.ThreadingHTTPServer(("127.0.0.1", 0), srv_state.handler())
+    srv.daemon_threads = True
+    port = srv.server_address[1]
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    tokf = tmp_path / "token"; tokf.write_text("smoke-token\n")
+    env = dict(os.environ)
+    env.update(BROWSER_BRIDGE_HOST="127.0.0.1", BROWSER_BRIDGE_PORT=str(port),
+               BROWSER_BRIDGE_TOKEN_FILE=str(tokf))
+
+    def run(*args):
+        return subprocess.run([str(BROWSER_BIN), *args], env=env,
+                              capture_output=True, text=True, timeout=30)
+    try:
+        # Nonexistent path → refused before dispatch.
+        r = run("upload", "#f", str(tmp_path / "nope.png"))
+        assert r.returncode != 0 and "no such file" in r.stderr.lower()
+        # A directory (not a regular file) → refused.
+        r = run("upload", "#f", str(tmp_path))
+        assert r.returncode != 0 and "not a regular file" in r.stderr.lower()
+        assert srv_state.bodies == [], "no upload reached the bridge for a bad path"
+        # A real file → dispatched with an ABSOLUTE path + selector.
+        f = tmp_path / "pic.png"; f.write_bytes(b"\x89PNG")
+        r = run("upload", "#file", str(f))
+        assert r.returncode == 0, r.stderr
+        b = srv_state.bodies[-1]
+        assert b["op"] == "upload"
+        assert b["selector"] == "#file"
+        assert b["path"] == os.path.realpath(str(f))  # resolved to an ABSOLUTE path
+    finally:
+        srv.shutdown(); srv.server_close()
+
+
+# =========================================================================== #
+# Gap 2 — hidden-tab self-announce: the CLI prints the note to STDERR (exit 0)
+# =========================================================================== #
+class _CannedCmdServer:
+    """A /cmd server that answers with a caller-supplied result envelope `data`."""
+
+    def __init__(self, data):
+        self.data = data
+
+    def handler(self):
+        outer = self
+
+        class _H(S.BaseHTTPRequestHandler):
+            def log_message(self, *a):  # noqa: A003
+                pass
+
+            def do_POST(self):
+                ln = int(self.headers.get("Content-Length") or 0)
+                if ln:
+                    self.rfile.read(ln)
+                payload = json.dumps({"ok": True, "result": {
+                    "id": "x", "ok": True, "data": outer.data}}).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+
+        return _H
+
+
+def _run_browser_against(data, args, tmp_path):
+    srv = S.ThreadingHTTPServer(("127.0.0.1", 0), _CannedCmdServer(data).handler())
+    srv.daemon_threads = True
+    port = srv.server_address[1]
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    tokf = tmp_path / "token"; tokf.write_text("smoke-token\n")
+    env = dict(os.environ)
+    env.update(BROWSER_BRIDGE_HOST="127.0.0.1", BROWSER_BRIDGE_PORT=str(port),
+               BROWSER_BRIDGE_TOKEN_FILE=str(tokf))
+    try:
+        return subprocess.run([str(BROWSER_BIN), *args], env=env,
+                              capture_output=True, text=True, timeout=30)
+    finally:
+        srv.shutdown(); srv.server_close()
+
+
+@pytest.mark.skipif(shutil.which("curl") is None, reason="curl not on PATH")
+def test_browser_cli_hidden_tab_note_to_stderr_exit0(tmp_path):
+    """A read whose result flags the tab hidden prints the note to STDERR but
+    exits 0 (a warning, not an error) and leaves the JSON on stdout intact."""
+    note = "tab is hidden — background tabs are throttled; run 'browser activate'"
+    data = {"url": "https://x.test", "title": "X", "html": "<html></html>",
+            "visibilityState": "hidden", "hidden": True, "note": note}
+    r = _run_browser_against(data, ["html"], tmp_path)
+    assert r.returncode == 0, "a hidden-tab warning must NOT fail the command"
+    assert note in r.stderr, f"the note must be on stderr, got: {r.stderr!r}"
+    # The JSON result is still on stdout, unbroken.
+    out = json.loads(r.stdout)
+    assert out["result"]["data"]["hidden"] is True
+
+
+@pytest.mark.skipif(shutil.which("curl") is None, reason="curl not on PATH")
+def test_browser_cli_visible_tab_no_stderr_warning(tmp_path):
+    """A read on a VISIBLE tab prints NO hidden-tab warning to stderr."""
+    data = {"url": "https://x.test", "title": "X", "html": "<html></html>",
+            "visibilityState": "visible"}
+    r = _run_browser_against(data, ["html"], tmp_path)
+    assert r.returncode == 0
+    assert "hidden" not in r.stderr.lower()
+    assert "throttled" not in r.stderr.lower()
+
+
+# =========================================================================== #
+# Gap 3 — stale extension: version in /health + unknown_op → reload/restart map
+# =========================================================================== #
+def test_health_includes_extension_version_and_current():
+    """/health surfaces each instance's reported extension_version AND the bridge-
+    level extension_version_current (the manifest version the server reads)."""
+    srv, _ = _serve()
+    ext = FakeExtension(srv, instance_id="a", label="alpha", ext_version="0.1.0")
+    ext.start()
+    try:
+        body = _wait_instances(srv, 1)
+        assert body is not None
+        # /health surfaces exactly what the server reads from the repo manifest.
+        assert body["extension_version_current"] == S.manifest_version()
+        inst = body["instances"][0]
+        assert inst["extension_version"] == "0.1.0"   # what THIS instance reported
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
+def test_health_extension_version_null_when_unreported():
+    """An instance whose extension predates version reporting → null (no crash)."""
+    srv, _ = _serve()
+    ext = FakeExtension(srv, instance_id="b", label="beta")  # no ext_version
+    ext.start()
+    try:
+        body = _wait_instances(srv, 1)
+        assert body is not None
+        assert body["instances"][0]["extension_version"] is None
+        assert "extension_version_current" in body
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
+def test_health_no_extension_still_reports_current_version():
+    srv, _ = _serve()
+    try:
+        st, body = _req(srv, "GET", "/health")
+        assert st == 200
+        assert "extension_version_current" in body
+        assert body["instances"] == []
+    finally:
+        srv.shutdown(); srv.server_close()
+
+
+@pytest.mark.skipif(shutil.which("curl") is None, reason="curl not on PATH")
+def test_browser_cli_unknown_op_maps_to_stale_extension_message(tmp_path):
+    """A server-side op-level `unknown_op` for a DISPATCHED op (the extension is
+    older than this CLI) maps to a clear reload/restart-Brave message + non-zero
+    exit (the ↻-is-unreliable insight: the long-poll keeps the old SW alive)."""
+    data_env = {"ok": False, "error": "unknown_op"}   # extension returned unknown_op
+
+    class _H(S.BaseHTTPRequestHandler):
+        def log_message(self, *a):  # noqa: A003
+            pass
+
+        def do_POST(self):
+            ln = int(self.headers.get("Content-Length") or 0)
+            if ln:
+                self.rfile.read(ln)
+            payload = json.dumps({"ok": True, "result": {
+                "id": "x", **data_env}}).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+    srv = S.ThreadingHTTPServer(("127.0.0.1", 0), _H)
+    srv.daemon_threads = True
+    port = srv.server_address[1]
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    tokf = tmp_path / "token"; tokf.write_text("smoke-token\n")
+    env = dict(os.environ)
+    env.update(BROWSER_BRIDGE_HOST="127.0.0.1", BROWSER_BRIDGE_PORT=str(port),
+               BROWSER_BRIDGE_TOKEN_FILE=str(tokf))
+    try:
+        r = subprocess.run([str(BROWSER_BIN), "upload", "#f", str(tokf)],
+                           env=env, capture_output=True, text=True, timeout=30)
+        assert r.returncode != 0, "a stale-extension unknown_op must exit non-zero"
+        low = r.stderr.lower()
+        assert "unknown_op" in low
+        assert "older than this cli" in low
+        assert "restart brave" in low, f"expected restart-Brave guidance, got: {r.stderr!r}"
+    finally:
+        srv.shutdown(); srv.server_close()
+
+
+@pytest.mark.skipif(shutil.which("curl") is None, reason="curl not on PATH")
+def test_browser_cli_normal_op_result_unaffected_by_unknown_op_mapping(tmp_path):
+    """A NORMAL successful op result is unaffected by the unknown_op mapping."""
+    data = {"url": "https://x.test", "title": "X", "html": "<html>ok</html>"}
+    r = _run_browser_against(data, ["html"], tmp_path)
+    assert r.returncode == 0, r.stderr
+    assert "older than this cli" not in r.stderr.lower()
+    out = json.loads(r.stdout)
+    assert out["result"]["data"]["html"] == "<html>ok</html>"
