@@ -153,13 +153,6 @@ export const CAPTURE_RETRY_BASE_MS = 700;
 // After a quota error specifically, wait AT LEAST a full quota window (~1s) so
 // the next attempt is safely outside it (belt-and-braces over the base spacing).
 export const CAPTURE_QUOTA_WAIT_MS = 1000;
-// Paint settle after 'complete'. Chrome fires "complete" slightly BEFORE the
-// first paint, so this settle (≈350ms) lets the FIRST capture usually succeed —
-// avoiding a retry (hence any quota risk) in the common case.
-export const CAPTURE_SETTLE_MS = 350;
-export const CAPTURE_READY_TIMEOUT_MS = 2000; // cap on the status poll
-export const CAPTURE_READY_POLL_MS = 100;   // status re-poll cadence
-
 // Transient (retry-worthy) capture failures — the GPU/paint race and the
 // per-second capture quota, NOT a permanent permission/URL error (retrying THOSE
 // just burns the cmd_timeout). Matched case-insensitively against the error
@@ -194,55 +187,6 @@ export function isCaptureQuotaError(err) {
   return !!s && s.includes(CAPTURE_QUOTA_PATTERN);
 }
 
-// --- fundamental limitation: captureVisibleTab needs an ON-SCREEN tab -------- //
-// captureVisibleTab captures the on-screen COMPOSITED pixels of a window's
-// visible tab. On the user's i3 tiling WM an owned/agent tab is intentionally
-// NOT foregrounded, and activating it does NOT guarantee its Brave WINDOW is
-// raised/composited (Chrome can't force i3 to raise a window). So the tab may
-// never composite and the GPU read-back keeps returning "image readback failed"
-// no matter how many times we retry — this is a PERMANENT condition for that tab,
-// NOT the paint race the settle+retry recovers. Once the spaced retries are spent
-// (a genuinely transient readback would already have succeeded on a retry), a
-// readback error means the tab is simply not visible on-screen.
-const OCCLUSION_CAPTURE_PATTERNS = ["image readback failed", "readback"];
-
-// The actionable error surfaced to the caller when a screenshot cannot be
-// captured because the target tab is not visible on-screen (background / occluded
-// window). Names the alternative ops that DO work on a background tab so the
-// caller/agent acts instead of blindly retrying a capture that cannot succeed.
-export const SCREENSHOT_NOT_VISIBLE_MESSAGE =
-  "screenshot unavailable: the target tab is not visible on-screen (background " +
-  "or occluded window). captureVisibleTab can only capture the foreground tab; " +
-  "bring the tab to the foreground, or use 'text'/'html'/'eval' which work on " +
-  "background tabs.";
-
-// True when `err` looks like the readback/occlusion failure (a GPU read-back with
-// no pixels) — but NOT the per-second quota error, which is a distinct, genuinely
-// transient throttle that keeps its own message (#182). Matched case-insensitively.
-// Intended to be checked only AFTER the retry budget is exhausted: a transient
-// readback that a spaced retry could recover has already succeeded by then, so a
-// match here means the tab is persistently not compositing → the limitation above.
-export function isOcclusionCaptureError(err) {
-  const s = errText(err);
-  if (!s) return false;
-  if (isCaptureQuotaError(err)) return false; // a quota hit is not an occlusion
-  return OCCLUSION_CAPTURE_PATTERNS.some((p) => s.includes(p));
-}
-
-// Map a POST-RETRY (exhausted-budget) capture failure to the error string the
-// caller sees. A readback/occlusion failure that survived every spaced retry is
-// the fundamental "tab not visible on-screen" limitation → the actionable
-// SCREENSHOT_NOT_VISIBLE_MESSAGE. Everything else (the quota error, a
-// permission/URL error, owned_tab_gone, …) passes through UNCHANGED so its own
-// specific cause is preserved. MUST be applied ONLY after the retries are
-// exhausted — never on an error a retry could still recover (that would wrongly
-// claim "unavailable"). Pure + unit-tested; service_worker.js applies it in the
-// screenshot op's catch, which by construction runs only post-retry.
-export function mapCaptureFailure(err) {
-  if (isOcclusionCaptureError(err)) return SCREENSHOT_NOT_VISIBLE_MESSAGE;
-  return String((err && err.message != null) ? err.message : err);
-}
-
 const defaultSleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // Call `capture()` (→ Promise<dataUrl>) with a bounded retry on a TRANSIENT
@@ -274,64 +218,6 @@ export async function captureWithRetry(capture, opts = {}) {
     }
   }
   throw lastErr; // unreachable (loop always returns or throws) — belt & braces
-}
-
-// Wait until a just-activated tab is painted enough to capture. Polls
-// `getStatus()` (→ the tab's `status`, e.g. "complete"/"loading") until it reads
-// "complete" or the timeout elapses, THEN waits a short settle — because
-// chrome fires "complete" slightly BEFORE the first paint, so a tab that is
-// already "complete" can still read back empty without the settle. All timing +
-// the status read are injectable so this is unit-testable with a fake clock.
-export async function waitForCaptureReady(getStatus, opts = {}) {
-  const timeoutMs = opts.timeoutMs == null ? CAPTURE_READY_TIMEOUT_MS : opts.timeoutMs;
-  const pollMs = opts.pollMs == null ? CAPTURE_READY_POLL_MS : opts.pollMs;
-  const settleMs = opts.settleMs == null ? CAPTURE_SETTLE_MS : opts.settleMs;
-  const sleep = opts.sleep || defaultSleep;
-  const now = opts.now || (() => Date.now());
-  const start = now();
-  // eslint-disable-next-line no-constant-condition
-  while (true) {
-    let status;
-    try { status = await getStatus(); } catch (e) { status = null; }
-    if (status === "complete") break;
-    if (now() - start >= timeoutMs) break; // don't hang past the budget
-    await sleep(pollMs);
-  }
-  if (settleMs > 0) await sleep(settleMs);
-}
-
-// Orchestrate a screenshot with the activate→settle→capture→restore dance, with
-// every chrome.* side effect INJECTED so the (important) invariant — the
-// previously-active tab is restored on BOTH the success AND the failure path,
-// and an already-visible tab is captured WITHOUT any activate/flicker — is
-// unit-testable. `deps`:
-//   isActive          : boolean  — is the target tab already the visible tab
-//   targetId          : the target tab's id
-//   capture()         : Promise<dataUrl> (the caller wraps this in captureWithRetry)
-//   getPrevActiveId() : Promise<id|null> — the tab active BEFORE we activate
-//   activate(id)      : Promise — bring the target tab to the foreground
-//   waitReady()       : Promise — settle until painted (waitForCaptureReady)
-//   restore(id)       : Promise — re-activate the previously-active tab
-// service_worker.js builds `deps` from the real chrome.* APIs.
-export async function screenshotWithRestore(deps) {
-  if (deps.isActive) {
-    // Already visible → capture directly, no needless activate/flicker.
-    return deps.capture();
-  }
-  let prevActiveId = null;
-  try {
-    prevActiveId = await deps.getPrevActiveId();
-    await deps.activate(deps.targetId);
-    await deps.waitReady();
-    return await deps.capture();
-  } finally {
-    // Restore focus to the previously-active tab on EVERY path (success AND
-    // failure) so a background screenshot never leaves the user's foreground
-    // changed. Never let a restore failure mask the real result/error.
-    if (prevActiveId != null && prevActiveId !== deps.targetId) {
-      try { await deps.restore(prevActiveId); } catch (e) { /* ignore */ }
-    }
-  }
 }
 
 // --- CDP (chrome.debugger) ops: any-frame reads + trusted input ------------- //
@@ -499,7 +385,10 @@ export async function withCdpSession(deps) {
 
 // Flatten a CDP Page.getFrameTree result into a compact [{frameId,url,name,parentId}]
 // list (depth-first, main frame first). METADATA only — frame id/url/name, never
-// frame CONTENT. Pure so the `frames` op's shaping is unit-tested without a browser.
+// frame CONTENT. Pure; used by matchCdpFrameId to map a target frame url → its CDP
+// (string) frameId for the `eval --frame` SAME-PROCESS path. (Frame ENUMERATION for
+// the `frames` op / `--frame` resolution moved to chrome.webNavigation — OOPIF-aware —
+// see normalizeWebNavFrames below.)
 export function flattenFrameTree(frameTree) {
   const out = [];
   const walk = (node, parentId) => {
@@ -511,21 +400,6 @@ export function flattenFrameTree(frameTree) {
   };
   walk(frameTree);
   return out;
-}
-
-// Resolve a caller `--frame <sel>` against a flattened frame list. `sel` may be an
-// exact frameId OR a URL substring (case-insensitive). Returns the matched frame's
-// {frameId,url,name,...} or throws `frame_not_found:<sel>`. Exact frameId wins over
-// a substring; among substring matches the FIRST (main-frame-first order) wins,
-// deterministically. An empty sel is a caller bug (the SW only calls this when a
-// frame IS targeted) → frame_not_specified.
-export function resolveFrame(frames, sel) {
-  const s = String(sel == null ? "" : sel);
-  if (!s) throw new Error("frame_not_specified");
-  for (const f of frames) if (f.frameId === s) return f;
-  const low = s.toLowerCase();
-  for (const f of frames) if ((f.url || "").toLowerCase().includes(low)) return f;
-  throw new Error(`frame_not_found:${s}`);
 }
 
 // The bounded key NAME → CDP Input.dispatchKeyEvent params map. Deliberately small:
@@ -752,30 +626,56 @@ export function normalizeWebNavFrames(frames) {
   return out;
 }
 
+// The lowercased hostname of a URL, or "" when unparseable. Used to prefer a HOST
+// match over a bare path match when resolving a `--frame` url substring. Pure.
+export function frameHostOf(url) {
+  try { return (new URL(String(url)).hostname || "").toLowerCase(); }
+  catch { return ""; }
+}
+
 // Resolve a caller `--frame <sel>` against a normalized getAllFrames list, returning
 // the matched FRAME OBJECT ({frameId,url,parentFrameId}). `sel` may be an exact
 // numeric frameId (e.g. "0" or 5 — the webNavigation id) OR a URL substring
-// (case-insensitive). An exact frameId match WINS over a substring; among substring
-// matches the FIRST (list order) wins deterministically. Throws `frame_not_found:<sel>`
-// when nothing matches and `frame_not_specified` for an empty sel (a caller bug — the
-// SW only calls this when a frame IS targeted). Tab-scoped by construction: `frames`
-// comes from ONE tab's getAllFrames, so a resolved frame can only ever reference a
-// frame of THAT tab — a frameId belonging to another tab is simply absent →
-// frame_not_found. Returning the OBJECT (not just the id) lets the SW both inject by
-// frameId AND report the FRAME'S OWN url in the op result (so a caller can confirm it
-// read the intended frame, not the top document), and — for `eval --frame` — map the
-// numeric webNavigation frameId to the frame's URL so the CDP path can locate its
-// execution context (see cdp_protocol: matchCdpFrameId / pickOopifSessionId). Pure.
+// (case-insensitive). Resolution order (deterministic, no silent first-match):
+//   1. An exact NUMERIC frameId always WINS.
+//   2. A url SUBSTRING prefers a HOST match over a bare path match — the substring is
+//      tested against each frame's HOSTNAME first. This disambiguates the civitai
+//      self-shadow: `--frame model-benchmarking` matches the TOP frame's PATH
+//      (civitai.com/apps/run/model-benchmarking) but the OOPIF's HOST
+//      (model-benchmarking.civit.ai) — the host match is the intended frame.
+//   3. If the substring still matches MULTIPLE frames ambiguously (all host, or all
+//      path), throw `ambiguous_frame:<n> [<frameId>:<url>, …]` listing the candidates
+//      so the caller re-issues with a NUMERIC frameId, INSTEAD of silently choosing
+//      the first (the #190/#192 "silently wrong frame" bug).
+// Throws `frame_not_found:<sel>` when nothing matches and `frame_not_specified` for an
+// empty sel (a caller bug — the SW only calls this when a frame IS targeted). Tab-scoped
+// by construction: `frames` comes from ONE tab's getAllFrames, so a resolved frame can
+// only ever reference a frame of THAT tab — a frameId belonging to another tab is simply
+// absent → frame_not_found. Returning the OBJECT (not just the id) lets the SW both
+// inject by frameId AND report the FRAME'S OWN url in the op result (so a caller can
+// confirm it read the intended frame, not the top document), and — for `eval --frame` —
+// map the numeric webNavigation frameId to the frame's URL so the CDP path can locate
+// its execution context (see cdp_protocol: matchCdpFrameId / pickOopifSessionId). Pure.
 export function resolveWebNavFrame(frames, sel) {
   const s = String(sel == null ? "" : sel).trim();
   if (!s) throw new Error("frame_not_specified");
+  const list = frames || [];
+  // 1. exact numeric frameId wins outright.
   if (/^\d+$/.test(s)) {
     const n = Number(s);
-    for (const f of frames || []) if (f.frameId === n) return f;
+    for (const f of list) if (f.frameId === n) return f;
   }
   const low = s.toLowerCase();
-  for (const f of frames || []) {
-    if ((f.url || "").toLowerCase().includes(low)) return f;
+  // 2. prefer HOST matches over PATH matches.
+  const hostMatches = list.filter((f) => frameHostOf(f.url).includes(low));
+  const candidates = hostMatches.length
+    ? hostMatches
+    : list.filter((f) => (f.url || "").toLowerCase().includes(low));
+  if (candidates.length === 1) return candidates[0];
+  // 3. ambiguous → a clear error listing the candidates (never a silent first-match).
+  if (candidates.length > 1) {
+    const listed = candidates.map((f) => `${f.frameId}:${f.url || ""}`).join(", ");
+    throw new Error(`ambiguous_frame:${candidates.length} [${listed}]`);
   }
   throw new Error(`frame_not_found:${s}`);
 }
@@ -832,9 +732,16 @@ export function frameEvalFn(src) {
 }
 
 // Synthetic click on `selector`: scroll into view, then dispatch a realistic
-// mousedown→mouseup→click sequence AND call el.click() (covers apps that listen for
-// either). Returns {ok:true,x,y} (frame-local center) or {ok:false,error} when the
-// selector matches nothing. Self-contained.
+// pointerdown/mousedown → pointerup/mouseup → a SINGLE `click` sequence. Returns
+// {ok:true,x,y} (frame-local center) or {ok:false,error} when the selector matches
+// nothing. Self-contained.
+//
+// CLICK-EXACTLY-ONCE (the live-observed 0→2 double-fire fix): a SYNTHETIC
+// mousedown/mouseup does NOT synthesize a `click` the way a TRUSTED press/release
+// does — only real user input (or the CDP Input.* path) auto-generates the click.
+// So we dispatch the `click` event ONCE ourselves. We deliberately do NOT ALSO call
+// el.click(): dispatching a `click` event AND calling el.click() fired the target's
+// onclick handler TWICE from one op (the bug). One dispatched `click` = one handler.
 export function frameClickFn(selector) {
   var el = document.querySelector(selector);
   if (!el) return { ok: false, error: "element_not_found" };
@@ -844,25 +751,34 @@ export function frameClickFn(selector) {
   var y = Math.round(r.top + r.height / 2);
   var opts = { bubbles: true, cancelable: true, view: window,
                clientX: x, clientY: y, button: 0 };
+  el.dispatchEvent(new MouseEvent("pointerdown", opts));
   el.dispatchEvent(new MouseEvent("mousedown", opts));
+  el.dispatchEvent(new MouseEvent("pointerup", opts));
   el.dispatchEvent(new MouseEvent("mouseup", opts));
-  el.dispatchEvent(new MouseEvent("click", opts));
-  if (typeof el.click === "function") el.click();
+  el.dispatchEvent(new MouseEvent("click", opts));   // exactly one click — NOT el.click() too
   return { ok: true, x: x, y: y };
 }
 
 // Synthetic type into `selector` (or the frame's activeElement when empty): focus,
 // set .value (or textContent for a contenteditable), then dispatch input+change so a
 // framework's listeners see the update. Returns {ok:true,typed:<len>} or
-// {ok:false,error} when a given selector matches nothing. NEVER returns the text.
-// Self-contained.
+// {ok:false,error} when there is no valid target. NEVER returns the text. Self-contained.
+//
+// REQUIRE A REAL EDITABLE TARGET (#190 audit): an <input>/<textarea> (has a settable
+// `value`) or a contenteditable element. With an empty selector the target is
+// document.activeElement, which DEFAULTS to <body> when nothing is focused — <body>
+// has no `value` and is not contenteditable, so the old code set nothing yet still
+// dispatched input/change and returned {ok:true,typed:N}: a FALSE success claiming N
+// chars were written when nothing was. Now that case returns {ok:false,
+// error:"no_editable_target"} — no false `typed`.
 export function frameTypeFn(selector, text) {
   var el = selector ? document.querySelector(selector) : document.activeElement;
   if (selector && !el) return { ok: false, error: "element_not_found" };
-  if (!el) el = document.body;
+  var editable = !!el && (el.isContentEditable === true || ("value" in el));
+  if (!editable) return { ok: false, error: "no_editable_target" };
   if (typeof el.focus === "function") el.focus();
-  if (el && "value" in el) el.value = text;
-  else if (el && el.isContentEditable) el.textContent = text;
+  if ("value" in el) el.value = text;
+  else el.textContent = text;   // contenteditable
   el.dispatchEvent(new Event("input", { bubbles: true }));
   el.dispatchEvent(new Event("change", { bubbles: true }));
   return { ok: true, typed: text.length };

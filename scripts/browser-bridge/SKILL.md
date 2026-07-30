@@ -129,6 +129,23 @@ reachable OOPIF path — drives most apps); the result carries `trusted:false` f
 `--frame` input and `trusted:true` for top-frame CDP input. A `--frame` op reports the
 FRAME's own `url` (so you can confirm you read the intended frame, not the top).
 
+**Picking `--frame` reliably (avoid the wrong frame):** prefer a **numeric `frameId`**
+from `frames` — it always wins and is never ambiguous. A URL substring is resolved
+**HOST-first** (matched against each frame's hostname before its path), so
+`--frame model-benchmarking` targets the OOPIF `model-benchmarking.civit.ai` rather than
+the top page's `civitai.com/apps/run/model-benchmarking` PATH. If a substring still
+matches **multiple** frames the op fails with `ambiguous_frame:<n> [<id>:<url>, …]`
+listing the candidates — re-issue with the numeric `frameId` (it does NOT silently pick
+the first match). So: **use the numeric id, or a host substring** — not a bare path token.
+
+**Limitation — nested OOPIFs (OOPIF-in-OOPIF):** the CDP `eval --frame` path
+auto-attaches only DIRECT child cross-origin targets (`Target.setAutoAttach({flatten})`
+is not recursive), so `eval --frame` on a **grandchild** cross-origin iframe (a
+cross-origin frame nested inside another cross-origin frame) returns `frame_not_found`
+(it fails safe — never a wrong/silent result). `text`/`html`/`click`/`type`/`key --frame`
+(via `chrome.scripting`) can still reach such a deeply-nested frame; only the CDP-based
+`eval --frame` is limited to direct children.
+
 Result payloads land under `.result.data` in the JSON (the envelope is
 `{"ok":true,"result":{"id","ok","data":{...}}}`).
 
@@ -397,17 +414,18 @@ know browser usage is being counted. Details: `README.md` → Telemetry.
 - `op '<op>' failed in the browser: unknown_op` (op-level — the CLI knows the op
   but the **extension** doesn't) → the loaded extension is an older build. Ask the
   user to reload it in `brave://extensions`; use `tabs` + `--tab <id>` meanwhile.
-- `Failed to capture tab: image readback failed` (older builds' spelling of the
-  screenshot error) → same cause as below: the window isn't composited. Use the
-  X-server fallback above.
+- `Failed to capture tab: image readback failed` (a `captureVisibleTab` readback
+  race on the fast path) → the SW now falls through to the **CDP `Page.captureScreenshot`**
+  primary path, which captures a background/occluded tab directly, so this should no
+  longer surface as an op error on current builds. If it does, reload the extension.
 - `400 bad_tab` → a non-numeric `tab` (only reachable via a raw API POST; the CLI
   already validates `--tab`).
 - `owned_tab_gone` (op-level, in `.result`) → your owned tab was closed; ownership
   is auto-dropped, so just re-issue (it falls back to the active tab / re-`open`).
-- `screenshot unavailable: … not visible on-screen …` (op-level, in `.result`,
-  after the retries are exhausted) → the target tab is background/occluded and
-  `captureVisibleTab` cannot capture it (see the screenshot note above). Do NOT
-  retry the screenshot — use `text`/`html`/`eval`, or foreground the tab.
+- `cdp_attach_refused:<scheme>` (op-level, in `.result`) → a CDP op (screenshot /
+  top-frame input / `eval --frame`) was aimed at a privileged tab (`chrome://`,
+  `file:`, extension, devtools, …); the bridge refuses to attach `chrome.debugger`
+  there. Point the op at a real `http/https` tab.
 - `401 unauthorized` → token mismatch (re-paste in the extension options).
 
 ## Gotcha: reload the unpacked extension after any change

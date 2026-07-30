@@ -322,9 +322,10 @@ const OPS = {
       const value = await cdpFrameEval(tab.id, tab.url, frame, cmd.js);
       return { url: frame.url || tab.url, value, frame: cmd.frame };
     }
-    // chrome.scripting runs in an ISOLATED world; `js` is evaluated and its
-    // completion value returned. Wrapped so a bare expression or a statement
-    // block both work. Result must be JSON-serialisable (structured clone).
+    // chrome.scripting runs the top-frame eval in the page's MAIN world (world:
+    // "MAIN" below) — so `js` sees the page's own globals — and its completion value
+    // is returned. Wrapped so a bare expression or a statement block both work.
+    // Result must be JSON-serialisable (structured clone).
     const [inj] = await chrome.scripting.executeScript({
       target: { tabId: tab.id },
       world: "MAIN",
@@ -457,7 +458,13 @@ const OPS = {
       const frame = await resolveFrame(tab.id, cmd.frame);
       const res = await execInFrame(tab.id, frame.frameId, frameTypeFn,
         [cmd.selector || "", text]);
-      if (!res || res.ok === false) throw new Error(`element_not_found:${cmd.selector}`);
+      // Surface the injected fn's SPECIFIC error: a missing selector → element_not_found
+      // (with the selector), and an empty/non-editable target → no_editable_target
+      // (never a false success claiming N chars typed — #190 audit).
+      if (!res || res.ok === false) {
+        const err = (res && res.error) || "type_failed";
+        throw new Error(err === "element_not_found" ? `element_not_found:${cmd.selector}` : err);
+      }
       return { url: frame.url || tab.url, typed: text.length, frame: cmd.frame, trusted: false };
     }
     await withCdp(tab.id, tab.url, async (send) => {

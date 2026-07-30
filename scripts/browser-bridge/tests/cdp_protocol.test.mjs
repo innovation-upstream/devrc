@@ -10,7 +10,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   CDP_VERSION, CDP_ATTACHABLE_SCHEMES, cdpSchemeOf, isCdpAttachableUrl,
-  assertCdpAttachable, withCdpSession, flattenFrameTree, resolveFrame,
+  assertCdpAttachable, withCdpSession, flattenFrameTree,
   keyEventParams, KEY_EVENTS, clickPoint, boxModelOrigin, frameEvalExpressions,
   isCdpSyntaxError, cdpExceptionText, frameHtmlExpression, frameTextExpression,
   elementRectExpression, focusExpression, fullPageClip,
@@ -124,18 +124,6 @@ test("flattenFrameTree flattens depth-first, main-frame first, metadata only", (
     { frameId: "F1a", url: "https://ads.example/x", name: "ad", parentId: "F1" },
     { frameId: "F2", url: "https://other.civit.ai/y", name: "", parentId: "MAIN" },
   ]);
-});
-
-test("resolveFrame: exact frameId wins; else a url substring; else not_found", () => {
-  const frames = [
-    { frameId: "MAIN", url: "https://civitai.com/", name: "" },
-    { frameId: "F1", url: "https://model-benchmarking.civit.ai/app", name: "bench" },
-  ];
-  assert.equal(resolveFrame(frames, "F1").frameId, "F1");                 // exact id
-  assert.equal(resolveFrame(frames, "model-benchmarking").frameId, "F1"); // substring
-  assert.equal(resolveFrame(frames, "CIVIT.AI").frameId, "F1");           // case-insensitive
-  assert.throws(() => resolveFrame(frames, "nope"), /frame_not_found:nope/);
-  assert.throws(() => resolveFrame(frames, ""), /frame_not_specified/);
 });
 
 // --- trusted input math ---------------------------------------------------- //
