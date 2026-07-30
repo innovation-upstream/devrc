@@ -725,6 +725,55 @@ in
     };
   };
 
+  # Catch the keylog spin in the act. keylog.service degenerates into a
+  # ~full-core userspace loop over hours/days (see CPUQuota above); a restart
+  # clears it, which is exactly what makes it hard to diagnose — noticing it
+  # and restarting destroys the evidence. This samples CPU and dumps the
+  # Python stack the first time it crosses the threshold, then self-disables
+  # (rm ~/.cache/keylog-spin/.captured to re-arm).
+  #
+  # nixpkgs' py-spy fails its own test suite (test_thread_names panics on an
+  # Option::unwrap of None — upstream test bug, not a build problem), so the
+  # check phase is skipped. Pinning it here also gives it a GC root, instead
+  # of rebuilding it from source on every ad-hoc nix-shell.
+  #
+  # NOTE: py-spy needs kernel.yama.ptrace_scope=0 to attach to a process it
+  # did not fork. NixOS defaults to 1, so without that sysctl the capture
+  # records the ptrace failure rather than a stack. See
+  # nix/system/apply-perf-tuning-2026-07-30.sh.
+  systemd.user.services.keylog-spin-capture = {
+    Unit = {
+      Description = "Capture a py-spy stack dump if keylog.service starts spinning";
+      OnFailure = [ "notify-failure@%n.service" ];
+    };
+    Service = {
+      Type = "oneshot";
+      TimeoutStartSec = 120;
+      Environment = [
+        "PATH=${lib.makeBinPath [
+          (pkgs.py-spy.overrideAttrs (_: { doCheck = false; }))
+          pkgs.coreutils pkgs.procps pkgs.systemd pkgs.gnugrep pkgs.gawk
+          pkgs.libnotify pkgs.bash
+        ]}"
+      ];
+      ExecStart = "${pkgs.bash}/bin/bash ${../scripts/keylog-spin-capture.sh}";
+    };
+  };
+
+  systemd.user.timers.keylog-spin-capture = {
+    Unit = {
+      Description = "Periodic check for the keylog CPU spin";
+    };
+    Timer = {
+      OnStartupSec = "5min";
+      OnUnitActiveSec = "5min";
+      Persistent = true;
+    };
+    Install = {
+      WantedBy = [ "timers.target" ];
+    };
+  };
+
   # i3 focus collector. Subscribes to i3's IPC event stream and emits a
   # source=i3 record on every window-focus / workspace-focus change — capturing
   # attention even when the user is only READING (the keylogger only records
