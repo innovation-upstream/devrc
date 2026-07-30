@@ -78,7 +78,7 @@ def call(base, method, path, payload=None, token=TOKEN, headers=None):
 
 
 # --- bind policy ----------------------------------------------------------- #
-@pytest.mark.parametrize("host", ["0.0.0.0", "192.168.50.250", "::",
+@pytest.mark.parametrize("host", ["0.0.0.0", "192.0.2.1", "::",  # TEST-NET-1
                                   "example-site.test"])
 def test_non_loopback_bind_is_refused(app, host):
     with pytest.raises(ValueError, match="non-loopback"):
