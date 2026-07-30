@@ -70,8 +70,34 @@ test("resolveWebNavFrameId: exact numeric frameId wins; url substring; case-inse
   // url substring → the numeric id of the matching frame.
   assert.equal(resolveWebNavFrameId(frames, "model-benchmarking.civit.ai"), 7);
   assert.equal(resolveWebNavFrameId(frames, "MODEL-BENCHMARKING.CIVIT.AI"), 7);
-  // first (list-order) substring match wins deterministically.
-  assert.equal(resolveWebNavFrameId(frames, "https://"), 0);
+});
+
+// --- Fix 3: host-preference + ambiguity (no silent wrong-frame) ------------- //
+test("resolveWebNavFrame: a url substring prefers a HOST match over a top-frame PATH match", () => {
+  const frames = normalizeWebNavFrames(GET_ALL_FRAMES);
+  // THE civitai self-shadow: `model-benchmarking` appears in the TOP frame's PATH
+  // (civitai.com/apps/run/model-benchmarking) AND the OOPIF's HOST
+  // (model-benchmarking.civit.ai). The HOST match (the OOPIF, frame 7) is intended —
+  // never the top path (frame 0), which the old first-match returned.
+  assert.equal(resolveWebNavFrame(frames, "model-benchmarking").frameId, 7);
+  assert.equal(resolveWebNavFrameId(frames, "model-benchmarking"), 7);
+});
+
+test("resolveWebNavFrame: a genuinely ambiguous substring → ambiguous_frame (not first-match)", () => {
+  const frames = normalizeWebNavFrames(GET_ALL_FRAMES);
+  // "https://" is in every frame's url and no frame's HOST → 3 path candidates,
+  // ambiguous. Must error (listing the candidates) so the caller picks a numeric id,
+  // NOT silently return the first frame.
+  assert.throws(() => resolveWebNavFrame(frames, "https://"),
+    /ambiguous_frame:3 \[/);
+  // Two frames sharing a HOST substring are ambiguous too → force a numeric id.
+  const dup = normalizeWebNavFrames([
+    { frameId: 3, parentFrameId: 0, url: "https://dup.example/a" },
+    { frameId: 4, parentFrameId: 0, url: "https://dup.example/b" },
+  ]);
+  assert.throws(() => resolveWebNavFrame(dup, "dup.example"), /ambiguous_frame:2 \[/);
+  // …but the exact NUMERIC frameId still disambiguates cleanly.
+  assert.equal(resolveWebNavFrame(dup, "4").frameId, 4);
 });
 
 test("resolveWebNavFrame: returns the FRAME OBJECT (id+url+parent) so the SW can report/locate the frame", () => {
@@ -161,16 +187,39 @@ test("frameEvalFn evaluates an expression (once), falls back to statements, prop
   assert.throws(() => frameEvalFn("(function(){ throw new Error('boom'); })()"), /boom/);
 });
 
-test("frameClickFn: scrolls, dispatches mousedown→mouseup→click AND el.click(); returns center", () => {
+test("frameClickFn: scrolls, dispatches pointerdown/mousedown→pointerup/mouseup→ONE click; returns center", () => {
   const el = fakeEl();
   fakeDoc({ map: { "#go": el } });
   const res = frameClickFn("#go");
   assert.deepEqual(res, { ok: true, x: 60, y: 40 });  // center of 100x40 @ (10,20)
   assert.equal(el.scrolled, true);
-  assert.deepEqual(el.events.map((e) => e.type), ["mousedown", "mouseup", "click"]);
-  assert.equal(el.clickCalls, 1, "also calls el.click() for click-only listeners");
+  assert.deepEqual(el.events.map((e) => e.type),
+    ["pointerdown", "mousedown", "pointerup", "mouseup", "click"]);
+  // exactly ONE dispatched `click` event…
+  assert.equal(el.events.filter((e) => e.type === "click").length, 1);
+  // …and el.click() is NOT also called (that was the 0→2 double-fire).
+  assert.equal(el.clickCalls, 0, "must NOT also call el.click() — that double-fired the handler");
   assert.equal(el.events[0].clientX, 60);
   assert.equal(el.events[0].clientY, 40);
+});
+
+test("frameClickFn: one click op fires the target's click handler EXACTLY ONCE (0→1, not 0→2)", () => {
+  // Reproduces the live-observed double-fire: a real element whose onclick increments a
+  // counter. Model the DOM's click semantics: a dispatched `click` event AND el.click()
+  // BOTH invoke the onclick handler (el.click() dispatches a click under the hood). With
+  // the fix (one click event, no el.click()) the counter goes 0→1, not 0→2.
+  let counter = 0;
+  const onclick = () => { counter++; };
+  const el = {
+    scrolled: false, clickCalls: 0,
+    scrollIntoView() { this.scrolled = true; },
+    getBoundingClientRect() { return { left: 10, top: 20, width: 100, height: 40 }; },
+    dispatchEvent(e) { if (e.type === "click") onclick(); return true; },
+    click() { this.clickCalls++; onclick(); },   // el.click() ALSO runs the handler
+  };
+  fakeDoc({ map: { "#btn": el } });
+  frameClickFn("#btn");
+  assert.equal(counter, 1, "one click op must fire the onclick handler exactly once");
 });
 
 test("frameClickFn: a missing selector → {ok:false,error:element_not_found} (no throw)", () => {
@@ -189,17 +238,45 @@ test("frameTypeFn: focuses, sets .value, dispatches input+change; returns only t
   assert.ok(!("text" in res), "the typed text must never be returned");
 });
 
-test("frameTypeFn: empty selector types into the frame's activeElement", () => {
-  const el = fakeEl();
+test("frameTypeFn: empty selector types into the frame's (editable) activeElement", () => {
+  const el = fakeEl();   // fakeEl has a settable `value` → editable
   fakeDoc({ active: el });
   const res = frameTypeFn("", "abc");
   assert.deepEqual(res, { ok: true, typed: 3 });
   assert.equal(el.value, "abc");
 });
 
+test("frameTypeFn: sets textContent for a contenteditable (no `value`)", () => {
+  const el = {
+    isContentEditable: true, textContent: "", focusCalls: 0, events: [],
+    focus() { this.focusCalls++; },
+    dispatchEvent(e) { this.events.push(e); },
+  };
+  fakeDoc({ map: { "#rte": el } });
+  const res = frameTypeFn("#rte", "rich");
+  assert.deepEqual(res, { ok: true, typed: 4 });
+  assert.equal(el.textContent, "rich");
+});
+
 test("frameTypeFn: a given selector matching nothing → element_not_found", () => {
   fakeDoc({ map: {} });
   assert.deepEqual(frameTypeFn("#nope", "x"), { ok: false, error: "element_not_found" });
+});
+
+test("frameTypeFn: NO editable target (empty sel, activeElement is <body>) → no_editable_target, NOT false success", () => {
+  // The #190 audit bug: empty selector + nothing focused → activeElement defaults to
+  // <body> (no `value`, not contenteditable). The OLD code set nothing yet returned
+  // {ok:true,typed:N} — a FALSE success. Now it's a clear error with NO `typed`.
+  const body = { innerText: "BODY", events: [], dispatchEvent(e) { this.events.push(e); } };
+  fakeDoc({ active: body, body });   // activeElement is the non-editable body
+  const res = frameTypeFn("", "hello");
+  assert.deepEqual(res, { ok: false, error: "no_editable_target" });
+  assert.ok(!("typed" in res), "must NOT claim typed:N when nothing was written");
+  assert.deepEqual(body.events, [], "no input/change dispatched on a non-editable target");
+  // A selector resolving to a non-editable element is likewise refused.
+  const div = { events: [], dispatchEvent(e) { this.events.push(e); } };
+  fakeDoc({ map: { "#label": div } });
+  assert.deepEqual(frameTypeFn("#label", "x"), { ok: false, error: "no_editable_target" });
 });
 
 test("frameKeyFn: dispatches keydown→keypress→keyup for a printable key with the mapped params", () => {

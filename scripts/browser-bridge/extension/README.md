@@ -67,23 +67,19 @@ retries are **spaced ≥~600ms** apart (a quota hit —
 `MAX_CAPTURE_VISIBLE_TAB_CALLS_PER_SECOND` — waits a full ~1s window) — a faster
 retry would just re-trip the quota instead of recovering.
 
-*Exhausted-retry → clear, actionable error:* when the quota-spaced retries are
-**exhausted** on a persistent readback error (the occluded-window case above), the
-op maps it via `mapCaptureFailure` to a caller-actionable message
-(`screenshot unavailable: the target tab is not visible on-screen … use
-'text'/'html'/'eval' which work on background tabs`) instead of the opaque
-`image readback failed`. The mapping runs **only post-exhaustion** (a readback a
-retry could still recover is never wrongly reported "unavailable"), and the quota
-error keeps its own message. *(Future opt-in, NOT implemented: a `chrome.debugger`
-+ CDP `Page.captureScreenshot` path could capture an off-screen tab, but it needs
-the `debugger` permission and shows a debug banner.)*
+The `captureVisibleTab` fast path is only used for a tab that is ALREADY the visible
+foreground tab (and not `--fullpage`); **the primary screenshot path is now CDP
+`Page.captureScreenshot`** (via the `debugger` permission), which captures a
+BACKGROUND / occluded / non-foreground tab directly — so the old i3 "not visible
+on-screen" occlusion case no longer applies to the normal path, and the earlier
+settle/activate-restore/occlusion-mapping helpers were retired along with it. Any
+`captureVisibleTab` failure simply falls through to the CDP path.
 
-**Reload the extension** after changing this to take effect. The classifier
-(`isTransientCaptureError` / `isOcclusionCaptureError`), the retry
-(`captureWithRetry`), the error mapping (`mapCaptureFailure`), the settle
-(`waitForCaptureReady`) and the activate→capture→restore orchestration
-(`screenshotWithRestore`, restore on success AND failure) are pure + unit-tested
-in `protocol.js`; `service_worker.js` supplies the chrome.* side effects.
+**Reload the extension** after changing this to take effect. The transient-error
+classifier (`isTransientCaptureError` / `isCaptureQuotaError`) and the quota-spaced
+retry (`captureWithRetry`) are pure + unit-tested in `protocol.js`; `service_worker.js`
+supplies the chrome.* side effects (both the `captureVisibleTab` fast path and the CDP
+`Page.captureScreenshot` primary path).
 
 If an owned tab was closed out-of-band, `chrome.tabs.get` throws and the op
 returns an `owned_tab_gone` error envelope. On that signal the **server drops the

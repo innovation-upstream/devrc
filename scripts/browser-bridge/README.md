@@ -149,7 +149,17 @@ serialized FUNC, so it can't evaluate an arbitrary JS STRING in the frame (it re
 execution context (same-process isolated world, or the OOPIF's own flat session via
 `Target.setAutoAttach`) and surfaces exceptions as a clear `frame_eval_failed` error —
 never a silent null. `--frame <numeric-frameId|url-substring>`
-selects the frame (the identifier is the numeric webNavigation `frameId`). `screenshot`,
+selects the frame (the identifier is the numeric webNavigation `frameId`). **Resolution
+is deterministic:** an exact numeric `frameId` always wins; a URL substring is matched
+**HOST-first** (against each frame's hostname before its path — so
+`--frame model-benchmarking` picks the OOPIF host `model-benchmarking.civit.ai`, not the
+top page's `…/run/model-benchmarking` path); a substring matching **multiple** frames
+fails with `ambiguous_frame:<n> [<id>:<url>, …]` (re-issue with the numeric id) rather
+than silently choosing the first. **Prefer a numeric `frameId` or a host substring.**
+**Nested-OOPIF limit:** `eval --frame` auto-attaches only DIRECT child OOPIF targets
+(`setAutoAttach({flatten})` isn't recursive), so `eval --frame` on a grandchild
+cross-origin iframe returns `frame_not_found` (fails safe); `text`/`html`/`click`/`type`/
+`key --frame` (chrome.scripting) can still reach it. `screenshot`,
 `eval --frame`, and TOP-frame trusted input use **CDP (chrome.debugger)** (see the CDP
 section below). A `--frame` op reports the FRAME's own `url` (so a caller can confirm it
 read the intended frame, not the top document). The tab-scoped ops
@@ -348,48 +358,25 @@ per-session (multi-step **workflow**) isolation did not.
   **released** so a dead session doesn't leak ownership, but the real Brave tab
   is deliberately **NOT closed** (never yank a visible tab out from under the
   user) — only an explicit `browser close` closes it.
-- **Screenshot is a VISIBLE-tab op (fundamental limitation, honest).**
-  `captureVisibleTab` captures the **on-screen composited pixels of a window's
-  foreground tab** — it fundamentally **cannot** capture a tab that isn't visible
-  on-screen. Screenshotting the **actual foreground tab** works fine. For a
-  session's **background/owned** tab the bridge makes a **best-effort** attempt —
-  briefly activate → **settle until painted** → capture (with retry) → restore the
-  previously-active tab (a short flicker) — so it never silently captures the wrong
-  tab. **But on the user's i3 tiling WM this commonly fails:** activating a tab does
-  NOT guarantee its Brave *window* is raised/composited (Chrome can't force i3 to
-  raise a window), so an owned/agent tab's window is often off-screen, the tab never
-  composites, and the capture keeps returning `"image readback failed"` no matter
-  how many times we retry. This is a **permanent condition for that tab, not the
-  transient paint race** the retry recovers.
-  - **Settle + retry (transient recovery):** a just-activated tab that IS visible
-    but momentarily unpainted returns `"image readback failed"` on the first try;
-    the SW waits for `status:"complete"` + a paint settle (~350ms) so the FIRST
-    capture usually wins, then **retries** on a transient error. Retries **respect
-    Chrome's ~2/sec `captureVisibleTab` quota** (spaced ≥~600ms; a
-    `MAX_CAPTURE_VISIBLE_TAB_CALLS_PER_SECOND` hit waits a ~1s window) — a faster
-    retry would re-trip the quota instead of recovering.
-  - **Exhausted-retry → clear, actionable error (not the opaque chrome string).**
-    When the quota-spaced retries are **exhausted** on a persistent readback error
-    (the occluded-window case above), the op maps it to a caller-actionable message
-    — `screenshot unavailable: the target tab is not visible on-screen (background
-    or occluded window). captureVisibleTab can only capture the foreground tab;
-    bring the tab to the foreground, or use 'text'/'html'/'eval' which work on
-    background tabs.` — instead of `image readback failed`. It is returned as the op
-    error (non-zero exit via the normal envelope). This is distinct from the
-    transient case: a readback a retry could still recover is NOT reported as
-    "unavailable" (the mapping runs only post-exhaustion), and the **quota error
-    keeps its own message** (it is a throttle, not an occlusion).
-  - **Use `text` / `html` / `eval` for a background tab** — they read the tab
-    directly regardless of whether it is on-screen, so an agent/owned tab (e.g. the
-    `browser agent`'s OWN background tab) should read, not screenshot.
-  - *Future opt-in (NOT implemented):* a `chrome.debugger` + CDP
-    `Page.captureScreenshot` path COULD capture an off-screen tab, but it needs the
-    `debugger` permission and shows a debug banner — deliberately out of scope.
-  - The classify + retry + settle + activate→capture→restore logic **and the
-    exhausted-retry error mapping** are pure and unit-tested in
-    `extension/protocol.js` (`isTransientCaptureError` / `captureWithRetry` /
-    `waitForCaptureReady` / `screenshotWithRestore` / `isOcclusionCaptureError` /
-    `mapCaptureFailure`); the capture itself needs real Brave, so it stays on the
+- **Screenshot — CDP-primary, works on a background tab.** The **primary** path is
+  **CDP `Page.captureScreenshot`** (via the `debugger` permission), which captures a
+  BACKGROUND / occluded / non-foreground tab directly — so an owned/agent tab that is
+  never foregrounded on the user's i3 tiling WM can still be screenshotted, and two
+  profiles can each screenshot their own tab. `--fullpage` captures the whole
+  scrollable document (CDP only). Attach is **refused on a privileged tab**
+  (`assertCdpAttachable`) before any attach.
+  - **`captureVisibleTab` fast path** — for a tab that is ALREADY the visible
+    foreground tab (and not `--fullpage`), the SW uses the cheap, banner-free
+    `captureVisibleTab` first; any failure there simply **falls through to the CDP
+    path**. That fast path uses `captureWithRetry`, which **respects Chrome's ~2/sec
+    `captureVisibleTab` quota** (retries spaced ≥~600ms; a
+    `MAX_CAPTURE_VISIBLE_TAB_CALLS_PER_SECOND` hit waits a ~1s window) so a retry
+    never re-trips the quota.
+  - `text` / `html` / `eval` also read a background tab directly (no compositing
+    needed), so for a pure read an agent/owned tab should read, not screenshot.
+  - The transient-error classifier (`isTransientCaptureError` / `isCaptureQuotaError`)
+    and the quota-spaced retry (`captureWithRetry`) are pure + unit-tested in
+    `extension/protocol.js`; the capture itself needs real Brave, so it stays on the
     manual checklist. Like any `extension/` change, it only takes effect after a
     manual extension **reload** in `brave://extensions`.
 - **Backward-compat.** A single session with no `open` (and even no
@@ -730,17 +717,18 @@ The **`browser agent`** slice, all headless (NO live model, NO Brave, NO bridge)
   ONE `--continue` retry then `blocked`, no-retry on a hard error.
 
 Current totals: **157 Python** (`test_server.py` 115 + `test_browser_agent_parse.py`
-14 + `test_browser_agent.py` 28) + **157 node** (`protocol.test.mjs` 59 +
-`browser_tool.test.mjs` 33 + `cdp_protocol.test.mjs` 32 + `frame_oopif.test.mjs` 15 +
+14 + `test_browser_agent.py` 28) + **143 node** (`protocol.test.mjs` 41 +
+`browser_tool.test.mjs` 33 + `cdp_protocol.test.mjs` 31 + `frame_oopif.test.mjs` 20 +
 `frame_eval_cdp.test.mjs` 9 + `service_worker.test.mjs` 9) — `frame_eval_cdp.test.mjs`
 covers the `eval --frame` CDP `Runtime.evaluate` fix (same-process + OOPIF context
-resolution, never-silent-null, #189 timeout no-wedge); the `protocol.test.mjs` cases cover the screenshot
-settle+retry decision logic (`isTransientCaptureError` / `captureWithRetry` /
-`waitForCaptureReady` / `screenshotWithRestore`) **and the exhausted-retry error
-mapping** (`isOcclusionCaptureError` / `mapCaptureFailure`): a persistent readback
-(retries exhausted) → the actionable "not visible on-screen" message, a transient
-readback that a spaced retry recovers still succeeds (no premature "unavailable"),
-and the #182 quota error keeps its own message. The live browser-driving loop (real DeepSeek + real
+resolution, never-silent-null, #189 timeout no-wedge); `frame_oopif.test.mjs` covers the
+OOPIF frame enumeration/resolution (incl. **host-preferred + ambiguity-safe** `--frame`
+matching) and the injected page functions — the **click-exactly-once** synthetic click
+(no double-fire) and the **no-editable-target** type refusal (no false `typed:N`); the
+`protocol.test.mjs` cases cover the screenshot settle+retry decision logic
+(`isTransientCaptureError` / `isCaptureQuotaError` / `captureWithRetry`): a spaced retry
+never re-trips the ~2/sec quota, a non-transient error propagates immediately, and the
+#182 quota error waits a full window. The live browser-driving loop (real DeepSeek + real
 Brave) canNOT run in CI; the chrome.* glue in `service_worker.js` and the
 end-to-end agent run are covered by the manual checklists (`extension/README.md` +
 "opencode browser-agent" above). The two `opencode debug agent` checks under
