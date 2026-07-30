@@ -26,10 +26,15 @@ HARD = "git re" + "set --hard HEAD"
 
 def run(cmd):
     """Return (blocked, error). `error` is non-empty if the guard misbehaved."""
-    p = subprocess.run([sys.executable, GUARD],
-                       input=json.dumps({"tool_name": "Bash",
-                                         "tool_input": {"command": cmd}}),
-                       capture_output=True, text=True, timeout=30)
+    try:
+        p = subprocess.run([sys.executable, GUARD],
+                           input=json.dumps({"tool_name": "Bash",
+                                             "tool_input": {"command": cmd}}),
+                           capture_output=True, text=True, timeout=30)
+    except subprocess.TimeoutExpired:
+        # A hang is a FAIL line, not a traceback -- catastrophic backtracking
+        # used to surface here as an uncaught TimeoutExpired.
+        return False, "guard TIMED OUT (>30s) -- catastrophic backtracking?"
     if p.returncode != 0:
         return False, f"guard exited {p.returncode}: {p.stderr.strip()[:200]}"
     if p.stderr.strip():
@@ -83,13 +88,41 @@ CASES = [
      f"git commit -m 'msg \\' && {ADDA} && echo 'done'", True),
     ("bypass: escaped quote + hard-reset",
      f"git commit -m 'msg \\' && {HARD} && echo 'done'", True),
-    # an unterminated heredoc must not swallow a following real command
-    ("bypass: unterminated heredoc",
+    # (round 2) `&` backgrounds the commit and feeds the heredoc to a REAL
+    # shell -- proven to execute, and was allowed while `&&`/`;` were blocked
+    ("bypass: & backgrounds the commit",
+     f"git commit -m 'ok' & bash <<'EOF'\n{ADDA}\nEOF", True),
+    ("bypass: & with sh + hard-reset",
+     f"git commit -m 'ok' & sh <<'EOF'\n{HARD}\nEOF", True),
+    ("bypass: & after gh pr create",
+     f"gh pr create --body x & bash <<'EOF'\n{ADDA}\nEOF", True),
+    # an unterminated heredoc must not swallow a following real command.
+    # (Blocked at every revision -- a guard against future regression, not a
+    # bypass that was ever open.)
+    ("unterminated heredoc stays visible",
      f"git commit -F - <<'NOPE'\nsome text\n{ADDA}", True),
 
     # --- stripping must stay narrowly scoped ----------------------------
     ("non-git -m untouched",          "docker run -m '2g' myimage", False),
     ("plain gh pr create",            'gh pr create --title "x" --body "y"', False),
+
+    # --- (round 2) false positives that must NOT block ------------------
+    # conventional-commit title: the `(` in `fix(guard):` must not sever the
+    # heredoc from its own command
+    ("FP: conventional-commit title + heredoc",
+     f"gh pr create --title \"fix(guard): close bypasses\" --body-file - <<'EOF'\nnever {ADDA} ever\nEOF", False),
+    ("FP: author with parens + heredoc",
+     f"git commit --author \"A (bot) <a@b.c>\" -F - <<'EOF'\nban {ADDA}\nEOF", False),
+    # message flags on other message-carrying commands
+    ("FP: git tag -m",                f"git tag -a v1 -m 'never {ADDA} ever'", False),
+    ("FP: git notes add -m",          f"git notes add -m 'never {ADDA}'", False),
+    ("FP: git merge --no-ff -m",      f"git merge --no-ff x -m 'never {ADDA}'", False),
+    ("FP: git stash push -m",         f"git stash push -m 'never {ADDA}'", False),
+    # --body / --title / -am were never stripped
+    ("FP: gh pr create --body",       f"gh pr create --body 'never {ADDA} ever'", False),
+    ("FP: gh issue comment --body",   f"gh issue comment 1 --body 'never {ADDA}'", False),
+    ("FP: gh pr --title only",        f"gh pr create --title 'ban {ADDA} always' --body x", False),
+    ("FP: git commit -am",            f"git commit -am 'docs: never {ADDA} ever'", False),
 ]
 
 fail = 0

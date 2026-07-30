@@ -28,14 +28,30 @@ import sys, json, re, ipaddress
 #
 # NEVER applied to the secret/IP guard: a credential in a commit message is
 # exactly what that check exists to catch.
-MESSAGE_CMD = re.compile(r"\bgit\s+commit\b|\bgh\s+(?:pr|issue|release|gist)\b")
+# Commands whose message/body argument is inert text. `git notes add` is also in
+# PUBLISH_SINK below; keep the two lists in mind together. Anything NOT listed
+# here gets no stripping at all.
+MESSAGE_CMD = re.compile(
+    r"\bgit\s+commit\b"
+    r"|\bgit\s+tag\b"
+    r"|\bgit\s+notes\s+add\b"
+    r"|\bgit\s+merge\b"
+    r"|\bgit\s+stash\s+push\b"
+    r"|\bgh\s+(?:pr|issue|release|gist)\b"
+    r"|\b(?:jj\s+describe|hg\s+commit|svn\s+commit)\b"
+)
 
 # Segment separators used to find WHICH sub-command a heredoc operator belongs to.
-# Command/process substitution openers are included: a heredoc inside `$(…)`,
-# `<(…)` or backticks belongs to the INNER command, not to an outer `git commit`.
-# Without them, `git commit -F <(bash <<'EOF' … EOF)` was mis-classified as
-# message-carrying and its shell-feeding body was stripped.
-_SEGMENT = re.compile(r"\n|;|&&|\|\||\||\$\(|<\(|`|\(")
+# Substitution openers are included: a heredoc inside `$(…)`, `<(…)`, `>(…)` or
+# backticks belongs to the INNER command, not to an outer `git commit` — without
+# them `git commit -F <(bash <<'EOF' … EOF)` had its shell-feeding body stripped.
+# `&` matters just as much: `git commit -m x & bash <<'EOF'` backgrounds the
+# commit and feeds the heredoc to a REAL shell, so the body must stay visible.
+# `&&` is listed before `&` so the two-char form wins.
+# Deliberately NOT a bare `(`: that split `gh pr create --title "fix(x): …"` off
+# from its own heredoc and re-blocked a legitimate body — the exact false
+# positive this whole function exists to prevent, and this repo's commit style.
+_SEGMENT = re.compile(r"\n|;|&&|&|\|\||\||\$\(|<\(|>\(|`")
 
 _HEREDOC = re.compile(r"<<-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
 
@@ -48,8 +64,12 @@ _HEREDOC = re.compile(r"<<-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
 # cannot backtrack exponentially — the previous `(?:\\.|(?!\3).)*` was a ReDoS
 # (an unterminated quote plus ~40 backslashes stalled for minutes, on a hook
 # that runs on EVERY Bash call, three times per command).
-_MSG_DQ = re.compile(r"(-m|--message)(=|\s+)\"(?:\\.|[^\"\\])*\"")
-_MSG_SQ = re.compile(r"(-m|--message)(=|\s+)'[^']*'")
+# `--body`/`--title` matter as much as `-m`: `gh pr create --body '…'` is an
+# extremely common shape. `--body-file` is NOT matched — the flag must be
+# followed by `=` or whitespace, and `--body-file` continues with `-`.
+_MSG_FLAG = r"(-m|-am|--message|--body|--title)"
+_MSG_DQ = re.compile(_MSG_FLAG + r"(=|\s+)\"(?:\\.|[^\"\\])*\"")
+_MSG_SQ = re.compile(_MSG_FLAG + r"(=|\s+)'[^']*'")
 
 # A message value containing command substitution really can execute; never
 # blank those out.
