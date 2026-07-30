@@ -165,15 +165,32 @@ cp "$AGENT_MD" "$SCRATCH/.opencode/agent/browser-agent.md"
 # an unsupported version, or a host tool still enabled), this turns a latent
 # "runs unconfined" landmine into a loud, safe refusal. `debug agent` has no
 # --dir, so we resolve the templated def by running in the scratch project dir.
-gate_out="$(cd "$SCRATCH" && "$OPENCODE_BIN" debug agent browser-agent 2>/dev/null)" || \
-  die "tool-set gate: 'opencode debug agent browser-agent' failed to run — cannot confirm a browser-only tool set (unsupported opencode version? see README 'opencode version requirement'); refusing to run"
-printf '%s' "$gate_out" | python3 -c '
+#
+# CAPTURE TO A FILE — NEVER `$(...)`. opencode does not reliably flush stdout
+# before exiting when stdout is a PIPE, so a command-substitution capture returns
+# a TRUNCATED prefix. Measured on these hosts: `debug skill` 65536 B via pipe vs
+# 293329 B via file (deterministic); `debug v2` 55276/55276/6103 B across three
+# identical pipe runs — two different cut points AND run-to-run variance, i.e. a
+# flush race on exit, not a fixed buffer cap. A truncated JSON document is
+# unparseable, so the gate fails closed (correct!) — but the refusal then
+# masquerades as an opencode-version problem. Redirecting to a real file removes
+# the pipe, and therefore the race: the same command that died with "Unterminated
+# string" via `$(...)` parses cleanly to a tool set of ['browser'] from a file.
+# $SCRATCH is already mktemp -d'd and rm -rf'd on every exit path.
+GATE_OUT="$SCRATCH/gate.json"
+( cd "$SCRATCH" && "$OPENCODE_BIN" debug agent browser-agent ) >"$GATE_OUT" 2>/dev/null || \
+  die "tool-set gate: 'opencode debug agent browser-agent' failed to RUN (non-zero exit) — cannot confirm a browser-only tool set; refusing to run (see README 'runtime tool-set gate')"
+[ -s "$GATE_OUT" ] || \
+  die "tool-set gate: 'opencode debug agent browser-agent' produced NO output — cannot confirm a browser-only tool set; refusing to run (see README 'runtime tool-set gate')"
+python3 -c '
 import json, sys
 # Confirm the resolved tool set is browser-ONLY. Fail closed (exit!=0) on ANY
 # uncertainty: unparseable output, missing `browser`, `browser` not true, a host
 # tool still true, or a host tool absent (absence must NOT read as "disabled").
+# Reads the dump from a FILE (argv[1]) — never a pipe (flush race, see above).
 try:
-    tools = json.load(sys.stdin)["tools"]
+    with open(sys.argv[1]) as fh:
+        tools = json.load(fh)["tools"]
     assert isinstance(tools, dict)
 except Exception as e:
     sys.stderr.write("unparseable debug-agent tool set: %s\n" % e); sys.exit(3)
@@ -187,7 +204,15 @@ missing = [t for t in required_false if t not in tools]
 if missing:
     sys.stderr.write("cannot confirm host tools disabled (absent: %s)\n" % ",".join(missing)); sys.exit(6)
 sys.exit(0)
-' || die "tool-set gate FAILED: opencode did not resolve browser-agent to a browser-ONLY tool set — the host-tool denial did not take on this opencode version/config. Refusing to run the model unconfined (see README 'runtime tool-set gate' / 'opencode version requirement')"
+' "$GATE_OUT"
+gate_rc=$?
+# Distinguish the three failure classes — a truncation used to masquerade as a
+# version problem, which is exactly what misdirects the diagnosis.
+case "$gate_rc" in
+  0) : ;;
+  3) die "tool-set gate: opencode's debug-agent output was UNPARSEABLE (not JSON, or no \`tools\` map) — cannot confirm a browser-only tool set; refusing to run. Reproduce with a FILE redirect (never a pipe): cd \"$SCRATCH\" && opencode debug agent browser-agent > /tmp/gate.json (see README 'runtime tool-set gate')" ;;
+  *) die "tool-set gate FAILED: opencode did not resolve browser-agent to a browser-ONLY tool set — the host-tool denial did not take on this opencode version/config. Refusing to run the model unconfined (see README 'runtime tool-set gate')" ;;
+esac
 
 # --- open the agent's own tab (with a pre-flight readiness retry) ------------ #
 # Opened AFTER the gate so a gate-fail leaks no tab.

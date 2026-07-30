@@ -62,18 +62,25 @@ export const OP_TO_SERVER = Object.freeze({
   whoami: "whoami",
 });
 
-// `upload` populates an <input type=file> with a file at a caller-chosen PATH via
-// CDP DOM.setFileInputFiles. EXFIL TRADEOFF (explicit operator decision): the agent
-// may supply ANY path — there is NO path allowlist here. Chrome reads the file by
-// path itself (same host), so no bytes route through the agent, but the CONTENTS of
-// any readable file could be posted to the target site. This is accepted; it is made
-// safe-to-audit rather than blocked: the SERVER audit-logs EVERY upload (op + target
-// domain + path). Still a bounded TYPED op — only selector/path/frame reach the wire
-// (buildRequest whitelists them); no raw-CDP/method/params passthrough. Own-tab-scoped
-// (the tab is forced by env), like every other op.
+// The AUTONOMOUS model's DEFAULT op set — 11 ops, identical to browser.js's typed
+// `op` enum, the agent-md capability table, and the README's published contract.
+// Keep those four in lockstep (tests/browser_tool.test.mjs parses all four and
+// asserts they match, so a drift fails CI).
+//
+// `upload` is DELIBERATELY ABSENT here. It populates an <input type=file> from a
+// caller-chosen ABSOLUTE PATH via CDP DOM.setFileInputFiles, with NO path
+// allowlist: Chrome reads the file by path itself (same host, no bytes cross the
+// bridge), but the CONTENTS of any readable file could be posted to the target
+// site. That exfil tradeoff is acceptable for the OPERATOR driving the `browser`
+// CLI by hand (deliberate, audit-logged, human-chosen path) — it is NOT acceptable
+// as a default for a cheap model that is by design pointed at untrusted,
+// prompt-injecting pages, where the "caller" choosing the path can effectively be
+// the page. `upload` stays in OP_TO_SERVER so it remains REACHABLE, but only via
+// an explicit, deliberate `BROWSER_AGENT_ALLOWED_OPS` opt-in (documented in the
+// README) — never by default, and never by anything the model can set itself.
 export const ALLOWED_OPS_DEFAULT = Object.freeze([
   "text", "html", "eval", "nav", "screenshot",
-  "frames", "click", "type", "key", "activate", "upload", "whoami",
+  "frames", "click", "type", "key", "activate", "whoami",
 ]);
 
 export const TEXT_MAX_BYTES_DEFAULT = 32768;
@@ -145,6 +152,11 @@ export function hostDenied(host, allowList, denyList) {
   return false;
 }
 
+// BROWSER_AGENT_ALLOWED_OPS — the operator's explicit op-set override (a space/
+// comma separated list). Unset/empty → ALLOWED_OPS_DEFAULT (the 11-op browser-only
+// set). Set → it REPLACES the default wholesale, so it can both narrow the agent
+// (`"text,html"`) and deliberately re-enable an off-by-default op such as `upload`.
+// It is read from the wrapper's environment, which the MODEL cannot influence.
 export function allowedOpsFromEnv(env) {
   const raw = _list(env.BROWSER_AGENT_ALLOWED_OPS);
   return raw.length ? raw : [...ALLOWED_OPS_DEFAULT];
@@ -273,8 +285,10 @@ export function buildRequest(args, env, token) {
     }
   } else if (op === "upload") {
     // Populate a file input. TYPED scalars only: selector + path (+ optional frame).
-    // ANY path is allowed for the agent (the explicit exfil tradeoff above); the
-    // server audit-logs every upload. Only these fields reach the wire — a smuggled
+    // NOT in ALLOWED_OPS_DEFAULT — unreachable unless the operator explicitly opts
+    // in via BROWSER_AGENT_ALLOWED_OPS (see the note on ALLOWED_OPS_DEFAULT). When
+    // opted in, ANY path is allowed (the explicit exfil tradeoff) and the server
+    // audit-logs every upload. Only these fields reach the wire — a smuggled
     // cdp/method/params is dropped (the whitelist build below).
     if (!args || !args.selector) throw new BrowserToolRefusal("upload_missing_selector");
     if (!args.path) throw new BrowserToolRefusal("upload_missing_path");
