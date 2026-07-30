@@ -1020,13 +1020,45 @@ def i3_focus_argv(title):
     return ["i3-msg", criteria]
 
 
+# Well-known absolute locations for `i3-msg`, tried IN ORDER when it is not on
+# PATH. The browser-bridge systemd --user service runs with a MINIMAL PATH
+# (python3 + coreutils) that does NOT include /run/current-system/sw/bin, where
+# i3-msg actually lives — so `shutil.which("i3-msg")` returns None IN-SERVICE
+# even on a graphical i3 host, and `activate` silently reported i3:"skipped".
+# Resolving i3-msg by these absolute paths makes the host-side foregrounding
+# work regardless of the (possibly minimal) service PATH — belt-and-suspenders
+# with the nix unit's PATH fix (which puts ${pkgs.i3}/bin on PATH).
+_I3_MSG_FALLBACKS = (
+    "/run/current-system/sw/bin/i3-msg",
+    str(Path.home() / ".nix-profile" / "bin" / "i3-msg"),
+)
+
+
+def _resolve_i3_msg():
+    """Absolute path to an executable `i3-msg`, or None if none is found.
+
+    Prefers `shutil.which` (honours PATH), then falls back to the first
+    well-known absolute location (see _I3_MSG_FALLBACKS) that EXISTS and is
+    EXECUTABLE. The fallback is what makes host-side i3 foregrounding work under
+    the browser-bridge systemd --user service, whose minimal PATH omits
+    /run/current-system/sw/bin."""
+    found = shutil.which("i3-msg")
+    if found:
+        return found
+    for cand in _I3_MSG_FALLBACKS:
+        if os.path.exists(cand) and os.access(cand, os.X_OK):
+            return cand
+    return None
+
+
 def i3_available() -> bool:
     """True when host-side i3 foregrounding is meaningful: a graphical session
-    (DISPLAY set) AND `i3-msg` on PATH. A headless / non-i3 host → False → the
+    (DISPLAY set) AND a resolvable `i3-msg` (on PATH or a well-known absolute
+    fallback — see _resolve_i3_msg). A headless / non-i3 host → False → the
     `activate` op SKIPS the i3 step gracefully (no error)."""
     if not os.environ.get("DISPLAY"):
         return False
-    return shutil.which("i3-msg") is not None
+    return _resolve_i3_msg() is not None
 
 
 def i3_foreground(title, *, timeout: float = I3_MSG_TIMEOUT) -> str:
@@ -1046,6 +1078,14 @@ def i3_foreground(title, *, timeout: float = I3_MSG_TIMEOUT) -> str:
     argv = i3_focus_argv(title)
     if argv is None:
         return "skipped"
+    # Resolve i3-msg to an ABSOLUTE path for argv[0] so the call works even when
+    # i3-msg is not on the (minimal systemd --user) PATH. i3_available() above
+    # already confirmed it resolves; re-check defensively. The criteria (argv[1])
+    # is built + sanitized + re.escape'd by i3_focus_argv — UNCHANGED here.
+    i3_msg = _resolve_i3_msg()
+    if i3_msg is None:
+        return "skipped"
+    argv[0] = i3_msg
     try:
         proc = subprocess.run(argv, shell=False, capture_output=True,
                               timeout=timeout)

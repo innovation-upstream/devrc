@@ -759,7 +759,15 @@ in
     Service = {
       Type = "simple";
       Environment = [
-        "PATH=${lib.makeBinPath [ pkgs.python312 pkgs.coreutils ]}"
+        # pkgs.i3 puts `i3-msg` on the service PATH: the `activate` op's
+        # host-side i3 foregrounding (#196) resolves i3-msg via PATH, but a
+        # systemd --user service otherwise inherits only python3+coreutils —
+        # NOT /run/current-system/sw/bin where i3-msg lives — so `which i3-msg`
+        # returned None in-service and `activate` silently reported i3:"skipped"
+        # even on the graphical i3 host. Pin the hermetic store path (pkgs.i3)
+        # and keep the system profile as a fallback. server.py ALSO resolves
+        # i3-msg by well-known absolute path (belt-and-suspenders).
+        "PATH=${lib.makeBinPath [ pkgs.python312 pkgs.coreutils pkgs.i3 ]}:/run/current-system/sw/bin"
         # Bind loopback only; never reachable off-host.
         "BROWSER_BRIDGE_HOST=127.0.0.1"
         # Distinct from the activity receiver's 8787.
