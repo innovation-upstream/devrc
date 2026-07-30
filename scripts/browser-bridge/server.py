@@ -106,8 +106,13 @@ from urllib.parse import unquote, urlsplit
 # frame. They dispatch + tab-scope exactly like the existing tab-scoped ops. The
 # server stays op-agnostic about the CDP mechanics — it only routes to the owned/
 # target tab and forwards the typed params (frame/selector/text/key) to the extension.
+# `activate` foregrounds the owned/target tab (chrome.tabs.update{active} +
+# chrome.windows.update{focused}) so a foreground-throttled SPA loads; it is
+# tab-scoped and dispatched like the other tab-scoped ops (its optional `waitMs`
+# is a passthrough field, not a routing hint). It is the ONE op that STEALS the
+# user's foreground focus (documented as intended, best-effort under i3).
 ALLOWED_OPS = ("getHtml", "text", "eval", "tabs", "nav", "screenshot",
-               "open", "close", "frames", "click", "type", "key")
+               "open", "close", "frames", "click", "type", "key", "activate")
 
 # Ops handled ENTIRELY server-side (never dispatched to the extension). `release`
 # relinquishes a session's owned-tab mapping without touching the real Brave tab.
@@ -118,7 +123,8 @@ SERVER_OPS = ("release",)
 # serialization (see Registry.submit). `open` (creates a tab), `tabs` (lists all)
 # and `release` (server-side) do NOT contend for a single tab.
 TAB_SCOPED_OPS = frozenset({"getHtml", "text", "eval", "nav", "screenshot",
-                            "close", "frames", "click", "type", "key"})
+                            "close", "frames", "click", "type", "key",
+                            "activate"})
 
 # Per-op required fields (skill-supplied). Absent → 400 bad_request. NOTE: `close`
 # takes NO skill-supplied field — the server injects the caller's owned tabId (or

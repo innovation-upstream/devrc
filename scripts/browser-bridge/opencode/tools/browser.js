@@ -23,14 +23,16 @@ export default tool({
     "'screenshot', 'frames' (list the tab's frames incl. cross-origin iframes — " +
     "pick one for `frame`), 'click' (TRUSTED click, pass `selector`), 'type' " +
     "(TRUSTED text input, pass `text`, optional `selector`), 'key' (one key: " +
-    "Enter/Tab/Escape/Backspace/Delete/Arrow*/Home/End/Page*, optional `selector`). " +
+    "Enter/Tab/Escape/Backspace/Delete/Arrow*/Home/End/Page*, optional `selector`), " +
+    "'activate' (FOREGROUND your tab so a foreground-throttled SPA finishes " +
+    "loading — steals the user's focus; optional `waitMs` to wait for load). " +
     "text/html/eval/click/type/key accept `frame` (a frameId or url-substring from " +
     "`frames`) to act INSIDE a cross-origin iframe. You cannot choose the tab — it " +
     "is fixed to the one you were given. Stay on the allowed domains.",
   args: {
     op: tool.schema
       .enum(["text", "html", "eval", "nav", "screenshot",
-             "frames", "click", "type", "key"])
+             "frames", "click", "type", "key", "activate"])
       .describe("the operation to perform on your tab"),
     selector: tool.schema.string().optional()
       .describe("op=text/click/type/key: CSS selector (click target / focus / scope)"),
@@ -46,6 +48,8 @@ export default tool({
       .describe("optional: a frameId or url-substring (from op=frames) to act INSIDE that frame"),
     maxBytes: tool.schema.number().optional()
       .describe("op=text: cap the returned text in bytes (default 32768, 0=uncapped)"),
+    waitMs: tool.schema.number().optional()
+      .describe("op=activate: bounded ms to wait for the tab to finish loading (0=no wait)"),
   },
   async execute(args) {
     // runBrowserOp reads the forced tab / instance / domain policy / token from

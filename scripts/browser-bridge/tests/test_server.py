@@ -940,10 +940,15 @@ def test_validate_command_contract():
     # The op set is the shared contract with extension/protocol.js.
     assert set(S.ALLOWED_OPS) == {"getHtml", "text", "eval", "tabs", "nav",
                                   "screenshot", "open", "close",
-                                  "frames", "click", "type", "key"}
+                                  "frames", "click", "type", "key", "activate"}
     # `text` is a dispatched, tab-scoped, cheap-read op with NO required field.
     assert S.validate_command({"op": "text"}) == ("text", None)
     assert "text" in S.TAB_SCOPED_OPS
+    # `activate` is a dispatched, tab-scoped op with NO required field (the server
+    # injects the tabId; its optional waitMs is a passthrough, not a routing hint).
+    assert S.validate_command({"op": "activate"}) == ("activate", None)
+    assert S.validate_command({"op": "activate", "waitMs": 1000}) == ("activate", None)
+    assert "activate" in S.TAB_SCOPED_OPS
     assert S.validate_command({"op": "tabs"}) == ("tabs", None)
     assert S.validate_command({"op": "eval", "js": "1"})[0] == "eval"
     assert S.validate_command({"op": "eval"})[1] == "missing_field:js"
@@ -1442,6 +1447,86 @@ def test_explicit_tab_override():
                         headers={S.HDR_SESSION_ID: "A"})
         assert st == 200
         assert body["result"]["data"]["tabId"] == 77
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
+# --- `activate` op: tab-scoped foreground, waitMs passthrough, telemetry ---- #
+def test_activate_routes_to_owned_session_tab():
+    """`activate` is tab-scoped: a session that `open`ed has its activate routed
+    to ITS owned tabId (own-tab enforcement — it can only ever foreground the tab
+    the session owns, never an arbitrary one)."""
+    srv, _ = _serve()
+    ext = FakeExtension(srv, instance_id="solo", label="only",
+                        executor=_tab_echo_exec([101]))
+    ext.start()
+    try:
+        assert _wait_connected(srv, want=True)
+        _cmd(srv, {"op": "open"}, session="A")
+        st, body = _cmd(srv, {"op": "activate"}, session="A")
+        assert st == 200
+        assert body["result"]["data"]["tabId"] == 101, \
+            "activate must route to the session's owned tab (tab-scoped, own-tab enforced)"
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
+def test_activate_explicit_tab_override():
+    """`--tab <id>` forces the activate target even with no owned tab."""
+    srv, _ = _serve()
+    ext = FakeExtension(srv, instance_id="solo", label="only",
+                        executor=_tab_echo_exec([]))
+    ext.start()
+    try:
+        assert _wait_connected(srv, want=True)
+        st, body = _req(srv, "POST", "/cmd", {"op": "activate", "tab": 88},
+                        headers={S.HDR_SESSION_ID: "A"})
+        assert st == 200
+        assert body["result"]["data"]["tabId"] == 88
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
+def test_activate_forwards_waitms_to_extension():
+    """`waitMs` is a passthrough command field (like text's selector/maxBytes) —
+    forwarded verbatim to the extension, NOT stripped like target/tab."""
+    srv, _ = _serve()
+    ext = FakeExtension(srv, instance_id="solo", label="only",
+                        executor=lambda c: {"tabId": c.get("tabId"),
+                                            "url": "https://x.test", "status": "complete"})
+    ext.start()
+    try:
+        assert _wait_connected(srv, want=True)
+        st, _ = _req(srv, "POST", "/cmd", {"op": "activate", "waitMs": 1500})
+        assert st == 200
+        acts = [c for c in ext.dispatched if c["op"] == "activate"]
+        assert len(acts) == 1
+        assert acts[0]["waitMs"] == 1500
+        # Routing hints never leak into the dispatched command.
+        assert "target" not in acts[0] and "tab" not in acts[0]
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
+def test_activate_telemetry_is_metadata_only(telemetry):
+    """PRIVACY: an activate event emits ONLY op + the bare domain — never page
+    content (activate returns no page content anyway; assert the metadata shape)."""
+    spool_dir = telemetry
+    srv, _ = _serve()
+    ext = FakeExtension(
+        srv, executor=lambda c: {"tabId": 5, "windowId": 1, "active": True,
+                                 "status": "complete",
+                                 "url": "https://model-benchmarking.civit.ai/run"})
+    ext.start()
+    try:
+        assert _wait_connected(srv, want=True)
+        st, _ = _req(srv, "POST", "/cmd", {"op": "activate"})
+        assert st == 200
+        e = _wait_events(spool_dir, 1)[0]
+        p = json.loads(e["payload"])
+        assert p["op"] == "activate"
+        assert p["outcome"] == "ok"
+        assert p["domain"] == "model-benchmarking.civit.ai"
     finally:
         ext.stop(); srv.shutdown(); srv.server_close()
 

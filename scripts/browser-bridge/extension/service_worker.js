@@ -22,6 +22,8 @@ import {
   pollHeaders, resultWithInstance, normalizeText, TEXT_MAX_BYTES_DEFAULT,
   classifyPollStatus, POLL_COMMAND, POLL_IDLE, POLL_SUPERSEDED,
   POLL_UNAUTHORIZED, SUPERSEDE_BACKOFF_MS, captureWithRetry,
+  // `activate` op: bounded wait-for-load after foregrounding (pure + unit-tested).
+  waitForTabLoad,
   // CDP (chrome.debugger) helpers — still used for screenshots + TOP-frame trusted
   // input (the pure, unit-tested decision layer).
   CDP_VERSION, withCdpSession, assertTabCdpReady, keyEventParams,
@@ -543,6 +545,46 @@ const OPS = {
     } catch (e) {
       return { closed: cmd.tabId, alreadyGone: true };
     }
+  },
+
+  // Bring the target tab to the FOREGROUND so a foreground-REQUIRING web app (a
+  // heavy SPA Chrome throttles while the tab is backgrounded — #175 keeps the
+  // agent's tab backgrounded by design, so such an app never leaves "Loading…")
+  // actually boots and can then be driven. This is THE ONE INTRUSIVE OP: it
+  // deliberately STEALS the user's current foreground (that IS the point — to
+  // load the app). Two steps, both permission-free for the extension's own use:
+  //   * chrome.tabs.update(tabId,{active:true})   — make it the active tab of its
+  //     window;
+  //   * chrome.windows.update(windowId,{focused})  — request that window's focus.
+  // i3 CAVEAT (honest): windows.update REQUESTS focus, but on a tiling WM Chrome
+  // cannot force i3 to raise/switch-workspace to the window — so activation
+  // reliably sets the tab active WITHIN its window and requests focus, but may
+  // NOT raise the window if it is on another i3 workspace (best-effort).
+  //
+  // Then an OPTIONAL bounded wait-for-load (waitForTabLoad — pure, unit-tested):
+  // wait (≤ ACTIVATE_WAIT_MAX_MS 8s, well under the 20s cmd_timeout) for the tab
+  // to reach status:"complete" + a short paint settle, so the caller gets a
+  // more-loaded tab. A discarded / never-completing tab returns PROMPTLY — the
+  // #189 no-wedge guarantee (tabLoadSettled fail-fasts an unloaded tab). No CDP,
+  // no debugger banner, no new permission. `globalThis.BROWSER_BRIDGE_ACTIVATE_
+  // TIMING` is a TEST-ONLY seam to shrink the poll/settle so a test settles in ms.
+  async activate(cmd) {
+    const tab = await targetTab(cmd);   // owned/explicit/active tab (server-forced for the agent)
+    // Steal focus: active tab of its window, then request the window's focus.
+    await chrome.tabs.update(tab.id, { active: true });
+    if (tab.windowId != null) {
+      try { await chrome.windows.update(tab.windowId, { focused: true }); }
+      catch (e) { /* best-effort — i3 may refuse to raise across workspaces */ }
+    }
+    // Optional bounded wait-for-load (default a modest wait; --wait/waitMs=0 skips).
+    const timing = (typeof globalThis !== "undefined"
+      && globalThis.BROWSER_BRIDGE_ACTIVATE_TIMING) || {};
+    const { tab: t } = await waitForTabLoad(
+      () => chrome.tabs.get(tab.id),
+      { waitMs: cmd && cmd.waitMs, ...timing });
+    const out = t || tab;
+    return { tabId: out.id, windowId: out.windowId, url: out.url,
+             title: out.title, active: out.active, status: out.status };
   },
 };
 

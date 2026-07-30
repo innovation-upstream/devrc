@@ -34,6 +34,15 @@
 #                               subsequent ops route to it. Prints its tabId.
 #   browser close             — close this session's owned tab + drop ownership
 #   browser release           — drop ownership WITHOUT closing the tab
+#   browser activate [--wait MS | --no-wait]
+#                             — FOREGROUND the owned/active tab (--tab to target
+#                               one) so a foreground-REQUIRING SPA (heavy JS app
+#                               Chrome throttles while backgrounded) finishes
+#                               loading, then can be driven. ⚠ STEALS FOCUS — the
+#                               ONE intrusive op; it changes what you see. Waits
+#                               (bounded, default ~3s, cap ~8s) for load unless
+#                               --no-wait; --wait MS overrides. i3 caveat: may not
+#                               raise the window across workspaces (best-effort).
 #   browser html              — outerHTML of the owned/active tab (+ url, title)
 #   browser text [selector]   — visible innerText of the owned/active tab (cheap
 #                               read; optional CSS selector; --max-bytes N caps
@@ -317,6 +326,32 @@ case "$sub" in
   release)
     cmd_op release | pretty
     ;;
+  activate)
+    # browser [--tab <id>] activate [--wait MS | --no-wait]
+    # Foreground the owned/explicit/active tab (STEALS FOCUS — the one intrusive
+    # op) so a foreground-throttled SPA loads and can then be driven. Optional
+    # bounded wait-for-load: default a modest wait (server-clamped, cap ~8s);
+    # --wait MS overrides; --no-wait skips (waitMs:0). i3 caveat: may not raise
+    # the window across workspaces (best-effort). NOTE: an extension code change —
+    # requires an extension reload to take effect (no permission re-prompt).
+    wait=""
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --wait) shift; [ $# -ge 1 ] || die "usage: browser activate [--wait MS]"; wait="$1"; shift ;;
+        --wait=*) wait="${1#--wait=}"; shift ;;
+        --no-wait) wait="0"; shift ;;
+        --) shift; break ;;
+        -*) die "browser activate: unknown flag: $1 (try: --wait MS | --no-wait)" ;;
+        *) die "browser activate takes no positional args (got: $1)" ;;
+      esac
+    done
+    extra=""
+    if [ -n "$wait" ]; then
+      case "$wait" in (*[!0-9]*) die "--wait must be a non-negative integer of ms (got: $wait)";; esac
+      extra="\"waitMs\":${wait}"
+    fi
+    cmd_op activate "$extra" | pretty
+    ;;
   html)
     cmd_op getHtml | pretty
     ;;
@@ -454,6 +489,6 @@ print(sys.argv[1])
     grep -E '^#( |$)' "$0" | sed -E 's/^# ?//'
     ;;
   *)
-    die "unknown subcommand: $sub (try: health instances open close release html text eval tabs nav screenshot frames click type key agent)"
+    die "unknown subcommand: $sub (try: health instances open close release activate html text eval tabs nav screenshot frames click type key agent)"
     ;;
 esac

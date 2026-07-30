@@ -13,9 +13,14 @@
 // any-frame reads + TRUSTED input (see the CDP section lower in this file):
 // `frames` lists the tab's frames, `click`/`type`/`key` dispatch trusted input,
 // and `--frame` routes a read (getHtml/text/eval) INTO a chosen cross-origin frame.
+// `activate` foregrounds the target tab (chrome.tabs.update{active} +
+// chrome.windows.update{focused}) so a foreground-REQUIRING web app (a heavy SPA
+// Chrome throttles while backgrounded) actually loads and can then be driven. It
+// is the ONE op that deliberately STEALS the user's focus; every other op is
+// non-intrusive. Tab-scoped (it targets a specific tab); no new permission.
 export const ALLOWED_OPS = [
   "getHtml", "text", "eval", "tabs", "nav", "screenshot", "open", "close",
-  "frames", "click", "type", "key",
+  "frames", "click", "type", "key", "activate",
 ];
 
 // Per-op required fields (mirrors server.py REQUIRED_FIELDS). The server already
@@ -218,6 +223,83 @@ export async function captureWithRetry(capture, opts = {}) {
     }
   }
   throw lastErr; // unreachable (loop always returns or throws) — belt & braces
+}
+
+// --- `activate` op: foreground the tab + bounded wait-for-load -------------- //
+// `activate` brings the target tab to the FOREGROUND (see service_worker.js's
+// executor: chrome.tabs.update{active} + chrome.windows.update{focused}) so a
+// foreground-REQUIRING SPA — one Chrome throttles while the tab is backgrounded
+// (#175 keeps the agent's tab backgrounded by design) — actually boots. After
+// foregrounding, we OPTIONALLY wait (bounded) for the tab to finish loading so
+// the caller gets a more-loaded tab to drive. ALL of the timing/decision logic
+// is pure + unit-tested here; the SW supplies the chrome.tabs.get side effect.
+//
+// #189 NO-WEDGE DISCIPLINE: everything is bounded WELL under the server's
+// cmd_timeout (20s) — the wait is capped at ACTIVATE_WAIT_MAX_MS (8s) and a
+// tab that has NO live renderer (discarded / unloaded by Chrome's memory saver)
+// or that never reaches "complete" returns PROMPTLY, never hangs the poll loop.
+
+// Default wait after foregrounding (modest — most SPAs paint their shell fast).
+export const ACTIVATE_WAIT_DEFAULT_MS = 3000;
+// Hard cap on the wait, kept well under the server cmd_timeout (20s) so the SW
+// always answers BEFORE the server gives up (and before the next /poll starves).
+export const ACTIVATE_WAIT_MAX_MS = 8000;
+// How often to re-check the tab's load status while waiting.
+export const ACTIVATE_POLL_MS = 150;
+// A short paint settle after status:"complete" so a just-booted SPA has a beat
+// to render its first controls before the caller reads/drives it.
+export const ACTIVATE_SETTLE_MS = 250;
+
+// Clamp a caller-supplied waitMs into [0, ACTIVATE_WAIT_MAX_MS]. undefined/null/
+// "" → the modest default; <=0 or non-finite → 0 (no wait). Never exceeds the
+// cap (the #189 bound). Pure.
+export function clampActivateWaitMs(waitMs) {
+  if (waitMs === undefined || waitMs === null || waitMs === "") {
+    return ACTIVATE_WAIT_DEFAULT_MS;
+  }
+  const n = Number(waitMs);
+  if (!Number.isFinite(n) || n <= 0) return 0;
+  return Math.min(Math.floor(n), ACTIVATE_WAIT_MAX_MS);
+}
+
+// True when we should STOP waiting on a tab: it finished loading
+// (status:"complete"), OR it has no live renderer to ever finish (discarded /
+// unloaded → fail-fast, never wait for a "complete" that cannot come), OR it is
+// gone (null). This is the #189 discarded-tab guard for the activate wait. Pure.
+export function tabLoadSettled(tab) {
+  if (!tab) return true;                                   // gone → stop
+  if (tab.discarded || tab.status === "unloaded") return true; // no renderer → stop
+  return tab.status === "complete";
+}
+
+// Poll `getTab()` until the tab is settled (loaded, or discarded/gone) or the
+// bounded wait elapses; then, when it settled by LOADING (not discard), a short
+// paint settle. Returns { tab, waited, timedOut } — `tab` is the freshest tab
+// object. EVERYTHING is bounded (waitMs is clamped ≤ ACTIVATE_WAIT_MAX_MS) so a
+// never-completing / discarded tab returns promptly and can NEVER wedge the SW
+// poll loop (#189). getTab/sleep/now are injected so this is unit-tested with no
+// real clock and no real browser. Pure orchestration.
+export async function waitForTabLoad(getTab, opts = {}) {
+  const waitMs = clampActivateWaitMs(opts.waitMs);
+  const pollMs = opts.pollMs == null ? ACTIVATE_POLL_MS : opts.pollMs;
+  const settleMs = opts.settleMs == null ? ACTIVATE_SETTLE_MS : opts.settleMs;
+  const sleep = opts.sleep || defaultSleep;
+  const now = opts.now || Date.now;
+  let tab = await getTab();
+  if (waitMs <= 0) return { tab, waited: false };
+  const deadline = now() + waitMs;
+  while (!tabLoadSettled(tab)) {
+    const remaining = deadline - now();
+    if (remaining <= 0) return { tab, waited: true, timedOut: true };
+    await sleep(Math.min(pollMs, remaining));
+    tab = await getTab();
+  }
+  // Settled by a real load (not a discard) → a brief paint settle, then re-read.
+  if (tab && tab.status === "complete" && settleMs > 0) {
+    await sleep(settleMs);
+    tab = await getTab();
+  }
+  return { tab, waited: true };
 }
 
 // --- CDP (chrome.debugger) ops: any-frame reads + trusted input ------------- //

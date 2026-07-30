@@ -136,6 +136,7 @@ always-detach) is in the **CDP ops** section below.
 | `click`      | top frame: **CDP** `getBoundingClientRect` → `Input.dispatchMouseEvent` (trusted); `--frame`: **SYNTHETIC** click via `chrome.scripting`; `selector` required, `frame` optional | `{url,clicked,x,y,frame,trusted}` |
 | `type`       | top frame: **CDP `Input.insertText`** (trusted); `--frame`: **SYNTHETIC** input via `chrome.scripting`; `text` required, `selector`/`frame` optional | `{url,typed,frame,trusted}` |
 | `key`        | top frame: **CDP `Input.dispatchKeyEvent`** (trusted); `--frame`: **SYNTHETIC** key via `chrome.scripting`; one bounded key; `key` required | `{url,key,frame,trusted}` |
+| `activate`   | **FOREGROUND the tab** — `chrome.tabs.update(tab,{active:true})` + `chrome.windows.update(windowId,{focused:true})`, then an OPTIONAL bounded wait-for-`status:"complete"` + paint settle (`waitMs`, clamped ≤8s; a discarded/never-completing tab returns promptly — no wedge). Loads a foreground-throttled SPA so it can be driven. **⚠ STEALS FOCUS** (the one intrusive op); **i3:** requests window focus but may not raise across workspaces (best-effort). No new permission | `{tabId,windowId,url,title,active,status}` |
 
 `open`/`close` are dispatched to the extension; `release` (drop ownership, don't
 close the tab) is handled server-side and never reaches the extension.
@@ -163,7 +164,7 @@ cross-origin iframe returns `frame_not_found` (fails safe); `text`/`html`/`click
 `eval --frame`, and TOP-frame trusted input use **CDP (chrome.debugger)** (see the CDP
 section below). A `--frame` op reports the FRAME's own `url` (so a caller can confirm it
 read the intended frame, not the top document). The tab-scoped ops
-(`getHtml`/`text`/`eval`/`nav`/`screenshot`/`close`/`frames`/`click`/`type`/`key`)
+(`getHtml`/`text`/`eval`/`nav`/`screenshot`/`close`/`frames`/`click`/`type`/`key`/`activate`)
 run against
 the calling session's owned tab when it has one (see Session isolation), else the
 active tab. `text` is the **cheap read**: it returns visible `innerText` (~KB)
@@ -390,7 +391,7 @@ per-session (multi-step **workflow**) isolation did not.
 ## Telemetry (activity pipeline)
 
 Each **handled command** (`getHtml`/`text`/`eval`/`tabs`/`nav`/`screenshot`/
-`frames`/`click`/`type`/`key`, incl. its error/ambiguous outcomes) emits **one**
+`frames`/`click`/`type`/`key`/`activate`, incl. its error/ambiguous outcomes) emits **one**
 event into the personal activity-telemetry pipeline, so browser-skill usage is
 first-class self-telemetry in ClickHouse `activity.events`:
 
@@ -459,8 +460,8 @@ The agent's entire capability is a single **custom opencode tool**, `browser`
 (`opencode/tools/browser.js` + its pure-logic sibling `browser_tool_impl.mjs`,
 copied into the scratch project's `.opencode/tools/` per run). The model calls it
 with TYPED arguments — `op` ∈ {`text`,`html`,`eval`,`nav`,`screenshot`,`frames`,
-`click`,`type`,`key`} plus optional `selector`/`url`/`js`/`text`/`key`/`frame`/
-`maxBytes` — **never a shell command string, and never a raw-CDP `cdp`/`method`
+`click`,`type`,`key`,`activate`} plus optional `selector`/`url`/`js`/`text`/`key`/`frame`/
+`maxBytes`/`waitMs` — **never a shell command string, and never a raw-CDP `cdp`/`method`
 field** (the CDP ops are bounded typed ops only; see the CDP security model above).
 
 - **Why this replaced the bash tool.** The MVP gave the agent opencode's *bash*

@@ -35,6 +35,12 @@ import { homedir } from "node:os";
 // exfil, Browser.*, Target.*, Fetch.*). buildRequest below constructs the wire body
 // field-by-field from a WHITELIST, so any extra arg the model smuggles (a `cdp`, a
 // `tab`, a `method`) is silently dropped, never forwarded. Keep it a whitelist.
+// `activate` foregrounds the agent's OWN (env-forced) tab so a foreground-
+// REQUIRING SPA (throttled while the agent's tab is backgrounded by design)
+// finishes loading and can then be driven. Own-tab-scoped like every other op —
+// the model can never activate an ARBITRARY tab (the tab is forced by env, not a
+// model arg). Typed, bounded, NO raw passthrough. It STEALS the user's focus (the
+// one intrusive op) — used to LOAD the app the agent was told to drive.
 export const OP_TO_SERVER = Object.freeze({
   text: "text",
   html: "getHtml",
@@ -45,11 +51,12 @@ export const OP_TO_SERVER = Object.freeze({
   click: "click",
   type: "type",
   key: "key",
+  activate: "activate",
 });
 
 export const ALLOWED_OPS_DEFAULT = Object.freeze([
   "text", "html", "eval", "nav", "screenshot",
-  "frames", "click", "type", "key",
+  "frames", "click", "type", "key", "activate",
 ]);
 
 export const TEXT_MAX_BYTES_DEFAULT = 32768;
@@ -221,6 +228,16 @@ export function buildRequest(args, env, token) {
     body.key = String(args.key);
     if (args && args.selector) body.selector = String(args.selector);
     _addFrame(body, args);
+  } else if (op === "activate") {
+    // Optional bounded wait-for-load. A TYPED non-negative int only — the server
+    // clamps it to its own cap; an invalid value is refused (never forwarded raw).
+    if (args && args.waitMs != null && args.waitMs !== "") {
+      const n = Number(args.waitMs);
+      if (!Number.isFinite(n) || n < 0 || !Number.isInteger(n)) {
+        throw new BrowserToolRefusal(`bad_waitMs:${args.waitMs}`);
+      }
+      body.waitMs = n;
+    }
   }
   // frames / screenshot: no extra typed fields (the tab is forced by env).
 
@@ -272,6 +289,12 @@ export function summarizeResult(op, envelope) {
   if (op === "key") {
     return JSON.stringify({ ok: true, key: data.key ?? null });
   }
+  if (op === "activate") {
+    // Compact confirmation the tab foregrounded (metadata only — no page content).
+    return JSON.stringify({ ok: true, tabId: data.tabId ?? null,
+      active: data.active ?? null, status: data.status ?? null,
+      url: data.url ?? null, title: data.title ?? null });
+  }
   return JSON.stringify(data);
 }
 
@@ -307,7 +330,8 @@ export async function runBrowserOp(args, opts = {}) {
   // never actually drives the browser, while still enforcing the op allowlist +
   // forced tab (a bad op/tab is refused even in dry-run).
   const MUTATING = op === "nav" || op === "eval" ||
-                   op === "click" || op === "type" || op === "key";
+                   op === "click" || op === "type" || op === "key" ||
+                   op === "activate";   // activate steals focus → never in a dry-run
   if (dry && MUTATING) {
     const allowed = allowedOpsFromEnv(env);
     if (!allowed.includes(op)) throw new BrowserToolRefusal(`op_not_allowed:${op}`);

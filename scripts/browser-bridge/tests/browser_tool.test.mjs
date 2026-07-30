@@ -279,14 +279,57 @@ test("runBrowserOp: dry-run intercepts nav/eval (no fetch) but still enforces de
 
 test("OP_TO_SERVER maps only the bounded ops (no lifecycle ops, no raw CDP)", () => {
   assert.deepEqual(Object.keys(OP_TO_SERVER).sort(),
-    ["click", "eval", "frames", "html", "key", "nav", "screenshot", "text", "type"]);
+    ["activate", "click", "eval", "frames", "html", "key", "nav", "screenshot", "text", "type"]);
   // Lifecycle ops (wrapper owns the tab) AND any raw-CDP escape must be unmappable.
   for (const forbidden of ["open", "close", "tabs", "release",
                            "cdp", "command", "attach", "detach", "sendCommand"]) {
     assert.ok(!(forbidden in OP_TO_SERVER), `${forbidden} must not be mappable`);
   }
   assert.deepEqual([...ALLOWED_OPS_DEFAULT].sort(),
-    ["click", "eval", "frames", "html", "key", "nav", "screenshot", "text", "type"]);
+    ["activate", "click", "eval", "frames", "html", "key", "nav", "screenshot", "text", "type"]);
+});
+
+test("buildRequest: activate forces the env tab; bounded waitMs only; NO raw passthrough", () => {
+  // Bare activate → only op + the forced tab (own-tab-scoped; model can't name a tab).
+  const bare = buildRequest({ op: "activate" }, baseEnv(), TOK).body;
+  assert.equal(bare.op, "activate");
+  assert.equal(bare.tab, 4242, "activate is forced to the env tab");
+  assert.deepEqual(Object.keys(bare).sort(), ["op", "tab"]);
+  // A valid waitMs passes through as a typed int.
+  const w = buildRequest({ op: "activate", waitMs: 1500 }, baseEnv(), TOK).body;
+  assert.equal(w.waitMs, 1500);
+  assert.deepEqual(Object.keys(w).sort(), ["op", "tab", "waitMs"]);
+  // waitMs=0 (no wait) is a legitimate value.
+  assert.equal(buildRequest({ op: "activate", waitMs: 0 }, baseEnv(), TOK).body.waitMs, 0);
+  // A bad waitMs is refused (never forwarded raw); a smuggled extra arg is dropped.
+  assert.throws(() => buildRequest({ op: "activate", waitMs: -5 }, baseEnv(), TOK), /bad_waitMs/);
+  assert.throws(() => buildRequest({ op: "activate", waitMs: 1.5 }, baseEnv(), TOK), /bad_waitMs/);
+  const smuggled = buildRequest(
+    { op: "activate", tab: 1, cdp: "x", method: "Page.navigate", waitMs: 100 },
+    baseEnv(), TOK).body;
+  assert.deepEqual(Object.keys(smuggled).sort(), ["op", "tab", "waitMs"],
+    "activate never forwards a smuggled tab/cdp/method");
+  assert.equal(smuggled.tab, 4242, "the forced env tab wins over a model-supplied tab");
+});
+
+test("summarizeResult: activate returns compact metadata-only confirmation", () => {
+  const s = JSON.parse(summarizeResult("activate", { data: {
+    tabId: 9, windowId: 2, url: "https://x.test/", title: "X",
+    active: true, status: "complete" } }));
+  assert.deepEqual(s, { ok: true, tabId: 9, active: true, status: "complete",
+    url: "https://x.test/", title: "X" });
+});
+
+test("runBrowserOp: activate reaches the bridge with the forced tab", async () => {
+  const fx = fetchStub({ activate: { tabId: 4242, windowId: 1,
+    url: "https://x.test/", title: "X", active: true, status: "complete" } });
+  const out = JSON.parse(await run({ op: "activate", waitMs: 200 }, baseEnv(), fx));
+  assert.equal(fx.calls.length, 1);
+  assert.equal(fx.calls[0].body.op, "activate");
+  assert.equal(fx.calls[0].body.tab, 4242, "forced env tab");
+  assert.equal(fx.calls[0].body.waitMs, 200);
+  assert.equal(out.ok, true);
+  assert.equal(out.status, "complete");
 });
 
 // --------------------------------------------------------------------------- //

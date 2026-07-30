@@ -24,6 +24,9 @@ import {
   clickPoint, boxModelOrigin, frameEvalExpressions, isCdpSyntaxError,
   cdpExceptionText, frameHtmlExpression, frameTextExpression,
   elementRectExpression, focusExpression, fullPageClip,
+  // `activate` op: bounded foreground wait-for-load (pure).
+  clampActivateWaitMs, tabLoadSettled, waitForTabLoad,
+  ACTIVATE_WAIT_DEFAULT_MS, ACTIVATE_WAIT_MAX_MS,
 } from "../extension/protocol.js";
 
 test("op set mirrors the server contract", () => {
@@ -33,9 +36,18 @@ test("op set mirrors the server contract", () => {
   // frames/click/type/key are the CDP (chrome.debugger) ops.
   assert.deepEqual(
     [...ALLOWED_OPS].sort(),
-    ["click", "close", "eval", "frames", "getHtml", "key", "nav",
+    ["activate", "click", "close", "eval", "frames", "getHtml", "key", "nav",
      "open", "screenshot", "tabs", "text", "type"],
   );
+});
+
+test("validateCommand accepts the `activate` op (bare + waitMs + injected tabId)", () => {
+  // activate takes NO required field (the server injects the tabId); waitMs is an
+  // optional passthrough. A bare op validates; a bad-scheme etc. is not its concern.
+  assert.deepEqual(validateCommand({ op: "activate" }), { ok: true });
+  assert.deepEqual(validateCommand({ op: "activate", waitMs: 1000 }), { ok: true });
+  assert.deepEqual(validateCommand({ op: "activate", tabId: 9, waitMs: 0 }),
+    { ok: true });
 });
 
 test("validateCommand accepts the cheap-read `text` op (bare + selector)", () => {
@@ -436,4 +448,88 @@ test("captureWithRetry: first-try success does not sleep or retry", async () => 
   assert.equal(out, "ok");
   assert.equal(calls, 1);
   assert.equal(slept, 0);
+});
+
+// --------------------------------------------------------------------------- //
+// `activate` op: bounded foreground wait-for-load (pure; injected getTab/sleep/now)
+// --------------------------------------------------------------------------- //
+test("clampActivateWaitMs: default / cap / disable", () => {
+  assert.equal(clampActivateWaitMs(undefined), ACTIVATE_WAIT_DEFAULT_MS);
+  assert.equal(clampActivateWaitMs(null), ACTIVATE_WAIT_DEFAULT_MS);
+  assert.equal(clampActivateWaitMs(""), ACTIVATE_WAIT_DEFAULT_MS);
+  assert.equal(clampActivateWaitMs(500), 500);
+  assert.equal(clampActivateWaitMs("1200"), 1200);
+  // clamped to the hard cap (kept well under the 20s cmd_timeout).
+  assert.equal(clampActivateWaitMs(999999), ACTIVATE_WAIT_MAX_MS);
+  // <=0 / non-finite → 0 (no wait).
+  assert.equal(clampActivateWaitMs(0), 0);
+  assert.equal(clampActivateWaitMs(-5), 0);
+  assert.equal(clampActivateWaitMs("nope"), 0);
+});
+
+test("tabLoadSettled: complete/discarded/unloaded/gone stop; loading waits", () => {
+  assert.equal(tabLoadSettled({ status: "complete" }), true);
+  assert.equal(tabLoadSettled({ status: "loading" }), false);
+  assert.equal(tabLoadSettled({ status: "loading", discarded: true }), true);
+  assert.equal(tabLoadSettled({ status: "unloaded" }), true);
+  assert.equal(tabLoadSettled(null), true);
+  assert.equal(tabLoadSettled(undefined), true);
+});
+
+test("waitForTabLoad: an already-complete tab short-circuits (no polling loop)", async () => {
+  let slept = 0;
+  const getTab = async () => ({ id: 5, status: "complete", active: true });
+  const r = await waitForTabLoad(getTab, { waitMs: 5000, settleMs: 0,
+    sleep: () => { slept++; } });
+  assert.equal(r.tab.status, "complete");
+  assert.ok(!r.timedOut);
+  assert.equal(slept, 0, "a complete tab never sleeps a poll interval");
+});
+
+test("waitForTabLoad: a loading tab that becomes complete resolves + paint-settles", async () => {
+  const seq = ["loading", "loading", "complete"];
+  let i = 0, slept = 0;
+  const getTab = async () => ({ id: 5, status: seq[Math.min(i++, seq.length - 1)], active: true });
+  let clock = 0;
+  const r = await waitForTabLoad(getTab, {
+    waitMs: 5000, pollMs: 10, settleMs: 30,
+    sleep: (ms) => { slept += ms; clock += ms; }, now: () => clock,
+  });
+  assert.equal(r.tab.status, "complete");
+  assert.ok(!r.timedOut);
+  assert.ok(slept >= 30, "includes the paint settle after complete");
+});
+
+test("waitForTabLoad: a never-completing tab returns at the bound (NO wedge, #189)", async () => {
+  let gets = 0;
+  const getTab = async () => { gets++; return { id: 5, status: "loading", active: true }; };
+  let clock = 0;
+  const r = await waitForTabLoad(getTab, {
+    waitMs: 100, pollMs: 20, settleMs: 0,
+    sleep: (ms) => { clock += ms; }, now: () => clock,
+  });
+  assert.equal(r.timedOut, true, "a loading-forever tab times out, never hangs");
+  assert.equal(r.tab.status, "loading");
+  // Bounded: it polled a handful of times, not unboundedly.
+  assert.ok(gets >= 2 && gets <= 8, `bounded polling (got ${gets})`);
+  assert.ok(clock <= 120, "total wait stayed within the bound");
+});
+
+test("waitForTabLoad: a DISCARDED tab fails-fast, returns promptly (no wait)", async () => {
+  let gets = 0, slept = 0;
+  const getTab = async () => { gets++; return { id: 5, status: "loading", discarded: true }; };
+  const r = await waitForTabLoad(getTab, { waitMs: 5000, pollMs: 10, settleMs: 30,
+    sleep: () => { slept++; } });
+  assert.equal(gets, 1, "one read, then fail-fast on the discarded tab");
+  assert.equal(slept, 0, "a discarded tab never waits (no renderer will ever complete)");
+  assert.ok(!r.timedOut);
+});
+
+test("waitForTabLoad: waitMs=0 does a single read and no wait", async () => {
+  let gets = 0, slept = 0;
+  const getTab = async () => { gets++; return { id: 5, status: "loading", active: true }; };
+  const r = await waitForTabLoad(getTab, { waitMs: 0, sleep: () => { slept++; } });
+  assert.equal(gets, 1);
+  assert.equal(slept, 0);
+  assert.equal(r.waited, false);
 });
