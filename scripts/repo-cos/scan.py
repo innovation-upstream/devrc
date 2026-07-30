@@ -291,7 +291,8 @@ def _post_approvals_to_clawgate(approvals, excl_state, *, _clawgate=None) -> Non
             repo = clawgate.resolve_repo_fullname(prop.get("repo") or "")
             # `initiative:<slug>` tag from the slug the DIGEST resolved (persisted in
             # last_emailed.json) — pure, no I/O, [] when absent/junk. post_task retries
-            # untagged on a 4xx so a tag can never cost the approval.
+            # untagged on an HTTP 400 (the tag-grammar rejection) so a tag can never cost
+            # the approval; no other status is retried.
             tags = clawgate.build_tags(prop)
             tid = clawgate.post_task(directory, body, repo=repo, tags=tags)
         except Exception as exc:  # noqa: BLE001

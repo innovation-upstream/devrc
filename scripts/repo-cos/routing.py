@@ -157,13 +157,17 @@ def related_for(proposals) -> list:
 # is worse than no key at all. So the tag path (never the display path) filters the
 # vocabulary through the rules below. They are deliberately CONSERVATIVE: a missing tag
 # costs nothing, a wrong tag costs trust, so an ambiguous slug is KEPT.
+#
+# INVARIANT the rules preserve: a slug that survives is emitted VERBATIM as the value half
+# of `initiative:<slug>`. `clawgate.normalize_tag` lowercases, so anything not already
+# all-lowercase is dropped (`not-lowercase`) rather than mangled — that keeps the emitted
+# tag byte-equal to the ledger slug, which is what the initiatives-side join relies on.
 
 # A ClickUp/opaque task id: starts with a digit, >=8 alphanumerics, no separators.
 # Matches 868j34n9y / 868kf6w7r / 868f9pd14; does NOT match 0313, 504, or v0.1.73.
 _ID_TOKEN_RE = re.compile(r"^\d[0-9a-z]{7,}$")
 _TOKEN_SPLIT_RE = re.compile(r"[-_./]+")
 _HAS_LETTER_RE = re.compile(r"[A-Za-z]")
-_HAS_LOWER_RE = re.compile(r"[a-z]")
 
 # Words that describe a DOCUMENT or a generic process step and never a project. A slug
 # made ENTIRELY of these carries no initiative identity. Kept small on purpose — every
@@ -204,14 +208,18 @@ def slug_drop_reason(slug) -> str | None:
       * "too-short"      — <3 chars; can't identify anything.
       * "no-letters"     — a bare date/number, e.g. `2026-07-21`. The scan adopted a
                            dated filename as a card label; it names no initiative.
-      * "screaming-case" — no lowercase letter at all, e.g. `HANDOFF`,
-                           `SESSION-HANDOFF`, `APP-DISCOVERY-DESIGN`. These come from a
-                           doc FILENAME adopted verbatim (`HANDOFF.md`), not from a named
-                           arc. Two reasons to drop rather than lowercase: they are
-                           documents, and the tag grammar forces lowercase, so the tag
-                           would no longer equal the ledger slug and the initiatives-side
-                           join would silently miss. Slugs with any lowercase letter
-                           (`SECURITY-AUDIT-v0.1.64`) are unaffected.
+      * "not-lowercase" — the slug is not ALREADY all-lowercase (`s != s.lower()`), e.g.
+                           `HANDOFF`, `SESSION-HANDOFF`, `APP-DISCOVERY-DESIGN`,
+                           `HANDOFF-comfyui-session`, `SECURITY-AUDIT-v0.1.64`. The
+                           load-bearing reason is the JOIN, not the shouting: the tag
+                           grammar forces lowercase (`clawgate.normalize_tag`), so any
+                           slug carrying an uppercase letter would be emitted as a tag
+                           that no longer equals its ledger slug and the initiatives-side
+                           join would silently miss. Dropping is the only degradation
+                           that keeps `tag == slug` an invariant — a missing tag is
+                           cheap, a tag that joins to nothing is a lie. (Most of these
+                           are also doc FILENAMEs adopted verbatim — `HANDOFF.md`,
+                           `HANDOFF-comfyui-session.md` — i.e. documents, not arcs.)
       * "opaque-id"      — contains a ClickUp-style id token, e.g.
                            `868j34n9y-868kf6w7r-complete-mark`.
       * "generic"        — EVERY token is document/process filler, e.g.
@@ -224,8 +232,8 @@ def slug_drop_reason(slug) -> str | None:
         return "too-short"
     if not _HAS_LETTER_RE.search(s):
         return "no-letters"
-    if not _HAS_LOWER_RE.search(s):
-        return "screaming-case"
+    if s != s.lower():
+        return "not-lowercase"
     toks = slug_tokens(s)
     if not toks:
         return "empty"

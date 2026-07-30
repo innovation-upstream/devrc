@@ -517,6 +517,10 @@ def _prime_scan(tmp_path, monkeypatch, devrc_dir):
     monkeypatch.setattr(exclusions, "HISTORY_DIR", tmp_path / "history")
     monkeypatch.setattr(exclusions, "LATEST_FILE", tmp_path / "latest.json")
     monkeypatch.setattr(scan, "DEFAULT_REPOS", [str(devrc_dir)])
+    # HERMETICITY NOTE: cmd_scan also calls routing.related_for → route.load_current(), a
+    # LIVE cross-cluster read of the homelab mailbox Postgres. It is stubbed suite-wide by
+    # the autouse fixture in tests/conftest.py (which also covers test_dismiss /
+    # test_exclusions / test_scan_cli, the other suites that drive the real cmd_scan).
 
 
 def test_scan_approve_posts_and_suppresses_repo_kept(tmp_path, monkeypatch):
@@ -554,7 +558,6 @@ def test_scan_approve_posts_and_suppresses_repo_kept(tmp_path, monkeypatch):
             posted["directory"] = directory
             posted["body"] = body
             posted["repo"] = repo
-            posted["tags"] = tags
             return 4242
 
     # inject the fake clawgate into scan's poster helper via monkeypatching the module import.
@@ -693,8 +696,15 @@ def test_build_tags_emits_one_initiative_tag():
     _assert_valid_tag(tags[0])
 
 
-def test_build_tags_lowercases_a_mixed_case_slug():
-    assert clawgate.build_tags({"initiative": "SECURITY-AUDIT-v0.1.64"}) == [
+def test_build_tags_drops_a_mixed_case_slug_rather_than_lowercasing_it():
+    """A mixed-case slug used to be silently lowercased into `initiative:security-audit-
+    v0.1.64` — a tag that no longer equals the ledger slug `SECURITY-AUDIT-v0.1.64`, so the
+    initiatives-side join misses. The denylist now drops it (`not-lowercase`) so the emitted
+    tag is ALWAYS byte-equal to its slug."""
+    assert clawgate.build_tags({"initiative": "SECURITY-AUDIT-v0.1.64"}) == []
+    assert clawgate.build_tags({"initiative": "HANDOFF-comfyui-session"}) == []
+    # the all-lowercase form of the same slug is still tagged, verbatim.
+    assert clawgate.build_tags({"initiative": "security-audit-v0.1.64"}) == [
         "initiative:security-audit-v0.1.64"]
 
 
@@ -757,7 +767,7 @@ def _http_error(code):
     return urllib.error.HTTPError("http://cg/api/tasks", code, "Bad Request", {}, None)
 
 
-def test_post_task_retries_once_without_tags_on_4xx():
+def test_post_task_retries_once_without_tags_on_400():
     calls = []
 
     def flaky(url, payload, token, timeout=15):
@@ -772,7 +782,26 @@ def test_post_task_retries_once_without_tags_on_4xx():
     assert len(calls) == 2                 # EXACTLY one retry
     assert "tags" in calls[0]
     assert "tags" not in calls[1]
+    # byte-identical to the pre-tags payload: same keys, same INSERTION ORDER.
     assert calls[1] == {"directory": "d", "body": "b", "repo": "O/R"}
+    assert list(calls[1]) == ["directory", "body", "repo"]
+
+
+def test_post_task_retries_only_on_400_not_other_4xx():
+    """400 is the ONLY grammar-rejection code (clawgate task-tags spec §6). 401/403 (rotated
+    hook token), 404 (wrong URL) and 429 (rate limit) earn a doomed second request; 408 is
+    worse — the origin may already have created the Task, so a retry DOUBLE-POSTS."""
+    for code in (401, 403, 404, 408, 429, 451):
+        calls = []
+
+        def always(url, payload, token, timeout=15, _c=code):
+            calls.append(dict(payload))
+            raise _http_error(_c)
+
+        assert clawgate.post_task("d", "b", tags=["initiative:x-y"],
+                                  creds=_CREDS, _post=always) is None, code
+        assert len(calls) == 1, f"HTTP {code} must NOT be retried (got {len(calls)} calls)"
+        assert "tags" in calls[0]
 
 
 def test_post_task_retry_logs_the_failure_and_the_retry(capsys):
@@ -854,13 +883,58 @@ def test_write_last_emailed_without_related_is_unchanged(tmp_path):
     assert "initiative" not in saved[0]
 
 
-def test_write_last_emailed_tolerates_short_related_list(tmp_path):
+def test_write_last_emailed_skips_attaching_on_a_MISALIGNED_related_list(tmp_path, capsys):
+    """A `related` list that isn't index-aligned means the caller reordered/filtered one of
+    the two lists — positional stamping would then tag the WRONG initiative. Degrade to NO
+    tags (and say so loudly); a missing tag is cheap, a wrong routing key is not."""
     path = tmp_path / "last_emailed.json"
     exclusions.write_last_emailed([dict(EMAILED[0]), dict(EMAILED[1])], subject="s",
                                   generated_at="t", related=["only-first"], path=path)
     saved = json.loads(path.read_text())["proposals"]
-    assert saved[0]["initiative"] == "only-first"
+    assert "initiative" not in saved[0]
     assert "initiative" not in saved[1]
+    err = capsys.readouterr().err
+    assert "MISALIGNED" in err
+    assert "1 slug(s) for 2 proposal(s)" in err
+
+
+# ---- 7e-bis. attach_related: the positional-misalignment guard, directly -------------
+
+def test_attach_related_stamps_when_lengths_match():
+    props = [{"title": "a"}, {"title": "b"}]
+    out = exclusions.attach_related(props, ["arc-one", None])
+    assert out is props                       # mutates + returns the same list
+    assert props[0]["initiative"] == "arc-one"
+    assert "initiative" not in props[1]       # None slug → no field
+
+
+def test_attach_related_is_a_noop_for_empty_or_none_related():
+    for related in (None, []):
+        props = [{"title": "a"}, {"title": "b"}]
+        exclusions.attach_related(props, related)
+        assert all("initiative" not in p for p in props), related
+
+
+def test_attach_related_skips_everything_and_warns_when_lengths_differ(capsys):
+    # TOO SHORT …
+    props = [{"title": "a"}, {"title": "b"}, {"title": "c"}]
+    exclusions.attach_related(props, ["arc-one", "arc-two"])
+    assert all("initiative" not in p for p in props)
+    err = capsys.readouterr().err
+    assert "MISALIGNED" in err and "2 slug(s) for 3 proposal(s)" in err
+    # … and TOO LONG (a filtered proposal list is the likelier future regression).
+    props = [{"title": "a"}]
+    exclusions.attach_related(props, ["arc-one", "arc-two"])
+    assert "initiative" not in props[0]
+    assert "MISALIGNED" in capsys.readouterr().err
+
+
+def test_attach_related_never_raises_on_a_junk_related_value(capsys):
+    # best-effort contract: an unsized/odd `related` is logged, never raised.
+    props = [{"title": "a"}]
+    assert exclusions.attach_related(props, object()) is props
+    assert "initiative" not in props[0]
+    assert capsys.readouterr().err != ""
 
 
 def test_approve_payload_carries_the_persisted_slug():

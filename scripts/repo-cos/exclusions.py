@@ -287,9 +287,22 @@ def attach_related(proposal_dicts: list[dict], related) -> list[dict]:
     shows it as `↳ relates to: <slug>`. PERSISTING it here is what lets the APPROVE path —
     which runs on a LATER run, against `last_emailed.json` — tag the clawgate Task with the
     SAME slug Zach saw, without re-resolving it (no extra cross-cluster read, and no risk of
-    the tag drifting from the breadcrumb). A None/short/absent `related` simply stamps
-    nothing. Mutates + returns the dicts. Never raises."""
+    the tag drifting from the breadcrumb). A None/empty `related` simply stamps nothing.
+
+    🔴 The stamping is POSITIONAL, so a `related` that is not index-aligned with
+    `proposal_dicts` would tag proposals with the WRONG initiative — silent, durable and
+    expensive. Today's single caller threads the same list to both writers so it cannot
+    misalign, but a future digest reorder/filter could. A non-empty `related` whose length
+    differs from `proposal_dicts` is therefore treated as a BUG: log loudly and attach
+    NOTHING (no tag beats a wrong tag). Never raises — the best-effort contract holds.
+
+    Mutates + returns the dicts."""
     try:
+        if related and len(related) != len(proposal_dicts):
+            _log(f"⚠ MISALIGNED related initiatives: {len(related)} slug(s) for "
+                 f"{len(proposal_dicts)} proposal(s) — attaching NONE (a wrong "
+                 f"initiative tag is worse than no tag). This is a caller bug.")
+            return proposal_dicts
         for i, pr in enumerate(proposal_dicts):
             slug = related[i] if related is not None and i < len(related) else None
             slug = str(slug).strip() if slug else ""

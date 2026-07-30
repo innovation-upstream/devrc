@@ -315,11 +315,19 @@ def post_task(directory: str, body: str, *, repo: str = "", model: str = "",
     🔴 TAGGING MUST NEVER COST AN APPROVAL. repo-cos only suppresses a proposal's evidence
     when the POST returns a task id, so a tag-induced 400 would silently lose the approval
     for a week. Two defences: (1) `normalize_tags` drops anything that can't satisfy
-    clawgate's grammar before it reaches the wire; (2) if a TAGGED post still fails with a
-    4xx, we retry EXACTLY ONCE with the `tags` key removed — a tagged-post failure degrades
-    to an untagged Task, never to no Task. Both the failure and the retry are logged. A
-    non-4xx failure (connection error, 5xx) is NOT retried: it isn't a tag problem, and one
-    hung weekly run must not turn into a retry loop."""
+    clawgate's grammar before it reaches the wire; (2) if a TAGGED post still fails with
+    HTTP 400, we retry EXACTLY ONCE with the `tags` key removed — a tagged-post failure
+    degrades to an untagged Task, never to no Task. Both the failure and the retry are
+    logged.
+
+    The retry is scoped to 400 ALONE because 400 is the ONLY grammar-rejection code
+    (clawgate task-tags spec §6: an invalid tag 400s the whole request). Every other
+    status is not a tag problem, so a second request is at best doomed and at worst
+    harmful: 401/403 (rotated hook token), 404 (wrong URL) and 429 (rate limit) just burn
+    a second doomed call, and 408 — a proxy request-timeout raised AFTER the origin may
+    already have created the Task — is the one shape where retrying could double-POST two
+    Task cards. Connection errors and 5xx are likewise not retried: one hung weekly run
+    must not turn into a retry loop."""
     c = creds if creds is not None else load_creds()
     api = (c.get("CLAWGATE_API_URL") or "").rstrip("/")
     token = c.get("CLAWGATE_HOOK_TOKEN") or ""
@@ -340,7 +348,10 @@ def post_task(directory: str, body: str, *, repo: str = "", model: str = "",
         raw = _post(url, payload, token)
     except urllib.error.HTTPError as exc:  # noqa: PERF203
         _log(f"POST {url} failed: HTTP {exc.code} {exc.reason}")
-        if not (clean_tags and 400 <= exc.code < 500):
+        # ONLY 400 is the tag-grammar rejection (spec §6). Any other code — incl. 401/403/
+        # 404/429, and especially 408 where the origin may already have created the Task —
+        # is not a tag problem and must not earn a second request.
+        if not (clean_tags and exc.code == 400):
             return None
         # FAIL-OPEN BACKSTOP: exactly one untagged retry. Losing the tag is cheap; losing
         # the approval (it would silently re-nag next week) is not.
