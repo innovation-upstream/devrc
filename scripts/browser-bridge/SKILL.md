@@ -112,7 +112,7 @@ Prefix any op with `--instance <key>` to target a specific connected profile
 | `browser [--instance K] [--tab T] [--frame F] click <selector>` | click the element's center — **TRUSTED** CDP on the top frame; **SYNTHETIC** (`chrome.scripting`) inside a cross-origin `--frame` |
 | `browser [--instance K] [--tab T] [--frame F] type <text> [--selector S]` | text input — **TRUSTED** CDP top frame; **SYNTHETIC** in-frame (focus `--selector` first if given) |
 | `browser [--instance K] [--tab T] [--frame F] key <Enter\|Tab\|Escape\|Backspace\|Delete\|Arrow*\|Home\|End\|Page*> [--selector S]` | dispatch one bounded key — **TRUSTED** CDP top frame; **SYNTHETIC** in-frame |
-| `browser [--instance K] [--tab T] activate [--wait MS \| --no-wait]` | **FOREGROUND** the owned/active tab so a foreground-throttled SPA finishes loading, then can be driven. **⚠ STEALS FOCUS — the ONE intrusive op** (it changes what the user sees; every other op is non-intrusive). Waits (bounded, default ~3s, cap ~8s) for `status:"complete"` + a paint settle unless `--no-wait`; `--wait MS` overrides. Returns `{tabId,windowId,url,title,active,status}`. **i3 caveat:** sets the tab active within its window and requests window focus, but on a tiling WM Chrome may NOT raise the window across workspaces (best-effort). |
+| `browser [--instance K] [--tab T] activate [--wait MS \| --no-wait]` | **FOREGROUND** the owned/active tab so a foreground-throttled SPA finishes loading, then can be read/driven. **⚠ STEALS FOCUS — the ONE intrusive op** (it changes what the user sees; every other op is non-intrusive). Foregrounds via **host-side `i3-msg`** (Chrome-side `tabs.update`/`windows.update` is a no-op on i3), so it works ONLY on a graphical i3 host; returns an extra **`i3:"applied"\|"skipped"\|"failed"`** field alongside `{tabId,windowId,url,title,active,status}`. Waits (bounded, default ~3s, cap ~8s) for `status:"complete"` + a paint settle unless `--no-wait`; `--wait MS` overrides. See "Driving a throttled SPA" below. |
 | `browser [--instance K] agent "<goal>" [flags]` | run the **autonomous opencode browser-agent** in its OWN isolated tab against `<goal>`; returns a compact `{answer,evidence,steps_used,status}` (see below) |
 | `browser --print-session-id`               | print the derived per-session id (debug) and exit |
 
@@ -235,6 +235,42 @@ Two traps that produce a confidently-wrong result:
 - *(Future option, NOT implemented: a `chrome.debugger` + CDP
   `Page.captureScreenshot` path could capture an off-screen tab, but it needs the
   `debugger` permission and shows a debug banner — deliberately out of scope.)*
+
+## Driving a throttled/backgrounded SPA (the `activate` pattern)
+
+A heavy SPA opened in a **backgrounded** tab is throttled by Chrome —
+`document.visibilityState:"hidden"`, so its timers/RAF are starved and it often
+**never finishes rendering**. You then can't read or drive it: `text`/`frames`
+come back empty or half-built, and in-frame `click`/`type` hit elements that don't
+exist yet. Verified case: `model-benchmarking.civit.ai` (an OOPIF inside a
+`civitai.com` tab) stayed blank while backgrounded.
+
+`activate` fixes this by **foregrounding the tab** so it un-throttles
+(`visibilityState:"visible"`) and the app paints. On i3 the foregrounding is done
+**host-side via `i3-msg`** (Chrome's own `tabs.update`/`windows.update` is a no-op
+under a tiling WM), and the result carries `i3:"applied"|"skipped"|"failed"` so you
+can confirm it actually raised the window.
+
+**Verified pattern to read & drive a cross-origin app:**
+
+```bash
+BB=~/workspace/devrc/scripts/browser-bridge/browser
+$BB --instance work open https://civitai.com/apps/run/model-benchmarking  # backgrounded
+$BB --instance work activate            # → visibilityState:"visible", app renders
+$BB --instance work frames              # now the OOPIF is listed
+$BB --instance work --frame model-benchmarking text    # read inside it
+$BB --instance work --frame model-benchmarking click 'button:has-text("Grid")'  # drive it
+```
+
+**Caveats (document honestly):**
+- **`activate` STEALS FOCUS** — it's the one intentionally-intrusive op; it changes
+  what the user sees. Restore their focus afterward if it matters
+  (`i3-msg '[id="<prev-winid>"] focus'`).
+- **i3-gated:** it only works on a graphical i3 host (it shells out to `i3-msg`); on
+  a headless/non-i3 host expect `i3:"skipped"` (or `"failed"`) and no foregrounding.
+- **In-frame `click`/`type` are SYNTHETIC** (`isTrusted:false`, the `chrome.scripting`
+  OOPIF path) — but were verified to actually drive the real app (the Grid tab got
+  selected). Top-frame input remains TRUSTED CDP.
 
 ## `browser agent "<goal>"` — autonomous read/navigate in an isolated tab
 
