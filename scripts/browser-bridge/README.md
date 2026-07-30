@@ -139,6 +139,57 @@ permission. This can be scoped down later; noted in `extension/README.md`. The C
 layer's own bounded security model (own-tab-only attach, no raw-CDP passthrough,
 always-detach) is in the **CDP ops** section below.
 
+### No cookie op — deliberate (decided 2026-07-30)
+
+There is **no `cookies` op** in the CLI, `server.py` or the extension, and the
+manifest deliberately does **not** request the `cookies` permission (verified:
+`permissions` is `["scripting","tabs","activeTab","storage","alarms","debugger",
+"webNavigation"]`). A cookie-read op is credential exfiltration by definition —
+it hands a live session token to a caller. Adding one would mean, at minimum:
+hard-denying it to the autonomous browser-agent the way `upload` is (see
+*opencode browser-agent*), audit-logging every read, and accepting that session
+tokens land in Claude transcripts, which persist on disk. The value it buys does
+not justify that, because the sanctioned alternative below covers the real use
+case without any of it. **Recorded so it isn't re-litigated.**
+
+Consequences to know:
+
+- `document.cookie` via `eval` is the ONLY cookie surface, and it cannot see
+  **HttpOnly** cookies — i.e. essentially every session/auth cookie. The cookie
+  that matters is exactly the invisible one.
+- On a CSP-strict origin the injected script doesn't run at all, so a cookie read
+  there returns `null` with no error, indistinguishable from a broken bridge.
+
+**Sanctioned pattern: don't extract the cookie — make the request from inside the
+page.** An in-page `fetch(url, {credentials:"include"})` run through `eval`
+attaches the cookies (HttpOnly included) automatically and returns only the
+response data. It needs no new permission and keeps credential *values* out of
+Claude's context and off disk. `eval` takes one expression, so use an async IIFE;
+the promise is awaited (`chrome.scripting` on the top frame, CDP
+`awaitPromise:true` for `--frame`), so you get the resolved value:
+
+```bash
+browser js '(async function(){ const r = await fetch("/api/thing", {credentials:"include"}); return JSON.stringify({status:r.status, body:(await r.text()).slice(0,500)}) })()'
+```
+
+Verified live 2026-07-30 against real Brave (laptop, both profiles):
+
+- Same origin (`openrouter.ai`), same path, status only: `credentials:"include"`
+  → **404**, `credentials:"omit"` → **401**. The differing status proves the
+  HttpOnly session cookie WAS attached by the in-page fetch, with no cookie value
+  ever crossing into the transcript.
+- `(async function(){ return "resolved:"+(1+1) })()` → `"resolved:2"`, confirming
+  the async-IIFE shape yields a resolved value, not a pending Promise.
+- CSP contrast: on a `github.com` tab `browser js 'location.host'` → `null` (no
+  error) while `text`/`html` work; the identical eval on `openrouter.ai` →
+  `"openrouter.ai"`.
+
+**Limitation, stated plainly:** the in-page fetch pattern does NOT work on
+CSP-strict origins (GitHub, Discord, …) — no injected script runs there, so an
+authenticated API call through the page is unavailable and `text`/`html` are the
+only reads. (The recipe is verified mechanically and credential-wise as above; it
+has not been exercised against a third-party authenticated API beyond that.)
+
 ## Ops
 
 | op | maps to | returns |
