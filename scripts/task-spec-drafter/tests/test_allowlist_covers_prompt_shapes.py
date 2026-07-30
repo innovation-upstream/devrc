@@ -619,6 +619,35 @@ def test_readonly_branch_listing_forms_are_allowlisted():
         assert _matches(cmd), f"read-only branch listing is NOT allowlisted: {cmd}"
 
 
+def test_git_tag_list_is_allowlisted_but_tag_mutation_is_not():
+    """`git tag -l` answers "which release shipped this?" — the question behind
+    `ticket-status`'s `deploy_status: unknown`.
+
+    It was deliberately EXCLUDED in #185 as "out of the drafter's remit". Layer B
+    extraction over four drafter runs then showed that was the wrong call: the missing
+    verb is what drove the long compensating git/gh archaeology chains, and one run's
+    `git tag -l "v5.0.21*" --sort=-version:refname` was refused outright.
+
+    `-l` is safe to glob because it structurally pins LIST mode — verified by
+    execution that git rejects `tag -l -d <name>` / `tag -l --delete <name>` /
+    `tag --list -d <name>` with rc=129 and the tag survives. Bare `git tag -d` DOES
+    delete, so `Bash(git … tag*)` would be a mutation vector; only `tag -l*` is allowed.
+    Same shape as `branch --merged*` vs the rejected `branch -a*`.
+    """
+    for repo in (_CIVITAI, "/home/zach/workspace/civit/datapacket-talos",
+                 "/home/zach/workspace/homelab-talos"):
+        assert _matches(f"git -C {repo} tag -l"), f"tag -l not allowlisted for {repo}"
+        assert _matches(f'git -C {repo} tag -l "v5.0.21*" --sort=-version:refname'), (
+            f"the real blocked shape is still not allowlisted for {repo}"
+        )
+        # mutation must stay unreachable
+        for mut in (f"git -C {repo} tag -d v5.0.21",
+                    f"git -C {repo} tag --delete v5.0.21",
+                    f"git -C {repo} tag v9.9.9",
+                    f"git -C {repo} tag -f v5.0.21 HEAD"):
+            assert not _runnable(mut), f"a tag MUTATION is runnable: {mut}"
+
+
 def test_branch_a_is_pinned_to_its_exact_argumentless_form():
     """`-a` does NOT pin git to list mode, so a `branch -a*` GLOB would be a WRITE
     path (verified on a scratch repo, git 2.x):
@@ -1567,21 +1596,35 @@ def test_no_command_the_real_run_executed_becomes_denied():
     )
 
 
-def test_corpus_rejections_stay_rejected_except_the_one_we_fixed():
-    """The same run emitted three commands the allowlist rejected. `gh -R
-    civitai/civitai issue view 3398` was the genuine gap and is now allowlisted;
-    the other two must STAY rejected — one is a malformed `git -C <repo> find …`
-    (git has no `find` verb) and the other is `git -C <repo> tag -l`, deliberately
-    left off (see the `branch -a` note: `tag` has write forms)."""
+def test_corpus_rejections_stay_rejected_except_the_ones_we_fixed():
+    """The run emitted three commands the allowlist rejected. TWO were genuine gaps
+    and are now allowlisted; the third must stay rejected.
+
+    - `gh -R civitai/civitai issue view 3398` — fixed in #185.
+    - `git -C <repo> tag -l "v5.0.21*" --sort=-version:refname` — originally left off
+      here as "tag has write forms". Layer B extraction over four drafter runs showed
+      that was the wrong call: it is the only way to answer the release-chain question
+      behind `ticket-status`'s `deploy_status: unknown`, and its absence drove the long
+      compensating archaeology chains. `tag -l*` (list mode, structurally pinned) is
+      now allowed; `tag*` remains forbidden because bare `git tag -d` deletes.
+    - `git -C <repo> find . -name …` — STAYS rejected: git has no `find` subcommand,
+      so this was a malformed command, not a missing capability.
+    """
     rejected = _corpus()["rejected"]
     assert len(rejected) == 3, rejected
-    fixed = [c for c in rejected if c.startswith("gh -R civitai/civitai issue view")]
-    assert len(fixed) == 1, rejected
-    assert _runnable(fixed[0]), f"the gap we set out to fix is still not runnable: {fixed[0]}"
+    fixed = [c for c in rejected
+             if c.startswith("gh -R civitai/civitai issue view")
+             or re.search(r"\btag -l\b", c)]
+    assert len(fixed) == 2, f"expected 2 fixed shapes, got {fixed}"
+    for cmd in fixed:
+        assert _runnable(cmd), f"a gap we set out to fix is still not runnable: {cmd}"
     for cmd in rejected:
         if cmd in fixed:
             continue
         assert not _runnable(cmd), f"a shape that should stay rejected is runnable: {cmd}"
+    # the malformed one is the only survivor, and for the right reason
+    survivors = [c for c in rejected if c not in fixed]
+    assert len(survivors) == 1 and " find " in survivors[0], survivors
 
 
 # --- kubectl-ro: RUNTIME behaviour, not just pattern matching ---------------- #
