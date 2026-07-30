@@ -159,6 +159,8 @@ the top page's `civitai.com/apps/run/model-benchmarking` PATH. If a substring st
 matches **multiple** frames the op fails with `ambiguous_frame:<n> [<id>:<url>, …]`
 listing the candidates — re-issue with the numeric `frameId` (it does NOT silently pick
 the first match). So: **use the numeric id, or a host substring** — not a bare path token.
+**⚠ The numeric-id escape hatch does NOT apply to `eval`/`upload --frame` on a
+cross-origin OOPIF** — see the duplicate-URL limitation below.
 
 **Nested OOPIFs (OOPIF-in-OOPIF) — supported, with hard caps.** `Target.setAutoAttach`
 is not recursive (it attaches only a session's DIRECT child targets), which is why
@@ -171,17 +173,44 @@ is **hard-bounded** and every bound fails LOUD (never a silent truncation, never
 
 | failure | error | meaning |
 |---------|-------|---------|
-| frame never attaches within the bounded wait (~3s ceiling, ~300 ms quiet-window settle) | `frame_not_found:<url>` | the frame isn't there (unchanged shape) |
+| frame never attaches within the bounded wait (3 s **hard** ceiling, checked every iteration; ~300 ms quiet-window settle) | `frame_not_found:<url>` | the frame isn't there (unchanged shape) |
 | nesting deeper than **5** levels below the tab | `oopif_depth_cap:5` | we deliberately stopped descending |
 | more than **50** attached targets for one op | `oopif_target_cap:50` | frame-spamming page; work is bounded |
-| two attached frames share the target URL | `ambiguous_frame:<n> [<sessionId>:<url>, …]` | re-issue with a distinguishable frame — it never silently picks one |
+| two attached frames share the target URL | `ambiguous_frame:<n> [<sessionId>:<url>, …]` | **no escape hatch — see below**; it never silently picks one |
 
 Both caps are named constants in `extension/protocol.js` (`OOPIF_MAX_DEPTH`,
 `OOPIF_MAX_TARGETS`, `OOPIF_SETTLE_MS`, `OOPIF_WAIT_MS`) and the whole cascade stays well
 under the per-op CDP budget. `text`/`html`/`click`/`type`/`key --frame` reach a nested
-frame as they always did (they use `chrome.scripting`, not CDP). **Not yet live-verified
-against real Brave** — the `tests/fixtures/oopif-rig/` three-domain fixture reproduces a
-grandchild OOPIF on demand for that check.
+frame as they always did (they use `chrome.scripting`, not CDP).
+
+**Every discovered target is filtered before it can ever be an eval target** — the
+recursion removed the old implicit "one level below a validated tab" boundary, so the
+boundary is now explicit: **own tab** (`chrome.debugger.onEvent` is global; a foreign
+`source.tabId` is dropped — and a caller that omits the tab fails CLOSED), **`iframe`
+targets only** (so a page's `new Worker(location.href)` can neither deny service by
+forcing `ambiguous_frame` nor capture your JS in a worker global), and **http/https
+only** (the same scheme gate the top tab passes, so a `chrome-extension://` child — any
+extension's web-accessible resource — can never become an eval target one level down).
+
+**⚠ Duplicate-URL OOPIFs are UNREACHABLE by `eval`/`upload --frame`, and the numeric
+`frameId` does NOT help.** The CDP path matches the frame purely by URL (a numeric
+webNavigation frameId has no 1:1 CDP target mapping), so two identical
+`<iframe src="https://embed.example/widget">` — a duplicated ad/widget slot, which is
+common — both match and the op fails `ambiguous_frame` with no way to pick one. That is a
+deliberate refusal, not a silent wrong-frame, but it IS a dead end: use
+`text`/`html`/`click`/`type`/`key --frame` (which resolve by numeric frameId and are
+unaffected), or change the page selector. A parent-chain tiebreak is a filed follow-up.
+
+**Not yet live-verified against real Brave** — `tests/fixtures/oopif-rig/` has two
+fixtures for that: a 3-domain grandchild rig, and a 7-level alternating-domain "deep" rig
+that empirically settles whether `OOPIF_MAX_DEPTH` really binds (see its README).
+
+**⚠ Known unverified degradation:** depth attribution relies on Chrome tagging a
+flat-mode sub-session event's `source` with the parent `sessionId`. If it does not, every
+target reads as depth 1 and **`OOPIF_MAX_DEPTH` silently stops binding** — the descent is
+then bounded only by the 50-target cap and the 3 s ceiling. It can NOT mis-route your JS
+(selection is by URL equality and never consults depth), but until the deep rig is run,
+treat "depth 5" as unconfirmed.
 
 Result payloads land under `.result.data` in the JSON (the envelope is
 `{"ok":true,"result":{"id","ok","data":{...}}}`).

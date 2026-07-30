@@ -247,18 +247,65 @@ fails LOUD rather than truncating silently or hanging:
 - attach events arrive **asynchronously** (a `setAutoAttach` reply does NOT mean its
   events landed), so the resolver waits on a quiet-window settle (`OOPIF_SETTLE_MS`,
   300 ms) under a hard ceiling (`OOPIF_WAIT_MS`, 3 s — well inside `CDP_OP_BUDGET_MS`);
-  a timeout surfaces as `frame_not_found:<url>`, never a silent null and never a hang;
+  a timeout surfaces as `frame_not_found:<url>`, never a silent null and never a hang.
+  The ceiling is checked **first each iteration, above the descend branch** — an earlier
+  revision checked it only when there was nothing left to descend into, so a page that
+  kept the queue non-empty never reached it and the real wall became `CDP_OP_BUDGET_MS`
+  (surfacing as `cdp_timeout:op`). It is now a true wall;
 - **ambiguity fails loud**: with nesting two frames can share a URL, so >1 matching
   attached session → `ambiguous_frame:<n> [<sessionId>:<url>, …]` (mirroring
   `resolveWebNavFrame`) instead of silently picking the first.
 
-A match already in hand always wins over a cap hit in the same batch. Every existing
-security property is preserved: own-tab-only attach, the pre-attach privileged-scheme
-refusal, always-detach, the `onEvent` listener removed in a `finally` **inside** the
-resolver, no raw-CDP passthrough (the method set is unchanged — the cascade only re-sends
-`Target.setAutoAttach`), and metadata-only telemetry. **Not live-verified against real
-Brave yet** — `tests/fixtures/oopif-rig/` is a three-domain loopback fixture that
-reproduces a grandchild OOPIF on demand for that operator check.
+A match already in hand always wins over a cap hit in the same batch.
+
+**The explicit boundary that replaces the old implicit one.** The pre-recursion code drew
+part of its safety from only ever looking ONE level below a tab whose URL
+`assertCdpAttachable` had validated. Recursion removes that, so every discovered target is
+filtered on three axes in `onEvt` before it is tracked, descended into, or matched:
+
+1. **Own tab** — `chrome.debugger.onEvent` is a GLOBAL listener, so an event whose
+   `source.tabId` isn't this op's tab is dropped. `tabId` is threaded in from the SW; a
+   caller that omits it **fails closed** (nothing equals `undefined`).
+2. **`iframe` targets only** (`OOPIF_TARGET_TYPES`) — a page can `new Worker(location.href)`
+   to mint a target with a url IDENTICAL to a real frame's. Unfiltered that lets any
+   cross-origin frame permanently deny service to itself (forced `ambiguous_frame`) and,
+   after a navigation race, could route the operator's JS into a WORKER global.
+   `Target.setAutoAttach` is also sent with `filter:[{type:"iframe"}]` so Chrome ideally
+   never attaches one at all — but that parameter is EXPERIMENTAL, so a rejection is
+   caught and the call transparently retried without it (**fail-soft**); the listener-side
+   check is the authoritative control and needs no protocol support.
+3. **http/https only** (`isCdpAttachableUrl` — the same gate the top tab passes). Without
+   it a hostile page embeds `<iframe src="chrome-extension://<id>/…">` (any extension with
+   `web_accessible_resources`); `getAllFrames` lists it, and a prompt-injected agent could
+   run operator JS inside ANOTHER EXTENSION'S ORIGIN — the top-tab guard bypassed by being
+   one level down.
+
+Every other existing security property is preserved: own-tab-only attach, the pre-attach
+privileged-scheme refusal, always-detach, the `onEvent` listener removed in a `finally`
+**inside** the resolver, no raw-CDP passthrough (the method set is unchanged — the cascade
+only re-sends `Target.setAutoAttach`), and metadata-only telemetry.
+
+**Known limitation — duplicate-URL OOPIFs have NO escape hatch.** The CDP path matches by
+frame URL only (a numeric webNavigation frameId has no 1:1 CDP target mapping and is
+discarded), so two identical `<iframe src="…/widget">` are both matched and the op fails
+`ambiguous_frame` — and re-issuing with the numeric id, the remedy the generic `--frame`
+docs give, provably cannot help here. A refusal, not a wrong frame, but a dead end for
+`eval`/`upload`; the fixed-func frame ops are unaffected. **Follow-up (cheap, not done):**
+the resolver already records `parentSessionId` per attached target and the caller has the
+frame's `parentFrameId` chain, so a parent-chain tiebreak is implementable — it was left
+out because the ancestor→session mapping is subtle when an intermediate frame is
+same-process (its target IS the top session) and that cannot be validated without live
+Brave.
+
+**⚠ Unverified assumption — depth attribution.** Depth comes from flat mode tagging a
+sub-session event's `source` with the parent `sessionId`. If Chrome does NOT tag it, every
+target reads as depth 1, `depthCapHit` is never set, and **`OOPIF_MAX_DEPTH` silently
+stops binding** — the descent is then bounded only by `OOPIF_MAX_TARGETS` and
+`OOPIF_WAIT_MS`. It canNOT mis-route JS (selection is by URL equality and never consults
+`depth`). **Not live-verified against real Brave yet** — `tests/fixtures/oopif-rig/`
+carries two fixtures for exactly this: a 3-domain grandchild rig (Check A, which also
+confirms the `iframe` type assumption by construction) and a 7-level alternating-domain
+"deep" rig (Check B) that discriminates a binding depth cap from a broken one.
 
 Everything is bounded by the per-op CDP timeouts (a bad frame fails fast, never wedges),
 and the never-silent-null contract holds: a genuine `null`/`undefined` is returned as a
@@ -699,12 +746,16 @@ nix-shell -p python312Packages.pytest --run "pytest scripts/browser-bridge/tests
 nix-shell -p nodejs --run "node --test scripts/browser-bridge/tests/*.test.mjs"
 ```
 
-`tests/fixtures/oopif-rig/` is NOT part of either suite — it is a manual live-verify
-fixture (three loopback-resolving registrable sites served by one `python3 -m
-http.server`) that reproduces a **nested/grandchild** cross-origin OOPIF on demand, the
-only known reliable way to exercise the CDP frame path against real Brave. Its README has
-the serve command, the exact verify sequence, and the ⚠ `vcap.me`-now-resolves-publicly
-warning.
+`tests/fixtures/oopif-rig/` is NOT part of either suite — it is a pair of manual
+live-verify fixtures (loopback-resolving registrable sites served by one `python3 -m
+http.server`) reproducing **nested** cross-origin OOPIFs on demand, the only known
+reliable way to exercise the CDP frame path against real Brave: **Check A** is a 3-domain
+grandchild rig (and, by construction, the confirmation that OOPIF targets really are typed
+`iframe` — if they weren't, the type filter would drop the grandchild and Check A would
+fail); **Check B** is a 7-level alternating-2-domain "deep" rig that discriminates a
+binding `OOPIF_MAX_DEPTH` from the untagged-`sessionId` degradation. Its README has the
+serve command, both verify sequences with an expected-outcome table, and the ⚠
+`vcap.me`-now-resolves-publicly warning.
 
 The CDP (chrome.debugger) ops are covered deterministically without a real browser:
 `tests/cdp_protocol.test.mjs` unit-tests the pure decision layer (attach-scope
@@ -791,8 +842,15 @@ The **`browser agent`** slice, all headless (NO live model, NO Brave, NO bridge)
   inherited-group straggler → asserted reaped, no orphan); schema parse + EXACTLY
   ONE `--continue` retry then `blocked`, no-retry on a hard error.
 
-Current totals (measured): **208 Python** + **206 node**, of which
-`nested_oopif.test.mjs` is **20** — the nested-OOPIF (#211) coverage: a GRANDCHILD frame
+Current totals (measured): **208 Python** + **220 node**, of which
+`nested_oopif.test.mjs` is **34** — the nested-OOPIF (#211) coverage. It models a
+**HOSTILE** page, not a cooperative one: worker/service-worker/page targets ignored, a
+`new Worker(location.href)` target that shares the wanted frame's url neither shadowing it
+nor forcing a denial-of-service `ambiguous_frame`, `chrome-extension:`/`file:`/`devtools:`/
+`about:`/`data:`/`javascript:` children refused (and never descended into), foreign-tab
+events dropped, an omitted `tabId` failing closed, the experimental `filter` param
+failing soft, the wait ceiling holding while the descend queue stays non-empty, and the
+untagged-`source.sessionId` degradation pinned to its ACTUAL behaviour. Plus a GRANDCHILD frame
 resolving through TWO attach levels (the second `Target.setAutoAttach` asserted to be sent
 ON the child's `sessionId`), a depth-3 cascade, the DIRECT-child single-level path
 unchanged (regression), the depth cap, the target cap, a frame-spamming page staying

@@ -689,6 +689,27 @@ export function matchCdpFrameId(frameTree, targetUrl) {
 // session (CDP flat mode forwards a `sessionId`), so the attach cascade walks DOWN the
 // frame tree until the wanted frame's target appears.
 //
+// The old single-level code drew its safety partly from an IMPLICIT boundary: it only
+// ever looked one level down from a tab whose URL `assertCdpAttachable` had already
+// validated. A recursive cascade REMOVES that boundary, so the boundary has to become
+// explicit — every discovered target is filtered on THREE axes before it is ever
+// considered (see `onEvt`), and only then bounded by the caps:
+//   * OWN TAB      — chrome.debugger.onEvent is a GLOBAL listener; an event whose
+//     `source.tabId` is not this op's tab is DROPPED (own-tab by construction, not by
+//     luck of the serial command loop);
+//   * TARGET TYPE  — only `iframe` targets. A page can `new Worker(location.href)` to
+//     mint a target with a url IDENTICAL to a real frame's; without this filter that
+//     both (a) lets any cross-origin frame make itself permanently un-eval-able by
+//     forcing `ambiguous_frame`, and (b) could route the operator's JS into a WORKER
+//     global after a navigation race. `OOPIF_AUTO_ATTACH_FILTER` additionally asks
+//     Chrome not to attach non-iframe targets at all (belt); this check is the braces.
+//   * ATTACHABLE SCHEME — `isCdpAttachableUrl` (http/https only), the SAME gate
+//     `assertCdpAttachable` applies to the top tab. Without it a hostile page embeds
+//     `<iframe src="chrome-extension://<id>/…">` (any extension with
+//     web_accessible_resources) and a prompt-injected agent could run the operator's JS
+//     inside ANOTHER EXTENSION'S ORIGIN — the top-tab guard bypassed by being one level
+//     down.
+//
 // A hostile page can nest/spawn frames without limit, so the descent is HARD-BOUNDED:
 //   * OOPIF_MAX_DEPTH   — how many levels below the tab's top session we descend;
 //   * OOPIF_MAX_TARGETS — total distinct sessions we will ever track for one op;
@@ -696,9 +717,12 @@ export function matchCdpFrameId(frameTree, targetUrl) {
 //     ASYNCHRONOUSLY (a setAutoAttach reply does NOT mean its events have landed), so we
 //     keep waiting while events are still arriving and give up once nothing new has
 //     arrived for this long and no session is left to descend into;
-//   * OOPIF_WAIT_MS     — the HARD ceiling on the whole resolution, kept well under the
-//     per-op CDP budget (CDP_OP_BUDGET_MS) so a slow cascade surfaces as a clean
-//     frame_not_found rather than a cdp_timeout, and NEVER as a hang.
+//   * OOPIF_WAIT_MS     — the HARD ceiling on the WHOLE resolution. It is checked FIRST
+//     each iteration, ABOVE the descend branch — an earlier revision checked it only
+//     when nothing was left to descend into, so a page that kept the descend queue
+//     non-empty never reached it and the real wall became CDP_OP_BUDGET_MS (surfacing as
+//     `cdp_timeout:op`, not the clean op error the docs promised). Now the ceiling is a
+//     true wall, kept well under CDP_OP_BUDGET_MS.
 // Exceeding a cap is a LOUD error (oopif_depth_cap / oopif_target_cap), never a silent
 // truncation; a match that is already in hand still wins over a cap that was just hit.
 export const OOPIF_MAX_DEPTH = 5;
@@ -706,9 +730,21 @@ export const OOPIF_MAX_TARGETS = 50;
 export const OOPIF_SETTLE_MS = 300;
 export const OOPIF_WAIT_MS = 3000;
 export const OOPIF_POLL_MS = 25;
+// Only cross-origin IFRAME targets are of interest — never workers/service workers/
+// pages. Chrome's Target.setAutoAttach `filter` is an EXPERIMENTAL parameter, so it may
+// be rejected on the pinned 1.3 channel; the resolver sends it and TRANSPARENTLY RETRIES
+// without it on rejection (fail-soft), because the authoritative control is the
+// listener-side type check, which needs no protocol support at all.
+export const OOPIF_TARGET_TYPES = Object.freeze(["iframe"]);
+export const OOPIF_AUTO_ATTACH_FILTER = Object.freeze([Object.freeze({ type: "iframe" })]);
 // The single auto-attach parameter set — flat mode (sessionId-addressed sub-sessions),
 // never waitForDebuggerOnStart (that would PAUSE the page's frames).
 export const OOPIF_AUTO_ATTACH_PARAMS = Object.freeze({
+  autoAttach: true, flatten: true, waitForDebuggerOnStart: false,
+  filter: OOPIF_AUTO_ATTACH_FILTER,
+});
+// The same params WITHOUT the experimental `filter` — the fail-soft retry.
+export const OOPIF_AUTO_ATTACH_PARAMS_NOFILTER = Object.freeze({
   autoAttach: true, flatten: true, waitForDebuggerOnStart: false,
 });
 
@@ -768,6 +804,9 @@ export function pickOopifSessionId(attached, targetUrl) {
 //   send(method, params, sessionId) — the ALREADY timeout-wrapped send from
 //       withCdpSession (so each auto-attach is individually bounded too),
 //   targetUrl,
+//   tabId — THIS op's tab. REQUIRED: chrome.debugger.onEvent is a GLOBAL listener, so
+//       every event is checked against it. Omit it and the resolver FAILS CLOSED
+//       (nothing matches `undefined`), never open.
 //   addListener(fn) / removeListener(fn) — chrome.debugger.onEvent (fn is called as
 //       (source, method, params); in flat mode `source.sessionId` names the PARENT
 //       session an event came from, which is how depth is attributed),
@@ -778,6 +817,14 @@ export function pickOopifSessionId(attached, targetUrl) {
 // caller turns that into `frame_not_found:<url>` — NEVER a silent null, never a hang).
 // Throws `ambiguous_frame:…` / `oopif_depth_cap:<n>` / `oopif_target_cap:<n>`.
 // The listener is ALWAYS removed in a `finally`.
+//
+// ⚠ KNOWN DEGRADATION (unverified Chrome behaviour): depth attribution relies on flat
+// mode tagging a sub-session's event `source` with the PARENT `sessionId`. If Chrome
+// does NOT tag it, every target is attributed depth 1, `depthCapHit` is never set and
+// OOPIF_MAX_DEPTH stops binding entirely — the descent is then bounded ONLY by
+// OOPIF_MAX_TARGETS and OOPIF_WAIT_MS (still bounded, but not at the advertised depth).
+// It canNOT mis-route JS: SELECTION is by URL equality alone and never consults `depth`.
+// The `oopif-rig` DEEP variant settles this empirically — see its README.
 export async function resolveOopifSession(deps) {
   const lim = deps.limits || {};
   const maxDepth = lim.maxDepth == null ? OOPIF_MAX_DEPTH : lim.maxDepth;
@@ -799,16 +846,25 @@ export async function resolveOopifSession(deps) {
 
   const onEvt = (source, method, params) => {
     if (method !== "Target.attachedToTarget" || !params || !params.targetInfo) return;
+    // (a) OWN TAB. onEvent is GLOBAL — an event for any other tab/debuggee is not ours.
+    // deps.tabId undefined ⇒ nothing can equal it ⇒ FAIL CLOSED.
+    if (!source || source.tabId !== deps.tabId) return;
+    const ti = params.targetInfo;
+    lastEventAt = now();   // the cascade is alive (even if THIS target is filtered out)
+    // (b) TARGET TYPE — iframes only; never a worker/service_worker/page target.
+    if (!OOPIF_TARGET_TYPES.includes(ti.type)) return;
+    // (c) ATTACHABLE SCHEME — the same http/https gate the TOP tab passed. A
+    // chrome-extension:/file:/devtools: child must never become an eval target.
+    const url = ti.url || "";
+    if (!isCdpAttachableUrl(url)) return;
     const sessionId = params.sessionId;
     if (!sessionId || depthOf.has(sessionId)) return;   // dedupe re-announcements
-    lastEventAt = now();
     // Flat mode tags an event from a sub-session with its sessionId; absent → the
-    // tab's TOP session, i.e. a direct child (depth 1).
+    // tab's TOP session, i.e. a direct child (depth 1). See the DEGRADATION note above.
     const parent = (source && source.sessionId) || null;
     const depth = parent && depthOf.has(parent) ? depthOf.get(parent) + 1 : 1;
     depthOf.set(sessionId, depth);
-    attached.push({ sessionId, url: params.targetInfo.url || "", depth,
-                    parentSessionId: parent });
+    attached.push({ sessionId, url, depth, parentSessionId: parent });
     if (depthOf.size > maxTargets) { capError = `oopif_target_cap:${maxTargets}`; return; }
     if (depth < maxDepth) pending.push(sessionId);
     else depthCapHit = true;
@@ -817,22 +873,36 @@ export async function resolveOopifSession(deps) {
   deps.addListener(onEvt);
   try {
     const deadline = now() + waitMs;
+    // `filter` is EXPERIMENTAL: send it, and on rejection fall back (for the rest of
+    // this op) to the plain params. The listener-side type check covers us either way.
+    let params = OOPIF_AUTO_ATTACH_PARAMS;
+    const autoAttach = async (sessionId) => {
+      try {
+        return await deps.send("Target.setAutoAttach", params, sessionId);
+      } catch (e) {
+        if (params === OOPIF_AUTO_ATTACH_PARAMS_NOFILTER) throw e;
+        params = OOPIF_AUTO_ATTACH_PARAMS_NOFILTER;
+        return await deps.send("Target.setAutoAttach", params, sessionId);
+      }
+    };
     // Level 0: the tab's TOP session — auto-attaches its DIRECT child targets.
-    await deps.send("Target.setAutoAttach", OOPIF_AUTO_ATTACH_PARAMS, undefined);
+    await autoAttach(undefined);
     for (;;) {
       // A match already in hand ALWAYS wins — over a cap, over a further descend.
       const hit = pickOopifSessionId(attached, deps.targetUrl);   // throws on ambiguity
       if (hit) return hit;
       if (capError) throw new Error(capError);
+      // THE HARD CEILING, checked FIRST — above the descend branch, so a page that
+      // keeps the queue non-empty can NEVER outrun it (the audit's Fix 5).
+      const t = now();
+      if (t >= deadline) break;
       if (pending.length) {
         // Descend: re-arm auto-attach ON the child session (flat mode forwards it).
-        await deps.send("Target.setAutoAttach", OOPIF_AUTO_ATTACH_PARAMS, pending.shift());
+        await autoAttach(pending.shift());
         continue;
       }
-      const t = now();
-      // Nothing left to descend into: give up once the cascade has gone QUIET, or at
-      // the hard ceiling — either way we RETURN (bounded), never spin.
-      if (t - lastEventAt >= settleMs || t >= deadline) break;
+      // Nothing left to descend into: give up once the cascade has gone QUIET.
+      if (t - lastEventAt >= settleMs) break;
       await sleep(pollMs);
     }
     // Not found. If we deliberately stopped descending, say SO rather than pretending

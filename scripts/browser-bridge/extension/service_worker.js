@@ -239,9 +239,10 @@ async function execInFrame(tabId, frameId, func, args) {
 // so a cap/propagation test settles in ms; undefined in production → the real bounds.
 // A frame that never appears within the bounds → `frame_not_found:<url>` (the SAME
 // error shape the single-level code returned) — never a silent null, never a hang.
-async function cdpOopifSession(send, frame) {
+async function cdpOopifSession(send, tabId, frame) {
   const sessionId = await resolveOopifSession({
     send,
+    tabId,                 // own-tab gate on the GLOBAL onEvent listener (fails closed)
     targetUrl: frame.url,
     addListener: (fn) => chrome.debugger.onEvent.addListener(fn),
     removeListener: (fn) => chrome.debugger.onEvent.removeListener(fn),
@@ -298,7 +299,7 @@ async function cdpFrameEval(tabId, tabUrl, frame, src) {
 
     // (3) CROSS-ORIGIN OOPIF (possibly NESTED) — the shared bounded recursive
     // auto-attach cascade resolves its flat session; evaluate in THAT session.
-    const sessionId = await cdpOopifSession(send, frame);
+    const sessionId = await cdpOopifSession(send, tabId, frame);
     return await evaluate(sessionId, undefined);
   });
 }
@@ -329,7 +330,7 @@ async function cdpSetFileInput(tabId, tabUrl, frame, selector, absPath) {
       } else {
         // CROSS-ORIGIN OOPIF (possibly NESTED) → NOT in the top frame tree → the SAME
         // shared bounded recursive auto-attach resolver `eval --frame` uses.
-        sessionId = await cdpOopifSession(send, frame);
+        sessionId = await cdpOopifSession(send, tabId, frame);
       }
     }
     // 1. Resolve the element to a CDP RemoteObject (returnByValue:false → objectId).

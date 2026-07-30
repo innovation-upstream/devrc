@@ -28,6 +28,7 @@ import assert from "node:assert/strict";
 import {
   resolveOopifSession, pickOopifSessionId, matchOopifSessions,
   OOPIF_MAX_DEPTH, OOPIF_MAX_TARGETS, OOPIF_AUTO_ATTACH_PARAMS,
+  OOPIF_AUTO_ATTACH_PARAMS_NOFILTER, OOPIF_TARGET_TYPES,
 } from "../extension/protocol.js";
 
 // The live rig's three registrable sites (three renderer processes / three targets).
@@ -37,12 +38,18 @@ const LEAF_URL = "http://127.0.0.1.nip.io:8901/leaf.html";
 
 // Tiny bounds so the cap/timeout cases settle in milliseconds, not seconds.
 const FAST = { settleMs: 30, waitMs: 300, pollMs: 5 };
+const TAB = 5;
+const OTHER_TAB = 99;
 
 // --------------------------------------------------------------------------- //
 // A fake CDP cascade. `tree` maps a session key ("top" for the tab's top session,
 // else a sessionId) → the child targets Chrome would announce when setAutoAttach is
 // sent ON that session. Announcements are per-session — which is precisely why the old
 // single-level code could not see a grandchild.
+//
+// A child entry is {sessionId, url} plus OPTIONAL adversarial overrides: `type` (default
+// "iframe") and `tabId` (default this op's tab) — so a test can model a page minting a
+// worker target, a privileged-scheme child, or an event from another tab.
 function makeCascade(tree, opts = {}) {
   const listeners = new Set();
   const sent = [];
@@ -50,15 +57,18 @@ function makeCascade(tree, opts = {}) {
     const kids = tree[parentSessionId == null ? "top" : parentSessionId] || [];
     for (const k of kids) {
       for (const fn of [...listeners]) {
-        fn({ tabId: 5, sessionId: parentSessionId },
+        fn({ tabId: k.tabId === undefined ? TAB : k.tabId, sessionId: parentSessionId },
            "Target.attachedToTarget",
-           { sessionId: k.sessionId, targetInfo: { url: k.url, type: "iframe" } });
+           { sessionId: k.sessionId,
+             targetInfo: { url: k.url, type: k.type === undefined ? "iframe" : k.type,
+                           targetId: `T_${k.sessionId}` } });
       }
     }
   };
   const send = async (method, params, sessionId) => {
     sent.push({ method, params, sessionId });
     if (method !== "Target.setAutoAttach") return {};
+    if (opts.rejectFilter && params && params.filter) throw new Error("Invalid parameters");
     if (opts.deliverAfterMs) setTimeout(() => announce(sessionId), opts.deliverAfterMs);
     else announce(sessionId);
     return {};
@@ -69,10 +79,11 @@ function makeCascade(tree, opts = {}) {
     removeListener: (fn) => listeners.delete(fn),
   };
 }
-const resolve = (rig, targetUrl, limits) => resolveOopifSession({
-  send: rig.send, targetUrl,
+const resolve = (rig, targetUrl, limits, over) => resolveOopifSession({
+  send: rig.send, targetUrl, tabId: TAB,
   addListener: rig.addListener, removeListener: rig.removeListener,
   limits: { ...FAST, ...(limits || {}) },
+  ...(over || {}),
 });
 const autoAttachSessions = (rig) =>
   rig.sent.filter((c) => c.method === "Target.setAutoAttach").map((c) => c.sessionId);
@@ -111,12 +122,31 @@ test("great-grandchild (depth 3) resolves; the cascade descends level by level",
   assert.deepEqual(autoAttachSessions(rig), [undefined, "S1", "S2"]);
 });
 
-test("auto-attach params are flat + never waitForDebuggerOnStart (would PAUSE the page)", async () => {
+test("auto-attach params are flat, iframe-FILTERED, never waitForDebuggerOnStart (would PAUSE the page)", async () => {
   const rig = makeCascade({ top: [{ sessionId: "S_MID", url: MID_URL }] });
   await resolve(rig, MID_URL);
-  assert.deepEqual(OOPIF_AUTO_ATTACH_PARAMS,
+  assert.deepEqual(OOPIF_AUTO_ATTACH_PARAMS, {
+    autoAttach: true, flatten: true, waitForDebuggerOnStart: false,
+    filter: [{ type: "iframe" }],
+  });
+  assert.deepEqual(OOPIF_AUTO_ATTACH_PARAMS_NOFILTER,
     { autoAttach: true, flatten: true, waitForDebuggerOnStart: false });
   for (const c of rig.sent) assert.deepEqual(c.params, OOPIF_AUTO_ATTACH_PARAMS);
+});
+
+test("the EXPERIMENTAL `filter` param FAILS SOFT: rejected → retried without it, same result", async () => {
+  // Target.setAutoAttach's `filter` is experimental and may be rejected on the pinned
+  // 1.3 channel. It must never be able to break the whole OOPIF path — the listener-side
+  // type check is the authoritative control.
+  const rig = makeCascade({ top: [{ sessionId: "S_MID", url: MID_URL }],
+                            S_MID: [{ sessionId: "S_LEAF", url: LEAF_URL }] },
+                          { rejectFilter: true });
+  assert.equal(await resolve(rig, LEAF_URL), "S_LEAF");
+  const attempts = rig.sent.filter((c) => c.method === "Target.setAutoAttach");
+  assert.ok(attempts[0].params.filter, "first attempt carries the filter");
+  assert.equal(attempts[1].params.filter, undefined, "retried WITHOUT the filter");
+  // Once it has fallen back it stays fallen back for the rest of the op (no re-probing).
+  for (const a of attempts.slice(1)) assert.equal(a.params.filter, undefined);
 });
 
 test("DEPTH CAP: descending stops at maxDepth and fails LOUD (oopif_depth_cap), no loop", async () => {
@@ -177,7 +207,43 @@ test("ASYNC propagation: an attachedToTarget arriving AFTER setAutoAttach resolv
     "S_LEAF");
 });
 
-test("a hard-capped cascade never exceeds the wait ceiling even while events keep arriving", async () => {
+test("THE HARD CEILING is a real wall: a page keeping the descend queue non-empty still stops at waitMs", async () => {
+  // The Fix-5 regression. An earlier revision checked the deadline ONLY when `pending`
+  // was empty, so a page that always had another child to descend into never reached it
+  // and the real wall became CDP_OP_BUDGET_MS (surfacing as cdp_timeout:op, not the
+  // clean op error the docs promise). Here: every setAutoAttach announces ONE new
+  // never-matching child, so `pending` is NEVER empty and the settle window is NEVER
+  // reached — only the ceiling can end this. maxTargets is set high so it cannot be the
+  // thing that stops us, which is what distinguishes ceiling from cap.
+  const listeners = new Set();
+  let n = 0;
+  const rig = {
+    listeners, sent: [],
+    addListener: (fn) => listeners.add(fn),
+    removeListener: (fn) => listeners.delete(fn),
+    send: async (method, params, sessionId) => {
+      rig.sent.push({ method, sessionId });
+      const id = `C${n++}`;
+      for (const fn of [...listeners]) {
+        fn({ tabId: TAB, sessionId }, "Target.attachedToTarget",
+           { sessionId: id, targetInfo: { url: `https://chain${id}.test/`, type: "iframe" } });
+      }
+      await new Promise((r) => setTimeout(r, 2));   // each descend costs a little time
+      return {};
+    },
+  };
+  const t0 = Date.now();
+  // maxDepth/maxTargets are BOTH generous — neither cap can trip before the ceiling.
+  const out = await resolve(rig, LEAF_URL,
+    { maxDepth: 1000, maxTargets: 100000, settleMs: 10_000, waitMs: 120, pollMs: 5 });
+  const elapsed = Date.now() - t0;
+  assert.equal(out, null, "the ceiling ends it as a clean not-found → frame_not_found");
+  assert.ok(elapsed >= 100, `must actually reach the ceiling, took ${elapsed}ms`);
+  assert.ok(elapsed < 2000, `must STOP at the ceiling, took ${elapsed}ms`);
+  assert.equal(listeners.size, 0);
+});
+
+test("a hard-capped cascade never spins even while events keep arriving (target cap trips)", async () => {
   // A page that keeps announcing NEW nested targets forever — the ceiling must win.
   const listeners = new Set();
   let n = 0;
@@ -190,8 +256,8 @@ test("a hard-capped cascade never exceeds the wait ceiling even while events kee
       rig.sent.push({ method, params, sessionId });
       const id = `N${n++}`;
       for (const fn of [...listeners]) {
-        fn({ tabId: 5, sessionId }, "Target.attachedToTarget",
-           { sessionId: id, targetInfo: { url: `https://noise${id}.test/` } });
+        fn({ tabId: TAB, sessionId }, "Target.attachedToTarget",
+           { sessionId: id, targetInfo: { url: `https://noise${id}.test/`, type: "iframe" } });
       }
       return {};
     },
@@ -209,6 +275,151 @@ test("a hard-capped cascade never exceeds the wait ceiling even while events kee
 test("production caps are the documented, deliberately small bounds", () => {
   assert.equal(OOPIF_MAX_DEPTH, 5);
   assert.equal(OOPIF_MAX_TARGETS, 50);
+  assert.deepEqual([...OOPIF_TARGET_TYPES], ["iframe"]);
+});
+
+// --------------------------------------------------------------------------- //
+// ADVERSARIAL: the page is HOSTILE. The cascade removed the old implicit
+// "one level down from a URL-validated tab" boundary, so these prove the explicit
+// replacement (own-tab / target-type / attachable-scheme) actually holds.
+// --------------------------------------------------------------------------- //
+
+test("HOSTILE: non-iframe targets (worker/service_worker/page/browser) are IGNORED entirely", async () => {
+  const rig = makeCascade({ top: [
+    { sessionId: "S_W", url: "https://a.test/w.js", type: "worker" },
+    { sessionId: "S_SW", url: "https://a.test/sw.js", type: "service_worker" },
+    { sessionId: "S_P", url: "https://a.test/popup", type: "page" },
+    { sessionId: "S_B", url: "https://a.test/b", type: "browser" },
+    { sessionId: "S_SHARED", url: "https://a.test/shared.js", type: "shared_worker" },
+  ] });
+  // None of them is selectable...
+  assert.equal(await resolve(rig, "https://a.test/w.js"), null);
+  // ...and none of them is DESCENDED into (only the top-session auto-attach happened).
+  assert.deepEqual(rig.sent.filter((c) => c.method === "Target.setAutoAttach")
+    .map((c) => c.sessionId), [undefined]);
+});
+
+test("HOSTILE: `new Worker(location.href)` — a worker target whose url EQUALS the frame's must not shadow it", async () => {
+  // The DoS + wrong-context vector: one line of JS in any cross-origin frame mints a
+  // target with an IDENTICAL url. Unfiltered that makes the frame permanently
+  // un-eval-able (forced ambiguous_frame) and, after a navigation race, could route the
+  // operator's JS into a WORKER global.
+  const rig = makeCascade({ top: [
+    { sessionId: "S_FRAME", url: LEAF_URL, type: "iframe" },
+    { sessionId: "S_WORKER", url: LEAF_URL, type: "worker" },
+  ] });
+  // Resolves cleanly to the REAL FRAME — no ambiguity, no worker.
+  assert.equal(await resolve(rig, LEAF_URL), "S_FRAME");
+});
+
+test("HOSTILE: a worker impersonating the frame CANNOT deny service by forcing ambiguous_frame", async () => {
+  const rig = makeCascade({ top: [
+    { sessionId: "S_FRAME", url: MID_URL, type: "iframe" },
+    ...Array.from({ length: 5 }, (_, i) =>
+      ({ sessionId: `S_W${i}`, url: MID_URL, type: "worker" })),
+  ] });
+  assert.equal(await resolve(rig, MID_URL), "S_FRAME", "workers never enter the match set");
+});
+
+test("HOSTILE: a privileged-scheme child is REFUSED — the top-tab scheme gate is not bypassable one level down", async () => {
+  // A hostile page embeds another extension's web_accessible_resource (or file:/
+  // devtools:). getAllFrames lists it, so a prompt-injected agent CAN pass it to
+  // `eval --frame` — running operator JS inside ANOTHER EXTENSION'S ORIGIN. Refused.
+  for (const url of ["chrome-extension://abcdefghijklmnop/page.html",
+                     "file:///home/zach/.ssh/id_ed25519",
+                     "devtools://devtools/bundled/x.html",
+                     "chrome://settings",
+                     "about:blank",
+                     "data:text/html,<script>1</script>",
+                     "javascript:alert(1)"]) {
+    const rig = makeCascade({ top: [{ sessionId: "S_PRIV", url, type: "iframe" }] });
+    assert.equal(await resolve(rig, url), null, `must refuse ${url}`);
+    // …and never descended into it either.
+    assert.deepEqual(rig.sent.filter((c) => c.method === "Target.setAutoAttach")
+      .map((c) => c.sessionId), [undefined], `must not descend into ${url}`);
+  }
+});
+
+test("HOSTILE: a privileged child does not poison an otherwise-good cascade", async () => {
+  const rig = makeCascade({
+    top: [{ sessionId: "S_EXT", url: "chrome-extension://aaaa/x.html" },
+          { sessionId: "S_MID", url: MID_URL }],
+    S_MID: [{ sessionId: "S_LEAF", url: LEAF_URL }],
+  });
+  assert.equal(await resolve(rig, LEAF_URL), "S_LEAF");
+  assert.equal(rig.sent.filter((c) => c.method === "Target.setAutoAttach")
+    .some((c) => c.sessionId === "S_EXT"), false, "never descends into the extension target");
+});
+
+test("OWN TAB: an attachedToTarget for ANOTHER tab is ignored (onEvent is a GLOBAL listener)", async () => {
+  const rig = makeCascade({ top: [
+    { sessionId: "S_OTHER", url: LEAF_URL, tabId: OTHER_TAB },
+  ] });
+  assert.equal(await resolve(rig, LEAF_URL), null, "another tab's frame must never resolve");
+});
+
+test("OWN TAB: the right tab still resolves alongside a same-url decoy from another tab", async () => {
+  const rig = makeCascade({ top: [
+    { sessionId: "S_OTHER", url: LEAF_URL, tabId: OTHER_TAB },
+    { sessionId: "S_MINE", url: LEAF_URL, tabId: TAB },
+  ] });
+  // No ambiguity: the foreign one never entered the set.
+  assert.equal(await resolve(rig, LEAF_URL), "S_MINE");
+});
+
+test("OWN TAB: an omitted deps.tabId FAILS CLOSED (nothing matches undefined)", async () => {
+  const rig = makeCascade({ top: [{ sessionId: "S_MID", url: MID_URL }] });
+  const out = await resolveOopifSession({
+    send: rig.send, targetUrl: MID_URL,          // tabId deliberately omitted
+    addListener: rig.addListener, removeListener: rig.removeListener,
+    limits: FAST,
+  });
+  assert.equal(out, null, "a caller that forgets tabId gets NOTHING, never everything");
+});
+
+test("DEGRADATION (Fix 6): an UNTAGGED source.sessionId loses the DEPTH bound — it does not fake a cap", async () => {
+  // Depth attribution assumes Chrome tags a sub-session event's source with the parent
+  // sessionId. If it does NOT, every target is attributed depth 1, so `depthCapHit` is
+  // NEVER set and OOPIF_MAX_DEPTH stops binding — the descent is then bounded only by
+  // maxTargets/waitMs. This pins the REAL behaviour (an earlier PR-body claim that it
+  // degrades to a spurious depth cap was backwards).
+  const listeners = new Set();
+  const chain = { top: ["S1"], S1: ["S2"], S2: ["S3"], S3: ["S4"] };
+  const urls = { S1: "https://l1.test/", S2: "https://l2.test/",
+                 S3: "https://l3.test/", S4: LEAF_URL };
+  const rig = {
+    listeners, sent: [],
+    addListener: (fn) => listeners.add(fn),
+    removeListener: (fn) => listeners.delete(fn),
+    send: async (method, params, sessionId) => {
+      rig.sent.push({ method, sessionId });
+      for (const id of chain[sessionId == null ? "top" : sessionId] || []) {
+        for (const fn of [...listeners]) {
+          // NOTE: source carries NO sessionId — the degraded case.
+          fn({ tabId: TAB }, "Target.attachedToTarget",
+             { sessionId: id, targetInfo: { url: urls[id], type: "iframe" } });
+        }
+      }
+      return {};
+    },
+  };
+  // maxDepth 2 would stop a CORRECTLY-attributed cascade before S4 (depth 4). Untagged,
+  // every target reads as depth 1 → we descend the whole chain and RESOLVE past the cap.
+  assert.equal(await resolve(rig, LEAF_URL, { maxDepth: 2 }), "S4",
+    "untagged source ⇒ the depth cap silently stops binding (bounded only by maxTargets/waitMs)");
+  // Selection is still by URL alone, so the frame reached is the one asked for — the
+  // degradation costs the DEPTH BOUND, never frame correctness.
+});
+
+test("depth is attributed from source.sessionId when Chrome DOES tag it (the assumed case)", async () => {
+  const rig = makeCascade({
+    top: [{ sessionId: "S1", url: "https://l1.test/" }],
+    S1: [{ sessionId: "S2", url: "https://l2.test/" }],
+    S2: [{ sessionId: "S3", url: "https://l3.test/" }],
+    S3: [{ sessionId: "S4", url: LEAF_URL }],
+  });
+  // The mirror of the test above: tagged ⇒ maxDepth 2 DOES bind and S4 is unreachable.
+  await assert.rejects(() => resolve(rig, LEAF_URL, { maxDepth: 2 }), /oopif_depth_cap:2/);
 });
 
 // --------------------------------------------------------------------------- //
@@ -258,20 +469,25 @@ const CASCADE = {
   SID_MID: [{ sessionId: "SID_LEAF", url: LEAF_URL }],
 };
 
+const FRAMES = [
+  { frameId: 0, parentFrameId: -1, url: TOP_URL },
+  { frameId: 2140, parentFrameId: 0, url: MID_URL },
+  { frameId: 2141, parentFrameId: 2140, url: LEAF_URL },
+];
+
 const state = {
-  frames: [
-    { frameId: 0, parentFrameId: -1, url: TOP_URL },
-    { frameId: 2140, parentFrameId: 0, url: MID_URL },
-    { frameId: 2141, parentFrameId: 2140, url: LEAF_URL },
-  ],
+  frames: FRAMES,
   tab: { id: TAB_ID, url: TOP_URL, title: "rig", active: false, status: "complete", windowId: 1 },
   cascade: CASCADE,
+  noise: [],          // adversarial extra targets announced on the TOP session
   evalReply: { result: { value: null } },
   calls: { cdp: [], attach: [], detach: [], executeScript: [] },
 };
 function reset() {
   state.calls = { cdp: [], attach: [], detach: [], executeScript: [] };
   state.cascade = CASCADE;
+  state.noise = [];
+  state.frames = FRAMES;
   state.evalReply = { result: { value: null } };
   globalThis.BROWSER_BRIDGE_OOPIF_LIMITS = { ...FAST };
 }
@@ -296,11 +512,15 @@ globalThis.chrome = {
       if (method === "Page.getFrameTree") return { frameTree: FRAME_TREE };
       if (method === "Page.createIsolatedWorld") return { executionContextId: 99 };
       if (method === "Target.setAutoAttach") {
-        const kids = state.cascade[target.sessionId == null ? "top" : target.sessionId] || [];
+        const kids = [...(state.cascade[target.sessionId == null ? "top" : target.sessionId] || []),
+                      ...(target.sessionId == null ? state.noise : [])];
         for (const k of kids) {
           for (const fn of evtListeners) {
-            fn({ tabId: target.tabId, sessionId: target.sessionId }, "Target.attachedToTarget",
-               { sessionId: k.sessionId, targetInfo: { url: k.url, type: "iframe" } });
+            fn({ tabId: k.tabId === undefined ? target.tabId : k.tabId,
+                 sessionId: target.sessionId },
+               "Target.attachedToTarget",
+               { sessionId: k.sessionId,
+                 targetInfo: { url: k.url, type: k.type === undefined ? "iframe" : k.type } });
           }
         }
         return {};
@@ -381,6 +601,52 @@ test("upload --frame <GRANDCHILD>: the SAME shared resolver routes setFileInputF
   assert.deepEqual(out.files, ["x.png"], "only the basename returns");
   assert.equal(state.calls.detach.length, 1);
   assert.equal(evtListeners.size, 0);
+});
+
+test("SECURITY (end-to-end, HOSTILE page): worker / foreign-tab / privileged decoys are all rejected", async () => {
+  reset();
+  // The page mints, all carrying the WANTED grandchild's url: a worker (the DoS +
+  // wrong-context vector), a same-url target belonging to ANOTHER tab, and a
+  // web-accessible resource of another extension. Every one must be ignored, and the op
+  // must still land in the real grandchild frame.
+  state.noise = [
+    { sessionId: "SID_WORKER", url: LEAF_URL, type: "worker" },
+    { sessionId: "SID_SW", url: LEAF_URL, type: "service_worker" },
+    { sessionId: "SID_FOREIGN", url: LEAF_URL, tabId: 4242 },
+    { sessionId: "SID_EXT", url: "chrome-extension://aaaabbbbcccc/page.html" },
+  ];
+  state.evalReply = { result: { value: "grandchild-reached" } };
+  const out = await OPS.eval({ tabId: TAB_ID, frame: "2141", js: "window.RIG_SECRET" });
+  assert.equal(out.value, "grandchild-reached");
+  // NOT ambiguous (the decoys never entered the match set) and evaluated in the REAL frame.
+  assert.equal(lastEval().sessionId, "SID_LEAF");
+  // No decoy was ever descended into.
+  const descended = cdpCalls("Target.setAutoAttach").map((c) => c.sessionId);
+  for (const bad of ["SID_WORKER", "SID_SW", "SID_FOREIGN", "SID_EXT"]) {
+    assert.equal(descended.includes(bad), false, `must never descend into ${bad}`);
+  }
+  assert.deepEqual(descended, [undefined, "SID_MID"]);
+});
+
+test("DOC-PINNED GAP (Fix 4): a numeric --frame id does NOT disambiguate duplicate-URL OOPIFs", async () => {
+  reset();
+  // Two genuinely distinct iframes with the SAME url (a duplicated ad/widget slot).
+  // The caller supplies an unambiguous NUMERIC frameId — but the CDP resolver matches
+  // purely by frame.url, so the numeric id cannot break the tie. This test EXISTS to pin
+  // the documented limitation honestly (SKILL.md/README say the id does not help here),
+  // not to bless it; the parent-chain follow-up is filed in the PR body.
+  state.frames = [
+    { frameId: 0, parentFrameId: -1, url: TOP_URL },
+    { frameId: 3001, parentFrameId: 0, url: MID_URL },
+    { frameId: 3002, parentFrameId: 0, url: MID_URL },
+  ];
+  state.cascade = { top: [{ sessionId: "SID_A", url: MID_URL },
+                          { sessionId: "SID_B", url: MID_URL }] };
+  await assert.rejects(() => OPS.eval({ tabId: TAB_ID, frame: "3002", js: "1" }),
+    /ambiguous_frame:2 \[SID_A:.*, SID_B:.*\]/);
+  assert.equal(cdpCalls("Runtime.evaluate").length, 0, "fails BEFORE running anything");
+  assert.equal(state.calls.detach.length, 1);
+  state.frames = FRAMES;   // restore for any later test
 });
 
 test("SECURITY: the nested cascade adds NO new CDP surface and stays own-tab only", async () => {
