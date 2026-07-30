@@ -28,12 +28,12 @@ import assert from "node:assert/strict";
 import {
   resolveOopifSession, pickOopifSessionId, matchOopifSessions,
   OOPIF_MAX_DEPTH, OOPIF_MAX_TARGETS, OOPIF_AUTO_ATTACH_PARAMS,
-  OOPIF_AUTO_ATTACH_PARAMS_NOFILTER, OOPIF_TARGET_TYPES,
+  OOPIF_AUTO_ATTACH_PARAMS_NOFILTER, OOPIF_TARGET_TYPES, formatCascadeTrace,
 } from "../extension/protocol.js";
 
 // The live rig's three registrable sites (three renderer processes / three targets).
 const TOP_URL = "http://127.0.0.1:8901/top.html";
-const MID_URL = "http://lvh.me:8901/mid.html";
+const MID_URL = "http://127.0.0.1.sslip.io:8901/mid.html";
 const LEAF_URL = "http://127.0.0.1.nip.io:8901/leaf.html";
 
 // Tiny bounds so the cap/timeout cases settle in milliseconds, not seconds.
@@ -56,8 +56,16 @@ function makeCascade(tree, opts = {}) {
   const announce = (parentSessionId) => {
     const kids = tree[parentSessionId == null ? "top" : parentSessionId] || [];
     for (const k of kids) {
+      // Source shape. `subNoTabId` models the SUSPECTED live Chrome behaviour: an event
+      // for a SUB-session carries only `sessionId`, no `tabId` — which is what would
+      // make an over-strict tabId check silently kill the whole cascade at level 2.
+      const src = {};
+      if (!(opts.subNoTabId && parentSessionId != null)) {
+        src.tabId = k.tabId === undefined ? TAB : k.tabId;
+      }
+      if (parentSessionId != null) src.sessionId = parentSessionId;
       for (const fn of [...listeners]) {
-        fn({ tabId: k.tabId === undefined ? TAB : k.tabId, sessionId: parentSessionId },
+        fn(src,
            "Target.attachedToTarget",
            { sessionId: k.sessionId,
              targetInfo: { url: k.url, type: k.type === undefined ? "iframe" : k.type,
@@ -87,6 +95,17 @@ const resolve = (rig, targetUrl, limits, over) => resolveOopifSession({
 });
 const autoAttachSessions = (rig) =>
   rig.sent.filter((c) => c.method === "Target.setAutoAttach").map((c) => c.sessionId);
+
+// The resolver THROWS `frame_not_found:<label> cascade[…]` rather than returning null,
+// so every failure carries the bounded diagnostic. Returns the message for inspection.
+async function notFound(rig, targetUrl, limits, over) {
+  let msg = null;
+  try { await resolve(rig, targetUrl, limits, over); }
+  catch (e) { msg = String(e.message); }
+  assert.ok(msg, "must reject — the resolver never returns a silent null");
+  assert.match(msg, /^frame_not_found:/);
+  return msg;
+}
 
 // --------------------------------------------------------------------------- //
 // PURE: the recursive resolver
@@ -185,14 +204,16 @@ test("AMBIGUITY fails loud: two attached sessions with the SAME url → ambiguou
     top: [{ sessionId: "S_A", url: MID_URL }, { sessionId: "S_B", url: MID_URL }],
   });
   await assert.rejects(() => resolve(rig, MID_URL),
-    /ambiguous_frame:2 \[S_A:http:\/\/lvh\.me:8901\/mid\.html, S_B:http:\/\/lvh\.me:8901\/mid\.html\]/);
+    /ambiguous_frame:2 \[S_A:http:\/\/127\.0\.0\.1\.sslip\.io:8901\/mid\.html, S_B:http:\/\/127\.0\.0\.1\.sslip\.io:8901\/mid\.html\]/);
   assert.equal(rig.listeners.size, 0);
 });
 
 test("PROPAGATION TIMEOUT: events that never arrive → null (caller → frame_not_found), bounded", async () => {
   const rig = makeCascade({});   // setAutoAttach resolves; NOTHING is ever announced
   const t0 = Date.now();
-  assert.equal(await resolve(rig, LEAF_URL, { settleMs: 40, waitMs: 200, pollMs: 5 }), null);
+  const msg = await notFound(rig, LEAF_URL, { settleMs: 40, waitMs: 200, pollMs: 5 });
+  assert.match(msg, /exit=settle/);
+  assert.match(msg, /\(no events observed\)/, "the diagnostic says plainly that NOTHING arrived");
   assert.ok(Date.now() - t0 < 3000, "must settle by the tiny bound, not hang");
   assert.equal(rig.listeners.size, 0);
 });
@@ -234,10 +255,10 @@ test("THE HARD CEILING is a real wall: a page keeping the descend queue non-empt
   };
   const t0 = Date.now();
   // maxDepth/maxTargets are BOTH generous — neither cap can trip before the ceiling.
-  const out = await resolve(rig, LEAF_URL,
+  const msg = await notFound(rig, LEAF_URL,
     { maxDepth: 1000, maxTargets: 100000, settleMs: 10_000, waitMs: 120, pollMs: 5 });
   const elapsed = Date.now() - t0;
-  assert.equal(out, null, "the ceiling ends it as a clean not-found → frame_not_found");
+  assert.match(msg, /exit=deadline/, "the ceiling — NOT a cap and NOT the settle window");
   assert.ok(elapsed >= 100, `must actually reach the ceiling, took ${elapsed}ms`);
   assert.ok(elapsed < 2000, `must STOP at the ceiling, took ${elapsed}ms`);
   assert.equal(listeners.size, 0);
@@ -293,7 +314,8 @@ test("HOSTILE: non-iframe targets (worker/service_worker/page/browser) are IGNOR
     { sessionId: "S_SHARED", url: "https://a.test/shared.js", type: "shared_worker" },
   ] });
   // None of them is selectable...
-  assert.equal(await resolve(rig, "https://a.test/w.js"), null);
+  const msg = await notFound(rig, "https://a.test/w.js");
+  assert.match(msg, /drop:type type=worker/, "the diagnostic names WHY each was dropped");
   // ...and none of them is DESCENDED into (only the top-session auto-attach happened).
   assert.deepEqual(rig.sent.filter((c) => c.method === "Target.setAutoAttach")
     .map((c) => c.sessionId), [undefined]);
@@ -333,7 +355,7 @@ test("HOSTILE: a privileged-scheme child is REFUSED — the top-tab scheme gate 
                      "data:text/html,<script>1</script>",
                      "javascript:alert(1)"]) {
     const rig = makeCascade({ top: [{ sessionId: "S_PRIV", url, type: "iframe" }] });
-    assert.equal(await resolve(rig, url), null, `must refuse ${url}`);
+    assert.match(await notFound(rig, url), /drop:scheme/, `must refuse ${url}`);
     // …and never descended into it either.
     assert.deepEqual(rig.sent.filter((c) => c.method === "Target.setAutoAttach")
       .map((c) => c.sessionId), [undefined], `must not descend into ${url}`);
@@ -355,7 +377,8 @@ test("OWN TAB: an attachedToTarget for ANOTHER tab is ignored (onEvent is a GLOB
   const rig = makeCascade({ top: [
     { sessionId: "S_OTHER", url: LEAF_URL, tabId: OTHER_TAB },
   ] });
-  assert.equal(await resolve(rig, LEAF_URL), null, "another tab's frame must never resolve");
+  assert.match(await notFound(rig, LEAF_URL), /drop:foreign-tab/,
+    "another tab's frame must never resolve");
 });
 
 test("OWN TAB: the right tab still resolves alongside a same-url decoy from another tab", async () => {
@@ -367,14 +390,140 @@ test("OWN TAB: the right tab still resolves alongside a same-url decoy from anot
   assert.equal(await resolve(rig, LEAF_URL), "S_MINE");
 });
 
-test("OWN TAB: an omitted deps.tabId FAILS CLOSED (nothing matches undefined)", async () => {
+test("OWN TAB: an omitted deps.tabId FAILS CLOSED (a tagged event can't match undefined)", async () => {
   const rig = makeCascade({ top: [{ sessionId: "S_MID", url: MID_URL }] });
-  const out = await resolveOopifSession({
+  await assert.rejects(() => resolveOopifSession({
     send: rig.send, targetUrl: MID_URL,          // tabId deliberately omitted
     addListener: rig.addListener, removeListener: rig.removeListener,
     limits: FAST,
-  });
-  assert.equal(out, null, "a caller that forgets tabId gets NOTHING, never everything");
+  }), /frame_not_found/, "a caller that forgets tabId gets NOTHING, never everything");
+});
+
+// --------------------------------------------------------------------------- //
+// OWNERSHIP FALLBACK — the fix for the FIRST LIVE FAILURE.
+// Live (Brave, 2026-07-30, verified-fresh extension): depth 1 resolved, depth 2+ ALWAYS
+// returned frame_not_found and NEVER oopif_depth_cap — i.e. no level-2 session was ever
+// recorded, so the cascade was INERT, not capped. Prime suspect: sub-session
+// attachedToTarget events carry no `source.tabId`, so the strict own-tab check dropped
+// every one of them. Ownership now falls back to SESSION PARENTAGE, which preserves the
+// invariant without depending on Chrome populating `tabId`.
+// --------------------------------------------------------------------------- //
+
+test("LIVE REPRO: sub-session events with NO tabId still resolve a GRANDCHILD (parentage fallback)", async () => {
+  const rig = makeCascade({ top: [{ sessionId: "S_MID", url: MID_URL }],
+                            S_MID: [{ sessionId: "S_LEAF", url: LEAF_URL }] },
+                          { subNoTabId: true });
+  // Under the strict-tabId rule this returned frame_not_found with attach=[top,S_MID] —
+  // exactly the live symptom. The level-2 event is now accepted because its
+  // source.sessionId is a session THIS cascade attached.
+  assert.equal(await resolve(rig, LEAF_URL), "S_LEAF");
+  assert.deepEqual(autoAttachSessions(rig), [undefined, "S_MID"]);
+});
+
+test("LIVE REPRO: the 7-level deep rig shape resolves to the documented cap with no tabId on sub-events", async () => {
+  const tree = { top: [{ sessionId: "S1", url: "https://d1.test/" }] };
+  for (let i = 1; i <= 5; i++) {
+    tree[`S${i}`] = [{ sessionId: `S${i + 1}`, url: `https://d${i + 1}.test/` }];
+  }
+  const rig = makeCascade(tree, { subNoTabId: true });
+  // depth 5 is AT the cap and resolves…
+  assert.equal(await resolve(rig, "https://d5.test/"), "S5");
+  // …depth 6 is PAST it and is refused LOUDLY (not silently not-found) — the outcome
+  // Check B of the live rig expects.
+  const rig2 = makeCascade(tree, { subNoTabId: true });
+  await assert.rejects(() => resolve(rig2, "https://d6.test/"), /oopif_depth_cap:5/);
+});
+
+test("OWNERSHIP: an event with NEITHER tabId nor a known parent sessionId is REJECTED", async () => {
+  const listeners = new Set();
+  const rig = {
+    listeners, sent: [],
+    addListener: (fn) => listeners.add(fn),
+    removeListener: (fn) => listeners.delete(fn),
+    send: async (method, params, sessionId) => {
+      rig.sent.push({ method, sessionId });
+      for (const fn of [...listeners]) {
+        fn({}, "Target.attachedToTarget",     // no tabId, no sessionId — unprovable
+           { sessionId: "S_GHOST", targetInfo: { url: LEAF_URL, type: "iframe" } });
+      }
+      return {};
+    },
+  };
+  assert.match(await notFound(rig, LEAF_URL), /drop:unowned/);
+});
+
+test("OWNERSHIP: an UNKNOWN parent sessionId is rejected even without a tabId (no blanket trust)", async () => {
+  // The fallback must not degrade into "anything with a sessionId is ours".
+  const listeners = new Set();
+  const rig = {
+    listeners, sent: [],
+    addListener: (fn) => listeners.add(fn),
+    removeListener: (fn) => listeners.delete(fn),
+    send: async (method, params, sessionId) => {
+      rig.sent.push({ method, sessionId });
+      for (const fn of [...listeners]) {
+        fn({ sessionId: "S_SOMEONE_ELSES" }, "Target.attachedToTarget",
+           { sessionId: "S_X", targetInfo: { url: LEAF_URL, type: "iframe" } });
+      }
+      return {};
+    },
+  };
+  const msg = await notFound(rig, LEAF_URL);
+  assert.match(msg, /drop:unowned/);
+  assert.match(msg, /parent=unknown/);
+});
+
+test("OWNERSHIP: a present-but-FOREIGN tabId still loses, even on a sub-session event", async () => {
+  // tabId, when present, stays AUTHORITATIVE — the fallback only covers its absence.
+  const rig = makeCascade({ top: [{ sessionId: "S_MID", url: MID_URL }],
+                            S_MID: [{ sessionId: "S_LEAF", url: LEAF_URL, tabId: OTHER_TAB }] });
+  const msg = await notFound(rig, LEAF_URL);
+  assert.match(msg, /drop:foreign-tab/);
+});
+
+// --------------------------------------------------------------------------- //
+// DIAGNOSTICS — the readout that makes the next live run evidence, not guesswork.
+// --------------------------------------------------------------------------- //
+
+test("DIAGNOSTIC: a failure reports exit reason, attach chain, event provenance and depths", async () => {
+  const rig = makeCascade({ top: [
+    { sessionId: "S_MID", url: MID_URL },
+    { sessionId: "S_W", url: LEAF_URL, type: "worker" },
+    { sessionId: "S_EXT", url: "chrome-extension://aaaa/x.html" },
+    { sessionId: "S_FOREIGN", url: LEAF_URL, tabId: OTHER_TAB },
+  ] });
+  const msg = await notFound(rig, "https://never.test/");
+  // Header: which exit fired, which sessions we auto-attached, counts, filter mode, caps.
+  assert.match(msg, /cascade\[exit=(settle|deadline) attach=top>S_MID events=4 accepted=1 filter=on caps=d5\/t50\]/);
+  // Per-event provenance, including WHY each was dropped.
+  assert.match(msg, /#1 accept type=iframe tab=match parent=absent d=1 http:\/\/127\.0\.0\.1\.sslip\.io:8901\/mid\.html/);
+  assert.match(msg, /drop:type type=worker/);
+  assert.match(msg, /drop:scheme/);
+  assert.match(msg, /drop:foreign-tab type=iframe tab=foreign/);
+});
+
+test("DIAGNOSTIC: the trace is CAPPED so a frame-spamming page cannot blow up the error", async () => {
+  const many = Array.from({ length: 60 }, (_, i) =>
+    ({ sessionId: `S${i}`, url: `https://spam${i}.test/`, type: "worker" }));
+  const rig = makeCascade({ top: many });
+  const msg = await notFound(rig, "https://never.test/");
+  const rows = msg.match(/#\d+ drop:/g) || [];
+  assert.equal(rows.length, 20, "at most OOPIF_TRACE_MAX entries are rendered");
+  assert.match(msg, /\(\+40 more events not shown\)/, "but the true count is still reported");
+  assert.ok(msg.length < 4000, `error must stay compact, was ${msg.length}`);
+});
+
+test("DIAGNOSTIC: formatCascadeTrace is pure and handles the empty case", () => {
+  assert.match(
+    formatCascadeTrace({ exit: "settle", eventsSeen: 0, trace: [], attachSent: [],
+                         filterMode: "on", accepted: 0, maxDepth: 5, maxTargets: 50 }),
+    /^cascade\[exit=settle attach=- events=0 accepted=0 filter=on caps=d5\/t50\] \(no events observed\)$/);
+});
+
+test("DIAGNOSTIC: a filter rejection is recorded in the readout (so it can't hide)", async () => {
+  const rig = makeCascade({ top: [{ sessionId: "S_MID", url: MID_URL }] },
+                          { rejectFilter: true });
+  assert.match(await notFound(rig, "https://never.test/"), /filter=rejected→off/);
 });
 
 test("DEGRADATION (Fix 6): an UNTAGGED source.sessionId loses the DEPTH bound — it does not fake a cap", async () => {
@@ -573,7 +722,7 @@ test("eval --frame: a frame that never attaches → frame_not_found:<url> (the l
   reset();
   state.cascade = {};    // nothing is ever announced
   await assert.rejects(() => OPS.eval({ tabId: TAB_ID, frame: "2141", js: "1" }),
-    /^Error: frame_not_found:http:\/\/127\.0\.0\.1\.nip\.io:8901\/leaf\.html$/);
+    /^Error: frame_not_found:http:\/\/127\.0\.0\.1\.nip\.io:8901\/leaf\.html cascade\[/);
   assert.equal(cdpCalls("Runtime.evaluate").length, 0, "never evaluates when unresolved");
   assert.equal(state.calls.detach.length, 1, "still detaches");
   assert.equal(evtListeners.size, 0);

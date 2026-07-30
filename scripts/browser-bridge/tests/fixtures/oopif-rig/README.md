@@ -22,23 +22,34 @@ server.
 | rig | level | url | site |
 |-----|-------|-----|------|
 | basic | top | `http://127.0.0.1:8901/top.html` | `127.0.0.1` |
-| basic | mid | `http://lvh.me:8901/mid.html` | `lvh.me` |
+| basic | mid | `http://127.0.0.1.sslip.io:8901/mid.html` | `sslip.io` |
 | basic | leaf | `http://127.0.0.1.nip.io:8901/leaf.html` | `nip.io` |
-| deep | 0…6 | `deep0.html` … `deep6.html` | **alternating** `127.0.0.1` / `lvh.me` |
+| deep | 0…6 | `deep0.html` … `deep6.html` | **alternating** `127.0.0.1` / `127.0.0.1.sslip.io` |
 
 The deep rig only needs **two** domains: alternating them means every frame is still
 cross-site from its **parent**, so each is its own local frame root → its own target.
 (A level-2 `127.0.0.1` frame may share a *process* with the top frame — that is fine and
-expected; what matters for CDP is that it is a separate local root from its `lvh.me`
+expected; what matters for CDP is that it is a separate local root from its `127.0.0.1.sslip.io`
 parent.)
-
-> ⚠ **Do NOT use `vcap.me`.** It is still widely recommended as a loopback alias but now
-> resolves to a **real public IP** (103.224.182.214). `lvh.me` and `nip.io` were the
-> working pair as of 2026-07; re-check with `getent hosts <name>` before trusting either
-> — a loopback alias going public is a live-traffic leak, not just a broken test.
 
 Both aliases need working public DNS. The port is irrelevant to isolation (a different
 port is a different *origin* but the same *site*) — the hostnames are what matter.
+
+### ⚠ Two traps when picking a loopback alias
+
+1. **`vcap.me` now resolves to a REAL PUBLIC IP** (103.224.182.214). It is still widely
+   recommended as a loopback alias; it is not one any more. A loopback alias going public
+   is a live-traffic leak, not just a broken test. **Always** `getent hosts <name>` before
+   trusting any of these — including `sslip.io`/`nip.io`, which were verified pointing at
+   127.0.0.1 on 2026-07-30.
+2. **Wallet/security extensions blocklist these domains.** The rig originally used
+   `lvh.me`; on the `work` Brave profile **Phantom Wallet hijacked the tab** to
+   `chrome-extension://…/phishing.html?origin=http%3A%2F%2Flvh.me…` because `lvh.me` is on
+   its phishing blocklist — so the fixture silently became a phishing interstitial instead
+   of the rig, which is worse than having no fixture. `lvh.me` was replaced with
+   `127.0.0.1.sslip.io` for this reason. If a rig page ever renders as an extension
+   warning page, **check the tab's real URL before debugging anything else**, and prefer a
+   profile without wallet extensions.
 
 ## Serve it
 
@@ -65,7 +76,7 @@ Frame ids are assigned per load — read them out of `frames`, don't hardcode.
 
 **Expected AFTER the nested-OOPIF fix (#211):** `frames` lists all three
 (`leaf.parentFrameId == mid.frameId`); `eval --frame <mid>` →
-`"http://lvh.me:8901/mid.html"`; `eval --frame <leaf>` → `"grandchild-reached"`;
+`"http://127.0.0.1.sslip.io:8901/mid.html"`; `eval --frame <leaf>` → `"grandchild-reached"`;
 `text --frame <leaf>` contains `leaf-marker`. All exit 0.
 
 **Confirmed BEFORE the fix (extension 0.2.0, live Brave):** `frames` already listed the
@@ -73,7 +84,59 @@ grandchild (webNavigation is OOPIF-aware) and `text --frame <leaf>` read it fine
 `eval --frame <leaf>` failed
 `op 'eval' failed in the browser: frame_not_found:http://127.0.0.1.nip.io:8901/leaf.html`
 (exit 1) — `Target.setAutoAttach` is not recursive, so the grandchild's target never
-attached to the tab's top session. That is the exact defect the fix removes.
+attached to the tab's top session. That is the defect the fix targets.
+
+### 📓 Live run #1 (2026-07-30, Brave restarted 16:21:35, extension written 16:01:21) — the cascade was INERT
+
+The first cascade implementation **did not work in real Brave**, and the two rigs are what
+proved it. Recorded here so the next run knows what "already ruled out" means:
+
+| check | result |
+|---|---|
+| basic `eval --frame <mid>` (depth 1) | ✅ `"http://…/mid.html"` |
+| basic `eval --frame <leaf>` (depth 2) | ❌ `frame_not_found` |
+| basic `text --frame <leaf>` (control) | ✅ reads fine |
+| deep `eval --frame` depth 1 | ✅ `"deep1-reached"` |
+| deep `eval --frame` depth 2 and depth 6 | ❌ `frame_not_found` |
+
+**What that ruled OUT:** depth 1 resolving means real OOPIF targets ARE typed `iframe`
+(the type filter is not eating them), the scheme check is fine, and the top-session
+`setAutoAttach` works. **What it ruled IN:** the failure was always `frame_not_found` and
+**never `oopif_depth_cap`** — so no level-2 session was ever *recorded*. The recursion was
+inert, not capped.
+
+**Diagnosed cause (fix in this branch, awaiting re-verification):** the own-tab check
+required `source.tabId` on every `attachedToTarget`, and Chrome appears not to populate it
+for **sub-session** events (they carry `sessionId` only). Every level-2+ event was
+therefore dropped as foreign. Ownership now falls back to **session parentage** — an event
+whose `source.sessionId` is a session this cascade itself attached is ours — which keeps
+the own-tab invariant without depending on `tabId` being present. `OOPIF_SETTLE_MS` was
+also raised (300 → 600 ms) and the quiet window now restarts on each newly-issued
+`setAutoAttach`, in case a slow second level was also being cut off.
+
+**Every failure now carries a bounded `cascade[…]` readout**, so run #2 does not need
+guesswork. Example shape:
+
+```
+frame_not_found:http://127.0.0.1.nip.io:8901/leaf.html cascade[exit=settle attach=top>S_MID events=3 accepted=2 filter=on caps=d5/t50]
+  #1 accept type=iframe tab=match  parent=absent  d=1 http://127.0.0.1.sslip.io:8901/mid.html
+| #2 drop:type type=worker tab=match parent=absent      http://x/w.js
+| #3 accept type=iframe tab=absent parent=known   d=2 http://127.0.0.1.nip.io:8901/leaf.html
+```
+
+How to read it on the next live run:
+
+- **`attach=top` only** → we never descended; look at why no child was queued.
+- **`attach=top>S_MID` but no `#…` row with `parent=known`** → the level-2 events are not
+  reaching us at all (a `setAutoAttach`-on-sub-session problem, hypothesis 2 — try
+  `Target.setDiscoverTargets` or a different param shape).
+- **rows with `drop:foreign-tab` and `tab=absent`** → impossible by construction now, but
+  `drop:unowned` + `parent=unknown` would mean the parentage fallback is not recognising
+  our own sessions.
+- **`exit=settle` with an `accept` row at `d=2`** → the frame WAS found but its url did not
+  match; compare the `#…` url against the one in the `frame_not_found:` prefix.
+- **`exit=deadline`** → raise `OOPIF_WAIT_MS`; **`filter=rejected→off`** → Chrome refused
+  the experimental `filter` param (harmless, the listener-side type check still applies).
 
 ### Why this ALSO settles the target-`type` question (not decorative)
 

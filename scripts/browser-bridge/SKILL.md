@@ -173,7 +173,7 @@ is **hard-bounded** and every bound fails LOUD (never a silent truncation, never
 
 | failure | error | meaning |
 |---------|-------|---------|
-| frame never attaches within the bounded wait (3 s **hard** ceiling, checked every iteration; ~300 ms quiet-window settle) | `frame_not_found:<url>` | the frame isn't there (unchanged shape) |
+| frame never attaches within the bounded wait (5 s **hard** ceiling, checked every iteration; 600 ms quiet-window settle, restarted on each new `setAutoAttach`) | `frame_not_found:<url> cascade[…]` | the frame isn't there — **plus a bounded diagnostic**, see below |
 | nesting deeper than **5** levels below the tab | `oopif_depth_cap:5` | we deliberately stopped descending |
 | more than **50** attached targets for one op | `oopif_target_cap:50` | frame-spamming page; work is bounded |
 | two attached frames share the target URL | `ambiguous_frame:<n> [<sessionId>:<url>, …]` | **no escape hatch — see below**; it never silently picks one |
@@ -201,16 +201,30 @@ deliberate refusal, not a silent wrong-frame, but it IS a dead end: use
 `text`/`html`/`click`/`type`/`key --frame` (which resolve by numeric frameId and are
 unaffected), or change the page selector. A parent-chain tiebreak is a filed follow-up.
 
-**Not yet live-verified against real Brave** — `tests/fixtures/oopif-rig/` has two
-fixtures for that: a 3-domain grandchild rig, and a 7-level alternating-domain "deep" rig
-that empirically settles whether `OOPIF_MAX_DEPTH` really binds (see its README).
+**Every OOPIF failure carries a bounded `cascade[…]` diagnostic** naming the loop exit
+(`match`/`settle`/`deadline`/`depth-cap`/`target-cap`), which sessions were auto-attached,
+and — for up to 20 observed targets — the target `type`, whether `source.tabId` was
+present/matched, whether the parent session was known, the computed depth, and why each
+was dropped (`drop:type`/`drop:scheme`/`drop:foreign-tab`/`drop:unowned`/`drop:dup`).
+It is **caller-facing text only** — telemetry stays metadata-only. Read it before
+theorising about a `frame_not_found`.
 
-**⚠ Known unverified degradation:** depth attribution relies on Chrome tagging a
-flat-mode sub-session event's `source` with the parent `sessionId`. If it does not, every
-target reads as depth 1 and **`OOPIF_MAX_DEPTH` silently stops binding** — the descent is
-then bounded only by the 50-target cap and the 3 s ceiling. It can NOT mis-route your JS
-(selection is by URL equality and never consults depth), but until the deep rig is run,
-treat "depth 5" as unconfirmed.
+**⚠ STATUS: live run #1 FAILED — the cascade was inert in real Brave.** Depth 1 resolved;
+depth 2+ always returned `frame_not_found` and **never** a depth cap, so no second-level
+session was ever recorded. Diagnosed cause: the own-tab check required `source.tabId`,
+which Chrome appears not to populate on **sub-session** events. Ownership now falls back
+to **session parentage** (an event whose `source.sessionId` is a session this cascade
+attached is ours), the settle window was raised and now restarts per descend, and the
+diagnostics above were added. **That fix is NOT yet re-verified.** Until run #2 passes,
+assume `eval --frame`/`upload --frame` reach a DIRECT child OOPIF only. Run
+`tests/fixtures/oopif-rig/` Check A and Check B (see its README, which records run #1 and
+how to read the readout).
+
+**⚠ Also unconfirmed:** whether `OOPIF_MAX_DEPTH` binds at all depends on Chrome tagging
+sub-session events with the parent `sessionId`. If it does not, every target reads as
+depth 1 and the depth cap silently stops binding (still bounded by 50 targets / 5 s). It
+can NOT mis-route your JS — selection is by URL equality and never consults depth.
+Check B settles it.
 
 Result payloads land under `.result.data` in the JSON (the envelope is
 `{"ok":true,"result":{"id","ok","data":{...}}}`).

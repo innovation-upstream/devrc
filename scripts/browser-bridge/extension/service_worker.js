@@ -237,20 +237,22 @@ async function execInFrame(tabId, frameId, func, args) {
 // removed inside resolveOopifSession's own `finally`.
 // `globalThis.BROWSER_BRIDGE_OOPIF_LIMITS` is a TEST-ONLY hook to shrink the caps/waits
 // so a cap/propagation test settles in ms; undefined in production → the real bounds.
-// A frame that never appears within the bounds → `frame_not_found:<url>` (the SAME
-// error shape the single-level code returned) — never a silent null, never a hang.
+// A frame that never appears within the bounds → `frame_not_found:<url> cascade[…]` —
+// the SAME error prefix the single-level code returned, now with a bounded diagnostic
+// readout of what the cascade actually observed (types, tab/parent provenance, depths,
+// which sessions we auto-attached, and which loop exit fired). Never a silent null,
+// never a hang. The diagnostic is CALLER-facing only — telemetry stays metadata-only.
 async function cdpOopifSession(send, tabId, frame) {
-  const sessionId = await resolveOopifSession({
+  return resolveOopifSession({
     send,
     tabId,                 // own-tab gate on the GLOBAL onEvent listener (fails closed)
     targetUrl: frame.url,
+    label: frame.url || frame.frameId,
     addListener: (fn) => chrome.debugger.onEvent.addListener(fn),
     removeListener: (fn) => chrome.debugger.onEvent.removeListener(fn),
     limits: (typeof globalThis !== "undefined" && globalThis.BROWSER_BRIDGE_OOPIF_LIMITS)
       || undefined,
   });
-  if (!sessionId) throw new Error(`frame_not_found:${frame.url || frame.frameId}`);
-  return sessionId;
 }
 
 // Evaluate an arbitrary JS STRING inside one resolved frame of `tabId` via CDP

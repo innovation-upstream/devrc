@@ -246,7 +246,8 @@ fails LOUD rather than truncating silently or hanging:
 - `OOPIF_MAX_TARGETS` = **50** distinct sessions per op → `oopif_target_cap:50`;
 - attach events arrive **asynchronously** (a `setAutoAttach` reply does NOT mean its
   events landed), so the resolver waits on a quiet-window settle (`OOPIF_SETTLE_MS`,
-  300 ms) under a hard ceiling (`OOPIF_WAIT_MS`, 3 s — well inside `CDP_OP_BUDGET_MS`);
+  600 ms, RESTARTED on each newly-issued `setAutoAttach` so a slow level is never cut off
+  mid-descend) under a hard ceiling (`OOPIF_WAIT_MS`, 5 s — well inside `CDP_OP_BUDGET_MS`);
   a timeout surfaces as `frame_not_found:<url>`, never a silent null and never a hang.
   The ceiling is checked **first each iteration, above the descend branch** — an earlier
   revision checked it only when there was nothing left to descend into, so a page that
@@ -263,9 +264,13 @@ part of its safety from only ever looking ONE level below a tab whose URL
 `assertCdpAttachable` had validated. Recursion removes that, so every discovered target is
 filtered on three axes in `onEvt` before it is tracked, descended into, or matched:
 
-1. **Own tab** — `chrome.debugger.onEvent` is a GLOBAL listener, so an event whose
-   `source.tabId` isn't this op's tab is dropped. `tabId` is threaded in from the SW; a
-   caller that omits it **fails closed** (nothing equals `undefined`).
+1. **Own tab / own cascade** — `chrome.debugger.onEvent` is a GLOBAL listener, so
+   ownership must be PROVEN per event. When `source.tabId` is present it is authoritative
+   and must equal this op's tab. When it is **absent** — which live evidence says is the
+   case for SUB-session events, and which made the first cascade implementation inert at
+   level 2 — ownership falls back to **session parentage**: the event's `source.sessionId`
+   must be a session THIS cascade attached. An event proving neither is dropped
+   (`drop:unowned`), so it still fails closed; the fallback is not blanket trust.
 2. **`iframe` targets only** (`OOPIF_TARGET_TYPES`) — a page can `new Worker(location.href)`
    to mint a target with a url IDENTICAL to a real frame's. Unfiltered that lets any
    cross-origin frame permanently deny service to itself (forced `ambiguous_frame`) and,
@@ -297,15 +302,35 @@ out because the ancestor→session mapping is subtle when an intermediate frame 
 same-process (its target IS the top session) and that cannot be validated without live
 Brave.
 
-**⚠ Unverified assumption — depth attribution.** Depth comes from flat mode tagging a
+**Failure diagnostics (`formatCascadeTrace`).** Every OOPIF failure —
+`frame_not_found`/`oopif_depth_cap`/`oopif_target_cap` — appends ONE compact
+`cascade[exit=… attach=… events=… accepted=… filter=… caps=…]` header plus up to
+`OOPIF_TRACE_MAX` (20) per-event rows recording each observed target's `type`, whether
+`source.tabId` was present and matched, whether its parent session was known, the computed
+depth, and the drop reason. Bounded by construction, so a frame-spamming page cannot blow
+up the error. It is **caller-facing error text only** (frame URLs appear, as they already
+do in `ambiguous_frame`) and is **never** fed to telemetry, which stays metadata-only.
+This exists because live run #1 failed and produced nothing to reason from.
+
+**⚠ STATUS — live run #1 FAILED; the current fix is UNVERIFIED.** With a
+confirmed-fresh extension, depth 1 resolved but depth 2+ always returned
+`frame_not_found` and **never** `oopif_depth_cap` — no second-level session was ever
+recorded, i.e. the recursion was **inert, not capped**. That ruled out the type filter and
+the scheme check (depth 1 works, so OOPIF targets really are typed `iframe`) and pointed
+at the own-tab check: Chrome appears not to populate `source.tabId` on sub-session events,
+so every level-2+ event was dropped as foreign. The parentage fallback above is the fix,
+plus the raised/restarting settle window — **neither is re-verified against real Brave.**
+Until run #2 passes, treat `eval`/`upload --frame` as reaching a DIRECT child OOPIF only.
+
+**⚠ Still unconfirmed — depth attribution.** Depth comes from flat mode tagging a
 sub-session event's `source` with the parent `sessionId`. If Chrome does NOT tag it, every
 target reads as depth 1, `depthCapHit` is never set, and **`OOPIF_MAX_DEPTH` silently
 stops binding** — the descent is then bounded only by `OOPIF_MAX_TARGETS` and
 `OOPIF_WAIT_MS`. It canNOT mis-route JS (selection is by URL equality and never consults
-`depth`). **Not live-verified against real Brave yet** — `tests/fixtures/oopif-rig/`
-carries two fixtures for exactly this: a 3-domain grandchild rig (Check A, which also
-confirms the `iframe` type assumption by construction) and a 7-level alternating-domain
-"deep" rig (Check B) that discriminates a binding depth cap from a broken one.
+`depth`). `tests/fixtures/oopif-rig/` carries two fixtures: a 3-domain grandchild rig
+(Check A, which also confirms the `iframe` type assumption by construction) and a 7-level
+alternating-domain "deep" rig (Check B) that discriminates a binding depth cap from a
+broken one. Its README records run #1 in full and explains how to read the new readout.
 
 Everything is bounded by the per-op CDP timeouts (a bad frame fails fast, never wedges),
 and the never-silent-null contract holds: a genuine `null`/`undefined` is returned as a
@@ -842,15 +867,20 @@ The **`browser agent`** slice, all headless (NO live model, NO Brave, NO bridge)
   inherited-group straggler → asserted reaped, no orphan); schema parse + EXACTLY
   ONE `--continue` retry then `blocked`, no-retry on a hard error.
 
-Current totals (measured): **208 Python** + **220 node**, of which
-`nested_oopif.test.mjs` is **34** — the nested-OOPIF (#211) coverage. It models a
+Current totals (measured): **208 Python** + **229 node**, of which
+`nested_oopif.test.mjs` is **43** — the nested-OOPIF (#211) coverage. It models a
 **HOSTILE** page, not a cooperative one: worker/service-worker/page targets ignored, a
 `new Worker(location.href)` target that shares the wanted frame's url neither shadowing it
 nor forcing a denial-of-service `ambiguous_frame`, `chrome-extension:`/`file:`/`devtools:`/
 `about:`/`data:`/`javascript:` children refused (and never descended into), foreign-tab
 events dropped, an omitted `tabId` failing closed, the experimental `filter` param
 failing soft, the wait ceiling holding while the descend queue stays non-empty, and the
-untagged-`source.sessionId` degradation pinned to its ACTUAL behaviour. Plus a GRANDCHILD frame
+untagged-`source.sessionId` degradation pinned to its ACTUAL behaviour. It also carries a
+**live-failure regression set**: sub-session events with NO `tabId` still resolving a
+grandchild via the parentage fallback (the run-#1 repro), the 7-level deep-rig shape
+resolving at depth 5 and refusing at depth 6, an unknown parent session still rejected
+(the fallback is not blanket trust), a present-but-foreign `tabId` still losing, and the
+`cascade[…]` diagnostic's content + 20-entry cap. Plus a GRANDCHILD frame
 resolving through TWO attach levels (the second `Target.setAutoAttach` asserted to be sent
 ON the child's `sessionId`), a depth-3 cascade, the DIRECT-child single-level path
 unchanged (regression), the depth cap, the target cap, a frame-spamming page staying
