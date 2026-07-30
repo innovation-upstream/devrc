@@ -65,7 +65,7 @@ corrupted `.sops.yaml` on a dirty tree (2026-06-24).
 
 - **To sync a branch: use a clean worktree, not a stash.** `git worktree add ../<repo>-<topic> -b <branch> origin/<main-branch>` → edit/build/test/commit/push there → `git worktree remove`. A concurrent push then rebases only your clean tree, which holds only your staged paths.
 - **To take another ref's version of a file:** `git checkout <ref> -- <paths>` — never stash/pop around it.
-- **When dispatching parallel subagents that touch one repo**, pass `isolation: "worktree"` on each Agent call so their edits cannot collide.
+- **When dispatching parallel subagents that touch one repo**, pass `isolation: "worktree"` on each Agent call so each gets its own worktree and their edits cannot collide in the working tree. The worktree path + branch come back in the agent's result for inspection/cleanup; worktrees with no changes are auto-removed. Without this, parallel agents share one tree and risk stashing or staging each other's in-flight work — near-misses on civitai. **Forbid `git stash` in parallel-dispatch prompts** for the repo-global reason above.
 - **Re-sync the base clone after worktree work merges.** Because worktrees do the committing, the base clone is write-only and silently falls behind — its dirty files become *stale orphans* of already-merged work, not WIP (homelab-talos was 262 behind on 2026-07-30). Run `git -C <repo> fetch origin && git -C <repo> merge --ff-only origin/<main-branch>` at the end of a worktree cycle. **If that conflicts, take upstream** (`--ours` during a stash/autostash apply); `warning: skipped previously applied commit` means the work already landed from a worktree → `git rebase --skip`.
 
 ## Token & Tool Hygiene 🟡
