@@ -323,6 +323,20 @@ def test_cmd_scan_threads_resolved_initiative_slugs_into_last_emailed(tmp_path, 
 
     monkeypatch.setattr(email_send, "send_digest", fake_send)
 
+    # BELT AND BRACES. This is the suite's ONLY --email test, and the stub above patches
+    # `send_digest` WHOLESALE — if a refactor changes how scan.py reaches it (a
+    # `from email_send import send_digest` at module scope, say), the patch silently
+    # no-ops and a REAL digest goes out before the assertions below fail. So block the
+    # two send seams as well, and — because `send_digest`'s `_relay`/`_sender` defaults
+    # are bound at DEF time and would keep pointing at the originals — the smtplib
+    # constructor underneath both of them, which is what actually opens the socket.
+    def _no_network(*a, **kw):
+        raise AssertionError("a REAL send was attempted — the send stub did not hold")
+
+    monkeypatch.setattr(email_send, "_relay_send", _no_network)
+    monkeypatch.setattr(email_send, "_smtp_send", _no_network)
+    monkeypatch.setattr(email_send.smtplib, "SMTP", _no_network)
+
     args = scan.build_parser().parse_args(["--email", "--repos", str(dev)])
     assert scan.cmd_scan(args) == 0
     assert sent, "the digest send was never reached — nothing wrote last_emailed.json"

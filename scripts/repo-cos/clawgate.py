@@ -204,6 +204,30 @@ def build_task_body(proposal: dict) -> str:
 
 # ---- task tags -----------------------------------------------------------------------
 
+def _normalize_tag(tag) -> tuple[str | None, str | None]:
+    """PURE core of `normalize_tag`: `(normalized_tag, drop_reason)`. Does NOT log.
+
+    Split out so a caller can decide WHICH reason to report. The join guard below needs
+    that: a tag can fail for a grammar reason (too long, bad charset) OR merely be
+    rewritten, and logging both — as the previous shape did for every >64-rune slug —
+    mis-attributes the drop. Exactly one of the two elements is ever non-None."""
+    try:
+        t = _WS_RE.sub("-", str(tag or "").strip().lower()).strip("-")
+    except Exception:  # noqa: BLE001
+        return None, "unstringifiable"
+    if not t:
+        return None, "empty"
+    if len(t) > TAG_MAX_LEN:
+        return None, f"{len(t)} runes exceeds the {TAG_MAX_LEN}-rune cap"
+    parts = t.split(":")
+    if len(parts) > 2:
+        return None, "more than one ':' (namespace:value only)"
+    for part in parts:
+        if not part or not _TAG_BODY_RE.match(part):
+            return None, "not [a-z0-9._/-]"
+    return t, None
+
+
 def normalize_tag(tag) -> str | None:
     """Normalize ONE tag to clawgate's grammar, or None if it can't be made valid.
 
@@ -212,23 +236,12 @@ def normalize_tag(tag) -> str | None:
     tag <=64 runes. Anything else is DROPPED, never mangled: silently rewriting
     `remix:clip_editor` into some other tag would produce a routing key that points at
     the wrong thing, which is exactly the failure a tag is supposed to prevent."""
-    try:
-        t = _WS_RE.sub("-", str(tag or "").strip().lower()).strip("-")
-    except Exception:  # noqa: BLE001
-        return None
-    if not t:
-        return None
-    if len(t) > TAG_MAX_LEN:
-        _log(f"dropping tag {t!r} — {len(t)} runes exceeds the {TAG_MAX_LEN}-rune cap")
-        return None
-    parts = t.split(":")
-    if len(parts) > 2:
-        _log(f"dropping tag {t!r} — more than one ':' (namespace:value only)")
-        return None
-    for part in parts:
-        if not part or not _TAG_BODY_RE.match(part):
-            _log(f"dropping tag {t!r} — not [a-z0-9._/-]")
-            return None
+    t, reason = _normalize_tag(tag)
+    if t is None and reason not in (None, "empty", "unstringifiable"):
+        # log the NORMALIZED form when we have one (matches the pre-split behaviour);
+        # a normalization that itself blew up has nothing meaningful to show.
+        shown = _WS_RE.sub("-", str(tag or "").strip().lower()).strip("-")
+        _log(f"dropping tag {shown!r} — {reason}")
     return t
 
 
@@ -248,6 +261,50 @@ def normalize_tags(tags) -> list[str]:
     return clean
 
 
+def guard_tags(raw) -> list[str]:
+    """🔴 THE STRUCTURAL JOIN GUARD, applied PER TAG.
+
+    A consumer of an `initiative:` tag joins on `tag == "initiative:" + slug` byte-for-byte
+    (see `scripts/initiatives/tasks.py` — it does no case-folding and no normalization), so
+    the ONLY acceptable outcome for a tag is the exact string we asked for. `normalize_tag`
+    performs THREE mutations — lowercase, whitespace→`-`, and a `-` strip — and the `routing`
+    denylist only polices the first (`not-lowercase`). A slug like `foo bar`, `x  y` or
+    `trailing-dash-` would therefore survive the denylist and be emitted REWRITTEN
+    (`initiative:foo-bar`), joining to nothing while looking perfectly healthy. No live slug
+    has that shape today, so pinning it with another denylist rule would only re-encode a
+    SNAPSHOT of the store. Comparing the normalizer's OUTPUT to its INPUT instead makes the
+    invariant hold structurally: any future slug, and any fourth mutation added to
+    `normalize_tag`, is caught here.
+
+    Each tag is judged INDEPENDENTLY and only the offender is dropped. That is deliberate:
+    an all-or-nothing guard (compare the whole normalized LIST to the whole wanted list)
+    would make one bad tag silently delete every OTHER namespace's tag on the same Task —
+    which turned the `runbook:` seam below into a trap (`raw = [initiative, runbook]` would
+    have dropped BOTH tags on every Task). Per-tag, adding a second namespace is safe.
+
+    A drop is the correct degradation — a missing tag is cheap, a tag that joins to nothing
+    is a lie (and the untagged Task is still posted either way). Every drop logs exactly ONE
+    accurate reason: the grammar's, when the grammar rejected it outright; the join
+    violation's, when the grammar would have silently rewritten it."""
+    kept: list[str] = []
+    for item in raw or []:
+        try:
+            tag = str(item)
+        except Exception as exc:  # noqa: BLE001 - a tag must NEVER cost an approval
+            _log(f"dropping an unstringifiable tag: {exc}")
+            continue
+        norm, reason = _normalize_tag(tag)
+        if norm is not None and norm == tag:
+            kept.append(tag)
+        elif reason is not None:
+            _log(f"dropping tag {tag!r} — {reason}")
+        else:
+            _log(f"dropping tag {tag!r} — the tag grammar would emit {norm!r}, not "
+                 f"{tag!r}; an emitted tag must equal its (stripped) ledger slug "
+                 f"byte-for-byte or the consuming join misses")
+    return normalize_tags(kept)
+
+
 def build_tags(proposal) -> list[str]:
     """The clawgate task tags for an APPROVED proposal. Never raises; [] on any doubt.
 
@@ -260,9 +317,17 @@ def build_tags(proposal) -> list[str]:
     document/date/id/filler slugs) and normalized to the tag grammar.
 
     🔴 The emitted tag ALWAYS equals `initiative:<ledger-slug>` byte-for-byte, enforced
-    STRUCTURALLY: the normalized result is compared to the exact tag we asked for and
-    dropped on ANY difference (see the guard below). The denylist alone is not enough —
-    it polices only one of `normalize_tag`'s mutations.
+    STRUCTURALLY by `guard_tags`: each normalized tag is compared to the exact tag we
+    asked for and dropped on ANY difference. The denylist alone is not enough — it
+    polices only one of `normalize_tag`'s mutations.
+
+    ⚠ ONE DELIBERATE NORMALIZATION, stated precisely: the slug is `.strip()`ped before
+    the tag is built (here, and again in `routing.taggable_slug`), so a stored slug with
+    surrounding whitespace — `"  padded-slug  "` — emits `initiative:padded-slug`, which
+    is byte-equal to the STRIPPED slug, not to the raw stored bytes. Everything the
+    guard promises is relative to that stripped form. In practice the store has no such
+    slug (a leading/trailing space would be a scan bug), and a consumer joining on a slug
+    it read from the same store would have to preserve that whitespace to miss.
 
     ── SEAM: a future `runbook:<name>` tag ────────────────────────────────────────────
     Deliberately NOT emitted today. `runbook:` is HARD-validated by clawgate
@@ -271,8 +336,12 @@ def build_tags(proposal) -> list[str]:
     non-converging) with no machine endpoint to list/validate names against. When
     clawgate grows a `GET /api/runbooks` (or the runbook set becomes worth routing to),
     slot it in HERE: resolve the name, verify it against that endpoint, and append
-    `f"runbook:{name}"` to `raw` below. Do NOT emit an unverified runbook name — the
-    fail-open retry in post_task would silently strip the whole tag list.
+    `f"runbook:{name}"` to `raw` below. That is SAFE as written — `guard_tags` judges
+    each tag independently, so a bad `runbook:` name costs only its own tag and the
+    `initiative:` tag still ships (it was NOT safe before the guard was made per-tag: an
+    all-or-nothing comparison dropped BOTH tags on every Task). Do NOT emit an unverified
+    runbook name — the fail-open retry in post_task would still strip the whole tag list
+    if clawgate 400s the request.
     ───────────────────────────────────────────────────────────────────────────────────
     """
     try:
@@ -285,27 +354,10 @@ def build_tags(proposal) -> list[str]:
         keep = routing.taggable_slug(slug)
         if not keep:
             return []
+        # ONE tag today; `guard_tags` enforces `emitted == asked-for` per tag, so a
+        # second namespace can be appended here without endangering this one (see SEAM).
         raw = [f"initiative:{keep}"]
-        tags = normalize_tags(raw)
-        # 🔴 STRUCTURAL JOIN GUARD. The initiatives-side join matches on `tag == slug`
-        # byte-for-byte, so the ONLY acceptable outcome is the exact tag we asked for.
-        # `normalize_tag` performs THREE mutations — lowercase, whitespace→`-`, and a
-        # `-` strip — and the `routing` denylist only polices the first (`not-lowercase`).
-        # A slug like `foo bar`, `x  y` or `trailing-dash-` would therefore survive the
-        # denylist and be emitted REWRITTEN (`initiative:foo-bar`), joining to nothing.
-        # No live slug has that shape today, so pinning it with another denylist rule
-        # would only re-encode a SNAPSHOT of the store. Comparing the normalizer's
-        # OUTPUT to its input instead makes the invariant hold structurally: any future
-        # slug, and any fourth mutation added to `normalize_tag`, is caught here. A drop
-        # is the correct degradation — a missing tag is cheap, a tag that joins to
-        # nothing is a lie (and the untagged Task is still posted either way).
-        want = [f"initiative:{keep}"]
-        if tags != want:
-            _log(f"dropping initiative tag for slug {keep!r} — the tag grammar would "
-                 f"emit {tags!r}, not {want!r}; an emitted tag must equal its ledger "
-                 f"slug byte-for-byte or the initiatives-side join misses")
-            return []
-        return tags
+        return guard_tags(raw)
     except Exception as exc:  # noqa: BLE001 - a tag must NEVER cost an approval
         _log(f"build_tags failed (posting untagged): {exc}")
         return []

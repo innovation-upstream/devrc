@@ -10,9 +10,13 @@ never touch Postgres; a store/tagging failure is asserted to be swallowed.
 matcher reuses the scan's tokenizers — the same import path proven hermetic by
 `scripts/initiatives/tests/test_route.py` and `test_initiative_scan.py`.
 """
+import os
+import subprocess
 import sys
 from datetime import date
 from pathlib import Path
+
+import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -316,18 +320,26 @@ def test_an_all_lowercase_slug_is_kept_verbatim():
 
 # --------------------------------------------------------------------------- #
 # CORPUS PROPERTIES — asserted over a SNAPSHOT of the real `initiatives.current`
-# vocabulary (tests/fixtures/initiatives_current_slugs.txt, 140 slugs, 2026-07-30).
+# vocabulary (tests/fixtures/initiatives_current_slugs.txt, 142 slugs, 2026-07-30).
 # Hermetic: the file is a checked-in snapshot, never a live read.
 #
 # ⚠ WHAT THESE CAN AND CANNOT CATCH. Every number below is pinned against the FIXTURE,
 # not against the live store, so they detect an unreviewed EDIT to the fixture or a
-# behaviour change in the denylist — never that the live vocabulary has moved on. It
-# already has once (139 → 140 between the feature landing and this follow-up) with the
-# suite fully green. Refreshing the fixture is a manual step; the command is in its
-# header. That trade is deliberate: a live read here would make the whole suite depend
-# on cross-cluster reachability, which tests/conftest.py exists specifically to prevent.
+# behaviour change in the denylist — never that the live vocabulary has moved on. It has
+# now done so TWICE within two days (139 → 140 → 142), each time with the suite fully
+# green, which is why "refresh it by hand and remember" is no longer the whole answer:
+# `test_fixture_matches_the_live_initiatives_store` (below) does the comparison for you,
+# SKIPPED by default and opt-in via `REPO_COS_LIVE_DRIFT_CHECK=1`. Keeping it opt-in is
+# deliberate: an unconditional live read would make the whole suite depend on
+# cross-cluster reachability, which tests/conftest.py exists specifically to prevent.
 # --------------------------------------------------------------------------- #
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
+
+# Opt-in env var for the live-store drift check below (also documented in the fixture
+# header and in README.md). Anything truthy-looking enables it; unset = SKIPPED.
+LIVE_DRIFT_ENV = "REPO_COS_LIVE_DRIFT_CHECK"
+KUBECONFIG_ENV = "REPO_COS_KUBECONFIG"
+DEFAULT_KUBECONFIG = Path.home() / "workspace" / "homelab-talos" / "homelab-kubeconfig"
 
 
 def _slug_corpus() -> list[str]:
@@ -342,9 +354,10 @@ def test_corpus_fixture_self_check_not_a_live_drift_detector():
     All this proves is that the fixture still holds the number of slugs the properties
     below are stated in, i.e. it fails only if someone edits the file without re-stating
     the counts. It CANNOT fail because `initiatives.current` grew, since nothing here
-    reads the store. Do not read a green suite as "the snapshot is current" — refresh it
-    with the command in the fixture header (and re-state these counts + README.md)."""
-    assert len(_slug_corpus()) == 140
+    reads the store. Do not read a green suite as "the snapshot is current" — run the
+    opt-in drift check below (`REPO_COS_LIVE_DRIFT_CHECK=1`), or refresh with the command
+    in the fixture header (and re-state these counts + README.md)."""
+    assert len(_slug_corpus()) == 142
 
 
 def test_every_emitted_tag_equals_its_ledger_slug_exactly(capsys):
@@ -369,21 +382,87 @@ def test_every_emitted_tag_equals_its_ledger_slug_exactly(capsys):
 
 def test_corpus_denylist_drop_counts_are_pinned(capsys):
     """The measurement this rule change was justified by, restated against the CURRENT
-    fixture (2026-07-30, 140 slugs): 10 denylist drops (4 all-caps + 2 mixed-case + 1 bare
-    date + 1 opaque id + 2 generic) → 130 pass the denylist → 3 more lost to the 64-rune
-    tag cap → 127 actually taggable. These are fixture numbers, not live ones — see the
-    section header. (The one slug added since the feature landed,
-    `deploy-comfyui-video-generation`, is taggable, so only the totals moved.)"""
+    fixture (2026-07-30, 142 slugs): 10 denylist drops (4 all-caps + 2 mixed-case + 1 bare
+    date + 1 opaque id + 2 generic) → 132 pass the denylist → 3 more lost to the 64-rune
+    tag cap → 129 actually taggable. These are fixture numbers, not live ones — see the
+    section header. (The three slugs added since the feature landed —
+    `deploy-comfyui-video-generation`, `app-blocks-message-passing-inventory`,
+    `civitai-dp-prod-cohort-bluegreen-release-proposal` — are all taggable, so only the
+    totals moved.)"""
     import clawgate  # noqa: PLC0415
     from collections import Counter
     corpus = _slug_corpus()
     reasons = Counter(r for r in (routing.slug_drop_reason(s) for s in corpus) if r)
     assert reasons == {"not-lowercase": 6, "no-letters": 1, "opaque-id": 1, "generic": 2}
     kept = [s for s in corpus if routing.slug_drop_reason(s) is None]
-    assert len(kept) == 130
+    assert len(kept) == 132
     taggable = [s for s in kept if clawgate.normalize_tags([f"initiative:{s}"])]
-    assert len(taggable) == 127
+    assert len(taggable) == 129
+    # 🔴 THE POSITIVE SIDE, pinned through the REAL emission path. Everything above counts
+    # the LAYERS; this counts what `build_tags` actually emits. Without it the corpus
+    # suite is satisfied by a guard that emits nothing at all — a mutation making
+    # build_tags return [] for any slug containing '/' or '_' passed the whole 308-test
+    # suite. A guard that silently over-drops is exactly the failure this feature cannot
+    # detect in production, because a dropped tag is silent BY DESIGN.
+    emitted = [s for s in corpus if clawgate.build_tags({"initiative": s})]
+    assert len(emitted) == 129
+    assert emitted == taggable          # and it is the SAME set, not merely the same size
     capsys.readouterr()
+
+
+# --------------------------------------------------------------------------- #
+# OPT-IN LIVE DRIFT CHECK — the one test that reads the real store. SKIPPED by default.
+# --------------------------------------------------------------------------- #
+
+def _live_slugs() -> list[str]:
+    """Read `initiatives.current` from the homelab mailbox Postgres (the same command the
+    fixture header documents). ONLY ever called from the opt-in test below."""
+    kubeconfig = os.environ.get(KUBECONFIG_ENV) or str(DEFAULT_KUBECONFIG)
+    proc = subprocess.run(
+        ["kubectl", "--kubeconfig", kubeconfig, "-n", "mailbox",
+         "exec", "mailbox-postgres-0", "--", "sh", "-c",
+         'psql -U ${POSTGRES_USER:-mail} -d ${POSTGRES_DB:-mail} '
+         '-tAc "select slug from initiatives.current order by 1;"'],
+        capture_output=True, text=True, timeout=120,
+    )
+    if proc.returncode != 0:
+        pytest.fail(f"live store read failed (rc={proc.returncode}); set {KUBECONFIG_ENV} "
+                    f"if the kubeconfig is not at {DEFAULT_KUBECONFIG}\n{proc.stderr[-800:]}")
+    return [ln.strip() for ln in proc.stdout.splitlines() if ln.strip()]
+
+
+@pytest.mark.skipif(
+    not os.environ.get(LIVE_DRIFT_ENV),
+    reason=f"live-store drift check is opt-in: set {LIVE_DRIFT_ENV}=1 (needs the homelab "
+           f"kubeconfig; override its path with {KUBECONFIG_ENV})",
+)
+def test_fixture_matches_the_live_initiatives_store():
+    """🔴 THE ONE TEST THAT READS THE LIVE STORE — opt-in, never part of a default run.
+
+    Every other corpus property is pinned against the checked-in snapshot, so none of
+    them can fail because `initiatives.current` moved on. It moved twice within two days
+    of being refreshed (139 → 140 → 142) with the suite green both times, so relying on
+    a manual refresh step that nothing enforces has now failed twice on the record.
+
+    Enable it (a `kubectl exec` into the homelab mailbox Postgres, ~1s):
+
+        REPO_COS_LIVE_DRIFT_CHECK=1 python -m pytest scripts/repo-cos/tests/test_routing.py -q
+
+    Left OPT-IN on purpose: tests/conftest.py exists precisely to keep the default run
+    hermetic (no cross-cluster reachability, no network round-trip per test), and this
+    check must not weaken that. Nothing here touches `route.load_current`, so the
+    conftest stub is neither needed nor disturbed. When it fails, refresh the fixture
+    with the command in its header and re-state the counts above + in README.md."""
+    live = set(_live_slugs())
+    assert live, "the live store returned no slugs — that is a store problem, not drift"
+    fixture = set(_slug_corpus())
+    added = sorted(live - fixture)
+    removed = sorted(fixture - live)
+    assert not added and not removed, (
+        f"fixture is STALE vs the live store ({len(fixture)} fixture / {len(live)} live)\n"
+        f"  added in the store, missing from the fixture: {added}\n"
+        f"  in the fixture, gone from the store: {removed}\n"
+        "  refresh: see the command in tests/fixtures/initiatives_current_slugs.txt")
 
 
 def test_the_two_mixed_case_corpus_slugs_are_now_dropped(capsys):
