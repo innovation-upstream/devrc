@@ -28,9 +28,13 @@ import {
   clickPoint, cdpExceptionText, elementRectExpression, focusExpression, fullPageClip,
   // OOPIF-capable frame enumeration/injection (chrome.webNavigation + chrome.scripting):
   // reaches cross-origin out-of-process iframes where CDP getFrameTree could not.
-  normalizeWebNavFrames, resolveWebNavFrameId,
-  frameReadHtmlFn, frameReadTextFn, frameEvalFn,
+  normalizeWebNavFrames, resolveWebNavFrame,
+  frameReadHtmlFn, frameReadTextFn,
   frameClickFn, frameTypeFn, frameKeyFn,
+  // CDP `eval --frame`: run an arbitrary JS STRING in the target frame's execution
+  // context (chrome.scripting can only run a serialized FUNC — the #190 null bug).
+  frameEvalExpressions, isCdpSyntaxError, matchCdpFrameId, pickOopifSessionId,
+  evalValueOrThrow,
 } from "./protocol.js";
 
 const DEFAULT_PORT = 8788;
@@ -108,10 +112,17 @@ function sendCdp(target, method, params) {
 // Attach chrome.debugger to `tabId`, run `run(send)`, and ALWAYS detach. `url` is
 // the target tab's URL, validated BEFORE attach by withCdpSession (a privileged /
 // other-surface tab is refused, never attached — the STRICT attach-scope invariant).
+// The `send` handed to `run` takes an optional 3rd arg `sessionId` so a command can
+// target a flat auto-attached sub-session (an OOPIF target) — still bounded by the
+// #189 per-command timeout. `globalThis.BROWSER_BRIDGE_CDP_TIMEOUTS` is a TEST-ONLY
+// hook to shrink the (8s) budgets so a no-wedge test settles in ms; undefined in
+// production → the real CDP_* budgets.
 async function withCdp(tabId, url, run) {
   const target = { tabId };
   return withCdpSession({
     url,
+    timeouts: (typeof globalThis !== "undefined" && globalThis.BROWSER_BRIDGE_CDP_TIMEOUTS)
+      || undefined,
     attach: async () => {
       // Fail fast on a discarded/unloaded tab (no live renderer → attach would
       // hang forever). withCdpSession's per-call timeouts are the backstop for any
@@ -128,8 +139,11 @@ async function withCdp(tabId, url, run) {
       await chrome.debugger.detach(target);
     },
     // Raw send — withCdpSession wraps it in the per-command timeout before handing
-    // it to `run`, so a single hung CDP command can't wedge the SW.
-    send: (method, params) => sendCdp(target, method, params),
+    // it to `run`, so a single hung CDP command can't wedge the SW. A non-null
+    // `sessionId` targets a flat auto-attached OOPIF sub-session (Debuggee
+    // {tabId, sessionId}); omitted → the tab's top session.
+    send: (method, params, sessionId) =>
+      sendCdp(sessionId != null ? { ...target, sessionId } : target, method, params),
     run: (send) => run(send),
   });
 }
@@ -153,11 +167,14 @@ async function framesForTab(tabId) {
   return normalizeWebNavFrames(raw || []);
 }
 
-// Resolve a caller `--frame <sel>` to a NUMERIC webNavigation frameId within `tabId`.
-// Throws frame_not_found / frame_not_specified. Confined to this tab by construction.
-async function resolveFrameId(tabId, frameSel) {
+// Resolve a caller `--frame <sel>` to the FRAME OBJECT ({frameId,url,parentFrameId})
+// within `tabId`. Throws frame_not_found / frame_not_specified. Confined to this tab by
+// construction (framesForTab is tab-scoped). Callers use `.frameId` to inject and
+// `.url` both to report the frame's own url AND (for eval) to locate the frame's CDP
+// execution context by URL.
+async function resolveFrame(tabId, frameSel) {
   const frames = await framesForTab(tabId);
-  return resolveWebNavFrameId(frames, frameSel);
+  return resolveWebNavFrame(frames, frameSel);
 }
 
 // Inject `func(...args)` INTO one resolved frame (by numeric frameId) of `tabId` via
@@ -175,6 +192,70 @@ async function execInFrame(tabId, frameId, func, args) {
   return inj ? inj.result : undefined;
 }
 
+// Evaluate an arbitrary JS STRING inside one resolved frame of `tabId` via CDP
+// Runtime.evaluate — the RELIABLE path for `eval --frame` (chrome.scripting can only
+// run a serialized FUNC, so it can't evaluate a user string: the #190 null-as-success
+// bug). Works for a SAME-PROCESS frame AND a cross-origin OOPIF (a separate target):
+//   1. attach chrome.debugger to the OWNED tab (withCdp → #187 own-tab-only scope +
+//      #189 bounded timeouts + discarded-tab fail-fast);
+//   2. SAME-PROCESS: the frame is in the top session's Page.getFrameTree → its CDP
+//      frameId → Page.createIsolatedWorld → an executionContextId → Runtime.evaluate;
+//   3. OOPIF: NOT in the top frame tree → Target.setAutoAttach({autoAttach,flatten})
+//      auto-attaches the OOPIF's target (flat sessionId, matched by url) → Runtime.
+//      evaluate in that session's default context.
+// NEVER SILENT-NULL: a genuine null/undefined result is returned AS a value, but a
+// FAILURE to execute (frame not resolvable / exceptionDetails) is a CLEAR op error
+// (frame_not_found / frame_eval_failed:<reason>) via evalValueOrThrow. `frame` is the
+// resolved {frameId,url} object; matching is by `frame.url` (the numeric webNavigation
+// frameId does not map 1:1 to a CDP frame/target).
+async function cdpFrameEval(tabId, tabUrl, frame, src) {
+  const { expression, fallback } = frameEvalExpressions(src);
+  return withCdp(tabId, tabUrl, async (send) => {
+    // Try `expression` (expression form); on a CDP SyntaxError retry `fallback` (the
+    // statement form). One evaluate per form → a side effect never double-runs.
+    const evaluate = async (sessionId, contextId) => {
+      const params = { expression, returnByValue: true, awaitPromise: true };
+      if (contextId != null) params.contextId = contextId;
+      let res = await send("Runtime.evaluate", params, sessionId);
+      if (res && res.exceptionDetails && isCdpSyntaxError(res.exceptionDetails)) {
+        const p2 = { expression: fallback, returnByValue: true, awaitPromise: true };
+        if (contextId != null) p2.contextId = contextId;
+        res = await send("Runtime.evaluate", p2, sessionId);
+      }
+      return evalValueOrThrow(res);   // throws frame_eval_failed:<reason> on exception
+    };
+
+    // (2) SAME-PROCESS frame — locate it in the top session's frame tree by url.
+    const { frameTree } = await send("Page.getFrameTree");
+    const cdpFrameId = matchCdpFrameId(frameTree, frame.url);
+    if (cdpFrameId) {
+      const iso = await send("Page.createIsolatedWorld",
+        { frameId: cdpFrameId, worldName: "browser-bridge-eval", grantUniveralAccess: false });
+      return evaluate(undefined, iso.executionContextId);
+    }
+
+    // (3) CROSS-ORIGIN OOPIF — auto-attach flat, match the target session by url,
+    // evaluate in THAT session. Collect Target.attachedToTarget events for the duration
+    // of this op only (listener removed in finally), then match by frame url.
+    const attached = [];
+    const onEvt = (_source, method, params) => {
+      if (method === "Target.attachedToTarget" && params && params.targetInfo) {
+        attached.push({ sessionId: params.sessionId, url: params.targetInfo.url });
+      }
+    };
+    chrome.debugger.onEvent.addListener(onEvt);
+    try {
+      await send("Target.setAutoAttach",
+        { autoAttach: true, flatten: true, waitForDebuggerOnStart: false });
+      const sessionId = pickOopifSessionId(attached, frame.url);
+      if (!sessionId) throw new Error(`frame_not_found:${frame.url || frame.frameId}`);
+      return await evaluate(sessionId, undefined);
+    } finally {
+      chrome.debugger.onEvent.removeListener(onEvt);
+    }
+  });
+}
+
 // --- op executors ---------------------------------------------------------- //
 // Each returns the op-specific `data` object; throws on failure (→ errorEnvelope).
 const OPS = {
@@ -183,9 +264,11 @@ const OPS = {
     // --frame → read the outerHTML INSIDE the chosen (cross-origin OOPIF) frame via
     // chrome.scripting (reaches an out-of-process iframe; no debugger banner).
     if (cmd && cmd.frame) {
-      const frameId = await resolveFrameId(tab.id, cmd.frame);
-      const html = await execInFrame(tab.id, frameId, frameReadHtmlFn, []);
-      return { url: tab.url, title: tab.title, html, frame: cmd.frame };
+      const frame = await resolveFrame(tab.id, cmd.frame);
+      const html = await execInFrame(tab.id, frame.frameId, frameReadHtmlFn, []);
+      // Report the FRAME's own url (not the top tab url) so the caller can confirm it
+      // read the intended frame (#190 reported the top url for a frame read).
+      return { url: frame.url || tab.url, title: tab.title, html, frame: cmd.frame };
     }
     // No frame → the lighter chrome.scripting top-frame read (no debugger banner).
     const [inj] = await chrome.scripting.executeScript({
@@ -208,10 +291,11 @@ const OPS = {
     // --frame → read innerText INSIDE the chosen (cross-origin OOPIF) frame via
     // chrome.scripting (reaches an out-of-process iframe; no debugger banner).
     if (cmd && cmd.frame) {
-      const frameId = await resolveFrameId(tab.id, cmd.frame);
-      const raw = await execInFrame(tab.id, frameId, frameReadTextFn, [sel]);
+      const frame = await resolveFrame(tab.id, cmd.frame);
+      const raw = await execInFrame(tab.id, frame.frameId, frameReadTextFn, [sel]);
       const { text, truncated } = normalizeText(raw, cap);
-      return { url: tab.url, title: tab.title, text, truncated, frame: cmd.frame };
+      // Report the FRAME's own url (see getHtml) so the caller confirms the right frame.
+      return { url: frame.url || tab.url, title: tab.title, text, truncated, frame: cmd.frame };
     }
     const [inj] = await chrome.scripting.executeScript({
       target: { tabId: tab.id },
@@ -227,13 +311,16 @@ const OPS = {
 
   async eval(cmd) {
     const tab = await targetTab(cmd);
-    // --frame → evaluate INSIDE the chosen (cross-origin OOPIF) frame via
-    // chrome.scripting. Runs in the frame's ISOLATED world (DOM-capable; no access to
-    // that frame's page globals — documented, matches the prior CDP semantics).
+    // --frame → evaluate the arbitrary JS STRING INSIDE the chosen frame (incl. a
+    // cross-origin OOPIF) via CDP Runtime.evaluate. chrome.scripting can only run a
+    // serialized FUNC (not a string), so the #190 chrome.scripting path executed
+    // nothing meaningful and returned value:null-as-success — the bug this fixes.
+    // cdpFrameEval resolves the frame's execution context (same-process isolated world
+    // OR OOPIF flat session) and NEVER silent-nulls (frame_not_found / frame_eval_failed).
     if (cmd && cmd.frame) {
-      const frameId = await resolveFrameId(tab.id, cmd.frame);
-      const value = await execInFrame(tab.id, frameId, frameEvalFn, [cmd.js]);
-      return { url: tab.url, value, frame: cmd.frame };
+      const frame = await resolveFrame(tab.id, cmd.frame);
+      const value = await cdpFrameEval(tab.id, tab.url, frame, cmd.js);
+      return { url: frame.url || tab.url, value, frame: cmd.frame };
     }
     // chrome.scripting runs in an ISOLATED world; `js` is evaluated and its
     // completion value returned. Wrapped so a bare expression or a statement
@@ -338,10 +425,10 @@ const OPS = {
     const tab = await targetTab(cmd);
     const selector = String(cmd.selector);
     if (cmd.frame) {
-      const frameId = await resolveFrameId(tab.id, cmd.frame);
-      const res = await execInFrame(tab.id, frameId, frameClickFn, [selector]);
+      const frame = await resolveFrame(tab.id, cmd.frame);
+      const res = await execInFrame(tab.id, frame.frameId, frameClickFn, [selector]);
       if (!res || res.ok === false) throw new Error(`element_not_found:${selector}`);
-      return { url: tab.url, clicked: selector, x: res.x, y: res.y,
+      return { url: frame.url || tab.url, clicked: selector, x: res.x, y: res.y,
                frame: cmd.frame, trusted: false };
     }
     const point = await withCdp(tab.id, tab.url, async (send) => {
@@ -367,11 +454,11 @@ const OPS = {
     const tab = await targetTab(cmd);
     const text = String(cmd.text);
     if (cmd.frame) {
-      const frameId = await resolveFrameId(tab.id, cmd.frame);
-      const res = await execInFrame(tab.id, frameId, frameTypeFn,
+      const frame = await resolveFrame(tab.id, cmd.frame);
+      const res = await execInFrame(tab.id, frame.frameId, frameTypeFn,
         [cmd.selector || "", text]);
       if (!res || res.ok === false) throw new Error(`element_not_found:${cmd.selector}`);
-      return { url: tab.url, typed: text.length, frame: cmd.frame, trusted: false };
+      return { url: frame.url || tab.url, typed: text.length, frame: cmd.frame, trusted: false };
     }
     await withCdp(tab.id, tab.url, async (send) => {
       if (cmd.selector) {
@@ -393,10 +480,10 @@ const OPS = {
     const tab = await targetTab(cmd);
     const p = keyEventParams(cmd.key);   // throws unknown_key (no injection/attach on refusal)
     if (cmd.frame) {
-      const frameId = await resolveFrameId(tab.id, cmd.frame);
-      const res = await execInFrame(tab.id, frameId, frameKeyFn, [cmd.selector || "", p]);
+      const frame = await resolveFrame(tab.id, cmd.frame);
+      const res = await execInFrame(tab.id, frame.frameId, frameKeyFn, [cmd.selector || "", p]);
       if (!res || res.ok === false) throw new Error(`element_not_found:${cmd.selector}`);
-      return { url: tab.url, key: p.key, frame: cmd.frame, trusted: false };
+      return { url: frame.url || tab.url, key: p.key, frame: cmd.frame, trusted: false };
     }
     await withCdp(tab.id, tab.url, async (send) => {
       if (cmd.selector) {

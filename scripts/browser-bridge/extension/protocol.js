@@ -458,7 +458,10 @@ export function promiseWithTimeout(promise, ms, label, timers = {}) {
 //   run(send):Promise<result>, timeouts?:{attachMs,commandMs,budgetMs}, timers? }.
 // `send` is OPTIONAL: when present, `run` is handed a timeout-WRAPPED send so each
 // CDP command is individually bounded; when absent, `run` receives undefined
-// (back-compat with call sites that don't issue commands).
+// (back-compat with call sites that don't issue commands). The wrapped send takes an
+// OPTIONAL 3rd arg `sessionId` — forwarded to the raw send so a command can target a
+// flat auto-attached sub-session (an OOPIF target) while STILL being bounded by the
+// per-command timeout; call sites that don't use flat sessions simply omit it.
 export async function withCdpSession(deps) {
   assertCdpAttachable(deps.url);        // BEFORE attach — refuse privileged/other tab
   const timers = deps.timers || {};
@@ -484,7 +487,8 @@ export async function withCdpSession(deps) {
   try {
     const rawSend = deps.send;
     const send = rawSend
-      ? (method, params) => promiseWithTimeout(rawSend(method, params), commandMs, method, timers)
+      ? (method, params, sessionId) =>
+          promiseWithTimeout(rawSend(method, params, sessionId), commandMs, method, timers)
       : undefined;
     return await promiseWithTimeout(
       Promise.resolve(deps.run(send)), budgetMs, "op", timers);
@@ -613,6 +617,77 @@ export function cdpExceptionText(exceptionDetails) {
   return String(ex.description || exceptionDetails.text || "eval_failed");
 }
 
+// --- CDP `eval --frame`: run an arbitrary JS STRING in a target frame ---------- //
+// WHY the CDP path (not chrome.scripting) for `eval --frame`: chrome.scripting.
+// executeScript runs a SERIALIZED FUNCTION, not an arbitrary JS string. The fixed-func
+// frame ops (text/html/click/type/key) work that way, but `eval` is an arbitrary user
+// STRING — routing it through a `func` that `new Function(src)`s inside the frame's
+// ISOLATED world hits the extension CSP / returns a null-as-success, so it never truly
+// evaluates (the #190 regression). The reliable way to run a JS STRING in a SPECIFIC
+// frame — including a cross-origin OOPIF (a separate renderer/target under site
+// isolation) — is CDP `Runtime.evaluate` in that frame's execution context.
+//
+// The numeric webNavigation frameId does NOT map 1:1 to a CDP frame id/target, so we
+// locate the target frame by URL (resolveWebNavFrame gives the frame's url). Two paths:
+//   * SAME-PROCESS frame → it appears in the top session's Page.getFrameTree; grab its
+//     CDP frameId (matchCdpFrameId), Page.createIsolatedWorld → an executionContextId,
+//     Runtime.evaluate({contextId}).
+//   * CROSS-ORIGIN OOPIF → it is NOT in the top session's frame tree (getFrameTree from
+//     the top target omits OOPIFs — the same reason #190 moved enumeration to
+//     webNavigation). Target.setAutoAttach({autoAttach,flatten}) auto-attaches to the
+//     OOPIF's target, surfacing a flat sessionId (pickOopifSessionId matches it by url);
+//     Runtime.evaluate is then issued in THAT session's default context.
+// The SW glue (service_worker.js) supplies the chrome.debugger side effects; ALL of it
+// is time-bounded by withCdpSession (#189) so a bad frame fails fast, never wedges.
+
+// Match a target frame URL against a CDP Page.getFrameTree result, returning the CDP
+// (string) frameId of the SAME-PROCESS frame whose url equals `targetUrl`, else null
+// (→ the frame is an OOPIF in a separate target, take the auto-attach path). Exact url
+// equality (getFrameTree urls mirror webNavigation urls for same-process frames); the
+// main frame (frameId 0 / the top url) matches its root node. Pure.
+export function matchCdpFrameId(frameTree, targetUrl) {
+  const want = String(targetUrl == null ? "" : targetUrl);
+  if (!want) return null;
+  for (const f of flattenFrameTree(frameTree)) {
+    if (f.url === want) return f.frameId;
+  }
+  return null;
+}
+
+// Pick the flat sessionId of the auto-attached OOPIF target whose url matches
+// `targetUrl`. `attached` is the list of {sessionId,url} the SW collected from
+// Target.attachedToTarget events after Target.setAutoAttach. Exact url match first,
+// then a suffix/prefix-tolerant fallback (an OOPIF target url can carry a trailing
+// slash the frame url lacks, or vice-versa). Returns null when none matches (→
+// frame_not_found). Pure.
+export function pickOopifSessionId(attached, targetUrl) {
+  const want = String(targetUrl == null ? "" : targetUrl);
+  if (!want) return null;
+  for (const a of attached || []) if (a && a.url === want) return a.sessionId;
+  // Tolerant fallback: ignore a single trailing slash difference.
+  const norm = (u) => String(u || "").replace(/\/+$/, "");
+  const w = norm(want);
+  for (const a of attached || []) if (a && norm(a.url) === w) return a.sessionId;
+  return null;
+}
+
+// Interpret a CDP Runtime.evaluate result under the NEVER-SILENT-NULL contract:
+//   * an exceptionDetails (a thrown error / CSP violation) → THROW
+//     `frame_eval_failed:<reason>` — a failure to execute must be a CLEAR op error,
+//     never a value:null masquerading as success (the exact #190 bug).
+//   * otherwise return the result's value verbatim — a genuine null/undefined result
+//     IS a legitimate value and is returned AS such (distinct from a failure). When
+//     returnByValue was set, `result.value` is the structured value; a bare handle
+//     (no value key) → undefined.
+// Pure — the SW passes the raw Runtime.evaluate reply.
+export function evalValueOrThrow(cdpResult) {
+  const r = cdpResult || {};
+  if (r.exceptionDetails) {
+    throw new Error(`frame_eval_failed:${cdpExceptionText(r.exceptionDetails)}`);
+  }
+  return r.result ? r.result.value : undefined;
+}
+
 // Frame-scoped read/probe expression builders (run in the frame's isolated world
 // via CDP Runtime.evaluate). Pure string builders so the SW stays thin + testable.
 export function frameHtmlExpression() {
@@ -678,26 +753,38 @@ export function normalizeWebNavFrames(frames) {
 }
 
 // Resolve a caller `--frame <sel>` against a normalized getAllFrames list, returning
-// the NUMERIC frameId to inject into. `sel` may be an exact numeric frameId (e.g. "0"
-// or 5 — the webNavigation id) OR a URL substring (case-insensitive). An exact
-// frameId match WINS over a substring; among substring matches the FIRST (list order)
-// wins deterministically. Throws `frame_not_found:<sel>` when nothing matches and
-// `frame_not_specified` for an empty sel (a caller bug — the SW only calls this when
-// a frame IS targeted). Tab-scoped by construction: `frames` comes from ONE tab's
-// getAllFrames, so a resolved frameId can only ever reference a frame of THAT tab —
-// a frameId belonging to another tab is simply absent → frame_not_found. Pure.
-export function resolveWebNavFrameId(frames, sel) {
+// the matched FRAME OBJECT ({frameId,url,parentFrameId}). `sel` may be an exact
+// numeric frameId (e.g. "0" or 5 — the webNavigation id) OR a URL substring
+// (case-insensitive). An exact frameId match WINS over a substring; among substring
+// matches the FIRST (list order) wins deterministically. Throws `frame_not_found:<sel>`
+// when nothing matches and `frame_not_specified` for an empty sel (a caller bug — the
+// SW only calls this when a frame IS targeted). Tab-scoped by construction: `frames`
+// comes from ONE tab's getAllFrames, so a resolved frame can only ever reference a
+// frame of THAT tab — a frameId belonging to another tab is simply absent →
+// frame_not_found. Returning the OBJECT (not just the id) lets the SW both inject by
+// frameId AND report the FRAME'S OWN url in the op result (so a caller can confirm it
+// read the intended frame, not the top document), and — for `eval --frame` — map the
+// numeric webNavigation frameId to the frame's URL so the CDP path can locate its
+// execution context (see cdp_protocol: matchCdpFrameId / pickOopifSessionId). Pure.
+export function resolveWebNavFrame(frames, sel) {
   const s = String(sel == null ? "" : sel).trim();
   if (!s) throw new Error("frame_not_specified");
   if (/^\d+$/.test(s)) {
     const n = Number(s);
-    for (const f of frames || []) if (f.frameId === n) return n;
+    for (const f of frames || []) if (f.frameId === n) return f;
   }
   const low = s.toLowerCase();
   for (const f of frames || []) {
-    if ((f.url || "").toLowerCase().includes(low)) return f.frameId;
+    if ((f.url || "").toLowerCase().includes(low)) return f;
   }
   throw new Error(`frame_not_found:${s}`);
+}
+
+// Back-compat convenience: resolve `--frame <sel>` to just the NUMERIC frameId (the
+// fixed-func frame ops inject by id). Delegates to resolveWebNavFrame so the two can
+// never diverge. Pure.
+export function resolveWebNavFrameId(frames, sel) {
+  return resolveWebNavFrame(frames, sel).frameId;
 }
 
 // --- injected page functions (run INSIDE the resolved frame via executeScript) --- //

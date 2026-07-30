@@ -16,6 +16,7 @@ import {
   elementRectExpression, focusExpression, fullPageClip,
   promiseWithTimeout, assertTabCdpReady, TAB_DISCARDED_MESSAGE,
   CDP_ATTACH_TIMEOUT_MS, CDP_COMMAND_TIMEOUT_MS, CDP_OP_BUDGET_MS,
+  matchCdpFrameId, pickOopifSessionId, evalValueOrThrow,
 } from "../extension/protocol.js";
 
 // A promise that NEVER settles — models a hung chrome.debugger call (the wedge).
@@ -342,4 +343,60 @@ test("withCdpSession still enforces security: a privileged url is REFUSED before
     detach: async () => {}, send: async () => ({}), run: (s) => s("Page.enable"),
   }), /cdp_attach_refused/);
   assert.equal(attached, false, "the timeout wiring must not weaken the attach-scope invariant");
+});
+
+// --- CDP `eval --frame` frame-context resolution (the #190 null fix) --------- //
+// The decision layer for running an arbitrary JS STRING in a target frame via CDP
+// Runtime.evaluate: locate a SAME-PROCESS frame in the top session's frame tree by url,
+// or an OOPIF flat session by url, and interpret the evaluate reply under the
+// never-silent-null contract. All pure — the SW supplies the chrome.debugger effects.
+
+test("matchCdpFrameId: finds a SAME-PROCESS frame's CDP id by url; an OOPIF (absent) → null", () => {
+  const tree = {
+    frame: { id: "MAIN", url: "https://civitai.com/apps/run/model-benchmarking", name: "" },
+    childFrames: [
+      { frame: { id: "SAME1", url: "https://civitai.com/embed/widget", name: "w" } },
+    ],
+  };
+  // top frame (frameId 0 maps to the top url) → the main CDP frame id.
+  assert.equal(matchCdpFrameId(tree, "https://civitai.com/apps/run/model-benchmarking"), "MAIN");
+  // a same-process child by exact url.
+  assert.equal(matchCdpFrameId(tree, "https://civitai.com/embed/widget"), "SAME1");
+  // the cross-origin OOPIF is NOT in the top session's frame tree → null (take the
+  // auto-attach path). This is the whole reason getFrameTree can't reach it.
+  assert.equal(matchCdpFrameId(tree, "https://model-benchmarking.civit.ai/"), null);
+  assert.equal(matchCdpFrameId(tree, ""), null);
+  assert.equal(matchCdpFrameId(null, "https://x/"), null);
+});
+
+test("pickOopifSessionId: matches the auto-attached OOPIF target session by url (trailing-slash tolerant)", () => {
+  const attached = [
+    { sessionId: "S_ad", url: "https://ads.example/pixel" },
+    { sessionId: "S_bench", url: "https://model-benchmarking.civit.ai/" },
+  ];
+  assert.equal(pickOopifSessionId(attached, "https://model-benchmarking.civit.ai/"), "S_bench");
+  // frame url without the trailing slash still matches the target url that has one.
+  assert.equal(pickOopifSessionId(attached, "https://model-benchmarking.civit.ai"), "S_bench");
+  assert.equal(pickOopifSessionId(attached, "https://ads.example/pixel"), "S_ad");
+  assert.equal(pickOopifSessionId(attached, "https://not-attached/"), null);
+  assert.equal(pickOopifSessionId([], "https://x/"), null);
+  assert.equal(pickOopifSessionId(null, "https://x/"), null);
+});
+
+test("evalValueOrThrow: NEVER-SILENT-NULL — exception → frame_eval_failed; real null/undefined pass AS values", () => {
+  // A real value passes through.
+  assert.equal(evalValueOrThrow({ result: { value: 1234 } }), 1234);
+  assert.equal(evalValueOrThrow({ result: { value: "https://model-benchmarking.civit.ai/" } }),
+    "https://model-benchmarking.civit.ai/");
+  // A GENUINE null/undefined result is a legitimate value (distinct from a failure).
+  assert.equal(evalValueOrThrow({ result: { value: null } }), null);
+  assert.equal(evalValueOrThrow({ result: { value: undefined } }), undefined);
+  assert.equal(evalValueOrThrow({}), undefined);                 // bare handle → undefined
+  // An exceptionDetails is a FAILURE TO EXECUTE → a clear op error, NOT value:null.
+  assert.throws(() => evalValueOrThrow({
+    result: { type: "object" },
+    exceptionDetails: { exception: { description: "TypeError: x is not a function" } },
+  }), /frame_eval_failed:TypeError: x is not a function/);
+  assert.throws(() => evalValueOrThrow({ exceptionDetails: { text: "Uncaught" } }),
+    /frame_eval_failed:Uncaught/);
 });

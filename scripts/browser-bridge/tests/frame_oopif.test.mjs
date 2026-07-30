@@ -15,7 +15,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
-  normalizeWebNavFrames, resolveWebNavFrameId,
+  normalizeWebNavFrames, resolveWebNavFrameId, resolveWebNavFrame,
   frameReadHtmlFn, frameReadTextFn, frameEvalFn,
   frameClickFn, frameTypeFn, frameKeyFn, keyEventParams,
 } from "../extension/protocol.js";
@@ -72,6 +72,23 @@ test("resolveWebNavFrameId: exact numeric frameId wins; url substring; case-inse
   assert.equal(resolveWebNavFrameId(frames, "MODEL-BENCHMARKING.CIVIT.AI"), 7);
   // first (list-order) substring match wins deterministically.
   assert.equal(resolveWebNavFrameId(frames, "https://"), 0);
+});
+
+test("resolveWebNavFrame: returns the FRAME OBJECT (id+url+parent) so the SW can report/locate the frame", () => {
+  const frames = normalizeWebNavFrames(GET_ALL_FRAMES);
+  // exact numeric id → the whole object (url is what the SW reports + matches in CDP).
+  assert.deepEqual(resolveWebNavFrame(frames, "7"),
+    { frameId: 7, url: "https://model-benchmarking.civit.ai/", parentFrameId: 0 });
+  // url substring → the same object.
+  assert.deepEqual(resolveWebNavFrame(frames, "model-benchmarking.civit.ai"),
+    { frameId: 7, url: "https://model-benchmarking.civit.ai/", parentFrameId: 0 });
+  // the top frame.
+  assert.equal(resolveWebNavFrame(frames, "0").frameId, 0);
+  // resolveWebNavFrameId delegates → same numeric id, never diverges.
+  assert.equal(resolveWebNavFrameId(frames, "model-benchmarking.civit.ai"),
+    resolveWebNavFrame(frames, "model-benchmarking.civit.ai").frameId);
+  assert.throws(() => resolveWebNavFrame(frames, "nope"), /frame_not_found:nope/);
+  assert.throws(() => resolveWebNavFrame(frames, ""), /frame_not_specified/);
 });
 
 test("resolveWebNavFrameId: unknown → frame_not_found; empty → frame_not_specified", () => {

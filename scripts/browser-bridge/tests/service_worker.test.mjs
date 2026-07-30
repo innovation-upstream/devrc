@@ -59,6 +59,7 @@ globalThis.chrome = {
       return {};
     },
     onDetach: { addListener() {} },
+    onEvent: { addListener() {}, removeListener() {} },
   },
   storage: { local: { async get() { return {}; }, async set() {} } },
   runtime: { onInstalled: { addListener() {} }, onStartup: { addListener() {} } },
@@ -94,23 +95,23 @@ test("--frame text: resolves the numeric frameId + injects via executeScript int
   assert.equal(typeof call.func, "function");
   assert.equal(out.text, "INNER OOPIF TEXT");
   assert.equal(out.frame, "model-benchmarking.civit.ai");
+  assert.equal(out.url, OOPIF_URL,
+    "a frame read reports the FRAME's own url (proves it targeted the OOPIF, not the top)");
   assert.deepEqual(state.calls.debugger, [], "a frame read must NOT use the debugger");
 });
 
-test("--frame html/eval: inject into the resolved OOPIF frame via executeScript", async () => {
+test("--frame html: inject into the resolved OOPIF frame via executeScript; reports the FRAME url", async () => {
   resetCalls();
   state.execResult = "<html>oopif</html>";
   const h = await OPS.getHtml({ tabId: TAB_ID, frame: "7" });   // numeric frame id
   assert.deepEqual(lastExec().target, { tabId: TAB_ID, frameIds: [7] });
   assert.equal(h.html, "<html>oopif</html>");
-
-  resetCalls();
-  state.execResult = 1234;
-  const e = await OPS.eval({ tabId: TAB_ID, frame: "model-benchmarking.civit.ai", js: "6*206 + 2" });
-  assert.deepEqual(lastExec().target, { tabId: TAB_ID, frameIds: [7] });
-  assert.equal(e.value, 1234);
-  assert.deepEqual(lastExec().args, ["6*206 + 2"]);
+  assert.equal(h.url, OOPIF_URL, "a frame read reports the FRAME's own url, not the top url");
+  assert.deepEqual(state.calls.debugger, [], "a fixed-func frame read must NOT use the debugger");
 });
+// NOTE: `eval --frame` no longer uses executeScript (chrome.scripting can only run a
+// serialized FUNC, never an arbitrary JS STRING → the #190 value:null bug). It now runs
+// via CDP Runtime.evaluate — see tests/frame_eval_cdp.test.mjs.
 
 test("--frame click/type/key: injected into the OOPIF frame; report trusted:false", async () => {
   resetCalls();
@@ -118,7 +119,7 @@ test("--frame click/type/key: injected into the OOPIF frame; report trusted:fals
   const c = await OPS.click({ tabId: TAB_ID, frame: "model-benchmarking.civit.ai", selector: "#run" });
   assert.deepEqual(lastExec().target, { tabId: TAB_ID, frameIds: [7] });
   assert.deepEqual(lastExec().args, ["#run"]);
-  assert.deepEqual(c, { url: state.tab.url, clicked: "#run", x: 60, y: 40,
+  assert.deepEqual(c, { url: OOPIF_URL, clicked: "#run", x: 60, y: 40,
                         frame: "model-benchmarking.civit.ai", trusted: false });
 
   resetCalls();
