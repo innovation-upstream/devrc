@@ -72,6 +72,29 @@ doesn't take (the op still returns `unknown_op`, or `health` still shows the old
 So on a `null`: first suspect a multi-statement body, then page CSP; fall back to
 `text`/`html` before concluding the bridge is down.
 
+### Cookies and authenticated requests
+
+**There is no cookie op** — the extension has no `cookies` permission, on purpose
+(README → *Security model*). So `eval` + `document.cookie` is the only route, and
+it is structurally blind to **HttpOnly** cookies — which is exactly what a session
+/ auth cookie always is. On a CSP-strict origin you also just get `null`, which
+reads like a dead bridge.
+
+**Don't extract the cookie — make the request from inside the page.** An in-page
+`fetch(url, {credentials:"include"})` attaches the cookies (HttpOnly included)
+automatically and hands back only the data: no new permission, and no credential
+value ever enters the transcript. `eval` takes ONE EXPRESSION, so use an async
+IIFE — the promise IS awaited (top frame `chrome.scripting`, `--frame` CDP
+`awaitPromise:true`), you get the resolved value, not a pending Promise:
+
+```bash
+browser js '(async function(){ const r = await fetch("/api/thing", {credentials:"include"}); return JSON.stringify({status:r.status, body:(await r.text()).slice(0,500)}) })()'
+```
+
+⚠ **This does NOT work on CSP-strict origins** (GitHub, Discord, …) — the injected
+script never runs there at all, so an authenticated API call *through the page* is
+simply unavailable; `text`/`html` are the only reads that work.
+
 ## The user is USING this browser
 
 It's their live session, not a scratch VM. Don't `nav` a tab that may hold unsaved
