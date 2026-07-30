@@ -45,10 +45,28 @@ Priority legend: **🔴 CRITICAL** (security/data/prod — never compromise) · 
 ## Git Workflow 🔴
 **Triggers**: session start, before changes, risky operations
 
+These rules live HERE (managed, shipped to every host), not in `~/.claude/CLAUDE.md` —
+that file is per-host/mutable and does NOT ship, so a 🔴 rule placed there silently
+protects only one machine. `~/.claude/CLAUDE.md` is for genuinely host-specific facts
+(paths, OS, package manager) only.
+
 - **Status first**: `git status && git branch` before starting.
-- **Feature branches only** — never work on main/master; commit before risky operations for rollback.
+- **Never `git add -A` / `--all` / `.`** — stage explicit paths. Blind-staging leaks unrelated WIP and secrets from a dirty tree (near-misses on civitai + homelab-talos). Enforced by the `bash-guard.py` PreToolUse hook.
+- **Never `git reset --hard`** — it irreversibly destroys uncommitted work. Use `git restore <path>` / `git checkout -- <path>` for specific files, or `git checkout <ref> -- <paths>` to take another ref's version.
 - **Review before commit** (`git diff`); descriptive messages (avoid bare "fix"/"update"/"changes").
-- **Commit/push only when asked.** (See `~/.claude/CLAUDE.md` for `never git add -A` / `never reset --hard` / the rebase recipe.)
+- **Commit/push only when asked.**
+- **Feature branches only — never work on main/master — EXCEPT in declared trunk-deploy repos.** `homelab-talos` is GitOps-reconciled from `trunk`: committing IS deploying live, so trunk-commit is the norm there and the feature-branch/PR default does NOT apply (see that repo's `CLAUDE.md`). Treat this as an explicit, repo-scoped carve-out — not licence to commit to `main` anywhere else.
+
+### 🔴 `git stash` is repo-GLOBAL — never use it to clear a tree for a rebase
+The stash stack is shared across ALL worktrees of a repo, so a concurrent agent or
+session can pop *your* stash. Two parallel remix subagents stole each other's work this
+way (2026-07-25), and the `stash → pull --rebase → stash pop` recipe's autostash form
+corrupted `.sops.yaml` on a dirty tree (2026-06-24).
+
+- **To sync a branch: use a clean worktree, not a stash.** `git worktree add ../<repo>-<topic> -b <branch> origin/<main-branch>` → edit/build/test/commit/push there → `git worktree remove`. A concurrent push then rebases only your clean tree, which holds only your staged paths.
+- **To take another ref's version of a file:** `git checkout <ref> -- <paths>` — never stash/pop around it.
+- **When dispatching parallel subagents that touch one repo**, pass `isolation: "worktree"` on each Agent call so their edits cannot collide.
+- **Re-sync the base clone after worktree work merges.** Because worktrees do the committing, the base clone is write-only and silently falls behind — its dirty files become *stale orphans* of already-merged work, not WIP (homelab-talos was 262 behind on 2026-07-30). Run `git -C <repo> fetch origin && git -C <repo> merge --ff-only origin/<main-branch>` at the end of a worktree cycle. **If that conflicts, take upstream** (`--ours` during a stash/autostash apply); `warning: skipped previously applied commit` means the work already landed from a worktree → `git rebase --skip`.
 
 ## Token & Tool Hygiene 🟡
 **Triggers**: writing scripts/files, editing, reading files, repeated operations

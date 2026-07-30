@@ -403,6 +403,17 @@ in
     recursive = true;
     force = true;
   };
+  # PreToolUse hooks — MANAGED (was per-host/unmanaged, which meant the only
+  # deterministic enforcement of the 🔴 Git Workflow rules in RULES.md existed on
+  # ONE host while RULES.md shipped everywhere). Edit devrc/claude/hooks/ then
+  # switch. NOTE: hook *registration* in ~/.claude/settings.json stays per-host —
+  # it already points at ~/.claude/hooks/bash-guard.py, which this symlink backs,
+  # so no settings change is needed on either host.
+  home.file.".claude/hooks/bash-guard.py" = {
+    source = ../claude/hooks/bash-guard.py;
+    executable = true;
+    force = true;
+  };
   # `browser` skill — the DELIBERATE EXCEPTION to the store-symlink pattern above.
   # Its source of truth is the browser-bridge subsystem in THIS repo
   # (scripts/browser-bridge/{SKILL.md,browser}), NOT devrc/claude/skills/. So rather
