@@ -117,10 +117,17 @@ dl-route backfill apply --manifest <path>.json
 ## Changing the code
 
 ```bash
-nix-shell -p python312Packages.pytest --run "python3 -m pytest scripts/dl-router/tests -q"
+# from the repo root — both commands are exact, see the gotchas below
+nix-shell -p 'python312.withPackages(ps:[ps.pytest])' --run "python3 -m pytest scripts/dl-router/tests -q"
 nix-shell -p nodejs --run "node --test 'scripts/dl-router/tests/*.test.mjs'"
 home-manager switch --flake ~/workspace/devrc --impure   # restarts the sidecar
 ```
+
+* `python312.withPackages(ps:[ps.pytest])`, **not** `python312Packages.pytest` —
+  the latter only works when the ambient `python3` happens to be the matching
+  minor version.
+* The node glob **must be quoted**. `node --test scripts/dl-router/tests` treats
+  the directory as one test file and reports a bogus failure.
 
 Invariants the tests exist to protect — do not weaken them:
 

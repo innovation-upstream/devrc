@@ -259,9 +259,16 @@ the qBittorrent endpoint and the clock are all injectable, and **the live
 qBittorrent instance is never contacted**.
 
 ```
-nix-shell -p python312Packages.pytest --run "python3 -m pytest scripts/dl-router/tests -q"
+nix-shell -p 'python312.withPackages(ps:[ps.pytest])' --run "python3 -m pytest scripts/dl-router/tests -q"
 nix-shell -p nodejs --run "node --test 'scripts/dl-router/tests/*.test.mjs'"
 ```
+
+Run both from the repo root. `python312.withPackages` (not
+`python312Packages.pytest`) is what actually guarantees the interpreter running
+the suite is the one pytest was built for; the bare-package form only works by
+accident when the ambient `python3` happens to be the same minor version. The
+node glob **must be quoted** — `node --test <dir>` treats the directory as a
+single test file and fails.
 
 The security tests are the ones to keep green: the path-traversal table is
 asserted against **both** `safety.py` and `extension/sanitize.js` (they must

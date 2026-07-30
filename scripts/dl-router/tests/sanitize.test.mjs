@@ -5,7 +5,8 @@
 // what goes into suggest({filename}); the sidecar decides what becomes a real
 // directory. A divergence is a hole.
 //
-// Run: nix-shell -p nodejs --run "node --test scripts/dl-router/tests"
+// Run (the glob must be quoted — `node --test <dir>` fails):
+//   nix-shell -p nodejs --run "node --test 'scripts/dl-router/tests/*.test.mjs'"
 import test from "node:test";
 import assert from "node:assert/strict";
 
