@@ -217,6 +217,20 @@ test("pollHeaders includes an encoded active tab when provided", () => {
   assert.equal(h["X-Bridge-Active-Title"], encodeURIComponent("Hi & Bye"));
 });
 
+test("pollHeaders carries the extension manifest version (whoami enrichment)", () => {
+  // The identity now includes the extension version when present; existing
+  // fields are UNCHANGED (still just instance-id when nothing else is set).
+  const h = pollHeaders("uuid-1", "work", null, "0.1.0");
+  assert.equal(h["X-Bridge-Instance-Id"], "uuid-1");
+  assert.equal(h["X-Bridge-Label"], "work");
+  assert.equal(h["X-Bridge-Ext-Version"], "0.1.0");
+  // Omitted when unknown (a legacy build) — the field simply does not appear,
+  // and the pre-existing identity shape is untouched.
+  const bare = pollHeaders("uuid-2", "");
+  assert.deepEqual(bare, { "X-Bridge-Instance-Id": "uuid-2" });
+  assert.equal(pollHeaders("uuid-3", "", null)["X-Bridge-Ext-Version"], undefined);
+});
+
 // --- poll-response classification: the distinct supersede signal ------------ //
 test("classifyPollStatus distinguishes command / idle / superseded / auth", () => {
   assert.equal(classifyPollStatus(200), POLL_COMMAND);

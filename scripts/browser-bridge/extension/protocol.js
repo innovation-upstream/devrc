@@ -953,15 +953,19 @@ export function capHeaderValue(s, max = MAX_HEADER_VALUE_CHARS) {
 }
 
 // Request headers the SW sends on /poll to identify its instance. Label +
-// active-tab strings are capped then URL-encoded (HTTP header values must be
-// ASCII-safe AND bounded); the server decodes them. Empty values are omitted so
-// a bare instance registers cleanly. `active` is an optional { url, title } for
-// cheap /health enrichment.
-export function pollHeaders(instanceId, label, active) {
+// active-tab + ext-version strings are capped then URL-encoded (HTTP header
+// values must be ASCII-safe AND bounded); the server decodes them. Empty values
+// are omitted so a bare instance registers cleanly. `active` is an optional
+// { url, title } for cheap /health enrichment. `extVersion` is the extension's
+// own manifest version (chrome.runtime.getManifest().version) — surfaced by
+// `whoami` so an operator can see which extension BUILD is loaded per instance;
+// omitted (→ null in whoami) by a legacy build that predates version reporting.
+export function pollHeaders(instanceId, label, active, extVersion) {
   const h = { "X-Bridge-Instance-Id": String(instanceId || "") };
   if (label) h["X-Bridge-Label"] = encodeURIComponent(capHeaderValue(label));
   if (active && active.url) h["X-Bridge-Active-Url"] = encodeURIComponent(capHeaderValue(active.url));
   if (active && active.title) h["X-Bridge-Active-Title"] = encodeURIComponent(capHeaderValue(active.title));
+  if (extVersion) h["X-Bridge-Ext-Version"] = encodeURIComponent(capHeaderValue(String(extVersion)));
   return h;
 }
 

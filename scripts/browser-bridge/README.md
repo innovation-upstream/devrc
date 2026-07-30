@@ -66,6 +66,25 @@ design when two profiles were connected).
   an unknown key errors. `--instance` works for every op.
 - **`browser instances`** lists the connected instances (routing key, label,
   auto-id, active-tab url/title) as JSON. `/health` also reports them.
+- **`browser whoami`** (GET `/whoami`, bearer + Host guarded like `/health`, NOT
+  rate-limited) is a read-only identity + diagnostics snapshot: **which HOST**
+  (`host.label` ∈ `laptop`/`workbench`/`unknown`, resolved `ACTIVITY_HOST` env →
+  the activity-collector env file → LAN-IP detect mirroring `ship.sh`
+  `detect_role`; `host.source` names the method, `host.ips` the machine's
+  non-loopback IPv4s), the connected **instances** (`key`/`label`/`instanceId`,
+  the active-tab **DOMAIN** only — metadata-only, never the full URL — and the
+  reported `extension_version`), and **bridge** diagnostics (`endpoint`, `port`,
+  `server_version` = a `SERVER_VERSION` const + best-effort git short-HEAD,
+  `connected` count, `rate_limit`, and `extension_version_current` = the manifest
+  version the server reads from the repo). It answers "am I on the laptop or the
+  workbench, and which profile?" in one shot (both hosts are hostname `nixos`).
+  **No hard "stale" flag (by design):** the extension manifest version is not
+  bumped per-change, so whoami reports both `extension_version` (loaded, per
+  instance) and `extension_version_current` (repo) for you to eyeball rather than
+  computing an unreliable stale verdict. The core snapshot needs **no extension
+  change / no reload**; `extension_version` simply reads `null` until an extension
+  build that reports its version (via the `X-Bridge-Ext-Version` poll header) has
+  been reloaded.
 - **Newest supersedes.** If a NEW connection (different auto-id) registers for a
   routing key that already has a live connection, the old one is dropped and any
   in-flight command on it resolves to a `superseded` error (no orphaned waiter).
