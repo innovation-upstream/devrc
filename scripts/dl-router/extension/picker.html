@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Save to…</title>
+  <style>
+    :root { color-scheme: light dark; }
+    body { font: 13px/1.45 system-ui, sans-serif; margin: 0; padding: 10px 12px; }
+    #q { width: 100%; box-sizing: border-box; font: inherit; padding: 6px 8px; }
+    #meta { margin: 6px 0; font-size: 12px; opacity: .7; word-break: break-word; }
+    #dup { margin: 4px 0; font-size: 12px; color: #b45309; }
+    #list { list-style: none; margin: 6px 0 0; padding: 0; max-height: 300px; overflow: auto; }
+    .row { padding: 4px 8px; border-radius: 4px; word-break: break-word; }
+    .row.sel { background: Highlight; color: HighlightText; }
+    .row.new { font-style: italic; }
+    #hint { margin-top: 8px; font-size: 11px; opacity: .55; }
+  </style>
+</head>
+<body>
+  <input id="q" type="text" placeholder="type to filter or name a new folder" autofocus>
+  <div id="meta"></div>
+  <div id="dup"></div>
+  <ul id="list"></ul>
+  <div id="hint">Enter accept · arrows move · Esc leave it in the catch-all folder</div>
+  <script type="module" src="picker.js"></script>
+</body>
+</html>
