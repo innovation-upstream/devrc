@@ -369,15 +369,17 @@ def test_post_approvals_passes_resolved_repo_to_post_task():
         captured["resolve_arg"] = name
         return "Owner/Repo"
 
-    def _post_task(directory, body, *, repo="", model=""):
+    def _post_task(directory, body, *, repo="", model="", tags=None):
         captured["directory"] = directory
         captured["repo"] = repo
+        captured["tags"] = tags
         return 4242
 
     fake_cg = types.SimpleNamespace(
         build_task_title=lambda p: p["title"],
         build_task_body=lambda p: "body",
         resolve_repo_fullname=_resolve,
+        build_tags=lambda p: [],
         post_task=_post_task,
     )
     approvals = [{"repo": "civitai", "title": "T",
@@ -515,6 +517,10 @@ def _prime_scan(tmp_path, monkeypatch, devrc_dir):
     monkeypatch.setattr(exclusions, "HISTORY_DIR", tmp_path / "history")
     monkeypatch.setattr(exclusions, "LATEST_FILE", tmp_path / "latest.json")
     monkeypatch.setattr(scan, "DEFAULT_REPOS", [str(devrc_dir)])
+    # HERMETICITY NOTE: cmd_scan also calls routing.related_for → route.load_current(), a
+    # LIVE cross-cluster read of the homelab mailbox Postgres. It is stubbed suite-wide by
+    # the autouse fixture in tests/conftest.py (which also covers test_dismiss /
+    # test_exclusions / test_scan_cli, the other suites that drive the real cmd_scan).
 
 
 def test_scan_approve_posts_and_suppresses_repo_kept(tmp_path, monkeypatch):
@@ -548,7 +554,7 @@ def test_scan_approve_posts_and_suppresses_repo_kept(tmp_path, monkeypatch):
             return "**🤖 repo-cos · APPROVED**\n" + p["title"]
 
         @staticmethod
-        def post_task(directory, body, *, repo="", model=""):
+        def post_task(directory, body, *, repo="", model="", tags=None):
             posted["directory"] = directory
             posted["body"] = body
             posted["repo"] = repo
@@ -617,3 +623,404 @@ def test_scan_approve_failed_post_not_suppressed(tmp_path, monkeypatch):
     assert "devrc/collector.py:5" in seen["refs"]
     st = exclusions.load_state(tmp_path / "exclusions.json")
     assert st["approved"] == {}
+
+
+# ==== 7. `initiative:<slug>` TASK TAGS (clawgate 0.7.75+) ============================
+# The digest resolves a confident initiative slug per proposal and persists it into
+# last_emailed.json; the approve path reads it POSITIONALLY and stamps the clawgate Task
+# with `initiative:<slug>`. Load-bearing invariant: TAGGING MUST NEVER COST AN APPROVAL.
+
+_CREDS = {"CLAWGATE_API_URL": "http://cg", "CLAWGATE_HOOK_TOKEN": "t"}
+
+# clawgate's tag grammar (spec §3): lowercase, [a-z0-9._/-], <=1 ':', <=64 runes.
+_TAG_RE = __import__("re").compile(r"^[a-z0-9._/-]+(:[a-z0-9._/-]+)?$")
+
+
+def _assert_valid_tag(tag: str):
+    assert _TAG_RE.match(tag), f"{tag!r} violates the clawgate tag grammar"
+    assert len(tag) <= clawgate.TAG_MAX_LEN
+    assert tag == tag.lower()
+
+
+# ---- 7a. normalization / grammar ----------------------------------------------------
+
+def test_normalize_tag_lowercases_and_collapses_whitespace():
+    assert clawgate.normalize_tag("Initiative:Remix-Composer") == "initiative:remix-composer"
+    assert clawgate.normalize_tag("  initiative:dp prod  sweep ") == "initiative:dp-prod-sweep"
+    _assert_valid_tag(clawgate.normalize_tag("Initiative:Remix-Composer"))
+
+
+def test_normalize_tag_drops_disallowed_characters_rather_than_mangling():
+    # A tag that can't be made valid is DROPPED — never silently rewritten into a
+    # different (wrong) routing key.
+    for bad in ("initiative:remix!composer", "initiative:remix,composer",
+                "initiative:rémix", "initiative:remix#1", "initiative:a:b:c"):
+        assert clawgate.normalize_tag(bad) is None, bad
+
+
+def test_normalize_tag_drops_over_64_runes():
+    slug = "x" * 60
+    tag = f"initiative:{slug}"          # 11 + 60 = 71 runes
+    assert len(tag) > clawgate.TAG_MAX_LEN
+    assert clawgate.normalize_tag(tag) is None
+    ok = f"initiative:{'x' * 53}"       # exactly 64
+    assert len(ok) == clawgate.TAG_MAX_LEN
+    assert clawgate.normalize_tag(ok) == ok
+
+
+def test_normalize_tag_drops_empty_and_whitespace():
+    for bad in ("", "   ", "\t\n", None, "-", "initiative:"):
+        assert clawgate.normalize_tag(bad) is None, repr(bad)
+
+
+def test_normalize_tags_dedupes_sorts_and_caps_at_20():
+    out = clawgate.normalize_tags(["b", "A", "a", "  b  "])
+    assert out == ["a", "b"]
+    many = [f"initiative:i{i}" for i in range(30)]
+    capped = clawgate.normalize_tags(many)
+    assert len(capped) == clawgate.TAG_MAX_COUNT
+    for t in capped:
+        _assert_valid_tag(t)
+
+
+def test_normalize_tags_of_none_is_empty():
+    assert clawgate.normalize_tags(None) == []
+    assert clawgate.normalize_tags([]) == []
+
+
+# ---- 7b. build_tags -----------------------------------------------------------------
+
+def test_build_tags_emits_one_initiative_tag():
+    tags = clawgate.build_tags({"initiative": "clawgate-agent-loop-close"})
+    assert tags == ["initiative:clawgate-agent-loop-close"]
+    _assert_valid_tag(tags[0])
+
+
+def test_build_tags_drops_a_mixed_case_slug_rather_than_lowercasing_it():
+    """A mixed-case slug used to be silently lowercased into `initiative:security-audit-
+    v0.1.64` — a tag that no longer equals the ledger slug `SECURITY-AUDIT-v0.1.64`, so the
+    initiatives-side join misses. The denylist now drops it (`not-lowercase`) so the emitted
+    tag is ALWAYS byte-equal to its slug."""
+    assert clawgate.build_tags({"initiative": "SECURITY-AUDIT-v0.1.64"}) == []
+    assert clawgate.build_tags({"initiative": "HANDOFF-comfyui-session"}) == []
+    # the all-lowercase form of the same slug is still tagged, verbatim.
+    assert clawgate.build_tags({"initiative": "security-audit-v0.1.64"}) == [
+        "initiative:security-audit-v0.1.64"]
+
+
+def test_build_tags_no_slug_no_tags():
+    assert clawgate.build_tags({}) == []
+    assert clawgate.build_tags({"initiative": ""}) == []
+    assert clawgate.build_tags({"initiative": None}) == []
+    assert clawgate.build_tags(None) == []
+
+
+def test_build_tags_applies_the_denylist():
+    for junk in ("HANDOFF", "2026-07-21", "actionable-next-steps",
+                 "868j34n9y-868kf6w7r-complete-mark"):
+        assert clawgate.build_tags({"initiative": junk}) == [], junk
+
+
+def test_build_tags_drops_a_slug_too_long_for_the_grammar():
+    # A real store slug can exceed the 64-rune tag cap once prefixed → no tag, no 400.
+    long_slug = "alert-civitai-disk-investigate-prioritize-remediation-space"
+    assert clawgate.build_tags({"initiative": long_slug}) == []
+
+
+def test_build_tags_never_raises_on_routing_failure(monkeypatch):
+    import routing
+    monkeypatch.setattr(routing, "taggable_slug",
+                        lambda s: (_ for _ in ()).throw(RuntimeError("router exploded")))
+    assert clawgate.build_tags({"initiative": "clawgate-agent-loop-close"}) == []
+
+
+# ---- 7c. post_task payload + back-compat --------------------------------------------
+
+def test_post_task_includes_tags_when_passed():
+    seen = {}
+    fake_post = lambda u, payload, t, timeout=15: (seen.update(payload=payload)  # noqa: E731
+                                                   or json.dumps({"id": 5}))
+    tid = clawgate.post_task("d", "b", repo="O/R", tags=["initiative:remix-clips"],
+                             creds=_CREDS, _post=fake_post)
+    assert tid == 5
+    assert seen["payload"] == {"directory": "d", "body": "b", "repo": "O/R",
+                               "tags": ["initiative:remix-clips"]}
+
+
+def test_post_task_omits_tags_key_entirely_when_empty():
+    # BACKWARD-COMPAT GUARD: byte-for-byte the pre-tags payload.
+    seen = {}
+    fake_post = lambda u, payload, t, timeout=15: (seen.update(payload=payload)  # noqa: E731
+                                                   or json.dumps({"id": 1}))
+    clawgate.post_task("d", "b", creds=_CREDS, _post=fake_post)
+    assert seen["payload"] == {"directory": "d", "body": "b"}
+    clawgate.post_task("d", "b", tags=[], creds=_CREDS, _post=fake_post)
+    assert seen["payload"] == {"directory": "d", "body": "b"}
+    clawgate.post_task("d", "b", tags=["!!!"], creds=_CREDS, _post=fake_post)
+    assert seen["payload"] == {"directory": "d", "body": "b"}   # invalid tag → key absent
+
+
+# ---- 7d. FAIL-OPEN: a tag must never cost an approval --------------------------------
+
+def _http_error(code):
+    import urllib.error
+    return urllib.error.HTTPError("http://cg/api/tasks", code, "Bad Request", {}, None)
+
+
+def test_post_task_retries_once_without_tags_on_400():
+    calls = []
+
+    def flaky(url, payload, token, timeout=15):
+        calls.append(dict(payload))
+        if "tags" in payload:
+            raise _http_error(400)
+        return json.dumps({"id": 77})
+
+    tid = clawgate.post_task("d", "b", repo="O/R", tags=["initiative:whatever-x"],
+                             creds=_CREDS, _post=flaky)
+    assert tid == 77                       # the approval is NOT lost
+    assert len(calls) == 2                 # EXACTLY one retry
+    assert "tags" in calls[0]
+    assert "tags" not in calls[1]
+    # byte-identical to the pre-tags payload: same keys, same INSERTION ORDER.
+    assert calls[1] == {"directory": "d", "body": "b", "repo": "O/R"}
+    assert list(calls[1]) == ["directory", "body", "repo"]
+
+
+def test_post_task_retries_only_on_400_not_other_4xx():
+    """400 is the ONLY grammar-rejection code (clawgate task-tags spec §6). 401/403 (rotated
+    hook token), 404 (wrong URL) and 429 (rate limit) earn a doomed second request; 408 is
+    worse — the origin may already have created the Task, so a retry DOUBLE-POSTS."""
+    for code in (401, 403, 404, 408, 429, 451):
+        calls = []
+
+        def always(url, payload, token, timeout=15, _c=code):
+            calls.append(dict(payload))
+            raise _http_error(_c)
+
+        assert clawgate.post_task("d", "b", tags=["initiative:x-y"],
+                                  creds=_CREDS, _post=always) is None, code
+        assert len(calls) == 1, f"HTTP {code} must NOT be retried (got {len(calls)} calls)"
+        assert "tags" in calls[0]
+
+
+def test_post_task_retry_logs_the_failure_and_the_retry(capsys):
+    def flaky(url, payload, token, timeout=15):
+        if "tags" in payload:
+            raise _http_error(400)
+        return json.dumps({"id": 8})
+
+    clawgate.post_task("d", "b", tags=["initiative:x-y"], creds=_CREDS, _post=flaky)
+    err = capsys.readouterr().err
+    assert "HTTP 400" in err
+    assert "retrying ONCE without tags" in err
+
+
+def test_post_task_untagged_4xx_is_not_retried():
+    calls = []
+
+    def always_400(url, payload, token, timeout=15):
+        calls.append(dict(payload))
+        raise _http_error(400)
+
+    assert clawgate.post_task("d", "b", creds=_CREDS, _post=always_400) is None
+    assert len(calls) == 1
+
+
+def test_post_task_connection_error_does_not_loop():
+    calls = []
+
+    def boom(url, payload, token, timeout=15):
+        calls.append(dict(payload))
+        raise OSError("connection refused")
+
+    assert clawgate.post_task("d", "b", tags=["initiative:x-y"],
+                              creds=_CREDS, _post=boom) is None
+    assert len(calls) == 1   # NOT a tag problem → no retry, no loop
+
+
+def test_post_task_5xx_is_not_retried_without_tags():
+    calls = []
+
+    def five_hundred(url, payload, token, timeout=15):
+        calls.append(dict(payload))
+        raise _http_error(503)
+
+    assert clawgate.post_task("d", "b", tags=["initiative:x-y"],
+                              creds=_CREDS, _post=five_hundred) is None
+    assert len(calls) == 1
+
+
+def test_post_task_retry_that_also_fails_returns_none():
+    calls = []
+
+    def always(url, payload, token, timeout=15):
+        calls.append(dict(payload))
+        raise _http_error(400)
+
+    assert clawgate.post_task("d", "b", tags=["initiative:x-y"],
+                              creds=_CREDS, _post=always) is None
+    assert len(calls) == 2   # tagged + one untagged retry, then give up
+
+
+# ---- 7e. PERSISTENCE: last_emailed.json round-trips the slug -------------------------
+
+def test_write_last_emailed_persists_the_initiative_slug(tmp_path):
+    path = tmp_path / "last_emailed.json"
+    props = [dict(EMAILED[0]), dict(EMAILED[1])]
+    exclusions.write_last_emailed(props, subject="s", generated_at="t",
+                                  related=["clawgate-agent-loop-close", None], path=path)
+    saved = json.loads(path.read_text())["proposals"]
+    assert saved[0]["initiative"] == "clawgate-agent-loop-close"
+    assert "initiative" not in saved[1]      # no confident match → no field
+
+
+def test_write_last_emailed_without_related_is_unchanged(tmp_path):
+    path = tmp_path / "last_emailed.json"
+    exclusions.write_last_emailed([dict(EMAILED[0])], subject="s", generated_at="t",
+                                  path=path)
+    saved = json.loads(path.read_text())["proposals"]
+    assert "initiative" not in saved[0]
+
+
+def test_write_last_emailed_skips_attaching_on_a_MISALIGNED_related_list(tmp_path, capsys):
+    """A `related` list that isn't index-aligned means the caller reordered/filtered one of
+    the two lists — positional stamping would then tag the WRONG initiative. Degrade to NO
+    tags (and say so loudly); a missing tag is cheap, a wrong routing key is not."""
+    path = tmp_path / "last_emailed.json"
+    exclusions.write_last_emailed([dict(EMAILED[0]), dict(EMAILED[1])], subject="s",
+                                  generated_at="t", related=["only-first"], path=path)
+    saved = json.loads(path.read_text())["proposals"]
+    assert "initiative" not in saved[0]
+    assert "initiative" not in saved[1]
+    err = capsys.readouterr().err
+    assert "MISALIGNED" in err
+    assert "1 slug(s) for 2 proposal(s)" in err
+
+
+# ---- 7e-bis. attach_related: the positional-misalignment guard, directly -------------
+
+def test_attach_related_stamps_when_lengths_match():
+    props = [{"title": "a"}, {"title": "b"}]
+    out = exclusions.attach_related(props, ["arc-one", None])
+    assert out is props                       # mutates + returns the same list
+    assert props[0]["initiative"] == "arc-one"
+    assert "initiative" not in props[1]       # None slug → no field
+
+
+def test_attach_related_is_a_noop_for_empty_or_none_related():
+    for related in (None, []):
+        props = [{"title": "a"}, {"title": "b"}]
+        exclusions.attach_related(props, related)
+        assert all("initiative" not in p for p in props), related
+
+
+def test_attach_related_skips_everything_and_warns_when_lengths_differ(capsys):
+    # TOO SHORT …
+    props = [{"title": "a"}, {"title": "b"}, {"title": "c"}]
+    exclusions.attach_related(props, ["arc-one", "arc-two"])
+    assert all("initiative" not in p for p in props)
+    err = capsys.readouterr().err
+    assert "MISALIGNED" in err and "2 slug(s) for 3 proposal(s)" in err
+    # … and TOO LONG (a filtered proposal list is the likelier future regression).
+    props = [{"title": "a"}]
+    exclusions.attach_related(props, ["arc-one", "arc-two"])
+    assert "initiative" not in props[0]
+    assert "MISALIGNED" in capsys.readouterr().err
+
+
+def test_attach_related_never_raises_on_a_junk_related_value(capsys):
+    # best-effort contract: an unsized/odd `related` is logged, never raised.
+    props = [{"title": "a"}]
+    assert exclusions.attach_related(props, object()) is props
+    assert "initiative" not in props[0]
+    assert capsys.readouterr().err != ""
+
+
+def test_approve_payload_carries_the_persisted_slug():
+    emailed = [dict(EMAILED[0], initiative="clawgate-agent-loop-close")]
+    approvals = exclusions.parse_reply("1. approve\n", emailed, alias_map=_alias())["approve"]
+    assert approvals[0]["initiative"] == "clawgate-agent-loop-close"
+    assert clawgate.build_tags(approvals[0]) == ["initiative:clawgate-agent-loop-close"]
+
+
+def test_approve_payload_on_an_OLD_last_emailed_file_yields_no_tag():
+    # A last_emailed.json written BEFORE this feature has no `initiative` key: no tag,
+    # no crash, and NO re-resolution (the approve path must gain no I/O).
+    approvals = exclusions.parse_reply("1. approve\n", EMAILED, alias_map=_alias())["approve"]
+    assert approvals[0]["initiative"] == ""
+    assert clawgate.build_tags(approvals[0]) == []
+
+
+# ---- 7f. approve path end-to-end: tagged vs untagged ---------------------------------
+
+def _fake_clawgate(captured, *, tid=4242):
+    import types
+    return types.SimpleNamespace(
+        build_task_title=lambda p: p["title"],
+        build_task_body=lambda p: "body",
+        resolve_repo_fullname=lambda name: "Owner/Repo",
+        build_tags=clawgate.build_tags,
+        post_task=lambda directory, body, *, repo="", model="", tags=None: (
+            captured.update(directory=directory, repo=repo, tags=tags) or tid),
+    )
+
+
+def test_approve_path_tags_the_task_with_the_persisted_slug():
+    captured = {}
+    approvals = [{"repo": "civitai", "title": "T", "evidence": ["civitai/src/x.ts:1"],
+                  "initiative": "app-blocks-w13-external-listings"}]
+    state = {"repos": {}, "dismissed": {}, "approved": {}}
+    scan._post_approvals_to_clawgate(approvals, state, _clawgate=_fake_clawgate(captured))
+    assert captured["tags"] == ["initiative:app-blocks-w13-external-listings"]
+    _assert_valid_tag(captured["tags"][0])
+    # the approval is still recorded/suppressed
+    assert state["approved"]["civitai/src/x.ts:1"]["clawgate_task_id"] == 4242
+
+
+def test_approve_path_without_a_slug_sends_no_tags():
+    captured = {}
+    approvals = [{"repo": "civitai", "title": "T", "evidence": ["civitai/src/x.ts:1"]}]
+    state = {"repos": {}, "dismissed": {}, "approved": {}}
+    scan._post_approvals_to_clawgate(approvals, state, _clawgate=_fake_clawgate(captured))
+    assert captured["tags"] == []
+    assert state["approved"]["civitai/src/x.ts:1"]["clawgate_task_id"] == 4242
+
+
+def test_approve_path_with_a_junk_slug_sends_no_tags():
+    captured = {}
+    approvals = [{"repo": "civitai", "title": "T", "evidence": ["civitai/src/x.ts:1"],
+                  "initiative": "SESSION-HANDOFF"}]
+    state = {"repos": {}, "dismissed": {}, "approved": {}}
+    scan._post_approvals_to_clawgate(approvals, state, _clawgate=_fake_clawgate(captured))
+    assert captured["tags"] == []
+    assert state["approved"]["civitai/src/x.ts:1"]["clawgate_task_id"] == 4242
+
+
+def test_approve_path_tagged_post_that_400s_still_records_the_approval():
+    """END-TO-END fail-open: clawgate 400s the tagged payload → the real post_task retries
+    untagged → a task id comes back → the evidence is STILL suppressed (no lost approval)."""
+    calls = []
+
+    def flaky(url, payload, token, timeout=15):
+        calls.append(dict(payload))
+        if "tags" in payload:
+            raise _http_error(400)
+        return json.dumps({"id": 909})
+
+    import types
+    fake_cg = types.SimpleNamespace(
+        build_task_title=lambda p: p["title"],
+        build_task_body=lambda p: "body",
+        resolve_repo_fullname=lambda name: "Owner/Repo",
+        build_tags=clawgate.build_tags,
+        post_task=lambda directory, body, *, repo="", model="", tags=None:
+            clawgate.post_task(directory, body, repo=repo, model=model, tags=tags,
+                               creds=_CREDS, _post=flaky),
+    )
+    approvals = [{"repo": "civitai", "title": "T", "evidence": ["civitai/src/x.ts:1"],
+                  "initiative": "dp-prod-latency-sweep"}]
+    state = {"repos": {}, "dismissed": {}, "approved": {}}
+    scan._post_approvals_to_clawgate(approvals, state, _clawgate=fake_cg)
+    assert len(calls) == 2
+    assert state["approved"]["civitai/src/x.ts:1"]["clawgate_task_id"] == 909

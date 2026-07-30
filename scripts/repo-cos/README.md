@@ -157,6 +157,35 @@ it only collects the full proposal; the **only new network** is the clawgate POS
   retry). Logs `approved: N proposal(s) → clawgate task(s) M/N; suppressed`.
 - **Reachability:** the weekly timer runs on the workbench where `~/.claude/clawgate.env` exists
   and clawgate is on the open, hook-token-gated LAN NodePort — no unit change needed.
+- **`initiative:<slug>` task tag (clawgate 0.7.75+):** the digest already resolves a confident
+  initiative slug per proposal (`routing.related_for` → the `↳ relates to:` breadcrumb). That
+  slug is now **persisted** into `last_emailed.json` as `initiative` and read **positionally**
+  by the approve path, so the Task carries `tags: ["initiative:<slug>"]` — the same slug you
+  saw when you approved. It is **never re-resolved at approve time** (no extra cross-cluster
+  read of the initiatives store); an older `last_emailed.json` without the field simply yields
+  no tag. Two filters run before the wire: `routing.taggable_slug` (a **denylist** dropping
+  document/date/opaque-id/filler and **not-already-lowercase** slugs — `HANDOFF`,
+  `HANDOFF-comfyui-session`, `2026-07-21`, `868j34n9y-…`, `actionable-next-steps` — each drop
+  logged with its rule) and `clawgate.normalize_tags` (clawgate's grammar: lowercase,
+  `[a-z0-9._/-]`, ≤1 `:`, ≤64 runes, ≤20 tags; anything invalid is **dropped, not mangled**).
+  Live measurement (2026-07-30, 139 slugs in `initiatives.current`): 10 denylist drops + 3
+  lost to the 64-rune cap → **126 taggable**.
+- **🔴 An emitted tag always equals its ledger slug, byte-for-byte.** `normalize_tag`
+  lowercases, so a slug carrying any uppercase letter would be emitted as a tag that no longer
+  matches the ledger and the initiatives-side join would silently miss. Rather than mangle,
+  the denylist drops it (`not-lowercase`). A missing tag is cheap; a tag that joins to nothing
+  is a lie.
+- **🔴 Tagging must never cost an approval.** Because suppression is POST-success-gated, a
+  tag-induced `400` would silently lose the approval for a week. Backstop: **HTTP `400` on a
+  tagged POST retries EXACTLY ONCE with the `tags` key removed** (both the failure and the
+  retry are logged), so a tagged-post failure degrades to an *untagged Task*, never to *no
+  Task*. `400` is the only grammar-rejection code (task-tags spec §6), so nothing else is
+  retried — `401`/`403`/`404`/`429`, connection errors and 5xx would just burn a doomed second
+  call, and `408` (proxy timeout *after* the origin created the Task) could double-POST. A
+  call with no tags sends the byte-identical pre-tags payload.
+- **No `runbook:` tags.** `runbook:` is hard-validated by clawgate (unknown name → `400`),
+  there is no machine endpoint to list valid names, and exactly one runbook exists. A marked
+  seam in `clawgate.build_tags` documents where one would slot in.
 
 ## Usage
 
@@ -237,3 +266,12 @@ formatter, the LLM JSON parse/repair + anti-slop filters, and BOTH mail paths �
 send (From/Reply-To/To headers, unverified-STARTTLS context) and the Postgres reply read
 (ownership-gate SQL, cleaned reply, no-row/DB-error → None). HTTP (OpenRouter), SMTP, the
 port-forward, and the DB cursor are all mocked — no live network / cluster in unit tests.
+
+**Hermeticity:** `scan.cmd_scan` calls `routing.related_for`, whose only I/O is
+`route.load_current()` — a live cross-cluster read of the homelab `mailbox` Postgres. Four
+suites drive the real `cmd_scan`, so `tests/conftest.py` carries an **autouse fixture that
+stubs `load_current` to an empty store** for every test; `test_routing.py` re-patches it
+in-test where it wants a fixture store. Measured: 11 real store-read attempts without the
+fixture, 0 with it. `tests/fixtures/initiatives_current_slugs.txt` is a checked-in
+**snapshot** of the real slug vocabulary (never a live read) used to pin the denylist's
+corpus-wide properties; refresh it with the psql command in its header.

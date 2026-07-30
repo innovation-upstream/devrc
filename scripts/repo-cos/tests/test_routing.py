@@ -189,3 +189,188 @@ def test_render_tolerates_short_related_list():
                          related=["only-first"])
     assert "↳ relates to: only-first" in body
     assert body.count("relates to:") == 1
+
+
+# --------------------------------------------------------------------------- #
+# taggable-slug DENYLIST — every case below is a REAL slug from initiatives.current
+# (or from a 120-day replay of the same scan that mints it). A breadcrumb may show
+# junk; a durable clawgate `initiative:` tag may not.
+# --------------------------------------------------------------------------- #
+
+# (slug, expected drop reason) — the junk the vocabulary actually contains.
+JUNK_SLUGS = [
+    # bare dates adopted from a dated filename
+    ("2026-07-21", "no-letters"),
+    ("2026-06-13", "no-letters"),
+    # NOT-ALREADY-LOWERCASE. The tag grammar lowercases, so any of these would emit a tag
+    # that no longer equals its ledger slug → the initiatives-side join silently misses.
+    # All-caps doc filenames (HANDOFF.md, APP-DISCOVERY-DESIGN.md …) …
+    ("HANDOFF", "not-lowercase"),
+    ("SESSION-HANDOFF", "not-lowercase"),
+    ("APP-DISCOVERY-DESIGN", "not-lowercase"),
+    ("COMFYUI-INTEGRATION-DESIGN", "not-lowercase"),
+    # … and the MIXED-case ones, which hit the identical join-miss. `HANDOFF-comfyui-
+    # session` is also exactly the doc-filename class the rule exists to drop.
+    ("HANDOFF-comfyui-session", "not-lowercase"),
+    ("SECURITY-AUDIT-v0.1.64", "not-lowercase"),
+    # SYNTHETIC (the one entry in this table that is not a real store slug): title-case,
+    # the shape a future scan could mint from a prose heading. `remix-platform` IS real.
+    ("Remix-Platform", "not-lowercase"),
+    # ClickUp id salad
+    ("868j34n9y-868kf6w7r-complete-mark", "opaque-id"),
+    ("868f9pd14-close-issue", "opaque-id"),
+    # pure document/process filler
+    ("actionable-next-steps", "generic"),
+    ("next-session", "generic"),
+    ("past-sessions-week", "generic"),
+    # degenerate input
+    ("", "empty"),
+    ("   ", "empty"),
+    ("ab", "too-short"),
+]
+
+# Genuine (all-lowercase) initiative slugs that MUST survive — including the near-misses
+# that a lazier rule (any "-handoff" suffix, any digit run) would eat.
+GENUINE_SLUGS = [
+    "clawgate-agent-loop-close",
+    "dp-prod-latency-sweep",
+    "remix-next-session-kickoff",         # contains 'next-session' but names remix
+    "faro-rum-observability",
+    "arr-backfill-and-face-pass",
+    "standup-triage-handoff",             # '-handoff' suffix, real arc
+    "clawgate-documentation-handoff",
+    "spend-exporter-handoff",
+    "security-audit-v0.1.64",             # the lowercase form of a real slug: KEPT
+    "civitai-cli-arc-continuation-v0.1.73",
+    "image-scan-ingestion-down-0313-rca",  # '0313' is a date, not an opaque id
+    "sysredis-ha-cutover-complete",
+    "app-blocks-w13-external-listings",
+    "svi_loop_recipe",                     # underscores are legal in the tag charset
+    "mail-automation",
+    "espanso-typing-toil",
+]
+
+# Ambiguous by design: junk-ish, but no rule separates them from genuine short slugs
+# without overfitting. PINNED as KEPT — a missing tag is cheap, a wrong tag is not.
+AMBIGUOUS_KEPT = [
+    "code-open",
+    "dispatch-yes",
+    "changes-merge-ship",
+    "from-memory-previous",
+    "component-file",
+    "durable-new-tag",
+]
+
+
+def test_denylist_drops_each_junk_pattern():
+    for slug, reason in JUNK_SLUGS:
+        assert routing.slug_drop_reason(slug) == reason, slug
+        assert routing.taggable_slug(slug) is None, slug
+
+
+def test_denylist_keeps_every_genuine_slug():
+    for slug in GENUINE_SLUGS:
+        assert routing.slug_drop_reason(slug) is None, slug
+        assert routing.taggable_slug(slug) == slug, slug
+
+
+def test_denylist_keeps_ambiguous_slugs_by_design():
+    for slug in AMBIGUOUS_KEPT:
+        assert routing.slug_drop_reason(slug) is None, slug
+        assert routing.taggable_slug(slug) == slug, slug
+
+
+def test_taggable_slug_logs_what_it_dropped_and_why(capsys):
+    # Silent filtering is not acceptable: a dropped slug must name itself AND its rule.
+    assert routing.taggable_slug("HANDOFF") is None
+    err = capsys.readouterr().err
+    assert "HANDOFF" in err
+    assert "not-lowercase" in err
+    assert "dropped initiative slug" in err
+
+
+def test_taggable_slug_logs_nothing_when_it_keeps(capsys):
+    assert routing.taggable_slug("clawgate-agent-loop-close") == "clawgate-agent-loop-close"
+    assert capsys.readouterr().err == ""
+
+
+def test_taggable_slug_trims_and_never_raises_on_junk_types():
+    assert routing.taggable_slug("  dp-prod-latency-sweep  ") == "dp-prod-latency-sweep"
+    assert routing.taggable_slug(None) is None
+    assert routing.taggable_slug(12345) is None      # no letters
+    # A non-string that stringifies to something with letters survives the DENYLIST (it
+    # is not the denylist's job to police charset) — the tag-grammar layer drops it.
+    assert routing.taggable_slug(["a", "b"]) == "['a', 'b']"
+
+
+def test_slug_tokens_splits_on_all_separators():
+    assert routing.slug_tokens("App-Blocks_w13/x.y") == ["app", "blocks", "w13", "x", "y"]
+
+
+def test_an_all_lowercase_slug_is_kept_verbatim():
+    # The positive half of the not-lowercase rule: already-lowercase → kept, byte-identical.
+    for slug in ("handoff-comfyui-session", "security-audit-v0.1.64", "remix-platform"):
+        assert routing.slug_drop_reason(slug) is None, slug
+        assert routing.taggable_slug(slug) == slug, slug
+
+
+# --------------------------------------------------------------------------- #
+# CORPUS PROPERTIES — asserted over a SNAPSHOT of the real `initiatives.current`
+# vocabulary (tests/fixtures/initiatives_current_slugs.txt, 139 slugs, 2026-07-30).
+# Hermetic: the file is a checked-in snapshot, never a live read.
+# --------------------------------------------------------------------------- #
+FIXTURES = Path(__file__).resolve().parent / "fixtures"
+
+
+def _live_slug_corpus() -> list[str]:
+    lines = FIXTURES.joinpath("initiatives_current_slugs.txt").read_text().splitlines()
+    return [ln.strip() for ln in lines if ln.strip() and not ln.startswith("#")]
+
+
+def test_corpus_snapshot_is_the_expected_size():
+    # Guards the numbers the properties below are stated in. If the store grew, refresh the
+    # fixture (command in its header) and re-state the counts — don't silently drift.
+    assert len(_live_slug_corpus()) == 139
+
+
+def test_every_emitted_tag_equals_its_ledger_slug_exactly(capsys):
+    """🔴 THE JOIN INVARIANT. For every slug in the real vocabulary, the tag we would emit
+    is either absent or EXACTLY `initiative:<slug>` — never a lowercased/mangled variant.
+    This is what the not-lowercase rule buys: no tag can point at a slug that isn't there."""
+    import clawgate  # noqa: PLC0415 - local: keeps the routing-only tests import-light
+    for slug in _live_slug_corpus():
+        keep = routing.taggable_slug(slug)
+        if keep is None:
+            continue
+        assert keep == slug, f"denylist mutated {slug!r} -> {keep!r}"
+        tags = clawgate.normalize_tags([f"initiative:{keep}"])
+        # the grammar layer may still DROP (e.g. the 64-rune cap) — it must never REWRITE.
+        assert tags in ([], [f"initiative:{slug}"]), (slug, tags)
+    capsys.readouterr()  # swallow the per-drop log lines
+
+
+def test_corpus_denylist_drop_counts_are_pinned(capsys):
+    """The live measurement this rule change was justified by: 139 slugs → 10 denylist
+    drops (4 all-caps + 2 mixed-case + 1 bare date + 1 opaque id + 2 generic) → 129 pass
+    the denylist → 3 more lost to the 64-rune tag cap → 126 actually taggable."""
+    import clawgate  # noqa: PLC0415
+    from collections import Counter
+    corpus = _live_slug_corpus()
+    reasons = Counter(r for r in (routing.slug_drop_reason(s) for s in corpus) if r)
+    assert reasons == {"not-lowercase": 6, "no-letters": 1, "opaque-id": 1, "generic": 2}
+    kept = [s for s in corpus if routing.slug_drop_reason(s) is None]
+    assert len(kept) == 129
+    taggable = [s for s in kept if clawgate.normalize_tags([f"initiative:{s}"])]
+    assert len(taggable) == 126
+    capsys.readouterr()
+
+
+def test_the_two_mixed_case_corpus_slugs_are_now_dropped(capsys):
+    # The exact slugs this rule change added to the drop set — pinned by name so a
+    # regression is legible, not just a count that moved.
+    corpus = _live_slug_corpus()
+    for slug in ("HANDOFF-comfyui-session", "SECURITY-AUDIT-v0.1.64"):
+        assert slug in corpus, f"{slug} left the store — refresh the fixture"
+        assert routing.slug_drop_reason(slug) == "not-lowercase"
+        assert routing.taggable_slug(slug) is None
+    capsys.readouterr()
