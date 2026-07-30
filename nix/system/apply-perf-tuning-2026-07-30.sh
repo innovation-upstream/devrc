@@ -78,6 +78,35 @@ else
   echo "[2/4] zramSwap: memoryPercent 50->70, added memoryMax=100GiB"
 fi
 
+# ---- 2b. ptrace_scope (OPTIONAL — prompted) ------------------------------
+# keylog-spin-capture.service uses py-spy to dump the stack of keylog.service,
+# which is a sibling process, not a descendant. NixOS sets
+# kernel.yama.ptrace_scope=1 ("descendants only"), which blocks that attach —
+# the capture then records the failure instead of a stack.
+#
+# Setting it to 0 restores the traditional Linux default: any process may
+# ptrace another running as the SAME UID. That is a genuine, if mild,
+# relaxation — it widens what a compromised same-user process could read from
+# your other processes (including secrets in their memory). On a single-user
+# workstation that already runs agent-spawned code as this user, the marginal
+# exposure is small, but it is not zero. Declining is a valid choice; the
+# watcher simply won't produce stacks after a reboot.
+if grep -qE 'kernel\.yama\.ptrace_scope' "$CFG"; then
+  echo "[2b] ptrace_scope already declared — skipping"
+else
+  read -r -p "[2b] Persist kernel.yama.ptrace_scope=0 so py-spy can attach? [y/N] " pt
+  if [[ ${pt:-n} =~ ^[Yy]$ ]]; then
+    sed -i '/^\s*"vm\.page-cluster" = 0;/a\
+    # Allow same-UID ptrace so py-spy can attach to sibling services\
+    # (keylog-spin-capture). NixOS defaults to 1 = descendants only.\
+    "kernel.yama.ptrace_scope" = 0;' "$CFG"
+    grep -qE 'ptrace_scope' "$CFG" && echo "[2b] added ptrace_scope=0" \
+      || echo "[2b] WARNING: anchor not found, add it by hand"
+  else
+    echo "[2b] skipped — keylog-spin-capture will log a ptrace failure after reboot"
+  fi
+fi
+
 # ---- 3. Validate before switching ---------------------------------------
 echo "[3/4] parsing $CFG ..."
 nix-instantiate --parse "$CFG" >/dev/null \
