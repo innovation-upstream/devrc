@@ -104,7 +104,7 @@ Prefix any op with `--instance <key>` to target a specific connected profile
 | `browser [--instance K] release`           | drop ownership WITHOUT closing the tab |
 | `browser [--instance K] [--tab T] html`              | `outerHTML` of the owned tab (else the active tab) |
 | `browser [--instance K] [--tab T] text [selector] [--max-bytes N]` | **cheap read** — visible `innerText` of the owned/active tab (optional CSS `selector`), whitespace-normalized + byte-capped (default 32768; `0`=uncapped; a truncation note is appended). ~98% smaller than `html` — prefer it |
-| `browser [--instance K] [--tab T] [--frame F] eval '<js>'` | run JS in the owned/active tab, return its value (`--frame` runs it INSIDE a cross-origin OOPIF via `chrome.scripting`, isolated world) |
+| `browser [--instance K] [--tab T] [--frame F] eval '<js>'` | run JS in the owned/active tab, return its value. **`--frame` runs the JS INSIDE the target frame (incl. a cross-origin OOPIF) via CDP `Runtime.evaluate`** (not `chrome.scripting`, which can only run a func — the old path returned `value:null`); a frame that can't be resolved / an exception → a clear `frame_not_found` / `frame_eval_failed:<reason>` error, never a silent null; reports the frame's own `url` |
 | `browser [--instance K] tabs`              | list open tabs (`.data.ownedTabId` flags this session's owned tab) |
 | `browser [--instance K] [--tab T] nav <url>`         | navigate the owned/active tab to `<url>` |
 | `browser [--instance K] [--tab T] screenshot [path] [--fullpage]` | screenshot via **CDP `Page.captureScreenshot`** — **works on a BACKGROUND/occluded tab** and on each profile's own tab (a foreground tab uses the cheap captureVisibleTab fast path). `--fullpage` grabs the whole scrollable document. Prints the data URL, or writes a `.png` to `path` |
@@ -116,12 +116,18 @@ Prefix any op with `--instance <key>` to target a specific connected profile
 | `browser --print-session-id`               | print the derived per-session id (debug) and exit |
 
 `--frame <F>` (a **numeric** `frameId` from `frames`, or a URL substring) routes a
-`text`/`html`/`eval`/`click`/`type`/`key` INTO that frame via `chrome.scripting` —
-which reaches CROSS-ORIGIN out-of-process iframes (OOPIFs). A frame-scoped `eval`/read
+`text`/`html`/`click`/`type`/`key` INTO that frame via `chrome.scripting` — which
+reaches CROSS-ORIGIN out-of-process iframes (OOPIFs). A frame-scoped fixed-func read
 runs in an **isolated world** (DOM-capable; it does not see that frame's page globals).
+**`eval --frame` is the exception: it runs the JS string via CDP `Runtime.evaluate`**
+(`chrome.scripting` can only run a serialized func, so the old path evaluated nothing and
+returned `value:null`) — same-process frames in an isolated world, a cross-origin OOPIF
+in its own flat session; a resolve/exec failure is a clear `frame_not_found` /
+`frame_eval_failed` error, never a silent null.
 In-frame `click`/`type`/`key` dispatch **SYNTHETIC** events (`isTrusted:false`, the
 reachable OOPIF path — drives most apps); the result carries `trusted:false` for
-`--frame` input and `trusted:true` for top-frame CDP input.
+`--frame` input and `trusted:true` for top-frame CDP input. A `--frame` op reports the
+FRAME's own `url` (so you can confirm you read the intended frame, not the top).
 
 Result payloads land under `.result.data` in the JSON (the envelope is
 `{"ok":true,"result":{"id","ok","data":{...}}}`).
@@ -142,8 +148,10 @@ limitations:
    `civitai.com`) because `chrome.webNavigation.getAllFrames` enumerates OOPIFs that
    CDP `Page.getFrameTree` could not; then `browser --tab T --frame <numericId-or-url>
    text` reads inside it and `--frame … click/type/key` drives an in-app control (via
-   `chrome.scripting` injection). Plain `text`/`html`/`eval` still see only the top
-   frame.
+   `chrome.scripting` injection), while `--frame … eval '<js>'` runs a JS string inside
+   it via CDP `Runtime.evaluate` (e.g. `--frame <oopif> eval 'location.href'` returns the
+   OOPIF's own url, not null). Plain `text`/`html`/`eval` (no `--frame`) still see only
+   the top frame.
 3. **Drive an app's TOP frame with trusted input** — top-frame `click`/`type`/`key`
    dispatch real `isTrusted` events via CDP. (In a cross-origin `--frame`, input is
    SYNTHETIC — see above.)

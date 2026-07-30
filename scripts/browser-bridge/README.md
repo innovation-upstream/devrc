@@ -126,7 +126,7 @@ always-detach) is in the **CDP ops** section below.
 |----|---------|---------|
 | `getHtml`    | `chrome.scripting` → `document.documentElement.outerHTML` | `{url,title,html}` |
 | `text`       | `chrome.scripting` → `(selector?document.querySelector(selector):document.body).innerText`, normalized + byte-capped (`selector`/`maxBytes` optional) | `{url,title,text,truncated}` |
-| `eval`       | `chrome.scripting.executeScript` (MAIN world) of `js`     | `{url,value}` |
+| `eval`       | top frame: `chrome.scripting.executeScript` (MAIN world) of `js`; **`--frame`: CDP `Runtime.evaluate`** in the frame's context (same-process isolated world OR OOPIF flat session) — chrome.scripting can't eval a STRING | `{url,value,frame?}` |
 | `tabs`       | `chrome.tabs.query({})`                                   | `{tabs:[...],ownedTabId}` |
 | `nav`        | `chrome.tabs.update(tab,{url})`                           | `{tabId,url}` |
 | `screenshot` | **CDP `Page.captureScreenshot`** (png) — works on a BACKGROUND/occluded tab + each profile's own tab; a foreground tab uses the cheap `captureVisibleTab` fast path. `fullpage` grabs the whole document | `{url,dataUrl,via}` |
@@ -139,13 +139,20 @@ always-detach) is in the **CDP ops** section below.
 
 `open`/`close` are dispatched to the extension; `release` (drop ownership, don't
 close the tab) is handled server-side and never reaches the extension.
-`frames` enumerates via **`chrome.webNavigation`** and a `--frame` on
-`getHtml`/`text`/`eval`/`click`/`type`/`key` injects via **`chrome.scripting`** INTO
+`frames` enumerates via **`chrome.webNavigation`** and a `--frame` on the fixed-func
+ops `getHtml`/`text`/`click`/`type`/`key` injects via **`chrome.scripting`** INTO
 the resolved frame — this reaches CROSS-ORIGIN out-of-process iframes (OOPIFs) that
-CDP `Page.getFrameTree` could NOT enumerate. `--frame <numeric-frameId|url-substring>`
-selects the frame (the identifier is the numeric webNavigation `frameId`). `screenshot`
-and TOP-frame trusted input still use **CDP (chrome.debugger)** (see the CDP section
-below). The tab-scoped ops
+CDP `Page.getFrameTree` could NOT enumerate. **`eval --frame` is the exception: it
+runs via CDP `Runtime.evaluate`, NOT `chrome.scripting`** — `chrome.scripting` runs a
+serialized FUNC, so it can't evaluate an arbitrary JS STRING in the frame (it returned
+`value:null`-as-success), whereas `Runtime.evaluate` runs the string in the frame's
+execution context (same-process isolated world, or the OOPIF's own flat session via
+`Target.setAutoAttach`) and surfaces exceptions as a clear `frame_eval_failed` error —
+never a silent null. `--frame <numeric-frameId|url-substring>`
+selects the frame (the identifier is the numeric webNavigation `frameId`). `screenshot`,
+`eval --frame`, and TOP-frame trusted input use **CDP (chrome.debugger)** (see the CDP
+section below). A `--frame` op reports the FRAME's own `url` (so a caller can confirm it
+read the intended frame, not the top document). The tab-scoped ops
 (`getHtml`/`text`/`eval`/`nav`/`screenshot`/`close`/`frames`/`click`/`type`/`key`)
 run against
 the calling session's owned tab when it has one (see Session isolation), else the
@@ -177,6 +184,22 @@ never target it. `getAllFrames` sees OOPIFs and `scripting` injects into them (g
 webNavigation `frameId`. In-frame input is **SYNTHETIC** (`isTrusted:false`) — the
 reachable OOPIF path (a trusted CDP `Input.*` event from the top target can't easily
 reach an OOPIF), and enough to drive most apps.
+
+**`eval --frame` runs via CDP `Runtime.evaluate` (not `chrome.scripting`).** The
+fixed-func frame ops above work because `chrome.scripting.executeScript` runs a
+serialized FUNCTION. But `eval` is an arbitrary JS STRING, and routing a string through
+a `func` that `new Function(src)`s it inside the frame's isolated world hits the
+extension CSP / returns `value:null`-as-success — it never truly evaluates (the bug).
+So `eval --frame` attaches `chrome.debugger` to the OWNED tab and resolves the target
+frame's execution context by URL (the numeric webNavigation `frameId` does not map 1:1
+to a CDP frame/target): a **same-process** frame is found in the top session's
+`Page.getFrameTree` → `Page.createIsolatedWorld` → `Runtime.evaluate({contextId})`; a
+**cross-origin OOPIF** is not in that tree → `Target.setAutoAttach({flatten:true})`
+auto-attaches its target (matched by URL) → `Runtime.evaluate` in that flat session.
+Everything is bounded by the per-op CDP timeouts (a bad frame fails fast, never wedges),
+and the never-silent-null contract holds: a genuine `null`/`undefined` is returned as a
+value, but a failure to execute is a clear `frame_not_found` / `frame_eval_failed:<reason>`
+error. Own-tab-only + typed-op invariants are unchanged (no raw-CDP passthrough).
 
 **CDP ops (`chrome.debugger`) — `screenshot` + TOP-frame trusted input.** These use the
 Chrome DevTools Protocol via the `debugger` permission. They fix two real agent
@@ -707,8 +730,11 @@ The **`browser agent`** slice, all headless (NO live model, NO Brave, NO bridge)
   ONE `--continue` retry then `blocked`, no-retry on a hard error.
 
 Current totals: **157 Python** (`test_server.py` 115 + `test_browser_agent_parse.py`
-14 + `test_browser_agent.py` 28) + **121 node** (`protocol.test.mjs` 59 +
-`browser_tool.test.mjs` 33 + `cdp_protocol.test.mjs` 29) — the `protocol.test.mjs` cases cover the screenshot
+14 + `test_browser_agent.py` 28) + **157 node** (`protocol.test.mjs` 59 +
+`browser_tool.test.mjs` 33 + `cdp_protocol.test.mjs` 32 + `frame_oopif.test.mjs` 15 +
+`frame_eval_cdp.test.mjs` 9 + `service_worker.test.mjs` 9) — `frame_eval_cdp.test.mjs`
+covers the `eval --frame` CDP `Runtime.evaluate` fix (same-process + OOPIF context
+resolution, never-silent-null, #189 timeout no-wedge); the `protocol.test.mjs` cases cover the screenshot
 settle+retry decision logic (`isTransientCaptureError` / `captureWithRetry` /
 `waitForCaptureReady` / `screenshotWithRestore`) **and the exhausted-retry error
 mapping** (`isOcclusionCaptureError` / `mapCaptureFailure`): a persistent readback

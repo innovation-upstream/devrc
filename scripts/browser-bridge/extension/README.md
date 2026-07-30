@@ -155,12 +155,23 @@ target it. `getAllFrames` enumerates OOPIFs; `scripting` injects into them (give
 (`isTrusted:false`) — the reachable OOPIF path, and enough to drive most apps; TOP-frame
 input stays CDP-**trusted**.
 
-### `debugger` — screenshots + TOP-frame trusted input
+**Exception — `eval --frame` uses CDP, not `scripting`.** `chrome.scripting` runs a
+serialized FUNCTION; the fixed-func frame ops (`text`/`html`/`click`/`type`/`key`) work
+that way, but `eval` is an arbitrary JS STRING, and `new Function(src)`-ing it inside
+the frame's isolated world hits the extension CSP / returns `value:null`-as-success — it
+never truly evaluates. So `eval --frame` runs via CDP `Runtime.evaluate` in the frame's
+execution context (same-process → `Page.createIsolatedWorld`; cross-origin OOPIF →
+`Target.setAutoAttach({flatten:true})` flat session, matched by URL), returning the real
+value and surfacing exceptions as `frame_eval_failed` — never a silent null. See the
+`debugger` section below.
+
+### `debugger` — screenshots + `eval --frame` + TOP-frame trusted input
 
 `chrome.debugger` is the biggest-blast-radius permission, so the CDP layer is
-tightly bounded (all decision logic is pure + unit-tested in `protocol.js`). It is now
-used ONLY for `screenshot` (works on a background/occluded tab) and TOP-frame trusted
-`click`/`type`/`key` (no `--frame`):
+tightly bounded (all decision logic is pure + unit-tested in `protocol.js`). It is used
+for `screenshot` (works on a background/occluded tab), **`eval --frame`** (run a JS
+string in a specific same-process or cross-origin OOPIF frame — see the exception
+above), and TOP-frame trusted `click`/`type`/`key` (no `--frame`):
 
 - **Own-tab attach ONLY.** A CDP op attaches `chrome.debugger` ONLY to the
   server-injected owned/`--tab` tab, and **refuses to attach to a privileged
@@ -173,9 +184,11 @@ used ONLY for `screenshot` (works on a background/occluded tab) and TOP-frame tr
 - **Typed commands only.** The SW maps each bounded op to a FIXED set of CDP methods;
   there is NO generic "run this CDP method" endpoint reachable by a caller/model.
 - **Banner tradeoff:** Brave shows "an extension is debugging this browser" while a
-  CDP op runs. Attach is per-op to keep that window tiny; `text`/`html`/`eval`
-  (top-frame AND `--frame`), `frames`, `--frame` input, and foreground-`screenshot`
-  all take the non-CDP path (no banner).
+  CDP op runs. Attach is per-op to keep that window tiny; `text`/`html` (top-frame AND
+  `--frame`), top-frame `eval`, `frames`, `--frame` input, and foreground-`screenshot`
+  all take the non-CDP path (no banner). `eval --frame` DOES attach (it needs
+  `Runtime.evaluate` to reach the frame), so it briefly shows the banner — bounded by
+  the per-op CDP timeouts and always-detach, like the other CDP ops.
 
 ## Stable extension ID (optional)
 
@@ -245,6 +258,15 @@ The chrome.* glue needs a real browser — verify by hand after loading:
       cross-origin `model-benchmarking.civit.ai` frame (the whole point — CDP
       getFrameTree missed it); `browser --tab <id> --frame <numericId-or-url> text`
       returns THAT frame's innerText (plain `text` shows only the top frame).
+- [ ] **`eval --frame` actually evaluates INSIDE the frame (the #190 fix):** on the same
+      OOPIF page, `browser --tab <id> frames` → note the cross-origin frame's numeric id.
+      `browser --tab <id> --frame <oopif-id> eval 'location.href'` returns
+      `https://model-benchmarking.civit.ai/...` (PROOF eval ran inside the OOPIF) — NOT
+      `value:null`. `--frame 0 eval 'location.href'` returns the TOP url. A bad frame
+      (`--frame nope eval '1'`) returns a clear `frame_not_found` error, and a throwing
+      expression (`--frame <id> eval 'x.y.z'`) returns `frame_eval_failed:<reason>` —
+      neither is a silent null. No instance wedge afterward (`browser health` still OK).
+      (A brief debugger banner flashes for `eval --frame` — it's a CDP op now.)
 - [ ] **Drive an in-app control INSIDE the cross-origin iframe:** `browser --tab <id>
       --frame <f> click "<selector>"` reaches a control inside the OOPIF; `--frame <f>
       type`/`--frame <f> key Enter` fill + submit. Input is SYNTHETIC in-frame
