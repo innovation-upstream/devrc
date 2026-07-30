@@ -157,6 +157,26 @@ it only collects the full proposal; the **only new network** is the clawgate POS
   retry). Logs `approved: N proposal(s) → clawgate task(s) M/N; suppressed`.
 - **Reachability:** the weekly timer runs on the workbench where `~/.claude/clawgate.env` exists
   and clawgate is on the open, hook-token-gated LAN NodePort — no unit change needed.
+- **`initiative:<slug>` task tag (clawgate 0.7.75+):** the digest already resolves a confident
+  initiative slug per proposal (`routing.related_for` → the `↳ relates to:` breadcrumb). That
+  slug is now **persisted** into `last_emailed.json` as `initiative` and read **positionally**
+  by the approve path, so the Task carries `tags: ["initiative:<slug>"]` — the same slug you
+  saw when you approved. It is **never re-resolved at approve time** (no extra cross-cluster
+  read of the initiatives store); an older `last_emailed.json` without the field simply yields
+  no tag. Two filters run before the wire: `routing.taggable_slug` (a **denylist** dropping
+  document/date/opaque-id/filler slugs — `HANDOFF`, `2026-07-21`,
+  `868j34n9y-…`, `actionable-next-steps` — each drop logged with its rule) and
+  `clawgate.normalize_tags` (clawgate's grammar: lowercase, `[a-z0-9._/-]`, ≤1 `:`, ≤64 runes,
+  ≤20 tags; anything invalid is **dropped, not mangled**).
+- **🔴 Tagging must never cost an approval.** Because suppression is POST-success-gated, a
+  tag-induced `400` would silently lose the approval for a week. Backstop: a **4xx on a tagged
+  POST retries EXACTLY ONCE with the `tags` key removed** (both the failure and the retry are
+  logged), so a tagged-post failure degrades to an *untagged Task*, never to *no Task*. A
+  connection error or 5xx is not retried. A call with no tags sends the byte-identical
+  pre-tags payload.
+- **No `runbook:` tags.** `runbook:` is hard-validated by clawgate (unknown name → `400`),
+  there is no machine endpoint to list valid names, and exactly one runbook exists. A marked
+  seam in `clawgate.build_tags` documents where one would slot in.
 
 ## Usage
 

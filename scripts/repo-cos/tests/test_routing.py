@@ -189,3 +189,110 @@ def test_render_tolerates_short_related_list():
                          related=["only-first"])
     assert "↳ relates to: only-first" in body
     assert body.count("relates to:") == 1
+
+
+# --------------------------------------------------------------------------- #
+# taggable-slug DENYLIST — every case below is a REAL slug from initiatives.current
+# (or from a 120-day replay of the same scan that mints it). A breadcrumb may show
+# junk; a durable clawgate `initiative:` tag may not.
+# --------------------------------------------------------------------------- #
+
+# (slug, expected drop reason) — the junk the vocabulary actually contains.
+JUNK_SLUGS = [
+    # bare dates adopted from a dated filename
+    ("2026-07-21", "no-letters"),
+    ("2026-06-13", "no-letters"),
+    # SCREAMING-CASE doc filenames (HANDOFF.md, APP-DISCOVERY-DESIGN.md …)
+    ("HANDOFF", "screaming-case"),
+    ("SESSION-HANDOFF", "screaming-case"),
+    ("APP-DISCOVERY-DESIGN", "screaming-case"),
+    ("COMFYUI-INTEGRATION-DESIGN", "screaming-case"),
+    # ClickUp id salad
+    ("868j34n9y-868kf6w7r-complete-mark", "opaque-id"),
+    ("868f9pd14-close-issue", "opaque-id"),
+    # pure document/process filler
+    ("actionable-next-steps", "generic"),
+    ("next-session", "generic"),
+    ("past-sessions-week", "generic"),
+    # degenerate input
+    ("", "empty"),
+    ("   ", "empty"),
+    ("ab", "too-short"),
+]
+
+# Genuine initiative slugs that MUST survive — including the near-misses that a
+# lazier rule (any "-handoff" suffix, any uppercase, any digit run) would eat.
+GENUINE_SLUGS = [
+    "clawgate-agent-loop-close",
+    "dp-prod-latency-sweep",
+    "remix-next-session-kickoff",         # contains 'next-session' but names remix
+    "faro-rum-observability",
+    "arr-backfill-and-face-pass",
+    "standup-triage-handoff",             # '-handoff' suffix, real arc
+    "clawgate-documentation-handoff",
+    "spend-exporter-handoff",
+    "SECURITY-AUDIT-v0.1.64",             # has a lowercase 'v' → NOT screaming-case
+    "civitai-cli-arc-continuation-v0.1.73",
+    "image-scan-ingestion-down-0313-rca",  # '0313' is a date, not an opaque id
+    "sysredis-ha-cutover-complete",
+    "app-blocks-w13-external-listings",
+    "svi_loop_recipe",                     # underscores are legal in the tag charset
+    "mail-automation",
+    "espanso-typing-toil",
+]
+
+# Ambiguous by design: junk-ish, but no rule separates them from genuine short slugs
+# without overfitting. PINNED as KEPT — a missing tag is cheap, a wrong tag is not.
+AMBIGUOUS_KEPT = [
+    "code-open",
+    "dispatch-yes",
+    "changes-merge-ship",
+    "from-memory-previous",
+    "component-file",
+    "durable-new-tag",
+]
+
+
+def test_denylist_drops_each_junk_pattern():
+    for slug, reason in JUNK_SLUGS:
+        assert routing.slug_drop_reason(slug) == reason, slug
+        assert routing.taggable_slug(slug) is None, slug
+
+
+def test_denylist_keeps_every_genuine_slug():
+    for slug in GENUINE_SLUGS:
+        assert routing.slug_drop_reason(slug) is None, slug
+        assert routing.taggable_slug(slug) == slug, slug
+
+
+def test_denylist_keeps_ambiguous_slugs_by_design():
+    for slug in AMBIGUOUS_KEPT:
+        assert routing.slug_drop_reason(slug) is None, slug
+        assert routing.taggable_slug(slug) == slug, slug
+
+
+def test_taggable_slug_logs_what_it_dropped_and_why(capsys):
+    # Silent filtering is not acceptable: a dropped slug must name itself AND its rule.
+    assert routing.taggable_slug("HANDOFF") is None
+    err = capsys.readouterr().err
+    assert "HANDOFF" in err
+    assert "screaming-case" in err
+    assert "dropped initiative slug" in err
+
+
+def test_taggable_slug_logs_nothing_when_it_keeps(capsys):
+    assert routing.taggable_slug("clawgate-agent-loop-close") == "clawgate-agent-loop-close"
+    assert capsys.readouterr().err == ""
+
+
+def test_taggable_slug_trims_and_never_raises_on_junk_types():
+    assert routing.taggable_slug("  dp-prod-latency-sweep  ") == "dp-prod-latency-sweep"
+    assert routing.taggable_slug(None) is None
+    assert routing.taggable_slug(12345) is None      # no letters
+    # A non-string that stringifies to something with letters survives the DENYLIST (it
+    # is not the denylist's job to police charset) — the tag-grammar layer drops it.
+    assert routing.taggable_slug(["a", "b"]) == "['a', 'b']"
+
+
+def test_slug_tokens_splits_on_all_separators():
+    assert routing.slug_tokens("App-Blocks_w13/x.y") == ["app", "blocks", "w13", "x", "y"]

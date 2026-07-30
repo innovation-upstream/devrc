@@ -264,7 +264,7 @@ def cmd_scan(args) -> int:
         body, args, proposals=result.proposals,
         candidate_count=len(cand_dicts), approx_tokens=result.approx_prompt_tokens,
         feedback_applied=fb is not None, excluded_repos=excluded_names,
-        dismissed_count=len(dismissed_recs),
+        dismissed_count=len(dismissed_recs), related=related,
     )
 
 
@@ -289,7 +289,11 @@ def _post_approvals_to_clawgate(approvals, excl_state, *, _clawgate=None) -> Non
             directory = clawgate.build_task_title(prop)
             body = clawgate.build_task_body(prop)
             repo = clawgate.resolve_repo_fullname(prop.get("repo") or "")
-            tid = clawgate.post_task(directory, body, repo=repo)
+            # `initiative:<slug>` tag from the slug the DIGEST resolved (persisted in
+            # last_emailed.json) — pure, no I/O, [] when absent/junk. post_task retries
+            # untagged on a 4xx so a tag can never cost the approval.
+            tags = clawgate.build_tags(prop)
+            tid = clawgate.post_task(directory, body, repo=repo, tags=tags)
         except Exception as exc:  # noqa: BLE001
             print(f"  ! clawgate post failed (proceeding): {exc}", file=sys.stderr)
             tid = None
@@ -340,7 +344,7 @@ def _emit_candidates(candidates, scans, cand_dicts, args, *, dismissed_recs=None
 
 def _deliver(body: str, args, *, proposals, candidate_count, approx_tokens,
              feedback_applied: bool = False, excluded_repos=None,
-             dismissed_count: int = 0) -> int:
+             dismissed_count: int = 0, related=None) -> int:
     """Print (dry-run) or send (--email) the digest. --dry-run is the default and always
     prints; --email additionally sends."""
     excluded_repos = list(excluded_repos or [])
@@ -369,20 +373,23 @@ def _deliver(body: str, args, *, proposals, candidate_count, approx_tokens,
             emailed = True
             # Snapshot the EMAILED proposals so a later reply's positional refs ("1./2./…")
             # map to what Zach SAW — not the next run's rotated set. Best-effort.
+            # `related` rides along as each proposal's `initiative` slug, so a LATER run's
+            # approve path can tag the clawgate Task with the SAME slug the digest showed.
             from datetime import datetime
             exclusions.write_last_emailed(
-                proposals, subject=subj,
+                proposals, subject=subj, related=related,
                 generated_at=datetime.now().astimezone().isoformat(timespec="seconds"))
         except Exception as exc:  # noqa: BLE001
             print(f"ERROR: email send failed: {exc}", file=sys.stderr)
             rc = 1
 
     _persist_latest(proposals, subject=digest.subject(), candidate_count=candidate_count,
-                    approx_tokens=approx_tokens, emailed=emailed)
+                    approx_tokens=approx_tokens, emailed=emailed, related=related)
     return rc
 
 
-def _persist_latest(proposals, *, subject, candidate_count, approx_tokens, emailed) -> None:
+def _persist_latest(proposals, *, subject, candidate_count, approx_tokens, emailed,
+                    related=None) -> None:
     """Write this run's proposals to ~/.config/repo-cos/latest.json (+ a dated history
     copy) so another session can read the EXACT set (not a re-rolled LLM call) and
     evaluate it collaboratively. Best-effort — never fails the run."""
@@ -396,7 +403,10 @@ def _persist_latest(proposals, *, subject, candidate_count, approx_tokens, email
             "subject": subject,
             "candidate_count": candidate_count,
             "approx_prompt_tokens": approx_tokens,
-            "proposals": [p.as_dict() for p in proposals],
+            # same `initiative` stamp as last_emailed.json, so the history/latest FALLBACK
+            # in load_last_emailed carries the slug too (keeps the two files coherent).
+            "proposals": exclusions.attach_related(
+                [p.as_dict() for p in proposals], related),
         }
         data = json.dumps(payload, indent=2)
         (PERSIST_DIR / "latest.json").write_text(data)

@@ -280,17 +280,41 @@ def load_last_emailed(*, last_emailed: Path | None = None,
     return None
 
 
+def attach_related(proposal_dicts: list[dict], related) -> list[dict]:
+    """Stamp the index-aligned initiative slugs onto proposal dicts as `initiative`.
+
+    The digest resolves a confident initiative slug per proposal (routing.related_for) and
+    shows it as `↳ relates to: <slug>`. PERSISTING it here is what lets the APPROVE path —
+    which runs on a LATER run, against `last_emailed.json` — tag the clawgate Task with the
+    SAME slug Zach saw, without re-resolving it (no extra cross-cluster read, and no risk of
+    the tag drifting from the breadcrumb). A None/short/absent `related` simply stamps
+    nothing. Mutates + returns the dicts. Never raises."""
+    try:
+        for i, pr in enumerate(proposal_dicts):
+            slug = related[i] if related is not None and i < len(related) else None
+            slug = str(slug).strip() if slug else ""
+            if slug:
+                pr["initiative"] = slug
+    except Exception as exc:  # noqa: BLE001 - best-effort: never fail a send over a tag
+        _log(f"could not attach related initiatives: {exc}")
+    return proposal_dicts
+
+
 def write_last_emailed(proposals, *, subject: str, generated_at: str,
-                       path: Path | None = None) -> None:
+                       related=None, path: Path | None = None) -> None:
     """Snapshot the EMAILED proposals so a later reply's positional refs map to what Zach
     saw (not the next run's rotated set). Best-effort. `proposals` are objects with
-    `.as_dict()` OR plain dicts."""
+    `.as_dict()` OR plain dicts.
+
+    `related` (optional, index-aligned) persists each proposal's resolved initiative slug as
+    an `initiative` field — read positionally by the approve path to tag the clawgate Task."""
     p = path or LAST_EMAILED_FILE
     try:
         p.parent.mkdir(parents=True, exist_ok=True)
         out = []
         for pr in proposals:
             out.append(pr.as_dict() if hasattr(pr, "as_dict") else dict(pr))
+        attach_related(out, related)
         payload = {
             "emailed_at": generated_at,
             "subject": subject,
@@ -454,7 +478,11 @@ def parse_reply(reply_text: str, emailed_proposals: list[dict] | None,
 
 def _approve_payload(prop: dict, line: str) -> dict:
     """The FULL proposal an approve line queues, with normalized evidence refs (so suppression
-    keys compare equal to fresh candidate refs). Carries the reason line for the audit trail."""
+    keys compare equal to fresh candidate refs). Carries the reason line for the audit trail.
+
+    `initiative` is the slug the DIGEST resolved and `write_last_emailed` persisted; it rides
+    through to `clawgate.build_tags` as the `initiative:<slug>` task tag. Absent on a
+    `last_emailed.json` written before that feature → "" → no tag (never re-resolved)."""
     return {
         "title": str(prop.get("title") or "").strip(),
         "repo": str(prop.get("repo") or "").strip(),
@@ -463,6 +491,7 @@ def _approve_payload(prop: dict, line: str) -> dict:
         "approach": str(prop.get("approach") or "").strip(),
         "effort": str(prop.get("effort") or "").strip(),
         "ci_verifiable": bool(prop.get("ci_verifiable")),
+        "initiative": str(prop.get("initiative") or "").strip(),
         "reason": line,
     }
 
