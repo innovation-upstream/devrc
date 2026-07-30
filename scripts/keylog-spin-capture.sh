@@ -24,21 +24,33 @@
 # to re-arm).
 #
 # Requires kernel.yama.ptrace_scope=0 to attach to a non-descendant process.
-# This host reads 0 already (verified 2026-07-30 — nothing in /etc/sysctl.d
-# sets it, and a py-spy attach succeeded), so no sysctl change is needed. If a
-# future host ships 1, the capture records the ptrace failure and, per the
-# grep guard below, leaves itself armed rather than disarming on a bad dump.
+# This is NOT uniform across the fleet: the workbench reads 0, the LAPTOP reads
+# 1 (verified 2026-07-30). On a host with 1, py-spy can never attach, so this
+# exits early rather than retrying a guaranteed failure every 5 minutes.
 set -euo pipefail
 
 THRESH=${KEYLOG_SPIN_THRESHOLD:-20}   # percent of one core
 WINDOW=${KEYLOG_SPIN_WINDOW:-3}       # sample seconds
+MAX_FAILS=${KEYLOG_SPIN_MAX_FAILS:-3} # give up after this many stackless dumps
 OUT="${XDG_CACHE_HOME:-$HOME/.cache}/keylog-spin"
 SENTINEL="$OUT/.captured"
+GIVEUP="$OUT/.giveup"
+FAILCOUNT="$OUT/.failcount"
 
 mkdir -p "$OUT"
 
 # One capture is enough — don't accumulate dumps forever.
 [[ -f $SENTINEL ]] && exit 0
+# Repeated stackless dumps mean something structural is wrong (no ptrace
+# permission, py-spy broken). Stop rather than looping every 5 min forever.
+[[ -f $GIVEUP ]] && exit 0
+
+# Hard precondition: without same-UID ptrace, every attach fails. Bail QUIETLY
+# — no dump file, no toast, no retry churn. Nothing here is fixable at runtime.
+ptrace_scope=$(cat /proc/sys/kernel/yama/ptrace_scope 2>/dev/null || echo 0)
+if [[ $ptrace_scope != 0 ]]; then
+  exit 0
+fi
 
 pid=$(systemctl --user show keylog.service -p MainPID --value 2>/dev/null || echo 0)
 [[ ${pid:-0} -gt 0 ]] || exit 0
@@ -72,38 +84,61 @@ dump="$OUT/spin-$stamp.txt"
   echo "utime+stime delta: $(( t1 - t0 )) ticks"
   echo "stime delta:       $(( s1 - s0 )) ticks"
   echo
-  # py-spy PAUSES the target by default (ptrace-stop). keylog is a data
-  # collector, so a long pause drops keystrokes. The plain dump is fast, so it
-  # takes the accurate blocking path; the --native pass unwinds C frames and is
-  # far slower, so it runs --nonblocking (slightly less consistent, but it must
-  # not freeze capture for seconds).
+  # py-spy PAUSES the target by default (ptrace-stop), and keylog is a data
+  # collector — a long pause drops keystrokes. `--nonblocking` is NOT an option
+  # here: py-spy rejects it outright when combined with --native ("Can't get
+  # native stack traces with the --nonblocking option", rc=1), so an earlier
+  # revision silently produced no native frames at all. Since the native frames
+  # ARE the diagnostic (they're what showed the healthy thread parked in
+  # select() inside libc), keep the blocking attach and bound the freeze with
+  # `timeout` instead — a hard ceiling on how long capture can stall.
   echo "--- py-spy dump ---"
   if command -v py-spy >/dev/null 2>&1; then
-    py-spy dump --pid "$pid" 2>&1 || echo "py-spy failed (see ptrace_scope above; needs 0 for non-descendants)"
+    timeout 10 py-spy dump --pid "$pid" 2>&1 || echo "py-spy dump failed or timed out"
   else
     echo "py-spy not on PATH"
   fi
   echo
-  echo "--- py-spy dump (native frames, nonblocking) ---"
+  echo "--- py-spy dump (native frames; blocking, 15s cap) ---"
   if command -v py-spy >/dev/null 2>&1; then
-    py-spy dump --pid "$pid" --native --nonblocking 2>&1 || echo "native dump failed"
+    timeout 15 py-spy dump --pid "$pid" --native 2>&1 || echo "native dump failed or timed out"
   fi
 } >"$dump" 2>&1
 
-# Only disarm if we actually got a stack. Otherwise a transient py-spy failure
-# (target exited mid-capture, ptrace denied, unwinder error) would burn the ONE
-# capture this mechanism exists for and silently disarm it forever.
-if grep -qE '^Thread [0-9]+ ' "$dump"; then
+# Disarm ONLY on a complete capture: a real `Thread N` frame AND no pass having
+# reported a failure. A transient py-spy failure must not burn the ONE capture
+# this mechanism exists for — but a PARTIAL dump (plain pass OK, native pass
+# dead) must not silently count as success either, since the native frames are
+# the diagnostic being sought.
+got_stack=false; grep -qE '^Thread [0-9]+ ' "$dump" && got_stack=true
+had_failure=false; grep -qiE 'failed or timed out|not on PATH' "$dump" && had_failure=true
+
+notify_urgency=normal
+if [[ $got_stack == true && $had_failure == false ]]; then
   touch "$SENTINEL"
-  armed_note="watcher disarmed (rm $SENTINEL to re-arm)"
+  rm -f "$FAILCOUNT"
+  armed_note="complete capture — watcher disarmed (rm $SENTINEL to re-arm)"
+  notify_urgency=critical
 else
+  # Bounded retry. Unbounded retries would mean a stackless dump + a
+  # non-expiring critical toast every 5 minutes, forever — strictly worse than
+  # the one-shot disarm this replaced.
+  fails=$(( $(cat "$FAILCOUNT" 2>/dev/null || echo 0) + 1 ))
+  echo "$fails" >"$FAILCOUNT"
   mv "$dump" "$dump.failed"
   dump="$dump.failed"
-  armed_note="NO STACK CAPTURED — watcher left ARMED to retry"
+  if [[ $fails -ge $MAX_FAILS ]]; then
+    touch "$GIVEUP"
+    armed_note="INCOMPLETE x$fails — giving up (rm $GIVEUP and $FAILCOUNT to retry)"
+    notify_urgency=critical
+  else
+    armed_note="INCOMPLETE ($fails/$MAX_FAILS) — still armed, will retry"
+  fi
 fi
 
-# Surface it — this is the whole point, don't let it rot in a cache dir.
-if command -v notify-send >/dev/null 2>&1; then
+# Surface it — but only escalate to a non-expiring critical toast on a real
+# capture or on final give-up. Intermediate retries stay quiet in the log.
+if command -v notify-send >/dev/null 2>&1 && [[ $notify_urgency == critical ]]; then
   notify-send -u critical "keylog spin ${pct}% — $armed_note" "$dump" || true
 fi
 echo "captured $dump (cpu=${pct}%) — $armed_note"

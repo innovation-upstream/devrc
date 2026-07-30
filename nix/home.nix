@@ -759,12 +759,15 @@ in
   # (both drv outputs 404), so every host that switches COMPILES it from
   # source (Rust + libunwind), and a build failure there fails the whole
   # home-manager switch. That is the price of a temporary diagnostic — set
-  # enableKeylogSpinCapture = false below to opt a host out entirely.
+  # enableKeylogSpinCapture = false (defined in the `let` block ABOVE) to opt
+  # a host out entirely.
   #
-  # py-spy needs kernel.yama.ptrace_scope=0 to attach to a non-descendant.
-  # This host already reads 0 (verified — nothing in /etc/sysctl.d sets it),
-  # so NO sysctl change is required; the script degrades safely if a future
-  # host ships 1.
+  # py-spy needs kernel.yama.ptrace_scope=0 to attach to a non-descendant, and
+  # that is NOT uniform here: the workbench reads 0, the LAPTOP reads 1
+  # (verified 2026-07-30). On a ptrace_scope=1 host py-spy can never attach, so
+  # the script checks the sysctl FIRST and exits quietly — no dump, no toast,
+  # no retry. It also gives up after KEYLOG_SPIN_MAX_FAILS incomplete captures,
+  # so a broken py-spy cannot turn the 5-min timer into a permanent loop.
   systemd.user.services.keylog-spin-capture = lib.mkIf enableKeylogSpinCapture {
     Unit = {
       Description = "Capture a py-spy stack dump if keylog.service starts spinning";
@@ -776,9 +779,9 @@ in
     };
     Service = {
       Type = "oneshot";
-      # Bounded well under the 5-min timer period. The plain py-spy dump
-      # ptrace-STOPS keylog while it runs, so this is a cap on how long
-      # keystroke capture can be frozen, not just a hang guard.
+      # Hang guard only. The actual cap on how long keystroke capture can be
+      # ptrace-frozen is the `timeout 10` / `timeout 15` wrapping each py-spy
+      # invocation in the script — systemd's timeout is the outer backstop.
       TimeoutStartSec = 45;
       Environment = [
         "PATH=${lib.makeBinPath [

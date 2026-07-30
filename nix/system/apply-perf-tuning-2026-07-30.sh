@@ -145,7 +145,14 @@ else
 fi
 
 if [[ ${ans:-n} =~ ^[Yy]$ ]]; then
-  nixos-rebuild switch
+  # Do NOT let a rebuild failure exit before the rollback line prints — that is
+  # precisely the moment the operator needs it.
+  if ! nixos-rebuild switch; then
+    echo
+    echo "nixos-rebuild FAILED. The config edits are still in place." >&2
+    echo "Rollback: cp -a $BAK $CFG && nixos-rebuild switch" >&2
+    exit 1
+  fi
 else
   echo "Config edited and validated; nixos-rebuild NOT run. Run it when ready:"
   echo "    sudo nixos-rebuild switch"
