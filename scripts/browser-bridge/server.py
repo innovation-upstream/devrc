@@ -84,7 +84,10 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import secrets
+import shutil
+import subprocess
 import sys
 import threading
 import time
@@ -186,6 +189,18 @@ OWNER_TTL_S = float(os.environ.get("BROWSER_BRIDGE_OWNER_TTL", "900"))
 RATE_PER_SEC = float(os.environ.get("BROWSER_BRIDGE_RATE_PER_SEC", "5"))
 BURST = float(os.environ.get("BROWSER_BRIDGE_BURST", "20"))
 MAX_QUEUE = int(os.environ.get("BROWSER_BRIDGE_MAX_QUEUE", "32"))
+
+# Host-side i3 foregrounding for the `activate` op (see i3_foreground below).
+# The Chrome-side activate (chrome.tabs.update{active}+windows.update{focused})
+# is a NO-OP for actual VISIBILITY under a tiling WM: a backgrounded tab stays
+# `document.visibilityState:"hidden"`, so a foreground-throttled SPA never
+# renders. Focusing the matching Brave X11 window via `i3-msg` is what actually
+# raises it + switches workspace, un-throttling the tab. Bounded by this timeout;
+# any failure is non-fatal (the Chrome-side activate result still returns).
+I3_MSG_TIMEOUT = float(os.environ.get("BROWSER_BRIDGE_I3_TIMEOUT", "1.5"))
+# Cap on the UNTRUSTED (page-controlled) tab-title fragment used in the i3
+# criteria — bounds a pathological title before it is re.escape'd.
+I3_TITLE_MAX = 80
 
 # Synthetic routing key for a legacy extension that polls without a handshake
 # (no X-Bridge-Instance-Id). All such polls collapse onto one unnamed instance.
@@ -947,6 +962,121 @@ def _coerce_tab(tab):
 
 
 # --------------------------------------------------------------------------- #
+# Host-side i3 foregrounding for `activate` (untrusted-title-safe, best-effort)
+# --------------------------------------------------------------------------- #
+# The `activate` op sets the tab active Chrome-side, which makes the tab's Brave
+# X11 window TITLE become the tab's title. The SERVER (same host as the browser)
+# then focuses THAT Brave window via `i3-msg` so i3 actually raises it + switches
+# workspace — the step that turns activation from a no-op into real visibility.
+#
+# SECURITY — the title is UNTRUSTED (page-controlled; a hostile page the agent
+# visited can set `document.title` to ANYTHING). The bound MUST be: the worst
+# outcome is "focuses the wrong Brave window or no window", NEVER command
+# execution and NEVER focusing a non-Brave window. That is enforced by:
+#   * subprocess with an ARGV LIST + shell=False (no shell → no `;`/`|`/`$()`/
+#     redirection surface at all). NEVER os.system / shell=True.
+#   * The i3 criteria `title=` value is a REGEX delimited by double-quotes inside
+#     the criteria. re.escape() neutralises regex metacharacters but does NOT
+#     escape the `"`/`[`/`]`/`\` that STRUCTURE an i3 criteria — a `"` could close
+#     the quoted value early and let trailing text be read as an i3 command
+#     (e.g. `exec`). So we STRIP those structural chars (and control chars) BEFORE
+#     re.escape. After that the value cannot break out of `title="..."`.
+#   * A `class="Brave-browser"` constraint so a matched window is always Brave.
+#   * A length cap + a bounded timeout; failure/timeout is swallowed (non-fatal).
+# i3-only chars that i3 uses to delimit a criteria/value. Stripped from the
+# UNTRUSTED title BEFORE re.escape so the value cannot escape its `title="..."`
+# quoting (re.escape does not touch `"`). Removing them at worst makes the title
+# match a different window or none — never a breakout.
+_I3_STRUCTURAL = str.maketrans("", "", '"[]\\')
+
+
+def _sanitize_i3_title(title) -> str:
+    """Reduce an UNTRUSTED tab title to a safe i3 criteria fragment.
+
+    Strips control chars / newlines AND the i3-criteria structural chars
+    (``"[]\\``), then caps length. The remaining text is re.escape'd by the
+    caller so regex metacharacters match literally. Returns "" when nothing
+    usable remains (the caller then SKIPS — there is nothing to focus)."""
+    if not isinstance(title, str):
+        return ""
+    # Drop C0 control chars (incl. \n/\r/\t) and DEL.
+    cleaned = "".join(ch for ch in title if ch >= " " and ch != "\x7f")
+    cleaned = cleaned.translate(_I3_STRUCTURAL)
+    return cleaned.strip()[:I3_TITLE_MAX]
+
+
+def i3_focus_argv(title):
+    """Build the argv LIST for `i3-msg` to focus the Brave window whose title
+    matches `title`, or None when there is no usable title (→ skip).
+
+    shell=False BY CONSTRUCTION (a list, never a shell string). The criteria is
+    `[class="Brave-browser" title="<re.escape'd fragment>"] focus`, so the worst
+    case is "focuses the wrong Brave window or none" — never a non-Brave window,
+    never code execution. See the module block above for the threat model."""
+    safe = _sanitize_i3_title(title)
+    if not safe:
+        return None
+    criteria = '[class="Brave-browser" title="%s"] focus' % re.escape(safe)
+    return ["i3-msg", criteria]
+
+
+def i3_available() -> bool:
+    """True when host-side i3 foregrounding is meaningful: a graphical session
+    (DISPLAY set) AND `i3-msg` on PATH. A headless / non-i3 host → False → the
+    `activate` op SKIPS the i3 step gracefully (no error)."""
+    if not os.environ.get("DISPLAY"):
+        return False
+    return shutil.which("i3-msg") is not None
+
+
+def i3_foreground(title, *, timeout: float = I3_MSG_TIMEOUT) -> str:
+    """Best-effort host-side i3 foregrounding of the Brave window matching the
+    (UNTRUSTED) `title`. Returns a small metadata state for the caller:
+
+      * "skipped" — no graphical/i3 session (i3-msg absent or no DISPLAY), or no
+        usable title. NOT an error — the Chrome-side activate still returns.
+      * "applied" — i3-msg ran and exited 0.
+      * "failed"  — i3-msg errored, timed out, or exited nonzero (non-fatal).
+
+    The title is sanitized + re.escape'd (see i3_focus_argv) and the call is
+    shell=False + timeout-bounded, so a hostile title can at worst focus the
+    wrong Brave window / none — never execute a command."""
+    if not i3_available():
+        return "skipped"
+    argv = i3_focus_argv(title)
+    if argv is None:
+        return "skipped"
+    try:
+        proc = subprocess.run(argv, shell=False, capture_output=True,
+                              timeout=timeout)
+    except Exception:  # noqa: BLE001 — best-effort; any failure is non-fatal.
+        log("activate_i3_failed", reason="exception")
+        return "failed"
+    if getattr(proc, "returncode", 1) == 0:
+        return "applied"
+    log("activate_i3_failed", reason="nonzero", rc=getattr(proc, "returncode", None))
+    return "failed"
+
+
+def _result_title(result) -> str:
+    """The tab title from an `activate` result envelope ({id,ok,data:{title}}),
+    or "" if absent. This is the UNTRUSTED, page-controlled string."""
+    if isinstance(result, dict):
+        data = result.get("data")
+        if isinstance(data, dict) and isinstance(data.get("title"), str):
+            return data["title"]
+    return ""
+
+
+def _annotate_i3(result, state: str) -> None:
+    """Record the i3-foregrounding outcome as a small metadata field on the
+    activate result's data ({...,"i3":"applied"|"skipped"|"failed"}) so the
+    caller knows whether the window was actually raised. Never emits the title."""
+    if isinstance(result, dict) and isinstance(result.get("data"), dict):
+        result["data"]["i3"] = state
+
+
+# --------------------------------------------------------------------------- #
 # Command validation
 # --------------------------------------------------------------------------- #
 def validate_command(body):
@@ -1195,6 +1325,17 @@ def make_handler(registry: Registry, token: str, cmd_timeout: float,
             else:
                 domain = _domain_from_result(result)
                 log("cmd_ok", op=op)
+                if op == "activate":
+                    # Chrome-side activate only set the tab active WITHIN its
+                    # window (a no-op for real visibility under i3 — the tab stays
+                    # document.hidden). Focus the matching Brave X11 WINDOW via
+                    # i3-msg so i3 raises it + switches workspace → the throttled
+                    # SPA un-throttles and renders. Best-effort + bounded; the
+                    # title is UNTRUSTED (page-controlled) and handled shell=False
+                    # + re.escape'd inside i3_foreground. Skipped gracefully off i3.
+                    state = i3_foreground(_result_title(result))
+                    _annotate_i3(result, state)
+                    log("activate_i3", state=state)
                 self._send(200, {"ok": True, "result": result})
             # Off the critical path: the HTTP response is already sent. Metadata-
             # only + best-effort — cannot delay or break the command (the key is
