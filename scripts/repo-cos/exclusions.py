@@ -296,6 +296,19 @@ def attach_related(proposal_dicts: list[dict], related) -> list[dict]:
     differs from `proposal_dicts` is therefore treated as a BUG: log loudly and attach
     NOTHING (no tag beats a wrong tag). Never raises — the best-effort contract holds.
 
+    ⚠ KNOWN DIVERGENCE from `digest.render` on that same misalignment. `render` stamps
+    the breadcrumb positionally too, but tolerates a SHORT list (`related[i-1] if i-1 <
+    len(related) else None`) — it prefix-stamps whatever it has. So in the hypothetical
+    misaligned case the two paths disagree: the EMAIL would show `↳ relates to: <slug>`
+    on the first N proposals while `last_emailed.json` (and therefore the clawgate task
+    tag) carries NO `initiative` at all. That asymmetry is DELIBERATE and in the safe
+    direction — the breadcrumb is display-only and re-read by a human, whereas the
+    stamped field is a durable routing key a later run acts on unattended, so the
+    durable path fails closed and the display path degrades gracefully. Worth knowing
+    when debugging: an email breadcrumb with no corresponding tag is a legitimate
+    symptom of a misalignment bug, not a tagging bug. Fix the caller, not either
+    stamper. (Today's single caller threads one list to both, so it cannot happen.)
+
     Mutates + returns the dicts."""
     try:
         if related and len(related) != len(proposal_dicts):

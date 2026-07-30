@@ -1,10 +1,17 @@
 # SNAPSHOT of `select slug from initiatives.current order by 1;` — the REAL, MINED
 # initiative vocabulary the `initiative:<slug>` tag is drawn from.
 #
-# Taken 2026-07-30 (139 slugs). Regenerate with:
+# Taken 2026-07-30 (140 slugs). Regenerate with:
 #   kubectl --kubeconfig ~/workspace/homelab-talos/homelab-kubeconfig -n mailbox \
 #     exec mailbox-postgres-0 -- sh -c 'psql -U ${POSTGRES_USER:-mail} \
 #     -d ${POSTGRES_DB:-mail} -tAc "select slug from initiatives.current order by 1;"'
+#
+# ⚠ This is a SNAPSHOT, refreshed BY HAND. Nothing in the suite reads the live store
+# (see tests/conftest.py — the whole run is deliberately hermetic), so no test can tell
+# you this file has gone stale; only re-running the command above can. Expect drift: the
+# store is mined continuously and grew by one slug between the feature landing and its
+# first follow-up. When you refresh it, re-state the counts in test_routing.py's corpus
+# tests and in README.md rather than letting them silently disagree with reality.
 #
 # Used by test_routing.py to pin the corpus-wide properties of the taggable-slug
 # denylist (notably: an emitted tag ALWAYS equals its ledger slug byte-for-byte).
@@ -93,6 +100,7 @@ delete-dispatch-flow-web
 delete-pod-stuck
 deleted-investigate-item-restore
 dependencies-improvements-repository-security
+deploy-comfyui-video-generation
 deref-quarantine-handoff
 deref-quarantine-sweeps-wet-autopilot
 detailer-hands-lora-output-portrait-walk-with

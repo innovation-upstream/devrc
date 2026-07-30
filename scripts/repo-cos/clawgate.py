@@ -259,6 +259,11 @@ def build_tags(proposal) -> list[str]:
     field simply yields no tag. It is then filtered by `routing.taggable_slug` (drops
     document/date/id/filler slugs) and normalized to the tag grammar.
 
+    🔴 The emitted tag ALWAYS equals `initiative:<ledger-slug>` byte-for-byte, enforced
+    STRUCTURALLY: the normalized result is compared to the exact tag we asked for and
+    dropped on ANY difference (see the guard below). The denylist alone is not enough —
+    it polices only one of `normalize_tag`'s mutations.
+
     ── SEAM: a future `runbook:<name>` tag ────────────────────────────────────────────
     Deliberately NOT emitted today. `runbook:` is HARD-validated by clawgate
     (`runbooks.GetRunbookByName`) so an unknown name 400s the POST — and there is
@@ -281,7 +286,26 @@ def build_tags(proposal) -> list[str]:
         if not keep:
             return []
         raw = [f"initiative:{keep}"]
-        return normalize_tags(raw)
+        tags = normalize_tags(raw)
+        # 🔴 STRUCTURAL JOIN GUARD. The initiatives-side join matches on `tag == slug`
+        # byte-for-byte, so the ONLY acceptable outcome is the exact tag we asked for.
+        # `normalize_tag` performs THREE mutations — lowercase, whitespace→`-`, and a
+        # `-` strip — and the `routing` denylist only polices the first (`not-lowercase`).
+        # A slug like `foo bar`, `x  y` or `trailing-dash-` would therefore survive the
+        # denylist and be emitted REWRITTEN (`initiative:foo-bar`), joining to nothing.
+        # No live slug has that shape today, so pinning it with another denylist rule
+        # would only re-encode a SNAPSHOT of the store. Comparing the normalizer's
+        # OUTPUT to its input instead makes the invariant hold structurally: any future
+        # slug, and any fourth mutation added to `normalize_tag`, is caught here. A drop
+        # is the correct degradation — a missing tag is cheap, a tag that joins to
+        # nothing is a lie (and the untagged Task is still posted either way).
+        want = [f"initiative:{keep}"]
+        if tags != want:
+            _log(f"dropping initiative tag for slug {keep!r} — the tag grammar would "
+                 f"emit {tags!r}, not {want!r}; an emitted tag must equal its ledger "
+                 f"slug byte-for-byte or the initiatives-side join misses")
+            return []
+        return tags
     except Exception as exc:  # noqa: BLE001 - a tag must NEVER cost an approval
         _log(f"build_tags failed (posting untagged): {exc}")
         return []
@@ -327,7 +351,19 @@ def post_task(directory: str, body: str, *, repo: str = "", model: str = "",
     a second doomed call, and 408 — a proxy request-timeout raised AFTER the origin may
     already have created the Task — is the one shape where retrying could double-POST two
     Task cards. Connection errors and 5xx are likewise not retried: one hung weekly run
-    must not turn into a retry loop."""
+    must not turn into a retry loop.
+
+    ⚠ KNOWN DIVERGENCE — `400` is a CROSS-REPO WIRE CONTRACT WITH NO TEST ON EITHER SIDE.
+    "an invalid tag ⇒ HTTP 400" lives in clawgate's task-tags spec §6, in clawgate's Go
+    handler, and here. Nothing on either side asserts it, and clawgate ships from a
+    different repo on its own cadence. If clawgate ever moves tag rejection to 422
+    (unprocessable) or 409, this backstop stops firing and repo-cos SILENTLY degrades
+    from *losing the tag* to *losing the approval* — the proposal is not suppressed, so
+    it just re-nags a week later and the only trace is one `POST … failed: HTTP 422`
+    line in the weekly run log. So: the literal `400` below is LOAD-BEARING, not
+    incidental. Widening the retry set is not free either (see the 408 double-POST
+    hazard above) — the fix if clawgate changes is to update this code to match the new
+    code, not to retry everything."""
     c = creds if creds is not None else load_creds()
     api = (c.get("CLAWGATE_API_URL") or "").rstrip("/")
     token = c.get("CLAWGATE_HOOK_TOKEN") or ""
