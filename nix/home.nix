@@ -558,6 +558,13 @@ in
   #                          deterministic tool/token/lang/git counts, the
   #                          telemetry-native replacement for the built-in
   #                          /insights session-meta cache. NO LLM.
+  #                          EMIT-ON-SETTLE: it does NOT re-ship a live session's
+  #                          rollup on every tick (that produced 27k rows over 702
+  #                          sessions, 97.4% superseded). Tunables, read from the
+  #                          environment at run time, defaults in the script:
+  #                          CLAUDE_SUMMARY_SETTLE_MINUTES (20) and
+  #                          CLAUDE_SUMMARY_INTERIM_HOURS (4). Left unset here so
+  #                          the script's defaults are the single source of truth.
   # Stdlib-only python + the emit helper's bash/coreutils on PATH. No graphical/
   # network dep — both only read local transcripts and append to the local spool,
   # so they run in headless/server mode too. Host is stamped by the collector

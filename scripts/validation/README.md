@@ -43,8 +43,11 @@ validate.py     — runner (invariants + reconcile always; replay+assert with --
   `kind=session-summary` payload carries the required rollup keys) and
   **`session_summary_no_orphans`** (no SETTLED, Layer-A-era prompt session is
   missing its summary — vacuous before Layer A is deployed, since the check gates
-  on the first summary ever emitted). Surfaces ingestion lag as a collector-health
-  proxy.
+  on the first summary ever emitted) and **`session_summary_rows_bounded`** (no
+  session emitted more than `SUMMARY_ROWS_PER_SESSION_CAP` summary rows in the
+  trailing 24h of *ingestion* — the emit-on-settle regression guard; windowed on
+  `ingested_at`, so the pre-fix duplicate backlog ages out rather than failing it
+  forever). Surfaces ingestion lag as a collector-health proxy.
 
 ### Retired metric: browser extension `active_ms`
 The browser extension's per-page `active_ms` was **structurally wrong on the i3

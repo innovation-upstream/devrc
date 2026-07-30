@@ -39,6 +39,15 @@ Instrumented today: `verify-agent-work`, `obs-read`, `ticket-status`,
 Append-only table → every reader dedupes with `argMax(<field>, ingested_at)` per
 `session`.
 
+Layer A is **emit-on-settle**: the 5-min tailer emits a session's rollup once
+when it is first seen, at most once per `CLAUDE_SUMMARY_INTERIM_HOURS` (4h) while
+it is still live, and again each time it goes idle for
+`CLAUDE_SUMMARY_SETTLE_MINUTES` (20m) — including after a `claude --resume`. So a
+session yields a handful of rows, not one per tick (it used to average 38.5, 97.4%
+of them immediately superseded). Every emit re-reads the WHOLE transcript, so the
+newest row is still the most complete one and the `argMax` read contract is
+unchanged.
+
 ## Layer B — `session_insight/` (LLM qualitative facets)
 
 Turns SETTLED Claude sessions into `session-insight` rows: underlying goal,

@@ -20,18 +20,43 @@ Event shape (via the shared `emit` helper → spool → ClickHouse activity.even
     ts      = the session START instant (UTC, same to_ch_ts conversion tailer uses)
     payload = the rollup JSON (see build_rollup)
 
-IDEMPOTENT + MUTABLE-SESSION AWARE. A session grows until it ends, so its summary
-changes over time. A state file (default
+EMIT-ON-SETTLE (idempotent + mutable-session aware). A session grows until it
+ends, so its summary changes over time. A state file (default
 ~/.local/state/activity/session-summary-state.json, env-overridable via
 CLAUDE_SUMMARY_STATE) records, per transcript path, a cheap signature
-(mtime-ns + byte size). The summary is (re-)emitted ONLY when the signature
-changed since the last emit — so the periodic timer never re-ships an unchanged
-session, but DOES re-ship one that grew.
+(mtime-ns + byte size) plus WHEN we last emitted for it. On every tick each
+transcript takes exactly one of these branches:
 
-READ CONTRACT (how the report/consumer dedupes): activity.events is append-only,
-so a mutating session accumulates several session-summary rows over its life. A
-consumer takes the LATEST per session with `argMax(<field>, ingested_at)` grouped
-by `session` — the newest emitted rollup wins. See scripts/session-analysis/insights.py.
+  unchanged   signature == the one we last emitted for  -> skip (nothing new)
+  settled     changed AND idle >= CLAUDE_SUMMARY_SETTLE_MINUTES (default 20)
+              -> EMIT. This is the authoritative final rollup for the session.
+              A session that is later RESUMED (`claude --resume` is real here)
+              changes signature again, settles again, and re-emits — so the
+              latest row is always the complete rollup.
+  first-seen  changed, still active, never emitted before -> EMIT once, so an
+              in-flight session (or one interrupted by a reboot) is present in
+              the report instead of missing entirely.
+  interim     changed, still active, last emit older than
+              CLAUDE_SUMMARY_INTERIM_HOURS (default 4) -> EMIT a bounded
+              interim rollup (backstop for very long sessions).
+  active      changed, still active, emitted recently -> skip.
+
+WHY: the previous rule was "re-emit whenever the signature changed", i.e. once
+per 5-min tick for the whole life of a live session. Measured on 2026-07-28 that
+produced 27,061 session-summary rows over 702 sessions (avg 38.5/session, worst
+486, ~1,800 new rows/day) of which 26,359 (97.4%) were immediately superseded.
+Nothing consumed them — the read contract already takes only the newest.
+
+READ CONTRACT UNCHANGED: activity.events is append-only, a session may still
+accumulate a handful of summary rows (first-seen / interim / final), and a
+consumer takes the LATEST per session with `argMax(<field>, ingested_at)`
+grouped by `session` — the newest emitted rollup is still the most complete one,
+because every emit re-reads the WHOLE transcript. See
+scripts/session-analysis/insights.py.
+
+The settle window MUST stay well under validation/invariants.py's
+SUMMARY_ORPHAN_GRACE_HOURS (2h), which flags a settled prompt-session that has
+no summary; 20 min + a 5-min tick leaves a wide margin.
 
 The host is stamped by the collector daemon (ACTIVITY_HOST), so this runs
 unchanged on both workbench + laptop. Skips the synthetic `subagents/` and `wf_*`
@@ -43,6 +68,7 @@ import json
 import os
 import re
 import subprocess
+import time
 from pathlib import Path
 
 from _shared import (
@@ -391,7 +417,49 @@ def emit_event(emit: str, ev: dict) -> None:
 
 
 # --------------------------------------------------------------------------- #
-# State (idempotency + mutable-session awareness)
+# Settle policy (env-tunable — mirrors Layer B's INSIGHT_SETTLE_HOURS style)
+# --------------------------------------------------------------------------- #
+# Idle time after which a transcript counts as SETTLED and gets its (final)
+# rollup. 20 min = 4 timer ticks: long enough that a normal think/read pause
+# mid-session doesn't count as settled, short enough that a finished session is
+# summarised promptly and stays far inside the 2h orphan-invariant grace.
+DEFAULT_SETTLE_MINUTES = 20.0
+# Backstop for a session that never settles (an all-day agent run, or a host that
+# reboots mid-session): at most ONE interim rollup per this many hours. 4h bounds
+# a 12h session to ~5 rows instead of ~144, while keeping the report from being
+# more than 4h stale on a session that is still going.
+DEFAULT_INTERIM_HOURS = 4.0
+
+STATE_VERSION = 2
+
+
+def _env_number(name: str, default: float) -> float:
+    """Non-negative float from the environment, falling back to `default` on
+    anything unparseable (a typo in the unit file must not kill the timer)."""
+    raw = os.environ.get(name)
+    if raw is None or raw == "":
+        return default
+    try:
+        val = float(raw)
+    except ValueError:
+        return default
+    return val if val >= 0 else default
+
+
+def settle_seconds() -> float:
+    """Idle seconds after which a transcript is SETTLED. 0 disables the gate
+    (every changed transcript emits — the pre-emit-on-settle behaviour)."""
+    return _env_number("CLAUDE_SUMMARY_SETTLE_MINUTES", DEFAULT_SETTLE_MINUTES) * 60.0
+
+
+def interim_seconds() -> float:
+    """Minimum seconds between interim emits for a still-active session.
+    0 disables interim emits entirely (only first-seen + settled emit)."""
+    return _env_number("CLAUDE_SUMMARY_INTERIM_HOURS", DEFAULT_INTERIM_HOURS) * 3600.0
+
+
+# --------------------------------------------------------------------------- #
+# State (idempotency + settle bookkeeping)
 # --------------------------------------------------------------------------- #
 def state_path() -> Path:
     explicit = os.environ.get("CLAUDE_SUMMARY_STATE")
@@ -404,30 +472,87 @@ def state_path() -> Path:
 def signature(path: str) -> str | None:
     """Cheap change signature (mtime-ns + byte size) — computed WITHOUT reading
     the file, so an unchanged session is skipped without parsing it."""
+    st = _stat(path)
+    return None if st is None else f"{st.st_mtime_ns}:{st.st_size}"
+
+
+def _stat(path: str):
     try:
-        st = os.stat(path)
+        return os.stat(path)
     except OSError:
         return None
-    return f"{st.st_mtime_ns}:{st.st_size}"
 
 
 def load_state(path: Path) -> dict:
+    """path -> {"sig": str, "emitted_at": float|None} for every transcript we
+    have emitted for.
+
+    Tolerates EVERYTHING: a missing file, truncated/garbage JSON, the v1 schema
+    ({"sigs": {path: sig}}), or individual junk entries. Anything it cannot make
+    sense of degrades to "we have never emitted for this" — which re-emits once
+    and re-converges, rather than crashing the timer.
+    """
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
-    except (FileNotFoundError, json.JSONDecodeError):
+    except (OSError, ValueError):
         return {}
-    sigs = data.get("sigs") if isinstance(data, dict) else None
-    return dict(sigs) if isinstance(sigs, dict) else {}
+    if not isinstance(data, dict):
+        return {}
+    # v1: {"version":1,"sigs":{path: "mtime:size"}} — migrate in place. An entry
+    # with no known emit time is treated as "emitted long ago", so a changed
+    # transcript emits once on the first post-upgrade tick and then settles in.
+    raw = data.get("sessions")
+    if not isinstance(raw, dict):
+        legacy = data.get("sigs")
+        if not isinstance(legacy, dict):
+            return {}
+        return {str(p): {"sig": str(s), "emitted_at": None}
+                for p, s in legacy.items() if isinstance(s, str)}
+    out: dict = {}
+    for p, ent in raw.items():
+        if isinstance(ent, dict) and isinstance(ent.get("sig"), str):
+            at = ent.get("emitted_at")
+            out[str(p)] = {"sig": ent["sig"],
+                           "emitted_at": at if isinstance(at, (int, float)) else None}
+        elif isinstance(ent, str):  # tolerate a flattened entry
+            out[str(p)] = {"sig": ent, "emitted_at": None}
+    return out
 
 
-def save_state(path: Path, sigs: dict) -> None:
+def save_state(path: Path, sessions: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(
-        json.dumps({"version": 1, "sigs": sigs}, separators=(",", ":")),
+        json.dumps({"version": STATE_VERSION, "sessions": sessions},
+                   separators=(",", ":")),
         encoding="utf-8",
     )
     os.replace(tmp, path)  # atomic
+
+
+# --------------------------------------------------------------------------- #
+# The emit decision (pure — unit-tested with an injected clock)
+# --------------------------------------------------------------------------- #
+def emit_decision(prev: dict | None, sig: str, mtime: float, now: float,
+                  settle_s: float, interim_s: float) -> tuple[bool, str]:
+    """(should_emit, reason) for one transcript. See the module docstring.
+
+    Reasons: unchanged | settled | first-seen | interim | active.
+    """
+    if prev and prev.get("sig") == sig:
+        return (False, "unchanged")
+    idle = now - mtime
+    if settle_s <= 0 or idle >= settle_s:
+        return (True, "settled")
+    if not prev:
+        return (True, "first-seen")
+    last = prev.get("emitted_at")
+    if not isinstance(last, (int, float)):
+        # Unknown last-emit (v1 state / corrupt entry): emit once to establish it.
+        return (True, "interim")
+    if interim_s > 0 and (now - last) >= interim_s:
+        return (True, "interim")
+    return (False, "active")
 
 
 # Flush the seen-set to disk every this-many emits so an interrupted run
@@ -439,46 +564,64 @@ CHECKPOINT_EVERY = 25
 # --------------------------------------------------------------------------- #
 # Run
 # --------------------------------------------------------------------------- #
-def run() -> int:
+def run(now: float | None = None) -> int:
+    """One pass over every transcript. `now` is injectable so the settle policy
+    is testable with a fake clock (no sleeping)."""
+    now = time.time() if now is None else now
+    settle_s = settle_seconds()
+    interim_s = interim_seconds()
     roots = projects_roots()
     sp = state_path()
     prev = load_state(sp)
     emit = emit_path()
 
-    # Start from the prior state and record a session's signature ONLY after it
-    # has been (re-)emitted (or confirmed unchanged), checkpointing periodically.
-    # This makes a long backfill RESUMABLE: whatever was flushed is skipped next
-    # run rather than re-emitted, so an interrupted scan converges instead of
-    # storming duplicates. A session reached-but-not-yet-emitted at interrupt is
-    # simply re-emitted next run (append-only read contract dedupes on it).
-    new_sigs: dict = dict(prev)
+    # Start from the prior state and update a session's entry ONLY after it has
+    # been (re-)emitted (or confirmed unchanged/deferred), checkpointing
+    # periodically. This makes a long backfill RESUMABLE: whatever was flushed is
+    # skipped next run rather than re-emitted, so an interrupted scan converges
+    # instead of storming duplicates. A session reached-but-not-yet-emitted at
+    # interrupt is simply re-emitted next run (append-only read contract dedupes).
+    new_state: dict = dict(prev)
     seen: set = set()
+    reasons: dict = {}
     emitted = 0
     scanned = 0
     since_checkpoint = 0
     for path, session in iter_transcripts(roots):
-        sig = signature(path)
-        if sig is None:
+        st = _stat(path)
+        if st is None:
             continue
+        sig = f"{st.st_mtime_ns}:{st.st_size}"
         seen.add(path)
         scanned += 1
-        if prev.get(path) == sig:
-            new_sigs[path] = sig  # unchanged since last emit — carry forward
+        should, reason = emit_decision(prev.get(path), sig, st.st_mtime, now,
+                                       settle_s, interim_s)
+        reasons[reason] = reasons.get(reason, 0) + 1
+        if not should:
+            # Carry the PRIOR entry forward untouched. Deliberately do NOT record
+            # the new signature: the session still owes us a rollup, and leaving
+            # the old signature in place is what makes the next tick re-evaluate
+            # it (and eventually emit once it settles).
+            if path in prev:
+                new_state[path] = prev[path]
             continue
         rollup = summarize_transcript(path)
         emit_event(emit, build_event(session, rollup))
-        new_sigs[path] = sig  # record ONLY after a successful emit
+        new_state[path] = {"sig": sig, "emitted_at": now}  # ONLY after a successful emit
         emitted += 1
         since_checkpoint += 1
         if since_checkpoint >= CHECKPOINT_EVERY:
-            save_state(sp, new_sigs)  # atomic tmp+rename checkpoint
+            save_state(sp, new_state)  # atomic tmp+rename checkpoint
             since_checkpoint = 0
 
-    # Final save: prune signatures for transcripts that no longer exist (we saw
+    # Final save: prune entries for transcripts that no longer exist (we saw
     # every current path this pass), keeping the state file from growing forever.
-    new_sigs = {p: s for p, s in new_sigs.items() if p in seen}
-    save_state(sp, new_sigs)
-    print(f"session-tailer: scanned={scanned} emitted={emitted} state={sp}")
+    new_state = {p: s for p, s in new_state.items() if p in seen}
+    save_state(sp, new_state)
+    breakdown = " ".join(f"{k}={v}" for k, v in sorted(reasons.items()))
+    print(f"session-tailer: scanned={scanned} emitted={emitted} "
+          f"[{breakdown}] settle={settle_s / 60:g}m interim={interim_s / 3600:g}h "
+          f"state={sp}")
     return 0
 
 

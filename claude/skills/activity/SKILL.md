@@ -121,6 +121,22 @@ extraction (no `claude -p`, no external API). Manual/on-demand only. (Layer A =
 5-min timer; the report `scripts/session-analysis/insights.py` fuses A + B + the
 message stream and is the telemetry-native successor to the built-in `/insights`.)
 
+**Layer A is EMIT-ON-SETTLE** (since 2026-07-30). It does NOT re-ship a live
+session's rollup every tick any more — it emits once on first sight, at most once
+per `CLAUDE_SUMMARY_INTERIM_HOURS` (default 4) while the session is still live,
+and again whenever the transcript has been idle for
+`CLAUDE_SUMMARY_SETTLE_MINUTES` (default 20) — so a resumed session still gets a
+correct final rollup. State: `~/.local/state/activity/session-summary-state.json`
+(v2: `{"sessions": {path: {sig, emitted_at}}}`; a corrupt/missing file degrades to
+"never emitted", never crashes the timer). Both knobs are read from the
+environment at run time; 0 disables that gate. **The `argMax(<field>,
+ingested_at)` per-`session` read contract is UNCHANGED** — every emit re-reads the
+whole transcript, so the newest row is still the most complete. Expect ~1–5 rows
+per session; the `session_summary_rows_bounded` invariant flags >24 rows/session
+ingested in 24h. Before the fix: 27,061 rows over 702 sessions (avg 38.5, worst
+486, ~1,800/day), 97.4% immediately superseded. The historical duplicates are NOT
+rewritten — they age out under the 180d TTL.
+
 Prereqs: `CLICKHOUSE_URL/USER/PASSWORD` in env (reader creds via SOPS — see top of this skill;
 `sops -d` on a `<(git show …)` process-substitution needs `--input-type yaml`).
 

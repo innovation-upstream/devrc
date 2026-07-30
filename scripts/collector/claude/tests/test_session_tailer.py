@@ -6,7 +6,11 @@ Covers:
     interruptions, tool_errors (+ categories), models, task/mcp/web flags, churn,
   * no raw prompt free-text leaks into the payload (first_prompt was dropped),
   * ts conversion (session START, UTC); sidechain turns excluded from duration,
-  * idempotency (unchanged transcript → no re-emit) + MUTABLE re-emit (grows → re-emit),
+  * idempotency (unchanged transcript → no re-emit),
+  * EMIT-ON-SETTLE: an active session doesn't re-emit every tick; a settled one
+    emits once; a resumed-after-settle one re-emits; the interim backstop bounds
+    a never-settling session; state survives a restart; a corrupt/missing/v1
+    state file degrades instead of crashing,
   * subagent / wf_ dir skip,
   * the `unreadable` path (garbage file / empty file),
   * emit-format round-trips through the real collector parser.
@@ -17,6 +21,7 @@ collector module parses it back — mirroring test_tailer.py.
 import importlib.util
 import json
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -33,6 +38,10 @@ S = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(S)
 
 EMIT = _COLLECTOR_DIR / "emit"
+
+# Settle policy in seconds, from the module's own defaults (no magic numbers).
+SETTLE = S.DEFAULT_SETTLE_MINUTES * 60.0
+INTERIM = S.DEFAULT_INTERIM_HOURS * 3600.0
 
 
 # --------------------------------------------------------------------------- #
@@ -74,6 +83,17 @@ def _write(projects_dir: Path, project_dirname: str, session: str, objs):
     p = d / f"{session}.jsonl"
     p.write_text("\n".join(json.dumps(o) for o in objs) + "\n", encoding="utf-8")
     return p
+
+
+def _append(path: Path, obj, *, mtime: float | None = None):
+    """Append a turn to a transcript (simulating a live session growing). The
+    file's mtime IS the settle signal, so tests can pin it explicitly."""
+    with path.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(obj) + "\n")
+    if mtime is not None:
+        import os as _os
+        _os.utime(path, (mtime, mtime))
+    return path
 
 
 # --------------------------------------------------------------------------- #
@@ -323,18 +343,21 @@ def test_idempotent_no_reemit_when_unchanged(env):
     assert len(_spool_events(env["spool"])) == 1
 
 
-def test_mutable_reemit_when_transcript_grows(env):
+def test_settled_growth_reemits_the_complete_rollup(env):
+    """A session that grew and then SETTLED re-emits, and the newest row is the
+    complete rollup (the argMax-on-read contract stays correct)."""
+    t0 = time.time()
     p = _write(env["projects"], "-home-zach-workspace-devrc", "s1", [
         user_typed("hello", ts="2026-07-11T10:00:00.000Z"),
     ])
-    assert S.run() == 0
+    assert S.run(now=t0) == 0                    # first-seen
     assert len(_spool_events(env["spool"])) == 1
-    # session grows (a later turn) → signature changes → re-emit
-    with p.open("a", encoding="utf-8") as f:
-        f.write(json.dumps(assistant([("Edit", {"file_path": "b.go",
-                "old_string": "x", "new_string": "y"})],
-                ts="2026-07-11T11:00:00.000Z")) + "\n")
-    assert S.run() == 0
+    # session grows (a later turn) …
+    _append(p, assistant([("Edit", {"file_path": "b.go",
+                                    "old_string": "x", "new_string": "y"})],
+                         ts="2026-07-11T11:00:00.000Z"), mtime=t0)
+    # … then goes idle past the settle window → re-emit with the full rollup
+    assert S.run(now=t0 + SETTLE + 1) == 0
     evs = _spool_events(env["spool"])
     assert len(evs) == 2  # append-only: two rows for the same session
     latest = json.loads(evs[-1]["payload"])
@@ -410,3 +433,210 @@ def test_run_prunes_deleted_transcripts_from_state(env):
     p.unlink()
     S.run()
     assert not any(k.endswith("gone.jsonl") for k in S.load_state(env["state"]))
+
+
+# --------------------------------------------------------------------------- #
+# emit_decision — the pure settle policy (fake clock, no sleeping)
+# --------------------------------------------------------------------------- #
+def _decide(prev, sig, mtime, now, settle=SETTLE, interim=INTERIM):
+    return S.emit_decision(prev, sig, mtime, now, settle, interim)
+
+
+def test_decision_unchanged_signature_never_emits():
+    prev = {"sig": "a", "emitted_at": 0.0}
+    assert _decide(prev, "a", mtime=0.0, now=10 * INTERIM) == (False, "unchanged")
+
+
+def test_decision_settled_emits():
+    prev = {"sig": "old", "emitted_at": 100.0}
+    assert _decide(prev, "new", mtime=1000.0, now=1000.0 + SETTLE) == (True, "settled")
+
+
+def test_decision_active_first_seen_emits_once_then_defers():
+    # never emitted before → one emit so a live session isn't missing entirely
+    assert _decide(None, "new", mtime=1000.0, now=1000.0) == (True, "first-seen")
+    # emitted a moment ago and still active → deferred
+    prev = {"sig": "old", "emitted_at": 1000.0}
+    assert _decide(prev, "new", mtime=1000.0, now=1000.0 + 60) == (False, "active")
+
+
+def test_decision_interim_backstop():
+    prev = {"sig": "old", "emitted_at": 1000.0}
+    # still active (just written) but last emit is older than the backstop
+    assert _decide(prev, "new", mtime=1000.0 + INTERIM,
+                   now=1000.0 + INTERIM) == (True, "interim")
+
+
+def test_decision_unknown_last_emit_emits_once():
+    """A v1/corrupt entry with no emit timestamp emits once to establish one."""
+    prev = {"sig": "old", "emitted_at": None}
+    assert _decide(prev, "new", mtime=1000.0, now=1000.0) == (True, "interim")
+
+
+def test_decision_settle_zero_disables_the_gate():
+    prev = {"sig": "old", "emitted_at": 1000.0}
+    assert _decide(prev, "new", mtime=1000.0, now=1000.0,
+                   settle=0)[0] is True  # every change emits (legacy behaviour)
+
+
+def test_decision_interim_zero_disables_the_backstop():
+    prev = {"sig": "old", "emitted_at": 0.0}
+    assert _decide(prev, "new", mtime=1000.0, now=1000.0,
+                   interim=0) == (False, "active")
+
+
+def test_settle_policy_env_overrides(monkeypatch):
+    monkeypatch.setenv("CLAUDE_SUMMARY_SETTLE_MINUTES", "5")
+    monkeypatch.setenv("CLAUDE_SUMMARY_INTERIM_HOURS", "2")
+    assert S.settle_seconds() == 300.0
+    assert S.interim_seconds() == 7200.0
+    # garbage / negative / empty all fall back to the defaults (never crash)
+    for bad in ("", "abc", "-3"):
+        monkeypatch.setenv("CLAUDE_SUMMARY_SETTLE_MINUTES", bad)
+        assert S.settle_seconds() == SETTLE
+
+
+# --------------------------------------------------------------------------- #
+# run(): emit-on-settle end to end (injected clock — no sleeping)
+# --------------------------------------------------------------------------- #
+def test_active_session_does_not_reemit_on_consecutive_ticks(env):
+    """The regression this fix targets: a live session used to re-ship its whole
+    rollup on EVERY 5-min tick (97.4% of all rows were superseded duplicates)."""
+    t0 = time.time()
+    p = _write(env["projects"], "-home-zach-workspace-devrc", "live", [
+        user_typed("start", ts="2026-07-11T10:00:00.000Z"),
+    ])
+    assert S.run(now=t0) == 0                       # first-seen emit
+    assert len(_spool_events(env["spool"])) == 1
+    for tick in range(1, 13):                       # an hour of 5-min ticks
+        t = t0 + tick * 300
+        _append(p, assistant([("Read", {"file_path": f"f{tick}.py"})],
+                             ts="2026-07-11T10:%02d:00.000Z" % tick), mtime=t)
+        assert S.run(now=t) == 0
+    assert len(_spool_events(env["spool"])) == 1    # still ONE row, not 13
+
+
+def test_settled_session_emits_exactly_once(env):
+    """A session idle past the settle window emits its final rollup once, and
+    never again while it stays untouched."""
+    t0 = time.time()
+    _write(env["projects"], "-home-zach-workspace-devrc", "done", [
+        user_typed("finish up", ts="2026-07-11T10:00:00.000Z"),
+        assistant([("Bash", {"command": "git commit -m x"})],
+                  ts="2026-07-11T10:20:00.000Z"),
+    ])
+    now = t0 + SETTLE + 1
+    assert S.run(now=now) == 0
+    assert len(_spool_events(env["spool"])) == 1
+    for later in (now + 300, now + 3600, now + 10 * INTERIM):
+        assert S.run(now=later) == 0
+    assert len(_spool_events(env["spool"])) == 1    # exactly once, forever
+
+
+def test_resumed_after_settle_reemits_the_final_rollup(env):
+    """`claude --resume` is real here (multi-day sessions exist). A settled
+    session that gets resumed must re-emit once it settles again, so the newest
+    row — the one argMax picks — is the COMPLETE rollup."""
+    t0 = time.time()
+    p = _write(env["projects"], "-home-zach-workspace-devrc", "resumed", [
+        user_typed("day one", ts="2026-07-11T10:00:00.000Z"),
+    ])
+    assert S.run(now=t0 + SETTLE + 1) == 0          # settled → final rollup #1
+    assert len(_spool_events(env["spool"])) == 1
+
+    # …two days later the session is resumed and grows again
+    t_resume = t0 + 2 * 86400
+    _append(p, assistant([("Edit", {"file_path": "b.go", "old_string": "x",
+                                    "new_string": "y"})],
+                         ts="2026-07-13T10:00:00.000Z"), mtime=t_resume)
+    # The first tick after the resume emits once (its last emit is older than the
+    # interim backstop, so the live session shows up again promptly) …
+    assert S.run(now=t_resume + 300) == 0
+    assert len(_spool_events(env["spool"])) == 2
+    # … and then it is ACTIVE again → no per-tick storm on the following ticks.
+    for tick in range(2, 8):
+        _append(p, assistant([("Read", {"file_path": "a.py"})],
+                             ts="2026-07-13T10:00:00.000Z"),
+                mtime=t_resume + tick * 300)
+        assert S.run(now=t_resume + tick * 300) == 0
+    assert len(_spool_events(env["spool"])) == 2
+    # Once it settles again it re-emits, and the newest row is complete.
+    assert S.run(now=t_resume + 8 * 300 + SETTLE) == 0
+    evs = _spool_events(env["spool"])
+    assert len(evs) == 3
+    latest = json.loads(evs[-1]["payload"])
+    assert latest["languages"].get("Go") == 1       # the resumed work is in it
+    assert latest["end_ts"] == "2026-07-13 10:00:00.000"
+
+
+def test_interim_backstop_bounds_a_never_settling_session(env):
+    """A session that NEVER goes idle still gets bounded interim rollups (so a
+    12h agent run isn't missing from the report), at most one per INTERIM."""
+    t0 = time.time()
+    p = _write(env["projects"], "-home-zach-workspace-devrc", "marathon", [
+        user_typed("long haul", ts="2026-07-11T10:00:00.000Z"),
+    ])
+    assert S.run(now=t0) == 0                       # first-seen
+    ticks = int(12 * 3600 / 300)                    # 12h of 5-min ticks
+    for tick in range(1, ticks + 1):
+        t = t0 + tick * 300
+        _append(p, assistant([("Read", {"file_path": "a.py"})],
+                             ts="2026-07-11T10:00:00.000Z"), mtime=t)
+        assert S.run(now=t) == 0
+    n = len(_spool_events(env["spool"]))
+    expected = 1 + int(12 * 3600 // INTERIM)        # first-seen + 3 interims
+    assert n == expected, f"expected {expected} bounded emits, got {n}"
+    assert n < 10                                   # vs 145 under the old rule
+
+
+def test_state_survives_a_restart(env):
+    """State is on disk, so a fresh process (timer re-fire / reboot) keeps the
+    settle bookkeeping instead of re-emitting everything."""
+    t0 = time.time()
+    p = _write(env["projects"], "-home-zach-workspace-devrc", "s1", [
+        user_typed("hi", ts="2026-07-11T10:00:00.000Z"),
+    ])
+    assert S.run(now=t0) == 0
+    raw = json.loads(env["state"].read_text())
+    assert raw["version"] == S.STATE_VERSION
+    entry = next(v for k, v in raw["sessions"].items() if k.endswith("s1.jsonl"))
+    assert entry["sig"] and entry["emitted_at"] == t0
+
+    # "restart": run() re-reads the state file from scratch every pass.
+    _append(p, assistant([("Read", {"file_path": "a.py"})]), mtime=t0 + 60)
+    assert S.run(now=t0 + 60) == 0
+    assert len(_spool_events(env["spool"])) == 1    # no re-emit after restart
+
+
+def test_corrupt_state_file_does_not_kill_the_run(env):
+    """Garbage state degrades to 'never emitted' (emit once, rewrite valid
+    state) rather than raising and failing the systemd oneshot."""
+    _write(env["projects"], "-home-zach-workspace-devrc", "s1", [user_typed("hi")])
+    for junk in ("{not json", "[]", "null", '{"sessions": 5}', ""):
+        env["state"].write_text(junk, encoding="utf-8")
+        assert S.load_state(env["state"]) == {}
+        assert S.run() == 0                          # no exception
+        assert json.loads(env["state"].read_text())["version"] == S.STATE_VERSION
+
+
+def test_missing_state_file_and_dir_are_created(env, tmp_path, monkeypatch):
+    nested = tmp_path / "no" / "such" / "dir" / "state.json"
+    monkeypatch.setenv("CLAUDE_SUMMARY_STATE", str(nested))
+    _write(env["projects"], "-home-zach-workspace-devrc", "s1", [user_typed("hi")])
+    assert S.load_state(nested) == {}
+    assert S.run() == 0
+    assert nested.exists()
+    assert len(_spool_events(env["spool"])) == 1
+
+
+def test_v1_state_file_migrates_without_a_reemit_storm(env):
+    """The deployed state file is v1 ({"sigs": {path: sig}}). An UNCHANGED
+    transcript must not re-emit just because the schema moved."""
+    p = _write(env["projects"], "-home-zach-workspace-devrc", "s1", [user_typed("hi")])
+    env["state"].write_text(json.dumps(
+        {"version": 1, "sigs": {str(p): S.signature(str(p))}}), encoding="utf-8")
+    loaded = S.load_state(env["state"])
+    assert loaded[str(p)] == {"sig": S.signature(str(p)), "emitted_at": None}
+    assert S.run(now=time.time()) == 0
+    assert _spool_events(env["spool"]) == []        # unchanged → nothing emitted
+    assert json.loads(env["state"].read_text())["version"] == S.STATE_VERSION
