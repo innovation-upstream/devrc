@@ -28,12 +28,18 @@ tmux focus hooks   ─┼─► emit (pure shell, hot path) ─► spool/current
   deterministic whole-transcript rollup (tool counts, tokens, languages, git
   commits/pushes, churn, durations, interruptions, tool errors, models, …). This
   is the telemetry-native, durable, versioned successor to the built-in `/insights`
-  `~/.claude/usage-data/session-meta` cache — **no LLM**. Idempotent + mutable-session
-  aware: a per-transcript signature (mtime-ns + size) in
-  `session-summary-state.json` means a summary is re-emitted ONLY when the session
-  grew. `activity.events` is append-only, so a session accumulates several summary
-  rows over its life; **consumers dedupe on read with `argMax(<field>, ingested_at)`
-  grouped by `session`** (see `scripts/session-analysis/insights.py`). A transcript
+  `~/.claude/usage-data/session-meta` cache — **no LLM**. Idempotent +
+  **emit-on-settle**: a per-transcript signature (mtime-ns + size) *and* the last
+  emit time live in `session-summary-state.json`, and a summary is emitted when the
+  session is first seen, when it has been idle for `CLAUDE_SUMMARY_SETTLE_MINUTES`
+  (default 20 — the authoritative final rollup, re-fired after a `claude --resume`),
+  or at most once per `CLAUDE_SUMMARY_INTERIM_HOURS` (default 4) while it is still
+  live. It does NOT re-ship on every 5-min tick (that produced 27k rows over 702
+  sessions, 97.4% immediately superseded). `activity.events` is append-only, so a
+  session still accumulates a handful of summary rows; **consumers dedupe on read
+  with `argMax(<field>, ingested_at)` grouped by `session`** (unchanged — every emit
+  re-reads the whole transcript, so newest = most complete). See
+  `scripts/session-analysis/insights.py`. A transcript
   that can't be parsed is emitted with `unreadable: true` — never fabricated.
   Both tailers share `claude/_shared.py` (ts/project/emit/root/iter helpers) and run
   on the same 5-min `claude-activity-source` timer (both hosts).

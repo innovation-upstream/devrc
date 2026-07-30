@@ -75,6 +75,23 @@ SUMMARY_REQUIRED_KEYS = (
 # tailer cadence + ingestion lag.
 SUMMARY_ORPHAN_GRACE_HOURS = 2
 
+# EMIT-ON-SETTLE guard. session-tailer.py used to re-emit a live session's whole
+# rollup on EVERY 5-min tick: measured 2026-07-28 at 27,061 rows over 702 sessions
+# (avg 38.5, worst 486, ~1,800 rows/day) of which 97.4% were immediately
+# superseded. The emitter now emits on SETTLE (+ a first-seen row and a bounded
+# interim backstop), so a session should produce a handful of rows, not one per
+# tick. This is a REGRESSION guard, not a tight bound on the settle policy: the
+# pathological "work / idle past the settle window / work again" ping-pong can
+# legitimately emit once per settle window, so the cap is deliberately loose —
+# it catches a return to per-tick emitting (which produced up to 288 rows per
+# session per day) rather than policing the exact cadence.
+SUMMARY_ROWS_PER_SESSION_CAP = 24
+# Windowed on `ingested_at` (server-stamped at ingest → genuinely UTC, unlike the
+# host-local `ts`), so the check reflects the CURRENT emitter, and the 26k
+# historical duplicate rows age out under the table's 180d TTL instead of failing
+# it forever.
+SUMMARY_ROWS_WINDOW_HOURS = 24
+
 
 @dataclass
 class Invariant:
@@ -235,6 +252,29 @@ def session_summary_wellformed_sql(table: str = "activity.events",
     )
 
 
+def session_summary_rows_per_session_sql(
+        table: str = "activity.events",
+        cap: int = SUMMARY_ROWS_PER_SESSION_CAP,
+        window_hours: int = SUMMARY_ROWS_WINDOW_HOURS) -> str:
+    """Count sessions that emitted MORE than `cap` session-summary rows in the
+    trailing `window_hours` of INGESTION.
+
+    Guards the emit-on-settle contract (see SUMMARY_ROWS_PER_SESSION_CAP): the
+    append-only table is meant to accumulate a handful of rollups per session
+    (first-seen + bounded interims + the final settled one), NOT one per 5-min
+    timer tick. Trailing-windowed on `ingested_at` so it measures the emitter
+    that is running now — the pre-fix backlog is not rewritten, it simply ages
+    out of the window (and eventually out of the 180d TTL)."""
+    return (
+        "SELECT count() FROM ("
+        f"SELECT session, count() AS n FROM {table} "
+        "WHERE source='claude' AND kind='session-summary' "
+        f"AND ingested_at > now() - INTERVAL {window_hours} HOUR "
+        f"GROUP BY session HAVING n > {cap}"
+        ")"
+    )
+
+
 def session_summary_orphans_sql(table: str = "activity.events",
                                 grace_hours: int = SUMMARY_ORPHAN_GRACE_HOURS) -> str:
     """Count SETTLED, Layer-A-era prompt sessions that have NO session-summary.
@@ -329,6 +369,17 @@ def build_invariants(table: str = "activity.events") -> list[Invariant]:
             # keys consumers depend on (insights.py + PR-2). All-time.
             session_summary_wellformed_sql(table),
             eval_zero_violations("session-summary payload missing required key(s)"),
+        ),
+        Invariant(
+            "session_summary_rows_bounded",
+            # Layer A: no session is re-shipping its rollup on every tick (the
+            # emit-on-settle guard — see session_summary_rows_per_session_sql).
+            # Trailing-windowed on ingested_at: the pre-fix duplicate backlog is
+            # deliberately NOT rewritten, it ages out.
+            session_summary_rows_per_session_sql(table),
+            eval_zero_violations(
+                f"session(s) with >{SUMMARY_ROWS_PER_SESSION_CAP} session-summary "
+                f"rows ingested in {SUMMARY_ROWS_WINDOW_HOURS}h"),
         ),
         Invariant(
             "session_summary_no_orphans",

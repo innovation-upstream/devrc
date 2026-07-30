@@ -111,7 +111,8 @@ def test_derived_attention_query_is_windowed_and_brave_only():
     # derived_attention_consistent and session_summary_no_orphans are the only
     # legitimately-windowed invariants (current-health / settled-grace); every
     # other guards immutable, all-time correctness.
-    windowed_ok = {"derived_attention_consistent", "session_summary_no_orphans"}
+    windowed_ok = {"derived_attention_consistent", "session_summary_no_orphans",
+                   "session_summary_rows_bounded"}
     for name, inv in invs.items():
         if name in windowed_ok:
             continue
@@ -158,10 +159,33 @@ def test_session_summary_orphans_sql_is_settled_and_layer_a_scoped():
     assert "NOT IN (SELECT session" in sql
 
 
+def test_session_summary_rows_bounded_registered_and_windowed():
+    """The emit-on-settle guard: a session must not re-ship its rollup every tick."""
+    invs = {inv.name: inv for inv in I.build_invariants("activity.events")}
+    assert "session_summary_rows_bounded" in invs
+    sql = invs["session_summary_rows_bounded"].sql
+    assert "kind='session-summary'" in sql
+    assert f"HAVING n > {I.SUMMARY_ROWS_PER_SESSION_CAP}" in sql
+    assert "GROUP BY session" in sql
+    # Windowed on ingested_at (server-stamped UTC), NOT the host-local ts — so the
+    # pre-fix duplicate backlog ages out instead of failing this forever.
+    assert f"ingested_at > now() - INTERVAL {I.SUMMARY_ROWS_WINDOW_HOURS} HOUR" in sql
+    assert "ts >" not in sql
+
+
+def test_session_summary_rows_cap_is_well_below_the_pre_fix_rate():
+    # Pre-fix, a live session emitted once per 5-min tick = 288 rows/day, and the
+    # worst observed session had 486 rows all-time. The cap must sit far below
+    # that to actually catch a regression.
+    assert I.SUMMARY_ROWS_PER_SESSION_CAP < 288 / 4
+    assert I.SUMMARY_ROWS_WINDOW_HOURS == 24
+
+
 def test_session_summary_invariants_use_zero_violations_evaluator():
     invs = {inv.name: inv for inv in I.build_invariants("activity.events")}
     # 0 violations -> PASS, N>0 -> FAIL, NULL -> PASS (vacuous)
-    for name in ("session_summary_wellformed", "session_summary_no_orphans"):
+    for name in ("session_summary_wellformed", "session_summary_no_orphans",
+                 "session_summary_rows_bounded"):
         ev = invs[name].evaluate
         assert ev(0)[0] is True
         assert ev(4)[0] is False
