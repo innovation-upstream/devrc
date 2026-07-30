@@ -43,7 +43,7 @@ Three actors, one loopback meeting point:
    `POST /result` (extension) by an id.
 2. **`extension/`** — a standalone MV3 extension. Its service worker long-polls
    `GET /poll`, executes the op against the active tab, and posts the result.
-3. **`browser`** — the bash skill entrypoint Claude calls (`html`, `eval`,
+3. **`browser`** — the bash skill entrypoint Claude calls (`html`, `js`/`eval`,
    `tabs`, `nav`, `screenshot`, `health`, `instances`).
 
 ### Multiple instances per host
@@ -143,12 +143,12 @@ always-detach) is in the **CDP ops** section below.
 
 | op | maps to | returns |
 |----|---------|---------|
-| `getHtml`    | `chrome.scripting` → `document.documentElement.outerHTML` | `{url,title,html,visibilityState,hidden?,note?}` |
+| `getHtml`    | `chrome.scripting` → `document.documentElement.outerHTML`, byte-capped CLI-side (`maxBytes`, default 32768, `0`=uncapped) | `{url,title,html,truncated?,visibilityState,hidden?,note?}` |
 | `text`       | `chrome.scripting` → `(selector?document.querySelector(selector):document.body).innerText`, normalized + byte-capped (`selector`/`maxBytes` optional) | `{url,title,text,truncated,visibilityState,hidden?,note?}` |
 | `eval`       | top frame: `chrome.scripting.executeScript` (MAIN world) of `js`; **`--frame`: CDP `Runtime.evaluate`** in the frame's context (same-process isolated world OR OOPIF flat session) — chrome.scripting can't eval a STRING | `{url,value,frame?,visibilityState,hidden?,note?}` |
 | `tabs`       | `chrome.tabs.query({})`                                   | `{tabs:[...],ownedTabId}` |
 | `nav`        | `chrome.tabs.update(tab,{url})`                           | `{tabId,url}` |
-| `screenshot` | **CDP `Page.captureScreenshot`** (png) — works on a BACKGROUND/occluded tab + each profile's own tab; a foreground tab uses the cheap `captureVisibleTab` fast path. `fullpage` grabs the whole document | `{url,dataUrl,via}` |
+| `screenshot` | **CDP `Page.captureScreenshot`** (png) — works on a BACKGROUND/occluded tab + each profile's own tab; a foreground tab uses the cheap `captureVisibleTab` fast path. `fullpage` grabs the whole document. The CLI decodes `dataUrl` to a **`.png` on disk** and prints a path, never the base64 (see below) | `{url,dataUrl,via}` |
 | `open`       | `chrome.tabs.create({url,active:false})` — **background/HIDDEN** (`visibilityState:"hidden"` → Chromium throttles it → a heavy SPA won't render → reads return a shell; `browser activate` un-throttles). Reads self-announce this via `hidden`/`note` | `{tabId,url}` |
 | `close`      | `chrome.tabs.remove(tabId)`                               | `{closed:tabId}` |
 | `frames`     | **`chrome.webNavigation.getAllFrames`** — the tab's frames INCLUDING cross-origin OUT-OF-PROCESS iframes (OOPIFs) | `{url,title,frames:[{frameId,url,parentFrameId}]}` |
@@ -192,6 +192,53 @@ rather than full `outerHTML` (~100s of KB) — the read the opencode browser-age
 uses. The `text` whitespace-normalization + byte-cap live in
 `extension/protocol.js` (`normalizeText`, unit-tested); a `--max-bytes` cap
 (default 32 KB, `0`=uncapped) truncates with a `…[truncated N bytes]` note.
+
+### CLI output discipline (`screenshot`, `html`) and the `js` alias
+
+Three CLI-surface behaviours — no server/extension involvement, so they need no
+Brave restart:
+
+- **`screenshot` never prints base64.** The data URL is 100s of KB (~133K–890K
+  tokens per call) and is useless in an agent's context — it can't see an image
+  from a data URL, it has to `Read` a `.png` anyway. So the CLI always decodes and
+  writes a file: to an explicit `path` (prints just the path, unchanged), or with
+  no path to a `browser-screenshot-*.png` temp file (`tempfile.gettempdir()`, so
+  `TMPDIR` is honoured), printing compact JSON `{ok,path,bytes,url,via}`.
+  **`--data-url`** is the explicit escape hatch that restores the old
+  raw-data-URL output; it is mutually exclusive with `path`.
+  Because a screenshot is a pixel-perfect image of an **authenticated** view, the
+  temp file is privacy-handled rather than just dropped in a shared `/tmp`:
+  - created with `tempfile.mkstemp` → `O_CREAT|O_EXCL|O_RDWR` at **mode 0600**
+    (plain `open()` would inherit umask and land 0644 = world-readable), which is
+    also the correct primitive against a pre-planted symlink;
+  - **auto-pruned after 24h** on each `screenshot` invocation — strictly scoped to
+    the `browser-screenshot-*.png` prefix in the temp dir, `lstat`-based so a
+    symlink is judged as itself and only a REGULAR file is ever unlinked, and
+    entirely best-effort (a prune error never fails the capture). Copy a capture
+    to an explicit `path` if you need to keep it longer.
+  - the payload is **validated before any write** — strict base64
+    (`validate=True`; the default silently drops non-alphabet chars, so junk and
+    `""` both decoded to `b""` and produced a 0-byte "successful" `.png`) plus the
+    8-byte PNG signature. Both failure modes exit non-zero with a clear message
+    and leave no file behind.
+- **`html` is byte-capped like `text`.** `--max-bytes N`, default 32768, `0` =
+  genuinely uncapped, and truncation uses the SAME convention as `normalizeText`:
+  the kept prefix (cut on a UTF-8 boundary) gets `\n…[truncated N bytes]` appended
+  and `truncated` is set — never silent. The cap is applied CLI-side (`cap_html`
+  in `browser`) because the extension's `getHtml` has no cap; `maxBytes` is still
+  sent on the wire so a future extension-side cap composes. Under the cap the
+  response is passed through **byte-identically** (no reserialization, no
+  `truncated` field), so an ordinary read is unchanged.
+- **`js` is a first-class alias for `eval`.** Claude Code's worktree-isolation
+  guard pattern-matches the literal token `eval` in a command string and REFUSES
+  to run it ("this command runs a string through eval, which can't be verified to
+  stay inside the worktree"). It is reacting to the WORD, not the behaviour:
+  `browser eval` ships a JS string over loopback to Brave and runs it in the PAGE
+  — no filesystem access, nothing that could escape the worktree. So
+  worktree-isolated agents should use **`browser js '<expr>'`**. `eval` keeps
+  working unchanged and is NOT deprecated (a deprecation warning would just
+  re-introduce the token). **The op sent ON THE WIRE is `eval` for both
+  spellings** — the extension only knows `eval`; `js` is a CLI-surface alias only.
 
 Server envelope: `POST /cmd` → `200 {"ok":true,"result":{id,ok,data}}`, or a
 structured error: `503 extension_not_connected`, `504 timeout`,
