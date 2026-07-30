@@ -2,6 +2,7 @@
 
 These exercise the CLI wiring without any network (--no-llm never touches OpenRouter).
 """
+import subprocess
 import sys
 from pathlib import Path
 
@@ -329,13 +330,33 @@ def test_cmd_scan_threads_resolved_initiative_slugs_into_last_emailed(tmp_path, 
     # no-ops and a REAL digest goes out before the assertions below fail. So block the
     # two send seams as well, and — because `send_digest`'s `_relay`/`_sender` defaults
     # are bound at DEF time and would keep pointing at the originals — the smtplib
-    # constructor underneath both of them, which is what actually opens the socket.
+    # constructors underneath both of them, which is what actually opens the socket.
+    #
+    # BOTH constructors: `smtplib.SMTP` is the load-bearing one today (both paths use
+    # STARTTLS), but "switch the relay/Gmail hop to implicit TLS" is a one-line refactor
+    # that would move the socket to `SMTP_SSL` and silently reopen this hole.
+    #
+    # And `_relay_send`'s `subprocess.Popen`, for a narrower reason: it spawns a
+    # `kubectl port-forward` against the PRODUCTION cluster BEFORE it reaches smtplib. If
+    # the outer stubs ever fail to hold, blocking the send is not enough — a unit test
+    # must not touch prod at all. Swapped via a shim bound to email_send's module global
+    # (NOT `setattr(email_send.subprocess, "Popen", …)`, which mutates the ONE shared
+    # `subprocess` module and breaks the scan's own git calls) so only this module's Popen
+    # is blocked and `subprocess.run`/`DEVNULL`/`PIPE` stay real.
     def _no_network(*a, **kw):
         raise AssertionError("a REAL send was attempted — the send stub did not hold")
+
+    class _PopenBlocked:
+        Popen = staticmethod(_no_network)
+
+        def __getattr__(self, name):        # everything else forwards to the real module
+            return getattr(subprocess, name)
 
     monkeypatch.setattr(email_send, "_relay_send", _no_network)
     monkeypatch.setattr(email_send, "_smtp_send", _no_network)
     monkeypatch.setattr(email_send.smtplib, "SMTP", _no_network)
+    monkeypatch.setattr(email_send.smtplib, "SMTP_SSL", _no_network)
+    monkeypatch.setattr(email_send, "subprocess", _PopenBlocked())
 
     args = scan.build_parser().parse_args(["--email", "--repos", str(dev)])
     assert scan.cmd_scan(args) == 0

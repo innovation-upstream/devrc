@@ -320,26 +320,45 @@ def test_an_all_lowercase_slug_is_kept_verbatim():
 
 # --------------------------------------------------------------------------- #
 # CORPUS PROPERTIES — asserted over a SNAPSHOT of the real `initiatives.current`
-# vocabulary (tests/fixtures/initiatives_current_slugs.txt, 142 slugs, 2026-07-30).
+# vocabulary (tests/fixtures/initiatives_current_slugs.txt, 144 slugs, 2026-07-30).
 # Hermetic: the file is a checked-in snapshot, never a live read.
 #
-# ⚠ WHAT THESE CAN AND CANNOT CATCH. Every number below is pinned against the FIXTURE,
-# not against the live store, so they detect an unreviewed EDIT to the fixture or a
-# behaviour change in the denylist — never that the live vocabulary has moved on. It has
-# now done so TWICE within two days (139 → 140 → 142), each time with the suite fully
-# green, which is why "refresh it by hand and remember" is no longer the whole answer:
-# `test_fixture_matches_the_live_initiatives_store` (below) does the comparison for you,
-# SKIPPED by default and opt-in via `REPO_COS_LIVE_DRIFT_CHECK=1`. Keeping it opt-in is
-# deliberate: an unconditional live read would make the whole suite depend on
-# cross-cluster reachability, which tests/conftest.py exists specifically to prevent.
+# 🔴 THESE ARE PROPERTY ASSERTIONS, NOT COUNT ASSERTIONS — deliberately. They used to pin
+# absolute totals (`len(corpus) == 142`, `len(taggable) == 129`, a per-reason Counter), and
+# those numbers rotted on THREE consecutive days (139 → 140 → 142 → 144) as the scan minted
+# new slugs. Every one of those refreshes was pure churn: not one of them was a behaviour
+# change, and re-stating a number in three places is exactly the ritual that trains people
+# to update it without reading it. So the assertions below state what must be TRUE of the
+# vocabulary (emitted == taggable, every emitted tag equals its slug byte-for-byte, drops
+# are non-zero and every drop carries a known reason) and hold at any corpus size.
+#
+# ⚠ WHAT THESE CAN AND CANNOT CATCH. They read the FIXTURE, not the live store, so they
+# detect a behaviour change in the denylist/guard — never that the live vocabulary has
+# moved on. That is what `test_fixture_matches_the_live_initiatives_store` (below) is for:
+# it names the slugs that moved, SKIPPED by default and opt-in via
+# `REPO_COS_LIVE_DRIFT_CHECK=1`. Keeping it opt-in is deliberate: an unconditional live
+# read would make the whole suite depend on cross-cluster reachability, which
+# tests/conftest.py exists specifically to prevent. With counts gone, a stale fixture is
+# now only a coverage gap (new shapes unexercised), never a red suite.
 # --------------------------------------------------------------------------- #
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 
 # Opt-in env var for the live-store drift check below (also documented in the fixture
-# header and in README.md). Anything truthy-looking enables it; unset = SKIPPED.
+# header and in README.md). Unset — or set to an explicitly OFF value (`0`/`false`/`no`/
+# `off`/empty, case-insensitive) — leaves it SKIPPED; anything else enables it.
 LIVE_DRIFT_ENV = "REPO_COS_LIVE_DRIFT_CHECK"
 KUBECONFIG_ENV = "REPO_COS_KUBECONFIG"
 DEFAULT_KUBECONFIG = Path.home() / "workspace" / "homelab-talos" / "homelab-kubeconfig"
+_OFF_VALUES = {"", "0", "false", "no", "off"}
+
+
+def _live_drift_enabled() -> bool:
+    """Is the opt-in live drift check on? `REPO_COS_LIVE_DRIFT_CHECK=0` must mean OFF.
+
+    A bare `not os.environ.get(...)` made every non-empty value opt IN, so `=0` and
+    `=false` — the two ways anyone actually writes "don't" — performed a live
+    cross-cluster read from an otherwise hermetic suite."""
+    return os.environ.get(LIVE_DRIFT_ENV, "").strip().lower() not in _OFF_VALUES
 
 
 def _slug_corpus() -> list[str]:
@@ -348,16 +367,21 @@ def _slug_corpus() -> list[str]:
     return [ln.strip() for ln in lines if ln.strip() and not ln.startswith("#")]
 
 
-def test_corpus_fixture_self_check_not_a_live_drift_detector():
+def test_corpus_fixture_is_well_formed_and_not_gutted():
     """SELF-CHECK on the checked-in fixture — deliberately NOT a live-store drift detector.
 
-    All this proves is that the fixture still holds the number of slugs the properties
-    below are stated in, i.e. it fails only if someone edits the file without re-stating
-    the counts. It CANNOT fail because `initiatives.current` grew, since nothing here
-    reads the store. Do not read a green suite as "the snapshot is current" — run the
-    opt-in drift check below (`REPO_COS_LIVE_DRIFT_CHECK=1`), or refresh with the command
-    in the fixture header (and re-state these counts + README.md)."""
-    assert len(_slug_corpus()) == 142
+    It proves the file is still a usable corpus (non-trivial, unique, whitespace-clean), so
+    a truncated/garbled fixture cannot make the properties below pass VACUOUSLY. It states
+    no total: the store gains slugs most days and a pinned length rotted three days running.
+    It CANNOT fail because `initiatives.current` grew, since nothing here reads the store —
+    do not read a green suite as "the snapshot is current". Run the opt-in drift check
+    below (`REPO_COS_LIVE_DRIFT_CHECK=1`), or refresh with the command in the fixture
+    header."""
+    corpus = _slug_corpus()
+    # a floor, not a pin: the vocabulary only grows, so this can never rot upward.
+    assert len(corpus) > 100, f"fixture looks truncated ({len(corpus)} slugs)"
+    assert len(set(corpus)) == len(corpus), "duplicate slugs in the fixture"
+    assert all(s == s.strip() and s for s in corpus), "blank / unstripped fixture line"
 
 
 def test_every_emitted_tag_equals_its_ledger_slug_exactly(capsys):
@@ -380,33 +404,60 @@ def test_every_emitted_tag_equals_its_ledger_slug_exactly(capsys):
     capsys.readouterr()  # swallow the per-drop log lines
 
 
-def test_corpus_denylist_drop_counts_are_pinned(capsys):
-    """The measurement this rule change was justified by, restated against the CURRENT
-    fixture (2026-07-30, 142 slugs): 10 denylist drops (4 all-caps + 2 mixed-case + 1 bare
-    date + 1 opaque id + 2 generic) → 132 pass the denylist → 3 more lost to the 64-rune
-    tag cap → 129 actually taggable. These are fixture numbers, not live ones — see the
-    section header. (The three slugs added since the feature landed —
-    `deploy-comfyui-video-generation`, `app-blocks-message-passing-inventory`,
-    `civitai-dp-prod-cohort-bluegreen-release-proposal` — are all taggable, so only the
-    totals moved.)"""
-    import clawgate  # noqa: PLC0415
-    from collections import Counter
+# The complete set of reasons `routing.slug_drop_reason` may return. A NEW reason string
+# is a behaviour change and must be added here consciously — that, not a per-reason count,
+# is the thing worth pinning (the counts move whenever the scan mints a slug).
+KNOWN_DROP_REASONS = {"no-letters", "not-lowercase", "opaque-id", "generic",
+                      "empty", "too-short"}
+
+
+def test_corpus_denylist_drops_are_real_and_every_drop_names_a_known_reason(capsys):
+    """The denylist's shape over the real vocabulary, as PROPERTIES rather than totals.
+
+    Observationally today (2026-07-30, 144 fixture slugs): 10 denylist drops → 134 pass →
+    3 more lost to the 64-rune tag cap → 131 taggable. Those numbers are recorded here and
+    in README.md as context ONLY; asserting them made the suite go red every time the scan
+    minted a slug (139 → 140 → 142 → 144 in three days), which is churn, not signal. What
+    IS asserted: the denylist bites (a rule set that dropped nothing would be a silent
+    no-op), it does not eat the vocabulary, and every drop carries a reason from the known
+    set — so a new/renamed reason string surfaces as a failure."""
     corpus = _slug_corpus()
-    reasons = Counter(r for r in (routing.slug_drop_reason(s) for s in corpus) if r)
-    assert reasons == {"not-lowercase": 6, "no-letters": 1, "opaque-id": 1, "generic": 2}
+    reasons = [routing.slug_drop_reason(s) for s in corpus]
+    dropped = [r for r in reasons if r]
+    assert dropped, "the denylist dropped NOTHING over the real vocabulary — it is a no-op"
+    assert set(dropped) <= KNOWN_DROP_REASONS, set(dropped) - KNOWN_DROP_REASONS
     kept = [s for s in corpus if routing.slug_drop_reason(s) is None]
-    assert len(kept) == 132
+    # the denylist is a filter, not a wall: the genuine majority must survive it.
+    assert len(kept) > len(corpus) * 0.8, f"denylist ate {len(corpus) - len(kept)} of {len(corpus)}"
+    capsys.readouterr()
+
+
+def test_every_taggable_slug_is_actually_emitted_by_build_tags(capsys):
+    """🔴 THE MUTE-BUTTON GUARD. Everything else here checks the LAYERS; this checks what
+    `build_tags` actually emits, as a SET EQUALITY against what the layers say is taggable.
+
+    Without it the corpus suite is satisfied by a guard that emits nothing at all — a
+    mutation making `build_tags` return `[]` for any slug containing `/` or `_` passed the
+    whole suite before this assertion existed. A guard that silently over-drops is exactly
+    the failure this feature cannot detect in production, because a dropped tag is silent
+    BY DESIGN. Set equality (not a count) is what makes this survive corpus growth: a
+    single wrongly-muted slug fails it at any vocabulary size."""
+    import clawgate  # noqa: PLC0415
+    corpus = _slug_corpus()
+    kept = [s for s in corpus if routing.slug_drop_reason(s) is None]
     taggable = [s for s in kept if clawgate.normalize_tags([f"initiative:{s}"])]
-    assert len(taggable) == 129
-    # 🔴 THE POSITIVE SIDE, pinned through the REAL emission path. Everything above counts
-    # the LAYERS; this counts what `build_tags` actually emits. Without it the corpus
-    # suite is satisfied by a guard that emits nothing at all — a mutation making
-    # build_tags return [] for any slug containing '/' or '_' passed the whole 308-test
-    # suite. A guard that silently over-drops is exactly the failure this feature cannot
-    # detect in production, because a dropped tag is silent BY DESIGN.
     emitted = [s for s in corpus if clawgate.build_tags({"initiative": s})]
-    assert len(emitted) == 129
-    assert emitted == taggable          # and it is the SAME set, not merely the same size
+    assert taggable, "no slug in the corpus is taggable — the guard has muted everything"
+    assert emitted == taggable          # the SAME set, in order — not merely the same size
+    # non-vacuity for the `/`-and-`_` mute mutation specifically: if the corpus ever loses
+    # every slug using the wider tag charset, that mutation would pass unnoticed.
+    plain = set("abcdefghijklmnopqrstuvwxyz0123456789-")
+    assert [s for s in taggable if set(s) - plain], (
+        "no taggable slug exercises the wider tag charset (._/) — the mute mutation would "
+        "pass VACUOUSLY; add such a slug to the fixture")
+    # and the grammar layer keeps the majority it is handed (an over-strict cap would show
+    # up here rather than as a mysteriously shrinking tag rate in production).
+    assert len(taggable) > len(kept) * 0.9, f"only {len(taggable)} of {len(kept)} taggable"
     capsys.readouterr()
 
 
@@ -418,13 +469,23 @@ def _live_slugs() -> list[str]:
     """Read `initiatives.current` from the homelab mailbox Postgres (the same command the
     fixture header documents). ONLY ever called from the opt-in test below."""
     kubeconfig = os.environ.get(KUBECONFIG_ENV) or str(DEFAULT_KUBECONFIG)
-    proc = subprocess.run(
-        ["kubectl", "--kubeconfig", kubeconfig, "-n", "mailbox",
-         "exec", "mailbox-postgres-0", "--", "sh", "-c",
-         'psql -U ${POSTGRES_USER:-mail} -d ${POSTGRES_DB:-mail} '
-         '-tAc "select slug from initiatives.current order by 1;"'],
-        capture_output=True, text=True, timeout=120,
-    )
+    try:
+        proc = subprocess.run(
+            ["kubectl", "--kubeconfig", kubeconfig, "-n", "mailbox",
+             "exec", "mailbox-postgres-0", "--", "sh", "-c",
+             'psql -U ${POSTGRES_USER:-mail} -d ${POSTGRES_DB:-mail} '
+             '-tAc "select slug from initiatives.current order by 1;"'],
+            capture_output=True, text=True, timeout=120,
+        )
+    except FileNotFoundError:
+        # no kubectl on PATH — the rc branch below never runs, so without this the
+        # opt-in check dies on a raw traceback instead of saying what to install.
+        pytest.fail("live store read failed: `kubectl` is not on PATH (the drift check "
+                    "shells out to it); install it or unset " + LIVE_DRIFT_ENV)
+    except subprocess.TimeoutExpired:
+        pytest.fail("live store read timed out after 120s — the homelab cluster is "
+                    f"unreachable from here (kubeconfig {kubeconfig}); unset "
+                    f"{LIVE_DRIFT_ENV} to skip the check")
     if proc.returncode != 0:
         pytest.fail(f"live store read failed (rc={proc.returncode}); set {KUBECONFIG_ENV} "
                     f"if the kubeconfig is not at {DEFAULT_KUBECONFIG}\n{proc.stderr[-800:]}")
@@ -432,7 +493,7 @@ def _live_slugs() -> list[str]:
 
 
 @pytest.mark.skipif(
-    not os.environ.get(LIVE_DRIFT_ENV),
+    not _live_drift_enabled(),
     reason=f"live-store drift check is opt-in: set {LIVE_DRIFT_ENV}=1 (needs the homelab "
            f"kubeconfig; override its path with {KUBECONFIG_ENV})",
 )
