@@ -15,7 +15,42 @@ Current guards:
 import sys, json, re, ipaddress
 
 
+# --- message-text stripping -------------------------------------------------
+# The git-SHAPE checks below must not fire on a command that merely QUOTES a
+# forbidden command inside a commit message or PR body. (Dogfood: the commit
+# documenting "never git add -A" was itself blocked by that rule.) So strip
+# message text before shape-matching.
+#
+# Deliberately narrow — a heredoc body is stripped ONLY when it feeds a
+# message-carrying command (git commit / gh pr|issue|release|gist). A heredoc
+# feeding a SHELL (`bash <<EOF … git add -A … EOF`) really would execute, so it
+# is left intact and still blocked.
+#
+# NEVER applied to the secret/IP guard: a credential in a commit message is
+# exactly what that check exists to catch.
+MESSAGE_CMD = re.compile(r"\bgit\s+commit\b|\bgh\s+(?:pr|issue|release|gist)\b")
+
+
+def _strip_message_text(cmd):
+    # 1. -m "…" / -m '…' / --message=…
+    out = re.sub(r"(-m|--message)(=|\s+)(['\"])(?:\\.|(?!\3).)*\3", r"\1\2''", cmd, flags=re.S)
+    # 2. heredoc bodies attached to a message-carrying command
+    for m in re.finditer(r"<<-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1", out):
+        tag = m.group(2)
+        cmdline = re.split(r"\n|;|&&|\|\||\|", out[:m.start()])[-1]
+        if not MESSAGE_CMD.search(cmdline):
+            continue
+        # Keep the operator line and the closing tag; drop only the body between
+        # them. `[^\n]*\n` (not `\s*.*?\n`) so the first body line isn't swallowed
+        # into the kept prefix.
+        body = re.compile(r"(<<-?\s*['\"]?" + re.escape(tag) + r"['\"]?[^\n]*\n).*?(^[ \t]*"
+                          + re.escape(tag) + r"[ \t]*$)", re.S | re.M)
+        out = body.sub(r"\1\2", out)
+    return out
+
+
 def check_git_add_all(cmd):
+    cmd = _strip_message_text(cmd)
     for m in re.finditer(r"\bgit\s+add\b([^&|;\n]*)", cmd):
         args = m.group(1)
         if re.search(r"(^|\s)(-A|--all)(\s|$)", args) or re.search(r"(^|\s)\.(\s|$)", args):
@@ -26,6 +61,7 @@ def check_git_add_all(cmd):
 
 
 def check_git_reset_hard(cmd):
+    cmd = _strip_message_text(cmd)
     if re.search(r"\bgit\s+reset\b[^&|;\n]*--hard\b", cmd):
         return ("`git reset --hard` is blocked by your RULES (irreversibly destroys uncommitted "
                 "work). Use `git restore <path>` / `git checkout -- <path>` for specific files, "
@@ -76,6 +112,7 @@ def check_heredoc_to_file(cmd):
 def check_cd_then_git(cmd):
     # `cd <path> && git …` / `cd <path>; git …` — the #1 wasteful command shape.
     # `git -C <path>` is always equivalent and avoids the cd approval prompt.
+    cmd = _strip_message_text(cmd)
     if re.match(r"\s*cd\s+\S+\s*(&&|;)", cmd) and re.search(r"\bgit\s", cmd):
         return ("`cd <path> && git …` is blocked — use `git -C <path> …` instead. "
                 "`cd` triggers approval prompts and can run untrusted hooks; the working "
