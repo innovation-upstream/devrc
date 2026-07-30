@@ -1,13 +1,19 @@
 #!/usr/bin/env python3
 """Regression suite for bash-guard.py.
 
-Covers three things:
-  1. the real bad command shapes are still blocked;
-  2. a command that merely QUOTES a blocked shape in a commit message / PR body
-     is NOT blocked (the false positive that motivated _strip_message_text);
-  3. message-stripping does not open a BYPASS -- every case below marked
-     "bypass" was proven exploitable by an adversarial audit of PR #217 and must
-     stay blocked.
+Two jobs:
+  1. the real bad command shapes are blocked;
+  2. the shapes that a reverted `_strip_message_text()` helper once let through
+     STAY blocked. Each "was-a-bypass" case below was proven to execute a
+     destructive command in a real shell while that helper was in place (PR
+     #217, three audit rounds). They are the reason the helper is gone -- see
+     the DESIGN NOTE in bash-guard.py before reintroducing anything like it.
+
+Accepted trade-off: because the checks match raw command text, a command that
+merely QUOTES a blocked shape is blocked too. The "FP (accepted)" cases below
+assert that deliberately, so the behaviour is documented rather than
+rediscovered. Workaround is in the deny message: write the text to a file and
+use `git commit -F <file>`.
 
 Run directly (hand-rolled asserts, not pytest-collectable -- the guard calls
 main() at import time, so it is only ever driven via subprocess):
@@ -20,7 +26,10 @@ GUARD = os.path.normpath(GUARD)
 
 # Dangerous substrings are built piecewise so this file can never trip a live
 # guard that is inspecting the command used to run it.
-ADDA = "git a" + "dd -A"
+# NOTE: keep a trailing word after -A. `check_git_add_all` requires -A to be
+# followed by whitespace or end-of-string, so a payload ending `-A'` silently
+# matches nothing and makes a test vacuous (this hid a real bypass once).
+ADDA = "git a" + "dd -A ever"
 HARD = "git re" + "set --hard HEAD"
 
 
@@ -32,8 +41,6 @@ def run(cmd):
                                              "tool_input": {"command": cmd}}),
                            capture_output=True, text=True, timeout=30)
     except subprocess.TimeoutExpired:
-        # A hang is a FAIL line, not a traceback -- catastrophic backtracking
-        # used to surface here as an uncaught TimeoutExpired.
         return False, "guard TIMED OUT (>30s) -- catastrophic backtracking?"
     if p.returncode != 0:
         return False, f"guard exited {p.returncode}: {p.stderr.strip()[:200]}"
@@ -58,71 +65,53 @@ CASES = [
     ("real hard-reset",               HARD, True),
     ("real cd&&git",                  "cd /tmp && git status", True),
     ("real add -A after a commit",    f'git commit -m "ok" && {ADDA}', True),
-
-    # --- quoted in a message: MUST NOT BLOCK ----------------------------
     ("explicit path staging",         "git a" + "dd clusters/foo.yaml", False),
-    ("-m quoting the rule",           f'git commit -m "docs: never {ADDA} here"', False),
-    ("-m quoting hard-reset",         f"git commit -m 'note: {HARD} is banned'", False),
-    ("--message= quoting",            f'git commit --message="{ADDA}"', False),
-    ("heredoc commit body",           f"git commit -F - <<'MSG'\nrule: {ADDA}\nand {HARD}\nMSG", False),
-    ("gh pr body heredoc",            f"gh pr create --body-file - <<'EOF'\nwe forbid {ADDA}\nEOF", False),
-    ("-m quoting cd&&git",            'git commit -m "avoid cd /x && git status"', False),
 
-    # --- BYPASSES proven by the PR #217 audit: MUST BLOCK ---------------
-    # (a) a second heredoc reusing the tag must not be stripped as well
-    ("bypass: 2nd heredoc same tag",
+    # --- was-a-bypass under _strip_message_text: MUST STAY BLOCKED ------
+    # round 1: same-tag heredoc / substitution / stale offsets / escaped quote
+    ("was-bypass: 2nd heredoc same tag",
      f"git commit -F - <<'EOF'\nnotes\nEOF\nbash <<'EOF'\n{ADDA}\nEOF", True),
-    ("bypass: shell heredoc first",
+    ("was-bypass: shell heredoc first",
      f"bash <<'EOF'\n{ADDA}\nEOF\ngit commit -F - <<'EOF'\nnotes\nEOF", True),
-    # (b) a heredoc inside a substitution feeds the INNER command
-    ("bypass: heredoc in <( )",
-     f"git commit -F <(bash <<'EOF'\n{ADDA}\nEOF\n)", True),
-    ("bypass: heredoc in $( )",
-     f"git commit -m \"$(bash <<'EOF'\n{ADDA}\nEOF\n)\"", True),
-    # (c) stale offsets after a long first body reclassified later heredocs
-    ("bypass: long body shifts offsets",
+    ("was-bypass: heredoc in <( )",   f"git commit -F <(bash <<'EOF'\n{ADDA}\nEOF\n)", True),
+    ("was-bypass: heredoc in $( )",   f"git commit -m \"$(bash <<'EOF'\n{ADDA}\nEOF\n)\"", True),
+    ("was-bypass: long body shifts offsets",
      "git commit -F - <<'M1'\n" + "\n".join(f"body line {i}" for i in range(30))
      + f"\nM1\nbash <<'B'\n{ADDA}\nB\ngit commit -m 'ok'", True),
-    # the shell has no escapes inside '...', so -m must stop at the first quote
-    ("bypass: escaped single quote",
+    ("was-bypass: escaped single quote",
      f"git commit -m 'msg \\' && {ADDA} && echo 'done'", True),
-    ("bypass: escaped quote + hard-reset",
-     f"git commit -m 'msg \\' && {HARD} && echo 'done'", True),
-    # (round 2) `&` backgrounds the commit and feeds the heredoc to a REAL
-    # shell -- proven to execute, and was allowed while `&&`/`;` were blocked
-    ("bypass: & backgrounds the commit",
+    # round 2: `&` backgrounds the commit, heredoc feeds a real shell
+    ("was-bypass: & backgrounds the commit",
      f"git commit -m 'ok' & bash <<'EOF'\n{ADDA}\nEOF", True),
-    ("bypass: & with sh + hard-reset",
+    ("was-bypass: & with sh + hard-reset",
      f"git commit -m 'ok' & sh <<'EOF'\n{HARD}\nEOF", True),
-    ("bypass: & after gh pr create",
-     f"gh pr create --body x & bash <<'EOF'\n{ADDA}\nEOF", True),
-    # an unterminated heredoc must not swallow a following real command.
-    # (Blocked at every revision -- a guard against future regression, not a
-    # bypass that was ever open.)
-    ("unterminated heredoc stays visible",
+    # round 3: decoy argument satisfied a substring command test
+    ("was-bypass: decoy 'git merge' arg",
+     f"bash -s -- 'git merge' <<'EOF'\n{ADDA}\nEOF", True),
+    ("was-bypass: decoy 'git tag' arg",
+     f"bash -s -- 'git tag' <<'EOF'\n{ADDA}\nEOF", True),
+    ("was-bypass: decoy via python3 -",
+     f"python3 - 'jj describe' <<'EOF'\nimport os; os.system('{ADDA}')\nEOF", True),
+    # never closed while stripping existed: ${ } funsub
+    ("was-bypass: ${ } funsub",
+     f"git commit -m \"${{ bash <<'EOF'\n{ADDA}\nEOF\n}}\"", True),
+    ("was-bypass: unterminated heredoc",
      f"git commit -F - <<'NOPE'\nsome text\n{ADDA}", True),
 
-    # --- stripping must stay narrowly scoped ----------------------------
+    # --- accepted false positives (quoting a rule) ----------------------
+    # Deliberate: the guard matches raw text. The deny message tells you to use
+    # `git commit -F <file>`. Asserted so the trade-off stays visible.
+    ("FP (accepted): -m quoting the rule",
+     f'git commit -m "docs: never {ADDA}"', True),
+    ("FP (accepted): heredoc commit body",
+     f"git commit -F - <<'MSG'\nrule: {ADDA}\nMSG", True),
+    ("FP (accepted): gh pr --body",
+     f"gh pr create --body 'never {ADDA}'", True),
+
+    # --- unrelated commands stay untouched ------------------------------
     ("non-git -m untouched",          "docker run -m '2g' myimage", False),
     ("plain gh pr create",            'gh pr create --title "x" --body "y"', False),
-
-    # --- (round 2) false positives that must NOT block ------------------
-    # conventional-commit title: the `(` in `fix(guard):` must not sever the
-    # heredoc from its own command
-    ("FP: conventional-commit title + heredoc",
-     f"gh pr create --title \"fix(guard): close bypasses\" --body-file - <<'EOF'\nnever {ADDA} ever\nEOF", False),
-    ("FP: author with parens + heredoc",
-     f"git commit --author \"A (bot) <a@b.c>\" -F - <<'EOF'\nban {ADDA}\nEOF", False),
-    # message flags on other message-carrying commands
-    ("FP: git tag -m",                f"git tag -a v1 -m 'never {ADDA} ever'", False),
-    ("FP: git notes add -m",          f"git notes add -m 'never {ADDA}'", False),
-    ("FP: git merge --no-ff -m",      f"git merge --no-ff x -m 'never {ADDA}'", False),
-    ("FP: git stash push -m",         f"git stash push -m 'never {ADDA}'", False),
-    # --body / --title / -am were never stripped
-    ("FP: gh pr create --body",       f"gh pr create --body 'never {ADDA} ever'", False),
-    ("FP: gh issue comment --body",   f"gh issue comment 1 --body 'never {ADDA}'", False),
-    ("FP: gh pr --title only",        f"gh pr create --title 'ban {ADDA} always' --body x", False),
-    ("FP: git commit -am",            f"git commit -am 'docs: never {ADDA} ever'", False),
+    ("plain commit",                  "git commit -F /tmp/msg.txt", False),
 ]
 
 fail = 0
@@ -136,19 +125,16 @@ for name, cmd, want in CASES:
     fail += not ok
     print(f"{'PASS' if ok else 'FAIL'}  block={blocked!s:<5} want={want!s:<5}  {name}")
 
-# The secret/IP guard must still scan the FULL command, message included --
-# message-stripping must never be applied to it.
+# The secret/IP guard must scan the FULL command, message included.
 SECRET = "github_pat_" + "A" * 42
 blocked, err = run(f'git commit -m "token {SECRET}"')
 ok = blocked and not err
 fail += not ok
 print(f"{'PASS' if ok else 'FAIL'}  secret inside -m still caught{'  ' + err if err else ''}")
 
-# ReDoS guard: an unterminated quote with a long backslash run must not stall.
-# The old ambiguous pattern took minutes here.
-redos = 'git commit -m "' + "\\" * 40
+# No pathological backtracking anywhere in the remaining patterns.
 t0 = time.time()
-_, err = run(redos)
+_, err = run('git commit -m "' + "\\" * 200)
 elapsed = time.time() - t0
 ok = elapsed < 2.0 and not err
 fail += not ok

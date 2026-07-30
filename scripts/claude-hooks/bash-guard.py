@@ -11,136 +11,57 @@ Current guards:
   - private key in a command -> reference the key file instead (never inline)
   - secret/public-IP + a publish sink (git commit / gh pr|issue) -> scrub before
     committing/posting (insights: leaked ingress IP into a public repo once)
+
+DESIGN NOTE — do not add "message text" stripping. The checks match the RAW
+command string, so a command that merely QUOTES a blocked shape (a commit
+message documenting "never git add -A") is blocked too. That false positive is
+DELIBERATELY accepted.
+
+A `_strip_message_text()` helper that blanked -m/--body values and heredoc
+bodies was built and reverted (PR #217, 2026-07-30). Three adversarial audit
+rounds each found a fresh hole in it, every one letting a genuinely-EXECUTING
+destructive command through:
+  r1: .sub() with no count blanked every same-tag heredoc, incl. `bash <<EOF`;
+      substitution-fed heredocs misread as message text; stale finditer offsets;
+      an escaped `\\'` over-matching past a closing quote; and a ReDoS.
+  r2: `&` was not a segment separator -> `git commit -m x & bash <<EOF` stripped
+      a body that runs in a real shell.
+  r3: the widened command list became a SUBSTRING test -> `bash -s -- 'git
+      merge' <<EOF` used a decoy argument to blank an executing body.
+Deciding which bytes are inert message vs. executable command is shell parsing;
+regexes cannot do it, and every round traded one failure mode for another. The
+guard with NO stripping blocked all of those shapes. The false positive costs
+one extra step -- write the message to a file and use `git commit -F <file>` --
+which RULES already prefers over heredocs. That is a better trade than a
+security guard with a rotating cast of bypasses.
 """
 import sys, json, re, ipaddress
 
 
-# --- message-text stripping -------------------------------------------------
-# The git-SHAPE checks below must not fire on a command that merely QUOTES a
-# forbidden command inside a commit message or PR body. (Dogfood: the commit
-# documenting "never git add -A" was itself blocked by that rule.) So strip
-# message text before shape-matching.
-#
-# Deliberately narrow — a heredoc body is stripped ONLY when it feeds a
-# message-carrying command (git commit / gh pr|issue|release|gist). A heredoc
-# feeding a SHELL (`bash <<EOF … git add -A … EOF`) really would execute, so it
-# is left intact and still blocked.
-#
-# NEVER applied to the secret/IP guard: a credential in a commit message is
-# exactly what that check exists to catch.
-# Commands whose message/body argument is inert text. `git notes add` is also in
-# PUBLISH_SINK below; keep the two lists in mind together. Anything NOT listed
-# here gets no stripping at all.
-MESSAGE_CMD = re.compile(
-    r"\bgit\s+commit\b"
-    r"|\bgit\s+tag\b"
-    r"|\bgit\s+notes\s+add\b"
-    r"|\bgit\s+merge\b"
-    r"|\bgit\s+stash\s+push\b"
-    r"|\bgh\s+(?:pr|issue|release|gist)\b"
-    r"|\b(?:jj\s+describe|hg\s+commit|svn\s+commit)\b"
-)
-
-# Segment separators used to find WHICH sub-command a heredoc operator belongs to.
-# Substitution openers are included: a heredoc inside `$(…)`, `<(…)`, `>(…)` or
-# backticks belongs to the INNER command, not to an outer `git commit` — without
-# them `git commit -F <(bash <<'EOF' … EOF)` had its shell-feeding body stripped.
-# `&` matters just as much: `git commit -m x & bash <<'EOF'` backgrounds the
-# commit and feeds the heredoc to a REAL shell, so the body must stay visible.
-# `&&` is listed before `&` so the two-char form wins.
-# Deliberately NOT a bare `(`: that split `gh pr create --title "fix(x): …"` off
-# from its own heredoc and re-blocked a legitimate body — the exact false
-# positive this whole function exists to prevent, and this repo's commit style.
-_SEGMENT = re.compile(r"\n|;|&&|&|\|\||\||\$\(|<\(|>\(|`")
-
-_HEREDOC = re.compile(r"<<-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
-
-# Quoted -m/--message values. Two DISJOINT patterns, deliberately:
-#   * double quotes honour backslash escapes, as the shell does;
-#   * single quotes do NOT — the shell has no escapes inside '…', so treating
-#     `\'` as an escape let the match run past the closing quote and swallow a
-#     following real command (`-m 'msg \' && git add -A`).
-# Both use non-ambiguous character classes ([^"\\] / [^']) so a failed match
-# cannot backtrack exponentially — the previous `(?:\\.|(?!\3).)*` was a ReDoS
-# (an unterminated quote plus ~40 backslashes stalled for minutes, on a hook
-# that runs on EVERY Bash call, three times per command).
-# `--body`/`--title` matter as much as `-m`: `gh pr create --body '…'` is an
-# extremely common shape. `--body-file` is NOT matched — the flag must be
-# followed by `=` or whitespace, and `--body-file` continues with `-`.
-_MSG_FLAG = r"(-m|-am|--message|--body|--title)"
-_MSG_DQ = re.compile(_MSG_FLAG + r"(=|\s+)\"(?:\\.|[^\"\\])*\"")
-_MSG_SQ = re.compile(_MSG_FLAG + r"(=|\s+)'[^']*'")
-
-# A message value containing command substitution really can execute; never
-# blank those out.
-_SUBST = re.compile(r"\$\(|`")
-
-
-def _strip_message_text(cmd):
-    # Only message-carrying commands get ANY stripping — so `docker run -m '2g'`
-    # is untouched, and the blast radius stays as small as possible.
-    if not MESSAGE_CMD.search(cmd):
-        return cmd
-    out = cmd
-    for pat in (_MSG_DQ, _MSG_SQ):
-        out = pat.sub(lambda m: m.group(0) if _SUBST.search(m.group(0))
-                      else m.group(1) + m.group(2) + "''", out)
-    return _strip_heredoc_bodies(out)
-
-
-def _strip_heredoc_bodies(out):
-    """Blank the body of each heredoc that feeds a message-carrying command.
-
-    Scans the MUTATED string with an advancing cursor. The previous version
-    iterated `re.finditer` over the ORIGINAL string while rebinding `out` in the
-    loop, so after the first substitution every later `m.start()` indexed a
-    shifted string — which silently reclassified a shell-feeding heredoc as
-    message text. It also used `.sub()` with no count, stripping EVERY heredoc
-    sharing the tag rather than only the matched one.
-    """
-    pos = 0
-    while True:
-        m = _HEREDOC.search(out, pos)
-        if not m:
-            return out
-        tag = m.group(2)
-        cmdline = _SEGMENT.split(out[:m.start()])[-1]
-        nl = out.find("\n", m.end())
-        if nl == -1 or not MESSAGE_CMD.search(cmdline):
-            pos = m.end()
-            continue
-        term = re.compile(r"^[ \t]*" + re.escape(tag) + r"[ \t]*$", re.M)
-        t = term.search(out, nl + 1)
-        if not t:
-            # Unterminated heredoc: strip nothing, so anything that follows stays
-            # visible to the shape checks.
-            pos = m.end()
-            continue
-        # Slice out exactly this body — never a global substitution.
-        out = out[:nl + 1] + out[t.start():]
-        pos = nl + 1
-
-
 def check_git_add_all(cmd):
-    cmd = _strip_message_text(cmd)
     for m in re.finditer(r"\bgit\s+add\b([^&|;\n]*)", cmd):
         args = m.group(1)
         if re.search(r"(^|\s)(-A|--all)(\s|$)", args) or re.search(r"(^|\s)\.(\s|$)", args):
             return ("`git add -A` / `git add --all` / `git add .` is blocked by your RULES "
                     "(never blind-stage — it sweeps up unrelated working-tree changes and has "
-                    "caused near-miss leaks). Stage specific paths instead: `git add <path> ...`.")
+                    "caused near-miss leaks). Stage specific paths instead: `git add <path> ...`. "
+                    "(Only QUOTING this rule, e.g. in a commit message or PR body? This guard "
+                    "matches the raw command text and cannot tell the difference. Write the "
+                    "message to a file with the Write tool and use `git commit -F <file>` / "
+                    "`gh pr create --body-file <file>` — which your RULES prefer over heredocs "
+                    "anyway.)")
     return None
 
 
 def check_git_reset_hard(cmd):
-    cmd = _strip_message_text(cmd)
     if re.search(r"\bgit\s+reset\b[^&|;\n]*--hard\b", cmd):
         return ("`git reset --hard` is blocked by your RULES (irreversibly destroys uncommitted "
                 "work). Use `git restore <path>` / `git checkout -- <path>` for specific files, "
                 "or `git checkout <ref> -- <paths>` to take another ref's version. Do NOT reach "
                 "for `git stash` — the stash stack is repo-GLOBAL across worktrees and a "
                 "concurrent agent can pop yours (RULES: Git Workflow). If you truly need it, "
-                "run it yourself.")
+                "run it yourself. (Only QUOTING this rule in a commit message or PR body? Write "
+                "it to a file and use `git commit -F <file>`.)")
     return None
 
 
@@ -184,7 +105,6 @@ def check_heredoc_to_file(cmd):
 def check_cd_then_git(cmd):
     # `cd <path> && git …` / `cd <path>; git …` — the #1 wasteful command shape.
     # `git -C <path>` is always equivalent and avoids the cd approval prompt.
-    cmd = _strip_message_text(cmd)
     if re.match(r"\s*cd\s+\S+\s*(&&|;)", cmd) and re.search(r"\bgit\s", cmd):
         return ("`cd <path> && git …` is blocked — use `git -C <path> …` instead. "
                 "`cd` triggers approval prompts and can run untrusted hooks; the working "
