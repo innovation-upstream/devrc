@@ -664,6 +664,35 @@ GATE_RE_SECURITY='\b(cert|certs|tls|ssl|mtls|mta-?sts|secret|secrets|token|token
 GATE_RE_MONEY='\b(buzz|currency|payment|payments|refund|refunds|withdraw|withdrawal|payout|payouts|billing|invoice|stripe|paypal|subscription|chargeback|wallet|merch)\b'
 GATE_RE_DESTRUCTIVE='\b(delete|deletes|deletion|drop|truncate|migration|migrations|rollback|restore|prod|production|scale ?down|scale-down|evict|eviction|wipe|purge|destroy|terraform destroy|drop table|force ?push)\b'
 
+# === DETERMINISTIC SEVERITY / URGENCY DETECTOR =============================
+# ORTHOGONAL to the safety gate above: it does NOT change classification and it
+# never blocks/relabels anything — it only stamps an auditable `severity` field
+# (URGENT | normal) so the digest can FLOAT an active prod incident to the top
+# instead of burying it mid-list next to a vague backlog ticket.
+#
+# Mirrors safety_gate()'s structure: a word-boundary, case-insensitive scan of
+# the ticket TEXT (title + body + comments — the model-independent signal, so an
+# incident is surfaced regardless of what the model concluded). A match on any
+# active-incident / high-urgency signal → severity=URGENT, else normal.
+#
+# TUNE the regex here. TRADEOFF (deliberate, documented): the set is kept
+# reasonably specific (word-anchored; `\b500s?\b` won't fire on "2500"), but
+# over-surfacing is the CHEAP failure (one extra glance at a non-incident) while
+# under-surfacing a real "image scanning DOWN" incident is the EXPENSIVE miss —
+# so when in doubt this leans toward tagging URGENT.
+SEV_RE_INCIDENT='\b(down|outage|broken|not working|stopped working|0 (images|jobs|results)|nothing (is )?processing|stuck|wedged?|crashloop|500s?|error rate|failing|regression|data loss|losing (money|buzz|revenue)|p0|p1|sev-?[012]|urgent|asap|critical|blocked prod|prod(uction)? (is )?(down|broken))\b'
+
+# severity_tag <ticket_text_file>  -> prints "URGENT" or "normal"
+# Deterministic, model-independent (scans ONLY the raw ticket text).
+severity_tag() {
+  local txt_file="$1"
+  if grep -Eiq "$SEV_RE_INCIDENT" "$txt_file" 2>/dev/null; then
+    printf 'URGENT'
+  else
+    printf 'normal'
+  fi
+}
+
 # safety_gate <ticket_text_file> <model_json>  -> prints possibly-rewritten json
 # Returns the json on stdout. Sets nothing else.
 safety_gate() {
@@ -675,6 +704,11 @@ safety_gate() {
   local scan
   scan="$(printf '%s\n%s' "$(cat "$txt_file" 2>/dev/null)" "$model_text")"
 
+  # ORTHOGONAL severity tag (URGENT | normal) — stamped on EVERY record below,
+  # never alters classification. Scans only the raw ticket text (model-independent).
+  local sev
+  sev="$(severity_tag "$txt_file")"
+
   local cats=""
   printf '%s' "$scan" | grep -Eiq "$GATE_RE_SECURITY"     && cats="${cats}security/secrets, "
   printf '%s' "$scan" | grep -Eiq "$GATE_RE_MONEY"        && cats="${cats}money, "
@@ -683,15 +717,46 @@ safety_gate() {
 
   if [ -z "$cats" ]; then
     # no risk match: pass through, just mark gate_fired=false for audit
-    printf '%s' "$json" | jq -c '. + {gate_fired:false}'
+    printf '%s' "$json" | jq -c --arg sev "$sev" '. + {gate_fired:false, severity:$sev}'
     return 0
   fi
 
-  # RISK match: force escalation, overriding the model. Preserve the model's
-  # original classification for audit (gate_override_from), blank the spec
-  # (it is no longer a dispatchable TASK), and stamp/extend the safety_flag.
+  # === CHANGE 2: SKIP the gate override for NON-DISPATCHING classifications ===
+  # The gate's job is to BLOCK a risky auto-dispatch. It does that by forcing
+  # NEEDS-DECISION + blanking the spec. But some classifications produce NO
+  # dispatchable spec at all — ALREADY-DONE / STALE-close / STALE / VERIFY / FYI
+  # / DUPLICATE. Relabeling one of those to NEEDS-DECISION with a scary
+  # safety_flag (e.g. a "close this, it's merged" ALREADY-DONE that merely
+  # mentions "prod") is pure DIGEST NOISE: it changes only the label, never an
+  # action.
+  #
+  # SAFETY REASONING (why this is safe): these classes never dispatch, so
+  # skipping the gate for them changes only the DIGEST LABEL, never an action —
+  # and an attacker cannot gain anything by evading the gate INTO a
+  # non-dispatching class, because no action is taken for that class either. The
+  # gate's dispatch-blocking value is UNCHANGED for TASK (and any class that
+  # yields a dispatchable spec), where it still fires fully below.
+  local cls
+  cls="$(printf '%s' "$json" | jq -r '.classification // ""')"
+  case "$cls" in
+    ALREADY-DONE|STALE-close|STALE|VERIFY|FYI|DUPLICATE)
+      # Keep the model's original classification + recommendation; do NOT relabel
+      # and do NOT attach a safety_flag. Record what the gate WOULD have matched
+      # for auditability (gate_fired stays false — no override happened).
+      printf '%s' "$json" | jq -c --arg sev "$sev" --arg cats "$cats" \
+        '. + {gate_fired:false, severity:$sev, gate_exempt_class:true, gate_would_have_categories:($cats|split(", "))}'
+      return 0
+      ;;
+  esac
+
+  # RISK match on a DISPATCHABLE classification (TASK / NEEDS-DECISION / ERROR):
+  # force escalation, overriding the model. Preserve the model's original
+  # classification for audit (gate_override_from), blank the spec (it is no
+  # longer a dispatchable TASK), and stamp/extend the safety_flag.
   printf '%s' "$json" | jq -c \
-    --arg cats "$cats" '
+    --arg cats "$cats" --arg sev "$sev" '
+      .severity = $sev
+      |
       . as $orig
       | .gate_fired = true
       | .gate_categories = ($cats | split(", "))
@@ -706,6 +771,71 @@ safety_gate() {
         )
     '
 }
+
+# === HUMAN SUMMARY / DIGEST BODY (severity-ordered) ========================
+# build_summary <queue_jsonl>  -> writes the markdown digest body to stdout.
+# Split into a function so the digest rendering (severity ordering + the urgent
+# callout — CHANGE 1) is testable OFFLINE against a synthetic queue, without the
+# live ClickUp/claude pipeline. Reads run-scoped globals for the meta line
+# (RUN_TS / TOTAL / PROCESSED / SKIPPED / BASELINED / GATE_HITS / DRAFTER_MODEL /
+# DRAFTER_MODE / CLICKUP_VIEW_ID) exactly as the inline block did.
+build_summary() {
+  local queue="$1"
+
+  # The action-worthy set severity ordering operates on (kept in sync with the
+  # section select below). An URGENT tag only floats an item that is ALSO
+  # action-worthy — an already-resolved incident (e.g. an ALREADY-DONE that
+  # merely mentions "down") is not an open incident, so it never reaches the
+  # callout or the reordering.
+  local aw='.classification=="TASK" or .classification=="NEEDS-DECISION" or .classification=="VERIFY" or .classification=="DUPLICATE" or (.safety_flag|length>0)'
+  local urgent_callout n_urgent
+  urgent_callout="$(jq -sr "
+    map(select((.severity==\"URGENT\") and ($aw)))
+    | if length==0 then empty
+      else \"🔥 \(length) URGENT — active incident\(if length>1 then \"s\" else \"\" end): \"
+           + (map(\"\(.ticket_id) \(.title)\") | join(\"; \"))
+      end" "$queue" 2>/dev/null)"
+  n_urgent="$(jq -sr "map(select((.severity==\"URGENT\") and ($aw))) | length" "$queue" 2>/dev/null)"
+  [ -n "$n_urgent" ] || n_urgent=0
+
+  echo "# Task-spec drafter — shadow queue $RUN_TS"
+  echo
+  # CHANGE 1: float the active-incident callout to the VERY TOP of the digest.
+  [ -n "$urgent_callout" ] && { echo "$urgent_callout"; echo; }
+  echo "Source: ClickUp triage view \`$CLICKUP_VIEW_ID\` · queue $TOTAL · processed $PROCESSED new/changed · skipped $SKIPPED unchanged · baselined $BASELINED · model=$DRAFTER_MODEL · mode=$DRAFTER_MODE · deterministic-gate escalations: $GATE_HITS · urgent: $n_urgent"
+  echo
+  echo "## Classification counts"
+  echo
+  jq -r '.classification' "$queue" | sort | uniq -c | sort -rn | sed 's/^/    /'
+  echo
+  echo "## Action-worthy (TASK / NEEDS-DECISION / VERIFY / DUPLICATE / safety-flagged)"
+  echo
+  # CHANGE 1: severity ordering — URGENT items FIRST (with a 🔥 URGENT marker),
+  # then the rest in file order. Slurp so the two groups can be concatenated
+  # deterministically (no reliance on jq sort stability); severity is orthogonal
+  # to classification, so the classification framing is unchanged within a group.
+  jq -sr "map(select($aw))
+         | (map(select(.severity==\"URGENT\")) + map(select(.severity!=\"URGENT\")))
+         | .[]
+         | \"### \" + (if .severity==\"URGENT\" then \"🔥 URGENT · \" else \"\" end) + \"[\(.classification)] \(.ticket_id) — \(.title)\n- confidence: \(.confidence)  age: \(.age_days // \"?\")d  status: \(.status // \"?\")\n- verified: \(.verification)\n\" +
+           (if (.correlations|length>0) then \"- correlations: \(.correlations|join(\"; \"))\n\" else \"\" end) +
+           (if (.classification==\"TASK\") then \"- SPEC goal: \(.spec.goal)\n- SPEC done(verifier): \(.spec.done)\n- SPEC owner: \(.spec.owner)  autonomy: \(.spec.autonomy)\n\" else \"- recommendation: \(.recommendation)\n\" end) +
+           (if (.safety_flag|length>0) then \"- ⚠ SAFETY: \(.safety_flag)\n\" else \"\" end)" \
+     "$queue"
+  echo
+  echo "## Suppressed (FYI / STALE-close / ALREADY-DONE, one-liners)"
+  echo
+  jq -r 'select(.classification=="FYI" or .classification=="STALE-close" or .classification=="ALREADY-DONE")
+         | "- [\(.classification)] \(.ticket_id) \(.title) — \(.recommendation // .verification)"' \
+     "$queue"
+}
+
+# TEST HOOK: let the hermetic suite source ONLY the pure functions
+# (severity_tag / safety_gate + the GATE_RE_* / SEV_RE_* regexes) in isolation,
+# without running the pipeline (no ClickUp fetch, no `claude -p`, no clawgate
+# POST). Sourcing with DRAFTER_LIB_ONLY=1 returns here. This is inert on the real
+# run path — DRAFTER_LIB_ONLY is unset by the systemd unit and every hand-run.
+if [ "${DRAFTER_LIB_ONLY:-0}" = "1" ]; then return 0 2>/dev/null || exit 0; fi
 
 RUN_TS="$(date '+%Y%m%dT%H%M%S')"
 QUEUE_JSONL="$DRAFTER_OUT_DIR/queue-$RUN_TS.jsonl"
@@ -965,31 +1095,8 @@ if [ "$PROCESSED" -eq 0 ]; then
   exit 0
 fi
 
-# --- build the human summary (counts by class + the genuine/decision items) -
-{
-  echo "# Task-spec drafter — shadow queue $RUN_TS"
-  echo
-  echo "Source: ClickUp triage view \`$CLICKUP_VIEW_ID\` · queue $TOTAL · processed $PROCESSED new/changed · skipped $SKIPPED unchanged · baselined $BASELINED · model=$DRAFTER_MODEL · mode=$DRAFTER_MODE · deterministic-gate escalations: $GATE_HITS"
-  echo
-  echo "## Classification counts"
-  echo
-  jq -r '.classification' "$QUEUE_JSONL" | sort | uniq -c | sort -rn | sed 's/^/    /'
-  echo
-  echo "## Action-worthy (TASK / NEEDS-DECISION / VERIFY / DUPLICATE / safety-flagged)"
-  echo
-  jq -r 'select(.classification=="TASK" or .classification=="NEEDS-DECISION" or .classification=="VERIFY" or .classification=="DUPLICATE" or (.safety_flag|length>0))
-         | "### [\(.classification)] \(.ticket_id) — \(.title)\n- confidence: \(.confidence)  age: \(.age_days // "?")d  status: \(.status // "?")\n- verified: \(.verification)\n" +
-           (if (.correlations|length>0) then "- correlations: \(.correlations|join("; "))\n" else "" end) +
-           (if (.classification=="TASK") then "- SPEC goal: \(.spec.goal)\n- SPEC done(verifier): \(.spec.done)\n- SPEC owner: \(.spec.owner)  autonomy: \(.spec.autonomy)\n" else "- recommendation: \(.recommendation)\n" end) +
-           (if (.safety_flag|length>0) then "- ⚠ SAFETY: \(.safety_flag)\n" else "" end)' \
-     "$QUEUE_JSONL"
-  echo
-  echo "## Suppressed (FYI / STALE-close / ALREADY-DONE, one-liners)"
-  echo
-  jq -r 'select(.classification=="FYI" or .classification=="STALE-close" or .classification=="ALREADY-DONE")
-         | "- [\(.classification)] \(.ticket_id) \(.title) — \(.recommendation // .verification)"' \
-     "$QUEUE_JSONL"
-} > "$QUEUE_SUMMARY"
+# --- build the human summary (severity-ordered; CHANGE 1) ------------------
+build_summary "$QUEUE_JSONL" > "$QUEUE_SUMMARY"
 
 log "summary written: $QUEUE_SUMMARY"
 ln -sf "$(basename "$QUEUE_JSONL")"  "$DRAFTER_OUT_DIR/latest.jsonl"

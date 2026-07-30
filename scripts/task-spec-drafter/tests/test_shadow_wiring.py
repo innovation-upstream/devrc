@@ -230,6 +230,65 @@ def test_safety_gate_forces_needs_decision():
         assert cat in src
 
 
+# --- CHANGE 2: gate SKIPS non-dispatching classes (structural) ----------------
+
+def test_gate_exempts_nondispatching_classes():
+    """The gate override must be SKIPPED for classes that yield no dispatchable
+    spec — relabeling them is pure digest noise (they never dispatch)."""
+    src = _read(_DRAFTER)
+    # a single case arm names every exempt class token exactly as the prompt emits
+    assert "ALREADY-DONE|STALE-close|STALE|VERIFY|FYI|DUPLICATE)" in src
+    # the exempt arm records the audit trail and returns WITHOUT relabeling
+    assert "gate_exempt_class:true" in src
+    assert "gate_would_have_categories" in src
+    # the safety reasoning is preserved in a code comment
+    assert "changes only the DIGEST LABEL, never an action" in src
+
+
+# --- CHANGE 1: deterministic severity detector + digest ordering (structural) --
+
+def test_severity_detector_present_and_tuned_next_to_gate():
+    src = _read(_DRAFTER)
+    assert "SEV_RE_INCIDENT=" in src
+    assert "severity_tag()" in src
+    # a representative slice of the tunable incident regex
+    for token in ("down", "outage", "crashloop", "error rate", "p0", "p1", "asap"):
+        assert token in src.split("SEV_RE_INCIDENT=", 1)[1].split("\n", 1)[0]
+
+
+def test_severity_is_stamped_on_every_gated_record():
+    """safety_gate must stamp `severity` on all three outputs (pass-through,
+    exempt, and escalated) so every queue record is auditable + orderable."""
+    src = _read(_DRAFTER)
+    gate = src.split("safety_gate() {", 1)[1].split("\nbuild_summary()", 1)[0] \
+        if "build_summary()" in src else src.split("safety_gate() {", 1)[1]
+    # severity computed once, added to json in every branch
+    assert 'sev="$(severity_tag "$txt_file")"' in gate
+    assert gate.count("severity:$sev") >= 2  # pass-through + exempt branches
+    assert ".severity = $sev" in gate         # escalation branch
+
+
+def test_digest_orders_urgent_first_with_marker_and_callout():
+    src = _read(_DRAFTER)
+    body = src.split("build_summary()", 1)[1]
+    # urgent-first ordering: two groups concatenated (urgent ++ non-urgent)
+    assert 'map(select(.severity==\\"URGENT\\")) + map(select(.severity!=\\"URGENT\\"))' in body
+    # 🔥 URGENT heading marker + the top-of-digest callout
+    assert "🔥 URGENT ·" in body
+    assert "active incident" in body
+    assert "urgent: $n_urgent" in body
+
+
+def test_lib_only_hook_returns_before_pipeline():
+    """The DRAFTER_LIB_ONLY test hook must sit AFTER the function defs but BEFORE
+    the live pipeline (the ClickUp fetch), so sourcing runs no live work."""
+    src = _read(_DRAFTER)
+    hook = src.index('DRAFTER_LIB_ONLY:-0')
+    assert hook < src.index("fetch_queue()"), "lib-only hook must precede the pipeline"
+    assert src.index("safety_gate()") < hook, "functions must be defined before the hook"
+    assert src.index("build_summary()") < hook
+
+
 # --- daily email digest (the review surface) ----------------------------------
 
 def test_digest_email_step_present_and_default_on():
