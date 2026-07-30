@@ -143,19 +143,20 @@ always-detach) is in the **CDP ops** section below.
 
 | op | maps to | returns |
 |----|---------|---------|
-| `getHtml`    | `chrome.scripting` → `document.documentElement.outerHTML` | `{url,title,html}` |
-| `text`       | `chrome.scripting` → `(selector?document.querySelector(selector):document.body).innerText`, normalized + byte-capped (`selector`/`maxBytes` optional) | `{url,title,text,truncated}` |
-| `eval`       | top frame: `chrome.scripting.executeScript` (MAIN world) of `js`; **`--frame`: CDP `Runtime.evaluate`** in the frame's context (same-process isolated world OR OOPIF flat session) — chrome.scripting can't eval a STRING | `{url,value,frame?}` |
+| `getHtml`    | `chrome.scripting` → `document.documentElement.outerHTML` | `{url,title,html,visibilityState,hidden?,note?}` |
+| `text`       | `chrome.scripting` → `(selector?document.querySelector(selector):document.body).innerText`, normalized + byte-capped (`selector`/`maxBytes` optional) | `{url,title,text,truncated,visibilityState,hidden?,note?}` |
+| `eval`       | top frame: `chrome.scripting.executeScript` (MAIN world) of `js`; **`--frame`: CDP `Runtime.evaluate`** in the frame's context (same-process isolated world OR OOPIF flat session) — chrome.scripting can't eval a STRING | `{url,value,frame?,visibilityState,hidden?,note?}` |
 | `tabs`       | `chrome.tabs.query({})`                                   | `{tabs:[...],ownedTabId}` |
 | `nav`        | `chrome.tabs.update(tab,{url})`                           | `{tabId,url}` |
 | `screenshot` | **CDP `Page.captureScreenshot`** (png) — works on a BACKGROUND/occluded tab + each profile's own tab; a foreground tab uses the cheap `captureVisibleTab` fast path. `fullpage` grabs the whole document | `{url,dataUrl,via}` |
-| `open`       | `chrome.tabs.create({url,active:false})`                 | `{tabId,url}` |
+| `open`       | `chrome.tabs.create({url,active:false})` — **background/HIDDEN** (`visibilityState:"hidden"` → Chromium throttles it → a heavy SPA won't render → reads return a shell; `browser activate` un-throttles). Reads self-announce this via `hidden`/`note` | `{tabId,url}` |
 | `close`      | `chrome.tabs.remove(tabId)`                               | `{closed:tabId}` |
 | `frames`     | **`chrome.webNavigation.getAllFrames`** — the tab's frames INCLUDING cross-origin OUT-OF-PROCESS iframes (OOPIFs) | `{url,title,frames:[{frameId,url,parentFrameId}]}` |
 | `click`      | top frame: **CDP** `getBoundingClientRect` → `Input.dispatchMouseEvent` (trusted); `--frame`: **SYNTHETIC** click via `chrome.scripting`; `selector` required, `frame` optional | `{url,clicked,x,y,frame,trusted}` |
 | `type`       | top frame: **CDP `Input.insertText`** (trusted); `--frame`: **SYNTHETIC** input via `chrome.scripting`; `text` required, `selector`/`frame` optional | `{url,typed,frame,trusted}` |
 | `key`        | top frame: **CDP `Input.dispatchKeyEvent`** (trusted); `--frame`: **SYNTHETIC** key via `chrome.scripting`; one bounded key; `key` required | `{url,key,frame,trusted}` |
 | `activate`   | **FOREGROUND the tab** — `chrome.tabs.update(tab,{active:true})` + `chrome.windows.update(windowId,{focused:true})`, then an OPTIONAL bounded wait-for-`status:"complete"` + paint settle (`waitMs`, clamped ≤8s; a discarded/never-completing tab returns promptly — no wedge). Loads a foreground-throttled SPA so it can be driven. **⚠ STEALS FOCUS** (the one intrusive op); **i3:** requests window focus but may not raise across workspaces (best-effort). No new permission | `{tabId,windowId,url,title,active,status}` |
+| `upload`     | **CDP `DOM.setFileInputFiles`** — resolve the `<input type=file>` at `selector` to a RemoteObject, VERIFY it is a file input, then hand Chrome the ABSOLUTE `path` (Chrome reads the file itself — **no bytes cross the bridge**); `--frame` routes into a same-process iframe OR a cross-origin OOPIF. Own-tab, #189-bounded, NO raw-CDP passthrough. **Data-exfil-capable → the server AUDIT-LOGS every upload** (op + target domain + path). `selector`+`path` required | `{ok,selector,frame,url,files:[basename]}` |
 
 `open`/`close` are dispatched to the extension; `release` (drop ownership, don't
 close the tab) is handled server-side and never reaches the extension.
@@ -274,6 +275,16 @@ only the thin `chrome.debugger` side-effect glue.
 `text`/`html`/`eval` or a foreground `screenshot` takes the lighter non-CDP path
 (no banner). **The manifest gained the `debugger` permission → the extension needs
 a manual reload** (and Brave may re-prompt for the permission).
+
+**⚠ Reloading (↻) the extension is UNRELIABLE — a full Brave restart is the
+reliable fix.** The extension's long-poll (`GET /poll`) keeps the OLD service
+worker permanently alive, so clicking ↻ in `brave://extensions` frequently does
+NOT swap in the new build. Symptom of a stale extension: a NEW op (e.g. `upload`
+on a pre-0.2.0 build) returns a server-side op-level **`unknown_op`** — the server
+knew the op and dispatched it, but the old service worker didn't. The **CLI maps
+that to a clear reload/restart message + non-zero exit**, and **`browser health`
+shows the loaded `extension_version` vs `extension_version_current`** so you can
+confirm. If a reload doesn't take, **fully quit and reopen Brave**.
 
 ## Concurrency backstop (per-instance rate limit + queue cap)
 
@@ -404,7 +415,11 @@ per-session (multi-step **workflow**) isolation did not.
   The multi-instance `--instance` targeting, ambiguity/supersede semantics, and
   telemetry are unchanged.
 
-`GET /health` → `{"ok":true,"extension_connected":bool,"count":N,"instances":[{key,label,instanceId,activeTab},…]}`.
+`GET /health` → `{"ok":true,"extension_connected":bool,"count":N,"extension_version_current":"<repo manifest>","instances":[{key,label,instanceId,activeTab,extension_version},…]}`.
+Each instance carries its **loaded `extension_version`** (from the `X-Bridge-Ext-Version`
+poll header; `null` until a build that reports it), and the bridge carries
+**`extension_version_current`** (the manifest version the server reads from the
+repo) — eyeball loaded-vs-current to spot a **stale** extension (see the stale note below).
 `GET /instances` → `{"ok":true,"count":N,"instances":[…]}`.
 
 ## Telemetry (activity pipeline)

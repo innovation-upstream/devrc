@@ -81,6 +81,11 @@
 #   browser [--frame <f>] key <Enter|Tab|Escape|...> [--selector <sel>]
 #                             — dispatch one bounded key (TRUSTED CDP top frame;
 #                               SYNTHETIC in-frame)
+#   browser [--frame <f>] upload <selector> <path>
+#                             — populate the <input type=file> at <selector> with the
+#                               LOCAL file <path> (CDP DOM.setFileInputFiles; Chrome
+#                               reads it by path, no bytes cross the bridge). Path is
+#                               validated + made absolute; every upload is AUDIT-LOGGED
 #   browser agent "<goal>"    — run the autonomous opencode browser-agent in its
 #                               OWN isolated tab against <goal> (see browser-agent)
 #   browser --print-session-id — print the derived per-session id and exit
@@ -230,6 +235,27 @@ if isinstance(r, dict) and r.get("ok") is False:
 '
 }
 
+# _hidden_warn RESP — for a successful read response, if the extension flagged the
+# tab as HIDDEN (background → throttled → an SPA may not have rendered → the read
+# is a shell-only DOM), print its note to STDERR. A WARNING only: exit stays 0 and
+# the JSON on stdout is untouched, so a caller/agent is warned without breaking the
+# machine-readable result. A no-op for any op whose result carries no `hidden` flag.
+_hidden_warn() {
+  printf '%s' "$1" | python3 -c '
+import json, sys
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+r = d.get("result") if isinstance(d, dict) else None
+data = r.get("data") if isinstance(r, dict) else None
+if isinstance(data, dict) and data.get("hidden") is True:
+    note = data.get("note") or ("tab is hidden (background) — content may not have "
+                                "rendered; run \x27browser activate\x27")
+    sys.stderr.write("browser: " + str(note) + "\n")
+'
+}
+
 # cmd_op OP [EXTRA_JSON_FIELDS] — POST /cmd, print the result JSON on a genuine
 # success; exit non-zero with a readable message on a transport, HTTP, OR
 # op-level (result.ok:false) error. Honours the global --instance (INSTANCE) by
@@ -300,8 +326,19 @@ cmd_op() {
     echo "$resp" >&2; die "could not parse the server response from /cmd"
   fi
   if [ -n "$oe" ]; then
+    # A server-side `unknown_op` for an op the CLI KNOWS (every op cmd_op dispatches
+    # is a real op — a user typo is caught by the subcommand dispatch BEFORE here, and
+    # the SERVER 400s an op IT doesn't know) means the EXTENSION returned unknown_op:
+    # i.e. the loaded MV3 service worker is OLDER than this CLI. Map it to clear
+    # reload/restart guidance (the long-poll keeps the old SW alive, so ↻ is unreliable).
+    if [ "$oe" = "unknown_op" ]; then
+      die "op '$op' returned unknown_op — your loaded browser-bridge extension is OLDER than this CLI. Reload it in brave://extensions. If the reload doesn't take, FULLY RESTART Brave (the extension's long-poll keeps the old service worker alive, so ↻ is unreliable)."
+    fi
     die "op '$op' failed in the browser: $oe"
   fi
+  # Gap 2: a read on a hidden/background tab self-announces (data.hidden) — warn on
+  # STDERR (exit stays 0) so the JSON result on stdout is unbroken.
+  _hidden_warn "$resp"
   printf '%s' "$resp"
 }
 
@@ -494,6 +531,23 @@ print(sys.argv[1])
     if [ -n "$ksel" ]; then extra="${extra},\"selector\":$(json_str "$ksel")"; fi
     cmd_op key "$extra" | pretty
     ;;
+  upload)
+    # browser [--frame <f>] upload <css-selector> <path>
+    # Populate the <input type=file> matched by <css-selector> with the LOCAL file
+    # at <path>. Chrome reads the file BY PATH itself (same host) — no bytes cross
+    # the bridge. VALIDATE the path (readable regular file) BEFORE dispatch, resolve
+    # it to an ABSOLUTE path, then send it as a typed op. The server AUDIT-LOGS every
+    # upload (op + target domain + path). --frame routes into a cross-origin OOPIF.
+    [ $# -ge 2 ] || die "usage: browser [--frame <f>] upload <css-selector> <path>"
+    usel="$1"; upath="$2"; shift 2
+    [ $# -eq 0 ] || die "browser upload takes exactly <selector> <path> (got extra: $1)"
+    [ -e "$upath" ] || die "upload: no such file: $upath"
+    [ -f "$upath" ] || die "upload: not a regular file: $upath"
+    [ -r "$upath" ] || die "upload: file not readable: $upath"
+    uabs="$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$upath")" \
+      || die "upload: could not resolve an absolute path for: $upath"
+    cmd_op upload "\"selector\":$(json_str "$usel"),\"path\":$(json_str "$uabs")" | pretty
+    ;;
   agent)
     # Hand off to the sibling browser-agent wrapper (autonomous opencode agent in
     # its own isolated tab). Forward a leading --instance (if the caller put it
@@ -510,6 +564,6 @@ print(sys.argv[1])
     grep -E '^#( |$)' "$0" | sed -E 's/^# ?//'
     ;;
   *)
-    die "unknown subcommand: $sub (try: health whoami instances open close release activate html text eval tabs nav screenshot frames click type key agent)"
+    die "unknown subcommand: $sub (try: health whoami instances open close release activate html text eval tabs nav screenshot frames click type key upload agent)"
     ;;
 esac

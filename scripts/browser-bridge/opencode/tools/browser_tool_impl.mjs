@@ -58,12 +58,22 @@ export const OP_TO_SERVER = Object.freeze({
   type: "type",
   key: "key",
   activate: "activate",
+  upload: "upload",
   whoami: "whoami",
 });
 
+// `upload` populates an <input type=file> with a file at a caller-chosen PATH via
+// CDP DOM.setFileInputFiles. EXFIL TRADEOFF (explicit operator decision): the agent
+// may supply ANY path — there is NO path allowlist here. Chrome reads the file by
+// path itself (same host), so no bytes route through the agent, but the CONTENTS of
+// any readable file could be posted to the target site. This is accepted; it is made
+// safe-to-audit rather than blocked: the SERVER audit-logs EVERY upload (op + target
+// domain + path). Still a bounded TYPED op — only selector/path/frame reach the wire
+// (buildRequest whitelists them); no raw-CDP/method/params passthrough. Own-tab-scoped
+// (the tab is forced by env), like every other op.
 export const ALLOWED_OPS_DEFAULT = Object.freeze([
   "text", "html", "eval", "nav", "screenshot",
-  "frames", "click", "type", "key", "activate", "whoami",
+  "frames", "click", "type", "key", "activate", "upload", "whoami",
 ]);
 
 export const TEXT_MAX_BYTES_DEFAULT = 32768;
@@ -261,6 +271,16 @@ export function buildRequest(args, env, token) {
       }
       body.waitMs = n;
     }
+  } else if (op === "upload") {
+    // Populate a file input. TYPED scalars only: selector + path (+ optional frame).
+    // ANY path is allowed for the agent (the explicit exfil tradeoff above); the
+    // server audit-logs every upload. Only these fields reach the wire — a smuggled
+    // cdp/method/params is dropped (the whitelist build below).
+    if (!args || !args.selector) throw new BrowserToolRefusal("upload_missing_selector");
+    if (!args.path) throw new BrowserToolRefusal("upload_missing_path");
+    body.selector = String(args.selector);
+    body.path = String(args.path);
+    _addFrame(body, args);
   }
   // frames / screenshot: no extra typed fields (the tab is forced by env).
 
@@ -311,6 +331,13 @@ export function summarizeResult(op, envelope) {
   }
   if (op === "key") {
     return JSON.stringify({ ok: true, key: data.key ?? null });
+  }
+  if (op === "upload") {
+    // Metadata-only confirmation: the selector + the BASENAME(s) set (never the
+    // full path — that stays server/CLI-side + in the audit log) + the frame.
+    return JSON.stringify({ ok: true, selector: data.selector ?? null,
+      files: Array.isArray(data.files) ? data.files : [],
+      frame: data.frame ?? null });
   }
   if (op === "activate") {
     // Compact confirmation the tab foregrounded (metadata only — no page content).
@@ -379,7 +406,8 @@ export async function runBrowserOp(args, opts = {}) {
   // forced tab (a bad op/tab is refused even in dry-run).
   const MUTATING = op === "nav" || op === "eval" ||
                    op === "click" || op === "type" || op === "key" ||
-                   op === "activate";   // activate steals focus → never in a dry-run
+                   op === "activate" ||  // activate steals focus → never in a dry-run
+                   op === "upload";      // upload populates a file input → never in a dry-run
   if (dry && MUTATING) {
     const allowed = allowedOpsFromEnv(env);
     if (!allowed.includes(op)) throw new BrowserToolRefusal(`op_not_allowed:${op}`);

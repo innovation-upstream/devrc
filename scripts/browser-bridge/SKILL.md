@@ -36,7 +36,19 @@ until the user reloads it. Don't debug the server; **tell the user to click relo
 ↻ on the card in `brave://extensions`**. Meanwhile work without `open`: run
 `browser tabs`, pick an existing tab, and pass `--tab <id>` on every op (or just
 read the active tab for a one-shot). Same reasoning for any op that answers
-`unknown_op`.
+`unknown_op` (e.g. `upload` on a pre-0.2.0 extension).
+
+The CLI now **detects this for you**: any op the CLI dispatches that returns a
+server-side `unknown_op` is mapped to a clear message + non-zero exit telling you
+the loaded extension is OLDER than the CLI and to reload/restart. **`browser
+health` also shows the build** — each instance's loaded `extension_version` vs the
+bridge's `extension_version_current` (repo manifest); a mismatch = stale.
+
+**⚠ Reload ↻ is UNRELIABLE — a full Brave restart is the reliable fix.** The
+extension's long-poll keeps the OLD service worker permanently alive, so clicking
+↻ in `brave://extensions` often does NOT swap in the new build. If a reload
+doesn't take (the op still returns `unknown_op`, or `health` still shows the old
+`extension_version`), tell the user to **fully quit and reopen Brave**.
 
 ## `eval` gotchas — a `null` result does NOT mean the bridge is down
 
@@ -97,10 +109,10 @@ Prefix any op with `--instance <key>` to target a specific connected profile
 
 | command | does |
 |---------|------|
-| `browser health`            | connected instances + count: `{"ok":true,"extension_connected":bool,"count":N,"instances":[…]}` |
+| `browser health`            | connected instances + count: `{"ok":true,"extension_connected":bool,"count":N,"extension_version_current":"<repo manifest>","instances":[{…,"extension_version":"<loaded>"}]}`. Each instance now shows its **loaded `extension_version`** and the bridge shows **`extension_version_current`** (the repo manifest) — eyeball loaded-vs-current to spot a STALE extension |
 | `browser whoami`            | **read-only identity + diagnostics** (global; no `--instance`/`--tab`). Reports **which HOST** (`host.label` = `laptop`/`workbench`/`unknown`, resolved `ACTIVITY_HOST` env → the activity-collector env file → LAN-IP detect, with `host.source` naming the method + `host.ips`), the connected **instances** (`key`/`label`/`instanceId` + active-tab **DOMAIN** only + reported `extension_version`), and **bridge** diagnostics (`endpoint`/`port`/`server_version`{version+git-HEAD}/`connected` count/`rate_limit` + `extension_version_current` = the manifest version the SERVER reads from the repo). Use it FIRST to confirm you're on the right host/profile (both hosts are hostname `nixos`). ⚠ There is deliberately **no hard "stale" flag** — the manifest version isn't bumped per-change, so compare `extension_version` (loaded) vs `extension_version_current` (repo) by eye. `extension_version` shows `null` until an extension build that reports it has reloaded; the rest of whoami needs NO extension change/reload. |
 | `browser instances`         | list connected instances as JSON (routing key, label, instanceId, active-tab url/title) |
-| `browser [--instance K] open [url]`        | open a NEW tab THIS session owns (default `about:blank`, created in the background); records ownership; returns its `tabId`. Use for multi-step work. |
+| `browser [--instance K] open [url]`        | open a NEW tab THIS session owns (default `about:blank`, created in the **background/HIDDEN** — `active:false`); records ownership; returns its `tabId`. Use for multi-step work. ⚠ A background tab is `document.visibilityState:"hidden"` → **Chromium throttles it, so a heavy SPA never renders** and a subsequent `text`/`html`/`eval` returns a **shell-only DOM** (indistinguishable from a broken site). The reads now **self-announce** this (`data.hidden:true` + a one-line warning on stderr); the escape hatch is **`browser activate`** (foreground it so it un-throttles). |
 | `browser [--instance K] close`             | close this session's owned tab and drop ownership |
 | `browser [--instance K] release`           | drop ownership WITHOUT closing the tab |
 | `browser [--instance K] [--tab T] html`              | `outerHTML` of the owned tab (else the active tab) |
@@ -113,6 +125,7 @@ Prefix any op with `--instance <key>` to target a specific connected profile
 | `browser [--instance K] [--tab T] [--frame F] click <selector>` | click the element's center — **TRUSTED** CDP on the top frame; **SYNTHETIC** (`chrome.scripting`) inside a cross-origin `--frame` |
 | `browser [--instance K] [--tab T] [--frame F] type <text> [--selector S]` | text input — **TRUSTED** CDP top frame; **SYNTHETIC** in-frame (focus `--selector` first if given) |
 | `browser [--instance K] [--tab T] [--frame F] key <Enter\|Tab\|Escape\|Backspace\|Delete\|Arrow*\|Home\|End\|Page*> [--selector S]` | dispatch one bounded key — **TRUSTED** CDP top frame; **SYNTHETIC** in-frame |
+| `browser [--instance K] [--tab T] [--frame F] upload <selector> <path>` | populate the `<input type=file>` at `<selector>` with the LOCAL file `<path>` via **CDP `DOM.setFileInputFiles`** — Chrome reads the file BY PATH itself (same host), so **no bytes cross the bridge**. The CLI validates the path (readable regular file) + resolves it to ABSOLUTE **before** dispatch; `--frame` routes into a cross-origin OOPIF. **Bounded TYPED op, own-tab, NO raw-CDP passthrough** — but it IS **data-exfil-capable** (any readable file's CONTENTS could be posted to the site), so **every upload is AUDIT-LOGGED** (op + target domain + path). Result carries the basename only |
 | `browser [--instance K] [--tab T] activate [--wait MS \| --no-wait]` | **FOREGROUND** the owned/active tab so a foreground-throttled SPA finishes loading, then can be read/driven. **⚠ STEALS FOCUS — the ONE intrusive op** (it changes what the user sees; every other op is non-intrusive). Foregrounds via **host-side `i3-msg`** (Chrome-side `tabs.update`/`windows.update` is a no-op on i3), so it works ONLY on a graphical i3 host; returns an extra **`i3:"applied"\|"skipped"\|"failed"`** field alongside `{tabId,windowId,url,title,active,status}`. Waits (bounded, default ~3s, cap ~8s) for `status:"complete"` + a paint settle unless `--no-wait`; `--wait MS` overrides. See "Driving a throttled SPA" below. |
 | `browser [--instance K] agent "<goal>" [flags]` | run the **autonomous opencode browser-agent** in its OWN isolated tab against `<goal>`; returns a compact `{answer,evidence,steps_used,status}` (see below) |
 | `browser --print-session-id`               | print the derived per-session id (debug) and exit |

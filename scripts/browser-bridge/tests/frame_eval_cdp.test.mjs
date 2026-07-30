@@ -121,7 +121,10 @@ test("eval --frame 0 (SAME-PROCESS/top): CDP Runtime.evaluate returns the VALUE,
   const out = await OPS.eval({ tabId: TAB_ID, frame: "0", js: "location.href" });
   // The CDP path was taken — attach happened, chrome.scripting did NOT.
   assert.equal(state.calls.attach.length, 1, "eval --frame must attach chrome.debugger (CDP path)");
-  assert.equal(state.calls.executeScript.length, 0, "eval --frame must NOT use chrome.scripting");
+  // The EVAL itself runs via CDP (asserted below). The only chrome.scripting call is
+  // the top-frame visibilityState probe (Gap 2) — NEVER a frame injection of the eval.
+  assert.ok(state.calls.executeScript.every((c) => !(c.target && c.target.frameIds)),
+    "eval --frame must use CDP for the eval; the only executeScript is the top-frame visibility probe");
   // Same-process → frame tree lookup + isolated world + evaluate(contextId).
   assert.ok(cdpMethods().includes("Page.getFrameTree"));
   assert.ok(cdpMethods().includes("Page.createIsolatedWorld"));
@@ -139,7 +142,9 @@ test("eval --frame <oopif>: OOPIF target resolved via setAutoAttach flat session
   reset();
   state.evalReply = { result: { value: OOPIF_URL } };   // location.href INSIDE the OOPIF
   const out = await OPS.eval({ tabId: TAB_ID, frame: "model-benchmarking.civit.ai", js: "location.href" });
-  assert.equal(state.calls.executeScript.length, 0, "still not chrome.scripting");
+  // Still CDP for the eval — the only executeScript is the top-frame visibility probe.
+  assert.ok(state.calls.executeScript.every((c) => !(c.target && c.target.frameIds)),
+    "eval --frame still uses CDP; the only executeScript is the top-frame visibility probe");
   // OOPIF path: NOT in the frame tree → auto-attach → evaluate in the matched SESSION.
   assert.ok(cdpMethods().includes("Target.setAutoAttach"), "auto-attaches to reach the OOPIF target");
   assert.equal(lastEval().sessionId, "SID_OOPIF", "evaluate is issued in the OOPIF's flat session");

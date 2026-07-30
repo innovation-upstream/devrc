@@ -18,9 +18,16 @@
 // Chrome throttles while backgrounded) actually loads and can then be driven. It
 // is the ONE op that deliberately STEALS the user's focus; every other op is
 // non-intrusive. Tab-scoped (it targets a specific tab); no new permission.
+// `upload` populates an <input type=file> via CDP DOM.setFileInputFiles — Chrome
+// reads the file BY PATH itself (same host as the browser), so NO file bytes
+// cross the bridge. It is a bounded TYPED CDP op exactly like click/type/key:
+// selector + path args, own-tab-scoped, #189-bounded, scheme-checked; there is
+// NO raw-CDP passthrough. It IS a data-exfil-capable action (an explicit
+// operator decision to let the autonomous agent read ANY path) — so the server
+// AUDIT-LOGS every upload (op + target domain + path).
 export const ALLOWED_OPS = [
   "getHtml", "text", "eval", "tabs", "nav", "screenshot", "open", "close",
-  "frames", "click", "type", "key", "activate",
+  "frames", "click", "type", "key", "activate", "upload",
 ];
 
 // Per-op required fields (mirrors server.py REQUIRED_FIELDS). The server already
@@ -31,6 +38,7 @@ export const REQUIRED_FIELDS = {
   click: ["selector"],
   type: ["text"],
   key: ["key"],
+  upload: ["selector", "path"],   // the file-input selector + the ABSOLUTE local path
 };
 
 // Validate an inbound command dict. Returns { ok:true } or { ok:false, error }.
@@ -300,6 +308,63 @@ export async function waitForTabLoad(getTab, opts = {}) {
     tab = await getTab();
   }
   return { tab, waited: true };
+}
+
+// --- hidden-tab self-announcing reads (prevent the "false outage") ---------- //
+// A tab opened via `open` is BACKGROUND, so document.visibilityState==="hidden"
+// and Chromium THROTTLES it — a heavy SPA never renders, and text/html/eval/frames
+// return an empty shell that is indistinguishable from a broken site. So every
+// read op reports the tab's visibilityState in its result, and when the tab is
+// hidden it self-announces (data.hidden=true + a note pointing at `activate`) so
+// an operator/agent is not fooled into declaring a false outage. Pure — the SW
+// supplies the tab's document.visibilityState (which reflects the tab; an OOPIF's
+// document follows the tab, so a --frame read reports it the same way).
+export const HIDDEN_TAB_NOTE =
+  "tab is hidden — background tabs are throttled, so SPA content may not have " +
+  "rendered; run 'browser activate' or expect a shell-only DOM.";
+
+// Merge the tab's visibilityState into a read result's `data`. A truthy
+// visibilityState is recorded; when it is exactly "hidden", the result ALSO
+// carries data.hidden=true + data.note so the read self-announces. A null/absent
+// visibilityState (the probe failed / a mock omitted it) adds nothing — the read
+// still returns its content. Returns the same object (mutated) for convenience.
+export function annotateVisibility(data, visibilityState) {
+  if (data && typeof data === "object" && visibilityState) {
+    data.visibilityState = visibilityState;
+    if (visibilityState === "hidden") {
+      data.hidden = true;
+      data.note = HIDDEN_TAB_NOTE;
+    }
+  }
+  return data;
+}
+
+// --- upload op: populate an <input type=file> via CDP DOM.setFileInputFiles --- //
+// The element is resolved to a CDP RemoteObject (objectId) via Runtime.evaluate,
+// verified to be a real file input, then handed to DOM.setFileInputFiles with the
+// ABSOLUTE path — Chrome reads the file itself, so no bytes cross the bridge. All
+// of the pure string/probe pieces live here so the SW stays thin + unit-tested.
+
+// Expression that resolves the file-input element to a RemoteObject (returnByValue
+// MUST be false so CDP hands back the node's objectId, not a serialized clone).
+export function fileInputSelectorExpression(selector) {
+  return `document.querySelector(${JSON.stringify(String(selector))})`;
+}
+
+// Function declaration for Runtime.callFunctionOn(objectId,...): true iff the
+// resolved node is genuinely an <input type=file> (else `not_a_file_input`). Kept
+// as a STRING (callFunctionOn takes a function-declaration string) and self-
+// contained (references only `this`).
+export const FILE_INPUT_CHECK_FN =
+  "function(){return this.tagName==='INPUT'&&this.type==='file';}";
+
+// The basename of an absolute path (POSIX). The RESULT returns ONLY the basename
+// (the full path stays server/CLI-side + in the audit log) — a trailing slash is
+// ignored; "" when nothing usable remains. Pure.
+export function basenameOf(path) {
+  const s = String(path == null ? "" : path).replace(/\/+$/, "");
+  const i = s.lastIndexOf("/");
+  return i >= 0 ? s.slice(i + 1) : s;
 }
 
 // --- CDP (chrome.debugger) ops: any-frame reads + trusted input ------------- //

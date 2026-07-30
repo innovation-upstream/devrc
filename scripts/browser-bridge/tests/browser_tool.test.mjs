@@ -282,7 +282,7 @@ test("OP_TO_SERVER maps only the bounded ops (no lifecycle ops, no raw CDP)", ()
   // like the rest; still NO lifecycle ops and NO raw-CDP escape.
   assert.deepEqual(Object.keys(OP_TO_SERVER).sort(),
     ["activate", "click", "eval", "frames", "html", "key", "nav", "screenshot",
-     "text", "type", "whoami"]);
+     "text", "type", "upload", "whoami"]);
   // Lifecycle ops (wrapper owns the tab) AND any raw-CDP escape must be unmappable.
   for (const forbidden of ["open", "close", "tabs", "release",
                            "cdp", "command", "attach", "detach", "sendCommand"]) {
@@ -290,7 +290,7 @@ test("OP_TO_SERVER maps only the bounded ops (no lifecycle ops, no raw CDP)", ()
   }
   assert.deepEqual([...ALLOWED_OPS_DEFAULT].sort(),
     ["activate", "click", "eval", "frames", "html", "key", "nav", "screenshot",
-     "text", "type", "whoami"]);
+     "text", "type", "upload", "whoami"]);
 });
 
 test("buildRequest: activate forces the env tab; bounded waitMs only; NO raw passthrough", () => {
@@ -540,4 +540,86 @@ test("runBrowserOp: whoami surfaces a bridge non-200 (auth/host) as an error", a
     async text() { return JSON.stringify({ ok: false, error: "unauthorized" }); } });
   await assert.rejects(() => run({ op: "whoami" }, baseEnv(), impl),
     /HTTP 401/);
+});
+
+// --------------------------------------------------------------------------- //
+// upload op via the TYPED tool (Gap 1): forced own-tab, required typed fields,
+// ANY path allowed (the explicit exfil tradeoff — audit-logged server-side), and
+// NO raw-CDP passthrough. `upload` populates an <input type=file> with a local
+// file whose path Chrome reads itself (no bytes route through the agent).
+// --------------------------------------------------------------------------- //
+test("buildRequest: upload forces the env tab + requires selector & path; forwards --frame", () => {
+  const b = buildRequest({ op: "upload", selector: "#f", path: "/home/zach/x.png" },
+    baseEnv(), TOK).body;
+  assert.equal(b.op, "upload");
+  assert.equal(b.tab, 4242, "upload is forced to the env tab (own-tab-scoped)");
+  assert.equal(b.selector, "#f");
+  assert.equal(b.path, "/home/zach/x.png");
+  const f = buildRequest({ op: "upload", selector: "#f", path: "/p", frame: "bench" },
+    baseEnv(), TOK).body;
+  assert.equal(f.frame, "bench", "upload forwards --frame (route into a cross-origin OOPIF)");
+});
+
+test("buildRequest: upload requires BOTH selector and path", () => {
+  assert.throws(() => buildRequest({ op: "upload", path: "/p" }, baseEnv(), TOK),
+    /upload_missing_selector/);
+  assert.throws(() => buildRequest({ op: "upload", selector: "#f" }, baseEnv(), TOK),
+    /upload_missing_path/);
+});
+
+test("buildRequest: upload allows ANY path (explicit exfil tradeoff — no path allowlist)", () => {
+  for (const p of ["/etc/passwd", "/home/zach/.ssh/id_ed25519", "/tmp/x"]) {
+    const b = buildRequest({ op: "upload", selector: "#f", path: p }, baseEnv(), TOK).body;
+    assert.equal(b.path, p, "any path is forwarded (accepted tradeoff; the server audit-logs it)");
+  }
+});
+
+test("NO raw-CDP passthrough: upload forwards ONLY op/tab/selector/path/frame", () => {
+  const hostile = { op: "upload", selector: "#f", path: "/p", frame: "x",
+    cdp: "Page.setDownloadBehavior", method: "DOM.setFileInputFiles",
+    params: { files: ["/etc/shadow"] }, objectId: "OBJ", files: ["/evil"],
+    tab: 999, tabId: 999, target: "other-profile" };
+  const b = buildRequest(hostile, baseEnv(), TOK).body;
+  assert.deepEqual(Object.keys(b).sort(), ["frame", "op", "path", "selector", "tab"],
+    "only the typed upload fields reach the wire");
+  assert.equal(b.tab, 4242, "the forced env tab wins over a smuggled tab");
+  for (const leak of ["cdp", "method", "params", "objectId", "files", "target", "tabId"]) {
+    assert.ok(!(leak in b), `${leak} must never be forwarded`);
+  }
+});
+
+test("summarizeResult: upload returns basenames only (never the full path)", () => {
+  const s = JSON.parse(summarizeResult("upload", { data: {
+    selector: "#f", files: ["render.png"], frame: null, url: "https://x.test/" } }));
+  assert.deepEqual(s, { ok: true, selector: "#f", files: ["render.png"], frame: null });
+  assert.ok(!/\/home|\/etc|\/tmp/.test(JSON.stringify(s)),
+    "a full path must never reach the model context");
+});
+
+test("runBrowserOp: upload reaches the bridge with the forced tab + typed fields", async () => {
+  const fx = fetchStub({ upload: { ok: true, selector: "#f", files: ["x.png"],
+    frame: null, url: "https://x.test/" } });
+  const out = JSON.parse(await run(
+    { op: "upload", selector: "#f", path: "/home/zach/x.png" }, baseEnv(), fx));
+  assert.equal(fx.calls.length, 1);
+  assert.equal(fx.calls[0].body.op, "upload");
+  assert.equal(fx.calls[0].body.tab, 4242, "forced env tab");
+  assert.equal(fx.calls[0].body.path, "/home/zach/x.png");
+  assert.equal(out.ok, true);
+  assert.deepEqual(out.files, ["x.png"]);
+});
+
+test("runBrowserOp: upload is MUTATING → dry-run intercepts it (never populates a file input)", async () => {
+  const fx = fetchStub();
+  const out = await run({ op: "upload", selector: "#f", path: "/p" },
+    baseEnv({ BROWSER_AGENT_DRY_RUN: "1" }), fx);
+  assert.match(out, /"dryRun":true/);
+  assert.equal(fx.calls.length, 0, "a dry-run must never touch the bridge");
+});
+
+test("runBrowserOp: upload is refused when NOT in the op allowlist", async () => {
+  const fx = fetchStub();
+  await assert.rejects(run({ op: "upload", selector: "#f", path: "/p" },
+    baseEnv({ BROWSER_AGENT_ALLOWED_OPS: "text,html" }), fx), /op_not_allowed:upload/);
+  assert.equal(fx.calls.length, 0);
 });

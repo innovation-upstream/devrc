@@ -114,8 +114,17 @@ from urllib.parse import unquote, urlsplit
 # tab-scoped and dispatched like the other tab-scoped ops (its optional `waitMs`
 # is a passthrough field, not a routing hint). It is the ONE op that STEALS the
 # user's foreground focus (documented as intended, best-effort under i3).
+# `upload` is a TYPED CDP op (DOM.setFileInputFiles): it populates an
+# <input type=file> with a local file whose ABSOLUTE path Chrome reads ITSELF
+# (same host) — so NO file bytes cross the bridge. It dispatches + tab-scopes
+# exactly like the other CDP ops (own-tab, #189-bounded, scheme-checked); the
+# server stays op-agnostic about the CDP mechanics and only forwards the typed
+# selector/path/frame. It IS a data-exfil-capable action (an EXPLICIT operator
+# decision to allow the autonomous agent any path) → the server AUDIT-LOGS every
+# upload (op + target domain + the file path — local metadata, never file CONTENT).
 ALLOWED_OPS = ("getHtml", "text", "eval", "tabs", "nav", "screenshot",
-               "open", "close", "frames", "click", "type", "key", "activate")
+               "open", "close", "frames", "click", "type", "key", "activate",
+               "upload")
 
 # Ops handled ENTIRELY server-side (never dispatched to the extension). `release`
 # relinquishes a session's owned-tab mapping without touching the real Brave tab.
@@ -127,7 +136,7 @@ SERVER_OPS = ("release",)
 # and `release` (server-side) do NOT contend for a single tab.
 TAB_SCOPED_OPS = frozenset({"getHtml", "text", "eval", "nav", "screenshot",
                             "close", "frames", "click", "type", "key",
-                            "activate"})
+                            "activate", "upload"})
 
 # Per-op required fields (skill-supplied). Absent → 400 bad_request. NOTE: `close`
 # takes NO skill-supplied field — the server injects the caller's owned tabId (or
@@ -138,6 +147,7 @@ REQUIRED_FIELDS = {
     "click": ("selector",),   # CDP trusted click needs the element selector
     "type": ("text",),        # CDP trusted type needs the text to insert
     "key": ("key",),          # CDP key event needs the key name
+    "upload": ("selector", "path"),  # file-input selector + the ABSOLUTE local path
 }
 
 MAX_CMD_BODY = 256 * 1024      # a command is tiny (op + a url / a js snippet).
@@ -1092,8 +1102,13 @@ class Registry:
 
     @staticmethod
     def _describe(inst: Instance) -> dict:
+        # extension_version (best-effort, from the /poll X-Bridge-Ext-Version
+        # header; None until a build that reports it polls) is surfaced in /health
+        # + /instances too so `browser health` shows which extension BUILD is loaded
+        # — the signal that distinguishes a stale extension from a missing op.
         return {"key": inst.key, "label": inst.label,
-                "instanceId": inst.instance_id, "activeTab": inst.active_tab}
+                "instanceId": inst.instance_id, "activeTab": inst.active_tab,
+                "extension_version": inst.extension_version}
 
     def snapshot(self):
         """A list of currently-live instances (key/label/instanceId/activeTab)."""
@@ -1473,9 +1488,15 @@ def make_handler(registry: Registry, token: str, cmd_timeout: float,
             path = urlsplit(self.path).path
             if path == "/health":
                 insts = registry.snapshot()
+                # extension_version_current = the manifest version the SERVER reads
+                # from the repo (best-effort, absolute path like whoami). Compare it
+                # by eye against each instance's reported extension_version to spot a
+                # stale loaded extension (NOT a hard "stale" flag — the manifest
+                # version is not bumped per-change).
                 self._send(200, {"ok": True,
                                  "extension_connected": bool(insts),
                                  "count": len(insts),
+                                 "extension_version_current": manifest_version(),
                                  "instances": insts})
                 return
             if path == "/instances":
@@ -1551,6 +1572,11 @@ def make_handler(registry: Registry, token: str, cmd_timeout: float,
                     self._send(400, {"ok": False, "error": terr})
                     return
             session_id = self.headers.get(HDR_SESSION_ID) or None
+            # The upload file PATH is captured for the AUDIT log/event (see the
+            # ALLOWED_OPS note). It is local metadata (never file content); logging
+            # it is acceptable and required for traceability of this exfil-capable
+            # action. `body` still carries it (target/tab are popped, path is not).
+            upload_path = body.get("path") if op == "upload" else None
             outcome, exit_code, domain = "ok", 0, ""
             # `release` is server-side: drop the session's ownership without ever
             # touching the real Brave tab or the extension.
@@ -1578,11 +1604,17 @@ def make_handler(registry: Registry, token: str, cmd_timeout: float,
                 log("throttled", op=op, key=e.key, reason=e.reason, sess=sess)
                 self._send(429, {"ok": False, "error": e.reason,
                                  "retry_after": round(e.retry_after, 3)})
+                extra = {"reason": e.reason, "sess": sess}
+                if op == "upload":
+                    # AUDIT even a throttled upload attempt (it never reached the
+                    # browser, so no file was read — but the attempt is traceable).
+                    extra["path"] = upload_path
+                    log("upload", outcome="throttled", domain="",
+                        path=upload_path, key=(target or ""))
                 emit_cmd_event(
                     op=op, key=(target or ""), outcome="throttled",
                     duration_ms=int((time.monotonic() - t0) * 1000),
-                    domain="", exit_code=1,
-                    extra={"reason": e.reason, "sess": sess})
+                    domain="", exit_code=1, extra=extra)
                 return
             except NoOwnedTab:
                 outcome, exit_code = "no_owned_tab", 1
@@ -1631,9 +1663,16 @@ def make_handler(registry: Registry, token: str, cmd_timeout: float,
             # only + best-effort — cannot delay or break the command (the key is
             # the skill's routing target, empty for the implicit single-instance
             # case). See emit_cmd_event / the PRIVACY + BEST-EFFORT contracts.
+            # `upload` additionally carries the file PATH (audit metadata) + a
+            # dedicated structured log line — this op is exfil-capable so EVERY
+            # outcome is traceable (the path is local metadata, never file content).
+            upload_extra = {"path": upload_path} if op == "upload" else None
+            if op == "upload":
+                log("upload", outcome=outcome, domain=domain, path=upload_path,
+                    key=(target or ""))
             emit_cmd_event(op=op, key=(target or ""), outcome=outcome,
                            duration_ms=int((time.monotonic() - t0) * 1000),
-                           domain=domain, exit_code=exit_code)
+                           domain=domain, exit_code=exit_code, extra=upload_extra)
 
         def _handle_result(self):
             body, err = self._read_body(MAX_RESULT_BODY)
