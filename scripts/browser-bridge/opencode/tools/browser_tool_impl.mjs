@@ -291,8 +291,10 @@ export function summarizeResult(op, envelope) {
   }
   if (op === "activate") {
     // Compact confirmation the tab foregrounded (metadata only — no page content).
+    // `i3` reports host-side i3 window focusing: applied | skipped | failed.
     return JSON.stringify({ ok: true, tabId: data.tabId ?? null,
       active: data.active ?? null, status: data.status ?? null,
+      i3: data.i3 ?? null,
       url: data.url ?? null, title: data.title ?? null });
   }
   return JSON.stringify(data);

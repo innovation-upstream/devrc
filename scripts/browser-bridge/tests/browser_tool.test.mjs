@@ -315,9 +315,18 @@ test("buildRequest: activate forces the env tab; bounded waitMs only; NO raw pas
 test("summarizeResult: activate returns compact metadata-only confirmation", () => {
   const s = JSON.parse(summarizeResult("activate", { data: {
     tabId: 9, windowId: 2, url: "https://x.test/", title: "X",
-    active: true, status: "complete" } }));
+    active: true, status: "complete", i3: "applied" } }));
   assert.deepEqual(s, { ok: true, tabId: 9, active: true, status: "complete",
-    url: "https://x.test/", title: "X" });
+    i3: "applied", url: "https://x.test/", title: "X" });
+});
+
+test("summarizeResult: activate i3 field defaults to null when the server omits it", () => {
+  // Off an i3 host the server may not annotate `i3`; the summary reports null,
+  // never throws.
+  const s = JSON.parse(summarizeResult("activate", { data: {
+    tabId: 9, url: "https://x.test/", title: "X", active: true,
+    status: "complete" } }));
+  assert.equal(s.i3, null);
 });
 
 test("runBrowserOp: activate reaches the bridge with the forced tab", async () => {

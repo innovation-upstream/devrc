@@ -12,6 +12,7 @@ import base64
 import hashlib
 import json
 import os
+import re
 import shutil
 import stat
 import struct
@@ -31,6 +32,11 @@ import server as S  # noqa: E402
 
 TOKEN = "test-token-abc123"
 EXT_DIR = Path(__file__).resolve().parent.parent / "extension"
+
+# Capture the REAL i3_available at import (the _disable_i3 autouse fixture stubs
+# the module attribute to False for hermeticity; this reference lets the
+# gating-logic test still exercise the genuine implementation).
+_REAL_I3_AVAILABLE = S.i3_available
 
 # The in-repo activity spool emitter (single source of truth for the v1 line
 # format). scripts/browser-bridge/tests/ -> parent.parent.parent == scripts/.
@@ -87,6 +93,16 @@ def _isolate_activity_spool(tmp_path, monkeypatch):
     monkeypatch.setenv("ACTIVITY_SPOOL_DIR", str(tmp_path / "activity-spool"))
     monkeypatch.setattr(S, "_spool_emit_mod", None)
     monkeypatch.setattr(S, "_spool_emit_tried", False)
+
+
+@pytest.fixture(autouse=True)
+def _disable_i3(monkeypatch):
+    """HERMETIC by default: neutralise host-side i3 foregrounding so no test
+    accidentally fires a real `i3-msg` (the suite runs on Zach's graphical
+    workbench where DISPLAY is set + i3-msg is on PATH). Tests that exercise the
+    i3 path re-enable it explicitly (monkeypatch S.i3_available → True + a fake
+    subprocess.run). With it False, `activate` reports i3:"skipped"."""
+    monkeypatch.setattr(S, "i3_available", lambda: False)
 
 
 @pytest.fixture
@@ -1529,6 +1545,224 @@ def test_activate_telemetry_is_metadata_only(telemetry):
         assert p["domain"] == "model-benchmarking.civit.ai"
     finally:
         ext.stop(); srv.shutdown(); srv.server_close()
+
+
+# --- `activate` host-side i3 foregrounding (untrusted-title-safe) ---------- #
+class _FakeProc:
+    def __init__(self, returncode=0):
+        self.returncode = returncode
+        self.stdout = b""
+        self.stderr = b""
+
+
+def _enable_i3(monkeypatch, returncode=0, raise_exc=None):
+    """Turn the i3 path ON and stub subprocess.run to capture the argv (never a
+    real i3-msg). Returns the list the fake appends (argv, kwargs) to per call."""
+    calls = []
+    monkeypatch.setattr(S, "i3_available", lambda: True)
+
+    def _fake_run(argv, **kw):
+        calls.append((argv, kw))
+        if raise_exc is not None:
+            raise raise_exc
+        return _FakeProc(returncode)
+
+    monkeypatch.setattr(S.subprocess, "run", _fake_run)
+    return calls
+
+
+def test_i3_focus_argv_hostile_title_is_safe():
+    """KEY SECURITY TEST: a hostile, page-controlled title (i3-criteria breakout
+    attempt, regex metachars, quotes, `;`, newlines, `$()`, backticks, very long)
+    can NEVER break out of the `title="..."` value into an i3 command. The argv is
+    a 2-element LIST (→ shell=False), constrained to class="Brave-browser", and
+    the criteria has EXACTLY the 4 structural `"`, one `[`, one `]` — a hostile
+    `"`/`]` would add more. Worst case is "wrong Brave window or none"."""
+    hostile = (
+        'evil"] exec xterm [title="pwn'      # try to close value → i3 `exec`
+        + '; rm -rf ~ | cat `id` $(whoami)'  # shell metachars (irrelevant, no shell)
+        + '\n\r\tmore .*+?[]{}^$\\ '          # control chars + regex metachars
+        + "A" * 500                             # length bomb
+    )
+    argv = S.i3_focus_argv(hostile)
+    assert isinstance(argv, list) and len(argv) == 2
+    assert argv[0] == "i3-msg"
+    crit = argv[1]
+    # Structural integrity: exactly one criteria bracket pair + the 2 quoted
+    # attribute values (class + title) → 4 double-quotes, and NO breakout.
+    assert crit.startswith('[class="Brave-browser" title="')
+    assert crit.endswith('"] focus')
+    assert crit.count('"') == 4, crit
+    assert crit.count("[") == 1 and crit.count("]") == 1, crit
+    assert "\n" not in crit and "\r" not in crit and "\t" not in crit
+    # `exec` cannot be a standalone i3 command — it only survives as inert text
+    # INSIDE the quoted title value (still between title=" and "]).
+    title_frag = crit[len('[class="Brave-browser" title="'):-len('"] focus')]
+    assert '"' not in title_frag and "]" not in title_frag and "[" not in title_frag
+    # Length is capped (the 500-char bomb cannot bloat the criteria unbounded).
+    assert len(title_frag) <= len(re.escape("A" * S.I3_TITLE_MAX)) + 40
+
+
+def test_i3_focus_argv_escapes_regex_metacharacters():
+    """A plain title with regex metacharacters is re.escape'd so it matches
+    literally (never alters i3's regex matching)."""
+    argv = S.i3_focus_argv("Model Benchmarking")
+    assert argv == ["i3-msg",
+                    '[class="Brave-browser" title="%s"] focus'
+                    % re.escape("Model Benchmarking")]
+
+
+def test_i3_focus_argv_empty_title_returns_none():
+    """No usable title (empty / only structural+control chars) → None → skip."""
+    assert S.i3_focus_argv("") is None
+    assert S.i3_focus_argv(None) is None
+    assert S.i3_focus_argv('"[]\\\n\t ') is None
+
+
+def test_activate_invokes_i3_msg_on_success(monkeypatch):
+    """On a successful activate the server runs i3-msg with the ARGV LIST
+    (shell=False), a class="Brave-browser" + re.escape'd-title criteria, and
+    `focus`; the result reports i3:"applied"."""
+    calls = _enable_i3(monkeypatch, returncode=0)
+    srv, _ = _serve()
+    ext = FakeExtension(srv, executor=lambda c: {
+        "tabId": 5, "windowId": 1, "active": True, "status": "complete",
+        "url": "https://model-benchmarking.civit.ai/run",
+        "title": "Model Benchmarking"})
+    ext.start()
+    try:
+        assert _wait_connected(srv, want=True)
+        st, body = _req(srv, "POST", "/cmd", {"op": "activate"})
+        assert st == 200
+        assert body["result"]["data"]["i3"] == "applied"
+        assert len(calls) == 1
+        argv, kw = calls[0]
+        assert argv[0] == "i3-msg"
+        assert argv[1] == ('[class="Brave-browser" title="%s"] focus'
+                           % re.escape("Model Benchmarking"))
+        assert kw.get("shell", False) is False  # NEVER a shell string
+        assert kw.get("timeout")  # bounded
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
+def test_activate_i3_skipped_when_unavailable(monkeypatch):
+    """i3-msg unavailable (headless/non-i3) → SKIPPED gracefully; the activate
+    still returns the Chrome-side result and NO subprocess is spawned."""
+    # _disable_i3 (autouse) already forces i3_available False; also make any
+    # subprocess.run a hard failure so a regression that skips the gate is caught.
+    def _boom(*a, **k):
+        raise AssertionError("i3-msg must NOT run when i3 is unavailable")
+    monkeypatch.setattr(S.subprocess, "run", _boom)
+    srv, _ = _serve()
+    ext = FakeExtension(srv, executor=lambda c: {
+        "tabId": 5, "active": True, "status": "complete",
+        "url": "https://x.test", "title": "Anything"})
+    ext.start()
+    try:
+        assert _wait_connected(srv, want=True)
+        st, body = _req(srv, "POST", "/cmd", {"op": "activate"})
+        assert st == 200
+        assert body["result"]["data"]["i3"] == "skipped"
+        assert body["result"]["data"]["tabId"] == 5  # Chrome-side result intact
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
+def test_activate_i3_skipped_when_no_title(monkeypatch):
+    """i3 available but the tab has no usable title → SKIPPED (no criteria to
+    match); no subprocess is spawned."""
+    calls = _enable_i3(monkeypatch, returncode=0)
+    srv, _ = _serve()
+    ext = FakeExtension(srv, executor=lambda c: {
+        "tabId": 5, "active": True, "status": "complete", "url": "https://x.test"})
+    ext.start()
+    try:
+        assert _wait_connected(srv, want=True)
+        st, body = _req(srv, "POST", "/cmd", {"op": "activate"})
+        assert st == 200
+        assert body["result"]["data"]["i3"] == "skipped"
+        assert calls == []
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
+def test_activate_i3_failed_on_nonzero(monkeypatch):
+    """i3-msg exits nonzero → non-fatal FAILED; the Chrome-side result still
+    returns."""
+    _enable_i3(monkeypatch, returncode=1)
+    srv, _ = _serve()
+    ext = FakeExtension(srv, executor=lambda c: {
+        "tabId": 5, "active": True, "status": "complete",
+        "url": "https://x.test", "title": "Some Tab"})
+    ext.start()
+    try:
+        assert _wait_connected(srv, want=True)
+        st, body = _req(srv, "POST", "/cmd", {"op": "activate"})
+        assert st == 200
+        assert body["result"]["data"]["i3"] == "failed"
+        assert body["result"]["data"]["tabId"] == 5
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
+def test_activate_i3_failed_on_timeout(monkeypatch):
+    """i3-msg timing out → non-fatal FAILED (the call is timeout-bounded)."""
+    _enable_i3(monkeypatch,
+               raise_exc=subprocess.TimeoutExpired(cmd="i3-msg", timeout=1.5))
+    srv, _ = _serve()
+    ext = FakeExtension(srv, executor=lambda c: {
+        "tabId": 5, "active": True, "status": "complete",
+        "url": "https://x.test", "title": "Some Tab"})
+    ext.start()
+    try:
+        assert _wait_connected(srv, want=True)
+        st, body = _req(srv, "POST", "/cmd", {"op": "activate"})
+        assert st == 200
+        assert body["result"]["data"]["i3"] == "failed"
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
+def test_activate_i3_telemetry_stays_metadata_only(telemetry, monkeypatch):
+    """Even when i3 focusing is APPLIED, the activate telemetry event carries NO
+    page title — only op / outcome / bare domain (the title can hold page
+    content; the i3 step must not leak it into activity.events)."""
+    spool_dir = telemetry
+    _enable_i3(monkeypatch, returncode=0)
+    srv, _ = _serve()
+    ext = FakeExtension(srv, executor=lambda c: {
+        "tabId": 5, "active": True, "status": "complete",
+        "url": "https://model-benchmarking.civit.ai/run",
+        "title": "SECRET PAGE CONTENT IN TITLE"})
+    ext.start()
+    try:
+        assert _wait_connected(srv, want=True)
+        st, _ = _req(srv, "POST", "/cmd", {"op": "activate"})
+        assert st == 200
+        e = _wait_events(spool_dir, 1)[0]
+        p = json.loads(e["payload"])
+        assert p["op"] == "activate" and p["outcome"] == "ok"
+        assert p["domain"] == "model-benchmarking.civit.ai"
+        # No title anywhere in the emitted event.
+        assert "SECRET" not in json.dumps(e)
+        assert "title" not in p
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
+def test_i3_available_requires_display_and_i3msg(monkeypatch):
+    """i3_available gates on BOTH a graphical session (DISPLAY) and i3-msg on
+    PATH — either missing → False (skip). Exercises the REAL implementation
+    (the autouse fixture stubs the module attribute for hermeticity)."""
+    monkeypatch.setattr(S.shutil, "which",
+                        lambda n: "/run/current-system/sw/bin/i3-msg")
+    monkeypatch.delenv("DISPLAY", raising=False)
+    assert _REAL_I3_AVAILABLE() is False          # no DISPLAY → False
+    monkeypatch.setenv("DISPLAY", ":0")
+    assert _REAL_I3_AVAILABLE() is True           # DISPLAY + i3-msg → True
+    monkeypatch.setattr(S.shutil, "which", lambda n: None)
+    assert _REAL_I3_AVAILABLE() is False          # i3-msg absent → False
 
 
 # --- THE BUG: two sessions interleave without clobbering ------------------- #
