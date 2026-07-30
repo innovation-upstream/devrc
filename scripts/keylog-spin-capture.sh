@@ -112,9 +112,10 @@ dump="$OUT/spin-$stamp.txt"
 # this mechanism exists for — but a PARTIAL dump (plain pass OK, native pass
 # dead) must not silently count as success either, since the native frames are
 # the diagnostic being sought.
-# `Thread N (idle):` is a HEADER py-spy prints unconditionally — it appears even
-# when zero Python frames resolve, and py-spy still exits 0, so a header alone
-# is NOT evidence of a usable capture. Require an actual frame line too:
+# py-spy prints a per-thread HEADER unconditionally — and when zero frames
+# resolve it still exits 0. The frameless form is `Thread N (active+gil)` (no
+# colon, no thread name); `Thread N (idle): "MainThread"` is the healthy form.
+# So a header alone is NOT evidence of a usable capture. Require a frame too:
 # py-spy indents frames as `    func (file.py:123)` / `    sym (libc.so.6)`.
 # Without this, a frameless-but-successful dump disarms the one-shot watcher on
 # a useless artifact (reproduced 6/6 against a short-lived target).
@@ -131,9 +132,10 @@ if [[ $got_stack == true && $had_failure == false ]]; then
   armed_note="complete capture — watcher disarmed (rm $SENTINEL to re-arm)"
   notify_urgency=critical
 else
-  # Bounded retry. Unbounded retries would mean a stackless dump + a
-  # non-expiring critical toast every 5 minutes, forever — strictly worse than
-  # the one-shot disarm this replaced.
+  # Bounded retry. Without the bound, a structurally-broken py-spy would write
+  # a new .failed dump AND ptrace-stop the collector every 5 minutes forever.
+  # (Those retries are silent — only a real capture or the final give-up
+  # escalates to a toast — so nothing would surface the loop either.)
   # Sanitize: under `set -u`, a garbage/multiline .failcount would make the
   # arithmetic abort BEFORE the .failed rename and before incrementing, so
   # .giveup becomes unreachable and dumps pile up every 5min instead.
@@ -143,10 +145,13 @@ else
   # .giveup unreachable. That is the exact failure this block exists to prevent.
   prev=0
   if [[ -r $FAILCOUNT ]]; then
-    prev=$(tr -cd '0-9' <"$FAILCOUNT" | head -c 6)
-    [[ -n ${prev:-} ]] || prev=0
+    # No pipe: `tr | head` can SIGPIPE (rc=141) on a large file under
+    # `pipefail`, which aborts here. Truncate with a bash slice instead.
+    prev=$(tr -cd '0-9' <"$FAILCOUNT"); prev=${prev:0:6}
   fi
-  fails=$(( prev + 1 ))
+  # 10# forces base-10: bash reads a leading zero as OCTAL, so "08" would be
+  # "value too great for base" and abort — and "007" would silently mean 7.
+  fails=$(( 10#${prev:-0} + 1 ))
   echo "$fails" >"$FAILCOUNT"
   mv "$dump" "$dump.failed"
   dump="$dump.failed"
