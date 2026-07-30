@@ -405,12 +405,29 @@ browser agent "go to news.ycombinator.com and report the top 3 story titles" \
   (`die`, model never invoked) unless the resolved `tools` map is browser-ONLY —
   `browser:true` AND every host tool (`bash`/`read`/`edit`/`write`/`webfetch`)
   present AND `false`. Any uncertainty (unparseable output, `browser` absent, a
-  host tool `true`, or a host tool absent) fails closed. Different opencode
-  versions resolve the deny differently (workbench 1.17.20, laptop 1.18.4), so this
-  is the one place the fail-closed property is *verified at runtime* rather than
-  trusted — on a version where the host-tool denial didn't take, `browser agent`
-  refuses instead of running the model unconfined. The gate runs BEFORE the tab is
-  opened, so a gate failure leaks no tab.
+  host tool `true`, or a host tool absent) fails closed. This is the one place the
+  fail-closed property is *verified at runtime* rather than trusted — on any
+  opencode where the host-tool denial didn't take, `browser agent` refuses instead
+  of running the model unconfined. The gate runs BEFORE the tab is opened, so a
+  gate failure leaks no tab. **Both hosts run opencode 1.18.4 and both resolve
+  browser-only** — there is no version-skew caveat.
+  - ⚠ **If you check the gate by hand, redirect to a FILE**
+    (`opencode debug agent browser-agent > /tmp/gate.json`), never a pipe or
+    `$(...)`: opencode doesn't reliably flush stdout before exiting into a pipe, so
+    a capture can be TRUNCATED and the gate then (correctly) fails closed with
+    `unparseable debug-agent tool set: Unterminated string…` — which looks like a
+    version problem and is not. The wrapper itself now captures to
+    `$SCRATCH/gate.json` for exactly this reason.
+- **The agent's `whoami` is narrowed.** It sees its OWN profile + the host label +
+  versions — never the operator's other profiles, never any `activeTabDomain`,
+  never the git HEAD. (Otherwise a prompt-injected page could have the model report
+  that your `banking` profile is on chase.com, then `nav` that to an attacker.) The
+  `browser whoami` CLI you run by hand is unchanged and still shows everything.
+- **No `upload` for the agent.** The autonomous model's op set is 11 ops
+  (`text`/`html`/`eval`/`nav`/`screenshot`/`frames`/`click`/`type`/`key`/
+  `activate`/`whoami`). `upload` is operator-only — you can still `browser upload`
+  by hand; the model gets `op_not_allowed:upload`. Re-enable it for the agent only
+  by an explicit `BROWSER_AGENT_ALLOWED_OPS` opt-in.
 - **Guardrails:** a step budget (`--steps`, default 12), a wall-clock `--timeout`
   (default 120s) enforced with a **process-group kill** (`setsid` + kill the whole
   group, so no opencode child survives), `--deny-domains`/`--allow-domains`

