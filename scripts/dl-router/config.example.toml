@@ -1,0 +1,74 @@
+# dl-router — copy to ~/.config/dl-router/config.toml and edit.
+#
+# NOTHING host-specific is committed: this file ships neutral placeholders only.
+# The real config, the alias database, the route log, the bearer token and the
+# qBittorrent credentials all live outside the repo.
+
+# Absolute path to the media library root. REQUIRED — the sidecar's routing
+# endpoints return 503 until it is set. This must ALSO be the Brave profile's
+# download.default_directory (see setup-brave-profile.sh): Chrome will not let
+# onDeterminingFilename escape the download root.
+library_root = "/path/to/library"
+
+# Loopback sidecar. 8790 is already taken on this host, hence 8791.
+host = "127.0.0.1"
+port = 8791
+
+# Auto-file at or above this score; below it the picker opens. Two candidates
+# within `tie_margin` of each other also go to the picker.
+auto_threshold = 0.75
+tie_margin = 0.05
+
+# Catch-all directory: where an unconfident download lands, and where Esc in
+# the picker leaves it.
+other_dir = "other"
+
+# How long the extension waits for the sidecar before falling back to its
+# cached snapshot. Chrome discards a slow suggestion, so keep this short.
+match_timeout_ms = 400
+# How far back a page-context capture may be reused for a download on the same
+# tab (correlation tier 3).
+capture_window_s = 15
+toast_ms = 8000
+
+# --- qBittorrent -------------------------------------------------------------
+# Used ONLY by `dl-route backfill`. New downloads never touch qBittorrent —
+# they are fresh files, not torrent payloads.
+#
+# Leave `username` empty and the backfill refuses to move anything: without the
+# torrent list it cannot prove a file is not a live seeding payload.
+[qbt]
+url = "http://127.0.0.1:30880"
+username = ""
+password = ""
+timeout_s = 8.0
+# Extra host-side mount roots to consider when deriving the host<->container
+# path mapping. The ancestors of library_root are always tried; this is an
+# escape hatch for unusual layouts. The mapping is derived AT RUNTIME from
+# torrents/info[].save_path — never from qBittorrent's stored config, whose
+# LastSavePath points at a mount that no longer exists.
+host_roots = []
+
+# --- yt-dlp ------------------------------------------------------------------
+# The HLS/DASH path: a stream has no single file for the download listener to
+# save, so the context menu hands the page URL to yt-dlp instead.
+[ytdlp]
+bin = "yt-dlp"
+# Reuse the browser's logged-in session. Format: "brave:<profile directory>".
+# Empty disables cookie reuse.
+cookies_from_browser = ""
+output_template = "%(title).150B [%(id)s].%(ext)s"
+max_jobs = 4
+
+# --- per-site capture rules ---------------------------------------------------
+# Adding a site is CONFIG, not code. Keys are hostnames; values are CSS
+# selectors whose text (or content/title attribute) becomes a subject tag.
+# Supported selector subset: tag, .class, #id, [attr], [attr="v"],
+# [attr^="v"], descendant combinators, and comma-separated groups.
+#
+# Generic extraction (Open Graph, JSON-LD Person/VideoObject, [itemprop=name],
+# meta keywords) always runs, so most sites need no rule at all.
+#
+# [site_rules."example-site.test"]
+# subject = ["a.performer-name", ".subject-link"]
+# tags    = [".tag-list a"]
