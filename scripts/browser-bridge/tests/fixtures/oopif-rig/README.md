@@ -74,7 +74,7 @@ $BB --tab $TAB close
 
 Frame ids are assigned per load — read them out of `frames`, don't hardcode.
 
-**Expected AFTER the nested-OOPIF fix (#211):** `frames` lists all three
+**Expected AFTER the nested-OOPIF fix (#211) — CONFIRMED live, run #2 below:** `frames` lists all three
 (`leaf.parentFrameId == mid.frameId`); `eval --frame <mid>` →
 `"http://127.0.0.1.sslip.io:8901/mid.html"`; `eval --frame <leaf>` → `"grandchild-reached"`;
 `text --frame <leaf>` contains `leaf-marker`. All exit 0.
@@ -85,6 +85,41 @@ grandchild (webNavigation is OOPIF-aware) and `text --frame <leaf>` read it fine
 `op 'eval' failed in the browser: frame_not_found:http://127.0.0.1.nip.io:8901/leaf.html`
 (exit 1) — `Target.setAutoAttach` is not recursive, so the grandchild's target never
 attached to the tab's top session. That is the defect the fix targets.
+
+### ✅ Live run #2 (2026-07-30, build `34769a0`, profile `personal`) — KNOWN-GOOD BASELINE
+
+This is what a healthy run looks like. If a future change breaks the cascade, diff against
+this.
+
+**Check A (3-level rig):** `eval --frame <leaf>` (GRANDCHILD) → `"grandchild-reached"`,
+reported url `http://127.0.0.1.nip.io:8901/leaf.html`; direct-child control → `"mid"`.
+
+**Check B (7-level deep rig):** all 7 frames enumerated, parent chain
+`0→117→118→119→120→121→122`, alternating `127.0.0.1` / `127.0.0.1.sslip.io`.
+
+| frame | depth | result |
+|---|---|---|
+| 119 | 3 | ✅ `"deep3-reached"` |
+| 121 | 5 | ✅ `"deep5-reached"` (AT the cap — resolves) |
+| 122 | 6 | ✅ `oopif_depth_cap:5` (PAST the cap — refused, loudly) |
+
+The depth-6 trace, verbatim:
+
+```
+cascade[exit=depth-cap attach=top>5B1F392F7DE254F9DECE8B1380A8211B>CD40054CBE960109E11F39916A3C40AE>DB842E0A84C5962706427874954E2992>98CEE272B651097F0CBFB4F90775F611 events=5 accepted=5 filter=on caps=d5/t50]
+```
+
+Read it: **four chained sub-session `setAutoAttach` calls** after `top` → the cascade
+descends through every permitted level. `events=5 accepted=5` with `exit=depth-cap` → all
+five nested targets were attributed correctly and the sixth was refused. **`OOPIF_MAX_DEPTH
+= 5` is therefore a measured guarantee, not a contingent one**, and `filter=on` confirms
+Chrome accepts the experimental `filter:[{type:"iframe"}]` param while real OOPIFs pass
+the type gate.
+
+**Also measured:** the ↻ reload **did** take this time (after an earlier full restart in
+the same Brave session), so ↻ is worth trying first — but only because the `cascade[…]`
+trace is a deterministic tell for whether it took (old build → bare `frame_not_found`; new
+build → error **plus** trace). Without such a tell, do the full restart.
 
 ### 📓 Live run #1 (2026-07-30, Brave restarted 16:21:35, extension written 16:01:21) — the cascade was INERT
 
@@ -105,14 +140,14 @@ proved it. Recorded here so the next run knows what "already ruled out" means:
 **never `oopif_depth_cap`** — so no level-2 session was ever *recorded*. The recursion was
 inert, not capped.
 
-**Diagnosed cause (fix in this branch, awaiting re-verification):** the own-tab check
-required `source.tabId` on every `attachedToTarget`, and Chrome appears not to populate it
-for **sub-session** events (they carry `sessionId` only). Every level-2+ event was
-therefore dropped as foreign. Ownership now falls back to **session parentage** — an event
-whose `source.sessionId` is a session this cascade itself attached is ours — which keeps
-the own-tab invariant without depending on `tabId` being present. `OOPIF_SETTLE_MS` was
-also raised (300 → 600 ms) and the quiet window now restarts on each newly-issued
-`setAutoAttach`, in case a slow second level was also being cut off.
+**Cause — CONFIRMED by run #2:** the own-tab check required `source.tabId` on every
+`attachedToTarget`, and **Chrome does not populate it for SUB-session events** (they carry
+`sessionId` only). Every level-2+ event was therefore dropped as foreign. Ownership now
+falls back to **session parentage** — an event whose `source.sessionId` is a session this
+cascade itself attached is ours — which keeps the own-tab invariant without depending on
+`tabId` being present. `OOPIF_SETTLE_MS` was also raised (300 → 600 ms) and the quiet
+window now restarts on each newly-issued `setAutoAttach`, in case a slow level was being
+cut off too. Run #2 proves the parentage fallback is what fixed it.
 
 **Every failure now carries a bounded `cascade[…]` readout**, so run #2 does not need
 guesswork. Example shape:

@@ -57,6 +57,14 @@ extension's long-poll keeps the OLD service worker permanently alive, so clickin
 doesn't take (the op still returns `unknown_op`, or `health` still shows the old
 `extension_version`), tell the user to **fully quit and reopen Brave**.
 
+**Nuance (measured 2026-07-30): a ↻ reload DID take** — swapping in a new build after an
+earlier full restart in the same Brave session. So ↻ is worth trying **first**, but only
+when you have a **deterministic tell** for whether it took. Don't reason about it; test
+it. Pick something the new build emits that the old one cannot, e.g. the nested-OOPIF
+`cascade[…]` trace: old build → a bare `frame_not_found:<url>`, new build → the same
+error **plus** the trace. That turns "did the reload take?" from an unfalsifiable guess
+into one command. With no such tell, skip ↻ and do the full restart.
+
 ## `eval` gotchas — a `null` result does NOT mean the bridge is down
 
 - **`eval` evaluates ONE EXPRESSION, not a script.** A multi-statement body
@@ -209,22 +217,21 @@ was dropped (`drop:type`/`drop:scheme`/`drop:foreign-tab`/`drop:unowned`/`drop:d
 It is **caller-facing text only** — telemetry stays metadata-only. Read it before
 theorising about a `frame_not_found`.
 
-**⚠ STATUS: live run #1 FAILED — the cascade was inert in real Brave.** Depth 1 resolved;
-depth 2+ always returned `frame_not_found` and **never** a depth cap, so no second-level
-session was ever recorded. Diagnosed cause: the own-tab check required `source.tabId`,
-which Chrome appears not to populate on **sub-session** events. Ownership now falls back
-to **session parentage** (an event whose `source.sessionId` is a session this cascade
-attached is ours), the settle window was raised and now restarts per descend, and the
-diagnostics above were added. **That fix is NOT yet re-verified.** Until run #2 passes,
-assume `eval --frame`/`upload --frame` reach a DIRECT child OOPIF only. Run
-`tests/fixtures/oopif-rig/` Check A and Check B (see its README, which records run #1 and
-how to read the readout).
+**✅ LIVE-VERIFIED against real Brave** (`tests/fixtures/oopif-rig/`, both checks). A
+grandchild OOPIF evaluates correctly, and on the 7-level deep rig depth 3 and depth 5
+resolve while depth 6 is refused with `oopif_depth_cap:5` and a full trace showing four
+chained sub-session auto-attaches. **`OOPIF_MAX_DEPTH = 5` is a real, measured guarantee**
+— not a contingent one.
 
-**⚠ Also unconfirmed:** whether `OOPIF_MAX_DEPTH` binds at all depends on Chrome tagging
-sub-session events with the parent `sessionId`. If it does not, every target reads as
-depth 1 and the depth cap silently stops binding (still bounded by 50 targets / 5 s). It
-can NOT mis-route your JS — selection is by URL equality and never consults depth.
-Check B settles it.
+**📌 Discovered Chrome behaviour (cost a full verify round — remember it):
+Chrome does NOT populate `source.tabId` on SUB-session `Target.attachedToTarget` events.**
+They carry `sessionId` only. An own-tab check that requires `tabId` therefore silently
+eats every level-2+ event and the whole cascade goes **inert** — it returns
+`frame_not_found` and *never* a depth cap, because no nested session is ever recorded.
+Ownership is consequently proven by **session parentage**: an event whose
+`source.sessionId` is a session this cascade itself attached is ours. `tabId` stays
+authoritative when present; an event proving neither is dropped. If you ever add a
+listener-side own-tab gate to a flat-mode CDP cascade, this is the trap.
 
 Result payloads land under `.result.data` in the JSON (the envelope is
 `{"ok":true,"result":{"id","ok","data":{...}}}`).

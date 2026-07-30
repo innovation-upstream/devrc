@@ -310,27 +310,36 @@ Brave.
 depth, and the drop reason. Bounded by construction, so a frame-spamming page cannot blow
 up the error. It is **caller-facing error text only** (frame URLs appear, as they already
 do in `ambiguous_frame`) and is **never** fed to telemetry, which stays metadata-only.
-This exists because live run #1 failed and produced nothing to reason from.
+This exists because live run #1 failed and produced nothing to reason from; on run #2 the
+trace answered the depth question in ONE command instead of another restart cycle. Keep
+it — a bounded self-describing failure is the difference between a verify round and a
+guess.
 
-**⚠ STATUS — live run #1 FAILED; the current fix is UNVERIFIED.** With a
-confirmed-fresh extension, depth 1 resolved but depth 2+ always returned
-`frame_not_found` and **never** `oopif_depth_cap` — no second-level session was ever
-recorded, i.e. the recursion was **inert, not capped**. That ruled out the type filter and
-the scheme check (depth 1 works, so OOPIF targets really are typed `iframe`) and pointed
-at the own-tab check: Chrome appears not to populate `source.tabId` on sub-session events,
-so every level-2+ event was dropped as foreign. The parentage fallback above is the fix,
-plus the raised/restarting settle window — **neither is re-verified against real Brave.**
-Until run #2 passes, treat `eval`/`upload --frame` as reaching a DIRECT child OOPIF only.
+**✅ LIVE-VERIFIED (run #2, real Brave).** Check A: a grandchild OOPIF evaluates
+correctly. Check B (7-level deep rig): depth 3 → `"deep3-reached"`, depth 5 →
+`"deep5-reached"`, depth 6 → `oopif_depth_cap:5` with `exit=depth-cap events=5 accepted=5`
+and **four chained sub-session auto-attaches** visible in the trace's `attach=` chain. So
+the cascade descends through every permitted level, all five were attributed correctly,
+and the sixth was refused: **`OOPIF_MAX_DEPTH = 5` is a real, measured guarantee, not a
+contingent one.** `filter=on` in that trace also confirms Chrome accepts the experimental
+`filter:[{type:"iframe"}]` param and that real OOPIFs pass the type gate.
 
-**⚠ Still unconfirmed — depth attribution.** Depth comes from flat mode tagging a
-sub-session event's `source` with the parent `sessionId`. If Chrome does NOT tag it, every
-target reads as depth 1, `depthCapHit` is never set, and **`OOPIF_MAX_DEPTH` silently
-stops binding** — the descent is then bounded only by `OOPIF_MAX_TARGETS` and
-`OOPIF_WAIT_MS`. It canNOT mis-route JS (selection is by URL equality and never consults
-`depth`). `tests/fixtures/oopif-rig/` carries two fixtures: a 3-domain grandchild rig
-(Check A, which also confirms the `iframe` type assumption by construction) and a 7-level
+**📌 Discovered Chrome behaviour — the durable lesson from this arc.**
+**Chrome does NOT populate `source.tabId` on SUB-session `Target.attachedToTarget`
+events**; they carry `sessionId` only. This is not documented anywhere obvious and it cost
+a full verify round: the first implementation's fail-closed own-tab check therefore
+dropped *every* level-2+ event, and the cascade went **inert** — returning
+`frame_not_found` and **never** a depth cap, because no nested session was ever recorded.
+"Inert, not capped" was the diagnostic signature. Hence ownership is proven by **session
+parentage** (`source.sessionId` ∈ sessions this cascade attached), with `tabId` still
+authoritative when present. **If you ever add a listener-side own-tab gate to a flat-mode
+CDP cascade, this is the trap.**
+
+`tests/fixtures/oopif-rig/` carries both fixtures — a 3-domain grandchild rig (Check A,
+which also confirms the `iframe` type assumption by construction) and a 7-level
 alternating-domain "deep" rig (Check B) that discriminates a binding depth cap from a
-broken one. Its README records run #1 in full and explains how to read the new readout.
+broken one. Its README records **both** runs — #1's failure and #2's known-good baseline
+with the real trace — plus how to read the readout.
 
 Everything is bounded by the per-op CDP timeouts (a bad frame fails fast, never wedges),
 and the never-silent-null contract holds: a genuine `null`/`undefined` is returned as a
