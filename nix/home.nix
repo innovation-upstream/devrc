@@ -403,6 +403,20 @@ in
     recursive = true;
     force = true;
   };
+  # `browser` skill — the DELIBERATE EXCEPTION to the store-symlink pattern above.
+  # Its source of truth is the browser-bridge subsystem in THIS repo
+  # (scripts/browser-bridge/{SKILL.md,browser}), NOT devrc/claude/skills/. So rather
+  # than copy those into the store we point ~/.claude/skills/browser/ at the live,
+  # MUTABLE repo checkout via mkOutOfStoreSymlink — the skill then always tracks the
+  # working tree (editable in place; a SKILL.md/CLI edit shows up with no switch).
+  # Ships to both hosts declaratively, replacing the previously HAND-MADE symlinks.
+  # Additive to ship.sh's skills rsync (no-delete; identical symlinks on both hosts
+  # are a no-op). One-time on each host: `rm ~/.claude/skills/browser/{SKILL.md,browser}`
+  # if the old manual symlinks exist, else the first switch reports "would be clobbered".
+  home.file.".claude/skills/browser/SKILL.md".source =
+    config.lib.file.mkOutOfStoreSymlink "${workspace}/devrc/scripts/browser-bridge/SKILL.md";
+  home.file.".claude/skills/browser/browser".source =
+    config.lib.file.mkOutOfStoreSymlink "${workspace}/devrc/scripts/browser-bridge/browser";
   # Claude Code hooks managed here (the script only — the settings.json
   # registration is per-host/unmanaged, like bash-guard.py). audit-pr-nudge fires
   # PostToolUse on `gh pr create` and injects context so Claude reflexively offers
