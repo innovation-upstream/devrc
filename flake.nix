@@ -68,7 +68,12 @@
             # git: verify-agent-work tests drive real temp git repos in-sandbox.
             # util-linux: the browser-agent wrapper uses `setsid` for its
             # process-group timeout kill (test_browser_agent.py exercises it).
-            nativeBuildInputs = [ pyEnv pkgs.bash pkgs.ripgrep pkgs.git pkgs.util-linux ];
+            # jq + gnugrep: task-spec-drafter's behavioral tests
+            # (test_severity_and_gate_skip.py) source drafter.sh and exercise the
+            # real safety_gate/severity_tag/build_summary via bash+jq+grep; without
+            # these on PATH the suite pytest-skips and the gate goes green without
+            # ever running the invariant (e.g. "TASK-with-risk STILL escalates").
+            nativeBuildInputs = [ pyEnv pkgs.bash pkgs.ripgrep pkgs.git pkgs.util-linux pkgs.jq pkgs.gnugrep ];
           }
           ''
             cp -r ${./.} src
