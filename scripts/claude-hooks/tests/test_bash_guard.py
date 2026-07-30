@@ -67,6 +67,26 @@ CASES = [
     ("real add -A after a commit",    f'git commit -m "ok" && {ADDA}', True),
     ("explicit path staging",         "git a" + "dd clusters/foo.yaml", False),
 
+    # --- blind-stage forms that evaded the whitespace-bounded match ----
+    # Each was verified to stage every file in a throwaway repo (round-4 audit).
+    ("blind: double-quoted -A",       'git a' + 'dd "-A"', True),
+    ("blind: single-quoted -A",       "git a" + "dd '-A'", True),
+    ("blind: quoted --all",           "git a" + "dd '--all'", True),
+    ("blind: bundled -Av",            "git a" + "dd -Av", True),
+    ("blind: bundled -vA",            "git a" + "dd -vA", True),
+    ("blind: quoted dot",             'git a' + 'dd "."', True),
+    ("blind: single-quoted dot",      "git a" + "dd '.'", True),
+    ("blind: --no-ignore-removal",    "git a" + "dd --no-ignore-removal", True),
+    ("blind: root pathspec :/",       "git a" + "dd :/", True),
+    # ...without over-blocking ordinary staging
+    ("ok: -p patch mode",             "git a" + "dd -p", False),
+    ("ok: -u with a path",            "git a" + "dd -u src/", False),
+    ("ok: -N intent-to-add",          "git a" + "dd -N newfile.txt", False),
+    ("ok: relative path ./src",       "git a" + "dd ./src/main.go", False),
+    ("ok: quoted path with spaces",   'git a' + 'dd "my file.txt"', False),
+    ("ok: path containing a dot",     "git a" + "dd foo.yaml", False),
+    ("ok: file named A",              "git a" + "dd A", False),
+
     # --- was-a-bypass under _strip_message_text: MUST STAY BLOCKED ------
     # round 1: same-tag heredoc / substitution / stale offsets / escaped quote
     ("was-bypass: 2nd heredoc same tag",

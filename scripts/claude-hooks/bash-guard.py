@@ -38,10 +38,24 @@ security guard with a rotating cast of bypasses.
 import sys, json, re, ipaddress
 
 
+# Blind-stage forms. Quotes are STRIPPED from the argument text before matching,
+# because the shell removes them too: `git add "-A"`, `git add '-A'` and
+# `git add "."` all stage everything, but were invisible to a match that
+# required whitespace around the flag (each verified to stage every file).
+# `-[A-Za-z]*A[A-Za-z]*` catches BUNDLED short flags (`-Av`, `-vA`, `-uA`) --
+# `-A` is the only uppercase-A short option `git add` has, so this cannot
+# collide with -n/-v/-f/-i/-p/-e/-u/-N.
+# `--no-ignore-removal` is git's documented alias for `--all`.
+# Erring toward over-matching is deliberate: this guard fails CLOSED, and a
+# false positive costs one `git add <path>` retype.
+_BLIND_FLAG = re.compile(r"(^|\s)(-[A-Za-z]*A[A-Za-z]*|--all|--no-ignore-removal)(\s|$)")
+_BLIND_PATH = re.compile(r"(^|\s)(\.|:/)(\s|$)")
+
+
 def check_git_add_all(cmd):
     for m in re.finditer(r"\bgit\s+add\b([^&|;\n]*)", cmd):
-        args = m.group(1)
-        if re.search(r"(^|\s)(-A|--all)(\s|$)", args) or re.search(r"(^|\s)\.(\s|$)", args):
+        args = m.group(1).replace('"', "").replace("'", "")
+        if _BLIND_FLAG.search(args) or _BLIND_PATH.search(args):
             return ("`git add -A` / `git add --all` / `git add .` is blocked by your RULES "
                     "(never blind-stage — it sweeps up unrelated working-tree changes and has "
                     "caused near-miss leaks). Stage specific paths instead: `git add <path> ...`. "
