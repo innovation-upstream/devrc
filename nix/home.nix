@@ -406,10 +406,10 @@ in
   # bash-guard — MANAGED (was per-host/unmanaged, so the deterministic
   # enforcement of the 🔴 Git Workflow rules in RULES.md DRIFTED between hosts:
   # workbench had 6 checks, the laptop a Jun-23 copy with 4). Edit
-  # devrc/scripts/claude-hooks/ then switch. `force = true` is REQUIRED: both
-  # hosts currently have this path as a hand-placed regular file, which would
-  # otherwise abort the switch in checkLinkTargets (cf. dropStaleClaudeNotify
-  # below, the same collision for claude-notify.py). Registration in
+  # devrc/scripts/claude-hooks/ then switch. `force = true` alone is NOT enough
+  # to displace a hand-placed regular file at this path — the switch returns
+  # rc=0 and silently leaves it unmanaged. `dropStaleClaudeHooks` below is what
+  # actually removes it; see the measurement in that comment. Registration in
   # ~/.claude/settings.json stays per-host and needs no change — it already
   # invokes `python3 ~/.claude/hooks/bash-guard.py`, which this symlink backs.
   home.file.".claude/hooks/bash-guard.py" = {
@@ -457,15 +457,25 @@ in
     source = ../scripts/claude-hooks/claude-notify.py;
   };
 
-  # This hook previously existed only as a PLAIN local file on the laptop
-  # (~/.claude/hooks/claude-notify.py + test_claude_notify.py). home-manager's
-  # store symlink above would collide with that non-symlink and fail
-  # checkLinkTargets on the first switch. Remove the stale NON-symlink copies
-  # (and the now-managed-elsewhere test) before the link check runs. Guarded on
-  # `! -L` so a legitimately-managed store symlink is never touched — this only
-  # ever removes a hand-placed regular file.
-  home.activation.dropStaleClaudeNotify = lib.hm.dag.entryBefore ["checkLinkTargets"] ''
-    for f in "$HOME/.claude/hooks/claude-notify.py" "$HOME/.claude/hooks/test_claude_notify.py"; do
+  # These hooks previously existed as PLAIN local files (claude-notify.py +
+  # test_claude_notify.py on the laptop; bash-guard.py on BOTH hosts). A
+  # hand-placed regular file at a managed path is NOT replaced by the store
+  # symlink — `force = true` is NOT sufficient. Measured 2026-07-30 on
+  # workbench: two consecutive `home-manager switch` runs returned rc=0 and
+  # printed "Creating home file links", yet ~/.claude/hooks/bash-guard.py stayed
+  # a regular file; `mv`-ing it away and re-switching produced the symlink
+  # immediately. So the file silently stays UNMANAGED and drifts — exactly the
+  # failure this hook was made managed to end (workbench had 6 checks, the
+  # laptop a months-old copy with 4).
+  #
+  # Removing the stale non-symlink BEFORE checkLinkTargets is what actually
+  # works. Guarded on `! -L` so a legitimately-managed store symlink is never
+  # touched — this only ever removes a hand-placed regular file, whose content
+  # is in git anyway.
+  home.activation.dropStaleClaudeHooks = lib.hm.dag.entryBefore ["checkLinkTargets"] ''
+    for f in "$HOME/.claude/hooks/claude-notify.py" \
+             "$HOME/.claude/hooks/test_claude_notify.py" \
+             "$HOME/.claude/hooks/bash-guard.py"; do
       if [ -e "$f" ] && [ ! -L "$f" ]; then
         $DRY_RUN_CMD rm -f "$f"
       fi
