@@ -30,7 +30,9 @@ def _stub_nix(dirpath: Path):
     """A fake `nix`: `build` echoes $FAKE_BROWSERS, `eval` prints a version."""
     p = dirpath / "nix"
     p.write_text(
-        "#!/usr/bin/env bash\n"
+        # /bin/sh (not `#!/usr/bin/env bash`) so the stub also execs in the nix
+        # build sandbox, which has no /usr/bin/env; body is POSIX-sh compatible.
+        "#!/bin/sh\n"
         'case "$1" in\n'
         '  build) [ -n "${FAKE_BROWSERS:-}" ] && echo "$FAKE_BROWSERS" ;;\n'
         '  eval)  echo "1.2.3" ;;\n'

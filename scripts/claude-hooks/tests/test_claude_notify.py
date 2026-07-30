@@ -42,7 +42,9 @@ def make_env(tmp):
     for name in ("dunstify", "notify-send", "curl"):
         p = os.path.join(bindir, name)
         with open(p, "w") as f:
-            f.write('#!/usr/bin/env bash\n'
+            # /bin/sh (not /usr/bin/env bash) so the stub also execs in the nix
+            # build sandbox, which has no /usr/bin/env; the body is POSIX-sh.
+            f.write('#!/bin/sh\n'
                     'echo "%s $*" >> "%s"\nexit 0\n' % (name, stub_log))
         os.chmod(p, 0o755)
 

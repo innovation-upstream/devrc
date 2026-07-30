@@ -22,6 +22,7 @@ import os
 import shutil
 import stat
 import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -44,6 +45,11 @@ SCHEMA_OK = {"answer": "The top 3 stories are A, B, C.",
 # Fixture builders — write tiny executable stand-ins into a tmp bin dir.
 # --------------------------------------------------------------------------- #
 def _write_exec(path: Path, content: str):
+    # The fake stdlib-only python stubs carry a `#!/usr/bin/env python3` shebang,
+    # but the nix build sandbox has no /usr/bin/env — point them at the running
+    # interpreter so they exec both in the sandbox AND on the dev host.
+    content = content.replace(
+        "#!/usr/bin/env python3\n", f"#!{sys.executable}\n", 1)
     path.write_text(content)
     path.chmod(path.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
     return path
