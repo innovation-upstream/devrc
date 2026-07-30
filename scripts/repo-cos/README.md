@@ -169,20 +169,36 @@ it only collects the full proposal; the **only new network** is the clawgate POS
   logged with its rule) and `clawgate.normalize_tags` (clawgate's grammar: lowercase,
   `[a-z0-9._/-]`, ≤1 `:`, ≤64 runes, ≤20 tags; anything invalid is **dropped, not mangled**).
   Measured over `tests/fixtures/initiatives_current_slugs.txt` — a **hand-refreshed snapshot**
-  of `initiatives.current`, last taken 2026-07-30 at **140 slugs**: 10 denylist drops + 3 lost
-  to the 64-rune cap → **127 taggable**. Those numbers are pinned by `test_routing.py`, but
-  **against the snapshot, not the live store**: the suite is deliberately hermetic (see
-  `tests/conftest.py`), so no test can tell you the fixture has gone stale — it already drifted
-  once (139 → 140) with everything green. Re-run the command in the fixture header to refresh
-  it, then re-state these counts.
-- **🔴 An emitted tag always equals its ledger slug, byte-for-byte.** This is enforced
-  **structurally** in `clawgate.build_tags`: the normalized tag is compared against the exact
-  `initiative:<slug>` we asked for and **dropped on any difference**. The denylist alone is not
-  sufficient — it polices only `normalize_tag`'s lowercasing (`not-lowercase`), while the same
-  function also collapses whitespace to `-` and strips leading/trailing `-`, so a slug like
-  `foo bar` or `trailing-dash-` would clear the denylist and be emitted **rewritten**, joining
-  to nothing. No live slug has that shape today, which is precisely why the guarantee must not
-  rest on a snapshot of the store. A missing tag is cheap; a tag that joins to nothing is a lie.
+  of `initiatives.current`, last taken 2026-07-30 at **142 slugs**: 10 denylist drops → 132 pass
+  the denylist → 3 more lost to the 64-rune cap → **129 taggable** (and 129 actually emitted by
+  `build_tags`, pinned on the positive side too). Those numbers are pinned by `test_routing.py`
+  **against the snapshot, not the live store**: the default suite is deliberately hermetic (see
+  `tests/conftest.py`), so no ordinary test can tell you the fixture has gone stale — it drifted
+  twice within two days of a refresh (139 → 140 → 142), green each time. So there is now an
+  **opt-in live drift check**, skipped by default:
+
+  ```sh
+  # reads initiatives.current and diffs it against the fixture, naming the slugs that moved
+  REPO_COS_LIVE_DRIFT_CHECK=1 python -m pytest scripts/repo-cos/tests/test_routing.py -q
+  # kubeconfig defaults to ~/workspace/homelab-talos/homelab-kubeconfig; override:
+  REPO_COS_LIVE_DRIFT_CHECK=1 REPO_COS_KUBECONFIG=/path/to/kubeconfig python -m pytest ...
+  ```
+
+  When it fails, refresh with the command in the fixture header, then re-state these counts.
+- **🔴 An emitted tag always equals its ledger slug, byte-for-byte** (byte-equal to the
+  **stripped** slug — `routing.taggable_slug` and `build_tags` both `.strip()`, so a stored
+  slug with surrounding whitespace emits `initiative:<stripped>`; nothing else may alter it).
+  This is enforced **structurally** by `clawgate.guard_tags`: each normalized tag is compared
+  against the exact tag we asked for and **dropped on any difference**. The denylist alone is
+  not sufficient — it polices only `normalize_tag`'s lowercasing (`not-lowercase`), while the
+  same function also collapses whitespace to `-` and strips leading/trailing `-`, so a slug
+  like `foo bar` or `trailing-dash-` would clear the denylist and be emitted **rewritten**,
+  joining to nothing. No live slug has that shape today, which is precisely why the guarantee
+  must not rest on a snapshot of the store. A missing tag is cheap; a tag that joins to nothing
+  is a lie. The guard is **per tag**: one bad tag costs only itself, so a second namespace
+  (see the `runbook:` seam) can be added without silently deleting the `initiative:` tag on
+  every Task. Each drop logs **exactly one** accurate reason (the grammar's, or the join
+  violation's — never both).
 - **🔴 Tagging must never cost an approval.** Because suppression is POST-success-gated, a
   tag-induced `400` would silently lose the approval for a week. Backstop: **HTTP `400` on a
   tagged POST retries EXACTLY ONCE with the `tags` key removed** (both the failure and the
@@ -193,7 +209,9 @@ it only collects the full proposal; the **only new network** is the clawgate POS
   call with no tags sends the byte-identical pre-tags payload.
 - **No `runbook:` tags.** `runbook:` is hard-validated by clawgate (unknown name → `400`),
   there is no machine endpoint to list valid names, and exactly one runbook exists. A marked
-  seam in `clawgate.build_tags` documents where one would slot in.
+  seam in `clawgate.build_tags` documents where one would slot in — and since the join guard
+  is per-tag, following it literally now emits both tags instead of dropping both
+  (`test_guard_tags_keeps_a_second_namespace_and_drops_only_the_offender`).
 
 ## Usage
 
@@ -281,5 +299,7 @@ suites drive the real `cmd_scan`, so `tests/conftest.py` carries an **autouse fi
 stubs `load_current` to an empty store** for every test; `test_routing.py` re-patches it
 in-test where it wants a fixture store. Measured: 11 real store-read attempts without the
 fixture, 0 with it. `tests/fixtures/initiatives_current_slugs.txt` is a checked-in
-**snapshot** of the real slug vocabulary (never a live read) used to pin the denylist's
-corpus-wide properties; refresh it with the psql command in its header.
+**snapshot** of the real slug vocabulary (never a live read in a default run) used to pin the
+denylist's corpus-wide properties; refresh it with the psql command in its header. The ONE test
+that reads the live store — `test_fixture_matches_the_live_initiatives_store`, the drift check —
+is **skipped unless `REPO_COS_LIVE_DRIFT_CHECK=1`** is set, so the default run stays network-free.

@@ -743,7 +743,10 @@ _SLUGS_THE_GRAMMAR_WOULD_REWRITE = (
     "foo bar",          # whitespace → '-'  (→ initiative:foo-bar)
     "x  y",             # collapsed run of whitespace
     "trailing-dash-",   # .strip('-')        (→ initiative:trailing-dash)
-    "-leading-dash",    # .strip('-') on the other end
+    "-leading-dash",    # NOT a rewrite: .strip('-') runs on the WHOLE tag, whose first
+                        # char is the 'i' of `initiative:`, so this one EMITS VERBATIM
+                        # as `initiative:-leading-dash`. Kept in the table as the
+                        # asymmetry's negative control (the trailing twin IS rewritten).
     "tab\tseparated",   # _WS_RE covers all whitespace, not just ' '
     " padded-slug ",    # NB: build_tags strips first, so this one is NOT a rewrite
 )
@@ -762,10 +765,22 @@ def test_build_tags_emitted_tag_always_equals_its_slug_exactly():
     """🔴 THE INVARIANT, as a PROPERTY over every shape above: build_tags returns either
     NOTHING or exactly `[f"initiative:{slug}"]`. It may never return a third thing (a
     rewritten tag), because the initiatives-side join matches on the slug byte-for-byte
-    and a rewritten tag joins to nothing while looking perfectly healthy."""
+    and a rewritten tag joins to nothing while looking perfectly healthy.
+
+    NB the `.strip()`: `build_tags` (and `routing.taggable_slug`) strip the slug before
+    building the tag, so the promise is byte-equality with the STRIPPED slug — which is
+    why `" padded-slug "` is in the table above yet legitimately emits
+    `initiative:padded-slug`. That is the ONE normalization the guard permits."""
     for slug in _SLUGS_THE_GRAMMAR_WOULD_REWRITE + _SLUGS_THAT_MUST_STILL_TAG:
         tags = clawgate.build_tags({"initiative": slug})
         assert tags in ([], [f"initiative:{slug.strip()}"]), (slug, tags)
+    # 🔴 THE POSITIVE HALF — without it the assertion above is satisfiable by a guard that
+    # emits NOTHING, EVER. (Verified: mutating build_tags to `return []` for any slug
+    # containing '/' or '_' left the whole suite green before this loop existed. A guard
+    # that silently over-drops is undetectable in production — a dropped tag is silent BY
+    # DESIGN — so the scalpel-not-mute-button property has to be pinned in the tests.)
+    for slug in _SLUGS_THAT_MUST_STILL_TAG:
+        assert clawgate.build_tags({"initiative": slug}) == [f"initiative:{slug}"], slug
 
 
 def test_build_tags_drops_every_slug_the_grammar_would_rewrite():
@@ -800,13 +815,75 @@ def test_build_tags_logs_why_it_dropped_a_rewritten_tag(capsys):
 
 
 def test_build_tags_guard_never_raises_and_never_costs_the_post():
-    # The load-bearing contract: the guard may only ever DROP a tag. It must not raise
-    # (post_task would never be reached) — a dropped tag is fine, a failed POST is not.
-    for slug in _SLUGS_THE_GRAMMAR_WOULD_REWRITE:
-        assert isinstance(clawgate.build_tags({"initiative": slug}), list)
+    """The load-bearing contract: the guard may only ever DROP a tag — never raise, and
+    never make the POST fail. The name used to overclaim (it asserted `isinstance(..., list)`
+    and never went near `post_task`), so the post half is now actually exercised: every
+    guarded shape is carried through the REAL post_task and must still produce a Task id."""
+    posted = []
+
+    def fake_post(url, payload, token, timeout=15):
+        posted.append(dict(payload))
+        return json.dumps({"id": 42})
+
+    for slug in _SLUGS_THE_GRAMMAR_WOULD_REWRITE + _SLUGS_THAT_MUST_STILL_TAG:
+        tags = clawgate.build_tags({"initiative": slug})
+        assert isinstance(tags, list)
+        tid = clawgate.post_task("d", "b", tags=tags, creds=_CREDS, _post=fake_post)
+        assert tid == 42, slug            # the approval is never lost to a tag
+        for tag in posted[-1].get("tags", []):
+            _assert_valid_tag(tag)        # nothing that would 400 ever reaches the wire
 
 
-# ---- 7c. post_task payload + back-compat --------------------------------------------
+# ---- 7c-bis. the guard is PER TAG (the `runbook:` seam is not a trap) ----------------
+
+def test_guard_tags_keeps_a_second_namespace_and_drops_only_the_offender():
+    """Following the `runbook:` seam literally — appending `f"runbook:{name}"` to `raw` —
+    must emit BOTH tags. Under the original all-or-nothing guard (whole normalized list
+    vs whole wanted list) a two-namespace `raw` compared unequal and dropped EVERY tag on
+    EVERY Task, silently. Per-tag, one bad tag costs only itself."""
+    both = clawgate.guard_tags(["initiative:remix-composer", "runbook:perf-deep-dive"])
+    assert both == ["initiative:remix-composer", "runbook:perf-deep-dive"]  # sorted
+    for tag in both:
+        _assert_valid_tag(tag)
+    # a rewritable tag alongside a good one: only the offender is dropped …
+    assert clawgate.guard_tags(["initiative:foo bar", "runbook:perf-deep-dive"]) == [
+        "runbook:perf-deep-dive"]
+    # … in either order, and for a grammar rejection (over-long) too.
+    assert clawgate.guard_tags(["runbook:perf-deep-dive", "initiative:" + "x" * 60]) == [
+        "runbook:perf-deep-dive"]
+    # and the single-tag behaviour build_tags relies on is unchanged.
+    assert clawgate.guard_tags(["initiative:foo bar"]) == []
+    assert clawgate.guard_tags([]) == []
+    assert clawgate.guard_tags(None) == []
+
+
+def test_guard_tags_drop_logs_one_accurate_reason_not_two(capsys):
+    """A >64-rune tag used to log BOTH the cap message and the join-violation message,
+    mis-attributing a length drop to the join guard. 3 live slugs hit this every weekly
+    run, and that log line is the only trace the drop leaves."""
+    assert clawgate.guard_tags(["initiative:" + "x" * 60]) == []
+    err = capsys.readouterr().err
+    assert "runes exceeds" in err
+    assert "must equal its" not in err, err        # NOT the join-violation message
+    assert err.count("dropping tag") == 1, err
+    # the rewrite case logs the join violation, and only that.
+    assert clawgate.guard_tags(["initiative:foo bar"]) == []
+    err = capsys.readouterr().err
+    assert "initiative:foo-bar" in err
+    assert "runes exceeds" not in err
+    assert err.count("dropping tag") == 1, err
+
+
+def test_build_tags_over_long_slug_logs_only_the_cap_reason(capsys):
+    # Same honesty fix, through the REAL emission path (a real store slug, 59 chars).
+    assert clawgate.build_tags(
+        {"initiative": "alert-civitai-disk-investigate-prioritize-remediation-space"}) == []
+    err = capsys.readouterr().err
+    assert "runes exceeds" in err
+    assert "must equal its" not in err, err
+
+
+# ---- 7d. post_task payload + back-compat --------------------------------------------
 
 def test_post_task_includes_tags_when_passed():
     seen = {}
@@ -832,7 +909,7 @@ def test_post_task_omits_tags_key_entirely_when_empty():
     assert seen["payload"] == {"directory": "d", "body": "b"}   # invalid tag → key absent
 
 
-# ---- 7d. FAIL-OPEN: a tag must never cost an approval --------------------------------
+# ---- 7e. FAIL-OPEN: a tag must never cost an approval --------------------------------
 
 def _http_error(code):
     import urllib.error
@@ -935,7 +1012,7 @@ def test_post_task_retry_that_also_fails_returns_none():
     assert len(calls) == 2   # tagged + one untagged retry, then give up
 
 
-# ---- 7e. PERSISTENCE: last_emailed.json round-trips the slug -------------------------
+# ---- 7f. PERSISTENCE: last_emailed.json round-trips the slug -------------------------
 
 def test_write_last_emailed_persists_the_initiative_slug(tmp_path):
     path = tmp_path / "last_emailed.json"
@@ -970,7 +1047,7 @@ def test_write_last_emailed_skips_attaching_on_a_MISALIGNED_related_list(tmp_pat
     assert "1 slug(s) for 2 proposal(s)" in err
 
 
-# ---- 7e-bis. attach_related: the positional-misalignment guard, directly -------------
+# ---- 7f-bis. attach_related: the positional-misalignment guard, directly -------------
 
 def test_attach_related_stamps_when_lengths_match():
     props = [{"title": "a"}, {"title": "b"}]
@@ -1024,7 +1101,7 @@ def test_approve_payload_on_an_OLD_last_emailed_file_yields_no_tag():
     assert clawgate.build_tags(approvals[0]) == []
 
 
-# ---- 7f. approve path end-to-end: tagged vs untagged ---------------------------------
+# ---- 7g. approve path end-to-end: tagged vs untagged ---------------------------------
 
 def _fake_clawgate(captured, *, tid=4242):
     import types

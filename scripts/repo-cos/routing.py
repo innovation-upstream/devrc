@@ -162,6 +162,11 @@ def related_for(proposals) -> list:
 # of `initiative:<slug>`. `clawgate.normalize_tag` lowercases, so anything not already
 # all-lowercase is dropped (`not-lowercase`) rather than mangled — that keeps the emitted
 # tag byte-equal to the ledger slug, which is what the initiatives-side join relies on.
+# ONE deliberate exception, stated precisely: `taggable_slug` `.strip()`s, so a stored slug
+# with surrounding whitespace is emitted as its STRIPPED form. "Byte-equal" everywhere in
+# this module and in clawgate.build_tags means byte-equal to the STRIPPED ledger slug.
+# (`clawgate.guard_tags` then enforces that nothing else — case, inner whitespace, a `-`
+# strip — rewrites the tag; a rewritten tag is dropped, never emitted.)
 
 # A ClickUp/opaque task id: starts with a digit, >=8 alphanumerics, no separators.
 # Matches 868j34n9y / 868kf6w7r / 868f9pd14; does NOT match 0313, 504, or v0.1.73.

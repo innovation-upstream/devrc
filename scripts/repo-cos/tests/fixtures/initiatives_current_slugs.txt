@@ -1,29 +1,28 @@
 # SNAPSHOT of `select slug from initiatives.current order by 1;` — the REAL, MINED
 # initiative vocabulary the `initiative:<slug>` tag is drawn from.
 #
-# Taken 2026-07-30 (140 slugs). Regenerate with:
+# Taken 2026-07-30 (142 slugs). Regenerate with:
 #   kubectl --kubeconfig ~/workspace/homelab-talos/homelab-kubeconfig -n mailbox \
 #     exec mailbox-postgres-0 -- sh -c 'psql -U ${POSTGRES_USER:-mail} \
 #     -d ${POSTGRES_DB:-mail} -tAc "select slug from initiatives.current order by 1;"'
 #
-# ⚠ This is a SNAPSHOT, refreshed BY HAND. Nothing in the suite reads the live store
-# (see tests/conftest.py — the whole run is deliberately hermetic), so no test can tell
-# you this file has gone stale; only re-running the command above can. Expect drift: the
-# store is mined continuously and grew by one slug between the feature landing and its
-# first follow-up. When you refresh it, re-state the counts in test_routing.py's corpus
-# tests and in README.md rather than letting them silently disagree with reality.
+# ⚠ This is a SNAPSHOT, refreshed BY HAND — and it has now gone stale TWICE within two
+# days of being refreshed (139 → 140 → 142), each time with the whole suite green. The
+# default run is hermetic (see tests/conftest.py) so no ordinary test can tell you this
+# file is behind. What CAN: the OPT-IN drift check
+#
+#   REPO_COS_LIVE_DRIFT_CHECK=1 python -m pytest scripts/repo-cos/tests/test_routing.py -q
+#
+# (test_routing.py::test_fixture_matches_the_live_initiatives_store — SKIPPED unless that
+# env var is set; needs the homelab kubeconfig, override its path with REPO_COS_KUBECONFIG).
+# It reads the live store, diffs it against this file, and NAMES the slugs that moved.
+# After refreshing, re-state the counts in test_routing.py's corpus tests and in README.md.
 #
 # Used by test_routing.py to pin the corpus-wide properties of the taggable-slug
 # denylist (notably: an emitted tag ALWAYS equals its ledger slug byte-for-byte).
 # `#` comments and blank lines are ignored by the loader.
 2026-07-21
 868j34n9y-868kf6w7r-complete-mark
-APP-DISCOVERY-DESIGN
-COMFYUI-INTEGRATION-DESIGN
-HANDOFF
-HANDOFF-comfyui-session
-SECURITY-AUDIT-v0.1.64
-SESSION-HANDOFF
 actionable-next-steps
 activity-days-from-last
 after-few-hours-progress
@@ -44,6 +43,7 @@ app-blocks-design-system-and-submit
 app-blocks-external-ga-connect-flow-preflip-gate
 app-blocks-external-ga-phase1
 app-blocks-marketplace-and-listing-media
+app-blocks-message-passing-inventory
 app-blocks-p3a-external-listing-submission-scope
 app-blocks-p3b-delist-claim-scope
 app-blocks-playable-collections
@@ -51,8 +51,8 @@ app-blocks-playable-collections-run-page-arc
 app-blocks-review-flow-and-sandbox
 app-blocks-review-ux-and-redos
 app-blocks-review-ux-media-reachability
-app-blocks-scope-system-audit
 app-blocks-scopes-arc
+app-blocks-scope-system-audit
 app-blocks-shared-storage-functional
 app-blocks-spend-before-approval-dogfood-blind-kickoff
 app-blocks-ux
@@ -60,6 +60,7 @@ app-blocks-viewer-bridge-sdk-published
 app-blocks-w13-vitrine-published
 app-blocks-w2-apps-as-repos-v0-handoff
 app-blocks-w6-ui-blind-dogfood-kickoff
+APP-DISCOVERY-DESIGN
 app-engine-event-new-service-set
 app-mod-review-flow-review-pass
 app-panorama-customcomfy-bridge
@@ -84,21 +85,23 @@ civitai-cli-arc-v0.1.79
 civitai-cli-browse-download-arc
 civitai-design-system-rollout
 civitai-dispatch-prs
+civitai-dp-prod-cohort-bluegreen-release-proposal
 clawgate-chat-polish
-cli-public-api-arc
 clips-composer-land-remix
+cli-public-api-arc
 cluster-cnpg-docs-production-verify
 code-open
 comfy-create-graceful-kill-relaunching-restart-script-with
 comfyui-docs-latest-setup-with
+COMFYUI-INTEGRATION-DESIGN
 comment-information-label-preview-with
 component-file
 custom-generators
 data-initiatives-retrieval-skill-understand
 decisions-human-tiering
+deleted-investigate-item-restore
 delete-dispatch-flow-web
 delete-pod-stuck
-deleted-investigate-item-restore
 dependencies-improvements-repository-security
 deploy-comfyui-video-generation
 deref-quarantine-handoff
@@ -123,6 +126,8 @@ espanso-floating-improve-integration-with
 espanso-typing-toil
 feed-live-remix-verify
 funnel-submit-link-deploy-runbook
+HANDOFF
+HANDOFF-comfyui-session
 harness-tuning
 health-system-tiering-verify
 increase-investigate-rate-request-sudden
@@ -148,6 +153,8 @@ remix-templates
 repo-cos-precision-iteration
 scope-resume-state-digest
 second-set-with
+SECURITY-AUDIT-v0.1.64
+SESSION-HANDOFF
 session-prompt-civitai-app-starters-blocks
 session-serializer-perf
 spec-insights-telemetry-pr2
