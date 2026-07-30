@@ -219,8 +219,178 @@ HDR_INSTANCE_ID = "X-Bridge-Instance-Id"
 HDR_LABEL = "X-Bridge-Label"
 HDR_ACTIVE_URL = "X-Bridge-Active-Url"
 HDR_ACTIVE_TITLE = "X-Bridge-Active-Title"
+# The extension's own manifest version (chrome.runtime.getManifest().version),
+# reported on every /poll so `whoami` can surface which extension build is loaded
+# per instance. Optional — a legacy extension that predates this simply omits it
+# (the field stays null in whoami). URL-encoded like the other identity headers.
+HDR_EXT_VERSION = "X-Bridge-Ext-Version"
 
 _ALLOWED_HOSTS = frozenset({"127.0.0.1", "localhost", "::1", "[::1]"})
+
+# --------------------------------------------------------------------------- #
+# whoami identity / diagnostics (read-only) — see the GET /whoami handler
+# --------------------------------------------------------------------------- #
+# A cheap, human-readable server version so `whoami` can report which build is
+# answering. Bumped by hand on a meaningful change (it is NOT the extension's
+# manifest version). The best-effort git short-HEAD (below) pins the exact commit.
+SERVER_VERSION = "whoami-1 (2026-07-30)"
+
+# The repo checkout — identical absolute path on both hosts (workbench + laptop).
+# Used to read the extension manifest by its ABSOLUTE path (server.py is deployed
+# as a flattened /nix/store symlink, so Path(__file__) does NOT sit next to the
+# extension tree — cf. the receiver's documented no-.resolve() gotcha) and to run
+# the best-effort git short-HEAD. Both are strictly best-effort → None when absent.
+_REPO_DIR = Path.home() / "workspace" / "devrc"
+_EXT_MANIFEST_PATH = (_REPO_DIR / "scripts" / "browser-bridge" / "extension"
+                      / "manifest.json")
+
+# ACTIVITY_HOST source-of-truth file (the activity-collector's env). Parsed as a
+# fallback host signal when ACTIVITY_HOST is not in the server's own environment.
+_ACTIVITY_COLLECTOR_ENV = Path.home() / ".config" / "activity-collector" / "env"
+
+# LAN-IP → host label, mirroring ship.sh detect_role: primary 192.168.50.x plus
+# the 10.42.0.x nebula fallbacks. Precedence (primary before secondary, workbench
+# before laptop within a pass) matches ship.sh so both agree on a host's identity.
+_HOST_IP_ORDER = (
+    ("192.168.50.250", "workbench"),
+    ("192.168.50.155", "laptop"),
+    ("10.42.0.30", "workbench"),
+    ("10.42.0.100", "laptop"),
+)
+
+
+def _normalize_host_label(value) -> str:
+    """A host label is only ever `laptop` or `workbench`; anything else → ""."""
+    v = (value or "").strip().lower()
+    return v if v in ("laptop", "workbench") else ""
+
+
+def _parse_activity_host(text) -> str:
+    """Extract the ACTIVITY_HOST value from an activity-collector env file body
+    (`KEY=value` lines; quotes stripped). "" when absent/unparseable."""
+    if not isinstance(text, str):
+        return ""
+    for line in text.splitlines():
+        line = line.strip()
+        if line.startswith("ACTIVITY_HOST="):
+            val = line[len("ACTIVITY_HOST="):].strip()
+            if len(val) >= 2 and val[0] == val[-1] and val[0] in ("'", '"'):
+                val = val[1:-1]
+            return val.strip()
+    return ""
+
+
+def _host_from_ips(ips) -> str:
+    """The host label implied by a machine's IPv4 list, by ship.sh precedence, or
+    "" when none of the known LAN/nebula addresses is present."""
+    ipset = set(ips or [])
+    for ip, label in _HOST_IP_ORDER:
+        if ip in ipset:
+            return label
+    return ""
+
+
+def local_ipv4s() -> list:
+    """Best-effort non-loopback IPv4 addresses of THIS machine (sorted, unique).
+
+    Stdlib-only + never raises: combines the hostname's A records with the
+    default-route source address (a UDP `connect` that sends no packets), and
+    drops loopback. Empty list if nothing resolves — whoami then reports the host
+    from the env/file signals or `unknown`."""
+    import socket
+    out = set()
+    try:
+        for info in socket.getaddrinfo(socket.gethostname(), None,
+                                       socket.AF_INET):
+            ip = info[4][0]
+            if ip and not ip.startswith("127."):
+                out.add(ip)
+    except Exception:  # noqa: BLE001 — best-effort.
+        pass
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            s.connect(("8.8.8.8", 9))   # no packet sent; picks the egress iface
+            ip = s.getsockname()[0]
+            if ip and not ip.startswith("127."):
+                out.add(ip)
+        finally:
+            s.close()
+    except Exception:  # noqa: BLE001 — best-effort.
+        pass
+    return sorted(out)
+
+
+def resolve_host(env=None, collector_env_path=None, ips=None) -> dict:
+    """Identify which host the bridge is running on: {label, source, ips}.
+
+    Resolution order (each input is injectable so this is fully unit-testable):
+      (a) ACTIVITY_HOST in `env`                    → source="activity_host_env"
+      (b) ACTIVITY_HOST= parsed from the activity-  → source="activity_collector_file"
+          collector env file (if readable)
+      (c) IP-detect from the machine's LAN IPv4s    → source="ip"
+          (mirrors ship.sh detect_role's mapping)
+      else                                          → label="unknown", source="unknown"
+
+    `label` ∈ {laptop, workbench, unknown}. `ips` is the machine's non-loopback
+    IPv4s (or the injected list). Never raises."""
+    env = env if env is not None else os.environ
+    ips = list(ips) if ips is not None else local_ipv4s()
+
+    label = _normalize_host_label(env.get("ACTIVITY_HOST"))
+    if label:
+        return {"label": label, "source": "activity_host_env", "ips": ips}
+
+    path = (collector_env_path if collector_env_path is not None
+            else _ACTIVITY_COLLECTOR_ENV)
+    try:
+        p = Path(path)
+        text = p.read_text(encoding="utf-8") if p.is_file() else None
+    except Exception:  # noqa: BLE001 — unreadable file → skip to IP detection.
+        text = None
+    if text:
+        label = _normalize_host_label(_parse_activity_host(text))
+        if label:
+            return {"label": label, "source": "activity_collector_file",
+                    "ips": ips}
+
+    label = _host_from_ips(ips)
+    if label:
+        return {"label": label, "source": "ip", "ips": ips}
+
+    return {"label": "unknown", "source": "unknown", "ips": ips}
+
+
+def git_short_head(repo=None, timeout: float = 1.0):
+    """Best-effort short git HEAD of the repo checkout, or None when unavailable.
+
+    subprocess with an ARGV LIST + shell=False (no shell surface) and a short
+    timeout; ANY failure (git absent, not a repo, timeout, nonzero) → None. Never
+    fatal — `whoami` still returns without it."""
+    repo = Path(repo) if repo is not None else _REPO_DIR
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(repo), "rev-parse", "--short", "HEAD"],
+            shell=False, capture_output=True, timeout=timeout, text=True)
+    except Exception:  # noqa: BLE001 — best-effort.
+        return None
+    if getattr(proc, "returncode", 1) != 0:
+        return None
+    head = (proc.stdout or "").strip()
+    return head or None
+
+
+def manifest_version(path=None):
+    """The extension manifest's `version` read from its ABSOLUTE repo path, or
+    None (missing checkout / unreadable / malformed). Best-effort — do NOT
+    .resolve() a symlinked server.py; read the manifest by its stable repo path."""
+    path = Path(path) if path is not None else _EXT_MANIFEST_PATH
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        v = data.get("version")
+        return v if isinstance(v, str) else None
+    except Exception:  # noqa: BLE001 — best-effort.
+        return None
 
 
 # --------------------------------------------------------------------------- #
@@ -461,9 +631,10 @@ class Instance:
 
     __slots__ = ("key", "instance_id", "label", "outbox", "results", "waiters",
                  "active_polls", "last_poll", "active_tab", "superseded",
-                 "pending", "rl_tokens", "rl_last")
+                 "pending", "rl_tokens", "rl_last", "extension_version")
 
-    def __init__(self, key, instance_id, label, now, burst=0.0):
+    def __init__(self, key, instance_id, label, now, burst=0.0,
+                 extension_version=None):
         self.key = key
         self.instance_id = instance_id
         self.label = label
@@ -474,6 +645,9 @@ class Instance:
         self.last_poll = now
         self.active_tab = None                # {url,title} best-effort from /poll
         self.superseded = False
+        # The extension's manifest version, best-effort from the /poll identity
+        # header (None until a build that reports it polls). Surfaced by whoami.
+        self.extension_version = extension_version
         # Concurrency backstop (per-instance, guarded by the Registry's _cond):
         #   pending   = admitted /cmd dispatches not yet completed (depth cap).
         #   rl_tokens = token-bucket balance; starts FULL so the whole burst is
@@ -529,7 +703,7 @@ class Registry:
 
     # --- registration ------------------------------------------------------ #
     def _register_locked(self, instance_id: str, label: str,
-                         active_tab=None) -> Instance:
+                         active_tab=None, extension_version=None) -> Instance:
         if not instance_id:
             # Legacy extension with no handshake → one synthetic unnamed instance.
             instance_id = LEGACY_INSTANCE_ID
@@ -547,13 +721,18 @@ class Registry:
             inst = None
         if inst is None:
             inst = Instance(key, instance_id, label, self._clock(),
-                            burst=self._burst)
+                            burst=self._burst,
+                            extension_version=extension_version)
             self._instances[key] = inst
         else:
             inst.label = label
             inst.key = key
         if active_tab is not None:
             inst.active_tab = active_tab
+        # Only overwrite a known version — a legacy poll (no header) must not wipe
+        # a version an earlier poll already reported.
+        if extension_version is not None:
+            inst.extension_version = extension_version
         return inst
 
     def _supersede_locked(self, inst: Instance, reason: str) -> None:
@@ -633,14 +812,15 @@ class Registry:
 
     # --- extension side ---------------------------------------------------- #
     def poll(self, instance_id: str, label: str, wait_timeout: float,
-             active_tab=None):
+             active_tab=None, extension_version=None):
         """Long-poll for `instance_id`/`label`: register the instance, then block
         up to `wait_timeout` for ITS next command. Returns the command dict (with
         its id), None on idle timeout, or the SUPERSEDED sentinel if this
         connection got displaced by a newer one sharing its routing key (the HTTP
         layer maps that to a distinct 409 so the extension backs off — not 204)."""
         with self._cond:
-            inst = self._register_locked(instance_id, label, active_tab)
+            inst = self._register_locked(instance_id, label, active_tab,
+                                         extension_version)
             inst.active_polls += 1
             inst.last_poll = self._clock()
             try:
@@ -919,6 +1099,36 @@ class Registry:
         """A list of currently-live instances (key/label/instanceId/activeTab)."""
         with self._cond:
             return [self._describe(i) for i in self._live_instances_locked()]
+
+    @staticmethod
+    def _describe_whoami(inst: Instance) -> dict:
+        """A METADATA-ONLY per-instance descriptor for whoami: the routing
+        key/label/instanceId, the active tab's BARE DOMAIN (never the full URL —
+        #173 metadata-only), and the reported extension_version (None if the
+        instance's extension predates version reporting)."""
+        at = inst.active_tab if isinstance(inst.active_tab, dict) else {}
+        url = at.get("url")
+        domain = ""
+        if isinstance(url, str) and url:
+            try:
+                domain = urlsplit(url).hostname or ""
+            except Exception:  # noqa: BLE001
+                domain = ""
+        return {"key": inst.key, "label": inst.label,
+                "instanceId": inst.instance_id,
+                "activeTabDomain": domain,
+                "extension_version": inst.extension_version}
+
+    def whoami_snapshot(self):
+        """Per-live-instance whoami descriptors (metadata only — domain, not URL)."""
+        with self._cond:
+            return [self._describe_whoami(i)
+                    for i in self._live_instances_locked()]
+
+    def rate_limit_config(self) -> dict:
+        """The per-instance concurrency-backstop knobs, for whoami diagnostics."""
+        return {"per_sec": self._rate_per_sec, "burst": self._burst,
+                "max_queue": self._max_queue}
 
     @property
     def connected(self) -> bool:
@@ -1203,11 +1413,12 @@ def make_handler(registry: Registry, token: str, cmd_timeout: float,
             return obj, None
 
         def _poll_identity(self):
-            """(instance_id, label, active_tab) from the /poll request headers.
+            """(instance_id, label, active_tab, ext_version) from the /poll headers.
 
             Missing instance id → "" (registry assigns the legacy synthetic id).
-            Label + active-tab strings are URL-encoded by the extension (header
-            values must be ASCII-safe) and decoded here.
+            Label + active-tab + ext-version strings are URL-encoded by the
+            extension (header values must be ASCII-safe) and decoded here. A
+            legacy extension that omits the ext-version header → None.
             """
             instance_id = (self.headers.get(HDR_INSTANCE_ID) or "").strip()
             raw_label = self.headers.get(HDR_LABEL) or ""
@@ -1218,7 +1429,42 @@ def make_handler(registry: Registry, token: str, cmd_timeout: float,
             if au or at:
                 active = {"url": unquote(au) if au else None,
                           "title": unquote(at) if at else None}
-            return instance_id, label, active
+            raw_ext = self.headers.get(HDR_EXT_VERSION)
+            ext_version = unquote(raw_ext).strip() if raw_ext else None
+            return instance_id, label, active, ext_version
+
+        def _whoami(self) -> dict:
+            """Assemble the read-only whoami snapshot: which HOST + which browser
+            profiles/instances + bridge diagnostics. Metadata only (host label,
+            instance labels, active-tab DOMAINs, versions — NEVER page content),
+            so it is safe to expose exactly like /health (bearer + Host guarded,
+            NOT rate-limited). Reached only after _guard() in do_GET."""
+            insts = registry.whoami_snapshot()
+            rl = registry.rate_limit_config()
+            srv_host, srv_port = (self.server.server_address[0],
+                                  self.server.server_address[1])
+            return {
+                "ok": True,
+                "host": resolve_host(),
+                "bridge": {
+                    "endpoint": f"http://{srv_host}:{srv_port}",
+                    "port": srv_port,
+                    # SERVER_VERSION const + the best-effort git short-HEAD (null
+                    # when the repo/git is unavailable — never fatal).
+                    "server_version": {"version": SERVER_VERSION,
+                                       "git": git_short_head()},
+                    "connected": len(insts),
+                    "rate_limit": {"per_sec": rl["per_sec"],
+                                   "burst": rl["burst"],
+                                   "max_queue": rl["max_queue"]},
+                    # The manifest version the SERVER reads from the repo, so a
+                    # human can eyeball loaded-vs-current. NOT an automatic stale
+                    # flag — the manifest version is not bumped per-change, so a
+                    # hard "stale" verdict would be unreliable; report both values.
+                    "extension_version_current": manifest_version(),
+                },
+                "instances": insts,
+            }
 
         # --- routes -------------------------------------------------------- #
         def do_GET(self):
@@ -1237,10 +1483,14 @@ def make_handler(registry: Registry, token: str, cmd_timeout: float,
                 self._send(200, {"ok": True, "count": len(insts),
                                  "instances": insts})
                 return
+            if path == "/whoami":
+                self._send(200, self._whoami())
+                return
             if path == "/poll":
-                instance_id, label, active = self._poll_identity()
+                instance_id, label, active, ext_version = self._poll_identity()
                 cmd = registry.poll(instance_id, label, poll_timeout,
-                                    active_tab=active)
+                                    active_tab=active,
+                                    extension_version=ext_version)
                 if cmd is SUPERSEDED:
                     # Distinct from the idle 204: THIS connection was displaced by
                     # a newer one sharing its routing key (duplicate label). Still

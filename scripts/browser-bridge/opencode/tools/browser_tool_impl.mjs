@@ -41,6 +41,12 @@ import { homedir } from "node:os";
 // the model can never activate an ARBITRARY tab (the tab is forced by env, not a
 // model arg). Typed, bounded, NO raw passthrough. It STEALS the user's focus (the
 // one intrusive op) — used to LOAD the app the agent was told to drive.
+// `whoami` is a READ-ONLY, GLOBAL diagnostic: it is NOT a /cmd op (it hits the
+// server's GET /whoami, has no tab, drives nothing) — it lets the agent confirm
+// which HOST + which browser profile it is connected to before acting. It maps to
+// itself only so it passes the uniform op-allowlist gate below; buildRequest
+// SHORT-CIRCUITS it to a GET before any /cmd body is built. Metadata only (host
+// label, instance labels, active-tab domains, versions — never page content).
 export const OP_TO_SERVER = Object.freeze({
   text: "text",
   html: "getHtml",
@@ -52,11 +58,12 @@ export const OP_TO_SERVER = Object.freeze({
   type: "type",
   key: "key",
   activate: "activate",
+  whoami: "whoami",
 });
 
 export const ALLOWED_OPS_DEFAULT = Object.freeze([
   "text", "html", "eval", "nav", "screenshot",
-  "frames", "click", "type", "key", "activate",
+  "frames", "click", "type", "key", "activate", "whoami",
 ]);
 
 export const TEXT_MAX_BYTES_DEFAULT = 32768;
@@ -170,6 +177,22 @@ export function buildRequest(args, env, token) {
   const allowed = allowedOpsFromEnv(env);
   if (!allowed.includes(op) || !(op in OP_TO_SERVER)) {
     throw new BrowserToolRefusal(`op_not_allowed:${op || "<none>"}`);
+  }
+  // whoami is a GLOBAL, read-only GET /whoami — no tab, no /cmd body. Short-
+  // circuit BEFORE forcedTab (it is not tab-scoped) and before any /cmd body is
+  // built. No typed args are forwarded (nothing to smuggle).
+  if (op === "whoami") {
+    const host = env.BROWSER_BRIDGE_HOST || "127.0.0.1";
+    const port = env.BROWSER_BRIDGE_PORT || "8788";
+    return {
+      method: "GET",
+      url: `http://${host}:${port}/whoami`,
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Host: "127.0.0.1", // #168 loopback Host-allowlist invariant
+      },
+      body: null,
+    };
   }
   const tab = forcedTab(env); // may throw disowned_tab
   const allowList = _list(env.BROWSER_AGENT_ALLOW_DOMAINS);
@@ -297,6 +320,29 @@ export function summarizeResult(op, envelope) {
       i3: data.i3 ?? null,
       url: data.url ?? null, title: data.title ?? null });
   }
+  if (op === "whoami") {
+    // Identity + diagnostics. `envelope` IS the whole whoami object (no .data).
+    // METADATA ONLY — host label, instance labels, active-tab DOMAINs, versions;
+    // NO page content, NO full URLs.
+    const w = envelope || {};
+    const host = w.host || {};
+    const bridge = w.bridge || {};
+    const instances = Array.isArray(w.instances) ? w.instances : [];
+    return JSON.stringify({
+      host: { label: host.label ?? null, source: host.source ?? null },
+      bridge: {
+        endpoint: bridge.endpoint ?? null,
+        connected: bridge.connected ?? null,
+        server_version: bridge.server_version ?? null,
+        extension_version_current: bridge.extension_version_current ?? null,
+      },
+      instances: instances.map((i) => ({
+        key: i.key ?? null, label: i.label ?? null,
+        activeTabDomain: i.activeTabDomain ?? null,
+        extension_version: i.extension_version ?? null,
+      })),
+    });
+  }
   return JSON.stringify(data);
 }
 
@@ -371,11 +417,11 @@ export async function runBrowserOp(args, opts = {}) {
   _audit(env, "exec", op, op === "nav" ? hostOf(args.url) : "");
   let resp;
   try {
-    resp = await fetchImpl(req.url, {
-      method: "POST",
-      headers: req.headers,
-      body: JSON.stringify(req.body),
-    });
+    const method = req.method || "POST";
+    const init = { method, headers: req.headers };
+    // A GET (whoami) carries no body; a /cmd POST sends the typed command body.
+    if (method !== "GET") init.body = JSON.stringify(req.body);
+    resp = await fetchImpl(req.url, init);
   } catch (e) {
     throw new Error(`browser-tool: transport error talking to the bridge: ${e && e.message}`);
   }
@@ -390,6 +436,9 @@ export async function runBrowserOp(args, opts = {}) {
   } catch {
     throw new Error("browser-tool: unparseable bridge response");
   }
+  // whoami returns the diagnostic object DIRECTLY ({ok,host,bridge,instances}) —
+  // there is no {result:<envelope>} wrapper like /cmd. Summarize it as-is.
+  if (op === "whoami") return summarizeResult("whoami", outer);
   const envelope = outer && outer.result;
   if (envelope && envelope.ok === false) {
     // An op-level failure in the page (e.g. owned_tab_gone) — surface to the model.

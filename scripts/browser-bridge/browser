@@ -29,6 +29,15 @@
 #
 # Subcommands:
 #   browser health            — connected instances + count (per-instance)
+#   browser whoami            — read-only identity + diagnostics: which HOST
+#                               (laptop/workbench, resolved from ACTIVITY_HOST →
+#                               the activity-collector env file → LAN-IP detect),
+#                               which connected browser profiles/instances (key/
+#                               label/instanceId + active-tab DOMAIN + reported
+#                               extension version), and bridge diagnostics
+#                               (endpoint/port/server_version+git/connected count/
+#                               rate-limit + the manifest version the server reads
+#                               from the repo). Global (no --instance/--tab).
 #   browser instances         — list connected instances as JSON (key/label/url)
 #   browser open [url]        — open a NEW tab this session owns (default about:blank);
 #                               subsequent ops route to it. Prints its tabId.
@@ -307,6 +316,14 @@ case "$sub" in
     [ "$HTTP_CODE" = "200" ] || { echo "$resp" >&2; die "HTTP $HTTP_CODE from /health"; }
     printf '%s\n' "$resp" | pretty
     ;;
+  whoami)
+    # Read-only identity + diagnostics. A cheap diagnostic GET like /health (NOT
+    # rate-limited); global, so no --instance/--tab. Pretty-prints the JSON.
+    raw="$(_curl GET /whoami)" || die "curl failed talking to ${BASE}/whoami"
+    HTTP_CODE="${raw##*$'\n'}"; resp="${raw%$'\n'*}"
+    [ "$HTTP_CODE" = "200" ] || { echo "$resp" >&2; die "HTTP $HTTP_CODE from /whoami"; }
+    printf '%s\n' "$resp" | pretty
+    ;;
   instances)
     raw="$(_curl GET /instances)" || die "curl failed talking to ${BASE}/instances"
     HTTP_CODE="${raw##*$'\n'}"; resp="${raw%$'\n'*}"
@@ -493,6 +510,6 @@ print(sys.argv[1])
     grep -E '^#( |$)' "$0" | sed -E 's/^# ?//'
     ;;
   *)
-    die "unknown subcommand: $sub (try: health instances open close release activate html text eval tabs nav screenshot frames click type key agent)"
+    die "unknown subcommand: $sub (try: health whoami instances open close release activate html text eval tabs nav screenshot frames click type key agent)"
     ;;
 esac

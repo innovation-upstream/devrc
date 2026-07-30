@@ -278,15 +278,19 @@ test("runBrowserOp: dry-run intercepts nav/eval (no fetch) but still enforces de
 });
 
 test("OP_TO_SERVER maps only the bounded ops (no lifecycle ops, no raw CDP)", () => {
+  // `whoami` is a read-only GLOBAL diagnostic (GET /whoami) — bounded + typed
+  // like the rest; still NO lifecycle ops and NO raw-CDP escape.
   assert.deepEqual(Object.keys(OP_TO_SERVER).sort(),
-    ["activate", "click", "eval", "frames", "html", "key", "nav", "screenshot", "text", "type"]);
+    ["activate", "click", "eval", "frames", "html", "key", "nav", "screenshot",
+     "text", "type", "whoami"]);
   // Lifecycle ops (wrapper owns the tab) AND any raw-CDP escape must be unmappable.
   for (const forbidden of ["open", "close", "tabs", "release",
                            "cdp", "command", "attach", "detach", "sendCommand"]) {
     assert.ok(!(forbidden in OP_TO_SERVER), `${forbidden} must not be mappable`);
   }
   assert.deepEqual([...ALLOWED_OPS_DEFAULT].sort(),
-    ["activate", "click", "eval", "frames", "html", "key", "nav", "screenshot", "text", "type"]);
+    ["activate", "click", "eval", "frames", "html", "key", "nav", "screenshot",
+     "text", "type", "whoami"]);
 });
 
 test("buildRequest: activate forces the env tab; bounded waitMs only; NO raw passthrough", () => {
@@ -447,4 +451,93 @@ test("runBrowserOp: a CDP op is refused when NOT in the op allowlist", async () 
       baseEnv({ BROWSER_AGENT_ALLOWED_OPS: "text,html" }), fx),
     /op_not_allowed:click/);
   assert.equal(fx.calls.length, 0);
+});
+
+// --------------------------------------------------------------------------- //
+// whoami — read-only GLOBAL identity/diagnostics op (GET /whoami, no tab, no body)
+// --------------------------------------------------------------------------- //
+// A GET stub for /whoami: records the call + returns a canned identity object
+// DIRECTLY (no {result:<envelope>} wrapper — whoami is not a /cmd op).
+function whoamiFetchStub(obj) {
+  const calls = [];
+  const body = obj ?? {
+    ok: true,
+    host: { label: "workbench", source: "ip", ips: ["192.168.50.250"] },
+    bridge: {
+      endpoint: "http://127.0.0.1:8788", port: 8788,
+      server_version: { version: "whoami-1", git: "abc1234" },
+      connected: 1,
+      rate_limit: { per_sec: 5, burst: 20, max_queue: 32 },
+      extension_version_current: "0.1.0",
+    },
+    instances: [{ key: "work", label: "work", instanceId: "uuid-a",
+                  activeTabDomain: "example.com", extension_version: "0.1.0" }],
+  };
+  const impl = async (url, opts) => {
+    calls.push({ url, headers: opts.headers, method: opts.method, body: opts.body });
+    return { status: 200, async text() { return JSON.stringify(body); } };
+  };
+  impl.calls = calls;
+  return impl;
+}
+
+test("buildRequest: whoami is a GLOBAL GET /whoami — no tab, no body, Host pinned", () => {
+  // whoami does NOT require BROWSER_AGENT_TAB (it is not tab-scoped): even with
+  // NO tab in env it builds cleanly, unlike every /cmd op.
+  const req = buildRequest({ op: "whoami" },
+    { BROWSER_BRIDGE_HOST: "127.0.0.1", BROWSER_BRIDGE_PORT: "8788" }, TOK);
+  assert.equal(req.method, "GET");
+  assert.equal(req.url, "http://127.0.0.1:8788/whoami");
+  assert.equal(req.headers.Authorization, `Bearer ${TOK}`);
+  assert.equal(req.headers.Host, "127.0.0.1");   // #168 loopback Host allowlist
+  assert.equal(req.body, null);
+  // No /cmd fields leak in (no op/tab/target smuggling — nothing is forwarded).
+  assert.equal(req.headers["Content-Type"], undefined);
+});
+
+test("buildRequest: whoami is refused when NOT in the op allowlist (gate holds)", () => {
+  assert.throws(() => buildRequest({ op: "whoami" },
+    baseEnv({ BROWSER_AGENT_ALLOWED_OPS: "text,html" }), TOK),
+    (e) => e instanceof BrowserToolRefusal && /op_not_allowed:whoami/.test(e.reason));
+});
+
+test("summarizeResult: whoami returns metadata-only identity (no page content)", () => {
+  const s = JSON.parse(summarizeResult("whoami", {
+    ok: true,
+    host: { label: "laptop", source: "activity_host_env", ips: ["192.168.50.155"] },
+    bridge: { endpoint: "http://127.0.0.1:8788", connected: 2,
+      server_version: { version: "whoami-1", git: null },
+      extension_version_current: "0.1.0" },
+    instances: [{ key: "work", label: "work", instanceId: "uuid-a",
+                  activeTabDomain: "civitai.com", extension_version: "0.1.0" }],
+  }));
+  assert.equal(s.host.label, "laptop");
+  assert.equal(s.host.source, "activity_host_env");
+  assert.equal(s.bridge.connected, 2);
+  assert.equal(s.bridge.extension_version_current, "0.1.0");
+  assert.deepEqual(s.instances[0], { key: "work", label: "work",
+    activeTabDomain: "civitai.com", extension_version: "0.1.0" });
+  // Metadata-only: no full URL/path, no instanceId leak beyond what's shown, no html/text.
+  const flat = JSON.stringify(s);
+  assert.ok(!/html|innerText|"text"|dataUrl/i.test(flat));
+});
+
+test("runBrowserOp: whoami issues a GET (no body) and summarizes the identity", async () => {
+  const fx = whoamiFetchStub();
+  const out = await run({ op: "whoami" }, baseEnv(), fx);
+  assert.equal(fx.calls.length, 1);
+  assert.equal(fx.calls[0].method, "GET");
+  assert.equal(fx.calls[0].body, undefined, "a GET must carry no request body");
+  assert.match(fx.calls[0].url, /\/whoami$/);
+  const parsed = JSON.parse(out);
+  assert.equal(parsed.host.label, "workbench");
+  assert.equal(parsed.instances[0].activeTabDomain, "example.com");
+  assert.equal(parsed.instances[0].extension_version, "0.1.0");
+});
+
+test("runBrowserOp: whoami surfaces a bridge non-200 (auth/host) as an error", async () => {
+  const impl = async () => ({ status: 401,
+    async text() { return JSON.stringify({ ok: false, error: "unauthorized" }); } });
+  await assert.rejects(() => run({ op: "whoami" }, baseEnv(), impl),
+    /HTTP 401/);
 });

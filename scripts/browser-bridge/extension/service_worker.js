@@ -55,6 +55,17 @@ async function instanceId() {
   return instanceId;
 }
 
+// The extension's own manifest version — reported on every /poll so `whoami` can
+// show which BUILD is loaded per instance. Best-effort (never throws; "" if the
+// manifest is somehow unreadable, e.g. under a bare unit-test chrome mock).
+function extensionVersion() {
+  try {
+    return (chrome.runtime.getManifest && chrome.runtime.getManifest().version) || "";
+  } catch (e) {
+    return "";
+  }
+}
+
 async function config() {
   const { port, token, label } = await chrome.storage.local.get(["port", "token", "label"]);
   return {
@@ -62,6 +73,7 @@ async function config() {
     token: token || "",
     label: label || "",
     instanceId: await instanceId(),
+    extVersion: extensionVersion(),
   };
 }
 
@@ -617,7 +629,8 @@ async function pollOnce(cfg) {
   const active = await activeTabSnapshot();
   const res = await fetch(`${base(cfg.port)}/poll`, {
     // Identify this instance so the server routes only its commands here.
-    headers: { ...authHeaders(cfg.token), ...pollHeaders(cfg.instanceId, cfg.label, active) },
+    headers: { ...authHeaders(cfg.token),
+               ...pollHeaders(cfg.instanceId, cfg.label, active, cfg.extVersion) },
   });
   const kind = classifyPollStatus(res.status);
   if (kind === POLL_COMMAND) return { kind, cmd: await res.json() };

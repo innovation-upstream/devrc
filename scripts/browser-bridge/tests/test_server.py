@@ -161,7 +161,8 @@ class FakeExtension(threading.Thread):
     echoes the op back via /result (echoing its instanceId)."""
 
     def __init__(self, srv, instance_id="fake-1", label="", executor=None,
-                 swallow=False, active_url=None, active_title=None):
+                 swallow=False, active_url=None, active_title=None,
+                 ext_version=None):
         super().__init__(daemon=True)
         self.srv = srv
         self.instance_id = instance_id
@@ -170,6 +171,7 @@ class FakeExtension(threading.Thread):
         self.swallow = swallow  # pick up a command but never answer (→ timeout)
         self.active_url = active_url
         self.active_title = active_title
+        self.ext_version = ext_version  # reported via X-Bridge-Ext-Version (or None)
         self.dispatched = []    # every command this fake picked up (for assertions)
         self._stopev = threading.Event()
 
@@ -181,6 +183,8 @@ class FakeExtension(threading.Thread):
             h[S.HDR_ACTIVE_URL] = urllib.parse.quote(self.active_url)
         if self.active_title:
             h[S.HDR_ACTIVE_TITLE] = urllib.parse.quote(self.active_title)
+        if self.ext_version:
+            h[S.HDR_EXT_VERSION] = urllib.parse.quote(self.ext_version)
         return h
 
     def run(self):
@@ -2975,3 +2979,284 @@ def test_browser_cli_screenshot_fullpage_flag(tmp_path):
     assert r.returncode == 0, r.stderr
     assert bodies[-1]["op"] == "screenshot"
     assert bodies[-1]["fullpage"] is True
+
+
+# =========================================================================== #
+# whoami — read-only host identity + bridge diagnostics (GET /whoami)
+# --------------------------------------------------------------------------- #
+# whoami reports which HOST (laptop/workbench) + which browser profiles/instances
+# + bridge diagnostics, bearer + Host guarded exactly like /health, NOT rate-
+# limited, and metadata-only (active-tab DOMAIN, never the full URL — #173).
+# =========================================================================== #
+
+# --- host resolution (fully injectable → unit-testable) -------------------- #
+def test_resolve_host_from_activity_host_env():
+    r = S.resolve_host(env={"ACTIVITY_HOST": "laptop"}, ips=[])
+    assert r == {"label": "laptop", "source": "activity_host_env", "ips": []}
+    r2 = S.resolve_host(env={"ACTIVITY_HOST": "WorkBench"}, ips=[])
+    assert r2["label"] == "workbench" and r2["source"] == "activity_host_env"
+
+
+def test_resolve_host_ignores_bogus_activity_host_env():
+    # A junk ACTIVITY_HOST is not a valid label → fall through to the next signal
+    # (collector file pinned absent so this is hermetic on a real host).
+    r = S.resolve_host(env={"ACTIVITY_HOST": "nixos"},
+                       collector_env_path="/nonexistent",
+                       ips=["192.168.50.155"])
+    assert r["label"] == "laptop" and r["source"] == "ip"
+
+
+def test_resolve_host_from_collector_file(tmp_path):
+    f = tmp_path / "env"
+    f.write_text('FOO=1\nACTIVITY_HOST="workbench"\nBAR=2\n', encoding="utf-8")
+    r = S.resolve_host(env={}, collector_env_path=f, ips=["10.0.0.9"])
+    assert r == {"label": "workbench", "source": "activity_collector_file",
+                 "ips": ["10.0.0.9"]}
+
+
+def test_resolve_host_env_beats_file(tmp_path):
+    f = tmp_path / "env"
+    f.write_text("ACTIVITY_HOST=workbench\n", encoding="utf-8")
+    r = S.resolve_host(env={"ACTIVITY_HOST": "laptop"}, collector_env_path=f,
+                       ips=[])
+    assert r["label"] == "laptop" and r["source"] == "activity_host_env"
+
+
+def test_resolve_host_missing_file_falls_through(tmp_path):
+    missing = tmp_path / "nope" / "env"
+    r = S.resolve_host(env={}, collector_env_path=missing,
+                       ips=["192.168.50.250"])
+    assert r["label"] == "workbench" and r["source"] == "ip"
+
+
+def test_resolve_host_from_ip_primary_and_secondary():
+    assert S.resolve_host(env={}, collector_env_path="/nonexistent",
+                          ips=["192.168.50.250"])["label"] == "workbench"
+    assert S.resolve_host(env={}, collector_env_path="/nonexistent",
+                          ips=["192.168.50.155"])["label"] == "laptop"
+    # nebula 10.42.0.x fallbacks also resolve.
+    assert S.resolve_host(env={}, collector_env_path="/nonexistent",
+                          ips=["10.42.0.30"])["label"] == "workbench"
+    assert S.resolve_host(env={}, collector_env_path="/nonexistent",
+                          ips=["10.42.0.100"])["label"] == "laptop"
+
+
+def test_resolve_host_unknown_when_nothing_matches():
+    r = S.resolve_host(env={}, collector_env_path="/nonexistent",
+                       ips=["8.8.8.8", "203.0.113.5"])
+    assert r == {"label": "unknown", "source": "unknown",
+                 "ips": ["8.8.8.8", "203.0.113.5"]}
+
+
+def test_host_from_ips_precedence_mirrors_ship():
+    # Both hosts' primaries present → workbench wins (ship.sh detect_role order).
+    assert S._host_from_ips(["192.168.50.155", "192.168.50.250"]) == "workbench"
+    # A primary beats a secondary of the OTHER host.
+    assert S._host_from_ips(["10.42.0.100", "192.168.50.250"]) == "workbench"
+    assert S._host_from_ips([]) == ""
+
+
+def test_parse_activity_host_variants():
+    assert S._parse_activity_host("ACTIVITY_HOST=laptop") == "laptop"
+    assert S._parse_activity_host("ACTIVITY_HOST='workbench'") == "workbench"
+    assert S._parse_activity_host('X=1\nACTIVITY_HOST="laptop"\n') == "laptop"
+    assert S._parse_activity_host("NOPE=1") == ""
+
+
+# --- git short-HEAD + manifest_version (best-effort scalars) --------------- #
+def test_git_short_head_none_on_non_repo(tmp_path):
+    # A directory that is not a git repo → None (best-effort, never fatal).
+    assert S.git_short_head(repo=tmp_path) is None
+
+
+def test_git_short_head_none_on_missing_dir(tmp_path):
+    assert S.git_short_head(repo=tmp_path / "does-not-exist") is None
+
+
+def test_manifest_version_reads_current():
+    v = S.manifest_version(path=EXT_DIR / "manifest.json")
+    assert isinstance(v, str) and v == "0.1.0"
+
+
+def test_manifest_version_none_on_missing(tmp_path):
+    assert S.manifest_version(path=tmp_path / "nope.json") is None
+
+
+def test_manifest_version_none_on_malformed(tmp_path):
+    bad = tmp_path / "manifest.json"
+    bad.write_text("{ not json", encoding="utf-8")
+    assert S.manifest_version(path=bad) is None
+
+
+# --- GET /whoami: shape, guard, zero-instances ----------------------------- #
+def test_whoami_shape_zero_instances():
+    srv, _ = _serve()
+    try:
+        status, body = _req(srv, "GET", "/whoami")
+        assert status == 200
+        assert body["ok"] is True
+        # host block
+        host = body["host"]
+        assert host["label"] in ("laptop", "workbench", "unknown")
+        assert host["source"] in ("activity_host_env",
+                                  "activity_collector_file", "ip", "unknown")
+        assert isinstance(host["ips"], list)
+        # bridge block
+        br = body["bridge"]
+        assert br["endpoint"].startswith("http://127.0.0.1:")
+        assert isinstance(br["port"], int)
+        assert br["server_version"]["version"] == S.SERVER_VERSION
+        assert "git" in br["server_version"]  # str or None, present either way
+        assert br["connected"] == 0
+        assert br["rate_limit"] == {"per_sec": S.RATE_PER_SEC,
+                                    "burst": S.BURST, "max_queue": S.MAX_QUEUE}
+        assert "extension_version_current" in br
+        # instances empty when nothing connected — host+bridge still reported.
+        assert body["instances"] == []
+    finally:
+        srv.shutdown(); srv.server_close()
+
+
+def test_whoami_missing_token_401():
+    srv, _ = _serve()
+    try:
+        status, _ = _req(srv, "GET", "/whoami", token=None)
+        assert status == 401
+    finally:
+        srv.shutdown(); srv.server_close()
+
+
+def test_whoami_wrong_token_401():
+    srv, _ = _serve()
+    try:
+        status, _ = _req(srv, "GET", "/whoami", token="nope")
+        assert status == 401
+    finally:
+        srv.shutdown(); srv.server_close()
+
+
+def test_whoami_bad_host_403():
+    srv, _ = _serve()
+    try:
+        status, _ = _req(srv, "GET", "/whoami", host="evil.example.com")
+        assert status == 403
+    finally:
+        srv.shutdown(); srv.server_close()
+
+
+def test_whoami_rate_limit_reflects_registry():
+    reg = S.Registry(rate_per_sec=7, burst=13, max_queue=99)
+    srv, _ = _serve(registry=reg)
+    try:
+        status, body = _req(srv, "GET", "/whoami")
+        assert status == 200
+        assert body["bridge"]["rate_limit"] == {"per_sec": 7.0, "burst": 13.0,
+                                                 "max_queue": 99}
+    finally:
+        srv.shutdown(); srv.server_close()
+
+
+def test_whoami_git_head_null_still_200(monkeypatch):
+    monkeypatch.setattr(S, "git_short_head", lambda *a, **k: None)
+    srv, _ = _serve()
+    try:
+        status, body = _req(srv, "GET", "/whoami")
+        assert status == 200
+        assert body["bridge"]["server_version"]["git"] is None
+    finally:
+        srv.shutdown(); srv.server_close()
+
+
+# --- GET /whoami: instances (metadata-only, ext_version enrichment) -------- #
+def test_whoami_reports_connected_instance_metadata_only():
+    srv, _ = _serve()
+    fake = FakeExtension(srv, instance_id="uuid-a", label="work",
+                         active_url="https://example.com/some/path?q=1",
+                         active_title="Example",
+                         ext_version="0.1.0")
+    fake.start()
+    try:
+        assert _wait_instances(srv, 1) is not None
+        status, body = _req(srv, "GET", "/whoami")
+        assert status == 200
+        assert body["bridge"]["connected"] == 1
+        insts = body["instances"]
+        assert len(insts) == 1
+        i = insts[0]
+        assert i["key"] == "work"        # label is the routing key
+        assert i["label"] == "work"
+        assert i["instanceId"] == "uuid-a"
+        # metadata-only: the DOMAIN, never the full URL/path/query (#173).
+        assert i["activeTabDomain"] == "example.com"
+        assert "some/path" not in json.dumps(i)
+        assert i["extension_version"] == "0.1.0"
+    finally:
+        fake.stop(); srv.shutdown(); srv.server_close()
+
+
+def test_whoami_extension_version_null_when_unreported():
+    srv, _ = _serve()
+    fake = FakeExtension(srv, instance_id="uuid-b", label="lab",
+                         active_url="https://noext.test/")
+    fake.start()
+    try:
+        assert _wait_instances(srv, 1) is not None
+        status, body = _req(srv, "GET", "/whoami")
+        assert status == 200
+        i = body["instances"][0]
+        assert i["extension_version"] is None
+        assert i["activeTabDomain"] == "noext.test"
+    finally:
+        fake.stop(); srv.shutdown(); srv.server_close()
+
+
+# --- CLI: `browser whoami` GETs /whoami and pretty-prints ------------------ #
+class _WhoamiServer:
+    """A minimal GET /whoami server returning a canned identity object."""
+
+    def handler(self):
+        class _H(S.BaseHTTPRequestHandler):
+            def log_message(self, *a):  # noqa: A003
+                pass
+
+            def do_GET(self):
+                payload = json.dumps({
+                    "ok": True,
+                    "host": {"label": "workbench", "source": "ip",
+                             "ips": ["192.168.50.250"]},
+                    "bridge": {"endpoint": "http://127.0.0.1:8788", "port": 8788,
+                               "server_version": {"version": "x", "git": None},
+                               "connected": 0,
+                               "rate_limit": {"per_sec": 5.0, "burst": 20.0,
+                                              "max_queue": 32},
+                               "extension_version_current": "0.1.0"},
+                    "instances": []}).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+
+        return _H
+
+
+@pytest.mark.skipif(shutil.which("curl") is None, reason="curl not on PATH")
+def test_browser_cli_whoami(tmp_path):
+    srv = S.ThreadingHTTPServer(("127.0.0.1", 0), _WhoamiServer().handler())
+    srv.daemon_threads = True
+    port = srv.server_address[1]
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    tokf = tmp_path / "token"
+    tokf.write_text("smoke-token\n")
+    env = dict(os.environ)
+    env.update(BROWSER_BRIDGE_HOST="127.0.0.1", BROWSER_BRIDGE_PORT=str(port),
+               BROWSER_BRIDGE_TOKEN_FILE=str(tokf))
+    try:
+        r = subprocess.run([str(BROWSER_BIN), "whoami"], env=env,
+                           capture_output=True, text=True, timeout=30)
+        assert r.returncode == 0, r.stderr
+        out = json.loads(r.stdout)
+        assert out["host"]["label"] == "workbench"
+        assert out["bridge"]["extension_version_current"] == "0.1.0"
+    finally:
+        srv.shutdown(); srv.server_close()
