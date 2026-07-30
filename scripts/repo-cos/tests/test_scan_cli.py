@@ -254,3 +254,89 @@ def test_no_fetch_flag_threads_into_scan_all(tmp_path, monkeypatch):
     args = scan.build_parser().parse_args(["--no-llm", "--repos", str(tmp_path)])
     scan.cmd_scan(args)
     assert seen["fetch"] is True
+
+
+# ---- INITIATIVE THREADING: router → cmd_scan → last_emailed.json -------------------
+# 🔴 THE FEATURE'S CENTRAL WIRING, and until now the one part with NO coverage. Both
+# HALVES were tested in isolation — test_routing proves `related_for` resolves slugs, and
+# test_approve proves the approve path tags from a HAND-WRITTEN `last_emailed.json` — but
+# nothing exercised the JOIN between them: that cmd_scan actually carries the resolved
+# slugs from the router into the file the approve path later reads. Mutation testing on
+# the merged code confirmed the gap: BOTH `related = routing.related_for(...)` → `[None]*n`
+# (scan.py:244) and `related=related` → `related=None` at the write_last_emailed call
+# (scan.py:381) left the entire 303-test suite green. If the threading silently broke,
+# every Task would post untagged and neither the tests nor production would say a word.
+#
+# This test drives the REAL cmd_scan end to end with only the two true externalities
+# stubbed (the LLM, and the SMTP send), and asserts the slug lands in the durable file.
+# It is written to FAIL under either mutation above — verify that before trusting it.
+#
+# `--email` is required because it is the ONLY path that writes last_emailed.json; the
+# send itself is stubbed, so no real digest is ever sent.
+
+def test_cmd_scan_threads_resolved_initiative_slugs_into_last_emailed(tmp_path, monkeypatch):
+    import json
+
+    import clawgate
+    import exclusions
+    import feedback as feedback_mod
+    import llm
+    import routing
+
+    dev = tmp_path / "devrc"
+    dev.mkdir()
+    (dev / "a.py").write_text("# TODO fix the thing\n")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "k")
+    monkeypatch.setattr(scan, "PERSIST_DIR", tmp_path / "state")
+    monkeypatch.setattr(exclusions, "LAST_EMAILED_FILE", tmp_path / "last_emailed.json")
+    monkeypatch.setattr(exclusions, "EXCLUSIONS_FILE", tmp_path / "exclusions.json")
+    monkeypatch.setattr(feedback_mod, "fetch_last_feedback", lambda: None)
+
+    # RE-PATCH the suite-wide hermeticity stub (conftest.py pins load_current to an EMPTY
+    # store). A later setattr on the same function-scoped monkeypatch wins, and both are
+    # undone in reverse at teardown — so this stays hermetic: still no live store read.
+    route = routing._route()
+    monkeypatch.setattr(route, "load_current", lambda: [
+        {"slug": "clawgate-agent-loop", "repo": str(dev),
+         "title": "Clawgate agent loop close"},
+        {"slug": "tekton-pipeline", "repo": str(dev), "title": "Tekton pipeline migration"},
+    ])
+
+    # Two proposals: the first matches an initiative confidently, the second matches
+    # nothing — so a bug that stamps a CONSTANT slug on everything also fails here.
+    matching = _RealishProp("harden the clawgate agent loop")
+    unrelated = _RealishProp("zzz unrelated proposal about nothing")
+    for p in (matching, unrelated):
+        p.repo, p.why, p.approach = "devrc", "", ""
+    monkeypatch.setattr(llm, "synthesize", lambda cands, *, top, model, feedback=None:
+                        llm.Synthesis(proposals=[matching, unrelated],
+                                      approx_prompt_tokens=1))
+
+    # STUB THE SEND. --email is the only branch that writes last_emailed.json; the real
+    # send_digest would deliver an actual digest to Zach's inbox.
+    import email_send
+    sent = {}
+
+    def fake_send(*, subject, body, **kw):
+        sent["subject"], sent["body"] = subject, body
+        return "repo-cos@inbox.zacx.dev"
+
+    monkeypatch.setattr(email_send, "send_digest", fake_send)
+
+    args = scan.build_parser().parse_args(["--email", "--repos", str(dev)])
+    assert scan.cmd_scan(args) == 0
+    assert sent, "the digest send was never reached — nothing wrote last_emailed.json"
+
+    # 1) the resolved slug is DURABLE: it reached the file the approve path reads.
+    payload = json.loads((tmp_path / "last_emailed.json").read_text())
+    props = payload["proposals"]
+    assert len(props) == 2
+    assert props[0]["initiative"] == "clawgate-agent-loop", props[0]
+    # 2) index-aligned, not blanket-stamped: the unmatched proposal carries no slug.
+    assert "initiative" not in props[1], props[1]
+    # 3) the whole point of persisting it — the approve path can now build the tag.
+    assert clawgate.build_tags(props[0]) == ["initiative:clawgate-agent-loop"]
+    assert clawgate.build_tags(props[1]) == []
+    # 4) and the emailed digest showed the SAME slug as a breadcrumb (the tag must equal
+    #    what Zach saw when he approved).
+    assert "↳ relates to: clawgate-agent-loop" in sent["body"]

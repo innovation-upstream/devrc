@@ -316,29 +316,47 @@ def test_an_all_lowercase_slug_is_kept_verbatim():
 
 # --------------------------------------------------------------------------- #
 # CORPUS PROPERTIES — asserted over a SNAPSHOT of the real `initiatives.current`
-# vocabulary (tests/fixtures/initiatives_current_slugs.txt, 139 slugs, 2026-07-30).
+# vocabulary (tests/fixtures/initiatives_current_slugs.txt, 140 slugs, 2026-07-30).
 # Hermetic: the file is a checked-in snapshot, never a live read.
+#
+# ⚠ WHAT THESE CAN AND CANNOT CATCH. Every number below is pinned against the FIXTURE,
+# not against the live store, so they detect an unreviewed EDIT to the fixture or a
+# behaviour change in the denylist — never that the live vocabulary has moved on. It
+# already has once (139 → 140 between the feature landing and this follow-up) with the
+# suite fully green. Refreshing the fixture is a manual step; the command is in its
+# header. That trade is deliberate: a live read here would make the whole suite depend
+# on cross-cluster reachability, which tests/conftest.py exists specifically to prevent.
 # --------------------------------------------------------------------------- #
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 
 
-def _live_slug_corpus() -> list[str]:
+def _slug_corpus() -> list[str]:
+    """The checked-in SNAPSHOT of `initiatives.current` — not a live read (see above)."""
     lines = FIXTURES.joinpath("initiatives_current_slugs.txt").read_text().splitlines()
     return [ln.strip() for ln in lines if ln.strip() and not ln.startswith("#")]
 
 
-def test_corpus_snapshot_is_the_expected_size():
-    # Guards the numbers the properties below are stated in. If the store grew, refresh the
-    # fixture (command in its header) and re-state the counts — don't silently drift.
-    assert len(_live_slug_corpus()) == 139
+def test_corpus_fixture_self_check_not_a_live_drift_detector():
+    """SELF-CHECK on the checked-in fixture — deliberately NOT a live-store drift detector.
+
+    All this proves is that the fixture still holds the number of slugs the properties
+    below are stated in, i.e. it fails only if someone edits the file without re-stating
+    the counts. It CANNOT fail because `initiatives.current` grew, since nothing here
+    reads the store. Do not read a green suite as "the snapshot is current" — refresh it
+    with the command in the fixture header (and re-state these counts + README.md)."""
+    assert len(_slug_corpus()) == 140
 
 
 def test_every_emitted_tag_equals_its_ledger_slug_exactly(capsys):
-    """🔴 THE JOIN INVARIANT. For every slug in the real vocabulary, the tag we would emit
-    is either absent or EXACTLY `initiative:<slug>` — never a lowercased/mangled variant.
-    This is what the not-lowercase rule buys: no tag can point at a slug that isn't there."""
+    """🔴 THE JOIN INVARIANT, over the whole real vocabulary and through the REAL emission
+    path (`clawgate.build_tags`, not just the grammar layer): every slug yields either NO
+    tag or EXACTLY `initiative:<slug>` — never a lowercased/whitespace-collapsed/mangled
+    variant. Enforced structurally in build_tags; the denylist's not-lowercase rule only
+    keeps that from throwing away tags we could have kept."""
     import clawgate  # noqa: PLC0415 - local: keeps the routing-only tests import-light
-    for slug in _live_slug_corpus():
+    for slug in _slug_corpus():
+        # the emission path, end to end: a slug on a proposal → the tag list posted.
+        assert clawgate.build_tags({"initiative": slug}) in ([], [f"initiative:{slug}"]), slug
         keep = routing.taggable_slug(slug)
         if keep is None:
             continue
@@ -350,25 +368,28 @@ def test_every_emitted_tag_equals_its_ledger_slug_exactly(capsys):
 
 
 def test_corpus_denylist_drop_counts_are_pinned(capsys):
-    """The live measurement this rule change was justified by: 139 slugs → 10 denylist
-    drops (4 all-caps + 2 mixed-case + 1 bare date + 1 opaque id + 2 generic) → 129 pass
-    the denylist → 3 more lost to the 64-rune tag cap → 126 actually taggable."""
+    """The measurement this rule change was justified by, restated against the CURRENT
+    fixture (2026-07-30, 140 slugs): 10 denylist drops (4 all-caps + 2 mixed-case + 1 bare
+    date + 1 opaque id + 2 generic) → 130 pass the denylist → 3 more lost to the 64-rune
+    tag cap → 127 actually taggable. These are fixture numbers, not live ones — see the
+    section header. (The one slug added since the feature landed,
+    `deploy-comfyui-video-generation`, is taggable, so only the totals moved.)"""
     import clawgate  # noqa: PLC0415
     from collections import Counter
-    corpus = _live_slug_corpus()
+    corpus = _slug_corpus()
     reasons = Counter(r for r in (routing.slug_drop_reason(s) for s in corpus) if r)
     assert reasons == {"not-lowercase": 6, "no-letters": 1, "opaque-id": 1, "generic": 2}
     kept = [s for s in corpus if routing.slug_drop_reason(s) is None]
-    assert len(kept) == 129
+    assert len(kept) == 130
     taggable = [s for s in kept if clawgate.normalize_tags([f"initiative:{s}"])]
-    assert len(taggable) == 126
+    assert len(taggable) == 127
     capsys.readouterr()
 
 
 def test_the_two_mixed_case_corpus_slugs_are_now_dropped(capsys):
     # The exact slugs this rule change added to the drop set — pinned by name so a
     # regression is legible, not just a count that moved.
-    corpus = _live_slug_corpus()
+    corpus = _slug_corpus()
     for slug in ("HANDOFF-comfyui-session", "SECURITY-AUDIT-v0.1.64"):
         assert slug in corpus, f"{slug} left the store — refresh the fixture"
         assert routing.slug_drop_reason(slug) == "not-lowercase"

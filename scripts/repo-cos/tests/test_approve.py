@@ -734,6 +734,78 @@ def test_build_tags_never_raises_on_routing_failure(monkeypatch):
     assert clawgate.build_tags({"initiative": "clawgate-agent-loop-close"}) == []
 
 
+# ---- 7c. the STRUCTURAL join invariant ----------------------------------------------
+# `normalize_tag` performs THREE mutations — lowercase, whitespace→`-`, `.strip("-")` —
+# and the routing denylist polices only the first (`not-lowercase`). These slugs clear the
+# denylist but WOULD be rewritten by the grammar layer, which is exactly the shape that
+# breaks the `tag == slug` join. build_tags must drop them, not emit the rewrite.
+_SLUGS_THE_GRAMMAR_WOULD_REWRITE = (
+    "foo bar",          # whitespace → '-'  (→ initiative:foo-bar)
+    "x  y",             # collapsed run of whitespace
+    "trailing-dash-",   # .strip('-')        (→ initiative:trailing-dash)
+    "-leading-dash",    # .strip('-') on the other end
+    "tab\tseparated",   # _WS_RE covers all whitespace, not just ' '
+    " padded-slug ",    # NB: build_tags strips first, so this one is NOT a rewrite
+)
+
+# Slugs that must still tag, verbatim — the guard has to be a scalpel, not a mute button.
+_SLUGS_THAT_MUST_STILL_TAG = (
+    "clawgate-agent-loop-close",
+    "deploy-comfyui-video-generation",
+    "security-audit-v0.1.64",
+    "remix/composer",
+    "dp_prod.latency",
+)
+
+
+def test_build_tags_emitted_tag_always_equals_its_slug_exactly():
+    """🔴 THE INVARIANT, as a PROPERTY over every shape above: build_tags returns either
+    NOTHING or exactly `[f"initiative:{slug}"]`. It may never return a third thing (a
+    rewritten tag), because the initiatives-side join matches on the slug byte-for-byte
+    and a rewritten tag joins to nothing while looking perfectly healthy."""
+    for slug in _SLUGS_THE_GRAMMAR_WOULD_REWRITE + _SLUGS_THAT_MUST_STILL_TAG:
+        tags = clawgate.build_tags({"initiative": slug})
+        assert tags in ([], [f"initiative:{slug.strip()}"]), (slug, tags)
+
+
+def test_build_tags_drops_every_slug_the_grammar_would_rewrite():
+    """The property asserted STRUCTURALLY rather than by enumerating known shapes: derive
+    the 'would be rewritten' set from `normalize_tag` ITSELF, then require build_tags to
+    emit nothing for each. If someone adds a FOURTH mutation to normalize_tag, the new
+    shape lands in `mutating` automatically and this test covers it without being edited —
+    which is the whole point of guarding in build_tags instead of adding a denylist rule
+    per mutation."""
+    import routing
+    mutating = []
+    for slug in _SLUGS_THE_GRAMMAR_WOULD_REWRITE:
+        keep = routing.taggable_slug(slug)
+        if keep is None:
+            continue  # already handled upstream by the denylist — not this guard's job
+        if clawgate.normalize_tag(f"initiative:{keep}") != f"initiative:{keep}":
+            mutating.append(slug)
+    # guard against a VACUOUS pass: if none of the shapes reach the grammar layer intact,
+    # this test proves nothing and the corpus above needs new shapes.
+    assert mutating, "no sample slug survives the denylist AND gets rewritten — vacuous"
+    for slug in mutating:
+        assert clawgate.build_tags({"initiative": slug}) == [], slug
+
+
+def test_build_tags_logs_why_it_dropped_a_rewritten_tag(capsys):
+    # A silent drop would be indistinguishable from "no initiative resolved" in the weekly
+    # run log, so the guard must say which slug it refused and what the grammar wanted.
+    assert clawgate.build_tags({"initiative": "foo bar"}) == []
+    err = capsys.readouterr().err
+    assert "foo bar" in err
+    assert "initiative:foo-bar" in err
+
+
+def test_build_tags_guard_never_raises_and_never_costs_the_post():
+    # The load-bearing contract: the guard may only ever DROP a tag. It must not raise
+    # (post_task would never be reached) — a dropped tag is fine, a failed POST is not.
+    for slug in _SLUGS_THE_GRAMMAR_WOULD_REWRITE:
+        assert isinstance(clawgate.build_tags({"initiative": slug}), list)
+
+
 # ---- 7c. post_task payload + back-compat --------------------------------------------
 
 def test_post_task_includes_tags_when_passed():

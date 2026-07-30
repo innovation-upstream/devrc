@@ -168,13 +168,21 @@ it only collects the full proposal; the **only new network** is the clawgate POS
   `HANDOFF-comfyui-session`, `2026-07-21`, `868j34n9y-…`, `actionable-next-steps` — each drop
   logged with its rule) and `clawgate.normalize_tags` (clawgate's grammar: lowercase,
   `[a-z0-9._/-]`, ≤1 `:`, ≤64 runes, ≤20 tags; anything invalid is **dropped, not mangled**).
-  Live measurement (2026-07-30, 139 slugs in `initiatives.current`): 10 denylist drops + 3
-  lost to the 64-rune cap → **126 taggable**.
-- **🔴 An emitted tag always equals its ledger slug, byte-for-byte.** `normalize_tag`
-  lowercases, so a slug carrying any uppercase letter would be emitted as a tag that no longer
-  matches the ledger and the initiatives-side join would silently miss. Rather than mangle,
-  the denylist drops it (`not-lowercase`). A missing tag is cheap; a tag that joins to nothing
-  is a lie.
+  Measured over `tests/fixtures/initiatives_current_slugs.txt` — a **hand-refreshed snapshot**
+  of `initiatives.current`, last taken 2026-07-30 at **140 slugs**: 10 denylist drops + 3 lost
+  to the 64-rune cap → **127 taggable**. Those numbers are pinned by `test_routing.py`, but
+  **against the snapshot, not the live store**: the suite is deliberately hermetic (see
+  `tests/conftest.py`), so no test can tell you the fixture has gone stale — it already drifted
+  once (139 → 140) with everything green. Re-run the command in the fixture header to refresh
+  it, then re-state these counts.
+- **🔴 An emitted tag always equals its ledger slug, byte-for-byte.** This is enforced
+  **structurally** in `clawgate.build_tags`: the normalized tag is compared against the exact
+  `initiative:<slug>` we asked for and **dropped on any difference**. The denylist alone is not
+  sufficient — it polices only `normalize_tag`'s lowercasing (`not-lowercase`), while the same
+  function also collapses whitespace to `-` and strips leading/trailing `-`, so a slug like
+  `foo bar` or `trailing-dash-` would clear the denylist and be emitted **rewritten**, joining
+  to nothing. No live slug has that shape today, which is precisely why the guarantee must not
+  rest on a snapshot of the store. A missing tag is cheap; a tag that joins to nothing is a lie.
 - **🔴 Tagging must never cost an approval.** Because suppression is POST-success-gated, a
   tag-induced `400` would silently lose the approval for a week. Backstop: **HTTP `400` on a
   tagged POST retries EXACTLY ONCE with the `tags` key removed** (both the failure and the
