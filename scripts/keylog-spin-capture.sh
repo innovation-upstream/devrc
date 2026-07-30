@@ -31,18 +31,17 @@ set -euo pipefail
 
 THRESH=${KEYLOG_SPIN_THRESHOLD:-20}   # percent of one core
 WINDOW=${KEYLOG_SPIN_WINDOW:-3}       # sample seconds
-MAX_FAILS=${KEYLOG_SPIN_MAX_FAILS:-3} # give up after this many stackless dumps
+MAX_FAILS=${KEYLOG_SPIN_MAX_FAILS:-3} # give up after this many INCOMPLETE dumps
 OUT="${XDG_CACHE_HOME:-$HOME/.cache}/keylog-spin"
 SENTINEL="$OUT/.captured"
 GIVEUP="$OUT/.giveup"
 FAILCOUNT="$OUT/.failcount"
 
-mkdir -p "$OUT"
-
 # One capture is enough — don't accumulate dumps forever.
 [[ -f $SENTINEL ]] && exit 0
-# Repeated stackless dumps mean something structural is wrong (no ptrace
-# permission, py-spy broken). Stop rather than looping every 5 min forever.
+# Repeated INCOMPLETE dumps (no frames, or a pass that errored) mean something
+# structural is wrong — no ptrace permission, py-spy broken, target churning.
+# Stop rather than looping every 5 min forever.
 [[ -f $GIVEUP ]] && exit 0
 
 # Hard precondition: without same-UID ptrace, every attach fails. Bail QUIETLY
@@ -51,6 +50,9 @@ ptrace_scope=$(cat /proc/sys/kernel/yama/ptrace_scope 2>/dev/null || echo 0)
 if [[ $ptrace_scope != 0 ]]; then
   exit 0
 fi
+
+# Only now create state — a quiet gate exit must leave no directory behind.
+mkdir -p "$OUT"
 
 pid=$(systemctl --user show keylog.service -p MainPID --value 2>/dev/null || echo 0)
 [[ ${pid:-0} -gt 0 ]] || exit 0
@@ -110,7 +112,16 @@ dump="$OUT/spin-$stamp.txt"
 # this mechanism exists for — but a PARTIAL dump (plain pass OK, native pass
 # dead) must not silently count as success either, since the native frames are
 # the diagnostic being sought.
-got_stack=false; grep -qE '^Thread [0-9]+ ' "$dump" && got_stack=true
+# `Thread N (idle):` is a HEADER py-spy prints unconditionally — it appears even
+# when zero Python frames resolve, and py-spy still exits 0, so a header alone
+# is NOT evidence of a usable capture. Require an actual frame line too:
+# py-spy indents frames as `    func (file.py:123)` / `    sym (libc.so.6)`.
+# Without this, a frameless-but-successful dump disarms the one-shot watcher on
+# a useless artifact (reproduced 6/6 against a short-lived target).
+got_stack=false
+if grep -qE '^Thread [0-9]+ ' "$dump" && grep -qE '^[[:space:]]+[^[:space:]]+ \(' "$dump"; then
+  got_stack=true
+fi
 had_failure=false; grep -qiE 'failed or timed out|not on PATH' "$dump" && had_failure=true
 
 notify_urgency=normal
@@ -123,7 +134,19 @@ else
   # Bounded retry. Unbounded retries would mean a stackless dump + a
   # non-expiring critical toast every 5 minutes, forever — strictly worse than
   # the one-shot disarm this replaced.
-  fails=$(( $(cat "$FAILCOUNT" 2>/dev/null || echo 0) + 1 ))
+  # Sanitize: under `set -u`, a garbage/multiline .failcount would make the
+  # arithmetic abort BEFORE the .failed rename and before incrementing, so
+  # .giveup becomes unreachable and dumps pile up every 5min instead.
+  # The read must be guarded, not just error-suppressed: `<"$FAILCOUNT"` on a
+  # missing file fails the whole command substitution, which under `set -e`
+  # aborts here — before the .failed rename and before the increment — leaving
+  # .giveup unreachable. That is the exact failure this block exists to prevent.
+  prev=0
+  if [[ -r $FAILCOUNT ]]; then
+    prev=$(tr -cd '0-9' <"$FAILCOUNT" | head -c 6)
+    [[ -n ${prev:-} ]] || prev=0
+  fi
+  fails=$(( prev + 1 ))
   echo "$fails" >"$FAILCOUNT"
   mv "$dump" "$dump.failed"
   dump="$dump.failed"

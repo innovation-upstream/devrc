@@ -29,7 +29,15 @@ let
   # build failure there fails the whole switch. Flip to false to opt a host out
   # without touching the unit definitions. DELETE the flag and the units once
   # the spin is root-caused and the CPUQuota on keylog.service comes off.
-  enableKeylogSpinCapture = graphical;
+  # NOT on the laptop: it reads kernel.yama.ptrace_scope=1 (workbench reads 0,
+  # verified 2026-07-30), so py-spy can never attach to keylog.service there and
+  # the unit would exit at the sysctl gate every 5min forever. Worse, merely
+  # ENABLING it drags the uncached from-source py-spy build (Rust + libunwind)
+  # into the laptop's `home-manager switch` — and a build failure there fails
+  # the whole switch, which would stop the laptop converging to origin/main for
+  # a workbench-only diagnostic. (`isLaptop` is defined below; `let` bindings
+  # are order-independent.)
+  enableKeylogSpinCapture = graphical && !isLaptop;
   # Host discriminator for the graphical config (i3 + i3status-rust bar). Evaluated
   # per-host under `--impure`: the laptop has an intel_backlight, the workbench does
   # not. Threaded into ./graphical.nix via _module.args below. Drives battery/backlight
