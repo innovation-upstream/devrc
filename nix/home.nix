@@ -1191,6 +1191,14 @@ in
         "HOME=%h"
         # Relay kubeconfig for the digest email (reuses repo-cos's postfix relay).
         "REPO_COS_PROD_KUBECONFIG=%h/workspace/homelab-talos/production-kubeconfig"
+        # The global PermissionRequest hook (clawgate) has no matcher, so it also fires
+        # for THIS unattended pass — where a permission prompt is unanswerable by
+        # construction: nobody is awake at 08:00 to tap approve, and the run is headless.
+        # Left on, the hook polls to CLAWGATE_HOOK_DEADLINE (170s) against a 240s
+        # DRAFTER_TIMEOUT, so a single blocked call burns most of one ticket's budget
+        # AND pushes a pointless notification. The hook supports a per-session opt-out;
+        # take it. (Interactive sessions are untouched — this is unit-scoped.)
+        "CLAWGATE_REMOTE_APPROVAL=off"
       ];
       ExecStart = "${pkgs.bash}/bin/bash %h/workspace/devrc/scripts/task-spec-drafter/drafter.sh";
       # Re-run with fresh code after a script-only edit (cf. X-Restart-Triggers above).
