@@ -35,7 +35,7 @@ import {
   frameClickFn, frameTypeFn, frameKeyFn,
   // CDP `eval --frame`: run an arbitrary JS STRING in the target frame's execution
   // context (chrome.scripting can only run a serialized FUNC — the #190 null bug).
-  frameEvalExpressions, isCdpSyntaxError, matchCdpFrameId, pickOopifSessionId,
+  frameEvalExpressions, isCdpSyntaxError, matchCdpFrameId, resolveOopifSession,
   evalValueOrThrow,
   // hidden-tab self-announce (Gap 2): reads report the tab's visibilityState so a
   // throttled background read can't masquerade as a real outage.
@@ -229,6 +229,29 @@ async function execInFrame(tabId, frameId, func, args) {
   return inj ? inj.result : undefined;
 }
 
+// THE single shared cross-origin-OOPIF session resolver — used by BOTH `eval --frame`
+// and `upload --frame` so their depth/cap/ambiguity/timeout semantics can never diverge
+// (they used to duplicate the auto-attach block verbatim, and only handled a DIRECT
+// child). All the decision logic lives in protocol.js `resolveOopifSession` (pure +
+// unit-testable); this is only the chrome.debugger listener glue. The listener is
+// removed inside resolveOopifSession's own `finally`.
+// `globalThis.BROWSER_BRIDGE_OOPIF_LIMITS` is a TEST-ONLY hook to shrink the caps/waits
+// so a cap/propagation test settles in ms; undefined in production → the real bounds.
+// A frame that never appears within the bounds → `frame_not_found:<url>` (the SAME
+// error shape the single-level code returned) — never a silent null, never a hang.
+async function cdpOopifSession(send, frame) {
+  const sessionId = await resolveOopifSession({
+    send,
+    targetUrl: frame.url,
+    addListener: (fn) => chrome.debugger.onEvent.addListener(fn),
+    removeListener: (fn) => chrome.debugger.onEvent.removeListener(fn),
+    limits: (typeof globalThis !== "undefined" && globalThis.BROWSER_BRIDGE_OOPIF_LIMITS)
+      || undefined,
+  });
+  if (!sessionId) throw new Error(`frame_not_found:${frame.url || frame.frameId}`);
+  return sessionId;
+}
+
 // Evaluate an arbitrary JS STRING inside one resolved frame of `tabId` via CDP
 // Runtime.evaluate — the RELIABLE path for `eval --frame` (chrome.scripting can only
 // run a serialized FUNC, so it can't evaluate a user string: the #190 null-as-success
@@ -237,9 +260,11 @@ async function execInFrame(tabId, frameId, func, args) {
 //      #189 bounded timeouts + discarded-tab fail-fast);
 //   2. SAME-PROCESS: the frame is in the top session's Page.getFrameTree → its CDP
 //      frameId → Page.createIsolatedWorld → an executionContextId → Runtime.evaluate;
-//   3. OOPIF: NOT in the top frame tree → Target.setAutoAttach({autoAttach,flatten})
-//      auto-attaches the OOPIF's target (flat sessionId, matched by url) → Runtime.
-//      evaluate in that session's default context.
+//   3. OOPIF: NOT in the top frame tree → the shared cdpOopifSession resolver drives a
+//      BOUNDED RECURSIVE Target.setAutoAttach({autoAttach,flatten}) cascade (re-armed on
+//      each attached child session, since setAutoAttach is not recursive) until the
+//      wanted frame's target appears — so a NESTED/grandchild OOPIF resolves too →
+//      Runtime.evaluate in that flat session's default context.
 // NEVER SILENT-NULL: a genuine null/undefined result is returned AS a value, but a
 // FAILURE to execute (frame not resolvable / exceptionDetails) is a CLEAR op error
 // (frame_not_found / frame_eval_failed:<reason>) via evalValueOrThrow. `frame` is the
@@ -271,25 +296,10 @@ async function cdpFrameEval(tabId, tabUrl, frame, src) {
       return evaluate(undefined, iso.executionContextId);
     }
 
-    // (3) CROSS-ORIGIN OOPIF — auto-attach flat, match the target session by url,
-    // evaluate in THAT session. Collect Target.attachedToTarget events for the duration
-    // of this op only (listener removed in finally), then match by frame url.
-    const attached = [];
-    const onEvt = (_source, method, params) => {
-      if (method === "Target.attachedToTarget" && params && params.targetInfo) {
-        attached.push({ sessionId: params.sessionId, url: params.targetInfo.url });
-      }
-    };
-    chrome.debugger.onEvent.addListener(onEvt);
-    try {
-      await send("Target.setAutoAttach",
-        { autoAttach: true, flatten: true, waitForDebuggerOnStart: false });
-      const sessionId = pickOopifSessionId(attached, frame.url);
-      if (!sessionId) throw new Error(`frame_not_found:${frame.url || frame.frameId}`);
-      return await evaluate(sessionId, undefined);
-    } finally {
-      chrome.debugger.onEvent.removeListener(onEvt);
-    }
+    // (3) CROSS-ORIGIN OOPIF (possibly NESTED) — the shared bounded recursive
+    // auto-attach cascade resolves its flat session; evaluate in THAT session.
+    const sessionId = await cdpOopifSession(send, frame);
+    return await evaluate(sessionId, undefined);
   });
 }
 
@@ -317,23 +327,9 @@ async function cdpSetFileInput(tabId, tabUrl, frame, selector, absPath) {
           { frameId: cdpFrameId, worldName: "browser-bridge-upload", grantUniveralAccess: false });
         contextId = iso.executionContextId;
       } else {
-        // CROSS-ORIGIN OOPIF → NOT in the top frame tree → auto-attach flat, match
-        // the target session by url, evaluate in THAT session (as `eval --frame`).
-        const attached = [];
-        const onEvt = (_source, method, params) => {
-          if (method === "Target.attachedToTarget" && params && params.targetInfo) {
-            attached.push({ sessionId: params.sessionId, url: params.targetInfo.url });
-          }
-        };
-        chrome.debugger.onEvent.addListener(onEvt);
-        try {
-          await send("Target.setAutoAttach",
-            { autoAttach: true, flatten: true, waitForDebuggerOnStart: false });
-          sessionId = pickOopifSessionId(attached, frame.url);
-          if (!sessionId) throw new Error(`frame_not_found:${frame.url || frame.frameId}`);
-        } finally {
-          chrome.debugger.onEvent.removeListener(onEvt);
-        }
+        // CROSS-ORIGIN OOPIF (possibly NESTED) → NOT in the top frame tree → the SAME
+        // shared bounded recursive auto-attach resolver `eval --frame` uses.
+        sessionId = await cdpOopifSession(send, frame);
       }
     }
     // 1. Resolve the element to a CDP RemoteObject (returnByValue:false → objectId).

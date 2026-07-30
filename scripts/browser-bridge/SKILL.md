@@ -124,7 +124,7 @@ Prefix any op with `--instance <key>` to target a specific connected profile
 | `browser [--instance K] release`           | drop ownership WITHOUT closing the tab |
 | `browser [--instance K] [--tab T] html`              | `outerHTML` of the owned tab (else the active tab) |
 | `browser [--instance K] [--tab T] text [selector] [--max-bytes N]` | **cheap read** — visible `innerText` of the owned/active tab (optional CSS `selector`), whitespace-normalized + byte-capped (default 32768; `0`=uncapped; a truncation note is appended). ~98% smaller than `html` — prefer it |
-| `browser [--instance K] [--tab T] [--frame F] eval '<js>'` | run JS in the owned/active tab, return its value. **`--frame` runs the JS INSIDE the target frame (incl. a cross-origin OOPIF) via CDP `Runtime.evaluate`** (not `chrome.scripting`, which can only run a func — the old path returned `value:null`); a frame that can't be resolved / an exception → a clear `frame_not_found` / `frame_eval_failed:<reason>` error, never a silent null; reports the frame's own `url` |
+| `browser [--instance K] [--tab T] [--frame F] eval '<js>'` | run JS in the owned/active tab, return its value. **`--frame` runs the JS INSIDE the target frame (incl. a cross-origin OOPIF) via CDP `Runtime.evaluate`** (not `chrome.scripting`, which can only run a func — the old path returned `value:null`); a frame that can't be resolved / an exception → a clear `frame_not_found` / `frame_eval_failed:<reason>` error, never a silent null; reports the frame's own `url`. **NESTED (grandchild+) OOPIFs are reached** via a bounded recursive auto-attach cascade — capped at depth 5 / 50 targets (`oopif_depth_cap` / `oopif_target_cap`), duplicate-URL frames fail `ambiguous_frame` |
 | `browser [--instance K] tabs`              | list open tabs (`.data.ownedTabId` flags this session's owned tab) |
 | `browser [--instance K] [--tab T] nav <url>`         | navigate the owned/active tab to `<url>` |
 | `browser [--instance K] [--tab T] screenshot [path] [--fullpage]` | screenshot via **CDP `Page.captureScreenshot`** — **works on a BACKGROUND/occluded tab** and on each profile's own tab (a foreground tab uses the cheap captureVisibleTab fast path). `--fullpage` grabs the whole scrollable document. Prints the data URL, or writes a `.png` to `path` |
@@ -132,7 +132,7 @@ Prefix any op with `--instance <key>` to target a specific connected profile
 | `browser [--instance K] [--tab T] [--frame F] click <selector>` | click the element's center — **TRUSTED** CDP on the top frame; **SYNTHETIC** (`chrome.scripting`) inside a cross-origin `--frame` |
 | `browser [--instance K] [--tab T] [--frame F] type <text> [--selector S]` | text input — **TRUSTED** CDP top frame; **SYNTHETIC** in-frame (focus `--selector` first if given) |
 | `browser [--instance K] [--tab T] [--frame F] key <Enter\|Tab\|Escape\|Backspace\|Delete\|Arrow*\|Home\|End\|Page*> [--selector S]` | dispatch one bounded key — **TRUSTED** CDP top frame; **SYNTHETIC** in-frame |
-| `browser [--instance K] [--tab T] [--frame F] upload <selector> <path>` | populate the `<input type=file>` at `<selector>` with the LOCAL file `<path>` via **CDP `DOM.setFileInputFiles`** — Chrome reads the file BY PATH itself (same host), so **no bytes cross the bridge**. The CLI validates the path (readable regular file) + resolves it to ABSOLUTE **before** dispatch; `--frame` routes into a cross-origin OOPIF. **Bounded TYPED op, own-tab, NO raw-CDP passthrough** — but it IS **data-exfil-capable** (any readable file's CONTENTS could be posted to the site), so **every upload is AUDIT-LOGGED** (op + target domain + path). Result carries the basename only |
+| `browser [--instance K] [--tab T] [--frame F] upload <selector> <path>` | populate the `<input type=file>` at `<selector>` with the LOCAL file `<path>` via **CDP `DOM.setFileInputFiles`** — Chrome reads the file BY PATH itself (same host), so **no bytes cross the bridge**. The CLI validates the path (readable regular file) + resolves it to ABSOLUTE **before** dispatch; `--frame` routes into a cross-origin OOPIF (incl. a NESTED one — same bounded cascade + caps as `eval --frame`). **Bounded TYPED op, own-tab, NO raw-CDP passthrough** — but it IS **data-exfil-capable** (any readable file's CONTENTS could be posted to the site), so **every upload is AUDIT-LOGGED** (op + target domain + path). Result carries the basename only |
 | `browser [--instance K] [--tab T] activate [--wait MS \| --no-wait]` | **FOREGROUND** the owned/active tab so a foreground-throttled SPA finishes loading, then can be read/driven. **⚠ STEALS FOCUS — the ONE intrusive op** (it changes what the user sees; every other op is non-intrusive). Foregrounds via **host-side `i3-msg`** (Chrome-side `tabs.update`/`windows.update` is a no-op on i3), so it works ONLY on a graphical i3 host; returns an extra **`i3:"applied"\|"skipped"\|"failed"`** field alongside `{tabId,windowId,url,title,active,status}`. Waits (bounded, default ~3s, cap ~8s) for `status:"complete"` + a paint settle unless `--no-wait`; `--wait MS` overrides. See "Driving a throttled SPA" below. |
 | `browser [--instance K] agent "<goal>" [flags]` | run the **autonomous opencode browser-agent** in its OWN isolated tab against `<goal>`; returns a compact `{answer,evidence,steps_used,status}` (see below) |
 | `browser --print-session-id`               | print the derived per-session id (debug) and exit |
@@ -160,13 +160,28 @@ matches **multiple** frames the op fails with `ambiguous_frame:<n> [<id>:<url>, 
 listing the candidates — re-issue with the numeric `frameId` (it does NOT silently pick
 the first match). So: **use the numeric id, or a host substring** — not a bare path token.
 
-**Limitation — nested OOPIFs (OOPIF-in-OOPIF):** the CDP `eval --frame` path
-auto-attaches only DIRECT child cross-origin targets (`Target.setAutoAttach({flatten})`
-is not recursive), so `eval --frame` on a **grandchild** cross-origin iframe (a
-cross-origin frame nested inside another cross-origin frame) returns `frame_not_found`
-(it fails safe — never a wrong/silent result). `text`/`html`/`click`/`type`/`key --frame`
-(via `chrome.scripting`) can still reach such a deeply-nested frame; only the CDP-based
-`eval --frame` is limited to direct children.
+**Nested OOPIFs (OOPIF-in-OOPIF) — supported, with hard caps.** `Target.setAutoAttach`
+is not recursive (it attaches only a session's DIRECT child targets), which is why
+`eval --frame` on a **grandchild** cross-origin iframe used to return `frame_not_found`.
+It now **re-arms auto-attach on each attached child session**, walking the cascade DOWN
+the frame tree until the wanted frame's target appears — so a grandchild (and deeper)
+cross-origin frame IS reachable by `eval --frame` and by the OOPIF branch of
+`upload --frame`. Because a hostile page can nest/spawn frames without limit, the descent
+is **hard-bounded** and every bound fails LOUD (never a silent truncation, never a hang):
+
+| failure | error | meaning |
+|---------|-------|---------|
+| frame never attaches within the bounded wait (~3s ceiling, ~300 ms quiet-window settle) | `frame_not_found:<url>` | the frame isn't there (unchanged shape) |
+| nesting deeper than **5** levels below the tab | `oopif_depth_cap:5` | we deliberately stopped descending |
+| more than **50** attached targets for one op | `oopif_target_cap:50` | frame-spamming page; work is bounded |
+| two attached frames share the target URL | `ambiguous_frame:<n> [<sessionId>:<url>, …]` | re-issue with a distinguishable frame — it never silently picks one |
+
+Both caps are named constants in `extension/protocol.js` (`OOPIF_MAX_DEPTH`,
+`OOPIF_MAX_TARGETS`, `OOPIF_SETTLE_MS`, `OOPIF_WAIT_MS`) and the whole cascade stays well
+under the per-op CDP budget. `text`/`html`/`click`/`type`/`key --frame` reach a nested
+frame as they always did (they use `chrome.scripting`, not CDP). **Not yet live-verified
+against real Brave** — the `tests/fixtures/oopif-rig/` three-domain fixture reproduces a
+grandchild OOPIF on demand for that check.
 
 Result payloads land under `.result.data` in the JSON (the envelope is
 `{"ok":true,"result":{"id","ok","data":{...}}}`).
