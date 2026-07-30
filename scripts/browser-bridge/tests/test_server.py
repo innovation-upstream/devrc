@@ -1560,6 +1560,9 @@ def _enable_i3(monkeypatch, returncode=0, raise_exc=None):
     real i3-msg). Returns the list the fake appends (argv, kwargs) to per call."""
     calls = []
     monkeypatch.setattr(S, "i3_available", lambda: True)
+    # Deterministic resolved i3-msg path (used as argv[0]) regardless of host.
+    monkeypatch.setattr(S, "_resolve_i3_msg",
+                        lambda: _FAKE_I3_MSG)
 
     def _fake_run(argv, **kw):
         calls.append((argv, kw))
@@ -1569,6 +1572,11 @@ def _enable_i3(monkeypatch, returncode=0, raise_exc=None):
 
     monkeypatch.setattr(S.subprocess, "run", _fake_run)
     return calls
+
+
+# The absolute i3-msg path the _enable_i3 helper makes _resolve_i3_msg return, so
+# argv[0] assertions are host-independent (matches _I3_MSG_FALLBACKS[0]).
+_FAKE_I3_MSG = "/run/current-system/sw/bin/i3-msg"
 
 
 def test_i3_focus_argv_hostile_title_is_safe():
@@ -1637,7 +1645,9 @@ def test_activate_invokes_i3_msg_on_success(monkeypatch):
         assert body["result"]["data"]["i3"] == "applied"
         assert len(calls) == 1
         argv, kw = calls[0]
-        assert argv[0] == "i3-msg"
+        # argv[0] is the RESOLVED ABSOLUTE i3-msg path (not the bare name) so the
+        # call works even under the minimal systemd --user service PATH.
+        assert argv[0] == _FAKE_I3_MSG
         assert argv[1] == ('[class="Brave-browser" title="%s"] focus'
                            % re.escape("Model Benchmarking"))
         assert kw.get("shell", False) is False  # NEVER a shell string
@@ -1752,8 +1762,8 @@ def test_activate_i3_telemetry_stays_metadata_only(telemetry, monkeypatch):
 
 
 def test_i3_available_requires_display_and_i3msg(monkeypatch):
-    """i3_available gates on BOTH a graphical session (DISPLAY) and i3-msg on
-    PATH — either missing → False (skip). Exercises the REAL implementation
+    """i3_available gates on BOTH a graphical session (DISPLAY) and a resolvable
+    i3-msg — either missing → False (skip). Exercises the REAL implementation
     (the autouse fixture stubs the module attribute for hermeticity)."""
     monkeypatch.setattr(S.shutil, "which",
                         lambda n: "/run/current-system/sw/bin/i3-msg")
@@ -1761,8 +1771,50 @@ def test_i3_available_requires_display_and_i3msg(monkeypatch):
     assert _REAL_I3_AVAILABLE() is False          # no DISPLAY → False
     monkeypatch.setenv("DISPLAY", ":0")
     assert _REAL_I3_AVAILABLE() is True           # DISPLAY + i3-msg → True
+    # i3-msg NOT on PATH *and* no absolute fallback exists → False. Both the
+    # which() lookup AND the absolute-fallback probe must miss (else the resolver
+    # finds a real /run/current-system/... i3-msg on the graphical test host).
     monkeypatch.setattr(S.shutil, "which", lambda n: None)
+    monkeypatch.setattr(S.os.path, "exists", lambda p: False)
     assert _REAL_I3_AVAILABLE() is False          # i3-msg absent → False
+
+
+def test_resolve_i3_msg_prefers_which(monkeypatch):
+    """_resolve_i3_msg returns the PATH-resolved i3-msg when one is on PATH."""
+    monkeypatch.setattr(S.shutil, "which", lambda n: "/usr/bin/i3-msg")
+    assert S._resolve_i3_msg() == "/usr/bin/i3-msg"
+
+
+def test_resolve_i3_msg_falls_back_to_absolute_path(monkeypatch):
+    """THE FIX: i3-msg is NOT on PATH (the minimal systemd --user service PATH),
+    but a well-known absolute i3-msg EXISTS and is executable → resolve to it."""
+    monkeypatch.setattr(S.shutil, "which", lambda n: None)
+    fallback = S._I3_MSG_FALLBACKS[0]
+    monkeypatch.setattr(S.os.path, "exists", lambda p: p == fallback)
+    monkeypatch.setattr(S.os, "access", lambda p, mode: p == fallback)
+    assert S._resolve_i3_msg() == fallback
+
+
+def test_resolve_i3_msg_none_when_nothing_found(monkeypatch):
+    """Nothing on PATH and no absolute fallback exists → None (→ i3 skipped)."""
+    monkeypatch.setattr(S.shutil, "which", lambda n: None)
+    monkeypatch.setattr(S.os.path, "exists", lambda p: False)
+    assert S._resolve_i3_msg() is None
+
+
+def test_i3_available_uses_absolute_fallback_off_path(monkeypatch):
+    """i3_available is TRUE when DISPLAY is set and i3-msg resolves ONLY via the
+    absolute fallback (which() misses) — the exact in-service condition the bug
+    hit. This is what un-breaks `activate` under the minimal service PATH."""
+    monkeypatch.setenv("DISPLAY", ":0")
+    monkeypatch.setattr(S.shutil, "which", lambda n: None)
+    fallback = S._I3_MSG_FALLBACKS[0]
+    monkeypatch.setattr(S.os.path, "exists", lambda p: p == fallback)
+    monkeypatch.setattr(S.os, "access", lambda p, mode: p == fallback)
+    assert _REAL_I3_AVAILABLE() is True
+    # DISPLAY absent → skipped regardless of a resolvable i3-msg.
+    monkeypatch.delenv("DISPLAY", raising=False)
+    assert _REAL_I3_AVAILABLE() is False
 
 
 # --- THE BUG: two sessions interleave without clobbering ------------------- #
