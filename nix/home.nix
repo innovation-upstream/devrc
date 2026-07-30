@@ -710,6 +710,13 @@ in
       ExecStart = "${pkgs.python312.withPackages (ps: [ ps.xlib ps.pyyaml ])}/bin/python3 %h/.config/activity-collector/keylog/keylog.py";
       Restart = "always";
       RestartSec = 10;
+      # Ceiling on a measured runaway: this unit was observed pinning a full
+      # core (96% CPU over a 3s sample, ~2 kernel ticks — i.e. spinning in
+      # userspace, not blocked on X) sustained over 24h+ regardless of typing.
+      # Root cause is still open; the cap bounds the blast radius on a box that
+      # is CPU-contended (PSI cpu some ~63%) without dropping keystroke capture.
+      # Remove once the spin is fixed and verified idle-at-~0%.
+      CPUQuota = "30%";
       # Restart on a script-only change (see activity-collector for rationale).
       X-Restart-Triggers = [ "${../scripts/collector/keylog}" ];
     };

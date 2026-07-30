@@ -31,6 +31,18 @@
     [[ -f $HOME/workspace/homelab-talos/workbench-kubeconfig ]]     && export KC_WORKBENCH=$HOME/workspace/homelab-talos/workbench-kubeconfig
     [[ -f $HOME/workspace/civit/datapacket-talos/prod-kubeconfig ]] && export KC_DPPROD=$HOME/workspace/civit/datapacket-talos/prod-kubeconfig
     [[ -f $HOME/.kube/homelab-nebula.yaml ]]        && export KC_NEBULA=$HOME/.kube/homelab-nebula.yaml
+
+    # ── Global build/test concurrency caps ──────────────────────────────────
+    # Vitest and Go both size their worker pools off the FULL CPU count with no
+    # awareness of sibling processes. With several agents running test suites
+    # concurrently, each independently claims all 24 threads — measured as two
+    # vitest runs at 91% + 71% CPU against PSI cpu some=63% (contention, since
+    # PSI full stayed at 0%). Capping here (.zshenv, so it reaches the
+    # non-interactive `zsh -c` every agent Bash call uses) bounds the total.
+    # Starting values, not a benchmarked optimum — any cap well under 24 beats
+    # each process assuming it owns the machine. Only affects NEW shells.
+    export VITEST_MAX_WORKERS=4
+    export GOMAXPROCS=8
   '';
 
   initContent = let
