@@ -26,12 +26,17 @@ const state = {
   execResult: { ok: true },
   tab: { id: TAB_ID, url: "https://civitai.com/apps/run/model-benchmarking",
          title: "Model Benchmarking", active: false, status: "complete", windowId: 1 },
-  calls: { getAllFrames: [], executeScript: [], debugger: [], tabsGet: [] },
+  calls: { getAllFrames: [], executeScript: [], debugger: [], tabsGet: [],
+           tabsUpdate: [], windowsUpdate: [] },
 };
 function resetCalls() {
-  state.calls = { getAllFrames: [], executeScript: [], debugger: [], tabsGet: [] };
+  state.calls = { getAllFrames: [], executeScript: [], debugger: [], tabsGet: [],
+                  tabsUpdate: [], windowsUpdate: [] };
   state.execResult = { ok: true };
 }
+// Keep the `activate` wait fast + deterministic in these wiring tests (the wait
+// LOGIC itself is unit-tested in protocol.test.mjs): no paint settle, 1ms polls.
+globalThis.BROWSER_BRIDGE_ACTIVATE_TIMING = { settleMs: 0, pollMs: 1 };
 
 globalThis.BROWSER_BRIDGE_NO_AUTOSTART = true;
 globalThis.chrome = {
@@ -48,7 +53,16 @@ globalThis.chrome = {
     async get(id) { state.calls.tabsGet.push(id); return { ...state.tab, id }; },
     async query() { return [state.tab]; },
     async captureVisibleTab() { return "data:image/png;base64,AAAA"; },
-    async update() {},
+    async update(id, props) {
+      state.calls.tabsUpdate.push({ id, props });
+      if (props) Object.assign(state.tab, props);   // e.g. {active:true}
+      return { ...state.tab, id };
+    },
+  },
+  windows: {
+    async update(windowId, props) {
+      state.calls.windowsUpdate.push({ windowId, props });
+    },
   },
   debugger: {
     async attach() { state.calls.debugger.push("attach"); },
@@ -189,4 +203,69 @@ test("screenshot STILL uses the chrome.debugger (CDP) path — not regressed to 
   assert.equal(state.calls.getAllFrames.length, 0, "screenshot must not enumerate frames");
   assert.equal(out.via, "cdp");
   assert.match(out.dataUrl, /^data:image\/png;base64,/);
+});
+
+// --------------------------------------------------------------------------- //
+// `activate` op: foreground the tab (tabs.update{active} + windows.update{focused})
+// then bounded wait-for-load. Wiring only — the wait LOGIC is unit-tested in
+// protocol.test.mjs. No CDP/debugger, no executeScript, no new permission.
+// --------------------------------------------------------------------------- //
+test("activate: makes the tab active + requests its window focus; returns tab info", async () => {
+  resetCalls();
+  state.tab = { id: TAB_ID, url: "https://model-benchmarking.civit.ai/",
+    title: "Bench", active: false, status: "complete", windowId: 3 };
+  const out = await OPS.activate({ tabId: TAB_ID });
+  // chrome.tabs.update(tabId, {active:true}) — make it the active tab of its window.
+  assert.deepEqual(state.calls.tabsUpdate, [{ id: TAB_ID, props: { active: true } }]);
+  // chrome.windows.update(windowId, {focused:true}) — request the window's focus.
+  assert.deepEqual(state.calls.windowsUpdate, [{ windowId: 3, props: { focused: true } }]);
+  // Returns the resolved tab's info so the caller can confirm it foregrounded.
+  assert.equal(out.tabId, TAB_ID);
+  assert.equal(out.windowId, 3);
+  assert.equal(out.status, "complete");
+  assert.equal(out.active, true);
+  assert.equal(out.url, "https://model-benchmarking.civit.ai/");
+  // Intrusive-but-bounded: NO debugger attach, NO page injection.
+  assert.deepEqual(state.calls.debugger, [], "activate must not use the debugger");
+  assert.equal(state.calls.executeScript.length, 0, "activate must not inject a script");
+});
+
+test("activate: an already-complete tab short-circuits the wait (returns promptly)", async () => {
+  resetCalls();
+  state.tab = { id: TAB_ID, url: "https://x.test/", title: "X",
+    active: false, status: "complete", windowId: 1 };
+  const out = await OPS.activate({ tabId: TAB_ID, waitMs: 5000 });
+  assert.equal(out.status, "complete");
+  // A complete tab needs at most a couple of tabs.get reads (windowId + the wait's
+  // first read) — it must NOT poll in a loop.
+  assert.ok(state.calls.tabsGet.length <= 2, "no polling loop for a complete tab");
+});
+
+test("activate: a DISCARDED/unloaded tab foregrounds then returns promptly (NO wedge #189)", async () => {
+  resetCalls();
+  state.tab = { id: TAB_ID, url: "https://x.test/", title: "X",
+    active: false, status: "unloaded", discarded: true, windowId: 1 };
+  // Even with a large waitMs, an unloaded tab (no live renderer) must fail-fast,
+  // never hang waiting for a "complete" that can't come.
+  const out = await OPS.activate({ tabId: TAB_ID, waitMs: 8000 });
+  assert.equal(state.calls.tabsUpdate.length, 1, "still foregrounds the tab");
+  assert.equal(out.status, "unloaded");
+  assert.ok(state.calls.tabsGet.length <= 2, "no polling loop for a discarded tab");
+});
+
+test("activate: windows.update failure is swallowed (best-effort i3 focus)", async () => {
+  resetCalls();
+  state.tab = { id: TAB_ID, url: "https://x.test/", title: "X",
+    active: false, status: "complete", windowId: 9 };
+  const origWindows = globalThis.chrome.windows;
+  globalThis.chrome.windows = { async update() { throw new Error("i3 refused to raise"); } };
+  try {
+    // A WM that refuses the focus request must NOT fail the op — the tab is still
+    // set active within its window (the reliable part), focus is best-effort.
+    const out = await OPS.activate({ tabId: TAB_ID });
+    assert.equal(out.status, "complete");
+    assert.deepEqual(state.calls.tabsUpdate, [{ id: TAB_ID, props: { active: true } }]);
+  } finally {
+    globalThis.chrome.windows = origWindows;
+  }
 });

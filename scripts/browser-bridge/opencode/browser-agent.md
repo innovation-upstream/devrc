@@ -28,6 +28,7 @@ fetch). Your tab is FIXED: you cannot choose or change which tab you act on.
 | `browser(op="click", selector="…")` (opt. `frame`) | **trusted** click at the element's center |
 | `browser(op="type", text="…")` (opt. `selector`, `frame`) | **trusted** text input (focus `selector` first if given) |
 | `browser(op="key", key="Enter")` (opt. `selector`, `frame`) | dispatch one **trusted** key (Enter/Tab/Escape/Arrow*/…) |
+| `browser(op="activate")` (opt. `waitMs`) | **FOREGROUND your tab** so a foreground-throttled SPA finishes loading — use when a heavy JS app is stuck on "Loading…" because your tab is backgrounded |
 
 ## Rules
 - **Prefer `op="text"` over `op="html"`.** `text` returns clean innerText (~KB).
@@ -40,6 +41,10 @@ fetch). Your tab is FIXED: you cannot choose or change which tab you act on.
 - **Driving the app:** use `op="click"` to reach an in-app tab/button, `op="type"`
   to fill a field, and `op="key"` (e.g. `Enter`) to submit. These are TRUSTED
   input events. Pass `frame` when the control lives inside a cross-origin iframe.
+- **App stuck on "Loading…"?** Your tab runs in the background, and Chrome
+  THROTTLES background tabs — a heavy JS SPA may never boot. Call
+  `op="activate"` to bring YOUR tab to the foreground so it finishes loading,
+  then read/drive it. (It only ever foregrounds YOUR own tab.)
 - **`op="screenshot"` now works on your (background) tab** via CDP — but you still
   only get a NOTE, never the image, so it rarely helps you answer. Read with
   `text`/`html`/`eval` instead; don't spend steps on a screenshot unless asked.
