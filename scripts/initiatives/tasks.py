@@ -380,11 +380,13 @@ def group_by_slug(tasks, base_url: str = "") -> dict[str, list[dict]]:
 
     ⚠ LATENT RISK, deliberately not fixed: the ledger's identity is `(repo, slug)` but this
     map is keyed on the SLUG ALONE, so two initiatives in different repos that happened to
-    share a slug would see each other's tasks. Live today: 143 rows / 143 DISTINCT slugs —
-    zero collisions — and closing it means widening the tag namespace to
-    `initiative:<repo>/<slug>` on the PRODUCER side (repo-cos) plus a migration for every
+    share a slug would see each other's tasks. Measured 2026-07-30: `initiatives.latest`
+    49 rows / 49 DISTINCT slugs and `initiatives.current` 144 / 144 — zero collisions in
+    either view. Closing it means widening the tag namespace to `initiative:<repo>/<slug>`
+    on the PRODUCER side (repo-cos + this repo's dispatch.py) plus a migration for every
     already-emitted tag. Not worth it for a decoration; revisit if the store ever shows a
-    duplicate slug (`select slug from initiatives.latest group by slug having count(*) > 1`)."""
+    duplicate slug:
+        select slug, count(*) from initiatives.latest group by slug having count(*) > 1;"""
     out: dict[str, list[dict]] = {}
     if not isinstance(tasks, list):
         return out

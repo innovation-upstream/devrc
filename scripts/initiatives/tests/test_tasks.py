@@ -148,9 +148,12 @@ def test_is_open_is_a_closed_set_of_live_statuses():
     assert tasks.is_open(_task(status="open")) is True
     assert tasks.is_open(_task(status="in_progress")) is True
     assert tasks.is_open(_task(status="ready_for_review")) is True
-    # complete / dismissed / unknown / missing must NOT block a dispatch (fail-open)
+    # complete / a future-renamed status / unknown / missing must NOT block a dispatch.
+    # clawgate's vocabulary is exactly {open, in_progress, ready_for_review, complete}
+    # (internal/notes/notes.go), so `retired_by_a_later_clawgate` stands in for "a status
+    # this code has never heard of" — OPEN_STATUSES is an allow-list, so it fails OPEN.
     assert tasks.is_open(_task(status="complete")) is False
-    assert tasks.is_open(_task(status="dismissed")) is False
+    assert tasks.is_open(_task(status="retired_by_a_later_clawgate")) is False
     assert tasks.is_open(_task(status="")) is False
     assert tasks.is_open({}) is False
     assert tasks.is_open(None) is False
@@ -160,7 +163,7 @@ def test_open_task_count_counts_only_live_work():
     views = [tasks.task_view(_task(1, status="open")),
              tasks.task_view(_task(2, status="in_progress")),
              tasks.task_view(_task(3, status="complete")),
-             tasks.task_view(_task(4, status="dismissed"))]
+             tasks.task_view(_task(4, status="retired_by_a_later_clawgate"))]
     assert tasks.open_task_count(views) == 2
     assert tasks.open_task_count([]) == 0
     assert tasks.open_task_count(None) == 0

@@ -5282,9 +5282,10 @@ def test_build_model_unknown_slug_in_the_map_matches_no_card():
     assert model["total"] == 1                                # no phantom card invented
 
 
-def test_build_model_open_task_count_ignores_complete_and_dismissed():
+def test_build_model_open_task_count_ignores_complete_and_unknown_statuses():
     model = viewer.build_model([_row(slug="a")], now=NOW, linked_tasks={"a": [
-        _tv(1, "open"), _tv(2, "in_progress"), _tv(3, "complete"), _tv(4, "dismissed")]})
+        _tv(1, "open"), _tv(2, "in_progress"), _tv(3, "complete"),
+        _tv(4, "retired_by_a_later_clawgate")]})
     assert model["flat"][0]["open_task_count"] == 2
 
 
