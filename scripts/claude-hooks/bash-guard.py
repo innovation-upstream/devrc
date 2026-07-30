@@ -48,14 +48,65 @@ import sys, json, re, ipaddress
 # `--no-ignore-removal` is git's documented alias for `--all`.
 # Erring toward over-matching is deliberate: this guard fails CLOSED, and a
 # false positive costs one `git add <path>` retype.
-_BLIND_FLAG = re.compile(r"(^|\s)(-[A-Za-z]*A[A-Za-z]*|--all|--no-ignore-removal)(\s|$)")
-_BLIND_PATH = re.compile(r"(^|\s)(\.|:/)(\s|$)")
+# `git [global-opts] add|stage <args>`. The global-opts hop matters: `git -C
+# <dir> add -A` is the shape check_cd_then_git and RULES actively PUSH agents
+# toward, so a bare `\bgit\s+add\b` anchor made this guard self-defeating —
+# real transcripts contain blind `git -C "$WT" add -A` calls it never saw.
+# `stage` is git's documented synonym for `add`.
+_GIT_ADD = re.compile(
+    r"\bgit\s+"
+    r"(?:(?:-[Cc]\s+\S+"
+    r"|--(?:git-dir|work-tree|namespace|exec-path)(?:=\S+|\s+\S+)"
+    r"|-[pP]|--paginate|--no-pager|--bare|--literal-pathspecs)\s+)*"
+    r"(?:add|stage)\b([^&|;\n]*)"
+)
+
+# Tokens that stage the whole tree. Checked per-TOKEN rather than with a
+# whitespace-bounded regex: `(git add -A)` and `git add -A;` defeated the
+# boundary, and nested `[A-Za-z]*` around the A backtracked quadratically
+# (6s on a 32k run of A's, on a hook that runs for every Bash call).
+# Short bundles: -A is the only uppercase-A short option `git add` has, so any
+# all-letters dash-token containing A is blind (-Av, -vA, -uA).
+_BLIND_SHORT = re.compile(r"-[A-Za-z]+")
+# git accepts unique long-option PREFIXES: --al == --all, --no-ignore-r == …removal.
+_BLIND_LONG = re.compile(r"--al|--all|--no-ignore-r[a-z-]*")
+# Whole-tree pathspecs: . ./ .// ./. :/ * $PWD $(pwd) :(top)
+# NOT `..` — verified by execution that it does not stage the tree (git errors
+# on it at the repo root), so blocking it would be an unproven over-block.
+# Hence `\.(?:/[./]*)?` rather than `\.[./]*`.
+_BLIND_PATH = re.compile(r"\.(?:/[./]*)?|:/|\*|\$PWD|\$\(pwd\)|:\(top\)\*?")
+
+
+def _stages_everything(argtext):
+    # The shell removes quotes, backslashes and the $ of $'…' before git sees
+    # the word; do the same, or `git add -\A` / `git add $'-A'` slip past.
+    t = re.sub(r"\$(?=['\"])", "", argtext)
+    t = t.replace('"', "").replace("'", "").replace("\\", "")
+    after_ddash = False
+    for raw in t.split():
+        if raw == "--":
+            after_ddash = True          # everything past this is a PATH, not a flag
+            continue
+        # A subshell's closing paren sticks to the last token (`(git add -A)`),
+        # as does a trailing `;`. Test both forms rather than truncating the
+        # capture at `)`, which would hide a real flag after `$(…)`.
+        # `$(pwd)` still matches via the unstripped form.
+        for tok in {raw, raw.rstrip(");")}:
+            if not tok:
+                continue
+            if not after_ddash:
+                if _BLIND_SHORT.fullmatch(tok) and "A" in tok:
+                    return True
+                if _BLIND_LONG.fullmatch(tok):
+                    return True
+            if _BLIND_PATH.fullmatch(tok):
+                return True
+    return False
 
 
 def check_git_add_all(cmd):
-    for m in re.finditer(r"\bgit\s+add\b([^&|;\n]*)", cmd):
-        args = m.group(1).replace('"', "").replace("'", "")
-        if _BLIND_FLAG.search(args) or _BLIND_PATH.search(args):
+    for m in _GIT_ADD.finditer(cmd):
+        if _stages_everything(m.group(1)):
             return ("`git add -A` / `git add --all` / `git add .` is blocked by your RULES "
                     "(never blind-stage — it sweeps up unrelated working-tree changes and has "
                     "caused near-miss leaks). Stage specific paths instead: `git add <path> ...`. "

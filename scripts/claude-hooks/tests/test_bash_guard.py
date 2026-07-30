@@ -26,9 +26,11 @@ GUARD = os.path.normpath(GUARD)
 
 # Dangerous substrings are built piecewise so this file can never trip a live
 # guard that is inspecting the command used to run it.
-# NOTE: keep a trailing word after -A. `check_git_add_all` requires -A to be
-# followed by whitespace or end-of-string, so a payload ending `-A'` silently
-# matches nothing and makes a test vacuous (this hid a real bypass once).
+# NOTE: keep a trailing word after -A. This USED to matter because the check
+# required -A to be followed by whitespace, so a payload ending `-A'` matched
+# nothing and made a test vacuous (that hid a real bypass once). Token matching
+# now catches the quoted form too, but the trailing word is kept so these read
+# as prose rather than as a bare flag.
 ADDA = "git a" + "dd -A ever"
 HARD = "git re" + "set --hard HEAD"
 
@@ -86,6 +88,49 @@ CASES = [
     ("ok: quoted path with spaces",   'git a' + 'dd "my file.txt"', False),
     ("ok: path containing a dot",     "git a" + "dd foo.yaml", False),
     ("ok: file named A",              "git a" + "dd A", False),
+
+    # --- gaps found by the #219 audit: all proven to stage everything ---
+    # `git -C <dir> add -A` is the shape RULES + check_cd_then_git push agents
+    # into, and it bypassed the guard entirely (11 blind hits in transcripts).
+    ("gap: git -C dir add -A",        "git -C /tmp/x a" + "dd -A", True),
+    ("gap: git -C dir add .",         "git -C /tmp/x a" + "dd .", True),
+    ("gap: git --git-dir= add -A",    "git --git-dir=/tmp/x/.git a" + "dd -A", True),
+    ("gap: git -c k=v add -A",        "git -c user.name=x a" + "dd -A", True),
+    ("gap: git -P add -A",            "git -P a" + "dd -A", True),
+    # backslash / ANSI-C escapes — same evasion class quoting was
+    ("gap: backslash -\\A",           "git a" + "dd -\\A", True),
+    ("gap: backslash \\-A",           "git a" + "dd \\-A", True),
+    ("gap: escaped --a\\ll",          "git a" + "dd --a\\ll", True),
+    ("gap: escaped dot",              "git a" + "dd \\.", True),
+    ("gap: ANSI-C $'-A'",             "git a" + "dd $'-A'", True),
+    # `git stage` is a documented synonym for `git add`
+    ("gap: git stage -A",             "git st" + "age -A", True),
+    ("gap: git stage .",              "git st" + "age .", True),
+    # unique long-option prefixes
+    ("gap: --al prefix",              "git a" + "dd --al", True),
+    ("gap: --no-ignore-remov",        "git a" + "dd --no-ignore-remov", True),
+    # subshell parens defeated the whitespace boundary
+    ("gap: (git add -A)",             "(git a" + "dd -A)", True),
+    ("gap: $(git add -A)",            "echo $(git a" + "dd -A)", True),
+    # other whole-tree pathspecs
+    ("gap: ./ and .//",               "git a" + "dd ./", True),
+    # `git add ..` is deliberately NOT blocked: execution showed it does not
+    # stage the tree (git errors at the repo root), so blocking it would be an
+    # over-block resting on an unproven assumption.
+    ("ok: parent .. (unproven blind)", "git a" + "dd ..", False),
+    ("gap: glob *",                   "git a" + "dd *", True),
+    ("gap: $PWD",                     "git a" + "dd $PWD", True),
+    ("gap: :(top)",                   "git a" + "dd ':(top)'", True),
+
+    # ...and the tightening must not catch scoped forms
+    ("ok: git -C dir add path",       "git -C /tmp/x a" + "dd src/main.go", False),
+    ("ok: git -C dir status",         "git -C /tmp/x status", False),
+    ("ok: rooted single path :/foo",  "git a" + "dd :/target.txt", False),
+    ("ok: scoped glob *.go",          "git a" + "dd *.go", False),
+    ("ok: file literally named -A",   "git a" + "dd -- -A", False),
+    ("ok: stage a path",              "git st" + "age src/main.go", False),
+    ("ok: --no-all is the opposite",  "git a" + "dd --no-all -u src/", False),
+    ("ok: filename with -A inside",   "git a" + "dd 'CHANGELOG -A.md'", False),
 
     # --- was-a-bypass under _strip_message_text: MUST STAY BLOCKED ------
     # round 1: same-tag heredoc / substitution / stale offsets / escaped quote
@@ -153,12 +198,18 @@ fail += not ok
 print(f"{'PASS' if ok else 'FAIL'}  secret inside -m still caught{'  ' + err if err else ''}")
 
 # No pathological backtracking anywhere in the remaining patterns.
-t0 = time.time()
-_, err = run('git commit -m "' + "\\" * 200)
-elapsed = time.time() - t0
-ok = elapsed < 2.0 and not err
-fail += not ok
-print(f"{'PASS' if ok else 'FAIL'}  no catastrophic backtracking ({elapsed:.2f}s)")
+for label, probe in [
+    ("quote+backslash run", 'git commit -m "' + "\\" * 200),
+    # the old _BLIND_FLAG had two adjacent [A-Za-z]* around the A and went
+    # quadratic when the run failed the trailing boundary: 6s at 32k.
+    ("long -AAAA… run", "git a" + "dd -" + "A" * 32000 + "!"),
+]:
+    t0 = time.time()
+    _, err = run(probe)
+    elapsed = time.time() - t0
+    ok = elapsed < 2.0 and not err
+    fail += not ok
+    print(f"{'PASS' if ok else 'FAIL'}  no catastrophic backtracking: {label} ({elapsed:.2f}s)")
 
 print("\nRESULT:", "all good" if not fail else f"{fail} failure(s)")
 sys.exit(1 if fail else 0)
