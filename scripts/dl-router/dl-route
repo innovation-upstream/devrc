@@ -1,0 +1,287 @@
+#!/usr/bin/env python3
+"""dl-route — CLI for the media download router.
+
+    dl-route status                     sidecar + index health
+    dl-route dirs                       list the routing targets
+    dl-route match --filename F [...]   dry-run the matcher on a context
+    dl-route log [-n 20]                recent routing decisions
+    dl-route alias list|set|rm          inspect/edit the alias table
+    dl-route backfill plan [--apply-safe-dirs]
+    dl-route backfill apply --manifest PATH [--dry-run]
+    dl-route fetch URL --dir NAME       queue a yt-dlp job via the sidecar
+    dl-route token                      print the bearer token (for the extension)
+
+Everything host-specific comes from ~/.config/dl-router/config.toml.
+`backfill apply` is the only subcommand that modifies existing files, and it
+refuses to run without an explicit reviewed manifest.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+import backfill as backfill_mod  # noqa: E402
+import config as config_mod  # noqa: E402
+import qbt as qbt_mod  # noqa: E402
+from dirindex import DirIndex  # noqa: E402
+from matcher import MatchContext, Matcher  # noqa: E402
+from store import Store  # noqa: E402
+
+
+def _cfg() -> config_mod.Config:
+    return config_mod.load()
+
+
+def _api(cfg, method: str, path: str, payload=None, timeout: float = 10.0):
+    token = config_mod.load_or_create_token(cfg.token_file)
+    url = f"http://{cfg.host}:{cfg.port}{path}"
+    data = json.dumps(payload).encode() if payload is not None else None
+    req = urllib.request.Request(
+        url, data=data, method=method,
+        headers={"Authorization": f"Bearer {token}",
+                 "Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return json.loads(resp.read().decode("utf-8") or "{}")
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8", "replace")
+        raise SystemExit(f"sidecar HTTP {exc.code}: {body}") from exc
+    except urllib.error.URLError as exc:
+        raise SystemExit(f"sidecar unreachable at {url}: {exc.reason}\n"
+                         f"  systemctl --user status dl-router") from exc
+
+
+def _local_bits(cfg):
+    root = cfg.require_library_root()
+    index = DirIndex(root, other_dir=cfg.other_dir)
+    store = Store(cfg.db_path)
+    return root, index, store
+
+
+# --- commands ------------------------------------------------------------- #
+def cmd_status(args) -> int:
+    cfg = _cfg()
+    print(f"config     {cfg.path}")
+    print(f"state      {cfg.state_dir}")
+    print(f"endpoint   http://{cfg.host}:{cfg.port}")
+    root = cfg.library_root
+    print(f"library    {root or '(unset — configure library_root)'}")
+    if root is not None:
+        index = DirIndex(root, other_dir=cfg.other_dir)
+        print(f"dirs       {len(index.names())}")
+        errs = index.errors()
+        if errs:
+            print(f"index errs {errs}")
+    try:
+        health = _api(cfg, "GET", "/healthz", timeout=3.0)
+        print(f"sidecar    up · {json.dumps(health)}")
+    except SystemExit as exc:
+        print(f"sidecar    DOWN ({exc})")
+    return 0
+
+
+def cmd_dirs(args) -> int:
+    cfg = _cfg()
+    root, index, _ = _local_bits(cfg)
+    for entry in index.entries():
+        print(f"{entry.name}\t{entry.key}")
+    return 0
+
+
+def cmd_match(args) -> int:
+    cfg = _cfg()
+    root, index, store = _local_bits(cfg)
+    matcher = Matcher(index.entries(), store.alias_map(),
+                      threshold=cfg.auto_threshold, tie_margin=cfg.tie_margin,
+                      other_dir=cfg.other_dir)
+    ctx = MatchContext(
+        filename=args.filename or "", url=args.url or "",
+        referrer=args.referrer or "", site=args.site or "",
+        title=args.title or "", tags=tuple(args.tag or ()),
+        link_text=args.link_text or "")
+    result = matcher.match(ctx, host_prior=store.host_prior(ctx.site))
+    print(json.dumps(result.as_dict(), indent=2, ensure_ascii=False))
+    return 0
+
+
+def cmd_log(args) -> int:
+    cfg = _cfg()
+    store = Store(cfg.db_path)
+    for row in store.recent_routes(args.number):
+        flag = "auto" if row["auto"] else "ask "
+        print(f"{flag} {row['confidence']:.2f} -> {row['dir']}\t{row['reason']}")
+    return 0
+
+
+def cmd_alias(args) -> int:
+    cfg = _cfg()
+    store = Store(cfg.db_path)
+    if args.alias_cmd == "list":
+        for (key, site), target in sorted(store.alias_map().items()):
+            print(f"{key}\t{site or '*'}\t{target}")
+    elif args.alias_cmd == "set":
+        from matcher import norm_key
+        store.upsert_alias(norm_key(args.phrase), args.dir, args.site or "")
+        print(f"alias set: {args.phrase!r} -> {args.dir}")
+    elif args.alias_cmd == "rm":
+        from matcher import norm_key
+        store.delete_alias(norm_key(args.phrase), args.site or "")
+        print(f"alias removed: {args.phrase!r}")
+    return 0
+
+
+def _qbt_client(cfg):
+    section = cfg.section("qbt")
+    if not section.get("username"):
+        return None, "qBittorrent credentials not configured"
+    client = qbt_mod.QbtClient(section.get("url", ""), section.get("username", ""),
+                               section.get("password", ""),
+                               timeout=float(section.get("timeout_s", 8.0)))
+    try:
+        return client, None
+    except qbt_mod.QbtError as exc:
+        return None, str(exc)
+
+
+def cmd_backfill_plan(args) -> int:
+    cfg = _cfg()
+    root, index, store = _local_bits(cfg)
+    # None (not []) = "qBittorrent state unknown" -> the plan refuses to
+    # classify anything as movable. See backfill.plan.
+    torrents, path_map = None, None
+    client, err = _qbt_client(cfg)
+    if client is None:
+        print(f"note: {err} — every row will be SKIP", file=sys.stderr)
+    else:
+        try:
+            torrents = client.torrents_info()
+            roots = qbt_mod.host_root_candidates(
+                root, cfg.section("qbt").get("host_roots", ()))
+            path_map = qbt_mod.derive_path_map(torrents, roots)
+            print(f"torrents: {len(torrents)}  path map: {path_map}",
+                  file=sys.stderr)
+        except qbt_mod.QbtError as exc:
+            torrents = None
+            print(f"note: qBittorrent unreachable ({exc}) — every row will be "
+                  "SKIP", file=sys.stderr)
+
+    plan_obj = backfill_mod.plan(root, store=store, dir_names=index.names(),
+                                 torrents=torrents, path_map=path_map,
+                                 threshold=cfg.auto_threshold)
+    paths = backfill_mod.write_manifest(plan_obj, cfg.state_dir / "manifests")
+    print(plan_obj.to_tsv())
+    print(f"counts: {plan_obj.counts()}", file=sys.stderr)
+    print(f"manifest: {paths['tsv']}\n          {paths['json']}",
+          file=sys.stderr)
+    print("review it, then: dl-route backfill apply --manifest "
+          f"{paths['json']} --dry-run", file=sys.stderr)
+    return 0
+
+
+def cmd_backfill_apply(args) -> int:
+    cfg = _cfg()
+    root = cfg.require_library_root()
+    plan_obj = backfill_mod.load_manifest(args.manifest)
+    if Path(plan_obj.root).resolve() != Path(root).resolve():
+        raise SystemExit(f"manifest root {plan_obj.root} != configured "
+                         f"library root {root} — refusing")
+    client = None
+    if any(r.move == backfill_mod.MOVE_QBT and r.action != backfill_mod.ACTION_SKIP
+           for r in plan_obj.rows):
+        client, err = _qbt_client(cfg)
+        if client is None:
+            raise SystemExit(f"manifest has torrent-backed rows but {err}")
+    results = backfill_mod.apply(plan_obj, client=client, dry_run=args.dry_run)
+    for op in results["ops"]:
+        print(("DRY " if args.dry_run else "    ") + op)
+    print(f"moved={len(results['moved'])} skipped={len(results['skipped'])}")
+    if results["failed"]:
+        print(f"FAILED on {results['failed']['relpath']}: "
+              f"{results['failed']['error']}", file=sys.stderr)
+        print(f"aborted {len(results['aborted'])} remaining row(s)",
+              file=sys.stderr)
+        return 1
+    return 0
+
+
+def cmd_fetch(args) -> int:
+    cfg = _cfg()
+    out = _api(cfg, "POST", "/fetch", {"url": args.url, "dir": args.dir})
+    print(json.dumps(out, indent=2))
+    return 0
+
+
+def cmd_token(args) -> int:
+    cfg = _cfg()
+    print(config_mod.load_or_create_token(cfg.token_file))
+    return 0
+
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(prog="dl-route", description=__doc__,
+                                formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    sub.add_parser("status", help="sidecar + index health").set_defaults(fn=cmd_status)
+    sub.add_parser("dirs", help="list routing targets").set_defaults(fn=cmd_dirs)
+    sub.add_parser("token", help="print the bearer token").set_defaults(fn=cmd_token)
+
+    m = sub.add_parser("match", help="dry-run the matcher")
+    m.add_argument("--filename", default="")
+    m.add_argument("--url", default="")
+    m.add_argument("--referrer", default="")
+    m.add_argument("--site", default="")
+    m.add_argument("--title", default="")
+    m.add_argument("--link-text", default="")
+    m.add_argument("--tag", action="append", default=[])
+    m.set_defaults(fn=cmd_match)
+
+    lg = sub.add_parser("log", help="recent routing decisions")
+    lg.add_argument("-n", "--number", type=int, default=20)
+    lg.set_defaults(fn=cmd_log)
+
+    al = sub.add_parser("alias", help="inspect/edit aliases")
+    alsub = al.add_subparsers(dest="alias_cmd", required=True)
+    alsub.add_parser("list")
+    aset = alsub.add_parser("set")
+    aset.add_argument("phrase")
+    aset.add_argument("dir")
+    aset.add_argument("--site", default="")
+    arm = alsub.add_parser("rm")
+    arm.add_argument("phrase")
+    arm.add_argument("--site", default="")
+    al.set_defaults(fn=cmd_alias)
+
+    bf = sub.add_parser("backfill", help="plan/apply the loose-file backfill")
+    bfsub = bf.add_subparsers(dest="bf_cmd", required=True)
+    bfp = bfsub.add_parser("plan", help="read-only; writes a manifest")
+    bfp.set_defaults(fn=cmd_backfill_plan)
+    bfa = bfsub.add_parser("apply", help="execute a REVIEWED manifest")
+    bfa.add_argument("--manifest", required=True)
+    bfa.add_argument("--dry-run", action="store_true")
+    bfa.set_defaults(fn=cmd_backfill_apply)
+
+    f = sub.add_parser("fetch", help="queue a yt-dlp job")
+    f.add_argument("url")
+    f.add_argument("--dir", required=True)
+    f.set_defaults(fn=cmd_fetch)
+    return p
+
+
+def main(argv=None) -> int:
+    args = build_parser().parse_args(argv)
+    try:
+        return args.fn(args)
+    except config_mod.ConfigError as exc:
+        print(f"config error: {exc}", file=sys.stderr)
+        return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

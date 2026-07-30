@@ -38,6 +38,12 @@ with pkgs; [
 
   # Browser automation
   playwright-driver.browsers
+
+  # Media download router — the yt-dlp path for HLS/DASH sources, which a
+  # plain download listener cannot save (there is no single file to save).
+  # Invoked by scripts/dl-router/fetcher.py as an argv list, never a shell
+  # string. See the `dl-router` skill.
+  yt-dlp
 ]
 ++ (import ./lang { inherit pkgs; })
 ++ (import ./tools { inherit pkgs workspace; })

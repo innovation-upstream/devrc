@@ -830,6 +830,61 @@ in
     };
   };
 
+  # dl-router — loopback sidecar for the media download router. SIBLING to
+  # browser-bridge above and modelled on it (loopback bind, bearer token,
+  # python312, WantedBy default.target), but a SEPARATE service and a separate
+  # extension on purpose: a bug in download routing must not take down the
+  # agent command channel.
+  #
+  # Unlike browser-bridge's standalone server.py this one imports its siblings
+  # (matcher/store/dirindex/qbt/...), so the whole directory is run FROM THE
+  # NIX STORE rather than symlinked file-by-file into ~/.config. That also
+  # leaves ~/.config/dl-router/ free for the two things that must stay
+  # writable: the user's config.toml and the runtime-created 0600 token.
+  #
+  # Port 8791 — 8790 is already taken on the workbench. Inert until
+  # library_root is configured AND the unpacked extension is enabled in a Brave
+  # profile (see the `dl-router` skill).
+  systemd.user.services.dl-router = {
+    Unit = {
+      Description = "Media download router sidecar (loopback match/index service)";
+      After = [ "network.target" ];
+    };
+    Service = {
+      Type = "simple";
+      Environment = [
+        "PATH=${lib.makeBinPath [ pkgs.python312 pkgs.coreutils pkgs.yt-dlp ]}:/run/current-system/sw/bin"
+        # Bind loopback only. server.py REFUSES any non-loopback address, so
+        # this is belt-and-braces rather than the only guard.
+        "DL_ROUTER_HOST=127.0.0.1"
+        "DL_ROUTER_PORT=8791"
+      ];
+      ExecStart = "${pkgs.python312}/bin/python3 ${../scripts/dl-router}/server.py";
+      Restart = "always";
+      RestartSec = 10;
+      # The store path in ExecStart already changes on any source edit, so the
+      # unit is rewritten and restarted by itself; this keeps the repo's
+      # explicit-trigger convention readable alongside the other units.
+      X-Restart-Triggers = [ "${../scripts/dl-router}" ];
+    };
+    Install = {
+      WantedBy = [ "default.target" ];
+    };
+  };
+
+  # `dl-router` skill — same deliberate mkOutOfStoreSymlink exception as the
+  # `browser` skill above: its source of truth is the subsystem in THIS repo,
+  # so the skill tracks the live working tree with no switch needed.
+  home.file.".claude/skills/dl-router/SKILL.md".source =
+    config.lib.file.mkOutOfStoreSymlink "${workspace}/devrc/scripts/dl-router/SKILL.md";
+  home.file.".claude/skills/dl-router/dl-route".source =
+    config.lib.file.mkOutOfStoreSymlink "${workspace}/devrc/scripts/dl-router/dl-route";
+  # The CLI on PATH (~/.local/bin is in home.sessionPath). Out-of-store so
+  # `dl-route` always runs the checked-out code — it resolves its sibling
+  # modules from its own resolved path.
+  home.file.".local/bin/dl-route".source =
+    config.lib.file.mkOutOfStoreSymlink "${workspace}/devrc/scripts/dl-router/dl-route";
+
   # Laptop-only SOCKS5 tunnel to the homelab kube API via the workbench. The
   # homelab API server (192.168.50.94:6443) is LAN-only and the laptop is
   # nebula-only, so it cannot reach the API directly. This holds an `ssh -D`
