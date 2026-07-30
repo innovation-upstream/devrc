@@ -1606,7 +1606,9 @@ def _run_wrapper(argv: list[str], kubeconfig: str = "/tmp/kubectl-ro-test.conf")
 
     with tempfile.TemporaryDirectory() as stub:
         Path(stub, "kubectl").write_text(
-            '#!/usr/bin/env bash\necho "KUBECTL-REACHED: $*"\n', encoding="utf-8"
+            # /bin/sh (not /usr/bin/env bash) so this stub also execs in the nix
+            # build sandbox, which has no /usr/bin/env; the body is POSIX-sh.
+            '#!/bin/sh\necho "KUBECTL-REACHED: $*"\n', encoding="utf-8"
         )
         os.chmod(Path(stub, "kubectl"), 0o755)
         p = subprocess.run(
