@@ -30,23 +30,75 @@ import sys, json, re, ipaddress
 # exactly what that check exists to catch.
 MESSAGE_CMD = re.compile(r"\bgit\s+commit\b|\bgh\s+(?:pr|issue|release|gist)\b")
 
+# Segment separators used to find WHICH sub-command a heredoc operator belongs to.
+# Command/process substitution openers are included: a heredoc inside `$(…)`,
+# `<(…)` or backticks belongs to the INNER command, not to an outer `git commit`.
+# Without them, `git commit -F <(bash <<'EOF' … EOF)` was mis-classified as
+# message-carrying and its shell-feeding body was stripped.
+_SEGMENT = re.compile(r"\n|;|&&|\|\||\||\$\(|<\(|`|\(")
+
+_HEREDOC = re.compile(r"<<-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
+
+# Quoted -m/--message values. Two DISJOINT patterns, deliberately:
+#   * double quotes honour backslash escapes, as the shell does;
+#   * single quotes do NOT — the shell has no escapes inside '…', so treating
+#     `\'` as an escape let the match run past the closing quote and swallow a
+#     following real command (`-m 'msg \' && git add -A`).
+# Both use non-ambiguous character classes ([^"\\] / [^']) so a failed match
+# cannot backtrack exponentially — the previous `(?:\\.|(?!\3).)*` was a ReDoS
+# (an unterminated quote plus ~40 backslashes stalled for minutes, on a hook
+# that runs on EVERY Bash call, three times per command).
+_MSG_DQ = re.compile(r"(-m|--message)(=|\s+)\"(?:\\.|[^\"\\])*\"")
+_MSG_SQ = re.compile(r"(-m|--message)(=|\s+)'[^']*'")
+
+# A message value containing command substitution really can execute; never
+# blank those out.
+_SUBST = re.compile(r"\$\(|`")
+
 
 def _strip_message_text(cmd):
-    # 1. -m "…" / -m '…' / --message=…
-    out = re.sub(r"(-m|--message)(=|\s+)(['\"])(?:\\.|(?!\3).)*\3", r"\1\2''", cmd, flags=re.S)
-    # 2. heredoc bodies attached to a message-carrying command
-    for m in re.finditer(r"<<-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1", out):
+    # Only message-carrying commands get ANY stripping — so `docker run -m '2g'`
+    # is untouched, and the blast radius stays as small as possible.
+    if not MESSAGE_CMD.search(cmd):
+        return cmd
+    out = cmd
+    for pat in (_MSG_DQ, _MSG_SQ):
+        out = pat.sub(lambda m: m.group(0) if _SUBST.search(m.group(0))
+                      else m.group(1) + m.group(2) + "''", out)
+    return _strip_heredoc_bodies(out)
+
+
+def _strip_heredoc_bodies(out):
+    """Blank the body of each heredoc that feeds a message-carrying command.
+
+    Scans the MUTATED string with an advancing cursor. The previous version
+    iterated `re.finditer` over the ORIGINAL string while rebinding `out` in the
+    loop, so after the first substitution every later `m.start()` indexed a
+    shifted string — which silently reclassified a shell-feeding heredoc as
+    message text. It also used `.sub()` with no count, stripping EVERY heredoc
+    sharing the tag rather than only the matched one.
+    """
+    pos = 0
+    while True:
+        m = _HEREDOC.search(out, pos)
+        if not m:
+            return out
         tag = m.group(2)
-        cmdline = re.split(r"\n|;|&&|\|\||\|", out[:m.start()])[-1]
-        if not MESSAGE_CMD.search(cmdline):
+        cmdline = _SEGMENT.split(out[:m.start()])[-1]
+        nl = out.find("\n", m.end())
+        if nl == -1 or not MESSAGE_CMD.search(cmdline):
+            pos = m.end()
             continue
-        # Keep the operator line and the closing tag; drop only the body between
-        # them. `[^\n]*\n` (not `\s*.*?\n`) so the first body line isn't swallowed
-        # into the kept prefix.
-        body = re.compile(r"(<<-?\s*['\"]?" + re.escape(tag) + r"['\"]?[^\n]*\n).*?(^[ \t]*"
-                          + re.escape(tag) + r"[ \t]*$)", re.S | re.M)
-        out = body.sub(r"\1\2", out)
-    return out
+        term = re.compile(r"^[ \t]*" + re.escape(tag) + r"[ \t]*$", re.M)
+        t = term.search(out, nl + 1)
+        if not t:
+            # Unterminated heredoc: strip nothing, so anything that follows stays
+            # visible to the shape checks.
+            pos = m.end()
+            continue
+        # Slice out exactly this body — never a global substitution.
+        out = out[:nl + 1] + out[t.start():]
+        pos = nl + 1
 
 
 def check_git_add_all(cmd):
