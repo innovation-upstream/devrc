@@ -564,9 +564,28 @@ know browser usage is being counted. Details: `README.md` → Telemetry.
 ## Gotcha: reload the unpacked extension after any change
 
 Brave does **not** hot-reload unpacked extensions. If `extension/` was edited,
-the user must click **reload** ↻ on the card in `brave://extensions`, or the old
-service-worker code keeps running. The `browser-bridge` **server** does restart
-automatically on a `home-manager switch` (X-Restart-Triggers).
+the old service-worker code keeps running until it's swapped in — **and clicking
+reload ↻ on the card in `brave://extensions` is UNRELIABLE** (the extension's
+long-poll keeps the OLD service worker permanently alive), so the reliable fix is
+a **full quit-and-reopen of Brave** (see the top of this doc). Symptom of a stale
+build: an op the CLI knows returns `unknown_op`, or `health` still shows the old
+`extension_version`. The `browser-bridge` **server** (not the extension) DOES
+restart automatically on a `home-manager switch` (X-Restart-Triggers).
+
+## Changing the bridge: live-verify against real Brave is the ONLY gate
+
+If you MODIFY browser-bridge (server / extension / CLI), a green test suite and a
+clean security audit are **prerequisites, NOT verification** — CI cannot drive a
+real Brave, so it never exercises the actual MV3 / CDP / i3 behaviour. Across the
+build-out, driving each change against the live browser caught ~11 defects that
+passing tests and audits BOTH missed (Chrome-side focus being inert on i3;
+`chrome.scripting` unable to eval a string → CDP `Runtime.evaluate`;
+`captureVisibleTab` needing foreground → CDP `Page.captureScreenshot`; OOPIFs
+needing `Target.setAutoAttach`; the reload-vs-restart trap). So the mandatory loop
+for any browser change is **build → audit → fix → merge → ship → live-verify on
+real Brave** — reproduce the exact path and LOOK at the actual result (exit 0 is
+not verification). Operate changes via a feature branch + `/audit-pr`-style review
+given it's a live-cookie surface.
 
 ## One-time setup (hand these steps to the user)
 
