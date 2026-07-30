@@ -70,11 +70,21 @@ _GIT_ADD = re.compile(
 _BLIND_SHORT = re.compile(r"-[A-Za-z]+")
 # git accepts unique long-option PREFIXES: --al == --all, --no-ignore-r == …removal.
 _BLIND_LONG = re.compile(r"--al|--all|--no-ignore-r[a-z-]*")
-# Whole-tree pathspecs: . ./ .// ./. :/ * $PWD $(pwd) :(top)
-# NOT `..` — verified by execution that it does not stage the tree (git errors
-# on it at the repo root), so blocking it would be an unproven over-block.
-# Hence `\.(?:/[./]*)?` rather than `\.[./]*`.
-_BLIND_PATH = re.compile(r"\.(?:/[./]*)?|:/|\*|\$PWD|\$\(pwd\)|:\(top\)\*?")
+# Whole-tree pathspecs.
+# `..` IS included. It errors at the repo ROOT ("outside repository"), which is
+# what an earlier root-only test showed — but from a SUBDIRECTORY it stages the
+# entire tree, and `git -C <repo>/sub add ..` reaches that without a `cd`, in
+# exactly the shape this guard now covers. Blocking the root form costs nothing
+# because git rejects it anyway.
+# `${PWD}` / `$PWD/` / `` `pwd` `` / `:/*` are the near-miss siblings of forms
+# already blocked; all verified to stage the whole tree.
+_BLIND_PATH = re.compile(
+    r"\.{1,2}(?:/[./]*)?"          # . ./ .// ./. .. ../ ../..
+    r"|:/\*?|\*"                    # :/ :/* *
+    r"|\$\{?PWD\}?/?\.?"            # $PWD ${PWD} $PWD/ $PWD/.
+    r"|\$\(pwd\)/?\.?|`pwd`/?\.?"   # $(pwd) `pwd`
+    r"|:\(top\)\*?"
+)
 
 
 def _stages_everything(argtext):

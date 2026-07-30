@@ -94,7 +94,13 @@ CASES = [
     # into, and it bypassed the guard entirely (11 blind hits in transcripts).
     ("gap: git -C dir add -A",        "git -C /tmp/x a" + "dd -A", True),
     ("gap: git -C dir add .",         "git -C /tmp/x a" + "dd .", True),
-    ("gap: git --git-dir= add -A",    "git --git-dir=/tmp/x/.git a" + "dd -A", True),
+    # NOTE: the git-dir must NOT end in `.git`, or the literal substring
+    # "git add" makes the case vacuous -- base blocks it without the opt-hop.
+    ("gap: git --git-dir= add -A",    "git --git-dir=/tmp/x/store a" + "dd -A", True),
+    ("gap: git -C x -C y add -A",     "git -C /tmp/x -C /tmp/y a" + "dd -A", True),
+    ("gap: git --exec-path= add -A",  "git --exec-path=/tmp/x a" + "dd -A", True),
+    ("gap: git --no-pager add -A",    "git --no-pager a" + "dd -A", True),
+    ("gap: blind flag before --",     "git a" + "dd -A -- src/", True),
     ("gap: git -c k=v add -A",        "git -c user.name=x a" + "dd -A", True),
     ("gap: git -P add -A",            "git -P a" + "dd -A", True),
     # backslash / ANSI-C escapes — same evasion class quoting was
@@ -114,10 +120,19 @@ CASES = [
     ("gap: $(git add -A)",            "echo $(git a" + "dd -A)", True),
     # other whole-tree pathspecs
     ("gap: ./ and .//",               "git a" + "dd ./", True),
-    # `git add ..` is deliberately NOT blocked: execution showed it does not
-    # stage the tree (git errors at the repo root), so blocking it would be an
-    # over-block resting on an unproven assumption.
-    ("ok: parent .. (unproven blind)", "git a" + "dd ..", False),
+    # `..` errors at the repo ROOT but stages the WHOLE TREE from a
+    # subdirectory -- and `git -C <repo>/sub add ..` reaches that with no `cd`.
+    # A root-only test once suggested otherwise; don't re-derive from that.
+    ("gap: parent .. (blind from subdir)", "git a" + "dd ..", True),
+    ("gap: git -C sub add ..",         "git -C /tmp/x/sub a" + "dd ..", True),
+    ("gap: ../ from a subdir",         "git -C /tmp/x/sub a" + "dd ../", True),
+    ("gap: ../.. from deeper",         "git -C /tmp/x/a/b a" + "dd ../..", True),
+    # near-miss siblings of already-blocked whole-tree pathspecs
+    ("gap: ${PWD}",                    "git a" + "dd ${PWD}", True),
+    ("gap: $PWD/",                     "git a" + "dd $PWD/", True),
+    ("gap: backtick pwd",              "git a" + "dd `pwd`", True),
+    ("gap: :/* root glob",             "git a" + "dd ':/*'", True),
+    ("gap: .// double slash",          "git a" + "dd .//", True),
     ("gap: glob *",                   "git a" + "dd *", True),
     ("gap: $PWD",                     "git a" + "dd $PWD", True),
     ("gap: :(top)",                   "git a" + "dd ':(top)'", True),
@@ -131,6 +146,19 @@ CASES = [
     ("ok: stage a path",              "git st" + "age src/main.go", False),
     ("ok: --no-all is the opposite",  "git a" + "dd --no-all -u src/", False),
     ("ok: filename with -A inside",   "git a" + "dd 'CHANGELOG -A.md'", False),
+    # 🔴 The opt-hop must NOT swallow sibling `add` subcommands. This repo runs
+    # `git worktree add` constantly (it is the prescribed workflow), so a
+    # regression here would block the thing RULES tells you to do.
+    ("ok: git worktree add -B",       "git worktree a" + "dd -B br /tmp/wt origin/main", False),
+    ("ok: git -C repo worktree add",  "git -C /repo worktree a" + "dd /tmp/wt -B x", False),
+    ("ok: git remote add",            "git remote a" + "dd origin git@h:r.git", False),
+    ("ok: git submodule add",         "git submodule a" + "dd https://h/r.git ext/r", False),
+    ("ok: git notes add -m",          "git notes a" + "dd -m 'note'", False),
+    ("ok: git stash (not stage)",     "git stash list", False),
+    # after `--` everything is a path, so a file literally named -A is fine
+    ("ok: git add -- x -A",           "git a" + "dd -- x -A", False),
+    ("ok: $PWD-rooted single path",   "git a" + "dd $PWD/src/main.go", False),
+    ("ok: rooted glob :/ *.go",       "git a" + "dd ':/src/*.go'", False),
 
     # --- was-a-bypass under _strip_message_text: MUST STAY BLOCKED ------
     # round 1: same-tag heredoc / substitution / stale offsets / escaped quote
