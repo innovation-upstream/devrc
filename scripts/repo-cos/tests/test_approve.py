@@ -15,6 +15,8 @@ import json
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import clawgate  # noqa: E402
 import exclusions  # noqa: E402
@@ -855,6 +857,57 @@ def test_guard_tags_keeps_a_second_namespace_and_drops_only_the_offender():
     assert clawgate.guard_tags(["initiative:foo bar"]) == []
     assert clawgate.guard_tags([]) == []
     assert clawgate.guard_tags(None) == []
+    assert clawgate.guard_tags(("initiative:remix-composer",)) == ["initiative:remix-composer"]
+
+
+# ---- 7c-ter. guard_tags is a PUBLIC entry point — non-list input may not raise or emit --
+
+class _ExplodingRepr:
+    def __repr__(self):
+        raise RuntimeError("repr blew up")
+
+
+@pytest.mark.parametrize("bad", [
+    "initiative:remix",          # 🔴 a BARE TAG STRING — the most plausible caller mistake.
+    "",                          # iterable, and str/bytes/dict all get consumed ELEMENT-WISE:
+    b"initiative:x",             # "initiative:remix" used to yield ['a','e','i','m','n', …]
+    bytearray(b"ab"),            # and b"..." the ordinals as strings.
+    {"initiative": "remix"},     # a dict iterates its KEYS → ['initiative']
+    {"initiative:remix"},        # a set is not a documented input either
+    5,                           # non-iterables raised TypeError out of the LOOP HEADER,
+    3.5,                         # which the per-item try/except never covered …
+    object(),
+    _ExplodingRepr(),            # … and must not be repr()'d while being reported, either
+])
+def test_guard_tags_rejects_non_list_input_without_raising_or_emitting(bad, capsys):
+    """`guard_tags` is documented, public, and pointed at by the `runbook:` seam. On a
+    non-list it must do what its contract says (return a list, never raise, never invent a
+    tag) — the two things it existed to guarantee were both violated for these shapes."""
+    assert clawgate.guard_tags(bad) == []
+    capsys.readouterr()
+
+
+def test_guard_tags_logs_what_it_refused_on_non_list_input(capsys):
+    # A silent [] is indistinguishable from "no tags resolved"; name the shape.
+    assert clawgate.guard_tags("initiative:remix") == []
+    err = capsys.readouterr().err
+    assert "str" in err and "expected a list" in err
+    # …but the normal "no tags" case (None) is not an error and must stay quiet.
+    assert clawgate.guard_tags(None) == []
+    assert capsys.readouterr().err == ""
+
+
+@pytest.mark.parametrize("bad", [123, None, b"x", 1.5, ["nested"], object(), _ExplodingRepr()])
+def test_guard_tags_drops_non_string_elements_and_keeps_valid_siblings(bad, capsys):
+    """`str(item)` is itself a MUTATION, and the one this guard compares AFTER rather than
+    against — so `[123]` laundered itself past the equality check and emitted `'123'` (the
+    pre-per-tag whole-list guard dropped it: `normalize_tags([123]) != [123]`). Per-tag, a
+    non-string element must drop like any other offender, without costing its siblings."""
+    assert clawgate.guard_tags([bad]) == []
+    assert clawgate.guard_tags([bad, "runbook:perf-deep-dive"]) == ["runbook:perf-deep-dive"]
+    assert clawgate.guard_tags(["runbook:perf-deep-dive", bad]) == ["runbook:perf-deep-dive"]
+    err = capsys.readouterr().err
+    assert "non-string tag" in err, err
 
 
 def test_guard_tags_drop_logs_one_accurate_reason_not_two(capsys):

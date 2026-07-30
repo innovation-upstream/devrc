@@ -169,13 +169,21 @@ it only collects the full proposal; the **only new network** is the clawgate POS
   logged with its rule) and `clawgate.normalize_tags` (clawgate's grammar: lowercase,
   `[a-z0-9._/-]`, ≤1 `:`, ≤64 runes, ≤20 tags; anything invalid is **dropped, not mangled**).
   Measured over `tests/fixtures/initiatives_current_slugs.txt` — a **hand-refreshed snapshot**
-  of `initiatives.current`, last taken 2026-07-30 at **142 slugs**: 10 denylist drops → 132 pass
-  the denylist → 3 more lost to the 64-rune cap → **129 taggable** (and 129 actually emitted by
-  `build_tags`, pinned on the positive side too). Those numbers are pinned by `test_routing.py`
-  **against the snapshot, not the live store**: the default suite is deliberately hermetic (see
-  `tests/conftest.py`), so no ordinary test can tell you the fixture has gone stale — it drifted
-  twice within two days of a refresh (139 → 140 → 142), green each time. So there is now an
-  **opt-in live drift check**, skipped by default:
+  of `initiatives.current`, last taken 2026-07-30 at **144 slugs**: 10 denylist drops → 134 pass
+  the denylist → 3 more lost to the 64-rune cap → **131 taggable** (and 131 actually emitted by
+  `build_tags`). **Those figures are context, not assertions.** `test_routing.py` used to pin
+  them and they rotted on three consecutive days (139 → 140 → 142 → 144) as the scan minted new
+  slugs — every refresh pure churn, none a behaviour change. The corpus tests now assert
+  **properties** that hold at any vocabulary size: `emitted == taggable` (set equality — the
+  mute-button guard), every emitted tag equals its slug byte-for-byte, the denylist drops
+  something and every drop names a reason from a **pinned reason set**, and the fixture is
+  well-formed. Refreshing the snapshot therefore needs **no counts re-stated anywhere** — paste
+  the new `select` output under the header and stop.
+
+  These still read the snapshot, not the live store: the default suite is deliberately hermetic
+  (see `tests/conftest.py`), so no ordinary test can tell you the fixture has gone stale — with
+  counts gone that is now a coverage gap (new slug shapes unexercised), never a red suite. The
+  **opt-in live drift check** is what reports actual drift, skipped by default:
 
   ```sh
   # reads initiatives.current and diffs it against the fixture, naming the slugs that moved
@@ -184,7 +192,9 @@ it only collects the full proposal; the **only new network** is the clawgate POS
   REPO_COS_LIVE_DRIFT_CHECK=1 REPO_COS_KUBECONFIG=/path/to/kubeconfig python -m pytest ...
   ```
 
-  When it fails, refresh with the command in the fixture header, then re-state these counts.
+  `REPO_COS_LIVE_DRIFT_CHECK=0` (or `false`/`no`/`off`, case-insensitive) means **off** — it
+  used to opt you *in*, since any non-empty value enabled the check. When the check fails,
+  refresh with the command in the fixture header; that is the whole procedure.
 - **🔴 An emitted tag always equals its ledger slug, byte-for-byte** (byte-equal to the
   **stripped** slug — `routing.taggable_slug` and `build_tags` both `.strip()`, so a stored
   slug with surrounding whitespace emits `initiative:<stripped>`; nothing else may alter it).
@@ -299,7 +309,11 @@ suites drive the real `cmd_scan`, so `tests/conftest.py` carries an **autouse fi
 stubs `load_current` to an empty store** for every test; `test_routing.py` re-patches it
 in-test where it wants a fixture store. Measured: 11 real store-read attempts without the
 fixture, 0 with it. `tests/fixtures/initiatives_current_slugs.txt` is a checked-in
-**snapshot** of the real slug vocabulary (never a live read in a default run) used to pin the
+**snapshot** of the real slug vocabulary (never a live read in a default run) used to assert the
 denylist's corpus-wide properties; refresh it with the psql command in its header. The ONE test
 that reads the live store — `test_fixture_matches_the_live_initiatives_store`, the drift check —
-is **skipped unless `REPO_COS_LIVE_DRIFT_CHECK=1`** is set, so the default run stays network-free.
+is **skipped unless `REPO_COS_LIVE_DRIFT_CHECK` is set to something other than `0`/`false`/`no`/
+`off`**, so the default run stays network-free. The suite's only `--email` test additionally
+blocks `smtplib.SMTP`, `smtplib.SMTP_SSL` and `email_send`'s `subprocess.Popen` (the relay path's
+production-cluster `kubectl port-forward`) beneath its `send_digest` stub, so no failure of that
+stub can reach the network or prod.

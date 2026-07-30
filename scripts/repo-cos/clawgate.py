@@ -265,7 +265,9 @@ def guard_tags(raw) -> list[str]:
     """🔴 THE STRUCTURAL JOIN GUARD, applied PER TAG.
 
     A consumer of an `initiative:` tag joins on `tag == "initiative:" + slug` byte-for-byte
-    (see `scripts/initiatives/tasks.py` — it does no case-folding and no normalization), so
+    (see `scripts/initiatives/tasks.py` — FORTHCOMING, it lands with the still-open PR #202
+    and is on no merged branch yet; the join semantics cited here are that PR's, and it does
+    no case-folding and no normalization), so
     the ONLY acceptable outcome for a tag is the exact string we asked for. `normalize_tag`
     performs THREE mutations — lowercase, whitespace→`-`, and a `-` strip — and the `routing`
     denylist only polices the first (`not-lowercase`). A slug like `foo bar`, `x  y` or
@@ -285,14 +287,37 @@ def guard_tags(raw) -> list[str]:
     A drop is the correct degradation — a missing tag is cheap, a tag that joins to nothing
     is a lie (and the untagged Task is still posted either way). Every drop logs exactly ONE
     accurate reason: the grammar's, when the grammar rejected it outright; the join
-    violation's, when the grammar would have silently rewritten it."""
+    violation's, when the grammar would have silently rewritten it.
+
+    🔴 SHAPE IS CHECKED BEFORE ITERATION, and elements must already BE strings. Both halves
+    are load-bearing for a PUBLIC entry point (the `runbook:` seam above points future
+    implementers straight at it):
+
+      * a non-list `raw` is rejected outright rather than iterated. `guard_tags(5)` would
+        otherwise raise `TypeError` out of the loop header — outside the per-item `try` —
+        breaking the "never costs an approval" contract; and the *iterable* non-lists are
+        worse than a raise, because they are consumed ELEMENT-WISE and succeed:
+        `guard_tags("initiative:remix")` → `['a','e','i','m','n','r','t','v','x']`,
+        `guard_tags(b"x")` → `['120']`, `guard_tags({"a": 1})` → `['a']`. A caller passing
+        a bare tag STRING instead of a one-element list is the most plausible future
+        mistake here, and emitting nine single-letter tags is the worst possible answer to
+        it. Only `list`/`tuple` is accepted; everything else yields `[]`.
+      * a non-string ELEMENT is dropped rather than `str()`d. `str(item)` is itself a
+        mutation, and it is the one mutation this guard compares AFTER instead of against —
+        so `[123]` used to launder itself past the equality check and emit `'123'` (the
+        pre-per-tag whole-list guard dropped it, because `normalize_tags([123]) != [123]`).
+        The type name alone is logged: an arbitrary object's `__repr__` can itself raise."""
+    if not isinstance(raw, (list, tuple)):
+        if raw is not None:                    # None = "no tags", the normal empty case
+            _log(f"dropping all tags: expected a list of tag strings, got "
+                 f"{type(raw).__name__} (a bare tag string must be passed as [tag])")
+        return []
     kept: list[str] = []
-    for item in raw or []:
-        try:
-            tag = str(item)
-        except Exception as exc:  # noqa: BLE001 - a tag must NEVER cost an approval
-            _log(f"dropping an unstringifiable tag: {exc}")
+    for item in raw:
+        if not isinstance(item, str):
+            _log(f"dropping a non-string tag of type {type(item).__name__}")
             continue
+        tag = item
         norm, reason = _normalize_tag(tag)
         if norm is not None and norm == tag:
             kept.append(tag)
