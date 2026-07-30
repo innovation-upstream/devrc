@@ -23,8 +23,11 @@
 # disk waiting for you. Self-disables after one capture (delete the sentinel
 # to re-arm).
 #
-# Requires kernel.yama.ptrace_scope=0 to attach to a non-descendant process;
-# NixOS defaults it to 1. Without it, the capture logs the failure instead.
+# Requires kernel.yama.ptrace_scope=0 to attach to a non-descendant process.
+# This host reads 0 already (verified 2026-07-30 — nothing in /etc/sysctl.d
+# sets it, and a py-spy attach succeeded), so no sysctl change is needed. If a
+# future host ships 1, the capture records the ptrace failure and, per the
+# grep guard below, leaves itself armed rather than disarming on a bad dump.
 set -euo pipefail
 
 THRESH=${KEYLOG_SPIN_THRESHOLD:-20}   # percent of one core
@@ -69,23 +72,38 @@ dump="$OUT/spin-$stamp.txt"
   echo "utime+stime delta: $(( t1 - t0 )) ticks"
   echo "stime delta:       $(( s1 - s0 )) ticks"
   echo
+  # py-spy PAUSES the target by default (ptrace-stop). keylog is a data
+  # collector, so a long pause drops keystrokes. The plain dump is fast, so it
+  # takes the accurate blocking path; the --native pass unwinds C frames and is
+  # far slower, so it runs --nonblocking (slightly less consistent, but it must
+  # not freeze capture for seconds).
   echo "--- py-spy dump ---"
   if command -v py-spy >/dev/null 2>&1; then
-    py-spy dump --pid "$pid" 2>&1 || echo "py-spy failed (ptrace_scope=1? needs 0 for non-descendants)"
+    py-spy dump --pid "$pid" 2>&1 || echo "py-spy failed (see ptrace_scope above; needs 0 for non-descendants)"
   else
     echo "py-spy not on PATH"
   fi
   echo
-  echo "--- py-spy dump (native frames) ---"
+  echo "--- py-spy dump (native frames, nonblocking) ---"
   if command -v py-spy >/dev/null 2>&1; then
-    py-spy dump --pid "$pid" --native 2>&1 || echo "native dump failed"
+    py-spy dump --pid "$pid" --native --nonblocking 2>&1 || echo "native dump failed"
   fi
 } >"$dump" 2>&1
 
-touch "$SENTINEL"
+# Only disarm if we actually got a stack. Otherwise a transient py-spy failure
+# (target exited mid-capture, ptrace denied, unwinder error) would burn the ONE
+# capture this mechanism exists for and silently disarm it forever.
+if grep -qE '^Thread [0-9]+ ' "$dump"; then
+  touch "$SENTINEL"
+  armed_note="watcher disarmed (rm $SENTINEL to re-arm)"
+else
+  mv "$dump" "$dump.failed"
+  dump="$dump.failed"
+  armed_note="NO STACK CAPTURED — watcher left ARMED to retry"
+fi
 
 # Surface it — this is the whole point, don't let it rot in a cache dir.
 if command -v notify-send >/dev/null 2>&1; then
-  notify-send -u critical "keylog spin captured (${pct}%)" "$dump" || true
+  notify-send -u critical "keylog spin ${pct}% — $armed_note" "$dump" || true
 fi
-echo "captured $dump (cpu=${pct}%)"
+echo "captured $dump (cpu=${pct}%) — $armed_note"

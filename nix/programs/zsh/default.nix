@@ -32,17 +32,33 @@
     [[ -f $HOME/workspace/civit/datapacket-talos/prod-kubeconfig ]] && export KC_DPPROD=$HOME/workspace/civit/datapacket-talos/prod-kubeconfig
     [[ -f $HOME/.kube/homelab-nebula.yaml ]]        && export KC_NEBULA=$HOME/.kube/homelab-nebula.yaml
 
-    # ── Global build/test concurrency caps ──────────────────────────────────
-    # Vitest and Go both size their worker pools off the FULL CPU count with no
-    # awareness of sibling processes. With several agents running test suites
-    # concurrently, each independently claims all 24 threads — measured as two
-    # vitest runs at 91% + 71% CPU against PSI cpu some=63% (contention, since
-    # PSI full stayed at 0%). Capping here (.zshenv, so it reaches the
-    # non-interactive `zsh -c` every agent Bash call uses) bounds the total.
-    # Starting values, not a benchmarked optimum — any cap well under 24 beats
-    # each process assuming it owns the machine. Only affects NEW shells.
+    # ── Global test concurrency cap ─────────────────────────────────────────
+    # Vitest sizes its worker pool off the FULL CPU count with no awareness of
+    # sibling processes, so N concurrent agents each claim all 24 threads —
+    # measured as two vitest runs at 91% + 71% CPU against PSI cpu some=63%
+    # (contention, since PSI full stayed at 0%). Capping here (.zshenv, so it
+    # reaches the non-interactive `zsh -c` every agent Bash call uses) bounds
+    # the total. Starting value, not a benchmarked optimum; NEW shells only.
+    #
+    # All THREE vars on purpose — the name changed by major version and the
+    # repos here straddle the rename:
+    #   Vitest 4.x  reads VITEST_MAX_WORKERS
+    #   Vitest 2/3  read  VITEST_MAX_THREADS (pool=threads)
+    #                and  VITEST_MAX_FORKS   (pool=forks — the 3.x DEFAULT)
+    # Setting only MAX_WORKERS is a silent no-op on 2.x/3.x, which is what
+    # promptver (3.2.4), codemirror-lang-sdprompt (2.1.9) and both
+    # civitai-advertising repos (^3.2.3) actually run. Unknown env vars are
+    # ignored, so setting all three is safe in both directions.
     export VITEST_MAX_WORKERS=4
-    export GOMAXPROCS=8
+    export VITEST_MAX_THREADS=4
+    export VITEST_MAX_FORKS=4
+
+    # Deliberately NOT setting GOMAXPROCS. Go 1.25+ derives it from the cgroup
+    # CPU limit and updates it dynamically; pinning an env var DISABLES that,
+    # making the system less adaptive, not more. It also double-caps builds,
+    # since `go build -p` and `go test -parallel` both default to GOMAXPROCS.
+    # To bound Go, put the shell in a systemd slice with CPUQuota= — Go picks
+    # that up natively, and it bounds non-Go processes in the slice too.
   '';
 
   initContent = let
