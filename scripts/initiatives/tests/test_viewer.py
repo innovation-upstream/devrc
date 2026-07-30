@@ -9,6 +9,7 @@ The store read + tmux overlay (the I/O) are exercised only via a fake provider �
 how sync.py/route.py separate the pure transform from infra."""
 import json
 import sys
+import urllib.error
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -2784,8 +2785,19 @@ def test_js_card_wires_two_tap_confirm_on_done_and_drop():
     assert "armConfirm(dropBtn, {armedLabel: 'drop?'" in body
     assert "archiveCard(v, doneBtn, astat, 'done', c)" in body
     assert "archiveCard(v, dropBtn, astat, 'dropped', c)" in body
-    # resolve + dispatch stay SINGLE-tap (human-gated downstream): no armConfirm on them.
-    assert "armConfirm(rbtn" not in body and "armConfirm(btn" not in body
+    # [resolve] stays SINGLE-tap unconditionally (it only opens the read-only ask sidebar).
+    assert "armConfirm(rbtn" not in body
+    # [⤴ dispatch] is single-tap by DEFAULT and two-tap ONLY when the linked-task guard fires
+    # (a.guard set = the initiative already has open clawgate tasks). So the armConfirm call
+    # must live inside the `if(a.guard)` branch, and the plain addEventListener path must
+    # still exist for the unguarded case — today's behaviour, untouched.
+    guard_branch = body.split("if(a.guard){", 1)
+    assert len(guard_branch) == 2, "the dispatch guard branch is missing"
+    guarded, rest = guard_branch[1].split("} else {", 1)
+    assert "armConfirm(btn, {armedLabel: a.guard" in guarded
+    assert "dispatchNextStep(v, btn, dstat)" in guarded
+    assert "armConfirm" not in rest.split("} else if(a.kind === 'done')", 1)[0]
+    assert "btn.addEventListener('click'" in rest
 
 
 def test_render_html_ships_armed_confirm_css():
@@ -5227,3 +5239,241 @@ def test_render_smoke_vocab_clarity_all_five_on_one_page():
     assert ".qa .drafting{" in html
     # regression: the per-card emerging badge + the ask sidebar's citation render survive.
     assert "emerging-badge" in html and "function renderSources(" in html
+
+
+# --------------------------------------------------------------------------- #
+# LINKED CLAWGATE TASKS — the consumer of repo-cos's `initiative:<slug>` tags.
+# The pure fetch/group layer is covered in test_tasks.py; here: the viewer JOIN
+# (build_model / build_detail / DataProvider), the SILENT degradation contract
+# (a clawgate failure must render byte-identically to today), and the dispatch
+# guard + expanded-detail JS (node-eval'd / source-asserted, like the rest).
+# --------------------------------------------------------------------------- #
+def _tv(tid, status="open", title=None, with_url=True):
+    """A linked-task view as `tasks.task_view` produces it."""
+    return {"id": tid, "title": title or f"task {tid}", "status": status,
+            "open": status in ("open", "in_progress", "ready_for_review"),
+            "url": f"http://cg.test:30302/tasks#task-{tid}" if with_url else ""}
+
+
+def test_build_model_attaches_linked_tasks_by_exact_slug():
+    rows = [_row(slug="alpha"), _row(slug="beta", repo="/home/zach/workspace/other")]
+    model = viewer.build_model(
+        rows, now=NOW, linked_tasks={"alpha": [_tv(1), _tv(2, "complete")]})
+    by_slug = {v["slug"]: v for v in model["flat"]}
+    assert [t["id"] for t in by_slug["alpha"]["linked_tasks"]] == [1, 2]
+    assert by_slug["alpha"]["open_task_count"] == 1          # the complete one doesn't count
+    # a card with no linked tasks gets the SAME (empty) shape, never a missing key
+    assert by_slug["beta"]["linked_tasks"] == []
+    assert by_slug["beta"]["open_task_count"] == 0
+
+
+def test_build_model_join_is_exact_not_case_or_prefix_insensitive():
+    rows = [_row(slug="foo")]
+    for wrong in ("Foo", "foo-bar", "fo", "FOO"):
+        model = viewer.build_model(rows, now=NOW, linked_tasks={wrong: [_tv(1)]})
+        assert model["flat"][0]["linked_tasks"] == [], wrong
+        assert model["flat"][0]["open_task_count"] == 0
+
+
+def test_build_model_unknown_slug_in_the_map_matches_no_card():
+    model = viewer.build_model([_row(slug="alpha")], now=NOW,
+                               linked_tasks={"no-such-initiative": [_tv(9)]})
+    assert model["flat"][0]["linked_tasks"] == []
+    assert model["total"] == 1                                # no phantom card invented
+
+
+def test_build_model_open_task_count_ignores_complete_and_dismissed():
+    model = viewer.build_model([_row(slug="a")], now=NOW, linked_tasks={"a": [
+        _tv(1, "open"), _tv(2, "in_progress"), _tv(3, "complete"), _tv(4, "dismissed")]})
+    assert model["flat"][0]["open_task_count"] == 2
+
+
+def test_build_model_garbage_linked_tasks_degrades_to_empty():
+    for junk in (None, {}, "nope", {"a": "not-a-list"}, {"a": None}):
+        model = viewer.build_model([_row(slug="a")], now=NOW, linked_tasks=junk)
+        assert model["flat"][0]["linked_tasks"] == []
+        assert model["flat"][0]["open_task_count"] == 0
+
+
+# --- the SILENT-degradation contract: every failure renders today's board ---- #
+def _rows_for_degradation():
+    return [_row(slug="alpha"), _row(slug="beta", momentum="stalled",
+                                     last_touch=NOW - timedelta(days=9))]
+
+
+def _render_with(linked_tasks):
+    return viewer.render_html(
+        viewer.build_model(_rows_for_degradation(), now=NOW, linked_tasks=linked_tasks), None)
+
+
+def test_no_linked_tasks_renders_exactly_the_pre_feature_board():
+    baseline = viewer.render_html(
+        viewer.build_model(_rows_for_degradation(), now=NOW), None)
+    # every "clawgate gave us nothing" shape must produce the IDENTICAL page
+    for empty in ({}, None):
+        assert _render_with(empty) == baseline
+
+
+def _provider_with_linked(linked_fn):
+    rows = _rows_for_degradation()
+    return viewer.DataProvider(ttl=0, loader=lambda: (rows, []),
+                               tmux=lambda r: [], now_fn=lambda: NOW,
+                               linked_tasks=linked_fn)
+
+
+def _rendered(provider):
+    model, err = provider.snapshot()
+    assert err is None, err
+    return viewer.render_html(model, err)
+
+
+def test_clawgate_failures_all_render_the_unchanged_board(capsys):
+    """Connection error, non-200, malformed JSON, missing creds, and a no-`tags` response
+    each yield the SAME page as the no-tasks render — not merely "no exception escaped"."""
+    baseline = _rendered(_provider_with_linked(lambda: {}))
+    tasks_mod = viewer._tasks()
+
+    def connection_error():
+        raise OSError("Connection refused")
+
+    def http_503():
+        raise urllib.error.HTTPError("http://cg/api/tasks", 503, "boom", {}, None)
+
+    def malformed_json():
+        # what the real read path yields when the body doesn't parse
+        return tasks_mod.group_by_slug(tasks_mod.fetch_tasks(
+            creds={"CLAWGATE_HOOK_TOKEN": "t"}, env={},
+            getter=lambda url, tok, timeout=None: "{not json"))
+
+    def missing_creds():
+        return tasks_mod.linked_tasks_map(creds={}, env={}, fetcher=tasks_mod.fetch_tasks)
+
+    def no_tags_field():
+        # a rolled-back clawgate: real tasks, but not one carries a `tags` key
+        return tasks_mod.group_by_slug(
+            [{"id": 1, "directory": "x", "status": "open"},
+             {"id": 2, "directory": "y", "status": "complete"}])
+
+    for failure in (connection_error, http_503, malformed_json, missing_creds, no_tags_field):
+        assert _rendered(_provider_with_linked(failure)) == baseline, failure.__name__
+    capsys.readouterr()   # the failures log to stderr; nothing reaches the page
+
+
+def test_a_clawgate_outage_never_turns_into_the_error_page():
+    provider = _provider_with_linked(lambda: (_ for _ in ()).throw(RuntimeError("down")))
+    model, err = provider.snapshot()
+    assert err is None and model is not None and model["total"] == 2
+
+
+def test_load_linked_tasks_never_raises(monkeypatch):
+    monkeypatch.setattr(viewer, "_tasks",
+                        lambda: (_ for _ in ()).throw(ImportError("no tasks.py")))
+    assert viewer.load_linked_tasks() == {}
+
+
+# --- the detail payload ----------------------------------------------------- #
+def test_build_detail_carries_linked_tasks():
+    model = viewer.build_model([_row(slug="alpha")], now=NOW,
+                               linked_tasks={"alpha": [_tv(7), _tv(8, "complete")]})
+    d = viewer.build_detail(model, None, "/home/zach/workspace/devrc", "alpha",
+                            doc_reader=lambda *a, **k: None)
+    assert d["ok"] is True
+    assert [t["id"] for t in d["linked_tasks"]] == [7, 8]
+    assert d["open_task_count"] == 1
+
+
+def test_build_detail_without_linked_tasks_is_an_empty_list():
+    model = viewer.build_model([_row(slug="alpha")], now=NOW)
+    d = viewer.build_detail(model, None, "/home/zach/workspace/devrc", "alpha",
+                            doc_reader=lambda *a, **k: None)
+    assert d["linked_tasks"] == [] and d["open_task_count"] == 0
+
+
+# --- the DISPATCH GUARD (pure JS, node-eval'd — the ACTUAL page code) -------- #
+def test_js_dispatch_guard_arms_on_open_linked_tasks():
+    one, many, none_open, absent = _node_card_actions([
+        {"slug": "a", "state": "active", "recommended_next_step": _REC, "open_task_count": 1},
+        {"slug": "b", "state": "active", "recommended_next_step": _REC, "open_task_count": 3},
+        {"slug": "c", "state": "active", "recommended_next_step": _REC, "open_task_count": 0},
+        {"slug": "d", "state": "active", "recommended_next_step": _REC},
+    ])
+    assert one[0]["guard"] == "already has 1 open task — dispatch anyway?"
+    assert many[0]["guard"] == "already has 3 open tasks — dispatch anyway?"
+    # zero / absent → NO guard key at all: today's single-tap behaviour, untouched.
+    assert "guard" not in none_open[0] and "guard" not in absent[0]
+    # the guard NEVER changes which actions exist, only the dispatch descriptor.
+    assert _kinds(one) == _kinds(none_open) == ["dispatch", "done"]
+    assert one[0]["label"] == "⤴ dispatch"
+
+
+def test_js_dispatch_guard_applies_to_the_resume_label_too():
+    stalled, needs = _node_card_actions([
+        {"slug": "s", "state": "stalled", "recommended_next_step": _REC, "open_task_count": 2},
+        {"slug": "n", "state": "needs_you", "recommended_next_step": _REC, "open_task_count": 1},
+    ])
+    assert stalled[0]["label"] == "⤴ resume"
+    assert stalled[0]["guard"] == "already has 2 open tasks — dispatch anyway?"
+    # on needs_you the order is [resolve, dispatch, done] — [resolve] is never guarded
+    assert _kinds(needs) == ["resolve", "dispatch", "done"]
+    assert "guard" not in needs[0]
+    assert needs[1]["guard"] == "already has 1 open task — dispatch anyway?"
+
+
+def test_js_dispatch_guard_ignores_garbage_counts():
+    rows = _node_card_actions([
+        {"slug": "a", "state": "active", "recommended_next_step": _REC, "open_task_count": -1},
+        {"slug": "b", "state": "active", "recommended_next_step": _REC, "open_task_count": "2"},
+        {"slug": "c", "state": "active", "recommended_next_step": _REC, "open_task_count": None},
+    ])
+    for acts in rows:
+        assert "guard" not in acts[0]
+
+
+def _node_actions_js(body):
+    node = _shutil.which("node")
+    if not node:
+        import pytest
+        pytest.skip("node not on PATH — actions JS untested this run")
+    out = _subprocess.run(
+        [node, "-e", viewer._ARCHIVE_JS + "\n" + viewer._ACTIONS_JS + "\n" + body],
+        capture_output=True, text=True, timeout=30)
+    assert out.returncode == 0, out.stderr
+    return json.loads(out.stdout)
+
+
+def test_js_linked_tasks_hint_lists_only_the_open_tasks():
+    v = {"linked_tasks": [{"id": 92, "status": "open", "open": True},
+                          {"id": 74, "status": "complete", "open": False},
+                          {"id": 77, "status": "in_progress", "open": True}]}
+    got = _node_actions_js(
+        "console.log(JSON.stringify(linkedTasksHint(" + json.dumps(v) + ")));")
+    assert got == "#92 open · #77 in_progress"
+    # no linked tasks → an empty hint, never "undefined"
+    assert _node_actions_js("console.log(JSON.stringify(linkedTasksHint({})));") == ""
+
+
+# --- EXPANDED detail renders linked tasks; the COLLAPSED card does not ------- #
+def _detail_body():
+    js = viewer._JS
+    return js[js.index("function renderDetail("):js.index("function loadDetail(")]
+
+
+def test_js_linked_tasks_render_in_the_expanded_detail_only():
+    detail, card = _detail_body(), _card_body()
+    # the expanded detail renders a section, one row per task, with status + title + link
+    assert "d.linked_tasks || (v && v.linked_tasks) || []" in detail
+    assert "'Linked clawgate tasks'" in detail and "'Linked clawgate task'" in detail
+    assert "el('span', 'lt-status'" in detail
+    assert "el('a', 'lt-link', label)" in detail and "a.target = '_blank'" in detail
+    # the COLLAPSED two-line card renders NO linked-task markup (it stays tuned for scanning)
+    for marker in ("lt-status", "lt-link", "Linked clawgate", "detail-list linked-tasks"):
+        assert marker not in card, marker
+
+
+def test_render_html_ships_the_linked_task_css_and_guard_css():
+    model = viewer.build_model([_row(slug="a")], now=NOW, linked_tasks={"a": [_tv(1)]})
+    html = viewer.render_html(model, None)
+    assert ".linked-task .lt-status{" in html and ".linked-task.open .lt-status{" in html
+    assert ".dispatch-btn.guarded{" in html and ".dispatch-btn.armed{" in html
+    # the data reaches the page through the SAME JSON island as everything else
+    assert '"open_task_count": 1' in html and "tasks#task-1" in html
