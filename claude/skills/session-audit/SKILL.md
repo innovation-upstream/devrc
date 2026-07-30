@@ -73,6 +73,12 @@ Lead with the single highest-leverage item (usually a missing CLAUDE.md). Then o
 - Don't delete files that affect deployment (symlinked scripts, etc.) without explicit confirmation —
   surface them as a separate follow-up.
 
+## ⚠ Skills are now devrc-managed (edit the SOURCE, not `~/.claude/skills/`)
+As of commit `9d8b0bd` (2026-07-29), the 13 doc/script skills live in **`~/workspace/devrc/claude/skills/`** and are symlinked **READ-ONLY** into `~/.claude/skills/` via `home.file.".claude/skills"` (recursive, like `commands/`). So when this audit proposes editing a skill:
+- **Edit `~/workspace/devrc/claude/skills/<name>/` → `home-manager switch --flake ~/workspace/devrc --impure` → push; the other host `git pull` + switches.** Never edit `~/.claude/skills/` directly (read-only symlink — the change won't ship and may error).
+- **Excluded** (NOT devrc-managed): `clickup` (an installed Node project with `node_modules` + its own flake + `accounts.json`) and `browser` (already symlinked from `scripts/browser-bridge`). Edit those in place as before.
+- **home-manager gotcha (hit both hosts this session):** `home.file` with `recursive=true` + `force=true` does **NOT** clobber a pre-existing REAL directory tree — the first switch silently leaves those files as real dirs (unlinked, so edits there never ship). Fix: `diff -rq` the real dir against the store generation (`readlink -f` a working symlink to locate the gen), and if identical, `rm -rf` the conflicting real dirs then re-`switch`.
+
 ## Boundaries
 **Will:** parse the repo's own transcripts; quantify waste; draft a CLAUDE.md; trim/relocate skill
 content; propose allowlist edits; implement on request.
