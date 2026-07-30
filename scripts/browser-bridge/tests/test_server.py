@@ -3706,6 +3706,139 @@ def test_browser_cli_screenshot_missing_image_data_still_errors(tmp_path):
     assert "missing image data" in r.stderr.lower()
 
 
+# --- screenshot: privacy of the temp file (mode / validation / retention) --- #
+
+@pytest.mark.skipif(shutil.which("curl") is None, reason="curl not on PATH")
+def test_browser_cli_screenshot_temp_file_is_mode_0600(tmp_path):
+    """PRIVACY: a screenshot is a pixel-perfect image of an AUTHENTICATED view.
+    The temp PNG must be owner-only (tempfile.mkstemp), NOT umask-derived 0644 —
+    /tmp is world-readable and shared with every UID on the box."""
+    tmpdir = tmp_path / "shots"
+    tmpdir.mkdir()
+    r, _ = _run_browser_canned(_shot_data(), ["screenshot"], tmp_path,
+                               env_extra={"TMPDIR": str(tmpdir)})
+    assert r.returncode == 0, r.stderr
+    p = Path(json.loads(r.stdout)["path"])
+    mode = stat.S_IMODE(p.stat().st_mode)
+    assert mode == 0o600, f"temp screenshot is {oct(mode)}, must be 0o600"
+
+
+@pytest.mark.parametrize("payload,why", [
+    ("data:image/png;base64,%%%%", "junk that b64decode would silently drop"),
+    ("data:image/png;base64,", "an empty payload"),
+    ("data:image/png;base64,notbase64!!!", "an outright invalid alphabet"),
+])
+@pytest.mark.skipif(shutil.which("curl") is None, reason="curl not on PATH")
+def test_browser_cli_screenshot_malformed_base64_errors_and_writes_nothing(
+        payload, why, tmp_path):
+    """A malformed payload must EXIT NON-ZERO with a clear message and leave NO
+    file. Without validate=True, b64decode ignores non-alphabet chars → these
+    would decode to b"" and be written as a 0-byte "successful" .png that an
+    agent then Reads as if it were a screenshot (and the last case would raise an
+    uncaught binascii.Error → a raw traceback)."""
+    tmpdir = tmp_path / "shots"
+    tmpdir.mkdir()
+    r, _ = _run_browser_canned(_shot_data(dataUrl=payload), ["screenshot"],
+                               tmp_path, env_extra={"TMPDIR": str(tmpdir)})
+    assert r.returncode != 0, f"{why} must not report success"
+    assert "not valid base64" in r.stderr or "not a PNG" in r.stderr, r.stderr
+    assert "Traceback" not in r.stderr, "must be a clean message, not a traceback"
+    assert list(tmpdir.iterdir()) == [], "no file (not even a 0-byte one) may remain"
+
+
+@pytest.mark.skipif(shutil.which("curl") is None, reason="curl not on PATH")
+def test_browser_cli_screenshot_non_png_payload_is_rejected(tmp_path):
+    """Valid base64 that isn't a PNG is refused before anything is written."""
+    tmpdir = tmp_path / "shots"
+    tmpdir.mkdir()
+    not_png = base64.b64encode(b"GIF89a not really a png").decode()
+    r, _ = _run_browser_canned(
+        _shot_data(dataUrl="data:image/png;base64," + not_png),
+        ["screenshot"], tmp_path, env_extra={"TMPDIR": str(tmpdir)})
+    assert r.returncode != 0
+    assert "not a PNG" in r.stderr
+    assert list(tmpdir.iterdir()) == []
+
+
+@pytest.mark.skipif(shutil.which("curl") is None, reason="curl not on PATH")
+def test_browser_cli_screenshot_explicit_path_also_validates(tmp_path):
+    """The same validation guards an EXPLICIT path — no 0-byte png there either."""
+    dest = tmp_path / "shot.png"
+    r, _ = _run_browser_canned(_shot_data(dataUrl="data:image/png;base64,%%%%"),
+                               ["screenshot", str(dest)], tmp_path)
+    assert r.returncode != 0
+    assert not dest.exists(), "a malformed payload must not create the target file"
+
+
+@pytest.mark.skipif(shutil.which("curl") is None, reason="curl not on PATH")
+def test_browser_cli_screenshot_prunes_aged_temp_captures_only(tmp_path):
+    """Retention: temp captures older than 24h are auto-pruned on the next
+    screenshot. Strictly prefix-scoped — a fresh capture and an unrelated file
+    are left alone."""
+    tmpdir = tmp_path / "shots"
+    tmpdir.mkdir()
+    old = tmpdir / "browser-screenshot-old.png"
+    fresh = tmpdir / "browser-screenshot-fresh.png"
+    other = tmpdir / "someone-elses-file.png"
+    unrelated_suffix = tmpdir / "browser-screenshot-notes.txt"
+    for f in (old, fresh, other, unrelated_suffix):
+        f.write_bytes(b"x")
+    aged = time.time() - (25 * 3600)         # older than the 24h retention
+    os.utime(old, (aged, aged))
+    os.utime(other, (aged, aged))            # aged BUT not ours → must survive
+    os.utime(unrelated_suffix, (aged, aged))  # right prefix, wrong suffix → survives
+
+    r, _ = _run_browser_canned(_shot_data(), ["screenshot"], tmp_path,
+                               env_extra={"TMPDIR": str(tmpdir)})
+    assert r.returncode == 0, r.stderr
+    assert not old.exists(), "an aged browser-screenshot-*.png must be pruned"
+    assert fresh.exists(), "a fresh capture must NOT be pruned"
+    assert other.exists(), "pruning must be scoped to our own prefix"
+    assert unrelated_suffix.exists(), "pruning must be scoped to .png"
+    # The new capture is there too.
+    assert Path(json.loads(r.stdout)["path"]).is_file()
+
+
+@pytest.mark.skipif(shutil.which("curl") is None, reason="curl not on PATH")
+def test_browser_cli_screenshot_prune_never_follows_a_symlink(tmp_path):
+    """An aged SYMLINK matching the prefix is unlinked as the symlink itself; the
+    file it points at is never touched (lstat + a regular-file check)."""
+    tmpdir = tmp_path / "shots"
+    tmpdir.mkdir()
+    victim = tmp_path / "precious.png"
+    victim.write_bytes(b"do not delete me")
+    link = tmpdir / "browser-screenshot-link.png"
+    link.symlink_to(victim)
+    aged = time.time() - (25 * 3600)
+    os.utime(link, (aged, aged), follow_symlinks=False)
+
+    r, _ = _run_browser_canned(_shot_data(), ["screenshot"], tmp_path,
+                               env_extra={"TMPDIR": str(tmpdir)})
+    assert r.returncode == 0, r.stderr
+    assert victim.read_bytes() == b"do not delete me", "the target must be untouched"
+
+
+@pytest.mark.skipif(shutil.which("curl") is None, reason="curl not on PATH")
+def test_browser_cli_screenshot_prune_is_best_effort_and_regular_files_only(tmp_path):
+    """Pruning must never fail the command and must only ever unlink a REGULAR
+    file: an aged DIRECTORY whose name matches the capture pattern is skipped
+    (not rmdir'd, no error), and the screenshot still succeeds."""
+    tmpdir = tmp_path / "shots"
+    tmpdir.mkdir()
+    decoy = tmpdir / "browser-screenshot-adir.png"
+    decoy.mkdir()
+    (decoy / "keep").write_bytes(b"keep")
+    aged = time.time() - (25 * 3600)
+    os.utime(decoy, (aged, aged))
+
+    r, _ = _run_browser_canned(_shot_data(), ["screenshot"], tmp_path,
+                               env_extra={"TMPDIR": str(tmpdir)})
+    assert r.returncode == 0, r.stderr
+    assert decoy.is_dir() and (decoy / "keep").exists()
+    assert "Traceback" not in r.stderr
+    assert Path(json.loads(r.stdout)["path"]).is_file()
+
+
 # --- `html` gets the same --max-bytes cap as `text` ------------------------- #
 
 @pytest.mark.skipif(shutil.which("curl") is None, reason="curl not on PATH")

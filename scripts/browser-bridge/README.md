@@ -202,10 +202,25 @@ Brave restart:
   tokens per call) and is useless in an agent's context — it can't see an image
   from a data URL, it has to `Read` a `.png` anyway. So the CLI always decodes and
   writes a file: to an explicit `path` (prints just the path, unchanged), or with
-  no path to a temp file (`tempfile.gettempdir()`, so `TMPDIR` is honoured) named
-  `browser-screenshot-<epoch>-<rand>.png`, printing compact JSON
-  `{ok,path,bytes,url,via}`. **`--data-url`** is the explicit escape hatch that
-  restores the old raw-data-URL output; it is mutually exclusive with `path`.
+  no path to a `browser-screenshot-*.png` temp file (`tempfile.gettempdir()`, so
+  `TMPDIR` is honoured), printing compact JSON `{ok,path,bytes,url,via}`.
+  **`--data-url`** is the explicit escape hatch that restores the old
+  raw-data-URL output; it is mutually exclusive with `path`.
+  Because a screenshot is a pixel-perfect image of an **authenticated** view, the
+  temp file is privacy-handled rather than just dropped in a shared `/tmp`:
+  - created with `tempfile.mkstemp` → `O_CREAT|O_EXCL|O_RDWR` at **mode 0600**
+    (plain `open()` would inherit umask and land 0644 = world-readable), which is
+    also the correct primitive against a pre-planted symlink;
+  - **auto-pruned after 24h** on each `screenshot` invocation — strictly scoped to
+    the `browser-screenshot-*.png` prefix in the temp dir, `lstat`-based so a
+    symlink is judged as itself and only a REGULAR file is ever unlinked, and
+    entirely best-effort (a prune error never fails the capture). Copy a capture
+    to an explicit `path` if you need to keep it longer.
+  - the payload is **validated before any write** — strict base64
+    (`validate=True`; the default silently drops non-alphabet chars, so junk and
+    `""` both decoded to `b""` and produced a 0-byte "successful" `.png`) plus the
+    8-byte PNG signature. Both failure modes exit non-zero with a clear message
+    and leave no file behind.
 - **`html` is byte-capped like `text`.** `--max-bytes N`, default 32768, `0` =
   genuinely uncapped, and truncation uses the SAME convention as `normalizeText`:
   the kept prefix (cut on a UTF-8 boundary) gets `\n…[truncated N bytes]` appended
