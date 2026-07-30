@@ -263,10 +263,11 @@ def test_post_task_unparseable_response_returns_none():
 def test_dispatch_initiative_happy_path():
     seen = {}
 
-    def poster(directory, body, *, repo="", creds=None):
+    def poster(directory, body, *, repo="", tags=None, creds=None):
         seen["directory"] = directory
         seen["body"] = body
         seen["repo"] = repo
+        seen["tags"] = tags
         return 99
 
     v = _view(next_step="wire the unit")
@@ -274,6 +275,8 @@ def test_dispatch_initiative_happy_path():
     assert res == {"ok": True, "task_id": 99, "error": None}
     assert seen["directory"] == "devrc · emerging-thing"
     assert "wire the unit" in seen["body"]
+    # The tag is what makes the created Task JOIN back to this card (and arm the guard).
+    assert seen["tags"] == ["initiative:emerging-thing"]
 
 
 def test_dispatch_initiative_no_grounded_step_is_error():
@@ -305,3 +308,122 @@ def test_dispatch_initiative_never_raises():
     res = dispatch.dispatch_initiative(_view(next_step="x"), poster=boom)
     assert res["ok"] is False and res["task_id"] is None
     assert "RuntimeError" in res["error"]
+
+
+# --- 🔴 TAGGING: the board's own dispatch must arm its own guard ------------- #
+# Before this, `dispatch.py` had NO `tags` anywhere: the board minted UNtagged clawgate Tasks,
+# which therefore never joined back to a card and never armed the duplicate-dispatch guard —
+# so tapping ⤴ dispatch twice on the same card (the exact duplicate the feature is named for)
+# was silent. Only repo-cos's weekly approve path emitted tagged tasks.
+def test_build_tags_emits_the_ledger_slug_VERBATIM():
+    assert dispatch.build_tags(_view(slug="remix-platform")) == ["initiative:remix-platform"]
+    # the join in tasks.py is EXACT string equality, so the tag value must equal the slug
+    tag = dispatch.build_tags(_view(slug="initiatives-task-links"))[0]
+    assert tag == "initiative:initiatives-task-links"
+    assert tag.split(":", 1)[1] == "initiatives-task-links"
+
+
+def test_build_tags_emits_NOTHING_rather_than_a_rewritten_slug(capsys):
+    """A normalized-but-rewritten slug would join to NOTHING while looking like it worked —
+    strictly worse than no tag. Exact-or-nothing, the same guarantee repo-cos gives."""
+    for bad in ("Foo Bar", "UPPER", "has:two:colons", "spaced out", "emoji-🚀", "x" * 80):
+        assert dispatch.build_tags(_view(slug=bad)) == [], bad
+    assert dispatch.build_tags(_view(slug="")) == []
+    assert dispatch.build_tags({}) == []
+    assert dispatch.build_tags(None) == []
+    assert "untagged" in capsys.readouterr().err
+
+
+def test_normalize_tag_matches_the_repo_cos_grammar():
+    assert dispatch.normalize_tag("initiative:alpha") == "initiative:alpha"
+    assert dispatch.normalize_tag("Initiative:Alpha") == "initiative:alpha"   # lowercased
+    assert dispatch.normalize_tag("a:b:c") is None                            # one ':' only
+    assert dispatch.normalize_tag("initiative:") is None                      # empty side
+    assert dispatch.normalize_tag("initiative:a b") == "initiative:a-b"       # ws → '-'
+    assert dispatch.normalize_tag("x" * (dispatch.TAG_MAX_LEN + 1)) is None
+    assert dispatch.normalize_tag("") is None and dispatch.normalize_tag(None) is None
+    assert dispatch.normalize_tags(["b", "a", "a", "BAD:TAG:X"]) == ["a", "b"]
+
+
+def test_post_task_sends_tags_only_when_nonempty():
+    captured = {}
+
+    def fake_post(url, payload, token, **kw):
+        captured["payload"] = dict(payload)
+        return '{"id": 1}'
+
+    dispatch.post_task("d", "b", creds=_CREDS, _post=fake_post)
+    assert "tags" not in captured["payload"]              # bare call = the old 2-key payload
+    dispatch.post_task("d", "b", tags=["initiative:alpha"], creds=_CREDS, _post=fake_post)
+    assert captured["payload"]["tags"] == ["initiative:alpha"]
+
+
+def test_post_task_retries_untagged_exactly_once_on_a_tag_400():
+    """FAIL-OPEN: 400 is clawgate's tag-grammar rejection, so a tagged post that 400s degrades
+    to an UNTAGGED task — never to no task. A tag must never cost a dispatch."""
+    seen = []
+
+    def flaky(url, payload, token, **kw):
+        seen.append(dict(payload))
+        if "tags" in payload:
+            raise urllib.error.HTTPError(url, 400, "bad tag", {}, None)
+        return '{"id": 7}'
+
+    assert dispatch.post_task("d", "b", tags=["initiative:alpha"],
+                              creds=_CREDS, _post=flaky) == 7
+    assert len(seen) == 2 and "tags" in seen[0] and "tags" not in seen[1]
+
+
+def test_post_task_does_NOT_retry_on_any_other_status():
+    # 408 in particular: the origin may already have created the Task, so a retry double-posts.
+    for code in (401, 403, 404, 408, 429, 500):
+        seen = []
+
+        def boom(url, payload, token, _code=code, **kw):
+            seen.append(payload)
+            raise urllib.error.HTTPError(url, _code, "err", {}, None)
+
+        assert dispatch.post_task("d", "b", tags=["initiative:alpha"],
+                                  creds=_CREDS, _post=boom) is None
+        assert len(seen) == 1, code
+
+
+def test_dispatch_of_an_untaggable_slug_still_dispatches_untagged():
+    seen = {}
+
+    def poster(directory, body, *, repo="", tags=None, creds=None):
+        seen["tags"] = tags
+        return 5
+
+    res = dispatch.dispatch_initiative(
+        _view(slug="Not A Valid Slug", next_step="do it"), poster=poster)
+    assert res["ok"] is True and res["task_id"] == 5      # FAIL-OPEN: the dispatch happens
+    assert seen["tags"] == []                             # …just untagged
+
+
+def test_dispatched_task_joins_back_and_ARMS_the_guard_end_to_end():
+    """The loop this closes: dispatch → the created clawgate Task carries `initiative:<slug>`
+    → `tasks.py` joins it to that same card → `open_task_count` > 0 → the guard arms."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "tasks_for_dispatch_test", Path(dispatch.__file__).resolve().parent / "tasks.py")
+    tasks = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(tasks)
+
+    posted = {}
+
+    def poster(directory, body, *, repo="", tags=None, creds=None):
+        posted.update({"directory": directory, "tags": tags})
+        return 4242
+
+    view = _view(slug="initiative-task-links", next_step="close the audit findings")
+    res = dispatch.dispatch_initiative(view, poster=poster)
+    assert res["ok"] is True
+
+    # what clawgate would then return from GET /api/tasks for that created task
+    created = {"id": res["task_id"], "directory": posted["directory"],
+               "status": "open", "tags": posted["tags"]}
+    linked = tasks.group_by_slug([created], "http://cg.test:30302")
+    assert list(linked) == ["initiative-task-links"] == [view["slug"]]
+    assert tasks.open_task_count(linked[view["slug"]]) == 1      # → the guard arms
+    assert linked[view["slug"]][0]["url"] == "http://cg.test:30302/tasks#task-4242"

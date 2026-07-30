@@ -84,6 +84,11 @@ NEXTSTEP_PATH = Path(__file__).resolve().parent / "nextstep.py"
 # token lives here (LAN-bound, Zach's user), NOT in the in-cluster devpod. Loaded lazily.
 DISPATCH_PATH = Path(__file__).resolve().parent / "dispatch.py"
 
+# The clawgate LINKED-TASKS reader (the consumer of repo-cos's `initiative:<slug>` tags). Read
+# ONCE per board render (never per card) and grouped into `slug -> [task]`; BEST-EFFORT, so a
+# clawgate outage renders exactly today's board. Loaded lazily by explicit path, like dispatch.
+TASKS_PATH = Path(__file__).resolve().parent / "tasks.py"
+
 # The standalone archived-lifecycle store (POST /api/archive + /api/unarchive → the board's
 # manual "done / drop" cleanup). Viewer-side ONLY (full mailbox creds, same path as the
 # assistant-log write). Loaded lazily by explicit importlib path (the sibling convention).
@@ -216,6 +221,50 @@ def _dispatch():
         spec.loader.exec_module(mod)
         _dispatch_mod = mod
     return _dispatch_mod
+
+
+_tasks_mod = None
+
+
+def _tasks():
+    """Load the clawgate linked-tasks sibling (`tasks.py`) by EXPLICIT importlib path (same
+    convention as `_dispatch`). Lazy so a viewer that never reaches clawgate pays nothing."""
+    global _tasks_mod
+    if _tasks_mod is None:
+        spec = importlib.util.spec_from_file_location("initiatives_viewer_tasks", TASKS_PATH)
+        if spec is None or spec.loader is None:
+            raise ImportError(f"cannot load {TASKS_PATH}")
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        _tasks_mod = mod
+    return _tasks_mod
+
+
+def load_linked_tasks() -> dict:
+    """The clawgate read behind its OWN cache → `slug -> [task view]` (repo-cos's
+    `initiative:<slug>` tags, consumed).
+
+    `tasks.cached_linked_tasks_map` owns the latency contract: a hard WALL-CLOCK deadline
+    (`tasks.FETCH_DEADLINE`) over the whole fetch — NOT a per-socket-operation
+    `urlopen(timeout=)`, which a slow-drip peer defeats without bound — a response size cap,
+    its own 30s TTL (so a hung clawgate is paid at most once per 30s, not on every 5s cold
+    render), single-flight, and SERVE-STALE-ON-FAILURE so a blip doesn't flicker the links
+    (and the dispatch guard) away.
+
+    The board's contract is SILENT BEST-EFFORT: clawgate unreachable, missing/unreadable
+    creds, a blown deadline, malformed JSON, or a rolled-back clawgate with no `tags` field
+    ALL log to stderr and yield `{}`/the last good map — the board then renders exactly as it
+    does today, with no error surface. NEVER raises (a sibling-load failure is caught here
+    too, so `tasks.py` being absent degrades the same way).
+
+    ⚠ Called OUTSIDE `DataProvider._lock` (see `DataProvider.snapshot`) — never move it back
+    inside, or a slow clawgate serializes every other board request behind it."""
+    try:
+        return _tasks().cached_linked_tasks_map()
+    except Exception as exc:  # noqa: BLE001 - a clawgate/sibling failure must never block a render
+        sys.stderr.write(
+            f"viewer: linked-task read failed: {type(exc).__name__}: {exc}\n")
+        return {}
 
 
 _archive_mod = None
@@ -1074,8 +1123,26 @@ def build_archived_view(archived, now: datetime) -> list[dict]:
     return out
 
 
+def attach_linked_tasks(views: list[dict], linked_tasks) -> None:
+    """PURE: stamp each view with its clawgate Tasks (`slug -> [task view]`, from the ONE
+    per-render `GET /api/tasks` read) — `linked_tasks` + `open_task_count`.
+
+    The join is by the EXACT slug (repo-cos guarantees the `initiative:<slug>` tag is either
+    the verbatim ledger slug or absent), so `initiative:Foo` never lands on `foo` and an
+    unknown slug simply matches no card. A missing/non-dict map, or a slug with no tasks,
+    yields `[]`/`0` on every card — byte-identical to the pre-feature model, which is what
+    makes the "clawgate is down" path render exactly today's board. Never raises."""
+    linked = linked_tasks if isinstance(linked_tasks, dict) else {}
+    for v in views:
+        tasks = linked.get(v.get("slug")) if linked else None
+        tasks = tasks if isinstance(tasks, list) else []
+        v["linked_tasks"] = tasks
+        v["open_task_count"] = sum(
+            1 for t in tasks if isinstance(t, dict) and t.get("open"))
+
+
 def build_model(rows: list[dict], now: datetime | None = None,
-                unmatched=None, archived=None) -> dict:
+                unmatched=None, archived=None, linked_tasks=None) -> dict:
     """PURE: store rows (+ any attached tmux) -> BOTH a grouped and a flat render model.
 
     `repos` groups initiatives by repo (within a repo: momentum then recency; repos
@@ -1091,7 +1158,12 @@ def build_model(rows: list[dict], now: datetime | None = None,
     since archiving are SUPPRESSED from `repos`/`flat` (and thus the counts + triage chips);
     an archived card whose `last_touch` advanced past its `archived_at` RESURFACES. The full
     archived set (including cards that have aged out of `latest`) rides along as `archived`
-    for the board's Done view. A missing/empty set suppresses nothing."""
+    for the board's Done view. A missing/empty set suppresses nothing.
+
+    `linked_tasks` is the clawgate `slug -> [task]` map (ONE `GET /api/tasks` per render,
+    grouped by repo-cos's `initiative:<slug>` tag). Purely ADDITIVE: it stamps each view with
+    `linked_tasks`/`open_task_count`; a missing/empty map (clawgate down, no creds, no tags)
+    leaves every card at `[]`/`0`, i.e. exactly the pre-feature model."""
     now = now or datetime.now(timezone.utc)
 
     archived_map = _archived_map(archived)
@@ -1107,6 +1179,9 @@ def build_model(rows: list[dict], now: datetime | None = None,
     rows = [r for r in rows if not _is_suppressed(r, archived_map)]
 
     views = [_initiative_view(r, now) for r in rows]
+    # The clawgate join (repo-cos's `initiative:<slug>` tags). Additive + best-effort: an
+    # empty/absent map leaves every card with `linked_tasks: []` / `open_task_count: 0`.
+    attach_linked_tasks(views, linked_tasks)
 
     by_repo: dict[str | None, list[dict]] = {}
     for r, v in zip(rows, views):
@@ -1291,6 +1366,12 @@ def build_detail(model: dict | None, error: str | None, repo: str, slug: str,
         "recent_commits": view.get("recent_commits") or [],
         "live_task": view.get("live_task") or "",
         "live_tasks": view.get("live_tasks") or [],
+        # The clawgate Tasks tagged `initiative:<slug>` for this card (from the per-render
+        # join in build_model — the detail endpoint never re-reads clawgate). Rendered ONLY
+        # in the expanded detail, alongside PRs + investigations; `[]` when clawgate is
+        # down/untagged, which is why the collapsed card is untouched by this feature.
+        "linked_tasks": view.get("linked_tasks") or [],
+        "open_task_count": view.get("open_task_count") or 0,
         "live": False,
     }
 
@@ -1487,6 +1568,18 @@ header .meta{color:var(--gray);font-size:.85rem}
   padding:.1rem .5rem}
 .dispatch-btn:hover:not(:disabled){border-color:var(--aqua)}
 .dispatch-btn:disabled{cursor:default;opacity:.7}
+/* GUARDED dispatch — the initiative already has open clawgate Task(s) tagged
+   `initiative:<slug>`, so dispatching would mint a duplicate. A persistent yellow border cues
+   "think first" at rest; the first tap arms it to the reason (the shared .armed orange, same
+   grammar as drop / ⤓ archive), a second tap dispatches anyway. */
+.dispatch-btn.guarded{border-color:var(--yellow)}
+/* `:not(.armed)` is LOAD-BEARING, not decoration: `.dispatch-btn.guarded:hover:not(:disabled)`
+   scores (0,4,0) and out-specifies `.dispatch-btn.armed` (0,2,0), so without it an ARMED button
+   still under the cursor — which is every armed button, since arming needs a click — kept the
+   yellow "think first" border instead of flipping to the orange "confirm" one. */
+.dispatch-btn.guarded:hover:not(:disabled):not(.armed){border-color:var(--yellow)}
+.dispatch-btn.armed{background:var(--orange);color:var(--bg);border-color:var(--orange);
+  font-weight:bold}
 .dispatch-status{margin-left:.5rem;color:var(--gray);font-size:.78rem}
 .dispatch-status.err{color:var(--red)}
 .dispatch-status.ok{color:var(--green)}
@@ -1534,6 +1627,15 @@ header .meta{color:var(--gray);font-size:.85rem}
   letter-spacing:.04em}
 .detail-list{margin:.1rem 0 .3rem;padding-left:1.1rem;color:var(--fg2);font-size:.84rem}
 .detail-list li{margin:.1rem 0}
+/* Linked clawgate tasks (expanded detail only — the collapsed card gets no chip). Status
+   reads as a small muted pill; an OPEN task's pill is aqua (it's live work + it arms the
+   dispatch guard), a complete/other one stays muted. */
+.detail-list.linked-tasks li{margin:.15rem 0}
+.linked-task .lt-status{font-size:.7rem;color:var(--fg2);background:var(--bg2);border-radius:3px;
+  padding:.02rem .4rem;margin-right:.45rem}
+.linked-task.open .lt-status{color:var(--aqua)}
+.linked-task .lt-link{color:var(--fg2);text-decoration:none;border-bottom:1px dotted var(--bg2)}
+.linked-task .lt-link:hover{color:var(--aqua);border-bottom-color:var(--aqua)}
 .detail-doc{color:var(--gray);font-size:.78rem;margin-top:.35rem;word-break:break-all}
 .detail-err{color:var(--red);font-size:.82rem}
 .empty{color:var(--gray);padding:2rem 0}
@@ -1771,6 +1873,14 @@ function matchArchived(a, q){
 #                       active (+legacy) -> [⤴ dispatch?] [✓ done]
 #                     The dispatch button is the SAME action either way (same /api/dispatch
 #                     wiring); only its LABEL flips to '⤴ resume' on stalled/cooling cards.
+#                     GUARD (clawgate linked tasks): when the initiative already has N OPEN
+#                     clawgate Tasks tagged `initiative:<slug>`, the dispatch descriptor also
+#                     carries `guard: "already has N open task(s) — dispatch anyway?"`, which
+#                     the card renders as a TWO-TAP armConfirm (the SAME grammar as drop /
+#                     ⤓ archive) so the second tap is a deliberate "yes, a duplicate is fine"
+#                     rather than a silent duplicate card. Completed/unknown-status tasks do
+#                     NOT count (tasks.OPEN_STATUSES is a closed set), and zero linked tasks
+#                     leaves the button EXACTLY as it is today (no `guard` key at all).
 #   resolveQuestion(slug) -> the grounded, prefilled question a [resolve] click asks the sidebar.
 #   askResolve(v)  -> open the EXISTING ask sidebar (openChat), prefill resolveQuestion(v.slug),
 #                     and submit it through the EXISTING chat-submit path (submitQuestion) so the
@@ -1782,24 +1892,104 @@ function matchArchived(a, q){
 #                     closures defined later; JS hoisting + call-time resolution makes this safe,
 #                     and the node test stubs them to assert the composed question hits submit.)
 _ACTIONS_JS = r"""
+// clawgate's task vocabulary is exactly {open, in_progress, ready_for_review, complete}
+// (clawgate internal/notes/notes.go). Rendered raw, the snake_case ones read like an internal
+// enum leaking into the UI, so they get a human label; anything unknown is de-underscored
+// rather than hidden, so a renamed status still shows the truth.
+var TASK_STATUS_LABELS = {
+  open: 'open', in_progress: 'in progress',
+  ready_for_review: 'ready for review', complete: 'complete'
+};
+function taskStatusLabel(s){
+  s = String(s == null ? '' : s);
+  if(!s) return 'unknown';
+  return TASK_STATUS_LABELS[s] || s.replace(/_/g, ' ');
+}
+// 🟡 OPTIMISTIC DISPATCH COUNT. The server-side `open_task_count` rides tasks.py's 30s cache
+// + the provider's 5s TTL + the board's 30s refetch, so after a successful dispatch the truth
+// can take ~a minute to come back — and during that window a second tap would be UNGUARDED,
+// i.e. exactly the silent duplicate this feature exists to prevent. So the client remembers
+// its OWN dispatches and folds them in with Math.max: the guard arms on the very next render,
+// and the overlay can only ever ADD guarding, never remove it. Bounded by OPTIMISTIC_TTL_MS so
+// a task completed shortly after doesn't keep a card guarded indefinitely.
+var OPTIMISTIC_TTL_MS = 120000;
+var optimisticDispatch = {};
+function optimisticKey(v){ return ((v && v.repo) || '') + '\u0000' + ((v && v.slug) || ''); }
+function nowMillis(nowMs){
+  return (typeof nowMs === 'number') ? nowMs
+       : ((typeof Date !== 'undefined' && Date.now) ? Date.now() : 0);
+}
+function optimisticCount(v, nowMs){
+  var k = optimisticKey(v);
+  var e = optimisticDispatch[k];
+  if(!e) return 0;
+  if((nowMillis(nowMs) - e.ts) >= OPTIMISTIC_TTL_MS){ delete optimisticDispatch[k]; return 0; }
+  return e.n;
+}
+function noteDispatched(v, nowMs){
+  // Called ONLY after clawgate confirms a created task id (see dispatchNextStep).
+  var t = nowMillis(nowMs);
+  optimisticDispatch[optimisticKey(v)] = {n: openTaskCount(v, t) + 1, ts: t};
+}
+function openTaskCount(v, nowMs){
+  var n = v && v.open_task_count;
+  n = (typeof n === 'number' && n > 0) ? n : 0;      // absent/0/garbage → unguarded
+  var o = optimisticCount(v, nowMs);
+  return o > n ? o : n;
+}
+function dispatchGuard(v, nowMs){
+  var n = openTaskCount(v, nowMs);
+  if(!n) return '';                                   // no linked open task → today's behaviour
+  return 'already has ' + n + ' open task' + (n === 1 ? '' : 's') + ' — dispatch anyway?';
+}
+function guardArmedLabel(label){
+  // 🟡 LAYOUT. The armed label REPLACES the button's text in place, so a long one reflows the
+  // whole action row: the full guard sentence measured 97px → 332px at 1280 and 97px → 222px
+  // at 390 (57% of the viewport — it wrapped to two lines and pushed ⤓ archive around). The
+  // board's established two-tap grammar is a short verb + '?' ('drop?', 'archive?'), so the
+  // armed state follows it. The full reason lives in btn.title, and the tasks themselves are
+  // listed in the expanded card detail.
+  var verb = String(label == null ? '' : label).replace(/^[^A-Za-z]+/, '') || 'dispatch';
+  return verb + ' anyway?';
+}
+function linkedTasksHint(v){
+  // A compact "#92 open · #77 in progress" line for the guarded button's title attribute.
+  var ts = (v && v.linked_tasks) || [];
+  var parts = [];
+  for(var i = 0; i < ts.length; i++){
+    var t = ts[i] || {};
+    if(!t.open) continue;                             // only the tasks that actually block
+    parts.push('#' + (t.id == null ? '?' : t.id) + ' ' + taskStatusLabel(t.status));
+  }
+  return parts.join(' · ');
+}
+function dispatchAction(v, label, nowMs){
+  var a = {kind:'dispatch', label:label};
+  var g = dispatchGuard(v, nowMs);
+  if(g){                                              // present ONLY when the guard should arm
+    a.guard = g;                                      // the FULL reason → btn.title
+    a.guardLabel = guardArmedLabel(label);            // the SHORT armed label → btn text
+  }
+  return a;
+}
 function cardActions(v){
   var st = (v && v.state) || 'active';
   var hasRec = !!(v && v.recommended_next_step && v.recommended_next_step.text);
   if(st === 'needs_you'){
     var a = [{kind:'resolve'}];
-    if(hasRec) a.push({kind:'dispatch', label:'⤴ dispatch'});
+    if(hasRec) a.push(dispatchAction(v, '⤴ dispatch'));
     a.push({kind:'done'});
     return a;
   }
   if(dropEligible(v)){                     // stalled or slowing (cooling)
     var b = [];
-    if(hasRec) b.push({kind:'dispatch', label:'⤴ resume'});
+    if(hasRec) b.push(dispatchAction(v, '⤴ resume'));
     b.push({kind:'drop'});
     b.push({kind:'done'});
     return b;
   }
   var c = [];                              // active (and any legacy/unknown state)
-  if(hasRec) c.push({kind:'dispatch', label:'⤴ dispatch'});
+  if(hasRec) c.push(dispatchAction(v, '⤴ dispatch'));
   c.push({kind:'done'});
   return c;
 }
@@ -2389,6 +2579,12 @@ _JS = r"""
     }).then(function(r){ return r.json().then(function(j){ return {ok: r.ok, j: j}; }); })
       .then(function(res){
         if(res.ok && res.j && res.j.ok){
+          // 🟡 GUARD THE NEXT TAP IMMEDIATELY. The server's open_task_count won't reflect this
+          // new task for up to ~a minute (tasks.py's 30s cache + the 5s provider TTL + the 30s
+          // board refetch), so record it client-side: the next render of this card arms the
+          // duplicate-dispatch guard even though the server still says 0. Only ever ADDS
+          // guarding (openTaskCount takes the max), and only after a confirmed task id.
+          noteDispatched(v);
           dstat.className = 'dispatch-status ok';
           dstat.textContent = 'task #' + res.j.task_id +
             ' created — tap Dispatch in clawgate to run';
@@ -2539,6 +2735,39 @@ _JS = r"""
           (p.number != null ? ('#' + p.number + ' ') : '') + (p.title || '')));
       });
       det.appendChild(ul3);
+    }
+    // LINKED CLAWGATE TASKS — the consumer side of repo-cos's `initiative:<slug>` tags. Lives
+    // ONLY here in the expanded detail (the collapsed card is deliberately two-line and tuned
+    // for scanning, so it gets no chip). One row per task: its status + title, the whole row
+    // an <a> to the task's card in clawgate (the card click handler already ignores clicks on
+    // an anchor, so following the link never toggles the expand). Empty/absent (clawgate down,
+    // no tags) → the section simply isn't rendered, i.e. exactly today's detail.
+    var lts = d.linked_tasks || (v && v.linked_tasks) || [];
+    if(lts.length){
+      det.appendChild(el('div', 'detail-h',
+        lts.length > 1 ? 'Linked clawgate tasks' : 'Linked clawgate task'));
+      var ult = el('ul', 'detail-list linked-tasks');
+      lts.forEach(function(t){
+        t = t || {};
+        var li = el('li', t.open ? 'linked-task open' : 'linked-task');
+        // Humanized pill ('in progress', not the raw `in_progress` enum); the raw value stays
+        // reachable in the title for anyone matching it against clawgate.
+        var pill = el('span', 'lt-status', taskStatusLabel(t.status));
+        if(t.status) pill.title = t.status;
+        li.appendChild(pill);
+        var label = (t.id != null ? ('#' + t.id + ' ') : '') + (t.title || '(untitled task)');
+        if(t.url){
+          var a = el('a', 'lt-link', label);
+          a.href = t.url;
+          a.target = '_blank';
+          a.rel = 'noopener noreferrer';
+          li.appendChild(a);
+        } else {
+          li.appendChild(document.createTextNode(label));
+        }
+        ult.appendChild(li);
+      });
+      det.appendChild(ult);
     }
     if(d.current_doc){
       det.appendChild(el('div', 'detail-doc',
@@ -2732,10 +2961,25 @@ _JS = r"""
         var btn = el('button', 'dispatch-btn', a.label);
         btn.title = rec.text + (basisHint(rec.basis) ? '  (' + basisHint(rec.basis) + ')' : '');
         var dstat = el('span', 'dispatch-status');
-        btn.addEventListener('click', function(ev){
-          ev.stopPropagation();  // don't toggle the card expand
-          dispatchNextStep(v, btn, dstat);
-        });
+        if(a.guard){
+          // GUARDED: this initiative already has open clawgate Task(s) tagged
+          // `initiative:<slug>`, so dispatching again would silently mint a duplicate card.
+          // Surface it in the EXISTING two-tap grammar (same armConfirm as drop / ⤓ archive):
+          // the first tap relabels the button to the reason, a second within ~3s dispatches
+          // anyway, blur/timeout disarms. The action itself is dispatchNextStep, VERBATIM.
+          // The ARMED text is the short `guardLabel` ('dispatch anyway?') — the board's
+          // two-tap grammar — so arming doesn't reflow the action row; the full reason + the
+          // blocking task ids stay in the tooltip, and the tasks themselves in the detail.
+          btn.classList.add('guarded');
+          btn.title = a.guard + '  ·  ' + linkedTasksHint(v);
+          armConfirm(btn, {armedLabel: a.guardLabel || a.guard, restLabel: a.label,
+            onConfirm: function(){ dispatchNextStep(v, btn, dstat); }});
+        } else {
+          btn.addEventListener('click', function(ev){
+            ev.stopPropagation();  // don't toggle the card expand
+            dispatchNextStep(v, btn, dstat);
+          });
+        }
         drow.appendChild(btn);
         drow.appendChild(dstat);
       } else if(a.kind === 'done'){
@@ -3731,11 +3975,13 @@ class DataProvider:
 
     def __init__(self, ttl: float = CACHE_TTL_SECONDS,
                  loader=load_latest, tmux=attach_tmux,
-                 now_fn=lambda: datetime.now(timezone.utc)):
+                 now_fn=lambda: datetime.now(timezone.utc),
+                 linked_tasks=load_linked_tasks):
         self._ttl = ttl
         self._loader = loader
         self._tmux = tmux
         self._now = now_fn
+        self._linked_tasks = linked_tasks
         self._lock = threading.Lock()
         self._cached: tuple[dict | None, str | None] | None = None
         self._fetched_at = 0.0
@@ -3745,10 +3991,45 @@ class DataProvider:
             self._cached = None
             self._fetched_at = 0.0
 
+    def _fresh(self) -> tuple[dict | None, str | None] | None:
+        """The cached result if it's still inside the TTL, else None. Caller holds `_lock`."""
+        if self._cached is not None and (time.monotonic() - self._fetched_at) < self._ttl:
+            return self._cached
+        return None
+
+    def _linked(self) -> dict:
+        """The clawgate linked-task map, in its OWN guard. The join is ADDITIVE decoration, so
+        a clawgate outage must degrade to `{}`/the last good map (today's board) and never
+        reach the build's `except`, which would render the error page instead.
+        `load_linked_tasks` already swallows everything; this second belt catches an injected
+        fetcher that raises."""
+        try:
+            return self._linked_tasks() if self._linked_tasks else {}
+        except Exception as exc:  # noqa: BLE001 - never fail a render on clawgate
+            sys.stderr.write(
+                f"viewer: linked-task read failed: {type(exc).__name__}: {exc}\n")
+            return {}
+
     def snapshot(self) -> tuple[dict | None, str | None]:
         with self._lock:
-            if self._cached is not None and (time.monotonic() - self._fetched_at) < self._ttl:
-                return self._cached
+            fresh = self._fresh()
+            if fresh is not None:
+                return fresh
+
+        # 🔴 THE CLAWGATE READ HAPPENS OUTSIDE `_lock` — ON PURPOSE, and it must stay that way.
+        # `/`, `/api/initiatives.json`, `/api/initiative` and `/api/ask` all funnel through
+        # `snapshot()`; when this read lived inside the lock, a hung clawgate serialized every
+        # one of them behind it. Out here, a slow read delays only the rebuild, and any request
+        # that finds a fresh cache (the check above) returns instantly regardless. `tasks.py`
+        # supplies the other half of the contract: a hard wall-clock deadline, its own 30s TTL
+        # and single-flight, so concurrent rebuilds don't multiply the clawgate load either.
+        linked = self._linked()
+
+        with self._lock:
+            # Re-check: another thread may have rebuilt while we were off talking to clawgate.
+            fresh = self._fresh()
+            if fresh is not None:
+                return fresh
             try:
                 loaded = self._loader()
                 # load_latest returns `(rows, archived)`; a legacy/injected loader may return
@@ -3761,7 +4042,8 @@ class DataProvider:
                 # matched no initiative (build_model coerces a non-list to [] → no section).
                 unmatched = self._tmux(rows)
                 result: tuple[dict | None, str | None] = (
-                    build_model(rows, self._now(), unmatched=unmatched, archived=archived),
+                    build_model(rows, self._now(), unmatched=unmatched, archived=archived,
+                                linked_tasks=linked),
                     None)
             except Exception as exc:  # noqa: BLE001 - any read failure → graceful error page
                 result = (None, f"{type(exc).__name__}: {exc}")
