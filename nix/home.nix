@@ -403,6 +403,19 @@ in
     recursive = true;
     force = true;
   };
+  # bash-guard — MANAGED (was per-host/unmanaged, so the deterministic
+  # enforcement of the 🔴 Git Workflow rules in RULES.md DRIFTED between hosts:
+  # workbench had 6 checks, the laptop a Jun-23 copy with 4). Edit
+  # devrc/scripts/claude-hooks/ then switch. `force = true` is REQUIRED: both
+  # hosts currently have this path as a hand-placed regular file, which would
+  # otherwise abort the switch in checkLinkTargets (cf. dropStaleClaudeNotify
+  # below, the same collision for claude-notify.py). Registration in
+  # ~/.claude/settings.json stays per-host and needs no change — it already
+  # invokes `python3 ~/.claude/hooks/bash-guard.py`, which this symlink backs.
+  home.file.".claude/hooks/bash-guard.py" = {
+    source = ../scripts/claude-hooks/bash-guard.py;
+    force = true;
+  };
   # `browser` skill — the DELIBERATE EXCEPTION to the store-symlink pattern above.
   # Its source of truth is the browser-bridge subsystem in THIS repo
   # (scripts/browser-bridge/{SKILL.md,browser}), NOT devrc/claude/skills/. So rather
@@ -418,7 +431,8 @@ in
   home.file.".claude/skills/browser/browser".source =
     config.lib.file.mkOutOfStoreSymlink "${workspace}/devrc/scripts/browser-bridge/browser";
   # Claude Code hooks managed here (the script only — the settings.json
-  # registration is per-host/unmanaged, like bash-guard.py). audit-pr-nudge fires
+  # registration is per-host/unmanaged, as for bash-guard.py above, whose script
+  # is likewise managed now). audit-pr-nudge fires
   # PostToolUse on `gh pr create` and injects context so Claude reflexively offers
   # `/audit-pr` (transcript audit: that request was hand-typed ≥14x while the skill
   # sat unused). Registered as `python3 ~/.claude/hooks/audit-pr-nudge.py`.
