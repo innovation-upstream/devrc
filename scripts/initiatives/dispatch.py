@@ -17,6 +17,7 @@ stdlib urllib, NEVER raises, returns the task id | None), adapted to an initiati
                                 no raw json dump).
   * `resolve_repo_fullname(repo_path)` → the view's `repo` IS an absolute local path, so read
                                 `git remote get-url origin` on it → GitHub `owner/name` | "".
+  * `build_tags(view)`        → `["initiative:<slug>"]` for the card being dispatched, or [].
   * `post_task(directory, body, ...)` → POST {API}/api/tasks (Bearer) → task id | None.
   * `dispatch_initiative(view)` → the convenience orchestrator the viewer endpoint calls:
                                 compute rec+title+body+repo, post, return {ok, task_id, error}.
@@ -28,6 +29,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import re
 import subprocess
 import sys
 import urllib.error
@@ -37,6 +39,27 @@ from pathlib import Path
 CLAWGATE_ENV = Path("~/.claude/clawgate.env").expanduser()
 POST_TIMEOUT = 15  # seconds — a hung clawgate must not stall the dispatch request
 TITLE_MAX = 80
+
+# ---- clawgate task-tag grammar (clawgate 0.7.75+, claudedocs/clawgate-task-tags-spec.md §3)
+# lowercase; charset [a-z0-9._/-]; at most ONE ':' separating namespace:value; <=64 runes per
+# tag; <=20 tags per task. A tag that violates the grammar 400s the WHOLE request, so it is
+# enforced client-side and anything that can't be made valid is DROPPED.
+#
+# 🔴 SOURCE OF TRUTH: `scripts/repo-cos/clawgate.py` (`normalize_tag`/`normalize_tags`), the
+# OTHER producer of `initiative:` tags. This is a DELIBERATE duplication, not an oversight:
+# importing across script dirs would make the board's dispatch path depend on repo-cos being
+# present in the same tree (they ship as independent script sets, and repo-cos/clawgate.py
+# lazily pulls in `routing`/`scan`), and a missing sibling would silently downgrade every
+# dispatch to untagged — the exact failure this feature exists to fix. ~30 lines of pure regex
+# is the cheaper coupling. If the grammar ever changes, change BOTH; the shared contract is
+# pinned by tests on both sides.
+TAG_MAX_LEN = 64
+TAG_MAX_COUNT = 20
+_TAG_BODY_RE = re.compile(r"^[a-z0-9._/-]+$")
+_WS_RE = re.compile(r"\s+")
+
+# The reserved namespace both producers write, and the key `tasks.py` joins on.
+INITIATIVE_TAG_PREFIX = "initiative:"
 
 # The pure recommendation deriver, loaded by explicit importlib path (the package's sibling
 # cross-load convention — NOT sys.path, whose mail-actions/llm.py would shadow). Lazy so a
@@ -267,6 +290,89 @@ def build_task_body(view: dict, recommendation: dict | None) -> str:
     return "\n".join(out)
 
 
+# ---- task tags -----------------------------------------------------------------------
+
+def normalize_tag(tag) -> str | None:
+    """Normalize ONE tag to clawgate's grammar, or None if it can't be made valid.
+
+    lowercase → trim → collapse internal whitespace to `-`, then validate: at most one `:`
+    (namespace separator), each side non-empty and drawn from `[a-z0-9._/-]`, whole tag <=64
+    runes. Anything else is DROPPED, never mangled. Mirrors `repo-cos/clawgate.normalize_tag`
+    (see the SOURCE OF TRUTH note at the top of this module)."""
+    try:
+        t = _WS_RE.sub("-", str(tag or "").strip().lower()).strip("-")
+    except Exception:  # noqa: BLE001
+        return None
+    if not t:
+        return None
+    if len(t) > TAG_MAX_LEN:
+        _log(f"dropping tag {t!r} — {len(t)} runes exceeds the {TAG_MAX_LEN}-rune cap")
+        return None
+    parts = t.split(":")
+    if len(parts) > 2:
+        _log(f"dropping tag {t!r} — more than one ':' (namespace:value only)")
+        return None
+    for part in parts:
+        if not part or not _TAG_BODY_RE.match(part):
+            _log(f"dropping tag {t!r} — not [a-z0-9._/-]")
+            return None
+    return t
+
+
+def normalize_tags(tags) -> list[str]:
+    """Normalize a tag list: drop the invalid, de-duplicate, sort, cap at 20. Never raises.
+    Sorted so the payload is deterministic (stable tests, stable clawgate render)."""
+    out: set[str] = set()
+    for raw in tags or []:
+        t = normalize_tag(raw)
+        if t:
+            out.add(t)
+    clean = sorted(out)
+    if len(clean) > TAG_MAX_COUNT:
+        _log(f"capping {len(clean)} tags to the first {TAG_MAX_COUNT}")
+        clean = clean[:TAG_MAX_COUNT]
+    return clean
+
+
+def build_tags(view: dict) -> list[str]:
+    """The clawgate task tags for the initiative being dispatched — at most one
+    `initiative:<slug>`. Never raises; `[]` on any doubt.
+
+    🔴 EXACT-OR-NOTHING. `tasks.py` joins a tag to a card by EXACT slug equality, so a
+    normalized-but-rewritten slug (`Foo Bar` → `foo-bar`) would produce a tag that joins to
+    NOTHING while looking like it worked — strictly worse than no tag, because it also arms
+    no guard and gives a false "this is linked" signal in the queue. So the slug is put
+    through the grammar and the result is only emitted when it comes back BYTE-IDENTICAL.
+    That is the same guarantee repo-cos gives ("the verbatim ledger slug or nothing"), stated
+    as an explicit equality check rather than relying on ledger slugs happening to be
+    already-normalized.
+
+    FAIL-OPEN is mandatory: a tag problem must never fail a dispatch. Every path here returns
+    a list — an untaggable slug returns `[]` and the Task is posted UNTAGGED (`post_task` adds
+    a second backstop: a tagged 400 retries once without tags).
+
+    NOTE: repo-cos additionally filters through `routing.taggable_slug` (a denylist for
+    document/date/id/filler slugs). That is right THERE — its slug comes from a fuzzy router
+    match and may be junk — and wrong HERE: this slug IS the ledger key of the card Zach just
+    tapped, so a denylist could only ever drop a tag for a real initiative."""
+    try:
+        slug = str((view or {}).get("slug") or "").strip()
+        if not slug:
+            _log("view has no slug — posting untagged")
+            return []
+        want = f"{INITIATIVE_TAG_PREFIX}{slug}"
+        got = normalize_tag(want)
+        if got != want:
+            # Either invalid (None) or rewritten. Both would join to nothing → emit nothing.
+            _log(f"slug {slug!r} cannot be tagged verbatim (would become {got!r}) — "
+                 "posting untagged rather than emitting a tag that joins to nothing")
+            return []
+        return [got]
+    except Exception as exc:  # noqa: BLE001 - a tag must NEVER cost a dispatch
+        _log(f"build_tags failed (posting untagged): {exc}")
+        return []
+
+
 # ---- HTTP post ---------------------------------------------------------------------
 
 def _post(url: str, payload: dict, token: str, *, timeout: int = POST_TIMEOUT) -> str:
@@ -282,14 +388,24 @@ def _post(url: str, payload: dict, token: str, *, timeout: int = POST_TIMEOUT) -
 
 
 def post_task(directory: str, body: str, *, repo: str = "", model: str = "",
-              creds: dict | None = None, _post=_post) -> int | None:
+              tags=None, creds: dict | None = None, _post=_post) -> int | None:
     """POST a Task to clawgate's `/api/tasks`. Returns the created task id (int) on success,
     else None. BEST-EFFORT: any error (no creds, unreachable, non-JSON, no id) is logged and
     yields None — NEVER raises. `creds`/`_post` are injectable for tests (no real network).
 
-    `repo` (a GitHub `owner/name`) and `model` pre-fill the Task's dispatch config; each is
-    added to the payload ONLY when non-empty, so a bare call sends exactly {"directory",
-    "body"}. OMITTING `model` → clawgate applies its own default (deepseek), which is correct."""
+    `repo` (a GitHub `owner/name`) and `model` pre-fill the Task's dispatch config; `tags`
+    (clawgate 0.7.75+) is the routing-key list that `tasks.py` joins back to the board. Each
+    is added to the payload ONLY when non-empty, so a bare call still sends exactly
+    {"directory", "body"} (backward-compatible). OMITTING `model` → clawgate applies its own
+    default (deepseek), which is correct.
+
+    🔴 TAGGING MUST NEVER COST A DISPATCH. Two defences, mirroring repo-cos: (1)
+    `normalize_tags` drops anything that can't satisfy clawgate's grammar before it reaches
+    the wire; (2) if a TAGGED post still fails with HTTP 400, retry EXACTLY ONCE with `tags`
+    removed — a tagged-post failure degrades to an untagged Task, never to no Task. The retry
+    is scoped to 400 alone because 400 is the ONLY grammar-rejection code (tag spec §6);
+    401/403/404/429 are not tag problems and would just burn a doomed call, and 408 is the one
+    shape where retrying could double-POST (the origin may already have created the Task)."""
     c = creds if creds is not None else load_creds()
     api = (c.get("CLAWGATE_API_URL") or "").rstrip("/")
     token = c.get("CLAWGATE_HOOK_TOKEN") or ""
@@ -303,11 +419,25 @@ def post_task(directory: str, body: str, *, repo: str = "", model: str = "",
         payload["repo"] = repo
     if model:
         payload["model"] = model
+    clean_tags = normalize_tags(tags)
+    if clean_tags:
+        payload["tags"] = clean_tags
     try:
         raw = _post(url, payload, token)
     except urllib.error.HTTPError as exc:  # noqa: PERF203
         _log(f"POST {url} failed: HTTP {exc.code} {exc.reason}")
-        return None
+        if not (clean_tags and exc.code == 400):
+            return None
+        _log(f"retrying ONCE without tags {clean_tags} — a tag must never cost a dispatch")
+        untagged = {k: v for k, v in payload.items() if k != "tags"}
+        try:
+            raw = _post(url, untagged, token)
+        except urllib.error.HTTPError as exc2:
+            _log(f"untagged retry also failed: HTTP {exc2.code} {exc2.reason}")
+            return None
+        except Exception as exc2:  # noqa: BLE001
+            _log(f"untagged retry also failed: {exc2}")
+            return None
     except Exception as exc:  # noqa: BLE001
         _log(f"POST {url} failed: {exc}")
         return None
@@ -329,8 +459,16 @@ def post_task(directory: str, body: str, *, repo: str = "", model: str = "",
 def dispatch_initiative(view: dict, *, creds=None, poster=None) -> dict:
     """Create a clawgate Task for one initiative view's grounded next step. Convenience over
     the pieces above: derive the recommendation (nextstep), build the title + body, resolve
-    the repo, and POST. `poster(directory, body, *, repo, creds) -> id|None` is injectable
-    (defaults to `post_task`) so tests never hit the network.
+    the repo, TAG it `initiative:<slug>`, and POST.
+    `poster(directory, body, *, repo, tags, creds) -> id|None` is injectable (defaults to
+    `post_task`) so tests never hit the network.
+
+    The TAG is what closes the loop: `tasks.py` joins `initiative:<slug>` back to this card,
+    so the Task this call creates shows up in the card's detail and ARMS the duplicate-dispatch
+    guard on the next render. Without it the board's own dispatch was the one producer whose
+    tasks never joined — i.e. tapping ⤴ dispatch twice, the exact duplicate the guard exists
+    to prevent, was silent. Tagging is FAIL-OPEN end to end (`build_tags` → [] on any doubt,
+    `post_task` retries untagged on a 400): a tag problem never costs the dispatch.
 
     Returns `{"ok": bool, "task_id": int|None, "error": str|None}`. NEVER raises — any failure
     (no grounded recommendation, creds missing, clawgate unreachable) is reported in the dict.
@@ -347,9 +485,10 @@ def dispatch_initiative(view: dict, *, creds=None, poster=None) -> dict:
         directory = build_task_title(v)
         body = build_task_body(v, recommendation)
         repo = resolve_repo_fullname(v.get("repo") or "")
+        tags = build_tags(v)
 
         post = poster if poster is not None else post_task
-        task_id = post(directory, body, repo=repo, creds=creds)
+        task_id = post(directory, body, repo=repo, tags=tags, creds=creds)
         if not isinstance(task_id, int) or isinstance(task_id, bool):
             return {"ok": False, "task_id": None,
                     "error": "clawgate did not return a task id (unreachable or no creds)"}

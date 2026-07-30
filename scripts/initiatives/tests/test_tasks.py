@@ -168,8 +168,8 @@ def test_open_task_count_counts_only_live_work():
 
 # --- fetch: the degradation matrix ----------------------------------------- #
 def _getter(body):
-    def get(url, token, *, timeout=None):
-        get.calls.append((url, token, timeout))
+    def get(url, token, *, deadline=None):
+        get.calls.append((url, token, deadline))
         return body
     get.calls = []
     return get
@@ -179,10 +179,11 @@ def test_fetch_tasks_happy_path_hits_api_tasks_with_the_bearer_token():
     get = _getter(json.dumps([_task(1, ["initiative:a"])]))
     got = tasks.fetch_tasks(creds=CREDS, env={}, getter=get)
     assert [t["id"] for t in got] == [1]
-    url, token, timeout = get.calls[0]
+    url, token, deadline = get.calls[0]
     assert url == "http://cg.test:30302/api/tasks"
     assert token == "tok"
-    assert timeout == tasks.FETCH_TIMEOUT and tasks.FETCH_TIMEOUT <= 5   # SHORT, on the render path
+    # SHORT wall-clock deadline — this is a decoration on the render path, not core data
+    assert deadline == tasks.FETCH_DEADLINE and tasks.FETCH_DEADLINE <= 5
 
 
 def test_fetch_tasks_missing_creds_yields_empty_without_calling_out(capsys):
@@ -193,13 +194,13 @@ def test_fetch_tasks_missing_creds_yields_empty_without_calling_out(capsys):
 
 
 def test_fetch_tasks_connection_error_yields_empty():
-    def boom(url, token, *, timeout=None):
+    def boom(url, token, *, deadline=None):
         raise OSError("Connection refused")
     assert tasks.fetch_tasks(creds=CREDS, env={}, getter=boom) == []
 
 
 def test_fetch_tasks_non_200_yields_empty():
-    def http_err(url, token, *, timeout=None):
+    def http_err(url, token, *, deadline=None):
         raise urllib.error.HTTPError(url, 503, "Service Unavailable", {}, None)
     assert tasks.fetch_tasks(creds=CREDS, env={}, getter=http_err) == []
 
@@ -219,7 +220,7 @@ def test_fetch_tasks_skips_non_dict_entries():
 def test_linked_tasks_map_fetches_once_then_groups():
     calls = []
 
-    def fetch(*, creds=None, env=None, timeout=None):
+    def fetch(*, creds=None, env=None, deadline=None):
         calls.append(creds)
         return [_task(1, ["initiative:alpha"]), _task(2, ["initiative:alpha"]), _task(3)]
 
@@ -231,7 +232,7 @@ def test_linked_tasks_map_fetches_once_then_groups():
 
 
 def test_linked_tasks_map_returns_empty_map_on_any_failure():
-    def boom(*, creds=None, env=None, timeout=None):
+    def boom(*, creds=None, env=None, deadline=None):
         raise RuntimeError("clawgate exploded")
     assert tasks.linked_tasks_map(creds=CREDS, env={}, fetcher=boom) == {}
     # …and a fetcher that merely returns nothing (unreachable clawgate) is an empty map too
@@ -244,3 +245,295 @@ def test_linked_tasks_map_no_tags_field_anywhere_is_an_empty_map():
     assert tasks.linked_tasks_map(
         creds=CREDS, env={},
         fetcher=lambda **kw: [_task(1), _task(2), _task(3)]) == {}
+
+
+# --- ok flag: a FAILED read is distinguishable from an empty queue ----------- #
+def test_fetch_tasks_result_separates_failure_from_an_empty_queue():
+    # clawgate answered with an empty queue → SUCCESS (nothing to serve stale).
+    assert tasks.fetch_tasks_result(creds=CREDS, env={}, getter=_getter("[]")) == (True, [])
+    # every failure shape is ok=False — which is what lets the cache serve the last good map.
+    def boom(url, token, *, deadline=None):
+        raise OSError("Connection refused")
+    assert tasks.fetch_tasks_result(creds=CREDS, env={}, getter=boom) == (False, [])
+    assert tasks.fetch_tasks_result(creds=CREDS, env={}, getter=_getter("{not json")) == (False, [])
+    assert tasks.fetch_tasks_result(creds={}, env={}, getter=_getter("[]")) == (False, [])
+
+
+# --- 🔴 THE WALL-CLOCK DEADLINE, against REAL sockets ------------------------ #
+# The bug this replaces shipped because the only latency test was "connection refused is
+# fast" (+0.010s). A refused connection exercises NONE of the failure modes that matter:
+# `urlopen(timeout=)` is per-socket-OPERATION, so a peer that accepts and never replies cost
+# the full timeout on EVERY render (+4.005s on a 0.80s baseline), and a peer that dribbles a
+# byte just inside the timeout was UNBOUNDED (+130s measured — and it still succeeded).
+# These two tests stand up real sockets that behave exactly that way.
+def _serve(handler):
+    """Start a one-connection TCP server on an ephemeral port; returns (url, stop)."""
+    import socket, threading
+    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(4)
+    port = srv.getsockname()[1]
+    stop = threading.Event()
+
+    def loop():
+        srv.settimeout(0.25)
+        while not stop.is_set():
+            try:
+                conn, _ = srv.accept()
+            except OSError:
+                continue
+            threading.Thread(target=handler, args=(conn, stop), daemon=True).start()
+        try:
+            srv.close()
+        except OSError:
+            pass
+
+    th = threading.Thread(target=loop, daemon=True)
+    th.start()
+    return f"http://127.0.0.1:{port}", stop.set
+
+
+def _blackhole(conn, stop):
+    """Accept the connection, read the request, and then say NOTHING, ever."""
+    try:
+        conn.recv(4096)
+        while not stop.is_set():
+            stop.wait(0.1)
+    finally:
+        try:
+            conn.close()
+        except OSError:
+            pass
+
+
+def _slow_drip(conn, stop):
+    """Reply one byte at a time, slowly — each individual send is well inside any per-socket
+    timeout, so this is the shape that defeated `urlopen(timeout=)` entirely."""
+    try:
+        conn.recv(4096)
+        body = json.dumps([_task(1, ["initiative:alpha"])])
+        raw = (f"HTTP/1.1 200 OK\r\nContent-Length: {len(body)}\r\n"
+               f"Content-Type: application/json\r\n\r\n{body}").encode()
+        for byte in raw:
+            if stop.is_set():
+                return
+            try:
+                conn.sendall(bytes([byte]))
+            except OSError:
+                return
+            stop.wait(0.25)          # 1 byte / 250ms — always inside the socket timeout
+    finally:
+        try:
+            conn.close()
+        except OSError:
+            pass
+
+
+def _timed_fetch(url, *, deadline):
+    import time
+    creds = {"CLAWGATE_API_URL": url, "CLAWGATE_HOOK_TOKEN": "tok"}
+    t0 = time.monotonic()
+    got = tasks.fetch_tasks(creds=creds, env={}, deadline=deadline)
+    return got, time.monotonic() - t0
+
+
+def test_blackholed_clawgate_costs_at_most_the_deadline():
+    url, stop = _serve(_blackhole)
+    try:
+        got, elapsed = _timed_fetch(url, deadline=1.0)
+    finally:
+        stop()
+    assert got == []                        # degrades to "no linked tasks"
+    assert elapsed < 2.0, f"blackhole added {elapsed:.3f}s for a 1.0s deadline"
+
+
+def test_slow_drip_clawgate_costs_at_most_the_deadline():
+    # 1 byte / 250ms over a ~120-byte response is ~30s of dribble; every individual read is
+    # inside the socket timeout, so ONLY a wall-clock deadline can bound this.
+    url, stop = _serve(_slow_drip)
+    try:
+        got, elapsed = _timed_fetch(url, deadline=1.0)
+    finally:
+        stop()
+    assert got == []
+    assert elapsed < 2.0, f"slow-drip added {elapsed:.3f}s for a 1.0s deadline"
+
+
+def test_run_with_deadline_bounds_any_callable_and_reraises():
+    import time
+    t0 = time.monotonic()
+    try:
+        tasks._run_with_deadline(lambda: time.sleep(30), 0.3)
+    except TimeoutError:
+        pass
+    else:
+        raise AssertionError("a 30s callable must not satisfy a 0.3s deadline")
+    assert time.monotonic() - t0 < 1.5
+    # a fast callable returns its value; a raising one re-raises verbatim
+    assert tasks._run_with_deadline(lambda: 42, 5) == 42
+    try:
+        tasks._run_with_deadline(lambda: (_ for _ in ()).throw(ValueError("nope")), 5)
+    except ValueError as exc:
+        assert "nope" in str(exc)
+    else:
+        raise AssertionError("the worker's exception must reach the caller")
+
+
+# --- response SIZE CAP ------------------------------------------------------- #
+def test_oversized_response_is_refused_rather_than_buffered():
+    # `Notes.List` has no LIMIT and rows carry full task bodies, so the payload grows with
+    # retained history. A body past the cap is a failed read, not an unbounded read.
+    huge = "[" + ",".join('{"id": %d}' % i for i in range(4000)) + "]"
+    assert len(huge) > 1000
+
+    def big(url, token, *, deadline=None):
+        raise OSError(f"response exceeded the {tasks.MAX_RESPONSE_BYTES}-byte cap")
+
+    assert tasks.fetch_tasks_result(creds=CREDS, env={}, getter=big) == (False, [])
+    assert tasks.MAX_RESPONSE_BYTES <= (4 << 20)     # bounded, not "some big number"
+
+
+def test_real_get_caps_the_response_body():
+    def flood(conn, stop):
+        try:
+            conn.recv(4096)
+            conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n")
+            blob = b"x" * 65536
+            while not stop.is_set():
+                try:
+                    conn.sendall(blob)
+                except OSError:
+                    return
+        finally:
+            try:
+                conn.close()
+            except OSError:
+                pass
+
+    url, stop = _serve(flood)
+    try:
+        try:
+            tasks._get(f"{url}/api/tasks", "tok", deadline=5, max_bytes=4096)
+        except OSError as exc:
+            assert "cap" in str(exc)
+        else:
+            raise AssertionError("an unbounded body must not be buffered whole")
+    finally:
+        stop()
+
+
+# --- the linked-task CACHE: TTL, serve-stale, single-flight ------------------ #
+class _Clock:
+    def __init__(self):
+        self.t = 1000.0
+
+    def __call__(self):
+        return self.t
+
+
+def test_cache_serves_within_its_ttl_without_refetching():
+    clock = _Clock()
+    cache = tasks.LinkedTaskCache(ttl=30.0, now=clock)
+    calls = []
+
+    def loader():
+        calls.append(1)
+        return True, {"alpha": [{"id": 1}]}
+
+    assert cache.get(loader) == {"alpha": [{"id": 1}]}
+    clock.t += 29.0
+    assert cache.get(loader) == {"alpha": [{"id": 1}]}
+    assert len(calls) == 1                    # still inside the TTL → no second clawgate read
+    clock.t += 2.0
+    cache.get(loader)
+    assert len(calls) == 2                    # past it → exactly one refresh
+
+
+def test_cache_serves_the_LAST_GOOD_map_when_a_refresh_fails(capsys):
+    # 🔴 the whole point: a transient blip must not make linked tasks — and with them the
+    # dispatch guard — flicker away. A failure keeps the previous map.
+    clock = _Clock()
+    cache = tasks.LinkedTaskCache(ttl=10.0, now=clock)
+    good = {"alpha": [{"id": 1, "open": True}]}
+    state = {"ok": True}
+
+    def loader():
+        return (True, good) if state["ok"] else (False, {})
+
+    assert cache.get(loader) == good
+    state["ok"] = False
+    clock.t += 11.0
+    assert cache.get(loader) == good          # STALE, not empty
+    assert "stale" in capsys.readouterr().err
+    # and it recovers when clawgate does
+    state["ok"] = True
+    clock.t += 11.0
+    assert cache.get(loader) == good
+
+
+def test_cache_backs_off_after_a_failure_instead_of_retrying_every_call():
+    clock = _Clock()
+    cache = tasks.LinkedTaskCache(ttl=10.0, now=clock)
+    calls = []
+
+    def loader():
+        calls.append(1)
+        return False, {}
+
+    assert cache.get(loader) == {}            # never succeeded → empty, exactly today's board
+    assert cache.get(loader) == {}
+    assert cache.get(loader) == {}
+    assert len(calls) == 1                    # a hung clawgate is retried once per TTL, not per request
+
+
+def test_cache_never_raises_when_the_loader_explodes():
+    cache = tasks.LinkedTaskCache(ttl=10.0, now=_Clock())
+
+    def boom():
+        raise RuntimeError("clawgate exploded")
+
+    assert cache.get(boom) == {}
+
+
+def test_cache_is_single_flight_so_a_slow_read_never_queues_callers():
+    # A concurrent caller must get the current value IMMEDIATELY rather than blocking behind a
+    # slow clawgate — the other half of moving the read out of DataProvider._lock.
+    import threading, time
+    cache = tasks.LinkedTaskCache(ttl=0.0)          # always "stale" → always tries to refresh
+    entered = threading.Event()
+    release = threading.Event()
+
+    def slow():
+        entered.set()
+        release.wait(5)
+        return True, {"alpha": []}
+
+    th = threading.Thread(target=lambda: cache.get(slow), daemon=True)
+    th.start()
+    assert entered.wait(5)
+    t0 = time.monotonic()
+    assert cache.get(lambda: (True, {"never": []})) == {}   # returns at once with what it has
+    assert time.monotonic() - t0 < 0.5
+    release.set()
+    th.join(5)
+
+
+def test_cached_linked_tasks_map_uses_the_cache_and_never_raises():
+    cache = tasks.LinkedTaskCache(ttl=60.0, now=_Clock())
+    calls = []
+
+    def fetcher(*, creds=None, env=None, deadline=None):
+        calls.append(1)
+        return True, [_task(1, ["initiative:alpha"])]
+
+    got = tasks.cached_linked_tasks_map(creds=CREDS, env={}, fetcher=fetcher, cache=cache)
+    assert list(got) == ["alpha"]
+    tasks.cached_linked_tasks_map(creds=CREDS, env={}, fetcher=fetcher, cache=cache)
+    assert len(calls) == 1                    # second render served from the cache
+
+    def boom(*, creds=None, env=None, deadline=None):
+        raise RuntimeError("nope")
+
+    cache.invalidate()
+    assert tasks.cached_linked_tasks_map(creds=CREDS, env={}, fetcher=boom, cache=cache) == {}

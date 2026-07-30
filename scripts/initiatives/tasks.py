@@ -14,7 +14,8 @@ Contract — mirrors `dispatch.py`'s (the sibling that WRITES tasks) exactly:
     timeout, malformed JSON, or a rolled-back clawgate with no `tags` field all degrade to
     "no linked tasks", logged to stderr. A board render must never block on or fail because
     of clawgate;
-  * a SHORT timeout (`FETCH_TIMEOUT`), because this sits on the render path;
+  * a hard WALL-CLOCK deadline (`FETCH_DEADLINE`) + a response SIZE CAP, because this sits on
+    the render path;
   * credential loading is REUSED from `dispatch.py` (`load_creds` → ~/.claude/clawgate.env),
     not reimplemented — one parser, one behaviour across the writer and the reader.
 
@@ -22,9 +23,34 @@ ONE fetch per render, not one per card: `GET /api/tasks` returns the whole queue
 which is then grouped into a `slug -> [task view]` map. There is deliberately NO per-card
 HTTP call (the board carries ~140 cards).
 
+🔴 WHY A WALL-CLOCK DEADLINE AND NOT `urlopen(timeout=)` (the audit finding that got this
+rewritten). `urlopen(timeout=N)` is a PER-SOCKET-OPERATION timeout, not a deadline on the
+call. Measured against the first cut (`timeout=4`), on top of a 0.80s cold-render baseline:
+
+    connection refused                                 +0.010s   (the only case tested → shipped)
+    blackhole (accepts, never replies)                 +4.005s   (~6x the whole render)
+    slow-drip (1 byte / 2s, each read inside the 4s)  +130s      — AND IT STILL SUCCEEDED
+
+so a dribbling clawgate stalled the board without bound. The fix is three-layered:
+  1. `_run_with_deadline` runs the whole fetch (DNS + connect + headers + body) in a DAEMON
+     thread and joins for at most `FETCH_DEADLINE` wall-clock seconds. That is a real deadline
+     covering every phase, whatever the socket does — including an injected getter;
+  2. `_get` additionally re-checks the wall clock between body chunks and caps the response at
+     `MAX_RESPONSE_BYTES`, so an abandoned worker thread TERMINATES itself instead of leaking
+     while it dribbles (`Notes.List` has no `LIMIT` and rows carry full task bodies — 16 KB for
+     6 tasks today, and it grows with retained history);
+  3. `LinkedTaskCache` (below) means the deadline is paid at most once per `CACHE_TTL_SECONDS`,
+     not on every cold render — and a failed refresh keeps serving the LAST GOOD map.
+
+The read is ALSO issued OUTSIDE `DataProvider._lock` (see `viewer.DataProvider.snapshot`), so a
+slow clawgate can never serialize `/`, `/api/initiatives.json`, `/api/initiative` and `/api/ask`
+behind it.
+
 Public surface:
   * `clawgate_base_url(creds, env)` → the API base (env override → creds → LAN NodePort).
-  * `fetch_tasks(...)`             → the raw task list, `[]` on ANY failure.
+  * `fetch_tasks_result(...)`      → `(ok, tasks)` — `ok=False` distinguishes a FAILED read
+                                     from a genuinely empty queue (what serve-stale needs).
+  * `fetch_tasks(...)`             → the raw task list, `[]` on ANY failure (thin wrapper).
   * `initiative_slugs(task)`       → the task's `initiative:` tag values, EXACT (no case-fold,
                                      no normalization — `initiative:Foo` keys `Foo`, which
                                      therefore never matches the slug `foo`).
@@ -32,8 +58,10 @@ Public surface:
   * `group_by_slug(tasks, base)`   → `slug -> [task view]` (a task with several initiative
                                      tags lands under each; an untagged task lands nowhere).
   * `open_task_count(views)`       → how many of a card's linked tasks are still LIVE work.
-  * `linked_tasks_map(...)`        → the orchestrator the viewer calls: fetch + group, `{}`
-                                     on any failure.
+  * `linked_tasks_map_result(...)` → `(ok, map)`: fetch + group, keeping the ok flag.
+  * `linked_tasks_map(...)`        → the uncached orchestrator: fetch + group, `{}` on failure.
+  * `cached_linked_tasks_map(...)` → what the VIEWER calls: the above behind `LinkedTaskCache`
+                                     (own TTL + serve-stale-on-failure + single-flight).
 """
 from __future__ import annotations
 
@@ -41,6 +69,8 @@ import importlib.util
 import json
 import os
 import sys
+import threading
+import time
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -55,15 +85,40 @@ DEFAULT_CLAWGATE_URL = "http://192.168.50.250:30302"
 # validated (charset/length only), the initiatives side does the join — this module IS that join.
 INITIATIVE_TAG_PREFIX = "initiative:"
 
-# SHORT by design: this read sits on the board render path, so a hung clawgate must cost a
-# few seconds at most and then degrade to "no linked tasks".
-FETCH_TIMEOUT = 4  # seconds
+# SHORT by design: this read is a DECORATION on a triage page, not core data, so a hung
+# clawgate must cost this much WALL-CLOCK time at most (once per CACHE_TTL_SECONDS) and then
+# degrade to the last good map / "no linked tasks". Enforced by `_run_with_deadline`, which
+# covers every phase (DNS, connect, headers, body) — NOT by `urlopen(timeout=)`, which is
+# per-socket-operation and therefore unbounded against a slow drip (see the module docstring).
+FETCH_DEADLINE = 2.0  # seconds, wall clock, for the WHOLE fetch
+
+# Per-socket-operation timeout INSIDE the worker thread. This is not the deadline (the join
+# is); it exists so an abandoned worker eventually dies instead of holding a socket forever.
+SOCKET_TIMEOUT = 2.0  # seconds
+
+# Response size cap. `Notes.List` has no `LIMIT` and each row carries the task's full body
+# (~16 KB for today's 6 tasks), so the queue grows with retained history. 1 MiB is ~60x
+# today's payload — generous headroom, but bounded: an unbounded `resp.read()` on the render
+# path is a memory/latency amplifier we don't need.
+MAX_RESPONSE_BYTES = 1 << 20  # 1 MiB
+READ_CHUNK = 64 * 1024        # bytes per read() — the wall clock is re-checked between chunks
+
+# The linked-task cache's OWN TTL — deliberately LONGER than the board's 5s `CACHE_TTL_SECONDS`
+# so a hung clawgate costs `FETCH_DEADLINE` at most once per 30s rather than every cold render,
+# and so a transient blip serves the last good map instead of flickering the links away. The
+# client compensates for the staleness it introduces on the dispatch path by optimistically
+# incrementing a card's open-task count after its own successful dispatch (viewer.py
+# `noteDispatched`), so two taps in quick succession are still guarded.
+CACHE_TTL_SECONDS = 30.0
 
 # Statuses that count as LIVE work for the dispatch guard — a CLOSED set, so anything else
-# (`complete`, a dismissed/renamed/unknown status, a missing status) is treated as NOT
-# blocking. Fail-open on purpose: a clawgate that renames a status must never wedge dispatch.
-# `ready_for_review` is included because such a task is still unfinished work in the queue —
-# dispatching a second card for it would be the exact duplicate this guard exists to prevent.
+# (`complete`, or a renamed/unknown/missing status) is treated as NOT blocking. Fail-open on
+# purpose: a clawgate that renames a status must never wedge dispatch. clawgate's vocabulary
+# is exactly {open, in_progress, ready_for_review, complete} (clawgate
+# `internal/notes/notes.go`), so today this set is "everything except `complete`" — but it is
+# written as a closed ALLOW-list, not as `!= complete`, so a future status is non-blocking by
+# default. `ready_for_review` is included because such a task is still unfinished work in the
+# queue — dispatching a second card for it would be the exact duplicate this guard prevents.
 OPEN_STATUSES = ("open", "in_progress", "ready_for_review")
 
 # Credential loading is reused from the sibling WRITER (one parser for ~/.claude/clawgate.env),
@@ -126,26 +181,88 @@ def clawgate_base_url(creds: dict | None = None, env=None) -> str:
 
 # ---- HTTP read ---------------------------------------------------------------------
 
-def _get(url: str, token: str, *, timeout: int = FETCH_TIMEOUT) -> str:
-    """Isolated network GET (stdlib urllib) — injected/mocked in tests. Returns the body."""
+def _run_with_deadline(fn, deadline: float, *, label: str = "clawgate fetch"):
+    """Run `fn()` under a REAL WALL-CLOCK DEADLINE and return its result.
+
+    Raises `TimeoutError` if `fn` hasn't finished within `deadline` seconds, and re-raises
+    whatever `fn` raised otherwise.
+
+    This — not `urlopen(timeout=)` — is what bounds the fetch. A socket timeout applies to
+    each individual operation, so a peer that dribbles a byte just inside the timeout keeps
+    the call alive indefinitely (measured: 130s through a `timeout=4` urlopen, and it still
+    *succeeded*). Joining a worker thread bounds DNS + connect + headers + body together,
+    regardless of what the peer does, and applies to an injected getter too.
+
+    The worker is a DAEMON thread, so an abandoned one can never hold up interpreter exit;
+    `_get` re-checks the clock between chunks so it also terminates itself shortly after
+    being abandoned, and the single-flight guard in `LinkedTaskCache` means at most one such
+    thread exists at a time."""
+    box: dict = {}
+
+    def target():
+        try:
+            box["value"] = fn()
+        except BaseException as exc:  # noqa: BLE001 - ferried to the caller verbatim
+            box["error"] = exc
+
+    th = threading.Thread(target=target, name="initiatives-clawgate-fetch", daemon=True)
+    th.start()
+    th.join(deadline)
+    if th.is_alive():
+        raise TimeoutError(f"{label} exceeded its {deadline}s wall-clock deadline")
+    if "error" in box:
+        raise box["error"]
+    return box.get("value")
+
+
+def _get(url: str, token: str, *, deadline: float = FETCH_DEADLINE,
+         max_bytes: int = MAX_RESPONSE_BYTES) -> str:
+    """Isolated network GET (stdlib urllib) — injected/mocked in tests. Returns the body.
+
+    Runs INSIDE the deadline thread, so its own guards are belt-and-braces for cleanup rather
+    than the deadline itself: a per-operation `SOCKET_TIMEOUT`, a wall-clock re-check between
+    body chunks (so an abandoned worker stops dribbling), and a `max_bytes` cap — the queue
+    endpoint has no server-side `LIMIT` and rows carry full task bodies, so an unbounded
+    `resp.read()` on the render path is an amplifier we decline."""
+    started = time.monotonic()
     req = urllib.request.Request(
         url, method="GET",
         headers={"Accept": "application/json", "Authorization": f"Bearer {token}"},
     )
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
+    with urllib.request.urlopen(req, timeout=min(SOCKET_TIMEOUT, deadline)) as resp:
         code = getattr(resp, "status", None)
         if code is not None and int(code) != 200:
             raise OSError(f"HTTP {code}")
-        return resp.read().decode("utf-8")
+        chunks: list[bytes] = []
+        total = 0
+        while True:
+            if (time.monotonic() - started) >= deadline:
+                raise TimeoutError(
+                    f"body read exceeded the {deadline}s wall-clock deadline "
+                    f"after {total} bytes")
+            chunk = resp.read(min(READ_CHUNK, (max_bytes + 1) - total))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+            if total > max_bytes:
+                raise OSError(
+                    f"response exceeded the {max_bytes}-byte cap — refusing to buffer it")
+        return b"".join(chunks).decode("utf-8", "replace")
 
 
-def fetch_tasks(*, creds: dict | None = None, env=None, timeout: int = FETCH_TIMEOUT,
-                getter=None) -> list[dict]:
-    """`GET {base}/api/tasks` (Bearer hook token) → the raw task list.
+def fetch_tasks_result(*, creds: dict | None = None, env=None,
+                       deadline: float = FETCH_DEADLINE,
+                       getter=None) -> tuple[bool, list[dict]]:
+    """`GET {base}/api/tasks` (Bearer hook token) → `(ok, tasks)`.
 
-    BEST-EFFORT: missing/unreadable creds, an unreachable clawgate, a non-200, a timeout, or
-    a body that isn't a JSON array all log to stderr and return `[]`. NEVER raises — a board
-    render must not depend on clawgate being up."""
+    `ok` is the bit that `[]` alone cannot carry: `(True, [])` is "clawgate answered and the
+    queue has no tagged tasks", `(False, [])` is "the read FAILED". `LinkedTaskCache` needs
+    that distinction to serve the last good map on a failure instead of dropping the links.
+
+    BEST-EFFORT: missing/unreadable creds, an unreachable clawgate, a non-200, a blown
+    deadline, an oversized body, or a body that isn't a JSON array all log to stderr and
+    return `(False, [])`. NEVER raises — a board render must not depend on clawgate."""
     c = creds if creds is not None else load_creds()
     token = ""
     try:
@@ -154,28 +271,40 @@ def fetch_tasks(*, creds: dict | None = None, env=None, timeout: int = FETCH_TIM
         token = ""
     if not token:
         _log("CLAWGATE_HOOK_TOKEN not set (~/.claude/clawgate.env) — no linked tasks")
-        return []
+        return False, []
 
     url = f"{clawgate_base_url(c, env)}/api/tasks"
     get = getter if getter is not None else _get
     try:
-        raw = get(url, token, timeout=timeout)
+        # THE deadline: bounds every phase of the call (and any injected getter), unlike the
+        # per-operation socket timeout this replaced.
+        raw = _run_with_deadline(lambda: get(url, token, deadline=deadline), deadline,
+                                 label=f"GET {url}")
     except urllib.error.HTTPError as exc:
         _log(f"GET {url} failed: HTTP {exc.code} {exc.reason}")
-        return []
+        return False, []
+    except TimeoutError as exc:
+        _log(f"GET {url} abandoned: {exc}")
+        return False, []
     except Exception as exc:  # noqa: BLE001
         _log(f"GET {url} failed: {exc}")
-        return []
+        return False, []
 
     try:
         obj = json.loads(raw)
     except Exception as exc:  # noqa: BLE001
         _log(f"GET {url} returned unparseable JSON ({exc})")
-        return []
+        return False, []
     if not isinstance(obj, list):
         _log(f"GET {url} returned {type(obj).__name__}, expected a list — no linked tasks")
-        return []
-    return [t for t in obj if isinstance(t, dict)]
+        return False, []
+    return True, [t for t in obj if isinstance(t, dict)]
+
+
+def fetch_tasks(*, creds: dict | None = None, env=None, deadline: float = FETCH_DEADLINE,
+                getter=None) -> list[dict]:
+    """`fetch_tasks_result` without the ok flag — the raw task list, `[]` on ANY failure."""
+    return fetch_tasks_result(creds=creds, env=env, deadline=deadline, getter=getter)[1]
 
 
 # ---- pure grouping -----------------------------------------------------------------
@@ -210,7 +339,7 @@ def initiative_slugs(task: dict) -> list[str]:
 
 def is_open(task: dict) -> bool:
     """Is this task still LIVE work (and therefore a reason not to mint a duplicate)?
-    `OPEN_STATUSES` is a closed set — `complete`, a dismissed/unknown/missing status → False."""
+    `OPEN_STATUSES` is a closed set — `complete`, or an unknown/missing status → False."""
     try:
         return str((task or {}).get("status") or "") in OPEN_STATUSES
     except Exception:  # noqa: BLE001
@@ -247,7 +376,15 @@ def group_by_slug(tasks, base_url: str = "") -> dict[str, list[dict]]:
     `initiative:` tag (or no `tags` field at all) appears nowhere; several tasks on one
     initiative accumulate in one list (input order preserved). A slug matching no card is
     simply an unused key — the viewer looks cards up in this map, never the reverse. Never
-    raises: a non-list input, or a non-dict entry, is skipped."""
+    raises: a non-list input, or a non-dict entry, is skipped.
+
+    ⚠ LATENT RISK, deliberately not fixed: the ledger's identity is `(repo, slug)` but this
+    map is keyed on the SLUG ALONE, so two initiatives in different repos that happened to
+    share a slug would see each other's tasks. Live today: 143 rows / 143 DISTINCT slugs —
+    zero collisions — and closing it means widening the tag namespace to
+    `initiative:<repo>/<slug>` on the PRODUCER side (repo-cos) plus a migration for every
+    already-emitted tag. Not worth it for a decoration; revisit if the store ever shows a
+    duplicate slug (`select slug from initiatives.latest group by slug having count(*) > 1`)."""
     out: dict[str, list[dict]] = {}
     if not isinstance(tasks, list):
         return out
@@ -272,19 +409,123 @@ def open_task_count(views) -> int:
 
 # ---- orchestrator ------------------------------------------------------------------
 
-def linked_tasks_map(*, creds: dict | None = None, env=None, timeout: int = FETCH_TIMEOUT,
-                     fetcher=None) -> dict[str, list[dict]]:
-    """The one call the viewer makes per board render: fetch the clawgate queue ONCE and
-    group it into `slug -> [task view]`.
+def linked_tasks_map_result(*, creds: dict | None = None, env=None,
+                            deadline: float = FETCH_DEADLINE,
+                            fetcher=None) -> tuple[bool, dict[str, list[dict]]]:
+    """Fetch the clawgate queue ONCE and group it into `slug -> [task view]`, keeping the ok
+    flag → `(ok, map)`.
 
-    `{}` on ANY failure (no creds, clawgate down, non-200, malformed JSON, no tags field) —
-    which renders the board exactly as it does today, with no linked-task info and no error
-    surface. NEVER raises."""
+    `(False, {})` on ANY failure (no creds, clawgate down, non-200, blown deadline, oversized
+    or malformed body). `fetcher` is injectable: it may return either the `(ok, tasks)` tuple
+    (`fetch_tasks_result`, the default) or a bare task list (in which case not raising counts
+    as success). NEVER raises."""
     try:
         c = creds if creds is not None else load_creds()
-        fetch = fetcher if fetcher is not None else fetch_tasks
-        tasks = fetch(creds=c, env=env, timeout=timeout)
-        return group_by_slug(tasks, clawgate_base_url(c, env))
+        fetch = fetcher if fetcher is not None else fetch_tasks_result
+        got = fetch(creds=c, env=env, deadline=deadline)
+        if isinstance(got, tuple):
+            ok, tasks = got
+        else:
+            ok, tasks = True, got
+        return bool(ok), group_by_slug(tasks, clawgate_base_url(c, env))
     except Exception as exc:  # noqa: BLE001 - best-effort: a failure is an empty map, not a raise
         _log(f"linked_tasks_map failed: {type(exc).__name__}: {exc}")
+        return False, {}
+
+
+def linked_tasks_map(*, creds: dict | None = None, env=None,
+                     deadline: float = FETCH_DEADLINE, fetcher=None) -> dict[str, list[dict]]:
+    """`linked_tasks_map_result` without the ok flag — the UNCACHED fetch+group, `{}` on any
+    failure. The viewer calls `cached_linked_tasks_map` instead; this stays the plain
+    orchestrator for the CLI/tests."""
+    return linked_tasks_map_result(creds=creds, env=env, deadline=deadline, fetcher=fetcher)[1]
+
+
+# ---- cache -------------------------------------------------------------------------
+
+class LinkedTaskCache:
+    """The linked-task join's OWN cache — independent of the board's 5s snapshot cache.
+
+    Three properties, each closing one of the amplifiers the audit measured:
+
+    * **TTL** (`ttl`, default `CACHE_TTL_SECONDS` = 30s): the fetch deadline is paid at most
+      once per TTL, not on every cold render. Without this a hung clawgate re-stalls the board
+      every 5s forever.
+    * **SERVE-STALE-ON-FAILURE**: a failed refresh keeps serving the LAST GOOD map. A transient
+      blip must not make an initiative's linked tasks — and with them the dispatch guard —
+      flicker away; the guard is exactly the thing that should NOT disappear when the service
+      it guards against is briefly unreachable. `ok=False` is what makes this distinguishable
+      from a genuinely empty queue, which is why the fetch carries that flag.
+    * **SINGLE-FLIGHT**: at most one refresh runs at a time (a non-blocking lock). A concurrent
+      caller gets the current value IMMEDIATELY rather than queueing behind a slow clawgate —
+      which, together with the read living outside `DataProvider._lock`, is what stops one hung
+      fetch from serializing unrelated board requests.
+
+    Thread-safe. Never raises: `get()` degrades to whatever it last had (or `{}`)."""
+
+    def __init__(self, ttl: float = CACHE_TTL_SECONDS, now=time.monotonic):
+        self._ttl = ttl
+        self._now = now
+        self._value: dict[str, list[dict]] = {}
+        self._have = False          # has a refresh EVER succeeded? (→ is `_value` real)
+        self._attempted_at = None   # monotonic ts of the last refresh ATTEMPT (ok or not)
+        self._state_lock = threading.Lock()
+        self._refresh_lock = threading.Lock()
+
+    def invalidate(self) -> None:
+        """Drop the cached map so the next `get()` re-reads (the ↻ refresh path / tests)."""
+        with self._state_lock:
+            self._value = {}
+            self._have = False
+            self._attempted_at = None
+
+    def get(self, loader) -> dict[str, list[dict]]:
+        """`loader() -> (ok, map)`; returns the fresh map, the last good one, or `{}`.
+
+        Note the TTL gates the last ATTEMPT, not the last SUCCESS: a failing clawgate is
+        retried once per TTL, not on every single request."""
+        with self._state_lock:
+            if self._attempted_at is not None and (self._now() - self._attempted_at) < self._ttl:
+                return self._value
+            current = self._value
+        if not self._refresh_lock.acquire(blocking=False):
+            # A refresh is already in flight. Waiting for it would reintroduce exactly the
+            # serialization this design exists to remove, so serve what we have right now.
+            return current
+        try:
+            ok, fresh = loader()
+        except Exception as exc:  # noqa: BLE001 - a loader failure is a failed refresh
+            _log(f"linked-task refresh raised: {type(exc).__name__}: {exc}")
+            ok, fresh = False, {}
+        finally:
+            self._refresh_lock.release()
+        with self._state_lock:
+            self._attempted_at = self._now()
+            if ok:
+                self._value = fresh
+                self._have = True
+            elif self._have:
+                _log("clawgate read failed — serving the last good linked-task map (stale)")
+            return self._value
+
+
+# The process-wide cache the viewer uses. Module-level (not per-DataProvider) so it survives
+# a provider rebuild and so every code path shares one clawgate budget.
+_CACHE = LinkedTaskCache()
+
+
+def cached_linked_tasks_map(*, creds: dict | None = None, env=None,
+                            deadline: float = FETCH_DEADLINE, fetcher=None,
+                            cache=None) -> dict[str, list[dict]]:
+    """The one call the VIEWER makes per board render: `slug -> [task view]`, cached.
+
+    Wraps `linked_tasks_map_result` in `LinkedTaskCache` (own 30s TTL + serve-stale-on-failure
+    + single-flight). `{}` until the first success; the last good map thereafter, even while
+    clawgate is down. NEVER raises — the board renders exactly as it does today on failure."""
+    c = cache if cache is not None else _CACHE
+    try:
+        return c.get(lambda: linked_tasks_map_result(
+            creds=creds, env=env, deadline=deadline, fetcher=fetcher))
+    except Exception as exc:  # noqa: BLE001 - best-effort to the very last line
+        _log(f"cached_linked_tasks_map failed: {type(exc).__name__}: {exc}")
         return {}

@@ -5343,7 +5343,7 @@ def test_clawgate_failures_all_render_the_unchanged_board(capsys):
         # what the real read path yields when the body doesn't parse
         return tasks_mod.group_by_slug(tasks_mod.fetch_tasks(
             creds={"CLAWGATE_HOOK_TOKEN": "t"}, env={},
-            getter=lambda url, tok, timeout=None: "{not json"))
+            getter=lambda url, tok, deadline=None: "{not json"))
 
     def missing_creds():
         return tasks_mod.linked_tasks_map(creds={}, env={}, fetcher=tasks_mod.fetch_tasks)
@@ -5447,7 +5447,7 @@ def test_js_linked_tasks_hint_lists_only_the_open_tasks():
                           {"id": 77, "status": "in_progress", "open": True}]}
     got = _node_actions_js(
         "console.log(JSON.stringify(linkedTasksHint(" + json.dumps(v) + ")));")
-    assert got == "#92 open · #77 in_progress"
+    assert got == "#92 open · #77 in progress"    # humanized, not the raw `in_progress` enum
     # no linked tasks → an empty hint, never "undefined"
     assert _node_actions_js("console.log(JSON.stringify(linkedTasksHint({})));") == ""
 
@@ -5477,3 +5477,157 @@ def test_render_html_ships_the_linked_task_css_and_guard_css():
     assert ".dispatch-btn.guarded{" in html and ".dispatch-btn.armed{" in html
     # the data reaches the page through the SAME JSON island as everything else
     assert '"open_task_count": 1' in html and "tasks#task-1" in html
+
+
+# --- 🔴 the clawgate read must NOT hold DataProvider._lock ------------------- #
+def test_a_hung_clawgate_read_does_not_serialize_other_board_requests():
+    """`/`, `/api/initiatives.json`, `/api/initiative` and `/api/ask` all funnel through
+    `snapshot()`. When the linked-task read lived INSIDE `_lock`, a hung clawgate blocked all
+    of them; out here it only delays the rebuild."""
+    import threading as _th
+    import time as _time
+    rows = _rows_for_degradation()
+    entered, release = _th.Event(), _th.Event()
+
+    def slow_linked():
+        entered.set()
+        release.wait(10)
+        return {}
+
+    prov = viewer.DataProvider(ttl=60, loader=lambda: (rows, []), tmux=lambda r: [],
+                               now_fn=lambda: NOW, linked_tasks=slow_linked)
+    # warm the board cache with a fast read, then force a rebuild with the slow one
+    prov.snapshot()
+    prov.invalidate()
+    th = _th.Thread(target=prov.snapshot, daemon=True)
+    th.start()
+    assert entered.wait(10), "the clawgate read never started"
+    # while it hangs, a request that finds a fresh cache must return AT ONCE. Prime one by
+    # letting a *second* provider serve — here we assert the lock itself is free.
+    t0 = _time.monotonic()
+    acquired = prov._lock.acquire(timeout=2)
+    held = _time.monotonic() - t0
+    if acquired:
+        prov._lock.release()
+    release.set()
+    th.join(10)
+    assert acquired, f"_lock was held across the clawgate read (waited {held:.2f}s)"
+    assert held < 1.0, f"acquiring _lock took {held:.2f}s during a hung clawgate read"
+
+
+def test_board_renders_within_the_deadline_against_a_blackholed_clawgate():
+    """End-to-end through the REAL read path (tasks.fetch → group), pointed at a socket that
+    accepts and never replies — the shape a closed port does NOT exercise."""
+    import socket as _socket
+    import threading as _th
+    import time as _time
+    srv = _socket.socket()
+    srv.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEADDR, 1)
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(2)
+    port = srv.getsockname()[1]
+    stop = _th.Event()
+
+    def accept_and_stall():
+        srv.settimeout(0.25)
+        while not stop.is_set():
+            try:
+                conn, _ = srv.accept()
+            except OSError:
+                continue
+            try:
+                conn.recv(4096)
+            except OSError:
+                pass
+        srv.close()
+
+    _th.Thread(target=accept_and_stall, daemon=True).start()
+    tasks_mod = viewer._tasks()
+    creds = {"CLAWGATE_API_URL": f"http://127.0.0.1:{port}", "CLAWGATE_HOOK_TOKEN": "tok"}
+    deadline = 1.0
+    try:
+        t0 = _time.monotonic()
+        model, err = _provider_with_linked(
+            lambda: tasks_mod.linked_tasks_map(creds=creds, env={}, deadline=deadline)
+        ).snapshot()
+        elapsed = _time.monotonic() - t0
+    finally:
+        stop.set()
+    assert err is None and model is not None
+    assert model["total"] == 2                      # the board rendered, unchanged
+    assert elapsed < 2.5, f"a blackholed clawgate cost {elapsed:.2f}s for a {deadline}s deadline"
+
+
+# --- 🟡 optimistic dispatch count: the SECOND tap is guarded immediately ----- #
+def test_js_note_dispatched_arms_the_guard_before_the_server_catches_up():
+    """After a successful dispatch the server's open_task_count lags by up to ~a minute
+    (tasks.py's 30s cache + the 5s provider TTL + the 30s refetch). The client folds in its
+    OWN dispatch so the next render is guarded — the exact duplicate this feature prevents."""
+    v = {"slug": "alpha", "repo": "/r", "state": "active", "recommended_next_step": _REC}
+    got = _node_actions_js(
+        "var v = " + json.dumps(v) + ";\n"
+        "var before = cardActions(v)[0];\n"
+        "noteDispatched(v, 1000);\n"                       # a confirmed dispatch at t=1000ms
+        "var after = dispatchAction(v, '⤴ dispatch', 1000);\n"
+        "var expired = dispatchAction(v, '⤴ dispatch', 1000 + OPTIMISTIC_TTL_MS + 1);\n"
+        "console.log(JSON.stringify({before: before.guard || null,"
+        " after: after.guard || null, expired: expired.guard || null,"
+        " label: after.guardLabel || null}));")
+    assert got["before"] is None                              # unguarded before the dispatch
+    assert got["after"] == "already has 1 open task — dispatch anyway?"
+    assert got["label"] == "dispatch anyway?"
+    assert got["expired"] is None                             # bounded by OPTIMISTIC_TTL_MS
+
+
+def test_js_optimistic_count_only_ever_adds_guarding():
+    """`Math.max`, never a replacement: a server that already reports MORE open tasks wins,
+    and the overlay can never lower a count (which would silently un-guard a card)."""
+    v = {"slug": "beta", "repo": "/r", "open_task_count": 3}
+    got = _node_actions_js(
+        "var v = " + json.dumps(v) + ";\n"
+        "var a = openTaskCount(v, 1000);\n"
+        "noteDispatched(v, 1000);\n"
+        "var b = openTaskCount(v, 1000);\n"
+        "var other = openTaskCount({slug:'beta', repo:'/other'}, 1000);\n"
+        "console.log(JSON.stringify([a, b, other]));")
+    assert got == [3, 4, 0]      # the overlay is keyed on (repo, slug) — no cross-card bleed
+
+
+def test_js_dispatch_button_arms_to_the_SHORT_label_not_the_full_sentence():
+    """🟡 layout: the armed text replaces the button's own label in place, so the full guard
+    sentence (43 chars) blew the action row up — 97px → 332px at 1280 and 97px → 222px at 390,
+    where it wrapped and reflowed ⤓ archive. The armed state follows the board's established
+    two-tap grammar (`drop?` / `archive?`); the full reason stays in the tooltip."""
+    got = _node_actions_js(
+        "console.log(JSON.stringify(["
+        "guardArmedLabel('⤴ dispatch'), guardArmedLabel('⤴ resume'), guardArmedLabel('')]));")
+    assert got == ["dispatch anyway?", "resume anyway?", "dispatch anyway?"]
+    for label in got:
+        assert len(label) <= 16
+    card = _card_body()
+    # the BUTTON arms to guardLabel and keeps the full explanation in the title
+    assert "armedLabel: a.guardLabel || a.guard" in card
+    assert "btn.title = a.guard + '  ·  ' + linkedTasksHint(v)" in card
+    assert "noteDispatched(v)" in viewer._JS
+
+
+def test_armed_dispatch_button_css_beats_the_guarded_hover_rule():
+    """🟢 `.dispatch-btn.guarded:hover:not(:disabled)` scores (0,4,0) and out-specifies
+    `.dispatch-btn.armed` (0,2,0) — so without the `:not(.armed)` carve-out an armed button
+    under the cursor (i.e. every armed button, since arming needs a click) kept the yellow
+    border instead of flipping to orange."""
+    html = viewer.render_html(viewer.build_model([_row(slug="a")], now=NOW), None)
+    assert ".dispatch-btn.guarded:hover:not(:disabled):not(.armed){" in html
+    assert ".dispatch-btn.guarded:hover:not(:disabled){border-color:var(--yellow)}" not in html
+
+
+# --- 🟢 humanized status pill ------------------------------------------------ #
+def test_js_task_status_labels_are_humanized():
+    got = _node_actions_js(
+        "console.log(JSON.stringify(['open','in_progress','ready_for_review','complete',"
+        "'some_new_status','',null].map(taskStatusLabel)));")
+    assert got == ["open", "in progress", "ready for review", "complete",
+                   "some new status", "unknown", "unknown"]
+    detail = _detail_body()
+    assert "el('span', 'lt-status', taskStatusLabel(t.status))" in detail
+    assert "pill.title = t.status" in detail

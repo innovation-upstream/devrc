@@ -1061,10 +1061,22 @@ in
       # persistently-unbindable port doesn't spin.
       Restart = "on-failure";
       RestartSec = "10s";
+      # Every file the LONG-RUNNING viewer process holds in memory. The siblings are loaded
+      # ONCE by explicit importlib path at first use and then cached for the life of the
+      # process, so a change to any of them is invisible until the unit restarts — listing
+      # only viewer.py meant a tasks.py-only (or dispatch/archive/nextstep-only) change
+      # switched cleanly and then silently did nothing.
+      # ⚠ `initiative-scan.py` is in the same boat (attach_tmux caches the scan module) but is
+      # NOT listed: it belongs to the sync unit too, and a scan change already requires an
+      # explicit `systemctl --user restart initiatives-viewer.service` (see the skill's gotchas).
       X-Restart-Triggers = [
         "${../scripts/initiatives/run-viewer.sh}"
         "${../scripts/initiatives/viewer.py}"
         "${../scripts/initiatives/agent_client.py}"
+        "${../scripts/initiatives/tasks.py}"
+        "${../scripts/initiatives/dispatch.py}"
+        "${../scripts/initiatives/archive.py}"
+        "${../scripts/initiatives/nextstep.py}"
       ];
     };
     Install = {
