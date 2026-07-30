@@ -22,6 +22,22 @@ let
   # box would not). Approximated as isNixOS, mirroring graphical.nix — deliberately NOT
   # !serverMode, which is true on the graphical workbench.
   graphical = isNixOS;
+  # TEMPORARY diagnostic: the keylog CPU-spin stack capture (service + timer,
+  # see keylog-spin-capture below). Gated as its own flag rather than reusing
+  # `graphical` because enabling it drags an UNCACHED from-source py-spy build
+  # (Rust + libunwind) into every `home-manager switch` on that host, and a
+  # build failure there fails the whole switch. Flip to false to opt a host out
+  # without touching the unit definitions. DELETE the flag and the units once
+  # the spin is root-caused and the CPUQuota on keylog.service comes off.
+  # NOT on the laptop: it reads kernel.yama.ptrace_scope=1 (workbench reads 0,
+  # verified 2026-07-30), so py-spy can never attach to keylog.service there and
+  # the unit would exit at the sysctl gate every 5min forever. Worse, merely
+  # ENABLING it drags the uncached from-source py-spy build (Rust + libunwind)
+  # into the laptop's `home-manager switch` — and a build failure there fails
+  # the whole switch, which would stop the laptop converging to origin/main for
+  # a workbench-only diagnostic. (`isLaptop` is defined below; `let` bindings
+  # are order-independent.)
+  enableKeylogSpinCapture = graphical && !isLaptop;
   # Host discriminator for the graphical config (i3 + i3status-rust bar). Evaluated
   # per-host under `--impure`: the laptop has an intel_backlight, the workbench does
   # not. Threaded into ./graphical.nix via _module.args below. Drives battery/backlight
@@ -403,6 +419,19 @@ in
     recursive = true;
     force = true;
   };
+  # bash-guard — MANAGED (was per-host/unmanaged, so the deterministic
+  # enforcement of the 🔴 Git Workflow rules in RULES.md DRIFTED between hosts:
+  # workbench had 6 checks, the laptop a Jun-23 copy with 4). Edit
+  # devrc/scripts/claude-hooks/ then switch. `force = true` alone is NOT enough
+  # to displace a hand-placed regular file at this path — the switch returns
+  # rc=0 and silently leaves it unmanaged. `dropStaleClaudeHooks` below is what
+  # actually removes it; see the measurement in that comment. Registration in
+  # ~/.claude/settings.json stays per-host and needs no change — it already
+  # invokes `python3 ~/.claude/hooks/bash-guard.py`, which this symlink backs.
+  home.file.".claude/hooks/bash-guard.py" = {
+    source = ../scripts/claude-hooks/bash-guard.py;
+    force = true;
+  };
   # `browser` skill — the DELIBERATE EXCEPTION to the store-symlink pattern above.
   # Its source of truth is the browser-bridge subsystem in THIS repo
   # (scripts/browser-bridge/{SKILL.md,browser}), NOT devrc/claude/skills/. So rather
@@ -418,7 +447,8 @@ in
   home.file.".claude/skills/browser/browser".source =
     config.lib.file.mkOutOfStoreSymlink "${workspace}/devrc/scripts/browser-bridge/browser";
   # Claude Code hooks managed here (the script only — the settings.json
-  # registration is per-host/unmanaged, like bash-guard.py). audit-pr-nudge fires
+  # registration is per-host/unmanaged, as for bash-guard.py above, whose script
+  # is likewise managed now). audit-pr-nudge fires
   # PostToolUse on `gh pr create` and injects context so Claude reflexively offers
   # `/audit-pr` (transcript audit: that request was hand-typed ≥14x while the skill
   # sat unused). Registered as `python3 ~/.claude/hooks/audit-pr-nudge.py`.
@@ -443,15 +473,25 @@ in
     source = ../scripts/claude-hooks/claude-notify.py;
   };
 
-  # This hook previously existed only as a PLAIN local file on the laptop
-  # (~/.claude/hooks/claude-notify.py + test_claude_notify.py). home-manager's
-  # store symlink above would collide with that non-symlink and fail
-  # checkLinkTargets on the first switch. Remove the stale NON-symlink copies
-  # (and the now-managed-elsewhere test) before the link check runs. Guarded on
-  # `! -L` so a legitimately-managed store symlink is never touched — this only
-  # ever removes a hand-placed regular file.
-  home.activation.dropStaleClaudeNotify = lib.hm.dag.entryBefore ["checkLinkTargets"] ''
-    for f in "$HOME/.claude/hooks/claude-notify.py" "$HOME/.claude/hooks/test_claude_notify.py"; do
+  # These hooks previously existed as PLAIN local files (claude-notify.py +
+  # test_claude_notify.py on the laptop; bash-guard.py on BOTH hosts). A
+  # hand-placed regular file at a managed path is NOT replaced by the store
+  # symlink — `force = true` is NOT sufficient. Measured 2026-07-30 on
+  # workbench: two consecutive `home-manager switch` runs returned rc=0 and
+  # printed "Creating home file links", yet ~/.claude/hooks/bash-guard.py stayed
+  # a regular file; `mv`-ing it away and re-switching produced the symlink
+  # immediately. So the file silently stays UNMANAGED and drifts — exactly the
+  # failure this hook was made managed to end (workbench had 6 checks, the
+  # laptop a months-old copy with 4).
+  #
+  # Removing the stale non-symlink BEFORE checkLinkTargets is what actually
+  # works. Guarded on `! -L` so a legitimately-managed store symlink is never
+  # touched — this only ever removes a hand-placed regular file, whose content
+  # is in git anyway.
+  home.activation.dropStaleClaudeHooks = lib.hm.dag.entryBefore ["checkLinkTargets"] ''
+    for f in "$HOME/.claude/hooks/claude-notify.py" \
+             "$HOME/.claude/hooks/test_claude_notify.py" \
+             "$HOME/.claude/hooks/bash-guard.py"; do
       if [ -e "$f" ] && [ ! -L "$f" ]; then
         $DRY_RUN_CMD rm -f "$f"
       fi
@@ -686,10 +726,97 @@ in
       ExecStart = "${pkgs.python312.withPackages (ps: [ ps.xlib ps.pyyaml ])}/bin/python3 %h/.config/activity-collector/keylog/keylog.py";
       Restart = "always";
       RestartSec = 10;
+      # Ceiling on a measured runaway: this unit was observed pinning a full
+      # core (96% CPU over a 3s sample, ~2 kernel ticks — i.e. spinning in
+      # userspace, not blocked on X) sustained over 24h+ regardless of typing.
+      # Root cause is still open; the cap bounds the blast radius on a box that
+      # is CPU-contended (PSI cpu some ~63%).
+      #
+      # ⚠ COUPLED to keylog-spin-capture.sh's threshold (default 20%). A 30%
+      # quota lets a 3s sample accrue at most ~90 of 300 ticks = 30%, leaving
+      # only a 10-point margin over the threshold. Lowering this below ~25%
+      # blinds the watcher silently — change both together, or not at all.
+      #
+      # NOT yet verified that capture keeps up under load while throttled: if
+      # the spin turns out to be backlog-driven (X RECORD buffer draining
+      # slower than it fills), throttling the drainer could make the backlog
+      # WORSE rather than bounding it. Watch for dropped events / rising RSS.
+      # Remove once the spin is fixed and verified idle-at-~0%.
+      CPUQuota = "30%";
       # Restart on a script-only change (see activity-collector for rationale).
       X-Restart-Triggers = [ "${../scripts/collector/keylog}" ];
     };
     Install = {
+      WantedBy = [ "graphical-session.target" ];
+    };
+  };
+
+  # Catch the keylog spin in the act. keylog.service degenerates into a
+  # ~full-core userspace loop over hours/days (see CPUQuota above); a restart
+  # clears it, which is exactly what makes it hard to diagnose — noticing it
+  # and restarting destroys the evidence. This samples CPU and dumps the
+  # Python stack the first time it crosses the threshold, then self-disables
+  # (rm ~/.cache/keylog-spin/.captured to re-arm).
+  #
+  # nixpkgs' py-spy fails its own test suite (test_thread_names panics on an
+  # Option::unwrap of None — upstream test bug, not a build problem), so the
+  # check phase is skipped. Pinning it here also gives it a GC root, instead
+  # of rebuilding it from source on every ad-hoc nix-shell.
+  #
+  # ⚠ BUILD COST: neither plain nor overridden py-spy is in cache.nixos.org
+  # (both drv outputs 404), so every host that switches COMPILES it from
+  # source (Rust + libunwind), and a build failure there fails the whole
+  # home-manager switch. That is the price of a temporary diagnostic — set
+  # enableKeylogSpinCapture = false (defined in the `let` block ABOVE) to opt
+  # a host out entirely.
+  #
+  # py-spy needs kernel.yama.ptrace_scope=0 to attach to a non-descendant, and
+  # that is NOT uniform here: the workbench reads 0, the LAPTOP reads 1
+  # (verified 2026-07-30). On a ptrace_scope=1 host py-spy can never attach, so
+  # the script checks the sysctl FIRST and exits quietly — no dump, no toast,
+  # no retry. It also gives up after KEYLOG_SPIN_MAX_FAILS incomplete captures,
+  # so a broken py-spy cannot turn the 5-min timer into a permanent loop.
+  systemd.user.services.keylog-spin-capture = lib.mkIf enableKeylogSpinCapture {
+    Unit = {
+      Description = "Capture a py-spy stack dump if keylog.service starts spinning";
+      # Only meaningful alongside a live keylog.service, which is itself
+      # graphical-session-gated — no point waking on a headless host.
+      After = [ "graphical-session.target" ];
+      PartOf = [ "graphical-session.target" ];
+      OnFailure = [ "notify-failure@%n.service" ];
+    };
+    Service = {
+      Type = "oneshot";
+      # Hang guard only. The actual cap on how long keystroke capture can be
+      # ptrace-frozen is the `timeout 10` / `timeout 15` wrapping each py-spy
+      # invocation in the script — systemd's timeout is the outer backstop.
+      TimeoutStartSec = 45;
+      Environment = [
+        "PATH=${lib.makeBinPath [
+          (pkgs.py-spy.overrideAttrs (_: { doCheck = false; }))
+          pkgs.coreutils pkgs.procps pkgs.systemd pkgs.gnugrep pkgs.gawk
+          pkgs.libnotify pkgs.bash
+        ]}"
+      ];
+      ExecStart = "${pkgs.bash}/bin/bash ${../scripts/keylog-spin-capture.sh}";
+    };
+  };
+
+  systemd.user.timers.keylog-spin-capture = lib.mkIf enableKeylogSpinCapture {
+    Unit = {
+      Description = "Periodic check for the keylog CPU spin";
+      PartOf = [ "graphical-session.target" ];
+    };
+    Timer = {
+      OnStartupSec = "5min";
+      OnUnitActiveSec = "5min";
+      # (No Persistent — it only applies to OnCalendar timers, not monotonic
+      # ones. Same rationale as the other monotonic timers in this file.)
+    };
+    Install = {
+      # graphical-session.target, NOT timers.target: keylog.service only runs
+      # under a graphical session, so on a headless host this would otherwise
+      # wake every 5min just to find MainPID=0 and exit.
       WantedBy = [ "graphical-session.target" ];
     };
   };
@@ -805,6 +932,61 @@ in
       WantedBy = [ "default.target" ];
     };
   };
+
+  # dl-router — loopback sidecar for the media download router. SIBLING to
+  # browser-bridge above and modelled on it (loopback bind, bearer token,
+  # python312, WantedBy default.target), but a SEPARATE service and a separate
+  # extension on purpose: a bug in download routing must not take down the
+  # agent command channel.
+  #
+  # Unlike browser-bridge's standalone server.py this one imports its siblings
+  # (matcher/store/dirindex/qbt/...), so the whole directory is run FROM THE
+  # NIX STORE rather than symlinked file-by-file into ~/.config. That also
+  # leaves ~/.config/dl-router/ free for the two things that must stay
+  # writable: the user's config.toml and the runtime-created 0600 token.
+  #
+  # Port 8791 — 8790 is already taken on the workbench. Inert until
+  # library_root is configured AND the unpacked extension is enabled in a Brave
+  # profile (see the `dl-router` skill).
+  systemd.user.services.dl-router = {
+    Unit = {
+      Description = "Media download router sidecar (loopback match/index service)";
+      After = [ "network.target" ];
+    };
+    Service = {
+      Type = "simple";
+      Environment = [
+        "PATH=${lib.makeBinPath [ pkgs.python312 pkgs.coreutils pkgs.yt-dlp ]}:/run/current-system/sw/bin"
+        # Bind loopback only. server.py REFUSES any non-loopback address, so
+        # this is belt-and-braces rather than the only guard.
+        "DL_ROUTER_HOST=127.0.0.1"
+        "DL_ROUTER_PORT=8791"
+      ];
+      ExecStart = "${pkgs.python312}/bin/python3 ${../scripts/dl-router}/server.py";
+      Restart = "always";
+      RestartSec = 10;
+      # The store path in ExecStart already changes on any source edit, so the
+      # unit is rewritten and restarted by itself; this keeps the repo's
+      # explicit-trigger convention readable alongside the other units.
+      X-Restart-Triggers = [ "${../scripts/dl-router}" ];
+    };
+    Install = {
+      WantedBy = [ "default.target" ];
+    };
+  };
+
+  # `dl-router` skill — same deliberate mkOutOfStoreSymlink exception as the
+  # `browser` skill above: its source of truth is the subsystem in THIS repo,
+  # so the skill tracks the live working tree with no switch needed.
+  home.file.".claude/skills/dl-router/SKILL.md".source =
+    config.lib.file.mkOutOfStoreSymlink "${workspace}/devrc/scripts/dl-router/SKILL.md";
+  home.file.".claude/skills/dl-router/dl-route".source =
+    config.lib.file.mkOutOfStoreSymlink "${workspace}/devrc/scripts/dl-router/dl-route";
+  # The CLI on PATH (~/.local/bin is in home.sessionPath). Out-of-store so
+  # `dl-route` always runs the checked-out code — it resolves its sibling
+  # modules from its own resolved path.
+  home.file.".local/bin/dl-route".source =
+    config.lib.file.mkOutOfStoreSymlink "${workspace}/devrc/scripts/dl-router/dl-route";
 
   # Laptop-only SOCKS5 tunnel to the homelab kube API via the workbench. The
   # homelab API server (192.168.50.94:6443) is LAN-only and the laptop is

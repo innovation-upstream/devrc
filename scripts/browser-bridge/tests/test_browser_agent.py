@@ -136,11 +136,14 @@ argv = sys.argv[1:]
 # FAKE_OC_ENV (those count/inspect only the real `run`). FAKE_OC_GATE_MODE drives
 # the shape so tests can prove the gate fails closed.
 if argv[:2] == ["debug", "agent"]:
+    import stat as _stat
     gate = os.environ.get("FAKE_OC_GATE_MODE", "ok")
     if gate == "fail":               # `debug agent` itself errors (bad/unsupported)
         sys.stderr.write("fake debug agent failed\n"); sys.exit(1)
     if gate == "unparseable":        # output is not JSON → gate must fail closed
         print("<not json>"); sys.exit(0)
+    if gate == "empty":              # exits 0 but writes NOTHING → must fail closed
+        sys.exit(0)
     tools = {"bash": False, "read": False, "edit": False, "write": False,
              "webfetch": False, "glob": False, "grep": False, "task": False,
              "browser": True}
@@ -150,7 +153,22 @@ if argv[:2] == ["debug", "agent"]:
         del tools["browser"]
     elif gate == "missing_hosttool": # bash omitted → can't confirm → refuse
         del tools["bash"]
-    print(json.dumps({"name": "browser-agent", "tools": tools}))
+    # Pad the dump so a truncated prefix is unmistakably a PREFIX, mirroring the
+    # real dumps (10s-100s of KB) that exposed opencode's stdout flush race.
+    full = json.dumps({"name": "browser-agent", "tools": tools,
+                       "_pad": "x" * 200000})
+    if gate == "truncated":          # a flush-race-style truncated prefix
+        sys.stdout.write(full[:4096]); sys.exit(0)
+    if gate == "pipe_truncates":
+        # THE REGRESSION PIN for the stdout flush race. Emit the FULL, valid dump
+        # only when stdout is a REGULAR FILE; through a PIPE (what `$(...)` gives
+        # you) emit a truncated prefix — exactly how the real opencode behaves when
+        # it exits without flushing a piped stdout. So this mode passes the gate
+        # IFF the wrapper redirects the debug dump to a file.
+        is_file = _stat.S_ISREG(os.fstat(1).st_mode)
+        sys.stdout.write(full if is_file else full[:4096])
+        sys.exit(0)
+    sys.stdout.write(full)
     sys.exit(0)
 
 cont = "--continue" in argv
@@ -349,6 +367,19 @@ def test_custom_tool_copied_into_scratch_project(rig):
     assert (sd / ".opencode/tools/browser_tool_impl.mjs").exists()
 
 
+def test_agent_def_does_not_offer_upload_to_the_model(rig):
+    """`upload` is operator-only: it takes a caller-chosen ABSOLUTE path with no
+    allowlist and the model is pointed at untrusted, prompt-injecting pages. The
+    def handed to the model must not advertise a capability the enforcement layer
+    refuses (`op_not_allowed:upload`) — the old three-way drift told it otherwise."""
+    r = rig.run(["read the page"], mode="ok")
+    assert r.returncode == 0, r.stderr
+    md = _agent_md(rig.scratch_root)
+    assert 'op="upload"' not in md, "the agent def must not offer an upload op"
+    assert "setFileInputFiles" not in md and "input type=file" not in md
+    assert "There is no `upload`" in md, "the def should say upload is unavailable"
+
+
 def test_wrapper_forces_tab_and_domain_policy_via_env(rig):
     """The model cannot choose the tab/instance/domain policy — the wrapper FORCES
     them on the tool via env. Assert the exact env opencode (and thus the tool)
@@ -404,6 +435,8 @@ def test_gate_passes_when_browser_only(rig):
     ("hosttool", "tool-set gate"),          # a host tool (bash) still enabled
     ("nobrowser", "tool-set gate"),         # the custom browser tool is absent
     ("unparseable", "tool-set gate"),       # debug output is not parseable
+    ("truncated", "tool-set gate"),         # a truncated JSON prefix (flush race)
+    ("empty", "tool-set gate"),             # exited 0 with NO output at all
     ("missing_hosttool", "tool-set gate"),  # bash omitted → can't confirm disabled
     ("fail", "tool-set gate"),              # `opencode debug agent` itself failed
 ])
@@ -417,6 +450,86 @@ def test_gate_fails_closed(rig, gate_mode, needle):
     assert needle in r.stderr.lower() or needle in r.stderr, r.stderr
     assert _oc_calls(rig.oc_log) == [], "the model must NEVER run when the gate fails"
     assert _browser_calls(rig.frb_log) == [], "no tab may be opened when the gate fails"
+
+
+@pytest.mark.parametrize("gate_mode,phrase", [
+    # A truncation used to surface as the SAME message as a version problem, which
+    # is precisely what misdirected the diagnosis. Each failure class must name
+    # itself distinctly so the operator can tell them apart from stderr alone.
+    ("fail", "failed to RUN"),
+    ("empty", "produced NO output"),
+    ("unparseable", "UNPARSEABLE"),
+    ("truncated", "UNPARSEABLE"),
+    ("hosttool", "browser-ONLY tool set"),
+    ("nobrowser", "browser-ONLY tool set"),
+    ("missing_hosttool", "browser-ONLY tool set"),
+])
+def test_gate_failure_messages_are_distinct(rig, gate_mode, phrase):
+    r = rig.run(["read the page"], mode="ok",
+                extra_env={"FAKE_OC_GATE_MODE": gate_mode})
+    assert r.returncode == 2, r.stdout + r.stderr
+    assert phrase in r.stderr, f"{gate_mode}: expected {phrase!r} in stderr:\n{r.stderr}"
+    # A run-failure / no-output / unparseable refusal must NOT claim the tool set
+    # was resolved-but-wrong, and vice versa — that conflation is the bug.
+    if phrase != "browser-ONLY tool set":
+        assert "did not resolve browser-agent" not in r.stderr, (
+            f"{gate_mode} must not masquerade as a not-browser-only tool set")
+
+
+# --------------------------------------------------------------------------- #
+# Regression pin: the gate must capture `opencode debug agent` to a FILE, never a
+# PIPE (`$(...)`). opencode does not reliably flush stdout before exiting into a
+# pipe, so a command-substitution capture can return a TRUNCATED prefix — which is
+# unparseable, so the gate fails closed (correct) with a message that looks like an
+# opencode-version problem (wrong diagnosis). Measured on these hosts: `debug
+# skill` 65536 B piped vs 293329 B to a file; `debug v2` 55276/55276/6103 B across
+# three identical piped runs — a flush RACE, not a fixed buffer cap.
+# --------------------------------------------------------------------------- #
+def test_gate_reads_from_a_file_not_a_pipe(rig):
+    """The fake opencode emits a FULL valid dump only when its stdout is a regular
+    FILE; through a pipe it emits a truncated prefix (mimicking the real flush
+    race). The gate therefore passes IFF the wrapper redirected to a file."""
+    r = rig.run(["read the page"], mode="ok",
+                extra_env={"FAKE_OC_GATE_MODE": "pipe_truncates"})
+    assert r.returncode == 0, (
+        "the gate must capture the debug dump to a FILE — a `$(...)` pipe capture "
+        f"truncates and fails closed spuriously:\n{r.stderr}")
+    assert len(_oc_calls(rig.oc_log)) >= 1, "the model run must proceed"
+
+
+def test_gate_dump_is_materialized_in_the_scratch_dir(rig):
+    """The dump lands as a real file inside the per-run $SCRATCH (which is already
+    mktemp -d'd and rm -rf'd on exit), and it holds the FULL untruncated JSON."""
+    r = rig.run(["read the page"], mode="ok")
+    assert r.returncode == 0, r.stderr
+    gate_json = _scratch_dir(rig.scratch_root) / "gate.json"
+    assert gate_json.exists(), "the gate must materialize its debug dump as a file"
+    parsed = json.loads(gate_json.read_text())   # full document, not a prefix
+    assert parsed["tools"]["browser"] is True
+    assert parsed["tools"]["bash"] is False
+
+
+def test_gate_source_has_no_command_substitution_capture():
+    """Static guard: no `$(...)`/backtick/pipe capture of `opencode debug agent`
+    may creep back into the wrapper — that is the flush-race bug itself."""
+    src = WRAPPER.read_text()
+    code = [ln for ln in src.splitlines() if not ln.lstrip().startswith("#")]
+    # The line(s) that actually INVOKE the dump (a die/help message may *mention*
+    # `opencode debug agent` in prose — that is documentation, not a capture).
+    invocations = [ln for ln in code if '"$OPENCODE_BIN" debug agent' in ln]
+    assert invocations, "the wrapper must still invoke `opencode debug agent`"
+    for ln in invocations:
+        assert "$(" not in ln, f"command-substitution capture of the gate dump: {ln}"
+        assert "`" not in ln, f"backtick capture of the gate dump: {ln}"
+        # A single `|` is a pipe; `||` is the die-on-failure guard (fine).
+        assert "|" not in ln.replace("||", ""), f"piped capture of the gate dump: {ln}"
+        assert ">" in ln, f"the gate dump must be redirected to a file: {ln}"
+    # No line anywhere may command-substitute the debug dump.
+    for ln in code:
+        assert not ("$(" in ln and "debug agent" in ln), \
+            f"command-substitution capture of the gate dump: {ln}"
+    assert any('>"$GATE_OUT"' in ln or '> "$GATE_OUT"' in ln for ln in invocations), \
+        "the gate dump must be redirected to $GATE_OUT (a file in $SCRATCH)"
 
 
 # --------------------------------------------------------------------------- #

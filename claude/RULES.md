@@ -45,10 +45,28 @@ Priority legend: **🔴 CRITICAL** (security/data/prod — never compromise) · 
 ## Git Workflow 🔴
 **Triggers**: session start, before changes, risky operations
 
+These rules live HERE (managed, shipped to every host), not in `~/.claude/CLAUDE.md` —
+that file is per-host/mutable and does NOT ship, so a 🔴 rule placed there silently
+protects only one machine. `~/.claude/CLAUDE.md` is for genuinely host-specific facts
+(paths, OS, package manager) only.
+
 - **Status first**: `git status && git branch` before starting.
-- **Feature branches only** — never work on main/master; commit before risky operations for rollback.
+- **Never `git add -A` / `--all` / `.`** — stage explicit paths. Blind-staging leaks unrelated WIP and secrets from a dirty tree (near-misses on civitai + homelab-talos). Enforced by the `bash-guard.py` PreToolUse hook.
+- **Never `git reset --hard`** — it irreversibly destroys uncommitted work. Use `git restore <path>` / `git checkout -- <path>` for specific files, or `git checkout <ref> -- <paths>` to take another ref's version.
 - **Review before commit** (`git diff`); descriptive messages (avoid bare "fix"/"update"/"changes").
-- **Commit/push only when asked.** (See `~/.claude/CLAUDE.md` for `never git add -A` / `never reset --hard` / the rebase recipe.)
+- **Commit/push only when asked.**
+- **Feature branches only — never work on main/master; commit before risky operations for rollback.** The one exception: **repos whose own `CLAUDE.md` states that committing to the main branch IS deploying — currently only `homelab-talos`** (GitOps-reconciled from `trunk`), where trunk-commit is the norm and the feature-branch/PR default does not apply. That written statement in the target repo is what makes the exception apply; you may not self-declare it, and it is not licence to commit to `main` anywhere else.
+
+### 🔴 `git stash` is repo-GLOBAL — never use it to clear a tree for a rebase
+The stash stack is shared across ALL worktrees of a repo, so a concurrent agent or
+session can pop *your* stash. Two parallel remix subagents stole each other's work this
+way (2026-07-25), and the `stash → pull --rebase → stash pop` recipe's autostash form
+corrupted `.sops.yaml` on a dirty tree (2026-06-24).
+
+- **To sync a branch: use a clean worktree, not a stash.** `git worktree add ../<repo>-<topic> -b <branch> origin/<main-branch>` → edit/build/test/commit/push there → `git worktree remove`. A concurrent push then rebases only your clean tree, which holds only your staged paths.
+- **To take another ref's version of a file:** `git checkout <ref> -- <paths>` — never stash/pop around it.
+- **Worktree isolation is the standing default for any subagent that MODIFIES files** — pass `isolation: "worktree"` on the Agent call. Mandatory when running agents in parallel, or when another agent/session may share the repo: multiple file-modifying agents in one checkout **WILL** clobber each other (observed — a stash+checkout from one agent silently wiped a sibling's uncommitted work mid-task; further near-misses on civitai). Read-only agents (audits/research/exploration) don't need one. The worktree path + branch come back in the agent's result for inspection/cleanup; worktrees with no changes are auto-removed. If a worktree would drop needed uncommitted context, commit first or run a single agent in-place — **never** run two file-modifying agents in the same checkout. **Forbid `git stash` in parallel-dispatch prompts** for the repo-global reason above.
+- **Re-sync the base clone after worktree work merges.** Because worktrees do the committing, the base clone is write-only and silently falls behind — its dirty files become *stale orphans* of already-merged work, not WIP (homelab-talos was 262 behind on 2026-07-30). Run `git -C <repo> fetch origin && git -C <repo> merge --ff-only origin/<main-branch>` at the end of a worktree cycle. `--ff-only` is the point: it cannot conflict or autostash — it either fast-forwards cleanly or **refuses**, which is your signal that the base clone has diverged. If it refuses, resolve deliberately: the base clone's side is almost always the stale one, so prefer upstream rather than trying to preserve local edits. Two drift tells while sorting it out — `warning: skipped previously applied commit` means that work already landed from a worktree (`git rebase --skip`), and untracked docs blocking a checkout mean a worktree committed them (diff against upstream, then delete the local copy).
 
 ## Token & Tool Hygiene 🟡
 **Triggers**: writing scripts/files, editing, reading files, repeated operations
@@ -71,6 +89,7 @@ Derived from auditing 232 sessions: 1,712 preventable errors + a ~1,000× redund
 
 - **zsh reserves `status`** — `status=$(...)` → `read-only variable: status`. Use `rc=`/`out=`.
 - **`sleep N && <cmd>` is blocked** by the harness — use the `Monitor` tool with an until-loop, or `run_in_background`. Never prepend `sleep` to a poll.
+- **`pgrep -f` / `pkill -f` match your OWN shell.** A wait loop like `while pgrep -f 'e2e/run.sh'; do sleep 10; done` never exits — the pattern appears in the loop's own command line, so it detects itself. Worse, `pkill -f '<pattern>'` in a background script can **kill the script itself**. Bit twice in one session (a 20-minute stall, then a job that killed itself with exit 144). Use PIDs (`ps -eo pid,etimes,args --no-headers | awk '…'` → `kill`), or add `| grep -v $$`, or match on something absent from your own command line.
 - **Read before Edit/Write** — a file must be Read in-session first, or the call errors ("File has not been read yet") and burns a round-trip.
 - **NixOS: no apt/dnf** — for a missing tool (pandoc, pdftoppm/poppler, openpyxl, …) run it under `nix-shell -p <pkg> --run "..."` proactively; don't run bare, fail, then retry.
 - **Don't re-emit git orientation** — the harness shows branch + status at session start; read that instead of `cd repo && echo === && git status` (this preamble ran ~1,000× last audit window). When you genuinely need fresh state, one compact `git status -s && git log --oneline -3`.

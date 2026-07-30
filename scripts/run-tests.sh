@@ -106,6 +106,7 @@ HOOK_TESTS=(
   "scripts/claude-hooks/tests/test_shell_env_nudge.py"
   "scripts/claude-hooks/tests/test_claude_notify.py"
   "scripts/claude-hooks/tests/test_register_nudge_hook.py"
+  "scripts/claude-hooks/tests/test_bash_guard.py"
 )
 for HOOK_TEST in "${HOOK_TESTS[@]}"; do
   [ -f "$HOOK_TEST" ] || continue

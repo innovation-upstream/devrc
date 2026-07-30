@@ -2982,9 +2982,13 @@ def test_browser_cli_click_requires_selector(tmp_path):
 @pytest.mark.skipif(shutil.which("curl") is None, reason="curl not on PATH")
 def test_browser_cli_screenshot_fullpage_flag(tmp_path):
     # --fullpage is threaded into the command body; a path arg still works too.
-    r, bodies = _run_browser(["screenshot", "--fullpage"], tmp_path)
-    # The canned capture server returns a text payload (no dataUrl), but the CLI
-    # only writes a file when a path is given; with no path it pretty-prints → exit 0.
+    # BEHAVIOUR CHANGE: `screenshot` with no path no longer pretty-prints the
+    # response — it now DECODES the data URL and writes a .png (the token fix), so
+    # this capture server's dataUrl-less payload would legitimately error. The
+    # `--data-url` escape hatch keeps the old pretty-print path, which is what this
+    # test needs to assert the flag threading. The new default (file-writing) path
+    # is covered by test_browser_cli_screenshot_fullpage_still_threaded_with_file_output.
+    r, bodies = _run_browser(["screenshot", "--fullpage", "--data-url"], tmp_path)
     assert r.returncode == 0, r.stderr
     assert bodies[-1]["op"] == "screenshot"
     assert bodies[-1]["fullpage"] is True
@@ -3529,3 +3533,452 @@ def test_browser_cli_normal_op_result_unaffected_by_unknown_op_mapping(tmp_path)
     assert "older than this cli" not in r.stderr.lower()
     out = json.loads(r.stdout)
     assert out["result"]["data"]["html"] == "<html>ok</html>"
+
+
+# =========================================================================== #
+# CLI token fixes: screenshot writes a FILE (never dumps base64 to stdout),
+# `html` gets the same --max-bytes cap as `text`, and `js` aliases `eval`.
+# All three are CLI-surface only (no server.py / extension change), so they are
+# exercised against the REAL bash entrypoint + a canned in-process /cmd server.
+# =========================================================================== #
+
+# A minimal, VALID 1x1 PNG — so the CLI's base64 decode + file write is a real
+# round-trip (the assertions check the PNG magic bytes on disk).
+_PNG_B64 = ("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8"
+            "AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC")
+_PNG_BYTES = base64.b64decode(_PNG_B64)
+_PNG_DATA_URL = "data:image/png;base64," + _PNG_B64
+
+
+class _CannedRecordingCmdServer:
+    """`_CannedCmdServer` + it RECORDS each posted /cmd body, so one test can
+    assert BOTH the request shape (op/flags on the wire) and the CLI's rendering
+    of the canned result."""
+
+    def __init__(self, data):
+        self.data = data
+        self.bodies = []
+
+    def handler(self):
+        outer = self
+
+        class _H(S.BaseHTTPRequestHandler):
+            def log_message(self, *a):  # noqa: A003
+                pass
+
+            def do_POST(self):
+                ln = int(self.headers.get("Content-Length") or 0)
+                raw = self.rfile.read(ln) if ln else b"{}"
+                try:
+                    outer.bodies.append(json.loads(raw))
+                except ValueError:
+                    outer.bodies.append(None)
+                payload = json.dumps({"ok": True, "result": {
+                    "id": "x", "ok": True, "data": outer.data}}).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+
+        return _H
+
+
+def _run_browser_canned(data, args, tmp_path, env_extra=None):
+    """Run the real `browser` CLI against a canned-result server that ALSO
+    records the posted bodies. Returns (CompletedProcess, bodies)."""
+    state = _CannedRecordingCmdServer(data)
+    srv = S.ThreadingHTTPServer(("127.0.0.1", 0), state.handler())
+    srv.daemon_threads = True
+    port = srv.server_address[1]
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    tokf = tmp_path / "token"
+    tokf.write_text("smoke-token\n")
+    env = dict(os.environ)
+    env.update(BROWSER_BRIDGE_HOST="127.0.0.1", BROWSER_BRIDGE_PORT=str(port),
+               BROWSER_BRIDGE_TOKEN_FILE=str(tokf))
+    if env_extra:
+        env.update(env_extra)
+    try:
+        r = subprocess.run([str(BROWSER_BIN), *args], env=env,
+                           capture_output=True, text=True, timeout=30)
+        return r, state.bodies
+    finally:
+        srv.shutdown(); srv.server_close()
+
+
+def _shot_data(**extra):
+    d = {"url": "https://x.test", "dataUrl": _PNG_DATA_URL, "via": "cdp"}
+    d.update(extra)
+    return d
+
+
+# --- screenshot never dumps base64 to stdout -------------------------------- #
+
+@pytest.mark.skipif(shutil.which("curl") is None, reason="curl not on PATH")
+def test_browser_cli_screenshot_no_path_writes_temp_file_and_prints_path(tmp_path):
+    """No path → the PNG lands in TMPDIR and stdout is a compact JSON result
+    carrying the PATH + byte size, NOT the base64 payload."""
+    tmpdir = tmp_path / "shots"
+    tmpdir.mkdir()
+    r, _ = _run_browser_canned(_shot_data(), ["screenshot"], tmp_path,
+                               env_extra={"TMPDIR": str(tmpdir)})
+    assert r.returncode == 0, r.stderr
+    out = json.loads(r.stdout)
+    assert out["ok"] is True
+    p = Path(out["path"])
+    assert p.is_file(), f"no png written at {p}"
+    assert p.parent == tmpdir, "the temp png must honour TMPDIR"
+    assert p.name.startswith("browser-screenshot-") and p.suffix == ".png"
+    # A real PNG round-tripped through base64.
+    assert p.read_bytes() == _PNG_BYTES
+    assert p.read_bytes()[:8] == b"\x89PNG\r\n\x1a\n"
+    assert out["bytes"] == len(_PNG_BYTES)
+    # Useful metadata carried through from the result.
+    assert out["url"] == "https://x.test"
+    assert out["via"] == "cdp"
+
+
+@pytest.mark.skipif(shutil.which("curl") is None, reason="curl not on PATH")
+def test_browser_cli_screenshot_no_path_stdout_has_no_base64_payload(tmp_path):
+    """THE fix: the 133K–890K-token base64 blob must never reach stdout/stderr."""
+    tmpdir = tmp_path / "shots"
+    tmpdir.mkdir()
+    r, _ = _run_browser_canned(_shot_data(), ["screenshot"], tmp_path,
+                               env_extra={"TMPDIR": str(tmpdir)})
+    assert r.returncode == 0, r.stderr
+    assert "data:image/png;base64," not in r.stdout
+    assert _PNG_B64 not in r.stdout
+    # Not even a FRAGMENT of the payload leaks (stdout or stderr).
+    assert _PNG_B64[:24] not in r.stdout
+    assert _PNG_B64[:24] not in r.stderr
+    # Stdout stays SMALL (a compact JSON line), not blob-sized.
+    assert len(r.stdout) < 600, f"stdout unexpectedly large: {len(r.stdout)}"
+
+
+@pytest.mark.skipif(shutil.which("curl") is None, reason="curl not on PATH")
+def test_browser_cli_screenshot_explicit_path_unchanged(tmp_path):
+    """An explicit path still writes there and prints JUST the path (back-compat)."""
+    dest = tmp_path / "shot.png"
+    r, _ = _run_browser_canned(_shot_data(), ["screenshot", str(dest)], tmp_path)
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.strip() == str(dest)
+    assert dest.read_bytes() == _PNG_BYTES
+    assert _PNG_B64[:24] not in r.stdout
+
+
+@pytest.mark.skipif(shutil.which("curl") is None, reason="curl not on PATH")
+def test_browser_cli_screenshot_data_url_escape_hatch(tmp_path):
+    """`--data-url` restores the old behaviour: the full data URL on stdout."""
+    r, _ = _run_browser_canned(_shot_data(), ["screenshot", "--data-url"], tmp_path)
+    assert r.returncode == 0, r.stderr
+    assert _PNG_DATA_URL in r.stdout.replace("\n", "")
+
+
+@pytest.mark.skipif(shutil.which("curl") is None, reason="curl not on PATH")
+def test_browser_cli_screenshot_data_url_with_path_is_rejected(tmp_path):
+    """--data-url and an explicit path are mutually exclusive (no silent winner)."""
+    r, _ = _run_browser_canned(_shot_data(),
+                               ["screenshot", "--data-url", str(tmp_path / "s.png")],
+                               tmp_path)
+    assert r.returncode != 0
+    assert "mutually exclusive" in r.stderr.lower()
+
+
+@pytest.mark.skipif(shutil.which("curl") is None, reason="curl not on PATH")
+def test_browser_cli_screenshot_fullpage_still_threaded_with_file_output(tmp_path):
+    """--fullpage still reaches the wire on the new (file-writing) default path."""
+    tmpdir = tmp_path / "shots"
+    tmpdir.mkdir()
+    r, bodies = _run_browser_canned(_shot_data(), ["screenshot", "--fullpage"],
+                                    tmp_path, env_extra={"TMPDIR": str(tmpdir)})
+    assert r.returncode == 0, r.stderr
+    assert bodies[-1]["op"] == "screenshot"
+    assert bodies[-1]["fullpage"] is True
+    assert Path(json.loads(r.stdout)["path"]).is_file()
+
+
+@pytest.mark.skipif(shutil.which("curl") is None, reason="curl not on PATH")
+def test_browser_cli_screenshot_missing_image_data_still_errors(tmp_path):
+    """A result with no dataUrl is a clear error, not a silent empty file."""
+    r, _ = _run_browser_canned({"url": "https://x.test"}, ["screenshot"], tmp_path)
+    assert r.returncode != 0
+    assert "missing image data" in r.stderr.lower()
+
+
+# --- screenshot: privacy of the temp file (mode / validation / retention) --- #
+
+@pytest.mark.skipif(shutil.which("curl") is None, reason="curl not on PATH")
+def test_browser_cli_screenshot_temp_file_is_mode_0600(tmp_path):
+    """PRIVACY: a screenshot is a pixel-perfect image of an AUTHENTICATED view.
+    The temp PNG must be owner-only (tempfile.mkstemp), NOT umask-derived 0644 —
+    /tmp is world-readable and shared with every UID on the box."""
+    tmpdir = tmp_path / "shots"
+    tmpdir.mkdir()
+    r, _ = _run_browser_canned(_shot_data(), ["screenshot"], tmp_path,
+                               env_extra={"TMPDIR": str(tmpdir)})
+    assert r.returncode == 0, r.stderr
+    p = Path(json.loads(r.stdout)["path"])
+    mode = stat.S_IMODE(p.stat().st_mode)
+    assert mode == 0o600, f"temp screenshot is {oct(mode)}, must be 0o600"
+
+
+@pytest.mark.parametrize("payload,why", [
+    ("data:image/png;base64,%%%%", "junk that b64decode would silently drop"),
+    ("data:image/png;base64,", "an empty payload"),
+    ("data:image/png;base64,notbase64!!!", "an outright invalid alphabet"),
+])
+@pytest.mark.skipif(shutil.which("curl") is None, reason="curl not on PATH")
+def test_browser_cli_screenshot_malformed_base64_errors_and_writes_nothing(
+        payload, why, tmp_path):
+    """A malformed payload must EXIT NON-ZERO with a clear message and leave NO
+    file. Without validate=True, b64decode ignores non-alphabet chars → these
+    would decode to b"" and be written as a 0-byte "successful" .png that an
+    agent then Reads as if it were a screenshot (and the last case would raise an
+    uncaught binascii.Error → a raw traceback)."""
+    tmpdir = tmp_path / "shots"
+    tmpdir.mkdir()
+    r, _ = _run_browser_canned(_shot_data(dataUrl=payload), ["screenshot"],
+                               tmp_path, env_extra={"TMPDIR": str(tmpdir)})
+    assert r.returncode != 0, f"{why} must not report success"
+    assert "not valid base64" in r.stderr or "not a PNG" in r.stderr, r.stderr
+    assert "Traceback" not in r.stderr, "must be a clean message, not a traceback"
+    assert list(tmpdir.iterdir()) == [], "no file (not even a 0-byte one) may remain"
+
+
+@pytest.mark.skipif(shutil.which("curl") is None, reason="curl not on PATH")
+def test_browser_cli_screenshot_non_png_payload_is_rejected(tmp_path):
+    """Valid base64 that isn't a PNG is refused before anything is written."""
+    tmpdir = tmp_path / "shots"
+    tmpdir.mkdir()
+    not_png = base64.b64encode(b"GIF89a not really a png").decode()
+    r, _ = _run_browser_canned(
+        _shot_data(dataUrl="data:image/png;base64," + not_png),
+        ["screenshot"], tmp_path, env_extra={"TMPDIR": str(tmpdir)})
+    assert r.returncode != 0
+    assert "not a PNG" in r.stderr
+    assert list(tmpdir.iterdir()) == []
+
+
+@pytest.mark.skipif(shutil.which("curl") is None, reason="curl not on PATH")
+def test_browser_cli_screenshot_explicit_path_also_validates(tmp_path):
+    """The same validation guards an EXPLICIT path — no 0-byte png there either."""
+    dest = tmp_path / "shot.png"
+    r, _ = _run_browser_canned(_shot_data(dataUrl="data:image/png;base64,%%%%"),
+                               ["screenshot", str(dest)], tmp_path)
+    assert r.returncode != 0
+    assert not dest.exists(), "a malformed payload must not create the target file"
+
+
+@pytest.mark.skipif(shutil.which("curl") is None, reason="curl not on PATH")
+def test_browser_cli_screenshot_prunes_aged_temp_captures_only(tmp_path):
+    """Retention: temp captures older than 24h are auto-pruned on the next
+    screenshot. Strictly prefix-scoped — a fresh capture and an unrelated file
+    are left alone."""
+    tmpdir = tmp_path / "shots"
+    tmpdir.mkdir()
+    old = tmpdir / "browser-screenshot-old.png"
+    fresh = tmpdir / "browser-screenshot-fresh.png"
+    other = tmpdir / "someone-elses-file.png"
+    unrelated_suffix = tmpdir / "browser-screenshot-notes.txt"
+    for f in (old, fresh, other, unrelated_suffix):
+        f.write_bytes(b"x")
+    aged = time.time() - (25 * 3600)         # older than the 24h retention
+    os.utime(old, (aged, aged))
+    os.utime(other, (aged, aged))            # aged BUT not ours → must survive
+    os.utime(unrelated_suffix, (aged, aged))  # right prefix, wrong suffix → survives
+
+    r, _ = _run_browser_canned(_shot_data(), ["screenshot"], tmp_path,
+                               env_extra={"TMPDIR": str(tmpdir)})
+    assert r.returncode == 0, r.stderr
+    assert not old.exists(), "an aged browser-screenshot-*.png must be pruned"
+    assert fresh.exists(), "a fresh capture must NOT be pruned"
+    assert other.exists(), "pruning must be scoped to our own prefix"
+    assert unrelated_suffix.exists(), "pruning must be scoped to .png"
+    # The new capture is there too.
+    assert Path(json.loads(r.stdout)["path"]).is_file()
+
+
+@pytest.mark.skipif(shutil.which("curl") is None, reason="curl not on PATH")
+def test_browser_cli_screenshot_prune_never_follows_a_symlink(tmp_path):
+    """An aged SYMLINK matching the prefix is unlinked as the symlink itself; the
+    file it points at is never touched (lstat + a regular-file check)."""
+    tmpdir = tmp_path / "shots"
+    tmpdir.mkdir()
+    victim = tmp_path / "precious.png"
+    victim.write_bytes(b"do not delete me")
+    link = tmpdir / "browser-screenshot-link.png"
+    link.symlink_to(victim)
+    aged = time.time() - (25 * 3600)
+    os.utime(link, (aged, aged), follow_symlinks=False)
+
+    r, _ = _run_browser_canned(_shot_data(), ["screenshot"], tmp_path,
+                               env_extra={"TMPDIR": str(tmpdir)})
+    assert r.returncode == 0, r.stderr
+    assert victim.read_bytes() == b"do not delete me", "the target must be untouched"
+
+
+@pytest.mark.skipif(shutil.which("curl") is None, reason="curl not on PATH")
+def test_browser_cli_screenshot_prune_is_best_effort_and_regular_files_only(tmp_path):
+    """Pruning must never fail the command and must only ever unlink a REGULAR
+    file: an aged DIRECTORY whose name matches the capture pattern is skipped
+    (not rmdir'd, no error), and the screenshot still succeeds."""
+    tmpdir = tmp_path / "shots"
+    tmpdir.mkdir()
+    decoy = tmpdir / "browser-screenshot-adir.png"
+    decoy.mkdir()
+    (decoy / "keep").write_bytes(b"keep")
+    aged = time.time() - (25 * 3600)
+    os.utime(decoy, (aged, aged))
+
+    r, _ = _run_browser_canned(_shot_data(), ["screenshot"], tmp_path,
+                               env_extra={"TMPDIR": str(tmpdir)})
+    assert r.returncode == 0, r.stderr
+    assert decoy.is_dir() and (decoy / "keep").exists()
+    assert "Traceback" not in r.stderr
+    assert Path(json.loads(r.stdout)["path"]).is_file()
+
+
+# --- `html` gets the same --max-bytes cap as `text` ------------------------- #
+
+@pytest.mark.skipif(shutil.which("curl") is None, reason="curl not on PATH")
+def test_browser_cli_html_default_cap_truncates_with_note(tmp_path):
+    """A >32 KB outerHTML is capped at the documented 32768-byte default and the
+    truncation is ANNOUNCED (the `text` convention: a note + a `truncated` count)."""
+    html = "<p>" + ("x" * 50000) + "</p>"
+    r, bodies = _run_browser_canned(
+        {"url": "https://x.test", "title": "X", "html": html}, ["html"], tmp_path)
+    assert r.returncode == 0, r.stderr
+    assert bodies[-1]["op"] == "getHtml"
+    assert bodies[-1]["maxBytes"] == 32768          # same default as `text`
+    data = json.loads(r.stdout)["result"]["data"]
+    assert data["truncated"] == len(html.encode()) - 32768
+    assert data["html"].endswith("…[truncated %d bytes]" % data["truncated"])
+    kept = data["html"].split("\n…[truncated")[0]
+    assert len(kept.encode("utf-8")) == 32768
+    assert kept == html[:32768]                     # a PREFIX of the original
+    # And the whole payload is now bounded (32 KB + the note), not 50 KB.
+    assert len(r.stdout) < 34000
+
+
+@pytest.mark.skipif(shutil.which("curl") is None, reason="curl not on PATH")
+def test_browser_cli_html_explicit_max_bytes_honoured(tmp_path):
+    html = "<p>" + ("y" * 5000) + "</p>"
+    r, bodies = _run_browser_canned(
+        {"url": "https://x.test", "title": "X", "html": html},
+        ["html", "--max-bytes", "100"], tmp_path)
+    assert r.returncode == 0, r.stderr
+    assert bodies[-1]["maxBytes"] == 100
+    data = json.loads(r.stdout)["result"]["data"]
+    kept = data["html"].split("\n…[truncated")[0]
+    assert len(kept.encode("utf-8")) == 100
+    assert data["truncated"] == len(html.encode()) - 100
+
+
+@pytest.mark.skipif(shutil.which("curl") is None, reason="curl not on PATH")
+def test_browser_cli_html_max_bytes_zero_is_truly_uncapped(tmp_path):
+    """`--max-bytes 0` is a real escape hatch — the FULL html, no note."""
+    html = "<p>" + ("z" * 60000) + "</p>"
+    r, bodies = _run_browser_canned(
+        {"url": "https://x.test", "title": "X", "html": html},
+        ["html", "--max-bytes=0"], tmp_path)
+    assert r.returncode == 0, r.stderr
+    assert bodies[-1]["maxBytes"] == 0
+    data = json.loads(r.stdout)["result"]["data"]
+    assert data["html"] == html
+    assert "truncated" not in data
+
+
+@pytest.mark.skipif(shutil.which("curl") is None, reason="curl not on PATH")
+def test_browser_cli_html_under_cap_is_byte_identical_no_regression(tmp_path):
+    """Under the cap the response is passed through UNTOUCHED — no `truncated`
+    field, no note, no reserialization: an ordinary `html` read is unchanged."""
+    html = "<html><body>ünïcøde ok</body></html>"
+    data = {"url": "https://x.test", "title": "X", "html": html}
+    r, _ = _run_browser_canned(data, ["html"], tmp_path)
+    assert r.returncode == 0, r.stderr
+    out = json.loads(r.stdout)["result"]["data"]
+    assert out == data, "an under-cap read must be byte-for-byte the old result"
+    assert "truncated" not in r.stdout
+
+
+@pytest.mark.skipif(shutil.which("curl") is None, reason="curl not on PATH")
+def test_browser_cli_html_truncation_never_splits_a_multibyte_char(tmp_path):
+    """The cut lands on a UTF-8 boundary (normalizeText's guarantee) — the JSON
+    still parses and the kept text is valid unicode."""
+    html = "é" * 100                     # 2 bytes each → an odd cap splits a char
+    r, _ = _run_browser_canned({"url": "https://x.test", "title": "X", "html": html},
+                               ["html", "--max-bytes", "51"], tmp_path)
+    assert r.returncode == 0, r.stderr
+    data = json.loads(r.stdout)["result"]["data"]
+    kept = data["html"].split("\n…[truncated")[0]
+    assert kept == "é" * 25              # 50 bytes — the 51st (partial) byte is dropped
+    assert data["truncated"] == 200 - 50
+
+
+@pytest.mark.skipif(shutil.which("curl") is None, reason="curl not on PATH")
+def test_browser_cli_html_rejects_bad_maxbytes_and_positional(tmp_path):
+    r, _ = _run_browser_canned({"html": "<p/>"}, ["html", "--max-bytes", "nope"],
+                               tmp_path)
+    assert r.returncode != 0
+    assert "max-bytes" in r.stderr.lower()
+    r, _ = _run_browser_canned({"html": "<p/>"}, ["html", "main"], tmp_path)
+    assert r.returncode != 0
+    assert "positional" in r.stderr.lower()
+
+
+# --- `js` is a first-class alias for `eval` --------------------------------- #
+
+@pytest.mark.skipif(shutil.which("curl") is None, reason="curl not on PATH")
+def test_browser_cli_js_and_eval_build_an_identical_request(tmp_path):
+    """`js` and `eval` post the SAME body — and the WIRE op is `eval` for BOTH
+    (the extension only knows `eval`; `js` is a CLI-surface alias only)."""
+    canned = {"url": "https://x.test", "value": 2}
+    r_js, b_js = _run_browser_canned(canned, ["js", "1+1"], tmp_path)
+    r_ev, b_ev = _run_browser_canned(canned, ["eval", "1+1"], tmp_path)
+    assert r_js.returncode == 0, r_js.stderr
+    assert r_ev.returncode == 0, r_ev.stderr
+    assert b_js[-1]["op"] == "eval", "the wire op for `js` MUST stay `eval`"
+    assert b_ev[-1]["op"] == "eval"
+    assert b_js[-1] == b_ev[-1]
+    assert b_js[-1]["js"] == "1+1"
+    assert json.loads(r_js.stdout) == json.loads(r_ev.stdout)
+
+
+@pytest.mark.skipif(shutil.which("curl") is None, reason="curl not on PATH")
+def test_browser_cli_js_alias_honours_frame_tab_instance(tmp_path):
+    """The global flags work identically through the alias."""
+    canned = {"url": "https://x.test", "value": 1}
+    r, bodies = _run_browser_canned(
+        canned,
+        ["--frame", "42", "--tab", "77", "--instance", "work", "js", "document.title"],
+        tmp_path)
+    assert r.returncode == 0, r.stderr
+    b = bodies[-1]
+    assert b["op"] == "eval"          # still `eval` on the wire
+    assert b["js"] == "document.title"
+    assert b["frame"] == "42"
+    assert b["tab"] == 77
+    assert b["target"] == "work"
+
+
+@pytest.mark.skipif(shutil.which("curl") is None, reason="curl not on PATH")
+def test_browser_cli_js_requires_an_expression(tmp_path):
+    r, _ = _run_browser_canned({"value": 1}, ["js"], tmp_path)
+    assert r.returncode != 0
+    assert "usage: browser js" in r.stderr
+
+
+def test_browser_cli_help_lists_js_alias_and_screenshot_data_url():
+    """`browser --help` (the header comment) documents the new surface, and the
+    unknown-subcommand error lists `js` too."""
+    r = subprocess.run([str(BROWSER_BIN), "--help"], capture_output=True,
+                       text=True, timeout=30)
+    assert r.returncode == 0, r.stderr
+    assert "browser js '<js>'" in r.stdout
+    assert "--data-url" in r.stdout
+    assert "--max-bytes" in r.stdout
+    r2 = subprocess.run([str(BROWSER_BIN), "bogus-op"], capture_output=True,
+                        text=True, timeout=30)
+    assert r2.returncode != 0
+    assert " js " in r2.stderr and " eval " in r2.stderr

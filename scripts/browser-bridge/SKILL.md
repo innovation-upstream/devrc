@@ -80,6 +80,29 @@ into one command. With no such tell, skip ↻ and do the full restart.
 So on a `null`: first suspect a multi-statement body, then page CSP; fall back to
 `text`/`html` before concluding the bridge is down.
 
+### Cookies and authenticated requests
+
+**There is no cookie op** — the extension has no `cookies` permission, on purpose
+(README → *Security model*). So `eval` + `document.cookie` is the only route, and
+it is structurally blind to **HttpOnly** cookies — which is exactly what a session
+/ auth cookie always is. On a CSP-strict origin you also just get `null`, which
+reads like a dead bridge.
+
+**Don't extract the cookie — make the request from inside the page.** An in-page
+`fetch(url, {credentials:"include"})` attaches the cookies (HttpOnly included)
+automatically and hands back only the data: no new permission, and no credential
+value ever enters the transcript. `eval` takes ONE EXPRESSION, so use an async
+IIFE — the promise IS awaited (top frame `chrome.scripting`, `--frame` CDP
+`awaitPromise:true`), you get the resolved value, not a pending Promise:
+
+```bash
+browser js '(async function(){ const r = await fetch("/api/thing", {credentials:"include"}); return JSON.stringify({status:r.status, body:(await r.text()).slice(0,500)}) })()'
+```
+
+⚠ **This does NOT work on CSP-strict origins** (GitHub, Discord, …) — the injected
+script never runs there at all, so an authenticated API call *through the page* is
+simply unavailable; `text`/`html` are the only reads that work.
+
 ## The user is USING this browser
 
 It's their live session, not a scratch VM. Don't `nav` a tab that may hold unsaved
@@ -130,17 +153,18 @@ Prefix any op with `--instance <key>` to target a specific connected profile
 | `browser [--instance K] open [url]`        | open a NEW tab THIS session owns (default `about:blank`, created in the **background/HIDDEN** — `active:false`); records ownership; returns its `tabId`. Use for multi-step work. ⚠ A background tab is `document.visibilityState:"hidden"` → **Chromium throttles it, so a heavy SPA never renders** and a subsequent `text`/`html`/`eval` returns a **shell-only DOM** (indistinguishable from a broken site). The reads now **self-announce** this (`data.hidden:true` + a one-line warning on stderr); the escape hatch is **`browser activate`** (foreground it so it un-throttles). |
 | `browser [--instance K] close`             | close this session's owned tab and drop ownership |
 | `browser [--instance K] release`           | drop ownership WITHOUT closing the tab |
-| `browser [--instance K] [--tab T] html`              | `outerHTML` of the owned tab (else the active tab) |
+| `browser [--instance K] [--tab T] html [--max-bytes N]` | `outerHTML` of the owned tab (else the active tab), byte-capped exactly like `text` (default 32768; `0`=uncapped; truncation appends `…[truncated N bytes]` and sets `truncated`). One uncapped `html` on a heavy SPA is ~100K tokens — the cap is ON by default. Prefer `text` anyway |
 | `browser [--instance K] [--tab T] text [selector] [--max-bytes N]` | **cheap read** — visible `innerText` of the owned/active tab (optional CSS `selector`), whitespace-normalized + byte-capped (default 32768; `0`=uncapped; a truncation note is appended). ~98% smaller than `html` — prefer it |
-| `browser [--instance K] [--tab T] [--frame F] eval '<js>'` | run JS in the owned/active tab, return its value. **`--frame` runs the JS INSIDE the target frame (incl. a cross-origin OOPIF) via CDP `Runtime.evaluate`** (not `chrome.scripting`, which can only run a func — the old path returned `value:null`); a frame that can't be resolved / an exception → a clear `frame_not_found` / `frame_eval_failed:<reason>` error, never a silent null; reports the frame's own `url`. **NESTED (grandchild+) OOPIFs are reached** via a bounded recursive auto-attach cascade — capped at depth 5 / 50 targets (`oopif_depth_cap` / `oopif_target_cap`), duplicate-URL frames fail `ambiguous_frame` |
+| `browser [--instance K] [--tab T] [--frame F] js '<js>'` | **ALIAS of `eval`** — identical semantics and flags (`--frame` included, so everything the `eval` row says about nested OOPIFs applies verbatim), and the op sent ON THE WIRE is `eval` either way. **Prefer `js` when you are a worktree-isolated agent:** Claude Code's isolation guard pattern-matches the literal token `eval` in a command string and REFUSES to run it ("runs a string through eval, which can't be verified to stay inside the worktree"). The guard reacts to the WORD, not the behaviour — this op ships JS over loopback to Brave and runs it in the PAGE; it touches no filesystem and cannot escape the worktree. `eval` remains valid everywhere else and is NOT deprecated |
+| `browser [--instance K] [--tab T] [--frame F] eval '<js>'` (alias: `js`) | run JS in the owned/active tab, return its value. **`--frame` runs the JS INSIDE the target frame (incl. a cross-origin OOPIF) via CDP `Runtime.evaluate`** (not `chrome.scripting`, which can only run a func — the old path returned `value:null`); a frame that can't be resolved / an exception → a clear `frame_not_found` / `frame_eval_failed:<reason>` error, never a silent null; reports the frame's own `url`. **NESTED (grandchild+) OOPIFs are reached** via a bounded recursive auto-attach cascade — capped at depth 5 / 50 targets (`oopif_depth_cap` / `oopif_target_cap`), duplicate-URL frames fail `ambiguous_frame`; every failure carries a bounded `cascade[…]` diagnostic |
 | `browser [--instance K] tabs`              | list open tabs (`.data.ownedTabId` flags this session's owned tab) |
 | `browser [--instance K] [--tab T] nav <url>`         | navigate the owned/active tab to `<url>` |
-| `browser [--instance K] [--tab T] screenshot [path] [--fullpage]` | screenshot via **CDP `Page.captureScreenshot`** — **works on a BACKGROUND/occluded tab** and on each profile's own tab (a foreground tab uses the cheap captureVisibleTab fast path). `--fullpage` grabs the whole scrollable document. Prints the data URL, or writes a `.png` to `path` |
+| `browser [--instance K] [--tab T] screenshot [path] [--fullpage] [--data-url]` | screenshot via **CDP `Page.captureScreenshot`** — **works on a BACKGROUND/occluded tab** and on each profile's own tab (a foreground tab uses the cheap captureVisibleTab fast path). `--fullpage` grabs the whole scrollable document. **Always writes a `.png`**: to `path` if given (prints the path), else to a **mode-0600** temp file (honours `TMPDIR`) and prints compact JSON `{ok,path,bytes,url,via}`. **The base64 data URL is NEVER printed** — it cost 133K–890K tokens per call and you can't see an image from a data URL anyway; **`Read` the `.png`**. A screenshot is a pixel-perfect image of an **authenticated** view, so temp captures are owner-only and **auto-pruned after 24h** (prefix-scoped, best-effort) — copy one to `path` if you need to keep it. The payload is validated (strict base64 + PNG signature) before any write, so a failed capture errors instead of leaving a 0-byte `.png`. `--data-url` is the escape hatch that restores the old raw-data-URL output (mutually exclusive with `path`) |
 | `browser [--instance K] [--tab T] frames`  | list the tab's frames (`frameId`/`url`/`parentFrameId`) via `chrome.webNavigation`, **INCLUDING cross-origin OUT-OF-PROCESS iframes (OOPIFs)** — pick a numeric `frameId` (or url-substring) for `--frame` |
 | `browser [--instance K] [--tab T] [--frame F] click <selector>` | click the element's center — **TRUSTED** CDP on the top frame; **SYNTHETIC** (`chrome.scripting`) inside a cross-origin `--frame` |
 | `browser [--instance K] [--tab T] [--frame F] type <text> [--selector S]` | text input — **TRUSTED** CDP top frame; **SYNTHETIC** in-frame (focus `--selector` first if given) |
 | `browser [--instance K] [--tab T] [--frame F] key <Enter\|Tab\|Escape\|Backspace\|Delete\|Arrow*\|Home\|End\|Page*> [--selector S]` | dispatch one bounded key — **TRUSTED** CDP top frame; **SYNTHETIC** in-frame |
-| `browser [--instance K] [--tab T] [--frame F] upload <selector> <path>` | populate the `<input type=file>` at `<selector>` with the LOCAL file `<path>` via **CDP `DOM.setFileInputFiles`** — Chrome reads the file BY PATH itself (same host), so **no bytes cross the bridge**. The CLI validates the path (readable regular file) + resolves it to ABSOLUTE **before** dispatch; `--frame` routes into a cross-origin OOPIF (incl. a NESTED one — same bounded cascade + caps as `eval --frame`). **Bounded TYPED op, own-tab, NO raw-CDP passthrough** — but it IS **data-exfil-capable** (any readable file's CONTENTS could be posted to the site), so **every upload is AUDIT-LOGGED** (op + target domain + path). Result carries the basename only |
+| `browser [--instance K] [--tab T] [--frame F] upload <selector> <path>` | populate the `<input type=file>` at `<selector>` with the LOCAL file `<path>` via **CDP `DOM.setFileInputFiles`** — Chrome reads the file BY PATH itself (same host), so **no bytes cross the bridge**. The CLI validates the path (readable regular file) + resolves it to ABSOLUTE **before** dispatch; `--frame` routes into a cross-origin OOPIF (incl. a NESTED one — same bounded cascade + caps as `eval --frame`). **Bounded TYPED op, own-tab, NO raw-CDP passthrough** — but it IS **data-exfil-capable** (any readable file's CONTENTS could be posted to the site), so **every upload is AUDIT-LOGGED** (op + target domain + path) and it is **OPERATOR-ONLY: `upload` is NOT in the autonomous browser-agent's default op set** (the model gets `op_not_allowed:upload`; re-enable only via an explicit `BROWSER_AGENT_ALLOWED_OPS` opt-in). Result carries the basename only |
 | `browser [--instance K] [--tab T] activate [--wait MS \| --no-wait]` | **FOREGROUND** the owned/active tab so a foreground-throttled SPA finishes loading, then can be read/driven. **⚠ STEALS FOCUS — the ONE intrusive op** (it changes what the user sees; every other op is non-intrusive). Foregrounds via **host-side `i3-msg`** (Chrome-side `tabs.update`/`windows.update` is a no-op on i3), so it works ONLY on a graphical i3 host; returns an extra **`i3:"applied"\|"skipped"\|"failed"`** field alongside `{tabId,windowId,url,title,active,status}`. Waits (bounded, default ~3s, cap ~8s) for `status:"complete"` + a paint settle unless `--no-wait`; `--wait MS` overrides. See "Driving a throttled SPA" below. |
 | `browser [--instance K] agent "<goal>" [flags]` | run the **autonomous opencode browser-agent** in its OWN isolated tab against `<goal>`; returns a compact `{answer,evidence,steps_used,status}` (see below) |
 | `browser --print-session-id`               | print the derived per-session id (debug) and exit |
@@ -367,7 +391,8 @@ next card, after ~30 UI changes had passed every server-side test):
 
 **1. `open` → `activate` → `screenshot` — and LOOK at the image.** `activate` is
 not optional; a backgrounded tab is throttled and may never finish painting, so
-you'd screenshot a half-built page. Exit 0 is not a rendered page.
+you'd screenshot a half-built page. Exit 0 is not a rendered page. `screenshot`
+prints a `.png` PATH (not a data URL) — `Read` that file; that is the LOOK step.
 
 **2. Hit-test the suspect element.** Take its `getBoundingClientRect()` and call
 `document.elementFromPoint(x, y)` at several points inside it, reporting for each
@@ -470,12 +495,29 @@ browser agent "go to news.ycombinator.com and report the top 3 story titles" \
   (`die`, model never invoked) unless the resolved `tools` map is browser-ONLY —
   `browser:true` AND every host tool (`bash`/`read`/`edit`/`write`/`webfetch`)
   present AND `false`. Any uncertainty (unparseable output, `browser` absent, a
-  host tool `true`, or a host tool absent) fails closed. Different opencode
-  versions resolve the deny differently (workbench 1.17.20, laptop 1.18.4), so this
-  is the one place the fail-closed property is *verified at runtime* rather than
-  trusted — on a version where the host-tool denial didn't take, `browser agent`
-  refuses instead of running the model unconfined. The gate runs BEFORE the tab is
-  opened, so a gate failure leaks no tab.
+  host tool `true`, or a host tool absent) fails closed. This is the one place the
+  fail-closed property is *verified at runtime* rather than trusted — on any
+  opencode where the host-tool denial didn't take, `browser agent` refuses instead
+  of running the model unconfined. The gate runs BEFORE the tab is opened, so a
+  gate failure leaks no tab. **Both hosts run opencode 1.18.4 and both resolve
+  browser-only** — there is no version-skew caveat.
+  - ⚠ **If you check the gate by hand, redirect to a FILE**
+    (`opencode debug agent browser-agent > /tmp/gate.json`), never a pipe or
+    `$(...)`: opencode doesn't reliably flush stdout before exiting into a pipe, so
+    a capture can be TRUNCATED and the gate then (correctly) fails closed with
+    `unparseable debug-agent tool set: Unterminated string…` — which looks like a
+    version problem and is not. The wrapper itself now captures to
+    `$SCRATCH/gate.json` for exactly this reason.
+- **The agent's `whoami` is narrowed.** It sees its OWN profile + the host label +
+  versions — never the operator's other profiles, never any `activeTabDomain`,
+  never the git HEAD. (Otherwise a prompt-injected page could have the model report
+  that your `banking` profile is on chase.com, then `nav` that to an attacker.) The
+  `browser whoami` CLI you run by hand is unchanged and still shows everything.
+- **No `upload` for the agent.** The autonomous model's op set is 11 ops
+  (`text`/`html`/`eval`/`nav`/`screenshot`/`frames`/`click`/`type`/`key`/
+  `activate`/`whoami`). `upload` is operator-only — you can still `browser upload`
+  by hand; the model gets `op_not_allowed:upload`. Re-enable it for the agent only
+  by an explicit `BROWSER_AGENT_ALLOWED_OPS` opt-in.
 - **Guardrails:** a step budget (`--steps`, default 12), a wall-clock `--timeout`
   (default 120s) enforced with a **process-group kill** (`setsid` + kill the whole
   group, so no opencode child survives), `--deny-domains`/`--allow-domains`

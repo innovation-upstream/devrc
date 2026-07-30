@@ -25,14 +25,21 @@ export default tool({
     "(TRUSTED text input, pass `text`, optional `selector`), 'key' (one key: " +
     "Enter/Tab/Escape/Backspace/Delete/Arrow*/Home/End/Page*, optional `selector`), " +
     "'activate' (FOREGROUND your tab so a foreground-throttled SPA finishes " +
-    "loading — steals the user's focus; optional `waitMs` to wait for load). " +
-    "text/html/eval/click/type/key accept `frame` (a frameId or url-substring from " +
-    "`frames`) to act INSIDE a cross-origin iframe. You cannot choose the tab — it " +
-    "is fixed to the one you were given. Stay on the allowed domains.",
+    "loading — steals the user's focus; optional `waitMs` to wait for load), " +
+    "'whoami' (read-only host/instance/version diagnostics — metadata only). " +
+    "There is NO 'upload' op: file upload is off by default for the autonomous " +
+    "agent. text/html/eval/click/type/key accept `frame` (a frameId or " +
+    "url-substring from `frames`) to act INSIDE a cross-origin iframe. You cannot " +
+    "choose the tab — it is fixed to the one you were given. Stay on the allowed " +
+    "domains.",
   args: {
+    // MUST stay in lockstep with ALLOWED_OPS_DEFAULT (browser_tool_impl.mjs), the
+    // agent-md capability table, and the README op list — tests/browser_tool.test.mjs
+    // parses all four and fails on drift. `upload` is deliberately absent from all
+    // of them (operator-only, opt-in via BROWSER_AGENT_ALLOWED_OPS).
     op: tool.schema
       .enum(["text", "html", "eval", "nav", "screenshot",
-             "frames", "click", "type", "key", "activate"])
+             "frames", "click", "type", "key", "activate", "whoami"])
       .describe("the operation to perform on your tab"),
     selector: tool.schema.string().optional()
       .describe("op=text/click/type/key: CSS selector (click target / focus / scope)"),
