@@ -14,10 +14,17 @@ skill dir is symlinked). Don't hunt for it under `~/.claude/skills/...`.
 
 ```bash
 BB=~/workspace/devrc/scripts/browser-bridge/browser   # ← the executable
+$BB whoami                          # ORIENT FIRST — which HOST (laptop/workbench; both are hostname 'nixos'),
+                                    #   which profiles/instances are connected, loaded-vs-repo extension version.
+                                    #   Run this BEFORE grabbing the browser so you know which machine/profile you're driving.
 $BB health                          # is an extension connected?
 $BB --instance <key> open <url>     # open a NEW tab this session owns
 $BB --instance <key> --tab <id> html   # act on a specific tab
 ```
+
+**Orientation rule:** on a fresh browser task, run `whoami` first (both hosts are
+hostname `nixos`, and this session's loopback bridge could be either machine with
+multiple profiles) — confirm the host + pick the right `--instance` before acting.
 
 ## ⚠ The LOADED extension may be older than this doc
 
