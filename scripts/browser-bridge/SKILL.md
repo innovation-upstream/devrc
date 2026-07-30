@@ -418,6 +418,11 @@ browser agent "go to news.ycombinator.com and report the top 3 story titles" \
     `unparseable debug-agent tool set: Unterminated string…` — which looks like a
     version problem and is not. The wrapper itself now captures to
     `$SCRATCH/gate.json` for exactly this reason.
+- **The agent's `whoami` is narrowed.** It sees its OWN profile + the host label +
+  versions — never the operator's other profiles, never any `activeTabDomain`,
+  never the git HEAD. (Otherwise a prompt-injected page could have the model report
+  that your `banking` profile is on chase.com, then `nav` that to an attacker.) The
+  `browser whoami` CLI you run by hand is unchanged and still shows everything.
 - **No `upload` for the agent.** The autonomous model's op set is 11 ops
   (`text`/`html`/`eval`/`nav`/`screenshot`/`frames`/`click`/`type`/`key`/
   `activate`/`whoami`). `upload` is operator-only — you can still `browser upload`

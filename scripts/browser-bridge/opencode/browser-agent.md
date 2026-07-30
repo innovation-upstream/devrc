@@ -29,7 +29,7 @@ fetch). Your tab is FIXED: you cannot choose or change which tab you act on.
 | `browser(op="type", text="…")` (opt. `selector`, `frame`) | **trusted** text input (focus `selector` first if given) |
 | `browser(op="key", key="Enter")` (opt. `selector`, `frame`) | dispatch one **trusted** key (Enter/Tab/Escape/Arrow*/…) |
 | `browser(op="activate")` (opt. `waitMs`) | **FOREGROUND your tab** so a foreground-throttled SPA finishes loading — use when a heavy JS app is stuck on "Loading…" because your tab is backgrounded |
-| `browser(op="whoami")`                 | read-only identity + diagnostics: which HOST (laptop/workbench), the connected browser instance(s), and bridge/extension versions — call it to CONFIRM which host/profile you're on before acting (metadata only, no page content) |
+| `browser(op="whoami")`                 | read-only identity + diagnostics: which HOST (laptop/workbench), YOUR OWN browser profile, and bridge/extension versions — call it to CONFIRM which host/profile you're on before acting (metadata only; you cannot see the operator's other profiles or what any tab is browsing) |
 
 ## Rules
 - **Prefer `op="text"` over `op="html"`.** `text` returns clean innerText (~KB).

