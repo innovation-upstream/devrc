@@ -22,6 +22,22 @@ let
   # box would not). Approximated as isNixOS, mirroring graphical.nix — deliberately NOT
   # !serverMode, which is true on the graphical workbench.
   graphical = isNixOS;
+  # TEMPORARY diagnostic: the keylog CPU-spin stack capture (service + timer,
+  # see keylog-spin-capture below). Gated as its own flag rather than reusing
+  # `graphical` because enabling it drags an UNCACHED from-source py-spy build
+  # (Rust + libunwind) into every `home-manager switch` on that host, and a
+  # build failure there fails the whole switch. Flip to false to opt a host out
+  # without touching the unit definitions. DELETE the flag and the units once
+  # the spin is root-caused and the CPUQuota on keylog.service comes off.
+  # NOT on the laptop: it reads kernel.yama.ptrace_scope=1 (workbench reads 0,
+  # verified 2026-07-30), so py-spy can never attach to keylog.service there and
+  # the unit would exit at the sysctl gate every 5min forever. Worse, merely
+  # ENABLING it drags the uncached from-source py-spy build (Rust + libunwind)
+  # into the laptop's `home-manager switch` — and a build failure there fails
+  # the whole switch, which would stop the laptop converging to origin/main for
+  # a workbench-only diagnostic. (`isLaptop` is defined below; `let` bindings
+  # are order-independent.)
+  enableKeylogSpinCapture = graphical && !isLaptop;
   # Host discriminator for the graphical config (i3 + i3status-rust bar). Evaluated
   # per-host under `--impure`: the laptop has an intel_backlight, the workbench does
   # not. Threaded into ./graphical.nix via _module.args below. Drives battery/backlight
@@ -710,10 +726,97 @@ in
       ExecStart = "${pkgs.python312.withPackages (ps: [ ps.xlib ps.pyyaml ])}/bin/python3 %h/.config/activity-collector/keylog/keylog.py";
       Restart = "always";
       RestartSec = 10;
+      # Ceiling on a measured runaway: this unit was observed pinning a full
+      # core (96% CPU over a 3s sample, ~2 kernel ticks — i.e. spinning in
+      # userspace, not blocked on X) sustained over 24h+ regardless of typing.
+      # Root cause is still open; the cap bounds the blast radius on a box that
+      # is CPU-contended (PSI cpu some ~63%).
+      #
+      # ⚠ COUPLED to keylog-spin-capture.sh's threshold (default 20%). A 30%
+      # quota lets a 3s sample accrue at most ~90 of 300 ticks = 30%, leaving
+      # only a 10-point margin over the threshold. Lowering this below ~25%
+      # blinds the watcher silently — change both together, or not at all.
+      #
+      # NOT yet verified that capture keeps up under load while throttled: if
+      # the spin turns out to be backlog-driven (X RECORD buffer draining
+      # slower than it fills), throttling the drainer could make the backlog
+      # WORSE rather than bounding it. Watch for dropped events / rising RSS.
+      # Remove once the spin is fixed and verified idle-at-~0%.
+      CPUQuota = "30%";
       # Restart on a script-only change (see activity-collector for rationale).
       X-Restart-Triggers = [ "${../scripts/collector/keylog}" ];
     };
     Install = {
+      WantedBy = [ "graphical-session.target" ];
+    };
+  };
+
+  # Catch the keylog spin in the act. keylog.service degenerates into a
+  # ~full-core userspace loop over hours/days (see CPUQuota above); a restart
+  # clears it, which is exactly what makes it hard to diagnose — noticing it
+  # and restarting destroys the evidence. This samples CPU and dumps the
+  # Python stack the first time it crosses the threshold, then self-disables
+  # (rm ~/.cache/keylog-spin/.captured to re-arm).
+  #
+  # nixpkgs' py-spy fails its own test suite (test_thread_names panics on an
+  # Option::unwrap of None — upstream test bug, not a build problem), so the
+  # check phase is skipped. Pinning it here also gives it a GC root, instead
+  # of rebuilding it from source on every ad-hoc nix-shell.
+  #
+  # ⚠ BUILD COST: neither plain nor overridden py-spy is in cache.nixos.org
+  # (both drv outputs 404), so every host that switches COMPILES it from
+  # source (Rust + libunwind), and a build failure there fails the whole
+  # home-manager switch. That is the price of a temporary diagnostic — set
+  # enableKeylogSpinCapture = false (defined in the `let` block ABOVE) to opt
+  # a host out entirely.
+  #
+  # py-spy needs kernel.yama.ptrace_scope=0 to attach to a non-descendant, and
+  # that is NOT uniform here: the workbench reads 0, the LAPTOP reads 1
+  # (verified 2026-07-30). On a ptrace_scope=1 host py-spy can never attach, so
+  # the script checks the sysctl FIRST and exits quietly — no dump, no toast,
+  # no retry. It also gives up after KEYLOG_SPIN_MAX_FAILS incomplete captures,
+  # so a broken py-spy cannot turn the 5-min timer into a permanent loop.
+  systemd.user.services.keylog-spin-capture = lib.mkIf enableKeylogSpinCapture {
+    Unit = {
+      Description = "Capture a py-spy stack dump if keylog.service starts spinning";
+      # Only meaningful alongside a live keylog.service, which is itself
+      # graphical-session-gated — no point waking on a headless host.
+      After = [ "graphical-session.target" ];
+      PartOf = [ "graphical-session.target" ];
+      OnFailure = [ "notify-failure@%n.service" ];
+    };
+    Service = {
+      Type = "oneshot";
+      # Hang guard only. The actual cap on how long keystroke capture can be
+      # ptrace-frozen is the `timeout 10` / `timeout 15` wrapping each py-spy
+      # invocation in the script — systemd's timeout is the outer backstop.
+      TimeoutStartSec = 45;
+      Environment = [
+        "PATH=${lib.makeBinPath [
+          (pkgs.py-spy.overrideAttrs (_: { doCheck = false; }))
+          pkgs.coreutils pkgs.procps pkgs.systemd pkgs.gnugrep pkgs.gawk
+          pkgs.libnotify pkgs.bash
+        ]}"
+      ];
+      ExecStart = "${pkgs.bash}/bin/bash ${../scripts/keylog-spin-capture.sh}";
+    };
+  };
+
+  systemd.user.timers.keylog-spin-capture = lib.mkIf enableKeylogSpinCapture {
+    Unit = {
+      Description = "Periodic check for the keylog CPU spin";
+      PartOf = [ "graphical-session.target" ];
+    };
+    Timer = {
+      OnStartupSec = "5min";
+      OnUnitActiveSec = "5min";
+      # (No Persistent — it only applies to OnCalendar timers, not monotonic
+      # ones. Same rationale as the other monotonic timers in this file.)
+    };
+    Install = {
+      # graphical-session.target, NOT timers.target: keylog.service only runs
+      # under a graphical session, so on a headless host this would otherwise
+      # wake every 5min just to find MainPID=0 and exit.
       WantedBy = [ "graphical-session.target" ];
     };
   };
