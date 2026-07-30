@@ -133,6 +133,14 @@ CASES = [
     ("gap: backtick pwd",              "git a" + "dd `pwd`", True),
     ("gap: :/* root glob",             "git a" + "dd ':/*'", True),
     ("gap: .// double slash",          "git a" + "dd .//", True),
+    # same-shape siblings of the stems above -- all proven whole-tree
+    ("gap: $PWD//",                    'git a' + 'dd "$PWD//"', True),
+    ("gap: $PWD/./",                   'git a' + 'dd "$PWD/./"', True),
+    ("gap: $(pwd)//",                  'git a' + 'dd "$(pwd)//"', True),
+    ("gap: `pwd`/./",                  'git a' + 'dd "`pwd`/./"', True),
+    ("gap: :(top,glob)",               "git a" + "dd ':(top,glob)'", True),
+    ("gap: :(top,icase)",              "git a" + "dd ':(top,icase)'", True),
+    ("gap: bare colon pathspec",       "git a" + "dd ':'", True),
     ("gap: glob *",                   "git a" + "dd *", True),
     ("gap: $PWD",                     "git a" + "dd $PWD", True),
     ("gap: :(top)",                   "git a" + "dd ':(top)'", True),
@@ -159,6 +167,20 @@ CASES = [
     ("ok: git add -- x -A",           "git a" + "dd -- x -A", False),
     ("ok: $PWD-rooted single path",   "git a" + "dd $PWD/src/main.go", False),
     ("ok: rooted glob :/ *.go",       "git a" + "dd ':/src/*.go'", False),
+    # the widened stems must not swallow scoped paths built from them
+    ("ok: $PWD/<path>",               'git a' + 'dd "$PWD/src/main.go"', False),
+    ("ok: ${PWD}/<path>",             'git a' + 'dd "${PWD}/x"', False),
+    ("ok: $(pwd)/<file>",             'git a' + 'dd "$(pwd)/file.txt"', False),
+    ("ok: $PWDX is a different var",  'git a' + 'dd "$PWDX"', False),
+    ("ok: $PWD_BACKUP",               'git a' + 'dd "$PWD_BACKUP"', False),
+    ("ok: :(top,glob) with a path",   "git a" + "dd ':(top,glob)x'", False),
+    ("ok: :(exclude)vendor",          "git a" + "dd ':(exclude)vendor'", False),
+    ("ok: :!foo negation",            "git a" + "dd ':!foo'", False),
+    ("ok: ..foo is a filename",       "git a" + "dd ..foo", False),
+    ("ok: .hidden file",              "git a" + "dd .hidden", False),
+    ("ok: .github path",              "git a" + "dd .github/workflows/ci.yml", False),
+    ("ok: ../sibling/file.txt",       "git a" + "dd ../sibling/file.txt", False),
+    ("ok: ../pkg/ scoped dir",        "git a" + "dd ../pkg/", False),
 
     # --- was-a-bypass under _strip_message_text: MUST STAY BLOCKED ------
     # round 1: same-tag heredoc / substitution / stale offsets / escaped quote

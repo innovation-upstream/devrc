@@ -71,19 +71,32 @@ _BLIND_SHORT = re.compile(r"-[A-Za-z]+")
 # git accepts unique long-option PREFIXES: --al == --all, --no-ignore-r == …removal.
 _BLIND_LONG = re.compile(r"--al|--all|--no-ignore-r[a-z-]*")
 # Whole-tree pathspecs.
-# `..` IS included. It errors at the repo ROOT ("outside repository"), which is
-# what an earlier root-only test showed — but from a SUBDIRECTORY it stages the
-# entire tree, and `git -C <repo>/sub add ..` reaches that without a `cd`, in
-# exactly the shape this guard now covers. Blocking the root form costs nothing
-# because git rejects it anyway.
-# `${PWD}` / `$PWD/` / `` `pwd` `` / `:/*` are the near-miss siblings of forms
-# already blocked; all verified to stage the whole tree.
+#
+# `..` IS included. Measured: it errors at the repo ROOT ("outside repository"),
+# stages the WHOLE TREE from a depth-1 subdirectory, and stages only the parent
+# directory from depth >= 2 (from `a/b/` it stages `a/`). So blocking it is
+# exact at depth 1, harmless at the root (git rejects it anyway), and a
+# fail-closed over-block deeper down — which the "err toward over-matching"
+# stance above accepts. It appears 0 times in 32k real commands.
+# (An earlier root-only test led to it being excluded, then a depth-1-only
+# test led to the claim that it is always whole-tree. Both were generalised
+# from a single depth. Measure at 0, 1 and 2 before touching this.)
+#
+# KNOWN LIMITATION, deliberately not chased: whether `X/..` is whole-tree
+# depends on runtime cwd and repo-root depth, which the command text does not
+# carry — `a/..` at the root is the whole tree, `a/b/..` is just `a/`, and
+# staging `a/` is allowed. Same for `$OLDPWD` and
+# `$(git rev-parse --show-toplevel)`, which the per-token split shatters
+# anyway. Guessing at these is the trap the DESIGN NOTE records.
+_TAIL = r"(?:/[./]*)?"              # trailing / ./ .// ./. on any stem
 _BLIND_PATH = re.compile(
-    r"\.{1,2}(?:/[./]*)?"          # . ./ .// ./. .. ../ ../..
-    r"|:/\*?|\*"                    # :/ :/* *
-    r"|\$\{?PWD\}?/?\.?"            # $PWD ${PWD} $PWD/ $PWD/.
-    r"|\$\(pwd\)/?\.?|`pwd`/?\.?"   # $(pwd) `pwd`
-    r"|:\(top\)\*?"
+    r"\.{1,2}" + _TAIL              # . ./ .// ./. .. ../ ../..
+    + r"|:/\*?|\*"                  # :/ :/* *
+    + r"|\$\{?PWD\}?" + _TAIL       # $PWD ${PWD} $PWD/ $PWD// $PWD/./
+    + r"|\$\(pwd\)" + _TAIL         # $(pwd) $(pwd)// …
+    + r"|`pwd`" + _TAIL             # `pwd` `pwd`/./ …
+    + r"|:\(top[a-z,]*\)\*?"        # :(top) :(top,glob) :(top,icase)
+    + r"|:"                         # bare `:` is the whole repo
 )
 
 
