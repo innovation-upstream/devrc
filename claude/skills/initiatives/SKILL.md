@@ -112,9 +112,40 @@ curl -sf -X POST http://192.168.50.250:8899/refresh; echo
 #   in-cluster devpod does NOT). Two human gates: this creates a card; you still tap Dispatch in clawgate.
 curl -s -X POST http://192.168.50.250:8899/api/dispatch -H 'Content-Type: application/json' \
   -d '{"repo":"<repo full path OR repo_name>","slug":"<slug>"}'   # 200 {ok,task_id} / 400 / 404 / 502
-# dispatch.py mirrors repo-cos/clawgate.py: POST clawgate /api/tasks {directory(=label),body,repo?} —
+# dispatch.py mirrors repo-cos/clawgate.py: POST clawgate /api/tasks {directory(=label),body,repo?,tags} —
 #   model OMITTED → clawgate default deepseek. Confirm the card: GET {CLAWGATE_API_URL}/api/tasks (Bearer).
 # Full arc: devrc/claudedocs/handoff-initiatives-nextstep-dispatch-shipped-2026-07-26.md
+
+# --- LINKED CLAWGATE TASKS (PR #202, origin/main e3e7b07) — the CONSUMER side of the tag ---
+# tasks.py joins initiatives → clawgate tasks on the `initiative:<slug>` tag. Rendered ONLY in the
+#   EXPANDED card detail (the collapsed card stays two-line for scanning).
+# 🔴 The join is EXACT / case-sensitive / VERBATIM — a plain dict lookup on the raw slug, no case
+#   folding. `initiative:Foo` keys `Foo` and therefore NEVER matches the ledger slug `foo`. That is
+#   why repo-cos's `taggable_slug` drops any non-lowercase slug rather than lowercasing it.
+# ⤴ dispatch is GUARDED: when linked tasks are open it arms a two-tap "already has N open task —
+#   dispatch anyway?" via the pre-existing `armConfirm` (armConfirm is NOT from #202).
+#   OPEN_STATUSES = ("open","in_progress","ready_for_review") — a closed ALLOW-list, so an unknown
+#   status is non-blocking (fail-open). ⚠ clawgate has NO `dismissed` task status; the vocabulary is
+#   exactly {open,in_progress,ready_for_review,complete} and dismissing DELETES. (`dismissed` exists
+#   only in clawgate's unrelated *suggestions* table.)
+# dispatch.py tags what it creates (`initiative:<slug>`, exact-or-nothing) and FAILS OPEN TWICE:
+#   build_tags emits [] on any doubt, then post_task retries ONCE untagged on HTTP 400 only.
+#   ⚠ its normalize_tag/normalize_tags are a DELIBERATE DUPLICATE of repo-cos/clawgate.py (the
+#   documented source of truth) — change both together. They have ALREADY DRIFTED: repo-cos gained
+#   `guard_tags` (per-tag, rejects non-list/non-string input, #206); dispatch.py has no equivalent.
+# Fetch shape: ONE fetch per BOARD RENDER (not per card — the board carries ~140 cards), 2.0s
+#   WALL-CLOCK deadline, 1 MiB cap, performed OUTSIDE `DataProvider._lock` (deliberate — keep it
+#   that way), 30s cache keyed on last ATTEMPT, serve-stale-on-failure, single-flight. Silent
+#   best-effort: any clawgate failure logs to stderr and the board renders unchanged.
+# 🟡 KNOWN, MEASURED, NOT FIXED: the abandoned fetch worker does NOT self-terminate. `resp.read(n)`
+#   blocks on a BufferedReader until n bytes or EOF, so with READ_CHUNK=64 KiB the wall-clock
+#   re-check is never reached for bodies >=64 KiB (measured: 6 fetches → 6 live threads, +12 FDs,
+#   none reclaimed). Bounded today only because the real payload is ~16 KB. Fix = `read1()`.
+#   Also: serve-stale has NO upper age bound (clawgate down → last good map served forever), and
+#   `group_by_slug` keys on slug ALONE, not (repo, slug) — zero collisions measured, still latent.
+# ⚠ `assistant.py` is MISSING from the viewer's X-Restart-Triggers (nix/home.nix) though it is an
+#   importlib-cached long-lived sibling → an assistant.py-only change switches cleanly and silently
+#   does nothing until a manual restart. Same trap the block's own comment warns about for tasks.py.
 ```
 
 ## deploy a change
@@ -145,6 +176,8 @@ KUBECONFIG=$KC_HOMELAB kubectl -n flux-system annotate helmrelease initiatives-a
 ```
 
 ## ⚠ gotchas (each cost real time)
+- **Running `run-viewer.sh` from an INTERACTIVE shell needs `env -u shellHook`.** `homelab-talos/.envrc` is `use flake`, and that flake's `shellHook` exports a **relative** `KUBECONFIG=homelab-kubeconfig`. The wrapper only defaults (`${KUBECONFIG:-<absolute>}`) so it defers to the relative one, and the inner `nix-shell -p …` re-executes the **inherited `$shellHook`**, re-exporting it even if you fixed `KUBECONFIG` first — the store read then fails silently from any cwd that isn't the repo root. `env -u shellHook ./run-viewer.sh`. **Systemd is unaffected** (minimal env, no direnv).
+- **Don't pin absolute slug counts in docs or tests.** The live store drifted **139→144 over ~3 days**; every doc or assertion carrying a total goes stale within days. Assert/state **properties** (floors, set-equality, ratios) instead — this already rotted repo-cos's corpus tests three days running before they were rewritten.
 - **Hardening = first-class kubeclaw 0.7.x chart VALUES (postRenderers + hand-written CNP RETIRED).**
   The chart (kubeclaw ≥0.7.0) exposes the three knobs the initiatives agent uses directly in `values`:
   **`securityContext`** (toYaml full-replace → `capabilities.drop:[ALL]` + `allowPrivilegeEscalation:false`

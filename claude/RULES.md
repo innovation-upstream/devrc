@@ -71,6 +71,7 @@ Derived from auditing 232 sessions: 1,712 preventable errors + a ~1,000× redund
 
 - **zsh reserves `status`** — `status=$(...)` → `read-only variable: status`. Use `rc=`/`out=`.
 - **`sleep N && <cmd>` is blocked** by the harness — use the `Monitor` tool with an until-loop, or `run_in_background`. Never prepend `sleep` to a poll.
+- **`pgrep -f` / `pkill -f` match your OWN shell.** A wait loop like `while pgrep -f 'e2e/run.sh'; do sleep 10; done` never exits — the pattern appears in the loop's own command line, so it detects itself. Worse, `pkill -f '<pattern>'` in a background script can **kill the script itself**. Bit twice in one session (a 20-minute stall, then a job that killed itself with exit 144). Use PIDs (`ps -eo pid,etimes,args --no-headers | awk '…'` → `kill`), or add `| grep -v $$`, or match on something absent from your own command line.
 - **Read before Edit/Write** — a file must be Read in-session first, or the call errors ("File has not been read yet") and burns a round-trip.
 - **NixOS: no apt/dnf** — for a missing tool (pandoc, pdftoppm/poppler, openpyxl, …) run it under `nix-shell -p <pkg> --run "..."` proactively; don't run bare, fail, then retry.
 - **Don't re-emit git orientation** — the harness shows branch + status at session start; read that instead of `cd repo && echo === && git status` (this preamble ran ~1,000× last audit window). When you genuinely need fresh state, one compact `git status -s && git log --oneline -3`.
