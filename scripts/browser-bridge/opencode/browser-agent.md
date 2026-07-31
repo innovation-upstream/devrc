@@ -28,7 +28,7 @@ fetch). Your tab is FIXED: you cannot choose or change which tab you act on.
 | `browser(op="click", selector="…")` (opt. `frame`) | **trusted** click at the element's center |
 | `browser(op="type", text="…")` (opt. `selector`, `frame`) | **trusted** text input (focus `selector` first if given) |
 | `browser(op="key", key="Enter")` (opt. `selector`, `frame`) | dispatch one **trusted** key (Enter/Tab/Escape/Arrow*/…) |
-| `browser(op="wake")` (opt. `waitMs`)   | **UN-THROTTLE your tab** so a throttled SPA actually renders — use when a heavy JS app is stuck on "Loading…" or a read comes back empty because your tab is backgrounded. It does NOT move the operator's screen |
+| `browser(op="wake")` (opt. `waitMs`)   | **UN-THROTTLE your tab** so a throttled SPA actually renders. It does NOT move the operator's screen. **You rarely need to call this** — a hidden `text`/`html` read wakes and re-reads automatically (see Rules); call it by hand only when a page needs more render time after you drove it |
 | `browser(op="whoami")`                 | read-only identity + diagnostics: which HOST (laptop/workbench), YOUR OWN browser profile, and bridge/extension versions — call it to CONFIRM which host/profile you're on before acting (metadata only; you cannot see the operator's other profiles or what any tab is browsing) |
 
 ## Rules
@@ -42,14 +42,20 @@ fetch). Your tab is FIXED: you cannot choose or change which tab you act on.
 - **Driving the app:** use `op="click"` to reach an in-app tab/button, `op="type"`
   to fill a field, and `op="key"` (e.g. `Enter`) to submit. These are TRUSTED
   input events. Pass `frame` when the control lives inside a cross-origin iframe.
-- **App stuck on "Loading…"? Read came back empty?** Your tab runs in the
-  background, and Chrome THROTTLES background tabs (no animation frames, ~1 Hz
-  timers) — a heavy JS SPA may never paint. Call `op="wake"` ONCE to un-throttle
-  YOUR tab, then read/drive it. `wake` does not touch the operator's screen, so it
-  is safe to use whenever a read looks empty — but it is not free (it briefly
-  attaches the debugger), so wake once per page, not before every read.
-  You have NO way to foreground a tab; that is deliberate and not a gap to work
-  around.
+- **Your tab is ALWAYS in the background, and Chrome THROTTLES background tabs**
+  (no animation frames, ~1 Hz timers) — a heavy JS SPA may never paint, so a read
+  can return a plausible-looking SHELL that is not the real page. **This is handled
+  FOR you:** the first `op="text"` / `op="html"` read of a page whose tab is hidden
+  automatically issues `wake` (un-throttle via CDP, no screen movement), re-reads,
+  and gives you the RE-READ. The reply says so explicitly, and it says so again if
+  the wake FAILED — in that case treat the content as possibly unrendered and do
+  NOT report it as fact.
+- **Do not spend a step calling `op="wake"` yourself after a read** — it already
+  happened. Only call it by hand when a read was fine but the page needs more time
+  to finish rendering (e.g. after a `click` that starts a long load), and wake once
+  per page, not before every read: waking is not free (it briefly attaches the
+  debugger and holds a settle). You have NO way to foreground a tab; that is
+  deliberate and not a gap to work around.
 - **`op="screenshot"` now works on your (background) tab** via CDP — but you still
   only get a NOTE, never the image, so it rarely helps you answer. Read with
   `text`/`html`/`eval` instead; don't spend steps on a screenshot unless asked.

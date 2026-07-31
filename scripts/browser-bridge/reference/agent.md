@@ -95,6 +95,29 @@ browser agent "go to news.ycombinator.com and report the top 3 story titles" \
   still: it is not reachable by the model at ALL**, not even via that opt-in,
   because it takes the operator's screen. The agent gets `wake` instead — the
   un-throttling it actually needed, with no focus theft.
+- **Hidden-tab AUTO-WAKE (deterministic, not modelled).** The agent's tab is always
+  opened `active:false`, so it is always hidden and always throttled. The bridge
+  already flags that (`data.hidden:true` + the throttle note on every read), but the
+  tool's `summarizeResult` used to return a bare `data.text`/`data.html` and DISCARD
+  both — so on a throttled SPA that rendered a plausible-looking shell the model read
+  the shell and returned a **confident wrong answer with `status:"ok"`**, quoting the
+  shell verbatim as evidence. Measured at **1 of 13 successful runs (7.7%)**, and it
+  was the only failure mode found (`claudedocs/browser-bridge-deepseek-measurement-
+  2026-07-31.md` §3.2). Now, in `opencode/tools/browser_tool_impl.mjs`:
+  - the **first** hidden `text`/`html` read of a page makes the TOOL issue `wake`,
+    re-read, and return the re-read — inside one model tool call, no step spent, no
+    decision asked of the model. `wake`, never `activate`.
+  - **once per PAGE**, keyed by the read's `url` per forced tab. The un-throttle dies
+    with the CDP detach but the DOM it produced persists, so later reads are cheap. A
+    `nav` clears the tab's record (new document → throttled again); a click/eval-driven
+    URL change produces a new key, so it wakes again.
+  - **fail-open**: a failed/forbidden wake, or a failed re-read, returns the ORIGINAL
+    read prefixed with a loud `[browser-tool] WARNING: … 'wake' FAILED (<reason>)`.
+    A read never becomes an error. A failed wake is not retried per-read.
+  - `hidden` + the server's note now survive `summarizeResult` for `text`/`html`/`eval`
+    regardless, so a still-hidden read is visible rather than silent. (`eval` gets the
+    signal but is never auto-re-run — an arbitrary expression is not idempotent.)
+  - kill switch: `BROWSER_AGENT_AUTO_WAKE=0` disables the auto-wake; the warning stays.
 - **Guardrails:** a step budget (`--steps`, default 12), a wall-clock `--timeout`
   (default 120s) enforced with a **process-group kill** (`setsid` + kill the whole
   group, so no opencode child survives), `--deny-domains`/`--allow-domains`

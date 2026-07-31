@@ -329,6 +329,125 @@ export function buildRequest(args, env, token) {
   };
 }
 
+// --- deterministic hidden-tab auto-wake ------------------------------------ //
+// WHY (measured, browser-bridge-deepseek-measurement-2026-07-31.md §3.2): the
+// agent's tab is ALWAYS opened `active:false`, so it is ALWAYS hidden and always
+// throttled. The server already self-announces that (`data.hidden:true` +
+// HIDDEN_TAB_NOTE on every read — extension/protocol.js annotateVisibility), but
+// summarizeResult used to return a BARE `data.text`/`data.html` and throw both
+// away. When a throttled SPA renders a sparse-but-PLAUSIBLE shell, the model read
+// the shell, could not tell the tab was hidden, and returned a confident WRONG
+// answer with `status:"ok"` and evidence that quoted the shell verbatim. That was
+// 1 of 13 `ok` runs (7.7%) and the ONLY failure mode found.
+//
+// The note reached the model only BY ACCIDENT before: via the `eval` branch, when
+// the value happened to be non-string and fell through to JSON.stringify(data).
+// That accident saved two runs and was absent in the failing one. So the fix is
+// DETERMINISTIC, not modelled: on the first hidden `text`/`html` read of a page
+// the tool ITSELF issues `wake`, re-reads, and returns the re-read. The model
+// never has to notice or decide.
+//
+// `wake`, NOT `activate` — wake un-throttles via CDP focus emulation and moves NO
+// focus; `activate` takes the operator's screen and is unreachable by the agent by
+// design (absent from OP_TO_SERVER). This is what makes an automatic un-throttle
+// acceptable for an autonomous background agent at all.
+
+// The ops that trigger an automatic wake. Deliberately NOT `eval`: an eval is a
+// caller-authored expression whose re-execution may not be idempotent. eval still
+// gets the SIGNAL (see HIDDEN_SIGNAL_OPS) — it just is not re-run automatically.
+export const AUTO_WAKE_OPS = Object.freeze(["text", "html"]);
+
+// The ops whose summary carries the hidden/throttle signal when `data.hidden` is
+// true. This is the "stop discarding the signal REGARDLESS" half of the fix: even
+// with auto-wake, a still-hidden or failed-wake read must be VISIBLE, not silent.
+export const HIDDEN_SIGNAL_OPS = Object.freeze(["text", "html", "eval"]);
+
+// Bound the per-tab page-key set so a long run that navigates many times cannot
+// grow it without limit. On overflow the set is cleared (worst case: one extra
+// wake), never allowed to grow.
+export const AUTO_WAKE_PAGE_CAP = 32;
+
+// tabId -> Set<pageKey>. Module-level, i.e. per browser-agent PROCESS — which is
+// exactly the lifetime of one `browser agent` run. Nothing is persisted to disk.
+const _wokenPages = new Map();
+
+// Test/seam hook: forget every recorded wake.
+export function resetAutoWakeState() { _wokenPages.clear(); }
+
+// The identity of the PAGE a read observed. Every read result carries the url it
+// read (extension/service_worker.js: `{url: tab.url, ...}`; for a `--frame` read
+// it is the FRAME's url). Using the url as the key means an in-page navigation
+// the agent caused with `click`/`eval` — not just an explicit `nav` — produces a
+// new key, so the new (freshly throttled) page is woken again.
+export function pageKeyOf(data) {
+  return typeof (data && data.url) === "string" ? data.url : "";
+}
+
+export function hasWokenPage(tab, key) {
+  const s = _wokenPages.get(tab);
+  return !!(s && s.has(key));
+}
+
+export function markPageWoken(tab, key) {
+  let s = _wokenPages.get(tab);
+  if (!s) { s = new Set(); _wokenPages.set(tab, s); }
+  if (s.size >= AUTO_WAKE_PAGE_CAP) s.clear();
+  s.add(key);
+}
+
+// A `nav` puts a BRAND-NEW document in the tab, and that document is throttled
+// again from scratch — so every recorded wake for the tab is void.
+export function forgetPageWakes(tab) { _wokenPages.delete(tab); }
+
+// Kill switch (reversibility): BROWSER_AGENT_AUTO_WAKE=0 restores the pre-fix
+// behaviour of never auto-waking. The signal-preservation half stays on either
+// way — turning auto-wake off must not put us back to a SILENT wrong answer.
+export function autoWakeEnabled(env) {
+  return String((env && env.BROWSER_AGENT_AUTO_WAKE) ?? "1").trim() !== "0";
+}
+
+// Fallback wording if the server's own note is missing (older extension / a mock).
+export const HIDDEN_FALLBACK_NOTE =
+  "tab is hidden — background tabs are throttled, so SPA content may not have rendered.";
+
+// The one-line, model-facing banner prepended to a read whose tab was hidden.
+// `autoWake` is null (no wake was attempted — e.g. `eval`, or the kill switch) or
+// {state, woke, detail}. Pure + exported so the wording is unit-assertable.
+export function hiddenNotice(data, autoWake) {
+  const note = (data && typeof data.note === "string" && data.note)
+    ? data.note : HIDDEN_FALLBACK_NOTE;
+  const st = autoWake && autoWake.state;
+  if (st === "woke" && autoWake.woke === true) {
+    return "[browser-tool] your tab was HIDDEN and throttled, so 'wake' was issued " +
+      `AUTOMATICALLY (${autoWake.detail}) and the content below is the RE-READ after ` +
+      "waking. No further wake is needed for this page.";
+  }
+  if (st === "woke") {
+    return "[browser-tool] WARNING: your tab was HIDDEN; an automatic 'wake' ran but " +
+      `could NOT confirm the tab un-throttled (${autoWake.detail}). The content below ` +
+      "is the re-read and may STILL be an unrendered shell — do not report it as fact " +
+      "if it looks like a loading/placeholder state.";
+  }
+  if (st === "already") {
+    return "[browser-tool] note: your tab is hidden, but 'wake' already ran for this " +
+      "page — the DOM it rendered persists, so the content below is post-wake.";
+  }
+  if (st === "failed") {
+    return "[browser-tool] WARNING: your tab is HIDDEN and the automatic 'wake' FAILED " +
+      `(${autoWake.detail}). The content below may be an unrendered shell, NOT the real ` +
+      `page. ${note}`;
+  }
+  return "[browser-tool] WARNING: your tab is HIDDEN and Chromium throttles it — the " +
+    `content below may be an unrendered shell, NOT the real page. ${note}`;
+}
+
+// Prepend the banner when the read was hidden (or when a wake was attempted at
+// all, so a wake that un-hid the tab is still reported honestly).
+function _withHiddenNotice(data, body, autoWake) {
+  if (data.hidden !== true && !autoWake) return body;
+  return `${hiddenNotice(data, autoWake)}\n\n${body}`;
+}
+
 // Pull a compact, model-facing string out of the server's 200 envelope. NEVER
 // dumps a base64 screenshot blob into the model context.
 //
@@ -337,13 +456,23 @@ export function buildRequest(args, env, token) {
 // every existing caller/test — is unaffected; an absent env simply means "no
 // instance forced", which is already the safe shape (no browsing domains are ever
 // emitted regardless).
-export function summarizeResult(op, envelope, env = {}) {
+// `autoWake` (4th arg, default null) carries what runBrowserOp did about a hidden
+// tab — see hiddenNotice. It only affects text/html/eval; every other op and every
+// existing caller/test is unaffected.
+export function summarizeResult(op, envelope, env = {}, autoWake = null) {
   const data = (envelope && envelope.data) || {};
-  if (op === "text") return typeof data.text === "string" ? data.text : JSON.stringify(data);
-  if (op === "html") return typeof data.html === "string" ? data.html : JSON.stringify(data);
+  if (op === "text") {
+    const body = typeof data.text === "string" ? data.text : JSON.stringify(data);
+    return _withHiddenNotice(data, body, autoWake);
+  }
+  if (op === "html") {
+    const body = typeof data.html === "string" ? data.html : JSON.stringify(data);
+    return _withHiddenNotice(data, body, autoWake);
+  }
   if (op === "eval") {
     const v = "value" in data ? data.value : data.result;
-    return typeof v === "string" ? v : JSON.stringify(v ?? data);
+    const body = typeof v === "string" ? v : JSON.stringify(v ?? data);
+    return _withHiddenNotice(data, body, autoWake);
   }
   if (op === "nav") {
     return JSON.stringify({ ok: true, url: data.url ?? null, title: data.title ?? null });
@@ -515,6 +644,54 @@ export async function runBrowserOp(args, opts = {}) {
   }
 
   _audit(env, "exec", op, op === "nav" ? hostOf(args.url) : "");
+  const outer = await _send(req, fetchImpl);
+  // whoami returns the diagnostic object DIRECTLY ({ok,host,bridge,instances}) —
+  // there is no {result:<envelope>} wrapper like /cmd. Summarize it as-is.
+  if (op === "whoami") return summarizeResult("whoami", outer, env);
+  let envelope = outer && outer.result;
+  if (envelope && envelope.ok === false) {
+    // An op-level failure in the page (e.g. owned_tab_gone) — surface to the model.
+    throw new BrowserToolRefusal(`op_failed:${envelope.error || "unknown"}`);
+  }
+
+  // A `nav` replaced the document: every wake recorded for this tab is void, the
+  // new page is throttled from scratch.
+  if (op === "nav") {
+    try { forgetPageWakes(forcedTab(env)); } catch { /* no tab → nothing to forget */ }
+  }
+
+  // --- the hidden-tab auto-wake (see AUTO_WAKE_OPS above) --------------------
+  let autoWake = null;
+  const data = (envelope && envelope.data) || {};
+  if (data.hidden === true && HIDDEN_SIGNAL_OPS.includes(op)) {
+    const tab = forcedTab(env);          // already validated by buildRequest
+    const key = pageKeyOf(data);
+    if (hasWokenPage(tab, key)) {
+      // WAKE ONCE PER PAGE. The un-throttled state itself dies with the CDP
+      // detach, but the DOM the page rendered during the wake PERSISTS — so a
+      // following read is cheap and correct without paying another ~1.5s settle.
+      autoWake = { state: "already", woke: null, detail: "" };
+    } else if (AUTO_WAKE_OPS.includes(op) && autoWakeEnabled(env)) {
+      // Marked BEFORE the attempt on purpose: if the wake fails, every later read
+      // of this page must NOT retry it. One failed wake per page, not one per read.
+      markPageWoken(tab, key);
+      _audit(env, "auto_wake", op, "hidden");
+      const r = await _autoWakeAndReRead(args, env, token, fetchImpl);
+      if (r.ok) {
+        envelope = r.envelope || envelope;
+        autoWake = { state: "woke", woke: r.woke, detail: r.detail };
+      } else {
+        // FAIL-OPEN: never turn a working read into an error. Return the original
+        // read, loudly labelled.
+        autoWake = { state: "failed", woke: null, detail: r.detail };
+      }
+    }
+  }
+  return summarizeResult(op, envelope || {}, env, autoWake);
+}
+
+// POST/GET a prepared request and return the parsed outer JSON body.
+async function _send(req, fetchImpl) {
   let resp;
   try {
     const method = req.method || "POST";
@@ -525,26 +702,54 @@ export async function runBrowserOp(args, opts = {}) {
   } catch (e) {
     throw new Error(`browser-tool: transport error talking to the bridge: ${e && e.message}`);
   }
-  const status = resp.status;
+  const st = resp.status;
   const textBody = await resp.text();
-  if (status !== 200) {
-    throw new Error(`browser-tool: bridge returned HTTP ${status}: ${textBody.slice(0, 300)}`);
+  if (st !== 200) {
+    throw new Error(`browser-tool: bridge returned HTTP ${st}: ${textBody.slice(0, 300)}`);
   }
-  let outer;
   try {
-    outer = JSON.parse(textBody);
+    return JSON.parse(textBody);
   } catch {
     throw new Error("browser-tool: unparseable bridge response");
   }
-  // whoami returns the diagnostic object DIRECTLY ({ok,host,bridge,instances}) —
-  // there is no {result:<envelope>} wrapper like /cmd. Summarize it as-is.
-  if (op === "whoami") return summarizeResult("whoami", outer, env);
-  const envelope = outer && outer.result;
-  if (envelope && envelope.ok === false) {
-    // An op-level failure in the page (e.g. owned_tab_gone) — surface to the model.
-    throw new BrowserToolRefusal(`op_failed:${envelope.error || "unknown"}`);
+}
+
+function _msg(e) { return String((e && e.message) || e).slice(0, 200); }
+
+// Issue `wake` on the agent's (env-forced) tab, then RE-RUN the caller's original
+// read and return its envelope. Never throws: every failure comes back as
+// {ok:false, detail} so the caller can fall back to the original read.
+//
+// `wake` goes through buildRequest like any other op, so the op allowlist still
+// applies — an operator who narrowed BROWSER_AGENT_ALLOWED_OPS to exclude `wake`
+// gets a clean refusal here and the fail-open path, not a bypass.
+async function _autoWakeAndReRead(args, env, token, fetchImpl) {
+  let woke = null;
+  let detail = "";
+  try {
+    const wakeOuter = await _send(buildRequest({ op: "wake" }, env, token), fetchImpl);
+    const wEnv = wakeOuter && wakeOuter.result;
+    if (wEnv && wEnv.ok === false) {
+      return { ok: false, detail: `wake failed: ${wEnv.error || "unknown"}` };
+    }
+    const wd = (wEnv && wEnv.data) || {};
+    woke = wd.woke === true;
+    detail = `woke:${wd.woke ?? "unknown"} settleMs:${wd.settleMs ?? "unknown"}`;
+  } catch (e) {
+    return { ok: false, detail: `wake failed: ${_msg(e)}` };
   }
-  return summarizeResult(op, envelope || {});
+  // The wake's un-throttle does not survive its own CDP detach, but the DOM the
+  // page rendered during it does — which is exactly what this re-read collects.
+  try {
+    const outer = await _send(buildRequest(args, env, token), fetchImpl);
+    const envelope = outer && outer.result;
+    if (envelope && envelope.ok === false) {
+      return { ok: false, detail: `re-read failed: ${envelope.error || "unknown"}` };
+    }
+    return { ok: true, envelope, woke, detail };
+  } catch (e) {
+    return { ok: false, detail: `re-read failed: ${_msg(e)}` };
+  }
 }
 
 function _readTokenFile(env) {
