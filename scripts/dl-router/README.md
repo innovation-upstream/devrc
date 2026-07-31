@@ -184,29 +184,61 @@ The library root is a **live qBittorrent seeding target**. A plain `mv` of a
 torrent payload makes the files vanish from qBittorrent's point of view and
 seeding stops. So:
 
-* `dl-route backfill plan` — **read-only** with respect to the tree. Seeds the
-  alias table from existing directory names and torrent names, then proposes a
-  directory per loose root file and writes a manifest (TSV to read, JSON to
-  apply). Each row is tagged `qbt` (torrent-backed → `setLocation`), `fs`
-  (plain rename), `NEW` (needs directory creation) or `SKIP`.
-* `dl-route backfill apply --manifest <path>` — refuses to run without an
-  explicit manifest you have reviewed. Torrent-backed rows move via
-  `torrents/setLocation` and the torrent is re-checked afterwards; anything
-  else moves via `os.rename`. Any failure aborts the remaining rows.
-  `--dry-run` prints the exact operations.
+* `dl-route backfill plan` — **read-only against the tree AND the alias
+  database**. It works out which aliases the existing directory and torrent
+  names would seed and uses them *in memory*; `--seed-aliases` is what actually
+  persists them into the store that drives live routing. It then proposes a
+  directory per loose root file and writes a manifest (**TSV — the artefact you
+  review and edit** — plus a JSON copy). Each row is tagged `qbt`
+  (torrent-backed → `setLocation`), `fs` (**proven** not torrent-backed → plain
+  rename), `NEW` (needs directory creation) or `SKIP`, and carries a `signal`
+  column saying what the proposal actually rests on (`alias` / `filename` /
+  `none`).
+* `dl-route backfill apply --manifest <path>.tsv` — refuses to run without an
+  explicit manifest you have reviewed. **Edit the `action` column and it takes
+  effect**: the TSV is a first-class manifest, and pointing `apply` at the JSON
+  after editing the TSV is refused rather than silently running the unedited
+  plan. Torrent-backed rows move via `torrents/setLocation` and the torrent is
+  re-verified afterwards — **waiting out the `moving` state**, because
+  `setLocation` returns as soon as the request is accepted, not when the
+  payload has arrived. Any failure aborts the remaining rows. `--dry-run`
+  prints the exact operations.
 
-`SKIP` is the default and the safe answer. In particular, **if qBittorrent is
-unreachable, or its host↔container path mapping cannot be derived, every row is
-SKIP** — without the torrent list nothing can prove a file is not a live
-payload. The path mapping is derived at runtime by correlating
-`torrents/info[].save_path` against paths that exist on the host; it is
-deliberately not read from qBittorrent's stored config, whose `LastSavePath`
-references a mount point that no longer exists.
+**`apply` re-derives everything against live qBittorrent before it touches a
+row.** The manifest's `move` and `torrent_hash` are plan-time values, and a
+torrent can be added, removed or moved in between; a row whose live
+classification disagrees with the manifest aborts the run and tells you to
+re-plan. A client is therefore required whenever *anything* is going to move,
+not only for rows the plan labelled `qbt`.
 
-The backfill has no page context, so there the **filename stem is the subject
-signal** (the live download path keeps the weak ≤0.50 filename cap, where it
-competes with real page context). The threshold is unchanged, so an opaque
-name still lands on `SKIP`.
+`SKIP` is the default and the safe answer, and **absence of proof is never
+treated as proof**:
+
+* qBittorrent unreachable, or its host↔container mapping underivable → every
+  row is `SKIP`.
+* Torrents exist but their **file lists** could not be read → no row may be
+  `fs`. The index knows a torrent's files, not just its `content_path`, because
+  a multi-file or no-root-folder torrent's payload sits *directly at the
+  library root* — exactly this tool's target population — and reading absence
+  from a partial index as "not torrent-backed" is a plain rename of a live
+  seeding payload.
+* A reachable qBittorrent with **no torrents at all** is positive proof, and
+  `fs` is then genuinely safe.
+
+The path mapping is derived at runtime by correlating
+`torrents/info[].save_path` against paths that exist on the host. It is
+deliberately not read from qBittorrent's stored config (whose `LastSavePath`
+references a mount point that no longer exists), it needs **more than one
+corroborating torrent** and an outright winner, and it must be able to express
+the library root — a mapping that cannot is worse than none, because it would
+classify every loose file as not-torrent-backed.
+
+The backfill has no page context, so the only signal that may carry a row is an
+**explicit alias** on the filename stem (seeded from a directory or torrent
+name, or hand-set) — recorded knowledge rather than a guess about an opaque
+filename. The filename itself stays under the spec's **≤0.50 cap**, so a
+filename-only row cannot reach the 0.75 threshold and is labelled `filename` in
+the manifest.
 
 Nothing outside the library root is ever touched, and existing directories are
 never renamed.
@@ -250,8 +282,8 @@ dl-route dirs                        list routing targets
 dl-route match --filename F --tag T  dry-run the matcher on a context
 dl-route log -n 20                   recent routing decisions
 dl-route alias list|set|rm           inspect/edit the alias table
-dl-route backfill plan               read-only; writes a manifest
-dl-route backfill apply --manifest P [--dry-run]
+dl-route backfill plan [--seed-aliases]  read-only (tree AND alias DB)
+dl-route backfill apply --manifest P.tsv [--dry-run]
 dl-route fetch URL --dir NAME        queue a yt-dlp job
 dl-route token                       print the bearer token
 ```

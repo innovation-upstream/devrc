@@ -97,20 +97,37 @@ payload with `mv` breaks seeding.
 
 ```bash
 dl-route backfill plan                                  # READ-ONLY
-dl-route backfill apply --manifest <path>.json --dry-run
-dl-route backfill apply --manifest <path>.json
+dl-route backfill plan --seed-aliases                   # ...and persist aliases
+dl-route backfill apply --manifest <path>.tsv --dry-run
+dl-route backfill apply --manifest <path>.tsv
 ```
 
-* `plan` never writes into the tree. Review the TSV before applying anything.
-* `apply` refuses to run without an explicit manifest. Torrent-backed rows move
-  via `torrents/setLocation` and the torrent is re-verified afterwards; any
-  failure aborts the remaining rows.
-* **If qBittorrent is unreachable or the host↔container path mapping cannot be
-  derived, every row is `SKIP`** — that is correct, not a bug. Fix the
-  credentials in `config.toml` rather than working around it.
-* The path mapping is derived at runtime from `torrents/info[].save_path`.
-  Do **not** hardcode it and do not read it from qBittorrent's stored config —
-  its `LastSavePath` points at a mount that no longer exists.
+* `plan` writes nothing — not into the tree, and **not into the alias
+  database**. It uses the aliases it would seed in memory; `--seed-aliases`
+  persists them.
+* **The TSV is the reviewed artefact.** Edit the `action` column to `SKIP` a
+  row and it takes effect — `apply` reads the TSV. Pointing `apply` at the
+  `.json` after editing the TSV is refused, not silently ignored.
+* `apply` refuses to run without an explicit manifest, and **re-derives every
+  row against live qBittorrent** before touching anything: the manifest's
+  `move`/`torrent_hash` are plan-time values. A disagreement aborts the run and
+  asks you to re-plan. It needs credentials whenever anything is going to move,
+  not just for `qbt` rows.
+* Torrent-backed rows move via `torrents/setLocation` and are re-verified
+  afterwards, **waiting out the `moving` state** (setLocation returns before
+  the payload has arrived). Any failure aborts the remaining rows.
+* **Absence of proof is never proof.** Every row is `SKIP` if qBittorrent is
+  unreachable or the path mapping cannot be derived; no row may be `fs` if the
+  torrents' FILE lists could not be read, because a no-root-folder torrent's
+  payload sits directly at the library root. That is correct, not a bug — fix
+  the credentials in `config.toml` rather than working around it.
+* The path mapping is derived at runtime from `torrents/info[].save_path`,
+  needs more than one corroborating torrent, and must be able to express the
+  library root. Do **not** hardcode it and do not read it from qBittorrent's
+  stored config — its `LastSavePath` points at a mount that no longer exists.
+* The only signal that may carry a row is an explicit **alias** on the filename
+  stem. The filename itself is capped at 0.50 (spec section 7), so a
+  filename-only row can never auto-file; the `signal` column says which it is.
 * Never point `apply` at the real tree to "see what happens". Tests cover it on
   temp trees with a fake qBittorrent.
 

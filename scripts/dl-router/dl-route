@@ -6,14 +6,16 @@
     dl-route match --filename F [...]   dry-run the matcher on a context
     dl-route log [-n 20]                recent routing decisions
     dl-route alias list|set|rm          inspect/edit the alias table
-    dl-route backfill plan [--apply-safe-dirs]
-    dl-route backfill apply --manifest PATH [--dry-run]
+    dl-route backfill plan [--seed-aliases]
+    dl-route backfill apply --manifest PATH.tsv [--dry-run]
     dl-route fetch URL --dir NAME       queue a yt-dlp job via the sidecar
     dl-route token                      print the bearer token (for the extension)
 
 Everything host-specific comes from ~/.config/dl-router/config.toml.
 `backfill apply` is the only subcommand that modifies existing files, and it
-refuses to run without an explicit reviewed manifest.
+refuses to run without an explicit reviewed manifest. `backfill plan` is
+read-only against BOTH the tree and the alias database -- pass --seed-aliases
+to actually persist the aliases it would otherwise only use in memory.
 """
 from __future__ import annotations
 
@@ -154,7 +156,7 @@ def cmd_backfill_plan(args) -> int:
     root, index, store = _local_bits(cfg)
     # None (not []) = "qBittorrent state unknown" -> the plan refuses to
     # classify anything as movable. See backfill.plan.
-    torrents, path_map = None, None
+    torrents, path_map, files_for = None, None, None
     client, err = _qbt_client(cfg)
     if client is None:
         print(f"note: {err} — every row will be SKIP", file=sys.stderr)
@@ -163,7 +165,15 @@ def cmd_backfill_plan(args) -> int:
             torrents = client.torrents_info()
             roots = qbt_mod.host_root_candidates(
                 root, cfg.section("qbt").get("host_roots", ()))
-            path_map = qbt_mod.derive_path_map(torrents, roots)
+            # library_root=root: a map that cannot express the library root is
+            # worse than no map -- it would classify every loose file as
+            # not-torrent-backed.
+            path_map = qbt_mod.derive_path_map(torrents, roots,
+                                               library_root=root)
+            # Per-FILE indexing. Without it a multi-file / no-root-folder
+            # torrent whose payload sits at the library root is invisible, and
+            # absence from the index must not be read as "safe to rename".
+            files_for = client.torrents_files
             print(f"torrents: {len(torrents)}  path map: {path_map}",
                   file=sys.stderr)
         except qbt_mod.QbtError as exc:
@@ -173,14 +183,20 @@ def cmd_backfill_plan(args) -> int:
 
     plan_obj = backfill_mod.plan(root, store=store, dir_names=index.names(),
                                  torrents=torrents, path_map=path_map,
-                                 threshold=cfg.auto_threshold)
+                                 threshold=cfg.auto_threshold,
+                                 persist_seeds=args.seed_aliases,
+                                 files_for=files_for)
     paths = backfill_mod.write_manifest(plan_obj, cfg.state_dir / "manifests")
     print(plan_obj.to_tsv())
     print(f"counts: {plan_obj.counts()}", file=sys.stderr)
+    for note in plan_obj.notes:
+        print(f"note: {note}", file=sys.stderr)
     print(f"manifest: {paths['tsv']}\n          {paths['json']}",
           file=sys.stderr)
-    print("review it, then: dl-route backfill apply --manifest "
-          f"{paths['json']} --dry-run", file=sys.stderr)
+    # The TSV, not the JSON: it is the artefact the header tells you to edit,
+    # and apply reads it.
+    print("review + edit the `action` column, then: dl-route backfill apply "
+          f"--manifest {paths['tsv']} --dry-run", file=sys.stderr)
     return 0
 
 
@@ -191,13 +207,20 @@ def cmd_backfill_apply(args) -> int:
     if Path(plan_obj.root).resolve() != Path(root).resolve():
         raise SystemExit(f"manifest root {plan_obj.root} != configured "
                          f"library root {root} — refusing")
+    # A client is required whenever ANYTHING is going to move, not just for
+    # rows the plan happened to label `qbt`: apply re-derives every row against
+    # live qBittorrent, and an `fs` row is only safe if that live state can
+    # still prove the file is not a torrent payload.
     client = None
-    if any(r.move == backfill_mod.MOVE_QBT and r.action != backfill_mod.ACTION_SKIP
-           for r in plan_obj.rows):
+    if any(r.action != backfill_mod.ACTION_SKIP for r in plan_obj.rows):
         client, err = _qbt_client(cfg)
         if client is None:
-            raise SystemExit(f"manifest has torrent-backed rows but {err}")
-    results = backfill_mod.apply(plan_obj, client=client, dry_run=args.dry_run)
+            raise SystemExit(
+                f"apply re-validates every row against live qBittorrent, but "
+                f"{err}. Fix the credentials in config.toml.")
+    results = backfill_mod.apply(
+        plan_obj, client=client, dry_run=args.dry_run,
+        host_roots=cfg.section("qbt").get("host_roots", ()))
     for op in results["ops"]:
         print(("DRY " if args.dry_run else "    ") + op)
     print(f"moved={len(results['moved'])} skipped={len(results['skipped'])}")
@@ -260,10 +283,18 @@ def build_parser() -> argparse.ArgumentParser:
 
     bf = sub.add_parser("backfill", help="plan/apply the loose-file backfill")
     bfsub = bf.add_subparsers(dest="bf_cmd", required=True)
-    bfp = bfsub.add_parser("plan", help="read-only; writes a manifest")
+    bfp = bfsub.add_parser(
+        "plan",
+        help="read-only (tree AND alias DB); writes a manifest")
+    bfp.add_argument(
+        "--seed-aliases", action="store_true",
+        help="also PERSIST the aliases derived from directory and torrent "
+             "names into the live alias database (plan is read-only without "
+             "this)")
     bfp.set_defaults(fn=cmd_backfill_plan)
     bfa = bfsub.add_parser("apply", help="execute a REVIEWED manifest")
-    bfa.add_argument("--manifest", required=True)
+    bfa.add_argument("--manifest", required=True,
+                     help="path to the reviewed .tsv (or the .json)")
     bfa.add_argument("--dry-run", action="store_true")
     bfa.set_defaults(fn=cmd_backfill_apply)
 
