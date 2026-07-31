@@ -30,9 +30,18 @@
 // NO raw-CDP passthrough. It IS a data-exfil-capable action (an explicit
 // operator decision to let the autonomous agent read ANY path) — so the server
 // AUDIT-LOGS every upload (op + target domain + path).
+// `ping` is the BUILD-FRESHNESS TELL. It takes no tab, touches no page and does
+// nothing but answer with this service worker's own manifest version + op set.
+// Its whole point is the op NAME: a build that predates it does not know the
+// name, so `validateCommand` rejects it with `unknown_op`. That turns "did my
+// ↻ reload actually take?" — which cost three full Brave restarts to guess at,
+// because the long-poll pins the old MV3 worker alive across a reload — into a
+// yes/no. CONTRACT for any future extension change that must be provably loaded:
+// bump `manifest.json` version AND add a new discriminator (a new op name, or a
+// new field in `ping`'s reply), so the old build cannot fake a pass.
 export const ALLOWED_OPS = [
   "getHtml", "text", "eval", "tabs", "nav", "screenshot", "open", "close",
-  "frames", "click", "type", "key", "wake", "activate", "upload",
+  "frames", "click", "type", "key", "wake", "activate", "upload", "ping",
 ];
 
 // Per-op required fields (mirrors server.py REQUIRED_FIELDS). The server already

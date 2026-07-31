@@ -97,8 +97,16 @@ pre-0.2.0 extension).
 The CLI **detects this for you**: any op the CLI dispatches that returns a
 server-side `unknown_op` is mapped to a clear message + non-zero exit telling you
 the loaded extension is OLDER than the CLI and to reload/restart. **`browser
-health` also shows the build** — each instance's loaded `extension_version` vs the
-bridge's `extension_version_current` (repo manifest); a mismatch = stale.
+health` also shows the build** — each instance's loaded `extension_version`, the
+`extension_version_expected` (the DEPLOYED manifest at
+`~/.local/share/browser-bridge-ext/`, else the repo copy), and an explicit
+`extension_stale` verdict: `true` = reload it, `false` = versions match,
+**`null` = undecidable** (the build predates version reporting, or no manifest is
+readable) — `null` is NOT "fine". `browser whoami` carries the same three fields.
+
+**`extension_stale:false` is a VERSION match, not a code match.** An extension
+change shipped without a manifest bump is invisible to it. That is why the
+version bump is part of the change contract, and why `ping` exists.
 
 **⚠ Reload ↻ is UNRELIABLE — a full Brave restart is the reliable fix.** The
 extension's long-poll keeps the OLD service worker permanently alive, so clicking
@@ -109,10 +117,32 @@ doesn't take (the op still returns `unknown_op`, or `health` still shows the old
 **Nuance (measured 2026-07-30): a ↻ reload DID take** — swapping in a new build after an
 earlier full restart in the same Brave session. So ↻ is worth trying **first**, but only
 when you have a **deterministic tell** for whether it took. Don't reason about it; test
-it. Pick something the new build emits that the old one cannot, e.g. the nested-OOPIF
-`cascade[…]` trace: old build → a bare `frame_not_found:<url>`, new build → the same
-error **plus** the trace. That turns "did the reload take?" from an unfalsifiable guess
-into one command. With no such tell, skip ↻ and do the full restart.
+it.
+
+**The tell is `browser ping`** (extension ≥ 0.3.0):
+
+```bash
+browser ping     # NEW build → {"pong":true,"extensionVersion":"0.3.0","ops":[…,"ping"]}
+                 # OLD build → op 'ping' returned unknown_op — … FULLY RESTART Brave …
+```
+
+`ping` takes no tab and touches no page — it only reports the LOADED service
+worker's own manifest version and op set. An older build has never heard of the
+op name, so it cannot fake a pass. Non-zero exit on the old build.
+
+**Contract for any future extension change that must be provably loaded:** bump
+`extension/manifest.json` AND add a new discriminator (a new op name, or a new
+field in `ping`'s reply). Without one, reload-vs-restart is unfalsifiable — that
+ambiguity cost three full Brave restarts in one session. With no such tell for
+the build in front of you, skip ↻ and do the full restart.
+
+**Where the extension loads from.** It should be
+`~/.local/share/browser-bridge-ext/` — a real copy written by home-manager, which
+no `git checkout`/branch switch/worktree op can change under a running
+verification. If `brave://extensions` still shows the extension's path inside
+`~/workspace/devrc/`, it is on the OLD git-mutable path: re-point it (remove the
+card → **Load unpacked** → the `~/.local/share/browser-bridge-ext/` directory →
+re-paste the token in Options), once per Brave profile.
 
 Symptom of a stale build: an op the CLI knows returns `unknown_op`, or `health` still
 shows the old `extension_version`. The `browser-bridge` **server** (not the extension)

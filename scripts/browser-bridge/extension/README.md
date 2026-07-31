@@ -111,17 +111,79 @@ overflow the server's header-line limit and fail the poll. (The pure classifier
 + cap live in `protocol.js` and ARE unit-tested; the back-off itself runs in the
 SW and can only be checked in a real browser — see the checklist below.)
 
-## Load it (and reload after every change)
+## 🔴 Load it from the DEPLOYED path, not this repo directory
 
-1. Brave → `brave://extensions`
-2. Toggle **Developer mode** (top-right).
-3. **Load unpacked** → select this `extension/` directory.
-4. Click the extension's **Options** (⋯ menu → Options), paste the token from
-   `~/.config/browser-bridge/token`, set port `8788`, **Save**.
+**Brave must load `~/.local/share/browser-bridge-ext/`, NOT this directory.**
 
-⚠ **Brave does not hot-reload unpacked extensions.** After editing any file here,
-click the **reload** ↻ button on the extension's card in `brave://extensions`,
-or the service worker keeps running the old code.
+`home-manager switch` writes a real copy of this tree to
+`~/.local/share/browser-bridge-ext/` (`home.activation.browserBridgeExtension` in
+`nix/home.nix` — a `cp -rL` + atomic swap, deliberately not store symlinks). That
+path is **git-immune**: devrc is worked on by many concurrent sessions, and
+loading the extension out of the working tree means any other session's `git
+checkout`, branch switch or worktree operation silently swaps the extension's
+code out from under a live verification. That is not hypothetical — it reverted a
+staged build mid-session on 2026-07-30.
+
+This directory stays the **source** (edit here, `home-manager switch`, then
+reload in Brave). Nothing removes it; a profile still pointed here keeps working,
+it is just not git-safe.
+
+### First-time load / re-point (per Brave profile — MANUAL, one-time)
+
+Do this **once for each profile** (work and personal). It cannot be automated:
+`brave://extensions` is not scriptable, and Brave must not be killed
+(`restore_on_startup` is unset on both profiles — the operator's tabs would not
+come back).
+
+1. `home-manager switch --flake ~/workspace/devrc --impure` — creates/refreshes
+   `~/.local/share/browser-bridge-ext/`. Confirm:
+   `ls ~/.local/share/browser-bridge-ext/manifest.json`
+2. In the profile's window: Brave → `brave://extensions`
+3. Toggle **Developer mode** (top-right).
+4. Find the **Browser Bridge (command channel)** card. If its **path** is under
+   `~/workspace/devrc/…`, click **Remove** (this drops that profile's
+   `chrome.storage.local` — token/port/label — hence step 7).
+5. **Load unpacked** → select `~/.local/share/browser-bridge-ext/`.
+   (`Ctrl+L` in the GTK file chooser lets you type the path.)
+6. Confirm any permission re-prompt (`debugger`, `webNavigation`).
+7. Extension card → ⋯ → **Options**: paste the token from
+   `~/.config/browser-bridge/token`, port `8788`, set the profile's **label**
+   (`work` / `personal` — must be unique per profile), **Save**.
+8. Verify from a shell — this is the whole point of the change:
+   ```bash
+   browser --instance <label> ping     # → {"pong":true,"extensionVersion":"0.3.0",…}
+   browser whoami                      # → that instance shows extension_stale:false
+   ```
+   `unknown_op` from `ping` means the OLD build is still loaded — go to the
+   reload section below.
+
+Repeat 2–8 in the other profile's window. The profiles are independent: one can
+be on the new path while the other is still on the repo path.
+
+## Reload after every change (and how to know it took)
+
+⚠ **Brave does not hot-reload unpacked extensions.** After editing any file here
+(and `home-manager switch`, which refreshes the deployed copy), click the
+**reload** ↻ button on the extension's card in `brave://extensions`, or the
+service worker keeps running the old code.
+
+⚠ **↻ is UNRELIABLE and silently so**: the extension's long-poll keeps the OLD
+MV3 service worker alive, so a reload often no-ops. Never assume it took —
+**probe it**:
+
+```bash
+browser ping    # new build → {"pong":true,"extensionVersion":"<manifest version>",…}
+                # old build → op 'ping' returned unknown_op …  (non-zero exit)
+```
+
+If `ping` still reports the old version after ↻, **fully quit and reopen Brave**
+(never `pkill` it — tabs are not restorable).
+
+> **CONTRACT for an extension change that must be provably loaded:** bump
+> `manifest.json`'s `version` AND add a new discriminator the old build cannot
+> fake — a new op name, or a new field in `ping`'s reply. `ping` itself exists
+> because "is the new build loaded?" was previously unfalsifiable, which cost
+> three full Brave restarts in a single session.
 
 > **MANDATORY reload after a permission change:** the manifest requests the
 > `debugger` permission (screenshot + TOP-frame trusted input) AND the
@@ -207,6 +269,16 @@ The chrome.* glue needs a real browser — verify by hand after loading:
 
 - [ ] With the server running + token pasted, `browser health` reports
       `extension_connected:true` within ~1 min (or after a reload).
+- [ ] **The load path is the git-immune one:** the extension card in
+      `brave://extensions` shows a path under `~/.local/share/browser-bridge-ext/`,
+      NOT under `~/workspace/devrc/`.
+- [ ] **`browser ping` answers with the DEPLOYED manifest version** (matching
+      `~/.local/share/browser-bridge-ext/manifest.json`), and `browser health` /
+      `browser whoami` show `extension_stale:false` for that instance. A build
+      older than the `ping` op returns `unknown_op` + a non-zero exit instead —
+      that is the intended "the reload did NOT take" answer.
+- [ ] **`ping` is inert:** running it does not change the focused tab, the
+      focused window, or any page (it touches no tab at all).
 - [ ] `browser html` on a logged-in tab returns markup containing logged-in-only
       content (proves the live authenticated session).
 - [ ] `browser eval 'document.title'` returns the active tab's title.

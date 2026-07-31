@@ -222,6 +222,48 @@ in
     fi
   '';
 
+  # browser-bridge: deploy the unpacked MV3 extension to a STABLE, git-immune
+  # path that Brave can be pointed at permanently.
+  #
+  # WHY: Brave has been loading the extension straight out of the git working
+  # tree (~/workspace/devrc/scripts/browser-bridge/extension). devrc is worked on
+  # by many concurrent sessions, so any other session's `git checkout`, branch
+  # switch or worktree operation silently swaps the extension's code out from
+  # under a live verification — measured: it reverted a staged build mid-session.
+  # A copy under ~/.local/share/ cannot be touched by any git operation.
+  #
+  # WHY A REAL COPY, NOT `home.file … recursive = true`: that would deploy the
+  # tree as read-only /nix/store SYMLINKS. Whether Chromium's unpacked-extension
+  # loader accepts a tree of dangling-into-the-store symlinks is exactly the kind
+  # of thing that must be MEASURED against live Brave, and a wrong guess here is
+  # expensive (it costs a full Brave restart to find out, and the operator's tabs
+  # are not restorable). A plain copy (`cp -rL`) removes the question entirely and
+  # is equally git-immune. Cost: the whole tree is rewritten on every switch.
+  #
+  # The copy is built beside the target and swapped in, so a half-written tree is
+  # never visible at the path Brave loads from. Re-pointing Brave at this path is
+  # a MANUAL operator step (brave://extensions → remove the repo-path entry →
+  # Load unpacked → this directory), once per profile; until then the previously
+  # loaded repo-path extension keeps working unchanged.
+  home.activation.browserBridgeExtension =
+    lib.hm.dag.entryAfter ["writeBoundary"] ''
+      bbSrc=${../scripts/browser-bridge/extension}
+      bbDst="$HOME/.local/share/browser-bridge-ext"
+      bbTmp="$bbDst.new.$$"
+      $DRY_RUN_CMD mkdir -p "$HOME/.local/share"
+      $DRY_RUN_CMD rm -rf "$bbTmp"
+      # -L dereferences the store symlinks into real files; the store copy is
+      # read-only, so make the result writable for the next switch's rm -rf.
+      $DRY_RUN_CMD cp -rL "$bbSrc" "$bbTmp"
+      $DRY_RUN_CMD chmod -R u+w "$bbTmp"
+      if [ -e "$bbDst" ]; then
+        $DRY_RUN_CMD rm -rf "$bbDst.old.$$"
+        $DRY_RUN_CMD mv "$bbDst" "$bbDst.old.$$"
+      fi
+      $DRY_RUN_CMD mv "$bbTmp" "$bbDst"
+      $DRY_RUN_CMD rm -rf "$bbDst.old.$$"
+    '';
+
   home.stateVersion = "24.11";
 
   home.packages = if isNixOS
@@ -379,6 +421,9 @@ in
   # with that token file). server.py is stdlib-only + standalone (no sibling
   # imports), so unlike the receiver it has NO don't-.resolve() import quirk.
   home.file.".config/browser-bridge/server.py".source = ../scripts/browser-bridge/server.py;
+  # NOTE: the UNPACKED EXTENSION is deliberately NOT a home.file here — it is
+  # copied by the browserBridgeExtension activation script below. See there for
+  # why a real copy rather than store symlinks.
   # i3 focus collector. Reuses keylog's spool_emit (the v1 line format), so
   # keylog/ must be present alongside it (it always is — shipped above).
   home.file.".config/activity-collector/i3" = {

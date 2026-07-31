@@ -37,8 +37,24 @@ test("op set mirrors the server contract", () => {
   assert.deepEqual(
     [...ALLOWED_OPS].sort(),
     ["activate", "click", "close", "eval", "frames", "getHtml", "key", "nav",
-     "open", "screenshot", "tabs", "text", "type", "upload", "wake"],
+     "open", "ping", "screenshot", "tabs", "text", "type", "upload", "wake"],
   );
+});
+
+// --- `ping`: the build-freshness tell -------------------------------------- //
+test("`ping` is in the op set and needs no fields (build-freshness probe)", () => {
+  assert.ok(ALLOWED_OPS.includes("ping"));
+  assert.deepEqual(validateCommand({ op: "ping" }), { ok: true });
+  // No REQUIRED_FIELDS entry — it takes no arguments at all.
+  assert.equal(REQUIRED_FIELDS.ping, undefined);
+});
+
+test("an op name the build predates fails as unknown_op — the freshness tell", () => {
+  // This is the WHOLE mechanism: a build that predates an op name cannot pass a
+  // probe for it. `ping` behaves for a 0.2.0 extension exactly as this unknown
+  // name behaves for the current one.
+  assert.deepEqual(validateCommand({ op: "ping-v2-not-yet-shipped" }),
+    { ok: false, error: "unknown_op" });
 });
 
 test("validateCommand accepts the `activate` op (bare + waitMs + injected tabId)", () => {

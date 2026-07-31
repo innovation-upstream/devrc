@@ -905,6 +905,17 @@ const OPS = {
     return { tabId: out.id, windowId: out.windowId, url: out.url,
              title: out.title, active: out.active, status: out.status };
   },
+
+  // `ping` — the deterministic "is the NEW build loaded?" probe. No tab, no page,
+  // no chrome.* call beyond getManifest(): it answers with THIS service worker's
+  // own manifest version and its op set. An older build fails it at
+  // validateCommand with `unknown_op` (it has never heard of the name), which the
+  // CLI already translates into reload/restart guidance. See protocol.js
+  // ALLOWED_OPS for the contract this op exists to enforce.
+  async ping() {
+    return { pong: true, extensionVersion: extensionVersion(),
+             ops: ALLOWED_OPS.slice() };
+  },
 };
 
 async function execute(cmd) {

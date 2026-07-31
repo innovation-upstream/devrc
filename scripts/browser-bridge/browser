@@ -36,8 +36,18 @@
 #                               label/instanceId + active-tab DOMAIN + reported
 #                               extension version), and bridge diagnostics
 #                               (endpoint/port/server_version+git/connected count/
-#                               rate-limit + the manifest version the server reads
-#                               from the repo). Global (no --instance/--tab).
+#                               rate-limit + the manifest version the server
+#                               expects: the DEPLOYED extension at
+#                               ~/.local/share/browser-bridge-ext/, else the repo
+#                               copy). Each instance also carries an explicit
+#                               `extension_stale` verdict (true/false, or null =
+#                               undecidable). Global (no --instance/--tab).
+#   browser ping              — BUILD-FRESHNESS PROBE: ask the loaded extension
+#                               what it is. Prints {pong,extensionVersion,ops} on
+#                               a CURRENT build; a build older than this op fails
+#                               with `unknown_op` and the reload/restart hint.
+#                               Use this — not two version strings — to answer
+#                               "did my ↻ actually load the new extension?".
 #   browser instances         — list connected instances as JSON (key/label/url)
 #   browser open [url]        — open a NEW tab this session owns (default about:blank);
 #                               subsequent ops route to it. Prints its tabId.
@@ -464,6 +474,15 @@ case "$sub" in
     [ "$HTTP_CODE" = "200" ] || { echo "$resp" >&2; die "HTTP $HTTP_CODE from /whoami"; }
     printf '%s\n' "$resp" | pretty
     ;;
+  ping)
+    # Build-freshness probe. Goes through /cmd like any op (so it proves the
+    # command channel end-to-end), but touches no tab and no page. On a build
+    # OLDER than the op the extension answers `unknown_op`, which cmd_op already
+    # translates into the reload/FULL-Brave-restart guidance — that is the
+    # deterministic "no, the new build is NOT loaded".
+    [ $# -eq 0 ] || die "browser ping takes no arguments"
+    cmd_op ping | pretty
+    ;;
   instances)
     raw="$(_curl GET /instances)" || die "curl failed talking to ${BASE}/instances"
     HTTP_CODE="${raw##*$'\n'}"; resp="${raw%$'\n'*}"
@@ -842,6 +861,6 @@ else:
     grep -E '^#( |$)' "$0" | sed -E 's/^# ?//'
     ;;
   *)
-    die "unknown subcommand: $sub (try: health whoami instances open close release wake activate html text js eval tabs nav screenshot frames click type key upload agent)"
+    die "unknown subcommand: $sub (try: health whoami ping instances open close release wake activate html text js eval tabs nav screenshot frames click type key upload agent)"
     ;;
 esac

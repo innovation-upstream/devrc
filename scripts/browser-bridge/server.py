@@ -129,9 +129,13 @@ from urllib.parse import unquote, urlsplit
 # selector/path/frame. It IS a data-exfil-capable action (an EXPLICIT operator
 # decision to allow the autonomous agent any path) → the server AUDIT-LOGS every
 # upload (op + target domain + the file path — local metadata, never file CONTENT).
+# `ping` is the extension BUILD-FRESHNESS tell (mirrors extension/protocol.js):
+# a no-tab, no-page op whose only job is to be a NAME an older build does not
+# know, so probing it answers "is the new build loaded?" with unknown_op vs a
+# version — instead of two version strings a human has to eyeball.
 ALLOWED_OPS = ("getHtml", "text", "eval", "tabs", "nav", "screenshot",
                "open", "close", "frames", "click", "type", "key", "wake",
-               "activate", "upload")
+               "activate", "upload", "ping")
 
 # Ops handled ENTIRELY server-side (never dispatched to the extension). `release`
 # relinquishes a session's owned-tab mapping without touching the real Brave tab.
@@ -260,6 +264,17 @@ SERVER_VERSION = "whoami-1 (2026-07-30)"
 _REPO_DIR = Path.home() / "workspace" / "devrc"
 _EXT_MANIFEST_PATH = (_REPO_DIR / "scripts" / "browser-bridge" / "extension"
                       / "manifest.json")
+
+# The STABLE, git-immune deploy target for the unpacked extension, written by
+# home-manager activation (a real copy, not a store symlink — see nix/home.nix).
+# Brave should be pointed HERE, not at the repo tree: loading it out of the repo
+# means any other session's `git checkout`/branch switch swaps the extension code
+# out from under a live verification (measured — it silently reverted a staged
+# build mid-session). Preferred over the repo manifest when it exists, because it
+# is what Brave actually loads; the repo path stays as the fallback so a host that
+# has not switched yet (or a bare checkout) keeps reporting a version.
+_DEPLOYED_EXT_DIR = Path.home() / ".local" / "share" / "browser-bridge-ext"
+_DEPLOYED_EXT_MANIFEST = _DEPLOYED_EXT_DIR / "manifest.json"
 
 # ACTIVITY_HOST source-of-truth file (the activity-collector's env). Parsed as a
 # fallback host signal when ACTIVITY_HOST is not in the server's own environment.
@@ -397,17 +412,51 @@ def git_short_head(repo=None, timeout: float = 1.0):
     return head or None
 
 
-def manifest_version(path=None):
-    """The extension manifest's `version` read from its ABSOLUTE repo path, or
-    None (missing checkout / unreadable / malformed). Best-effort — do NOT
-    .resolve() a symlinked server.py; read the manifest by its stable repo path."""
-    path = Path(path) if path is not None else _EXT_MANIFEST_PATH
+def _read_manifest_version(path):
+    """The `version` string in the manifest.json at `path`, or None (missing /
+    unreadable / malformed). Best-effort — never raises."""
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
         v = data.get("version")
         return v if isinstance(v, str) else None
     except Exception:  # noqa: BLE001 — best-effort.
         return None
+
+
+def manifest_version(path=None):
+    """The version Brave is EXPECTED to have loaded: the deployed extension's
+    manifest (`~/.local/share/browser-bridge-ext/`) when present, else the repo
+    manifest. Absolute paths on purpose — do NOT .resolve() a symlinked
+    server.py; it is deployed as a flattened /nix/store symlink and does not sit
+    next to either extension tree. None when neither is readable."""
+    if path is not None:
+        return _read_manifest_version(path)
+    return (_read_manifest_version(_DEPLOYED_EXT_MANIFEST)
+            or _read_manifest_version(_EXT_MANIFEST_PATH))
+
+
+def annotate_staleness(instances, expected):
+    """Add an explicit loaded-vs-expected verdict to each instance descriptor,
+    IN PLACE, and return the list. `expected` is the manifest version the server
+    expects (manifest_version(), which may itself be None).
+
+    `extension_stale` is a yes/no, not two strings to eyeball:
+      True  — this instance reports a version that differs from `expected`
+              (the loaded build is not the deployed one → reload/restart it)
+      False — they match
+      None  — undecidable: the instance predates version reporting, or no
+              manifest is readable. NEVER guess in that case.
+
+    A False here means the VERSION matches; it is not proof the code matches
+    (an unbumped change looks identical). That is exactly why the extension also
+    carries the `ping` op: a new op name cannot be faked by an old build.
+    """
+    for inst in instances:
+        loaded = inst.get("extension_version")
+        inst["extension_version_expected"] = expected
+        inst["extension_stale"] = (
+            None if (not expected or not loaded) else loaded != expected)
+    return instances
 
 
 # --------------------------------------------------------------------------- #
@@ -1461,7 +1510,8 @@ def make_handler(registry: Registry, token: str, cmd_timeout: float,
             instance labels, active-tab DOMAINs, versions — NEVER page content),
             so it is safe to expose exactly like /health (bearer + Host guarded,
             NOT rate-limited). Reached only after _guard() in do_GET."""
-            insts = registry.whoami_snapshot()
+            expected = manifest_version()
+            insts = annotate_staleness(registry.whoami_snapshot(), expected)
             rl = registry.rate_limit_config()
             srv_host, srv_port = (self.server.server_address[0],
                                   self.server.server_address[1])
@@ -1479,11 +1529,12 @@ def make_handler(registry: Registry, token: str, cmd_timeout: float,
                     "rate_limit": {"per_sec": rl["per_sec"],
                                    "burst": rl["burst"],
                                    "max_queue": rl["max_queue"]},
-                    # The manifest version the SERVER reads from the repo, so a
-                    # human can eyeball loaded-vs-current. NOT an automatic stale
-                    # flag — the manifest version is not bumped per-change, so a
-                    # hard "stale" verdict would be unreliable; report both values.
-                    "extension_version_current": manifest_version(),
+                    # The manifest version the server expects Brave to have
+                    # loaded (deployed dir, else repo). Each instance additionally
+                    # carries `extension_stale` — an explicit true/false/null
+                    # verdict rather than two strings to compare by eye. null
+                    # means undecidable, never "fine".
+                    "extension_version_current": expected,
                 },
                 "instances": insts,
             }
@@ -1494,16 +1545,17 @@ def make_handler(registry: Registry, token: str, cmd_timeout: float,
                 return
             path = urlsplit(self.path).path
             if path == "/health":
-                insts = registry.snapshot()
-                # extension_version_current = the manifest version the SERVER reads
-                # from the repo (best-effort, absolute path like whoami). Compare it
-                # by eye against each instance's reported extension_version to spot a
-                # stale loaded extension (NOT a hard "stale" flag — the manifest
-                # version is not bumped per-change).
+                # extension_version_current = the manifest version the SERVER
+                # expects Brave to have loaded (deployed dir, else repo). Each
+                # instance additionally carries the explicit `extension_stale`
+                # verdict (true/false/null) so this is a yes/no, not an eyeball
+                # comparison of two strings.
+                expected = manifest_version()
+                insts = annotate_staleness(registry.snapshot(), expected)
                 self._send(200, {"ok": True,
                                  "extension_connected": bool(insts),
                                  "count": len(insts),
-                                 "extension_version_current": manifest_version(),
+                                 "extension_version_current": expected,
                                  "instances": insts})
                 return
             if path == "/instances":

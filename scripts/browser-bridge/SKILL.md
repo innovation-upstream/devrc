@@ -28,7 +28,8 @@ Result payloads land under `.result.data`.
 | command | does |
 |---|---|
 | `whoami` | **read-only identity** (global; no `--instance`/`--tab`) — host label (`laptop`/`workbench`), connected instances (active-tab **domain** only), bridge diagnostics + `extension_version_current` |
-| `health` | connected instances + count; compare each instance's loaded `extension_version` against `extension_version_current` (repo manifest) by eye — mismatch = STALE |
+| `health` | connected instances + count, each with an explicit `extension_stale` verdict (`true`/`false`; `null` = undecidable) vs `extension_version_current` |
+| `ping` | **is the new extension build loaded?** → `{pong,extensionVersion,ops}`. A build older than this op answers `unknown_op`. The only deterministic answer after a ↻ reload |
 | `instances` | list connected instances as JSON (key, label, instanceId, active-tab url/title) |
 | `open [url]` | open a NEW tab this session owns (default `about:blank`, **created in the BACKGROUND/hidden**), returns `tabId`. Idempotent. Use for multi-step work |
 | `close` / `release` | close this session's owned tab / drop ownership without closing it |

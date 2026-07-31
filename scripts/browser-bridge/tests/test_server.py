@@ -961,7 +961,7 @@ def test_validate_command_contract():
     assert set(S.ALLOWED_OPS) == {"getHtml", "text", "eval", "tabs", "nav",
                                   "screenshot", "open", "close",
                                   "frames", "click", "type", "key", "wake",
-                                  "activate", "upload"}
+                                  "activate", "upload", "ping"}
     # `upload` is a dispatched, tab-scoped CDP op requiring selector + path.
     assert S.validate_command({"op": "upload", "selector": "#f",
                                "path": "/tmp/x"}) == ("upload", None)
@@ -3093,7 +3093,61 @@ def test_git_short_head_none_on_missing_dir(tmp_path):
 
 def test_manifest_version_reads_current():
     v = S.manifest_version(path=EXT_DIR / "manifest.json")
-    assert isinstance(v, str) and v == "0.2.0"
+    assert isinstance(v, str) and v == "0.3.0"
+
+
+def test_manifest_version_prefers_the_deployed_copy_over_the_repo(tmp_path,
+                                                                 monkeypatch):
+    """The version the server reports as EXPECTED is the one Brave actually
+    loads — the deployed ~/.local/share/browser-bridge-ext/ copy — not the repo
+    working tree (which any concurrent session's checkout can change)."""
+    deployed = tmp_path / "deployed.json"
+    deployed.write_text('{"version": "9.9.9"}', encoding="utf-8")
+    monkeypatch.setattr(S, "_DEPLOYED_EXT_MANIFEST", deployed)
+    monkeypatch.setattr(S, "_EXT_MANIFEST_PATH", EXT_DIR / "manifest.json")
+    assert S.manifest_version() == "9.9.9"
+
+
+def test_manifest_version_falls_back_to_repo_when_not_deployed(tmp_path,
+                                                               monkeypatch):
+    """Backwards-safe: a host that has not switched yet (no deployed copy) keeps
+    reporting the repo manifest instead of going null."""
+    monkeypatch.setattr(S, "_DEPLOYED_EXT_MANIFEST", tmp_path / "absent.json")
+    monkeypatch.setattr(S, "_EXT_MANIFEST_PATH", EXT_DIR / "manifest.json")
+    assert S.manifest_version() == "0.3.0"
+
+
+def test_manifest_version_none_when_neither_exists(tmp_path, monkeypatch):
+    monkeypatch.setattr(S, "_DEPLOYED_EXT_MANIFEST", tmp_path / "a.json")
+    monkeypatch.setattr(S, "_EXT_MANIFEST_PATH", tmp_path / "b.json")
+    assert S.manifest_version() is None
+
+
+# --- annotate_staleness: the explicit loaded-vs-expected verdict ------------ #
+def test_annotate_staleness_flags_a_mismatch_true():
+    insts = [{"key": "work", "extension_version": "0.2.0"}]
+    S.annotate_staleness(insts, expected="0.3.0")
+    assert insts[0]["extension_stale"] is True
+    assert insts[0]["extension_version_expected"] == "0.3.0"
+
+
+def test_annotate_staleness_flags_a_match_false():
+    insts = [{"key": "work", "extension_version": "0.3.0"}]
+    S.annotate_staleness(insts, expected="0.3.0")
+    assert insts[0]["extension_stale"] is False
+
+
+def test_annotate_staleness_is_none_when_undecidable():
+    """NEVER guess: an instance that reports no version (a build predating
+    version reporting), or an unreadable manifest, yields null — not False."""
+    insts = [{"key": "a", "extension_version": None},
+             {"key": "b", "extension_version": ""}]
+    S.annotate_staleness(insts, expected="0.3.0")
+    assert [i["extension_stale"] for i in insts] == [None, None]
+
+    insts2 = [{"key": "c", "extension_version": "0.3.0"}]
+    S.annotate_staleness(insts2, expected=None)
+    assert insts2[0]["extension_stale"] is None
 
 
 def test_manifest_version_none_on_missing(tmp_path):
@@ -3484,6 +3538,103 @@ def test_health_no_extension_still_reports_current_version():
         assert body["instances"] == []
     finally:
         srv.shutdown(); srv.server_close()
+
+
+def test_health_carries_an_explicit_stale_verdict_per_instance():
+    """The point of the change: a yes/no, not two version strings to eyeball.
+    An instance reporting 0.1.0 against the current manifest is STALE=True."""
+    srv, _ = _serve()
+    ext = FakeExtension(srv, instance_id="a", label="alpha", ext_version="0.1.0")
+    ext.start()
+    try:
+        body = _wait_instances(srv, 1)
+        assert body is not None
+        inst = body["instances"][0]
+        assert inst["extension_version_expected"] == S.manifest_version()
+        assert inst["extension_stale"] is True
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
+def test_health_stale_verdict_is_false_when_the_loaded_build_matches():
+    srv, _ = _serve()
+    ext = FakeExtension(srv, instance_id="a", label="alpha",
+                        ext_version=S.manifest_version())
+    ext.start()
+    try:
+        body = _wait_instances(srv, 1)
+        assert body is not None
+        assert body["instances"][0]["extension_stale"] is False
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
+def test_whoami_carries_the_stale_verdict_per_instance():
+    srv, _ = _serve()
+    ext = FakeExtension(srv, instance_id="a", label="alpha", ext_version="0.1.0")
+    ext.start()
+    try:
+        _wait_instances(srv, 1)
+        st, body = _req(srv, "GET", "/whoami")
+        assert st == 200
+        inst = body["instances"][0]
+        assert inst["extension_stale"] is True
+        assert inst["extension_version_expected"] == S.manifest_version()
+        assert body["bridge"]["extension_version_current"] == S.manifest_version()
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
+def test_whoami_stale_verdict_is_null_for_an_unreporting_extension():
+    """A build that predates version reporting is UNDECIDABLE, never "fine"."""
+    srv, _ = _serve()
+    ext = FakeExtension(srv, instance_id="a", label="alpha")  # no ext_version
+    ext.start()
+    try:
+        _wait_instances(srv, 1)
+        st, body = _req(srv, "GET", "/whoami")
+        assert st == 200
+        assert body["instances"][0]["extension_stale"] is None
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
+# --- `ping`: the extension build-freshness op ------------------------------ #
+def test_ping_is_an_allowed_op_and_is_not_tab_scoped():
+    """`ping` must reach the extension (it is the freshness tell) but must NOT
+    contend for a tab — it touches no page, so it can be probed with no owned
+    tab and cannot be serialized behind another session's in-flight op."""
+    assert "ping" in S.ALLOWED_OPS
+    assert "ping" not in S.TAB_SCOPED_OPS
+    assert "ping" not in S.SERVER_OPS      # it is DISPATCHED, not answered locally
+    assert S.validate_command({"op": "ping"}) == ("ping", None)
+
+
+def test_ping_op_set_mirrors_the_extension_protocol_js():
+    """server.py ALLOWED_OPS and extension/protocol.js ALLOWED_OPS are one
+    contract — a drift here is how an op silently becomes undispatchable."""
+    js = (EXT_DIR / "protocol.js").read_text(encoding="utf-8")
+    block = re.search(r"export const ALLOWED_OPS = \[(.*?)\];", js, re.S)
+    assert block is not None
+    js_ops = set(re.findall(r'"([a-zA-Z]+)"', block.group(1)))
+    assert js_ops == set(S.ALLOWED_OPS)
+
+
+def test_ping_round_trips_to_the_extension_with_no_owned_tab():
+    """End-to-end over the real HTTP path: a session that owns no tab can still
+    probe which build is loaded (the FakeExtension echoes the op)."""
+    srv, _ = _serve()
+    ext = FakeExtension(srv, instance_id="a", label="alpha", ext_version="0.3.0")
+    ext.start()
+    try:
+        _wait_instances(srv, 1)
+        st, body = _req(srv, "POST", "/cmd", {"op": "ping"},
+                        headers={"X-Session-Id": "sess-ping"})
+        assert st == 200, body
+        assert body["ok"] is True
+        assert body["result"]["ok"] is True
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
 
 
 @pytest.mark.skipif(shutil.which("curl") is None, reason="curl not on PATH")
