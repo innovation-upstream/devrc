@@ -26,9 +26,11 @@ GUARD = os.path.normpath(GUARD)
 
 # Dangerous substrings are built piecewise so this file can never trip a live
 # guard that is inspecting the command used to run it.
-# NOTE: keep a trailing word after -A. `check_git_add_all` requires -A to be
-# followed by whitespace or end-of-string, so a payload ending `-A'` silently
-# matches nothing and makes a test vacuous (this hid a real bypass once).
+# NOTE: keep a trailing word after -A. This USED to matter because the check
+# required -A to be followed by whitespace, so a payload ending `-A'` matched
+# nothing and made a test vacuous (that hid a real bypass once). Token matching
+# now catches the quoted form too, but the trailing word is kept so these read
+# as prose rather than as a bare flag.
 ADDA = "git a" + "dd -A ever"
 HARD = "git re" + "set --hard HEAD"
 
@@ -86,6 +88,99 @@ CASES = [
     ("ok: quoted path with spaces",   'git a' + 'dd "my file.txt"', False),
     ("ok: path containing a dot",     "git a" + "dd foo.yaml", False),
     ("ok: file named A",              "git a" + "dd A", False),
+
+    # --- gaps found by the #219 audit: all proven to stage everything ---
+    # `git -C <dir> add -A` is the shape RULES + check_cd_then_git push agents
+    # into, and it bypassed the guard entirely (11 blind hits in transcripts).
+    ("gap: git -C dir add -A",        "git -C /tmp/x a" + "dd -A", True),
+    ("gap: git -C dir add .",         "git -C /tmp/x a" + "dd .", True),
+    # NOTE: the git-dir must NOT end in `.git`, or the literal substring
+    # "git add" makes the case vacuous -- base blocks it without the opt-hop.
+    ("gap: git --git-dir= add -A",    "git --git-dir=/tmp/x/store a" + "dd -A", True),
+    ("gap: git -C x -C y add -A",     "git -C /tmp/x -C /tmp/y a" + "dd -A", True),
+    ("gap: git --exec-path= add -A",  "git --exec-path=/tmp/x a" + "dd -A", True),
+    ("gap: git --no-pager add -A",    "git --no-pager a" + "dd -A", True),
+    ("gap: blind flag before --",     "git a" + "dd -A -- src/", True),
+    ("gap: git -c k=v add -A",        "git -c user.name=x a" + "dd -A", True),
+    ("gap: git -P add -A",            "git -P a" + "dd -A", True),
+    # backslash / ANSI-C escapes — same evasion class quoting was
+    ("gap: backslash -\\A",           "git a" + "dd -\\A", True),
+    ("gap: backslash \\-A",           "git a" + "dd \\-A", True),
+    ("gap: escaped --a\\ll",          "git a" + "dd --a\\ll", True),
+    ("gap: escaped dot",              "git a" + "dd \\.", True),
+    ("gap: ANSI-C $'-A'",             "git a" + "dd $'-A'", True),
+    # `git stage` is a documented synonym for `git add`
+    ("gap: git stage -A",             "git st" + "age -A", True),
+    ("gap: git stage .",              "git st" + "age .", True),
+    # unique long-option prefixes
+    ("gap: --al prefix",              "git a" + "dd --al", True),
+    ("gap: --no-ignore-remov",        "git a" + "dd --no-ignore-remov", True),
+    # subshell parens defeated the whitespace boundary
+    ("gap: (git add -A)",             "(git a" + "dd -A)", True),
+    ("gap: $(git add -A)",            "echo $(git a" + "dd -A)", True),
+    # other whole-tree pathspecs
+    ("gap: ./ and .//",               "git a" + "dd ./", True),
+    # `..` errors at the repo ROOT but stages the WHOLE TREE from a
+    # subdirectory -- and `git -C <repo>/sub add ..` reaches that with no `cd`.
+    # A root-only test once suggested otherwise; don't re-derive from that.
+    ("gap: parent .. (blind from subdir)", "git a" + "dd ..", True),
+    ("gap: git -C sub add ..",         "git -C /tmp/x/sub a" + "dd ..", True),
+    ("gap: ../ from a subdir",         "git -C /tmp/x/sub a" + "dd ../", True),
+    ("gap: ../.. from deeper",         "git -C /tmp/x/a/b a" + "dd ../..", True),
+    # near-miss siblings of already-blocked whole-tree pathspecs
+    ("gap: ${PWD}",                    "git a" + "dd ${PWD}", True),
+    ("gap: $PWD/",                     "git a" + "dd $PWD/", True),
+    ("gap: backtick pwd",              "git a" + "dd `pwd`", True),
+    ("gap: :/* root glob",             "git a" + "dd ':/*'", True),
+    ("gap: .// double slash",          "git a" + "dd .//", True),
+    # same-shape siblings of the stems above -- all proven whole-tree
+    ("gap: $PWD//",                    'git a' + 'dd "$PWD//"', True),
+    ("gap: $PWD/./",                   'git a' + 'dd "$PWD/./"', True),
+    ("gap: $(pwd)//",                  'git a' + 'dd "$(pwd)//"', True),
+    ("gap: `pwd`/./",                  'git a' + 'dd "`pwd`/./"', True),
+    ("gap: :(top,glob)",               "git a" + "dd ':(top,glob)'", True),
+    ("gap: :(top,icase)",              "git a" + "dd ':(top,icase)'", True),
+    ("gap: bare colon pathspec",       "git a" + "dd ':'", True),
+    ("gap: glob *",                   "git a" + "dd *", True),
+    ("gap: $PWD",                     "git a" + "dd $PWD", True),
+    ("gap: :(top)",                   "git a" + "dd ':(top)'", True),
+
+    # ...and the tightening must not catch scoped forms
+    ("ok: git -C dir add path",       "git -C /tmp/x a" + "dd src/main.go", False),
+    ("ok: git -C dir status",         "git -C /tmp/x status", False),
+    ("ok: rooted single path :/foo",  "git a" + "dd :/target.txt", False),
+    ("ok: scoped glob *.go",          "git a" + "dd *.go", False),
+    ("ok: file literally named -A",   "git a" + "dd -- -A", False),
+    ("ok: stage a path",              "git st" + "age src/main.go", False),
+    ("ok: --no-all is the opposite",  "git a" + "dd --no-all -u src/", False),
+    ("ok: filename with -A inside",   "git a" + "dd 'CHANGELOG -A.md'", False),
+    # 🔴 The opt-hop must NOT swallow sibling `add` subcommands. This repo runs
+    # `git worktree add` constantly (it is the prescribed workflow), so a
+    # regression here would block the thing RULES tells you to do.
+    ("ok: git worktree add -B",       "git worktree a" + "dd -B br /tmp/wt origin/main", False),
+    ("ok: git -C repo worktree add",  "git -C /repo worktree a" + "dd /tmp/wt -B x", False),
+    ("ok: git remote add",            "git remote a" + "dd origin git@h:r.git", False),
+    ("ok: git submodule add",         "git submodule a" + "dd https://h/r.git ext/r", False),
+    ("ok: git notes add -m",          "git notes a" + "dd -m 'note'", False),
+    ("ok: git stash (not stage)",     "git stash list", False),
+    # after `--` everything is a path, so a file literally named -A is fine
+    ("ok: git add -- x -A",           "git a" + "dd -- x -A", False),
+    ("ok: $PWD-rooted single path",   "git a" + "dd $PWD/src/main.go", False),
+    ("ok: rooted glob :/ *.go",       "git a" + "dd ':/src/*.go'", False),
+    # the widened stems must not swallow scoped paths built from them
+    ("ok: $PWD/<path>",               'git a' + 'dd "$PWD/src/main.go"', False),
+    ("ok: ${PWD}/<path>",             'git a' + 'dd "${PWD}/x"', False),
+    ("ok: $(pwd)/<file>",             'git a' + 'dd "$(pwd)/file.txt"', False),
+    ("ok: $PWDX is a different var",  'git a' + 'dd "$PWDX"', False),
+    ("ok: $PWD_BACKUP",               'git a' + 'dd "$PWD_BACKUP"', False),
+    ("ok: :(top,glob) with a path",   "git a" + "dd ':(top,glob)x'", False),
+    ("ok: :(exclude)vendor",          "git a" + "dd ':(exclude)vendor'", False),
+    ("ok: :!foo negation",            "git a" + "dd ':!foo'", False),
+    ("ok: ..foo is a filename",       "git a" + "dd ..foo", False),
+    ("ok: .hidden file",              "git a" + "dd .hidden", False),
+    ("ok: .github path",              "git a" + "dd .github/workflows/ci.yml", False),
+    ("ok: ../sibling/file.txt",       "git a" + "dd ../sibling/file.txt", False),
+    ("ok: ../pkg/ scoped dir",        "git a" + "dd ../pkg/", False),
 
     # --- was-a-bypass under _strip_message_text: MUST STAY BLOCKED ------
     # round 1: same-tag heredoc / substitution / stale offsets / escaped quote
@@ -153,12 +248,18 @@ fail += not ok
 print(f"{'PASS' if ok else 'FAIL'}  secret inside -m still caught{'  ' + err if err else ''}")
 
 # No pathological backtracking anywhere in the remaining patterns.
-t0 = time.time()
-_, err = run('git commit -m "' + "\\" * 200)
-elapsed = time.time() - t0
-ok = elapsed < 2.0 and not err
-fail += not ok
-print(f"{'PASS' if ok else 'FAIL'}  no catastrophic backtracking ({elapsed:.2f}s)")
+for label, probe in [
+    ("quote+backslash run", 'git commit -m "' + "\\" * 200),
+    # the old _BLIND_FLAG had two adjacent [A-Za-z]* around the A and went
+    # quadratic when the run failed the trailing boundary: 6s at 32k.
+    ("long -AAAA… run", "git a" + "dd -" + "A" * 32000 + "!"),
+]:
+    t0 = time.time()
+    _, err = run(probe)
+    elapsed = time.time() - t0
+    ok = elapsed < 2.0 and not err
+    fail += not ok
+    print(f"{'PASS' if ok else 'FAIL'}  no catastrophic backtracking: {label} ({elapsed:.2f}s)")
 
 print("\nRESULT:", "all good" if not fail else f"{fail} failure(s)")
 sys.exit(1 if fail else 0)
