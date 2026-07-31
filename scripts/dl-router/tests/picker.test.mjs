@@ -6,9 +6,13 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
+globalThis.DL_ROUTER_NO_AUTOSTART = true;
+
 import {
-  ENTRY_DIR, ENTRY_NEW, filterEntries, initialState, reduce, titleCase,
+  ENTRY_DIR, ENTRY_NEW, SNAPSHOT_ATTEMPTS, SNAPSHOT_RETRY_MS, filterEntries,
+  initialState, mount, reduce, titleCase,
 } from "../extension/picker.js";
+import { makeDoc } from "./fake_page.mjs";
 
 const DIRS = ["Jane Doe", "john-smith", "Mary_Major", "acme-studio", "other"];
 
@@ -187,4 +191,721 @@ test("the reducer never mutates the previous state", () => {
   reduce(state, input("jane"));
   reduce(state, key("ArrowDown"));
   assert.equal(JSON.stringify(state), before);
+});
+
+// --- the load-order race ----------------------------------------------------- //
+//
+// mount() starts with `dirs: []`, fills it from an async `dlr:snapshot`
+// round-trip, and the window opens FOCUSED. Typing a query and pressing Enter
+// before the answer landed CREATED a new directory -- with nothing loaded,
+// filterEntries has nothing to match, so the "+ new dir" proposal is the only
+// entry and it is on top. That re-opened the exact footgun the entry-ordering
+// rule was written to close.
+test("Enter is deferred, not acted on, while the directory list is loading", () => {
+  let state = initialState({ dirs: [], suggestNew: "", loading: true });
+  state = drive(state, [input("smith"), key("Enter")]);
+  assert.equal(state.done, null, "Enter must not create a directory yet");
+  assert.equal(state.pendingEnter, true);
+});
+
+test("the deferred Enter selects the existing directory once it arrives", () => {
+  let state = initialState({ dirs: [], loading: true });
+  state = drive(state, [input("smith"), key("Enter")]);
+  state = reduce(state, { type: "dirs", dirs: DIRS });
+  assert.deepEqual(state.done,
+    { action: "choose", dir: "john-smith", createdNew: false },
+    "the race used to create a directory called 'Smith' here");
+});
+
+test("a deferred Enter still creates when nothing really matches", () => {
+  let state = initialState({ dirs: [], loading: true });
+  state = drive(state, [input("aster nightingale"), key("Enter")]);
+  state = reduce(state, { type: "dirs", dirs: DIRS });
+  assert.deepEqual(state.done,
+    { action: "choose", dir: "Aster Nightingale", createdNew: true });
+});
+
+test("Escape works immediately even while loading", () => {
+  let state = initialState({ dirs: [], loading: true, otherDir: "other" });
+  state = drive(state, [key("Escape")]);
+  assert.deepEqual(state.done, { action: "cancel", dir: "other" });
+});
+
+test("arrows while loading do not queue a choice", () => {
+  let state = initialState({ dirs: [], loading: true });
+  state = drive(state, [key("ArrowDown"), key("ArrowDown")]);
+  assert.equal(state.done, null);
+  assert.equal(state.pendingEnter, false);
+});
+
+test("the dirs event resets the highlight and clears loading", () => {
+  let state = initialState({ dirs: [], loading: true });
+  state = reduce(state, { type: "dirs", dirs: DIRS });
+  assert.equal(state.loading, false);
+  assert.equal(state.index, 0);
+  assert.deepEqual(state.dirs, DIRS);
+});
+
+test("a malformed dirs event leaves an empty but usable list", () => {
+  let state = initialState({ dirs: [], loading: true });
+  state = reduce(state, { type: "dirs", dirs: "nope" });
+  assert.deepEqual(state.dirs, []);
+  assert.equal(state.loading, false);
+});
+
+// --- mount() ----------------------------------------------------------------- //
+const PAGE_IDS = ["q", "list", "meta", "dup"];
+
+// A sentinel, because `chooseResult: undefined` would hit the default
+// parameter and so could never express "the worker answered with nothing".
+const DEFAULT_CHOOSE = Symbol("default-choose");
+
+function mountPicker({ search = "?id=7&reason=r&suggestNew=Aster+Vale",
+  snapshot = { dirs: DIRS.map((name) => ({ name })) }, deferReply = false,
+  chooseResult = DEFAULT_CHOOSE } = {}) {
+  const doc = makeDoc(PAGE_IDS, { search });
+  const sent = [];
+  let replySnapshot = null;
+  const chromeApi = {
+    runtime: {
+      sendMessage: (msg, cb) => {
+        sent.push(msg);
+        if (typeof cb === "function") {
+          replySnapshot = () => cb({ ok: true, snapshot });
+          if (!deferReply) replySnapshot();
+        }
+        if (msg.type !== "dlr:choose") return Promise.resolve({ ok: true });
+        return Promise.resolve(
+          chooseResult === DEFAULT_CHOOSE ? { ok: true } : chooseResult);
+      },
+    },
+  };
+  let closed = 0;
+  const handle = mount(doc, chromeApi, { closeWindow: () => { closed += 1; } });
+  return { doc, sent, handle, land: () => replySnapshot && replySnapshot(),
+    closed: () => closed };
+}
+
+test("mount renders the reason, focuses the input and asks for the snapshot", () => {
+  const { doc, sent } = mountPicker();
+  assert.equal(doc.getElementById("meta").textContent, "r");
+  assert.equal(doc.getElementById("q").focused, true);
+  assert.ok(sent.some((m) => m.type === "dlr:snapshot"));
+});
+
+test("mount shows a loading row until the directories arrive", () => {
+  const { doc, land } = mountPicker({ deferReply: true });
+  assert.match(doc.getElementById("list").textContent, /Loading directories/);
+  land();
+  assert.ok(!doc.getElementById("list").textContent.includes("Loading"));
+  assert.match(doc.getElementById("list").textContent, /john-smith/);
+});
+
+const tick = () => new Promise((r) => setTimeout(r, 0));
+
+test("mount: typing + Enter BEFORE the snapshot lands selects, never creates", async () => {
+  // The end-to-end version of the race, driven through the real DOM wiring.
+  const { doc, sent, land, closed } = mountPicker({ deferReply: true });
+  doc.getElementById("q").value = "smith";
+  doc.getElementById("q").fire("input");
+  doc.fire("keydown", { key: "Enter" });
+  assert.equal(sent.filter((m) => m.type === "dlr:choose").length, 0,
+    "nothing may be chosen while the list is still empty");
+  land();
+  const choose = sent.find((m) => m.type === "dlr:choose");
+  assert.deepEqual(choose,
+    { type: "dlr:choose", downloadId: 7, dir: "john-smith", createdNew: false });
+  await tick();
+  assert.equal(closed(), 1);
+});
+
+test("mount: the normal flow still selects and closes", async () => {
+  const { doc, sent, closed } = mountPicker();
+  doc.getElementById("q").value = "jane";
+  doc.getElementById("q").fire("input");
+  doc.fire("keydown", { key: "Enter" });
+  const choose = sent.find((m) => m.type === "dlr:choose");
+  assert.equal(choose.dir, "Jane Doe");
+  await tick();
+  assert.equal(closed(), 1);
+});
+
+test("mount: Escape closes without choosing anything", async () => {
+  const { doc, sent, closed } = mountPicker();
+  doc.fire("keydown", { key: "Escape" });
+  assert.equal(sent.filter((m) => m.type === "dlr:choose").length, 0);
+  await tick();
+  assert.equal(closed(), 1);
+});
+
+test("mount: keys the picker does not own are left alone", () => {
+  const { doc } = mountPicker();
+  const e = doc.fire("keydown", { key: "a" });
+  assert.notEqual(e.defaultPrevented, true);
+});
+
+test("mount: arrows move the highlight in the rendered list", () => {
+  const { doc } = mountPicker();
+  doc.fire("keydown", { key: "ArrowDown" });
+  const rows = doc.getElementById("list").children;
+  assert.ok(rows[1].className.includes("sel"));
+});
+
+test("mount: a yt-dlp job id survives as a string", () => {
+  const { doc, sent } = mountPicker({ search: "?id=fetch%3A3" });
+  doc.fire("keydown", { key: "Enter" });
+  const choose = sent.find((m) => m.type === "dlr:choose");
+  assert.equal(choose.downloadId, "fetch:3");
+});
+
+test("mount: the duplicate warning is shown when there is one", () => {
+  const { doc } = mountPicker({ search: "?id=7&dup=Possible+duplicate" });
+  assert.equal(doc.getElementById("dup").textContent, "Possible duplicate");
+});
+
+test("mount: an empty snapshot still offers the new-directory entry", () => {
+  const { doc, sent } = mountPicker({ snapshot: { dirs: [] },
+    search: "?id=7&suggestNew=Aster+Vale" });
+  assert.match(doc.getElementById("list").textContent, /new dir "Aster Vale"/);
+  doc.fire("keydown", { key: "Enter" });
+  const choose = sent.find((m) => m.type === "dlr:choose");
+  assert.deepEqual(choose, { type: "dlr:choose", downloadId: 7,
+    dir: "Aster Vale", createdNew: true });
+});
+
+
+// --- a FAILED snapshot is not an empty library ------------------------------ //
+//
+// The picker is a separate popup the user can leave open past MV3's ~30 s idle
+// teardown. On a cold-woken worker the /dirs fetch 401s, and treating that as
+// "there are no directories" makes the new-directory proposal the only entry --
+// so typing a name and pressing Enter CREATES one instead of selecting the
+// existing match. Finding 16, back through a different door.
+test("a failed snapshot does not clear loading with an empty list", () => {
+  let state = initialState({ dirs: [], loading: true });
+  state = drive(state, [input("smith"), key("Enter")]);
+  assert.equal(state.pendingEnter, true);
+  state = reduce(state, { type: "dirs-failed" });
+  assert.equal(state.failed, true);
+  assert.equal(state.done, null, "a pending Enter must not become a creation");
+  assert.equal(state.pendingEnter, false);
+});
+
+test("Enter does nothing at all once the list is known to be unavailable", () => {
+  let state = initialState({ dirs: [], loading: true });
+  state = reduce(state, { type: "dirs-failed" });
+  state = drive(state, [input("aster nightingale"), key("Enter")]);
+  assert.equal(state.done, null, "'no answer' is not 'no directories exist'");
+});
+
+test("Escape still works when the list could not be loaded", () => {
+  let state = initialState({ dirs: [], loading: true, otherDir: "other" });
+  state = reduce(state, { type: "dirs-failed" });
+  state = drive(state, [key("Escape")]);
+  assert.deepEqual(state.done, { action: "cancel", dir: "other" });
+});
+
+test("a GENUINELY empty library does clear loading", () => {
+  // ok-with-no-dirs is a real answer; creating is then the only sane action.
+  let state = initialState({ dirs: [], loading: true, suggestNew: "Aster Vale" });
+  state = reduce(state, { type: "dirs", dirs: [] });
+  assert.equal(state.loading, false);
+  assert.equal(state.failed, false);
+  state = drive(state, [key("Enter")]);
+  assert.deepEqual(state.done,
+    { action: "choose", dir: "Aster Vale", createdNew: true });
+});
+
+test("mount retries a failed snapshot rather than giving up on the first no", async () => {
+  const doc = makeDoc(PAGE_IDS, { search: "?id=7" });
+  const sent = [];
+  let answers = 0;
+  const chromeApi = {
+    runtime: {
+      sendMessage: (msg, cb) => {
+        sent.push(msg);
+        if (typeof cb === "function") {
+          answers += 1;
+          // The first two answers are what a cold worker gives.
+          if (answers <= 2) cb({ ok: false, snapshot: null });
+          else cb({ ok: true, snapshot: { dirs: DIRS.map((name) => ({ name })) } });
+        }
+        return Promise.resolve({ ok: true });
+      },
+    },
+  };
+  mount(doc, chromeApi, { closeWindow: () => {} });
+  assert.match(doc.getElementById("list").textContent, /Loading directories/);
+  await new Promise((r) => setTimeout(r, SNAPSHOT_RETRY_MS * 3 + 60));
+  assert.ok(answers >= 3, `only asked ${answers} times`);
+  assert.match(doc.getElementById("list").textContent, /john-smith/);
+});
+
+test("mount: typing + Enter while the worker is cold selects once it wakes", async () => {
+  const doc = makeDoc(PAGE_IDS, { search: "?id=7" });
+  const sent = [];
+  let answers = 0;
+  const chromeApi = {
+    runtime: {
+      sendMessage: (msg, cb) => {
+        sent.push(msg);
+        if (typeof cb === "function") {
+          answers += 1;
+          if (answers === 1) cb({ ok: false, snapshot: null });
+          else cb({ ok: true, snapshot: { dirs: DIRS.map((name) => ({ name })) } });
+        }
+        return Promise.resolve({ ok: true });
+      },
+    },
+  };
+  mount(doc, chromeApi, { closeWindow: () => {} });
+  doc.getElementById("q").value = "smith";
+  doc.getElementById("q").fire("input");
+  doc.fire("keydown", { key: "Enter" });
+  assert.equal(sent.filter((m) => m.type === "dlr:choose").length, 0);
+  await new Promise((r) => setTimeout(r, SNAPSHOT_RETRY_MS * 2 + 60));
+  const choose = sent.find((m) => m.type === "dlr:choose");
+  assert.deepEqual(choose,
+    { type: "dlr:choose", downloadId: 7, dir: "john-smith", createdNew: false },
+    "a cold worker must not turn the user's selection into a creation");
+});
+
+test("mount gives up eventually and says so, without creating anything", async () => {
+  const doc = makeDoc(PAGE_IDS, { search: "?id=7" });
+  const sent = [];
+  const chromeApi = {
+    runtime: {
+      sendMessage: (msg, cb) => {
+        sent.push(msg);
+        if (typeof cb === "function") cb({ ok: false, snapshot: null });
+        return Promise.resolve({ ok: true });
+      },
+    },
+  };
+  mount(doc, chromeApi, { closeWindow: () => {} });
+  doc.getElementById("q").value = "smith";
+  doc.getElementById("q").fire("input");
+  doc.fire("keydown", { key: "Enter" });
+  await new Promise((r) => setTimeout(r, SNAPSHOT_RETRY_MS * (SNAPSHOT_ATTEMPTS + 2)));
+  assert.equal(sent.filter((m) => m.type === "dlr:choose").length, 0);
+  assert.match(doc.getElementById("list").textContent, /Could not reach/);
+});
+
+
+// --- a refused choice must be VISIBLE ---------------------------------------- //
+//
+// finish() awaited sendMessage, DISCARDED the response and closed the window
+// regardless -- and EVERY choose goes through the picker, so an immediate
+// refusal (the sidecar could not prove the router created the file) was never
+// surfaced to anyone.
+test("a refused choice keeps the window open and says why", async () => {
+  const { doc, sent, closed } = mountPicker({
+    chooseResult: { ok: false, error: "cannot prove it created this file" },
+  });
+  doc.getElementById("q").value = "jane";
+  doc.getElementById("q").fire("input");
+  doc.fire("keydown", { key: "Enter" });
+  await tick();
+  assert.equal(sent.filter((m) => m.type === "dlr:choose").length, 1);
+  assert.equal(closed(), 0, "closing on a refusal is how it stayed invisible");
+  assert.match(doc.getElementById("meta").textContent, /Could not file into/);
+  assert.match(doc.getElementById("meta").textContent, /cannot prove/);
+});
+
+test("after a refusal the user can still pick somewhere else", async () => {
+  let result = { ok: false, error: "refused" };
+  const doc = makeDoc(PAGE_IDS, { search: "?id=7" });
+  const sent = [];
+  const chromeApi = {
+    runtime: {
+      sendMessage: (msg, cb) => {
+        sent.push(msg);
+        if (typeof cb === "function") {
+          cb({ ok: true, snapshot: { dirs: DIRS.map((name) => ({ name })) } });
+        }
+        return Promise.resolve(
+          msg.type === "dlr:choose" ? result : { ok: true });
+      },
+    },
+  };
+  let closed = 0;
+  mount(doc, chromeApi, { closeWindow: () => { closed += 1; } });
+
+  doc.getElementById("q").value = "jane";
+  doc.getElementById("q").fire("input");
+  doc.fire("keydown", { key: "Enter" });
+  await tick();
+  assert.equal(closed, 0);
+
+  // The window is still usable: a second, accepted pick goes through.
+  result = { ok: true };
+  doc.getElementById("q").value = "smith";
+  doc.getElementById("q").fire("input");
+  doc.fire("keydown", { key: "Enter" });
+  await tick();
+  const chooses = sent.filter((m) => m.type === "dlr:choose");
+  assert.equal(chooses.length, 2);
+  assert.equal(chooses[1].dir, "john-smith");
+  assert.equal(closed, 1);
+});
+
+test("Escape still works after a refusal", async () => {
+  const { doc, sent, closed } = mountPicker({
+    chooseResult: { ok: false, error: "refused" },
+  });
+  doc.fire("keydown", { key: "Enter" });
+  await tick();
+  doc.fire("keydown", { key: "Escape" });
+  await tick();
+  assert.equal(closed(), 1);
+  assert.equal(sent.filter((m) => m.type === "dlr:choose").length, 1);
+});
+
+test("an accepted choice still closes the window", async () => {
+  const { doc, closed } = mountPicker({ chooseResult: { ok: true, dir: "x" } });
+  doc.fire("keydown", { key: "Enter" });
+  await tick();
+  assert.equal(closed(), 1);
+});
+
+test("Enter retries after the directory list could not be loaded", async () => {
+  // `retry` was exported but nothing wired it, so after ~2.4s the window was
+  // Esc-only.
+  const doc = makeDoc(PAGE_IDS, { search: "?id=7" });
+  let answers = 0;
+  const sent = [];
+  const chromeApi = {
+    runtime: {
+      sendMessage: (msg, cb) => {
+        sent.push(msg);
+        if (typeof cb === "function") {
+          answers += 1;
+          if (answers <= SNAPSHOT_ATTEMPTS) cb({ ok: false, snapshot: null });
+          else cb({ ok: true, snapshot: { dirs: DIRS.map((name) => ({ name })) } });
+        }
+        return Promise.resolve({ ok: true });
+      },
+    },
+  };
+  mount(doc, chromeApi, { closeWindow: () => {} });
+  await new Promise((r) => setTimeout(r, SNAPSHOT_RETRY_MS * (SNAPSHOT_ATTEMPTS + 2)));
+  assert.match(doc.getElementById("list").textContent, /Enter to retry/);
+
+  doc.fire("keydown", { key: "Enter" });
+  await new Promise((r) => setTimeout(r, SNAPSHOT_RETRY_MS + 60));
+  assert.match(doc.getElementById("list").textContent, /john-smith/);
+  assert.equal(sent.filter((m) => m.type === "dlr:choose").length, 0,
+    "the retry must not double as a selection");
+});
+
+
+// --- the loop fix, pinned DETERMINISTICALLY --------------------------------- //
+//
+// `choose-failed` appeared zero times in this file: the ordering was only
+// exercised through mount(), so a regression surfaced as a whole-file OOM
+// rather than an assertion. A green suite hid this once already.
+test("choose-failed clears `done` even though done is already set", () => {
+  const done = { ...initialState({ dirs: DIRS }),
+    done: { action: "choose", dir: "Jane Doe", createdNew: false } };
+  const next = reduce(done, { type: "choose-failed", message: "refused" });
+  assert.equal(next.done, null,
+    "reduce's `state.done` early-return must not swallow this event");
+  assert.match(next.error, /refused/);
+});
+
+test("choose-failed is the ONLY event that survives the done guard", () => {
+  // Anything else must still be inert once the flow has finished.
+  const done = { ...initialState({ dirs: DIRS }),
+    done: { action: "choose", dir: "Jane Doe", createdNew: false } };
+  for (const event of [input("smith"), key("Enter"), key("Escape"),
+    key("ArrowDown"), { type: "dirs", dirs: DIRS }, { type: "dirs-failed" }]) {
+    assert.equal(reduce(done, event), done, JSON.stringify(event));
+  }
+});
+
+test("choose-failed supplies a default message", () => {
+  const done = { ...initialState({ dirs: DIRS }),
+    done: { action: "choose", dir: "x", createdNew: false } };
+  assert.ok(reduce(done, { type: "choose-failed" }).error.length > 0);
+});
+
+// --- one choose at a time ---------------------------------------------------- //
+test("keypresses during an in-flight choose do not re-send it", async () => {
+  // `reduce` returns unchanged state once `done` is set, but apply() ran
+  // `if (state.done) void finish()` regardless -- so every later keypress
+  // fired another dlr:choose. Measured before the fix: 3 keypresses -> 4
+  // messages.
+  const doc = makeDoc(PAGE_IDS, { search: "?id=7" });
+  const sent = [];
+  let release;
+  const gate = new Promise((r) => { release = r; });
+  const chromeApi = {
+    runtime: {
+      sendMessage: (msg, cb) => {
+        sent.push(msg);
+        if (typeof cb === "function") {
+          cb({ ok: true, snapshot: { dirs: DIRS.map((name) => ({ name })) } });
+          return Promise.resolve({ ok: true });
+        }
+        return gate.then(() => ({ ok: true }));
+      },
+    },
+  };
+  let closed = 0;
+  mount(doc, chromeApi, { closeWindow: () => { closed += 1; } });
+
+  doc.fire("keydown", { key: "Enter" });          // starts the choose
+  doc.fire("keydown", { key: "ArrowDown" });
+  doc.fire("keydown", { key: "Enter" });
+  doc.fire("keydown", { key: "Escape" });
+  await tick();
+  assert.equal(sent.filter((m) => m.type === "dlr:choose").length, 1,
+    "exactly one choose may be in flight");
+  release();
+  await tick();
+  assert.equal(closed, 1);
+});
+
+// --- an unknown outcome is not a success ------------------------------------- //
+test("a missing response is treated as a refusal, not a silent close", async () => {
+  // Chrome's sendMessage behaviour when the worker is torn down mid-choose is
+  // not something this code can verify, so an absent answer must not close the
+  // window on an unknown outcome. Built inline rather than through
+  // mountPicker: `chooseResult: undefined` would hit the default parameter and
+  // so could never express "resolved with nothing".
+  for (const answer of [undefined, null]) {
+    const doc = makeDoc(PAGE_IDS, { search: "?id=7" });
+    const chromeApi = {
+      runtime: {
+        sendMessage: (msg, cb) => {
+          if (typeof cb === "function") {
+            cb({ ok: true, snapshot: { dirs: DIRS.map((name) => ({ name })) } });
+            return Promise.resolve({ ok: true });
+          }
+          return Promise.resolve(answer);
+        },
+      },
+    };
+    let closed = 0;
+    mount(doc, chromeApi, { closeWindow: () => { closed += 1; } });
+    doc.fire("keydown", { key: "Enter" });
+    await tick();
+    assert.equal(closed, 0, `closed on ${String(answer)}`);
+    assert.match(doc.getElementById("meta").textContent, /no answer/);
+  }
+});
+
+// --- a stale refusal must not sit through the next attempt ------------------- //
+test("typing clears a previous refusal", () => {
+  let state = initialState({ dirs: DIRS });
+  state = reduce({ ...state, done: { action: "choose", dir: "x" } },
+    { type: "choose-failed", message: "refused" });
+  assert.ok(state.error);
+  state = reduce(state, input("jane"));
+  assert.equal(state.error, "", "a new attempt is not about the old failure");
+});
+
+test("a new Enter clears the previous refusal", () => {
+  let state = initialState({ dirs: DIRS });
+  state = reduce({ ...state, done: { action: "choose", dir: "x" } },
+    { type: "choose-failed", message: "refused" });
+  state = reduce(state, key("Enter"));
+  assert.equal(state.error, "");
+  assert.ok(state.done);
+});
+
+test("the in-flight choose shows progress rather than the stale error", async () => {
+  const doc = makeDoc(PAGE_IDS, { search: "?id=7" });
+  let release;
+  const gate = new Promise((r) => { release = r; });
+  const chromeApi = {
+    runtime: {
+      sendMessage: (msg, cb) => {
+        if (typeof cb === "function") {
+          cb({ ok: true, snapshot: { dirs: DIRS.map((name) => ({ name })) } });
+          return Promise.resolve({ ok: true });
+        }
+        return gate.then(() => ({ ok: true }));
+      },
+    },
+  };
+  mount(doc, chromeApi, { closeWindow: () => {} });
+  doc.getElementById("q").value = "jane";
+  doc.getElementById("q").fire("input");
+  doc.fire("keydown", { key: "Enter" });
+  await tick();
+  assert.match(doc.getElementById("meta").textContent, /Filing into "Jane Doe"/);
+  release();
+  await tick();
+});
+
+
+// --- the single-flight guard must LATCH, not just cover the flight ---------- //
+//
+// An in-flight flag alone reset in .finally() while `done` stayed set on the
+// success and cancel paths, so once the choose SETTLED every later event
+// re-entered finish() and re-sent. Measured on that version: 1 Enter + 3 keys
+// -> 4 messages; 1 Enter + 1 keystroke in the filter box -> 2. It was masked
+// on the happy path only by close() tearing the page down, and whether
+// window.close() on a popup is instant has never been observed in a browser.
+function latchHarness() {
+  const doc = makeDoc(PAGE_IDS, { search: "?id=7" });
+  const sent = [];
+  let closed = 0;
+  const chromeApi = {
+    runtime: {
+      sendMessage: (msg, cb) => {
+        sent.push(msg);
+        if (typeof cb === "function") {
+          cb({ ok: true, snapshot: { dirs: DIRS.map((name) => ({ name })) } });
+          return Promise.resolve({ ok: true });
+        }
+        return Promise.resolve({ ok: true });
+      },
+    },
+  };
+  mount(doc, chromeApi, { closeWindow: () => { closed += 1; } });
+  return { doc, sent, closed: () => closed };
+}
+
+test("events AFTER a settled choose do not re-send it", async () => {
+  const { doc, sent } = latchHarness();
+  doc.fire("keydown", { key: "Enter" });
+  await tick();                      // the choose settles and close() runs
+  doc.fire("keydown", { key: "ArrowDown" });
+  doc.fire("keydown", { key: "Enter" });
+  doc.fire("keydown", { key: "Escape" });
+  await tick();
+  assert.equal(sent.filter((m) => m.type === "dlr:choose").length, 1,
+    "the guard must stay latched once `done` is set");
+});
+
+test("a single keystroke after a settled choose does not re-send it", async () => {
+  const { doc, sent } = latchHarness();
+  doc.fire("keydown", { key: "Enter" });
+  await tick();
+  doc.getElementById("q").value = "j";
+  doc.getElementById("q").fire("input");
+  await tick();
+  assert.equal(sent.filter((m) => m.type === "dlr:choose").length, 1);
+});
+
+test("a settled CANCEL is latched too", async () => {
+  const { doc, sent, closed } = latchHarness();
+  doc.fire("keydown", { key: "Escape" });
+  await tick();
+  doc.fire("keydown", { key: "Enter" });
+  doc.fire("keydown", { key: "Escape" });
+  await tick();
+  assert.equal(sent.filter((m) => m.type === "dlr:choose").length, 0);
+  assert.equal(closed(), 1, "close() must not be called again either");
+});
+
+test("but a REFUSED choose unlatches, so retry still works", async () => {
+  // The refusal path clears `done`, which is exactly what unlatches the guard.
+  let answer = { ok: false, error: "refused" };
+  const doc = makeDoc(PAGE_IDS, { search: "?id=7" });
+  const sent = [];
+  let closed = 0;
+  const chromeApi = {
+    runtime: {
+      sendMessage: (msg, cb) => {
+        sent.push(msg);
+        if (typeof cb === "function") {
+          cb({ ok: true, snapshot: { dirs: DIRS.map((name) => ({ name })) } });
+          return Promise.resolve({ ok: true });
+        }
+        return Promise.resolve(answer);
+      },
+    },
+  };
+  mount(doc, chromeApi, { closeWindow: () => { closed += 1; } });
+  doc.fire("keydown", { key: "Enter" });
+  await tick();
+  answer = { ok: true };
+  doc.fire("keydown", { key: "Enter" });
+  await tick();
+  assert.equal(sent.filter((m) => m.type === "dlr:choose").length, 2);
+  assert.equal(closed, 1);
+});
+
+// --- the in-flight message must survive a render ---------------------------- //
+test("an event during an in-flight choose does not blank the meta line", async () => {
+  // `Filing into "X"...` was written straight to meta.textContent, so the next
+  // render() erased it -- and any event triggers one. Probed: after Escape
+  // during a never-settling choose, meta was "" on a picker that is (correctly)
+  // unresponsive until the choose settles.
+  const doc = makeDoc(PAGE_IDS, { search: "?id=7&reason=tag" });
+  const chromeApi = {
+    runtime: {
+      sendMessage: (msg, cb) => {
+        if (typeof cb === "function") {
+          cb({ ok: true, snapshot: { dirs: DIRS.map((name) => ({ name })) } });
+          return Promise.resolve({ ok: true });
+        }
+        return new Promise(() => {});      // never settles
+      },
+    },
+  };
+  mount(doc, chromeApi, { closeWindow: () => {} });
+  doc.getElementById("q").value = "jane";
+  doc.getElementById("q").fire("input");
+  doc.fire("keydown", { key: "Enter" });
+  await tick();
+  assert.match(doc.getElementById("meta").textContent, /Filing into "Jane Doe"/);
+
+  for (const key of ["Escape", "ArrowDown", "Enter"]) {
+    doc.fire("keydown", { key });
+    await tick();
+    assert.match(doc.getElementById("meta").textContent,
+      /Filing into "Jane Doe"/, `blanked by ${key}`);
+  }
+});
+
+test("the status is carried in state, not painted on the DOM", () => {
+  const state = initialState({ dirs: DIRS });
+  const next = reduce({ ...state, done: { action: "choose", dir: "Jane Doe" } },
+    { type: "choosing", dir: "Jane Doe" });
+  assert.match(next.status, /Filing into "Jane Doe"/);
+  // ...and it survives the done guard, like choose-failed and for the same
+  // reason: it is dispatched WHILE done is set.
+  assert.notEqual(next.status, "");
+});
+
+test("a refusal replaces the in-flight status rather than stacking on it", () => {
+  let state = initialState({ dirs: DIRS });
+  state = reduce({ ...state, done: { action: "choose", dir: "x" } },
+    { type: "choosing", dir: "x" });
+  state = reduce(state, { type: "choose-failed", message: "refused" });
+  assert.equal(state.status, "");
+  assert.match(state.error, /refused/);
+});
+
+test("typing clears the in-flight status too", () => {
+  let state = initialState({ dirs: DIRS });
+  state = reduce({ ...state, done: { action: "choose", dir: "x" } },
+    { type: "choosing", dir: "x" });
+  state = reduce({ ...state, done: null }, input("jane"));
+  assert.equal(state.status, "");
+});
+
+test("a caught sendMessage rejection is not Error-prefixed", async () => {
+  const doc = makeDoc(PAGE_IDS, { search: "?id=7" });
+  const chromeApi = {
+    runtime: {
+      sendMessage: (msg, cb) => {
+        if (typeof cb === "function") {
+          cb({ ok: true, snapshot: { dirs: DIRS.map((name) => ({ name })) } });
+          return Promise.resolve({ ok: true });
+        }
+        return Promise.reject(new Error("the message port closed"));
+      },
+    },
+  };
+  mount(doc, chromeApi, { closeWindow: () => {} });
+  doc.fire("keydown", { key: "Enter" });
+  await tick();
+  const shown = doc.getElementById("meta").textContent;
+  assert.match(shown, /the message port closed/);
+  assert.ok(!shown.includes("Error:"), shown);
 });

@@ -1,11 +1,15 @@
 // Sanitisation contract for the extension half.
 //
-// The hostile-input table below is the SAME one tests/test_security.py runs
-// against safety.py. The two implementations must agree: the extension decides
-// what goes into suggest({filename}); the sidecar decides what becomes a real
-// directory. A divergence is a hole.
+// The hostile-input table is NOT written here. It lives in
+// tests/fixtures/name_cases.json and tests/test_security.py drives safety.py
+// from the SAME file. The two implementations must agree: the extension
+// decides what goes into suggest({filename}); the sidecar decides what becomes
+// a real directory. A divergence is a hole -- and while the tables were two
+// hand-copied literal lists, a differential fuzz found 991 inputs the two
+// disagreed on that neither list covered.
 //
-// Run: nix-shell -p nodejs --run "node --test scripts/dl-router/tests"
+// Run (the glob must be quoted -- `node --test <dir>` fails):
+//   nix-shell -p nodejs --run "node --test 'scripts/dl-router/tests/*.test.mjs'"
 import test from "node:test";
 import assert from "node:assert/strict";
 
@@ -13,21 +17,25 @@ import {
   MAX_DIR_NAME, MAX_FILE_NAME, baseName, isHttpUrl, isSafeDirName, joinDirFile,
   relPathFromAbsolute, sanitizeDirName, sanitizeFileName,
 } from "../extension/sanitize.js";
+import { loadNameCases } from "./fixtures.mjs";
 
-const HOSTILE_DIR_NAMES = [
-  "..", ".", "../..", "../../etc", "foo/bar", "foo\\bar", "/absolute",
-  "/etc/passwd", "\\\\server\\share",
-  "with\u0000nul", "with\nnewline", "with\rcarriage", "with\ttab",
-  "with\u001bescape", "with\u007fdelete",
-  "trailing ", " leading", "trailing.",
-  "with\u202eRLO", "with\u200fRLM", "with\u2066FSI",
-  "x".repeat(MAX_DIR_NAME + 1), "",
-];
+const CASES = loadNameCases();
+const HOSTILE_DIR_NAMES = CASES.hostileDirNames;
+const SAFE_DIR_NAMES = CASES.safeDirNames;
 
-const SAFE_DIR_NAMES = [
-  "Jane Doe", "john-smith", "Mary_Major", "acme-studio", "subject (2021)",
-  "subject [remaster]", "José Álvarez", "x".repeat(MAX_DIR_NAME),
-];
+test("the shared fixture actually loaded", () => {
+  // A silently empty table would make every case below vacuously pass.
+  assert.ok(HOSTILE_DIR_NAMES.length >= 30, "hostile table too small");
+  assert.ok(SAFE_DIR_NAMES.length >= 8, "safe table too small");
+  assert.ok(CASES.fileNames.length >= 15);
+  assert.ok(CASES.httpUrlsAccepted.length >= 5);
+  assert.ok(CASES.httpUrlsRejected.length >= 20);
+  // The {repeat, count} form must have been expanded, not left as an object.
+  assert.ok(HOSTILE_DIR_NAMES.some(
+    (n) => typeof n === "string" && n.length === MAX_DIR_NAME + 1));
+  assert.ok(SAFE_DIR_NAMES.some(
+    (n) => typeof n === "string" && n.length === MAX_DIR_NAME));
+});
 
 test("hostile directory names are rejected", () => {
   for (const name of HOSTILE_DIR_NAMES) {
@@ -44,14 +52,15 @@ test("legitimate directory names are accepted", () => {
 });
 
 test("non-strings are rejected", () => {
-  for (const value of [null, undefined, 42, [], {}, true]) {
+  for (const value of [...CASES.nonStringNames, undefined]) {
     assert.equal(isSafeDirName(value), false);
   }
 });
 
 test("decomposed unicode is rejected so lookalikes cannot coexist", () => {
-  const decomposed = "José";   // e + combining acute
-  const precomposed = "José";
+  const decomposed = "Jose\u0301";     // e + COMBINING ACUTE ACCENT
+  const precomposed = "Jos\u00e9";     // LATIN SMALL LETTER E WITH ACUTE
+  assert.notEqual(decomposed, precomposed, "the two forms must differ");
   assert.equal(isSafeDirName(decomposed), false);
   assert.equal(isSafeDirName(precomposed), true);
 });
@@ -65,22 +74,26 @@ test("the known-directory allowlist is enforced", () => {
 });
 
 test("filenames are reduced to one safe component", () => {
-  const cases = [
-    ["../../etc/passwd", "passwd"],
-    ["..\\..\\windows\\evil.exe", "evil.exe"],
-    ["/absolute/path/clip.mp4", "clip.mp4"],
-    ["clip\u0000.mp4", "clip.mp4"],
-    ["clip\nname.mp4", "clipname.mp4"],
-    ["...", "download"],
-    ["..", "download"],
-    [".", "download"],
-    ["", "download"],
-    [null, "download"],
-    [42, "download"],
-  ];
-  for (const [raw, expected] of cases) {
+  for (const [raw, expected] of CASES.fileNames) {
     assert.equal(sanitizeFileName(raw), expected, `for ${JSON.stringify(raw)}`);
   }
+});
+
+test("zero-width and C1 characters are stripped from filenames", () => {
+  // Regression for the cross-language divergence: JS `trim()` strips U+FEFF
+  // and Python `strip()` does not, while Python treats U+0085 as whitespace
+  // and JS does not. Both are dropped outright on both sides now.
+  for (const raw of ["clip\ufeff.mp4", "clip\u0085.mp4", "clip\u200b.mp4"]) {
+    assert.equal(sanitizeFileName(raw), "clip.mp4", JSON.stringify(raw));
+  }
+});
+
+test("a colon is legal -- the yt-dlp quirk is handled at its argv boundary", () => {
+  // Spec section 6.3's rule is global. Rejecting `:` here made a directory
+  // like "Series: Volume 1" appear in /dirs while being impossible to select,
+  // learn or move into. fetcher.build_argv pins the --paths TYPE instead.
+  assert.equal(isSafeDirName("Series: Volume 1"), true);
+  assert.equal(sanitizeFileName("season:one.mp4"), "season:one.mp4");
 });
 
 test("filename bidi characters are stripped", () => {
@@ -122,29 +135,66 @@ test("baseName takes the last component under either separator", () => {
   assert.equal(baseName(""), "");
 });
 
-test("relPathFromAbsolute returns dir/file", () => {
-  assert.equal(relPathFromAbsolute("/home/u/lib/Jane Doe/clip.mp4"),
+test("relPathFromAbsolute returns dir/file only INSIDE the library root", () => {
+  const ROOT = "/home/u/library";
+  assert.equal(relPathFromAbsolute(`${ROOT}/Jane Doe/clip.mp4`, ROOT),
     "Jane Doe/clip.mp4");
-  assert.equal(relPathFromAbsolute("clip.mp4"), null);
-  assert.equal(relPathFromAbsolute(""), null);
-  assert.equal(relPathFromAbsolute(null), null);
+  // A trailing slash on the configured root must not change the answer.
+  assert.equal(relPathFromAbsolute(`${ROOT}/Jane Doe/clip.mp4`, `${ROOT}/`),
+    "Jane Doe/clip.mp4");
+  assert.equal(relPathFromAbsolute("C:\\lib\\Jane Doe\\clip.mp4", "C:\\lib"),
+    "Jane Doe/clip.mp4");
+});
+
+test("relPathFromAbsolute refuses anything outside the library root", () => {
+  // THE finding: this used to take the last two components of ANY absolute
+  // path, so a download saved elsewhere produced a plausible "<dir>/<file>"
+  // naming a DIFFERENT, real file inside the library -- which /relocate would
+  // then move. The library root is a live seeding target.
+  const ROOT = "/home/u/library";
+  const cases = [
+    ["/home/u/Downloads/Jane Doe/clip.mp4", ROOT],   // a lookalike elsewhere
+    ["/home/u/library-other/Jane Doe/clip.mp4", ROOT], // shared prefix
+    [`${ROOT}/clip.mp4`, ROOT],                      // loose at the root
+    [`${ROOT}/a/b/clip.mp4`, ROOT],                  // nested deeper
+    [`${ROOT}/../escape/clip.mp4`, ROOT],            // traversal component
+    ["/etc/passwd", ROOT],
+    ["clip.mp4", ROOT],
+    ["", ROOT],
+    [null, ROOT],
+  ];
+  for (const [path, root] of cases) {
+    assert.equal(relPathFromAbsolute(path, root), null, String(path));
+  }
+});
+
+test("relPathFromAbsolute refuses when the root is unknown", () => {
+  // No snapshot yet => no root => nothing may be relocated. Fail closed.
+  for (const root of [undefined, null, "", 42, "/"]) {
+    assert.equal(
+      relPathFromAbsolute("/home/u/library/Jane Doe/clip.mp4", root), null,
+      String(root));
+  }
 });
 
 test("http(s) URLs are accepted", () => {
-  for (const url of [
-    "http://example-site.test/v/1",
-    "https://example-site.test/v/1?x=2#f",
-    "https://user:pass@example-site.test/v",
-  ]) assert.equal(isHttpUrl(url), true, url);
+  for (const url of CASES.httpUrlsAccepted) {
+    assert.equal(isHttpUrl(url), true, String(url));
+  }
 });
 
 test("non-http or malformed URLs are refused", () => {
-  for (const url of [
-    "file:///etc/passwd", "javascript:alert(1)", "data:text/html,<script>",
-    "ftp://example-site.test/x", "//example-site.test/x", "https://",
-    "-oProxyCommand=id", "--config-location=/tmp/evil",
-    "https://example-site.test/ x", "https://example-site.test/\nHeader: x",
-    "https://example-site.test/\u0000", "https://x.test/" + "a".repeat(5000),
-    "", null, 42,
-  ]) assert.equal(isHttpUrl(url), false, String(url));
+  for (const url of CASES.httpUrlsRejected) {
+    assert.equal(isHttpUrl(url), false, String(url).slice(0, 60));
+  }
+});
+
+test("the host rule does not delegate to new URL", () => {
+  // WHATWG collapses the extra slashes in `http://////..` and calls the host
+  // `..`; Python's urlsplit accepts `http://%2f`. Neither parser can be the
+  // contract, so both implementations validate the authority by hand.
+  assert.equal(isHttpUrl("http://////.."), false);
+  assert.equal(isHttpUrl("http://%2f"), false);
+  assert.equal(isHttpUrl("https:///80"), false);
+  assert.equal(isHttpUrl("https://example-site.test:99999/v"), false);
 });

@@ -46,11 +46,19 @@ import config as config_mod  # noqa: E402
 from dirindex import DirIndex, FileIndex  # noqa: E402
 from fetcher import Fetcher  # noqa: E402
 from matcher import MatchContext, Matcher, find_duplicate, norm_key  # noqa: E402
-from safety import UnsafeName, is_safe_dir_name, safe_rel_path  # noqa: E402
+from safety import (  # noqa: E402
+    UnsafeName, is_safe_dir_name, names_match, safe_rel_path,
+)
 from store import Store  # noqa: E402
 
 SERVER_VERSION = "dl-router/1"
 MAX_BODY = 256 * 1024
+
+# How much older than its own routing decision a file may be and still be
+# accepted as "this router created it" (filesystem timestamp granularity, not
+# clock skew — both come from the same machine). A torrent payload predates its
+# would-be routing decision by hours or days, so a few seconds costs nothing.
+MTIME_SLACK_S = 5.0
 
 _LOOPBACK = frozenset({"127.0.0.1", "::1", "localhost"})
 _ALLOWED_HOST_HEADERS = frozenset({"127.0.0.1", "localhost", "::1", "[::1]"})
@@ -72,9 +80,11 @@ class App:
     def __init__(self, cfg: config_mod.Config, *, store: Store | None = None,
                  dir_index: DirIndex | None = None,
                  file_index: FileIndex | None = None,
-                 fetcher: Fetcher | None = None, clock=time.time):
+                 fetcher: Fetcher | None = None, clock=time.time,
+                 config_error: str | None = None):
         self.cfg = cfg
         self.clock = clock
+        self.config_error = config_error
         self.root = cfg.library_root
         self.store = store if store is not None else Store(cfg.db_path,
                                                            clock=clock)
@@ -121,6 +131,10 @@ class App:
     def healthz(self) -> dict:
         out = {"ok": True, "version": SERVER_VERSION,
                "configured": self.configured}
+        if self.config_error:
+            # The whole point of degrading instead of exiting: the operator can
+            # see WHY without reading the journal of a restart loop.
+            out["configError"] = self.config_error
         if self.configured:
             out["root_present"] = self.root.is_dir()
             out["dirs"] = len(self.dirs.entries())
@@ -130,6 +144,11 @@ class App:
 
     def dirs_snapshot(self) -> dict:
         snap = self.dirs.snapshot()
+        # The extension needs the root to prove a completed download actually
+        # landed inside the library before it asks /relocate to move it (see
+        # relPathFromAbsolute). Loopback + bearer token only, and it never
+        # leaves the machine.
+        snap["root"] = str(self.root)
         snap["aliases"] = [{"key": k, "site": s, "dir": d}
                            for (k, s), d in sorted(self.store.alias_map().items())]
         snap["threshold"] = self.cfg.auto_threshold
@@ -148,10 +167,14 @@ class App:
         result = matcher.match(ctx, host_prior=prior)
         result.dup = find_duplicate(self.files, result.dir, ctx.filename,
                                     ctx.size)
+        # `downloadId` is the browser's DownloadItem id. Recording it here is
+        # what later lets /relocate prove a file under the library root was put
+        # there by this router and not by qBittorrent (see `_prove_owned`).
         self.store.log_route(url=ctx.url, site=ctx.site, filename=ctx.filename,
                              dir_name=result.dir, confidence=result.confidence,
                              reason=result.reason, auto=result.auto,
-                             dup=result.dup)
+                             dup=result.dup,
+                             download_id=str(payload.get("downloadId") or ""))
         return result.as_dict(ttl_ms=int(self.cfg.get("dir_cache_ttl_s", 5.0) * 1000))
 
     def learn(self, payload: dict) -> dict:
@@ -201,15 +224,125 @@ class App:
         return {"ok": True, "dir": name, "created": not existed,
                 "etag": self.dirs.etag()}
 
+    def _prove_owned(self, rel_path: str, src, download_id: str) -> None:
+        """Refuse unless this router demonstrably created `rel_path`.
+
+        WHY THIS IS NOT OPTIONAL: the library root is a live qBittorrent
+        seeding target and /relocate is an `os.rename`. Renaming a torrent
+        payload makes the files vanish from qBittorrent's point of view and
+        seeding stops. The endpoint validated `toDir` and confined the source
+        to the root -- there was never a path escape -- but it moved ANY file
+        that happened to exist at the supplied relative path, and that path was
+        derived in the extension from the last two components of the browser's
+        absolute filename with nothing checking it landed under the library
+        root at all.
+
+        Two independent proofs, BOTH required, and the absence of either is a
+        refusal (never a warning, never a best-effort move):
+
+          1. IDENTITY. The file's name must be the name of the download this
+             `downloadId` refers to, modulo `conflictAction: "uniquify"`'s
+             " (1)" suffix. This is what binds the proof to THIS file.
+          2. AGE. The file's mtime must be at or after the routing decision.
+             A browser writes the file after the decision, so this holds for a
+             genuine download; a COMPLETED payload that was already on disk
+             predates it.
+
+             Honest limit: an IN-PROGRESS torrent is still writing pieces, so
+             its mtime is current and the age test passes vacuously for it.
+             Against that shape the identity proof is the only one doing work
+             -- which is why identity is not optional and why it binds to the
+             file rather than to its folder.
+
+        WHAT THIS DELIBERATELY NO LONGER CHECKS, and why: it used to require
+        the file to be sitting in the directory the /match decision NAMED. That
+        was never a proof of anything -- any file that happened to be in that
+        directory passed, so a `/match` for `innocent.mp4` authorised moving a
+        live payload that merely shared the directory -- AND it was wrong for
+        every case the correction flow exists to serve:
+
+          * below threshold or a tie: route_core deliberately files into the
+            catch-all while /match logs the CANDIDATE dir, so the two always
+            disagreed and the picker's whole purpose was dead;
+          * the 400 ms timeout: the extension uses its cached local decision
+            while the server logged the answer it computed too late;
+          * a correction that has already been applied once.
+
+        Name+time is strictly stronger (it binds to the file, not the folder)
+        and is true in all of those cases.
+        """
+        if self.store.routed_file(rel_path) is not None:
+            return
+
+        disk_name = rel_path.rsplit("/", 1)[-1]
+        route = self.store.route_for_download(download_id)
+
+        # NO ROUTE ROW = NO PROOF. There is deliberately no fallback here.
+        #
+        # A "the extension says this download is recent and named X" fallback
+        # was tried and removed: with no routing decision to check it against
+        # there is nothing to verify the claim WITH, so it reduces to trusting
+        # the caller -- on the one code path whose entire purpose is to refuse
+        # a move it cannot prove. A live torrent payload written in the last
+        # hour with a matching name is exactly the shape that gets through.
+        #
+        # The cost of refusing is small and recoverable: a download that was
+        # never routed (the sidecar was unreachable when it started) cannot be
+        # auto-undone, and the user moves that one file by hand. The cost of
+        # the alternative is a broken seed.
+        if route is None:
+            # Do NOT guess a cause here. An earlier draft of this message
+            # blamed a sidecar restart; the route log is persistent SQLite and
+            # log_route commits, so a restart does not lose anything. Shipping
+            # a confident wrong diagnosis is worse than naming the real
+            # possibilities.
+            raise UnsafeName(
+                "refusing to move a file this router cannot prove it created: "
+                "no routing decision is on record for this download. Either "
+                "the sidecar was unreachable when the download started (so "
+                "/match never ran for it), no downloadId was sent, or the "
+                "route log has been cleared. Move this one file by hand; "
+                "downloads routed while the sidecar is reachable can be "
+                "corrected normally.")
+
+        expected = str(route.get("filename") or "")
+        if not expected:
+            raise UnsafeName(
+                "refusing to move a file this router cannot prove it created "
+                "(the recorded route has no filename to identify it by)")
+        if not names_match(disk_name, expected):
+            raise UnsafeName(
+                "refusing to move a file this router cannot prove it created "
+                f"(this download was {expected!r}; the file on disk is "
+                f"{disk_name!r})")
+
+        try:
+            mtime = src.stat().st_mtime
+        except OSError as exc:
+            raise UnsafeName(f"cannot stat the source: {exc}") from exc
+        if mtime < float(route.get("ts") or 0.0) - MTIME_SLACK_S:
+            raise UnsafeName(
+                "refusing to move a file this router cannot prove it created "
+                "(it predates its own routing decision, so it was already on "
+                "disk before this download was routed — quite possibly a "
+                "torrent payload)")
+
+        self.store.record_routed_file(rel_path, download_id,
+                                      rel_path.split("/", 1)[0])
+
     def relocate(self, payload: dict) -> dict:
         to_dir = payload.get("toDir")
         if not is_safe_dir_name(to_dir):
             raise UnsafeName(f"invalid target directory: {to_dir!r}")
         if not self.dirs.has(to_dir):
             raise UnsafeName(f"unknown directory: {to_dir!r}")
-        src = safe_rel_path(payload.get("fromRelPath"), root=self.root)
+        rel_path = payload.get("fromRelPath")
+        src = safe_rel_path(rel_path, root=self.root)
         if not src.is_file():
-            raise FileNotFoundError(f"not a file: {payload.get('fromRelPath')!r}")
+            raise FileNotFoundError(f"not a file: {rel_path!r}")
+        # Fail closed BEFORE anything is moved.
+        self._prove_owned(str(rel_path), src,
+                          str(payload.get("downloadId") or ""))
         dest_dir = safe_rel_path(to_dir, root=self.root)
         dest = dest_dir / src.name
         if dest == src:
@@ -225,15 +358,29 @@ class App:
             if dest.exists():
                 raise FileExistsError("could not find a free destination name")
         os.rename(src, dest)
+        new_rel = str(dest.relative_to(self.root))
+        # Follow the file, so a second correction still has provenance for it.
+        self.store.move_routed_file(str(rel_path), new_rel, to_dir)
         self.files.refresh(force=True)
-        return {"ok": True, "moved": True, "dir": to_dir,
-                "relPath": str(dest.relative_to(self.root))}
+        return {"ok": True, "moved": True, "dir": to_dir, "relPath": new_rel}
+
+    def known_dirs(self) -> set:
+        """The directories anything may write into: the index plus the
+        catch-all, which is created on demand and so may not be indexed yet."""
+        return self.dirs.name_set() | {self.cfg.other_dir}
 
     def fetch(self, payload: dict) -> dict:
         url = payload.get("url")
         dir_name = payload.get("dir") or self.cfg.other_dir
-        job = self.fetcher.submit(url, dir_name, known_dirs=None)
-        log("fetch", job=job.id, dir=dir_name, state=job.state)
+        # `known_dirs=None` here meant /fetch bypassed the allowlist that every
+        # other write path enforces: any syntactically valid name was accepted
+        # and yt-dlp silently created the directory. /mkdir is the only
+        # endpoint allowed to bring a directory into existence.
+        job = self.fetcher.submit(url, dir_name, known_dirs=self.known_dirs())
+        # Metadata only: the directory name is a subject in the user's private
+        # library, and this line goes to the user journal (see log()'s own
+        # docstring, which this call used to contradict).
+        log("fetch", job=job.id, state=job.state)
         return {"ok": True, **job.as_dict()}
 
     def fetch_status(self, job_id: str):
@@ -276,7 +423,17 @@ def make_handler(app: App, token: str):
             hdr = self.headers.get("Authorization", "")
             if not hdr.startswith("Bearer "):
                 return False
-            return secrets.compare_digest(hdr[len("Bearer "):].strip(), token)
+            try:
+                return secrets.compare_digest(hdr[len("Bearer "):].strip(),
+                                              token)
+            except TypeError:
+                # `compare_digest` raises on a non-ASCII str. This runs inside
+                # _guard, OUTSIDE _run's error mapping, so the exception closed
+                # the connection with no response at all and printed a
+                # traceback into the journal -- fail-closed, but a violation of
+                # this file's "a bad request must never 500" contract, and
+                # trivially reachable from any page that can reach the socket.
+                return False
 
         def _guard(self) -> bool:
             if not self._host_ok():
@@ -382,6 +539,24 @@ def make_handler(app: App, token: str):
                 return
             self._run(fn, body)
 
+        # `_send` already suppresses the body for HEAD, but without this method
+        # BaseHTTPRequestHandler answered HEAD with an HTML 501 that never
+        # passed _guard -- no bypass, just an inconsistent shape that made the
+        # HEAD branch in _send unreachable.
+        def do_HEAD(self):
+            self.do_GET()
+
+        def _method_not_allowed(self):
+            if not self._guard():
+                return
+            self._send(405, {"ok": False, "error": "method_not_allowed"},
+                       {"Allow": "GET, HEAD, POST"})
+
+        do_OPTIONS = _method_not_allowed
+        do_PUT = _method_not_allowed
+        do_DELETE = _method_not_allowed
+        do_PATCH = _method_not_allowed
+
     return Handler
 
 
@@ -401,14 +576,36 @@ def build_server(host: str, port: int, app: App, token: str) -> ThreadingHTTPSer
 
 
 def main(argv=None) -> int:
-    cfg = config_mod.load()
+    # A malformed config.toml used to raise out of here, and the unit is
+    # `Restart=always` with `RestartSec=10` — a silent 6/min restart loop with
+    # nothing listening and no way to see why except the journal. Degrade to
+    # the same "unconfigured" state an un-set-up host already has: /healthz
+    # answers and names the problem, routing endpoints return 503.
+    cfg, cfg_error = config_mod.load_degraded()
     token = config_mod.load_or_create_token(cfg.token_file)
-    app = App(cfg)
+    try:
+        app = App(cfg, config_error=cfg_error)
+    except Exception as exc:  # noqa: BLE001
+        # Constructing the App opens the SQLite store and runs migrations. A
+        # corrupt or half-migrated database would otherwise raise out of here
+        # into the same `Restart=always` loop the config path already handles.
+        # Degrade the same way: serve, and say why.
+        log("startup_error", kind=type(exc).__name__)
+        blank, _ = config_mod.load_degraded(Path(os.devnull))
+        blank.data["library_root"] = ""
+        blank.state_dir, blank.token_file = cfg.state_dir, cfg.token_file
+        blank.data["host"], blank.data["port"] = cfg.host, cfg.port
+        app = App(blank, store=Store(":memory:"),
+                  config_error=f"{cfg_error or ''} {type(exc).__name__}: "
+                               f"{exc}".strip())
     server = build_server(cfg.host, cfg.port, app, token)
     log("listening", host=cfg.host, port=cfg.port,
         token_file=str(cfg.token_file), configured=app.configured,
         dirs=(len(app.dirs.entries()) if app.configured else 0))
-    if not app.configured:
+    if cfg_error:
+        log("config_error", detail=cfg_error.replace(" ", "_"))
+        log("warning", msg="serving 503 until config.toml is fixed")
+    elif not app.configured:
         log("warning", msg="library_root unset — routing endpoints return 503")
     try:
         server.serve_forever()

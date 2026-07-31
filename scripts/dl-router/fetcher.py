@@ -21,7 +21,7 @@ import threading
 import time
 from pathlib import Path
 
-from safety import UnsafeName, is_http_url, is_safe_dir_name
+from safety import UnsafeName, is_http_url, is_safe_dir_name, safe_rel_path
 
 STATE_QUEUED = "queued"
 STATE_RUNNING = "running"
@@ -45,7 +45,15 @@ def build_argv(url: str, dest_dir, *, ytdlp_bin: str = "yt-dlp",
         "--no-continue",
         "--no-overwrites",
         "--no-progress",
-        "--paths", str(dest_dir),
+        # `home:` pins the --paths TYPE explicitly. yt-dlp parses this argument
+        # as `[TYPE:]PATH` and only treats a prefix as a TYPE when it matches a
+        # known one, so an absolute path is already safe -- but stating the
+        # type removes the ambiguity entirely, which is what lets a directory
+        # name legitimately contain a colon ("Series: Volume 1"). The global
+        # name rule (safety.py / sanitize.js) therefore does NOT have to reject
+        # `:`, and must not: doing so made such a directory appear in /dirs
+        # while being impossible to route into.
+        "--paths", f"home:{dest_dir}",
         "-o", str(output_template),
     ]
     if cookies_from_browser:
@@ -118,7 +126,12 @@ class Fetcher:
             raise UnsafeName(f"unsafe directory name: {dir_name!r}")
         if known_dirs is not None and dir_name not in known_dirs:
             raise UnsafeName(f"unknown directory: {dir_name!r}")
-        dest = self.library_root / dir_name
+        # `is_safe_dir_name` proves the NAME is one component; it says nothing
+        # about where that component RESOLVES. yt-dlp is handed this path with
+        # `--paths` and will happily follow a symlink out of the library, so
+        # resolve it and refuse an escape -- the same check /mkdir and
+        # /relocate already do.
+        dest = safe_rel_path(dir_name, root=self.library_root)
         argv = build_argv(url, dest, ytdlp_bin=self.ytdlp_bin,
                           cookies_from_browser=self.cookies_from_browser,
                           output_template=self.output_template)

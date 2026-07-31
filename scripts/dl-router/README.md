@@ -83,14 +83,20 @@ Normalisation key: NFKD → strip diacritics → casefold → drop non-alphanume
 | normalised page tag/subject == directory key | 0.85 |
 | token-sequence containment, scaled by coverage | 0.60–0.80 |
 | filename token match | ≤ 0.50 |
-| host prior (last directory used on this site) | +0.05, ranking only |
+| host prior (last directory used on this site) | +0.05, display only |
 
 Guards:
 
 * a fuzzy hit needs **≥2 tokens, or one token of ≥4 characters** — otherwise a
   short directory name matches random page prose;
-* the **host prior is never decisive**: it cannot create a candidate, and the
-  auto-file threshold is tested against the pre-bonus score;
+* the **host prior is never decisive**. Candidate ordering, the auto-file
+  threshold and the tie margin all read the **pre-bonus** score, so the prior
+  cannot create a candidate, cannot change which candidate wins, cannot carry
+  one over the threshold, and cannot manufacture the margin that would suppress
+  the tie-break. All it may do is put its directory first among candidates that
+  are *already exactly tied* — and such a pair is inside the tie margin by
+  definition, so the picker opens anyway. The `+0.05` survives on the candidate
+  list purely so the reason string can show the prior was consulted;
 * the top two within `tie_margin` → picker, never a coin flip;
 * `reason` is always returned and shown in the toast, so a wrong match is
   diagnosable rather than mysterious.
@@ -145,7 +151,37 @@ where a download often starts. `chrome.notifications` is the secondary
 fallback.
 
 **Undo after completion**: choosing a different directory after the download
-completes calls `/relocate` (a same-filesystem rename, instant) and `/learn`.
+completes calls `/relocate` (a same-filesystem rename, instant) and then
+`/learn` — in that order, and the alias is written **only if the move actually
+happened**.
+
+`/relocate` is the one endpoint that moves a pre-existing file inside a live
+seeding target, so it is not unconditional. It refuses unless it can prove this
+router created the file, by **two independent proofs, both required**:
+
+* **identity** — the file's name is the name of that download, modulo
+  `uniquify`'s ` (1)` suffix. (Binding to the *directory* instead would let one
+  routing decision authorise moving any file that happened to share the folder,
+  and would break every correction, because a below-threshold match is
+  deliberately filed into the catch-all while `/match` logged the candidate.)
+* **age** — the file was written at or after that routing decision. (This
+  holds for a genuine download and for a *completed* payload already on disk.
+  An in-progress torrent is still writing pieces, so its mtime is current and
+  the age test passes vacuously for it — which is exactly why identity is not
+  optional.)
+
+**No routing decision on record means no proof, and there is deliberately no
+fallback.** With no record to check the extension's claim *against*, any
+fallback reduces to trusting the caller on the one code path whose whole
+purpose is to refuse a move it cannot prove. A download reaches that state when
+the sidecar was unreachable when it started (so `/match` never ran for it), no
+`downloadId` was sent, or the route log has been cleared — **not** because the
+sidecar restarted: the route log is persistent SQLite and every decision is
+committed. That one file gets moved by hand; anything routed while the sidecar
+was reachable corrects normally.
+
+A file that fails either proof is **not moved**, the refusal is surfaced rather
+than swallowed, and no alias is learned from a move that did not happen.
 
 **Profile scoping**: routing is off until enabled on that profile's options
 page. Extension storage is per-profile, so every other profile behaves exactly
@@ -166,7 +202,7 @@ All endpoints require `Authorization: Bearer <token>` from
 | POST | `/match` | page context → `{dir, confidence, reason, candidates, suggestNew, dup, auto, ttlMs}` |
 | POST | `/learn` | persist a correction (alias + labelled example + host prior) |
 | POST | `/mkdir` | create a validated new directory |
-| POST | `/relocate` | validated rename **within** the library root |
+| POST | `/relocate` | rename **within** the library root, only for a file this router provably created |
 | POST | `/fetch` | yt-dlp job for a stream URL; `GET /fetch/<id>` for status |
 | GET | `/log` | recent routing decisions |
 
@@ -178,29 +214,61 @@ The library root is a **live qBittorrent seeding target**. A plain `mv` of a
 torrent payload makes the files vanish from qBittorrent's point of view and
 seeding stops. So:
 
-* `dl-route backfill plan` — **read-only** with respect to the tree. Seeds the
-  alias table from existing directory names and torrent names, then proposes a
-  directory per loose root file and writes a manifest (TSV to read, JSON to
-  apply). Each row is tagged `qbt` (torrent-backed → `setLocation`), `fs`
-  (plain rename), `NEW` (needs directory creation) or `SKIP`.
-* `dl-route backfill apply --manifest <path>` — refuses to run without an
-  explicit manifest you have reviewed. Torrent-backed rows move via
-  `torrents/setLocation` and the torrent is re-checked afterwards; anything
-  else moves via `os.rename`. Any failure aborts the remaining rows.
-  `--dry-run` prints the exact operations.
+* `dl-route backfill plan` — **read-only against the tree AND the alias
+  database**. It works out which aliases the existing directory and torrent
+  names would seed and uses them *in memory*; `--seed-aliases` is what actually
+  persists them into the store that drives live routing. It then proposes a
+  directory per loose root file and writes a manifest (**TSV — the artefact you
+  review and edit** — plus a JSON copy). Each row is tagged `qbt`
+  (torrent-backed → `setLocation`), `fs` (**proven** not torrent-backed → plain
+  rename), `NEW` (needs directory creation) or `SKIP`, and carries a `signal`
+  column saying what the proposal actually rests on (`alias` / `filename` /
+  `none`).
+* `dl-route backfill apply --manifest <path>.tsv` — refuses to run without an
+  explicit manifest you have reviewed. **Edit the `action` column and it takes
+  effect**: the TSV is a first-class manifest, and pointing `apply` at the JSON
+  after editing the TSV is refused rather than silently running the unedited
+  plan. Torrent-backed rows move via `torrents/setLocation` and the torrent is
+  re-verified afterwards — **waiting out the `moving` state**, because
+  `setLocation` returns as soon as the request is accepted, not when the
+  payload has arrived. Any failure aborts the remaining rows. `--dry-run`
+  prints the exact operations.
 
-`SKIP` is the default and the safe answer. In particular, **if qBittorrent is
-unreachable, or its host↔container path mapping cannot be derived, every row is
-SKIP** — without the torrent list nothing can prove a file is not a live
-payload. The path mapping is derived at runtime by correlating
-`torrents/info[].save_path` against paths that exist on the host; it is
-deliberately not read from qBittorrent's stored config, whose `LastSavePath`
-references a mount point that no longer exists.
+**`apply` re-derives everything against live qBittorrent before it touches a
+row.** The manifest's `move` and `torrent_hash` are plan-time values, and a
+torrent can be added, removed or moved in between; a row whose live
+classification disagrees with the manifest aborts the run and tells you to
+re-plan. A client is therefore required whenever *anything* is going to move,
+not only for rows the plan labelled `qbt`.
 
-The backfill has no page context, so there the **filename stem is the subject
-signal** (the live download path keeps the weak ≤0.50 filename cap, where it
-competes with real page context). The threshold is unchanged, so an opaque
-name still lands on `SKIP`.
+`SKIP` is the default and the safe answer, and **absence of proof is never
+treated as proof**:
+
+* qBittorrent unreachable, or its host↔container mapping underivable → every
+  row is `SKIP`.
+* Torrents exist but their **file lists** could not be read → no row may be
+  `fs`. The index knows a torrent's files, not just its `content_path`, because
+  a multi-file or no-root-folder torrent's payload sits *directly at the
+  library root* — exactly this tool's target population — and reading absence
+  from a partial index as "not torrent-backed" is a plain rename of a live
+  seeding payload.
+* A reachable qBittorrent with **no torrents at all** is positive proof, and
+  `fs` is then genuinely safe.
+
+The path mapping is derived at runtime by correlating
+`torrents/info[].save_path` against paths that exist on the host. It is
+deliberately not read from qBittorrent's stored config (whose `LastSavePath`
+references a mount point that no longer exists), it needs **more than one
+corroborating torrent** and an outright winner, and it must be able to express
+the library root — a mapping that cannot is worse than none, because it would
+classify every loose file as not-torrent-backed.
+
+The backfill has no page context, so the only signal that may carry a row is an
+**explicit alias** on the filename stem (seeded from a directory or torrent
+name, or hand-set) — recorded knowledge rather than a guess about an opaque
+filename. The filename itself stays under the spec's **≤0.50 cap**, so a
+filename-only row cannot reach the 0.75 threshold and is labelled `filename` in
+the manifest.
 
 Nothing outside the library root is ever touched, and existing directories are
 never renamed.
@@ -244,8 +312,8 @@ dl-route dirs                        list routing targets
 dl-route match --filename F --tag T  dry-run the matcher on a context
 dl-route log -n 20                   recent routing decisions
 dl-route alias list|set|rm           inspect/edit the alias table
-dl-route backfill plan               read-only; writes a manifest
-dl-route backfill apply --manifest P [--dry-run]
+dl-route backfill plan [--seed-aliases]  read-only (tree AND alias DB)
+dl-route backfill apply --manifest P.tsv [--dry-run]
 dl-route fetch URL --dir NAME        queue a yt-dlp job
 dl-route token                       print the bearer token
 ```
@@ -259,14 +327,39 @@ the qBittorrent endpoint and the clock are all injectable, and **the live
 qBittorrent instance is never contacted**.
 
 ```
-nix-shell -p python312Packages.pytest --run "python3 -m pytest scripts/dl-router/tests -q"
+nix-shell -p 'python312.withPackages(ps:[ps.pytest])' --run "python3 -m pytest scripts/dl-router/tests -q"
 nix-shell -p nodejs --run "node --test 'scripts/dl-router/tests/*.test.mjs'"
 ```
+
+Run both from the repo root. `python312.withPackages` (not
+`python312Packages.pytest`) is what actually guarantees the interpreter running
+the suite is the one pytest was built for; the bare-package form only works by
+accident when the ambient `python3` happens to be the same minor version. The
+node glob **must be quoted** — `node --test <dir>` treats the directory as a
+single test file and fails.
 
 The security tests are the ones to keep green: the path-traversal table is
 asserted against **both** `safety.py` and `extension/sanitize.js` (they must
 agree), and the yt-dlp contract asserts an argv **list** with a validated
 http(s) URL and a `--` terminator — never a shell string.
+
+**One table, two implementations.** The hostile-input cases live in
+`tests/fixtures/name_cases.json`; `test_security.py` and `sanitize.test.mjs`
+both load it. They used to be two hand-copied literal lists, which agreed with
+each other and both passed while the implementations disagreed on 991 inputs
+neither list contained. After touching either implementation, re-run the
+differential fuzzer (it needs both interpreters, so it is a script, not a
+collected test):
+
+```
+nix-shell -p nodejs python312 --run "python3 scripts/dl-router/tests/difffuzz.py"
+```
+
+It must print `0 divergence(s)`. Where the two languages' primitives differ
+(JS `trim()` strips U+FEFF, Python's does not; Python treats U+0085 as
+whitespace, JS does not; `urlsplit` and `new URL` disagree about what a host
+is), the rule is written out explicitly in **both** files rather than
+delegating to either standard library.
 
 ---
 

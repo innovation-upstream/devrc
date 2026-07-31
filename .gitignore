@@ -16,3 +16,20 @@ __pycache__/
 
 # Local Claude Code settings (allowlists, settings.local.json) — never commit
 .claude/
+
+# dl-router local state. None of this may ever be committed: config.toml holds
+# the library root and the qBittorrent credentials, `token` is the sidecar
+# bearer token, the SQLite store holds the alias table and the route log, and a
+# manifest names real files. A stray `cp config.example.toml config.toml` inside
+# the repo must not be stageable.
+/scripts/dl-router/config.toml
+/scripts/dl-router/token
+/scripts/dl-router/manifests/
+/scripts/dl-router/*.sqlite3
+/scripts/dl-router/*.sqlite3-wal
+/scripts/dl-router/*.sqlite3-shm
+
+# The dl-router design spec contains the real library root, the qBittorrent
+# NodePort and the Brave profile name. `claudedocs/` is otherwise committable,
+# so this one file is excluded by name.
+/claudedocs/dl-router-design-*.md

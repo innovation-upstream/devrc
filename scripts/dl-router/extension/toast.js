@@ -1,4 +1,4 @@
-// toast.js — the auto-file confirmation popup (decision D3).
+// toast.js -- the auto-file confirmation popup (decision D3).
 //
 // Shows WHERE the download went, WHY (the matcher's reason, so a wrong match is
 // diagnosable rather than mysterious), any duplicate warning, and a `change`
@@ -37,7 +37,7 @@ export function sourceLabel(source) {
   }
 }
 
-/** Fill the toast DOM. Pure w.r.t. chrome.* — takes the document. */
+/** Fill the toast DOM. Pure w.r.t. chrome.* -- takes the document. */
 export function render(doc, model) {
   doc.getElementById("dir").textContent = model.dir;
   doc.getElementById("reason").textContent = model.reason;

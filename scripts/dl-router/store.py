@@ -17,7 +17,7 @@ import threading
 import time
 from pathlib import Path
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 MIGRATIONS = {
     1: [
@@ -56,6 +56,32 @@ MIGRATIONS = {
               site TEXT PRIMARY KEY,
               dir  TEXT NOT NULL,
               ts   REAL NOT NULL
+           )""",
+    ],
+    # v2 -- the provenance the /relocate guard needs.
+    #
+    # /relocate is the one endpoint that moves a PRE-EXISTING file, and the
+    # library root is a live qBittorrent seeding target. Without provenance it
+    # would happily rename a torrent payload (breaking seeding) on nothing more
+    # than a relative path supplied by the extension. `routes.download_id` ties
+    # a routing decision to the browser's DownloadItem, and `routed_files` is
+    # the ledger of paths this router is allowed to move.
+    2: [
+        # `ADD_COLUMN_IF_MISSING` rather than a bare ALTER: sqlite3 autocommits
+        # DDL, so a crash between the ALTER and the `PRAGMA user_version` bump
+        # left the column present with the version still at 1 -- and every
+        # subsequent open then raised `duplicate column name: download_id`.
+        # server.py constructs the Store unguarded, so that is a
+        # `Restart=always` loop: exactly the failure load_degraded() exists to
+        # prevent, reintroduced one layer down.
+        ("ADD_COLUMN_IF_MISSING", "routes", "download_id",
+         "TEXT NOT NULL DEFAULT ''"),
+        "CREATE INDEX IF NOT EXISTS routes_download ON routes(download_id)",
+        """CREATE TABLE IF NOT EXISTS routed_files (
+              rel_path    TEXT PRIMARY KEY,
+              download_id TEXT NOT NULL DEFAULT '',
+              dir         TEXT NOT NULL,
+              ts          REAL NOT NULL
            )""",
     ],
 }
@@ -105,13 +131,35 @@ class Store:
         self._local.conn = None
 
     # --- schema ------------------------------------------------------------ #
+    def _has_column(self, table: str, column: str) -> bool:
+        return any(row[1] == column
+                   for row in self.conn.execute(f"PRAGMA table_info({table})"))
+
+    def _run_migration_step(self, step) -> None:
+        """Apply one migration step. Every step must be RE-RUNNABLE.
+
+        sqlite3 autocommits DDL, so there is no transaction wrapping a
+        migration and a crash can leave it half-applied. Each statement is
+        therefore either `IF NOT EXISTS` or guarded here.
+        """
+        if isinstance(step, tuple):
+            kind = step[0]
+            if kind == "ADD_COLUMN_IF_MISSING":
+                _, table, column, decl = step
+                if not self._has_column(table, column):
+                    self.conn.execute(
+                        f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
+                return
+            raise RuntimeError(f"unknown migration step: {kind}")
+        self.conn.execute(step)
+
     def migrate(self) -> int:
         conn = self.conn
         cur = conn.execute("PRAGMA user_version")
         version = int(cur.fetchone()[0])
         for target in range(version + 1, SCHEMA_VERSION + 1):
-            for stmt in MIGRATIONS[target]:
-                conn.execute(stmt)
+            for step in MIGRATIONS[target]:
+                self._run_migration_step(step)
             conn.execute(f"PRAGMA user_version={target}")
             conn.commit()
         return SCHEMA_VERSION
@@ -177,16 +225,68 @@ class Store:
 
     # --- route log --------------------------------------------------------- #
     def log_route(self, *, url="", site="", filename="", dir_name="",
-                  confidence=0.0, reason="", auto=False, dup=None) -> int:
+                  confidence=0.0, reason="", auto=False, dup=None,
+                  download_id="") -> int:
         cur = self.conn.execute(
             """INSERT INTO routes (ts, url, site, filename, dir, confidence,
-                                   reason, auto, dup)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                                   reason, auto, dup, download_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (self._clock(), url, site, filename, dir_name, float(confidence),
              reason, 1 if auto else 0,
-             json.dumps(dup, separators=(",", ":")) if dup else None))
+             json.dumps(dup, separators=(",", ":")) if dup else None,
+             str(download_id or "")))
         self.conn.commit()
         return int(cur.lastrowid)
+
+    def route_for_download(self, download_id):
+        """The most recent routing decision for a browser download id.
+
+        This is the ONLY evidence the sidecar has that a file under the library
+        root was put there by this router rather than by qBittorrent. An empty
+        id never matches, so an omitted `downloadId` cannot prove anything.
+        """
+        download_id = str(download_id or "")
+        if not download_id:
+            return None
+        row = self.conn.execute(
+            "SELECT * FROM routes WHERE download_id=? ORDER BY id DESC LIMIT 1",
+            (download_id,)).fetchone()
+        return dict(row) if row else None
+
+    # --- routed-file ledger ------------------------------------------------- #
+    def record_routed_file(self, rel_path: str, download_id: str,
+                           dir_name: str) -> None:
+        """Remember that `rel_path` is a file this router created."""
+        self.conn.execute(
+            """INSERT INTO routed_files (rel_path, download_id, dir, ts)
+               VALUES (?, ?, ?, ?)
+               ON CONFLICT(rel_path) DO UPDATE SET
+                 download_id = excluded.download_id,
+                 dir = excluded.dir,
+                 ts = excluded.ts""",
+            (rel_path, str(download_id or ""), dir_name, self._clock()))
+        self.conn.commit()
+
+    def routed_file(self, rel_path: str):
+        row = self.conn.execute(
+            "SELECT * FROM routed_files WHERE rel_path=?",
+            (rel_path,)).fetchone()
+        return dict(row) if row else None
+
+    def move_routed_file(self, old_rel: str, new_rel: str,
+                         dir_name: str) -> None:
+        """Follow a file through a relocate, so a second correction still has
+        provenance for it."""
+        row = self.routed_file(old_rel)
+        download_id = row["download_id"] if row else ""
+        self.conn.execute("DELETE FROM routed_files WHERE rel_path=?",
+                          (old_rel,))
+        self.conn.commit()
+        self.record_routed_file(new_rel, download_id, dir_name)
+
+    def routed_file_count(self) -> int:
+        return int(self.conn.execute(
+            "SELECT COUNT(*) AS n FROM routed_files").fetchone()["n"])
 
     def recent_routes(self, limit: int = 50) -> list:
         rows = self.conn.execute(

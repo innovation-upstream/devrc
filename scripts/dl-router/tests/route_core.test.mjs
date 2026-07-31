@@ -467,3 +467,62 @@ test("default timers are used when none are injected", async () => {
   assert.equal(suggest.calls.length, 1);
   assert.equal(suggest.calls[0].filename, "other/clip.mp4");
 });
+
+// --- the allowlist must fail CLOSED ----------------------------------------- //
+//
+// `handleDetermining` used to build `known` as `deps.knownDirs instanceof Set ?
+// ... : null`, and sanitizeDirName(name, null) skips the allowlist entirely. So
+// any non-Set -- an Array, undefined, null, a half-loaded snapshot -- meant the
+// sidecar's answer was accepted verbatim and Chrome created whatever directory
+// was suggested. These assert the opposite: an unvouched directory is refused
+// and the download lands in the catch-all.
+for (const [label, value] of [
+  ["an Array", ["Jane Doe", "john-smith"]],
+  ["null", null],
+  ["undefined", undefined],
+  ["a plain object", { "Jane Doe": true }],
+  ["a Map", new Map([["Jane Doe", 1]])],
+  ["a string", "Jane Doe"],
+]) {
+  test(`knownDirs as ${label} refuses an unvouched directory`, async () => {
+    const suggest = spy();
+    const timers = fakeTimers();
+    handleDetermining(ITEM, suggest, ladderDeps({
+      ...timers,
+      knownDirs: value,
+      requestMatch: () => Promise.resolve(
+        { dir: "Attacker Chosen", auto: true, reason: "r" }),
+    }));
+    await settle();
+    assert.equal(suggest.calls.length, 1);
+    assert.equal(suggest.calls[0].filename, "other/clip.mp4",
+      `a non-Set knownDirs must not let "Attacker Chosen" through`);
+  });
+}
+
+test("a non-Set knownDirs still allows the catch-all itself", async () => {
+  const suggest = spy();
+  const timers = fakeTimers();
+  handleDetermining(ITEM, suggest, ladderDeps({
+    ...timers,
+    knownDirs: undefined,
+    otherDir: "catch-all",
+    requestMatch: () => Promise.resolve(
+      { dir: "catch-all", auto: true, reason: "r" }),
+  }));
+  await settle();
+  assert.equal(suggest.calls[0].filename, "catch-all/clip.mp4");
+});
+
+test("an EMPTY Set refuses everything but the catch-all", async () => {
+  const suggest = spy();
+  const timers = fakeTimers();
+  handleDetermining(ITEM, suggest, ladderDeps({
+    ...timers,
+    knownDirs: new Set(),
+    requestMatch: () => Promise.resolve(
+      { dir: "Jane Doe", auto: true, reason: "r" }),
+  }));
+  await settle();
+  assert.equal(suggest.calls[0].filename, "other/clip.mp4");
+});

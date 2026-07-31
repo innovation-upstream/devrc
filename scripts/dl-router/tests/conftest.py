@@ -6,6 +6,7 @@ All fixture data is SYNTHETIC (`Jane Doe`, `acme-studio`, `example-site.test`).
 """
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -16,6 +17,33 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import config as config_mod  # noqa: E402
 from dirindex import DirIndex, FileIndex  # noqa: E402
 from store import Store  # noqa: E402
+
+FIXTURES = Path(__file__).resolve().parent / "fixtures"
+
+
+def _expand(value):
+    """Expand the fixture file's {prefix?, repeat, count} long-string form.
+
+    Anything else (including a plain dict, which is one of the non-string
+    cases) is returned untouched.
+    """
+    if isinstance(value, dict) and "repeat" in value:
+        return str(value.get("prefix", "")) + str(value["repeat"]) * int(
+            value["count"])
+    if isinstance(value, list):
+        return [_expand(v) for v in value]
+    return value
+
+
+def load_name_cases() -> dict:
+    """THE shared hostile-input table (tests/fixtures/name_cases.json).
+
+    `tests/sanitize.test.mjs` loads the SAME file through the same expansion
+    rules, so safety.py and extension/sanitize.js are asserted against one
+    table rather than two hand-copied lists that silently drifted apart.
+    """
+    raw = json.loads((FIXTURES / "name_cases.json").read_text(encoding="utf-8"))
+    return {k: _expand(v) for k, v in raw.items() if not k.startswith("_")}
 
 # The three naming conventions that coexist in a real library. The matcher must
 # fold all of them to one key, which is why existing dirs are never renamed.
