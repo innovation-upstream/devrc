@@ -55,22 +55,39 @@ def _write_exec(path: Path, content: str):
     return path
 
 
-def _fake_browser(path: Path) -> Path:
-    """A stand-in for the real `browser` CLI (used ONLY for open/close/print-session-id
-    by the wrapper — the agent's own reads go through the custom tool, not this).
+# A distinctive string that appears ONLY in the fake `browser tabs` listing — used
+# to prove the probe's output never reaches the wrapper's own stdout. (In the real
+# world that listing is the operator's entire tab list: every url + title.)
+PROBE_MARKER = "PROBE-ONLY-TAB-TITLE-9f3ac1"
 
-    - `--print-session-id`           → prints a stable fake id.
+
+def _fake_browser(path: Path) -> Path:
+    """A stand-in for the real `browser` CLI (used ONLY for open/close/tabs/
+    print-session-id by the wrapper — the agent's own reads go through the custom
+    tool, not this).
+
+    - `--print-session-id`            → prints a stable fake id.
     - `[--instance K] open [url]`     → prints {result:{data:{tabId:FRB_TABID}}}
-      (or exits 1 if FRB_OPEN_FAIL=1).
-    - `[--instance K] --tab N eval …` → the wrapper's readiness PROBE. Succeeds by
-      default; if FRB_PROBE_FAIL_TIMES>0 the FIRST that-many probe calls instead
-      mimic a tab-gone op error (stderr `owned_tab_gone`, exit 1) — the counter is
-      persisted in FRB_PROBE_COUNT so retries advance it.
+      (or exits 1 if FRB_OPEN_FAIL=1). The tab is opened at **about:blank**, as
+      the real wrapper does.
+    - `[--instance K] tabs`           → the wrapper's readiness PROBE: a
+      chrome.tabs-style listing (id/url/title/active/windowId), always including a
+      decoy tab titled PROBE_MARKER. Modes:
+        * FRB_PROBE_FAIL_TIMES>0 — the FIRST that-many probes OMIT the owned tab
+          from the listing (the tab-gone shape → wrapper must re-open); the
+          counter is persisted in FRB_PROBE_COUNT so retries advance it.
+        * FRB_PROBE_HARD_FAIL=1  — a bridge/transport error (stderr + exit 1).
+        * FRB_PROBE_UNPARSEABLE=1 — exits 0 with output that carries no tab list.
+    - `[--instance K] --tab N eval …` → mimics REAL Chrome on an about:blank tab:
+      chrome.scripting cannot inject there (no host permission covers about:blank),
+      so it FAILS. This is the regression pin — a wrapper that probes with `eval`
+      can never start.
     - `[--instance K] --tab N <op> …` → prints a canned success envelope.
     Every invocation is appended (one JSON line) to $FRB_LOG for assertions.
     """
     return _write_exec(path, '''#!/usr/bin/env python3
 import json, os, sys
+MARKER = "PROBE-ONLY-TAB-TITLE-9f3ac1"
 argv = sys.argv[1:]
 if argv and argv[0] == "--print-session-id":
     print("claude:fake-session"); sys.exit(0)
@@ -90,17 +107,18 @@ if log:
     with open(log, "a") as f:
         f.write(json.dumps({"op": op, "tab": tab, "instance": inst,
                             "rest": rest}) + "\\n")
+tabid = int(os.environ.get("FRB_TABID", "4242"))
 if op == "open":
     if os.environ.get("FRB_OPEN_FAIL") == "1":
         sys.stderr.write("fake open failed\\n"); sys.exit(1)
-    tabid = int(os.environ.get("FRB_TABID", "4242"))
     print(json.dumps({"ok": True, "result": {"id": "x", "ok": True,
           "data": {"tabId": tabid, "url": "about:blank"}}}))
     sys.exit(0)
-if op == "eval":
-    # The wrapper's cheap readiness probe. Optionally fail the first N calls with
-    # a tab-gone op error (as the real `browser` CLI surfaces owned_tab_gone: a
-    # message on stderr + non-zero exit) to exercise the open->probe->reopen loop.
+if op == "tabs":
+    # The wrapper's NON-INJECTING readiness probe.
+    if os.environ.get("FRB_PROBE_HARD_FAIL") == "1":
+        sys.stderr.write("browser: no extension connected " + MARKER + "\\n")
+        sys.exit(1)
     fail_times = int(os.environ.get("FRB_PROBE_FAIL_TIMES", "0"))
     cf = os.environ.get("FRB_PROBE_COUNT")
     cur = 0
@@ -109,12 +127,26 @@ if op == "eval":
         except ValueError: cur = 0
     if cf:
         open(cf, "w").write(str(cur + 1))
-    if cur < fail_times:
-        sys.stderr.write("browser: op 'eval' failed in the browser: owned_tab_gone\\n")
-        sys.exit(1)
+    if os.environ.get("FRB_PROBE_UNPARSEABLE") == "1":
+        print("<not json, no tab list> " + MARKER); sys.exit(0)
+    # A decoy tab is ALWAYS present; the owned tab is omitted while "gone".
+    tabs = [{"id": 11, "url": "https://decoy.test/", "title": MARKER,
+             "active": True, "windowId": 1}]
+    if cur >= fail_times:
+        tabs.append({"id": tabid, "url": "about:blank", "title": "",
+                     "active": False, "windowId": 1})
     print(json.dumps({"ok": True, "result": {"id": "x", "ok": True,
-          "data": {"value": 1}}}))
+          "data": {"tabs": tabs}}}))
     sys.exit(0)
+if op == "eval":
+    # REAL Chrome behaviour on the agent's about:blank tab: chrome.scripting has
+    # no host permission for about:blank, so injection is refused. Any wrapper
+    # that uses `eval` as its readiness probe dies here, before the model runs.
+    sys.stderr.write(
+        "browser: op 'eval' failed in the browser: Cannot access contents of url "
+        "\\"about:blank\\". Extension manifest must request permission to access "
+        "this host.\\n")
+    sys.exit(1)
 print(json.dumps({"ok": True, "result": {"id": "x", "ok": True,
       "data": {"url": "https://x.test", "title": "X", "text": "page text"}}}))
 sys.exit(0)
@@ -588,10 +620,10 @@ def test_open_failure_clean_error(rig):
 
 # --------------------------------------------------------------------------- #
 # Pre-flight tab-readiness retry: after opening its own tab, the wrapper PROBES
-# it (cheap `eval '1'`, no model tokens) to confirm the tab is live/owned before
-# invoking opencode. Right after an extension reload the service worker's tab
-# tracking isn't settled, so the just-opened tab can vanish (owned_tab_gone); the
-# wrapper must re-open (bounded retry) so the model never gets a doomed tabId.
+# it (a NON-INJECTING `browser tabs` listing, no model tokens) to confirm the tab
+# is live/owned before invoking opencode. Right after an extension reload the
+# service worker's tab tracking isn't settled, so the just-opened tab can vanish;
+# the wrapper must re-open (bounded retry) so the model never gets a doomed tabId.
 # --------------------------------------------------------------------------- #
 def test_readiness_probe_passes_first_try_single_open(rig):
     """Happy path: the probe passes on the first attempt → EXACTLY one open, one
@@ -600,15 +632,14 @@ def test_readiness_probe_passes_first_try_single_open(rig):
     assert r.returncode == 0, r.stderr
     calls = _browser_calls(rig.frb_log)
     opens = [c for c in calls if c["op"] == "open"]
-    probes = [c for c in calls if c["op"] == "eval"]
+    probes = [c for c in calls if c["op"] == "tabs"]
     assert len(opens) == 1, f"expected exactly one open, got {len(opens)}"
     assert len(probes) == 1, f"expected exactly one readiness probe, got {len(probes)}"
-    assert probes[0]["tab"] == str(TAB_ID), "the probe must target the opened tab"
     assert len(_oc_calls(rig.oc_log)) == 1, "opencode must be invoked once the probe passes"
 
 
 def test_readiness_reopens_on_transient_tab_gone(rig):
-    """First probe reports owned_tab_gone (post-reload transient), the retry's
+    """First probe reports the tab is gone (post-reload transient), the retry's
     probe passes → the wrapper re-opens, the probe passes, and opencode IS
     invoked and the run proceeds to a normal result."""
     r = rig.run(["read the page"], mode="ok", probe_fail=1)
@@ -616,7 +647,7 @@ def test_readiness_reopens_on_transient_tab_gone(rig):
     assert json.loads(r.stdout.strip()) == SCHEMA_OK
     calls = _browser_calls(rig.frb_log)
     opens = [c for c in calls if c["op"] == "open"]
-    probes = [c for c in calls if c["op"] == "eval"]
+    probes = [c for c in calls if c["op"] == "tabs"]
     assert len(opens) == 2, f"expected a re-open after the transient, got {len(opens)} opens"
     assert len(probes) == 2, f"expected two probes (fail then pass), got {len(probes)}"
     # The stale (gone) tab is closed best-effort before re-opening.
@@ -655,6 +686,112 @@ def test_readiness_failure_still_closes_tab_no_orphan(rig):
     assert any(c["op"] == "close" and c["tab"] == str(TAB_ID) for c in calls), \
         "cleanup must close the last owned tab on a readiness-failure exit"
     assert "extension loaded/connected" in r.stderr.lower(), "the error must be actionable"
+
+
+# --------------------------------------------------------------------------- #
+# REGRESSION (the second of two independent blockers that kept `browser agent`
+# from EVER running): the readiness probe must not need PAGE-CONTENT access.
+#
+# The agent's tab is deliberately opened at about:blank, and chrome.scripting
+# cannot inject into about:blank — it isn't covered by the manifest's <all_urls>
+# host permission. The old probe ran `eval '1'` there, so EVERY run died with
+#   readiness probe failed unexpectedly on tab N: browser: op 'eval' failed in
+#   the browser: Cannot access contents of url "about:blank". …
+# before a single model token was spent. The fake `browser` above reproduces that
+# Chrome behaviour faithfully, so these tests FAIL on the pre-fix wrapper.
+# --------------------------------------------------------------------------- #
+def test_readiness_probe_passes_on_an_about_blank_tab(rig):
+    """THE regression: the agent's own tab starts at about:blank and the probe
+    must still pass. (Pre-fix this died rc=2 with Chrome's host-permission error.)"""
+    r = rig.run(["report the page title"], mode="ok")
+    assert r.returncode == 0, (
+        "the readiness probe must pass on an about:blank tab — page-content "
+        f"access is not required to check that a tab exists:\n{r.stderr}")
+    assert "Cannot access contents of url" not in r.stderr
+    assert json.loads(r.stdout.strip()) == SCHEMA_OK
+    assert len(_oc_calls(rig.oc_log)) == 1, "the model must actually be reached"
+
+
+def test_readiness_probe_does_not_inject_into_the_page(rig):
+    """Structural pin: the probe must use a NON-INJECTING op. No `eval` (nor any
+    other content-script op) may be issued against the agent's tab by the wrapper
+    — the only pre-model browser calls are `open` and the `tabs` probe."""
+    r = rig.run(["read the page"], mode="ok")
+    assert r.returncode == 0, r.stderr
+    ops = [c["op"] for c in _browser_calls(rig.frb_log)]
+    assert "eval" not in ops, "the readiness probe must not inject into the page"
+    for injecting in ("html", "getHtml", "text", "screenshot", "nav"):
+        assert injecting not in ops, f"the wrapper must not issue `{injecting}` itself"
+    assert ops.count("tabs") == 1, f"expected exactly one `tabs` probe, got {ops}"
+
+
+def test_probe_source_does_not_use_eval():
+    """Static guard: `eval` must not creep back into the probe. The wrapper may
+    still MENTION it in the explanatory comment (that is the bug's postmortem),
+    so only non-comment lines are checked."""
+    src = WRAPPER.read_text()
+    code = [ln for ln in src.splitlines() if not ln.lstrip().startswith("#")]
+    probe_calls = [ln for ln in code if '"$BROWSER_BIN"' in ln and " eval " in ln]
+    assert probe_calls == [], f"the wrapper must not run a `browser eval`: {probe_calls}"
+    assert any('"$BROWSER_BIN"' in ln and " tabs" in ln for ln in code), \
+        "the readiness probe must use the non-injecting `tabs` op"
+
+
+def test_probe_hard_failure_dies_rc2_without_running_the_model(rig):
+    """A genuine (non-tab-gone) probe failure is still HARD: rc=2, the error is
+    surfaced on stderr, the model is never invoked, and no retry loop spins."""
+    r = rig.run(["read the page"], mode="ok",
+                extra_env={"FRB_PROBE_HARD_FAIL": "1"})
+    assert r.returncode == 2, r.stdout + r.stderr
+    assert "readiness probe failed unexpectedly" in r.stderr
+    assert _oc_calls(rig.oc_log) == [], "the model must NEVER run on a hard probe failure"
+    # rc=2 is terminal — exactly one open + one probe, no bounded-retry spin.
+    ops = [c["op"] for c in _browser_calls(rig.frb_log)]
+    assert ops.count("open") == 1, f"a hard probe failure must not retry the open: {ops}"
+    assert ops.count("tabs") == 1, f"a hard probe failure must not re-probe: {ops}"
+    assert r.stdout.strip() == "", "a hard probe failure must not print a schema result"
+
+
+def test_probe_unparseable_listing_is_a_hard_failure(rig):
+    """A 0-exit `tabs` whose output carries no tab list is rc=2 (fail closed) — an
+    unreadable answer must never be treated as 'ready'."""
+    r = rig.run(["read the page"], mode="ok",
+                extra_env={"FRB_PROBE_UNPARSEABLE": "1"})
+    assert r.returncode == 2, r.stdout + r.stderr
+    assert "readiness probe failed unexpectedly" in r.stderr
+    assert _oc_calls(rig.oc_log) == [], "the model must NEVER run on an unreadable probe"
+
+
+def test_probe_output_never_reaches_stdout(rig):
+    """PROBE_OUT captures stdout+stderr and must NEVER reach the wrapper's own
+    stdout — in production the `tabs` listing is the operator's ENTIRE tab list
+    (every url + title), and any of it on stdout would corrupt the JSON result."""
+    # Happy path: the listing (incl. the decoy tab's title) must not leak.
+    r = rig.run(["read the page"], mode="ok")
+    assert r.returncode == 0, r.stderr
+    assert PROBE_MARKER not in r.stdout, "the probe's tab listing leaked to stdout"
+    assert PROBE_MARKER not in r.stderr, "the probe's tab listing leaked to stderr"
+    assert json.loads(r.stdout.strip()) == SCHEMA_OK   # stdout is EXACTLY the schema
+    # Tab-gone retry path: still nothing on stdout.
+    r2 = rig.run(["read the page"], mode="ok", probe_fail=1)
+    assert r2.returncode == 0, r2.stderr
+    assert PROBE_MARKER not in r2.stdout
+    assert json.loads(r2.stdout.strip()) == SCHEMA_OK
+    # Hard-failure path: the error goes to STDERR, stdout stays empty.
+    r3 = rig.run(["read the page"], mode="ok",
+                 extra_env={"FRB_PROBE_HARD_FAIL": "1"})
+    assert r3.returncode == 2
+    assert r3.stdout.strip() == "", "an op-error dump must never reach stdout"
+
+
+def test_unparseable_probe_error_does_not_dump_the_whole_listing(rig):
+    """Privacy: when the listing can't be parsed, the stderr diagnostic is capped
+    — it must not spray the operator's full tab list into the terminal/logs."""
+    r = rig.run(["read the page"], mode="ok",
+                extra_env={"FRB_PROBE_UNPARSEABLE": "1"})
+    assert r.returncode == 2
+    assert "could not find a tab list" in r.stderr
+    assert "first 200 bytes" in r.stderr, "the raw response must be truncated"
 
 
 # --------------------------------------------------------------------------- #
