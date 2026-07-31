@@ -106,7 +106,12 @@ carries the new rules. Selector subset: tag, `.class`, `#id`, `[attr]`,
 **"Downloads still show a Save-As dialog."** The profile's
 `download.default_directory` is not the library root, or `prompt_for_download`
 is still on. Re-run `setup-brave-profile.sh` with Brave **fully closed** (it
-refuses otherwise, because Brave rewrites `Preferences` on exit).
+refuses otherwise, because Brave rewrites `Preferences` on exit). "Closed"
+means *this* profile: the guard asks whether any live process is using this
+`--user-data-dir` (open fd / main-process cmdline / a live `SingletonLock`), so
+headless automation on a throwaway `/tmp` profile does not block it, and a
+stale lock from a crash does not either. It names the pid to quit. `--list` and
+`--dry-run` write nothing and are never gated.
 
 ## Backfill — the one dangerous path
 

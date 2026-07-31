@@ -13,17 +13,20 @@
 #     download.prompt_for_download = false
 #
 # Safety:
-#   * refuses to run while Brave is running (Brave rewrites Preferences on exit
-#     and would clobber the edit);
+#   * refuses to run while a browser is USING THIS user-data-dir (it rewrites
+#     Preferences on exit and would clobber the edit). An instance on some
+#     OTHER --user-data-dir -- headless automation on a throwaway profile, say
+#     -- shares the binary but not this file, and does not count;
 #   * backs up Preferences with a timestamp before touching it;
 #   * lists the profile display names first, so the right directory is chosen;
-#   * --dry-run prints the resulting diff without writing.
+#   * --list and --dry-run write nothing, so they are not gated at all.
 #
 # Nothing here is committed with a real path: the library root comes from
 # ~/.config/dl-router/config.toml (or --root).
 set -euo pipefail
 
-BRAVE_DIR="${BRAVE_DIR:-$HOME/.config/BraveSoftware/Brave-Browser}"
+DEFAULT_BRAVE_DIR="$HOME/.config/BraveSoftware/Brave-Browser"
+BRAVE_DIR="${BRAVE_DIR:-$DEFAULT_BRAVE_DIR}"
 CONFIG="${DL_ROUTER_CONFIG:-$HOME/.config/dl-router/config.toml}"
 PROFILE=""
 ROOT=""
@@ -36,17 +39,25 @@ usage: setup-brave-profile.sh [--list] [--profile <dir>] [--root <path>] [--dry-
   --list            show each profile directory and its display name, then exit
   --profile <dir>   profile DIRECTORY name ("Default", "Profile 2", ...)
   --root <path>     library root (default: library_root from config.toml)
-  --dry-run         show what would change; write nothing
+  --dry-run         show what would change; write nothing (writes nothing by
+                    construction, so it is not gated on the browser: a live
+                    instance is reported as a warning instead of a refusal)
 
 Environment:
-  BRAVE_DIR                          browser profile directory
+  BRAVE_DIR                          browser user-data-dir holding the profile
   DL_ROUTER_CONFIG                   config.toml to read library_root from
   DL_ROUTER_ASSUME_BROWSER_CLOSED=1  proceed even when this script cannot
-                                     determine whether the browser is running
-                                     (pgrep missing or erroring). Only use it
-                                     with the browser genuinely closed: it
-                                     rewrites Preferences on exit and would
-                                     silently revert the change.
+                                     determine whether anything is using this
+                                     user-data-dir (no readable process table).
+                                     It does NOT override a browser that WAS
+                                     positively detected -- quit that one
+                                     instead. Only use it with the browser
+                                     genuinely closed: it rewrites Preferences
+                                     on exit and would silently revert the
+                                     change.
+  DL_ROUTER_PROC_DIR                 procfs mount point (default /proc); the
+                                     "is anything using this profile?" check
+                                     reads it.
 
 Run --list first, pick the profile whose display name is the one you download
 with, then re-run with --profile.
@@ -153,67 +164,242 @@ if [ ! -f "$PREFS" ]; then
   exit 2
 fi
 
-# --- refuse while the browser is running ----------------------------------- #
-# Match the real binary names, not a bare pattern: `pgrep -f brave` would also
-# match this script's own command line.
+# --- refuse while something is using THIS user-data-dir --------------------- #
+# THE BUG THIS GUARD USED TO HAVE: it asked `pgrep -x brave`, i.e. "does a
+# process with that BINARY NAME exist", and called that "the browser is
+# running". On a host that also drives headless Brave for automation
+# (Playwright/chromedp, each on its own `--user-data-dir=/tmp/...`) that is a
+# false positive essentially always: the real browser is closed, nothing holds
+# this profile, and the one-time setup step is simply unrunnable. The
+# documented escape hatch did not help either -- it only covered "pgrep could
+# not answer", and here pgrep answered, loudly and wrongly.
 #
-# THE BUG THIS GUARD USED TO HAVE: `pgrep ... >/dev/null 2>&1` was treated as
-# "not running" for ANY non-zero exit. pgrep exits 1 for "no match" and the
-# SHELL exits 127 when the binary is absent from PATH -- and 2>/dev/null hid
-# the "command not found" message. On a host without procps the guard silently
-# passed and the script patched Preferences under a live browser, which then
-# rewrote them on exit and reverted the change: exactly the failure the guard
-# exists to prevent, and a confusing one because nothing appears to be wrong.
+# What actually matters is not the binary name but the FILE: is any live
+# process using the user-data-dir that contains the profile we are about to
+# patch? Three signals, most reliable first (see the embedded checker):
+#   1. a process holding an open fd under the user-data-dir -- kernel truth,
+#      no parsing, and it catches non-Brave holders too;
+#   2. a browser MAIN process (no --type=, i.e. not a renderer/zygote child)
+#      whose --user-data-dir resolves here -- or that has no --user-data-dir at
+#      all, which means it is on the default one;
+#   3. SingletonLock, a "<host>-<pid>" symlink -- but only when that pid is
+#      still alive. A stale lock from a crash or an unclean exit must not block
+#      the script forever.
 #
-# So: distinguish 1 (checked, not running) from anything else (could not
-# check), and fail closed on "could not check".
-browser_running() {
-  local rc saw_answer=0 name
-  for name in brave brave-browser Brave-Browser brave-bin; do
-    # `|| rc=$?` keeps a non-zero exit non-fatal under `set -e` without
-    # toggling the option (an inner `set -e` would re-arm it for the caller).
-    rc=0
-    pgrep -x "$name" >/dev/null 2>&1 || rc=$?
-    case "$rc" in
-      0) return 0 ;;     # running
-      1) saw_answer=1 ;; # definitely not running under this name
-      *) ;;              # 127 / 126 / anything else: the tool did not answer
-    esac
-  done
-  if [ "$saw_answer" -eq 1 ]; then
-    return 1
-  fi
-  return 2               # never got a usable answer from pgrep at all
-}
+# Fail closed is preserved: if the checker cannot get a usable process table it
+# refuses, and only DL_ROUTER_ASSUME_BROWSER_CLOSED=1 overrides THAT. It does
+# not override a positively identified instance -- there is nothing to guess
+# about, and the message names the pid to quit.
+GUARD_RC=0
+GUARD_MSG="$(
+  python3 - "$BRAVE_DIR" "$PROFILE" "$DEFAULT_BRAVE_DIR" <<'PY' 2>&1
+import os
+import re
+import sys
 
-if ! command -v pgrep >/dev/null 2>&1; then
-  echo "pgrep is not available, so this script cannot tell whether the browser" >&2
-  echo "is running. Refusing: patching Preferences under a live browser is" >&2
-  echo "silently reverted on exit. Install procps (or quit the browser and" >&2
-  echo "re-run with DL_ROUTER_ASSUME_BROWSER_CLOSED=1)." >&2
-  [ "${DL_ROUTER_ASSUME_BROWSER_CLOSED:-0}" = "1" ] || exit 3
+BUSY, UNKNOWN = 3, 4
+udd_arg, profile, default_arg = sys.argv[1], sys.argv[2], sys.argv[3]
+proc_root = os.environ.get("DL_ROUTER_PROC_DIR") or "/proc"
+
+
+def norm(path):
+    try:
+        return os.path.realpath(path)
+    except OSError:
+        return os.path.abspath(path)
+
+
+udd = norm(udd_arg)
+inside = udd.rstrip("/") + "/"
+udd_is_default = udd == norm(default_arg)
+
+# Packaging calls it brave, brave-browser, brave-bin, .brave-wrapped (Nix), ...
+# The name is only ever used to decide whether a process is ELIGIBLE for the
+# cmdline check -- never on its own to conclude that this profile is in use.
+BRAVE_NAME = re.compile(r"^\.?brave", re.IGNORECASE)
+
+
+def read_text(pid, name):
+    try:
+        with open(os.path.join(proc_root, pid, name), "rb") as fh:
+            return fh.read().decode("utf-8", "replace")
+    except OSError:
+        return None
+
+
+def link(pid, name):
+    try:
+        return os.readlink(os.path.join(proc_root, pid, name))
+    except OSError:
+        return ""
+
+
+def first_token(cmdline):
+    # Chromium REWRITES its own argv to set the process title, which collapses
+    # the NUL separators into spaces -- on a live browser every process reads
+    # back as one space-joined blob, not a NUL-separated vector. Handle both.
+    return re.split(r"[\0 ]", cmdline, maxsplit=1)[0]
+
+
+def names_of(pid, cmdline):
+    out = [read_text(pid, "comm") or "", os.path.basename(link(pid, "exe"))]
+    if cmdline:
+        out.append(os.path.basename(first_token(cmdline)))
+    return [n.strip() for n in out if n.strip()]
+
+
+def flag_value(cmdline, flag):
+    m = re.search(r"(?:^|[\0 ])" + re.escape(flag) + r"[= ]", cmdline)
+    if not m:
+        return None
+    # The value ends at the next NUL (a real argv) or at the next " --flag" (an
+    # argv the process rewrote into one blob).
+    return re.split(r"\0| --", cmdline[m.end():], maxsplit=1)[0].strip()
+
+
+def has_flag(cmdline, flag):
+    return re.search(r"(?:^|[\0 ])" + re.escape(flag) + r"[= ]", cmdline) is not None
+
+
+def fd_under_udd(pid):
+    fd_dir = os.path.join(proc_root, pid, "fd")
+    try:
+        entries = os.listdir(fd_dir)
+    except OSError:
+        return None
+    for fd in entries:
+        try:
+            target = os.readlink(os.path.join(fd_dir, fd))
+        except OSError:
+            continue
+        target = target.split(" (deleted)")[0]
+        if target == udd or target.startswith(inside):
+            return target
+    return None
+
+
+def live_pids():
+    try:
+        found = sorted((e for e in os.listdir(proc_root) if e.isdigit()), key=int)
+    except OSError:
+        return None
+    # A real process table always has pid 1. An empty (or simply wrong)
+    # directory is not evidence that nothing is running.
+    return found or None
+
+
+def lock_pid():
+    try:
+        target = os.readlink(os.path.join(udd, "SingletonLock"))
+    except OSError:
+        return None
+    m = re.search(r"-(\d+)$", target)
+    return m.group(1) if m else None
+
+
+def describe(pid, cmdline):
+    names = names_of(pid, cmdline)
+    return "pid %s (%s)" % (pid, names[0] if names else "unknown")
+
+
+def verdict():
+    """('clear'|'busy'|'unknown', detail)."""
+    pids = live_pids()
+    held_by = lock_pid()
+
+    if pids is None:
+        # No process table. The lock is the only signal left, and it can only
+        # prove BUSY, never free.
+        if held_by is not None:
+            try:
+                os.kill(int(held_by), 0)
+                alive = True
+            except ProcessLookupError:
+                alive = False
+            except (OSError, ValueError):
+                alive = True   # cannot signal it, so cannot rule it out
+            if alive:
+                return "busy", ("pid %s" % held_by,
+                                "holds this profile's SingletonLock")
+        return "unknown", ("no readable process table at %s -- cannot tell "
+                           "whether anything is using this profile" % proc_root)
+
+    for pid in pids:
+        cmdline = read_text(pid, "cmdline")
+        if cmdline is None:
+            continue           # gone, or not ours to inspect
+        open_file = fd_under_udd(pid)
+        if open_file:
+            return "busy", (describe(pid, cmdline),
+                            "has %s open" % open_file)
+        if not any(BRAVE_NAME.match(n) for n in names_of(pid, cmdline)):
+            continue
+        if has_flag(cmdline, "--type"):
+            continue           # a renderer/zygote/gpu child, not an instance
+        value = flag_value(cmdline, "--user-data-dir")
+        if value is not None:
+            if not os.path.isabs(value):
+                cwd = link(pid, "cwd")
+                value = os.path.join(cwd, value) if cwd else value
+            if norm(value) == udd:
+                return "busy", (describe(pid, cmdline),
+                                "was started with --user-data-dir=%s" % udd)
+        elif udd_is_default:
+            return "busy", (describe(pid, cmdline),
+                            "has no --user-data-dir, so it is on the default "
+                            "one, which is this one")
+
+    if held_by is not None and held_by in pids and read_text(held_by, "cmdline") is None:
+        # Alive, holds the lock, and opaque to us (another user, or hidepid).
+        # Every other case of a live lock holder was decided above.
+        return "busy", ("pid %s" % held_by,
+                        "holds this profile's SingletonLock and cannot be "
+                        "inspected from here")
+
+    return "clear", None
+
+
+status, detail = verdict()
+if status == "clear":
+    raise SystemExit(0)
+if status == "busy":
+    who, why = detail
+    sys.stderr.write(
+        "A browser is using the profile directory this script would patch:\n"
+        "  blocked by:      %s\n"
+        "                   %s\n"
+        "  profile:         %s\n"
+        "  user-data-dir:   %s\n"
+        "Quit THAT instance completely and re-run -- it rewrites Preferences\n"
+        "on exit, which would silently revert this change. Instances on a\n"
+        "different --user-data-dir (headless automation, throwaway profiles)\n"
+        "are ignored by this check and are safe to leave running.\n"
+        % (who, why, profile, udd))
+    raise SystemExit(BUSY)
+sys.stderr.write("Could not determine whether a browser is using this profile "
+                 "directory:\n  %s\n" % detail)
+raise SystemExit(UNKNOWN)
+PY
+)" || GUARD_RC=$?
+
+if [ -n "$GUARD_MSG" ]; then
+  printf '%s\n' "$GUARD_MSG" >&2
 fi
-
-BROWSER_RC=0
-browser_running || BROWSER_RC=$?
-case "$BROWSER_RC" in
-  0)
-    echo "The browser is running. Quit it completely (it rewrites Preferences" >&2
-    echo "on exit, which would silently revert this change), then re-run." >&2
+if [ "$GUARD_RC" -ne 0 ] && [ "$DRY_RUN" -eq 1 ]; then
+  echo "(--dry-run writes nothing, so that is a warning, not a refusal.)" >&2
+elif [ "$GUARD_RC" -eq 3 ]; then
+  exit 3
+elif [ "$GUARD_RC" -ne 0 ]; then
+  # 4 = the check ran and could not answer. Anything else = the check itself
+  # broke (no python3, a traceback, ...). Both are "no answer", and no answer
+  # fails closed -- that is what DL_ROUTER_ASSUME_BROWSER_CLOSED=1 is for.
+  if [ "${DL_ROUTER_ASSUME_BROWSER_CLOSED:-0}" != "1" ]; then
+    echo "Refusing rather than guessing: patching Preferences under a live" >&2
+    echo "browser is silently reverted on exit. Quit the browser and re-run" >&2
+    echo "with DL_ROUTER_ASSUME_BROWSER_CLOSED=1 to override." >&2
     exit 3
-    ;;
-  1) : ;;   # confirmed closed
-  *)
-    if [ "${DL_ROUTER_ASSUME_BROWSER_CLOSED:-0}" != "1" ]; then
-      echo "Could not determine whether the browser is running (pgrep gave no" >&2
-      echo "usable answer). Refusing rather than guessing -- patching" >&2
-      echo "Preferences under a live browser is silently reverted on exit." >&2
-      echo "Quit it and re-run with DL_ROUTER_ASSUME_BROWSER_CLOSED=1 to" >&2
-      echo "override." >&2
-      exit 3
-    fi
-    ;;
-esac
+  fi
+fi
 
 # --- back up + patch -------------------------------------------------------- #
 STAMP="$(date +%Y%m%d-%H%M%S)"
