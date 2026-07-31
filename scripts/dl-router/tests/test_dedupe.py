@@ -15,6 +15,7 @@ from __future__ import annotations
 import os
 import sqlite3
 import sys
+import threading
 from pathlib import Path
 
 import pytest
@@ -175,6 +176,122 @@ def test_the_cache_is_bounded(tmp_path):
     for i in range(10):
         cache.digest(write(tmp_path / f"f{i}.bin", blob(1000 + i)))
     assert len(cache) <= 3
+
+
+class RecordingLock:
+    """An RLock that counts acquisitions, so "is it locked?" is assertable."""
+
+    def __init__(self):
+        self._real = threading.RLock()
+        self.entries = 0
+
+    def __enter__(self):
+        self.entries += 1
+        return self._real.__enter__()
+
+    def __exit__(self, *exc):
+        return self._real.__exit__(*exc)
+
+
+def test_every_cache_mutation_is_taken_under_the_lock(tmp_path):
+    """THE STRUCTURAL PIN for the HashCache lock, and the reason it is
+    structural rather than a stress test.
+
+    One HashCache is shared by every ThreadingHTTPServer request thread, and
+    /dedupe runs on the completion of every download. But under CPython's GIL,
+    DELETING THIS LOCK AND RUNNING A STRESS TEST LEAVES IT GREEN -- measured,
+    not assumed. A test that passes when the fix is removed is decoration, so
+    the lock is asserted directly instead: every entry point that touches
+    `_entries`, `hits` or `misses` must take it.
+
+    COUNTED PER SECTION, not merely "was the lock touched at all". `digest()`
+    has TWO critical sections -- the cached read, and the insert-plus-eviction
+    after the hash -- and asserting only "> 0" let the write half be unlinked
+    while the read half kept the test green. That was measured too.
+    """
+    cache = D.HashCache()
+    lock = RecordingLock()
+    cache._lock = lock
+    path = write(tmp_path / "a.bin", blob(2000))
+
+    def taken(fn):
+        before = lock.entries
+        fn()
+        return lock.entries - before
+
+    # A miss holds the lock TWICE: once to read, once to insert and evict.
+    assert taken(lambda: cache.digest(path)) >= 2, (
+        "the insert/eviction half of digest() ran unlocked")
+    # A hit holds it once, for the read.
+    assert taken(lambda: cache.digest(path)) >= 1, (
+        "the hit path read the cache unlocked")
+    assert taken(lambda: cache.forget(path)) >= 1, (
+        "forget() mutated the cache unlocked")
+    assert taken(cache.stats) >= 1, "stats() read the cache unlocked"
+    assert taken(lambda: len(cache)) >= 1, "__len__ read the cache unlocked"
+    # The stat-failed path evicts too.
+    assert taken(lambda: cache.digest(tmp_path / "gone.bin")) >= 1, (
+        "the missing-file path evicted unlocked")
+
+
+def test_the_cache_stays_bounded_and_correct_under_concurrent_use(tmp_path):
+    """A SMOKE TEST, NOT A PIN -- and labelled so nobody mistakes it for one.
+
+    It exercises the real threaded shape (/dedupe on every completed download,
+    one shared cache), but the GIL makes it pass with the lock removed, so it
+    cannot be the thing that protects the invariant. See
+    `test_every_cache_mutation_is_taken_under_the_lock`, which can.
+    """
+    paths = [write(tmp_path / f"f{i}.bin", blob(2000 + i)) for i in range(40)]
+    truth = {str(p): D.partial_digest(p) for p in paths}
+    cache = D.HashCache(max_entries=8)
+    wrong: list = []
+    barrier = threading.Barrier(6)
+
+    def worker():
+        barrier.wait()
+        for _ in range(15):
+            for p in paths:
+                got = cache.digest(p)
+                if got != truth[str(p)]:
+                    wrong.append((str(p), got))
+
+    threads = [threading.Thread(target=worker) for _ in range(6)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=60)
+    assert not any(t.is_alive() for t in threads), "a worker deadlocked"
+    assert wrong == [], f"a concurrent read returned a wrong digest: {wrong[:3]}"
+    assert len(cache) <= 8, f"the cap drifted to {len(cache)} under contention"
+
+
+def test_forget_and_stats_are_safe_while_another_thread_hashes(tmp_path):
+    paths = [write(tmp_path / f"g{i}.bin", blob(3000 + i)) for i in range(20)]
+    cache = D.HashCache()
+    stop = threading.Event()
+    errors: list = []
+
+    def churn():
+        try:
+            while not stop.is_set():
+                cache.stats()
+                for p in paths:
+                    cache.forget(p)
+        except Exception as exc:            # a dict mutated during iteration
+            errors.append(exc)
+
+    t = threading.Thread(target=churn)
+    t.start()
+    try:
+        for _ in range(20):
+            for p in paths:
+                cache.digest(p)
+    finally:
+        stop.set()
+        t.join(timeout=30)
+    assert not t.is_alive()
+    assert errors == [], f"{errors[:2]}"
 
 
 # --- confirm_duplicate ------------------------------------------------------ #

@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import threading
 
 # 128 KiB from each end. Big enough to cover a container header plus the first
 # frames (and the trailing index/moov atom that a remux would change), small
@@ -125,6 +126,29 @@ class HashCache:
     cost is paid per candidate per download rather than once per file. Keyed on
     (size, mtime_ns) as well as the path so a file rewritten in place is
     re-hashed rather than answered from a stale digest.
+
+    CONCURRENCY. One instance is shared by every ThreadingHTTPServer request
+    thread, so the dict operations are under a lock -- the same rule
+    `DirIndex`/`FileIndex` already follow. Without it the read-modify-write in
+    `digest()` interleaves: the eviction sweep pops entries another thread has
+    just written, and `len() > max` is evaluated against a size a third thread
+    is changing, so the cap drifts.
+
+    BE HONEST ABOUT WHAT THAT COSTS AND HOW IT IS TESTED. Nothing here can
+    corrupt an ANSWER -- a lost entry is a recomputed digest -- so the damage
+    is wasted I/O and an unbounded-ish cache, not a wrong duplicate. And under
+    CPython's GIL a stress test does NOT reliably reproduce it: removing this
+    lock and running one leaves it green. So the lock is pinned STRUCTURALLY
+    (`test_every_cache_mutation_is_taken_under_the_lock` substitutes a
+    recording lock and asserts each entry point acquires it), and the stress
+    test is kept as a smoke test that is explicitly labelled as one. A pin that
+    passes when the fix is deleted is decoration, not a pin.
+
+    THE HASH ITSELF RUNS OUTSIDE THE LOCK, deliberately, for the reason
+    `FileIndex.refresh` spells out: holding a lock across file I/O serialises
+    every request thread behind one read. The cost of that choice is that two
+    threads racing on the same cold path may both hash it once -- a duplicated
+    256 KiB read, not a wrong answer.
     """
 
     def __init__(self, *, max_entries: int = MAX_CACHE_ENTRIES,
@@ -133,6 +157,7 @@ class HashCache:
         self._max = int(max_entries)
         self._head = int(head)
         self._tail = int(tail)
+        self._lock = threading.RLock()
         self.hits = 0
         self.misses = 0
 
@@ -144,34 +169,41 @@ class HashCache:
         except OSError:
             # Gone or unreadable. Drop any cached digest: keeping it would let
             # a later file at the same path answer with the old one.
-            self._entries.pop(key, None)
+            with self._lock:
+                self._entries.pop(key, None)
             return None
         stamp = (st.st_size, st.st_mtime_ns)
-        cached = self._entries.get(key)
-        if cached is not None and cached[0] == stamp:
-            self.hits += 1
-            return cached[1]
-        self.misses += 1
+        with self._lock:
+            cached = self._entries.get(key)
+            if cached is not None and cached[0] == stamp:
+                self.hits += 1
+                return cached[1]
+            self.misses += 1
         value = partial_digest(path, size=st.st_size, head=self._head,
                                tail=self._tail, opener=opener)
-        if value is None:
-            self._entries.pop(key, None)
-            return None
-        self._entries[key] = (stamp, value)
-        if len(self._entries) > self._max:
-            for stale in list(self._entries)[:len(self._entries) - self._max]:
-                self._entries.pop(stale, None)
+        with self._lock:
+            if value is None:
+                self._entries.pop(key, None)
+                return None
+            self._entries[key] = (stamp, value)
+            excess = len(self._entries) - self._max
+            if excess > 0:
+                for stale in list(self._entries)[:excess]:
+                    self._entries.pop(stale, None)
         return value
 
     def forget(self, path) -> None:
-        self._entries.pop(str(path), None)
+        with self._lock:
+            self._entries.pop(str(path), None)
 
     def stats(self) -> dict:
-        return {"entries": len(self._entries), "hits": self.hits,
-                "misses": self.misses}
+        with self._lock:
+            return {"entries": len(self._entries), "hits": self.hits,
+                    "misses": self.misses}
 
     def __len__(self) -> int:
-        return len(self._entries)
+        with self._lock:
+            return len(self._entries)
 
 
 def confirm_duplicate(root, rel_path: str, candidates, cache: HashCache, *,
