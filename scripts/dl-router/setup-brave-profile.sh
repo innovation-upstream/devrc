@@ -43,11 +43,21 @@ with, then re-run with --profile.
 USAGE
 }
 
+# `shift 2` with only one argument left is a fatal shift error under `set -e`,
+# which surfaces as an unexplained non-zero exit rather than a usage message.
+need_value() {
+  if [ "$2" -lt 2 ]; then
+    echo "$1 requires a value" >&2
+    usage >&2
+    exit 2
+  fi
+}
+
 while [ $# -gt 0 ]; do
   case "$1" in
     --list) LIST=1; shift ;;
-    --profile) PROFILE="${2:-}"; shift 2 ;;
-    --root) ROOT="${2:-}"; shift 2 ;;
+    --profile) need_value "$1" "$#"; PROFILE="$2"; shift 2 ;;
+    --root) need_value "$1" "$#"; ROOT="$2"; shift 2 ;;
     --dry-run) DRY_RUN=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "unknown argument: $1" >&2; usage >&2; exit 2 ;;
@@ -133,15 +143,67 @@ if [ ! -f "$PREFS" ]; then
   exit 2
 fi
 
-# --- refuse while Brave is running ----------------------------------------- #
-# Match the real binary paths, not a bare name: `pgrep -f brave` would also
+# --- refuse while the browser is running ----------------------------------- #
+# Match the real binary names, not a bare pattern: `pgrep -f brave` would also
 # match this script's own command line.
-if pgrep -x brave >/dev/null 2>&1 || pgrep -x brave-browser >/dev/null 2>&1 \
-   || pgrep -x "Brave-Browser" >/dev/null 2>&1; then
-  echo "Brave is running. Quit it completely (it rewrites Preferences on exit," >&2
-  echo "which would silently revert this change), then re-run." >&2
-  exit 3
+#
+# THE BUG THIS GUARD USED TO HAVE: `pgrep ... >/dev/null 2>&1` was treated as
+# "not running" for ANY non-zero exit. pgrep exits 1 for "no match" and the
+# SHELL exits 127 when the binary is absent from PATH -- and 2>/dev/null hid
+# the "command not found" message. On a host without procps the guard silently
+# passed and the script patched Preferences under a live browser, which then
+# rewrote them on exit and reverted the change: exactly the failure the guard
+# exists to prevent, and a confusing one because nothing appears to be wrong.
+#
+# So: distinguish 1 (checked, not running) from anything else (could not
+# check), and fail closed on "could not check".
+browser_running() {
+  local rc saw_answer=0 name
+  for name in brave brave-browser Brave-Browser brave-bin; do
+    # `|| rc=$?` keeps a non-zero exit non-fatal under `set -e` without
+    # toggling the option (an inner `set -e` would re-arm it for the caller).
+    rc=0
+    pgrep -x "$name" >/dev/null 2>&1 || rc=$?
+    case "$rc" in
+      0) return 0 ;;     # running
+      1) saw_answer=1 ;; # definitely not running under this name
+      *) ;;              # 127 / 126 / anything else: the tool did not answer
+    esac
+  done
+  if [ "$saw_answer" -eq 1 ]; then
+    return 1
+  fi
+  return 2               # never got a usable answer from pgrep at all
+}
+
+if ! command -v pgrep >/dev/null 2>&1; then
+  echo "pgrep is not available, so this script cannot tell whether the browser" >&2
+  echo "is running. Refusing: patching Preferences under a live browser is" >&2
+  echo "silently reverted on exit. Install procps (or quit the browser and" >&2
+  echo "re-run with DL_ROUTER_ASSUME_BROWSER_CLOSED=1)." >&2
+  [ "${DL_ROUTER_ASSUME_BROWSER_CLOSED:-0}" = "1" ] || exit 3
 fi
+
+BROWSER_RC=0
+browser_running || BROWSER_RC=$?
+case "$BROWSER_RC" in
+  0)
+    echo "The browser is running. Quit it completely (it rewrites Preferences" >&2
+    echo "on exit, which would silently revert this change), then re-run." >&2
+    exit 3
+    ;;
+  1) : ;;   # confirmed closed
+  *)
+    if [ "${DL_ROUTER_ASSUME_BROWSER_CLOSED:-0}" != "1" ]; then
+      echo "Could not determine whether the browser is running (pgrep gave no" >&2
+      echo "usable answer). Refusing rather than guessing -- patching" >&2
+      echo "Preferences under a live browser is silently reverted on exit." >&2
+      echo "Quit it and re-run with DL_ROUTER_ASSUME_BROWSER_CLOSED=1 to" >&2
+      echo "override." >&2
+      exit 3
+    fi
+    ;;
+esac
 
 # --- back up + patch -------------------------------------------------------- #
 STAMP="$(date +%Y%m%d-%H%M%S)"
