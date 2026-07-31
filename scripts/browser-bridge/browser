@@ -263,6 +263,36 @@ for i in (insts or []):
 '
 }
 
+# render_missing — read a JSON blob on stdin carrying "known_instances" and print
+# one STDERR line per key that is KNOWN but no longer connected:
+#   work: DISCONNECTED (last seen 2026-07-31T18:02:34Z, last op: frames)
+#
+# This exists because `extension_connected` is a bare OR across instances: with
+# two profiles wired up, `work` can be gone for an hour while /health still says
+# `"extension_connected": true`. Reading the boolean is what "is the bridge up?"
+# naturally reaches for, so the drop has to be made GLANCEABLE rather than
+# requiring the reader to diff instances[] against what they expected to be there.
+# Stderr on purpose — stdout stays machine-parseable JSON.
+render_missing() {
+  python3 -c '
+import json, sys
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+if not isinstance(d, dict):
+    sys.exit(0)
+for i in (d.get("known_instances") or []):
+    if i.get("connected"):
+        continue
+    seen = i.get("last_seen") or "?"
+    op = i.get("last_unanswered_op")
+    sys.stderr.write("browser: %s: DISCONNECTED (last seen %s%s)\n"
+                     % (i.get("key", "?"), seen,
+                        ", last unanswered op: %s" % op if op else ""))
+'
+}
+
 # _curl METHOD PATH [JSON_BODY] — emits `<body>\n<http_code>` to stdout. The
 # caller splits it (globals can't cross the command-substitution subshell).
 _curl() {
@@ -403,7 +433,13 @@ cmd_op() {
   HTTP_CODE="${raw##*$'\n'}"; resp="${raw%$'\n'*}"
   case "$HTTP_CODE" in
     200) : ;;  # HTTP ok — still must inspect the inner op result below.
-    503) echo "$resp" >&2; die "no extension connected — load the browser-bridge extension in Brave (see SKILL.md)" ;;
+    503)
+      # Fail-FAST (no waiting on cmd_timeout): resolution failed before the
+      # command ever reached an instance. Name the profiles we HAVE seen drop.
+      printf '%s' "$resp" | render_missing
+      echo "$resp" >&2
+      die "no extension connected — load the browser-bridge extension in Brave (see SKILL.md)"
+      ;;
     504) echo "$resp" >&2; die "timeout waiting for the extension to answer (is Brave focused / responsive?)" ;;
     401) die "unauthorized — token mismatch (re-paste the token in the extension options)" ;;
     429)
@@ -431,8 +467,13 @@ cmd_op() {
       ;;
     404)
       if printf '%s' "$resp" | grep -q '"unknown_instance"'; then
+        # Fail-FAST: the server rejects an unresolvable target BEFORE enqueueing,
+        # so this never waits out the 20s cmd_timeout. Print the live instances
+        # AND any known-but-dropped ones — a mistyped label and a profile that
+        # silently died look identical from the CLI otherwise.
         echo "browser: no connected instance matches --instance '${INSTANCE}'. Connected:" >&2
         printf '%s' "$resp" | render_instances
+        printf '%s' "$resp" | render_missing
         exit 1
       fi
       echo "$resp" >&2; die "HTTP 404 from /cmd"
@@ -474,6 +515,8 @@ case "$sub" in
     HTTP_CODE="${raw##*$'\n'}"; resp="${raw%$'\n'*}"
     [ "$HTTP_CODE" = "200" ] || { echo "$resp" >&2; die "HTTP $HTTP_CODE from /health"; }
     printf '%s\n' "$resp" | pretty
+    # A known-but-gone instance is the failure `extension_connected` hides.
+    printf '%s' "$resp" | render_missing
     ;;
   whoami)
     # Read-only identity + diagnostics. A cheap diagnostic GET like /health (NOT

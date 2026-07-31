@@ -81,6 +81,7 @@ Config (env):
 """
 from __future__ import annotations
 
+import datetime
 import hashlib
 import json
 import os
@@ -166,6 +167,15 @@ MAX_RESULT_BODY = 32 * 1024 * 1024  # a screenshot data URL can be a few MB.
 
 # A connection is considered "present" if a long-poll landed within this window.
 CONNECT_STALE_S = 40.0
+
+# How long a routing key stays in `known_instances`/`missing` after it stops
+# polling. Without a forget path the registry remembers every key for the whole
+# process lifetime, so an operator who normally runs ONE profile would get a
+# permanent `other: DISCONNECTED` nag from `browser health` forever — a warning
+# that is always on is a warning nobody reads. 24h is long enough to still name a
+# profile that dropped during a working day, short enough that a profile you
+# genuinely stopped using ages out.
+KNOWN_FORGET_S = 86400.0
 
 # Session isolation (fixes concurrent-session tab clobbering)
 # ----------------------------------------------------------
@@ -719,7 +729,8 @@ class Instance:
     __slots__ = ("key", "instance_id", "label", "outbox", "results", "waiters",
                  "active_polls", "last_poll", "active_tab", "superseded",
                  "pending", "rl_tokens", "rl_last", "extension_version",
-                 "extension_id")
+                 "extension_id", "last_poll_wall", "lost_logged",
+                 "last_dispatch")
 
     def __init__(self, key, instance_id, label, now, burst=0.0,
                  extension_version=None, extension_id=None):
@@ -748,6 +759,18 @@ class Instance:
         self.pending = 0
         self.rl_tokens = float(burst)
         self.rl_last = now
+        # --- silent-drop detector (see _live_instances_locked) --------------- #
+        # `last_poll` is on the registry's MONOTONIC clock, which is meaningless
+        # to a human reading `browser health`. Keep a wall-clock copy purely for
+        # the "last seen 18:02:34" rendering; never used for liveness math.
+        self.last_poll_wall = time.time()
+        # Edge-trigger for the `instance_lost` / `instance_connected` log events —
+        # log ONCE per transition, not once per health probe.
+        self.lost_logged = False
+        # The last command handed to this instance that has NOT produced a result:
+        # {"id","op","at"} or None. This is the field that would have NAMED
+        # `frames` as the wedging op on 2026-07-29 without any code-reading.
+        self.last_dispatch = None
 
 
 class Registry:
@@ -919,6 +942,7 @@ class Registry:
                                          extension_version, extension_id)
             inst.active_polls += 1
             inst.last_poll = self._clock()
+            inst.last_poll_wall = time.time()
             try:
                 deadline = self._clock() + wait_timeout
                 while True:
@@ -933,6 +957,7 @@ class Registry:
             finally:
                 inst.active_polls -= 1
                 inst.last_poll = self._clock()
+                inst.last_poll_wall = time.time()
 
     def deliver_result(self, cid: str, payload: dict,
                        instance_id: str = None) -> bool:
@@ -1071,6 +1096,11 @@ class Registry:
                     cmd["reuseTabId"] = reuse_tab_id
                 inst.outbox.append(cmd)
                 inst.waiters.add(cid)
+                # Remember what we handed this instance. Cleared only when a
+                # RESULT comes back, so if the instance goes silent this field
+                # still names the command it never answered — the single fact
+                # that turns the next silent drop from inference into evidence.
+                inst.last_dispatch = {"id": cid, "op": op, "at": time.time()}
                 self._cond.notify_all()  # wake this instance's waiting poller
                 while cid not in inst.results:
                     if inst.superseded:
@@ -1085,6 +1115,9 @@ class Registry:
                     self._cond.wait(remaining)
                 inst.waiters.discard(cid)
                 result = inst.results.pop(cid)
+                # Answered → no longer the outstanding command.
+                if (inst.last_dispatch or {}).get("id") == cid:
+                    inst.last_dispatch = None
                 self._record_ownership_locked(inst, op, session_id, tab_id,
                                               result)
                 return result
@@ -1163,9 +1196,69 @@ class Registry:
         for inst in self._instances.values():
             if inst.superseded:
                 continue
-            if inst.active_polls > 0 or (now - inst.last_poll) < CONNECT_STALE_S:
+            alive = (inst.active_polls > 0
+                     or (now - inst.last_poll) < CONNECT_STALE_S)
+            # Edge-triggered drop/return detector. Evaluated here because this is
+            # the ONE place liveness is decided — a separate reaper thread would
+            # be a second definition of "live" that could disagree with this one.
+            #
+            # Before this, a silent drop left NO trace anywhere: the server logs
+            # `dispatch`/`cmd_ok` but had no event for "an instance I knew about
+            # stopped polling", so a drop was invisible unless somebody happened
+            # to send a command into it (the operator's second drop of 2026-07-31
+            # produced no journal line at all for exactly that reason).
+            if alive:
                 live.append(inst)
+                if inst.lost_logged:
+                    inst.lost_logged = False
+                    log("instance_connected", key=inst.key,
+                        instance_id=inst.instance_id)
+            elif not inst.lost_logged:
+                inst.lost_logged = True
+                d = inst.last_dispatch or {}
+                log("instance_lost", key=inst.key,
+                    instance_id=inst.instance_id,
+                    stale_s=round(now - inst.last_poll, 1),
+                    # The last command dispatched to it that never came back —
+                    # empty when it went quiet while idle.
+                    last_op=d.get("op") or "", last_id=d.get("id") or "")
         return live
+
+    def _known_instances_locked(self):
+        """Every routing key this process has seen and not superseded, each with
+        whether it is live RIGHT NOW.
+
+        This is what makes a dead named instance visible. `extension_connected`
+        is a bare OR over live instances, so one healthy profile reports the
+        bridge as up while `work` has been gone for an hour; it cannot be
+        redefined without breaking callers that legitimately ask "is anything
+        up", so the honest answer is carried ALONGSIDE it.
+        """
+        live_ids = {id(i) for i in self._live_instances_locked()}
+        now = self._clock()
+        out = []
+        for inst in self._instances.values():
+            if inst.superseded:
+                continue
+            # Age out a key nobody has used in a day — see KNOWN_FORGET_S.
+            if id(inst) not in live_ids and (now - inst.last_poll) > KNOWN_FORGET_S:
+                continue
+            d = inst.last_dispatch or {}
+            out.append({
+                "key": inst.key, "label": inst.label,
+                "instanceId": inst.instance_id,
+                "connected": id(inst) in live_ids,
+                "last_seen": _iso_utc(inst.last_poll_wall),
+                "last_seen_age_s": round(self._clock() - inst.last_poll, 1),
+                "last_unanswered_op": d.get("op") or None,
+            })
+        return out
+
+    def known_snapshot(self):
+        """(known_instances, missing) — every seen key + the subset now gone."""
+        with self._cond:
+            known = self._known_instances_locked()
+        return known, [k for k in known if not k["connected"]]
 
     def _find_locked(self, target: str):
         for inst in self._instances.values():
@@ -1247,6 +1340,16 @@ class Registry:
 # --------------------------------------------------------------------------- #
 # Small scalar guards (module-level so they're directly unit-testable)
 # --------------------------------------------------------------------------- #
+def _iso_utc(wall: float) -> str:
+    """A wall-clock epoch as an ISO-8601 UTC string, for human-readable
+    `last seen` rendering. Never used for liveness math (that is monotonic)."""
+    try:
+        return (datetime.datetime.fromtimestamp(wall, datetime.timezone.utc)
+                .strftime("%Y-%m-%dT%H:%M:%SZ"))
+    except Exception:  # noqa: BLE001
+        return ""
+
+
 def _is_tab_gone(err) -> bool:
     """True if an op-level error string signals the target tab no longer exists.
 
@@ -1622,11 +1725,23 @@ def make_handler(registry: Registry, token: str, cmd_timeout: float,
                 # comparison of two strings.
                 expected = manifest_version()
                 insts = annotate_staleness(registry.snapshot(), expected)
+                known, missing = registry.known_snapshot()
+                # `extension_connected` is DELIBERATELY left as-is: it is a bare
+                # OR over live instances ("is anything up"), which is what
+                # existing callers ask of it, and silently redefining it to
+                # "everything I ever saw is up" would break them. The dishonesty
+                # it enables — one healthy profile masking a `work` that dropped
+                # an hour ago — is fixed by carrying the truth alongside:
+                # `known_instances` (every key seen this process-lifetime, each
+                # with `connected`) and `missing` (the ones now gone). `browser
+                # health` renders `work: DISCONNECTED (last seen …)` from these.
                 self._send(200, {"ok": True,
                                  "extension_connected": bool(insts),
                                  "count": len(insts),
                                  "extension_version_current": expected,
-                                 "instances": insts})
+                                 "instances": insts,
+                                 "known_instances": known,
+                                 "missing": missing})
                 return
             if path == "/instances":
                 insts = registry.snapshot()
@@ -1754,8 +1869,13 @@ def make_handler(registry: Registry, token: str, cmd_timeout: float,
             except NoExtension:
                 outcome, exit_code = "no_extension", 1
                 log("cmd_no_extension", op=op)
+                # Carry the keys we HAVE seen so "nothing connected" can say
+                # WHICH profile went away and when, instead of leaving the
+                # operator to guess whether Brave was ever wired up at all.
+                known, _missing = registry.known_snapshot()
                 self._send(503, {"ok": False,
-                                 "error": "extension_not_connected"})
+                                 "error": "extension_not_connected",
+                                 "known_instances": known})
             except AmbiguousInstance as e:
                 outcome, exit_code = "ambiguous", 1
                 log("cmd_ambiguous", op=op, count=len(e.instances))
@@ -1764,8 +1884,10 @@ def make_handler(registry: Registry, token: str, cmd_timeout: float,
             except UnknownInstance as e:
                 outcome, exit_code = "unknown_instance", 1
                 log("cmd_unknown_instance", op=op, target=e.target)
+                known, _missing = registry.known_snapshot()
                 self._send(404, {"ok": False, "error": "unknown_instance",
-                                 "target": e.target, "instances": e.instances})
+                                 "target": e.target, "instances": e.instances,
+                                 "known_instances": known})
             except BridgeSuperseded as e:
                 outcome, exit_code = "superseded", 1
                 log("cmd_superseded", op=op, key=e.key)
@@ -1837,6 +1959,28 @@ def build_server(host: str, port: int, registry: Registry, token: str,
     return server
 
 
+# The extension races its own /poll fetch against a wall-clock budget
+# (POLL_BUDGET_MS in extension/protocol.js, 40s). That budget MUST exceed this
+# server's poll_timeout or every long-poll aborts client-side just before the
+# server's 204, and the extension backoff-spins instead of long-polling. The two
+# live in different languages and different processes, so nothing enforces the
+# relationship — the least we can do is say so out loud at startup.
+EXTENSION_POLL_BUDGET_S = 40.0
+
+
+def _warn_poll_timeout_vs_extension_budget(poll_timeout: float) -> None:
+    if poll_timeout >= EXTENSION_POLL_BUDGET_S:
+        log("config_warning",
+            reason="poll_timeout_exceeds_extension_poll_budget",
+            poll_timeout=poll_timeout,
+            extension_poll_budget_s=EXTENSION_POLL_BUDGET_S,
+            detail="BROWSER_BRIDGE_POLL_TIMEOUT is at or above the extension's "
+                   "POLL_BUDGET_MS; every poll will abort client-side and the "
+                   "extension will backoff-spin. Lower it or raise "
+                   "POLL_BUDGET_MS in extension/protocol.js (needs a Brave "
+                   "reload).")
+
+
 def main(argv=None) -> int:
     host = os.environ.get("BROWSER_BRIDGE_HOST", "127.0.0.1")
     port = int(os.environ.get("BROWSER_BRIDGE_PORT", "8788"))
@@ -1849,6 +1993,7 @@ def main(argv=None) -> int:
     server = build_server(host, port, registry, token, cmd_timeout, poll_timeout)
     log("listening", host=host, port=port, token_file=str(token_file),
         cmd_timeout=cmd_timeout, poll_timeout=poll_timeout)
+    _warn_poll_timeout_vs_extension_budget(poll_timeout)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
