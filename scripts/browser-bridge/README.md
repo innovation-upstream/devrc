@@ -578,9 +578,57 @@ the real foreground (a permission prompt, a native picker, verifying with your o
 eyes). It just stops being the default advice, and it is now **operator-only**
 (absent from the agent's op set entirely).
 
-**⚠ NOT LIVE-VERIFIED against the operator's real Brave.** The CDP semantics above
-are measured against real Brave, but the extension/server/CLI wiring has only been
-unit-tested. See *Live verification* below for the exact sequence.
+**✅ LIVE-VERIFIED against the operator's real Brave** using the sequence in *Live
+verification* below: `WAKE-RIG-SHELL` → `WAKE-RIG-RENDERED`, `visibilityState`
+`"visible"` during the wake and back to `"hidden"` after detach, and
+`xdotool getactivewindow` **unchanged** before/after — the page rendered and the
+operator's focus never moved.
+
+### Real false-outage report — a hidden tab that looked like a production outage
+
+This is the cost of the failure mode `wake` exists to prevent, and the reason the
+`visibilityState` rule in SKILL.md is 🔴. It happened.
+
+An agent read `civitai.com/apps` in a BACKGROUND tab it owned and saw 0 content
+cards, 3 spinners, and 0 tRPC calls — for a logged-in user with every feature flag
+on. It declared the production store broken, then escalated to **"site-wide"** when
+a second page looked the same.
+
+Every corroborating check it ran shared the identical flaw:
+
+- **A second profile on a different account reproduced it exactly** — also a
+  background tab. Two independent-looking confirmations, one shared cause.
+- **`?cb=<ts>` cache-busting didn't help** — the tab was still hidden, so the fresh
+  load was throttled the same way.
+- **A `next.router.push` soft-nav inside the hidden tab threw a plausible
+  `TypeError` plus a minified React error** — errors **the probe itself caused**.
+  Real-user telemetry showed **zero** occurrences of them in the preceding 2 hours.
+
+Nothing inside the browser could settle it, because every reading came from the same
+poisoned vantage point. It was settled only by **leaving the browser**: RUM showed
+~24k content-paint samples in 30 minutes, pods were healthy, and an anonymous `curl`
+returned 200. The site was fine the entire time.
+
+**The remedy, updated.** The original write-up of this incident concluded that
+`activate` was the only fix, because at the time it was — foregrounding the tab was
+the only way to un-throttle it. **That is no longer true.** `browser wake` (#225)
+un-throttles the tab via CDP focus emulation **without moving the operator's focus**,
+so the diagnostic step no longer costs the operator their screen. `activate` remains
+only for things that genuinely need the real foreground (a permission prompt, a
+native picker, seeing it with your own eyes), and is unreachable by the autonomous
+agent. See *The two shapes* above for `wake` vs `--wake`.
+
+**The three rules this bought** (carried in SKILL.md, in the `wake` section):
+
+1. Check `document.visibilityState` FIRST. If `"hidden"`, a "nothing rendered / no
+   requests fired" reading is MEANINGLESS.
+2. Spoofing `visibilityState` afterwards does NOT recover the page — the throttling
+   is browser-enforced and the app's fetch decisions are already made. `wake` is the
+   fix.
+3. **"Is this page broken for REAL users?" is not a browser question.** Answer it
+   from server-side / real-user evidence — RUM, metrics, pod health, an anonymous
+   `curl`. Use the browser probe to EXPLAIN a failure telemetry already shows, never
+   to DISCOVER one.
 
 ### Live verification (operator-run)
 
@@ -622,8 +670,9 @@ Optional third check — the read world (`wake-shadow.html` installs a main-worl
 
 ```bash
 browser open http://127.0.0.1:8901/wake-shadow.html
-browser html --wake     # MUST contain WAKE-SHADOW-REAL, MUST NOT contain POISON
-browser text --wake     # MUST be WAKE-SHADOW-REAL,      MUST NOT contain POISON
+browser html --wake     # MUST be the FULL document containing WAKE-SHADOW-REAL —
+                        # NOT the short `<html>WAKE-SHADOW-POISON-MAIN-WORLD</html>`
+browser text --wake     # MUST be exactly WAKE-SHADOW-REAL
 browser js 'document.documentElement.outerHTML' --wake   # WILL show the POISON — expected
 browser close
 ```

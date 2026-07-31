@@ -272,11 +272,17 @@ main-world read could be served attacker-authored content that is not in the DOM
 
 ```bash
 browser open http://127.0.0.1:8901/wake-shadow.html
-browser html --wake     # MUST contain WAKE-SHADOW-REAL, MUST NOT contain POISON
-browser text --wake     # MUST be WAKE-SHADOW-REAL,      MUST NOT contain POISON
+browser html --wake     # MUST be the FULL document containing WAKE-SHADOW-REAL —
+                        # NOT the short `<html>WAKE-SHADOW-POISON-MAIN-WORLD</html>`
+browser text --wake     # MUST be exactly WAKE-SHADOW-REAL
 browser js 'document.documentElement.outerHTML' --wake   # WILL show the POISON — expected
 browser close
 ```
+
+⚠ "must not contain POISON" is the WRONG check for `html --wake`: the fixture's own
+source contains that word (in its comment and its script), so a **correct**
+isolated-world read of the full document legitimately includes it. The discriminator
+is that the read returns the whole document rather than the short shadowed string.
 
 The last line is not a failure: `eval` means "run my JS with the page's own globals",
 and plain `eval` is already `world:"MAIN"`, so `--wake` adds no exposure there.
