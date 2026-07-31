@@ -2,10 +2,35 @@
 
 **Load this when:** an element is in the DOM but invisible, unclickable, or painted
 UNDER something else · a popover/dropdown/tooltip renders behind neighbouring content ·
-a `z-index` change "does nothing" · a click lands on the wrong element · you are about
+a `z-index` change "does nothing" · a click lands on the wrong element · a
+`data-testid` selector matches NOTHING on a production page · you are about
 to reason about paint order from CSS source instead of measuring it.
 
 Core: `~/workspace/devrc/scripts/browser-bridge/SKILL.md`.
+
+## 🔴 `data-testid` is STRIPPED in production builds — it silently finds NOTHING
+
+Before you conclude "the element isn't there", check what you selected ON. At least
+the civitai app strips it: `next.config.mjs` sets
+`compiler.reactRemoveProperties` under `NODE_ENV=production`, which deletes
+`data-testid` from the shipped DOM. **This is a common Next/SWC production
+setting generally**, so assume it of any prod Next app.
+
+The failure is silent and reads as a product bug: the selector matches zero nodes,
+`click`/`text` report nothing found, and the element is right there on screen.
+
+Select **structurally** instead:
+
+- semantic **roles / visible text** (`button`, heading text, `aria-label`);
+- **DOM shape** (parent/child/nth relationships that the build can't erase);
+- a **computed style** — e.g. `getComputedStyle(el).aspectRatio` to pick out cards
+  of a known ratio.
+
+⚠ Only `data-testid` is targeted. **Non-`testid` data attributes are NOT stripped**,
+so a purpose-built one survives into prod and makes a reliable selector — civitai
+added `data-listing-cover-placeholder` for exactly this. If you own the app and
+need a stable hook for browser-driving, add a non-`testid` data attribute rather
+than fighting the strip.
 
 The bridge is the only way to see PAINT ORDER. Markup-level tests and `html` reads
 can't: an element can be present, correct, and completely covered. The sequence

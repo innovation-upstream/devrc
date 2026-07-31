@@ -3,7 +3,9 @@
 **Load this when:** any op returned an error string you don't recognise — look it up
 below · an op the CLI knows answers `unknown_op` · you clicked reload ↻ in
 `brave://extensions` and the old behaviour persists · `health` still shows the old
-`extension_version` after a reload.
+`extension_version` after a reload · a bridge that was WORKING suddenly returns
+nothing / `extension_not_connected` with no user action · you reloaded ↻ and the
+instance you're driving is still dead.
 
 Core: `~/workspace/devrc/scripts/browser-bridge/SKILL.md`. This file is the catch-all: no error string
 should strand you.
@@ -50,6 +52,29 @@ should strand you.
   browser-agent's op or scheme gate, `~/workspace/devrc/scripts/browser-bridge/reference/agent.md`.
 - `Cannot access a chrome:// URL` (with a `null` result) → `eval`/`js` can't run on
   `chrome://` / `brave://` pages. Not a bridge fault.
+
+## ⚠ The extension can DROP mid-session — and ↻ is PER-PROFILE
+
+Distinct from a stale build: this is a bridge that was **working in this very
+session** and stops. Measured twice in one session (2026-07-31) — a healthy bridge
+went `extension_connected:false` with **no user action, no error on the Claude
+side**, and no signal other than ops that suddenly returned nothing. MV3 service
+workers are evictable and the long-poll can lose its peer; treat a drop as normal
+wear, not as evidence of a bug in the page, the CLI or the server.
+
+🔴 **Actionable rule: re-run `browser health` the moment a call unexpectedly fails
+or returns nothing — BEFORE you start debugging the page or the CLI.** It is one
+cheap command and it collapses the whole "is the page broken?" branch.
+
+The fix is the same manual step as a stale build (the user clicks ↻ on the card in
+`brave://extensions`) — but you have to notice it first, and:
+
+⚠ **↻ must be done in the PROFILE you are driving.** `brave://extensions` is
+per-profile, so reloading it in profile A leaves profile B still disconnected —
+while `health` keeps reporting a connected count **from A**, which reads as "the
+extension is fine". Name the profile when you ask the user to reload, and confirm
+recovery with `browser --instance <key> health`, not a bare `health`.
+→ multi-instance semantics: `~/workspace/devrc/scripts/browser-bridge/reference/tabs-instances.md`
 
 ## The LOADED extension may be older than the CLI
 

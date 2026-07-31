@@ -73,6 +73,12 @@ else a stable auto-id; labels must be unique per host).
   right key, and re-issue with `--instance <key>`. (The bridge never guesses.)
 - **`browser --instance <key> <op>`** targets one (key = label or auto-id); an
   unknown key errors.
+- **⚠ A bare `health` can mask ONE dead instance.** The extension can drop
+  mid-session per profile, and `brave://extensions` is per-profile — reloading ↻ in
+  profile A leaves B disconnected while `health`'s connected count (from A) still
+  looks healthy. Confirm with `browser --instance <key> health`, and name the
+  profile when asking the user to reload.
+  → `~/workspace/devrc/scripts/browser-bridge/reference/errors.md`
 - **Newest supersedes:** a fresh connection for an already-held key drops the old
   one; an in-flight command on the dropped connection returns a `superseded`
   error — just retry. The displaced connection's own `/poll` gets a distinct
