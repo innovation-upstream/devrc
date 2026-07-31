@@ -273,23 +273,28 @@ for i in (insts or []):
 # naturally reaches for, so the drop has to be made GLANCEABLE rather than
 # requiring the reader to diff instances[] against what they expected to be there.
 # Stderr on purpose — stdout stays machine-parseable JSON.
+# DEGRADES SILENTLY on anything unexpected — an older server with no
+# `known_instances`, a non-dict body, a malformed entry. This runs as the LAST
+# command of `browser health`, so it OWNS that arm's exit code; a traceback here
+# would turn a working health probe into rc 1. Hence the try wraps the whole
+# walk, not just the parse.
 render_missing() {
   python3 -c '
 import json, sys
 try:
     d = json.load(sys.stdin)
+    if not isinstance(d, dict):
+        sys.exit(0)
+    for i in (d.get("known_instances") or []):
+        if not isinstance(i, dict) or i.get("connected"):
+            continue
+        seen = i.get("last_seen") or "?"
+        op = i.get("last_unanswered_op")
+        sys.stderr.write("browser: %s: DISCONNECTED (last seen %s%s)\n"
+                         % (i.get("key", "?"), seen,
+                            ", last unanswered op: %s" % op if op else ""))
 except Exception:
     sys.exit(0)
-if not isinstance(d, dict):
-    sys.exit(0)
-for i in (d.get("known_instances") or []):
-    if i.get("connected"):
-        continue
-    seen = i.get("last_seen") or "?"
-    op = i.get("last_unanswered_op")
-    sys.stderr.write("browser: %s: DISCONNECTED (last seen %s%s)\n"
-                     % (i.get("key", "?"), seen,
-                        ", last unanswered op: %s" % op if op else ""))
 '
 }
 

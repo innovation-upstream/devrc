@@ -1959,12 +1959,23 @@ def build_server(host: str, port: int, registry: Registry, token: str,
     return server
 
 
-# The extension races its own /poll fetch against a wall-clock budget
-# (POLL_BUDGET_MS in extension/protocol.js, 40s). That budget MUST exceed this
-# server's poll_timeout or every long-poll aborts client-side just before the
-# server's 204, and the extension backoff-spins instead of long-polling. The two
-# live in different languages and different processes, so nothing enforces the
-# relationship — the least we can do is say so out loud at startup.
+# ⚠ FORWARD-LOOKING, and scoped accordingly in the message below.
+#
+# From extension 0.4.0 onward, the extension races its own /poll fetch against a
+# wall-clock budget (POLL_BUDGET_MS, 40s, in extension/protocol.js). That budget
+# must strictly EXCEED this server's poll_timeout, or every long-poll aborts
+# client-side just before the server's 204 and the extension backoff-spins
+# instead of long-polling. Equality is a genuine race, hence `>=` below.
+#
+# Extensions BEFORE 0.4.0 — including 0.3.1, the build currently deployed — do
+# `pollOnce` as a bare unbounded `await fetch` with no AbortController and no
+# budget, so for them this misconfiguration has NO client-side abort: the poll
+# simply outlives the server's 204. The warning must not tell an operator (who is
+# by definition already debugging when they read it) that today's extension will
+# backoff-spin, because today's will not.
+#
+# The two sides live in different languages and different processes, so nothing
+# can enforce the relationship. Saying it out loud at startup is the fix.
 EXTENSION_POLL_BUDGET_S = 40.0
 
 
@@ -1974,11 +1985,14 @@ def _warn_poll_timeout_vs_extension_budget(poll_timeout: float) -> None:
             reason="poll_timeout_exceeds_extension_poll_budget",
             poll_timeout=poll_timeout,
             extension_poll_budget_s=EXTENSION_POLL_BUDGET_S,
-            detail="BROWSER_BRIDGE_POLL_TIMEOUT is at or above the extension's "
-                   "POLL_BUDGET_MS; every poll will abort client-side and the "
-                   "extension will backoff-spin. Lower it or raise "
-                   "POLL_BUDGET_MS in extension/protocol.js (needs a Brave "
-                   "reload).")
+            applies_to_extension="0.4.0+",
+            detail="BROWSER_BRIDGE_POLL_TIMEOUT is at or above the /poll budget "
+                   "used by extension 0.4.0 and later (POLL_BUDGET_MS in "
+                   "extension/protocol.js). On those builds every poll will "
+                   "abort client-side and the extension will backoff-spin; "
+                   "builds before 0.4.0 do not bound the poll fetch at all and "
+                   "are unaffected. Lower BROWSER_BRIDGE_POLL_TIMEOUT, or raise "
+                   "POLL_BUDGET_MS (needs a full Brave restart).")
 
 
 def main(argv=None) -> int:
