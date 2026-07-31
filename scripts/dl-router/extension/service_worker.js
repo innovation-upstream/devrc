@@ -112,6 +112,26 @@ function otherDir() {
   return state.snapshot?.otherDir || "other";
 }
 
+/**
+ * The library root, from the /dirs snapshot. Without it the extension cannot
+ * prove a completed download landed inside the library, so every relocate is
+ * refused rather than guessed (relPathFromAbsolute returns null on "").
+ */
+function libraryRoot() {
+  const root = state.snapshot?.root;
+  return typeof root === "string" ? root : "";
+}
+
+/**
+ * The relative path to hand /relocate, or null when it cannot be proven.
+ * Central so both correction paths (immediate and deferred-to-onChanged) get
+ * the same containment check.
+ */
+function relPathFor(item) {
+  if (!item || typeof item.filename !== "string") return null;
+  return relPathFromAbsolute(item.filename, libraryRoot());
+}
+
 // --- capture buffer -------------------------------------------------------- //
 export function recordCapture(payload, sender) {
   if (!payload || typeof payload !== "object") return;
@@ -271,9 +291,12 @@ export async function applyChoice(downloadId, chosenDir, { createdNew } = {}) {
   const items = await chrome.downloads.search({ id: downloadId });
   const item = items && items[0];
   if (item && item.state === "complete" && item.filename) {
-    const rel = relPathFromAbsolute(item.filename);
+    // null = the download did not land at <libraryRoot>/<dir>/<file>, so there
+    // is nothing here this router may move. Refuse rather than guess.
+    const rel = relPathFor(item);
     if (rel && rel.split("/")[0] !== safe) {
-      await api("POST", "/relocate", { fromRelPath: rel, toDir: safe },
+      await api("POST", "/relocate",
+        { fromRelPath: rel, toDir: safe, downloadId },
         { timeoutMs: 10000 });
     }
   } else if (entry) {
@@ -298,10 +321,11 @@ export async function onDownloadChanged(delta) {
   if (entry.wanted && entry.wanted !== entry.dir) {
     const items = await chrome.downloads.search({ id: delta.id });
     const item = items && items[0];
-    const rel = item && item.filename ? relPathFromAbsolute(item.filename) : null;
+    const rel = relPathFor(item);
     if (rel) {
       await api("POST", "/relocate",
-        { fromRelPath: rel, toDir: entry.wanted }, { timeoutMs: 10000 })
+        { fromRelPath: rel, toDir: entry.wanted, downloadId: delta.id },
+        { timeoutMs: 10000 })
         .catch(() => {});
     }
   }

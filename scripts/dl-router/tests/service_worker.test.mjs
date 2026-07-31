@@ -78,9 +78,14 @@ globalThis.fetch = async (url, opts) => {
 
 const SW = await import("../extension/service_worker.js");
 
+const LIB_ROOT = "/home/u/library";
+
 const SNAPSHOT = {
   etag: "abc123",
   otherDir: "other",
+  // The extension needs the library root to prove a completed download landed
+  // INSIDE the library before it asks /relocate to move anything.
+  root: LIB_ROOT,
   threshold: 0.75,
   matchTimeoutMs: 400,
   captureWindowS: 15,
@@ -306,7 +311,7 @@ test("applyChoice relocates a completed download and learns", async () => {
   assert.deepEqual(out, { ok: true, dir: "Jane Doe" });
   const relocate = posted.find((p) => p.url.endsWith("/relocate"));
   assert.deepEqual(relocate.body,
-    { fromRelPath: "other/f.mp4", toDir: "Jane Doe" });
+    { fromRelPath: "other/f.mp4", toDir: "Jane Doe", downloadId: 11 });
   const learn = posted.find((p) => p.url.endsWith("/learn"));
   assert.equal(learn.body.chosenDir, "Jane Doe");
   assert.equal(learn.body.autoDir, "other");
@@ -470,4 +475,88 @@ test("dlr:repick reopens the picker for a known download", async () => {
   SW.onMessage({ type: "dlr:repick", downloadId: 21 }, {}, () => {});
   await settle(10);
   assert.match(calls.windowsCreate[0].url, /picker\.html/);
+});
+
+
+// --- relocate is refused unless the file is provably inside the library ----- //
+//
+// relPathFromAbsolute used to take the last two components of whatever
+// absolute path Chrome reported. A download saved outside the library root
+// therefore produced a plausible "<dir>/<file>" that named a DIFFERENT, real
+// file inside the library -- and /relocate would move it. The library root is
+// a live qBittorrent seeding target.
+test("a download that landed OUTSIDE the library is never relocated", async () => {
+  reset();
+  SW.state.pending.set(31, { dir: "other", payload: {} });
+  searchResult = [{ id: 31, state: "complete",
+    filename: "/home/u/Downloads/other/f.mp4" }];
+  const posted = [];
+  fetchHandler = async (url, opts) => {
+    posted.push(url);
+    return { ok: true, status: 200, json: async () => ({ ok: true }) };
+  };
+  await SW.applyChoice(31, "Jane Doe");
+  assert.equal(posted.filter((u) => u.endsWith("/relocate")).length, 0,
+    "the last two components of an outside path must not become a relPath");
+  assert.ok(posted.some((u) => u.endsWith("/learn")),
+    "the correction is still learned");
+});
+
+test("a download loose at the library root is never relocated", async () => {
+  reset();
+  SW.state.pending.set(32, { dir: "other", payload: {} });
+  searchResult = [{ id: 32, state: "complete",
+    filename: `${LIB_ROOT}/f.mp4` }];
+  const posted = [];
+  fetchHandler = async (url) => {
+    posted.push(url);
+    return { ok: true, status: 200, json: async () => ({ ok: true }) };
+  };
+  await SW.applyChoice(32, "Jane Doe");
+  assert.equal(posted.filter((u) => u.endsWith("/relocate")).length, 0);
+});
+
+test("no snapshot means no library root means no relocate", async () => {
+  reset({ snapshot: null });
+  SW.state.pending.set(33, { dir: "other", payload: {} });
+  searchResult = [{ id: 33, state: "complete",
+    filename: `${LIB_ROOT}/other/f.mp4` }];
+  const posted = [];
+  fetchHandler = async (url) => {
+    posted.push(url);
+    return { ok: true, status: 200, json: async () => ({ ok: true }) };
+  };
+  await SW.applyChoice(33, "other").catch(() => {});
+  assert.equal(posted.filter((u) => u.endsWith("/relocate")).length, 0);
+});
+
+test("the deferred onChanged relocate carries the download id too", async () => {
+  reset();
+  SW.state.pending.set(34, { dir: "other", payload: {}, wanted: "Jane Doe" });
+  searchResult = [{ id: 34, state: "complete",
+    filename: `${LIB_ROOT}/other/f.mp4` }];
+  const posted = [];
+  fetchHandler = async (url, opts) => {
+    posted.push({ url, body: JSON.parse(opts.body || "{}") });
+    return { ok: true, status: 200, json: async () => ({}) };
+  };
+  await SW.onDownloadChanged({ id: 34, state: { current: "complete" } });
+  const relocate = posted.find((p) => p.url.endsWith("/relocate"));
+  assert.deepEqual(relocate.body,
+    { fromRelPath: "other/f.mp4", toDir: "Jane Doe", downloadId: 34 });
+});
+
+test("the /match payload carries the download id", async () => {
+  reset();
+  const posted = [];
+  fetchHandler = async (url, opts) => {
+    posted.push({ url, body: JSON.parse(opts.body || "{}") });
+    return { ok: true, status: 200,
+      json: async () => ({ dir: "Jane Doe", auto: true, reason: "r" }) };
+  };
+  SW.onDeterminingFilename({ id: 77, filename: "f.mp4" }, spy());
+  await settle(10);
+  const match = posted.find((p) => p.url.endsWith("/match"));
+  assert.equal(match.body.downloadId, 77,
+    "without it the sidecar cannot prove who created the file");
 });

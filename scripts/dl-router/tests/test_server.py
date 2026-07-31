@@ -7,6 +7,7 @@ extension, no browser.
 from __future__ import annotations
 
 import json
+import os
 import sys
 import threading
 import urllib.error
@@ -244,11 +245,33 @@ def test_mkdir_traversal_creates_nothing_outside_the_root(live, library):
     assert not (library.parent / "pwned").exists()
 
 
+# --- relocate: provenance is mandatory ------------------------------------- #
+#
+# /relocate is an os.rename inside a LIVE qBittorrent seeding target. It used
+# to move any file that existed at the supplied relative path -- correct
+# `toDir` validation, correct `safe_rel_path` confinement, no path escape, and
+# still able to rename a torrent payload out from under qBittorrent on nothing
+# but a string from the extension. It now demands proof the router created the
+# file.
+
+def route_a_download(base, download_id, *, tags=(), filename="clip.mp4"):
+    """Do what the extension does on a real download: record a /match decision
+    against the browser's DownloadItem id. That record is the provenance."""
+    status, body, _ = call(base, "POST", "/match", {
+        "downloadId": download_id,
+        "filename": filename,
+        "page": {"url": "https://example-site.test/v/1", "tags": list(tags)},
+    })
+    assert status == 200, body
+    return body
+
+
 def test_relocate_moves_a_file_within_the_library(live, library):
     (library / "other" / "clip.mp4").write_text("payload")
+    route_a_download(live, 41)
     status, body, _ = call(live, "POST", "/relocate",
                            {"fromRelPath": "other/clip.mp4",
-                            "toDir": "Jane Doe"})
+                            "toDir": "Jane Doe", "downloadId": 41})
     assert status == 200
     assert body["moved"] is True
     assert (library / "Jane Doe" / "clip.mp4").read_text() == "payload"
@@ -258,10 +281,95 @@ def test_relocate_moves_a_file_within_the_library(live, library):
 def test_relocate_uniquifies_instead_of_overwriting(live, library):
     (library / "other" / "clip.mp4").write_text("new")
     (library / "Jane Doe" / "clip.mp4").write_text("old")
+    route_a_download(live, 42)
     _, body, _ = call(live, "POST", "/relocate",
-                      {"fromRelPath": "other/clip.mp4", "toDir": "Jane Doe"})
+                      {"fromRelPath": "other/clip.mp4", "toDir": "Jane Doe",
+                       "downloadId": 42})
     assert (library / "Jane Doe" / "clip.mp4").read_text() == "old"
     assert body["relPath"] == "Jane Doe/clip (1).mp4"
+
+
+def test_relocate_refuses_a_file_the_router_never_routed(live, library):
+    """THE finding. A pre-existing file at a perfectly valid relative path --
+    exactly what a loose torrent payload under a subject directory looks like."""
+    victim = library / "Jane Doe" / "seeding-payload.mp4"
+    victim.write_text("torrent payload")
+    status, body, _ = call(live, "POST", "/relocate",
+                           {"fromRelPath": "Jane Doe/seeding-payload.mp4",
+                            "toDir": "john-smith"})
+    assert status == 400
+    assert body["error"] == "unsafe"
+    assert "cannot prove" in body["detail"]
+    assert victim.read_text() == "torrent payload", "the file must not move"
+    assert not (library / "john-smith" / "seeding-payload.mp4").exists()
+
+
+def test_relocate_refuses_an_unknown_download_id(live, library):
+    (library / "Jane Doe" / "payload.mp4").write_text("x")
+    status, body, _ = call(live, "POST", "/relocate",
+                           {"fromRelPath": "Jane Doe/payload.mp4",
+                            "toDir": "john-smith", "downloadId": 999999})
+    assert status == 400
+    assert "no routing decision on record" in body["detail"]
+    assert (library / "Jane Doe" / "payload.mp4").exists()
+
+
+def test_relocate_refuses_when_the_route_named_a_different_directory(live,
+                                                                     library):
+    """A real download id, but pointed at a file sitting somewhere else. Without
+    this check one legitimate download would authorise moving any file in the
+    library."""
+    (library / "Jane Doe" / "someone-elses.mp4").write_text("payload")
+    route_a_download(live, 43)          # files into `other`
+    status, body, _ = call(live, "POST", "/relocate",
+                           {"fromRelPath": "Jane Doe/someone-elses.mp4",
+                            "toDir": "john-smith", "downloadId": 43})
+    assert status == 400
+    assert "recorded route filed into" in body["detail"]
+    assert (library / "Jane Doe" / "someone-elses.mp4").exists()
+
+
+def test_relocate_refuses_a_file_older_than_its_routing_decision(live, library,
+                                                                 store, clock):
+    """The second, independent proof: a browser writes the file AFTER the
+    decision, a torrent payload was already on disk."""
+    stale = library / "other" / "old-payload.mp4"
+    stale.write_text("payload")
+    route_a_download(live, 44)
+    # The route was logged at the fake clock's `now`; age the file past it.
+    os.utime(stale, (clock.now - 86400, clock.now - 86400))
+    status, body, _ = call(live, "POST", "/relocate",
+                           {"fromRelPath": "other/old-payload.mp4",
+                            "toDir": "Jane Doe", "downloadId": 44})
+    assert status == 400
+    assert "predates the routing decision" in body["detail"]
+    assert stale.exists()
+
+
+def test_a_second_correction_still_works_after_the_first_move(live, library):
+    """The ledger follows the file, so `change` twice in a row is not refused
+    the second time."""
+    (library / "other" / "clip.mp4").write_text("payload")
+    route_a_download(live, 45)
+    _, first, _ = call(live, "POST", "/relocate",
+                       {"fromRelPath": "other/clip.mp4", "toDir": "Jane Doe",
+                        "downloadId": 45})
+    assert first["moved"] is True
+    status, second, _ = call(live, "POST", "/relocate",
+                             {"fromRelPath": first["relPath"],
+                              "toDir": "john-smith"})
+    assert status == 200, second
+    assert (library / "john-smith" / "clip.mp4").read_text() == "payload"
+
+
+def test_relocate_records_provenance_only_after_it_is_proven(live, library,
+                                                             store):
+    (library / "Jane Doe" / "untouchable.mp4").write_text("x")
+    before = store.routed_file_count()
+    call(live, "POST", "/relocate",
+         {"fromRelPath": "Jane Doe/untouchable.mp4", "toDir": "john-smith"})
+    assert store.routed_file_count() == before, \
+        "a refused relocate must not seed the ledger it just failed"
 
 
 @pytest.mark.parametrize("rel", ["../../etc/passwd", "/etc/passwd",
@@ -286,6 +394,13 @@ def test_relocate_missing_source_is_404(live):
                            {"fromRelPath": "other/nope.mp4",
                             "toDir": "Jane Doe"})
     assert status == 404
+
+
+def test_dirs_snapshot_carries_the_library_root(live, library):
+    """The extension needs it to prove a completed download landed INSIDE the
+    library before asking for a relocate."""
+    _, body, _ = call(live, "GET", "/dirs")
+    assert body["root"] == str(library)
 
 
 def test_fetch_starts_a_job_and_reports_status(live):

@@ -200,6 +200,11 @@ export function correlateCapture(item, captures, opts = {}) {
 export function buildMatchPayload(item, capture) {
   const c = capture || {};
   return {
+    // The browser's DownloadItem id. The sidecar records it against the
+    // routing decision, and that record is the ONLY thing that later lets
+    // /relocate prove a file under the library root was written by this router
+    // rather than by qBittorrent.
+    downloadId: item?.id ?? null,
     url: item?.url || "",
     finalUrl: item?.finalUrl || "",
     referrer: item?.referrer || "",

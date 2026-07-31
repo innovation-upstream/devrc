@@ -131,12 +131,46 @@ test("baseName takes the last component under either separator", () => {
   assert.equal(baseName(""), "");
 });
 
-test("relPathFromAbsolute returns dir/file", () => {
-  assert.equal(relPathFromAbsolute("/home/u/lib/Jane Doe/clip.mp4"),
+test("relPathFromAbsolute returns dir/file only INSIDE the library root", () => {
+  const ROOT = "/home/u/library";
+  assert.equal(relPathFromAbsolute(`${ROOT}/Jane Doe/clip.mp4`, ROOT),
     "Jane Doe/clip.mp4");
-  assert.equal(relPathFromAbsolute("clip.mp4"), null);
-  assert.equal(relPathFromAbsolute(""), null);
-  assert.equal(relPathFromAbsolute(null), null);
+  // A trailing slash on the configured root must not change the answer.
+  assert.equal(relPathFromAbsolute(`${ROOT}/Jane Doe/clip.mp4`, `${ROOT}/`),
+    "Jane Doe/clip.mp4");
+  assert.equal(relPathFromAbsolute("C:\\lib\\Jane Doe\\clip.mp4", "C:\\lib"),
+    "Jane Doe/clip.mp4");
+});
+
+test("relPathFromAbsolute refuses anything outside the library root", () => {
+  // THE finding: this used to take the last two components of ANY absolute
+  // path, so a download saved elsewhere produced a plausible "<dir>/<file>"
+  // naming a DIFFERENT, real file inside the library -- which /relocate would
+  // then move. The library root is a live seeding target.
+  const ROOT = "/home/u/library";
+  const cases = [
+    ["/home/u/Downloads/Jane Doe/clip.mp4", ROOT],   // a lookalike elsewhere
+    ["/home/u/library-other/Jane Doe/clip.mp4", ROOT], // shared prefix
+    [`${ROOT}/clip.mp4`, ROOT],                      // loose at the root
+    [`${ROOT}/a/b/clip.mp4`, ROOT],                  // nested deeper
+    [`${ROOT}/../escape/clip.mp4`, ROOT],            // traversal component
+    ["/etc/passwd", ROOT],
+    ["clip.mp4", ROOT],
+    ["", ROOT],
+    [null, ROOT],
+  ];
+  for (const [path, root] of cases) {
+    assert.equal(relPathFromAbsolute(path, root), null, String(path));
+  }
+});
+
+test("relPathFromAbsolute refuses when the root is unknown", () => {
+  // No snapshot yet => no root => nothing may be relocated. Fail closed.
+  for (const root of [undefined, null, "", 42, "/"]) {
+    assert.equal(
+      relPathFromAbsolute("/home/u/library/Jane Doe/clip.mp4", root), null,
+      String(root));
+  }
 });
 
 test("http(s) URLs are accepted", () => {

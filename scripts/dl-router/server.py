@@ -52,6 +52,12 @@ from store import Store  # noqa: E402
 SERVER_VERSION = "dl-router/1"
 MAX_BODY = 256 * 1024
 
+# How much older than its own routing decision a file may be and still be
+# accepted as "this router created it" (filesystem timestamp granularity, not
+# clock skew — both come from the same machine). A torrent payload predates its
+# would-be routing decision by hours or days, so a few seconds costs nothing.
+MTIME_SLACK_S = 5.0
+
 _LOOPBACK = frozenset({"127.0.0.1", "::1", "localhost"})
 _ALLOWED_HOST_HEADERS = frozenset({"127.0.0.1", "localhost", "::1", "[::1]"})
 
@@ -130,6 +136,11 @@ class App:
 
     def dirs_snapshot(self) -> dict:
         snap = self.dirs.snapshot()
+        # The extension needs the root to prove a completed download actually
+        # landed inside the library before it asks /relocate to move it (see
+        # relPathFromAbsolute). Loopback + bearer token only, and it never
+        # leaves the machine.
+        snap["root"] = str(self.root)
         snap["aliases"] = [{"key": k, "site": s, "dir": d}
                            for (k, s), d in sorted(self.store.alias_map().items())]
         snap["threshold"] = self.cfg.auto_threshold
@@ -148,10 +159,14 @@ class App:
         result = matcher.match(ctx, host_prior=prior)
         result.dup = find_duplicate(self.files, result.dir, ctx.filename,
                                     ctx.size)
+        # `downloadId` is the browser's DownloadItem id. Recording it here is
+        # what later lets /relocate prove a file under the library root was put
+        # there by this router and not by qBittorrent (see `_prove_owned`).
         self.store.log_route(url=ctx.url, site=ctx.site, filename=ctx.filename,
                              dir_name=result.dir, confidence=result.confidence,
                              reason=result.reason, auto=result.auto,
-                             dup=result.dup)
+                             dup=result.dup,
+                             download_id=str(payload.get("downloadId") or ""))
         return result.as_dict(ttl_ms=int(self.cfg.get("dir_cache_ttl_s", 5.0) * 1000))
 
     def learn(self, payload: dict) -> dict:
@@ -201,15 +216,71 @@ class App:
         return {"ok": True, "dir": name, "created": not existed,
                 "etag": self.dirs.etag()}
 
+    def _prove_owned(self, rel_path: str, src, download_id: str) -> None:
+        """Refuse unless this router demonstrably created `rel_path`.
+
+        WHY THIS IS NOT OPTIONAL: the library root is a live qBittorrent
+        seeding target and /relocate is an `os.rename`. Renaming a torrent
+        payload makes the files vanish from qBittorrent's point of view and
+        seeding stops. The endpoint validated `toDir` and confined the source
+        to the root -- there was never a path escape -- but it moved ANY file
+        that happened to exist at the supplied relative path, and that path was
+        derived in the extension from the last two components of the browser's
+        absolute filename with nothing checking it landed under the library
+        root at all.
+
+        Two independent proofs, BOTH required, and the absence of either is a
+        refusal (never a warning, never a best-effort move):
+
+          1. Provenance. Either the path is already in the routed-file ledger
+             (this router put it there), or a `downloadId` is supplied whose
+             /match decision is on record AND named the directory the file is
+             currently sitting in. An absent or unknown id proves nothing.
+          2. Age. The file's mtime must be at or after the routing decision.
+             A browser writes the file after the decision; a torrent payload
+             that was already on disk predates it by definition.
+        """
+        if self.store.routed_file(rel_path) is not None:
+            return
+
+        route = self.store.route_for_download(download_id)
+        if route is None:
+            raise UnsafeName(
+                "refusing to move a file this router cannot prove it created "
+                "(no routing decision on record for this download)")
+
+        current_dir = rel_path.split("/", 1)[0]
+        if route.get("dir") != current_dir:
+            raise UnsafeName(
+                "refusing to move a file this router cannot prove it created "
+                f"(the recorded route filed into {route.get('dir')!r}, the "
+                f"file is in {current_dir!r})")
+
+        try:
+            mtime = src.stat().st_mtime
+        except OSError as exc:
+            raise UnsafeName(f"cannot stat the source: {exc}") from exc
+        if mtime < float(route.get("ts") or 0.0) - MTIME_SLACK_S:
+            raise UnsafeName(
+                "refusing to move a file this router cannot prove it created "
+                "(it predates the routing decision, so it was already on disk "
+                "— quite possibly a live torrent payload)")
+
+        self.store.record_routed_file(rel_path, download_id, current_dir)
+
     def relocate(self, payload: dict) -> dict:
         to_dir = payload.get("toDir")
         if not is_safe_dir_name(to_dir):
             raise UnsafeName(f"invalid target directory: {to_dir!r}")
         if not self.dirs.has(to_dir):
             raise UnsafeName(f"unknown directory: {to_dir!r}")
-        src = safe_rel_path(payload.get("fromRelPath"), root=self.root)
+        rel_path = payload.get("fromRelPath")
+        src = safe_rel_path(rel_path, root=self.root)
         if not src.is_file():
-            raise FileNotFoundError(f"not a file: {payload.get('fromRelPath')!r}")
+            raise FileNotFoundError(f"not a file: {rel_path!r}")
+        # Fail closed BEFORE anything is moved.
+        self._prove_owned(str(rel_path), src,
+                          str(payload.get("downloadId") or ""))
         dest_dir = safe_rel_path(to_dir, root=self.root)
         dest = dest_dir / src.name
         if dest == src:
@@ -225,9 +296,11 @@ class App:
             if dest.exists():
                 raise FileExistsError("could not find a free destination name")
         os.rename(src, dest)
+        new_rel = str(dest.relative_to(self.root))
+        # Follow the file, so a second correction still has provenance for it.
+        self.store.move_routed_file(str(rel_path), new_rel, to_dir)
         self.files.refresh(force=True)
-        return {"ok": True, "moved": True, "dir": to_dir,
-                "relPath": str(dest.relative_to(self.root))}
+        return {"ok": True, "moved": True, "dir": to_dir, "relPath": new_rel}
 
     def fetch(self, payload: dict) -> dict:
         url = payload.get("url")

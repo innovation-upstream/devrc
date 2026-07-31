@@ -143,14 +143,35 @@ export function baseName(path) {
 
 /**
  * `<dir>/<file>` for a completed download's ABSOLUTE path -- the relative path
- * the sidecar's /relocate expects. Returns null when the path has no directory
- * component (the file landed at the download root).
+ * the sidecar's /relocate expects.
+ *
+ * `libraryRoot` is REQUIRED and comes from the /dirs snapshot. This used to
+ * take the last two components of whatever absolute path Chrome reported, with
+ * nothing checking the download had landed under the library root at all: a
+ * download saved anywhere else produced a plausible-looking "<dir>/<file>"
+ * that named a DIFFERENT, real file inside the library, and /relocate would
+ * move it. The library root is a live seeding target, so that file could be a
+ * torrent payload.
+ *
+ * Returns null -- meaning "do not ask the sidecar to move anything" -- unless
+ * the path is exactly `<root>/<one directory>/<one file>`. A file sitting
+ * directly at the root, or nested deeper, or outside the root, all yield null.
  */
-export function relPathFromAbsolute(absolute) {
+export function relPathFromAbsolute(absolute, libraryRoot) {
   if (typeof absolute !== "string" || !absolute) return null;
-  const parts = absolute.replace(/\\/g, "/").split("/").filter(Boolean);
-  if (parts.length < 2) return null;
-  return `${parts[parts.length - 2]}/${parts[parts.length - 1]}`;
+  if (typeof libraryRoot !== "string" || !libraryRoot) return null;
+  const norm = (s) => s.replace(/\\/g, "/").replace(/\/+$/, "");
+  const path = norm(absolute);
+  const root = norm(libraryRoot);
+  if (!root) return null;
+  if (!path.startsWith(`${root}/`)) return null;
+  const rest = path.slice(root.length + 1);
+  const parts = rest.split("/");
+  // Exactly one directory and one filename, and neither may be empty or a
+  // traversal component.
+  if (parts.length !== 2) return null;
+  if (parts.some((p) => !p || p === "." || p === "..")) return null;
+  return `${parts[0]}/${parts[1]}`;
 }
 
 // `_` is invalid per RFC 1123 but browsers and curl accept it, so it is
