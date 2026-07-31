@@ -376,9 +376,14 @@ export function mount(doc, chromeApi, { closeWindow } = {}) {
       // which tab the overlay was injected into. Every other close path
       // (accepted, cancelled, refused-then-Esc) funnels through here, so the
       // overlay cannot outlive the flow.
+      // `.catch` as well as `try`: nothing answers this message, so Chrome
+      // settles the promise with "the message port closed before a response
+      // was received". Unhandled, that is a red error in the picker's console
+      // on EVERY successful pick.
       try {
-        void chromeApi.runtime.sendMessage({
+        const sent = chromeApi.runtime.sendMessage({
           type: "dlr:picker-closed", overlay: overlayId });
+        if (sent && typeof sent.catch === "function") sent.catch(() => {});
       } catch { /* worker restarting; the overlay is inert either way */ }
       return;
     }
@@ -566,8 +571,9 @@ export function mount(doc, chromeApi, { closeWindow } = {}) {
     // booted inside the frame. The service worker will not consider the
     // overlay delivered without it, and falls back to the popup window.
     try {
-      void chromeApi.runtime.sendMessage({
+      const sent = chromeApi.runtime.sendMessage({
         type: "dlr:picker-ready", overlay: overlayId });
+      if (sent && typeof sent.catch === "function") sent.catch(() => {});
     } catch { /* the worker's timeout falls back to a window */ }
   }
 

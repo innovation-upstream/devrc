@@ -24,7 +24,7 @@ individual library subdirectories by hand.
                                               │
                           auto-filed ─────────┴───────── unsure
                                 │                          │
-                          toast + undo               picker (type/↑↓/Enter)
+                          toast + undo            picker (type/↑↓/Enter/click)
                                 └──────── correction ──────┘
                                               ▼
                                     /learn → alias + example
@@ -56,7 +56,7 @@ existing directories are never renamed.
 | `safety.py` | the one place a page-derived string becomes a path component |
 | `store.py` | SQLite: aliases (+ provenance), examples, route log, host prior, picker-assigned kinds |
 | `dirkinds.py` | performer/category classification + the draft generator |
-| `dirindex.py` | mtime+TTL-cached scan of the library root |
+| `dirindex.py` | mtime+TTL-cached scan of the library root; whole-tree file index for dedupe + per-directory counts |
 | `qbt.py` | qBittorrent WebUI client + runtime-derived path mapping |
 | `fetcher.py` | yt-dlp jobs for HLS/DASH sources |
 | `backfill.py` | `plan` (read-only) / `apply` (reviewed manifest only) |
@@ -305,10 +305,72 @@ filename if the listener is slow):
    `suggest({filename: dir + "/" + name, conflictAction: "uniquify"})` — never
    `overwrite`.
 
-**Toast and picker are popup windows**, not in-page overlays: injection fails
-on the PDF viewer, `chrome://` pages and sandboxed frames, which is exactly
-where a download often starts. `chrome.notifications` is the secondary
-fallback.
+**The picker is an in-page overlay, with the popup window as an automatic
+fallback.** The overlay is an iframe of `picker.html` inside a **closed** shadow
+root, injected by `picker_overlay.js` — a second file on the content-script
+declaration `content_capture.js` already has, so it needs no new permissions.
+Framing an extension page from a web page does need `picker.html` in
+`web_accessible_resources`; its module imports are not exposed.
+
+It is the **same page, running the same reducer**. The overlay does not
+reimplement the picker — that is the point, and a test asserts
+`picker_overlay.js` contains none of the picker's vocabulary. Being a separate
+document also means page CSS cannot reach the picker or vice versa; the shadow
+root is what stops the page styling or discovering the host element.
+
+Delivery is decided per download, with **two gates**, and every failure falls
+back to the window:
+
+1. **the content script answers.** `chrome.tabs.sendMessage` rejects with
+   "receiving end does not exist" where no content script runs — one check
+   covering `brave://`/`chrome://`, the PDF viewer (an ordinary `https` URL
+   whose document is a plugin), the Web Store, `view-source:`, `file://`, a
+   discarded tab, and a page that has not reached `document_idle`. A tab that
+   has *closed* — the self-closing file-host tab — fails one step earlier, at
+   `chrome.tabs.get`.
+2. **the frame reports itself ready.** A content-script-injected iframe is
+   subject to the *page's* CSP, so a strict `frame-src` blocks the load while
+   every DOM call in gate 1 still succeeds. Only an extension context that
+   actually booted can send `dlr:picker-ready`. Without this gate such a site
+   would leave an empty overlay and no window — a download with no picker,
+   which is the one outcome that is not allowed.
+
+The overlay is **never dismissed by an outside click or by losing focus**. That
+is exactly why `chrome.action.openPopup()` was rejected: an action popup
+dismisses on blur, silently discarding the pick and leaving the file in the
+catch-all. The iframe cannot close itself, so the picker sends
+`dlr:picker-closed` and the worker tears the overlay down — falling back to
+`sender.tab.id` so a pick made after an MV3 teardown still removes it.
+
+**The toast is still a popup window**, unconditionally: it is a passive
+notification with an eight-second life, and it has no pick to lose.
+`chrome.notifications` remains the last rung under both.
+
+**The picker is keyboard-first and mouse-capable.** Type to filter, arrows to
+move, Enter to accept, Esc to leave it in the catch-all; a **click** on a row
+accepts that row. Click is implemented in the reducer as "move the highlight
+there, then Enter", so it reuses the Enter branch verbatim — the kind prompt,
+the new-directory sub-question and the refusals all come from one place. A
+click while the list is still loading or is known to be unavailable is
+**dropped, not deferred**: Enter defers because a typed query survives the list
+arriving, but a click's intent is a screen position, and honouring it against a
+different list would choose an arbitrary directory or create one.
+
+Each row shows **how many files that directory already holds**. The tally comes
+from the `/dirs` snapshot, as a by-product of the whole-tree walk `FileIndex`
+already performs for dedupe — never a scan of its own, and `dir_counts()`
+deliberately does not refresh, so `/dirs` can never block on a walk of the
+library. `/match` warms it on every download.
+
+**The counts are deliberately not part of the `/dirs` ETag.** That ETag's job is
+"the routing configuration changed" — the directories, their kinds, the aliases,
+the threshold — because the extension's cached fallback matcher runs off exactly
+that. A count changes on every completed download, and `FileIndex` is TTL-cached
+so the same unchanged library can answer with two different counts a minute
+apart; an ETag that changes when nothing changed is not a validator. The cost of
+that choice is that a `304` carries no body, so the extension asks for the
+snapshot **without `If-None-Match` on the picker path** — the one request whose
+freshness a human is waiting on — and revalidates everywhere else.
 
 **Undo after completion**: choosing a different directory after the download
 completes calls `/relocate` (a same-filesystem rename, instant) and then

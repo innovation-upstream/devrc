@@ -31,6 +31,13 @@ const TOAST_H = 190;
 const PICKER_W = 460;
 const PICKER_H = 420;
 
+// How long the service worker waits for an injected overlay to prove it booted
+// before giving up and opening the popup window instead. The content script's
+// work is synchronous DOM building and the frame is a local extension page, so
+// a healthy path answers in single-digit milliseconds; this is the budget for a
+// page that is blocking the frame, not for a slow one.
+const OVERLAY_READY_MS = 1500;
+
 // How long onDeterminingFilename will wait for the cold-start config read
 // before giving up and declining to route. A chrome.storage.local read is
 // sub-millisecond; if it has not landed by now something is badly wrong and
@@ -49,6 +56,7 @@ export const state = {
   config: { port: DEFAULT_PORT, token: "", enabled: false },
   configLoaded: false,  // has loadConfig() completed at least once?
   ownWindowIds: new Set(),  // popup windows WE created (toast/picker)
+  overlays: new Map(),  // overlayId -> {tabId, downloadId} for in-page pickers
 };
 
 /**
@@ -146,8 +154,26 @@ export async function api(method, path, body, { timeoutMs, headers } = {}) {
 }
 
 // --- snapshot -------------------------------------------------------------- //
-export async function refreshSnapshot() {
-  const headers = state.etag ? { "If-None-Match": state.etag } : undefined;
+/**
+ * Fetch the /dirs snapshot.
+ *
+ * `revalidate` is what makes the picker's per-directory counts fresh.
+ *
+ * The sidecar deliberately leaves those counts OUT of the etag (see
+ * App.dirs_snapshot): they change on every download and would turn a cache
+ * validator for the ROUTING CONFIGURATION into a per-download counter. The
+ * price of that choice is that a 304 carries no body, so a revalidating client
+ * keeps whatever counts it already had -- and since the routing configuration
+ * changes about once a month, they would be frozen for about a month.
+ *
+ * So the ONE request a human is waiting on -- the picker asking for the list it
+ * is about to render -- skips If-None-Match and takes the full few-KB loopback
+ * body. Everything else (the five-minute alarm, startup, the post-/mkdir
+ * refresh) revalidates as before, so the steady-state traffic is unchanged.
+ */
+export async function refreshSnapshot({ revalidate = true } = {}) {
+  const headers = (revalidate && state.etag)
+    ? { "If-None-Match": state.etag } : undefined;
   const out = await api("GET", "/dirs", undefined, { timeoutMs: 4000, headers });
   if (out && out.notModified) return state.snapshot;
   state.snapshot = out;
@@ -297,6 +323,12 @@ function routeDownload(item, suggest) {
         decision: info.decision,
         payload,
         tier,
+        // Where to put an in-page picker: the tab the click came from. It is
+        // the capture's, not the DownloadItem's -- a DownloadItem carries no
+        // tabId, which is the whole reason the capture buffer exists. Absent
+        // when nothing correlated, and openOverlayPicker then falls back to the
+        // active tab and finally to a window.
+        tabId: capture?.tabId,
         ts: Date.now(),
       });
       // Fire-and-forget: the download is already answered.
@@ -396,16 +428,30 @@ export async function showToast(info) {
   }
 }
 
-export async function openPicker(info) {
+/** The query string both picker delivery paths are built from. ONE source. */
+function pickerParams(info) {
+  return {
+    id: String(info.downloadId ?? ""),
+    dir: info.dir || "",
+    reason: info.reason || "",
+    dup: info.dup || "",
+    suggestNew: info.suggestNew || "",
+  };
+}
+
+/**
+ * The picker as a dedicated popup window. THE FALLBACK, and it stays.
+ *
+ * Content scripts do not run on `brave://`/`chrome://`, the PDF viewer, the Web
+ * Store, `view-source:` or `file://`, and a download whose tab has already
+ * closed -- the self-closing file-host tab -- has nothing to inject into at
+ * all. Every one of those is a real case here, so this path is not legacy: it
+ * is the answer whenever the page cannot host the overlay.
+ */
+export async function openPickerWindow(info) {
   try {
     const win = await chrome.windows.create({
-      url: popupUrl("picker.html", {
-        id: String(info.downloadId ?? ""),
-        dir: info.dir || "",
-        reason: info.reason || "",
-        dup: info.dup || "",
-        suggestNew: info.suggestNew || "",
-      }),
+      url: popupUrl("picker.html", pickerParams(info)),
       type: "popup",
       width: PICKER_W,
       height: PICKER_H,
@@ -416,6 +462,160 @@ export async function openPicker(info) {
   } catch {
     return showToast({ ...info, source: "picker-failed" });
   }
+}
+
+/**
+ * Cheap pre-check on a tab's URL. NOT the real test.
+ *
+ * It rejects the schemes a content script provably never sees, so the common
+ * `brave://newtab` case costs no round-trip. It cannot cover the PDF viewer
+ * (an ordinary https URL whose document is a plugin), a tab still loading, or a
+ * discarded tab -- for those the probe below is the authority. Anything this
+ * misses falls back correctly; anything it rejects wrongly only costs a window.
+ */
+export function overlayCapableUrl(url) {
+  if (typeof url !== "string" || !/^https?:\/\//i.test(url)) return false;
+  // The Web Store is blocked to extensions by the browser itself.
+  if (/^https?:\/\/chromewebstore\.google\.com\//i.test(url)) return false;
+  if (/^https?:\/\/chrome\.google\.com\/webstore(\/|$)/i.test(url)) return false;
+  return true;
+}
+
+/** Which tab should host the overlay. */
+function overlayTabId(info) {
+  if (typeof info.tabId === "number") return info.tabId;
+  const entry = state.pending.get(info.downloadId);
+  if (entry && typeof entry.tabId === "number") return entry.tabId;
+  // Last resort: wherever the user is actually looking. A download's own tab
+  // often closes itself, and asking on the page in front of them beats a popup
+  // window. `state.activeTabId` already excludes our own popups.
+  return typeof state.activeTabId === "number" ? state.activeTabId : null;
+}
+
+function newOverlayId() {
+  try {
+    if (globalThis.crypto && typeof globalThis.crypto.randomUUID === "function") {
+      return globalThis.crypto.randomUUID();
+    }
+  } catch { /* fall through */ }
+  return `ov-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+// Resolvers for overlays whose `dlr:picker-ready` has not landed yet. Module
+// scope, not `state`: purely in-flight, and the wait is under two seconds.
+const overlayWaiters = new Map();
+
+function waitForOverlayReady(id, ms) {
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      overlayWaiters.delete(id);
+      resolve(false);
+    }, ms);
+    // `unref` exists only under node (the test runner); without it this timer
+    // holds the event loop open and hangs the suite.
+    if (timer && typeof timer.unref === "function") timer.unref();
+    overlayWaiters.set(id, (ok) => {
+      clearTimeout(timer);
+      overlayWaiters.delete(id);
+      resolve(ok !== false);
+    });
+  });
+}
+
+/** Abandon a readiness wait, so its timer does not outlive a failed open. */
+function cancelOverlayWait(id) {
+  const done = overlayWaiters.get(id);
+  if (done) done(false);
+}
+
+async function tellOverlayToClose(tabId, id) {
+  try {
+    await chrome.tabs.sendMessage(tabId,
+      { type: "dlr:close-overlay", overlay: id }, { frameId: 0 });
+  } catch { /* tab gone or navigated -- the overlay went with the document */ }
+}
+
+/**
+ * The picker as an in-page overlay. Returns false -- never throws -- whenever
+ * the page cannot host it, so the caller falls back to the window.
+ *
+ * `chrome.action.openPopup()` is deliberately not an option here: the manifest
+ * declares no `default_popup`, and an action popup dismisses on focus loss,
+ * which would silently discard a pick and leave the file in the catch-all.
+ *
+ * TWO gates, and both are needed:
+ *
+ *   1. the content script answers `dlr:overlay-open`. `chrome.tabs.sendMessage`
+ *      rejects with "receiving end does not exist" when there is no content
+ *      script -- which is one check covering `brave://`, the PDF viewer, the
+ *      Web Store, `view-source:`, `file://`, a closed or discarded tab, and a
+ *      page that has not reached `document_idle` yet.
+ *   2. the FRAME reports itself ready. A content-script-injected iframe is
+ *      subject to the page's CSP, so a strict `frame-src` blocks the load while
+ *      every DOM call in gate 1 still succeeds. Only an extension context that
+ *      actually booted can send `dlr:picker-ready`.
+ *
+ * Without gate 2 a CSP-restrictive site would leave an empty overlay and no
+ * window -- a download with no picker at all, which is the one outcome that is
+ * not allowed.
+ */
+export async function openOverlayPicker(info) {
+  const tabId = overlayTabId(info);
+  if (typeof tabId !== "number") return false;
+  let tab = null;
+  try {
+    tab = await chrome.tabs.get(tabId);
+  } catch {
+    return false;   // the tab has gone: the self-closing file-host tab
+  }
+  if (!tab || tab.discarded) return false;
+  if (!overlayCapableUrl(tab.url || tab.pendingUrl)) return false;
+
+  const id = newOverlayId();
+  const url = popupUrl("picker.html",
+    { ...pickerParams(info), embed: "1", overlay: id });
+  // ARM THE READINESS WAIT BEFORE THE PROBE. The content script returns as soon
+  // as the DOM nodes exist; the frame's own boot is a SEPARATE round trip and
+  // may land first. Registering the waiter after the send would drop a `ready`
+  // that won the race and fall back to a popup window for no reason at all --
+  // and, worse, intermittently.
+  const ready = waitForOverlayReady(id, OVERLAY_READY_MS);
+  let created = null;
+  try {
+    created = await chrome.tabs.sendMessage(tabId,
+      { type: "dlr:overlay-open", id, url }, { frameId: 0 });
+  } catch {
+    cancelOverlayWait(id);
+    return false;   // gate 1: no content script in this tab
+  }
+  if (!created || created.ok !== true) {
+    cancelOverlayWait(id);
+    return false;
+  }
+
+  state.overlays.set(id, { tabId, downloadId: info.downloadId });
+  if (await ready) return true;
+  // gate 2 failed: tear the husk down before opening the window, so the user
+  // is never looking at two pickers for one download.
+  state.overlays.delete(id);
+  await tellOverlayToClose(tabId, id);
+  return false;
+}
+
+/**
+ * Ask the user which directory. Overlay first, popup window as the automatic
+ * fallback -- and `openOverlayPicker` is written so that every failure mode
+ * reaches this fallback rather than throwing.
+ */
+export async function openPicker(info) {
+  let shown = false;
+  try {
+    shown = await openOverlayPicker(info);
+  } catch {
+    shown = false;
+  }
+  if (shown) return true;
+  return openPickerWindow(info);
 }
 
 // --- corrections ----------------------------------------------------------- //
@@ -712,6 +912,9 @@ export async function startFetch(url, info, tab) {
     dup: formatDup(decision?.dup) || "",
     suggestNew: decision?.suggestNew || "",
     candidates: decision?.candidates || [],
+    // A yt-dlp job has no entry in `state.pending`, so the tab has to be
+    // carried explicitly -- it is the tab the context menu was used in.
+    tabId: tab?.id ?? capture?.tabId,
   });
   return { ok: true, queued: true, dir: null };
 }
@@ -795,8 +998,11 @@ export function onMessage(msg, sender, sendResponse) {
     return true;   // async response
   }
   if (msg.type === "dlr:snapshot") {
+    // `revalidate: false` -- this is the picker asking for the list it is
+    // about to render, and the per-directory counts are not covered by the
+    // etag, so a 304 would hand it a stale tally. See refreshSnapshot.
     ready()
-      .then(() => refreshSnapshot())
+      .then(() => refreshSnapshot({ revalidate: false }))
       .then(() => sendResponse({ ok: Boolean(state.snapshot),
         snapshot: state.snapshot }))
       .catch(() => sendResponse({ ok: Boolean(state.snapshot),
@@ -811,6 +1017,27 @@ export function onMessage(msg, sender, sendResponse) {
       .then(() => sendResponse({ siteRules: state.snapshot?.siteRules || {} }))
       .catch(() => sendResponse({ siteRules: {} }));
     return true;
+  }
+  if (msg.type === "dlr:picker-ready") {
+    // Gate 2 of the overlay handshake -- see openOverlayPicker. Pure
+    // bookkeeping against an in-flight promise: it must NOT await ready(),
+    // because the whole point is to answer inside the readiness budget.
+    const resolve = overlayWaiters.get(msg.overlay);
+    if (resolve) resolve();
+    return false;
+  }
+  if (msg.type === "dlr:picker-closed") {
+    // The embedded picker finished (accepted, cancelled, or refused then
+    // escaped) and cannot close its own frame. Tear the overlay down.
+    const record = state.overlays.get(msg.overlay);
+    state.overlays.delete(msg.overlay);
+    // `sender.tab.id` is what survives an MV3 teardown. The picker can sit
+    // open well past the ~30 s idle timeout, and a restarted worker has an
+    // empty `state.overlays` -- keying only on that map would leave the
+    // overlay on screen forever with nothing able to remove it.
+    const tabId = record ? record.tabId : sender?.tab?.id;
+    if (typeof tabId === "number") void tellOverlayToClose(tabId, msg.overlay);
+    return false;
   }
   if (msg.type === "dlr:repick") {
     void ready().then(() => {
