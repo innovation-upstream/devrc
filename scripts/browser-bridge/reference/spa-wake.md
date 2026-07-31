@@ -39,6 +39,20 @@ every `open`ed heavy app starts throttled.
   identical flaw, and one of the errors it cited was caused by the probe itself.
   **Post-mortem: `~/workspace/devrc/scripts/browser-bridge/README.md` § *Real false-outage report*.**
 
+## Confirm throttling before you diagnose anything
+
+Two checks that stop a throttled tab from reading as a broken product:
+
+- **`readyState` alone is NOT sufficient.** A throttled SPA reaches
+  `document.readyState === "complete"` on an empty shell and stays there. Poll
+  `readyState` **and a real content selector** (an actual node the page must render),
+  and allow **materially longer** than a foreground load before concluding anything.
+  Then `wake` and re-read — `wake`, never `activate`.
+- **Cross-check a suspected outage with a separate `curl` for the HTTP status.**
+  A **200 from `curl` plus an empty DOM in a background tab is THROTTLING, not a
+  server fault.** That one command separates the two explanations that otherwise
+  look identical from inside the browser.
+
 ## `wake` — the fix, and it does NOT take the operator's screen
 
 It attaches CDP to that tab ONLY, turns on `Emulation.setFocusEmulationEnabled`
