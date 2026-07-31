@@ -24,8 +24,9 @@ export default tool({
     "pick one for `frame`), 'click' (TRUSTED click, pass `selector`), 'type' " +
     "(TRUSTED text input, pass `text`, optional `selector`), 'key' (one key: " +
     "Enter/Tab/Escape/Backspace/Delete/Arrow*/Home/End/Page*, optional `selector`), " +
-    "'activate' (FOREGROUND your tab so a foreground-throttled SPA finishes " +
-    "loading — steals the user's focus; optional `waitMs` to wait for load), " +
+    "'wake' (UN-THROTTLE your background tab so a throttled SPA actually renders " +
+    "— does NOT move the user's focus; optional `waitMs` settle. Use this when a " +
+    "read comes back empty or the page looks stuck on 'Loading…'), " +
     "'whoami' (read-only host/instance/version diagnostics — metadata only). " +
     "There is NO 'upload' op: file upload is off by default for the autonomous " +
     "agent. text/html/eval/click/type/key accept `frame` (a frameId or " +
@@ -39,7 +40,7 @@ export default tool({
     // of them (operator-only, opt-in via BROWSER_AGENT_ALLOWED_OPS).
     op: tool.schema
       .enum(["text", "html", "eval", "nav", "screenshot",
-             "frames", "click", "type", "key", "activate", "whoami"])
+             "frames", "click", "type", "key", "wake", "whoami"])
       .describe("the operation to perform on your tab"),
     selector: tool.schema.string().optional()
       .describe("op=text/click/type/key: CSS selector (click target / focus / scope)"),
@@ -56,7 +57,7 @@ export default tool({
     maxBytes: tool.schema.number().optional()
       .describe("op=text: cap the returned text in bytes (default 32768, 0=uncapped)"),
     waitMs: tool.schema.number().optional()
-      .describe("op=activate: bounded ms to wait for the tab to finish loading (0=no wait)"),
+      .describe("op=wake: bounded ms to hold the un-throttle so the page can render (0=no wait)"),
   },
   async execute(args) {
     // runBrowserOp reads the forced tab / instance / domain policy / token from

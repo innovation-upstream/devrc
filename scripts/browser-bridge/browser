@@ -43,24 +43,44 @@
 #                               subsequent ops route to it. Prints its tabId.
 #   browser close             — close this session's owned tab + drop ownership
 #   browser release           — drop ownership WITHOUT closing the tab
+#   browser wake [--wait MS | --no-wait]
+#                             — UN-THROTTLE the owned/active tab WITHOUT touching
+#                               focus. A background tab is visibilityState:"hidden"
+#                               → Chromium gives it NO animation frames and ~1 Hz
+#                               timers, so a heavy SPA never paints. `wake` attaches
+#                               CDP to that tab only, turns on focus emulation (+ a
+#                               lifecycle thaw), holds it for a bounded settle
+#                               (default ~1.5s, cap ~8s) so the page renders, then
+#                               detaches. Nothing here moves your screen.
+#                               ⚠ The un-throttled STATE ends at detach (measured);
+#                               what persists is the DOM the page rendered. If a
+#                               read must OBSERVE live un-throttled state, use
+#                               `--wake` on that read instead (below).
+#                               THIS IS THE REMEDY FOR A HIDDEN/EMPTY READ — not
+#                               `activate`.
 #   browser activate [--wait MS | --no-wait]
 #                             — FOREGROUND the owned/active tab (--tab to target
-#                               one) so a foreground-REQUIRING SPA (heavy JS app
-#                               Chrome throttles while backgrounded) finishes
-#                               loading, then can be driven. ⚠ STEALS FOCUS — the
-#                               ONE intrusive op; it changes what you see. Waits
-#                               (bounded, default ~3s, cap ~8s) for load unless
-#                               --no-wait; --wait MS overrides. On i3 the SERVER
-#                               also runs `i3-msg` host-side to actually raise the
-#                               Brave window + switch workspace (Chrome-side focus
-#                               alone is a no-op under i3); the result's `i3` field
-#                               reports applied/skipped/failed (skipped off i3).
+#                               one). ⚠⚠ STEALS THE OPERATOR'S SCREEN — the ONE
+#                               intrusive op. LAST RESORT: use it only when
+#                               something genuinely needs the REAL foreground (a
+#                               permission prompt, a native picker, seeing it with
+#                               your own eyes). For a throttled/unrendered tab use
+#                               `browser wake`. Needed at most ONCE PER TAB — never
+#                               per read. Waits (bounded, default ~3s, cap ~8s) for
+#                               load unless --no-wait; --wait MS overrides. On i3
+#                               the SERVER also runs `i3-msg` host-side to actually
+#                               raise the Brave window + switch workspace; the
+#                               result's `i3` field reports applied/skipped/failed.
 #   browser html              — outerHTML of the owned/active tab (+ url, title);
 #                               --max-bytes N caps it (default 32768, 0 = uncapped,
-#                               truncation appends a "…[truncated N bytes]" note)
+#                               truncation appends a "…[truncated N bytes]" note).
+#                               --wake un-throttles the tab and reads in the SAME
+#                               CDP session (opt-in; briefly shows Brave's debug
+#                               banner — the default read stays banner-free)
 #   browser text [selector]   — visible innerText of the owned/active tab (cheap
 #                               read; optional CSS selector; --max-bytes N caps
-#                               the returned text, default 32768, 0 = uncapped)
+#                               the returned text, default 32768, 0 = uncapped).
+#                               --wake as for `html`
 #   browser js '<js>'         — run JS in the owned/active tab, return its value.
 #                               ALIAS of `browser eval` (identical semantics/flags,
 #                               and the wire op is `eval` either way). PREFER `js`
@@ -268,9 +288,27 @@ r = d.get("result") if isinstance(d, dict) else None
 data = r.get("data") if isinstance(r, dict) else None
 if isinstance(data, dict) and data.get("hidden") is True:
     note = data.get("note") or ("tab is hidden (background) — content may not have "
-                                "rendered; run \x27browser activate\x27")
+                                "rendered; run \x27browser wake\x27 (non-intrusive) "
+                                "or re-run this read with --wake")
     sys.stderr.write("browser: " + str(note) + "\n")
 '
+}
+
+# wake_fields WAKE WAITMS — emit the `,"wake":true[,"waitMs":N]` JSON fragment for
+# a read invoked with `--wake` / `--wake=MS`, or NOTHING at all when --wake was not
+# passed. Emitting nothing is the load-bearing half: a plain `text`/`html`/`js`
+# must go over the wire BYTE-IDENTICALLY to before, so the extension keeps taking
+# the light chrome.scripting path with no debugger banner.
+wake_fields() {
+  [ -n "$1" ] || return 0
+  # NOTE: this runs inside $( ) — a `die` here would exit only the SUBSHELL and
+  # the request would still be sent. So --wake=MS is validated at PARSE time, in
+  # the flag loop of each subcommand, and this function only formats.
+  if [ -n "$2" ]; then
+    printf ',"wake":true,"waitMs":%s' "$2"
+  else
+    printf ',"wake":true'
+  fi
 }
 
 # cap_html MAXB — stdin: a /cmd response JSON; stdout: the same JSON with
@@ -441,6 +479,34 @@ case "$sub" in
   release)
     cmd_op release | pretty
     ;;
+  wake)
+    # browser [--tab <id>] wake [--wait MS | --no-wait]
+    # UN-THROTTLE the owned/explicit/active tab WITHOUT moving focus — the
+    # non-intrusive counterpart to `activate`. The extension attaches CDP to that
+    # tab only, applies Emulation.setFocusEmulationEnabled (+ a best-effort
+    # Page.setWebLifecycleState thaw), holds it for a bounded settle so the page
+    # gets real animation frames, then detaches. NO i3-msg, NO tab/window focus
+    # change — the server's host-side foregrounding is keyed on `activate` alone.
+    # --wait MS overrides the settle; --no-wait applies the un-throttle and returns
+    # immediately (useful only if you follow with a `--wake` read).
+    wait=""
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --wait) shift; [ $# -ge 1 ] || die "usage: browser wake [--wait MS]"; wait="$1"; shift ;;
+        --wait=*) wait="${1#--wait=}"; shift ;;
+        --no-wait) wait="0"; shift ;;
+        --) shift; break ;;
+        -*) die "browser wake: unknown flag: $1 (try: --wait MS | --no-wait)" ;;
+        *) die "browser wake takes no positional args (got: $1)" ;;
+      esac
+    done
+    extra=""
+    if [ -n "$wait" ]; then
+      case "$wait" in (*[!0-9]*) die "--wait must be a non-negative integer of ms (got: $wait)";; esac
+      extra="\"waitMs\":${wait}"
+    fi
+    cmd_op wake "$extra" | pretty
+    ;;
   activate)
     # browser [--tab <id>] activate [--wait MS | --no-wait]
     # Foreground the owned/explicit/active tab (STEALS FOCUS — the one intrusive
@@ -475,36 +541,53 @@ case "$sub" in
     # cap is on by DEFAULT and truncation is never silent. `maxBytes` is also sent
     # to the extension (which ignores it today) so a future extension-side cap
     # composes; the CLI-side cap in cap_html is what actually bounds stdout.
-    maxb=32768
+    #
+    # --wake [MS] routes THIS ONE read through CDP with the un-throttle applied in
+    # the same session (see `browser wake`). Opt-in on purpose: the default read
+    # takes the light chrome.scripting path with NO debugger banner, and routing
+    # every read through CDP would flash "an extension is debugging this browser"
+    # on every single read — trading focus theft for banner spam.
+    maxb=32768; wake=""; wakewait=""
     while [ $# -gt 0 ]; do
       case "$1" in
         --max-bytes) shift; [ $# -ge 1 ] || die "usage: browser html [--max-bytes N]"; maxb="$1"; shift ;;
         --max-bytes=*) maxb="${1#--max-bytes=}"; shift ;;
+        --wake) wake=1; shift ;;
+        --wake=*) wake=1; wakewait="${1#--wake=}";
+          case "$wakewait" in (*[!0-9]*|"") die "--wake=MS must be a non-negative integer of ms (got: $wakewait)";; esac
+          shift ;;
         --) shift; break ;;
-        -*) die "browser html: unknown flag: $1 (try: --max-bytes N)" ;;
+        -*) die "browser html: unknown flag: $1 (try: --max-bytes N | --wake[=MS])" ;;
         *) die "browser html takes no positional args (got: $1)" ;;
       esac
     done
     case "$maxb" in (*[!0-9]*|"") die "--max-bytes must be a non-negative integer (got: $maxb)";; esac
-    cmd_op getHtml "\"maxBytes\":${maxb}" | cap_html "$maxb" | pretty
+    extra="\"maxBytes\":${maxb}$(wake_fields "$wake" "$wakewait")"
+    cmd_op getHtml "$extra" | cap_html "$maxb" | pretty
     ;;
   text)
     # browser text [selector] [--max-bytes N]
     # Cheap innerText read. Optional CSS selector (a leading non-flag arg) and an
     # optional --max-bytes cap (default 32768; 0 = uncapped). The selector/cap are
     # passed to the extension, which normalizes + byte-caps the text.
-    sel=""; maxb=32768
+    # --wake routes this one read through CDP with the un-throttle applied in the
+    # same session (see `browser html` / `browser wake`).
+    sel=""; maxb=32768; wake=""; wakewait=""
     while [ $# -gt 0 ]; do
       case "$1" in
         --max-bytes) shift; [ $# -ge 1 ] || die "usage: browser text [selector] [--max-bytes N]"; maxb="$1"; shift ;;
         --max-bytes=*) maxb="${1#--max-bytes=}"; shift ;;
+        --wake) wake=1; shift ;;
+        --wake=*) wake=1; wakewait="${1#--wake=}";
+          case "$wakewait" in (*[!0-9]*|"") die "--wake=MS must be a non-negative integer of ms (got: $wakewait)";; esac
+          shift ;;
         --) shift; break ;;
         -*) die "browser text: unknown flag: $1" ;;
         *) [ -z "$sel" ] || die "browser text takes at most one selector (got extra: $1)"; sel="$1"; shift ;;
       esac
     done
     case "$maxb" in (*[!0-9]*|"") die "--max-bytes must be a non-negative integer (got: $maxb)";; esac
-    extra="\"maxBytes\":${maxb}"
+    extra="\"maxBytes\":${maxb}$(wake_fields "$wake" "$wakewait")"
     if [ -n "$sel" ]; then extra="\"selector\":$(json_str "$sel"),${extra}"; fi
     cmd_op text "$extra" | pretty
     ;;
@@ -522,7 +605,23 @@ case "$sub" in
     # `eval`, and this is a CLI-surface alias only.
     [ $# -ge 1 ] || die "usage: browser js '<js>'   (or the identical: browser eval '<js>')"
     js="$(json_str "$1")"
-    cmd_op eval "\"js\":${js}" | pretty
+    shift
+    # --wake evaluates inside a woken (un-throttled, focus-untouched) CDP session —
+    # the shape to use when the expression MEASURES live un-throttled state (rAF
+    # ticks, a lazily-hydrating SPA) rather than reading persisted DOM.
+    wake=""; wakewait=""
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --wake) wake=1; shift ;;
+        --wake=*) wake=1; wakewait="${1#--wake=}";
+          case "$wakewait" in (*[!0-9]*|"") die "--wake=MS must be a non-negative integer of ms (got: $wakewait)";; esac
+          shift ;;
+        --) shift; break ;;
+        -*) die "browser js: unknown flag: $1 (try: --wake[=MS])" ;;
+        *) die "browser js takes exactly one JS argument (got extra: $1)" ;;
+      esac
+    done
+    cmd_op eval "\"js\":${js}$(wake_fields "$wake" "$wakewait")" | pretty
     ;;
   tabs)
     cmd_op tabs | pretty
@@ -735,6 +834,6 @@ else:
     grep -E '^#( |$)' "$0" | sed -E 's/^# ?//'
     ;;
   *)
-    die "unknown subcommand: $sub (try: health whoami instances open close release activate html text js eval tabs nav screenshot frames click type key upload agent)"
+    die "unknown subcommand: $sub (try: health whoami instances open close release wake activate html text js eval tabs nav screenshot frames click type key upload agent)"
     ;;
 esac

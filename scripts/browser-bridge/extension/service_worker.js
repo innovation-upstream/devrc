@@ -43,6 +43,10 @@ import {
   // upload op (Gap 1): resolve a file input + hand its ABSOLUTE path to CDP
   // DOM.setFileInputFiles (Chrome reads the file itself — no bytes cross the bridge).
   fileInputSelectorExpression, FILE_INPUT_CHECK_FN, basenameOf,
+  // `wake` op / `--wake` reads: un-throttle a background tab via CDP WITHOUT
+  // touching focus (the non-intrusive replacement for reflexive `activate`).
+  clampWakeMs, applyWakeSteps, WAKE_PROBE_EXPRESSION,
+  frameHtmlExpression, frameTextExpression,
 } from "./protocol.js";
 
 const DEFAULT_PORT = 8788;
@@ -193,6 +197,34 @@ async function cdpEval(send, contextId, expression) {
     { expression, contextId, returnByValue: true, awaitPromise: true });
   if (res.exceptionDetails) throw new Error(cdpExceptionText(res.exceptionDetails));
   return res.result ? res.result.value : undefined;
+}
+
+// --- `wake`: un-throttle the owned tab via CDP, WITHOUT stealing focus ------- //
+// Applies the fixed WAKE_CDP_STEPS (see protocol.js for the measured Chromium
+// behaviour that dictates them), holds the un-throttle for a bounded settle so the
+// page gets real animation frames, and probes what it achieved — all INSIDE one
+// attached session, because the un-throttled state is measured NOT to survive
+// detach. `run` (optional) is executed after the settle and still inside the woken
+// session: that is how `--wake` reads get an un-throttled read. Returns
+// { applied, skipped, settleMs, probe, value } where `value` is `run`'s result.
+//
+// Own-tab-scoped exactly like every other CDP op: the caller passes the tab the
+// server routed to, withCdp refuses a privileged scheme BEFORE attaching and
+// ALWAYS detaches in its `finally`. No raw-CDP passthrough — the method set is
+// fixed data (WAKE_CDP_STEPS) plus the same Runtime.evaluate the read ops use.
+async function cdpWake(tabId, tabUrl, waitMs, run) {
+  const settleMs = clampWakeMs(waitMs);
+  return withCdp(tabId, tabUrl, async (send) => {
+    const { applied, skipped } = await applyWakeSteps(send);
+    if (settleMs > 0) await sleep(settleMs);
+    let probe = null;
+    try {
+      const raw = await cdpEval(send, undefined, WAKE_PROBE_EXPRESSION);
+      probe = typeof raw === "string" ? JSON.parse(raw) : raw;
+    } catch (e) { /* best-effort diagnostic — never fail a wake on the probe */ }
+    const value = run ? await run(send) : undefined;
+    return { applied, skipped, settleMs, probe, value };
+  });
 }
 
 // --- OOPIF-capable frame glue (chrome.webNavigation + chrome.scripting) ------- //
@@ -354,10 +386,34 @@ async function cdpSetFileInput(tabId, tabUrl, frame, selector, absPath) {
   });
 }
 
+// `--wake` un-throttles the TAB, and a --frame read already goes through its own
+// resolution path; combining them would silently ignore one of the two. Refuse
+// loudly with the exact remedy instead (`browser wake`, then the frame read).
+function assertWakeNotFramed(cmd) {
+  if (cmd && cmd.wake && cmd.frame) {
+    throw new Error("wake_with_frame_unsupported: run 'browser wake' first, "
+      + "then re-issue the --frame read");
+  }
+}
+
+// Merge a cdpWake() outcome into a read result. The read happened INSIDE the woken
+// session, so the visibilityState to report is the one the PROBE saw there — not a
+// separate chrome.scripting probe of the (already re-throttled) tab. `woke` is
+// true when the probe confirms the page was actually un-throttled during the read.
+function wakeAnnotate(data, w) {
+  const vis = w && w.probe ? w.probe.visibilityState : null;
+  annotateVisibility(data, vis);
+  data.woke = vis === "visible";
+  data.wake = { applied: w.applied, settleMs: w.settleMs };
+  if (w.skipped && w.skipped.length) data.wake.skipped = w.skipped;
+  return data;
+}
+
 // --- op executors ---------------------------------------------------------- //
 // Each returns the op-specific `data` object; throws on failure (→ errorEnvelope).
 const OPS = {
   async getHtml(cmd) {
+    assertWakeNotFramed(cmd);   // --wake + --frame is refused before any work
     const tab = await targetTab(cmd);
     // --frame → read the outerHTML INSIDE the chosen (cross-origin OOPIF) frame via
     // chrome.scripting (reaches an out-of-process iframe; no debugger banner).
@@ -369,6 +425,14 @@ const OPS = {
       // read the intended frame (#190 reported the top url for a frame read).
       return annotateVisibility(
         { url: frame.url || tab.url, title: tab.title, html, frame: cmd.frame }, vis);
+    }
+    // --wake → un-throttle the tab and read INSIDE the same CDP session (the
+    // un-throttled state does not survive detach — see protocol.js `wake`). This
+    // is the OPT-IN path; the default read below stays on chrome.scripting.
+    if (cmd && cmd.wake) {
+      const w = await cdpWake(tab.id, tab.url, cmd.waitMs,
+        (send) => cdpEval(send, undefined, frameHtmlExpression()));
+      return wakeAnnotate({ url: tab.url, title: tab.title, html: w.value }, w);
     }
     // No frame → the lighter chrome.scripting top-frame read (no debugger banner).
     const vis = await tabVisibilityState(tab.id);
@@ -385,6 +449,7 @@ const OPS = {
   // injected fn returns RAW innerText; normalizeText does the whitespace
   // collapse + cap out here (so it stays pure + unit-tested).
   async text(cmd) {
+    assertWakeNotFramed(cmd);   // --wake + --frame is refused before any work
     const tab = await targetTab(cmd);
     const sel = (cmd && typeof cmd.selector === "string") ? cmd.selector : "";
     const cap = (cmd && cmd.maxBytes != null)
@@ -400,6 +465,13 @@ const OPS = {
       return annotateVisibility(
         { url: frame.url || tab.url, title: tab.title, text, truncated, frame: cmd.frame }, vis);
     }
+    // --wake → un-throttle + read in ONE CDP session (opt-in; see getHtml).
+    if (cmd && cmd.wake) {
+      const w = await cdpWake(tab.id, tab.url, cmd.waitMs,
+        (send) => cdpEval(send, undefined, frameTextExpression(sel)));
+      const { text, truncated } = normalizeText(w.value, cap);
+      return wakeAnnotate({ url: tab.url, title: tab.title, text, truncated }, w);
+    }
     const vis = await tabVisibilityState(tab.id);
     const [inj] = await chrome.scripting.executeScript({
       target: { tabId: tab.id },
@@ -414,6 +486,7 @@ const OPS = {
   },
 
   async eval(cmd) {
+    assertWakeNotFramed(cmd);   // --wake + --frame is refused before any work
     const tab = await targetTab(cmd);
     // --frame → evaluate the arbitrary JS STRING INSIDE the chosen frame (incl. a
     // cross-origin OOPIF) via CDP Runtime.evaluate. chrome.scripting can only run a
@@ -429,6 +502,23 @@ const OPS = {
       const vis = await tabVisibilityState(tab.id);
       const value = await cdpFrameEval(tab.id, tab.url, frame, cmd.js);
       return annotateVisibility({ url: frame.url || tab.url, value, frame: cmd.frame }, vis);
+    }
+    // --wake → un-throttle + evaluate in ONE CDP session (opt-in; see getHtml).
+    // Uses the SAME expression/statement pair + never-silent-null contract as
+    // `eval --frame` (frameEvalExpressions/evalValueOrThrow), just in the tab's
+    // default (top-frame) context.
+    if (cmd && cmd.wake) {
+      const { expression, fallback } = frameEvalExpressions(cmd.js);
+      const w = await cdpWake(tab.id, tab.url, cmd.waitMs, async (send) => {
+        let res = await send("Runtime.evaluate",
+          { expression, returnByValue: true, awaitPromise: true });
+        if (res && res.exceptionDetails && isCdpSyntaxError(res.exceptionDetails)) {
+          res = await send("Runtime.evaluate",
+            { expression: fallback, returnByValue: true, awaitPromise: true });
+        }
+        return evalValueOrThrow(res);
+      });
+      return wakeAnnotate({ url: tab.url, value: w.value }, w);
     }
     const vis = await tabVisibilityState(tab.id);
     // chrome.scripting runs the top-frame eval in the page's MAIN world (world:
@@ -675,12 +765,17 @@ const OPS = {
     }
   },
 
-  // Bring the target tab to the FOREGROUND so a foreground-REQUIRING web app (a
-  // heavy SPA Chrome throttles while the tab is backgrounded — #175 keeps the
-  // agent's tab backgrounded by design, so such an app never leaves "Loading…")
-  // actually boots and can then be driven. This is THE ONE INTRUSIVE OP: it
-  // deliberately STEALS the user's current foreground (that IS the point — to
-  // load the app). Two steps, both permission-free for the extension's own use:
+  // Bring the target tab to the FOREGROUND. THE ONE INTRUSIVE OP — it takes the
+  // OPERATOR'S SCREEN away from whatever they were doing.
+  //
+  // ⚠ LAST RESORT, NOT the remedy for a throttled/hidden tab. Un-throttling is
+  // `wake`'s job (CDP focus emulation, no focus movement, measured equivalent for
+  // rendering). Use `activate` only when something genuinely needs the REAL
+  // foreground — a getUserMedia/permission prompt, a native picker, or verifying
+  // with your own eyes. It is needed at most ONCE PER TAB; calling it per read is
+  // the exact pattern that had an agent yanking the screen 1–5×/minute.
+  //
+  // Two steps, both permission-free for the extension's own use:
   //   * chrome.tabs.update(tabId,{active:true})   — make it the active tab of its
   //     window;
   //   * chrome.windows.update(windowId,{focused})  — request that window's focus.
@@ -696,6 +791,37 @@ const OPS = {
   // #189 no-wedge guarantee (tabLoadSettled fail-fasts an unloaded tab). No CDP,
   // no debugger banner, no new permission. `globalThis.BROWSER_BRIDGE_ACTIVATE_
   // TIMING` is a TEST-ONLY seam to shrink the poll/settle so a test settles in ms.
+  // UN-THROTTLE the owned/target tab WITHOUT touching focus — the non-intrusive
+  // answer to "my background tab never rendered", and the op the autonomous agent
+  // gets INSTEAD of `activate` (focus theft is now operator-only).
+  //
+  // Attaches CDP to the OWN tab only (withCdp: privileged-scheme refusal before
+  // attach, always-detach in a `finally`), applies the fixed WAKE_CDP_STEPS, holds
+  // them for a bounded settle (default 1.5s, cap 8s) so the page receives real
+  // animation frames, probes the result, detaches. The un-throttled STATE reverts
+  // on detach (measured) — what persists is the DOM the page rendered during the
+  // window, which is exactly what a subsequent cheap non-CDP read wants.
+  //
+  // No i3-msg, no chrome.tabs.update{active}, no chrome.windows.update{focused}:
+  // nothing here can move the operator's screen.
+  async wake(cmd) {
+    const tab = await targetTab(cmd);
+    const w = await cdpWake(tab.id, tab.url, cmd && cmd.waitMs, null);
+    const fresh = await chrome.tabs.get(tab.id).catch(() => tab);
+    return {
+      tabId: tab.id, url: fresh.url || tab.url, title: fresh.title || tab.title,
+      applied: w.applied, skipped: w.skipped, settleMs: w.settleMs,
+      // What the page saw WHILE woken (visibilityState "visible" ⇒ un-throttled).
+      visibilityState: w.probe ? w.probe.visibilityState : null,
+      readyState: w.probe ? w.probe.readyState : null,
+      woke: !!(w.probe && w.probe.visibilityState === "visible"),
+      // The honest caveat, carried in-band so a caller can't miss it.
+      note: "un-throttled without moving focus; the un-throttled state ends at "
+        + "detach — rendered DOM persists. Use --wake on a read that must observe "
+        + "live un-throttled state.",
+    };
+  },
+
   async activate(cmd) {
     const tab = await targetTab(cmd);   // owned/explicit/active tab (server-forced for the agent)
     // Steal focus: active tab of its window, then request the window's focus.

@@ -960,8 +960,8 @@ def test_validate_command_contract():
     # The op set is the shared contract with extension/protocol.js.
     assert set(S.ALLOWED_OPS) == {"getHtml", "text", "eval", "tabs", "nav",
                                   "screenshot", "open", "close",
-                                  "frames", "click", "type", "key", "activate",
-                                  "upload"}
+                                  "frames", "click", "type", "key", "wake",
+                                  "activate", "upload"}
     # `upload` is a dispatched, tab-scoped CDP op requiring selector + path.
     assert S.validate_command({"op": "upload", "selector": "#f",
                                "path": "/tmp/x"}) == ("upload", None)
@@ -978,6 +978,11 @@ def test_validate_command_contract():
     assert S.validate_command({"op": "activate"}) == ("activate", None)
     assert S.validate_command({"op": "activate", "waitMs": 1000}) == ("activate", None)
     assert "activate" in S.TAB_SCOPED_OPS
+    # `wake` is a dispatched, tab-scoped CDP op with NO required field; its
+    # optional waitMs (the un-throttle settle) is a passthrough, not a routing hint.
+    assert S.validate_command({"op": "wake"}) == ("wake", None)
+    assert S.validate_command({"op": "wake", "waitMs": 500}) == ("wake", None)
+    assert "wake" in S.TAB_SCOPED_OPS
     assert S.validate_command({"op": "tabs"}) == ("tabs", None)
     assert S.validate_command({"op": "eval", "js": "1"})[0] == "eval"
     assert S.validate_command({"op": "eval"})[1] == "missing_field:js"
@@ -3982,3 +3987,104 @@ def test_browser_cli_help_lists_js_alias_and_screenshot_data_url():
                         text=True, timeout=30)
     assert r2.returncode != 0
     assert " js " in r2.stderr and " eval " in r2.stderr
+
+
+# --------------------------------------------------------------------------- #
+# `wake` op: tab-scoped, waitMs passthrough, and — the point of the whole change
+# — it NEVER triggers the host-side i3 foregrounding that steals the operator's
+# screen. `activate` remains the only op that does.
+# --------------------------------------------------------------------------- #
+def test_wake_routes_to_owned_session_tab():
+    """`wake` is tab-scoped: a session that `open`ed has its wake routed to ITS
+    owned tabId, so it can only ever un-throttle the tab the session owns."""
+    srv, _ = _serve()
+    ext = FakeExtension(srv, instance_id="solo", label="only",
+                        executor=_tab_echo_exec([101]))
+    ext.start()
+    try:
+        assert _wait_connected(srv, want=True)
+        _cmd(srv, {"op": "open"}, session="A")
+        st, body = _cmd(srv, {"op": "wake"}, session="A")
+        assert st == 200
+        assert body["result"]["data"]["tabId"] == 101, \
+            "wake must route to the session's owned tab (own-tab enforced)"
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
+def test_wake_explicit_tab_override():
+    """`--tab <id>` forces the wake target even with no owned tab."""
+    srv, _ = _serve()
+    ext = FakeExtension(srv, instance_id="solo", label="only",
+                        executor=_tab_echo_exec([]))
+    ext.start()
+    try:
+        assert _wait_connected(srv, want=True)
+        st, body = _req(srv, "POST", "/cmd", {"op": "wake", "tab": 88},
+                        headers={S.HDR_SESSION_ID: "A"})
+        assert st == 200
+        assert body["result"]["data"]["tabId"] == 88
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
+def test_wake_forwards_waitms_to_extension():
+    """`waitMs` (the un-throttle settle) is a passthrough command field."""
+    srv, _ = _serve()
+    ext = FakeExtension(srv, executor=lambda c: {"tabId": 5, "woke": True})
+    ext.start()
+    try:
+        assert _wait_connected(srv, want=True)
+        st, _ = _req(srv, "POST", "/cmd", {"op": "wake", "waitMs": 500})
+        assert st == 200
+        wakes = [c for c in ext.dispatched if c["op"] == "wake"]
+        assert wakes and wakes[0].get("waitMs") == 500
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
+def test_wake_NEVER_invokes_i3_msg(monkeypatch):
+    """THE REGRESSION GUARD FOR THIS WHOLE CHANGE. The host-side i3 foregrounding
+    is what actually yanks the operator's screen, and it is keyed on
+    op == "activate" alone. Enable i3 (so a leak WOULD be observable), then assert
+    a successful `wake` spawns NO i3-msg and adds no `i3` field to the result."""
+    calls = _enable_i3(monkeypatch, returncode=0)
+    srv, _ = _serve()
+    ext = FakeExtension(srv, executor=lambda c: {
+        "tabId": 5, "woke": True, "visibilityState": "visible",
+        "url": "https://model-benchmarking.civit.ai/run",
+        "title": "Model Benchmarking"})
+    ext.start()
+    try:
+        assert _wait_connected(srv, want=True)
+        st, body = _req(srv, "POST", "/cmd", {"op": "wake"})
+        assert st == 200
+        assert body["result"]["data"]["woke"] is True
+        assert calls == [], "wake must NEVER shell out to i3-msg (that is focus theft)"
+        assert "i3" not in body["result"]["data"], \
+            "wake does no host-side foregrounding, so it must not claim an i3 state"
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
+def test_wake_telemetry_is_metadata_only(telemetry):
+    """PRIVACY: a wake event emits ONLY op + the bare domain — never page content
+    and never a full URL with path/query."""
+    spool_dir = telemetry
+    srv, _ = _serve()
+    ext = FakeExtension(srv, executor=lambda c: {
+        "tabId": 5, "woke": True,
+        "url": "https://model-benchmarking.civit.ai/run?q=secret"})
+    ext.start()
+    try:
+        assert _wait_connected(srv, want=True)
+        st, _ = _req(srv, "POST", "/cmd", {"op": "wake"})
+        assert st == 200
+        e = _wait_events(spool_dir, 1)[0]
+        p = json.loads(e["payload"])
+        assert p["op"] == "wake"
+        assert p["outcome"] == "ok"
+        assert p["domain"] == "model-benchmarking.civit.ai"
+        assert "secret" not in json.dumps(e), "no full URL / query ever in telemetry"
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()

@@ -35,12 +35,22 @@ import { homedir } from "node:os";
 // exfil, Browser.*, Target.*, Fetch.*). buildRequest below constructs the wire body
 // field-by-field from a WHITELIST, so any extra arg the model smuggles (a `cdp`, a
 // `tab`, a `method`) is silently dropped, never forwarded. Keep it a whitelist.
-// `activate` foregrounds the agent's OWN (env-forced) tab so a foreground-
-// REQUIRING SPA (throttled while the agent's tab is backgrounded by design)
-// finishes loading and can then be driven. Own-tab-scoped like every other op —
-// the model can never activate an ARBITRARY tab (the tab is forced by env, not a
-// model arg). Typed, bounded, NO raw passthrough. It STEALS the user's focus (the
-// one intrusive op) — used to LOAD the app the agent was told to drive.
+// `wake` UN-THROTTLES the agent's OWN (env-forced) tab so a foreground-REQUIRING
+// SPA (throttled while the agent's tab is backgrounded by design) finishes loading
+// and can be driven — via CDP focus emulation, WITHOUT moving the operator's
+// focus. Own-tab-scoped like every other op (the tab is forced by env, not a model
+// arg). Typed, bounded, NO raw passthrough.
+//
+// ⚠ `activate` is DELIBERATELY ABSENT from OP_TO_SERVER — the autonomous model can
+// NEVER reach it, not even via BROWSER_AGENT_ALLOWED_OPS. It foregrounds the tab
+// and (server-side) raises the Brave window through i3-msg, i.e. it TAKES THE
+// OPERATOR'S SCREEN. Telemetry caught a driving session calling it 1–5×/minute,
+// grabbing the screen on nearly every interaction. Focus theft is a decision only
+// a human sitting at the machine should make, so it stays on the `browser` CLI
+// (operator-only) and `wake` gives the agent the capability it actually needed.
+// This is a stronger stance than `upload`'s opt-in, and intentionally so: `upload`
+// is a risk the operator can knowingly accept per run, whereas a model stealing
+// focus has no legitimate autonomous use at all.
 // `whoami` is a READ-ONLY, GLOBAL diagnostic: it is NOT a /cmd op (it hits the
 // server's GET /whoami, has no tab, drives nothing) — it lets the agent confirm
 // which HOST + which browser profile it is connected to before acting. It maps to
@@ -57,7 +67,7 @@ export const OP_TO_SERVER = Object.freeze({
   click: "click",
   type: "type",
   key: "key",
-  activate: "activate",
+  wake: "wake",
   upload: "upload",
   whoami: "whoami",
 });
@@ -80,7 +90,7 @@ export const OP_TO_SERVER = Object.freeze({
 // README) — never by default, and never by anything the model can set itself.
 export const ALLOWED_OPS_DEFAULT = Object.freeze([
   "text", "html", "eval", "nav", "screenshot",
-  "frames", "click", "type", "key", "activate", "whoami",
+  "frames", "click", "type", "key", "wake", "whoami",
 ]);
 
 export const TEXT_MAX_BYTES_DEFAULT = 32768;
@@ -273,9 +283,10 @@ export function buildRequest(args, env, token) {
     body.key = String(args.key);
     if (args && args.selector) body.selector = String(args.selector);
     _addFrame(body, args);
-  } else if (op === "activate") {
-    // Optional bounded wait-for-load. A TYPED non-negative int only — the server
-    // clamps it to its own cap; an invalid value is refused (never forwarded raw).
+  } else if (op === "wake") {
+    // Optional bounded un-throttle settle. A TYPED non-negative int only — the
+    // extension clamps it to its own cap; an invalid value is refused here (never
+    // forwarded raw). No other field: the tab is forced by env.
     if (args && args.waitMs != null && args.waitMs !== "") {
       const n = Number(args.waitMs);
       if (!Number.isFinite(n) || n < 0 || !Number.isInteger(n)) {
@@ -359,12 +370,13 @@ export function summarizeResult(op, envelope, env = {}) {
       files: Array.isArray(data.files) ? data.files : [],
       frame: data.frame ?? null });
   }
-  if (op === "activate") {
-    // Compact confirmation the tab foregrounded (metadata only — no page content).
-    // `i3` reports host-side i3 window focusing: applied | skipped | failed.
+  if (op === "wake") {
+    // Compact confirmation the tab was un-throttled (metadata only — no page
+    // content). `woke` is the honest verdict: true only when the probe saw
+    // visibilityState "visible" while the CDP session was attached.
     return JSON.stringify({ ok: true, tabId: data.tabId ?? null,
-      active: data.active ?? null, status: data.status ?? null,
-      i3: data.i3 ?? null,
+      woke: data.woke ?? null, visibilityState: data.visibilityState ?? null,
+      readyState: data.readyState ?? null, settleMs: data.settleMs ?? null,
       url: data.url ?? null, title: data.title ?? null });
   }
   if (op === "whoami") {
@@ -458,8 +470,11 @@ export async function runBrowserOp(args, opts = {}) {
   // forced tab (a bad op/tab is refused even in dry-run).
   const MUTATING = op === "nav" || op === "eval" ||
                    op === "click" || op === "type" || op === "key" ||
-                   op === "activate" ||  // activate steals focus → never in a dry-run
                    op === "upload";      // upload populates a file input → never in a dry-run
+  // (`activate` used to be listed here. It is now unreachable for the agent at
+  //  all — absent from OP_TO_SERVER — so buildRequest refuses it long before this
+  //  point. `wake` is deliberately NOT mutating: it changes no page state and
+  //  moves no focus, so a dry-run may still exercise it like a read.)
   if (dry && MUTATING) {
     const allowed = allowedOpsFromEnv(env);
     if (!allowed.includes(op)) throw new BrowserToolRefusal(`op_not_allowed:${op}`);
