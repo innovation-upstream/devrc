@@ -20,6 +20,24 @@ function expand(value) {
   return value;
 }
 
+/**
+ * THE shared identity-signal table (fixtures/url_cases.json).
+ *
+ * tests/conftest.py loads the same file, so matcher.py and route_core.js are
+ * asserted against ONE table. The cached fallback runs exactly when the sidecar
+ * is unreachable, so a divergence between the two is invisible until it
+ * misfiles something.
+ */
+export function loadUrlCases() {
+  const raw = JSON.parse(
+    readFileSync(join(HERE, "fixtures", "url_cases.json"), "utf8"));
+  const out = {};
+  for (const [key, value] of Object.entries(raw)) {
+    if (!key.startsWith("_")) out[key] = value;
+  }
+  return out;
+}
+
 export function loadNameCases() {
   const raw = JSON.parse(
     readFileSync(join(HERE, "fixtures", "name_cases.json"), "utf8"));

@@ -16,6 +16,21 @@ import { contentTokens, normKey } from "./route_core.js";
 
 export const ENTRY_NEW = "new";
 export const ENTRY_DIR = "dir";
+export const ENTRY_KIND = "kind";
+
+// The two directory kinds, and the one-line explanation of each. Creating a
+// directory without saying which it is leaves it UNCLASSIFIED, and an
+// unclassified directory never auto-files -- so it would silently interrupt
+// every future download into it. Hence a second keypress, not an assumption.
+export const KIND_CHOICES = [
+  { name: "performer", label: "performer - a person or group (may auto-file)" },
+  { name: "category", label: "category - a topic (always asks first)" },
+];
+
+export function kindEntries() {
+  return KIND_CHOICES.map((k) => ({ kind: ENTRY_KIND, name: k.name,
+    label: k.label }));
+}
 
 // How hard mount() tries to get the directory list before giving up. A cold
 // service worker needs one storage read; these bounds cover a slow wake without
@@ -97,6 +112,9 @@ export function initialState({ dirs = [], suggestNew = "", downloadId = null,
     error: "",
     status: "",
     pendingEnter: false,
+    // The name of a directory the user asked to CREATE, while we ask which
+    // kind it is. Non-null means the list on screen is the kind prompt.
+    pendingNew: null,
     query: "", index: 0, done: null,
   };
   state.entries = filterEntries(dirs, "", suggestNew);
@@ -138,6 +156,37 @@ export function reduce(state, event) {
   }
   if (state.done) return state;
   const next = { ...state };
+  // --- the kind prompt --------------------------------------------------- //
+  // A modal sub-step, handled BEFORE the normal branches so a stray `input`
+  // (the text box keeps focus) cannot rebuild the list out from under it.
+  if (state.pendingNew) {
+    if (event.type !== "key") return state;
+    if (event.key === "ArrowDown") {
+      next.index = Math.min(state.index + 1, state.entries.length - 1);
+      return next;
+    }
+    if (event.key === "ArrowUp") {
+      next.index = Math.max(state.index - 1, 0);
+      return next;
+    }
+    if (event.key === "Escape") {
+      // Back to the directory list, NOT out of the picker. Escaping a
+      // sub-question should undo the sub-question.
+      next.pendingNew = null;
+      next.entries = filterEntries(state.dirs, state.query, state.suggestNew);
+      next.index = 0;
+      return next;
+    }
+    if (event.key === "Enter") {
+      const choice = state.entries[state.index];
+      if (!choice) return state;
+      next.pendingNew = null;
+      next.done = { action: "choose", dir: state.pendingNew,
+        createdNew: true, kind: choice.name };
+      return next;
+    }
+    return state;
+  }
   if (event.type === "input") {
     // Typing is a new attempt: the previous refusal is no longer what the
     // screen is about. It used to persist through the retype AND through the
@@ -204,10 +253,17 @@ export function reduce(state, event) {
       const entry = state.entries[state.index];
       if (!entry) return state;
       next.error = "";
+      if (entry.kind === ENTRY_NEW) {
+        // One more question before anything is created.
+        next.pendingNew = entry.name;
+        next.entries = kindEntries();
+        next.index = 0;
+        return next;
+      }
       next.done = {
         action: "choose",
         dir: entry.name,
-        createdNew: entry.kind === ENTRY_NEW,
+        createdNew: false,
       };
       return next;
     }
@@ -255,7 +311,9 @@ export function mount(doc, chromeApi, { closeWindow } = {}) {
     // render() erased it -- and any event during an in-flight choose triggers
     // one, so an Escape mid-choose left a BLANK meta line on a picker that is
     // (correctly) unresponsive until the choose settles.
-    meta.textContent = state.status || state.error || state.reason;
+    meta.textContent = state.pendingNew
+      ? `New directory "${state.pendingNew}" - which kind? (Esc to go back)`
+      : (state.status || state.error || state.reason);
     if (state.dup) dup.textContent = state.dup;
   };
   renderMeta();
@@ -291,12 +349,17 @@ export function mount(doc, chromeApi, { closeWindow } = {}) {
       apply({ type: "choosing", dir: done.dir });
       let resp;
       try {
-        resp = await chromeApi.runtime.sendMessage({
+        const message = {
           type: "dlr:choose",
           downloadId,
           dir: done.dir,
           createdNew: done.createdNew,
-        });
+        };
+        // Only on creation, and only ever set by the kind prompt -- so
+        // selecting an existing directory sends exactly the message it always
+        // did, with no `kind: undefined` riding along.
+        if (done.kind) message.kind = done.kind;
+        resp = await chromeApi.runtime.sendMessage(message);
       } catch (err) {
         // `err.message`, not String(err): String() prepends "Error: ", the
         // exact shape just removed from the sidecar path.

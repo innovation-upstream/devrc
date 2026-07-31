@@ -17,7 +17,7 @@ import threading
 import time
 from pathlib import Path
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 4
 
 MIGRATIONS = {
     1: [
@@ -83,6 +83,58 @@ MIGRATIONS = {
               dir         TEXT NOT NULL,
               ts          REAL NOT NULL
            )""",
+    ],
+    # v3 -- alias PROVENANCE, and picker-assigned directory kinds.
+    #
+    # Four bad aliases had to be deleted by hand after the first evening of
+    # real use: a forum section name, two other posters' usernames, one of them
+    # at GLOBAL scope. Nothing surfaced them, because an alias row recorded only
+    # `(key, site) -> dir`; there was no way to ask "what made you believe
+    # this?". `source` and `evidence` are what `dl-route alias review` reads.
+    #
+    # `dir_kinds` is the machine-written half of the classification: the picker
+    # asks which kind a NEW directory is, and the answer lands here rather than
+    # being appended to the human-edited dirs.toml.
+    3: [
+        ("ADD_COLUMN_IF_MISSING", "aliases", "source", "TEXT NOT NULL DEFAULT ''"),
+        ("ADD_COLUMN_IF_MISSING", "aliases", "evidence",
+         "TEXT NOT NULL DEFAULT ''"),
+        """CREATE TABLE IF NOT EXISTS dir_kinds (
+              name   TEXT PRIMARY KEY,
+              kind   TEXT NOT NULL,
+              source TEXT NOT NULL DEFAULT '',
+              ts     REAL NOT NULL
+           )""",
+    ],
+    # v4 -- REFUSALS ARE A DURABLE FACT, not an event.
+    #
+    # Three rounds of defects landed on one mechanism: the notification that
+    # tells the operator the screen refused something. It was silent, then it
+    # fired on every catch-all filing, then it fired forever for a permanently
+    # refused identity. Each fix filtered the EVENT harder, and each carried
+    # the next defect, because the event is the wrong unit: what is worth
+    # saying is "this source will never be learned", which is a fact about a
+    # (key, site, dir) -- true once, not once per download.
+    #
+    # A suppression map in the extension cannot hold it either: MV3 tears the
+    # service worker down after ~30s idle, so the map empties and the
+    # notifications resume. The store is the only durable place, and recording
+    # the refusal here also gives `dl-route alias review` something permanent
+    # to show -- which is where a durable fact belongs, with the notification
+    # demoted to a one-time pointer at it.
+    4: [
+        """CREATE TABLE IF NOT EXISTS screened (
+              key      TEXT NOT NULL,
+              site     TEXT NOT NULL DEFAULT '',
+              dir      TEXT NOT NULL,
+              source   TEXT NOT NULL DEFAULT '',
+              why      TEXT NOT NULL DEFAULT '',
+              hits     INTEGER NOT NULL DEFAULT 1,
+              first_ts REAL NOT NULL,
+              last_ts  REAL NOT NULL,
+              PRIMARY KEY (key, site, dir)
+           )""",
+        "CREATE INDEX IF NOT EXISTS screened_dir ON screened(dir)",
     ],
 }
 
@@ -168,22 +220,39 @@ class Store:
         return int(self.conn.execute("PRAGMA user_version").fetchone()[0])
 
     # --- aliases ----------------------------------------------------------- #
-    def upsert_alias(self, key: str, dir_name: str, site: str = "") -> None:
+    def upsert_alias(self, key: str, dir_name: str, site: str = "", *,
+                     source: str = "", evidence: str = "") -> None:
         """Insert or re-point an alias, bumping its hit count.
 
         A correction re-points an existing alias rather than accumulating a
         second row: the user's latest choice is authoritative.
+
+        `source`/`evidence` are the provenance `dl-route alias review` prints.
+        They are refreshed on every write, because a re-pointed alias was
+        re-derived from whatever the LATEST correction saw.
         """
         now = self._clock()
         self.conn.execute(
-            """INSERT INTO aliases (key, site, dir, hits, created_at, updated_at)
-               VALUES (?, ?, ?, 1, ?, ?)
+            """INSERT INTO aliases (key, site, dir, hits, created_at,
+                                    updated_at, source, evidence)
+               VALUES (?, ?, ?, 1, ?, ?, ?, ?)
                ON CONFLICT(key, site) DO UPDATE SET
                  dir = excluded.dir,
                  hits = aliases.hits + 1,
-                 updated_at = excluded.updated_at""",
-            (key, site or "", dir_name, now, now))
+                 updated_at = excluded.updated_at,
+                 source = excluded.source,
+                 evidence = excluded.evidence""",
+            (key, site or "", dir_name, now, now, str(source or ""),
+             str(evidence or "")))
         self.conn.commit()
+
+    def alias_rows(self) -> list:
+        """Every alias with its provenance, most recently written first."""
+        rows = self.conn.execute(
+            """SELECT key, site, dir, hits, created_at, updated_at, source,
+                      evidence
+               FROM aliases ORDER BY updated_at DESC, key ASC""").fetchall()
+        return [dict(r) for r in rows]
 
     def alias(self, key: str, site: str = ""):
         row = self.conn.execute(
@@ -222,6 +291,122 @@ class Store:
             "SELECT * FROM examples ORDER BY id DESC LIMIT ?",
             (int(limit),)).fetchall()
         return [dict(r) for r in rows]
+
+    def phrase_dir_spread(self, limit: int = 500, *,
+                          other_dir: str = "") -> dict:
+        """`{phrase key: how many DISTINCT directories it has been seen on}`.
+
+        The data-driven half of the site-chrome exclusion. A subject tag
+        appears on the pages of ONE directory's content; a forum section name
+        or an uploader's username appears on everything, so it accumulates
+        spread. Measured from the labelled examples the router already stores,
+        so no vocabulary has to be maintained (and none could be committed —
+        the words are the operator's private library).
+
+        `other_dir` (the catch-all) is EXCLUDED. Sending a download there is
+        the operator saying "not any of these" — the absence of a subject, not
+        evidence of one, which is exactly why `learn` refuses to write an alias
+        for it. Counting it here contradicted that: one shrug plus one real
+        correction made every phrase on the page look like chrome, and the
+        operator's next correction was refused as "site chrome".
+        """
+        # Local imports keep store.py import-light.
+        from matcher import norm_key, thread_slug, title_subject
+
+        spread: dict = {}
+        for row in self.examples(limit):
+            chosen = row.get("chosen_dir") or ""
+            if other_dir and chosen == other_dir:
+                continue
+            try:
+                ctx = json.loads(row.get("context") or "{}")
+            except ValueError:
+                continue
+            page = ctx.get("page") if isinstance(ctx, dict) else None
+            if not isinstance(page, dict):
+                continue
+            phrases = [t for t in (page.get("tags") or [])
+                       if isinstance(t, str)] \
+                if isinstance(page.get("tags"), list) else []
+            # THE TITLE SUBJECT COUNTS TOO. The branding test can only
+            # recognise a site whose display name resembles its hostname, so on
+            # a forum where they differ the site's own name survives as a
+            # "subject". Counting it here is what eventually catches it: a real
+            # subject belongs to one directory, a site name turns up on every
+            # one of them.
+            # Corroborated, so a page with no thread slug contributes no
+            # title phrase here at all. That does weaken this measure on
+            # slug-less sites -- accepted: an UNCORROBORATED title phrase is
+            # exactly the thing that turned out to be junk, and counting junk
+            # towards a chrome measure makes the measure worse, not better.
+            subject = title_subject(page.get("title") or "",
+                                    str(page.get("site") or ""),
+                                    thread_slug(page.get("url") or ""))
+            if subject:
+                phrases.append(subject)
+            for phrase in phrases:
+                key = norm_key(phrase)
+                if key:
+                    spread.setdefault(key, set()).add(chosen)
+        return {key: len(dirs) for key, dirs in spread.items()}
+
+    # --- screened (refused) candidates -------------------------------------- #
+    def record_screened(self, key: str, site: str, dir_name: str,
+                        source: str = "", why: str = "") -> bool:
+        """Remember that this candidate was refused. True iff it is NEW.
+
+        The return value is what makes the notification a one-time pointer
+        rather than a per-download alarm: a phrase refused for a permanent
+        reason (site branding, shared vocabulary, a spread that only ever
+        grows) is refused on EVERY correction, and reporting it every time
+        trains the operator to dismiss it.
+        """
+        now = self._clock()
+        cur = self.conn.execute(
+            """INSERT INTO screened (key, site, dir, source, why, hits,
+                                     first_ts, last_ts)
+               VALUES (?, ?, ?, ?, ?, 1, ?, ?)
+               ON CONFLICT(key, site, dir) DO UPDATE SET
+                 hits = screened.hits + 1,
+                 why = excluded.why,
+                 last_ts = excluded.last_ts""",
+            (key, site or "", dir_name, str(source or ""), str(why or ""),
+             now, now))
+        # `rowcount` is 1 for both branches, so ask the row itself.
+        row = self.conn.execute(
+            "SELECT hits FROM screened WHERE key=? AND site=? AND dir=?",
+            (key, site or "", dir_name)).fetchone()
+        self.conn.commit()
+        del cur
+        return bool(row) and int(row["hits"]) == 1
+
+    def screened_rows(self, limit: int = 200) -> list:
+        rows = self.conn.execute(
+            "SELECT * FROM screened ORDER BY last_ts DESC LIMIT ?",
+            (int(limit),)).fetchall()
+        return [dict(r) for r in rows]
+
+    def clear_screened(self, key: str, site: str = "") -> int:
+        cur = self.conn.execute("DELETE FROM screened WHERE key=? AND site=?",
+                                (key, site or ""))
+        self.conn.commit()
+        return int(cur.rowcount)
+
+    # --- directory kinds ---------------------------------------------------- #
+    def set_dir_kind(self, name: str, kind: str, source: str = "") -> None:
+        self.conn.execute(
+            """INSERT INTO dir_kinds (name, kind, source, ts)
+               VALUES (?, ?, ?, ?)
+               ON CONFLICT(name) DO UPDATE SET
+                 kind = excluded.kind,
+                 source = excluded.source,
+                 ts = excluded.ts""",
+            (str(name), str(kind), str(source or ""), self._clock()))
+        self.conn.commit()
+
+    def dir_kind_map(self) -> dict:
+        rows = self.conn.execute("SELECT name, kind FROM dir_kinds").fetchall()
+        return {r["name"]: r["kind"] for r in rows}
 
     # --- route log --------------------------------------------------------- #
     def log_route(self, *, url="", site="", filename="", dir_name="",

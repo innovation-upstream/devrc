@@ -45,6 +45,18 @@ def load_name_cases() -> dict:
     raw = json.loads((FIXTURES / "name_cases.json").read_text(encoding="utf-8"))
     return {k: _expand(v) for k, v in raw.items() if not k.startswith("_")}
 
+
+def load_url_cases() -> dict:
+    """THE shared identity-signal table (tests/fixtures/url_cases.json).
+
+    `tests/fixtures.mjs` loads the SAME file, so matcher.py and
+    extension/route_core.js are asserted against one table. The extension's
+    cached fallback runs exactly when the sidecar is unreachable, so a
+    divergence between the two would be invisible until it misfiled something.
+    """
+    raw = json.loads((FIXTURES / "url_cases.json").read_text(encoding="utf-8"))
+    return {k: v for k, v in raw.items() if not k.startswith("_")}
+
 # The three naming conventions that coexist in a real library. The matcher must
 # fold all of them to one key, which is why existing dirs are never renamed.
 SAMPLE_DIRS = [
@@ -104,7 +116,25 @@ def file_index(library, clock):
 
 
 @pytest.fixture
-def cfg(tmp_path, library):
+def dirs_file(tmp_path):
+    """Directory kinds for the sample library — every directory `performer`.
+
+    Only a `performer` directory may auto-file (a `category` always asks, and
+    an unclassified one does too), so without a classification EVERY auto-file
+    assertion in the suite would be asserting the kind gate rather than the
+    rule it names. The gate has its own tests, and the category/unclassified
+    cases write their own file.
+    """
+    path = tmp_path / "dirs.toml"
+    body = ["performer = ["]
+    body += [f'  "{name}",' for name in SAMPLE_DIRS]
+    body += ["]", "category = []", ""]
+    path.write_text("\n".join(body), encoding="utf-8")
+    return path
+
+
+@pytest.fixture
+def cfg(tmp_path, library, dirs_file):
     """A Config pointing entirely at temp paths."""
     data = config_mod._deep_merge(config_mod.DEFAULTS, {
         "library_root": str(library),
@@ -113,4 +143,5 @@ def cfg(tmp_path, library):
     })
     return config_mod.Config(data, path=tmp_path / "config.toml",
                              state_dir=tmp_path / "state",
-                             token_file=tmp_path / "token")
+                             token_file=tmp_path / "token",
+                             dirs_file=dirs_file)

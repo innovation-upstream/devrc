@@ -28,16 +28,20 @@ configured — the sidecar answers `/healthz` but every routing endpoint returns
 |---|---|
 | code | `scripts/dl-router/` (this repo) |
 | config | `~/.config/dl-router/config.toml` (**never committed**) |
+| directory kinds | `~/.config/dl-router/dirs.toml` (**never committed**) |
 | bearer token | `~/.config/dl-router/token` (0600, auto-created) |
 | aliases, route log | `~/.local/share/dl-router/dl-router.sqlite3` |
 | backfill manifests | `~/.local/share/dl-router/manifests/` |
 | service | `systemd --user` unit `dl-router` (from `nix/home.nix`) |
 | extension | `scripts/dl-router/extension/`, loaded unpacked per profile |
 
-**Never print the library root, directory names, filenames or the route log
-into a commit message, a PR, a doc, or any file in this repo.** The repo is
-public; the library is private. Synthetic names only (`Jane Doe`, `acme-studio`,
-`example-site.test`).
+**Never print the library root, directory names, filenames, the route log,
+alias keys, real channel ids, forum names or host names into a commit message,
+a PR, a doc, or any file in this repo.** The repo is public; the library is
+private. Synthetic names only (`Jane Doe`, `acme-studio`, `example-site.test`,
+`someforum.test`, and made-up snowflakes). This includes the output of
+`dl-route dirs classify` and `dl-route alias review` — both are lists of the
+operator's private taxonomy.
 
 ## Common tasks
 
@@ -55,11 +59,44 @@ dl-route alias set "<page tag>" "<Directory>" --site example-site.test
 Site-scoped aliases score 1.00 and beat everything else. Re-check with
 `dl-route match --tag "<page tag>" --site example-site.test`.
 
-**"It keeps asking instead of auto-filing."** The score is under
-`auto_threshold` (0.75) or two candidates are within `tie_margin`.
-`dl-route match …` shows the candidate list. Prefer adding an alias over
-lowering the threshold — the threshold is what keeps a wrong guess out of a
-subject directory.
+**"It keeps asking instead of auto-filing."** Check the reason string first —
+there are now four distinct causes and only one of them is the score:
+
+1. **`unclassified directory '<X>'`** — `~/.config/dl-router/dirs.toml` does not
+   list it. An unclassified directory NEVER auto-files. This is the most likely
+   cause on a host that has not run the classifier; `dl-route status` prints
+   `unclassified=N` for exactly this reason.
+   ```bash
+   dl-route dirs classify --out ~/.config/dl-router/dirs.toml   # then edit it
+   ```
+   The file is picked up live — no restart.
+2. **`category directory — always confirm`** — by design. A category is
+   confirmed every time, whatever it scores. Do not "fix" this by reclassifying
+   a genuine category as a performer.
+3. **`tie: …`** — two candidates within `tie_margin`.
+4. the score is under `auto_threshold` (0.75). `dl-route match …` shows the
+   candidate list. Prefer adding an alias over lowering the threshold — the
+   threshold is what keeps a wrong guess out of a subject directory.
+
+**"Everything from this chat channel / forum thread opens the picker."** That
+is the FIRST download from it, by design. Confirm it once and the identity
+alias is written; later downloads match at 1.00 with nothing scraped. Check
+what was learned:
+```bash
+dl-route alias review          # evidence, provenance and hit count per row
+```
+
+**"It learned something wrong."** `dl-route alias review` flags global and
+suspicious rows, lists every **refused** candidate with its reason and how many
+times it has recurred, and prints the exact removal command. A refused
+candidate never auto-files — if one is a real subject,
+`dl-route alias set '<phrase>' '<Dir>' --site <host> --force`. A performer directory
+never learns a tag, and nothing is ever learned at global scope, so a bad row
+now means either a manual `alias set --force` or a category confirmation.
+```bash
+dl-route alias rm '<key>' --site '*'          # `*` == global, as listed
+dl-route alias rm 'discord:<channel id>' --site discord.com
+```
 
 **"The undo / `change` button says it could not move the file."**
 `/relocate` refuses anything it cannot prove this router created — the library
@@ -176,7 +213,23 @@ Invariants the tests exist to protect — do not weaken them:
   the sidecar plus an idempotent `finish()` is what makes this true.
 * **Every page-derived string is validated before it becomes a path.**
   `safety.py` and `extension/sanitize.js` must agree; the same hostile-input
-  table is asserted against both.
+  table (`tests/fixtures/name_cases.json`) is asserted against both. After
+  touching either, re-run the differential fuzzer — it must print
+  `0 divergence(s)`:
+  ```bash
+  nix-shell -p nodejs python312 --run "python3 scripts/dl-router/tests/difffuzz.py"
+  ```
+* **Identity signals must agree across the two languages too.**
+  `matcher.py` and `extension/route_core.js` both derive a Discord channel id
+  and a forum thread slug from a URL, and the extension's copy runs exactly
+  when the sidecar is unreachable — so a divergence is invisible until it
+  misfiles. `tests/fixtures/url_cases.json` is the one table both suites
+  assert. Add a row there before adding a URL shape to either implementation.
+* **Only a `performer` directory may auto-file**, in the cached fallback as
+  well as in the sidecar. Weakening the gate on one side only re-creates a
+  divergence that shows up solely when the sidecar is down.
+* **Nothing is ever learned at global scope**, and a performer directory never
+  learns a tag. That is the fix for the mislearning incident, not a preference.
 * **yt-dlp is invoked as an argv list with a validated http(s) URL and a `--`
   terminator** — never a shell string. The URL comes from a web page.
 * **The sidecar refuses any non-loopback bind**, with no override.
@@ -185,6 +238,15 @@ Invariants the tests exist to protect — do not weaken them:
 Editing the sidecar requires a `home-manager switch` (it runs from the nix
 store). `SKILL.md` and `dl-route` are out-of-store symlinks and track the
 working tree immediately.
+
+**Deploying a matching change is TWO steps, not one.** The extension carries
+its own copy of the matcher (`route_core.js`) for the cached fallback, so a
+`home-manager switch` alone leaves the OLD service worker running with the old
+rules — including, after the directory-kinds change, a `localDecide` with no
+kind gate, which will keep auto-filing from cache into a directory you have
+just reclassified as a category. Finish the deploy with a **full Brave
+restart** (not the reload button — the long-poll keeps the old worker alive,
+same gotcha as browser-bridge), then re-check `dl-route status`.
 
 ## Gotchas
 

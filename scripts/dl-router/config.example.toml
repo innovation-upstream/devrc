@@ -16,6 +16,16 @@ port = 8791
 
 # Auto-file at or above this score; below it the picker opens. Two candidates
 # within `tie_margin` of each other also go to the picker.
+#
+# The score is NOT the only gate. Only a directory classified `performer` in
+# ~/.config/dl-router/dirs.toml may auto-file at all: a `category` directory
+# always confirms, and an UNCLASSIFIED one does too. Generate a draft to
+# review with:
+#
+#     dl-route dirs classify --out ~/.config/dl-router/dirs.toml
+#
+# Until that file exists nothing auto-files, which is the safe end of the
+# range, not a misconfiguration.
 auto_threshold = 0.75
 tie_margin = 0.05
 

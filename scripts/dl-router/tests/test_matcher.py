@@ -14,15 +14,26 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from conftest import SAMPLE_DIRS  # noqa: E402
 from matcher import (  # noqa: E402
-    HOST_PRIOR_BONUS, SCORE_ALIAS_GLOBAL, SCORE_ALIAS_SITE, SCORE_CONTAIN_MAX,
-    SCORE_CONTAIN_MIN, SCORE_FILENAME_MAX, SCORE_TAG_EXACT, DirEntry,
-    MatchContext, Matcher, content_tokens, find_duplicate, norm_key,
-    passes_fuzzy_guard, title_case, tokens,
+    HOST_PRIOR_BONUS, KIND_CATEGORY, KIND_PERFORMER, SCORE_ALIAS_GLOBAL,
+    SCORE_ALIAS_SITE, SCORE_CONTAIN_MAX, SCORE_CONTAIN_MIN, SCORE_FILENAME_MAX,
+    SCORE_TAG_EXACT, DirEntry, MatchContext, Matcher, content_tokens,
+    find_duplicate, norm_key, passes_fuzzy_guard, title_case, tokens,
 )
 
 
 def make(dirs=None, aliases=None, **kw) -> Matcher:
-    return Matcher(dirs if dirs is not None else SAMPLE_DIRS, aliases or {}, **kw)
+    """A matcher over the sample dirs, all classified `performer`.
+
+    Classifying them by default keeps every SCORING test about scoring. Only a
+    performer directory may auto-file (a category always asks, and so does an
+    unclassified one), so without this every `auto is True` assertion below
+    would be asserting the kind gate instead of the rule it names. The gate has
+    its own tests further down.
+    """
+    dirs = dirs if dirs is not None else SAMPLE_DIRS
+    kw.setdefault("dir_kinds",
+                  {getattr(d, "name", d): KIND_PERFORMER for d in dirs})
+    return Matcher(dirs, aliases or {}, **kw)
 
 
 # --- normalisation --------------------------------------------------------- #

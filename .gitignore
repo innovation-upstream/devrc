@@ -19,10 +19,13 @@ __pycache__/
 
 # dl-router local state. None of this may ever be committed: config.toml holds
 # the library root and the qBittorrent credentials, `token` is the sidecar
-# bearer token, the SQLite store holds the alias table and the route log, and a
-# manifest names real files. A stray `cp config.example.toml config.toml` inside
-# the repo must not be stageable.
+# bearer token, the SQLite store holds the alias table and the route log, a
+# manifest names real files, and dirs.toml is a list of the operator's real
+# subject directories -- `dl-route dirs classify --out` will write it wherever
+# it is pointed. A stray `cp config.example.toml config.toml` inside the repo
+# must not be stageable, and neither must a draft written next to the code.
 /scripts/dl-router/config.toml
+/scripts/dl-router/dirs.toml
 /scripts/dl-router/token
 /scripts/dl-router/manifests/
 /scripts/dl-router/*.sqlite3

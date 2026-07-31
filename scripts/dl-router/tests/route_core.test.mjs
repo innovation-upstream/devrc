@@ -16,10 +16,17 @@ import {
   subjectPhrases,
 } from "../extension/route_core.js";
 
+// `kind` travels with every directory in the /dirs snapshot. Only a
+// `performer` directory may auto-file, in the cached fallback exactly as in
+// the sidecar -- so the fixtures classify, or every auto-file assertion below
+// would silently be asserting the kind gate instead of the rule it names.
 const DIRS = [
-  { name: "Jane Doe", key: "janedoe", tokens: ["jane", "doe"] },
-  { name: "john-smith", key: "johnsmith", tokens: ["john", "smith"] },
-  { name: "Mary_Major", key: "marymajor", tokens: ["mary", "major"] },
+  { name: "Jane Doe", key: "janedoe", tokens: ["jane", "doe"],
+    kind: "performer" },
+  { name: "john-smith", key: "johnsmith", tokens: ["john", "smith"],
+    kind: "performer" },
+  { name: "Mary_Major", key: "marymajor", tokens: ["mary", "major"],
+    kind: "performer" },
   { name: "other", key: "other", tokens: [] },
 ];
 
@@ -185,7 +192,8 @@ test("cached decision: containment is scored between the bounds", () => {
 test("cached decision: a short directory name does not match prose", () => {
   const snap = {
     ...SNAPSHOT,
-    dirs: [{ name: "Cat", key: "cat", tokens: ["cat"] }, DIRS[3]],
+    dirs: [{ name: "Cat", key: "cat", tokens: ["cat"],
+      kind: "performer" }, DIRS[3]],
   };
   assert.equal(localDecide({ pageTitle: "the cat sat on a mat" }, snap), null);
 });

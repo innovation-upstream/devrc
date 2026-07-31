@@ -202,14 +202,15 @@ def seed_aliases(store, dir_names, torrents=None, path_map=None,
     """PERSIST the seeds from `alias_seeds`. Returns how many were written."""
     seeds = alias_seeds(store, dir_names, torrents, path_map, root)
     for key, target in seeds.items():
-        store.upsert_alias(key, target, "")
+        store.upsert_alias(key, target, "", source="backfill-seed",
+                           evidence=key)
     return len(seeds)
 
 
 def plan(root, *, store, dir_names, matcher: Matcher | None = None,
          torrents=None, path_map=None, threshold: float = 0.75,
          clock=time.time, do_seed: bool = True, persist_seeds: bool = False,
-         files_for=None) -> Plan:
+         files_for=None, dir_kinds=None) -> Plan:
     """Build a manifest for the loose root files.
 
     READ-ONLY by default: it writes nothing into the tree AND nothing into the
@@ -225,7 +226,8 @@ def plan(root, *, store, dir_names, matcher: Matcher | None = None,
         seeds = alias_seeds(store, dir_names, torrents, path_map, root)
         if persist_seeds:
             for key, target in seeds.items():
-                store.upsert_alias(key, target, "")
+                store.upsert_alias(key, target, "", source="backfill-seed",
+                                   evidence=key)
             notes.append(f"seeded {len(seeds)} alias(es)")
         elif seeds:
             notes.append(f"{len(seeds)} alias(es) would be seeded "
@@ -236,7 +238,15 @@ def plan(root, *, store, dir_names, matcher: Matcher | None = None,
         for key, target in seeds.items():
             aliases.setdefault((key, ""), target)
     if matcher is None:
-        matcher = Matcher(dir_names, aliases, threshold=threshold)
+        # `dir_kinds` matters here for the same reason it does live: the
+        # `result.auto` branch below is the one place a FILENAME-only signal
+        # can move a file, and only a `performer` directory may auto-file. An
+        # unclassified target therefore SKIPs -- which is this tool's safe
+        # answer and the one it defaults to everywhere else. Passing it in
+        # rather than leaving it empty keeps the plan honest about what the
+        # live router would do with the same row.
+        matcher = Matcher(dir_names, aliases, threshold=threshold,
+                          dir_kinds=dir_kinds)
     else:
         matcher.aliases = aliases
 

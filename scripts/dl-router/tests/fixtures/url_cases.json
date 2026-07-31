@@ -1,0 +1,271 @@
+{
+  "_why": [
+    "ONE table, TWO implementations. matcher.py and extension/route_core.js each",
+    "derive identity signals from a URL, and the extension's cached fallback runs",
+    "exactly when the sidecar is unreachable -- so a divergence between them is",
+    "invisible until it misfiles something. The hostile-name table",
+    "(name_cases.json) exists for the same reason: two hand-copied lists agreed",
+    "with each other and both passed while the implementations disagreed on 991",
+    "inputs neither list contained.",
+    "",
+    "Every id, host and name here is SYNTHETIC."
+  ],
+  "discord": [
+    {
+      "url": "https://cdn.discordapp.com/attachments/119283746551234567/998877665544332211/clip.mp4",
+      "channel": "119283746551234567"
+    },
+    {
+      "url": "https://media.discordapp.net/attachments/119283746551234567/998877665544332211/still.png",
+      "channel": "119283746551234567"
+    },
+    {
+      "url": "https://cdn.discordapp.com/attachments/119283746551234567/998877665544332211/clip.mp4?ex=abc&is=def",
+      "channel": "119283746551234567"
+    },
+    {
+      "url": "https://cdn.discordapp.com/ephemeral-attachments/220000000000000001/1/x.mp4",
+      "channel": "220000000000000001"
+    },
+    {
+      "url": "https://cdn.discordapp.com/avatars/119283746551234567/abc.png",
+      "channel": ""
+    },
+    {
+      "url": "https://cdn.discordapp.com/attachments/not-a-snowflake/1/clip.mp4",
+      "channel": ""
+    },
+    {
+      "url": "https://cdn.discordapp.com/attachments/119283746551234567",
+      "channel": ""
+    },
+    {
+      "url": "https://example-site.test/attachments/119283746551234567/1/clip.mp4",
+      "channel": ""
+    },
+    {
+      "url": "https://evil.test/cdn.discordapp.com/attachments/119283746551234567/1/x.mp4",
+      "channel": ""
+    },
+    {
+      "url": "not a url",
+      "channel": ""
+    },
+    {
+      "url": "",
+      "channel": ""
+    }
+  ],
+  "slug": [
+    {
+      "url": "https://forum.test/threads/aster-vale-collection.481920/",
+      "slug": "aster vale collection"
+    },
+    {
+      "url": "https://forum.test/threads/aster-vale-collection.481920/page-3",
+      "slug": "aster vale collection"
+    },
+    {
+      "url": "https://forum.test/showthread.php/481920-aster-vale-collection",
+      "slug": "aster vale collection"
+    },
+    {
+      "url": "https://forum.test/forums/general-discussion/threads/aster-vale.99/",
+      "slug": "aster vale"
+    },
+    {
+      "url": "https://board.test/t/aster-vale/1234",
+      "slug": ""
+    },
+    {
+      "url": "https://forum.test/threads/481920/",
+      "slug": ""
+    },
+    {
+      "url": "https://forum.test/threads/",
+      "slug": ""
+    },
+    {
+      "url": "https://forum.test/",
+      "slug": ""
+    },
+    {
+      "url": "https://filehost.test/d/AbCdEf",
+      "slug": ""
+    },
+    {
+      "url": "https://filehost.test/f/9f2a1c92b",
+      "slug": ""
+    },
+    {
+      "url": "not a url",
+      "slug": ""
+    },
+    {
+      "url": "",
+      "slug": ""
+    },
+    {
+      "url": "https://forum.test/forums/general-discussion/threads/aster.99/",
+      "slug": "aster"
+    },
+    {
+      "url": "https://forum.test/forums/general-discussion.12/",
+      "slug": ""
+    },
+    {
+      "url": "https://forum.test/members/some-poster.4321/",
+      "slug": ""
+    },
+    {
+      "url": "https://cdn.test/uploads/dsc-0123.jpg",
+      "slug": ""
+    },
+    {
+      "url": "https://cdn.test/i/img-20240101.mp4",
+      "slug": ""
+    },
+    {
+      "url": "https://forum.test/threads/aster-vale-new-set.222/",
+      "slug": "aster vale new set"
+    },
+    {
+      "url": "https://forum.test/topic/aster-vale/",
+      "slug": ""
+    },
+    {
+      "url": "https://forum.test/viewtopic.php/aster-vale",
+      "slug": "aster vale"
+    },
+    {
+      "url": "https://forum.test/topics/general-discussion",
+      "slug": ""
+    },
+    {
+      "url": "https://forum.test/t/photography",
+      "slug": ""
+    },
+    {
+      "url": "https://forum.test/topic/12345-aster-vale/",
+      "slug": ""
+    },
+    {
+      "url": "https://forum.test/t/aster-vale/1234",
+      "slug": ""
+    },
+    {
+      "url": "https://forum.test/topic/aster-vale.9912/",
+      "slug": ""
+    },
+    {
+      "url": "https://forum.test/topics/general-discussion/2",
+      "slug": ""
+    },
+    {
+      "url": "https://forum.test/t/photography/3",
+      "slug": ""
+    },
+    {
+      "url": "https://forum.test/t/best-of-2024",
+      "slug": ""
+    },
+    {
+      "url": "https://forum.test/threads/%D9%A0%D9%A1%D9%A2%D9%A0%D9%A1%D9%A2",
+      "slug": ""
+    },
+    {
+      "url": "https://forum.test/threads/%D9%A0%D9%A1%D9%A2-%D9%A0%D9%A1%D9%A2/",
+      "slug": ""
+    },
+    {
+      "url": "https://forum.test/threads/%D0%B0%D1%81%D1%82%D0%B5%D1%80-%D0%B2%D0%B5%D0%B9%D0%BB.99/",
+      "slug": "астер веил"
+    }
+  ],
+  "_host_why": [
+    "hostOf feeds the SCOPE of an alias, so the two implementations have to agree",
+    "on what a host is. They did not: `urlsplit` and `new URL` disagreed on 9 of",
+    "30 hostile inputs (scheme handling, IPv6 brackets, IDN punycoding,",
+    "percent-encoded authorities). The rule is written out in both rather than",
+    "delegated to either standard library -- the same treatment is_http_url",
+    "already gets in safety.py / sanitize.js."
+  ],
+  "host": [
+    {
+      "url": "https://forum.test/x",
+      "host": "forum.test"
+    },
+    {
+      "url": "HTTP://Forum.TEST/x",
+      "host": "forum.test"
+    },
+    {
+      "url": "http://forum.test:8080/x",
+      "host": "forum.test"
+    },
+    {
+      "url": "https://user:pw@forum.test/x",
+      "host": "forum.test"
+    },
+    {
+      "url": "file:///etc/passwd",
+      "host": ""
+    },
+    {
+      "url": "data:text/html,x",
+      "host": ""
+    },
+    {
+      "url": "blob:https://a.test/x",
+      "host": ""
+    },
+    {
+      "url": "javascript:alert(1)",
+      "host": ""
+    },
+    {
+      "url": "ftp://forum.test/x",
+      "host": ""
+    },
+    {
+      "url": "//forum.test/x",
+      "host": ""
+    },
+    {
+      "url": "https:///",
+      "host": ""
+    },
+    {
+      "url": "https://",
+      "host": ""
+    },
+    {
+      "url": "not a url",
+      "host": ""
+    },
+    {
+      "url": "",
+      "host": ""
+    },
+    {
+      "url": "http://[::1]/x",
+      "host": "::1"
+    },
+    {
+      "url": "http://[2001:db8::1]:80/x",
+      "host": "2001:db8::1"
+    },
+    {
+      "url": "http://127.0.0.1/x",
+      "host": "127.0.0.1"
+    },
+    {
+      "url": "http://%D0%BF%D1%80%D0%B8%D0%BC%D0%B5%D1%80.test/",
+      "host": "xn--e1afmkfd.test"
+    },
+    {
+      "url": "http://xn--e1afmkfd.test/",
+      "host": "xn--e1afmkfd.test"
+    }
+  ]
+}

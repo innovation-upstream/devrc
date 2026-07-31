@@ -18,8 +18,8 @@
 // suppress listener registration and networking.
 
 import {
-  buildMatchPayload, correlateCapture, formatDup, handleDetermining,
-  localDecide,
+  buildMatchPayload, carryReferrer, correlateCapture, formatDup,
+  handleDetermining, localContext, localDecide,
 } from "./route_core.js";
 import { isHttpUrl, relPathFromAbsolute, sanitizeDirName } from "./sanitize.js";
 import { DEFAULT_PORT, manifestPort as readManifestPort } from "./port.js";
@@ -217,6 +217,11 @@ export function recordCapture(payload, sender) {
       ? payload.tags.filter((t) => typeof t === "string").slice(0, 64) : [],
     og: payload.og && typeof payload.og === "object" ? payload.og : {},
     tabId: sender?.tab?.id,
+    // The tab this one was opened from. It NARROWS the referrer carry's href
+    // proof (see carryReferrer) -- it is not itself a proof, and the branch
+    // that treated it as one was deleted. It comes free on the sender; the
+    // content script has no way to know it.
+    openerTabId: sender?.tab?.openerTabId,
     ts: Date.now(),
   };
   state.captures.push(capture);
@@ -275,20 +280,14 @@ function routeDownload(item, suggest) {
     windowMs: (state.snapshot?.captureWindowS ?? 15) * 1000,
     activeTabId: state.activeTabId,
   });
-  const payload = buildMatchPayload(item, capture);
+  const payload = buildMatchPayload(
+    item, capture, carryReferrer(item, capture, state.captures));
 
   return handleDetermining(item, suggest, {
     knownDirs: knownDirs(),
     otherDir: otherDir(),
     timeoutMs: state.snapshot?.matchTimeoutMs ?? 400,
-    localDecision: () => localDecide({
-      tags: payload.page.tags,
-      og: payload.page.og,
-      linkText: payload.page.linkText,
-      alt: payload.page.alt,
-      pageTitle: payload.page.title,
-      site: payload.page.site,
-    }, state.snapshot),
+    localDecision: () => localDecide(localContext(payload), state.snapshot),
     requestMatch: () => api("POST", "/match", payload,
       { timeoutMs: state.snapshot?.matchTimeoutMs ?? 400 }),
     onDecision: (info) => {
@@ -425,7 +424,8 @@ export async function openPicker(info) {
  * relocated (a same-filesystem rename, instant); otherwise the target is
  * remembered and applied when onChanged reports completion.
  */
-export async function applyChoice(downloadId, chosenDir, { createdNew } = {}) {
+export async function applyChoice(downloadId, chosenDir,
+  { createdNew, kind } = {}) {
   // A cold-woken worker has no config and no snapshot yet, so knownDirs() is
   // empty and EVERY pick would be thrown away as "unsafe". The picker is a
   // separate popup window the user can leave open past the ~30s idle teardown,
@@ -434,7 +434,12 @@ export async function applyChoice(downloadId, chosenDir, { createdNew } = {}) {
   const entry = state.pending.get(downloadId);
   const known = new Set([...knownDirs(), otherDir()]);
   if (createdNew) {
-    await api("POST", "/mkdir", { name: chosenDir }, { timeoutMs: 5000 });
+    // `kind` is what the picker asked for. Creating a directory WITHOUT one
+    // leaves it unclassified, and an unclassified directory never auto-files
+    // -- so the new directory would silently interrupt every future download
+    // into it. That is why the picker asks rather than assuming.
+    await api("POST", "/mkdir", { name: chosenDir, kind: kind || undefined },
+      { timeoutMs: 5000 });
     await refreshSnapshot();
   }
   const safe = sanitizeDirName(chosenDir, createdNew ? null : known);
@@ -498,12 +503,76 @@ async function relocate(rel, toDir, downloadId) {
 
 async function learn(entry, chosenDir, createdNew) {
   if (!entry) return;
-  await api("POST", "/learn", {
+  const out = await api("POST", "/learn", {
     context: entry.payload,
     chosenDir,
     autoDir: entry.dir,
     createdNew: Boolean(createdNew),
-  }, { timeoutMs: 5000 }).catch(() => {});
+    // EXPLICIT CONFIRMATION. Every call here follows the user choosing a
+    // directory in the picker (or confirming the one the router chose), and
+    // the sidecar will not learn a tag -> directory alias without it. Stated
+    // as a flag rather than inferred from the endpoint so the rule is legible
+    // on both sides, and so a future automatic caller fails closed.
+    confirmed: true,
+  }, { timeoutMs: 5000 }).catch(() => null);
+  reportNothingLearned(out);
+}
+
+/** Sources that carry a full-confidence identity (see matcher.identity_signals). */
+const IDENTITY_SOURCES = new Set(["discord-channel", "thread-slug"]);
+
+/**
+ * Tell the user ONCE when a correction taught the router something less than
+ * it looked like it did.
+ *
+ * The sidecar screens every candidate alias and returns what it refused, and
+ * nothing consumed that -- which is how an over-strict screen stayed invisible
+ * outside the sidecar journal. Two rules, and both matter:
+ *
+ *   * A SCREENED IDENTITY always notifies, even when something else was
+ *     written. A screened identity writes no row, so the re-point bypass never
+ *     engages for it either -- that channel or thread will never auto-file, and
+ *     reporting "learned" because an unrelated tag landed hides it forever.
+ *   * Otherwise, notify only when NOTHING was written. A category page whose
+ *     junk tags were screened while a good one was learned is working as
+ *     designed and must not nag.
+ *
+ * The catch-all is excluded outright: `/learn` returns a `skipped` entry for it
+ * BY DESIGN ("the absence of a subject, not one"), and filing to the catch-all
+ * is routine -- notifying there would train the operator to dismiss the very
+ * notification the rest of this exists for. The `"catch-all"` source string is
+ * a CROSS-LANGUAGE CONTRACT with server.App.learn and is pinned on both sides.
+ *
+ * Everything here is once-per-fact, never once-per-download. `dl-route alias
+ * review` is the permanent surface; this is only the pointer at it.
+ */
+export function reportNothingLearned(out) {
+  if (!out || !Array.isArray(out.skipped)) return false;
+  // `first` is the sidecar telling us it has not refused this exact
+  // (key, site, dir) before. WITHOUT IT the identity rule below notifies on
+  // EVERY correction, because a permanent refusal (site branding, shared
+  // vocabulary, a spread that only ever grows) recurs on every one -- and a
+  // screened identity writes no row, so nothing else ever changes either.
+  //
+  // The flag lives in the SIDECAR, not in a suppression map here: MV3 tears
+  // this worker down after ~30s idle, so a map would empty and the
+  // notifications would resume. See Store.record_screened.
+  const real = out.skipped.filter(
+    (s) => s && s.source !== "catch-all" && s.first !== false);
+  if (!real.length) return false;
+  const identity = real.find((s) => IDENTITY_SOURCES.has(s.source));
+  const wroteSomething = Array.isArray(out.written) && out.written.length > 0;
+  if (!identity && wroteSomething) return false;
+  // Report the IDENTITY refusal when there is one: it is the consequential
+  // one, and `find(s => s.why)` would have reported whichever came first.
+  const chosen = identity || real.find((s) => s.why) || real[0];
+  void reportFailure(
+    identity
+      ? `Filed into ${out.dir}, but it will not learn this source`
+      : `Filed into ${out.dir}, but learned nothing from it`,
+    (chosen && chosen.why) ? String(chosen.why)
+      : "every candidate was screened out");
+  return true;
 }
 
 export async function onDownloadChanged(delta) {
@@ -618,17 +687,15 @@ export async function startFetch(url, info, tab) {
     { now: Date.now(),
       windowMs: (state.snapshot?.captureWindowS ?? 15) * 1000,
       activeTabId: tab?.id ?? state.activeTabId }).capture;
-  const payload = buildMatchPayload({ url, filename: "" }, capture);
+  const item = { url, filename: "", referrer: info?.pageUrl || "" };
+  const payload = buildMatchPayload(
+    item, capture, carryReferrer(item, capture, state.captures));
 
   let decision = null;
   try {
     decision = await api("POST", "/match", payload, { timeoutMs: 4000 });
   } catch {
-    decision = localDecide({
-      tags: payload.page.tags, og: payload.page.og,
-      linkText: payload.page.linkText, alt: payload.page.alt,
-      pageTitle: payload.page.title, site: payload.page.site,
-    }, state.snapshot);
+    decision = localDecide(localContext(payload), state.snapshot);
   }
 
   const known = new Set([...knownDirs(), otherDir()]);
@@ -665,7 +732,7 @@ export async function submitFetch(key, dir, { createdNew } = {}) {
     if (job && createdNew !== undefined) {
       await api("POST", "/learn", {
         context: job.payload, chosenDir: dir, autoDir: null,
-        createdNew: Boolean(createdNew),
+        createdNew: Boolean(createdNew), confirmed: true,
       }, { timeoutMs: 5000 }).catch(() => {});
     }
     return { ok: true, dir, jobId: out?.jobId };
@@ -722,7 +789,7 @@ export function onMessage(msg, sender, sendResponse) {
   if (msg.type === "dlr:choose") {
     ready()
       .then(() => applyChoice(msg.downloadId, msg.dir,
-        { createdNew: msg.createdNew }))
+        { createdNew: msg.createdNew, kind: msg.kind }))
       .then((r) => sendResponse(r))
       .catch((e) => sendResponse({ ok: false, error: errorMessage(e) }));
     return true;   // async response

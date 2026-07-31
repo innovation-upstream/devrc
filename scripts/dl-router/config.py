@@ -4,6 +4,8 @@ Everything host-specific lives OUTSIDE the repo:
 
     ~/.config/dl-router/config.toml   settings (library root, qBittorrent creds,
                                       per-site capture rules)
+    ~/.config/dl-router/dirs.toml     directory kinds (performer/category) —
+                                      see dirkinds.py
     ~/.config/dl-router/token         bearer token, 0600, auto-created
     ~/.local/share/dl-router/         SQLite store + backfill manifests
 
@@ -14,6 +16,7 @@ endpoints until it is configured.
 Env overrides (all optional, mainly for tests + the systemd unit):
 
     DL_ROUTER_CONFIG        path to config.toml
+    DL_ROUTER_DIRS_FILE     path to dirs.toml (directory kinds)
     DL_ROUTER_STATE_DIR     state dir (SQLite, manifests)
     DL_ROUTER_TOKEN_FILE    bearer-token path
     DL_ROUTER_LIBRARY_ROOT  library root (overrides config.toml)
@@ -122,14 +125,29 @@ def _deep_merge(base: dict, over: dict) -> dict:
 class Config:
     """Loaded configuration. Attribute access for the hot fields."""
 
-    __slots__ = ("data", "path", "state_dir", "token_file")
+    __slots__ = ("data", "path", "state_dir", "token_file", "_dirs_file")
 
     def __init__(self, data: dict, *, path: Path | None = None,
-                 state_dir: Path | None = None, token_file: Path | None = None):
+                 state_dir: Path | None = None, token_file: Path | None = None,
+                 dirs_file: Path | None = None):
         self.data = data
         self.path = path
         self.state_dir = Path(state_dir) if state_dir else default_state_dir()
         self.token_file = Path(token_file) if token_file else default_token_file()
+        self._dirs_file = Path(dirs_file) if dirs_file else None
+
+    @property
+    def dirs_file(self) -> Path:
+        """The directory-kind classification (see dirkinds.py).
+
+        Host-specific and never committed, so it lives beside config.toml
+        rather than in the repo. Imported lazily to keep this loader free of a
+        dependency on the matcher.
+        """
+        if self._dirs_file is not None:
+            return self._dirs_file
+        from dirkinds import default_dirs_file
+        return default_dirs_file()
 
     # --- hot fields ------------------------------------------------------- #
     @property
@@ -243,9 +261,12 @@ def load(path: Path | None = None, *, env=None) -> Config:
         else default_state_dir()
     token_file = Path(env["DL_ROUTER_TOKEN_FILE"]) if env.get("DL_ROUTER_TOKEN_FILE") \
         else default_token_file()
+    dirs_file = Path(env["DL_ROUTER_DIRS_FILE"]) \
+        if env.get("DL_ROUTER_DIRS_FILE") else None
 
     _validate(data)
-    return Config(data, path=path, state_dir=state_dir, token_file=token_file)
+    return Config(data, path=path, state_dir=state_dir, token_file=token_file,
+                  dirs_file=dirs_file)
 
 
 def _validate(data: dict) -> None:
@@ -311,8 +332,10 @@ def load_degraded(path: Path | None = None, *, env=None):
             if env.get("DL_ROUTER_STATE_DIR") else default_state_dir()
         token_file = Path(env["DL_ROUTER_TOKEN_FILE"]) \
             if env.get("DL_ROUTER_TOKEN_FILE") else default_token_file()
+        dirs_file = Path(env["DL_ROUTER_DIRS_FILE"]) \
+            if env.get("DL_ROUTER_DIRS_FILE") else None
         return Config(data, path=resolved, state_dir=state_dir,
-                      token_file=token_file), str(exc)
+                      token_file=token_file, dirs_file=dirs_file), str(exc)
 
 
 def load_or_create_token(path: Path | None = None) -> str:
