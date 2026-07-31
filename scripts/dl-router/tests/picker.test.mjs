@@ -1235,3 +1235,24 @@ test("an accepted choice in an overlay closes it too", async () => {
   assert.ok(sent.some((m) => m.type === "dlr:choose"));
   assert.ok(sent.some((m) => m.type === "dlr:picker-closed"));
 });
+
+test("AN EMBEDDED PICK CARRIES THE ID THE WORKER ISSUED", () => {
+  // Half of a cross-component contract, and the half that fails LOUDLY if it
+  // rots: the worker refuses a `dlr:choose` from a subframe that cannot present
+  // an id it issued (any page may frame picker.html and clickjack two clicks).
+  // Stop sending it here and EVERY real overlay pick is refused.
+  const { doc, sent } = mountFree("?id=7&embed=1&overlay=ov-abc");
+  doc.getElementById("list").children[1].fire("click");
+  const choose = sent.find((m) => m.type === "dlr:choose");
+  assert.equal(choose.overlay, "ov-abc");
+});
+
+test("...and a windowed pick still carries none", () => {
+  // The other half: the popup window is the TOP frame of its own tab, which is
+  // what the worker's guard keys on. Adding an id here would be harmless but
+  // adding the ASSUMPTION that one is always present would not.
+  const { doc, sent } = mountFree("?id=7");
+  doc.getElementById("list").children[1].fire("click");
+  const choose = sent.find((m) => m.type === "dlr:choose");
+  assert.equal("overlay" in choose, false);
+});
