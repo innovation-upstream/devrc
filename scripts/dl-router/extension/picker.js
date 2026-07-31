@@ -329,7 +329,56 @@ export function reduce(state, event) {
  *
  * `closeWindow` is injectable for the same reason.
  */
-export function mount(doc, chromeApi, { closeWindow } = {}) {
+/**
+ * KEEP THE FILTER INPUT FOCUSED, in both delivery paths, with ONE mechanism.
+ *
+ * The picker is keyboard-first: it opens, you type, it filters. It was not
+ * focused in practice, and the reason differs per path -- which is exactly why
+ * this is one function driven by an event both paths raise, rather than two
+ * hand-rolled fixes that drift.
+ *
+ *   * POPUP WINDOW. `input.focus()` at mount time runs while the window is
+ *     still being created; Chrome focuses the document when the window
+ *     actually gets focus, and that can land AFTER the module has run, leaving
+ *     the caret nowhere. `autofocus` in the HTML has the same race.
+ *   * IN-PAGE OVERLAY. `input.focus()` inside a framed document only moves
+ *     focus WITHIN that document -- the frame element itself must hold focus
+ *     for a keystroke to reach it. The content script focuses the frame (see
+ *     picker_overlay.js), and whether that lands before or after this module
+ *     runs is a race between two documents. Whichever order happens, focusing
+ *     the frame raises `focus` on the framed window, and this handler puts the
+ *     caret back in the input.
+ *
+ * So: focus now, focus on `load`, and focus again every time the window
+ * receives focus. Re-focusing is always safe here -- the input is the only
+ * focusable control on the page (rows are clicked, not tabbed to).
+ *
+ * `win` is injectable so a test can raise those events without a browser.
+ */
+export function installAutoFocus(doc, win, input) {
+  if (!input || typeof input.focus !== "function") return () => {};
+  const focusInput = () => {
+    try {
+      // The WINDOW first: focusing an element inside an unfocused window does
+      // not raise that window, and in the popup path that is the whole
+      // problem.
+      if (win && typeof win.focus === "function") win.focus();
+    } catch { /* not allowed here; the input focus below may still work */ }
+    try {
+      input.focus();
+    } catch { /* the document may be going away */ }
+  };
+  focusInput();
+  if (win && typeof win.addEventListener === "function") {
+    win.addEventListener("focus", focusInput);
+    // `load` is the frame path's reliable one: the content script's
+    // `frame.focus()` may have fired before this document existed.
+    win.addEventListener("load", focusInput);
+  }
+  return focusInput;
+}
+
+export function mount(doc, chromeApi, { closeWindow, win } = {}) {
   const params = new URLSearchParams(doc.location.search);
   const rawId = params.get("id") || "";
   // A yt-dlp job id is a string ("fetch:3"); a browser download id is a number.
@@ -561,7 +610,8 @@ export function mount(doc, chromeApi, { closeWindow } = {}) {
   };
   askForDirs();
   render();
-  input.focus();
+  const window_ = win || (typeof window !== "undefined" ? window : null);
+  installAutoFocus(doc, window_, input);
 
   if (embedded) {
     // THE OVERLAY'S PROOF OF LIFE, and it is not decorative.

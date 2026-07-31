@@ -28,6 +28,8 @@ const CAPTURE_LIMIT = 40;
 const SNAPSHOT_REFRESH_MINUTES = 5;
 const TOAST_W = 420;
 const TOAST_H = 190;
+// The duplicate toast carries one more line and two more buttons.
+const TOAST_DUP_H = 240;
 const PICKER_W = 460;
 const PICKER_H = 420;
 
@@ -428,6 +430,57 @@ export async function showToast(info) {
   }
 }
 
+/**
+ * The duplicate question. THE FILE IS ALREADY KEPT AND FILED -- this only
+ * offers to remove the copy that just landed.
+ *
+ * A window, and a taller one, for the same reason the auto-file toast is a
+ * window: a download often starts on a page no content script can reach. It is
+ * shown only for a CONFIRMED duplicate (matching size AND bounded head+tail
+ * digest, from POST /dedupe), never for the "possible duplicate" line that
+ * rides along on the ordinary toast -- offering a delete button next to a
+ * maybe is how a warning becomes a data-loss mechanism.
+ */
+export async function showDuplicateToast(info) {
+  const dupLine = `Duplicate of ${info.dupRelPath}`;
+  try {
+    const win = await chrome.windows.create({
+      url: popupUrl("toast.html", {
+        id: String(info.downloadId ?? ""),
+        dir: info.dir || "",
+        reason: info.reason || "The file was kept and filed normally.",
+        dup: dupLine,
+        source: "duplicate",
+        mode: "dup",
+        rel: info.relPath || "",
+        dupRel: info.dupRelPath || "",
+      }),
+      type: "popup",
+      width: TOAST_W,
+      height: TOAST_DUP_H,
+      // FOCUSED, unlike the ordinary toast: this one is a question with no
+      // auto-close, and an unfocused question sits behind the browser window
+      // forever.
+      focused: true,
+    });
+    rememberOwnWindow(win);
+    return true;
+  } catch {
+    try {
+      // The notification carries NO delete affordance on purpose. A
+      // notification button cannot show the sidecar's refusal, and this path
+      // exists because window creation already failed.
+      await chrome.notifications.create({
+        type: "basic",
+        iconUrl: chrome.runtime.getURL("icons/icon-48.png"),
+        title: `Filed to ${info.dir} (duplicate)`,
+        message: `${dupLine}\nThe file was kept.`,
+      });
+    } catch { /* nothing left to try */ }
+    return false;
+  }
+}
+
 /** The query string both picker delivery paths are built from. ONE source. */
 function pickerParams(info) {
   return {
@@ -761,6 +814,17 @@ export async function openOverlayPicker(info) {
       await chrome.windows.update(tab.windowId, { focused: true });
     }
   } catch { /* the overlay is up either way */ }
+  // AND THEN TAKE THE KEYBOARD FOCUS BACK. Raising a tab focuses the PAGE's
+  // document, which strips the focus off the frame the content script had just
+  // given it -- so the picker painted, and typing went to the page underneath
+  // it. This message is sent AFTER the raising, so it is the one that wins;
+  // the framed picker's own `focus` handler then puts the caret in the filter
+  // input. Best effort, and last: an overlay you have to click once is far
+  // better than no overlay.
+  try {
+    await chrome.tabs.sendMessage(tabId,
+      { type: "dlr:focus-overlay", overlay: id }, { frameId: 0 });
+  } catch { /* the overlay is up and usable either way */ }
   return true;
 }
 
@@ -937,11 +1001,48 @@ export function reportNothingLearned(out) {
   return true;
 }
 
+/**
+ * Confirm (or refute) a duplicate, now that the file exists.
+ *
+ * WHY IT IS HERE AND NOT ON THE /match PATH: at `onDeterminingFilename` time
+ * Chrome has not written a byte, so there is no file to hash -- and `totalBytes`
+ * is frequently 0 there, so even the size is unreliable. This is the first
+ * moment both files exist. It is also a moment where nothing is waiting: a slow
+ * answer costs a late toast, not a misfiled download.
+ *
+ * Fire-and-forget by construction: every failure is swallowed. A dedupe warning
+ * that broke the completion handler would take the correction path down with
+ * it, and there is nothing to report -- the file is already filed correctly.
+ */
+export async function confirmDuplicate(downloadId, rel, dir) {
+  if (!rel) return null;
+  let out;
+  try {
+    out = await api("POST", "/dedupe", { relPath: rel, downloadId },
+      { timeoutMs: 15000 });
+  } catch {
+    return null;
+  }
+  if (!out || out.duplicate !== true || !out.dupRelPath) return null;
+  await showDuplicateToast({
+    downloadId,
+    dir: dir || rel.split("/")[0],
+    relPath: out.relPath || rel,
+    dupRelPath: out.dupRelPath,
+    reason: `Same size and content as a file you already have (${out.kind}).`,
+  });
+  return out;
+}
+
 export async function onDownloadChanged(delta) {
   if (!delta || delta.state?.current !== "complete") return;
   await ready();
   const entry = state.pending.get(delta.id);
   if (!entry) return;
+  // Where the file ended up, following any correction applied below. The
+  // dedupe check needs the FINAL path: checking the pre-move one would ask the
+  // sidecar about a file that is no longer there.
+  let finalRel = null;
   if (entry.wanted) {
     const items = await chrome.downloads.search({ id: delta.id });
     const item = items && items[0];
@@ -965,12 +1066,17 @@ export async function onDownloadChanged(delta) {
       // move happened" is trivially satisfied -- and this is the user
       // CONFIRMING a directory, which is a positive signal for the matcher
       // whether or not the router had proposed it.
+      finalRel = rel;
       await learn(entry, entry.wanted, entry.wantedCreatedNew);
     } else {
       // Inside the library but in the wrong directory: move it, regardless of
       // what the router originally intended.
       try {
-        await relocate(rel, entry.wanted, delta.id);
+        const moved = await relocate(rel, entry.wanted, delta.id);
+        // The sidecar uniquifies on a name collision, so its answer is the
+        // authority on where the file is -- not the path we asked for.
+        finalRel = (moved && typeof moved.relPath === "string")
+          ? moved.relPath : rel;
         await learn(entry, entry.wanted, entry.wantedCreatedNew);
       } catch (err) {
         // A `.catch(() => {})` here is how a completely dead correction path
@@ -982,7 +1088,16 @@ export async function onDownloadChanged(delta) {
           errorMessage(err));
       }
     }
+  } else {
+    // The auto-filed path: no correction was asked for, so the file is wherever
+    // the router put it.
+    const items = await chrome.downloads.search({ id: delta.id });
+    finalRel = relPathFor(items && items[0]);
   }
+  // THE DUPLICATE CHECK IS LAST, and it never throws (see confirmDuplicate).
+  // It runs on both paths -- an auto-filed download is exactly as likely to be
+  // a duplicate as a corrected one -- and only ever WARNS.
+  await confirmDuplicate(delta.id, finalRel, entry.wanted || entry.dir);
   // Keep the entry briefly so a late "change" click can still relocate.
   // `unref` exists only under node (the test runner) -- without it this timer
   // would hold the event loop open for five minutes and hang the suite.
@@ -1186,6 +1301,43 @@ export function onMessage(msg, sender, sendResponse) {
       })
       .then((r) => sendResponse(r))
       .catch((e) => sendResponse({ ok: false, error: errorMessage(e) }));
+    return true;   // async response
+  }
+  if (msg.type === "dlr:discard") {
+    // THE ONLY DESTRUCTIVE MESSAGE IN THE EXTENSION.
+    //
+    // It asserts nothing and proves nothing: it forwards three strings and
+    // lets the sidecar refuse. That is deliberate -- the sidecar holds the
+    // route log, the file's mtime and the bytes of both files, and this worker
+    // holds none of them, so any check here would be a check the caller could
+    // also have made. The one thing this side CAN enforce is the frame rule
+    // already established for `dlr:choose`: `toast.html` is web-accessible, so
+    // a page could frame it, and a pick from an unrecognised subframe is
+    // refused. A DELETE from a subframe is refused OUTRIGHT -- there is no
+    // legitimate embedded duplicate toast, so there is no nonce to check
+    // against and nothing to weigh up.
+    const fromSubframe = typeof sender?.frameId === "number"
+      && sender.frameId > 0;
+    if (fromSubframe) {
+      sendResponse({ ok: false,
+        error: "refusing a delete from an embedded frame" });
+      return false;
+    }
+    ready()
+      .then(() => api("POST", "/discard", {
+        relPath: msg.relPath,
+        dupRelPath: msg.dupRelPath,
+        downloadId: msg.downloadId,
+      }, { timeoutMs: 15000 }))
+      .then((r) => sendResponse(r))
+      .catch((e) => {
+        // Surface it twice: in the toast (which stays open) and as a
+        // notification, because a refused DELETE is the one refusal the user
+        // must not be able to miss.
+        const detail = errorMessage(e);
+        void reportFailure("Did not delete the duplicate", detail);
+        sendResponse({ ok: false, error: detail });
+      });
     return true;   // async response
   }
   if (msg.type === "dlr:snapshot") {

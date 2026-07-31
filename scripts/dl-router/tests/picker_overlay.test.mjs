@@ -316,3 +316,48 @@ test("the frame is focused, and again once it has loaded", () => {
   frame.fire("load");
   assert.equal(frame.focused, true);
 });
+
+// --- dlr:focus-overlay ------------------------------------------------------- //
+//
+// FOCUSING THE FRAME AT BUILD TIME IS NOT ENOUGH, and this is the half that was
+// missing. The worker RAISES the overlay's tab and its window right after the
+// frame reports ready -- and raising a tab puts focus on the PAGE's document,
+// taking it straight back off the frame. Whichever lands last wins, so the
+// worker asks again after it has finished raising things.
+
+test("dlr:focus-overlay puts keyboard focus back on the live frame", () => {
+  const doc = freshDoc();
+  OV.openOverlay(doc, { id: "ov-a", url: URL_A });
+  const { frame } = frameOf(doc);
+  frame.focused = false;
+  assert.deepEqual(OV.focusOverlay("ov-a"), { ok: true });
+  assert.equal(frame.focused, true);
+});
+
+test("a focus request for another overlay is refused, not obeyed", () => {
+  // A stale request must not yank the caret into a picker a LATER download
+  // opened.
+  const doc = freshDoc();
+  OV.openOverlay(doc, { id: "ov-a", url: URL_A });
+  const { frame } = frameOf(doc);
+  frame.focused = false;
+  assert.deepEqual(OV.focusOverlay("ov-b"), { ok: false, error: "stale" });
+  assert.equal(frame.focused, false);
+});
+
+test("a focus request with no overlay is a no-op", () => {
+  freshDoc();
+  assert.deepEqual(OV.focusOverlay("ov-a"), { ok: false, error: "no_overlay" });
+});
+
+test("handleMessage routes dlr:focus-overlay", () => {
+  const doc = freshDoc();
+  OV.openOverlay(doc, { id: "ov-a", url: URL_A });
+  const { frame } = frameOf(doc);
+  frame.focused = false;
+  let answer = null;
+  OV.handleMessage(doc, { type: "dlr:focus-overlay", overlay: "ov-a" },
+    (r) => { answer = r; });
+  assert.deepEqual(answer, { ok: true });
+  assert.equal(frame.focused, true);
+});
