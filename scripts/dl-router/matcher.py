@@ -14,12 +14,13 @@ string, which is why existing directories are never renamed (decision D7):
 
 Scoring (highest rule wins per directory):
 
-    exact alias hit, site-scoped                            1.00
-    exact alias hit, global                                 0.90
-    normalised page tag/subject == dir key                  0.85
-    token-sequence containment, scaled by coverage     0.60-0.80
-    filename token match                                   <=0.50
-    host prior (last dir used on this host)          +0.05 ranking only
+    identity-signal alias hit (Discord channel, forum thread)   1.00
+    exact alias hit, site-scoped                                1.00
+    exact alias hit, global                                     0.90
+    normalised page tag/subject == dir key                      0.85
+    token-sequence containment, scaled by coverage         0.60-0.80
+    filename token match                                       <=0.50
+    host prior (last dir used on this host)              +0.05 ranking only
 
 Guards
     * A fuzzy hit (containment or filename) needs >=2 tokens, or a single token
@@ -33,11 +34,28 @@ Guards
       identical `base` -- and such a pair is inside the tie margin by
       definition, so the picker opens anyway.
     * Top two within `tie_margin` -> no auto-file, show the picker.
+    * DIRECTORY KIND gates auto-filing. Only a `performer` directory may
+      auto-file. A `category` directory always opens the picker regardless of
+      score, and an UNCLASSIFIED directory does too -- unknown is "ask", never
+      "probably fine". See dirkinds.py.
+
+IDENTITY SIGNALS (the deterministic half)
+
+The evening this module met real traffic, eight of nine downloads scored 0.00
+"no signal in page context or filename": six came from a Discord CDN, where the
+page is a SPA and the captured context was completely empty. Page scraping
+cannot fix that. But the Discord attachment URL carries its channel id, and a
+forum attachment URL carries its thread slug -- structured, in the URL, immune
+to any UI change. `identity_signals()` turns those into `(key, site)` alias
+pairs, and it is the SAME function the matcher looks up and the learner writes,
+so the two can never drift apart.
 """
 from __future__ import annotations
 
+import re
 import unicodedata
 from dataclasses import dataclass, field
+from urllib.parse import urlsplit
 
 # Score constants — named so tests assert against the spec table, not magic
 # numbers scattered through the scorer.
@@ -51,6 +69,14 @@ HOST_PRIOR_BONUS = 0.05
 
 MIN_FUZZY_TOKENS = 2
 MIN_SINGLE_TOKEN_LEN = 4
+
+# Directory kinds. The library is NOT purely subject-keyed: unattributed
+# material is filed by category, and the two need opposite learning rules and
+# opposite auto-file rules. See dirkinds.py for where the classification lives.
+KIND_PERFORMER = "performer"
+KIND_CATEGORY = "category"
+KIND_UNKNOWN = "unknown"
+KINDS = frozenset({KIND_PERFORMER, KIND_CATEGORY})
 
 # Tokens that carry no subject information and would otherwise create
 # accidental containment hits. Deliberately tiny and generic (no site- or
@@ -68,6 +94,248 @@ _FILENAME_NOISE = frozenset({
     "1080p", "720p", "480p", "2160p", "4k", "hevc", "h264", "h265", "x264",
     "x265", "aac", "avc", "60fps", "30fps",
 })
+
+# --- identity signals ------------------------------------------------------ #
+# Structured alias keys. They are stored VERBATIM (not folded through
+# `norm_key`) so that `dl-route alias list` prints exactly what `alias rm`
+# accepts, and so a channel id can never be confused with a subject phrase.
+KEY_PREFIX_DISCORD = "discord:"
+KEY_PREFIX_THREAD = "thread:"
+KEY_PREFIXES = (KEY_PREFIX_DISCORD, KEY_PREFIX_THREAD)
+
+# The site an identity signal is scoped to. Discord attachments are served from
+# a CDN host that is NOT the site the user was on, and the SPA gives us no page
+# context at all, so the scope is pinned to this constant rather than derived.
+DISCORD_SITE = "discord.com"
+_DISCORD_CDN_HOSTS = frozenset({"cdn.discordapp.com", "media.discordapp.net"})
+# Both hosts serve `/attachments/<channel>/<message>/<file>`; ephemeral (slash
+# command) uploads use the same shape under a different first segment.
+_DISCORD_ATTACHMENT_SEGMENTS = frozenset({"attachments", "ephemeral-attachments"})
+# A snowflake is 17-19 digits today. Bounded loosely, but bounded: an unbounded
+# "any digits" rule would turn a stray numeric path segment into an alias key.
+_SNOWFLAKE = re.compile(r"^[0-9]{5,25}$")
+
+# URL path segments that are forum CHROME rather than a thread subject. This is
+# a structural list (route/verb segments), not a vocabulary of subject words --
+# no library-specific or site-specific term belongs here.
+_PATH_CHROME = frozenset({
+    "threads", "thread", "topic", "topics", "forum", "forums", "board",
+    "boards", "index.php", "showthread.php", "viewtopic.php", "viewforum.php",
+    "t", "f", "p", "post", "posts", "page", "pages", "attachment",
+    "attachments", "download", "downloads", "view", "watch", "media", "album",
+    "gallery", "comments", "s", "goto", "print",
+})
+
+# `slug.123456` (xenforo) and `123456-slug` (vbulletin) both carry a numeric id
+# beside the slug. Stripping it is what makes the two shapes fold to one key.
+_TRAILING_ID = re.compile(r"[.\-_]\d{2,}$")
+_LEADING_ID = re.compile(r"^\d{2,}[.\-_]")
+
+# Title separators. A page title is routinely "<subject> | <site>"; the site
+# half is chrome and is dropped by comparing against the host's own tokens.
+_TITLE_SPLIT = re.compile(r"\s*[|–—·•»«]\s*|\s+[-‐]\s+|\s*::\s*")
+
+# A learned alias key shorter than this is refused: two or three characters
+# match far too much page prose to be a subject.
+MIN_ALIAS_KEY_LEN = 4
+# A thread slug is hyphenated WORDS. One token is an opaque id (`/d/AbCdEf`).
+MIN_SLUG_TOKENS = 2
+# A phrase seen on this many DISTINCT directories is site chrome (a forum
+# section, an uploader's username), not a subject. Data-driven: it is measured
+# from the labelled examples, not read off a word list.
+CHROME_DIR_SPREAD = 2
+
+
+def host_of(url) -> str:
+    """Hostname of `url`, lowercased. `''` when it has none."""
+    if not isinstance(url, str) or not url:
+        return ""
+    try:
+        return (urlsplit(url).hostname or "").lower()
+    except ValueError:
+        return ""
+
+
+def url_path_segments(url) -> tuple:
+    """Non-empty path segments of `url`."""
+    if not isinstance(url, str) or not url:
+        return ()
+    try:
+        path = urlsplit(url).path
+    except ValueError:
+        return ()
+    return tuple(seg for seg in path.split("/") if seg)
+
+
+def discord_channel_id(url) -> str:
+    """The channel id from a Discord attachment URL, else `''`.
+
+    `https://cdn.discordapp.com/attachments/<channel>/<message>/<file>`
+
+    This is the whole point of the Discord path: the id is IN THE URL, so no
+    DOM scraping is involved and a Discord UI change cannot break it.
+    """
+    if host_of(url) not in _DISCORD_CDN_HOSTS:
+        return ""
+    segments = url_path_segments(url)
+    if len(segments) < 3 or segments[0].lower() not in _DISCORD_ATTACHMENT_SEGMENTS:
+        return ""
+    channel = segments[1]
+    return channel if _SNOWFLAKE.match(channel) else ""
+
+
+def discord_alias_key(channel_id: str) -> str:
+    return KEY_PREFIX_DISCORD + str(channel_id)
+
+
+def _slug_tokens(segment: str) -> tuple:
+    """Content tokens of one path segment, with any adjacent numeric id gone."""
+    seg = str(segment or "")
+    seg = _LEADING_ID.sub("", seg)
+    seg = _TRAILING_ID.sub("", seg)
+    return content_tokens(seg)
+
+
+def thread_slug(url) -> str:
+    """The forum thread subject carried by a URL path, as a phrase.
+
+    `/forums/some-section/threads/subject-name.12345/page-2`  ->  "subject name"
+
+    Preferred over the tag list (decision: the tag list on a forum is chrome and
+    other posters' usernames) and over the page title (which carries site
+    branding). Returns `''` when no segment qualifies.
+    """
+    best = ()
+    for segment in url_path_segments(url):
+        lowered = segment.lower()
+        if lowered in _PATH_CHROME:
+            continue
+        toks = _slug_tokens(segment)
+        # TWO tokens minimum, not the usual fuzzy guard. A file host's path is
+        # `/d/AbCdEf` -- one opaque 6-character token, which the fuzzy guard
+        # happily accepts and which would then be minted as a thread identity
+        # for a page that has no thread. A slug is hyphenated words; an id is
+        # not. The cost is missing a genuinely one-word thread title, which
+        # falls through to the picker exactly as it does today.
+        if len(toks) < MIN_SLUG_TOKENS:
+            continue
+        # `page-2`, `post-14` -- a chrome verb plus its number is not a subject.
+        if len(toks) <= 2 and toks[0] in _PATH_CHROME:
+            continue
+        if all(t.isdigit() for t in toks):
+            continue
+        # DEEPEST wins: `/forums/<section>/threads/<subject>` puts the section
+        # before the subject, and the subject is the one that identifies it.
+        best = toks
+    return " ".join(best)
+
+
+def thread_alias_key(slug: str) -> str:
+    toks = content_tokens(slug)
+    return (KEY_PREFIX_THREAD + "-".join(toks)) if toks else ""
+
+
+def _host_tokens(site: str) -> frozenset:
+    """Tokens of a hostname, minus the parts every hostname has."""
+    return frozenset(t for t in tokens(site)
+                     if t not in STOPWORDS and len(t) > 1)
+
+
+def is_site_branding(phrase, site: str) -> bool:
+    """True when `phrase` is the SITE's own name rather than a subject.
+
+    Two checks, because a hostname concatenates what a title spaces out:
+    `"Some Forum"` on `someforum.test` shares no TOKEN with the host, but its
+    normalisation key `someforum` is right there inside `someforumtest`.
+
+    Known and accepted cost: a subject whose name is a substring of the host
+    they publish on (`Jane Doe` on `janedoe.test`) reads as branding here. It
+    loses one weak title-derived alias; the identity signals, which are the
+    ones that actually carry that site, are unaffected.
+    """
+    if not site:
+        return False
+    toks = content_tokens(phrase)
+    if not toks:
+        return False
+    host_toks = _host_tokens(site)
+    if host_toks and all(t in host_toks for t in toks):
+        return True
+    key = norm_key(phrase)
+    return len(key) >= MIN_ALIAS_KEY_LEN and key in norm_key(site)
+
+
+def title_subject(title, site: str = "") -> str:
+    """The subject half of a page title, with the site's branding dropped.
+
+    `"Subject Name | Some Forum"` on `someforum.test` -> `"Subject Name"`.
+
+    Deterministic and data-driven: a segment is chrome when every one of its
+    tokens is also a token of the HOST, so no list of site names is needed.
+    """
+    if not isinstance(title, str) or not title.strip():
+        return ""
+    parts = [p.strip() for p in _TITLE_SPLIT.split(title) if p and p.strip()]
+    kept = []
+    for part in parts:
+        toks = content_tokens(part)
+        if not toks or is_site_branding(part, site):
+            continue
+        kept.append((len(toks), part))
+    if not kept:
+        return ""
+    # The longest surviving segment: a title is "<subject> | <site>" far more
+    # often than the reverse, but ordering is not reliable across sites while
+    # "the site name is short" is.
+    kept.sort(key=lambda pair: -pair[0])
+    return kept[0][1]
+
+
+@dataclass(frozen=True)
+class IdentitySignal:
+    """A structured, site-scoped alias key derived from the URL.
+
+    ONE function produces these and BOTH the matcher and the learner consume
+    it, which is what stops "what we match on" and "what we learn" drifting.
+    """
+    key: str
+    site: str
+    kind: str        # provenance, surfaced by `dl-route alias review`
+    evidence: str
+
+
+def identity_signals(ctx) -> list:
+    """Every identity signal derivable from a context's URLs, strongest first.
+
+    Deliberately URL-only. Page DOM content is not an identity: it is what the
+    mislearning incident was made of.
+    """
+    out: list = []
+    seen = set()
+
+    def add(key, site, kind, evidence):
+        if not key or (key, site) in seen:
+            return
+        seen.add((key, site))
+        out.append(IdentitySignal(key=key, site=site, kind=kind,
+                                  evidence=evidence))
+
+    for url in (ctx.url, ctx.final_url, ctx.referrer):
+        channel = discord_channel_id(url)
+        if channel:
+            add(discord_alias_key(channel), DISCORD_SITE, "discord-channel",
+                f"channel {channel}")
+
+    # Order matters: the page the download was clicked ON first, then the
+    # download's own URL, then a PROVEN cross-host referrer (see the extension's
+    # carryReferrer -- never a time window, never "the last thread I saw").
+    for url in (ctx.page_url, ctx.url, ctx.final_url, ctx.referrer,
+                ctx.referrer_url):
+        slug = thread_slug(url)
+        key = thread_alias_key(slug)
+        if key:
+            add(key, host_of(url), "thread-slug", slug)
+    return out
 
 
 def strip_diacritics(text: str) -> str:
@@ -158,6 +426,13 @@ class MatchContext:
     link_text: str = ""
     alt: str = ""
     og: dict = field(default_factory=dict)
+    page_url: str = ""      # URL of the page the download was clicked on
+    # A PROVEN cross-host referrer: the forum thread that linked to this file
+    # host. Only ever populated when the extension could prove the link (an
+    # opener-tab chain or a captured click whose href is this page) -- never
+    # from a time window or "the last thread seen".
+    referrer_url: str = ""
+    referrer_title: str = ""
 
     @staticmethod
     def from_payload(payload: dict) -> "MatchContext":
@@ -168,17 +443,30 @@ class MatchContext:
         tags = tuple(str(t) for t in raw_tags
                      if isinstance(t, str) and t.strip())[:64] \
             if isinstance(raw_tags, list) else ()
+        page_url = str(page.get("url") or "")
+        url = str(payload.get("url") or "")
+        final_url = str(payload.get("finalUrl") or "")
+        referrer = str(payload.get("referrer") or "")
         site = str(page.get("site") or "").strip().lower()
         if not site:
-            site = _host_of(str(page.get("url") or payload.get("referrer") or ""))
+            site = host_of(page_url or referrer)
+        if not site and any(discord_channel_id(u)
+                            for u in (url, final_url, referrer)):
+            # Discord is a SPA: the captured page context is EMPTY (no title,
+            # no tags, no page URL), so there is nothing to derive a site from.
+            # The attachment URL still proves which site this is, and pinning it
+            # keeps everything learned here SITE-SCOPED instead of falling into
+            # the global-alias branch -- which is how a username became a
+            # library-wide alias the first evening this ran.
+            site = DISCORD_SITE
         try:
             size = int(payload.get("size") or 0)
         except (TypeError, ValueError):
             size = 0
         return MatchContext(
-            url=str(payload.get("url") or ""),
-            final_url=str(payload.get("finalUrl") or ""),
-            referrer=str(payload.get("referrer") or ""),
+            url=url,
+            final_url=final_url,
+            referrer=referrer,
             filename=str(payload.get("filename") or ""),
             mime=str(payload.get("mime") or ""),
             size=size,
@@ -189,13 +477,33 @@ class MatchContext:
             alt=str(page.get("alt") or ""),
             og={str(k): str(v) for k, v in og.items()
                 if isinstance(v, (str, int, float))},
+            page_url=page_url,
+            referrer_url=str(page.get("referrerUrl") or ""),
+            referrer_title=str(page.get("referrerTitle") or ""),
         )
+
+    def thread_slugs(self) -> list:
+        """Thread-subject phrases from the URLs, deepest-first per URL."""
+        out, seen = [], set()
+        for url in (self.page_url, self.url, self.final_url, self.referrer,
+                    self.referrer_url):
+            slug = thread_slug(url)
+            key = norm_key(slug)
+            if slug and key not in seen:
+                seen.add(key)
+                out.append(slug)
+        return out
 
     def subject_phrases(self) -> list:
         """Ordered candidate subject strings, strongest signal first.
 
-        Tags are the designed signal; og/link/alt/title are the fallbacks that
-        make the matcher work on sites with no tag markup at all.
+        ORDER CHANGED after the first evening of real traffic. It used to be
+        tags-first; on the one forum download where context WAS captured, the
+        tag list was the forum's own section names and other posters'
+        usernames, while the subject sat in the URL's thread slug and in the
+        page title. The URL slug is the cleanest carrier of a subject there is
+        -- it cannot be polluted by other users' content -- so it leads, the
+        de-branded title follows, and the tag list is demoted behind both.
         """
         out: list = []
         seen = set()
@@ -212,6 +520,10 @@ class MatchContext:
             seen.add(key)
             out.append(value)
 
+        for slug in self.thread_slugs():
+            add(slug)
+        add(title_subject(self.referrer_title, host_of(self.referrer_url)))
+        add(title_subject(self.title, self.site))
         for tag in self.tags:
             add(tag)
         for og_key in ("video:actor", "video:tag", "og:video:actor",
@@ -221,15 +533,12 @@ class MatchContext:
         add(self.link_text)
         add(self.alt)
         add(self.title)
+        add(self.referrer_title)
         return out
 
 
-def _host_of(url: str) -> str:
-    from urllib.parse import urlsplit
-    try:
-        return (urlsplit(url).hostname or "").lower()
-    except ValueError:
-        return ""
+# Back-compat alias for the private name this module used to expose.
+_host_of = host_of
 
 
 def filename_stem(filename: str) -> str:
@@ -290,12 +599,16 @@ class MatchResult:
 class Matcher:
     """Scores a `MatchContext` against the directory index + alias table.
 
-    `aliases` maps `(norm_key, site)` -> directory name, with `site=""` for a
+    `aliases` maps `(key, site)` -> directory name, with `site=""` for a
     global alias. Injected, so the scorer stays pure and unit-testable.
+
+    `dir_kinds` maps a directory name to `performer` / `category`. Anything
+    absent is UNKNOWN, and only a `performer` directory may ever auto-file.
     """
 
     def __init__(self, dirs, aliases=None, *, threshold: float = 0.75,
-                 tie_margin: float = 0.05, other_dir: str = "other"):
+                 tie_margin: float = 0.05, other_dir: str = "other",
+                 dir_kinds=None):
         self.dirs = [d if isinstance(d, DirEntry) else DirEntry.of(str(d))
                      for d in (dirs or [])]
         self.by_name = {d.name: d for d in self.dirs}
@@ -308,8 +621,33 @@ class Matcher:
         self.threshold = float(threshold)
         self.tie_margin = float(tie_margin)
         self.other_dir = other_dir
+        # Keyed by norm_key so a dirs.toml written in a different naming
+        # convention than the directory on disk still classifies it -- the same
+        # convention-folding that stops directories ever needing a rename.
+        self.dir_kinds = {norm_key(k): str(v)
+                          for k, v in dict(dir_kinds or {}).items()
+                          if norm_key(k) and v in KINDS}
+
+    def kind_of(self, dir_name: str) -> str:
+        return self.dir_kinds.get(norm_key(dir_name), KIND_UNKNOWN)
 
     # --- individual rules -------------------------------------------------- #
+    def _identity_hits(self, ctx) -> list:
+        """Structured URL identities -> full-confidence alias hits.
+
+        This is the Discord path. The first download from a channel has no
+        signal at all and opens the picker; confirming it writes
+        `discord:<channel id>` scoped to Discord, and every later download from
+        that channel lands here at 1.00 with nothing scraped from any page.
+        """
+        out = []
+        for sig in identity_signals(ctx):
+            target = self.aliases.get((sig.key, sig.site))
+            if target and target in self.by_name:
+                out.append(Candidate(target, SCORE_ALIAS_SITE, SCORE_ALIAS_SITE,
+                                     f"alias({sig.kind}) '{sig.key}'"))
+        return out
+
     def _alias_hits(self, phrases, site: str) -> list:
         out = []
         for phrase in phrases:
@@ -389,6 +727,7 @@ class Matcher:
               dup: dict | None = None) -> MatchResult:
         phrases = ctx.subject_phrases()
         hits: list = []
+        hits += self._identity_hits(ctx)
         hits += self._alias_hits(phrases, ctx.site)
         hits += self._tag_exact(phrases)
         hits += self._containment(phrases)
@@ -444,6 +783,26 @@ class Matcher:
                 auto = False
                 reason = (f"tie: '{top.dir}' {top.base:.2f} vs "
                           f"'{runner.dir}' {runner.base:.2f} — {top.reason}")
+        # DIRECTORY KIND. Applied LAST and unconditionally, so no score, alias
+        # or prior can route around it.
+        #
+        #   * category  -- a tag legitimately identifies the directory, but a
+        #     tag is a weak claim about any ONE file, so a category always gets
+        #     confirmed. (Known consequence: a confirmed Discord channel alias
+        #     pointing at a category directory keeps asking forever. That is
+        #     the rule as specified; see the PR body for the exception.)
+        #   * unknown   -- absence of a classification is not permission. An
+        #     unclassified directory is one `dl-route dirs classify` away from
+        #     being usable, and until then it asks.
+        if auto:
+            kind = self.kind_of(top.dir)
+            if kind == KIND_CATEGORY:
+                auto = False
+                reason = f"category directory — always confirm — {reason}"
+            elif kind != KIND_PERFORMER:
+                auto = False
+                reason = (f"unclassified directory '{top.dir}' — set its kind "
+                          f"(dl-route dirs classify) — {reason}")
         # `confidence` is the pre-bonus score: it is what the threshold was
         # tested against, so reporting the bonused number would be a lie.
         return MatchResult(dir=top.dir, confidence=top.base, reason=reason,
@@ -468,6 +827,69 @@ class Matcher:
             if is_safe_dir_name(proposal) and proposal not in self.by_name:
                 return proposal
         return None
+
+
+def is_structured_key(key) -> bool:
+    """True for `discord:`/`thread:` keys — an identity, not a word."""
+    return isinstance(key, str) and key.startswith(KEY_PREFIXES)
+
+
+def alias_key(phrase) -> str:
+    """The stored key for a phrase, as typed at the CLI or learned.
+
+    Structured keys keep their prefix and are canonicalised inside it, so
+    `dl-route alias rm 'discord:123'` removes exactly the row
+    `dl-route alias list` printed. Everything else folds through `norm_key`.
+    """
+    raw = str(phrase or "").strip()
+    lowered = raw.lower()
+    if lowered.startswith(KEY_PREFIX_DISCORD):
+        rest = raw[len(KEY_PREFIX_DISCORD):].strip()
+        return discord_alias_key(rest) if _SNOWFLAKE.match(rest) else ""
+    if lowered.startswith(KEY_PREFIX_THREAD):
+        return thread_alias_key(raw[len(KEY_PREFIX_THREAD):])
+    return norm_key(raw)
+
+
+def suspicious_alias_key(phrase, *, key: str = "", dir_names=(), site: str = "",
+                         spread: int = 0):
+    """Why `phrase` must not become an alias, or None if it is fine.
+
+    This is the generalisation of the four rows that had to be deleted by hand
+    after the first evening: a forum section name, two other posters' usernames
+    and one of them at GLOBAL scope. Catching those four specific strings would
+    have been a word list; these rules catch the FAILURE CLASS, and every one of
+    them is measured from data the router already has rather than from a
+    vocabulary that would need maintaining (and could never be committed to a
+    public repo anyway).
+    """
+    key = key or alias_key(phrase)
+    if not key:
+        return "empty key"
+    if is_structured_key(key):
+        return None          # a channel id / thread slug is an identity
+    if len(key) < MIN_ALIAS_KEY_LEN:
+        return (f"key {key!r} is shorter than {MIN_ALIAS_KEY_LEN} characters — "
+                "it would match unrelated page prose")
+    if spread >= CHROME_DIR_SPREAD:
+        return (f"seen on {spread} different directories — that is site chrome "
+                "(a section name, an uploader's username), not a subject")
+    ptoks = content_tokens(phrase)
+    if is_site_branding(phrase, site):
+        return f"it is part of the site name ({site})"
+    if ptoks:
+        shared = 0
+        for tok in ptoks:
+            hits = sum(1 for name in dir_names if tok in content_tokens(name))
+            if hits >= CHROME_DIR_SPREAD:
+                shared += 1
+        if shared == len(ptoks):
+            return ("every word of it already appears in "
+                    f"{CHROME_DIR_SPREAD}+ library directories — it reads as a "
+                    "category word, not a subject")
+    if len(ptoks) == 1 and any(ch.isdigit() for ch in ptoks[0]):
+        return "a single word with digits in it reads as a handle, not a name"
+    return None
 
 
 def find_duplicate(index, target_dir: str, filename: str, size: int = 0):

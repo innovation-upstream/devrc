@@ -199,15 +199,28 @@ def test_match_uses_the_host_prior_from_the_store(live, store):
     assert "+host-prior" in body["candidates"][0]["reason"]
 
 
-def test_learn_writes_an_alias_and_an_example(live, store):
+def test_learn_records_the_example_and_prior_but_no_tag_alias_for_a_performer(
+        live, store):
+    """The mislearning fix, at the endpoint.
+
+    This used to assert the OPPOSITE: that a page tag became a site alias for
+    whichever directory was chosen. On real traffic that turned a forum section
+    name and two other posters' usernames into aliases for a subject directory
+    (one of them global), because a tag list is not evidence about a PERSON.
+    The example and the host prior are still recorded -- they are the parts
+    that were never the problem.
+    """
     status, body, _ = call(live, "POST", "/learn", {
         "context": {"page": {"url": "https://example-site.test/v",
                              "tags": ["Aster Nightingale"]}},
         "chosenDir": "Jane Doe",
         "autoDir": "other",
+        "confirmed": True,
     })
     assert status == 200 and body["ok"] is True
-    assert store.alias("asternightingale", "example-site.test") == "Jane Doe"
+    assert store.alias("asternightingale", "example-site.test") is None
+    assert store.alias("asternightingale", "") is None
+    assert body["aliases"] == 0
     assert store.host_prior("example-site.test") == "Jane Doe"
     assert store.examples()[0]["chosen_dir"] == "Jane Doe"
 

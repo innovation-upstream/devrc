@@ -17,7 +17,7 @@ import threading
 import time
 from pathlib import Path
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 MIGRATIONS = {
     1: [
@@ -82,6 +82,28 @@ MIGRATIONS = {
               download_id TEXT NOT NULL DEFAULT '',
               dir         TEXT NOT NULL,
               ts          REAL NOT NULL
+           )""",
+    ],
+    # v3 -- alias PROVENANCE, and picker-assigned directory kinds.
+    #
+    # Four bad aliases had to be deleted by hand after the first evening of
+    # real use: a forum section name, two other posters' usernames, one of them
+    # at GLOBAL scope. Nothing surfaced them, because an alias row recorded only
+    # `(key, site) -> dir`; there was no way to ask "what made you believe
+    # this?". `source` and `evidence` are what `dl-route alias review` reads.
+    #
+    # `dir_kinds` is the machine-written half of the classification: the picker
+    # asks which kind a NEW directory is, and the answer lands here rather than
+    # being appended to the human-edited dirs.toml.
+    3: [
+        ("ADD_COLUMN_IF_MISSING", "aliases", "source", "TEXT NOT NULL DEFAULT ''"),
+        ("ADD_COLUMN_IF_MISSING", "aliases", "evidence",
+         "TEXT NOT NULL DEFAULT ''"),
+        """CREATE TABLE IF NOT EXISTS dir_kinds (
+              name   TEXT PRIMARY KEY,
+              kind   TEXT NOT NULL,
+              source TEXT NOT NULL DEFAULT '',
+              ts     REAL NOT NULL
            )""",
     ],
 }
@@ -168,22 +190,39 @@ class Store:
         return int(self.conn.execute("PRAGMA user_version").fetchone()[0])
 
     # --- aliases ----------------------------------------------------------- #
-    def upsert_alias(self, key: str, dir_name: str, site: str = "") -> None:
+    def upsert_alias(self, key: str, dir_name: str, site: str = "", *,
+                     source: str = "", evidence: str = "") -> None:
         """Insert or re-point an alias, bumping its hit count.
 
         A correction re-points an existing alias rather than accumulating a
         second row: the user's latest choice is authoritative.
+
+        `source`/`evidence` are the provenance `dl-route alias review` prints.
+        They are refreshed on every write, because a re-pointed alias was
+        re-derived from whatever the LATEST correction saw.
         """
         now = self._clock()
         self.conn.execute(
-            """INSERT INTO aliases (key, site, dir, hits, created_at, updated_at)
-               VALUES (?, ?, ?, 1, ?, ?)
+            """INSERT INTO aliases (key, site, dir, hits, created_at,
+                                    updated_at, source, evidence)
+               VALUES (?, ?, ?, 1, ?, ?, ?, ?)
                ON CONFLICT(key, site) DO UPDATE SET
                  dir = excluded.dir,
                  hits = aliases.hits + 1,
-                 updated_at = excluded.updated_at""",
-            (key, site or "", dir_name, now, now))
+                 updated_at = excluded.updated_at,
+                 source = excluded.source,
+                 evidence = excluded.evidence""",
+            (key, site or "", dir_name, now, now, str(source or ""),
+             str(evidence or "")))
         self.conn.commit()
+
+    def alias_rows(self) -> list:
+        """Every alias with its provenance, most recently written first."""
+        rows = self.conn.execute(
+            """SELECT key, site, dir, hits, created_at, updated_at, source,
+                      evidence
+               FROM aliases ORDER BY updated_at DESC, key ASC""").fetchall()
+        return [dict(r) for r in rows]
 
     def alias(self, key: str, site: str = ""):
         row = self.conn.execute(
@@ -222,6 +261,51 @@ class Store:
             "SELECT * FROM examples ORDER BY id DESC LIMIT ?",
             (int(limit),)).fetchall()
         return [dict(r) for r in rows]
+
+    def phrase_dir_spread(self, limit: int = 500) -> dict:
+        """`{phrase key: how many DISTINCT directories it has been seen on}`.
+
+        The data-driven half of the site-chrome exclusion. A subject tag
+        appears on the pages of ONE directory's content; a forum section name
+        or an uploader's username appears on everything, so it accumulates
+        spread. Measured from the labelled examples the router already stores,
+        so no vocabulary has to be maintained (and none could be committed —
+        the words are the operator's private library).
+        """
+        from matcher import norm_key  # local: keeps store.py import-light
+
+        spread: dict = {}
+        for row in self.examples(limit):
+            chosen = row.get("chosen_dir") or ""
+            try:
+                ctx = json.loads(row.get("context") or "{}")
+            except ValueError:
+                continue
+            page = ctx.get("page") if isinstance(ctx, dict) else None
+            tags = page.get("tags") if isinstance(page, dict) else None
+            if not isinstance(tags, list):
+                continue
+            for tag in tags:
+                key = norm_key(tag) if isinstance(tag, str) else ""
+                if key:
+                    spread.setdefault(key, set()).add(chosen)
+        return {key: len(dirs) for key, dirs in spread.items()}
+
+    # --- directory kinds ---------------------------------------------------- #
+    def set_dir_kind(self, name: str, kind: str, source: str = "") -> None:
+        self.conn.execute(
+            """INSERT INTO dir_kinds (name, kind, source, ts)
+               VALUES (?, ?, ?, ?)
+               ON CONFLICT(name) DO UPDATE SET
+                 kind = excluded.kind,
+                 source = excluded.source,
+                 ts = excluded.ts""",
+            (str(name), str(kind), str(source or ""), self._clock()))
+        self.conn.commit()
+
+    def dir_kind_map(self) -> dict:
+        rows = self.conn.execute("SELECT name, kind FROM dir_kinds").fetchall()
+        return {r["name"]: r["kind"] for r in rows}
 
     # --- route log --------------------------------------------------------- #
     def log_route(self, *, url="", site="", filename="", dir_name="",

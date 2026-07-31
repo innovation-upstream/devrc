@@ -40,7 +40,7 @@ cli = _load_cli()
 
 
 @pytest.fixture
-def cli_env(tmp_path, library, monkeypatch):
+def cli_env(tmp_path, library, dirs_file, monkeypatch):
     """Point the CLI's config loader entirely at temp paths."""
     cfg_path = tmp_path / "config.toml"
     cfg_path.write_text(f'library_root = "{library}"\nport = 8799\n',
@@ -49,7 +49,9 @@ def cli_env(tmp_path, library, monkeypatch):
     monkeypatch.setenv("DL_ROUTER_CONFIG", str(cfg_path))
     monkeypatch.setenv("DL_ROUTER_STATE_DIR", str(state))
     monkeypatch.setenv("DL_ROUTER_TOKEN_FILE", str(tmp_path / "token"))
-    return {"config": cfg_path, "state": state, "library": library}
+    monkeypatch.setenv("DL_ROUTER_DIRS_FILE", str(dirs_file))
+    return {"config": cfg_path, "state": state, "library": library,
+            "dirs_file": dirs_file}
 
 
 def call(argv):
@@ -110,11 +112,14 @@ def test_status_reports_an_unset_library_root(tmp_path, monkeypatch, capsys):
     assert "unset" in capsys.readouterr().out
 
 
-def test_dirs_lists_the_routing_targets(cli_env, capsys):
+def test_dirs_lists_the_routing_targets_with_their_kinds(cli_env, capsys):
     assert call(["dirs"]) == 0
     lines = capsys.readouterr().out.splitlines()
-    assert "Jane Doe\tjanedoe" in lines
-    assert "john-smith\tjohnsmith" in lines
+    # name / normalisation key / kind -- the kind is the third column because
+    # an unclassified directory never auto-files, so "which are unclassified?"
+    # has to be answerable from the listing.
+    assert "Jane Doe\tjanedoe\tperformer" in lines
+    assert "john-smith\tjohnsmith\tperformer" in lines
 
 
 def test_token_prints_a_stable_token_and_creates_it_0600(cli_env, capsys):
@@ -145,21 +150,21 @@ def test_match_on_an_opaque_filename_lands_on_the_catch_all(cli_env, capsys):
 
 
 def test_alias_set_list_and_rm_round_trip(cli_env, capsys):
-    assert call(["alias", "set", "JD", "Jane Doe",
+    assert call(["alias", "set", "JDoe", "Jane Doe",
                  "--site", "example-site.test"]) == 0
     capsys.readouterr()
     assert call(["alias", "list"]) == 0
     listed = capsys.readouterr().out
-    assert "jd\texample-site.test\tJane Doe" in listed
+    assert "jdoe\texample-site.test\tJane Doe" in listed
 
     # ...and the matcher now uses it.
-    assert call(["match", "--tag", "JD", "--site", "example-site.test"]) == 0
+    assert call(["match", "--tag", "JDoe", "--site", "example-site.test"]) == 0
     assert json.loads(capsys.readouterr().out)["confidence"] == 1.0
 
-    assert call(["alias", "rm", "JD", "--site", "example-site.test"]) == 0
+    assert call(["alias", "rm", "JDoe", "--site", "example-site.test"]) == 0
     capsys.readouterr()
     call(["alias", "list"])
-    assert "jd\t" not in capsys.readouterr().out
+    assert "jdoe\t" not in capsys.readouterr().out
 
 
 def test_log_prints_recent_routes(cli_env, capsys):
@@ -352,3 +357,135 @@ def test_fetch_refuses_a_non_http_url(live_sidecar):
 def test_an_unreachable_sidecar_gives_an_actionable_message(cli_env):
     with pytest.raises(SystemExit, match="systemctl --user status dl-router"):
         call(["fetch", "https://example-site.test/v/1", "--dir", "other"])
+
+
+# --- the alias round-trip bug ---------------------------------------------- #
+def test_a_global_alias_can_be_removed_with_the_star_that_list_prints(cli_env,
+                                                                      capsys):
+    """`alias list` printed `*` for a global alias and `alias rm --site '*'`
+    could not remove it: the site is stored as `''`, so it looked for a
+    literal-asterisk site, removed nothing, and printed "alias removed" anyway.
+    The most dangerous alias in the table was the one that could not be removed
+    the obvious way."""
+    store = Store(cli._cfg().db_path)
+    store.upsert_alias("astervale", "Jane Doe", "", source="manual")
+    store.close()
+
+    assert call(["alias", "list"]) == 0
+    assert "astervale\t*\tJane Doe" in capsys.readouterr().out
+
+    assert call(["alias", "rm", "Aster Vale", "--site", "*"]) == 0
+    capsys.readouterr()
+    call(["alias", "list"])
+    assert "astervale" not in capsys.readouterr().out
+
+
+def test_an_empty_site_still_means_global(cli_env, capsys):
+    store = Store(cli._cfg().db_path)
+    store.upsert_alias("astervale", "Jane Doe", "")
+    store.close()
+    assert call(["alias", "rm", "Aster Vale", "--site", ""]) == 0
+
+
+def test_removing_an_alias_that_is_not_there_says_so(cli_env, capsys):
+    """It used to print "alias removed" whether or not a row existed, which is
+    how the un-removable global alias stayed un-removed."""
+    assert call(["alias", "rm", "Aster Vale", "--site", "*"]) == 1
+    assert "no alias" in capsys.readouterr().err
+
+
+def test_alias_set_refuses_a_key_that_looks_like_a_mistake(cli_env):
+    with pytest.raises(SystemExit, match="shorter than"):
+        call(["alias", "set", "JD", "Jane Doe", "--site", "example-site.test"])
+
+
+def test_alias_set_force_writes_it_anyway(cli_env, capsys):
+    assert call(["alias", "set", "JD", "Jane Doe", "--site",
+                 "example-site.test", "--force"]) == 0
+    assert "warning" in capsys.readouterr().err
+
+
+def test_a_structured_alias_key_round_trips_through_set_list_and_rm(cli_env,
+                                                                    capsys):
+    channel = "119283746551234567"
+    assert call(["alias", "set", f"discord:{channel}", "Jane Doe",
+                 "--site", "discord.com"]) == 0
+    capsys.readouterr()
+    call(["alias", "list"])
+    assert f"discord:{channel}\tdiscord.com\tJane Doe" in capsys.readouterr().out
+    assert call(["alias", "rm", f"discord:{channel}",
+                 "--site", "discord.com"]) == 0
+
+
+# --- alias review ----------------------------------------------------------- #
+def test_alias_review_shows_evidence_and_hits_and_flags_the_global_one(cli_env,
+                                                                       capsys):
+    """Nothing surfaced the four bad rows; that is why this command exists."""
+    store = Store(cli._cfg().db_path)
+    store.upsert_alias("astervale", "Jane Doe", "example-site.test",
+                       source="title-subject", evidence="Aster Vale")
+    store.upsert_alias("poster1988", "Jane Doe", "",
+                       source="tag", evidence="poster_1988")
+    store.close()
+    assert call(["alias", "review"]) == 0
+    out = capsys.readouterr().out
+    assert "title-subject" in out and "Aster Vale" in out
+    # The global one is flagged, and it is listed FIRST (riskiest first).
+    assert out.index("poster1988") < out.index("astervale")
+    assert "! poster1988" in out
+    assert "handle" in out or "global scope" in out
+    assert "dl-route alias rm" in out
+
+
+def test_alias_review_json_is_machine_readable(cli_env, capsys):
+    store = Store(cli._cfg().db_path)
+    store.upsert_alias("astervale", "Jane Doe", "example-site.test",
+                       source="title-subject", evidence="Aster Vale")
+    store.close()
+    assert call(["alias", "review", "--json"]) == 0
+    rows = json.loads(capsys.readouterr().out)
+    assert rows[0]["key"] == "astervale"
+    assert rows[0]["source"] == "title-subject"
+    assert rows[0]["hits"] == 1
+    assert rows[0]["suspect"] is None
+
+
+def test_alias_review_on_an_empty_table_is_not_an_error(cli_env, capsys):
+    assert call(["alias", "review"]) == 0
+    assert "no aliases" in capsys.readouterr().out
+
+
+# --- the directory-kind draft ---------------------------------------------- #
+def test_dirs_classify_drafts_a_reviewable_file(cli_env, capsys, tmp_path):
+    out = tmp_path / "draft.toml"
+    assert call(["dirs", "classify", "--out", str(out)]) == 0
+    import tomllib
+    parsed = tomllib.loads(out.read_text(encoding="utf-8"))
+    assert set(parsed) == {"performer", "category"}
+    assert "Jane Doe" in parsed["performer"]
+    # ...and it explains itself rather than emitting a bare list.
+    assert "review" in out.read_text(encoding="utf-8").lower()
+
+
+def test_dirs_classify_prints_to_stdout_by_default(cli_env, capsys):
+    assert call(["dirs", "classify"]) == 0
+    assert "performer = [" in capsys.readouterr().out
+
+
+def test_dirs_classify_refuses_to_clobber_a_reviewed_file(cli_env, tmp_path):
+    out = tmp_path / "draft.toml"
+    out.write_text("performer = []\ncategory = []\n", encoding="utf-8")
+    with pytest.raises(SystemExit, match="--force"):
+        call(["dirs", "classify", "--out", str(out)])
+
+
+def test_status_names_the_unclassified_directories_as_the_reason_it_asks(
+        cli_env, capsys, tmp_path):
+    """`dirs       26` with everything asking and no explanation is the shape
+    of the evening this batch came from."""
+    (tmp_path / "dirs.toml").write_text('performer = []\ncategory = []\n',
+                                        encoding="utf-8")
+    assert call(["status"]) == 0
+    out = capsys.readouterr().out
+    assert "unclassified=6" in out
+    assert "dl-route dirs classify" in out

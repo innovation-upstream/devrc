@@ -1,0 +1,279 @@
+"""The learning rule: only the DISCRIMINATING signal, and never globally.
+
+The regression this file exists for. On the first forum download, `/learn`
+wrote an alias for every captured subject phrase — which on that page meant a
+forum section name and two other posters' usernames — plus one at GLOBAL scope,
+so anything carrying that username on ANY site would have auto-filed into a
+stranger's directory at alias confidence. Four rows had to be deleted by hand,
+and nothing in the system had surfaced them.
+
+`App.learn` is HTTP-free by design, so these drive it directly.
+"""
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+import config as config_mod  # noqa: E402
+import server as S  # noqa: E402
+from conftest import SAMPLE_DIRS  # noqa: E402
+from fetcher import Fetcher  # noqa: E402
+from matcher import (  # noqa: E402
+    DISCORD_SITE, KIND_CATEGORY, KIND_PERFORMER, MatchContext, discord_alias_key,
+    thread_alias_key,
+)
+
+CHANNEL = "119283746551234567"
+CDN = f"https://cdn.discordapp.com/attachments/{CHANNEL}/998877665544332211/clip.mp4"
+THREAD = "https://someforum.test/threads/aster-vale-collection.481920/"
+
+# "Jane Doe" is a person; "acme-studio" collects unattributed material.
+KINDS_TOML = """\
+performer = ["Jane Doe", "john-smith", "Mary_Major", "Aster Vale"]
+category = ["acme-studio"]
+"""
+
+
+class Spawner:
+    def __call__(self, argv, cwd=None):
+        class P:
+            def poll(self_inner):
+                return None
+
+            def terminate(self_inner):
+                pass
+        return P()
+
+
+@pytest.fixture
+def kinded_app(tmp_path, library, store, dir_index, file_index, clock):
+    path = tmp_path / "dirs.toml"
+    path.write_text(KINDS_TOML, encoding="utf-8")
+    data = config_mod._deep_merge(config_mod.DEFAULTS, {
+        "library_root": str(library), "host": "127.0.0.1", "port": 0})
+    cfg = config_mod.Config(data, path=tmp_path / "config.toml",
+                            state_dir=tmp_path / "state",
+                            token_file=tmp_path / "token", dirs_file=path)
+    return S.App(cfg, store=store, dir_index=dir_index, file_index=file_index,
+                 fetcher=Fetcher(library, runner=Spawner(), clock=clock),
+                 clock=clock)
+
+
+def forum_context(tags):
+    """The shape that produced the four bad rows: a forum page whose tag list is
+    section names and other posters' usernames."""
+    return {
+        "url": "https://someforum.test/attachments/opaque-9f2.mp4",
+        "filename": "opaque-9f2.mp4",
+        "page": {"url": THREAD, "site": "someforum.test",
+                 "title": "Aster Vale Collection | Some Forum", "tags": tags},
+    }
+
+
+# --- the regression --------------------------------------------------------- #
+def test_a_tag_never_becomes_an_alias_for_a_performer_directory(kinded_app):
+    chrome = ["General Discussion", "poster_1988", "uploader42"]
+    out = kinded_app.learn({"context": forum_context(chrome),
+                            "chosenDir": "Aster Vale", "confirmed": True})
+    written = {w["key"] for w in out["written"]}
+    for tag in chrome:
+        from matcher import norm_key
+        assert norm_key(tag) not in written, tag
+    assert kinded_app.store.alias("generaldiscussion", "someforum.test") is None
+    assert kinded_app.store.alias("poster1988", "") is None
+
+
+def test_learning_never_writes_a_global_alias(kinded_app):
+    """A global alias applies on every site at once — the widest blast radius
+    the store has, and the least evidence supports it. `dl-route alias set
+    --site '*'` still exists for a deliberate one."""
+    for chosen, ctx in (("Aster Vale", forum_context(["Aster Vale"])),
+                        ("acme-studio", forum_context(["Acme Studio"])),
+                        ("Jane Doe", {"url": CDN, "page": {}})):
+        kinded_app.learn({"context": ctx, "chosenDir": chosen,
+                          "confirmed": True})
+    assert all(site for (_key, site) in kinded_app.store.alias_map())
+
+
+def test_a_performer_learns_the_thread_slug_and_the_title_subject(kinded_app):
+    out = kinded_app.learn({"context": forum_context(["General Discussion"]),
+                            "chosenDir": "Aster Vale", "confirmed": True})
+    written = {(w["key"], w["site"]) for w in out["written"]}
+    assert (thread_alias_key("aster vale collection"), "someforum.test") in written
+    # The de-branded title, NOT the raw "... | Some Forum".
+    assert ("astervalecollection", "someforum.test") in written
+
+
+def test_a_discord_download_learns_its_channel_and_nothing_else(kinded_app):
+    """Six of nine real downloads looked exactly like this: no page context at
+    all. The channel id is the only thing there is, and it is enough."""
+    out = kinded_app.learn({
+        "context": {"url": CDN, "filename": "clip.mp4",
+                    "page": {"tags": [], "title": "", "url": ""}},
+        "chosenDir": "Jane Doe", "confirmed": True})
+    assert [(w["key"], w["site"]) for w in out["written"]] == [
+        (discord_alias_key(CHANNEL), DISCORD_SITE)]
+
+
+def test_the_learned_channel_then_auto_files_the_next_download(kinded_app):
+    kinded_app.learn({"context": {"url": CDN, "page": {}},
+                      "chosenDir": "Jane Doe", "confirmed": True})
+    res = kinded_app.match({"url": CDN.replace("clip.mp4", "another.mp4"),
+                            "filename": "another.mp4", "page": {}})
+    assert res["dir"] == "Jane Doe"
+    assert res["auto"] is True
+
+
+# --- the category rule ------------------------------------------------------ #
+def test_a_category_directory_does_learn_a_tag_but_only_site_scoped(kinded_app):
+    out = kinded_app.learn({"context": forum_context(["Field Recordings"]),
+                            "chosenDir": "acme-studio", "confirmed": True})
+    assert ("fieldrecordings", "someforum.test") in {
+        (w["key"], w["site"]) for w in out["written"]}
+    assert kinded_app.store.alias("fieldrecordings", "") is None
+
+
+def test_a_category_tag_is_not_learned_without_an_explicit_confirmation(
+        kinded_app):
+    out = kinded_app.learn({"context": forum_context(["Field Recordings"]),
+                            "chosenDir": "acme-studio"})
+    assert not [w for w in out["written"] if w["source"] == "tag"]
+    assert out["skipped"]
+
+
+def test_a_category_confirmation_is_capped(kinded_app):
+    """A tag list can hold 64 entries. The user confirmed one directory, not
+    sixty-four synonyms for it."""
+    many = [f"Tag Number {n}" for n in range(20)]
+    out = kinded_app.learn({"context": forum_context(many),
+                            "chosenDir": "acme-studio", "confirmed": True})
+    assert len([w for w in out["written"] if w["source"] == "tag"]) \
+        <= S.MAX_LEARNED_TAGS
+
+
+def test_a_suspicious_tag_is_refused_and_reported(kinded_app):
+    """The screen catches the failure CLASS, not four specific strings."""
+    out = kinded_app.learn({"context": forum_context(["Some Forum", "JD"]),
+                            "chosenDir": "acme-studio", "confirmed": True})
+    assert not [w for w in out["written"] if w["source"] == "tag"]
+    reasons = " ".join(s["why"] for s in out["skipped"])
+    assert "site name" in reasons and "shorter than" in reasons
+
+
+def test_a_tag_seen_on_many_directories_stops_being_learnable(kinded_app):
+    """Data-driven, from the labelled examples the router already stores: a
+    subject tag appears on ONE directory's pages; a section name appears on
+    everything, so it accumulates spread."""
+    for chosen in ("Jane Doe", "john-smith"):
+        kinded_app.learn({"context": forum_context(["Common Section"]),
+                          "chosenDir": chosen, "confirmed": True})
+    out = kinded_app.learn({"context": forum_context(["Common Section"]),
+                            "chosenDir": "acme-studio", "confirmed": True})
+    assert kinded_app.store.alias("commonsection", "someforum.test") is None
+    assert any("different directories" in s["why"] for s in out["skipped"])
+
+
+# --- provenance + kinds ----------------------------------------------------- #
+def test_every_learned_alias_records_what_produced_it(kinded_app):
+    kinded_app.learn({"context": {"url": CDN, "page": {}},
+                      "chosenDir": "Jane Doe", "confirmed": True})
+    row = kinded_app.store.alias_rows()[0]
+    assert row["source"] == "discord-channel"
+    assert CHANNEL in row["evidence"]
+    assert row["hits"] == 1
+
+
+def test_mkdir_records_the_kind_the_picker_asked_for(kinded_app):
+    out = kinded_app.mkdir({"name": "Aster Nightingale",
+                            "kind": KIND_PERFORMER})
+    assert out["kind"] == KIND_PERFORMER
+    assert kinded_app.dir_kinds().kind("Aster Nightingale") == KIND_PERFORMER
+
+
+def test_mkdir_without_a_kind_leaves_the_directory_unclassified(kinded_app):
+    """...and an unclassified directory never auto-files, which is why the
+    picker asks."""
+    out = kinded_app.mkdir({"name": "Aster Nightingale"})
+    assert out["kind"] == "unknown"
+
+
+def test_mkdir_refuses_an_invented_kind(kinded_app):
+    from safety import UnsafeName
+    with pytest.raises(UnsafeName):
+        kinded_app.mkdir({"name": "Aster Nightingale", "kind": "performer!"})
+
+
+def test_the_snapshot_carries_each_directory_kind(kinded_app):
+    """The extension's cached fallback matcher applies the same gate, or a
+    sidecar timeout would auto-file into a category the sidecar would have
+    asked about."""
+    snap = kinded_app.dirs_snapshot()
+    kinds = {d["name"]: d["kind"] for d in snap["dirs"]}
+    assert kinds["Jane Doe"] == KIND_PERFORMER
+    assert kinds["acme-studio"] == KIND_CATEGORY
+    assert kinds["other"] == "unknown"
+    assert set(kinds) == set(SAMPLE_DIRS)
+
+
+def test_healthz_reports_how_many_directories_are_unclassified(kinded_app):
+    out = kinded_app.healthz()
+    assert out["dirKinds"]["unknown"] >= 1
+    assert out["dirsFile"]["present"] is True
+
+
+def test_a_category_match_asks_even_from_a_confirmed_identity_alias(kinded_app):
+    """KNOWN CONSEQUENCE, recorded on purpose: a confirmed Discord channel
+    pointing at a CATEGORY directory keeps asking forever. That is the rule as
+    specified — a category is always confirmed — and it is flagged in the PR
+    body rather than quietly excepted here."""
+    kinded_app.learn({"context": {"url": CDN, "page": {}},
+                      "chosenDir": "acme-studio", "confirmed": True})
+    res = kinded_app.match({"url": CDN, "filename": "clip.mp4", "page": {}})
+    assert res["dir"] == "acme-studio"
+    assert res["confidence"] == pytest.approx(1.0)
+    assert res["auto"] is False
+
+
+def test_the_context_still_lands_in_the_example_log(kinded_app):
+    kinded_app.learn({"context": forum_context(["Anything"]),
+                      "chosenDir": "Jane Doe", "autoDir": "other"})
+    example = kinded_app.store.examples()[0]
+    assert example["chosen_dir"] == "Jane Doe"
+    assert example["auto_dir"] == "other"
+
+
+def test_learn_still_refuses_an_unknown_directory(kinded_app):
+    from safety import UnsafeName
+    with pytest.raises(UnsafeName):
+        kinded_app.learn({"context": forum_context([]),
+                          "chosenDir": "Not A Real Dir"})
+
+
+def test_the_host_prior_is_still_recorded(kinded_app):
+    kinded_app.learn({"context": forum_context([]), "chosenDir": "Jane Doe"})
+    assert kinded_app.store.host_prior("someforum.test") == "Jane Doe"
+
+
+def test_a_context_with_nothing_provable_learns_nothing(kinded_app):
+    """A direct-link download with no page, no thread and no channel. It used
+    to produce a GLOBAL alias off the filename-derived phrase."""
+    out = kinded_app.learn({
+        "context": {"url": "https://filehost.test/d/AbCdEf",
+                    "filename": "opaque.mp4", "page": {}},
+        "chosenDir": "Jane Doe", "confirmed": True})
+    assert out["written"] == []
+    assert kinded_app.store.alias_count() == 0
+
+
+def test_the_kind_gate_reads_a_live_edit_of_the_dirs_file(kinded_app):
+    """The classification is a plain file the operator edits; a stale cache
+    would mean an edit does not take effect until the sidecar restarts."""
+    ctx = MatchContext(tags=("Jane Doe",), site="someforum.test")
+    assert kinded_app.matcher().match(ctx).auto is True
+    Path(kinded_app.cfg.dirs_file).write_text(
+        'performer = []\ncategory = ["Jane Doe"]\n', encoding="utf-8")
+    assert kinded_app.matcher().match(ctx).auto is False

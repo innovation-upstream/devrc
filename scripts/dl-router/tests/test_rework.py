@@ -23,7 +23,7 @@ import server as S  # noqa: E402
 from conftest import SAMPLE_DIRS  # noqa: E402
 from dirindex import DirIndex, FileIndex  # noqa: E402
 from qbt import PathMap  # noqa: E402
-from store import Store  # noqa: E402
+from store import SCHEMA_VERSION, Store  # noqa: E402
 
 
 class FakeQbt:
@@ -268,7 +268,7 @@ def test_migration_2_is_re_runnable_after_a_crash(tmp_path):
     conn.close()
 
     store = Store(db)                     # must not raise
-    assert store.version() == 2
+    assert store.version() == SCHEMA_VERSION
     store.log_route(dir_name="other", download_id="7")
     assert store.route_for_download("7")["dir"] == "other"
     store.close()
@@ -277,11 +277,11 @@ def test_migration_2_is_re_runnable_after_a_crash(tmp_path):
 def test_migration_is_idempotent_when_run_twice(tmp_path):
     db = tmp_path / "dl-router.sqlite3"
     a = Store(db)
-    assert a.migrate() == 2
-    assert a.migrate() == 2
+    assert a.migrate() == SCHEMA_VERSION
+    assert a.migrate() == SCHEMA_VERSION
     a.close()
     b = Store(db)
-    assert b.version() == 2
+    assert b.version() == SCHEMA_VERSION
     b.close()
 
 

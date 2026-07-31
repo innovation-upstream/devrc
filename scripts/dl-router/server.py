@@ -44,8 +44,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import config as config_mod  # noqa: E402
 from dirindex import DirIndex, FileIndex  # noqa: E402
+from dirkinds import DirKinds  # noqa: E402
 from fetcher import Fetcher  # noqa: E402
-from matcher import MatchContext, Matcher, find_duplicate, norm_key  # noqa: E402
+from matcher import (  # noqa: E402
+    KIND_CATEGORY, KIND_UNKNOWN, KINDS, MatchContext, Matcher, content_tokens,
+    find_duplicate, host_of, identity_signals, norm_key, passes_fuzzy_guard,
+    suspicious_alias_key, title_subject,
+)
 from safety import (  # noqa: E402
     UnsafeName, is_safe_dir_name, names_match, safe_rel_path,
 )
@@ -59,6 +64,14 @@ MAX_BODY = 256 * 1024
 # clock skew — both come from the same machine). A torrent payload predates its
 # would-be routing decision by hours or days, so a few seconds costs nothing.
 MTIME_SLACK_S = 5.0
+
+# How many tags a single confirmation may turn into aliases, for a CATEGORY
+# directory. A tag list can hold 64 entries; the user confirmed one directory,
+# not sixty-four synonyms for it, and the first few are the most specific (site
+# rules and JSON-LD are pushed to the front of the list by the capture script).
+MAX_LEARNED_TAGS = 3
+# A title-derived subject longer than this is a sentence, not a name.
+MAX_TITLE_SUBJECT_TOKENS = 5
 
 _LOOPBACK = frozenset({"127.0.0.1", "::1", "localhost"})
 _ALLOWED_HOST_HEADERS = frozenset({"127.0.0.1", "localhost", "::1", "[::1]"})
@@ -116,16 +129,47 @@ class App:
         else:
             self.fetcher = None
 
+        self._kinds_file: DirKinds | None = None
+        self._kinds_stamp = None
+
     # --- helpers ----------------------------------------------------------- #
     @property
     def configured(self) -> bool:
         return self.root is not None and self.dirs is not None
 
+    def dir_kinds(self) -> DirKinds:
+        """The resolved directory classification.
+
+        The human TOML is re-parsed only when its mtime/size changes -- this is
+        on the /match path and /match has a 400 ms budget before the extension
+        gives up and uses its cached decision. The picker-assigned kinds come
+        from SQLite and are read every time, because /mkdir writes one and the
+        very next call must see it.
+        """
+        path = Path(self.cfg.dirs_file)
+        try:
+            st = path.stat()
+            stamp = (st.st_mtime_ns, st.st_size)
+        except OSError:
+            stamp = None
+        if self._kinds_file is None or stamp != self._kinds_stamp:
+            self._kinds_file = DirKinds.load(path)
+            self._kinds_stamp = stamp
+        overlay = self.store.dir_kind_map()
+        if not overlay:
+            return self._kinds_file
+        merged = dict(overlay)
+        # The human file wins: it is the one the operator reviewed.
+        merged.update(self._kinds_file.as_map())
+        return DirKinds(merged, path=path, present=self._kinds_file.present,
+                        error=self._kinds_file.error)
+
     def matcher(self) -> Matcher:
         return Matcher(self.dirs.entries(), self.store.alias_map(),
                        threshold=self.cfg.auto_threshold,
                        tie_margin=self.cfg.tie_margin,
-                       other_dir=self.cfg.other_dir)
+                       other_dir=self.cfg.other_dir,
+                       dir_kinds=self.dir_kinds().as_map())
 
     # --- endpoint logic (HTTP-free, so tests can call it directly) --------- #
     def healthz(self) -> dict:
@@ -137,13 +181,29 @@ class App:
             out["configError"] = self.config_error
         if self.configured:
             out["root_present"] = self.root.is_dir()
-            out["dirs"] = len(self.dirs.entries())
+            names = self.dirs.names()
+            out["dirs"] = len(names)
             out["aliases"] = self.store.alias_count()
             out["etag"] = self.dirs.etag()
+            # Unclassified directories never auto-file, so this count is the
+            # single most useful number for "why is it asking every time?".
+            kinds = self.dir_kinds()
+            out["dirKinds"] = kinds.counts(names)
+            out["dirsFile"] = {"path": str(kinds.path or ""),
+                               "present": kinds.present}
+            if kinds.error:
+                out["dirsFile"]["error"] = kinds.error
         return out
 
     def dirs_snapshot(self) -> dict:
         snap = self.dirs.snapshot()
+        # The kind travels WITH each directory: the extension's cached
+        # fallback matcher has to apply the same auto-file gate as the sidecar,
+        # or a sidecar timeout would auto-file into a category directory that
+        # the sidecar itself would have asked about.
+        kinds = self.dir_kinds()
+        for entry in snap.get("dirs", ()):
+            entry["kind"] = kinds.kind(entry.get("name", ""))
         # The extension needs the root to prove a completed download actually
         # landed inside the library before it asks /relocate to move it (see
         # relPathFromAbsolute). Loopback + bearer token only, and it never
@@ -178,50 +238,121 @@ class App:
         return result.as_dict(ttl_ms=int(self.cfg.get("dir_cache_ttl_s", 5.0) * 1000))
 
     def learn(self, payload: dict) -> dict:
+        """Persist a correction — ONLY the discriminating signal.
+
+        WHAT THIS REPLACED, and why. The first version wrote an alias for the
+        first three SUBJECT PHRASES of the context, plus one at GLOBAL scope.
+        On the first forum download that produced four aliases, of which three
+        were wrong: a forum section name, and two other posters' usernames --
+        one of them global, so it would have auto-filed anything carrying that
+        username into a stranger's directory at alias confidence. They were
+        deleted by hand; nothing in the system had surfaced them.
+
+        The rule is now keyed on WHAT the directory is:
+
+          * identity signals (Discord channel id, forum thread slug) are
+            learned for ANY kind. They are structural, come from the URL, and
+            cannot be contaminated by another user's content.
+          * a subject name in the page TITLE is learned for a performer (or a
+            not-yet-classified) directory. Never for a category.
+          * a TAG is learned only for a CATEGORY directory, where a tag is the
+            legitimate signal -- and then only from an explicit confirmation,
+            capped, site-scoped, and screened by `suspicious_alias_key`.
+
+        NO ALIAS IS EVER LEARNED AT GLOBAL SCOPE. A global alias applies to
+        every site at once, which is the largest blast radius the store has and
+        the least evidence supports it. `dl-route alias set --site '*'` still
+        exists for a deliberate one.
+        """
         chosen = payload.get("chosenDir")
         if not is_safe_dir_name(chosen):
             raise UnsafeName("chosenDir is not a valid directory name")
         if not self.dirs.has(chosen):
             raise UnsafeName(f"unknown directory: {chosen!r}")
         ctx = MatchContext.from_payload(payload.get("context") or {})
-        phrases = ctx.subject_phrases()
-        keys = [norm_key(p) for p in phrases[:3]]
-        keys = [k for k in keys if k]
-        written = 0
-        for key in keys:
-            if ctx.site:
-                self.store.upsert_alias(key, chosen, ctx.site)
-                written += 1
-            elif self.store.alias(key, "") is None:
-                # No site context (a direct-link download): a global alias is
-                # the only thing we can learn.
-                self.store.upsert_alias(key, chosen, "")
-                written += 1
-        # A global alias is seeded only when absent, so a site-specific
-        # correction never silently re-points every other site.
-        for key in keys[:1]:
-            if self.store.alias(key, "") is None:
-                self.store.upsert_alias(key, chosen, "")
-                written += 1
+        kind = self.dir_kinds().kind(chosen)
+        confirmed = bool(payload.get("confirmed"))
+        dir_names = sorted(self.dirs.name_set())
+        written: list = []
+        skipped: list = []
+
+        def write(key, site, source, evidence):
+            self.store.upsert_alias(key, chosen, site, source=source,
+                                    evidence=str(evidence)[:200])
+            written.append({"key": key, "site": site, "source": source})
+
+        def screen(phrase, key, source, spread):
+            why = suspicious_alias_key(phrase, key=key, dir_names=dir_names,
+                                       site=ctx.site, spread=spread)
+            if why:
+                skipped.append({"key": key, "source": source, "why": why})
+            return why is None
+
+        # 1. Identity signals — every kind, always. Site-scoped by construction.
+        for sig in identity_signals(ctx):
+            write(sig.key, sig.site, sig.kind, sig.evidence)
+
+        spread_map = self.store.phrase_dir_spread()
+
+        if kind == KIND_CATEGORY:
+            # 2. Tags — the legitimate signal for a category, and ONLY there.
+            if confirmed and ctx.site:
+                for tag in ctx.tags[:MAX_LEARNED_TAGS]:
+                    key = norm_key(tag)
+                    if not key:
+                        continue
+                    if screen(tag, key, "tag", spread_map.get(key, 0)):
+                        write(key, ctx.site, "tag", tag)
+            elif ctx.tags:
+                skipped.append({
+                    "key": "", "source": "tag",
+                    "why": "a tag is learned only from an explicit "
+                           "confirmation on a site-scoped context"})
+        else:
+            # 3. The subject inside the page title — performer / unclassified.
+            for title, site in ((ctx.title, ctx.site),
+                                (ctx.referrer_title, host_of(ctx.referrer_url))):
+                subject = title_subject(title, site)
+                if not subject or not site:
+                    continue
+                toks = content_tokens(subject)
+                if not passes_fuzzy_guard(toks) or len(toks) > MAX_TITLE_SUBJECT_TOKENS:
+                    continue
+                key = norm_key(subject)
+                if key and screen(subject, key, "title-subject",
+                                  spread_map.get(key, 0)):
+                    write(key, site, "title-subject", subject)
+
         if ctx.site:
             self.store.set_host_prior(ctx.site, chosen)
         self.store.add_example(payload.get("context") or {}, chosen,
                                payload.get("autoDir"),
                                bool(payload.get("createdNew")))
-        return {"ok": True, "aliases": written, "dir": chosen}
+        return {"ok": True, "aliases": len(written), "written": written,
+                "skipped": skipped, "dir": chosen, "kind": kind}
 
     def mkdir(self, payload: dict) -> dict:
         name = payload.get("name")
         if not is_safe_dir_name(name):
             raise UnsafeName(f"invalid directory name: {name!r}")
+        # The picker asks which kind a NEW directory is, because an
+        # unclassified one never auto-files -- creating one without an answer
+        # would quietly produce a directory that always interrupts.
+        kind = payload.get("kind")
+        if kind is not None and kind not in KINDS:
+            raise UnsafeName(f"invalid directory kind: {kind!r} "
+                             f"(expected one of {sorted(KINDS)})")
         target = self.root / name
         # Belt and braces: the name is already one safe component, but resolve
         # it too so a symlinked collision cannot land outside the root.
         resolved = safe_rel_path(name, root=self.root)
         existed = target.is_dir()
         os.makedirs(resolved, exist_ok=True)
+        if kind in KINDS:
+            self.store.set_dir_kind(name, kind, source="picker")
         self.dirs.refresh(force=True)
         return {"ok": True, "dir": name, "created": not existed,
+                "kind": self.dir_kinds().kind(name),
                 "etag": self.dirs.etag()}
 
     def _prove_owned(self, rel_path: str, src, download_id: str) -> None:

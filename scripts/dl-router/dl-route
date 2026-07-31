@@ -2,10 +2,12 @@
 """dl-route — CLI for the media download router.
 
     dl-route status                     sidecar + index health
-    dl-route dirs                       list the routing targets
+    dl-route dirs                       list the routing targets + their kinds
+    dl-route dirs classify [--out P]    DRAFT the directory-kind file
     dl-route match --filename F [...]   dry-run the matcher on a context
     dl-route log [-n 20]                recent routing decisions
     dl-route alias list|set|rm          inspect/edit the alias table
+    dl-route alias review [--json]      what has been LEARNED, with evidence
     dl-route backfill plan [--seed-aliases]
     dl-route backfill apply --manifest PATH.tsv [--dry-run]
     dl-route fetch URL --dir NAME       queue a yt-dlp job via the sidecar
@@ -30,10 +32,39 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import backfill as backfill_mod  # noqa: E402
 import config as config_mod  # noqa: E402
+import dirkinds as dirkinds_mod  # noqa: E402
 import qbt as qbt_mod  # noqa: E402
 from dirindex import DirIndex  # noqa: E402
-from matcher import MatchContext, Matcher  # noqa: E402
+from matcher import (  # noqa: E402
+    KIND_UNKNOWN, MatchContext, Matcher, alias_key, suspicious_alias_key,
+)
 from store import Store  # noqa: E402
+
+# What `alias list` prints for a site-less (global) alias, and what `alias rm`
+# must therefore ACCEPT for one.
+#
+# It printed `*` and refused it: the site is stored as `''`, so `--site '*'`
+# looked for a literal-asterisk site and removed nothing, with a cheerful
+# "alias removed" either way. The most dangerous alias in the table -- a global
+# one, which applies on every site at once -- was the one that could not be
+# removed the obvious way.
+GLOBAL_SITE_DISPLAY = "*"
+
+
+def _site_arg(value) -> str:
+    """Normalise a `--site` argument to the stored representation.
+
+    `*` (what `alias list` prints) and `''` both mean GLOBAL. Hostnames fold to
+    lower case, because that is how the sidecar stores every site it derives.
+    """
+    text = str(value or "").strip()
+    if text in ("", GLOBAL_SITE_DISPLAY):
+        return ""
+    return text.lower()
+
+
+def _site_display(site: str) -> str:
+    return site or GLOBAL_SITE_DISPLAY
 
 
 def _cfg() -> config_mod.Config:
@@ -66,6 +97,12 @@ def _local_bits(cfg):
     return root, index, store
 
 
+def _kinds(cfg, store):
+    """The resolved directory classification (human file + picker answers)."""
+    return dirkinds_mod.DirKinds.load(cfg.dirs_file,
+                                      overlay=store.dir_kind_map())
+
+
 # --- commands ------------------------------------------------------------- #
 def cmd_status(args) -> int:
     cfg = _cfg()
@@ -76,10 +113,24 @@ def cmd_status(args) -> int:
     print(f"library    {root or '(unset — configure library_root)'}")
     if root is not None:
         index = DirIndex(root, other_dir=cfg.other_dir)
-        print(f"dirs       {len(index.names())}")
+        names = index.names()
+        print(f"dirs       {len(names)}")
         errs = index.errors()
         if errs:
             print(f"index errs {errs}")
+        kinds = _kinds(cfg, Store(cfg.db_path))
+        counts = kinds.counts(names)
+        print(f"dir kinds  {cfg.dirs_file}"
+              f"{'' if kinds.present else ' (absent)'}")
+        print(f"           performer={counts['performer']} "
+              f"category={counts['category']} "
+              f"unclassified={counts[KIND_UNKNOWN]}")
+        if kinds.error:
+            print(f"           ERROR {kinds.error}")
+        if counts[KIND_UNKNOWN]:
+            # The single most likely cause of "why does it ask every time?".
+            print("           unclassified directories never auto-file — "
+                  "run: dl-route dirs classify")
     try:
         health = _api(cfg, "GET", "/healthz", timeout=3.0)
         print(f"sidecar    up · {json.dumps(health)}")
@@ -90,9 +141,37 @@ def cmd_status(args) -> int:
 
 def cmd_dirs(args) -> int:
     cfg = _cfg()
-    root, index, _ = _local_bits(cfg)
+    root, index, store = _local_bits(cfg)
+    kinds = _kinds(cfg, store)
     for entry in index.entries():
-        print(f"{entry.name}\t{entry.key}")
+        print(f"{entry.name}\t{entry.key}\t{kinds.kind(entry.name)}")
+    return 0
+
+
+def cmd_dirs_classify(args) -> int:
+    """DRAFT the directory-kind file from the live index.
+
+    Writes nothing anywhere near the library, and prints to stdout by default:
+    the point is that the operator reviews a best-guess split and moves the
+    wrong lines, rather than typing every directory name by hand. The draft is
+    NEVER committed — it is a list of their private directories.
+    """
+    cfg = _cfg()
+    root, index, store = _local_bits(cfg)
+    text = dirkinds_mod.draft(index.names(), known=_kinds(cfg, store))
+    if not args.out:
+        sys.stdout.write(text)
+        print(f"\n# review, then save as {cfg.dirs_file}", file=sys.stderr)
+        return 0
+    out = Path(args.out)
+    if out.exists() and not args.force:
+        raise SystemExit(f"{out} exists — review it, or pass --force to "
+                         f"overwrite (already-classified entries are kept)")
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(text, encoding="utf-8")
+    print(f"draft written: {out}", file=sys.stderr)
+    print("review it (move lines between the two lists), then it takes effect "
+          "on the next match", file=sys.stderr)
     return 0
 
 
@@ -101,12 +180,13 @@ def cmd_match(args) -> int:
     root, index, store = _local_bits(cfg)
     matcher = Matcher(index.entries(), store.alias_map(),
                       threshold=cfg.auto_threshold, tie_margin=cfg.tie_margin,
-                      other_dir=cfg.other_dir)
+                      other_dir=cfg.other_dir,
+                      dir_kinds=_kinds(cfg, store).as_map())
     ctx = MatchContext(
         filename=args.filename or "", url=args.url or "",
         referrer=args.referrer or "", site=args.site or "",
         title=args.title or "", tags=tuple(args.tag or ()),
-        link_text=args.link_text or "")
+        link_text=args.link_text or "", page_url=args.page_url or "")
     result = matcher.match(ctx, host_prior=store.host_prior(ctx.site))
     print(json.dumps(result.as_dict(), indent=2, ensure_ascii=False))
     return 0
@@ -121,20 +201,117 @@ def cmd_log(args) -> int:
     return 0
 
 
+def _alias_warning(cfg, store, phrase, key, site):
+    """Why this alias looks like a mistake, or None."""
+    root = cfg.library_root
+    names = DirIndex(root, other_dir=cfg.other_dir).names() if root else []
+    spread = store.phrase_dir_spread().get(key, 0)
+    why = suspicious_alias_key(phrase, key=key, dir_names=names, site=site,
+                               spread=spread)
+    if why:
+        return why
+    if not site:
+        return ("global scope — it applies on EVERY site, which is the widest "
+                "blast radius the alias table has")
+    return None
+
+
 def cmd_alias(args) -> int:
     cfg = _cfg()
     store = Store(cfg.db_path)
     if args.alias_cmd == "list":
         for (key, site), target in sorted(store.alias_map().items()):
-            print(f"{key}\t{site or '*'}\t{target}")
+            # `_site_display` and `_site_arg` are inverses, so what is printed
+            # here is exactly what `alias rm --site` accepts.
+            print(f"{key}\t{_site_display(site)}\t{target}")
+    elif args.alias_cmd == "review":
+        return cmd_alias_review(args, cfg, store)
     elif args.alias_cmd == "set":
-        from matcher import norm_key
-        store.upsert_alias(norm_key(args.phrase), args.dir, args.site or "")
-        print(f"alias set: {args.phrase!r} -> {args.dir}")
+        site = _site_arg(args.site)
+        key = alias_key(args.phrase)
+        if not key:
+            raise SystemExit(f"{args.phrase!r} does not produce an alias key")
+        warning = _alias_warning(cfg, store, args.phrase, key, site)
+        if warning and not args.force:
+            raise SystemExit(
+                f"refusing to write {key!r} -> {args.dir}: {warning}\n"
+                f"  pass --force if you mean it")
+        if warning:
+            print(f"warning: {warning}", file=sys.stderr)
+        store.upsert_alias(key, args.dir, site, source="manual",
+                           evidence=str(args.phrase))
+        print(f"alias set: {key!r} @ {_site_display(site)} -> {args.dir}")
     elif args.alias_cmd == "rm":
-        from matcher import norm_key
-        store.delete_alias(norm_key(args.phrase), args.site or "")
-        print(f"alias removed: {args.phrase!r}")
+        site = _site_arg(args.site)
+        key = alias_key(args.phrase)
+        if store.alias(key, site) is None:
+            # Silence here is how an un-removable alias stayed un-removed: the
+            # old command printed "alias removed" whether or not a row existed.
+            print(f"no alias {key!r} at site {_site_display(site)}",
+                  file=sys.stderr)
+            return 1
+        store.delete_alias(key, site)
+        print(f"alias removed: {key!r} @ {_site_display(site)}")
+    return 0
+
+
+def cmd_alias_review(args, cfg=None, store=None) -> int:
+    """Everything that has been LEARNED, with the evidence behind it.
+
+    This command exists because four wrong aliases -- a forum section name and
+    two other posters' usernames, one of them global -- sat in the table with
+    nothing to surface them. `alias list` printed three columns of keys; it
+    could not answer "what made you believe this?" or "has it ever fired?".
+    """
+    cfg = cfg or _cfg()
+    store = store or Store(cfg.db_path)
+    rows = store.alias_rows()
+    root = cfg.library_root
+    names = DirIndex(root, other_dir=cfg.other_dir).names() if root else []
+    spread = store.phrase_dir_spread()
+    for row in rows:
+        row["suspect"] = suspicious_alias_key(
+            row["evidence"] or row["key"], key=row["key"], dir_names=names,
+            site=row["site"], spread=spread.get(row["key"], 0))
+        row["global"] = not row["site"]
+    # Riskiest first: global scope, then flagged, then most-used.
+    rows.sort(key=lambda r: (not r["global"], r["suspect"] is None,
+                             -int(r["hits"]), r["key"]))
+
+    if getattr(args, "json", False):
+        print(json.dumps(rows, indent=2, ensure_ascii=False))
+        return 0
+
+    if not rows:
+        print("no aliases learned yet")
+        return 0
+    widths = {
+        "key": max(3, *(len(r["key"]) for r in rows)),
+        "site": max(4, *(len(_site_display(r["site"])) for r in rows)),
+        "dir": max(3, *(len(r["dir"]) for r in rows)),
+        "source": max(6, *(len(r["source"] or "?") for r in rows)),
+    }
+    flagged = sum(1 for r in rows if r["suspect"] or r["global"])
+    print(f"{len(rows)} alias(es), {flagged} worth a look  "
+          f"(! = suspicious or global)")
+    print(f"  {'KEY'.ljust(widths['key'])}  {'SITE'.ljust(widths['site'])}  "
+          f"{'DIR'.ljust(widths['dir'])}  HITS  "
+          f"{'SOURCE'.ljust(widths['source'])}  EVIDENCE")
+    for row in rows:
+        flag = "!" if (row["suspect"] or row["global"]) else " "
+        print(f"{flag} {row['key'].ljust(widths['key'])}  "
+              f"{_site_display(row['site']).ljust(widths['site'])}  "
+              f"{row['dir'].ljust(widths['dir'])}  "
+              f"{str(row['hits']).rjust(4)}  "
+              f"{(row['source'] or '?').ljust(widths['source'])}  "
+              f"{row['evidence'] or ''}")
+        if row["suspect"]:
+            print(f"    ^ {row['suspect']}")
+        elif row["global"]:
+            print("    ^ global scope — applies on every site")
+    if flagged:
+        print(f"\nremove one with: dl-route alias rm '<key>' --site "
+              f"'{GLOBAL_SITE_DISPLAY}'   (or --site <hostname>)")
     return 0
 
 
@@ -271,13 +448,27 @@ def build_parser() -> argparse.ArgumentParser:
     sub = p.add_subparsers(dest="cmd", required=True)
 
     sub.add_parser("status", help="sidecar + index health").set_defaults(fn=cmd_status)
-    sub.add_parser("dirs", help="list routing targets").set_defaults(fn=cmd_dirs)
     sub.add_parser("token", help="print the bearer token").set_defaults(fn=cmd_token)
+
+    d = sub.add_parser("dirs", help="list routing targets + their kinds")
+    d.set_defaults(fn=cmd_dirs)
+    # `required=False`: a bare `dl-route dirs` still lists.
+    dsub = d.add_subparsers(dest="dirs_cmd", required=False)
+    dc = dsub.add_parser(
+        "classify",
+        help="DRAFT the directory-kind file (performer vs category)")
+    dc.add_argument("--out", default="",
+                    help="write the draft here instead of stdout")
+    dc.add_argument("--force", action="store_true",
+                    help="overwrite an existing --out file")
+    dc.set_defaults(fn=cmd_dirs_classify)
 
     m = sub.add_parser("match", help="dry-run the matcher")
     m.add_argument("--filename", default="")
     m.add_argument("--url", default="")
     m.add_argument("--referrer", default="")
+    m.add_argument("--page-url", default="",
+                   help="the page the download was clicked on (thread slug)")
     m.add_argument("--site", default="")
     m.add_argument("--title", default="")
     m.add_argument("--link-text", default="")
@@ -290,14 +481,22 @@ def build_parser() -> argparse.ArgumentParser:
 
     al = sub.add_parser("alias", help="inspect/edit aliases")
     alsub = al.add_subparsers(dest="alias_cmd", required=True)
-    alsub.add_parser("list")
+    alsub.add_parser("list", help="key / site / dir, one per line")
+    arev = alsub.add_parser(
+        "review", help="what has been LEARNED, with evidence and hit counts")
+    arev.add_argument("--json", action="store_true")
     aset = alsub.add_parser("set")
     aset.add_argument("phrase")
     aset.add_argument("dir")
-    aset.add_argument("--site", default="")
+    # `*` and `''` both mean global, so what `alias list` PRINTS is accepted.
+    aset.add_argument("--site", default="",
+                      help=f"hostname, or '{GLOBAL_SITE_DISPLAY}'/'' for global")
+    aset.add_argument("--force", action="store_true",
+                      help="write it even though it looks like a mistake")
     arm = alsub.add_parser("rm")
     arm.add_argument("phrase")
-    arm.add_argument("--site", default="")
+    arm.add_argument("--site", default="",
+                     help=f"hostname, or '{GLOBAL_SITE_DISPLAY}'/'' for global")
     al.set_defaults(fn=cmd_alias)
 
     bf = sub.add_parser("backfill", help="plan/apply the loose-file backfill")

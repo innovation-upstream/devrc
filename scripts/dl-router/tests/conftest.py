@@ -104,7 +104,25 @@ def file_index(library, clock):
 
 
 @pytest.fixture
-def cfg(tmp_path, library):
+def dirs_file(tmp_path):
+    """Directory kinds for the sample library — every directory `performer`.
+
+    Only a `performer` directory may auto-file (a `category` always asks, and
+    an unclassified one does too), so without a classification EVERY auto-file
+    assertion in the suite would be asserting the kind gate rather than the
+    rule it names. The gate has its own tests, and the category/unclassified
+    cases write their own file.
+    """
+    path = tmp_path / "dirs.toml"
+    body = ["performer = ["]
+    body += [f'  "{name}",' for name in SAMPLE_DIRS]
+    body += ["]", "category = []", ""]
+    path.write_text("\n".join(body), encoding="utf-8")
+    return path
+
+
+@pytest.fixture
+def cfg(tmp_path, library, dirs_file):
     """A Config pointing entirely at temp paths."""
     data = config_mod._deep_merge(config_mod.DEFAULTS, {
         "library_root": str(library),
@@ -113,4 +131,5 @@ def cfg(tmp_path, library):
     })
     return config_mod.Config(data, path=tmp_path / "config.toml",
                              state_dir=tmp_path / "state",
-                             token_file=tmp_path / "token")
+                             token_file=tmp_path / "token",
+                             dirs_file=dirs_file)
