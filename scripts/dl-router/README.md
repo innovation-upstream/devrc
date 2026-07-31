@@ -83,14 +83,20 @@ Normalisation key: NFKD → strip diacritics → casefold → drop non-alphanume
 | normalised page tag/subject == directory key | 0.85 |
 | token-sequence containment, scaled by coverage | 0.60–0.80 |
 | filename token match | ≤ 0.50 |
-| host prior (last directory used on this site) | +0.05, ranking only |
+| host prior (last directory used on this site) | +0.05, display only |
 
 Guards:
 
 * a fuzzy hit needs **≥2 tokens, or one token of ≥4 characters** — otherwise a
   short directory name matches random page prose;
-* the **host prior is never decisive**: it cannot create a candidate, and the
-  auto-file threshold is tested against the pre-bonus score;
+* the **host prior is never decisive**. Candidate ordering, the auto-file
+  threshold and the tie margin all read the **pre-bonus** score, so the prior
+  cannot create a candidate, cannot change which candidate wins, cannot carry
+  one over the threshold, and cannot manufacture the margin that would suppress
+  the tie-break. All it may do is put its directory first among candidates that
+  are *already exactly tied* — and such a pair is inside the tie margin by
+  definition, so the picker opens anyway. The `+0.05` survives on the candidate
+  list purely so the reason string can show the prior was consulted;
 * the top two within `tie_margin` → picker, never a coin flip;
 * `reason` is always returned and shown in the toast, so a wrong match is
   diagnosable rather than mysterious.

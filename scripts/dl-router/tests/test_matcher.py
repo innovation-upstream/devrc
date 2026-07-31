@@ -322,3 +322,76 @@ def test_as_dict_shape_matches_the_sidecar_contract():
     assert set(out) == {"dir", "confidence", "reason", "auto", "candidates",
                         "suggestNew", "dup", "ttlMs"}
     assert out["ttlMs"] == 5000
+
+
+# --- the host prior is NEVER decisive -------------------------------------- #
+#
+# The invariant is stated in matcher.py's own docstring and in README's scoring
+# table. It was not true: the prior added its bonus to `score`, ranking read
+# `score`, and the tie-break compared `score`. With two 0.85 tag-exact
+# candidates that promoted the runner-up to 0.90, which BOTH reordered the pair
+# and manufactured a 0.05 gap that suppressed the tie-break -- so the download
+# silently auto-filed into a different directory with no picker.
+def _two_way_tie_matcher(threshold=0.75, tie_margin=0.05):
+    """Two directories that both score exactly SCORE_TAG_EXACT on one context."""
+    return make(dirs=["Jane Doe", "Aster Vale", "other"], threshold=threshold,
+                tie_margin=tie_margin)
+
+
+TIE_CTX = MatchContext(tags=("Jane Doe", "Aster Vale"), site="example-site.test")
+
+
+def test_two_equal_tag_exact_candidates_go_to_the_picker_without_a_prior():
+    res = _two_way_tie_matcher().match(TIE_CTX)
+    assert res.auto is False
+    assert res.reason.startswith("tie:")
+
+
+def test_a_prior_on_the_runner_up_does_not_auto_file_it():
+    """THE regression. Before the fix this returned auto=True for 'Aster Vale'."""
+    res = _two_way_tie_matcher().match(TIE_CTX, host_prior="Aster Vale")
+    assert res.auto is False, (
+        "the host prior promoted the runner-up over the tie-break")
+    assert res.reason.startswith("tie:")
+
+
+def test_a_prior_never_changes_which_candidate_wins_on_base():
+    """A strictly better candidate stays the winner even with the prior on the
+    other one and the bonus large enough to cross the gap."""
+    m = make(dirs=["Jane Doe", "Aster Vale", "other"], threshold=0.5,
+             tie_margin=0.0)
+    # 'Jane Doe' hits the global alias (0.90), 'Aster Vale' the tag rule (0.85).
+    # The 0.05 bonus is exactly the gap, which is what used to flip it.
+    m.aliases = {(norm_key("Jane Doe"), ""): "Jane Doe"}
+    res = m.match(MatchContext(tags=("Jane Doe", "Aster Vale")),
+                  host_prior="Aster Vale")
+    assert res.dir == "Jane Doe"
+    assert res.candidates[0].dir == "Jane Doe"
+
+
+def test_a_prior_orders_but_does_not_decide_an_exact_tie():
+    """The one thing the prior may still do: surface its directory first in the
+    candidate list. The picker still opens, because a gap of 0 is inside any
+    positive tie margin."""
+    res = _two_way_tie_matcher().match(TIE_CTX, host_prior="Aster Vale")
+    assert res.candidates[0].dir == "Aster Vale"
+    assert res.dir == "Aster Vale"
+    assert res.auto is False
+
+
+def test_confidence_is_the_pre_bonus_score():
+    """`confidence` is what the threshold was tested against; reporting the
+    bonused number would misstate why a decision was taken."""
+    res = make().match(MatchContext(tags=("Jane Doe",)), host_prior="Jane Doe")
+    assert res.confidence == pytest.approx(SCORE_TAG_EXACT)
+    assert res.candidates[0].score == pytest.approx(
+        SCORE_TAG_EXACT + HOST_PRIOR_BONUS)
+
+
+def test_a_prior_cannot_carry_a_below_threshold_score_over_the_line():
+    m = make(threshold=0.75)
+    res = m.match(MatchContext(title="Jane Doe tonight"), host_prior="Jane Doe")
+    top = res.candidates[0]
+    assert top.base < 0.75 <= top.base + HOST_PRIOR_BONUS
+    assert res.auto is False
+    assert res.confidence < 0.75

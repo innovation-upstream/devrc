@@ -242,8 +242,16 @@ export function formatDup(dup) {
  */
 export function handleDetermining(item, suggest, deps) {
   const otherDir = deps.otherDir || "other";
+  // FAIL CLOSED. This used to be `: null`, and sanitizeDirName(name, null)
+  // skips the allowlist entirely -- so a knownDirs that was an Array, or
+  // undefined, or null (a snapshot that had not loaded, a caller passing the
+  // wrong shape) meant ANY syntactically valid directory name coming back from
+  // the sidecar was accepted and Chrome created whatever was suggested. The
+  // catch-all is always allowed because it is the terminal fallback of this
+  // very ladder; nothing else is, unless the snapshot vouched for it.
   const known = deps.knownDirs instanceof Set
-    ? new Set([...deps.knownDirs, otherDir]) : null;
+    ? new Set([...deps.knownDirs, otherDir])
+    : new Set([otherDir]);
   const timeoutMs = deps.timeoutMs ?? DEFAULT_MATCH_TIMEOUT_MS;
   const setT = deps.setTimeout || setTimeout;
   const clearT = deps.clearTimeout || clearTimeout;

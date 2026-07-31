@@ -99,8 +99,13 @@ async function restoreSnapshot() {
 }
 
 function knownDirs() {
-  const names = (state.snapshot?.dirs || []).map((d) => d.name);
-  return new Set(names);
+  // Always a Set, even for a hostile or half-loaded snapshot: handleDetermining
+  // fails closed on a non-Set, and a `.map` on a non-array would throw inside
+  // the download listener.
+  const dirs = state.snapshot?.dirs;
+  if (!Array.isArray(dirs)) return new Set();
+  return new Set(dirs.map((d) => d && d.name).filter(
+    (n) => typeof n === "string" && n));
 }
 
 function otherDir() {

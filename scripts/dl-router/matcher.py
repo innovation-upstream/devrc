@@ -25,9 +25,13 @@ Guards
     * A fuzzy hit (containment or filename) needs >=2 tokens, or a single token
       of >=4 characters. Without this a 3-letter directory name matches random
       page prose.
-    * The host prior is a RANKING nudge: it never creates a candidate on its own
-      and never carries a directory over the auto-file threshold (the threshold
-      test reads `base`, the pre-bonus score).
+    * The host prior is a RANKING nudge and NEVER decisive. It cannot create a
+      candidate, cannot carry a directory over the auto-file threshold, cannot
+      change which candidate wins, and cannot suppress the tie-break: ordering,
+      the threshold and the tie margin all read `base`, the pre-bonus score.
+      The prior only breaks a tie between candidates that already have an
+      identical `base` -- and such a pair is inside the tie margin by
+      definition, so the picker opens anyway.
     * Top two within `tie_margin` -> no auto-file, show the picker.
 """
 from __future__ import annotations
@@ -396,14 +400,32 @@ class Matcher:
             if cur is None or cand.base > cur.base:
                 best[cand.dir] = cand
 
-        # Host prior: RANKING ONLY. It never invents a candidate and `base` (the
-        # threshold input) is left untouched, so it can never be decisive.
+        # Host prior: RANKING ONLY, and only among candidates that are ALREADY
+        # tied on `base`.
+        #
+        # It used to add its bonus to `score` and then rank on `score`, which
+        # made it decisive twice over: with two 0.85 tag-exact candidates it
+        # promoted the runner-up to 0.90, which both re-ordered the pair AND
+        # opened a 0.05 gap that defeated the tie-break -- so a download
+        # auto-filed into a different directory than the evidence chose, with
+        # no picker and nothing in the reason string to say why. matcher.py's
+        # own docstring and README both promised the opposite.
+        #
+        # Now `base` alone decides the order and the threshold, and the prior is
+        # only a tiebreak between equal `base` values -- where the tie-margin
+        # check below then fires anyway (a gap of 0 is always inside the
+        # margin), so the picker still opens. The bonus survives on `score`
+        # purely so the candidate list and the reason string can show that the
+        # prior was consulted.
         if host_prior and host_prior in best:
             cand = best[host_prior]
             cand.score = min(1.0, cand.base + HOST_PRIOR_BONUS)
             cand.reason += " +host-prior"
 
-        candidates = sorted(best.values(), key=lambda c: (-c.score, c.dir))
+        def rank(c: Candidate):
+            return (-c.base, 0 if c.dir == host_prior else 1, c.dir)
+
+        candidates = sorted(best.values(), key=rank)
 
         if not candidates:
             return MatchResult(dir=self.other_dir, confidence=0.0,
@@ -416,11 +438,15 @@ class Matcher:
         reason = top.reason
         if auto and len(candidates) > 1:
             runner = candidates[1]
-            if (top.score - runner.score) < self.tie_margin:
+            # `base`, not `score`: comparing bonused scores let the prior
+            # manufacture the margin that suppressed this very check.
+            if (top.base - runner.base) < self.tie_margin:
                 auto = False
-                reason = (f"tie: '{top.dir}' {top.score:.2f} vs "
-                          f"'{runner.dir}' {runner.score:.2f} — {top.reason}")
-        return MatchResult(dir=top.dir, confidence=top.score, reason=reason,
+                reason = (f"tie: '{top.dir}' {top.base:.2f} vs "
+                          f"'{runner.dir}' {runner.base:.2f} — {top.reason}")
+        # `confidence` is the pre-bonus score: it is what the threshold was
+        # tested against, so reporting the bonused number would be a lie.
+        return MatchResult(dir=top.dir, confidence=top.base, reason=reason,
                            candidates=candidates[:8], auto=auto,
                            suggest_new=self.propose_new(phrases), dup=dup)
 
