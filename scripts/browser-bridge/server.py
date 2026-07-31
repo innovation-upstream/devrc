@@ -1536,6 +1536,16 @@ def make_handler(registry: Registry, token: str, cmd_timeout: float,
             # Identity strings (instance id / label / ext version / ext id) get
             # the tight cap; the active-tab url/title get the larger one, since a
             # legitimate URL is long (it mirrors protocol.js MAX_HEADER_VALUE_CHARS).
+            #
+            # ⚠ NOTE FOR ANYONE CHANGING /poll (e.g. the long-poll disconnect
+            # fix): `instance_id` is the ROUTING KEY (`key = label or
+            # instance_id` in _register_locked), and it is TRUNCATED here. Today
+            # it is a crypto.randomUUID() — 36 chars, nowhere near the cap — so
+            # this is inert. But if ids ever grow, or gain a per-connection
+            # suffix, two distinct connections could truncate to the SAME string
+            # and collide into one registry slot, which presents as a phantom
+            # supersede rather than as an obvious length bug. Raise the cap or
+            # hash instead of truncating if that day comes.
             instance_id = (self.headers.get(HDR_INSTANCE_ID)
                            or "").strip()[:MAX_IDENTITY_CHARS]
             raw_label = self.headers.get(HDR_LABEL) or ""

@@ -336,6 +336,22 @@ in
       # aborting — a bare `mv:` message from `set -e` is not an acceptable exit.
       bbDone=""
       bbTry=0
+
+      # --dry-run must SHOW the swap, perform nothing, and never fail. The loop
+      # below cannot run under dry-run: its branches are decided from filesystem
+      # effects that $DRY_RUN_CMD deliberately does not produce (nothing was
+      # copied, nothing gets removed), so it would re-decide the same branch,
+      # exhaust its attempts and abort the dry run — with blame text about a
+      # concurrent activation that is not involved. Gate it out, and print what
+      # would run, since that is the entire job of this mode.
+      if [ -n "''${DRY_RUN_CMD:-}" ]; then
+        echo "would install the browser-bridge extension at $bbDst:"
+        echo "  mv -T --exchange $bbTmp $bbDst"
+        echo "  # if RENAME_EXCHANGE is unavailable, the weaker fallback:"
+        echo "  mv -T $bbDst $bbDst.old.$$ && mv -T $bbTmp $bbDst"
+        bbDone=1
+      fi
+
       while [ -z "$bbDone" ] && [ "$bbTry" -lt 2 ]; do
         bbTry=$((bbTry + 1))
         # `[ ! -L ]` matters: chmod -R FOLLOWS a symlink-to-directory and would
@@ -381,12 +397,20 @@ in
             fi
           fi
         elif [ -e "$bbDst" ] || [ -L "$bbDst" ]; then
-          # A symlink or a plain file sits at the path. Unlink ONLY that — never
-          # a directory, so a tree another activation installed in the TOCTOU
-          # window above can't be deleted here. Next iteration installs into the
-          # now-absent path (or exchanges, if one appeared meanwhile).
-          $DRY_RUN_CMD rm -rf "$bbDst"        # on a symlink this drops the LINK,
-                                              # not its target (measured)
+          # A symlink or a plain file sits at the path (an operator artefact —
+          # the documented rollback goes via brave://extensions and never
+          # creates one). Remove it so the next iteration can install.
+          #
+          # `rm -f`, NOT `rm -rf`, and that is the whole point: the `elif` test
+          # above is a TOCTOU, so by the time this line runs the path may have
+          # become a DIRECTORY that a concurrent activation just installed.
+          # `rm -rf` deletes it silently with rc=0 — measured, 5/5 — which is
+          # exactly the hazard this loop exists to close. `rm -f` REFUSES a
+          # directory (rc=1, tree intact — measured), removes a plain file, and
+          # on a symlink drops the LINK, not its target (measured). `|| true`
+          # keeps the refusal non-fatal so iteration 2 re-decides and takes the
+          # atomic exchange branch — the intended recovery.
+          $DRY_RUN_CMD rm -f "$bbDst" || true
         else
           # Absent — first install. If a concurrent activation wins the race and
           # creates the directory first, `mv -T` refuses (it will not descend
@@ -395,7 +419,9 @@ in
             bbDone=1
           elif [ "$bbTry" -ge 2 ]; then
             echo "browser-bridge: extension deploy FAILED — could not install" \
-                 "at $bbDst. Nothing was removed; re-run home-manager switch." >&2
+                 "at $bbDst. No DIRECTORY was removed (a symlink or plain file" \
+                 "at that path may have been); the new tree is at $bbTmp." \
+                 "Re-run home-manager switch." >&2
             false                             # loud: set -e aborts the switch
           fi
         fi
@@ -405,8 +431,10 @@ in
       # of attempts, and that must never pass silently for a deploy.
       if [ -z "$bbDone" ]; then
         echo "browser-bridge: extension deploy FAILED — $bbDst did not settle" \
-             "after $bbTry attempts (concurrent activation?). Nothing was" \
-             "removed; re-run home-manager switch." >&2
+             "after $bbTry attempts (a concurrent activation is the likely" \
+             "cause). No DIRECTORY was removed (a symlink or plain file at that" \
+             "path may have been); the new tree is at $bbTmp. Re-run" \
+             "home-manager switch." >&2
         false                                 # loud: set -e aborts the switch
       fi
 
