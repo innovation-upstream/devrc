@@ -122,6 +122,13 @@
     // focus, so the load handler is the one that usually does the work. Without
     // this the user would have to click the overlay before they could type,
     // which the popup window never required.
+    //
+    // THIS IS NOT SUFFICIENT ON ITS OWN, and that is why `dlr:focus-overlay`
+    // exists. The worker RAISES the tab and its window after the frame reports
+    // ready (see openOverlayPicker) -- and raising a tab puts focus on the
+    // page's own document, taking it straight back off a frame that had just
+    // been given it. Whichever of the two lands last wins, so the worker asks
+    // for the focus again once it has finished raising things.
     frame.addEventListener("load", function () {
       try {
         frame.focus();
@@ -222,6 +229,27 @@
     return { ok: removed };
   }
 
+  /**
+   * Handle `dlr:focus-overlay`. Put keyboard focus back on the live frame.
+   *
+   * The id must match: a stale focus request must not yank the caret into a
+   * picker a LATER download opened, and a request for an overlay we do not
+   * have is a no-op rather than a blind `document.activeElement` grab.
+   */
+  function focusOverlay(id) {
+    if (!current || !current.frame) return { ok: false, error: "no_overlay" };
+    if (id && current.id !== id) return { ok: false, error: "stale" };
+    if (typeof current.frame.focus !== "function") {
+      return { ok: false, error: "not_focusable" };
+    }
+    try {
+      current.frame.focus();
+    } catch (e) {
+      return { ok: false, error: "focus_failed" };
+    }
+    return { ok: true };
+  }
+
   function hasOverlay() {
     return Boolean(current);
   }
@@ -239,6 +267,10 @@
     }
     if (msg.type === "dlr:close-overlay") {
       sendResponse(closeOverlay(msg.overlay, doc));
+      return false;
+    }
+    if (msg.type === "dlr:focus-overlay") {
+      sendResponse(focusOverlay(msg.overlay));
       return false;
     }
     return false;
@@ -278,6 +310,7 @@
       HOST_ID: HOST_ID,
       openOverlay: openOverlay,
       closeOverlay: closeOverlay,
+      focusOverlay: focusOverlay,
       handleMessage: handleMessage,
       hasOverlay: hasOverlay,
       stillAttached: stillAttached,

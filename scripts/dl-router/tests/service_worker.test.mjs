@@ -1969,3 +1969,254 @@ test("registerListeners really registers the tab watchers", () => {
   assert.ok(kinds.includes("removed"), "tabs.onRemoved");
   assert.ok(kinds.includes("updated"), "tabs.onUpdated");
 });
+
+// --- the duplicate flow: confirm after completion, warn, never destroy ------ //
+//
+// THE DUPLICATE CHECK CANNOT HAPPEN ON THE /match PATH. At
+// onDeterminingFilename time Chrome has written nothing, so there is no file to
+// hash, and `totalBytes` is frequently 0 so even the size is unreliable. These
+// pin that it happens on COMPLETION, that it only ever warns, and that the one
+// destructive message refuses everything it cannot get an answer for.
+
+function dedupeResponder(dedupe, { onPost } = {}) {
+  return async (url, opts) => {
+    if (onPost) onPost(url, JSON.parse(opts?.body || "{}"));
+    if (url.endsWith("/dedupe")) {
+      return { ok: true, status: 200, json: async () => dedupe };
+    }
+    if (url.endsWith("/relocate")) {
+      return { ok: true, status: 200,
+        json: async () => ({ ok: true, relPath: "Jane Doe/f (1).mp4" }) };
+    }
+    return { ok: true, status: 200, json: async () => ({ ok: true }) };
+  };
+}
+
+test("a completed auto-filed download is checked for duplicates", async () => {
+  reset();
+  SW.state.pending.set(200, { dir: "Jane Doe", payload: { page: {} } });
+  searchResult = [{ id: 200, state: "complete",
+    filename: `${LIB_ROOT}/Jane Doe/f.mp4` }];
+  const posted = [];
+  fetchHandler = dedupeResponder(
+    { ok: true, duplicate: false },
+    { onPost: (url, body) => posted.push({ url, body }) });
+  await SW.onDownloadChanged({ id: 200, state: { current: "complete" } });
+  const check = posted.find((p) => p.url.endsWith("/dedupe"));
+  assert.ok(check, "no duplicate check ran on the auto-file path");
+  assert.deepEqual(check.body, { relPath: "Jane Doe/f.mp4", downloadId: 200 });
+  assert.equal(calls.windowsCreate.length, 0, "nothing to warn about");
+});
+
+test("a CONFIRMED duplicate opens a toast offering delete and keep", async () => {
+  reset();
+  SW.state.pending.set(201, { dir: "Jane Doe", payload: { page: {} } });
+  searchResult = [{ id: 201, state: "complete",
+    filename: `${LIB_ROOT}/Jane Doe/f.mp4` }];
+  fetchHandler = dedupeResponder({
+    ok: true, duplicate: true, relPath: "Jane Doe/f.mp4",
+    dupRelPath: "john-smith/75936.mov", kind: "size+hash" });
+  await SW.onDownloadChanged({ id: 201, state: { current: "complete" } });
+  assert.equal(calls.windowsCreate.length, 1);
+  const url = calls.windowsCreate[0].url;
+  assert.match(url, /toast\.html\?/);
+  const q = new URLSearchParams(url.split("?")[1]);
+  assert.equal(q.get("mode"), "dup");
+  assert.equal(q.get("rel"), "Jane Doe/f.mp4");
+  assert.equal(q.get("dupRel"), "john-smith/75936.mov");
+  assert.match(q.get("dup"), /Duplicate of john-smith\/75936\.mov/);
+  assert.equal(calls.windowsCreate[0].focused, true,
+    "a question with no auto-close must not open behind the browser");
+});
+
+test("the duplicate check uses the path AFTER a correction moved the file",
+  async () => {
+    // The sidecar uniquifies on a name collision, so its answer is the
+    // authority on where the file is. Checking the pre-move path would ask
+    // about a file that is no longer there.
+    reset();
+    SW.state.pending.set(202, { dir: "other", payload: { page: {} },
+      wanted: "Jane Doe" });
+    searchResult = [{ id: 202, state: "complete",
+      filename: `${LIB_ROOT}/other/f.mp4` }];
+    const posted = [];
+    fetchHandler = dedupeResponder({ ok: true, duplicate: false },
+      { onPost: (url, body) => posted.push({ url, body }) });
+    await SW.onDownloadChanged({ id: 202, state: { current: "complete" } });
+    const check = posted.find((p) => p.url.endsWith("/dedupe"));
+    assert.equal(check.body.relPath, "Jane Doe/f (1).mp4");
+  });
+
+test("a failing duplicate check never breaks the completion path", async () => {
+  reset();
+  SW.state.pending.set(203, { dir: "other", payload: { page: {} },
+    wanted: "Jane Doe" });
+  searchResult = [{ id: 203, state: "complete",
+    filename: `${LIB_ROOT}/other/f.mp4` }];
+  const posted = [];
+  fetchHandler = async (url, opts) => {
+    posted.push(url);
+    if (url.endsWith("/dedupe")) throw new Error("sidecar went away");
+    void opts;
+    return { ok: true, status: 200, json: async () => ({ ok: true }) };
+  };
+  await SW.onDownloadChanged({ id: 203, state: { current: "complete" } });
+  assert.ok(posted.some((u) => u.endsWith("/learn")),
+    "the correction must still have completed");
+  assert.equal(calls.notifications.length, 0,
+    "a dedupe failure is not worth interrupting anyone for");
+});
+
+test("a duplicate answer with no counterpart path is ignored", async () => {
+  // Without `dupRelPath` there is nothing proving the bytes exist elsewhere,
+  // so there is nothing to offer a delete against.
+  reset();
+  SW.state.pending.set(204, { dir: "Jane Doe", payload: { page: {} } });
+  searchResult = [{ id: 204, state: "complete",
+    filename: `${LIB_ROOT}/Jane Doe/f.mp4` }];
+  fetchHandler = dedupeResponder({ ok: true, duplicate: true });
+  await SW.onDownloadChanged({ id: 204, state: { current: "complete" } });
+  assert.equal(calls.windowsCreate.length, 0);
+});
+
+test("the duplicate toast falls back to a notification with NO delete",
+  async () => {
+    reset();
+    windowsCreateFails = true;
+    await SW.showDuplicateToast({ downloadId: 205, dir: "Jane Doe",
+      relPath: "Jane Doe/f.mp4", dupRelPath: "john-smith/75936.mov" });
+    assert.equal(calls.notifications.length, 1);
+    assert.match(calls.notifications[0].message, /The file was kept/);
+    assert.equal(calls.notifications[0].buttons, undefined,
+      "a notification cannot show a refusal, so it must not offer a delete");
+  });
+
+// --- dlr:discard: the one destructive message ------------------------------- //
+test("dlr:discard forwards all three fields to /discard", async () => {
+  reset();
+  const posted = [];
+  fetchHandler = async (url, opts) => {
+    posted.push({ url, body: JSON.parse(opts.body || "{}") });
+    return { ok: true, status: 200,
+      json: async () => ({ ok: true, discarded: true }) };
+  };
+  const answer = await new Promise((resolve) => {
+    SW.onMessage({ type: "dlr:discard", downloadId: 7,
+      relPath: "Jane Doe/f.mp4", dupRelPath: "john-smith/75936.mov" },
+    { frameId: 0 }, resolve);
+  });
+  assert.deepEqual(answer, { ok: true, discarded: true });
+  const call = posted.find((p) => p.url.endsWith("/discard"));
+  assert.deepEqual(call.body, { relPath: "Jane Doe/f.mp4",
+    dupRelPath: "john-smith/75936.mov", downloadId: 7 });
+});
+
+test("a REFUSED discard is reported, twice, and never claimed as done",
+  async () => {
+    reset();
+    fetchHandler = async (url) => {
+      if (url.endsWith("/discard")) {
+        return { ok: false, status: 400,
+          json: async () => ({ detail: "refusing to move a file this router "
+            + "cannot prove it created" }) };
+      }
+      return { ok: true, status: 200, json: async () => ({ ok: true }) };
+    };
+    const answer = await new Promise((resolve) => {
+      SW.onMessage({ type: "dlr:discard", downloadId: 7,
+        relPath: "Jane Doe/f.mp4", dupRelPath: "john-smith/75936.mov" },
+      { frameId: 0 }, resolve);
+    });
+    assert.equal(answer.ok, false);
+    assert.match(answer.error, /cannot prove it created/);
+    assert.equal(calls.notifications.length, 1,
+      "a refused DELETE is the one refusal the user must not miss");
+    assert.match(calls.notifications[0].title, /Did not delete/);
+  });
+
+test("a discard from an embedded FRAME is refused outright", async () => {
+  // toast.html is web-accessible, so a page could frame it. There is no
+  // legitimate embedded duplicate toast, so there is nothing to weigh up.
+  reset();
+  const posted = [];
+  fetchHandler = async (url) => {
+    posted.push(url);
+    return { ok: true, status: 200, json: async () => ({ ok: true }) };
+  };
+  const answer = await new Promise((resolve) => {
+    SW.onMessage({ type: "dlr:discard", downloadId: 7,
+      relPath: "Jane Doe/f.mp4", dupRelPath: "john-smith/75936.mov" },
+    { frameId: 3 }, resolve);
+  });
+  assert.equal(answer.ok, false);
+  assert.match(answer.error, /embedded frame/);
+  assert.equal(posted.filter((u) => u.endsWith("/discard")).length, 0,
+    "nothing may reach the sidecar from a framed toast");
+});
+
+// --- the overlay picker takes the keyboard focus back ----------------------- //
+test("the overlay is re-focused AFTER the tab and window are raised", async () => {
+  // Raising a tab focuses the PAGE's document, which strips focus off the
+  // frame the content script had just given it. This message is what wins.
+  reset();
+  contentScriptMissing = false;
+  const ok = await SW.openOverlayPicker({ downloadId: 300, dir: "other",
+    tabId: 42, reason: "r" });
+  assert.equal(ok, true);
+  const kinds = calls.tabMessages.map((m) => m.msg.type);
+  const opened = kinds.indexOf("dlr:overlay-open");
+  const focused = kinds.indexOf("dlr:focus-overlay");
+  assert.ok(focused > opened, "no focus request was sent");
+  const raiseIndex = calls.tabsUpdate.length;
+  assert.ok(raiseIndex >= 1, "the tab was never raised");
+  const focusMsg = calls.tabMessages[focused];
+  assert.equal(focusMsg.opts.frameId, 0);
+  assert.equal(typeof focusMsg.msg.overlay, "string");
+});
+
+test("a failed focus request does not lose a working overlay", async () => {
+  reset();
+  contentScriptMissing = false;
+  const realSend = chrome.tabs.sendMessage;
+  chrome.tabs.sendMessage = async (id, msg, opts) => {
+    if (msg && msg.type === "dlr:focus-overlay") throw new Error("gone");
+    return realSend(id, msg, opts);
+  };
+  try {
+    assert.equal(await SW.openOverlayPicker({ downloadId: 301, dir: "other",
+      tabId: 42 }), true);
+  } finally {
+    chrome.tabs.sendMessage = realSend;
+  }
+});
+
+test("a repeated completion delta does NOT ask or warn twice", async () => {
+  // `state.pending` is kept for five minutes after completion so a late
+  // "change" click can still relocate, and nothing stops Chrome delivering a
+  // second `complete` delta in that window. Without the latch that is a second
+  // /dedupe and a second FOCUSED, never-auto-closing duplicate toast for one
+  // download -- they would stack up in front of the user.
+  reset();
+  SW.state.pending.set(206, { dir: "Jane Doe", payload: { page: {} } });
+  searchResult = [{ id: 206, state: "complete",
+    filename: `${LIB_ROOT}/Jane Doe/f.mp4` }];
+  const posted = [];
+  fetchHandler = dedupeResponder({
+    ok: true, duplicate: true, relPath: "Jane Doe/f.mp4",
+    dupRelPath: "john-smith/75936.mov", kind: "size+hash" },
+  { onPost: (url) => posted.push(url) });
+  await SW.onDownloadChanged({ id: 206, state: { current: "complete" } });
+  await SW.onDownloadChanged({ id: 206, state: { current: "complete" } });
+  assert.equal(posted.filter((u) => u.endsWith("/dedupe")).length, 1,
+    "the duplicate check ran twice for one download");
+  assert.equal(calls.windowsCreate.length, 1,
+    "two duplicate toasts for one download");
+});
+
+test("confirmDuplicate without an entry still answers (the latch is optional)",
+  async () => {
+    reset();
+    fetchHandler = dedupeResponder({ ok: true, duplicate: false });
+    assert.equal(await SW.confirmDuplicate(207, "Jane Doe/f.mp4", "Jane Doe"),
+      null);
+  });

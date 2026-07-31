@@ -483,8 +483,199 @@ All endpoints require `Authorization: Bearer <token>` from
 | POST | `/learn` | persist a correction (alias + labelled example + host prior) |
 | POST | `/mkdir` | create a validated new directory |
 | POST | `/relocate` | rename **within** the library root, only for a file this router provably created |
+| POST | `/dedupe` | confirm a duplicate by exact size + a bounded head/tail hash, after the download landed |
+| POST | `/discard` | remove a **proven** duplicate this router just wrote (five proofs; trash by default) |
 | POST | `/fetch` | yt-dlp job for a stream URL; `GET /fetch/<id>` for status |
+| GET | `/have?url=` | source-URL ledger lookup — "have I already downloaded this?" |
 | GET | `/log` | recent routing decisions |
+
+---
+
+## Dedupe — size first, a bounded hash to confirm
+
+The original check matched on the normalised **filename stem**. Against this
+traffic that is a dead signal: the filenames are random per download, so it
+fired **zero times in seventeen real downloads** while the library held groups
+of same-size files it structurally could not see.
+
+Three signals now, ranked, and each labelled in `kind`:
+
+| `kind` | meaning | confirmable? |
+|---|---|---|
+| `name+size` | same stem **and** the same byte count | yes |
+| `size` | different name, same exact byte count — **the signal that matters here** | yes |
+| `name` | same stem, different byte count | no: different lengths are definitively different bytes |
+
+**The size bucket is free.** `FileIndex` already stats every file during the
+walk it already performs, so bucketing by exact size is a second dict built
+from a number it already had.
+
+**Where the hashing happens, and why it is not on `/match`.** `/match` runs
+inside `onDeterminingFilename`, *before Chrome has written a byte* — the file
+does not exist, so there is nothing to hash, and `totalBytes` is frequently `0`
+there so even the size is unreliable. That settles the 400 ms budget question
+by construction rather than by tuning: `/match` does a dict lookup and reports
+a *possible* duplicate; `POST /dedupe`, called from `downloads.onChanged` after
+completion, is the authoritative answer. Nothing is waiting on it, so a slow
+answer costs a late toast, not a misfiled download.
+
+**The digest is bounded and never reads a whole file**: 128 KiB from each end
+plus the size, into a `blake2b`. Constant cost regardless of a multi-GB file.
+The two windows **meet rather than overlap** — the tail start is clamped to the
+end of the head window — so a file between 128 KiB and 256 KiB is read in full
+(still ≤ 256 KiB) instead of having its tail skipped. Guarding the tail read
+with `size > head + tail` instead left everything past 128 KiB unhashed for
+exactly that band, and two files differing only in their *last byte* confirmed
+as duplicates; `test_the_last_byte_is_always_hashed_at_every_size` walks the
+boundary.
+
+The honest cost of the bound: two files sharing their first and last 128 KiB
+and differing only in the middle are reported as duplicates. That is affordable
+only because a duplicate is a **warning with a keep button**, never an automatic
+destruction — `tests/test_dedupe.py` pins the bound behaviourally, so widening
+it to a whole-file read breaks a named test.
+
+Digests are cached on `(path, size, mtime)`, so a library file is hashed once
+rather than once per colliding download, and at most `MAX_DUP_CANDIDATES` (8)
+same-size candidates are hashed per check. A file that vanished, is unreadable,
+or is empty has **no** digest and confirms nothing.
+
+### Duplicate handling: warn, never destroy silently
+
+The file is **kept and filed normally**. A confirmed duplicate opens a toast
+naming the library file it duplicates, offering `delete` and `keep`. That toast
+does **not** auto-close (a timer would answer a question one of whose buttons
+deletes a file), `Escape` is *keep*, and a refused delete leaves the toast open
+showing the sidecar's own reason.
+
+`POST /discard` is the **only destructive operation in this subsystem**. The
+checks, and what each is actually worth:
+
+1. **containment** — both paths, **and the trash destination**, through
+   `safe_rel_path`. The destination used not to be: `os.makedirs(exist_ok=True)`
+   follows a symlink, so a symlinked `.dl-router-trash` put the file outside the
+   library root entirely.
+2. **the source is not a live payload** — the seeding guard, see below.
+3. **identity + age + recency** — the same evidence `/relocate` demands,
+   without its `routed_files` short-circuit, and the routing decision must be
+   under an hour old. Worth less than it reads (see the caveat below), which is
+   why the route row is now **consumed**: one routing decision authorises at
+   most one discard. It previously authorised an unbounded series, because
+   `new.mp4`, `new (1).mp4` and `new (2).mp4` all satisfy `names_match` against
+   a route recorded as `new.mp4`.
+4. **the kept file genuinely predates the download** — it must be older than
+   the routing decision by at least `MTIME_SLACK_S`. Without this the identity
+   proof could not tell which half of a **uniquify pair** was the new copy, and
+   `/discard` could be pointed at the original and would remove it. The two
+   mtime windows are deliberately disjoint so no file can satisfy both.
+   The two paths must also be **different inodes** (`st_dev`, `st_ino`, not
+   resolved paths — `resolve()` collapses symlinks but not hardlinks).
+5. **the two files are read IN FULL and compared byte for byte** — see below.
+   The kept copy must also be a **complete** file, and both are re-stat'd after
+   the comparison and must be unchanged, so a file still being written is
+   refused rather than renamed out from under its writer.
+
+**Read check 3 sceptically.** The *age* half passes vacuously against an
+in-progress torrent (its mtime is current, which `_prove_owned`'s docstring has
+always conceded), and `names_match` tolerates `uniquify`'s ` (N)` by design. So
+identity is filename-with-slack, not exact. What actually binds a delete is
+**filename-with-slack + under an hour + one-use-per-decision + check 4's
+timestamp + check 5's re-proof**.
+
+### Sampling is a warning. The delete is gated on a full comparison.
+
+This took three rounds to get right, and the shape of the mistake is worth
+recording: a digest designed as a cheap *warning* kept being promoted into a
+*proof* that authorised destruction, and each round shored it up with another
+`stat`-derived signal.
+
+qBittorrent **preallocates**, so an in-progress payload has its full final
+`st_size` from creation, and under "download first and last pieces first" its
+head and tail are the finished bytes. First that defeated the head+tail digest.
+Then `st_blocks` was added — which only catches `ftruncate`-style *sparse*
+files. qBittorrent's "pre-allocate disk space for all files" uses
+`posix_fallocate`, which reserves **real extents**: identical size, identical
+block count, identical ends. Measured:
+
+```
+complete    blocks*512 = 8388608   _looks_preallocated = False
+fallocated  blocks*512 = 8388608   _looks_preallocated = False
+head+tail digests identical : True
+```
+
+**The information is not in the metadata.** So two things changed:
+
+* the digest now also reads **eight 128 KiB mid-file samples** at offsets
+  derived from the size (~1.25 MiB total, still constant). An unfilled extent
+  reads as zeros, and an all-zero mid sample is *direct* evidence of one — a
+  finished media file does not contain a 128 KiB run of zeros. This fixes the
+  **warning**, so the toast stops offering a delete for this pair at all.
+* `/discard` no longer uses the digest as its proof. It **reads both files in
+  full and compares them byte for byte**. Sampling cannot carry a destructive
+  decision: eight samples catch a 40%-complete payload with overwhelming
+  probability but a 99%-complete one only about 8% of the time, and deleting
+  the finished copy to keep a 99% copy still destroys data. No bounded read
+  *proves* two multi-GB files identical; it only ever fails to disprove it.
+
+The full comparison is affordable precisely because `/discard` is not `/match`:
+it is rare, the user asked for it, and nothing is waiting on a 400 ms budget.
+It runs **after** every cheap check, so only a request that has already earned
+it pays. A comparison that runs out of its budget (`[dedupe] verify_timeout_s`,
+180 s) returns "could not determine" — a **refusal**, never an all-clear, which
+is why `files_identical` returns three states rather than a bool.
+
+The kept file must additionally be non-sparse, have no all-zero mid sample,
+and — when qBittorrent is configured — report `progress == 1`. A file already
+in `.dl-router-trash/` is rejected as proof too: containment is not visibility,
+and two discards could otherwise empty the library of a file by proving the
+second against the first's corpse.
+
+### The seeding guard is the payload check, **not** the trash
+
+**Trash protects your bytes and does nothing for seeding.** qBittorrent seeds
+by *path*, so renaming a payload into `.dl-router-trash/` breaks the torrent
+exactly as an `unlink` would. `backfill apply` already refuses to move anything
+live qBittorrent cannot prove is not a payload — and that is the *reversible*
+operation, so the asymmetry was backwards.
+
+`/discard` therefore refuses:
+
+* a **hardlinked** file (`st_nlink > 1`) — the standard layout is a payload
+  hardlinked into a subject directory; a browser download is always `nlink 1`;
+* a **symlink** — `safe_rel_path` resolves, so the discard would remove the
+  target and leave the link dangling;
+* a **sparse** file — preallocated and partly written;
+* and, when qBittorrent **is** configured, anything live state says is a
+  payload, or anything it cannot corroborate at all (including qBittorrent
+  being unreachable). Credentials are deliberately empty on this host, so the
+  three local structural checks are what carry the weight there.
+
+And then it does not `unlink`. The file is renamed into `.dl-router-trash/`
+inside the library root: an atomic same-filesystem move, hidden so both index
+scans skip it, inspectable with `ls`, reversible with `mv`. Set
+`[dedupe] delete_mode = "unlink"` to opt into a real delete.
+
+**Be precise about what the trash guarantees**: it protects the operator's
+bytes — every refusal path above is one `mv` from recovery — and it does *not*
+protect a seed, because qBittorrent seeds by path. It also has no retention, no
+size cap and no reporting: nothing sweeps it and `dl-route status` does not
+mention it, so it grows until emptied by hand (`du -sh …/.dl-router-trash`). A
+cross-filesystem library root cannot use it at all — the move fails closed with
+an `EXDEV` explanation rather than falling back to a non-atomic copy-then-delete.
+
+---
+
+## Source-URL ledger
+
+Schema **v5** adds `source_urls`, keyed on a normalised URL (lower-case scheme
+and host, no default port, no fragment; path and query kept verbatim, because a
+query string usually *is* the asset identity). `/match` records every routed
+download's source URL, `/relocate` re-points the row after a correction, and
+`GET /have?url=` answers "already downloaded, in `<dir>`". The primary key is
+the lookup index; a second index on `download_id` serves the write side.
+
+This is **groundwork only** — there is no UI. A later change will use it to
+badge "already have this" on a page before downloading.
 
 ---
 

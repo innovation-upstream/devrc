@@ -16,8 +16,9 @@ import sqlite3
 import threading
 import time
 from pathlib import Path
+from urllib.parse import urlsplit
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 6
 
 MIGRATIONS = {
     1: [
@@ -136,7 +137,108 @@ MIGRATIONS = {
            )""",
         "CREATE INDEX IF NOT EXISTS screened_dir ON screened(dir)",
     ],
+    # v5 -- THE SOURCE-URL LEDGER: "have I already downloaded this?".
+    #
+    # `routes` already records a url, but it is an append-only decision log:
+    # one row per /match, no uniqueness, and no index on url. Asking it "do I
+    # have this link already" is a table scan whose answer is a pile of rows.
+    # The question a later change wants to answer is a per-URL FACT -- yes/no,
+    # and which directory it went to -- so it gets a table keyed on the URL,
+    # which is also its index.
+    #
+    # ADDITIVE AND RE-RUNNABLE, like every migration here. sqlite3 autocommits
+    # DDL, so there is no transaction around a migration: a crash between the
+    # last statement and the `PRAGMA user_version` bump re-runs the whole step
+    # list on the next open. Every statement below is `IF NOT EXISTS` or goes
+    # through ADD_COLUMN_IF_MISSING, so re-running is a no-op rather than the
+    # `duplicate column name` crash loop that v2's comment records.
+    5: [
+        """CREATE TABLE IF NOT EXISTS source_urls (
+              url_key     TEXT PRIMARY KEY,
+              url         TEXT NOT NULL,
+              site        TEXT NOT NULL DEFAULT '',
+              dir         TEXT NOT NULL DEFAULT '',
+              rel_path    TEXT NOT NULL DEFAULT '',
+              download_id TEXT NOT NULL DEFAULT '',
+              hits        INTEGER NOT NULL DEFAULT 1,
+              first_ts    REAL NOT NULL,
+              last_ts     REAL NOT NULL
+           )""",
+        # The PRIMARY KEY is the lookup index (the badge asks by URL). This
+        # second one is for the WRITE side: /relocate re-points the ledger by
+        # downloadId once a correction moves the file, and without it that is a
+        # scan of the whole ledger on every correction.
+        "CREATE INDEX IF NOT EXISTS source_urls_download "
+        "ON source_urls(download_id)",
+        "CREATE INDEX IF NOT EXISTS source_urls_last ON source_urls(last_ts DESC)",
+    ],
+    # v6 -- A ROUTING DECISION AUTHORISES AT MOST ONE DISCARD.
+    #
+    # The route row was being consulted as evidence and never consumed, so ONE
+    # downloadId authorised an unbounded series of deletes: `new.mp4`,
+    # `new (1).mp4`, `new (2).mp4` all satisfy `names_match` against a route
+    # recorded as `new.mp4` (the uniquify tolerance is deliberate and
+    # irreducible), and each was still inside the one-hour window. Three files
+    # removed on one decision.
+    #
+    # Evidence that is not consumed is a capability, not a proof. This table
+    # is the consumption: /discard refuses a downloadId that already has a row
+    # here. It doubles as the audit trail for the only destructive operation in
+    # the subsystem -- what was removed, what it was kept against, and where it
+    # went -- which nothing else records.
+    6: [
+        """CREATE TABLE IF NOT EXISTS discards (
+              download_id TEXT PRIMARY KEY,
+              rel_path    TEXT NOT NULL,
+              kept_rel    TEXT NOT NULL DEFAULT '',
+              trash_rel   TEXT NOT NULL DEFAULT '',
+              mode        TEXT NOT NULL DEFAULT '',
+              ts          REAL NOT NULL
+           )""",
+        "CREATE INDEX IF NOT EXISTS discards_ts ON discards(ts DESC)",
+    ],
 }
+
+
+def source_url_key(url) -> str:
+    """The ledger's identity for a URL. Deterministic, and deliberately dumb.
+
+    Lower-cases the scheme and host, drops the default port and the fragment,
+    and keeps path and query verbatim — a query string usually IS the asset
+    identity on the sites this routes for, so stripping parameters would merge
+    genuinely different downloads into one ledger row.
+
+    What it does NOT do: follow redirects, strip tracking parameters, or
+    normalise a trailing slash. Every one of those makes two different URLs
+    look like one, and this table's whole purpose is to answer "have I got THIS
+    already" — a false yes is the answer that costs something.
+    """
+    raw = str(url or "").strip()
+    if not raw:
+        return ""
+    try:
+        parts = urlsplit(raw)
+    except ValueError:
+        return ""
+    scheme = (parts.scheme or "").lower()
+    if scheme not in ("http", "https"):
+        # A blob:/data:/file: URL identifies nothing durable, and a data: URL
+        # would put the whole payload in a primary key.
+        return ""
+    host = (parts.hostname or "").lower()
+    if not host:
+        return ""
+    port = ""
+    try:
+        if parts.port and not ((scheme == "http" and parts.port == 80)
+                               or (scheme == "https" and parts.port == 443)):
+            port = f":{parts.port}"
+    except ValueError:
+        port = ""
+    tail = parts.path or "/"
+    if parts.query:
+        tail += "?" + parts.query
+    return f"{scheme}://{host}{port}{tail}"
 
 
 class Store:
@@ -469,6 +571,19 @@ class Store:
         self.conn.commit()
         self.record_routed_file(new_rel, download_id, dir_name)
 
+    def forget_routed_file(self, rel_path: str) -> int:
+        """Drop the ledger row for a path that no longer holds that file.
+
+        Used after a discard. Leaving the row behind would leave a standing
+        claim that this router owns a path it has emptied — and `_prove_owned`
+        short-circuits on exactly that claim, so a later file arriving at the
+        same path would inherit a proof it never earned.
+        """
+        cur = self.conn.execute("DELETE FROM routed_files WHERE rel_path=?",
+                                (rel_path,))
+        self.conn.commit()
+        return int(cur.rowcount)
+
     def routed_file_count(self) -> int:
         return int(self.conn.execute(
             "SELECT COUNT(*) AS n FROM routed_files").fetchone()["n"])
@@ -488,6 +603,151 @@ class Store:
                     d["dup"] = None
             out.append(d)
         return out
+
+    # --- the discard log (one per routing decision) -------------------------- #
+    def discard_for_download(self, download_id: str):
+        """The discard already performed on this routing decision, or None."""
+        download_id = str(download_id or "")
+        if not download_id:
+            return None
+        row = self.conn.execute(
+            "SELECT * FROM discards WHERE download_id=?",
+            (download_id,)).fetchone()
+        return dict(row) if row else None
+
+    def record_discard(self, download_id: str, rel_path: str, *,
+                       kept_rel: str = "", trash_rel: str = "",
+                       mode: str = "") -> bool:
+        """CONSUME the routing decision. False iff it was already consumed.
+
+        `INSERT ... ON CONFLICT DO NOTHING` rather than a check-then-insert, so
+        two threads (or the CLI and the sidecar) racing one downloadId cannot
+        both pass: SQLite decides, and exactly one gets `rowcount == 1`.
+        """
+        download_id = str(download_id or "")
+        if not download_id:
+            return False
+        cur = self.conn.execute(
+            """INSERT INTO discards (download_id, rel_path, kept_rel,
+                                     trash_rel, mode, ts)
+               VALUES (?, ?, ?, ?, ?, ?)
+               ON CONFLICT(download_id) DO NOTHING""",
+            (download_id, str(rel_path), str(kept_rel or ""),
+             str(trash_rel or ""), str(mode or ""), self._clock()))
+        self.conn.commit()
+        return int(cur.rowcount) == 1
+
+    def set_discard_trash(self, download_id: str, trash_rel: str) -> int:
+        """Record WHERE a discarded file went.
+
+        Separate from `record_discard` because that one is
+        `ON CONFLICT DO NOTHING` -- which is what makes it an atomic claim, and
+        also what makes it unable to update. Calling it twice left every row
+        with an empty `trash_rel`, so the table promised "where it went" and
+        never delivered it. The uniquified `(N)` name in the trash is exactly
+        what someone needs to undo a wrong discard.
+        """
+        cur = self.conn.execute(
+            "UPDATE discards SET trash_rel=? WHERE download_id=?",
+            (str(trash_rel or ""), str(download_id or "")))
+        self.conn.commit()
+        return int(cur.rowcount)
+
+    def release_discard(self, download_id: str) -> int:
+        """Un-consume a routing decision whose discard did NOT happen.
+
+        The claim is taken immediately before the destructive act so a crash
+        cannot leave a file deleted and unrecorded. The other direction has to
+        be handled too: if the rename or unlink fails, nothing was destroyed
+        and the decision must not stay spent -- otherwise a failing trash
+        (EXDEV, a planted symlink, no free name) permanently disables discard
+        for that download AND leaves the table claiming a file was removed
+        that is still on disk.
+        """
+        cur = self.conn.execute("DELETE FROM discards WHERE download_id=?",
+                                (str(download_id or ""),))
+        self.conn.commit()
+        return int(cur.rowcount)
+
+    def recent_discards(self, limit: int = 50) -> list:
+        rows = self.conn.execute(
+            "SELECT * FROM discards ORDER BY ts DESC LIMIT ?",
+            (int(limit),)).fetchall()
+        return [dict(r) for r in rows]
+
+    # --- source-URL ledger --------------------------------------------------- #
+    def record_source_url(self, url, *, site: str = "", dir_name: str = "",
+                          rel_path: str = "", download_id: str = "") -> str:
+        """Remember that this URL was routed. Returns the key, or "".
+
+        Called from /match, which is the one place EVERY routed download passes
+        through — including the ones the user then corrects, which is why the
+        directory is re-pointed by `set_source_url_dir` rather than being
+        written once and left wrong.
+
+        An unusable URL (no scheme, a blob:, a data:) writes nothing and says
+        so by returning "". It is not an error: plenty of downloads have no
+        durable source URL, and the ledger simply has no fact to record.
+        """
+        key = source_url_key(url)
+        if not key:
+            return ""
+        now = self._clock()
+        self.conn.execute(
+            """INSERT INTO source_urls (url_key, url, site, dir, rel_path,
+                                        download_id, hits, first_ts, last_ts)
+               VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?)
+               ON CONFLICT(url_key) DO UPDATE SET
+                 hits = source_urls.hits + 1,
+                 last_ts = excluded.last_ts,
+                 site = CASE WHEN excluded.site != '' THEN excluded.site
+                             ELSE source_urls.site END,
+                 dir = CASE WHEN excluded.dir != '' THEN excluded.dir
+                            ELSE source_urls.dir END,
+                 rel_path = CASE WHEN excluded.rel_path != ''
+                                 THEN excluded.rel_path
+                                 ELSE source_urls.rel_path END,
+                 download_id = CASE WHEN excluded.download_id != ''
+                                    THEN excluded.download_id
+                                    ELSE source_urls.download_id END""",
+            (key, str(url), str(site or ""), str(dir_name or ""),
+             str(rel_path or ""), str(download_id or ""), now, now))
+        self.conn.commit()
+        return key
+
+    def source_url(self, url):
+        """The ledger row for `url`, or None. The lookup the badge will use."""
+        key = source_url_key(url)
+        if not key:
+            return None
+        row = self.conn.execute(
+            "SELECT * FROM source_urls WHERE url_key=?", (key,)).fetchone()
+        return dict(row) if row else None
+
+    def set_source_url_dir(self, download_id: str, dir_name: str,
+                           rel_path: str = "") -> int:
+        """Re-point the ledger after a correction moved the file.
+
+        Without this the ledger would answer "you have this, in <dir>" with the
+        directory the ROUTER guessed rather than the one the operator chose —
+        and the whole point of the later badge is to tell the truth about where
+        something already is.
+        """
+        download_id = str(download_id or "")
+        if not download_id:
+            return 0
+        cur = self.conn.execute(
+            """UPDATE source_urls SET dir=?, rel_path=CASE WHEN ?!='' THEN ?
+                                                      ELSE rel_path END
+               WHERE download_id=?""",
+            (str(dir_name or ""), str(rel_path or ""), str(rel_path or ""),
+             download_id))
+        self.conn.commit()
+        return int(cur.rowcount)
+
+    def source_url_count(self) -> int:
+        return int(self.conn.execute(
+            "SELECT COUNT(*) AS n FROM source_urls").fetchone()["n"])
 
     # --- host prior -------------------------------------------------------- #
     def set_host_prior(self, site: str, dir_name: str) -> None:

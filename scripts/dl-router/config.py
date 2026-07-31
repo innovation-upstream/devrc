@@ -56,6 +56,21 @@ DEFAULTS: dict = {
     "dir_cache_ttl_s": 5.0,
     "file_cache_ttl_s": 60.0,
     "file_index_max": 200000,
+    # Duplicate handling. A duplicate is never acted on automatically: the file
+    # is kept and filed normally, and the toast offers `delete` and `keep`.
+    "dedupe": {
+        # What `delete` does. "trash" renames the newly-downloaded copy into a
+        # hidden `.dl-router-trash/` inside the library root -- an atomic
+        # same-filesystem move, skipped by both index scans, inspectable with
+        # `ls`, and reversible with `mv`. "unlink" really removes it.
+        #
+        # The default is the reversible one ON PURPOSE. This is the only
+        # destructive operation in the subsystem, it runs next to a live
+        # qBittorrent seeding target, and the honest limit of the confirmation
+        # behind it is that the head+tail digest samples 256 KiB, not the whole
+        # file. Nothing here is worth an irreversible default.
+        "delete_mode": "trash",
+    },
     # qBittorrent WebUI. Used ONLY by the backfill; new downloads never touch it.
     "qbt": {
         "url": "http://127.0.0.1:30880",

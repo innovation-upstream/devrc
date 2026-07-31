@@ -97,8 +97,10 @@ def test_loopback_bind_is_allowed(app):
 # --- auth ------------------------------------------------------------------ #
 ENDPOINTS = [("GET", "/healthz", None), ("GET", "/dirs", None),
              ("GET", "/log", None), ("GET", "/fetch/xyz", None),
+             ("GET", "/have?url=https://example-site.test/a", None),
              ("POST", "/match", {}), ("POST", "/learn", {}),
              ("POST", "/mkdir", {}), ("POST", "/relocate", {}),
+             ("POST", "/dedupe", {}), ("POST", "/discard", {}),
              ("POST", "/fetch", {})]
 
 
@@ -303,6 +305,81 @@ def test_relocate_uniquifies_instead_of_overwriting(live, library):
                        "downloadId": 42})
     assert (library / "Jane Doe" / "clip.mp4").read_text() == "old"
     assert body["relPath"] == "Jane Doe/clip (1).mp4"
+
+
+# --- /dedupe, /discard and /have over a real socket ------------------------- #
+#
+# The unit-level behaviour lives in test_dedupe.py; these pin the HTTP wiring —
+# that the routes exist, that a refusal comes back as a 4xx with a `detail` the
+# extension can show, and that a destructive call is refused end to end.
+
+def test_dedupe_confirms_over_http(live, library):
+    body = b"z" * 300000
+    (library / "john-smith" / "75936.mov").write_bytes(body)
+    (library / "Jane Doe" / "aXNTnnsMMuBsAYEe.mp4").write_bytes(body)
+    status, out, _ = call(live, "POST", "/dedupe",
+                          {"relPath": "Jane Doe/aXNTnnsMMuBsAYEe.mp4"})
+    assert status == 200
+    assert out["duplicate"] is True
+    assert out["dupRelPath"] == "john-smith/75936.mov"
+
+
+def test_dedupe_refuses_a_traversing_path_over_http(live):
+    status, out, _ = call(live, "POST", "/dedupe",
+                          {"relPath": "../../etc/passwd"})
+    assert status == 400
+    assert out["error"] == "unsafe"
+
+
+def test_discard_over_http_removes_only_the_proven_new_copy(live, library):
+    body = b"z" * 300000
+    keep = library / "john-smith" / "75936.mov"
+    keep.write_bytes(body)
+    new = library / "Jane Doe" / "clip.mp4"
+    new.write_bytes(body)
+    route_a_download(live, 77)
+    # The kept file must PREDATE the routing decision -- that timestamp is
+    # what tells the two halves of a uniquify pair apart, so a fixture that
+    # writes both "now" is not exercising a real discard. The app fixture's
+    # clock starts at 1000.0; back-date the pre-existing copy behind it.
+    os.utime(keep, (0, 0))
+    status, out, _ = call(live, "POST", "/discard",
+                          {"relPath": "Jane Doe/clip.mp4",
+                           "dupRelPath": "john-smith/75936.mov",
+                           "downloadId": 77})
+    assert status == 200, out
+    assert out["discarded"] is True
+    assert not new.exists()
+    assert keep.read_bytes() == body
+
+
+def test_discard_over_http_refuses_an_unproven_file(live, library):
+    body = b"z" * 300000
+    (library / "john-smith" / "75936.mov").write_bytes(body)
+    victim = library / "Jane Doe" / "seeding-payload.mkv"
+    victim.write_bytes(body)
+    route_a_download(live, 78)     # a real route, for a DIFFERENT filename
+    status, out, _ = call(live, "POST", "/discard",
+                          {"relPath": "Jane Doe/seeding-payload.mkv",
+                           "dupRelPath": "john-smith/75936.mov",
+                           "downloadId": 78})
+    assert status == 400
+    assert "cannot prove it created" in out["detail"]
+    assert victim.exists(), "a refused discard must not remove anything"
+
+
+def test_have_answers_from_the_source_url_ledger(live):
+    from urllib.parse import quote
+    url = "https://example-site.test/v/1"
+    status, out, _ = call(live, "GET", f"/have?url={quote(url, safe='')}")
+    assert status == 200
+    assert out["have"] is False
+    call(live, "POST", "/match",
+         {"downloadId": 91, "filename": "clip.mp4", "url": url,
+          "page": {"url": url}})
+    _, out, _ = call(live, "GET", f"/have?url={quote(url, safe='')}")
+    assert out["have"] is True
+    assert out["dir"]
 
 
 # --- the correction paths the picker exists to serve ----------------------- #

@@ -41,12 +41,42 @@ match_timeout_ms = 400
 capture_window_s = 15
 toast_ms = 8000
 
+# --- duplicate handling -------------------------------------------------------
+# A duplicate is NEVER acted on automatically: the file is kept and filed
+# normally, and the toast offers `delete` and `keep`.
+#
+# `delete_mode` is what `delete` does:
+#   "trash"  (default) rename into a hidden `.dl-router-trash/` inside the
+#            library root. An atomic same-filesystem move, skipped by both
+#            index scans, inspectable with `ls`, undone with `mv`.
+#   "unlink" really remove the file.
+#
+# The default is the reversible one deliberately. Note what it does and does
+# NOT buy: it protects your BYTES, and nothing else. qBittorrent seeds by
+# PATH, so moving a payload into the trash breaks a torrent exactly as
+# deleting it would — the seeding guard is the payload check below, not this.
+#
+# Nothing sweeps the trash. It grows until you empty it by hand:
+#   du -sh <library root>/.dl-router-trash
+[dedupe]
+delete_mode = "trash"
+
+# How long `delete` may spend PROVING the two files are identical before it
+# gives up. It reads both files in full and compares them byte for byte —
+# sampling a bounded window cannot prove two multi-GB files identical, and a
+# check that authorises destruction has to be a proof. Running out of the
+# budget is a REFUSAL, never an all-clear. The extension's own /discard
+# timeout must exceed this.
+verify_timeout_s = 180.0
+
 # --- qBittorrent -------------------------------------------------------------
-# Used ONLY by `dl-route backfill`. New downloads never touch qBittorrent —
-# they are fresh files, not torrent payloads.
+# Used by `dl-route backfill` AND by `POST /discard`.
 #
 # Leave `username` empty and the backfill refuses to move anything: without the
-# torrent list it cannot prove a file is not a live seeding payload.
+# torrent list it cannot prove a file is not a live seeding payload. /discard
+# falls back to local structural checks (hardlink count, symlink, sparseness);
+# set the credentials and it additionally demands the same live corroboration
+# the backfill does, and refuses if qBittorrent is configured but unreachable.
 [qbt]
 url = "http://127.0.0.1:30880"
 username = ""

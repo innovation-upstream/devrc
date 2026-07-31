@@ -11,7 +11,7 @@ globalThis.DL_ROUTER_NO_AUTOSTART = true;
 
 import {
   ENTRY_DIR, ENTRY_NEW, SNAPSHOT_ATTEMPTS, SNAPSHOT_RETRY_MS, filterEntries,
-  initialState, mount, reduce, titleCase,
+  initialState, installAutoFocus, mount, reduce, titleCase,
 } from "../extension/picker.js";
 import { makeDoc } from "./fake_page.mjs";
 
@@ -292,9 +292,24 @@ const PAGE_IDS = ["q", "list", "meta", "dup"];
 // parameter and so could never express "the worker answered with nothing".
 const DEFAULT_CHOOSE = Symbol("default-choose");
 
+/** A window stand-in that records focus() and can raise focus/load events. */
+function makeWin() {
+  const listeners = new Map();
+  return {
+    focused: 0,
+    focus() { this.focused += 1; },
+    addEventListener(type, fn) {
+      if (!listeners.has(type)) listeners.set(type, []);
+      listeners.get(type).push(fn);
+    },
+    fire(type) { for (const fn of listeners.get(type) || []) fn({ type }); },
+    hasListener: (type) => (listeners.get(type) || []).length > 0,
+  };
+}
+
 function mountPicker({ search = "?id=7&reason=r&suggestNew=Aster+Vale",
   snapshot = { dirs: DIRS.map((name) => ({ name })) }, deferReply = false,
-  chooseResult = DEFAULT_CHOOSE } = {}) {
+  chooseResult = DEFAULT_CHOOSE, win = makeWin() } = {}) {
   const doc = makeDoc(PAGE_IDS, { search });
   const sent = [];
   let replySnapshot = null;
@@ -313,9 +328,10 @@ function mountPicker({ search = "?id=7&reason=r&suggestNew=Aster+Vale",
     },
   };
   let closed = 0;
-  const handle = mount(doc, chromeApi, { closeWindow: () => { closed += 1; } });
-  return { doc, sent, handle, land: () => replySnapshot && replySnapshot(),
-    closed: () => closed };
+  const handle = mount(doc, chromeApi,
+    { closeWindow: () => { closed += 1; }, win });
+  return { doc, sent, handle, win,
+    land: () => replySnapshot && replySnapshot(), closed: () => closed };
 }
 
 test("mount renders the reason, focuses the input and asks for the snapshot", () => {
@@ -323,6 +339,67 @@ test("mount renders the reason, focuses the input and asks for the snapshot", ()
   assert.equal(doc.getElementById("meta").textContent, "r");
   assert.equal(doc.getElementById("q").focused, true);
   assert.ok(sent.some((m) => m.type === "dlr:snapshot"));
+});
+
+// --- auto-focus: the picker is keyboard-first in BOTH delivery paths --------- //
+//
+// The popup window and the in-page overlay lose the caret for different
+// reasons -- a window that is focused after the module runs, and a framed
+// document whose `input.focus()` only moves focus WITHIN the frame -- so the
+// fix is ONE mechanism driven by an event both paths raise, not two.
+
+test("POPUP PATH: mount raises the window as well as focusing the input", () => {
+  // `input.focus()` inside an unfocused window does not raise it, which is why
+  // the caret was nowhere despite line 564 and `autofocus` in the HTML.
+  const { doc, win } = mountPicker();
+  assert.ok(win.focused >= 1, "the window was never focused");
+  assert.equal(doc.getElementById("q").focused, true);
+});
+
+test("the input is re-focused every time the window receives focus", () => {
+  // THE SHARED MECHANISM. In the popup path this catches a window focused
+  // after the module ran; in the overlay path it is what turns the content
+  // script's `frame.focus()` into a focused INPUT.
+  const { doc, win } = mountPicker();
+  const input = doc.getElementById("q");
+  input.focused = false;
+  win.fire("focus");
+  assert.equal(input.focused, true);
+});
+
+test("the input is re-focused on window load", () => {
+  const { doc, win } = mountPicker();
+  const input = doc.getElementById("q");
+  input.focused = false;
+  win.fire("load");
+  assert.equal(input.focused, true);
+});
+
+test("installAutoFocus survives a window that refuses focus()", () => {
+  // A framed document may not be allowed to raise its window. That must not
+  // stop the input being focused.
+  const doc = makeDoc(PAGE_IDS);
+  const input = doc.getElementById("q");
+  const hostile = {
+    focus() { throw new Error("not allowed"); },
+    addEventListener() {},
+  };
+  installAutoFocus(doc, hostile, input);
+  assert.equal(input.focused, true);
+});
+
+test("installAutoFocus is inert without a focusable input", () => {
+  assert.equal(typeof installAutoFocus(makeDoc(PAGE_IDS), null, null),
+    "function");
+  assert.equal(typeof installAutoFocus(makeDoc(PAGE_IDS), null, {}), "function");
+});
+
+test("EMBEDDED PATH: the framed picker still focuses its own input", () => {
+  const { doc, win } = mountPicker({
+    search: "?id=7&embed=1&overlay=ov-a&reason=r" });
+  assert.equal(doc.getElementById("q").focused, true);
+  assert.ok(win.hasListener("focus"),
+    "without this, focusing the frame leaves the caret nowhere");
 });
 
 test("mount shows a loading row until the directories arrive", () => {

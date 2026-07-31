@@ -32,6 +32,7 @@ configured — the sidecar answers `/healthz` but every routing endpoint returns
 | bearer token | `~/.config/dl-router/token` (0600, auto-created) |
 | aliases, route log | `~/.local/share/dl-router/dl-router.sqlite3` |
 | backfill manifests | `~/.local/share/dl-router/manifests/` |
+| discarded duplicates | `<library root>/.dl-router-trash/` (hidden; `mv` one back to undo) |
 | service | `systemd --user` unit `dl-router` (from `nix/home.nix`) |
 | extension | `scripts/dl-router/extension/`, loaded unpacked per profile |
 
@@ -257,6 +258,16 @@ Invariants the tests exist to protect — do not weaken them:
 * **yt-dlp is invoked as an argv list with a validated http(s) URL and a `--`
   terminator** — never a shell string. The URL comes from a web page.
 * **The sidecar refuses any non-loopback bind**, with no override.
+* **A duplicate is never acted on automatically.** The file is kept and filed;
+  the toast asks. `POST /discard` is refused unless all five proofs hold, the
+  refusal is surfaced (toast **and** notification), and the default is a move
+  into `.dl-router-trash/`. Making any part of this implicit turns a warning
+  into a data-loss mechanism.
+* **A schema migration must be additive, idempotent and re-runnable after a
+  crash between the DDL and the `PRAGMA user_version` bump.** sqlite3
+  autocommits DDL, so there is no transaction around a migration; every step is
+  `IF NOT EXISTS` or goes through `ADD_COLUMN_IF_MISSING`. This has bitten
+  here before (v2) and is pinned per version.
 * Tests never contact the live qBittorrent instance or touch the real library.
 
 Editing the sidecar requires a `home-manager switch` (it runs from the nix
@@ -288,9 +299,67 @@ same gotcha as browser-bridge), then re-check `dl-route status`.
   starts that walk (a whole-tree walk there would blow the extension's 4 s
   snapshot budget on a large library); `/match` warms it on every download. A
   picker with no counts means no `/match` has run in this sidecar process yet.
+* **Dedupe is size-first, and the hash is deliberately NOT on `/match`.** At
+  `onDeterminingFilename` time the downloaded file does not exist, so there is
+  nothing to hash and `totalBytes` is often `0`. `/match` reports a *possible*
+  duplicate from the free size bucket; `POST /dedupe` after completion is the
+  authoritative answer, and that is where all the I/O lives — outside the
+  400 ms budget by construction, not by tuning. Do not move it onto `/match`.
+* **The head+tail digest samples 128 KiB from each end, never the middle.** Two
+  files of the same length that differ only in the middle read as duplicates.
+  That is the price of a constant-cost check on multi-GB media, and it is only
+  affordable because the answer is a warning with a `keep` button. If a delete
+  is ever made automatic, this bound stops being acceptable.
+* **`POST /discard` is the only destructive path, and the SEEDING guard is the
+  payload check — not the trash.** qBittorrent seeds by PATH, so a rename into
+  `.dl-router-trash/` breaks a torrent exactly as `unlink` would. `/discard`
+  refuses a hardlinked file (`nlink > 1` — the standard payload-into-subject-dir
+  layout), a symlink, a sparse file, and — when qBittorrent credentials are set
+  — anything live state calls a payload or cannot corroborate at all. Creds are
+  deliberately empty on this host, so the three local checks carry it there.
+  `backfill apply` demands the same corroboration for a REVERSIBLE move; do not
+  let /discard end up weaker than it again.
+* **SAMPLING IS A WARNING; THE DELETE IS GATED ON A FULL COMPARISON.** This is
+  the single most important invariant in the subsystem and it took three
+  rounds. `/dedupe` samples (head + tail + eight 128 KiB mid-file windows);
+  `/discard` reads BOTH FILES IN FULL and compares them byte for byte. Do not
+  "optimise" that back into a digest comparison — no bounded read proves two
+  multi-GB files identical, it only fails to disprove.
+* **`st_blocks` cannot see a fallocated partial.** qBittorrent's "pre-allocate
+  disk space for all files" uses `posix_fallocate`, which reserves REAL
+  extents: identical size, identical block count, identical head and tail as
+  the finished file. Only reading the middle separates them — an all-zero mid
+  sample is an unfilled extent. The sparse check catches only the
+  `ftruncate` shape; it is not the guard, it is one of several.
+* **A verification that runs out of budget is a REFUSAL.** `files_identical`
+  returns True / False / **None**; None is "could not determine" and must
+  never collapse into either answer. Same for a stat that cannot answer
+  (`_looks_preallocated` fails CLOSED).
+* **One routing decision authorises ONE discard.** The route row is consumed
+  (`discards` table, v6). Unconsumed evidence is a capability, not a proof —
+  one downloadId used to remove `new.mp4`, `new (1).mp4` and `new (2).mp4` in
+  turn, because `names_match` tolerates the ` (N)` suffix by design.
+* **The kept file must PREDATE the routing decision** by at least
+  `MTIME_SLACK_S`. That timestamp is the only thing distinguishing the two
+  halves of a uniquify pair; the two mtime windows are deliberately disjoint so
+  no file can satisfy both. Without it /discard could remove the ORIGINAL.
+* **Same file = same inode.** The self-check compares `(st_dev, st_ino)`, not
+  resolved paths — `resolve()` collapses symlinks but not hardlinks. Don't
+  "simplify" it back to a path comparison.
+* **The trash is unbounded and invisible to `dl-route status`.** Nothing sweeps
+  it, nothing reports its size, and both index scans skip it by design. Check
+  by hand (`du -sh <library root>/.dl-router-trash`) if space goes missing. A
+  cross-filesystem library root cannot use it: the move fails closed on EXDEV
+  rather than degrading to a non-atomic copy-then-delete.
+* **The trash directory is hidden on purpose**: both index scans skip
+  dot-prefixed names, so its contents never become dedupe candidates or
+  routing targets. Do not rename it to something visible.
 * `onDeterminingFilename` **cannot escape the download root**: no `..`, no
   absolute paths. That is precisely why the profile's download directory has to
   *be* the library root.
+* **An extension change needs a FULL Brave restart**, not `↻` on the
+  extensions page — same lesson as browser-bridge. A reload often leaves the
+  old service worker alive.
 * Existing directories are **never renamed** (three naming conventions coexist;
   the matcher folds them). New ones are Title Case and never created silently.
 * Both hosts are hostname `nixos` — check `dl-route status` to know which one
