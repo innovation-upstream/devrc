@@ -1,4 +1,4 @@
-// content_capture.js — page-context capture (classic content script, all frames).
+// content_capture.js -- page-context capture (classic content script, all frames).
 //
 // Downloaded filenames from file-sharing/tube sites are usually opaque, so the
 // routing signal has to come from the PAGE. On a capture-phase mousedown/click/
@@ -54,7 +54,7 @@
 
   /**
    * Every DOM query goes through here. A per-site rule is USER CONFIG, so a
-   * malformed selector must degrade to "no matches", never throw — and the
+   * malformed selector must degrade to "no matches", never throw -- and the
    * guard belongs with the extractors rather than only in domAdapter, so the
    * property holds for any adapter.
    */

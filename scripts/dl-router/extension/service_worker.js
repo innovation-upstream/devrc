@@ -1,4 +1,4 @@
-// service_worker.js — chrome.* glue for the media download router.
+// service_worker.js -- chrome.* glue for the media download router.
 //
 // All decision logic lives in route_core.js / sanitize.js (pure, node-tested).
 // This file owns the browser side: config, the cached /dirs snapshot, the
@@ -26,7 +26,7 @@ const TOAST_H = 190;
 const PICKER_W = 460;
 const PICKER_H = 420;
 
-// Module-global so `onDeterminingFilename` can read it SYNCHRONOUSLY — the
+// Module-global so `onDeterminingFilename` can read it SYNCHRONOUSLY -- the
 // listener has no time to await chrome.storage. It is repopulated on every
 // service-worker start and by the refresh alarm.
 export const state = {
@@ -301,7 +301,7 @@ export async function onDownloadChanged(delta) {
     }
   }
   // Keep the entry briefly so a late "change" click can still relocate.
-  // `unref` exists only under node (the test runner) — without it this timer
+  // `unref` exists only under node (the test runner) -- without it this timer
   // would hold the event loop open for five minutes and hang the suite.
   const sweep = setTimeout(() => state.pending.delete(delta.id), 5 * 60 * 1000);
   if (sweep && typeof sweep.unref === "function") sweep.unref();
@@ -315,7 +315,7 @@ export async function installMenus() {
     await chrome.contextMenus.removeAll();
     chrome.contextMenus.create({
       id: MENU_ID,
-      title: "Save to library…",
+      title: "Save to library\u2026",
       contexts: ["link", "image", "video"],
     });
   } catch { /* menus are a nicety, never fatal */ }
@@ -328,7 +328,7 @@ export async function onMenuClicked(info, tab) {
   const streaming = /\.m3u8(\?|$)|\.mpd(\?|$)/i.test(target)
     || info.mediaType === "video";
   if (streaming) {
-    // HLS/DASH has no single file to save — hand the PAGE url to yt-dlp.
+    // HLS/DASH has no single file to save -- hand the PAGE url to yt-dlp.
     const url = isHttpUrl(info.pageUrl) ? info.pageUrl : target;
     await api("POST", "/fetch", { url, dir: otherDir() }, { timeoutMs: 8000 })
       .catch(() => {});

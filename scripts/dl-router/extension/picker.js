@@ -1,10 +1,10 @@
-// picker.js — the "which directory?" popup.
+// picker.js -- the "which directory?" popup.
 //
 // Shown when the match is below the auto-file threshold, or when the toast's
 // `change` is clicked. Keyboard-first: type to filter, arrows to move, Enter to
 // accept, Esc to leave it where it is (the catch-all directory).
 //
-// The top entry is always the NEW-DIRECTORY proposal (decision D6) — one
+// The top entry is always the NEW-DIRECTORY proposal (decision D6) -- one
 // keypress to create, but never created silently. Proposals are Title Case
 // (D7); existing directories are never renamed.
 //
@@ -124,7 +124,7 @@ export function reduce(state, event) {
       return next;
     }
     if (key === "Escape") {
-      // Leave it where the ladder put it — the catch-all directory. No move,
+      // Leave it where the ladder put it -- the catch-all directory. No move,
       // no alias, no surprise.
       next.done = { action: "cancel", dir: state.otherDir };
       return next;

@@ -1,4 +1,4 @@
-// sanitize.js — name validation for the download path.
+// sanitize.js -- name validation for the download path.
 //
 // This is the browser-side twin of ../safety.py and the two MUST agree: the
 // extension decides what string goes into suggest({filename}) and the sidecar
@@ -9,11 +9,15 @@
 // The threat is concrete: the directory name is derived from page markup, and
 // the filename comes from the server's Content-Disposition. Chrome refuses to
 // let onDeterminingFilename escape the download root, but "refuses" means "drops
-// the suggestion and uses the default" — we want a deterministic, validated
+// the suggestion and uses the default" -- we want a deterministic, validated
 // answer instead of relying on the browser's rejection.
 //
-// Every non-ASCII character below is written as an escape ON PURPOSE: this file
-// must stay plain ASCII so it greps, diffs and reviews as text.
+// Every non-ASCII character below is written as an escape ON PURPOSE. That rule
+// covers EVERY file under extension/ and tests/source_hygiene.test.mjs enforces
+// it: one raw control character anywhere in a source file makes git classify the
+// whole module as binary, and `gh pr diff` then prints "Binary files differ"
+// instead of the code -- which is exactly how an 11 KB module carrying the
+// suggest() ladder shipped unreviewed once already.
 
 export const MAX_DIR_NAME = 120;
 export const MAX_FILE_NAME = 200;
@@ -109,7 +113,7 @@ export function baseName(path) {
 }
 
 /**
- * `<dir>/<file>` for a completed download's ABSOLUTE path — the relative path
+ * `<dir>/<file>` for a completed download's ABSOLUTE path -- the relative path
  * the sidecar's /relocate expects. Returns null when the path has no directory
  * component (the file landed at the download root).
  */
