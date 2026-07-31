@@ -982,19 +982,117 @@ test("a deferred-equal pick does not learn when the file left the library",
     assert.equal(posted.filter((u) => u.endsWith("/relocate")).length, 0);
   });
 
-test("a deferred-equal pick does not learn when the file is in another dir",
+// NOTE: the previous round asserted here that a deferred-equal pick with the
+// file in ANOTHER library directory must not learn. That rule is SUPERSEDED:
+// keying on the router's intent rather than the file's location meant nothing
+// happened at all in that case -- no move, no report -- while the picker had
+// already reported success. It is now moved and then learned; see
+// "deferred pick == router answer, file in the WRONG dir -> it is moved".
+
+
+// --- the deferred branch keys on WHERE THE FILE IS, not on router intent ---- //
+//
+// It used to branch on `entry.wanted !== entry.dir` first, which asks the
+// wrong question. When the pick EQUALLED the router's own answer but the file
+// was somewhere else, nothing happened at all: no move, no report -- while the
+// picker had already returned {ok:true, deferred:true} and closed, so the user
+// believed their pick had been applied. The sibling branch, given the
+// identical physical situation, reported it.
+function deferred(id, { dir, wanted, filename }) {
+  reset();
+  SW.state.pending.set(id, { dir, wanted, payload: { page: {} } });
+  searchResult = [{ id, state: "complete", filename }];
+  const posted = [];
+  fetchHandler = async (url, opts) => {
+    posted.push({ url, body: JSON.parse(opts.body || "{}") });
+    return { ok: true, status: 200, json: async () => ({ ok: true }) };
+  };
+  return posted;
+}
+
+test("deferred pick == router answer, file in the WRONG dir -> it is moved",
+  async () => {
+    const posted = deferred(100, { dir: "Jane Doe", wanted: "Jane Doe",
+      filename: `${LIB_ROOT}/john-smith/f.mp4` });
+    await SW.onDownloadChanged({ id: 100, state: { current: "complete" } });
+    const relocate = posted.find((p) => p.url.endsWith("/relocate"));
+    assert.ok(relocate, "the file is in the library, just in the wrong place");
+    assert.equal(relocate.body.toDir, "Jane Doe");
+    assert.equal(relocate.body.fromRelPath, "john-smith/f.mp4");
+    assert.ok(posted.some((p) => p.url.endsWith("/learn")));
+  });
+
+test("deferred pick == router answer, file OUTSIDE the root -> reported",
+  async () => {
+    const posted = deferred(101, { dir: "Jane Doe", wanted: "Jane Doe",
+      filename: "/home/u/Downloads/f.mp4" });
+    await SW.onDownloadChanged({ id: 101, state: { current: "complete" } });
+    assert.equal(posted.filter((p) => p.url.endsWith("/relocate")).length, 0);
+    assert.equal(posted.filter((p) => p.url.endsWith("/learn")).length, 0);
+    assert.equal(calls.notifications.length, 1,
+      "silently doing nothing is how the user came to believe it was applied");
+    assert.match(calls.notifications[0].message, /did not land inside/);
+  });
+
+test("deferred pick == router answer, file where it says -> learn only",
+  async () => {
+    const posted = deferred(102, { dir: "Jane Doe", wanted: "Jane Doe",
+      filename: `${LIB_ROOT}/Jane Doe/f.mp4` });
+    await SW.onDownloadChanged({ id: 102, state: { current: "complete" } });
+    assert.equal(posted.filter((p) => p.url.endsWith("/relocate")).length, 0);
+    assert.ok(posted.some((p) => p.url.endsWith("/learn")));
+    assert.equal(calls.notifications.length, 0);
+  });
+
+test("deferred pick != router answer still behaves as before", async () => {
+  const posted = deferred(103, { dir: "other", wanted: "Jane Doe",
+    filename: `${LIB_ROOT}/other/f.mp4` });
+  await SW.onDownloadChanged({ id: 103, state: { current: "complete" } });
+  const relocate = posted.find((p) => p.url.endsWith("/relocate"));
+  assert.equal(relocate.body.toDir, "Jane Doe");
+  assert.ok(posted.some((p) => p.url.endsWith("/learn")));
+});
+
+test("deferred pick != router answer, already in the right place -> no move",
+  async () => {
+    const posted = deferred(104, { dir: "other", wanted: "Jane Doe",
+      filename: `${LIB_ROOT}/Jane Doe/f.mp4` });
+    await SW.onDownloadChanged({ id: 104, state: { current: "complete" } });
+    assert.equal(posted.filter((p) => p.url.endsWith("/relocate")).length, 0);
+    assert.ok(posted.some((p) => p.url.endsWith("/learn")));
+  });
+
+test("a refused deferred move is still reported and not learned from",
   async () => {
     reset();
-    SW.state.pending.set(98, { dir: "Jane Doe", payload: { page: {} },
-      wanted: "Jane Doe" });
-    searchResult = [{ id: 98, state: "complete",
+    SW.state.pending.set(105, { dir: "Jane Doe", wanted: "Jane Doe",
+      payload: { page: {} } });
+    searchResult = [{ id: 105, state: "complete",
       filename: `${LIB_ROOT}/john-smith/f.mp4` }];
     const posted = [];
     fetchHandler = async (url) => {
       posted.push(url);
+      if (url.endsWith("/relocate")) {
+        return { ok: false, status: 400,
+          json: async () => ({ detail: "cannot prove it created this file" }) };
+      }
       return { ok: true, status: 200, json: async () => ({ ok: true }) };
     };
-    await SW.onDownloadChanged({ id: 98, state: { current: "complete" } });
-    assert.equal(posted.filter((u) => u.endsWith("/learn")).length, 0,
-      "the file is not where the confirmation claims");
+    await SW.onDownloadChanged({ id: 105, state: { current: "complete" } });
+    assert.equal(posted.filter((u) => u.endsWith("/learn")).length, 0);
+    assert.equal(calls.notifications.length, 1);
+    assert.match(calls.notifications[0].message, /cannot prove/);
   });
+
+test("a non-string detail does not become [object Object]", async () => {
+  reset();
+  fetchHandler = async () => ({
+    ok: false, status: 400,
+    json: async () => ({ detail: { nested: "shape" } }),
+  });
+  await assert.rejects(() => SW.api("POST", "/relocate", {}), (err) => {
+    assert.ok(!String(err.message).includes("[object Object]"), err.message);
+    assert.match(String(err.message), /sidecar 400/);
+    return true;
+  });
+});

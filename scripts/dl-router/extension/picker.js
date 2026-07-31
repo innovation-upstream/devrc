@@ -95,6 +95,7 @@ export function initialState({ dirs = [], suggestNew = "", downloadId = null,
     loading: Boolean(loading),
     failed: false,
     error: "",
+    status: "",
     pendingEnter: false,
     query: "", index: 0, done: null,
   };
@@ -112,6 +113,15 @@ export function reduce(state, event) {
   // `done`, and the guard would drop it -- which made apply() see `done` still
   // set, call finish() again, get refused again, and spin forever (OOM in the
   // test runner within seconds).
+  if (event.type === "choosing") {
+    // ABOVE the `state.done` guard, for the same reason choose-failed is: it
+    // is dispatched while `done` is set, and the guard would drop it.
+    return {
+      ...state,
+      status: `Filing into "${String(event.dir)}"...`,
+      error: "",
+    };
+  }
   if (event.type === "choose-failed") {
     // The service worker refused the pick (most often /relocate could not
     // prove this router created the file). finish() used to await
@@ -122,6 +132,7 @@ export function reduce(state, event) {
     return {
       ...state,
       done: null,
+      status: "",
       error: String(event.message || "The sidecar refused that choice."),
     };
   }
@@ -132,6 +143,7 @@ export function reduce(state, event) {
     // screen is about. It used to persist through the retype AND through the
     // next in-flight choose, with no progress shown.
     next.error = "";
+    next.status = "";
     next.query = String(event.value ?? "");
     next.entries = filterEntries(state.dirs, next.query, state.suggestNew);
     next.index = 0;
@@ -238,7 +250,12 @@ export function mount(doc, chromeApi, { closeWindow } = {}) {
   const dup = doc.getElementById("dup");
 
   const renderMeta = () => {
-    meta.textContent = state.error || state.reason;
+    // `status` first: it is the only one describing something happening NOW.
+    // Writing it straight to `meta.textContent` instead meant the next
+    // render() erased it -- and any event during an in-flight choose triggers
+    // one, so an Escape mid-choose left a BLANK meta line on a picker that is
+    // (correctly) unresponsive until the choose settles.
+    meta.textContent = state.status || state.error || state.reason;
     if (state.dup) dup.textContent = state.dup;
   };
   renderMeta();
@@ -271,7 +288,7 @@ export function mount(doc, chromeApi, { closeWindow } = {}) {
     const done = state.done;
     if (!done) return;
     if (done.action === "choose") {
-      meta.textContent = `Filing into "${done.dir}"...`;
+      apply({ type: "choosing", dir: done.dir });
       let resp;
       try {
         resp = await chromeApi.runtime.sendMessage({
@@ -281,7 +298,9 @@ export function mount(doc, chromeApi, { closeWindow } = {}) {
           createdNew: done.createdNew,
         });
       } catch (err) {
-        resp = { ok: false, error: String(err) };
+        // `err.message`, not String(err): String() prepends "Error: ", the
+        // exact shape just removed from the sidecar path.
+        resp = { ok: false, error: (err && err.message) || String(err) };
       }
       // A refusal must be VISIBLE. The window stays open so the user can pick
       // somewhere else or press Esc -- closing on a rejected move is how an
@@ -303,20 +322,32 @@ export function mount(doc, chromeApi, { closeWindow } = {}) {
     close();
   };
 
-  // SINGLE-FLIGHT. `reduce` correctly returns state unchanged once `done` is
-  // set, but `apply` then ran `if (state.done) void finish()` regardless -- so
-  // every subsequent keypress during an in-flight choose fired ANOTHER
-  // `dlr:choose`. Measured: three keypresses -> four messages. Pre-existing,
-  // and the same structural family as the choose-failed loop: a guard that
-  // swallows the event without stopping the side effect. Making the
-  // post-refusal window interactive widens the exposure, so it is fixed here.
+  // SINGLE-FLIGHT AND LATCHED. `reduce` correctly returns state unchanged once
+  // `done` is set, but `apply` then ran `if (state.done) void finish()`
+  // regardless -- so every keypress during an in-flight choose fired ANOTHER
+  // `dlr:choose`. Three keypresses -> four messages.
+  //
+  // An in-flight flag alone was not enough: it reset in `.finally()` while
+  // `done` stayed set on the success and cancel paths, so once the choose
+  // SETTLED every later event re-entered finish() and re-sent. Measured on
+  // that version: 1 Enter + 3 keys -> 4 messages; 1 Enter + 1 keystroke -> 2.
+  // It was masked on the happy path only by close() tearing the page down,
+  // and whether window.close() on a popup is instant has never been observed
+  // in a real browser.
+  //
+  // So the flag LATCHES: it stays true exactly while `done` is set. The
+  // refusal path clears `done` (that is what choose-failed is for), which
+  // unlatches it and lets the user retry; the closing paths leave `done` set
+  // and stay latched forever.
   let finishing = false;
   const apply = (event) => {
     state = reduce(state, event);
     render();
     if (state.done && !finishing) {
       finishing = true;
-      void finish().finally(() => { finishing = false; });
+      void finish()
+        .finally(() => { finishing = Boolean(state.done); })
+        .catch(() => { /* finish() reports its own failures */ });
     }
   };
 

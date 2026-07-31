@@ -189,14 +189,18 @@ class QbtClient:
         return data
 
     def torrent_state(self, torrent_hash: str):
-        # `hashes=` scopes the query server-side. Be honest about what that
-        # means: the filter now runs FIRST, so if qBittorrent matches it
-        # case-sensitively the client-side compare below is unreachable and
-        # this returns None (verify_seeding then reports false -- fail closed,
-        # but for the wrong reason). Unverified against a live instance; no
-        # impact in practice because every hash here originates from
-        # qBittorrent itself, lowercase. The compare stays as the guard for a
-        # caller that supplies one in another case.
+        # `hashes=` scopes the query server-side, and it runs FIRST -- which
+        # makes the comparison below dead either way, so do not describe it as
+        # a safety net:
+        #   * the filter matched  -> the row it returned has the hash we asked
+        #     for, in the case we asked for it, so the compare passes trivially;
+        #   * the filter did not  -> the list is empty and the loop never runs.
+        # So a case-sensitive server-side filter would make this return None
+        # (verify_seeding then reports false: fail closed, but for the wrong
+        # reason). Unverified against a live instance. No impact in practice
+        # because every hash reaching here originates from qBittorrent itself,
+        # lowercase. The compare is kept only to keep the function correct if a
+        # future caller passes several hashes and gets several rows back.
         for t in self.torrents_info(hashes=torrent_hash):
             if str(t.get("hash", "")).lower() == torrent_hash.lower():
                 return t.get("state")

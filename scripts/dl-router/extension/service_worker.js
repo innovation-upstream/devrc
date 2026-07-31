@@ -97,7 +97,11 @@ async function sidecarError(resp) {
   let detail = "";
   try {
     const body = await resp.json();
-    detail = String(body?.detail || body?.error || "");
+    // Only a STRING is a message. Anything else stringifies to
+    // "[object Object]", which is worse than the bare status line it replaces.
+    for (const field of [body?.detail, body?.error]) {
+      if (typeof field === "string" && field) { detail = field; break; }
+    }
   } catch { /* not JSON, or already consumed -- fall back to the status */ }
   const err = new Error(
     detail ? `sidecar ${resp.status}: ${detail}` : `sidecar ${resp.status}`);
@@ -510,44 +514,42 @@ export async function onDownloadChanged(delta) {
   if (entry.wanted) {
     const items = await chrome.downloads.search({ id: delta.id });
     const item = items && items[0];
-    // Where the file ACTUALLY landed. Both branches below need this: neither
-    // may assert something about the file without having checked it.
+    // KEY ON WHERE THE FILE ACTUALLY IS, not on what the router intended.
+    //
+    // This used to branch on `entry.wanted !== entry.dir` first, which asked
+    // the wrong question. When the pick EQUALLED the router's own answer but
+    // the file was somewhere else, nothing happened at all: no move, no
+    // report, and the picker had already returned {ok:true, deferred:true} and
+    // closed -- so the user believed their pick had been applied. The sibling
+    // branch, given the identical physical situation, reported it.
     const rel = relPathFor(item);
-    if (entry.wanted !== entry.dir) {
-      let moved = false;
-      if (rel) {
-        try {
-          await relocate(rel, entry.wanted, delta.id);
-          moved = true;
-        } catch (err) {
-          // This `.catch(() => {})` is how a completely dead correction path
-          // stayed invisible: the move was refused, the alias was written
-          // anyway, and the UI reported success. Surface it, and do not learn
-          // from a move that never happened.
-          await reportFailure(
-            `Could not move the download to ${entry.wanted}`,
-            errorMessage(err));
-        }
-      } else {
+    if (!rel) {
+      // Outside the library root entirely (a Save-As elsewhere). Nothing this
+      // router may move, and nothing it may learn from.
+      await reportFailure(
+        `Could not move the download to ${entry.wanted}`,
+        "the file did not land inside the library root");
+    } else if (rel.split("/")[0] === entry.wanted) {
+      // Already where the user asked. Nothing to move, so "only learn if the
+      // move happened" is trivially satisfied -- and this is the user
+      // CONFIRMING a directory, which is a positive signal for the matcher
+      // whether or not the router had proposed it.
+      await learn(entry, entry.wanted, entry.wantedCreatedNew);
+    } else {
+      // Inside the library but in the wrong directory: move it, regardless of
+      // what the router originally intended.
+      try {
+        await relocate(rel, entry.wanted, delta.id);
+        await learn(entry, entry.wanted, entry.wantedCreatedNew);
+      } catch (err) {
+        // A `.catch(() => {})` here is how a completely dead correction path
+        // stayed invisible: the move was refused, the alias was written
+        // anyway, and the UI reported success. Surface it, and do not learn
+        // from a move that never happened.
         await reportFailure(
           `Could not move the download to ${entry.wanted}`,
-          "the file did not land inside the library root");
+          errorMessage(err));
       }
-      if (moved) {
-        await learn(entry, entry.wanted, entry.wantedCreatedNew);
-      }
-    } else if (rel && rel.split("/")[0] === entry.wanted) {
-      // The deferred pick equals where the ladder filed it, and the file is
-      // VERIFIED to be there. Nothing to move, so "only learn if the move
-      // happened" is trivially satisfied -- and this is the user CONFIRMING
-      // the router's own answer, a positive signal the matcher was getting
-      // before the learn was gated behind `moved`.
-      //
-      // The check is not decoration: with a Save-As into a non-library folder
-      // this branch used to post /learn with a subject directory the file
-      // never went near. No toast here -- the user did not ask for a move, so
-      // there is no failure to report; there is simply nothing to learn from.
-      await learn(entry, entry.wanted, entry.wantedCreatedNew);
     }
   }
   // Keep the entry briefly so a late "change" click can still relocate.

@@ -738,3 +738,174 @@ test("the in-flight choose shows progress rather than the stale error", async ()
   release();
   await tick();
 });
+
+
+// --- the single-flight guard must LATCH, not just cover the flight ---------- //
+//
+// An in-flight flag alone reset in .finally() while `done` stayed set on the
+// success and cancel paths, so once the choose SETTLED every later event
+// re-entered finish() and re-sent. Measured on that version: 1 Enter + 3 keys
+// -> 4 messages; 1 Enter + 1 keystroke in the filter box -> 2. It was masked
+// on the happy path only by close() tearing the page down, and whether
+// window.close() on a popup is instant has never been observed in a browser.
+function latchHarness() {
+  const doc = makeDoc(PAGE_IDS, { search: "?id=7" });
+  const sent = [];
+  let closed = 0;
+  const chromeApi = {
+    runtime: {
+      sendMessage: (msg, cb) => {
+        sent.push(msg);
+        if (typeof cb === "function") {
+          cb({ ok: true, snapshot: { dirs: DIRS.map((name) => ({ name })) } });
+          return Promise.resolve({ ok: true });
+        }
+        return Promise.resolve({ ok: true });
+      },
+    },
+  };
+  mount(doc, chromeApi, { closeWindow: () => { closed += 1; } });
+  return { doc, sent, closed: () => closed };
+}
+
+test("events AFTER a settled choose do not re-send it", async () => {
+  const { doc, sent } = latchHarness();
+  doc.fire("keydown", { key: "Enter" });
+  await tick();                      // the choose settles and close() runs
+  doc.fire("keydown", { key: "ArrowDown" });
+  doc.fire("keydown", { key: "Enter" });
+  doc.fire("keydown", { key: "Escape" });
+  await tick();
+  assert.equal(sent.filter((m) => m.type === "dlr:choose").length, 1,
+    "the guard must stay latched once `done` is set");
+});
+
+test("a single keystroke after a settled choose does not re-send it", async () => {
+  const { doc, sent } = latchHarness();
+  doc.fire("keydown", { key: "Enter" });
+  await tick();
+  doc.getElementById("q").value = "j";
+  doc.getElementById("q").fire("input");
+  await tick();
+  assert.equal(sent.filter((m) => m.type === "dlr:choose").length, 1);
+});
+
+test("a settled CANCEL is latched too", async () => {
+  const { doc, sent, closed } = latchHarness();
+  doc.fire("keydown", { key: "Escape" });
+  await tick();
+  doc.fire("keydown", { key: "Enter" });
+  doc.fire("keydown", { key: "Escape" });
+  await tick();
+  assert.equal(sent.filter((m) => m.type === "dlr:choose").length, 0);
+  assert.equal(closed(), 1, "close() must not be called again either");
+});
+
+test("but a REFUSED choose unlatches, so retry still works", async () => {
+  // The refusal path clears `done`, which is exactly what unlatches the guard.
+  let answer = { ok: false, error: "refused" };
+  const doc = makeDoc(PAGE_IDS, { search: "?id=7" });
+  const sent = [];
+  let closed = 0;
+  const chromeApi = {
+    runtime: {
+      sendMessage: (msg, cb) => {
+        sent.push(msg);
+        if (typeof cb === "function") {
+          cb({ ok: true, snapshot: { dirs: DIRS.map((name) => ({ name })) } });
+          return Promise.resolve({ ok: true });
+        }
+        return Promise.resolve(answer);
+      },
+    },
+  };
+  mount(doc, chromeApi, { closeWindow: () => { closed += 1; } });
+  doc.fire("keydown", { key: "Enter" });
+  await tick();
+  answer = { ok: true };
+  doc.fire("keydown", { key: "Enter" });
+  await tick();
+  assert.equal(sent.filter((m) => m.type === "dlr:choose").length, 2);
+  assert.equal(closed, 1);
+});
+
+// --- the in-flight message must survive a render ---------------------------- //
+test("an event during an in-flight choose does not blank the meta line", async () => {
+  // `Filing into "X"...` was written straight to meta.textContent, so the next
+  // render() erased it -- and any event triggers one. Probed: after Escape
+  // during a never-settling choose, meta was "" on a picker that is (correctly)
+  // unresponsive until the choose settles.
+  const doc = makeDoc(PAGE_IDS, { search: "?id=7&reason=tag" });
+  const chromeApi = {
+    runtime: {
+      sendMessage: (msg, cb) => {
+        if (typeof cb === "function") {
+          cb({ ok: true, snapshot: { dirs: DIRS.map((name) => ({ name })) } });
+          return Promise.resolve({ ok: true });
+        }
+        return new Promise(() => {});      // never settles
+      },
+    },
+  };
+  mount(doc, chromeApi, { closeWindow: () => {} });
+  doc.getElementById("q").value = "jane";
+  doc.getElementById("q").fire("input");
+  doc.fire("keydown", { key: "Enter" });
+  await tick();
+  assert.match(doc.getElementById("meta").textContent, /Filing into "Jane Doe"/);
+
+  for (const key of ["Escape", "ArrowDown", "Enter"]) {
+    doc.fire("keydown", { key });
+    await tick();
+    assert.match(doc.getElementById("meta").textContent,
+      /Filing into "Jane Doe"/, `blanked by ${key}`);
+  }
+});
+
+test("the status is carried in state, not painted on the DOM", () => {
+  const state = initialState({ dirs: DIRS });
+  const next = reduce({ ...state, done: { action: "choose", dir: "Jane Doe" } },
+    { type: "choosing", dir: "Jane Doe" });
+  assert.match(next.status, /Filing into "Jane Doe"/);
+  // ...and it survives the done guard, like choose-failed and for the same
+  // reason: it is dispatched WHILE done is set.
+  assert.notEqual(next.status, "");
+});
+
+test("a refusal replaces the in-flight status rather than stacking on it", () => {
+  let state = initialState({ dirs: DIRS });
+  state = reduce({ ...state, done: { action: "choose", dir: "x" } },
+    { type: "choosing", dir: "x" });
+  state = reduce(state, { type: "choose-failed", message: "refused" });
+  assert.equal(state.status, "");
+  assert.match(state.error, /refused/);
+});
+
+test("typing clears the in-flight status too", () => {
+  let state = initialState({ dirs: DIRS });
+  state = reduce({ ...state, done: { action: "choose", dir: "x" } },
+    { type: "choosing", dir: "x" });
+  state = reduce({ ...state, done: null }, input("jane"));
+  assert.equal(state.status, "");
+});
+
+test("a caught sendMessage rejection is not Error-prefixed", async () => {
+  const doc = makeDoc(PAGE_IDS, { search: "?id=7" });
+  const chromeApi = {
+    runtime: {
+      sendMessage: (msg, cb) => {
+        if (typeof cb === "function") {
+          cb({ ok: true, snapshot: { dirs: DIRS.map((name) => ({ name })) } });
+          return Promise.resolve({ ok: true });
+        }
+        return Promise.reject(new Error("the message port closed"));
+      },
+    },
+  };
+  mount(doc, chromeApi, { closeWindow: () => {} });
+  doc.fire("keydown", { key: "Enter" });
+  await tick();
+  const shown = doc.getElementById("meta").textContent;
+  assert.match(shown, /the message port closed/);
+  assert.ok(!shown.includes("Error:"), shown);
+});
