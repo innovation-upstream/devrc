@@ -371,7 +371,8 @@ def cmd_backfill_plan(args) -> int:
                                  torrents=torrents, path_map=path_map,
                                  threshold=cfg.auto_threshold,
                                  persist_seeds=args.seed_aliases,
-                                 files_for=files_for)
+                                 files_for=files_for,
+                                 dir_kinds=_kinds(cfg, store).as_map())
     paths = backfill_mod.write_manifest(plan_obj, cfg.state_dir / "manifests")
     print(plan_obj.to_tsv())
     print(f"counts: {plan_obj.counts()}", file=sys.stderr)

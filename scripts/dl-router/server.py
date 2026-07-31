@@ -31,6 +31,7 @@ Env: DL_ROUTER_HOST, DL_ROUTER_PORT, DL_ROUTER_CONFIG, DL_ROUTER_STATE_DIR,
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import secrets
@@ -218,6 +219,21 @@ class App:
         snap["matchTimeoutMs"] = int(self.cfg.get("match_timeout_ms", 400))
         snap["captureWindowS"] = int(self.cfg.get("capture_window_s", 15))
         snap["toastMs"] = int(self.cfg.get("toast_ms", 8000))
+        # THE ETAG COVERS THE WHOLE SNAPSHOT, not just the directory names.
+        #
+        # DirIndex's etag hashes the names it scanned, which is all it can
+        # know about. But the extension caches this ENTIRE payload and revalidates
+        # with `If-None-Match`, so anything else in here that changes without a
+        # directory being added or removed -- an alias learned, a kind edited
+        # into dirs.toml -- produced a 304 and a permanently stale cache. The
+        # kinds made that load-bearing: the cached fallback would keep
+        # auto-filing into a directory the operator had just reclassified as a
+        # category, and only when the sidecar was unreachable, which is exactly
+        # when nobody is watching.
+        snap["etag"] = hashlib.sha256(
+            json.dumps(snap, sort_keys=True, ensure_ascii=False,
+                       separators=(",", ":")).encode("utf-8")
+        ).hexdigest()[:16]
         return snap
 
     def match(self, payload: dict) -> dict:

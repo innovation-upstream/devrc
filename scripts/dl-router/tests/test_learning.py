@@ -277,3 +277,56 @@ def test_the_kind_gate_reads_a_live_edit_of_the_dirs_file(kinded_app):
     Path(kinded_app.cfg.dirs_file).write_text(
         'performer = []\ncategory = ["Jane Doe"]\n', encoding="utf-8")
     assert kinded_app.matcher().match(ctx).auto is False
+
+
+# --- cache invalidation ------------------------------------------------------ #
+def test_editing_the_kinds_file_changes_the_dirs_etag(kinded_app):
+    """The extension caches the WHOLE /dirs payload and revalidates with
+    `If-None-Match`. DirIndex's etag only hashes directory NAMES, so a kind
+    edited into dirs.toml used to produce a 304 and a permanently stale cache
+    -- and the stale copy would keep auto-filing into a directory just
+    reclassified as a category, only while the sidecar was unreachable, which
+    is exactly when nobody is watching.
+    """
+    before = kinded_app.dirs_snapshot()["etag"]
+    Path(kinded_app.cfg.dirs_file).write_text(
+        'performer = []\ncategory = ["Jane Doe"]\n', encoding="utf-8")
+    after = kinded_app.dirs_snapshot()["etag"]
+    assert before != after
+
+
+def test_learning_an_alias_changes_the_dirs_etag(kinded_app):
+    before = kinded_app.dirs_snapshot()["etag"]
+    kinded_app.learn({"context": {"url": CDN, "page": {}},
+                      "chosenDir": "Jane Doe", "confirmed": True})
+    assert kinded_app.dirs_snapshot()["etag"] != before
+
+
+def test_the_backfill_plan_applies_the_same_kind_gate(library, store):
+    """SKIP is the backfill's safe answer, and an unclassified target is not a
+    licence to rename a file inside a live seeding target.
+
+    The `result.auto` branch in backfill.plan is the ONE place a filename-only
+    signal can move a file (it needs a lowered threshold to be reachable at
+    all, since the filename rule is capped at 0.50). The kind gate applies
+    there exactly as it does live.
+    """
+    import backfill as backfill_mod
+    from qbt import PathMap
+
+    (library / "jane_doe.mp4").write_bytes(b"x")
+    # A reachable qBittorrent with NO torrents is positive proof that the file
+    # is not a payload, which is what lets a row be `fs` at all.
+    common = dict(store=store, dir_names=["Jane Doe", "other"],
+                  torrents=[], path_map=PathMap("/downloads", str(library)),
+                  threshold=0.1, do_seed=False)
+    unclassified = backfill_mod.plan(library, dir_kinds={}, **common)
+    classified = backfill_mod.plan(library,
+                                   dir_kinds={"Jane Doe": KIND_PERFORMER},
+                                   **common)
+
+    def row(plan):
+        return next(r for r in plan.rows if r.relpath == "jane_doe.mp4")
+
+    assert row(classified).action != backfill_mod.ACTION_SKIP
+    assert row(unclassified).action == backfill_mod.ACTION_SKIP
