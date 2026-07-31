@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import socket
 import sys
 import threading
 import urllib.error
@@ -18,8 +19,10 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+import config as config_mod  # noqa: E402
 import server as S  # noqa: E402
 from fetcher import Fetcher  # noqa: E402
+from store import Store  # noqa: E402
 
 TOKEN = "test-token-abc123"
 
@@ -537,3 +540,186 @@ def test_routing_endpoints_are_503_without_a_library_root(tmp_path, store):
         server.shutdown()
         server.server_close()
         thread.join(timeout=5)
+
+
+# --- /fetch honours the same allowlist as every other write path ------------ #
+def test_fetch_refuses_a_directory_outside_the_index(live, library):
+    """/fetch passed `known_dirs=None`, so it was the one write path with no
+    allowlist: yt-dlp would create whatever directory was named."""
+    status, body, _ = call(live, "POST", "/fetch",
+                           {"url": "https://example-site.test/v/1",
+                            "dir": "Brand New Subject"})
+    assert status == 400
+    assert body["error"] == "unsafe"
+    assert not (library / "Brand New Subject").exists()
+
+
+def test_fetch_refuses_an_unsafe_directory_name(live, library):
+    for bad in ("../escape", "a/b", "..", "with:colon", "Not Indexed"):
+        status, _, _ = call(live, "POST", "/fetch",
+                            {"url": "https://example-site.test/v/1",
+                             "dir": bad})
+        assert status == 400, bad
+    assert not (library.parent / "escape").exists()
+
+
+def test_fetch_allows_the_catch_all_even_before_it_is_indexed(live, library):
+    status, body, _ = call(live, "POST", "/fetch",
+                           {"url": "https://example-site.test/v/1"})
+    assert status == 200, body
+    assert body["dir"] == "other"
+
+
+def test_fetch_refuses_a_directory_that_symlinks_out_of_the_library(
+        live, library, tmp_path, dir_index):
+    """`is_safe_dir_name` proves the NAME is one component and says nothing
+    about where it RESOLVES; yt-dlp follows the symlink with --paths."""
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (library / "escape-link").symlink_to(outside, target_is_directory=True)
+    dir_index.refresh(force=True)
+    status, body, _ = call(live, "POST", "/fetch",
+                           {"url": "https://example-site.test/v/1",
+                            "dir": "escape-link"})
+    assert status == 400, body
+    assert body["error"] == "unsafe"
+
+
+# --- a bad request must never 500 (or hang) -------------------------------- #
+def test_a_non_ascii_authorization_header_is_a_401_not_a_crash(live):
+    """`secrets.compare_digest` raises TypeError on a non-ASCII str, and
+    _auth_ok runs inside _guard, OUTSIDE _run's error mapping -- so the
+    connection was closed with no response and a traceback hit the journal."""
+    status, body, _ = call(live, "GET", "/healthz", token=None,
+                           headers={"Authorization": "Bearer \xe9\xe9\xe9"})
+    assert status == 401
+    assert body["error"] == "unauthorized"
+
+
+def test_the_server_still_answers_after_a_hostile_auth_header(live):
+    raw_request(live, ("GET /healthz HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+                       "Authorization: Bearer \u4f60\u597d\r\n"
+                       "Connection: close\r\n\r\n").encode("utf-8"))
+    status, body, _ = call(live, "GET", "/healthz")
+    assert status == 200 and body["ok"] is True
+
+
+@pytest.mark.parametrize("header", [
+    "Bearer \xe9", "Bearer " + "\xff" * 100,
+    "bearer lowercase", "Basic dXNlcjpwdw==", "Bearer", "",
+])
+def test_malformed_authorization_headers_all_yield_401(live, header):
+    status, body, _ = call(live, "GET", "/healthz", token=None,
+                           headers={"Authorization": header})
+    assert status == 401, header
+    assert body["error"] == "unauthorized"
+
+
+def raw_request(base: str, raw: bytes) -> bytes:
+    """Send bytes urllib refuses to encode. http.server decodes headers as
+    latin-1, so UTF-8 in an Authorization header arrives as a non-ASCII str --
+    which is exactly what made compare_digest raise."""
+    host, port = base[len("http://"):].split(":")
+    with socket.create_connection((host, int(port)), timeout=10) as sock:
+        sock.sendall(raw)
+        chunks = []
+        while True:
+            got = sock.recv(4096)
+            if not got:
+                break
+            chunks.append(got)
+            if b"}" in got:
+                break
+    return b"".join(chunks)
+
+
+def test_a_utf8_authorization_header_gets_a_real_401_response(live):
+    """Regression: this used to close the connection with NO response at all
+    and print a traceback into the journal."""
+    raw = ("GET /healthz HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+           "Authorization: Bearer \u4f60\u597d\r\n"
+           "Connection: close\r\n\r\n").encode("utf-8")
+    resp = raw_request(live, raw)
+    assert resp, "the server closed the connection without responding"
+    assert b"401" in resp.split(b"\r\n", 1)[0]
+    assert b"unauthorized" in resp
+
+
+# --- HTTP method surface --------------------------------------------------- #
+def test_head_goes_through_the_guard_and_returns_no_body(live):
+    req = urllib.request.Request(live + "/healthz", method="HEAD",
+                                 headers={"Authorization": f"Bearer {TOKEN}"})
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        assert resp.status == 200
+        assert resp.read() == b""
+        assert resp.headers["Content-Type"] == "application/json"
+
+
+def test_head_without_a_token_is_401(live):
+    req = urllib.request.Request(live + "/healthz", method="HEAD")
+    try:
+        with urllib.request.urlopen(req, timeout=10):
+            raise AssertionError("HEAD must not bypass the guard")
+    except urllib.error.HTTPError as exc:
+        assert exc.code == 401
+
+
+@pytest.mark.parametrize("method", ["PUT", "DELETE", "PATCH", "OPTIONS"])
+def test_other_methods_are_a_json_405_after_the_guard(live, method):
+    status, body, headers = call(live, method, "/healthz")
+    assert status == 405
+    assert body["error"] == "method_not_allowed"
+    assert headers["Allow"] == "GET, HEAD, POST"
+
+
+@pytest.mark.parametrize("method", ["PUT", "DELETE", "PATCH", "OPTIONS"])
+def test_other_methods_still_require_a_token(live, method):
+    status, body, _ = call(live, method, "/healthz", token=None)
+    assert status == 401
+
+
+# --- a malformed config degrades instead of crash-looping ------------------ #
+def test_a_malformed_config_serves_503_instead_of_exiting(tmp_path):
+    """`Restart=always` + `RestartSec=10` + a fatal ConfigError was a silent
+    6-restarts-per-minute loop with nothing listening."""
+    bad = tmp_path / "config.toml"
+    bad.write_text("library_root = \"/tmp\"\nthis is not = valid toml [[[",
+                   encoding="utf-8")
+    with pytest.raises(config_mod.ConfigError):
+        config_mod.load(bad)
+
+    cfg, err = config_mod.load_degraded(bad, env={})
+    assert err and "cannot read" in err
+    assert cfg.library_root is None
+
+    app = S.App(cfg, store=Store(tmp_path / "s.sqlite3"), config_error=err)
+    assert app.configured is False
+    health = app.healthz()
+    assert health["ok"] is True
+    assert health["configured"] is False
+    assert "configError" in health
+
+    server = S.build_server("127.0.0.1", 0, app, TOKEN)
+    port = server.server_address[1]
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        base = f"http://127.0.0.1:{port}"
+        status, body, _ = call(base, "GET", "/healthz")
+        assert status == 200 and "configError" in body
+        for method, path, payload in [("GET", "/dirs", None),
+                                      ("POST", "/match", {"filename": "x"}),
+                                      ("POST", "/mkdir", {"name": "X"}),
+                                      ("POST", "/relocate", {"toDir": "X"}),
+                                      ("POST", "/fetch", {"url": "https://x.test/"})]:
+            status, _, _ = call(base, method, path, payload)
+            assert status == 503, f"{method} {path}"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def test_a_valid_config_reports_no_error(cfg):
+    app = S.App(cfg, store=Store(":memory:"))
+    assert "configError" not in app.healthz()

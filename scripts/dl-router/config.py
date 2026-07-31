@@ -179,6 +179,22 @@ class Config:
         return root
 
 
+def _tighten_permissions(path: Path) -> None:
+    """config.toml is where the qBittorrent password lives.
+
+    The setup instructions are `cp config.example.toml ~/.config/...`, which
+    lands 0644 — world-readable credentials. The token file is already created
+    0600 by `load_or_create_token`; this brings the config in line. Best effort:
+    a config on a filesystem that cannot represent the mode is not fatal.
+    """
+    try:
+        mode = path.stat().st_mode & 0o777
+        if mode & 0o077:
+            os.chmod(path, 0o600)
+    except OSError:
+        pass
+
+
 def load(path: Path | None = None, *, env=None) -> Config:
     """Load config.toml over DEFAULTS, then apply env overrides.
 
@@ -192,6 +208,7 @@ def load(path: Path | None = None, *, env=None) -> Config:
 
     raw: dict = {}
     if path.exists():
+        _tighten_permissions(path)
         try:
             with open(path, "rb") as fh:
                 raw = tomllib.load(fh)
@@ -236,6 +253,45 @@ def _validate(data: dict) -> None:
     rules = data.get("site_rules")
     if rules is not None and not isinstance(rules, dict):
         raise ConfigError("site_rules must be a table keyed by hostname")
+
+
+def load_degraded(path: Path | None = None, *, env=None):
+    """`load()`, but a malformed config yields an UNCONFIGURED Config instead
+    of raising.
+
+    The systemd unit is `Restart=always` + `RestartSec=10`, so a fatal
+    ConfigError on a typo'd config.toml was a silent 6-restarts-per-minute
+    loop with nothing listening. Degrading to "library_root unset" reuses the
+    behaviour that already exists for an unconfigured host: /healthz answers
+    and reports the problem, every routing endpoint returns 503, and nothing
+    is routed anywhere by accident.
+
+    Returns `(config, error_or_None)`.
+    """
+    try:
+        return load(path, env=env), None
+    except ConfigError as exc:
+        env = os.environ if env is None else env
+        data = copy.deepcopy(DEFAULTS)
+        data["library_root"] = ""
+        # The bind address still has to come from somewhere the typo cannot
+        # have broken: the unit's own environment, else the loopback defaults.
+        if env.get("DL_ROUTER_HOST"):
+            data["host"] = env["DL_ROUTER_HOST"]
+        if env.get("DL_ROUTER_PORT"):
+            try:
+                data["port"] = int(env["DL_ROUTER_PORT"])
+            except ValueError:
+                pass
+        resolved = Path(path) if path is not None else (
+            Path(env["DL_ROUTER_CONFIG"]) if env.get("DL_ROUTER_CONFIG")
+            else default_config_path())
+        state_dir = Path(env["DL_ROUTER_STATE_DIR"]) \
+            if env.get("DL_ROUTER_STATE_DIR") else default_state_dir()
+        token_file = Path(env["DL_ROUTER_TOKEN_FILE"]) \
+            if env.get("DL_ROUTER_TOKEN_FILE") else default_token_file()
+        return Config(data, path=resolved, state_dir=state_dir,
+                      token_file=token_file), str(exc)
 
 
 def load_or_create_token(path: Path | None = None) -> str:

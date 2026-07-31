@@ -11,11 +11,18 @@ never sleep.
 Robustness matters more than completeness here — the library is a live seeding
 target with unusual names and the occasional unreadable directory. A permission
 error skips that entry; it never takes the sidecar down.
+
+Concurrency: `refresh()` mutates shared state (`_entries`, `_etag`, `_map`) and
+is reached from EVERY ThreadingHTTPServer request thread, plus /mkdir and
+/relocate which force it. Each index therefore holds a lock across the whole
+scan-and-publish, so a reader can never observe a half-built index. The tests
+are single-threaded, so this is the one invariant here they cannot demonstrate.
 """
 from __future__ import annotations
 
 import hashlib
 import os
+import threading
 import time
 from pathlib import Path
 
@@ -36,6 +43,7 @@ class DirIndex:
         self._loaded_at: float = -1.0
         self._root_mtime = None
         self._errors: list = []
+        self._lock = threading.RLock()
 
     # --- scanning ---------------------------------------------------------- #
     def _scan(self) -> list:
@@ -78,11 +86,17 @@ class DirIndex:
         return (self._clock() - self._loaded_at) >= self._ttl
 
     def refresh(self, force: bool = False) -> None:
-        if force or self._stale():
-            self._root_mtime = self._root_stat_mtime()
-            self._entries = self._scan()
+        with self._lock:
+            if not (force or self._stale()):
+                return
+            root_mtime = self._root_stat_mtime()
+            entries = self._scan()
+            payload = "\n".join(e.name for e in entries)
+            # Publish only once everything is built, so a concurrent reader
+            # never sees entries that do not match the etag.
+            self._root_mtime = root_mtime
+            self._entries = entries
             self._loaded_at = self._clock()
-            payload = "\n".join(e.name for e in self._entries)
             self._etag = hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
 
     # --- accessors --------------------------------------------------------- #
@@ -143,6 +157,7 @@ class FileIndex:
         self._count = 0
         self._truncated = False
         self._loaded_at = -1.0
+        self._lock = threading.RLock()
 
     def _scan(self) -> dict:
         out: dict = {}
@@ -173,8 +188,10 @@ class FileIndex:
         return out
 
     def refresh(self, force: bool = False) -> None:
-        if force or self._loaded_at < 0 or \
-                (self._clock() - self._loaded_at) >= self._ttl:
+        with self._lock:
+            if not (force or self._loaded_at < 0
+                    or (self._clock() - self._loaded_at) >= self._ttl):
+                return
             self._map = self._scan()
             self._loaded_at = self._clock()
 

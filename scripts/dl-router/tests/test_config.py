@@ -165,3 +165,63 @@ def test_empty_token_file_is_regenerated(tmp_path):
     path = tmp_path / "token"
     path.write_text("\n")
     assert config_mod.load_or_create_token(path).strip()
+
+
+# --- config.toml holds the qBittorrent password ---------------------------- #
+def test_loading_tightens_a_world_readable_config(tmp_path):
+    """The documented setup is `cp config.example.toml ~/.config/...`, which
+    lands 0644 -- world-readable credentials. The token file was already 0600;
+    the config was not."""
+    path = tmp_path / "config.toml"
+    path.write_text('library_root = "/tmp/lib"\n', encoding="utf-8")
+    os.chmod(path, 0o644)
+    config_mod.load(path, env={})
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+
+def test_loading_leaves_an_already_private_config_alone(tmp_path):
+    path = tmp_path / "config.toml"
+    path.write_text('library_root = "/tmp/lib"\n', encoding="utf-8")
+    os.chmod(path, 0o400)
+    config_mod.load(path, env={})
+    assert stat.S_IMODE(path.stat().st_mode) == 0o400
+
+
+def test_a_group_readable_config_is_tightened_too(tmp_path):
+    path = tmp_path / "config.toml"
+    path.write_text('library_root = "/tmp/lib"\n', encoding="utf-8")
+    os.chmod(path, 0o640)
+    config_mod.load(path, env={})
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+
+# --- a malformed config must not become a restart loop --------------------- #
+def test_load_degraded_returns_an_unconfigured_config_and_the_error(tmp_path):
+    path = tmp_path / "config.toml"
+    path.write_text("not = valid = toml [[[", encoding="utf-8")
+    with pytest.raises(config_mod.ConfigError):
+        config_mod.load(path, env={})
+    cfg, err = config_mod.load_degraded(path, env={})
+    assert err
+    assert cfg.library_root is None
+    assert cfg.host == config_mod.DEFAULT_HOST
+    assert cfg.port == config_mod.DEFAULT_PORT
+
+
+def test_load_degraded_still_honours_the_units_bind_environment(tmp_path):
+    """The typo is in config.toml; the unit's own environment is still good,
+    and the sidecar must come up on the right loopback port to be diagnosable."""
+    path = tmp_path / "config.toml"
+    path.write_text("[[[", encoding="utf-8")
+    cfg, err = config_mod.load_degraded(
+        path, env={"DL_ROUTER_HOST": "127.0.0.1", "DL_ROUTER_PORT": "8799"})
+    assert err
+    assert (cfg.host, cfg.port) == ("127.0.0.1", 8799)
+
+
+def test_load_degraded_is_a_no_op_for_a_valid_config(tmp_path):
+    path = tmp_path / "config.toml"
+    path.write_text('library_root = "/tmp/lib"\n', encoding="utf-8")
+    cfg, err = config_mod.load_degraded(path, env={})
+    assert err is None
+    assert str(cfg.library_root) == "/tmp/lib"

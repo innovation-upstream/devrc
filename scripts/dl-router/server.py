@@ -78,9 +78,11 @@ class App:
     def __init__(self, cfg: config_mod.Config, *, store: Store | None = None,
                  dir_index: DirIndex | None = None,
                  file_index: FileIndex | None = None,
-                 fetcher: Fetcher | None = None, clock=time.time):
+                 fetcher: Fetcher | None = None, clock=time.time,
+                 config_error: str | None = None):
         self.cfg = cfg
         self.clock = clock
+        self.config_error = config_error
         self.root = cfg.library_root
         self.store = store if store is not None else Store(cfg.db_path,
                                                            clock=clock)
@@ -127,6 +129,10 @@ class App:
     def healthz(self) -> dict:
         out = {"ok": True, "version": SERVER_VERSION,
                "configured": self.configured}
+        if self.config_error:
+            # The whole point of degrading instead of exiting: the operator can
+            # see WHY without reading the journal of a restart loop.
+            out["configError"] = self.config_error
         if self.configured:
             out["root_present"] = self.root.is_dir()
             out["dirs"] = len(self.dirs.entries())
@@ -302,11 +308,23 @@ class App:
         self.files.refresh(force=True)
         return {"ok": True, "moved": True, "dir": to_dir, "relPath": new_rel}
 
+    def known_dirs(self) -> set:
+        """The directories anything may write into: the index plus the
+        catch-all, which is created on demand and so may not be indexed yet."""
+        return self.dirs.name_set() | {self.cfg.other_dir}
+
     def fetch(self, payload: dict) -> dict:
         url = payload.get("url")
         dir_name = payload.get("dir") or self.cfg.other_dir
-        job = self.fetcher.submit(url, dir_name, known_dirs=None)
-        log("fetch", job=job.id, dir=dir_name, state=job.state)
+        # `known_dirs=None` here meant /fetch bypassed the allowlist that every
+        # other write path enforces: any syntactically valid name was accepted
+        # and yt-dlp silently created the directory. /mkdir is the only
+        # endpoint allowed to bring a directory into existence.
+        job = self.fetcher.submit(url, dir_name, known_dirs=self.known_dirs())
+        # Metadata only: the directory name is a subject in the user's private
+        # library, and this line goes to the user journal (see log()'s own
+        # docstring, which this call used to contradict).
+        log("fetch", job=job.id, state=job.state)
         return {"ok": True, **job.as_dict()}
 
     def fetch_status(self, job_id: str):
@@ -349,7 +367,17 @@ def make_handler(app: App, token: str):
             hdr = self.headers.get("Authorization", "")
             if not hdr.startswith("Bearer "):
                 return False
-            return secrets.compare_digest(hdr[len("Bearer "):].strip(), token)
+            try:
+                return secrets.compare_digest(hdr[len("Bearer "):].strip(),
+                                              token)
+            except TypeError:
+                # `compare_digest` raises on a non-ASCII str. This runs inside
+                # _guard, OUTSIDE _run's error mapping, so the exception closed
+                # the connection with no response at all and printed a
+                # traceback into the journal -- fail-closed, but a violation of
+                # this file's "a bad request must never 500" contract, and
+                # trivially reachable from any page that can reach the socket.
+                return False
 
         def _guard(self) -> bool:
             if not self._host_ok():
@@ -455,6 +483,24 @@ def make_handler(app: App, token: str):
                 return
             self._run(fn, body)
 
+        # `_send` already suppresses the body for HEAD, but without this method
+        # BaseHTTPRequestHandler answered HEAD with an HTML 501 that never
+        # passed _guard -- no bypass, just an inconsistent shape that made the
+        # HEAD branch in _send unreachable.
+        def do_HEAD(self):
+            self.do_GET()
+
+        def _method_not_allowed(self):
+            if not self._guard():
+                return
+            self._send(405, {"ok": False, "error": "method_not_allowed"},
+                       {"Allow": "GET, HEAD, POST"})
+
+        do_OPTIONS = _method_not_allowed
+        do_PUT = _method_not_allowed
+        do_DELETE = _method_not_allowed
+        do_PATCH = _method_not_allowed
+
     return Handler
 
 
@@ -474,14 +520,22 @@ def build_server(host: str, port: int, app: App, token: str) -> ThreadingHTTPSer
 
 
 def main(argv=None) -> int:
-    cfg = config_mod.load()
+    # A malformed config.toml used to raise out of here, and the unit is
+    # `Restart=always` with `RestartSec=10` — a silent 6/min restart loop with
+    # nothing listening and no way to see why except the journal. Degrade to
+    # the same "unconfigured" state an un-set-up host already has: /healthz
+    # answers and names the problem, routing endpoints return 503.
+    cfg, cfg_error = config_mod.load_degraded()
     token = config_mod.load_or_create_token(cfg.token_file)
-    app = App(cfg)
+    app = App(cfg, config_error=cfg_error)
     server = build_server(cfg.host, cfg.port, app, token)
     log("listening", host=cfg.host, port=cfg.port,
         token_file=str(cfg.token_file), configured=app.configured,
         dirs=(len(app.dirs.entries()) if app.configured else 0))
-    if not app.configured:
+    if cfg_error:
+        log("config_error", detail=cfg_error.replace(" ", "_"))
+        log("warning", msg="serving 503 until config.toml is fixed")
+    elif not app.configured:
         log("warning", msg="library_root unset — routing endpoints return 503")
     try:
         server.serve_forever()
