@@ -6,9 +6,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
+globalThis.DL_ROUTER_NO_AUTOSTART = true;
+
 import {
-  ENTRY_DIR, ENTRY_NEW, filterEntries, initialState, reduce, titleCase,
+  ENTRY_DIR, ENTRY_NEW, filterEntries, initialState, mount, reduce, titleCase,
 } from "../extension/picker.js";
+import { makeDoc } from "./fake_page.mjs";
 
 const DIRS = ["Jane Doe", "john-smith", "Mary_Major", "acme-studio", "other"];
 
@@ -187,4 +190,177 @@ test("the reducer never mutates the previous state", () => {
   reduce(state, input("jane"));
   reduce(state, key("ArrowDown"));
   assert.equal(JSON.stringify(state), before);
+});
+
+// --- the load-order race ----------------------------------------------------- //
+//
+// mount() starts with `dirs: []`, fills it from an async `dlr:snapshot`
+// round-trip, and the window opens FOCUSED. Typing a query and pressing Enter
+// before the answer landed CREATED a new directory -- with nothing loaded,
+// filterEntries has nothing to match, so the "+ new dir" proposal is the only
+// entry and it is on top. That re-opened the exact footgun the entry-ordering
+// rule was written to close.
+test("Enter is deferred, not acted on, while the directory list is loading", () => {
+  let state = initialState({ dirs: [], suggestNew: "", loading: true });
+  state = drive(state, [input("smith"), key("Enter")]);
+  assert.equal(state.done, null, "Enter must not create a directory yet");
+  assert.equal(state.pendingEnter, true);
+});
+
+test("the deferred Enter selects the existing directory once it arrives", () => {
+  let state = initialState({ dirs: [], loading: true });
+  state = drive(state, [input("smith"), key("Enter")]);
+  state = reduce(state, { type: "dirs", dirs: DIRS });
+  assert.deepEqual(state.done,
+    { action: "choose", dir: "john-smith", createdNew: false },
+    "the race used to create a directory called 'Smith' here");
+});
+
+test("a deferred Enter still creates when nothing really matches", () => {
+  let state = initialState({ dirs: [], loading: true });
+  state = drive(state, [input("aster nightingale"), key("Enter")]);
+  state = reduce(state, { type: "dirs", dirs: DIRS });
+  assert.deepEqual(state.done,
+    { action: "choose", dir: "Aster Nightingale", createdNew: true });
+});
+
+test("Escape works immediately even while loading", () => {
+  let state = initialState({ dirs: [], loading: true, otherDir: "other" });
+  state = drive(state, [key("Escape")]);
+  assert.deepEqual(state.done, { action: "cancel", dir: "other" });
+});
+
+test("arrows while loading do not queue a choice", () => {
+  let state = initialState({ dirs: [], loading: true });
+  state = drive(state, [key("ArrowDown"), key("ArrowDown")]);
+  assert.equal(state.done, null);
+  assert.equal(state.pendingEnter, false);
+});
+
+test("the dirs event resets the highlight and clears loading", () => {
+  let state = initialState({ dirs: [], loading: true });
+  state = reduce(state, { type: "dirs", dirs: DIRS });
+  assert.equal(state.loading, false);
+  assert.equal(state.index, 0);
+  assert.deepEqual(state.dirs, DIRS);
+});
+
+test("a malformed dirs event leaves an empty but usable list", () => {
+  let state = initialState({ dirs: [], loading: true });
+  state = reduce(state, { type: "dirs", dirs: "nope" });
+  assert.deepEqual(state.dirs, []);
+  assert.equal(state.loading, false);
+});
+
+// --- mount() ----------------------------------------------------------------- //
+const PAGE_IDS = ["q", "list", "meta", "dup"];
+
+function mountPicker({ search = "?id=7&reason=r&suggestNew=Aster+Vale",
+  snapshot = { dirs: DIRS.map((name) => ({ name })) }, deferReply = false } = {}) {
+  const doc = makeDoc(PAGE_IDS, { search });
+  const sent = [];
+  let replySnapshot = null;
+  const chromeApi = {
+    runtime: {
+      sendMessage: (msg, cb) => {
+        sent.push(msg);
+        if (typeof cb === "function") {
+          replySnapshot = () => cb({ ok: true, snapshot });
+          if (!deferReply) replySnapshot();
+        }
+        return Promise.resolve({ ok: true });
+      },
+    },
+  };
+  let closed = 0;
+  const handle = mount(doc, chromeApi, { closeWindow: () => { closed += 1; } });
+  return { doc, sent, handle, land: () => replySnapshot && replySnapshot(),
+    closed: () => closed };
+}
+
+test("mount renders the reason, focuses the input and asks for the snapshot", () => {
+  const { doc, sent } = mountPicker();
+  assert.equal(doc.getElementById("meta").textContent, "r");
+  assert.equal(doc.getElementById("q").focused, true);
+  assert.ok(sent.some((m) => m.type === "dlr:snapshot"));
+});
+
+test("mount shows a loading row until the directories arrive", () => {
+  const { doc, land } = mountPicker({ deferReply: true });
+  assert.match(doc.getElementById("list").textContent, /Loading directories/);
+  land();
+  assert.ok(!doc.getElementById("list").textContent.includes("Loading"));
+  assert.match(doc.getElementById("list").textContent, /john-smith/);
+});
+
+const tick = () => new Promise((r) => setTimeout(r, 0));
+
+test("mount: typing + Enter BEFORE the snapshot lands selects, never creates", async () => {
+  // The end-to-end version of the race, driven through the real DOM wiring.
+  const { doc, sent, land, closed } = mountPicker({ deferReply: true });
+  doc.getElementById("q").value = "smith";
+  doc.getElementById("q").fire("input");
+  doc.fire("keydown", { key: "Enter" });
+  assert.equal(sent.filter((m) => m.type === "dlr:choose").length, 0,
+    "nothing may be chosen while the list is still empty");
+  land();
+  const choose = sent.find((m) => m.type === "dlr:choose");
+  assert.deepEqual(choose,
+    { type: "dlr:choose", downloadId: 7, dir: "john-smith", createdNew: false });
+  await tick();
+  assert.equal(closed(), 1);
+});
+
+test("mount: the normal flow still selects and closes", async () => {
+  const { doc, sent, closed } = mountPicker();
+  doc.getElementById("q").value = "jane";
+  doc.getElementById("q").fire("input");
+  doc.fire("keydown", { key: "Enter" });
+  const choose = sent.find((m) => m.type === "dlr:choose");
+  assert.equal(choose.dir, "Jane Doe");
+  await tick();
+  assert.equal(closed(), 1);
+});
+
+test("mount: Escape closes without choosing anything", async () => {
+  const { doc, sent, closed } = mountPicker();
+  doc.fire("keydown", { key: "Escape" });
+  assert.equal(sent.filter((m) => m.type === "dlr:choose").length, 0);
+  await tick();
+  assert.equal(closed(), 1);
+});
+
+test("mount: keys the picker does not own are left alone", () => {
+  const { doc } = mountPicker();
+  const e = doc.fire("keydown", { key: "a" });
+  assert.notEqual(e.defaultPrevented, true);
+});
+
+test("mount: arrows move the highlight in the rendered list", () => {
+  const { doc } = mountPicker();
+  doc.fire("keydown", { key: "ArrowDown" });
+  const rows = doc.getElementById("list").children;
+  assert.ok(rows[1].className.includes("sel"));
+});
+
+test("mount: a yt-dlp job id survives as a string", () => {
+  const { doc, sent } = mountPicker({ search: "?id=fetch%3A3" });
+  doc.fire("keydown", { key: "Enter" });
+  const choose = sent.find((m) => m.type === "dlr:choose");
+  assert.equal(choose.downloadId, "fetch:3");
+});
+
+test("mount: the duplicate warning is shown when there is one", () => {
+  const { doc } = mountPicker({ search: "?id=7&dup=Possible+duplicate" });
+  assert.equal(doc.getElementById("dup").textContent, "Possible duplicate");
+});
+
+test("mount: an empty snapshot still offers the new-directory entry", () => {
+  const { doc, sent } = mountPicker({ snapshot: { dirs: [] },
+    search: "?id=7&suggestNew=Aster+Vale" });
+  assert.match(doc.getElementById("list").textContent, /new dir "Aster Vale"/);
+  doc.fire("keydown", { key: "Enter" });
+  const choose = sent.find((m) => m.type === "dlr:choose");
+  assert.deepEqual(choose, { type: "dlr:choose", downloadId: 7,
+    dir: "Aster Vale", createdNew: true });
 });

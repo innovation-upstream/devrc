@@ -81,9 +81,13 @@ export function filterEntries(dirs, query, suggestNew) {
 }
 
 export function initialState({ dirs = [], suggestNew = "", downloadId = null,
-  reason = "", dup = "", otherDir = "other" } = {}) {
+  reason = "", dup = "", otherDir = "other", loading = false } = {}) {
   const state = {
     dirs, suggestNew, downloadId, reason, dup, otherDir,
+    // `loading` = the directory list has not arrived from the sidecar yet.
+    // While it is set, Enter is DEFERRED rather than acted on: see reduce().
+    loading: Boolean(loading),
+    pendingEnter: false,
     query: "", index: 0, done: null,
   };
   state.entries = filterEntries(dirs, "", suggestNew);
@@ -103,6 +107,19 @@ export function reduce(state, event) {
     next.index = 0;
     return next;
   }
+  if (event.type === "dirs") {
+    // The directory list arrived. Rebuild the entries against the CURRENT
+    // query, then honour an Enter the user pressed while we were still empty.
+    next.dirs = Array.isArray(event.dirs) ? event.dirs : [];
+    next.loading = false;
+    next.entries = filterEntries(next.dirs, state.query, state.suggestNew);
+    next.index = 0;
+    if (state.pendingEnter) {
+      next.pendingEnter = false;
+      return reduce(next, { type: "key", key: "Enter" });
+    }
+    return next;
+  }
   if (event.type === "key") {
     const key = event.key;
     if (key === "ArrowDown") {
@@ -114,6 +131,21 @@ export function reduce(state, event) {
       return next;
     }
     if (key === "Enter") {
+      // THE RACE. mount() starts with `dirs: []` and fills it from an async
+      // `dlr:snapshot` round-trip, and the window opens FOCUSED. Typing a query
+      // and hitting Enter before the answer landed used to CREATE a new
+      // directory -- because with no directories loaded, filterEntries has
+      // nothing to match and the "+ new dir" proposal is the only entry, on
+      // top. That is precisely the footgun the entry-ordering rule above was
+      // written to close, re-opened by the load order.
+      //
+      // Deferring rather than dropping the keypress: the user's Enter is
+      // honoured the moment the real list arrives, against the list they
+      // actually meant.
+      if (state.loading) {
+        next.pendingEnter = true;
+        return next;
+      }
       const entry = state.entries[state.index];
       if (!entry) return state;
       next.done = {
@@ -134,15 +166,26 @@ export function reduce(state, event) {
 }
 
 // --- DOM shell ------------------------------------------------------------- //
-export function mount(doc, chromeApi) {
+/**
+ * Wire the reducer to the page. Returns a small handle so the flow is
+ * drivable in tests (it had 0% coverage, which is how the load-order race
+ * above survived a suite that covered the reducer thoroughly).
+ *
+ * `closeWindow` is injectable for the same reason.
+ */
+export function mount(doc, chromeApi, { closeWindow } = {}) {
   const params = new URLSearchParams(doc.location.search);
-  const downloadId = Number(params.get("id"));
+  const rawId = params.get("id") || "";
+  // A yt-dlp job id is a string ("fetch:3"); a browser download id is a number.
+  const downloadId = /^\d+$/.test(rawId) ? Number(rawId) : rawId;
   let state = initialState({
     dirs: [],
     suggestNew: params.get("suggestNew") || "",
     downloadId,
     reason: params.get("reason") || "",
     dup: params.get("dup") || "",
+    // Nothing may be CHOSEN until the real directory list has arrived.
+    loading: true,
   });
 
   const input = doc.getElementById("q");
@@ -153,8 +196,18 @@ export function mount(doc, chromeApi) {
   meta.textContent = state.reason;
   if (state.dup) dup.textContent = state.dup;
 
+  const close = closeWindow
+    || (() => { if (typeof window !== "undefined") window.close(); });
+
   const render = () => {
     list.textContent = "";
+    if (state.loading) {
+      const li = doc.createElement("li");
+      li.textContent = "Loading directories...";
+      li.className = "row loading";
+      list.appendChild(li);
+      return;
+    }
     state.entries.forEach((entry, i) => {
       const li = doc.createElement("li");
       li.textContent = entry.label;
@@ -168,14 +221,16 @@ export function mount(doc, chromeApi) {
     const done = state.done;
     if (!done) return;
     if (done.action === "choose") {
-      await chromeApi.runtime.sendMessage({
-        type: "dlr:choose",
-        downloadId,
-        dir: done.dir,
-        createdNew: done.createdNew,
-      });
+      try {
+        await chromeApi.runtime.sendMessage({
+          type: "dlr:choose",
+          downloadId,
+          dir: done.dir,
+          createdNew: done.createdNew,
+        });
+      } catch { /* the window is closing either way */ }
     }
-    window.close();
+    close();
   };
 
   const apply = (event) => {
@@ -193,12 +248,15 @@ export function mount(doc, chromeApi) {
   });
 
   chromeApi.runtime.sendMessage({ type: "dlr:snapshot" }, (resp) => {
-    const dirs = (resp?.snapshot?.dirs || []).map((d) => d.name);
-    state = { ...state, dirs, entries: filterEntries(dirs, state.query, state.suggestNew) };
-    render();
+    const dirs = (resp?.snapshot?.dirs || [])
+      .map((d) => d && d.name)
+      .filter((n) => typeof n === "string" && n);
+    apply({ type: "dirs", dirs });
   });
   render();
   input.focus();
+
+  return { state: () => state, apply };
 }
 
 if (typeof document !== "undefined" && typeof chrome !== "undefined"

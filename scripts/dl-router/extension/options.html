@@ -23,8 +23,13 @@
   </p>
 
   <label for="port">Sidecar port</label>
-  <input id="port" type="number" min="1" max="65535">
-  <div class="hint">Default 8791.</div>
+  <input id="port" type="number" readonly disabled>
+  <div class="hint">
+    Fixed by the extension's <code>host_permissions</code>, which an options
+    page cannot change. To move the sidecar, edit the port in BOTH
+    <code>manifest.json</code> and <code>~/.config/dl-router/config.toml</code>,
+    then fully restart the browser.
+  </div>
 
   <label for="token">Bearer token</label>
   <input id="token" type="text" autocomplete="off" spellcheck="false">

@@ -1,49 +1,97 @@
 // options.js -- per-profile configuration (decision D2).
 //
 // Extension storage is per-profile, so ticking "enable" here scopes routing to
-// THIS Brave profile by construction. Every other profile keeps stock download
-// behaviour with no code path through the router at all.
+// THIS browser profile by construction. Every other profile keeps stock
+// download behaviour with no code path through the router at all.
 //
 // The token comes from `dl-route token` (the sidecar's ~/.config/dl-router/token).
+//
+// THE PORT IS NOT A SETTING. `host_permissions` in manifest.json is a hard pin
+// (`http://127.0.0.1:8791/*`) that an options page cannot change, so the port
+// field used to be a footgun: editing it stored a value the extension was not
+// permitted to reach, every fetch failed with a permissions error, and nothing
+// in the UI said why. The field is now read-only and shows what the manifest
+// actually allows -- one source of truth.
+//
+// Everything is exported and `mount()` takes its document + chrome, so the page
+// is testable headlessly (it had zero coverage).
 
-const DEFAULT_PORT = 8791;
+export const DEFAULT_PORT = 8791;
 
-async function load() {
-  const { port, token, enabled } = await chrome.storage.local.get(
-    ["port", "token", "enabled"]);
-  document.getElementById("port").value = port || DEFAULT_PORT;
-  document.getElementById("token").value = token || "";
-  document.getElementById("enabled").checked = Boolean(enabled);
+/** The port the manifest permits. The ONLY port this extension can reach. */
+export function manifestPort(chromeApi) {
+  try {
+    const perms = chromeApi.runtime.getManifest()?.host_permissions || [];
+    for (const perm of perms) {
+      const m = /^https?:\/\/127\.0\.0\.1:(\d+)\//.exec(String(perm));
+      if (m) return Number(m[1]);
+    }
+  } catch { /* fall through */ }
+  return DEFAULT_PORT;
 }
 
-async function probe() {
-  const status = document.getElementById("status");
-  const port = parseInt(document.getElementById("port").value, 10) || DEFAULT_PORT;
-  const token = document.getElementById("token").value.trim();
+/** Render the stored settings. The port always comes from the manifest. */
+export async function load(doc, chromeApi) {
+  const got = await chromeApi.storage.local.get(["token", "enabled"]);
+  doc.getElementById("port").value = manifestPort(chromeApi);
+  doc.getElementById("token").value = got.token || "";
+  doc.getElementById("enabled").checked = Boolean(got.enabled);
+}
+
+/** Ask the sidecar who it is, and say so plainly. */
+export async function probe(doc, chromeApi, fetchImpl) {
+  const status = doc.getElementById("status");
+  const port = manifestPort(chromeApi);
+  const token = doc.getElementById("token").value.trim();
+  if (!token) {
+    status.textContent = "No token yet. Run `dl-route token` and paste it here.";
+    return status.textContent;
+  }
   try {
-    const resp = await fetch(`http://127.0.0.1:${port}/healthz`, {
+    const resp = await fetchImpl(`http://127.0.0.1:${port}/healthz`, {
       headers: { Authorization: `Bearer ${token}` },
     });
-    if (resp.status === 401) { status.textContent = "Sidecar reachable, token REJECTED."; return; }
-    if (!resp.ok) { status.textContent = `Sidecar returned HTTP ${resp.status}.`; return; }
-    const body = await resp.json();
-    status.textContent = body.configured
-      ? `Sidecar OK -- ${body.dirs} directories, ${body.aliases} aliases.`
-      : "Sidecar OK but library_root is not configured (see config.toml).";
+    if (resp.status === 401) {
+      status.textContent = "Sidecar reachable, token REJECTED.";
+    } else if (!resp.ok) {
+      status.textContent = `Sidecar returned HTTP ${resp.status}.`;
+    } else {
+      const body = await resp.json();
+      if (body.configError) {
+        status.textContent =
+          `Sidecar up but its config is broken: ${body.configError}`;
+      } else if (body.configured) {
+        status.textContent =
+          `Sidecar OK -- ${body.dirs} directories, ${body.aliases} aliases.`;
+      } else {
+        status.textContent =
+          "Sidecar OK but library_root is not configured (see config.toml).";
+      }
+    }
   } catch (err) {
-    status.textContent = `Sidecar unreachable: ${err}`;
+    status.textContent = `Sidecar unreachable on port ${port}: ${err}`;
   }
+  return status.textContent;
 }
 
-document.getElementById("save").addEventListener("click", async () => {
-  const port = parseInt(document.getElementById("port").value, 10) || DEFAULT_PORT;
-  const token = document.getElementById("token").value.trim();
-  const enabled = document.getElementById("enabled").checked;
-  await chrome.storage.local.set({ port, token, enabled });
-  document.getElementById("status").textContent = "Saved. Checking sidecar...";
-  await probe();
-});
+/** Persist. The port is deliberately NOT stored -- the manifest owns it. */
+export async function save(doc, chromeApi, fetchImpl) {
+  const token = doc.getElementById("token").value.trim();
+  const enabled = doc.getElementById("enabled").checked;
+  await chromeApi.storage.local.set({ token, enabled });
+  doc.getElementById("status").textContent = "Saved. Checking sidecar...";
+  return probe(doc, chromeApi, fetchImpl);
+}
 
-document.getElementById("test").addEventListener("click", probe);
+export function mount(doc, chromeApi, fetchImpl = globalThis.fetch) {
+  doc.getElementById("save").addEventListener(
+    "click", () => { void save(doc, chromeApi, fetchImpl); });
+  doc.getElementById("test").addEventListener(
+    "click", () => { void probe(doc, chromeApi, fetchImpl); });
+  return load(doc, chromeApi);
+}
 
-load();
+if (typeof document !== "undefined" && typeof chrome !== "undefined"
+    && !globalThis.DL_ROUTER_NO_AUTOSTART) {
+  void mount(document, chrome);
+}

@@ -39,13 +39,18 @@ globalThis.chrome = {
     },
     onChanged: { addListener() {} },
   },
-  runtime: { getURL: (p) => `chrome-extension://test/${p}`, onMessage: { addListener() {} } },
+  runtime: {
+    getURL: (p) => `chrome-extension://test/${p}`,
+    onMessage: { addListener() {} },
+    getManifest: () => ({ host_permissions: ["http://127.0.0.1:8791/*"] }),
+  },
   windows: {
     create: async (opts) => {
       calls.windowsCreate.push(opts);
       if (windowsCreateFails) throw new Error("no window");
-      return { id: 1 };
+      return { id: 900 + calls.windowsCreate.length };
     },
+    onRemoved: { addListener() {} },
   },
   notifications: {
     create: async (opts) => {
@@ -100,12 +105,15 @@ const SNAPSHOT = {
 
 function reset({ enabled = true, snapshot = SNAPSHOT } = {}) {
   for (const k of Object.keys(calls)) calls[k].length = 0;
-  storageLocal = { port: 8791, token: "tok", enabled };
+  storageLocal = { token: "tok", enabled };
   storageSession = {};
   searchResult = [];
   windowsCreateFails = false;
   notificationsFail = false;
   SW.state.config = { port: 8791, token: "tok", enabled };
+  SW.state.configLoaded = true;
+  SW.state.pendingFetch.clear();
+  SW.state.ownWindowIds.clear();
   SW.state.snapshot = snapshot;
   SW.state.etag = snapshot ? `"${snapshot.etag}"` : null;
   SW.state.captures = [];
@@ -128,6 +136,14 @@ test("loadConfig reads the per-profile settings", async () => {
   reset({ enabled: true });
   const cfg = await SW.loadConfig();
   assert.deepEqual(cfg, { port: 8791, token: "tok", enabled: true });
+});
+
+test("the port comes from the manifest, not from storage", () => {
+  // host_permissions is a hard pin the options page cannot change, so a
+  // configurable port setting silently bricked every fetch.
+  reset();
+  storageLocal.port = 9999;
+  assert.equal(SW.manifestPort(), 8791);
 });
 
 test("routing is off in a profile where it was never enabled", async () => {
@@ -405,11 +421,47 @@ test("the menu downloads a plain link", async () => {
   assert.deepEqual(calls.downloads[0], { url: "https://example-site.test/f.mp4" });
 });
 
-test("the menu routes a stream through the yt-dlp endpoint", async () => {
+test("the menu routes a stream through the matched dir, not the catch-all", () => {
+  // It used to be hardcoded to `dir: otherDir()` with `.catch(() => {})`: a
+  // yt-dlp capture never reached the matched directory, never toasted, never
+  // offered the picker, and every failure was swallowed.
+  return (async () => {
+    reset();
+    const posted = [];
+    fetchHandler = async (url, opts) => {
+      posted.push({ url, body: JSON.parse(opts.body || "{}") });
+      if (url.endsWith("/match")) {
+        return { ok: true, status: 200,
+          json: async () => ({ dir: "Jane Doe", auto: true,
+            reason: "tag=='Jane Doe'" }) };
+      }
+      return { ok: true, status: 200, json: async () => ({ jobId: "j1" }) };
+    };
+    await SW.onMenuClicked({
+      menuItemId: SW.MENU_ID,
+      srcUrl: "https://cdn.example-site.test/master.m3u8",
+      pageUrl: "https://example-site.test/v/1",
+    }, {});
+    assert.equal(calls.downloads.length, 0);
+    const matchCall = posted.find((p) => p.url.endsWith("/match"));
+    assert.ok(matchCall, "a stream must be matched like any other download");
+    const fetchCall = posted.find((p) => p.url.endsWith("/fetch"));
+    assert.equal(fetchCall.body.url, "https://example-site.test/v/1");
+    assert.equal(fetchCall.body.dir, "Jane Doe");
+    assert.match(calls.windowsCreate[0].url, /toast\.html/);
+  })();
+});
+
+test("a below-threshold stream opens the picker instead of guessing", async () => {
   reset();
   const posted = [];
   fetchHandler = async (url, opts) => {
-    posted.push({ url, body: JSON.parse(opts.body || "{}") });
+    posted.push(url);
+    if (url.endsWith("/match")) {
+      return { ok: true, status: 200,
+        json: async () => ({ dir: "Jane Doe", auto: false, reason: "tie",
+          suggestNew: "Aster Vale" }) };
+    }
     return { ok: true, status: 200, json: async () => ({ jobId: "j1" }) };
   };
   await SW.onMenuClicked({
@@ -417,9 +469,77 @@ test("the menu routes a stream through the yt-dlp endpoint", async () => {
     srcUrl: "https://cdn.example-site.test/master.m3u8",
     pageUrl: "https://example-site.test/v/1",
   }, {});
-  assert.equal(calls.downloads.length, 0);
+  assert.equal(posted.filter((u) => u.endsWith("/fetch")).length, 0,
+    "nothing may be fetched before the user picks a directory");
+  assert.match(calls.windowsCreate[0].url, /picker\.html/);
+  assert.equal(SW.state.pendingFetch.size, 1);
+});
+
+test("choosing a directory for a queued stream submits the job there", async () => {
+  reset();
+  fetchHandler = async (url) => {
+    if (url.endsWith("/match")) {
+      return { ok: true, status: 200,
+        json: async () => ({ dir: "other", auto: false, reason: "no match" }) };
+    }
+    return { ok: true, status: 200, json: async () => ({ jobId: "j2" }) };
+  };
+  await SW.onMenuClicked({
+    menuItemId: SW.MENU_ID,
+    srcUrl: "https://cdn.example-site.test/master.m3u8",
+    pageUrl: "https://example-site.test/v/1",
+  }, {});
+  const [key] = [...SW.state.pendingFetch.keys()];
+  const posted = [];
+  fetchHandler = async (url, opts) => {
+    posted.push({ url, body: JSON.parse(opts.body || "{}") });
+    return { ok: true, status: 200, json: async () => ({ jobId: "j2" }) };
+  };
+  const out = await SW.applyChoice(key, "john-smith");
+  assert.equal(out.dir, "john-smith");
   const fetchCall = posted.find((p) => p.url.endsWith("/fetch"));
-  assert.equal(fetchCall.body.url, "https://example-site.test/v/1");
+  assert.equal(fetchCall.body.dir, "john-smith");
+  assert.equal(SW.state.pendingFetch.size, 0);
+  assert.equal(calls.search.length, 0,
+    "a fetch job has no DownloadItem to search for");
+});
+
+test("a failing /fetch is SURFACED, not swallowed", async () => {
+  reset();
+  fetchHandler = async (url) => {
+    if (url.endsWith("/match")) {
+      return { ok: true, status: 200,
+        json: async () => ({ dir: "Jane Doe", auto: true, reason: "r" }) };
+    }
+    return { ok: false, status: 400, json: async () => ({}) };
+  };
+  await SW.onMenuClicked({
+    menuItemId: SW.MENU_ID,
+    srcUrl: "https://cdn.example-site.test/master.m3u8",
+    pageUrl: "https://example-site.test/v/1",
+  }, {}).catch(() => {});
+  assert.equal(calls.notifications.length, 1,
+    "clicking Save must not look identical whether it worked or not");
+  assert.match(calls.notifications[0].title, /Could not start/);
+});
+
+test("an unreachable sidecar still routes a stream from the cache", async () => {
+  reset();
+  SW.recordCapture({ pageUrl: "https://example-site.test/v/1",
+    tags: ["john-smith"] }, { tab: { id: 7 } });
+  const posted = [];
+  fetchHandler = async (url, opts) => {
+    if (url.endsWith("/match")) throw new Error("ECONNREFUSED");
+    posted.push({ url, body: JSON.parse(opts.body || "{}") });
+    return { ok: true, status: 200, json: async () => ({ jobId: "j3" }) };
+  };
+  await SW.onMenuClicked({
+    menuItemId: SW.MENU_ID,
+    srcUrl: "https://cdn.example-site.test/master.m3u8",
+    pageUrl: "https://example-site.test/v/1",
+  }, { id: 7 });
+  const fetchCall = posted.find((p) => p.url.endsWith("/fetch"));
+  assert.equal(fetchCall.body.dir, "john-smith");
 });
 
 test("the menu ignores non-http targets", async () => {
@@ -559,4 +679,69 @@ test("the /match payload carries the download id", async () => {
   const match = posted.find((p) => p.url.endsWith("/match"));
   assert.equal(match.body.downloadId, 77,
     "without it the sidecar cannot prove who created the file");
+});
+
+// --- the toast must not steal the active tab -------------------------------- //
+//
+// chrome.windows.create ACTIVATES the new window's tab, which fired
+// chrome.tabs.onActivated and clobbered state.activeTabId with the toast's own
+// tab. After the very first toast, tier-3 correlation ("most recent capture
+// from the active tab") matched nothing for the rest of the session and
+// routing silently degraded to the catch-all -- no error, just worse matching.
+test("a real tab activation updates activeTabId", () => {
+  reset();
+  SW.onTabActivated({ tabId: 42, windowId: 5 });
+  assert.equal(SW.state.activeTabId, 42);
+});
+
+test("activation inside OUR toast window is ignored", async () => {
+  reset();
+  SW.state.activeTabId = 7;
+  await SW.showToast({ downloadId: 1, dir: "Jane Doe", reason: "r" });
+  const ownWindowId = [...SW.state.ownWindowIds][0];
+  assert.ok(typeof ownWindowId === "number", "the popup must be remembered");
+  SW.onTabActivated({ tabId: 999, windowId: ownWindowId });
+  assert.equal(SW.state.activeTabId, 7, "the toast stole the active tab");
+});
+
+test("activation inside OUR picker window is ignored", async () => {
+  reset();
+  SW.state.activeTabId = 7;
+  await SW.openPicker({ downloadId: 1, dir: "other", reason: "r" });
+  const ownWindowId = [...SW.state.ownWindowIds][0];
+  SW.onTabActivated({ tabId: 998, windowId: ownWindowId });
+  assert.equal(SW.state.activeTabId, 7);
+});
+
+test("tier-3 correlation still works after a toast has been shown", async () => {
+  reset();
+  SW.state.activeTabId = 7;
+  SW.recordCapture({ pageUrl: "https://example-site.test/v/1",
+    tags: ["john-smith"] }, { tab: { id: 7 } });
+  await SW.showToast({ downloadId: 1, dir: "Jane Doe", reason: "r" });
+  SW.onTabActivated({ tabId: 1234, windowId: [...SW.state.ownWindowIds][0] });
+
+  fetchHandler = async () => { throw new Error("down"); };
+  const suggest = spy();
+  SW.onDeterminingFilename({ id: 60, filename: "f.mp4" }, suggest);
+  await settle(10);
+  assert.equal(suggest.calls[0].filename, "john-smith/f.mp4",
+    "the capture on the real tab must still correlate");
+});
+
+test("a closed popup stops being tracked", async () => {
+  reset();
+  await SW.showToast({ downloadId: 1, dir: "Jane Doe", reason: "r" });
+  const id = [...SW.state.ownWindowIds][0];
+  SW.onWindowRemoved(id);
+  assert.equal(SW.state.ownWindowIds.has(id), false);
+  SW.onTabActivated({ tabId: 555, windowId: id });
+  assert.equal(SW.state.activeTabId, 555);
+});
+
+test("a malformed activation event is ignored", () => {
+  reset();
+  SW.state.activeTabId = 7;
+  for (const e of [null, undefined, {}, { tabId: "nope" }]) SW.onTabActivated(e);
+  assert.equal(SW.state.activeTabId, 7);
 });

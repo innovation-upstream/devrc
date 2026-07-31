@@ -9,6 +9,11 @@
 // this profile's options page. Extension storage is per-profile, so a profile
 // where it was never enabled behaves exactly like stock Brave.
 //
+// MV3 lifetime: this worker is torn down after ~30s idle and restarted by the
+// next event. Listener registration therefore has to happen in the FIRST TURN
+// of the script -- see `registerListeners()` at the bottom -- and everything
+// asynchronous hangs off `ready`, which the handlers await internally.
+//
 // Test hook: set `globalThis.DL_ROUTER_NO_AUTOSTART = true` before importing to
 // suppress listener registration and networking.
 
@@ -26,6 +31,12 @@ const TOAST_H = 190;
 const PICKER_W = 460;
 const PICKER_H = 420;
 
+// How long onDeterminingFilename will wait for the cold-start config read
+// before giving up and declining to route. A chrome.storage.local read is
+// sub-millisecond; if it has not landed by now something is badly wrong and
+// declining (Chrome's default filename) is the conservative answer.
+const READY_TIMEOUT_MS = 250;
+
 // Module-global so `onDeterminingFilename` can read it SYNCHRONOUSLY -- the
 // listener has no time to await chrome.storage. It is repopulated on every
 // service-worker start and by the refresh alarm.
@@ -34,17 +45,49 @@ export const state = {
   etag: null,
   captures: [],         // recent page-context captures (newest last)
   pending: new Map(),   // downloadId -> {dir, filename, decision, ts}
+  pendingFetch: new Map(),  // fetchKey -> {url, payload, decision}
   config: { port: DEFAULT_PORT, token: "", enabled: false },
+  configLoaded: false,  // has loadConfig() completed at least once?
+  ownWindowIds: new Set(),  // popup windows WE created (toast/picker)
 };
 
+/**
+ * Resolves once the worker has read its config and restored its snapshot.
+ * Handlers registered synchronously await this instead of the module doing so.
+ */
+let readyPromise = null;
+export function ready() {
+  return readyPromise || Promise.resolve();
+}
+
 // --- config + transport ---------------------------------------------------- //
+/**
+ * The sidecar port, read from the MANIFEST rather than from storage.
+ *
+ * `host_permissions` is a hard pin (`http://127.0.0.1:8791/*`) that an options
+ * page cannot change, so a configurable port setting was a footgun: changing
+ * it silently bricked every fetch with a permissions error and no UI said so.
+ * One source of truth -- edit manifest.json to move the port.
+ */
+export function manifestPort() {
+  try {
+    const perms = chrome.runtime.getManifest()?.host_permissions || [];
+    for (const perm of perms) {
+      const m = /^https?:\/\/127\.0\.0\.1:(\d+)\//.exec(String(perm));
+      if (m) return Number(m[1]);
+    }
+  } catch { /* fall through */ }
+  return DEFAULT_PORT;
+}
+
 export async function loadConfig() {
-  const got = await chrome.storage.local.get(["port", "token", "enabled"]);
+  const got = await chrome.storage.local.get(["token", "enabled"]);
   state.config = {
-    port: got.port || DEFAULT_PORT,
+    port: manifestPort(),
     token: got.token || "",
     enabled: Boolean(got.enabled),
   };
+  state.configLoaded = true;
   return state.config;
 }
 
@@ -156,8 +199,50 @@ export function recordCapture(payload, sender) {
 }
 
 // --- the download path ----------------------------------------------------- //
+/**
+ * The listener Chrome calls. Registered SYNCHRONOUSLY at module scope.
+ *
+ * The bug this shape exists to prevent: `start()` used to `await loadConfig()`
+ * and `await restoreSnapshot()` BEFORE calling addListener. MV3 requires
+ * registration in the first turn of the script, so after the ~30s idle
+ * teardown a download that woke the worker could be dispatched before the
+ * listener existed -- Chrome then used the default filename and the file
+ * landed loose in the library root, unrouted and mixed in with the seeding
+ * payloads. The listener is now always there; the readiness wait moved inside.
+ *
+ * Three cases:
+ *   * config already read and routing disabled -> return false, stock Brave;
+ *   * config already read and enabled          -> route synchronously;
+ *   * config NOT read yet (a cold wake)        -> return true, wait for
+ *     `ready()`, then route. If readiness does not land in READY_TIMEOUT_MS we
+ *     cannot prove routing is even enabled for this profile, so we call
+ *     `suggest()` with no argument, which tells Chrome to use its default.
+ *     suggest() is still called EXACTLY ONCE on every one of these paths.
+ */
 export function onDeterminingFilename(item, suggest) {
-  if (!state.config.enabled) return false;   // profile opted out -> stock Brave
+  if (state.configLoaded) {
+    if (!state.config.enabled) return false;  // profile opted out
+    return routeDownload(item, suggest);
+  }
+  void (async () => {
+    let settled = false;
+    try {
+      await Promise.race([
+        ready(),
+        new Promise((r) => setTimeout(r, READY_TIMEOUT_MS)),
+      ]);
+      settled = state.configLoaded;
+    } catch { /* fall through to the conservative answer */ }
+    if (!settled || !state.config.enabled) {
+      suggest();   // no argument = Chrome's default filename
+      return;
+    }
+    routeDownload(item, suggest);
+  })();
+  return true;
+}
+
+function routeDownload(item, suggest) {
   const { capture, tier } = correlateCapture(item, state.captures, {
     now: Date.now(),
     windowMs: (state.snapshot?.captureWindowS ?? 15) * 1000,
@@ -213,6 +298,39 @@ async function afterDecision(item, info) {
 }
 
 // --- toast / picker windows ------------------------------------------------ //
+/**
+ * Remember a popup we created, so tab activation inside it is ignored.
+ *
+ * Creating a popup window ACTIVATES its tab, which fired chrome.tabs.onActivated
+ * and clobbered `state.activeTabId` with the toast's own tab. After the very
+ * first toast, tier-3 context correlation ("most recent capture from the active
+ * tab") therefore matched nothing for the rest of the session and routing
+ * silently degraded to the catch-all -- with no error anywhere, just steadily
+ * worse matching.
+ */
+function rememberOwnWindow(win) {
+  if (win && typeof win.id === "number") state.ownWindowIds.add(win.id);
+}
+
+export function onWindowRemoved(windowId) {
+  state.ownWindowIds.delete(windowId);
+}
+
+/**
+ * chrome.tabs.onActivated handler. Ignores our own popups.
+ *
+ * `windowId` (not the tab's URL) is the check because it is available
+ * synchronously in the event itself -- no chrome.tabs.get round-trip that
+ * could resolve after the next download has already been correlated.
+ */
+export function onTabActivated(info) {
+  if (!info || typeof info.tabId !== "number") return;
+  if (info.windowId !== undefined && state.ownWindowIds.has(info.windowId)) {
+    return;
+  }
+  state.activeTabId = info.tabId;
+}
+
 function popupUrl(page, params) {
   const qs = new URLSearchParams(params).toString();
   return chrome.runtime.getURL(`${page}?${qs}`);
@@ -223,7 +341,7 @@ export async function showToast(info) {
   // chrome:// pages and sandboxed frames, which is exactly where a download
   // often starts.
   try {
-    await chrome.windows.create({
+    const win = await chrome.windows.create({
       url: popupUrl("toast.html", {
         id: String(info.downloadId ?? ""),
         dir: info.dir || "",
@@ -237,6 +355,7 @@ export async function showToast(info) {
       height: TOAST_H,
       focused: false,
     });
+    rememberOwnWindow(win);
     return true;
   } catch {
     try {
@@ -253,7 +372,7 @@ export async function showToast(info) {
 
 export async function openPicker(info) {
   try {
-    await chrome.windows.create({
+    const win = await chrome.windows.create({
       url: popupUrl("picker.html", {
         id: String(info.downloadId ?? ""),
         dir: info.dir || "",
@@ -266,6 +385,7 @@ export async function openPicker(info) {
       height: PICKER_H,
       focused: true,
     });
+    rememberOwnWindow(win);
     return true;
   } catch {
     return showToast({ ...info, source: "picker-failed" });
@@ -287,6 +407,12 @@ export async function applyChoice(downloadId, chosenDir, { createdNew } = {}) {
   }
   const safe = sanitizeDirName(chosenDir, createdNew ? null : known);
   if (!safe) throw new Error(`refusing unsafe directory: ${chosenDir}`);
+
+  // A yt-dlp job, not a browser download: there is no DownloadItem to search
+  // for and nothing to relocate -- the job simply has not been submitted yet.
+  if (state.pendingFetch.has(downloadId)) {
+    return submitFetch(downloadId, safe, { createdNew });
+  }
 
   const items = await chrome.downloads.search({ id: downloadId });
   const item = items && items[0];
@@ -351,6 +477,7 @@ export async function installMenus() {
 }
 
 export async function onMenuClicked(info, tab) {
+  await ready();
   if (info.menuItemId !== MENU_ID || !state.config.enabled) return;
   const target = info.srcUrl || info.linkUrl || info.pageUrl;
   if (!isHttpUrl(target)) return;
@@ -359,11 +486,112 @@ export async function onMenuClicked(info, tab) {
   if (streaming) {
     // HLS/DASH has no single file to save -- hand the PAGE url to yt-dlp.
     const url = isHttpUrl(info.pageUrl) ? info.pageUrl : target;
-    await api("POST", "/fetch", { url, dir: otherDir() }, { timeoutMs: 8000 })
-      .catch(() => {});
+    await startFetch(url, info, tab);
     return;
   }
   await chrome.downloads.download({ url: target });
+}
+
+// --- the yt-dlp path ------------------------------------------------------- //
+let fetchSeq = 0;
+
+/** Fetch jobs get a string key so applyChoice can tell them from a download. */
+export function fetchKey() {
+  fetchSeq += 1;
+  return `fetch:${fetchSeq}`;
+}
+
+/**
+ * Route a stream the SAME way a browser download is routed.
+ *
+ * It used to be `api("POST", "/fetch", { url, dir: otherDir() })
+ * .catch(() => {})`: hardcoded to the catch-all, so a yt-dlp capture never
+ * landed in the matched directory, never showed a toast, never offered the
+ * picker, and swallowed every error -- clicking "Save to library" on a stream
+ * looked identical whether it worked, was refused by the allowlist, or never
+ * reached the sidecar at all.
+ *
+ * Now: /match (with the same cached-snapshot fallback as the download path),
+ * auto-file above the threshold with a toast, picker below it, and any failure
+ * is surfaced rather than swallowed.
+ */
+export async function startFetch(url, info, tab) {
+  const capture = correlateCapture(
+    { url, referrer: info?.pageUrl || "" }, state.captures,
+    { now: Date.now(),
+      windowMs: (state.snapshot?.captureWindowS ?? 15) * 1000,
+      activeTabId: tab?.id ?? state.activeTabId }).capture;
+  const payload = buildMatchPayload({ url, filename: "" }, capture);
+
+  let decision = null;
+  try {
+    decision = await api("POST", "/match", payload, { timeoutMs: 4000 });
+  } catch {
+    decision = localDecide({
+      tags: payload.page.tags, og: payload.page.og,
+      linkText: payload.page.linkText, alt: payload.page.alt,
+      pageTitle: payload.page.title, site: payload.page.site,
+    }, state.snapshot);
+  }
+
+  const known = new Set([...knownDirs(), otherDir()]);
+  const dir = decision && decision.auto !== false
+    ? sanitizeDirName(decision.dir, known) : null;
+  const key = fetchKey();
+  state.pendingFetch.set(key, { url, payload, decision });
+
+  if (dir) return submitFetch(key, dir, {});
+  await openPicker({
+    downloadId: key,
+    dir: otherDir(),
+    reason: decision?.reason || "no match",
+    dup: formatDup(decision?.dup) || "",
+    suggestNew: decision?.suggestNew || "",
+    candidates: decision?.candidates || [],
+  });
+  return { ok: true, queued: true, dir: null };
+}
+
+/** Submit the job and report the outcome. Never silently swallows a failure. */
+export async function submitFetch(key, dir, { createdNew } = {}) {
+  const job = state.pendingFetch.get(key);
+  state.pendingFetch.delete(key);
+  const url = job?.url;
+  if (!isHttpUrl(url)) throw new Error(`refusing a non-http URL: ${url}`);
+  try {
+    const out = await api("POST", "/fetch", { url, dir }, { timeoutMs: 8000 });
+    await showToast({
+      downloadId: key, dir,
+      reason: job?.decision?.reason || "stream via yt-dlp",
+      source: "yt-dlp",
+    });
+    if (job && createdNew !== undefined) {
+      await api("POST", "/learn", {
+        context: job.payload, chosenDir: dir, autoDir: null,
+        createdNew: Boolean(createdNew),
+      }, { timeoutMs: 5000 }).catch(() => {});
+    }
+    return { ok: true, dir, jobId: out?.jobId };
+  } catch (err) {
+    // The whole point: a refused or unreachable /fetch has to be visible.
+    await reportFailure(`Could not start the download for ${dir}`, String(err));
+    throw err;
+  }
+}
+
+/** Surface an error to the user. Toast window first, notification second. */
+export async function reportFailure(title, detail) {
+  try {
+    await chrome.notifications.create({
+      type: "basic",
+      iconUrl: chrome.runtime.getURL("icons/icon-48.png"),
+      title,
+      message: detail || "",
+    });
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 // --- messaging ------------------------------------------------------------- //
@@ -407,16 +635,32 @@ export function onMessage(msg, sender, sendResponse) {
 }
 
 // --- startup --------------------------------------------------------------- //
-export async function start() {
-  await loadConfig();
-  await restoreSnapshot();
+/**
+ * Register every chrome.* listener. MUST be callable synchronously, and MUST
+ * be reached in the FIRST TURN of the module -- no `await` before it, ever.
+ *
+ * THE BUG: `start()` used to `await loadConfig()` and `await restoreSnapshot()`
+ * before calling `chrome.downloads.onDeterminingFilename.addListener`. MV3
+ * tears this worker down after ~30s idle and restarts it on the next event, so
+ * a download that WOKE the worker could be dispatched during those awaits,
+ * before the listener existed. Chrome then used the default filename and the
+ * file landed loose in the library root -- unrouted, and mixed in with the
+ * qBittorrent seeding payloads that the backfill then has to disentangle.
+ *
+ * Nothing in here may await. The handlers do their own waiting on `ready()`.
+ */
+export function registerListeners() {
   chrome.downloads.onDeterminingFilename.addListener(onDeterminingFilename);
   chrome.downloads.onChanged.addListener((d) => { void onDownloadChanged(d); });
   chrome.runtime.onMessage.addListener(onMessage);
   chrome.contextMenus.onClicked.addListener((info, tab) => {
     void onMenuClicked(info, tab);
   });
-  chrome.tabs.onActivated.addListener(({ tabId }) => { state.activeTabId = tabId; });
+  // Ignores activation inside our own toast/picker popups -- see onTabActivated.
+  chrome.tabs.onActivated.addListener(onTabActivated);
+  try {
+    chrome.windows.onRemoved.addListener(onWindowRemoved);
+  } catch { /* older shapes without windows.onRemoved */ }
   chrome.storage.onChanged.addListener((changes, area) => {
     if (area === "local") void loadConfig();
   });
@@ -424,14 +668,31 @@ export async function start() {
   chrome.alarms.onAlarm.addListener((alarm) => {
     if (alarm.name === "dlr-refresh") void refreshSnapshot().catch(() => {});
   });
+}
+
+/**
+ * Everything asynchronous. Listeners are ALREADY registered by the time this
+ * runs; anything that needs its results awaits `ready()`.
+ */
+export async function start() {
+  await loadConfig();
+  await restoreSnapshot();
   await installMenus();
   try {
     const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
-    if (tab) state.activeTabId = tab.id;
+    if (tab && !state.ownWindowIds.has(tab.windowId)) state.activeTabId = tab.id;
   } catch { /* no window yet */ }
   await refreshSnapshot().catch(() => {});
+  return state.config;
+}
+
+/** Test hook: re-arm the module as if the worker had just been woken. */
+export function bootstrap() {
+  registerListeners();          // synchronous, first turn -- never move this
+  readyPromise = start().catch(() => state.config);
+  return readyPromise;
 }
 
 if (!(typeof globalThis !== "undefined" && globalThis.DL_ROUTER_NO_AUTOSTART)) {
-  void start();
+  bootstrap();
 }
