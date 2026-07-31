@@ -275,6 +275,24 @@ asserted against **both** `safety.py` and `extension/sanitize.js` (they must
 agree), and the yt-dlp contract asserts an argv **list** with a validated
 http(s) URL and a `--` terminator — never a shell string.
 
+**One table, two implementations.** The hostile-input cases live in
+`tests/fixtures/name_cases.json`; `test_security.py` and `sanitize.test.mjs`
+both load it. They used to be two hand-copied literal lists, which agreed with
+each other and both passed while the implementations disagreed on 991 inputs
+neither list contained. After touching either implementation, re-run the
+differential fuzzer (it needs both interpreters, so it is a script, not a
+collected test):
+
+```
+nix-shell -p nodejs python312 --run "python3 scripts/dl-router/tests/difffuzz.py"
+```
+
+It must print `0 divergence(s)`. Where the two languages' primitives differ
+(JS `trim()` strips U+FEFF, Python's does not; Python treats U+0085 as
+whitespace, JS does not; `urlsplit` and `new URL` disagree about what a host
+is), the rule is written out explicitly in **both** files rather than
+delegating to either standard library.
+
 ---
 
 ## Privacy

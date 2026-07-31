@@ -25,21 +25,47 @@ export const MAX_FILE_NAME = 200;
 // Bidi/format controls: LRM, RLM, LRE, RLE, PDF, LRO, RLO, LRI, RLI, FSI, PDI,
 // ALM. With an RLO, "subject<RLO>gnp.exe" renders as "subject exe.png"; there is
 // no legitimate use for one in a directory name.
-const BIDI = new Set(
+//
+// The zero-width characters (ZWSP, ZWNJ, ZWJ, ZWNBSP) are in the same set for a
+// second reason: they make two directory names that RENDER identically compare
+// unequal, which defeats the NFC check below. U+FEFF additionally has to be here
+// for cross-language parity -- JS `trim()` strips it and Python `str.strip()`
+// does not, so merely allowing it guaranteed safety.py and this file disagreed
+// on every name that ended with one.
+const FORMAT_CONTROLS = new Set(
   [0x200e, 0x200f, 0x202a, 0x202b, 0x202c, 0x202d, 0x202e,
-   0x2066, 0x2067, 0x2068, 0x2069, 0x061c].map((c) => String.fromCharCode(c)),
+   0x2066, 0x2067, 0x2068, 0x2069, 0x061c,
+   0x200b, 0x200c, 0x200d, 0xfeff].map((c) => String.fromCharCode(c)),
 );
 
+// Legal in a POSIX filename, but `:` is the separator in yt-dlp's
+// `--paths TYPE:PATH` (see fetcher.py), so a directory name containing one is
+// silently mis-parsed into a type selector plus a truncated path.
+const HOSTILE_PUNCTUATION = new Set([":"]);
+
+/**
+ * C0 controls, DEL, and the C1 range (0x80-0x9f).
+ *
+ * C1 is here for parity, not paranoia: Python's `strip()`/`split()` treat
+ * U+0085 (NEL) as whitespace and JS's `trim()`/`\s` do not, so any rule that
+ * merely trimmed them diverged between the two implementations. Rejecting the
+ * range outright makes both agree and loses nothing legitimate.
+ */
 function hasControl(s) {
   for (const ch of s) {
     const c = ch.codePointAt(0);
-    if (c < 0x20 || c === 0x7f) return true;
+    if (c < 0x20 || c === 0x7f || (c >= 0x80 && c <= 0x9f)) return true;
   }
   return false;
 }
 
-function hasBidi(s) {
-  for (const ch of s) if (BIDI.has(ch)) return true;
+function hasFormatControl(s) {
+  for (const ch of s) if (FORMAT_CONTROLS.has(ch)) return true;
+  return false;
+}
+
+function hasHostilePunctuation(s) {
+  for (const ch of s) if (HOSTILE_PUNCTUATION.has(ch)) return true;
   return false;
 }
 
@@ -49,9 +75,10 @@ export function isSafeDirName(name) {
   if (name.length === 0 || name.length > MAX_DIR_NAME) return false;
   if (name === "." || name === "..") return false;
   if (name.includes("/") || name.includes("\\")) return false;
+  if (hasHostilePunctuation(name)) return false;
   // NUL is < 0x20 so hasControl covers it; spaces are legitimate ("Jane Doe").
   if (hasControl(name)) return false;
-  if (hasBidi(name)) return false;
+  if (hasFormatControl(name)) return false;
   if (name !== name.trim() || name.endsWith(".")) return false;
   if (name.normalize("NFC") !== name) return false;
   return true;
@@ -81,11 +108,13 @@ export function sanitizeFileName(name, fallback = "download") {
   base = base.normalize("NFC");
   let cleaned = "";
   for (const ch of base) {
-    const c = ch.codePointAt(0);
-    if (c < 0x20 || c === 0x7f || BIDI.has(ch)) continue;
+    if (hasControl(ch) || FORMAT_CONTROLS.has(ch)
+        || HOSTILE_PUNCTUATION.has(ch)) continue;
     cleaned += ch;
   }
-  cleaned = cleaned.split(/\s+/).filter(Boolean).join(" ").trim();
+  // ORDER MATTERS and must match safety.py exactly: collapse whitespace, then
+  // strip dots at both ends, then strip whatever whitespace that exposed.
+  cleaned = cleaned.split(/\s+/).filter(Boolean).join(" ");
   cleaned = cleaned.replace(/^\.+/, "").replace(/\.+$/, "").trim();
   if (!cleaned || cleaned === "." || cleaned === "..") return fallback;
   if (cleaned.length <= MAX_FILE_NAME) return cleaned;
@@ -124,17 +153,84 @@ export function relPathFromAbsolute(absolute) {
   return `${parts[parts.length - 2]}/${parts[parts.length - 1]}`;
 }
 
-/** True iff `url` is a plain http(s) URL safe to hand to yt-dlp. */
+// `_` is invalid per RFC 1123 but browsers and curl accept it, so it is
+// allowed here too -- what matters is that BOTH implementations allow
+// exactly the same set (see safety.py).
+const HOST_CHARS = /^[A-Za-z0-9_-]+$/;
+const IPV6_CHARS = /^[0-9A-Fa-f:.]+$/;
+const DIGITS = /^[0-9]+$/;
+
+/** Strict, parser-independent host rule. Mirrors safety.py exactly. */
+function validHost(host) {
+  if (!host || host.length > 253) return false;
+  if (host.startsWith("[")) {
+    if (!host.endsWith("]")) return false;
+    const inner = host.slice(1, -1);
+    return inner.length > 0 && IPV6_CHARS.test(inner);
+  }
+  if (host.includes("]")) return false;
+  for (const label of host.split(".")) {
+    if (!label || label.length > 63) return false;
+    if (label.startsWith("-") || label.endsWith("-")) return false;
+    if (!HOST_CHARS.test(label)) return false;
+  }
+  return true;
+}
+
+/**
+ * True iff `url` is a plain http(s) URL safe to hand to yt-dlp.
+ *
+ * The authority is split and validated BY HAND rather than trusting `new URL`.
+ * Differential fuzzing against safety.py found 50 inputs where the two
+ * standard parsers disagreed about what a host is -- WHATWG collapses the
+ * extra slashes in `http://////..` and calls the host `..`, while Python's
+ * `urlsplit` accepts `http://%2f` and a bare ZWNBSP host. Neither is wrong for
+ * its own spec, which is why neither can be the contract: only an explicit
+ * shared rule makes the sidecar and the extension provably agree on what
+ * yt-dlp will be handed.
+ */
 export function isHttpUrl(url) {
   if (typeof url !== "string" || !url || url.length > 4096) return false;
   if (url.startsWith("-")) return false;
   if (hasControl(url) || /\s/.test(url)) return false;
-  let parsed;
-  try {
-    parsed = new URL(url);
-  } catch {
-    return false;
+  if (hasFormatControl(url)) return false;
+
+  const lowered = url.toLowerCase();
+  let rest;
+  if (lowered.startsWith("http://")) rest = url.slice("http://".length);
+  else if (lowered.startsWith("https://")) rest = url.slice("https://".length);
+  else return false;
+
+  let end = rest.length;
+  for (let i = 0; i < rest.length; i += 1) {
+    const ch = rest[i];
+    if (ch === "/" || ch === "?" || ch === "#") { end = i; break; }
   }
-  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return false;
-  return Boolean(parsed.host);
+  let authority = rest.slice(0, end);
+  const at = authority.lastIndexOf("@");
+  if (at >= 0) authority = authority.slice(at + 1);
+
+  let host = authority;
+  let port = null;
+  if (host.startsWith("[")) {
+    const close = host.indexOf("]");
+    if (close < 0) return false;
+    const tail = host.slice(close + 1);
+    host = host.slice(0, close + 1);
+    if (tail) {
+      if (!tail.startsWith(":")) return false;
+      port = tail.slice(1);
+    }
+  } else if (host.includes(":")) {
+    const colon = host.indexOf(":");
+    port = host.slice(colon + 1);
+    host = host.slice(0, colon);
+  }
+
+  if (port !== null) {
+    if (!DIGITS.test(port)) return false;
+    const n = Number(port);
+    if (n < 1 || n > 65535) return false;
+  }
+  return validHost(host);
 }
