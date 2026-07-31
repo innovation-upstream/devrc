@@ -211,9 +211,76 @@ def test_file_index_ttl(library, clock, monkeypatch):
     idx = FileIndex(library, clock=clock, ttl=10.0)
     idx.refresh()
     calls = []
-    monkeypatch.setattr(idx, "_scan", lambda: (calls.append(1), ({}, 0, False))[1])
+    monkeypatch.setattr(idx, "_scan",
+                        lambda: (calls.append(1), ({}, {}, 0, False))[1])
     idx.refresh()
     assert calls == []
     clock.advance(11)
     idx.refresh()
     assert calls == [1]
+
+
+# --- per-directory item counts --------------------------------------------- #
+#
+# The picker shows how many files each subject directory holds. The tally is a
+# BY-PRODUCT of the dedupe walk, never a scan of its own -- see FileIndex's
+# docstring and, more importantly, `dir_counts`, which must not refresh.
+def test_file_index_counts_files_per_top_level_directory(library, clock):
+    (library / "Jane Doe" / "one.mp4").write_text("x")
+    (library / "Jane Doe" / "two.mp4").write_text("x")
+    (library / "john-smith" / "solo.mp4").write_text("x")
+    idx = FileIndex(library, clock=clock)
+    idx.refresh()
+    assert idx.dir_counts() == {"Jane Doe": 2, "john-smith": 1}
+
+
+def test_counts_include_files_nested_below_the_subject_directory(library, clock):
+    nested = library / "Jane Doe" / "2026" / "set-a"
+    nested.mkdir(parents=True)
+    (nested / "deep.mp4").write_text("x")
+    (library / "Jane Doe" / "shallow.mp4").write_text("x")
+    idx = FileIndex(library, clock=clock)
+    idx.refresh()
+    # A directory "holds" everything under it: a per-subject total that ignored
+    # the layout inside would be a different, less useful number.
+    assert idx.dir_counts()["Jane Doe"] == 2
+
+
+def test_a_loose_file_in_the_library_root_is_counted_under_no_directory(
+        library, clock):
+    (library / "unfiled.mp4").write_text("x")
+    (library / "Jane Doe" / "filed.mp4").write_text("x")
+    idx = FileIndex(library, clock=clock)
+    idx.refresh()
+    counts = idx.dir_counts()
+    assert counts == {"Jane Doe": 1}
+    assert "unfiled.mp4" not in counts
+
+
+def test_counts_skip_hidden_files_exactly_like_the_dedupe_index(library, clock):
+    (library / "Jane Doe" / ".partial.mp4").write_text("x")
+    (library / "Jane Doe" / "real.mp4").write_text("x")
+    idx = FileIndex(library, clock=clock)
+    idx.refresh()
+    assert idx.dir_counts() == {"Jane Doe": 1}
+
+
+def test_dir_counts_NEVER_triggers_a_scan(library, clock, monkeypatch):
+    """THE pin on the cost decision.
+
+    `dir_counts` is called from /dirs, which the extension hits on every picker
+    open. Adding a `self.refresh()` to it would put a whole-tree walk of a media
+    library on that path -- and the extension gives up on the snapshot after
+    4 s, so a large library would turn a decorative counter into a picker that
+    never loads. This test fails the moment that refresh is added.
+    """
+    (library / "Jane Doe" / "one.mp4").write_text("x")
+    idx = FileIndex(library, clock=clock)
+    calls = []
+    real_scan = idx._scan
+    monkeypatch.setattr(idx, "_scan", lambda: (calls.append(1), real_scan())[1])
+    assert idx.dir_counts() == {}, "no walk has happened yet, so no counts"
+    assert calls == [], "dir_counts must not scan"
+    idx.refresh()
+    assert idx.dir_counts() == {"Jane Doe": 1}
+    assert calls == [1], "the ONE walk is the dedupe index's own"

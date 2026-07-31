@@ -238,7 +238,58 @@ class App:
             json.dumps(snap, sort_keys=True, ensure_ascii=False,
                        separators=(",", ":")).encode("utf-8")
         ).hexdigest()[:16]
+        # PER-DIRECTORY ITEM COUNTS, SERVED BUT DELIBERATELY OUTSIDE THE ETAG.
+        #
+        # This line is below the hash on purpose. The alternative -- folding the
+        # counts in, the way the kinds and aliases above are folded in -- was
+        # rejected for three reasons, in increasing order of how much they cost:
+        #
+        #   1. Churn. A count changes on EVERY completed download, so the etag
+        #      would change on every download and the extension's five-minute
+        #      revalidation would fetch the whole payload instead of a 304.
+        #      Cheap in bytes over loopback; not the real problem.
+        #   2. The etag would stop being a cache validator. These counts come
+        #      from FileIndex, which is TTL-cached and refreshed opportunistically
+        #      -- so the same unchanged library can answer with two different
+        #      counts a minute apart. An etag that changes when nothing changed
+        #      is not a validator, it is a random number.
+        #   3. It would destroy the one thing this etag is FOR. Everything else
+        #      in this payload is routing configuration: the directories, their
+        #      kinds, the aliases, the threshold. The extension's cached
+        #      fallback matcher runs off exactly that, and the comment above
+        #      exists because a stale kind kept auto-filing into a directory the
+        #      operator had reclassified. "The routing configuration changed" is
+        #      a question worth being able to answer -- from `dl-route status`,
+        #      whose /healthz etag is the same value, as much as from
+        #      If-None-Match. Mixing a per-download counter into it means the
+        #      answer is always yes.
+        #
+        # The cost of this choice, stated honestly: a 304 carries no body, so a
+        # revalidating client keeps the counts it already had. That is why the
+        # extension asks for the snapshot WITHOUT If-None-Match on the picker
+        # path (service_worker.refreshSnapshot's `revalidate` flag) -- the one
+        # request whose freshness a human is waiting on -- and keeps
+        # revalidating everywhere else. Counts are cosmetic: nothing routes on
+        # them, and no code path may start to.
+        #
+        # A SEPARATE MAP, not a `count` field on each `dirs` entry: the cached
+        # fallback matcher iterates `dirs`, and the entries it reads stay
+        # byte-identical to what they were before counts existed.
+        snap["counts"] = self.file_counts()
         return snap
+
+    def file_counts(self) -> dict:
+        """Files per subject directory, for the picker's per-directory count.
+
+        Restricted to directories that are actually in the index: the walk
+        tallies whatever top-level names it encountered, and a routing target
+        is the only thing worth showing a count for.
+        """
+        if self.files is None or self.dirs is None:
+            return {}
+        known = self.dirs.name_set()
+        return {name: n for name, n in self.files.dir_counts().items()
+                if name in known}
 
     def match(self, payload: dict) -> dict:
         ctx = MatchContext.from_payload(payload)

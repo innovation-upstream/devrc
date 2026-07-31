@@ -186,6 +186,12 @@ class FileIndex:
 
     Bounded by `max_files` so a pathological tree cannot exhaust memory; the
     cap being hit is reported rather than silently truncating the answer.
+
+    It ALSO tallies files per top-level directory as a by-product of the walk
+    it already performs (see `dir_counts`). That tally is deliberately not a
+    second scan: this walk visits every file in the library exactly once, and a
+    third traversal of a media library to count what this one already sees
+    would be pure waste.
     """
 
     def __init__(self, root, *, clock=time.monotonic, ttl: float = 60.0,
@@ -195,6 +201,7 @@ class FileIndex:
         self._ttl = float(ttl)
         self._max = int(max_files)
         self._map: dict = {}
+        self._dir_counts: dict = {}
         self._count = 0
         self._truncated = False
         self._loaded_at = -1.0
@@ -203,18 +210,25 @@ class FileIndex:
 
     def _scan(self):
         out: dict = {}
+        counts: dict = {}
         count = 0
         truncated = False
         # followlinks=False: never walk out of the library through a symlink.
         for dirpath, dirnames, filenames in os.walk(self.root, followlinks=False,
                                                     onerror=lambda _e: None):
             dirnames[:] = [d for d in dirnames if not d.startswith(".")]
+            # The subject directory this whole `dirpath` belongs to, computed
+            # ONCE per directory rather than once per file. Empty for the
+            # library root itself: a loose file sitting in the root is in no
+            # subject directory, and counting it under one would be a lie.
+            rel_dir = os.path.relpath(dirpath, self.root)
+            top = "" if rel_dir == os.curdir else rel_dir.split(os.sep, 1)[0]
             for fname in filenames:
                 if fname.startswith("."):
                     continue
                 if count >= self._max:
                     truncated = True
-                    return out, count, truncated
+                    return out, counts, count, truncated
                 full = os.path.join(dirpath, fname)
                 try:
                     size = os.stat(full).st_size
@@ -225,8 +239,10 @@ class FileIndex:
                 key = norm_key(stem)
                 if key:
                     out.setdefault(key, []).append((rel, size))
+                if top:
+                    counts[top] = counts.get(top, 0) + 1
                 count += 1
-        return out, count, truncated
+        return out, counts, count, truncated
 
     def refresh(self, force: bool = False) -> None:
         """Single-flight, and the scan runs OUTSIDE the lock.
@@ -245,13 +261,14 @@ class FileIndex:
                 return
             self._scanning = True
         try:
-            data, count, truncated = self._scan()
+            data, counts, count, truncated = self._scan()
         except Exception:
             with self._lock:
                 self._scanning = False
             raise
         with self._lock:
             self._map = data
+            self._dir_counts = counts
             self._count = count
             self._truncated = truncated
             self._loaded_at = self._clock()
@@ -261,6 +278,34 @@ class FileIndex:
         self.refresh()
         with self._lock:
             return list(self._map.get(key, ()))
+
+    def dir_counts(self) -> dict:
+        """Files per top-level directory, as of the last completed walk.
+
+        THIS DELIBERATELY DOES NOT REFRESH, and that is the whole reason the
+        counts are affordable.
+
+        Its only caller is `/dirs`, which the extension hits on every picker
+        open and every five-minute alarm. Calling `refresh()` here would put a
+        whole-tree walk of a media library on that path: the first `/dirs`
+        after a restart would block until the walk finished, and the
+        extension's snapshot fetch gives up after 4 s — so a large library
+        would turn a cosmetic counter into a picker that shows "Loading
+        directories..." and then fails. `/match` already refreshes this index
+        on EVERY download (via find_duplicate), so by the time any picker
+        opens the tally is warm and at most one TTL stale, which is ample for
+        a number nothing routes on.
+
+        The consequence, stated plainly: before the first `/match` of a
+        process the map is empty and the picker simply shows no counts. That
+        is the intended degradation, not an oversight.
+
+        Stale by construction in one more way: when the `max_files` cap is hit
+        the walk returns early, so the counts are partial. `stats()["truncated"]`
+        is where that is visible; nothing routes on these numbers.
+        """
+        with self._lock:
+            return dict(self._dir_counts)
 
     def stats(self) -> dict:
         self.refresh()
