@@ -152,9 +152,13 @@ come back).
    `ls ~/.local/share/browser-bridge-ext/manifest.json`
 2. In the profile's window: Brave → `brave://extensions`
 3. Toggle **Developer mode** (top-right).
-4. Find the **Browser Bridge (command channel)** card. If its **path** is under
-   `~/workspace/devrc/…`, click **Remove** (this drops that profile's
-   `chrome.storage.local` — token/port/label — hence step 7).
+4. Find the **Browser Bridge (command channel)** card. **Before touching it,
+   write down the `ID` shown on that card** together with its **path** — this is
+   the only "before" reading you can take, and it is what makes the path→id
+   claim falsifiable in step 9. (`ping` cannot give it to you: the loaded build
+   is 0.2.0, which has no `ping` op and answers `unknown_op`.) Then, if the path
+   is under `~/workspace/devrc/…`, click **Remove** (this drops that profile's
+   `chrome.storage.local` — token/port/label/`instanceId` — hence step 7).
 5. **Load unpacked** → select `~/.local/share/browser-bridge-ext/`.
    (`Ctrl+L` in the GTK file chooser lets you type the path.)
 6. Confirm any permission re-prompt (`debugger`, `webNavigation`).
@@ -172,13 +176,16 @@ come back).
    `unknown_op` from `ping` means the OLD build is still loaded — go to the
    reload section below.
 9. **Record this profile's `id`** (from `ping`, or `extension_id` in `whoami`)
-   somewhere you keep notes. An unpacked extension's id is derived from its
-   absolute directory path, so a *changed* id later means the profile got
-   re-pointed at a different directory — the one thing the version fields cannot
-   tell you. ⚠ The path→id derivation is INFERRED from documented Chromium
-   behaviour, not measured here; the recorded id is a baseline to compare
-   against, not a computed expectation. (Nothing computes an expected id, on
-   purpose: a wrong derivation would raise false alarms.)
+   somewhere you keep notes, and **compare it against the id you wrote down in
+   step 4** — they should DIFFER, because the load path changed. That comparison
+   is the only test of the path→id premise this whole migration rests on; if the
+   id is unchanged, say so and see the checklist item near the end of this file.
+   Thereafter a *changed* id means the profile got re-pointed at a different
+   directory — the one thing the version fields cannot tell you. ⚠ The path→id
+   derivation is INFERRED from documented Chromium behaviour, not measured here;
+   the recorded id is a baseline to compare against, not a computed expectation.
+   (Nothing computes an expected id, on purpose: a wrong derivation would raise
+   false alarms.)
 
 Repeat 2–9 in the other profile's window. The profiles are independent: one can
 be on the new path while the other is still on the repo path — and their ids
@@ -321,11 +328,17 @@ The chrome.* glue needs a real browser — verify by hand after loading:
       instance. A build older than the `ping` op returns `unknown_op` + a
       non-zero exit instead — the intended "the reload did NOT take" answer.
 - [ ] **The `id` changes when the load path changes** (the one claim this whole
-      migration rests on, and it is INFERRED, not measured): note `ping`'s `id`
-      while the profile is on the repo path, re-point it to
-      `~/.local/share/browser-bridge-ext/`, and confirm the id is DIFFERENT. If
-      it is unchanged, `id` does not track the directory and the write-ups in
-      this file, `../README.md` and `../reference/errors.md` must be corrected.
+      migration rests on, and it is INFERRED, not measured).
+      ⚠ **You cannot get the "before" value from `ping`** — the build currently
+      loaded from the repo path is 0.2.0, which has no `ping` op and answers
+      `unknown_op`. Read the **ID shown on the extension's card in
+      `brave://extensions`** instead (enable Developer mode; the card shows both
+      the ID and the load path). Capture it **before** you re-point, or the
+      comparison becomes impossible. Then re-point to
+      `~/.local/share/browser-bridge-ext/` and compare against `ping`'s `id`
+      (or that card's ID again). If it is UNCHANGED, `id` does not track the
+      directory and the write-ups in this file, `../README.md`,
+      `../reference/errors.md` and the repo `CLAUDE.md` must be corrected.
 - [ ] **`ping` is inert:** running it does not change the focused tab, the
       focused window, or any page (it touches no tab at all).
 - [ ] `browser html` on a logged-in tab returns markup containing logged-in-only

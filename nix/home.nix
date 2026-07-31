@@ -255,52 +255,100 @@ in
   # error anywhere. `git add` a new extension file BEFORE switching. (Same trap
   # already documented for claude/commands/ in CLAUDE.md.)
   #
-  # The copy is built beside the target and swapped in with a SINGLE `mv -T`, so
-  # a half-written tree is never visible at the path Brave loads from. Re-pointing
-  # Brave at this path is a MANUAL operator step (brave://extensions → remove the
-  # repo-path entry → Load unpacked → this directory), once per profile; until
-  # then the previously loaded repo-path extension keeps working unchanged.
+  # The copy is built beside the target and swapped in with an ATOMIC directory
+  # exchange, so neither a half-written tree nor a MISSING directory is ever
+  # visible at the path Brave loads from. Re-pointing Brave at this path is a
+  # MANUAL operator step (brave://extensions → remove the repo-path entry → Load
+  # unpacked → this directory), once per profile; until then the previously
+  # loaded repo-path extension keeps working unchanged.
   #
-  # WHY `rm -rf` + `mv -T` RATHER THAN A HASH-SUFFIXED DIR + SYMLINK FLIP: an
-  # unpacked extension's ID is derived from its absolute directory path, and the
-  # `ping` op reports `chrome.runtime.id` precisely so the operator can confirm
-  # WHICH directory Brave loaded. A `…-ext.<hash>/` target whose name changes on
-  # every switch risks changing that ID on every switch (whether Chromium
-  # canonicalises the symlink before hashing is unmeasured), which would both
-  # destroy the id-stability the probe depends on and potentially force a
-  # re-point per switch. A stable real directory keeps the path — and therefore
-  # the ID — constant. TRADE-OFF ACCEPTED: `mv -T` cannot replace a non-empty
-  # directory, so there is a brief window where $bbDst does not exist. Brave
-  # reads extension files at load/reload time, not continuously, and the operator
-  # reloads after a switch anyway.
+  # SWAP = `mv -T --exchange` (renameat2 RENAME_EXCHANGE), fallback to a
+  # rename-away dance. Two earlier designs were rejected/regressed:
+  #   * hash-suffixed dir + symlink flip — the unpacked extension's ID is derived
+  #     from its absolute directory path, and `ping` reports `chrome.runtime.id`
+  #     precisely so the operator can confirm WHICH directory Brave loaded. A
+  #     target whose name changes every switch risks changing that ID every
+  #     switch (whether Chromium canonicalises a symlink before hashing is
+  #     unmeasured), destroying the id-stability the probe depends on.
+  #   * `rm -rf "$bbDst"` then `mv -T` — measured to DELETE the deployed tree
+  #     outright under two concurrent activations (3/3 trials: one side exits 0
+  #     while the other removes the tree it just installed, then aborts). Worse
+  #     than the nesting bug it replaced: an absent directory is exactly the
+  #     mid-verification breakage this deploy exists to prevent.
+  # RENAME_EXCHANGE gets atomicity AND a stable path — no trade needed. It swaps
+  # the two directories in one syscall, so $bbDst is never absent for any window,
+  # and the OLD tree lands at $bbTmp for cleanup AFTER the swap succeeded (so a
+  # failed deploy leaves the previous extension in place rather than nothing).
+  # Linux/ext4-specific; the fallback covers a filesystem without renameat2.
   #
-  # Concurrency: `mv -T` never descends into an existing target, so two
-  # overlapping activations can no longer nest one tree inside the other (the
-  # non-`-T` two-rename form could, silently, because `mv` still exits 0). Fixed
-  # temp/target names mean an interrupted run's leftovers are RECLAIMED by the
-  # next run instead of leaking a `.new.<pid>` per interruption. Two genuinely
-  # simultaneous activations on ONE host can still collide over $bbTmp — that
-  # fails loudly (non-zero, switch aborts), it does not corrupt the deployed tree.
+  # Concurrency (measured, distinct PIDs, 400-file source, 3/3 trials): the
+  # exchange path leaves BOTH activations exiting 0 with a complete tree and zero
+  # leftovers; the fallback path always leaves $bbDst present and complete, with
+  # the loser failing LOUDLY and one `.old.<pid>` that the next run's sweep
+  # reclaims. $$-suffixed temp names are collision-free BY CONSTRUCTION across
+  # processes (note: a bash SUBSHELL inherits its parent's $$, so `( … ) &` does
+  # not model two switches — separate processes do). The sweep below is what
+  # bounds the leak that a fixed temp name was wrongly used to solve: it reclaims
+  # only siblings whose owning PID is gone, never a live activation's.
   home.activation.browserBridgeExtension =
     lib.hm.dag.entryAfter ["writeBoundary"] ''
       bbSrc=${../scripts/browser-bridge/extension}
       bbDst="$HOME/.local/share/browser-bridge-ext"
-      bbTmp="$bbDst.new"
+      bbTmp="$bbDst.new.$$"
       $DRY_RUN_CMD mkdir -p "$HOME/.local/share"
-      # Reclaim leftovers from an interrupted earlier run. `cp -rL` from the
-      # read-only store yields a 0555 tree, and `rm -rf` CANNOT unlink inside a
-      # 0555 directory — under activation's `set -eu` that aborts the whole
-      # switch. So always chmod before removing (ignore "no such file").
+
+      # Sweep leftovers from interrupted earlier runs — but ONLY those whose
+      # owning PID is dead, so a concurrent activation's in-flight temp survives.
+      # `cp -rL` from the read-only store yields a 0555 tree and `rm -rf` cannot
+      # unlink inside one (measured), which under activation's `set -eu` would
+      # abort the entire switch — so chmod always precedes rm. chmod on a missing
+      # path exits non-zero, hence the `|| true`.
+      for bbOld in "$bbDst".new.* "$bbDst".old.*; do
+        [ -e "$bbOld" ] || continue
+        bbPid="''${bbOld##*.}"
+        case "$bbPid" in (*[!0-9]*) continue;; esac
+        [ "$bbPid" = "$$" ] && continue
+        [ -d "/proc/$bbPid" ] && continue     # a LIVE activation owns it
+        $DRY_RUN_CMD chmod -R u+rwX "$bbOld" 2>/dev/null || true
+        $DRY_RUN_CMD rm -rf "$bbOld"
+      done
+
       $DRY_RUN_CMD chmod -R u+rwX "$bbTmp" 2>/dev/null || true
-      $DRY_RUN_CMD rm -rf "$bbTmp"
+      $DRY_RUN_CMD rm -rf "$bbTmp"            # cp -rL NESTS if the target exists
       $DRY_RUN_CMD cp -rL "$bbSrc" "$bbTmp"   # -L → real files, not store symlinks
       $DRY_RUN_CMD chmod -R u+rwX "$bbTmp"    # writable for the NEXT switch's rm -rf
-      $DRY_RUN_CMD chmod -R u+rwX "$bbDst" 2>/dev/null || true
-      $DRY_RUN_CMD rm -rf "$bbDst"
-      # -T is load-bearing: without it, a concurrent run that recreated $bbDst
-      # between the rm and the mv would make this move the tree INSIDE it.
-      $DRY_RUN_CMD mv -T "$bbTmp" "$bbDst" \
-        || { $DRY_RUN_CMD rm -rf "$bbDst"; $DRY_RUN_CMD mv -T "$bbTmp" "$bbDst"; }
+
+      # `[ ! -L ]` matters: chmod -R FOLLOWS a symlink-to-directory and would
+      # rewrite the modes of whatever it points at (measured). If an operator
+      # ever symlinks this path at the repo checkout, a switch must not chmod the
+      # repo — replace the link instead.
+      if [ -d "$bbDst" ] && [ ! -L "$bbDst" ]; then
+        if ! $DRY_RUN_CMD mv -T --exchange "$bbTmp" "$bbDst" 2>/dev/null; then
+          # No renameat2(RENAME_EXCHANGE) here — rename the old tree AWAY (never
+          # delete it first), install, and restore it if the install fails.
+          bbBak="$bbDst.old.$$"
+          $DRY_RUN_CMD rm -rf "$bbBak"
+          $DRY_RUN_CMD mv -T "$bbDst" "$bbBak"
+          if ! $DRY_RUN_CMD mv -T "$bbTmp" "$bbDst"; then
+            $DRY_RUN_CMD mv -T "$bbBak" "$bbDst" || true
+            echo "browser-bridge: extension deploy FAILED — kept the previously" \
+                 "deployed tree at $bbDst" >&2
+            false                             # loud: set -e aborts the switch
+          fi
+          $DRY_RUN_CMD chmod -R u+rwX "$bbBak" 2>/dev/null || true
+          $DRY_RUN_CMD rm -rf "$bbBak"
+        fi
+      else
+        # First install, or the path is a symlink/plain file — replace it. `rm -rf`
+        # on a symlink removes only the LINK, not its target (measured).
+        $DRY_RUN_CMD rm -rf "$bbDst"
+        $DRY_RUN_CMD mv -T "$bbTmp" "$bbDst"
+      fi
+
+      # After a successful exchange $bbTmp holds the OLD tree; after the fallback
+      # or first install it no longer exists. Either way, clean up.
+      $DRY_RUN_CMD chmod -R u+rwX "$bbTmp" 2>/dev/null || true
+      $DRY_RUN_CMD rm -rf "$bbTmp"
     '';
 
   home.stateVersion = "24.11";

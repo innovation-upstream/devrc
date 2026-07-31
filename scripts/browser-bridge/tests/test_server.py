@@ -3664,6 +3664,25 @@ def test_extension_id_is_null_for_a_build_that_does_not_report_it():
         ext.stop(); srv.shutdown(); srv.server_close()
 
 
+def test_identity_headers_are_bounded_server_side():
+    """A hostile/buggy extension must not be able to push an unbounded string
+    into every /health and /whoami response. protocol.js's cap is client-side
+    only, so the SERVER truncates the version + id it accepts."""
+    srv, _ = _serve()
+    huge = "x" * 5000
+    ext = FakeExtension(srv, instance_id="a", label="alpha",
+                        ext_version=huge, ext_id=huge)
+    ext.start()
+    try:
+        body = _wait_instances(srv, 1)
+        assert body is not None
+        inst = body["instances"][0]
+        assert len(inst["extension_version"]) == S.MAX_IDENTITY_CHARS
+        assert len(inst["extension_id"]) == S.MAX_IDENTITY_CHARS
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
 def test_a_later_poll_without_the_id_header_does_not_wipe_a_known_id():
     """Same rule the version field already follows: only overwrite a KNOWN
     value, so a legacy/partial poll cannot erase what an earlier poll reported."""

@@ -814,16 +814,34 @@ those is something only live Brave can answer — a wrong guess costs a full Bra
 restart to discover. A copy removes the question and is equally git-immune. Cost:
 the tree is rewritten on every switch.
 
-**Why a stable directory rather than a hash-suffixed dir + symlink flip:** the
-extension ID is path-derived, and `ping`'s `id` field depends on it being stable
-across switches. A target whose name changes each switch risks changing the ID
-each switch (whether Chromium canonicalises a symlink before hashing is
-unmeasured), which would defeat the probe and could force a re-point per switch.
-`mv -T` is load-bearing: without `-T`, a concurrent activation that recreated the
-target between the `rm` and the `mv` would nest one tree inside the other while
-`mv` still exited 0 (reproduced). Trade-off accepted: `mv -T` cannot replace a
-non-empty directory, so there is a brief window where the target does not exist —
-Brave reads extension files at load/reload time, not continuously.
+**The swap is `mv -T --exchange` (renameat2 `RENAME_EXCHANGE`)**, with a
+rename-away fallback for a filesystem that lacks it. Two earlier designs were
+rejected:
+
+- *hash-suffixed dir + symlink flip* — the extension ID is path-derived and
+  `ping`'s `id` depends on it being stable across switches. A target whose name
+  changes each switch risks changing the ID each switch (whether Chromium
+  canonicalises a symlink before hashing is unmeasured), defeating the probe and
+  possibly forcing a re-point per switch.
+- *`rm -rf` then `mv -T`* — measured to **delete the deployed tree** under two
+  concurrent activations (3/3 trials: one side exits 0 having installed its tree,
+  the other then removes it and aborts). An absent directory is precisely the
+  mid-verification breakage this deploy exists to prevent, so this was strictly
+  worse than the nesting bug it replaced.
+
+`RENAME_EXCHANGE` needs no trade-off: it swaps the two directories in one
+syscall, so the path is never absent and never changes, and the OLD tree lands at
+the temp name for cleanup only *after* the swap succeeded — a failed deploy
+therefore leaves the previous extension in place rather than nothing.
+
+Measured on the rendered activation script under `set -eu -o pipefail` against a
+scratch `HOME` (400-file source, coreutils 9.11, ext4): first install, idempotent
+re-run, a 0555 previous tree, and a symlinked destination (link replaced, target
+untouched and its mode unchanged) all rc=0; **two concurrent processes, 3/3
+trials: both exit 0, the directory is present and complete, zero nesting, zero
+leftovers.** The fallback path was exercised separately (exchange forced off):
+the directory is always present and complete, and the loser fails loudly leaving
+one `.old.<pid>` that the next run's PID-liveness sweep reclaims.
 
 Re-pointing Brave is a **manual, one-time, per-profile** step (`brave://extensions`
 is not scriptable) — the exact sequence, and the rollback procedure, are in

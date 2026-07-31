@@ -256,6 +256,13 @@ HDR_EXT_VERSION = "X-Bridge-Ext-Version"
 # expected one (a wrong derivation would raise false stale alarms).
 HDR_EXT_ID = "X-Bridge-Ext-Id"
 
+# Server-side bound on the extension-supplied identity strings (version + id).
+# protocol.js already caps them at 2048 chars, but a client-side cap only binds
+# an honest client — these values arrive over HTTP and are echoed back in every
+# /health and /whoami response, so they get truncated here too. Generous: a real
+# manifest version is <20 chars and a Chrome extension id is exactly 32.
+MAX_IDENTITY_CHARS = 256
+
 _ALLOWED_HOSTS = frozenset({"127.0.0.1", "localhost", "::1", "[::1]"})
 
 # --------------------------------------------------------------------------- #
@@ -1527,10 +1534,16 @@ def make_handler(registry: Registry, token: str, cmd_timeout: float,
             if au or at:
                 active = {"url": unquote(au) if au else None,
                           "title": unquote(at) if at else None}
+            # Both version + id are bounded HERE, server-side. protocol.js caps
+            # them with capHeaderValue, but that only binds an HONEST extension —
+            # the value arrives over HTTP and is echoed into every /health and
+            # /whoami response, so the server must not rely on the client's cap.
             raw_ext = self.headers.get(HDR_EXT_VERSION)
-            ext_version = unquote(raw_ext).strip() if raw_ext else None
+            ext_version = (unquote(raw_ext).strip()[:MAX_IDENTITY_CHARS]
+                           if raw_ext else None)
             raw_id = self.headers.get(HDR_EXT_ID)
-            ext_id = unquote(raw_id).strip() if raw_id else None
+            ext_id = (unquote(raw_id).strip()[:MAX_IDENTITY_CHARS]
+                      if raw_id else None)
             return instance_id, label, active, ext_version, ext_id
 
         def _whoami(self) -> dict:
