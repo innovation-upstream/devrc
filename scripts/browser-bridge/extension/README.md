@@ -111,17 +111,136 @@ overflow the server's header-line limit and fail the poll. (The pure classifier
 + cap live in `protocol.js` and ARE unit-tested; the back-off itself runs in the
 SW and can only be checked in a real browser — see the checklist below.)
 
-## Load it (and reload after every change)
+## 🔴 Load it from the DEPLOYED path, not this repo directory
 
-1. Brave → `brave://extensions`
-2. Toggle **Developer mode** (top-right).
-3. **Load unpacked** → select this `extension/` directory.
-4. Click the extension's **Options** (⋯ menu → Options), paste the token from
-   `~/.config/browser-bridge/token`, set port `8788`, **Save**.
+**Brave must load `~/.local/share/browser-bridge-ext/`, NOT this directory.**
 
-⚠ **Brave does not hot-reload unpacked extensions.** After editing any file here,
-click the **reload** ↻ button on the extension's card in `brave://extensions`,
-or the service worker keeps running the old code.
+`home-manager switch` writes a real copy of this tree to
+`~/.local/share/browser-bridge-ext/` (`home.activation.browserBridgeExtension` in
+`nix/home.nix` — `cp -rL` into a sibling temp dir then a single `mv -T`,
+deliberately not store symlinks). devrc is worked on by many concurrent sessions,
+and loading the extension out of the working tree means any other session's `git
+checkout`, `stash`, branch switch or worktree operation silently swaps the
+extension's code out from under a live verification. That is not hypothetical —
+it reverted a staged build mid-session on 2026-07-30.
+
+⚠ **Honest scope — this is not "nothing can change it".** A `home-manager
+switch` (or `ship.sh`) rewrites the deployed tree from whatever the working tree
+holds at that moment, so a concurrent session sitting on another branch can still
+swap the extension mid-verification. What the deploy removes is the **silent**
+class (a bare checkout with no switch). `browser ping` is what makes the
+remaining case detectable.
+
+⚠ **Flake trap: a NEW file here must be `git add`ed before switching.** Flakes
+only see git-tracked files, so an untracked new extension file is silently
+omitted from the deployed tree — a partially-updated extension with **no error
+anywhere**. (Same trap as `claude/commands/`, documented in the repo CLAUDE.md.)
+
+This directory stays the **source** (edit here, `git add` if new,
+`home-manager switch`, then reload in Brave). Nothing removes it; a profile still
+pointed here keeps working, it is just not git-safe.
+
+### First-time load / re-point (per Brave profile — MANUAL, one-time)
+
+Do this **once for each profile** (work and personal). It cannot be automated:
+`brave://extensions` is not scriptable, and Brave must not be killed
+(`restore_on_startup` is unset on both profiles — the operator's tabs would not
+come back).
+
+1. `home-manager switch --flake ~/workspace/devrc --impure` — creates/refreshes
+   `~/.local/share/browser-bridge-ext/`. Confirm:
+   `ls ~/.local/share/browser-bridge-ext/manifest.json`
+2. In the profile's window: Brave → `brave://extensions`
+3. Toggle **Developer mode** (top-right).
+4. Find the **Browser Bridge (command channel)** card. **Before touching it,
+   write down the `ID` shown on that card** together with its **path** — this is
+   the only "before" reading you can take, and it is what makes the path→id
+   claim falsifiable in step 9. (`ping` cannot give it to you: the loaded build
+   is 0.2.0, which has no `ping` op and answers `unknown_op`.) Then, if the path
+   is under `~/workspace/devrc/…`, click **Remove** (this drops that profile's
+   `chrome.storage.local` — token/port/label/`instanceId` — hence step 7).
+5. **Load unpacked** → select `~/.local/share/browser-bridge-ext/`.
+   (`Ctrl+L` in the GTK file chooser lets you type the path.)
+6. Confirm any permission re-prompt (`debugger`, `webNavigation`).
+7. Extension card → ⋯ → **Options**: paste the token from
+   `~/.config/browser-bridge/token`, port `8788`, set the profile's **label**
+   (`work` / `personal` — must be unique per profile), **Save**.
+8. Verify from a shell — this is the whole point of the change:
+   ```bash
+   browser --instance <label> ping   # → {"pong":true,"extensionVersion":"0.3.1",
+                                     #     "id":"<ext-id>","ops":[…,"ping"]}
+   browser whoami                    # → that instance: extension_stale:false
+                                     #    + extension_id, and
+                                     #    bridge.extension_dir_expected
+   ```
+   `unknown_op` from `ping` means the OLD build is still loaded — go to the
+   reload section below.
+9. **Record this profile's `id`** (from `ping`, or `extension_id` in `whoami`)
+   somewhere you keep notes, and **compare it against the id you wrote down in
+   step 4** — they should DIFFER, because the load path changed. That comparison
+   is the only test of the path→id premise this whole migration rests on; if the
+   id is unchanged, say so and see the checklist item near the end of this file.
+   Thereafter a *changed* id means the profile got re-pointed at a different
+   directory — the one thing the version fields cannot tell you. ⚠ The path→id
+   derivation is INFERRED from documented Chromium behaviour, not measured here;
+   the recorded id is a baseline to compare against, not a computed expectation.
+   (Nothing computes an expected id, on purpose: a wrong derivation would raise
+   false alarms.)
+
+Repeat 2–9 in the other profile's window. The profiles are independent: one can
+be on the new path while the other is still on the repo path.
+
+⚠ **Open question, cheap to settle while you are here:** do the two profiles,
+once BOTH point at `~/.local/share/browser-bridge-ext/`, report the SAME id or
+different ones? Chromium is documented to derive an unpacked extension's id from
+a hash of the **absolute path only**, which would make them identical — but that
+is INFERRED on both sides and nothing here has measured it. It does not affect
+the step-9 comparison (that is before-vs-after on ONE profile), but please note
+which you observe and correct this paragraph.
+
+### Rollback (if the deployed directory will not load)
+
+The repo copy is never removed, so rollback is the same flow pointed the other
+way:
+
+1. `brave://extensions` → **Remove** the `~/.local/share/browser-bridge-ext/` card.
+2. **Load unpacked** → `~/workspace/devrc/scripts/browser-bridge/extension/`.
+3. ⋯ → **Options**: re-paste the token, port `8788`, and the profile's label.
+4. `browser --instance <label> ping` to confirm it answers.
+
+⚠ **Rollback is not free.** Remove wipes that profile's
+`chrome.storage.local` — token, port, label and the persisted `instanceId` all
+go, which is why step 3 is mandatory and why the profile comes back with a NEW
+auto-id. Per profile. You are also back on the git-mutable path.
+
+## Reload after every change (and how to know it took)
+
+⚠ **Brave does not hot-reload unpacked extensions.** After editing any file here
+(and `home-manager switch`, which refreshes the deployed copy), click the
+**reload** ↻ button on the extension's card in `brave://extensions`, or the
+service worker keeps running the old code.
+
+⚠ **↻ is UNRELIABLE and silently so**: the extension's long-poll keeps the OLD
+MV3 service worker alive, so a reload often no-ops. Never assume it took —
+**probe it**:
+
+```bash
+browser --instance <label> ping
+  # new build → {"pong":true,"extensionVersion":"<manifest version>","id":"…",…}
+  # old build → op 'ping' returned unknown_op …                  (non-zero exit)
+# --instance matters: with two profiles connected, a bare call gets
+# 409 ambiguous_instance rather than an answer.
+```
+
+If `ping` still reports the old version after ↻, **fully quit and reopen Brave**
+(never `pkill` it — tabs are not restorable).
+
+> **CONTRACT for an extension change that must be provably loaded:** bump
+> `manifest.json`'s `version` AND add a new discriminator the old build cannot
+> fake — a new op name, or a new field in `ping`'s reply. `ping` itself exists
+> because "is the new build loaded?" was previously unfalsifiable, which cost
+> three full Brave restarts in a single session. (0.3.0 → 0.3.1 was exactly
+> this: adding `id` to `ping`'s reply is a discriminator, so it got a bump.)
 
 > **MANDATORY reload after a permission change:** the manifest requests the
 > `debugger` permission (screenshot + TOP-frame trusted input) AND the
@@ -207,6 +326,33 @@ The chrome.* glue needs a real browser — verify by hand after loading:
 
 - [ ] With the server running + token pasted, `browser health` reports
       `extension_connected:true` within ~1 min (or after a reload).
+- [ ] **The load path is the git-immune one:** the extension card in
+      `brave://extensions` shows a path under `~/.local/share/browser-bridge-ext/`,
+      NOT under `~/workspace/devrc/`.
+- [ ] **`browser --instance <label> ping` answers with the DEPLOYED manifest
+      version** (matching `~/.local/share/browser-bridge-ext/manifest.json`), and
+      `browser health` / `browser whoami` show `extension_stale:false` for that
+      instance. A build older than the `ping` op returns `unknown_op` + a
+      non-zero exit instead — the intended "the reload did NOT take" answer.
+- [ ] **The `id` changes when the load path changes** (the one claim this whole
+      migration rests on, and it is INFERRED, not measured).
+      ⚠ **You cannot get the "before" value from `ping`** — the build currently
+      loaded from the repo path is 0.2.0, which has no `ping` op and answers
+      `unknown_op`. Read the **ID shown on the extension's card in
+      `brave://extensions`** instead (enable Developer mode; the card shows both
+      the ID and the load path). Capture it **before** you re-point, or the
+      comparison becomes impossible. Then re-point to
+      `~/.local/share/browser-bridge-ext/` and compare against `ping`'s `id`
+      (or that card's ID again). If it is UNCHANGED, `id` does not track the
+      directory and the write-ups in this file, `../README.md`,
+      `../reference/errors.md` and the repo `CLAUDE.md` must be corrected.
+- [ ] **Same path, two profiles — same id or not?** Once BOTH profiles point at
+      `~/.local/share/browser-bridge-ext/`, compare their ids. Chromium is
+      documented to hash the absolute PATH only (→ they should MATCH), but that
+      is inferred, not measured, and this pass gets the answer for free. Record
+      what you see and fix the paragraph after step 9 in this file.
+- [ ] **`ping` is inert:** running it does not change the focused tab, the
+      focused window, or any page (it touches no tab at all).
 - [ ] `browser html` on a logged-in tab returns markup containing logged-in-only
       content (proves the live authenticated session).
 - [ ] `browser eval 'document.title'` returns the active tab's title.

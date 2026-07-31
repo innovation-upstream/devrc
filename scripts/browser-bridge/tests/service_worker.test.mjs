@@ -269,3 +269,41 @@ test("activate: windows.update failure is swallowed (best-effort i3 focus)", asy
     globalThis.chrome.windows = origWindows;
   }
 });
+
+// --------------------------------------------------------------------------- //
+// `ping` — the build-freshness tell. It must be INERT: no tab lookup, no page
+// injection, no CDP. Its only job is to prove WHICH build answered.
+// --------------------------------------------------------------------------- //
+test("ping: reports the loaded manifest version + id + op set, touching no tab", async () => {
+  resetCalls();
+  const origRuntime = globalThis.chrome.runtime;
+  globalThis.chrome.runtime = { ...origRuntime, id: "abcdefghijklmnop",
+    getManifest: () => ({ version: "0.3.1" }) };
+  try {
+    const out = await OPS.ping({});
+    assert.equal(out.pong, true);
+    assert.equal(out.extensionVersion, "0.3.1",
+      "must report the LOADED build's own manifest, not the repo's");
+    // The path-derived id — the ONLY field that says which DIRECTORY Brave
+    // loaded. Two builds at the same version but different paths differ here.
+    assert.equal(out.id, "abcdefghijklmnop");
+    assert.ok(out.ops.includes("ping"), "the op set is self-describing");
+    // Inert: a freshness probe must never be able to disturb the operator's tabs.
+    assert.deepEqual(state.calls.tabsGet, []);
+    assert.deepEqual(state.calls.tabsUpdate, []);
+    assert.deepEqual(state.calls.executeScript, []);
+    assert.deepEqual(state.calls.debugger, []);
+    assert.deepEqual(state.calls.getAllFrames, []);
+  } finally {
+    globalThis.chrome.runtime = origRuntime;
+  }
+});
+
+test("ping: degrades to empty version + id when runtime is bare", async () => {
+  // The bare mock has neither getManifest nor id — must not throw (best-effort,
+  // like the /poll identity headers).
+  const out = await OPS.ping({});
+  assert.equal(out.pong, true);
+  assert.equal(out.extensionVersion, "");
+  assert.equal(out.id, "");
+});

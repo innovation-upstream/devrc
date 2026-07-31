@@ -75,6 +75,20 @@ function extensionVersion() {
   }
 }
 
+// `chrome.runtime.id` — the extension's ID, which for an UNPACKED extension is
+// derived from the absolute directory Brave loaded it from. That makes it the
+// only signal that distinguishes a repo-path load from a
+// ~/.local/share/browser-bridge-ext/ load: both report the same manifest
+// version, so version alone cannot answer "did the migration take?".
+// Best-effort ("" if unavailable), like extensionVersion().
+function extensionId() {
+  try {
+    return (chrome.runtime && chrome.runtime.id) || "";
+  } catch (e) {
+    return "";
+  }
+}
+
 async function config() {
   const { port, token, label } = await chrome.storage.local.get(["port", "token", "label"]);
   return {
@@ -83,6 +97,7 @@ async function config() {
     label: label || "",
     instanceId: await instanceId(),
     extVersion: extensionVersion(),
+    extId: extensionId(),
   };
 }
 
@@ -905,6 +920,25 @@ const OPS = {
     return { tabId: out.id, windowId: out.windowId, url: out.url,
              title: out.title, active: out.active, status: out.status };
   },
+
+  // `ping` — the deterministic "is the NEW build loaded?" probe. No tab, no page,
+  // no chrome.* call beyond getManifest()/runtime.id: it answers with THIS
+  // service worker's own manifest version, its extension ID and its op set. An
+  // older build fails it at validateCommand with `unknown_op` (it has never
+  // heard of the name), which the CLI already translates into reload/restart
+  // guidance. See protocol.js ALLOWED_OPS for the contract this op enforces.
+  //
+  // `id` answers the OTHER half — WHICH DIRECTORY Brave loaded. An unpacked
+  // extension's ID is derived from its absolute path, so a repo-path load and a
+  // ~/.local/share/browser-bridge-ext/ load report the same VERSION but
+  // different IDs. Version alone therefore cannot confirm the migration took.
+  // ⚠ The path→id derivation is INFERRED from documented Chromium behaviour and
+  // is NOT measured here — confirm it live by recording the id before and after
+  // re-pointing a profile.
+  async ping() {
+    return { pong: true, extensionVersion: extensionVersion(),
+             id: extensionId(), ops: ALLOWED_OPS.slice() };
+  },
 };
 
 async function execute(cmd) {
@@ -937,7 +971,8 @@ async function pollOnce(cfg) {
   const res = await fetch(`${base(cfg.port)}/poll`, {
     // Identify this instance so the server routes only its commands here.
     headers: { ...authHeaders(cfg.token),
-               ...pollHeaders(cfg.instanceId, cfg.label, active, cfg.extVersion) },
+               ...pollHeaders(cfg.instanceId, cfg.label, active, cfg.extVersion,
+                              cfg.extId) },
   });
   const kind = classifyPollStatus(res.status);
   if (kind === POLL_COMMAND) return { kind, cmd: await res.json() };

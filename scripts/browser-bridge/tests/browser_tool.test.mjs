@@ -639,6 +639,29 @@ test("SECURITY: whoami drops activeTabDomain for EVERY instance, incl. the agent
   }
 });
 
+test("SECURITY: whoami drops the new extension_id + extension_dir_expected fields", () => {
+  // The server now reports a per-instance `extension_id` (a stable per-profile
+  // fingerprint) and a bridge-level `extension_dir_expected` (an absolute HOST
+  // PATH). Neither is any of the autonomous model's business — the summarizer is
+  // an explicit allowlist, so this asserts the allowlist actually holds as new
+  // server fields land, rather than silently forwarding them.
+  const withIds = { ...MULTI_WHOAMI,
+    bridge: { ...MULTI_WHOAMI.bridge,
+      extension_dir_expected: "/home/zach/.local/share/browser-bridge-ext" },
+    instances: MULTI_WHOAMI.instances.map((i) => ({ ...i,
+      extension_id: "abcdefghijklmnop" })) };
+  for (const env of [baseEnv({ BROWSER_AGENT_INSTANCE: "work" }), baseEnv()]) {
+    const s = JSON.parse(summarizeResult("whoami", withIds, env));
+    const flat = JSON.stringify(s);
+    assert.ok(!/extension_id|abcdefghijklmnop/.test(flat),
+      "the per-profile extension id must not reach the model");
+    assert.ok(!/extension_dir_expected|\/home\//.test(flat),
+      "an absolute host path must not reach the model");
+    // The legitimate signal still survives the narrowing.
+    assert.equal(s.instances[0].extension_version, "0.1.0");
+  }
+});
+
 test("SECURITY: whoami matches the forced instance by LABEL too (wrapper accepts either)", () => {
   // `--instance` may name an auto key or a human label; both must resolve.
   const s = JSON.parse(summarizeResult("whoami", MULTI_WHOAMI,

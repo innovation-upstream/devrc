@@ -30,9 +30,18 @@
 // NO raw-CDP passthrough. It IS a data-exfil-capable action (an explicit
 // operator decision to let the autonomous agent read ANY path) — so the server
 // AUDIT-LOGS every upload (op + target domain + path).
+// `ping` is the BUILD-FRESHNESS TELL. It takes no tab, touches no page and does
+// nothing but answer with this service worker's own manifest version + op set.
+// Its whole point is the op NAME: a build that predates it does not know the
+// name, so `validateCommand` rejects it with `unknown_op`. That turns "did my
+// ↻ reload actually take?" — which cost three full Brave restarts to guess at,
+// because the long-poll pins the old MV3 worker alive across a reload — into a
+// yes/no. CONTRACT for any future extension change that must be provably loaded:
+// bump `manifest.json` version AND add a new discriminator (a new op name, or a
+// new field in `ping`'s reply), so the old build cannot fake a pass.
 export const ALLOWED_OPS = [
   "getHtml", "text", "eval", "tabs", "nav", "screenshot", "open", "close",
-  "frames", "click", "type", "key", "wake", "activate", "upload",
+  "frames", "click", "type", "key", "wake", "activate", "upload", "ping",
 ];
 
 // Per-op required fields (mirrors server.py REQUIRED_FIELDS). The server already
@@ -1499,12 +1508,20 @@ export function capHeaderValue(s, max = MAX_HEADER_VALUE_CHARS) {
 // own manifest version (chrome.runtime.getManifest().version) — surfaced by
 // `whoami` so an operator can see which extension BUILD is loaded per instance;
 // omitted (→ null in whoami) by a legacy build that predates version reporting.
-export function pollHeaders(instanceId, label, active, extVersion) {
+// `extId` is `chrome.runtime.id` — WHICH DIRECTORY Brave loaded this extension
+// from. An unpacked extension's ID is derived from its absolute directory path,
+// so the repo-path load and the ~/.local/share/browser-bridge-ext/ load have
+// DIFFERENT ids while reporting the SAME version. It is the only field that can
+// answer "did the migration off the git-mutable path actually take?".
+// ⚠ INFERRED from documented Chromium behaviour, NOT measured here — treat a
+// changed id as evidence, and record the post-re-point id per profile.
+export function pollHeaders(instanceId, label, active, extVersion, extId) {
   const h = { "X-Bridge-Instance-Id": String(instanceId || "") };
   if (label) h["X-Bridge-Label"] = encodeURIComponent(capHeaderValue(label));
   if (active && active.url) h["X-Bridge-Active-Url"] = encodeURIComponent(capHeaderValue(active.url));
   if (active && active.title) h["X-Bridge-Active-Title"] = encodeURIComponent(capHeaderValue(active.title));
   if (extVersion) h["X-Bridge-Ext-Version"] = encodeURIComponent(capHeaderValue(String(extVersion)));
+  if (extId) h["X-Bridge-Ext-Id"] = encodeURIComponent(capHeaderValue(String(extId)));
   return h;
 }
 

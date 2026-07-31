@@ -222,6 +222,228 @@ in
     fi
   '';
 
+  # browser-bridge: deploy the unpacked MV3 extension to a STABLE, git-immune
+  # path that Brave can be pointed at permanently.
+  #
+  # WHY: Brave has been loading the extension straight out of the git working
+  # tree (~/workspace/devrc/scripts/browser-bridge/extension). devrc is worked on
+  # by many concurrent sessions, so any other session's `git checkout`, branch
+  # switch or worktree operation silently swaps the extension's code out from
+  # under a live verification — measured: it reverted a staged build mid-session.
+  # A copy under ~/.local/share/ is untouchable by `git checkout`/`stash`/branch
+  # switch/worktree ops.
+  #
+  # ⚠ HONEST SCOPE — this is NOT "no git operation can reach it". `home-manager
+  # switch` (and `ship.sh`) rewrites this tree from whatever the working tree
+  # holds AT THAT MOMENT. A concurrent session sitting on another branch that
+  # runs a switch still swaps the extension mid-verification. What this removes
+  # is the SILENT class (a checkout with no switch); a switch is at least an
+  # explicit, logged act. `browser ping` is what makes the remaining case
+  # detectable rather than invisible.
+  #
+  # WHY A REAL COPY, NOT `home.file … recursive = true`: that would deploy the
+  # tree as read-only /nix/store SYMLINKS. Whether Chromium's unpacked-extension
+  # loader accepts a tree of dangling-into-the-store symlinks is exactly the kind
+  # of thing that must be MEASURED against live Brave, and a wrong guess here is
+  # expensive (it costs a full Brave restart to find out, and the operator's tabs
+  # are not restorable). A plain copy (`cp -rL`) removes the question entirely and
+  # is equally git-immune. Cost: the whole tree is rewritten on every switch.
+  #
+  # ⚠ FLAKE TRAP: flakes only see git-TRACKED files, so a NEW extension file that
+  # has not been `git add`ed is silently omitted from ${../scripts/browser-bridge/extension}
+  # and therefore from the deployed tree — a partially-updated extension with NO
+  # error anywhere. `git add` a new extension file BEFORE switching. (Same trap
+  # already documented for claude/commands/ in CLAUDE.md.)
+  #
+  # The copy is built beside the target and swapped in with an ATOMIC directory
+  # exchange, so neither a half-written tree nor a MISSING directory is ever
+  # visible at the path Brave loads from. Re-pointing Brave at this path is a
+  # MANUAL operator step (brave://extensions → remove the repo-path entry → Load
+  # unpacked → this directory), once per profile; until then the previously
+  # loaded repo-path extension keeps working unchanged.
+  #
+  # SWAP = `mv -T --exchange` (renameat2 RENAME_EXCHANGE), fallback to a
+  # rename-away dance. Two earlier designs were rejected/regressed:
+  #   * hash-suffixed dir + symlink flip — the unpacked extension's ID is derived
+  #     from its absolute directory path, and `ping` reports `chrome.runtime.id`
+  #     precisely so the operator can confirm WHICH directory Brave loaded. A
+  #     target whose name changes every switch risks changing that ID every
+  #     switch (whether Chromium canonicalises a symlink before hashing is
+  #     unmeasured), destroying the id-stability the probe depends on.
+  #   * `rm -rf "$bbDst"` then `mv -T` — measured to DELETE the deployed tree
+  #     outright under two concurrent activations (3/3 trials: one side exits 0
+  #     while the other removes the tree it just installed, then aborts). Worse
+  #     than the nesting bug it replaced: an absent directory is exactly the
+  #     mid-verification breakage this deploy exists to prevent.
+  # RENAME_EXCHANGE gets atomicity AND a stable path — no trade needed. It swaps
+  # the two directories in one syscall, so $bbDst is never absent for any window,
+  # and the OLD tree lands at $bbTmp for cleanup AFTER the swap succeeded (so a
+  # failed deploy leaves the previous extension in place rather than nothing).
+  # Linux/ext4-specific; the fallback covers a filesystem without renameat2.
+  #
+  # Concurrency (measured, distinct PIDs, 400-file source, 3/3 trials): the
+  # exchange path leaves BOTH activations exiting 0 with a complete tree and zero
+  # leftovers; the fallback path always leaves $bbDst present and complete, with
+  # the loser failing LOUDLY and one `.old.<pid>` that the next run's sweep
+  # reclaims. $$-suffixed temp names are collision-free BY CONSTRUCTION across
+  # processes (note: a bash SUBSHELL inherits its parent's $$, so `( … ) &` does
+  # not model two switches — separate processes do). The sweep below is what
+  # bounds the leak that a fixed temp name was wrongly used to solve: it reclaims
+  # only siblings whose owning PID is gone, never a live activation's.
+  home.activation.browserBridgeExtension =
+    lib.hm.dag.entryAfter ["writeBoundary"] ''
+      bbSrc=${../scripts/browser-bridge/extension}
+      bbDst="$HOME/.local/share/browser-bridge-ext"
+      bbTmp="$bbDst.new.$$"
+      $DRY_RUN_CMD mkdir -p "$HOME/.local/share"
+
+      # Sweep leftovers from interrupted earlier runs — but ONLY those whose
+      # owning PID is dead, so a concurrent activation's in-flight temp survives.
+      # `cp -rL` from the read-only store yields a 0555 tree and `rm -rf` cannot
+      # unlink inside one (measured), which under activation's `set -eu` would
+      # abort the entire switch — so chmod always precedes rm. chmod on a missing
+      # path exits non-zero, hence the `|| true`.
+      # Known, accepted limits: (1) a `…new.<pid>` whose PID has been REUSED by
+      # an unrelated process is spared forever — leak-only, never corruption, and
+      # vanishingly rare at pid_max 4194304; (2) a suffix that is not a PID at
+      # all (`…new.abc`) is spared deliberately — this loop must not delete a
+      # directory it cannot prove it created. The inverse (sweeping a LIVE
+      # sibling mid-flight) is impossible.
+      for bbOld in "$bbDst".new.* "$bbDst".old.*; do
+        [ -e "$bbOld" ] || continue
+        bbPid="''${bbOld##*.}"
+        # An EMPTY suffix (`…new.`) is ours-but-broken, and must be swept here:
+        # it would otherwise be spared forever, because `[ -d "/proc/" ]` is TRUE.
+        if [ -n "$bbPid" ]; then
+          case "$bbPid" in (*[!0-9]*) continue;; esac
+          [ "$bbPid" = "$$" ] && continue
+          [ -d "/proc/$bbPid" ] && continue   # a LIVE activation owns it
+        fi
+        $DRY_RUN_CMD chmod -R u+rwX "$bbOld" 2>/dev/null || true
+        $DRY_RUN_CMD rm -rf "$bbOld"
+      done
+
+      $DRY_RUN_CMD chmod -R u+rwX "$bbTmp" 2>/dev/null || true
+      $DRY_RUN_CMD rm -rf "$bbTmp"            # cp -rL NESTS if the target exists
+      $DRY_RUN_CMD cp -rL "$bbSrc" "$bbTmp"   # -L → real files, not store symlinks
+      $DRY_RUN_CMD chmod -R u+rwX "$bbTmp"    # writable for the NEXT switch's rm -rf
+
+      # Install $bbTmp at $bbDst. Two attempts, because every branch test below
+      # is a TOCTOU against a concurrent activation: the path can change shape
+      # between the test and the syscall. Re-deciding once absorbs that instead
+      # of acting on a stale observation. EVERY failure path either restores the
+      # previous tree or leaves it untouched, and prints a named error before
+      # aborting — a bare `mv:` message from `set -e` is not an acceptable exit.
+      bbDone=""
+      bbTry=0
+
+      # --dry-run must SHOW the swap, perform nothing, and never fail. The loop
+      # below cannot run under dry-run: its branches are decided from filesystem
+      # effects that $DRY_RUN_CMD deliberately does not produce (nothing was
+      # copied, nothing gets removed), so it would re-decide the same branch,
+      # exhaust its attempts and abort the dry run — with blame text about a
+      # concurrent activation that is not involved. Gate it out, and print what
+      # would run, since that is the entire job of this mode.
+      if [ -n "''${DRY_RUN_CMD:-}" ]; then
+        echo "would install the browser-bridge extension at $bbDst:"
+        echo "  mv -T --exchange $bbTmp $bbDst"
+        echo "  # if RENAME_EXCHANGE is unavailable, the weaker fallback:"
+        echo "  mv -T $bbDst $bbDst.old.$$ && mv -T $bbTmp $bbDst"
+        bbDone=1
+      fi
+
+      while [ -z "$bbDone" ] && [ "$bbTry" -lt 2 ]; do
+        bbTry=$((bbTry + 1))
+        # `[ ! -L ]` matters: chmod -R FOLLOWS a symlink-to-directory and would
+        # rewrite the modes of whatever it points at (measured). If an operator
+        # ever symlinks this path at the repo checkout, a switch must not chmod
+        # the repo — replace the link instead (the elif below).
+        if [ -d "$bbDst" ] && [ ! -L "$bbDst" ]; then
+          # THE ATOMIC PATH — the only one that never exposes an absent or
+          # partial tree at $bbDst. Capture stderr: a failure here is NOT
+          # necessarily "no RENAME_EXCHANGE" (EXDEV/ENOSPC/EACCES/EBUSY, or a
+          # coreutils without the option, all land here and are
+          # indistinguishable), so report what actually happened rather than
+          # asserting a cause, and say plainly that the fallback is weaker.
+          if bbErr="$($DRY_RUN_CMD mv -T --exchange "$bbTmp" "$bbDst" 2>&1)"; then
+            bbDone=1
+          else
+            echo "browser-bridge: atomic directory exchange failed at $bbDst" \
+                 "(mv said: $bbErr). Falling back to the rename-away swap," \
+                 "which BRIEFLY leaves $bbDst absent — a Brave reload during" \
+                 "that window can fail. Re-run the switch if it did." >&2
+            bbBak="$bbDst.old.$$"
+            $DRY_RUN_CMD rm -rf "$bbBak"
+            if ! $DRY_RUN_CMD mv -T "$bbDst" "$bbBak"; then
+              echo "browser-bridge: extension deploy FAILED before touching" \
+                   "$bbDst — the previously deployed tree is UNCHANGED." >&2
+              false                           # loud: set -e aborts the switch
+            fi
+            # $bbDst is absent from here until one of the two moves below.
+            if $DRY_RUN_CMD mv -T "$bbTmp" "$bbDst"; then
+              $DRY_RUN_CMD chmod -R u+rwX "$bbBak" 2>/dev/null || true
+              $DRY_RUN_CMD rm -rf "$bbBak"
+              bbDone=1
+            else
+              if $DRY_RUN_CMD mv -T "$bbBak" "$bbDst"; then
+                echo "browser-bridge: extension deploy FAILED — RESTORED the" \
+                     "previously deployed tree at $bbDst." >&2
+              else
+                echo "browser-bridge: extension deploy FAILED and the previous" \
+                     "tree could not be restored. It is at $bbBak — move it to" \
+                     "$bbDst by hand, or re-run home-manager switch." >&2
+              fi
+              false                           # loud: set -e aborts the switch
+            fi
+          fi
+        elif [ -e "$bbDst" ] || [ -L "$bbDst" ]; then
+          # A symlink or a plain file sits at the path (an operator artefact —
+          # the documented rollback goes via brave://extensions and never
+          # creates one). Remove it so the next iteration can install.
+          #
+          # `rm -f`, NOT `rm -rf`, and that is the whole point: the `elif` test
+          # above is a TOCTOU, so by the time this line runs the path may have
+          # become a DIRECTORY that a concurrent activation just installed.
+          # `rm -rf` deletes it silently with rc=0 — measured, 5/5 — which is
+          # exactly the hazard this loop exists to close. `rm -f` REFUSES a
+          # directory (rc=1, tree intact — measured), removes a plain file, and
+          # on a symlink drops the LINK, not its target (measured). `|| true`
+          # keeps the refusal non-fatal so iteration 2 re-decides and takes the
+          # atomic exchange branch — the intended recovery.
+          $DRY_RUN_CMD rm -f "$bbDst" || true
+        else
+          # Absent — first install. If a concurrent activation wins the race and
+          # creates the directory first, `mv -T` refuses (it will not descend
+          # into an existing directory) and the next iteration exchanges into it.
+          if $DRY_RUN_CMD mv -T "$bbTmp" "$bbDst"; then
+            bbDone=1
+          elif [ "$bbTry" -ge 2 ]; then
+            echo "browser-bridge: extension deploy FAILED — could not install" \
+                 "at $bbDst. No DIRECTORY was removed (a symlink or plain file" \
+                 "at that path may have been); the new tree is at $bbTmp." \
+                 "Re-run home-manager switch." >&2
+            false                             # loud: set -e aborts the switch
+          fi
+        fi
+      done
+
+      # Belt-and-braces: the loop can only exit with bbDone empty by running out
+      # of attempts, and that must never pass silently for a deploy.
+      if [ -z "$bbDone" ]; then
+        echo "browser-bridge: extension deploy FAILED — $bbDst did not settle" \
+             "after $bbTry attempts (a concurrent activation is the likely" \
+             "cause). No DIRECTORY was removed (a symlink or plain file at that" \
+             "path may have been); the new tree is at $bbTmp. Re-run" \
+             "home-manager switch." >&2
+        false                                 # loud: set -e aborts the switch
+      fi
+
+      # After a successful exchange $bbTmp holds the OLD tree; after the fallback
+      # or first install it no longer exists. Either way, clean up.
+      $DRY_RUN_CMD chmod -R u+rwX "$bbTmp" 2>/dev/null || true
+      $DRY_RUN_CMD rm -rf "$bbTmp"
+    '';
+
   home.stateVersion = "24.11";
 
   home.packages = if isNixOS
@@ -379,6 +601,9 @@ in
   # with that token file). server.py is stdlib-only + standalone (no sibling
   # imports), so unlike the receiver it has NO don't-.resolve() import quirk.
   home.file.".config/browser-bridge/server.py".source = ../scripts/browser-bridge/server.py;
+  # NOTE: the UNPACKED EXTENSION is deliberately NOT a home.file here — it is
+  # copied by the browserBridgeExtension activation script below. See there for
+  # why a real copy rather than store symlinks.
   # i3 focus collector. Reuses keylog's spool_emit (the v1 line format), so
   # keylog/ must be present alongside it (it always is — shipped above).
   home.file.".config/activity-collector/i3" = {

@@ -37,8 +37,24 @@ test("op set mirrors the server contract", () => {
   assert.deepEqual(
     [...ALLOWED_OPS].sort(),
     ["activate", "click", "close", "eval", "frames", "getHtml", "key", "nav",
-     "open", "screenshot", "tabs", "text", "type", "upload", "wake"],
+     "open", "ping", "screenshot", "tabs", "text", "type", "upload", "wake"],
   );
+});
+
+// --- `ping`: the build-freshness tell -------------------------------------- //
+test("`ping` is in the op set and needs no fields (build-freshness probe)", () => {
+  assert.ok(ALLOWED_OPS.includes("ping"));
+  assert.deepEqual(validateCommand({ op: "ping" }), { ok: true });
+  // No REQUIRED_FIELDS entry — it takes no arguments at all.
+  assert.equal(REQUIRED_FIELDS.ping, undefined);
+});
+
+test("an op name the build predates fails as unknown_op — the freshness tell", () => {
+  // This is the WHOLE mechanism: a build that predates an op name cannot pass a
+  // probe for it. `ping` behaves for a 0.2.0 extension exactly as this unknown
+  // name behaves for the current one.
+  assert.deepEqual(validateCommand({ op: "ping-v2-not-yet-shipped" }),
+    { ok: false, error: "unknown_op" });
 });
 
 test("validateCommand accepts the `activate` op (bare + waitMs + injected tabId)", () => {
@@ -230,6 +246,19 @@ test("pollHeaders carries the extension manifest version (whoami enrichment)", (
   const bare = pollHeaders("uuid-2", "");
   assert.deepEqual(bare, { "X-Bridge-Instance-Id": "uuid-2" });
   assert.equal(pollHeaders("uuid-3", "", null)["X-Bridge-Ext-Version"], undefined);
+});
+
+test("pollHeaders carries the extension ID — WHICH DIRECTORY Brave loaded", () => {
+  // Version alone cannot distinguish a repo-path load from a deployed-path one
+  // (identical manifests). chrome.runtime.id is path-derived, so it can.
+  const h = pollHeaders("uuid-1", "work", null, "0.3.1", "abcdefghijklmnop");
+  assert.equal(h["X-Bridge-Ext-Id"], "abcdefghijklmnop");
+  assert.equal(h["X-Bridge-Ext-Version"], "0.3.1");
+  // Optional + backwards-safe, exactly like the version header: a build that
+  // does not report an id simply omits the header (→ null server-side).
+  assert.equal(pollHeaders("uuid-2", "work", null, "0.3.1")["X-Bridge-Ext-Id"],
+    undefined);
+  assert.deepEqual(pollHeaders("uuid-3", ""), { "X-Bridge-Instance-Id": "uuid-3" });
 });
 
 // --- poll-response classification: the distinct supersede signal ------------ //

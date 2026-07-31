@@ -38,6 +38,25 @@ EXT_DIR = Path(__file__).resolve().parent.parent / "extension"
 # gating-logic test still exercise the genuine implementation).
 _REAL_I3_AVAILABLE = S.i3_available
 
+# A manifest version pinned for the staleness tests. `manifest_version()` prefers
+# the DEPLOYED extension at ~/.local/share/browser-bridge-ext/, so any test that
+# asserts on a stale/fresh verdict must pin it — otherwise the suite's result
+# depends on the operator's live deploy state (whether they have switched, and to
+# which build). Deliberately not a real version so a leak is obvious.
+PINNED_VERSION = "9.9.9-pinned"
+
+
+@pytest.fixture
+def pinned_manifest(tmp_path, monkeypatch):
+    """Pin manifest_version() to PINNED_VERSION, hermetically: a tmp deployed
+    manifest + a non-existent repo fallback. Never reads host state."""
+    deployed = tmp_path / "pinned-manifest.json"
+    deployed.write_text(json.dumps({"version": PINNED_VERSION}),
+                        encoding="utf-8")
+    monkeypatch.setattr(S, "_DEPLOYED_EXT_MANIFEST", deployed)
+    monkeypatch.setattr(S, "_EXT_MANIFEST_PATH", tmp_path / "no-repo-manifest.json")
+    return PINNED_VERSION
+
 # The in-repo activity spool emitter (single source of truth for the v1 line
 # format). scripts/browser-bridge/tests/ -> parent.parent.parent == scripts/.
 SPOOL_EMIT_PY = (Path(__file__).resolve().parent.parent.parent
@@ -162,7 +181,7 @@ class FakeExtension(threading.Thread):
 
     def __init__(self, srv, instance_id="fake-1", label="", executor=None,
                  swallow=False, active_url=None, active_title=None,
-                 ext_version=None):
+                 ext_version=None, ext_id=None):
         super().__init__(daemon=True)
         self.srv = srv
         self.instance_id = instance_id
@@ -172,6 +191,7 @@ class FakeExtension(threading.Thread):
         self.active_url = active_url
         self.active_title = active_title
         self.ext_version = ext_version  # reported via X-Bridge-Ext-Version (or None)
+        self.ext_id = ext_id            # reported via X-Bridge-Ext-Id (or None)
         self.dispatched = []    # every command this fake picked up (for assertions)
         self._stopev = threading.Event()
 
@@ -185,6 +205,8 @@ class FakeExtension(threading.Thread):
             h[S.HDR_ACTIVE_TITLE] = urllib.parse.quote(self.active_title)
         if self.ext_version:
             h[S.HDR_EXT_VERSION] = urllib.parse.quote(self.ext_version)
+        if self.ext_id:
+            h[S.HDR_EXT_ID] = urllib.parse.quote(self.ext_id)
         return h
 
     def run(self):
@@ -961,7 +983,7 @@ def test_validate_command_contract():
     assert set(S.ALLOWED_OPS) == {"getHtml", "text", "eval", "tabs", "nav",
                                   "screenshot", "open", "close",
                                   "frames", "click", "type", "key", "wake",
-                                  "activate", "upload"}
+                                  "activate", "upload", "ping"}
     # `upload` is a dispatched, tab-scoped CDP op requiring selector + path.
     assert S.validate_command({"op": "upload", "selector": "#f",
                                "path": "/tmp/x"}) == ("upload", None)
@@ -3093,7 +3115,61 @@ def test_git_short_head_none_on_missing_dir(tmp_path):
 
 def test_manifest_version_reads_current():
     v = S.manifest_version(path=EXT_DIR / "manifest.json")
-    assert isinstance(v, str) and v == "0.2.0"
+    assert isinstance(v, str) and v == "0.3.1"
+
+
+def test_manifest_version_prefers_the_deployed_copy_over_the_repo(tmp_path,
+                                                                 monkeypatch):
+    """The version the server reports as EXPECTED is the one Brave actually
+    loads — the deployed ~/.local/share/browser-bridge-ext/ copy — not the repo
+    working tree (which any concurrent session's checkout can change)."""
+    deployed = tmp_path / "deployed.json"
+    deployed.write_text('{"version": "9.9.9"}', encoding="utf-8")
+    monkeypatch.setattr(S, "_DEPLOYED_EXT_MANIFEST", deployed)
+    monkeypatch.setattr(S, "_EXT_MANIFEST_PATH", EXT_DIR / "manifest.json")
+    assert S.manifest_version() == "9.9.9"
+
+
+def test_manifest_version_falls_back_to_repo_when_not_deployed(tmp_path,
+                                                               monkeypatch):
+    """Backwards-safe: a host that has not switched yet (no deployed copy) keeps
+    reporting the repo manifest instead of going null."""
+    monkeypatch.setattr(S, "_DEPLOYED_EXT_MANIFEST", tmp_path / "absent.json")
+    monkeypatch.setattr(S, "_EXT_MANIFEST_PATH", EXT_DIR / "manifest.json")
+    assert S.manifest_version() == "0.3.1"
+
+
+def test_manifest_version_none_when_neither_exists(tmp_path, monkeypatch):
+    monkeypatch.setattr(S, "_DEPLOYED_EXT_MANIFEST", tmp_path / "a.json")
+    monkeypatch.setattr(S, "_EXT_MANIFEST_PATH", tmp_path / "b.json")
+    assert S.manifest_version() is None
+
+
+# --- annotate_staleness: the explicit loaded-vs-expected verdict ------------ #
+def test_annotate_staleness_flags_a_mismatch_true():
+    insts = [{"key": "work", "extension_version": "0.2.0"}]
+    S.annotate_staleness(insts, expected="0.3.0")
+    assert insts[0]["extension_stale"] is True
+    assert insts[0]["extension_version_expected"] == "0.3.0"
+
+
+def test_annotate_staleness_flags_a_match_false():
+    insts = [{"key": "work", "extension_version": "0.3.0"}]
+    S.annotate_staleness(insts, expected="0.3.0")
+    assert insts[0]["extension_stale"] is False
+
+
+def test_annotate_staleness_is_none_when_undecidable():
+    """NEVER guess: an instance that reports no version (a build predating
+    version reporting), or an unreadable manifest, yields null — not False."""
+    insts = [{"key": "a", "extension_version": None},
+             {"key": "b", "extension_version": ""}]
+    S.annotate_staleness(insts, expected="0.3.0")
+    assert [i["extension_stale"] for i in insts] == [None, None]
+
+    insts2 = [{"key": "c", "extension_version": "0.3.0"}]
+    S.annotate_staleness(insts2, expected=None)
+    assert insts2[0]["extension_stale"] is None
 
 
 def test_manifest_version_none_on_missing(tmp_path):
@@ -3484,6 +3560,198 @@ def test_health_no_extension_still_reports_current_version():
         assert body["instances"] == []
     finally:
         srv.shutdown(); srv.server_close()
+
+
+def test_health_carries_an_explicit_stale_verdict_per_instance(pinned_manifest):
+    """The point of the change: a yes/no, not two version strings to eyeball.
+    An instance reporting 0.1.0 against the expected manifest is STALE=True."""
+    srv, _ = _serve()
+    ext = FakeExtension(srv, instance_id="a", label="alpha", ext_version="0.1.0")
+    ext.start()
+    try:
+        body = _wait_instances(srv, 1)
+        assert body is not None
+        inst = body["instances"][0]
+        assert inst["extension_version_expected"] == PINNED_VERSION
+        assert inst["extension_stale"] is True
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
+def test_health_stale_verdict_is_false_when_the_loaded_build_matches(
+        pinned_manifest):
+    srv, _ = _serve()
+    ext = FakeExtension(srv, instance_id="a", label="alpha",
+                        ext_version=PINNED_VERSION)
+    ext.start()
+    try:
+        body = _wait_instances(srv, 1)
+        assert body is not None
+        assert body["instances"][0]["extension_stale"] is False
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
+def test_whoami_carries_the_stale_verdict_per_instance(pinned_manifest):
+    srv, _ = _serve()
+    ext = FakeExtension(srv, instance_id="a", label="alpha", ext_version="0.1.0")
+    ext.start()
+    try:
+        _wait_instances(srv, 1)
+        st, body = _req(srv, "GET", "/whoami")
+        assert st == 200
+        inst = body["instances"][0]
+        assert inst["extension_stale"] is True
+        assert inst["extension_version_expected"] == PINNED_VERSION
+        assert body["bridge"]["extension_version_current"] == PINNED_VERSION
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
+def test_whoami_stale_verdict_is_null_for_an_unreporting_extension():
+    """A build that predates version reporting is UNDECIDABLE, never "fine"."""
+    srv, _ = _serve()
+    ext = FakeExtension(srv, instance_id="a", label="alpha")  # no ext_version
+    ext.start()
+    try:
+        _wait_instances(srv, 1)
+        st, body = _req(srv, "GET", "/whoami")
+        assert st == 200
+        assert body["instances"][0]["extension_stale"] is None
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
+# --- extension_id: WHICH DIRECTORY Brave loaded ---------------------------- #
+# The version fields cannot answer this — a repo-path 0.3.1 and a deployed-path
+# 0.3.1 are identical on every version field. chrome.runtime.id is path-derived,
+# so it is the only signal that can confirm the migration off the git-mutable
+# path took. (The path→id derivation itself is INFERRED from documented Chromium
+# behaviour, not measured here — which is exactly why the server only REPORTS
+# the id and never computes an expected one.)
+def test_health_and_whoami_surface_the_reported_extension_id():
+    srv, _ = _serve()
+    ext = FakeExtension(srv, instance_id="a", label="alpha",
+                        ext_version="0.3.1", ext_id="abcdefghijklmnop")
+    ext.start()
+    try:
+        body = _wait_instances(srv, 1)
+        assert body is not None
+        assert body["instances"][0]["extension_id"] == "abcdefghijklmnop"
+        st, who = _req(srv, "GET", "/whoami")
+        assert st == 200
+        assert who["instances"][0]["extension_id"] == "abcdefghijklmnop"
+        # The deploy dir Brave SHOULD be pointed at, for the operator to read
+        # next to the id. NOT an expected id — the server never guesses one.
+        assert who["bridge"]["extension_dir_expected"].endswith(
+            "browser-bridge-ext")
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
+def test_extension_id_is_null_for_a_build_that_does_not_report_it():
+    """Backwards-safe: the currently-loaded 0.2.0 build sends no id header."""
+    srv, _ = _serve()
+    ext = FakeExtension(srv, instance_id="a", label="alpha", ext_version="0.2.0")
+    ext.start()
+    try:
+        body = _wait_instances(srv, 1)
+        assert body is not None
+        assert body["instances"][0]["extension_id"] is None
+        st, who = _req(srv, "GET", "/whoami")
+        assert who["instances"][0]["extension_id"] is None
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
+def test_identity_headers_are_bounded_server_side():
+    """A hostile/buggy extension must not be able to push an unbounded string
+    into every /health and /whoami response. protocol.js's cap is client-side
+    only, so the SERVER truncates the version + id it accepts."""
+    srv, _ = _serve()
+    huge = "x" * 5000
+    ext = FakeExtension(srv, instance_id="a", label="alpha",
+                        ext_version=huge, ext_id=huge)
+    ext.start()
+    try:
+        body = _wait_instances(srv, 1)
+        assert body is not None
+        inst = body["instances"][0]
+        assert len(inst["extension_version"]) == S.MAX_IDENTITY_CHARS
+        assert len(inst["extension_id"]) == S.MAX_IDENTITY_CHARS
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
+def test_every_poll_supplied_string_is_bounded_server_side():
+    """The same rationale applies to EVERY /poll string, not just the two new
+    ones: label and the active-tab url/title are echoed into /health, /instances
+    and /whoami too, and protocol.js's cap binds only an honest extension."""
+    srv, _ = _serve()
+    huge = "y" * 6000
+    ext = FakeExtension(srv, instance_id=huge, label=huge,
+                        active_url="https://e.test/" + huge,
+                        active_title=huge)
+    ext.start()
+    try:
+        body = _wait_instances(srv, 1)
+        assert body is not None
+        inst = body["instances"][0]
+        assert len(inst["label"]) == S.MAX_IDENTITY_CHARS
+        assert len(inst["instanceId"]) == S.MAX_IDENTITY_CHARS
+        assert len(inst["activeTab"]["url"]) == S.MAX_ACTIVE_TAB_CHARS
+        assert len(inst["activeTab"]["title"]) == S.MAX_ACTIVE_TAB_CHARS
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
+def test_a_later_poll_without_the_id_header_does_not_wipe_a_known_id():
+    """Same rule the version field already follows: only overwrite a KNOWN
+    value, so a legacy/partial poll cannot erase what an earlier poll reported."""
+    reg = S.Registry()
+    reg.poll("a", "alpha", 0.0, extension_version="0.3.1",
+             extension_id="abcdefghijklmnop")
+    reg.poll("a", "alpha", 0.0)          # no headers at all
+    assert reg.snapshot()[0]["extension_id"] == "abcdefghijklmnop"
+    assert reg.snapshot()[0]["extension_version"] == "0.3.1"
+
+
+# --- `ping`: the extension build-freshness op ------------------------------ #
+def test_ping_is_an_allowed_op_and_is_not_tab_scoped():
+    """`ping` must reach the extension (it is the freshness tell) but must NOT
+    contend for a tab — it touches no page, so it can be probed with no owned
+    tab and cannot be serialized behind another session's in-flight op."""
+    assert "ping" in S.ALLOWED_OPS
+    assert "ping" not in S.TAB_SCOPED_OPS
+    assert "ping" not in S.SERVER_OPS      # it is DISPATCHED, not answered locally
+    assert S.validate_command({"op": "ping"}) == ("ping", None)
+
+
+def test_ping_op_set_mirrors_the_extension_protocol_js():
+    """server.py ALLOWED_OPS and extension/protocol.js ALLOWED_OPS are one
+    contract — a drift here is how an op silently becomes undispatchable."""
+    js = (EXT_DIR / "protocol.js").read_text(encoding="utf-8")
+    block = re.search(r"export const ALLOWED_OPS = \[(.*?)\];", js, re.S)
+    assert block is not None
+    js_ops = set(re.findall(r'"([a-zA-Z]+)"', block.group(1)))
+    assert js_ops == set(S.ALLOWED_OPS)
+
+
+def test_ping_round_trips_to_the_extension_with_no_owned_tab():
+    """End-to-end over the real HTTP path: a session that owns no tab can still
+    probe which build is loaded (the FakeExtension echoes the op)."""
+    srv, _ = _serve()
+    ext = FakeExtension(srv, instance_id="a", label="alpha", ext_version="0.3.0")
+    ext.start()
+    try:
+        _wait_instances(srv, 1)
+        st, body = _req(srv, "POST", "/cmd", {"op": "ping"},
+                        headers={"X-Session-Id": "sess-ping"})
+        assert st == 200, body
+        assert body["ok"] is True
+        assert body["result"]["ok"] is True
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
 
 
 @pytest.mark.skipif(shutil.which("curl") is None, reason="curl not on PATH")
