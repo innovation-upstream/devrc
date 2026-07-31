@@ -96,8 +96,12 @@ const SNAPSHOT = {
   captureWindowS: 15,
   toastMs: 8000,
   dirs: [
-    { name: "Jane Doe", key: "janedoe", tokens: ["jane", "doe"] },
-    { name: "john-smith", key: "johnsmith", tokens: ["john", "smith"] },
+    // `kind` gates auto-filing in the cached fallback the same way it does in
+    // the sidecar; unclassified never auto-files.
+    { name: "Jane Doe", key: "janedoe", tokens: ["jane", "doe"],
+      kind: "performer" },
+    { name: "john-smith", key: "johnsmith", tokens: ["john", "smith"],
+      kind: "performer" },
   ],
   aliases: [],
   siteRules: { "example-site.test": { tags: [".tag a"] } },
@@ -382,7 +386,7 @@ test("applyChoice creates a new directory first when asked", async () => {
       return { ok: true, status: 200,
         json: async () => ({ ...SNAPSHOT, etag: "new",
           dirs: [...SNAPSHOT.dirs, { name: "Aster Vale", key: "astervale",
-            tokens: ["aster", "vale"] }] }) };
+            tokens: ["aster", "vale"], kind: "performer" }] }) };
     }
     return { ok: true, status: 200, json: async () => ({ ok: true }) };
   };
@@ -1095,4 +1099,107 @@ test("a non-string detail does not become [object Object]", async () => {
     assert.match(String(err.message), /sidecar 400/);
     return true;
   });
+});
+
+// --- identity signals, kinds and the referrer carry, through the real glue --- //
+test("recordCapture remembers the opener tab", () => {
+  // The ONLY provable link between a forum thread and the file host it sent
+  // the user to. The content script cannot know it; the sender does.
+  reset();
+  SW.recordCapture({ pageUrl: "https://filehost.test/f/AbCdEf" },
+    { tab: { id: 12, openerTabId: 4 } });
+  const c = SW.state.captures.at(-1);
+  assert.equal(c.tabId, 12);
+  assert.equal(c.openerTabId, 4);
+});
+
+test("a Discord download posts its URL, so the sidecar can read the channel", async () => {
+  // Six of nine real downloads had NO page context at all -- correlation finds
+  // nothing, and the URL is the entire signal.
+  reset();
+  const url = "https://cdn.discordapp.com/attachments/119283746551234567"
+    + "/998877665544332211/clip.mp4";
+  let posted = null;
+  fetchHandler = async (u, opts) => {
+    if (u.endsWith("/match")) posted = JSON.parse(opts.body);
+    return { ok: true, status: 200,
+      json: async () => ({ dir: "other", auto: false, confidence: 0 }) };
+  };
+  SW.onDeterminingFilename({ id: 40, url, filename: "clip.mp4" }, spy());
+  await settle(5);
+  assert.equal(posted.url, url);
+});
+
+test("a proven referrer travels to the sidecar; an unprovable one does not", async () => {
+  reset();
+  const thread = "https://someforum.test/threads/aster-vale.481920/";
+  const hostPage = "https://filehost.test/f/AbCdEf";
+  SW.recordCapture({ pageUrl: thread, pageTitle: "Aster Vale | Some Forum",
+    href: hostPage, tags: [] }, { tab: { id: 4 } });
+  SW.recordCapture({ pageUrl: hostPage, pageTitle: "Download", tags: [] },
+    { tab: { id: 5, openerTabId: 4 } });
+
+  let posted = null;
+  const capturePost = () => {
+    fetchHandler = async (u, opts) => {
+      if (u.endsWith("/match")) posted = JSON.parse(opts.body);
+      return { ok: true, status: 200,
+        json: async () => ({ dir: "other", auto: false, confidence: 0 }) };
+    };
+  };
+  capturePost();
+  SW.onDeterminingFilename(
+    { id: 41, url: "https://filehost.test/d/AbCdEf", referrer: hostPage,
+      filename: "f.mp4" }, spy());
+  await settle(5);
+  assert.equal(posted.page.referrerUrl, thread);
+
+  // Now the same download with the chain broken: no href, no opener.
+  reset();                       // ...which also restores the default handler
+  SW.recordCapture({ pageUrl: thread, pageTitle: "Aster Vale", tags: [] },
+    { tab: { id: 4 } });
+  SW.recordCapture({ pageUrl: hostPage, tags: [] }, { tab: { id: 5 } });
+  posted = null;
+  capturePost();
+  SW.onDeterminingFilename(
+    { id: 42, url: "https://filehost.test/d/AbCdEf", referrer: hostPage,
+      filename: "f.mp4" }, spy());
+  await settle(5);
+  assert.equal(posted.page.referrerUrl, "",
+    "an unprovable thread is never carried");
+});
+
+test("creating a directory sends the kind the picker asked for", async () => {
+  reset();
+  const posted = [];
+  fetchHandler = async (url, opts) => {
+    posted.push({ url, body: opts.body ? JSON.parse(opts.body) : null });
+    if (url.endsWith("/dirs")) {
+      return { ok: true, status: 200, json: async () => SNAPSHOT };
+    }
+    return { ok: true, status: 200, json: async () => ({ ok: true }) };
+  };
+  await SW.applyChoice(50, "Aster Vale",
+    { createdNew: true, kind: "performer" });
+  const mkdir = posted.find((p) => p.url.endsWith("/mkdir"));
+  assert.deepEqual(mkdir.body, { name: "Aster Vale", kind: "performer" });
+});
+
+test("a correction is marked as an explicit confirmation", async () => {
+  // The sidecar refuses to learn a tag -> directory alias without it, and the
+  // flag is stated rather than inferred so a future automatic caller fails
+  // closed.
+  reset();
+  SW.state.pending.set(60, { dir: "other", filename: "f.mp4",
+    payload: { page: {} }, ts: Date.now() });
+  searchResult = [{ id: 60, state: "complete",
+    filename: `${LIB_ROOT}/Jane Doe/f.mp4` }];
+  const posted = [];
+  fetchHandler = async (url, opts) => {
+    posted.push({ url, body: opts.body ? JSON.parse(opts.body) : null });
+    return { ok: true, status: 200, json: async () => ({ ok: true }) };
+  };
+  await SW.applyChoice(60, "Jane Doe", {});
+  const learn = posted.find((p) => p.url.endsWith("/learn"));
+  assert.equal(learn.body.confirmed, true);
 });

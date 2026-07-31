@@ -157,11 +157,22 @@ def host_of(url) -> str:
 
 
 def url_path_segments(url) -> tuple:
-    """Non-empty path segments of `url`."""
+    """Non-empty path segments of an ABSOLUTE URL. `()` for anything else.
+
+    The hostname requirement is not cosmetic: `urlsplit` happily parses
+    `"not a url"` as a relative path and hands back `["not a url"]`, which the
+    slug extractor then reads as a two-word thread subject. JS's `new URL`
+    throws on the same input, so without this the two implementations disagree
+    -- and the extension's copy runs exactly when the sidecar is unreachable,
+    where the disagreement is invisible. Pinned by fixtures/url_cases.json.
+    """
     if not isinstance(url, str) or not url:
         return ()
     try:
-        path = urlsplit(url).path
+        split = urlsplit(url)
+        if not split.hostname:
+            return ()
+        path = split.path
     except ValueError:
         return ()
     return tuple(seg for seg in path.split("/") if seg)

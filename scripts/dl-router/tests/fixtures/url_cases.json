@@ -1,0 +1,53 @@
+{
+  "_why": [
+    "ONE table, TWO implementations. matcher.py and extension/route_core.js each",
+    "derive identity signals from a URL, and the extension's cached fallback runs",
+    "exactly when the sidecar is unreachable -- so a divergence between them is",
+    "invisible until it misfiles something. The hostile-name table",
+    "(name_cases.json) exists for the same reason: two hand-copied lists agreed",
+    "with each other and both passed while the implementations disagreed on 991",
+    "inputs neither list contained.",
+    "",
+    "Every id, host and name here is SYNTHETIC."
+  ],
+  "discord": [
+    {"url": "https://cdn.discordapp.com/attachments/119283746551234567/998877665544332211/clip.mp4",
+     "channel": "119283746551234567"},
+    {"url": "https://media.discordapp.net/attachments/119283746551234567/998877665544332211/still.png",
+     "channel": "119283746551234567"},
+    {"url": "https://cdn.discordapp.com/attachments/119283746551234567/998877665544332211/clip.mp4?ex=abc&is=def",
+     "channel": "119283746551234567"},
+    {"url": "https://cdn.discordapp.com/ephemeral-attachments/220000000000000001/1/x.mp4",
+     "channel": "220000000000000001"},
+    {"url": "https://cdn.discordapp.com/avatars/119283746551234567/abc.png",
+     "channel": ""},
+    {"url": "https://cdn.discordapp.com/attachments/not-a-snowflake/1/clip.mp4",
+     "channel": ""},
+    {"url": "https://cdn.discordapp.com/attachments/119283746551234567",
+     "channel": ""},
+    {"url": "https://example-site.test/attachments/119283746551234567/1/clip.mp4",
+     "channel": ""},
+    {"url": "https://evil.test/cdn.discordapp.com/attachments/119283746551234567/1/x.mp4",
+     "channel": ""},
+    {"url": "not a url", "channel": ""},
+    {"url": "", "channel": ""}
+  ],
+  "slug": [
+    {"url": "https://forum.test/threads/aster-vale-collection.481920/",
+     "slug": "aster vale collection"},
+    {"url": "https://forum.test/threads/aster-vale-collection.481920/page-3",
+     "slug": "aster vale collection"},
+    {"url": "https://forum.test/showthread.php/481920-aster-vale-collection",
+     "slug": "aster vale collection"},
+    {"url": "https://forum.test/forums/general-discussion/threads/aster-vale.99/",
+     "slug": "aster vale"},
+    {"url": "https://board.test/t/aster-vale/1234", "slug": "aster vale"},
+    {"url": "https://forum.test/threads/481920/", "slug": ""},
+    {"url": "https://forum.test/threads/", "slug": ""},
+    {"url": "https://forum.test/", "slug": ""},
+    {"url": "https://filehost.test/d/AbCdEf", "slug": ""},
+    {"url": "https://filehost.test/f/9f2a1c92b", "slug": ""},
+    {"url": "not a url", "slug": ""},
+    {"url": "", "slug": ""}
+  ]
+}

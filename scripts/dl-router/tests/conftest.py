@@ -45,6 +45,18 @@ def load_name_cases() -> dict:
     raw = json.loads((FIXTURES / "name_cases.json").read_text(encoding="utf-8"))
     return {k: _expand(v) for k, v in raw.items() if not k.startswith("_")}
 
+
+def load_url_cases() -> dict:
+    """THE shared identity-signal table (tests/fixtures/url_cases.json).
+
+    `tests/fixtures.mjs` loads the SAME file, so matcher.py and
+    extension/route_core.js are asserted against one table. The extension's
+    cached fallback runs exactly when the sidecar is unreachable, so a
+    divergence between the two would be invisible until it misfiled something.
+    """
+    raw = json.loads((FIXTURES / "url_cases.json").read_text(encoding="utf-8"))
+    return {k: v for k, v in raw.items() if not k.startswith("_")}
+
 # The three naming conventions that coexist in a real library. The matcher must
 # fold all of them to one key, which is why existing dirs are never renamed.
 SAMPLE_DIRS = [

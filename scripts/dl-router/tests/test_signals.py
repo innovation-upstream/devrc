@@ -23,6 +23,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from conftest import load_url_cases  # noqa: E402
 from matcher import (  # noqa: E402
     DISCORD_SITE, KEY_PREFIX_DISCORD, KIND_PERFORMER, SCORE_ALIAS_SITE,
     MatchContext, Matcher, alias_key, discord_alias_key, discord_channel_id,
@@ -275,3 +276,23 @@ def test_a_structured_key_is_never_suspicious():
 def test_a_real_subject_name_passes_the_screen():
     assert suspicious_alias_key("Aster Nightingale", dir_names=["Jane Doe"],
                                 site="forum.test", spread=1) is None
+
+
+# --- the shared table ------------------------------------------------------- #
+# ONE table, TWO implementations (tests/fixtures/url_cases.json). The
+# extension's cached fallback runs exactly when the sidecar is unreachable, so
+# a divergence between matcher.py and route_core.js is invisible until it
+# misfiles something. `identity.test.mjs` asserts the SAME rows.
+URL_CASES = load_url_cases()
+
+
+@pytest.mark.parametrize("case", URL_CASES["discord"],
+                         ids=lambda c: c["url"][:60] or "empty")
+def test_discord_ids_match_the_shared_table(case):
+    assert discord_channel_id(case["url"]) == case["channel"]
+
+
+@pytest.mark.parametrize("case", URL_CASES["slug"],
+                         ids=lambda c: c["url"][:60] or "empty")
+def test_thread_slugs_match_the_shared_table(case):
+    assert thread_slug(case["url"]) == case["slug"]

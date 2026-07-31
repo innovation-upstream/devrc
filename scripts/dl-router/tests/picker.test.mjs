@@ -132,18 +132,48 @@ test("Enter chooses the highlighted existing directory", () => {
     { action: "choose", dir: "john-smith", createdNew: false });
 });
 
-test("Enter on the top entry creates a new directory", () => {
+test("Enter on the top entry creates a new directory, after asking its kind", () => {
+  // Creating a directory without saying which KIND it is leaves it
+  // unclassified, and an unclassified directory never auto-files -- so it
+  // would silently interrupt every future download into it. Hence the second
+  // keypress.
   let state = initialState({ dirs: DIRS, suggestNew: "Aster Vale" });
   state = drive(state, [key("Enter")]);
-  assert.deepEqual(state.done,
-    { action: "choose", dir: "Aster Vale", createdNew: true });
+  assert.equal(state.done, null, "nothing is created before the kind is known");
+  assert.equal(state.pendingNew, "Aster Vale");
+  assert.deepEqual(state.entries.map((e) => e.name), ["performer", "category"]);
+  state = drive(state, [key("Enter")]);
+  assert.deepEqual(state.done, { action: "choose", dir: "Aster Vale",
+    createdNew: true, kind: "performer" });
+});
+
+test("the kind prompt can pick category", () => {
+  let state = initialState({ dirs: DIRS, suggestNew: "Aster Vale" });
+  state = drive(state, [key("Enter"), key("ArrowDown"), key("Enter")]);
+  assert.equal(state.done.kind, "category");
+});
+
+test("Escape in the kind prompt goes back to the list, not out of the picker", () => {
+  let state = initialState({ dirs: DIRS, suggestNew: "Aster Vale" });
+  state = drive(state, [key("Enter"), key("Escape")]);
+  assert.equal(state.done, null, "escaping a sub-question undoes the question");
+  assert.equal(state.pendingNew, null);
+  assert.equal(state.entries[0].name, "Aster Vale");
+});
+
+test("typing while the kind prompt is up cannot rebuild the list under it", () => {
+  let state = initialState({ dirs: DIRS, suggestNew: "Aster Vale" });
+  state = drive(state, [key("Enter"), input("jane")]);
+  assert.equal(state.pendingNew, "Aster Vale");
+  assert.deepEqual(state.entries.map((e) => e.name), ["performer", "category"]);
 });
 
 test("typing then Enter creates the typed directory", () => {
   let state = initialState({ dirs: DIRS });
-  state = drive(state, [input("aster nightingale"), key("Enter")]);
-  assert.deepEqual(state.done,
-    { action: "choose", dir: "Aster Nightingale", createdNew: true });
+  state = drive(state, [input("aster nightingale"), key("Enter"),
+    key("Enter")]);
+  assert.deepEqual(state.done, { action: "choose", dir: "Aster Nightingale",
+    createdNew: true, kind: "performer" });
 });
 
 test("typing resets the highlight to the top", () => {
@@ -221,8 +251,9 @@ test("a deferred Enter still creates when nothing really matches", () => {
   let state = initialState({ dirs: [], loading: true });
   state = drive(state, [input("aster nightingale"), key("Enter")]);
   state = reduce(state, { type: "dirs", dirs: DIRS });
-  assert.deepEqual(state.done,
-    { action: "choose", dir: "Aster Nightingale", createdNew: true });
+  state = drive(state, [key("Enter")]);          // the kind prompt
+  assert.deepEqual(state.done, { action: "choose", dir: "Aster Nightingale",
+    createdNew: true, kind: "performer" });
 });
 
 test("Escape works immediately even while loading", () => {
@@ -368,9 +399,10 @@ test("mount: an empty snapshot still offers the new-directory entry", () => {
     search: "?id=7&suggestNew=Aster+Vale" });
   assert.match(doc.getElementById("list").textContent, /new dir "Aster Vale"/);
   doc.fire("keydown", { key: "Enter" });
+  doc.fire("keydown", { key: "Enter" });        // performer
   const choose = sent.find((m) => m.type === "dlr:choose");
   assert.deepEqual(choose, { type: "dlr:choose", downloadId: 7,
-    dir: "Aster Vale", createdNew: true });
+    dir: "Aster Vale", createdNew: true, kind: "performer" });
 });
 
 
@@ -411,9 +443,9 @@ test("a GENUINELY empty library does clear loading", () => {
   state = reduce(state, { type: "dirs", dirs: [] });
   assert.equal(state.loading, false);
   assert.equal(state.failed, false);
-  state = drive(state, [key("Enter")]);
-  assert.deepEqual(state.done,
-    { action: "choose", dir: "Aster Vale", createdNew: true });
+  state = drive(state, [key("Enter"), key("Enter")]);
+  assert.deepEqual(state.done, { action: "choose", dir: "Aster Vale",
+    createdNew: true, kind: "performer" });
 });
 
 test("mount retries a failed snapshot rather than giving up on the first no", async () => {
@@ -553,7 +585,8 @@ test("Escape still works after a refusal", async () => {
   const { doc, sent, closed } = mountPicker({
     chooseResult: { ok: false, error: "refused" },
   });
-  doc.fire("keydown", { key: "Enter" });
+  doc.fire("keydown", { key: "Enter" });        // the new-directory entry
+  doc.fire("keydown", { key: "Enter" });        // its kind
   await tick();
   doc.fire("keydown", { key: "Escape" });
   await tick();
@@ -564,6 +597,7 @@ test("Escape still works after a refusal", async () => {
 test("an accepted choice still closes the window", async () => {
   const { doc, closed } = mountPicker({ chooseResult: { ok: true, dir: "x" } });
   doc.fire("keydown", { key: "Enter" });
+  doc.fire("keydown", { key: "Enter" });        // its kind
   await tick();
   assert.equal(closed(), 1);
 });
