@@ -880,3 +880,121 @@ test("a deferred pick EQUAL to the auto dir still learns", async () => {
   assert.ok(learn, "the confirmation must still be learned");
   assert.equal(learn.body.chosenDir, "Jane Doe");
 });
+
+
+// --- the sidecar's own words must reach the user ---------------------------- //
+//
+// api() threw `new Error(`sidecar ${status}`)` and discarded the JSON body
+// unread, while the sidecar puts its explanation in {"detail": ...} with a 400.
+// Two whole findings were about making that refusal honest and making it
+// visible; the honest text was reachable only via `dl-route log` or curl.
+const REFUSAL = "no routing decision is on record for this download. Either "
+  + "the sidecar was unreachable when the download started";
+
+test("a 400 detail is carried into the thrown error", async () => {
+  reset();
+  fetchHandler = async () => ({
+    ok: false, status: 400,
+    json: async () => ({ ok: false, error: "unsafe", detail: REFUSAL }),
+  });
+  await assert.rejects(() => SW.api("POST", "/relocate", {}), (err) => {
+    assert.equal(err.status, 400);
+    assert.equal(err.detail, REFUSAL);
+    assert.match(String(err.message), /no routing decision is on record/);
+    return true;
+  });
+});
+
+test("errorMessage prefers the sidecar's words over the status line", () => {
+  assert.equal(SW.errorMessage({ detail: REFUSAL, message: "sidecar 400" }),
+    REFUSAL);
+  assert.equal(SW.errorMessage(new Error("boom")), "boom");
+  assert.equal(SW.errorMessage("plain"), "plain");
+});
+
+test("a body that is not JSON still yields a usable error", async () => {
+  reset();
+  fetchHandler = async () => ({
+    ok: false, status: 502,
+    json: async () => { throw new Error("not json"); },
+  });
+  await assert.rejects(() => SW.api("GET", "/dirs"), /sidecar 502/);
+});
+
+test("the picker is told WHY, not just that it failed", async () => {
+  reset();
+  SW.state.pending.set(95, { dir: "other", payload: { page: {} } });
+  searchResult = [{ id: 95, state: "complete",
+    filename: `${LIB_ROOT}/other/f.mp4` }];
+  fetchHandler = async (url) => {
+    if (url.endsWith("/relocate")) {
+      return { ok: false, status: 400,
+        json: async () => ({ detail: REFUSAL }) };
+    }
+    return { ok: true, status: 200, json: async () => ({ ok: true }) };
+  };
+  const responses = [];
+  SW.onMessage({ type: "dlr:choose", downloadId: 95, dir: "Jane Doe" }, {},
+    (r) => responses.push(r));
+  await settle(10);
+  assert.equal(responses[0].ok, false);
+  assert.match(responses[0].error, /no routing decision is on record/,
+    "the picker rendered `Error: sidecar 400` before this");
+  assert.ok(!responses[0].error.startsWith("Error:"));
+});
+
+test("the desktop notification carries the reason too", async () => {
+  reset();
+  SW.state.pending.set(96, { dir: "other", payload: { page: {} },
+    wanted: "Jane Doe" });
+  searchResult = [{ id: 96, state: "complete",
+    filename: `${LIB_ROOT}/other/f.mp4` }];
+  fetchHandler = async (url) => {
+    if (url.endsWith("/relocate")) {
+      return { ok: false, status: 400,
+        json: async () => ({ detail: REFUSAL }) };
+    }
+    return { ok: true, status: 200, json: async () => ({ ok: true }) };
+  };
+  await SW.onDownloadChanged({ id: 96, state: { current: "complete" } });
+  assert.equal(calls.notifications.length, 1);
+  assert.match(calls.notifications[0].message, /no routing decision is on record/);
+});
+
+// --- the deferred-equal learn must VERIFY, not assert ----------------------- //
+test("a deferred-equal pick does not learn when the file left the library",
+  async () => {
+    // "there is nothing to move" was asserted, not checked: with a Save-As to
+    // a non-library folder this posted /learn with a subject directory the
+    // file never went near.
+    reset();
+    SW.state.pending.set(97, { dir: "Jane Doe", payload: { page: {} },
+      wanted: "Jane Doe" });
+    searchResult = [{ id: 97, state: "complete",
+      filename: "/home/u/Downloads/f.mp4" }];
+    const posted = [];
+    fetchHandler = async (url) => {
+      posted.push(url);
+      return { ok: true, status: 200, json: async () => ({ ok: true }) };
+    };
+    await SW.onDownloadChanged({ id: 97, state: { current: "complete" } });
+    assert.equal(posted.filter((u) => u.endsWith("/learn")).length, 0);
+    assert.equal(posted.filter((u) => u.endsWith("/relocate")).length, 0);
+  });
+
+test("a deferred-equal pick does not learn when the file is in another dir",
+  async () => {
+    reset();
+    SW.state.pending.set(98, { dir: "Jane Doe", payload: { page: {} },
+      wanted: "Jane Doe" });
+    searchResult = [{ id: 98, state: "complete",
+      filename: `${LIB_ROOT}/john-smith/f.mp4` }];
+    const posted = [];
+    fetchHandler = async (url) => {
+      posted.push(url);
+      return { ok: true, status: 200, json: async () => ({ ok: true }) };
+    };
+    await SW.onDownloadChanged({ id: 98, state: { current: "complete" } });
+    assert.equal(posted.filter((u) => u.endsWith("/learn")).length, 0,
+      "the file is not where the confirmation claims");
+  });

@@ -256,9 +256,13 @@ test("a malformed dirs event leaves an empty but usable list", () => {
 // --- mount() ----------------------------------------------------------------- //
 const PAGE_IDS = ["q", "list", "meta", "dup"];
 
+// A sentinel, because `chooseResult: undefined` would hit the default
+// parameter and so could never express "the worker answered with nothing".
+const DEFAULT_CHOOSE = Symbol("default-choose");
+
 function mountPicker({ search = "?id=7&reason=r&suggestNew=Aster+Vale",
   snapshot = { dirs: DIRS.map((name) => ({ name })) }, deferReply = false,
-  chooseResult = { ok: true } } = {}) {
+  chooseResult = DEFAULT_CHOOSE } = {}) {
   const doc = makeDoc(PAGE_IDS, { search });
   const sent = [];
   let replySnapshot = null;
@@ -270,8 +274,9 @@ function mountPicker({ search = "?id=7&reason=r&suggestNew=Aster+Vale",
           replySnapshot = () => cb({ ok: true, snapshot });
           if (!deferReply) replySnapshot();
         }
+        if (msg.type !== "dlr:choose") return Promise.resolve({ ok: true });
         return Promise.resolve(
-          msg.type === "dlr:choose" ? chooseResult : { ok: true });
+          chooseResult === DEFAULT_CHOOSE ? { ok: true } : chooseResult);
       },
     },
   };
@@ -591,4 +596,145 @@ test("Enter retries after the directory list could not be loaded", async () => {
   assert.match(doc.getElementById("list").textContent, /john-smith/);
   assert.equal(sent.filter((m) => m.type === "dlr:choose").length, 0,
     "the retry must not double as a selection");
+});
+
+
+// --- the loop fix, pinned DETERMINISTICALLY --------------------------------- //
+//
+// `choose-failed` appeared zero times in this file: the ordering was only
+// exercised through mount(), so a regression surfaced as a whole-file OOM
+// rather than an assertion. A green suite hid this once already.
+test("choose-failed clears `done` even though done is already set", () => {
+  const done = { ...initialState({ dirs: DIRS }),
+    done: { action: "choose", dir: "Jane Doe", createdNew: false } };
+  const next = reduce(done, { type: "choose-failed", message: "refused" });
+  assert.equal(next.done, null,
+    "reduce's `state.done` early-return must not swallow this event");
+  assert.match(next.error, /refused/);
+});
+
+test("choose-failed is the ONLY event that survives the done guard", () => {
+  // Anything else must still be inert once the flow has finished.
+  const done = { ...initialState({ dirs: DIRS }),
+    done: { action: "choose", dir: "Jane Doe", createdNew: false } };
+  for (const event of [input("smith"), key("Enter"), key("Escape"),
+    key("ArrowDown"), { type: "dirs", dirs: DIRS }, { type: "dirs-failed" }]) {
+    assert.equal(reduce(done, event), done, JSON.stringify(event));
+  }
+});
+
+test("choose-failed supplies a default message", () => {
+  const done = { ...initialState({ dirs: DIRS }),
+    done: { action: "choose", dir: "x", createdNew: false } };
+  assert.ok(reduce(done, { type: "choose-failed" }).error.length > 0);
+});
+
+// --- one choose at a time ---------------------------------------------------- //
+test("keypresses during an in-flight choose do not re-send it", async () => {
+  // `reduce` returns unchanged state once `done` is set, but apply() ran
+  // `if (state.done) void finish()` regardless -- so every later keypress
+  // fired another dlr:choose. Measured before the fix: 3 keypresses -> 4
+  // messages.
+  const doc = makeDoc(PAGE_IDS, { search: "?id=7" });
+  const sent = [];
+  let release;
+  const gate = new Promise((r) => { release = r; });
+  const chromeApi = {
+    runtime: {
+      sendMessage: (msg, cb) => {
+        sent.push(msg);
+        if (typeof cb === "function") {
+          cb({ ok: true, snapshot: { dirs: DIRS.map((name) => ({ name })) } });
+          return Promise.resolve({ ok: true });
+        }
+        return gate.then(() => ({ ok: true }));
+      },
+    },
+  };
+  let closed = 0;
+  mount(doc, chromeApi, { closeWindow: () => { closed += 1; } });
+
+  doc.fire("keydown", { key: "Enter" });          // starts the choose
+  doc.fire("keydown", { key: "ArrowDown" });
+  doc.fire("keydown", { key: "Enter" });
+  doc.fire("keydown", { key: "Escape" });
+  await tick();
+  assert.equal(sent.filter((m) => m.type === "dlr:choose").length, 1,
+    "exactly one choose may be in flight");
+  release();
+  await tick();
+  assert.equal(closed, 1);
+});
+
+// --- an unknown outcome is not a success ------------------------------------- //
+test("a missing response is treated as a refusal, not a silent close", async () => {
+  // Chrome's sendMessage behaviour when the worker is torn down mid-choose is
+  // not something this code can verify, so an absent answer must not close the
+  // window on an unknown outcome. Built inline rather than through
+  // mountPicker: `chooseResult: undefined` would hit the default parameter and
+  // so could never express "resolved with nothing".
+  for (const answer of [undefined, null]) {
+    const doc = makeDoc(PAGE_IDS, { search: "?id=7" });
+    const chromeApi = {
+      runtime: {
+        sendMessage: (msg, cb) => {
+          if (typeof cb === "function") {
+            cb({ ok: true, snapshot: { dirs: DIRS.map((name) => ({ name })) } });
+            return Promise.resolve({ ok: true });
+          }
+          return Promise.resolve(answer);
+        },
+      },
+    };
+    let closed = 0;
+    mount(doc, chromeApi, { closeWindow: () => { closed += 1; } });
+    doc.fire("keydown", { key: "Enter" });
+    await tick();
+    assert.equal(closed, 0, `closed on ${String(answer)}`);
+    assert.match(doc.getElementById("meta").textContent, /no answer/);
+  }
+});
+
+// --- a stale refusal must not sit through the next attempt ------------------- //
+test("typing clears a previous refusal", () => {
+  let state = initialState({ dirs: DIRS });
+  state = reduce({ ...state, done: { action: "choose", dir: "x" } },
+    { type: "choose-failed", message: "refused" });
+  assert.ok(state.error);
+  state = reduce(state, input("jane"));
+  assert.equal(state.error, "", "a new attempt is not about the old failure");
+});
+
+test("a new Enter clears the previous refusal", () => {
+  let state = initialState({ dirs: DIRS });
+  state = reduce({ ...state, done: { action: "choose", dir: "x" } },
+    { type: "choose-failed", message: "refused" });
+  state = reduce(state, key("Enter"));
+  assert.equal(state.error, "");
+  assert.ok(state.done);
+});
+
+test("the in-flight choose shows progress rather than the stale error", async () => {
+  const doc = makeDoc(PAGE_IDS, { search: "?id=7" });
+  let release;
+  const gate = new Promise((r) => { release = r; });
+  const chromeApi = {
+    runtime: {
+      sendMessage: (msg, cb) => {
+        if (typeof cb === "function") {
+          cb({ ok: true, snapshot: { dirs: DIRS.map((name) => ({ name })) } });
+          return Promise.resolve({ ok: true });
+        }
+        return gate.then(() => ({ ok: true }));
+      },
+    },
+  };
+  mount(doc, chromeApi, { closeWindow: () => {} });
+  doc.getElementById("q").value = "jane";
+  doc.getElementById("q").fire("input");
+  doc.fire("keydown", { key: "Enter" });
+  await tick();
+  assert.match(doc.getElementById("meta").textContent, /Filing into "Jane Doe"/);
+  release();
+  await tick();
 });

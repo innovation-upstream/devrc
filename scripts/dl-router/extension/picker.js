@@ -128,6 +128,10 @@ export function reduce(state, event) {
   if (state.done) return state;
   const next = { ...state };
   if (event.type === "input") {
+    // Typing is a new attempt: the previous refusal is no longer what the
+    // screen is about. It used to persist through the retype AND through the
+    // next in-flight choose, with no progress shown.
+    next.error = "";
     next.query = String(event.value ?? "");
     next.entries = filterEntries(state.dirs, next.query, state.suggestNew);
     next.index = 0;
@@ -187,6 +191,7 @@ export function reduce(state, event) {
       }
       const entry = state.entries[state.index];
       if (!entry) return state;
+      next.error = "";
       next.done = {
         action: "choose",
         dir: entry.name,
@@ -266,6 +271,7 @@ export function mount(doc, chromeApi, { closeWindow } = {}) {
     const done = state.done;
     if (!done) return;
     if (done.action === "choose") {
+      meta.textContent = `Filing into "${done.dir}"...`;
       let resp;
       try {
         resp = await chromeApi.runtime.sendMessage({
@@ -280,20 +286,38 @@ export function mount(doc, chromeApi, { closeWindow } = {}) {
       // A refusal must be VISIBLE. The window stays open so the user can pick
       // somewhere else or press Esc -- closing on a rejected move is how an
       // immediate refusal became invisible.
-      if (resp && resp.ok === false) {
+      //
+      // A MISSING answer counts as a refusal too. Chrome's sendMessage
+      // behaviour when the service worker is torn down mid-choose is not
+      // something this code can verify, and treating `undefined` as success
+      // would close the window on an unknown outcome -- exactly the silent
+      // close this branch exists to prevent.
+      if (!resp || resp.ok === false) {
         apply({ type: "choose-failed",
                 message: `Could not file into "${done.dir}": `
-                         + `${resp.error || "refused"}` });
+                         + `${(resp && resp.error) || "no answer from the "
+                         + "extension (it may have been restarted)"}` });
         return;
       }
     }
     close();
   };
 
+  // SINGLE-FLIGHT. `reduce` correctly returns state unchanged once `done` is
+  // set, but `apply` then ran `if (state.done) void finish()` regardless -- so
+  // every subsequent keypress during an in-flight choose fired ANOTHER
+  // `dlr:choose`. Measured: three keypresses -> four messages. Pre-existing,
+  // and the same structural family as the choose-failed loop: a guard that
+  // swallows the event without stopping the side effect. Making the
+  // post-refusal window interactive widens the exposure, so it is fixed here.
+  let finishing = false;
   const apply = (event) => {
     state = reduce(state, event);
     render();
-    if (state.done) void finish();
+    if (state.done && !finishing) {
+      finishing = true;
+      void finish().finally(() => { finishing = false; });
+    }
   };
 
   input.addEventListener("input", () => apply({ type: "input", value: input.value }));

@@ -81,6 +81,43 @@ function base() {
   return `http://127.0.0.1:${state.config.port || DEFAULT_PORT}`;
 }
 
+/**
+ * Turn a non-OK sidecar response into an Error that CARRIES ITS MESSAGE.
+ *
+ * This used to be `throw new Error(\`sidecar ${resp.status}\`)`, discarding the
+ * body unread -- while the sidecar puts its explanation in `{"detail": ...}`
+ * with a 400. So the careful "no routing decision is on record for this
+ * download; either the sidecar was unreachable when it started..." text was
+ * only ever reachable via `dl-route log` or curl, and the picker rendered
+ * `Could not file into "Jane Doe": Error: sidecar 400`. Two whole findings
+ * were about making that refusal honest and visible; neither was true at the
+ * point the user actually reads it.
+ */
+async function sidecarError(resp) {
+  let detail = "";
+  try {
+    const body = await resp.json();
+    detail = String(body?.detail || body?.error || "");
+  } catch { /* not JSON, or already consumed -- fall back to the status */ }
+  const err = new Error(
+    detail ? `sidecar ${resp.status}: ${detail}` : `sidecar ${resp.status}`);
+  err.status = resp.status;
+  err.detail = detail;
+  return err;
+}
+
+/**
+ * The human-readable half of an error, for a toast or the picker.
+ * Prefers the sidecar's own words over "Error: sidecar 400".
+ */
+export function errorMessage(err) {
+  if (err && typeof err === "object") {
+    if (err.detail) return String(err.detail);
+    if (err.message) return String(err.message);
+  }
+  return String(err);
+}
+
 export async function api(method, path, body, { timeoutMs, headers } = {}) {
   const controller = new AbortController();
   const timer = timeoutMs
@@ -97,7 +134,7 @@ export async function api(method, path, body, { timeoutMs, headers } = {}) {
       body: body === undefined ? undefined : JSON.stringify(body),
     });
     if (resp.status === 304) return { notModified: true };
-    if (!resp.ok) throw new Error(`sidecar ${resp.status}`);
+    if (!resp.ok) throw await sidecarError(resp);
     return await resp.json();
   } finally {
     if (timer) clearTimeout(timer);
@@ -444,7 +481,8 @@ export async function applyChoice(downloadId, chosenDir, { createdNew } = {}) {
  * file's name must match what that routing decision recorded, and the file must
  * be no older than it. Nothing the extension could assert here would add
  * evidence, so nothing is asserted: with no record the move is refused, and the
- * refusal says which causes are possible.
+ * sidecar's own explanation is carried back through `sidecarError` so the user
+ * reads THAT rather than a bare status code.
  */
 async function relocate(rel, toDir, downloadId) {
   return api("POST", "/relocate", {
@@ -469,38 +507,48 @@ export async function onDownloadChanged(delta) {
   await ready();
   const entry = state.pending.get(delta.id);
   if (!entry) return;
-  if (entry.wanted && entry.wanted !== entry.dir) {
+  if (entry.wanted) {
     const items = await chrome.downloads.search({ id: delta.id });
     const item = items && items[0];
+    // Where the file ACTUALLY landed. Both branches below need this: neither
+    // may assert something about the file without having checked it.
     const rel = relPathFor(item);
-    let moved = false;
-    if (rel) {
-      try {
-        await relocate(rel, entry.wanted, delta.id);
-        moved = true;
-      } catch (err) {
-        // This `.catch(() => {})` is how a completely dead correction path
-        // stayed invisible: the move was refused, the alias was written
-        // anyway, and the UI reported success. Surface it, and do not learn
-        // from a move that never happened.
+    if (entry.wanted !== entry.dir) {
+      let moved = false;
+      if (rel) {
+        try {
+          await relocate(rel, entry.wanted, delta.id);
+          moved = true;
+        } catch (err) {
+          // This `.catch(() => {})` is how a completely dead correction path
+          // stayed invisible: the move was refused, the alias was written
+          // anyway, and the UI reported success. Surface it, and do not learn
+          // from a move that never happened.
+          await reportFailure(
+            `Could not move the download to ${entry.wanted}`,
+            errorMessage(err));
+        }
+      } else {
         await reportFailure(
-          `Could not move the download to ${entry.wanted}`, String(err));
+          `Could not move the download to ${entry.wanted}`,
+          "the file did not land inside the library root");
       }
-    } else {
-      await reportFailure(
-        `Could not move the download to ${entry.wanted}`,
-        "the file did not land inside the library root");
-    }
-    if (moved) {
+      if (moved) {
+        await learn(entry, entry.wanted, entry.wantedCreatedNew);
+      }
+    } else if (rel && rel.split("/")[0] === entry.wanted) {
+      // The deferred pick equals where the ladder filed it, and the file is
+      // VERIFIED to be there. Nothing to move, so "only learn if the move
+      // happened" is trivially satisfied -- and this is the user CONFIRMING
+      // the router's own answer, a positive signal the matcher was getting
+      // before the learn was gated behind `moved`.
+      //
+      // The check is not decoration: with a Save-As into a non-library folder
+      // this branch used to post /learn with a subject directory the file
+      // never went near. No toast here -- the user did not ask for a move, so
+      // there is no failure to report; there is simply nothing to learn from.
       await learn(entry, entry.wanted, entry.wantedCreatedNew);
     }
-  } else if (entry.wanted) {
-    // The deferred pick equals where the ladder already filed it: there is
-    // nothing to move, so the "only learn if the move happened" rule is
-    // trivially satisfied. Gating the learn behind `moved` silently dropped
-    // this case, and it is the user CONFIRMING the router's own answer --
-    // a real positive signal the matcher was getting before.
-    await learn(entry, entry.wanted, entry.wantedCreatedNew);
   }
   // Keep the entry briefly so a late "change" click can still relocate.
   // `unref` exists only under node (the test runner) -- without it this timer
@@ -621,7 +669,8 @@ export async function submitFetch(key, dir, { createdNew } = {}) {
     return { ok: true, dir, jobId: out?.jobId };
   } catch (err) {
     // The whole point: a refused or unreachable /fetch has to be visible.
-    await reportFailure(`Could not start the download for ${dir}`, String(err));
+    await reportFailure(`Could not start the download for ${dir}`,
+      errorMessage(err));
     throw err;
   }
 }
@@ -673,7 +722,7 @@ export function onMessage(msg, sender, sendResponse) {
       .then(() => applyChoice(msg.downloadId, msg.dir,
         { createdNew: msg.createdNew }))
       .then((r) => sendResponse(r))
-      .catch((e) => sendResponse({ ok: false, error: String(e) }));
+      .catch((e) => sendResponse({ ok: false, error: errorMessage(e) }));
     return true;   // async response
   }
   if (msg.type === "dlr:snapshot") {
