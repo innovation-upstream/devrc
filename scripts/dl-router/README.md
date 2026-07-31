@@ -483,8 +483,97 @@ All endpoints require `Authorization: Bearer <token>` from
 | POST | `/learn` | persist a correction (alias + labelled example + host prior) |
 | POST | `/mkdir` | create a validated new directory |
 | POST | `/relocate` | rename **within** the library root, only for a file this router provably created |
+| POST | `/dedupe` | confirm a duplicate by exact size + a bounded head/tail hash, after the download landed |
+| POST | `/discard` | remove a **proven** duplicate this router just wrote (five proofs; trash by default) |
 | POST | `/fetch` | yt-dlp job for a stream URL; `GET /fetch/<id>` for status |
+| GET | `/have?url=` | source-URL ledger lookup — "have I already downloaded this?" |
 | GET | `/log` | recent routing decisions |
+
+---
+
+## Dedupe — size first, a bounded hash to confirm
+
+The original check matched on the normalised **filename stem**. Against this
+traffic that is a dead signal: the filenames are random per download, so it
+fired **zero times in seventeen real downloads** while the library held groups
+of same-size files it structurally could not see.
+
+Three signals now, ranked, and each labelled in `kind`:
+
+| `kind` | meaning | confirmable? |
+|---|---|---|
+| `name+size` | same stem **and** the same byte count | yes |
+| `size` | different name, same exact byte count — **the signal that matters here** | yes |
+| `name` | same stem, different byte count | no: different lengths are definitively different bytes |
+
+**The size bucket is free.** `FileIndex` already stats every file during the
+walk it already performs, so bucketing by exact size is a second dict built
+from a number it already had.
+
+**Where the hashing happens, and why it is not on `/match`.** `/match` runs
+inside `onDeterminingFilename`, *before Chrome has written a byte* — the file
+does not exist, so there is nothing to hash, and `totalBytes` is frequently `0`
+there so even the size is unreliable. That settles the 400 ms budget question
+by construction rather than by tuning: `/match` does a dict lookup and reports
+a *possible* duplicate; `POST /dedupe`, called from `downloads.onChanged` after
+completion, is the authoritative answer. Nothing is waiting on it, so a slow
+answer costs a late toast, not a misfiled download.
+
+**The digest is bounded and never reads a whole file**: 128 KiB from each end
+plus the size, into a `blake2b`. Constant cost regardless of a multi-GB file.
+The honest cost of the bound: two files sharing their first and last 128 KiB
+and differing only in the middle are reported as duplicates. That is affordable
+only because a duplicate is a **warning with a keep button**, never an automatic
+destruction — `tests/test_dedupe.py` pins the bound behaviourally, so widening
+it to a whole-file read breaks a named test.
+
+Digests are cached on `(path, size, mtime)`, so a library file is hashed once
+rather than once per colliding download, and at most `MAX_DUP_CANDIDATES` (8)
+same-size candidates are hashed per check. A file that vanished, is unreadable,
+or is empty has **no** digest and confirms nothing.
+
+### Duplicate handling: warn, never destroy silently
+
+The file is **kept and filed normally**. A confirmed duplicate opens a toast
+naming the library file it duplicates, offering `delete` and `keep`. That toast
+does **not** auto-close (a timer would answer a question one of whose buttons
+deletes a file), `Escape` is *keep*, and a refused delete leaves the toast open
+showing the sidecar's own reason.
+
+`POST /discard` is the **only destructive operation in this subsystem**, and it
+is strictly harder to satisfy than `/relocate`. Five independent proofs, all
+required:
+
+1. **containment** — both paths through `safe_rel_path`;
+2. **identity + age** — the same evidence `/relocate` demands, and deliberately
+   *without* its `routed_files` short-circuit (a claim recorded weeks ago says
+   nothing about the file at that path now);
+3. **recency** — the routing decision must be under an hour old. `/relocate`
+   has no such window because a rename is reversible; this is not;
+4. **it is not the file it duplicates** — the caller must name the pre-existing
+   copy, it must exist, and the two must differ on their *resolved* paths;
+5. **the duplication is re-proven at delete time** — same size, same bounded
+   digest, right now. This is the load-bearing one: a discard can only ever
+   remove bytes that demonstrably still exist elsewhere in the library.
+
+And then it does not `unlink`. The file is renamed into `.dl-router-trash/`
+inside the library root: an atomic same-filesystem move, hidden so both index
+scans skip it, inspectable with `ls`, reversible with `mv`. Set
+`[dedupe] delete_mode = "unlink"` to opt into a real delete.
+
+---
+
+## Source-URL ledger
+
+Schema **v5** adds `source_urls`, keyed on a normalised URL (lower-case scheme
+and host, no default port, no fragment; path and query kept verbatim, because a
+query string usually *is* the asset identity). `/match` records every routed
+download's source URL, `/relocate` re-points the row after a correction, and
+`GET /have?url=` answers "already downloaded, in `<dir>`". The primary key is
+the lookup index; a second index on `download_id` serves the write side.
+
+This is **groundwork only** — there is no UI. A later change will use it to
+badge "already have this" on a page before downloading.
 
 ---
 
