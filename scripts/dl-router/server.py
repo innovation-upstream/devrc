@@ -51,7 +51,7 @@ from matcher import (  # noqa: E402
     KIND_CATEGORY, KIND_PERFORMER, KIND_UNKNOWN, KINDS, MatchContext, Matcher,
     content_tokens,
     find_duplicate, host_of, identity_signals, norm_key, passes_fuzzy_guard,
-    suspicious_alias_key, title_subject,
+    suspicious_alias_key, thread_slug, title_subject,
 )
 from safety import (  # noqa: E402
     UnsafeName, is_safe_dir_name, names_match, safe_rel_path,
@@ -301,9 +301,24 @@ class App:
                                     evidence=str(evidence)[:200])
             written.append({"key": key, "site": site, "source": source})
 
-        spread_map = self.store.phrase_dir_spread()
+        spread_map = self.store.phrase_dir_spread(
+            other_dir=self.cfg.other_dir)
 
         def screen(phrase, key, source, site):
+            # AN EXPLICIT CORRECTION ALWAYS WINS.
+            #
+            # If a row already exists for this (key, site), the operator is
+            # RE-POINTING something the router previously learned, and the
+            # screen must not stand in the way. It did: the chrome-spread
+            # measure counts the operator's OWN routing history, so correcting
+            # the same thread to a second directory looked exactly like a
+            # phrase "seen on 2 different directories" -- the fix was refused,
+            # the original wrong alias survived, and the next download from
+            # that thread still auto-filed into the wrong directory at 1.00. A
+            # router that overrules the operator on the second correction is
+            # worse than one that never learned anything.
+            if self.store.alias(key, site) is not None:
+                return True
             why = suspicious_alias_key(phrase, key=key, dir_names=dir_names,
                                        site=site,
                                        spread=spread_map.get(norm_key(phrase), 0))
@@ -365,9 +380,13 @@ class App:
             #    else, which is what the docs have always said. Learning weak
             #    title aliases for it meant a pile of dormant rows that would
             #    all activate at once the moment it was classified.
-            for title, site in ((ctx.title, ctx.site),
-                                (ctx.referrer_title, host_of(ctx.referrer_url))):
-                subject = title_subject(title, site)
+            slugs = ctx.thread_slugs()
+            own_slug = thread_slug(ctx.page_url) or (slugs[0] if slugs else "")
+            for title, site, slug in (
+                    (ctx.title, ctx.site, own_slug),
+                    (ctx.referrer_title, host_of(ctx.referrer_url),
+                     thread_slug(ctx.referrer_url))):
+                subject = title_subject(title, site, slug)
                 if not subject or not site:
                     continue
                 toks = content_tokens(subject)

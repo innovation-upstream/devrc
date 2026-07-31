@@ -461,7 +461,8 @@ def test_dirs_classify_drafts_a_reviewable_file(cli_env, capsys, tmp_path):
     assert call(["dirs", "classify", "--out", str(out)]) == 0
     import tomllib
     parsed = tomllib.loads(out.read_text(encoding="utf-8"))
-    assert set(parsed) == {"performer", "category"}
+    assert set(parsed) == {"performer", "category", "ask"}
+    # An already-reviewed classification survives regeneration...
     assert "Jane Doe" in parsed["performer"]
     # ...and it explains itself rather than emitting a bare list.
     assert "review" in out.read_text(encoding="utf-8").lower()

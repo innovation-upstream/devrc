@@ -262,7 +262,8 @@ class Store:
             (int(limit),)).fetchall()
         return [dict(r) for r in rows]
 
-    def phrase_dir_spread(self, limit: int = 500) -> dict:
+    def phrase_dir_spread(self, limit: int = 500, *,
+                          other_dir: str = "") -> dict:
         """`{phrase key: how many DISTINCT directories it has been seen on}`.
 
         The data-driven half of the site-chrome exclusion. A subject tag
@@ -271,13 +272,22 @@ class Store:
         spread. Measured from the labelled examples the router already stores,
         so no vocabulary has to be maintained (and none could be committed —
         the words are the operator's private library).
+
+        `other_dir` (the catch-all) is EXCLUDED. Sending a download there is
+        the operator saying "not any of these" — the absence of a subject, not
+        evidence of one, which is exactly why `learn` refuses to write an alias
+        for it. Counting it here contradicted that: one shrug plus one real
+        correction made every phrase on the page look like chrome, and the
+        operator's next correction was refused as "site chrome".
         """
         # Local imports keep store.py import-light.
-        from matcher import norm_key, title_subject
+        from matcher import norm_key, thread_slug, title_subject
 
         spread: dict = {}
         for row in self.examples(limit):
             chosen = row.get("chosen_dir") or ""
+            if other_dir and chosen == other_dir:
+                continue
             try:
                 ctx = json.loads(row.get("context") or "{}")
             except ValueError:
@@ -295,7 +305,8 @@ class Store:
             # subject belongs to one directory, a site name turns up on every
             # one of them.
             subject = title_subject(page.get("title") or "",
-                                    str(page.get("site") or ""))
+                                    str(page.get("site") or ""),
+                                    thread_slug(page.get("url") or ""))
             if subject:
                 phrases.append(subject)
             for phrase in phrases:

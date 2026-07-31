@@ -131,10 +131,30 @@
     },
     {
       "url": "https://forum.test/topic/aster-vale/",
-      "slug": "aster vale"
+      "slug": ""
     },
     {
       "url": "https://forum.test/viewtopic.php/aster-vale",
+      "slug": "aster vale"
+    },
+    {
+      "url": "https://forum.test/topics/general-discussion",
+      "slug": ""
+    },
+    {
+      "url": "https://forum.test/t/photography",
+      "slug": ""
+    },
+    {
+      "url": "https://forum.test/topic/12345-aster-vale/",
+      "slug": "aster vale"
+    },
+    {
+      "url": "https://forum.test/t/aster-vale/1234",
+      "slug": "aster vale"
+    },
+    {
+      "url": "https://forum.test/topic/aster-vale.9912/",
       "slug": "aster vale"
     }
   ],

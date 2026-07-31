@@ -93,9 +93,20 @@ const SNOWFLAKE = /^[0-9]{5,25}$/;
 // the deepest segment that qualifies" rule handed a forum SECTION name a 1.00
 // identity alias whenever the thread's own slug was a single word.
 const THREAD_ANCHORS = new Set([
-  "threads", "thread", "topic", "topics", "t",
-  "showthread.php", "viewtopic.php", "showthread", "viewtopic",
+  "threads", "thread", "showthread.php", "viewtopic.php",
+  "showthread", "viewtopic",
 ]);
+
+// AMBIGUOUS routes: Discourse and IPB use these for a thread, but plenty of
+// sites use the same words for an INDEX (`/topics/general-discussion`,
+// `/t/photography`). A real thread always carries a numeric id beside the
+// slug; an index route never does. See matcher._ID_ANCHORS.
+const ID_ANCHORS = new Set(["topic", "topics", "t"]);
+
+function carriesThreadId(segments, i) {
+  if (LEADING_ID.test(segments[i]) || TRAILING_ID.test(segments[i])) return true;
+  return i + 1 < segments.length && /^\d+$/.test(segments[i + 1]);
+}
 const TRAILING_ID = /[.\-_]\d{2,}$/;
 const LEADING_ID = /^\d{2,}[.\-_]/;
 // Title separators. Escaped rather than literal: every source file here is
@@ -173,7 +184,10 @@ export function threadSlug(url) {
   let best = [];
   const segments = pathSegments(url);
   for (let i = 1; i < segments.length; i += 1) {
-    if (!THREAD_ANCHORS.has(segments[i - 1].toLowerCase())) continue;
+    const anchor = segments[i - 1].toLowerCase();
+    if (ID_ANCHORS.has(anchor)) {
+      if (!carriesThreadId(segments, i)) continue;
+    } else if (!THREAD_ANCHORS.has(anchor)) continue;
     const toks = allTokens(
       segments[i].replace(LEADING_ID, "").replace(TRAILING_ID, ""));
     // The thread route already proves this is a thread, so a ONE-word slug is
@@ -203,20 +217,32 @@ export function isSiteBranding(phrase, site) {
 }
 
 /**
- * The subject half of a page title, with the site's branding dropped.
- * THE FIRST surviving segment, not the longest -- see matcher.title_subject.
- * "Longest wins" returned the SITE name whenever the subject was one word and
- * the site's display name did not resemble its hostname.
+ * The subject segment of a page title, CORROBORATED against the URL slug.
+ *
+ * Neither position nor size can do this job and both were tried: "longest"
+ * returned the SITE name for a one-word subject, and "first" then broke every
+ * template that does not put the subject first (`'Some Forum - View topic -
+ * <subject>'`, `'Section | <subject> | Some Forum'`). phpBB puts the subject
+ * last, XenForo puts it first, and both are common.
+ *
+ * So it asks the anchored slug, which is independent and positionally proven,
+ * and takes the segment sharing the most tokens with it. WITH NO SLUG THERE IS
+ * NO ANSWER -- "" rather than a guess. See matcher.title_subject.
  */
-export function titleSubject(title, site) {
+export function titleSubject(title, site, slug) {
   if (typeof title !== "string" || !title.trim()) return "";
+  const slugTokens = new Set(contentTokens(slug));
+  if (!slugTokens.size) return "";
+  let best = ""; let bestOverlap = 0;
   for (const raw of title.split(TITLE_SPLIT)) {
     const part = (raw || "").trim();
-    if (!part || !contentTokens(part).length) continue;
-    if (isSiteBranding(part, site)) continue;
-    return part;
+    const toks = contentTokens(part);
+    if (!toks.length || isSiteBranding(part, site)) continue;
+    const overlap = [...new Set(toks)].filter((t) => slugTokens.has(t)).length;
+    // Strictly greater, so the FIRST segment wins a tie.
+    if (overlap > bestOverlap) { best = part; bestOverlap = overlap; }
   }
-  return "";
+  return bestOverlap ? best : "";
 }
 
 /** Thread-subject phrases from a context's URLs, strongest first. */
@@ -291,9 +317,12 @@ export function subjectPhrases(ctx) {
     seen.add(key);
     out.push(v);
   };
-  for (const slug of threadSlugs(ctx)) add(slug);
-  add(titleSubject(ctx?.referrerTitle, hostOf(ctx?.referrerUrl)));
-  add(titleSubject(ctx?.pageTitle, ctx?.site));
+  const slugs = threadSlugs(ctx);
+  for (const slug of slugs) add(slug);
+  const ownSlug = threadSlug(ctx?.pageUrl) || slugs[0] || "";
+  add(titleSubject(ctx?.referrerTitle, hostOf(ctx?.referrerUrl),
+    threadSlug(ctx?.referrerUrl)));
+  add(titleSubject(ctx?.pageTitle, ctx?.site, ownSlug));
   for (const tag of ctx?.tags || []) add(tag);
   const og = ctx?.og || {};
   for (const k of ["video:actor", "video:tag", "og:video:actor",

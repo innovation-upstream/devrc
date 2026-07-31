@@ -130,9 +130,35 @@ test("the slug leads the subject phrases, ahead of the tag list", () => {
   assert.ok(phrases.indexOf("General Discussion") > 0);
 });
 
-test("the de-branded title beats the raw one", () => {
-  assert.equal(titleSubject("Aster Vale | Some Forum", "someforum.test"),
-    "Aster Vale");
+test("the title subject is corroborated against the slug, not guessed", () => {
+  // phpBB puts the subject LAST, XenForo puts it FIRST, and both are common:
+  // neither position nor size can pick it. See matcher.title_subject.
+  const SUBJECT = "Aster Vale Deluxe Photo Set";
+  const SLUG = "aster vale deluxe photo set";
+  for (const title of [
+    `${SUBJECT} | Some Forum`,
+    `Some Forum - View topic - ${SUBJECT}`,
+    `Section | ${SUBJECT} | Some Forum`,
+    `Page 2 | ${SUBJECT} | Some Forum`,
+  ]) {
+    assert.equal(titleSubject(title, "forum.test", SLUG), SUBJECT, title);
+  }
+});
+
+test("with no slug there is no title subject at all", () => {
+  assert.equal(titleSubject("Aster Vale | Some Forum", "someforum.test", ""),
+    "");
+});
+
+test("an index route is not a thread without a numeric id", () => {
+  // `/topics/...` and `/t/...` are thread routes on Discourse and IPB and
+  // INDEX routes elsewhere. A thread always carries an id beside the slug.
+  assert.equal(threadSlug("https://forum.test/topics/general-discussion"), "");
+  assert.equal(threadSlug("https://forum.test/t/photography"), "");
+  assert.equal(threadSlug("https://forum.test/t/aster-vale/1234"),
+    "aster vale");
+  assert.equal(threadSlug("https://forum.test/topic/12345-aster-vale/"),
+    "aster vale");
 });
 
 // --- the cross-host referrer carry ------------------------------------------ //

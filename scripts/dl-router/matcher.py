@@ -138,10 +138,24 @@ _SNOWFLAKE = re.compile(r"^[0-9]{5,25}$")
 # superlative ("deepest that qualifies", "longest that survives") picks the
 # wrong thing exactly when the subject is short, and short subjects are common.
 # A segment that no forum route introduced is not a thread, full stop.
+# UNAMBIGUOUS thread routes: nothing else lives behind these.
 _THREAD_ANCHORS = frozenset({
-    "threads", "thread", "topic", "topics", "t",
-    "showthread.php", "viewtopic.php", "showthread", "viewtopic",
+    "threads", "thread", "showthread.php", "viewtopic.php",
+    "showthread", "viewtopic",
 })
+
+# AMBIGUOUS routes. Discourse (`/t/<slug>/<id>`) and IPB (`/topic/<id>-<slug>/`)
+# use these for a thread, but plenty of sites use the same words for an INDEX:
+#
+#     /topics/general-discussion   ->  a section listing, not a thread
+#     /t/photography               ->  a tag page, not a thread
+#
+# Treating them as unambiguous asserted something untrue and re-opened the
+# section-name hole one level down. A real thread on these platforms always
+# carries a numeric id beside the slug; an index route never does, so the id is
+# the discriminator -- and requiring it is fail-closed, because a thread shape
+# nobody anticipated degrades to "no slug" (the picker), never to a wrong slug.
+_ID_ANCHORS = frozenset({"topic", "topics", "t"})
 
 # `slug.123456` (xenforo) and `123456-slug` (vbulletin) both carry a numeric id
 # beside the slug. Stripping it is what makes the two shapes fold to one key.
@@ -152,11 +166,12 @@ _LEADING_ID = re.compile(r"^\d{2,}[.\-_]")
 # half is chrome and is dropped by comparing against the host's own tokens.
 _TITLE_SPLIT = re.compile(r"\s*[|–—·•»«]\s*|\s+[-‐]\s+|\s*::\s*")
 
-# A learned alias key shorter than this is refused: two characters match far
-# too much page prose to be a subject. Three is deliberate rather than four:
-# an initialised stage name folds to three (`M.I.A.` -> `mia`), and refusing a
-# real subject is not free just because the refusal is quiet.
-MIN_ALIAS_KEY_LEN = 3
+# A learned alias key shorter than this is refused: three characters match far
+# too much page prose to be a subject. An INITIALISED name is exempt
+# (`M.I.A.` -> `mia`) -- the punctuation is what distinguishes it from a bare
+# three-letter word, and lowering the floor for everything instead let `gif`,
+# `mp4`, `www` and `com` through.
+MIN_ALIAS_KEY_LEN = 4
 # A phrase seen on this many DISTINCT directories is site chrome (a forum
 # section, an uploader's username), not a subject. Data-driven: it is measured
 # from the labelled examples, not read off a word list.
@@ -276,6 +291,19 @@ def _slug_tokens(segment: str) -> tuple:
     return tokens(seg)
 
 
+def _carries_thread_id(segments, i: int) -> bool:
+    """True when the slug at `segments[i]` has a numeric thread id beside it.
+
+    Either inside the segment (`/topic/12345-slug/`, `/topic/slug.12345/`) or as
+    the next one (`/t/slug/12345`). This is what separates a Discourse/IPB
+    thread from a same-named index route.
+    """
+    segment = segments[i]
+    if _LEADING_ID.match(segment) or _TRAILING_ID.search(segment):
+        return True
+    return i + 1 < len(segments) and segments[i + 1].isdigit()
+
+
 def thread_slug(url) -> str:
     """The forum thread subject carried by a URL path, as a phrase.
 
@@ -297,7 +325,11 @@ def thread_slug(url) -> str:
     best = ()
     segments = url_path_segments(url)
     for i in range(1, len(segments)):
-        if segments[i - 1].lower() not in _THREAD_ANCHORS:
+        anchor = segments[i - 1].lower()
+        if anchor in _ID_ANCHORS:
+            if not _carries_thread_id(segments, i):
+                continue
+        elif anchor not in _THREAD_ANCHORS:
             continue
         toks = _slug_tokens(segments[i])
         # The thread route already proves this is a thread, so a ONE-word slug
@@ -348,42 +380,57 @@ def is_site_branding(phrase, site: str) -> bool:
     return len(key) >= MIN_ALIAS_KEY_LEN and key in norm_key(site)
 
 
-def title_subject(title, site: str = "") -> str:
-    """The subject half of a page title, with the site's branding dropped.
+def title_subject(title, site: str = "", slug: str = "") -> str:
+    """The subject segment of a page title, CORROBORATED against the URL slug.
 
-    `"Subject Name | Some Forum"` on `someforum.test` -> `"Subject Name"`.
+    `"Subject Name | Some Forum"` with slug `"subject name"` -> `"Subject Name"`.
 
-    THE FIRST surviving segment, not the longest.
+    NEITHER POSITION NOR SIZE CAN DO THIS JOB, and both were tried:
 
-    "Longest wins" was a superlative over candidates, and like the old slug
-    rule it picked the wrong thing exactly when the subject was short. The
-    branding test can only recognise a site whose display name resembles its
-    hostname, so on a forum where those differ it fires for neither segment --
-    and then the longer one wins, which is the SITE name whenever the subject
-    is a single word:
+      * "longest surviving segment" returned the SITE name whenever the subject
+        was one word and the site's display name did not resemble its hostname
+        (`'Aster | Some Forum'` on `forum.test` -> `'Some Forum'`);
+      * "first surviving segment" then broke every template that does not put
+        the subject first, which is a large share of real forums --
 
-        title_subject('Aster | Some Forum', 'forum.test')  ->  'Some Forum'
+            'Some Forum - View topic - Aster Vale Deluxe Photo Set' -> 'View topic'
+            'Section | Aster Vale Deluxe Photo Set | Some Forum'    -> 'Section'
+            'Page 2 | Aster Vale Deluxe Photo Set | Some Forum'     -> 'Page 2'
 
-    That is a 1.00 site-scoped alias for the site's own name: every page on
-    that forum with a short subject then auto-files into one directory.
+        ...and `'View topic'` is a phpBB constant, so it became a site-wide
+        1.00 alias. phpBB puts the subject last, XenForo puts it first, and
+        both are common: there is no ordering rule, and a third superlative
+        would just relocate the failure again.
 
-    Position is the reliable signal. `"<subject> | <site>"` is the dominant
-    convention by a wide margin, and the reverse order is still handled
-    whenever the branding test CAN see it, because that segment is dropped
-    before position is consulted. When neither is knowable, taking the first
-    segment is at worst a weak alias for one page's real title -- the failure
-    mode is a useless alias, not a wrong one.
+    So this stops guessing and asks something that already knows. The anchored
+    URL slug is an independent, positionally-proven statement of what the
+    thread is about; the title segment that shares the most tokens with it is
+    the subject, and every other segment is chrome by construction.
+
+    WITH NO SLUG THERE IS NO ANSWER, and `''` is returned rather than a guess.
+    A title subject can therefore only ever be learned when something
+    independent has already confirmed the subject -- fail-closed, and it
+    deletes the guessing problem instead of re-tuning it. Pages with no thread
+    slug still match on their raw title through the ordinary containment rule;
+    what they no longer do is mint an alias.
     """
     if not isinstance(title, str) or not title.strip():
         return ""
+    slug_tokens = set(content_tokens(slug))
+    if not slug_tokens:
+        return ""
+    best, best_overlap = "", 0
     for part in _TITLE_SPLIT.split(title):
         part = (part or "").strip()
-        if not part or not content_tokens(part):
+        toks = content_tokens(part)
+        if not toks or is_site_branding(part, site):
             continue
-        if is_site_branding(part, site):
-            continue
-        return part
-    return ""
+        overlap = sum(1 for t in set(toks) if t in slug_tokens)
+        # Strictly greater, so the FIRST segment wins a tie -- deterministic,
+        # and only ever consulted between segments that corroborate equally.
+        if overlap > best_overlap:
+            best, best_overlap = part, overlap
+    return best if best_overlap else ""
 
 
 @dataclass(frozen=True)
@@ -615,10 +662,16 @@ class MatchContext:
             seen.add(key)
             out.append(value)
 
-        for slug in self.thread_slugs():
+        slugs = self.thread_slugs()
+        for slug in slugs:
             add(slug)
-        add(title_subject(self.referrer_title, host_of(self.referrer_url)))
-        add(title_subject(self.title, self.site))
+        # The de-branded title is CORROBORATED against the slug (see
+        # title_subject): with no slug it contributes nothing here, and the raw
+        # title below still carries the page through ordinary containment.
+        own_slug = thread_slug(self.page_url) or (slugs[0] if slugs else "")
+        add(title_subject(self.referrer_title, host_of(self.referrer_url),
+                          thread_slug(self.referrer_url)))
+        add(title_subject(self.title, self.site, own_slug))
         for tag in self.tags:
             add(tag)
         for og_key in ("video:actor", "video:tag", "og:video:actor",
@@ -977,13 +1030,21 @@ def suspicious_alias_key(phrase, *, key: str = "", dir_names=(), site: str = "",
     if not key:
         return "empty key"
     structured = is_structured_key(key)
-    if not structured and len(key) < MIN_ALIAS_KEY_LEN:
+    ptoks = content_tokens(phrase)
+    if not structured and not ptoks:
+        # Nothing but stopwords and format noise -- `gif`, `mp4`, `www`, `com`.
+        # This has to come FIRST: with no content tokens the shared-vocabulary
+        # and handle rules below both silently pass, so a short stopword slipped
+        # through the whole screen once the length floor was lowered.
+        return (f"{phrase!r} is nothing but stopwords or format noise, "
+                "so it says nothing about a subject")
+    if not structured and len(key) < MIN_ALIAS_KEY_LEN \
+            and not _looks_initialised(phrase):
         return (f"key {key!r} is shorter than {MIN_ALIAS_KEY_LEN} characters — "
                 "it would match unrelated page prose")
     if spread >= CHROME_DIR_SPREAD:
         return (f"seen on {spread} different directories — that is site chrome "
                 "(a section name, an uploader's username), not a subject")
-    ptoks = content_tokens(phrase)
     if is_site_branding(phrase, site):
         return f"it is part of the site name ({site})"
     if ptoks:
@@ -1001,19 +1062,28 @@ def suspicious_alias_key(phrase, *, key: str = "", dir_names=(), site: str = "",
     return None
 
 
-def _looks_like_a_handle(ptoks) -> bool:
-    """`poster1988`, `uploader42` — a word with a number stuck on the end.
+# A word with a number stuck on the end: `poster1988`, `uploader7`, `user2`.
+# One trailing digit is the COMMON username shape, so requiring two (an earlier
+# narrowing) let most real handles straight through.
+_HANDLE = re.compile(r"^[^\W\d_]+[0-9]{1,4}$")
+# Letters separated by punctuation: `M.I.A.`, `K. D.` -- an initialised stage
+# name, not a three-letter word. This is what lets the length floor stay at 4
+# without refusing a real subject.
+_INITIALISED = re.compile(r"^(?:[^\W\d_][.\u00b7\s]+){2,}[^\W\d_]?[.]?$")
 
-    NARROWED from "a single token containing any digit", which refused
-    legitimate single-word stage names that merely contain a numeral. The
-    remaining false positive is a name that genuinely ends in digits; it is
-    reported rather than silently dropped, and `--force` still writes it.
+
+def _looks_initialised(phrase) -> bool:
+    return bool(_INITIALISED.match(str(phrase or "").strip()))
+
+
+def _looks_like_a_handle(ptoks) -> bool:
+    """`poster1988`, `uploader7`, `user2` — a word with a number on the end.
+
+    A name that genuinely ends in digits is a false positive; it is REPORTED
+    rather than silently dropped, and `--force` still writes it. A numeral
+    inside a word (`m1a`) is not matched.
     """
-    if len(ptoks) != 1:
-        return False
-    tok = ptoks[0]
-    return (len(tok) >= 6 and tok[-1].isdigit() and tok[-2].isdigit()
-            and not tok[0].isdigit())
+    return len(ptoks) == 1 and bool(_HANDLE.match(ptoks[0]))
 
 
 def find_duplicate(index, target_dir: str, filename: str, size: int = 0):

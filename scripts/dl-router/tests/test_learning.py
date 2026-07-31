@@ -357,22 +357,23 @@ def test_an_unclassified_directory_learns_identity_only(kinded_app):
     assert {w["source"] for w in out["written"]} == {"thread-slug"}
 
 
-def test_a_screened_identity_signal_is_refused_not_written(kinded_app):
+def test_a_screened_identity_signal_is_refused_on_a_FIRST_write(kinded_app):
     """Identity signals used to bypass the screen entirely — the one row that
-    most needed checking was the only one exempt."""
-    for chosen in ("Jane Doe", "john-smith"):
-        kinded_app.learn({"context": forum_context([]), "chosenDir": chosen,
-                          "confirmed": True})
-    # The slug phrase has now been seen against two different directories.
-    kinded_app.store.add_example(
-        {"page": {"tags": ["aster vale collection"], "site": "someforum.test"}},
-        "Mary_Major")
-    kinded_app.store.add_example(
-        {"page": {"tags": ["aster vale collection"], "site": "someforum.test"}},
-        "john-smith")
+    most needed checking was the only one exempt.
+
+    The screen applies on a first write only: once a row exists, a further
+    correction is the operator RE-POINTING it, and an explicit correction
+    always wins (see test_a_second_correction_overrules_the_first).
+    """
+    for chosen in ("Mary_Major", "john-smith"):
+        kinded_app.store.add_example(
+            {"page": {"tags": ["aster vale collection"],
+                      "site": "someforum.test"}}, chosen)
     out = kinded_app.learn({"context": forum_context([]),
                             "chosenDir": "Aster Vale", "confirmed": True})
     assert any(s["source"] == "thread-slug" for s in out["skipped"])
+    assert kinded_app.store.alias(thread_alias_key("aster vale collection"),
+                                  "someforum.test") is None
 
 
 def test_junk_tags_do_not_consume_the_category_budget(kinded_app):
@@ -391,16 +392,70 @@ def test_refusals_are_reported_in_the_response(kinded_app):
     assert out["skipped"] and out["skipped"][0]["why"]
 
 
-def test_an_initialised_stage_name_is_no_longer_refused(kinded_app):
-    """`M.I.A.` folds to a three-character key. Refusing a real subject is not
-    free just because the refusal is quiet."""
-    from matcher import suspicious_alias_key
-    assert suspicious_alias_key("M.I.A.", dir_names=["Jane Doe"],
-                                site="someforum.test") is None
+def test_a_second_correction_overrules_the_first(kinded_app):
+    """AN EXPLICIT CORRECTION ALWAYS WINS.
+
+    The chrome-spread measure counts the operator's OWN routing history, so
+    correcting the same thread to a second directory looked exactly like a
+    phrase "seen on 2 different directories": the fix was REFUSED, the original
+    wrong alias survived, and the next download from that thread still
+    auto-filed into the wrong place at 1.00. A router that overrules the
+    operator on the second correction is worse than one that never learned.
+    """
+    key = thread_alias_key("aster vale collection")
+    kinded_app.learn({"context": forum_context([]), "chosenDir": "other",
+                      "confirmed": True})                       # a shrug
+    kinded_app.learn({"context": forum_context([]), "chosenDir": "Jane Doe",
+                      "confirmed": True})                       # wrong
+    assert kinded_app.store.alias(key, "someforum.test") == "Jane Doe"
+
+    out = kinded_app.learn({"context": forum_context([]),
+                            "chosenDir": "john-smith", "confirmed": True})
+    assert key in {w["key"] for w in out["written"]}, out["skipped"]
+    assert kinded_app.store.alias(key, "someforum.test") == "john-smith"
+
+    res = kinded_app.match({"url": THREAD, "filename": "x.mp4",
+                            "page": {"url": THREAD, "site": "someforum.test"}})
+    assert res["dir"] == "john-smith"
 
 
-def test_a_stage_name_containing_a_numeral_is_no_longer_refused():
+def test_the_catch_all_does_not_count_towards_chrome_spread(kinded_app):
+    """It is "not any of these" — the absence of a subject, not evidence of
+    one, which is exactly why learn() refuses to write an alias for it.
+    Counting it here contradicted that."""
+    kinded_app.store.add_example(
+        {"page": {"tags": ["Field Recordings"], "site": "someforum.test"}},
+        "other")
+    kinded_app.store.add_example(
+        {"page": {"tags": ["Field Recordings"], "site": "someforum.test"}},
+        "Jane Doe")
+    spread = kinded_app.store.phrase_dir_spread(other_dir="other")
+    assert spread.get("fieldrecordings", 0) == 1
+
+
+def test_a_numeral_INSIDE_a_word_is_not_a_handle():
     from matcher import suspicious_alias_key
-    assert suspicious_alias_key("m1a", dir_names=["Jane Doe"]) is None
-    # ...while a word with a number stuck on the end still reads as a handle.
-    assert suspicious_alias_key("poster1988", dir_names=["Jane Doe"])
+    assert suspicious_alias_key("mi5a", dir_names=["Jane Doe"]) is None
+
+
+@pytest.mark.parametrize("handle", ["poster1988", "poster1", "uploader7",
+                                    "user2", "x1988"])
+def test_a_word_with_a_number_on_the_end_still_reads_as_a_handle(handle):
+    """ONE trailing digit is the common username shape. An earlier narrowing
+    required two, which let most real handles straight through."""
+    from matcher import suspicious_alias_key
+    assert suspicious_alias_key(handle, dir_names=["Jane Doe"])
+
+
+@pytest.mark.parametrize("junk", ["gif", "mp4", "www", "com"])
+def test_a_stopword_or_format_word_can_never_become_an_alias(junk):
+    """These have no content tokens at all, so the shared-vocabulary and handle
+    rules below both passed them silently once the length floor was lowered."""
+    from matcher import suspicious_alias_key
+    assert suspicious_alias_key(junk, dir_names=["Jane Doe"])
+
+
+def test_an_initialised_name_is_exempt_from_the_length_floor_but_a_word_is_not():
+    from matcher import suspicious_alias_key
+    assert suspicious_alias_key("M.I.A.", dir_names=["Jane Doe"]) is None
+    assert suspicious_alias_key("set", dir_names=["Jane Doe"])

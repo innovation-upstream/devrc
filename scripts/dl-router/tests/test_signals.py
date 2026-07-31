@@ -180,19 +180,56 @@ def test_a_forum_thread_matches_its_directory_by_slug_alone():
 
 
 # --- page titles ------------------------------------------------------------ #
-@pytest.mark.parametrize("title,site,expected", [
-    ("Aster Vale Collection | Some Forum", "someforum.test",
-     "Aster Vale Collection"),
-    ("Some Forum - Aster Vale Collection", "someforum.test",
-     "Aster Vale Collection"),
-    ("Aster Vale", "", "Aster Vale"),
-    ("", "someforum.test", ""),
+# Real `<title>` templates. phpBB puts the subject LAST, XenForo puts it FIRST,
+# and both are common -- which is why neither position nor size can pick it.
+SLUG = "aster vale deluxe photo set"
+SUBJECT = "Aster Vale Deluxe Photo Set"
+
+
+@pytest.mark.parametrize("title", [
+    f"{SUBJECT} | Some Forum",                       # XenForo
+    f"Some Forum - View topic - {SUBJECT}",          # phpBB
+    f"Section | {SUBJECT} | Some Forum",
+    f"Page 2 | {SUBJECT} | Some Forum",
+    f"Some Forum \u00bb {SUBJECT}",
 ])
-def test_title_subject_drops_the_site_branding(title, site, expected):
-    """Data-driven: a title segment is chrome when every word of it is also a
-    word of the HOST. No list of site names has to be maintained (and none
-    could be committed -- they are the operator's private browsing)."""
-    assert title_subject(title, site) == expected
+def test_the_title_subject_is_corroborated_against_the_slug(title):
+    """`title_subject` asks the anchored URL slug instead of guessing.
+
+    Both guesses were tried and both failed on real templates. "Longest
+    surviving segment" returned the SITE name whenever the subject was one
+    word; "first surviving segment" then returned `'View topic'` (a phpBB
+    constant, so a site-wide 1.00 alias), `'Section'` and `'Page 2'`. There is
+    no ordering rule to find, and a third superlative would just relocate the
+    failure -- so this corroborates against a signal that is already proven.
+    """
+    assert title_subject(title, "forum.test", SLUG) == SUBJECT
+
+
+def test_with_no_slug_there_is_no_title_subject_at_all():
+    """FAIL CLOSED. A title subject can only ever be learned when something
+    independent has already confirmed what the subject is. Pages with no thread
+    slug still MATCH on their raw title through ordinary containment; what they
+    no longer do is mint an alias."""
+    assert title_subject(f"{SUBJECT} | Some Forum", "forum.test", "") == ""
+    assert title_subject("Anything At All", "forum.test") == ""
+
+
+def test_a_title_that_corroborates_nothing_yields_nothing():
+    assert title_subject("Completely Unrelated | Some Forum", "forum.test",
+                         SLUG) == ""
+
+
+@pytest.mark.parametrize("title,site,slug,expected", [
+    ("Aster Vale Collection | Some Forum", "someforum.test",
+     "aster vale collection", "Aster Vale Collection"),
+    ("Some Forum - Aster Vale Collection", "someforum.test",
+     "aster vale collection", "Aster Vale Collection"),
+    ("", "someforum.test", "aster vale", ""),
+])
+def test_title_subject_still_drops_the_site_branding(title, site, slug,
+                                                     expected):
+    assert title_subject(title, site, slug) == expected
 
 
 # --- cross-host referrer carry ---------------------------------------------- #
@@ -389,19 +426,17 @@ def test_a_downloads_own_filename_is_not_a_pseudo_thread():
 
 
 def test_the_site_name_does_not_win_a_short_title():
-    """BLOCKER 2. `title_subject` took the LONGEST surviving segment, and the
-    branding test only recognises a site whose display name resembles its
-    hostname -- so on a forum where they differ the site name won whenever the
-    subject was one word, giving every short-titled page on that forum a 1.00
-    site-scoped alias into one directory."""
-    assert title_subject("Aster | Some Forum", "forum.test") == "Aster"
+    """The site's display name must never become the subject, on a forum where
+    the branding test cannot see it (display name unlike the hostname)."""
+    assert title_subject("Aster | Some Forum", "forum.test", "aster") == "Aster"
 
 
-def test_the_branding_test_still_wins_over_position_when_it_can_see_it():
-    """Position is the fallback, not a replacement: a reversed title is still
-    handled wherever the site name IS recognisable."""
-    assert title_subject("Some Forum - Aster Vale Collection",
-                         "someforum.test") == "Aster Vale Collection"
+def test_the_phpBB_constant_never_becomes_an_alias():
+    """`'View topic'` appears in the title of every phpBB thread on a site. As
+    a learned alias it is a site-wide 1.00 auto-file into one directory."""
+    for slug in (SLUG, "aster vale", "photography"):
+        assert title_subject(f"Some Forum - View topic - {SUBJECT}",
+                             "forum.test", slug) != "View topic"
 
 
 def test_identity_keys_are_near_verbatim_so_threads_do_not_collide():

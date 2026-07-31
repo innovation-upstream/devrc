@@ -51,6 +51,14 @@ from matcher import (
 
 DIRS_FILE_ENV = "DL_ROUTER_DIRS_FILE"
 
+# The generator's third list. It is DELIBERATELY not a kind: `DirKinds` ignores
+# it, so everything parked there is unclassified and therefore asks. It exists
+# so the draft can pre-sort the directories it IS sure about (a single word,
+# digits, a shared vocabulary) without silently authorising the ones it is not.
+# Folding the ambiguous ones into `category` instead was safe, but it threw away
+# the whole labour saving for a library that is mostly people.
+ASK_LIST = "ask"
+
 # A word appearing in this many directory names is a taxonomy word, not a
 # subject. Same threshold, same reasoning as matcher.CHROME_DIR_SPREAD.
 SHARED_TOKEN_DIRS = 2
@@ -117,6 +125,11 @@ class DirKinds:
                             error=f"cannot read {path}: {exc}")
         errors = []
         seen: dict = {}
+        for key in raw:
+            if key not in (KIND_PERFORMER, KIND_CATEGORY, ASK_LIST):
+                errors.append(f"unknown list {key!r} — expected "
+                              f"{KIND_PERFORMER}, {KIND_CATEGORY} or "
+                              f"{ASK_LIST}")
         for kind in (KIND_PERFORMER, KIND_CATEGORY):
             value = raw.get(kind, [])
             if not isinstance(value, list):
@@ -205,8 +218,7 @@ def guess_kind(name: str, freq: dict):
         return KIND_CATEGORY, f"{len(toks)} words — long for a name"
     if all(freq.get(t, 0) >= SHARED_TOKEN_DIRS for t in toks):
         return KIND_CATEGORY, "every word is shared with other directories"
-    return KIND_CATEGORY, (f"{len(toks)} words — could be a name; MOVE IT UP "
-                           "if it is a person")
+    return ASK_LIST, f"{len(toks)} words — could be either; you decide"
 
 
 _TOML_ESCAPES = {
@@ -234,13 +246,14 @@ HEADER = """\
 # Save as ~/.config/dl-router/dirs.toml (or $DL_ROUTER_DIRS_FILE).  This file is
 # NEVER committed: it describes a private library.
 #
-# The only review action is to move a line between the two lists.  The comment
-# after each line is why the generator put it there.
+# The only review action is to move a line between the lists.  The comment after
+# each line is why the generator put it there.
 #
-# EVERYTHING STARTS IN `category`, ON PURPOSE.  Nothing here can tell a person's
-# name from a topic, and `category` is the side that ASKS -- so a skimmed review
-# leaves you with directories that ask too often, never with directories that
-# auto-file into the wrong place.  Move the ones that name a person up.
+# THE GENERATOR ONLY SORTS WHAT IT CAN PROVE -- a single word, digits, a
+# vocabulary shared with other directories.  Nothing available to it
+# distinguishes "Ada Lovelace" from "Field Recordings" (two capitalised words
+# either way), so those go to `ask` rather than being guessed onto the
+# auto-filing side.
 #
 #   performer  filed by subject identity.  MAY auto-file.  Learns only identity
 #              signals — a Discord channel id, a forum thread slug, a subject
@@ -249,8 +262,12 @@ HEADER = """\
 #              Learns tag -> directory aliases, site-scoped only, and only from
 #              an explicit confirmation.
 #
-# A directory in NEITHER list is unclassified: it never auto-files and never
-# learns a tag.  That is the safe end of the range, not a bug.
+#   ask        NOT A KIND -- this list is IGNORED, so everything in it is
+#              unclassified and therefore asks.  EMPTY IT as you review: move
+#              each line into `performer` or `category`.
+#
+# A directory in NONE of the lists is unclassified too: it never auto-files and
+# never learns a tag.  That is the safe end of the range, not a bug.
 """
 
 
@@ -262,7 +279,7 @@ def draft(dir_names, *, known=None) -> str:
     """
     names = sorted({str(n) for n in (dir_names or ()) if str(n).strip()})
     freq = _token_document_frequency(names)
-    buckets = {KIND_PERFORMER: [], KIND_CATEGORY: []}
+    buckets = {KIND_PERFORMER: [], KIND_CATEGORY: [], ASK_LIST: []}
     for name in names:
         settled = known.kind(name) if known is not None else KIND_UNKNOWN
         if settled in KINDS:
@@ -272,12 +289,11 @@ def draft(dir_names, *, known=None) -> str:
         buckets[kind].append((name, why))
 
     lines = [HEADER]
-    for kind in (KIND_PERFORMER, KIND_CATEGORY):
+    for kind in (KIND_PERFORMER, KIND_CATEGORY, ASK_LIST):
         rows = buckets[kind]
         lines.append(f"\n{kind} = [")
         if not rows:
-            lines.append("  # (none — move directories here from the other "
-                         "list)")
+            lines.append("  # (none — move directories here from another list)")
         width = max((len(toml_string(n)) for n, _ in rows), default=0)
         for name, why in rows:
             literal = toml_string(name) + ","

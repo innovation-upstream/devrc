@@ -7,6 +7,7 @@ auto-file rules. Fixtures are synthetic throughout.
 """
 from __future__ import annotations
 
+import pathlib
 import sys
 import tomllib
 from pathlib import Path
@@ -101,32 +102,58 @@ DRAFT_DIRS = ["Jane Doe", "john-smith", "Field Notes", "Compilations",
               "A Very Long Directory Name Indeed"]
 
 
+def all_listed(parsed):
+    return parsed["performer"] + parsed["category"] + parsed[dk.ASK_LIST]
+
+
 def test_the_draft_is_valid_toml_and_covers_every_directory():
-    text = dk.draft(DRAFT_DIRS)
-    parsed = tomllib.loads(text)
-    listed = {norm_key(n) for n in parsed["performer"] + parsed["category"]}
-    assert listed == {norm_key(n) for n in DRAFT_DIRS}
+    parsed = tomllib.loads(dk.draft(DRAFT_DIRS))
+    assert {norm_key(n) for n in all_listed(parsed)} \
+        == {norm_key(n) for n in DRAFT_DIRS}
 
 
-def test_the_draft_guesses_the_ASKING_side_for_everything_ambiguous():
+def test_the_draft_never_guesses_onto_the_auto_filing_side():
     """The draft must never silently authorise auto-filing.
 
     Nothing available to a generator distinguishes "Ada Lovelace" from "Field
     Recordings" -- two capitalised words either way -- so resolving that
     ambiguity towards `performer` meant a skimmed review turned category
     directories into auto-filers. (The module's own docstring example, "Field
-    Recordings", drafted as a performer.) Ambiguous now lands in `category`,
-    which ASKS: skim it and the worst case is a directory that asks too often.
+    Recordings", drafted as a performer.)
     """
     parsed = tomllib.loads(dk.draft(DRAFT_DIRS))
     assert parsed["performer"] == []
-    assert set(parsed["category"]) == set(DRAFT_DIRS)
 
 
-def test_an_ambiguous_line_says_it_may_need_moving_up():
-    text = dk.draft(["Jane Doe"])
-    line = next(l for l in text.splitlines() if "Jane Doe" in l)
-    assert "MOVE IT UP" in line
+def test_the_ambiguous_ones_go_to_a_list_that_is_NOT_a_kind():
+    """`ask` is ignored by the loader, so everything in it is unclassified and
+    therefore asks. Folding them into `category` instead was safe, but it threw
+    away the labour saving for a library that is mostly people."""
+    parsed = tomllib.loads(dk.draft(DRAFT_DIRS))
+    assert "Jane Doe" in parsed[dk.ASK_LIST]
+    assert "john-smith" in parsed[dk.ASK_LIST]
+    # ...and it is not a kind at all.
+    assert dk.ASK_LIST not in dk.KINDS
+
+
+def test_the_ask_list_really_does_read_as_unclassified(tmp_path):
+    path = write(tmp_path, 'performer = []\ncategory = []\nask = ["Jane Doe"]\n')
+    kinds = dk.DirKinds.load(path)
+    assert kinds.kind("Jane Doe") == KIND_UNKNOWN
+    assert not kinds.error
+
+
+def test_an_unknown_list_name_is_reported(tmp_path):
+    path = write(tmp_path, 'performer = []\ncategory = []\nperfomer = []\n')
+    assert "unknown list" in (dk.DirKinds.load(path).error or "")
+
+
+def test_the_draft_still_sorts_what_it_can_prove():
+    parsed = tomllib.loads(dk.draft(DRAFT_DIRS))
+    for name in ("Compilations", "Season 2024",
+                 "A Very Long Directory Name Indeed", "Live Sets",
+                 "Archive Sets", "Live Archive"):
+        assert name in parsed["category"], name
 
 
 def test_the_draft_still_explains_the_unambiguous_ones(): 
@@ -156,13 +183,12 @@ def test_the_draft_preserves_an_existing_classification(tmp_path):
 
 def test_a_directory_name_with_toml_metacharacters_survives_the_round_trip():
     tricky = ['He said "hi"', "back\\slash", "tab\there"]
-    parsed = tomllib.loads(dk.draft(tricky))
-    assert set(parsed["performer"] + parsed["category"]) == set(tricky)
+    assert set(all_listed(tomllib.loads(dk.draft(tricky)))) == set(tricky)
 
 
 def test_an_empty_library_still_produces_a_usable_file():
-    parsed = tomllib.loads(dk.draft([]))
-    assert parsed == {"performer": [], "category": []}
+    assert tomllib.loads(dk.draft([])) == {"performer": [], "category": [],
+                                           dk.ASK_LIST: []}
 
 
 # --- the auto-file gate ----------------------------------------------------- #

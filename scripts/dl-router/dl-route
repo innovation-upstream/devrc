@@ -36,7 +36,8 @@ import dirkinds as dirkinds_mod  # noqa: E402
 import qbt as qbt_mod  # noqa: E402
 from dirindex import DirIndex  # noqa: E402
 from matcher import (  # noqa: E402
-    KIND_UNKNOWN, MatchContext, Matcher, alias_key, suspicious_alias_key,
+    KIND_UNKNOWN, MatchContext, Matcher, alias_key, norm_key,
+    suspicious_alias_key,
 )
 from store import Store  # noqa: E402
 
@@ -223,7 +224,12 @@ def _alias_warning(cfg, store, phrase, key, site):
     """Why this alias looks like a mistake, or None."""
     root = cfg.library_root
     names = DirIndex(root, other_dir=cfg.other_dir).names() if root else []
-    spread = store.phrase_dir_spread().get(key, 0)
+    # `norm_key(phrase)`, the same key the SERVER screens on. Keying this on
+    # the stored alias key instead meant the two never agreed for a structured
+    # row -- so `alias review`, the tool whose whole job is to surface exactly
+    # those rows, could not reproduce the server's verdict on them.
+    spread = store.phrase_dir_spread(
+        other_dir=cfg.other_dir).get(norm_key(phrase), 0)
     why = suspicious_alias_key(phrase, key=key, dir_names=names, site=site,
                                spread=spread)
     if why:
@@ -286,11 +292,12 @@ def cmd_alias_review(args, cfg=None, store=None) -> int:
     rows = store.alias_rows()
     root = cfg.library_root
     names = DirIndex(root, other_dir=cfg.other_dir).names() if root else []
-    spread = store.phrase_dir_spread()
+    spread = store.phrase_dir_spread(other_dir=cfg.other_dir)
     for row in rows:
+        evidence = row["evidence"] or row["key"]
         row["suspect"] = suspicious_alias_key(
-            row["evidence"] or row["key"], key=row["key"], dir_names=names,
-            site=row["site"], spread=spread.get(row["key"], 0))
+            evidence, key=row["key"], dir_names=names,
+            site=row["site"], spread=spread.get(norm_key(evidence), 0))
         row["global"] = not row["site"]
     # Riskiest first: global scope, then flagged, then most-used.
     rows.sort(key=lambda r: (not r["global"], r["suspect"] is None,

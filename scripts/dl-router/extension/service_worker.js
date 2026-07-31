@@ -217,9 +217,10 @@ export function recordCapture(payload, sender) {
       ? payload.tags.filter((t) => typeof t === "string").slice(0, 64) : [],
     og: payload.og && typeof payload.og === "object" ? payload.og : {},
     tabId: sender?.tab?.id,
-    // The tab this one was opened from. It is the ONLY provable link between a
-    // forum thread and the file host it sent the user to, and it comes free on
-    // the sender -- the content script has no way to know it.
+    // The tab this one was opened from. It NARROWS the referrer carry's href
+    // proof (see carryReferrer) -- it is not itself a proof, and the branch
+    // that treated it as one was deleted. It comes free on the sender; the
+    // content script has no way to know it.
     openerTabId: sender?.tab?.openerTabId,
     ts: Date.now(),
   };
@@ -502,7 +503,7 @@ async function relocate(rel, toDir, downloadId) {
 
 async function learn(entry, chosenDir, createdNew) {
   if (!entry) return;
-  await api("POST", "/learn", {
+  const out = await api("POST", "/learn", {
     context: entry.payload,
     chosenDir,
     autoDir: entry.dir,
@@ -513,7 +514,28 @@ async function learn(entry, chosenDir, createdNew) {
     // as a flag rather than inferred from the endpoint so the rule is legible
     // on both sides, and so a future automatic caller fails closed.
     confirmed: true,
-  }, { timeoutMs: 5000 }).catch(() => {});
+  }, { timeoutMs: 5000 }).catch(() => null);
+  reportNothingLearned(out);
+}
+
+/**
+ * Tell the user when a correction taught the router NOTHING.
+ *
+ * The sidecar screens every candidate alias and returns what it refused, and
+ * nothing consumed that -- so an over-strict screen was invisible outside the
+ * sidecar journal, which is how it stayed silent. This deliberately fires only
+ * when the correction produced no alias AT ALL: a category page whose junk
+ * tags were screened while a good one was learned is working as designed and
+ * must not nag.
+ */
+export function reportNothingLearned(out) {
+  if (!out || !Array.isArray(out.skipped) || !out.skipped.length) return false;
+  if (Array.isArray(out.written) && out.written.length) return false;
+  const why = out.skipped.find((s) => s && s.why);
+  void reportFailure(
+    `Filed into ${out.dir}, but learned nothing from it`,
+    why ? String(why.why) : "every candidate was screened out");
+  return true;
 }
 
 export async function onDownloadChanged(delta) {
