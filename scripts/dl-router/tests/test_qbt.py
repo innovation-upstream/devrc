@@ -37,7 +37,7 @@ class StubQbt:
         self.calls.append((method, url, data, headers))
         if url.endswith("/auth/login"):
             return Response(self.login_status, self.login_body)
-        if url.endswith("/torrents/info"):
+        if "/torrents/info" in url:
             import json
             if self.torrents_status != 200:
                 status, self.torrents_status = self.torrents_status, 200
@@ -114,7 +114,7 @@ def test_transport_error_surfaces_as_qbterror():
 def test_non_list_torrents_info_is_rejected():
     class Weird(StubQbt):
         def __call__(self, method, url, data=None, headers=None):
-            if url.endswith("/torrents/info"):
+            if "/torrents/info" in url:
                 return Response(200, b'{"not": "a list"}')
             return super().__call__(method, url, data, headers)
 
@@ -125,7 +125,7 @@ def test_non_list_torrents_info_is_rejected():
 def test_non_json_response_is_rejected():
     class Garbage(StubQbt):
         def __call__(self, method, url, data=None, headers=None):
-            if url.endswith("/torrents/info"):
+            if "/torrents/info" in url:
                 return Response(200, b"<html>nope</html>")
             return super().__call__(method, url, data, headers)
 
@@ -279,7 +279,7 @@ def moving_client(states, *, clock=None, sleeps=None):
 
     class Walking(StubQbt):
         def __call__(self, method, url, data=None, headers=None):
-            if url.endswith("/torrents/info"):
+            if "/torrents/info" in url:
                 import json
                 state = seq.pop(0) if len(seq) > 1 else seq[0]
                 return Response(200, json.dumps(

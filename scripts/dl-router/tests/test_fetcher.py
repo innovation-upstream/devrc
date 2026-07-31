@@ -69,7 +69,7 @@ def test_submit_starts_a_running_job_in_the_target_directory(library, clock):
     job = f.submit(URL, "Jane Doe")
     assert job.state == STATE_RUNNING
     assert job.started_at == clock.now
-    assert str(library / "Jane Doe") in spawn.argvs[0]
+    assert f"home:{library / 'Jane Doe'}" in spawn.argvs[0]
 
 
 def test_job_completes_when_the_process_exits_zero(library, clock):

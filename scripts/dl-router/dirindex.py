@@ -56,8 +56,10 @@ class DirIndex:
         with it:
             for de in it:
                 try:
-                    # follow_symlinks=True on purpose: a symlinked subject dir is
-                    # a legitimate layout and should still be a routing target.
+                    # follow_symlinks=True on purpose: a symlinked subject dir
+                    # is a legitimate layout and should still be a routing
+                    # target -- PROVIDED it resolves back inside the library
+                    # root.
                     if not de.is_dir(follow_symlinks=True):
                         continue
                 except OSError as exc:
@@ -66,10 +68,28 @@ class DirIndex:
                 name = de.name
                 if name.startswith("."):
                     continue
+                # ONE invariant, honoured by every writer. safe_rel_path (used
+                # by /mkdir, /relocate and the yt-dlp fetcher) refuses a
+                # directory that resolves outside the root, so advertising one
+                # here produced a routing target that browser downloads could
+                # write through -- straight out of the library, past every
+                # containment check -- while yt-dlp refused it. Escaping
+                # symlinks are excluded and REPORTED, not silently dropped.
+                if not self._resolves_inside(de.path):
+                    errors.append(f"{name}: symlink resolves outside the root")
+                    continue
                 entries.append(DirEntry.of(name))
         entries.sort(key=lambda e: e.name)
         self._errors = errors
         return entries
+
+    def _resolves_inside(self, path) -> bool:
+        try:
+            root = Path(self.root).resolve()
+            target = Path(path).resolve()
+        except OSError:
+            return False
+        return target == root or target.is_relative_to(root)
 
     def _root_stat_mtime(self):
         try:
@@ -102,7 +122,8 @@ class DirIndex:
     # --- accessors --------------------------------------------------------- #
     def entries(self) -> list:
         self.refresh()
-        return list(self._entries)
+        with self._lock:
+            return list(self._entries)
 
     def names(self) -> list:
         return [e.name for e in self.entries()]
@@ -112,11 +133,13 @@ class DirIndex:
 
     def etag(self) -> str:
         self.refresh()
-        return self._etag
+        with self._lock:
+            return self._etag
 
     def errors(self) -> list:
         self.refresh()
-        return list(self._errors)
+        with self._lock:
+            return list(self._errors)
 
     def has(self, name: str) -> bool:
         return name in self.name_set()
@@ -129,15 +152,25 @@ class DirIndex:
         return None
 
     def snapshot(self) -> dict:
-        """The payload the extension caches (GET /dirs)."""
-        entries = self.entries()
-        return {
-            "etag": self._etag,
-            "otherDir": self.other_dir,
-            "dirs": [{"name": e.name, "key": e.key, "tokens": list(e.tokens)}
-                     for e in entries],
-            "errors": self._errors,
-        }
+        """The payload the extension caches (GET /dirs).
+
+        entries + etag + errors are read under ONE lock hold. Reading `_etag`
+        outside it was the exact invariant the locking change advertised and
+        did not deliver: a concurrent refresh could pair refresh-N's entries
+        with refresh-N+1's etag, and server.py serves that as the HTTP `ETag`
+        -- so the extension caches a stale directory list under a fresh etag
+        and its `If-None-Match` never refetches it.
+        """
+        self.refresh()
+        with self._lock:
+            return {
+                "etag": self._etag,
+                "otherDir": self.other_dir,
+                "dirs": [{"name": e.name, "key": e.key,
+                          "tokens": list(e.tokens)}
+                         for e in self._entries],
+                "errors": list(self._errors),
+            }
 
 
 class FileIndex:
@@ -158,11 +191,12 @@ class FileIndex:
         self._truncated = False
         self._loaded_at = -1.0
         self._lock = threading.RLock()
+        self._scanning = False
 
-    def _scan(self) -> dict:
+    def _scan(self):
         out: dict = {}
         count = 0
-        self._truncated = False
+        truncated = False
         # followlinks=False: never walk out of the library through a symlink.
         for dirpath, dirnames, filenames in os.walk(self.root, followlinks=False,
                                                     onerror=lambda _e: None):
@@ -171,8 +205,8 @@ class FileIndex:
                 if fname.startswith("."):
                     continue
                 if count >= self._max:
-                    self._truncated = True
-                    return out
+                    truncated = True
+                    return out, count, truncated
                 full = os.path.join(dirpath, fname)
                 try:
                     size = os.stat(full).st_size
@@ -184,22 +218,44 @@ class FileIndex:
                 if key:
                     out.setdefault(key, []).append((rel, size))
                 count += 1
-        self._count = count
-        return out
+        return out, count, truncated
 
     def refresh(self, force: bool = False) -> None:
+        """Single-flight, and the scan runs OUTSIDE the lock.
+
+        This is a whole-tree walk of a media library. Holding the lock across
+        it serialised every ThreadingHTTPServer request thread behind one scan
+        and would push /match straight past its 400 ms budget -- which is the
+        timeout that makes the extension fall back to its cached decision. One
+        thread scans; the others serve the previous (slightly stale) index,
+        which is exactly what a dedupe WARNING can tolerate.
+        """
         with self._lock:
-            if not (force or self._loaded_at < 0
-                    or (self._clock() - self._loaded_at) >= self._ttl):
+            stale = (force or self._loaded_at < 0
+                     or (self._clock() - self._loaded_at) >= self._ttl)
+            if not stale or self._scanning:
                 return
-            self._map = self._scan()
+            self._scanning = True
+        try:
+            data, count, truncated = self._scan()
+        except Exception:
+            with self._lock:
+                self._scanning = False
+            raise
+        with self._lock:
+            self._map = data
+            self._count = count
+            self._truncated = truncated
             self._loaded_at = self._clock()
+            self._scanning = False
 
     def by_name_key(self, key: str) -> list:
         self.refresh()
-        return list(self._map.get(key, ()))
+        with self._lock:
+            return list(self._map.get(key, ()))
 
     def stats(self) -> dict:
         self.refresh()
-        return {"files": self._count, "keys": len(self._map),
-                "truncated": self._truncated}
+        with self._lock:
+            return {"files": self._count, "keys": len(self._map),
+                    "truncated": self._truncated}

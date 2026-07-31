@@ -39,7 +39,7 @@ class Recorder(BaseHTTPRequestHandler):
 
     def do_GET(self):
         Recorder.seen.append(("GET", self.path, dict(self.headers), b""))
-        if self.path.endswith("/torrents/info"):
+        if "/torrents/info" in self.path:
             self._respond(b'[{"hash":"H1","name":"n","save_path":"/downloads"}]')
         elif "/torrents/files" in self.path:
             self._respond(b'[{"name":"a.mp4"}]')

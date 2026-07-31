@@ -129,14 +129,23 @@ class QbtClient:
             self.login()
 
     # --- API --------------------------------------------------------------- #
-    def torrents_info(self) -> list:
+    def torrents_info(self, hashes: str | None = None) -> list:
+        """`hashes` scopes the query to one torrent (or a `|`-joined list).
+
+        verify_seeding polls this once a second for up to five minutes; with
+        ~1000 torrents an unscoped call re-serialises the entire list every
+        time, for one state field.
+        """
         self.ensure_login()
-        resp = self._call("GET", "/torrents/info")
+        path = "/torrents/info"
+        if hashes:
+            path = f"{path}?{urllib.parse.urlencode({'hashes': hashes})}"
+        resp = self._call("GET", path)
         if resp.status == 403:
             # Session expired mid-run — one re-login, then give up.
             self._logged_in = False
             self.ensure_login()
-            resp = self._call("GET", "/torrents/info")
+            resp = self._call("GET", path)
         if resp.status != 200:
             raise QbtError(f"torrents/info: HTTP {resp.status}")
         data = resp.json()
@@ -180,7 +189,7 @@ class QbtClient:
         return data
 
     def torrent_state(self, torrent_hash: str):
-        for t in self.torrents_info():
+        for t in self.torrents_info(hashes=torrent_hash):
             if str(t.get("hash", "")).lower() == torrent_hash.lower():
                 return t.get("state")
         return None
@@ -362,12 +371,38 @@ class TorrentIndex:
     treat it as one.
     """
 
-    __slots__ = ("by_path", "complete", "errors")
+    __slots__ = ("by_path", "complete", "errors", "unknown_prefixes")
 
-    def __init__(self, by_path=None, complete=False, errors=None):
+    def __init__(self, by_path=None, complete=False, errors=None,
+                 unknown_prefixes=None):
         self.by_path = dict(by_path or {})
         self.complete = bool(complete)
         self.errors = list(errors or [])
+        # Host directory prefixes belonging to torrents whose file list could
+        # NOT be read. A path under one of these is unknown; a path outside all
+        # of them is provably not covered by any of them.
+        self.unknown_prefixes = list(unknown_prefixes or [])
+
+    def proves_absent(self, host_path: str) -> bool:
+        """True iff absence from `by_path` PROVES the path is not a torrent
+        payload.
+
+        `complete` used to be one global flag: a single failed
+        `torrents/files` call set it False forever and the backfill collapsed
+        to all-SKIP. With ~1000 torrents one transient HTTP error produced an
+        empty manifest.
+
+        A torrent's files all live under its own `save_path`, so a failed
+        listing only makes THAT subtree unknown. Everything outside it is still
+        proven.
+        """
+        if host_path in self.by_path:
+            return False
+        norm = os.path.normpath(str(host_path))
+        for prefix in self.unknown_prefixes:
+            if norm == prefix or norm.startswith(prefix.rstrip("/") + "/"):
+                return False
+        return True
 
     def get(self, key, default=None):
         return self.by_path.get(key, default)
@@ -412,8 +447,10 @@ def index_by_host_path(torrents, path_map: PathMap, *, files_for=None):
     out: dict = {}
     errors: list = []
     if path_map is None:
+        # No mapping at all: nothing anywhere can be proven.
         return TorrentIndex({}, complete=False,
-                            errors=["no host<->container path map"])
+                            errors=["no host<->container path map"],
+                            unknown_prefixes=["/"])
 
     torrents = list(torrents)
     for t in torrents:
@@ -428,19 +465,33 @@ def index_by_host_path(torrents, path_map: PathMap, *, files_for=None):
                 out.setdefault(os.path.normpath(host), t)
 
     complete = files_for is not None
-    if files_for is not None:
+    unknown: list = []
+
+    def mark_unknown(torrent, why):
+        """This torrent's files are unknown -- but only ITS subtree is."""
+        nonlocal complete
+        complete = False
+        errors.append(why)
+        save_path = str(torrent.get("save_path") or "").strip()
+        host = path_map.to_host(save_path) if save_path else None
+        # No save_path (or one outside the map) means we cannot even bound
+        # where its files are, so nothing anywhere can be proven.
+        unknown.append(os.path.normpath(host) if host else "/")
+
+    if files_for is None:
+        for t in torrents:
+            mark_unknown(t, "file listing not requested")
+    else:
         for t in torrents:
             thash = str(t.get("hash") or "").strip()
             save = str(t.get("save_path") or "").strip()
             if not thash or not save:
-                complete = False
-                errors.append(f"{thash[:12] or '?'}: no hash or save_path")
+                mark_unknown(t, f"{thash[:12] or '?'}: no hash or save_path")
                 continue
             try:
                 entries = files_for(thash) or []
             except Exception as exc:  # noqa: BLE001 -- any failure = unproven
-                complete = False
-                errors.append(f"{thash[:12]}: {exc}")
+                mark_unknown(t, f"{thash[:12]}: {exc}")
                 continue
             for entry in entries:
                 rel = str((entry or {}).get("name") or "").strip()
@@ -450,4 +501,5 @@ def index_by_host_path(torrents, path_map: PathMap, *, files_for=None):
                 if host:
                     out.setdefault(os.path.normpath(host), t)
 
-    return TorrentIndex(out, complete=complete, errors=errors)
+    return TorrentIndex(out, complete=complete, errors=errors,
+                        unknown_prefixes=sorted(set(unknown)))

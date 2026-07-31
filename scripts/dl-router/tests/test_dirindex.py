@@ -52,11 +52,33 @@ def test_unusual_but_legal_directory_names_are_indexed(library, clock, name):
     assert idx.has(name)
 
 
-def test_symlinked_directory_is_a_routing_target(library, tmp_path, clock):
+def test_a_symlinked_directory_INSIDE_the_root_is_a_routing_target(library,
+                                                                   clock):
+    """A symlinked subject dir is a legitimate layout, as long as it resolves
+    back inside the library."""
+    (library / "real-target").mkdir()
+    (library / "linked").symlink_to(library / "real-target",
+                                    target_is_directory=True)
+    assert "linked" in DirIndex(library, clock=clock).names()
+
+
+def test_a_symlink_ESCAPING_the_root_is_not_a_routing_target(library, tmp_path,
+                                                             clock):
+    """ONE invariant, honoured by every writer.
+
+    safe_rel_path (used by /mkdir, /relocate and the yt-dlp fetcher) refuses a
+    directory that resolves outside the root, so advertising one here produced
+    a target that browser downloads could write THROUGH -- out of the library,
+    past every containment check -- while yt-dlp refused it. The two halves
+    disagreed about the same directory."""
     outside = tmp_path / "elsewhere"
     outside.mkdir()
-    (library / "linked").symlink_to(outside, target_is_directory=True)
-    assert "linked" in DirIndex(library, clock=clock).names()
+    (library / "escape-link").symlink_to(outside, target_is_directory=True)
+    idx = DirIndex(library, clock=clock)
+    assert "escape-link" not in idx.names()
+    # Excluded, not silently dropped: it shows up in /dirs' errors and in
+    # `dl-route status`.
+    assert any("escape-link" in e for e in idx.errors())
 
 
 def test_broken_symlink_is_skipped(library, clock):
@@ -189,7 +211,7 @@ def test_file_index_ttl(library, clock, monkeypatch):
     idx = FileIndex(library, clock=clock, ttl=10.0)
     idx.refresh()
     calls = []
-    monkeypatch.setattr(idx, "_scan", lambda: (calls.append(1), {})[1])
+    monkeypatch.setattr(idx, "_scan", lambda: (calls.append(1), ({}, 0, False))[1])
     idx.refresh()
     assert calls == []
     clock.advance(11)

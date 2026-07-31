@@ -21,9 +21,11 @@ import {
   buildMatchPayload, correlateCapture, formatDup, handleDetermining,
   localDecide,
 } from "./route_core.js";
-import { isHttpUrl, relPathFromAbsolute, sanitizeDirName } from "./sanitize.js";
+import {
+  baseName, isHttpUrl, relPathFromAbsolute, sanitizeDirName,
+} from "./sanitize.js";
+import { DEFAULT_PORT, manifestPort as readManifestPort } from "./port.js";
 
-const DEFAULT_PORT = 8791;
 const CAPTURE_LIMIT = 40;
 const SNAPSHOT_REFRESH_MINUTES = 5;
 const TOAST_W = 420;
@@ -61,23 +63,9 @@ export function ready() {
 }
 
 // --- config + transport ---------------------------------------------------- //
-/**
- * The sidecar port, read from the MANIFEST rather than from storage.
- *
- * `host_permissions` is a hard pin (`http://127.0.0.1:8791/*`) that an options
- * page cannot change, so a configurable port setting was a footgun: changing
- * it silently bricked every fetch with a permissions error and no UI said so.
- * One source of truth -- edit manifest.json to move the port.
- */
+/** The sidecar port. See port.js -- the manifest is the only source of truth. */
 export function manifestPort() {
-  try {
-    const perms = chrome.runtime.getManifest()?.host_permissions || [];
-    for (const perm of perms) {
-      const m = /^https?:\/\/127\.0\.0\.1:(\d+)\//.exec(String(perm));
-      if (m) return Number(m[1]);
-    }
-  } catch { /* fall through */ }
-  return DEFAULT_PORT;
+  return readManifestPort(chrome);
 }
 
 export async function loadConfig() {
@@ -399,6 +387,11 @@ export async function openPicker(info) {
  * remembered and applied when onChanged reports completion.
  */
 export async function applyChoice(downloadId, chosenDir, { createdNew } = {}) {
+  // A cold-woken worker has no config and no snapshot yet, so knownDirs() is
+  // empty and EVERY pick would be thrown away as "unsafe". The picker is a
+  // separate popup window the user can leave open past the ~30s idle teardown,
+  // so this is the normal case, not an edge one.
+  await ready();
   const entry = state.pending.get(downloadId);
   const known = new Set([...knownDirs(), otherDir()]);
   if (createdNew) {
@@ -421,38 +414,79 @@ export async function applyChoice(downloadId, chosenDir, { createdNew } = {}) {
     // is nothing here this router may move. Refuse rather than guess.
     const rel = relPathFor(item);
     if (rel && rel.split("/")[0] !== safe) {
-      await api("POST", "/relocate",
-        { fromRelPath: rel, toDir: safe, downloadId },
-        { timeoutMs: 10000 });
+      // Deliberately NOT caught: a refused relocate must reach the caller (and
+      // the user) rather than being reported as a success, and the alias below
+      // must not be learned from a move that did not happen.
+      await relocate(rel, safe, downloadId, item);
     }
   } else if (entry) {
-    entry.wanted = safe;   // applied by onChanged when the download completes
+    // Applied by onChanged when the download completes -- along with the
+    // learn, so neither happens unless the move did.
+    entry.wanted = safe;
+    entry.wantedCreatedNew = Boolean(createdNew);
     state.pending.set(downloadId, entry);
+    return { ok: true, dir: safe, deferred: true };
   }
-  if (entry) {
-    await api("POST", "/learn", {
-      context: entry.payload,
-      chosenDir: safe,
-      autoDir: entry.dir,
-      createdNew: Boolean(createdNew),
-    }, { timeoutMs: 5000 }).catch(() => {});
-  }
+  await learn(entry, safe, createdNew);
   return { ok: true, dir: safe };
+}
+
+/**
+ * Ask the sidecar to move a completed download.
+ *
+ * `downloadFilename` lets the sidecar bind its routing decision to THIS file:
+ * it proves ownership by name + write time, not by which directory the file
+ * happens to be in. It also covers the case where the sidecar was down when
+ * the download was decided, so there is no routing decision on record at all.
+ */
+async function relocate(rel, toDir, downloadId, item) {
+  return api("POST", "/relocate", {
+    fromRelPath: rel,
+    toDir,
+    downloadId,
+    downloadFilename: baseName(item?.filename || ""),
+  }, { timeoutMs: 10000 });
+}
+
+async function learn(entry, chosenDir, createdNew) {
+  if (!entry) return;
+  await api("POST", "/learn", {
+    context: entry.payload,
+    chosenDir,
+    autoDir: entry.dir,
+    createdNew: Boolean(createdNew),
+  }, { timeoutMs: 5000 }).catch(() => {});
 }
 
 export async function onDownloadChanged(delta) {
   if (!delta || delta.state?.current !== "complete") return;
+  await ready();
   const entry = state.pending.get(delta.id);
   if (!entry) return;
   if (entry.wanted && entry.wanted !== entry.dir) {
     const items = await chrome.downloads.search({ id: delta.id });
     const item = items && items[0];
     const rel = relPathFor(item);
+    let moved = false;
     if (rel) {
-      await api("POST", "/relocate",
-        { fromRelPath: rel, toDir: entry.wanted, downloadId: delta.id },
-        { timeoutMs: 10000 })
-        .catch(() => {});
+      try {
+        await relocate(rel, entry.wanted, delta.id, item);
+        moved = true;
+      } catch (err) {
+        // This `.catch(() => {})` is how a completely dead correction path
+        // stayed invisible: the move was refused, the alias was written
+        // anyway, and the UI reported success. Surface it, and do not learn
+        // from a move that never happened.
+        await reportFailure(
+          `Could not move the download to ${entry.wanted}`, String(err));
+      }
+    } else {
+      await reportFailure(
+        `Could not move the download to ${entry.wanted}`,
+        "the file did not land inside the library root");
+    }
+    if (moved) {
+      await learn(entry, entry.wanted, entry.wantedCreatedNew);
     }
   }
   // Keep the entry briefly so a late "change" click can still relocate.
@@ -595,39 +629,68 @@ export async function reportFailure(title, detail) {
 }
 
 // --- messaging ------------------------------------------------------------- //
+/**
+ * EVERY branch that reads config or the snapshot must await `ready()` first.
+ *
+ * It did not, and the consequences were not theoretical: the toast and the
+ * picker are separate popup WINDOWS the user can leave open past the ~30 s MV3
+ * idle teardown, so a message routinely arrives at a cold-woken worker where
+ * `state.config.token` is `""` and `state.snapshot` is `null`. Then:
+ *
+ *   * `dlr:choose` -> applyChoice computed knownDirs() from a null snapshot
+ *     and threw the user's pick away as "refusing unsafe directory";
+ *   * `dlr:snapshot` -> `Bearer ` -> 401 -> the picker cleared its loading
+ *     state with an EMPTY directory list, so typing a name and pressing Enter
+ *     created a new directory instead of selecting the existing match. That is
+ *     finding 16 restored by a different route.
+ *
+ * `dlr:rules` answers asynchronously for the same reason; returning `true`
+ * keeps the message channel open for the late `sendResponse`.
+ */
 export function onMessage(msg, sender, sendResponse) {
   if (!msg || typeof msg !== "object") return false;
   if (msg.type === "dlr:capture") {
+    // Pure bookkeeping into a module-global buffer: no config, no snapshot,
+    // and it must not be delayed or a fast click is lost.
     recordCapture(msg.payload, sender);
     return false;
   }
   if (msg.type === "dlr:choose") {
-    applyChoice(msg.downloadId, msg.dir, { createdNew: msg.createdNew })
+    ready()
+      .then(() => applyChoice(msg.downloadId, msg.dir,
+        { createdNew: msg.createdNew }))
       .then((r) => sendResponse(r))
       .catch((e) => sendResponse({ ok: false, error: String(e) }));
     return true;   // async response
   }
   if (msg.type === "dlr:snapshot") {
-    refreshSnapshot()
-      .then(() => sendResponse({ ok: true, snapshot: state.snapshot }))
+    ready()
+      .then(() => refreshSnapshot())
+      .then(() => sendResponse({ ok: Boolean(state.snapshot),
+        snapshot: state.snapshot }))
       .catch(() => sendResponse({ ok: Boolean(state.snapshot),
         snapshot: state.snapshot }));
     return true;
   }
   if (msg.type === "dlr:rules") {
     // Content scripts ask for the per-site capture rules on load. Answer from
-    // the cached snapshot; never block on the network here.
-    sendResponse({ siteRules: state.snapshot?.siteRules || {} });
-    return false;
+    // the cached snapshot -- but only once there IS one; never block on the
+    // network here.
+    ready()
+      .then(() => sendResponse({ siteRules: state.snapshot?.siteRules || {} }))
+      .catch(() => sendResponse({ siteRules: {} }));
+    return true;
   }
   if (msg.type === "dlr:repick") {
-    const entry = state.pending.get(msg.downloadId);
-    void openPicker({
-      downloadId: msg.downloadId,
-      dir: entry?.dir || otherDir(),
-      reason: entry?.decision?.reason || "",
-      dup: formatDup(entry?.decision?.dup) || "",
-      suggestNew: entry?.decision?.suggestNew || "",
+    void ready().then(() => {
+      const entry = state.pending.get(msg.downloadId);
+      return openPicker({
+        downloadId: msg.downloadId,
+        dir: entry?.dir || otherDir(),
+        reason: entry?.decision?.reason || "",
+        dup: formatDup(entry?.decision?.dup) || "",
+        suggestNew: entry?.decision?.suggestNew || "",
+      });
     });
     return false;
   }

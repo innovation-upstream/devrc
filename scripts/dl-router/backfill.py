@@ -271,20 +271,25 @@ def plan(root, *, store, dir_names, matcher: Matcher | None = None,
     #   * torrents + map + every file list read -> yes.
     #   * any file list failed / not requested   -> NO. This is the case that
     #     used to silently become `fs`.
-    if not qbt_known:
-        proven_not_torrent = False
-    elif not torrents:
-        proven_not_torrent = True
-    elif not path_map:
-        proven_not_torrent = False
-    else:
-        proven_not_torrent = torrent_index.complete
-    if qbt_known and torrents and path_map and not proven_not_torrent:
+    # Proof is PER FILE, not per run. A single failed `torrents/files` call
+    # used to set one global flag and collapse the whole manifest to SKIP --
+    # with ~1000 torrents, one transient HTTP error produced an empty
+    # manifest. A torrent's files live under its own save_path, so a failed
+    # listing only makes THAT subtree unknown (see TorrentIndex.proves_absent).
+    def proves_absent(host_path: str) -> bool:
+        if not qbt_known:
+            return False
+        if not torrents:
+            return True          # no torrents at all: positive proof
+        if not path_map:
+            return False
+        return torrent_index.proves_absent(host_path)
+
+    if qbt_known and torrents and path_map and not torrent_index.complete:
         notes.append(
-            "torrent file lists incomplete — a file that is merely ABSENT from "
-            "the index cannot be proven safe to rename, so no row is `fs`"
-            + (f" ({len(torrent_index.errors)} listing error(s))"
-               if torrent_index.errors else ""))
+            f"{len(torrent_index.errors)} torrent file listing(s) unavailable — "
+            f"files under those torrents' save paths cannot be proven safe to "
+            f"rename and stay SKIP; the rest of the tree is unaffected")
 
     known = set(dir_names)
     rows = []
@@ -318,13 +323,14 @@ def plan(root, *, store, dir_names, matcher: Matcher | None = None,
                 # as NEW (directories are still never created silently).
                 pending_new = alias_target
 
-        torrent = torrent_index.get(os.path.normpath(str(full)))
+        host_path = os.path.normpath(str(full))
+        torrent = torrent_index.get(host_path)
         thash = str(torrent.get("hash", "")) if torrent else ""
         # FAIL CLOSED. `MOVE_QBT if torrent else MOVE_FS` turned an index MISS
         # into a plain rename of what may well be a live seeding payload.
         if torrent:
             move = MOVE_QBT
-        elif proven_not_torrent:
+        elif proves_absent(host_path):
             move = MOVE_FS
         else:
             move = MOVE_UNKNOWN
@@ -515,12 +521,21 @@ class ApplyError(RuntimeError):
 class LiveState:
     """qBittorrent as it is AT APPLY TIME, not as the plan remembered it."""
 
-    __slots__ = ("index", "path_map", "proven_not_torrent")
+    __slots__ = ("index", "path_map", "no_torrents")
 
-    def __init__(self, index, path_map, proven_not_torrent):
+    def __init__(self, index, path_map, no_torrents):
         self.index = index
         self.path_map = path_map
-        self.proven_not_torrent = proven_not_torrent
+        self.no_torrents = no_torrents
+
+    def proves_absent(self, host_path: str) -> bool:
+        """Per PATH, not per run -- one unreadable torrent must not veto the
+        whole apply (see TorrentIndex.proves_absent)."""
+        if self.no_torrents:
+            return True
+        if self.path_map is None:
+            return False
+        return self.index.proves_absent(host_path)
 
 
 def derive_live_state(client, root: Path, host_roots=()) -> LiveState:
@@ -537,13 +552,7 @@ def derive_live_state(client, root: Path, host_roots=()) -> LiveState:
     path_map = qbt_mod.derive_path_map(torrents, roots, library_root=root)
     files_for = getattr(client, "torrents_files", None)
     index = qbt_mod.index_by_host_path(torrents, path_map, files_for=files_for)
-    if not torrents:
-        proven = True                  # no torrents at all: positive proof
-    elif path_map is None:
-        proven = False
-    else:
-        proven = index.complete
-    return LiveState(index, path_map, proven)
+    return LiveState(index, path_map, no_torrents=not torrents)
 
 
 def apply(manifest, *, client=None, path_map=None, dry_run: bool = False,
@@ -579,17 +588,29 @@ def apply(manifest, *, client=None, path_map=None, dry_run: bool = False,
     live = None
     if todo and revalidate:
         if client is None:
-            raise ApplyError(
-                "apply must re-validate against live qBittorrent before moving "
-                "anything, and no client was supplied. The manifest's `move` "
-                "and `torrent_hash` are plan-time values; a torrent can have "
-                "been added, removed or moved since.")
-        live = derive_live_state(client, root, host_roots)
-        if live.path_map is not None:
-            path_map = live.path_map
-        results["ops"].append(
-            f"revalidated against qBittorrent: {len(live.index)} indexed path(s), "
-            f"proven_non_torrent={live.proven_not_torrent}")
+            if dry_run:
+                # --dry-run moves nothing, and it is the step the docs tell you
+                # to run FIRST. Requiring credentials for a preview blocked the
+                # review gate itself. Say plainly that the preview is unchecked.
+                results["ops"].append(
+                    "DRY RUN WITHOUT qBittorrent: this preview shows the "
+                    "manifest's plan-time classification, NOT a re-validated "
+                    "one. A real apply will re-derive and may differ.")
+            else:
+                raise ApplyError(
+                    "apply must re-validate against live qBittorrent before "
+                    "moving anything, and no client was supplied. The "
+                    "manifest's `move` and `torrent_hash` are plan-time "
+                    "values; a torrent can have been added, removed or moved "
+                    "since.")
+        else:
+            live = derive_live_state(client, root, host_roots)
+            if live.path_map is not None:
+                path_map = live.path_map
+            results["ops"].append(
+                f"revalidated against qBittorrent: {len(live.index)} indexed "
+                f"path(s), {len(live.index.unknown_prefixes)} unproven "
+                f"subtree(s)")
 
     for idx, row in enumerate(todo):
         try:
@@ -623,7 +644,7 @@ def _apply_row(row: PlanRow, root: Path, *, client, path_map, dry_run,
         if torrent is not None:
             move = MOVE_QBT
             torrent_hash = str(torrent.get("hash") or "")
-        elif live.proven_not_torrent:
+        elif live.proves_absent(os.path.normpath(str(src))):
             move = MOVE_FS
             torrent_hash = ""
         else:

@@ -9,7 +9,8 @@ import assert from "node:assert/strict";
 globalThis.DL_ROUTER_NO_AUTOSTART = true;
 
 import {
-  ENTRY_DIR, ENTRY_NEW, filterEntries, initialState, mount, reduce, titleCase,
+  ENTRY_DIR, ENTRY_NEW, SNAPSHOT_ATTEMPTS, SNAPSHOT_RETRY_MS, filterEntries,
+  initialState, mount, reduce, titleCase,
 } from "../extension/picker.js";
 import { makeDoc } from "./fake_page.mjs";
 
@@ -363,4 +364,122 @@ test("mount: an empty snapshot still offers the new-directory entry", () => {
   const choose = sent.find((m) => m.type === "dlr:choose");
   assert.deepEqual(choose, { type: "dlr:choose", downloadId: 7,
     dir: "Aster Vale", createdNew: true });
+});
+
+
+// --- a FAILED snapshot is not an empty library ------------------------------ //
+//
+// The picker is a separate popup the user can leave open past MV3's ~30 s idle
+// teardown. On a cold-woken worker the /dirs fetch 401s, and treating that as
+// "there are no directories" makes the new-directory proposal the only entry --
+// so typing a name and pressing Enter CREATES one instead of selecting the
+// existing match. Finding 16, back through a different door.
+test("a failed snapshot does not clear loading with an empty list", () => {
+  let state = initialState({ dirs: [], loading: true });
+  state = drive(state, [input("smith"), key("Enter")]);
+  assert.equal(state.pendingEnter, true);
+  state = reduce(state, { type: "dirs-failed" });
+  assert.equal(state.failed, true);
+  assert.equal(state.done, null, "a pending Enter must not become a creation");
+  assert.equal(state.pendingEnter, false);
+});
+
+test("Enter does nothing at all once the list is known to be unavailable", () => {
+  let state = initialState({ dirs: [], loading: true });
+  state = reduce(state, { type: "dirs-failed" });
+  state = drive(state, [input("aster nightingale"), key("Enter")]);
+  assert.equal(state.done, null, "'no answer' is not 'no directories exist'");
+});
+
+test("Escape still works when the list could not be loaded", () => {
+  let state = initialState({ dirs: [], loading: true, otherDir: "other" });
+  state = reduce(state, { type: "dirs-failed" });
+  state = drive(state, [key("Escape")]);
+  assert.deepEqual(state.done, { action: "cancel", dir: "other" });
+});
+
+test("a GENUINELY empty library does clear loading", () => {
+  // ok-with-no-dirs is a real answer; creating is then the only sane action.
+  let state = initialState({ dirs: [], loading: true, suggestNew: "Aster Vale" });
+  state = reduce(state, { type: "dirs", dirs: [] });
+  assert.equal(state.loading, false);
+  assert.equal(state.failed, false);
+  state = drive(state, [key("Enter")]);
+  assert.deepEqual(state.done,
+    { action: "choose", dir: "Aster Vale", createdNew: true });
+});
+
+test("mount retries a failed snapshot rather than giving up on the first no", async () => {
+  const doc = makeDoc(PAGE_IDS, { search: "?id=7" });
+  const sent = [];
+  let answers = 0;
+  const chromeApi = {
+    runtime: {
+      sendMessage: (msg, cb) => {
+        sent.push(msg);
+        if (typeof cb === "function") {
+          answers += 1;
+          // The first two answers are what a cold worker gives.
+          if (answers <= 2) cb({ ok: false, snapshot: null });
+          else cb({ ok: true, snapshot: { dirs: DIRS.map((name) => ({ name })) } });
+        }
+        return Promise.resolve({ ok: true });
+      },
+    },
+  };
+  mount(doc, chromeApi, { closeWindow: () => {} });
+  assert.match(doc.getElementById("list").textContent, /Loading directories/);
+  await new Promise((r) => setTimeout(r, SNAPSHOT_RETRY_MS * 3 + 60));
+  assert.ok(answers >= 3, `only asked ${answers} times`);
+  assert.match(doc.getElementById("list").textContent, /john-smith/);
+});
+
+test("mount: typing + Enter while the worker is cold selects once it wakes", async () => {
+  const doc = makeDoc(PAGE_IDS, { search: "?id=7" });
+  const sent = [];
+  let answers = 0;
+  const chromeApi = {
+    runtime: {
+      sendMessage: (msg, cb) => {
+        sent.push(msg);
+        if (typeof cb === "function") {
+          answers += 1;
+          if (answers === 1) cb({ ok: false, snapshot: null });
+          else cb({ ok: true, snapshot: { dirs: DIRS.map((name) => ({ name })) } });
+        }
+        return Promise.resolve({ ok: true });
+      },
+    },
+  };
+  mount(doc, chromeApi, { closeWindow: () => {} });
+  doc.getElementById("q").value = "smith";
+  doc.getElementById("q").fire("input");
+  doc.fire("keydown", { key: "Enter" });
+  assert.equal(sent.filter((m) => m.type === "dlr:choose").length, 0);
+  await new Promise((r) => setTimeout(r, SNAPSHOT_RETRY_MS * 2 + 60));
+  const choose = sent.find((m) => m.type === "dlr:choose");
+  assert.deepEqual(choose,
+    { type: "dlr:choose", downloadId: 7, dir: "john-smith", createdNew: false },
+    "a cold worker must not turn the user's selection into a creation");
+});
+
+test("mount gives up eventually and says so, without creating anything", async () => {
+  const doc = makeDoc(PAGE_IDS, { search: "?id=7" });
+  const sent = [];
+  const chromeApi = {
+    runtime: {
+      sendMessage: (msg, cb) => {
+        sent.push(msg);
+        if (typeof cb === "function") cb({ ok: false, snapshot: null });
+        return Promise.resolve({ ok: true });
+      },
+    },
+  };
+  mount(doc, chromeApi, { closeWindow: () => {} });
+  doc.getElementById("q").value = "smith";
+  doc.getElementById("q").fire("input");
+  doc.fire("keydown", { key: "Enter" });
+  await new Promise((r) => setTimeout(r, SNAPSHOT_RETRY_MS * (SNAPSHOT_ATTEMPTS + 2)));
+  assert.equal(sent.filter((m) => m.type === "dlr:choose").length, 0);
+  assert.match(doc.getElementById("list").textContent, /Could not reach/);
 });

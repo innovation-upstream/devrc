@@ -67,7 +67,15 @@ MIGRATIONS = {
     # a routing decision to the browser's DownloadItem, and `routed_files` is
     # the ledger of paths this router is allowed to move.
     2: [
-        "ALTER TABLE routes ADD COLUMN download_id TEXT NOT NULL DEFAULT ''",
+        # `ADD_COLUMN_IF_MISSING` rather than a bare ALTER: sqlite3 autocommits
+        # DDL, so a crash between the ALTER and the `PRAGMA user_version` bump
+        # left the column present with the version still at 1 -- and every
+        # subsequent open then raised `duplicate column name: download_id`.
+        # server.py constructs the Store unguarded, so that is a
+        # `Restart=always` loop: exactly the failure load_degraded() exists to
+        # prevent, reintroduced one layer down.
+        ("ADD_COLUMN_IF_MISSING", "routes", "download_id",
+         "TEXT NOT NULL DEFAULT ''"),
         "CREATE INDEX IF NOT EXISTS routes_download ON routes(download_id)",
         """CREATE TABLE IF NOT EXISTS routed_files (
               rel_path    TEXT PRIMARY KEY,
@@ -123,13 +131,35 @@ class Store:
         self._local.conn = None
 
     # --- schema ------------------------------------------------------------ #
+    def _has_column(self, table: str, column: str) -> bool:
+        return any(row[1] == column
+                   for row in self.conn.execute(f"PRAGMA table_info({table})"))
+
+    def _run_migration_step(self, step) -> None:
+        """Apply one migration step. Every step must be RE-RUNNABLE.
+
+        sqlite3 autocommits DDL, so there is no transaction wrapping a
+        migration and a crash can leave it half-applied. Each statement is
+        therefore either `IF NOT EXISTS` or guarded here.
+        """
+        if isinstance(step, tuple):
+            kind = step[0]
+            if kind == "ADD_COLUMN_IF_MISSING":
+                _, table, column, decl = step
+                if not self._has_column(table, column):
+                    self.conn.execute(
+                        f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
+                return
+            raise RuntimeError(f"unknown migration step: {kind}")
+        self.conn.execute(step)
+
     def migrate(self) -> int:
         conn = self.conn
         cur = conn.execute("PRAGMA user_version")
         version = int(cur.fetchone()[0])
         for target in range(version + 1, SCHEMA_VERSION + 1):
-            for stmt in MIGRATIONS[target]:
-                conn.execute(stmt)
+            for step in MIGRATIONS[target]:
+                self._run_migration_step(step)
             conn.execute(f"PRAGMA user_version={target}")
             conn.commit()
         return SCHEMA_VERSION

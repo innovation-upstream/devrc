@@ -17,6 +17,12 @@ import { contentTokens, normKey } from "./route_core.js";
 export const ENTRY_NEW = "new";
 export const ENTRY_DIR = "dir";
 
+// How hard mount() tries to get the directory list before giving up. A cold
+// service worker needs one storage read; these bounds cover a slow wake without
+// leaving the window unusable forever.
+export const SNAPSHOT_ATTEMPTS = 8;
+export const SNAPSHOT_RETRY_MS = 300;
+
 /** Title Case a free-typed name for a new-directory proposal. */
 export function titleCase(phrase) {
   return String(phrase).split(/\s+/).filter(Boolean).map((word) => {
@@ -87,6 +93,7 @@ export function initialState({ dirs = [], suggestNew = "", downloadId = null,
     // `loading` = the directory list has not arrived from the sidecar yet.
     // While it is set, Enter is DEFERRED rather than acted on: see reduce().
     loading: Boolean(loading),
+    failed: false,
     pendingEnter: false,
     query: "", index: 0, done: null,
   };
@@ -105,6 +112,16 @@ export function reduce(state, event) {
     next.query = String(event.value ?? "");
     next.entries = filterEntries(state.dirs, next.query, state.suggestNew);
     next.index = 0;
+    return next;
+  }
+  if (event.type === "dirs-failed") {
+    // Could not get the list at all. Stay OUT of the "loading" state so the
+    // window is not stuck, but do NOT pretend the library is empty: a pending
+    // Enter is dropped rather than silently turned into a directory creation.
+    next.loading = false;
+    next.failed = true;
+    next.pendingEnter = false;
+    next.entries = [];
     return next;
   }
   if (event.type === "dirs") {
@@ -131,6 +148,9 @@ export function reduce(state, event) {
       return next;
     }
     if (key === "Enter") {
+      // Nothing may be chosen when the directory list could not be loaded --
+      // "no answer" is not "no directories exist".
+      if (state.failed) return state;
       // THE RACE. mount() starts with `dirs: []` and fills it from an async
       // `dlr:snapshot` round-trip, and the window opens FOCUSED. Typing a query
       // and hitting Enter before the answer landed used to CREATE a new
@@ -201,10 +221,12 @@ export function mount(doc, chromeApi, { closeWindow } = {}) {
 
   const render = () => {
     list.textContent = "";
-    if (state.loading) {
+    if (state.loading || state.failed) {
       const li = doc.createElement("li");
-      li.textContent = "Loading directories...";
-      li.className = "row loading";
+      li.textContent = state.failed
+        ? "Could not reach the sidecar. Esc to leave it where it is."
+        : "Loading directories...";
+      li.className = state.failed ? "row failed" : "row loading";
       list.appendChild(li);
       return;
     }
@@ -247,16 +269,43 @@ export function mount(doc, chromeApi, { closeWindow } = {}) {
     }
   });
 
-  chromeApi.runtime.sendMessage({ type: "dlr:snapshot" }, (resp) => {
-    const dirs = (resp?.snapshot?.dirs || [])
-      .map((d) => d && d.name)
-      .filter((n) => typeof n === "string" && n);
-    apply({ type: "dirs", dirs });
-  });
+  // Asking for the snapshot, with retries.
+  //
+  // A FAILED answer is not an empty library. If the service worker was cold
+  // when this popup asked, its token was still `""` and the /dirs fetch 401'd;
+  // treating that as "there are no directories" makes the new-directory
+  // proposal the only entry, so typing a name and pressing Enter CREATES one
+  // instead of selecting the existing match -- the exact footgun the deferred
+  // Enter above exists to prevent, re-entered through the back door.
+  //
+  // So: only leave the loading state on a snapshot we actually got. `ok` is
+  // false when the worker could not answer; a genuinely empty library answers
+  // ok with an empty list, and that does clear loading.
+  let attempts = 0;
+  const askForDirs = () => {
+    attempts += 1;
+    chromeApi.runtime.sendMessage({ type: "dlr:snapshot" }, (resp) => {
+      const usable = Boolean(resp && resp.ok && resp.snapshot
+        && Array.isArray(resp.snapshot.dirs));
+      if (!usable) {
+        if (attempts < SNAPSHOT_ATTEMPTS) {
+          setTimeout(askForDirs, SNAPSHOT_RETRY_MS);
+        } else {
+          apply({ type: "dirs-failed" });
+        }
+        return;
+      }
+      const dirs = resp.snapshot.dirs
+        .map((d) => d && d.name)
+        .filter((n) => typeof n === "string" && n);
+      apply({ type: "dirs", dirs });
+    });
+  };
+  askForDirs();
   render();
   input.focus();
 
-  return { state: () => state, apply };
+  return { state: () => state, apply, retry: askForDirs };
 }
 
 if (typeof document !== "undefined" && typeof chrome !== "undefined"

@@ -38,10 +38,13 @@ const FORMAT_CONTROLS = new Set(
    0x200b, 0x200c, 0x200d, 0xfeff].map((c) => String.fromCharCode(c)),
 );
 
-// Legal in a POSIX filename, but `:` is the separator in yt-dlp's
-// `--paths TYPE:PATH` (see fetcher.py), so a directory name containing one is
-// silently mis-parsed into a type selector plus a truncated path.
-const HOSTILE_PUNCTUATION = new Set([":"]);
+// NOTE ON `:` -- deliberately NOT rejected. It was, briefly, because yt-dlp's
+// `--paths TYPE:PATH` looked like it would mis-parse it. But this rule is
+// GLOBAL (spec section 6.3), so rejecting `:` made a directory such as
+// "Series: Volume 1" appear in /dirs while being impossible to select, learn
+// or move into. The quirk belongs at yt-dlp's argv boundary, where
+// fetcher.build_argv now pins the --paths type explicitly. safety.py carries
+// the same note.
 
 /**
  * C0 controls, DEL, and the C1 range (0x80-0x9f).
@@ -64,18 +67,12 @@ function hasFormatControl(s) {
   return false;
 }
 
-function hasHostilePunctuation(s) {
-  for (const ch of s) if (HOSTILE_PUNCTUATION.has(ch)) return true;
-  return false;
-}
-
 /** True iff `name` is a single, safe path component. */
 export function isSafeDirName(name) {
   if (typeof name !== "string") return false;
   if (name.length === 0 || name.length > MAX_DIR_NAME) return false;
   if (name === "." || name === "..") return false;
   if (name.includes("/") || name.includes("\\")) return false;
-  if (hasHostilePunctuation(name)) return false;
   // NUL is < 0x20 so hasControl covers it; spaces are legitimate ("Jane Doe").
   if (hasControl(name)) return false;
   if (hasFormatControl(name)) return false;
@@ -108,8 +105,7 @@ export function sanitizeFileName(name, fallback = "download") {
   base = base.normalize("NFC");
   let cleaned = "";
   for (const ch of base) {
-    if (hasControl(ch) || FORMAT_CONTROLS.has(ch)
-        || HOSTILE_PUNCTUATION.has(ch)) continue;
+    if (hasControl(ch) || FORMAT_CONTROLS.has(ch)) continue;
     cleaned += ch;
   }
   // ORDER MATTERS and must match safety.py exactly: collapse whitespace, then

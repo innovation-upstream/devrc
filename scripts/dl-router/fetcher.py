@@ -45,7 +45,15 @@ def build_argv(url: str, dest_dir, *, ytdlp_bin: str = "yt-dlp",
         "--no-continue",
         "--no-overwrites",
         "--no-progress",
-        "--paths", str(dest_dir),
+        # `home:` pins the --paths TYPE explicitly. yt-dlp parses this argument
+        # as `[TYPE:]PATH` and only treats a prefix as a TYPE when it matches a
+        # known one, so an absolute path is already safe -- but stating the
+        # type removes the ambiguity entirely, which is what lets a directory
+        # name legitimately contain a colon ("Series: Volume 1"). The global
+        # name rule (safety.py / sanitize.js) therefore does NOT have to reject
+        # `:`, and must not: doing so made such a directory appear in /dirs
+        # while being impossible to route into.
+        "--paths", f"home:{dest_dir}",
         "-o", str(output_template),
     ]
     if cookies_from_browser:

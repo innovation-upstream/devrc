@@ -14,21 +14,12 @@
 // actually allows -- one source of truth.
 //
 // Everything is exported and `mount()` takes its document + chrome, so the page
-// is testable headlessly (it had zero coverage).
+// is testable headlessly (it had zero coverage). The port rule itself lives in
+// port.js so this file and the service worker cannot drift apart.
 
-export const DEFAULT_PORT = 8791;
+import { DEFAULT_PORT, manifestPort } from "./port.js";
 
-/** The port the manifest permits. The ONLY port this extension can reach. */
-export function manifestPort(chromeApi) {
-  try {
-    const perms = chromeApi.runtime.getManifest()?.host_permissions || [];
-    for (const perm of perms) {
-      const m = /^https?:\/\/127\.0\.0\.1:(\d+)\//.exec(String(perm));
-      if (m) return Number(m[1]);
-    }
-  } catch { /* fall through */ }
-  return DEFAULT_PORT;
-}
+export { DEFAULT_PORT, manifestPort };
 
 /** Render the stored settings. The port always comes from the manifest. */
 export async function load(doc, chromeApi) {

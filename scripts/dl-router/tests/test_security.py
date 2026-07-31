@@ -23,8 +23,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import fetcher as fetcher_mod  # noqa: E402
 from conftest import load_name_cases  # noqa: E402
 from safety import (  # noqa: E402
-    UnsafeName, is_http_url, is_safe_dir_name, join_dir_file, safe_dir_name,
-    safe_file_name, safe_rel_path,
+    UnsafeName, is_http_url, is_safe_dir_name, join_dir_file, names_match,
+    safe_dir_name, safe_file_name, safe_rel_path, uniquify_base,
 )
 
 CASES = load_name_cases()
@@ -115,10 +115,19 @@ def test_filename_zero_width_and_c1_characters_are_stripped():
         assert safe_file_name(raw) == "clip.mp4"
 
 
-def test_filename_colon_is_stripped_because_yt_dlp_reads_it_as_a_selector():
-    # yt-dlp's `--paths TYPE:PATH` would read the part before the colon as a
-    # type selector and silently truncate the destination.
-    assert ":" not in safe_file_name("season:one.mp4")
+def test_a_colon_is_legal_in_a_name_and_handled_at_the_ytdlp_boundary():
+    """Spec section 6.3's rule is `^[^/\\\\\\x00-\\x1f]{1,120}$`. Rejecting `:`
+    globally made a directory like "Series: Volume 1" appear in /dirs while
+    being impossible to select, learn or move into -- a routing target the
+    router refuses to route to. yt-dlp's `--paths` quirk is handled where it
+    belongs, by pinning the type."""
+    assert is_safe_dir_name("Series: Volume 1") is True
+    assert safe_file_name("season:one.mp4") == "season:one.mp4"
+    argv = fetcher_mod.build_argv("https://example-site.test/v",
+                                  "/lib/Series: Volume 1")
+    paths = argv[argv.index("--paths") + 1]
+    assert paths == "home:/lib/Series: Volume 1", (
+        "the TYPE must be pinned so no colon in the path can be read as one")
 
 
 def test_long_filename_is_truncated_but_keeps_its_extension():
@@ -203,8 +212,9 @@ def test_build_argv_refuses_a_non_http_url():
 def test_build_argv_passes_the_destination_as_a_separate_argument():
     argv = fetcher_mod.build_argv("https://example-site.test/v",
                                   "/tmp/dest dir with spaces")
-    assert "/tmp/dest dir with spaces" in argv
-    assert argv[argv.index("--paths") + 1] == "/tmp/dest dir with spaces"
+    # One argv element, with the --paths TYPE pinned so the path is never
+    # re-read as a type selector.
+    assert argv[argv.index("--paths") + 1] == "home:/tmp/dest dir with spaces"
 
 
 def test_fetcher_runs_with_shell_false(monkeypatch, library):
@@ -247,3 +257,47 @@ def test_no_download_can_land_outside_the_library(library):
             rel = join_dir_file(dir_name, raw_name)
             resolved = safe_rel_path(rel, root=library)
             assert str(resolved).startswith(str(library.resolve()) + os.sep)
+
+
+# --- binding a routing decision to a FILE, not a folder --------------------- #
+#
+# /relocate proves ownership by name + write time. The directory check it
+# replaced let any file in the named directory through, so one /match for
+# `innocent.mp4` authorised moving a live payload that merely shared the folder.
+@pytest.mark.parametrize("actual,expected", [
+    ("clip.mp4", "clip.mp4"),
+    ("clip (1).mp4", "clip.mp4"),          # conflictAction: "uniquify"
+    ("clip (12).mp4", "clip.mp4"),
+    ("clip.mp4", "clip (3).mp4"),          # either side may carry the suffix
+    ("clip  name.mp4", "clip name.mp4"),   # the extension collapses whitespace
+    ("clip.mp4", "  clip.mp4  "),
+    ("noext", "noext"),
+    ("noext (1)", "noext"),
+])
+def test_names_that_refer_to_the_same_download_match(actual, expected):
+    assert names_match(actual, expected) is True
+
+
+@pytest.mark.parametrize("actual,expected", [
+    ("seeding-payload.mkv", "innocent.mp4"),
+    ("clip2.mp4", "clip.mp4"),
+    ("clip.mkv", "clip.mp4"),              # a different extension is a different file
+    ("clip (1) extra.mp4", "clip.mp4"),
+    ("", "clip.mp4"),
+    ("clip.mp4", ""),
+    (None, "clip.mp4"),
+    ("clip.mp4", None),
+    (42, "clip.mp4"),
+])
+def test_names_that_do_not_refer_to_the_same_download_are_refused(actual,
+                                                                  expected):
+    assert names_match(actual, expected) is False
+
+
+def test_uniquify_base_strips_only_the_trailing_counter():
+    assert uniquify_base("clip (1).mp4") == "clip.mp4"
+    assert uniquify_base("clip (1) (2).mp4") == "clip (1).mp4"
+    assert uniquify_base("Season (2021).mp4") == "Season (2021).mp4", \
+        "a year is not a uniquify counter"
+    assert uniquify_base("clip.mp4") == "clip.mp4"
+    assert uniquify_base("noext (3)") == "noext"

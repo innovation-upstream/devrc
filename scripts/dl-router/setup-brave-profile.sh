@@ -38,6 +38,16 @@ usage: setup-brave-profile.sh [--list] [--profile <dir>] [--root <path>] [--dry-
   --root <path>     library root (default: library_root from config.toml)
   --dry-run         show what would change; write nothing
 
+Environment:
+  BRAVE_DIR                          browser profile directory
+  DL_ROUTER_CONFIG                   config.toml to read library_root from
+  DL_ROUTER_ASSUME_BROWSER_CLOSED=1  proceed even when this script cannot
+                                     determine whether the browser is running
+                                     (pgrep missing or erroring). Only use it
+                                     with the browser genuinely closed: it
+                                     rewrites Preferences on exit and would
+                                     silently revert the change.
+
 Run --list first, pick the profile whose display name is the one you download
 with, then re-run with --profile.
 USAGE

@@ -151,7 +151,25 @@ where a download often starts. `chrome.notifications` is the secondary
 fallback.
 
 **Undo after completion**: choosing a different directory after the download
-completes calls `/relocate` (a same-filesystem rename, instant) and `/learn`.
+completes calls `/relocate` (a same-filesystem rename, instant) and then
+`/learn` — in that order, and the alias is written **only if the move actually
+happened**.
+
+`/relocate` is the one endpoint that moves a pre-existing file inside a live
+seeding target, so it is not unconditional. It refuses unless it can prove this
+router created the file, by **two independent proofs, both required**:
+
+* **identity** — the file's name is the name of that download, modulo
+  `uniquify`'s ` (1)` suffix. (Binding to the *directory* instead would let one
+  routing decision authorise moving any file that happened to share the folder,
+  and would break every correction, because a below-threshold match is
+  deliberately filed into the catch-all while `/match` logged the candidate.)
+* **age** — the file was written at or after that routing decision.
+
+If the sidecar was down when the download was decided there is no decision on
+record; the extension then supplies the download's filename and the file must
+additionally be recent. A file that fails either proof is **not moved**, and
+the refusal is surfaced rather than swallowed.
 
 **Profile scoping**: routing is off until enabled on that profile's options
 page. Extension storage is per-profile, so every other profile behaves exactly
@@ -172,7 +190,7 @@ All endpoints require `Authorization: Bearer <token>` from
 | POST | `/match` | page context → `{dir, confidence, reason, candidates, suggestNew, dup, auto, ttlMs}` |
 | POST | `/learn` | persist a correction (alias + labelled example + host prior) |
 | POST | `/mkdir` | create a validated new directory |
-| POST | `/relocate` | validated rename **within** the library root |
+| POST | `/relocate` | rename **within** the library root, only for a file this router provably created |
 | POST | `/fetch` | yt-dlp job for a stream URL; `GET /fetch/<id>` for status |
 | GET | `/log` | recent routing decisions |
 

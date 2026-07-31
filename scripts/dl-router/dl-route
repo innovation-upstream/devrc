@@ -139,6 +139,14 @@ def cmd_alias(args) -> int:
 
 
 def _qbt_client(cfg):
+    """Build a client and PROVE it works.
+
+    The `try` here used to wrap only `return client, None`, so the `except
+    QbtError` was dead code: the first contact happened later, inside plan() or
+    apply(), and an unreachable qBittorrent surfaced as an uncaught traceback
+    rather than the message two lines above. Logging in here means the caller
+    gets a clean, actionable string.
+    """
     section = cfg.section("qbt")
     if not section.get("username"):
         return None, "qBittorrent credentials not configured"
@@ -146,9 +154,10 @@ def _qbt_client(cfg):
                                section.get("password", ""),
                                timeout=float(section.get("timeout_s", 8.0)))
     try:
-        return client, None
+        client.login()
     except qbt_mod.QbtError as exc:
-        return None, str(exc)
+        return None, f"qBittorrent unreachable or rejected us ({exc})"
+    return client, None
 
 
 def cmd_backfill_plan(args) -> int:
@@ -214,13 +223,23 @@ def cmd_backfill_apply(args) -> int:
     client = None
     if any(r.action != backfill_mod.ACTION_SKIP for r in plan_obj.rows):
         client, err = _qbt_client(cfg)
-        if client is None:
+        if client is None and not args.dry_run:
             raise SystemExit(
                 f"apply re-validates every row against live qBittorrent, but "
                 f"{err}. Fix the credentials in config.toml.")
-    results = backfill_mod.apply(
-        plan_obj, client=client, dry_run=args.dry_run,
-        host_roots=cfg.section("qbt").get("host_roots", ()))
+        if client is None:
+            # --dry-run moves nothing and is the review step the docs tell you
+            # to run first; apply() says plainly that it was not re-validated.
+            print(f"note: {err} — this preview is NOT re-validated",
+                  file=sys.stderr)
+    try:
+        results = backfill_mod.apply(
+            plan_obj, client=client, dry_run=args.dry_run,
+            host_roots=cfg.section("qbt").get("host_roots", ()))
+    except qbt_mod.QbtError as exc:
+        raise SystemExit(f"qBittorrent failed mid-apply: {exc}") from exc
+    except backfill_mod.ApplyError as exc:
+        raise SystemExit(f"refusing to apply: {exc}") from exc
     for op in results["ops"]:
         print(("DRY " if args.dry_run else "    ") + op)
     print(f"moved={len(results['moved'])} skipped={len(results['skipped'])}")

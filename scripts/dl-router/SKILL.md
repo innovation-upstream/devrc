@@ -61,6 +61,14 @@ Site-scoped aliases score 1.00 and beat everything else. Re-check with
 lowering the threshold — the threshold is what keeps a wrong guess out of a
 subject directory.
 
+**"The undo / `change` button says it could not move the file."**
+`/relocate` refuses anything it cannot prove this router created — the library
+root is a live seeding target and the move is an `os.rename`. It needs the
+file's name to match that download's (modulo `uniquify`'s ` (1)`) *and* the
+file to be no older than the routing decision. A file that was already on disk,
+or a download from before the sidecar last started with no filename supplied,
+is refused by design. `dl-route log` shows the decision it is checking against.
+
 **"It files things into the catch-all folder."** That is the designed
 below-threshold behaviour: an unconfident download must not pollute a subject
 directory, and the picker's Esc then costs nothing. Fix the *match*, not the

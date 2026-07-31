@@ -54,8 +54,6 @@
     "with\u200bZWSP",
     "with\u200cZWNJ",
     "with\u200dZWJ",
-    "with:colon",
-    ":leading-colon",
     "C:\\Windows",
     "",
     { "repeat": "x", "count": 121 }
@@ -70,6 +68,8 @@
     "subject [remaster]",
     "Jos\u00e9 \u00c1lvarez",
     "Aster Vale",
+    "Series: Volume 1",
+    "10:30 Session",
     { "repeat": "x", "count": 120 }
   ],
 
@@ -86,7 +86,7 @@
     ["clip\ufeff.mp4", "clip.mp4"],
     ["clip\u200b.mp4", "clip.mp4"],
     ["clip\u202egnp.exe", "clipgnp.exe"],
-    ["a:b.mp4", "ab.mp4"],
+    ["a:b.mp4", "a:b.mp4"],
     ["  spaced   out .mp4", "spaced out .mp4"],
     [". foo", "foo"],
     [".. foo ..", "foo"],

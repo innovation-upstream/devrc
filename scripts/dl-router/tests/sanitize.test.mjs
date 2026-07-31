@@ -88,8 +88,12 @@ test("zero-width and C1 characters are stripped from filenames", () => {
   }
 });
 
-test("a colon is stripped because yt-dlp reads it as a --paths selector", () => {
-  assert.ok(!sanitizeFileName("season:one.mp4").includes(":"));
+test("a colon is legal -- the yt-dlp quirk is handled at its argv boundary", () => {
+  // Spec section 6.3's rule is global. Rejecting `:` here made a directory
+  // like "Series: Volume 1" appear in /dirs while being impossible to select,
+  // learn or move into. fetcher.build_argv pins the --paths TYPE instead.
+  assert.equal(isSafeDirName("Series: Volume 1"), true);
+  assert.equal(sanitizeFileName("season:one.mp4"), "season:one.mp4");
 });
 
 test("filename bidi characters are stripped", () => {

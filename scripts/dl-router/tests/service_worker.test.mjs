@@ -326,8 +326,12 @@ test("applyChoice relocates a completed download and learns", async () => {
   const out = await SW.applyChoice(11, "Jane Doe");
   assert.deepEqual(out, { ok: true, dir: "Jane Doe" });
   const relocate = posted.find((p) => p.url.endsWith("/relocate"));
-  assert.deepEqual(relocate.body,
-    { fromRelPath: "other/f.mp4", toDir: "Jane Doe", downloadId: 11 });
+  assert.deepEqual(relocate.body, {
+    fromRelPath: "other/f.mp4", toDir: "Jane Doe", downloadId: 11,
+    // The sidecar proves ownership by NAME + write time, not by which folder
+    // the file is in -- so it has to be told which download this is.
+    downloadFilename: "f.mp4",
+  });
   const learn = posted.find((p) => p.url.endsWith("/learn"));
   assert.equal(learn.body.chosenDir, "Jane Doe");
   assert.equal(learn.body.autoDir, "other");
@@ -567,8 +571,11 @@ test("onMessage routes captures, choices, snapshots and rules", async () => {
   assert.equal(SW.state.captures.length, 1);
 
   const rules = [];
+  // dlr:rules now answers ASYNCHRONOUSLY (it has to await readiness before it
+  // can read the snapshot), so it returns true to keep the channel open.
   assert.equal(SW.onMessage({ type: "dlr:rules" }, {}, (r) => rules.push(r)),
-    false);
+    true);
+  await settle(0);
   assert.deepEqual(rules[0].siteRules, SNAPSHOT.siteRules);
 
   assert.equal(SW.onMessage({ type: "dlr:choose", downloadId: 1, dir: "x" },
@@ -662,8 +669,10 @@ test("the deferred onChanged relocate carries the download id too", async () => 
   };
   await SW.onDownloadChanged({ id: 34, state: { current: "complete" } });
   const relocate = posted.find((p) => p.url.endsWith("/relocate"));
-  assert.deepEqual(relocate.body,
-    { fromRelPath: "other/f.mp4", toDir: "Jane Doe", downloadId: 34 });
+  assert.deepEqual(relocate.body, {
+    fromRelPath: "other/f.mp4", toDir: "Jane Doe", downloadId: 34,
+    downloadFilename: "f.mp4",
+  });
 });
 
 test("the /match payload carries the download id", async () => {
@@ -744,4 +753,99 @@ test("a malformed activation event is ignored", () => {
   SW.state.activeTabId = 7;
   for (const e of [null, undefined, {}, { tabId: "nope" }]) SW.onTabActivated(e);
   assert.equal(SW.state.activeTabId, 7);
+});
+
+
+// --- a failed correction must be VISIBLE, and must not be learned from ------ //
+//
+// The deferred path did `.catch(() => {})` and wrote the alias anyway. That is
+// HOW a completely dead correction path stayed invisible for a whole audit
+// round: every relocate was being refused, the UI reported success, and the
+// alias table filled up with corrections that had never been applied.
+test("a refused deferred relocate is surfaced and NOT learned from", async () => {
+  reset();
+  SW.state.pending.set(80, { dir: "other", payload: { page: {} },
+    wanted: "Jane Doe" });
+  searchResult = [{ id: 80, state: "complete",
+    filename: `${LIB_ROOT}/other/f.mp4` }];
+  const posted = [];
+  fetchHandler = async (url) => {
+    posted.push(url);
+    if (url.endsWith("/relocate")) {
+      return { ok: false, status: 400, json: async () => ({}) };
+    }
+    return { ok: true, status: 200, json: async () => ({ ok: true }) };
+  };
+  await SW.onDownloadChanged({ id: 80, state: { current: "complete" } });
+  assert.equal(calls.notifications.length, 1, "the failure must be visible");
+  assert.match(calls.notifications[0].title, /Could not move/);
+  assert.equal(posted.filter((u) => u.endsWith("/learn")).length, 0,
+    "an alias must not be learned from a move that never happened");
+});
+
+test("a SUCCESSFUL deferred relocate does learn", async () => {
+  reset();
+  SW.state.pending.set(81, { dir: "other", payload: { page: {} },
+    wanted: "Jane Doe" });
+  searchResult = [{ id: 81, state: "complete",
+    filename: `${LIB_ROOT}/other/f.mp4` }];
+  const posted = [];
+  fetchHandler = async (url, opts) => {
+    posted.push({ url, body: JSON.parse(opts.body || "{}") });
+    return { ok: true, status: 200, json: async () => ({ ok: true }) };
+  };
+  await SW.onDownloadChanged({ id: 81, state: { current: "complete" } });
+  assert.equal(calls.notifications.length, 0);
+  const learn = posted.find((p) => p.url.endsWith("/learn"));
+  assert.equal(learn.body.chosenDir, "Jane Doe");
+});
+
+test("a file that landed outside the library is reported, not silently dropped",
+  async () => {
+    reset();
+    SW.state.pending.set(82, { dir: "other", payload: {}, wanted: "Jane Doe" });
+    searchResult = [{ id: 82, state: "complete",
+      filename: "/home/u/Downloads/other/f.mp4" }];
+    const posted = [];
+    fetchHandler = async (url) => {
+      posted.push(url);
+      return { ok: true, status: 200, json: async () => ({ ok: true }) };
+    };
+    await SW.onDownloadChanged({ id: 82, state: { current: "complete" } });
+    assert.equal(posted.filter((u) => u.endsWith("/relocate")).length, 0);
+    assert.equal(calls.notifications.length, 1);
+    assert.equal(posted.filter((u) => u.endsWith("/learn")).length, 0);
+  });
+
+test("a refused IMMEDIATE relocate rejects rather than reporting success",
+  async () => {
+    reset();
+    SW.state.pending.set(83, { dir: "other", payload: { page: {} } });
+    searchResult = [{ id: 83, state: "complete",
+      filename: `${LIB_ROOT}/other/f.mp4` }];
+    const posted = [];
+    fetchHandler = async (url) => {
+      posted.push(url);
+      if (url.endsWith("/relocate")) {
+        return { ok: false, status: 400, json: async () => ({}) };
+      }
+      return { ok: true, status: 200, json: async () => ({ ok: true }) };
+    };
+    await assert.rejects(() => SW.applyChoice(83, "Jane Doe"), /sidecar 400/);
+    assert.equal(posted.filter((u) => u.endsWith("/learn")).length, 0);
+  });
+
+test("applyChoice on an in-flight download reports that it deferred", async () => {
+  reset();
+  SW.state.pending.set(84, { dir: "other", payload: {} });
+  searchResult = [{ id: 84, state: "in_progress" }];
+  const posted = [];
+  fetchHandler = async (url) => {
+    posted.push(url);
+    return { ok: true, status: 200, json: async () => ({}) };
+  };
+  const out = await SW.applyChoice(84, "Jane Doe");
+  assert.equal(out.deferred, true);
+  assert.equal(posted.filter((u) => u.endsWith("/learn")).length, 0,
+    "the learn is deferred too -- neither happens unless the move does");
 });

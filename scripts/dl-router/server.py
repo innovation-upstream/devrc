@@ -46,7 +46,9 @@ import config as config_mod  # noqa: E402
 from dirindex import DirIndex, FileIndex  # noqa: E402
 from fetcher import Fetcher  # noqa: E402
 from matcher import MatchContext, Matcher, find_duplicate, norm_key  # noqa: E402
-from safety import UnsafeName, is_safe_dir_name, safe_rel_path  # noqa: E402
+from safety import (  # noqa: E402
+    UnsafeName, is_safe_dir_name, names_match, safe_rel_path,
+)
 from store import Store  # noqa: E402
 
 SERVER_VERSION = "dl-router/1"
@@ -57,6 +59,13 @@ MAX_BODY = 256 * 1024
 # clock skew — both come from the same machine). A torrent payload predates its
 # would-be routing decision by hours or days, so a few seconds costs nothing.
 MTIME_SLACK_S = 5.0
+
+# The fallback baseline used when there is no routing decision on record (the
+# sidecar was down when the download was decided). The file must have been
+# written within this window, which a pre-existing seeding payload never has
+# been. Deliberately generous enough to survive a user who leaves the toast
+# alone for a while, and narrow enough to exclude the library's history.
+RECENT_FILE_WINDOW_S = 3600.0
 
 _LOOPBACK = frozenset({"127.0.0.1", "::1", "localhost"})
 _ALLOWED_HOST_HEADERS = frozenset({"127.0.0.1", "localhost", "::1", "[::1]"})
@@ -222,7 +231,8 @@ class App:
         return {"ok": True, "dir": name, "created": not existed,
                 "etag": self.dirs.etag()}
 
-    def _prove_owned(self, rel_path: str, src, download_id: str) -> None:
+    def _prove_owned(self, rel_path: str, src, download_id: str,
+                     download_filename: str = "") -> None:
         """Refuse unless this router demonstrably created `rel_path`.
 
         WHY THIS IS NOT OPTIONAL: the library root is a live qBittorrent
@@ -238,41 +248,79 @@ class App:
         Two independent proofs, BOTH required, and the absence of either is a
         refusal (never a warning, never a best-effort move):
 
-          1. Provenance. Either the path is already in the routed-file ledger
-             (this router put it there), or a `downloadId` is supplied whose
-             /match decision is on record AND named the directory the file is
-             currently sitting in. An absent or unknown id proves nothing.
-          2. Age. The file's mtime must be at or after the routing decision.
+          1. IDENTITY. The file's name must be the name of the download this
+             `downloadId` refers to, modulo `conflictAction: "uniquify"`'s
+             " (1)" suffix. This is what binds the proof to THIS file.
+          2. AGE. The file's mtime must be at or after the routing decision.
              A browser writes the file after the decision; a torrent payload
              that was already on disk predates it by definition.
+
+        WHAT THIS DELIBERATELY NO LONGER CHECKS, and why: it used to require
+        the file to be sitting in the directory the /match decision NAMED. That
+        was never a proof of anything -- any file that happened to be in that
+        directory passed, so a `/match` for `innocent.mp4` authorised moving a
+        live payload that merely shared the directory -- AND it was wrong for
+        every case the correction flow exists to serve:
+
+          * below threshold or a tie: route_core deliberately files into the
+            catch-all while /match logs the CANDIDATE dir, so the two always
+            disagreed and the picker's whole purpose was dead;
+          * the 400 ms timeout: the extension uses its cached local decision
+            while the server logged the answer it computed too late;
+          * a correction that has already been applied once.
+
+        Name+time is strictly stronger (it binds to the file, not the folder)
+        and is true in all of those cases.
         """
         if self.store.routed_file(rel_path) is not None:
             return
 
+        disk_name = rel_path.rsplit("/", 1)[-1]
         route = self.store.route_for_download(download_id)
-        if route is None:
-            raise UnsafeName(
-                "refusing to move a file this router cannot prove it created "
-                "(no routing decision on record for this download)")
 
-        current_dir = rel_path.split("/", 1)[0]
-        if route.get("dir") != current_dir:
+        if route is not None:
+            expected = str(route.get("filename") or "")
+            baseline = float(route.get("ts") or 0.0)
+            proof = "the routing decision on record"
+        else:
+            # The sidecar was down when the download was decided, so there is
+            # no route row -- but the file still has to be correctable, or a
+            # single sidecar restart permanently orphans it and D3's learning
+            # loop dies with it. The fallback proof is deliberately narrower:
+            # the caller must say which download it is talking about, the name
+            # must match, and the file must be genuinely RECENT rather than
+            # merely newer than some decision.
+            expected = str(download_filename or "")
+            baseline = self.clock() - RECENT_FILE_WINDOW_S
+            proof = "a recent download reported by the extension"
+            if not expected:
+                raise UnsafeName(
+                    "refusing to move a file this router cannot prove it "
+                    "created (no routing decision on record for this download, "
+                    "and no download filename supplied to identify it)")
+
+        if not expected:
             raise UnsafeName(
                 "refusing to move a file this router cannot prove it created "
-                f"(the recorded route filed into {route.get('dir')!r}, the "
-                f"file is in {current_dir!r})")
+                "(the recorded route has no filename to identify it by)")
+        if not names_match(disk_name, expected):
+            raise UnsafeName(
+                "refusing to move a file this router cannot prove it created "
+                f"(this download was {expected!r}; the file on disk is "
+                f"{disk_name!r})")
 
         try:
             mtime = src.stat().st_mtime
         except OSError as exc:
             raise UnsafeName(f"cannot stat the source: {exc}") from exc
-        if mtime < float(route.get("ts") or 0.0) - MTIME_SLACK_S:
+        if mtime < baseline - MTIME_SLACK_S:
             raise UnsafeName(
                 "refusing to move a file this router cannot prove it created "
-                "(it predates the routing decision, so it was already on disk "
-                "— quite possibly a live torrent payload)")
+                f"(it predates {proof}, so it was already on disk — quite "
+                f"possibly a live torrent payload)")
 
-        self.store.record_routed_file(rel_path, download_id, current_dir)
+        self.store.record_routed_file(rel_path, download_id,
+                                      rel_path.split("/", 1)[0])
 
     def relocate(self, payload: dict) -> dict:
         to_dir = payload.get("toDir")
@@ -286,7 +334,8 @@ class App:
             raise FileNotFoundError(f"not a file: {rel_path!r}")
         # Fail closed BEFORE anything is moved.
         self._prove_owned(str(rel_path), src,
-                          str(payload.get("downloadId") or ""))
+                          str(payload.get("downloadId") or ""),
+                          str(payload.get("downloadFilename") or ""))
         dest_dir = safe_rel_path(to_dir, root=self.root)
         dest = dest_dir / src.name
         if dest == src:
@@ -527,7 +576,21 @@ def main(argv=None) -> int:
     # answers and names the problem, routing endpoints return 503.
     cfg, cfg_error = config_mod.load_degraded()
     token = config_mod.load_or_create_token(cfg.token_file)
-    app = App(cfg, config_error=cfg_error)
+    try:
+        app = App(cfg, config_error=cfg_error)
+    except Exception as exc:  # noqa: BLE001
+        # Constructing the App opens the SQLite store and runs migrations. A
+        # corrupt or half-migrated database would otherwise raise out of here
+        # into the same `Restart=always` loop the config path already handles.
+        # Degrade the same way: serve, and say why.
+        log("startup_error", kind=type(exc).__name__)
+        blank, _ = config_mod.load_degraded(Path(os.devnull))
+        blank.data["library_root"] = ""
+        blank.state_dir, blank.token_file = cfg.state_dir, cfg.token_file
+        blank.data["host"], blank.data["port"] = cfg.host, cfg.port
+        app = App(blank, store=Store(":memory:"),
+                  config_error=f"{cfg_error or ''} {type(exc).__name__}: "
+                               f"{exc}".strip())
     server = build_server(cfg.host, cfg.port, app, token)
     log("listening", host=cfg.host, port=cfg.port,
         token_file=str(cfg.token_file), configured=app.configured,

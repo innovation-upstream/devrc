@@ -28,6 +28,7 @@ concrete divergences that had to be closed:
 """
 from __future__ import annotations
 
+import re
 import unicodedata
 from pathlib import Path
 
@@ -54,11 +55,16 @@ _FORMAT_CONTROLS = frozenset(chr(c) for c in (
 # Back-compat name for the narrower set this used to be.
 _BIDI_CONTROLS = _FORMAT_CONTROLS
 
-# Characters that are syntactically legal in a POSIX filename but break a tool
-# dl-router actually invokes. `:` is the separator in yt-dlp's
-# `--paths TYPE:PATH`, so a directory containing one is silently mis-parsed
-# into a type selector plus a truncated path (fetcher.py builds `--paths`).
-_HOSTILE_PUNCTUATION = frozenset({":"})
+# NOTE ON `:` -- deliberately NOT rejected here.
+#
+# It was, briefly, because yt-dlp's `--paths TYPE:PATH` looked like it would
+# mis-parse a directory containing one. But the name rule is GLOBAL (spec
+# section 6.3: `^[^/\\\x00-\x1f]{1,120}$`), so rejecting `:` here made a
+# directory such as `Series: Volume 1` appear in /dirs while being impossible
+# to select, learn, or move into -- a routing target the router refuses to
+# route to. The right place for a tool's parsing quirk is that tool's argv
+# boundary, and fetcher.build_argv now pins the `--paths` type explicitly
+# (`home:<path>`) so no colon in the path can ever be read as a type selector.
 
 
 class UnsafeName(ValueError):
@@ -80,7 +86,7 @@ def _has_control(s: str) -> bool:
 def is_safe_dir_name(name) -> bool:
     """True iff `name` is a single, safe directory component.
 
-    Rejects: non-str, empty, >120 chars, `.`/`..`, any `/` or `\\`, `:`, NUL
+    Rejects: non-str, empty, >120 chars, `.`/`..`, any `/` or `\\`, NUL
     and control characters (C0, DEL, C1), bidi/format/zero-width characters,
     leading/trailing whitespace or dots (which Windows-ish tooling and humans
     both mis-read), and any name that is not already NFC-normalised (so two
@@ -93,8 +99,6 @@ def is_safe_dir_name(name) -> bool:
     if name in (".", ".."):
         return False
     if "/" in name or "\\" in name:
-        return False
-    if any(ch in _HOSTILE_PUNCTUATION for ch in name):
         return False
     if "\x00" in name or _has_control(name):
         return False
@@ -144,7 +148,6 @@ def safe_file_name(name, *, fallback: str = "download") -> str:
     cleaned = "".join(
         ch for ch in base
         if not _has_control(ch) and ch not in _FORMAT_CONTROLS
-        and ch not in _HOSTILE_PUNCTUATION
     )
     # ORDER MATTERS and must match sanitize.js exactly: collapse whitespace,
     # then strip dots at both ends, then strip whatever whitespace that
@@ -219,6 +222,47 @@ def _valid_host(host: str) -> bool:
         if any(ch not in _HOST_CHARS for ch in label):
             return False
     return True
+
+
+# Chrome's uniquify counter is a small integer starting at 1. Bounding it to
+# three digits keeps a legitimate parenthesised number out of the rule --
+# "Season (2021).mp4" is a title, not a collision counter -- at the cost of
+# refusing a relocate after the 999th collision of one name, which fails
+# closed and has never happened.
+_UNIQUIFY_SUFFIX = re.compile(r"^(?P<base>.+?) \(\d{1,3}\)$")
+
+
+def uniquify_base(name: str) -> str:
+    """Strip Chrome's `conflictAction: "uniquify"` suffix.
+
+    `clip.mp4` collides -> Chrome writes `clip (1).mp4`. The suffix goes before
+    the extension, so it has to be stripped from the STEM.
+    """
+    if not isinstance(name, str):
+        return ""
+    stem, dot, ext = name.rpartition(".")
+    if not dot or len(ext) > 12:
+        stem, ext = name, ""
+    match = _UNIQUIFY_SUFFIX.match(stem)
+    base = match.group("base") if match else stem
+    return f"{base}.{ext}" if ext else base
+
+
+def names_match(actual: str, expected: str) -> bool:
+    """True iff two download filenames refer to the same download.
+
+    Used by /relocate to bind a routing decision to the file on disk. Tolerant
+    of exactly two things and nothing else: the uniquify suffix, and the
+    sanitisation the extension applies before handing the name to `suggest()`
+    (so the browser's raw Content-Disposition name still matches what landed).
+    """
+    if not isinstance(actual, str) or not isinstance(expected, str):
+        return False
+    if not actual or not expected:
+        return False
+    a = uniquify_base(safe_file_name(actual, fallback=""))
+    b = uniquify_base(safe_file_name(expected, fallback=""))
+    return bool(a) and a == b
 
 
 def is_http_url(url) -> bool:

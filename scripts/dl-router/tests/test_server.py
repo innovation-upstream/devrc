@@ -292,9 +292,103 @@ def test_relocate_uniquifies_instead_of_overwriting(live, library):
     assert body["relPath"] == "Jane Doe/clip (1).mp4"
 
 
+# --- the correction paths the picker exists to serve ----------------------- #
+#
+# The guard originally required the file to be sitting in the directory the
+# /match decision NAMED. That is wrong for every case the correction flow
+# exists for, because route_core deliberately files a non-auto answer into the
+# CATCH-ALL while /match logs the CANDIDATE. Net effect: auto-file worked and
+# every correction was refused, which kills D3's learning loop.
+
+def test_a_below_threshold_download_filed_into_the_catch_all_CAN_be_corrected(
+        live, library):
+    """THE regression. A tie files into `other/` while /match logged
+    'Jane Doe'; the undo must still work."""
+    got = route_a_download(live, 50, tags=["Jane Doe", "john-smith"])
+    assert got["auto"] is False, "precondition: this is the picker path"
+    assert got["dir"] != "other", "precondition: the candidate is a subject dir"
+    (library / "other" / "clip.mp4").write_text("payload")
+    status, body, _ = call(live, "POST", "/relocate",
+                           {"fromRelPath": "other/clip.mp4",
+                            "toDir": "Jane Doe", "downloadId": 50})
+    assert status == 200, body
+    assert (library / "Jane Doe" / "clip.mp4").read_text() == "payload"
+
+
+def test_a_confident_match_can_still_be_corrected_to_a_different_dir(live,
+                                                                     library):
+    got = route_a_download(live, 51, tags=["Jane Doe"])
+    assert got["auto"] is True
+    (library / "Jane Doe" / "clip.mp4").write_text("payload")
+    status, _, _ = call(live, "POST", "/relocate",
+                        {"fromRelPath": "Jane Doe/clip.mp4",
+                         "toDir": "john-smith", "downloadId": 51})
+    assert status == 200
+    assert (library / "john-smith" / "clip.mp4").exists()
+
+
+def test_the_timeout_path_can_be_corrected(live, library):
+    """The extension answered from its cached local decision because the
+    sidecar missed the 400 ms budget, so the file is wherever the CACHE said --
+    which is not what the server logged."""
+    route_a_download(live, 52, tags=["Jane Doe"])
+    (library / "john-smith" / "clip.mp4").write_text("payload")
+    status, body, _ = call(live, "POST", "/relocate",
+                           {"fromRelPath": "john-smith/clip.mp4",
+                            "toDir": "Mary_Major", "downloadId": 52})
+    assert status == 200, body
+
+
+def test_a_uniquified_name_still_matches_its_routing_decision(live, library):
+    """conflictAction: "uniquify" means the file on disk is `clip (1).mp4`
+    while the decision recorded `clip.mp4`."""
+    route_a_download(live, 53, filename="clip.mp4")
+    (library / "other" / "clip (1).mp4").write_text("payload")
+    status, body, _ = call(live, "POST", "/relocate",
+                           {"fromRelPath": "other/clip (1).mp4",
+                            "toDir": "Jane Doe", "downloadId": 53})
+    assert status == 200, body
+
+
+def test_a_download_decided_while_the_sidecar_was_DOWN_can_be_corrected(
+        live, library):
+    """No route row exists at all. Without a fallback proof a single sidecar
+    restart permanently orphans that file."""
+    (library / "other" / "late.mp4").write_text("payload")
+    status, body, _ = call(live, "POST", "/relocate",
+                           {"fromRelPath": "other/late.mp4",
+                            "toDir": "Jane Doe", "downloadId": 54,
+                            "downloadFilename": "late.mp4"})
+    assert status == 200, body
+    assert (library / "Jane Doe" / "late.mp4").exists()
+
+
+def test_that_fallback_still_needs_the_download_to_name_itself(live, library):
+    (library / "other" / "late.mp4").write_text("payload")
+    status, body, _ = call(live, "POST", "/relocate",
+                           {"fromRelPath": "other/late.mp4",
+                            "toDir": "Jane Doe", "downloadId": 55})
+    assert status == 400
+    assert "no download filename supplied" in body["detail"]
+
+
+def test_that_fallback_refuses_a_file_that_is_not_recent(live, library, clock):
+    old = library / "other" / "ancient.mp4"
+    old.write_text("payload")
+    os.utime(old, (clock.now - 86400 * 30, clock.now - 86400 * 30))
+    status, body, _ = call(live, "POST", "/relocate",
+                           {"fromRelPath": "other/ancient.mp4",
+                            "toDir": "Jane Doe", "downloadId": 56,
+                            "downloadFilename": "ancient.mp4"})
+    assert status == 400
+    assert "predates" in body["detail"]
+    assert old.exists()
+
+
+# --- what the guard actually proves ---------------------------------------- #
 def test_relocate_refuses_a_file_the_router_never_routed(live, library):
-    """THE finding. A pre-existing file at a perfectly valid relative path --
-    exactly what a loose torrent payload under a subject directory looks like."""
+    """A pre-existing file at a perfectly valid relative path -- exactly what a
+    loose torrent payload under a subject directory looks like."""
     victim = library / "Jane Doe" / "seeding-payload.mp4"
     victim.write_text("torrent payload")
     status, body, _ = call(live, "POST", "/relocate",
@@ -313,39 +407,52 @@ def test_relocate_refuses_an_unknown_download_id(live, library):
                            {"fromRelPath": "Jane Doe/payload.mp4",
                             "toDir": "john-smith", "downloadId": 999999})
     assert status == 400
-    assert "no routing decision on record" in body["detail"]
     assert (library / "Jane Doe" / "payload.mp4").exists()
 
 
-def test_relocate_refuses_when_the_route_named_a_different_directory(live,
-                                                                     library):
-    """A real download id, but pointed at a file sitting somewhere else. Without
-    this check one legitimate download would authorise moving any file in the
-    library."""
-    (library / "Jane Doe" / "someone-elses.mp4").write_text("payload")
-    route_a_download(live, 43)          # files into `other`
+def test_a_routing_decision_does_not_authorise_moving_a_DIFFERENT_file(
+        live, library):
+    """The identity half of the proof.
+
+    The directory check it replaced let ANY file in the named directory
+    through: one /match for `innocent.mp4` authorised moving a live payload
+    that merely shared the folder. Reproduced before this fix."""
+    route_a_download(live, 60, tags=["Jane Doe"], filename="innocent.mp4")
+    victim = library / "Jane Doe" / "seeding-payload.mkv"
+    victim.write_text("a live torrent payload, written AFTER the match")
     status, body, _ = call(live, "POST", "/relocate",
-                           {"fromRelPath": "Jane Doe/someone-elses.mp4",
-                            "toDir": "john-smith", "downloadId": 43})
+                           {"fromRelPath": "Jane Doe/seeding-payload.mkv",
+                            "toDir": "john-smith", "downloadId": 60})
+    assert status == 400, "a match for one file must not authorise another"
+    assert "this download was" in body["detail"]
+    assert victim.exists()
+    assert not (library / "john-smith" / "seeding-payload.mkv").exists()
+
+
+def test_a_near_miss_filename_is_not_close_enough(live, library):
+    route_a_download(live, 61, filename="clip.mp4")
+    (library / "other" / "clip2.mp4").write_text("x")
+    status, _, _ = call(live, "POST", "/relocate",
+                        {"fromRelPath": "other/clip2.mp4",
+                         "toDir": "Jane Doe", "downloadId": 61})
     assert status == 400
-    assert "recorded route filed into" in body["detail"]
-    assert (library / "Jane Doe" / "someone-elses.mp4").exists()
 
 
 def test_relocate_refuses_a_file_older_than_its_routing_decision(live, library,
                                                                  store, clock):
-    """The second, independent proof: a browser writes the file AFTER the
-    decision, a torrent payload was already on disk."""
-    stale = library / "other" / "old-payload.mp4"
+    """The AGE half of the proof: a browser writes the file AFTER the decision,
+    a torrent payload was already on disk. Name alone is not enough -- a
+    payload could legitimately share a name with something downloaded later."""
+    stale = library / "other" / "clip.mp4"
     stale.write_text("payload")
-    route_a_download(live, 44)
+    route_a_download(live, 44, filename="clip.mp4")
     # The route was logged at the fake clock's `now`; age the file past it.
     os.utime(stale, (clock.now - 86400, clock.now - 86400))
     status, body, _ = call(live, "POST", "/relocate",
-                           {"fromRelPath": "other/old-payload.mp4",
+                           {"fromRelPath": "other/clip.mp4",
                             "toDir": "Jane Doe", "downloadId": 44})
     assert status == 400
-    assert "predates the routing decision" in body["detail"]
+    assert "predates" in body["detail"]
     assert stale.exists()
 
 

@@ -25,9 +25,9 @@ __pycache__/
 /scripts/dl-router/config.toml
 /scripts/dl-router/token
 /scripts/dl-router/manifests/
-*.sqlite3
-*.sqlite3-wal
-*.sqlite3-shm
+/scripts/dl-router/*.sqlite3
+/scripts/dl-router/*.sqlite3-wal
+/scripts/dl-router/*.sqlite3-shm
 
 # The dl-router design spec contains the real library root, the qBittorrent
 # NodePort and the Brave profile name. `claudedocs/` is otherwise committable,

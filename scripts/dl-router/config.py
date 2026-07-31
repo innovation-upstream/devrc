@@ -143,7 +143,19 @@ class Config:
 
     @property
     def port(self) -> int:
-        return int(self.data.get("port") or DEFAULT_PORT)
+        """`0` is NOT "unset".
+
+        This was `int(data.get("port") or DEFAULT_PORT)`, so a configured `0`
+        silently became 8791 -- while `_validate` rejects `0` as out of range.
+        Two places disagreeing about what `0` means is the exact class of
+        divergence this round exists to eliminate, and on the degraded path
+        (which skips validation) it was reachable: `DL_ROUTER_PORT=0` bound the
+        live sidecar's port instead of failing.
+        """
+        raw = self.data.get("port")
+        if raw is None or raw == "":
+            return DEFAULT_PORT
+        return int(raw)
 
     @property
     def auto_threshold(self) -> float:
@@ -273,16 +285,25 @@ def load_degraded(path: Path | None = None, *, env=None):
     except ConfigError as exc:
         env = os.environ if env is None else env
         data = copy.deepcopy(DEFAULTS)
+        # config.toml is unreadable, so nothing from it can be trusted -- but
+        # DL_ROUTER_LIBRARY_ROOT is set by the unit, not by the broken file, so
+        # a host configured entirely through the environment still works.
         data["library_root"] = ""
         # The bind address still has to come from somewhere the typo cannot
         # have broken: the unit's own environment, else the loopback defaults.
+        # The typo is in config.toml; the unit's own environment is still
+        # good. Anything invalid there falls back to the default rather than
+        # being silently reinterpreted.
+        if env.get("DL_ROUTER_LIBRARY_ROOT"):
+            data["library_root"] = env["DL_ROUTER_LIBRARY_ROOT"]
         if env.get("DL_ROUTER_HOST"):
             data["host"] = env["DL_ROUTER_HOST"]
         if env.get("DL_ROUTER_PORT"):
             try:
-                data["port"] = int(env["DL_ROUTER_PORT"])
+                port = int(env["DL_ROUTER_PORT"])
             except ValueError:
-                pass
+                port = DEFAULT_PORT
+            data["port"] = port if 1 <= port <= 65535 else DEFAULT_PORT
         resolved = Path(path) if path is not None else (
             Path(env["DL_ROUTER_CONFIG"]) if env.get("DL_ROUTER_CONFIG")
             else default_config_path())
