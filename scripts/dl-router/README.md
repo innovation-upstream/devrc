@@ -289,8 +289,16 @@ never renamed.
    ```
    This sets `download.default_directory` and `savefile.default_directory` to
    the library root and turns off `prompt_for_download`, after backing up
-   `Preferences`. It refuses to run while Brave is running, because Brave
-   rewrites `Preferences` on exit and would revert the change.
+   `Preferences`. It refuses to run while a browser is **using that
+   user-data-dir**, because Brave rewrites `Preferences` on exit and would
+   revert the change — and it says which pid to quit. It checks for an open fd
+   under the directory, a browser main process whose `--user-data-dir` resolves
+   there (or that has none, i.e. the default one), and a `SingletonLock` whose
+   pid is still alive. An instance on a *different* `--user-data-dir` (headless
+   automation on a throwaway profile) and a stale lock left by a crash do not
+   count. `--list` and `--dry-run` write nothing and are not gated at all.
+   If it cannot read a process table it still refuses;
+   `DL_ROUTER_ASSUME_BROWSER_CLOSED=1` overrides *that* case only.
 4. **Load the extension.** `brave://extensions` → Developer mode → Load
    unpacked → this directory's `extension/`.
 5. **Enable it for that profile.** Open the extension's Options page, paste the
