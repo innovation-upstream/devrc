@@ -569,3 +569,24 @@ def test_alias_review_does_not_flag_a_structured_row_with_no_spread(cli_env,
     store.close()
     assert call(["alias", "review", "--json"]) == 0
     assert json.loads(capsys.readouterr().out)[0]["suspect"] is None
+
+
+def test_alias_review_lists_refused_candidates_as_the_permanent_surface(
+        cli_env, capsys):
+    """A screened candidate writes no alias row, so the only thing that ever
+    mentioned it was a notification that fires once. This is where the fact
+    lives permanently — and it is what makes the over-strict half of the screen
+    as visible as the over-loose half."""
+    store = Store(cli._cfg().db_path)
+    for _ in range(2):
+        store.record_screened("thread:general-discussion", "example-site.test",
+                              "Jane Doe", "thread-slug",
+                              "seen on 2 different directories")
+    store.close()
+    assert call(["alias", "review"]) == 0
+    out = capsys.readouterr().out
+    assert "refused candidate" in out
+    assert "thread:general-discussion" in out
+    assert "seen on 2 different directories" in out
+    assert "seen 2x" in out
+    assert "will NEVER auto-file" in out

@@ -150,8 +150,8 @@ class DirKinds:
                 if key in seen and seen[key] != kind:
                     # Listed as BOTH. Ambiguous, so it resolves to unknown —
                     # which asks — rather than to whichever list was read last.
-                    errors.append(f"{item!r} is in both lists — treated as "
-                                  "unclassified")
+                    errors.append(f"{item!r} appears in more than one list "
+                                  "— treated as unclassified")
                     merged.pop(item, None)
                     seen[key] = None
                     continue

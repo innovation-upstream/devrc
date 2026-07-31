@@ -1274,3 +1274,36 @@ test("the identity refusal is the one reported, not merely the first", () => {
   });
   assert.match(calls.notifications[0].message, /consequential/);
 });
+
+test("a PERMANENTLY refused identity notifies once, not once per download", () => {
+  // The screen refuses a permanent reason (site branding, shared vocabulary, a
+  // spread that only ever grows) on EVERY correction, and a screened identity
+  // writes no row so nothing else changes either. Without the sidecar's
+  // `first` flag this fired forever -- the same "train them to dismiss it"
+  // failure as the catch-all bug, narrower in trigger but unbounded.
+  reset();
+  const learned = {
+    dir: "acme-studio",
+    written: [{ key: "fieldrecordings", site: "s.test", source: "tag" }],
+    skipped: [{ key: "thread:x", source: "thread-slug",
+      why: "it is part of the site name", first: true }],
+  };
+  assert.equal(SW.reportNothingLearned(learned), true);
+  assert.equal(calls.notifications.length, 1);
+
+  // ...every subsequent correction for the same key says `first: false`.
+  const again = { ...learned,
+    skipped: [{ ...learned.skipped[0], first: false }] };
+  assert.equal(SW.reportNothingLearned(again), false);
+  assert.equal(SW.reportNothingLearned(again), false);
+  assert.equal(calls.notifications.length, 1, "one fact, one notification");
+});
+
+test("a refusal with no `first` field at all still notifies", () => {
+  // Forward compatibility with an older sidecar: absent is not `false`.
+  reset();
+  assert.equal(SW.reportNothingLearned({
+    dir: "Jane Doe", written: [],
+    skipped: [{ key: "jd", source: "tag", why: "too short" }],
+  }), true);
+});

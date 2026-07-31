@@ -102,8 +102,9 @@ from it and nothing else:
 | Discord attachment (`cdn.discordapp.com`, `media.discordapp.net`) | `discord:<channel id>` | `discord.com` |
 | forum thread slug, **anchored** to a thread route | `thread:<slug>` | that forum's host |
 
-A slug is the path segment immediately after `/threads/`, `/topic/`, `/t/`,
-`showthread.php` or similar — and **nowhere else**. That is positional on
+A slug is the path segment immediately after an **unambiguous** thread route
+(`/threads/`, `/thread/`, `showthread.php`, `viewtopic.php`) — and nowhere else.
+`/topic/`, `/topics/` and `/t/` are deliberately not anchors; see below. That is positional on
 purpose. The first version took "the deepest segment with ≥2 words", and when a
 thread's own slug was a single word the *section* one level up won instead
 (`/forums/general-discussion/threads/aster.99/` → `general discussion`), so one
@@ -254,14 +255,24 @@ be both unmaintainable and un-committable to a public repo:
   (`poster1988`). Narrowed from "a single token containing any digit", which
   refused legitimate stage names.
 
-Refusals are **surfaced**, not silently dropped: they come back in `/learn`'s
-response and the sidecar logs a metadata-only count and reason-code line. An
-over-strict screen that nobody can see is the same failure as an over-loose one.
+A refusal is a **durable fact, not an event**. It is recorded in the store
+against its `(key, site, directory)` and listed permanently by
+`dl-route alias review` — which shows both halves: what was learned (evidence,
+provenance, hit count, riskiest first, global and suspicious rows flagged) and
+what was *refused* ("these will NEVER auto-file", with the reason and how many
+times it has recurred). An over-strict screen that nobody can see is the same
+failure as an over-loose one, so both are inspectable in one command.
 
-`dl-route alias review` shows what has been learned with the evidence, the
-provenance and the hit count behind each row, riskiest first, flagging the
-global and suspicious ones. Refusals are reported back in `/learn`'s response
-rather than silently dropped.
+The extension notifies **once per fact**, the first time a refusal is recorded.
+That shape was arrived at the hard way: three successive attempts filtered the
+*event* harder — the notification was first silent, then fired on every routine
+catch-all filing, then fired forever for a permanently-refused identity — and
+each fix carried the next defect, because the event is the wrong unit. What is
+worth saying is "this source will never be learned", which is true once. A
+suppression map in the extension cannot hold that either: MV3 tears the service
+worker down after ~30 s idle, so the map would empty and the notifications
+would resume. The store is the only durable place, and the notification is
+demoted to a one-time pointer at `alias review`.
 
 ---
 

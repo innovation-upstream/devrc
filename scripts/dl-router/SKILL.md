@@ -87,7 +87,10 @@ dl-route alias review          # evidence, provenance and hit count per row
 ```
 
 **"It learned something wrong."** `dl-route alias review` flags global and
-suspicious rows and prints the exact removal command. A performer directory
+suspicious rows, lists every **refused** candidate with its reason and how many
+times it has recurred, and prints the exact removal command. A refused
+candidate never auto-files — if one is a real subject,
+`dl-route alias set '<phrase>' '<Dir>' --site <host> --force`. A performer directory
 never learns a tag, and nothing is ever learned at global scope, so a bad row
 now means either a manual `alias set --force` or a category confirmation.
 ```bash

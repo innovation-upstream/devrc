@@ -60,7 +60,7 @@ def test_a_directory_in_both_lists_is_ambiguous_and_therefore_unknown(tmp_path):
                  'performer = ["Jane Doe"]\ncategory = ["jane-doe"]\n')
     kinds = dk.DirKinds.load(path)
     assert kinds.kind("Jane Doe") == KIND_UNKNOWN
-    assert kinds.error and "both lists" in kinds.error
+    assert kinds.error and "more than one list" in kinds.error
 
 
 def test_a_malformed_file_degrades_instead_of_raising(tmp_path):
@@ -263,5 +263,16 @@ def test_a_name_in_both_ask_and_performer_is_ambiguous(tmp_path):
 def test_a_clean_ask_entry_is_not_an_error(tmp_path):
     path = write(tmp_path, 'performer = []\ncategory = []\nask = ["Jane Doe"]\n')
     kinds = dk.DirKinds.load(path)
+    assert kinds.kind("Jane Doe") == KIND_UNKNOWN
+    assert not kinds.error
+
+
+def test_an_ask_entry_overrides_a_picker_assigned_kind(tmp_path):
+    """The reviewed file is the authority over the machine overlay, and `ask`
+    is a decision too: parking a directory there has to be able to UNDO a kind
+    the picker assigned, or a reclassification could never take an auto-filing
+    directory back out of service."""
+    path = write(tmp_path, 'performer = []\ncategory = []\nask = ["Jane Doe"]\n')
+    kinds = dk.DirKinds.load(path, overlay={"Jane Doe": KIND_PERFORMER})
     assert kinds.kind("Jane Doe") == KIND_UNKNOWN
     assert not kinds.error

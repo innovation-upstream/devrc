@@ -522,8 +522,8 @@ async function learn(entry, chosenDir, createdNew) {
 const IDENTITY_SOURCES = new Set(["discord-channel", "thread-slug"]);
 
 /**
- * Tell the user when a correction taught the router something LESS than it
- * looked like it did.
+ * Tell the user ONCE when a correction taught the router something less than
+ * it looked like it did.
  *
  * The sidecar screens every candidate alias and returns what it refused, and
  * nothing consumed that -- which is how an over-strict screen stayed invisible
@@ -540,11 +540,25 @@ const IDENTITY_SOURCES = new Set(["discord-channel", "thread-slug"]);
  * The catch-all is excluded outright: `/learn` returns a `skipped` entry for it
  * BY DESIGN ("the absence of a subject, not one"), and filing to the catch-all
  * is routine -- notifying there would train the operator to dismiss the very
- * notification the rest of this exists for.
+ * notification the rest of this exists for. The `"catch-all"` source string is
+ * a CROSS-LANGUAGE CONTRACT with server.App.learn and is pinned on both sides.
+ *
+ * Everything here is once-per-fact, never once-per-download. `dl-route alias
+ * review` is the permanent surface; this is only the pointer at it.
  */
 export function reportNothingLearned(out) {
   if (!out || !Array.isArray(out.skipped)) return false;
-  const real = out.skipped.filter((s) => s && s.source !== "catch-all");
+  // `first` is the sidecar telling us it has not refused this exact
+  // (key, site, dir) before. WITHOUT IT the identity rule below notifies on
+  // EVERY correction, because a permanent refusal (site branding, shared
+  // vocabulary, a spread that only ever grows) recurs on every one -- and a
+  // screened identity writes no row, so nothing else ever changes either.
+  //
+  // The flag lives in the SIDECAR, not in a suppression map here: MV3 tears
+  // this worker down after ~30s idle, so a map would empty and the
+  // notifications would resume. See Store.record_screened.
+  const real = out.skipped.filter(
+    (s) => s && s.source !== "catch-all" && s.first !== false);
   if (!real.length) return false;
   const identity = real.find((s) => IDENTITY_SOURCES.has(s.source));
   const wroteSomething = Array.isArray(out.written) && out.written.length > 0;

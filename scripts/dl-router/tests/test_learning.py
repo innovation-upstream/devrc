@@ -345,6 +345,13 @@ def test_the_catch_all_learns_nothing(kinded_app):
     assert kinded_app.store.host_prior(DISCORD_SITE) is None
     # ...but the correction is still recorded as an example.
     assert kinded_app.store.examples()[0]["chosen_dir"] == "other"
+    # THE SOURCE STRING IS A CROSS-LANGUAGE CONTRACT. The extension's
+    # reportNothingLearned filters on this exact literal so that a routine
+    # catch-all filing never notifies (service_worker.js, IDENTITY_SOURCES
+    # block). It was pinned only on the JS side, so renaming it here left all
+    # of pytest green while silently re-opening the notification-spam bug.
+    assert [s["source"] for s in out["skipped"]] == ["catch-all"]
+    assert out["skipped"][0]["first"] is False
 
 
 def test_an_unclassified_directory_learns_identity_only(kinded_app):
@@ -524,3 +531,62 @@ def test_a_stopword_phrase_is_refused_even_well_over_the_length_floor(junk):
     from matcher import norm_key, suspicious_alias_key
     assert len(norm_key(junk)) > MIN_ALIAS_KEY_LEN
     assert suspicious_alias_key(junk, dir_names=["Jane Doe"])
+
+
+# --- refusals are a durable fact, not an event ------------------------------- #
+def test_a_repeated_refusal_is_reported_as_first_only_once(kinded_app):
+    """PINS THE `first` FLAG, which is what makes the refusal notification
+    once-per-fact instead of once-per-download.
+
+    A permanent refusal (site branding, shared vocabulary, a spread that only
+    ever grows) recurs on EVERY correction, and a screened identity writes no
+    row so nothing else changes either. The flag cannot live in the extension:
+    MV3 tears the service worker down after ~30 s idle, so a suppression map
+    there would empty and the notifications would resume.
+    """
+    for chosen in ("Mary_Major", "acme-studio"):
+        kinded_app.store.add_example(
+            {"page": {"tags": ["Aster Vale Collection"],
+                      "site": "someforum.test"}}, chosen)
+
+    def slug_refusal(out):
+        return next(s for s in out["skipped"] if s["source"] == "thread-slug")
+
+    first = kinded_app.learn({"context": forum_context([]),
+                              "chosenDir": "Aster Vale", "confirmed": True})
+    assert slug_refusal(first)["first"] is True
+    for _ in range(3):
+        again = kinded_app.learn({"context": forum_context([]),
+                                  "chosenDir": "Aster Vale", "confirmed": True})
+        assert slug_refusal(again)["first"] is False
+
+
+def test_the_same_refusal_for_a_DIFFERENT_directory_is_a_new_fact(kinded_app):
+    for chosen in ("Mary_Major", "acme-studio"):
+        kinded_app.store.add_example(
+            {"page": {"tags": ["Aster Vale Collection"],
+                      "site": "someforum.test"}}, chosen)
+    kinded_app.learn({"context": forum_context([]), "chosenDir": "Aster Vale",
+                      "confirmed": True})
+    out = kinded_app.learn({"context": forum_context([]),
+                            "chosenDir": "Jane Doe", "confirmed": True})
+    assert next(s for s in out["skipped"]
+                if s["source"] == "thread-slug")["first"] is True
+
+
+def test_a_refusal_is_recorded_where_the_operator_can_find_it(kinded_app):
+    """A screened candidate writes no alias row, so before this it existed
+    nowhere inspectable and a one-shot notification was the only surface."""
+    for chosen in ("Mary_Major", "acme-studio"):
+        kinded_app.store.add_example(
+            {"page": {"tags": ["Aster Vale Collection"],
+                      "site": "someforum.test"}}, chosen)
+    kinded_app.learn({"context": forum_context([]), "chosenDir": "Aster Vale",
+                      "confirmed": True})
+    kinded_app.learn({"context": forum_context([]), "chosenDir": "Aster Vale",
+                      "confirmed": True})
+    row = next(r for r in kinded_app.store.screened_rows()
+               if r["source"] == "thread-slug")
+    assert row["dir"] == "Aster Vale"
+    assert row["hits"] == 2
+    assert row["why"]

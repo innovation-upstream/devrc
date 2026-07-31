@@ -134,11 +134,22 @@ export function hostOf(url) {
 
 function pathSegments(url) {
   if (!hostOf(url)) return [];
+  let raw;
   try {
-    return new URL(url).pathname.split("/").filter(Boolean);
+    raw = new URL(url).pathname.split("/").filter(Boolean);
   } catch {
     return [];
   }
+  // PERCENT-DECODED: `pathname` is the encoded form here while Python's
+  // `urlsplit().path` is the raw one, so a non-latin slug produced `%D0%BF...`
+  // tokens on this side and real words on the other. See matcher.py.
+  return raw.map((seg) => {
+    try {
+      return decodeURIComponent(seg);
+    } catch {
+      return seg;
+    }
+  });
 }
 
 /** The channel id from a Discord attachment URL, else "". */
@@ -185,8 +196,10 @@ export function threadSlug(url) {
     // The thread route already proves this is a thread, so a ONE-word slug is
     // legitimate here; the old >=2-token guard existed only to stop an opaque
     // file-host id being minted as a subject, and no anchor introduces one.
+    // `\p{Nd}`, not `\d`: a bare id is not a subject in any script, and
+    // Python's `isdigit()` covers every Unicode decimal. See matcher.py.
     const meaningful = toks.filter(
-      (t) => !STOPWORDS.has(t) && !/^\d+$/.test(t));
+      (t) => !STOPWORDS.has(t) && !/^\p{Nd}+$/u.test(t));
     if (!meaningful.length || !passesFuzzyGuard(meaningful)) continue;
     best = toks;
   }

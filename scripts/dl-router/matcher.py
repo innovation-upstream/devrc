@@ -55,7 +55,7 @@ from __future__ import annotations
 import re
 import unicodedata
 from dataclasses import dataclass, field
-from urllib.parse import urlsplit
+from urllib.parse import unquote, urlsplit
 
 # Score constants — named so tests assert against the spec table, not magic
 # numbers scattered through the scorer.
@@ -157,9 +157,14 @@ _THREAD_ANCHORS = frozenset({
 # The ambiguity was the problem, not the gate around it. This design already
 # says no slug is fine and a wrong slug is not, so the ambiguous routes are
 # simply not anchors: an id-less Discourse or IPB thread degrades to the
-# picker. If one of those platforms ever matters here, the honest way to add it
-# is a per-site rule in local config where the operator ASSERTS the shape --
-# not a global guess about everyone's URLs.
+# picker, and a Discord channel or an unambiguous forum route still carries it.
+#
+# There is deliberately NO promise of a workaround here. `site_rules` in
+# config.toml are CSS selectors for DOM capture and cannot express a URL shape,
+# and for a performer directory a tag is never learned -- so nothing that
+# exists today can restore a Discourse identity alias. Supporting one would
+# take a new per-host anchor list in config (`[thread_anchors."<host>"]`) that
+# the operator asserts; that is a feature, not a setting, and it is not built.
 
 # `slug.123456` (xenforo) and `123456-slug` (vbulletin) both carry a numeric id
 # beside the slug. Stripping it is what makes the two shapes fold to one key.
@@ -199,7 +204,6 @@ def _ascii_host(host: str) -> str:
         # `new URL` percent-DECODES the host before punycoding it; `urlsplit`
         # hands back the raw escapes. Without this the two produce
         # `xn--e1afmkfd.test` and `%d0%bf....test` for the same URL.
-        from urllib.parse import unquote
         try:
             decoded = unquote(host, errors="strict")
         except (UnicodeDecodeError, ValueError):
@@ -250,7 +254,20 @@ def url_path_segments(url) -> tuple:
         path = urlsplit(url).path
     except ValueError:
         return ()
-    return tuple(seg for seg in path.split("/") if seg)
+    # PERCENT-DECODED, because `new URL().pathname` hands JS the encoded form
+    # while `urlsplit().path` hands Python the raw one -- so an unescaped
+    # non-ASCII slug produced `%D0%BF...` tokens on one side and real words on
+    # the other. Decoding in both is what makes a non-latin thread slug work
+    # at all, rather than merely agreeing on junk.
+    out = []
+    for seg in path.split("/"):
+        if not seg:
+            continue
+        try:
+            out.append(unquote(seg, errors="strict"))
+        except (UnicodeDecodeError, ValueError):
+            out.append(seg)
+    return tuple(out)
 
 
 def discord_channel_id(url) -> str:
@@ -323,12 +340,15 @@ def thread_slug(url) -> str:
         # is legitimate here in a way it never was under the old rule -- the
         # >=2-token guard existed only to stop an opaque file-host id
         # (`/d/AbCdEf`) being minted as a subject, and no anchor introduces one.
-        # `isascii()` as well as `isdigit()`: Python's `isdigit` accepts
-        # non-ASCII digits and JS's `/^\d+$/` does not, and these two
-        # implementations have to agree.
+        # A bare id is not a subject IN ANY SCRIPT. The previous spelling
+        # (`isascii() and isdigit()`) was sold as a parity fix but WIDENED the
+        # rule: `/threads/\u0660\u0661\u0662` minted its Arabic-Indic id as a
+        # slug, contradicting the fixture contract that `/threads/481920/`
+        # yields nothing. `isdigit()` covers every Unicode decimal, and JS's
+        # mirror uses `\p{Nd}` so the two agree -- rejecting, which is the safe
+        # direction.
         meaningful = tuple(t for t in toks
-                           if t not in STOPWORDS
-                           and not (t.isascii() and t.isdigit()))
+                           if t not in STOPWORDS and not t.isdigit())
         if not meaningful or not passes_fuzzy_guard(meaningful):
             continue
         best = toks

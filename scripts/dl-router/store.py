@@ -17,7 +17,7 @@ import threading
 import time
 from pathlib import Path
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 MIGRATIONS = {
     1: [
@@ -105,6 +105,36 @@ MIGRATIONS = {
               source TEXT NOT NULL DEFAULT '',
               ts     REAL NOT NULL
            )""",
+    ],
+    # v4 -- REFUSALS ARE A DURABLE FACT, not an event.
+    #
+    # Three rounds of defects landed on one mechanism: the notification that
+    # tells the operator the screen refused something. It was silent, then it
+    # fired on every catch-all filing, then it fired forever for a permanently
+    # refused identity. Each fix filtered the EVENT harder, and each carried
+    # the next defect, because the event is the wrong unit: what is worth
+    # saying is "this source will never be learned", which is a fact about a
+    # (key, site, dir) -- true once, not once per download.
+    #
+    # A suppression map in the extension cannot hold it either: MV3 tears the
+    # service worker down after ~30s idle, so the map empties and the
+    # notifications resume. The store is the only durable place, and recording
+    # the refusal here also gives `dl-route alias review` something permanent
+    # to show -- which is where a durable fact belongs, with the notification
+    # demoted to a one-time pointer at it.
+    4: [
+        """CREATE TABLE IF NOT EXISTS screened (
+              key      TEXT NOT NULL,
+              site     TEXT NOT NULL DEFAULT '',
+              dir      TEXT NOT NULL,
+              source   TEXT NOT NULL DEFAULT '',
+              why      TEXT NOT NULL DEFAULT '',
+              hits     INTEGER NOT NULL DEFAULT 1,
+              first_ts REAL NOT NULL,
+              last_ts  REAL NOT NULL,
+              PRIMARY KEY (key, site, dir)
+           )""",
+        "CREATE INDEX IF NOT EXISTS screened_dir ON screened(dir)",
     ],
 }
 
@@ -319,6 +349,48 @@ class Store:
                 if key:
                     spread.setdefault(key, set()).add(chosen)
         return {key: len(dirs) for key, dirs in spread.items()}
+
+    # --- screened (refused) candidates -------------------------------------- #
+    def record_screened(self, key: str, site: str, dir_name: str,
+                        source: str = "", why: str = "") -> bool:
+        """Remember that this candidate was refused. True iff it is NEW.
+
+        The return value is what makes the notification a one-time pointer
+        rather than a per-download alarm: a phrase refused for a permanent
+        reason (site branding, shared vocabulary, a spread that only ever
+        grows) is refused on EVERY correction, and reporting it every time
+        trains the operator to dismiss it.
+        """
+        now = self._clock()
+        cur = self.conn.execute(
+            """INSERT INTO screened (key, site, dir, source, why, hits,
+                                     first_ts, last_ts)
+               VALUES (?, ?, ?, ?, ?, 1, ?, ?)
+               ON CONFLICT(key, site, dir) DO UPDATE SET
+                 hits = screened.hits + 1,
+                 why = excluded.why,
+                 last_ts = excluded.last_ts""",
+            (key, site or "", dir_name, str(source or ""), str(why or ""),
+             now, now))
+        # `rowcount` is 1 for both branches, so ask the row itself.
+        row = self.conn.execute(
+            "SELECT hits FROM screened WHERE key=? AND site=? AND dir=?",
+            (key, site or "", dir_name)).fetchone()
+        self.conn.commit()
+        del cur
+        return bool(row) and int(row["hits"]) == 1
+
+    def screened_rows(self, limit: int = 200) -> list:
+        rows = self.conn.execute(
+            "SELECT * FROM screened ORDER BY last_ts DESC LIMIT ?",
+            (int(limit),)).fetchall()
+        return [dict(r) for r in rows]
+
+    def clear_screened(self, key: str, site: str = "") -> int:
+        cur = self.conn.execute("DELETE FROM screened WHERE key=? AND site=?",
+                                (key, site or ""))
+        self.conn.commit()
+        return int(cur.rowcount)
 
     # --- directory kinds ---------------------------------------------------- #
     def set_dir_kind(self, name: str, kind: str, source: str = "") -> None:

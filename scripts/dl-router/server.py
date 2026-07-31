@@ -323,7 +323,14 @@ class App:
                                        site=site,
                                        spread=spread_map.get(norm_key(phrase), 0))
             if why:
-                skipped.append({"key": key, "source": source, "why": why})
+                # `first` is what stops the extension notifying on every
+                # correction for a PERMANENTLY refused candidate -- see
+                # Store.record_screened. The refusal is durable state, not an
+                # event, and `dl-route alias review` shows it permanently.
+                first = self.store.record_screened(key, site, chosen, source,
+                                                   why)
+                skipped.append({"key": key, "source": source, "why": why,
+                                "first": first})
             return why is None
 
         # THE CATCH-ALL LEARNS NOTHING.
@@ -339,7 +346,13 @@ class App:
                                    payload.get("autoDir"),
                                    bool(payload.get("createdNew")))
             return {"ok": True, "aliases": 0, "written": [],
+                    # SOURCE STRING IS A CROSS-LANGUAGE CONTRACT: the
+                    # extension's reportNothingLearned filters on this literal
+                    # so a routine catch-all filing never notifies. Pinned on
+                    # both sides (test_the_catch_all_learns_nothing,
+                    # service_worker.test.mjs).
                     "skipped": [{"key": "", "source": "catch-all",
+                                 "first": False,
                                  "why": "the catch-all directory is the "
                                         "absence of a subject, not one"}],
                     "dir": chosen, "kind": kind}
@@ -371,7 +384,7 @@ class App:
                         learned += 1
             elif ctx.tags:
                 skipped.append({
-                    "key": "", "source": "tag",
+                    "key": "", "source": "tag", "first": False,
                     "why": "a tag is learned only from an explicit "
                            "confirmation on a site-scoped context"})
         elif kind == KIND_PERFORMER:

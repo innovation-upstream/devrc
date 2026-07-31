@@ -303,13 +303,20 @@ def cmd_alias_review(args, cfg=None, store=None) -> int:
     rows.sort(key=lambda r: (not r["global"], r["suspect"] is None,
                              -int(r["hits"]), r["key"]))
 
+    refused = store.screened_rows()
+
     if getattr(args, "json", False):
-        print(json.dumps(rows, indent=2, ensure_ascii=False))
+        print(json.dumps({"aliases": rows, "refused": refused}, indent=2,
+                         ensure_ascii=False)
+              if refused else json.dumps(rows, indent=2, ensure_ascii=False))
         return 0
 
     if not rows:
+        # NOT an early return: "nothing was learned" is the most interesting
+        # moment to see WHAT WAS REFUSED, and printing only this line hid the
+        # refusals in exactly that case.
         print("no aliases learned yet")
-        return 0
+        return _print_refused(refused)
     widths = {
         "key": max(3, *(len(r["key"]) for r in rows)),
         "site": max(4, *(len(_site_display(r["site"])) for r in rows)),
@@ -337,6 +344,29 @@ def cmd_alias_review(args, cfg=None, store=None) -> int:
     if flagged:
         print(f"\nremove one with: dl-route alias rm '<key>' --site "
               f"'{GLOBAL_SITE_DISPLAY}'   (or --site <hostname>)")
+
+    return _print_refused(refused)
+
+
+def _print_refused(refused) -> int:
+    """REFUSALS ARE THE OTHER HALF OF "what has been learned".
+
+    A screened candidate writes no alias row, so before this it existed nowhere
+    the operator could look: the only surface was a notification that fires
+    once. This is the permanent one, and it is what makes the over-strict half
+    of the screen as visible as the over-loose half.
+    """
+    if not refused:
+        return 0
+    print(f"\n{len(refused)} refused candidate(s) — these will NEVER "
+          f"auto-file:")
+    for row in refused:
+        print(f"  {row['key']}  @ {_site_display(row['site'])}"
+              f"  -> {row['dir']}  ({row['source'] or '?'}, seen "
+              f"{row['hits']}x)")
+        print(f"    ^ {row['why']}")
+    print("\nif one of these is a real subject: dl-route alias set "
+          "'<phrase>' '<Directory>' --site <hostname> --force")
     return 0
 
 
