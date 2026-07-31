@@ -8,6 +8,32 @@ you need to know what the agent can and cannot reach.
 
 Core: `~/workspace/devrc/scripts/browser-bridge/SKILL.md`.
 
+## Status (2026-07-31) — read before re-diagnosing
+
+✅ **Verified working end-to-end 2026-07-31.** A real run against a live tab returned
+`{"answer":"Example Domain","evidence":[…],"steps_used":2,"status":"ok"}`.
+⚠ A `--dry-run` does **NOT** prove this: it still invokes the model but *intercepts*
+`nav`, so it exercises neither navigation nor reading. Only a real run does.
+
+It had **TWO independent blockers**, both now fixed — either one alone made the
+command unrunnable, which is why fixing the first didn't appear to help:
+
+1. **#216** — an `$(...)` stdout flush race truncated the fail-closed tool-set gate's
+   input, so the gate (correctly) refused with `unparseable debug-agent tool set: …`.
+   Fixed by capturing to a file. See the ⚠ note under the gate bullet below.
+2. **#234** — the tab-readiness probe ran `eval '1'` against `about:blank`, and
+   `chrome.scripting` **cannot inject into `about:blank`**, so readiness could never
+   be reached. Fixed by probing without injecting.
+
+🔴 **Every doc misattributed both symptoms to an opencode *version* problem for the
+entire arc.** They are not version-related — both hosts run opencode 1.18.4 and both
+resolve browser-only. Do not re-open that hypothesis.
+
+⚠ **Capability is still UNMEASURED** beyond two trivial tasks — "it runs" is not "it
+is good at this". The proposed default flip to `browser agent`-first is deliberately
+**NOT shipped**, pending a ~10-goal / ~$0.06 measurement of real success rate. Do not
+flip it on arithmetic (token-cost) reasoning alone.
+
 Offload an open-ended "go read X and tell me Y" browsing task to a **cheap
 autonomous agent** (opencode + DeepSeek `deepseek-v4-flash` via OpenRouter) so it
 never burns YOUR context on transient page HTML — only a compact structured
