@@ -365,9 +365,22 @@ export async function waitForTabLoad(getTab, opts = {}) {
 // SPA's first paint (the rAF-gated fixture needed ~470 ms) without wasting a
 // whole second of the operator's rate-limit budget on a page that is already up.
 export const WAKE_SETTLE_DEFAULT_MS = 1500;
-// Hard cap, matching ACTIVATE_WAIT_MAX_MS and kept well under the server's
-// cmd_timeout (20s) and CDP_OP_BUDGET_MS (15s) — the #189 no-wedge bound.
-export const WAKE_SETTLE_MAX_MS = 8000;
+// Hard cap on the settle. DERIVED, not picked: unlike `activate` (whose wait is the
+// whole op), the settle is only ONE PHASE of a CDP op that must ALSO fit the probe
+// and, for a `--wake` read, the read itself — all inside CDP_OP_BUDGET_MS (15s).
+// A naive 8s cap made `html --wake=8000` = 8s settle + a read bounded by
+// CDP_COMMAND_TIMEOUT_MS (8s) = up to 16s > the budget, surfacing as an opaque
+// `cdp_timeout:op` (it fails safe and still detaches, but the message tells the
+// caller nothing). So the ceiling is CDP_OP_BUDGET_MS − CDP_COMMAND_TIMEOUT_MS −
+// 1s margin = 6s, which keeps settle + one worst-case command inside the budget by
+// construction. Clamping beats documenting a footgun.
+//
+// Written as a literal (CDP_OP_BUDGET_MS / CDP_COMMAND_TIMEOUT_MS are declared
+// LOWER in this file, so referencing them here would hit the const TDZ at module
+// evaluation). The relationship is not left to a comment: `wake.test.mjs` asserts
+// WAKE_SETTLE_MAX_MS + CDP_COMMAND_TIMEOUT_MS < CDP_OP_BUDGET_MS, so changing a
+// budget without re-deriving this fails CI.
+export const WAKE_SETTLE_MAX_MS = 6000;
 
 // Clamp a caller-supplied wake settle into [0, WAKE_SETTLE_MAX_MS]. undefined /
 // null / "" → the default; non-finite or negative → 0 (apply the un-throttle,
@@ -395,11 +408,47 @@ export const WAKE_CDP_STEPS = Object.freeze([
                   params: Object.freeze({ enabled: true }), optional: false }),
 ]);
 
-// Probe run INSIDE the woken session to report what the un-throttle achieved.
-// Metadata only — no page content ever leaves via this expression.
-export const WAKE_PROBE_EXPRESSION =
-  "JSON.stringify({visibilityState:document.visibilityState," +
-  "readyState:document.readyState,hasFocus:document.hasFocus()})";
+// The EXPLICIT teardown for the step above. It is NOT enough to rely on detach
+// reverting focus emulation: that revert is an implementation detail of the
+// Emulation domain, not a protocol contract, and there is a concrete path where
+// detach does not happen promptly — a hung/failed `chrome.debugger.detach` (tab
+// mid-crash, wedged renderer) is bounded and SWALLOWED by withCdpSession's
+// safeDetach, so the attachment can outlive the op. A tab left permanently
+// focus-emulated is a hidden tab that believes it is focused and visible:
+// un-throttled indefinitely, stuck debug banner, nothing that knows to clean it up.
+//
+// It also closes a credential-adjacent risk that must not rest on a measured side
+// effect: `navigator.clipboard.readText()` requires a FOCUSED document plus an
+// already-granted `clipboard-read` permission, and the operator's clipboard
+// routinely holds a password or token. On an origin that already has that grant, a
+// document that believes it is focused may be able to read it. Narrowing the
+// emulated-focus window to exactly the wake, deterministically, is the fix — not
+// hoping the revert happens. (Pointer-lock/fullscreen/autoplay stay closed
+// regardless: they additionally need transient user activation, which `wake` never
+// synthesizes.)
+//
+// Best-effort by construction: this runs in a `finally`, so a failure here must
+// never mask the op's real result or error.
+export const WAKE_CDP_TEARDOWN = Object.freeze({
+  method: "Emulation.setFocusEmulationEnabled",
+  params: Object.freeze({ enabled: false }),
+});
+
+// Probe run INSIDE the wake window to report what the un-throttle achieved.
+// Metadata only — no page content can leave via it.
+//
+// It is a FUNCTION (injected via chrome.scripting, ISOLATED world), not a CDP
+// expression, and that is deliberate: a CDP Runtime.evaluate with no contextId runs
+// in the page's MAIN world, where a hostile page can shadow `document.visibilityState`
+// / `document.hasFocus` and lie to us — turning `woke` into a page-controlled claim.
+// The isolated world sees the real values.
+export function wakeProbeFn() {
+  return {
+    visibilityState: document.visibilityState,
+    readyState: document.readyState,
+    hasFocus: document.hasFocus(),
+  };
+}
 
 // Apply WAKE_CDP_STEPS through `send`, tolerating an optional step's failure.
 // Returns { applied:[method,…], skipped:[{method,error},…] } so the op can report

@@ -324,6 +324,25 @@ test("SECURITY: `activate` is UNREACHABLE for the autonomous agent — not even 
   assert.equal(fx.calls.length, 0, "nothing ever reached the bridge");
 });
 
+test("SECURITY: the op gate is OWN-PROPERTY — a prototype key is never an op", async () => {
+  // `op in OP_TO_SERVER` walks the prototype chain, so "constructor"/"toString"/
+  // "valueOf"/"__proto__" all read as present. Not exploitable on its own (it also
+  // needs an operator-set BROWSER_AGENT_ALLOWED_OPS naming one, and the resulting
+  // body fails server-side) — but Object.hasOwn is simply the correct check, and the
+  // focus-theft control must not sit next to a sloppy membership test.
+  for (const proto of ["constructor", "toString", "valueOf", "hasOwnProperty",
+                       "__proto__", "isPrototypeOf"]) {
+    assert.throws(
+      () => buildRequest({ op: proto },
+        baseEnv({ BROWSER_AGENT_ALLOWED_OPS: `text,${proto}` }), TOK),
+      new RegExp(`op_not_allowed:${proto === "__proto__" ? ".*" : proto}`),
+      `${proto} must never resolve to a server op`);
+  }
+  // The real ops still pass the own-property gate.
+  assert.equal(buildRequest({ op: "text" }, baseEnv(), TOK).body.op, "text");
+  assert.equal(buildRequest({ op: "wake" }, baseEnv(), TOK).body.op, "wake");
+});
+
 test("buildRequest: wake forces the env tab; bounded waitMs only; NO raw passthrough", () => {
   // Bare wake → only op + the forced tab (own-tab-scoped; model can't name a tab).
   const bare = buildRequest({ op: "wake" }, baseEnv(), TOK).body;

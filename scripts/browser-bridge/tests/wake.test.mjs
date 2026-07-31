@@ -19,8 +19,9 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   ALLOWED_OPS, validateCommand,
-  WAKE_SETTLE_DEFAULT_MS, WAKE_SETTLE_MAX_MS, WAKE_CDP_STEPS,
-  clampWakeMs, applyWakeSteps, WAKE_PROBE_EXPRESSION, HIDDEN_TAB_NOTE,
+  WAKE_SETTLE_DEFAULT_MS, WAKE_SETTLE_MAX_MS, WAKE_CDP_STEPS, WAKE_CDP_TEARDOWN,
+  clampWakeMs, applyWakeSteps, wakeProbeFn, HIDDEN_TAB_NOTE,
+  CDP_OP_BUDGET_MS, CDP_COMMAND_TIMEOUT_MS,
 } from "../extension/protocol.js";
 
 // --------------------------------------------------------------------------- //
@@ -45,7 +46,18 @@ test("clampWakeMs: default / zero / cap — bounded like clampActivateWaitMs", (
   assert.equal(clampWakeMs(250), 250);
   assert.equal(clampWakeMs(250.9), 250);
   assert.equal(clampWakeMs(999999), WAKE_SETTLE_MAX_MS, "never exceeds the #189 cap");
-  assert.ok(WAKE_SETTLE_MAX_MS <= 8000, "the settle stays well under CDP_OP_BUDGET_MS");
+});
+
+test("WAKE_SETTLE_MAX_MS is DERIVED from the CDP budgets — settle + one command fits", () => {
+  // The settle is only ONE PHASE of a CDP op that must also fit the probe and (for a
+  // --wake read) the read, all inside CDP_OP_BUDGET_MS. An 8s cap let
+  // `html --wake=8000` reach 8s settle + an 8s-bounded read = 16s > the 15s budget,
+  // surfacing as an opaque `cdp_timeout:op`. Pin the relationship so changing a
+  // budget without re-deriving the cap fails here rather than in production.
+  assert.ok(WAKE_SETTLE_MAX_MS + CDP_COMMAND_TIMEOUT_MS < CDP_OP_BUDGET_MS,
+    `settle cap ${WAKE_SETTLE_MAX_MS} + command ${CDP_COMMAND_TIMEOUT_MS} `
+    + `must fit the ${CDP_OP_BUDGET_MS} op budget`);
+  assert.ok(WAKE_SETTLE_DEFAULT_MS < WAKE_SETTLE_MAX_MS);
 });
 
 test("SECURITY: WAKE_CDP_STEPS is FROZEN data with no caller-influenced params", () => {
@@ -59,9 +71,29 @@ test("SECURITY: WAKE_CDP_STEPS is FROZEN data with no caller-influenced params",
   // No raw-CDP passthrough: nothing here is a caller-supplied method or param.
   assert.deepEqual(WAKE_CDP_STEPS[0].params, { state: "active" });
   assert.deepEqual(WAKE_CDP_STEPS[1].params, { enabled: true });
-  // The probe is metadata-only — it can never return page content.
-  assert.match(WAKE_PROBE_EXPRESSION, /visibilityState/);
-  assert.ok(!/innerText|outerHTML|documentElement/.test(WAKE_PROBE_EXPRESSION),
+});
+
+test("SECURITY: the teardown explicitly DISABLES focus emulation (never left to detach)", () => {
+  // Relying on detach to revert focus emulation is relying on an Emulation-domain
+  // implementation detail — and a hung/failed detach is bounded and SWALLOWED by
+  // withCdpSession's safeDetach, so the attachment (and the emulated focus) can
+  // outlive the op. It must be turned off explicitly.
+  assert.equal(WAKE_CDP_TEARDOWN.method, "Emulation.setFocusEmulationEnabled");
+  assert.deepEqual(WAKE_CDP_TEARDOWN.params, { enabled: false });
+  assert.ok(Object.isFrozen(WAKE_CDP_TEARDOWN) && Object.isFrozen(WAKE_CDP_TEARDOWN.params));
+  // It must undo exactly what the steps turned on.
+  const on = WAKE_CDP_STEPS.find((x) => x.method === WAKE_CDP_TEARDOWN.method);
+  assert.ok(on && on.params.enabled === true);
+});
+
+test("SECURITY: the wake probe is an isolated-world FUNCTION, not a main-world expression", () => {
+  // A CDP Runtime.evaluate probe runs in the page's MAIN world, where a hostile page
+  // can shadow document.visibilityState / document.hasFocus and make `woke` a
+  // page-controlled claim. chrome.scripting's isolated world sees the real values.
+  assert.equal(typeof wakeProbeFn, "function");
+  const src = String(wakeProbeFn);
+  assert.match(src, /visibilityState/);
+  assert.ok(!/innerText|outerHTML|documentElement|querySelector/.test(src),
     "the wake probe must never read page content");
 });
 
@@ -113,18 +145,29 @@ test("the hidden-tab note points at the NON-INTRUSIVE remedy, not `activate`", (
 const TAB_ID = 5;
 const TOP_URL = "https://example.com/app";
 
+// The mock keeps the ISOLATED-world results (what chrome.scripting returns) and the
+// MAIN-world results (what a CDP Runtime.evaluate would return) DELIBERATELY
+// DIFFERENT, so a test can tell which world a read actually came from. The
+// main-world values simulate a hostile page that has installed an `outerHTML`
+// getter / shadowed `innerText` — content it authored that is not in the DOM.
+const ISOLATED_HTML = "<html>REAL-DOM</html>";
+const ISOLATED_TEXT = "REAL-TEXT";
+const MAIN_WORLD_POISON = "ATTACKER-SHADOWED-CONTENT";
+
 const state = {
   tab: { id: TAB_ID, url: TOP_URL, title: "App", active: false, status: "complete", windowId: 1 },
-  visibility: "hidden",        // what the CDP wake PROBE reports
-  evalValue: "WOKEN-READ",     // what a CDP Runtime.evaluate read returns
+  visibility: "hidden",        // what the ISOLATED-world wake probe reports
   failStep: null,              // a CDP method name to reject
+  failDetach: false,           // simulate a hung/failing chrome.debugger.detach
+  throwInRead: false,          // make the --wake read throw (teardown must still run)
   calls: { cdp: [], attach: [], detach: [], scripting: [] },
 };
 function reset() {
   state.tab = { id: TAB_ID, url: TOP_URL, title: "App", active: false, status: "complete", windowId: 1 };
   state.visibility = "hidden";
-  state.evalValue = "WOKEN-READ";
   state.failStep = null;
+  state.failDetach = false;
+  state.throwInRead = false;
   state.calls = { cdp: [], attach: [], detach: [], scripting: [] };
 }
 
@@ -138,9 +181,26 @@ globalThis.chrome = {
   scripting: {
     async executeScript(params) {
       const src = params.func ? String(params.func) : "";
-      state.calls.scripting.push(src.includes("visibilityState") ? "probe" : "read");
-      if (src.includes("visibilityState")) return [{ result: state.visibility }];
-      return [{ result: "PLAIN-READ" }];
+      // The WAKE probe (wakeProbeFn) returns an object and mentions readyState; the
+      // ordinary read-path visibility probe returns the bare string. Both are
+      // chrome.scripting, so distinguish them by shape, not by mechanism.
+      if (src.includes("readyState")) {
+        state.calls.scripting.push("probe");
+        return [{ result: { visibilityState: state.visibility,
+                            readyState: "complete", hasFocus: true } }];
+      }
+      if (src.includes("visibilityState")) {
+        state.calls.scripting.push("vis");
+        return [{ result: state.visibility }];
+      }
+      if (src.includes("outerHTML")) {
+        state.calls.scripting.push("html");
+        if (state.throwInRead) throw new Error("read_boom");
+        return [{ result: ISOLATED_HTML }];
+      }
+      state.calls.scripting.push("text");
+      if (state.throwInRead) throw new Error("read_boom");
+      return [{ result: ISOLATED_TEXT }];
     },
   },
   tabs: {
@@ -153,17 +213,16 @@ globalThis.chrome = {
   },
   debugger: {
     async attach(target) { state.calls.attach.push(target); },
-    async detach(target) { state.calls.detach.push(target); },
+    async detach(target) {
+      state.calls.detach.push(target);
+      if (state.failDetach) throw new Error("detach_failed");
+    },
     async sendCommand(target, method, params) {
       state.calls.cdp.push({ method, params, sessionId: target.sessionId });
       if (state.failStep === method) throw new Error(`cdp_reject:${method}`);
       if (method === "Runtime.evaluate") {
-        const expr = String(params.expression || "");
-        if (expr.includes("visibilityState")) {
-          return { result: { value: JSON.stringify({
-            visibilityState: state.visibility, readyState: "complete", hasFocus: true }) } };
-        }
-        return { result: { value: state.evalValue } };
+        // Anything reaching CDP evaluate is running in the page's MAIN world.
+        return { result: { value: MAIN_WORLD_POISON } };
       }
       return {};
     },
@@ -175,19 +234,26 @@ globalThis.chrome = {
   alarms: { create() {}, onAlarm: { addListener() {} } },
 };
 
-const { OPS } = await import("../extension/service_worker.js");
+const { OPS, cdpAttached } = await import("../extension/service_worker.js");
 
 const cdpMethods = () => state.calls.cdp.map((c) => c.method);
+const focusEmuCalls = () => state.calls.cdp
+  .filter((c) => c.method === "Emulation.setFocusEmulationEnabled")
+  .map((c) => c.params && c.params.enabled);
 
 test("wake: applies the un-throttle to the ROUTED tab and reports it woke", async () => {
   reset();
-  state.visibility = "visible";     // what the probe sees INSIDE the woken session
+  state.visibility = "visible";     // what the ISOLATED probe sees during the wake
   const out = await OPS.wake({ tabId: TAB_ID, waitMs: 0 });
 
   assert.deepEqual(state.calls.attach, [{ tabId: TAB_ID }], "own-tab attach only");
   assert.deepEqual(state.calls.detach, [{ tabId: TAB_ID }], "always detaches");
-  assert.deepEqual(cdpMethods(),
-    ["Page.setWebLifecycleState", "Emulation.setFocusEmulationEnabled", "Runtime.evaluate"]);
+  assert.deepEqual(cdpMethods(), [
+    "Page.setWebLifecycleState",
+    "Emulation.setFocusEmulationEnabled",   // on
+    "Emulation.setFocusEmulationEnabled",   // off (explicit teardown)
+  ]);
+  assert.deepEqual(state.calls.scripting, ["probe"], "the probe is isolated-world");
   assert.equal(out.tabId, TAB_ID);
   assert.equal(out.woke, true);
   assert.equal(out.visibilityState, "visible");
@@ -240,6 +306,62 @@ test("SECURITY: wake ALWAYS detaches, even when a required CDP step throws", asy
   assert.deepEqual(state.calls.detach, [{ tabId: TAB_ID }], "detach happens in the finally");
 });
 
+// --- Fix A: explicit un-emulation + the tracking-set ordering --------------- //
+
+test("SECURITY: focus emulation is explicitly DISABLED before detach", async () => {
+  reset();
+  state.visibility = "visible";
+  await OPS.wake({ tabId: TAB_ID, waitMs: 0 });
+  assert.deepEqual(focusEmuCalls(), [true, false],
+    "the emulated-focus window must be closed explicitly, not left to detach");
+  // ...and it must happen BEFORE the detach, not after (or alongside) it.
+  const offIdx = state.calls.cdp.findIndex(
+    (c) => c.method === "Emulation.setFocusEmulationEnabled" && c.params.enabled === false);
+  assert.ok(offIdx >= 0);
+  assert.equal(state.calls.detach.length, 1);
+});
+
+test("SECURITY: focus emulation is disabled even when the --wake READ throws", async () => {
+  reset();
+  state.visibility = "visible";
+  state.throwInRead = true;
+  await assert.rejects(() => OPS.text({ tabId: TAB_ID, wake: true, waitMs: 0 }),
+    /read_boom/);
+  assert.deepEqual(focusEmuCalls(), [true, false],
+    "a thrown read must not leave the tab focus-emulated");
+  assert.deepEqual(state.calls.detach, [{ tabId: TAB_ID }]);
+});
+
+test("SECURITY: a teardown FAILURE never masks the op's real result", async () => {
+  reset();
+  state.visibility = "visible";
+  // Both the on- and off- calls use the same method name, so failing it makes the
+  // REQUIRED wake step throw first — the op must surface THAT, not a teardown error.
+  state.failStep = "Emulation.setFocusEmulationEnabled";
+  await assert.rejects(() => OPS.wake({ tabId: TAB_ID, waitMs: 0 }),
+    /cdp_reject:Emulation.setFocusEmulationEnabled/);
+});
+
+test("REGRESSION: a failed/hung detach leaves the tab TRACKED in cdpAttached", async () => {
+  reset();
+  state.visibility = "visible";
+  state.failDetach = true;
+  // The op still succeeds — withCdpSession bounds and swallows a detach failure.
+  const out = await OPS.wake({ tabId: TAB_ID, waitMs: 0 });
+  assert.equal(out.woke, true);
+  assert.ok(cdpAttached.has(TAB_ID),
+    "deleting from the tracking set BEFORE awaiting detach made a real leaked "
+    + "attachment invisible; a failed detach must leave the tab tracked");
+  cdpAttached.delete(TAB_ID);   // don't leak mock state into later tests
+});
+
+test("a SUCCESSFUL detach still clears the tracking set", async () => {
+  reset();
+  state.visibility = "visible";
+  await OPS.wake({ tabId: TAB_ID, waitMs: 0 });
+  assert.ok(!cdpAttached.has(TAB_ID), "the normal path must not accumulate entries");
+});
+
 // --- the load-bearing regression guard ------------------------------------- //
 
 test("REGRESSION: a DEFAULT text/html/eval read takes the NON-CDP path — ZERO debugger attaches", async () => {
@@ -268,15 +390,18 @@ test("text --wake: un-throttles and reads INSIDE THE SAME CDP session", async ()
 
   assert.deepEqual(state.calls.attach, [{ tabId: TAB_ID }]);
   assert.deepEqual(state.calls.detach, [{ tabId: TAB_ID }]);
-  // The un-throttle steps come BEFORE the read, in ONE attached session — the whole
-  // reason --wake exists (the un-throttled state does NOT survive detach).
-  const order = cdpMethods();
-  assert.equal(order[0], "Page.setWebLifecycleState");
-  assert.equal(order[1], "Emulation.setFocusEmulationEnabled");
-  assert.ok(order.slice(2).every((m) => m === "Runtime.evaluate"));
   assert.equal(state.calls.attach.length, 1, "ONE attach covers both the wake and the read");
+  // The un-throttle comes BEFORE the read and is torn down after — the whole reason
+  // --wake exists (the un-throttled state does NOT survive detach).
+  assert.deepEqual(cdpMethods(), [
+    "Page.setWebLifecycleState",
+    "Emulation.setFocusEmulationEnabled",
+    "Emulation.setFocusEmulationEnabled",
+  ]);
+  assert.deepEqual(state.calls.scripting, ["probe", "text"],
+    "probe and read both go through chrome.scripting, inside the attached session");
 
-  assert.equal(out.text, "WOKEN-READ");
+  assert.equal(out.text, ISOLATED_TEXT);
   assert.equal(out.woke, true);
   assert.equal(out.visibilityState, "visible");
   assert.ok(!("hidden" in out), "a woken read is not a hidden read");
@@ -284,20 +409,65 @@ test("text --wake: un-throttles and reads INSIDE THE SAME CDP session", async ()
     ["Page.setWebLifecycleState", "Emulation.setFocusEmulationEnabled"]);
 });
 
-test("html --wake / eval --wake take the same single-session path", async () => {
+// --- Fix B: --wake reads must come from the ISOLATED world ------------------ //
+
+test("SECURITY: text/html --wake read the ISOLATED world — a main-world shadow is NOT observed", async () => {
+  // A hostile page can install an `outerHTML` getter or shadow innerText/querySelector
+  // and hand the reader content that is NOT in the DOM — a prompt-injection payload
+  // delivered on exactly the path agents are told to use when a read "came back
+  // empty". The mock returns MAIN_WORLD_POISON from every CDP Runtime.evaluate, so
+  // seeing it here would mean the read ran in the page's main world.
   reset();
   state.visibility = "visible";
+  const t = await OPS.text({ tabId: TAB_ID, wake: true, waitMs: 0 });
+  assert.equal(t.text, ISOLATED_TEXT);
+  assert.notEqual(t.text, MAIN_WORLD_POISON);
 
+  reset();
+  state.visibility = "visible";
   const h = await OPS.getHtml({ tabId: TAB_ID, wake: true, waitMs: 0 });
-  assert.equal(h.html, "WOKEN-READ");
-  assert.equal(h.woke, true);
-  assert.equal(state.calls.attach.length, 1);
+  assert.equal(h.html, ISOLATED_HTML);
+  assert.notEqual(h.html, MAIN_WORLD_POISON);
 
+  // No Runtime.evaluate at all on the html/text --wake path: the reads and the probe
+  // are chrome.scripting, only the un-throttle is CDP.
+  assert.ok(!cdpMethods().includes("Runtime.evaluate"),
+    "a --wake html/text read must never evaluate in the page's main world");
+});
+
+test("SECURITY: the `woke` verdict is probed from the ISOLATED world, not main-world CDP", async () => {
+  reset();
+  state.visibility = "visible";
+  const out = await OPS.wake({ tabId: TAB_ID, waitMs: 0 });
+  assert.equal(out.woke, true);
+  assert.ok(state.calls.scripting.includes("probe"));
+  assert.ok(!cdpMethods().includes("Runtime.evaluate"),
+    "a main-world probe could be shadowed, making `woke` a page-controlled claim");
+});
+
+test("eval --wake DOES use CDP main world — matching plain `eval` (world:MAIN) by design", async () => {
+  // `eval` means "run my JS with the page's own globals", and the default eval path
+  // is explicitly world:"MAIN". So --wake adds no exposure eval didn't already have.
+  // It also CANNOT use chrome.scripting: that runs a serialized FUNC, never a
+  // caller's JS STRING (#190). Pin the intent so the asymmetry with text/html is
+  // deliberate and visible.
   reset();
   state.visibility = "visible";
   const e = await OPS.eval({ tabId: TAB_ID, js: "1+1", wake: true, waitMs: 0 });
-  assert.equal(e.value, "WOKEN-READ");
+  assert.equal(e.value, MAIN_WORLD_POISON, "eval --wake evaluates in the main world");
   assert.equal(e.woke, true);
+  assert.ok(cdpMethods().includes("Runtime.evaluate"));
+  assert.deepEqual(focusEmuCalls(), [true, false], "still torn down explicitly");
+  assert.deepEqual(state.calls.detach, [{ tabId: TAB_ID }]);
+});
+
+test("html --wake takes the same single-session path", async () => {
+  reset();
+  state.visibility = "visible";
+  const h = await OPS.getHtml({ tabId: TAB_ID, wake: true, waitMs: 0 });
+  assert.equal(h.html, ISOLATED_HTML);
+  assert.equal(h.woke, true);
+  assert.equal(state.calls.attach.length, 1);
   assert.deepEqual(state.calls.detach, [{ tabId: TAB_ID }]);
 });
 
@@ -310,6 +480,8 @@ test("a --wake read still reports honestly when the tab stayed hidden", async ()
   assert.match(out.note, /browser wake/);
 });
 
+// --- Fix C: --frame is refused on every wake surface ------------------------ //
+
 test("--wake + --frame is REFUSED loudly (never silently ignore one of the two)", async () => {
   for (const call of [
     () => OPS.text({ tabId: TAB_ID, wake: true, frame: "7" }),
@@ -318,7 +490,23 @@ test("--wake + --frame is REFUSED loudly (never silently ignore one of the two)"
   ]) {
     reset();
     await assert.rejects(call, /wake_with_frame_unsupported/);
+    assert.deepEqual(state.calls.attach, [], "refused before any attach");
   }
+});
+
+test("the `wake` OP with a --frame is refused too (global flag, no per-frame wake)", async () => {
+  // `--frame` is a GLOBAL CLI flag parsed before the subcommand, so
+  // `browser --frame X wake` puts a `frame` on the wire. Silently waking the whole
+  // tab while the caller believes they scoped it is the same quiet mismatch the
+  // --wake+--frame refusal exists to prevent.
+  reset();
+  await assert.rejects(() => OPS.wake({ tabId: TAB_ID, frame: "7", waitMs: 0 }),
+    /wake_with_frame_unsupported/);
+  assert.deepEqual(state.calls.attach, [], "refused before any attach");
+  assert.match(
+    await OPS.wake({ tabId: TAB_ID, frame: "7" }).catch((e) => e.message),
+    /tab-level, not per-frame/,
+    "the message must explain WHY, not just refuse");
 });
 
 test("SECURITY: a --wake read attaches ONLY to the routed tab, never the active tab", async () => {

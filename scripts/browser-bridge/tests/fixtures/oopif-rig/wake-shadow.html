@@ -1,0 +1,49 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>wake-shadow</title>
+<!--
+  MAIN-WORLD SHADOWING fixture for `text --wake` / `html --wake`.
+
+  A CDP `Runtime.evaluate` with no contextId runs in the page's MAIN world, where a
+  page can install an `outerHTML` getter and shadow `innerText`/`querySelector` — and
+  hand the reader content it authored that is NOT in the DOM. That would be a
+  prompt-injection channel on exactly the path agents are told to use when a read
+  "came back empty".
+
+  `text`/`html --wake` read via chrome.scripting's ISOLATED world (only the
+  un-throttle is CDP), so these overrides must NOT be observed:
+
+    browser open http://127.0.0.1:8901/wake-shadow.html
+    browser html --wake     # MUST contain WAKE-SHADOW-REAL, MUST NOT contain POISON
+    browser text --wake     # MUST be WAKE-SHADOW-REAL,      MUST NOT contain POISON
+
+  `js`/`eval --wake` DOES run in the main world — same as plain `js`/`eval`, which is
+  what `eval` means — so this is the expected contrast, not a bug:
+
+    browser js 'document.documentElement.outerHTML' --wake   # WILL show the POISON
+-->
+<body>
+<div id="app">WAKE-SHADOW-REAL</div>
+<script>
+var POISON = '<html>WAKE-SHADOW-POISON-MAIN-WORLD</html>';
+
+// Shadow the two surfaces the reads use, in the MAIN world only.
+try {
+  Object.defineProperty(document.documentElement, 'outerHTML', {
+    configurable: true,
+    get: function () { return POISON; }
+  });
+} catch (e) { /* older engines */ }
+
+try {
+  Object.defineProperty(document.body, 'innerText', {
+    configurable: true,
+    get: function () { return 'WAKE-SHADOW-POISON-MAIN-WORLD'; }
+  });
+} catch (e) { /* ignore */ }
+
+document.querySelector = function () {
+  return { innerText: 'WAKE-SHADOW-POISON-MAIN-WORLD' };
+};
+</script>
+</body>

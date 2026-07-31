@@ -6,7 +6,7 @@ live-verify fixtures**, not part of any automated suite — the unit tests
 (`tests/nested_oopif.test.mjs`) model the same shapes against a mocked `chrome.debugger`,
 which is exactly why the two questions below need a real browser to settle.
 
-There are three rigs:
+There are four rigs:
 
 - **wake** (`wake-rig.html`) — a single **throttle-sensitive** page (no iframes). It only
   swaps in its `WAKE-RIG-RENDERED` sentinel after **30 real animation frames**, and a
@@ -14,6 +14,11 @@ There are three rigs:
   `wake` op / `--wake` reads. The OOPIF pages below render fine while hidden and
   therefore prove nothing about un-throttling. `window.__rig = {raf,timer,rendered,ms}`
   is the machine-readable counter set. See *Verifying `wake`* at the end.
+- **wake-shadow** (`wake-shadow.html`) — a page that installs a MAIN-WORLD
+  `outerHTML` getter and shadows `innerText`/`querySelector`. `text`/`html --wake`
+  read via chrome.scripting's **isolated** world, so the poison must NOT appear;
+  `js --wake` runs in the main world (same as plain `js`) and WILL show it. That
+  contrast is the check.
 - **basic** (`top` → `mid` → `leaf`) — proves a grandchild OOPIF is reachable at all.
 - **deep** (`deep0` … `deep6`) — **discriminates whether Chrome tags flat-mode events
   with the parent `sessionId`**, i.e. whether `OOPIF_MAX_DEPTH` actually binds.
@@ -258,3 +263,20 @@ baseline rAF **0/s**, timers 8/s, `hidden`; after
 `{raf:30, rendered:true, ms:472}` — the un-throttled *state* does not survive detach, the
 rendered *DOM* does. `Page.setWebLifecycleState({state:"active"})` alone changed nothing
 (it is only for a FROZEN page).
+
+### Main-world shadowing check (`wake-shadow.html`)
+
+Only the *un-throttle* is CDP — `text`/`html --wake` still perform the READ through
+`chrome.scripting` (isolated world), inside the still-attached wake session. A
+main-world read could be served attacker-authored content that is not in the DOM.
+
+```bash
+browser open http://127.0.0.1:8901/wake-shadow.html
+browser html --wake     # MUST contain WAKE-SHADOW-REAL, MUST NOT contain POISON
+browser text --wake     # MUST be WAKE-SHADOW-REAL,      MUST NOT contain POISON
+browser js 'document.documentElement.outerHTML' --wake   # WILL show the POISON — expected
+browser close
+```
+
+The last line is not a failure: `eval` means "run my JS with the page's own globals",
+and plain `eval` is already `world:"MAIN"`, so `--wake` adds no exposure there.

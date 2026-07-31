@@ -50,8 +50,11 @@
 #                               timers, so a heavy SPA never paints. `wake` attaches
 #                               CDP to that tab only, turns on focus emulation (+ a
 #                               lifecycle thaw), holds it for a bounded settle
-#                               (default ~1.5s, cap ~8s) so the page renders, then
-#                               detaches. Nothing here moves your screen.
+#                               (default ~1.5s, cap 6s — derived so the settle plus
+#                               one worst-case CDP command still fits the op budget)
+#                               so the page renders, then explicitly turns focus
+#                               emulation back OFF and detaches. Nothing here moves
+#                               your screen.
 #                               ⚠ The un-throttled STATE ends at detach (measured);
 #                               what persists is the DOM the page rendered. If a
 #                               read must OBSERVE live un-throttled state, use
@@ -74,9 +77,13 @@
 #   browser html              — outerHTML of the owned/active tab (+ url, title);
 #                               --max-bytes N caps it (default 32768, 0 = uncapped,
 #                               truncation appends a "…[truncated N bytes]" note).
-#                               --wake un-throttles the tab and reads in the SAME
-#                               CDP session (opt-in; briefly shows Brave's debug
-#                               banner — the default read stays banner-free)
+#                               --wake[=MS] un-throttles the tab and reads inside the
+#                               SAME CDP session (opt-in; briefly shows Brave's debug
+#                               banner — the default read stays banner-free). Only the
+#                               UN-THROTTLE is CDP: the read itself still runs in
+#                               chrome.scripting's ISOLATED world, so a hostile page
+#                               cannot shadow outerHTML/innerText and feed you text
+#                               that is not in the DOM
 #   browser text [selector]   — visible innerText of the owned/active tab (cheap
 #                               read; optional CSS selector; --max-bytes N caps
 #                               the returned text, default 32768, 0 = uncapped).
@@ -484,8 +491,9 @@ case "$sub" in
     # UN-THROTTLE the owned/explicit/active tab WITHOUT moving focus — the
     # non-intrusive counterpart to `activate`. The extension attaches CDP to that
     # tab only, applies Emulation.setFocusEmulationEnabled (+ a best-effort
-    # Page.setWebLifecycleState thaw), holds it for a bounded settle so the page
-    # gets real animation frames, then detaches. NO i3-msg, NO tab/window focus
+    # Page.setWebLifecycleState thaw), holds it for a bounded settle (cap 6s) so the
+    # page gets real animation frames, then explicitly disables focus emulation and
+    # detaches (never relying on detach to revert the emulation). NO i3-msg, NO tab/window focus
     # change — the server's host-side foregrounding is keyed on `activate` alone.
     # --wait MS overrides the settle; --no-wait applies the un-throttle and returns
     # immediately (useful only if you follow with a `--wake` read).

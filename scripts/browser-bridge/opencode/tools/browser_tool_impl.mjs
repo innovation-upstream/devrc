@@ -207,7 +207,12 @@ function _coerceMaxBytes(v) {
 export function buildRequest(args, env, token) {
   const op = String((args && args.op) || "");
   const allowed = allowedOpsFromEnv(env);
-  if (!allowed.includes(op) || !(op in OP_TO_SERVER)) {
+  // Object.hasOwn, NOT `in`: `in` walks the prototype chain, so `"constructor" in
+  // OP_TO_SERVER` (and toString/valueOf/…) is true. Not exploitable today — it would
+  // still need an operator-set BROWSER_AGENT_ALLOWED_OPS naming one, and the
+  // resulting body fails server-side — and `activate` is not a prototype property so
+  // the focus-theft control has no bypass. Own-property is simply the correct check.
+  if (!allowed.includes(op) || !Object.hasOwn(OP_TO_SERVER, op)) {
     throw new BrowserToolRefusal(`op_not_allowed:${op || "<none>"}`);
   }
   // whoami is a GLOBAL, read-only GET /whoami — no tab, no /cmd body. Short-

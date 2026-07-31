@@ -206,7 +206,7 @@ has not been exercised against a third-party authenticated API beyond that.)
 | `click`      | top frame: **CDP** `getBoundingClientRect` → `Input.dispatchMouseEvent` (trusted); `--frame`: **SYNTHETIC** click via `chrome.scripting`; `selector` required, `frame` optional | `{url,clicked,x,y,frame,trusted}` |
 | `type`       | top frame: **CDP `Input.insertText`** (trusted); `--frame`: **SYNTHETIC** input via `chrome.scripting`; `text` required, `selector`/`frame` optional | `{url,typed,frame,trusted}` |
 | `key`        | top frame: **CDP `Input.dispatchKeyEvent`** (trusted); `--frame`: **SYNTHETIC** key via `chrome.scripting`; one bounded key; `key` required | `{url,key,frame,trusted}` |
-| `wake`       | **UN-THROTTLE the tab WITHOUT touching focus** — CDP `Emulation.setFocusEmulationEnabled` (+ best-effort `Page.setWebLifecycleState`) held for a bounded settle (`waitMs`, default 1.5s, clamped ≤8s) so a background SPA gets real animation frames and renders, then detaches. Own-tab-scoped like every CDP op. **This is the remedy for a hidden/empty read — not `activate`.** ⚠ the un-throttled STATE ends at detach (measured); rendered DOM persists | `{tabId,url,title,woke,visibilityState,readyState,applied,skipped,settleMs,note}` |
+| `wake`       | **UN-THROTTLE the tab WITHOUT touching focus** — CDP `Emulation.setFocusEmulationEnabled` (+ best-effort `Page.setWebLifecycleState`) held for a bounded settle (`waitMs`, default 1.5s, clamped ≤**6s**) so a background SPA gets real animation frames and renders, then **explicitly disables focus emulation** and detaches. Own-tab-scoped like every CDP op. **This is the remedy for a hidden/empty read — not `activate`.** ⚠ the un-throttled STATE ends at detach (measured); rendered DOM persists | `{tabId,url,title,woke,visibilityState,readyState,applied,skipped,settleMs,note}` |
 | `--wake` on `text`/`html`/`eval` | the SAME un-throttle applied **inside the same CDP session as the read**, for a read that must OBSERVE live un-throttled state (rather than the DOM `wake` left behind). Opt-in only — the default read path is unchanged (see below) | the read's normal shape + `{woke,wake:{applied,settleMs}}` |
 | `activate`   | **FOREGROUND the tab** — `chrome.tabs.update(tab,{active:true})` + `chrome.windows.update(windowId,{focused:true})`, then an OPTIONAL bounded wait-for-`status:"complete"` + paint settle (`waitMs`, clamped ≤8s; a discarded/never-completing tab returns promptly — no wedge). **⚠⚠ STEALS THE OPERATOR'S SCREEN** — the one intrusive op, and a **LAST RESORT**: use it only when something genuinely needs the REAL foreground (a permission prompt, a native picker, seeing it yourself). For a throttled/unrendered tab use `wake`. Needed at most **once per tab, never per read**. **Operator-only — absent from the autonomous agent's op set entirely.** **i3:** the server also raises the Brave window via `i3-msg` | `{tabId,windowId,url,title,active,status,i3}` |
 | `upload`     | **CDP `DOM.setFileInputFiles`** — resolve the `<input type=file>` at `selector` to a RemoteObject, VERIFY it is a file input, then hand Chrome the ABSOLUTE `path` (Chrome reads the file itself — **no bytes cross the bridge**); `--frame` routes into a same-process iframe OR a cross-origin OOPIF (incl. a **NESTED** one — same bounded cascade + caps as `eval --frame`). Own-tab, #189-bounded, NO raw-CDP passthrough. **Data-exfil-capable → the server AUDIT-LOGS every upload** (op + target domain + path) and it is **OPERATOR-ONLY — not in the autonomous agent's default op set** (`BROWSER_AGENT_ALLOWED_OPS` opt-in only). `selector`+`path` required | `{ok,selector,frame,url,files:[basename]}` |
@@ -489,7 +489,7 @@ Three findings, all load-bearing:
 **The two shapes.**
 
 - **`browser wake`** — attach, un-throttle, hold for a bounded settle (default
-  1.5 s, cap 8 s), probe, detach. The un-throttled state ends at detach, but the
+  1.5 s, cap 6 s), probe, explicitly un-emulate focus, detach. The un-throttled state ends at detach, but the
   **DOM the page rendered during the window persists** (measured: the fixture's
   rAF-gated content rendered at 472 ms and was still present after detach). This is
   the cheap once-per-tab answer, and the following read stays on the normal
@@ -498,6 +498,52 @@ Three findings, all load-bearing:
   the same attached session, so the read observes a genuinely un-throttled page.
   Use it when the read must see live un-throttled state (measuring rAF, a lazily
   hydrating SPA) rather than persisted DOM. `--wake=MS` overrides the settle.
+
+**Which WORLD a `--wake` read runs in (this is a security property, not a detail).**
+Only the *un-throttle* is CDP. `text --wake` / `html --wake` still perform the READ
+through `chrome.scripting` — the **isolated world** — just inside the still-attached
+wake session. A CDP `Runtime.evaluate` with no `contextId` would run in the page's
+**main world**, where a hostile page can
+
+```js
+Object.defineProperty(document.documentElement, 'outerHTML', { get: () => "…attacker text…" })
+```
+
+(or shadow `innerText`/`querySelector`/`document.body`) and hand the reader content
+it authored that is **not in the DOM** — a prompt-injection payload delivered on
+exactly the path agents are told to use when a read "came back empty", and invisible
+to later inspection of the real page. The isolated world closes that. The `woke`
+verdict is probed the same way, so a page cannot fake `visibilityState` either.
+
+`eval --wake` **does** run in the main world — and that is correct: the default
+(non-wake) `eval` is explicitly `world:"MAIN"`, because `eval` means "run my JS with
+the page's own globals". `--wake` therefore adds no exposure `eval` didn't already
+have. (`eval` cannot use `chrome.scripting` at all: it can only run a serialized
+FUNC, never a caller's JS STRING — the #190 null-as-success bug.)
+
+**Focus emulation is turned OFF explicitly, never left to detach.** `wake` sends
+`Emulation.setFocusEmulationEnabled({enabled:false})` in a `finally` around the
+settle/probe/read, so the emulated-focus window is exactly the wake — on every exit
+path, including a throw. Relying on detach to revert it would be relying on an
+Emulation-domain implementation detail, and there is a concrete path where detach
+does not happen promptly: a hung/failed `chrome.debugger.detach` (tab mid-crash,
+wedged renderer) is bounded and **swallowed** by `withCdpSession`'s `safeDetach`, so
+the attachment can outlive the op. A tab left permanently focus-emulated is a hidden
+tab that believes it is focused and visible — un-throttled indefinitely, stuck debug
+banner, nothing that knows to clean it up.
+
+That also keeps a **credential-adjacent** risk from resting on a measured side
+effect: `navigator.clipboard.readText()` needs a *focused* document **plus** an
+already-granted `clipboard-read` permission, and the operator's clipboard routinely
+holds a password or token — so on an origin that already has that grant, a document
+that believes it is focused may be able to read it. Bounding the window
+deterministically is the fix; hoping the revert happens is not. (Pointer-lock,
+fullscreen and autoplay stay closed regardless — they additionally require transient
+user activation, which `wake` never synthesizes.)
+
+Relatedly, `withCdp`'s detach now removes the tab from the `cdpAttached` tracking set
+**after** the detach resolves, not before: a failed detach must leave the tab
+*tracked*, or the leak is invisible to every consumer of that set.
 
 **Why normal reads deliberately stay NON-CDP.** `text`/`html`/`eval` (top frame, no
 `--frame`) take the light `chrome.scripting` path with **no debugger attach and no
@@ -511,12 +557,21 @@ regress this.
 **Bounds and scope** are the same as every other CDP op: own-tab only, the
 pre-attach privileged-scheme refusal (`assertCdpAttachable`), always-detach in a
 `finally`, no raw-CDP passthrough (the method set is the frozen `WAKE_CDP_STEPS`
-data plus the same `Runtime.evaluate` the reads already use), and the settle is
-clamped well under `CDP_OP_BUDGET_MS`. **`wake` does NOT trigger the host-side
-`i3-msg` foregrounding** — that branch is keyed on `op == "activate"` alone.
-`--wake` combined with `--frame` is **refused loudly**
-(`wake_with_frame_unsupported`) rather than silently ignoring one of the two: run
-`browser wake` first, then re-issue the frame read.
+data plus the probe/read), and the settle is clamped so that **settle + one
+worst-case CDP command still fits `CDP_OP_BUDGET_MS`**: `WAKE_SETTLE_MAX_MS` is
+`CDP_OP_BUDGET_MS - CDP_COMMAND_TIMEOUT_MS - 1s` = **6 s**. An 8 s cap would have let
+`html --wake=8000` reach 8 s settle + an 8 s-bounded read = 16 s > the 15 s budget,
+surfacing as an opaque `cdp_timeout:op` (it fails safe and still detaches, but tells
+the caller nothing). A unit test pins the relationship, so changing a budget without
+re-deriving the cap fails CI.
+
+**`wake` does NOT trigger the host-side `i3-msg` foregrounding** — that branch is
+keyed on `op == "activate"` alone (a server test enables i3 and asserts a `wake`
+spawns nothing). `--frame` is **refused loudly** (`wake_with_frame_unsupported`)
+both when combined with `--wake` and on the `wake` op itself — `--frame` is a global
+CLI flag, so `browser --frame X wake` would otherwise silently wake the whole tab
+while the caller believed they had scoped it. Un-throttling is inherently tab-level;
+run `browser wake` on the tab, then re-issue the frame read.
 
 **`activate` stays** — it is still the honest answer when something genuinely needs
 the real foreground (a permission prompt, a native picker, verifying with your own
@@ -561,6 +616,22 @@ animation frames, and a hidden tab gets none — so the shell→sentinel transit
 a genuine un-throttle, not a page that would have rendered anyway (the OOPIF rig
 pages render fine while hidden and cannot demonstrate this). A run that renders the
 page but changes the active window name is a **failure**, not a pass.
+
+Optional third check — the read world (`wake-shadow.html` installs a main-world
+`outerHTML` getter and shadows `innerText`/`querySelector`):
+
+```bash
+browser open http://127.0.0.1:8901/wake-shadow.html
+browser html --wake     # MUST contain WAKE-SHADOW-REAL, MUST NOT contain POISON
+browser text --wake     # MUST be WAKE-SHADOW-REAL,      MUST NOT contain POISON
+browser js 'document.documentElement.outerHTML' --wake   # WILL show the POISON — expected
+browser close
+```
+
+Strictly speaking this is belt-and-braces: `text`/`html --wake` use the *same
+mechanism* as an ordinary read (`chrome.scripting`), so their world is the one
+already exercised everywhere. The fixture exists so the property is checkable rather
+than argued.
 
 **CDP ops (`chrome.debugger`) — `screenshot` + TOP-frame trusted input.** These use the
 Chrome DevTools Protocol via the `debugger` permission. They fix two real agent
