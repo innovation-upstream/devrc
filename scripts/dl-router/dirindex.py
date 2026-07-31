@@ -187,6 +187,13 @@ class FileIndex:
     Bounded by `max_files` so a pathological tree cannot exhaust memory; the
     cap being hit is reported rather than silently truncating the answer.
 
+    IT ALSO BUCKETS BY EXACT BYTE SIZE (see `by_size`), and that map is FREE.
+    The walk already stats every file to record its size next to the name key;
+    the size bucket is a second dict built from the number it already has. This
+    is the primary dedupe signal now — the filename stem is random per download
+    in this traffic and matched nothing in seventeen real downloads, while the
+    library held groups of same-size files no name key could ever relate.
+
     It ALSO tallies files per top-level directory as a by-product of the walk
     it already performs (see `dir_counts`). That tally is deliberately not a
     second scan: this walk visits every file in the library exactly once, and a
@@ -201,6 +208,7 @@ class FileIndex:
         self._ttl = float(ttl)
         self._max = int(max_files)
         self._map: dict = {}
+        self._sizes: dict = {}
         self._dir_counts: dict = {}
         self._count = 0
         self._truncated = False
@@ -210,6 +218,7 @@ class FileIndex:
 
     def _scan(self):
         out: dict = {}
+        sizes: dict = {}
         counts: dict = {}
         count = 0
         truncated = False
@@ -228,7 +237,7 @@ class FileIndex:
                     continue
                 if count >= self._max:
                     truncated = True
-                    return out, counts, count, truncated
+                    return out, sizes, counts, count, truncated
                 full = os.path.join(dirpath, fname)
                 try:
                     size = os.stat(full).st_size
@@ -239,10 +248,18 @@ class FileIndex:
                 key = norm_key(stem)
                 if key:
                     out.setdefault(key, []).append((rel, size))
+                # SIZE 0 IS NOT A BUCKET. An unstattable file records 0 above,
+                # and so does a genuinely empty one -- a failed download's
+                # leftover. Bucketing them together would make every empty file
+                # a "duplicate" of every other, which is true and useless, and
+                # would put an unreadable file in a bucket the hash step can
+                # never confirm.
+                if size > 0:
+                    sizes.setdefault(size, []).append((rel, size))
                 if top:
                     counts[top] = counts.get(top, 0) + 1
                 count += 1
-        return out, counts, count, truncated
+        return out, sizes, counts, count, truncated
 
     def refresh(self, force: bool = False) -> None:
         """Single-flight, and the scan runs OUTSIDE the lock.
@@ -261,13 +278,14 @@ class FileIndex:
                 return
             self._scanning = True
         try:
-            data, counts, count, truncated = self._scan()
+            data, sizes, counts, count, truncated = self._scan()
         except Exception:
             with self._lock:
                 self._scanning = False
             raise
         with self._lock:
             self._map = data
+            self._sizes = sizes
             self._dir_counts = counts
             self._count = count
             self._truncated = truncated
@@ -278,6 +296,23 @@ class FileIndex:
         self.refresh()
         with self._lock:
             return list(self._map.get(key, ()))
+
+    def by_size(self, size: int) -> list:
+        """Every indexed file of exactly `size` bytes, as [(relpath, size)].
+
+        The PRIMARY dedupe signal. Size 0 never buckets (see `_scan`), so an
+        empty or unstattable file answers empty rather than matching every
+        other empty file in the library.
+        """
+        try:
+            size = int(size)
+        except (TypeError, ValueError):
+            return []
+        if size <= 0:
+            return []
+        self.refresh()
+        with self._lock:
+            return list(self._sizes.get(size, ()))
 
     def dir_counts(self) -> dict:
         """Files per top-level directory, as of the last completed walk.
@@ -316,4 +351,5 @@ class FileIndex:
         self.refresh()
         with self._lock:
             return {"files": self._count, "keys": len(self._map),
+                    "sizes": len(self._sizes),
                     "truncated": self._truncated}

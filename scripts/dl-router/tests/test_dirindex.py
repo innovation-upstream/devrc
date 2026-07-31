@@ -212,7 +212,7 @@ def test_file_index_ttl(library, clock, monkeypatch):
     idx.refresh()
     calls = []
     monkeypatch.setattr(idx, "_scan",
-                        lambda: (calls.append(1), ({}, {}, 0, False))[1])
+                        lambda: (calls.append(1), ({}, {}, {}, 0, False))[1])
     idx.refresh()
     assert calls == []
     clock.advance(11)

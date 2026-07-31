@@ -22,8 +22,11 @@ Endpoints (all require `Authorization: Bearer <token>`)
     POST /learn            persist a correction (alias + labelled example)
     POST /mkdir            create a validated new directory
     POST /relocate         validated rename WITHIN the library root (undo)
+    POST /dedupe           confirm a duplicate by size + bounded head/tail hash
+    POST /discard          remove a PROVEN duplicate this router just wrote
     POST /fetch            yt-dlp job for a stream URL
     GET  /fetch/<id>       job status
+    GET  /have?url=        source-URL ledger lookup ("already downloaded?")
     GET  /log              recent routes
 
 Env: DL_ROUTER_HOST, DL_ROUTER_PORT, DL_ROUTER_CONFIG, DL_ROUTER_STATE_DIR,
@@ -35,6 +38,7 @@ import hashlib
 import json
 import os
 import secrets
+import sqlite3
 import sys
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -44,6 +48,7 @@ from urllib.parse import parse_qs, urlsplit
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import config as config_mod  # noqa: E402
+from dedupe import HashCache, confirm_duplicate  # noqa: E402
 from dirindex import DirIndex, FileIndex  # noqa: E402
 from dirkinds import DirKinds  # noqa: E402
 from fetcher import Fetcher  # noqa: E402
@@ -66,6 +71,19 @@ MAX_BODY = 256 * 1024
 # clock skew — both come from the same machine). A torrent payload predates its
 # would-be routing decision by hours or days, so a few seconds costs nothing.
 MTIME_SLACK_S = 5.0
+
+# How recently a download must have been routed for /discard to delete its
+# file. /relocate has no such window -- correcting where a file sits is
+# reversible and a stale correction costs nothing -- but a DELETE is not, so it
+# is additionally scoped to "this router just wrote it". The dedupe toast is
+# answered within seconds; an hour is generous and still refuses a downloadId
+# replayed against a path that has since come to hold something else.
+DISCARD_MAX_ROUTE_AGE_S = 3600.0
+
+# Where a discarded duplicate goes. Hidden, so both index scans skip it (they
+# already drop dot-prefixed names), on the same filesystem as the library so
+# the move is an atomic rename rather than a copy, and inspectable with `ls`.
+TRASH_DIR = ".dl-router-trash"
 
 # How many tags a single confirmation may turn into aliases, for a CATEGORY
 # directory. A tag list can hold 64 entries; the user confirmed one directory,
@@ -133,6 +151,12 @@ class App:
 
         self._kinds_file: DirKinds | None = None
         self._kinds_stamp = None
+        # Bounded head+tail digests, keyed on (path, size, mtime). Lives on the
+        # App rather than on FileIndex so it survives an index refresh: the
+        # library file a size collision compares against is the SAME file on
+        # the next download into that bucket, and re-hashing it every time is
+        # the cost this exists to remove.
+        self.hashes = HashCache()
 
     # --- helpers ----------------------------------------------------------- #
     @property
@@ -296,17 +320,133 @@ class App:
         matcher = self.matcher()
         prior = self.store.host_prior(ctx.site) if ctx.site else None
         result = matcher.match(ctx, host_prior=prior)
+        # NO HASHING ON THIS PATH, AND THE REASON IS STRUCTURAL, NOT A BUDGET
+        # JUDGEMENT CALL.
+        #
+        # /match runs inside `onDeterminingFilename`, BEFORE Chrome has written
+        # a single byte. The file this download will become does not exist yet,
+        # so there is nothing here to hash — a head+tail digest needs BOTH
+        # files and only one of them is on disk. Even if it were affordable it
+        # would be impossible.
+        #
+        # That settles the 400 ms question by construction. What /match does
+        # instead is free: `find_duplicate` reads the size bucket that
+        # `FileIndex` already built from stats it already took, which is a dict
+        # lookup. The answer is a POSSIBLE duplicate, labelled by `kind`, plus
+        # the same-size `candidates` the confirmation step will hash.
+        #
+        # Honest limit, and it is why the confirmation is not optional: at this
+        # point `ctx.size` is the DownloadItem's `totalBytes`, which is 0
+        # whenever the response has no Content-Length. So the size signal is
+        # OPPORTUNISTIC here and AUTHORITATIVE in `dedupe_check`, which stats
+        # the finished file. Nothing routes on either — dedupe is a warning.
         result.dup = find_duplicate(self.files, result.dir, ctx.filename,
                                     ctx.size)
         # `downloadId` is the browser's DownloadItem id. Recording it here is
         # what later lets /relocate prove a file under the library root was put
         # there by this router and not by qBittorrent (see `_prove_owned`).
+        download_id = str(payload.get("downloadId") or "")
         self.store.log_route(url=ctx.url, site=ctx.site, filename=ctx.filename,
                              dir_name=result.dir, confidence=result.confidence,
                              reason=result.reason, auto=result.auto,
                              dup=result.dup,
-                             download_id=str(payload.get("downloadId") or ""))
+                             download_id=download_id)
+        # THE SOURCE-URL LEDGER. Groundwork for "already have this" on a page,
+        # written here because /match is the one place every routed download
+        # passes through. Best-effort by design: a download with no usable
+        # source URL records nothing and must not fail the match it is riding
+        # on, which is a decision the browser is blocking on.
+        try:
+            self.store.record_source_url(ctx.url, site=ctx.site,
+                                         dir_name=result.dir,
+                                         download_id=download_id)
+        except sqlite3.Error as exc:
+            log("ledger-write-failed", error=exc.__class__.__name__)
         return result.as_dict(ttl_ms=int(self.cfg.get("dir_cache_ttl_s", 5.0) * 1000))
+
+    def have_url(self, url: str) -> dict:
+        """GET /have?url= — the ledger lookup. NO UI consumes this yet.
+
+        It is the read half of the v5 ledger, shipped with it so the table has
+        a caller and a test rather than accumulating rows nothing can read.
+        """
+        row = self.store.source_url(url)
+        if not row:
+            return {"ok": True, "have": False}
+        return {"ok": True, "have": True, "dir": row.get("dir") or "",
+                "relPath": row.get("rel_path") or "",
+                "hits": int(row.get("hits") or 0),
+                "firstTs": row.get("first_ts"), "lastTs": row.get("last_ts")}
+
+    # --- dedupe confirmation ------------------------------------------------ #
+    def dedupe_check(self, payload: dict) -> dict:
+        """POST /dedupe — the AUTHORITATIVE duplicate answer, after the write.
+
+        WHERE THE HASHING HAPPENS, AND WHY IT IS HERE. See the note in
+        `match()`: at /match time the downloaded file does not exist, so the
+        only place both files are on disk is after completion. That also puts
+        every byte of I/O outside the 400 ms budget that /match must respect —
+        this endpoint is called from `downloads.onChanged`, where nothing is
+        waiting on it and a slow answer costs a late toast, not a misfiled
+        download.
+
+        The cost ladder, in order:
+          * one `stat` of the finished file (its real size — `totalBytes` at
+            /match time is frequently 0);
+          * one dict lookup in the size bucket the index already holds;
+          * ONLY on a collision, a bounded head+tail digest of the new file and
+            of up to `MAX_DUP_CANDIDATES` same-size library files, cached by
+            (path, size, mtime) so a library file is hashed once, not once per
+            colliding download.
+
+        A name-only hit is reported as a `signal` and never as a confirmed
+        duplicate: different byte counts are definitively different files, so
+        there is nothing a hash could confirm.
+        """
+        rel_path = payload.get("relPath")
+        # Containment first, exactly like every other path-taking endpoint. A
+        # read is less dangerous than a move, but "read any file the sidecar
+        # user can read" is still not something this endpoint may offer.
+        src = safe_rel_path(rel_path, root=self.root)
+        if not src.is_file():
+            raise FileNotFoundError(f"not a file: {rel_path!r}")
+        rel = str(src.relative_to(self.root)).replace(os.sep, "/")
+        try:
+            size = src.stat().st_size
+        except OSError as exc:
+            raise UnsafeName(f"cannot stat the file: {exc}") from exc
+        if size <= 0:
+            # A zero-byte file matches every other zero-byte file. That is true
+            # and useless, and it is the shape a failed download leaves behind.
+            return {"ok": True, "duplicate": False, "relPath": rel,
+                    "reason": "the file is empty, which identifies nothing"}
+        target_dir = rel.split("/", 1)[0] if "/" in rel else ""
+        signal = find_duplicate(self.files, target_dir, src.name, size,
+                                exclude_rel=rel)
+        if not signal:
+            return {"ok": True, "duplicate": False, "relPath": rel,
+                    "reason": "no other file in the library has this size"}
+        candidates = list(signal.get("candidates") or ())
+        if not candidates:
+            # A name-only hit: same stem, different length. Kept as a signal
+            # because a re-download under the same name is worth saying, and
+            # labelled so nothing can mistake it for a confirmation.
+            return {"ok": True, "duplicate": False, "relPath": rel,
+                    "signal": signal,
+                    "reason": "same name but a different size, so not the "
+                              "same file"}
+        match, why = confirm_duplicate(self.root, rel, candidates, self.hashes)
+        if match is None:
+            return {"ok": True, "duplicate": False, "relPath": rel,
+                    "signal": signal, "candidates": len(candidates),
+                    "reason": why}
+        in_target = match.split("/", 1)[0] == target_dir
+        return {"ok": True, "duplicate": True, "relPath": rel,
+                "dupRelPath": match, "size": size,
+                "kind": ("name+size+hash" if signal.get("kind") == "name+size"
+                         else "size+hash"),
+                "where": "target-dir" if in_target else "library",
+                "candidates": len(candidates), "reason": why}
 
     def learn(self, payload: dict) -> dict:
         """Persist a correction — ONLY the discriminating signal.
@@ -549,7 +689,22 @@ class App:
         """
         if self.store.routed_file(rel_path) is not None:
             return
+        self._prove_created(rel_path, src, download_id)
+        self.store.record_routed_file(rel_path, download_id,
+                                      rel_path.split("/", 1)[0])
 
+    def _prove_created(self, rel_path: str, src, download_id: str,
+                       *, max_route_age_s: float | None = None) -> dict:
+        """The identity+age proof itself. Returns the route row it proved from.
+
+        Split out of `_prove_owned` so /discard can require the SAME evidence
+        without inheriting the `routed_files` short-circuit. That ledger is a
+        standing claim ("this router created this path"), which is the right
+        answer for a reversible rename and the wrong one for a delete: a claim
+        recorded weeks ago says nothing about the file sitting at that path
+        now. /discard therefore proves it from scratch every time, and
+        additionally bounds how old the routing decision may be.
+        """
         disk_name = rel_path.rsplit("/", 1)[-1]
         route = self.store.route_for_download(download_id)
 
@@ -596,15 +751,22 @@ class App:
             mtime = src.stat().st_mtime
         except OSError as exc:
             raise UnsafeName(f"cannot stat the source: {exc}") from exc
-        if mtime < float(route.get("ts") or 0.0) - MTIME_SLACK_S:
+        route_ts = float(route.get("ts") or 0.0)
+        if mtime < route_ts - MTIME_SLACK_S:
             raise UnsafeName(
                 "refusing to move a file this router cannot prove it created "
                 "(it predates its own routing decision, so it was already on "
                 "disk before this download was routed — quite possibly a "
                 "torrent payload)")
-
-        self.store.record_routed_file(rel_path, download_id,
-                                      rel_path.split("/", 1)[0])
+        if max_route_age_s is not None:
+            age = float(self.clock()) - route_ts
+            if age > float(max_route_age_s):
+                raise UnsafeName(
+                    "refusing to act on a routing decision this old "
+                    f"({int(age)}s; the limit is {int(max_route_age_s)}s). "
+                    "Only a file this router has JUST written may be "
+                    "discarded.")
+        return route
 
     def relocate(self, payload: dict) -> dict:
         to_dir = payload.get("toDir")
@@ -637,8 +799,126 @@ class App:
         new_rel = str(dest.relative_to(self.root))
         # Follow the file, so a second correction still has provenance for it.
         self.store.move_routed_file(str(rel_path), new_rel, to_dir)
+        # The ledger has to follow it too: it answers "you already have this,
+        # in <dir>", and after a correction the router's own guess is the wrong
+        # answer to give.
+        try:
+            self.store.set_source_url_dir(
+                str(payload.get("downloadId") or ""), to_dir, new_rel)
+        except sqlite3.Error as exc:
+            log("ledger-update-failed", error=exc.__class__.__name__)
         self.files.refresh(force=True)
         return {"ok": True, "moved": True, "dir": to_dir, "relPath": new_rel}
+
+    def discard(self, payload: dict) -> dict:
+        """POST /discard — remove the NEWLY DOWNLOADED copy of a duplicate.
+
+        THIS IS THE FIRST DESTRUCTIVE OPERATION IN THIS SUBSYSTEM, and it is
+        deliberately harder to satisfy than /relocate, which is itself the
+        strictest thing here. The library root is a live qBittorrent seeding
+        target: deleting the wrong file destroys the operator's data AND breaks
+        a torrent. So the answer to every ambiguity is a refusal with a reason,
+        never a best-effort delete.
+
+        FIVE independent proofs, ALL required:
+
+          1. CONTAINMENT. Both paths go through `safe_rel_path`, so neither can
+             address anything outside the library root.
+          2. IDENTITY + AGE — the same evidence /relocate demands, via
+             `_prove_created`: a routing decision must exist for this
+             downloadId, the file's name must be that download's name (modulo
+             `uniquify`'s " (N)"), and its mtime must not predate the decision.
+             Deliberately WITHOUT the `routed_files` short-circuit, which is a
+             claim about the past rather than about the file on disk now.
+          3. RECENCY. The routing decision must be less than
+             DISCARD_MAX_ROUTE_AGE_S old. /relocate has no such window because
+             a rename is reversible; this is not.
+          4. IT IS NOT THE FILE IT DUPLICATES. The caller must name the
+             pre-existing copy, it must exist, and it must not be the file
+             being discarded — checked on the RESOLVED paths, so a symlink,
+             a `./` or a trailing-slash variant cannot make one look like the
+             other. The pre-existing library file is never what gets removed.
+          5. THE DUPLICATION IS RE-PROVEN NOW. Both files must still have the
+             same byte count and the same bounded head+tail digest at the
+             moment of the delete. This is the load-bearing one: it means a
+             discard can only ever remove bytes that demonstrably still exist
+             elsewhere in the library.
+
+        And then it does not unlink. The file is renamed into a hidden trash
+        directory inside the library root — an atomic same-filesystem move, out
+        of both index scans (they skip dot-prefixed names), and inspectable.
+        `[dedupe] delete_mode = "unlink"` opts into a real unlink; the default
+        is the reversible one because this subsystem's history is that each fix
+        introduces the next defect, and the first destructive operation should
+        be the one a mistake can be walked back from.
+        """
+        rel_path = payload.get("relPath")
+        dup_rel = payload.get("dupRelPath")
+        download_id = str(payload.get("downloadId") or "")
+        src = safe_rel_path(rel_path, root=self.root)
+        keep = safe_rel_path(dup_rel, root=self.root)
+        if not src.is_file():
+            raise FileNotFoundError(f"not a file: {rel_path!r}")
+        if not keep.is_file():
+            raise UnsafeName(
+                "refusing to discard: the file it is supposed to duplicate "
+                f"({dup_rel!r}) is not there, so there is nothing proving "
+                "these bytes exist anywhere else")
+        try:
+            same = src.resolve() == keep.resolve()
+        except OSError:
+            same = True   # cannot tell them apart => refuse
+        if same:
+            raise UnsafeName(
+                "refusing to discard a file as a duplicate of itself")
+
+        rel = str(src.relative_to(self.root)).replace(os.sep, "/")
+        keep_rel = str(keep.relative_to(self.root)).replace(os.sep, "/")
+        self._prove_created(rel, src, download_id,
+                            max_route_age_s=DISCARD_MAX_ROUTE_AGE_S)
+
+        # Proof 5: re-prove the duplication against the file on disk RIGHT NOW.
+        try:
+            src_size = src.stat().st_size
+            keep_size = keep.stat().st_size
+        except OSError as exc:
+            raise UnsafeName(f"cannot stat both files: {exc}") from exc
+        if src_size <= 0 or src_size != keep_size:
+            raise UnsafeName(
+                "refusing to discard: these two files are no longer the same "
+                f"size ({src_size} vs {keep_size})")
+        match, why = confirm_duplicate(self.root, rel, [keep_rel], self.hashes)
+        if match is None:
+            raise UnsafeName(f"refusing to discard: {why}")
+
+        mode = str(self.cfg.section("dedupe").get("delete_mode", "trash"))
+        if mode == "unlink":
+            os.unlink(src)
+            dest_rel = ""
+        else:
+            trash = self.root / TRASH_DIR
+            os.makedirs(trash, exist_ok=True, mode=0o700)
+            dest = trash / src.name
+            n = 1
+            while dest.exists() and n < 1000:
+                stem, dot, ext = src.name.rpartition(".")
+                base, suffix = (stem, "." + ext) if dot else (src.name, "")
+                dest = trash / f"{base} ({n}){suffix}"
+                n += 1
+            if dest.exists():
+                raise FileExistsError("the trash has no free name for this file")
+            os.rename(src, dest)
+            dest_rel = f"{TRASH_DIR}/{dest.name}"
+        # The path no longer holds that file, so the standing ownership claim
+        # must go with it -- otherwise a later file arriving here inherits a
+        # proof it never earned.
+        self.store.forget_routed_file(rel)
+        self.hashes.forget(str(src))
+        self.files.refresh(force=True)
+        log("discard", mode=mode, trashed=bool(dest_rel))
+        return {"ok": True, "discarded": True, "mode": mode,
+                "relPath": rel, "keptRelPath": keep_rel,
+                "trashRelPath": dest_rel}
 
     def known_dirs(self) -> set:
         """The directories anything may write into: the index plus the
@@ -787,6 +1067,12 @@ def make_handler(app: App, token: str):
                 else:
                     self._send(200, {"ok": True, **job})
                 return
+            if path == "/have":
+                if not self._need_config():
+                    return
+                url = (parse_qs(split.query).get("url") or [""])[0]
+                self._send(200, app.have_url(url))
+                return
             if path == "/log":
                 try:
                     limit = int((parse_qs(split.query).get("limit") or ["50"])[0])
@@ -802,6 +1088,7 @@ def make_handler(app: App, token: str):
             path = urlsplit(self.path).path
             routes = {"/match": app.match, "/learn": app.learn,
                       "/mkdir": app.mkdir, "/relocate": app.relocate,
+                      "/dedupe": app.dedupe_check, "/discard": app.discard,
                       "/fetch": app.fetch}
             fn = routes.get(path)
             if fn is None:

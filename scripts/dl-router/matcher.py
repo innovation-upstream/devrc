@@ -57,6 +57,14 @@ import unicodedata
 from dataclasses import dataclass, field
 from urllib.parse import unquote, urlsplit
 
+# ONE definition of the candidate cap, imported rather than restated. This
+# number governs how many files the hash step will read, and the list it caps
+# is built here -- two copies of it would drift the moment either side was
+# tuned, which is the failure safety.py/sanitize.js already paid for. The
+# import is inert: `dedupe` touches the filesystem only when called, so this
+# module's "no I/O" contract still holds.
+from dedupe import MAX_DUP_CANDIDATES  # noqa: E402
+
 # Score constants — named so tests assert against the spec table, not magic
 # numbers scattered through the scorer.
 SCORE_ALIAS_SITE = 1.00
@@ -1123,25 +1131,96 @@ def _looks_like_a_handle(ptoks) -> bool:
     return len(ptoks) == 1 and bool(_HANDLE.match(ptoks[0]))
 
 
-def find_duplicate(index, target_dir: str, filename: str, size: int = 0):
+def _entry_size(entry) -> int:
+    try:
+        return int(entry[1]) if len(entry) > 1 else 0
+    except (TypeError, ValueError):
+        return 0
+
+
+def _target_first(entries, target_dir: str) -> list:
+    """Same list, hits inside the target directory first. Order within each
+    half is the index's, so the answer is stable across calls."""
+    inside, outside = [], []
+    for entry in entries:
+        (inside if str(entry[0]).split("/", 1)[0] == target_dir
+         else outside).append(entry)
+    return inside + outside
+
+
+def find_duplicate(index, target_dir: str, filename: str, size: int = 0, *,
+                   exclude_rel: str = ""):
     """Dedupe check against the target dir and the whole-tree file index.
 
-    `index` exposes `by_name_key(key)` -> [(relpath, size), ...]. Returns a
-    `{where, relpath, size, kind}` dict or None. NEVER blocks or overwrites —
-    the caller only warns; `conflictAction: "uniquify"` handles real collisions.
+    `index` exposes `by_name_key(key)` -> [(relpath, size), ...] and, when it
+    is a real `FileIndex`, `by_size(size)` -> the same shape. Returns a
+    `{where, relpath, size, kind, candidates}` dict or None. NEVER blocks or
+    overwrites — the caller only warns; `conflictAction: "uniquify"` handles
+    real collisions.
+
+    THREE SIGNALS, RANKED, AND EACH IS LABELLED IN `kind`:
+
+      * `name+size` — the stem AND the exact byte count agree. The strongest
+        thing that can be known without reading either file.
+      * `size` — a different name, the same exact byte count. THIS IS THE ONE
+        THAT MATTERS HERE: the filenames in this traffic are random per
+        download, so the name signal fired zero times in seventeen real
+        downloads while the library held groups of same-size files. A size hit
+        is also the only signal a bounded head+tail hash can CONFIRM, which is
+        why it outranks a name-only hit that is provably a different file.
+      * `name` — the same stem, a different byte count. Kept, and deliberately
+        ranked last: two files of different lengths are definitively not the
+        same bytes, so this can never be confirmed. It is retained as a signal
+        because a re-download under the same name is still worth saying out
+        loud, and removing it would regress the only dedupe this had.
+
+    `candidates` carries the same-size relpaths (target directory first,
+    capped) for the caller's hash-confirmation step. A name-only hit carries no
+    candidates, because there is nothing a hash could confirm.
+
+    `exclude_rel` drops one relpath from every tier: the confirmation path runs
+    AFTER the download has landed, so the index may already contain the very
+    file being checked, and a file is not a duplicate of itself.
     """
     if index is None:
         return None
+    try:
+        size = int(size or 0)
+    except (TypeError, ValueError):
+        size = 0
+    exclude_rel = str(exclude_rel or "")
+
     key = norm_key(_filename_stem(filename))
-    if not key:
-        return None
-    matches = index.by_name_key(key) or []
-    if not matches:
-        return None
-    in_target = [m for m in matches
-                 if str(m[0]).split("/", 1)[0] == target_dir]
-    chosen = in_target[0] if in_target else matches[0]
-    relpath, existing_size = chosen[0], (chosen[1] if len(chosen) > 1 else 0)
-    kind = "name+size" if size and existing_size == size else "name"
-    return {"where": "target-dir" if in_target else "library",
-            "relpath": relpath, "size": existing_size, "kind": kind}
+    name_matches = [m for m in (index.by_name_key(key) or [])
+                    if str(m[0]) != exclude_rel] if key else []
+
+    # `getattr`, not a hard call: a stub index (and any older FileIndex still
+    # in memory across a hot reload) exposes only `by_name_key`, and the name
+    # signal must keep working without the size one.
+    size_matches: list = []
+    by_size = getattr(index, "by_size", None)
+    if size > 0 and callable(by_size):
+        size_matches = [m for m in (by_size(size) or ())
+                        if str(m[0]) != exclude_rel]
+
+    name_rels = {str(m[0]) for m in name_matches}
+    both = [m for m in name_matches if size > 0 and _entry_size(m) == size]
+    size_only = [m for m in size_matches if str(m[0]) not in name_rels]
+
+    # The confirmable set, target directory first, capped. `both` leads because
+    # a name AND size agreement is the likeliest match in the bucket.
+    confirmable = (_target_first(both, target_dir)
+                   + _target_first(size_only, target_dir))
+    candidates = [str(m[0]) for m in confirmable][:MAX_DUP_CANDIDATES]
+
+    for tier, kind in ((both, "name+size"), (size_only, "size"),
+                       (name_matches, "name")):
+        if not tier:
+            continue
+        ordered = _target_first(tier, target_dir)
+        chosen = ordered[0]
+        in_target = str(chosen[0]).split("/", 1)[0] == target_dir
+        return {"where": "target-dir" if in_target else "library",
+                "relpath": chosen[0], "size": _entry_size(chosen),
+                "kind": kind, "candidates": candidates}
+    return None
