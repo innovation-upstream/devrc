@@ -13,6 +13,12 @@ Priority legend: **🔴 CRITICAL** (security/data/prod — never compromise) · 
 ✅ "Deployed. Reproduced the FAB click via Playwright — modal opens. Verified."
 ❌ "FAB fixed and verified on-cluster." (rollout succeeded; click still does nothing)
 
+### 🔴 A test you have not watched FAIL proves nothing
+- **A regression test must be shown to fail on pre-change code.** Report the matrix — "red at `<base-ref>`, green at HEAD". A guard that pins an invariant the bug never violated is an **invariant guard**: label it as one, don't count it as regression coverage. (Four vacuous guards on a single PR this session; two got through review and were caught only by an adversarial audit.)
+- **Mutation-test a guard before certifying it** — break the thing on purpose and watch the guard go red. Two ways this lied here: an "invariant guard" passed because its click landed outside the viewport, so the interaction never happened; and a whole mutation sweep reported all-catching because `xvfb-run` was missing from PATH and *every* mutant exited non-zero. A green result from a harness that never ran is worse than no result — check the harness actually ran before reading its verdict.
+- **Never derive a test's expectation from the implementation it tests.** Stubbing a function to a no-op left 31 integration tests green. Pin literal expected values for contracts.
+- **Write the claim AFTER the code, from what the function does.** A README asserted a privacy guarantee stronger than the code in four consecutive rounds — each round restated the intent instead of re-reading the implementation.
+
 ## Memory Is a Hypothesis, Not Ground Truth 🔴
 **Triggers**: acting on a remembered fact — MEMORY.md, CLAUDE.md notes, prior diagnosis
 
@@ -27,6 +33,7 @@ Priority legend: **🔴 CRITICAL** (security/data/prod — never compromise) · 
 - **Flag BEFORE acting, not after.** Surface disagreement, risk, or a simpler path as a gate before the work: own your uncertainty honestly, state the concrete blast radius, end with "your call to proceed." Stop before high-blast-radius autonomous actions (mass rollouts, prod changes) and get direction.
 - **Don't defend your own position against repeated failure reports** — re-check instead; the user hitting the failure again outweighs your prior conclusion.
 - **User-facing micro-decisions** (input controls, copy, button semantics, resource layout) with several reasonable options: present the choice briefly before building, don't ship-then-rework.
+- **One rule, one place.** A predicate duplicated across call sites regenerates the same bug at every site — one spread over five call sites was re-fixed five times and only held once it was consolidated into a single choke point. When you find yourself patching the second copy, stop and consolidate instead.
 
 ## Failure Investigation 🔴
 **Triggers**: errors, test failures, unexpected behavior, tool failures
@@ -94,6 +101,8 @@ Derived from auditing 232 sessions: 1,712 preventable errors + a ~1,000× redund
 - **NixOS: no apt/dnf** — for a missing tool (pandoc, pdftoppm/poppler, openpyxl, …) run it under `nix-shell -p <pkg> --run "..."` proactively; don't run bare, fail, then retry.
 - **Don't re-emit git orientation** — the harness shows branch + status at session start; read that instead of `cd repo && echo === && git status` (this preamble ran ~1,000× last audit window). When you genuinely need fresh state, one compact `git status -s && git log --oneline -3`.
 - **Quote globs meant literally** — zsh aborts on unmatched globs (`no matches found`); quote patterns and kubectl `custom-columns=...[0]...` values.
+- **A `count=1` text replace on a pattern that occurs more than once is a live hazard.** Which occurrence you hit is not the one you pictured — grep the count first, and confirm by `git diff` which one moved *before* committing. One such replace landed on the wrong trigger in a shared Tekton EventListener and left two CEL filters with unbalanced parens.
+- **`grep` can render a character invisible.** A raw U+E000 embedded in source printed identical to the untouched line, so an edit that had landed looked like it hadn't. When output "looks unchanged", inspect bytes — `sed -n l`, `xxd`, or `grep -P '\x{E000}'`.
 - **`gh secret set` has NO `--body-file`** — omit `--body` entirely and it reads the value from **stdin** (`gh secret set NAME < file`). That's also the safe way: a secret in `--body` is exposed in argv/history.
 - **GitHub sudo-mode re-auth cannot be automated** — creating a PAT (or any sudo-mode action) in the browser always stops at a passkey/TOTP/password gate. Hand that step to the user with exact instructions instead of burning turns trying to drive it.
 

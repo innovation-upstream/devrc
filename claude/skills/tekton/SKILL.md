@@ -1,6 +1,6 @@
 ---
 name: tekton
-description: Operate the homelab Tekton CI/CD platform. Tekton Operator + Pipelines/Triggers/Dashboard on the homelab cluster, the public GitHub webhook (tekton-webhook.zacx.dev → el-github-listener), the naida-ux-audit auto-detection pipeline (push→main → walk → push to auditloop → regression gate → commit status), the read-only Dashboard, and adding a new pipeline/repo. Use when the user mentions Tekton, the homelab CI platform, the ux-audit auto-detection pipeline, the Tekton webhook/dashboard/EventListener, adding a Tekton pipeline, or the hostNetwork gateway host-port collision. Cross-refs the auditloop + ux-audit-loops skills. Built the 2026-07 session.
+description: Operate the homelab Tekton CI/CD platform. Tekton Operator + Pipelines/Triggers/Dashboard on the homelab cluster, the public GitHub webhook (tekton-webhook.zacx.dev → el-github-listener), the naida-ux-audit auto-detection pipeline (push→main → walk → push to auditloop → regression gate → commit status), the **clawgate-ci** pipeline (the repo's real pre-merge gate now that GitHub Actions is billing-blocked), the read-only Dashboard, and adding a new pipeline/repo. Use when the user mentions Tekton, the homelab CI platform, the ux-audit auto-detection pipeline, clawgate-ci, the Tekton webhook/dashboard/EventListener, adding a Tekton pipeline, a trigger that did not fire, or the hostNetwork gateway host-port collision. Cross-refs the auditloop + ux-audit-loops skills. Built the 2026-07 session.
 ---
 
 # Tekton — homelab CI/CD platform
@@ -75,6 +75,35 @@ target → gate on the a11y-rule delta → post commit status **`tekton/ux-audit
 
 Cross-ref: `auditloop` skill (remix producer + a11y-id contract), `ux-audit-loops` skill.
 
+## 3rd pipeline — `clawgate-ci` (ns `tekton-ci`) — the repo's REAL pre-merge gate
+
+**GitHub Actions is billing-blocked repo-wide.** Every workflow run fails in 3–16s with `steps: 0` and the annotation *"The job was not started because recent account payments have failed or your spending limit needs to be increased"* (verified 2026-07-30 via `gh api repos/ZacxDev/homelab-infra/actions/runs` + the job annotation; the log blob 404s). **Red Actions checks on this repo are noise, not signal** — do not debug them, and do not read a green/red Actions check as a gate. `.github/workflows/clawgate-ci.yml` survives only as `name: clawgate e2e (manual)`, `on: workflow_dispatch`, carrying the one e2e job that wasn't ported.
+
+Definition: `clusters/homelab/apps/tekton-pipelines/triggers/clawgate-ci-pipeline.yaml` + `clawgate-ci-triggertemplate.yaml`. ⚠ The three "legs" are **steps of ONE Task** (`clawgate-ci`), not three Pipeline tasks — `mint-token`, `clone`, `status-pending`, `wait-postgres`, `build-css`, then:
+- **`go`** — `go build ./... && go vet ./... && go test -race -cover ./...` against a **`postgres:16-alpine` SIDECAR** (`CLAWGATE_TEST_DATABASE_URL=…@127.0.0.1:5432/clawgate_test`).
+- **`extension`** — `npm install && npm run coverage` in `containers/clawgate/extension`.
+- **`hook`** — `bats hook/tests/clawgate-hook.bats hook/tests/clawgate-stop-hook.bats` on `bats/bats:1.11.0`.
+
+Then `verdict`, plus a `finally: report` task (`clawgate-ci-report`) posting the commit status. Trigger `clawgate-ci-push` on the shared `el-github-listener`: **push-only** (no `pull_request`), **any branch** (`body.ref.startsWith('refs/heads/')`), path-filtered to `containers/clawgate/` **and** `clusters/homelab/apps/tekton-pipelines/triggers/clawgate-ci-` (a self-guard, so a change to the pipeline re-tests itself) — the `commits`-array test is OR'd with a `head_commit` fallback for GitHub's truncation of large pushes.
+
+**Known-open 🟡 (all verified 2026-07-30, none fixed):**
+- **Branch creation over-matches.** `git push -u origin newbranch` sends `commits: []` (first disjunct false) **plus a pre-existing `head_commit`** — and the second disjunct only checks `has(body.head_commit) && != null`, so if that already-tested tip touched `containers/clawgate/` a **full run fires on branch creation**. The file's own comment covers branch *deletion* (null head_commit — correctly safe) and misses creation. `auditloop-push-main` carries a `(!has(body.deleted) || body.deleted == false)` guard; clawgate-ci has no `created`/`deleted` guard.
+- **PVC unpinned.** Per-run **6Gi** RWO `volumeClaimTemplate` with **no** `podTemplate.nodeSelector`, while *every* other pipeline pins `kubernetes.io/hostname: talos-xr6-r7p` (naida 8Gi, remix 12Gi, gitops-validate 6Gi, auditloop 10Gi). It works today (clawgate pods land on `talos-jkj-deb`) because it mounts only the one PVC — but it forgoes the shared nix cache and is the odd one out.
+- **No concurrency control at all** — every matching push gets an independent PipelineRun and its own 6Gi PVC.
+- **`error` vs `fail` is implemented for the CSS path ONLY** (`clawgate-ci-pipeline.yaml:329` writes `error` when `.css-failed` exists). The `extension` and `hook` legs only ever write `pass`/`fail`, so a crashed `npm install` or an unpullable bats image reports **"your change is bad"**. Partly compensated at aggregation: a *missing* verdict file is treated as the error class and the summary separates `FAILED:` from `COULD NOT RUN:`.
+
+## 🔴 Merging a trigger does NOT fire the first run — reconcile FIRST
+
+The single most expensive Tekton gotcha here. **The webhook arrives within seconds of the merge; the Flux `tekton-triggers` Kustomization reconciles on a 5-minute interval; GitHub does not retry.** So the push that "should" have started CI hits an EventListener that does not yet carry the trigger, and is **silently dropped**. Absence of a PipelineRun is not evidence that anything is fine.
+
+**Correct sequence:** merge → `flux reconcile kustomization tekton-triggers` → confirm the trigger is live on the CR (`kubectl -n tekton-ci get eventlistener github-listener -o jsonpath='{.spec.triggers[*].name}'`) → **then** push, or create a PipelineRun by hand.
+
+**Editing `spec.triggers` does NOT restart the EventListener sink pod** — triggers are hot-read from the CR. Verified: `el-github-listener-…` was **14d old with 0 restarts, deployment generation 1**, while `eventlistener.yaml` had been committed three times in the preceding day; the pod was serving all six triggers and clawgate PipelineRuns fired on it. So "the pod is old" tells you nothing about whether a trigger is live — **read the CR**, not the pod.
+
+## ⚠ The shared `eventlistener.yaml` is NOT safe to hand-edit
+
+One file serves **six** live triggers — `naida-push-main`, `remix-push-trunk`, `gitops-validate-pr`, `gitops-validate-push-trunk`, `clawgate-ci-push`, `auditloop-push-main` — each a multi-line CEL expression, several structurally near-identical (the same `(c.added + c.modified + c.removed).exists(f, f.startsWith('containers/<app>/'))` shape). A blind `count=1` text replace cannot be assumed to land on the trigger you meant, and a paren-level mistake in one trigger's CEL is a config error that can take **all six** down. **Put a `cel-go` harness in the loop for any CEL change** (the remix filter was validated that way over 6 cases incl. truncated-tip and null-head), and confirm by `git diff` which occurrence actually moved.
+
 ## Dashboard
 
 Read-only. `kubectl -n tekton-pipelines port-forward svc/tekton-dashboard 9097:9097` → http://localhost:9097. Public exposure (`tekton.zacx.dev` + Authelia) is **DEFERRED**.
@@ -88,7 +117,7 @@ Read-only. `kubectl -n tekton-pipelines port-forward svc/tekton-dashboard 9097:9
 
 ## Adding a new pipeline / new repo
 
-1. Add a **Trigger** on `el-github-listener` with a **CEL filter** scoping the exact `repository.full_name` + `ref` (the App is org-wide → always scope, gotcha under GitHub App).
+1. Add a **Trigger** on `el-github-listener` with a **CEL filter** scoping the exact `repository.full_name` + `ref` (the App is org-wide → always scope, gotcha under GitHub App). Validate the CEL with `cel-go` before merging — the file is shared by six triggers (see the hand-edit warning above). Guard branch **creation** (`commits: []` + a live `head_commit`) and **deletion** (null `head_commit`) explicitly; clawgate-ci gets the creation case wrong.
 2. TriggerTemplate → PipelineRun (clone via minted installation token; public base image, **no imagePullSecret** — gotcha #4).
 3. To pull results back into a gate, use the **auditloop read API** (`AUDITLOOP_API_TOKEN`, `fetch-findings.mjs`) — see the `auditloop` + `ux-audit-loops` skills.
 4. Ephemeral workspace only (no RWX — gotcha #3); expect cold runs.
