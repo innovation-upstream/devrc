@@ -155,6 +155,15 @@ closed or navigated, the page removed the node, or a second download needed the
 same tab. That is the safety net, not a bug: the alternative is a download
 nobody was asked about.
 
+**If the overlay NEVER works on any site**, suspect `use_dynamic_url` on the
+`web_accessible_resources` entry: the framed page's ES-module imports have to
+resolve under the rotating origin, which is why `picker.js`, `sanitize.js` and
+`route_core.js` are listed next to `picker.html`. This has never been exercised
+in a browser. It fails safe — the frame never boots, gate 2 fires, and every
+picker becomes a window — so the symptom is "always windowed, never in-page".
+Drop `use_dynamic_url` to test the hypothesis; the per-open id still authorises
+picks either way.
+
 **"Downloads still show a Save-As dialog."** The profile's
 `download.default_directory` is not the library root, or `prompt_for_download`
 is still on. Re-run `setup-brave-profile.sh` with Brave **fully closed** (it

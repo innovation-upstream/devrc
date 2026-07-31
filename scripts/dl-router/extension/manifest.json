@@ -28,8 +28,14 @@
   ],
   "web_accessible_resources": [
     {
-      "resources": ["picker.html"],
-      "matches": ["http://*/*", "https://*/*"]
+      "resources": [
+        "picker.html",
+        "picker.js",
+        "sanitize.js",
+        "route_core.js"
+      ],
+      "matches": ["http://*/*", "https://*/*"],
+      "use_dynamic_url": true
     }
   ],
   "options_ui": {

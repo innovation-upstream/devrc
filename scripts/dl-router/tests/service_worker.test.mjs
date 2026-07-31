@@ -16,7 +16,7 @@ globalThis.DL_ROUTER_NO_AUTOSTART = true;
 const calls = {
   windowsCreate: [], notifications: [], downloads: [], search: [],
   fetches: [], menus: [], tabsGet: [], tabMessages: [],
-  tabsUpdate: [], windowsUpdate: [],
+  tabsUpdate: [], windowsUpdate: [], tabListeners: [],
 };
 let storageLocal = {};
 let storageSession = {};
@@ -121,6 +121,11 @@ globalThis.chrome = {
       return { ok: true };
     },
     onActivated: { addListener() {} },
+    // Registered by registerListeners so an overlay whose tab dies becomes a
+    // window again. Present here so that registration is real, not a silent
+    // no-op swallowed by its try/catch.
+    onRemoved: { addListener: (fn) => calls.tabListeners.push(["removed", fn]) },
+    onUpdated: { addListener: (fn) => calls.tabListeners.push(["updated", fn]) },
   },
   alarms: { create() {}, onAlarm: { addListener() {} } },
 };
@@ -1806,12 +1811,11 @@ test("A PICK FROM AN UNRECOGNISED SUBFRAME IS REFUSED", async () => {
   // made two blind clicks enough.
   reset();
   let answer = null;
-  const handled = SW.onMessage(
+  SW.onMessage(
     { type: "dlr:choose", downloadId: 1, dir: "Evil", createdNew: true,
       kind: "performer" },
     { frameId: 3, tab: { id: 42 } }, (r) => { answer = r; });
-  await settle();
-  assert.equal(handled, false, "answered synchronously, nothing dispatched");
+  await settle(20);
   assert.equal(answer.ok, false);
   assert.match(answer.error, /unrecognised frame/);
   assert.equal(calls.fetches.length, 0, "no /mkdir, no /relocate, no /learn");
@@ -1860,4 +1864,108 @@ test("a sender with no frame information at all is still served", async () => {
     (r) => { answer = r; });
   await settle(20);
   assert.equal(answer.ok, true);
+});
+
+// --- the registry must outlive the ~30s MV3 idle teardown ------------------- //
+//
+// Choosing a directory is the SLOWEST thing the user does here, so the picker
+// routinely outlives the worker that opened it. Every consumer of the overlay
+// registry therefore has to read the durable copy, or it reasons from an empty
+// Map on exactly the path that matters most.
+
+/** The worker being torn down and woken: memory gone, storage.session kept. */
+const tearDownWorker = () => SW.state.overlays.clear();
+
+test("A LEGITIMATE PICK SURVIVES AN MV3 TEARDOWN", async () => {
+  // THE regression. `state.overlays` is in-memory and nothing repopulated it on
+  // wake, so after ~30 s the anti-clickjack guard saw an empty registry and
+  // refused a real pick -- discarding the user's choice precisely when they had
+  // been deliberating longest. Same shape as the screened-refusal suppression
+  // map: a fact that must outlive a teardown does not live in worker memory.
+  const id = await liveOverlay();
+  await settle();
+  tearDownWorker();
+  assert.equal(SW.state.overlays.size, 0, "the worker really did lose it");
+
+  searchResult = [];
+  let answer = null;
+  SW.onMessage({ type: "dlr:choose", downloadId: 1, dir: "Jane Doe",
+    overlay: id }, { frameId: 7, tab: { id: 42 } }, (r) => { answer = r; });
+  await settle(20);
+  assert.equal(answer.ok, true, answer && answer.error);
+  assert.equal(answer.dir, "Jane Doe");
+});
+
+test("...but a forged id still cannot get through after one", async () => {
+  // The counterweight: restoring the durable copy must not degrade into a
+  // blanket allow. Delete the guard entirely and the test above still passes;
+  // this is the one that notices.
+  await liveOverlay();
+  await settle();
+  tearDownWorker();
+  let answer = null;
+  SW.onMessage({ type: "dlr:choose", downloadId: 1, dir: "Evil",
+    overlay: "ov-guessed" }, { frameId: 7, tab: { id: 42 } },
+  (r) => { answer = r; });
+  await settle(20);
+  assert.equal(answer.ok, false);
+  assert.match(answer.error, /unrecognised frame/);
+  assert.equal(calls.fetches.length, 0);
+});
+
+test("the tab watchers survive a teardown too", async () => {
+  // Otherwise a tab closing after the worker slept finds no overlay to rescue,
+  // and the download is left with no picker at all -- the same invariant, one
+  // wake later.
+  await liveOverlay();
+  await settle();
+  tearDownWorker();
+  await SW.onTabRemoved(42);
+  await settle();
+  assert.equal(calls.windowsCreate.length, 1, "the question is re-asked");
+});
+
+test("a navigation after a teardown re-asks too", async () => {
+  await liveOverlay();
+  await settle();
+  tearDownWorker();
+  await SW.onTabUpdated(42, { status: "loading" });
+  await settle();
+  assert.equal(calls.windowsCreate.length, 1);
+});
+
+test("restoreOverlays never clobbers an overlay opened this turn", async () => {
+  const live = await liveOverlay({ downloadId: 2, tabId: 43 });
+  await settle();
+  // A durable copy that disagrees about the live overlay, plus one the worker
+  // has genuinely forgotten. The live record must win; the forgotten one must
+  // come back.
+  storageSession.overlays = [
+    [live, { tabId: 999, downloadId: 999, info: { downloadId: 999 } }],
+    ["ov-older", { tabId: 42, downloadId: 1, info: { downloadId: 1 } }],
+  ];
+  await SW.restoreOverlays();
+  assert.equal(SW.state.overlays.get(live).tabId, 43, "the live one wins");
+  assert.equal(SW.state.overlays.has("ov-older"), true, "the other is restored");
+});
+
+test("a corrupt durable copy is ignored rather than trusted", async () => {
+  reset();
+  storageSession.overlays = ["nope", null, [1, 2], ["ov-x", "not-an-object"]];
+  await SW.restoreOverlays();
+  assert.equal(SW.state.overlays.size, 0);
+  storageSession.overlays = { not: "an array" };
+  await SW.restoreOverlays();
+  assert.equal(SW.state.overlays.size, 0);
+});
+
+test("registerListeners really registers the tab watchers", () => {
+  // They sit inside a try/catch for older shapes, which is exactly how a
+  // registration can silently become a no-op.
+  reset();
+  calls.tabListeners.length = 0;
+  SW.registerListeners();
+  const kinds = calls.tabListeners.map(([k]) => k);
+  assert.ok(kinds.includes("removed"), "tabs.onRemoved");
+  assert.ok(kinds.includes("updated"), "tabs.onUpdated");
 });

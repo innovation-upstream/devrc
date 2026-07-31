@@ -305,7 +305,10 @@
 
   var watcher = null;
 
-  chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
+  // `_sender` is unused: this listener only ever hears from OUR service worker,
+  // and the frame the message is about is identified by the overlay id in the
+  // payload. Named rather than dropped because sendResponse is the third arg.
+  chrome.runtime.onMessage.addListener(function (msg, _sender, sendResponse) {
     var out = handleMessage(document, msg, sendResponse);
     // The watcher is armed only while an overlay is live: an always-on
     // MutationObserver on every page the user visits would be a real cost.

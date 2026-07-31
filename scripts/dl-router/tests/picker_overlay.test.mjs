@@ -198,11 +198,23 @@ test("the manifest delivers the overlay through the EXISTING content script", ()
   assert.deepEqual(cs.js, ["content_capture.js", "picker_overlay.js"]);
   assert.deepEqual(manifest.permissions.slice().sort(),
     ["alarms", "contextMenus", "downloads", "notifications", "storage", "tabs"]);
-  // Framing an extension page from a web page needs it web-accessible. Only
-  // the page itself: its module imports are loaded by the extension, from the
-  // extension origin, and must NOT be exposed.
-  assert.deepEqual(manifest.web_accessible_resources,
-    [{ resources: ["picker.html"], matches: ["http://*/*", "https://*/*"] }]);
+  // Framing an extension page from a web page needs it web-accessible.
+  const [war] = manifest.web_accessible_resources;
+  assert.deepEqual(manifest.web_accessible_resources.length, 1);
+  assert.deepEqual(war.matches, ["http://*/*", "https://*/*"]);
+  // THE PRIMARY MITIGATION, ahead of the per-open id rather than instead of it.
+  // A static chrome-extension://<id>/picker.html is guessable, so any page
+  // could frame the picker and try to clickjack two clicks into a /mkdir and a
+  // /relocate. A dynamic URL rotates per session, so the page cannot construct
+  // the surface to load at all; the id stays as the authorisation check for
+  // anything that does get loaded.
+  assert.equal(war.use_dynamic_url, true);
+  // The framed page's OWN module graph has to be listed too: under a rotating
+  // origin its relative imports resolve against that origin, and an unlisted
+  // import would 404 -- which fails safe (gate 2 never fires, the worker opens
+  // a window) but would mean the overlay never worked at all.
+  assert.deepEqual(war.resources.slice().sort(),
+    ["picker.html", "picker.js", "route_core.js", "sanitize.js"]);
 });
 
 // --- the page can take the overlay away ------------------------------------- //

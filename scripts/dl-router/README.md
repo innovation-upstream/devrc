@@ -367,16 +367,38 @@ up: the popup window it replaces was created `focused: true`, and the toast's
 `change` makes this concrete — the user is looking at the toast's own window
 while the overlay goes to the download's tab.
 
-**A pick from an unrecognised subframe is refused.** `picker.html` has to be
-web-accessible to be framed at all, so any page can embed it, point it at a
-recent download id and clickjack two clicks — one to take the "+ new dir" row,
-one to answer the kind prompt — into a `/mkdir` and a `/relocate`.
-Click-to-select is what made two blind clicks sufficient. Our own overlay is a
-subframe too, so the discriminator is the per-open id: unguessable, issued by
-the worker, and never visible to the page because the shadow root holding the
-frame is **closed**. The popup-window picker is the top frame of its own tab and
-carries no id, which is why the test is on `frameId` rather than on an id being
-present.
+**Two mitigations against a page framing the picker.** `picker.html` has to be
+web-accessible to be framed at all, so a page could otherwise embed it, point it
+at a recent download id, and clickjack two clicks — one to take the "+ new dir"
+row, one to answer the kind prompt — into a `/mkdir` and a `/relocate`.
+Click-to-select is what made two blind clicks sufficient.
+
+1. **`use_dynamic_url: true`** rotates the resource URL per browser session, so
+   an arbitrary page cannot construct the URL to frame in the first place. The
+   framed page's own module graph (`picker.js`, `sanitize.js`, `route_core.js`)
+   is listed alongside it, because under a rotating origin its relative imports
+   resolve against that origin.
+2. **A pick from an unrecognised subframe is refused.** Our own overlay is a
+   subframe too, so the discriminator is the per-open id: unguessable, issued by
+   the worker, and never visible to the page because the shadow root holding the
+   frame is **closed**. The popup-window picker is the top frame of its own tab
+   and carries no id, which is why the test is on `frameId` rather than on an id
+   being present.
+
+The second is the authorisation check; the first removes the ability to load the
+surface at all.
+
+**The overlay registry is persisted in `chrome.storage.session`**, and that is
+not incidental. MV3 tears the worker down after ~30 s idle, and choosing a
+directory is the slowest thing the user does here — so the picker routinely
+outlives the worker that opened it. An in-memory-only registry meant the
+subframe guard saw an empty map on the far side of a teardown and **refused a
+legitimate pick**, discarding the choice precisely when the user had been
+deliberating longest; and the tab watchers found no overlay to rescue when its
+tab closed. `storage.session` has exactly the right lifetime: it survives the
+teardown and dies with the browser, which is also when every overlay dies. Same
+lesson as `Store.record_screened` — a fact that must outlive a teardown does not
+live in service-worker memory.
 
 **The toast is still a popup window**, unconditionally: it is a passive
 notification with an eight-second life, and it has no pick to lose.

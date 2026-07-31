@@ -501,6 +501,76 @@ function newOverlayId() {
   return `ov-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
 }
 
+// --- the overlay registry, and why it is PERSISTED -------------------------- //
+//
+// `state.overlays` is in-memory, and MV3 tears this worker down after ~30 s
+// idle. The picker routinely outlives that: the user is CHOOSING, which is the
+// slowest thing they do here. Everything that consults the registry on the far
+// side of a teardown therefore has to read a durable copy first, or it reasons
+// from an empty map:
+//
+//   * `dlr:choose` -> the anti-clickjack guard would refuse a LEGITIMATE pick
+//     and discard it, precisely when the user had been deliberating longest;
+//   * `tabs.onRemoved`/`onUpdated` -> the tab closing would find no overlay to
+//     rescue, and the download would be left with no picker at all.
+//
+// `chrome.storage.session` has exactly the right lifetime: it survives the idle
+// teardown and dies with the browser, which is also when every overlay dies.
+// This is the same lesson as `Store.record_screened` -- a fact that must
+// outlive a teardown does not live in service-worker memory.
+async function persistOverlays() {
+  try {
+    await chrome.storage.session.set({ overlays: [...state.overlays] });
+  } catch { /* storage.session unavailable; the in-memory copy still works */ }
+}
+
+// Overlays already being converted back into a window. Single-flight, and a
+// TOMBSTONE: `persistOverlays` is fire-and-forget, so a restore that runs
+// before that write lands would otherwise RESURRECT an overlay that has just
+// been re-delivered -- and the user would get a second window for one download.
+// Ids are per-open and the worker is torn down every ~30 s idle, so this set
+// cannot grow unbounded.
+const redelivering = new Set();
+
+/** Merge the durable copy in. NEVER clobbers an overlay opened this turn. */
+export async function restoreOverlays() {
+  try {
+    const { overlays } = await chrome.storage.session.get("overlays");
+    if (!Array.isArray(overlays)) return;
+    for (const entry of overlays) {
+      if (!Array.isArray(entry) || typeof entry[0] !== "string") continue;
+      if (!entry[1] || typeof entry[1] !== "object") continue;
+      if (redelivering.has(entry[0])) continue;   // already asked in a window
+      if (!state.overlays.has(entry[0])) state.overlays.set(entry[0], entry[1]);
+    }
+  } catch { /* best effort */ }
+}
+
+function rememberOverlay(id, record) {
+  state.overlays.set(id, record);
+  void persistOverlays();
+}
+
+function forgetOverlay(id) {
+  const had = state.overlays.delete(id);
+  if (had) void persistOverlays();
+  return had;
+}
+
+/**
+ * Is this one of OUR overlays? Consults the durable copy before saying no.
+ *
+ * The lazy restore is here rather than only in `start()` so the answer does not
+ * depend on when readiness happened to resolve. Refusing a real pick is not a
+ * recoverable error: the user's choice is gone.
+ */
+async function overlayIsOurs(id) {
+  if (typeof id !== "string" || !id) return false;
+  if (state.overlays.has(id)) return true;
+  await restoreOverlays();
+  return state.overlays.has(id);
+}
+
 // Resolvers for overlays whose `dlr:picker-ready` has not landed yet. Module
 // scope, not `state`: purely in-flight, and the wait is under two seconds.
 const overlayWaiters = new Map();
@@ -560,19 +630,34 @@ function overlayInTab(tabId) {
  * produce one window.
  */
 async function redeliverAsWindow(id) {
+  // SINGLE-FLIGHT, CHECKED SYNCHRONOUSLY. onRemoved and onUpdated both fire for
+  // a closing tab, and the page can report the loss at the same moment -- and
+  // each of those now awaits `restoreOverlays()` first, so without this claim
+  // all three could pass the "is there an overlay?" test before any of them
+  // removed it. Two windows for one download is worse than none.
+  if (redelivering.has(id)) return false;
   const record = state.overlays.get(id);
   if (!record) return false;
-  state.overlays.delete(id);
+  redelivering.add(id);
+  forgetOverlay(id);
   // Best effort: if anything IS still on screen, take it down first, so the
   // user never faces two pickers for one download.
   await tellOverlayToClose(record.tabId, id);
   return openPickerWindow(record.info);
 }
 
-/** chrome.tabs.onRemoved: the tab holding the overlay is gone. */
-export function onTabRemoved(tabId) {
+/**
+ * chrome.tabs.onRemoved: the tab holding the overlay is gone.
+ *
+ * `await restoreOverlays()` first, for the same reason the choose guard does:
+ * this event is exactly the kind that WAKES a torn-down worker, and an empty
+ * in-memory registry would find nothing to rescue and leave the download
+ * unasked.
+ */
+export async function onTabRemoved(tabId) {
+  await restoreOverlays();
   const id = overlayInTab(tabId);
-  if (id) void redeliverAsWindow(id);
+  if (id) await redeliverAsWindow(id);
 }
 
 /**
@@ -584,10 +669,11 @@ export function onTabRemoved(tabId) {
  * yanking the picker into a window every time a SPA changes route would be a
  * regression rather than a rescue.
  */
-export function onTabUpdated(tabId, changeInfo) {
+export async function onTabUpdated(tabId, changeInfo) {
   if (!changeInfo || changeInfo.status !== "loading") return;
+  await restoreOverlays();
   const id = overlayInTab(tabId);
-  if (id) void redeliverAsWindow(id);
+  if (id) await redeliverAsWindow(id);
 }
 
 /**
@@ -656,11 +742,11 @@ export async function openOverlayPicker(info) {
 
   // `info` is kept so the question can be RE-ASKED in a window if the overlay
   // stops existing -- see redeliverAsWindow.
-  state.overlays.set(id, { tabId, downloadId: info.downloadId, info });
+  rememberOverlay(id, { tabId, downloadId: info.downloadId, info });
   if (!(await ready)) {
     // gate 2 failed: tear the husk down before opening the window, so the user
     // is never looking at two pickers for one download.
-    state.overlays.delete(id);
+    forgetOverlay(id);
     await tellOverlayToClose(tabId, id);
     return false;
   }
@@ -1081,15 +1167,23 @@ export function onMessage(msg, sender, sendResponse) {
     // (the shadow root holding the frame is closed). The popup-window picker is
     // the TOP frame of its own tab and carries no nonce, which is why the test
     // is on `frameId` rather than on the nonce being present.
-    if (typeof sender?.frameId === "number" && sender.frameId > 0
-        && !state.overlays.has(msg.overlay)) {
-      sendResponse({ ok: false,
-        error: "refusing a pick from an unrecognised frame" });
-      return false;
-    }
+    // THE CHECK IS ASYNC, and it has to be. The registry it consults must
+    // survive the ~30 s MV3 idle teardown -- the picker outlives that all the
+    // time, because choosing is the slowest thing the user does here -- so
+    // `overlayIsOurs` falls back to the durable copy in chrome.storage.session
+    // rather than reading an empty in-memory Map and refusing a REAL pick.
+    // Refusing a real pick is not recoverable: the choice is simply gone.
+    const fromSubframe = typeof sender?.frameId === "number"
+      && sender.frameId > 0;
     ready()
-      .then(() => applyChoice(msg.downloadId, msg.dir,
-        { createdNew: msg.createdNew, kind: msg.kind }))
+      .then(async () => {
+        if (fromSubframe && !(await overlayIsOurs(msg.overlay))) {
+          return { ok: false,
+            error: "refusing a pick from an unrecognised frame" };
+        }
+        return applyChoice(msg.downloadId, msg.dir,
+          { createdNew: msg.createdNew, kind: msg.kind });
+      })
       .then((r) => sendResponse(r))
       .catch((e) => sendResponse({ ok: false, error: errorMessage(e) }));
     return true;   // async response
@@ -1135,7 +1229,7 @@ export function onMessage(msg, sender, sendResponse) {
     // The embedded picker finished (accepted, cancelled, or refused then
     // escaped) and cannot close its own frame. Tear the overlay down.
     const record = state.overlays.get(msg.overlay);
-    state.overlays.delete(msg.overlay);
+    forgetOverlay(msg.overlay);
     // `sender.tab.id` is what survives an MV3 teardown. The picker can sit
     // open well past the ~30 s idle timeout, and a restarted worker has an
     // empty `state.overlays` -- keying only on that map would leave the
@@ -1210,6 +1304,10 @@ export function registerListeners() {
 export async function start() {
   await loadConfig();
   await restoreSnapshot();
+  // Overlays opened before the last idle teardown. Without this a woken worker
+  // has an empty registry, and the tab watchers would find no overlay to rescue
+  // when its tab closes.
+  await restoreOverlays();
   await installMenus();
   try {
     const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
