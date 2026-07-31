@@ -497,10 +497,17 @@ test("the budget is per TAB, not per page", () => {
   assert.equal(wakeCountForTab(12), 0, "budgets do not leak between tabs");
 });
 
-// A FIXED cap of 8 starved legitimate runs: 12 distinct pages reached by nav+text
-// is not churn, but pages 8-11 were never woken — silently reverting the back half
-// of a default `--steps 12` run to BROWSER_AGENT_AUTO_WAKE=0 behaviour.
-test("REGRESSION: 12 distinct pages in a --steps 12 run are ALL woken (no starvation)", async () => {
+// A FIXED cap of 8 starved legitimate runs: reaching 12 distinct pages is not
+// churn, but pages 8-11 were never woken — silently reverting the back half of a
+// long run to BROWSER_AGENT_AUTO_WAKE=0 behaviour.
+//
+// ⚠ Framing note: this drives 12 nav+text PAIRS = 24 tool calls, so this exact
+// shape does not fit inside a prompted `--steps 12` budget (and `STEPS` is only
+// prompted — nothing enforces it; see the AUTO_WAKE_TAB_CAP comment). What the
+// test discriminates is the cap ARITHMETIC at cap=12: with the cap bound to STEPS
+// all 12 pages wake; with a fixed 8 the last four are starved. The "exactly 12
+// wakes" assertion is the load-bearing one.
+test("REGRESSION: 12 distinct pages at cap=12 are ALL woken (no starvation)", async () => {
   const f = bridge();
   const env = baseEnv({ BROWSER_AGENT_STEPS: "12" });
   for (let i = 0; i < 12; i++) {
@@ -628,6 +635,40 @@ test("BROWSER_AGENT_DRY_RUN=1: no wake is issued, and the WARNING says why", asy
   assert.match(out, /DRY RUN/);
   assert.match(out, /SHELL \(waiting for frames\)/, "the read itself still returns");
   assert.equal(wakeCountForTab(4242), 0, "and no budget is charged");
+});
+
+// The auto-path skip and reference/agent.md both justify themselves with "a dry
+// run never drives the browser". A MANUAL op="wake" that still attached the
+// debugger would make the documented guarantee stronger than the code.
+test("REGRESSION: a MANUAL op='wake' in a dry run never reaches the bridge either", async () => {
+  const f = bridge();
+  const out = await run({ op: "wake" }, baseEnv({ BROWSER_AGENT_DRY_RUN: "1" }), f);
+  assert.deepEqual(ops(f), [],
+    "a dry-run wake must be synthesized, not attached to the operator's live tab");
+  assert.deepEqual(JSON.parse(out), { ok: true, dryRun: true, op: "wake" });
+});
+
+test("a dry-run wake is still policy-checked (bad tab / forbidden op refused, not synthesized)", async () => {
+  const f = bridge();
+  const dryEnv = { BROWSER_AGENT_DRY_RUN: "1" };
+  await assert.rejects(
+    () => run({ op: "wake" }, baseEnv({ ...dryEnv, BROWSER_AGENT_ALLOWED_OPS: "text" }), f),
+    /op_not_allowed:wake/);
+  await assert.rejects(
+    () => runBrowserOp({ op: "wake" },
+      { env: { ...dryEnv, BROWSER_BRIDGE_HOST: "127.0.0.1" }, fetchImpl: f, readToken: () => TOK }),
+    /disowned_tab/);
+  assert.deepEqual(ops(f), [], "and still nothing on the wire");
+});
+
+test("with BOTH the kill switch and dry-run set, the banner blames the kill switch", async () => {
+  const f = bridge();
+  const out = await run({ op: "text" },
+    baseEnv({ BROWSER_AGENT_AUTO_WAKE: "0", BROWSER_AGENT_DRY_RUN: "1" }), f);
+  assert.deepEqual(ops(f), ["text"]);
+  assert.match(out, /^\[browser-tool\] WARNING:/);
+  assert.doesNotMatch(out, /DRY RUN/,
+    "the more specific cause (auto-wake is off entirely) is the honest one to name");
 });
 
 // --------------------------------------------------------------------------- //

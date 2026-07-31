@@ -143,10 +143,14 @@ browser agent "go to news.ycombinator.com and report the top 3 story titles" \
     woken, silently reverting the back half of a default `--steps 12` run to
     `BROWSER_AGENT_AUTO_WAKE=0`. Binding it to STEPS gives the provable bound "at most
     one injected wake per model step". Past the cap it stops waking and says so loudly.
-  - **dry-run**: `BROWSER_AGENT_DRY_RUN=1` skips the auto-wake and says so. A read is
-    passive, but a wake attaches the debugger to the operator's live tab for ~1.5 s and
-    raises Brave's "an extension is debugging this browser" banner — past what
-    "logs, doesn't drive" promises.
+  - **dry-run**: `BROWSER_AGENT_DRY_RUN=1` skips the auto-wake and says so, **and
+    `wake` is now one of the MUTATING ops** — so a *manual* `op="wake"` in a dry run is
+    synthesized (`{"ok":true,"dryRun":true,"op":"wake"}`) rather than reaching the
+    bridge, while still being policy-checked (a forbidden op or a disowned tab is
+    still refused). A read is passive, but a wake attaches the debugger to the
+    operator's live tab for up to a 6 s settle and raises Brave's "an extension is
+    debugging this browser" banner — past what "logs, doesn't drive" promises. Both
+    paths now match that promise; previously the doc was stronger than the code.
   - the banner **hedges**: `woke` is probed from `visibilityState` inside the CDP
     attach, so it proves the tab was un-throttled and says nothing about whether the
     app finished rendering inside the bounded settle. Every post-wake banner tells the
@@ -164,8 +168,10 @@ browser agent "go to news.ycombinator.com and report the top 3 story titles" \
   bridge), a **non-http(s) nav scheme hard-denial** (a `nav` to `file:`/`data:`/
   `about:`/`javascript:`/`chrome:`/… is refused as `nav_scheme_denied:<scheme>`
   before any fetch — those have no host and would otherwise bypass
-  `--allow-domains`), and `--dry-run` (intercepts `nav`/`eval` — logs, doesn't
-  execute). The full opencode JSON transcript + a metadata-only tool audit are kept
+  `--allow-domains`), and `--dry-run` (intercepts every mutating op —
+  `nav`/`eval`/`click`/`type`/`key`/`upload`/`wake` — logs, doesn't execute; reads
+  still hit the browser, and the auto-wake is skipped with a WARNING). The full
+  opencode JSON transcript + a metadata-only tool audit are kept
   in a scratch dir. **Domain deny is best-effort** (see note below).
 - **⚠ Privacy:** the pages the agent reads are sent to **OpenRouter/DeepSeek**.
   Do NOT point it at high-secret authenticated pages casually.

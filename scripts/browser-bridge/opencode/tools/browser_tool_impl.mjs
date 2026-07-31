@@ -372,6 +372,29 @@ export const HIDDEN_SIGNAL_OPS = Object.freeze(["text", "html", "eval"]);
 // reported as already-woken, and a freshly-throttled document gets read as a shell
 // and labelled post-wake. So a successful one of these voids the tab's records.
 // Over-forgetting costs one extra wake; under-forgetting costs a WRONG ANSWER.
+//
+// KNOWN COST, deliberately accepted: this is unconditional, so a purely READ-ONLY
+// `eval` also voids the verdict and the next read pays a fresh wake. There is no
+// cheap, sound way to tell a read-only eval from a document-replacing one — a
+// keyword scan of the `js` string is a heuristic on attacker-adjacent input and
+// misses `el.click()` on a submit button entirely.
+//
+// ⚠ THE RIGHT FIX IS NOT "make these four ops precise" — do not build that.
+// A `click` can start a navigation that COMMITS ASYNCHRONOUSLY, so any per-op
+// probe (including a CDP `Page.getFrameTree` loaderId sampled right after the
+// click) still sees the OLD document and would UNDER-invalidate — the dangerous
+// direction. The sound design is to attach a per-document identity to EVERY
+// READ'S PAYLOAD and key the wake verdict on `(url, documentId)`. Then a document
+// replacement changes the key by construction, sync or async; this whole list
+// disappears; and the same-URL remount the url key cannot see is fixed for free.
+// Prefer `performance.timeOrigin` read from the ISOLATED world over a CDP
+// loaderId: it rides the existing read path with no debugger attach (the
+// expensive thing this design avoids) and is naturally per-frame, which `--frame`
+// reads need. Where a content script cannot inject (`chrome://`, the PDF viewer)
+// the id is absent and MUST fail CLOSED — unknown document, never reuse a verdict
+// — which is exactly the empty-key handling markPageWakeAttempt already has.
+// That is an extension-side change, so it belongs in the next batch that already
+// requires a manifest bump and a full Brave re-point.
 export const PAGE_INVALIDATING_OPS = Object.freeze(["nav", "click", "key", "eval"]);
 
 // Bound the per-tab page-key map so a long run that navigates many times cannot
@@ -390,10 +413,21 @@ export const AUTO_WAKE_PAGE_CAP = 32;
 // browser-agent wrapper already knows and now exports). A fixed 8 STARVED
 // legitimate runs: 12 distinct pages reached by nav+text is not churn, yet pages
 // 8-11 were never woken, silently reverting the back half of a default
-// `--steps 12` run to BROWSER_AGENT_AUTO_WAKE=0 behaviour. Binding it to STEPS
-// gives the provable bound "at most ONE injected wake per model step" — a run
-// cannot read more pages than it has steps — while still capping churn at what a
-// churny run could have cost anyway.
+// `--steps 12` run to BROWSER_AGENT_AUTO_WAKE=0 behaviour.
+//
+// ⚠ Be precise about what this buys, because the obvious phrasing is a claim
+// nothing enforces. `STEPS` is a PROMPTED budget only — the wrapper `sed`s it into
+// the agent md and the task message ("Hard budget: N steps"); the `opencode` argv
+// carries NO step-limit flag, so nothing stops a model from exceeding it. So this
+// is NOT "a run cannot read more pages than it has steps". What it actually gives
+// is: at most one injected wake per tool call, and no more than the model's own
+// prompted budget in total unless the operator raises it. The REAL ceiling on a
+// runaway run is `--timeout` (default 120s, enforced by a process-group kill).
+// Consequently the cap is close to non-binding by construction — it only engages
+// after the model has already blown its unenforced budget. That is the accepted
+// price of killing the starvation: worst case for a churny `--steps 12` run went
+// from 8 wakes (~24 bridge calls, ~12s of settles) to 12 (~36 calls, ~18s), and it
+// scales linearly with an operator-chosen `--steps`.
 export const AUTO_WAKE_TAB_CAP = 8;         // fallback when STEPS is unknown
 export const AUTO_WAKE_CAP_FLOOR = 4;       // a 1-2 step run still gets a few
 
@@ -459,6 +493,13 @@ export function wakeCountForTab(tab) {
 // The budget is still charged (so an urlless page cannot wake without limit) but
 // NOTHING is stored: an empty key would collide with every other urlless read and
 // vouch for a document it never saw.
+//
+// ⚠ So "one failed wake per page, not one per read" holds for every IDENTIFIABLE
+// page and NOT for an urlless one: with no verdict stored, a failed wake there is
+// re-attempted on each subsequent read until the tab's budget runs out. That is a
+// cost, cap-bounded, and it is the correct side to err on — the alternative is a
+// shared empty-key verdict that a different urlless document would inherit.
+// Reads carry a url on every path the extension implements, so this is degenerate.
 export function markPageWakeAttempt(tab, key) {
   const s = _tabState(tab);
   s.wakes += 1;
@@ -719,11 +760,22 @@ export async function runBrowserOp(args, opts = {}) {
   // forced tab (a bad op/tab is refused even in dry-run).
   const MUTATING = op === "nav" || op === "eval" ||
                    op === "click" || op === "type" || op === "key" ||
-                   op === "upload";      // upload populates a file input → never in a dry-run
+                   op === "upload" ||    // upload populates a file input → never in a dry-run
+                   op === "wake";        // wake ATTACHES THE DEBUGGER → see below
   // (`activate` used to be listed here. It is now unreachable for the agent at
   //  all — absent from OP_TO_SERVER — so buildRequest refuses it long before this
-  //  point. `wake` is deliberately NOT mutating: it changes no page state and
-  //  moves no focus, so a dry-run may still exercise it like a read.)
+  //  point.)
+  //
+  // `wake` USED to be excluded here, on the reasoning that it changes no page
+  // state and moves no focus, so a dry-run could exercise it like a read. That is
+  // true of the PAGE and false of the OPERATOR: a wake attaches chrome.debugger to
+  // their live tab for up to a 6s settle, which raises Brave's "an extension is
+  // debugging this browser" banner. A dry-run promises "logs, doesn't drive", and
+  // the auto-wake path + reference/agent.md now both justify skipping the wake
+  // with exactly that promise. Leaving the MANUAL `op="wake"` able to attach in a
+  // dry run made the documented guarantee stronger than the code — so the code is
+  // hardened to match, not the doc softened. A dry-run wake now synthesizes like
+  // any other mutating op.
   if (dry && MUTATING) {
     const allowed = allowedOpsFromEnv(env);
     if (!allowed.includes(op)) throw new BrowserToolRefusal(`op_not_allowed:${op}`);
@@ -804,14 +856,22 @@ export async function runBrowserOp(args, opts = {}) {
       autoWake = prior.ok
         ? { state: "already-woke", woke: true, detail: prior.detail }
         : { state: "already-failed", woke: false, detail: prior.detail };
+    } else if (!AUTO_WAKE_OPS.includes(op)) {
+      // `eval`: signal only, never auto-re-run. autoWake stays null → the generic
+      // hidden WARNING, which is the honest description (nothing was attempted).
+    } else if (!autoWakeEnabled(env)) {
+      // Kill switch. Checked BEFORE the dry-run branch so a run with BOTH set is
+      // told which one actually stopped the wake — the more specific cause first.
+      // autoWake stays null → the generic hidden WARNING.
     } else if (dry) {
       // A dry-run's contract is "logs, never actually drives the browser". A read
       // is passive, but a `wake` ATTACHES THE DEBUGGER to the operator's live tab
-      // for ~1.5s and raises Brave's "an extension is debugging this browser"
-      // banner — a categorical step past that. Skip it and say what would have
-      // happened; the signal is preserved either way.
+      // and raises Brave's "an extension is debugging this browser" banner — a
+      // categorical step past that. (The MANUAL `op="wake"` is now intercepted the
+      // same way, via MUTATING.) Skip it and say what would have happened; the
+      // signal is preserved either way.
       autoWake = { state: "dryrun", woke: null, detail: "" };
-    } else if (AUTO_WAKE_OPS.includes(op) && autoWakeEnabled(env)) {
+    } else {
       const cap = autoWakeTabCap(env);
       if (wakeCountForTab(tab) >= cap) {
         // Churn backstop (URL-rewriting pages defeat the per-page key). Stop
