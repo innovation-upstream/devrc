@@ -8,11 +8,12 @@
 #                          [--steps N] [--timeout S] [--dry-run]
 #
 # What it does (see README "opencode browser-agent"):
-#   1. `open`s a NEW tab on instance K (its OWN tab), captures the tabId, and
-#      PROBES it (cheap `eval '1'`, no model tokens) to confirm the tab is
-#      live/owned before proceeding — re-opening (bounded retry) if a post-reload
-#      transient left the tab gone (owned_tab_gone), so the model never gets a
-#      doomed tabId.
+#   1. `open`s a NEW tab on instance K (its OWN tab) at about:blank, captures the
+#      tabId, and PROBES it (a NON-INJECTING `browser tabs` listing, no model
+#      tokens) to confirm the tab is live/owned before proceeding — re-opening
+#      (bounded retry) if a post-reload transient left the tab gone, so the model
+#      never gets a doomed tabId. The probe must NOT inject into the page: the
+#      tab starts at about:blank, which no host permission covers.
 #   2. Runs `opencode run --format json -m <deepseek> --agent browser-agent --auto`
 #      in a scratch --dir. The agent def DENIES every built-in tool (bash, edit,
 #      read, webfetch, …) and ALLOWS only ONE custom, TYPED tool: `browser`
@@ -222,10 +223,11 @@ esac
 # VANISH before the model's first op — opencode then returns status:"blocked"
 # with op_failed:owned_tab_gone and the run wastes tokens. So before spending
 # ANY model token, VERIFY the freshly-opened tab is actually live/owned with a
-# CHEAP, metadata-only probe (`eval '1'` → returns 1, NO page content). If the
-# probe reports the tab is gone, close the stale tab (best-effort) and re-open —
-# bounded retry with a short backoff to let the SW settle. Only a probe-passing
-# owned tab is ever handed to opencode.
+# CHEAP, metadata-only, NON-INJECTING probe (`browser tabs` → chrome.tabs
+# metadata only, NO page content, NO chrome.scripting). If the probe reports the
+# tab is gone, close the stale tab (best-effort) and re-open — bounded retry with
+# a short backoff to let the SW settle. Only a probe-passing owned tab is ever
+# handed to opencode.
 READY_ATTEMPTS="${BROWSER_AGENT_READY_ATTEMPTS:-3}"   # test seam
 READY_BACKOFF="${BROWSER_AGENT_READY_BACKOFF:-0.4}"   # test seam (seconds)
 
@@ -241,21 +243,94 @@ except Exception:
   case "$TAB" in (*[!0-9]*|"") die "could not determine the opened tabId from: $open_resp";; esac
 }
 
-# _probe_tab — model-free readiness check of the CURRENT owned tab ($TAB). Runs a
-# harmless `eval '1'` (returns 1; NO page content). Returns:
-#   0 → tab is live/usable (probe passed)
-#   1 → tab is GONE (owned_tab_gone / "no tab with id") — re-open and retry
+# _probe_tab — model-free readiness check of the CURRENT owned tab ($TAB). Lists
+# the browser's tabs (`browser tabs` → pure chrome.tabs metadata: id/url/title/
+# active/windowId; NO chrome.scripting injection, NO page content) and asserts
+# $TAB is present.
+#
+# ⚠ WHY NOT `eval '1'` (what this used to do): that made `browser agent`
+# IMPOSSIBLE to run — an unconditional, 100%-of-the-time hard failure before the
+# model was ever invoked. The agent's tab is deliberately opened at about:blank
+# (a neutral start; navigating it somewhere on startup would leak a request the
+# caller never asked for and could trip --allow-domains), and chrome.scripting
+# CANNOT inject into about:blank — it is not covered by the manifest's <all_urls>
+# host permission. So every probe came back with Chrome's
+#   Cannot access contents of url "about:blank". Extension manifest must request
+#   permission to access this host.
+# which is not owned_tab_gone → rc=2 → `die`. Readiness only ever needed to
+# answer "does this tab exist and can the bridge see it" — the probe's own
+# comment said as much ("NO page content"). `tabs` answers exactly that, for ANY
+# url scheme, without needing page-content access at all.
+#
+# Returns:
+#   0 → tab is live/usable (present in the tab list)
+#   1 → tab is GONE (absent from the list, or the bridge said owned_tab_gone)
 #   2 → some OTHER error (hard failure — surfaced via PROBE_OUT)
 # The probe's stdout+stderr are captured into PROBE_OUT and NEVER reach the
-# wrapper's own stdout, so an op-error dump can't pollute the final JSON result.
+# wrapper's own stdout, so neither an op-error dump nor a tab listing can pollute
+# the final JSON result.
 PROBE_OUT=""
 _probe_tab() {
-  PROBE_OUT="$("$BROWSER_BIN" "${bflags[@]}" --tab "$TAB" eval '1' 2>&1)"
+  PROBE_OUT="$("$BROWSER_BIN" "${bflags[@]}" tabs 2>&1)"
   local rc=$?
-  [ "$rc" = "0" ] && return 0
-  case "$PROBE_OUT" in
-    *owned_tab_gone*|*"no tab with id"*|*"No tab with id"*) return 1 ;;
-    *) return 2 ;;
+  if [ "$rc" != "0" ]; then
+    # A non-zero `tabs` is a bridge/transport failure (no extension, rate limit,
+    # ambiguous instance…) — hard. The owned_tab_gone shapes are kept for
+    # robustness in case a future/older extension answers `tabs` per-tab.
+    case "$PROBE_OUT" in
+      *owned_tab_gone*|*"no tab with id"*|*"No tab with id"*) return 1 ;;
+      *) return 2 ;;
+    esac
+  fi
+  # rc=0 → parse the listing and look for $TAB. Reads stdin (never argv) so a
+  # large listing can't blow the arg limit.
+  local prc
+  printf '%s' "$PROBE_OUT" | python3 -c '
+import json, sys
+# Locate the tabs array inside the CLI envelope ({"ok":…,"result":{…,"data":
+# {"tabs":[…]}}}), tolerating any stderr noise around the JSON document.
+# exit 0 = tab present, 1 = tab absent (gone), 3 = no parseable tab list.
+want = sys.argv[1]
+raw = sys.stdin.read()
+dec = json.JSONDecoder()
+obj = None
+i = raw.find("{")
+while i != -1:
+    try:
+        obj = dec.raw_decode(raw[i:])[0]
+        break
+    except ValueError:
+        i = raw.find("{", i + 1)
+def find_tabs(o):
+    if isinstance(o, dict):
+        t = o.get("tabs")
+        if isinstance(t, list):
+            return t
+        for v in o.values():
+            r = find_tabs(v)
+            if r is not None:
+                return r
+    elif isinstance(o, list):
+        for v in o:
+            r = find_tabs(v)
+            if r is not None:
+                return r
+    return None
+tabs = find_tabs(obj) if obj is not None else None
+if tabs is None:
+    sys.exit(3)
+sys.exit(0 if any(str(t.get("id")) == want
+                  for t in tabs if isinstance(t, dict)) else 1)
+' "$TAB"
+  prc=$?
+  case "$prc" in
+    0) return 0 ;;
+    1) return 1 ;;
+    # Unparseable: replace PROBE_OUT with a SHORT diagnostic — the raw value can
+    # be the operator's whole tab list (every url + title), which must not land
+    # in a stderr error dump.
+    *) PROBE_OUT="could not find a tab list in the \`browser tabs\` response (first 200 bytes: $(printf '%.200s' "$PROBE_OUT"))"
+       return 2 ;;
   esac
 }
 

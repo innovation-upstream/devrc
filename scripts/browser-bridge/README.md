@@ -922,8 +922,22 @@ browser agent "<goal>" [--instance K] [--allow-domains …] [--deny-domains …]
 
 **Flow (the wrapper, `browser-agent`):**
 
-1. `open`s a NEW background tab on instance K and captures its `tabId` (the
-   agent's OWN tab — reuses the #175 `open`+`--tab` isolation).
+1. `open`s a NEW background tab on instance K **at `about:blank`** and captures
+   its `tabId` (the agent's OWN tab — reuses the #175 `open`+`--tab` isolation),
+   then **PROBES** it before spending a model token: a **non-injecting `browser
+   tabs` listing** (pure `chrome.tabs` metadata — no `chrome.scripting`, no page
+   content) that must contain the new `tabId`. Absent → the post-reload transient
+   → close + re-open, bounded by `BROWSER_AGENT_READY_ATTEMPTS`/`_BACKOFF`. Any
+   other probe error is a hard refusal.
+
+   ⚠ **The probe must never inject.** It used to run `eval '1'`, which made
+   `browser agent` **impossible to run**: `chrome.scripting` cannot inject into
+   `about:blank` (no host permission covers it), so every single run died with
+   `Cannot access contents of url "about:blank". Extension manifest must request
+   permission to access this host.` before the model was ever invoked. The tab
+   deliberately starts neutral — navigating it somewhere on startup would leak a
+   request the caller never asked for and could trip `--allow-domains` — so
+   readiness has to be answerable without page-content access. `tabs` is.
 2. Runs `opencode run --format json -m openrouter/deepseek/deepseek-v4-flash
    --agent browser-agent --auto` in a scratch `--dir`, under a **wall-clock
    `--timeout` enforced with a PROCESS-GROUP kill** (`setsid` + `kill -<pgid>`, so
