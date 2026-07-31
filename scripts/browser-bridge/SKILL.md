@@ -358,6 +358,24 @@ drive it: `text`/`frames` come back empty or half-built, and in-frame
 `model-benchmarking.civit.ai` (an OOPIF inside a `civitai.com` tab) stayed blank
 while backgrounded.
 
+🔴 **Before you believe any "nothing rendered / no requests fired" reading:**
+
+- **Check `document.visibilityState` FIRST**
+  (`browser --tab <id> eval 'document.visibilityState'`). If `"hidden"`, that
+  reading is MEANINGLESS — a shell-only DOM is indistinguishable from a genuinely
+  broken frontend. (Reads self-announce it: `data.hidden:true` + a stderr warning.)
+- **Spoofing it afterwards does NOT recover the page.**
+  `Object.defineProperty(document,'visibilityState',…)` changes nothing: the
+  throttling is browser-enforced and the app's fetch decisions are already made.
+  **`wake` is the fix** — not a spoof, and not `activate`.
+- 🔴 **"Is this page broken for REAL users?" is not a browser question.** Answer it
+  from server-side/real-user evidence — RUM, metrics, pod health, an anonymous
+  `curl`. Use the browser probe to EXPLAIN a failure telemetry already shows, never
+  to DISCOVER one. An agent once escalated a hidden-tab read to a site-wide
+  production outage that was not happening; every "corroborating" check shared the
+  identical flaw, and one of the errors it cited was caused by the probe itself.
+  Post-mortem: README.md § *Real false-outage report*.
+
 **`wake` is the fix, and it does NOT take the operator's screen.** It attaches CDP
 to your own tab, enables focus emulation (measured: `visibilityState` → `visible`,
 rAF 0/s → 62/s), holds it for a bounded settle (cap 6s) so the page paints, then explicitly
