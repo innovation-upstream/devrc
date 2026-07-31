@@ -108,12 +108,34 @@ browser agent "go to news.ycombinator.com and report the top 3 story titles" \
     re-read, and return the re-read — inside one model tool call, no step spent, no
     decision asked of the model. `wake`, never `activate`.
   - **once per PAGE**, keyed by the read's `url` per forced tab. The un-throttle dies
-    with the CDP detach but the DOM it produced persists, so later reads are cheap. A
-    `nav` clears the tab's record (new document → throttled again); a click/eval-driven
-    URL change produces a new key, so it wakes again.
+    with the CDP detach but the DOM it produced persists, so later reads are cheap.
+    A successful `nav`/`click`/`key`/`eval` clears the tab's records — the URL key
+    cannot see a same-URL document replacement (form POST, `location.reload()`, a
+    same-URL SPA remount), and under-forgetting costs a wrong answer while
+    over-forgetting costs one extra wake. A `wake` the MODEL calls also marks the
+    page, so a manual wake is not immediately paid for twice.
+  - the **VERDICT** is stored, not just the key — `{ok, detail}`. A page whose wake
+    FAILED is never later described as post-wake: `note:` is reserved for a wake the
+    tool can vouch for (`woke === true`); a failed / unconfirmed / skipped / never-
+    attempted page gets `WARNING:` and the recorded reason. Storing only the key made
+    every later read of a failed page a *reassured* wrong answer — worse than the
+    silent one this change exists to remove.
   - **fail-open**: a failed/forbidden wake, or a failed re-read, returns the ORIGINAL
     read prefixed with a loud `[browser-tool] WARNING: … 'wake' FAILED (<reason>)`.
     A read never becomes an error. A failed wake is not retried per-read.
+  - **budget**: `AUTO_WAKE_TAB_CAP` = 8 automatic wakes per tab per run
+    (`BROWSER_AGENT_AUTO_WAKE_MAX` overrides), independent of the page key. On a page
+    that rewrites its URL on every read (hash routing, `?t=` cache-busters,
+    `history.replaceState` on infinite scroll) every read yields a fresh key, so
+    once-per-page would degrade to once-per-read: 3 bridge calls + a ~1.5 s settle
+    each against the 5/s + burst-20 per-instance limiter. Past the cap it stops waking
+    and says so loudly.
+  - the banner **hedges**: `woke` is probed from `visibilityState` inside the CDP
+    attach, so it proves the tab was un-throttled and says nothing about whether the
+    app finished rendering inside the bounded settle. Every post-wake banner tells the
+    model that a loading/placeholder state below is real.
+  - both injected calls are audited (`auto_wake_exec`) and so is the outcome
+    (`auto_wake_ok` / `auto_wake_unconfirmed` / `auto_wake_failed` / `auto_wake_capped`).
   - `hidden` + the server's note now survive `summarizeResult` for `text`/`html`/`eval`
     regardless, so a still-hidden read is visible rather than silent. (`eval` gets the
     signal but is never auto-re-run — an arbitrary expression is not idempotent.)

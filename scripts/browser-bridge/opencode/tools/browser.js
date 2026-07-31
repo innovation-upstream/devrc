@@ -25,8 +25,11 @@ export default tool({
     "(TRUSTED text input, pass `text`, optional `selector`), 'key' (one key: " +
     "Enter/Tab/Escape/Backspace/Delete/Arrow*/Home/End/Page*, optional `selector`), " +
     "'wake' (UN-THROTTLE your background tab so a throttled SPA actually renders " +
-    "— does NOT move the user's focus; optional `waitMs` settle. Use this when a " +
-    "read comes back empty or the page looks stuck on 'Loading…'), " +
+    "— does NOT move the user's focus; optional `waitMs` settle. You RARELY need " +
+    "to call this: a 'text'/'html' read of a hidden tab already wakes and re-reads " +
+    "AUTOMATICALLY, and the reply tells you it did. Do NOT spend a step waking " +
+    "after a read — only call it when you drove the page (click/key) and it needs " +
+    "more time to render, and at most once per page), " +
     "'whoami' (read-only host/instance/version diagnostics — metadata only). " +
     "There is NO 'upload' op: file upload is off by default for the autonomous " +
     "agent. text/html/eval/click/type/key accept `frame` (a frameId or " +
