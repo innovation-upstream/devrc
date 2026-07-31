@@ -54,7 +54,8 @@ existing directories are never renamed.
 | `server.py` | loopback HTTP sidecar (127.0.0.1:8791, bearer auth) |
 | `matcher.py` | deterministic scoring — no LLM, no network, no I/O |
 | `safety.py` | the one place a page-derived string becomes a path component |
-| `store.py` | SQLite: aliases, labelled examples, route log, host prior |
+| `store.py` | SQLite: aliases (+ provenance), examples, route log, host prior, picker-assigned kinds |
+| `dirkinds.py` | performer/category classification + the draft generator |
 | `dirindex.py` | mtime+TTL-cached scan of the library root |
 | `qbt.py` | qBittorrent WebUI client + runtime-derived path mapping |
 | `fetcher.py` | yt-dlp jobs for HLS/DASH sources |
@@ -78,12 +79,75 @@ Normalisation key: NFKD → strip diacritics → casefold → drop non-alphanume
 
 | Rule | Score |
 |---|---|
+| identity-signal alias hit (Discord channel, forum thread) | 1.00 |
 | exact alias hit, site-scoped | 1.00 |
 | exact alias hit, global | 0.90 |
 | normalised page tag/subject == directory key | 0.85 |
 | token-sequence containment, scaled by coverage | 0.60–0.80 |
 | filename token match | ≤ 0.50 |
 | host prior (last directory used on this site) | +0.05, display only |
+
+### Identity signals — the deterministic half
+
+Page scraping has a hard floor: a single-page app gives a content script
+nothing to read. The first evening of real traffic hit it — most downloads came
+from a chat CDN whose captured context was completely empty (`tags: []`,
+`title: ''`, `pageUrl: ''`), and scored 0.00.
+
+But the URL is structured. `identity_signals()` derives site-scoped alias keys
+from it and nothing else:
+
+| Signal | Key | Scope |
+|---|---|---|
+| Discord attachment (`cdn.discordapp.com`, `media.discordapp.net`) | `discord:<channel id>` | `discord.com` |
+| forum thread slug in the path | `thread:<slug>` | that forum's host |
+
+The first download from a channel or thread has no signal, opens the picker,
+and confirming it writes the key. Every later download from the same channel
+matches at **1.00 with nothing scraped from any page** — so a UI change on the
+source site cannot break routing that already works.
+
+The **same function** produces the keys the matcher looks up and the keys the
+learner writes, so "what we match on" and "what we learn" cannot drift apart.
+The URL table is a shared fixture asserted against *both* `matcher.py` and
+`extension/route_core.js`.
+
+**Subject ordering** follows from the same evidence: the URL thread slug leads,
+then the page title with the site's own branding removed, and the tag list
+trails both. On the one forum download that *did* capture context, the tag list
+was the forum's section names and other posters' usernames while the subject
+sat in the slug and the title.
+
+### Cross-host referrer carry
+
+A download from a paired file host has no context of its own — the page is a
+download button. The forum thread that sent the user there does have one, and it
+is carried **only when the link is provable**: a captured click whose `href` is
+this page, or the tab this one was opened from (`openerTabId`). There is
+deliberately no time window and no "the last thread I saw"; both are wrong
+exactly when several tabs are open, which is how anyone browses a forum. An
+unprovable link goes to the picker.
+
+### Directory kinds
+
+The library is not purely subject-keyed. `~/.config/dl-router/dirs.toml` (never
+committed) classifies each directory:
+
+```toml
+performer = ["Ada Lovelace"]     # a person or group
+category  = ["Field Recordings"] # unattributed material, filed by topic
+```
+
+* **Only a `performer` directory may auto-file.** A `category` always opens the
+  picker whatever it scores — a tag legitimately identifies the category, but a
+  tag is a weak claim about any *one* file.
+* **An unclassified directory never auto-files either.** Absence of a
+  classification is not permission.
+* `dl-route dirs classify` drafts the file from the live index with a
+  best-guess split and the reason on every line, so the review action is
+  "move this line", not "type every directory name".
+* Creating a directory through the picker **asks which kind it is** — otherwise
+  the new directory would silently interrupt every future download into it.
 
 Guards:
 
@@ -113,6 +177,47 @@ overwrites** — `conflictAction: "uniquify"` handles real collisions.
 Route provenance lives in SQLite only. There are deliberately **no
 `.dlmeta.json` sidecar files**: extra files inside the media directories would
 pollute them and risk confusing qBittorrent and media scanners.
+
+---
+
+## Learning — only the discriminating signal
+
+A correction is the only place the router gains knowledge, so it is also the
+only place it can gain *wrong* knowledge. The first version wrote an alias for
+the first three subject phrases of the context plus one at global scope; on a
+forum page that meant a section name and two other posters' usernames, one of
+them global. Four rows had to be deleted by hand, and nothing surfaced them.
+
+What `/learn` writes now depends on what the directory **is**:
+
+| Directory kind | Learns |
+|---|---|
+| `performer` | identity signals (Discord channel, thread slug) and a subject name found in the page title. **Never a tag.** |
+| `category` | the above, plus tag → directory aliases — site-scoped, capped, and only from an explicit confirmation |
+| unclassified | identity signals only |
+
+**No alias is ever learned at global scope.** A global alias applies on every
+site at once: the widest blast radius the store has, and the least evidence
+supports it. `dl-route alias set --site '*'` still exists for a deliberate one.
+
+Every candidate key is screened first, by rules that describe the *failure
+class* rather than the four strings that caused it — and every rule is measured
+from data the router already holds, because a vocabulary of "bad words" would
+be both unmaintainable and un-committable to a public repo:
+
+* shorter than 4 characters;
+* seen on **two or more different directories** in the labelled examples — the
+  signature of site chrome (a section name, an uploader's username), which
+  appears on everything, while a subject tag appears on one directory's pages;
+* part of the **site's own name**;
+* every word of it already appears in two or more library directories, which is
+  what a taxonomy reads like and a person's name does not;
+* a single token containing digits (a handle, not a name).
+
+`dl-route alias review` shows what has been learned with the evidence, the
+provenance and the hit count behind each row, riskiest first, flagging the
+global and suspicious ones. Refusals are reported back in `/learn`'s response
+rather than silently dropped.
 
 ---
 
@@ -278,7 +383,12 @@ never renamed.
 ## Setup
 
 1. **Configure.** `cp config.example.toml ~/.config/dl-router/config.toml` and
-   set `library_root`.
+   set `library_root`. Then classify the directories, or nothing will ever
+   auto-file:
+   ```
+   dl-route dirs classify --out ~/.config/dl-router/dirs.toml
+   $EDITOR ~/.config/dl-router/dirs.toml     # move the wrong lines
+   ```
 2. **Start the sidecar.** `home-manager switch` installs the
    `dl-router` systemd user service. Check with `dl-route status`.
 3. **Point the browser profile at the library.** With Brave **fully closed**:
@@ -315,16 +425,24 @@ never renamed.
 ## CLI
 
 ```
-dl-route status                      sidecar + index health
-dl-route dirs                        list routing targets
+dl-route status                      sidecar + index health + kind counts
+dl-route dirs                        list routing targets + their kinds
+dl-route dirs classify [--out P]     DRAFT the directory-kind file
 dl-route match --filename F --tag T  dry-run the matcher on a context
 dl-route log -n 20                   recent routing decisions
 dl-route alias list|set|rm           inspect/edit the alias table
+dl-route alias review [--json]       what was LEARNED, with evidence + hits
 dl-route backfill plan [--seed-aliases]  read-only (tree AND alias DB)
 dl-route backfill apply --manifest P.tsv [--dry-run]
 dl-route fetch URL --dir NAME        queue a yt-dlp job
 dl-route token                       print the bearer token
 ```
+
+`alias list` prints `*` for a global alias, and `alias rm --site '*'` accepts
+it — what is displayed is what is accepted. (`--site ''` still works.) `alias
+set` refuses a key that trips the suspicious-key screen unless you pass
+`--force`, and structured keys round-trip verbatim:
+`dl-route alias rm 'discord:<channel id>' --site discord.com`.
 
 ---
 
@@ -373,7 +491,10 @@ delegating to either standard library.
 
 ## Privacy
 
-Nothing about the library is committed. `library_root`, per-site rules,
-aliases, the route log, qBittorrent credentials and the bearer token all live
-under `~/.config/dl-router/` and `~/.local/share/dl-router/`. The sidecar's
-journal lines are metadata only. All fixtures in `tests/` are synthetic.
+Nothing about the library is committed. `library_root`, the directory-kind
+classification (`dirs.toml` — a list of the operator's private directory
+names), per-site rules, aliases, the route log, qBittorrent credentials and the
+bearer token all live under `~/.config/dl-router/` and
+`~/.local/share/dl-router/`. The sidecar's journal lines are metadata only. All
+fixtures in `tests/` are synthetic, including the URL table — no real channel
+id, host or forum appears anywhere in this repo.

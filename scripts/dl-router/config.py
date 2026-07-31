@@ -4,6 +4,8 @@ Everything host-specific lives OUTSIDE the repo:
 
     ~/.config/dl-router/config.toml   settings (library root, qBittorrent creds,
                                       per-site capture rules)
+    ~/.config/dl-router/dirs.toml     directory kinds (performer/category) —
+                                      see dirkinds.py
     ~/.config/dl-router/token         bearer token, 0600, auto-created
     ~/.local/share/dl-router/         SQLite store + backfill manifests
 
@@ -14,6 +16,7 @@ endpoints until it is configured.
 Env overrides (all optional, mainly for tests + the systemd unit):
 
     DL_ROUTER_CONFIG        path to config.toml
+    DL_ROUTER_DIRS_FILE     path to dirs.toml (directory kinds)
     DL_ROUTER_STATE_DIR     state dir (SQLite, manifests)
     DL_ROUTER_TOKEN_FILE    bearer-token path
     DL_ROUTER_LIBRARY_ROOT  library root (overrides config.toml)
