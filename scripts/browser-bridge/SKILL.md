@@ -112,9 +112,25 @@ use an obviously disposable one. If anything moved their focus, **restore it**
 **Concurrent drivers (esp. sibling subagents) → each `open` and thread its own
 `--tab <id>`.** Sibling subagents of one parent SHARE a session id (they inherit
 `CLAUDE_CODE_SESSION_ID` + `$TMUX_PANE`), so without an explicit `--tab` they fight
-over the SAME tab. Do **not** run a bare high-rate `eval` loop — it saturates the
-single serial extension connection and gets `429 rate_limited`.
-→ `reference/tabs-instances.md`
+over the SAME tab. Worse: **`open` can hand you a SIBLING'S TAB** — it returns
+**`reused: true`** carrying the other agent's `tabId` (and its URL, on a different
+port) instead of creating a fresh one. Observed for real, 2026-07-31. **The returned
+`tabId` is not automatically yours — check the `reused` field.** Do **not** run a bare
+high-rate `eval` loop — it saturates the single serial extension connection and gets
+`429 rate_limited`. → `reference/tabs-instances.md`
+
+🔴 **VERIFY THE PAGE BEFORE YOU TRUST A SCREENSHOT.** After `open`/`wake` and before
+reading anything, confirm identity with one cheap call:
+
+```bash
+$BB --instance work --tab "$TAB" js '(function(){return location.href})()'
+```
+
+Cost of skipping it: an agent screenshotted a **different application instance** — a
+sibling's server on another port — and reported findings about the wrong build. One
+call turns "I screenshotted something" into "I screenshotted the thing under test".
+Same class as the hidden-tab trap above: **an op that SUCCEEDS is not an op that did
+what you meant.**
 
 ## Before you rely on it
 
