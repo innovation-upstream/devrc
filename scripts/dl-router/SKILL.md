@@ -319,13 +319,22 @@ same gotcha as browser-bridge), then re-check `dl-route status`.
   deliberately empty on this host, so the three local checks carry it there.
   `backfill apply` demands the same corroboration for a REVERSIBLE move; do not
   let /discard end up weaker than it again.
-* **A bounded digest cannot tell a finished file from a preallocated torrent.**
-  qBittorrent preallocates, so an in-progress payload has full `st_size` from
-  creation; once its first and last pieces land, its head+tail digest matches
-  the finished file byte for byte. That once trashed the COMPLETE copy and kept
-  the partial. The kept file must therefore be non-sparse and, if qBittorrent
-  knows it, `progress == 1`. Never re-derive "is it a duplicate" from the
-  digest alone on a destructive path.
+* **SAMPLING IS A WARNING; THE DELETE IS GATED ON A FULL COMPARISON.** This is
+  the single most important invariant in the subsystem and it took three
+  rounds. `/dedupe` samples (head + tail + eight 128 KiB mid-file windows);
+  `/discard` reads BOTH FILES IN FULL and compares them byte for byte. Do not
+  "optimise" that back into a digest comparison — no bounded read proves two
+  multi-GB files identical, it only fails to disprove.
+* **`st_blocks` cannot see a fallocated partial.** qBittorrent's "pre-allocate
+  disk space for all files" uses `posix_fallocate`, which reserves REAL
+  extents: identical size, identical block count, identical head and tail as
+  the finished file. Only reading the middle separates them — an all-zero mid
+  sample is an unfilled extent. The sparse check catches only the
+  `ftruncate` shape; it is not the guard, it is one of several.
+* **A verification that runs out of budget is a REFUSAL.** `files_identical`
+  returns True / False / **None**; None is "could not determine" and must
+  never collapse into either answer. Same for a stat that cannot answer
+  (`_looks_preallocated` fails CLOSED).
 * **One routing decision authorises ONE discard.** The route row is consumed
   (`discards` table, v6). Unconsumed evidence is a capability, not a proof —
   one downloadId used to remove `new.mp4`, `new (1).mp4` and `new (2).mp4` in

@@ -570,9 +570,9 @@ checks, and what each is actually worth:
    mtime windows are deliberately disjoint so no file can satisfy both.
    The two paths must also be **different inodes** (`st_dev`, `st_ino`, not
    resolved paths — `resolve()` collapses symlinks but not hardlinks).
-5. **the duplication is re-proven at delete time**, and the kept copy must be a
-   **complete** file — see the completeness rule below. Both files are re-stat'd
-   after the digest and must be unchanged, so a file still being written is
+5. **the two files are read IN FULL and compared byte for byte** — see below.
+   The kept copy must also be a **complete** file, and both are re-stat'd after
+   the comparison and must be unchanged, so a file still being written is
    refused rather than renamed out from under its writer.
 
 **Read check 3 sceptically.** The *age* half passes vacuously against an
@@ -582,24 +582,53 @@ identity is filename-with-slack, not exact. What actually binds a delete is
 **filename-with-slack + under an hour + one-use-per-decision + check 4's
 timestamp + check 5's re-proof**.
 
-### Completeness: a bounded digest cannot see an unfinished file
+### Sampling is a warning. The delete is gated on a full comparison.
+
+This took three rounds to get right, and the shape of the mistake is worth
+recording: a digest designed as a cheap *warning* kept being promoted into a
+*proof* that authorised destruction, and each round shored it up with another
+`stat`-derived signal.
 
 qBittorrent **preallocates**, so an in-progress payload has its full final
-`st_size` from the moment it is created. If its first and last pieces have
-landed — the common case, and the default under "download first and last pieces
-first" — its head+tail digest is **byte-identical to a finished copy while the
-middle is still zeros**. `/dedupe` answered `duplicate: true` and `/discard`
-trashed the *complete* browser copy, keeping the partial. No adversary
-required.
+`st_size` from creation, and under "download first and last pieces first" its
+head and tail are the finished bytes. First that defeated the head+tail digest.
+Then `st_blocks` was added — which only catches `ftruncate`-style *sparse*
+files. qBittorrent's "pre-allocate disk space for all files" uses
+`posix_fallocate`, which reserves **real extents**: identical size, identical
+block count, identical ends. Measured:
 
-`dedupe.py` justifies the 256 KiB bound precisely because the answer is "a
-warning with a keep button, never an automatic destruction" — and then
-`/discard` reused that same digest as its load-bearing proof. So the kept file
-is now additionally required to be non-sparse (`st_blocks * 512 >= st_size`,
-cheap and credential-free) and, when qBittorrent is configured, `progress == 1`.
-A file already in `.dl-router-trash/` is also rejected as proof: containment is
-not visibility, and two discards could otherwise empty the library of a file by
-proving the second against the first's corpse.
+```
+complete    blocks*512 = 8388608   _looks_preallocated = False
+fallocated  blocks*512 = 8388608   _looks_preallocated = False
+head+tail digests identical : True
+```
+
+**The information is not in the metadata.** So two things changed:
+
+* the digest now also reads **eight 128 KiB mid-file samples** at offsets
+  derived from the size (~1.25 MiB total, still constant). An unfilled extent
+  reads as zeros, and an all-zero mid sample is *direct* evidence of one — a
+  finished media file does not contain a 128 KiB run of zeros. This fixes the
+  **warning**, so the toast stops offering a delete for this pair at all.
+* `/discard` no longer uses the digest as its proof. It **reads both files in
+  full and compares them byte for byte**. Sampling cannot carry a destructive
+  decision: eight samples catch a 40%-complete payload with overwhelming
+  probability but a 99%-complete one only about 8% of the time, and deleting
+  the finished copy to keep a 99% copy still destroys data. No bounded read
+  *proves* two multi-GB files identical; it only ever fails to disprove it.
+
+The full comparison is affordable precisely because `/discard` is not `/match`:
+it is rare, the user asked for it, and nothing is waiting on a 400 ms budget.
+It runs **after** every cheap check, so only a request that has already earned
+it pays. A comparison that runs out of its budget (`[dedupe] verify_timeout_s`,
+180 s) returns "could not determine" — a **refusal**, never an all-clear, which
+is why `files_identical` returns three states rather than a bool.
+
+The kept file must additionally be non-sparse, have no all-zero mid sample,
+and — when qBittorrent is configured — report `progress == 1`. A file already
+in `.dl-router-trash/` is rejected as proof too: containment is not visibility,
+and two discards could otherwise empty the library of a file by proving the
+second against the first's corpse.
 
 ### The seeding guard is the payload check, **not** the trash
 

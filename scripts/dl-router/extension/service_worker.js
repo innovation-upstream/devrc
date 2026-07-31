@@ -30,6 +30,14 @@ const TOAST_W = 420;
 const TOAST_H = 190;
 // The duplicate toast carries one more line and two more buttons.
 const TOAST_DUP_H = 240;
+// /discard READS BOTH FILES IN FULL before deleting anything -- sampling
+// cannot carry a destructive decision, so the sidecar proves it properly and
+// that takes as long as the disk takes. This MUST exceed the sidecar's own
+// `DISCARD_VERIFY_TIMEOUT_S` (180 s), or the toast reports "Not deleted" for a
+// delete that then succeeds -- an active false claim about a destructive
+// operation, which is the exact shape already fixed once here (the index walk
+// on the response path).
+const DISCARD_TIMEOUT_MS = 240000;
 const PICKER_W = 460;
 const PICKER_H = 420;
 
@@ -1347,7 +1355,7 @@ export function onMessage(msg, sender, sendResponse) {
         relPath: msg.relPath,
         dupRelPath: msg.dupRelPath,
         downloadId: msg.downloadId,
-      }, { timeoutMs: 15000 }))
+      }, { timeoutMs: DISCARD_TIMEOUT_MS }))
       .then((r) => sendResponse(r))
       .catch((e) => {
         // Surface it twice: in the toast (which stays open) and as a

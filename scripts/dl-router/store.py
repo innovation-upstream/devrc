@@ -637,6 +637,38 @@ class Store:
         self.conn.commit()
         return int(cur.rowcount) == 1
 
+    def set_discard_trash(self, download_id: str, trash_rel: str) -> int:
+        """Record WHERE a discarded file went.
+
+        Separate from `record_discard` because that one is
+        `ON CONFLICT DO NOTHING` -- which is what makes it an atomic claim, and
+        also what makes it unable to update. Calling it twice left every row
+        with an empty `trash_rel`, so the table promised "where it went" and
+        never delivered it. The uniquified `(N)` name in the trash is exactly
+        what someone needs to undo a wrong discard.
+        """
+        cur = self.conn.execute(
+            "UPDATE discards SET trash_rel=? WHERE download_id=?",
+            (str(trash_rel or ""), str(download_id or "")))
+        self.conn.commit()
+        return int(cur.rowcount)
+
+    def release_discard(self, download_id: str) -> int:
+        """Un-consume a routing decision whose discard did NOT happen.
+
+        The claim is taken immediately before the destructive act so a crash
+        cannot leave a file deleted and unrecorded. The other direction has to
+        be handled too: if the rename or unlink fails, nothing was destroyed
+        and the decision must not stay spent -- otherwise a failing trash
+        (EXDEV, a planted symlink, no free name) permanently disables discard
+        for that download AND leaves the table claiming a file was removed
+        that is still on disk.
+        """
+        cur = self.conn.execute("DELETE FROM discards WHERE download_id=?",
+                                (str(download_id or ""),))
+        self.conn.commit()
+        return int(cur.rowcount)
+
     def recent_discards(self, limit: int = 50) -> list:
         rows = self.conn.execute(
             "SELECT * FROM discards ORDER BY ts DESC LIMIT ?",

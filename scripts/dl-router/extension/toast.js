@@ -116,6 +116,13 @@ export function mount(doc, chromeApi, win) {
       // Disabled while in flight: a second click is a second delete request,
       // and the first one may already have moved the file.
       discard.disabled = true;
+      // The sidecar READS BOTH FILES IN FULL before deleting anything --
+      // sampling cannot carry a destructive decision, so it proves the two
+      // are identical properly, and on a large pair that is tens of seconds.
+      // Say so rather than leaving a dead-looking button.
+      const dupLine = doc.getElementById("dup");
+      const wasDup = dupLine.textContent;
+      dupLine.textContent = `${wasDup} - verifying both files...`;
       void (async () => {
         let resp;
         try {
@@ -131,6 +138,7 @@ export function mount(doc, chromeApi, win) {
         // A missing answer counts as a refusal, exactly as in the picker: the
         // worker may have been torn down mid-request and "probably worked" is
         // not a thing to report about a delete.
+        dupLine.textContent = wasDup;
         if (!resp || resp.ok === false) {
           // The refusal goes in its OWN line. Writing it over `#dup` erased
           // the "Duplicate of <path>" text, so after any refusal the user

@@ -11,22 +11,32 @@ THE SHAPE OF THE ANSWER, and the reason it is cheap:
      walk it already performs, so a size bucket costs one dict lookup and no
      I/O at all. On the common path (no other file of that size) the answer is
      "not a duplicate" and nothing here runs.
-  2. ONLY when sizes collide, a bounded head+tail digest of both files. Two
-     files of identical length whose first and last 128 KiB agree are the same
-     file for every practical purpose here; two that disagree anywhere in
-     either window are definitively not.
+  2. ONLY when sizes collide, a bounded digest of both files: the first and
+     last 128 KiB plus eight 128 KiB samples at mid-file offsets derived from
+     the size. ~1.25 MiB, constant regardless of how large the files are.
 
-NEVER READ A WHOLE FILE. These are multi-GB media files and this runs on a
-download-completion path. The digest reads at most `HEAD_BYTES + TAIL_BYTES`
-and folds the size in, so the read cost is constant regardless of file size.
-The cost of the bound, stated honestly: two files that share their first and
-last 128 KiB and differ only in the middle are reported as duplicates. For
-media that means two encodes of the same source with identical length and
-identical container head/tail — and the answer is a WARNING with a keep
-button, never an automatic destruction, which is what makes the bound
-affordable. `tests/test_dedupe.py` pins the bound behaviourally: a file that
-differs ONLY in the middle digests the same, so widening this to a whole-file
-read breaks a named test.
+SAMPLING IS A WARNING. IT IS NOT A PROOF, AND IT MUST NEVER GATE A DELETE.
+That distinction was learned the hard way, twice:
+
+  * head+tail alone could not tell a finished file from a PREALLOCATED torrent
+    payload. qBittorrent's `posix_fallocate` reserves real extents, so the
+    partial has the same size AND the same `st_blocks`, and under "first and
+    last pieces first" the same head and tail. The middle is the only place
+    the difference lives, which is why the mid samples exist -- an unfilled
+    extent reads as zeros (see `looks_unfilled`).
+  * but even with mid samples, no bounded read PROVES two multi-GB files
+    identical. Eight samples catch a 40%-complete payload with overwhelming
+    probability and a 99%-complete one only about 8% of the time. It fails to
+    disprove; it never proves.
+
+So the two paths are deliberately different, and the difference is the point:
+
+    /dedupe  (a warning, on a completion path)  -> sample_file, bounded
+    /discard (destroys a file, user-initiated)  -> files_identical, FULL read
+
+The full comparison is affordable exactly because /discard is not /match: it is
+rare, the user asked for it, and nothing is waiting on a 400 ms budget. A
+bounded read on that path was a proof that was not one.
 
 NOTHING HERE IMPORTS FROM matcher/dirindex/server. It is pure filesystem
 identity, so it can be exercised against real temp files with no index, no
@@ -37,12 +47,36 @@ from __future__ import annotations
 import hashlib
 import os
 import threading
+import time
 
 # 128 KiB from each end. Big enough to cover a container header plus the first
 # frames (and the trailing index/moov atom that a remux would change), small
 # enough that hashing eight candidates is ~2 MiB of reads.
 HEAD_BYTES = 128 * 1024
 TAIL_BYTES = 128 * 1024
+
+# MID-FILE SAMPLES, and why head+tail alone was not enough.
+#
+# qBittorrent preallocates. With "pre-allocate disk space for all files" that
+# is `posix_fallocate`, which reserves REAL EXTENTS -- so the partial file has
+# the final size AND the final block count, and `st_blocks` says nothing. Under
+# "download first and last pieces first" its head and tail are the finished
+# bytes. A head+tail digest of a 40%-complete payload is therefore
+# byte-identical to the finished file, and no amount of `stat` can tell them
+# apart: identical size, identical blocks, identical ends.
+#
+# The information is only in the middle, so the middle has to be read. Eight
+# 128 KiB samples at offsets derived from the SIZE (so two files of the same
+# length always sample the same places) costs ~1 MiB on top of the ends and
+# still does not depend on the file's length.
+MID_SAMPLES = 8
+SAMPLE_BYTES = 128 * 1024
+
+# The ceiling this module will ever read for a DIGEST: ~1.25 MiB.
+MAX_DIGEST_BYTES = HEAD_BYTES + TAIL_BYTES + (MID_SAMPLES * SAMPLE_BYTES)
+
+# How much a full verification reads at a time.
+COMPARE_CHUNK = 1024 * 1024
 
 # How many same-size candidates a single check will hash. A size bucket can be
 # large (a library accumulates same-size files), and the check runs on a
@@ -67,6 +101,54 @@ def _feed(fh, count: int, digest) -> int:
         digest.update(chunk)
         read += len(chunk)
     return read
+
+
+def mid_windows(size: int, *, head: int = HEAD_BYTES, tail: int = TAIL_BYTES,
+                samples: int = MID_SAMPLES,
+                sample_bytes: int = SAMPLE_BYTES) -> list:
+    """`[(offset, length), ...]` for the mid-file samples. NON-OVERLAPPING.
+
+    Derived from `size` ALONE so two files of the same length always sample
+    exactly the same places — otherwise comparing their digests would be
+    meaningless.
+
+    Two shapes, because a fixed window count does not fit every file:
+
+      * a mid region no bigger than the whole sample budget is read ENTIRELY
+        (one window). Slicing it into eight 128 KiB windows would have them
+        overlap each other and run into the tail, feeding the same bytes to
+        the digest several times — measured at 327680 bytes, where the digest
+        read 1.25 MiB out of a 320 KiB file.
+      * anything larger gets `samples` evenly spaced windows, clipped so none
+        crosses into the tail window.
+
+    Either way the total is at most `samples * sample_bytes`, and no byte is
+    ever fed twice.
+    """
+    start, end = int(head), int(size) - int(tail)
+    span = end - start
+    samples, sample_bytes = int(samples), int(sample_bytes)
+    if span <= 0 or samples <= 0 or sample_bytes <= 0:
+        return []
+    budget = samples * sample_bytes
+    if span <= budget:
+        return [(start, span)]
+    out = []
+    # `samples + 1` intervals so no window sits exactly on either boundary.
+    for i in range(1, samples + 1):
+        off = start + (span * i) // (samples + 1)
+        off = min(off, end - sample_bytes)
+        if off < start:
+            off = start
+        if out and off < out[-1][0] + out[-1][1]:
+            continue                      # would overlap its predecessor
+        out.append((off, min(sample_bytes, end - off)))
+    return out
+
+
+def mid_offsets(size: int, **kw) -> list:
+    """Just the offsets from `mid_windows`."""
+    return [off for off, _ in mid_windows(size, **kw)]
 
 
 def _read_bounded(fh, size: int, head: int, tail: int, digest) -> int:
@@ -97,9 +179,73 @@ def _read_bounded(fh, size: int, head: int, tail: int, digest) -> int:
     return read
 
 
+def sample_file(path, *, size=None, head: int = HEAD_BYTES,
+                tail: int = TAIL_BYTES, samples: int = MID_SAMPLES,
+                sample_bytes: int = SAMPLE_BYTES, opener=open):
+    """Bounded fingerprint PLUS what the samples looked like. None on failure.
+
+    Returns `{digest, size, mid_samples, zero_samples, bytes_read}`.
+
+    `zero_samples` is the load-bearing extra. An unfilled extent reads as
+    zeros, so an all-zero mid sample in a media file is DIRECT evidence that
+    the file is not finished — not a probabilistic hint. A finished video file
+    does not contain a 128 KiB run of zeros in the middle; a preallocated
+    torrent that has not reached that piece does, always.
+    """
+    try:
+        if size is None:
+            size = os.stat(path).st_size
+        size = int(size)
+    except (OSError, TypeError, ValueError):
+        return None
+    if size <= 0:
+        return None
+    head, tail = int(head), int(tail)
+    # The size is folded in FIRST, so two files whose sampled windows agree but
+    # whose lengths differ can never collide even if a caller compares digests
+    # across size buckets.
+    digest = hashlib.blake2b(str(size).encode("ascii"), digest_size=16)
+    windows = mid_windows(size, head=head, tail=tail, samples=samples,
+                          sample_bytes=sample_bytes)
+    zeros = 0
+    taken = 0
+    read = 0
+    try:
+        with opener(path, "rb") as fh:
+            read += _read_bounded(fh, size, head, tail, digest)
+            for off, want in windows:
+                fh.seek(off, os.SEEK_SET)
+                chunk = fh.read(want) if want > 0 else b""
+                if not chunk:
+                    continue
+                digest.update(chunk)
+                read += len(chunk)
+                taken += 1
+                if not any(chunk):
+                    zeros += 1
+    except OSError:
+        return None
+    return {"digest": digest.hexdigest(), "size": size, "mid_samples": taken,
+            "zero_samples": zeros, "bytes_read": read}
+
+
+def looks_unfilled(record) -> bool:
+    """True iff a mid sample was ALL ZEROS — an unfilled extent.
+
+    This is what `st_blocks` cannot see. `posix_fallocate` reserves real
+    extents, so a preallocated partial has the same size AND the same block
+    count as the finished file; only reading the middle distinguishes them.
+    """
+    return bool(record) and int(record.get("zero_samples", 0)) > 0
+
+
 def partial_digest(path, *, size=None, head: int = HEAD_BYTES,
                    tail: int = TAIL_BYTES, opener=open):
-    """Bounded content fingerprint, or None when the file cannot supply one.
+    """Just the digest from `sample_file`, or None.
+
+    A THIN WRAPPER ON PURPOSE. Two sampling implementations would drift about
+    which bytes they read, and the whole point of the mid samples is that both
+    files sample the same places.
 
     None (never an exception, never a partial answer) for every failure the
     caller has to handle anyway:
@@ -113,24 +259,49 @@ def partial_digest(path, *, size=None, head: int = HEAD_BYTES,
 
     `opener` is injectable so a test can count the bytes actually read.
     """
+    record = sample_file(path, size=size, head=head, tail=tail, opener=opener)
+    return record["digest"] if record else None
+
+
+def files_identical(a, b, *, chunk: int = COMPARE_CHUNK, deadline=None,
+                    clock=time.monotonic, opener=open):
+    """FULL byte-for-byte comparison. `(verdict, reason)`.
+
+    `verdict` is True, False, or **None for "could not determine"** — the third
+    state is not optional, because a comparison that ran out of budget must
+    never be mistaken for either answer.
+
+    WHY THIS EXISTS AT ALL, given everything above samples. Sampling cannot
+    carry a destructive decision and it was being asked to. Eight mid-file
+    samples catch a 40%-complete preallocated payload with overwhelming
+    probability -- but a 99%-complete one only about 8% of the time, and
+    deleting the finished copy to keep a 99% copy still destroys data. No
+    bounded read proves two multi-GB files identical; it only ever fails to
+    disprove it.
+
+    So the WARNING path (`/dedupe`) samples, and the DESTRUCTIVE path
+    (`/discard`) calls this. That is affordable precisely because /discard is
+    not /match: it is a rare, user-initiated action with no latency budget,
+    where reading both files is the only thing that is actually a proof.
+    """
+    read = 0
     try:
-        if size is None:
-            size = os.stat(path).st_size
-        size = int(size)
-    except (OSError, TypeError, ValueError):
-        return None
-    if size <= 0:
-        return None
-    # The size is folded in FIRST, so two files whose sampled windows agree but
-    # whose lengths differ can never collide even if a caller compares digests
-    # across size buckets.
-    digest = hashlib.blake2b(str(size).encode("ascii"), digest_size=16)
-    try:
-        with opener(path, "rb") as fh:
-            _read_bounded(fh, size, int(head), int(tail), digest)
-    except OSError:
-        return None
-    return digest.hexdigest()
+        with opener(a, "rb") as fa, opener(b, "rb") as fb:
+            while True:
+                if deadline is not None and clock() > deadline:
+                    return None, (f"could not finish comparing the two files "
+                                  f"within the time budget (compared "
+                                  f"{read} bytes)")
+                ca = fa.read(chunk)
+                cb = fb.read(chunk)
+                if ca != cb:
+                    return False, ("the two files differ -- they are not the "
+                                   "same content")
+                if not ca:
+                    return True, f"byte-for-byte identical over {read} bytes"
+                read += len(ca)
+    except OSError as exc:
+        return None, f"could not read both files ({exc})"
 
 
 class HashCache:

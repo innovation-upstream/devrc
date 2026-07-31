@@ -49,7 +49,10 @@ from urllib.parse import parse_qs, urlsplit
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import config as config_mod  # noqa: E402
-from dedupe import HashCache, confirm_duplicate  # noqa: E402
+from dedupe import (  # noqa: E402
+    HashCache, confirm_duplicate, files_identical, looks_unfilled,
+    sample_file,
+)
 from dirindex import DirIndex, FileIndex  # noqa: E402
 from dirkinds import DirKinds  # noqa: E402
 from fetcher import Fetcher  # noqa: E402
@@ -72,6 +75,13 @@ MAX_BODY = 256 * 1024
 # clock skew — both come from the same machine). A torrent payload predates its
 # would-be routing decision by hours or days, so a few seconds costs nothing.
 MTIME_SLACK_S = 5.0
+
+# How long /discard will spend proving the two files are byte-for-byte
+# identical before giving up. It reads BOTH files in full -- the only thing
+# that is actually a proof -- and a timeout is a REFUSAL, never an all-clear.
+# Generous because the user clicked a button and is waiting; the extension's
+# own /discard timeout must exceed it.
+DISCARD_VERIFY_TIMEOUT_S = 180.0
 
 # How recently a download must have been routed for /discard to delete its
 # file. /relocate has no such window -- correcting where a file sits is
@@ -865,8 +875,12 @@ class App:
         does not prove completeness; that is what the qBittorrent check is for.
         """
         blocks = getattr(st, "st_blocks", None)
-        if blocks is None:            # not POSIX; no information either way
-            return False
+        if blocks is None:
+            # No information either way -- and "no information" on a
+            # destructive path is a refusal, not an all-clear. It used to
+            # return False (i.e. "looks complete"), which is the wrong default
+            # for the only check standing between a partial file and a delete.
+            return True
         return (int(blocks) * 512) < int(st.st_size)
 
     def _refuse_incomplete_keep(self, keep_rel: str, keep, st, live,
@@ -892,9 +906,28 @@ class App:
                 "refusing to discard: the file it is supposed to duplicate "
                 f"({keep_rel!r}) is sparse — it has fewer blocks allocated "
                 "than its length claims, which is what an in-progress, "
-                "preallocated torrent payload looks like. A bounded head+tail "
-                "digest cannot tell that apart from a finished file, so it is "
-                "not proof these bytes exist anywhere else.")
+                "preallocated torrent payload looks like. A bounded digest "
+                "cannot tell that apart from a finished file, so it is not "
+                "proof these bytes exist anywhere else.")
+        # AN ALL-ZERO MID SAMPLE IS AN UNFILLED EXTENT, and this is the check
+        # `st_blocks` cannot make. `posix_fallocate` -- what qBittorrent's
+        # "pre-allocate disk space for all files" uses -- reserves REAL
+        # extents, so the partial has the same size AND the same block count
+        # as the finished file. Measured: `_looks_preallocated` returns False
+        # for both, and their head+tail digests are identical. The difference
+        # only exists in the middle, so the middle has to be read.
+        record = sample_file(keep)
+        if record is None:
+            raise UnsafeName(
+                "refusing to discard: the file it is supposed to duplicate "
+                "could not be read")
+        if looks_unfilled(record):
+            raise UnsafeName(
+                "refusing to discard: the file it is supposed to duplicate "
+                f"({keep_rel!r}) has a 128 KiB run of zeros in the middle, "
+                "which is an unfilled extent — a preallocated torrent payload "
+                "that has not reached that piece. A finished media file does "
+                "not look like this.")
         payload = self._payload_verdict(keep, live, qbt_error)
         if payload is not None and not payload.get("complete", False):
             raise UnsafeName(
@@ -996,8 +1029,14 @@ class App:
 
         Then, only if qBittorrent is configured, the live corroboration.
         """
-        # The literal path, before `safe_rel_path` resolved it.
-        literal = os.path.join(str(self.root), str(rel_path))
+        # The literal path, before `safe_rel_path` resolved it -- NORMALISED.
+        #
+        # `os.path.islink("…/new.mp4/")` is False (lstat follows the trailing
+        # slash) while `Path()` strips it, so a caller that appended one got
+        # the symlink's TARGET trashed and a dangling link left behind. This is
+        # the same normalisation shape `forget_routed_file` already had to
+        # learn; it is cheap to apply everywhere a raw payload string is used.
+        literal = os.path.normpath(os.path.join(str(self.root), str(rel_path)))
         if os.path.islink(literal):
             raise UnsafeName(
                 "refusing to discard a symlink: the file it points at would be "
@@ -1193,34 +1232,71 @@ class App:
         # its routing decision; the file it duplicates was already there.
         # STRICTLY OLDER, and the slack goes the OTHER WAY here on purpose.
         #
-        # `_prove_created` accepts the source at `mtime >= route_ts - slack`,
-        # so requiring the kept file to be merely `<= route_ts + slack` left a
-        # 10-second window in which BOTH files satisfy both rules and the two
-        # halves of a uniquify pair are still interchangeable -- which is the
-        # whole defect. Requiring `keep` to predate the decision by at least
-        # the slack makes the two windows disjoint: no file can be both.
+        # (4) ONLY WHEN THE PAIR IS ACTUALLY AMBIGUOUS.
         #
-        # The cost is a refusal when a genuine original happens to have been
-        # written in the same few seconds as the routing decision, which is
-        # fail-closed and recoverable by hand.
+        # The rule exists for ONE situation: `uniquify` produced two files
+        # whose names BOTH match the routing decision (`new.mp4` and
+        # `new (1).mp4` against a route recorded as `new.mp4`), so identity
+        # cannot say which is the new copy and the timestamp has to.
+        #
+        # Applied unconditionally it was far too broad. `_prove_created`
+        # accepts the source at `mtime >= route_ts - slack`, so demanding the
+        # kept file be OLDER than `route_ts - slack` excluded the entire
+        # duration of the download -- and refused the shape the toast most
+        # often shows: the same file downloaded again a couple of seconds
+        # later, and two overlapping downloads of it. Fail-closed, but it
+        # stranded exactly the duplicates worth offering to remove.
+        #
+        # When the kept file's name could NOT be this download (the usual
+        # case -- a different name, often a different directory), identity has
+        # already distinguished them and this rule has nothing to add.
         route_ts = float(route.get("ts") or 0.0)
-        if keep_st.st_mtime > route_ts - MTIME_SLACK_S:
+        expected = str(route.get("filename") or "")
+        keep_could_be_this_download = bool(expected) and names_match(
+            keep.name, expected)
+        if keep_could_be_this_download and \
+                keep_st.st_mtime >= route_ts - MTIME_SLACK_S:
+            # `>=`, not `>`, so the two windows are disjoint at exact equality
+            # too -- one character, and both this comment and the README
+            # claimed it already.
             raise UnsafeName(
-                "refusing to discard: the file it is supposed to duplicate "
-                "does not predate this download's routing decision, so it is "
-                "not demonstrably the pre-existing copy. With `uniquify` the "
-                "two names differ only by a ` (N)` suffix and this timestamp "
-                "is what tells them apart -- refusing rather than guessing "
-                "which of the two is the original.")
+                "refusing to discard: BOTH of these names match this "
+                "download's routing decision, which is what `uniquify` "
+                "produces, and the file it is supposed to duplicate does not "
+                "predate that decision -- so there is nothing left to say "
+                "which of the two is the original. Refusing rather than "
+                "guessing.")
 
-        # (5) re-prove the duplication against the files on disk RIGHT NOW.
+        # (5) THE PROOF, AND IT IS A FULL READ OF BOTH FILES.
+        #
+        # This is where the sampled digest was, and it should never have been.
+        # Sampling cannot carry a destructive decision: eight mid-file samples
+        # catch a 40%-complete preallocated payload with overwhelming
+        # probability but a 99%-complete one only about 8% of the time, and
+        # deleting the finished copy to keep a 99% copy still destroys data. No
+        # bounded read PROVES two multi-GB files identical -- it only ever
+        # fails to disprove it. Two rounds of this were spent shoring the
+        # digest up with another `stat`-derived signal; the information is not
+        # in the metadata.
+        #
+        # /discard can afford the real thing precisely because it is not
+        # /match: it is rare, the user asked for it, and nothing is waiting on
+        # a 400 ms budget. The cheap checks above still run FIRST, so the
+        # expensive one is only reached by a request that has already earned it.
         if src_st.st_size <= 0 or src_st.st_size != keep_st.st_size:
             raise UnsafeName(
                 "refusing to discard: these two files are no longer the same "
                 f"size ({src_st.st_size} vs {keep_st.st_size})")
         self._refuse_incomplete_keep(keep_rel, keep, keep_st, live, qbt_error)
-        match, why = confirm_duplicate(self.root, rel, [keep_rel], self.hashes)
-        if match is None:
+        budget = float(self.cfg.section("dedupe").get("verify_timeout_s",
+                                                      DISCARD_VERIFY_TIMEOUT_S))
+        verdict, why = files_identical(src, keep,
+                                       deadline=time.monotonic() + budget)
+        if verdict is not True:
+            # `None` (ran out of budget, or unreadable) and `False` (genuinely
+            # different) are BOTH refusals, and the message says which -- but
+            # neither is ever an all-clear. That third state is the whole
+            # reason `files_identical` does not return a bool.
             raise UnsafeName(f"refusing to discard: {why}")
 
         # NOTHING MAY HAVE CHANGED UNDER US while the proofs ran.
@@ -1243,10 +1319,21 @@ class App:
                     "checked (it is still being written, or something else "
                     "moved it)")
 
-        # CONSUME THE ROUTING DECISION. Atomic, and before the destructive act:
-        # a crash after this point costs a file that is already proven
-        # redundant, while a crash before it costs nothing at all.
+        # EVERYTHING THAT CAN STILL REFUSE MUST HAVE REFUSED BY NOW.
+        #
+        # `_trash_dest` can raise (a symlinked trash, no free name), and it
+        # used to run AFTER the routing decision was consumed -- so a planted
+        # symlink at `<root>/.dl-router-trash` spent the row while the file
+        # stayed exactly where it was. The retry was then refused forever and
+        # the `discards` table recorded a file as discarded that was not: a
+        # permanent one-shot denial of service on every discard, and a lying
+        # audit trail. Compute the destination first.
         mode = str(self.cfg.section("dedupe").get("delete_mode", "trash"))
+        dest = self._trash_dest(src) if mode != "unlink" else None
+
+        # CONSUME THE ROUTING DECISION. Atomic, and immediately before the
+        # destructive act: a crash after this point costs a file that is
+        # already proven redundant, while a crash before it costs nothing.
         if not self.store.record_discard(download_id, rel, kept_rel=keep_rel,
                                          mode=mode):
             prior = self.store.discard_for_download(download_id) or {}
@@ -1257,13 +1344,19 @@ class App:
                 "removes every `(N)` variant of the name in turn.")
 
         if mode == "unlink":
-            os.unlink(src)
+            try:
+                os.unlink(src)
+            except OSError:
+                # RELEASE THE ROW. Nothing was destroyed, so the decision must
+                # not stay spent -- see the note above `dest`.
+                self.store.release_discard(download_id)
+                raise
             dest_rel = ""
         else:
-            dest = self._trash_dest(src)
             try:
                 os.rename(src, dest)
             except OSError as exc:
+                self.store.release_discard(download_id)
                 # EXDEV: the trash is on a different filesystem from the file
                 # (a multi-mount library root). Fail CLOSED and say which -- a
                 # copy-then-delete fallback would be a non-atomic destructive
@@ -1275,8 +1368,12 @@ class App:
                     "receive this file; move or delete it by hand."
                 ) from exc
             dest_rel = f"{TRASH_DIR}/{dest.name}"
-            self.store.record_discard(download_id, rel, kept_rel=keep_rel,
-                                      trash_rel=dest_rel, mode=mode)
+            # WHERE IT WENT, recorded on the row that already exists. A second
+            # `record_discard` was dead code: `ON CONFLICT DO NOTHING` cannot
+            # update, so every row read `trash_rel = ''` -- and the uniquified
+            # `(N)` name in the trash is precisely what someone needs after a
+            # wrong discard.
+            self.store.set_discard_trash(download_id, dest_rel)
         # The path no longer holds that file, so the standing ownership claim
         # must go with it -- otherwise a later file arriving here inherits a
         # proof it never earned.

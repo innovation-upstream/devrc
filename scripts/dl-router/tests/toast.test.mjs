@@ -271,3 +271,16 @@ test("Escape is KEEP -- the reflex key never deletes", () => {
 function tick() {
   return new Promise((r) => setTimeout(r, 0));
 }
+
+test("delete shows a verifying state, and restores the dup line after", async () => {
+  // The sidecar reads BOTH files in full before deleting -- sampling cannot
+  // carry a destructive decision -- so the button is not dead, it is working.
+  const { doc } = mountDup({
+    reply: { ok: false, error: "the two files differ" } });
+  doc.nodes.discard.listeners.click();
+  assert.match(doc.nodes.dup.textContent, /verifying both files/);
+  await tick();
+  assert.match(doc.nodes.dup.textContent, /Duplicate of john-smith\/75936\.mov/);
+  assert.doesNotMatch(doc.nodes.dup.textContent, /verifying/);
+  assert.match(doc.nodes.error.textContent, /the two files differ/);
+});

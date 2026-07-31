@@ -91,22 +91,48 @@ def test_the_digest_never_reads_the_whole_file(tmp_path):
     path = write(tmp_path / "big.mp4", blob(size))
     opener = CountingOpener()
     assert D.partial_digest(path, opener=opener)
-    assert opener.read <= D.HEAD_BYTES + D.TAIL_BYTES
-    assert opener.read < size / 4
+    assert opener.read <= D.MAX_DIGEST_BYTES
+    assert opener.read < size / 3
 
 
-def test_two_files_differing_only_in_the_middle_digest_the_same(tmp_path):
-    """The behavioural half of the bound, and the honest cost of it.
+def test_a_difference_in_the_SAMPLED_middle_is_now_caught(tmp_path):
+    """THE MID SAMPLES, which is what head+tail could not do.
 
-    Not an oversight: it is the price of a constant-cost check on multi-GB
-    media, and it is affordable only because a duplicate is a WARNING with a
-    keep button, never an automatic destruction.
+    This test used to assert the OPPOSITE -- that a middle-only difference
+    digested the same -- and documented it as the affordable price of a
+    constant-cost check. It was affordable right up until the same digest was
+    made to gate a delete, at which point a preallocated torrent payload with
+    a finished head and tail read as identical to the completed file.
     """
-    size = D.HEAD_BYTES + D.TAIL_BYTES + 8192
+    size = D.HEAD_BYTES + D.TAIL_BYTES + (8 << 20)
     a = write(tmp_path / "a.mp4", blob(size, middle=b"1"))
     b = write(tmp_path / "b.mp4", blob(size, middle=b"2"))
+    assert D.partial_digest(a) != D.partial_digest(b)
+
+
+def test_a_difference_BETWEEN_samples_is_still_missed(tmp_path):
+    """THE RESIDUAL COST, stated rather than implied.
+
+    Sampling is still sampling: a difference that falls between two sample
+    windows is invisible. That is exactly why `/discard` no longer uses this
+    digest as its proof and reads both files in full instead -- and why this
+    test is named for the limitation rather than for a guarantee.
+    """
+    size = D.HEAD_BYTES + D.TAIL_BYTES + (8 << 20)
+    base = bytearray(blob(size))
+    offsets = D.mid_offsets(size)
+    # A byte safely between the first two sample windows.
+    gap = offsets[0] + D.SAMPLE_BYTES + 4096
+    assert gap < offsets[1], "no gap between samples to test"
+    other = bytearray(base)
+    other[gap] ^= 0xFF
+    a = write(tmp_path / "a.mp4", bytes(base))
+    b = write(tmp_path / "b.mp4", bytes(other))
     assert a.read_bytes() != b.read_bytes()
     assert D.partial_digest(a) == D.partial_digest(b)
+    # ...and the FULL comparison, which is what gates the delete, sees it.
+    verdict, _ = D.files_identical(a, b)
+    assert verdict is False
 
 
 @pytest.mark.parametrize("region", ["head", "tail"])
@@ -157,7 +183,7 @@ def test_the_bound_still_holds_across_the_boundary(tmp_path, size):
     reading more than the two windows."""
     opener = CountingOpener()
     D.partial_digest(write(tmp_path / "a.bin", b"x" * size), opener=opener)
-    assert opener.read <= D.HEAD_BYTES + D.TAIL_BYTES
+    assert opener.read <= D.MAX_DIGEST_BYTES
     assert opener.read <= size, "a byte was fed to the digest twice"
 
 
@@ -1214,10 +1240,12 @@ def test_a_sparse_file_is_recognised_as_preallocated(tmp_path):
     part = sparse(tmp_path / "part.mkv", size)
     whole = write(tmp_path / "whole.mkv", blob(size))
     assert part.stat().st_size == whole.stat().st_size
-    # The premise of the whole finding: the digests AGREE.
-    assert D.partial_digest(part) == D.partial_digest(whole)
     assert S.App._looks_preallocated(part.stat()) is True
     assert S.App._looks_preallocated(whole.stat()) is False
+    # The mid samples now separate them -- head+tail alone did not.
+    assert D.partial_digest(part) != D.partial_digest(whole)
+    assert D.looks_unfilled(D.sample_file(part)) is True
+    assert D.looks_unfilled(D.sample_file(whole)) is False
 
 
 def test_discard_refuses_an_INCOMPLETE_file_as_proof(app, library, clock):
@@ -1404,10 +1432,10 @@ def test_two_concurrent_discards_of_one_pair_cannot_both_win(app, library,
 
     arrived = threading.Event()
     both_in = threading.Event()
-    real = S.confirm_duplicate
+    real = S.files_identical
 
-    def rendezvous(root, rel, cands, cache, **kw):
-        out = real(root, rel, cands, cache, **kw)
+    def rendezvous(a_path, b_path, **kw):
+        out = real(a_path, b_path, **kw)
         if arrived.is_set():
             both_in.set()               # the second thread got in: no lock
         else:
@@ -1415,7 +1443,7 @@ def test_two_concurrent_discards_of_one_pair_cannot_both_win(app, library,
             both_in.wait(timeout=2.0)   # serialised => times out, as it should
         return out
 
-    monkeypatch.setattr(S, "confirm_duplicate", rendezvous)
+    monkeypatch.setattr(S, "files_identical", rendezvous)
 
     outcomes: list = []
 
@@ -1491,15 +1519,15 @@ def test_a_file_changing_under_the_proofs_is_refused(app, library, clock,
     new = _routed(app, library, clock)
     app.files.refresh(force=True)
 
-    real = S.confirm_duplicate
+    real = S.files_identical
 
-    def grow(root, rel, cands, cache, **kw):
-        out = real(root, rel, cands, cache, **kw)
+    def grow(a, b, **kw):
+        out = real(a, b, **kw)
         with open(new, "ab") as fh:                   # the writer appends
             fh.write(b"more")
         return out
 
-    monkeypatch.setattr(S, "confirm_duplicate", grow)
+    monkeypatch.setattr(S, "files_identical", grow)
     with pytest.raises(UnsafeName) as exc:
         app.discard({"relPath": "Jane Doe/new.mp4",
                      "dupRelPath": "john-smith/75936.mov", "downloadId": "42"})
@@ -1523,6 +1551,27 @@ class _FakeQbt:
 
     def torrents_files(self, torrent_hash):
         return list(self._files.get(torrent_hash, []))
+
+
+def _qbt_torrents(library, entries):
+    """Torrent rows that `derive_path_map` can actually correlate.
+
+    It needs MIN_PATH_MAP_VOTES (2) torrents whose `<host_root>/<tail>/<name>`
+    exists on disk, and the winning map must translate the library root. Two
+    filler torrents pointing at real files satisfy that; without them the map
+    is None, every path becomes "unknown", and /discard refuses with "could
+    not corroborate" -- correct fail-closed behaviour, but it means a test
+    asserting a MORE specific refusal is not exercising the branch it names.
+    """
+    out = []
+    for i, (rel, extra) in enumerate(entries):
+        path = library / rel
+        row = {"hash": f"h{i}", "save_path": str(path.parent),
+               "name": path.name, "content_path": str(path),
+               "state": "stalledUP", "progress": 1.0}
+        row.update(extra or {})
+        out.append(row)
+    return out
 
 
 def _with_qbt(app, client):
@@ -1612,3 +1661,354 @@ def test_the_example_config_documents_delete_mode(tmp_path):
     import tomllib
     parsed = tomllib.loads(text)
     assert parsed["dedupe"]["delete_mode"] in ("trash", "unlink")
+
+
+# --- round 3: the fallocated partial, and a proof that is actually one ------ #
+def fallocated(path: Path, size: int, *, head: bytes = b"H",
+               tail: bytes = b"T", fill_to: float = 0.0) -> Path:
+    """A PREALLOCATED partial: real extents, real block count, real ends.
+
+    `os.ftruncate` makes a sparse file, which `st_blocks` catches. This is the
+    other shape, and the one qBittorrent actually uses when "pre-allocate disk
+    space for all files" is on: `posix_fallocate` reserves REAL extents, so
+    size AND blocks match a finished file exactly. Under "download first and
+    last pieces first" the ends are finished too.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(path, os.O_CREAT | os.O_RDWR | os.O_TRUNC, 0o600)
+    try:
+        os.posix_fallocate(fd, 0, size)
+        os.pwrite(fd, head * D.HEAD_BYTES, 0)
+        os.pwrite(fd, tail * D.TAIL_BYTES, size - D.TAIL_BYTES)
+        end = int((size - D.TAIL_BYTES - D.HEAD_BYTES) * fill_to)
+        off = D.HEAD_BYTES
+        while off < D.HEAD_BYTES + end:
+            n = min(1 << 20, D.HEAD_BYTES + end - off)
+            os.pwrite(fd, b"M" * n, off)
+            off += n
+    finally:
+        os.close(fd)
+    return path
+
+
+def complete_file(path: Path, size: int, *, head: bytes = b"H",
+                  tail: bytes = b"T") -> Path:
+    return fallocated(path, size, head=head, tail=tail, fill_to=1.0)
+
+
+def test_st_blocks_CANNOT_see_a_fallocated_partial(tmp_path):
+    """THE PREMISE of the round-3 blocker, asserted so it cannot rot.
+
+    `posix_fallocate` allocates real extents, so the metadata heuristic that
+    caught the sparse variant is blind here: identical size, identical block
+    count, identical head, identical tail.
+    """
+    size = D.HEAD_BYTES + D.TAIL_BYTES + (8 << 20)
+    part = fallocated(tmp_path / "part.mkv", size, fill_to=0.4)
+    whole = complete_file(tmp_path / "whole.mkv", size)
+    assert part.stat().st_size == whole.stat().st_size
+    assert part.stat().st_blocks == whole.stat().st_blocks
+    assert S.App._looks_preallocated(part.stat()) is False
+    assert S.App._looks_preallocated(whole.stat()) is False, (
+        "the metadata heuristic cannot distinguish these -- that is the point")
+
+
+def test_the_mid_samples_see_what_st_blocks_cannot(tmp_path):
+    size = D.HEAD_BYTES + D.TAIL_BYTES + (8 << 20)
+    part = fallocated(tmp_path / "part.mkv", size, fill_to=0.4)
+    whole = complete_file(tmp_path / "whole.mkv", size)
+    assert D.partial_digest(part) != D.partial_digest(whole)
+    assert D.looks_unfilled(D.sample_file(part)) is True
+    assert D.looks_unfilled(D.sample_file(whole)) is False
+
+
+def test_discard_refuses_a_FALLOCATED_partial_end_to_end(app, library, clock):
+    """THE BLOCKER, driven through the shipped sequence with credentials
+    empty -- the live configuration. It previously answered
+    `{'ok': True, 'discarded': True}` with the COMPLETE copy trashed."""
+    size = D.HEAD_BYTES + D.TAIL_BYTES + (8 << 20)
+    partial = fallocated(library / "john-smith" / "75936.mov", size,
+                         fill_to=0.4)
+    os.utime(partial, (clock.now - 3600, clock.now - 3600))
+    complete = complete_file(library / "Jane Doe" / "new.mp4", size)
+    app.store.log_route(dir_name="Jane Doe", filename="new.mp4",
+                        download_id="42")
+    os.utime(complete, (clock.now + 1, clock.now + 1))
+    app.files.refresh(force=True)
+    assert app._qbt_client() is None, "must reproduce with NO credentials"
+
+    with pytest.raises(UnsafeName) as exc:
+        app.discard({"relPath": "Jane Doe/new.mp4",
+                     "dupRelPath": "john-smith/75936.mov", "downloadId": "42"})
+    assert "zeros in the middle" in str(exc.value)
+    assert complete.exists(), "the COMPLETE copy was destroyed"
+    assert complete.stat().st_size == size
+
+
+def test_dedupe_does_not_call_a_fallocated_partial_a_duplicate(app, library):
+    """And the WARNING stops lying too, so the user is never offered a delete
+    button for this pair in the first place."""
+    size = D.HEAD_BYTES + D.TAIL_BYTES + (8 << 20)
+    fallocated(library / "john-smith" / "75936.mov", size, fill_to=0.4)
+    complete_file(library / "Jane Doe" / "new.mp4", size)
+    app.files.refresh(force=True)
+    out = app.dedupe_check({"relPath": "Jane Doe/new.mp4"})
+    assert out["duplicate"] is False
+
+
+def test_the_delete_gate_is_a_FULL_comparison_not_a_sample(app, library,
+                                                           clock):
+    """Sampling cannot carry a destructive decision, so it no longer does.
+
+    Two files identical at every sampled window and different between them:
+    the digest says duplicate, the full comparison says no, and the delete is
+    refused. Nothing the sampler can do would catch this, which is the whole
+    argument for reading both files.
+    """
+    size = D.HEAD_BYTES + D.TAIL_BYTES + (8 << 20)
+    base = bytearray(blob(size))
+    gap = D.mid_offsets(size)[0] + D.SAMPLE_BYTES + 4096
+    other = bytearray(base)
+    other[gap] ^= 0xFF
+    keep = write(library / "john-smith" / "75936.mov", bytes(base))
+    os.utime(keep, (clock.now - 3600, clock.now - 3600))
+    new = write(library / "Jane Doe" / "new.mp4", bytes(other))
+    app.store.log_route(dir_name="Jane Doe", filename="new.mp4",
+                        download_id="42")
+    os.utime(new, (clock.now + 1, clock.now + 1))
+    app.files.refresh(force=True)
+
+    assert D.partial_digest(keep) == D.partial_digest(new), "premise"
+    with pytest.raises(UnsafeName) as exc:
+        app.discard({"relPath": "Jane Doe/new.mp4",
+                     "dupRelPath": "john-smith/75936.mov", "downloadId": "42"})
+    assert "the two files differ" in str(exc.value)
+    assert new.exists()
+
+
+def test_a_verification_that_runs_out_of_budget_is_a_REFUSAL(app, library,
+                                                             clock,
+                                                             monkeypatch):
+    """`files_identical` returns None, not False, for "could not determine" --
+    and None must never be mistaken for either answer."""
+    _pre_existing(app, library, clock)
+    new = _routed(app, library, clock)
+    app.files.refresh(force=True)
+    monkeypatch.setattr(S, "files_identical",
+                        lambda *a, **k: (None, "ran out of budget"))
+    with pytest.raises(UnsafeName) as exc:
+        app.discard({"relPath": "Jane Doe/new.mp4",
+                     "dupRelPath": "john-smith/75936.mov", "downloadId": "42"})
+    assert "ran out of budget" in str(exc.value)
+    assert new.exists()
+
+
+def test_files_identical_reports_three_distinct_states(tmp_path):
+    a = write(tmp_path / "a.bin", blob(300000))
+    b = write(tmp_path / "b.bin", blob(300000))
+    c = write(tmp_path / "c.bin", blob(300000, head=b"Z"))
+    assert D.files_identical(a, b)[0] is True
+    assert D.files_identical(a, c)[0] is False
+    assert D.files_identical(a, tmp_path / "gone.bin")[0] is None
+    # A budget already in the past cannot complete: None, never False.
+    verdict, why = D.files_identical(a, b, deadline=-1.0)
+    assert verdict is None and "budget" in why
+
+
+# --- the refusals that must NOT spend the routing decision ------------------ #
+def test_a_failed_rename_releases_the_routing_decision(app, library, clock,
+                                                       monkeypatch):
+    """A planted symlink at the trash, or EXDEV, spent the row while the file
+    stayed put -- so the retry was refused forever and `discards` recorded a
+    file as removed that was still on disk. A permanent one-shot DoS on every
+    discard."""
+    _pre_existing(app, library, clock)
+    new = _routed(app, library, clock)
+    app.files.refresh(force=True)
+
+    def exdev(src, dst):
+        raise OSError(18, "Invalid cross-device link")
+
+    monkeypatch.setattr(os, "rename", exdev)
+    with pytest.raises(UnsafeName):
+        app.discard({"relPath": "Jane Doe/new.mp4",
+                     "dupRelPath": "john-smith/75936.mov", "downloadId": "42"})
+    assert new.exists()
+    assert app.store.discard_for_download("42") is None, (
+        "a failed discard spent the routing decision")
+    assert app.store.recent_discards() == []
+
+    # And the retry works once the cause is gone.
+    monkeypatch.undo()
+    assert app.discard({"relPath": "Jane Doe/new.mp4",
+                        "dupRelPath": "john-smith/75936.mov",
+                        "downloadId": "42"})["discarded"] is True
+
+
+def test_a_symlinked_trash_does_not_spend_the_routing_decision(app, library,
+                                                               clock,
+                                                               tmp_path):
+    outside = tmp_path / "elsewhere"
+    outside.mkdir()
+    (library / S.TRASH_DIR).symlink_to(outside, target_is_directory=True)
+    _pre_existing(app, library, clock)
+    _routed(app, library, clock)
+    app.files.refresh(force=True)
+    with pytest.raises(UnsafeName):
+        app.discard({"relPath": "Jane Doe/new.mp4",
+                     "dupRelPath": "john-smith/75936.mov", "downloadId": "42"})
+    assert app.store.discard_for_download("42") is None
+
+
+def test_the_discard_log_records_WHERE_the_file_went(app, library, clock):
+    """`trash_rel` was always '' -- the second `record_discard` could not
+    update, because `ON CONFLICT DO NOTHING` is what makes it an atomic claim.
+    The uniquified `(N)` name is the one thing needed to undo a wrong
+    discard."""
+    _pre_existing(app, library, clock)
+    write(library / S.TRASH_DIR / "new.mp4", b"an older casualty")
+    _routed(app, library, clock)
+    app.files.refresh(force=True)
+    out = app.discard({"relPath": "Jane Doe/new.mp4",
+                       "dupRelPath": "john-smith/75936.mov",
+                       "downloadId": "42"})
+    row = app.store.discard_for_download("42")
+    assert row["trash_rel"] == out["trashRelPath"]
+    assert row["trash_rel"] == f"{S.TRASH_DIR}/new (1).mp4", (
+        "the uniquified name must be recorded, not the original")
+    assert (library / row["trash_rel"]).is_file()
+    assert row["kept_rel"] == "john-smith/75936.mov"
+
+
+# --- the shapes the mtime rule must NOT refuse ------------------------------ #
+def test_the_same_file_downloaded_again_seconds_later_is_still_discardable(
+        app, library, clock):
+    """THE SHAPE THE TOAST MOST OFTEN SHOWS. Stated as "older than the
+    decision" with no floor, the rule excluded the whole duration of the new
+    download -- so a re-download two seconds later, and two overlapping
+    downloads, were both refused. Fail-closed, but it stranded exactly the
+    duplicates worth offering to remove."""
+    first = write(library / "john-smith" / "75936.mov", blob(300000))
+    os.utime(first, (clock.now - 2, clock.now - 2))     # 2 s earlier
+    second = write(library / "Jane Doe" / "new.mp4", blob(300000))
+    app.store.log_route(dir_name="Jane Doe", filename="new.mp4",
+                        download_id="42")
+    os.utime(second, (clock.now + 1, clock.now + 1))
+    app.files.refresh(force=True)
+    out = app.discard({"relPath": "Jane Doe/new.mp4",
+                       "dupRelPath": "john-smith/75936.mov",
+                       "downloadId": "42"})
+    assert out["discarded"] is True
+    assert first.exists()
+
+
+# --- pins for the two checks that were entirely unpinned -------------------- #
+def test_the_SOURCE_payload_refusal_is_pinned_independently(app, library,
+                                                            clock):
+    """The old test asserted only "torrent payload" in the message, which
+    `_refuse_incomplete_keep` also emits -- so deleting the SOURCE refusal
+    left the suite green. This one keeps the keep side spotless, so only the
+    source check can refuse."""
+    keep = _pre_existing(app, library, clock)
+    new = _routed(app, library, clock)
+    app.files.refresh(force=True)
+    filler = write(library / "Mary_Major" / "seed.mkv", blob(1000))
+    torrents = _qbt_torrents(library, [
+        ("Jane Doe/new.mp4", {"state": "stalledUP", "progress": 1.0}),
+        ("Mary_Major/seed.mkv", None),
+        ("john-smith/75936.mov", None),
+    ])
+    files = {t["hash"]: [{"name": t["name"]}] for t in torrents}
+    _with_qbt(app, _FakeQbt(torrents, files))
+    with pytest.raises(UnsafeName) as exc:
+        app.discard({"relPath": "Jane Doe/new.mp4",
+                     "dupRelPath": "john-smith/75936.mov", "downloadId": "42"})
+    # The message must name the SOURCE rule, not the keep-completeness one.
+    assert "live qBittorrent says this file IS a torrent payload" in str(
+        exc.value)
+    assert new.exists() and keep.exists() and filler.exists()
+
+
+def test_an_INCOMPLETE_keep_is_refused_on_qbittorrent_progress_alone(
+        app, library, clock):
+    """The `progress == 1` half was entirely unpinned. Reproduced with a keep
+    that is byte-identical and NOT sparse, so only qBittorrent's progress can
+    refuse it -- which is the check that closes the blocker once credentials
+    exist."""
+    keep = _pre_existing(app, library, clock)
+    new = _routed(app, library, clock)
+    app.files.refresh(force=True)
+    write(library / "Mary_Major" / "seed.mkv", blob(1000))
+    write(library / "other" / "seed2.mkv", blob(1000))
+    torrents = _qbt_torrents(library, [
+        ("john-smith/75936.mov", {"state": "downloading", "progress": 0.4}),
+        ("Mary_Major/seed.mkv", None),
+        ("other/seed2.mkv", None),
+    ])
+    files = {t["hash"]: [{"name": t["name"]}] for t in torrents}
+    _with_qbt(app, _FakeQbt(torrents, files))
+    with pytest.raises(UnsafeName) as exc:
+        app.discard({"relPath": "Jane Doe/new.mp4",
+                     "dupRelPath": "john-smith/75936.mov", "downloadId": "42"})
+    assert "not finished" in str(exc.value)
+    assert new.exists() and keep.exists()
+
+
+def test_the_two_mtime_windows_are_disjoint_at_exact_equality(app, library,
+                                                              clock):
+    """`>=` vs `>`: one character, and both the code comment and the README
+    stated flatly that no file can satisfy both rules."""
+    route_ts = clock.now
+    a = write(library / "Jane Doe" / "new.mp4", blob(300000))
+    b = write(library / "john-smith" / "new.mp4", blob(300000))
+    app.store.log_route(dir_name="Jane Doe", filename="new.mp4",
+                        download_id="42")
+    exact = route_ts - S.MTIME_SLACK_S
+    for path in (a, b):
+        os.utime(path, (exact, exact))
+    app.files.refresh(force=True)
+    with pytest.raises(UnsafeName) as exc:
+        app.discard({"relPath": "Jane Doe/new.mp4",
+                     "dupRelPath": "john-smith/new.mp4", "downloadId": "42"})
+    assert "predate" in str(exc.value)
+    assert a.exists() and b.exists()
+
+
+def test_a_stat_without_st_blocks_fails_CLOSED(tmp_path):
+    """"No information" on a destructive path is a refusal, not an all-clear.
+    It used to return False -- "looks complete" -- for a stat that could not
+    answer."""
+    class NoBlocks:
+        st_size = 1024
+
+    assert S.App._looks_preallocated(NoBlocks()) is True
+
+
+def test_a_TRAILING_SLASH_does_not_defeat_the_symlink_refusal(app, library,
+                                                              clock):
+    """`os.path.islink("…/new.mp4/")` is False -- lstat follows the trailing
+    slash -- while `Path()` strips it, so the symlink's TARGET was trashed and
+    a dangling link left behind. `normpath` closes it.
+
+    The codebase already learned this shape at `forget_routed_file`; a raw
+    payload string needs normalising everywhere it is used, not just where it
+    was noticed.
+    """
+    _pre_existing(app, library, clock)
+    target = write(library / "other" / "real.mkv", blob(300000))
+    link = library / "Jane Doe" / "new.mp4"
+    link.parent.mkdir(parents=True, exist_ok=True)
+    link.symlink_to(target)
+    app.store.log_route(dir_name="Jane Doe", filename="new.mp4",
+                        download_id="42")
+    os.utime(target, (clock.now + 1, clock.now + 1))
+    app.files.refresh(force=True)
+
+    for spelling in ("Jane Doe/new.mp4/", "Jane Doe/./new.mp4"):
+        with pytest.raises(UnsafeName) as exc:
+            app.discard({"relPath": spelling,
+                         "dupRelPath": "john-smith/75936.mov",
+                         "downloadId": "42"})
+        assert "symlink" in str(exc.value), spelling
+        assert target.exists(), f"the symlink's TARGET was removed via {spelling}"
+        assert link.is_symlink()

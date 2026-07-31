@@ -61,6 +61,14 @@ toast_ms = 8000
 [dedupe]
 delete_mode = "trash"
 
+# How long `delete` may spend PROVING the two files are identical before it
+# gives up. It reads both files in full and compares them byte for byte —
+# sampling a bounded window cannot prove two multi-GB files identical, and a
+# check that authorises destruction has to be a proof. Running out of the
+# budget is a REFUSAL, never an all-clear. The extension's own /discard
+# timeout must exceed this.
+verify_timeout_s = 180.0
+
 # --- qBittorrent -------------------------------------------------------------
 # Used by `dl-route backfill` AND by `POST /discard`.
 #
