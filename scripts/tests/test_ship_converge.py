@@ -124,6 +124,21 @@ class Repo:
         assert out.returncode == 0, f"setup git {args} failed: {out.stderr}"
         return out.stdout.strip()
 
+    def _git_allow_fail(self, repo, *args):
+        """For setup steps expected to fail, e.g. producing a merge conflict."""
+        return subprocess.run(
+            ["git", "-C", str(repo), *args],
+            capture_output=True, text=True, env=self.env(),
+        )
+
+    def push_upstream_rename(self, src, dst):
+        """Push a further origin/main commit that RENAMES src -> dst."""
+        builder = self.root / "builder"
+        self._git(builder, "pull", "-q", "--ff-only", "origin", "main")
+        self._git(builder, "mv", src, dst)
+        self._git(builder, "commit", "-q", "-m", f"rename {src} -> {dst}")
+        self._git(builder, "push", "-q", "origin", "main")
+
     # -- state accessors ---------------------------------------------------- #
     def branch(self):
         return self._git(self.work, "symbolic-ref", "--quiet", "--short", "HEAD") or "DETACHED"
@@ -283,6 +298,132 @@ def test_skips_when_checkout_to_main_is_blocked(repo):
     assert_no_stash_created(repo, before, out)
     assert repo.branch() == "feat/diverging-file", "ship moved off the feature branch"
     assert (repo.work / "stable.txt").read_text().endswith("uncommitted\n")
+
+
+def test_refuses_conflicted_mid_merge_tree_at_target(repo):
+    """🔴 A conflicted mid-merge tree must NEVER reach `home-manager switch`.
+
+    The dangerous shape: HEAD is ALREADY at origin/main, so the fast-forward is
+    short-circuited and nothing in the merge path runs — yet MERGE_HEAD and
+    unmerged entries are present. `home-manager switch --flake` builds from the
+    WORKING TREE, not the commit, so conflict markers in any managed non-nix
+    file (claude/RULES.md, claude/commands/*, hooks, scripts/*) would be
+    DEPLOYED TO BOTH HOSTS and then reported as VERIFIED.
+    """
+    # Land at origin/main, then create a conflicting side branch and merge it.
+    repo._git(repo.work, "fetch", "origin", "-q")   # work was cloned before the ahead commit
+    repo._git(repo.work, "merge", "--ff-only", "-q", "origin/main")
+    at_target = repo.head()
+    repo._git(repo.work, "checkout", "-q", "-b", "side", "HEAD~1")
+    (repo.work / "f").write_text("base\nside branch version\n")
+    repo._git(repo.work, "commit", "-q", "-am", "side edits f")
+    repo._git(repo.work, "checkout", "-q", "main")
+    conflict = repo._git_allow_fail(repo.work, "merge", "side")
+    assert conflict.returncode != 0, "setup should have produced a conflict"
+
+    # Preconditions: mid-merge, conflicted, and sitting exactly at origin/main.
+    assert (repo.work / ".git" / "MERGE_HEAD").exists()
+    assert repo.head() == at_target == repo.origin_main()
+    assert "<<<<<<<" in (repo.work / "f").read_text()
+    before = repo.stash_list()
+
+    rc, out = repo.ship()
+
+    assert rc == 5, f"expected rc5 (conflicted tree), got {rc}\n{out}"
+    # It must not have reached step 3 at all. With SHIP_NO_SWITCH=1 the switch
+    # step announces itself, so its ABSENCE proves we exited before it.
+    assert "SHIP_NO_SWITCH" not in out, f"reached the switch step\n{out}"
+    assert "VERIFIED" not in out, f"reported success on a conflicted tree\n{out}"
+    assert "unresolved merge" in out
+    # Tree untouched: still mid-merge, markers intact.
+    assert (repo.work / ".git" / "MERGE_HEAD").exists()
+    assert "<<<<<<<" in (repo.work / "f").read_text()
+    assert_no_stash_created(repo, before, out)
+
+
+def test_refuses_conflicted_tree_when_also_behind(repo):
+    """Same guard on the non-short-circuit path (HEAD behind origin/main)."""
+    repo._git(repo.work, "checkout", "-q", "-b", "side")
+    (repo.work / "stable.txt").write_text("stable\nside\n")
+    repo._git(repo.work, "commit", "-q", "-am", "side")
+    repo._git(repo.work, "checkout", "-q", "main")
+    (repo.work / "stable.txt").write_text("stable\nmain\n")
+    repo._git(repo.work, "commit", "-q", "-am", "main edit")
+    assert repo._git_allow_fail(repo.work, "merge", "side").returncode != 0
+    before = repo.stash_list()
+
+    rc, out = repo.ship()
+
+    assert rc == 5, f"expected rc5, got {rc}\n{out}"
+    assert "SHIP_NO_SWITCH" not in out and "VERIFIED" not in out
+    assert_no_stash_created(repo, before, out)
+
+
+def test_blocking_files_named_when_upstream_renamed_the_file(repo):
+    """Rename detection must not hide the blocker (message must not be empty).
+
+    Uses stable.txt, which the ahead-commit never touches, so the rename is a
+    100%-similarity R — exactly the case where `git diff --name-only` collapses
+    the pair to the DESTINATION only and the source (the file the user actually
+    edited) vanishes from the intersection. Renaming a file that also changed
+    content would score below the rename threshold and pass either way, which
+    is why this test is pinned to a pure rename.
+    """
+    repo.push_upstream_rename("stable.txt", "renamed-stable.txt")
+    (repo.work / "stable.txt").write_text("stable\nmy local edit\n")
+    before = repo.stash_list()
+
+    rc, out = repo.ship()
+
+    assert rc == 7, f"expected rc7, got {rc}\n{out}"
+    assert "blocking files" in out, f"blocking-files section missing\n{out}"
+    assert "- stable.txt" in out, f"renamed-away file not named as a blocker\n{out}"
+    assert (repo.work / "stable.txt").read_text() == "stable\nmy local edit\n"
+    assert_no_stash_created(repo, before, out)
+
+
+def test_warns_when_gitignored_file_is_overwritten(repo):
+    """Ignored files are unprotected by git — we must at least say so."""
+    # Untracked .gitignore is enough — exclude rules apply whether or not the
+    # ignore file itself is committed, and this keeps main un-diverged.
+    (repo.work / ".gitignore").write_text("added-upstream.txt\n")
+    (repo.work / "added-upstream.txt").write_text("my ignored local file\n")
+    before = repo.stash_list()
+
+    rc, out = repo.ship()
+
+    assert rc == 0, out
+    assert "WARNING" in out and "added-upstream.txt" in out, (
+        f"silent clobber of an ignored file\n{out}"
+    )
+    # The clobber genuinely happens — the warning is the whole mitigation.
+    assert (repo.work / "added-upstream.txt").read_text() == "from upstream\n"
+    assert_no_stash_created(repo, before, out)
+
+
+def test_reports_missing_origin_main_as_config_error_not_divergence(repo):
+    """A missing origin/main must not be misreported as 'diverged'."""
+    # Rename the branch on ORIGIN so `git fetch` still SUCCEEDS but no
+    # origin/main exists afterwards — that is the case being classified.
+    repo._git(repo.origin, "branch", "-m", "main", "master")
+    repo._git(repo.work, "update-ref", "-d", "refs/remotes/origin/main")
+
+    rc, out = repo.ship()
+
+    assert rc == 4, f"expected rc4, got {rc}\n{out}"
+    assert "no origin/main" in out, f"unclear diagnosis\n{out}"
+    # Assert on the per-host DIAGNOSIS, not the whole output — the trailing
+    # legend legitimately contains the word "diverged".
+    assert "has diverged" not in out, f"misclassified as divergence\n{out}"
+
+
+def test_verify_line_names_a_dirty_tree(repo):
+    """Dirty convergence is the normal path now — the verifier must say so."""
+    (repo.work / "stable.txt").write_text("stable\nwip\n")
+    rc, out = repo.ship()
+    assert rc == 0, out
+    assert "DIRTY" in out, f"verify line hides the dirty state\n{out}"
+    assert "origin/main + local WIP" in out
 
 
 def test_skips_when_local_main_diverged(repo):

@@ -23,6 +23,12 @@
 # causes that host to be SKIPPED with the blocking files named. We never mutate
 # the user's tree to force progress.
 #
+# One documented exception, which git itself imposes: GITIGNORED files are not
+# protected by a fast-forward and cannot be detected as blockers, so an ignored
+# file the incoming commits also touch WILL be overwritten. We cannot refuse on
+# it (ignored build artifacts collide routinely and harmlessly), so it is
+# reported loudly instead of clobbered silently — see warn_ignored_overwrites.
+#
 # Host identity: BOTH machines have hostname `nixos`, so we CANNOT tell them
 # apart by hostname. Instead we detect the physical host from its local IPv4
 # addresses (see detect_role) and derive the REMOTE (the other host) from that.
@@ -56,7 +62,10 @@
 #
 # Exit codes:
 #   3  repo missing on that host
-#   4  git fetch failed
+#   4  git fetch failed, or origin/main is missing / HEAD unborn
+#   5  SKIPPED — an unresolved merge/cherry-pick is in progress (conflicted
+#      tree). NEVER switched: home-manager builds from the WORKING TREE, so
+#      conflict markers in a managed file would be deployed to both hosts.
 #   6  local host could not be identified (see detect_role)
 #   7  SKIPPED — cannot fast-forward: local modifications / untracked files
 #      overlap the incoming commits and would be overwritten. (This code
@@ -174,15 +183,27 @@ host=$(hostname 2>/dev/null || echo local)
 [ -n "$host" ] || host=local
 cd "$repo" || { echo "[$host] no repo at $repo"; exit 3; }
 git fetch origin -q || { echo "[$host] git fetch failed"; exit 4; }
-target=$(git rev-parse origin/main)
+# Validate the target rather than letting a raw `fatal:` leak and get
+# misclassified downstream (a missing origin/main would otherwise fail the
+# ancestry test and be reported as "diverged", which it is not).
+target=$(git rev-parse -q --verify origin/main) || {
+  echo "[$host] no origin/main after a successful fetch — remote/branch misconfigured."
+  echo "[$host]   check: git -C $repo remote -v ; git -C $repo branch -r"
+  exit 4
+}
 
 # blocking_files — paths that are locally modified/staged/untracked AND are also
 # touched by the incoming commits. That intersection is exactly the set a
 # checkout or fast-forward would have to overwrite. Computed as a deterministic
 # set operation; we never parse git error prose to decide anything.
+#   --no-renames is REQUIRED: with rename detection on (the default) an upstream
+#   rename f -> g reports only the destination g, so a local edit to f would
+#   intersect with nothing and the actionable message would come out EMPTY.
+#   Disabling it reports both sides of the rename, which is what actually gets
+#   touched on disk.
 blocking_files() {
   inc=$(mktemp); loc=$(mktemp)
-  git diff --name-only HEAD origin/main 2>/dev/null | sort -u > "$inc"
+  git diff --name-only --no-renames HEAD origin/main 2>/dev/null | sort -u > "$inc"
   { git diff --name-only
     git diff --cached --name-only
     git ls-files --others --exclude-standard
@@ -209,6 +230,50 @@ skip_cannot_ff() {
   exit 7
 }
 
+# warn_ignored_overwrites — gitignored files are INVISIBLE to both
+# blocking_files (--exclude-standard) and to git itself: a fast-forward will
+# silently overwrite an ignored file that the incoming commits touch, with no
+# refusal. We cannot skip on this (an ignored build artifact colliding is
+# normal and harmless), so we warn loudly instead of clobbering in silence.
+warn_ignored_overwrites() {
+  inc=$(mktemp); ign=$(mktemp)
+  git diff --name-only --no-renames HEAD origin/main 2>/dev/null | sort -u > "$inc"
+  git ls-files --others --ignored --exclude-standard 2>/dev/null | sort -u > "$ign"
+  hits=$(comm -12 "$inc" "$ign")
+  rm -f "$inc" "$ign"
+  if [ -n "$hits" ]; then
+    echo "[$host] WARNING — gitignored files that the incoming commits also change."
+    echo "[$host]   git does NOT protect ignored files; these were overwritten:"
+    echo "$hits" | sed "s|^|[$host]     - |"
+  fi
+}
+
+# 0) Refuse a mid-merge / conflicted tree OUTRIGHT, before anything else.
+#    This must run even when HEAD is already AT origin/main, because that path
+#    short-circuits the merge entirely and would otherwise fall straight through
+#    to the switch. `home-manager switch --flake` builds from the WORKING TREE,
+#    not the commit, so conflict markers in any managed non-nix file
+#    (claude/RULES.md, claude/commands/*, hooks, scripts/*) would be DEPLOYED TO
+#    BOTH HOSTS and then reported as VERIFIED. Resolving a merge is a human
+#    decision; ship never guesses at one.
+conflicted=$(git diff --name-only --diff-filter=U 2>/dev/null)
+if git rev-parse -q --verify MERGE_HEAD >/dev/null 2>&1 \
+   || git rev-parse -q --verify CHERRY_PICK_HEAD >/dev/null 2>&1 \
+   || git rev-parse -q --verify REVERT_HEAD >/dev/null 2>&1 \
+   || [ -n "$conflicted" ]; then
+  echo "[$host] SKIPPED — an unresolved merge/cherry-pick is in progress (conflicted tree)."
+  if [ -n "$conflicted" ]; then
+    echo "[$host]   unmerged paths:"
+    echo "$conflicted" | sed "s|^|[$host]     - |"
+  fi
+  echo "[$host]   NOT switching: home-manager builds from the WORKING TREE, so conflict"
+  echo "[$host]   markers in a managed file would be deployed to both hosts."
+  echo "[$host]   resolve on that host, then re-run ship:"
+  echo "[$host]     git -C $repo status ; resolve ; git -C $repo commit"
+  echo "[$host]     or abandon it:  git -C $repo merge --abort"
+  exit 5
+fi
+
 # 1) Land ON the `main` BRANCH (not merely main'"'"'s commit).
 #    NOTE: never `checkout -B main` when a local main already exists — that
 #    RESETS the branch and would silently destroy un-pushed commits. We only
@@ -220,13 +285,20 @@ if [ "$branch" != "main" ]; then
   else
     coerr=$(git checkout -b main --track origin/main -q 2>&1) || skip_cannot_ff "could not create a local main branch" "$coerr"
   fi
+  # Surface checkout warnings on SUCCESS too — notably the detached-HEAD
+  # "you are leaving N commits behind" notice, which is the users only chance
+  # to rescue un-referenced commits before they become unreachable.
+  [ -n "$coerr" ] && echo "$coerr" | sed "s|^|[$host]   git: |"
 fi
 
 # 2) Fast-forward main to origin/main. Two distinct refusals, told apart
 #    deterministically by an ancestry test BEFORE we touch anything:
 #      not an ancestor -> diverged/un-pushed commits            -> exit 8
 #      ancestor but merge refuses -> local changes in the way   -> exit 7
-head=$(git rev-parse HEAD)
+head=$(git rev-parse -q --verify HEAD) || {
+  echo "[$host] HEAD is unborn (no commits) — cannot converge this checkout."
+  exit 4
+}
 if [ "$head" = "$target" ]; then
   echo "[$host] main already at origin/main ($target)"
 elif ! git merge-base --is-ancestor HEAD origin/main; then
@@ -237,6 +309,7 @@ else
   # A fast-forward is possible, so only overlapping local changes can block it.
   # merge.autoStash is forced OFF: this repo sets rebase.autoStash=true globally
   # (nix/programs/git), and no autostash may EVER sneak into this path.
+  warn_ignored_overwrites
   if mergeerr=$(git -c merge.autoStash=false merge --ff-only origin/main -q 2>&1); then
     echo "[$host] fast-forwarded main $head -> $target"
   else
@@ -258,7 +331,16 @@ fi
 now=$(git rev-parse HEAD)
 nowbranch=$(git symbolic-ref --quiet --short HEAD || echo "DETACHED")
 if [ "$now" = "$target" ] && [ "$nowbranch" = "main" ]; then
-  echo "[$host] ✅ VERIFIED — on branch main at origin/main + switched"
+  # Name the dirty state explicitly. Converging a dirty tree is now the NORMAL
+  # supported path, and home-manager builds from the WORKING TREE — so what got
+  # deployed is origin/main PLUS that WIP, not origin/main. Saying so is the
+  # difference between an honest verifier and a misleading one.
+  if [ -n "$(git status --porcelain 2>/dev/null)" ]; then
+    echo "[$host] ✅ VERIFIED — on branch main at origin/main + switched"
+    echo "[$host]   NOTE: tree is DIRTY — what was built/deployed is origin/main + local WIP."
+  else
+    echo "[$host] ✅ VERIFIED — on branch main at origin/main (clean tree) + switched"
+  fi
 else
   echo "[$host] ❌ VERIFY FAILED — branch=$nowbranch HEAD=$now origin/main=$target"; exit 11
 fi
@@ -309,7 +391,8 @@ if [ "$rc" = 0 ]; then
   echo "ship: converged + verified at origin/main (local=$SHIP_ROLE remote=$REMOTE_ROLE)."
 else
   echo "ship: incomplete (rc=$rc) — see per-host lines above."
-  echo "  rc3=no-repo  rc4=fetch-failed  rc6=host-unidentified"
+  echo "  rc3=no-repo  rc4=fetch/origin-main-unavailable  rc5=skipped:conflicted-tree(merge in progress)"
+  echo "  rc6=host-unidentified"
   echo "  rc7=skipped:cannot-fast-forward(local changes in the way)  rc8=skipped:diverged(needs rebase)"
   echo "  rc9=switch-failed  rc11=verify-failed"
 fi
