@@ -256,12 +256,16 @@ HDR_EXT_VERSION = "X-Bridge-Ext-Version"
 # expected one (a wrong derivation would raise false stale alarms).
 HDR_EXT_ID = "X-Bridge-Ext-Id"
 
-# Server-side bound on the extension-supplied identity strings (version + id).
-# protocol.js already caps them at 2048 chars, but a client-side cap only binds
-# an honest client — these values arrive over HTTP and are echoed back in every
-# /health and /whoami response, so they get truncated here too. Generous: a real
-# manifest version is <20 chars and a Chrome extension id is exactly 32.
+# Server-side bounds on EVERY extension-supplied /poll string. protocol.js
+# already caps them, but a client-side cap only binds an honest client — these
+# values arrive over HTTP and are echoed back in every /health, /instances and
+# /whoami response, so they get truncated here too.
+#   IDENTITY  — instance id, label, ext version, ext id. Generous: a real
+#               manifest version is <20 chars and a Chrome extension id is 32.
+#   ACTIVE_TAB — the active tab's url/title, which are legitimately long.
+#               Mirrors protocol.js MAX_HEADER_VALUE_CHARS.
 MAX_IDENTITY_CHARS = 256
+MAX_ACTIVE_TAB_CHARS = 2048
 
 _ALLOWED_HOSTS = frozenset({"127.0.0.1", "localhost", "::1", "[::1]"})
 
@@ -1525,19 +1529,25 @@ def make_handler(registry: Registry, token: str, cmd_timeout: float,
             the extension (header values must be ASCII-safe) and decoded here. A
             legacy extension that omits either optional header → None for it.
             """
-            instance_id = (self.headers.get(HDR_INSTANCE_ID) or "").strip()
+            # EVERY extension-supplied string is bounded HERE, server-side.
+            # protocol.js caps them with capHeaderValue, but a client-side cap
+            # binds only an HONEST extension: these values arrive over HTTP and
+            # are echoed back in every /health, /instances and /whoami response.
+            # Identity strings (instance id / label / ext version / ext id) get
+            # the tight cap; the active-tab url/title get the larger one, since a
+            # legitimate URL is long (it mirrors protocol.js MAX_HEADER_VALUE_CHARS).
+            instance_id = (self.headers.get(HDR_INSTANCE_ID)
+                           or "").strip()[:MAX_IDENTITY_CHARS]
             raw_label = self.headers.get(HDR_LABEL) or ""
-            label = unquote(raw_label).strip() if raw_label else ""
+            label = (unquote(raw_label).strip()[:MAX_IDENTITY_CHARS]
+                     if raw_label else "")
             au = self.headers.get(HDR_ACTIVE_URL)
             at = self.headers.get(HDR_ACTIVE_TITLE)
             active = None
             if au or at:
-                active = {"url": unquote(au) if au else None,
-                          "title": unquote(at) if at else None}
-            # Both version + id are bounded HERE, server-side. protocol.js caps
-            # them with capHeaderValue, but that only binds an HONEST extension —
-            # the value arrives over HTTP and is echoed into every /health and
-            # /whoami response, so the server must not rely on the client's cap.
+                active = {
+                    "url": unquote(au)[:MAX_ACTIVE_TAB_CHARS] if au else None,
+                    "title": unquote(at)[:MAX_ACTIVE_TAB_CHARS] if at else None}
             raw_ext = self.headers.get(HDR_EXT_VERSION)
             ext_version = (unquote(raw_ext).strip()[:MAX_IDENTITY_CHARS]
                            if raw_ext else None)

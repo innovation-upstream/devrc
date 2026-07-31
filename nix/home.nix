@@ -303,12 +303,22 @@ in
       # unlink inside one (measured), which under activation's `set -eu` would
       # abort the entire switch — so chmod always precedes rm. chmod on a missing
       # path exits non-zero, hence the `|| true`.
+      # Known, accepted limits: (1) a `…new.<pid>` whose PID has been REUSED by
+      # an unrelated process is spared forever — leak-only, never corruption, and
+      # vanishingly rare at pid_max 4194304; (2) a suffix that is not a PID at
+      # all (`…new.abc`) is spared deliberately — this loop must not delete a
+      # directory it cannot prove it created. The inverse (sweeping a LIVE
+      # sibling mid-flight) is impossible.
       for bbOld in "$bbDst".new.* "$bbDst".old.*; do
         [ -e "$bbOld" ] || continue
         bbPid="''${bbOld##*.}"
-        case "$bbPid" in (*[!0-9]*) continue;; esac
-        [ "$bbPid" = "$$" ] && continue
-        [ -d "/proc/$bbPid" ] && continue     # a LIVE activation owns it
+        # An EMPTY suffix (`…new.`) is ours-but-broken, and must be swept here:
+        # it would otherwise be spared forever, because `[ -d "/proc/" ]` is TRUE.
+        if [ -n "$bbPid" ]; then
+          case "$bbPid" in (*[!0-9]*) continue;; esac
+          [ "$bbPid" = "$$" ] && continue
+          [ -d "/proc/$bbPid" ] && continue   # a LIVE activation owns it
+        fi
         $DRY_RUN_CMD chmod -R u+rwX "$bbOld" 2>/dev/null || true
         $DRY_RUN_CMD rm -rf "$bbOld"
       done
@@ -318,31 +328,86 @@ in
       $DRY_RUN_CMD cp -rL "$bbSrc" "$bbTmp"   # -L → real files, not store symlinks
       $DRY_RUN_CMD chmod -R u+rwX "$bbTmp"    # writable for the NEXT switch's rm -rf
 
-      # `[ ! -L ]` matters: chmod -R FOLLOWS a symlink-to-directory and would
-      # rewrite the modes of whatever it points at (measured). If an operator
-      # ever symlinks this path at the repo checkout, a switch must not chmod the
-      # repo — replace the link instead.
-      if [ -d "$bbDst" ] && [ ! -L "$bbDst" ]; then
-        if ! $DRY_RUN_CMD mv -T --exchange "$bbTmp" "$bbDst" 2>/dev/null; then
-          # No renameat2(RENAME_EXCHANGE) here — rename the old tree AWAY (never
-          # delete it first), install, and restore it if the install fails.
-          bbBak="$bbDst.old.$$"
-          $DRY_RUN_CMD rm -rf "$bbBak"
-          $DRY_RUN_CMD mv -T "$bbDst" "$bbBak"
-          if ! $DRY_RUN_CMD mv -T "$bbTmp" "$bbDst"; then
-            $DRY_RUN_CMD mv -T "$bbBak" "$bbDst" || true
-            echo "browser-bridge: extension deploy FAILED — kept the previously" \
-                 "deployed tree at $bbDst" >&2
+      # Install $bbTmp at $bbDst. Two attempts, because every branch test below
+      # is a TOCTOU against a concurrent activation: the path can change shape
+      # between the test and the syscall. Re-deciding once absorbs that instead
+      # of acting on a stale observation. EVERY failure path either restores the
+      # previous tree or leaves it untouched, and prints a named error before
+      # aborting — a bare `mv:` message from `set -e` is not an acceptable exit.
+      bbDone=""
+      bbTry=0
+      while [ -z "$bbDone" ] && [ "$bbTry" -lt 2 ]; do
+        bbTry=$((bbTry + 1))
+        # `[ ! -L ]` matters: chmod -R FOLLOWS a symlink-to-directory and would
+        # rewrite the modes of whatever it points at (measured). If an operator
+        # ever symlinks this path at the repo checkout, a switch must not chmod
+        # the repo — replace the link instead (the elif below).
+        if [ -d "$bbDst" ] && [ ! -L "$bbDst" ]; then
+          # THE ATOMIC PATH — the only one that never exposes an absent or
+          # partial tree at $bbDst. Capture stderr: a failure here is NOT
+          # necessarily "no RENAME_EXCHANGE" (EXDEV/ENOSPC/EACCES/EBUSY, or a
+          # coreutils without the option, all land here and are
+          # indistinguishable), so report what actually happened rather than
+          # asserting a cause, and say plainly that the fallback is weaker.
+          if bbErr="$($DRY_RUN_CMD mv -T --exchange "$bbTmp" "$bbDst" 2>&1)"; then
+            bbDone=1
+          else
+            echo "browser-bridge: atomic directory exchange failed at $bbDst" \
+                 "(mv said: $bbErr). Falling back to the rename-away swap," \
+                 "which BRIEFLY leaves $bbDst absent — a Brave reload during" \
+                 "that window can fail. Re-run the switch if it did." >&2
+            bbBak="$bbDst.old.$$"
+            $DRY_RUN_CMD rm -rf "$bbBak"
+            if ! $DRY_RUN_CMD mv -T "$bbDst" "$bbBak"; then
+              echo "browser-bridge: extension deploy FAILED before touching" \
+                   "$bbDst — the previously deployed tree is UNCHANGED." >&2
+              false                           # loud: set -e aborts the switch
+            fi
+            # $bbDst is absent from here until one of the two moves below.
+            if $DRY_RUN_CMD mv -T "$bbTmp" "$bbDst"; then
+              $DRY_RUN_CMD chmod -R u+rwX "$bbBak" 2>/dev/null || true
+              $DRY_RUN_CMD rm -rf "$bbBak"
+              bbDone=1
+            else
+              if $DRY_RUN_CMD mv -T "$bbBak" "$bbDst"; then
+                echo "browser-bridge: extension deploy FAILED — RESTORED the" \
+                     "previously deployed tree at $bbDst." >&2
+              else
+                echo "browser-bridge: extension deploy FAILED and the previous" \
+                     "tree could not be restored. It is at $bbBak — move it to" \
+                     "$bbDst by hand, or re-run home-manager switch." >&2
+              fi
+              false                           # loud: set -e aborts the switch
+            fi
+          fi
+        elif [ -e "$bbDst" ] || [ -L "$bbDst" ]; then
+          # A symlink or a plain file sits at the path. Unlink ONLY that — never
+          # a directory, so a tree another activation installed in the TOCTOU
+          # window above can't be deleted here. Next iteration installs into the
+          # now-absent path (or exchanges, if one appeared meanwhile).
+          $DRY_RUN_CMD rm -rf "$bbDst"        # on a symlink this drops the LINK,
+                                              # not its target (measured)
+        else
+          # Absent — first install. If a concurrent activation wins the race and
+          # creates the directory first, `mv -T` refuses (it will not descend
+          # into an existing directory) and the next iteration exchanges into it.
+          if $DRY_RUN_CMD mv -T "$bbTmp" "$bbDst"; then
+            bbDone=1
+          elif [ "$bbTry" -ge 2 ]; then
+            echo "browser-bridge: extension deploy FAILED — could not install" \
+                 "at $bbDst. Nothing was removed; re-run home-manager switch." >&2
             false                             # loud: set -e aborts the switch
           fi
-          $DRY_RUN_CMD chmod -R u+rwX "$bbBak" 2>/dev/null || true
-          $DRY_RUN_CMD rm -rf "$bbBak"
         fi
-      else
-        # First install, or the path is a symlink/plain file — replace it. `rm -rf`
-        # on a symlink removes only the LINK, not its target (measured).
-        $DRY_RUN_CMD rm -rf "$bbDst"
-        $DRY_RUN_CMD mv -T "$bbTmp" "$bbDst"
+      done
+
+      # Belt-and-braces: the loop can only exit with bbDone empty by running out
+      # of attempts, and that must never pass silently for a deploy.
+      if [ -z "$bbDone" ]; then
+        echo "browser-bridge: extension deploy FAILED — $bbDst did not settle" \
+             "after $bbTry attempts (concurrent activation?). Nothing was" \
+             "removed; re-run home-manager switch." >&2
+        false                                 # loud: set -e aborts the switch
       fi
 
       # After a successful exchange $bbTmp holds the OLD tree; after the fallback

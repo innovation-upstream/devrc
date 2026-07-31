@@ -188,8 +188,15 @@ come back).
    false alarms.)
 
 Repeat 2–9 in the other profile's window. The profiles are independent: one can
-be on the new path while the other is still on the repo path — and their ids
-differ, since the ids are per-profile as well as per-path.
+be on the new path while the other is still on the repo path.
+
+⚠ **Open question, cheap to settle while you are here:** do the two profiles,
+once BOTH point at `~/.local/share/browser-bridge-ext/`, report the SAME id or
+different ones? Chromium is documented to derive an unpacked extension's id from
+a hash of the **absolute path only**, which would make them identical — but that
+is INFERRED on both sides and nothing here has measured it. It does not affect
+the step-9 comparison (that is before-vs-after on ONE profile), but please note
+which you observe and correct this paragraph.
 
 ### Rollback (if the deployed directory will not load)
 
@@ -339,6 +346,11 @@ The chrome.* glue needs a real browser — verify by hand after loading:
       (or that card's ID again). If it is UNCHANGED, `id` does not track the
       directory and the write-ups in this file, `../README.md`,
       `../reference/errors.md` and the repo `CLAUDE.md` must be corrected.
+- [ ] **Same path, two profiles — same id or not?** Once BOTH profiles point at
+      `~/.local/share/browser-bridge-ext/`, compare their ids. Chromium is
+      documented to hash the absolute PATH only (→ they should MATCH), but that
+      is inferred, not measured, and this pass gets the answer for free. Record
+      what you see and fix the paragraph after step 9 in this file.
 - [ ] **`ping` is inert:** running it does not change the focused tab, the
       focused window, or any page (it touches no tab at all).
 - [ ] `browser html` on a logged-in tab returns markup containing logged-in-only

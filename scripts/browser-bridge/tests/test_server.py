@@ -3683,6 +3683,28 @@ def test_identity_headers_are_bounded_server_side():
         ext.stop(); srv.shutdown(); srv.server_close()
 
 
+def test_every_poll_supplied_string_is_bounded_server_side():
+    """The same rationale applies to EVERY /poll string, not just the two new
+    ones: label and the active-tab url/title are echoed into /health, /instances
+    and /whoami too, and protocol.js's cap binds only an honest extension."""
+    srv, _ = _serve()
+    huge = "y" * 6000
+    ext = FakeExtension(srv, instance_id=huge, label=huge,
+                        active_url="https://e.test/" + huge,
+                        active_title=huge)
+    ext.start()
+    try:
+        body = _wait_instances(srv, 1)
+        assert body is not None
+        inst = body["instances"][0]
+        assert len(inst["label"]) == S.MAX_IDENTITY_CHARS
+        assert len(inst["instanceId"]) == S.MAX_IDENTITY_CHARS
+        assert len(inst["activeTab"]["url"]) == S.MAX_ACTIVE_TAB_CHARS
+        assert len(inst["activeTab"]["title"]) == S.MAX_ACTIVE_TAB_CHARS
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
 def test_a_later_poll_without_the_id_header_does_not_wipe_a_known_id():
     """Same rule the version field already follows: only overwrite a KNOWN
     value, so a legacy/partial poll cannot erase what an earlier poll reported."""

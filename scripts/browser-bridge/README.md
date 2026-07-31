@@ -834,14 +834,33 @@ syscall, so the path is never absent and never changes, and the OLD tree lands a
 the temp name for cleanup only *after* the swap succeeded — a failed deploy
 therefore leaves the previous extension in place rather than nothing.
 
-Measured on the rendered activation script under `set -eu -o pipefail` against a
-scratch `HOME` (400-file source, coreutils 9.11, ext4): first install, idempotent
-re-run, a 0555 previous tree, and a symlinked destination (link replaced, target
-untouched and its mode unchanged) all rc=0; **two concurrent processes, 3/3
-trials: both exit 0, the directory is present and complete, zero nesting, zero
-leftovers.** The fallback path was exercised separately (exchange forced off):
-the directory is always present and complete, and the loser fails loudly leaving
-one `.old.<pid>` that the next run's PID-liveness sweep reclaims.
+🔴 **The two paths do NOT have the same guarantee, and the difference is
+measurable.** The exchange path never exposes an absent or partial tree at the
+destination. **The fallback briefly does** — it renames the old tree away and
+then installs, and between those two syscalls nothing exists at the path. That
+window is inherent to the fallback and is not a concurrency artifact: a single
+writer with no contention hits it. The deploy therefore prints a runtime warning
+naming the window whenever it falls back, and states what to do if a Brave reload
+landed in it (re-run the switch). Do not read "atomic swap" as covering both
+paths; on these hosts (ext4, coreutils 9.11) the fallback should never fire.
+
+Measured on the RENDERED activation script (the Nix literal put through
+`nix-instantiate --eval`, so shell-level escaping is covered too) under
+`set -eu -o pipefail` against a scratch `HOME`, 400-file source:
+
+| case | result |
+|---|---|
+| first install / idempotent re-run / 0555 previous tree | rc=0, 400 files |
+| symlinked destination | link replaced, target intact, target mode unchanged |
+| **exchange path, single writer, sampled throughout, 4/4** | **observer saw NO absent, partial or non-dir state** |
+| **exchange path, 4 concurrent writers, jittered starts, 6/6** | **all rc=0, 400 files, observer clean, 0 nesting, 0 leftovers** |
+| **fallback path (exchange forced off via a `mv` shim), single writer, 4/4** | **observer saw `ABSENT` every time** — the window above, reproduced |
+| sweep: empty-suffix / dead-PID / non-numeric / live-PID leftovers | swept / swept / spared (deliberate) / spared |
+
+Every failure exit in the deploy prints a named `browser-bridge: …` message
+saying what happened to the previous tree (unchanged, restored, or left at
+`.old.<pid>` for manual recovery) before aborting the switch — there are no bare
+`mv:` exits left.
 
 Re-pointing Brave is a **manual, one-time, per-profile** step (`brave://extensions`
 is not scriptable) — the exact sequence, and the rollback procedure, are in
