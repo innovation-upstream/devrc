@@ -534,3 +534,38 @@ def test_alias_review_shows_backfill_seeds_as_the_global_rows_they_are(cli_env,
     out = capsys.readouterr().out
     assert "backfill-seed" in out
     assert "! janedoe" in out
+
+
+def test_alias_review_reproduces_the_servers_verdict_on_a_structured_row(
+        cli_env, capsys):
+    """PINS THE SPREAD-KEY FIX.
+
+    The server screens on `norm_key(evidence)`; `alias review` used to look up
+    `row["key"]`. For a structured row those never agree — `thread:aster-vale`
+    is not `astervale` — so the tool whose entire job is to surface exactly
+    those rows could not reproduce the server's verdict on them. Reverting the
+    key leaves this failing.
+    """
+    store = Store(cli._cfg().db_path)
+    store.upsert_alias("thread:aster-vale", "Jane Doe", "example-site.test",
+                       source="thread-slug", evidence="aster vale")
+    for chosen in ("Jane Doe", "john-smith"):
+        store.add_example({"page": {"tags": ["Aster Vale"],
+                                    "site": "example-site.test"}}, chosen)
+    store.close()
+    assert call(["alias", "review", "--json"]) == 0
+    row = json.loads(capsys.readouterr().out)[0]
+    assert row["key"] == "thread:aster-vale"
+    assert row["suspect"] and "different directories" in row["suspect"]
+
+
+def test_alias_review_does_not_flag_a_structured_row_with_no_spread(cli_env,
+                                                                    capsys):
+    """The other half: the lookup has to be able to come back clean too, or the
+    test above would pass with any always-suspect key."""
+    store = Store(cli._cfg().db_path)
+    store.upsert_alias("thread:aster-vale", "Jane Doe", "example-site.test",
+                       source="thread-slug", evidence="aster vale")
+    store.close()
+    assert call(["alias", "review", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out)[0]["suspect"] is None

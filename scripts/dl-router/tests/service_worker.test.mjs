@@ -1203,3 +1203,74 @@ test("a correction is marked as an explicit confirmation", async () => {
   const learn = posted.find((p) => p.url.endsWith("/learn"));
   assert.equal(learn.body.confirmed, true);
 });
+
+// --- reportNothingLearned: the notification that makes the screen visible --- //
+// It had no test at all, and it is the only consumer of `skipped` -- so the
+// mechanism the screen's visibility depends on was itself unpinned.
+test("filing to the catch-all does NOT notify", () => {
+  // /learn returns a `skipped` entry for the catch-all BY DESIGN ("the absence
+  // of a subject, not one"), and filing there is routine. Notifying would
+  // train the operator to dismiss the exact notification this exists for.
+  reset();
+  const fired = SW.reportNothingLearned({
+    dir: "other", written: [],
+    skipped: [{ key: "", source: "catch-all", why: "the catch-all is..." }],
+  });
+  assert.equal(fired, false);
+  assert.equal(calls.notifications.length, 0);
+});
+
+test("a screened IDENTITY notifies even when something else was written", () => {
+  // A screened identity writes no row, so the re-point bypass never engages
+  // for it either: that thread will never auto-file, forever. Reporting
+  // success because an unrelated tag landed hides it permanently.
+  reset();
+  const fired = SW.reportNothingLearned({
+    dir: "Jane Doe",
+    written: [{ key: "fieldrecordings", site: "s.test", source: "tag" }],
+    skipped: [{ key: "thread:x", source: "thread-slug", why: "seen on 2..." }],
+  });
+  assert.equal(fired, true);
+  assert.match(calls.notifications[0].title, /will not learn this source/);
+  assert.match(calls.notifications[0].message, /seen on 2/);
+});
+
+test("a screened tag with something else written stays quiet", () => {
+  reset();
+  assert.equal(SW.reportNothingLearned({
+    dir: "acme-studio",
+    written: [{ key: "fieldrecordings", site: "s.test", source: "tag" }],
+    skipped: [{ key: "jd", source: "tag", why: "too short" }],
+  }), false);
+  assert.equal(calls.notifications.length, 0);
+});
+
+test("a correction that learned nothing at all notifies", () => {
+  reset();
+  assert.equal(SW.reportNothingLearned({
+    dir: "acme-studio", written: [],
+    skipped: [{ key: "jd", source: "tag", why: "too short" }],
+  }), true);
+  assert.match(calls.notifications[0].title, /learned nothing/);
+});
+
+test("nothing skipped, nothing said", () => {
+  reset();
+  assert.equal(SW.reportNothingLearned({ dir: "Jane Doe",
+    written: [{ key: "k", site: "s", source: "thread-slug" }], skipped: [] }),
+  false);
+  assert.equal(SW.reportNothingLearned(null), false);
+  assert.equal(calls.notifications.length, 0);
+});
+
+test("the identity refusal is the one reported, not merely the first", () => {
+  reset();
+  SW.reportNothingLearned({
+    dir: "Jane Doe", written: [],
+    skipped: [
+      { key: "jd", source: "tag", why: "FIRST but unimportant" },
+      { key: "thread:x", source: "thread-slug", why: "THE consequential one" },
+    ],
+  });
+  assert.match(calls.notifications[0].message, /consequential/);
+});

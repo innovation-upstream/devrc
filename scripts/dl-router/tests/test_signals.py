@@ -130,13 +130,21 @@ def test_a_channel_alias_does_not_leak_to_another_channel():
     # a section ABOVE the thread -- the deepest qualifying segment wins
     ("https://forum.test/forums/general-discussion/threads/aster-vale.99/",
      "aster vale"),
-    ("https://board.test/t/aster-vale/1234", "aster vale"),
 ])
 def test_thread_slug_extraction(url, expected):
     assert thread_slug(url) == expected
 
 
 @pytest.mark.parametrize("url", [
+    # `t`/`topic`/`topics` are NOT anchors: a paginated index route is
+    # structurally identical to a Discourse thread, so no adjacency rule can
+    # separate them. An id-less Discourse/IPB thread degrades to the picker,
+    # which this design calls acceptable — a wrong slug is not.
+    "https://board.test/t/aster-vale/1234",
+    "https://forum.test/topic/12345-aster-vale/",
+    "https://forum.test/topics/general-discussion/2",
+    "https://forum.test/t/photography/3",
+    "https://forum.test/t/best-of-2024",
     "",
     None,
     "https://forum.test/",
@@ -448,3 +456,31 @@ def test_identity_keys_are_near_verbatim_so_threads_do_not_collide():
     b = thread_alias_key(thread_slug(
         "https://forum.test/threads/aster-vale-set.223/"))
     assert a and b and a != b
+
+
+# --- corroboration needs more than a coincidence ----------------------------- #
+@pytest.mark.parametrize("title,slug", [
+    ("Section: Photography | Some Forum", "photography meetup"),
+    ("Page 12 | Some Forum", "top-12-sets"),
+    ("A Long Sentence Mentioning Aster And Vale In Passing | X", "aster vale"),
+])
+def test_one_shared_token_is_a_coincidence_not_corroboration(title, slug):
+    """The whole segment is emitted VERBATIM, so a single incidental overlap
+    minted `'Section: Photography'` and `'Page 12'` as subjects."""
+    assert title_subject(title, "forum.test", slug) == ""
+
+
+def test_a_single_word_segment_that_matches_outright_still_corroborates():
+    assert title_subject("Aster | Some Forum", "forum.test", "aster") == "Aster"
+
+
+@pytest.mark.parametrize("phrase", ["w.w.w.", "e.g.", "i.e.", "p.s.", "O. K."])
+def test_the_initialism_exemption_has_a_floor_and_a_stopword_check(phrase):
+    """It had neither, so it re-opened everything the length floor was for:
+    `w.w.w.` folds to `www` (defeating the stopword rule), and the rest fold to
+    two-character keys — under the floor this change restored."""
+    assert suspicious_alias_key(phrase, dir_names=["Jane Doe"])
+
+
+def test_a_real_initialised_name_is_still_exempt():
+    assert suspicious_alias_key("M.I.A.", dir_names=["Jane Doe"]) is None

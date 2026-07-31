@@ -518,23 +518,46 @@ async function learn(entry, chosenDir, createdNew) {
   reportNothingLearned(out);
 }
 
+/** Sources that carry a full-confidence identity (see matcher.identity_signals). */
+const IDENTITY_SOURCES = new Set(["discord-channel", "thread-slug"]);
+
 /**
- * Tell the user when a correction taught the router NOTHING.
+ * Tell the user when a correction taught the router something LESS than it
+ * looked like it did.
  *
  * The sidecar screens every candidate alias and returns what it refused, and
- * nothing consumed that -- so an over-strict screen was invisible outside the
- * sidecar journal, which is how it stayed silent. This deliberately fires only
- * when the correction produced no alias AT ALL: a category page whose junk
- * tags were screened while a good one was learned is working as designed and
- * must not nag.
+ * nothing consumed that -- which is how an over-strict screen stayed invisible
+ * outside the sidecar journal. Two rules, and both matter:
+ *
+ *   * A SCREENED IDENTITY always notifies, even when something else was
+ *     written. A screened identity writes no row, so the re-point bypass never
+ *     engages for it either -- that channel or thread will never auto-file, and
+ *     reporting "learned" because an unrelated tag landed hides it forever.
+ *   * Otherwise, notify only when NOTHING was written. A category page whose
+ *     junk tags were screened while a good one was learned is working as
+ *     designed and must not nag.
+ *
+ * The catch-all is excluded outright: `/learn` returns a `skipped` entry for it
+ * BY DESIGN ("the absence of a subject, not one"), and filing to the catch-all
+ * is routine -- notifying there would train the operator to dismiss the very
+ * notification the rest of this exists for.
  */
 export function reportNothingLearned(out) {
-  if (!out || !Array.isArray(out.skipped) || !out.skipped.length) return false;
-  if (Array.isArray(out.written) && out.written.length) return false;
-  const why = out.skipped.find((s) => s && s.why);
+  if (!out || !Array.isArray(out.skipped)) return false;
+  const real = out.skipped.filter((s) => s && s.source !== "catch-all");
+  if (!real.length) return false;
+  const identity = real.find((s) => IDENTITY_SOURCES.has(s.source));
+  const wroteSomething = Array.isArray(out.written) && out.written.length > 0;
+  if (!identity && wroteSomething) return false;
+  // Report the IDENTITY refusal when there is one: it is the consequential
+  // one, and `find(s => s.why)` would have reported whichever came first.
+  const chosen = identity || real.find((s) => s.why) || real[0];
   void reportFailure(
-    `Filed into ${out.dir}, but learned nothing from it`,
-    why ? String(why.why) : "every candidate was screened out");
+    identity
+      ? `Filed into ${out.dir}, but it will not learn this source`
+      : `Filed into ${out.dir}, but learned nothing from it`,
+    (chosen && chosen.why) ? String(chosen.why)
+      : "every candidate was screened out");
   return true;
 }
 

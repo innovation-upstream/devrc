@@ -144,18 +144,22 @@ _THREAD_ANCHORS = frozenset({
     "showthread", "viewtopic",
 })
 
-# AMBIGUOUS routes. Discourse (`/t/<slug>/<id>`) and IPB (`/topic/<id>-<slug>/`)
-# use these for a thread, but plenty of sites use the same words for an INDEX:
+# `t`, `topic` and `topics` are DELIBERATELY ABSENT.
 #
-#     /topics/general-discussion   ->  a section listing, not a thread
-#     /t/photography               ->  a tag page, not a thread
+# Discourse (`/t/<slug>/<id>`) and IPB (`/topic/<id>-<slug>/`) use them for a
+# thread, and plenty of other sites use the same words for an index. Two rounds
+# went into gating them: first on the presence of a numeric id beside the slug,
+# which is false for a PAGINATED index (`/topics/general-discussion/2`,
+# `/t/photography/3`) -- and a paginated index is structurally identical to a
+# Discourse thread, so no adjacency rule can separate them. `/t/best-of-2024`
+# is worse still: the year admits the route AND is stripped as an id.
 #
-# Treating them as unambiguous asserted something untrue and re-opened the
-# section-name hole one level down. A real thread on these platforms always
-# carries a numeric id beside the slug; an index route never does, so the id is
-# the discriminator -- and requiring it is fail-closed, because a thread shape
-# nobody anticipated degrades to "no slug" (the picker), never to a wrong slug.
-_ID_ANCHORS = frozenset({"topic", "topics", "t"})
+# The ambiguity was the problem, not the gate around it. This design already
+# says no slug is fine and a wrong slug is not, so the ambiguous routes are
+# simply not anchors: an id-less Discourse or IPB thread degrades to the
+# picker. If one of those platforms ever matters here, the honest way to add it
+# is a per-site rule in local config where the operator ASSERTS the shape --
+# not a global guess about everyone's URLs.
 
 # `slug.123456` (xenforo) and `123456-slug` (vbulletin) both carry a numeric id
 # beside the slug. Stripping it is what makes the two shapes fold to one key.
@@ -291,19 +295,6 @@ def _slug_tokens(segment: str) -> tuple:
     return tokens(seg)
 
 
-def _carries_thread_id(segments, i: int) -> bool:
-    """True when the slug at `segments[i]` has a numeric thread id beside it.
-
-    Either inside the segment (`/topic/12345-slug/`, `/topic/slug.12345/`) or as
-    the next one (`/t/slug/12345`). This is what separates a Discourse/IPB
-    thread from a same-named index route.
-    """
-    segment = segments[i]
-    if _LEADING_ID.match(segment) or _TRAILING_ID.search(segment):
-        return True
-    return i + 1 < len(segments) and segments[i + 1].isdigit()
-
-
 def thread_slug(url) -> str:
     """The forum thread subject carried by a URL path, as a phrase.
 
@@ -325,19 +316,19 @@ def thread_slug(url) -> str:
     best = ()
     segments = url_path_segments(url)
     for i in range(1, len(segments)):
-        anchor = segments[i - 1].lower()
-        if anchor in _ID_ANCHORS:
-            if not _carries_thread_id(segments, i):
-                continue
-        elif anchor not in _THREAD_ANCHORS:
+        if segments[i - 1].lower() not in _THREAD_ANCHORS:
             continue
         toks = _slug_tokens(segments[i])
         # The thread route already proves this is a thread, so a ONE-word slug
         # is legitimate here in a way it never was under the old rule -- the
         # >=2-token guard existed only to stop an opaque file-host id
         # (`/d/AbCdEf`) being minted as a subject, and no anchor introduces one.
+        # `isascii()` as well as `isdigit()`: Python's `isdigit` accepts
+        # non-ASCII digits and JS's `/^\d+$/` does not, and these two
+        # implementations have to agree.
         meaningful = tuple(t for t in toks
-                           if t not in STOPWORDS and not t.isdigit())
+                           if t not in STOPWORDS
+                           and not (t.isascii() and t.isdigit()))
         if not meaningful or not passes_fuzzy_guard(meaningful):
             continue
         best = toks
@@ -425,9 +416,19 @@ def title_subject(title, site: str = "", slug: str = "") -> str:
         toks = content_tokens(part)
         if not toks or is_site_branding(part, site):
             continue
-        overlap = sum(1 for t in set(toks) if t in slug_tokens)
-        # Strictly greater, so the FIRST segment wins a tie -- deterministic,
-        # and only ever consulted between segments that corroborate equally.
+        unique = set(toks)
+        overlap = sum(1 for t in unique if t in slug_tokens)
+        # ONE shared token is a coincidence, not corroboration, and the whole
+        # segment gets emitted verbatim -- so `"Section: Photography"` was
+        # minted off the single word `photography`, and `"Page 12"` off a `12`
+        # that happened to appear in the slug. Require either a segment that is
+        # ENTIRELY one corroborated word, or two shared words; and in both
+        # cases require the shared words to be at least half of the segment, so
+        # a long sentence cannot ride in on two incidental hits.
+        if overlap < 1 or (overlap < 2 and len(unique) > 1):
+            continue
+        if overlap * 2 < len(unique):
+            continue
         if overlap > best_overlap:
             best, best_overlap = part, overlap
     return best if best_overlap else ""
@@ -665,6 +666,11 @@ class MatchContext:
         slugs = self.thread_slugs()
         for slug in slugs:
             add(slug)
+        # `slugs[0]` may come from the PROVEN cross-host referrer rather than
+        # this page -- deliberate, and safe for the same reason the carry is:
+        # nothing reaches `referrer_url` unless the extension proved the link.
+        # It is what lets a file-host page corroborate its title against the
+        # forum thread that sent the user there.
         # The de-branded title is CORROBORATED against the slug (see
         # title_subject): with no slug it contributes nothing here, and the raw
         # title below still carries the page through ordinary containment.
@@ -1066,14 +1072,25 @@ def suspicious_alias_key(phrase, *, key: str = "", dir_names=(), site: str = "",
 # One trailing digit is the COMMON username shape, so requiring two (an earlier
 # narrowing) let most real handles straight through.
 _HANDLE = re.compile(r"^[^\W\d_]+[0-9]{1,4}$")
-# Letters separated by punctuation: `M.I.A.`, `K. D.` -- an initialised stage
-# name, not a three-letter word. This is what lets the length floor stay at 4
-# without refusing a real subject.
-_INITIALISED = re.compile(r"^(?:[^\W\d_][.\u00b7\s]+){2,}[^\W\d_]?[.]?$")
+# Single letters separated by DOTS: `M.I.A.` -- an initialised stage name, not
+# a three-letter word. This is what lets the length floor stay at 4 without
+# refusing a real subject.
+#
+# Dots only, and never below three letters. Allowing spaces as a separator and
+# putting no floor under it re-opened everything the floor was for: `w.w.w.`
+# folds to `www` (defeating the stopword rule two hunks above), and `e.g.`,
+# `i.e.`, `p.s.` and `O. K.` all fold to TWO-character keys -- under the floor
+# this very change restored.
+_INITIALISED = re.compile(r"^(?:[^\W\d_]\.){2,}$")
+MIN_INITIALISED_KEY_LEN = 3
 
 
 def _looks_initialised(phrase) -> bool:
-    return bool(_INITIALISED.match(str(phrase or "").strip()))
+    phrase = str(phrase or "").strip()
+    if not _INITIALISED.match(phrase):
+        return False
+    key = norm_key(phrase)
+    return len(key) >= MIN_INITIALISED_KEY_LEN and key not in STOPWORDS
 
 
 def _looks_like_a_handle(ptoks) -> bool:

@@ -75,7 +75,7 @@
     },
     {
       "url": "https://board.test/t/aster-vale/1234",
-      "slug": "aster vale"
+      "slug": ""
     },
     {
       "url": "https://forum.test/threads/481920/",
@@ -147,15 +147,27 @@
     },
     {
       "url": "https://forum.test/topic/12345-aster-vale/",
-      "slug": "aster vale"
+      "slug": ""
     },
     {
       "url": "https://forum.test/t/aster-vale/1234",
-      "slug": "aster vale"
+      "slug": ""
     },
     {
       "url": "https://forum.test/topic/aster-vale.9912/",
-      "slug": "aster vale"
+      "slug": ""
+    },
+    {
+      "url": "https://forum.test/topics/general-discussion/2",
+      "slug": ""
+    },
+    {
+      "url": "https://forum.test/t/photography/3",
+      "slug": ""
+    },
+    {
+      "url": "https://forum.test/t/best-of-2024",
+      "slug": ""
     }
   ],
   "_host_why": [

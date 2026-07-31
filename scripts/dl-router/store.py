@@ -304,6 +304,11 @@ class Store:
             # "subject". Counting it here is what eventually catches it: a real
             # subject belongs to one directory, a site name turns up on every
             # one of them.
+            # Corroborated, so a page with no thread slug contributes no
+            # title phrase here at all. That does weaken this measure on
+            # slug-less sites -- accepted: an UNCORROBORATED title phrase is
+            # exactly the thing that turned out to be junk, and counting junk
+            # towards a chrome measure makes the measure worse, not better.
             subject = title_subject(page.get("title") or "",
                                     str(page.get("site") or ""),
                                     thread_slug(page.get("url") or ""))

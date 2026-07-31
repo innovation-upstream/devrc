@@ -97,16 +97,11 @@ const THREAD_ANCHORS = new Set([
   "showthread", "viewtopic",
 ]);
 
-// AMBIGUOUS routes: Discourse and IPB use these for a thread, but plenty of
-// sites use the same words for an INDEX (`/topics/general-discussion`,
-// `/t/photography`). A real thread always carries a numeric id beside the
-// slug; an index route never does. See matcher._ID_ANCHORS.
-const ID_ANCHORS = new Set(["topic", "topics", "t"]);
-
-function carriesThreadId(segments, i) {
-  if (LEADING_ID.test(segments[i]) || TRAILING_ID.test(segments[i])) return true;
-  return i + 1 < segments.length && /^\d+$/.test(segments[i + 1]);
-}
+// `t`, `topic` and `topics` are DELIBERATELY ABSENT -- see matcher.py. Gating
+// them on an adjacent numeric id does not work: a PAGINATED index
+// (`/topics/general-discussion/2`) is structurally identical to a Discourse
+// thread, so no adjacency rule can separate them. No slug is fine; a wrong
+// slug is not.
 const TRAILING_ID = /[.\-_]\d{2,}$/;
 const LEADING_ID = /^\d{2,}[.\-_]/;
 // Title separators. Escaped rather than literal: every source file here is
@@ -184,10 +179,7 @@ export function threadSlug(url) {
   let best = [];
   const segments = pathSegments(url);
   for (let i = 1; i < segments.length; i += 1) {
-    const anchor = segments[i - 1].toLowerCase();
-    if (ID_ANCHORS.has(anchor)) {
-      if (!carriesThreadId(segments, i)) continue;
-    } else if (!THREAD_ANCHORS.has(anchor)) continue;
+    if (!THREAD_ANCHORS.has(segments[i - 1].toLowerCase())) continue;
     const toks = allTokens(
       segments[i].replace(LEADING_ID, "").replace(TRAILING_ID, ""));
     // The thread route already proves this is a thread, so a ONE-word slug is
@@ -238,7 +230,12 @@ export function titleSubject(title, site, slug) {
     const part = (raw || "").trim();
     const toks = contentTokens(part);
     if (!toks.length || isSiteBranding(part, site)) continue;
-    const overlap = [...new Set(toks)].filter((t) => slugTokens.has(t)).length;
+    const unique = new Set(toks);
+    const overlap = [...unique].filter((t) => slugTokens.has(t)).length;
+    // ONE shared token is a coincidence, not corroboration, and the whole
+    // segment is emitted verbatim -- see matcher.title_subject.
+    if (overlap < 1 || (overlap < 2 && unique.size > 1)) continue;
+    if (overlap * 2 < unique.size) continue;
     // Strictly greater, so the FIRST segment wins a tie.
     if (overlap > bestOverlap) { best = part; bestOverlap = overlap; }
   }

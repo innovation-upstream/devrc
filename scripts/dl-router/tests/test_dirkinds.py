@@ -245,3 +245,23 @@ def test_a_malformed_file_drops_the_picker_overlay_too(tmp_path):
     kinds = dk.DirKinds.load(path, overlay={"Jane Doe": KIND_PERFORMER})
     assert kinds.kind("Jane Doe") == KIND_UNKNOWN
     assert kinds.error
+
+
+def test_a_name_in_both_ask_and_performer_is_ambiguous(tmp_path):
+    """A half-finished review — the line copied to `ask` but the original left
+    in `performer` — used to resolve to `performer` with no error, so the very
+    directory the operator had just parked as undecided carried on auto-filing.
+    Ambiguity resolves to unknown, which is this module's rule everywhere else.
+    """
+    path = write(tmp_path,
+                 'performer = ["Jane Doe"]\ncategory = []\nask = ["Jane Doe"]\n')
+    kinds = dk.DirKinds.load(path)
+    assert kinds.kind("Jane Doe") == KIND_UNKNOWN
+    assert kinds.error
+
+
+def test_a_clean_ask_entry_is_not_an_error(tmp_path):
+    path = write(tmp_path, 'performer = []\ncategory = []\nask = ["Jane Doe"]\n')
+    kinds = dk.DirKinds.load(path)
+    assert kinds.kind("Jane Doe") == KIND_UNKNOWN
+    assert not kinds.error

@@ -150,15 +150,27 @@ test("with no slug there is no title subject at all", () => {
     "");
 });
 
-test("an index route is not a thread without a numeric id", () => {
-  // `/topics/...` and `/t/...` are thread routes on Discourse and IPB and
-  // INDEX routes elsewhere. A thread always carries an id beside the slug.
-  assert.equal(threadSlug("https://forum.test/topics/general-discussion"), "");
-  assert.equal(threadSlug("https://forum.test/t/photography"), "");
-  assert.equal(threadSlug("https://forum.test/t/aster-vale/1234"),
+test("the ambiguous routes are not anchors at all", () => {
+  // Gating `t`/`topic`/`topics` on an adjacent numeric id does not work: a
+  // PAGINATED index is structurally identical to a Discourse thread.
+  for (const url of [
+    "https://forum.test/topics/general-discussion",
+    "https://forum.test/topics/general-discussion/2",
+    "https://forum.test/t/photography",
+    "https://forum.test/t/photography/3",
+    "https://forum.test/t/best-of-2024",
+    "https://forum.test/t/aster-vale/1234",
+    "https://forum.test/topic/12345-aster-vale/",
+  ]) assert.equal(threadSlug(url), "", url);
+  // ...while the unambiguous routes still work.
+  assert.equal(threadSlug("https://forum.test/threads/aster-vale.99/"),
     "aster vale");
-  assert.equal(threadSlug("https://forum.test/topic/12345-aster-vale/"),
-    "aster vale");
+});
+
+test("one shared token is a coincidence, not corroboration", () => {
+  assert.equal(titleSubject("Section: Photography | Some Forum", "forum.test",
+    "photography meetup"), "");
+  assert.equal(titleSubject("Page 12 | X", "forum.test", "top-12-sets"), "");
 });
 
 // --- the cross-host referrer carry ------------------------------------------ //

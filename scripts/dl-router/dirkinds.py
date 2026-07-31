@@ -130,7 +130,12 @@ class DirKinds:
                 errors.append(f"unknown list {key!r} — expected "
                               f"{KIND_PERFORMER}, {KIND_CATEGORY} or "
                               f"{ASK_LIST}")
-        for kind in (KIND_PERFORMER, KIND_CATEGORY):
+        # ALL THREE lists, `ask` included. A name left in `performer` while a
+        # copy was moved to `ask` used to resolve to `performer` with no error
+        # -- so a half-finished review kept auto-filing the very directory the
+        # operator had just parked as undecided. Ambiguity resolves to unknown,
+        # which is this module's rule everywhere else.
+        for kind in (KIND_PERFORMER, KIND_CATEGORY, ASK_LIST):
             value = raw.get(kind, [])
             if not isinstance(value, list):
                 errors.append(f"{kind} must be a list of directory names")

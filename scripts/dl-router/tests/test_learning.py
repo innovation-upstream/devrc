@@ -23,8 +23,8 @@ import server as S  # noqa: E402
 from conftest import SAMPLE_DIRS  # noqa: E402
 from fetcher import Fetcher  # noqa: E402
 from matcher import (  # noqa: E402
-    DISCORD_SITE, KIND_CATEGORY, KIND_PERFORMER, MatchContext, discord_alias_key,
-    thread_alias_key,
+    CHROME_DIR_SPREAD, DISCORD_SITE, KIND_CATEGORY, KIND_PERFORMER,
+    MIN_ALIAS_KEY_LEN, MatchContext, discord_alias_key, thread_alias_key,
 )
 
 CHANNEL = "119283746551234567"
@@ -459,3 +459,68 @@ def test_an_initialised_name_is_exempt_from_the_length_floor_but_a_word_is_not()
     from matcher import suspicious_alias_key
     assert suspicious_alias_key("M.I.A.", dir_names=["Jane Doe"]) is None
     assert suspicious_alias_key("set", dir_names=["Jane Doe"])
+
+
+# --- pins on the PERMISSIVE changes ------------------------------------------ #
+# Across this PR the defects have been in WIDENED behaviour while every pin sat
+# on TIGHTENED behaviour, so the riskiest lines were revertible with a green
+# suite. Each test below fails when its permissive change is deleted.
+def test_a_re_point_wins_even_once_the_phrase_reads_as_chrome(kinded_app):
+    """PINS THE SCREEN BYPASS at server.learn's `screen()`.
+
+    Deleting the bypass leaves this failing. The earlier
+    `test_a_second_correction_overrules_the_first` does NOT cover it: with the
+    catch-all excluded from spread, its fixture only reaches spread 1, so the
+    screen passes anyway and the bypass is never load-bearing. It becomes
+    load-bearing on the THIRD correction, which is what this builds directly.
+    """
+    key = thread_alias_key("aster vale collection")
+    # The operator's own history has now put this phrase on two directories,
+    # which is exactly what the chrome measure looks for.
+    for chosen in ("Mary_Major", "acme-studio"):
+        kinded_app.store.add_example(
+            {"page": {"tags": ["Aster Vale Collection"],
+                      "site": "someforum.test"}}, chosen)
+    spread = kinded_app.store.phrase_dir_spread(other_dir="other")
+    assert spread.get("astervalecollection", 0) >= CHROME_DIR_SPREAD, \
+        "fixture must actually trip the screen, or this pins nothing"
+    # ...and the router already learned this key once.
+    kinded_app.store.upsert_alias(key, "Jane Doe", "someforum.test",
+                                  source="thread-slug",
+                                  evidence="aster vale collection")
+
+    out = kinded_app.learn({"context": forum_context([]),
+                            "chosenDir": "john-smith", "confirmed": True})
+    assert key in {w["key"] for w in out["written"]}, out["skipped"]
+    assert kinded_app.store.alias(key, "someforum.test") == "john-smith"
+
+
+def test_the_same_phrase_is_still_refused_when_there_is_nothing_to_re_point(
+        kinded_app):
+    """The other half of the pin: identical fixture, no existing row, refused.
+    Without this the test above would also pass if the screen were removed."""
+    for chosen in ("Mary_Major", "acme-studio"):
+        kinded_app.store.add_example(
+            {"page": {"tags": ["Aster Vale Collection"],
+                      "site": "someforum.test"}}, chosen)
+    out = kinded_app.learn({"context": forum_context([]),
+                            "chosenDir": "john-smith", "confirmed": True})
+    assert thread_alias_key("aster vale collection") not in \
+        {w["key"] for w in out["written"]}
+
+
+@pytest.mark.parametrize("junk", ["Download Video", "Free HD Clip",
+                                  "the and of"])
+def test_a_stopword_phrase_is_refused_even_well_over_the_length_floor(junk):
+    """PINS THE STOPWORD-FIRST RULE.
+
+    The earlier parametrized cases (`gif`, `mp4`, `www`, `com`) are all under
+    the 4-character floor, so the floor catches them and deleting the stopword
+    rule changes nothing. These fold to long keys — `downloadvideo` is thirteen
+    characters — and are caught ONLY by the stopword rule. That rule also has
+    to run FIRST: with no content tokens, the shared-vocabulary and handle
+    rules below it both pass silently.
+    """
+    from matcher import norm_key, suspicious_alias_key
+    assert len(norm_key(junk)) > MIN_ALIAS_KEY_LEN
+    assert suspicious_alias_key(junk, dir_names=["Jane Doe"])
