@@ -4356,3 +4356,384 @@ def test_wake_telemetry_is_metadata_only(telemetry):
         assert "secret" not in json.dumps(e), "no full URL / query ever in telemetry"
     finally:
         ext.stop(); srv.shutdown(); srv.server_close()
+
+
+# --------------------------------------------------------------------------- #
+# Silent-drop honesty + detector (2026-07-31 diagnosis)
+#
+# `extension_connected` is a bare OR across live instances, so one healthy Brave
+# profile reported the bridge as UP for as long as it lived while a named
+# instance (`work`) had silently dropped. The field cannot be redefined without
+# breaking callers that legitimately ask "is anything up", so the truth is
+# carried alongside it: `known_instances` (every routing key seen this process
+# lifetime, each with `connected`) and `missing`.
+#
+# Alongside that, `instance_lost` gives the drop a journal trace naming the last
+# command the instance never answered — the operator's second drop produced no
+# evidence at all because nothing was dispatched while it was down.
+# --------------------------------------------------------------------------- #
+def _drop_registry():
+    """A registry on a controllable clock, with `work` and `personal` polled in
+    once so both are KNOWN. Returns (reg, clock-list)."""
+    clock = [1000.0]
+    reg = S.Registry(clock=lambda: clock[0])
+    with reg._cond:  # noqa: SLF001 — white-box on purpose: no HTTP needed
+        reg._register_locked("id-work", "work")          # noqa: SLF001
+        reg._register_locked("id-personal", "personal")  # noqa: SLF001
+    return reg, clock
+
+
+def test_known_instances_reports_a_dropped_instance_as_not_connected():
+    reg, clock = _drop_registry()
+    known, missing = reg.known_snapshot()
+    assert {k["key"] for k in known} == {"work", "personal"}
+    assert all(k["connected"] for k in known)
+    assert missing == []
+    # `work` stops polling; `personal` keeps polling.
+    clock[0] += S.CONNECT_STALE_S + 1
+    with reg._cond:  # noqa: SLF001
+        reg._instances["personal"].last_poll = clock[0]  # noqa: SLF001
+    known, missing = reg.known_snapshot()
+    by_key = {k["key"]: k for k in known}
+    assert by_key["work"]["connected"] is False
+    assert by_key["personal"]["connected"] is True
+    assert [m["key"] for m in missing] == ["work"]
+
+
+def test_a_long_gone_instance_is_forgotten_so_health_does_not_nag_forever():
+    """Without a forget path the registry remembers every key for its whole
+    process lifetime, so an operator who normally runs ONE profile would see a
+    permanent `other: DISCONNECTED` line — a warning that is always on is a
+    warning nobody reads."""
+    reg, clock = _drop_registry()
+    clock[0] += S.CONNECT_STALE_S + 1
+    _known, missing = reg.known_snapshot()
+    assert {m["key"] for m in missing} == {"work", "personal"}
+    clock[0] += S.KNOWN_FORGET_S            # both now long past the cutoff
+    known, missing = reg.known_snapshot()
+    assert known == [] and missing == []
+
+
+def test_INVARIANT_GUARD_a_freshly_polled_instance_is_not_aged_out():
+    """⚠ INVARIANT GUARD, **not** coverage of the live-exemption clause.
+
+    This pins only "a recent `last_poll` beats the age-out", i.e. that the cutoff
+    keys off staleness rather than uptime. It CANNOT fail if the
+    `id(inst) not in live_ids` term is deleted from the age-out, because
+    `now - last_poll == 0` already makes the predicate false on its own. The
+    clause itself is pinned by
+    test_forget_exempts_an_instance_live_via_an_in_flight_poll below.
+
+    Kept because it is the case an operator actually has (a profile polling for a
+    week must never be reported as gone), and it is cheap."""
+    reg, clock = _drop_registry()
+    clock[0] += S.KNOWN_FORGET_S * 3
+    with reg._cond:  # noqa: SLF001
+        for inst in reg._instances.values():  # noqa: SLF001
+            inst.last_poll = clock[0]         # still polling
+    known, missing = reg.known_snapshot()
+    assert {k["key"] for k in known} == {"work", "personal"}
+    assert missing == []
+
+
+def test_forget_exempts_an_instance_live_via_an_in_flight_poll():
+    """The live-exemption term in the age-out, pinned for real.
+
+    `_live_instances_locked` calls an instance alive on EITHER a fresh
+    `last_poll` OR `active_polls > 0`. Only the second disjunct can be true while
+    `last_poll` is ancient, so that is the state this constructs: a stale
+    timestamp AND a poll thread in flight. Such an instance must NOT be forgotten
+    — forgetting a connection that is mid-request is the one thing the age-out
+    must never do.
+
+    ⚠ Honest scope: this state is believed UNREACHABLE in production. `poll()`
+    stamps `last_poll` at entry and again in its `finally`, so an in-flight poll's
+    timestamp can be at most `poll_timeout` old — never past KNOWN_FORGET_S. The
+    exemption is defensive. This test exists so the clause cannot be deleted as
+    'dead' without a red test, since the reasoning that makes it dead lives in a
+    different method."""
+    clock = [1000.0]
+    reg = S.Registry(clock=lambda: clock[0])
+    with reg._cond:  # noqa: SLF001
+        inst = reg._register_locked("id-work", "work")  # noqa: SLF001
+        inst.active_polls = 1                 # a poll thread is parked in _cond.wait
+    clock[0] += S.KNOWN_FORGET_S * 2          # ...with an ancient last_poll
+    known, missing = reg.known_snapshot()
+    assert [k["key"] for k in known] == ["work"], \
+        "an instance with a poll IN FLIGHT must never be aged out"
+    assert known[0]["connected"] is True
+    assert missing == []
+
+
+# --- `browser health`'s DISCONNECTED line (the only operator-visible surface) - #
+def _serve_canned_health(payload):
+    """A stub bridge that answers /health with `payload` verbatim, so the CLI's
+    rendering can be driven against server shapes the real Registry cannot
+    produce (an OLD server with no `known_instances`, a malformed entry)."""
+    class H(S.BaseHTTPRequestHandler):
+        def do_GET(self):  # noqa: N802
+            body = json.dumps(payload).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *a):  # silence
+            pass
+
+    srv = S.ThreadingHTTPServer(("127.0.0.1", 0), H)
+    srv.daemon_threads = True
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    return srv
+
+
+def _run_health(srv, tmp_path):
+    tokf = tmp_path / "token"
+    tokf.write_text("health-token\n")
+    env = dict(os.environ)
+    env.update(BROWSER_BRIDGE_HOST="127.0.0.1",
+               BROWSER_BRIDGE_PORT=str(srv.server_address[1]),
+               BROWSER_BRIDGE_TOKEN_FILE=str(tokf))
+    return subprocess.run([str(BROWSER_BIN), "health"], env=env,
+                          capture_output=True, text=True, timeout=30)
+
+
+def test_browser_health_prints_one_DISCONNECTED_line_and_keeps_stdout_json(tmp_path):
+    """The whole point of this PR, exercised through the REAL CLI: a dropped
+    named instance is glanceable, and stdout stays machine-parseable."""
+    srv = _serve_canned_health({
+        "ok": True, "extension_connected": True, "count": 1, "instances": [],
+        "known_instances": [
+            {"key": "personal", "connected": True, "last_seen": "2026-07-31T22:00:00Z",
+             "last_unanswered_op": None},
+            {"key": "work", "connected": False, "last_seen": "2026-07-31T18:02:34Z",
+             "last_unanswered_op": "frames"},
+        ],
+        "missing": [{"key": "work"}]})
+    try:
+        r = _run_health(srv, tmp_path)
+        assert r.returncode == 0, r.stderr
+        json.loads(r.stdout)                    # stdout is UNBROKEN JSON
+        lines = [x for x in r.stderr.splitlines() if x.strip()]
+        assert lines == [
+            "browser: work: DISCONNECTED (last seen 2026-07-31T18:02:34Z, "
+            "last unanswered op: frames)"], r.stderr
+    finally:
+        srv.shutdown(); srv.server_close()
+
+
+def test_browser_health_is_SILENT_when_every_known_instance_is_connected(tmp_path):
+    srv = _serve_canned_health({
+        "ok": True, "extension_connected": True, "count": 1, "instances": [],
+        "known_instances": [{"key": "work", "connected": True,
+                             "last_seen": "2026-07-31T22:00:00Z"}],
+        "missing": []})
+    try:
+        r = _run_health(srv, tmp_path)
+        assert r.returncode == 0 and r.stderr.strip() == "", r.stderr
+    finally:
+        srv.shutdown(); srv.server_close()
+
+
+def test_browser_health_degrades_silently_against_an_OLD_server(tmp_path):
+    """`browser` is deployed as a symlink to the working tree, so it goes live on
+    `git pull` — BEFORE the switch that restarts server.py. It therefore WILL run
+    against a server with no `known_instances`, and must stay silent and rc 0."""
+    srv = _serve_canned_health({"ok": True, "extension_connected": True,
+                                "count": 1, "instances": [{"key": "work"}]})
+    try:
+        r = _run_health(srv, tmp_path)
+        assert r.returncode == 0 and r.stderr.strip() == "", r.stderr
+        json.loads(r.stdout)
+    finally:
+        srv.shutdown(); srv.server_close()
+
+
+def test_browser_health_survives_a_malformed_known_instances(tmp_path):
+    """render_missing is the LAST command of the `health` arm, so it owns the
+    exit code — a traceback would turn a working probe into rc 1. The try must
+    wrap the whole walk, not just the JSON parse."""
+    srv = _serve_canned_health({"ok": True, "extension_connected": True,
+                                "count": 0, "instances": [],
+                                "known_instances": ["not-a-dict", 7, None]})
+    try:
+        r = _run_health(srv, tmp_path)
+        assert r.returncode == 0, r.stderr
+        assert "Traceback" not in r.stderr
+    finally:
+        srv.shutdown(); srv.server_close()
+
+
+def test_poll_timeout_at_or_above_the_extension_poll_budget_warns(capsys):
+    """From extension 0.4.0 on, the extension aborts its own /poll at
+    POLL_BUDGET_MS (40s); raising the server's poll_timeout to/past that makes
+    every poll abort client-side and the extension backoff-spin. Nothing can
+    enforce it across the two processes, so it must at least be said out loud.
+
+    The warning MUST carry its version scope: the extension this server currently
+    ships against (0.3.1) does not bound the poll fetch at all, so an unscoped
+    message would describe behaviour that does not exist yet to an operator who
+    is already debugging."""
+    capsys.readouterr()
+    S._warn_poll_timeout_vs_extension_budget(25.0)   # noqa: SLF001 — the default
+    assert capsys.readouterr().err == "", "the default must be silent"
+    S._warn_poll_timeout_vs_extension_budget(45.0)   # noqa: SLF001
+    lines = [json.loads(x) for x in capsys.readouterr().err.splitlines() if x]
+    assert [x["event"] for x in lines] == ["config_warning"]
+    assert lines[0]["reason"] == "poll_timeout_exceeds_extension_poll_budget"
+    assert lines[0]["applies_to_extension"] == "0.4.0+"
+    assert "0.4.0" in lines[0]["detail"], \
+        "the claim must name the extension version it applies to"
+
+
+def test_extension_connected_still_true_but_known_instances_tells_the_truth():
+    """REGRESSION for the exact reported dishonesty: with two profiles wired up
+    and one dropped, the boolean stays true (by design, for its existing
+    callers) — and the drop is now visible in the SAME payload."""
+    reg, clock = _drop_registry()
+    clock[0] += S.CONNECT_STALE_S + 1
+    with reg._cond:  # noqa: SLF001
+        reg._instances["personal"].last_poll = clock[0]  # noqa: SLF001
+    assert reg.connected is True, \
+        "extension_connected must NOT be silently redefined — callers depend on it"
+    _known, missing = reg.known_snapshot()
+    assert [m["key"] for m in missing] == ["work"], \
+        "the dropped instance must be nameable from the same payload"
+
+
+def test_health_payload_carries_known_instances_and_missing():
+    srv, _ = _serve()
+    ext = FakeExtension(srv, instance_id="fake-1", label="work")
+    ext.start()
+    try:
+        assert _wait_connected(srv, want=True)
+        st, body = _req(srv, "GET", "/health")
+        assert st == 200
+        assert [k["key"] for k in body["known_instances"]] == ["work"]
+        assert body["known_instances"][0]["connected"] is True
+        assert body["known_instances"][0]["last_seen"].endswith("Z")
+        assert body["missing"] == []
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
+def test_instance_lost_is_logged_once_and_names_the_unanswered_command(capsys):
+    """The detector. A drop must leave a journal trace naming the op the
+    instance never came back from — the fact that would have identified `frames`
+    on 2026-07-29 without any code reading."""
+    clock = [1000.0]
+    reg = S.Registry(clock=lambda: clock[0])
+    with reg._cond:  # noqa: SLF001
+        inst = reg._register_locked("id-work", "work")  # noqa: SLF001
+        # Model a dispatched-but-never-answered command (what `submit` records).
+        inst.last_dispatch = {"id": "abc123", "op": "frames", "at": 0.0}
+    capsys.readouterr()                       # drop registration noise
+    clock[0] += S.CONNECT_STALE_S + 5
+    reg.snapshot()
+    reg.snapshot()                            # a second probe must NOT re-log
+    lines = [json.loads(x) for x in capsys.readouterr().err.splitlines() if x]
+    lost = [x for x in lines if x["event"] == "instance_lost"]
+    assert len(lost) == 1, f"edge-triggered, not per-probe: {lines}"
+    assert lost[0]["key"] == "work"
+    assert lost[0]["last_op"] == "frames"
+    assert lost[0]["last_id"] == "abc123"
+    assert lost[0]["stale_s"] >= S.CONNECT_STALE_S
+
+
+def test_instance_connected_is_logged_when_a_dropped_instance_returns(capsys):
+    clock = [1000.0]
+    reg = S.Registry(clock=lambda: clock[0])
+    with reg._cond:  # noqa: SLF001
+        reg._register_locked("id-work", "work")  # noqa: SLF001
+    clock[0] += S.CONNECT_STALE_S + 5
+    reg.snapshot()                            # → instance_lost
+    with reg._cond:  # noqa: SLF001
+        reg._instances["work"].last_poll = clock[0]  # noqa: SLF001
+    capsys.readouterr()
+    reg.snapshot()                            # → instance_connected
+    lines = [json.loads(x) for x in capsys.readouterr().err.splitlines() if x]
+    assert [x["event"] for x in lines if x["event"].startswith("instance_")] \
+        == ["instance_connected"]
+
+
+def test_last_dispatch_is_cleared_once_the_command_is_answered():
+    """A healthy instance must not report a phantom `last_unanswered_op` — that
+    would make every future drop report a stale, misleading op name."""
+    srv, reg = _serve()
+    ext = FakeExtension(srv, instance_id="fake-1", label="work")
+    ext.start()
+    try:
+        assert _wait_connected(srv, want=True)
+        st, _ = _req(srv, "POST", "/cmd", {"op": "tabs"})
+        assert st == 200
+        known, _missing = reg.known_snapshot()
+        assert known[0]["last_unanswered_op"] is None
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
+def test_last_unanswered_op_survives_a_swallowed_command():
+    """The wedge signature: the extension picked the command up and never
+    answered. That op name is exactly what the detector must retain."""
+    srv, reg = _serve(cmd_timeout=0.3)
+    ext = FakeExtension(srv, instance_id="fake-1", label="work", swallow=True)
+    ext.start()
+    try:
+        assert _wait_connected(srv, want=True)
+        st, _ = _req(srv, "POST", "/cmd", {"op": "frames"})
+        assert st == 504
+        known, _missing = reg.known_snapshot()
+        assert known[0]["last_unanswered_op"] == "frames"
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
+# --- fail FAST on an unresolvable target (never wait out cmd_timeout) -------- #
+def test_unknown_instance_fails_fast_not_after_cmd_timeout():
+    """MEASURED, not asserted-by-construction: a mistyped/unknown --instance must
+    be rejected in well under the 20s cmd_timeout. `cmd_timeout` here is 5s, so a
+    resolution error that took the timeout path would be unmissable."""
+    srv, _ = _serve(cmd_timeout=5.0)
+    ext = FakeExtension(srv, instance_id="fake-1", label="work")
+    ext.start()
+    try:
+        assert _wait_connected(srv, want=True)
+        t0 = time.monotonic()
+        st, body = _req(srv, "POST", "/cmd",
+                        {"op": "tabs", "target": "nosuchlabel"})
+        elapsed = time.monotonic() - t0
+        assert st == 404 and body["error"] == "unknown_instance"
+        assert elapsed < 1.0, f"took {elapsed:.2f}s — it went down a waiting path"
+        # And it names what IS known, so a typo and a silent drop are separable.
+        assert [k["key"] for k in body["known_instances"]] == ["work"]
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
+def test_no_extension_fails_fast_and_names_the_instance_that_dropped():
+    """A profile that HAS dropped (no in-flight poll, last_poll older than
+    CONNECT_STALE_S) must fail fast and be NAMED.
+
+    ⚠ Scope of this claim, measured: this is the settled state AFTER the
+    transition window. While an instance still has a poll thread in flight the
+    server correctly considers it live and the command waits out `cmd_timeout` —
+    that bounded (≤ poll_timeout + CONNECT_STALE_S) window is unchanged here and
+    is not something a resolution-time check can remove.
+    """
+    clock = [1000.0]
+    reg = S.Registry(clock=lambda: clock[0])
+    with reg._cond:  # noqa: SLF001
+        reg._register_locked("fake-1", "work")  # noqa: SLF001
+    clock[0] += S.CONNECT_STALE_S + 1          # it stopped polling; nothing in flight
+    srv, _ = _serve(cmd_timeout=5.0, registry=reg)
+    try:
+        t0 = time.monotonic()
+        st, body = _req(srv, "POST", "/cmd", {"op": "tabs", "target": "work"})
+        elapsed = time.monotonic() - t0
+        assert st == 503 and body["error"] == "extension_not_connected"
+        assert elapsed < 1.0, f"took {elapsed:.2f}s — it went down a waiting path"
+        assert [k["key"] for k in body["known_instances"]] == ["work"]
+        assert body["known_instances"][0]["connected"] is False
+    finally:
+        srv.shutdown(); srv.server_close()

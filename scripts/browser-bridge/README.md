@@ -785,6 +785,55 @@ load path is an open live-verification item.
 or a new field in `ping`'s reply). Without one, reload-vs-restart is
 unfalsifiable — that ambiguity cost three full Brave restarts in one session.
 
+### `known_instances` / `missing` — a dead named instance can no longer hide
+
+`/health`'s `extension_connected` is a bare OR across live instances, so with two
+profiles wired up it stayed `true` while `work` had been gone for an hour. It is
+**not** redefined (callers legitimately use it for "is anything up"); the truth is
+carried alongside:
+
+* `known_instances[]` — every routing key seen this process lifetime, each with
+  `connected`, `last_seen` (ISO-8601 UTC), `last_seen_age_s` and
+  `last_unanswered_op`;
+* `missing[]` — the subset that is no longer live.
+
+A key that has been gone longer than `KNOWN_FORGET_S` (24h) is dropped from both,
+so an operator who normally runs one profile does not get a permanent
+`other: DISCONNECTED` nag. A warning that is always on is a warning nobody reads.
+
+⚠ **`last_unanswered_op` means "not answered within `cmd_timeout`", not "never
+answered".** A late result that arrives after the caller's `submit` gave up is
+dropped, and `last_dispatch` is only cleared on the delivering path — so the field
+can name an op that eventually completed. It is a lead, not a verdict.
+
+`browser health` renders one **stderr** line per gone instance (stdout stays
+machine-parseable JSON):
+
+```
+browser: work: DISCONNECTED (last seen 2026-07-31T18:02:34Z, last unanswered op: frames)
+```
+
+The same `known_instances` block rides on the fail-fast `404 unknown_instance`
+and `503 extension_not_connected` bodies, so a mistyped `--instance` and a
+profile that silently died are distinguishable at the point of failure.
+
+**The detector.** The server logs `instance_lost` (edge-triggered, once per
+transition) naming the key, the staleness, and **the id/op of the last command
+dispatched to it that never produced a result** — the single fact that would have
+identified `frames` on 2026-07-29 without any code reading — plus
+`instance_connected` when it comes back. Before this, a drop left no trace at all
+unless somebody happened to send a command into it, which is exactly why one of
+the two observed drops appears nowhere in the journal.
+
+⚠ **The detector is PROBE-DRIVEN, not autonomous.** There is no reaper thread:
+liveness is evaluated inside `_live_instances_locked`, which only runs when
+something asks (`/health`, `/instances`, `/whoami`, a `/cmd` dispatch). So
+detection latency is "time until the next probe", and the `stale_s` in the event
+is measured at probe time, not at the moment of the drop. A bridge nobody touches
+for an hour logs `instance_lost` an hour late, with an hour of staleness. That is
+a deliberate trade — one definition of "live", no background thread that could
+disagree with it — but it is not a monitor.
+
 ### Where the extension loads from (git-immune deploy path)
 
 `home-manager switch` copies `extension/` to **`~/.local/share/browser-bridge-ext/`**
