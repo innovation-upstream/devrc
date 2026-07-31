@@ -9,9 +9,12 @@ Priority legend: **🔴 CRITICAL** (security/data/prod — never compromise) · 
 - **Deployed ≠ verified**: State them separately. "Deployed 0.3.6; not yet verified against the click path" is honest. "Shipped and verified" when you only confirmed the rollout is not.
 - **For UI/interaction bugs, reproduce the user's actual click path** (Playwright) before claiming fixed — don't infer from the code.
 - **When you can't verify, say so plainly** and hand the check to the user with exact steps.
+- **One measurement is not a general claim**: when the behavior depends on a dimension — depth, host, revision, cwd, timing, size, permissions — measure at ≥2 points (a boundary *and* a middle) before asserting it; behavior can differ, and even invert, between them. **Name the points you measured** so the claim carries its own scope. Applies double inside a code comment or test assertion — those outlive the session and get trusted on sight.
 
 ✅ "Deployed. Reproduced the FAB click via Playwright — modal opens. Verified."
 ❌ "FAB fixed and verified on-cluster." (rollout succeeded; click still does nothing)
+✅ "Tested at repo root (errors), depth 1 (stages whole tree), depth 2 (scoped) — the guard must block depth 1."
+❌ "Verified by execution that `git add ..` doesn't stage the tree." (only the repo root was tested)
 
 ## Memory Is a Hypothesis, Not Ground Truth 🔴
 **Triggers**: acting on a remembered fact — MEMORY.md, CLAUDE.md notes, prior diagnosis
