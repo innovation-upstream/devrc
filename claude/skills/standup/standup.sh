@@ -190,13 +190,29 @@ scan_state(){
 # Cross-repo initiative ledger: momentum counts, owed/held items (→ ACTIONS),
 # initiative-tied open PRs, and the most-stalled. Runs initiative-scan telemetry-OFF
 # (fast, no creds); the full telemetry view is `/initiatives`. Skips gracefully if
-# the script / nix-shell / jq aren't available.
+# the script / python3 / jq aren't available.
 scan_initiatives(){
   [ -f "$ISCAN" ] || { echo "  (initiative-scan not present — skipped)"; return; }
-  have nix-shell && have jq || { echo "  (nix-shell/jq unavailable — skipped)"; return; }
-  local json
-  json=$(nix-shell -p "python3.withPackages(p:[p.requests])" --run \
-    "python $ISCAN --json --days $IDAYS" 2>/dev/null)
+  have jq || { echo "  (jq unavailable — skipped)"; return; }
+  local json raw
+  # Call python3 DIRECTLY (mirrors sync.py, which shells out with sys.executable
+  # and has never hit this). A `$(nix-shell --run ...)` capture is NOT clean on
+  # this box: a repo `flake.nix` shellHook echoes a greeting to STDOUT on shell
+  # entry — an open-PR digest built from `gh pr list` (so the PR set tracks the
+  # cwd repo's git remote), a "source .venv/bin/activate" hint elsewhere. That
+  # chatter lands in front of the JSON, so jq died with "Invalid numeric literal
+  # at line 2, column 5" ×4 and every initiative field came back empty (STATUS
+  # showed a bare `Initiatives a/s/st`). The scan needs `requests` only when
+  # telemetry is ON, and this call is deliberately telemetry-OFF.
+  if have python3; then raw=$(python3 "$ISCAN" --json --days "$IDAYS" 2>/dev/null); fi
+  # Fallback only if the system python3 can't run it (e.g. a missing import on
+  # the laptop); the slice below then strips whatever init chatter came with it.
+  if [ -z "${raw:-}" ] && have nix-shell; then
+    raw=$(nix-shell -p "python3.withPackages(p:[p.requests])" --run \
+      "python $ISCAN --json --days $IDAYS" 2>/dev/null)
+  fi
+  # Defensive: keep only from the first line that opens the JSON object.
+  json=$(printf '%s' "${raw:-}" | sed -n '/^{/,$p')
   [ -z "$json" ] && { echo "  (initiative-scan no output — skipped)"; return; }
 
   read -r INIT_ACTIVE INIT_SLOW INIT_STALL < <(printf '%s' "$json" | jq -r '

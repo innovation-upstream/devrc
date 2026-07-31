@@ -52,10 +52,24 @@ health` also shows the build** — each instance's loaded `extension_version` vs
 bridge's `extension_version_current` (repo manifest); a mismatch = stale.
 
 **⚠ Reload ↻ is UNRELIABLE — a full Brave restart is the reliable fix.** The
-extension's long-poll keeps the OLD service worker permanently alive, so clicking
-↻ in `brave://extensions` often does NOT swap in the new build. If a reload
-doesn't take (the op still returns `unknown_op`, or `health` still shows the old
-`extension_version`), tell the user to **fully quit and reopen Brave**.
+extension holds a continuous long-poll, which keeps its MV3 service worker
+permanently alive, so clicking ↻ in `brave://extensions` often does NOT swap in the
+new build (observed: ↻ twice, old code still running). If a reload doesn't take (the
+op still returns `unknown_op`, or `health` still shows the old `extension_version`),
+tell the user to **fully quit and reopen Brave** — that picks up the new build
+immediately. Toggling the extension off→on is the second-best option.
+
+**Diagnose in THIS order — don't send the user to reload three times first:**
+
+```bash
+# 1. Is the op even ON DISK? If not, no reload will EVER help — the source is behind.
+grep -c "async open(cmd)" ~/workspace/devrc/scripts/browser-bridge/extension/service_worker.js
+# 2. Extension or bridge server? cmd_ok for the failing op = it round-tripped fine
+#    and the EXTENSION answered unknown_op → it's stale, not the server.
+journalctl --user -u browser-bridge --since "-30 min" --no-pager | grep -a '"op"'
+# 3. Quick liveness probe for the CDP-era build (use the real instance key):
+$BB --instance work frames    # a frame list = CDP build live; unknown_op = stale
+```
 
 ## `eval` gotchas — a `null` result does NOT mean the bridge is down
 
@@ -68,6 +82,9 @@ doesn't take (the op still returns `unknown_op`, or `health` still shows the old
 - **Strict page CSP silently blocks the injected script — notably GitHub.** On a
   GitHub page even `document.title` comes back `null`, no error. **Use `html` /
   `text` there — they work**, because they don't inject script.
+- 🔴 **An EMPTY/loading DOM usually means a HIDDEN tab, not a broken site.** Before
+  concluding anything from zero content, run `eval 'document.visibilityState'` —
+  `"hidden"` makes the read meaningless. See "Driving a throttled/backgrounded SPA".
 
 So on a `null`: first suspect a multi-statement body, then page CSP; fall back to
 `text`/`html` before concluding the bridge is down.
@@ -267,6 +284,36 @@ come back empty or half-built, and in-frame `click`/`type` hit elements that don
 exist yet. Verified case: `model-benchmarking.civit.ai` (an OOPIF inside a
 `civitai.com` tab) stayed blank while backgrounded.
 
+🔴 **`open` creates the tab HIDDEN, and a hidden tab does not render a JS-driven
+SPA** (Chromium throttles its timers to ~1/min). `text`/`html`/`eval` then return
+the page SHELL — loading spinners, zero content, often zero network requests fired
+— which is **indistinguishable from a genuinely broken frontend**.
+
+- 🔴 **Check `document.visibilityState` FIRST**
+  (`browser --tab <id> eval 'document.visibilityState'`). If `"hidden"`, any
+  "nothing rendered / no requests fired" reading is MEANINGLESS. (Current builds
+  also self-announce it as `data.hidden:true` + a stderr warning — older ones don't.)
+- **Spoofing it afterwards does NOT recover the page** —
+  `Object.defineProperty(document,'visibilityState',…)` changes nothing: the
+  throttling is browser-enforced and the app's fetch decisions are already made.
+  **`activate` is the only fix.**
+- 🔴 **"Is this page broken for REAL users?" is not a browser question.** Answer it
+  from server-side/real-user evidence — RUM, metrics, pod health, an anonymous
+  `curl`. Use the browser probe to EXPLAIN a failure telemetry already shows, never
+  to DISCOVER one.
+
+**Real false-outage report (why this rule is 🔴):** an agent read `civitai.com/apps`
+in an owned background tab, saw 0 content cards / 3 spinners / 0 tRPC calls for a
+logged-in user with every flag on, and declared the production store broken — then
+escalated to "site-wide" when a second page looked the same. Every corroborating
+check shared the identical flaw: a second profile on a different account reproduced
+it exactly (also a background tab); `?cb=<ts>` cache-busting didn't help (still
+hidden); and a `next.router.push` soft-nav inside the hidden tab threw a plausible
+`TypeError` + a minified React error that **the probe itself caused** (zero
+occurrences in 2h of real-user telemetry). It was settled only by leaving the
+browser: RUM showed ~24k content-paint samples in 30 min, pods healthy, anonymous
+`curl` 200.
+
 `activate` fixes this by **foregrounding the tab** so it un-throttles
 (`visibilityState:"visible"`) and the app paints. On i3 the foregrounding is done
 **host-side via `i3-msg`** (Chrome's own `tabs.update`/`windows.update` is a no-op
@@ -282,6 +329,18 @@ $BB --instance work activate            # → visibilityState:"visible", app ren
 $BB --instance work frames              # now the OOPIF is listed
 $BB --instance work --frame model-benchmarking text    # read inside it
 $BB --instance work --frame model-benchmarking click 'button:has-text("Grid")'  # drive it
+```
+
+**Be courteous — give the user their tab back** (verified working). Note the
+active tab BEFORE stealing focus, then restore it:
+
+```bash
+PREV=$($BB --instance work tabs | jq -r '.result.data.tabs[]|select(.active)|.id' | head -1)
+$BB --instance work open https://civitai.com/apps   # (active:true is per WINDOW — take the one you steal from)
+$BB --instance work activate                        # foreground YOURS; now reads are real
+$BB --instance work text                            # ...read / screenshot / drive...
+$BB --instance work --tab "$PREV" activate          # restore the user's tab
+$BB --instance work close                           # then close yours
 ```
 
 **Caveats (document honestly):**
