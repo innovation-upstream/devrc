@@ -350,39 +350,52 @@ def test_a_uniquified_name_still_matches_its_routing_decision(live, library):
     assert status == 200, body
 
 
-def test_a_download_decided_while_the_sidecar_was_DOWN_can_be_corrected(
-        live, library):
-    """No route row exists at all. Without a fallback proof a single sidecar
-    restart permanently orphans that file."""
+def test_a_download_whose_routing_record_was_LOST_is_refused(live, library):
+    """FAIL CLOSED. There is no fallback here on purpose.
+
+    A "the extension says this download is recent and named X" fallback was
+    tried and removed: with no routing decision to check it against there is
+    nothing to verify the claim WITH, so it reduces to trusting the caller --
+    on the one code path whose entire purpose is to refuse a move it cannot
+    prove. A live payload written in the last hour with a matching name is
+    exactly the shape that would get through.
+
+    The cost of refusing is small and recoverable; the cost of the alternative
+    is a broken seed."""
     (library / "other" / "late.mp4").write_text("payload")
     status, body, _ = call(live, "POST", "/relocate",
                            {"fromRelPath": "other/late.mp4",
                             "toDir": "Jane Doe", "downloadId": 54,
                             "downloadFilename": "late.mp4"})
-    assert status == 200, body
-    assert (library / "Jane Doe" / "late.mp4").exists()
+    assert status == 400
+    assert (library / "other" / "late.mp4").exists()
+    assert not (library / "Jane Doe" / "late.mp4").exists()
 
 
-def test_that_fallback_still_needs_the_download_to_name_itself(live, library):
+def test_that_refusal_says_the_record_was_lost_so_it_is_diagnosable(live,
+                                                                    library):
+    """"Refused" with no reason is a mystery bug report. Name the cause."""
     (library / "other" / "late.mp4").write_text("payload")
-    status, body, _ = call(live, "POST", "/relocate",
-                           {"fromRelPath": "other/late.mp4",
-                            "toDir": "Jane Doe", "downloadId": 55})
-    assert status == 400
-    assert "no download filename supplied" in body["detail"]
+    _, body, _ = call(live, "POST", "/relocate",
+                      {"fromRelPath": "other/late.mp4",
+                       "toDir": "Jane Doe", "downloadId": 55})
+    detail = body["detail"]
+    assert "no routing decision on record" in detail
+    assert "restarted" in detail, "the likely cause must be named"
+    assert "by hand" in detail, "and the way out"
 
 
-def test_that_fallback_refuses_a_file_that_is_not_recent(live, library, clock):
-    old = library / "other" / "ancient.mp4"
-    old.write_text("payload")
-    os.utime(old, (clock.now - 86400 * 30, clock.now - 86400 * 30))
-    status, body, _ = call(live, "POST", "/relocate",
-                           {"fromRelPath": "other/ancient.mp4",
-                            "toDir": "Jane Doe", "downloadId": 56,
-                            "downloadFilename": "ancient.mp4"})
+def test_an_extension_supplied_filename_cannot_substitute_for_a_record(live,
+                                                                       library):
+    """Nothing the caller asserts may create provenance out of nothing."""
+    recent = library / "Jane Doe" / "seeding-payload.mkv"
+    recent.write_text("a payload written moments ago")
+    status, _, _ = call(live, "POST", "/relocate",
+                        {"fromRelPath": "Jane Doe/seeding-payload.mkv",
+                         "toDir": "john-smith", "downloadId": 56,
+                         "downloadFilename": "seeding-payload.mkv"})
     assert status == 400
-    assert "predates" in body["detail"]
-    assert old.exists()
+    assert recent.exists()
 
 
 # --- what the guard actually proves ---------------------------------------- #

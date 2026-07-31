@@ -60,13 +60,6 @@ MAX_BODY = 256 * 1024
 # would-be routing decision by hours or days, so a few seconds costs nothing.
 MTIME_SLACK_S = 5.0
 
-# The fallback baseline used when there is no routing decision on record (the
-# sidecar was down when the download was decided). The file must have been
-# written within this window, which a pre-existing seeding payload never has
-# been. Deliberately generous enough to survive a user who leaves the toast
-# alone for a while, and narrow enough to exclude the library's history.
-RECENT_FILE_WINDOW_S = 3600.0
-
 _LOOPBACK = frozenset({"127.0.0.1", "::1", "localhost"})
 _ALLOWED_HOST_HEADERS = frozenset({"127.0.0.1", "localhost", "::1", "[::1]"})
 
@@ -231,8 +224,7 @@ class App:
         return {"ok": True, "dir": name, "created": not existed,
                 "etag": self.dirs.etag()}
 
-    def _prove_owned(self, rel_path: str, src, download_id: str,
-                     download_filename: str = "") -> None:
+    def _prove_owned(self, rel_path: str, src, download_id: str) -> None:
         """Refuse unless this router demonstrably created `rel_path`.
 
         WHY THIS IS NOT OPTIONAL: the library root is a live qBittorrent
@@ -278,27 +270,28 @@ class App:
         disk_name = rel_path.rsplit("/", 1)[-1]
         route = self.store.route_for_download(download_id)
 
-        if route is not None:
-            expected = str(route.get("filename") or "")
-            baseline = float(route.get("ts") or 0.0)
-            proof = "the routing decision on record"
-        else:
-            # The sidecar was down when the download was decided, so there is
-            # no route row -- but the file still has to be correctable, or a
-            # single sidecar restart permanently orphans it and D3's learning
-            # loop dies with it. The fallback proof is deliberately narrower:
-            # the caller must say which download it is talking about, the name
-            # must match, and the file must be genuinely RECENT rather than
-            # merely newer than some decision.
-            expected = str(download_filename or "")
-            baseline = self.clock() - RECENT_FILE_WINDOW_S
-            proof = "a recent download reported by the extension"
-            if not expected:
-                raise UnsafeName(
-                    "refusing to move a file this router cannot prove it "
-                    "created (no routing decision on record for this download, "
-                    "and no download filename supplied to identify it)")
+        # NO ROUTE ROW = NO PROOF. There is deliberately no fallback here.
+        #
+        # A "the extension says this download is recent and named X" fallback
+        # was tried and removed: with no routing decision to check it against
+        # there is nothing to verify the claim WITH, so it reduces to trusting
+        # the caller -- on the one code path whose entire purpose is to refuse
+        # a move it cannot prove. A live torrent payload written in the last
+        # hour with a matching name is exactly the shape that gets through.
+        #
+        # The cost of refusing is small and recoverable: a download whose
+        # decision was lost (the sidecar restarted between the download and
+        # the correction) cannot be auto-undone, and the user moves it by hand.
+        # The cost of the alternative is a broken seed.
+        if route is None:
+            raise UnsafeName(
+                "refusing to move a file this router cannot prove it created: "
+                "there is no routing decision on record for this download, so "
+                "the record was lost — most likely the sidecar restarted "
+                "between the download and this correction. Move the file by "
+                "hand; the router will route the next one normally.")
 
+        expected = str(route.get("filename") or "")
         if not expected:
             raise UnsafeName(
                 "refusing to move a file this router cannot prove it created "
@@ -313,11 +306,11 @@ class App:
             mtime = src.stat().st_mtime
         except OSError as exc:
             raise UnsafeName(f"cannot stat the source: {exc}") from exc
-        if mtime < baseline - MTIME_SLACK_S:
+        if mtime < float(route.get("ts") or 0.0) - MTIME_SLACK_S:
             raise UnsafeName(
                 "refusing to move a file this router cannot prove it created "
-                f"(it predates {proof}, so it was already on disk — quite "
-                f"possibly a live torrent payload)")
+                "(it predates its own routing decision, so it was already on "
+                "disk — quite possibly a live torrent payload)")
 
         self.store.record_routed_file(rel_path, download_id,
                                       rel_path.split("/", 1)[0])
@@ -334,8 +327,7 @@ class App:
             raise FileNotFoundError(f"not a file: {rel_path!r}")
         # Fail closed BEFORE anything is moved.
         self._prove_owned(str(rel_path), src,
-                          str(payload.get("downloadId") or ""),
-                          str(payload.get("downloadFilename") or ""))
+                          str(payload.get("downloadId") or ""))
         dest_dir = safe_rel_path(to_dir, root=self.root)
         dest = dest_dir / src.name
         if dest == src:

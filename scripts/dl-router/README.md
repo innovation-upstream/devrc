@@ -166,10 +166,16 @@ router created the file, by **two independent proofs, both required**:
   deliberately filed into the catch-all while `/match` logged the candidate.)
 * **age** — the file was written at or after that routing decision.
 
-If the sidecar was down when the download was decided there is no decision on
-record; the extension then supplies the download's filename and the file must
-additionally be recent. A file that fails either proof is **not moved**, and
-the refusal is surfaced rather than swallowed.
+**No routing decision on record means no proof, and there is deliberately no
+fallback.** If the sidecar restarted between the download and the correction,
+the record is gone and the move is refused — there would be nothing left to
+check the extension's claim *against*, so any fallback reduces to trusting the
+caller on the one code path whose whole purpose is to refuse a move it cannot
+prove. The refusal says the record was lost and that the file can be moved by
+hand; the next download routes normally.
+
+A file that fails either proof is **not moved**, the refusal is surfaced rather
+than swallowed, and no alias is learned from a move that did not happen.
 
 **Profile scoping**: routing is off until enabled on that profile's options
 page. Extension storage is per-profile, so every other profile behaves exactly

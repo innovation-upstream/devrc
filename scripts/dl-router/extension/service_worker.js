@@ -21,9 +21,7 @@ import {
   buildMatchPayload, correlateCapture, formatDup, handleDetermining,
   localDecide,
 } from "./route_core.js";
-import {
-  baseName, isHttpUrl, relPathFromAbsolute, sanitizeDirName,
-} from "./sanitize.js";
+import { isHttpUrl, relPathFromAbsolute, sanitizeDirName } from "./sanitize.js";
 import { DEFAULT_PORT, manifestPort as readManifestPort } from "./port.js";
 
 const CAPTURE_LIMIT = 40;
@@ -417,7 +415,7 @@ export async function applyChoice(downloadId, chosenDir, { createdNew } = {}) {
       // Deliberately NOT caught: a refused relocate must reach the caller (and
       // the user) rather than being reported as a success, and the alias below
       // must not be learned from a move that did not happen.
-      await relocate(rel, safe, downloadId, item);
+      await relocate(rel, safe, downloadId);
     }
   } else if (entry) {
     // Applied by onChanged when the download completes -- along with the
@@ -434,17 +432,18 @@ export async function applyChoice(downloadId, chosenDir, { createdNew } = {}) {
 /**
  * Ask the sidecar to move a completed download.
  *
- * `downloadFilename` lets the sidecar bind its routing decision to THIS file:
- * it proves ownership by name + write time, not by which directory the file
- * happens to be in. It also covers the case where the sidecar was down when
- * the download was decided, so there is no routing decision on record at all.
+ * The sidecar proves ownership from its OWN record of this `downloadId` -- the
+ * file's name must match what that routing decision recorded, and the file must
+ * be no older than it. Nothing the extension could assert here would add
+ * evidence, so nothing is asserted: if the sidecar has no record (it restarted
+ * between the download and this correction) the move is refused, and the
+ * refusal says so.
  */
-async function relocate(rel, toDir, downloadId, item) {
+async function relocate(rel, toDir, downloadId) {
   return api("POST", "/relocate", {
     fromRelPath: rel,
     toDir,
     downloadId,
-    downloadFilename: baseName(item?.filename || ""),
   }, { timeoutMs: 10000 });
 }
 
@@ -470,7 +469,7 @@ export async function onDownloadChanged(delta) {
     let moved = false;
     if (rel) {
       try {
-        await relocate(rel, entry.wanted, delta.id, item);
+        await relocate(rel, entry.wanted, delta.id);
         moved = true;
       } catch (err) {
         // This `.catch(() => {})` is how a completely dead correction path

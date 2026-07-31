@@ -64,10 +64,18 @@ subject directory.
 **"The undo / `change` button says it could not move the file."**
 `/relocate` refuses anything it cannot prove this router created — the library
 root is a live seeding target and the move is an `os.rename`. It needs the
-file's name to match that download's (modulo `uniquify`'s ` (1)`) *and* the
-file to be no older than the routing decision. A file that was already on disk,
-or a download from before the sidecar last started with no filename supplied,
-is refused by design. `dl-route log` shows the decision it is checking against.
+file's name to match that download's (modulo `uniquify`'s ` (1)`) **and** the
+file to be no older than the routing decision.
+
+Two refusals are by design, not bugs:
+
+* the file was already on disk (it predates its own routing decision);
+* **the sidecar restarted between the download and the correction**, so the
+  routing decision is gone. There is no fallback for this on purpose — with no
+  record to check against, anything else would just be trusting the caller.
+  Move that one file by hand; the next download routes normally.
+
+`dl-route log` shows the decision it is checking against.
 
 **"It files things into the catch-all folder."** That is the designed
 below-threshold behaviour: an unconfident download must not pollute a subject

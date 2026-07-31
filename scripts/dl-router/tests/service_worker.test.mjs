@@ -326,12 +326,11 @@ test("applyChoice relocates a completed download and learns", async () => {
   const out = await SW.applyChoice(11, "Jane Doe");
   assert.deepEqual(out, { ok: true, dir: "Jane Doe" });
   const relocate = posted.find((p) => p.url.endsWith("/relocate"));
-  assert.deepEqual(relocate.body, {
-    fromRelPath: "other/f.mp4", toDir: "Jane Doe", downloadId: 11,
-    // The sidecar proves ownership by NAME + write time, not by which folder
-    // the file is in -- so it has to be told which download this is.
-    downloadFilename: "f.mp4",
-  });
+  // The sidecar proves ownership from its OWN record of this downloadId --
+  // name + write time. Nothing the extension could assert here would add
+  // evidence, so nothing is asserted.
+  assert.deepEqual(relocate.body,
+    { fromRelPath: "other/f.mp4", toDir: "Jane Doe", downloadId: 11 });
   const learn = posted.find((p) => p.url.endsWith("/learn"));
   assert.equal(learn.body.chosenDir, "Jane Doe");
   assert.equal(learn.body.autoDir, "other");
@@ -669,10 +668,8 @@ test("the deferred onChanged relocate carries the download id too", async () => 
   };
   await SW.onDownloadChanged({ id: 34, state: { current: "complete" } });
   const relocate = posted.find((p) => p.url.endsWith("/relocate"));
-  assert.deepEqual(relocate.body, {
-    fromRelPath: "other/f.mp4", toDir: "Jane Doe", downloadId: 34,
-    downloadFilename: "f.mp4",
-  });
+  assert.deepEqual(relocate.body,
+    { fromRelPath: "other/f.mp4", toDir: "Jane Doe", downloadId: 34 });
 });
 
 test("the /match payload carries the download id", async () => {
