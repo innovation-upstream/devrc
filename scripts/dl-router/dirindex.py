@@ -49,6 +49,10 @@ class DirIndex:
     def _scan(self) -> list:
         entries, errors = [], []
         try:
+            root_resolved = Path(self.root).resolve()
+        except OSError:
+            root_resolved = None
+        try:
             it = os.scandir(self.root)
         except (OSError, ValueError) as exc:
             self._errors = [f"{self.root}: {exc.__class__.__name__}"]
@@ -75,7 +79,7 @@ class DirIndex:
                 # write through -- straight out of the library, past every
                 # containment check -- while yt-dlp refused it. Escaping
                 # symlinks are excluded and REPORTED, not silently dropped.
-                if not self._resolves_inside(de.path):
+                if not self._resolves_inside(de.path, root_resolved):
                     errors.append(f"{name}: symlink resolves outside the root")
                     continue
                 entries.append(DirEntry.of(name))
@@ -83,13 +87,17 @@ class DirIndex:
         self._errors = errors
         return entries
 
-    def _resolves_inside(self, path) -> bool:
+    @staticmethod
+    def _resolves_inside(path, root_resolved) -> bool:
+        """`root_resolved` is hoisted out of the scan loop: this used to
+        re-resolve the library root once per directory entry."""
+        if root_resolved is None:
+            return False
         try:
-            root = Path(self.root).resolve()
             target = Path(path).resolve()
         except OSError:
             return False
-        return target == root or target.is_relative_to(root)
+        return target == root_resolved or target.is_relative_to(root_resolved)
 
     def _root_stat_mtime(self):
         try:

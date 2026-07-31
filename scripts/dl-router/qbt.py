@@ -189,6 +189,10 @@ class QbtClient:
         return data
 
     def torrent_state(self, torrent_hash: str):
+        # `hashes=` scopes the query server-side, but the client-side compare
+        # stays: it is what made this case-insensitive before, and qBittorrent's
+        # own filter has not been verified against a live instance for case.
+        # Belt and braces -- the filter is an optimisation, not the check.
         for t in self.torrents_info(hashes=torrent_hash):
             if str(t.get("hash", "")).lower() == torrent_hash.lower():
                 return t.get("state")

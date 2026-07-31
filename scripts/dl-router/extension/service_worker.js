@@ -409,9 +409,17 @@ export async function applyChoice(downloadId, chosenDir, { createdNew } = {}) {
   const item = items && items[0];
   if (item && item.state === "complete" && item.filename) {
     // null = the download did not land at <libraryRoot>/<dir>/<file>, so there
-    // is nothing here this router may move. Refuse rather than guess.
+    // is nothing here this router may move. Refuse rather than guess -- and
+    // SAY SO. This branch used to fall through to a `/learn` and an `{ok:true}`
+    // while moving nothing, the same swallow-and-learn pair that was fixed in
+    // onDownloadChanged but not here. This is the branch the picker uses.
     const rel = relPathFor(item);
-    if (rel && rel.split("/")[0] !== safe) {
+    if (!rel) {
+      const detail = "the file did not land inside the library root";
+      await reportFailure(`Could not move the download to ${safe}`, detail);
+      return { ok: false, dir: safe, error: detail };
+    }
+    if (rel.split("/")[0] !== safe) {
       // Deliberately NOT caught: a refused relocate must reach the caller (and
       // the user) rather than being reported as a success, and the alias below
       // must not be learned from a move that did not happen.
@@ -435,9 +443,8 @@ export async function applyChoice(downloadId, chosenDir, { createdNew } = {}) {
  * The sidecar proves ownership from its OWN record of this `downloadId` -- the
  * file's name must match what that routing decision recorded, and the file must
  * be no older than it. Nothing the extension could assert here would add
- * evidence, so nothing is asserted: if the sidecar has no record (it restarted
- * between the download and this correction) the move is refused, and the
- * refusal says so.
+ * evidence, so nothing is asserted: with no record the move is refused, and the
+ * refusal says which causes are possible.
  */
 async function relocate(rel, toDir, downloadId) {
   return api("POST", "/relocate", {
@@ -487,6 +494,13 @@ export async function onDownloadChanged(delta) {
     if (moved) {
       await learn(entry, entry.wanted, entry.wantedCreatedNew);
     }
+  } else if (entry.wanted) {
+    // The deferred pick equals where the ladder already filed it: there is
+    // nothing to move, so the "only learn if the move happened" rule is
+    // trivially satisfied. Gating the learn behind `moved` silently dropped
+    // this case, and it is the user CONFIRMING the router's own answer --
+    // a real positive signal the matcher was getting before.
+    await learn(entry, entry.wanted, entry.wantedCreatedNew);
   }
   // Keep the entry briefly so a late "change" click can still relocate.
   // `unref` exists only under node (the test runner) -- without it this timer

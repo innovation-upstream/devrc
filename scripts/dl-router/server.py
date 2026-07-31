@@ -244,8 +244,15 @@ class App:
              `downloadId` refers to, modulo `conflictAction: "uniquify"`'s
              " (1)" suffix. This is what binds the proof to THIS file.
           2. AGE. The file's mtime must be at or after the routing decision.
-             A browser writes the file after the decision; a torrent payload
-             that was already on disk predates it by definition.
+             A browser writes the file after the decision, so this holds for a
+             genuine download; a COMPLETED payload that was already on disk
+             predates it.
+
+             Honest limit: an IN-PROGRESS torrent is still writing pieces, so
+             its mtime is current and the age test passes vacuously for it.
+             Against that shape the identity proof is the only one doing work
+             -- which is why identity is not optional and why it binds to the
+             file rather than to its folder.
 
         WHAT THIS DELIBERATELY NO LONGER CHECKS, and why: it used to require
         the file to be sitting in the directory the /match decision NAMED. That
@@ -279,17 +286,24 @@ class App:
         # a move it cannot prove. A live torrent payload written in the last
         # hour with a matching name is exactly the shape that gets through.
         #
-        # The cost of refusing is small and recoverable: a download whose
-        # decision was lost (the sidecar restarted between the download and
-        # the correction) cannot be auto-undone, and the user moves it by hand.
-        # The cost of the alternative is a broken seed.
+        # The cost of refusing is small and recoverable: a download that was
+        # never routed (the sidecar was unreachable when it started) cannot be
+        # auto-undone, and the user moves that one file by hand. The cost of
+        # the alternative is a broken seed.
         if route is None:
+            # Do NOT guess a cause here. An earlier draft of this message
+            # blamed a sidecar restart; the route log is persistent SQLite and
+            # log_route commits, so a restart does not lose anything. Shipping
+            # a confident wrong diagnosis is worse than naming the real
+            # possibilities.
             raise UnsafeName(
                 "refusing to move a file this router cannot prove it created: "
-                "there is no routing decision on record for this download, so "
-                "the record was lost — most likely the sidecar restarted "
-                "between the download and this correction. Move the file by "
-                "hand; the router will route the next one normally.")
+                "no routing decision is on record for this download. Either "
+                "the sidecar was unreachable when the download started (so "
+                "/match never ran for it), no downloadId was sent, or the "
+                "route log has been cleared. Move this one file by hand; "
+                "downloads routed while the sidecar is reachable can be "
+                "corrected normally.")
 
         expected = str(route.get("filename") or "")
         if not expected:
@@ -310,7 +324,8 @@ class App:
             raise UnsafeName(
                 "refusing to move a file this router cannot prove it created "
                 "(it predates its own routing decision, so it was already on "
-                "disk — quite possibly a live torrent payload)")
+                "disk before this download was routed — quite possibly a "
+                "torrent payload)")
 
         self.store.record_routed_file(rel_path, download_id,
                                       rel_path.split("/", 1)[0])

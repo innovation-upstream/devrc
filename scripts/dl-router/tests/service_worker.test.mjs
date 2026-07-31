@@ -621,11 +621,17 @@ test("a download that landed OUTSIDE the library is never relocated", async () =
     posted.push(url);
     return { ok: true, status: 200, json: async () => ({ ok: true }) };
   };
-  await SW.applyChoice(31, "Jane Doe");
+  const out = await SW.applyChoice(31, "Jane Doe");
   assert.equal(posted.filter((u) => u.endsWith("/relocate")).length, 0,
     "the last two components of an outside path must not become a relPath");
-  assert.ok(posted.some((u) => u.endsWith("/learn")),
-    "the correction is still learned");
+  // ...and it must SAY it did nothing. This branch used to return {ok:true}
+  // and learn an alias for a move that never happened -- the same
+  // swallow-and-learn pair that was fixed in onDownloadChanged but not here,
+  // on the branch the picker actually uses.
+  assert.equal(out.ok, false);
+  assert.equal(calls.notifications.length, 1);
+  assert.equal(posted.filter((u) => u.endsWith("/learn")).length, 0,
+    "no alias may be learned from a move that did not happen");
 });
 
 test("a download loose at the library root is never relocated", async () => {
@@ -845,4 +851,32 @@ test("applyChoice on an in-flight download reports that it deferred", async () =
   assert.equal(out.deferred, true);
   assert.equal(posted.filter((u) => u.endsWith("/learn")).length, 0,
     "the learn is deferred too -- neither happens unless the move does");
+});
+
+
+test("a deferred pick EQUAL to the auto dir still learns", async () => {
+  // Moving /learn behind `moved` silently dropped this: applyChoice returns
+  // {deferred:true} without learning and onDownloadChanged only learned when
+  // wanted !== dir. It is the user CONFIRMING the router's own answer, which
+  // is a real positive signal the matcher was getting before.
+  reset();
+  SW.state.pending.set(90, { dir: "Jane Doe", payload: { page: {} } });
+  searchResult = [{ id: 90, state: "in_progress" }];
+  fetchHandler = async () => ({ ok: true, status: 200, json: async () => ({}) });
+  const out = await SW.applyChoice(90, "Jane Doe");
+  assert.equal(out.deferred, true);
+
+  const posted = [];
+  fetchHandler = async (url, opts) => {
+    posted.push({ url, body: JSON.parse(opts.body || "{}") });
+    return { ok: true, status: 200, json: async () => ({}) };
+  };
+  searchResult = [{ id: 90, state: "complete",
+    filename: `${LIB_ROOT}/Jane Doe/f.mp4` }];
+  await SW.onDownloadChanged({ id: 90, state: { current: "complete" } });
+  assert.equal(posted.filter((p) => p.url.endsWith("/relocate")).length, 0,
+    "nothing to move");
+  const learn = posted.find((p) => p.url.endsWith("/learn"));
+  assert.ok(learn, "the confirmation must still be learned");
+  assert.equal(learn.body.chosenDir, "Jane Doe");
 });

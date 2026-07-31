@@ -164,15 +164,21 @@ router created the file, by **two independent proofs, both required**:
   routing decision authorise moving any file that happened to share the folder,
   and would break every correction, because a below-threshold match is
   deliberately filed into the catch-all while `/match` logged the candidate.)
-* **age** — the file was written at or after that routing decision.
+* **age** — the file was written at or after that routing decision. (This
+  holds for a genuine download and for a *completed* payload already on disk.
+  An in-progress torrent is still writing pieces, so its mtime is current and
+  the age test passes vacuously for it — which is exactly why identity is not
+  optional.)
 
 **No routing decision on record means no proof, and there is deliberately no
-fallback.** If the sidecar restarted between the download and the correction,
-the record is gone and the move is refused — there would be nothing left to
-check the extension's claim *against*, so any fallback reduces to trusting the
-caller on the one code path whose whole purpose is to refuse a move it cannot
-prove. The refusal says the record was lost and that the file can be moved by
-hand; the next download routes normally.
+fallback.** With no record to check the extension's claim *against*, any
+fallback reduces to trusting the caller on the one code path whose whole
+purpose is to refuse a move it cannot prove. A download reaches that state when
+the sidecar was unreachable when it started (so `/match` never ran for it), no
+`downloadId` was sent, or the route log has been cleared — **not** because the
+sidecar restarted: the route log is persistent SQLite and every decision is
+committed. That one file gets moved by hand; anything routed while the sidecar
+was reachable corrects normally.
 
 A file that fails either proof is **not moved**, the refusal is surfaced rather
 than swallowed, and no alias is learned from a move that did not happen.

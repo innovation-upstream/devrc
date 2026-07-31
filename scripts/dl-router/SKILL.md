@@ -70,10 +70,12 @@ file to be no older than the routing decision.
 Two refusals are by design, not bugs:
 
 * the file was already on disk (it predates its own routing decision);
-* **the sidecar restarted between the download and the correction**, so the
-  routing decision is gone. There is no fallback for this on purpose — with no
-  record to check against, anything else would just be trusting the caller.
-  Move that one file by hand; the next download routes normally.
+* **the download was never routed** — the sidecar was unreachable when it
+  started, so `/match` never ran for it (or no `downloadId` was sent, or the
+  route log was cleared). A restart does *not* cause this: the route log is
+  persistent SQLite and every decision is committed. There is no fallback here
+  on purpose — with no record to check against, anything else would just be
+  trusting the caller. Move that one file by hand.
 
 `dl-route log` shows the decision it is checking against.
 

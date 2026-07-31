@@ -268,7 +268,11 @@ def test_no_download_can_land_outside_the_library(library):
     ("clip.mp4", "clip.mp4"),
     ("clip (1).mp4", "clip.mp4"),          # conflictAction: "uniquify"
     ("clip (12).mp4", "clip.mp4"),
-    ("clip.mp4", "clip (3).mp4"),          # either side may carry the suffix
+    # A site that serves `Take (12).mp4` is recorded verbatim; a collision then
+    # writes `Take (12) (3).mp4`. Stripping BOTH sides landed one strip on each
+    # and refused this, killing the correction loop for a common filename shape.
+    ("Take (12) (3).mp4", "Take (12).mp4"),
+    ("Take (12).mp4", "Take (12).mp4"),
     ("clip  name.mp4", "clip name.mp4"),   # the extension collapses whitespace
     ("clip.mp4", "  clip.mp4  "),
     ("noext", "noext"),
@@ -281,6 +285,11 @@ def test_names_that_refer_to_the_same_download_match(actual, expected):
 @pytest.mark.parametrize("actual,expected", [
     ("seeding-payload.mkv", "innocent.mp4"),
     ("clip2.mp4", "clip.mp4"),
+    # Chrome only ever ADDS `(N)` after onDeterminingFilename, so a recorded
+    # name can never have gained one. Stripping `expected` too would collapse
+    # `X.ext` and `X (1).ext` .. `X (999).ext` into one identity.
+    ("clip.mp4", "clip (3).mp4"),
+    ("clip (2).mp4", "clip (1).mp4"),
     ("clip.mkv", "clip.mp4"),              # a different extension is a different file
     ("clip (1) extra.mp4", "clip.mp4"),
     ("", "clip.mp4"),
@@ -301,3 +310,22 @@ def test_uniquify_base_strips_only_the_trailing_counter():
         "a year is not a uniquify counter"
     assert uniquify_base("clip.mp4") == "clip.mp4"
     assert uniquify_base("noext (3)") == "noext"
+
+
+def test_the_uniquify_suffix_is_stripped_from_the_DISK_name_only():
+    """Direction matters in both directions -- see names_match's docstring."""
+    # What Chrome actually does: record `clip.mp4`, collide, write `clip (1)`.
+    assert names_match("clip (1).mp4", "clip.mp4") is True
+    # What it never does: the recorded name gaining a counter.
+    assert names_match("clip.mp4", "clip (1).mp4") is False
+    # So two DIFFERENT collisions of the same base are not each other.
+    assert names_match("clip (2).mp4", "clip (1).mp4") is False
+    # And a site's own parenthesised counter survives a real collision.
+    assert names_match("Take (12) (3).mp4", "Take (12).mp4") is True
+
+
+def test_the_residual_tolerance_is_acknowledged_not_accidental():
+    """A record of `Take.mp4` accepts a file named `Take (12).mp4`. That is
+    irreducible given ANY uniquify tolerance, and is a design cost rather than
+    a defect -- pinned so it is a deliberate choice, not a drift."""
+    assert names_match("Take (12).mp4", "Take.mp4") is True

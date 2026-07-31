@@ -149,7 +149,11 @@ test("no request was ever sent with an empty bearer token", () => {
     + "'there are no directories'");
 });
 
-test("dlr:rules answers asynchronously once the snapshot exists", async () => {
+// NOTE: warm by this point -- the storage gate was released above and cannot
+// be re-closed in-process. This pins the ASYNC ANSWER SHAPE (returning true and
+// responding later), which is what the cold path depends on; the cold-path
+// behaviour itself is covered by the three tests above.
+test("dlr:rules answers asynchronously (warm -- shape only)", async () => {
   await SW.ready();
   const responses = [];
   const returned = SW.onMessage({ type: "dlr:rules" }, {},

@@ -363,6 +363,9 @@ def test_a_download_whose_routing_record_was_LOST_is_refused(live, library):
     The cost of refusing is small and recoverable; the cost of the alternative
     is a broken seed."""
     (library / "other" / "late.mp4").write_text("payload")
+    # `downloadFilename` is sent DELIBERATELY even though the field was
+    # removed: the point is that re-adding a caller-supplied name must not
+    # revive the fallback.
     status, body, _ = call(live, "POST", "/relocate",
                            {"fromRelPath": "other/late.mp4",
                             "toDir": "Jane Doe", "downloadId": 54,
@@ -380,9 +383,14 @@ def test_that_refusal_says_the_record_was_lost_so_it_is_diagnosable(live,
                       {"fromRelPath": "other/late.mp4",
                        "toDir": "Jane Doe", "downloadId": 55})
     detail = body["detail"]
-    assert "no routing decision on record" in detail
-    assert "restarted" in detail, "the likely cause must be named"
-    assert "by hand" in detail, "and the way out"
+    assert "no routing decision is on record" in detail
+    # The real causes -- NOT "the sidecar restarted", which an earlier draft
+    # claimed: the route log is persistent SQLite and log_route commits, so a
+    # restart loses nothing. A confident wrong diagnosis is worse than none.
+    assert "unreachable when the download started" in detail
+    assert "by hand" in detail, "the way out must be named"
+    assert "restart" not in detail.lower(), \
+        "do not blame a cause that cannot produce this state"
 
 
 def test_an_extension_supplied_filename_cannot_substitute_for_a_record(live,

@@ -257,7 +257,8 @@ test("a malformed dirs event leaves an empty but usable list", () => {
 const PAGE_IDS = ["q", "list", "meta", "dup"];
 
 function mountPicker({ search = "?id=7&reason=r&suggestNew=Aster+Vale",
-  snapshot = { dirs: DIRS.map((name) => ({ name })) }, deferReply = false } = {}) {
+  snapshot = { dirs: DIRS.map((name) => ({ name })) }, deferReply = false,
+  chooseResult = { ok: true } } = {}) {
   const doc = makeDoc(PAGE_IDS, { search });
   const sent = [];
   let replySnapshot = null;
@@ -269,7 +270,8 @@ function mountPicker({ search = "?id=7&reason=r&suggestNew=Aster+Vale",
           replySnapshot = () => cb({ ok: true, snapshot });
           if (!deferReply) replySnapshot();
         }
-        return Promise.resolve({ ok: true });
+        return Promise.resolve(
+          msg.type === "dlr:choose" ? chooseResult : { ok: true });
       },
     },
   };
@@ -482,4 +484,111 @@ test("mount gives up eventually and says so, without creating anything", async (
   await new Promise((r) => setTimeout(r, SNAPSHOT_RETRY_MS * (SNAPSHOT_ATTEMPTS + 2)));
   assert.equal(sent.filter((m) => m.type === "dlr:choose").length, 0);
   assert.match(doc.getElementById("list").textContent, /Could not reach/);
+});
+
+
+// --- a refused choice must be VISIBLE ---------------------------------------- //
+//
+// finish() awaited sendMessage, DISCARDED the response and closed the window
+// regardless -- and EVERY choose goes through the picker, so an immediate
+// refusal (the sidecar could not prove the router created the file) was never
+// surfaced to anyone.
+test("a refused choice keeps the window open and says why", async () => {
+  const { doc, sent, closed } = mountPicker({
+    chooseResult: { ok: false, error: "cannot prove it created this file" },
+  });
+  doc.getElementById("q").value = "jane";
+  doc.getElementById("q").fire("input");
+  doc.fire("keydown", { key: "Enter" });
+  await tick();
+  assert.equal(sent.filter((m) => m.type === "dlr:choose").length, 1);
+  assert.equal(closed(), 0, "closing on a refusal is how it stayed invisible");
+  assert.match(doc.getElementById("meta").textContent, /Could not file into/);
+  assert.match(doc.getElementById("meta").textContent, /cannot prove/);
+});
+
+test("after a refusal the user can still pick somewhere else", async () => {
+  let result = { ok: false, error: "refused" };
+  const doc = makeDoc(PAGE_IDS, { search: "?id=7" });
+  const sent = [];
+  const chromeApi = {
+    runtime: {
+      sendMessage: (msg, cb) => {
+        sent.push(msg);
+        if (typeof cb === "function") {
+          cb({ ok: true, snapshot: { dirs: DIRS.map((name) => ({ name })) } });
+        }
+        return Promise.resolve(
+          msg.type === "dlr:choose" ? result : { ok: true });
+      },
+    },
+  };
+  let closed = 0;
+  mount(doc, chromeApi, { closeWindow: () => { closed += 1; } });
+
+  doc.getElementById("q").value = "jane";
+  doc.getElementById("q").fire("input");
+  doc.fire("keydown", { key: "Enter" });
+  await tick();
+  assert.equal(closed, 0);
+
+  // The window is still usable: a second, accepted pick goes through.
+  result = { ok: true };
+  doc.getElementById("q").value = "smith";
+  doc.getElementById("q").fire("input");
+  doc.fire("keydown", { key: "Enter" });
+  await tick();
+  const chooses = sent.filter((m) => m.type === "dlr:choose");
+  assert.equal(chooses.length, 2);
+  assert.equal(chooses[1].dir, "john-smith");
+  assert.equal(closed, 1);
+});
+
+test("Escape still works after a refusal", async () => {
+  const { doc, sent, closed } = mountPicker({
+    chooseResult: { ok: false, error: "refused" },
+  });
+  doc.fire("keydown", { key: "Enter" });
+  await tick();
+  doc.fire("keydown", { key: "Escape" });
+  await tick();
+  assert.equal(closed(), 1);
+  assert.equal(sent.filter((m) => m.type === "dlr:choose").length, 1);
+});
+
+test("an accepted choice still closes the window", async () => {
+  const { doc, closed } = mountPicker({ chooseResult: { ok: true, dir: "x" } });
+  doc.fire("keydown", { key: "Enter" });
+  await tick();
+  assert.equal(closed(), 1);
+});
+
+test("Enter retries after the directory list could not be loaded", async () => {
+  // `retry` was exported but nothing wired it, so after ~2.4s the window was
+  // Esc-only.
+  const doc = makeDoc(PAGE_IDS, { search: "?id=7" });
+  let answers = 0;
+  const sent = [];
+  const chromeApi = {
+    runtime: {
+      sendMessage: (msg, cb) => {
+        sent.push(msg);
+        if (typeof cb === "function") {
+          answers += 1;
+          if (answers <= SNAPSHOT_ATTEMPTS) cb({ ok: false, snapshot: null });
+          else cb({ ok: true, snapshot: { dirs: DIRS.map((name) => ({ name })) } });
+        }
+        return Promise.resolve({ ok: true });
+      },
+    },
+  };
+  mount(doc, chromeApi, { closeWindow: () => {} });
+  await new Promise((r) => setTimeout(r, SNAPSHOT_RETRY_MS * (SNAPSHOT_ATTEMPTS + 2)));
+  assert.match(doc.getElementById("list").textContent, /Enter to retry/);
+
+  doc.fire("keydown", { key: "Enter" });
+  await new Promise((r) => setTimeout(r, SNAPSHOT_RETRY_MS + 60));
+  assert.match(doc.getElementById("list").textContent, /john-smith/);
+  assert.equal(sent.filter((m) => m.type === "dlr:choose").length, 0,
+    "the retry must not double as a selection");
 });

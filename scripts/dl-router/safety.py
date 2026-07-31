@@ -249,20 +249,41 @@ def uniquify_base(name: str) -> str:
 
 
 def names_match(actual: str, expected: str) -> bool:
-    """True iff two download filenames refer to the same download.
+    """True iff the file `actual` on disk is the download `expected` recorded.
 
     Used by /relocate to bind a routing decision to the file on disk. Tolerant
-    of exactly two things and nothing else: the uniquify suffix, and the
-    sanitisation the extension applies before handing the name to `suggest()`
-    (so the browser's raw Content-Disposition name still matches what landed).
+    of exactly two things and nothing else: the sanitisation the extension
+    applies before handing a name to `suggest()` (so the browser's raw
+    Content-Disposition name still matches what landed), and Chrome's uniquify
+    suffix.
+
+    THE SUFFIX IS STRIPPED FROM `actual` ONLY, and the direction matters both
+    ways. Chrome only ever ADDS `(N)` after `onDeterminingFilename`, so the
+    recorded name can never have gained one -- stripping `expected` buys
+    nothing and costs twice:
+
+      * a false REJECT. A site that serves `Take (12).mp4` gets recorded as
+        `Take (12).mp4`; a collision writes `Take (12) (3).mp4`. Stripping both
+        sides lands one strip on each and resolves them to different strings,
+        so the correction is refused with a message that reads like a bug --
+        and sites serving `foo (1).mp4` are common.
+      * a false ACCEPT. It collapses `X.ext` and `X (1).ext` .. `X (999).ext`
+        into ONE identity, so a record of `clip (1).mp4` would authorise moving
+        `clip (2).mp4`.
+
+    What remains is irreducible given any uniquify tolerance at all: a record
+    of `Take.mp4` accepts a file named `Take (12).mp4`. That is the design cost
+    of tolerating the suffix, not a defect.
     """
     if not isinstance(actual, str) or not isinstance(expected, str):
         return False
     if not actual or not expected:
         return False
-    a = uniquify_base(safe_file_name(actual, fallback=""))
-    b = uniquify_base(safe_file_name(expected, fallback=""))
-    return bool(a) and a == b
+    a = safe_file_name(actual, fallback="")
+    b = safe_file_name(expected, fallback="")
+    if not a or not b:
+        return False
+    return a == b or uniquify_base(a) == b
 
 
 def is_http_url(url) -> bool:

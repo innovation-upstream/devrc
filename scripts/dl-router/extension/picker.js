@@ -94,6 +94,7 @@ export function initialState({ dirs = [], suggestNew = "", downloadId = null,
     // While it is set, Enter is DEFERRED rather than acted on: see reduce().
     loading: Boolean(loading),
     failed: false,
+    error: "",
     pendingEnter: false,
     query: "", index: 0, done: null,
   };
@@ -106,7 +107,25 @@ export function initialState({ dirs = [], suggestNew = "", downloadId = null,
  * ({action:"choose"|"cancel", ...}) once the flow finishes.
  */
 export function reduce(state, event) {
-  if (!event || state.done) return state;
+  if (!event) return state;
+  // BEFORE the `state.done` guard on purpose: this event exists to UNDO
+  // `done`, and the guard would drop it -- which made apply() see `done` still
+  // set, call finish() again, get refused again, and spin forever (OOM in the
+  // test runner within seconds).
+  if (event.type === "choose-failed") {
+    // The service worker refused the pick (most often /relocate could not
+    // prove this router created the file). finish() used to await
+    // sendMessage, DISCARD the response and close the window regardless, so
+    // an immediate refusal was never seen by anyone -- and every `choose`
+    // goes through here. Clearing `done` leaves the window usable: the user
+    // can pick a different directory, or Esc out.
+    return {
+      ...state,
+      done: null,
+      error: String(event.message || "The sidecar refused that choice."),
+    };
+  }
+  if (state.done) return state;
   const next = { ...state };
   if (event.type === "input") {
     next.query = String(event.value ?? "");
@@ -213,18 +232,22 @@ export function mount(doc, chromeApi, { closeWindow } = {}) {
   const meta = doc.getElementById("meta");
   const dup = doc.getElementById("dup");
 
-  meta.textContent = state.reason;
-  if (state.dup) dup.textContent = state.dup;
+  const renderMeta = () => {
+    meta.textContent = state.error || state.reason;
+    if (state.dup) dup.textContent = state.dup;
+  };
+  renderMeta();
 
   const close = closeWindow
     || (() => { if (typeof window !== "undefined") window.close(); });
 
   const render = () => {
+    renderMeta();
     list.textContent = "";
     if (state.loading || state.failed) {
       const li = doc.createElement("li");
       li.textContent = state.failed
-        ? "Could not reach the sidecar. Esc to leave it where it is."
+        ? "Could not reach the sidecar. Enter to retry, Esc to leave it."
         : "Loading directories...";
       li.className = state.failed ? "row failed" : "row loading";
       list.appendChild(li);
@@ -243,14 +266,26 @@ export function mount(doc, chromeApi, { closeWindow } = {}) {
     const done = state.done;
     if (!done) return;
     if (done.action === "choose") {
+      let resp;
       try {
-        await chromeApi.runtime.sendMessage({
+        resp = await chromeApi.runtime.sendMessage({
           type: "dlr:choose",
           downloadId,
           dir: done.dir,
           createdNew: done.createdNew,
         });
-      } catch { /* the window is closing either way */ }
+      } catch (err) {
+        resp = { ok: false, error: String(err) };
+      }
+      // A refusal must be VISIBLE. The window stays open so the user can pick
+      // somewhere else or press Esc -- closing on a rejected move is how an
+      // immediate refusal became invisible.
+      if (resp && resp.ok === false) {
+        apply({ type: "choose-failed",
+                message: `Could not file into "${done.dir}": `
+                         + `${resp.error || "refused"}` });
+        return;
+      }
     }
     close();
   };
@@ -263,10 +298,18 @@ export function mount(doc, chromeApi, { closeWindow } = {}) {
 
   input.addEventListener("input", () => apply({ type: "input", value: input.value }));
   doc.addEventListener("keydown", (e) => {
-    if (["ArrowDown", "ArrowUp", "Enter", "Escape"].includes(e.key)) {
-      e.preventDefault();
-      apply({ type: "key", key: e.key });
+    if (!["ArrowDown", "ArrowUp", "Enter", "Escape"].includes(e.key)) return;
+    e.preventDefault();
+    // Enter on the "could not reach the sidecar" screen retries, rather than
+    // leaving the window Esc-only forever.
+    if (e.key === "Enter" && state.failed) {
+      state = { ...state, failed: false, loading: true, error: "" };
+      render();
+      attempts = 0;
+      askForDirs();
+      return;
     }
+    apply({ type: "key", key: e.key });
   });
 
   // Asking for the snapshot, with retries.
