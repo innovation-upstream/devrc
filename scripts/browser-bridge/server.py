@@ -109,11 +109,18 @@ from urllib.parse import unquote, urlsplit
 # frame. They dispatch + tab-scope exactly like the existing tab-scoped ops. The
 # server stays op-agnostic about the CDP mechanics — it only routes to the owned/
 # target tab and forwards the typed params (frame/selector/text/key) to the extension.
+# `wake` UN-THROTTLES the owned/target tab via CDP (Emulation.setFocusEmulation
+# Enabled + Page.setWebLifecycleState) WITHOUT moving focus — the non-intrusive
+# remedy for "the background tab never rendered". It is tab-scoped and dispatched
+# like any other tab-scoped op, with an optional `waitMs` passthrough (the settle
+# the extension holds the un-throttle for). CRITICALLY, and unlike `activate`, it
+# does NOT trigger the host-side i3 foregrounding below — nothing in the `wake`
+# path can take the operator's screen.
 # `activate` foregrounds the owned/target tab (chrome.tabs.update{active} +
-# chrome.windows.update{focused}) so a foreground-throttled SPA loads; it is
-# tab-scoped and dispatched like the other tab-scoped ops (its optional `waitMs`
-# is a passthrough field, not a routing hint). It is the ONE op that STEALS the
-# user's foreground focus (documented as intended, best-effort under i3).
+# chrome.windows.update{focused}) AND (host-side, below) raises the Brave window
+# via i3-msg. It is the ONE op that STEALS the operator's screen and is a LAST
+# RESORT — `wake` is the answer for throttling. Tab-scoped, dispatched like the
+# other tab-scoped ops (its optional `waitMs` is a passthrough field).
 # `upload` is a TYPED CDP op (DOM.setFileInputFiles): it populates an
 # <input type=file> with a local file whose ABSOLUTE path Chrome reads ITSELF
 # (same host) — so NO file bytes cross the bridge. It dispatches + tab-scopes
@@ -123,8 +130,8 @@ from urllib.parse import unquote, urlsplit
 # decision to allow the autonomous agent any path) → the server AUDIT-LOGS every
 # upload (op + target domain + the file path — local metadata, never file CONTENT).
 ALLOWED_OPS = ("getHtml", "text", "eval", "tabs", "nav", "screenshot",
-               "open", "close", "frames", "click", "type", "key", "activate",
-               "upload")
+               "open", "close", "frames", "click", "type", "key", "wake",
+               "activate", "upload")
 
 # Ops handled ENTIRELY server-side (never dispatched to the extension). `release`
 # relinquishes a session's owned-tab mapping without touching the real Brave tab.
@@ -136,7 +143,7 @@ SERVER_OPS = ("release",)
 # and `release` (server-side) do NOT contend for a single tab.
 TAB_SCOPED_OPS = frozenset({"getHtml", "text", "eval", "nav", "screenshot",
                             "close", "frames", "click", "type", "key",
-                            "activate", "upload"})
+                            "wake", "activate", "upload"})
 
 # Per-op required fields (skill-supplied). Absent → 400 bad_request. NOTE: `close`
 # takes NO skill-supplied field — the server injects the caller's owned tabId (or

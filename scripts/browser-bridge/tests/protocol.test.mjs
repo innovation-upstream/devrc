@@ -37,7 +37,7 @@ test("op set mirrors the server contract", () => {
   assert.deepEqual(
     [...ALLOWED_OPS].sort(),
     ["activate", "click", "close", "eval", "frames", "getHtml", "key", "nav",
-     "open", "screenshot", "tabs", "text", "type", "upload"],
+     "open", "screenshot", "tabs", "text", "type", "upload", "wake"],
   );
 });
 

@@ -281,8 +281,8 @@ test("OP_TO_SERVER maps only the bounded ops (no lifecycle ops, no raw CDP)", ()
   // `whoami` is a read-only GLOBAL diagnostic (GET /whoami) — bounded + typed
   // like the rest; still NO lifecycle ops and NO raw-CDP escape.
   assert.deepEqual(Object.keys(OP_TO_SERVER).sort(),
-    ["activate", "click", "eval", "frames", "html", "key", "nav", "screenshot",
-     "text", "type", "upload", "whoami"]);
+    ["click", "eval", "frames", "html", "key", "nav", "screenshot",
+     "text", "type", "upload", "wake", "whoami"]);
   // Lifecycle ops (wrapper owns the tab) AND any raw-CDP escape must be unmappable.
   for (const forbidden of ["open", "close", "tabs", "release",
                            "cdp", "command", "attach", "detach", "sendCommand"]) {
@@ -293,64 +293,106 @@ test("OP_TO_SERVER maps only the bounded ops (no lifecycle ops, no raw CDP)", ()
   // enabled by default — it takes a caller-chosen absolute path with no allowlist,
   // and the model is pointed at untrusted, prompt-injecting pages.
   assert.deepEqual([...ALLOWED_OPS_DEFAULT].sort(),
-    ["activate", "click", "eval", "frames", "html", "key", "nav", "screenshot",
-     "text", "type", "whoami"]);
+    ["click", "eval", "frames", "html", "key", "nav", "screenshot",
+     "text", "type", "wake", "whoami"]);
   assert.ok(!ALLOWED_OPS_DEFAULT.includes("upload"),
     "upload must NOT be in the autonomous agent's default op set");
   assert.ok("upload" in OP_TO_SERVER,
     "upload stays mappable so an explicit BROWSER_AGENT_ALLOWED_OPS opt-in still works");
 });
 
-test("buildRequest: activate forces the env tab; bounded waitMs only; NO raw passthrough", () => {
-  // Bare activate → only op + the forced tab (own-tab-scoped; model can't name a tab).
-  const bare = buildRequest({ op: "activate" }, baseEnv(), TOK).body;
-  assert.equal(bare.op, "activate");
-  assert.equal(bare.tab, 4242, "activate is forced to the env tab");
+test("SECURITY: `activate` is UNREACHABLE for the autonomous agent — not even opt-in", async () => {
+  // `activate` foregrounds the tab and (server-side) raises the Brave window via
+  // i3-msg: it TAKES THE OPERATOR'S SCREEN. Telemetry caught a driving session
+  // calling it 1-5x/MINUTE. Unlike `upload` (operator-opt-in-able), the model can
+  // never reach it — it is absent from OP_TO_SERVER, so the allowlist gate refuses
+  // it even when BROWSER_AGENT_ALLOWED_OPS explicitly names it.
+  assert.ok(!("activate" in OP_TO_SERVER), "activate must NOT be mappable at all");
+  assert.ok(!ALLOWED_OPS_DEFAULT.includes("activate"));
+  assert.throws(() => buildRequest({ op: "activate" }, baseEnv(), TOK),
+    /op_not_allowed:activate/);
+  assert.throws(
+    () => buildRequest({ op: "activate" },
+      baseEnv({ BROWSER_AGENT_ALLOWED_OPS: "text,activate" }), TOK),
+    /op_not_allowed:activate/,
+    "an explicit opt-in must NOT resurrect focus theft for the model");
+  const fx = fetchStub({});
+  await assert.rejects(
+    () => run({ op: "activate" },
+      baseEnv({ BROWSER_AGENT_ALLOWED_OPS: "text,activate" }), fx),
+    /op_not_allowed:activate/);
+  assert.equal(fx.calls.length, 0, "nothing ever reached the bridge");
+});
+
+test("SECURITY: the op gate is OWN-PROPERTY — a prototype key is never an op", async () => {
+  // `op in OP_TO_SERVER` walks the prototype chain, so "constructor"/"toString"/
+  // "valueOf"/"__proto__" all read as present. Not exploitable on its own (it also
+  // needs an operator-set BROWSER_AGENT_ALLOWED_OPS naming one, and the resulting
+  // body fails server-side) — but Object.hasOwn is simply the correct check, and the
+  // focus-theft control must not sit next to a sloppy membership test.
+  for (const proto of ["constructor", "toString", "valueOf", "hasOwnProperty",
+                       "__proto__", "isPrototypeOf"]) {
+    assert.throws(
+      () => buildRequest({ op: proto },
+        baseEnv({ BROWSER_AGENT_ALLOWED_OPS: `text,${proto}` }), TOK),
+      new RegExp(`op_not_allowed:${proto === "__proto__" ? ".*" : proto}`),
+      `${proto} must never resolve to a server op`);
+  }
+  // The real ops still pass the own-property gate.
+  assert.equal(buildRequest({ op: "text" }, baseEnv(), TOK).body.op, "text");
+  assert.equal(buildRequest({ op: "wake" }, baseEnv(), TOK).body.op, "wake");
+});
+
+test("buildRequest: wake forces the env tab; bounded waitMs only; NO raw passthrough", () => {
+  // Bare wake → only op + the forced tab (own-tab-scoped; model can't name a tab).
+  const bare = buildRequest({ op: "wake" }, baseEnv(), TOK).body;
+  assert.equal(bare.op, "wake");
+  assert.equal(bare.tab, 4242, "wake is forced to the env tab");
   assert.deepEqual(Object.keys(bare).sort(), ["op", "tab"]);
-  // A valid waitMs passes through as a typed int.
-  const w = buildRequest({ op: "activate", waitMs: 1500 }, baseEnv(), TOK).body;
+  // A valid waitMs (the un-throttle settle) passes through as a typed int.
+  const w = buildRequest({ op: "wake", waitMs: 1500 }, baseEnv(), TOK).body;
   assert.equal(w.waitMs, 1500);
   assert.deepEqual(Object.keys(w).sort(), ["op", "tab", "waitMs"]);
-  // waitMs=0 (no wait) is a legitimate value.
-  assert.equal(buildRequest({ op: "activate", waitMs: 0 }, baseEnv(), TOK).body.waitMs, 0);
+  assert.equal(buildRequest({ op: "wake", waitMs: 0 }, baseEnv(), TOK).body.waitMs, 0);
   // A bad waitMs is refused (never forwarded raw); a smuggled extra arg is dropped.
-  assert.throws(() => buildRequest({ op: "activate", waitMs: -5 }, baseEnv(), TOK), /bad_waitMs/);
-  assert.throws(() => buildRequest({ op: "activate", waitMs: 1.5 }, baseEnv(), TOK), /bad_waitMs/);
+  assert.throws(() => buildRequest({ op: "wake", waitMs: -5 }, baseEnv(), TOK), /bad_waitMs/);
+  assert.throws(() => buildRequest({ op: "wake", waitMs: 1.5 }, baseEnv(), TOK), /bad_waitMs/);
   const smuggled = buildRequest(
-    { op: "activate", tab: 1, cdp: "x", method: "Page.navigate", waitMs: 100 },
+    { op: "wake", tab: 1, cdp: "x", method: "Page.navigate", waitMs: 100 },
     baseEnv(), TOK).body;
   assert.deepEqual(Object.keys(smuggled).sort(), ["op", "tab", "waitMs"],
-    "activate never forwards a smuggled tab/cdp/method");
+    "wake never forwards a smuggled tab/cdp/method");
   assert.equal(smuggled.tab, 4242, "the forced env tab wins over a model-supplied tab");
 });
 
-test("summarizeResult: activate returns compact metadata-only confirmation", () => {
-  const s = JSON.parse(summarizeResult("activate", { data: {
-    tabId: 9, windowId: 2, url: "https://x.test/", title: "X",
-    active: true, status: "complete", i3: "applied" } }));
-  assert.deepEqual(s, { ok: true, tabId: 9, active: true, status: "complete",
-    i3: "applied", url: "https://x.test/", title: "X" });
+test("summarizeResult: wake returns compact metadata-only confirmation", () => {
+  const s = JSON.parse(summarizeResult("wake", { data: {
+    tabId: 9, url: "https://x.test/", title: "X", woke: true,
+    visibilityState: "visible", readyState: "complete", settleMs: 1500,
+    applied: ["Page.setWebLifecycleState", "Emulation.setFocusEmulationEnabled"] } }));
+  assert.deepEqual(s, { ok: true, tabId: 9, woke: true, visibilityState: "visible",
+    readyState: "complete", settleMs: 1500, url: "https://x.test/", title: "X" });
 });
 
-test("summarizeResult: activate i3 field defaults to null when the server omits it", () => {
-  // Off an i3 host the server may not annotate `i3`; the summary reports null,
-  // never throws.
-  const s = JSON.parse(summarizeResult("activate", { data: {
-    tabId: 9, url: "https://x.test/", title: "X", active: true,
-    status: "complete" } }));
-  assert.equal(s.i3, null);
+test("summarizeResult: wake reports woke:false honestly when the tab stayed hidden", () => {
+  const s = JSON.parse(summarizeResult("wake", { data: {
+    tabId: 9, url: "https://x.test/", title: "X", woke: false,
+    visibilityState: "hidden" } }));
+  assert.equal(s.woke, false);
+  assert.equal(s.visibilityState, "hidden");
+  assert.equal(s.settleMs, null, "an omitted field summarizes as null, never throws");
 });
 
-test("runBrowserOp: activate reaches the bridge with the forced tab", async () => {
-  const fx = fetchStub({ activate: { tabId: 4242, windowId: 1,
-    url: "https://x.test/", title: "X", active: true, status: "complete" } });
-  const out = JSON.parse(await run({ op: "activate", waitMs: 200 }, baseEnv(), fx));
+test("runBrowserOp: wake reaches the bridge with the forced tab", async () => {
+  const fx = fetchStub({ wake: { tabId: 4242, url: "https://x.test/", title: "X",
+    woke: true, visibilityState: "visible", readyState: "complete", settleMs: 200 } });
+  const out = JSON.parse(await run({ op: "wake", waitMs: 200 }, baseEnv(), fx));
   assert.equal(fx.calls.length, 1);
-  assert.equal(fx.calls[0].body.op, "activate");
+  assert.equal(fx.calls[0].body.op, "wake");
   assert.equal(fx.calls[0].body.tab, 4242, "forced env tab");
   assert.equal(fx.calls[0].body.waitMs, 200);
   assert.equal(out.ok, true);
-  assert.equal(out.status, "complete");
+  assert.equal(out.woke, true);
 });
 
 // --------------------------------------------------------------------------- //

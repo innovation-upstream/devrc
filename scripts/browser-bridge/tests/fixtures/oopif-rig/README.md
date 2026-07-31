@@ -6,8 +6,19 @@ live-verify fixtures**, not part of any automated suite — the unit tests
 (`tests/nested_oopif.test.mjs`) model the same shapes against a mocked `chrome.debugger`,
 which is exactly why the two questions below need a real browser to settle.
 
-There are two rigs:
+There are four rigs:
 
+- **wake** (`wake-rig.html`) — a single **throttle-sensitive** page (no iframes). It only
+  swaps in its `WAKE-RIG-RENDERED` sentinel after **30 real animation frames**, and a
+  background tab gets none — so it is the only fixture here that can demonstrate the
+  `wake` op / `--wake` reads. The OOPIF pages below render fine while hidden and
+  therefore prove nothing about un-throttling. `window.__rig = {raf,timer,rendered,ms}`
+  is the machine-readable counter set. See *Verifying `wake`* at the end.
+- **wake-shadow** (`wake-shadow.html`) — a page that installs a MAIN-WORLD
+  `outerHTML` getter and shadows `innerText`/`querySelector`. `text`/`html --wake`
+  read via chrome.scripting's **isolated** world, so the poison must NOT appear;
+  `js --wake` runs in the main world (same as plain `js`) and WILL show it. That
+  contrast is the check.
 - **basic** (`top` → `mid` → `leaf`) — proves a grandchild OOPIF is reachable at all.
 - **deep** (`deep0` … `deep6`) — **discriminates whether Chrome tags flat-mode events
   with the parent `sessionId`**, i.e. whether `OOPIF_MAX_DEPTH` actually binds.
@@ -221,3 +232,51 @@ Read the outcome off `deep6`:
 the cap resolves; only **past** it is refused. `text --frame <deep6>` should always work
 (chrome.scripting path, unaffected by any of this) — it is the control proving the frame
 exists and is readable, so a `deep6` eval failure is about the CDP cascade, not the page.
+
+
+## Verifying `wake` (the non-intrusive un-throttle)
+
+`wake-rig.html` is the fixture for `browser wake` / `--wake`. It must show BOTH that a
+hidden tab renders AND that **focus does not move** — a fix that renders the page but
+takes the operator's screen is a failure.
+
+```bash
+export DISPLAY=:0 XAUTHORITY=/home/zach/.Xauthority
+python3 -m http.server 8901 --bind 127.0.0.1 --directory "$(dirname "$0")" &
+
+nix-shell -p xdotool --run 'xdotool getactivewindow getwindowname'   # BEFORE
+
+browser open http://127.0.0.1:8901/wake-rig.html
+browser text            # WAKE-RIG-SHELL, hidden:true, the wake note
+browser wake            # woke:true, visibilityState:"visible"
+browser text            # WAKE-RIG-RENDERED  (the DOM survived the detach)
+browser js 'JSON.stringify(window.__rig)' --wake   # raf>=30, rendered:true
+
+nix-shell -p xdotool --run 'xdotool getactivewindow getwindowname'   # AFTER — MUST MATCH
+browser close
+```
+
+**Reference measurement** (throwaway Brave 1.89 under Xvfb, raw CDP, background tab):
+baseline rAF **0/s**, timers 8/s, `hidden`; after
+`Emulation.setFocusEmulationEnabled({enabled:true})` rAF **62/s**, timers 247/s,
+`visible`; after detach it reverts to 0/s + `hidden`, but the rig's counters still read
+`{raf:30, rendered:true, ms:472}` — the un-throttled *state* does not survive detach, the
+rendered *DOM* does. `Page.setWebLifecycleState({state:"active"})` alone changed nothing
+(it is only for a FROZEN page).
+
+### Main-world shadowing check (`wake-shadow.html`)
+
+Only the *un-throttle* is CDP — `text`/`html --wake` still perform the READ through
+`chrome.scripting` (isolated world), inside the still-attached wake session. A
+main-world read could be served attacker-authored content that is not in the DOM.
+
+```bash
+browser open http://127.0.0.1:8901/wake-shadow.html
+browser html --wake     # MUST contain WAKE-SHADOW-REAL, MUST NOT contain POISON
+browser text --wake     # MUST be WAKE-SHADOW-REAL,      MUST NOT contain POISON
+browser js 'document.documentElement.outerHTML' --wake   # WILL show the POISON — expected
+browser close
+```
+
+The last line is not a failure: `eval` means "run my JS with the page's own globals",
+and plain `eval` is already `world:"MAIN"`, so `--wake` adds no exposure there.

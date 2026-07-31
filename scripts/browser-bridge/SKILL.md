@@ -150,7 +150,7 @@ Prefix any op with `--instance <key>` to target a specific connected profile
 | `browser health`            | connected instances + count: `{"ok":true,"extension_connected":bool,"count":N,"extension_version_current":"<repo manifest>","instances":[{…,"extension_version":"<loaded>"}]}`. Each instance now shows its **loaded `extension_version`** and the bridge shows **`extension_version_current`** (the repo manifest) — eyeball loaded-vs-current to spot a STALE extension |
 | `browser whoami`            | **read-only identity + diagnostics** (global; no `--instance`/`--tab`). Reports **which HOST** (`host.label` = `laptop`/`workbench`/`unknown`, resolved `ACTIVITY_HOST` env → the activity-collector env file → LAN-IP detect, with `host.source` naming the method + `host.ips`), the connected **instances** (`key`/`label`/`instanceId` + active-tab **DOMAIN** only + reported `extension_version`), and **bridge** diagnostics (`endpoint`/`port`/`server_version`{version+git-HEAD}/`connected` count/`rate_limit` + `extension_version_current` = the manifest version the SERVER reads from the repo). Use it FIRST to confirm you're on the right host/profile (both hosts are hostname `nixos`). ⚠ There is deliberately **no hard "stale" flag** — the manifest version isn't bumped per-change, so compare `extension_version` (loaded) vs `extension_version_current` (repo) by eye. `extension_version` shows `null` until an extension build that reports it has reloaded; the rest of whoami needs NO extension change/reload. |
 | `browser instances`         | list connected instances as JSON (routing key, label, instanceId, active-tab url/title) |
-| `browser [--instance K] open [url]`        | open a NEW tab THIS session owns (default `about:blank`, created in the **background/HIDDEN** — `active:false`); records ownership; returns its `tabId`. Use for multi-step work. ⚠ A background tab is `document.visibilityState:"hidden"` → **Chromium throttles it, so a heavy SPA never renders** and a subsequent `text`/`html`/`eval` returns a **shell-only DOM** (indistinguishable from a broken site). The reads now **self-announce** this (`data.hidden:true` + a one-line warning on stderr); the escape hatch is **`browser activate`** (foreground it so it un-throttles). |
+| `browser [--instance K] open [url]`        | open a NEW tab THIS session owns (default `about:blank`, created in the **background/HIDDEN** — `active:false`); records ownership; returns its `tabId`. Use for multi-step work. ⚠ A background tab is `document.visibilityState:"hidden"` → **Chromium throttles it, so a heavy SPA never renders** and a subsequent `text`/`html`/`eval` returns a **shell-only DOM** (indistinguishable from a broken site). The reads now **self-announce** this (`data.hidden:true` + a one-line warning on stderr); the escape hatch is **`browser wake`** — it un-throttles the tab via CDP focus emulation and **does NOT move the operator's focus**. (`browser activate` also un-throttles, but it STEALS THE OPERATOR'S SCREEN — last resort only.) |
 | `browser [--instance K] close`             | close this session's owned tab and drop ownership |
 | `browser [--instance K] release`           | drop ownership WITHOUT closing the tab |
 | `browser [--instance K] [--tab T] html [--max-bytes N]` | `outerHTML` of the owned tab (else the active tab), byte-capped exactly like `text` (default 32768; `0`=uncapped; truncation appends `…[truncated N bytes]` and sets `truncated`). One uncapped `html` on a heavy SPA is ~100K tokens — the cap is ON by default. Prefer `text` anyway |
@@ -165,7 +165,9 @@ Prefix any op with `--instance <key>` to target a specific connected profile
 | `browser [--instance K] [--tab T] [--frame F] type <text> [--selector S]` | text input — **TRUSTED** CDP top frame; **SYNTHETIC** in-frame (focus `--selector` first if given) |
 | `browser [--instance K] [--tab T] [--frame F] key <Enter\|Tab\|Escape\|Backspace\|Delete\|Arrow*\|Home\|End\|Page*> [--selector S]` | dispatch one bounded key — **TRUSTED** CDP top frame; **SYNTHETIC** in-frame |
 | `browser [--instance K] [--tab T] [--frame F] upload <selector> <path>` | populate the `<input type=file>` at `<selector>` with the LOCAL file `<path>` via **CDP `DOM.setFileInputFiles`** — Chrome reads the file BY PATH itself (same host), so **no bytes cross the bridge**. The CLI validates the path (readable regular file) + resolves it to ABSOLUTE **before** dispatch; `--frame` routes into a cross-origin OOPIF (incl. a NESTED one — same bounded cascade + caps as `eval --frame`). **Bounded TYPED op, own-tab, NO raw-CDP passthrough** — but it IS **data-exfil-capable** (any readable file's CONTENTS could be posted to the site), so **every upload is AUDIT-LOGGED** (op + target domain + path) and it is **OPERATOR-ONLY: `upload` is NOT in the autonomous browser-agent's default op set** (the model gets `op_not_allowed:upload`; re-enable only via an explicit `BROWSER_AGENT_ALLOWED_OPS` opt-in). Result carries the basename only |
-| `browser [--instance K] [--tab T] activate [--wait MS \| --no-wait]` | **FOREGROUND** the owned/active tab so a foreground-throttled SPA finishes loading, then can be read/driven. **⚠ STEALS FOCUS — the ONE intrusive op** (it changes what the user sees; every other op is non-intrusive). Foregrounds via **host-side `i3-msg`** (Chrome-side `tabs.update`/`windows.update` is a no-op on i3), so it works ONLY on a graphical i3 host; returns an extra **`i3:"applied"\|"skipped"\|"failed"`** field alongside `{tabId,windowId,url,title,active,status}`. Waits (bounded, default ~3s, cap ~8s) for `status:"complete"` + a paint settle unless `--no-wait`; `--wait MS` overrides. See "Driving a throttled SPA" below. |
+| `browser [--instance K] [--tab T] wake [--wait MS \| --no-wait]` | **UN-THROTTLE the owned/active tab WITHOUT touching focus** — the fix for a `hidden`/empty read. A background tab gets NO animation frames and ~1 Hz timers, so a heavy SPA never paints; `wake` attaches CDP to that tab only, turns on `Emulation.setFocusEmulationEnabled` (+ a best-effort `Page.setWebLifecycleState` thaw), holds it ~1.5s (cap **6s**, `--wait MS` — derived so the settle plus one worst-case CDP command still fits the op budget) so the page renders, then **explicitly disables focus emulation** and detaches (the revert is never left to detach). Returns `{woke,visibilityState,readyState,applied,settleMs,…}`; `woke` is probed from an ISOLATED world, so a page cannot fake it. **Nothing in this path moves the operator's screen** (no `i3-msg`, no tab/window focus change). ⚠ The un-throttled STATE ends at detach (measured) — what persists is the **DOM the page rendered**, which is what a following cheap read wants. If a read must OBSERVE live un-throttled state, use `--wake` on that read instead. |
+| `browser … text\|html\|js [--wake[=MS]]` | run THAT ONE read inside a woken CDP session (same un-throttle, applied in the same session as the read). Opt-in on purpose: the default read path stays on `chrome.scripting` with **no debugger banner**, and routing every read through CDP would flash "an extension is debugging this browser" on every read. `--wake` + `--frame` is refused (`wake_with_frame_unsupported`) — `wake` first, then the frame read. |
+| `browser [--instance K] [--tab T] activate [--wait MS \| --no-wait]` | **FOREGROUND** the owned/active tab. **⚠⚠ STEALS THE OPERATOR'S SCREEN — the ONE intrusive op**, and a **LAST RESORT**. It is **NOT** the remedy for a throttled/hidden tab — that is `wake` (above), which achieves the same rendering without touching focus. Use `activate` only when something genuinely needs the REAL foreground: a browser permission prompt, a native file picker, or seeing the page with your own eyes. **Needed at most ONCE PER TAB — never per read** (telemetry caught a session calling it 1–5×/minute, grabbing the operator's screen on nearly every interaction). Foregrounds via **host-side `i3-msg`** (Chrome-side `tabs.update`/`windows.update` is a no-op on i3), so it works ONLY on a graphical i3 host; returns **`i3:"applied"\|"skipped"\|"failed"`** alongside `{tabId,windowId,url,title,active,status}`. Waits (bounded, default ~3s, cap ~8s) for `status:"complete"` + a paint settle unless `--no-wait`. **Operator-only — absent from the autonomous agent's op set.** |
 | `browser [--instance K] agent "<goal>" [flags]` | run the **autonomous opencode browser-agent** in its OWN isolated tab against `<goal>`; returns a compact `{answer,evidence,steps_used,status}` (see below) |
 | `browser --print-session-id`               | print the derived per-session id (debug) and exit |
 
@@ -346,41 +348,65 @@ Two traps that produce a confidently-wrong result:
   `Page.captureScreenshot` path could capture an off-screen tab, but it needs the
   `debugger` permission and shows a debug banner — deliberately out of scope.)*
 
-## Driving a throttled/backgrounded SPA (the `activate` pattern)
+## Driving a throttled/backgrounded SPA (the `wake` pattern)
 
 A heavy SPA opened in a **backgrounded** tab is throttled by Chrome —
-`document.visibilityState:"hidden"`, so its timers/RAF are starved and it often
-**never finishes rendering**. You then can't read or drive it: `text`/`frames`
-come back empty or half-built, and in-frame `click`/`type` hit elements that don't
-exist yet. Verified case: `model-benchmarking.civit.ai` (an OOPIF inside a
-`civitai.com` tab) stayed blank while backgrounded.
+`document.visibilityState:"hidden"`, so it gets **no animation frames at all** and
+~1 Hz timers, and it often **never finishes rendering**. You then can't read or
+drive it: `text`/`frames` come back empty or half-built, and in-frame
+`click`/`type` hit elements that don't exist yet. Verified case:
+`model-benchmarking.civit.ai` (an OOPIF inside a `civitai.com` tab) stayed blank
+while backgrounded.
 
-`activate` fixes this by **foregrounding the tab** so it un-throttles
-(`visibilityState:"visible"`) and the app paints. On i3 the foregrounding is done
-**host-side via `i3-msg`** (Chrome's own `tabs.update`/`windows.update` is a no-op
-under a tiling WM), and the result carries `i3:"applied"|"skipped"|"failed"` so you
-can confirm it actually raised the window.
-
-**Verified pattern to read & drive a cross-origin app:**
+**`wake` is the fix, and it does NOT take the operator's screen.** It attaches CDP
+to your own tab, enables focus emulation (measured: `visibilityState` → `visible`,
+rAF 0/s → 62/s), holds it for a bounded settle (cap 6s) so the page paints, then explicitly
+disables focus emulation and detaches.
+No `i3-msg`, no tab/window focus change.
 
 ```bash
 BB=~/workspace/devrc/scripts/browser-bridge/browser
 $BB --instance work open https://civitai.com/apps/run/model-benchmarking  # backgrounded
-$BB --instance work activate            # → visibilityState:"visible", app renders
+$BB --instance work wake                # → woke:true, the app renders
 $BB --instance work frames              # now the OOPIF is listed
 $BB --instance work --frame model-benchmarking text    # read inside it
 $BB --instance work --frame model-benchmarking click 'button:has-text("Grid")'  # drive it
 ```
 
-**Caveats (document honestly):**
-- **`activate` STEALS FOCUS** — it's the one intentionally-intrusive op; it changes
-  what the user sees. Restore their focus afterward if it matters
-  (`i3-msg '[id="<prev-winid>"] focus'`).
-- **i3-gated:** it only works on a graphical i3 host (it shells out to `i3-msg`); on
-  a headless/non-i3 host expect `i3:"skipped"` (or `"failed"`) and no foregrounding.
-- **In-frame `click`/`type` are SYNTHETIC** (`isTrusted:false`, the `chrome.scripting`
-  OOPIF path) — but were verified to actually drive the real app (the Grid tab got
-  selected). Top-frame input remains TRUSTED CDP.
+**Wake once per page, not per read.** The un-throttled *state* ends when the CDP
+session detaches (measured), but the **DOM the page rendered during the wake
+window persists** — so a following ordinary `text`/`html` sees the rendered page
+on the cheap, banner-free path. Re-wake after a navigation or when the app needs
+to do more rendering work.
+
+**When the read itself must observe live un-throttled state** — you are measuring
+rAF, or the app hydrates lazily and re-empties while hidden — put the un-throttle
+and the read in ONE session:
+
+```bash
+$BB --instance work text --wake         # un-throttle + read, same CDP session
+$BB --instance work html --wake=3000    # longer settle
+$BB --instance work js '…' --wake
+```
+
+`--wake` is deliberately opt-in: an ordinary `text`/`html`/`eval` takes the light
+`chrome.scripting` path with **no debugger banner**, and routing every read
+through CDP would flash "an extension is debugging this browser" on every single
+read. `--wake` cannot be combined with `--frame` (refused with
+`wake_with_frame_unsupported`) — run `browser wake`, then the frame read.
+
+**When you actually need `activate` (rare).** `activate` is still the honest
+answer when something needs the REAL foreground: a browser permission prompt, a
+native file picker, or verifying with your own eyes. **It STEALS the operator's
+screen** — telemetry caught a session calling it 1–5 times per minute, grabbing
+the screen on nearly every interaction. If you must, call it **once per tab**,
+never per read, and restore focus afterward
+(`i3-msg '[id="<prev-winid>"] focus'`). It is i3-gated (`i3:"skipped"` off a
+graphical i3 host) and is **not available to the autonomous browser-agent at all**.
+
+**Caveat:** in-frame `click`/`type` are SYNTHETIC (`isTrusted:false`, the
+`chrome.scripting` OOPIF path) — but were verified to actually drive the real app
+(the Grid tab got selected). Top-frame input remains TRUSTED CDP.
 
 ## Diagnosing a CSS / layout bug (hit-test, don't theorise)
 
@@ -389,10 +415,12 @@ can't: an element can be present, correct, and completely covered. The sequence
 that found a real one (civitai-manager v0.1.82 — an open popover painted under the
 next card, after ~30 UI changes had passed every server-side test):
 
-**1. `open` → `activate` → `screenshot` — and LOOK at the image.** `activate` is
+**1. `open` → `wake` → `screenshot` — and LOOK at the image.** The un-throttle is
 not optional; a backgrounded tab is throttled and may never finish painting, so
-you'd screenshot a half-built page. Exit 0 is not a rendered page. `screenshot`
-prints a `.png` PATH (not a data URL) — `Read` that file; that is the LOOK step.
+you'd screenshot a half-built page. Use `wake` (non-intrusive), NOT `activate` —
+`screenshot` already works on a background tab via CDP, so nothing here needs the
+real foreground. Exit 0 is not a rendered page. `screenshot` prints a `.png` PATH
+(not a data URL) — `Read` that file; that is the LOOK step.
 
 **2. Hit-test the suspect element.** Take its `getBoundingClientRect()` and call
 `document.elementFromPoint(x, y)` at several points inside it, reporting for each
@@ -513,11 +541,14 @@ browser agent "go to news.ycombinator.com and report the top 3 story titles" \
   never the git HEAD. (Otherwise a prompt-injected page could have the model report
   that your `banking` profile is on chase.com, then `nav` that to an attacker.) The
   `browser whoami` CLI you run by hand is unchanged and still shows everything.
-- **No `upload` for the agent.** The autonomous model's op set is 11 ops
-  (`text`/`html`/`eval`/`nav`/`screenshot`/`frames`/`click`/`type`/`key`/
-  `activate`/`whoami`). `upload` is operator-only — you can still `browser upload`
-  by hand; the model gets `op_not_allowed:upload`. Re-enable it for the agent only
-  by an explicit `BROWSER_AGENT_ALLOWED_OPS` opt-in.
+- **No `upload` and no `activate` for the agent.** The autonomous model's op set
+  is 11 ops (`text`/`html`/`eval`/`nav`/`screenshot`/`frames`/`click`/`type`/
+  `key`/`wake`/`whoami`). `upload` is operator-only — you can still `browser
+  upload` by hand; the model gets `op_not_allowed:upload`, and it is re-enabled
+  only by an explicit `BROWSER_AGENT_ALLOWED_OPS` opt-in. **`activate` is stricter
+  still: it is not reachable by the model at ALL**, not even via that opt-in,
+  because it takes the operator's screen. The agent gets `wake` instead — the
+  un-throttling it actually needed, with no focus theft.
 - **Guardrails:** a step budget (`--steps`, default 12), a wall-clock `--timeout`
   (default 120s) enforced with a **process-group kill** (`setsid` + kill the whole
   group, so no opencode child survives), `--deny-domains`/`--allow-domains`

@@ -13,11 +13,16 @@
 // any-frame reads + TRUSTED input (see the CDP section lower in this file):
 // `frames` lists the tab's frames, `click`/`type`/`key` dispatch trusted input,
 // and `--frame` routes a read (getHtml/text/eval) INTO a chosen cross-origin frame.
+// `wake` UN-THROTTLES the target tab WITHOUT touching focus — the non-intrusive
+// answer to "the background tab never rendered". It attaches CDP to the own tab
+// and applies Emulation.setFocusEmulationEnabled (+ Page.setWebLifecycleState for
+// the frozen case), holds that for a bounded settle so the page gets real
+// animation frames, then detaches. See the `wake` section lower in this file for
+// the measured Chromium behaviour that dictates the design.
 // `activate` foregrounds the target tab (chrome.tabs.update{active} +
-// chrome.windows.update{focused}) so a foreground-REQUIRING web app (a heavy SPA
-// Chrome throttles while backgrounded) actually loads and can then be driven. It
-// is the ONE op that deliberately STEALS the user's focus; every other op is
-// non-intrusive. Tab-scoped (it targets a specific tab); no new permission.
+// chrome.windows.update{focused}). It is the LAST-RESORT op: it STEALS the
+// operator's screen, and it is only needed when something genuinely requires the
+// real foreground — `wake` covers throttling. Tab-scoped; no new permission.
 // `upload` populates an <input type=file> via CDP DOM.setFileInputFiles — Chrome
 // reads the file BY PATH itself (same host as the browser), so NO file bytes
 // cross the bridge. It is a bounded TYPED CDP op exactly like click/type/key:
@@ -27,7 +32,7 @@
 // AUDIT-LOGS every upload (op + target domain + path).
 export const ALLOWED_OPS = [
   "getHtml", "text", "eval", "tabs", "nav", "screenshot", "open", "close",
-  "frames", "click", "type", "key", "activate", "upload",
+  "frames", "click", "type", "key", "wake", "activate", "upload",
 ];
 
 // Per-op required fields (mirrors server.py REQUIRED_FIELDS). The server already
@@ -310,18 +315,185 @@ export async function waitForTabLoad(getTab, opts = {}) {
   return { tab, waited: true };
 }
 
+// --- `wake` op: un-throttle a background tab WITHOUT stealing focus --------- //
+// THE PROBLEM this fixes: a tab opened by `open` is background →
+// document.visibilityState==="hidden" → Chromium throttles it (NO animation
+// frames at all, timers clamped to ~1 Hz), so a heavy SPA never paints and every
+// read returns a shell. The historical remedy was `activate`, which FOREGROUNDS
+// the tab and therefore takes the operator's screen. Telemetry caught an agent
+// calling `activate` 1–5×/minute while the operator was working.
+//
+// MEASURED CHROMIUM BEHAVIOUR (throwaway Brave 1.89 under Xvfb, real CDP, a
+// background tab; the numbers below are observed, not assumed):
+//
+//   baseline (hidden)                       rAF   0 /s   timers   8 /s   vis hidden
+//   + Page.setWebLifecycleState(active)     rAF   0 /s                   vis hidden
+//   + Emulation.setFocusEmulationEnabled    rAF  62 /s   timers 247 /s   vis VISIBLE
+//   after the CDP session DETACHES          rAF   0 /s   timers   8 /s   vis hidden
+//
+// Three durable findings encoded here:
+//
+//  1. `Emulation.setFocusEmulationEnabled({enabled:true})` is what actually
+//     un-throttles: the renderer reports visibilityState "visible" and produces
+//     real animation frames. It moves NO window/tab focus — it is a per-session
+//     renderer override, invisible to the operator and to the window manager.
+//  2. `Page.setWebLifecycleState({state:"active"})` alone changed NOTHING for a
+//     merely-hidden tab. It is kept because it is the only lever for a page
+//     Chromium has FROZEN (memory-saver lifecycle), which focus emulation does
+//     not thaw — but it is best-effort and must never fail the op.
+//  3. **The un-throttled state does NOT survive detach.** It reverted completely
+//     the moment the session closed. Since every CDP op here is
+//     attach→run→detach-in-`finally`, a "wake once, read later" op CANNOT hand a
+//     later read an un-throttled tab. Hence BOTH shapes exist:
+//       * `wake` — un-throttle, hold it for a bounded settle so the page does its
+//         rendering work, detach. What PERSISTS is the DOM the page produced
+//         during that window (measured: the fixture's rAF-gated content rendered
+//         at 472 ms and was still there after detach). This is the cheap,
+//         once-per-tab answer, and it leaves the default read path untouched.
+//       * `--wake` on text/html/eval — un-throttle and perform THAT read inside
+//         the SAME attached session, so the read itself observes a genuinely
+//         un-throttled page. Required whenever the read must see live
+//         un-throttled state rather than persisted DOM.
+//
+// DESIGN CONSTRAINT (load-bearing): the DEFAULT text/html/eval path stays on
+// chrome.scripting with NO debugger attach. Routing every read through CDP would
+// make Brave flash "an extension is debugging this browser" on every single read
+// — trading focus theft for banner spam. Waking is opt-in, reached only when a
+// read actually came back hidden/empty.
+
+// Default settle held with the un-throttle applied. Long enough for a typical
+// SPA's first paint (the rAF-gated fixture needed ~470 ms) without wasting a
+// whole second of the operator's rate-limit budget on a page that is already up.
+export const WAKE_SETTLE_DEFAULT_MS = 1500;
+// Hard cap on the settle. DERIVED, not picked: unlike `activate` (whose wait is the
+// whole op), the settle is only ONE PHASE of a CDP op that must ALSO fit the probe
+// and, for a `--wake` read, the read itself — all inside CDP_OP_BUDGET_MS (15s).
+// A naive 8s cap made `html --wake=8000` = 8s settle + a read bounded by
+// CDP_COMMAND_TIMEOUT_MS (8s) = up to 16s > the budget, surfacing as an opaque
+// `cdp_timeout:op` (it fails safe and still detaches, but the message tells the
+// caller nothing). So the ceiling is CDP_OP_BUDGET_MS − CDP_COMMAND_TIMEOUT_MS −
+// 1s margin = 6s, which keeps settle + one worst-case command inside the budget by
+// construction. Clamping beats documenting a footgun.
+//
+// Written as a literal (CDP_OP_BUDGET_MS / CDP_COMMAND_TIMEOUT_MS are declared
+// LOWER in this file, so referencing them here would hit the const TDZ at module
+// evaluation). The relationship is not left to a comment: `wake.test.mjs` asserts
+// WAKE_SETTLE_MAX_MS + CDP_COMMAND_TIMEOUT_MS < CDP_OP_BUDGET_MS, so changing a
+// budget without re-deriving this fails CI.
+export const WAKE_SETTLE_MAX_MS = 6000;
+
+// Clamp a caller-supplied wake settle into [0, WAKE_SETTLE_MAX_MS]. undefined /
+// null / "" → the default; non-finite or negative → 0 (apply the un-throttle,
+// don't wait). Mirrors clampActivateWaitMs. Pure.
+export function clampWakeMs(waitMs) {
+  if (waitMs === undefined || waitMs === null || waitMs === "") {
+    return WAKE_SETTLE_DEFAULT_MS;
+  }
+  const n = Number(waitMs);
+  if (!Number.isFinite(n) || n <= 0) return 0;
+  return Math.min(Math.floor(n), WAKE_SETTLE_MAX_MS);
+}
+
+// The FIXED, ordered CDP method sequence that un-throttles a tab. Exported as
+// DATA (not a live call) so the "no raw-CDP passthrough / typed-op-only" property
+// is unit-assertable: there is no caller-influenced method or param anywhere in
+// it. `optional:true` marks a step whose failure is swallowed (see below).
+//
+// Order matters: lifecycle first (thaw a frozen page), then focus emulation (the
+// step that actually un-throttles a merely-hidden one).
+export const WAKE_CDP_STEPS = Object.freeze([
+  Object.freeze({ method: "Page.setWebLifecycleState",
+                  params: Object.freeze({ state: "active" }), optional: true }),
+  Object.freeze({ method: "Emulation.setFocusEmulationEnabled",
+                  params: Object.freeze({ enabled: true }), optional: false }),
+]);
+
+// The EXPLICIT teardown for the step above. It is NOT enough to rely on detach
+// reverting focus emulation: that revert is an implementation detail of the
+// Emulation domain, not a protocol contract, and there is a concrete path where
+// detach does not happen promptly — a hung/failed `chrome.debugger.detach` (tab
+// mid-crash, wedged renderer) is bounded and SWALLOWED by withCdpSession's
+// safeDetach, so the attachment can outlive the op. A tab left permanently
+// focus-emulated is a hidden tab that believes it is focused and visible:
+// un-throttled indefinitely, stuck debug banner, nothing that knows to clean it up.
+//
+// It also closes a credential-adjacent risk that must not rest on a measured side
+// effect: `navigator.clipboard.readText()` requires a FOCUSED document plus an
+// already-granted `clipboard-read` permission, and the operator's clipboard
+// routinely holds a password or token. On an origin that already has that grant, a
+// document that believes it is focused may be able to read it. Narrowing the
+// emulated-focus window to exactly the wake, deterministically, is the fix — not
+// hoping the revert happens. (Pointer-lock/fullscreen/autoplay stay closed
+// regardless: they additionally need transient user activation, which `wake` never
+// synthesizes.)
+//
+// Best-effort by construction: this runs in a `finally`, so a failure here must
+// never mask the op's real result or error.
+export const WAKE_CDP_TEARDOWN = Object.freeze({
+  method: "Emulation.setFocusEmulationEnabled",
+  params: Object.freeze({ enabled: false }),
+});
+
+// Probe run INSIDE the wake window to report what the un-throttle achieved.
+// Metadata only — no page content can leave via it.
+//
+// It is a FUNCTION (injected via chrome.scripting, ISOLATED world), not a CDP
+// expression, and that is deliberate: a CDP Runtime.evaluate with no contextId runs
+// in the page's MAIN world, where a hostile page can shadow `document.visibilityState`
+// / `document.hasFocus` and lie to us — turning `woke` into a page-controlled claim.
+// The isolated world sees the real values.
+export function wakeProbeFn() {
+  return {
+    visibilityState: document.visibilityState,
+    readyState: document.readyState,
+    hasFocus: document.hasFocus(),
+  };
+}
+
+// Apply WAKE_CDP_STEPS through `send`, tolerating an optional step's failure.
+// Returns { applied:[method,…], skipped:[{method,error},…] } so the op can report
+// honestly which levers actually took (a Chromium that drops
+// Page.setWebLifecycleState must NOT fail the wake — finding 2 above says that
+// step is a no-op for the common hidden-tab case anyway). A REQUIRED step's
+// failure propagates: a wake that could not un-throttle must not claim success.
+// Pure orchestration — `send` is injected, so this is unit-tested with no browser.
+export async function applyWakeSteps(send, steps = WAKE_CDP_STEPS) {
+  const applied = [];
+  const skipped = [];
+  for (const step of steps) {
+    try {
+      await send(step.method, step.params);
+      applied.push(step.method);
+    } catch (e) {
+      if (!step.optional) throw e;
+      skipped.push({ method: step.method, error: e && e.message ? e.message : String(e) });
+    }
+  }
+  return { applied, skipped };
+}
+
 // --- hidden-tab self-announcing reads (prevent the "false outage") ---------- //
 // A tab opened via `open` is BACKGROUND, so document.visibilityState==="hidden"
 // and Chromium THROTTLES it — a heavy SPA never renders, and text/html/eval/frames
 // return an empty shell that is indistinguishable from a broken site. So every
 // read op reports the tab's visibilityState in its result, and when the tab is
-// hidden it self-announces (data.hidden=true + a note pointing at `activate`) so
-// an operator/agent is not fooled into declaring a false outage. Pure — the SW
-// supplies the tab's document.visibilityState (which reflects the tab; an OOPIF's
-// document follows the tab, so a --frame read reports it the same way).
+// hidden it self-announces (data.hidden=true + a note) so an operator/agent is not
+// fooled into declaring a false outage. Pure — the SW supplies the tab's
+// document.visibilityState (which reflects the tab; an OOPIF's document follows
+// the tab, so a --frame read reports it the same way).
+//
+// ⚠ THE WORDING IS LOAD-BEARING. This note is emitted on EVERY read of a hidden
+// tab, so whatever remedy it names becomes the reflex an agent learns. It used to
+// say "run 'browser activate'" — and telemetry then caught a session activating
+// 1–5×/minute, yanking the operator's screen away on nearly every interaction.
+// It now names the NON-INTRUSIVE remedy and states plainly that `activate` takes
+// the screen. Do not reintroduce `activate` as the headline advice here.
 export const HIDDEN_TAB_NOTE =
   "tab is hidden — background tabs are throttled, so SPA content may not have " +
-  "rendered; run 'browser activate' or expect a shell-only DOM.";
+  "rendered. Non-intrusive fix: run 'browser wake' (un-throttles the tab via CDP, " +
+  "does NOT move focus), or re-run this read with --wake. Only use " +
+  "'browser activate' if something genuinely needs the real foreground — it " +
+  "STEALS the operator's screen.";
 
 // Merge the tab's visibilityState into a read result's `data`. A truthy
 // visibilityState is recorded; when it is exactly "hidden", the result ALSO
