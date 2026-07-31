@@ -115,15 +115,32 @@ _DISCORD_ATTACHMENT_SEGMENTS = frozenset({"attachments", "ephemeral-attachments"
 # "any digits" rule would turn a stray numeric path segment into an alias key.
 _SNOWFLAKE = re.compile(r"^[0-9]{5,25}$")
 
-# URL path segments that are forum CHROME rather than a thread subject. This is
-# a structural list (route/verb segments), not a vocabulary of subject words --
-# no library-specific or site-specific term belongs here.
-_PATH_CHROME = frozenset({
-    "threads", "thread", "topic", "topics", "forum", "forums", "board",
-    "boards", "index.php", "showthread.php", "viewtopic.php", "viewforum.php",
-    "t", "f", "p", "post", "posts", "page", "pages", "attachment",
-    "attachments", "download", "downloads", "view", "watch", "media", "album",
-    "gallery", "comments", "s", "goto", "print",
+# The path segments that INTRODUCE a thread. A slug is the segment immediately
+# after one of these, and nowhere else.
+#
+# THIS USED TO BE A "SKIP THE CHROME, TAKE THE DEEPEST SEGMENT THAT QUALIFIES"
+# RULE, AND THAT RULE WAS WRONG IN THE ONE CASE THAT MATTERS. When a thread's
+# own slug is a single word, it failed the >=2-token test and the SECTION name
+# one level up won instead:
+#
+#     /forums/general-discussion/threads/aster.99/  ->  "general discussion"
+#     /forums/general-discussion.12/                ->  "general discussion"
+#     /members/some-poster.4321/                    ->  "some poster"
+#
+# Those became `thread:` identity keys, which score 1.00 and auto-file -- so
+# one correction taught the router that an entire forum SECTION, or another
+# member's profile, meant one subject directory. That is precisely the
+# mislearning this whole change exists to remove, relocated from the tag list
+# into the URL path and made worse, because an identity key outranks everything
+# else.
+#
+# Anchoring is a POSITIONAL rule, not a superlative over candidates: a
+# superlative ("deepest that qualifies", "longest that survives") picks the
+# wrong thing exactly when the subject is short, and short subjects are common.
+# A segment that no forum route introduced is not a thread, full stop.
+_THREAD_ANCHORS = frozenset({
+    "threads", "thread", "topic", "topics", "t",
+    "showthread.php", "viewtopic.php", "showthread", "viewtopic",
 })
 
 # `slug.123456` (xenforo) and `123456-slug` (vbulletin) both carry a numeric id
@@ -135,44 +152,83 @@ _LEADING_ID = re.compile(r"^\d{2,}[.\-_]")
 # half is chrome and is dropped by comparing against the host's own tokens.
 _TITLE_SPLIT = re.compile(r"\s*[|–—·•»«]\s*|\s+[-‐]\s+|\s*::\s*")
 
-# A learned alias key shorter than this is refused: two or three characters
-# match far too much page prose to be a subject.
-MIN_ALIAS_KEY_LEN = 4
-# A thread slug is hyphenated WORDS. One token is an opaque id (`/d/AbCdEf`).
-MIN_SLUG_TOKENS = 2
+# A learned alias key shorter than this is refused: two characters match far
+# too much page prose to be a subject. Three is deliberate rather than four:
+# an initialised stage name folds to three (`M.I.A.` -> `mia`), and refusing a
+# real subject is not free just because the refusal is quiet.
+MIN_ALIAS_KEY_LEN = 3
 # A phrase seen on this many DISTINCT directories is site chrome (a forum
 # section, an uploader's username), not a subject. Data-driven: it is measured
 # from the labelled examples, not read off a word list.
 CHROME_DIR_SPREAD = 2
 
 
+def _ascii_host(host: str) -> str:
+    """A hostname in the one form BOTH implementations produce.
+
+    JS's `new URL().hostname` punycodes an internationalised host and wraps an
+    IPv6 literal in brackets; Python's `urlsplit().hostname` does neither and
+    strips the brackets. Both are right for their own spec, which is exactly
+    why neither can be the contract -- so the rule is written out here and
+    mirrored in route_core.js, the same treatment `is_http_url` already gets in
+    safety.py. An un-encodable host is refused rather than guessed at.
+    """
+    host = (host or "").lower()
+    if not host:
+        return ""
+    if "%" in host:
+        # `new URL` percent-DECODES the host before punycoding it; `urlsplit`
+        # hands back the raw escapes. Without this the two produce
+        # `xn--e1afmkfd.test` and `%d0%bf....test` for the same URL.
+        from urllib.parse import unquote
+        try:
+            decoded = unquote(host, errors="strict")
+        except (UnicodeDecodeError, ValueError):
+            return ""
+        if any(ch in decoded for ch in "/\\?#@[]:"):
+            return ""       # an escape that smuggles authority syntax
+        host = decoded
+    if all(ord(ch) < 128 for ch in host):
+        return host
+    try:
+        return host.encode("idna").decode("ascii")
+    except (UnicodeError, ValueError):
+        return ""
+
+
 def host_of(url) -> str:
-    """Hostname of `url`, lowercased. `''` when it has none."""
+    """Hostname of an http(s) URL, normalised. `''` for anything else.
+
+    The scheme filter matters: these hosts become the SCOPE of an alias, and
+    `file:`, `data:` and `blob:` URLs have no meaningful one. `urlsplit`
+    cheerfully parses all three; `new URL` parses them too but reports a
+    different hostname, so without an explicit gate the two implementations
+    disagreed on 9 of 30 hostile inputs.
+    """
     if not isinstance(url, str) or not url:
         return ""
     try:
-        return (urlsplit(url).hostname or "").lower()
+        split = urlsplit(url)
+        if split.scheme.lower() not in ("http", "https"):
+            return ""
+        return _ascii_host(split.hostname or "")
     except ValueError:
         return ""
 
 
 def url_path_segments(url) -> tuple:
-    """Non-empty path segments of an ABSOLUTE URL. `()` for anything else.
+    """Non-empty path segments of an absolute http(s) URL. `()` otherwise.
 
-    The hostname requirement is not cosmetic: `urlsplit` happily parses
+    Gated on `host_of` for two reasons. `urlsplit` happily parses
     `"not a url"` as a relative path and hands back `["not a url"]`, which the
-    slug extractor then reads as a two-word thread subject. JS's `new URL`
-    throws on the same input, so without this the two implementations disagree
-    -- and the extension's copy runs exactly when the sidecar is unreachable,
-    where the disagreement is invisible. Pinned by fixtures/url_cases.json.
+    slug extractor then read as a two-word thread subject, while JS's
+    `new URL` throws. And `data:`/`file:`/`blob:` URLs have paths but no site
+    to scope an alias to. Pinned by fixtures/url_cases.json.
     """
-    if not isinstance(url, str) or not url:
+    if not host_of(url):
         return ()
     try:
-        split = urlsplit(url)
-        if not split.hostname:
-            return ()
-        path = split.path
+        path = urlsplit(url).path
     except ValueError:
         return ()
     return tuple(seg for seg in path.split("/") if seg)
@@ -200,49 +256,65 @@ def discord_alias_key(channel_id: str) -> str:
 
 
 def _slug_tokens(segment: str) -> tuple:
-    """Content tokens of one path segment, with any adjacent numeric id gone."""
+    """VERBATIM tokens of one path segment, with any adjacent numeric id gone.
+
+    `tokens`, not `content_tokens`. Stopword stripping belongs to fuzzy
+    matching, never to an identity: it made distinct threads collide, and
+    `upsert_alias` re-points on conflict, so the collision was silent --
+
+        /threads/aster-vale-new-set.222/  ->  thread:aster-vale-set
+        /threads/aster-vale-set.223/      ->  thread:aster-vale-set
+
+    ...and the second correction quietly repointed a key the first thread hits
+    at 1.00. `new` is a stopword here; so are `part`, `scene`, `full`, `hd`,
+    `clip`, `video`, `source`, `original` and `final`, which is a lot of real
+    thread titles.
+    """
     seg = str(segment or "")
     seg = _LEADING_ID.sub("", seg)
     seg = _TRAILING_ID.sub("", seg)
-    return content_tokens(seg)
+    return tokens(seg)
 
 
 def thread_slug(url) -> str:
     """The forum thread subject carried by a URL path, as a phrase.
 
-    `/forums/some-section/threads/subject-name.12345/page-2`  ->  "subject name"
+    ANCHORED: the slug is the segment immediately following a thread route
+    (`/threads/`, `/topic/`, `/t/`, `showthread.php`, ...) and nowhere else.
 
-    Preferred over the tag list (decision: the tag list on a forum is chrome and
-    other posters' usernames) and over the page title (which carries site
-    branding). Returns `''` when no segment qualifies.
+        /forums/some-section/threads/subject-name.12345/page-2 -> "subject name"
+        /forums/some-section/                                  -> ""
+        /members/some-poster.4321/                             -> ""
+        /uploads/dsc-0123.jpg                                  -> ""
+
+    See `_THREAD_ANCHORS` for why this is positional rather than a superlative
+    over candidate segments. The last anchored segment wins when a URL somehow
+    contains two, which is deterministic without being a "best of" rule.
+
+    Preferred over the tag list (on a forum that is section names and other
+    posters' usernames) and over the page title (site branding).
     """
     best = ()
-    for segment in url_path_segments(url):
-        lowered = segment.lower()
-        if lowered in _PATH_CHROME:
+    segments = url_path_segments(url)
+    for i in range(1, len(segments)):
+        if segments[i - 1].lower() not in _THREAD_ANCHORS:
             continue
-        toks = _slug_tokens(segment)
-        # TWO tokens minimum, not the usual fuzzy guard. A file host's path is
-        # `/d/AbCdEf` -- one opaque 6-character token, which the fuzzy guard
-        # happily accepts and which would then be minted as a thread identity
-        # for a page that has no thread. A slug is hyphenated words; an id is
-        # not. The cost is missing a genuinely one-word thread title, which
-        # falls through to the picker exactly as it does today.
-        if len(toks) < MIN_SLUG_TOKENS:
+        toks = _slug_tokens(segments[i])
+        # The thread route already proves this is a thread, so a ONE-word slug
+        # is legitimate here in a way it never was under the old rule -- the
+        # >=2-token guard existed only to stop an opaque file-host id
+        # (`/d/AbCdEf`) being minted as a subject, and no anchor introduces one.
+        meaningful = tuple(t for t in toks
+                           if t not in STOPWORDS and not t.isdigit())
+        if not meaningful or not passes_fuzzy_guard(meaningful):
             continue
-        # `page-2`, `post-14` -- a chrome verb plus its number is not a subject.
-        if len(toks) <= 2 and toks[0] in _PATH_CHROME:
-            continue
-        if all(t.isdigit() for t in toks):
-            continue
-        # DEEPEST wins: `/forums/<section>/threads/<subject>` puts the section
-        # before the subject, and the subject is the one that identifies it.
         best = toks
     return " ".join(best)
 
 
 def thread_alias_key(slug: str) -> str:
-    toks = content_tokens(slug)
+    """The stored key for a thread slug. Near-verbatim — see `_slug_tokens`."""
+    toks = tokens(slug)
     return (KEY_PREFIX_THREAD + "-".join(toks)) if toks else ""
 
 
@@ -281,25 +353,37 @@ def title_subject(title, site: str = "") -> str:
 
     `"Subject Name | Some Forum"` on `someforum.test` -> `"Subject Name"`.
 
-    Deterministic and data-driven: a segment is chrome when every one of its
-    tokens is also a token of the HOST, so no list of site names is needed.
+    THE FIRST surviving segment, not the longest.
+
+    "Longest wins" was a superlative over candidates, and like the old slug
+    rule it picked the wrong thing exactly when the subject was short. The
+    branding test can only recognise a site whose display name resembles its
+    hostname, so on a forum where those differ it fires for neither segment --
+    and then the longer one wins, which is the SITE name whenever the subject
+    is a single word:
+
+        title_subject('Aster | Some Forum', 'forum.test')  ->  'Some Forum'
+
+    That is a 1.00 site-scoped alias for the site's own name: every page on
+    that forum with a short subject then auto-files into one directory.
+
+    Position is the reliable signal. `"<subject> | <site>"` is the dominant
+    convention by a wide margin, and the reverse order is still handled
+    whenever the branding test CAN see it, because that segment is dropped
+    before position is consulted. When neither is knowable, taking the first
+    segment is at worst a weak alias for one page's real title -- the failure
+    mode is a useless alias, not a wrong one.
     """
     if not isinstance(title, str) or not title.strip():
         return ""
-    parts = [p.strip() for p in _TITLE_SPLIT.split(title) if p and p.strip()]
-    kept = []
-    for part in parts:
-        toks = content_tokens(part)
-        if not toks or is_site_branding(part, site):
+    for part in _TITLE_SPLIT.split(title):
+        part = (part or "").strip()
+        if not part or not content_tokens(part):
             continue
-        kept.append((len(toks), part))
-    if not kept:
-        return ""
-    # The longest surviving segment: a title is "<subject> | <site>" far more
-    # often than the reverse, but ordering is not reliable across sites while
-    # "the site name is short" is.
-    kept.sort(key=lambda pair: -pair[0])
-    return kept[0][1]
+        if is_site_branding(part, site):
+            continue
+        return part
+    return ""
 
 
 @dataclass(frozen=True)
@@ -873,13 +957,27 @@ def suspicious_alias_key(phrase, *, key: str = "", dir_names=(), site: str = "",
     them is measured from data the router already has rather than from a
     vocabulary that would need maintaining (and could never be committed to a
     public repo anyway).
+
+    STRUCTURED KEYS ARE SCREENED TOO. They used to return None immediately, on
+    the reasoning that a channel id is an identity rather than a word. The
+    reasoning held; the exemption did not, because a BADLY DERIVED identity is
+    still an identity as far as the store is concerned, and it lands at 1.00
+    with auto-file rather than at 0.85 without. A section name mis-read as a
+    thread slug was the worst row the router could possibly write, and it was
+    the one row nothing checked.
+
+    What structured keys are exempt from is only the two rules that describe a
+    WORD rather than a source: minimum length (a channel id is digits; a
+    one-word thread slug is legitimately short) and the handle shape (a channel
+    id is nothing but digits). Chrome spread, site branding and shared library
+    vocabulary all still apply, and all three are exactly what catches a
+    section name.
     """
     key = key or alias_key(phrase)
     if not key:
         return "empty key"
-    if is_structured_key(key):
-        return None          # a channel id / thread slug is an identity
-    if len(key) < MIN_ALIAS_KEY_LEN:
+    structured = is_structured_key(key)
+    if not structured and len(key) < MIN_ALIAS_KEY_LEN:
         return (f"key {key!r} is shorter than {MIN_ALIAS_KEY_LEN} characters — "
                 "it would match unrelated page prose")
     if spread >= CHROME_DIR_SPREAD:
@@ -898,9 +996,24 @@ def suspicious_alias_key(phrase, *, key: str = "", dir_names=(), site: str = "",
             return ("every word of it already appears in "
                     f"{CHROME_DIR_SPREAD}+ library directories — it reads as a "
                     "category word, not a subject")
-    if len(ptoks) == 1 and any(ch.isdigit() for ch in ptoks[0]):
-        return "a single word with digits in it reads as a handle, not a name"
+    if not structured and _looks_like_a_handle(ptoks):
+        return "it reads as a handle (a word with a number stuck on the end)"
     return None
+
+
+def _looks_like_a_handle(ptoks) -> bool:
+    """`poster1988`, `uploader42` — a word with a number stuck on the end.
+
+    NARROWED from "a single token containing any digit", which refused
+    legitimate single-word stage names that merely contain a numeral. The
+    remaining false positive is a name that genuinely ends in digits; it is
+    reported rather than silently dropped, and `--force` still writes it.
+    """
+    if len(ptoks) != 1:
+        return False
+    tok = ptoks[0]
+    return (len(tok) >= 6 and tok[-1].isdigit() and tok[-2].isdigit()
+            and not tok[0].isdigit())
 
 
 def find_duplicate(index, target_dir: str, filename: str, size: int = 0):

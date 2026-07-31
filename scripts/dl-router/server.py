@@ -48,7 +48,8 @@ from dirindex import DirIndex, FileIndex  # noqa: E402
 from dirkinds import DirKinds  # noqa: E402
 from fetcher import Fetcher  # noqa: E402
 from matcher import (  # noqa: E402
-    KIND_CATEGORY, KIND_UNKNOWN, KINDS, MatchContext, Matcher, content_tokens,
+    KIND_CATEGORY, KIND_PERFORMER, KIND_UNKNOWN, KINDS, MatchContext, Matcher,
+    content_tokens,
     find_duplicate, host_of, identity_signals, norm_key, passes_fuzzy_guard,
     suspicious_alias_key, title_subject,
 )
@@ -185,7 +186,10 @@ class App:
             names = self.dirs.names()
             out["dirs"] = len(names)
             out["aliases"] = self.store.alias_count()
-            out["etag"] = self.dirs.etag()
+            # The snapshot hash, NOT DirIndex's names-only etag: two different
+            # values under one name, in the subsystem whose last bug was an
+            # etag that did not cover what it labelled.
+            out["etag"] = self.dirs_snapshot()["etag"]
             # Unclassified directories never auto-file, so this count is the
             # single most useful number for "why is it asking every time?".
             kinds = self.dir_kinds()
@@ -297,35 +301,70 @@ class App:
                                     evidence=str(evidence)[:200])
             written.append({"key": key, "site": site, "source": source})
 
-        def screen(phrase, key, source, spread):
+        spread_map = self.store.phrase_dir_spread()
+
+        def screen(phrase, key, source, site):
             why = suspicious_alias_key(phrase, key=key, dir_names=dir_names,
-                                       site=ctx.site, spread=spread)
+                                       site=site,
+                                       spread=spread_map.get(norm_key(phrase), 0))
             if why:
                 skipped.append({"key": key, "source": source, "why": why})
             return why is None
 
-        # 1. Identity signals — every kind, always. Site-scoped by construction.
-        for sig in identity_signals(ctx):
-            write(sig.key, sig.site, sig.kind, sig.evidence)
+        # THE CATCH-ALL LEARNS NOTHING.
+        #
+        # Sending a download to the catch-all is the user saying "not any of
+        # these", which is the absence of a subject, not evidence of one. It
+        # cannot auto-file (the directory is unclassified), but a 1.00 identity
+        # alias pointing at it would make the catch-all the permanent top
+        # candidate in the picker for that channel or thread -- turning one
+        # shrug into a standing recommendation.
+        if chosen == self.cfg.other_dir:
+            self.store.add_example(payload.get("context") or {}, chosen,
+                                   payload.get("autoDir"),
+                                   bool(payload.get("createdNew")))
+            return {"ok": True, "aliases": 0, "written": [],
+                    "skipped": [{"key": "", "source": "catch-all",
+                                 "why": "the catch-all directory is the "
+                                        "absence of a subject, not one"}],
+                    "dir": chosen, "kind": kind}
 
-        spread_map = self.store.phrase_dir_spread()
+        # 1. Identity signals — every kind, always. Site-scoped by construction,
+        #    and SCREENED: a badly derived identity is still an identity as far
+        #    as the store is concerned, and it lands at 1.00 with auto-file
+        #    rather than at 0.85 without. This is the one row that most needed
+        #    checking and was the only one exempt from the check.
+        for sig in identity_signals(ctx):
+            if screen(sig.evidence, sig.key, sig.kind, sig.site):
+                write(sig.key, sig.site, sig.kind, sig.evidence)
 
         if kind == KIND_CATEGORY:
             # 2. Tags — the legitimate signal for a category, and ONLY there.
             if confirmed and ctx.site:
-                for tag in ctx.tags[:MAX_LEARNED_TAGS]:
+                learned = 0
+                for tag in ctx.tags:
+                    if learned >= MAX_LEARNED_TAGS:
+                        break
                     key = norm_key(tag)
                     if not key:
                         continue
-                    if screen(tag, key, "tag", spread_map.get(key, 0)):
+                    # SCREEN FIRST, THEN CAP. Capping the input list meant a
+                    # page whose first three tags were junk consumed the whole
+                    # budget and a legitimate fourth was never even considered.
+                    if screen(tag, key, "tag", ctx.site):
                         write(key, ctx.site, "tag", tag)
+                        learned += 1
             elif ctx.tags:
                 skipped.append({
                     "key": "", "source": "tag",
                     "why": "a tag is learned only from an explicit "
                            "confirmation on a site-scoped context"})
-        else:
-            # 3. The subject inside the page title — performer / unclassified.
+        elif kind == KIND_PERFORMER:
+            # 3. The subject inside the page title. PERFORMER ONLY -- an
+            #    unclassified directory learns identity signals and nothing
+            #    else, which is what the docs have always said. Learning weak
+            #    title aliases for it meant a pile of dormant rows that would
+            #    all activate at once the moment it was classified.
             for title, site in ((ctx.title, ctx.site),
                                 (ctx.referrer_title, host_of(ctx.referrer_url))):
                 subject = title_subject(title, site)
@@ -335,9 +374,16 @@ class App:
                 if not passes_fuzzy_guard(toks) or len(toks) > MAX_TITLE_SUBJECT_TOKENS:
                     continue
                 key = norm_key(subject)
-                if key and screen(subject, key, "title-subject",
-                                  spread_map.get(key, 0)):
+                if key and screen(subject, key, "title-subject", site):
                     write(key, site, "title-subject", subject)
+
+        if skipped:
+            # AN OVER-STRICT SCREEN MUST NOT BE SILENT. The response carries the
+            # detail; this line is what makes it visible without one. Reason
+            # CODES only -- the keys themselves are the operator's private
+            # library, and this journal is world-readable (see log()).
+            log("learn_screened", n=len(skipped),
+                sources="|".join(sorted({s["source"] for s in skipped})))
 
         if ctx.site:
             self.store.set_host_prior(ctx.site, chosen)

@@ -100,7 +100,21 @@ from it and nothing else:
 | Signal | Key | Scope |
 |---|---|---|
 | Discord attachment (`cdn.discordapp.com`, `media.discordapp.net`) | `discord:<channel id>` | `discord.com` |
-| forum thread slug in the path | `thread:<slug>` | that forum's host |
+| forum thread slug, **anchored** to a thread route | `thread:<slug>` | that forum's host |
+
+A slug is the path segment immediately after `/threads/`, `/topic/`, `/t/`,
+`showthread.php` or similar — and **nowhere else**. That is positional on
+purpose. The first version took "the deepest segment with ≥2 words", and when a
+thread's own slug was a single word the *section* one level up won instead
+(`/forums/general-discussion/threads/aster.99/` → `general discussion`), so one
+correction taught the router that an entire forum section meant one directory,
+at 1.00, with auto-file. A superlative over candidates ("deepest that
+qualifies", "longest that survives") picks the wrong thing exactly when the
+subject is short, and short subjects are the common case.
+
+Identity keys are **near-verbatim**: stopwords are kept, because
+`aster-vale-new-set` and `aster-vale-set` folding to one key silently repointed
+a live alias.
 
 The first download from a channel or thread has no signal, opens the picker,
 and confirming it writes the key. Every later download from the same channel
@@ -113,8 +127,10 @@ The URL table is a shared fixture asserted against *both* `matcher.py` and
 `extension/route_core.js`.
 
 **Subject ordering** follows from the same evidence: the URL thread slug leads,
-then the page title with the site's own branding removed, and the tag list
-trails both. On the one forum download that *did* capture context, the tag list
+then the page title with the site's own branding removed (**the first**
+surviving segment, not the longest — "longest wins" returned the *site* name
+whenever the subject was one word and the site's display name did not resemble
+its hostname), and the tag list trails both. On the one forum download that *did* capture context, the tag list
 was the forum's section names and other posters' usernames while the subject
 sat in the slug and the title.
 
@@ -122,11 +138,18 @@ sat in the slug and the title.
 
 A download from a paired file host has no context of its own — the page is a
 download button. The forum thread that sent the user there does have one, and it
-is carried **only when the link is provable**: a captured click whose `href` is
-this page, or the tab this one was opened from (`openerTabId`). There is
-deliberately no time window and no "the last thread I saw"; both are wrong
-exactly when several tabs are open, which is how anyone browses a forum. An
-unprovable link goes to the picker.
+is carried **only when the link is provable**, and there is exactly one proof:
+a captured click on another page whose `href`/`mediaSrc` is this page. When the
+opener tab is known, the donor must additionally be in it — `openerTabId` can
+only *narrow* the proof, never supply one.
+
+An opener-tab-only branch existed briefly and was **deleted, not tightened**.
+It took the newest capture from the opener tab with nothing binding it to the
+navigation that opened the tab, which is "the last thread I saw in that tab"
+wearing the word "provable" — and it went wrong on the ordinary pattern of
+opening a file host in a new tab and carrying on browsing. There is no time
+window either: a window is a guess about how fast someone browses. An
+unprovable link goes to the picker, which is the point.
 
 ### Directory kinds
 
@@ -143,9 +166,12 @@ category  = ["Field Recordings"] # unattributed material, filed by topic
   tag is a weak claim about any *one* file.
 * **An unclassified directory never auto-files either.** Absence of a
   classification is not permission.
-* `dl-route dirs classify` drafts the file from the live index with a
-  best-guess split and the reason on every line, so the review action is
-  "move this line", not "type every directory name".
+* `dl-route dirs classify` drafts the file from the live index with the reason
+  on every line, so the review action is "move this line", not "type every
+  directory name". **Everything starts in `category`** — nothing available to a
+  generator distinguishes a person's name from a topic, and `category` is the
+  side that asks, so a skimmed review leaves directories that ask too often
+  rather than directories that auto-file into the wrong place.
 * Creating a directory through the picker **asks which kind it is** — otherwise
   the new directory would silently interrupt every future download into it.
 
@@ -196,12 +222,24 @@ What `/learn` writes now depends on what the directory **is**:
 | `category` | the above, plus tag → directory aliases — site-scoped, capped, and only from an explicit confirmation |
 | unclassified | identity signals only |
 
-**No alias is ever learned at global scope.** A global alias applies on every
-site at once: the widest blast radius the store has, and the least evidence
-supports it. `dl-route alias set --site '*'` still exists for a deliberate one.
+**The correction path never learns a global alias.** A global alias applies on
+every site at once: the widest blast radius the store has, and the least
+evidence supports it. Two deliberate, explicitly-invoked exceptions remain, and
+both show up flagged in `alias review`: `dl-route alias set --site '*' --force`,
+and `backfill plan --seed-aliases` (which has no site to scope to — the seeds
+come from directory and torrent names, not from a page).
 
-Every candidate key is screened first, by rules that describe the *failure
-class* rather than the four strings that caused it — and every rule is measured
+**The catch-all learns nothing at all.** Sending a download there is "not any
+of these" — the absence of a subject rather than evidence of one.
+
+Every candidate key is screened first — **including the identity signals**. A
+badly derived identity is still an identity as far as the store is concerned,
+and it lands at 1.00 *with* auto-file rather than at 0.85 without, so the worst
+row the router can write must not be the one row nothing checks. Structured
+keys skip only the two rules that describe a word rather than a source
+(minimum length, handle shape).
+
+The rules describe the *failure class* rather than the four strings that caused it — and every rule is measured
 from data the router already holds, because a vocabulary of "bad words" would
 be both unmaintainable and un-committable to a public repo:
 
@@ -212,7 +250,13 @@ be both unmaintainable and un-committable to a public repo:
 * part of the **site's own name**;
 * every word of it already appears in two or more library directories, which is
   what a taxonomy reads like and a person's name does not;
-* a single token containing digits (a handle, not a name).
+* it reads as a handle — a word with a number stuck on the end
+  (`poster1988`). Narrowed from "a single token containing any digit", which
+  refused legitimate stage names.
+
+Refusals are **surfaced**, not silently dropped: they come back in `/learn`'s
+response and the sidecar logs a metadata-only count and reason-code line. An
+over-strict screen that nobody can see is the same failure as an over-loose one.
 
 `dl-route alias review` shows what has been learned with the evidence, the
 provenance and the hit count behind each row, riskiest first, flagging the

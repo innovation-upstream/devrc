@@ -236,6 +236,15 @@ Editing the sidecar requires a `home-manager switch` (it runs from the nix
 store). `SKILL.md` and `dl-route` are out-of-store symlinks and track the
 working tree immediately.
 
+**Deploying a matching change is TWO steps, not one.** The extension carries
+its own copy of the matcher (`route_core.js`) for the cached fallback, so a
+`home-manager switch` alone leaves the OLD service worker running with the old
+rules — including, after the directory-kinds change, a `localDecide` with no
+kind gate, which will keep auto-filing from cache into a directory you have
+just reclassified as a category. Finish the deploy with a **full Brave
+restart** (not the reload button — the long-poll keeps the old worker alive,
+same gotcha as browser-bridge), then re-check `dl-route status`.
+
 ## Gotchas
 
 * Port **8791** — 8790 is already taken on the workbench.

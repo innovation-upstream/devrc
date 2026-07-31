@@ -489,3 +489,47 @@ def test_status_names_the_unclassified_directories_as_the_reason_it_asks(
     out = capsys.readouterr().out
     assert "unclassified=6" in out
     assert "dl-route dirs classify" in out
+
+
+def test_dirs_classify_force_refuses_to_discard_an_unparseable_file(cli_env,
+                                                                    tmp_path):
+    """--force is safe only because an existing classification is carried into
+    the draft. When the file cannot be PARSED there is nothing to carry, so
+    --force would silently reset every decision in it — the one destructive act
+    available from a command whose whole job is to be read-only."""
+    out = tmp_path / "broken.toml"
+    out.write_text("performer = [ oops", encoding="utf-8")
+    with pytest.raises(SystemExit, match="cannot be parsed"):
+        call(["dirs", "classify", "--out", str(out), "--force"])
+    assert out.read_text(encoding="utf-8") == "performer = [ oops"
+
+
+def test_dirs_classify_force_does_overwrite_a_readable_file(cli_env, tmp_path):
+    out = tmp_path / "ok.toml"
+    out.write_text('performer = ["Jane Doe"]\ncategory = []\n', encoding="utf-8")
+    assert call(["dirs", "classify", "--out", str(out), "--force"]) == 0
+    import tomllib
+    # ...and the existing decision survived the regeneration.
+    assert "Jane Doe" in tomllib.loads(out.read_text(encoding="utf-8"))["performer"]
+
+
+def test_status_does_not_create_the_state_dir(cli_env, capsys):
+    """A read-only command must not have a side effect on disk."""
+    state = Path(cli_env["state"])
+    assert not state.exists()
+    assert call(["status"]) == 0
+    assert not state.exists(), "status created the state directory"
+
+
+def test_alias_review_shows_backfill_seeds_as_the_global_rows_they_are(cli_env,
+                                                                      capsys):
+    """`backfill plan --seed-aliases` is the ONE place a global alias is
+    written. It is explicit and user-invoked, but it must be visible as such."""
+    store = Store(cli._cfg().db_path)
+    store.upsert_alias("janedoe", "Jane Doe", "", source="backfill-seed",
+                       evidence="janedoe")
+    store.close()
+    assert call(["alias", "review"]) == 0
+    out = capsys.readouterr().out
+    assert "backfill-seed" in out
+    assert "! janedoe" in out

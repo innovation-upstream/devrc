@@ -49,12 +49,17 @@ export function normKey(text) {
     .replace(/[^\p{L}\p{N}]+/gu, "");
 }
 
-/** Ordered alphanumeric tokens, minus stopwords. */
-export function contentTokens(text) {
+/** Ordered alphanumeric tokens, VERBATIM (stopwords kept). */
+export function allTokens(text) {
   if (typeof text !== "string") return [];
   return text.normalize("NFKD").replace(/\p{M}/gu, "").toLowerCase()
     .split(/[^\p{L}\p{N}]+/u)
-    .filter((t) => t && !STOPWORDS.has(t));
+    .filter(Boolean);
+}
+
+/** Ordered alphanumeric tokens, minus stopwords. */
+export function contentTokens(text) {
+  return allTokens(text).filter((t) => !STOPWORDS.has(t));
 }
 
 export function passesFuzzyGuard(tokens) {
@@ -75,7 +80,6 @@ export function passesFuzzyGuard(tokens) {
 export const DISCORD_SITE = "discord.com";
 export const KEY_PREFIX_DISCORD = "discord:";
 export const KEY_PREFIX_THREAD = "thread:";
-export const MIN_SLUG_TOKENS = 2;
 
 const DISCORD_CDN_HOSTS = new Set(["cdn.discordapp.com", "media.discordapp.net"]);
 const DISCORD_ATTACHMENT_SEGMENTS = new Set([
@@ -83,13 +87,14 @@ const DISCORD_ATTACHMENT_SEGMENTS = new Set([
 ]);
 const SNOWFLAKE = /^[0-9]{5,25}$/;
 
-// Structural route/verb segments, not a vocabulary of subject words.
-const PATH_CHROME = new Set([
-  "threads", "thread", "topic", "topics", "forum", "forums", "board",
-  "boards", "index.php", "showthread.php", "viewtopic.php", "viewforum.php",
-  "t", "f", "p", "post", "posts", "page", "pages", "attachment",
-  "attachments", "download", "downloads", "view", "watch", "media", "album",
-  "gallery", "comments", "s", "goto", "print",
+// The path segments that INTRODUCE a thread. A slug is the segment
+// immediately after one of these, and nowhere else. See matcher.py's
+// _THREAD_ANCHORS for the full reasoning: the previous "skip the chrome, take
+// the deepest segment that qualifies" rule handed a forum SECTION name a 1.00
+// identity alias whenever the thread's own slug was a single word.
+const THREAD_ANCHORS = new Set([
+  "threads", "thread", "topic", "topics", "t",
+  "showthread.php", "viewtopic.php", "showthread", "viewtopic",
 ]);
 const TRAILING_ID = /[.\-_]\d{2,}$/;
 const LEADING_ID = /^\d{2,}[.\-_]/;
@@ -98,17 +103,31 @@ const LEADING_ID = /^\d{2,}[.\-_]/;
 const TITLE_SPLIT
   = /\s*[|\u2013\u2014\u00b7\u2022\u00bb\u00ab]\s*|\s+[-\u2010]\s+|\s*::\s*/;
 
+/**
+ * Hostname of an http(s) URL, normalised. "" for anything else.
+ *
+ * The scheme filter and the bracket strip are the contract, not the parser's
+ * defaults: these hosts become the SCOPE of an alias, `file:`/`data:`/`blob:`
+ * have no meaningful one, and `new URL` brackets an IPv6 literal where
+ * Python's `urlsplit` does not. Mirrors matcher.host_of; pinned by
+ * fixtures/url_cases.json.
+ */
 export function hostOf(url) {
   if (typeof url !== "string" || !url) return "";
+  let parsed;
   try {
-    return new URL(url).hostname.toLowerCase();
+    parsed = new URL(url);
   } catch {
     return "";
   }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return "";
+  const host = parsed.hostname.toLowerCase();
+  return host.startsWith("[") && host.endsWith("]")
+    ? host.slice(1, -1) : host;
 }
 
 function pathSegments(url) {
-  if (typeof url !== "string" || !url) return [];
+  if (!hostOf(url)) return [];
   try {
     return new URL(url).pathname.split("/").filter(Boolean);
   } catch {
@@ -129,29 +148,41 @@ export function discordAliasKey(channelId) {
   return KEY_PREFIX_DISCORD + String(channelId);
 }
 
+/**
+ * The stored key for a thread slug. NEAR-VERBATIM: `allTokens`, not
+ * `contentTokens`. Stopword stripping belongs to fuzzy matching, never to an
+ * identity -- it collided distinct threads (`aster-vale-new-set` and
+ * `aster-vale-set` both folded to `thread:aster-vale-set`) and upsert_alias
+ * re-points on conflict, so the collision was silent.
+ */
 export function threadAliasKey(slug) {
-  const toks = contentTokens(slug);
+  const toks = allTokens(slug);
   return toks.length ? KEY_PREFIX_THREAD + toks.join("-") : "";
 }
 
 /**
- * The forum thread subject carried by a URL path, as a phrase.
- * `/forums/some-section/threads/subject-name.12345/page-2` -> "subject name"
+ * The forum thread subject carried by a URL path, as a phrase. ANCHORED: the
+ * slug is the segment immediately following a thread route, and nowhere else.
  *
- * TWO tokens minimum, not the usual fuzzy guard: a file host's path is
- * `/d/AbCdEf`, one opaque token, and minting that as a thread identity would
- * invent a subject for a page that has no thread.
+ *   /forums/some-section/threads/subject-name.12345/page-2 -> "subject name"
+ *   /forums/some-section/                                  -> ""
+ *   /members/some-poster.4321/                             -> ""
+ *   /uploads/dsc-0123.jpg                                  -> ""
  */
 export function threadSlug(url) {
   let best = [];
-  for (const segment of pathSegments(url)) {
-    if (PATH_CHROME.has(segment.toLowerCase())) continue;
-    const toks = contentTokens(
-      segment.replace(LEADING_ID, "").replace(TRAILING_ID, ""));
-    if (toks.length < MIN_SLUG_TOKENS) continue;
-    if (toks.length <= 2 && PATH_CHROME.has(toks[0])) continue;   // `page-2`
-    if (toks.every((t) => /^\d+$/.test(t))) continue;
-    best = toks;                                  // deepest qualifying wins
+  const segments = pathSegments(url);
+  for (let i = 1; i < segments.length; i += 1) {
+    if (!THREAD_ANCHORS.has(segments[i - 1].toLowerCase())) continue;
+    const toks = allTokens(
+      segments[i].replace(LEADING_ID, "").replace(TRAILING_ID, ""));
+    // The thread route already proves this is a thread, so a ONE-word slug is
+    // legitimate here; the old >=2-token guard existed only to stop an opaque
+    // file-host id being minted as a subject, and no anchor introduces one.
+    const meaningful = toks.filter(
+      (t) => !STOPWORDS.has(t) && !/^\d+$/.test(t));
+    if (!meaningful.length || !passesFuzzyGuard(meaningful)) continue;
+    best = toks;
   }
   return best.join(" ");
 }
@@ -171,19 +202,21 @@ export function isSiteBranding(phrase, site) {
   return key.length >= MIN_SINGLE_TOKEN_LEN && normKey(site).includes(key);
 }
 
-/** The subject half of a page title, with the site's branding dropped. */
+/**
+ * The subject half of a page title, with the site's branding dropped.
+ * THE FIRST surviving segment, not the longest -- see matcher.title_subject.
+ * "Longest wins" returned the SITE name whenever the subject was one word and
+ * the site's display name did not resemble its hostname.
+ */
 export function titleSubject(title, site) {
   if (typeof title !== "string" || !title.trim()) return "";
-  const kept = [];
   for (const raw of title.split(TITLE_SPLIT)) {
     const part = (raw || "").trim();
-    const toks = contentTokens(part);
-    if (!toks.length || isSiteBranding(part, site)) continue;
-    kept.push({ n: toks.length, part });
+    if (!part || !contentTokens(part).length) continue;
+    if (isSiteBranding(part, site)) continue;
+    return part;
   }
-  if (!kept.length) return "";
-  kept.sort((a, b) => b.n - a.n);
-  return kept[0].part;
+  return "";
 }
 
 /** Thread-subject phrases from a context's URLs, strongest first. */
@@ -370,16 +403,29 @@ export function kindOf(snapshot, name) {
  *
  * A download from a paired file host has no context of its own: the page is a
  * download button and nothing else. The thread that sent the user there does
- * have one -- but only if we can prove the two are connected. Two proofs, and
- * deliberately no third:
+ * have one -- but only if we can PROVE the two are connected.
  *
- *   1. a captured click on another page whose `href` IS this page (or is the
- *      download's referrer);
- *   2. the tab this one was OPENED FROM (`openerTabId`).
+ * There is exactly ONE proof, and it is a link the user was observed
+ * following: a captured click on another page whose `href`/`mediaSrc` is this
+ * page (or is the download's referrer).
  *
- * There is NO time window and no "the last thread I saw", because both are
- * guesses that get it wrong exactly when the user has several tabs open --
- * which is how anyone browses a forum. An unprovable link goes to the picker.
+ * THE OPENER-TAB BRANCH WAS DELETED, not tightened. It took the newest usable
+ * capture whose `tabId` matched `openerTabId`, with nothing binding that
+ * capture to the navigation that opened the tab and no time bound at all --
+ * so it was "the last thread I saw in that tab" wearing the word "provable".
+ * It went wrong on the ordinary forum pattern: open a file host in a new tab,
+ * keep browsing the opener tab, and by the time the download fires the newest
+ * capture from that tab is a DIFFERENT thread. The href proof cannot always
+ * cover for it (a `?ref=` parameter or any URL normalisation breaks the
+ * equality), and the wrong answer was not merely used for one match -- it was
+ * LEARNED, as a 1.00 identity alias.
+ *
+ * `openerTabId` is still recorded, and now only ever NARROWS the href proof:
+ * when we know which tab this page was opened from, the donor must be in it.
+ * That can only reject a candidate, never invent one.
+ *
+ * No time window either: a window is a guess about how fast someone browses.
+ * An unprovable link goes to the picker, which is the whole point.
  *
  * Returns `{ pageUrl, pageTitle }` or null.
  */
@@ -390,24 +436,23 @@ export function carryReferrer(item, capture, captures) {
   if (capture && Array.isArray(capture.tags) && capture.tags.length) return null;
 
   const here = new Set([capture?.pageUrl, item?.referrer].filter(Boolean));
+  if (!here.size) return null;
   const openerTabId = capture?.openerTabId;
   const list = (captures || []).slice().sort((a, b) => (b.ts || 0) - (a.ts || 0));
 
-  const usable = (c) => c && c.pageUrl && !here.has(c.pageUrl)
-    && (threadSlug(c.pageUrl) || c.pageTitle);
-
   for (const c of list) {
-    if (!usable(c)) continue;
-    if ((c.href && here.has(c.href)) || (c.mediaSrc && here.has(c.mediaSrc))) {
-      return { pageUrl: c.pageUrl, pageTitle: c.pageTitle || "" };
+    if (!c || !c.pageUrl || here.has(c.pageUrl)) continue;
+    if (!threadSlug(c.pageUrl) && !c.pageTitle) continue;
+    // The proof itself: this donor page linked to the page we are on.
+    if (!((c.href && here.has(c.href)) || (c.mediaSrc && here.has(c.mediaSrc)))) {
+      continue;
     }
-  }
-  if (openerTabId !== undefined && openerTabId !== null) {
-    for (const c of list) {
-      if (usable(c) && c.tabId === openerTabId) {
-        return { pageUrl: c.pageUrl, pageTitle: c.pageTitle || "" };
-      }
+    // ...and, when we know it, the donor must be the tab we came from.
+    if (openerTabId !== undefined && openerTabId !== null
+        && c.tabId !== openerTabId) {
+      continue;
     }
+    return { pageUrl: c.pageUrl, pageTitle: c.pageTitle || "" };
   }
   return null;
 }

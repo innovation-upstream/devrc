@@ -330,3 +330,77 @@ def test_the_backfill_plan_applies_the_same_kind_gate(library, store):
 
     assert row(classified).action != backfill_mod.ACTION_SKIP
     assert row(unclassified).action == backfill_mod.ACTION_SKIP
+
+
+# --- audit follow-ups -------------------------------------------------------- #
+def test_the_catch_all_learns_nothing(kinded_app):
+    """Sending a download to the catch-all is "not any of these" — the absence
+    of a subject, not evidence of one. A 1.00 identity alias pointing at it
+    cannot auto-file (it is unclassified), but it would make the catch-all the
+    permanent top candidate in the picker for that channel."""
+    out = kinded_app.learn({"context": {"url": CDN, "page": {}},
+                            "chosenDir": "other", "confirmed": True})
+    assert out["written"] == []
+    assert kinded_app.store.alias_count() == 0
+    assert kinded_app.store.host_prior(DISCORD_SITE) is None
+    # ...but the correction is still recorded as an example.
+    assert kinded_app.store.examples()[0]["chosen_dir"] == "other"
+
+
+def test_an_unclassified_directory_learns_identity_only(kinded_app):
+    """The docs always said so; the code learned title subjects for it too,
+    leaving dormant rows that would all activate at once on classification."""
+    (Path(kinded_app.root) / "Unlisted Dir").mkdir()
+    kinded_app.dirs.refresh(force=True)
+    out = kinded_app.learn({"context": forum_context([]),
+                            "chosenDir": "Unlisted Dir", "confirmed": True})
+    assert {w["source"] for w in out["written"]} == {"thread-slug"}
+
+
+def test_a_screened_identity_signal_is_refused_not_written(kinded_app):
+    """Identity signals used to bypass the screen entirely — the one row that
+    most needed checking was the only one exempt."""
+    for chosen in ("Jane Doe", "john-smith"):
+        kinded_app.learn({"context": forum_context([]), "chosenDir": chosen,
+                          "confirmed": True})
+    # The slug phrase has now been seen against two different directories.
+    kinded_app.store.add_example(
+        {"page": {"tags": ["aster vale collection"], "site": "someforum.test"}},
+        "Mary_Major")
+    kinded_app.store.add_example(
+        {"page": {"tags": ["aster vale collection"], "site": "someforum.test"}},
+        "john-smith")
+    out = kinded_app.learn({"context": forum_context([]),
+                            "chosenDir": "Aster Vale", "confirmed": True})
+    assert any(s["source"] == "thread-slug" for s in out["skipped"])
+
+
+def test_junk_tags_do_not_consume_the_category_budget(kinded_app):
+    """Screen FIRST, then cap. Capping the input list meant a page whose first
+    three tags were junk spent the whole budget and a legitimate fourth was
+    never considered."""
+    tags = ["JD", "Some Forum", "poster1988", "Field Recordings"]
+    out = kinded_app.learn({"context": forum_context(tags),
+                            "chosenDir": "acme-studio", "confirmed": True})
+    assert "fieldrecordings" in {w["key"] for w in out["written"]}
+
+
+def test_refusals_are_reported_in_the_response(kinded_app):
+    out = kinded_app.learn({"context": forum_context(["JD"]),
+                            "chosenDir": "acme-studio", "confirmed": True})
+    assert out["skipped"] and out["skipped"][0]["why"]
+
+
+def test_an_initialised_stage_name_is_no_longer_refused(kinded_app):
+    """`M.I.A.` folds to a three-character key. Refusing a real subject is not
+    free just because the refusal is quiet."""
+    from matcher import suspicious_alias_key
+    assert suspicious_alias_key("M.I.A.", dir_names=["Jane Doe"],
+                                site="someforum.test") is None
+
+
+def test_a_stage_name_containing_a_numeral_is_no_longer_refused():
+    from matcher import suspicious_alias_key
+    assert suspicious_alias_key("m1a", dir_names=["Jane Doe"]) is None
+    # ...while a word with a number stuck on the end still reads as a handle.
+    assert suspicious_alias_key("poster1988", dir_names=["Jane Doe"])

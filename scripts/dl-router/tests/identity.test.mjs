@@ -8,7 +8,8 @@ import assert from "node:assert/strict";
 
 import {
   KIND_CATEGORY, KIND_PERFORMER, SCORE_ALIAS_SITE, buildMatchPayload,
-  carryReferrer, discordAliasKey, discordChannelId, identitySignals, kindOf,
+  carryReferrer, discordAliasKey, discordChannelId, hostOf, identitySignals,
+  kindOf,
   localContext, localDecide, subjectPhrases, threadAliasKey, threadSlug,
   titleSubject,
 } from "../extension/route_core.js";
@@ -43,6 +44,16 @@ test("Discord channel ids match the shared table byte for byte", () => {
 test("thread slugs match the shared table byte for byte", () => {
   for (const c of URL_CASES.slug) {
     assert.equal(threadSlug(c.url), c.slug, c.url);
+  }
+});
+
+test("hostnames match the shared table byte for byte", () => {
+  // The host is the SCOPE of an alias. `new URL` and Python's `urlsplit`
+  // disagreed on 9 of 30 hostile inputs (scheme handling, IPv6 brackets, IDN
+  // punycoding, percent-encoded authorities), so the rule is written out in
+  // both rather than delegated to either standard library.
+  for (const c of URL_CASES.host) {
+    assert.equal(hostOf(c.url), c.host, c.url);
   }
 });
 
@@ -140,11 +151,45 @@ test("a captured click whose href IS this page proves the link", () => {
   assert.equal(carried.pageUrl, THREAD);
 });
 
-test("an opener-tab chain proves the link too", () => {
-  const donor = { ...forumCapture, href: "" };
+// BLOCKER 3. The opener-tab branch took the newest usable capture whose tabId
+// matched `openerTabId`, with nothing binding that capture to the navigation
+// that opened the tab and no time bound -- "the last thread I saw in that tab"
+// wearing the word "provable". The wrong answer was not just used for one
+// match; it was LEARNED, as a 1.00 identity alias.
+test("an opener tab alone is NOT a proof — the branch is gone", () => {
+  const donor = { ...forumCapture, href: "" };   // never linked here
+  assert.equal(carryReferrer({ url: "https://filehost.test/d/AbCdEf" },
+    hostCapture, [donor, hostCapture]), null);
+});
+
+test("the ordinary forum pattern no longer carries the WRONG thread", () => {
+  // Open the file host in a new tab, keep browsing the opener tab. By the time
+  // the download fires, the newest capture from that tab is a different
+  // thread -- and the href proof cannot cover for it, because a `?ref=`
+  // parameter on the published href breaks the equality.
+  const linked = { ...forumCapture, href: "https://filehost.test/f/AbCdEf?ref=1" };
+  const laterThread = {
+    pageUrl: "https://someforum.test/threads/someone-else.99/",
+    pageTitle: "Someone Else", tabId: 1, href: "", tags: [], ts: Date.now(),
+  };
+  assert.equal(carryReferrer({ url: "https://filehost.test/d/AbCdEf" },
+    hostCapture, [linked, laterThread, hostCapture]), null);
+});
+
+test("openerTabId can only NARROW the href proof, never invent one", () => {
+  // Same proven link, but the donor is not the tab we came from.
+  const donor = { ...forumCapture, tabId: 77 };
+  assert.equal(carryReferrer({ url: "https://filehost.test/d/AbCdEf" },
+    hostCapture, [donor, hostCapture]), null);
+  // ...and with the tab agreeing, the carry stands.
   const carried = carryReferrer({ url: "https://filehost.test/d/AbCdEf" },
-    hostCapture, [donor, hostCapture]);
+    hostCapture, [forumCapture, hostCapture]);
   assert.equal(carried.pageUrl, THREAD);
+});
+
+test("a download with no page of its own at all carries nothing", () => {
+  assert.equal(carryReferrer({ url: "https://filehost.test/d/AbCdEf" },
+    null, [forumCapture]), null);
 });
 
 test("an unprovable thread is NOT carried, however recent", () => {

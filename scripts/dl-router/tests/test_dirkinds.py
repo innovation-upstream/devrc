@@ -108,18 +108,34 @@ def test_the_draft_is_valid_toml_and_covers_every_directory():
     assert listed == {norm_key(n) for n in DRAFT_DIRS}
 
 
-def test_the_draft_splits_names_from_categories():
+def test_the_draft_guesses_the_ASKING_side_for_everything_ambiguous():
+    """The draft must never silently authorise auto-filing.
+
+    Nothing available to a generator distinguishes "Ada Lovelace" from "Field
+    Recordings" -- two capitalised words either way -- so resolving that
+    ambiguity towards `performer` meant a skimmed review turned category
+    directories into auto-filers. (The module's own docstring example, "Field
+    Recordings", drafted as a performer.) Ambiguous now lands in `category`,
+    which ASKS: skim it and the worst case is a directory that asks too often.
+    """
     parsed = tomllib.loads(dk.draft(DRAFT_DIRS))
-    assert "Jane Doe" in parsed["performer"]
-    assert "john-smith" in parsed["performer"]
-    # single word, digits, too many words, and the shared-vocabulary rule:
-    # every word of "Live Sets" / "Archive Sets" / "Live Archive" also appears
-    # in another directory, which is what a taxonomy looks like and what a
-    # person's name does not.
-    for name in ("Compilations", "Season 2024",
-                 "A Very Long Directory Name Indeed", "Live Sets",
-                 "Archive Sets", "Live Archive"):
-        assert name in parsed["category"], name
+    assert parsed["performer"] == []
+    assert set(parsed["category"]) == set(DRAFT_DIRS)
+
+
+def test_an_ambiguous_line_says_it_may_need_moving_up():
+    text = dk.draft(["Jane Doe"])
+    line = next(l for l in text.splitlines() if "Jane Doe" in l)
+    assert "MOVE IT UP" in line
+
+
+def test_the_draft_still_explains_the_unambiguous_ones(): 
+    text = dk.draft(DRAFT_DIRS)
+    reasons = {l.split("#", 1)[1].strip() for l in text.splitlines()
+               if l.strip().startswith('"')}
+    assert "a single word" in reasons
+    assert "contains digits" in reasons
+    assert "every word is shared with other directories" in reasons
 
 
 def test_every_draft_line_carries_the_reason_it_landed_there():
@@ -190,3 +206,16 @@ def test_the_gate_cannot_be_routed_around_by_the_host_prior():
         MatchContext(tags=("Jane Doe",), site="site.test"),
         host_prior="Jane Doe")
     assert res.auto is False
+
+
+def test_a_malformed_file_drops_the_picker_overlay_too(tmp_path):
+    """FAIL CLOSED, completely. `merged` used to be seeded from the SQLite
+    picker overlay BEFORE parsing, so picker-assigned `performer` kinds
+    survived a broken dirs.toml and kept auto-filing while the operator
+    believed their edit had disabled it. The overlay is machine state and
+    syntactically fine, but the file is the authority over it, and "I cannot
+    read the authority" is not a state in which to keep auto-filing."""
+    path = write(tmp_path, "this is not = valid toml [[[")
+    kinds = dk.DirKinds.load(path, overlay={"Jane Doe": KIND_PERFORMER})
+    assert kinds.kind("Jane Doe") == KIND_UNKNOWN
+    assert kinds.error

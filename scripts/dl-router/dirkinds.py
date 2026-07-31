@@ -92,6 +92,14 @@ class DirKinds:
         MALFORMED file degrades the same way rather than raising: this is
         loaded on the /match path, and the sidecar failing a match is worse
         than every match asking.
+
+        A malformed file FAILS CLOSED COMPLETELY — the picker overlay is
+        dropped too. It used to seed `merged` from the overlay before parsing,
+        so picker-assigned `performer` kinds survived a broken file and kept
+        auto-filing while the operator believed their edit had disabled it. The
+        overlay is machine state and syntactically fine, but the file is the
+        authority over it, and "I cannot read the authority" is not a state in
+        which to keep auto-filing.
         """
         path = Path(path) if path is not None else default_dirs_file(env)
         merged: dict = {}
@@ -104,7 +112,8 @@ class DirKinds:
             with open(path, "rb") as fh:
                 raw = tomllib.load(fh)
         except (OSError, tomllib.TOMLDecodeError) as exc:
-            return DirKinds(merged, path=path, present=True,
+            # Everything, including the overlay -- see the docstring.
+            return DirKinds({}, path=path, present=True,
                             error=f"cannot read {path}: {exc}")
         errors = []
         seen: dict = {}
@@ -168,9 +177,22 @@ def _token_document_frequency(names) -> dict:
 def guess_kind(name: str, freq: dict):
     """Best-guess kind for one directory, with the reason to print beside it.
 
-    Deliberately crude and deliberately EXPLAINED. It exists to save typing,
-    not to be right: every line carries why it landed where it did, so the
-    review is "does that reason hold?" rather than "what even is this?".
+    IT GUESSES THE ASKING SIDE. Without a vocabulary of names — which could
+    never be committed to a public repo and would need endless maintenance —
+    nothing distinguishes "Ada Lovelace" from "Field Recordings": two
+    capitalised words either way. The first draft resolved that ambiguity
+    towards `performer`, which is the AUTO-FILING side, so a skimmed review
+    turned category directories into auto-filers. Its own docstring example,
+    "Field Recordings", drafted as a performer.
+
+    So the ambiguous case now lands in `category`, and the two failure modes
+    are no longer symmetric: skim this draft and the worst outcome is that a
+    performer directory keeps asking (mildly annoying, one line to move) rather
+    than a category directory silently auto-filing (wrong files, discovered
+    later, and the alias is learned too).
+
+    Every line still carries its reason, so the review is "does that hold?"
+    rather than "what even is this?".
     """
     toks = content_tokens(name)
     if not toks:
@@ -183,7 +205,8 @@ def guess_kind(name: str, freq: dict):
         return KIND_CATEGORY, f"{len(toks)} words — long for a name"
     if all(freq.get(t, 0) >= SHARED_TOKEN_DIRS for t in toks):
         return KIND_CATEGORY, "every word is shared with other directories"
-    return KIND_PERFORMER, f"{len(toks)} name-like words"
+    return KIND_CATEGORY, (f"{len(toks)} words — could be a name; MOVE IT UP "
+                           "if it is a person")
 
 
 _TOML_ESCAPES = {
@@ -213,6 +236,11 @@ HEADER = """\
 #
 # The only review action is to move a line between the two lists.  The comment
 # after each line is why the generator put it there.
+#
+# EVERYTHING STARTS IN `category`, ON PURPOSE.  Nothing here can tell a person's
+# name from a topic, and `category` is the side that ASKS -- so a skimmed review
+# leaves you with directories that ask too often, never with directories that
+# auto-file into the wrong place.  Move the ones that name a person up.
 #
 #   performer  filed by subject identity.  MAY auto-file.  Learns only identity
 #              signals — a Discord channel id, a forum thread slug, a subject

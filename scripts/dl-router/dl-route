@@ -118,7 +118,11 @@ def cmd_status(args) -> int:
         errs = index.errors()
         if errs:
             print(f"index errs {errs}")
-        kinds = _kinds(cfg, Store(cfg.db_path))
+        # Read-only: do NOT construct a Store when there is no database yet
+        # (it would create the state directory as a side effect of `status`).
+        store = Store(cfg.db_path) if cfg.db_path.exists() else None
+        kinds = (_kinds(cfg, store) if store is not None
+                 else dirkinds_mod.DirKinds.load(cfg.dirs_file))
         counts = kinds.counts(names)
         print(f"dir kinds  {cfg.dirs_file}"
               f"{'' if kinds.present else ' (absent)'}")
@@ -158,7 +162,8 @@ def cmd_dirs_classify(args) -> int:
     """
     cfg = _cfg()
     root, index, store = _local_bits(cfg)
-    text = dirkinds_mod.draft(index.names(), known=_kinds(cfg, store))
+    known = _kinds(cfg, store)
+    text = dirkinds_mod.draft(index.names(), known=known)
     if not args.out:
         sys.stdout.write(text)
         print(f"\n# review, then save as {cfg.dirs_file}", file=sys.stderr)
@@ -167,6 +172,19 @@ def cmd_dirs_classify(args) -> int:
     if out.exists() and not args.force:
         raise SystemExit(f"{out} exists — review it, or pass --force to "
                          f"overwrite (already-classified entries are kept)")
+    # --force is safe ONLY because an existing classification is carried into
+    # the draft. When the current file cannot be PARSED there is nothing to
+    # carry, so --force would silently reset every decision in it -- the one
+    # destructive act available from a command whose whole job is to be
+    # read-only. Refuse, and say what to do instead.
+    if out.exists() and args.force:
+        existing = dirkinds_mod.DirKinds.load(out)
+        if existing.error:
+            raise SystemExit(
+                f"refusing to overwrite {out}: it exists but cannot be parsed "
+                f"({existing.error}), so none of its classifications can be "
+                f"carried into the draft and --force would discard them all.\n"
+                f"  fix the syntax, or move the file aside first")
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(text, encoding="utf-8")
     print(f"draft written: {out}", file=sys.stderr)

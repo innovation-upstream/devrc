@@ -27,7 +27,8 @@ from conftest import load_url_cases  # noqa: E402
 from matcher import (  # noqa: E402
     DISCORD_SITE, KEY_PREFIX_DISCORD, KIND_PERFORMER, SCORE_ALIAS_SITE,
     MatchContext, Matcher, alias_key, discord_alias_key, discord_channel_id,
-    identity_signals, is_structured_key, suspicious_alias_key, thread_alias_key,
+    host_of, identity_signals, is_structured_key, suspicious_alias_key,
+    thread_alias_key,
     thread_slug, title_subject,
 )
 
@@ -265,12 +266,32 @@ def test_a_handle_shaped_token_is_refused():
     assert why and "handle" in why
 
 
-def test_a_structured_key_is_never_suspicious():
-    """A channel id is short, numeric and shared by everything in that channel.
-    It is an IDENTITY, and the screen must not fight the mechanism that makes
-    Discord work at all."""
-    assert suspicious_alias_key(discord_alias_key(CHANNEL),
-                                dir_names=["Jane Doe"], spread=99) is None
+def test_a_structured_key_skips_only_the_WORD_rules():
+    """Structured keys used to be exempt from the screen entirely.
+
+    The reasoning ("a channel id is an identity, not a word") held; the
+    exemption did not. A badly derived identity is still an identity as far as
+    the store is concerned, and it lands at 1.00 WITH auto-file rather than at
+    0.85 without -- so the worst row the router can write was the one row
+    nothing checked. What structured keys skip now is only the two rules that
+    describe a word rather than a source.
+    """
+    channel = discord_alias_key(CHANNEL)
+    # ...the word rules do not fire on it: it is short and it is all digits.
+    assert suspicious_alias_key(channel, dir_names=["Jane Doe"],
+                                site="discord.com") is None
+    # ...but the chrome-spread rule still does.
+    assert suspicious_alias_key(channel, dir_names=["Jane Doe"], spread=99)
+
+
+def test_a_section_name_mistaken_for_a_thread_is_still_screened():
+    """Defence in depth behind the anchoring fix: even if some future URL shape
+    slipped a section name through as a `thread:` key, the spread rule catches
+    it once it has been seen on two directories."""
+    key = thread_alias_key("general discussion")
+    assert suspicious_alias_key("general discussion", key=key,
+                                dir_names=["Jane Doe"], site="forum.test",
+                                spread=2)
 
 
 def test_a_real_subject_name_passes_the_screen():
@@ -296,3 +317,99 @@ def test_discord_ids_match_the_shared_table(case):
                          ids=lambda c: c["url"][:60] or "empty")
 def test_thread_slugs_match_the_shared_table(case):
     assert thread_slug(case["url"]) == case["slug"]
+
+
+@pytest.mark.parametrize("case", URL_CASES["host"],
+                         ids=lambda c: c["url"][:60] or "empty")
+def test_hosts_match_the_shared_table(case):
+    """`urlsplit` and `new URL` disagreed on 9 of 30 hostile inputs — scheme
+    handling, IPv6 brackets, IDN punycoding, percent-encoded authorities. The
+    host is the SCOPE of an alias, so the rule is written out in both rather
+    than delegated to either standard library."""
+    assert host_of(case["url"]) == case["host"]
+
+
+# --- audit blockers: reproduced, then pinned -------------------------------- #
+# Each of these FAILED on the first version of this change. The URLs are the
+# ones the audit ran; the names are synthetic.
+SECTION_URLS = [
+    "https://forum.test/forums/general-discussion/threads/aster.99/",
+    "https://forum.test/forums/general-discussion.12/",
+    "https://forum.test/members/some-poster.4321/",
+]
+
+
+@pytest.mark.parametrize("url", SECTION_URLS)
+def test_a_forum_section_or_member_page_is_never_a_thread_identity(url):
+    """BLOCKER 1. `thread_slug` took "the deepest segment with >=2 content
+    tokens", so when a thread's own slug was ONE word the SECTION name one
+    level up won -- and a section name became a 1.00 auto-filing identity key.
+    That is the mislearning this whole change exists to remove, relocated from
+    the tag list into the URL path and made worse, because an identity outranks
+    every other rule.
+
+    The fix is positional, not a better superlative: a slug is the segment
+    immediately after a thread route, and nowhere else.
+    """
+    assert thread_slug(url) != "general discussion"
+    assert thread_slug(url) != "some poster"
+
+
+def test_the_thread_still_wins_when_its_own_slug_is_one_word():
+    assert thread_slug(SECTION_URLS[0]) == "aster"
+
+
+def test_a_section_page_with_no_thread_yields_no_identity_at_all():
+    for url in SECTION_URLS[1:]:
+        assert thread_slug(url) == ""
+        assert identity_signals(
+            MatchContext.from_payload({"page": {"url": url}})) == []
+
+
+def test_a_section_alias_cannot_be_learned_then_hit_from_another_thread():
+    """The end-to-end shape the audit reproduced: one correction in a section,
+    then a DIFFERENT thread in the same section matching at 1.00."""
+    first = SECTION_URLS[0]
+    other = "https://forum.test/forums/general-discussion/threads/vale.100/"
+    keys = {s.key for s in identity_signals(
+        MatchContext.from_payload({"page": {"url": first}}))}
+    other_keys = {s.key for s in identity_signals(
+        MatchContext.from_payload({"page": {"url": other}}))}
+    assert keys and other_keys
+    assert keys.isdisjoint(other_keys), \
+        "two threads in one section must not share an identity key"
+
+
+def test_a_downloads_own_filename_is_not_a_pseudo_thread():
+    """`/uploads/dsc-0123.jpg` used to mint `thread:dsc-0123`. Camera defaults
+    collide across posters, and every download wrote a junk row."""
+    for url in ("https://cdn.test/uploads/dsc-0123.jpg",
+                "https://cdn.test/i/img-20240101.mp4"):
+        assert thread_slug(url) == ""
+
+
+def test_the_site_name_does_not_win_a_short_title():
+    """BLOCKER 2. `title_subject` took the LONGEST surviving segment, and the
+    branding test only recognises a site whose display name resembles its
+    hostname -- so on a forum where they differ the site name won whenever the
+    subject was one word, giving every short-titled page on that forum a 1.00
+    site-scoped alias into one directory."""
+    assert title_subject("Aster | Some Forum", "forum.test") == "Aster"
+
+
+def test_the_branding_test_still_wins_over_position_when_it_can_see_it():
+    """Position is the fallback, not a replacement: a reversed title is still
+    handled wherever the site name IS recognisable."""
+    assert title_subject("Some Forum - Aster Vale Collection",
+                         "someforum.test") == "Aster Vale Collection"
+
+
+def test_identity_keys_are_near_verbatim_so_threads_do_not_collide():
+    """Stopword stripping belongs to fuzzy matching, never to an identity:
+    `aster-vale-new-set` and `aster-vale-set` both folded to one key, and
+    upsert_alias re-points on conflict, so the collision was silent."""
+    a = thread_alias_key(thread_slug(
+        "https://forum.test/threads/aster-vale-new-set.222/"))
+    b = thread_alias_key(thread_slug(
+        "https://forum.test/threads/aster-vale-set.223/"))
+    assert a and b and a != b

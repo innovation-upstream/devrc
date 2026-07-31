@@ -272,7 +272,8 @@ class Store:
         so no vocabulary has to be maintained (and none could be committed —
         the words are the operator's private library).
         """
-        from matcher import norm_key  # local: keeps store.py import-light
+        # Local imports keep store.py import-light.
+        from matcher import norm_key, title_subject
 
         spread: dict = {}
         for row in self.examples(limit):
@@ -282,11 +283,23 @@ class Store:
             except ValueError:
                 continue
             page = ctx.get("page") if isinstance(ctx, dict) else None
-            tags = page.get("tags") if isinstance(page, dict) else None
-            if not isinstance(tags, list):
+            if not isinstance(page, dict):
                 continue
-            for tag in tags:
-                key = norm_key(tag) if isinstance(tag, str) else ""
+            phrases = [t for t in (page.get("tags") or [])
+                       if isinstance(t, str)] \
+                if isinstance(page.get("tags"), list) else []
+            # THE TITLE SUBJECT COUNTS TOO. The branding test can only
+            # recognise a site whose display name resembles its hostname, so on
+            # a forum where they differ the site's own name survives as a
+            # "subject". Counting it here is what eventually catches it: a real
+            # subject belongs to one directory, a site name turns up on every
+            # one of them.
+            subject = title_subject(page.get("title") or "",
+                                    str(page.get("site") or ""))
+            if subject:
+                phrases.append(subject)
+            for phrase in phrases:
+                key = norm_key(phrase)
                 if key:
                     spread.setdefault(key, set()).add(chosen)
         return {key: len(dirs) for key, dirs in spread.items()}
