@@ -50,8 +50,13 @@ export function titleCase(phrase) {
 /**
  * Build the entry list for a query.
  * `dirs` is the array of existing directory names.
+ * `counts` is an optional {name -> number} map of how many files each holds.
+ *
+ * The count rides as its own field rather than being appended to `label`:
+ * `label` is what the new-directory proposal is built from and what the
+ * sidecar-facing flow reads, and a decorative number has no business in it.
  */
-export function filterEntries(dirs, query, suggestNew) {
+export function filterEntries(dirs, query, suggestNew, counts) {
   const q = String(query || "").trim();
   const qKey = normKey(q);
   const existing = new Set(dirs || []);
@@ -73,10 +78,16 @@ export function filterEntries(dirs, query, suggestNew) {
     return 2;
   };
 
+  const countOf = (name) => {
+    const n = counts && counts[name];
+    return typeof n === "number" && Number.isFinite(n) && n >= 0 ? n : undefined;
+  };
+
   const dirEntries = (dirs || [])
     .filter(matches)
     .sort((a, b) => (rank(a) - rank(b)) || a.localeCompare(b))
-    .map((name) => ({ kind: ENTRY_DIR, name, label: name }));
+    .map((name) => ({ kind: ENTRY_DIR, name, label: name,
+      count: countOf(name) }));
 
   const proposalRaw = q ? titleCase(q) : String(suggestNew || "");
   if (!proposalRaw || !isSafeDirName(proposalRaw) || existing.has(proposalRaw)) {
@@ -102,9 +113,10 @@ export function filterEntries(dirs, query, suggestNew) {
 }
 
 export function initialState({ dirs = [], suggestNew = "", downloadId = null,
-  reason = "", dup = "", otherDir = "other", loading = false } = {}) {
+  reason = "", dup = "", otherDir = "other", loading = false,
+  counts = null } = {}) {
   const state = {
-    dirs, suggestNew, downloadId, reason, dup, otherDir,
+    dirs, suggestNew, downloadId, reason, dup, otherDir, counts,
     // `loading` = the directory list has not arrived from the sidecar yet.
     // While it is set, Enter is DEFERRED rather than acted on: see reduce().
     loading: Boolean(loading),
@@ -117,7 +129,7 @@ export function initialState({ dirs = [], suggestNew = "", downloadId = null,
     pendingNew: null,
     query: "", index: 0, done: null,
   };
-  state.entries = filterEntries(dirs, "", suggestNew);
+  state.entries = filterEntries(dirs, "", suggestNew, counts);
   return state;
 }
 
@@ -155,6 +167,30 @@ export function reduce(state, event) {
     };
   }
   if (state.done) return state;
+  // --- click ------------------------------------------------------------- //
+  // Mouse selection, expressed as "move the highlight there, then Enter" so it
+  // reuses the Enter branch VERBATIM: the kind prompt, the new-directory
+  // sub-question, the failed/loading refusals and the `done` shape all come
+  // from one implementation. A second copy of "what does choosing mean" is
+  // exactly the drift this file already paid for once.
+  //
+  // Placed here -- after the `done` guard, before the kind prompt -- so it is
+  // dead once the flow has finished, and live while the kind prompt is up
+  // (clicking "performer" must work).
+  if (event.type === "click") {
+    const i = event.index;
+    if (!Number.isInteger(i) || i < 0 || i >= state.entries.length) return state;
+    // A click while the list is unavailable is DROPPED, not deferred.
+    //
+    // Enter defers (see `pendingEnter`) because a typed query survives the
+    // list arriving -- the user's intent is "the thing matching what I typed".
+    // A click's intent is a SCREEN POSITION, and position N of the loading
+    // placeholder has nothing to do with position N of the real list. Honouring
+    // it later would choose an arbitrary directory, or create one, which is the
+    // precise footgun the deferred Enter exists to close.
+    if (state.loading || state.failed) return state;
+    return reduce({ ...state, index: i }, { type: "key", key: "Enter" });
+  }
   const next = { ...state };
   // --- the kind prompt --------------------------------------------------- //
   // A modal sub-step, handled BEFORE the normal branches so a stray `input`
@@ -173,7 +209,8 @@ export function reduce(state, event) {
       // Back to the directory list, NOT out of the picker. Escaping a
       // sub-question should undo the sub-question.
       next.pendingNew = null;
-      next.entries = filterEntries(state.dirs, state.query, state.suggestNew);
+      next.entries = filterEntries(state.dirs, state.query, state.suggestNew,
+        state.counts);
       next.index = 0;
       return next;
     }
@@ -194,7 +231,8 @@ export function reduce(state, event) {
     next.error = "";
     next.status = "";
     next.query = String(event.value ?? "");
-    next.entries = filterEntries(state.dirs, next.query, state.suggestNew);
+    next.entries = filterEntries(state.dirs, next.query, state.suggestNew,
+      state.counts);
     next.index = 0;
     return next;
   }
@@ -212,8 +250,14 @@ export function reduce(state, event) {
     // The directory list arrived. Rebuild the entries against the CURRENT
     // query, then honour an Enter the user pressed while we were still empty.
     next.dirs = Array.isArray(event.dirs) ? event.dirs : [];
+    // Counts are cosmetic and optional: a snapshot without them (an older
+    // sidecar, or a file index that has not been walked yet) renders exactly
+    // as it always did rather than showing zeroes, which would be a lie.
+    next.counts = (event.counts && typeof event.counts === "object")
+      ? event.counts : null;
     next.loading = false;
-    next.entries = filterEntries(next.dirs, state.query, state.suggestNew);
+    next.entries = filterEntries(next.dirs, state.query, state.suggestNew,
+      next.counts);
     next.index = 0;
     if (state.pendingEnter) {
       next.pendingEnter = false;
@@ -300,6 +344,13 @@ export function mount(doc, chromeApi, { closeWindow } = {}) {
     loading: true,
   });
 
+  // Rendered as an in-page overlay (an iframe of THIS page inside a closed
+  // shadow root in the tab) rather than as a popup window. The document, the
+  // reducer and every branch below are identical; only "what does closing
+  // mean" differs, because an iframe cannot close itself.
+  const embedded = params.get("embed") === "1";
+  const overlayId = params.get("overlay") || "";
+
   const input = doc.getElementById("q");
   const list = doc.getElementById("list");
   const meta = doc.getElementById("meta");
@@ -318,8 +369,21 @@ export function mount(doc, chromeApi, { closeWindow } = {}) {
   };
   renderMeta();
 
-  const close = closeWindow
-    || (() => { if (typeof window !== "undefined") window.close(); });
+  const close = closeWindow || (() => {
+    if (embedded) {
+      // window.close() on an iframe is a no-op, so an embedded picker asks the
+      // service worker to tear the overlay down -- it is the side that knows
+      // which tab the overlay was injected into. Every other close path
+      // (accepted, cancelled, refused-then-Esc) funnels through here, so the
+      // overlay cannot outlive the flow.
+      try {
+        void chromeApi.runtime.sendMessage({
+          type: "dlr:picker-closed", overlay: overlayId });
+      } catch { /* worker restarting; the overlay is inert either way */ }
+      return;
+    }
+    if (typeof window !== "undefined") window.close();
+  });
 
   const render = () => {
     renderMeta();
@@ -333,11 +397,33 @@ export function mount(doc, chromeApi, { closeWindow } = {}) {
       list.appendChild(li);
       return;
     }
+    // The row the flow settled on. Both Enter and a click act on
+    // `state.index` -- the click event moves the highlight there first -- so
+    // the confirmation lands on what the user picked from either input, with
+    // no second notion of "the chosen row" to drift.
+    const takenIndex = (state.done && state.done.action === "choose")
+      ? state.index : -1;
     state.entries.forEach((entry, i) => {
       const li = doc.createElement("li");
-      li.textContent = entry.label;
+      const label = doc.createElement("span");
+      label.className = "label";
+      label.textContent = entry.label;
+      li.appendChild(label);
+      if (typeof entry.count === "number") {
+        // How many files the directory already holds. Decorative, and a
+        // separate node so it can be styled down and can never be mistaken
+        // for part of the directory name.
+        const badge = doc.createElement("span");
+        badge.className = "count";
+        badge.textContent = String(entry.count);
+        li.appendChild(badge);
+      }
       li.className = i === state.index ? "row sel" : "row";
       if (entry.kind === ENTRY_NEW) li.classList.add("new");
+      if (i === takenIndex) li.classList.add("taken");
+      // Mouse selection. `apply` is declared below; the handler only ever runs
+      // after mount() has returned, so the reference resolves.
+      li.addEventListener("click", () => apply({ type: "click", index: i }));
       list.appendChild(li);
     });
   };
@@ -459,12 +545,31 @@ export function mount(doc, chromeApi, { closeWindow } = {}) {
       const dirs = resp.snapshot.dirs
         .map((d) => d && d.name)
         .filter((n) => typeof n === "string" && n);
-      apply({ type: "dirs", dirs });
+      apply({ type: "dirs", dirs, counts: resp.snapshot.counts });
     });
   };
   askForDirs();
   render();
   input.focus();
+
+  if (embedded) {
+    // THE OVERLAY'S PROOF OF LIFE, and it is not decorative.
+    //
+    // The content script can create the host element and the iframe and still
+    // end up with a frame that never loaded: a content-script-injected iframe
+    // is subject to the PAGE's Content-Security-Policy, so a site with a
+    // restrictive `frame-src` blocks it outright. From the outside that failure
+    // is indistinguishable from success -- an overlay that is present, empty
+    // and silent -- and the download would be left with no picker at all.
+    //
+    // This message is the only signal that an extension context actually
+    // booted inside the frame. The service worker will not consider the
+    // overlay delivered without it, and falls back to the popup window.
+    try {
+      void chromeApi.runtime.sendMessage({
+        type: "dlr:picker-ready", overlay: overlayId });
+    } catch { /* the worker's timeout falls back to a window */ }
+  }
 
   return { state: () => state, apply, retry: askForDirs };
 }
