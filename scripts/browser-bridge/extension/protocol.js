@@ -1508,12 +1508,20 @@ export function capHeaderValue(s, max = MAX_HEADER_VALUE_CHARS) {
 // own manifest version (chrome.runtime.getManifest().version) — surfaced by
 // `whoami` so an operator can see which extension BUILD is loaded per instance;
 // omitted (→ null in whoami) by a legacy build that predates version reporting.
-export function pollHeaders(instanceId, label, active, extVersion) {
+// `extId` is `chrome.runtime.id` — WHICH DIRECTORY Brave loaded this extension
+// from. An unpacked extension's ID is derived from its absolute directory path,
+// so the repo-path load and the ~/.local/share/browser-bridge-ext/ load have
+// DIFFERENT ids while reporting the SAME version. It is the only field that can
+// answer "did the migration off the git-mutable path actually take?".
+// ⚠ INFERRED from documented Chromium behaviour, NOT measured here — treat a
+// changed id as evidence, and record the post-re-point id per profile.
+export function pollHeaders(instanceId, label, active, extVersion, extId) {
   const h = { "X-Bridge-Instance-Id": String(instanceId || "") };
   if (label) h["X-Bridge-Label"] = encodeURIComponent(capHeaderValue(label));
   if (active && active.url) h["X-Bridge-Active-Url"] = encodeURIComponent(capHeaderValue(active.url));
   if (active && active.title) h["X-Bridge-Active-Title"] = encodeURIComponent(capHeaderValue(active.title));
   if (extVersion) h["X-Bridge-Ext-Version"] = encodeURIComponent(capHeaderValue(String(extVersion)));
+  if (extId) h["X-Bridge-Ext-Id"] = encodeURIComponent(capHeaderValue(String(extId)));
   return h;
 }
 

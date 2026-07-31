@@ -89,8 +89,13 @@ design when two profiles were connected).
   strings" arrangement, which existed only because the manifest version was not
   bumped per-change — bumping it is now part of the change contract.
   ⚠ `extension_stale:false` is a **version** match, not a code match: a change
-  shipped without a manifest bump is invisible to it. The deterministic check is
-  **`browser ping`** (below).
+  shipped without a manifest bump is invisible to it, and it says nothing about
+  WHICH DIRECTORY the build came from. The deterministic checks are
+  **`browser ping`** and the per-instance **`extension_id`** (below).
+  Each instance also carries **`extension_id`** (`chrome.runtime.id`, path-derived
+  for an unpacked extension), and the bridge carries **`extension_dir_expected`**
+  (the directory Brave should be pointed at). The server never computes an
+  expected id — see the `ping` section for why.
 - **Newest supersedes.** If a NEW connection (different auto-id) registers for a
   routing key that already has a live connection, the old one is dropped and any
   in-flight command on it resolves to a `superseded` error (no orphaned waiter).
@@ -747,14 +752,33 @@ on both profiles, so the operator's tabs would be gone for good).
 ### `browser ping` — the deterministic "is the new build loaded?" probe
 
 ```bash
-browser ping   # NEW → {"pong":true,"extensionVersion":"0.3.0","ops":[…,"ping"]}
-               # OLD → op 'ping' returned unknown_op — … FULLY RESTART Brave …
+browser --instance <label> ping
+# NEW → {"pong":true,"extensionVersion":"0.3.1","id":"<ext-id>","ops":[…,"ping"]}
+# OLD → op 'ping' returned unknown_op — … FULLY RESTART Brave …        (exit 1)
 ```
+
+Pass `--instance`: with two profiles connected, a bare call gets
+`409 ambiguous_instance` instead of an answer.
 
 `ping` is a no-tab, no-page op whose entire purpose is its **name**: a build that
 predates it fails validation with `unknown_op`, so it cannot fake a pass. It
 answers the reload question with a yes/no instead of a comparison of two version
 strings that an unbumped change would defeat.
+
+**`id` = `chrome.runtime.id`, which answers the OTHER question: which DIRECTORY
+did Brave load?** An unpacked extension's id is derived from its absolute path,
+so a repo-path build and a deployed-path build at the SAME version report
+DIFFERENT ids. Without it there is no programmatic way to confirm the migration
+took — only reading the path off `brave://extensions` by hand. Surfaced per
+instance as `extension_id` in `whoami`/`health`, next to
+`bridge.extension_dir_expected` (the directory Brave should be pointed at).
+
+⚠ **INFERRED, not measured.** The path→id derivation comes from documented
+Chromium behaviour; nothing here has observed it. Consequently the server
+**never computes an expected id** — a wrong derivation would raise false "wrong
+directory" alarms. The workflow is instead: record each profile's id right after
+re-pointing it, then compare later. Confirming the id actually changes with the
+load path is an open live-verification item.
 
 **Contract for any extension change that must be provably loaded:** bump
 `extension/manifest.json`'s `version` AND add a new discriminator (a new op name,
@@ -767,20 +791,44 @@ unfalsifiable — that ambiguity cost three full Brave restarts in one session.
 (`home.activation.browserBridgeExtension` in `nix/home.nix`) and **Brave should be
 pointed there**, not at the repo tree. devrc is worked on by many concurrent
 sessions; loading the extension out of the working tree lets any other session's
-`git checkout`/branch switch/worktree op swap the code out from under a live
-verification (measured — it reverted a staged build mid-session on 2026-07-30).
+`git checkout`/`stash`/branch switch/worktree op swap the code out from under a
+live verification (measured — it reverted a staged build mid-session on
+2026-07-30).
 
-It is a **real copy** (`cp -rL` into a sibling temp dir, then an atomic swap), not
-`home.file … recursive = true`: that would deploy a tree of read-only /nix/store
-symlinks, and whether Chromium's unpacked-extension loader accepts those is
-something only live Brave can answer — a wrong guess costs a full Brave restart to
-discover. A copy removes the question and is equally git-immune. Cost: the tree is
-rewritten on every switch.
+⚠ **Honest scope: "git-immune" means immune to git, not to everything.** A
+`home-manager switch` (or `ship.sh`) rewrites the deployed tree from whatever the
+working tree holds at that moment, so a concurrent session on another branch can
+still swap the extension mid-verification. What the deploy eliminates is the
+**silent** class (a checkout with no switch); a switch is at least explicit and
+logged. `ping` covers the rest by making it detectable.
+
+⚠ **Flake trap:** flakes only see git-TRACKED files, so a NEW extension file that
+has not been `git add`ed is silently omitted from the deployed tree — a
+partially-updated extension with no error anywhere. `git add` new extension files
+before switching.
+
+It is a **real copy** (`cp -rL` into a sibling temp dir, then a single `mv -T`),
+not `home.file … recursive = true`: that would deploy a tree of read-only
+/nix/store symlinks, and whether Chromium's unpacked-extension loader accepts
+those is something only live Brave can answer — a wrong guess costs a full Brave
+restart to discover. A copy removes the question and is equally git-immune. Cost:
+the tree is rewritten on every switch.
+
+**Why a stable directory rather than a hash-suffixed dir + symlink flip:** the
+extension ID is path-derived, and `ping`'s `id` field depends on it being stable
+across switches. A target whose name changes each switch risks changing the ID
+each switch (whether Chromium canonicalises a symlink before hashing is
+unmeasured), which would defeat the probe and could force a re-point per switch.
+`mv -T` is load-bearing: without `-T`, a concurrent activation that recreated the
+target between the `rm` and the `mv` would nest one tree inside the other while
+`mv` still exited 0 (reproduced). Trade-off accepted: `mv -T` cannot replace a
+non-empty directory, so there is a brief window where the target does not exist —
+Brave reads extension files at load/reload time, not continuously.
 
 Re-pointing Brave is a **manual, one-time, per-profile** step (`brave://extensions`
-is not scriptable) — the exact sequence is in `extension/README.md`. Until an
-operator does it, the previously loaded repo-path extension keeps working
-unchanged; nothing removes the repo `extension/` directory.
+is not scriptable) — the exact sequence, and the rollback procedure, are in
+`extension/README.md`. Until an operator does it, the previously loaded repo-path
+extension keeps working unchanged; nothing removes the repo `extension/` directory.
 
 ## Concurrency backstop (per-instance rate limit + queue cap)
 
@@ -911,10 +959,13 @@ per-session (multi-step **workflow**) isolation did not.
   The multi-instance `--instance` targeting, ambiguity/supersede semantics, and
   telemetry are unchanged.
 
-`GET /health` → `{"ok":true,"extension_connected":bool,"count":N,"extension_version_current":"<deployed-else-repo manifest>","instances":[{key,label,instanceId,activeTab,extension_version,extension_version_expected,extension_stale},…]}`.
+`GET /health` → `{"ok":true,"extension_connected":bool,"count":N,"extension_version_current":"<deployed-else-repo manifest>","instances":[{key,label,instanceId,activeTab,extension_version,extension_id,extension_version_expected,extension_stale},…]}`.
 Each instance carries its **loaded `extension_version`** (from the `X-Bridge-Ext-Version`
-poll header; `null` until a build that reports it), the `extension_version_expected`,
-and the explicit **`extension_stale`** verdict (`true`/`false`/`null`=undecidable).
+poll header; `null` until a build that reports it), its **`extension_id`** (from
+`X-Bridge-Ext-Id`; `null` likewise — this is the path-derived
+`chrome.runtime.id`, i.e. WHICH DIRECTORY was loaded), the
+`extension_version_expected`, and the explicit **`extension_stale`** verdict
+(`true`/`false`/`null`=undecidable).
 `extension_version_current` is the manifest the server expects Brave to have loaded:
 the deployed `~/.local/share/browser-bridge-ext/` copy, else the repo one.
 `GET /instances` → `{"ok":true,"count":N,"instances":[…]}`.
@@ -1420,8 +1471,10 @@ systemctl --user status browser-bridge
    token from `~/.config/browser-bridge/token`, port `8788`, **Save**.
 4. `scripts/browser-bridge/browser health` → `{"ok":true,"extension_connected":true}`
    with `extension_stale:false` on the instance, and
-   `scripts/browser-bridge/browser ping` → `{"pong":true,"extensionVersion":"0.3.0",…}`
-   (an `unknown_op` here means Brave is still running an older build).
+   `scripts/browser-bridge/browser --instance <label> ping` →
+   `{"pong":true,"extensionVersion":"0.3.1","id":"<ext-id>",…}` (an `unknown_op`
+   here means Brave is still running an older build). Record that `id` — it is
+   the per-profile baseline for "which directory is loaded".
 5. Focus a tab where you are **logged in** (e.g. Gmail), then
    `scripts/browser-bridge/browser html | grep -i <your-name-or-account-marker>` —
    seeing logged-in-only markup **proves it's the live authenticated session**,

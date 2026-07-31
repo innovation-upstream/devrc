@@ -230,7 +230,16 @@ in
   # by many concurrent sessions, so any other session's `git checkout`, branch
   # switch or worktree operation silently swaps the extension's code out from
   # under a live verification — measured: it reverted a staged build mid-session.
-  # A copy under ~/.local/share/ cannot be touched by any git operation.
+  # A copy under ~/.local/share/ is untouchable by `git checkout`/`stash`/branch
+  # switch/worktree ops.
+  #
+  # ⚠ HONEST SCOPE — this is NOT "no git operation can reach it". `home-manager
+  # switch` (and `ship.sh`) rewrites this tree from whatever the working tree
+  # holds AT THAT MOMENT. A concurrent session sitting on another branch that
+  # runs a switch still swaps the extension mid-verification. What this removes
+  # is the SILENT class (a checkout with no switch); a switch is at least an
+  # explicit, logged act. `browser ping` is what makes the remaining case
+  # detectable rather than invisible.
   #
   # WHY A REAL COPY, NOT `home.file … recursive = true`: that would deploy the
   # tree as read-only /nix/store SYMLINKS. Whether Chromium's unpacked-extension
@@ -240,28 +249,58 @@ in
   # are not restorable). A plain copy (`cp -rL`) removes the question entirely and
   # is equally git-immune. Cost: the whole tree is rewritten on every switch.
   #
-  # The copy is built beside the target and swapped in, so a half-written tree is
-  # never visible at the path Brave loads from. Re-pointing Brave at this path is
-  # a MANUAL operator step (brave://extensions → remove the repo-path entry →
-  # Load unpacked → this directory), once per profile; until then the previously
-  # loaded repo-path extension keeps working unchanged.
+  # ⚠ FLAKE TRAP: flakes only see git-TRACKED files, so a NEW extension file that
+  # has not been `git add`ed is silently omitted from ${../scripts/browser-bridge/extension}
+  # and therefore from the deployed tree — a partially-updated extension with NO
+  # error anywhere. `git add` a new extension file BEFORE switching. (Same trap
+  # already documented for claude/commands/ in CLAUDE.md.)
+  #
+  # The copy is built beside the target and swapped in with a SINGLE `mv -T`, so
+  # a half-written tree is never visible at the path Brave loads from. Re-pointing
+  # Brave at this path is a MANUAL operator step (brave://extensions → remove the
+  # repo-path entry → Load unpacked → this directory), once per profile; until
+  # then the previously loaded repo-path extension keeps working unchanged.
+  #
+  # WHY `rm -rf` + `mv -T` RATHER THAN A HASH-SUFFIXED DIR + SYMLINK FLIP: an
+  # unpacked extension's ID is derived from its absolute directory path, and the
+  # `ping` op reports `chrome.runtime.id` precisely so the operator can confirm
+  # WHICH directory Brave loaded. A `…-ext.<hash>/` target whose name changes on
+  # every switch risks changing that ID on every switch (whether Chromium
+  # canonicalises the symlink before hashing is unmeasured), which would both
+  # destroy the id-stability the probe depends on and potentially force a
+  # re-point per switch. A stable real directory keeps the path — and therefore
+  # the ID — constant. TRADE-OFF ACCEPTED: `mv -T` cannot replace a non-empty
+  # directory, so there is a brief window where $bbDst does not exist. Brave
+  # reads extension files at load/reload time, not continuously, and the operator
+  # reloads after a switch anyway.
+  #
+  # Concurrency: `mv -T` never descends into an existing target, so two
+  # overlapping activations can no longer nest one tree inside the other (the
+  # non-`-T` two-rename form could, silently, because `mv` still exits 0). Fixed
+  # temp/target names mean an interrupted run's leftovers are RECLAIMED by the
+  # next run instead of leaking a `.new.<pid>` per interruption. Two genuinely
+  # simultaneous activations on ONE host can still collide over $bbTmp — that
+  # fails loudly (non-zero, switch aborts), it does not corrupt the deployed tree.
   home.activation.browserBridgeExtension =
     lib.hm.dag.entryAfter ["writeBoundary"] ''
       bbSrc=${../scripts/browser-bridge/extension}
       bbDst="$HOME/.local/share/browser-bridge-ext"
-      bbTmp="$bbDst.new.$$"
+      bbTmp="$bbDst.new"
       $DRY_RUN_CMD mkdir -p "$HOME/.local/share"
+      # Reclaim leftovers from an interrupted earlier run. `cp -rL` from the
+      # read-only store yields a 0555 tree, and `rm -rf` CANNOT unlink inside a
+      # 0555 directory — under activation's `set -eu` that aborts the whole
+      # switch. So always chmod before removing (ignore "no such file").
+      $DRY_RUN_CMD chmod -R u+rwX "$bbTmp" 2>/dev/null || true
       $DRY_RUN_CMD rm -rf "$bbTmp"
-      # -L dereferences the store symlinks into real files; the store copy is
-      # read-only, so make the result writable for the next switch's rm -rf.
-      $DRY_RUN_CMD cp -rL "$bbSrc" "$bbTmp"
-      $DRY_RUN_CMD chmod -R u+w "$bbTmp"
-      if [ -e "$bbDst" ]; then
-        $DRY_RUN_CMD rm -rf "$bbDst.old.$$"
-        $DRY_RUN_CMD mv "$bbDst" "$bbDst.old.$$"
-      fi
-      $DRY_RUN_CMD mv "$bbTmp" "$bbDst"
-      $DRY_RUN_CMD rm -rf "$bbDst.old.$$"
+      $DRY_RUN_CMD cp -rL "$bbSrc" "$bbTmp"   # -L → real files, not store symlinks
+      $DRY_RUN_CMD chmod -R u+rwX "$bbTmp"    # writable for the NEXT switch's rm -rf
+      $DRY_RUN_CMD chmod -R u+rwX "$bbDst" 2>/dev/null || true
+      $DRY_RUN_CMD rm -rf "$bbDst"
+      # -T is load-bearing: without it, a concurrent run that recreated $bbDst
+      # between the rm and the mv would make this move the tree INSIDE it.
+      $DRY_RUN_CMD mv -T "$bbTmp" "$bbDst" \
+        || { $DRY_RUN_CMD rm -rf "$bbDst"; $DRY_RUN_CMD mv -T "$bbTmp" "$bbDst"; }
     '';
 
   home.stateVersion = "24.11";

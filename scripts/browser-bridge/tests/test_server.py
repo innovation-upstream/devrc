@@ -38,6 +38,25 @@ EXT_DIR = Path(__file__).resolve().parent.parent / "extension"
 # gating-logic test still exercise the genuine implementation).
 _REAL_I3_AVAILABLE = S.i3_available
 
+# A manifest version pinned for the staleness tests. `manifest_version()` prefers
+# the DEPLOYED extension at ~/.local/share/browser-bridge-ext/, so any test that
+# asserts on a stale/fresh verdict must pin it — otherwise the suite's result
+# depends on the operator's live deploy state (whether they have switched, and to
+# which build). Deliberately not a real version so a leak is obvious.
+PINNED_VERSION = "9.9.9-pinned"
+
+
+@pytest.fixture
+def pinned_manifest(tmp_path, monkeypatch):
+    """Pin manifest_version() to PINNED_VERSION, hermetically: a tmp deployed
+    manifest + a non-existent repo fallback. Never reads host state."""
+    deployed = tmp_path / "pinned-manifest.json"
+    deployed.write_text(json.dumps({"version": PINNED_VERSION}),
+                        encoding="utf-8")
+    monkeypatch.setattr(S, "_DEPLOYED_EXT_MANIFEST", deployed)
+    monkeypatch.setattr(S, "_EXT_MANIFEST_PATH", tmp_path / "no-repo-manifest.json")
+    return PINNED_VERSION
+
 # The in-repo activity spool emitter (single source of truth for the v1 line
 # format). scripts/browser-bridge/tests/ -> parent.parent.parent == scripts/.
 SPOOL_EMIT_PY = (Path(__file__).resolve().parent.parent.parent
@@ -162,7 +181,7 @@ class FakeExtension(threading.Thread):
 
     def __init__(self, srv, instance_id="fake-1", label="", executor=None,
                  swallow=False, active_url=None, active_title=None,
-                 ext_version=None):
+                 ext_version=None, ext_id=None):
         super().__init__(daemon=True)
         self.srv = srv
         self.instance_id = instance_id
@@ -172,6 +191,7 @@ class FakeExtension(threading.Thread):
         self.active_url = active_url
         self.active_title = active_title
         self.ext_version = ext_version  # reported via X-Bridge-Ext-Version (or None)
+        self.ext_id = ext_id            # reported via X-Bridge-Ext-Id (or None)
         self.dispatched = []    # every command this fake picked up (for assertions)
         self._stopev = threading.Event()
 
@@ -185,6 +205,8 @@ class FakeExtension(threading.Thread):
             h[S.HDR_ACTIVE_TITLE] = urllib.parse.quote(self.active_title)
         if self.ext_version:
             h[S.HDR_EXT_VERSION] = urllib.parse.quote(self.ext_version)
+        if self.ext_id:
+            h[S.HDR_EXT_ID] = urllib.parse.quote(self.ext_id)
         return h
 
     def run(self):
@@ -3093,7 +3115,7 @@ def test_git_short_head_none_on_missing_dir(tmp_path):
 
 def test_manifest_version_reads_current():
     v = S.manifest_version(path=EXT_DIR / "manifest.json")
-    assert isinstance(v, str) and v == "0.3.0"
+    assert isinstance(v, str) and v == "0.3.1"
 
 
 def test_manifest_version_prefers_the_deployed_copy_over_the_repo(tmp_path,
@@ -3114,7 +3136,7 @@ def test_manifest_version_falls_back_to_repo_when_not_deployed(tmp_path,
     reporting the repo manifest instead of going null."""
     monkeypatch.setattr(S, "_DEPLOYED_EXT_MANIFEST", tmp_path / "absent.json")
     monkeypatch.setattr(S, "_EXT_MANIFEST_PATH", EXT_DIR / "manifest.json")
-    assert S.manifest_version() == "0.3.0"
+    assert S.manifest_version() == "0.3.1"
 
 
 def test_manifest_version_none_when_neither_exists(tmp_path, monkeypatch):
@@ -3540,9 +3562,9 @@ def test_health_no_extension_still_reports_current_version():
         srv.shutdown(); srv.server_close()
 
 
-def test_health_carries_an_explicit_stale_verdict_per_instance():
+def test_health_carries_an_explicit_stale_verdict_per_instance(pinned_manifest):
     """The point of the change: a yes/no, not two version strings to eyeball.
-    An instance reporting 0.1.0 against the current manifest is STALE=True."""
+    An instance reporting 0.1.0 against the expected manifest is STALE=True."""
     srv, _ = _serve()
     ext = FakeExtension(srv, instance_id="a", label="alpha", ext_version="0.1.0")
     ext.start()
@@ -3550,16 +3572,17 @@ def test_health_carries_an_explicit_stale_verdict_per_instance():
         body = _wait_instances(srv, 1)
         assert body is not None
         inst = body["instances"][0]
-        assert inst["extension_version_expected"] == S.manifest_version()
+        assert inst["extension_version_expected"] == PINNED_VERSION
         assert inst["extension_stale"] is True
     finally:
         ext.stop(); srv.shutdown(); srv.server_close()
 
 
-def test_health_stale_verdict_is_false_when_the_loaded_build_matches():
+def test_health_stale_verdict_is_false_when_the_loaded_build_matches(
+        pinned_manifest):
     srv, _ = _serve()
     ext = FakeExtension(srv, instance_id="a", label="alpha",
-                        ext_version=S.manifest_version())
+                        ext_version=PINNED_VERSION)
     ext.start()
     try:
         body = _wait_instances(srv, 1)
@@ -3569,7 +3592,7 @@ def test_health_stale_verdict_is_false_when_the_loaded_build_matches():
         ext.stop(); srv.shutdown(); srv.server_close()
 
 
-def test_whoami_carries_the_stale_verdict_per_instance():
+def test_whoami_carries_the_stale_verdict_per_instance(pinned_manifest):
     srv, _ = _serve()
     ext = FakeExtension(srv, instance_id="a", label="alpha", ext_version="0.1.0")
     ext.start()
@@ -3579,8 +3602,8 @@ def test_whoami_carries_the_stale_verdict_per_instance():
         assert st == 200
         inst = body["instances"][0]
         assert inst["extension_stale"] is True
-        assert inst["extension_version_expected"] == S.manifest_version()
-        assert body["bridge"]["extension_version_current"] == S.manifest_version()
+        assert inst["extension_version_expected"] == PINNED_VERSION
+        assert body["bridge"]["extension_version_current"] == PINNED_VERSION
     finally:
         ext.stop(); srv.shutdown(); srv.server_close()
 
@@ -3597,6 +3620,59 @@ def test_whoami_stale_verdict_is_null_for_an_unreporting_extension():
         assert body["instances"][0]["extension_stale"] is None
     finally:
         ext.stop(); srv.shutdown(); srv.server_close()
+
+
+# --- extension_id: WHICH DIRECTORY Brave loaded ---------------------------- #
+# The version fields cannot answer this — a repo-path 0.3.1 and a deployed-path
+# 0.3.1 are identical on every version field. chrome.runtime.id is path-derived,
+# so it is the only signal that can confirm the migration off the git-mutable
+# path took. (The path→id derivation itself is INFERRED from documented Chromium
+# behaviour, not measured here — which is exactly why the server only REPORTS
+# the id and never computes an expected one.)
+def test_health_and_whoami_surface_the_reported_extension_id():
+    srv, _ = _serve()
+    ext = FakeExtension(srv, instance_id="a", label="alpha",
+                        ext_version="0.3.1", ext_id="abcdefghijklmnop")
+    ext.start()
+    try:
+        body = _wait_instances(srv, 1)
+        assert body is not None
+        assert body["instances"][0]["extension_id"] == "abcdefghijklmnop"
+        st, who = _req(srv, "GET", "/whoami")
+        assert st == 200
+        assert who["instances"][0]["extension_id"] == "abcdefghijklmnop"
+        # The deploy dir Brave SHOULD be pointed at, for the operator to read
+        # next to the id. NOT an expected id — the server never guesses one.
+        assert who["bridge"]["extension_dir_expected"].endswith(
+            "browser-bridge-ext")
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
+def test_extension_id_is_null_for_a_build_that_does_not_report_it():
+    """Backwards-safe: the currently-loaded 0.2.0 build sends no id header."""
+    srv, _ = _serve()
+    ext = FakeExtension(srv, instance_id="a", label="alpha", ext_version="0.2.0")
+    ext.start()
+    try:
+        body = _wait_instances(srv, 1)
+        assert body is not None
+        assert body["instances"][0]["extension_id"] is None
+        st, who = _req(srv, "GET", "/whoami")
+        assert who["instances"][0]["extension_id"] is None
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
+def test_a_later_poll_without_the_id_header_does_not_wipe_a_known_id():
+    """Same rule the version field already follows: only overwrite a KNOWN
+    value, so a legacy/partial poll cannot erase what an earlier poll reported."""
+    reg = S.Registry()
+    reg.poll("a", "alpha", 0.0, extension_version="0.3.1",
+             extension_id="abcdefghijklmnop")
+    reg.poll("a", "alpha", 0.0)          # no headers at all
+    assert reg.snapshot()[0]["extension_id"] == "abcdefghijklmnop"
+    assert reg.snapshot()[0]["extension_version"] == "0.3.1"
 
 
 # --- `ping`: the extension build-freshness op ------------------------------ #

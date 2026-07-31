@@ -41,13 +41,22 @@
 #                               ~/.local/share/browser-bridge-ext/, else the repo
 #                               copy). Each instance also carries an explicit
 #                               `extension_stale` verdict (true/false, or null =
-#                               undecidable). Global (no --instance/--tab).
+#                               undecidable) and its `extension_id`
+#                               (chrome.runtime.id — WHICH DIRECTORY it was
+#                               loaded from), plus bridge.extension_dir_expected.
+#                               Global (no --instance/--tab).
 #   browser ping              — BUILD-FRESHNESS PROBE: ask the loaded extension
-#                               what it is. Prints {pong,extensionVersion,ops} on
-#                               a CURRENT build; a build older than this op fails
-#                               with `unknown_op` and the reload/restart hint.
-#                               Use this — not two version strings — to answer
-#                               "did my ↻ actually load the new extension?".
+#                               what it is. Prints {pong,extensionVersion,id,ops}
+#                               on a CURRENT build; a build older than this op
+#                               fails with `unknown_op` and the reload/restart
+#                               hint. Use this — not two version strings — to
+#                               answer "did my ↻ actually load the new
+#                               extension?". `id` is path-derived, so it also
+#                               answers "from WHICH directory?" (INFERRED from
+#                               Chromium docs, not measured — compare it against
+#                               the id you recorded after re-pointing, not
+#                               against a guess). Pass --instance when two
+#                               profiles are connected, else 409 ambiguous.
 #   browser instances         — list connected instances as JSON (key/label/url)
 #   browser open [url]        — open a NEW tab this session owns (default about:blank);
 #                               subsequent ops route to it. Prints its tabId.

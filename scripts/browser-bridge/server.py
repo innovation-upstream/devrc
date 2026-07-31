@@ -245,6 +245,16 @@ HDR_ACTIVE_TITLE = "X-Bridge-Active-Title"
 # per instance. Optional — a legacy extension that predates this simply omits it
 # (the field stays null in whoami). URL-encoded like the other identity headers.
 HDR_EXT_VERSION = "X-Bridge-Ext-Version"
+# The extension's own `chrome.runtime.id`. For an UNPACKED extension this is
+# derived from the absolute directory Brave loaded it from, so it is the ONLY
+# field that distinguishes a repo-path load from a deployed
+# ~/.local/share/browser-bridge-ext/ load — both report the same manifest
+# version. Optional, exactly like HDR_EXT_VERSION (a build predating it simply
+# omits it → the field stays null). URL-encoded like the other identity headers.
+# ⚠ The path→id derivation is INFERRED from documented Chromium behaviour, not
+# measured; the server therefore only REPORTS the id, it never computes an
+# expected one (a wrong derivation would raise false stale alarms).
+HDR_EXT_ID = "X-Bridge-Ext-Id"
 
 _ALLOWED_HOSTS = frozenset({"127.0.0.1", "localhost", "::1", "[::1]"})
 
@@ -697,10 +707,11 @@ class Instance:
 
     __slots__ = ("key", "instance_id", "label", "outbox", "results", "waiters",
                  "active_polls", "last_poll", "active_tab", "superseded",
-                 "pending", "rl_tokens", "rl_last", "extension_version")
+                 "pending", "rl_tokens", "rl_last", "extension_version",
+                 "extension_id")
 
     def __init__(self, key, instance_id, label, now, burst=0.0,
-                 extension_version=None):
+                 extension_version=None, extension_id=None):
         self.key = key
         self.instance_id = instance_id
         self.label = label
@@ -714,6 +725,10 @@ class Instance:
         # The extension's manifest version, best-effort from the /poll identity
         # header (None until a build that reports it polls). Surfaced by whoami.
         self.extension_version = extension_version
+        # chrome.runtime.id — WHICH DIRECTORY this extension was loaded from
+        # (path-derived for an unpacked extension). None until a build that
+        # reports it polls. Reported only; never compared to a computed expected.
+        self.extension_id = extension_id
         # Concurrency backstop (per-instance, guarded by the Registry's _cond):
         #   pending   = admitted /cmd dispatches not yet completed (depth cap).
         #   rl_tokens = token-bucket balance; starts FULL so the whole burst is
@@ -769,7 +784,8 @@ class Registry:
 
     # --- registration ------------------------------------------------------ #
     def _register_locked(self, instance_id: str, label: str,
-                         active_tab=None, extension_version=None) -> Instance:
+                         active_tab=None, extension_version=None,
+                         extension_id=None) -> Instance:
         if not instance_id:
             # Legacy extension with no handshake → one synthetic unnamed instance.
             instance_id = LEGACY_INSTANCE_ID
@@ -788,7 +804,8 @@ class Registry:
         if inst is None:
             inst = Instance(key, instance_id, label, self._clock(),
                             burst=self._burst,
-                            extension_version=extension_version)
+                            extension_version=extension_version,
+                            extension_id=extension_id)
             self._instances[key] = inst
         else:
             inst.label = label
@@ -799,6 +816,8 @@ class Registry:
         # a version an earlier poll already reported.
         if extension_version is not None:
             inst.extension_version = extension_version
+        if extension_id is not None:
+            inst.extension_id = extension_id
         return inst
 
     def _supersede_locked(self, inst: Instance, reason: str) -> None:
@@ -878,7 +897,7 @@ class Registry:
 
     # --- extension side ---------------------------------------------------- #
     def poll(self, instance_id: str, label: str, wait_timeout: float,
-             active_tab=None, extension_version=None):
+             active_tab=None, extension_version=None, extension_id=None):
         """Long-poll for `instance_id`/`label`: register the instance, then block
         up to `wait_timeout` for ITS next command. Returns the command dict (with
         its id), None on idle timeout, or the SUPERSEDED sentinel if this
@@ -886,7 +905,7 @@ class Registry:
         layer maps that to a distinct 409 so the extension backs off — not 204)."""
         with self._cond:
             inst = self._register_locked(instance_id, label, active_tab,
-                                         extension_version)
+                                         extension_version, extension_id)
             inst.active_polls += 1
             inst.last_poll = self._clock()
             try:
@@ -1162,9 +1181,13 @@ class Registry:
         # header; None until a build that reports it polls) is surfaced in /health
         # + /instances too so `browser health` shows which extension BUILD is loaded
         # — the signal that distinguishes a stale extension from a missing op.
+        # extension_id (chrome.runtime.id) says WHICH DIRECTORY that build was
+        # loaded from — version alone cannot tell a repo-path load from a
+        # deployed-path one, since both report the same manifest version.
         return {"key": inst.key, "label": inst.label,
                 "instanceId": inst.instance_id, "activeTab": inst.active_tab,
-                "extension_version": inst.extension_version}
+                "extension_version": inst.extension_version,
+                "extension_id": inst.extension_id}
 
     def snapshot(self):
         """A list of currently-live instances (key/label/instanceId/activeTab)."""
@@ -1175,8 +1198,10 @@ class Registry:
     def _describe_whoami(inst: Instance) -> dict:
         """A METADATA-ONLY per-instance descriptor for whoami: the routing
         key/label/instanceId, the active tab's BARE DOMAIN (never the full URL —
-        #173 metadata-only), and the reported extension_version (None if the
-        instance's extension predates version reporting)."""
+        #173 metadata-only), the reported extension_version (None if the
+        instance's extension predates version reporting) and its extension_id
+        (chrome.runtime.id — which DIRECTORY the build was loaded from; local
+        metadata, not browsing data)."""
         at = inst.active_tab if isinstance(inst.active_tab, dict) else {}
         url = at.get("url")
         domain = ""
@@ -1188,7 +1213,8 @@ class Registry:
         return {"key": inst.key, "label": inst.label,
                 "instanceId": inst.instance_id,
                 "activeTabDomain": domain,
-                "extension_version": inst.extension_version}
+                "extension_version": inst.extension_version,
+                "extension_id": inst.extension_id}
 
     def whoami_snapshot(self):
         """Per-live-instance whoami descriptors (metadata only — domain, not URL)."""
@@ -1484,12 +1510,13 @@ def make_handler(registry: Registry, token: str, cmd_timeout: float,
             return obj, None
 
         def _poll_identity(self):
-            """(instance_id, label, active_tab, ext_version) from the /poll headers.
+            """(instance_id, label, active_tab, ext_version, ext_id) from the
+            /poll headers.
 
             Missing instance id → "" (registry assigns the legacy synthetic id).
-            Label + active-tab + ext-version strings are URL-encoded by the
-            extension (header values must be ASCII-safe) and decoded here. A
-            legacy extension that omits the ext-version header → None.
+            Label + active-tab + ext-version + ext-id strings are URL-encoded by
+            the extension (header values must be ASCII-safe) and decoded here. A
+            legacy extension that omits either optional header → None for it.
             """
             instance_id = (self.headers.get(HDR_INSTANCE_ID) or "").strip()
             raw_label = self.headers.get(HDR_LABEL) or ""
@@ -1502,7 +1529,9 @@ def make_handler(registry: Registry, token: str, cmd_timeout: float,
                           "title": unquote(at) if at else None}
             raw_ext = self.headers.get(HDR_EXT_VERSION)
             ext_version = unquote(raw_ext).strip() if raw_ext else None
-            return instance_id, label, active, ext_version
+            raw_id = self.headers.get(HDR_EXT_ID)
+            ext_id = unquote(raw_id).strip() if raw_id else None
+            return instance_id, label, active, ext_version, ext_id
 
         def _whoami(self) -> dict:
             """Assemble the read-only whoami snapshot: which HOST + which browser
@@ -1535,6 +1564,14 @@ def make_handler(registry: Registry, token: str, cmd_timeout: float,
                     # verdict rather than two strings to compare by eye. null
                     # means undecidable, never "fine".
                     "extension_version_current": expected,
+                    # The deploy directory Brave SHOULD have been pointed at.
+                    # Reported so an operator can read it next to each instance's
+                    # path-derived `extension_id`. The server deliberately does
+                    # NOT compute an expected id from it: the path→id derivation
+                    # is INFERRED, not measured, and a wrong derivation would
+                    # raise false "wrong directory" alarms. Compare ids across
+                    # time (before/after a re-point), not against a guess.
+                    "extension_dir_expected": str(_DEPLOYED_EXT_DIR),
                 },
                 "instances": insts,
             }
@@ -1567,10 +1604,12 @@ def make_handler(registry: Registry, token: str, cmd_timeout: float,
                 self._send(200, self._whoami())
                 return
             if path == "/poll":
-                instance_id, label, active, ext_version = self._poll_identity()
+                (instance_id, label, active, ext_version,
+                 ext_id) = self._poll_identity()
                 cmd = registry.poll(instance_id, label, poll_timeout,
                                     active_tab=active,
-                                    extension_version=ext_version)
+                                    extension_version=ext_version,
+                                    extension_id=ext_id)
                 if cmd is SUPERSEDED:
                     # Distinct from the idle 204: THIS connection was displaced by
                     # a newer one sharing its routing key (duplicate label). Still

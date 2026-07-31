@@ -248,6 +248,19 @@ test("pollHeaders carries the extension manifest version (whoami enrichment)", (
   assert.equal(pollHeaders("uuid-3", "", null)["X-Bridge-Ext-Version"], undefined);
 });
 
+test("pollHeaders carries the extension ID — WHICH DIRECTORY Brave loaded", () => {
+  // Version alone cannot distinguish a repo-path load from a deployed-path one
+  // (identical manifests). chrome.runtime.id is path-derived, so it can.
+  const h = pollHeaders("uuid-1", "work", null, "0.3.1", "abcdefghijklmnop");
+  assert.equal(h["X-Bridge-Ext-Id"], "abcdefghijklmnop");
+  assert.equal(h["X-Bridge-Ext-Version"], "0.3.1");
+  // Optional + backwards-safe, exactly like the version header: a build that
+  // does not report an id simply omits the header (→ null server-side).
+  assert.equal(pollHeaders("uuid-2", "work", null, "0.3.1")["X-Bridge-Ext-Id"],
+    undefined);
+  assert.deepEqual(pollHeaders("uuid-3", ""), { "X-Bridge-Instance-Id": "uuid-3" });
+});
+
 // --- poll-response classification: the distinct supersede signal ------------ //
 test("classifyPollStatus distinguishes command / idle / superseded / auth", () => {
   assert.equal(classifyPollStatus(200), POLL_COMMAND);
