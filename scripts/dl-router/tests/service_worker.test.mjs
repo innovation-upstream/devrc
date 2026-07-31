@@ -16,6 +16,7 @@ globalThis.DL_ROUTER_NO_AUTOSTART = true;
 const calls = {
   windowsCreate: [], notifications: [], downloads: [], search: [],
   fetches: [], menus: [], tabsGet: [], tabMessages: [],
+  tabsUpdate: [], windowsUpdate: [],
 };
 let storageLocal = {};
 let storageSession = {};
@@ -32,7 +33,8 @@ let tabDiscarded = false;
 let tabsGetFails = false;
 let contentScriptMissing = true;    // sendMessage rejects: no receiving end
 let overlayOpenResult = { ok: true };
-let overlayReports = "ready";       // "ready" | "silent"
+let overlayReports = "ready";       // "ready" | "ready-late" | "silent"
+let tabsUpdateFails = false;
 
 globalThis.chrome = {
   storage: {
@@ -61,6 +63,10 @@ globalThis.chrome = {
       if (windowsCreateFails) throw new Error("no window");
       return { id: 900 + calls.windowsCreate.length };
     },
+    update: async (id, info) => {
+      calls.windowsUpdate.push({ id, info });
+      return { id };
+    },
     onRemoved: { addListener() {} },
   },
   notifications: {
@@ -88,7 +94,12 @@ globalThis.chrome = {
       // Chrome rejects for a tab that no longer exists -- the self-closing
       // file-host tab, which is a real case in this workflow.
       if (tabsGetFails) throw new Error("No tab with id: " + id);
-      return { id, url: tabUrl, discarded: tabDiscarded };
+      return { id, url: tabUrl, discarded: tabDiscarded, windowId: 5 };
+    },
+    update: async (id, info) => {
+      calls.tabsUpdate.push({ id, info });
+      if (tabsUpdateFails) throw new Error("no such tab");
+      return { id };
     },
     sendMessage: async (id, msg, opts) => {
       calls.tabMessages.push({ id, msg, opts });
@@ -160,6 +171,7 @@ function reset({ enabled = true, snapshot = SNAPSHOT } = {}) {
   contentScriptMissing = true;
   overlayOpenResult = { ok: true };
   overlayReports = "ready";
+  tabsUpdateFails = false;
   SW.state.overlays.clear();
   SW.state.config = { port: 8791, token: "tok", enabled };
   SW.state.configLoaded = true;
@@ -1641,4 +1653,211 @@ test("...and so is one that arrives after it", async () => {
   SW.state.activeTabId = 42;
   assert.equal(await SW.openPicker({ downloadId: 1, dir: "other" }), true);
   assert.equal(calls.windowsCreate.length, 0);
+});
+
+// --- AN OVERLAY THAT STOPS EXISTING BECOMES A WINDOW ------------------------ //
+//
+// PINS ON THE PERMISSIVE PATH. Gate 2 proves the frame booted; it proves
+// nothing a millisecond later, and `openPicker` has already returned true. The
+// overlay lives in a document the extension does not own, so every way it can
+// vanish needs a route back to a window -- or the download is left unasked,
+// which is the one outcome that is not allowed.
+
+async function liveOverlay({ downloadId = 1, tabId = 42 } = {}) {
+  reset();
+  contentScriptMissing = false;
+  SW.state.activeTabId = tabId;
+  await SW.openPicker({ downloadId, dir: "other", reason: "no match",
+    suggestNew: "Aster Vale" });
+  assert.equal(calls.windowsCreate.length, 0, "precondition: overlay is up");
+  return overlayOpen().msg.id;
+}
+
+test("the tab holding the overlay CLOSES -> the picker comes back as a window",
+  async () => {
+    // The self-closing file-host tab, arriving one beat later than the version
+    // chrome.tabs.get catches.
+    const id = await liveOverlay();
+    SW.onTabRemoved(42);
+    await settle();
+    assert.equal(calls.windowsCreate.length, 1, "the question is re-asked");
+    assert.equal(SW.state.overlays.size, 0);
+    // ...as the SAME question: same download, same proposal.
+    const url = new URL(calls.windowsCreate[0].url);
+    assert.equal(url.searchParams.get("id"), "1");
+    assert.equal(url.searchParams.get("suggestNew"), "Aster Vale");
+    assert.equal(url.searchParams.get("embed"), null, "and as a real window");
+    assert.equal(SW.state.overlays.has(id), false);
+  });
+
+test("the tab NAVIGATES -> the picker comes back as a window", async () => {
+  await liveOverlay();
+  SW.onTabUpdated(42, { status: "loading" });
+  await settle();
+  assert.equal(calls.windowsCreate.length, 1);
+  assert.equal(SW.state.overlays.size, 0);
+});
+
+test("a SPA route change does NOT yank the picker into a window", async () => {
+  // pushState fires onUpdated with a url but no `status`, and the document is
+  // not replaced -- the overlay is still there and still usable. Re-delivering
+  // on every route change would be a regression, not a rescue.
+  await liveOverlay();
+  SW.onTabUpdated(42, { url: "https://example-site.test/v/2" });
+  SW.onTabUpdated(42, { status: "complete" });
+  SW.onTabUpdated(42, { title: "something" });
+  await settle();
+  assert.equal(calls.windowsCreate.length, 0);
+  assert.equal(SW.state.overlays.size, 1);
+});
+
+test("the PAGE removes the overlay -> the picker comes back as a window",
+  async () => {
+    // `document.body.innerHTML = ...`, a DOM sanitiser, a framework re-render,
+    // or hostile script. The content script reports it; this is the other half.
+    const id = await liveOverlay();
+    SW.onMessage({ type: "dlr:overlay-lost", overlay: id }, {}, () => {});
+    await settle();
+    assert.equal(calls.windowsCreate.length, 1);
+    assert.equal(SW.state.overlays.size, 0);
+  });
+
+test("events for OTHER tabs leave the overlay alone", async () => {
+  await liveOverlay({ tabId: 42 });
+  SW.onTabRemoved(99);
+  SW.onTabUpdated(99, { status: "loading" });
+  await settle();
+  assert.equal(calls.windowsCreate.length, 0);
+  assert.equal(SW.state.overlays.size, 1);
+});
+
+test("re-delivery is idempotent: two triggers, ONE window", async () => {
+  // onRemoved and onUpdated can both fire for a closing tab, and the page can
+  // report the loss at the same moment. Two pickers for one download would be
+  // worse than none.
+  const id = await liveOverlay();
+  SW.onTabUpdated(42, { status: "loading" });
+  SW.onTabRemoved(42);
+  SW.onMessage({ type: "dlr:overlay-lost", overlay: id }, {}, () => {});
+  await settle();
+  assert.equal(calls.windowsCreate.length, 1);
+});
+
+test("a loss reported for an unknown overlay does nothing", async () => {
+  reset();
+  SW.onMessage({ type: "dlr:overlay-lost", overlay: "ov-nope" }, {}, () => {});
+  await settle();
+  assert.equal(calls.windowsCreate.length, 0);
+});
+
+test("a SECOND download into the same tab gets a window, not an eviction",
+  async () => {
+    // The content script keeps exactly ONE overlay and evicts the incumbent, so
+    // overlaying the second download would silently destroy the first one's
+    // picker while the worker still believed it was delivered. Both questions
+    // must be asked.
+    await liveOverlay({ downloadId: 1, tabId: 42 });
+    calls.windowsCreate.length = 0;
+    assert.equal(await SW.openPicker({ downloadId: 2, dir: "other" }), true);
+    assert.equal(calls.windowsCreate.length, 1, "the second gets a window");
+    assert.equal(SW.state.overlays.size, 1, "the first keeps its overlay");
+    const url = new URL(calls.windowsCreate[0].url);
+    assert.equal(url.searchParams.get("id"), "2");
+  });
+
+test("once the first overlay closes, the tab can host another", async () => {
+  const id = await liveOverlay({ downloadId: 1, tabId: 42 });
+  SW.onMessage({ type: "dlr:picker-closed", overlay: id }, {}, () => {});
+  await settle();
+  calls.windowsCreate.length = 0;
+  assert.equal(await SW.openPicker({ downloadId: 2, dir: "other" }), true);
+  assert.equal(calls.windowsCreate.length, 0, "overlaid again");
+});
+
+test("the overlay's tab is raised, or the question is asked where nobody looks",
+  async () => {
+    // The popup window this replaces was created `focused: true`. The toast's
+    // `change` makes it concrete: the user is looking at the toast's own
+    // window, and the overlay goes to the download's tab.
+    reset();
+    contentScriptMissing = false;
+    SW.state.activeTabId = 42;
+    await SW.openPicker({ downloadId: 1, dir: "other" });
+    assert.deepEqual(calls.tabsUpdate, [{ id: 42, info: { active: true } }]);
+    assert.deepEqual(calls.windowsUpdate, [{ id: 5, info: { focused: true } }]);
+  });
+
+test("a tab that refuses to be raised still keeps its working overlay",
+  async () => {
+    reset();
+    contentScriptMissing = false;
+    tabsUpdateFails = true;
+    SW.state.activeTabId = 42;
+    assert.equal(await SW.openPicker({ downloadId: 1, dir: "other" }), true);
+    assert.equal(calls.windowsCreate.length, 0, "no pointless second picker");
+  });
+
+// --- a hostile page may frame picker.html ----------------------------------- //
+test("A PICK FROM AN UNRECOGNISED SUBFRAME IS REFUSED", async () => {
+  // `picker.html` is web-accessible -- it has to be, to be framed at all -- so
+  // any page can embed it, point it at a recent download id, and clickjack two
+  // clicks: one to take the "+ new dir" row, one to answer the kind prompt.
+  // That is a /mkdir and a /relocate driven by a page. Click-to-select is what
+  // made two blind clicks enough.
+  reset();
+  let answer = null;
+  const handled = SW.onMessage(
+    { type: "dlr:choose", downloadId: 1, dir: "Evil", createdNew: true,
+      kind: "performer" },
+    { frameId: 3, tab: { id: 42 } }, (r) => { answer = r; });
+  await settle();
+  assert.equal(handled, false, "answered synchronously, nothing dispatched");
+  assert.equal(answer.ok, false);
+  assert.match(answer.error, /unrecognised frame/);
+  assert.equal(calls.fetches.length, 0, "no /mkdir, no /relocate, no /learn");
+});
+
+test("...and a guessed nonce does not help", async () => {
+  reset();
+  let answer = null;
+  SW.onMessage({ type: "dlr:choose", downloadId: 1, dir: "Evil",
+    overlay: "ov-guessed" }, { frameId: 3, tab: { id: 42 } },
+  (r) => { answer = r; });
+  await settle();
+  assert.equal(answer.ok, false);
+  assert.equal(calls.fetches.length, 0);
+});
+
+test("OUR overlay's pick, carrying the id we issued, goes through", async () => {
+  // The counterweight: the guard must not break the path it protects.
+  const id = await liveOverlay();
+  searchResult = [];
+  let answer = null;
+  SW.onMessage({ type: "dlr:choose", downloadId: 1, dir: "Jane Doe",
+    overlay: id }, { frameId: 7, tab: { id: 42 } }, (r) => { answer = r; });
+  await settle(20);
+  assert.equal(answer.ok, true);
+  assert.equal(answer.dir, "Jane Doe");
+});
+
+test("the popup window's pick is untouched by the guard", async () => {
+  // It is the TOP frame of its own tab and carries no nonce, which is exactly
+  // why the test is on frameId rather than on a nonce being present.
+  reset();
+  searchResult = [];
+  let answer = null;
+  SW.onMessage({ type: "dlr:choose", downloadId: 1, dir: "Jane Doe" },
+    { frameId: 0, tab: { id: 42 } }, (r) => { answer = r; });
+  await settle(20);
+  assert.equal(answer.ok, true);
+});
+
+test("a sender with no frame information at all is still served", async () => {
+  reset();
+  searchResult = [];
+  let answer = null;
+  SW.onMessage({ type: "dlr:choose", downloadId: 1, dir: "Jane Doe" }, {},
+    (r) => { answer = r; });
+  await settle(20);
+  assert.equal(answer.ok, true);
 });

@@ -450,6 +450,12 @@ export function mount(doc, chromeApi, { closeWindow } = {}) {
         // selecting an existing directory sends exactly the message it always
         // did, with no `kind: undefined` riding along.
         if (done.kind) message.kind = done.kind;
+        // The per-open id, ONLY when embedded. `picker.html` is
+        // web-accessible, so any page can frame it and try to clickjack a pick
+        // out of the user; the worker refuses a choice from a SUBFRAME that
+        // cannot present an id it issued. The popup window is a top-level frame
+        // and deliberately still sends the message it always did.
+        if (embedded && overlayId) message.overlay = overlayId;
         resp = await chromeApi.runtime.sendMessage(message);
       } catch (err) {
         // `err.message`, not String(err): String() prepends "Error: ", the

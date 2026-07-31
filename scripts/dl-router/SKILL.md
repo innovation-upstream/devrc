@@ -150,6 +150,11 @@ viewer, the Web Store, `view-source:`, `file://`, a tab that already closed
 blocks a `frame-src`. Check the tab's URL first. A picker that never appears at
 all is a real fault; a windowed one is not.
 
+It also **converts back to a window** if the overlay stops existing — the tab
+closed or navigated, the page removed the node, or a second download needed the
+same tab. That is the safety net, not a bug: the alternative is a download
+nobody was asked about.
+
 **"Downloads still show a Save-As dialog."** The profile's
 `download.default_directory` is not the library root, or `prompt_for_download`
 is still on. Re-run `setup-brave-profile.sh` with Brave **fully closed** (it
@@ -267,6 +272,9 @@ same gotcha as browser-bridge), then re-check `dl-route status`.
   not. `dl-route status`'s `etag` therefore still answers "did the routing
   config change?". The picker's own snapshot request skips `If-None-Match` so
   it still sees fresh counts; nothing else does.
+* Counts are **suppressed entirely when the file index hit its `file_index_max`
+  cap** — a partial tally of an unknown fraction of the library rendered next to
+  a directory name would be a wrong number, which is worse than none.
 * Counts are **empty until the file index has been walked**. `/dirs` never
   starts that walk (a whole-tree walk there would blow the extension's 4 s
   snapshot budget on a large library); `/match` warms it on every download. A

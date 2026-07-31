@@ -292,19 +292,24 @@ class FileIndex:
         extension's snapshot fetch gives up after 4 s — so a large library
         would turn a cosmetic counter into a picker that shows "Loading
         directories..." and then fails. `/match` already refreshes this index
-        on EVERY download (via find_duplicate), so by the time any picker
-        opens the tally is warm and at most one TTL stale, which is ample for
-        a number nothing routes on.
+        on EVERY browser download (via find_duplicate), so by the time a
+        picker opens for one the tally is warm and at most one TTL stale,
+        which is ample for a number nothing routes on. The yt-dlp path also
+        runs /match, so it warms it too.
 
         The consequence, stated plainly: before the first `/match` of a
         process the map is empty and the picker simply shows no counts. That
         is the intended degradation, not an oversight.
 
-        Stale by construction in one more way: when the `max_files` cap is hit
-        the walk returns early, so the counts are partial. `stats()["truncated"]`
-        is where that is visible; nothing routes on these numbers.
+        A TRUNCATED WALK REPORTS NOTHING. When the `max_files` cap is hit the
+        walk returns early, so whatever it counted is a partial tally of an
+        unknown fraction of the library -- and it would be rendered next to a
+        directory name with no hint that it is wrong. The rest of this file's
+        rule applies: a wrong number is worse than no number.
         """
         with self._lock:
+            if self._truncated:
+                return {}
             return dict(self._dir_counts)
 
     def stats(self) -> dict:

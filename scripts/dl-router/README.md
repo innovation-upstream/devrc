@@ -335,12 +335,48 @@ back to the window:
    would leave an empty overlay and no window — a download with no picker,
    which is the one outcome that is not allowed.
 
+**Gate 2 proves the frame booted. It proves nothing a millisecond later.** An
+overlay is a node in a document the extension does not own, and `openPicker`
+has already returned true — so every way it can vanish has a route back to a
+window, or the download ends up unasked:
+
+* the tab **closes** (`chrome.tabs.onRemoved`) or **navigates**
+  (`chrome.tabs.onUpdated`, keyed on `status === "loading"` so a single-page
+  app's `pushState` does not yank the picker into a window);
+* the **page removes the host node** — `document.body.innerHTML = …`, a DOM
+  sanitiser, a framework re-render, or hostile script. A `MutationObserver` on
+  `body`, armed only while an overlay is live, reports `dlr:overlay-lost`.
+* a **second download into the same tab**. The content script keeps exactly one
+  overlay and evicts the incumbent, so the worker refuses the second overlay
+  outright and gives it a window: two questions, both asked, neither lost.
+
+Re-delivery is idempotent — the record is removed first, so two triggers
+produce one window — and it re-asks the *same* question, from the `info` the
+worker kept.
+
 The overlay is **never dismissed by an outside click or by losing focus**. That
 is exactly why `chrome.action.openPopup()` was rejected: an action popup
 dismisses on blur, silently discarding the pick and leaving the file in the
 catch-all. The iframe cannot close itself, so the picker sends
 `dlr:picker-closed` and the worker tears the overlay down — falling back to
-`sender.tab.id` so a pick made after an MV3 teardown still removes it.
+`sender.tab.id` so a pick made after an MV3 teardown still removes it, and the
+content script sweeps a stray host by id if it was re-injected in between.
+
+The overlay's tab is **raised** (`tabs.update` + `windows.update`) once it is
+up: the popup window it replaces was created `focused: true`, and the toast's
+`change` makes this concrete — the user is looking at the toast's own window
+while the overlay goes to the download's tab.
+
+**A pick from an unrecognised subframe is refused.** `picker.html` has to be
+web-accessible to be framed at all, so any page can embed it, point it at a
+recent download id and clickjack two clicks — one to take the "+ new dir" row,
+one to answer the kind prompt — into a `/mkdir` and a `/relocate`.
+Click-to-select is what made two blind clicks sufficient. Our own overlay is a
+subframe too, so the discriminator is the per-open id: unguessable, issued by
+the worker, and never visible to the page because the shadow root holding the
+frame is **closed**. The popup-window picker is the top frame of its own tab and
+carries no id, which is why the test is on `frameId` rather than on an id being
+present.
 
 **The toast is still a popup window**, unconditionally: it is a passive
 notification with an eight-second life, and it has no pick to lose.

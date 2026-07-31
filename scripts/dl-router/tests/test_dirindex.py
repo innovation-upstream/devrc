@@ -284,3 +284,24 @@ def test_dir_counts_NEVER_triggers_a_scan(library, clock, monkeypatch):
     idx.refresh()
     assert idx.dir_counts() == {"Jane Doe": 1}
     assert calls == [1], "the ONE walk is the dedupe index's own"
+
+
+def test_a_TRUNCATED_walk_reports_no_counts_at_all(library, clock):
+    """A partial tally of an unknown fraction of the library would be rendered
+    next to a directory name with no hint that it is wrong. Same rule the
+    picker applies to a malformed count: a wrong number is worse than none.
+    """
+    for i in range(10):
+        (library / "Jane Doe" / f"f{i}.mp4").write_text("x")
+    idx = FileIndex(library, clock=clock, max_files=3)
+    idx.refresh()
+    assert idx.stats()["truncated"] is True
+    assert idx.dir_counts() == {}
+
+
+def test_an_untruncated_walk_of_the_same_tree_does_report_them(library, clock):
+    for i in range(10):
+        (library / "Jane Doe" / f"f{i}.mp4").write_text("x")
+    idx = FileIndex(library, clock=clock, max_files=1000)
+    idx.refresh()
+    assert idx.dir_counts() == {"Jane Doe": 10}

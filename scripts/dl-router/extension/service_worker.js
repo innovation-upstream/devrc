@@ -535,6 +535,61 @@ async function tellOverlayToClose(tabId, id) {
   } catch { /* tab gone or navigated -- the overlay went with the document */ }
 }
 
+/** The live overlay in a tab, if any. */
+function overlayInTab(tabId) {
+  for (const [id, record] of state.overlays) {
+    if (record.tabId === tabId) return id;
+  }
+  return null;
+}
+
+/**
+ * AN OVERLAY THAT STOPS EXISTING MUST BECOME A WINDOW.
+ *
+ * Gate 2 proves the frame booted. It proves nothing one millisecond later, and
+ * an overlay is a node in a document the extension does not own: the tab can
+ * close, navigate, or reload; the page can remove the node; and a second
+ * download into the same tab evicts the first (the content script keeps exactly
+ * one). In every one of those the picker vanishes, `openPicker` has already
+ * returned true, and the download would be left with NO picker at all -- the
+ * one outcome that is not allowed.
+ *
+ * So the worker keeps enough of the request (`info`) to re-ask, and re-asks in
+ * a popup window, which nothing on the page can touch. Re-delivery is
+ * idempotent: the record is removed first, so two triggers for the same overlay
+ * produce one window.
+ */
+async function redeliverAsWindow(id) {
+  const record = state.overlays.get(id);
+  if (!record) return false;
+  state.overlays.delete(id);
+  // Best effort: if anything IS still on screen, take it down first, so the
+  // user never faces two pickers for one download.
+  await tellOverlayToClose(record.tabId, id);
+  return openPickerWindow(record.info);
+}
+
+/** chrome.tabs.onRemoved: the tab holding the overlay is gone. */
+export function onTabRemoved(tabId) {
+  const id = overlayInTab(tabId);
+  if (id) void redeliverAsWindow(id);
+}
+
+/**
+ * chrome.tabs.onUpdated: the tab is navigating, so the overlay's document --
+ * and the overlay with it -- is about to be destroyed.
+ *
+ * Keyed on `status === "loading"` and NOT on `changeInfo.url`: a single-page
+ * app's pushState fires a url change without replacing the document, and
+ * yanking the picker into a window every time a SPA changes route would be a
+ * regression rather than a rescue.
+ */
+export function onTabUpdated(tabId, changeInfo) {
+  if (!changeInfo || changeInfo.status !== "loading") return;
+  const id = overlayInTab(tabId);
+  if (id) void redeliverAsWindow(id);
+}
+
 /**
  * The picker as an in-page overlay. Returns false -- never throws -- whenever
  * the page cannot host it, so the caller falls back to the window.
@@ -570,6 +625,12 @@ export async function openOverlayPicker(info) {
   }
   if (!tab || tab.discarded) return false;
   if (!overlayCapableUrl(tab.url || tab.pendingUrl)) return false;
+  // ONE OVERLAY PER TAB, decided HERE rather than discovered later. The content
+  // script keeps exactly one and evicts the incumbent, which for two downloads
+  // racing into the same tab means the first one's picker disappears while the
+  // worker still believes it was delivered. Refusing the second overlay sends
+  // it to a window instead: two questions, both asked, neither lost.
+  if (overlayInTab(tabId)) return false;
 
   const id = newOverlayId();
   const url = popupUrl("picker.html",
@@ -593,13 +654,28 @@ export async function openOverlayPicker(info) {
     return false;
   }
 
-  state.overlays.set(id, { tabId, downloadId: info.downloadId });
-  if (await ready) return true;
-  // gate 2 failed: tear the husk down before opening the window, so the user
-  // is never looking at two pickers for one download.
-  state.overlays.delete(id);
-  await tellOverlayToClose(tabId, id);
-  return false;
+  // `info` is kept so the question can be RE-ASKED in a window if the overlay
+  // stops existing -- see redeliverAsWindow.
+  state.overlays.set(id, { tabId, downloadId: info.downloadId, info });
+  if (!(await ready)) {
+    // gate 2 failed: tear the husk down before opening the window, so the user
+    // is never looking at two pickers for one download.
+    state.overlays.delete(id);
+    await tellOverlayToClose(tabId, id);
+    return false;
+  }
+  // BRING THE QUESTION TO THE USER. The popup window this replaces was created
+  // `focused: true`; an overlay painted into a background tab is a question
+  // nobody sees. The toast's `change` makes this concrete -- the user is looking
+  // at the toast's own window, and the overlay goes to the download's tab.
+  // Best effort: failing to raise a tab must not lose an overlay that works.
+  try {
+    await chrome.tabs.update(tabId, { active: true });
+    if (typeof tab.windowId === "number") {
+      await chrome.windows.update(tab.windowId, { focused: true });
+    }
+  } catch { /* the overlay is up either way */ }
+  return true;
 }
 
 /**
@@ -990,6 +1066,27 @@ export function onMessage(msg, sender, sendResponse) {
     return false;
   }
   if (msg.type === "dlr:choose") {
+    // A SUBFRAME MUST PRESENT A NONCE WE ISSUED.
+    //
+    // `picker.html` is web-accessible (it has to be, to be framed), so ANY page
+    // can embed it, point it at a recent download id and a chosen name, and
+    // clickjack two clicks out of the user: one to take the "+ new dir" row,
+    // one to answer the kind prompt. That is a /mkdir and a /relocate driven by
+    // a hostile page. Path traversal is already impossible, but "create a
+    // directory in the library and misfile a download into it" is not nothing,
+    // and click-to-select is what made two blind clicks sufficient.
+    //
+    // Our own overlay is a subframe too, so the discriminator is the per-open
+    // id: unguessable, issued by this worker, and never visible to the page
+    // (the shadow root holding the frame is closed). The popup-window picker is
+    // the TOP frame of its own tab and carries no nonce, which is why the test
+    // is on `frameId` rather than on the nonce being present.
+    if (typeof sender?.frameId === "number" && sender.frameId > 0
+        && !state.overlays.has(msg.overlay)) {
+      sendResponse({ ok: false,
+        error: "refusing a pick from an unrecognised frame" });
+      return false;
+    }
     ready()
       .then(() => applyChoice(msg.downloadId, msg.dir,
         { createdNew: msg.createdNew, kind: msg.kind }))
@@ -1017,6 +1114,14 @@ export function onMessage(msg, sender, sendResponse) {
       .then(() => sendResponse({ siteRules: state.snapshot?.siteRules || {} }))
       .catch(() => sendResponse({ siteRules: {} }));
     return true;
+  }
+  if (msg.type === "dlr:overlay-lost") {
+    // The content script noticed its host node was detached -- a page that
+    // rewrote document.body, a sanitiser, an SPA re-render, or a page
+    // deliberately removing it. Re-ask in a window, which the page cannot
+    // touch.
+    void redeliverAsWindow(msg.overlay);
+    return false;
   }
   if (msg.type === "dlr:picker-ready") {
     // Gate 2 of the overlay handshake -- see openOverlayPicker. Pure
@@ -1079,6 +1184,13 @@ export function registerListeners() {
   });
   // Ignores activation inside our own toast/picker popups -- see onTabActivated.
   chrome.tabs.onActivated.addListener(onTabActivated);
+  // An overlay lives in a document the extension does not own. When that
+  // document goes away the picker has to come back as a window, or the
+  // download is left unasked -- see redeliverAsWindow.
+  try {
+    chrome.tabs.onRemoved.addListener(onTabRemoved);
+    chrome.tabs.onUpdated.addListener(onTabUpdated);
+  } catch { /* older shapes without these events */ }
   try {
     chrome.windows.onRemoved.addListener(onWindowRemoved);
   } catch { /* older shapes without windows.onRemoved */ }

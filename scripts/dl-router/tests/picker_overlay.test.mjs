@@ -205,6 +205,91 @@ test("the manifest delivers the overlay through the EXISTING content script", ()
     [{ resources: ["picker.html"], matches: ["http://*/*", "https://*/*"] }]);
 });
 
+// --- the page can take the overlay away ------------------------------------- //
+//
+// PINS ON A PERMISSIVE PATH. Gate 2 proves the frame booted; it proves nothing
+// a millisecond later. An overlay is a node in a document the extension does
+// not own, and the worker has ALREADY been told the picker was delivered. If
+// losing it were silent, the download would end up with no picker at all.
+
+test("a detached host is REPORTED, so the worker can re-ask in a window", () => {
+  const doc = freshDoc();
+  OV.openOverlay(doc, { id: "ov-a", url: URL_A });
+  const { host } = frameOf(doc);
+  assert.equal(OV.stillAttached(), true);
+
+  host.remove();                       // `body.innerHTML = ...`, a sanitiser,
+  assert.equal(OV.stillAttached(), false);   // an SPA re-render, or hostile JS
+
+  const lost = [];
+  assert.equal(OV.reportLostIfDetached((id) => lost.push(id)), true);
+  assert.deepEqual(lost, ["ov-a"]);
+  assert.equal(OV.hasOverlay(), false, "and it stops claiming to have one");
+});
+
+test("an attached overlay is NOT reported lost", () => {
+  const doc = freshDoc();
+  OV.openOverlay(doc, { id: "ov-a", url: URL_A });
+  const lost = [];
+  assert.equal(OV.reportLostIfDetached((id) => lost.push(id)), false);
+  assert.deepEqual(lost, []);
+  assert.equal(OV.hasOverlay(), true);
+});
+
+test("a detached host is reported exactly once", () => {
+  // Re-delivery must not produce two windows for one download.
+  const doc = freshDoc();
+  OV.openOverlay(doc, { id: "ov-a", url: URL_A });
+  frameOf(doc).host.remove();
+  const lost = [];
+  const notify = (id) => lost.push(id);
+  OV.reportLostIfDetached(notify);
+  OV.reportLostIfDetached(notify);
+  OV.reportLostIfDetached(notify);
+  assert.deepEqual(lost, ["ov-a"]);
+});
+
+test("a notify that throws does not wedge the content script", () => {
+  const doc = freshDoc();
+  OV.openOverlay(doc, { id: "ov-a", url: URL_A });
+  frameOf(doc).host.remove();
+  assert.equal(OV.reportLostIfDetached(() => { throw new Error("no worker"); }),
+    true);
+  assert.equal(OV.hasOverlay(), false);
+});
+
+test("the watcher is only armed while an overlay is live", () => {
+  // An always-on MutationObserver over every page the user visits is a real
+  // cost for no extra coverage; node has no MutationObserver, so the guard is
+  // what is asserted here.
+  const doc = freshDoc();
+  assert.equal(OV.watchAttachment(doc, () => {}), null,
+    "no MutationObserver, no watcher -- and no throw");
+  assert.equal(OV.watchAttachment(null, () => {}), null);
+});
+
+test("closing SWEEPS a stray host left by a previous injection", () => {
+  // The content script is re-injected on every navigation, so a re-injected
+  // copy has no record while a host element from before may still be in the
+  // document. Without the sweep the user faces a modal with no close button
+  // and no working Esc, and the only way out is a page reload.
+  const doc = freshDoc();
+  OV.openOverlay(doc, { id: "ov-a", url: URL_A });
+  OV.forget();                                   // as if freshly re-injected
+  assert.equal(OV.hasOverlay(), false);
+  // The fake's getElementById is id-keyed, so register the host under its id
+  // the way a real document would.
+  doc.els.set(OV.HOST_ID, doc.body.children[0]);
+  assert.deepEqual(OV.closeOverlay("ov-a", doc), { ok: true, swept: true });
+  assert.equal(doc.body.children.length, 0);
+});
+
+test("the sweep does not invent an overlay that was never there", () => {
+  const doc = freshDoc();
+  assert.deepEqual(OV.closeOverlay("ov-a", doc),
+    { ok: false, error: "no_overlay" });
+});
+
 test("the frame is focused, and again once it has loaded", () => {
   // The picker is keyboard-first. `input.focus()` inside the framed document
   // only moves focus WITHIN that document -- the frame element has to hold

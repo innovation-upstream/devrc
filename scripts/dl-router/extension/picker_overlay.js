@@ -163,14 +163,59 @@
     return { ok: true, id: msg.id };
   }
 
+  /** Is the live overlay still in the document? */
+  function stillAttached() {
+    if (!current || !current.host) return false;
+    if (typeof current.host.isConnected === "boolean") {
+      return current.host.isConnected;
+    }
+    return Boolean(current.host.parentNode);
+  }
+
+  /**
+   * THE OVERLAY CAN BE TAKEN AWAY BY THE PAGE, and that must not silently cost
+   * the user the question.
+   *
+   * `document.body.innerHTML = ...`, a DOM sanitiser, a framework re-render, or
+   * nine lines of hostile script all detach the host. The worker has already
+   * been told the overlay was delivered, so without this the download is left
+   * with no picker and nothing notices. Reporting it makes the worker re-ask in
+   * a popup window, which the page cannot reach.
+   *
+   * The closed shadow root is NOT what protects the pick here -- a page does
+   * not need the frame's URL to remove the element next to it. This is.
+   */
+  function reportLostIfDetached(notify) {
+    if (!current || stillAttached()) return false;
+    var lost = current.id;
+    current = null;
+    try {
+      if (typeof notify === "function") notify(lost);
+    } catch (e) { /* the worker will not learn; nothing else to try */ }
+    return true;
+  }
+
   /**
    * Handle `dlr:close-overlay`. An id that does not match the live overlay is
    * a no-op rather than a blind teardown: the worker retries and times out on
    * its own schedule, and a stale close must not remove a picker that a later
    * download legitimately opened.
    */
-  function closeOverlay(id) {
-    if (!current) return { ok: false, error: "no_overlay" };
+  function closeOverlay(id, doc) {
+    if (!current) {
+      // NO RECORD IS NOT "NOTHING TO DO". This content script is re-injected on
+      // every navigation, so a re-injected copy has `current === null` while a
+      // host element from before may still be sitting in the document. Without
+      // this sweep the user would face a 460x420 modal with no close button and
+      // no working Esc, and the only way out would be a page reload.
+      var stray = (doc && typeof doc.getElementById === "function")
+        ? doc.getElementById(HOST_ID) : null;
+      if (stray) {
+        detach({ host: stray });
+        return { ok: true, swept: true };
+      }
+      return { ok: false, error: "no_overlay" };
+    }
     if (id && current.id !== id) return { ok: false, error: "stale" };
     var removed = detach(current);
     current = null;
@@ -193,10 +238,30 @@
       return false;
     }
     if (msg.type === "dlr:close-overlay") {
-      sendResponse(closeOverlay(msg.overlay));
+      sendResponse(closeOverlay(msg.overlay, doc));
       return false;
     }
     return false;
+  }
+
+  /**
+   * Watch for the host being detached. `childList` on `body` only -- the host
+   * is a direct child of it, and `innerHTML =` or a `removeChild` both show up
+   * there. A `subtree: true` observer over every page the user visits would be
+   * a real cost for no extra coverage.
+   */
+  function watchAttachment(doc, notify) {
+    if (typeof MutationObserver !== "function") return null;
+    if (!doc || !doc.body) return null;
+    var obs = new MutationObserver(function () {
+      if (reportLostIfDetached(notify)) obs.disconnect();
+    });
+    try {
+      obs.observe(doc.body, { childList: true });
+    } catch (e) {
+      return null;
+    }
+    return obs;
   }
 
   /** Top frame only: `all_frames` is for capture, not for painting a picker. */
@@ -215,6 +280,9 @@
       closeOverlay: closeOverlay,
       handleMessage: handleMessage,
       hasOverlay: hasOverlay,
+      stillAttached: stillAttached,
+      reportLostIfDetached: reportLostIfDetached,
+      watchAttachment: watchAttachment,
       forget: forget,
       isTopFrame: isTopFrame,
     };
@@ -226,7 +294,28 @@
   if (typeof chrome === "undefined" || !chrome.runtime) return;
   if (!isTopFrame(typeof window !== "undefined" ? window : null)) return;
 
+  /** Tell the worker the overlay is gone, so it can re-ask in a window. */
+  function reportLost(lostId) {
+    try {
+      var sent = chrome.runtime.sendMessage(
+        { type: "dlr:overlay-lost", overlay: lostId });
+      if (sent && typeof sent.catch === "function") sent.catch(function () {});
+    } catch (e) { /* worker restarting */ }
+  }
+
+  var watcher = null;
+
   chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
-    return handleMessage(document, msg, sendResponse);
+    var out = handleMessage(document, msg, sendResponse);
+    // The watcher is armed only while an overlay is live: an always-on
+    // MutationObserver on every page the user visits would be a real cost.
+    if (msg && msg.type === "dlr:overlay-open" && hasOverlay()) {
+      if (watcher) watcher.disconnect();
+      watcher = watchAttachment(document, reportLost);
+    } else if (msg && msg.type === "dlr:close-overlay" && !hasOverlay()) {
+      if (watcher) watcher.disconnect();
+      watcher = null;
+    }
+    return out;
   });
 }());
