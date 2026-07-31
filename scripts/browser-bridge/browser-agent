@@ -401,7 +401,7 @@ run_opencode() {  # <transcript-out> [continue] — returns opencode's exit code
   BROWSER_AGENT_TAB="$TAB" BROWSER_AGENT_INSTANCE="$INSTANCE" \
   BROWSER_AGENT_ALLOW_DOMAINS="$ALLOW" BROWSER_AGENT_DENY_DOMAINS="$DENY" \
   BROWSER_AGENT_DRY_RUN="$DRYRUN" BROWSER_AGENT_AUDIT="$AUDIT_LOG" \
-  BROWSER_AGENT_SESSION_ID="$SESSION_ID" \
+  BROWSER_AGENT_SESSION_ID="$SESSION_ID" BROWSER_AGENT_STEPS="$STEPS" \
     setsid "$OPENCODE_BIN" "${oc[@]}" "${msg[@]}" >"$out" 2>>"$ERRLOG" </dev/null &
   local leader=$!               # setsid makes opencode the group leader → PGID == leader
   # Watchdog: after $TIMEOUT, mark + TERM opencode's whole group, then (grace) KILL

@@ -95,6 +95,72 @@ browser agent "go to news.ycombinator.com and report the top 3 story titles" \
   still: it is not reachable by the model at ALL**, not even via that opt-in,
   because it takes the operator's screen. The agent gets `wake` instead — the
   un-throttling it actually needed, with no focus theft.
+- **Hidden-tab AUTO-WAKE (deterministic, not modelled).** The agent's tab is always
+  opened `active:false`, so it is always hidden and always throttled. The bridge
+  already flags that (`data.hidden:true` + the throttle note on every read), but the
+  tool's `summarizeResult` used to return a bare `data.text`/`data.html` and DISCARD
+  both — so on a throttled SPA that rendered a plausible-looking shell the model read
+  the shell and returned a **confident wrong answer with `status:"ok"`**, quoting the
+  shell verbatim as evidence. Measured at **1 of 13 successful runs (7.7%)**, and it
+  was the only failure mode found (`claudedocs/browser-bridge-deepseek-measurement-
+  2026-07-31.md` §3.2). Now, in `opencode/tools/browser_tool_impl.mjs`:
+  - the **first** hidden `text`/`html` read of a page makes the TOOL issue `wake`,
+    re-read, and return the re-read — inside one model tool call, no step spent, no
+    decision asked of the model. `wake`, never `activate`.
+  - **once per PAGE**, keyed by the read's `url` per forced tab. The un-throttle dies
+    with the CDP detach but the DOM it produced persists, so later reads are cheap.
+    A successful `nav`/`click`/`key`/`eval` clears the tab's records — the URL key
+    cannot see a same-URL document replacement (form POST, `location.reload()`, a
+    same-URL SPA remount), and under-forgetting costs a wrong answer while
+    over-forgetting costs one extra wake.
+  - a `wake` the MODEL calls is deliberately **NOT** recorded as the page's wake. It
+    looks like a free optimisation and is a correctness trap: the extension reports
+    the url from a `chrome.tabs.get` taken AFTER the settle, so a URL change during
+    the ~1.5s window (a redirect completing, `history.replaceState`, an SPA route
+    settling) lands the verdict on document **B** while the settle was spent on **A** —
+    and B's shell then gets the `note: … post-wake` banner. The auto path is immune
+    because it keys on the PRE-wake read's url. Fixing it properly needs the extension
+    to return the pre-attach url too (manifest bump + full Brave re-point), which is
+    not worth saving one wake. Do not reintroduce it without that.
+  - the **VERDICT** is stored, not just the key — `{ok, detail}`. A page whose wake
+    FAILED is never later described as post-wake: `note:` is reserved for a wake the
+    tool can vouch for (`woke === true`); a failed / unconfirmed / skipped / never-
+    attempted page gets `WARNING:` and the recorded reason. Storing only the key made
+    every later read of a failed page a *reassured* wrong answer — worse than the
+    silent one this change exists to remove.
+  - **fail-open**: a failed/forbidden wake, or a failed re-read, returns the ORIGINAL
+    read prefixed with a loud `[browser-tool] WARNING: … 'wake' FAILED (<reason>)`.
+    A read never becomes an error. A failed wake is not retried per-read.
+  - **budget**: automatic wakes per tab per run are capped, independent of the page
+    key, because a page that rewrites its URL on every read (hash routing, `?t=`
+    cache-busters, `history.replaceState` on infinite scroll) yields a fresh key each
+    time, degrading once-per-page into once-per-read: 3 bridge calls + a ~1.5 s settle
+    each against the 5/s + burst-20 per-instance limiter. The cap is **the run's step
+    budget** (`BROWSER_AGENT_STEPS`, exported by the `browser-agent` wrapper), floored
+    at `AUTO_WAKE_CAP_FLOOR` (4), falling back to `AUTO_WAKE_TAB_CAP` (8) when unknown;
+    `BROWSER_AGENT_AUTO_WAKE_MAX` overrides everything. A **fixed** 8 starved legitimate
+    runs — 12 distinct pages reached by nav+text is not churn, yet pages 8–11 were never
+    woken, silently reverting the back half of a default `--steps 12` run to
+    `BROWSER_AGENT_AUTO_WAKE=0`. Binding it to STEPS gives the provable bound "at most
+    one injected wake per model step". Past the cap it stops waking and says so loudly.
+  - **dry-run**: `BROWSER_AGENT_DRY_RUN=1` skips the auto-wake and says so, **and
+    `wake` is now one of the MUTATING ops** — so a *manual* `op="wake"` in a dry run is
+    synthesized (`{"ok":true,"dryRun":true,"op":"wake"}`) rather than reaching the
+    bridge, while still being policy-checked (a forbidden op or a disowned tab is
+    still refused). A read is passive, but a wake attaches the debugger to the
+    operator's live tab for up to a 6 s settle and raises Brave's "an extension is
+    debugging this browser" banner — past what "logs, doesn't drive" promises. Both
+    paths now match that promise; previously the doc was stronger than the code.
+  - the banner **hedges**: `woke` is probed from `visibilityState` inside the CDP
+    attach, so it proves the tab was un-throttled and says nothing about whether the
+    app finished rendering inside the bounded settle. Every post-wake banner tells the
+    model that a loading/placeholder state below is real.
+  - both injected calls are audited (`auto_wake_exec`) and so is the outcome
+    (`auto_wake_ok` / `auto_wake_unconfirmed` / `auto_wake_failed` / `auto_wake_capped`).
+  - `hidden` + the server's note now survive `summarizeResult` for `text`/`html`/`eval`
+    regardless, so a still-hidden read is visible rather than silent. (`eval` gets the
+    signal but is never auto-re-run — an arbitrary expression is not idempotent.)
+  - kill switch: `BROWSER_AGENT_AUTO_WAKE=0` disables the auto-wake; the warning stays.
 - **Guardrails:** a step budget (`--steps`, default 12), a wall-clock `--timeout`
   (default 120s) enforced with a **process-group kill** (`setsid` + kill the whole
   group, so no opencode child survives), `--deny-domains`/`--allow-domains`
@@ -102,8 +168,10 @@ browser agent "go to news.ycombinator.com and report the top 3 story titles" \
   bridge), a **non-http(s) nav scheme hard-denial** (a `nav` to `file:`/`data:`/
   `about:`/`javascript:`/`chrome:`/… is refused as `nav_scheme_denied:<scheme>`
   before any fetch — those have no host and would otherwise bypass
-  `--allow-domains`), and `--dry-run` (intercepts `nav`/`eval` — logs, doesn't
-  execute). The full opencode JSON transcript + a metadata-only tool audit are kept
+  `--allow-domains`), and `--dry-run` (intercepts every mutating op —
+  `nav`/`eval`/`click`/`type`/`key`/`upload`/`wake` — logs, doesn't execute; reads
+  still hit the browser, and the auto-wake is skipped with a WARNING). The full
+  opencode JSON transcript + a metadata-only tool audit are kept
   in a scratch dir. **Domain deny is best-effort** (see note below).
 - **⚠ Privacy:** the pages the agent reads are sent to **OpenRouter/DeepSeek**.
   Do NOT point it at high-secret authenticated pages casually.
