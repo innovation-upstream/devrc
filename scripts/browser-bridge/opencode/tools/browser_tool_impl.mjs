@@ -384,15 +384,28 @@ export const AUTO_WAKE_PAGE_CAP = 32;
 // (hash routing, `?t=` cache-busters, history.replaceState on infinite scroll)
 // every read yields a fresh key, so "wake once per page" silently degrades to
 // "wake per read": 3 bridge calls + a ~1.5s settle each, against a per-instance
-// 5/s + burst-20 limiter. Past the cap the tool stops waking and says so LOUDLY —
-// it never falls back to the silent shell this whole change exists to remove.
-// Override with BROWSER_AGENT_AUTO_WAKE_MAX.
-export const AUTO_WAKE_TAB_CAP = 8;
+// 5/s + burst-20 limiter.
+//
+// The cap is BOUND TO THE RUN'S STEP BUDGET (`BROWSER_AGENT_STEPS`, which the
+// browser-agent wrapper already knows and now exports). A fixed 8 STARVED
+// legitimate runs: 12 distinct pages reached by nav+text is not churn, yet pages
+// 8-11 were never woken, silently reverting the back half of a default
+// `--steps 12` run to BROWSER_AGENT_AUTO_WAKE=0 behaviour. Binding it to STEPS
+// gives the provable bound "at most ONE injected wake per model step" — a run
+// cannot read more pages than it has steps — while still capping churn at what a
+// churny run could have cost anyway.
+export const AUTO_WAKE_TAB_CAP = 8;         // fallback when STEPS is unknown
+export const AUTO_WAKE_CAP_FLOOR = 4;       // a 1-2 step run still gets a few
 
+// Precedence: the operator's explicit override > the run's step budget > the
+// fallback. A junk value at either source falls through rather than producing NaN
+// (`NaN >= n` is false, i.e. a junk cap would silently mean UNCAPPED).
 export function autoWakeTabCap(env) {
-  const raw = String((env && env.BROWSER_AGENT_AUTO_WAKE_MAX) ?? "").trim();
-  if (!/^[0-9]+$/.test(raw)) return AUTO_WAKE_TAB_CAP;
-  return Number(raw);
+  const override = String((env && env.BROWSER_AGENT_AUTO_WAKE_MAX) ?? "").trim();
+  if (/^[0-9]+$/.test(override)) return Number(override);
+  const steps = String((env && env.BROWSER_AGENT_STEPS) ?? "").trim();
+  if (/^[0-9]+$/.test(steps)) return Math.max(Number(steps), AUTO_WAKE_CAP_FLOOR);
+  return AUTO_WAKE_TAB_CAP;
 }
 
 // tabId -> { pages: Map<pageKey, {ok, detail}>, wakes: number }. Module-level,
@@ -441,15 +454,22 @@ export function wakeCountForTab(tab) {
 // read) and charge the tab's wake budget. The placeholder verdict is a FAILURE:
 // if the process is interrupted between the attempt and its outcome, the
 // conservative reading — "we cannot vouch for this page" — is what survives.
+//
+// An EMPTY key means the read carried no url, i.e. we cannot identify the page.
+// The budget is still charged (so an urlless page cannot wake without limit) but
+// NOTHING is stored: an empty key would collide with every other urlless read and
+// vouch for a document it never saw.
 export function markPageWakeAttempt(tab, key) {
   const s = _tabState(tab);
+  s.wakes += 1;
+  if (!key) return s.wakes;
   if (s.pages.size >= AUTO_WAKE_PAGE_CAP) s.pages.clear();
   s.pages.set(key, { ok: false, detail: "the wake did not complete" });
-  s.wakes += 1;
   return s.wakes;
 }
 
 export function recordPageWakeOutcome(tab, key, ok, detail) {
+  if (!key) return;   // never write a verdict that any urlless read would match
   _tabState(tab).pages.set(key, { ok: !!ok, detail: String(detail || "") });
 }
 
@@ -519,6 +539,12 @@ export function hiddenNotice(data, autoWake) {
     return "[browser-tool] WARNING: your tab is HIDDEN and the automatic 'wake' FAILED " +
       `(${autoWake.detail}). The content below may be an unrendered shell, NOT the real ` +
       `page. ${note}`;
+  }
+  if (st === "dryrun") {
+    return "[browser-tool] WARNING: your tab is HIDDEN and Chromium throttles it. The " +
+      "automatic 'wake' was SKIPPED because this is a DRY RUN (a wake attaches the " +
+      "debugger to a live tab). The content below may be an unrendered shell, NOT the " +
+      `real page. ${note}`;
   }
   if (st === "capped") {
     return "[browser-tool] WARNING: your tab is HIDDEN and the automatic wake was SKIPPED " +
@@ -743,17 +769,19 @@ export async function runBrowserOp(args, opts = {}) {
     throw new BrowserToolRefusal(`op_failed:${envelope.error || "unknown"}`);
   }
 
-  // A wake the MODEL asked for counts as this page's wake — otherwise a manual
-  // `wake` followed by a read would pay for a second one immediately. It does NOT
-  // charge the tab cap: that budget bounds the traffic THIS TOOL injects on its
-  // own initiative, not the model's own (already step-budgeted) calls.
-  if (op === "wake") {
-    const wd = (envelope && envelope.data) || {};
-    try {
-      recordPageWakeOutcome(forcedTab(env), pageKeyOf(wd), wd.woke === true,
-        `woke:${wd.woke ?? "unknown"} settleMs:${wd.settleMs ?? "unknown"} (called directly)`);
-    } catch { /* no tab → nothing to record */ }
-  }
+  // ⚠ A `wake` the MODEL called is deliberately NOT recorded as this page's wake.
+  // It looks like a free optimisation (skip the tool's own wake right after a
+  // manual one) and it is a correctness trap: the extension reports the url from a
+  // `chrome.tabs.get` taken AFTER the settle, so if the URL changed during the
+  // ~1.5s window — a redirect completing, history.replaceState, an SPA route
+  // settling — the verdict lands on document B while the settle was spent on
+  // document A, and B's shell then gets a `note: … the DOM it rendered persists`.
+  // That is exactly the reassured-wrong-answer failure this whole change exists to
+  // remove. The AUTO path is immune because it keys on the PRE-wake read's url, so
+  // a URL change during the wake fails safe. Closing the gap properly needs the
+  // extension to also return the pre-attach url — an extension change, hence a
+  // manifest bump and a full Brave re-point — which is not worth saving one wake.
+  // DO NOT reintroduce this without that pre-attach url.
 
   // --- the hidden-tab auto-wake (see AUTO_WAKE_OPS above) --------------------
   // NOTE the ORDER: the banner for THIS read is decided first, from the
@@ -776,6 +804,13 @@ export async function runBrowserOp(args, opts = {}) {
       autoWake = prior.ok
         ? { state: "already-woke", woke: true, detail: prior.detail }
         : { state: "already-failed", woke: false, detail: prior.detail };
+    } else if (dry) {
+      // A dry-run's contract is "logs, never actually drives the browser". A read
+      // is passive, but a `wake` ATTACHES THE DEBUGGER to the operator's live tab
+      // for ~1.5s and raises Brave's "an extension is debugging this browser"
+      // banner — a categorical step past that. Skip it and say what would have
+      // happened; the signal is preserved either way.
+      autoWake = { state: "dryrun", woke: null, detail: "" };
     } else if (AUTO_WAKE_OPS.includes(op) && autoWakeEnabled(env)) {
       const cap = autoWakeTabCap(env);
       if (wakeCountForTab(tab) >= cap) {
@@ -862,8 +897,11 @@ async function _autoWakeAndReRead(args, env, token, fetchImpl) {
   let woke = null;
   let detail = "";
   try {
+    // Audited AFTER buildRequest, never before: a wake the op-allowlist refuses
+    // never reaches the bridge, so logging an `exec` for it would be untrue.
+    const wakeReq = buildRequest({ op: "wake" }, env, token);
     _audit(env, "auto_wake_exec", "wake", "");
-    const wakeOuter = await _send(buildRequest({ op: "wake" }, env, token), fetchImpl);
+    const wakeOuter = await _send(wakeReq, fetchImpl);
     const wEnv = wakeOuter && wakeOuter.result;
     if (wEnv && wEnv.ok === false) {
       return { ok: false, detail: `wake failed: ${_msg(wEnv.error) || "unknown"}` };
@@ -877,8 +915,9 @@ async function _autoWakeAndReRead(args, env, token, fetchImpl) {
   // The wake's un-throttle does not survive its own CDP detach, but the DOM the
   // page rendered during it does — which is exactly what this re-read collects.
   try {
+    const reReadReq = buildRequest(args, env, token);
     _audit(env, "auto_wake_exec", String((args && args.op) || ""), "re-read");
-    const outer = await _send(buildRequest(args, env, token), fetchImpl);
+    const outer = await _send(reReadReq, fetchImpl);
     const envelope = outer && outer.result;
     if (envelope && envelope.ok === false) {
       return { ok: false, detail: `re-read failed: ${_msg(envelope.error) || "unknown"}` };

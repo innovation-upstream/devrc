@@ -28,7 +28,7 @@ fetch). Your tab is FIXED: you cannot choose or change which tab you act on.
 | `browser(op="click", selector="…")` (opt. `frame`) | **trusted** click at the element's center |
 | `browser(op="type", text="…")` (opt. `selector`, `frame`) | **trusted** text input (focus `selector` first if given) |
 | `browser(op="key", key="Enter")` (opt. `selector`, `frame`) | dispatch one **trusted** key (Enter/Tab/Escape/Arrow*/…) |
-| `browser(op="wake")` (opt. `waitMs`)   | **UN-THROTTLE your tab** so a throttled SPA actually renders. It does NOT move the operator's screen. **You rarely need to call this** — a hidden `text`/`html` read wakes and re-reads automatically (see Rules); call it by hand only when a page needs more render time after you drove it |
+| `browser(op="wake")` (opt. `waitMs`)   | **UN-THROTTLE your tab** so a throttled SPA actually renders. It does NOT move the operator's screen. **You almost never need to call this** — a hidden `text`/`html` read wakes and re-reads automatically, including the first read after you drove the page (see Rules) |
 | `browser(op="whoami")`                 | read-only identity + diagnostics: which HOST (laptop/workbench), YOUR OWN browser profile, and bridge/extension versions — call it to CONFIRM which host/profile you're on before acting (metadata only; you cannot see the operator's other profiles or what any tab is browsing) |
 
 ## Rules
@@ -50,12 +50,14 @@ fetch). Your tab is FIXED: you cannot choose or change which tab you act on.
   and gives you the RE-READ. The reply says so explicitly, and it says so again if
   the wake FAILED — in that case treat the content as possibly unrendered and do
   NOT report it as fact.
-- **Do not spend a step calling `op="wake"` yourself after a read** — it already
-  happened. Only call it by hand when a read was fine but the page needs more time
-  to finish rendering (e.g. after a `click` that starts a long load), and wake once
-  per page, not before every read: waking is not free (it briefly attaches the
-  debugger and holds a settle). You have NO way to foreground a tab; that is
-  deliberate and not a gap to work around.
+- **Do not spend a step calling `op="wake"` yourself** — it already happened, and
+  it happens again automatically on the first read after a `nav`/`click`/`key`/
+  `eval` (those replace the document, so the tool wakes the new one for you). Just
+  read, and believe what the reply says about the wake. Waking is not free (it
+  briefly attaches the debugger and holds a settle), so the tool budgets it; if a
+  reply says the wake budget is spent, stop trying to re-read the same page and
+  answer with what you have, or say you could not read it. You have NO way to
+  foreground a tab; that is deliberate and not a gap to work around.
 - **`op="screenshot"` now works on your (background) tab** via CDP — but you still
   only get a NOTE, never the image, so it rarely helps you answer. Read with
   `text`/`html`/`eval` instead; don't spend steps on a screenshot unless asked.

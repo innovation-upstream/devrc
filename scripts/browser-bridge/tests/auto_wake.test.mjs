@@ -27,6 +27,7 @@ import assert from "node:assert/strict";
 import {
   runBrowserOp, summarizeResult, resetAutoWakeState, hiddenNotice,
   AUTO_WAKE_OPS, HIDDEN_SIGNAL_OPS, AUTO_WAKE_PAGE_CAP, AUTO_WAKE_TAB_CAP,
+  AUTO_WAKE_CAP_FLOOR,
   PAGE_INVALIDATING_OPS, pageKeyOf, hasWokenPage, getPageWake,
   markPageWakeAttempt, recordPageWakeOutcome, wakeCountForTab, autoWakeTabCap,
   forgetPageWakes, autoWakeEnabled,
@@ -488,8 +489,7 @@ test("URL churn: the wake budget caps the injected traffic and says so LOUDLY", 
   assert.match(out, /may be an unrendered shell/);
 });
 
-test("the default budget is 8 and it is per TAB, not per page", () => {
-  assert.equal(AUTO_WAKE_TAB_CAP, 8);
+test("the budget is per TAB, not per page", () => {
   assert.equal(wakeCountForTab(11), 0);
   markPageWakeAttempt(11, "https://a");
   markPageWakeAttempt(11, "https://b");
@@ -497,33 +497,76 @@ test("the default budget is 8 and it is per TAB, not per page", () => {
   assert.equal(wakeCountForTab(12), 0, "budgets do not leak between tabs");
 });
 
-// --------------------------------------------------------------------------- //
-// a MANUAL wake counts as the page's wake
-// --------------------------------------------------------------------------- //
-test("a wake the MODEL called marks the page — the next read does not wake again", async () => {
+// A FIXED cap of 8 starved legitimate runs: 12 distinct pages reached by nav+text
+// is not churn, but pages 8-11 were never woken — silently reverting the back half
+// of a default `--steps 12` run to BROWSER_AGENT_AUTO_WAKE=0 behaviour.
+test("REGRESSION: 12 distinct pages in a --steps 12 run are ALL woken (no starvation)", async () => {
   const f = bridge();
-  await run({ op: "wake" }, baseEnv(), f);
-  f.calls.length = 0;
-  const out = await run({ op: "text" }, baseEnv(), f);
-  assert.deepEqual(ops(f), ["text"], "REGRESSION: a manual wake must not be paid for twice");
-  assert.match(out, /already SUCCEEDED for this page/);
-  // the recorded verdict names its provenance, so the audit/debug story is clear
-  assert.match(getPageWake(4242, PAGE).detail, /called directly/);
+  const env = baseEnv({ BROWSER_AGENT_STEPS: "12" });
+  for (let i = 0; i < 12; i++) {
+    await run({ op: "nav", url: `https://app.test/p${i}` }, env, f);
+    const out = await run({ op: "text" }, env, f);
+    assert.doesNotMatch(out, /wake budget/,
+      `page ${i}: a legitimate new document must not be starved by the churn backstop`);
+    assert.match(out, /RENDERED ANSWER/);
+  }
+  assert.equal(f.calls.filter((c) => c.op === "wake").length, 12,
+    "one injected wake per page — the provable bound is one per STEP");
 });
 
-test("a manual wake does NOT charge the auto-wake budget (that bounds injected traffic)", async () => {
-  const f = bridge();
-  await run({ op: "wake" }, baseEnv(), f);
-  assert.equal(wakeCountForTab(4242), 0);
+test("the cap binds to the run's step budget, floored, with the override winning", () => {
+  assert.equal(autoWakeTabCap({ BROWSER_AGENT_STEPS: "12" }), 12);
+  assert.equal(autoWakeTabCap({ BROWSER_AGENT_STEPS: "30" }), 30);
+  assert.equal(autoWakeTabCap({ BROWSER_AGENT_STEPS: "1" }), AUTO_WAKE_CAP_FLOOR,
+    "a 1-step run still gets a usable floor");
+  assert.equal(autoWakeTabCap({}), AUTO_WAKE_TAB_CAP, "unknown STEPS → the fallback");
+  assert.equal(autoWakeTabCap({ BROWSER_AGENT_STEPS: "junk" }), AUTO_WAKE_TAB_CAP);
+  assert.equal(autoWakeTabCap({ BROWSER_AGENT_STEPS: "12", BROWSER_AGENT_AUTO_WAKE_MAX: "2" }),
+    2, "the operator's explicit override beats the step budget");
 });
 
-test("a manual wake that reported woke:false does NOT vouch for the page", async () => {
-  const f = bridge({ woke: false });
+test("the browser-agent wrapper exports BROWSER_AGENT_STEPS (the cap's source)", () => {
+  const wrapper = readFileSync(new URL("../browser-agent", import.meta.url), "utf8");
+  assert.match(wrapper, /BROWSER_AGENT_STEPS="\$STEPS"/,
+    "the cap silently falls back to 8 if the wrapper stops exporting the step budget");
+});
+
+// --------------------------------------------------------------------------- //
+// a MANUAL wake must NOT vouch for a page
+// --------------------------------------------------------------------------- //
+// The extension reports the url from a chrome.tabs.get taken AFTER the settle, so
+// a URL change during the ~1.5s window lands the verdict on document B while the
+// settle was spent on A — and B's shell would then be graded `note: … post-wake`.
+// Byte for byte the reassured wrong answer this whole file exists to prevent. The
+// AUTO path is immune because it keys on the PRE-wake read's url.
+test("REGRESSION: a `wake` the MODEL called records NOTHING (its url is post-settle)", async () => {
+  const f = bridge();
   await run({ op: "wake" }, baseEnv(), f);
+  assert.equal(getPageWake(4242, PAGE), undefined,
+    "a manual wake must never write a verdict — it cannot know which document it settled");
+  assert.equal(wakeCountForTab(4242), 0, "…and it does not charge the injected-traffic budget");
+});
+
+test("REGRESSION: a manual wake whose URL CHANGED mid-settle cannot vouch for the new page", async () => {
+  const f = bridge();
+  // The wake op returns the url as it was AFTER the settle — document B.
+  f.state.url = "https://app.test/after-redirect";
+  await run({ op: "wake" }, baseEnv(), f);
+  f.state.awake = false;             // B was never settled; it is a fresh shell
   f.calls.length = 0;
+
   const out = await run({ op: "text" }, baseEnv(), f);
-  assert.deepEqual(ops(f), ["text"], "still not retried");
-  assert.match(out, /WARNING/);
+  assert.deepEqual(ops(f), ["text", "wake", "text"],
+    "B must be woken on its own merits, not inherit A's verdict");
+  assert.doesNotMatch(out, /already SUCCEEDED/,
+    "REGRESSION: a shell was about to be labelled post-wake off a manual wake's url");
+});
+
+test("the auto path keys on the PRE-wake read's url, so a mid-wake URL change fails safe", async () => {
+  const f = bridge();
+  const out = await run({ op: "text" }, baseEnv(), f);   // keyed on PAGE (pre-wake)
+  assert.ok(hasWokenPage(4242, PAGE), "the verdict belongs to the document that was read");
+  assert.match(out, /RENDERED ANSWER/);
 });
 
 // --------------------------------------------------------------------------- //
@@ -554,6 +597,62 @@ test("the audit log distinguishes a SUCCESSFUL auto-wake from a FAILED one", asy
   } finally {
     try { unlinkSync(path); } catch { /* best-effort */ }
   }
+});
+
+test("an `exec` line is logged only for a wake that REACHED the bridge", async () => {
+  const path = `${tmpdir()}/browser-auto-wake-audit-${process.pid}-${Math.random()}.jsonl`;
+  const env = baseEnv({ BROWSER_AGENT_AUDIT: path, BROWSER_AGENT_ALLOWED_OPS: "text,html" });
+  try {
+    const f = bridge();
+    await run({ op: "text" }, env, f);
+    assert.deepEqual(ops(f), ["text"], "the allowlist refused the wake pre-bridge");
+    const lines = readFileSync(path, "utf8").trim().split("\n").map((l) => JSON.parse(l));
+    assert.equal(lines.filter((l) => l.decision === "auto_wake_exec").length, 0,
+      "REGRESSION: an exec was logged for a wake that never left the process");
+    assert.ok(lines.some((l) => l.decision === "auto_wake_failed"),
+      "the refusal itself is still recorded");
+  } finally {
+    try { unlinkSync(path); } catch { /* best-effort */ }
+  }
+});
+
+// --------------------------------------------------------------------------- //
+// dry-run must not attach the debugger to the operator's live tab
+// --------------------------------------------------------------------------- //
+test("BROWSER_AGENT_DRY_RUN=1: no wake is issued, and the WARNING says why", async () => {
+  const f = bridge();
+  const out = await run({ op: "text" }, baseEnv({ BROWSER_AGENT_DRY_RUN: "1" }), f);
+  assert.deepEqual(ops(f), ["text"],
+    "a dry-run must never attach the debugger to a live tab");
+  assert.match(out, /^\[browser-tool\] WARNING:/);
+  assert.match(out, /DRY RUN/);
+  assert.match(out, /SHELL \(waiting for frames\)/, "the read itself still returns");
+  assert.equal(wakeCountForTab(4242), 0, "and no budget is charged");
+});
+
+// --------------------------------------------------------------------------- //
+// an unidentifiable page must never be vouched for
+// --------------------------------------------------------------------------- //
+test("an EMPTY page key is never stored — two urlless reads must not share a verdict", () => {
+  markPageWakeAttempt(21, "");
+  assert.equal(getPageWake(21, ""), undefined, "nothing may be written under the empty key");
+  assert.equal(wakeCountForTab(21), 1, "…but the budget IS charged, so it cannot loop");
+  recordPageWakeOutcome(21, "", true, "woke:true");
+  assert.equal(getPageWake(21, ""), undefined,
+    "REGRESSION: a vouched empty key would match every other urlless read");
+});
+
+test("a read with no url wakes, is warned about, and never becomes 'already SUCCEEDED'", async () => {
+  const f = bridge();
+  f.state.url = null;                       // the read carries no identifiable url
+  const first = await run({ op: "text" }, baseEnv(), f);
+  assert.match(first, /RENDERED ANSWER/);
+  f.calls.length = 0;
+  f.state.awake = false;
+  const second = await run({ op: "text" }, baseEnv(), f);
+  assert.doesNotMatch(second, /already SUCCEEDED/,
+    "an unidentifiable page may never be vouched for");
+  assert.deepEqual(ops(f), ["text", "wake", "text"], "it re-wakes instead — budget-bounded");
 });
 
 test("a hostile/huge server error is BOUNDED before it reaches the banner", async () => {
@@ -639,6 +738,7 @@ test("hiddenNotice never recommends `activate` (the wording is load-bearing)", (
                     { state: "already-woke", woke: true, detail: "" },
                     { state: "already-failed", woke: false, detail: "wake failed: boom" },
                     { state: "capped", woke: null, detail: "8/8 wakes used" },
+                    { state: "dryrun", woke: null, detail: "" },
                     { state: "failed", woke: null, detail: "wake failed: boom" }]) {
     const s = hiddenNotice(data, aw);
     assert.ok(s.length > 0);

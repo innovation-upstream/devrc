@@ -112,8 +112,16 @@ browser agent "go to news.ycombinator.com and report the top 3 story titles" \
     A successful `nav`/`click`/`key`/`eval` clears the tab's records — the URL key
     cannot see a same-URL document replacement (form POST, `location.reload()`, a
     same-URL SPA remount), and under-forgetting costs a wrong answer while
-    over-forgetting costs one extra wake. A `wake` the MODEL calls also marks the
-    page, so a manual wake is not immediately paid for twice.
+    over-forgetting costs one extra wake.
+  - a `wake` the MODEL calls is deliberately **NOT** recorded as the page's wake. It
+    looks like a free optimisation and is a correctness trap: the extension reports
+    the url from a `chrome.tabs.get` taken AFTER the settle, so a URL change during
+    the ~1.5s window (a redirect completing, `history.replaceState`, an SPA route
+    settling) lands the verdict on document **B** while the settle was spent on **A** —
+    and B's shell then gets the `note: … post-wake` banner. The auto path is immune
+    because it keys on the PRE-wake read's url. Fixing it properly needs the extension
+    to return the pre-attach url too (manifest bump + full Brave re-point), which is
+    not worth saving one wake. Do not reintroduce it without that.
   - the **VERDICT** is stored, not just the key — `{ok, detail}`. A page whose wake
     FAILED is never later described as post-wake: `note:` is reserved for a wake the
     tool can vouch for (`woke === true`); a failed / unconfirmed / skipped / never-
@@ -123,13 +131,22 @@ browser agent "go to news.ycombinator.com and report the top 3 story titles" \
   - **fail-open**: a failed/forbidden wake, or a failed re-read, returns the ORIGINAL
     read prefixed with a loud `[browser-tool] WARNING: … 'wake' FAILED (<reason>)`.
     A read never becomes an error. A failed wake is not retried per-read.
-  - **budget**: `AUTO_WAKE_TAB_CAP` = 8 automatic wakes per tab per run
-    (`BROWSER_AGENT_AUTO_WAKE_MAX` overrides), independent of the page key. On a page
-    that rewrites its URL on every read (hash routing, `?t=` cache-busters,
-    `history.replaceState` on infinite scroll) every read yields a fresh key, so
-    once-per-page would degrade to once-per-read: 3 bridge calls + a ~1.5 s settle
-    each against the 5/s + burst-20 per-instance limiter. Past the cap it stops waking
-    and says so loudly.
+  - **budget**: automatic wakes per tab per run are capped, independent of the page
+    key, because a page that rewrites its URL on every read (hash routing, `?t=`
+    cache-busters, `history.replaceState` on infinite scroll) yields a fresh key each
+    time, degrading once-per-page into once-per-read: 3 bridge calls + a ~1.5 s settle
+    each against the 5/s + burst-20 per-instance limiter. The cap is **the run's step
+    budget** (`BROWSER_AGENT_STEPS`, exported by the `browser-agent` wrapper), floored
+    at `AUTO_WAKE_CAP_FLOOR` (4), falling back to `AUTO_WAKE_TAB_CAP` (8) when unknown;
+    `BROWSER_AGENT_AUTO_WAKE_MAX` overrides everything. A **fixed** 8 starved legitimate
+    runs — 12 distinct pages reached by nav+text is not churn, yet pages 8–11 were never
+    woken, silently reverting the back half of a default `--steps 12` run to
+    `BROWSER_AGENT_AUTO_WAKE=0`. Binding it to STEPS gives the provable bound "at most
+    one injected wake per model step". Past the cap it stops waking and says so loudly.
+  - **dry-run**: `BROWSER_AGENT_DRY_RUN=1` skips the auto-wake and says so. A read is
+    passive, but a wake attaches the debugger to the operator's live tab for ~1.5 s and
+    raises Brave's "an extension is debugging this browser" banner — past what
+    "logs, doesn't drive" promises.
   - the banner **hedges**: `woke` is probed from `visibilityState` inside the CDP
     attach, so it proves the tab was un-throttled and says nothing about whether the
     app finished rendering inside the bounded settle. Every post-wake banner tells the
