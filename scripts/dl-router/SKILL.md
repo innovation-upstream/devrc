@@ -138,7 +138,31 @@ carries the new rules. Selector subset: tag, `.class`, `#id`, `[attr]`,
 2. Options page → *Test connection* — port and token right? Is *Enable routing
    in this profile* ticked? It is **per-profile** and off by default.
 3. **An extension code change needs a FULL Brave restart**, not the reload
-   button — same gotcha as browser-bridge.
+   button — same gotcha as browser-bridge. The manifest version is bumped on
+   every code change specifically so `brave://extensions` can be checked:
+   if it still reads the old number, the restart did not take.
+
+**"The picker opens in a separate window instead of in the page."** That is the
+designed fallback, not a fault. The overlay needs a content script in the tab
+and a frame that boots, so it falls back for `brave://`/`chrome://`, the PDF
+viewer, the Web Store, `view-source:`, `file://`, a tab that already closed
+(the self-closing file-host tab), a page still loading, and any site whose CSP
+blocks a `frame-src`. Check the tab's URL first. A picker that never appears at
+all is a real fault; a windowed one is not.
+
+It also **converts back to a window** if the overlay stops existing — the tab
+closed or navigated, the page removed the node, or a second download needed the
+same tab. That is the safety net, not a bug: the alternative is a download
+nobody was asked about.
+
+**If the overlay NEVER works on any site**, suspect `use_dynamic_url` on the
+`web_accessible_resources` entry: the framed page's ES-module imports have to
+resolve under the rotating origin, which is why `picker.js`, `sanitize.js` and
+`route_core.js` are listed next to `picker.html`. This has never been exercised
+in a browser. It fails safe — the frame never boots, gate 2 fires, and every
+picker becomes a window — so the symptom is "always windowed, never in-page".
+Drop `use_dynamic_url` to test the hypothesis; the per-open id still authorises
+picks either way.
 
 **"Downloads still show a Save-As dialog."** The profile's
 `download.default_directory` is not the library root, or `prompt_for_download`
@@ -251,6 +275,19 @@ same gotcha as browser-bridge), then re-check `dl-route status`.
 ## Gotchas
 
 * Port **8791** — 8790 is already taken on the workbench.
+* The picker's **per-directory counts are not covered by the `/dirs` ETag**, on
+  purpose: they change on every download and `FileIndex` is TTL-cached, so
+  including them would make the ETag change when the routing configuration had
+  not. `dl-route status`'s `etag` therefore still answers "did the routing
+  config change?". The picker's own snapshot request skips `If-None-Match` so
+  it still sees fresh counts; nothing else does.
+* Counts are **suppressed entirely when the file index hit its `file_index_max`
+  cap** — a partial tally of an unknown fraction of the library rendered next to
+  a directory name would be a wrong number, which is worse than none.
+* Counts are **empty until the file index has been walked**. `/dirs` never
+  starts that walk (a whole-tree walk there would blow the extension's 4 s
+  snapshot budget on a large library); `/match` warms it on every download. A
+  picker with no counts means no `/match` has run in this sidecar process yet.
 * `onDeterminingFilename` **cannot escape the download root**: no `..`, no
   absolute paths. That is precisely why the profile's download directory has to
   *be* the library root.

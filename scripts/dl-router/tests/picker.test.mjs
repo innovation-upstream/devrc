@@ -5,6 +5,7 @@
 // exactly where the suggest() ladder already put it — no move, no alias.
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 
 globalThis.DL_ROUTER_NO_AUTOSTART = true;
 
@@ -942,4 +943,316 @@ test("a caught sendMessage rejection is not Error-prefixed", async () => {
   const shown = doc.getElementById("meta").textContent;
   assert.match(shown, /the message port closed/);
   assert.ok(!shown.includes("Error:"), shown);
+});
+
+// --- per-directory item counts ----------------------------------------------- //
+//
+// The number rides as its own field and its own DOM node. It is decorative:
+// nothing routes on it, and it must never end up inside `label`, which is what
+// the new-directory proposal and the sidecar-facing flow are built from.
+const COUNTS = { "Jane Doe": 12, "john-smith": 3, "Mary_Major": 0 };
+
+test("filterEntries attaches each directory's count", () => {
+  const byName = Object.fromEntries(
+    filterEntries(DIRS, "", "", COUNTS).map((e) => [e.name, e.count]));
+  assert.equal(byName["Jane Doe"], 12);
+  assert.equal(byName["john-smith"], 3);
+  assert.equal(byName["Mary_Major"], 0, "zero is a count, not a missing one");
+  assert.equal(byName["acme-studio"], undefined, "absent stays absent");
+});
+
+test("no counts map at all leaves every entry countless", () => {
+  for (const entry of filterEntries(DIRS, "", "")) {
+    assert.equal(entry.count, undefined);
+  }
+});
+
+test("a malformed count is dropped rather than rendered", () => {
+  const hostile = { "Jane Doe": "12", "john-smith": NaN, "Mary_Major": -1,
+    "acme-studio": Infinity, other: null };
+  for (const entry of filterEntries(DIRS, "", "", hostile)) {
+    assert.equal(entry.count, undefined, entry.name);
+  }
+});
+
+test("the count NEVER leaks into the entry label", () => {
+  // `label` is what the "+ new dir" proposal is built from and what the flow
+  // reads; a decorative number in it would be a directory name with a number
+  // stuck on the end.
+  for (const entry of filterEntries(DIRS, "", "", COUNTS)) {
+    assert.equal(entry.label, entry.name);
+  }
+});
+
+test("the new-directory proposal carries no count", () => {
+  const entries = filterEntries(DIRS, "aster nightingale", "", COUNTS);
+  const proposal = entries.find((e) => e.kind === ENTRY_NEW);
+  assert.equal(proposal.count, undefined);
+});
+
+test("the dirs event carries the counts into the entries", () => {
+  let state = initialState({ dirs: [], loading: true });
+  state = reduce(state, { type: "dirs", dirs: DIRS, counts: COUNTS });
+  const jane = state.entries.find((e) => e.name === "Jane Doe");
+  assert.equal(jane.count, 12);
+  // ...and they survive a re-filter, which rebuilds the list from scratch.
+  state = reduce(state, input("jane"));
+  assert.equal(state.entries[0].count, 12);
+});
+
+test("a snapshot with no counts renders exactly as it always did", () => {
+  let state = initialState({ dirs: [], loading: true });
+  state = reduce(state, { type: "dirs", dirs: DIRS });
+  assert.equal(state.counts, null);
+  assert.ok(state.entries.every((e) => e.count === undefined));
+});
+
+test("mount renders the count beside the directory name", () => {
+  const { doc } = mountPicker({
+    snapshot: { dirs: DIRS.map((name) => ({ name })), counts: COUNTS } });
+  const rows = doc.getElementById("list").children;
+  const jane = rows.find((r) => r.textContent.includes("Jane Doe"));
+  const badge = jane.children.find((c) => c.className === "count");
+  assert.equal(badge.textContent, "12");
+  // The name is its own node, so the count can be styled down and can never be
+  // mistaken for part of it.
+  assert.equal(jane.children[0].textContent, "Jane Doe");
+});
+
+test("mount draws no count node when the sidecar sent none", () => {
+  const { doc } = mountPicker();
+  const rows = doc.getElementById("list").children;
+  for (const row of rows) {
+    assert.ok(!row.children.some((c) => c.className === "count"));
+  }
+});
+
+// --- click to select --------------------------------------------------------- //
+const click = (index) => ({ type: "click", index });
+
+test("a click chooses the clicked row, not the highlighted one", () => {
+  let state = initialState({ dirs: DIRS });
+  state = drive(state, [key("ArrowDown")]);           // highlight moves to 1
+  const target = state.entries[3].name;
+  state = drive(state, [click(3)]);
+  assert.deepEqual(state.done,
+    { action: "choose", dir: target, createdNew: false });
+  assert.equal(state.index, 3, "the highlight follows the click");
+});
+
+test("a click on the new-directory entry asks the kind first", () => {
+  // Creation by mouse must be exactly as deliberate as creation by keyboard.
+  let state = initialState({ dirs: DIRS, suggestNew: "Aster Vale" });
+  state = drive(state, [click(0)]);
+  assert.equal(state.done, null, "nothing is created before the kind is known");
+  assert.equal(state.pendingNew, "Aster Vale");
+  assert.deepEqual(state.entries.map((e) => e.name), ["performer", "category"]);
+});
+
+test("a click answers the kind prompt", () => {
+  let state = initialState({ dirs: DIRS, suggestNew: "Aster Vale" });
+  state = drive(state, [click(0), click(1)]);
+  assert.deepEqual(state.done, { action: "choose", dir: "Aster Vale",
+    createdNew: true, kind: "category" });
+});
+
+test("a click while the directory list is still loading is DROPPED", () => {
+  // THE pin. Enter DEFERS while loading because a typed query survives the
+  // list arriving. A click's intent is a screen position, and position N of the
+  // loading placeholder is not position N of the real list -- honouring it
+  // later would choose an arbitrary directory, or CREATE one, which is the
+  // exact footgun the deferred Enter exists to close.
+  const state = initialState({ dirs: [], suggestNew: "Aster Vale",
+    loading: true });
+  assert.equal(state.entries[0].kind, ENTRY_NEW,
+    "the proposal really is sitting at index 0 while loading");
+  const after = reduce(state, click(0));
+  assert.equal(after, state, "state is returned untouched");
+  assert.equal(after.done, null);
+  assert.equal(after.pendingNew, null);
+  assert.equal(after.pendingEnter, false, "and it is not queued for later");
+});
+
+test("a click is refused once the list is known to be unavailable", () => {
+  let state = initialState({ dirs: [], suggestNew: "Aster Vale", loading: true });
+  state = reduce(state, { type: "dirs-failed" });
+  const after = reduce(state, click(0));
+  assert.equal(after, state);
+  assert.equal(after.done, null);
+});
+
+test("a click with a nonsense index does nothing", () => {
+  const state = initialState({ dirs: DIRS });
+  for (const i of [-1, 99, 1.5, NaN, "2", null, undefined]) {
+    assert.equal(reduce(state, click(i)), state, String(i));
+  }
+});
+
+test("a click after the flow finished is ignored", () => {
+  let state = initialState({ dirs: DIRS });
+  state = drive(state, [key("Escape")]);
+  const after = reduce(state, click(1));
+  assert.equal(after, state);
+  assert.deepEqual(after.done, { action: "cancel", dir: "other" });
+});
+
+test("the reducer never mutates the previous state on a click", () => {
+  const before = initialState({ dirs: DIRS });
+  const snapshot = JSON.stringify(before);
+  reduce(before, click(2));
+  assert.equal(JSON.stringify(before), snapshot);
+});
+
+test("mount: clicking a rendered row chooses that directory", async () => {
+  const { doc, sent, closed } = mountPicker();
+  const rows = doc.getElementById("list").children;
+  const wanted = rows[3].children[0].textContent;
+  rows[3].fire("click");
+  const choose = sent.find((m) => m.type === "dlr:choose");
+  assert.deepEqual(choose, { type: "dlr:choose", downloadId: 7, dir: wanted,
+    createdNew: false });
+  await tick();
+  assert.equal(closed(), 1);
+});
+
+test("mount: the loading placeholder is not clickable at all", () => {
+  // Belt and braces around the reducer's refusal: the row that stands in for
+  // the list while it loads never even gets a handler.
+  const { doc } = mountPicker({ deferReply: true });
+  const rows = doc.getElementById("list").children;
+  assert.match(rows[0].textContent, /Loading directories/);
+  assert.equal(rows[0].listeners.has("click"), false);
+});
+
+test("mount: the keyboard still drives the list after a click", async () => {
+  // The keyboard-first flow must not become a second-class citizen. Clicking
+  // the new-directory row raises the kind prompt; arrows and Enter still answer
+  // it, without touching the mouse again.
+  const { doc, sent } = mountPicker();
+  doc.getElementById("list").children[0].fire("click");   // "+ new dir"
+  assert.equal(sent.filter((m) => m.type === "dlr:choose").length, 0);
+  doc.fire("keydown", { key: "ArrowDown" });
+  doc.fire("keydown", { key: "Enter" });
+  const choose = sent.find((m) => m.type === "dlr:choose");
+  assert.deepEqual(choose, { type: "dlr:choose", downloadId: 7,
+    dir: "Aster Vale", createdNew: true, kind: "category" });
+});
+
+test("mount: clicks during an in-flight choose do not re-send it", async () => {
+  // The same single-flight latch the keyboard is held to. A click is a much
+  // easier way to produce three of them in a row.
+  const { doc, sent } = mountPicker({
+    chooseResult: new Promise(() => {}) });
+  const rows = () => doc.getElementById("list").children;
+  rows()[2].fire("click");
+  await tick();
+  rows()[3].fire("click");
+  rows()[4].fire("click");
+  await tick();
+  assert.equal(sent.filter((m) => m.type === "dlr:choose").length, 1);
+});
+
+test("mount: the chosen row is marked for the confirmation animation", () => {
+  const { doc } = mountPicker({ deferReply: false });
+  const rows = doc.getElementById("list").children;
+  rows[2].fire("click");
+  // Re-read: render() rebuilds the list.
+  assert.ok(doc.getElementById("list").children[2].className.includes("taken"),
+    "the row the user picked is the one that pulses");
+  assert.ok(!doc.getElementById("list").children[1].className.includes("taken"));
+});
+
+test("mount: a keyboard choice marks the same way a click does", () => {
+  const { doc } = mountPicker();
+  doc.fire("keydown", { key: "ArrowDown" });
+  doc.fire("keydown", { key: "Enter" });
+  assert.ok(doc.getElementById("list").children[1].className.includes("taken"));
+});
+
+test("the picker's motion is opt-out", () => {
+  // The animation is CSS, so this is the only place it can be pinned headlessly
+  // -- but an unconditional animation is a real accessibility regression and
+  // deleting the media query must not be silent.
+  const css = readFileSync(
+    new URL("../extension/picker.html", import.meta.url), "utf8");
+  assert.match(css, /prefers-reduced-motion/);
+  assert.match(css, /\.row\.taken/);
+  // Hover is CSS-only on purpose: a pointer that moved the selection would
+  // fight the keyboard, because the mouse sits wherever it was left.
+  assert.match(css, /\.row:hover/);
+});
+
+// --- delivered as an in-page overlay ----------------------------------------- //
+//
+// Same document, same reducer, same finish() -- only "what does closing mean"
+// differs, because an iframe cannot close itself.
+function mountFree(search) {
+  const doc = makeDoc(PAGE_IDS, { search });
+  const sent = [];
+  const chromeApi = {
+    runtime: {
+      sendMessage: (msg, cb) => {
+        sent.push(msg);
+        if (typeof cb === "function") {
+          cb({ ok: true, snapshot: { dirs: DIRS.map((name) => ({ name })) } });
+        }
+        return Promise.resolve({ ok: true });
+      },
+    },
+  };
+  return { doc, sent, handle: mount(doc, chromeApi) };
+}
+
+test("an embedded picker announces that it actually booted", () => {
+  // The service worker will not consider the overlay delivered without this:
+  // a content-script-injected iframe is subject to the PAGE's CSP, so the host
+  // element can exist while the frame never loaded. Only an extension context
+  // that really started can send it.
+  const { sent } = mountFree("?id=7&embed=1&overlay=ov-abc");
+  assert.deepEqual(sent.find((m) => m.type === "dlr:picker-ready"),
+    { type: "dlr:picker-ready", overlay: "ov-abc" });
+});
+
+test("a windowed picker announces nothing", () => {
+  const { sent } = mountFree("?id=7");
+  assert.equal(sent.some((m) => m.type === "dlr:picker-ready"), false);
+});
+
+test("an embedded picker asks the worker to tear the overlay down", async () => {
+  // window.close() on an iframe is a no-op, so without this the overlay would
+  // outlive the pick and sit on the page forever.
+  const { doc, sent } = mountFree("?id=7&embed=1&overlay=ov-abc");
+  doc.fire("keydown", { key: "Escape" });
+  await tick();
+  assert.deepEqual(sent.find((m) => m.type === "dlr:picker-closed"),
+    { type: "dlr:picker-closed", overlay: "ov-abc" });
+});
+
+test("an accepted choice in an overlay closes it too", async () => {
+  const { doc, sent } = mountFree("?id=7&embed=1&overlay=ov-abc");
+  doc.getElementById("list").children[0].fire("click");
+  await tick();
+  assert.ok(sent.some((m) => m.type === "dlr:choose"));
+  assert.ok(sent.some((m) => m.type === "dlr:picker-closed"));
+});
+
+test("AN EMBEDDED PICK CARRIES THE ID THE WORKER ISSUED", () => {
+  // Half of a cross-component contract, and the half that fails LOUDLY if it
+  // rots: the worker refuses a `dlr:choose` from a subframe that cannot present
+  // an id it issued (any page may frame picker.html and clickjack two clicks).
+  // Stop sending it here and EVERY real overlay pick is refused.
+  const { doc, sent } = mountFree("?id=7&embed=1&overlay=ov-abc");
+  doc.getElementById("list").children[1].fire("click");
+  const choose = sent.find((m) => m.type === "dlr:choose");
+  assert.equal(choose.overlay, "ov-abc");
+});
+
+test("...and a windowed pick still carries none", () => {
+  // The other half: the popup window is the TOP frame of its own tab, which is
+  // what the worker's guard keys on. Adding an id here would be harmless but
+  // adding the ASSUMPTION that one is always present would not.
+  const { doc, sent } = mountFree("?id=7");
+  doc.getElementById("list").children[1].fire("click");
+  const choose = sent.find((m) => m.type === "dlr:choose");
+  assert.equal("overlay" in choose, false);
 });

@@ -864,3 +864,113 @@ def test_a_malformed_config_serves_503_instead_of_exiting(tmp_path):
 def test_a_valid_config_reports_no_error(cfg):
     app = S.App(cfg, store=Store(":memory:"))
     assert "configError" not in app.healthz()
+
+
+# --- per-directory counts, and the ETag decision --------------------------- #
+#
+# The picker shows how many files each subject directory holds. The counts are
+# served in the /dirs snapshot but are DELIBERATELY NOT part of its ETag, and
+# the tests below are what hold that line in both directions: one fails if the
+# counts disappear, the others fail if they are ever folded into the hash.
+def test_dirs_snapshot_carries_per_directory_counts(live, app, library):
+    (library / "Jane Doe" / "one.mp4").write_text("x")
+    (library / "Jane Doe" / "two.mp4").write_text("x")
+    (library / "john-smith" / "solo.mp4").write_text("x")
+    app.files.refresh(force=True)
+    _, body, _ = call(live, "GET", "/dirs")
+    assert body["counts"] == {"Jane Doe": 2, "john-smith": 1}
+
+
+def test_counts_are_reported_only_for_indexed_directories(app, library):
+    (library / "Jane Doe" / "one.mp4").write_text("x")
+    hidden = library / ".stash"
+    hidden.mkdir()
+    (hidden / "x.mp4").write_text("x")
+    app.files.refresh(force=True)
+    counts = app.dirs_snapshot()["counts"]
+    assert counts == {"Jane Doe": 1}
+
+
+def test_THE_ETAG_IGNORES_THE_COUNTS(app, library):
+    """THE pin on the ETag decision. Delete the deliberate exclusion in
+    App.dirs_snapshot -- fold `counts` back in above the hash -- and this fails.
+
+    A count changes on every completed download, and FileIndex is TTL-cached,
+    so an ETag covering the counts would change when the routing configuration
+    had not: it would stop being a cache validator for the thing the extension's
+    cached fallback matcher actually runs on.
+    """
+    (library / "Jane Doe" / "one.mp4").write_text("x")
+    app.files.refresh(force=True)
+    first = app.dirs_snapshot()
+    (library / "Jane Doe" / "two.mp4").write_text("x")
+    app.files.refresh(force=True)
+    second = app.dirs_snapshot()
+    assert second["counts"] != first["counts"], "the counts really did change"
+    assert second["etag"] == first["etag"], "but the routing payload did not"
+
+
+def test_dirs_still_304s_after_a_download_changed_the_counts(live, app, library):
+    """The same pin, end to end over HTTP -- the shape the extension sees."""
+    (library / "Jane Doe" / "one.mp4").write_text("x")
+    app.files.refresh(force=True)
+    _, body, headers = call(live, "GET", "/dirs")
+    assert body["counts"]["Jane Doe"] == 1
+    etag = headers["ETag"]
+    (library / "Jane Doe" / "two.mp4").write_text("x")
+    app.files.refresh(force=True)
+    status, body2, _ = call(live, "GET", "/dirs",
+                            headers={"If-None-Match": etag})
+    assert status == 304
+    assert body2 is None
+
+
+def test_the_etag_still_changes_when_the_ROUTING_payload_does(app, library):
+    """The other direction: excluding the counts must not have excluded
+    anything else. A new directory is a routing change and must invalidate."""
+    app.files.refresh(force=True)
+    first = app.dirs_snapshot()["etag"]
+    (library / "New Subject").mkdir()
+    app.dirs.refresh(force=True)
+    assert app.dirs_snapshot()["etag"] != first
+
+
+def test_serving_dirs_NEVER_walks_the_library(live, app, library,
+                                              monkeypatch):
+    """/dirs is the picker's own path and has a 4 s budget on the extension
+    side. It must read whatever tally the dedupe walk already produced and
+    never start one of its own -- a whole-tree walk here would turn a
+    decorative counter into a picker that fails to load on a big library.
+    """
+    (library / "Jane Doe" / "one.mp4").write_text("x")
+    calls = []
+    real_scan = app.files._scan
+    monkeypatch.setattr(app.files, "_scan",
+                        lambda: (calls.append(1), real_scan())[1])
+    status, body, _ = call(live, "GET", "/dirs")
+    assert status == 200
+    assert calls == [], "/dirs must not scan the library"
+    assert body["counts"] == {}, "and it reports no counts rather than blocking"
+
+
+def test_a_match_is_what_warms_the_counts(app, library):
+    """The intended degradation, made explicit: counts are empty until the
+    dedupe index has been walked, and /match walks it on every download -- so
+    by the time any picker opens they are there."""
+    (library / "Jane Doe" / "one.mp4").write_text("x")
+    assert app.dirs_snapshot()["counts"] == {}
+    app.match({"url": "https://example-site.test/dl/1", "filename": "clip.mp4",
+               "page": {"url": "https://example-site.test/v/1",
+                        "tags": ["Jane Doe"]}})
+    assert app.dirs_snapshot()["counts"] == {"Jane Doe": 1}
+
+
+def test_the_dirs_entries_are_untouched_by_the_counts(app, library):
+    """The counts are a SEPARATE map, not a field on each `dirs` entry: the
+    extension's cached fallback matcher iterates those entries, and they stay
+    exactly what they were before counts existed."""
+    (library / "Jane Doe" / "one.mp4").write_text("x")
+    app.files.refresh(force=True)
+    snap = app.dirs_snapshot()
+    for entry in snap["dirs"]:
+        assert set(entry) == {"name", "key", "tokens", "kind"}
