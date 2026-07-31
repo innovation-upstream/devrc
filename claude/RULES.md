@@ -67,8 +67,25 @@ protects only one machine. `~/.claude/CLAUDE.md` is for genuinely host-specific 
 ### 🔴 `git stash` is repo-GLOBAL — never use it to clear a tree for a rebase
 The stash stack is shared across ALL worktrees of a repo, so a concurrent agent or
 session can pop *your* stash. Two parallel remix subagents stole each other's work this
-way (2026-07-25), and the `stash → pull --rebase → stash pop` recipe's autostash form
-corrupted `.sops.yaml` on a dirty tree (2026-06-24).
+way (2026-07-25) — that is the evidence this rule rests on, and it is unaffected by the
+correction below.
+
+🔴 **Retracted 2026-07-31 — do not re-derive it.** This rule used to also cite the
+`stash → pull --rebase → stash pop` autostash as having corrupted `.sops.yaml` on a dirty
+tree (2026-06-24). **That attribution was wrong.** `.envrc` was regenerating `.sops.yaml`
+from a `.sops.template.yaml` frozen at 9 rules on *every direnv load*, silently reverting
+the tracked 31-rule file — a pure 113-line deletion that dropped 22 app rules and the
+fail-closed catch-all, after which a new `*.enc.yaml` in an unlisted path would commit in
+**plaintext**. Proven by rendering the frozen template to a byte-identical sha256 of the
+corrupt file, and by its mtime matching a `.direnv` rebuild to the second. The wrong theory
+is *why the bug survived four recurrences from 2026-06-06*: every fix targeted stash
+behaviour, so nobody looked for the actual writer. Fixed in `homelab-infra` (generator
+removed, stale template deleted, `scripts/check-sops-rules.sh` gates it).
+
+The lesson that generalises: **when a file keeps reverting, find the writer before blaming
+the VCS operation you happened to be running.** A checksum guard wrapped around the
+suspected operation proves nothing if the real write happens elsewhere — that one compared
+hashes around the stash while the overwrite landed on the next `cd` into the repo.
 
 - **To sync a branch: use a clean worktree, not a stash.** `git worktree add ../<repo>-<topic> -b <branch> origin/<main-branch>` → edit/build/test/commit/push there → `git worktree remove`. A concurrent push then rebases only your clean tree, which holds only your staged paths.
 - **To take another ref's version of a file:** `git checkout <ref> -- <paths>` — never stash/pop around it.
