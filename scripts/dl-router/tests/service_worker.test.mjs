@@ -2189,3 +2189,34 @@ test("a failed focus request does not lose a working overlay", async () => {
     chrome.tabs.sendMessage = realSend;
   }
 });
+
+test("a repeated completion delta does NOT ask or warn twice", async () => {
+  // `state.pending` is kept for five minutes after completion so a late
+  // "change" click can still relocate, and nothing stops Chrome delivering a
+  // second `complete` delta in that window. Without the latch that is a second
+  // /dedupe and a second FOCUSED, never-auto-closing duplicate toast for one
+  // download -- they would stack up in front of the user.
+  reset();
+  SW.state.pending.set(206, { dir: "Jane Doe", payload: { page: {} } });
+  searchResult = [{ id: 206, state: "complete",
+    filename: `${LIB_ROOT}/Jane Doe/f.mp4` }];
+  const posted = [];
+  fetchHandler = dedupeResponder({
+    ok: true, duplicate: true, relPath: "Jane Doe/f.mp4",
+    dupRelPath: "john-smith/75936.mov", kind: "size+hash" },
+  { onPost: (url) => posted.push(url) });
+  await SW.onDownloadChanged({ id: 206, state: { current: "complete" } });
+  await SW.onDownloadChanged({ id: 206, state: { current: "complete" } });
+  assert.equal(posted.filter((u) => u.endsWith("/dedupe")).length, 1,
+    "the duplicate check ran twice for one download");
+  assert.equal(calls.windowsCreate.length, 1,
+    "two duplicate toasts for one download");
+});
+
+test("confirmDuplicate without an entry still answers (the latch is optional)",
+  async () => {
+    reset();
+    fetchHandler = dedupeResponder({ ok: true, duplicate: false });
+    assert.equal(await SW.confirmDuplicate(207, "Jane Doe/f.mp4", "Jane Doe"),
+      null);
+  });

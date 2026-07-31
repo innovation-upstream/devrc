@@ -22,6 +22,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+import config as config_mod  # noqa: E402
 import dedupe as D  # noqa: E402
 import server as S  # noqa: E402
 from dirindex import FileIndex  # noqa: E402
@@ -117,6 +118,47 @@ def test_a_difference_in_either_sampled_window_is_seen(tmp_path, region):
     a = write(tmp_path / "a.mp4", base)
     b = write(tmp_path / "b.mp4", bytes(other))
     assert D.partial_digest(a) != D.partial_digest(b)
+
+
+# Sizes ACROSS the head/tail boundary. The first implementation guarded the
+# tail read with `size > head + tail`, so a file bigger than the head window
+# but no bigger than both combined had its tail silently never hashed --
+# everything past 128 KiB was unread, and two files differing only in their
+# LAST byte confirmed as duplicates. That is a false positive in the one check
+# that gates the delete.
+@pytest.mark.parametrize("size", [
+    1,                              # smaller than anything
+    D.HEAD_BYTES - 1,
+    D.HEAD_BYTES,                   # exactly the head window
+    D.HEAD_BYTES + 1,               # <-- the blind band starts here
+    D.HEAD_BYTES + 4096,
+    (D.HEAD_BYTES + D.TAIL_BYTES) // 2,
+    D.HEAD_BYTES + D.TAIL_BYTES - 1,
+    D.HEAD_BYTES + D.TAIL_BYTES,    # <-- and ends here
+    D.HEAD_BYTES + D.TAIL_BYTES + 1,
+    D.HEAD_BYTES + D.TAIL_BYTES + 65536,
+])
+def test_the_last_byte_is_always_hashed_at_every_size(tmp_path, size):
+    base = bytes(bytearray(b"x" * size))
+    other = bytearray(base)
+    other[-1] ^= 0xFF
+    a = write(tmp_path / "a.bin", base)
+    b = write(tmp_path / "b.bin", bytes(other))
+    assert D.partial_digest(a) != D.partial_digest(b), (
+        f"the final byte of a {size}-byte file was never read")
+
+
+@pytest.mark.parametrize("size", [
+    D.HEAD_BYTES + 1, D.HEAD_BYTES + 4096, D.HEAD_BYTES + D.TAIL_BYTES,
+    D.HEAD_BYTES + D.TAIL_BYTES + 65536,
+])
+def test_the_bound_still_holds_across_the_boundary(tmp_path, size):
+    """Clamping the tail start must not turn into reading anything twice, or
+    reading more than the two windows."""
+    opener = CountingOpener()
+    D.partial_digest(write(tmp_path / "a.bin", b"x" * size), opener=opener)
+    assert opener.read <= D.HEAD_BYTES + D.TAIL_BYTES
+    assert opener.read <= size, "a byte was fed to the digest twice"
 
 
 def test_the_size_is_part_of_the_digest(tmp_path):
@@ -916,3 +958,104 @@ def test_running_the_v5_step_list_twice_is_a_no_op(tmp_path):
     assert store.source_url_count() == 1, "a re-run dropped the ledger"
     assert store.migrate() == SCHEMA_VERSION
     store.close()
+
+
+# --- findings from the adversarial audit ------------------------------------ #
+def test_two_hardlinks_are_the_same_file_not_a_duplicate(app, library, clock):
+    """HARDLINKS ARE ONE FILE. `resolve()` collapses symlinks and nothing
+    else, so it called two links to one inode "two copies" -- the toast would
+    claim a duplicate, the delete would free zero bytes, and under `unlink`
+    it would remove the very path qBittorrent registered for that torrent.
+    Hardlinking a payload into a subject directory is standard seeding
+    practice, so this shape really occurs here."""
+    payload = write(library / "john-smith" / "seed.mkv", blob(300000))
+    link = library / "Jane Doe" / "new.mp4"
+    link.parent.mkdir(parents=True, exist_ok=True)
+    os.link(payload, link)
+    assert payload.stat().st_ino == link.stat().st_ino
+    app.store.log_route(dir_name="Jane Doe", filename="new.mp4",
+                        download_id="42")
+    os.utime(link, (clock.now + 1, clock.now + 1))
+    app.files.refresh(force=True)
+
+    with pytest.raises(UnsafeName) as exc:
+        app.discard({"relPath": "Jane Doe/new.mp4",
+                     "dupRelPath": "john-smith/seed.mkv", "downloadId": "42"})
+    assert "same file on disk" in str(exc.value)
+    assert link.exists() and payload.exists()
+    assert payload.stat().st_nlink == 2, "a seeded link was removed"
+
+
+def test_dedupe_and_discard_work_under_a_SYMLINKED_library_root(
+        tmp_path, clock, dirs_file, monkeypatch):
+    """`safe_rel_path` resolves; `cfg.library_root` does not. On the common
+    NAS layout (`~/Media` -> `/mnt/pool/Media`) `relative_to` therefore raised
+    for EVERY file, and `confirmDuplicate` swallows failures -- so the whole
+    feature was silently dead with no diagnostic anywhere."""
+    real = tmp_path / "real-library"
+    for name in ("Jane Doe", "john-smith", "other"):
+        (real / name).mkdir(parents=True)
+    link = tmp_path / "library"
+    link.symlink_to(real, target_is_directory=True)
+
+    data = config_mod._deep_merge(config_mod.DEFAULTS, {
+        "library_root": str(link), "host": "127.0.0.1", "port": 0})
+    cfg = config_mod.Config(data, path=tmp_path / "config.toml",
+                            state_dir=tmp_path / "state",
+                            token_file=tmp_path / "token", dirs_file=dirs_file)
+    store = Store(tmp_path / "db.sqlite3", clock=clock)
+    app = S.App(cfg, store=store, clock=clock)
+    try:
+        write(real / "john-smith" / "75936.mov", blob(300000))
+        new = write(real / "Jane Doe" / "new.mp4", blob(300000))
+        app.files.refresh(force=True)
+
+        out = app.dedupe_check({"relPath": "Jane Doe/new.mp4"})
+        assert out["duplicate"] is True, out
+        assert out["dupRelPath"] == "john-smith/75936.mov"
+
+        app.store.log_route(dir_name="Jane Doe", filename="new.mp4",
+                            download_id="42")
+        os.utime(new, (clock.now + 1, clock.now + 1))
+        done = app.discard({"relPath": "Jane Doe/new.mp4",
+                            "dupRelPath": "john-smith/75936.mov",
+                            "downloadId": "42"})
+        assert done["discarded"] is True
+        assert not new.exists()
+    finally:
+        store.close()
+
+
+def test_discard_does_not_walk_the_library_before_answering(app, library,
+                                                            clock, monkeypatch):
+    """The forced index refresh used to run AFTER the rename and BEFORE the
+    response -- a synchronous whole-tree walk inside the extension's 15 s
+    timeout, for a delete that had already succeeded. On a timeout the user is
+    told "Not deleted" about a file that is gone."""
+    write(library / "john-smith" / "75936.mov", blob(300000))
+    _routed(app, library, clock)
+    app.files.refresh(force=True)
+    walks = []
+    monkeypatch.setattr(app.files, "refresh",
+                        lambda force=False: walks.append(force))
+    app.discard({"relPath": "Jane Doe/new.mp4",
+                 "dupRelPath": "john-smith/75936.mov", "downloadId": "42"})
+    assert True not in walks, (
+        "a forced whole-tree walk is back on the destructive response path")
+
+
+def test_discard_forgets_the_ownership_claim_under_EITHER_spelling(
+        app, library, clock):
+    """`routed_files` is keyed on the RAW payload string by _prove_owned and
+    move_routed_file, but the discard normalises. A single normalised delete
+    silently missed the row, leaving a standing ownership claim at an emptied
+    path -- which _prove_owned's short-circuit honours for whatever lands
+    there next."""
+    write(library / "john-smith" / "75936.mov", blob(300000))
+    _routed(app, library, clock)
+    app.store.record_routed_file("Jane Doe/./new.mp4", "42", "Jane Doe")
+    app.files.refresh(force=True)
+    app.discard({"relPath": "Jane Doe/./new.mp4",
+                 "dupRelPath": "john-smith/75936.mov", "downloadId": "42"})
+    assert app.store.routed_file("Jane Doe/./new.mp4") is None
+    assert app.store.routed_file("Jane Doe/new.mp4") is None

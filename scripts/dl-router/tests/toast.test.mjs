@@ -46,7 +46,7 @@ test("each decision source gets a human label", () => {
 // --- rendering ---------------------------------------------------------------- //
 function fakeDoc({ search = "" } = {}) {
   const nodes = {};
-  for (const id of ["dir", "reason", "badge", "dup", "change", "keep",
+  for (const id of ["dir", "reason", "badge", "dup", "error", "change", "keep",
     "discard"]) {
     nodes[id] = { id, textContent: "", hidden: false, disabled: false,
       listeners: {},
@@ -222,8 +222,11 @@ test("a REFUSED delete keeps the toast open and shows the reason", async () => {
   doc.nodes.discard.listeners.click();
   await tick();
   assert.equal(win.closed, false, "a refusal must stay visible");
-  assert.match(doc.nodes.dup.textContent, /Not deleted: refusing to move/);
+  assert.match(doc.nodes.error.textContent, /Not deleted: refusing to move/);
   assert.equal(doc.nodes.discard.disabled, false, "retry must be possible");
+  // THE REFUSAL MUST NOT ERASE WHAT THE DUPLICATE WAS OF. Writing it over
+  // `#dup` removed exactly the context needed to judge whether to retry.
+  assert.match(doc.nodes.dup.textContent, /Duplicate of john-smith\/75936\.mov/);
 });
 
 test("a MISSING answer counts as a refusal, not a success", async () => {
@@ -231,7 +234,8 @@ test("a MISSING answer counts as a refusal, not a success", async () => {
   doc.nodes.discard.listeners.click();
   await tick();
   assert.equal(win.closed, false);
-  assert.match(doc.nodes.dup.textContent, /no answer from the extension/);
+  assert.match(doc.nodes.error.textContent, /no answer from the extension/);
+  assert.match(doc.nodes.dup.textContent, /Duplicate of/);
 });
 
 test("a thrown sendMessage counts as a refusal", async () => {
@@ -239,7 +243,8 @@ test("a thrown sendMessage counts as a refusal", async () => {
   doc.nodes.discard.listeners.click();
   await tick();
   assert.equal(win.closed, false);
-  assert.match(doc.nodes.dup.textContent, /Not deleted: worker gone/);
+  assert.match(doc.nodes.error.textContent, /Not deleted: worker gone/);
+  assert.match(doc.nodes.dup.textContent, /Duplicate of/);
 });
 
 test("delete is single-flight while in flight", async () => {

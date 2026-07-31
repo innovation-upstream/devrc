@@ -1014,8 +1014,22 @@ export function reportNothingLearned(out) {
  * that broke the completion handler would take the correction path down with
  * it, and there is nothing to report -- the file is already filed correctly.
  */
-export async function confirmDuplicate(downloadId, rel, dir) {
+export async function confirmDuplicate(downloadId, rel, dir, entry) {
   if (!rel) return null;
+  // ONCE PER DOWNLOAD, LATCHED ON THE ENTRY.
+  //
+  // `state.pending` keeps the entry for five minutes after completion (so a
+  // late "change" click can still relocate), and nothing stops Chrome
+  // delivering a second `state: {current: "complete"}` delta in that window.
+  // Without this latch that is a second /dedupe and a second duplicate toast
+  // for ONE download -- and this toast is focused and never auto-closes, so
+  // the duplicates would stack up in front of the user. The same lesson as
+  // the picker's done-latch: the guard belongs on the transition, not on the
+  // post-state.
+  if (entry) {
+    if (entry.dedupeChecked) return null;
+    entry.dedupeChecked = true;
+  }
   let out;
   try {
     out = await api("POST", "/dedupe", { relPath: rel, downloadId },
@@ -1097,7 +1111,7 @@ export async function onDownloadChanged(delta) {
   // THE DUPLICATE CHECK IS LAST, and it never throws (see confirmDuplicate).
   // It runs on both paths -- an auto-filed download is exactly as likely to be
   // a duplicate as a corrected one -- and only ever WARNS.
-  await confirmDuplicate(delta.id, finalRel, entry.wanted || entry.dir);
+  await confirmDuplicate(delta.id, finalRel, entry.wanted || entry.dir, entry);
   // Keep the entry briefly so a late "change" click can still relocate.
   // `unref` exists only under node (the test runner) -- without it this timer
   // would hold the event loop open for five minutes and hang the suite.
@@ -1310,12 +1324,17 @@ export function onMessage(msg, sender, sendResponse) {
     // lets the sidecar refuse. That is deliberate -- the sidecar holds the
     // route log, the file's mtime and the bytes of both files, and this worker
     // holds none of them, so any check here would be a check the caller could
-    // also have made. The one thing this side CAN enforce is the frame rule
-    // already established for `dlr:choose`: `toast.html` is web-accessible, so
-    // a page could frame it, and a pick from an unrecognised subframe is
-    // refused. A DELETE from a subframe is refused OUTRIGHT -- there is no
-    // legitimate embedded duplicate toast, so there is no nonce to check
-    // against and nothing to weigh up.
+    // also have made.
+    //
+    // The subframe refusal below is DEFENCE IN DEPTH, not a live hole being
+    // closed: `toast.html` is NOT in `web_accessible_resources` (only
+    // picker.html and its modules are), so today no page can frame it. It is
+    // here because the reason picker.html had to become web-accessible --
+    // being framed as an overlay -- could just as easily be wanted for the
+    // toast later, and the person making that change should find the delete
+    // path already refusing rather than have to notice it needs to. There is
+    // no legitimate embedded duplicate toast, so unlike `dlr:choose` there is
+    // no nonce to weigh up: a subframe is simply refused.
     const fromSubframe = typeof sender?.frameId === "number"
       && sender.frameId > 0;
     if (fromSubframe) {

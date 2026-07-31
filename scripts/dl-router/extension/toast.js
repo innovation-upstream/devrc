@@ -82,6 +82,8 @@ export function render(doc, model) {
     const el = doc.getElementById(id);
     if (el) el.hidden = !duplicate;
   }
+  const err = doc.getElementById("error");
+  if (err) err.hidden = true;
   return model;
 }
 
@@ -130,10 +132,14 @@ export function mount(doc, chromeApi, win) {
         // worker may have been torn down mid-request and "probably worked" is
         // not a thing to report about a delete.
         if (!resp || resp.ok === false) {
-          const dupLine = doc.getElementById("dup");
-          dupLine.textContent = `Not deleted: ${(resp && resp.error)
+          // The refusal goes in its OWN line. Writing it over `#dup` erased
+          // the "Duplicate of <path>" text, so after any refusal the user
+          // could no longer see WHICH file it was supposed to duplicate --
+          // exactly the context needed to judge whether to retry.
+          const err = doc.getElementById("error");
+          err.textContent = `Not deleted: ${(resp && resp.error)
             || "no answer from the extension (it may have been restarted)"}`;
-          dupLine.hidden = false;
+          err.hidden = false;
           discard.disabled = false;
           return;
         }

@@ -57,28 +57,43 @@ MAX_DUP_CANDIDATES = 8
 MAX_CACHE_ENTRIES = 4096
 
 
-def _read_bounded(fh, size: int, head: int, tail: int, digest) -> int:
-    """Feed at most `head + tail` bytes into `digest`. Returns bytes read."""
+def _feed(fh, count: int, digest) -> int:
+    """Read exactly `count` bytes (or to EOF) into `digest`."""
     read = 0
-    remaining = head
-    while remaining > 0:
-        chunk = fh.read(min(65536, remaining))
+    while read < count:
+        chunk = fh.read(min(65536, count - read))
         if not chunk:
             break
         digest.update(chunk)
         read += len(chunk)
-        remaining -= len(chunk)
-    if size > head + tail:
+    return read
+
+
+def _read_bounded(fh, size: int, head: int, tail: int, digest) -> int:
+    """Feed at most `head + tail` bytes into `digest`. Returns bytes read.
+
+    THE TAIL START IS CLAMPED TO THE END OF THE HEAD WINDOW, and that is not a
+    detail. The first version guarded the tail read with `size > head + tail`,
+    which meant a file LARGER than the head window but no larger than both
+    windows combined had its tail silently never read: everything past
+    `head` bytes was unhashed, so two files differing only in their final byte
+    digested identically. Measured, at 129 KiB, 192 KiB and 256 KiB.
+
+    That is a false negative in the direction that matters -- it is the
+    confirmation that gates `/discard` -- and three places documented the
+    opposite. Clamping instead of skipping means the two windows meet rather
+    than overlap: for a file between `head` and `head + tail` the whole file is
+    read (which is still at most `head + tail` bytes), and above that the
+    middle is skipped exactly as intended.
+    """
+    read = _feed(fh, min(size, head), digest)
+    # Where the tail window starts, never before the head window ended -- so
+    # no byte is fed twice and no byte between them is missed.
+    tail_start = max(head, size - tail)
+    if size > tail_start:
         # Seek rather than read through the middle: this is the whole point.
-        fh.seek(size - tail, os.SEEK_SET)
-        remaining = tail
-        while remaining > 0:
-            chunk = fh.read(min(65536, remaining))
-            if not chunk:
-                break
-            digest.update(chunk)
-            read += len(chunk)
-            remaining -= len(chunk)
+        fh.seek(tail_start, os.SEEK_SET)
+        read += _feed(fh, size - tail_start, digest)
     return read
 
 

@@ -310,12 +310,25 @@ same gotcha as browser-bridge), then re-check `dl-route status`.
   That is the price of a constant-cost check on multi-GB media, and it is only
   affordable because the answer is a warning with a `keep` button. If a delete
   is ever made automatic, this bound stops being acceptable.
-* **`POST /discard` is the only destructive path.** It takes five proofs
-  (containment, `/relocate`'s identity+age evidence, a one-hour recency window,
-  "it is not the file it duplicates", and a re-proof of the duplication at
-  delete time) and defaults to a **move into `.dl-router-trash/`**, not an
+* **`POST /discard` is the only destructive path.** Five checks (containment,
+  `/relocate`'s identity+age evidence, a one-hour recency window, "it is not
+  the same inode as the file it duplicates", and a re-proof of the duplication
+  at delete time), defaulting to a **move into `.dl-router-trash/`**, not an
   unlink. If someone reports "it deleted the wrong file", look in there first —
   and check `[dedupe] delete_mode` has not been set to `unlink`.
+* **Don't over-trust that list.** The *age* half passes vacuously against an
+  in-progress torrent (current mtime), and `names_match` tolerates ` (N)`. The
+  real binding is filename-with-slack + under an hour + the delete-time
+  duplication re-proof — which is why the trash default is load-bearing and not
+  a nicety. And "the bytes exist elsewhere" is not "the seed survives".
+* **Same file = same inode.** The duplicate/self check compares
+  `(st_dev, st_ino)`, not resolved paths, because hardlinking a payload into a
+  subject directory is normal seeding practice and `resolve()` would call one
+  inode two copies. Don't "simplify" it back to a path comparison.
+* **The trash is unbounded and invisible to `dl-route status`.** Nothing sweeps
+  it, nothing reports its size, and both index scans skip it by design. On a
+  library of multi-GB media that is a real disk sink — check it by hand
+  (`du -sh <library root>/.dl-router-trash`) if space goes missing.
 * **The trash directory is hidden on purpose**: both index scans skip
   dot-prefixed names, so its contents never become dedupe candidates or
   routing targets. Do not rename it to something visible.

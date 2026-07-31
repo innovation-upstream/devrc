@@ -378,6 +378,36 @@ class App:
                 "hits": int(row.get("hits") or 0),
                 "firstTs": row.get("first_ts"), "lastTs": row.get("last_ts")}
 
+    def _rel_to_root(self, path, fallback: str = "") -> str:
+        """`path` (already contained) as a `/`-joined path relative to the root.
+
+        WHY THIS IS NOT `path.relative_to(self.root)`. `safe_rel_path` returns
+        a FULLY RESOLVED path, while `cfg.library_root` is only
+        `Path(raw).expanduser()` -- not resolved. So on the very common NAS
+        layout where the library root is a symlink (`~/Media` ->
+        `/mnt/pool/Media`), `relative_to` raises ValueError for every file: the
+        resolved path genuinely is not under the unresolved root. That would
+        have made the whole dedupe feature raise a 400 on every call, and
+        `confirmDuplicate` swallows failures, so it would have been silently
+        dead with no diagnostic anywhere.
+
+        Both sides are resolved here, and the resolution is done per call
+        rather than cached because the root can be re-pointed under a running
+        sidecar. It is one `stat`-ish syscall on a path already in the cache.
+        """
+        try:
+            root = Path(self.root).resolve()
+        except OSError:
+            root = Path(self.root)
+        try:
+            return str(Path(path).relative_to(root)).replace(os.sep, "/")
+        except ValueError:
+            # `safe_rel_path` already proved containment, so this is only
+            # reachable if the root moved between the two calls. Fall back to
+            # the caller's own string rather than raising a confusing
+            # "not in the subpath of" out of a dedupe check.
+            return str(fallback or "").replace(os.sep, "/")
+
     # --- dedupe confirmation ------------------------------------------------ #
     def dedupe_check(self, payload: dict) -> dict:
         """POST /dedupe — the AUTHORITATIVE duplicate answer, after the write.
@@ -410,7 +440,7 @@ class App:
         src = safe_rel_path(rel_path, root=self.root)
         if not src.is_file():
             raise FileNotFoundError(f"not a file: {rel_path!r}")
-        rel = str(src.relative_to(self.root)).replace(os.sep, "/")
+        rel = self._rel_to_root(src, rel_path)
         try:
             size = src.stat().st_size
         except OSError as exc:
@@ -864,16 +894,32 @@ class App:
                 "refusing to discard: the file it is supposed to duplicate "
                 f"({dup_rel!r}) is not there, so there is nothing proving "
                 "these bytes exist anywhere else")
+        # SAME FILE = SAME INODE, not merely the same resolved path.
+        #
+        # `resolve()` collapses symlinks and nothing else, so it says "these
+        # are different files" about two HARDLINKS to one inode -- and
+        # hardlinking a payload into a subject directory is standard seeding
+        # practice, so this is a shape that really occurs in this library.
+        # Getting it wrong is not cosmetic: the toast would claim the user
+        # holds two copies when they hold one, the delete would free zero
+        # bytes, and under `delete_mode = "unlink"` it would remove the very
+        # path qBittorrent registered for that torrent (qBittorrent seeds by
+        # PATH -- the inode surviving does not save the seed).
         try:
-            same = src.resolve() == keep.resolve()
+            src_st, keep_st = src.stat(), keep.stat()
+            same = (src_st.st_dev, src_st.st_ino) == (keep_st.st_dev,
+                                                      keep_st.st_ino)
         except OSError:
             same = True   # cannot tell them apart => refuse
         if same:
             raise UnsafeName(
-                "refusing to discard a file as a duplicate of itself")
+                "refusing to discard a file as a duplicate of itself (the two "
+                "paths are the same file on disk -- a hardlink or a symlink, "
+                "not two copies, so deleting one frees nothing and may break "
+                "a seed)")
 
-        rel = str(src.relative_to(self.root)).replace(os.sep, "/")
-        keep_rel = str(keep.relative_to(self.root)).replace(os.sep, "/")
+        rel = self._rel_to_root(src, rel_path)
+        keep_rel = self._rel_to_root(keep, dup_rel)
         self._prove_created(rel, src, download_id,
                             max_route_age_s=DISCARD_MAX_ROUTE_AGE_S)
 
@@ -912,9 +958,33 @@ class App:
         # The path no longer holds that file, so the standing ownership claim
         # must go with it -- otherwise a later file arriving here inherits a
         # proof it never earned.
+        #
+        # BOTH KEYS, because the two sides do not agree on one. `_prove_owned`
+        # and `move_routed_file` key `routed_files` on the RAW payload string,
+        # while `rel` here is normalised from the resolved path -- so a caller
+        # that sent `"Jane Doe/./clip.mp4"` earlier recorded under that literal
+        # and a single normalised delete would silently miss it, leaving the
+        # claim standing at an emptied path.
         self.store.forget_routed_file(rel)
+        if str(rel_path) != rel:
+            self.store.forget_routed_file(str(rel_path))
         self.hashes.forget(str(src))
-        self.files.refresh(force=True)
+        # NO `files.refresh(force=True)` HERE, and that is deliberate.
+        #
+        # It is a synchronous whole-tree walk of the library (up to
+        # `file_index_max` files), and putting it AFTER the rename but BEFORE
+        # the response means a slow walk blows the extension's 15 s /discard
+        # timeout -- for a delete that already succeeded. The toast then says
+        # "Not deleted", re-enables the button, and the natural retry produces
+        # a second, differently worded refusal. An active false claim about a
+        # destructive operation, reachable with no adversary at all, just a
+        # cold index on a large library.
+        #
+        # The index goes stale by at most one TTL instead, and the cost of that
+        # is nil: the trashed path lingers as a dedupe CANDIDATE, and
+        # `confirm_duplicate` already treats an unreadable candidate as no
+        # answer. `/relocate` keeps its forced refresh -- it is not
+        # destructive, so a late answer there is only a late answer.
         log("discard", mode=mode, trashed=bool(dest_rel))
         return {"ok": True, "discarded": True, "mode": mode,
                 "relPath": rel, "keptRelPath": keep_rel,

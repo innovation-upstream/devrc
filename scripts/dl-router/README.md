@@ -521,6 +521,14 @@ answer costs a late toast, not a misfiled download.
 
 **The digest is bounded and never reads a whole file**: 128 KiB from each end
 plus the size, into a `blake2b`. Constant cost regardless of a multi-GB file.
+The two windows **meet rather than overlap** — the tail start is clamped to the
+end of the head window — so a file between 128 KiB and 256 KiB is read in full
+(still ≤ 256 KiB) instead of having its tail skipped. Guarding the tail read
+with `size > head + tail` instead left everything past 128 KiB unhashed for
+exactly that band, and two files differing only in their *last byte* confirmed
+as duplicates; `test_the_last_byte_is_always_hashed_at_every_size` walks the
+boundary.
+
 The honest cost of the bound: two files sharing their first and last 128 KiB
 and differing only in the middle are reported as duplicates. That is affordable
 only because a duplicate is a **warning with a keep button**, never an automatic
@@ -541,8 +549,7 @@ deletes a file), `Escape` is *keep*, and a refused delete leaves the toast open
 showing the sidecar's own reason.
 
 `POST /discard` is the **only destructive operation in this subsystem**, and it
-is strictly harder to satisfy than `/relocate`. Five independent proofs, all
-required:
+is strictly harder to satisfy than `/relocate`. Five checks, all required:
 
 1. **containment** — both paths through `safe_rel_path`;
 2. **identity + age** — the same evidence `/relocate` demands, and deliberately
@@ -551,10 +558,28 @@ required:
 3. **recency** — the routing decision must be under an hour old. `/relocate`
    has no such window because a rename is reversible; this is not;
 4. **it is not the file it duplicates** — the caller must name the pre-existing
-   copy, it must exist, and the two must differ on their *resolved* paths;
+   copy, it must exist, and the two must be *different inodes*. `(st_dev,
+   st_ino)`, not resolved paths: `resolve()` collapses symlinks but not
+   **hardlinks**, and hardlinking a payload into a subject directory is normal
+   seeding practice — so a resolved-path comparison would call one inode "two
+   copies", free zero bytes, and under `unlink` remove the path qBittorrent
+   registered for that torrent;
 5. **the duplication is re-proven at delete time** — same size, same bounded
    digest, right now. This is the load-bearing one: a discard can only ever
    remove bytes that demonstrably still exist elsewhere in the library.
+
+**Do not read "five independent proofs" into that list — two of them are
+weaker than they look, and the code says so at each site.** The *age* half of
+check 2 passes vacuously against an in-progress torrent (its mtime is current,
+which `_prove_owned`'s own docstring has always conceded), and `names_match`
+tolerates `uniquify`'s ` (N)` suffix by design, so identity is
+filename-with-slack rather than exact. What actually binds a delete is
+**filename (uniquify-tolerant) + under an hour + the delete-time duplication
+re-proof**. That was an acceptable cost for a reversible rename and it is
+reused verbatim here, which is why check 5 and the trash default carry the real
+weight. Note too that "the bytes exist elsewhere" is not "the seed survives":
+moving a payload out from under qBittorrent breaks seeding regardless, which is
+the other reason the default is reversible.
 
 And then it does not `unlink`. The file is renamed into `.dl-router-trash/`
 inside the library root: an atomic same-filesystem move, hidden so both index
