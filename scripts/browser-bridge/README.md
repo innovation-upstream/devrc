@@ -753,7 +753,7 @@ on both profiles, so the operator's tabs would be gone for good).
 
 ```bash
 browser --instance <label> ping
-# NEW → {"pong":true,"extensionVersion":"0.3.1","id":"<ext-id>","ops":[…,"ping"]}
+# NEW → {"pong":true,"extensionVersion":"0.4.0","id":"<ext-id>","ops":[…,"ping"]}
 # OLD → op 'ping' returned unknown_op — … FULLY RESTART Brave …        (exit 1)
 ```
 
@@ -784,6 +784,71 @@ load path is an open live-verification item.
 `extension/manifest.json`'s `version` AND add a new discriminator (a new op name,
 or a new field in `ping`'s reply). Without one, reload-vs-restart is
 unfalsifiable — that ambiguity cost three full Brave restarts in one session.
+
+### The no-wedge guarantee (0.4.0) — why an instance used to need a manual ↻
+
+Until 0.4.0 an instance would silently stop answering and stay dead until the
+operator clicked ↻ in `brave://extensions`. Root cause (diagnosed 2026-07-31,
+`claudedocs/browser-bridge-silent-drop-diagnosis-2026-07-31.md`): an **unbounded
+`await` inside `execute()`** parks the `while (true)` poll loop forever. `loop()`
+is guarded by a non-reentrant module global — `if (running) return` — whose reset
+lives in a `finally` a parked loop can never reach, so the 1-minute
+`bridge-keepalive` alarm fired on time, called `loop()`, hit the guard and did
+nothing. Only a fresh service-worker evaluation cleared it.
+
+**The counter-intuitive part: the CDP path was never the culprit — it is the one
+path that was already bounded** (`withCdpSession`, 8s attach / 8s command / 15s
+op). The unbounded awaits were the *non*-CDP `chrome.*` calls: `frames` →
+`webNavigation.getAllFrames`, the `screenshot` fast path →
+`tabs.captureVisibleTab`, `targetTab()` → `tabs.get`/`tabs.query`, and
+`pollOnce`'s bare `fetch`. Both recorded drops are immediately preceded by a
+`cmd_timeout` on exactly those ops, while ops that timed out through the bounded
+CDP path did **not** kill the instance.
+
+Two changes close it:
+
+1. **Every op is bounded at ONE choke point** — `execute()` races
+   `OPS[cmd.op](cmd)` against `EXEC_OP_BUDGET_MS` (18s). `frames`/`screenshot`
+   are deliberately **not** patched individually — one rule, one place, or the bug
+   regenerates at the next op added (`targetTab()` alone is on the path of every
+   op). Every *other* await in the loop body is bounded too: the poll fetch
+   (`POLL_BUDGET_MS` 40s), the result POST (`RESULT_BUDGET_MS` 10s), and the
+   `chrome.storage.local` reads in `config()`/`clearSuperseded()`
+   (`STORAGE_BUDGET_MS` 5s) — the last of which runs on *every* healthy iteration,
+   i.e. more often than `frames`/`screenshot` ever did. Fetches additionally carry
+   an `AbortSignal` so the socket is torn down rather than abandoned.
+
+   ⚠ **The budget ordering is not the tidy `CDP 15s < exec 18s < server 20s` it
+   looks like.** `withCdpSession` *composes* its phases: attach ≤8s + run ≤15s +
+   an awaited detach ≤8s = up to 31s. So a hung CDP `run` with a slow detach hits
+   the 18s exec bound first and reports `op_timeout:<op>`, losing the precise
+   `cdp_timeout:` label. That is accepted deliberately — the caller-visible
+   ceiling is the *server's* 20s `cmd_timeout`, so raising the exec budget past
+   31s would only park the loop longer for an envelope that could never arrive,
+   and pre-change that same case produced a bare `cmd_timeout` with no phase at
+   all. The attach-hang and per-CDP-command-hang cases still surface their exact
+   `cdp_timeout:attach` / `cdp_timeout:<method>` (they fire at 8s). Known cost: a
+   slow-but-successful CDP op in the 18–20s band is now killed at 18s.
+2. **The keepalive can now recover** — `keepaliveTick()` (not a bare `loop()`)
+   compares `lastLoopTickAt` against `LOOP_STALL_MS` (180s, >2.5× the worst
+   legitimate iteration). A loop that has not ticked in that long is retired via a
+   generation bump and a fresh one takes the latch. This is the defence against
+   the *next* unbounded await someone adds, not the primary fix.
+
+   Duplicate **polling** is prevented structurally: the retired loop re-checks its
+   generation *immediately before each poll* and its `finally` declines to clear
+   `running` unless it still owns the generation. A top-of-iteration check alone
+   is **not** sufficient — it only fires between iterations, so a loop retired
+   while parked mid-iteration resumes and completes that whole iteration,
+   including its poll (measured: polls went 8 → 9). A retired loop *may* still
+   finish posting a result it had already dequeued; that is deliberate, since
+   dropping it would strand the caller until its `cmd_timeout`, and the server
+   correlates results by command id.
+
+Regression coverage: `tests/loop_wedge.test.mjs` wedges a real op with a
+never-settling promise and asserts the loop releases and keeps polling. It is
+**mutation-tested** — removing the `promiseWithTimeout` from `execute()` turns
+both wedge tests red.
 
 ### `known_instances` / `missing` — a dead named instance can no longer hide
 
@@ -1558,7 +1623,7 @@ systemctl --user status browser-bridge
 4. `scripts/browser-bridge/browser health` → `{"ok":true,"extension_connected":true}`
    with `extension_stale:false` on the instance, and
    `scripts/browser-bridge/browser --instance <label> ping` →
-   `{"pong":true,"extensionVersion":"0.3.1","id":"<ext-id>",…}` (an `unknown_op`
+   `{"pong":true,"extensionVersion":"0.4.0","id":"<ext-id>",…}` (an `unknown_op`
    here means Brave is still running an older build). Record that `id` — it is
    the per-profile baseline for "which directory is loaded".
 5. Focus a tab where you are **logged in** (e.g. Gmail), then

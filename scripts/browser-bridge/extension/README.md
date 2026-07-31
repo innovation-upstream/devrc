@@ -167,7 +167,7 @@ come back).
    (`work` / `personal` — must be unique per profile), **Save**.
 8. Verify from a shell — this is the whole point of the change:
    ```bash
-   browser --instance <label> ping   # → {"pong":true,"extensionVersion":"0.3.1",
+   browser --instance <label> ping   # → {"pong":true,"extensionVersion":"0.4.0",
                                      #     "id":"<ext-id>","ops":[…,"ping"]}
    browser whoami                    # → that instance: extension_stale:false
                                      #    + extension_id, and

@@ -634,23 +634,90 @@ export const CDP_COMMAND_TIMEOUT_MS = 8000;
 export const CDP_OP_BUDGET_MS = 15000;
 
 // Race `promise` against a `ms` deadline. On timeout, REJECT with
-// `cdp_timeout:<label>` (the phase — attach / a CDP method / op / detach) so the
-// caller sees WHICH call hung; the underlying promise is left pending (abandoned)
-// but the returned promise SETTLES, so the awaiter is never blocked past `ms`. A
+// `<prefix>:<label>` — by default `cdp_timeout:<label>` (the phase — attach / a
+// CDP method / op / detach) so the caller sees WHICH call hung; the underlying
+// promise is left pending (abandoned) but the returned promise SETTLES, so the
+// awaiter is never blocked past `ms`. A
 // promise that settles on its own (resolve OR reject) wins the race and its
 // value/error passes through unchanged, and the timer is cleared so nothing lingers.
 // `ms <= 0` disables the bound (returns the promise as-is). Timers injectable.
-export function promiseWithTimeout(promise, ms, label, timers = {}) {
+//
+// `prefix` exists because this helper is no longer CDP-only: the poll loop uses
+// it to bound the NON-CDP chrome.* ops (`frames` → webNavigation.getAllFrames,
+// `screenshot` fast path → tabs.captureVisibleTab, targetTab → tabs.get/query)
+// and its own fetches, and mislabelling those `cdp_timeout:` would send the next
+// diagnosis straight back at the debugger — the one path that was already bounded.
+export function promiseWithTimeout(promise, ms, label, timers = {},
+                                   prefix = "cdp_timeout") {
   const p = Promise.resolve(promise);
   if (!(ms > 0)) return p;
   const setT = timers.setTimeout || setTimeout;
   const clearT = timers.clearTimeout || clearTimeout;
   let handle;
   const timeout = new Promise((_, reject) => {
-    handle = setT(() => reject(new Error(`cdp_timeout:${label}`)), ms);
+    handle = setT(() => reject(new Error(`${prefix}:${label}`)), ms);
   });
   return Promise.race([p, timeout]).finally(() => clearT(handle));
 }
+
+// --- poll-loop wall-clock budgets (the no-wedge guarantee, generalized) ------ //
+// The CDP path has been bounded since #—: withCdpSession races every
+// chrome.debugger call. Everything ELSE the worker awaits was unbounded, and an
+// unbounded await inside execute() parks the `while (true)` poll loop FOREVER —
+// `running` (the loop's non-reentrant guard) is only cleared by the finally the
+// parked loop can never reach, so the 1-minute keepalive alarm calls loop(), hits
+// `if (running) return`, and does nothing. Only a fresh worker evaluation (the
+// operator clicking ↻ in brave://extensions) recovered it.
+//
+// These budgets bound every await in the loop body (op, poll, result, and the
+// chrome.storage.local reads via STORAGE_BUDGET_MS below).
+//
+// ⚠ The ordering is NOT the tidy `CDP 15s < exec 18s < server 20s` it looks like.
+// `withCdpSession` composes its phases rather than sharing one wall clock:
+// attach ≤ CDP_ATTACH_TIMEOUT_MS (8s) + run ≤ CDP_OP_BUDGET_MS (15s) + an AWAITED
+// safeDetach ≤ CDP_COMMAND_TIMEOUT_MS (8s) = up to 31s, plus a frame resolve.
+// Measured on a 10×-scaled probe: a hung `run` with a slow detach settles at the
+// EXEC bound and reports `op_timeout:<op>`, NOT `cdp_timeout:op`.
+//
+// That mislabel is accepted deliberately, because the alternative is worse:
+//   * The caller-visible ceiling is the SERVER's cmd_timeout (20s), not this one.
+//     Raising EXEC_OP_BUDGET_MS above 31s to "let CDP finish labelling" would put
+//     it past 20s, so the envelope could never reach the caller anyway — the
+//     server would answer `cmd_timeout` first and the loop would stay parked ~11s
+//     longer for nothing.
+//   * Pre-change, that same case produced a bare server-side `cmd_timeout` with NO
+//     phase at all. `op_timeout:frames` at 18s is strictly more information,
+//     sooner, and it is the case where the loop is provably released.
+//   * The attach-hang and per-CDP-command-hang cases still surface their precise
+//     `cdp_timeout:attach` / `cdp_timeout:<method>` — those fire at 8s, well
+//     inside this bound.
+// Known cost: a slow-but-SUCCESSFUL CDP op in the 18–20s band is now killed at 18s
+// where it previously had until the server's 20s. That band was already mostly
+// lost to the server, so the trade is small and deliberate.
+//
+// Lowering the CDP composition below 18s instead would mean shrinking the attach
+// or detach budgets, which are load-bearing for the debugger-leak invariants —
+// not worth reopening without a live measurement.
+export const EXEC_OP_BUDGET_MS = 18000;
+// chrome.storage.local reads/writes on the loop's own path — config() (every
+// iteration) and the superseded flag. Same unbounded-chrome.* class as the ops,
+// and clearSuperseded() runs on EVERY healthy iteration, i.e. far more often than
+// `frames`/`screenshot` ever did. Bounded so "every await in the loop body is
+// bounded" is literally true rather than nearly true.
+export const STORAGE_BUDGET_MS = 5000;
+// A /poll blocks server-side for BROWSER_BRIDGE_POLL_TIMEOUT (default 25s) before
+// its 204. 40s leaves generous headroom for a slow loopback round-trip plus the
+// activeTabSnapshot() that precedes the fetch, while still being a bound.
+export const POLL_BUDGET_MS = 40000;
+// POST /result is a loopback write the server answers immediately.
+export const RESULT_BUDGET_MS = 10000;
+// If the loop has not completed an iteration in this long it is WEDGED, not slow.
+// Worst legitimate iteration: POLL_BUDGET + EXEC_OP_BUDGET + RESULT_BUDGET = 68s,
+// or a SUPERSEDE_BACKOFF_MS (30s) / max nextBackoffMs (30s) sleep after a poll
+// budget = 70s. 180s is >2.5x the worst legitimate case, so this can only fire on
+// a genuine wedge — it is the defence against the NEXT unbounded await, not the
+// primary fix.
+export const LOOP_STALL_MS = 180000;
 
 // Orchestrate a CDP op with a per-op attach→run→ALWAYS-detach lifecycle, every
 // chrome.debugger side effect INJECTED so the invariants are unit-testable without

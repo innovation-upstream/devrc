@@ -46,10 +46,25 @@ import {
   // `wake` op / `--wake` reads: un-throttle a background tab via CDP WITHOUT
   // touching focus (the non-intrusive replacement for reflexive `activate`).
   clampWakeMs, applyWakeSteps, wakeProbeFn, WAKE_CDP_TEARDOWN,
+  // The no-wedge guarantee, generalized past CDP: every await in the poll loop
+  // body is raced against a wall-clock budget (see protocol.js for why and for
+  // the CDP < exec < server-cmd_timeout ordering).
+  promiseWithTimeout, EXEC_OP_BUDGET_MS, POLL_BUDGET_MS, RESULT_BUDGET_MS,
+  LOOP_STALL_MS, STORAGE_BUDGET_MS,
 } from "./protocol.js";
 
 const DEFAULT_PORT = 8788;
 let running = false;
+// Wall-clock (Date.now) of the last completed poll-loop iteration. `running` is a
+// LATCH — it says a loop was started, not that one is alive — so the keepalive
+// alarm needs an independent liveness signal to tell "wedged" from "idle-polling".
+// null = no iteration has completed yet (the loop was only just kicked).
+let lastLoopTickAt = null;
+// Monotonically increasing loop generation. The keepalive force-restart bumps it,
+// which retires any loop still parked on an abandoned await: that loop exits at
+// its next iteration and its finally declines to clear `running` (it no longer
+// owns the flag), so a force-restart can never leave two pollers racing.
+let loopGeneration = 0;
 
 // The stable per-profile auto-id: generated ONCE and persisted in
 // chrome.storage.local so it survives service-worker restarts/reloads within
@@ -941,14 +956,71 @@ const OPS = {
   },
 };
 
+// The extension-side breadcrumb (the §2.2 detector). ONE rolling slot in
+// chrome.storage.local, so it cannot grow: {op, id, phase, ts}. After a drop this
+// answers "wedged in `frames` since 18:02:34" from OBSERVATION instead of from
+// inference over the server's journal — the operator's second drop left no trace
+// anywhere because nothing was dispatched while the instance was down.
+//
+// FIRE-AND-FORGET on purpose: it is never awaited. A storage write is itself a
+// chrome.* call, and awaiting it inside execute() would add exactly the class of
+// unbounded await this whole change exists to remove.
+// The loop's wall-clock budgets, with a test-injectable override (the same
+// `globalThis.BROWSER_BRIDGE_*_TIMING` convention the `activate` op already uses)
+// so a unit test can drive a 20ms budget instead of waiting 18 real seconds.
+// Production reads the protocol.js constants unchanged.
+function loopTiming() {
+  const t = (typeof globalThis !== "undefined"
+    && globalThis.BROWSER_BRIDGE_LOOP_TIMING) || {};
+  return {
+    execMs: t.execMs == null ? EXEC_OP_BUDGET_MS : t.execMs,
+    pollMs: t.pollMs == null ? POLL_BUDGET_MS : t.pollMs,
+    resultMs: t.resultMs == null ? RESULT_BUDGET_MS : t.resultMs,
+    stallMs: t.stallMs == null ? LOOP_STALL_MS : t.stallMs,
+    storageMs: t.storageMs == null ? STORAGE_BUDGET_MS : t.storageMs,
+  };
+}
+
+// Bound a chrome.storage.local call. These are the loop's remaining non-op
+// chrome.* awaits; a hang in one is the same fault class as a hung `frames`.
+function storageBounded(promise, label) {
+  return promiseWithTimeout(promise, loopTiming().storageMs, label, {},
+                            "op_timeout");
+}
+
+function breadcrumb(op, id, phase) {
+  try {
+    const p = chrome.storage.local.set(
+      { lastExec: { op, id, phase, ts: Date.now() } });
+    if (p && typeof p.catch === "function") p.catch(() => {});
+  } catch (e) { /* storage unavailable — a breadcrumb must never break an op */ }
+}
+
+// execute — THE choke point where every op is bounded.
+//
+// The bound lives here and NOWHERE else on purpose. Patching `frames` and
+// `screenshot` individually (the two ops the journal caught wedging) would fix
+// today's two call sites and regenerate the bug at the next op someone adds —
+// `targetTab()` alone is on the path of every single op. One rule, one place.
+//
+// A timed-out op returns a NORMAL error envelope (`op_timeout:<op>`) through the
+// existing catch, so the poll loop takes the same path it takes for any op that
+// threw in the page: post the result, iterate, keep polling. Nothing throws past
+// the loop.
 async function execute(cmd) {
   const v = validateCommand(cmd);
   if (!v.ok) return errorEnvelope(cmd.id, v.error);
+  breadcrumb(cmd.op, cmd.id, "start");
   try {
-    const data = await OPS[cmd.op](cmd);
+    const data = await promiseWithTimeout(
+      OPS[cmd.op](cmd), loopTiming().execMs, cmd.op, {}, "op_timeout");
+    breadcrumb(cmd.op, cmd.id, "done");
     return resultEnvelope(cmd.id, data);
   } catch (e) {
-    return errorEnvelope(cmd.id, e && e.message ? e.message : e);
+    const msg = e && e.message ? e.message : e;
+    breadcrumb(cmd.op, cmd.id,
+               String(msg).startsWith("op_timeout:") ? "timeout" : "error");
+    return errorEnvelope(cmd.id, msg);
   }
 }
 
@@ -966,6 +1038,20 @@ async function activeTabSnapshot() {
 // pollOnce returns a tagged result: { kind } where kind ∈ POLL_IDLE /
 // POLL_SUPERSEDED, or { kind: POLL_COMMAND, cmd } — so the loop can tell the
 // distinct "you were superseded" signal (409) apart from a normal idle 204.
+// An AbortSignal that fires after `ms`, or undefined where AbortSignal.timeout is
+// unavailable (a bare unit-test global). Aborting the SOCKET is complementary to
+// racing the promise: promiseWithTimeout settles the awaiter but abandons the
+// underlying fetch, which would leak a socket per wedged poll; the signal actually
+// tears the request down.
+function abortAfter(ms) {
+  try {
+    if (typeof AbortSignal !== "undefined" && AbortSignal.timeout) {
+      return AbortSignal.timeout(ms);
+    }
+  } catch (e) { /* fall through — the promise race is still the hard bound */ }
+  return undefined;
+}
+
 async function pollOnce(cfg) {
   const active = await activeTabSnapshot();
   const res = await fetch(`${base(cfg.port)}/poll`, {
@@ -973,6 +1059,7 @@ async function pollOnce(cfg) {
     headers: { ...authHeaders(cfg.token),
                ...pollHeaders(cfg.instanceId, cfg.label, active, cfg.extVersion,
                               cfg.extId) },
+    signal: abortAfter(loopTiming().pollMs),
   });
   const kind = classifyPollStatus(res.status);
   if (kind === POLL_COMMAND) return { kind, cmd: await res.json() };
@@ -987,9 +1074,12 @@ async function pollOnce(cfg) {
 // state change so a steady-state loser doesn't spam storage.
 async function setSuperseded(cfg) {
   try {
-    const { superseded } = await chrome.storage.local.get("superseded");
+    const { superseded } = await storageBounded(
+      chrome.storage.local.get("superseded"), "superseded.get");
     if (!superseded) {
-      await chrome.storage.local.set({ superseded: true, supersededSince: Date.now() });
+      await storageBounded(
+        chrome.storage.local.set({ superseded: true, supersededSince: Date.now() }),
+        "superseded.set");
       // eslint-disable-next-line no-console
       console.warn(
         "[browser-bridge] superseded by another instance sharing this routing key" +
@@ -1001,9 +1091,14 @@ async function setSuperseded(cfg) {
 
 async function clearSuperseded() {
   try {
-    const { superseded } = await chrome.storage.local.get("superseded");
-    if (superseded) await chrome.storage.local.set({ superseded: false, supersededSince: 0 });
-  } catch (e) { /* ignore */ }
+    const { superseded } = await storageBounded(
+      chrome.storage.local.get("superseded"), "superseded.get");
+    if (superseded) {
+      await storageBounded(
+        chrome.storage.local.set({ superseded: false, supersededSince: 0 }),
+        "superseded.set");
+    }
+  } catch (e) { /* ignore — including our own bound expiring */ }
 }
 
 async function postResult(cfg, envelope) {
@@ -1012,20 +1107,80 @@ async function postResult(cfg, envelope) {
     headers: authHeaders(cfg.token),
     // Stamp our instanceId so the server scopes the reply to this instance.
     body: JSON.stringify(resultWithInstance(envelope, cfg.instanceId)),
+    signal: abortAfter(loopTiming().resultMs),
   });
+}
+
+// The alarm-side recovery. `running` alone cannot distinguish "a loop is polling
+// happily" from "a loop is parked on an await that will never settle", so the
+// alarm consults lastLoopTickAt: a loop that has not completed an iteration in
+// LOOP_STALL_MS is wedged, and we retire it (bump the generation, clear the
+// latch) before kicking a fresh one. Exported for unit tests.
+//
+// Safety against duplicate POLLING is structural, not timing-based: the retired
+// loop re-checks its generation immediately before each /poll (see `retired()` in
+// loop() — a top-of-iteration check alone is NOT enough, it only fires between
+// iterations) and its finally only clears `running` if it still owns the
+// generation. So even if the abandoned await settles LATER, that loop exits
+// without polling alongside the new one. It MAY still finish posting a result it
+// had already dequeued, which is deliberate — see the note in loop().
+export function keepaliveTick(now = Date.now()) {
+  if (running && lastLoopTickAt !== null
+      && (now - lastLoopTickAt) > loopTiming().stallMs) {
+    // eslint-disable-next-line no-console
+    console.warn("[browser-bridge] poll loop wedged for "
+      + Math.round((now - lastLoopTickAt) / 1000) + "s — force-restarting");
+    loopGeneration += 1;      // retire the wedged loop
+    running = false;          // release the latch it can never release itself
+    lastLoopTickAt = now;     // don't re-fire on the very next alarm
+    breadcrumb("(loop)", null, "force-restart");
+  }
+  loop();
 }
 
 async function loop() {
   if (running) return;
   running = true;
+  const myGen = loopGeneration;
+  lastLoopTickAt = Date.now();
   let attempt = 0;
+  // Have we been retired by a keepalive force-restart? A generation check at the
+  // TOP of the while body is NOT sufficient: it only fires BETWEEN iterations, so
+  // a loop retired while parked mid-iteration resumes and completes that whole
+  // iteration — including its /poll — alongside its replacement. Measured: parking
+  // the loop inside config()'s storage read, retiring it, then releasing produced
+  // one extra poll from the retired loop.
+  const retired = () => myGen !== loopGeneration;
   try {
     // eslint-disable-next-line no-constant-condition
     while (true) {
-      const cfg = await config();
-      if (!cfg.token) { await sleep(5000); continue; }
+      // A force-restart retired us: exit WITHOUT clearing `running` (the finally
+      // checks the generation) so the replacement loop keeps the latch.
+      if (retired()) return;
+      lastLoopTickAt = Date.now();
       try {
-        const r = await pollOnce(cfg);
+        // config() reads chrome.storage.local — the SAME unbounded chrome.* class
+        // this whole change exists to close, and it sits on EVERY iteration. It is
+        // inside the try so a timed-out read becomes a backoff+retry rather than
+        // an escape that kills the loop until the next alarm.
+        const cfg = await promiseWithTimeout(config(), loopTiming().storageMs,
+                                             "config", {}, "op_timeout");
+        if (!cfg.token) { await sleep(5000); continue; }
+        // ⚠ THE check that actually prevents duplicate pollers. It must sit
+        // immediately before the poll, not merely at the top of the iteration:
+        // being retired mid-`config()` is the COMMON case (after this change the
+        // storage reads are the loop's slowest awaits), and a retired loop that
+        // polls is exactly the concurrency the generation mechanism promises to
+        // prevent.
+        //
+        // Deliberately NOT gating execute()/postResult(): a command already
+        // dequeued from the server has no other owner, so dropping it would
+        // strand the caller until its cmd_timeout. Posting a finished result from
+        // a retired loop is harmless (the server correlates by command id) —
+        // POLLING from one is not.
+        if (retired()) return;
+        const r = await promiseWithTimeout(pollOnce(cfg), loopTiming().pollMs,
+                                           "poll", {}, "op_timeout");
         attempt = 0;                             // healthy round-trip
         if (r.kind === POLL_SUPERSEDED) {
           // Another instance on this host claimed our routing key (a duplicate
@@ -1039,17 +1194,25 @@ async function loop() {
         }
         await clearSuperseded();
         if (r.kind === POLL_COMMAND && r.cmd) {
+          // execute() self-bounds at EXEC_OP_BUDGET_MS and NEVER throws — it
+          // always returns an envelope, so a timed-out op is reported to the
+          // server as a normal error and the loop iterates.
           const envelope = await execute(r.cmd);
-          await postResult(cfg, envelope);
+          await promiseWithTimeout(postResult(cfg, envelope),
+                                   loopTiming().resultMs, "result", {},
+                                   "op_timeout");
         }
       } catch (e) {
-        // Transport error (server down, unauthorized, network) → backoff.
+        // Transport error (server down, unauthorized, network, a poll/result
+        // budget expiring) → backoff. Bounded: nextBackoffMs caps at 30s.
         const wait = nextBackoffMs(attempt++) + Math.floor(Math.random() * 250);
         await sleep(wait);
       }
     }
   } finally {
-    running = false;
+    // Only clear the latch if we still OWN it — a loop retired by a
+    // keepalive force-restart must not clear the flag its replacement set.
+    if (myGen === loopGeneration) running = false;
   }
 }
 
@@ -1067,7 +1230,10 @@ function startBackground() {
   chrome.runtime.onStartup.addListener(() => loop());
   chrome.alarms.create("bridge-keepalive", { periodInMinutes: 1 });
   chrome.alarms.onAlarm.addListener((a) => {
-    if (a.name === "bridge-keepalive") loop();
+    // keepaliveTick, NOT loop(): a bare loop() call hits `if (running) return`
+    // and is structurally incapable of clearing a wedged loop — which is exactly
+    // why the pre-0.4.0 alarm never recovered the instance and only a manual ↻ did.
+    if (a.name === "bridge-keepalive") keepaliveTick();
   });
   // If Chrome detaches our debugger out-of-band (tab crash/close, DevTools opened, or
   // the user hitting the "an extension is debugging this browser" banner's Cancel),
@@ -1091,4 +1257,25 @@ if (!(typeof globalThis !== "undefined" && globalThis.BROWSER_BRIDGE_NO_AUTOSTAR
 // `cdpAttached` is exported for TESTS only — it is the leak-visibility invariant
 // (a failed detach must leave the tab tracked), which cannot be asserted from the
 // outside otherwise. Nothing in the extension imports it.
-export { execute, OPS, ALLOWED_OPS, cdpAttached };
+// `loop` + `loopState` are exported for TESTS only — the wedge regression
+// (tests/loop_wedge.test.mjs) has to drive a real loop iteration against a
+// never-settling op and observe that it releases, which cannot be asserted from
+// the outside. Nothing in the extension imports them.
+export { execute, OPS, ALLOWED_OPS, cdpAttached, loop };
+
+// A read/reset window onto the loop's private liveness state, for tests.
+export const loopState = {
+  get running() { return running; },
+  get lastLoopTickAt() { return lastLoopTickAt; },
+  get generation() { return loopGeneration; },
+  // Reset between tests (each test file gets its own module instance, but a
+  // single file may drive the loop more than once).
+  reset() { running = false; lastLoopTickAt = null; loopGeneration = 0; },
+  // Pretend the loop last ticked `ms` ago — lets a test exercise the stall
+  // branch of keepaliveTick without waiting LOOP_STALL_MS of real time.
+  backdate(ms) { lastLoopTickAt = Date.now() - ms; },
+  // Retire the current loop (the same mechanism keepaliveTick uses): it exits at
+  // the top of its next iteration. A test needs this because loop() is a
+  // deliberate `while (true)` with no other exit.
+  retire() { loopGeneration += 1; },
+};

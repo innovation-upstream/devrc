@@ -3115,7 +3115,12 @@ def test_git_short_head_none_on_missing_dir(tmp_path):
 
 def test_manifest_version_reads_current():
     v = S.manifest_version(path=EXT_DIR / "manifest.json")
-    assert isinstance(v, str) and v == "0.3.1"
+    # Bumped to 0.4.0 for the poll-loop no-wedge change (every op bounded +
+    # a keepalive that can actually recover a wedged loop). The bump is the
+    # operator's only falsifiable "is the new build loaded?" signal, so this
+    # assertion is deliberately a literal — it MUST be updated in the same
+    # commit as manifest.json, which is the point.
+    assert isinstance(v, str) and v == "0.4.0"
 
 
 def test_manifest_version_prefers_the_deployed_copy_over_the_repo(tmp_path,
@@ -3136,7 +3141,7 @@ def test_manifest_version_falls_back_to_repo_when_not_deployed(tmp_path,
     reporting the repo manifest instead of going null."""
     monkeypatch.setattr(S, "_DEPLOYED_EXT_MANIFEST", tmp_path / "absent.json")
     monkeypatch.setattr(S, "_EXT_MANIFEST_PATH", EXT_DIR / "manifest.json")
-    assert S.manifest_version() == "0.3.1"
+    assert S.manifest_version() == "0.4.0"
 
 
 def test_manifest_version_none_when_neither_exists(tmp_path, monkeypatch):
