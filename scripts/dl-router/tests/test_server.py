@@ -338,6 +338,11 @@ def test_discard_over_http_removes_only_the_proven_new_copy(live, library):
     new = library / "Jane Doe" / "clip.mp4"
     new.write_bytes(body)
     route_a_download(live, 77)
+    # The kept file must PREDATE the routing decision -- that timestamp is
+    # what tells the two halves of a uniquify pair apart, so a fixture that
+    # writes both "now" is not exercising a real discard. The app fixture's
+    # clock starts at 1000.0; back-date the pre-existing copy behind it.
+    os.utime(keep, (0, 0))
     status, out, _ = call(live, "POST", "/discard",
                           {"relPath": "Jane Doe/clip.mp4",
                            "dupRelPath": "john-smith/75936.mov",

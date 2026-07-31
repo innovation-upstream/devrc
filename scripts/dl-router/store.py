@@ -18,7 +18,7 @@ import time
 from pathlib import Path
 from urllib.parse import urlsplit
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 MIGRATIONS = {
     1: [
@@ -171,6 +171,31 @@ MIGRATIONS = {
         "CREATE INDEX IF NOT EXISTS source_urls_download "
         "ON source_urls(download_id)",
         "CREATE INDEX IF NOT EXISTS source_urls_last ON source_urls(last_ts DESC)",
+    ],
+    # v6 -- A ROUTING DECISION AUTHORISES AT MOST ONE DISCARD.
+    #
+    # The route row was being consulted as evidence and never consumed, so ONE
+    # downloadId authorised an unbounded series of deletes: `new.mp4`,
+    # `new (1).mp4`, `new (2).mp4` all satisfy `names_match` against a route
+    # recorded as `new.mp4` (the uniquify tolerance is deliberate and
+    # irreducible), and each was still inside the one-hour window. Three files
+    # removed on one decision.
+    #
+    # Evidence that is not consumed is a capability, not a proof. This table
+    # is the consumption: /discard refuses a downloadId that already has a row
+    # here. It doubles as the audit trail for the only destructive operation in
+    # the subsystem -- what was removed, what it was kept against, and where it
+    # went -- which nothing else records.
+    6: [
+        """CREATE TABLE IF NOT EXISTS discards (
+              download_id TEXT PRIMARY KEY,
+              rel_path    TEXT NOT NULL,
+              kept_rel    TEXT NOT NULL DEFAULT '',
+              trash_rel   TEXT NOT NULL DEFAULT '',
+              mode        TEXT NOT NULL DEFAULT '',
+              ts          REAL NOT NULL
+           )""",
+        "CREATE INDEX IF NOT EXISTS discards_ts ON discards(ts DESC)",
     ],
 }
 
@@ -578,6 +603,45 @@ class Store:
                     d["dup"] = None
             out.append(d)
         return out
+
+    # --- the discard log (one per routing decision) -------------------------- #
+    def discard_for_download(self, download_id: str):
+        """The discard already performed on this routing decision, or None."""
+        download_id = str(download_id or "")
+        if not download_id:
+            return None
+        row = self.conn.execute(
+            "SELECT * FROM discards WHERE download_id=?",
+            (download_id,)).fetchone()
+        return dict(row) if row else None
+
+    def record_discard(self, download_id: str, rel_path: str, *,
+                       kept_rel: str = "", trash_rel: str = "",
+                       mode: str = "") -> bool:
+        """CONSUME the routing decision. False iff it was already consumed.
+
+        `INSERT ... ON CONFLICT DO NOTHING` rather than a check-then-insert, so
+        two threads (or the CLI and the sidecar) racing one downloadId cannot
+        both pass: SQLite decides, and exactly one gets `rowcount == 1`.
+        """
+        download_id = str(download_id or "")
+        if not download_id:
+            return False
+        cur = self.conn.execute(
+            """INSERT INTO discards (download_id, rel_path, kept_rel,
+                                     trash_rel, mode, ts)
+               VALUES (?, ?, ?, ?, ?, ?)
+               ON CONFLICT(download_id) DO NOTHING""",
+            (download_id, str(rel_path), str(kept_rel or ""),
+             str(trash_rel or ""), str(mode or ""), self._clock()))
+        self.conn.commit()
+        return int(cur.rowcount) == 1
+
+    def recent_discards(self, limit: int = 50) -> list:
+        rows = self.conn.execute(
+            "SELECT * FROM discards ORDER BY ts DESC LIMIT ?",
+            (int(limit),)).fetchall()
+        return [dict(r) for r in rows]
 
     # --- source-URL ledger --------------------------------------------------- #
     def record_source_url(self, url, *, site: str = "", dir_name: str = "",

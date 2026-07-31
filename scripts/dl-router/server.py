@@ -39,6 +39,7 @@ import json
 import os
 import secrets
 import sqlite3
+import threading
 import sys
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -157,6 +158,12 @@ class App:
         # the next download into that bucket, and re-hashing it every time is
         # the cost this exists to remove.
         self.hashes = HashCache()
+        # /discard is serialised. Two concurrent discards of one PAIR each
+        # proved the bytes survived in the other, and both won -- reproduced,
+        # and unrecoverable under `delete_mode = "unlink"`. It needs only two
+        # duplicate toasts open at once. In-process only; the cross-process
+        # half is the atomic route-row consumption in `record_discard`.
+        self._discard_lock = threading.RLock()
 
     # --- helpers ----------------------------------------------------------- #
     @property
@@ -840,48 +847,285 @@ class App:
         self.files.refresh(force=True)
         return {"ok": True, "moved": True, "dir": to_dir, "relPath": new_rel}
 
+    @staticmethod
+    def _looks_preallocated(st) -> bool:
+        """True iff the file has fewer blocks allocated than its size claims.
+
+        qBittorrent PREALLOCATES: a payload has its full final `st_size` from
+        the moment it is created, and fills in pieces afterwards. The unwritten
+        middle is a hole, so `st_blocks` is short. That is the cheap,
+        deterministic, credential-free way to recognise "this length is a
+        promise, not content".
+
+        Honest limits, both in the fail-safe direction: a filesystem with
+        transparent compression (btrfs/zfs) can report fewer blocks for a
+        genuinely complete file, so this can REFUSE a legitimate discard —
+        which costs the operator one manual delete. And a torrent that has
+        filled every piece it preallocated is no longer sparse, so this alone
+        does not prove completeness; that is what the qBittorrent check is for.
+        """
+        blocks = getattr(st, "st_blocks", None)
+        if blocks is None:            # not POSIX; no information either way
+            return False
+        return (int(blocks) * 512) < int(st.st_size)
+
+    def _refuse_incomplete_keep(self, keep_rel: str, keep, st, live,
+                                qbt_error) -> None:
+        """The kept file must be a COMPLETE file, not a promise of one.
+
+        THE BOUNDED DIGEST CANNOT SEE THIS, and that inverted the whole
+        guarantee. qBittorrent preallocates, so an in-progress payload has the
+        full `st_size` from creation; if its FIRST and LAST pieces have landed
+        — the common case, and the default under "download first and last
+        pieces first" — its head+tail digest is byte-identical to a finished
+        copy while the middle is still zeros. Reproduced end to end through the
+        shipped sequence: /dedupe answered `duplicate: true` and /discard
+        trashed the COMPLETE browser copy, keeping the 40%-shaped partial.
+
+        `dedupe.py` justifies the 256 KiB bound precisely because the answer is
+        "a WARNING with a keep button, never an automatic destruction" — and
+        then /discard reused that same digest as its load-bearing proof. This
+        is the check that makes the two consistent.
+        """
+        if self._looks_preallocated(st):
+            raise UnsafeName(
+                "refusing to discard: the file it is supposed to duplicate "
+                f"({keep_rel!r}) is sparse — it has fewer blocks allocated "
+                "than its length claims, which is what an in-progress, "
+                "preallocated torrent payload looks like. A bounded head+tail "
+                "digest cannot tell that apart from a finished file, so it is "
+                "not proof these bytes exist anywhere else.")
+        payload = self._payload_verdict(keep, live, qbt_error)
+        if payload is not None and not payload.get("complete", False):
+            raise UnsafeName(
+                "refusing to discard: the file it is supposed to duplicate is "
+                f"a torrent payload that is not finished ({payload.get('why')})"
+                " — it cannot prove these bytes exist anywhere else")
+
+    def _live_qbt_state(self):
+        """Live qBittorrent, derived ONCE per /discard. `(state, error)`.
+
+        `(None, None)` means "not configured" — the callers then fall back to
+        the local structural guards. Derived once and threaded through both
+        checks because `derive_live_state` lists every torrent AND every
+        torrent's files; doing that per-path turned one delete into two full
+        sweeps of a ~1000-torrent instance.
+        """
+        client = self._qbt_client()
+        if client is None:
+            return None, None
+        try:
+            import backfill as backfill_mod
+            return backfill_mod.derive_live_state(
+                client, Path(self.root),
+                self.cfg.section("qbt").get("host_roots", ())), None
+        except Exception as exc:                     # noqa: BLE001
+            # Unreachable, auth failure, malformed answer. The caller decides.
+            return None, f"{exc.__class__.__name__}: {exc}"
+
+    def _payload_verdict(self, path, live, error):
+        """What live qBittorrent says about this path, or None if it has
+        nothing to say (not configured).
+
+        Mirrors what `backfill apply` already derives — `derive_live_state` and
+        `TorrentIndex.proves_absent` — rather than inventing a second notion of
+        "is this a payload". The callers decide what each verdict means, and
+        they differ: the SOURCE must be PROVEN not to be a payload; the KEPT
+        file is only checked for completeness.
+        """
+        if error:
+            return {"error": error}
+        if live is None:
+            return None
+        host_path = os.path.normpath(str(path))
+        torrent = live.index.get(host_path)
+        if torrent is not None:
+            state = str(torrent.get("state") or "")
+            progress = torrent.get("progress")
+            try:
+                complete = float(progress) >= 1.0
+            except (TypeError, ValueError):
+                complete = False
+            return {"payload": True, "complete": complete,
+                    "why": f"state={state or 'unknown'} progress={progress}"}
+        if live.proves_absent(host_path):
+            return {"payload": False, "complete": True, "why": "not a payload"}
+        return {"error": "live qBittorrent state cannot prove this path is "
+                         "not a torrent payload"}
+
+    def _qbt_client(self):
+        """A qBittorrent client, or None when none is configured.
+
+        Credentials are DELIBERATELY empty on this host (the backfill refuses
+        to move anything without them, which is the safe default), so this
+        returns None there and the local structural guards carry the weight.
+        """
+        qbt = self.cfg.section("qbt")
+        if not (qbt.get("username") and qbt.get("password")):
+            return None
+        try:
+            import qbt as qbt_mod
+            return qbt_mod.QbtClient(
+                qbt.get("url", ""), qbt.get("username", ""),
+                qbt.get("password", ""),
+                transport=qbt_mod.urllib_transport(
+                    float(qbt.get("timeout_s", 8.0))))
+        except Exception:                            # noqa: BLE001
+            return None
+
+    def _refuse_if_payload(self, rel_path, src, st, live, qbt_error) -> None:
+        """The file being DISCARDED must not be a live torrent payload.
+
+        WHY THIS AND NOT THE TRASH DEFAULT IS THE SEEDING GUARD: qBittorrent
+        seeds by PATH, so renaming a payload into `.dl-router-trash/` breaks
+        the torrent exactly as an unlink would. Trash protects the operator's
+        bytes; only this protects the seed. `backfill apply` already refuses to
+        move anything live qBittorrent cannot prove is not a payload — and that
+        is the REVERSIBLE operation, so the asymmetry was backwards.
+
+        Three local, credential-free structural refusals first, because the
+        credentials are deliberately empty on this host and a guard that only
+        works when they are set is not a guard here:
+
+          * HARDLINKED (`st_nlink > 1`). The standard seeding layout is a
+            payload hardlinked into a subject directory. A browser download is
+            always nlink 1.
+          * A SYMLINK. `safe_rel_path` RESOLVES, so the discard would remove
+            the target and leave a dangling link pointing at nothing.
+          * SPARSE. A preallocated, partially written payload.
+
+        Then, only if qBittorrent is configured, the live corroboration.
+        """
+        # The literal path, before `safe_rel_path` resolved it.
+        literal = os.path.join(str(self.root), str(rel_path))
+        if os.path.islink(literal):
+            raise UnsafeName(
+                "refusing to discard a symlink: the file it points at would be "
+                "removed and the link left dangling. Delete the link by hand "
+                "if that is what you meant.")
+        if int(getattr(st, "st_nlink", 1)) > 1:
+            raise UnsafeName(
+                "refusing to discard a file with more than one hard link "
+                f"(nlink={st.st_nlink}). A browser download has exactly one; "
+                "several is the standard layout for a payload hardlinked into "
+                "a subject directory, and removing this path would break the "
+                "seed even though the bytes survive.")
+        if self._looks_preallocated(st):
+            raise UnsafeName(
+                "refusing to discard a sparse file: it has fewer blocks "
+                "allocated than its length claims, which is what a "
+                "preallocated, partly written torrent payload looks like.")
+        verdict = self._payload_verdict(src, live, qbt_error)
+        if verdict is None:
+            return          # qBittorrent not configured; local guards stand
+        if verdict.get("error"):
+            raise UnsafeName(
+                "refusing to discard: qBittorrent is configured but could not "
+                f"corroborate that this file is not a live payload "
+                f"({verdict['error']}). `backfill apply` refuses on the same "
+                "evidence for a REVERSIBLE move; this one is not reversible.")
+        if verdict.get("payload"):
+            raise UnsafeName(
+                "refusing to discard: live qBittorrent says this file IS a "
+                f"torrent payload ({verdict.get('why')}). Removing it breaks "
+                "the seed -- moving it to the trash breaks it just as much, "
+                "because qBittorrent seeds by path.")
+
+    def _trash_dest(self, src) -> Path:
+        """A free destination inside the trash, CONTAINMENT-CHECKED.
+
+        THE TRASH DESTINATION WAS THE ONE PATH THAT SKIPPED `safe_rel_path`.
+        `os.makedirs(exist_ok=True)` FOLLOWS a symlink, so with
+        `<root>/.dl-router-trash` symlinked anywhere the `os.rename` landed the
+        file outside the library root entirely -- past the containment that is
+        proof #1 of the five. Reproduced.
+
+        Two guards, because they answer different questions. A symlinked trash
+        directory is refused outright (this router creates that directory
+        itself; a symlink there is never a legitimate layout, and refusing is
+        clearer than silently resolving it). And the final destination goes
+        through `safe_rel_path` like every other path in this file, which is
+        what catches anything the first check does not anticipate.
+        """
+        trash = self.root / TRASH_DIR
+        if trash.is_symlink():
+            raise UnsafeName(
+                f"refusing to use {TRASH_DIR!r}: it is a symlink, so the "
+                "discarded file would be written outside the library root")
+        os.makedirs(trash, exist_ok=True, mode=0o700)
+        if trash.is_symlink() or not trash.is_dir():
+            raise UnsafeName(f"{TRASH_DIR!r} is not a directory")
+        name = src.name
+        stem, dot, ext = name.rpartition(".")
+        base, suffix = (stem, "." + ext) if dot else (name, "")
+        candidate = name
+        n = 1
+        while (trash / candidate).exists() and n < 1000:
+            candidate = f"{base} ({n}){suffix}"
+            n += 1
+        if (trash / candidate).exists():
+            raise FileExistsError("the trash has no free name for this file")
+        dest = safe_rel_path(f"{TRASH_DIR}/{candidate}", root=self.root)
+        # `safe_rel_path` resolves, so this also rejects a pre-planted symlink
+        # AT the destination name pointing out of the library.
+        if dest.parent != Path(self.root).resolve() / TRASH_DIR:
+            raise UnsafeName("the trash destination resolved outside the trash")
+        return dest
+
     def discard(self, payload: dict) -> dict:
         """POST /discard — remove the NEWLY DOWNLOADED copy of a duplicate.
 
-        THIS IS THE FIRST DESTRUCTIVE OPERATION IN THIS SUBSYSTEM, and it is
-        deliberately harder to satisfy than /relocate, which is itself the
-        strictest thing here. The library root is a live qBittorrent seeding
-        target: deleting the wrong file destroys the operator's data AND breaks
-        a torrent. So the answer to every ambiguity is a refusal with a reason,
-        never a best-effort delete.
+        THIS IS THE ONLY DESTRUCTIVE OPERATION IN THIS SUBSYSTEM. The library
+        root is a live qBittorrent seeding target, so a wrong answer destroys
+        the operator's data AND breaks a torrent. Every ambiguity is a refusal
+        with a reason, never a best-effort delete.
 
-        FIVE independent proofs, ALL required:
+        The checks, and what each is actually worth — an earlier revision of
+        this docstring called them "five independent proofs", and an audit
+        showed three of them were not what they claimed:
 
-          1. CONTAINMENT. Both paths go through `safe_rel_path`, so neither can
-             address anything outside the library root.
-          2. IDENTITY + AGE — the same evidence /relocate demands, via
-             `_prove_created`: a routing decision must exist for this
-             downloadId, the file's name must be that download's name (modulo
-             `uniquify`'s " (N)"), and its mtime must not predate the decision.
-             Deliberately WITHOUT the `routed_files` short-circuit, which is a
-             claim about the past rather than about the file on disk now.
-          3. RECENCY. The routing decision must be less than
-             DISCARD_MAX_ROUTE_AGE_S old. /relocate has no such window because
-             a rename is reversible; this is not.
-          4. IT IS NOT THE FILE IT DUPLICATES. The caller must name the
-             pre-existing copy, it must exist, and it must not be the file
-             being discarded — checked on the RESOLVED paths, so a symlink,
-             a `./` or a trailing-slash variant cannot make one look like the
-             other. The pre-existing library file is never what gets removed.
-          5. THE DUPLICATION IS RE-PROVEN NOW. Both files must still have the
-             same byte count and the same bounded head+tail digest at the
-             moment of the delete. This is the load-bearing one: it means a
-             discard can only ever remove bytes that demonstrably still exist
-             elsewhere in the library.
+          1. CONTAINMENT. Both paths, AND the trash destination, go through
+             `safe_rel_path`. The destination used not to, and a symlinked
+             trash directory put the file outside the root.
+          2. THE SOURCE IS NOT A LIVE PAYLOAD. Local structural refusals that
+             need no credentials — a hardlinked file (`st_nlink > 1`, the
+             standard seeding layout), a symlink, a sparse/preallocated file —
+             plus, when qBittorrent IS configured, the same live corroboration
+             `backfill apply` demands. See `_refuse_if_payload`.
+          3. IDENTITY + AGE + RECENCY, via `_prove_created`. Worth less than it
+             reads: `names_match` tolerates `uniquify`'s ` (N)` by design, so a
+             route recorded as `new.mp4` accepts `new (1).mp4` too. What closes
+             that is (4) and the CONSUMPTION of the route row — one routing
+             decision now authorises at most one discard, because evidence that
+             is never consumed is a capability, not a proof.
+          4. THE KEPT FILE IS GENUINELY PRE-EXISTING. It must predate the
+             routing decision. Without this the two halves of a uniquify pair
+             were interchangeable and /discard could remove the ORIGINAL —
+             which is exactly what the test for it failed to catch, because its
+             two fixtures had different names.
+          5. THE DUPLICATION IS RE-PROVEN NOW, and the kept copy must be a
+             COMPLETE file. A bounded head+tail digest cannot tell a finished
+             file from a preallocated torrent whose first and last pieces have
+             landed, so the digest alone was proving the opposite of what it
+             claimed. See `_refuse_incomplete_keep`.
 
-        And then it does not unlink. The file is renamed into a hidden trash
-        directory inside the library root — an atomic same-filesystem move, out
-        of both index scans (they skip dot-prefixed names), and inspectable.
-        `[dedupe] delete_mode = "unlink"` opts into a real unlink; the default
-        is the reversible one because this subsystem's history is that each fix
-        introduces the next defect, and the first destructive operation should
-        be the one a mistake can be walked back from.
+        SERIALISED. The whole critical section holds `_discard_lock`: two
+        concurrent discards of one PAIR each proved the bytes survived in the
+        other, and both won. (In-process only — the CLI is a separate process.
+        The route-row consumption in (3) is the cross-process half, and it is
+        an atomic INSERT for that reason.)
+
+        And then it does not unlink; it renames into a hidden trash directory.
+        BE CLEAR ABOUT WHAT THAT BUYS: it protects the operator's BYTES, and
+        nothing else. qBittorrent seeds by PATH, so a rename into
+        `.dl-router-trash/` breaks a torrent exactly as an unlink would — which
+        is why check (2), not the trash, is the seeding guard.
+        `[dedupe] delete_mode = "unlink"` opts out of the byte protection.
         """
+        with self._discard_lock:
+            return self._discard_locked(payload)
+
+    def _discard_locked(self, payload: dict) -> dict:
         rel_path = payload.get("relPath")
         dup_rel = payload.get("dupRelPath")
         download_id = str(payload.get("downloadId") or "")
@@ -894,6 +1138,21 @@ class App:
                 "refusing to discard: the file it is supposed to duplicate "
                 f"({dup_rel!r}) is not there, so there is nothing proving "
                 "these bytes exist anywhere else")
+
+        rel = self._rel_to_root(src, rel_path)
+        keep_rel = self._rel_to_root(keep, dup_rel)
+
+        # THE TRASH IS NOT EVIDENCE. `safe_rel_path` proves containment, not
+        # VISIBILITY -- and a file already discarded is one the operator has
+        # said they do not want. Accepting it as "the bytes exist elsewhere"
+        # let two discards empty the library of a file entirely: the second
+        # was proved against the first one's corpse.
+        if keep_rel.split("/", 1)[0] == TRASH_DIR:
+            raise UnsafeName(
+                "refusing to discard: the file it is supposed to duplicate is "
+                f"already in {TRASH_DIR!r}, which proves nothing -- that copy "
+                "has itself been discarded")
+
         # SAME FILE = SAME INODE, not merely the same resolved path.
         #
         # `resolve()` collapses symlinks and nothing else, so it says "these
@@ -918,43 +1177,106 @@ class App:
                 "not two copies, so deleting one frees nothing and may break "
                 "a seed)")
 
-        rel = self._rel_to_root(src, rel_path)
-        keep_rel = self._rel_to_root(keep, dup_rel)
-        self._prove_created(rel, src, download_id,
-                            max_route_age_s=DISCARD_MAX_ROUTE_AGE_S)
+        live, qbt_error = self._live_qbt_state()
+        self._refuse_if_payload(rel_path, src, src_st, live, qbt_error)
+        route = self._prove_created(rel, src, download_id,
+                                    max_route_age_s=DISCARD_MAX_ROUTE_AGE_S)
 
-        # Proof 5: re-prove the duplication against the file on disk RIGHT NOW.
-        try:
-            src_size = src.stat().st_size
-            keep_size = keep.stat().st_size
-        except OSError as exc:
-            raise UnsafeName(f"cannot stat both files: {exc}") from exc
-        if src_size <= 0 or src_size != keep_size:
+        # (4) THE KEPT FILE MUST GENUINELY PREDATE THE DOWNLOAD.
+        #
+        # Without this the identity proof cannot tell WHICH side of a uniquify
+        # pair is the new copy: `names_match` accepts both `new.mp4` and
+        # `new (1).mp4` against a route recorded as `new.mp4`, and the only
+        # other discriminator was "mtime >= route_ts - slack", which any
+        # actively written file satisfies. So /discard could be pointed at the
+        # ORIGINAL and would remove it. The router's own file is written after
+        # its routing decision; the file it duplicates was already there.
+        # STRICTLY OLDER, and the slack goes the OTHER WAY here on purpose.
+        #
+        # `_prove_created` accepts the source at `mtime >= route_ts - slack`,
+        # so requiring the kept file to be merely `<= route_ts + slack` left a
+        # 10-second window in which BOTH files satisfy both rules and the two
+        # halves of a uniquify pair are still interchangeable -- which is the
+        # whole defect. Requiring `keep` to predate the decision by at least
+        # the slack makes the two windows disjoint: no file can be both.
+        #
+        # The cost is a refusal when a genuine original happens to have been
+        # written in the same few seconds as the routing decision, which is
+        # fail-closed and recoverable by hand.
+        route_ts = float(route.get("ts") or 0.0)
+        if keep_st.st_mtime > route_ts - MTIME_SLACK_S:
+            raise UnsafeName(
+                "refusing to discard: the file it is supposed to duplicate "
+                "does not predate this download's routing decision, so it is "
+                "not demonstrably the pre-existing copy. With `uniquify` the "
+                "two names differ only by a ` (N)` suffix and this timestamp "
+                "is what tells them apart -- refusing rather than guessing "
+                "which of the two is the original.")
+
+        # (5) re-prove the duplication against the files on disk RIGHT NOW.
+        if src_st.st_size <= 0 or src_st.st_size != keep_st.st_size:
             raise UnsafeName(
                 "refusing to discard: these two files are no longer the same "
-                f"size ({src_size} vs {keep_size})")
+                f"size ({src_st.st_size} vs {keep_st.st_size})")
+        self._refuse_incomplete_keep(keep_rel, keep, keep_st, live, qbt_error)
         match, why = confirm_duplicate(self.root, rel, [keep_rel], self.hashes)
         if match is None:
             raise UnsafeName(f"refusing to discard: {why}")
 
+        # NOTHING MAY HAVE CHANGED UNDER US while the proofs ran.
+        #
+        # The digest is bounded but not instant, and a file that is still being
+        # WRITTEN (the yt-dlp path appends; Chrome's `.crdownload` does not, but
+        # nothing here is Chrome-specific) passes every check above and then
+        # gets renamed out from under its own writer, which happily keeps
+        # appending into the trash. Re-stat both and require them byte-identical
+        # to what was proved.
+        try:
+            src_now, keep_now = src.stat(), keep.stat()
+        except OSError as exc:
+            raise UnsafeName(f"cannot re-stat both files: {exc}") from exc
+        for label, was, now in (("the downloaded file", src_st, src_now),
+                                ("the file it duplicates", keep_st, keep_now)):
+            if (was.st_size, was.st_mtime_ns) != (now.st_size, now.st_mtime_ns):
+                raise UnsafeName(
+                    f"refusing to discard: {label} changed while it was being "
+                    "checked (it is still being written, or something else "
+                    "moved it)")
+
+        # CONSUME THE ROUTING DECISION. Atomic, and before the destructive act:
+        # a crash after this point costs a file that is already proven
+        # redundant, while a crash before it costs nothing at all.
         mode = str(self.cfg.section("dedupe").get("delete_mode", "trash"))
+        if not self.store.record_discard(download_id, rel, kept_rel=keep_rel,
+                                         mode=mode):
+            prior = self.store.discard_for_download(download_id) or {}
+            raise UnsafeName(
+                "refusing to discard: this download's routing decision has "
+                f"already been used to discard {prior.get('rel_path')!r}. One "
+                "decision authorises one delete -- otherwise the same id "
+                "removes every `(N)` variant of the name in turn.")
+
         if mode == "unlink":
             os.unlink(src)
             dest_rel = ""
         else:
-            trash = self.root / TRASH_DIR
-            os.makedirs(trash, exist_ok=True, mode=0o700)
-            dest = trash / src.name
-            n = 1
-            while dest.exists() and n < 1000:
-                stem, dot, ext = src.name.rpartition(".")
-                base, suffix = (stem, "." + ext) if dot else (src.name, "")
-                dest = trash / f"{base} ({n}){suffix}"
-                n += 1
-            if dest.exists():
-                raise FileExistsError("the trash has no free name for this file")
-            os.rename(src, dest)
+            dest = self._trash_dest(src)
+            try:
+                os.rename(src, dest)
+            except OSError as exc:
+                # EXDEV: the trash is on a different filesystem from the file
+                # (a multi-mount library root). Fail CLOSED and say which -- a
+                # copy-then-delete fallback would be a non-atomic destructive
+                # operation, which is the last thing this path should grow.
+                raise UnsafeName(
+                    f"refusing to discard: could not move the file into "
+                    f"{TRASH_DIR!r} ({exc.__class__.__name__}: {exc}). If the "
+                    "library root spans several filesystems the trash cannot "
+                    "receive this file; move or delete it by hand."
+                ) from exc
             dest_rel = f"{TRASH_DIR}/{dest.name}"
+            self.store.record_discard(download_id, rel, kept_rel=keep_rel,
+                                      trash_rel=dest_rel, mode=mode)
         # The path no longer holds that file, so the standing ownership claim
         # must go with it -- otherwise a later file arriving here inherits a
         # proof it never earned.

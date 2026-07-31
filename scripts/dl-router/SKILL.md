@@ -310,25 +310,38 @@ same gotcha as browser-bridge), then re-check `dl-route status`.
   That is the price of a constant-cost check on multi-GB media, and it is only
   affordable because the answer is a warning with a `keep` button. If a delete
   is ever made automatic, this bound stops being acceptable.
-* **`POST /discard` is the only destructive path.** Five checks (containment,
-  `/relocate`'s identity+age evidence, a one-hour recency window, "it is not
-  the same inode as the file it duplicates", and a re-proof of the duplication
-  at delete time), defaulting to a **move into `.dl-router-trash/`**, not an
-  unlink. If someone reports "it deleted the wrong file", look in there first —
-  and check `[dedupe] delete_mode` has not been set to `unlink`.
-* **Don't over-trust that list.** The *age* half passes vacuously against an
-  in-progress torrent (current mtime), and `names_match` tolerates ` (N)`. The
-  real binding is filename-with-slack + under an hour + the delete-time
-  duplication re-proof — which is why the trash default is load-bearing and not
-  a nicety. And "the bytes exist elsewhere" is not "the seed survives".
-* **Same file = same inode.** The duplicate/self check compares
-  `(st_dev, st_ino)`, not resolved paths, because hardlinking a payload into a
-  subject directory is normal seeding practice and `resolve()` would call one
-  inode two copies. Don't "simplify" it back to a path comparison.
+* **`POST /discard` is the only destructive path, and the SEEDING guard is the
+  payload check — not the trash.** qBittorrent seeds by PATH, so a rename into
+  `.dl-router-trash/` breaks a torrent exactly as `unlink` would. `/discard`
+  refuses a hardlinked file (`nlink > 1` — the standard payload-into-subject-dir
+  layout), a symlink, a sparse file, and — when qBittorrent credentials are set
+  — anything live state calls a payload or cannot corroborate at all. Creds are
+  deliberately empty on this host, so the three local checks carry it there.
+  `backfill apply` demands the same corroboration for a REVERSIBLE move; do not
+  let /discard end up weaker than it again.
+* **A bounded digest cannot tell a finished file from a preallocated torrent.**
+  qBittorrent preallocates, so an in-progress payload has full `st_size` from
+  creation; once its first and last pieces land, its head+tail digest matches
+  the finished file byte for byte. That once trashed the COMPLETE copy and kept
+  the partial. The kept file must therefore be non-sparse and, if qBittorrent
+  knows it, `progress == 1`. Never re-derive "is it a duplicate" from the
+  digest alone on a destructive path.
+* **One routing decision authorises ONE discard.** The route row is consumed
+  (`discards` table, v6). Unconsumed evidence is a capability, not a proof —
+  one downloadId used to remove `new.mp4`, `new (1).mp4` and `new (2).mp4` in
+  turn, because `names_match` tolerates the ` (N)` suffix by design.
+* **The kept file must PREDATE the routing decision** by at least
+  `MTIME_SLACK_S`. That timestamp is the only thing distinguishing the two
+  halves of a uniquify pair; the two mtime windows are deliberately disjoint so
+  no file can satisfy both. Without it /discard could remove the ORIGINAL.
+* **Same file = same inode.** The self-check compares `(st_dev, st_ino)`, not
+  resolved paths — `resolve()` collapses symlinks but not hardlinks. Don't
+  "simplify" it back to a path comparison.
 * **The trash is unbounded and invisible to `dl-route status`.** Nothing sweeps
-  it, nothing reports its size, and both index scans skip it by design. On a
-  library of multi-GB media that is a real disk sink — check it by hand
-  (`du -sh <library root>/.dl-router-trash`) if space goes missing.
+  it, nothing reports its size, and both index scans skip it by design. Check
+  by hand (`du -sh <library root>/.dl-router-trash`) if space goes missing. A
+  cross-filesystem library root cannot use it: the move fails closed on EXDEV
+  rather than degrading to a non-atomic copy-then-delete.
 * **The trash directory is hidden on purpose**: both index scans skip
   dot-prefixed names, so its contents never become dedupe candidates or
   routing targets. Do not rename it to something visible.

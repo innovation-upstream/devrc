@@ -548,43 +548,91 @@ does **not** auto-close (a timer would answer a question one of whose buttons
 deletes a file), `Escape` is *keep*, and a refused delete leaves the toast open
 showing the sidecar's own reason.
 
-`POST /discard` is the **only destructive operation in this subsystem**, and it
-is strictly harder to satisfy than `/relocate`. Five checks, all required:
+`POST /discard` is the **only destructive operation in this subsystem**. The
+checks, and what each is actually worth:
 
-1. **containment** — both paths through `safe_rel_path`;
-2. **identity + age** — the same evidence `/relocate` demands, and deliberately
-   *without* its `routed_files` short-circuit (a claim recorded weeks ago says
-   nothing about the file at that path now);
-3. **recency** — the routing decision must be under an hour old. `/relocate`
-   has no such window because a rename is reversible; this is not;
-4. **it is not the file it duplicates** — the caller must name the pre-existing
-   copy, it must exist, and the two must be *different inodes*. `(st_dev,
-   st_ino)`, not resolved paths: `resolve()` collapses symlinks but not
-   **hardlinks**, and hardlinking a payload into a subject directory is normal
-   seeding practice — so a resolved-path comparison would call one inode "two
-   copies", free zero bytes, and under `unlink` remove the path qBittorrent
-   registered for that torrent;
-5. **the duplication is re-proven at delete time** — same size, same bounded
-   digest, right now. This is the load-bearing one: a discard can only ever
-   remove bytes that demonstrably still exist elsewhere in the library.
+1. **containment** — both paths, **and the trash destination**, through
+   `safe_rel_path`. The destination used not to be: `os.makedirs(exist_ok=True)`
+   follows a symlink, so a symlinked `.dl-router-trash` put the file outside the
+   library root entirely.
+2. **the source is not a live payload** — the seeding guard, see below.
+3. **identity + age + recency** — the same evidence `/relocate` demands,
+   without its `routed_files` short-circuit, and the routing decision must be
+   under an hour old. Worth less than it reads (see the caveat below), which is
+   why the route row is now **consumed**: one routing decision authorises at
+   most one discard. It previously authorised an unbounded series, because
+   `new.mp4`, `new (1).mp4` and `new (2).mp4` all satisfy `names_match` against
+   a route recorded as `new.mp4`.
+4. **the kept file genuinely predates the download** — it must be older than
+   the routing decision by at least `MTIME_SLACK_S`. Without this the identity
+   proof could not tell which half of a **uniquify pair** was the new copy, and
+   `/discard` could be pointed at the original and would remove it. The two
+   mtime windows are deliberately disjoint so no file can satisfy both.
+   The two paths must also be **different inodes** (`st_dev`, `st_ino`, not
+   resolved paths — `resolve()` collapses symlinks but not hardlinks).
+5. **the duplication is re-proven at delete time**, and the kept copy must be a
+   **complete** file — see the completeness rule below. Both files are re-stat'd
+   after the digest and must be unchanged, so a file still being written is
+   refused rather than renamed out from under its writer.
 
-**Do not read "five independent proofs" into that list — two of them are
-weaker than they look, and the code says so at each site.** The *age* half of
-check 2 passes vacuously against an in-progress torrent (its mtime is current,
-which `_prove_owned`'s own docstring has always conceded), and `names_match`
-tolerates `uniquify`'s ` (N)` suffix by design, so identity is
-filename-with-slack rather than exact. What actually binds a delete is
-**filename (uniquify-tolerant) + under an hour + the delete-time duplication
-re-proof**. That was an acceptable cost for a reversible rename and it is
-reused verbatim here, which is why check 5 and the trash default carry the real
-weight. Note too that "the bytes exist elsewhere" is not "the seed survives":
-moving a payload out from under qBittorrent breaks seeding regardless, which is
-the other reason the default is reversible.
+**Read check 3 sceptically.** The *age* half passes vacuously against an
+in-progress torrent (its mtime is current, which `_prove_owned`'s docstring has
+always conceded), and `names_match` tolerates `uniquify`'s ` (N)` by design. So
+identity is filename-with-slack, not exact. What actually binds a delete is
+**filename-with-slack + under an hour + one-use-per-decision + check 4's
+timestamp + check 5's re-proof**.
+
+### Completeness: a bounded digest cannot see an unfinished file
+
+qBittorrent **preallocates**, so an in-progress payload has its full final
+`st_size` from the moment it is created. If its first and last pieces have
+landed — the common case, and the default under "download first and last pieces
+first" — its head+tail digest is **byte-identical to a finished copy while the
+middle is still zeros**. `/dedupe` answered `duplicate: true` and `/discard`
+trashed the *complete* browser copy, keeping the partial. No adversary
+required.
+
+`dedupe.py` justifies the 256 KiB bound precisely because the answer is "a
+warning with a keep button, never an automatic destruction" — and then
+`/discard` reused that same digest as its load-bearing proof. So the kept file
+is now additionally required to be non-sparse (`st_blocks * 512 >= st_size`,
+cheap and credential-free) and, when qBittorrent is configured, `progress == 1`.
+A file already in `.dl-router-trash/` is also rejected as proof: containment is
+not visibility, and two discards could otherwise empty the library of a file by
+proving the second against the first's corpse.
+
+### The seeding guard is the payload check, **not** the trash
+
+**Trash protects your bytes and does nothing for seeding.** qBittorrent seeds
+by *path*, so renaming a payload into `.dl-router-trash/` breaks the torrent
+exactly as an `unlink` would. `backfill apply` already refuses to move anything
+live qBittorrent cannot prove is not a payload — and that is the *reversible*
+operation, so the asymmetry was backwards.
+
+`/discard` therefore refuses:
+
+* a **hardlinked** file (`st_nlink > 1`) — the standard layout is a payload
+  hardlinked into a subject directory; a browser download is always `nlink 1`;
+* a **symlink** — `safe_rel_path` resolves, so the discard would remove the
+  target and leave the link dangling;
+* a **sparse** file — preallocated and partly written;
+* and, when qBittorrent **is** configured, anything live state says is a
+  payload, or anything it cannot corroborate at all (including qBittorrent
+  being unreachable). Credentials are deliberately empty on this host, so the
+  three local structural checks are what carry the weight there.
 
 And then it does not `unlink`. The file is renamed into `.dl-router-trash/`
 inside the library root: an atomic same-filesystem move, hidden so both index
 scans skip it, inspectable with `ls`, reversible with `mv`. Set
 `[dedupe] delete_mode = "unlink"` to opt into a real delete.
+
+**Be precise about what the trash guarantees**: it protects the operator's
+bytes — every refusal path above is one `mv` from recovery — and it does *not*
+protect a seed, because qBittorrent seeds by path. It also has no retention, no
+size cap and no reporting: nothing sweeps it and `dl-route status` does not
+mention it, so it grows until emptied by hand (`du -sh …/.dl-router-trash`). A
+cross-filesystem library root cannot use it at all — the move fails closed with
+an `EXDEV` explanation rather than falling back to a non-atomic copy-then-delete.
 
 ---
 
