@@ -35,6 +35,7 @@ configured — the sidecar answers `/healthz` but every routing endpoint returns
 | discarded duplicates | `<library root>/.dl-router-trash/` (hidden; `mv` one back to undo) |
 | service | `systemd --user` unit `dl-router` (from `nix/home.nix`) |
 | extension | `scripts/dl-router/extension/`, loaded unpacked per profile |
+| player rules | `~/.config/dl-router/config.toml` → `[site_rules."<host>".player]` |
 
 **Never print the library root, directory names, filenames, the route log,
 alias keys, real channel ids, forum names or host names into a commit message,
@@ -174,6 +175,65 @@ means *this* profile: the guard asks whether any live process is using this
 headless automation on a throwaway `/tmp` profile does not block it, and a
 stale lock from a crash does not either. It names the pid to quit. `--list` and
 `--dry-run` write nothing and are never gated.
+
+## Player buttons / embedded video downloads
+
+Per-player download buttons let you save embedded video directly from an `<video>`
+element (e.g. `turbo.cr` iframes embedded on a forum page like `simpcity.cr`).
+This uses a **two-layer rule system**:
+
+| Rule type | Keyed on | Purpose |
+|---|---|---|
+| **context rules** | PAGE host (the top-level page) | Extract subject/tags from the page the video is embedded on |
+| **player rules** | EMBED host (the iframe serving the video) | Locate the `<video>` element and extract the media URL |
+
+The content script runs **inside the OOPIF** (out-of-process iframe) — that is
+where the `<video>` element lives, which is why player rules are keyed on the
+embed host, not the page host.
+
+### Config example
+
+```toml
+[site_rules."example-forum.test".context]
+subject = [".p-title-value"]
+
+[site_rules."example-embed.test".player]
+container = ".plyr"
+media = { element = "#main-video", attr = "src" }
+mount = ".video-wrapper"
+label = "Save to library"
+```
+
+Key fields:
+- `container` — the player wrapper element the button mounts into
+- `media` — the `<video>` or `<source>` element + attribute holding the URL
+- `mount` — where the button is inserted in the DOM
+- `label` — button text
+
+### How to identify embed hosts
+
+Use `browser frames` to find cross-origin iframes, then inspect inside them
+for the video element structure. The embed host is the one serving the iframe,
+not the page embedding it.
+
+### Important details
+
+- The media URL is **signed and rotates** — `player_buttons.js` reads it **at
+  click time**, never caches. A stale URL will fail.
+- The "Already have this" badge checks the **source URL ledger** on mount
+  (`GET /have?url=…`).
+- `state.prevents` **double-clicks** via `chrome.storage.local` — the button
+  disables after click until the download is confirmed or the tab changes.
+- Only **HTML5 video with accessible `<video>` elements** are supported. DRM or
+  non-standard players (e.g. nested shadow DOM) will not work.
+
+### Troubleshooting
+
+**"Buttons don't appear"**
+1. Check `site_rules` config — both context and player rules must be present
+2. Verify the embed host matches the rule key exactly (use `browser frames` to
+   confirm the iframe origin)
+3. A **full Brave restart** is required after changing player rule config
 
 ## Backfill — the one dangerous path
 

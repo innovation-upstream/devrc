@@ -285,6 +285,12 @@ data-driven: Open Graph, JSON-LD `Person`/`VideoObject`, `[itemprop=name]`,
 `meta[name=keywords]`, plus a **per-site rules table from config** — adding a
 site is config, not code.
 
+**Player buttons** extend this to embedded video via a two-layer rule system:
+*context rules* (keyed on the page host) extract subject/tags from the hosting
+page; *player rules* (keyed on the embed host) locate the `<video>` element and
+read the signed, rotating media URL at click time. Only HTML5 video with
+accessible `<video>` elements are supported.
+
 **Correlating a download to a context.** A `DownloadItem` carries no `tabId`,
 so there is a three-tier ladder:
 
