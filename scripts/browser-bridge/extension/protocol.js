@@ -1124,6 +1124,106 @@ export function annotateEmulatedRead(data, summary, viaCdp) {
   return data;
 }
 
+// --- the DOCUMENT-PREDATES-EMULATION trap, and its hint --------------------- //
+//
+// The read-path trap above has a twin on the APPLY path, and it is worse because
+// the read annotation cannot see it: emulation applied to an ALREADY-LOADED page
+// is only PARTIALLY effective, and the half that does not take is invisible.
+//
+// MEASURED on real Brave (laptop, extension 0.5.0, https://example.com in an owned
+// tab) — this is the only live evidence this code rests on, do not extend it:
+//   * `emulate iphone-15` on the already-loaded page →
+//       "ontouchstart" in window  === false
+//       typeof TouchEvent         === "undefined"
+//     while navigator.maxTouchPoints === 5, matchMedia("(pointer:coarse)") === true,
+//     matchMedia("(hover:none)") === true, navigator.userAgentData === {mobile:true,
+//     platform:"iOS"} and innerWidth === 393 ALL applied correctly.
+//   * `nav` to the SAME url UNDER emulation, then re-check →
+//       "ontouchstart" in window === true, typeof TouchEvent === "function",
+//       maxTouchPoints === 5, innerWidth === 393.
+//
+// Cause: those two properties are installed on the global at DOCUMENT CREATION, so
+// a live override cannot retroactively add them; metrics/media/UA-CH are queried
+// live and so apply immediately. ⚠ EXACTLY TWO properties were tested. Treat the
+// create-time set as "at least these", never as exhaustive — the note below says
+// so, and any future edit must keep saying so unless someone measures more.
+//
+// The consequence is a confident wrong answer: `open <url>` → `emulate` → read
+// concludes the site has no touch support. PR #251 fixed the docs (emulate THEN
+// nav); this is the same lesson as the F1 read annotation — the ENVELOPE is what
+// actually protects a caller, because it reaches a model that read no docs at all.
+//
+// ⚠ THE WORDING IS LOAD-BEARING (see NOT_EMULATED_READ_NOTE). It names the two
+// measured properties and the remedy (`nav`, re-navigating the same URL is enough),
+// because "something may be wrong" teaches no reflex.
+export const DOCUMENT_PREDATES_EMULATION_NOTE =
+  "This tab already had a document loaded BEFORE these overrides were applied. "
+  + "Properties Chromium installs at DOCUMENT CREATION cannot be added "
+  + "retroactively: measured on Brave, `\"ontouchstart\" in window` stays false and "
+  + "`typeof TouchEvent` stays \"undefined\" here, even though maxTouchPoints, "
+  + "pointer:coarse / hover:none, navigator.userAgentData and innerWidth all did "
+  + "apply. Those two are the only properties measured — assume there are others. "
+  + "REMEDY: `browser nav <url>` now that emulation is on (re-navigating the SAME "
+  + "url is enough), then read again; the new document is created with touch "
+  + "installed.";
+
+// URLs that are NOT a committed document worth warning about. A tab freshly
+// `open`ed sits at about:blank and emulating it is the CORRECT workflow — warning
+// there would train the caller to ignore the hint. `about:blank#foo` /
+// `about:blank?x` are the same empty document with a fragment/query.
+const NO_DOCUMENT_URLS = new Set([
+  "", "about:blank", "about:newtab", "chrome://newtab/", "brave://newtab/",
+]);
+
+// Does this tab URL represent a real, committed document? ONE rule, ONE place —
+// `emulate` is the only caller today, and a second copy at a future call site is
+// how this grows a divergent second answer.
+export function hasCommittedDocument(url) {
+  if (typeof url !== "string") return false;
+  const u = url.trim();
+  if (NO_DOCUMENT_URLS.has(u)) return false;
+  if (u === "about:blank" || u.startsWith("about:blank#")
+      || u.startsWith("about:blank?")) return false;
+  return true;
+}
+
+// The CREATE-TIME signature of a stored emulation state: the part of the state
+// that a document can only pick up by being CREATED under it. Two states with the
+// same signature produce a document with the same create-time properties, so
+// re-emulating an identical device after a `nav` is silent rather than crying wolf.
+//
+// It is deliberately WIDER than the two measured properties (touch), and includes
+// `mobile` and whether a UA override is in force: those are the other inputs
+// Chromium consults at document creation, the measured set is explicitly NOT
+// exhaustive, and a spurious hint costs a re-`nav` while a missed one costs a
+// wrong conclusion about the site. `null`/reset → "none" (no emulation at create).
+export function emulationCreateTimeSignature(state) {
+  if (!state || state.reset) return "none";
+  const touch = state.touch && state.touch.enabled
+    ? String(state.touch.maxTouchPoints) : "off";
+  const mobile = state.metrics ? String(!!state.metrics.mobile) : "null";
+  return `touch:${touch}|mobile:${mobile}|ua:${state.ua ? 1 : 0}`;
+}
+
+// Should `emulate` warn? Pure: the tab's CURRENT url, the signature of the state
+// being applied, and the signature of the state the tab's CURRENT document was
+// created under (undefined/null = "not created by us under emulation").
+export function documentPredatesEmulation(url, stateSignature, documentSignature) {
+  if (!hasCommittedDocument(url)) return false;
+  return (documentSignature || "none") !== stateSignature;
+}
+
+// Annotate an `emulate` SUCCESS envelope with the hint. Same idiom as
+// annotateEmulatedRead — a boolean flag plus `emulationNote` — so a caller sees
+// ONE annotation shape across the feature, not two. Absent entirely when the hint
+// does not fire (an envelope must not grow a field to say "nothing to report").
+export function annotateDocumentPredates(data, fires) {
+  if (!data || typeof data !== "object" || !fires) return data;
+  data.documentPredatesEmulation = true;
+  data.emulationNote = DOCUMENT_PREDATES_EMULATION_NOTE;
+  return data;
+}
+
 // Is this state's touch emulation ON? The predicate `click` branches on to decide
 // between Input.dispatchTouchEvent and Input.dispatchMouseEvent. ONE rule, ONE
 // place — a second copy of `state && state.touch && state.touch.enabled` at the

@@ -26,6 +26,9 @@ import {
   normalizeEmulation, emulationCdpSteps, applyEmulationSteps, emulationSummary,
   isTouchEmulated, touchTapEvents, ALLOWED_OPS, EMULATION_MAX_STEPS,
   CDP_OP_BUDGET_MS, EXEC_OP_BUDGET_MS,
+  hasCommittedDocument, emulationCreateTimeSignature, documentPredatesEmulation,
+  annotateDocumentPredates, DOCUMENT_PREDATES_EMULATION_NOTE,
+  NOT_EMULATED_READ_NOTE,
 } from "../extension/protocol.js";
 
 // --------------------------------------------------------------------------- //
@@ -483,7 +486,7 @@ globalThis.chrome = {
   alarms: { create() {}, onAlarm: { addListener() {} } },
 };
 
-const { OPS, execute, emulationState } =
+const { OPS, execute, emulationState, documentEmulation } =
   await import("../extension/service_worker.js");
 
 function methods() { return sw.cdp.map((c) => c.method); }
@@ -491,7 +494,7 @@ function paramsOf(method) {
   const hit = sw.cdp.find((c) => c.method === method);
   return hit ? hit.params : undefined;
 }
-function fresh() { resetSw(); emulationState.clear(); }
+function fresh() { resetSw(); emulationState.clear(); documentEmulation.clear(); }
 
 // The exact ordered prefix an emulated tab's CDP session must open with.
 const IPHONE_PREFIX = [
@@ -999,4 +1002,245 @@ test("a bad `emulate` is refused with its NAMED error through execute()", async 
   assert.equal(env.error, "unknown_preset:nokia-3310");
   assert.deepEqual(sw.cdp, [], "a refused emulate touches no CDP");
   assert.equal(emulationState.has(TAB_A), false);
+});
+
+// --------------------------------------------------------------------------- //
+// documentPredatesEmulation — the CREATE-TIME hint (manifest 0.6.0)
+//
+// The defect it guards (MEASURED live, laptop, extension 0.5.0, example.com —
+// see protocol.js DOCUMENT_PREDATES_EMULATION_NOTE): `emulate` on an
+// ALREADY-LOADED page leaves `"ontouchstart" in window === false` and
+// `typeof TouchEvent === "undefined"`, while metrics/media/UA-CH all apply. A
+// `nav` UNDER emulation fixes it. PR #251 wrote that down; this makes the
+// ENVELOPE say it, the way the F1 read annotation does.
+//
+// ⚠ NOTHING BELOW OBSERVES A BROWSER. These tests prove the hint fires and clears
+// on the intended state transitions against a MOCKED chrome.debugger. That the
+// remedy (`nav` under emulation) actually installs TouchEvent is the LIVE
+// measurement above, not something this file can re-prove.
+// --------------------------------------------------------------------------- //
+
+test("PURE hasCommittedDocument: an empty/new tab is NOT a committed document", () => {
+  for (const u of ["", "about:blank", "about:blank#x", "about:blank?q=1",
+                   "about:newtab", "chrome://newtab/", "brave://newtab/"]) {
+    assert.equal(hasCommittedDocument(u), false, `${JSON.stringify(u)} must not warn`);
+  }
+  for (const u of ["https://example.com", "http://127.0.0.1:8788/x",
+                   "https://example.com/a#frag"]) {
+    assert.equal(hasCommittedDocument(u), true, `${u} IS a committed document`);
+  }
+  // Defensive: a missing/odd url must not throw and must not warn.
+  for (const u of [undefined, null, 42, {}]) assert.equal(hasCommittedDocument(u), false);
+});
+
+test("PURE createTimeSignature: 'none' for no/reset state, and it SEPARATES devices", () => {
+  assert.equal(emulationCreateTimeSignature(null), "none");
+  assert.equal(emulationCreateTimeSignature({ reset: true }), "none");
+
+  const iphone = normalizeEmulation({ device: "iphone-15" });
+  const sameAgain = normalizeEmulation({ device: "iphone-15" });
+  assert.equal(emulationCreateTimeSignature(iphone),
+               emulationCreateTimeSignature(sameAgain),
+               "the same device must produce the SAME signature — otherwise a "
+               + "re-emulate after nav cries wolf on every call");
+  assert.notEqual(emulationCreateTimeSignature(iphone), "none");
+
+  // Touch off is a DIFFERENT create-time world from touch on: that is the whole
+  // measured property. Same device, touch:false → different signature.
+  const noTouch = normalizeEmulation({ device: "iphone-15", touch: false });
+  assert.notEqual(emulationCreateTimeSignature(noTouch),
+                  emulationCreateTimeSignature(iphone));
+  // …and so is a different touch-point count.
+  const fewer = normalizeEmulation({ device: "iphone-15", maxTouchPoints: 2 });
+  assert.notEqual(emulationCreateTimeSignature(fewer),
+                  emulationCreateTimeSignature(iphone));
+});
+
+test("PURE documentPredatesEmulation: the full decision matrix", () => {
+  const sig = emulationCreateTimeSignature(normalizeEmulation({ device: "iphone-15" }));
+  const other = emulationCreateTimeSignature(
+    normalizeEmulation({ device: "iphone-15", touch: false }));
+
+  // No committed document → never warn, whatever the record says. This is THE
+  // correct workflow (open at about:blank, then emulate) and warning on it would
+  // train the caller to ignore the hint.
+  assert.equal(documentPredatesEmulation("about:blank", sig, undefined), false);
+  assert.equal(documentPredatesEmulation("about:blank", sig, "none"), false);
+
+  // Committed document, no record of us building it under emulation → WARN.
+  assert.equal(documentPredatesEmulation("https://example.com", sig, undefined), true);
+  assert.equal(documentPredatesEmulation("https://example.com", sig, "none"), true);
+  // Built under a DIFFERENT create-time state → still WARN.
+  assert.equal(documentPredatesEmulation("https://example.com", sig, other), true);
+  // Built under THIS exact create-time state → silent.
+  assert.equal(documentPredatesEmulation("https://example.com", sig, sig), false);
+});
+
+test("PURE annotateDocumentPredates: same idiom as the read annotation, absent when silent", () => {
+  const fires = annotateDocumentPredates({ tabId: 1 }, true);
+  assert.equal(fires.documentPredatesEmulation, true);
+  assert.equal(fires.emulationNote, DOCUMENT_PREDATES_EMULATION_NOTE);
+
+  const silent = annotateDocumentPredates({ tabId: 1 }, false);
+  assert.deepEqual(Object.keys(silent), ["tabId"],
+    "a silent hint must not grow the envelope a single field");
+  // Non-objects pass through untouched rather than throwing.
+  assert.equal(annotateDocumentPredates(null, true), null);
+  assert.equal(annotateDocumentPredates("x", true), "x");
+});
+
+test("THE NOTE IS LOAD-BEARING: it names the measured properties, the remedy, and its own limits", () => {
+  const n = DOCUMENT_PREDATES_EMULATION_NOTE;
+  // What is broken — concretely. "something may be wrong" teaches no reflex.
+  assert.ok(n.includes("ontouchstart"), "the note must name ontouchstart");
+  assert.ok(n.includes("TouchEvent"), "the note must name TouchEvent");
+  // What to do about it.
+  assert.ok(/browser nav/.test(n), "the note must give the `nav` remedy");
+  // The accuracy standard: exactly TWO properties were measured. A future edit
+  // that quietly promotes the list to exhaustive fails here.
+  assert.ok(/only properties measured|assume there are others/i.test(n),
+    "the note must NOT present the create-time list as exhaustive");
+  // ONE annotation idiom across the feature: both notes ride `emulationNote`.
+  assert.notEqual(n, NOT_EMULATED_READ_NOTE);
+});
+
+test("GLUE: emulating a tab that ALREADY has a document fires the hint", async () => {
+  fresh();   // TAB_A sits at https://example.com/a — a committed document
+  const out = await OPS.emulate({ tabId: TAB_A, device: "iphone-15" });
+  assert.equal(out.documentPredatesEmulation, true);
+  assert.equal(out.emulationNote, DOCUMENT_PREDATES_EMULATION_NOTE);
+  // The hint is ADDITIVE — the op's normal result is untouched.
+  assert.equal(out.emulation.preset, "iphone-15");
+  assert.deepEqual(out.applied, IPHONE_PREFIX);
+  assert.ok(/sticky per tab/.test(out.note));
+});
+
+test("GLUE: after a `nav` UNDER emulation, re-emulating the SAME device is SILENT", async () => {
+  fresh();
+  const first = await OPS.emulate({ tabId: TAB_A, device: "iphone-15" });
+  assert.equal(first.documentPredatesEmulation, true, "precondition: it fired once");
+
+  await OPS.nav({ tabId: TAB_A, url: "https://example.com/a" });   // built under emulation
+
+  const again = await OPS.emulate({ tabId: TAB_A, device: "iphone-15" });
+  assert.equal(again.documentPredatesEmulation, undefined,
+    "the document WAS created under this emulation — warning again is crying wolf");
+  assert.equal(again.emulationNote, undefined);
+  assert.equal(again.emulation.preset, "iphone-15");
+});
+
+test("GLUE: after a nav under emulation, emulating a DIFFERENT create-time state fires again", async () => {
+  fresh();
+  await OPS.emulate({ tabId: TAB_A, device: "iphone-15" });
+  await OPS.nav({ tabId: TAB_A, url: "https://example.com/a" });
+
+  // touch OFF is a different create-time world — the loaded document has touch
+  // installed, the requested state says it should not.
+  const out = await OPS.emulate({ tabId: TAB_A, device: "iphone-15", touch: false });
+  assert.equal(out.documentPredatesEmulation, true);
+});
+
+test("GLUE: the WRONG ORDER — nav on a plain tab, THEN emulate — fires the hint", async () => {
+  fresh();
+  await OPS.nav({ tabId: TAB_A, url: "https://example.com/loaded-first" });
+  const out = await OPS.emulate({ tabId: TAB_A, device: "iphone-15" });
+  assert.equal(out.documentPredatesEmulation, true,
+    "a document built with NO overrides is exactly the measured defect");
+});
+
+test("GLUE: a FAILED nav under emulation records no document (the old one is still loaded)", async () => {
+  fresh();
+  await OPS.emulate({ tabId: TAB_A, device: "iphone-15" });
+  sw.failMethod = "Page.navigate";
+  await assert.rejects(() => OPS.nav({ tabId: TAB_A, url: "https://example.com/x" }));
+  sw.failMethod = null;
+  const out = await OPS.emulate({ tabId: TAB_A, device: "iphone-15" });
+  assert.equal(out.documentPredatesEmulation, true,
+    "the navigation never committed, so the OLD document is still loaded");
+});
+
+test("GLUE: --reset carries NO hint, and does not forget what the document was built under", async () => {
+  fresh();
+  await OPS.emulate({ tabId: TAB_A, device: "iphone-15" });
+  await OPS.nav({ tabId: TAB_A, url: "https://example.com/a" });
+
+  const reset = await OPS.emulate({ tabId: TAB_A, reset: true });
+  assert.equal(reset.documentPredatesEmulation, undefined,
+    "--reset applies nothing, so there is nothing to warn about");
+  assert.equal(reset.emulationNote, undefined);
+  assert.equal(reset.reset, true);
+
+  // The DOCUMENT is unchanged by a reset — it still has touch installed — so
+  // re-emulating the same device stays silent. (`clearEmulation` must not have
+  // dropped the document record.)
+  const again = await OPS.emulate({ tabId: TAB_A, device: "iphone-15" });
+  assert.equal(again.documentPredatesEmulation, undefined,
+    "--reset must not make a later identical emulate cry wolf");
+});
+
+test("GLUE: a tab with NO emulation state is completely unaffected", async () => {
+  fresh();
+  // The plain nav envelope has not grown a field…
+  const nav = await OPS.nav({ tabId: TAB_B, url: "https://example.com/plain" });
+  assert.deepEqual(Object.keys(nav).sort(), ["tabId", "url", "via"]);
+  assert.equal(nav.via, "tabs.update");
+  // …and a plain read is still un-annotated (the F1 guarantee, unchanged).
+  const read = await OPS.text({ tabId: TAB_B });
+  assert.equal(read.documentPredatesEmulation, undefined);
+  assert.equal(read.emulated, undefined);
+  assert.equal(read.emulationNote, undefined);
+});
+
+test("GLUE: the hint rides ONLY on `emulate` — a read envelope never grows it", async () => {
+  fresh();
+  const emu = await OPS.emulate({ tabId: TAB_A, device: "iphone-15" });
+  assert.equal(emu.documentPredatesEmulation, true, "precondition");
+  const read = await OPS.text({ tabId: TAB_A });
+  assert.equal(read.documentPredatesEmulation, undefined,
+    "the read path has its OWN annotation (notEmulatedRead); two hints on one "
+    + "envelope is two idioms");
+  assert.equal(read.notEmulatedRead, true);
+});
+
+test("GLUE: a vanished / closed / swapped tab drops the document record too", async () => {
+  // A recycled tabId inheriting a stale record would SUPPRESS the hint on a
+  // brand-new tab — the failure mode that matters, since silence is the unsafe
+  // direction here.
+  fresh();
+  await OPS.emulate({ tabId: TAB_A, device: "iphone-15" });
+  await OPS.nav({ tabId: TAB_A, url: "https://example.com/a" });
+  assert.ok(documentEmulation.has(TAB_A), "precondition: the record exists");
+  await OPS.close({ tabId: TAB_A });
+  assert.equal(documentEmulation.has(TAB_A), false, "`close` drops it");
+
+  fresh();
+  await OPS.nav({ tabId: TAB_A, url: "https://example.com/a" });
+  assert.ok(documentEmulation.has(TAB_A));
+  sw.gone.add(TAB_A);
+  await assert.rejects(() => OPS.screenshot({ tabId: TAB_A }), /owned_tab_gone/);
+  assert.equal(documentEmulation.has(TAB_A), false, "a vanished tab drops it");
+
+  fresh();
+  await OPS.nav({ tabId: TAB_A, url: "https://example.com/a" });
+  await OPS.nav({ tabId: TAB_B, url: "https://example.com/b" });
+  for (const fn of sw.removedListeners) fn(TAB_A);
+  assert.equal(documentEmulation.has(TAB_A), false, "onRemoved drops it");
+  for (const fn of sw.replacedListeners) fn(TAB_B, TAB_A);
+  assert.equal(documentEmulation.has(TAB_B), false, "onReplaced drops both ids");
+});
+
+test("TODAY'S CONTRACT: `emulate` on an about:blank tab is REFUSED before it can warn", async () => {
+  // Pinning the CURRENT behaviour, not endorsing it: chrome.debugger may only
+  // attach to http/https (CDP_ATTACHABLE_SCHEMES), so the documented
+  // `open` → `emulate` → `nav` recipe cannot run as written — `emulate` on the
+  // about:blank tab `open` creates is refused. Flagged in the PR; not fixed here.
+  //
+  // It also means the "a freshly opened tab must not warn" property is exercised
+  // at the PURE level above (documentPredatesEmulation("about:blank", …) is
+  // false), which is where it will still hold if this refusal is ever relaxed.
+  fresh();
+  sw.tabs.set(TAB_A, { id: TAB_A, url: "about:blank", title: "", active: true,
+                       status: "complete", windowId: 1 });
+  await assert.rejects(() => OPS.emulate({ tabId: TAB_A, device: "iphone-15" }),
+    /cdp_attach_refused:about:/);
 });

@@ -56,7 +56,8 @@ import {
   // in protocol.js for the central problem and the safety property it buys.
   normalizeEmulation, emulationCdpSteps, applyEmulationSteps, emulationSummary,
   isTouchEmulated, touchTapEvents, DEVICE_PRESETS, PRESET_NAMES,
-  annotateEmulatedRead,
+  annotateEmulatedRead, emulationCreateTimeSignature, documentPredatesEmulation,
+  annotateDocumentPredates,
 } from "./protocol.js";
 
 const DEFAULT_PORT = 8788;
@@ -168,7 +169,7 @@ async function targetTab(cmd) {
 // so a stale entry is not merely untidy — the next tab to inherit the id would be
 // silently emulated by a session that never asked for it.
 function ownedTabGone(tabId) {
-  clearEmulation(tabId);
+  forgetTab(tabId);
   return new Error("owned_tab_gone");
 }
 
@@ -222,12 +223,46 @@ function clearEmulation(tabId) {
   if (tabId != null) emulationState.delete(tabId);
 }
 
+// --- WHICH EMULATION THE TAB'S CURRENT DOCUMENT WAS CREATED UNDER ------------ //
+// tabId -> emulationCreateTimeSignature() of the state in force when THIS bridge
+// navigated the tab. Absent = "we did not create this document under emulation",
+// which is the conservative reading (the `emulate` hint fires).
+//
+// It is a SEPARATE map from emulationState on purpose, and `clearEmulation` does
+// NOT touch it: the two describe different things. `emulate --reset` stops
+// emulating, but the document that a previous emulated `nav` created still HAS
+// touch installed — forgetting that would make a later re-`emulate` cry wolf.
+// It is dropped only when the DOCUMENT can no longer exist: the tab is gone,
+// removed, or swapped (forgetTab below).
+//
+// ⚠ HONEST LIMITATION: only the bridge's own `nav` writes here. A navigation the
+// OPERATOR performs by hand (or a page-initiated one) is not observed, so after
+// one the record can be stale and the hint may not fire. Documented in
+// reference/emulation.md; chrome.tabs.onUpdated was deliberately not used, since
+// it cannot distinguish our own CDP navigation from an out-of-band one without a
+// second piece of mutable state to get wrong.
+const documentEmulation = new Map();
+
+function recordDocumentEmulation(tabId, state) {
+  if (tabId != null) {
+    documentEmulation.set(tabId, emulationCreateTimeSignature(state));
+  }
+}
+
+// The tab itself is gone/retired — drop BOTH maps. Emulation state and the
+// document record have different lifetimes everywhere else, but a recycled tabId
+// must inherit neither.
+function forgetTab(tabId) {
+  clearEmulation(tabId);
+  if (tabId != null) documentEmulation.delete(tabId);
+}
+
 // Drop the state of a tab that no longer exists. Registered at module scope so it
 // runs for EVERY tab close, not only a `close` op — a tab the operator closed by
 // hand must not leave an entry behind that a recycled tabId could later inherit.
 try {
   if (typeof chrome !== "undefined" && chrome.tabs && chrome.tabs.onRemoved) {
-    chrome.tabs.onRemoved.addListener((tabId) => clearEmulation(tabId));
+    chrome.tabs.onRemoved.addListener((tabId) => forgetTab(tabId));
   }
   // onReplaced fires when a tab is SWAPPED for another (a prerender/instant
   // navigation activating): the old tabId is retired WITHOUT onRemoved firing. Left
@@ -240,8 +275,8 @@ try {
   // carrying the state across would claim an emulation that was never applied.
   if (typeof chrome !== "undefined" && chrome.tabs && chrome.tabs.onReplaced) {
     chrome.tabs.onReplaced.addListener((addedTabId, removedTabId) => {
-      clearEmulation(removedTabId);
-      clearEmulation(addedTabId);
+      forgetTab(removedTabId);
+      forgetTab(addedTabId);
     });
   }
 } catch (e) { /* bare unit-test global with no chrome.tabs — nothing to hook */ }
@@ -813,10 +848,20 @@ const OPS = {
       await withCdp(tab.id, tab.url, async (send) => {
         await send("Page.navigate", { url: cmd.url });
       });
+      // The new document WAS created inside the emulated session, so it carries
+      // the create-time properties (touch et al). Recorded so a later `emulate`
+      // with the same create-time signature stays silent instead of crying wolf.
+      // Recorded only AFTER the navigate succeeded — a failed nav leaves the old
+      // document in place, and its old record with it.
+      recordDocumentEmulation(tab.id, emu);
       return { tabId: tab.id, url: cmd.url, via: "cdp",
                emulation: emulationSummary(emu) };
     }
     await chrome.tabs.update(tab.id, { url: cmd.url });
+    // Un-emulated navigation: the new document was created with NO overrides, so
+    // any later `emulate` on it MUST warn. Recording "none" explicitly (rather
+    // than deleting) keeps one writer for this map.
+    recordDocumentEmulation(tab.id, null);
     return { tabId: tab.id, url: cmd.url, via: "tabs.update" };
   },
 
@@ -1043,7 +1088,7 @@ const OPS = {
   // a recycled tabId. Clearing here makes it deterministic.
   async close(cmd) {
     if (!cmd || cmd.tabId == null) throw new Error("missing_tabId");
-    clearEmulation(cmd.tabId);
+    forgetTab(cmd.tabId);
     try {
       await chrome.tabs.remove(cmd.tabId);
       return { closed: cmd.tabId };
@@ -1097,7 +1142,17 @@ const OPS = {
       else emulationState.delete(tab.id);
       throw e;
     }
-    return {
+    // THE CREATE-TIME HINT (protocol.js DOCUMENT_PREDATES_EMULATION_NOTE). Fires
+    // when the tab already holds a committed document that was NOT created under
+    // an emulation with this same create-time signature — i.e. exactly the case
+    // where `ontouchstart`/`TouchEvent` are measurably missing. Silent for the
+    // correct workflow (`open` at about:blank → emulate → nav) and for a re-
+    // `emulate` of the same device after an emulated `nav`.
+    //
+    // `tab.url` is the URL as of the START of this op, which is the document the
+    // overrides just landed on. Deliberately not re-read after the apply: nothing
+    // in `emulate` navigates.
+    return annotateDocumentPredates({
       tabId: tab.id, url: tab.url,
       emulation: emulationSummary(state),
       applied,
@@ -1105,7 +1160,8 @@ const OPS = {
         + "subsequent op's CDP session. Between ops the tab is NOT emulated (the "
         + "overrides die at detach), so a crashed agent cannot leave your browser "
         + "distorted. `browser emulate --reset` stops re-applying.",
-    };
+    }, documentPredatesEmulation(tab.url, emulationCreateTimeSignature(state),
+                                 documentEmulation.get(tab.id)));
   },
 
   // Bring the target tab to the FOREGROUND. THE ONE INTRUSIVE OP — it takes the
@@ -1538,7 +1594,8 @@ if (!(typeof globalThis !== "undefined" && globalThis.BROWSER_BRIDGE_NO_AUTOSTAR
 // `emulationState` is exported for TESTS only — it is the sticky-emulation Map, and
 // asserting "close cleared it" / "a vanished tab dropped it" requires seeing it.
 // Nothing in production reads it from outside this module.
-export { execute, OPS, ALLOWED_OPS, cdpAttached, loop, emulationState };
+export { execute, OPS, ALLOWED_OPS, cdpAttached, loop, emulationState,
+         documentEmulation };
 
 // A read/reset window onto the loop's private liveness state, for tests.
 export const loopState = {

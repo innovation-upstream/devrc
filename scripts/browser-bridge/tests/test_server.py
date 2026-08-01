@@ -3115,11 +3115,12 @@ def test_git_short_head_none_on_missing_dir(tmp_path):
 
 def test_manifest_version_reads_current():
     v = S.manifest_version(path=EXT_DIR / "manifest.json")
-    # Bumped to 0.5.0 for the `emulate` op (device emulation). 0.4.0 was the
-    # poll-loop no-wedge change. The bump is the operator's only falsifiable "is
-    # the new build loaded?" signal, so this assertion is deliberately a literal
-    # — it MUST be updated in the same commit as manifest.json, which is the point.
-    assert isinstance(v, str) and v == "0.5.0"
+    # Bumped to 0.6.0 for the `documentPredatesEmulation` hint on `emulate`.
+    # 0.5.0 was the `emulate` op itself; 0.4.0 the poll-loop no-wedge change. The
+    # bump is the operator's only falsifiable "is the new build loaded?" signal,
+    # so this assertion is deliberately a literal — it MUST be updated in the
+    # same commit as manifest.json, which is the point.
+    assert isinstance(v, str) and v == "0.6.0"
 
 
 def test_manifest_version_prefers_the_deployed_copy_over_the_repo(tmp_path,
@@ -3140,7 +3141,7 @@ def test_manifest_version_falls_back_to_repo_when_not_deployed(tmp_path,
     reporting the repo manifest instead of going null."""
     monkeypatch.setattr(S, "_DEPLOYED_EXT_MANIFEST", tmp_path / "absent.json")
     monkeypatch.setattr(S, "_EXT_MANIFEST_PATH", EXT_DIR / "manifest.json")
-    assert S.manifest_version() == "0.5.0"
+    assert S.manifest_version() == "0.6.0"
 
 
 def test_manifest_version_none_when_neither_exists(tmp_path, monkeypatch):
