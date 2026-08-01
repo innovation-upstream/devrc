@@ -36,8 +36,9 @@ test("op set mirrors the server contract", () => {
   // frames/click/type/key are the CDP (chrome.debugger) ops.
   assert.deepEqual(
     [...ALLOWED_OPS].sort(),
-    ["activate", "click", "close", "eval", "frames", "getHtml", "key", "nav",
-     "open", "ping", "screenshot", "tabs", "text", "type", "upload", "wake"],
+    ["activate", "click", "close", "emulate", "eval", "frames", "getHtml", "key",
+     "nav", "open", "ping", "screenshot", "tabs", "text", "type", "upload",
+     "wake"],
   );
 });
 

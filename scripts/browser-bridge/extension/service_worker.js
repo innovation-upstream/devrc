@@ -51,6 +51,12 @@ import {
   // the CDP < exec < server-cmd_timeout ordering).
   promiseWithTimeout, EXEC_OP_BUDGET_MS, POLL_BUDGET_MS, RESULT_BUDGET_MS,
   LOOP_STALL_MS, STORAGE_BUDGET_MS,
+  // `emulate` op: device emulation (viewport/touch/UA+UA-CH/media/geo/tz) that is
+  // STICKY per tab because CDP overrides die at detach — see the EMULATION section
+  // in protocol.js for the central problem and the safety property it buys.
+  normalizeEmulation, emulationCdpSteps, applyEmulationSteps, emulationSummary,
+  isTouchEmulated, touchTapEvents, DEVICE_PRESETS, PRESET_NAMES,
+  annotateEmulatedRead,
 } from "./protocol.js";
 
 const DEFAULT_PORT = 8788;
@@ -145,10 +151,25 @@ async function targetTab(cmd) {
     try {
       return await chrome.tabs.get(cmd.tabId);
     } catch (e) {
-      throw new Error("owned_tab_gone");   // the tab was closed out-of-band
+      throw ownedTabGone(cmd.tabId);       // the tab was closed out-of-band
     }
   }
   return activeTab();
+}
+
+// THE single "this tab is gone" reaction: drop any emulation state for it, then
+// produce the standard error. Two layers detect the same condition — targetTab (on
+// every op) and withCdp's attach (the CDP-readiness check) — and the CLEANUP must
+// not be written twice; one copy would inevitably be the one that got a later fix.
+//
+// Clearing here rather than relying on chrome.tabs.onRemoved matters because
+// onRemoved is an event whose timing we do not control, and it does not fire at
+// all for a tab that was already gone when we first looked. Chrome RECYCLES tabIds,
+// so a stale entry is not merely untidy — the next tab to inherit the id would be
+// silently emulated by a session that never asked for it.
+function ownedTabGone(tabId) {
+  clearEmulation(tabId);
+  return new Error("owned_tab_gone");
 }
 
 // Read the tab's `document.visibilityState` (top frame) so a read op can self-
@@ -179,6 +200,52 @@ async function tabVisibilityState(tabId) {
 // us out-of-band (tab crash/close, or the user hitting the debug banner's Cancel).
 const cdpAttached = new Set();
 
+// --- EMULATION state (the sticky half) -------------------------------------- //
+// tabId -> the normalized emulation state from normalizeEmulation(). This is the
+// ONLY mutable emulation state in the extension.
+//
+// It is IN-MEMORY on purpose (not chrome.storage): CDP overrides die at detach, so
+// state that outlived the service worker would describe an emulation that is not
+// actually applied anywhere — a lie that survives a restart is worse than a
+// forgotten one. Losing it on worker eviction is the correct, safe failure: the
+// operator's tab is already un-emulated at that point.
+//
+// Emptied by: `emulate --reset`, `close`, chrome.tabs.onRemoved, and a failed
+// tabs.get during CDP attach (the tab went away out-of-band).
+const emulationState = new Map();
+
+function emulationFor(tabId) {
+  return tabId == null ? null : (emulationState.get(tabId) || null);
+}
+
+function clearEmulation(tabId) {
+  if (tabId != null) emulationState.delete(tabId);
+}
+
+// Drop the state of a tab that no longer exists. Registered at module scope so it
+// runs for EVERY tab close, not only a `close` op — a tab the operator closed by
+// hand must not leave an entry behind that a recycled tabId could later inherit.
+try {
+  if (typeof chrome !== "undefined" && chrome.tabs && chrome.tabs.onRemoved) {
+    chrome.tabs.onRemoved.addListener((tabId) => clearEmulation(tabId));
+  }
+  // onReplaced fires when a tab is SWAPPED for another (a prerender/instant
+  // navigation activating): the old tabId is retired WITHOUT onRemoved firing. Left
+  // unhandled that strands a Map entry on an id Chrome can recycle. Narrow — the
+  // tab also loses its server-side ownership, and `ownedTabGone` catches the common
+  // vanish — but it costs two lines and the restart is already being paid for.
+  //
+  // The emulation deliberately does NOT follow the tab to its new id: the swapped-in
+  // document is a different page that was rendered WITHOUT the overrides, so
+  // carrying the state across would claim an emulation that was never applied.
+  if (typeof chrome !== "undefined" && chrome.tabs && chrome.tabs.onReplaced) {
+    chrome.tabs.onReplaced.addListener((addedTabId, removedTabId) => {
+      clearEmulation(removedTabId);
+      clearEmulation(addedTabId);
+    });
+  }
+} catch (e) { /* bare unit-test global with no chrome.tabs — nothing to hook */ }
+
 function sendCdp(target, method, params) {
   return chrome.debugger.sendCommand(target, method, params || {});
 }
@@ -203,7 +270,7 @@ async function withCdp(tabId, url, run) {
       // other hang; this turns the common case into an immediate clear error.
       let tab;
       try { tab = await chrome.tabs.get(tabId); }
-      catch (e) { throw new Error("owned_tab_gone"); }
+      catch (e) { throw ownedTabGone(tabId); }   // clears emulation state too
       assertTabCdpReady(tab);
       await chrome.debugger.attach(target, CDP_VERSION);
       cdpAttached.add(tabId);
@@ -226,7 +293,25 @@ async function withCdp(tabId, url, run) {
     // {tabId, sessionId}); omitted → the tab's top session.
     send: (method, params, sessionId) =>
       sendCdp(sessionId != null ? { ...target, sessionId } : target, method, params),
-    run: (send) => run(send),
+    // ⚠ THE STICKY RE-APPLICATION CHOKE POINT. Every CDP op in this file goes
+    // through withCdp, so applying the tab's emulation HERE — once, before `run`
+    // — makes every one of them emulation-aware without a single call site
+    // knowing about it. That is deliberate: patching `screenshot` and `click`
+    // individually would fix today's two visible cases and regenerate the bug at
+    // the next CDP op someone adds. One rule, one place.
+    //
+    // Apply-then-act ordering matters and is asserted by the tests: the overrides
+    // must be live BEFORE anything measures layout (a --fullpage clip's
+    // Page.getLayoutMetrics, a click's element rect) or navigates.
+    //
+    // A failing apply propagates normally — withCdpSession still detaches in its
+    // finally and execute() turns it into an ordinary error envelope, so a bad
+    // emulation can fail an op but can never wedge the poll loop.
+    run: async (send) => {
+      const steps = emulationCdpSteps(emulationFor(tabId));
+      if (steps.length) await applyEmulationSteps(send, steps);
+      return run(send);
+    },
   });
 }
 
@@ -465,6 +550,18 @@ function assertWakeNotFramed(cmd, isWakeOp) {
 // session, so the visibilityState to report is the one the PROBE saw there — not a
 // separate chrome.scripting probe of the (already re-throttled) tab. `woke` is
 // true when the probe confirms the page was actually un-throttled during the read.
+// Annotate a READ result with whether it actually observed the EMULATED page.
+//
+// `viaCdp` is passed per CALL SITE, not inferred from the op, because that is
+// genuinely where the answer lives: `text --wake` and `eval --frame` route through
+// withCdp (→ emulated), while the default `text`/`html`/`eval` take
+// chrome.scripting (→ NOT emulated). Same op, different answer, depending on a
+// flag — which is exactly why the envelope has to say so rather than leaving the
+// caller to know this file's routing table. See NOT_EMULATED_READ_NOTE.
+function emuAnnotate(data, tabId, viaCdp) {
+  return annotateEmulatedRead(data, emulationSummary(emulationFor(tabId)), viaCdp);
+}
+
 function wakeAnnotate(data, w) {
   const vis = w && w.probe ? w.probe.visibilityState : null;
   annotateVisibility(data, vis);
@@ -488,8 +585,10 @@ const OPS = {
       const html = await execInFrame(tab.id, frame.frameId, frameReadHtmlFn, []);
       // Report the FRAME's own url (not the top tab url) so the caller can confirm it
       // read the intended frame (#190 reported the top url for a frame read).
-      return annotateVisibility(
-        { url: frame.url || tab.url, title: tab.title, html, frame: cmd.frame }, vis);
+      // chrome.scripting into the frame: NO CDP -> the REAL, un-emulated DOM.
+      return emuAnnotate(annotateVisibility(
+        { url: frame.url || tab.url, title: tab.title, html, frame: cmd.frame }, vis),
+        tab.id, false);
     }
     // --wake → un-throttle the tab and read INSIDE the same CDP session (the
     // un-throttled state does not survive detach — see protocol.js `wake`). This
@@ -510,7 +609,9 @@ const OPS = {
         });
         return inj ? inj.result : undefined;
       });
-      return wakeAnnotate({ url: tab.url, title: tab.title, html: w.value }, w);
+      return emuAnnotate(
+        wakeAnnotate({ url: tab.url, title: tab.title, html: w.value }, w),
+        tab.id, true);   // cdpWake -> withCdp -> emulation WAS applied
     }
     // No frame → the lighter chrome.scripting top-frame read (no debugger banner).
     const vis = await tabVisibilityState(tab.id);
@@ -518,7 +619,9 @@ const OPS = {
       target: { tabId: tab.id },
       func: () => document.documentElement.outerHTML,
     });
-    return annotateVisibility({ url: tab.url, title: tab.title, html: inj.result }, vis);
+    return emuAnnotate(
+      annotateVisibility({ url: tab.url, title: tab.title, html: inj.result }, vis),
+      tab.id, false);   // chrome.scripting: NO CDP -> the REAL, un-emulated DOM
   },
 
   // Cheap read: the tab's VISIBLE innerText (optionally scoped to a CSS
@@ -540,8 +643,10 @@ const OPS = {
       const raw = await execInFrame(tab.id, frame.frameId, frameReadTextFn, [sel]);
       const { text, truncated } = normalizeText(raw, cap);
       // Report the FRAME's own url (see getHtml) so the caller confirms the right frame.
-      return annotateVisibility(
-        { url: frame.url || tab.url, title: tab.title, text, truncated, frame: cmd.frame }, vis);
+      // chrome.scripting into the frame: NO CDP -> the REAL, un-emulated DOM.
+      return emuAnnotate(annotateVisibility(
+        { url: frame.url || tab.url, title: tab.title, text, truncated, frame: cmd.frame },
+        vis), tab.id, false);
     }
     // --wake → un-throttle + read in ONE CDP session (opt-in; see getHtml).
     if (cmd && cmd.wake) {
@@ -559,7 +664,9 @@ const OPS = {
         return inj ? inj.result : undefined;
       });
       const { text, truncated } = normalizeText(w.value, cap);
-      return wakeAnnotate({ url: tab.url, title: tab.title, text, truncated }, w);
+      return emuAnnotate(
+        wakeAnnotate({ url: tab.url, title: tab.title, text, truncated }, w),
+        tab.id, true);   // cdpWake -> withCdp -> emulation WAS applied
     }
     const vis = await tabVisibilityState(tab.id);
     const [inj] = await chrome.scripting.executeScript({
@@ -571,7 +678,9 @@ const OPS = {
       },
     });
     const { text, truncated } = normalizeText(inj.result, cap);
-    return annotateVisibility({ url: tab.url, title: tab.title, text, truncated }, vis);
+    return emuAnnotate(
+      annotateVisibility({ url: tab.url, title: tab.title, text, truncated }, vis),
+      tab.id, false);   // chrome.scripting: NO CDP -> the REAL, un-emulated DOM
   },
 
   async eval(cmd) {
@@ -590,7 +699,9 @@ const OPS = {
       // via CDP (the #190 fix), so this probe does not regress the eval mechanism.
       const vis = await tabVisibilityState(tab.id);
       const value = await cdpFrameEval(tab.id, tab.url, frame, cmd.js);
-      return annotateVisibility({ url: frame.url || tab.url, value, frame: cmd.frame }, vis);
+      return emuAnnotate(
+        annotateVisibility({ url: frame.url || tab.url, value, frame: cmd.frame }, vis),
+        tab.id, true);   // cdpFrameEval -> withCdp -> emulation WAS applied
     }
     // --wake → un-throttle + evaluate in ONE CDP session (opt-in; see getHtml).
     // Uses the SAME expression/statement pair + never-silent-null contract as
@@ -616,7 +727,8 @@ const OPS = {
         }
         return evalValueOrThrow(res);
       });
-      return wakeAnnotate({ url: tab.url, value: w.value }, w);
+      return emuAnnotate(wakeAnnotate({ url: tab.url, value: w.value }, w),
+                         tab.id, true);   // cdpWake -> withCdp -> emulated
     }
     const vis = await tabVisibilityState(tab.id);
     // chrome.scripting runs the top-frame eval in the page's MAIN world (world:
@@ -648,23 +760,64 @@ const OPS = {
         return fn();
       },
     });
-    return annotateVisibility({ url: tab.url, value: inj.result }, vis);
+    return emuAnnotate(
+      annotateVisibility({ url: tab.url, value: inj.result }, vis),
+      tab.id, false);   // chrome.scripting MAIN world: NO CDP -> un-emulated
   },
 
+  // Each tab additionally carries `emulation` when this service worker holds a
+  // device-emulation state for it (absent otherwise, so the common listing is
+  // unchanged). SURFACING IT HERE IS THE POINT: an emulation left on by a session
+  // that wandered off is otherwise invisible, and "why is this page rendering at
+  // 393px" becomes a mystery instead of a line in `browser tabs`. `emulatedTabs`
+  // repeats the ids at the top level so a caller does not have to scan.
   async tabs() {
     const tabs = await chrome.tabs.query({});
-    return {
-      tabs: tabs.map((t) => ({
+    const emulated = [];
+    const out = tabs.map((t) => {
+      const entry = {
         id: t.id, url: t.url, title: t.title,
         active: t.active, windowId: t.windowId,
-      })),
-    };
+      };
+      const summary = emulationSummary(emulationFor(t.id));
+      if (summary) { entry.emulation = summary; emulated.push(t.id); }
+      return entry;
+    });
+    return { tabs: out, emulatedTabs: emulated };
   },
 
+  // Navigate the owned/target tab.
+  //
+  // TWO paths, and the split exists BECAUSE of emulation. The plain path is
+  // chrome.tabs.update — cheap, no debugger banner, unchanged behaviour.
+  //
+  // On an EMULATED tab that is wrong: chrome.tabs.update navigates outside any CDP
+  // session, so the page's first paint, its `@media` evaluation and — critically —
+  // its server-side and client-side UA sniffing all happen with the REAL desktop
+  // metrics and the REAL user agent. The emulated values would only appear on the
+  // next op, by which time a UA-sniffing site has already served the desktop
+  // bundle. So an emulated tab navigates via CDP Page.navigate INSIDE a session
+  // that has already applied the overrides (withCdp's run wrapper does that before
+  // this callback is reached).
+  //
+  // Honest limitation, documented in reference/emulation.md: the overrides still
+  // die when this session detaches, moments after the navigation is committed. A
+  // page that re-measures the viewport LATER (after load, on a resize listener)
+  // will see the real window until the next op re-applies. Waking/reading with an
+  // op is what re-establishes it — that is inherent to the detach-scoped design,
+  // and it is the price of the safety property (see protocol.js EMULATION).
   async nav(cmd) {
     const tab = await targetTab(cmd);
+    const emu = emulationFor(tab.id);
+    if (emu) {
+      await withCdp(tab.id, tab.url, async (send) => {
+        await send("Page.navigate", { url: cmd.url });
+      });
+      return { tabId: tab.id, url: cmd.url, via: "cdp",
+               emulation: emulationSummary(emu) };
+    }
     await chrome.tabs.update(tab.id, { url: cmd.url });
-    return { tabId: tab.id, url: cmd.url };
+    return { tabId: tab.id, url: cmd.url, via: "tabs.update" };
   },
 
   // Screenshot the owned/target tab. PRIMARY path is CDP Page.captureScreenshot,
@@ -675,10 +828,20 @@ const OPS = {
   // --fullpage); any failure there falls through to the CDP path. `--fullpage`
   // captures the whole scrollable document (CDP only). Attach is REFUSED on a
   // privileged tab (assertCdpAttachable inside withCdp) before any attach.
+  //
+  // ⚠ THE FAST PATH IS DISABLED ON AN EMULATED TAB, and that is not an
+  // optimization detail — it is a correctness gate. chrome.tabs.captureVisibleTab
+  // never attaches the debugger, so it captures the tab's REAL, un-emulated
+  // rendering. On an emulated tab it would return a perfectly valid PNG of the
+  // desktop layout in answer to "screenshot my iPhone viewport": a confident wrong
+  // answer, indistinguishable from a correct one, on the single op whose entire
+  // job is to show you what the device sees. Forcing CDP costs a debugger banner
+  // and is unambiguously the right trade.
   async screenshot(cmd) {
     const tab = await targetTab(cmd);
     const fullpage = !!(cmd && cmd.fullpage);
-    if (tab.active && !fullpage) {
+    const emulated = !!emulationFor(tab.id);
+    if (tab.active && !fullpage && !emulated) {
       // Fast path — no debugger attach/banner. Chrome throttles captureVisibleTab to
       // ~2/sec; captureWithRetry spaces the (rare) retry ≥ the quota window.
       try {
@@ -690,6 +853,10 @@ const OPS = {
     const dataUrl = await withCdp(tab.id, tab.url, async (send) => {
       const params = { format: "png" };
       if (fullpage) {
+        // Page.getLayoutMetrics runs AFTER withCdp's run wrapper has applied the
+        // emulation (see the choke point in withCdp), so on an emulated tab these
+        // metrics — and therefore the --fullpage clip — are the EMULATED ones. The
+        // ordering is asserted by a test rather than trusted to this comment.
         const metrics = await send("Page.getLayoutMetrics");
         params.clip = fullPageClip(metrics);
         params.captureBeyondViewport = true;
@@ -697,7 +864,9 @@ const OPS = {
       const { data } = await send("Page.captureScreenshot", params);
       return `data:image/png;base64,${data}`;
     });
-    return { url: tab.url, dataUrl, via: "cdp" };
+    const summary = emulationSummary(emulationFor(tab.id));
+    return { url: tab.url, dataUrl, via: "cdp",
+             ...(summary ? { emulation: summary } : {}) };
   },
 
   // List the target tab's frames ({frameId,url,parentFrameId}) via
@@ -750,18 +919,32 @@ const OPS = {
       return { url: frame.url || tab.url, clicked: selector, x: res.x, y: res.y,
                frame: cmd.frame, trusted: false };
     }
+    // On a TOUCH-EMULATED tab the top-frame path dispatches Input.dispatchTouchEvent
+    // (touchStart/touchEnd) instead of mouse events — which is exactly what DevTools
+    // does with touch emulation on. This is not cosmetic: Chromium synthesizes
+    // compatibility MOUSE events from touch, but never touch events from mouse, so
+    // a mobile UI whose handler is `touchstart` (or a library that binds pointer
+    // events with `pointerType === "touch"`) simply never fires under a mouse click
+    // — the tap "does nothing" and the agent reports a broken page that is not
+    // broken. Mouse remains the behaviour on every non-touch-emulated tab.
+    const emu = emulationFor(tab.id);
+    const touch = isTouchEmulated(emu);
     const point = await withCdp(tab.id, tab.url, async (send) => {
       const rect = await cdpEval(send, undefined, elementRectExpression(selector));
       if (!rect) throw new Error(`element_not_found:${selector}`);
       const p = clickPoint(rect, { x: 0, y: 0 });
-      const mouse = (type) => send("Input.dispatchMouseEvent",
-        { type, x: p.x, y: p.y, button: "left", buttons: 1, clickCount: 1 });
-      await mouse("mousePressed");
-      await mouse("mouseReleased");
+      if (touch) {
+        for (const ev of touchTapEvents(p.x, p.y)) await send(ev.method, ev.params);
+      } else {
+        const mouse = (type) => send("Input.dispatchMouseEvent",
+          { type, x: p.x, y: p.y, button: "left", buttons: 1, clickCount: 1 });
+        await mouse("mousePressed");
+        await mouse("mouseReleased");
+      }
       return p;
     });
     return { url: tab.url, clicked: selector, x: point.x, y: point.y,
-             frame: null, trusted: true };
+             frame: null, trusted: true, via: touch ? "touch" : "mouse" };
   },
 
   // Type `text` (optionally focus `--selector` first). `--frame` → SYNTHETIC input
@@ -853,14 +1036,76 @@ const OPS = {
   // closed out-of-band, `chrome.tabs.remove` rejects — treat that as success
   // (the desired end-state, tab absent, already holds) so the session's stale
   // ownership is cleanly dropped instead of surfacing a spurious error.
+  //
+  // Drops any emulation state for the tab FIRST, on both paths. onRemoved would
+  // normally do it, but it is an event we do not control the timing of (and does
+  // not fire at all on the already-gone path), and a stale entry is inheritable by
+  // a recycled tabId. Clearing here makes it deterministic.
   async close(cmd) {
     if (!cmd || cmd.tabId == null) throw new Error("missing_tabId");
+    clearEmulation(cmd.tabId);
     try {
       await chrome.tabs.remove(cmd.tabId);
       return { closed: cmd.tabId };
     } catch (e) {
       return { closed: cmd.tabId, alreadyGone: true };
     }
+  },
+
+  // --- `emulate`: device emulation for real mobile testing ------------------ //
+  //
+  // Stores (or clears) the tab's emulation state and applies it ONCE immediately so
+  // the caller gets a straight yes/no on whether Chromium accepted the overrides,
+  // rather than discovering a bad timezone id three ops later. Every subsequent op
+  // that attaches CDP re-applies it (see the choke point in withCdp).
+  //
+  // `--reset` means "STOP RE-APPLYING". It does not need to undo anything: the
+  // overrides died at the previous op's detach, and the tab is already un-emulated
+  // right now. That is the whole safety property (protocol.js EMULATION).
+  //
+  // OWNERSHIP is enforced SERVER-side (server.py OWNED_TAB_ONLY_OPS → the named
+  // `not_owned_tab` refusal), not here, because the server is the only side that
+  // knows which session owns which tab. The extension still refuses a privileged
+  // scheme before attaching, as every CDP op does.
+  async emulate(cmd) {
+    const tab = await targetTab(cmd);
+    const state = normalizeEmulation(cmd);   // throws a NAMED error on bad input
+
+    if (state.reset) {
+      const had = emulationSummary(emulationFor(tab.id));
+      clearEmulation(tab.id);
+      return {
+        tabId: tab.id, url: tab.url, reset: true,
+        wasEmulating: had,
+        note: "emulation stopped. Nothing had to be undone — CDP overrides die at "
+          + "debugger detach, so the tab was already un-emulated between ops.",
+      };
+    }
+
+    // Store BEFORE applying so the apply goes through the same withCdp choke point
+    // every other op uses — one code path, no second copy of the apply logic. A
+    // failed apply rolls the state back: leaving it stored would mean every later
+    // op re-attempts an emulation the caller was told had failed.
+    const previous = emulationState.get(tab.id) || null;
+    emulationState.set(tab.id, state);
+    let applied;
+    try {
+      applied = await withCdp(tab.id, tab.url, async () =>
+        emulationCdpSteps(state).map((s) => s.method));
+    } catch (e) {
+      if (previous) emulationState.set(tab.id, previous);
+      else emulationState.delete(tab.id);
+      throw e;
+    }
+    return {
+      tabId: tab.id, url: tab.url,
+      emulation: emulationSummary(state),
+      applied,
+      note: "sticky per tab: these overrides are re-applied inside every "
+        + "subsequent op's CDP session. Between ops the tab is NOT emulated (the "
+        + "overrides die at detach), so a crashed agent cannot leave your browser "
+        + "distorted. `browser emulate --reset` stops re-applying.",
+    };
   },
 
   // Bring the target tab to the FOREGROUND. THE ONE INTRUSIVE OP — it takes the
@@ -1290,7 +1535,10 @@ if (!(typeof globalThis !== "undefined" && globalThis.BROWSER_BRIDGE_NO_AUTOSTAR
 // (tests/loop_wedge.test.mjs) has to drive a real loop iteration against a
 // never-settling op and observe that it releases, which cannot be asserted from
 // the outside. Nothing in the extension imports them.
-export { execute, OPS, ALLOWED_OPS, cdpAttached, loop };
+// `emulationState` is exported for TESTS only — it is the sticky-emulation Map, and
+// asserting "close cleared it" / "a vanished tab dropped it" requires seeing it.
+// Nothing in production reads it from outside this module.
+export { execute, OPS, ALLOWED_OPS, cdpAttached, loop, emulationState };
 
 // A read/reset window onto the loop's private liveness state, for tests.
 export const loopState = {
