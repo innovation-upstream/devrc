@@ -95,6 +95,7 @@ Result payloads land under `.result.data`.
    from a genuinely broken site. `open` creates tabs hidden, so this is the common
    case. Check `data.hidden` / `document.visibilityState`, then **`wake`** — never
    `activate`, and spoofing `visibilityState` does not recover the page.
+   **A reload RE-throttles: re-`wake` or clicks go silently inert.**
    → `reference/spa-wake.md`
 
 ## When things look broken — triage
