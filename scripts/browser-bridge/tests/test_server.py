@@ -3630,9 +3630,12 @@ def test_whoami_stale_verdict_is_null_for_an_unreporting_extension():
 # The version fields cannot answer this — a repo-path 0.3.1 and a deployed-path
 # 0.3.1 are identical on every version field. chrome.runtime.id is path-derived,
 # so it is the only signal that can confirm the migration off the git-mutable
-# path took. (The path→id derivation itself is INFERRED from documented Chromium
-# behaviour, not measured here — which is exactly why the server only REPORTS
-# the id and never computes an expected one.)
+# path took. (The path→id derivation is now MEASURED — sha256(abs path), first 32
+# hex chars, nibbles mapped a-p; see extension/README.md. The server still only
+# REPORTS the id and never computes an expected one: that is a deliberate
+# separate decision, because an unknown path — a hand-loaded third profile, or a
+# rollback to the repo path — must degrade to null, never to a false "wrong
+# directory" alarm.)
 def test_health_and_whoami_surface_the_reported_extension_id():
     srv, _ = _serve()
     ext = FakeExtension(srv, instance_id="a", label="alpha",
