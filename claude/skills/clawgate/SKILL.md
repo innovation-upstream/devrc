@@ -31,6 +31,7 @@ to `~/.claude/skills/clawgate/reference/` after a home-manager switch.
 | `reference/troubleshooting.md` | something is broken — symptom-first index (push, PWA icon, stale SW, RBAC, agent model) |
 | `reference/hooks.md` | installing hooks on another host, or the Stop / 💡 Suggestions path |
 | `reference/agent-hardening.md` | locking down any kubeclaw agent devpod (securityContext, networkPolicy, FQDN allowlist) |
+| `reference/element-references.md` | a task body contains element references from the browser extension and you need to find them in source |
 
 Session memories: `clawgate-phase2` · `clawgate-phase3` · `clawgate-runbooks` ·
 `clawgate-loop-validation` · `clawgate-version-before-build` · `authelia-passkey-sso` ·
@@ -231,6 +232,12 @@ breaks the whole create.** Grammar in one line: lowercased, ≤20 tags, ≤64 ru
 (hard-validated), `initiative:` (soft), `gate:` (**blocks dispatch, 409**), `auto:dispatch` (off).
 🔴 That **400 is a load-bearing WIRE CONTRACT** — producers key their fail-open retry on it. Full
 grammar, rationale, and the `title`-vs-`directory` rules: `reference/internals.md`.
+
+⚠ **A task body may contain element references picked with the browser extension** — lines like
+`` - `#remix-row-cf23 > div.flex > button.grid` — button "Delete remix" (host/path · prev · next) ``.
+🔑 **Do NOT search the selector first** (it is the least durable signal): work domain/path →
+adjacent text → selector → accessible name. Full procedure, worked example, and the
+`buildEnrichment` developer note: `reference/element-references.md`.
 
 ## hook management
 - The PermissionRequest hook is global + on by default. Disable for one session: launch with
