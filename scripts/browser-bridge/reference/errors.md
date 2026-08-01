@@ -136,12 +136,26 @@ old build.
 **`id` answers the other question: WHICH DIRECTORY did Brave load?** An unpacked
 extension's id is derived from its absolute path, so the repo-path load and the
 deployed-path load report the **same version but different ids** — version alone
-cannot confirm the migration took. ⚠ That derivation is INFERRED from documented
-Chromium behaviour and is **not measured here**: treat a changed id as evidence,
-not proof. Practical use — **record each profile's id right after re-pointing it**
-(e.g. in your notes), then compare later. The server deliberately does not compute
-an expected id; `whoami`'s `bridge.extension_dir_expected` just tells you which
-directory it *should* be.
+cannot confirm the migration took. ✅ That derivation is **MEASURED**
+(2026-08-01, Brave/Chromium on both NixOS hosts, unpacked extensions, two
+paths — not generalised to packed extensions or other browsers): the id is
+`sha256(absolute path)` → first 32 hex chars → each nibble `0-f` mapped to
+`a-p`, with **no per-profile component**, so two profiles on one directory
+report one id.
+
+```python
+h = hashlib.sha256(path.encode()).hexdigest()[:32]
+ext_id = "".join(chr(ord("a") + int(c, 16)) for c in h)
+```
+
+Known values: repo path `~/workspace/devrc/scripts/browser-bridge/extension` →
+`pkkoninbaeicfalpdkkmcknhnacjjjpi`; deployed path
+`~/.local/share/browser-bridge-ext` → `bgbkamdlkdleahpgdgmjipjbgmepgenk`. So you
+can **predict the id in advance** and check a re-point against it, not just
+before-vs-after. Read the "before" id off the `brave://extensions` card *before*
+clicking Remove — Remove wipes `chrome.storage.local`. The server still does not
+compute an expected id (open follow-up); `whoami`'s
+`bridge.extension_dir_expected` just tells you which directory it *should* be.
 
 **Contract for any future extension change that must be provably loaded:** bump
 `extension/manifest.json` AND add a new discriminator (a new op name, or a new

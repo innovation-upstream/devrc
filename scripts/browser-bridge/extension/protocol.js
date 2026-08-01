@@ -2281,8 +2281,10 @@ export function capHeaderValue(s, max = MAX_HEADER_VALUE_CHARS) {
 // so the repo-path load and the ~/.local/share/browser-bridge-ext/ load have
 // DIFFERENT ids while reporting the SAME version. It is the only field that can
 // answer "did the migration off the git-mutable path actually take?".
-// ⚠ INFERRED from documented Chromium behaviour, NOT measured here — treat a
-// changed id as evidence, and record the post-re-point id per profile.
+// MEASURED (2026-08-01; Brave/Chromium on both NixOS hosts, unpacked
+// extensions, two paths): id = sha256(absolute path), first 32 hex chars, each
+// nibble 0-f mapped to a-p. PATH ONLY — no per-profile component. So the id is
+// computable in advance; see extension/README.md "The path→id derivation".
 export function pollHeaders(instanceId, label, active, extVersion, extId) {
   const h = { "X-Bridge-Instance-Id": String(instanceId || "") };
   if (label) h["X-Bridge-Label"] = encodeURIComponent(capHeaderValue(label));
