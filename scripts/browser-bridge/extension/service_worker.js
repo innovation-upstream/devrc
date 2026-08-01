@@ -1271,9 +1271,12 @@ const OPS = {
   // extension's ID is derived from its absolute path, so a repo-path load and a
   // ~/.local/share/browser-bridge-ext/ load report the same VERSION but
   // different IDs. Version alone therefore cannot confirm the migration took.
-  // ⚠ The path→id derivation is INFERRED from documented Chromium behaviour and
-  // is NOT measured here — confirm it live by recording the id before and after
-  // re-pointing a profile.
+  // The path→id derivation is MEASURED (2026-08-01; Brave/Chromium on both
+  // NixOS hosts, unpacked extensions, two paths): sha256(absolute path), first
+  // 32 hex chars, each nibble 0-f mapped to a-p, PATH ONLY — no per-profile
+  // component, so two profiles on one directory report one id. The expected id
+  // is therefore computable in advance; see extension/README.md "The path→id
+  // derivation (MEASURED)".
   async ping() {
     return { pong: true, extensionVersion: extensionVersion(),
              id: extensionId(), ops: ALLOWED_OPS.slice() };

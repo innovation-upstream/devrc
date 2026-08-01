@@ -52,11 +52,12 @@
 #                               hint. Use this — not two version strings — to
 #                               answer "did my ↻ actually load the new
 #                               extension?". `id` is path-derived, so it also
-#                               answers "from WHICH directory?" (INFERRED from
-#                               Chromium docs, not measured — compare it against
-#                               the id you recorded after re-pointing, not
-#                               against a guess). Pass --instance when two
-#                               profiles are connected, else 409 ambiguous.
+#                               answers "from WHICH directory?" — MEASURED, and
+#                               PREDICTABLE in advance: sha256(abs path), first
+#                               32 hex chars, each nibble 0-f mapped to a-p. See
+#                               extension/README.md -> "The path→id derivation
+#                               (MEASURED)". Pass --instance when two profiles
+#                               are connected, else 409 ambiguous.
 #   browser instances         — list connected instances as JSON (key/label/url)
 #   browser open [url]        — open a NEW tab this session owns (default about:blank);
 #                               subsequent ops route to it. Prints its tabId.

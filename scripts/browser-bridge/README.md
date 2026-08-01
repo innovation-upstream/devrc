@@ -925,12 +925,34 @@ took — only reading the path off `brave://extensions` by hand. Surfaced per
 instance as `extension_id` in `whoami`/`health`, next to
 `bridge.extension_dir_expected` (the directory Brave should be pointed at).
 
-⚠ **INFERRED, not measured.** The path→id derivation comes from documented
-Chromium behaviour; nothing here has observed it. Consequently the server
-**never computes an expected id** — a wrong derivation would raise false "wrong
-directory" alarms. The workflow is instead: record each profile's id right after
-re-pointing it, then compare later. Confirming the id actually changes with the
-load path is an open live-verification item.
+✅ **MEASURED (2026-08-01).** The id is `sha256(absolute path)` → first 32 hex
+chars → each nibble `0-f` mapped to `a-p`:
+
+```python
+h = hashlib.sha256(path.encode()).hexdigest()[:32]
+ext_id = "".join(chr(ord("a") + int(c, 16)) for c in h)
+```
+
+Three independent confirmations: the formula reproduces the
+`pkkoninbaeicfalpdkkmcknhnacjjjpi` the laptop reported while loaded from
+`/home/zach/workspace/devrc/scripts/browser-bridge/extension`; it *predicted*
+`bgbkamdlkdleahpgdgmjipjbgmepgenk` for
+`/home/zach/.local/share/browser-bridge-ext` and `ping` returned exactly that
+after the re-point; and the hash takes the **path only, with no profile
+component** — both laptop profiles on one path report one id (measured twice,
+repo path then deployed path), and the workbench reports the same
+`pkkoni…` for the same absolute repo path.
+
+⚠ **Scope:** Brave/Chromium on the two NixOS hosts, **unpacked** extensions, two
+paths. Not generalised to packed extensions or other browsers.
+
+**Consequence:** the id an operator should see is now **predictable in advance**
+from the target path, so a re-point can be checked against a computed
+expectation instead of only before-vs-after. Read the "before" id off the
+`brave://extensions` card **before clicking Remove** (Remove wipes
+`chrome.storage.local`). The server still **does not compute an expected id** —
+that is a deliberate follow-up needing its own PR, not an oversight; see
+`extension/README.md` → "The path→id derivation (MEASURED)".
 
 **Contract for any extension change that must be provably loaded:** bump
 `extension/manifest.json`'s `version` AND add a new discriminator (a new op name,

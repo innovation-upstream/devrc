@@ -154,11 +154,14 @@ come back).
 3. Toggle **Developer mode** (top-right).
 4. Find the **Browser Bridge (command channel)** card. **Before touching it,
    write down the `ID` shown on that card** together with its **path** — this is
-   the only "before" reading you can take, and it is what makes the path→id
-   claim falsifiable in step 9. (`ping` cannot give it to you: the loaded build
-   is 0.2.0, which has no `ping` op and answers `unknown_op`.) Then, if the path
-   is under `~/workspace/devrc/…`, click **Remove** (this drops that profile's
-   `chrome.storage.local` — token/port/label/`instanceId` — hence step 7).
+   the only "before" reading you can take, and **Remove wipes it**. (`ping`
+   cannot give it to you: the loaded build is 0.2.0, which has no `ping` op and
+   answers `unknown_op`.) You can also **compute what it should be** from the
+   path — see [The path→id derivation](#the-pathid-derivation-measured) below —
+   so this reading is now a confirmation, not the only source of truth. Then, if
+   the path is under `~/workspace/devrc/…`, click **Remove** (this drops that
+   profile's `chrome.storage.local` — token/port/label/`instanceId` — hence
+   step 7).
 5. **Load unpacked** → select `~/.local/share/browser-bridge-ext/`.
    (`Ctrl+L` in the GTK file chooser lets you type the path.)
 6. Confirm any permission re-prompt (`debugger`, `webNavigation`).
@@ -176,27 +179,55 @@ come back).
    `unknown_op` from `ping` means the OLD build is still loaded — go to the
    reload section below.
 9. **Record this profile's `id`** (from `ping`, or `extension_id` in `whoami`)
-   somewhere you keep notes, and **compare it against the id you wrote down in
-   step 4** — they should DIFFER, because the load path changed. That comparison
-   is the only test of the path→id premise this whole migration rests on; if the
-   id is unchanged, say so and see the checklist item near the end of this file.
-   Thereafter a *changed* id means the profile got re-pointed at a different
-   directory — the one thing the version fields cannot tell you. ⚠ The path→id
-   derivation is INFERRED from documented Chromium behaviour, not measured here;
-   the recorded id is a baseline to compare against, not a computed expectation.
-   (Nothing computes an expected id, on purpose: a wrong derivation would raise
-   false alarms.)
+   and **compare it against both** the id you wrote down in step 4 (it must
+   DIFFER — the load path changed) **and the id computed from the new path**
+   (it must MATCH). For `~/.local/share/browser-bridge-ext` that computed value
+   is `bgbkamdlkdleahpgdgmjipjbgmepgenk`; for the repo path
+   `~/workspace/devrc/scripts/browser-bridge/extension` it is
+   `pkkoninbaeicfalpdkkmcknhnacjjjpi`. Thereafter a *changed* id means the
+   profile got re-pointed at a different directory — the one thing the version
+   fields cannot tell you. (The server still does not compute an expected id;
+   that is a deliberate open follow-up, not an oversight — see below.)
 
 Repeat 2–9 in the other profile's window. The profiles are independent: one can
 be on the new path while the other is still on the repo path.
 
-⚠ **Open question, cheap to settle while you are here:** do the two profiles,
-once BOTH point at `~/.local/share/browser-bridge-ext/`, report the SAME id or
-different ones? Chromium is documented to derive an unpacked extension's id from
-a hash of the **absolute path only**, which would make them identical — but that
-is INFERRED on both sides and nothing here has measured it. It does not affect
-the step-9 comparison (that is before-vs-after on ONE profile), but please note
-which you observe and correct this paragraph.
+#### The path→id derivation (MEASURED)
+
+An unpacked extension's `chrome.runtime.id` is derived from the **absolute
+directory path only** — no profile component. The derivation is
+`sha256(path)` → first 32 hex chars → each nibble `0-f` mapped to `a-p`:
+
+```python
+h = hashlib.sha256(path.encode()).hexdigest()[:32]
+ext_id = "".join(chr(ord("a") + int(c, 16)) for c in h)
+```
+
+Measured 2026-08-01, three independent ways:
+
+1. **Reproduced by computation.** With the extension loaded from
+   `/home/zach/workspace/devrc/scripts/browser-bridge/extension`, the laptop
+   reported `pkkoninbaeicfalpdkkmcknhnacjjjpi`; the formula reproduces that
+   string exactly.
+2. **Predicted, then confirmed.** Before re-pointing, the formula predicted
+   `bgbkamdlkdleahpgdgmjipjbgmepgenk` for
+   `/home/zach/.local/share/browser-bridge-ext`. After the operator re-pointed,
+   `ping` returned exactly that.
+3. **Path only, no profile component.** Both laptop profiles on the repo path
+   reported the SAME id, and after migrating both reported the same
+   deployed-path id. The **workbench** — a different host, same absolute repo
+   path — reports `pkkoninbaeicfalpdkkmcknhnacjjjpi` too.
+
+⚠ **Scope of the measurement:** Brave/Chromium on these two NixOS hosts, for
+**unpacked** extensions, at two paths. Nothing here was measured for packed
+extensions or for any other browser — do not assume it carries over.
+
+**Operational consequence:** the id is now **predictable in advance** from the
+target path, so you can know what it *should* be rather than only comparing
+before-vs-after. The "before" reading off the `brave://extensions` card is still
+worth taking **before you click Remove** (Remove wipes `chrome.storage.local`),
+but it is no longer the only thing standing between you and an unfalsifiable
+migration.
 
 ### Rollback (if the deployed directory will not load)
 
@@ -334,23 +365,20 @@ The chrome.* glue needs a real browser — verify by hand after loading:
       `browser health` / `browser whoami` show `extension_stale:false` for that
       instance. A build older than the `ping` op returns `unknown_op` + a
       non-zero exit instead — the intended "the reload did NOT take" answer.
-- [ ] **The `id` changes when the load path changes** (the one claim this whole
-      migration rests on, and it is INFERRED, not measured).
-      ⚠ **You cannot get the "before" value from `ping`** — the build currently
-      loaded from the repo path is 0.2.0, which has no `ping` op and answers
-      `unknown_op`. Read the **ID shown on the extension's card in
-      `brave://extensions`** instead (enable Developer mode; the card shows both
-      the ID and the load path). Capture it **before** you re-point, or the
-      comparison becomes impossible. Then re-point to
-      `~/.local/share/browser-bridge-ext/` and compare against `ping`'s `id`
-      (or that card's ID again). If it is UNCHANGED, `id` does not track the
-      directory and the write-ups in this file, `../README.md`,
-      `../reference/errors.md` and the repo `CLAUDE.md` must be corrected.
-- [ ] **Same path, two profiles — same id or not?** Once BOTH profiles point at
-      `~/.local/share/browser-bridge-ext/`, compare their ids. Chromium is
-      documented to hash the absolute PATH only (→ they should MATCH), but that
-      is inferred, not measured, and this pass gets the answer for free. Record
-      what you see and fix the paragraph after step 9 in this file.
+- [x] **The `id` changes when the load path changes** — MEASURED 2026-08-01, and
+      the id is now computable from the path in advance (see "The path→id
+      derivation (MEASURED)" above). ⚠ **You still cannot get the "before" value
+      from `ping`** — the build loaded from the repo path is 0.2.0, which has no
+      `ping` op and answers `unknown_op`. Read the **ID shown on the extension's
+      card in `brave://extensions`** (enable Developer mode; the card shows both
+      the ID and the load path) **before clicking Remove**, since Remove wipes
+      that profile's `chrome.storage.local`. Expected values:
+      repo path → `pkkoninbaeicfalpdkkmcknhnacjjjpi`, deployed path →
+      `bgbkamdlkdleahpgdgmjipjbgmepgenk`.
+- [x] **Same path, two profiles — SAME id.** Measured on both laptop profiles,
+      twice (both on the repo path, then both on the deployed path), and the
+      workbench reports the same repo-path id. The hash takes the absolute path
+      only; there is no per-profile component.
 - [ ] **`ping` is inert:** running it does not change the focused tab, the
       focused window, or any page (it touches no tab at all).
 - [ ] `browser html` on a logged-in tab returns markup containing logged-in-only
