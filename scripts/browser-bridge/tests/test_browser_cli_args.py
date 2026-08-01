@@ -271,6 +271,92 @@ def test_no_positional_subcommands_reject_a_stray_arg_after_the_separator(bridge
 # `emulate` — flags already work on either side of the preset; pin it, and pin
 # that `--` feeds the preset rather than dropping it.
 # --------------------------------------------------------------------------- #
+SINGLE_POSITIONAL = [
+    # subcommand, args producing "empty first positional then a second one",
+    # the fragment of the duplicate-rejection message
+    ("js", ["--", "", "SECOND"], "exactly one JS argument"),
+    ("text", ["--", "", "#second"], "at most one selector"),
+    ("type", ["--", "", "SECOND"], "one text arg"),
+    ("key", ["--", "", "Enter"], "one key name"),
+    ("emulate", ["--", "", "iphone-15"], "at most one preset name"),
+    ("screenshot", ["--", "", "/tmp/x.png"], "at most one path"),
+]
+
+
+@pytest.mark.parametrize("sub,args,needle", SINGLE_POSITIONAL)
+def test_an_empty_first_positional_is_not_silently_overwritten(bridge, sub, args,
+                                                               needle):
+    """REGRESSION (audit finding on PR #251). The five sibling `--` loops used the
+    OLD `[ -z "$var" ] || die` guard, which is FALSY for an empty positional — so a
+    second one silently OVERWROTE the first and went on the wire with exit 0:
+
+        browser type -- '' SECOND   → rc 0, {"op":"type","text":"SECOND"}
+        browser text -- '' '#second' → rc 0, {"selector":"#second"}
+
+    Wrong value on the wire, exit 0 — the exact class this PR exists to remove.
+    All six now route through the single pos_add/pos_rest choke point, which
+    tracks "a positional was SEEN" instead."""
+    before = len(bridge.bodies)
+    cp = bridge.run(sub, *args)
+    assert cp.returncode != 0, f"{sub} {args}: expected a usage error"
+    assert needle in cp.stderr, cp.stderr
+    assert len(bridge.bodies) == before, "nothing may reach the wire on a usage error"
+
+
+@pytest.mark.parametrize("sub,args,needle", SINGLE_POSITIONAL)
+def test_the_same_duplicate_is_rejected_without_the_separator(bridge, sub, args,
+                                                              needle):
+    """The `*)` arm and the `--` arm must agree — they are the same choke point.
+    Same inputs, minus the `--`."""
+    before = len(bridge.bodies)
+    cp = bridge.run(sub, *args[1:])
+    assert cp.returncode != 0, f"{sub} {args[1:]}: expected a usage error"
+    assert needle in cp.stderr, cp.stderr
+    assert len(bridge.bodies) == before
+
+
+def test_screenshot_rejects_an_explicitly_empty_path(bridge):
+    """`screenshot` alone means "write a temp file"; `screenshot -- ''` is a
+    mistake, and POS_SEEN is what distinguishes them."""
+    cp = bridge.run("screenshot", "--", "")
+    assert cp.returncode != 0 and "must not be empty" in cp.stderr
+
+
+def test_nav_error_names_the_flag_not_the_innocent_url(bridge):
+    """`browser nav --wake <url>` is the flag-order confusion this PR is about;
+    pointing at the trailing url ("got extra: https://…") sends the reader to the
+    wrong argument."""
+    cp = bridge.run("nav", "--wake", "https://a.test")
+    assert cp.returncode != 0
+    assert "takes no flags" in cp.stderr and "--wake" in cp.stderr
+    assert "Put the url first" in cp.stderr
+
+
+def test_help_does_not_require_a_token_file(tmp_path):
+    """The hermetic nix gate has no ~/.config, so a token-gated --help FAILED it
+    (measured at 69f5334). --help touches neither the server nor the token."""
+    env = dict(os.environ,
+               BROWSER_BRIDGE_TOKEN_FILE=str(tmp_path / "definitely-absent"))
+    for args in (["--help"], ["-h"], ["help"], []):
+        cp = subprocess.run(["bash", str(CLI), *args], env=env,
+                            capture_output=True, text=True, timeout=60)
+        assert cp.returncode == 0, f"{args}: {cp.stderr}"
+        assert "FLAG ORDER / END OF FLAGS" in cp.stdout, args
+        assert "token file" not in cp.stderr, args
+
+
+def test_help_documents_the_end_of_flags_separator_generally(tmp_path):
+    """`--` semantics changed for six subcommands, so the doc entry must not live
+    only under `js`."""
+    env = dict(os.environ,
+               BROWSER_BRIDGE_TOKEN_FILE=str(tmp_path / "absent"))
+    out = subprocess.run(["bash", str(CLI), "--help"], env=env,
+                         capture_output=True, text=True, timeout=60).stdout
+    head = out.split("FLAG ORDER / END OF FLAGS")[1]
+    for sub in ("js", "text", "type", "screenshot"):
+        assert sub in head, f"{sub} missing from the end-of-flags entry"
+
+
 def test_emulate_preset_and_flags_are_order_independent(bridge):
     a = _body(bridge, "emulate", "--color-scheme", "dark", "iphone-15")
     b = _body(bridge, "emulate", "iphone-15", "--color-scheme", "dark")

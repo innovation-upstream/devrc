@@ -73,11 +73,19 @@
             # real safety_gate/severity_tag/build_summary via bash+jq+grep; without
             # these on PATH the suite pytest-skips and the gate goes green without
             # ever running the invariant (e.g. "TASK-with-risk STILL escalates").
-            # curl: the `browser` CLI talks to the bridge with curl, and
-            # test_browser_cli_args.py drives the REAL script against a stub
-            # LOOPBACK server (still hermetic — no outbound network). Without curl
-            # on PATH that suite pytest-skips and the gate goes green without ever
-            # running the flag-order invariant it exists to pin.
+            # curl: the `browser` CLI shells out to curl, and two suites drive the
+            # REAL script (test_server.py, and test_browser_cli_args.py against a
+            # stub LOOPBACK server — still hermetic, no outbound network).
+            #
+            # MEASURED, not assumed: `nix build .#checks.x86_64-linux.pytests` at
+            # 69f5334 (before this line) exited 1 with
+            #   5 failed, 258 passed, 41 skipped
+            # — four `AssertionError: browser: curl not found on PATH` in
+            # test_server.py (those callers are NOT skip-guarded), plus one
+            # `token file not found/readable` from the --help test. So the gate was
+            # RED, not "green while silently skipping": 41 test_server.py tests
+            # skipped AND five failed. Adding curl here (with the --help/token fix
+            # in the CLI) is what takes it green and makes those 41 actually run.
             nativeBuildInputs = [ pyEnv pkgs.bash pkgs.ripgrep pkgs.git pkgs.util-linux pkgs.jq pkgs.gnugrep pkgs.curl ];
           }
           ''
