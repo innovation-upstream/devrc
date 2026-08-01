@@ -20,6 +20,14 @@ a parse error that reads as the FEATURE being broken.
 The invariant pinned here: for every subcommand that accepts both flags and a
 positional, the two orders must produce a BYTE-IDENTICAL request body.
 
+MUTATION RESULT (`git checkout origin/main -- scripts/browser-bridge/browser`,
+control verified non-empty: 21 insertions / 82 deletions):
+  - 14 of these tests go RED on the pre-fix parser — they are genuine REGRESSION
+    coverage.
+  - 5 stay green on the pre-fix parser and are labelled `INVARIANT GUARD` below.
+    They pin behaviour the bug never broke (back-compat that the fix must not
+    take away); they are NOT evidence the fix works.
+
 Run: nix-shell -p python312Packages.pytest curl --run \\
        "pytest scripts/browser-bridge/tests/test_browser_cli_args.py"
 """
@@ -155,7 +163,7 @@ def test_wake_with_ms_is_order_independent(bridge, sub):
 
 
 def test_js_without_wake_sends_no_wake_field(bridge):
-    """The load-bearing half of wake_fields: a plain read must go over the wire
+    """INVARIANT GUARD (green pre-fix). The load-bearing half of wake_fields: a plain read must go over the wire
     byte-identically to before, so the extension keeps the light no-banner path."""
     b = _body(bridge, "js", "document.title")
     assert "wake" not in b and "waitMs" not in b
@@ -176,12 +184,13 @@ def test_js_expression_beginning_with_a_dash_needs_the_end_of_flags_separator(br
 
 
 def test_js_still_accepts_an_empty_expression(bridge):
-    """`browser js ''` kept its old meaning — the parser tracks "a positional was
+    """INVARIANT GUARD (green pre-fix). `browser js ''` kept its old meaning — the parser tracks "a positional was
     SEEN", not "the positional is non-empty"."""
     assert _body(bridge, "js", "")["js"] == ""
 
 
 def test_js_rejects_a_second_expression_and_an_unknown_flag(bridge):
+    """INVARIANT GUARD (green pre-fix) — back-compat on the rejection paths."""
     for args in (("js", "1", "2"), ("js", "--", "1", "2")):
         cp = bridge.run(*args)
         assert cp.returncode != 0, args
@@ -202,6 +211,8 @@ def test_js_with_no_expression_at_all_is_a_usage_error(bridge):
 # pin that it STAYS so, and cover the `--` handling that was fixed alongside).
 # --------------------------------------------------------------------------- #
 def test_text_selector_and_flags_are_order_independent(bridge):
+    """INVARIANT GUARD (green pre-fix) — `text` was ALREADY order-free; this pins
+    that the js/eval fix did not regress the op it was modelled on."""
     a = _body(bridge, "text", "--wake", "--max-bytes", "64", "main h1")
     b = _body(bridge, "text", "main h1", "--wake", "--max-bytes", "64")
     c = _body(bridge, "text", "--max-bytes=64", "main h1", "--wake")
@@ -221,6 +232,8 @@ def test_text_end_of_flags_separator_does_not_swallow_the_selector(bridge):
 # `-`-leading value keeps working), but an extra arg is no longer dropped.
 # --------------------------------------------------------------------------- #
 def test_nav_open_click_keep_a_bare_positional(bridge):
+    """INVARIANT GUARD (green pre-fix) — these take NO flags, so their positional
+    stays bare and a `-`-leading value must keep working with no `--`."""
     assert _body(bridge, "nav", "https://example.com")["url"] == "https://example.com"
     assert _body(bridge, "open", "https://example.com")["url"] == "https://example.com"
     # A selector that starts with `-` must NOT need an escape here.

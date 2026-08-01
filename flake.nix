@@ -73,7 +73,12 @@
             # real safety_gate/severity_tag/build_summary via bash+jq+grep; without
             # these on PATH the suite pytest-skips and the gate goes green without
             # ever running the invariant (e.g. "TASK-with-risk STILL escalates").
-            nativeBuildInputs = [ pyEnv pkgs.bash pkgs.ripgrep pkgs.git pkgs.util-linux pkgs.jq pkgs.gnugrep ];
+            # curl: the `browser` CLI talks to the bridge with curl, and
+            # test_browser_cli_args.py drives the REAL script against a stub
+            # LOOPBACK server (still hermetic — no outbound network). Without curl
+            # on PATH that suite pytest-skips and the gate goes green without ever
+            # running the flag-order invariant it exists to pin.
+            nativeBuildInputs = [ pyEnv pkgs.bash pkgs.ripgrep pkgs.git pkgs.util-linux pkgs.jq pkgs.gnugrep pkgs.curl ];
           }
           ''
             cp -r ${./.} src

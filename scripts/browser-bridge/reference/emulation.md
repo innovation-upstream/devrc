@@ -12,8 +12,9 @@ Requires extension **0.5.0+**. On an older build the op fails with `unknown_op`
 ## The 30-second version
 
 ```bash
-browser open https://example.com     # emulation is OWNED-TAB-ONLY
-browser emulate iphone-15
+browser open                         # emulation is OWNED-TAB-ONLY (about:blank)
+browser emulate iphone-15            # ← emulate FIRST …
+browser nav https://example.com      # ← … then LOAD. This order is load-bearing.
 browser screenshot                   # ← captured at 393×852 @3x, as an iPhone
 browser click '#menu'                # ← dispatched as a TOUCH tap
 browser emulate --reset
@@ -21,9 +22,77 @@ browser emulate --reset
 
 `browser emulate --list` prints the preset names without touching the browser.
 
-🔴 **Before you trust a `text`/`html`/`js` read on an emulated tab, read
-"`text` / `html` / `js` do NOT read the emulated page" below.** Those three ops
-return the REAL desktop DOM; `--wake` is what reads the emulated one.
+🔴 **Two traps, both of which produce a confident wrong answer. Read both before
+you trust anything you read off an emulated tab:**
+
+1. **Order:** `emulate` **then** `nav`. Emulating an already-loaded page does not
+   give it the touch **API** — see "🔴 Emulate BEFORE you load" immediately below.
+2. **Read path:** `text`/`html`/`js` return the REAL desktop DOM; `--wake` is what
+   reads the emulated one — see "`text` / `html` / `js` do NOT read the emulated
+   page".
+
+---
+
+## 🔴 Emulate BEFORE you load — a live override cannot add the touch API
+
+**Applying `emulate` to a tab that has already committed a document leaves the
+page without `ontouchstart` and without `TouchEvent`, while every other mobile
+signal reads correctly.** A feature-detecting site therefore concludes it is on a
+non-touch device, and an agent reading that concludes the site has no touch
+support. Wrong, confidently, and in exactly the shape this feature exists to
+prevent.
+
+The cause is where each signal lives. `window.ontouchstart` and the `TouchEvent`
+constructor are installed on the global **at document creation** — CDP's
+`Emulation.setTouchEmulationEnabled` sets the flag the *next* document is built
+with, and cannot retroactively install properties on a global that already exists.
+Viewport metrics, media features and the UA/UA-CH values are queried **live** by
+the page every time it asks, so overriding them takes effect immediately.
+
+**Measured** (2026-07-31, live Brave, extension 0.5.0, `https://example.com` in an
+owned tab, `iphone-15`):
+
+| signal | `emulate` on an ALREADY-LOADED page | after `nav` UNDER emulation |
+|---|---|---|
+| `innerWidth` × `innerHeight` | ✅ `393` × `852` | ✅ `393` × `852` |
+| `devicePixelRatio` | ✅ `3` | ✅ `3` |
+| `navigator.maxTouchPoints` | ✅ `5` | ✅ `5` |
+| `matchMedia("(pointer:coarse)")` | ✅ `true` | ✅ `true` |
+| `matchMedia("(hover:none)")` | ✅ `true` | ✅ `true` |
+| `navigator.userAgent` + `userAgentData` | ✅ iPhone / `{mobile:true, platform:"iOS"}` | ✅ same |
+| `"ontouchstart" in window` | ❌ **`false`** | ✅ `true` |
+| `typeof TouchEvent` | ❌ **`undefined`** | ✅ `"function"` |
+
+So: **anything queried live applies at once; anything installed on the global at
+document creation needs a document load.** Today that second set is the touch API
+surface. Treat the list as the measured cases, not as proven exhaustive — any
+other create-time global would behave the same way.
+
+### The rule
+
+```bash
+browser open                      # about:blank — nothing committed yet
+browser emulate iphone-15
+browser nav <url>                 # the document is BUILT under emulation
+# ... now read / click / screenshot
+```
+
+If the tab is already on the page you want, **re-`nav` to it** after `emulate`
+(`browser nav <same-url>`) before reading or interacting. `nav` on an emulated tab
+goes through CDP inside the session that has already applied the overrides, so the
+new document is created with touch enabled and with the mobile UA visible to any
+load-time sniffing.
+
+⚠ The natural-looking order — `open <url>` → `emulate` → interact — is the WRONG
+one, which is why the 30-second recipe above opens `about:blank`. `browser click`
+still dispatches touch *events* on such a tab (that is driven by the stored
+emulation state, not by the page's API surface), so a tap can work while the
+page's own `'ontouchstart' in window` feature-detect has already sent it down the
+desktop branch.
+
+**There is no envelope warning for this yet** — the `emulated`/`notEmulatedRead`
+annotation covers the read-path trap, not this one. See "Envelope hint (not
+implemented)" at the end of this page.
 
 ---
 
@@ -289,6 +358,32 @@ Deliberately **excluded**: the UA string (long, operator-supplied free text; the
 preset name identifies it anyway) and the geolocation **coordinates** — an emulated
 lat/lon is a place the operator chose to pretend to be, and only its *presence* is
 recorded. No URL, no page content, as everywhere else.
+
+---
+
+## Envelope hint (NOT implemented — deliberate, and why)
+
+The lesson from the read-path trap is that **the envelope is the protection that
+works regardless of which docs were read**: `notEmulatedRead` + `emulationNote`
+warn a model that never opened this file. The document-order trap deserves the
+same treatment — `emulate` returning something like
+`documentPredatesEmulation: true` when the target tab already has a committed
+document (anything other than a fresh `about:blank`), with a note saying "re-`nav`
+before reading; the touch API is not installed on this document".
+
+It is **not implemented here on purpose.** The check has to run where the tab's
+state is known — `handleEmulate` in `extension/protocol.js` — so it is an
+extension code change, and the deployed extension is loaded from
+`~/.local/share/browser-bridge-ext/`: shipping it means a manifest bump and a FULL
+Brave restart on **both** profiles, which had just been done for 0.5.0. Doing it
+inside a docs-and-CLI fix would also have meant claiming a behaviour change that
+cannot be live-verified without driving the browser.
+
+**Follow-up, when the next extension bump happens anyway:** add the flag in
+`handleEmulate`, surface it in the CLI as a stderr warning next to the existing
+`_hidden_warn`, and cover it in `tests/emulation.test.mjs`. Until then this page
+and the `README` pointer are the only warning, which is precisely the weaker form
+of protection that motivates doing it.
 
 ---
 

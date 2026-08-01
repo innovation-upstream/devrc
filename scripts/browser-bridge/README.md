@@ -463,6 +463,21 @@ error. Own-tab-only + typed-op invariants are unchanged (no raw-CDP passthrough)
 Full operator/agent documentation lives in `reference/emulation.md` (preset metrics
 and their provenance, every flag, every error). What follows is the design record.
 
+🔴 **Workflow rule — `emulate` BEFORE you load, not after.** Applying emulation to
+a tab that has **already committed a document** leaves that document without
+`ontouchstart` and without `TouchEvent` (measured 2026-07-31 on live Brave, ext
+0.5.0, `example.com`, `iphone-15`: `"ontouchstart" in window` → `false`,
+`typeof TouchEvent` → `undefined`) while `innerWidth`/`devicePixelRatio`,
+`navigator.maxTouchPoints` (5), `(pointer:coarse)`, `(hover:none)` and the UA/UA-CH
+values are all correct. Those two are installed on the global **at document
+creation**, so a live override cannot add them retroactively; everything else the
+page queries live. A feature-detecting site then reports "no touch support" and an
+agent believes it. The order that works is `browser open` (about:blank) →
+`browser emulate <preset>` → `browser nav <url>` → read/interact; if the tab is
+already on the page, **re-`nav` to it** after `emulate`. There is **no envelope
+warning for this yet** — see "Envelope hint (NOT implemented)" in
+`reference/emulation.md` for the follow-up and why it was not shipped here.
+
 ### The central problem: CDP emulation dies at detach
 
 `withCdpSession` **always** detaches in its `finally` — that is invariant #2, and it
