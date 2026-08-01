@@ -398,7 +398,10 @@ const sw = {
   events: [],              // ordered "attach"/"detach" + method names
   tabs: new Map(),
   gone: new Set(),         // tabIds chrome.tabs.get must reject for
+  frames: [],              // chrome.webNavigation.getAllFrames result
+  frameTree: null,         // CDP Page.getFrameTree result (same-process --frame)
   removedListeners: [],
+  replacedListeners: [],
   tabsUpdate: [],
   tabsRemove: [],
   layoutMetrics: { cssContentSize: { width: 393, height: 4200 } },
@@ -415,6 +418,8 @@ function resetSw() {
   sw.tabsRemove = [];
   sw.failMethod = null;
   sw.hangMethod = null;
+  sw.frames = [];
+  sw.frameTree = null;
   sw.tabs = new Map([
     [TAB_A, { id: TAB_A, url: "https://example.com/a", title: "A",
               active: true, status: "complete", windowId: 1 }],
@@ -427,7 +432,7 @@ resetSw();
 globalThis.BROWSER_BRIDGE_NO_AUTOSTART = true;
 globalThis.BROWSER_BRIDGE_ACTIVATE_TIMING = { settleMs: 0, pollMs: 1 };
 globalThis.chrome = {
-  webNavigation: { async getAllFrames() { return []; } },
+  webNavigation: { async getAllFrames() { return sw.frames; } },
   scripting: {
     async executeScript() { return [{ result: { visibilityState: "visible" } }]; },
   },
@@ -446,6 +451,7 @@ globalThis.chrome = {
     async update(id, props) { sw.tabsUpdate.push({ id, props }); return sw.tabs.get(id); },
     async remove(id) { sw.tabsRemove.push(id); sw.gone.add(id); sw.tabs.delete(id); },
     onRemoved: { addListener(fn) { sw.removedListeners.push(fn); } },
+    onReplaced: { addListener(fn) { sw.replacedListeners.push(fn); } },
   },
   windows: { async update() {} },
   debugger: {
@@ -461,6 +467,8 @@ globalThis.chrome = {
       if (sw.failMethod === method) throw new Error(`cdp_failed:${method}`);
       if (method === "Page.captureScreenshot") return { data: "QkJCQg==" };
       if (method === "Page.getLayoutMetrics") return sw.layoutMetrics;
+      if (method === "Page.getFrameTree") return { frameTree: sw.frameTree };
+      if (method === "Page.createIsolatedWorld") return { executionContextId: 42 };
       if (method === "Runtime.evaluate") {
         return { result: { value: sw.elementRect } };
       }
@@ -717,7 +725,8 @@ test("ISOLATION: emulating tab A never touches tab B", async () => {
     "tab A must still be the iPhone, not the iPad");
   sw.cdp = [];
   await OPS.screenshot({ tabId: TAB_B, fullpage: true });
-  assert.equal(paramsOf("Emulation.setDeviceMetricsOverride").width, 768);
+  assert.equal(paramsOf("Emulation.setDeviceMetricsOverride").width,
+    DEVICE_PRESETS["ipad-mini"].width);
 });
 
 test("`tabs` SURFACES emulated tabs (a stuck override is visible, not mysterious)", async () => {
@@ -833,6 +842,153 @@ test("NO-WEDGE: a HUNG emulation step is bounded like any other CDP command", as
     delete globalThis.BROWSER_BRIDGE_CDP_TIMEOUTS;
     sw.hangMethod = null;
   }
+});
+
+// --------------------------------------------------------------------------- //
+// F1: the NON-CDP read path is NOT emulated — and must say so
+//
+// `text`/`html`/`js` take the chrome.scripting path, which never attaches the
+// debugger, so withCdp's re-application choke point never runs. The DOM they read
+// is the tab's real, un-emulated one. That is correct-by-design (between ops the
+// tab genuinely is not emulated) but it is a TRAP: an agent screenshots a phone
+// layout, then reads `text` and reasons about the DESKTOP DOM. So the envelope has
+// to say which one it got.
+// --------------------------------------------------------------------------- //
+
+test("F1 REPRODUCTION: a default text/html/js read of an emulated tab issues ZERO CDP calls", async () => {
+  fresh();
+  await OPS.emulate({ tabId: TAB_A, device: "iphone-15" });
+  for (const op of ["text", "getHtml", "eval"]) {
+    sw.cdp = []; sw.events = [];
+    await OPS[op]({ tabId: TAB_A, js: "1" });
+    assert.deepEqual(sw.cdp, [],
+      `${op} took the chrome.scripting path — no CDP, so NO emulation was applied`);
+    assert.ok(!sw.events.includes("attach"), `${op} must not attach the debugger`);
+  }
+});
+
+test("F1: a NON-emulated read of an emulated tab is annotated `emulated:false` + a note", async () => {
+  fresh();
+  await OPS.emulate({ tabId: TAB_A, device: "iphone-15" });
+  for (const [op, cmd] of [["text", {}], ["getHtml", {}], ["eval", { js: "1" }]]) {
+    const out = await OPS[op]({ tabId: TAB_A, ...cmd });
+    assert.equal(out.emulated, false,
+      `${op} read the un-emulated DOM and must say so`);
+    assert.equal(out.notEmulatedRead, true);
+    assert.match(out.emulationNote, /--wake/,
+      "the note must name the remedy, like HIDDEN_TAB_NOTE does");
+    assert.match(out.emulationNote, /real|un-emulated/i);
+  }
+});
+
+test("F1: a CDP read (--wake) of an emulated tab is annotated `emulated:true`", async () => {
+  fresh();
+  await OPS.emulate({ tabId: TAB_A, device: "iphone-15" });
+  for (const [op, cmd] of [["text", {}], ["getHtml", {}], ["eval", { js: "1" }]]) {
+    const out = await OPS[op]({ tabId: TAB_A, wake: true, waitMs: 0, ...cmd });
+    assert.equal(out.emulated, true, `${op} --wake reads inside an emulated session`);
+    assert.equal(out.notEmulatedRead, undefined);
+    assert.equal(out.emulation.preset, "iphone-15");
+  }
+});
+
+test("F1: `eval --frame` goes through CDP, so it IS emulated", async () => {
+  // A SAME-PROCESS frame (resolved via Page.getFrameTree → createIsolatedWorld) —
+  // the cheapest path that still proves `eval --frame` routes through withCdp. The
+  // cross-origin OOPIF cascade is exercised in frame_oopif.test.mjs; replicating
+  // its auto-attach event machinery here would test the mock, not the annotation.
+  fresh();
+  const FRAME_URL = "https://example.com/a/inner";
+  sw.frames = [{ frameId: 0, parentFrameId: -1, url: "https://example.com/a" },
+               { frameId: 3, parentFrameId: 0, url: FRAME_URL }];
+  sw.frameTree = {
+    frame: { id: "TOPF", url: "https://example.com/a" },
+    childFrames: [{ frame: { id: "SUBF", url: FRAME_URL } }],
+  };
+  await OPS.emulate({ tabId: TAB_A, device: "iphone-15" });
+  sw.cdp = [];
+  const out = await OPS.eval({ tabId: TAB_A, js: "1", frame: FRAME_URL });
+  assert.equal(out.emulated, true);
+  assert.equal(out.emulation.preset, "iphone-15");
+  // …and it really did apply the overrides before evaluating in the frame.
+  const m = methods();
+  assert.deepEqual(m.slice(0, 3), IPHONE_PREFIX);
+  assert.ok(m.indexOf("Runtime.evaluate") > m.indexOf("Emulation.setUserAgentOverride"));
+});
+
+test("F1: a NON-emulated tab gets NO emulation annotation at all (envelope unchanged)", async () => {
+  fresh();
+  for (const [op, cmd] of [["text", {}], ["getHtml", {}], ["eval", { js: "1" }]]) {
+    const out = await OPS[op]({ tabId: TAB_A, ...cmd });
+    assert.equal(out.emulated, undefined,
+      `${op} on a plain tab must not grow a field`);
+    assert.equal(out.notEmulatedRead, undefined);
+    assert.equal(out.emulationNote, undefined);
+  }
+});
+
+test("F3: a raw --ua derives platform FROM THE UA STRING, never from --mobile", () => {
+  // The bug this pins: keying platform off the `mobile` flag alone produced
+  // `platform:"Android"` for an iPhone UA — exactly the "combination no real client
+  // ever produces" that the preset metadata exists to avoid. An inconsistent pair
+  // is a STRONGER bot-detection signal than a blank platform.
+  const iphone = normalizeEmulation({
+    width: 393, height: 852, mobile: true,
+    ua: "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) Mobile/15E148",
+  });
+  assert.equal(iphone.ua.userAgentMetadata.platform, "iOS");
+  assert.equal(iphone.ua.userAgentMetadata.model, "iPhone");
+  assert.equal(iphone.ua.userAgentMetadata.mobile, true);
+
+  const android = normalizeEmulation({
+    width: 412, height: 915, mobile: true,
+    ua: "Mozilla/5.0 (Linux; Android 14; Pixel 8) Chrome/126.0.0.0 Mobile",
+  });
+  assert.equal(android.ua.userAgentMetadata.platform, "Android");
+
+  const ipad = normalizeEmulation({
+    width: 744, height: 1133, mobile: true,
+    ua: "Mozilla/5.0 (iPad; CPU OS 17_0 like Mac OS X) Mobile/15E148",
+  });
+  assert.equal(ipad.ua.userAgentMetadata.platform, "iOS");
+  assert.equal(ipad.ua.userAgentMetadata.model, "iPad");
+
+  // An unrecognised UA leaves platform EMPTY rather than guessing one.
+  const weird = normalizeEmulation({ width: 300, height: 600, mobile: true,
+                                     ua: "TotallyCustomAgent/1.0" });
+  assert.equal(weird.ua.userAgentMetadata.platform, "");
+  assert.equal(weird.ua.userAgentMetadata.model, "");
+
+  // brands stays EMPTY for every raw UA — a wrong brand list is worse than none.
+  for (const s of [iphone, android, ipad, weird]) {
+    assert.deepEqual(s.ua.userAgentMetadata.brands, []);
+  }
+});
+
+test("F4: both iPad Minis exist and are distinct (a stable name was not re-pointed)", () => {
+  assert.equal(DEVICE_PRESETS["ipad-mini"].width, 744,
+    "the unqualified name tracks the CURRENT shipping 6th-gen");
+  assert.equal(DEVICE_PRESETS["ipad-mini"].height, 1133);
+  assert.equal(DEVICE_PRESETS["ipad-mini-2019"].width, 768,
+    "the 2019 model keeps a name of its own rather than being silently replaced");
+  assert.equal(DEVICE_PRESETS["ipad-mini-2019"].height, 1024);
+  // The integrity + provenance tests above cover both entries automatically.
+});
+
+test("onReplaced (prerender/instant swap) drops BOTH tab ids' emulation state", async () => {
+  // A swapped-out tabId is retired WITHOUT onRemoved firing, which would strand a
+  // Map entry on a recyclable id. The emulation deliberately does NOT follow the
+  // tab: the swapped-in document was rendered WITHOUT the overrides, so carrying
+  // the state across would claim an emulation that was never applied.
+  fresh();
+  await OPS.emulate({ tabId: TAB_A, device: "iphone-15" });
+  await OPS.emulate({ tabId: TAB_B, device: "pixel-8" });
+  assert.ok(sw.replacedListeners.length >= 1,
+    "the SW must register an onReplaced listener at module scope");
+  for (const fn of sw.replacedListeners) fn(TAB_B, TAB_A);   // (added, removed)
+  assert.equal(emulationState.has(TAB_A), false, "the retired id is dropped");
+  assert.equal(emulationState.has(TAB_B), false,
+    "the swapped-IN id is dropped too — its document was never emulated");
 });
 
 test("a bad `emulate` is refused with its NAMED error through execute()", async () => {

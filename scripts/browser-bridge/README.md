@@ -475,8 +475,14 @@ exactly the class this codebase keeps shipping.
 **The fix: store, and re-apply inside every session.** `emulate` normalizes the
 request into a state object held in a module-level `Map<tabId, state>`
 (`emulationState`, `service_worker.js`). `withCdp`'s `run` wrapper — the ONE place
-every CDP op in the file funnels through — applies the state's ordered step list
+every **CDP** op in the file funnels through — applies the state's ordered step list
 before handing control to the op. Apply-then-act, every session.
+
+⚠ **"every CDP op" is not "every op", and the difference is user-visible.**
+`text`, `html` and the default `eval` read via `chrome.scripting`, which never
+attaches the debugger, so they never reach that choke point and return the tab's
+REAL, un-emulated DOM. See "The read path is not emulated" below — that is the
+characteristic failure mode of this feature and it has its own annotation.
 
 The choke point is deliberate. Patching `screenshot` and `click` individually would
 have fixed the two visible cases and regenerated the bug at the next CDP op anyone
@@ -529,6 +535,27 @@ removed for it specifically.
 `nav` also routes through CDP `Page.navigate` on an emulated tab, so a page
 sniffing the UA at load time sees the emulated one rather than being served the
 desktop bundle before emulation is ever re-applied.
+
+### The read path is not emulated (and says so)
+
+`text` / `html` / `eval` take the `chrome.scripting` path. Verified by execution:
+after `emulate iphone-15` they issue **zero** CDP calls and zero attaches, so the
+DOM they read is the real desktop one — `innerWidth`, `getBoundingClientRect`,
+`matchMedia` and `navigator.userAgent` all come back un-emulated.
+
+This is correct-by-design (between ops the tab genuinely is not emulated, which is
+the safety property), but it is a trap: an agent screenshots a phone layout, then
+reads `text` and reasons about a desktop DOM with nothing to tell it apart. Same
+command, two answers — `js --wake 'innerWidth'` returns the emulated width because
+it routes `cdpWake` → `withCdp`; bare `js 'innerWidth'` returns the real one.
+
+So a read of a tab **that has emulation state** is annotated, in the same spirit as
+`HIDDEN_TAB_NOTE`: `{emulated:false, notEmulatedRead:true, emulationNote}` on the
+`chrome.scripting` paths (including `text`/`html --frame`), and
+`{emulated:true, emulation:{…}}` on the CDP paths (`--wake` reads, `eval --frame`).
+A tab with no emulation state gets neither field, so ordinary envelopes are
+unchanged. `viaCdp` is passed per CALL SITE rather than inferred from the op,
+because that is genuinely where the answer lives.
 
 ### Budget interaction (the #249 bounds)
 

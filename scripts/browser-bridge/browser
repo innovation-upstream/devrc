@@ -83,7 +83,8 @@
 #   browser emulate <preset> | --width N --height N [...] | --reset | --list
 #                             — DEVICE EMULATION on the tab THIS SESSION OWNS, for
 #                               real mobile testing. Presets: iphone-15 iphone-se
-#                               pixel-8 ipad-mini galaxy-s24 (`--list` prints them;
+#                               pixel-8 ipad-mini ipad-mini-2019 galaxy-s24
+#                               (`--list` prints them;
 #                               metrics + provenance in
 #                               scripts/browser-bridge/reference/emulation.md).
 #                               Sets viewport + deviceScaleFactor, touch emulation,
@@ -649,7 +650,7 @@ case "$sub" in
     # extension/protocol.js (bash cannot import the table). A test asserts the two
     # lists are identical, so this cannot silently drift — see
     # tests/emulation.test.mjs "CLI preset list matches PRESET_NAMES".
-    # PRESET_NAMES: iphone-15 iphone-se pixel-8 ipad-mini galaxy-s24
+    # PRESET_NAMES: iphone-15 iphone-se pixel-8 ipad-mini ipad-mini-2019 galaxy-s24
     emu_device=""; emu_reset=0; emu_list=0
     emu_width=""; emu_height=""; emu_dsf=""; emu_mobile=""; emu_touch=""
     emu_mtp=""; emu_ua=""; emu_orient=""; emu_cs=""; emu_geo=""; emu_tz=""
@@ -687,7 +688,7 @@ case "$sub" in
     done
     if [ "$emu_list" -eq 1 ]; then
       printf '%s\n' "device presets (metrics: scripts/browser-bridge/reference/emulation.md):"
-      printf '  %s\n' iphone-15 iphone-se pixel-8 ipad-mini galaxy-s24
+      printf '  %s\n' iphone-15 iphone-se pixel-8 ipad-mini ipad-mini-2019 galaxy-s24
       printf '%s\n' "raw override: browser emulate --width N --height N [--dsf F] [--mobile] [--touch] [--ua STR]"
       exit 0
     fi

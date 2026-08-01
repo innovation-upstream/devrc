@@ -597,6 +597,39 @@ function appleUaMetadata(model, platformVersion) {
   });
 }
 
+// UA-CH metadata for a RAW `--ua` string, where there is no preset to copy from.
+//
+// The platform is DERIVED FROM THE UA STRING, never from the `--mobile` flag. An
+// earlier version keyed it off `mobile` alone, which produced
+// `platform: "Android"` for an iPhone UA — precisely the "combination no real
+// client ever produces" that appleUaMetadata above exists to avoid. Guessing wrong
+// is worse than not guessing: an inconsistent pair is a stronger bot-detection
+// signal than a blank platform.
+//
+// When the UA names a platform we recognise, say so; otherwise leave platform ""
+// (a client that declines to state it) rather than inventing one. Brands stay
+// empty either way — we have no basis to claim a Chromium version from an
+// arbitrary string, and a WRONG brand list is worse than none.
+export function rawUaMetadata(userAgent, mobile) {
+  const ua = String(userAgent || "");
+  let platform = "";
+  let model = "";
+  if (/\biPhone\b/.test(ua)) { platform = "iOS"; model = "iPhone"; }
+  else if (/\biPad\b/.test(ua)) { platform = "iOS"; model = "iPad"; }
+  else if (/\bAndroid\b/.test(ua)) { platform = "Android"; }
+  else if (/\bMac OS X\b|\bMacintosh\b/.test(ua)) { platform = "macOS"; }
+  else if (/\bWindows\b/.test(ua)) { platform = "Windows"; }
+  else if (/\bLinux\b|\bX11\b/.test(ua)) { platform = "Linux"; }
+  return Object.freeze({
+    brands: Object.freeze([]),
+    platform,
+    platformVersion: "",
+    architecture: "",
+    model,
+    mobile: !!mobile,
+  });
+}
+
 const IOS_UA = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) "
   + "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 "
   + "Safari/604.1";
@@ -659,15 +692,35 @@ export const DEVICE_PRESETS = Object.freeze({
       + "class is 2.625, giving the 412x915 CSS viewport DevTools uses for the "
       + "Pixel 7/8 generation.",
   }),
+  // ⚠ TWO iPad Minis, deliberately. The 5th-gen (2019) 768×1024 figure is what
+  // Chrome DevTools' long-standing "iPad Mini" entry uses, and it remains a
+  // legitimate tablet breakpoint — so it keeps a name of its own rather than being
+  // quietly re-pointed. `ipad-mini` (unqualified) tracks the CURRENT shipping
+  // device, the 6th-gen, whose 744×1133 viewport is materially narrower and is the
+  // one a "does this work on an iPad Mini" question actually means today.
+  // Re-pointing a stable name would have silently changed every existing caller's
+  // result AND made the older entry's honest `source` string false.
   "ipad-mini": Object.freeze({
-    label: "iPad Mini",
+    label: "iPad Mini (6th gen)",
+    width: 744, height: 1133, deviceScaleFactor: 2, mobile: true,
+    maxTouchPoints: 5,
+    physical: Object.freeze({ width: 1488, height: 2266 }),
+    userAgent: IPADOS_UA,
+    userAgentMetadata: appleUaMetadata("iPad", "17.0"),
+    source: "Apple published 1488x2266 physical @2x for the 6th-gen iPad Mini "
+      + "(2021), giving a 744x1133 CSS viewport — the current shipping device, "
+      + "and materially narrower than the 2019 model below.",
+  }),
+  "ipad-mini-2019": Object.freeze({
+    label: "iPad Mini (5th gen, 2019)",
     width: 768, height: 1024, deviceScaleFactor: 2, mobile: true,
     maxTouchPoints: 5,
     physical: Object.freeze({ width: 1536, height: 2048 }),
     userAgent: IPADOS_UA,
     userAgentMetadata: appleUaMetadata("iPad", "17.0"),
-    source: "Chrome DevTools' 'iPad Mini' entry: 768x1024 @2x (1536x2048 "
-      + "physical). The tablet breakpoint — mobile:true but NOT phone-width.",
+    source: "Chrome DevTools' long-standing 'iPad Mini' entry: 768x1024 @2x "
+      + "(1536x2048 physical). The classic tablet breakpoint — mobile:true but "
+      + "NOT phone-width.",
   }),
   "galaxy-s24": Object.freeze({
     label: "Galaxy S24",
@@ -857,14 +910,8 @@ export function normalizeEmulation(cmd) {
     // GENERIC metadata, not a faithful per-device one. Use a preset for that.
     ua = Object.freeze({
       userAgent,
-      userAgentMetadata: base ? base.userAgentMetadata : Object.freeze({
-        brands: Object.freeze([]),
-        platform: mobile ? "Android" : "Linux",
-        platformVersion: "",
-        architecture: "",
-        model: "",
-        mobile: !!mobile,
-      }),
+      userAgentMetadata: base ? base.userAgentMetadata
+        : rawUaMetadata(userAgent, mobile),
     });
   } else if (base) {
     ua = Object.freeze({
@@ -1025,6 +1072,56 @@ export function emulationSummary(state) {
     timezone: state.timezone,
     geolocation: !!state.geolocation,
   };
+}
+
+// --- the NON-EMULATED READ trap, and the annotation that defuses it --------- //
+//
+// `text`, `getHtml` and the default `eval` read via chrome.scripting. That path
+// NEVER attaches the debugger, so withCdp's re-application choke point never runs
+// and the DOM they see is the tab's REAL, un-emulated one.
+//
+// That is correct-by-design, not a bug: between ops the tab genuinely is not
+// emulated (the safety property above), so the at-rest DOM really is desktop.
+// But it is a TRAP, and it is this feature's characteristic failure mode on the
+// read path: an agent screenshots a phone layout, then reads `text`/`html` and
+// reasons about a DESKTOP DOM, with nothing in the envelope to tell it apart.
+// Layout-derived values (innerWidth, getBoundingClientRect, matchMedia) and
+// navigator.userAgent all come back REAL.
+//
+// So every read of a tab that HAS emulation state says which one it got. Same
+// pattern, and the same reasoning, as HIDDEN_TAB_NOTE: the read self-announces
+// rather than leaving a plausible-but-wrong answer to be discovered later.
+//
+// ⚠ THE WORDING IS LOAD-BEARING (see HIDDEN_TAB_NOTE). Whatever remedy this names
+// becomes the reflex an agent learns, so it names `--wake` — the flag that routes
+// the read through cdpWake → withCdp and therefore through the emulation apply.
+export const NOT_EMULATED_READ_NOTE =
+  "This tab has device emulation configured, but THIS read did not go through "
+  + "CDP — it read the tab's REAL, un-emulated DOM. Emulation overrides only "
+  + "exist inside a CDP session (they die at detach), so layout-derived values "
+  + "(innerWidth, getBoundingClientRect, matchMedia) and navigator.userAgent are "
+  + "the DESKTOP ones here. Re-run this read with --wake to read inside an "
+  + "emulated session.";
+
+// Annotate a READ result with whether it observed the emulated page.
+//   * no emulation state for the tab → returns `data` UNTOUCHED (a plain tab's
+//     envelope must not grow fields);
+//   * viaCdp → { emulated:true, emulation:<summary> };
+//   * otherwise → { emulated:false, notEmulatedRead:true, emulationNote }.
+// Pure; `summary` is emulationSummary(state) (metadata only) and `viaCdp` is
+// supplied per-CALL-SITE, because whether a read is emulated depends on the PATH
+// (--wake / --frame eval go through CDP; the default reads do not), not on the op.
+export function annotateEmulatedRead(data, summary, viaCdp) {
+  if (!data || typeof data !== "object" || !summary) return data;
+  if (viaCdp) {
+    data.emulated = true;
+    data.emulation = summary;
+  } else {
+    data.emulated = false;
+    data.notEmulatedRead = true;
+    data.emulationNote = NOT_EMULATED_READ_NOTE;
+  }
+  return data;
 }
 
 // Is this state's touch emulation ON? The predicate `click` branches on to decide

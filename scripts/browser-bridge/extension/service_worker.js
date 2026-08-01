@@ -56,6 +56,7 @@ import {
   // in protocol.js for the central problem and the safety property it buys.
   normalizeEmulation, emulationCdpSteps, applyEmulationSteps, emulationSummary,
   isTouchEmulated, touchTapEvents, DEVICE_PRESETS, PRESET_NAMES,
+  annotateEmulatedRead,
 } from "./protocol.js";
 
 const DEFAULT_PORT = 8788;
@@ -227,6 +228,21 @@ function clearEmulation(tabId) {
 try {
   if (typeof chrome !== "undefined" && chrome.tabs && chrome.tabs.onRemoved) {
     chrome.tabs.onRemoved.addListener((tabId) => clearEmulation(tabId));
+  }
+  // onReplaced fires when a tab is SWAPPED for another (a prerender/instant
+  // navigation activating): the old tabId is retired WITHOUT onRemoved firing. Left
+  // unhandled that strands a Map entry on an id Chrome can recycle. Narrow — the
+  // tab also loses its server-side ownership, and `ownedTabGone` catches the common
+  // vanish — but it costs two lines and the restart is already being paid for.
+  //
+  // The emulation deliberately does NOT follow the tab to its new id: the swapped-in
+  // document is a different page that was rendered WITHOUT the overrides, so
+  // carrying the state across would claim an emulation that was never applied.
+  if (typeof chrome !== "undefined" && chrome.tabs && chrome.tabs.onReplaced) {
+    chrome.tabs.onReplaced.addListener((addedTabId, removedTabId) => {
+      clearEmulation(removedTabId);
+      clearEmulation(addedTabId);
+    });
   }
 } catch (e) { /* bare unit-test global with no chrome.tabs — nothing to hook */ }
 
@@ -534,6 +550,18 @@ function assertWakeNotFramed(cmd, isWakeOp) {
 // session, so the visibilityState to report is the one the PROBE saw there — not a
 // separate chrome.scripting probe of the (already re-throttled) tab. `woke` is
 // true when the probe confirms the page was actually un-throttled during the read.
+// Annotate a READ result with whether it actually observed the EMULATED page.
+//
+// `viaCdp` is passed per CALL SITE, not inferred from the op, because that is
+// genuinely where the answer lives: `text --wake` and `eval --frame` route through
+// withCdp (→ emulated), while the default `text`/`html`/`eval` take
+// chrome.scripting (→ NOT emulated). Same op, different answer, depending on a
+// flag — which is exactly why the envelope has to say so rather than leaving the
+// caller to know this file's routing table. See NOT_EMULATED_READ_NOTE.
+function emuAnnotate(data, tabId, viaCdp) {
+  return annotateEmulatedRead(data, emulationSummary(emulationFor(tabId)), viaCdp);
+}
+
 function wakeAnnotate(data, w) {
   const vis = w && w.probe ? w.probe.visibilityState : null;
   annotateVisibility(data, vis);
@@ -557,8 +585,10 @@ const OPS = {
       const html = await execInFrame(tab.id, frame.frameId, frameReadHtmlFn, []);
       // Report the FRAME's own url (not the top tab url) so the caller can confirm it
       // read the intended frame (#190 reported the top url for a frame read).
-      return annotateVisibility(
-        { url: frame.url || tab.url, title: tab.title, html, frame: cmd.frame }, vis);
+      // chrome.scripting into the frame: NO CDP -> the REAL, un-emulated DOM.
+      return emuAnnotate(annotateVisibility(
+        { url: frame.url || tab.url, title: tab.title, html, frame: cmd.frame }, vis),
+        tab.id, false);
     }
     // --wake → un-throttle the tab and read INSIDE the same CDP session (the
     // un-throttled state does not survive detach — see protocol.js `wake`). This
@@ -579,7 +609,9 @@ const OPS = {
         });
         return inj ? inj.result : undefined;
       });
-      return wakeAnnotate({ url: tab.url, title: tab.title, html: w.value }, w);
+      return emuAnnotate(
+        wakeAnnotate({ url: tab.url, title: tab.title, html: w.value }, w),
+        tab.id, true);   // cdpWake -> withCdp -> emulation WAS applied
     }
     // No frame → the lighter chrome.scripting top-frame read (no debugger banner).
     const vis = await tabVisibilityState(tab.id);
@@ -587,7 +619,9 @@ const OPS = {
       target: { tabId: tab.id },
       func: () => document.documentElement.outerHTML,
     });
-    return annotateVisibility({ url: tab.url, title: tab.title, html: inj.result }, vis);
+    return emuAnnotate(
+      annotateVisibility({ url: tab.url, title: tab.title, html: inj.result }, vis),
+      tab.id, false);   // chrome.scripting: NO CDP -> the REAL, un-emulated DOM
   },
 
   // Cheap read: the tab's VISIBLE innerText (optionally scoped to a CSS
@@ -609,8 +643,10 @@ const OPS = {
       const raw = await execInFrame(tab.id, frame.frameId, frameReadTextFn, [sel]);
       const { text, truncated } = normalizeText(raw, cap);
       // Report the FRAME's own url (see getHtml) so the caller confirms the right frame.
-      return annotateVisibility(
-        { url: frame.url || tab.url, title: tab.title, text, truncated, frame: cmd.frame }, vis);
+      // chrome.scripting into the frame: NO CDP -> the REAL, un-emulated DOM.
+      return emuAnnotate(annotateVisibility(
+        { url: frame.url || tab.url, title: tab.title, text, truncated, frame: cmd.frame },
+        vis), tab.id, false);
     }
     // --wake → un-throttle + read in ONE CDP session (opt-in; see getHtml).
     if (cmd && cmd.wake) {
@@ -628,7 +664,9 @@ const OPS = {
         return inj ? inj.result : undefined;
       });
       const { text, truncated } = normalizeText(w.value, cap);
-      return wakeAnnotate({ url: tab.url, title: tab.title, text, truncated }, w);
+      return emuAnnotate(
+        wakeAnnotate({ url: tab.url, title: tab.title, text, truncated }, w),
+        tab.id, true);   // cdpWake -> withCdp -> emulation WAS applied
     }
     const vis = await tabVisibilityState(tab.id);
     const [inj] = await chrome.scripting.executeScript({
@@ -640,7 +678,9 @@ const OPS = {
       },
     });
     const { text, truncated } = normalizeText(inj.result, cap);
-    return annotateVisibility({ url: tab.url, title: tab.title, text, truncated }, vis);
+    return emuAnnotate(
+      annotateVisibility({ url: tab.url, title: tab.title, text, truncated }, vis),
+      tab.id, false);   // chrome.scripting: NO CDP -> the REAL, un-emulated DOM
   },
 
   async eval(cmd) {
@@ -659,7 +699,9 @@ const OPS = {
       // via CDP (the #190 fix), so this probe does not regress the eval mechanism.
       const vis = await tabVisibilityState(tab.id);
       const value = await cdpFrameEval(tab.id, tab.url, frame, cmd.js);
-      return annotateVisibility({ url: frame.url || tab.url, value, frame: cmd.frame }, vis);
+      return emuAnnotate(
+        annotateVisibility({ url: frame.url || tab.url, value, frame: cmd.frame }, vis),
+        tab.id, true);   // cdpFrameEval -> withCdp -> emulation WAS applied
     }
     // --wake → un-throttle + evaluate in ONE CDP session (opt-in; see getHtml).
     // Uses the SAME expression/statement pair + never-silent-null contract as
@@ -685,7 +727,8 @@ const OPS = {
         }
         return evalValueOrThrow(res);
       });
-      return wakeAnnotate({ url: tab.url, value: w.value }, w);
+      return emuAnnotate(wakeAnnotate({ url: tab.url, value: w.value }, w),
+                         tab.id, true);   // cdpWake -> withCdp -> emulated
     }
     const vis = await tabVisibilityState(tab.id);
     // chrome.scripting runs the top-frame eval in the page's MAIN world (world:
@@ -717,7 +760,9 @@ const OPS = {
         return fn();
       },
     });
-    return annotateVisibility({ url: tab.url, value: inj.result }, vis);
+    return emuAnnotate(
+      annotateVisibility({ url: tab.url, value: inj.result }, vis),
+      tab.id, false);   // chrome.scripting MAIN world: NO CDP -> un-emulated
   },
 
   // Each tab additionally carries `emulation` when this service worker holds a

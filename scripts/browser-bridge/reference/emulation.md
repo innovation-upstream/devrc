@@ -21,6 +21,10 @@ browser emulate --reset
 
 `browser emulate --list` prints the preset names without touching the browser.
 
+🔴 **Before you trust a `text`/`html`/`js` read on an emulated tab, read
+"`text` / `html` / `js` do NOT read the emulated page" below.** Those three ops
+return the REAL desktop DOM; `--wake` is what reads the emulated one.
+
 ---
 
 ## Why it is sticky, and the safety property that buys
@@ -83,7 +87,8 @@ not yours" (drop the `--tab`).
 | `iphone-15` | 393 × 852 | 3 | 5 pts | iOS 17 Safari · `iOS` |
 | `iphone-se` | 375 × 667 | 2 | 5 pts | iOS 17 Safari · `iOS` |
 | `pixel-8` | 412 × 915 | 2.625 | 5 pts | Chrome 126 Android · `Android` |
-| `ipad-mini` | 768 × 1024 | 2 | 5 pts | iPadOS 17 Safari · `iOS` |
+| `ipad-mini` | 744 × 1133 | 2 | 5 pts | iPadOS 17 Safari · `iOS` |
+| `ipad-mini-2019` | 768 × 1024 | 2 | 5 pts | iPadOS 17 Safari · `iOS` |
 | `galaxy-s24` | 360 × 780 | 3 | 5 pts | Chrome 126 Android · `Android` |
 
 **Provenance, stated honestly.** These are the vendors' published *logical*
@@ -116,9 +121,13 @@ Flags: `--width --height --dsf --mobile/--no-mobile --touch/--no-touch
 --color-scheme light|dark|no-preference --geo LAT,LON[,ACC] --tz ZONE --reset
 --list`.
 
-**⚠ A raw `--ua` gets GENERIC UA-Client-Hints metadata**, not a faithful
-per-device one — enough that a site never sees your real desktop brands, but not a
-convincing individual device. Use a preset when the UA actually matters.
+**⚠ A raw `--ua` gets MINIMAL UA-Client-Hints metadata**, not a faithful
+per-device one. `platform`/`model` are **derived from the UA string** (an iPhone UA
+gets `platform: "iOS"`, never `"Android"`), and `brands` is left **empty** — there
+is no basis to claim a Chromium version from an arbitrary string, and a wrong brand
+list is a stronger bot-detection signal than none. Where the UA names no platform
+we recognise, `platform` stays `""` rather than being guessed. Use a **preset** when
+the UA actually matters.
 
 ---
 
@@ -135,6 +144,53 @@ Apple presets carry `brands: []` **on purpose**: Safari does not implement UA-CH
 and sends no `Sec-CH-UA` at all. That is correct emulation, not a missing field.
 
 ---
+
+## 🔴 `text` / `html` / `js` do NOT read the emulated page
+
+**The single most important thing on this page.** Read it before you trust a read.
+
+`text`, `html` and the default `js`/`eval` go through `chrome.scripting`, which
+**never attaches the debugger** — so the emulation is never applied and they return
+the tab's **real, un-emulated DOM**. `innerWidth`, `getBoundingClientRect`,
+`matchMedia` and `navigator.userAgent` all come back **desktop**.
+
+That is correct-by-design, not a bug: between ops the tab genuinely is not emulated
+(see the safety property above), so the at-rest DOM really *is* desktop. But it is
+the trap this feature is most likely to spring — screenshot a phone layout, then
+read `text` and reason about a desktop DOM.
+
+**Which reads are emulated:**
+
+| read | path | emulated? |
+|---|---|---|
+| `text` / `html` / `js` | `chrome.scripting` | ❌ **no** |
+| `text --frame` / `html --frame` | `chrome.scripting` | ❌ **no** |
+| `text --wake` / `html --wake` / `js --wake` | CDP (`cdpWake` → `withCdp`) | ✅ yes |
+| `js --frame` | CDP (`cdpFrameEval` → `withCdp`) | ✅ yes |
+| `screenshot`, `click`, `nav`, `wake`, `upload` | CDP | ✅ yes |
+
+**The envelope tells you which one you got.** On a tab that has emulation state,
+every read carries either:
+
+```jsonc
+{ "emulated": false, "notEmulatedRead": true,
+  "emulationNote": "…read the tab's REAL, un-emulated DOM … Re-run with --wake …" }
+// or
+{ "emulated": true, "emulation": { "preset": "iphone-15", "width": 393, … } }
+```
+
+A tab with **no** emulation state gets neither field, so ordinary envelopes are
+unchanged.
+
+**So to measure the emulated viewport, use `--wake`:**
+
+```bash
+browser js --wake 'innerWidth+"x"+innerHeight'    # → 393x852
+browser js 'innerWidth+"x"+innerHeight'           # → the REAL window size
+```
+
+Same command, two answers, depending on the flag. That is why the annotation
+exists.
 
 ## What emulation changes about other ops
 
@@ -205,9 +261,21 @@ device, and the device does not interfere with the wake.
 | `unknown_op` | the loaded extension predates 0.5.0 → `errors.md` |
 
 A **failed apply is loud, never partial**: no emulation step is optional, because a
-half-applied emulation returns a plausible screenshot of the wrong thing. If a step
-fails, the op fails with a normal error envelope and the emulation state is rolled
-back, so later ops do not silently retry something you were told had failed.
+half-applied emulation returns a plausible screenshot of the wrong thing. A failing
+step fails the op with a normal error envelope, and the debugger is still released.
+
+What happens to the stored state depends on **which** apply failed, and the
+distinction matters:
+
+* **The initial `emulate` apply** — the state is **rolled back** (to the previous
+  emulation, or to none). You were told it failed, so nothing later re-attempts it.
+* **A sticky re-apply inside a later op** (`screenshot`, `click`, …) — the state is
+  **retained** and the *next* op will try again. That is deliberate: a transient
+  failure (a renderer briefly busy, a navigation in flight) should not silently
+  un-emulate a tab you asked to be emulated. The cost is that a *persistently*
+  failing override fails every subsequent op with the same error until you
+  `--reset`, rather than degrading to un-emulated — which is the safer direction,
+  since degrading silently is how you get a desktop screenshot labelled as a phone.
 
 ---
 
