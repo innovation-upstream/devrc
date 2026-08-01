@@ -55,11 +55,23 @@ let storageGate = null;
 // storageGate because a test that asserts the BOUND fires must not also have to
 // release the hang — releasing it is what the bound is replacing.
 let hangStorageReads = 0;
+// Parks chrome.tabs.query — the await INSIDE pollOnce, between loop()'s
+// generation check and the actual /poll fetch. This is the window that falsified
+// the previous "duplicate polling is prevented" claim.
+let tabsQueryGate = null;
+// Park the `superseded` storage read (string key) to prove clearSuperseded()'s
+// bound — not just config()'s — releases the loop. RELEASABLE rather than a bare
+// NEVER(): under the mutant (bound gutted) the loop parks here, and an
+// unreleasable hang would stall the whole test FILE instead of just failing the
+// one test. The bound is what the assertion measures; the release only lets the
+// mutant's loop unwind afterwards.
+let supersededGate = null;
 globalThis.chrome = {
   storage: {
     local: {
       async get(keys) {
         if (hangStorageReads > 0) { hangStorageReads -= 1; await NEVER(); }
+        if (supersededGate && keys === "superseded") await supersededGate;
         // storageGate parks ONLY config()'s read (the array-form key list).
         // Gating every read parks at whichever chrome.storage call comes next —
         // which may be clearSuperseded()'s, i.e. AFTER the poll, making the
@@ -78,7 +90,10 @@ globalThis.chrome = {
   },
   runtime: { id: "testextid", getManifest: () => ({ version: "0.4.0" }) },
   tabs: {
-    async query() { return [{ id: 5, url: "https://example.com/", title: "T" }]; },
+    async query() {
+      if (tabsQueryGate) await tabsQueryGate;
+      return [{ id: 5, url: "https://example.com/", title: "T" }];
+    },
     async get(id) { return { id, url: "https://example.com/", title: "T" }; },
   },
   webNavigation: { async getAllFrames() { return []; } },
@@ -134,6 +149,22 @@ async function withWatchdog(promise, ms = 3000) {
 // `setTimeout(() => loopState.retire())` fires during a LATER test and silently
 // retires ITS loop — which cost a green-looking run here: the config-bound test
 // saw zero polls and failed for a reason that had nothing to do with the code.
+// Wait until `pred()` holds, or give up after `ms`. Returns true if it held.
+//
+// ⚠ Written as a SEQUENTIAL deadline loop on purpose. The obvious
+// `Promise.race([delay(ms), (async () => { while (!pred()) await delay(20); })()])`
+// leaves the inner IIFE spinning forever when the race is won by the timeout —
+// a dangling promise that keeps node's event loop alive, so the whole test FILE
+// hangs instead of reporting the one red test. Cost an interrupted run to find.
+async function waitFor(pred, ms = 4000, step = 20) {
+  const deadline = Date.now() + ms;
+  while (Date.now() < deadline) {
+    if (pred()) return true;
+    await delay(step);
+  }
+  return pred();
+}
+
 async function runLoop(ms = 3000) {
   let timedOut = false;
   let handle;
@@ -153,6 +184,8 @@ test.beforeEach(() => {
   breadcrumbs.length = 0;
   storageGate = null;
   hangStorageReads = 0;
+  tabsQueryGate = null;
+  supersededGate = null;
 });
 
 // --- the wedge ---------------------------------------------------------------- //
@@ -404,18 +437,93 @@ test("REGRESSION: a hung chrome.storage read in config() releases the loop", asy
   await delay(80);
   assert.equal(wire.polls, 0, "precondition: parked before ever polling");
   // storageMs is 300ms here; the bound must expire, back off (~1s), and carry on.
-  const timedOut = await Promise.race([
-    delay(4000).then(() => true),
-    (async () => {
-      while (wire.polls === 0) await delay(20);
-      return false;
-    })(),
-  ]);
+  const recovered = await waitFor(() => wire.polls > 0);
   loopState.retire();                          // ALWAYS release the loop first —
   await delay(20);                             // an assert here must not hang the file
-  assert.equal(timedOut, false,
+  assert.equal(recovered, true,
     "a hung storage read parked the loop — config() is unbounded");
   await running;
+});
+
+test("REGRESSION: a loop retired inside chrome.tabs.query must not reach the /poll fetch", async () => {
+  // The window that falsified the previous guarantee. loop()'s generation check
+  // sits before pollOnce(), but pollOnce AWAITS activeTabSnapshot()
+  // (chrome.tabs.query) before its fetch — so a retirement landing there let the
+  // retired loop sail on into the poll. Measured then: maxConcurrentPolls = 2.
+  //
+  // Driven through the PRODUCTION keepaliveTick path (backdate + tick), not a
+  // bare loopState.retire(), so this pins what actually ships.
+  loopState.reset();
+  let inFlight = 0;
+  let maxInFlight = 0;
+  wire.polls = 0;
+  globalThis.fetch = async (url) => {
+    if (!String(url).endsWith("/poll")) throw new Error(`unexpected: ${url}`);
+    wire.polls += 1;
+    inFlight += 1;
+    maxInFlight = Math.max(maxInFlight, inFlight);
+    await delay(15);                        // a poll is in flight for a while
+    inFlight -= 1;
+    return res(204, null);
+  };
+  let release;
+  const parked = loop();
+  await delay(30);                          // a few healthy iterations
+  tabsQueryGate = new Promise((r) => { release = r; });
+  await delay(30);                          // now parked INSIDE chrome.tabs.query
+  loopState.backdate(5000);                 // stallMs is 1000 in this file
+  keepaliveTick();                          // → retires it AND starts a replacement
+  await delay(40);                          // the replacement is polling
+  tabsQueryGate = null;
+  release();                                // the retired loop resumes...
+  await delay(80);                          // ...and must NOT poll
+  assert.equal(maxInFlight, 1,
+    `two loops polled concurrently (max ${maxInFlight}) — the generation check `
+    + "must sit inside pollOnce with NO await between it and the fetch");
+  loopState.retire();
+  await parked;
+  await delay(40);                          // let the replacement exit too
+});
+
+test("REGRESSION: a retired loop must not stamp the shared lastLoopTickAt", async () => {
+  // Why the TOP-of-iteration check is still load-bearing even though the binding
+  // poll guard moved into pollOnce: a retired loop that reaches the top of its
+  // next iteration would refresh the liveness clock, masking a genuine wedge of
+  // its REPLACEMENT from the keepalive.
+  loopState.reset();
+  wire.polls = 0;
+  globalThis.fetch = async () => { throw new Error("transport down"); };
+  const parked = loop();
+  await delay(60);                          // failed poll → now in the backoff sleep
+  const before = loopState.lastLoopTickAt;
+  assert.ok(before !== null, "precondition: the loop stamped at least once");
+  loopState.retire();
+  await delay(1500);                        // past the ~1s backoff → loop top
+  assert.equal(loopState.lastLoopTickAt, before,
+    "a retired loop refreshed the liveness clock — that masks a real wedge of "
+    + "the loop that replaced it");
+  await parked;
+});
+
+test("REGRESSION: a hung clearSuperseded() storage read releases the loop", async () => {
+  // storageBounded covers config() AND the superseded flag. Only config()'s bound
+  // was pinned; gutting storageBounded left this path untested even though
+  // clearSuperseded() runs on EVERY healthy iteration — more often than the ops.
+  loopState.reset();
+  let release;
+  supersededGate = new Promise((r) => { release = r; });
+  installFetch({ command: null, stopAfter: 1e9 });
+  const parked = loop();
+  const keptPolling = await waitFor(() => wire.polls >= 3);
+  // Unwind FIRST — an assertion that throws here must not strand the loop, and
+  // under the mutant the loop is parked in the gate rather than past it.
+  loopState.retire();
+  supersededGate = null;
+  release();
+  await delay(40);
+  assert.equal(keptPolling, true,
+    "the loop stopped polling — clearSuperseded()'s storage read is unbounded");
+  await parked;
 });
 
 test("the keepalive is wired to keepaliveTick, not to a bare loop() call", async () => {

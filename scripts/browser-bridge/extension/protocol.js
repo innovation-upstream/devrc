@@ -689,11 +689,24 @@ export function promiseWithTimeout(promise, ms, label, timers = {},
 //     phase at all. `op_timeout:frames` at 18s is strictly more information,
 //     sooner, and it is the case where the loop is provably released.
 //   * The attach-hang and per-CDP-command-hang cases still surface their precise
-//     `cdp_timeout:attach` / `cdp_timeout:<method>` — those fire at 8s, well
-//     inside this bound.
+//     `cdp_timeout:attach` / `cdp_timeout:<method>`. ⚠ The margin on the attach
+//     case is THIN, not comfortable: a hung attach is 8s attach + an AWAITED
+//     safeDetach of up to 8s = **16s** against this 18s bound — 2s of headroom
+//     (measured at 10× scale: settles at 16s reporting `cdp_timeout:attach`).
+//     A per-command hang is roomier (8s + detach, reported as
+//     `cdp_timeout:<method>`). Anyone lowering EXEC_OP_BUDGET_MS below 16s, or
+//     raising CDP_ATTACH_TIMEOUT_MS / CDP_COMMAND_TIMEOUT_MS, converts the
+//     attach case into a generic `op_timeout` — re-measure before touching either.
 // Known cost: a slow-but-SUCCESSFUL CDP op in the 18–20s band is now killed at 18s
 // where it previously had until the server's 20s. That band was already mostly
 // lost to the server, so the trade is small and deliberate.
+//
+// ⚠ This 18s ceiling is HARD and silently caps the server's env-configurable
+// BROWSER_BRIDGE_CMD_TIMEOUT (default 20s). Raising that env var to, say, 60s to
+// accommodate a slow page buys nothing for any op routed through execute(): the
+// extension still gives up at 18s and answers `op_timeout:<op>`. Only a matching
+// EXEC_OP_BUDGET_MS bump (which needs a full Brave restart) actually extends the
+// ceiling.
 //
 // Lowering the CDP composition below 18s instead would mean shrinking the attach
 // or detach budgets, which are load-bearing for the debugger-leak invariants —
@@ -711,12 +724,33 @@ export const STORAGE_BUDGET_MS = 5000;
 export const POLL_BUDGET_MS = 40000;
 // POST /result is a loopback write the server answers immediately.
 export const RESULT_BUDGET_MS = 10000;
-// If the loop has not completed an iteration in this long it is WEDGED, not slow.
-// Worst legitimate iteration: POLL_BUDGET + EXEC_OP_BUDGET + RESULT_BUDGET = 68s,
-// or a SUPERSEDE_BACKOFF_MS (30s) / max nextBackoffMs (30s) sleep after a poll
-// budget = 70s. 180s is >2.5x the worst legitimate case, so this can only fire on
-// a genuine wedge — it is the defence against the NEXT unbounded await, not the
-// primary fix.
+// If the loop has not stamped lastLoopTickAt in this long it is WEDGED, not slow.
+//
+// The worst LEGITIMATE iteration, derived term by term from the loop body as it
+// actually stands (an earlier version of this comment said 68s — it counted only
+// poll+exec+result and omitted the storage bounds this very block introduces):
+//
+//   config()                    STORAGE_BUDGET_MS      5.00s
+//   pollOnce()                  POLL_BUDGET_MS        40.00s
+//   clearSuperseded() get+set    2 × STORAGE_BUDGET_MS 10.00s
+//   execute()                   EXEC_OP_BUDGET_MS     18.00s
+//   postResult()                RESULT_BUDGET_MS      10.00s
+//   backoff after a failure     nextBackoffMs cap +
+//                               250ms jitter          30.25s
+//                                                    -------
+//                                                    113.25s
+//
+// (The supersede path is not additive with the command path — SUPERSEDE_BACKOFF_MS
+// is 30s and `continue`s before execute/result, so it is strictly cheaper.)
+//
+// 180s is therefore **1.59×** the worst legitimate iteration, not the 2.5× claimed
+// before. The conclusion is unchanged — 113.25s is a hard ceiling, every term in
+// it is a bound rather than an expectation, and a real iteration is milliseconds —
+// so a 180s stall still means a genuine wedge. But the margin is one-and-a-half
+// times, not two-and-a-half: ADDING A NEW BOUNDED AWAIT TO THE LOOP BODY EATS INTO
+// IT. Re-derive this sum when you do, and raise LOOP_STALL_MS if it approaches.
+//
+// This is the defence against the NEXT unbounded await, not the primary fix.
 export const LOOP_STALL_MS = 180000;
 
 // Orchestrate a CDP op with a per-op attach→run→ALWAYS-detach lifecycle, every

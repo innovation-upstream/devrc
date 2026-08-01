@@ -827,23 +827,47 @@ Two changes close it:
    31s would only park the loop longer for an envelope that could never arrive,
    and pre-change that same case produced a bare `cmd_timeout` with no phase at
    all. The attach-hang and per-CDP-command-hang cases still surface their exact
-   `cdp_timeout:attach` / `cdp_timeout:<method>` (they fire at 8s). Known cost: a
-   slow-but-successful CDP op in the 18–20s band is now killed at 18s.
-2. **The keepalive can now recover** — `keepaliveTick()` (not a bare `loop()`)
-   compares `lastLoopTickAt` against `LOOP_STALL_MS` (180s, >2.5× the worst
-   legitimate iteration). A loop that has not ticked in that long is retired via a
-   generation bump and a fresh one takes the latch. This is the defence against
-   the *next* unbounded await someone adds, not the primary fix.
+   `cdp_timeout:attach` / `cdp_timeout:<method>` — but the attach margin is
+   **thin, not comfortable**: a hung attach is 8s attach + an *awaited* detach of
+   up to 8s = **16s against the 18s bound, i.e. 2s of headroom** (measured at 10×
+   scale). Lowering `EXEC_OP_BUDGET_MS` below 16s, or raising either CDP timeout,
+   turns that case into a generic `op_timeout`. Known cost: a slow-but-successful
+   CDP op in the 18–20s band is now killed at 18s.
 
-   Duplicate **polling** is prevented structurally: the retired loop re-checks its
-   generation *immediately before each poll* and its `finally` declines to clear
-   `running` unless it still owns the generation. A top-of-iteration check alone
-   is **not** sufficient — it only fires between iterations, so a loop retired
-   while parked mid-iteration resumes and completes that whole iteration,
-   including its poll (measured: polls went 8 → 9). A retired loop *may* still
-   finish posting a result it had already dequeued; that is deliberate, since
-   dropping it would strand the caller until its `cmd_timeout`, and the server
-   correlates results by command id.
+   ⚠ The 18s ceiling is **hard**, and it silently caps the server's
+   env-configurable `BROWSER_BRIDGE_CMD_TIMEOUT` (default 20s). Raising that env
+   var to 60s for a slow page buys nothing for any op routed through `execute()`
+   — the extension still gives up at 18s. Only a matching `EXEC_OP_BUDGET_MS`
+   bump (full Brave restart) actually extends it.
+2. **The keepalive can now recover** — `keepaliveTick()` (not a bare `loop()`)
+   compares `lastLoopTickAt` against `LOOP_STALL_MS` (180s). A loop that has not
+   stamped in that long is retired via a generation bump and a fresh one takes the
+   latch. This is the defence against the *next* unbounded await someone adds, not
+   the primary fix.
+
+   The margin is **1.59×**, not the 2.5× an earlier draft of this section claimed
+   — that figure counted only poll+exec+result (68s) and omitted the storage
+   bounds introduced by the same change. Derived term by term from the loop as it
+   stands: `config` 5s + `poll` 40s + `clearSuperseded` (get+set) 10s + `execute`
+   18s + `postResult` 10s + a post-failure backoff (30s cap + 250ms jitter) =
+   **113.25s**. The conclusion holds — every term is a *bound*, not an
+   expectation, and a real iteration is milliseconds — but adding another bounded
+   await to the loop body eats into that margin, so re-derive the sum when you do.
+   The full table is in `extension/protocol.js` next to `LOOP_STALL_MS`.
+
+   Duplicate **polling** is guarded by re-checking the generation with **no await
+   between the check and the `fetch`**. That check therefore lives *inside*
+   `pollOnce()`, not in `loop()`: `activeTabSnapshot()` (`chrome.tabs.query`) sits
+   between them, and a retirement landing in that window let the retired loop sail
+   into the poll (measured through the real `keepaliveTick` path:
+   `maxConcurrentPolls = 2`). The check has now occupied three positions — top of
+   iteration, before `pollOnce`, and inside it — each move forced by the guarantee
+   being falsified one frame deeper, so the rule to remember is the *invariant*,
+   not the location. A retired loop *may* still finish posting a result it had
+   already dequeued; that is deliberate, since dropping it would strand the caller
+   until its `cmd_timeout`, and the server correlates results by command id (cids
+   are unique per submit and a timed-out submit has already stripped the outbox,
+   so a late post is a no-op, never a misroute).
 
 Regression coverage: `tests/loop_wedge.test.mjs` wedges a real op with a
 never-settling promise and asserts the loop releases and keeps polling. It is

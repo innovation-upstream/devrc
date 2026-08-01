@@ -55,15 +55,19 @@ import {
 
 const DEFAULT_PORT = 8788;
 let running = false;
-// Wall-clock (Date.now) of the last completed poll-loop iteration. `running` is a
-// LATCH — it says a loop was started, not that one is alive — so the keepalive
-// alarm needs an independent liveness signal to tell "wedged" from "idle-polling".
-// null = no iteration has completed yet (the loop was only just kicked).
+// Wall-clock (Date.now) stamped at the START of each poll-loop iteration — NOT
+// at its completion. That is the right sense for stall detection: a loop parked
+// forever mid-iteration never stamps again, so the age of this value IS how long
+// the current iteration has been running. (An end-of-iteration stamp would read
+// the same for a wedge and for a loop that simply has not finished yet.)
+// `running` is a LATCH — it says a loop was started, not that one is alive — so
+// the keepalive alarm needs this independent signal to tell "wedged" from
+// "idle-polling". null = the loop was only just kicked and has not stamped yet.
 let lastLoopTickAt = null;
 // Monotonically increasing loop generation. The keepalive force-restart bumps it,
 // which retires any loop still parked on an abandoned await: that loop exits at
-// its next iteration and its finally declines to clear `running` (it no longer
-// owns the flag), so a force-restart can never leave two pollers racing.
+// its next generation check and its finally declines to clear `running` (it no
+// longer owns the flag), so a force-restart can never leave two pollers racing.
 let loopGeneration = 0;
 
 // The stable per-profile auto-id: generated ONCE and persisted in
@@ -1052,8 +1056,23 @@ function abortAfter(ms) {
   return undefined;
 }
 
-async function pollOnce(cfg) {
+// A retired loop must never reach the `fetch` below. `pollOnce` is the last
+// place that can be guaranteed, because it AWAITS activeTabSnapshot()
+// (chrome.tabs.query) first: a check in loop() before calling pollOnce leaves
+// that await as a window in which a keepalive force-restart can land, after
+// which the retired loop sails on into the poll. Measured through the real
+// keepaliveTick path with a gate inside chrome.tabs.query: maxConcurrentPolls=2.
+//
+// This is the THIRD position this check has occupied (top of iteration → before
+// pollOnce → here). Each move was prompted by the guarantee being falsified one
+// frame deeper, so state the rule rather than the location: the check belongs
+// immediately before the side effect it guards, with NO await between them.
+const POLL_RETIRED = "retired";
+
+async function pollOnce(cfg, retired) {
   const active = await activeTabSnapshot();
+  // NOTHING may be awaited between here and the fetch.
+  if (retired && retired()) return { kind: POLL_RETIRED };
   const res = await fetch(`${base(cfg.port)}/poll`, {
     // Identify this instance so the server routes only its commands here.
     headers: { ...authHeaders(cfg.token),
@@ -1117,13 +1136,17 @@ async function postResult(cfg, envelope) {
 // LOOP_STALL_MS is wedged, and we retire it (bump the generation, clear the
 // latch) before kicking a fresh one. Exported for unit tests.
 //
-// Safety against duplicate POLLING is structural, not timing-based: the retired
-// loop re-checks its generation immediately before each /poll (see `retired()` in
-// loop() — a top-of-iteration check alone is NOT enough, it only fires between
-// iterations) and its finally only clears `running` if it still owns the
-// generation. So even if the abandoned await settles LATER, that loop exits
-// without polling alongside the new one. It MAY still finish posting a result it
-// had already dequeued, which is deliberate — see the note in loop().
+// Duplicate POLLING is guarded by re-checking the generation with NO await
+// between the check and the `fetch` — the check therefore lives inside
+// pollOnce(), not in loop(), because `activeTabSnapshot()` sits between them.
+// The retired loop's finally also declines to clear `running` unless it still
+// owns the generation. So an abandoned await that settles LATER lets that loop
+// exit without polling alongside the new one. It MAY still finish posting a
+// result it had already dequeued, which is deliberate — see the note in loop().
+//
+// ⚠ Two earlier versions of this comment asserted the guarantee while the check
+// sat one frame too shallow, and both were falsified by a probe. If you move it,
+// re-measure with a gate parked in whatever the last await before the fetch is.
 export function keepaliveTick(now = Date.now()) {
   if (running && lastLoopTickAt !== null
       && (now - lastLoopTickAt) > loopTiming().stallMs) {
@@ -1150,6 +1173,10 @@ async function loop() {
   // iteration — including its /poll — alongside its replacement. Measured: parking
   // the loop inside config()'s storage read, retiring it, then releasing produced
   // one extra poll from the retired loop.
+  //
+  // The top-of-iteration check is still worth keeping for a SECOND reason: it
+  // stops a retired loop stamping the shared `lastLoopTickAt`, which would
+  // refresh the liveness clock and mask a genuine wedge of its replacement.
   const retired = () => myGen !== loopGeneration;
   try {
     // eslint-disable-next-line no-constant-condition
@@ -1166,21 +1193,23 @@ async function loop() {
         const cfg = await promiseWithTimeout(config(), loopTiming().storageMs,
                                              "config", {}, "op_timeout");
         if (!cfg.token) { await sleep(5000); continue; }
-        // ⚠ THE check that actually prevents duplicate pollers. It must sit
-        // immediately before the poll, not merely at the top of the iteration:
-        // being retired mid-`config()` is the COMMON case (after this change the
-        // storage reads are the loop's slowest awaits), and a retired loop that
-        // polls is exactly the concurrency the generation mechanism promises to
-        // prevent.
+        // An early bail so a retired loop does not even run activeTabSnapshot().
+        // It is an OPTIMISATION, not the guarantee — the binding check lives
+        // inside pollOnce(), immediately before the fetch, because there is an
+        // await (chrome.tabs.query) between here and there.
         //
         // Deliberately NOT gating execute()/postResult(): a command already
         // dequeued from the server has no other owner, so dropping it would
         // strand the caller until its cmd_timeout. Posting a finished result from
-        // a retired loop is harmless (the server correlates by command id) —
-        // POLLING from one is not.
+        // a retired loop is harmless (the server correlates by command id, cids
+        // are unique per submit, and a timed-out submit has already stripped the
+        // outbox — so a late post is a no-op, never a misroute). POLLING from a
+        // retired loop is the thing that must not happen.
         if (retired()) return;
-        const r = await promiseWithTimeout(pollOnce(cfg), loopTiming().pollMs,
-                                           "poll", {}, "op_timeout");
+        const r = await promiseWithTimeout(pollOnce(cfg, retired),
+                                           loopTiming().pollMs, "poll", {},
+                                           "op_timeout");
+        if (r.kind === POLL_RETIRED) return;   // retired inside pollOnce
         attempt = 0;                             // healthy round-trip
         if (r.kind === POLL_SUPERSEDED) {
           // Another instance on this host claimed our routing key (a duplicate
