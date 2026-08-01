@@ -6,21 +6,31 @@ Read this when you need to test a page as a phone/tablet, or when you hit
 
 Requires extension **0.5.0+**. On an older build the op fails with `unknown_op`
 (see `errors.md` — a reload ↻ is unreliable, it needs a FULL Brave restart).
+The `documentPredatesEmulation` envelope hint needs **0.6.0+**; on 0.5.0 `emulate`
+simply never carries it (the trap is still there, unannounced).
 
 ---
 
 ## The 30-second version
 
 ```bash
-browser open                         # emulation is OWNED-TAB-ONLY (about:blank)
-browser emulate iphone-15            # ← emulate FIRST …
-browser nav https://example.com      # ← … then LOAD. This order is load-bearing.
+browser open https://example.com     # emulation is OWNED-TAB-ONLY
+browser emulate iphone-15            # ← replies documentPredatesEmulation: true …
+browser nav https://example.com      # ← … so RE-NAV: the document is rebuilt emulated
 browser screenshot                   # ← captured at 393×852 @3x, as an iPhone
 browser click '#menu'                # ← dispatched as a TOUCH tap
 browser emulate --reset
 ```
 
 `browser emulate --list` prints the preset names without touching the browser.
+
+⚠ **`browser open` with no URL will NOT work as the first step**, despite what
+this recipe said before 0.6.0: the tab it creates sits at `about:blank`, and
+`chrome.debugger` may only attach to `http:`/`https:`
+(`CDP_ATTACHABLE_SCHEMES`), so `emulate` on it is refused with
+`cdp_attach_refused:about:`. Open the URL, emulate, then **re-`nav` to the same
+URL** — which is exactly what the hint tells you to do. (Established from the
+attach predicate and pinned by a unit test; not re-measured live.)
 
 🔴 **Two traps, both of which produce a confident wrong answer. Read both before
 you trust anything you read off an emulated tab:**
@@ -71,9 +81,9 @@ other create-time global would behave the same way.
 ### The rule
 
 ```bash
-browser open                      # about:blank — nothing committed yet
-browser emulate iphone-15
-browser nav <url>                 # the document is BUILT under emulation
+browser open <url>                # emulate needs an http/https tab to attach to
+browser emulate iphone-15         # → documentPredatesEmulation: true
+browser nav <url>                 # the document is RE-BUILT under emulation
 # ... now read / click / screenshot
 ```
 
@@ -84,15 +94,16 @@ new document is created with touch enabled and with the mobile UA visible to any
 load-time sniffing.
 
 ⚠ The natural-looking order — `open <url>` → `emulate` → interact — is the WRONG
-one, which is why the 30-second recipe above opens `about:blank`. `browser click`
+one; the missing step is the re-`nav`. `browser click`
 still dispatches touch *events* on such a tab (that is driven by the stored
 emulation state, not by the page's API surface), so a tap can work while the
 page's own `'ontouchstart' in window` feature-detect has already sent it down the
 desktop branch.
 
-**There is no envelope warning for this yet** — the `emulated`/`notEmulatedRead`
-annotation covers the read-path trap, not this one. See "Envelope hint (not
-implemented)" at the end of this page.
+**Since 0.6.0 the envelope warns you** — `emulate` returns
+`documentPredatesEmulation: true` + an `emulationNote` when the tab already holds a
+document that was not built under this emulation. See "The
+`documentPredatesEmulation` hint" below for exactly when it fires and clears.
 
 ---
 
@@ -361,29 +372,79 @@ recorded. No URL, no page content, as everywhere else.
 
 ---
 
-## Envelope hint (NOT implemented — deliberate, and why)
+## The `documentPredatesEmulation` hint (0.6.0+)
 
-The lesson from the read-path trap is that **the envelope is the protection that
-works regardless of which docs were read**: `notEmulatedRead` + `emulationNote`
-warn a model that never opened this file. The document-order trap deserves the
-same treatment — `emulate` returning something like
-`documentPredatesEmulation: true` when the target tab already has a committed
-document (anything other than a fresh `about:blank`), with a note saying "re-`nav`
-before reading; the touch API is not installed on this document".
+Docs are the weaker protection: the envelope reaches a model that read none of
+this. So `emulate` self-announces the create-time trap the same way a read
+self-announces the read-path trap — **one idiom, a boolean plus `emulationNote`**:
 
-It is **not implemented here on purpose.** The check has to run where the tab's
-state is known — `handleEmulate` in `extension/protocol.js` — so it is an
-extension code change, and the deployed extension is loaded from
-`~/.local/share/browser-bridge-ext/`: shipping it means a manifest bump and a FULL
-Brave restart on **both** profiles, which had just been done for 0.5.0. Doing it
-inside a docs-and-CLI fix would also have meant claiming a behaviour change that
-cannot be live-verified without driving the browser.
+```jsonc
+{ "tabId": 42, "url": "https://example.com",
+  "emulation": { "preset": "iphone-15", "width": 393, … },
+  "applied": ["Emulation.setDeviceMetricsOverride", …],
+  "note": "sticky per tab: …",
+  // ↓ only when the trap applies
+  "documentPredatesEmulation": true,
+  "emulationNote": "This tab already had a document loaded BEFORE these overrides
+                    were applied … `\"ontouchstart\" in window` stays false and
+                    `typeof TouchEvent` stays \"undefined\" … REMEDY: `browser nav
+                    <url>` now that emulation is on …" }
+```
 
-**Follow-up, when the next extension bump happens anyway:** add the flag in
-`handleEmulate`, surface it in the CLI as a stderr warning next to the existing
-`_hidden_warn`, and cover it in `tests/emulation.test.mjs`. Until then this page
-and the `README` pointer are the only warning, which is precisely the weaker form
-of protection that motivates doing it.
+**When it fires.** Both must hold:
+
+1. the tab's URL is a **committed document** — anything other than `about:blank`
+   (with or without a fragment/query), `about:newtab`, `chrome://newtab/`,
+   `brave://newtab/`; and
+2. that document was **not created by this bridge under an emulation with the same
+   create-time signature**. The signature is the part of the state a document can
+   only pick up by being *built* under it: touch on/off + `maxTouchPoints`,
+   `mobile`, and whether a UA override is in force. It is deliberately wider than
+   the two measured properties — a spurious hint costs one re-`nav`, a missed one
+   costs a wrong conclusion about the site.
+
+| sequence | hint on the last `emulate`? |
+|---|---|
+| `open <url>` → `emulate` | ✅ fires — the page loaded un-emulated |
+| `nav <url>` (un-emulated) → `emulate` | ✅ fires |
+| `emulate` → `nav <url>` → `emulate` (same device) | — silent, the document was built emulated |
+| `emulate` → `nav` → `emulate --touch=false` | ✅ fires — different create-time state |
+| `emulate` → `nav` → `emulate --reset` → `emulate` (same device) | — silent; `--reset` does not un-build the document |
+| `emulate --reset` (any time) | — never; a reset applies nothing |
+| tab with no emulation at all | — the envelope is unchanged, no new field |
+
+**When the record clears.** The "what was this document built under" record is
+per-tab and dies with the tab: `close`, `chrome.tabs.onRemoved`,
+`chrome.tabs.onReplaced` (prerender swap), and a tab that vanished out-of-band
+(`owned_tab_gone`). It deliberately **survives `emulate --reset`** — a reset stops
+re-applying overrides, but the document it already built still has touch installed,
+and forgetting that would make the next identical `emulate` cry wolf.
+
+⚠ **Honest limitation: only the bridge's own `nav` updates the record.** Any other
+navigation is unobserved, so the record can go stale and the hint stay silent on a
+document that really does predate the overrides. Concretely, all of these:
+
+* **your own `browser click` / `browser key`** that follows a link or submits a
+  form — the new document commits *after* that op's CDP session detaches, so it is
+  created **un-emulated**, while the record still says "built emulated". This is the
+  one an agent is most likely to hit and least likely to recognise;
+* a navigation the operator performs by hand in the tab;
+* a page-initiated one (meta-refresh, a JS `location` assignment, a redirect chain
+  that lands somewhere else);
+* a `nav` whose `Page.navigate` **resolves with an `errorText`** (DNS failure, etc.)
+  rather than throwing: the record is still written, though what committed is a
+  Chrome error page. `chrome.tabs.onUpdated` was deliberately not
+used: it cannot distinguish the bridge's own CDP navigation from an out-of-band one
+without a second piece of mutable state to get wrong. **If in doubt, re-`nav`** —
+it is idempotent and cheap.
+
+⚠ **What is and is not verified:** the fire/clear behaviour above is covered by
+unit tests against a **mocked** `chrome.debugger` (`tests/emulation.test.mjs`), and
+every one of those guards was mutation-tested. The *underlying* fact the note
+asserts — that `ontouchstart`/`TouchEvent` are missing before a re-`nav` and
+present after — is the live measurement in the table at the top of this page, taken
+once, on `example.com`, with `iphone-15`. Exactly two properties were measured;
+neither this page nor the note claims that list is exhaustive.
 
 ---
 
