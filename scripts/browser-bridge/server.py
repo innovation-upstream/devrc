@@ -144,7 +144,7 @@ from urllib.parse import unquote, urlsplit
 # operator is using.
 ALLOWED_OPS = ("getHtml", "text", "eval", "tabs", "nav", "screenshot",
                "open", "close", "frames", "click", "type", "key", "wake",
-               "activate", "upload", "ping", "emulate")
+               "activate", "upload", "ping", "emulate", "context")
 
 # Ops handled ENTIRELY server-side (never dispatched to the extension). `release`
 # relinquishes a session's owned-tab mapping without touching the real Brave tab.
@@ -156,7 +156,7 @@ SERVER_OPS = ("release",)
 # and `release` (server-side) do NOT contend for a single tab.
 TAB_SCOPED_OPS = frozenset({"getHtml", "text", "eval", "nav", "screenshot",
                             "close", "frames", "click", "type", "key",
-                            "wake", "activate", "upload", "emulate"})
+                            "wake", "activate", "upload", "emulate", "context"})
 
 # Ops that may run ONLY against a tab the calling session OWNS (opened via `open`).
 # This is the emulation blast-radius rule, enforced at the one place that knows who
