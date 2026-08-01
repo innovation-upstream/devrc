@@ -134,7 +134,13 @@
 #                               read; optional CSS selector; --max-bytes N caps
 #                               the returned text, default 32768, 0 = uncapped).
 #                               --wake as for `html`
-#   browser js '<js>'         — run JS in the owned/active tab, return its value.
+#   browser js '<js>' [--wake[=MS]]
+#                             — run JS in the owned/active tab, return its value.
+#                               FLAG ORDER IS FREE: `js --wake '<expr>'` and
+#                               `js '<expr>' --wake` are the same command (as are
+#                               the flags on `text`/`html`). For a JS expression
+#                               that STARTS with `-`, end the flags first:
+#                               `browser js -- '-1+2'`.
 #                               ALIAS of `browser eval` (identical semantics/flags,
 #                               and the wire op is `eval` either way). PREFER `js`
 #                               in a worktree-isolated agent: Claude Code's isolation
@@ -583,6 +589,11 @@ case "$sub" in
     # Optional url; default about:blank. Records this session's owned tab.
     if [ $# -ge 1 ]; then
       url="$(json_str "$1")"
+      shift
+      # `open` takes NO flags, so it keeps a bare positional (a URL can never be
+      # confused for a flag). But an extra arg used to be SILENTLY DROPPED — the
+      # same failure mode as the `js` flag-order bug, one step quieter. Reject it.
+      [ $# -eq 0 ] || die "browser open takes at most one url (got extra: $1)"
       cmd_op open "\"url\":${url}" | pretty
     else
       cmd_op open | pretty
@@ -611,7 +622,7 @@ case "$sub" in
         --wait) shift; [ $# -ge 1 ] || die "usage: browser wake [--wait MS]"; wait="$1"; shift ;;
         --wait=*) wait="${1#--wait=}"; shift ;;
         --no-wait) wait="0"; shift ;;
-        --) shift; break ;;
+        --) shift; [ $# -eq 0 ] || die "browser wake takes no positional args (got: $1)"; break ;;
         -*) die "browser wake: unknown flag: $1 (try: --wait MS | --no-wait)" ;;
         *) die "browser wake takes no positional args (got: $1)" ;;
       esac
@@ -680,7 +691,12 @@ case "$sub" in
         --geo=*) emu_geo="${1#--geo=}"; shift ;;
         --tz) shift; [ $# -ge 1 ] || die "--tz needs an IANA zone (e.g. Europe/London)"; emu_tz="$1"; shift ;;
         --tz=*) emu_tz="${1#--tz=}"; shift ;;
-        --) shift; break ;;
+        --) shift
+          while [ $# -gt 0 ]; do
+            [ -z "$emu_device" ] || die "browser emulate takes at most one preset name (got extra: $1)"
+            emu_device="$1"; shift
+          done
+          break ;;
         -*) die "browser emulate: unknown flag: $1 (try: <preset> | --width N --height N [--dsf F] [--mobile] [--touch] [--ua S] [--orientation portrait|landscape] [--color-scheme light|dark] [--geo LAT,LON] [--tz ZONE] | --reset | --list)" ;;
         *) [ -z "$emu_device" ] || die "browser emulate takes at most one preset name (got extra: $1)"
            emu_device="$1"; shift ;;
@@ -774,7 +790,7 @@ sys.stdout.write(json.dumps(fields)[1:-1])
         --wait) shift; [ $# -ge 1 ] || die "usage: browser activate [--wait MS]"; wait="$1"; shift ;;
         --wait=*) wait="${1#--wait=}"; shift ;;
         --no-wait) wait="0"; shift ;;
-        --) shift; break ;;
+        --) shift; [ $# -eq 0 ] || die "browser activate takes no positional args (got: $1)"; break ;;
         -*) die "browser activate: unknown flag: $1 (try: --wait MS | --no-wait)" ;;
         *) die "browser activate takes no positional args (got: $1)" ;;
       esac
@@ -808,7 +824,7 @@ sys.stdout.write(json.dumps(fields)[1:-1])
         --wake=*) wake=1; wakewait="${1#--wake=}";
           case "$wakewait" in (*[!0-9]*|"") die "--wake=MS must be a non-negative integer of ms (got: $wakewait)";; esac
           shift ;;
-        --) shift; break ;;
+        --) shift; [ $# -eq 0 ] || die "browser html takes no positional args (got: $1)"; break ;;
         -*) die "browser html: unknown flag: $1 (try: --max-bytes N | --wake[=MS])" ;;
         *) die "browser html takes no positional args (got: $1)" ;;
       esac
@@ -833,8 +849,13 @@ sys.stdout.write(json.dumps(fields)[1:-1])
         --wake=*) wake=1; wakewait="${1#--wake=}";
           case "$wakewait" in (*[!0-9]*|"") die "--wake=MS must be a non-negative integer of ms (got: $wakewait)";; esac
           shift ;;
-        --) shift; break ;;
-        -*) die "browser text: unknown flag: $1" ;;
+        --) shift
+          while [ $# -gt 0 ]; do
+            [ -z "$sel" ] || die "browser text takes at most one selector (got extra: $1)"
+            sel="$1"; shift
+          done
+          break ;;
+        -*) die "browser text: unknown flag: $1 (try: --max-bytes N | --wake[=MS]; use '--' before a selector starting with '-')" ;;
         *) [ -z "$sel" ] || die "browser text takes at most one selector (got extra: $1)"; sel="$1"; shift ;;
       esac
     done
@@ -855,24 +876,43 @@ sys.stdout.write(json.dumps(fields)[1:-1])
     # un-deprecated (a deprecation warning would just re-introduce the token).
     # ⚠ The WIRE op stays `eval` for BOTH spellings — the extension only knows
     # `eval`, and this is a CLI-surface alias only.
-    [ $# -ge 1 ] || die "usage: browser js '<js>'   (or the identical: browser eval '<js>')"
-    js="$(json_str "$1")"
-    shift
     # --wake evaluates inside a woken (un-throttled, focus-untouched) CDP session —
     # the shape to use when the expression MEASURES live un-throttled state (rAF
     # ticks, a lazily-hydrating SPA) rather than reading persisted DOM.
-    wake=""; wakewait=""
+    #
+    # FLAG ORDER IS FREE (fixed after a live miss): the JS expression used to be
+    # taken as `$1` BEFORE this loop ran, so `browser js --wake '<expr>'` swallowed
+    # the literal string `--wake` as the JS and then rejected the real expression
+    # as "extra" — while `browser js '<expr>' --wake` worked. Both orders are the
+    # SAME command now (matching `text`, which was already order-free). This is not
+    # only a usability wart: the documented emulation verification probe is written
+    # flags-first, so following the docs produced a parse error that read as the
+    # feature being broken.
+    # An expression that legitimately STARTS with `-` (e.g. `-1+2`) is still
+    # rejected as an unknown flag — pass it after the `--` end-of-flags separator:
+    #   browser js -- '-1+2'
+    js=""; js_seen=0; wake=""; wakewait=""
     while [ $# -gt 0 ]; do
       case "$1" in
         --wake) wake=1; shift ;;
         --wake=*) wake=1; wakewait="${1#--wake=}";
           case "$wakewait" in (*[!0-9]*|"") die "--wake=MS must be a non-negative integer of ms (got: $wakewait)";; esac
           shift ;;
-        --) shift; break ;;
-        -*) die "browser js: unknown flag: $1 (try: --wake[=MS])" ;;
-        *) die "browser js takes exactly one JS argument (got extra: $1)" ;;
+        --) # everything after `--` is positional, even if it starts with `-`.
+          shift
+          while [ $# -gt 0 ]; do
+            [ "$js_seen" -eq 0 ] || die "browser js takes exactly one JS argument (got extra: $1)"
+            js="$1"; js_seen=1; shift
+          done
+          break ;;
+        -*) die "browser js: unknown flag: $1 (try: --wake[=MS]; use '--' before a JS expression starting with '-')" ;;
+        *) [ "$js_seen" -eq 0 ] || die "browser js takes exactly one JS argument (got extra: $1)"
+           js="$1"; js_seen=1; shift ;;
       esac
     done
+    # js_seen (not [ -n "$js" ]) so `browser js ''` keeps its old meaning.
+    [ "$js_seen" -eq 1 ] || die "usage: browser js '<js>' [--wake[=MS]]   (or the identical: browser eval '<js>')"
+    js="$(json_str "$js")"
     cmd_op eval "\"js\":${js}$(wake_fields "$wake" "$wakewait")" | pretty
     ;;
   tabs)
@@ -880,7 +920,10 @@ sys.stdout.write(json.dumps(fields)[1:-1])
     ;;
   nav)
     [ $# -ge 1 ] || die "usage: browser nav <url>"
-    url="$(json_str "$1")"
+    url="$(json_str "$1")"; shift
+    # No flags on `nav` → the positional stays bare (a URL never looks like a
+    # flag). Extra args were silently dropped before; make that loud instead.
+    [ $# -eq 0 ] || die "browser nav takes exactly one url (got extra: $1)"
     cmd_op nav "\"url\":${url}" | pretty
     ;;
   screenshot)
@@ -899,8 +942,13 @@ sys.stdout.write(json.dumps(fields)[1:-1])
       case "$1" in
         --fullpage) full="\"fullpage\":true"; shift ;;
         --data-url) dataurl=1; shift ;;
-        --) shift; break ;;
-        -*) die "browser screenshot: unknown flag: $1 (try: --fullpage, --data-url)" ;;
+        --) shift
+          while [ $# -gt 0 ]; do
+            [ -z "$out" ] || die "browser screenshot takes at most one path (got extra: $1)"
+            out="$1"; shift
+          done
+          break ;;
+        -*) die "browser screenshot: unknown flag: $1 (try: --fullpage, --data-url; use '--' before a path starting with '-')" ;;
         *) [ -z "$out" ] || die "browser screenshot takes at most one path (got extra: $1)"; out="$1"; shift ;;
       esac
     done
@@ -1013,7 +1061,10 @@ else:
     # browser [--frame <f>] click <selector> — click the element's center. Top frame:
     # TRUSTED CDP. Cross-origin --frame: SYNTHETIC click injected via chrome.scripting.
     [ $# -ge 1 ] || die "usage: browser [--frame <f>] click <css-selector>"
-    sel="$(json_str "$1")"
+    sel="$(json_str "$1")"; shift
+    # No flags on `click` → the selector stays bare (so a `-`-leading selector
+    # keeps working). Extra args were silently dropped before; make that loud.
+    [ $# -eq 0 ] || die "browser click takes exactly one css-selector (got extra: $1)"
     cmd_op click "\"selector\":${sel}" | pretty
     ;;
   type)
@@ -1025,8 +1076,13 @@ else:
       case "$1" in
         --selector) shift; [ $# -ge 1 ] || die "usage: browser type <text> [--selector <sel>]"; tsel="$1"; shift ;;
         --selector=*) tsel="${1#--selector=}"; shift ;;
-        --) shift; break ;;
-        -*) die "browser type: unknown flag: $1 (try: --selector <sel>)" ;;
+        --) shift
+          while [ $# -gt 0 ]; do
+            [ -z "$txt" ] || die "browser type takes one text arg (got extra: $1)"
+            txt="$1"; shift
+          done
+          break ;;
+        -*) die "browser type: unknown flag: $1 (try: --selector <sel>; use '--' before text starting with '-')" ;;
         *) [ -z "$txt" ] || die "browser type takes one text arg (got extra: $1)"; txt="$1"; shift ;;
       esac
     done
@@ -1043,7 +1099,12 @@ else:
       case "$1" in
         --selector) shift; [ $# -ge 1 ] || die "usage: browser key <name> [--selector <sel>]"; ksel="$1"; shift ;;
         --selector=*) ksel="${1#--selector=}"; shift ;;
-        --) shift; break ;;
+        --) shift
+          while [ $# -gt 0 ]; do
+            [ -z "$kname" ] || die "browser key takes one key name (got extra: $1)"
+            kname="$1"; shift
+          done
+          break ;;
         -*) die "browser key: unknown flag: $1 (try: --selector <sel>)" ;;
         *) [ -z "$kname" ] || die "browser key takes one key name (got extra: $1)"; kname="$1"; shift ;;
       esac
