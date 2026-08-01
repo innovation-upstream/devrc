@@ -20,7 +20,7 @@
 #   Two Claude sessions driving one browser used to interleave on ONE shared
 #   active tab. Now each session can `open` its OWN tab; the server records the
 #   ownership under a stable per-session id (X-Session-Id header, derived from
-#   CLAUDE_CODE_SESSION_ID → $TMUX_PANE → a per-process-tree token — see
+#   CLAUDE_CODE_SESSION_ID → $TMUX_PANE → the POSIX session id — see
 #   derive_session_id below) and routes that session's html/eval/nav/screenshot/
 #   close to ITS tab. A session that never `open`ed falls back to the active tab
 #   (the one-shot read path — inherently safe). `--tab <id>` overrides the target
@@ -234,12 +234,30 @@ die() { echo "browser: $*" >&2; exit 1; }
 #   2. CLAUDE_SESSION_ID — defensive alternate spelling, in case a CLI build
 #      renames the var.
 #   3. $TMUX_PANE — the user runs each session in its own tmux pane, so the pane
-#      id is a good per-session proxy when no Claude var is exported.
-#   4. a random token cached under the controlling process tree (keyed by the
-#      shell's PPID = the Claude Code process managing the Bash tool, stable
-#      across a session's calls), persisted so repeated calls read the same id.
-# DEGRADATION: if two drivers ever resolve the SAME id they SHARE a tab — no
-# worse than the pre-fix behaviour. This is NOT hypothetical for one case:
+#      id is a good per-session proxy when no Claude var is exported. NOTE this
+#      step is COSMETIC, not structural: MEASURED 2026-08-01, each pane gets its
+#      own pty AND its own POSIX session (%0 sess=2982021 tty=pts/8, %1
+#      sess=2982024 tty=pts/9), so step 4 alone would already isolate panes.
+#      Kept because it is cheaper and more legible — do not "simplify" it away
+#      under the belief that removing it would break pane isolation.
+#   4. the POSIX SESSION id (`sid:<sid>:<leader-starttime>`), read from
+#      /proc/self/stat. See _session_from_proc below for why this — and NOT the
+#      PPID — is the right process-tree signal.
+#   5. LAST RESORT (no procfs): a random token cached under
+#      $XDG_RUNTIME_DIR/browser-bridge, keyed by PPID. Kept only as a
+#      non-Linux safety net — it is NOT stable across a subshell.
+# 🔴 Step 4 used to BE the PPID-keyed token, and that DRIFTS across a `$( … )`
+# that forks — so `T=$(browser open … | …)` registered ownership under one id
+# and `browser --tab "$T" emulate` presented another → `not_owned_tab`. Measured
+# over ssh 2026-08-01; invisible wherever CLAUDE_CODE_SESSION_ID is set. Full
+# account: reference/tabs-instances.md → "The subshell hazard".
+# DEGRADATION: if two drivers ever resolve the SAME id they SHARE a tab. This is
+# a TRADE, not a strict improvement (measured): two drivers with DIFFERENT
+# parents inside ONE POSIX session were distinct under the old ppid key and now
+# collide (sid:2983316:8395877 twice, vs ppid:2983326 / ppid:2983316) — reachable
+# only with all three env sources unset. In the commoner shape the new code is
+# better: three setsid'd runs from one shell were ONE id under the old key and
+# are three now. It is NOT hypothetical for one case:
 # **sibling subagents of one parent share identity.** Empirically (dumped from
 # inside two parallel subagents) a subagent inherits the PARENT's
 # CLAUDE_CODE_SESSION_ID *and* runs in the same $TMUX_PANE, and the harness
@@ -249,10 +267,51 @@ die() { echo "browser: $*" >&2; exit 1; }
 # drivers that may share a session id should each `open` and then pass the
 # returned `--tab <id>` explicitly on every subsequent op — an explicit --tab
 # overrides owned-tab routing entirely, so they never collide. See SKILL.md.
+
+# _session_from_proc — `sid:<session-id>:<leader-starttime>` from procfs, or
+# non-zero if procfs is unreadable. WHY the POSIX session id and not $PPID/$$:
+# setsid(2) is the ONLY way to leave a session, so every subshell/pipeline
+# stage/command substitution of one shell reports the same sid (stable — $PPID
+# is not), while sshd, tmux (per pane), a terminal, a systemd unit and cron all
+# setsid, so genuinely distinct sessions still get distinct ids (isolation is
+# preserved). `<leader-starttime>` (stat field 22, ticks since boot) defuses PID
+# REUSE — a recycled sid cannot inherit a dead session's tab.
+# Parsing: comm (field 2) is parenthesised and may contain spaces, so cut
+# through the LAST ") " first; after the cut fields are 1=state 2=ppid 3=pgrp
+# 4=session … 20=starttime (the 1-based stat index minus 2).
+# BROWSER_BRIDGE_PROC is a TEST seam (point it at a nonexistent path to exercise
+# the last-resort branch), not an operator knob.
+_session_from_proc() {
+  local procfs="${BROWSER_BRIDGE_PROC:-/proc}"
+  local line rest sid st
+  [ -r "${procfs}/self/stat" ] || return 1
+  IFS= read -r line < "${procfs}/self/stat" || return 1
+  rest="${line##*\) }"
+  set -- $rest
+  [ $# -ge 4 ] || return 1
+  sid="$4"
+  case "$sid" in ''|0|*[!0-9]*) return 1 ;; esac
+  # `x` = the session leader has already exited, so no starttime is available
+  # and the id degrades to `sid:<sid>:x` — the pid-reuse guard is OFF for that
+  # session. Recorded, not acted on: an orphaned session that then collides with
+  # a recycled sid is far-fetched, and server-side ownership self-releases on the
+  # 900s idle TTL anyway.
+  st="x"
+  if [ -r "${procfs}/${sid}/stat" ] && IFS= read -r line < "${procfs}/${sid}/stat"; then
+    rest="${line##*\) }"
+    set -- $rest
+    if [ $# -ge 20 ]; then
+      case "${20}" in ''|*[!0-9]*) : ;; *) st="${20}" ;; esac
+    fi
+  fi
+  printf 'sid:%s:%s' "$sid" "$st"
+}
+
 derive_session_id() {
   if [ -n "${CLAUDE_CODE_SESSION_ID:-}" ]; then printf 'claude:%s' "$CLAUDE_CODE_SESSION_ID"; return; fi
   if [ -n "${CLAUDE_SESSION_ID:-}" ];      then printf 'claude:%s' "$CLAUDE_SESSION_ID"; return; fi
   if [ -n "${TMUX_PANE:-}" ];              then printf 'tmux:%s' "$TMUX_PANE"; return; fi
+  local sid; sid="$(_session_from_proc)" && [ -n "$sid" ] && { printf '%s' "$sid"; return; }
   local dir="${XDG_RUNTIME_DIR:-/tmp}/browser-bridge"
   local f="${dir}/session-${PPID}"
   if [ -r "$f" ]; then cat "$f"; return; fi
@@ -538,7 +597,25 @@ cmd_op() {
       if printf '%s' "$resp" | grep -q '"not_owned_tab"'; then
         # The emulation blast-radius refusal. Distinct from no_owned_tab: the
         # session may well own a tab — this one is not it. Nothing was applied.
-        die "op '$op' may only run on a tab THIS session owns — run 'browser open [url]' first and drop --tab (device emulation is deliberately never allowed on your own browsing tabs)"
+        #
+        # The two shapes need DIFFERENT advice. The old single message said
+        # "drop --tab", which sends you hunting the flag when the real cause is
+        # usually a session-id mismatch (the `open` ran under a different id).
+        # So print the id THIS call presented — it is a routing token, never a
+        # secret; `--print-session-id` already prints it.
+        if [ -n "$TAB" ]; then
+          echo "browser: tab ${TAB} is not owned by THIS session." >&2
+          echo "browser:   this call's session id: ${SESSION_ID}" >&2
+          echo "browser:   Either that tab belongs to another driver/session, or the" >&2
+          echo "browser:   'browser open' that created it ran under a DIFFERENT id." >&2
+          echo "browser:   Compare them: run 'browser --print-session-id' the same way" >&2
+          echo "browser:   you ran the 'open' (e.g. inside the same \$( … ) or pipeline)" >&2
+          echo "browser:   and again directly — if they differ, that is the bug." >&2
+          die "op '$op' refused (device emulation is deliberately never allowed on a tab this session does not own)"
+        fi
+        echo "browser: this session owns no tab, so '$op' has nothing it may act on." >&2
+        echo "browser:   this call's session id: ${SESSION_ID}" >&2
+        die "run 'browser open [url]' first, then re-run '$op' (device emulation is deliberately never allowed on your own browsing tabs)"
       fi
       if printf '%s' "$resp" | grep -q '"no_owned_tab"'; then
         die "this session owns no tab to close — run 'browser open [url]' first (or pass --tab <id>)"
