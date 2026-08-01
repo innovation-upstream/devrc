@@ -20,13 +20,17 @@ a parse error that reads as the FEATURE being broken.
 The invariant pinned here: for every subcommand that accepts both flags and a
 positional, the two orders must produce a BYTE-IDENTICAL request body.
 
-MUTATION RESULT (`git checkout origin/main -- scripts/browser-bridge/browser`,
-control verified non-empty: 21 insertions / 82 deletions):
-  - 14 of these tests go RED on the pre-fix parser — they are genuine REGRESSION
-    coverage.
-  - 5 stay green on the pre-fix parser and are labelled `INVARIANT GUARD` below.
-    They pin behaviour the bug never broke (back-compat that the fix must not
-    take away); they are NOT evidence the fix works.
+MUTATION RESULTS (each control verified genuinely non-empty first):
+
+  Round 1 — `git checkout origin/main -- browser` (21 ins / 82 del):
+    14 RED (regression coverage), 5 green (labelled `INVARIANT GUARD` below —
+    back-compat the fix must not take away; NOT evidence the fix works).
+
+  Round 2 — `git checkout d15e211 -- browser browser-agent` (66/113 and 3/13):
+    14 RED here + 2 in test_browser_agent.py. The `[js-...]` cases of the two
+    empty-first-positional parametrizations stay green because `js` was already
+    fixed in round 1 — for THIS round they are invariant guards, and they are the
+    control that proves the parametrization is pointed at the right defect.
 
 Run: nix-shell -p python312Packages.pytest curl --run \\
        "pytest scripts/browser-bridge/tests/test_browser_cli_args.py"
