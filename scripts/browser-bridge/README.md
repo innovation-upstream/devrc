@@ -1237,11 +1237,24 @@ per-session (multi-step **workflow**) isolation did not.
   `/cmd`, derived (in order) from `CLAUDE_CODE_SESSION_ID` (Claude Code's own
   session UUID — identical across every Bash-tool call in a session, verified on
   the 2.1.x CLI) → `CLAUDE_SESSION_ID` (defensive alternate) → `$TMUX_PANE` (each
-  session runs in its own tmux pane) → a random token cached under the shell's
-  PPID (the Claude Code process, stable across a session's calls). It is used for
+  session runs in its own tmux pane) → the **POSIX session id**
+  (`sid:<sid>:<leader-starttime>` from `/proc/self/stat`) → (procfs-less systems
+  only) a random token cached under the shell's PPID. It is used for
   **routing only** and is **never** trusted for auth — bearer + Host still gate
   every request. If two sessions ever resolve the same id they share a tab
   (documented degradation — no worse than before).
+- **⚠ Why the POSIX session id, and not `$PPID` (fixed 2026-08-01).** The
+  PPID-keyed token was **not stable across a command substitution**: a `$( … )`
+  that forks gives `browser` a different parent pid, so
+  `T=$(browser open … | …)` registered tab ownership under one id and the
+  following `browser --tab "$T" emulate` presented another → `not_owned_tab`.
+  Measured over ssh on the workbench (`CLAUDE_CODE_SESSION_ID` unset there, so
+  the fallback actually ran). A subshell cannot leave its POSIX session — only
+  `setsid(2)` can — so the session id is stable across subshells while still
+  differing between two ssh logins, two tmux panes and two systemd units, which
+  is what keeps per-session tab isolation intact. The `<leader-starttime>`
+  suffix defuses pid reuse. See
+  `reference/tabs-instances.md` → "The subshell hazard".
 - **⚠ Sibling subagents share identity (known limitation).** Per-session
   isolation covers concurrent **top-level** sessions, NOT sibling subagents of
   one parent. Empirically (dumped from inside two parallel subagents) a subagent

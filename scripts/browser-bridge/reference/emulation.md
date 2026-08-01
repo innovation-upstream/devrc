@@ -156,7 +156,17 @@ the operator's browser. So the fallback is removed for this op specifically.
 
 `not_owned_tab` is deliberately **distinct** from `no_owned_tab`: the latter means
 "you have nothing to act on" (run `browser open`), the former means "that tab is
-not yours" (drop the `--tab`).
+not yours".
+
+⚠ **If you passed `--tab <id>` you captured from `browser open`, suspect the
+SESSION ID before you suspect the flag.** Until 2026-08-01 the fallback id was
+keyed on `$PPID`, so `T=$(browser open … | …)` registered ownership under a
+*different* id than the following `browser --tab "$T" emulate` presented — and
+the old message ("drop `--tab`") pointed straight at the wrong thing. The CLI now
+prints the session id the failing call presented; run `browser --print-session-id`
+both inside the same `$( … )` you used for the `open` and directly, and compare.
+Full account: `~/workspace/devrc/scripts/browser-bridge/reference/tabs-instances.md`
+→ "The subshell hazard".
 
 ---
 

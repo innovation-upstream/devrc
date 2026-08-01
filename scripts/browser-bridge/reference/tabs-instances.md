@@ -31,10 +31,43 @@ Now each session can own its own tab:
   with `owned_tab_gone` and the bridge drops your ownership — your NEXT command
   automatically falls back to the active tab. `browser close` always clears the
   mapping, even if the tab was already gone.
-- **Session id source:** `CLAUDE_CODE_SESSION_ID` → `$TMUX_PANE` → a
-  per-process-tree token (see README). It is routing-only, never trusted for
-  auth. If two drivers ever resolve the same id they share a tab (degrades to
-  the old behaviour — no worse). `browser --print-session-id` prints the derived id.
+- **Session id source (precedence):** `CLAUDE_CODE_SESSION_ID` → `CLAUDE_SESSION_ID`
+  → `$TMUX_PANE` → the **POSIX session id** (`sid:<sid>:<leader-starttime>`, from
+  `/proc/self/stat`) → (no procfs only) a PPID-keyed cached token. It is
+  routing-only, never trusted for auth. If two drivers ever resolve the same id
+  they share a tab (degrades to the old behaviour — no worse).
+  `browser --print-session-id` prints the derived id.
+- **⚠ The subshell hazard (fixed 2026-08-01 — read this if you script `open`).**
+  Capturing a tab id is naturally written inside a command substitution:
+
+  ```bash
+  T=$(browser open https://example.com | grep -oE '"tabId": *[0-9]+' | grep -oE '[0-9]+')
+  browser --tab "$T" emulate iphone-15
+  ```
+
+  Until 2026-08-01 the last-resort fallback was keyed on `$PPID`, and a `$( … )`
+  that forks gives `browser` a different parent pid — so the `open` registered
+  ownership under one session id and the later call presented another. The
+  refusal (`op 'emulate' may only run on a tab THIS session owns`) points at
+  `--tab`, which is the wrong place to look. **Measured over ssh on the
+  workbench**, where `CLAUDE_CODE_SESSION_ID` is unset:
+
+  ```
+  $ echo "in subst: $(browser --print-session-id)"
+  in subst:  ppid:2484606:c4b88b1d9de41681
+  $ browser --print-session-id
+             ppid:2484584:3216410da01ef5e2      # DIFFERENT → not_owned_tab
+  ```
+
+  Invisible under normal Claude Code use (`CLAUDE_CODE_SESSION_ID` is set, so the
+  fallback never runs); it bites over **ssh, cron, and any non-Claude shell**.
+  The POSIX session id fixes it: a subshell cannot leave its session (only
+  `setsid(2)` can), so every process in one login/pane/unit agrees — while two
+  ssh logins, two tmux panes and two systemd units still get distinct ids, so
+  per-session tab isolation is preserved. **If you hit `not_owned_tab` anyway**,
+  the CLI now prints the session id THIS call presented; run
+  `browser --print-session-id` both inside the same `$( … )`/pipeline you used
+  for the `open` and directly, and compare.
 - **⚠ Concurrent drivers that may share a session id (subagents): pass explicit
   `--tab`.** Sibling subagents of ONE parent share identity — a subagent inherits
   the parent's `CLAUDE_CODE_SESSION_ID` and the same `$TMUX_PANE`, and there is NO
