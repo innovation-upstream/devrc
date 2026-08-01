@@ -79,6 +79,20 @@ window persists** — so a following ordinary `text`/`html` sees the rendered pa
 on the cheap, banner-free path. Re-wake after a navigation or when the app needs
 to do more rendering work.
 
+### ⚠ After a RELOAD the tab is RE-THROTTLED — and htmx then silently stops firing
+
+"Once per page" means once per **document**, and a reload makes a new one. Any
+navigation or `HX-Refresh`-driven reload puts a background tab back into the
+throttled state, so subsequent clicks appear to do nothing — **no error, no
+console output, the control just looks broken**. That is the whole tell: a
+control that is *silently* inert after a reload is far more likely to be
+throttled than broken.
+
+Two agents lost real time to this in one session; one spent three clicks
+debugging a control that was fine. **Re-run `wake` after any reload**, not only
+after the initial `open`. When a click itself triggers the reload, the wake has
+to come after the click, not before it.
+
 ## `--wake` — when the read itself must observe live un-throttled state
 
 Use it when you are measuring rAF, or the app hydrates lazily and re-empties while
