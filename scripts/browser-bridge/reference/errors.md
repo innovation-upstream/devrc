@@ -124,7 +124,7 @@ profiles are normally connected, so a bare call gets `409 ambiguous_instance`:
 
 ```bash
 browser --instance <label> ping
-# NEW build → {"pong":true,"extensionVersion":"0.3.1","id":"<ext-id>","ops":[…,"ping"]}
+# NEW build → {"pong":true,"extensionVersion":"0.4.0","id":"<ext-id>","ops":[…,"ping"]}
 # OLD build → op 'ping' returned unknown_op — … FULLY RESTART Brave …   (exit 1)
 ```
 
