@@ -217,6 +217,41 @@ clawgate's own login (magic-link `/login?token=`, session cookie, Traefik basic-
   Status vocabulary is exactly **`open` / `in_progress` / `ready_for_review` / `complete`** (`notes.ValidStatus`) — there is **no `dismissed`** status; dismissing deletes. **Route-scope distinction:** the session routes (`/tasks/...`, no `/api` prefix) are LAN/UI-only, and the agent route `PATCH /agent/task/status` **forbids `complete`** — the machine `PATCH /api/tasks/{id}/status` is the trusted-producer path that allows ALL statuses.
   🔴 **"session auth" is not auth**: `requireSession` is a literal pass-through no-op since 0.7.37 (`internal/api/auth.go`), so everything on the LAN NodePort is unauthenticated — including `DELETE /tasks/{id}`. And `requireHookToken` is **enforce-when-set**: with `CLAWGATE_HOOK_TOKEN` empty the machine endpoints are wide open too.
 
+## resolving element references
+
+When a task body contains element references from the browser extension (lines starting with `- ` and a selector), the enriched format (v1.4.0+) includes page context and adjacent text that help locate the element in source code.
+
+### Reference format
+
+```
+- `#remix-row-cf23 > div.flex > button.grid` — button "Delete remix" (aigeum.com/remixes · prev: "Edit" · next: "Share")
+```
+
+### Resolution strategy
+
+Work from the most specific signal inward:
+
+1. **Domain + path** (`aigeum.com/remixes`) — identifies which route/page the element lives on. Search for the route in the app's router config or page components.
+2. **Adjacent text** (`prev: "Edit"`, `next: "Share"`) — search for these strings in the source code. They're likely rendered by the same component that owns the picked element. The preceding text often appears just before the element's component in JSX/templates.
+3. **Selector** (`#remix-row-`) — search for the element directly in DOM-generating code (look for the ID, testid, or tag+class combination).
+4. **Tag + accessible name** (`button "Delete remix"`) — further narrows the search (e.g. search for that label text in templates).
+
+### Practical example
+
+```
+Reference: - `#remix-row-cf23 > div.flex > button.grid` — button "Delete remix" (aigeum.com/remixes · prev: "Edit" · next: "Share")
+
+Resolution strategy:
+1. domain=aigeum.com, path=/remixes → look for route "/remixes" in router config
+2. prev="Edit" → search for "Edit" string in that route's components
+3. selector has #remix-row- prefix → search for "remix-row" in component code
+4. tag=button, name="Delete remix" → search for "Delete remix" label text
+```
+
+### Developer note
+
+The enrichment is built by `buildEnrichment` in `extension/content.js`. It reads `window.location` for page context and walks `previousElementSibling` / `nextElementSibling` for adjacent text, capping each at 120 chars. To modify enrichment behaviour, edit that function — `lib.js` stays pure and handles only selector building and accessible name computation.
+
 ## troubleshooting playbook
 - **No native notifications**: check the pod logs for `subscription stored` (none = the phone never subscribed) and `delivered ... to N device(s)` (N>0 = server delivered, so a missing notification is the OS/browser swallowing it). On Android: allow notifications for the app + set battery to Unrestricted. Brave web-push is finicky; Chrome-installed PWA is the reliable fallback.
 - **`fetch ... URL that includes credentials`**: the page was opened with basic-auth creds in the URL (`https://user:pass@host`). Client fetches must build URLs from `location.origin` (credential-free), not relative paths. (Fixed in 0.2.1.)
