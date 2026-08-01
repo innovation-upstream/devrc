@@ -29,10 +29,84 @@ command unrunnable, which is why fixing the first didn't appear to help:
 entire arc.** They are not version-related — both hosts run opencode 1.18.4 and both
 resolve browser-only. Do not re-open that hypothesis.
 
-⚠ **Capability is still UNMEASURED** beyond two trivial tasks — "it runs" is not "it
-is good at this". The proposed default flip to `browser agent`-first is deliberately
-**NOT shipped**, pending a ~10-goal / ~$0.06 measurement of real success rate. Do not
-flip it on arithmetic (token-cost) reasoning alone.
+✅ **The `browser agent`-first default IS shipped** (SKILL.md → `## FIRST DECISION`).
+It was held back until capability was measured rather than argued from token
+arithmetic; the measurement is
+`~/workspace/devrc/claudedocs/browser-bridge-deepseek-measurement-2026-07-31.md`.
+
+## What was measured — and the scope it was measured at
+
+**Scope, so the numbers carry it:** host **laptop `192.168.50.155`**, instance
+**`personal`**, extension 0.2.0, `opencode` **1.18.4**, model
+**`openrouter/deepseek/deepseek-v4-flash`** as OpenRouter routed it on
+**2026-07-31**, defaults `--steps 12` / `--timeout 120`, **14 goals each run exactly
+ONCE**. Nothing here is evidence about the workbench (`.250`), the `work` profile, a
+different model, or run-to-run variance.
+
+- **13/14 answers correct.** Excluding the deliberate out-of-allowlist guardrail
+  case: 12/13. One run per goal, so the 95% binomial CI is ≈**0.66–0.998** — read it
+  as "≈0.9", not as a rate.
+- **~$0.0025 per run** (sum of attributed per-run deltas, $0.0345 over 14 runs;
+  the campaign credit delta $0.0702 is an upper bound — that OpenRouter key is
+  shared with other tooling).
+- **Median wall-clock 22.65s**, range 11.9s–59.0s. Simple single-page reads: median
+  18.1s, always 2 tool calls. Blind-click interactive goals were the expensive shape
+  at 48.7s and 59.0s / 8–12 tool calls.
+- The **one wrong answer** (`status:"ok"`, confidently wrong) came from reading an
+  unrendered shell in a throttled hidden tab — 1 of 13 `ok` runs (7.7%). That is the
+  failure the agent tool's deterministic auto-wake below closes **by construction**
+  — it is NOT yet live-verified against that run, because F2 has not been
+  reproducible since (2026-08-01: with auto-wake disabled, and again with `wake`
+  denied outright, the rig rendered before the agent's slower read landed and both
+  controls returned the CORRECT answer). The auto-wake mechanism itself IS
+  live-verified: a real run's audit shows `auto_wake` → `auto_wake_exec` (wake) →
+  `auto_wake_exec` (re-read) → `auto_wake_ok woke:true settleMs:1500`. Closing the
+  gap needs a fixture that stays an unrendered shell for ≥30s. It was not a
+  reasoning failure, and no other run produced a wrong `ok`.
+- The out-of-allowlist guardrail behaved exactly as documented: clean
+  `status:"blocked"`, exit 1, empty evidence, no fabrication, no hang.
+
+### 🔴 Do NOT sell `evidence` as protection against a wrong answer
+
+The design doc proposed "`status:"ok"` but empty/unquoted `evidence` → treat as
+`partial`" as a **prerequisite** for the flip. The measurement **falsified that as a
+safety net** and it was demoted:
+
+- It would have flagged goal **B**, which was **correct** (its evidence was a
+  paraphrase, not a substring of any tool output) — a false positive.
+- It would **not** have flagged **F2**, the only wrong answer, because F2 quoted its
+  unrendered page **verbatim**. The evidence was perfectly faithful; the *page* was
+  in the wrong state.
+
+Evidence grounding is anti-**confabulation** hygiene, and worth keeping as such. It
+is not a correctness check. The real protections are (a) the deterministic
+auto-`wake` below, and (b) escalation being cheap — taking over from the agent costs
+~200 tokens, which is why agent-first wins even at a low success rate.
+
+### Guardrails the measurement named
+
+1. **Don't default to the agent for virtualised / lazy-loaded list content.** The
+   civitai card-list goal only worked because the model woke the tab twice and then
+   read `html`; the list could not be reproduced through `text` on a hidden tab even
+   after waking.
+2. **Keep `--allow-domains` tight, and include the frame hosts you expect.** Measured
+   at two points on the same nested-OOPIF goal: with the frame hosts allowlisted the
+   model **skipped `frames`** and top-level-`nav`'d to each iframe URL in turn (right
+   answer, 7 calls); with the allowlist tightened to `127.0.0.1` only, it called
+   `frames`, picked the deepest `frameId`, and used `eval --frame` (right answer).
+   A tight allowlist is what pushes it onto the correct path.
+3. **Ignore `steps_used`.** It disagreed with the tool audit in **5 of 14** runs and
+   **always undercounted** (5 vs 7, 8 vs 12, 5 vs 7, 4 vs 6, 7 vs 8). Don't reason
+   from it; `BROWSER_AGENT_KEEP_SCRATCH=1` + `tool-audit.jsonl` is the ground truth.
+4. **Privacy is a hard boundary, not a preference** — see the ⚠ Privacy bullet below.
+
+### Measured but NOT measured — don't over-claim
+
+`status:"partial"` was **never produced** by any run, so its behaviour is unmeasured.
+Nor were: needle-in-a-haystack reads over long innerText, the step-budget/timeout
+boundaries (nothing exhausted either), failure paths other than the domain guardrail,
+authenticated/high-secret pages (deliberately excluded), prompt injection or hostile
+pages, and `activate` (never invoked).
 
 Offload an open-ended "go read X and tell me Y" browsing task to a **cheap
 autonomous agent** (opencode + DeepSeek `deepseek-v4-flash` via OpenRouter) so it
@@ -174,7 +248,9 @@ browser agent "go to news.ycombinator.com and report the top 3 story titles" \
   opencode JSON transcript + a metadata-only tool audit are kept
   in a scratch dir. **Domain deny is best-effort** (see note below).
 - **⚠ Privacy:** the pages the agent reads are sent to **OpenRouter/DeepSeek**.
-  Do NOT point it at high-secret authenticated pages casually.
+  Never point it at banking, private mail, a credential manager, or anything you
+  would not hand to a third party. This is the one part of the agent-first default
+  that is not a judgement call.
 - **⚠ Domain deny is a mitigation, not a guarantee.** The tool refuses a `nav` to
   a denied host, but it cannot see a page's own client-side redirect (meta-refresh
   / `location=` after an allowed nav) — the bridge navigates the tab and the tool
