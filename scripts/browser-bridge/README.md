@@ -458,7 +458,7 @@ and the never-silent-null contract holds: a genuine `null`/`undefined` is return
 value, but a failure to execute is a clear `frame_not_found` / `frame_eval_failed:<reason>`
 error. Own-tab-only + typed-op invariants are unchanged (no raw-CDP passthrough).
 
-## `emulate` — device emulation (0.5.0)
+## `emulate` — device emulation (0.5.0; create-time hint 0.6.0)
 
 Full operator/agent documentation lives in `reference/emulation.md` (preset metrics
 and their provenance, every flag, every error). What follows is the design record.
@@ -472,11 +472,24 @@ a tab that has **already committed a document** leaves that document without
 values are all correct. Those two are installed on the global **at document
 creation**, so a live override cannot add them retroactively; everything else the
 page queries live. A feature-detecting site then reports "no touch support" and an
-agent believes it. The order that works is `browser open` (about:blank) →
-`browser emulate <preset>` → `browser nav <url>` → read/interact; if the tab is
-already on the page, **re-`nav` to it** after `emulate`. There is **no envelope
-warning for this yet** — see "Envelope hint (NOT implemented)" in
-`reference/emulation.md` for the follow-up and why it was not shipped here.
+agent believes it. The order that works is `browser open <url>` →
+`browser emulate <preset>` → **re-`browser nav <url>`** (the document is rebuilt
+inside the emulated session) → read/interact.
+
+⚠ It is **not** `browser open` with no URL: that tab sits at `about:blank`, and
+`chrome.debugger` attaches only to `http:`/`https:` (`CDP_ATTACHABLE_SCHEMES`), so
+`emulate` on it is refused with `cdp_attach_refused:about:` — and an emulated `nav`
+cannot rescue it either, since that attaches on the tab's current (`about:blank`)
+URL. This README taught the about:blank order until 0.6.0; it never worked.
+
+**Since 0.6.0 the envelope warns you**: `emulate` returns
+`documentPredatesEmulation: true` plus an `emulationNote` naming `ontouchstart` /
+`TouchEvent` and the re-`nav` remedy, whenever the target tab holds a committed
+document that was not built under an emulation with the same create-time signature.
+It is silent for the correct re-`nav` sequence, silent on `--reset`, and adds no
+field at all to a tab with no emulation state — the same annotation idiom as the
+read path's `notEmulatedRead`. See "The `documentPredatesEmulation` hint (0.6.0+)"
+in `reference/emulation.md` for the fire/clear table and its limits.
 
 ### The central problem: CDP emulation dies at detach
 

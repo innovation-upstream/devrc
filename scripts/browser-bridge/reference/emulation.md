@@ -420,11 +420,20 @@ per-tab and dies with the tab: `close`, `chrome.tabs.onRemoved`,
 re-applying overrides, but the document it already built still has touch installed,
 and forgetting that would make the next identical `emulate` cry wolf.
 
-⚠ **Honest limitation:** only the bridge's **own `nav`** updates the record. A
-navigation *you* perform by hand in the tab, or one the page initiates (a link, a
-redirect chain that lands elsewhere, a JS `location` assignment), is not observed —
-after one, the record can be stale and the hint may stay silent on a document that
-really does predate the overrides. `chrome.tabs.onUpdated` was deliberately not
+⚠ **Honest limitation: only the bridge's own `nav` updates the record.** Any other
+navigation is unobserved, so the record can go stale and the hint stay silent on a
+document that really does predate the overrides. Concretely, all of these:
+
+* **your own `browser click` / `browser key`** that follows a link or submits a
+  form — the new document commits *after* that op's CDP session detaches, so it is
+  created **un-emulated**, while the record still says "built emulated". This is the
+  one an agent is most likely to hit and least likely to recognise;
+* a navigation the operator performs by hand in the tab;
+* a page-initiated one (meta-refresh, a JS `location` assignment, a redirect chain
+  that lands somewhere else);
+* a `nav` whose `Page.navigate` **resolves with an `errorText`** (DNS failure, etc.)
+  rather than throwing: the record is still written, though what committed is a
+  Chrome error page. `chrome.tabs.onUpdated` was deliberately not
 used: it cannot distinguish the bridge's own CDP navigation from an out-of-band one
 without a second piece of mutable state to get wrong. **If in doubt, re-`nav`** —
 it is idempotent and cheap.

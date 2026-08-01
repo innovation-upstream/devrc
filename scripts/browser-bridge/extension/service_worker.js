@@ -235,9 +235,13 @@ function clearEmulation(tabId) {
 // It is dropped only when the DOCUMENT can no longer exist: the tab is gone,
 // removed, or swapped (forgetTab below).
 //
-// ⚠ HONEST LIMITATION: only the bridge's own `nav` writes here. A navigation the
-// OPERATOR performs by hand (or a page-initiated one) is not observed, so after
-// one the record can be stale and the hint may not fire. Documented in
+// ⚠ HONEST LIMITATION: only the bridge's own `nav` writes here. Every other
+// navigation is unobserved, so the record can go stale and the hint stay silent.
+// The one that bites is the bridge's OWN `click`/`key`: a click that follows a
+// link commits its new document AFTER that op's CDP session detaches, so the
+// document is created UN-emulated while this map still says "built emulated". An
+// operator's hand navigation and a page-initiated one (meta-refresh, location=)
+// are the same class. Documented in
 // reference/emulation.md; chrome.tabs.onUpdated was deliberately not used, since
 // it cannot distinguish our own CDP navigation from an out-of-band one without a
 // second piece of mutable state to get wrong.
@@ -851,8 +855,16 @@ const OPS = {
       // The new document WAS created inside the emulated session, so it carries
       // the create-time properties (touch et al). Recorded so a later `emulate`
       // with the same create-time signature stays silent instead of crying wolf.
-      // Recorded only AFTER the navigate succeeded — a failed nav leaves the old
+      // Recorded only AFTER the navigate succeeded — a THROWING nav leaves the old
       // document in place, and its old record with it.
+      //
+      // ⚠ Known soft edge: `Page.navigate` can RESOLVE while reporting a failure in
+      // its `errorText` (DNS failure, connection refused, …). This does not read it,
+      // so the record is written for what is actually a Chrome error page. Low
+      // impact — an error page has no create-time properties anyone is testing, and
+      // the very next real `nav` overwrites the record — but it is a known way for
+      // the record to be optimistic. Reading `errorText` would need a decision about
+      // what `nav` should RETURN in that case, which is a wider change than a hint.
       recordDocumentEmulation(tab.id, emu);
       return { tabId: tab.id, url: cmd.url, via: "cdp",
                emulation: emulationSummary(emu) };
@@ -1145,9 +1157,16 @@ const OPS = {
     // THE CREATE-TIME HINT (protocol.js DOCUMENT_PREDATES_EMULATION_NOTE). Fires
     // when the tab already holds a committed document that was NOT created under
     // an emulation with this same create-time signature — i.e. exactly the case
-    // where `ontouchstart`/`TouchEvent` are measurably missing. Silent for the
-    // correct workflow (`open` at about:blank → emulate → nav) and for a re-
-    // `emulate` of the same device after an emulated `nav`.
+    // where `ontouchstart`/`TouchEvent` are measurably missing. Silent for a
+    // re-`emulate` of the same device after an emulated `nav`.
+    //
+    // ⚠ The correct workflow is `open <url>` → `emulate` (fires) → re-`nav` under
+    // emulation. It is NOT "open at about:blank, then emulate": chrome.debugger
+    // attaches only to http/https (CDP_ATTACHABLE_SCHEMES), so `emulate` on an
+    // about:blank tab is refused with `cdp_attach_refused:about:` before it ever
+    // reaches this annotation — and an emulated `nav` cannot rescue it either,
+    // since that attaches on the tab's CURRENT (about:blank) url. Pinned by a
+    // test in tests/emulation.test.mjs.
     //
     // `tab.url` is the URL as of the START of this op, which is the document the
     // overrides just landed on. Deliberately not re-read after the apply: nothing

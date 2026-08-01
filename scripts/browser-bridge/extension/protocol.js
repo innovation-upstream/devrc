@@ -1167,10 +1167,19 @@ export const DOCUMENT_PREDATES_EMULATION_NOTE =
   + "url is enough), then read again; the new document is created with touch "
   + "installed.";
 
-// URLs that are NOT a committed document worth warning about. A tab freshly
-// `open`ed sits at about:blank and emulating it is the CORRECT workflow — warning
-// there would train the caller to ignore the hint. `about:blank#foo` /
-// `about:blank?x` are the same empty document with a fragment/query.
+// URLs that are NOT a committed document worth warning about: there is no page
+// whose create-time properties could be wrong, so a warning here would be pure
+// noise. `about:blank#foo` / `about:blank?x` are the same empty document with a
+// fragment/query.
+//
+// ⚠ DO NOT read this as "open at about:blank, then emulate" being the happy path —
+// that sequence CANNOT run. chrome.debugger attaches only to http/https
+// (CDP_ATTACHABLE_SCHEMES below), so `emulate` on an about:blank tab is refused
+// with `cdp_attach_refused:about:` before any of this is reached, and an emulated
+// `nav` cannot rescue it either (it attaches on the tab's CURRENT url, which is
+// still about:blank). The workflow that works is `open <url>` → `emulate` (the
+// hint FIRES) → re-`nav` under emulation. This branch is defensive: it keeps the
+// predicate honest for any future caller that reaches it with a blank tab.
 const NO_DOCUMENT_URLS = new Set([
   "", "about:blank", "about:newtab", "chrome://newtab/", "brave://newtab/",
 ]);
@@ -1193,10 +1202,21 @@ export function hasCommittedDocument(url) {
 // re-emulating an identical device after a `nav` is silent rather than crying wolf.
 //
 // It is deliberately WIDER than the two measured properties (touch), and includes
-// `mobile` and whether a UA override is in force: those are the other inputs
-// Chromium consults at document creation, the measured set is explicitly NOT
-// exhaustive, and a spurious hint costs a re-`nav` while a missed one costs a
-// wrong conclusion about the site. `null`/reset → "none" (no emulation at create).
+// `mobile` and whether a UA override is in force. The measured set is explicitly
+// NOT exhaustive, and a spurious hint costs a re-`nav` while a missed one costs a
+// wrong conclusion about the site — so NARROWING this is the dangerous direction
+// (it produces false SILENCE). Every component is pinned by a test.
+//
+// ⚠ Be honest about what each component is:
+//   * touch/maxTouchPoints — the MEASURED create-time property (ontouchstart,
+//     TouchEvent). This is the soundness claim.
+//   * mobile — unmeasured, included conservatively.
+//   * ua — CONSERVATIVE PADDING, not a soundness claim: `navigator.userAgentData`
+//     was measured to apply LIVE on an already-loaded page, so the UA is not
+//     create-time as far as anything measured here goes. It is one BIT on purpose
+//     (two different UA strings share a signature); do not read the boolean as a
+//     claim that UA content is create-time-relevant.
+// `null`/reset → "none" (no emulation at create).
 export function emulationCreateTimeSignature(state) {
   if (!state || state.reset) return "none";
   const touch = state.touch && state.touch.enabled
@@ -1207,10 +1227,12 @@ export function emulationCreateTimeSignature(state) {
 
 // Should `emulate` warn? Pure: the tab's CURRENT url, the signature of the state
 // being applied, and the signature of the state the tab's CURRENT document was
-// created under (undefined/null = "not created by us under emulation").
+// created under — `undefined` when we have no record, which compares unequal to
+// every real signature and so WARNS. That is the intended conservative default:
+// silence is the unsafe direction here.
 export function documentPredatesEmulation(url, stateSignature, documentSignature) {
   if (!hasCommittedDocument(url)) return false;
-  return (documentSignature || "none") !== stateSignature;
+  return documentSignature !== stateSignature;
 }
 
 // Annotate an `emulate` SUCCESS envelope with the hint. Same idiom as

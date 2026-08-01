@@ -1054,6 +1054,29 @@ test("PURE createTimeSignature: 'none' for no/reset state, and it SEPARATES devi
   const fewer = normalizeEmulation({ device: "iphone-15", maxTouchPoints: 2 });
   assert.notEqual(emulationCreateTimeSignature(fewer),
                   emulationCreateTimeSignature(iphone));
+
+  // EVERY component of the signature must be pinned, not just the measured one.
+  // NARROWING the signature is the dangerous direction — it produces false
+  // SILENCE, the failure mode this whole hint exists to prevent — and a narrowing
+  // edit is exactly the kind that ships green if only touch is guarded.
+  const raw = { width: 393, height: 852, dsf: 3, touch: true, maxTouchPoints: 5 };
+  // (a) `mobile` — same viewport and touch, different mobile flag.
+  assert.notEqual(
+    emulationCreateTimeSignature(normalizeEmulation({ ...raw, mobile: true })),
+    emulationCreateTimeSignature(normalizeEmulation({ ...raw, mobile: false })),
+    "dropping `mobile` from the signature would silently accept a document built "
+    + "with the opposite mobile flag");
+  // (b) the UA-override bit — same everything, one with a raw --ua and one without.
+  // (Conservative padding, not a soundness claim: userAgentData was measured to
+  // apply LIVE. Pinned anyway so the padding cannot be removed unnoticed.)
+  const IPHONE_UA = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) "
+    + "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1";
+  assert.notEqual(
+    emulationCreateTimeSignature(normalizeEmulation({ ...raw, mobile: true })),
+    emulationCreateTimeSignature(normalizeEmulation({ ...raw, mobile: true,
+                                                      ua: IPHONE_UA })),
+    "dropping the UA-override bit would silently accept a document built without "
+    + "the UA override");
 });
 
 test("PURE documentPredatesEmulation: the full decision matrix", () => {

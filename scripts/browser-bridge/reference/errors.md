@@ -39,9 +39,15 @@ should strand you.
 - `owned_tab_gone` (op-level, in `.result`) → your owned tab was closed; ownership
   is auto-dropped, so just re-issue (it falls back to the active tab / re-`open`).
 - `cdp_attach_refused:<scheme>` (op-level, in `.result`) → a CDP op (screenshot /
-  top-frame input / `eval --frame`) was aimed at a privileged tab (`chrome://`,
-  `file:`, extension, devtools, …); the bridge refuses to attach `chrome.debugger`
-  there. Point the op at a real `http/https` tab.
+  top-frame input / `eval --frame` / `emulate` / `wake` / an emulated `nav`) was
+  aimed at a non-`http(s)` tab (`chrome://`, `file:`, extension, devtools,
+  **`about:blank`**, …); the bridge refuses to attach `chrome.debugger` there.
+  Point the op at a real `http/https` tab.
+  - **`cdp_attach_refused:about:` from `emulate` is the common one**: a tab from a
+    bare `browser open` sits at `about:blank`, and you cannot emulate it (nor `nav`
+    out of it under emulation — the emulated `nav` attaches on the tab's *current*
+    url). Do `browser open <url>` → `browser emulate <preset>` → re-`browser nav
+    <url>`; see `~/workspace/devrc/scripts/browser-bridge/reference/emulation.md`.
 - `401 unauthorized` → token mismatch (re-paste in the extension options).
 - `wake_with_frame_unsupported` → `--wake` was combined with `--frame`. Run
   `browser wake`, then the frame read (`~/workspace/devrc/scripts/browser-bridge/reference/spa-wake.md`).
