@@ -5,9 +5,12 @@ description: Operate the re-runnable UX-audit loops for the naida + vetr apps �
 
 # UX-audit loops (naida + vetr)
 
-Born from activity-telemetry mining (heavy manual in-browser QA on vetr+naida). Each app has a re-runnable loop that automates the manual "click through → write notes → hand to Claude → implement → re-run". Cross-session detail: memory `qa-ux-audit-harness` (read first). Both were built this session; vetr's already caught a live revenue bug.
+Re-runnable loops that automate the manual "click through → write notes → hand to Claude →
+implement → re-run". Cross-session detail: memory `qa-ux-audit-harness` (read first).
 
-**The loop:** `make ux-audit` (free walk → screenshots + deterministic findings) → `make ux-audit-draft` (opt-in, paid: vision LLM fills the per-view `**UX notes:**` scaffold) → review/edit `findings.md` → hand to an implementing Claude → re-run to verify + re-audit.
+**The loop:** `make ux-audit` (free walk → screenshots + deterministic findings) →
+`make ux-audit-draft` (opt-in, paid: vision LLM fills the per-view `**UX notes:**` scaffold)
+→ review/edit `findings.md` → hand to an implementing Claude → re-run to verify + re-audit.
 
 ## naida
 | | |
@@ -29,10 +32,17 @@ Born from activity-telemetry mining (heavy manual in-browser QA on vetr+naida). 
 | Payments | prod runs `PAYMENT_GATEWAY=authnet` (Stripe→Authorize.net migration, env-flag). Harness defaults authnet, **forces `ANET_ENDPOINT=sandbox`**. Sandbox creds in `~/.config/vetr/authnet.env` (ANET_LOGIN_ID/TRANSACTION_KEY suffice — add-card is server-token HOSTED CIM, not inline Accept.js, so PUBLIC_CLIENT_KEY/SIGNATURE_KEY not needed). |
 
 ## The draft pass (both apps)
-Opt-in, PAID, runs the vision LLM FROM the harness (never through the app), reads `OPENROUTER_API_KEY` only here. Default model `anthropic/claude-haiku-4.5` (10/10 reliable, cheap; `UX_DRAFT_MODEL=anthropic/claude-sonnet-4.6` for sharper). Downscales screenshots ≤1568px (pngjs) before sending; `max_tokens` 2048; per-view failures non-fatal. No key → exits cleanly, leaves the blank scaffold.
+Opt-in, PAID, runs the vision LLM FROM the harness (never through the app), reads
+`OPENROUTER_API_KEY` only here. Default model `anthropic/claude-haiku-4.5` (10/10 reliable,
+cheap; `UX_DRAFT_MODEL=anthropic/claude-sonnet-4.6` for sharper). Downscales screenshots
+≤1568px (pngjs) before sending; `max_tokens` 2048; per-view failures non-fatal. No key →
+exits cleanly, leaves the blank scaffold.
 
 ## Findings are origin-classified (not a denylist)
-`findings.md` leads with **first-party** console/network counts (the app's own origin = real signal); cross-origin third-party (Faro/GA/Stripe.js beacons that fail in the hermetic env) are bucketed separately as "environmental — not app bugs", never dropped. vetr also disables Faro at build (`VITE_FARO_ENABLED=false`). Origin-based via `new URL().origin`, survives new SDKs.
+`findings.md` leads with **first-party** console/network counts (the app's own origin = real
+signal); cross-origin third-party (Faro/GA/Stripe.js beacons that fail in the hermetic env)
+are bucketed separately as "environmental — not app bugs", never dropped. vetr also disables
+Faro at build (`VITE_FARO_ENABLED=false`). Origin-based via `new URL().origin`, survives new SDKs.
 
 ## NixOS / run gotchas
 - **`nix develop`** in each repo provides the toolchain (go/php/node/make/chromium); `flake.nix` + `.envrc` (direnv). If `make` is "command not found", you're not in the shell (or use `cd tests/e2e && npm run ...`).
@@ -40,8 +50,14 @@ Opt-in, PAID, runs the vision LLM FROM the harness (never through the app), read
 - vetr bring-up does `unset CDPATH` (a caller's CDPATH corrupted `$(cd&&pwd)` dir captures — PR #71).
 - Run dirs `tests/e2e/ux-audit-runs/<ts>/` are gitignored.
 
-## ⚠ Known live bug this surfaced (vetr) — being fixed by another agent
-Under authnet, the pooled-consult + servicer-booking **pay-now checkout is broken**: `appointment-checkout.tsx`/`booking-checkout.tsx` render `<StripeCheckout>` UNCONDITIONALLY (consumes a Stripe `client_secret`) but authnet returns `client_secret:null` → empty form, can't pay; some no-card primitives 500. Full report: `vetrllc/vetr-workspace` `payment-rails-paynow-checkout-bug.md` (merged). Fix = make checkout FE gateway-aware (mirror `gateway-add-card-form.tsx`) + authnet charge primitives. When their fix lands, add a regression-guard assertion that the checkout renders a usable form under authnet.
+## ⚠ Known live bug this surfaced (vetr)
+Under authnet, the pooled-consult + servicer-booking **pay-now checkout is broken**:
+`appointment-checkout.tsx`/`booking-checkout.tsx` render `<StripeCheckout>` UNCONDITIONALLY
+(consumes a Stripe `client_secret`) but authnet returns `client_secret:null` → empty form,
+can't pay; some no-card primitives 500. Full report: `vetrllc/vetr-workspace`
+`payment-rails-paynow-checkout-bug.md` (merged). Fix = make checkout FE gateway-aware
+(mirror `gateway-add-card-form.tsx`) + authnet charge primitives. When the fix lands, add a
+regression-guard assertion that the checkout renders a usable form under authnet.
 
 ## operator notes
 - The real validation is whether `findings.md` is something you'd hand to Claude — run it and judge; tune the walk/scaffold if the shape's off.
