@@ -293,7 +293,7 @@ esac
 # here (before the token read — a typo must not be reported as a missing token)
 # and supplies the text of the unknown-subcommand error. Keeping it single-source
 # is why this is a variable rather than a second hand-maintained list.
-SUBCOMMANDS="health whoami ping instances open close release wake emulate activate html text js eval tabs nav screenshot frames click type key upload agent"
+SUBCOMMANDS="health whoami ping instances open close release wake emulate activate html text js eval tabs nav screenshot frames click type key upload agent context"
 _sub_known=0
 for _s in $SUBCOMMANDS; do
   # A literal string compare, NOT a `case` glob — a subcommand like `*` would
@@ -654,6 +654,12 @@ case "$sub" in
     [ $# -eq 0 ] || die "browser ping takes no arguments"
     cmd_op ping | pretty
     ;;
+  context)
+    # Return page metadata (domain, path, searchParams, title) without reading
+    # DOM content. Lighter than text/html — just the URL components + title.
+    [ $# -eq 0 ] || die "browser context takes no arguments"
+    cmd_op context | pretty
+    ;;
   instances)
     raw="$(_curl GET /instances)" || die "curl failed talking to ${BASE}/instances"
     HTTP_CODE="${raw##*$'\n'}"; resp="${raw%$'\n'*}"
@@ -905,23 +911,25 @@ sys.stdout.write(json.dumps(fields)[1:-1])
     cmd_op getHtml "$extra" | cap_html "$maxb" | pretty
     ;;
   text)
-    # browser text [selector] [--max-bytes N]
+    # browser text [selector] [--max-bytes N] [--annotated]
     # Cheap innerText read. Optional CSS selector (a leading non-flag arg) and an
     # optional --max-bytes cap (default 32768; 0 = uncapped). The selector/cap are
     # passed to the extension, which normalizes + byte-caps the text.
     # --wake routes this one read through CDP with the un-throttle applied in the
     # same session (see `browser html` / `browser wake`).
-    POS=""; POS_SEEN=0; maxb=32768; wake=""; wakewait=""
+    # --annotated returns structured element data instead of plain text.
+    POS=""; POS_SEEN=0; maxb=32768; wake=""; wakewait=""; annotated=""
     while [ $# -gt 0 ]; do
       case "$1" in
-        --max-bytes) shift; [ $# -ge 1 ] || die "usage: browser text [selector] [--max-bytes N]"; maxb="$1"; shift ;;
+        --max-bytes) shift; [ $# -ge 1 ] || die "usage: browser text [selector] [--max-bytes N] [--annotated]"; maxb="$1"; shift ;;
         --max-bytes=*) maxb="${1#--max-bytes=}"; shift ;;
         --wake) wake=1; shift ;;
         --wake=*) wake=1; wakewait="${1#--wake=}";
           case "$wakewait" in (*[!0-9]*|"") die "--wake=MS must be a non-negative integer of ms (got: $wakewait)";; esac
           shift ;;
+        --annotated) annotated=1; shift ;;
         --) shift; pos_rest "text takes at most one selector" "$@"; break ;;
-        -*) die "browser text: unknown flag: $1 (try: --max-bytes N | --wake[=MS]; use '--' before a selector starting with '-')" ;;
+        -*) die "browser text: unknown flag: $1 (try: --max-bytes N | --wake[=MS] | --annotated; use '--' before a selector starting with '-')" ;;
         *) pos_add "text takes at most one selector" "$1"; shift ;;
       esac
     done
@@ -929,6 +937,7 @@ sys.stdout.write(json.dumps(fields)[1:-1])
     case "$maxb" in (*[!0-9]*|"") die "--max-bytes must be a non-negative integer (got: $maxb)";; esac
     extra="\"maxBytes\":${maxb}$(wake_fields "$wake" "$wakewait")"
     if [ -n "$sel" ]; then extra="\"selector\":$(json_str "$sel"),${extra}"; fi
+    if [ -n "$annotated" ]; then extra="${extra},\"annotated\":true"; fi
     cmd_op text "$extra" | pretty
     ;;
   eval|js)

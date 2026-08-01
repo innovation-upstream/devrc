@@ -58,6 +58,10 @@ import {
   isTouchEmulated, touchTapEvents, DEVICE_PRESETS, PRESET_NAMES,
   annotateEmulatedRead, emulationCreateTimeSignature, documentPredatesEmulation,
   annotateDocumentPredates,
+  // page context (shared by `context` op + enriched `text`/`html` results).
+  parsePageContext, annotatePageContext,
+  // annotated text: structured element extraction for `text --annotated`.
+  annotatedTextFn, ANNOTATED_TEXT_MAX_ITEMS_DEFAULT,
 } from "./protocol.js";
 
 const DEFAULT_PORT = 8788;
@@ -626,7 +630,7 @@ const OPS = {
       // read the intended frame (#190 reported the top url for a frame read).
       // chrome.scripting into the frame: NO CDP -> the REAL, un-emulated DOM.
       return emuAnnotate(annotateVisibility(
-        { url: frame.url || tab.url, title: tab.title, html, frame: cmd.frame }, vis),
+        annotatePageContext({ url: frame.url || tab.url, title: tab.title, html, frame: cmd.frame, tabId: tab.id }, tab.url), vis),
         tab.id, false);
     }
     // --wake → un-throttle the tab and read INSIDE the same CDP session (the
@@ -649,7 +653,7 @@ const OPS = {
         return inj ? inj.result : undefined;
       });
       return emuAnnotate(
-        wakeAnnotate({ url: tab.url, title: tab.title, html: w.value }, w),
+        wakeAnnotate(annotatePageContext({ url: tab.url, title: tab.title, html: w.value, tabId: tab.id }, tab.url), w),
         tab.id, true);   // cdpWake -> withCdp -> emulation WAS applied
     }
     // No frame → the lighter chrome.scripting top-frame read (no debugger banner).
@@ -659,7 +663,7 @@ const OPS = {
       func: () => document.documentElement.outerHTML,
     });
     return emuAnnotate(
-      annotateVisibility({ url: tab.url, title: tab.title, html: inj.result }, vis),
+      annotateVisibility(annotatePageContext({ url: tab.url, title: tab.title, html: inj.result, tabId: tab.id }, tab.url), vis),
       tab.id, false);   // chrome.scripting: NO CDP -> the REAL, un-emulated DOM
   },
 
@@ -674,9 +678,13 @@ const OPS = {
     const sel = (cmd && typeof cmd.selector === "string") ? cmd.selector : "";
     const cap = (cmd && cmd.maxBytes != null)
       ? cmd.maxBytes : TEXT_MAX_BYTES_DEFAULT;
+    const annotated = !!(cmd && cmd.annotated);
+    const maxItems = (cmd && typeof cmd.maxItems === "number")
+      ? cmd.maxItems : ANNOTATED_TEXT_MAX_ITEMS_DEFAULT;
     // --frame → read innerText INSIDE the chosen (cross-origin OOPIF) frame via
     // chrome.scripting (reaches an out-of-process iframe; no debugger banner).
     if (cmd && cmd.frame) {
+      if (annotated) throw new Error("annotated_with_frame_unsupported: --annotated is not supported with --frame");
       const frame = await resolveFrame(tab.id, cmd.frame);
       const vis = await tabVisibilityState(tab.id);   // BEFORE the read → read stays last
       const raw = await execInFrame(tab.id, frame.frameId, frameReadTextFn, [sel]);
@@ -684,11 +692,48 @@ const OPS = {
       // Report the FRAME's own url (see getHtml) so the caller confirms the right frame.
       // chrome.scripting into the frame: NO CDP -> the REAL, un-emulated DOM.
       return emuAnnotate(annotateVisibility(
-        { url: frame.url || tab.url, title: tab.title, text, truncated, frame: cmd.frame },
+        annotatePageContext({ url: frame.url || tab.url, title: tab.title, text, truncated, frame: cmd.frame, tabId: tab.id }, tab.url),
         vis), tab.id, false);
     }
     // --wake → un-throttle + read in ONE CDP session (opt-in; see getHtml).
     if (cmd && cmd.wake) {
+      if (annotated) {
+        // Annotated inside a woken CDP session.
+        const w = await cdpWake(tab.id, tab.url, cmd.waitMs, async () => {
+          const [inj] = await chrome.scripting.executeScript({
+            target: { tabId: tab.id },
+            args: [sel, maxItems],
+            func: annotatedTextFn,
+          });
+          return inj ? inj.result : undefined;
+        });
+        const data = annotatePageContext({
+          elements: w.value ? w.value.elements : [],
+          count: w.value ? w.value.count : 0,
+          url: tab.url,
+          title: tab.title,
+          tabId: tab.id,
+          truncated: 0,
+        }, tab.url);
+        // Byte-cap: if total JSON exceeds maxBytes, truncate elements array.
+        const jsonBytes = new TextEncoder().encode(JSON.stringify(data.elements)).length;
+        if (jsonBytes > cap) {
+          let kept = 0;
+          let total = 0;
+          const enc = new TextEncoder();
+          for (let i = 0; i < data.elements.length; i++) {
+            const entry = JSON.stringify(data.elements[i]);
+            const entryBytes = enc.encode(entry).length;
+            if (total + entryBytes > cap) break;
+            total += entryBytes;
+            kept = i + 1;
+          }
+          data.elements = data.elements.slice(0, kept);
+          data.count = data.elements.length;
+          data.truncated = jsonBytes - total;
+        }
+        return emuAnnotate(wakeAnnotate(data, w), tab.id, true);
+      }
       // ISOLATED-world read inside the still-attached wake session — see getHtml's
       // note. A main-world read could be served shadowed `innerText`/`querySelector`.
       const w = await cdpWake(tab.id, tab.url, cmd.waitMs, async () => {
@@ -704,8 +749,44 @@ const OPS = {
       });
       const { text, truncated } = normalizeText(w.value, cap);
       return emuAnnotate(
-        wakeAnnotate({ url: tab.url, title: tab.title, text, truncated }, w),
+        wakeAnnotate(annotatePageContext({ url: tab.url, title: tab.title, text, truncated, tabId: tab.id }, tab.url), w),
         tab.id, true);   // cdpWake -> withCdp -> emulation WAS applied
+    }
+    // --annotated path (no --frame, no --wake).
+    if (annotated) {
+      const [inj] = await chrome.scripting.executeScript({
+        target: { tabId: tab.id },
+        args: [sel, maxItems],
+        func: annotatedTextFn,
+      });
+      const data = annotatePageContext({
+        elements: inj.result ? inj.result.elements : [],
+        count: inj.result ? inj.result.count : 0,
+        url: tab.url,
+        title: tab.title,
+        tabId: tab.id,
+        truncated: 0,
+      }, tab.url);
+      // Byte-cap: if total JSON exceeds maxBytes, truncate elements array.
+      const jsonBytes = new TextEncoder().encode(JSON.stringify(data.elements)).length;
+      if (jsonBytes > cap) {
+        let kept = 0;
+        let total = 0;
+        const enc = new TextEncoder();
+        for (let i = 0; i < data.elements.length; i++) {
+          const entry = JSON.stringify(data.elements[i]);
+          const entryBytes = enc.encode(entry).length;
+          if (total + entryBytes > cap) break;
+          total += entryBytes;
+          kept = i + 1;
+        }
+        data.elements = data.elements.slice(0, kept);
+        data.count = data.elements.length;
+        data.truncated = jsonBytes - total;
+      }
+      return emuAnnotate(
+        annotateVisibility(data, await tabVisibilityState(tab.id)),
+        tab.id, false);
     }
     const vis = await tabVisibilityState(tab.id);
     const [inj] = await chrome.scripting.executeScript({
@@ -718,7 +799,7 @@ const OPS = {
     });
     const { text, truncated } = normalizeText(inj.result, cap);
     return emuAnnotate(
-      annotateVisibility({ url: tab.url, title: tab.title, text, truncated }, vis),
+      annotateVisibility(annotatePageContext({ url: tab.url, title: tab.title, text, truncated, tabId: tab.id }, tab.url), vis),
       tab.id, false);   // chrome.scripting: NO CDP -> the REAL, un-emulated DOM
   },
 
@@ -1280,6 +1361,22 @@ const OPS = {
   async ping() {
     return { pong: true, extensionVersion: extensionVersion(),
              id: extensionId(), ops: ALLOWED_OPS.slice() };
+  },
+
+  // Return page metadata (domain, path, searchParams, title) without reading
+  // DOM content. The envelope's instanceId already carries the instance identity,
+  // so the data payload focuses on page-level context.
+  async context(cmd) {
+    const tab = await targetTab(cmd);
+    const ctx = parsePageContext(tab.url);
+    return {
+      url: tab.url,
+      domain: ctx.domain,
+      path: ctx.path,
+      searchParams: ctx.searchParams,
+      title: tab.title,
+      tabId: tab.id,
+    };
   },
 };
 

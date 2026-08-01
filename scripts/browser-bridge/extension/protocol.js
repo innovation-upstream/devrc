@@ -47,7 +47,7 @@
 export const ALLOWED_OPS = [
   "getHtml", "text", "eval", "tabs", "nav", "screenshot", "open", "close",
   "frames", "click", "type", "key", "wake", "activate", "upload", "ping",
-  "emulate",
+  "emulate", "context",
 ];
 
 // Per-op required fields (mirrors server.py REQUIRED_FIELDS). The server already
@@ -87,6 +87,39 @@ export function errorEnvelope(id, error) {
 // but bounds a pathological page so a cheap model isn't flooded. The CLI passes
 // this by default; a caller can override via `--max-bytes` (0 → uncapped).
 export const TEXT_MAX_BYTES_DEFAULT = 32 * 1024;
+
+// Default max elements for `text --annotated`. Keeps the JSON payload bounded
+// while covering most pages. The CLI or caller can override via `maxItems`.
+export const ANNOTATED_TEXT_MAX_ITEMS_DEFAULT = 200;
+
+// --- page context helpers (shared by `context` op + `text`/`html` enrichment) -- //
+// Parse a URL string into its component parts. Returns { domain, path, searchParams }
+// where domain is the hostname, path is the pathname, and searchParams is an object
+// of parsed query parameters (empty object if none). Handles empty/unparseable URLs
+// gracefully by returning empty strings and an empty object.
+export function parsePageContext(url) {
+  if (!url) return { domain: "", path: "", searchParams: {} };
+  try {
+    const u = new URL(String(url));
+    const sp = {};
+    for (const [k, v] of u.searchParams) sp[k] = v;
+    return { domain: u.hostname || "", path: u.pathname || "/", searchParams: sp };
+  } catch {
+    return { domain: "", path: "", searchParams: {} };
+  }
+}
+
+// Annotate a data object with parsed page context (domain, path, searchParams)
+// from a URL. Does NOT overwrite existing fields on `data`. Returns the same
+// object (mutated) for convenience.
+export function annotatePageContext(data, url) {
+  if (!data || typeof data !== "object") return data;
+  const ctx = parsePageContext(url);
+  if (!("domain" in data)) data.domain = ctx.domain;
+  if (!("path" in data)) data.path = ctx.path;
+  if (!("searchParams" in data)) data.searchParams = ctx.searchParams;
+  return data;
+}
 
 // Normalize raw innerText for return: collapse runs of blank lines (3+ newlines
 // → a single blank line), strip trailing whitespace per line, trim the ends,
@@ -2321,6 +2354,195 @@ export function frameKeyFn(selector, keyParams) {
   if (keyParams.text) target.dispatchEvent(new KeyboardEvent("keypress", init));
   target.dispatchEvent(new KeyboardEvent("keyup", init));
   return { ok: true, key: keyParams.key };
+}
+
+// --- annotated text: structured element extraction for --annotated ---------- //
+// Testable pure helpers that extract element metadata for the `text --annotated`
+// feature. Each is independently unit-testable; `annotatedTextFn` composes them
+// into a self-contained function for chrome.scripting injection.
+
+// Generate a CSS selector path from `element` up to `document.documentElement`.
+// Short-circuits on elements with an `id` (id is unique in the document).
+// Uses :nth-child only when the tag alone isn't unique among siblings.
+// Pure — operates on a DOM element.
+export function generateCssPath(element) {
+  if (!element || !element.tagName) return "";
+  const tag = element.tagName.toLowerCase();
+  // Short-circuit: id is unique in the document.
+  if (element.id) return `#${element.id}`;
+  const parts = [];
+  let cur = element;
+  while (cur && cur.nodeType === 1) {
+    const t = cur.tagName.toLowerCase();
+    if (cur.id) { parts.unshift(`#${cur.id}`); break; }
+    const parent = cur.parentElement;
+    if (parent) {
+      const siblings = Array.from(parent.children).filter(
+        (c) => c.tagName === cur.tagName
+      );
+      if (siblings.length > 1) {
+        const idx = siblings.indexOf(cur) + 1;
+        parts.unshift(`${t}:nth-child(${idx})`);
+      } else {
+        parts.unshift(t);
+      }
+    } else {
+      parts.unshift(t);
+    }
+    cur = parent;
+  }
+  return parts.join(" > ");
+}
+
+// Extract identifying attributes from an element. Only includes attributes
+// that are present and non-empty. Returns a plain object. Pure.
+const IDENTIFYING_ATTRS = [
+  "id", "class", "href", "src", "alt", "title", "name", "placeholder",
+  "type", "role", "aria-label", "data-testid", "data-cy", "data-e2e",
+];
+export function extractIdentifyingAttrs(element) {
+  if (!element || !element.getAttribute) return {};
+  const attrs = {};
+  for (const name of IDENTIFYING_ATTRS) {
+    const val = element.getAttribute(name);
+    if (val != null && val !== "") {
+      attrs[name] = name === "class" ? val : val;
+    }
+  }
+  return attrs;
+}
+
+// Get up to `maxLen` chars of text context from adjacent siblings. Pure.
+export function getAdjacentText(element, maxLen = 40) {
+  if (!element) return { precedingText: "", followingText: "" };
+  let preceding = "";
+  let following = "";
+  // Previous sibling: walk backwards to find a text node or element with text.
+  let prev = element.previousSibling;
+  while (prev && !preceding) {
+    if (prev.nodeType === 3) { // TEXT_NODE
+      preceding = (prev.textContent || "").trim().slice(-maxLen);
+    } else if (prev.nodeType === 1) { // ELEMENT_NODE
+      preceding = (prev.textContent || "").trim().slice(-maxLen);
+    }
+    prev = prev.previousSibling;
+  }
+  // Next sibling.
+  let next = element.nextSibling;
+  while (next && !following) {
+    if (next.nodeType === 3) {
+      following = (next.textContent || "").trim().slice(0, maxLen);
+    } else if (next.nodeType === 1) {
+      following = (next.textContent || "").trim().slice(0, maxLen);
+    }
+    next = next.nextSibling;
+  }
+  return { precedingText: preceding, followingText: following };
+}
+
+// The self-contained injected function for `text --annotated`. Runs in the page
+// via chrome.scripting.executeScript. MUST reference only its own parameters and
+// page globals — no closures over module scope. Returns { elements, count }.
+// `maxItems` defaults to ANNOTATED_TEXT_MAX_ITEMS_DEFAULT if not provided.
+export function annotatedTextFn(selector, maxItems) {
+  var cap = (typeof maxItems === "number" && maxItems > 0) ? maxItems : 200;
+  var root = selector ? document.querySelector(selector) : document.body;
+  if (!root) return { elements: [], count: 0 };
+
+  var IDENTIFYING_ATTRS = [
+    "id", "class", "href", "src", "alt", "title", "name", "placeholder",
+    "type", "role", "aria-label", "data-testid", "data-cy", "data-e2e",
+  ];
+
+  function genPath(el) {
+    if (!el || !el.tagName) return "";
+    if (el.id) return "#" + el.id;
+    var parts = [];
+    var cur = el;
+    while (cur && cur.nodeType === 1) {
+      var t = cur.tagName.toLowerCase();
+      if (cur.id) { parts.unshift("#" + cur.id); break; }
+      var par = cur.parentElement;
+      if (par) {
+        var sibs = Array.prototype.filter.call(par.children, function(c) {
+          return c.tagName === cur.tagName;
+        });
+        if (sibs.length > 1) {
+          var idx = Array.prototype.indexOf.call(sibs, cur) + 1;
+          parts.unshift(t + ":nth-child(" + idx + ")");
+        } else {
+          parts.unshift(t);
+        }
+      } else {
+        parts.unshift(t);
+      }
+      cur = par;
+    }
+    return parts.join(" > ");
+  }
+
+  function getAttrs(el) {
+    if (!el || !el.getAttribute) return {};
+    var attrs = {};
+    for (var i = 0; i < IDENTIFYING_ATTRS.length; i++) {
+      var n = IDENTIFYING_ATTRS[i];
+      var v = el.getAttribute(n);
+      if (v != null && v !== "") attrs[n] = v;
+    }
+    return attrs;
+  }
+
+  function ownText(el) {
+    var parts = [];
+    for (var i = 0; i < el.childNodes.length; i++) {
+      var c = el.childNodes[i];
+      if (c.nodeType === 3) parts.push(c.textContent || "");
+    }
+    return parts.join("").trim().slice(0, 200);
+  }
+
+  function adjText(el, max) {
+    var prev = "", next = "";
+    var p = el.previousSibling;
+    while (p && !prev) {
+      if (p.nodeType === 3) prev = (p.textContent || "").trim().slice(-max);
+      else if (p.nodeType === 1) prev = (p.textContent || "").trim().slice(-max);
+      p = p.previousSibling;
+    }
+    var n = el.nextSibling;
+    while (n && !next) {
+      if (n.nodeType === 3) next = (n.textContent || "").trim().slice(0, max);
+      else if (n.nodeType === 1) next = (n.textContent || "").trim().slice(0, max);
+      n = n.nextSibling;
+    }
+    return { precedingText: prev, followingText: next };
+  }
+
+  // BFS walk limited to cap elements.
+  var elements = [];
+  var queue = [root];
+  while (queue.length > 0 && elements.length < cap) {
+    var el = queue.shift();
+    // Skip the root container itself — only collect descendants.
+    if (el !== root) {
+      var text = ownText(el);
+      var adj = adjText(el, 40);
+      elements.push({
+        text: text,
+        path: genPath(el),
+        tag: el.tagName.toLowerCase(),
+        attrs: getAttrs(el),
+        precedingText: adj.precedingText,
+        followingText: adj.followingText,
+      });
+    }
+    if (elements.length < cap) {
+      for (var j = 0; j < el.children.length; j++) {
+        queue.push(el.children[j]);
+      }
+    }
+  }
+  return { elements: elements, count: elements.length };
 }
 
 // The full-page screenshot clip from a CDP Page.getLayoutMetrics result. Uses the

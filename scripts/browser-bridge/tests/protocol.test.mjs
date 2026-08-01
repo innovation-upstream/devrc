@@ -27,6 +27,11 @@ import {
   // `activate` op: bounded foreground wait-for-load (pure).
   clampActivateWaitMs, tabLoadSettled, waitForTabLoad,
   ACTIVATE_WAIT_DEFAULT_MS, ACTIVATE_WAIT_MAX_MS,
+  // page context helpers.
+  parsePageContext, annotatePageContext,
+  // annotated text helpers.
+  generateCssPath, extractIdentifyingAttrs, getAdjacentText,
+  ANNOTATED_TEXT_MAX_ITEMS_DEFAULT,
 } from "../extension/protocol.js";
 
 test("op set mirrors the server contract", () => {
@@ -36,7 +41,7 @@ test("op set mirrors the server contract", () => {
   // frames/click/type/key are the CDP (chrome.debugger) ops.
   assert.deepEqual(
     [...ALLOWED_OPS].sort(),
-    ["activate", "click", "close", "emulate", "eval", "frames", "getHtml", "key",
+    ["activate", "click", "close", "context", "emulate", "eval", "frames", "getHtml", "key",
      "nav", "open", "ping", "screenshot", "tabs", "text", "type", "upload",
      "wake"],
   );
@@ -577,4 +582,68 @@ test("waitForTabLoad: waitMs=0 does a single read and no wait", async () => {
   assert.equal(gets, 1);
   assert.equal(slept, 0);
   assert.equal(r.waited, false);
+});
+
+// --- `context` op + page context helpers ------------------------------------ //
+test("`context` is in the op set and needs no fields", () => {
+  assert.ok(ALLOWED_OPS.includes("context"));
+  assert.deepEqual(validateCommand({ op: "context" }), { ok: true });
+  assert.equal(REQUIRED_FIELDS.context, undefined);
+});
+
+test("parsePageContext: full URL with query params", () => {
+  const r = parsePageContext("https://example.com/path?q=1&b=2");
+  assert.deepEqual(r, { domain: "example.com", path: "/path", searchParams: { q: "1", b: "2" } });
+});
+
+test("parsePageContext: URL without query params", () => {
+  const r = parsePageContext("https://example.com");
+  assert.deepEqual(r, { domain: "example.com", path: "/", searchParams: {} });
+});
+
+test("parsePageContext: localhost with port", () => {
+  const r = parsePageContext("http://localhost:3000/foo");
+  assert.deepEqual(r, { domain: "localhost", path: "/foo", searchParams: {} });
+});
+
+test("parsePageContext: empty string", () => {
+  const r = parsePageContext("");
+  assert.deepEqual(r, { domain: "", path: "", searchParams: {} });
+});
+
+test("parsePageContext: null/undefined", () => {
+  assert.deepEqual(parsePageContext(null), { domain: "", path: "", searchParams: {} });
+  assert.deepEqual(parsePageContext(undefined), { domain: "", path: "", searchParams: {} });
+});
+
+test("parsePageContext: query param with no value", () => {
+  const r = parsePageContext("https://example.com/path?flag");
+  assert.deepEqual(r, { domain: "example.com", path: "/path", searchParams: { flag: "" } });
+});
+
+test("annotatePageContext: adds domain/path/searchParams to data object", () => {
+  const data = { url: "https://example.com/path?q=1", title: "Test" };
+  annotatePageContext(data, "https://example.com/path?q=1");
+  assert.equal(data.domain, "example.com");
+  assert.equal(data.path, "/path");
+  assert.deepEqual(data.searchParams, { q: "1" });
+  // Original fields preserved.
+  assert.equal(data.url, "https://example.com/path?q=1");
+  assert.equal(data.title, "Test");
+});
+
+test("annotatePageContext: does not overwrite existing fields", () => {
+  const data = { domain: "pre-existing.com", path: "/old" };
+  annotatePageContext(data, "https://example.com/new");
+  assert.equal(data.domain, "pre-existing.com");
+  assert.equal(data.path, "/old");
+});
+
+test("annotatePageContext: returns data unchanged for null/undefined data", () => {
+  assert.equal(annotatePageContext(null, "https://x"), null);
+  assert.equal(annotatePageContext(undefined, "https://x"), undefined);
+});
+
+test("ANNOTATED_TEXT_MAX_ITEMS_DEFAULT is 200", () => {
+  assert.equal(ANNOTATED_TEXT_MAX_ITEMS_DEFAULT, 200);
 });
