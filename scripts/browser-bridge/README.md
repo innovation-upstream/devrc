@@ -213,6 +213,7 @@ has not been exercised against a third-party authenticated API beyond that.)
 | `screenshot` | **CDP `Page.captureScreenshot`** (png) — works on a BACKGROUND/occluded tab + each profile's own tab; a foreground tab uses the cheap `captureVisibleTab` fast path. `fullpage` grabs the whole document. The CLI decodes `dataUrl` to a **`.png` on disk** and prints a path, never the base64 (see below) | `{url,dataUrl,via}` |
 | `open`       | `chrome.tabs.create({url,active:false})` — **background/HIDDEN** (`visibilityState:"hidden"` → Chromium throttles it → a heavy SPA won't render → reads return a shell). The escape hatch is **`browser wake`** (or a `--wake` read): it un-throttles the tab and moves NO focus. Reads self-announce this via `hidden`/`note` | `{tabId,url}` |
 | `close`      | `chrome.tabs.remove(tabId)`                               | `{closed:tabId}` |
+| `emulate`    | **device emulation** — CDP `Emulation.setDeviceMetricsOverride` / `setTouchEmulationEnabled` / `setUserAgentOverride` (**+`userAgentMetadata`**) / `setEmulatedMedia` / `setTimezoneOverride` / `setGeolocationOverride`, from a named preset or raw params. **Sticky per tab** (re-applied inside every later CDP session) and **owned-tab-only**. `--reset` stops re-applying | `{tabId,url,emulation,applied,note}` or `{tabId,url,reset,wasEmulating,note}` |
 | `frames`     | **`chrome.webNavigation.getAllFrames`** — the tab's frames INCLUDING cross-origin OUT-OF-PROCESS iframes (OOPIFs) | `{url,title,frames:[{frameId,url,parentFrameId}]}` |
 | `click`      | top frame: **CDP** `getBoundingClientRect` → `Input.dispatchMouseEvent` (trusted); `--frame`: **SYNTHETIC** click via `chrome.scripting`; `selector` required, `frame` optional | `{url,clicked,x,y,frame,trusted}` |
 | `type`       | top frame: **CDP `Input.insertText`** (trusted); `--frame`: **SYNTHETIC** input via `chrome.scripting`; `text` required, `selector`/`frame` optional | `{url,typed,frame,trusted}` |
@@ -249,7 +250,7 @@ match failing `ambiguous_frame`. See the CDP section below. `screenshot`,
 `eval --frame`, and TOP-frame trusted input use **CDP (chrome.debugger)** (see the CDP
 section below). A `--frame` op reports the FRAME's own `url` (so a caller can confirm it
 read the intended frame, not the top document). The tab-scoped ops
-(`getHtml`/`text`/`eval`/`nav`/`screenshot`/`close`/`frames`/`click`/`type`/`key`/`wake`/`activate`)
+(`getHtml`/`text`/`eval`/`nav`/`screenshot`/`close`/`frames`/`click`/`type`/`key`/`wake`/`activate`/`emulate`)
 run against
 the calling session's owned tab when it has one (see Session isolation), else the
 active tab. `text` is the **cheap read**: it returns visible `innerText` (~KB)
@@ -456,6 +457,102 @@ Everything is bounded by the per-op CDP timeouts (a bad frame fails fast, never 
 and the never-silent-null contract holds: a genuine `null`/`undefined` is returned as a
 value, but a failure to execute is a clear `frame_not_found` / `frame_eval_failed:<reason>`
 error. Own-tab-only + typed-op invariants are unchanged (no raw-CDP passthrough).
+
+## `emulate` — device emulation (0.5.0)
+
+Full operator/agent documentation lives in `reference/emulation.md` (preset metrics
+and their provenance, every flag, every error). What follows is the design record.
+
+### The central problem: CDP emulation dies at detach
+
+`withCdpSession` **always** detaches in its `finally` — that is invariant #2, and it
+is load-bearing (a leaked `chrome.debugger` attachment is a stuck banner plus an
+open surface). CDP `Emulation.*` overrides are session-scoped, so they evaporate
+with that detach. A naive `emulate` op would therefore set device metrics that were
+already gone by the time the next command ran: a confident-wrong-answer bug of
+exactly the class this codebase keeps shipping.
+
+**The fix: store, and re-apply inside every session.** `emulate` normalizes the
+request into a state object held in a module-level `Map<tabId, state>`
+(`emulationState`, `service_worker.js`). `withCdp`'s `run` wrapper — the ONE place
+every CDP op in the file funnels through — applies the state's ordered step list
+before handing control to the op. Apply-then-act, every session.
+
+The choke point is deliberate. Patching `screenshot` and `click` individually would
+have fixed the two visible cases and regenerated the bug at the next CDP op anyone
+added. One rule, one place.
+
+### ✅ The safety property this buys
+
+**Because the overrides die at detach, the tab is not emulated between ops.** A
+crashed agent, a killed session, or an evicted MV3 service worker cannot leave the
+operator's real browser distorted — the worst case is a forgotten `Map` entry that
+dies with the worker.
+
+A held-open session would have been simpler to write and strictly worse to own: its
+failure mode is a permanently mangled tab plus a permanent debug banner,
+recoverable only by the operator finding and closing the tab. That trade is the
+whole reason for the design, and it is why `--reset` means "stop re-applying"
+rather than "undo" — there is nothing live to undo.
+
+The cost, stated plainly: a page that re-measures the viewport *after* an op (a
+`resize` listener, a late layout pass) sees the real window until the next op
+re-applies.
+
+### Blast radius: owned tabs only
+
+Enforced server-side via `OWNED_TAB_ONLY_OPS` in `_effective_tab_locked` — the one
+place that knows who owns what. The session must own a tab **and** the resolved
+target must BE that tab, so an explicit `--tab` cannot reach around ownership onto
+one of the operator's tabs. Refusal is `not_owned_tab` (409), distinct from
+`no_owned_tab` because the remedies differ.
+
+Every other tab-scoped op degrades to "the active tab" when the session owns
+nothing — the useful one-shot read path, and a read is harmless. `emulate` resizes
+the viewport, rewrites the UA and turns the mouse into a finger, so the fallback is
+removed for it specifically.
+
+### Two ops that had to change, or they would lie
+
+* **`screenshot`'s `captureVisibleTab` fast path is disabled while a tab is
+  emulated.** That call never attaches the debugger, so it would have returned a
+  valid PNG of the un-emulated desktop layout in answer to "screenshot my iPhone
+  viewport" — indistinguishable from a correct result, on the one op whose entire
+  job is showing what the device sees. `--fullpage` clips from
+  `Page.getLayoutMetrics`, which is read *after* the overrides land, so the clip is
+  the emulated one.
+* **`click` dispatches `Input.dispatchTouchEvent` under touch emulation**, as
+  DevTools does. Chromium synthesizes compatibility mouse events from touch but
+  never the reverse, so a `touchstart`-only handler never fires under a mouse
+  click — the tap "does nothing" and the agent reports a working page as broken.
+
+`nav` also routes through CDP `Page.navigate` on an emulated tab, so a page
+sniffing the UA at load time sees the emulated one rather than being served the
+desktop bundle before emulation is ever re-applied.
+
+### Budget interaction (the #249 bounds)
+
+The re-application runs inside `withCdpSession`'s `run`, so each step goes through
+the **wrapped** `send` and is individually bounded by `CDP_COMMAND_TIMEOUT_MS`
+(asserted: a hung override reports `cdp_timeout:Emulation.<method>` and still
+detaches). The apply plus the op's work stay bounded together by
+`CDP_OP_BUDGET_MS`, so the composed worst case is **unchanged** and no term in the
+`LOOP_STALL_MS` derivation moves. The step count is bounded by a constant
+(`EMULATION_MAX_STEPS` = 6), not by caller input.
+
+⚠ **Unmeasured:** how much of the 15s run budget a real apply consumes on a live
+tab. These are loopback `chrome.debugger` calls to a local renderer and are
+*expected* to be low-millisecond, but that is an expectation, not a measurement —
+there was no browser in the session that built this. If a legitimate op is ever
+seen timing out at 18s only when emulated, that is the first number to go measure.
+
+### Not exposed to the autonomous agent
+
+`emulate` is absent from `ALLOWED_OPS_DEFAULT` and `OP_TO_SERVER`, so `browser
+agent` cannot reach it even via `BROWSER_AGENT_ALLOWED_OPS`. The agent's op set is
+deliberately minimal; widening it is a separate decision. The ownership gate
+already confines the op to the caller's own tab, so this is scope discipline rather
+than a safety requirement.
 
 ## `wake` — un-throttling a background tab without stealing the screen
 

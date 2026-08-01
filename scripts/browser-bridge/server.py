@@ -134,9 +134,17 @@ from urllib.parse import unquote, urlsplit
 # a no-tab, no-page op whose only job is to be a NAME an older build does not
 # know, so probing it answers "is the new build loaded?" with unknown_op vs a
 # version — instead of two version strings a human has to eyeball.
+# `emulate` puts the SESSION'S OWN tab into device emulation (viewport +
+# deviceScaleFactor, touch, mobile UA including UA-Client-Hints metadata, and
+# media/geolocation/timezone) for real mobile testing. The overrides are
+# re-applied by the extension inside every subsequent CDP session because CDP
+# emulation dies at debugger detach — which is also why a crashed agent cannot
+# leave the operator's browser distorted (see extension/protocol.js EMULATION).
+# It is OWNED-TAB-ONLY (below): an agent must never be able to resize a tab the
+# operator is using.
 ALLOWED_OPS = ("getHtml", "text", "eval", "tabs", "nav", "screenshot",
                "open", "close", "frames", "click", "type", "key", "wake",
-               "activate", "upload", "ping")
+               "activate", "upload", "ping", "emulate")
 
 # Ops handled ENTIRELY server-side (never dispatched to the extension). `release`
 # relinquishes a session's owned-tab mapping without touching the real Brave tab.
@@ -148,7 +156,23 @@ SERVER_OPS = ("release",)
 # and `release` (server-side) do NOT contend for a single tab.
 TAB_SCOPED_OPS = frozenset({"getHtml", "text", "eval", "nav", "screenshot",
                             "close", "frames", "click", "type", "key",
-                            "wake", "activate", "upload"})
+                            "wake", "activate", "upload", "emulate"})
+
+# Ops that may run ONLY against a tab the calling session OWNS (opened via `open`).
+# This is the emulation blast-radius rule, enforced at the one place that knows who
+# owns what.
+#
+# Every other tab-scoped op degrades gracefully to "the active tab" when the session
+# owns nothing — that is the useful one-shot "read the tab I have open" path, and a
+# read is inherently safe. `emulate` is NOT safe that way: it resizes the viewport,
+# rewrites the user agent and turns the mouse into a finger. Applied to the tab the
+# OPERATOR is looking at, an agent would be reshaping the human's browser. So the
+# fallback is removed for it: no owned tab (or a `--tab` pointing anywhere else)
+# → a named `not_owned_tab` refusal, never a guess.
+#
+# Kept as a SET rather than an `if op == "emulate"` because the next op with this
+# property must land here and not grow a second copy of the predicate.
+OWNED_TAB_ONLY_OPS = frozenset({"emulate"})
 
 # Per-op required fields (skill-supplied). Absent → 400 bad_request. NOTE: `close`
 # takes NO skill-supplied field — the server injects the caller's owned tabId (or
@@ -592,6 +616,37 @@ def _session_hash(session_id) -> str:
     return hashlib.sha256(session_id.encode("utf-8")).hexdigest()[:8]
 
 
+def _emulate_extra(body) -> dict:
+    """METADATA-ONLY telemetry fields for an `emulate` command.
+
+    Deliberately narrow, and the exclusions are the interesting part:
+      * the UA STRING is not emitted — it is long, operator-supplied free text, and
+        the preset name already identifies it for every non-raw call;
+      * geolocation COORDINATES are not emitted — an emulated lat/lon is a location
+        the operator chose to pretend to be at, which is not the bridge's business
+        to record. Only whether one was set.
+      * no URL, no title, no page content (the generic contract for every event).
+    What IS emitted is what makes a stuck override diagnosable later: the preset
+    name and the viewport.
+    """
+    if not isinstance(body, dict):
+        return {}
+    if body.get("reset"):
+        return {"emu_reset": True}
+    out = {"emu_device": body.get("device") or "raw"}
+    for src, dst in (("width", "emu_width"), ("height", "emu_height"),
+                     ("dsf", "emu_dsf")):
+        v = body.get(src)
+        if isinstance(v, (int, float)) and not isinstance(v, bool):
+            out[dst] = v
+    for src, dst in (("mobile", "emu_mobile"), ("touch", "emu_touch")):
+        v = body.get(src)
+        if isinstance(v, bool):
+            out[dst] = v
+    out["emu_geo"] = bool(body.get("geo"))
+    return out
+
+
 def emit_cmd_event(op: str, key: str, outcome: str, duration_ms: int,
                    domain: str = "", exit_code: int = 0, extra: dict = None) -> None:
     """Append ONE metadata-only activity event for a handled command.
@@ -702,6 +757,17 @@ class BridgeSuperseded(Exception):
 class NoOwnedTab(Exception):
     """A `close` was issued by a session that owns no tab on the target instance
     (and gave no explicit --tab). Nothing to close → a clear error, not a guess."""
+
+
+class NotOwnedTab(Exception):
+    """An OWNED_TAB_ONLY_OPS op (today: `emulate`) targeted a tab this session does
+    not own — it owns none at all, or `--tab` named a different one.
+
+    DISTINCT from NoOwnedTab on purpose. NoOwnedTab means "you have nothing to act
+    on"; this means "that tab is not yours", which is a refusal with a security
+    reason behind it and deserves its own name in the logs, the HTTP body and the
+    CLI's guidance. Collapsing the two would tell an operator to run `browser open`
+    when the real problem is that they pointed `--tab` at their own window."""
 
 
 class RateLimited(Exception):
@@ -904,6 +970,11 @@ class Registry:
         resolved = tab if tab is not None else owned
         if op == "close" and resolved is None:
             raise NoOwnedTab()
+        # Blast-radius gate for OWNED_TAB_ONLY_OPS. The session must own a tab AND
+        # the resolved target must BE that tab — so an explicit `--tab <id>` cannot
+        # be used to reach around ownership onto one of the operator's own tabs.
+        if op in OWNED_TAB_ONLY_OPS and (owned is None or resolved != owned):
+            raise NotOwnedTab()
         # Active-tab ops with no concrete tab still share ONE physical tab per
         # instance, so they serialize under a synthetic "active" key.
         tab_key = (inst.key, resolved if resolved is not None else "active")
@@ -1033,6 +1104,8 @@ class Registry:
 
         Raises NoExtension / AmbiguousInstance / UnknownInstance if the target
         cannot be resolved, NoOwnedTab for a `close` with nothing to close,
+        NotOwnedTab for an OWNED_TAB_ONLY_OPS op (`emulate`) aimed at a tab this
+        session does not own,
         BridgeSuperseded if the servicing instance is dropped mid-flight, or
         BridgeTimeout on no reply within `timeout` (the upper bound that keeps a
         FIFO-queued command from blocking forever).
@@ -1823,6 +1896,9 @@ def make_handler(registry: Registry, token: str, cmd_timeout: float,
             # it is acceptable and required for traceability of this exfil-capable
             # action. `body` still carries it (target/tab are popped, path is not).
             upload_path = body.get("path") if op == "upload" else None
+            # Captured BEFORE submit so the fields are still present regardless of
+            # which path (ok / refused / throttled) the request takes below.
+            emulate_extra = _emulate_extra(body) if op == "emulate" else None
             outcome, exit_code, domain = "ok", 0, ""
             # `release` is server-side: drop the session's ownership without ever
             # touching the real Brave tab or the extension.
@@ -1851,6 +1927,8 @@ def make_handler(registry: Registry, token: str, cmd_timeout: float,
                 self._send(429, {"ok": False, "error": e.reason,
                                  "retry_after": round(e.retry_after, 3)})
                 extra = {"reason": e.reason, "sess": sess}
+                if emulate_extra:
+                    extra.update(emulate_extra)
                 if op == "upload":
                     # AUDIT even a throttled upload attempt (it never reached the
                     # browser, so no file was read — but the attempt is traceable).
@@ -1866,6 +1944,13 @@ def make_handler(registry: Registry, token: str, cmd_timeout: float,
                 outcome, exit_code = "no_owned_tab", 1
                 log("cmd_no_owned_tab", op=op)
                 self._send(409, {"ok": False, "error": "no_owned_tab"})
+            except NotOwnedTab:
+                # The blast-radius refusal for OWNED_TAB_ONLY_OPS. Never reached the
+                # extension, so nothing was emulated — the operator's tab is
+                # untouched, which is the entire point of the gate.
+                outcome, exit_code = "not_owned_tab", 1
+                log("cmd_not_owned_tab", op=op)
+                self._send(409, {"ok": False, "error": "not_owned_tab"})
             except NoExtension:
                 outcome, exit_code = "no_extension", 1
                 log("cmd_no_extension", op=op)
@@ -1919,13 +2004,13 @@ def make_handler(registry: Registry, token: str, cmd_timeout: float,
             # `upload` additionally carries the file PATH (audit metadata) + a
             # dedicated structured log line — this op is exfil-capable so EVERY
             # outcome is traceable (the path is local metadata, never file content).
-            upload_extra = {"path": upload_path} if op == "upload" else None
+            extra = {"path": upload_path} if op == "upload" else emulate_extra
             if op == "upload":
                 log("upload", outcome=outcome, domain=domain, path=upload_path,
                     key=(target or ""))
             emit_cmd_event(op=op, key=(target or ""), outcome=outcome,
                            duration_ms=int((time.monotonic() - t0) * 1000),
-                           domain=domain, exit_code=exit_code, extra=upload_extra)
+                           domain=domain, exit_code=exit_code, extra=extra)
 
         def _handle_result(self):
             body, err = self._read_body(MAX_RESULT_BODY)

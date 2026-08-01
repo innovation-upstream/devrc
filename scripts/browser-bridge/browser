@@ -80,6 +80,32 @@
 #                               `--wake` on that read instead (below).
 #                               THIS IS THE REMEDY FOR A HIDDEN/EMPTY READ — not
 #                               `activate`.
+#   browser emulate <preset> | --width N --height N [...] | --reset | --list
+#                             — DEVICE EMULATION on the tab THIS SESSION OWNS, for
+#                               real mobile testing. Presets: iphone-15 iphone-se
+#                               pixel-8 ipad-mini galaxy-s24 (`--list` prints them;
+#                               metrics + provenance in
+#                               scripts/browser-bridge/reference/emulation.md).
+#                               Sets viewport + deviceScaleFactor, touch emulation,
+#                               and a mobile UA **including UA-Client-Hints
+#                               metadata** — without that half, a site reading
+#                               navigator.userAgentData still sees your desktop.
+#                               Optional --color-scheme / --geo LAT,LON / --tz.
+#                               Raw override: --width/--height/--dsf/--mobile/
+#                               --touch/--ua for anything not in the table.
+#                               STICKY per tab: re-applied inside every later op's
+#                               CDP session, because CDP overrides die at detach.
+#                               ✅ That is also the SAFETY property — between ops
+#                               the tab is NOT emulated, so a crashed agent can
+#                               never leave your real browser distorted.
+#                               `--reset` stops re-applying (nothing to undo).
+#                               ⚠ OWNED TABS ONLY (`browser open` first): emulating
+#                               a tab you are browsing in is refused with
+#                               `not_owned_tab`. Screenshots on an emulated tab are
+#                               forced onto the CDP path — the captureVisibleTab
+#                               fast path would silently return the UN-emulated
+#                               view. `click` dispatches TOUCH events while touch
+#                               emulation is on, as DevTools does.
 #   browser activate [--wait MS | --no-wait]
 #                             — FOREGROUND the owned/active tab (--tab to target
 #                               one). ⚠⚠ STEALS THE OPERATOR'S SCREEN — the ONE
@@ -464,6 +490,11 @@ cmd_op() {
         printf '%s' "$resp" | render_instances
         exit 1
       fi
+      if printf '%s' "$resp" | grep -q '"not_owned_tab"'; then
+        # The emulation blast-radius refusal. Distinct from no_owned_tab: the
+        # session may well own a tab — this one is not it. Nothing was applied.
+        die "op '$op' may only run on a tab THIS session owns — run 'browser open [url]' first and drop --tab (device emulation is deliberately never allowed on your own browsing tabs)"
+      fi
       if printf '%s' "$resp" | grep -q '"no_owned_tab"'; then
         die "this session owns no tab to close — run 'browser open [url]' first (or pass --tab <id>)"
       fi
@@ -590,6 +621,142 @@ case "$sub" in
       extra="\"waitMs\":${wait}"
     fi
     cmd_op wake "$extra" | pretty
+    ;;
+  emulate)
+    # browser emulate <preset> [overrides…]
+    # browser emulate --width N --height N [--dsf F] [--mobile] [--touch] [--ua STR]
+    # browser emulate --reset
+    # browser emulate --list
+    #
+    # DEVICE EMULATION for real mobile testing. Sets the viewport +
+    # deviceScaleFactor, touch emulation, a mobile user agent INCLUDING
+    # UA-Client-Hints metadata (the half that is usually missed — modern sites read
+    # navigator.userAgentData, not the UA string), and optionally
+    # prefers-color-scheme / geolocation / timezone.
+    #
+    # STICKY PER TAB: the extension stores the state and re-applies it inside every
+    # subsequent op's CDP session. It has to — CDP emulation overrides die when the
+    # debugger detaches, and the bridge always detaches. The upside of that is the
+    # reason the design was chosen: BETWEEN ops the tab is NOT emulated, so a
+    # crashed agent or a dead service worker cannot leave your real browser
+    # distorted. `--reset` just stops the re-applying.
+    #
+    # OWNED TABS ONLY. `browser open` first. Emulating a tab you are browsing in is
+    # refused server-side with `not_owned_tab` — an agent must not be able to
+    # resize the operator's window.
+    #
+    # ⚠ The preset NAMES below are duplicated from DEVICE_PRESETS in
+    # extension/protocol.js (bash cannot import the table). A test asserts the two
+    # lists are identical, so this cannot silently drift — see
+    # tests/emulation.test.mjs "CLI preset list matches PRESET_NAMES".
+    # PRESET_NAMES: iphone-15 iphone-se pixel-8 ipad-mini galaxy-s24
+    emu_device=""; emu_reset=0; emu_list=0
+    emu_width=""; emu_height=""; emu_dsf=""; emu_mobile=""; emu_touch=""
+    emu_mtp=""; emu_ua=""; emu_orient=""; emu_cs=""; emu_geo=""; emu_tz=""
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --reset) emu_reset=1; shift ;;
+        --list) emu_list=1; shift ;;
+        --width) shift; [ $# -ge 1 ] || die "--width needs a value"; emu_width="$1"; shift ;;
+        --width=*) emu_width="${1#--width=}"; shift ;;
+        --height) shift; [ $# -ge 1 ] || die "--height needs a value"; emu_height="$1"; shift ;;
+        --height=*) emu_height="${1#--height=}"; shift ;;
+        --dsf) shift; [ $# -ge 1 ] || die "--dsf needs a value"; emu_dsf="$1"; shift ;;
+        --dsf=*) emu_dsf="${1#--dsf=}"; shift ;;
+        --mobile) emu_mobile="true"; shift ;;
+        --no-mobile) emu_mobile="false"; shift ;;
+        --touch) emu_touch="true"; shift ;;
+        --no-touch) emu_touch="false"; shift ;;
+        --max-touch-points) shift; [ $# -ge 1 ] || die "--max-touch-points needs a value"; emu_mtp="$1"; shift ;;
+        --max-touch-points=*) emu_mtp="${1#--max-touch-points=}"; shift ;;
+        --ua) shift; [ $# -ge 1 ] || die "--ua needs a value"; emu_ua="$1"; shift ;;
+        --ua=*) emu_ua="${1#--ua=}"; shift ;;
+        --orientation) shift; [ $# -ge 1 ] || die "--orientation needs a value"; emu_orient="$1"; shift ;;
+        --orientation=*) emu_orient="${1#--orientation=}"; shift ;;
+        --color-scheme) shift; [ $# -ge 1 ] || die "--color-scheme needs a value"; emu_cs="$1"; shift ;;
+        --color-scheme=*) emu_cs="${1#--color-scheme=}"; shift ;;
+        --geo) shift; [ $# -ge 1 ] || die "--geo needs LAT,LON[,ACCURACY]"; emu_geo="$1"; shift ;;
+        --geo=*) emu_geo="${1#--geo=}"; shift ;;
+        --tz) shift; [ $# -ge 1 ] || die "--tz needs an IANA zone (e.g. Europe/London)"; emu_tz="$1"; shift ;;
+        --tz=*) emu_tz="${1#--tz=}"; shift ;;
+        --) shift; break ;;
+        -*) die "browser emulate: unknown flag: $1 (try: <preset> | --width N --height N [--dsf F] [--mobile] [--touch] [--ua S] [--orientation portrait|landscape] [--color-scheme light|dark] [--geo LAT,LON] [--tz ZONE] | --reset | --list)" ;;
+        *) [ -z "$emu_device" ] || die "browser emulate takes at most one preset name (got extra: $1)"
+           emu_device="$1"; shift ;;
+      esac
+    done
+    if [ "$emu_list" -eq 1 ]; then
+      printf '%s\n' "device presets (metrics: scripts/browser-bridge/reference/emulation.md):"
+      printf '  %s\n' iphone-15 iphone-se pixel-8 ipad-mini galaxy-s24
+      printf '%s\n' "raw override: browser emulate --width N --height N [--dsf F] [--mobile] [--touch] [--ua STR]"
+      exit 0
+    fi
+    # Assemble the command fields in python so numbers stay JSON numbers, strings
+    # are escaped once, and --geo is parsed in one place. Validation of RANGES is
+    # deliberately NOT duplicated here — normalizeEmulation in the extension is the
+    # single authority (one rule, one place); this only rejects what it cannot even
+    # encode. An out-of-range value comes back as `invalid_emulation:<field>`.
+    extra="$(EMU_DEVICE="$emu_device" EMU_RESET="$emu_reset" EMU_WIDTH="$emu_width" \
+             EMU_HEIGHT="$emu_height" EMU_DSF="$emu_dsf" EMU_MOBILE="$emu_mobile" \
+             EMU_TOUCH="$emu_touch" EMU_MTP="$emu_mtp" EMU_UA="$emu_ua" \
+             EMU_ORIENT="$emu_orient" EMU_CS="$emu_cs" EMU_GEO="$emu_geo" \
+             EMU_TZ="$emu_tz" python3 -c '
+import json, os, sys
+
+def env(name):
+    v = os.environ.get(name, "")
+    return v if v != "" else None
+
+fields = {}
+if os.environ.get("EMU_RESET") == "1":
+    fields["reset"] = True
+else:
+    for key, name, cast in (
+            ("device", "EMU_DEVICE", str),
+            ("width", "EMU_WIDTH", int),
+            ("height", "EMU_HEIGHT", int),
+            ("dsf", "EMU_DSF", float),
+            ("maxTouchPoints", "EMU_MTP", int),
+            ("ua", "EMU_UA", str),
+            ("orientation", "EMU_ORIENT", str),
+            ("colorScheme", "EMU_CS", str),
+            ("tz", "EMU_TZ", str)):
+        raw = env(name)
+        if raw is None:
+            continue
+        try:
+            fields[key] = cast(raw)
+        except ValueError:
+            sys.stderr.write("browser emulate: --%s must be a number (got: %s)\n"
+                             % (key, raw))
+            sys.exit(1)
+    for key, name in (("mobile", "EMU_MOBILE"), ("touch", "EMU_TOUCH")):
+        raw = env(name)
+        if raw is not None:
+            fields[key] = (raw == "true")
+    geo = env("EMU_GEO")
+    if geo is not None:
+        parts = [p.strip() for p in geo.split(",")]
+        if len(parts) not in (2, 3):
+            sys.stderr.write("browser emulate: --geo takes LAT,LON[,ACCURACY]\n")
+            sys.exit(1)
+        try:
+            g = {"latitude": float(parts[0]), "longitude": float(parts[1])}
+            if len(parts) == 3:
+                g["accuracy"] = float(parts[2])
+        except ValueError:
+            sys.stderr.write("browser emulate: --geo values must be numbers\n")
+            sys.exit(1)
+        fields["geo"] = g
+
+if not fields:
+    sys.stderr.write("usage: browser emulate <preset> | --width N --height N [...] "
+                     "| --reset | --list\n")
+    sys.exit(1)
+# Emit WITHOUT the enclosing braces — cmd_op splices this into the command body.
+sys.stdout.write(json.dumps(fields)[1:-1])
+')" || exit 1
+    cmd_op emulate "$extra" | pretty
     ;;
   activate)
     # browser [--tab <id>] activate [--wait MS | --no-wait]
@@ -918,6 +1085,6 @@ else:
     grep -E '^#( |$)' "$0" | sed -E 's/^# ?//'
     ;;
   *)
-    die "unknown subcommand: $sub (try: health whoami ping instances open close release wake activate html text js eval tabs nav screenshot frames click type key upload agent)"
+    die "unknown subcommand: $sub (try: health whoami ping instances open close release wake emulate activate html text js eval tabs nav screenshot frames click type key upload agent)"
     ;;
 esac

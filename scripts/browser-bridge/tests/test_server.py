@@ -983,7 +983,7 @@ def test_validate_command_contract():
     assert set(S.ALLOWED_OPS) == {"getHtml", "text", "eval", "tabs", "nav",
                                   "screenshot", "open", "close",
                                   "frames", "click", "type", "key", "wake",
-                                  "activate", "upload", "ping"}
+                                  "activate", "upload", "ping", "emulate"}
     # `upload` is a dispatched, tab-scoped CDP op requiring selector + path.
     assert S.validate_command({"op": "upload", "selector": "#f",
                                "path": "/tmp/x"}) == ("upload", None)
@@ -3115,12 +3115,11 @@ def test_git_short_head_none_on_missing_dir(tmp_path):
 
 def test_manifest_version_reads_current():
     v = S.manifest_version(path=EXT_DIR / "manifest.json")
-    # Bumped to 0.4.0 for the poll-loop no-wedge change (every op bounded +
-    # a keepalive that can actually recover a wedged loop). The bump is the
-    # operator's only falsifiable "is the new build loaded?" signal, so this
-    # assertion is deliberately a literal — it MUST be updated in the same
-    # commit as manifest.json, which is the point.
-    assert isinstance(v, str) and v == "0.4.0"
+    # Bumped to 0.5.0 for the `emulate` op (device emulation). 0.4.0 was the
+    # poll-loop no-wedge change. The bump is the operator's only falsifiable "is
+    # the new build loaded?" signal, so this assertion is deliberately a literal
+    # — it MUST be updated in the same commit as manifest.json, which is the point.
+    assert isinstance(v, str) and v == "0.5.0"
 
 
 def test_manifest_version_prefers_the_deployed_copy_over_the_repo(tmp_path,
@@ -3141,7 +3140,7 @@ def test_manifest_version_falls_back_to_repo_when_not_deployed(tmp_path,
     reporting the repo manifest instead of going null."""
     monkeypatch.setattr(S, "_DEPLOYED_EXT_MANIFEST", tmp_path / "absent.json")
     monkeypatch.setattr(S, "_EXT_MANIFEST_PATH", EXT_DIR / "manifest.json")
-    assert S.manifest_version() == "0.4.0"
+    assert S.manifest_version() == "0.5.0"
 
 
 def test_manifest_version_none_when_neither_exists(tmp_path, monkeypatch):
@@ -4742,3 +4741,185 @@ def test_no_extension_fails_fast_and_names_the_instance_that_dropped():
         assert body["known_instances"][0]["connected"] is False
     finally:
         srv.shutdown(); srv.server_close()
+
+
+# --------------------------------------------------------------------------- #
+# `emulate`: device emulation — the OWNED-TAB-ONLY blast-radius gate
+#
+# The extension-side behaviour (sticky re-application, the screenshot fast-path
+# refusal, touch clicks) is covered by tests/emulation.test.mjs. What lives HERE is
+# the half only the server knows: which tab a session may emulate at all.
+# --------------------------------------------------------------------------- #
+def test_emulate_is_a_known_tab_scoped_op():
+    assert "emulate" in S.ALLOWED_OPS
+    assert "emulate" in S.TAB_SCOPED_OPS, \
+        "emulate acts on ONE tab, so it must serialize per-tab like every other"
+    assert "emulate" in S.OWNED_TAB_ONLY_OPS
+
+
+def test_emulate_refused_when_the_session_owns_no_tab():
+    """No `open` -> `not_owned_tab`, NOT the active-tab fallback every other
+    tab-scoped op gets. The fallback is safe for a READ; for `emulate` it would
+    resize the tab the OPERATOR is looking at."""
+    srv, _ = _serve()
+    ext = FakeExtension(srv, instance_id="solo", label="only",
+                        executor=_tab_echo_exec([]))
+    ext.start()
+    try:
+        assert _wait_connected(srv, want=True)
+        st, body = _cmd(srv, {"op": "emulate", "device": "iphone-15"}, session="A")
+        assert st == 409
+        assert body["error"] == "not_owned_tab"
+        # It never reached the browser — nothing was emulated.
+        assert all(c["op"] != "emulate" for c in ext.dispatched)
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
+def test_emulate_refused_when_tab_override_points_at_someone_elses_tab():
+    """THE reach-around: the session DOES own a tab, but `--tab` names another.
+    Without this check an agent could emulate any tab id it can guess, including
+    the operator's."""
+    srv, reg = _serve()
+    ext = FakeExtension(srv, instance_id="solo", label="only",
+                        executor=_tab_echo_exec([101]))
+    ext.start()
+    try:
+        assert _wait_connected(srv, want=True)
+        _cmd(srv, {"op": "open"}, session="A")
+        assert reg.owners_snapshot() == {("only", "A"): 101}
+        st, body = _req(srv, "POST", "/cmd",
+                        {"op": "emulate", "device": "iphone-15", "tab": 999},
+                        headers={S.HDR_SESSION_ID: "A"})
+        assert st == 409
+        assert body["error"] == "not_owned_tab"
+        assert all(c["op"] != "emulate" for c in ext.dispatched)
+        # A plain read with the same override is STILL allowed — the gate is
+        # scoped to OWNED_TAB_ONLY_OPS, it did not tighten everything.
+        st, body = _req(srv, "POST", "/cmd", {"op": "getHtml", "tab": 999},
+                        headers={S.HDR_SESSION_ID: "A"})
+        assert st == 200 and body["result"]["data"]["tabId"] == 999
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
+def test_emulate_refused_for_a_session_with_no_session_id_at_all():
+    """No X-Session-Id -> owns nothing -> refused. A raw token-holder cannot skip
+    the gate by simply omitting the routing header."""
+    srv, _ = _serve()
+    ext = FakeExtension(srv, instance_id="solo", label="only",
+                        executor=_tab_echo_exec([]))
+    ext.start()
+    try:
+        assert _wait_connected(srv, want=True)
+        st, body = _req(srv, "POST", "/cmd", {"op": "emulate", "device": "iphone-15"})
+        assert st == 409
+        assert body["error"] == "not_owned_tab"
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
+def test_emulate_on_the_owned_tab_is_dispatched_with_that_tabId():
+    srv, reg = _serve()
+    ext = FakeExtension(srv, instance_id="solo", label="only",
+                        executor=_tab_echo_exec([101]))
+    ext.start()
+    try:
+        assert _wait_connected(srv, want=True)
+        _cmd(srv, {"op": "open"}, session="A")
+        st, body = _cmd(srv, {"op": "emulate", "device": "iphone-15"}, session="A")
+        assert st == 200
+        assert body["result"]["data"]["tabId"] == 101
+        emu = [c for c in ext.dispatched if c["op"] == "emulate"]
+        assert len(emu) == 1
+        assert emu[0]["tabId"] == 101
+        # The device field is forwarded verbatim — the extension is the single
+        # authority on validating it (one rule, one place).
+        assert emu[0]["device"] == "iphone-15"
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
+def test_emulate_with_an_explicit_tab_equal_to_the_owned_tab_is_allowed():
+    """`--tab <my own tab>` is the same tab, so it passes. The gate is 'not
+    yours', not 'never use --tab'."""
+    srv, _ = _serve()
+    ext = FakeExtension(srv, instance_id="solo", label="only",
+                        executor=_tab_echo_exec([101]))
+    ext.start()
+    try:
+        assert _wait_connected(srv, want=True)
+        _cmd(srv, {"op": "open"}, session="A")
+        st, body = _req(srv, "POST", "/cmd",
+                        {"op": "emulate", "device": "iphone-15", "tab": 101},
+                        headers={S.HDR_SESSION_ID: "A"})
+        assert st == 200
+        assert body["result"]["data"]["tabId"] == 101
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
+def test_emulate_telemetry_is_metadata_only(telemetry):
+    """device/viewport are fine; the UA string and the geolocation COORDINATES
+    are not. An emulated lat/lon is a place the operator chose to pretend to be
+    — its presence is worth recording, its value is not the bridge's business."""
+    spool_dir = telemetry
+    srv, _ = _serve()
+    ext = FakeExtension(srv, instance_id="solo", label="only",
+                        executor=_tab_echo_exec([101]))
+    ext.start()
+    try:
+        assert _wait_connected(srv, want=True)
+        _cmd(srv, {"op": "open"}, session="A")
+        _wait_events(spool_dir, 1)
+        st, _ = _cmd(srv, {"op": "emulate", "device": "pixel-8",
+                           "width": 412, "height": 915, "mobile": True,
+                           "touch": True,
+                           "ua": "Mozilla/5.0 (Linux; Android 14; SECRETMODEL)",
+                           "geo": {"latitude": 51.5074, "longitude": -0.1278}},
+                      session="A")
+        assert st == 200
+        evs = _wait_events(spool_dir, 2)
+        e = [x for x in evs if json.loads(x["payload"])["op"] == "emulate"][0]
+        p = json.loads(e["payload"])
+        assert p["emu_device"] == "pixel-8"
+        assert p["emu_width"] == 412 and p["emu_height"] == 915
+        assert p["emu_mobile"] is True and p["emu_touch"] is True
+        assert p["emu_geo"] is True, "the PRESENCE of a geo override is recorded"
+        blob = json.dumps(p)
+        assert "SECRETMODEL" not in blob, "the UA string must never be emitted"
+        assert "51.5074" not in blob and "-0.1278" not in blob, \
+            "emulated coordinates must never be emitted"
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
+def test_emulate_reset_telemetry_says_reset_and_nothing_else():
+    assert S._emulate_extra({"reset": True}) == {"emu_reset": True}  # noqa: SLF001
+    # A raw (preset-less) emulation is labelled "raw", never left absent.
+    out = S._emulate_extra({"width": 390, "height": 844})            # noqa: SLF001
+    assert out["emu_device"] == "raw"
+    assert out["emu_geo"] is False
+    # A non-dict body cannot raise (telemetry is best-effort by contract).
+    assert S._emulate_extra(None) == {}                              # noqa: SLF001
+
+
+def test_not_owned_tab_is_distinct_from_no_owned_tab():
+    """Two different refusals with two different remedies. Collapsing them would
+    tell an operator to run `browser open` when the real problem is that they
+    pointed --tab at their own window."""
+    assert S.NotOwnedTab is not S.NoOwnedTab
+    assert not issubclass(S.NotOwnedTab, S.NoOwnedTab)
+    assert not issubclass(S.NoOwnedTab, S.NotOwnedTab)
+
+
+def test_poll_budget_warning_still_claims_extension_0_4_0_plus():
+    """#248's `applies_to_extension: "0.4.0+"` claim must stay accurate after the
+    manifest bump to 0.5.0 — 0.5.0 IS 0.4.0+, so the claim holds and the string
+    must NOT have been 'helpfully' bumped along with the manifest."""
+    manifest = json.loads(
+        (Path(__file__).resolve().parents[1] / "extension" / "manifest.json")
+        .read_text())
+    major, minor, _ = (int(x) for x in manifest["version"].split("."))
+    assert (major, minor) >= (0, 4), \
+        f"manifest {manifest['version']} no longer satisfies 0.4.0+"

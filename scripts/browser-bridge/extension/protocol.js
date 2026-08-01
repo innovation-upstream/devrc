@@ -39,9 +39,15 @@
 // yes/no. CONTRACT for any future extension change that must be provably loaded:
 // bump `manifest.json` version AND add a new discriminator (a new op name, or a
 // new field in `ping`'s reply), so the old build cannot fake a pass.
+// `emulate` puts the SESSION'S OWN tab into a device-emulation mode (viewport +
+// deviceScaleFactor, touch, mobile user-agent INCLUDING userAgentMetadata, and
+// media/geolocation/timezone) so an agent can do real mobile testing. See the
+// EMULATION section lower in this file for the persistence model and the safety
+// property that falls out of it.
 export const ALLOWED_OPS = [
   "getHtml", "text", "eval", "tabs", "nav", "screenshot", "open", "close",
   "frames", "click", "type", "key", "wake", "activate", "upload", "ping",
+  "emulate",
 ];
 
 // Per-op required fields (mirrors server.py REQUIRED_FIELDS). The server already
@@ -479,6 +485,570 @@ export async function applyWakeSteps(send, steps = WAKE_CDP_STEPS) {
     }
   }
   return { applied, skipped };
+}
+
+// --- EMULATION: device emulation for real mobile testing -------------------- //
+//
+// THE CENTRAL PROBLEM, and why this is shaped the way it is.
+//
+// `withCdpSession` ALWAYS detaches in its `finally` (that is invariant #2 — a
+// leaked chrome.debugger attachment is a stuck banner plus an open surface). CDP
+// Emulation overrides are SESSION-SCOPED: they die the instant the debugger
+// detaches. So a naive `emulate` op that just sent Emulation.setDeviceMetricsOverride
+// would set a viewport that has already evaporated by the time the NEXT command
+// (`screenshot`, `click`, a `text` read) runs — a confident-wrong-answer of exactly
+// the class this codebase keeps shipping.
+//
+// The design is therefore: `emulate` STORES a normalized emulation state per tab,
+// and EVERY op that attaches CDP to that tab RE-APPLIES the overrides inside its
+// own session, BEFORE doing its work. Apply-then-act, every session, no exceptions.
+// The state lives in a module-level Map in service_worker.js (`emulationState`);
+// everything in THIS file is the pure, browser-free half: the preset table, the
+// validation, and the ordered CDP step list.
+//
+// ✅ THE SAFETY PROPERTY THIS BUYS — state it explicitly, it is the REASON this
+// design was chosen over holding one long-lived debugger session open:
+//
+//   Because the overrides die at detach, the tab is NOT emulated between ops. A
+//   crashed agent, a killed Claude session, or an evicted MV3 service worker
+//   therefore CANNOT leave the operator's real browser distorted. The worst case
+//   is a forgotten entry in an in-memory Map that dies with the worker — not a
+//   Brave tab stuck at 393×852 pretending to be an iPhone with nothing left
+//   running that knows how to undo it.
+//
+// A held session would have been simpler to write and strictly worse to own: the
+// failure mode would be a permanently mangled tab plus a permanent debug banner,
+// recoverable only by the operator finding and closing the tab.
+//
+// BLAST RADIUS: enforced SERVER-side (see server.py OWNED_TAB_ONLY_OPS). Only a
+// tab the calling session opened via `open` may be emulated; anything else is
+// refused with `not_owned_tab`. The operator's own tabs are not resizable by an
+// agent, by construction, not by convention.
+
+// Bounds on the raw (`--width/--height/--dsf/...`) override path. Deliberately
+// generous but finite: the point is to refuse the nonsense values that would make
+// Chromium itself misbehave (a 0-height viewport, a negative scale factor), not to
+// curate a taste level. A preset always lands inside these by definition, which is
+// what the preset-integrity test asserts.
+export const EMULATION_LIMITS = Object.freeze({
+  minDimension: 1,
+  maxDimension: 10000,     // DevTools' own device-metrics inputs stop well below this
+  minScaleFactor: 0.1,
+  maxScaleFactor: 10,
+  maxTouchPoints: 16,      // CDP Emulation.setTouchEmulationEnabled caps at 16
+  maxUserAgentChars: 1024,
+  maxTimezoneChars: 64,
+});
+
+// The screenOrientation values CDP accepts.
+export const EMULATION_ORIENTATIONS = Object.freeze({
+  portrait: Object.freeze({ type: "portraitPrimary", angle: 0 }),
+  landscape: Object.freeze({ type: "landscapePrimary", angle: 90 }),
+});
+
+// The `prefers-color-scheme` values Emulation.setEmulatedMedia accepts. "" is not
+// offered — `emulate --reset` is how you stop emulating.
+export const EMULATION_COLOR_SCHEMES = Object.freeze(
+  ["light", "dark", "no-preference"]);
+
+// Every key a preset entry MUST carry. Asserted by the preset-integrity test so a
+// half-filled preset (the classic "I added a device and forgot the UA metadata")
+// cannot ship — it would silently emulate a phone-sized DESKTOP browser.
+export const PRESET_REQUIRED_KEYS = Object.freeze([
+  "label", "width", "height", "deviceScaleFactor", "mobile",
+  "maxTouchPoints", "userAgent", "userAgentMetadata", "source",
+]);
+
+// UA-Client-Hints metadata for Chrome-on-Android. WITHOUT this, a site that reads
+// navigator.userAgentData (which every modern Chromium-based stack does in
+// preference to the UA string) still sees the operator's DESKTOP Linux Chrome —
+// the most commonly missed half of "set a mobile user agent". `brands` mirrors the
+// GREASE-plus-two-real-brands shape Chrome actually sends.
+function androidUaMetadata(model, androidVersion, chromeMajor) {
+  return Object.freeze({
+    brands: Object.freeze([
+      Object.freeze({ brand: "Not/A)Brand", version: "8" }),
+      Object.freeze({ brand: "Chromium", version: String(chromeMajor) }),
+      Object.freeze({ brand: "Google Chrome", version: String(chromeMajor) }),
+    ]),
+    platform: "Android",
+    platformVersion: androidVersion,
+    architecture: "",
+    model,
+    mobile: true,
+  });
+}
+
+// UA-CH metadata for Apple devices. `brands: []` is CORRECT and deliberate, not an
+// omission: Safari does NOT implement UA-Client-Hints and sends no Sec-CH-UA at
+// all, so a site sniffing userAgentData on a real iPhone sees an empty brand list.
+// Setting it explicitly still MATTERS — omitting userAgentMetadata entirely leaves
+// Chrome reporting the operator's real desktop brands next to an iPhone UA string,
+// which is a combination no real client ever produces and which trips bot
+// detection on exactly the sites worth testing.
+function appleUaMetadata(model, platformVersion) {
+  return Object.freeze({
+    brands: Object.freeze([]),
+    platform: "iOS",
+    platformVersion,
+    architecture: "",
+    model,
+    mobile: true,
+  });
+}
+
+const IOS_UA = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) "
+  + "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 "
+  + "Safari/604.1";
+const IPADOS_UA = "Mozilla/5.0 (iPad; CPU OS 17_0 like Mac OS X) "
+  + "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 "
+  + "Safari/604.1";
+const androidUa = (model, androidVersion, chromeMajor) =>
+  `Mozilla/5.0 (Linux; Android ${androidVersion}; ${model}) `
+  + "AppleWebKit/537.36 (KHTML, like Gecko) "
+  + `Chrome/${chromeMajor}.0.0.0 Mobile Safari/537.36`;
+
+// The curated preset table. Small ON PURPOSE: presets exist so an agent prompt can
+// say `browser emulate iphone-15` and get a REPRODUCIBLE result, not so this file
+// can mirror DevTools. Anything not here is covered by the raw
+// `--width/--height/--dsf/--mobile/--ua/--touch` path.
+//
+// ⚠ PROVENANCE, stated honestly per preset in `source`. The CSS-pixel viewport and
+// deviceScaleFactor values are the logical-resolution figures that Chrome DevTools'
+// device list (`front_end/models/emulation/EmulatedDevices.ts` in Chromium) uses,
+// which are in turn the vendors' published logical resolutions. They were sourced
+// from those published specs and cross-checked for internal consistency
+// (physical pixels ÷ deviceScaleFactor = the CSS viewport, asserted by the
+// preset-integrity test where a physical resolution is recorded).
+//
+// ⚠ NOT VERIFIED against a live DevTools device list in the session that wrote
+// this — there was no browser to open (this whole change was built without touching
+// live Brave, deliberately). Treat the exact figures as "the published logical
+// resolution", which is what matters for layout testing, rather than as "byte-equal
+// to whatever DevTools ships this month". If a preset ever disagrees with DevTools,
+// DevTools wins; fix it here and say so.
+export const DEVICE_PRESETS = Object.freeze({
+  "iphone-15": Object.freeze({
+    label: "iPhone 15",
+    width: 393, height: 852, deviceScaleFactor: 3, mobile: true,
+    maxTouchPoints: 5,
+    physical: Object.freeze({ width: 1179, height: 2556 }),
+    userAgent: IOS_UA,
+    userAgentMetadata: appleUaMetadata("iPhone", "17.0"),
+    source: "Apple published logical resolution 393x852 @3x (1179x2556 physical); "
+      + "matches the Chrome DevTools 'iPhone 15 Pro' entry.",
+  }),
+  "iphone-se": Object.freeze({
+    label: "iPhone SE",
+    width: 375, height: 667, deviceScaleFactor: 2, mobile: true,
+    maxTouchPoints: 5,
+    physical: Object.freeze({ width: 750, height: 1334 }),
+    userAgent: IOS_UA,
+    userAgentMetadata: appleUaMetadata("iPhone", "17.0"),
+    source: "Chrome DevTools' long-standing 'iPhone SE' entry: 375x667 @2x "
+      + "(750x1334 physical). The smallest viewport worth regression-testing.",
+  }),
+  "pixel-8": Object.freeze({
+    label: "Pixel 8",
+    width: 412, height: 915, deviceScaleFactor: 2.625, mobile: true,
+    maxTouchPoints: 5,
+    physical: Object.freeze({ width: 1080, height: 2400 }),
+    userAgent: androidUa("Pixel 8", "14", 126),
+    userAgentMetadata: androidUaMetadata("Pixel 8", "14", 126),
+    source: "Google published 1080x2400 physical; Chrome's Android dsf for this "
+      + "class is 2.625, giving the 412x915 CSS viewport DevTools uses for the "
+      + "Pixel 7/8 generation.",
+  }),
+  "ipad-mini": Object.freeze({
+    label: "iPad Mini",
+    width: 768, height: 1024, deviceScaleFactor: 2, mobile: true,
+    maxTouchPoints: 5,
+    physical: Object.freeze({ width: 1536, height: 2048 }),
+    userAgent: IPADOS_UA,
+    userAgentMetadata: appleUaMetadata("iPad", "17.0"),
+    source: "Chrome DevTools' 'iPad Mini' entry: 768x1024 @2x (1536x2048 "
+      + "physical). The tablet breakpoint — mobile:true but NOT phone-width.",
+  }),
+  "galaxy-s24": Object.freeze({
+    label: "Galaxy S24",
+    width: 360, height: 780, deviceScaleFactor: 3, mobile: true,
+    maxTouchPoints: 5,
+    physical: Object.freeze({ width: 1080, height: 2340 }),
+    userAgent: androidUa("SM-S921B", "14", 126),
+    userAgentMetadata: androidUaMetadata("SM-S921B", "14", 126),
+    source: "Samsung published 1080x2340 physical; Chrome reports dsf 3 on this "
+      + "device, giving a 360x780 CSS viewport — the narrowest mainstream "
+      + "Android width currently shipping.",
+  }),
+});
+
+export const PRESET_NAMES = Object.freeze(Object.keys(DEVICE_PRESETS));
+
+// A refusal an agent/operator is meant to READ and act on. Kept as plain Errors
+// with NAMED, greppable messages, exactly like `unknown_key` / `element_not_found`.
+function emuErr(name) { return new Error(name); }
+
+function requireInt(value, field, min, max) {
+  const n = Number(value);
+  if (!Number.isFinite(n) || !Number.isInteger(n) || n < min || n > max) {
+    throw emuErr(`invalid_emulation:${field}`);
+  }
+  return n;
+}
+
+function requireNumber(value, field, min, max) {
+  const n = Number(value);
+  if (!Number.isFinite(n) || n < min || n > max) {
+    throw emuErr(`invalid_emulation:${field}`);
+  }
+  return n;
+}
+
+function requireBool(value, field) {
+  if (typeof value === "boolean") return value;
+  if (value === "true" || value === 1 || value === "1") return true;
+  if (value === "false" || value === 0 || value === "0") return false;
+  throw emuErr(`invalid_emulation:${field}`);
+}
+
+// A UA string is echoed into a request HEADER by Chromium. A CR/LF in it is the
+// classic header-injection primitive, so it is REFUSED rather than stripped —
+// silently sanitizing input is how you end up unsure what actually went on the wire.
+function requireUserAgent(value) {
+  if (typeof value !== "string") throw emuErr("invalid_emulation:ua");
+  const s = value.trim();
+  if (!s || s.length > EMULATION_LIMITS.maxUserAgentChars) {
+    throw emuErr("invalid_emulation:ua");
+  }
+  // eslint-disable-next-line no-control-regex
+  if (/[\x00-\x1f\x7f]/.test(s)) throw emuErr("invalid_emulation:ua");
+  return s;
+}
+
+function requireTimezone(value) {
+  if (typeof value !== "string") throw emuErr("invalid_emulation:tz");
+  const s = value.trim();
+  if (!s || s.length > EMULATION_LIMITS.maxTimezoneChars
+      || !/^[A-Za-z0-9_+\-/]+$/.test(s)) {
+    throw emuErr("invalid_emulation:tz");
+  }
+  return s;
+}
+
+// Normalize an `emulate` command into the STORED state (or a reset marker).
+//
+// Returns { reset: true } for `--reset`, else a frozen state object:
+//   { preset, label, metrics, touch, ua, media, geolocation, timezone }
+// where every sub-object is either the exact CDP params for its method or null.
+// Storing CDP-SHAPED params (rather than loose fields re-assembled at each apply)
+// is deliberate: the sticky re-application path then has no logic in it to drift.
+//
+// Pure — no chrome.*, no clock, no state. Throws a NAMED error on bad input.
+export function normalizeEmulation(cmd) {
+  const c = cmd || {};
+  const wantsReset = c.reset === true || c.reset === "true";
+
+  // Raw params are meaningful ONLY as a device description; combining them with
+  // --reset is contradictory (do you want the viewport or not?) and is refused
+  // rather than resolved by precedence, because either precedence would surprise
+  // half the callers.
+  const rawKeys = ["device", "width", "height", "dsf", "mobile", "ua", "touch",
+                   "maxTouchPoints", "orientation", "colorScheme", "geo", "tz"];
+  const supplied = rawKeys.filter((k) => c[k] !== undefined && c[k] !== null
+                                          && c[k] !== "");
+  if (wantsReset) {
+    if (supplied.length) throw emuErr("invalid_emulation:reset_with_params");
+    return Object.freeze({ reset: true });
+  }
+  if (!supplied.length) throw emuErr("emulate_needs_device_or_params");
+
+  let base = null;
+  let presetName = null;
+  if (c.device !== undefined && c.device !== null && c.device !== "") {
+    presetName = String(c.device);
+    base = DEVICE_PRESETS[presetName];
+    if (!base) throw emuErr(`unknown_preset:${presetName}`);
+  }
+
+  // --- viewport / device metrics ------------------------------------------- //
+  const width = c.width !== undefined && c.width !== null && c.width !== ""
+    ? requireInt(c.width, "width", EMULATION_LIMITS.minDimension,
+                 EMULATION_LIMITS.maxDimension)
+    : (base ? base.width : null);
+  const height = c.height !== undefined && c.height !== null && c.height !== ""
+    ? requireInt(c.height, "height", EMULATION_LIMITS.minDimension,
+                 EMULATION_LIMITS.maxDimension)
+    : (base ? base.height : null);
+  const dsf = c.dsf !== undefined && c.dsf !== null && c.dsf !== ""
+    ? requireNumber(c.dsf, "dsf", EMULATION_LIMITS.minScaleFactor,
+                    EMULATION_LIMITS.maxScaleFactor)
+    : (base ? base.deviceScaleFactor : null);
+  const mobile = c.mobile !== undefined && c.mobile !== null && c.mobile !== ""
+    ? requireBool(c.mobile, "mobile")
+    : (base ? base.mobile : null);
+
+  // A viewport needs BOTH dimensions. One alone is not a partial override you can
+  // resolve — Emulation.setDeviceMetricsOverride takes both or neither, and
+  // guessing the other from the real window would make the result depend on the
+  // operator's window size, i.e. not reproducible.
+  if ((width === null) !== (height === null)) {
+    throw emuErr("invalid_emulation:width_and_height_together");
+  }
+
+  let orientation = null;
+  if (c.orientation !== undefined && c.orientation !== null
+      && c.orientation !== "") {
+    const o = EMULATION_ORIENTATIONS[String(c.orientation)];
+    if (!o) throw emuErr("invalid_emulation:orientation");
+    orientation = o;
+  }
+
+  let metrics = null;
+  if (width !== null && height !== null) {
+    let w = width;
+    let h = height;
+    // `landscape` swaps the viewport as well as the reported orientation angle —
+    // setting the angle alone leaves a portrait-shaped "landscape" device, which
+    // is the least useful possible answer.
+    if (orientation && orientation.angle === 90 && h > w) { w = height; h = width; }
+    metrics = Object.freeze({
+      width: w,
+      height: h,
+      deviceScaleFactor: dsf === null ? 1 : dsf,
+      mobile: mobile === null ? false : mobile,
+      screenOrientation: orientation
+        || (w > h ? EMULATION_ORIENTATIONS.landscape
+                  : EMULATION_ORIENTATIONS.portrait),
+    });
+  }
+
+  // --- touch ---------------------------------------------------------------- //
+  // `--touch` / `--no-touch` explicitly, else the preset's implied touch support.
+  // maxTouchPoints without touch is a contradiction, refused rather than inferred.
+  let touchEnabled = null;
+  if (c.touch !== undefined && c.touch !== null && c.touch !== "") {
+    touchEnabled = requireBool(c.touch, "touch");
+  } else if (base) {
+    touchEnabled = base.maxTouchPoints > 0;
+  }
+  let maxTouchPoints = base ? base.maxTouchPoints : 1;
+  if (c.maxTouchPoints !== undefined && c.maxTouchPoints !== null
+      && c.maxTouchPoints !== "") {
+    if (touchEnabled === false) {
+      throw emuErr("invalid_emulation:max_touch_points_without_touch");
+    }
+    maxTouchPoints = requireInt(c.maxTouchPoints, "maxTouchPoints", 1,
+                                EMULATION_LIMITS.maxTouchPoints);
+    if (touchEnabled === null) touchEnabled = true;
+  }
+  const touch = touchEnabled === null ? null : Object.freeze({
+    enabled: touchEnabled,
+    maxTouchPoints: touchEnabled ? maxTouchPoints : 1,
+  });
+
+  // --- user agent (+ the half everyone forgets) ----------------------------- //
+  let ua = null;
+  if (c.ua !== undefined && c.ua !== null && c.ua !== "") {
+    const userAgent = requireUserAgent(c.ua);
+    // A RAW --ua carries no client-hints metadata of its own. Rather than leave
+    // the operator's real desktop brands showing through navigator.userAgentData,
+    // derive a minimal, internally-consistent metadata block from the mobile flag.
+    // Honest limitation, documented in reference/emulation.md: a raw UA gets
+    // GENERIC metadata, not a faithful per-device one. Use a preset for that.
+    ua = Object.freeze({
+      userAgent,
+      userAgentMetadata: base ? base.userAgentMetadata : Object.freeze({
+        brands: Object.freeze([]),
+        platform: mobile ? "Android" : "Linux",
+        platformVersion: "",
+        architecture: "",
+        model: "",
+        mobile: !!mobile,
+      }),
+    });
+  } else if (base) {
+    ua = Object.freeze({
+      userAgent: base.userAgent,
+      userAgentMetadata: base.userAgentMetadata,
+    });
+  }
+
+  // --- media / geolocation / timezone --------------------------------------- //
+  let media = null;
+  if (c.colorScheme !== undefined && c.colorScheme !== null
+      && c.colorScheme !== "") {
+    const cs = String(c.colorScheme);
+    if (!EMULATION_COLOR_SCHEMES.includes(cs)) {
+      throw emuErr("invalid_emulation:colorScheme");
+    }
+    media = Object.freeze({
+      media: "",   // "" = don't override the media TYPE, only the features
+      features: Object.freeze([
+        Object.freeze({ name: "prefers-color-scheme", value: cs }),
+      ]),
+    });
+  }
+
+  let geolocation = null;
+  if (c.geo !== undefined && c.geo !== null && c.geo !== "") {
+    const g = c.geo;
+    if (typeof g !== "object" || Array.isArray(g)) {
+      throw emuErr("invalid_emulation:geo");
+    }
+    geolocation = Object.freeze({
+      latitude: requireNumber(g.latitude, "geo.latitude", -90, 90),
+      longitude: requireNumber(g.longitude, "geo.longitude", -180, 180),
+      accuracy: g.accuracy === undefined || g.accuracy === null || g.accuracy === ""
+        ? 10
+        : requireNumber(g.accuracy, "geo.accuracy", 0, 100000),
+    });
+  }
+
+  const timezone = c.tz !== undefined && c.tz !== null && c.tz !== ""
+    ? requireTimezone(c.tz) : null;
+
+  if (!metrics && !touch && !ua && !media && !geolocation && !timezone) {
+    throw emuErr("emulate_needs_device_or_params");
+  }
+
+  return Object.freeze({
+    preset: presetName,
+    label: base ? base.label : null,
+    metrics, touch, ua, media, geolocation, timezone,
+  });
+}
+
+// The ORDERED CDP step list for a stored emulation state. Order is load-bearing
+// and asserted by the tests, not left to a comment:
+//
+//   1. setDeviceMetricsOverride  — the viewport every later measurement is taken
+//      against. It MUST precede anything that reads layout (Page.getLayoutMetrics
+//      for a --fullpage clip, an element rect for a click), or the op measures the
+//      real window and produces a confidently wrong coordinate.
+//   2. setTouchEmulationEnabled  — flips `pointer: coarse` / `hover: none`, which
+//      changes LAYOUT on responsive sites, so it lands before the page is asked
+//      anything.
+//   3. setUserAgentOverride      — a page that sniffs UA at load time must see it
+//      before `nav` navigates (which is why `nav` on an emulated tab goes through
+//      CDP at all).
+//   4-6. setEmulatedMedia / setTimezoneOverride / setGeolocationOverride — the
+//      soft ones, order-independent among themselves.
+//
+// NONE of these are `optional`. A half-applied emulation is worse than a refused
+// one: it returns a plausible screenshot of the wrong thing. If a step fails, the
+// op fails with a normal error envelope and the caller knows.
+//
+// ⏱ INTERACTION WITH THE POLL-LOOP BUDGETS (see EXEC_OP_BUDGET_MS above). The
+// re-application runs INSIDE withCdpSession's `run`, so:
+//   * each step goes through the WRAPPED `send` and is individually bounded by
+//     CDP_COMMAND_TIMEOUT_MS, exactly like every other CDP command (asserted by
+//     the "a hung emulation step is bounded" test — a hung override reports
+//     `cdp_timeout:Emulation.<method>`, it does not park the loop);
+//   * the apply plus the op's own work remain bounded together by
+//     CDP_OP_BUDGET_MS, so the composed worst case (attach 8s + run 15s +
+//     awaited safeDetach 8s, killed at the 18s EXEC bound) is UNCHANGED by this
+//     feature — no term in the LOOP_STALL_MS derivation moves;
+//   * the step COUNT is bounded by a CONSTANT — EMULATION_MAX_STEPS below — not
+//     by anything the caller supplies. A caller cannot lengthen the apply by
+//     sending a bigger payload, which is the property that keeps the cost
+//     analysable at all.
+// What this does NOT establish: how much of the 15s run budget a real apply
+// actually consumes on a live tab. These are loopback chrome.debugger calls to a
+// local renderer and are expected to be low-millisecond, but that is an
+// EXPECTATION, not a measurement — there was no browser in the session that wrote
+// this. If a legitimate op is ever seen timing out at 18s only when emulated,
+// that is the number to go measure first.
+export const EMULATION_MAX_STEPS = 6;
+
+export function emulationCdpSteps(state) {
+  if (!state || state.reset) return [];
+  const steps = [];
+  if (state.metrics) {
+    steps.push({ method: "Emulation.setDeviceMetricsOverride",
+                 params: state.metrics });
+  }
+  if (state.touch) {
+    steps.push({ method: "Emulation.setTouchEmulationEnabled",
+                 params: { enabled: state.touch.enabled,
+                           maxTouchPoints: state.touch.maxTouchPoints } });
+  }
+  if (state.ua) {
+    steps.push({ method: "Emulation.setUserAgentOverride",
+                 params: { userAgent: state.ua.userAgent,
+                           userAgentMetadata: state.ua.userAgentMetadata } });
+  }
+  if (state.media) {
+    steps.push({ method: "Emulation.setEmulatedMedia", params: state.media });
+  }
+  if (state.timezone) {
+    steps.push({ method: "Emulation.setTimezoneOverride",
+                 params: { timezoneId: state.timezone } });
+  }
+  if (state.geolocation) {
+    steps.push({ method: "Emulation.setGeolocationOverride",
+                 params: state.geolocation });
+  }
+  return steps;
+}
+
+// Apply the steps through `send`, IN ORDER, failing loudly on the first failure.
+// Deliberately NOT applyWakeSteps: that one swallows optional steps, and there is
+// no such thing as an optional emulation step (see above). Returns the applied
+// method names so the op can report exactly what took.
+export async function applyEmulationSteps(send, steps) {
+  const applied = [];
+  for (const step of steps || []) {
+    await send(step.method, step.params);
+    applied.push(step.method);
+  }
+  return applied;
+}
+
+// The compact, METADATA-ONLY summary of a stored state — what `emulate` returns,
+// what `tabs` annotates an emulated tab with, and what goes into telemetry. No
+// URL, no page content; the UA string is deliberately EXCLUDED (it is long, and
+// the preset name identifies it) but its presence is reported.
+export function emulationSummary(state) {
+  if (!state || state.reset) return null;
+  return {
+    preset: state.preset,
+    label: state.label,
+    width: state.metrics ? state.metrics.width : null,
+    height: state.metrics ? state.metrics.height : null,
+    deviceScaleFactor: state.metrics ? state.metrics.deviceScaleFactor : null,
+    mobile: state.metrics ? state.metrics.mobile : null,
+    touch: state.touch ? state.touch.enabled : false,
+    maxTouchPoints: state.touch ? state.touch.maxTouchPoints : 0,
+    userAgentOverridden: !!state.ua,
+    colorScheme: state.media && state.media.features[0]
+      ? state.media.features[0].value : null,
+    timezone: state.timezone,
+    geolocation: !!state.geolocation,
+  };
+}
+
+// Is this state's touch emulation ON? The predicate `click` branches on to decide
+// between Input.dispatchTouchEvent and Input.dispatchMouseEvent. ONE rule, ONE
+// place — a second copy of `state && state.touch && state.touch.enabled` at the
+// call site is how this grows a divergent third behaviour.
+export function isTouchEmulated(state) {
+  return !!(state && !state.reset && state.touch && state.touch.enabled);
+}
+
+// The ordered Input.dispatchTouchEvent pair for a tap at (x, y) — what DevTools
+// itself dispatches when touch emulation is on, and what a page's touch handlers
+// (and every touch-first UI library) actually listen for. A mouse event on a
+// touch-emulated tab is NOT equivalent: Chromium does synthesize compatibility
+// mouse events from touch, but not the reverse, so a `touchstart`-only handler
+// never fires. Pure data — unit-assertable, no caller-influenced method name.
+export function touchTapEvents(x, y) {
+  const point = { x, y, radiusX: 1, radiusY: 1, force: 1, id: 1 };
+  return [
+    { method: "Input.dispatchTouchEvent",
+      params: { type: "touchStart", touchPoints: [point] } },
+    { method: "Input.dispatchTouchEvent",
+      params: { type: "touchEnd", touchPoints: [] } },
+  ];
 }
 
 // --- hidden-tab self-announcing reads (prevent the "false outage") ---------- //
