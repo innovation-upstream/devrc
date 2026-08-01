@@ -48,6 +48,15 @@ Priority legend: **🔴 CRITICAL** (security/data/prod — never compromise) · 
 - **Never skip tests/validation** to make things pass — no disabling, commenting out, or bypassing checks.
 - **Debug systematically**: read the error, investigate the tool failure, before switching approaches.
 
+## A Green Test Suite Is a Claim, Not Evidence 🔴
+**Triggers**: "tests pass", "CI is green", merging a batch of PRs, trusting a gate
+
+- 🔴 **Gate on the MERGED tree, not the PR branch.** A PR that is green on its own branch, and individually review-clean, proves NOTHING about the tree its merge creates. Four PRs in one remix batch were all individually green and individually audit-clean; **two were red** — one a pure cross-PR interaction (PR A's feature deleted the DOM nodes PR B's tests queried), one regressing pre-existing tests it never ran. Per-PR review structurally cannot see this: B's reviewer ran before A existed. **Build an integration branch off current main, merge every candidate, run the FULL suite there, and bisect the merge commits to attribute a failure.** Also check how far behind main a PR is — one was 10 commits behind and had never been tested against it.
+- 🔴 **COUNT the tests; never read an exit code.** Four separate false greens in one session: a wrapper's trailing `echo`, a trailing `grep` with no match, a suite truncated by `panic: test timed out` (which still reported `FAIL=0`), and a piped `grep` inside `nix-shell --run`. Count `=== RUN` / `--- PASS` / `--- FAIL` / `--- SKIP` and grep for the timeout panic. **A known-red slow test must be `-skip`ped BY NAME**, or it eats the suite budget and silently truncates everything after it — that truncation hid two regressions through two "green" full runs.
+- 🔴 **A test that skips itself, or passes by accident of the environment, is worse than no test** — it reports safety. Two tests passed only because the headless browser's default window is 437px tall; setting a realistic viewport failed them on clean main. Set viewport/locale/timezone explicitly whenever the outcome depends on them.
+- 🔴 **Distinguish a real failure from a load flake by WALL TIME (~15×), not by one re-run.** And a flaky test is fixable: one went from ~1-in-2 failing at 22-45s to 6/6 deterministic at 2.6s once the timing dependency was removed.
+- 🔴 **A permanently-red gate is worse than no gate** — it trains everyone to click through. Unbreak it or stop gating on it; do not merge through a gate you have already called meaningless.
+
 ## Professional Honesty 🟡
 **Triggers**: assessments, reviews, recommendations, technical claims
 
