@@ -112,3 +112,32 @@ max_jobs = 4
 # [site_rules."example-site.test"]
 # subject = ["a.performer-name", ".subject-link"]
 # tags    = [".tag-list a"]
+#
+# --- two layers, keyed on two different hosts ---------------------------------
+# A forum page's videos are usually CROSS-ORIGIN IFRAMES to an embed host, and
+# the two questions have to be asked in two different documents:
+#
+#   * the CONTEXT layer, keyed on the PAGE host -- what is this page about?
+#     That is `subject`/`tags` above (or the explicit `.context` sub-table
+#     below, which wins where both exist). Read in the top frame.
+#   * the PLAYER layer, keyed on the EMBED host -- where is the media element
+#     and how is its URL read? Read INSIDE the embed frame, which is a
+#     different origin and therefore a different key in this same table.
+#
+# Keying the player rule on the forum does not work: the forum's embed wrapper
+# is host-agnostic, so it would match embeds from hosts you have no rule for.
+# An embed host with no player rule simply gets no button.
+#
+# [site_rules."forum.example.test".context]
+# subject = ["h1.thread-title"]
+#
+# [site_rules."embedhost.example.test".player]
+# container = "#video-container"     # one button per match (required)
+# mount     = "#video-wrapper"       # where inside it to mount (optional)
+# label     = "Save to library"      # optional, <= 40 chars
+# # The media-URL accessor. READ AT CLICK TIME, never cached: these URLs are
+# # commonly signed with a short expiry and re-signed in place on the same
+# # element, so a value read when the button was drawn is already stale.
+# # `attr` is an attribute (or same-named property) NAME, never an expression:
+# # config is data, and there is no path here that evaluates a string.
+# media     = { element = "video#main-video", attr = "src" }

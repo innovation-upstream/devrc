@@ -132,6 +132,51 @@ export function hostOf(url) {
     ? host.slice(1, -1) : host;
 }
 
+/**
+ * THE STABLE IDENTITY OF AN EMBEDDED PLAYER. Scheme + host + path, nothing else.
+ *
+ * This is the single most consequential decision in the player-button feature,
+ * so it is written where both callers can read it.
+ *
+ * The media URL an embed host hands its `<video>` is SIGNED AND ROTATING: it
+ * carries `?exp=<unix>&token=<...>` and is re-signed roughly hourly, in place,
+ * on the same element. `source_url_key` (store.py) deliberately keeps the query
+ * string, because on a file host the query IS the asset identity -- so keying
+ * the ledger on the media URL would mint a NEW row every time the signature
+ * rotated. The "already have this" badge would then never light, and a badge
+ * that never lights is worse than no badge: it reads as "you do not have this".
+ *
+ * The embed PAGE url (`https://<embed host>/embed/<id>`) is the stable name for
+ * the same asset: it is what the forum links to, it is what the frame's own
+ * `location.href` is, and its path carries the embed id. The query is dropped
+ * because playback parameters (`?autoplay=1`, `?t=30`) do not change WHICH
+ * asset this is, and keeping them would split one asset across several rows --
+ * the same failure as the signature, only slower.
+ *
+ * Both halves of the feature go through here so they cannot drift: the WRITE
+ * (`sourceKey` on the /match payload, which the sidecar records instead of the
+ * signed URL) and the READ (`GET /have?url=`). The normalisation lives in the
+ * service worker rather than the content script for the same reason -- one
+ * implementation, called twice.
+ *
+ * Returns "" for anything that is not an http(s) URL, which the callers treat
+ * as "no stable key", never as a key of its own.
+ */
+export function playerSourceKey(url) {
+  if (!hostOf(url)) return "";
+  let parsed;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return "";
+  }
+  // `host`, not `hostname`: a non-default port is part of the identity, and
+  // URL already omits the default one -- which is exactly what
+  // store.source_url_key does on the Python side, so the two agree on the key
+  // for the same input string.
+  return `${parsed.protocol}//${parsed.host.toLowerCase()}${parsed.pathname || "/"}`;
+}
+
 function pathSegments(url) {
   if (!hostOf(url)) return [];
   let raw;
@@ -549,6 +594,10 @@ export function buildMatchPayload(item, capture, carried) {
     filename: baseName(item?.filename || ""),
     mime: item?.mime || "",
     size: item?.fileSize || item?.totalBytes || 0,
+    // THE LEDGER'S KEY, when the download has a stable name that its own URL
+    // is not (see playerSourceKey). Empty for every ordinary download, and the
+    // sidecar then falls back to `url` exactly as it did before.
+    sourceKey: typeof c.sourceKey === "string" ? c.sourceKey : "",
     page: {
       title: c.pageTitle || "",
       url: c.pageUrl || "",

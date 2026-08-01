@@ -65,7 +65,7 @@ from matcher import (  # noqa: E402
 from safety import (  # noqa: E402
     UnsafeName, is_safe_dir_name, names_match, safe_rel_path,
 )
-from store import Store  # noqa: E402
+from store import Store, source_url_key  # noqa: E402
 
 SERVER_VERSION = "dl-router/1"
 MAX_BODY = 256 * 1024
@@ -373,8 +373,19 @@ class App:
         # passes through. Best-effort by design: a download with no usable
         # source URL records nothing and must not fail the match it is riding
         # on, which is a decision the browser is blocking on.
+        #
+        # `source_key` WHEN IT IS USABLE. An embedded player's media URL is
+        # signed and rotates in place, so it names the request rather than the
+        # asset; the extension sends the embed page URL as a stable name
+        # instead (see MatchContext.source_key). The test is `source_url_key`
+        # itself rather than truthiness: a non-empty but unusable key (a
+        # `blob:`, a typo) would otherwise write NOTHING at all, silently
+        # dropping the ledger row that the ordinary URL would have produced.
+        ledger_url = ctx.source_key if source_url_key(ctx.source_key) \
+            else ctx.url
         try:
-            self.store.record_source_url(ctx.url, site=ctx.site,
+            self.store.record_source_url(ledger_url,
+                                         site=ctx.site,
                                          dir_name=result.dir,
                                          download_id=download_id)
         except sqlite3.Error as exc:

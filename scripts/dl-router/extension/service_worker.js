@@ -19,7 +19,7 @@
 
 import {
   buildMatchPayload, carryReferrer, correlateCapture, formatDup,
-  handleDetermining, localContext, localDecide,
+  handleDetermining, localContext, localDecide, playerSourceKey,
 } from "./route_core.js";
 import { isHttpUrl, relPathFromAbsolute, sanitizeDirName } from "./sanitize.js";
 import { DEFAULT_PORT, manifestPort as readManifestPort } from "./port.js";
@@ -53,6 +53,32 @@ const OVERLAY_READY_MS = 1500;
 // sub-millisecond; if it has not landed by now something is badly wrong and
 // declining (Chrome's default filename) is the conservative answer.
 const READY_TIMEOUT_MS = 250;
+
+// --- `state.pending` outlives this worker, and has to -------------------------
+//
+// An entry in `state.pending` is what makes a download's toast, its relocate
+// and its learning possible: `onDownloadChanged` reads it and returns early
+// when it is absent. It was an in-memory Map, and MV3 tears this worker down
+// after ~30 s idle -- so ANY download that took longer than half a minute lost
+// all three, silently, today. That is not an edge case; it is every video.
+//
+// `chrome.storage.local`, NOT `chrome.storage.session`. The two are used for
+// two different lifetimes in this file and conflating them would be wrong in
+// both directions:
+//
+//   * the overlay registry uses `session` because an overlay is a node in a
+//     page's document. Every overlay dies with the browser, so a record that
+//     outlived the browser could only ever resurrect a picker for a download
+//     nobody remembers.
+//   * a download in flight is the opposite. Chrome RESUMES interrupted
+//     downloads across a browser restart, and a multi-gigabyte file plausibly
+//     spans one. `local` survives that, which is the correct lifetime here.
+//
+// The cost of the longer lifetime is that stale entries would accumulate
+// forever, so a TTL and a cap are prerequisites rather than polish.
+const PENDING_KEY = "pending";
+const PENDING_MAX = 64;
+const PENDING_TTL_MS = 24 * 60 * 60 * 1000;
 
 // Module-global so `onDeterminingFilename` can read it SYNCHRONOUSLY -- the
 // listener has no time to await chrome.storage. It is repopulated on every
@@ -252,6 +278,9 @@ export function recordCapture(payload, sender) {
     tags: Array.isArray(payload.tags)
       ? payload.tags.filter((t) => typeof t === "string").slice(0, 64) : [],
     og: payload.og && typeof payload.og === "object" ? payload.og : {},
+    // The STABLE ledger key for a download whose own URL is not one (a signed,
+    // rotating media URL). Empty for every ordinary capture.
+    sourceKey: typeof payload.sourceKey === "string" ? payload.sourceKey : "",
     tabId: sender?.tab?.id,
     // The tab this one was opened from. It NARROWS the referrer carry's href
     // proof (see carryReferrer) -- it is not itself a proof, and the branch
@@ -264,6 +293,71 @@ export function recordCapture(payload, sender) {
   if (state.captures.length > CAPTURE_LIMIT) {
     state.captures.splice(0, state.captures.length - CAPTURE_LIMIT);
   }
+}
+
+// --- the pending registry, and why it is PERSISTED -------------------------- //
+/**
+ * Write the durable copy. Fire-and-forget everywhere: a failed write costs a
+ * toast after a teardown, and blocking a routing decision on storage would
+ * cost the download itself.
+ *
+ * Pruned on WRITE as well as on read, so the stored array cannot grow past the
+ * cap even if nothing ever reads it back.
+ */
+async function persistPending() {
+  try {
+    const now = Date.now();
+    const rows = [...state.pending]
+      .filter(([, e]) => e && typeof e === "object"
+        && now - (e.ts || 0) <= PENDING_TTL_MS)
+      .slice(-PENDING_MAX);
+    await chrome.storage.local.set({ [PENDING_KEY]: rows });
+  } catch { /* storage unavailable; the in-memory copy still works */ }
+}
+
+/** Merge the durable copy in. NEVER clobbers an entry created this turn. */
+export async function restorePending() {
+  try {
+    const got = await chrome.storage.local.get(PENDING_KEY);
+    const rows = got && got[PENDING_KEY];
+    if (!Array.isArray(rows)) return;
+    const now = Date.now();
+    for (const row of rows) {
+      if (!Array.isArray(row) || row.length !== 2) continue;
+      const [id, entry] = row;
+      if (typeof id !== "number" && typeof id !== "string") continue;
+      if (!entry || typeof entry !== "object") continue;
+      // A download older than the TTL is not resumable in any useful sense and
+      // its file has long since been dealt with by hand.
+      if (now - (entry.ts || 0) > PENDING_TTL_MS) continue;
+      if (!state.pending.has(id)) state.pending.set(id, entry);
+    }
+  } catch { /* best effort */ }
+}
+
+function rememberPending(id, entry) {
+  state.pending.set(id, entry);
+  void persistPending();
+}
+
+function forgetPending(id) {
+  const had = state.pending.delete(id);
+  if (had) void persistPending();
+  return had;
+}
+
+/**
+ * The entry for a download, consulting the durable copy before giving up.
+ *
+ * The lazy restore is here rather than only in `start()` for the same reason
+ * `overlayIsOurs` does it: whether the answer is right must not depend on when
+ * readiness happened to resolve. Every caller that would otherwise reason from
+ * an empty Map goes through this.
+ */
+async function pendingEntry(id) {
+  if (state.pending.has(id)) return state.pending.get(id);
+  await restorePending();
+  return state.pending.get(id);
 }
 
 // --- the download path ----------------------------------------------------- //
@@ -327,7 +421,7 @@ function routeDownload(item, suggest) {
     requestMatch: () => api("POST", "/match", payload,
       { timeoutMs: state.snapshot?.matchTimeoutMs ?? 400 }),
     onDecision: (info) => {
-      state.pending.set(item.id, {
+      rememberPending(item.id, {
         dir: info.dir,
         filename: info.filename,
         decision: info.decision,
@@ -542,10 +636,18 @@ export function overlayCapableUrl(url) {
   return true;
 }
 
-/** Which tab should host the overlay. */
-function overlayTabId(info) {
+/**
+ * Which tab should host the overlay.
+ *
+ * ASYNC because `pendingEntry` is: after an idle teardown the in-memory Map is
+ * empty, and reading it directly would send every post-teardown picker to a
+ * popup window (or the wrong tab) rather than to the tab the download came
+ * from -- which is precisely the window in which a picker is most likely to be
+ * opened, because the user was slow.
+ */
+async function overlayTabId(info) {
   if (typeof info.tabId === "number") return info.tabId;
-  const entry = state.pending.get(info.downloadId);
+  const entry = await pendingEntry(info.downloadId);
   if (entry && typeof entry.tabId === "number") return entry.tabId;
   // Last resort: wherever the user is actually looking. A download's own tab
   // often closes itself, and asking on the page in front of them beats a popup
@@ -762,7 +864,7 @@ export async function onTabUpdated(tabId, changeInfo) {
  * not allowed.
  */
 export async function openOverlayPicker(info) {
-  const tabId = overlayTabId(info);
+  const tabId = await overlayTabId(info);
   if (typeof tabId !== "number") return false;
   let tab = null;
   try {
@@ -865,7 +967,7 @@ export async function applyChoice(downloadId, chosenDir,
   // separate popup window the user can leave open past the ~30s idle teardown,
   // so this is the normal case, not an edge one.
   await ready();
-  const entry = state.pending.get(downloadId);
+  const entry = await pendingEntry(downloadId);
   const known = new Set([...knownDirs(), otherDir()]);
   if (createdNew) {
     // `kind` is what the picker asked for. Creating a directory WITHOUT one
@@ -910,7 +1012,11 @@ export async function applyChoice(downloadId, chosenDir,
     // learn, so neither happens unless the move did.
     entry.wanted = safe;
     entry.wantedCreatedNew = Boolean(createdNew);
-    state.pending.set(downloadId, entry);
+    // THE CORRECTION ITSELF HAS TO SURVIVE THE TEARDOWN. This is the branch a
+    // picker takes while the download is still running, which is exactly the
+    // case that outlives ~30 s of idle: without the durable write the user's
+    // choice would be applied by a worker that no longer has it.
+    rememberPending(downloadId, entry);
     return { ok: true, dir: safe, deferred: true };
   }
   await learn(entry, safe, createdNew);
@@ -1037,6 +1143,11 @@ export async function confirmDuplicate(downloadId, rel, dir, entry) {
   if (entry) {
     if (entry.dedupeChecked) return null;
     entry.dedupeChecked = true;
+    // The latch has to be as durable as the entry that carries it. Now that
+    // `pending` survives the teardown, a second `complete` delta delivered to a
+    // freshly-woken worker would restore the entry WITHOUT the latch and open a
+    // second focused, never-auto-closing duplicate toast for one download.
+    void persistPending();
   }
   let out;
   try {
@@ -1059,7 +1170,12 @@ export async function confirmDuplicate(downloadId, rel, dir, entry) {
 export async function onDownloadChanged(delta) {
   if (!delta || delta.state?.current !== "complete") return;
   await ready();
-  const entry = state.pending.get(delta.id);
+  // THE DURABLE READ, and the whole point of persisting `pending`. This used to
+  // be `state.pending.get(delta.id)`, and the `if (!entry) return` below then
+  // discarded the toast, the pending relocate and the learning for every
+  // download that ran longer than the ~30 s MV3 idle teardown -- which is most
+  // of them.
+  const entry = await pendingEntry(delta.id);
   if (!entry) return;
   // Where the file ended up, following any correction applied below. The
   // dedupe check needs the FINAL path: checking the pre-move one would ask the
@@ -1123,8 +1239,131 @@ export async function onDownloadChanged(delta) {
   // Keep the entry briefly so a late "change" click can still relocate.
   // `unref` exists only under node (the test runner) -- without it this timer
   // would hold the event loop open for five minutes and hang the suite.
-  const sweep = setTimeout(() => state.pending.delete(delta.id), 5 * 60 * 1000);
+  const sweep = setTimeout(() => forgetPending(delta.id), 5 * 60 * 1000);
   if (sweep && typeof sweep.unref === "function") sweep.unref();
+}
+
+// --- the player-button path ------------------------------------------------ //
+/**
+ * The top frame's own description of itself, or null.
+ *
+ * THE EMBED FRAME CANNOT IDENTIFY ITS THREAD, and this is the only path that
+ * can. `document.referrer` inside the embed is the forum ORIGIN with the path
+ * stripped (`strict-origin-when-cross-origin`), and
+ * `location.ancestorOrigins` gives origins without paths. So the subject has to
+ * come from the top frame, and only the worker can reach both frames.
+ *
+ * `{ frameId: 0 }` is the whole correlation, and it is a PROOF rather than a
+ * heuristic: the message is delivered to the top frame OF THE SAME TAB the
+ * click came from, and that frame answers with its own `location.href`.
+ *
+ * THERE IS DELIBERATELY NO FALLBACK. The obvious one -- the newest capture from
+ * this tab -- is the branch `carryReferrer` had deleted for being "the last
+ * thread I saw in that tab" wearing the word "provable"; on a forum, where the
+ * user scrolls past several threads, it produces a CONFIDENT WRONG SUBJECT that
+ * is then learned as a 1.00 identity alias. Returning null costs one picker.
+ */
+async function topFrameContext(tabId) {
+  let res;
+  try {
+    res = await chrome.tabs.sendMessage(tabId, { type: "dlr:page-context" },
+      { frameId: 0 });
+  } catch {
+    return null;   // no content script in the top frame, or the tab is gone
+  }
+  if (!res || res.ok !== true) return null;
+  const ctx = res.context;
+  if (!ctx || typeof ctx !== "object") return null;
+  // The frame must have reported a real page URL. Without one there is no
+  // thread slug, no site and no title -- i.e. nothing this was asked for.
+  if (!isHttpUrl(ctx.pageUrl)) return null;
+  return ctx;
+}
+
+/**
+ * `dlr:player-download` -- a click on an injected player button.
+ *
+ * The media URL arrives from the frame READ AT CLICK TIME (see
+ * player_buttons.readMediaUrl); it is signed and rotates, so it is used
+ * immediately and never stored.
+ *
+ * The routing then rides the ordinary pipeline rather than a parallel one: a
+ * capture is synthesised for the tab and pushed into the SAME buffer every
+ * click capture goes into, and `chrome.downloads.download` is handed the exact
+ * URL that capture records. `correlateCapture` tier 1 (exact URL match on
+ * `item.url`) therefore binds them deterministically -- no time window, no
+ * active-tab guess, and every downstream behaviour (auto-file, toast, picker,
+ * relocate, learn, dedupe) is inherited unchanged.
+ */
+export async function playerDownload(msg, sender) {
+  await ready();
+  if (!state.config.enabled) {
+    return { ok: false, error: "routing is not enabled in this profile" };
+  }
+  const mediaUrl = msg && msg.mediaUrl;
+  if (!isHttpUrl(mediaUrl)) {
+    return { ok: false, error: "refusing a non-http media URL" };
+  }
+  const tabId = sender?.tab?.id;
+  if (typeof tabId !== "number") {
+    return { ok: false, error: "no tab for this player" };
+  }
+  const context = await topFrameContext(tabId);
+  const capture = {
+    ...(context || {}),
+    // The clicked "element" is the media itself. Both fields are set because
+    // tier 1 tests either against the DownloadItem's url.
+    href: mediaUrl,
+    mediaSrc: mediaUrl,
+    // The ledger's key. Stable across the signature rotation the media URL is
+    // subject to -- see route_core.playerSourceKey.
+    sourceKey: playerSourceKey(msg && msg.embedUrl),
+  };
+  // WITH NO PROVEN CONTEXT THE CAPTURE CARRIES NO SUBJECT AT ALL. Not the embed
+  // page's title, not its URL: an embed page is a bare player, and anything
+  // scraped from it would be the embed host's branding presented as the
+  // subject. An empty context scores nothing, falls below the threshold and
+  // reaches the picker, which is the correct degradation.
+  if (!context) {
+    capture.pageUrl = "";
+    capture.pageTitle = "";
+    capture.site = "";
+    capture.tags = [];
+    capture.og = {};
+  }
+  recordCapture(capture, { tab: { id: tabId } });
+  try {
+    const downloadId = await chrome.downloads.download({ url: mediaUrl });
+    return { ok: true, downloadId, context: Boolean(context) };
+  } catch (err) {
+    return { ok: false, error: errorMessage(err) };
+  }
+}
+
+/**
+ * `dlr:have` -- the "already have this" badge's question.
+ *
+ * Asked BY THE EMBED PAGE URL, normalised through the same `playerSourceKey`
+ * the write side uses. Keying this on the media URL instead would mean the
+ * badge never lit: the signature rotates, so every lookup would miss, and a
+ * badge that never lights actively asserts "you do not have this".
+ *
+ * Every failure is a MISS, never an error the user sees. This is a hint on
+ * someone else's page; a sidecar that is down must produce no badge, not a
+ * broken one.
+ */
+export async function haveUrl(embedUrl) {
+  await ready();
+  if (!state.config.enabled) return { ok: false, have: false };
+  const key = playerSourceKey(embedUrl);
+  if (!key) return { ok: false, have: false };
+  try {
+    const out = await api("GET", `/have?url=${encodeURIComponent(key)}`,
+      undefined, { timeoutMs: 3000 });
+    return { ok: true, have: out?.have === true, dir: out?.dir || "" };
+  } catch {
+    return { ok: false, have: false };
+  }
 }
 
 // --- context menus --------------------------------------------------------- //
@@ -1388,6 +1627,25 @@ export function onMessage(msg, sender, sendResponse) {
       .catch(() => sendResponse({ siteRules: {} }));
     return true;
   }
+  if (msg.type === "dlr:player-download") {
+    // FROM A SUBFRAME BY DESIGN, unlike `dlr:choose` and `dlr:discard`: the
+    // media element only exists inside the cross-origin embed frame, so
+    // refusing subframes here would refuse the entire feature. There is no
+    // nonce to check and none is needed -- this message asserts nothing about
+    // the library. Everything it can do, the page could already do: start a
+    // download of a URL it chose. Where it lands is decided by /match from a
+    // context proven through frameId 0, and an unproven one goes to the picker.
+    playerDownload(msg, sender)
+      .then((r) => sendResponse(r))
+      .catch((e) => sendResponse({ ok: false, error: errorMessage(e) }));
+    return true;   // async response
+  }
+  if (msg.type === "dlr:have") {
+    haveUrl(msg.embedUrl)
+      .then((r) => sendResponse(r))
+      .catch(() => sendResponse({ ok: false, have: false }));
+    return true;   // async response
+  }
   if (msg.type === "dlr:overlay-lost") {
     // The content script noticed its host node was detached -- a page that
     // rewrote document.body, a sanitiser, an SPA re-render, or a page
@@ -1418,8 +1676,8 @@ export function onMessage(msg, sender, sendResponse) {
     return false;
   }
   if (msg.type === "dlr:repick") {
-    void ready().then(() => {
-      const entry = state.pending.get(msg.downloadId);
+    void ready().then(async () => {
+      const entry = await pendingEntry(msg.downloadId);
       return openPicker({
         downloadId: msg.downloadId,
         dir: entry?.dir || otherDir(),
@@ -1468,7 +1726,13 @@ export function registerListeners() {
     chrome.windows.onRemoved.addListener(onWindowRemoved);
   } catch { /* older shapes without windows.onRemoved */ }
   chrome.storage.onChanged.addListener((changes, area) => {
-    if (area === "local") void loadConfig();
+    // ONLY the two config keys. `chrome.storage.local` also holds the durable
+    // `pending` registry now, which is written on every routing decision and
+    // every correction -- so an unfiltered handler would re-read the config
+    // (and allocate a promise inside a listener) on every download event, for
+    // a change that provably cannot affect it.
+    if (area !== "local" || !changes) return;
+    if ("token" in changes || "enabled" in changes) void loadConfig();
   });
   chrome.alarms.create("dlr-refresh", { periodInMinutes: SNAPSHOT_REFRESH_MINUTES });
   chrome.alarms.onAlarm.addListener((alarm) => {
@@ -1487,6 +1751,9 @@ export async function start() {
   // has an empty registry, and the tab watchers would find no overlay to rescue
   // when its tab closes.
   await restoreOverlays();
+  // Downloads still in flight from before the last teardown, or from before the
+  // last browser restart. See the PENDING_KEY block at the top.
+  await restorePending();
   await installMenus();
   try {
     const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
