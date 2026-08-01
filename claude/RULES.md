@@ -83,11 +83,29 @@ protects only one machine. `~/.claude/CLAUDE.md` is for genuinely host-specific 
 
 - 🟡 **Docs/notes written into a working tree are UNSAVED WORK** — a lesson, post-mortem, gotcha or script improvement in a tracked file is one routine `stash`/`checkout`/deploy by any other session away from silent, unreported deletion. **Commit it or open a PR in the SAME session.** Three such pieces were found stranded in one session: a production false-outage post-mortem, three measured browser gotchas, and a 288-line `standup.sh` (vs 272 in `main`). **Before dropping ANY stash, diff it against `HEAD`** — stashes here have twice held work nobody knew existed.
 
-### 🔴 `git stash` is repo-GLOBAL — never use it to clear a tree for a rebase
+### 🔴 `git stash` is repo-GLOBAL — never `git stash` in a shared repo, for ANY reason
 The stash stack is shared across ALL worktrees of a repo, so a concurrent agent or
 session can pop *your* stash. Two parallel remix subagents stole each other's work this
 way (2026-07-25) — that is the evidence this rule rests on, and it is unaffected by the
 correction below.
+
+🔴 **Broadened 2026-08-01: the prohibition is NOT scoped to rebases.** This heading used
+to read "never use it to clear a tree for a rebase", and that scoping is exactly how it
+failed. A subagent in `civitai` stashed for a completely different reason — clearing what
+it believed was a dirty tree to measure a test baseline — read the rebase-shaped rule as
+not applying, and proceeded. The `stash push` silently no-op'd on an already-clean file,
+so the following `stash pop` reached for **a teammate's entry** off the shared stack. The
+pop conflicted, which is the only reason the entry was kept rather than dropped; 58 stash
+entries and `stash@{0}` were verified intact afterwards. It knew the rule and was bitten
+anyway, because "hazardous for rebases" is not "don't".
+
+**So: never `git stash` in any repo you share with other sessions, agents or humans —
+regardless of why.** `refs/stash` lives in the **common** git dir
+(`git rev-parse --git-common-dir`), not the per-worktree dir, so being in your own
+worktree gives you **zero** isolation. To set work aside, **copy it aside**
+(`cp <file> /tmp/…`, restore by copying back) or commit it to a throwaway branch.
+`git stash list` is a safe READ and will usually show pre-existing entries you must not
+disturb — if it is non-empty, that alone is proof the stack is shared.
 
 🔴 **Retracted 2026-07-31 — do not re-derive it.** This rule used to also cite the
 `stash → pull --rebase → stash pop` autostash as having corrupted `.sops.yaml` on a dirty
