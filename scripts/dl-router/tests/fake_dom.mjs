@@ -18,6 +18,13 @@ class El {
     this.children = [];
     this.parentElement = null;
     this.text = "";
+    // Mutation APIs, for the widget player_buttons.js builds and mounts. This
+    // parser exists to drive extractors over fixture HTML; a widget has to be
+    // BUILT and ATTACHED into that same tree, and the alternative -- a second
+    // DOM stand-in for the mounting half -- is the drift this file avoids.
+    this.shadowRoot = null;
+    this.listeners = new Map();
+    this.disabled = false;
   }
 
   getAttribute(name) {
@@ -25,13 +32,69 @@ class El {
     return v === undefined ? null : v;
   }
 
+  setAttribute(name, value) {
+    this.attrs[String(name).toLowerCase()] = String(value);
+  }
+
   get textContent() {
     if (this.children.length === 0) return this.text;
     return this.text + this.children.map((c) => c.textContent).join("");
   }
 
+  set textContent(v) {
+    this.text = String(v ?? "");
+    this.children = [];
+  }
+
+  get className() { return this.getAttribute("class") || ""; }
+
+  set className(v) { this.setAttribute("class", v); }
+
   get classList() {
     return (this.getAttribute("class") || "").split(/\s+/).filter(Boolean);
+  }
+
+  /** A CLOSED shadow root is unreadable from the element in a real DOM; this
+   * handle exists for assertions only, exactly as in fake_page.mjs. */
+  attachShadow({ mode } = {}) {
+    const root = new El("#shadow-root");
+    root.mode = mode;
+    this.shadowRoot = root;
+    return root;
+  }
+
+  appendChild(child) {
+    this.children.push(child);
+    if (child && typeof child === "object") child.parentElement = this;
+    return child;
+  }
+
+  remove() {
+    const parent = this.parentElement;
+    if (!parent) return;
+    const i = parent.children.indexOf(this);
+    if (i >= 0) parent.children.splice(i, 1);
+    this.parentElement = null;
+  }
+
+  /** Attached to the tree this node was built into. */
+  get isConnected() {
+    let node = this;
+    while (node.parentElement) node = node.parentElement;
+    return node.tagName === "#document";
+  }
+
+  addEventListener(type, fn) {
+    if (!this.listeners.has(type)) this.listeners.set(type, []);
+    this.listeners.get(type).push(fn);
+  }
+
+  /** Deliver an event to every listener registered for `type`. */
+  fire(type, event = {}) {
+    const e = { preventDefault() { e.defaultPrevented = true; }, ...event };
+    const out = [];
+    for (const fn of this.listeners.get(type) || []) out.push(fn(e));
+    return out;
   }
 }
 
@@ -50,8 +113,12 @@ export function parseHTML(html) {
   const root = new El("#document");
   let current = root;
   let i = 0;
+  // The document root IS a parent, so `isConnected` can tell a node that was
+  // parsed (or mounted into the tree) from a freshly created, unattached one.
+  // Selector matching is unaffected: "#document" matches no compound, and the
+  // ancestor walk simply runs off the top as it did before.
   const push = (node) => {
-    node.parentElement = current === root ? null : current;
+    node.parentElement = current;
     current.children.push(node);
   };
 
@@ -196,6 +263,21 @@ export function domFromHTML(html, { url = "https://example-site.test/v/1",
     url,
     title: title || (titleEl ? titleEl.textContent.trim() : ""),
     root,
+  };
+}
+
+/**
+ * The adapter player_buttons.js is written against (`docAdapter`'s shape),
+ * backed by parsed fixture HTML. `queryAll` takes an optional scope root, which
+ * is how a rule's `mount` selector is resolved INSIDE its container.
+ */
+export function playerDomFromHTML(html, { url = "https://embed.example.test/embed/ID1" } = {}) {
+  const root = parseHTML(html);
+  return {
+    root,
+    url,
+    queryAll: (sel, scope) => queryAll(scope || root, sel),
+    create: (tag) => new El(String(tag).toLowerCase()),
   };
 }
 

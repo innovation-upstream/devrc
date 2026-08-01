@@ -9,6 +9,7 @@
 // DL_ROUTER_NO_AUTOSTART so importing it here does nothing on its own.
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 
 globalThis.DL_ROUTER_NO_AUTOSTART = true;
 
@@ -36,19 +37,34 @@ let overlayOpenResult = { ok: true };
 let overlayReports = "ready";       // "ready" | "ready-late" | "silent"
 let tabsUpdateFails = false;
 
+// --- the player-button path -------------------------------------------------- //
+// What the TOP frame answers when the worker asks it to describe itself. `null`
+// reproduces "there is no content script in the top frame", which is the
+// correlation failure the picker degradation depends on.
+let pageContextResult = null;
+let pageContextThrows = false;
+
+// chrome.storage STRUCTURED-CLONES on the way in and on the way out. Storing
+// the reference instead was a real fidelity bug in this mock: a live object
+// mutated after being "persisted" appeared to have been persisted with the
+// mutation, so `state.pending`'s dedupe latch tested as durable while the
+// production code had not written it. Clone, or the persistence tests lie.
+const clone = (v) => (v === undefined ? undefined
+  : JSON.parse(JSON.stringify(v)));
+
 globalThis.chrome = {
   storage: {
     local: {
       get: async (keys) => {
         const out = {};
-        for (const k of [].concat(keys)) out[k] = storageLocal[k];
+        for (const k of [].concat(keys)) out[k] = clone(storageLocal[k]);
         return out;
       },
-      set: async (obj) => Object.assign(storageLocal, obj),
+      set: async (obj) => Object.assign(storageLocal, clone(obj)),
     },
     session: {
-      get: async (k) => ({ [k]: storageSession[k] }),
-      set: async (obj) => Object.assign(storageSession, obj),
+      get: async (k) => ({ [k]: clone(storageSession[k]) }),
+      set: async (obj) => Object.assign(storageSession, clone(obj)),
     },
     onChanged: { addListener() {} },
   },
@@ -103,6 +119,13 @@ globalThis.chrome = {
     },
     sendMessage: async (id, msg, opts) => {
       calls.tabMessages.push({ id, msg, opts });
+      if (msg && msg.type === "dlr:page-context") {
+        if (pageContextThrows) {
+          throw new Error("Could not establish connection. "
+            + "Receiving end does not exist.");
+        }
+        return pageContextResult;
+      }
       if (msg && msg.type === "dlr:overlay-open") {
         if (contentScriptMissing) {
           throw new Error("Could not establish connection. "
@@ -177,6 +200,8 @@ function reset({ enabled = true, snapshot = SNAPSHOT } = {}) {
   overlayOpenResult = { ok: true };
   overlayReports = "ready";
   tabsUpdateFails = false;
+  pageContextResult = null;
+  pageContextThrows = false;
   SW.state.overlays.clear();
   SW.state.config = { port: 8791, token: "tok", enabled };
   SW.state.configLoaded = true;
@@ -2220,3 +2245,446 @@ test("confirmDuplicate without an entry still answers (the latch is optional)",
     assert.equal(await SW.confirmDuplicate(207, "Jane Doe/f.mp4", "Jane Doe"),
       null);
   });
+
+// --- the player-button path -------------------------------------------------- //
+//
+// A click on an injected button inside a CROSS-ORIGIN embed frame. The frame
+// has the media URL and nothing else; the top frame has the subject and cannot
+// see the media; only the worker can reach both.
+const EMBED_URL = "https://embedhost.example.test/embed/SYNTH8563";
+const MEDIA_URL = "https://cdn.example.test/media/data/f.mp4"
+  + "?exp=1900000000&token=SIGNED_A&fn=f.mp4";
+const FORUM_URL = "https://forum.example.test/threads/jane-doe-set.90001/page-6";
+
+/** What the top frame reports when a context rule matched. */
+function topContext(overrides = {}) {
+  return {
+    ok: true,
+    context: {
+      href: "", mediaSrc: "", linkText: "", alt: "",
+      pageUrl: FORUM_URL,
+      pageTitle: "Jane Doe | Example Forums",
+      site: "forum.example.test",
+      tags: ["Jane Doe"],
+      og: {},
+      ...overrides,
+    },
+  };
+}
+
+/** The frame sending `dlr:player-download`; `frameId > 0` -- a subframe. */
+const embedSender = (tabId = 7) => ({ tab: { id: tabId }, frameId: 4 });
+
+test("a player click downloads the URL read at click time", async () => {
+  reset();
+  pageContextResult = topContext();
+  const res = await SW.playerDownload(
+    { mediaUrl: MEDIA_URL, embedUrl: EMBED_URL }, embedSender());
+  assert.equal(res.ok, true);
+  assert.equal(res.context, true);
+  assert.deepEqual(calls.downloads, [{ url: MEDIA_URL }]);
+});
+
+test("frame -> top-frame correlation asks FRAME 0 OF THE SAME TAB", async () => {
+  // The only proof available: `document.referrer` inside the embed is the forum
+  // ORIGIN with the path stripped, and ancestorOrigins carries no paths either.
+  reset();
+  pageContextResult = topContext();
+  await SW.playerDownload({ mediaUrl: MEDIA_URL, embedUrl: EMBED_URL },
+    embedSender(11));
+  const ask = calls.tabMessages.find((m) => m.msg.type === "dlr:page-context");
+  assert.ok(ask, "the worker must ask the top frame");
+  assert.equal(ask.id, 11, "the tab the click came from");
+  assert.deepEqual(ask.opts, { frameId: 0 }, "the TOP frame, never any other");
+});
+
+test("a correlated click carries the thread's subject into /match", async () => {
+  reset();
+  pageContextResult = topContext();
+  const posted = [];
+  fetchHandler = async (url, opts) => {
+    if (url.endsWith("/match")) {
+      posted.push(JSON.parse(opts.body));
+      return { ok: true, status: 200,
+        json: async () => ({ dir: "Jane Doe", confidence: 1, auto: true,
+          reason: "alias(thread-slug)" }) };
+    }
+    return { ok: true, status: 200, json: async () => ({}) };
+  };
+  await SW.playerDownload({ mediaUrl: MEDIA_URL, embedUrl: EMBED_URL },
+    embedSender());
+  // Now Chrome dispatches the download the click started.
+  SW.onDeterminingFilename({ id: 401, url: MEDIA_URL, filename: "f.mp4" },
+    () => {});
+  await settle(5);
+  assert.equal(posted.length, 1);
+  const p = posted[0];
+  // Tier 1 bound the synthesised capture to the DownloadItem by exact URL --
+  // no time window, no active-tab guess.
+  assert.equal(p.page.url, FORUM_URL);
+  assert.deepEqual(p.page.tags, ["Jane Doe"]);
+  assert.equal(p.page.site, "forum.example.test");
+});
+
+test("THE LEDGER KEY IS THE EMBED URL, NOT THE SIGNED MEDIA URL", async () => {
+  // The media URL is re-signed in place roughly hourly. Keyed on it, the ledger
+  // would mint a new row per rotation and the badge would never light.
+  reset();
+  pageContextResult = topContext();
+  const posted = [];
+  fetchHandler = async (url, opts) => {
+    if (url.endsWith("/match")) posted.push(JSON.parse(opts.body));
+    return { ok: true, status: 200,
+      json: async () => ({ dir: "Jane Doe", confidence: 1, auto: true }) };
+  };
+  await SW.playerDownload({ mediaUrl: MEDIA_URL, embedUrl: `${EMBED_URL}?autoplay=1#t=3` },
+    embedSender());
+  SW.onDeterminingFilename({ id: 402, url: MEDIA_URL, filename: "f.mp4" },
+    () => {});
+  await settle(5);
+  assert.equal(posted[0].sourceKey, EMBED_URL,
+    "normalised to scheme+host+path: playback params are not an identity");
+  assert.notEqual(posted[0].sourceKey, MEDIA_URL);
+});
+
+test("CORRELATION FAILURE DEGRADES TO THE PICKER, never to a wrong subject",
+  async () => {
+    // The top frame has no content script (a CSP-sandboxed host, a page still
+    // loading, a tab that navigated). The tempting fallback -- the newest
+    // capture from this tab -- is the branch carryReferrer already deleted for
+    // learning "the last thread I saw" as a 1.00 alias.
+    reset();
+    pageContextThrows = true;
+    // A capture from a DIFFERENT thread, live in the same tab. If any fallback
+    // existed, this is the wrong subject it would import.
+    SW.state.captures = [{
+      href: "https://forum.example.test/other", mediaSrc: "",
+      pageUrl: "https://forum.example.test/threads/someone-else.777/",
+      pageTitle: "Someone Else", site: "forum.example.test",
+      tags: ["Someone Else"], og: {}, tabId: 7, ts: Date.now(),
+    }];
+    const posted = [];
+    fetchHandler = async (url, opts) => {
+      if (url.endsWith("/match")) {
+        posted.push(JSON.parse(opts.body));
+        return { ok: true, status: 200,
+          json: async () => ({ dir: "other", confidence: 0.1, auto: false,
+            reason: "no match" }) };
+      }
+      return { ok: true, status: 200, json: async () => ({}) };
+    };
+    const res = await SW.playerDownload(
+      { mediaUrl: MEDIA_URL, embedUrl: EMBED_URL }, embedSender());
+    assert.equal(res.ok, true);
+    assert.equal(res.context, false, "the worker must admit it proved nothing");
+
+    SW.onDeterminingFilename({ id: 403, url: MEDIA_URL, filename: "f.mp4" },
+      () => {});
+    await settle(5);
+    assert.equal(posted.length, 1);
+    assert.equal(posted[0].page.url, "", "no page URL was proven");
+    assert.deepEqual(posted[0].page.tags, [], "and no subject was invented");
+    assert.equal(posted[0].page.title, "");
+    for (const value of Object.values(posted[0].page)) {
+      assert.notEqual(value, "Someone Else");
+    }
+    // ...and the user is asked.
+    const picker = calls.windowsCreate.find((w) => /picker\.html/.test(w.url));
+    assert.ok(picker, "an unproven subject must reach the picker");
+  });
+
+test("a top frame that answers without a usable page URL counts as a failure",
+  async () => {
+    reset();
+    pageContextResult = topContext({ pageUrl: "about:blank" });
+    const res = await SW.playerDownload(
+      { mediaUrl: MEDIA_URL, embedUrl: EMBED_URL }, embedSender());
+    assert.equal(res.context, false);
+    assert.equal(SW.state.captures[0].tags.length, 0);
+  });
+
+test("a non-http media URL is refused before any download starts", async () => {
+  reset();
+  pageContextResult = topContext();
+  for (const bad of ["blob:abcd", "javascript:alert(1)", "", null,
+    "file:///etc/passwd"]) {
+    const res = await SW.playerDownload(
+      { mediaUrl: bad, embedUrl: EMBED_URL }, embedSender());
+    assert.equal(res.ok, false, JSON.stringify(bad));
+  }
+  assert.deepEqual(calls.downloads, []);
+});
+
+test("a player click in a profile where routing is off does nothing", async () => {
+  reset({ enabled: false });
+  const res = await SW.playerDownload(
+    { mediaUrl: MEDIA_URL, embedUrl: EMBED_URL }, embedSender());
+  assert.equal(res.ok, false);
+  assert.deepEqual(calls.downloads, []);
+});
+
+test("a message with no tab cannot start a download", async () => {
+  reset();
+  const res = await SW.playerDownload(
+    { mediaUrl: MEDIA_URL, embedUrl: EMBED_URL }, { frameId: 4 });
+  assert.equal(res.ok, false);
+  assert.deepEqual(calls.downloads, []);
+});
+
+test("dlr:player-download is routed, and answers asynchronously", async () => {
+  reset();
+  pageContextResult = topContext();
+  let answer = null;
+  const ret = SW.onMessage({ type: "dlr:player-download", mediaUrl: MEDIA_URL,
+    embedUrl: EMBED_URL }, embedSender(), (r) => { answer = r; });
+  assert.equal(ret, true, "the channel must stay open for the late response");
+  await settle(5);
+  assert.equal(answer.ok, true);
+});
+
+// --- the "already have this" badge ------------------------------------------- //
+test("dlr:have asks the ledger by the NORMALISED embed url", async () => {
+  reset();
+  fetchHandler = async () => ({ ok: true, status: 200,
+    json: async () => ({ ok: true, have: true, dir: "Jane Doe" }) });
+  const res = await SW.haveUrl(`${EMBED_URL}?autoplay=1`);
+  assert.deepEqual(res, { ok: true, have: true, dir: "Jane Doe" });
+  assert.equal(calls.fetches[0].url,
+    `http://127.0.0.1:8791/have?url=${encodeURIComponent(EMBED_URL)}`);
+});
+
+test("a ledger miss is a miss, and a dead sidecar is also a miss", async () => {
+  reset();
+  fetchHandler = async () => ({ ok: true, status: 200,
+    json: async () => ({ ok: true, have: false }) });
+  assert.deepEqual(await SW.haveUrl(EMBED_URL), { ok: true, have: false,
+    dir: "" });
+  fetchHandler = async () => { throw new Error("connection refused"); };
+  // A badge is a hint on someone else's page: a sidecar that is down must
+  // produce NO badge, never a broken one.
+  assert.deepEqual(await SW.haveUrl(EMBED_URL), { ok: false, have: false });
+});
+
+test("an unusable embed url is not asked about at all", async () => {
+  reset();
+  for (const bad of ["", "blob:x", "about:blank", null]) {
+    assert.deepEqual(await SW.haveUrl(bad), { ok: false, have: false });
+  }
+  assert.deepEqual(calls.fetches, []);
+});
+
+test("dlr:have is routed and answers asynchronously", async () => {
+  reset();
+  fetchHandler = async () => ({ ok: true, status: 200,
+    json: async () => ({ ok: true, have: true, dir: "Jane Doe" }) });
+  let answer = null;
+  const ret = SW.onMessage({ type: "dlr:have", embedUrl: EMBED_URL },
+    embedSender(), (r) => { answer = r; });
+  assert.equal(ret, true);
+  await settle(5);
+  assert.equal(answer.have, true);
+});
+
+// --- state.pending SURVIVES THE ~30s MV3 IDLE TEARDOWN ----------------------- //
+//
+// Every test below simulates the teardown the same way Chrome does it: the
+// module globals go, `chrome.storage.local` stays. `state.pending.clear()` is
+// therefore not a shortcut -- it IS the teardown.
+function teardown() {
+  SW.state.pending.clear();
+  SW.state.overlays.clear();
+  SW.state.captures = [];
+}
+
+test("A DOWNLOAD THAT OUTLIVES THE TEARDOWN KEEPS ITS TOAST", async () => {
+  // The bug: `pending` was an in-memory Map and `onDownloadChanged` returns
+  // early without an entry -- so a download taking longer than half a minute
+  // lost its toast, its pending relocate AND its learning. Silently, and for
+  // essentially every video.
+  reset();
+  SW.state.snapshot.root = LIB_ROOT;
+  const suggest = spy();
+  fetchHandler = async () => ({ ok: true, status: 200,
+    json: async () => ({ dir: "Jane Doe", confidence: 1, auto: true,
+      reason: "alias" }) });
+  SW.onDeterminingFilename({ id: 501, url: MEDIA_URL, filename: "f.mp4" },
+    suggest);
+  await settle(5);
+  assert.ok(SW.state.pending.has(501));
+  assert.ok(Array.isArray(storageLocal.pending),
+    "the routing decision must be written durably, not only to memory");
+
+  teardown();
+  searchResult = [{ id: 501, state: "complete",
+    filename: `${LIB_ROOT}/Jane Doe/f.mp4` }];
+  fetchHandler = async () => ({ ok: true, status: 200,
+    json: async () => ({ ok: true, duplicate: false }) });
+  await SW.onDownloadChanged({ id: 501, state: { current: "complete" } });
+  assert.ok(SW.state.pending.has(501),
+    "the woken worker must find the entry it wrote before the teardown");
+});
+
+test("A CORRECTION MADE BEFORE THE TEARDOWN IS STILL APPLIED AFTER IT",
+  async () => {
+    // The picker is a separate window the user can leave open past the idle
+    // timeout -- choosing is the slowest thing they do here -- so this is the
+    // normal case, not an edge one.
+    reset();
+    SW.state.snapshot.root = LIB_ROOT;
+    SW.state.pending.set(502, { dir: "other", filename: "f.mp4",
+      payload: { page: {} }, ts: Date.now() });
+    searchResult = [];   // still downloading: the choice is deferred
+    const out = await SW.applyChoice(502, "Jane Doe", {});
+    assert.deepEqual(out, { ok: true, dir: "Jane Doe", deferred: true });
+
+    teardown();
+    searchResult = [{ id: 502, state: "complete",
+      filename: `${LIB_ROOT}/other/f.mp4` }];
+    const posted = [];
+    fetchHandler = async (url, opts) => {
+      posted.push({ url, body: opts.body ? JSON.parse(opts.body) : null });
+      return { ok: true, status: 200,
+        json: async () => ({ ok: true, relPath: "Jane Doe/f.mp4" }) };
+    };
+    await SW.onDownloadChanged({ id: 502, state: { current: "complete" } });
+    const moved = posted.find((p) => p.url.endsWith("/relocate"));
+    assert.ok(moved, "the pick must survive the teardown and be applied");
+    assert.equal(moved.body.toDir, "Jane Doe");
+    assert.ok(posted.some((p) => p.url.endsWith("/learn")),
+      "and it must still be learned from");
+  });
+
+test("the dedupe latch survives the teardown too", async () => {
+  // Persisting the entry without persisting its latch would open a SECOND
+  // focused, never-auto-closing duplicate toast for one download.
+  reset();
+  SW.state.snapshot.root = LIB_ROOT;
+  // Routed through the real path, so the entry is genuinely durable -- setting
+  // `state.pending` by hand would leave nothing in storage and the second delta
+  // would find no entry at all, which passes for the wrong reason.
+  fetchHandler = async () => ({ ok: true, status: 200,
+    json: async () => ({ dir: "Jane Doe", confidence: 1, auto: true }) });
+  SW.onDeterminingFilename({ id: 503, url: MEDIA_URL, filename: "f.mp4" },
+    () => {});
+  await settle(5);
+  assert.ok(storageLocal.pending.some((r) => r[0] === 503));
+
+  searchResult = [{ id: 503, state: "complete",
+    filename: `${LIB_ROOT}/Jane Doe/f.mp4` }];
+  const posted = [];
+  fetchHandler = dedupeResponder({
+    ok: true, duplicate: true, relPath: "Jane Doe/f.mp4",
+    dupRelPath: "john-smith/x.mov", kind: "size+hash" },
+  { onPost: (url) => posted.push(url) });
+  await SW.onDownloadChanged({ id: 503, state: { current: "complete" } });
+  teardown();
+  await SW.onDownloadChanged({ id: 503, state: { current: "complete" } });
+  assert.equal(posted.filter((u) => u.endsWith("/dedupe")).length, 1,
+    "the duplicate check ran twice for one download");
+  const dupToasts = calls.windowsCreate.filter((w) => /mode=dup/.test(w.url));
+  assert.equal(dupToasts.length, 1, "two duplicate toasts for one download");
+});
+
+test("the restored registry is TTL- and size-bounded", async () => {
+  // `storage.local` outlives the browser, so without these an abandoned
+  // download would be resurrected weeks later, and the registry would grow
+  // without limit.
+  reset();
+  const day = 24 * 60 * 60 * 1000;
+  storageLocal.pending = [
+    [601, { dir: "Jane Doe", ts: Date.now() }],
+    [602, { dir: "Jane Doe", ts: Date.now() - day - 1000 }],
+    ["not-a-pair"],
+    [603, null],
+    [{ bad: "key" }, { dir: "x", ts: Date.now() }],
+  ];
+  await SW.restorePending();
+  assert.deepEqual([...SW.state.pending.keys()], [601]);
+
+  reset();
+  for (let i = 0; i < 100; i += 1) {
+    SW.state.pending.set(700 + i, { dir: "Jane Doe", ts: Date.now() });
+  }
+  await SW.applyChoice(700, "Jane Doe", {});
+  assert.ok(storageLocal.pending.length <= 64,
+    `stored ${storageLocal.pending.length} entries`);
+});
+
+test("restorePending NEVER clobbers an entry created this turn", async () => {
+  reset();
+  storageLocal.pending = [[801, { dir: "stale", ts: Date.now() }]];
+  SW.state.pending.set(801, { dir: "fresh", ts: Date.now() });
+  await SW.restorePending();
+  assert.equal(SW.state.pending.get(801).dir, "fresh");
+});
+
+test("the five-minute sweep clears the DURABLE copy, not just the memory one",
+  async () => {
+    // Otherwise the entry would be gone from memory and immediately restored
+    // from storage by the next `pendingEntry`, and nothing would ever expire.
+    reset();
+    SW.state.pending.set(802, { dir: "Jane Doe", payload: { page: {} },
+      ts: Date.now() });
+    searchResult = [{ id: 802, state: "complete",
+      filename: `${LIB_ROOT}/Jane Doe/f.mp4` }];
+    fetchHandler = async () => ({ ok: true, status: 200,
+      json: async () => ({ ok: true, duplicate: false }) });
+    const realSetTimeout = globalThis.setTimeout;
+    let sweep = null;
+    globalThis.setTimeout = (fn, ms) => {
+      if (ms === 5 * 60 * 1000) { sweep = fn; return { unref() {} }; }
+      return realSetTimeout(fn, ms);
+    };
+    try {
+      await SW.onDownloadChanged({ id: 802, state: { current: "complete" } });
+    } finally {
+      globalThis.setTimeout = realSetTimeout;
+    }
+    assert.ok(sweep, "a sweep must be armed for a completed download");
+    assert.ok(storageLocal.pending.some((r) => r[0] === 802));
+    sweep();
+    await settle(0);
+    assert.ok(!SW.state.pending.has(802));
+    assert.ok(!storageLocal.pending.some((r) => r[0] === 802),
+      "the durable copy would otherwise resurrect it on the next read");
+  });
+
+test("an entry past its TTL is dropped on WRITE, not only on read", async () => {
+  reset();
+  SW.state.pending.set(804, { dir: "Jane Doe",
+    ts: Date.now() - 25 * 60 * 60 * 1000 });
+  SW.state.pending.set(805, { dir: "Jane Doe", ts: Date.now() });
+  await SW.applyChoice(805, "Jane Doe", {});
+  assert.deepEqual(storageLocal.pending.map((r) => r[0]), [805]);
+});
+
+test("a routing decision no longer re-reads the config on every download",
+  async () => {
+    // `pending` now lives in chrome.storage.local alongside the token, so an
+    // unfiltered storage.onChanged handler would call loadConfig() on every
+    // single download event.
+    reset();
+    const src = readFileSync(
+      new URL("../extension/service_worker.js", import.meta.url), "utf8");
+    const handler = src.slice(src.indexOf("chrome.storage.onChanged"));
+    assert.match(handler.slice(0, 600), /"token" in changes/);
+    assert.match(handler.slice(0, 600), /"enabled" in changes/);
+  });
+
+test("after a teardown the picker still goes to the DOWNLOAD's tab", async () => {
+  // `overlayTabId` reads `pending`, so before the durable read it sent every
+  // post-teardown picker to a popup window (or worse, the wrong tab) --
+  // precisely when a picker is most likely to be needed, because the user was
+  // slow enough to trigger the teardown in the first place.
+  reset();
+  contentScriptMissing = false;
+  tabUrl = "https://forum.example.test/threads/jane-doe.1/";
+  SW.state.pending.set(901, { dir: "other", filename: "f.mp4", tabId: 42,
+    payload: { page: {} }, ts: Date.now() });
+  await SW.applyChoice(901, "other", {}).catch(() => {});
+  teardown();
+  await SW.openPicker({ downloadId: 901, dir: "other", reason: "" });
+  const open = calls.tabMessages.find((m) => m.msg.type === "dlr:overlay-open");
+  assert.ok(open, "the overlay must still be offered");
+  assert.equal(open.id, 42, "in the tab the download came from");
+});
