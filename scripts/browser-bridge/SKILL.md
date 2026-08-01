@@ -14,10 +14,41 @@ $BB --instance <key> --tab <id> text   # cheap read of a specific tab
 ```
 
 🔴 **Run `whoami` first on every fresh browser task.** Both hosts are hostname
-`nixos`, and this session's loopback bridge could be either machine with several
-Brave profiles — confirm the host and pick the right `--instance` before acting.
+`nixos` and this bridge could be either, with several Brave profiles — confirm the
+host and pick the right `--instance` before acting.
 
 Full architecture / security model: `scripts/browser-bridge/README.md`.
+
+## FIRST DECISION: agent or direct?
+
+**Open-ended READ — "go find X and tell me Y" → reach for `browser agent` FIRST.**
+A cheap autonomous model works in its OWN isolated tab and returns a compact
+`{answer,evidence,steps_used,status}` — the page HTML (10K–100K tokens on a heavy
+page) never enters YOUR context.
+
+    browser agent "go to news.ycombinator.com and report the top 3 story titles"
+
+**Drive ops directly when** the task is **precise** (URL + selector/JS known, 1–3
+ops) · **interactive** (click/type/submit/upload) · **diagnostic** (you must SEE a
+screenshot, or hit-test paint order) · **secret** — agent-read pages go to
+**OpenRouter/DeepSeek**: never banking, private mail, credential managers, or
+anything you wouldn't hand a third party. Nor **virtualised/lazy-loaded lists**.
+
+SEE the page → drive. KNOW something from it → agent. Ambiguous → agent first;
+taking over costs ~200 tokens, so agent-first wins even at a low success rate.
+
+**Measured** (14 goals, each run ONCE; laptop `.155`, `personal`, opencode 1.18.4,
+`deepseek-v4-flash`, 2026-07-31): **13/14 correct**, ~**$0.0025**/run, median
+**22.65s**. One run per goal = wide CI; read it as "≈0.9", not a rate.
+
+`blocked` → non-zero exit, take over. `partial` → read `evidence`, drive the rest.
+Thin `evidence` is a weak smell, **NOT** protection against a wrong answer — the
+one wrong run quoted its unrendered page verbatim, and the check would have flagged
+a *correct* run. What protects you: the deterministic auto-`wake` on a hidden
+`text`/`html` read (that was the one failure; fixed), and cheap escalation — if the
+answer depends on rendered SPA state, confirm with ONE `text --wake`. **Ignore
+`steps_used`** (undercounted, 5/14). Keep `--allow-domains` TIGHT *and* list the
+frame hosts you expect. → `reference/agent.md`
 
 ## Ops
 
@@ -30,7 +61,7 @@ Result payloads land under `.result.data`.
 | `whoami` | **read-only identity** (global; no `--instance`/`--tab`) — host label (`laptop`/`workbench`), connected instances (active-tab **domain** only), bridge diagnostics + `extension_version_current` |
 | `health` | connected instances + count, each with an explicit `extension_stale` verdict (`true`/`false`; `null` = undecidable) vs `extension_version_current` |
 | `ping` | **which extension build+dir is loaded?** → `{pong,extensionVersion,id,ops}`; older build → `unknown_op`. The only deterministic answer after a ↻ reload |
-| `instances` | list connected instances as JSON (key, label, instanceId, active-tab url/title) |
+| `instances` | connected instances as JSON (key, label, instanceId, active-tab url/title) |
 | `open [url]` | open a NEW tab this session owns (default `about:blank`, **created in the BACKGROUND/hidden**), returns `tabId`. Idempotent. Use for multi-step work |
 | `close` / `release` | close this session's owned tab / drop ownership without closing it |
 | `tabs` | list open tabs (`.data.ownedTabId` flags yours) |
@@ -46,14 +77,11 @@ Result payloads land under `.result.data`.
 | `upload <selector> <path>` | populate an `<input type=file>` via CDP `DOM.setFileInputFiles` — Chrome reads the file by path, **no bytes cross the bridge**. AUDIT-LOGGED, **operator-only** (the agent gets `op_not_allowed:upload`) |
 | `wake [--wait MS]` | **UN-THROTTLE a hidden/background tab with NO focus movement** — the fix for an empty or `hidden` read. ~1.5s settle, cap **6s**. **Wake once per PAGE, not per read**: the un-throttled state ends at detach, but the DOM the page rendered PERSISTS for a following cheap read |
 | `text\|html\|js --wake[=MS]` | run THAT ONE read inside the woken CDP session — only when the read must observe live un-throttled state. `text`/`html --wake` read from an ISOLATED world; `js --wake` is MAIN world by definition. `--wake` + `--frame` is refused (`wake_with_frame_unsupported`) |
-| `activate` | **⚠⚠ STEALS THE OPERATOR'S SCREEN — the ONE intrusive op, a LAST RESORT.** It is **NOT** the fix for a hidden/unrendered tab — that is `wake`. Use it only for something needing the REAL foreground (a browser permission prompt, a native file picker, seeing it with your own eyes), at most **once per TAB, never per read**. i3-gated; unreachable by the autonomous agent |
+| `activate` | **⚠⚠ STEALS THE OPERATOR'S SCREEN — the ONE intrusive op, a LAST RESORT.** It is **NOT** the fix for a hidden/unrendered tab — that is `wake`. Read `reference/spa-wake.md` BEFORE using it |
 | `emulate <preset>\|--reset` | **device emulation** (mobile testing) on a tab you `open`ed. Sticky; owned-tab-only → `reference/emulation.md` |
-| `agent "<goal>"` | run the autonomous opencode browser-agent in its OWN isolated tab; returns compact `{answer,evidence,steps_used,status}` instead of page HTML → `reference/agent.md` |
-| `--print-session-id` | print the derived per-session id (debug) |
+| `agent "<goal>"` | the autonomous browser-agent — see **FIRST DECISION** above, then `reference/agent.md` |
 
-## 🔴 Four traps that return a WRONG answer SILENTLY
-
-These stay here because you only learn you needed them *after* being misled.
+## 🔴 Three traps that return a WRONG answer SILENTLY
 
 1. **`js`/`eval` evaluates ONE EXPRESSION, not a script.** A multi-statement body
    (`window.scrollBy(0,1400); "ok"`) returns **`null` with no error** — it looks
@@ -67,22 +95,6 @@ These stay here because you only learn you needed them *after* being misled.
    case. Check `data.hidden` / `document.visibilityState`, then **`wake`** — never
    `activate`, and spoofing `visibilityState` does not recover the page.
    → `reference/spa-wake.md`
-4. **A stale loaded extension answers `unknown_op`** for an op the CLI knows, and
-   **reload ↻ in `brave://extensions` is UNRELIABLE** (the long-poll keeps the old
-   service worker alive) — a **full quit-and-reopen of Brave** is the reliable fix.
-   → `reference/errors.md`
-
-**Cookies / authenticated requests.** There is no cookie op (no `cookies`
-permission, on purpose), and `document.cookie` is structurally blind to **HttpOnly**
-— which a session cookie always is. Don't extract the cookie; **make the request
-from inside the page**, so no credential ever enters the transcript:
-
-```bash
-browser js '(async function(){ const r = await fetch("/api/thing", {credentials:"include"}); return JSON.stringify({status:r.status, body:(await r.text()).slice(0,500)}) })()'
-```
-
-The promise IS awaited. ⚠ This does **not** work on CSP-strict origins (GitHub,
-Discord, …) — there, `text`/`html` are the only reads that work.
 
 ## When things look broken — triage
 
@@ -94,44 +106,32 @@ Discord, …) — there, `text`/`html` are the only reads that work.
    connected count can be coming from a DIFFERENT instance. → `reference/errors.md`
 2. **A read is empty / half-built / `data.hidden:true`** → the tab is throttled.
    `browser wake`, then re-read. → `reference/spa-wake.md`
-3. **`null` from `js`/`eval`** → multi-statement body first, then page CSP. Fall
-   back to `text`/`html` before concluding the bridge is down.
-4. **`unknown_op` on an op the CLI knows** → stale extension; full Brave restart.
+3. **`null` from `js`/`eval`** → trap 1, then trap 2. Fall back to `text`/`html`
+   before concluding the bridge is down.
+4. **`unknown_op` on an op the CLI knows** → stale extension. Reload ↻ is
+   UNRELIABLE (the long-poll keeps the old worker alive) — full Brave restart.
 5. **Any other unrecognised error string** → look it up in `reference/errors.md`.
-6. **Never diagnose a site OUTAGE from a browser read.** "Is this broken for real
-   users?" is answered by server-side evidence (RUM, metrics, pod health, an
-   anonymous `curl`). A hidden-tab read once produced a confident, false, site-wide
-   outage report. → `reference/spa-wake.md`
+6. **Never diagnose a site OUTAGE from a browser read** — a hidden-tab read once
+   produced a confident, false, site-wide outage report. "Broken for real users?"
+   needs server-side evidence (RUM, metrics, pod health, an anonymous `curl`).
+   → `reference/spa-wake.md`
 
 ## This is the user's LIVE session
 
 It's their real browser, not a scratch VM. Don't `nav` a tab that may hold unsaved
-work (a half-typed comment, a form, a logged-in console) — `open` your own tab, or
-use an obviously disposable one. If anything moved their focus, **restore it**
+work (a half-typed comment, a form) — `open` your own tab, or use an obviously
+disposable one. If anything moved their focus, **restore it**
 (`i3-msg '[id="<prev-winid>"] focus'`).
 
-**Concurrent drivers (esp. sibling subagents) → each `open` and thread its own
-`--tab <id>`.** Sibling subagents of one parent SHARE a session id (they inherit
-`CLAUDE_CODE_SESSION_ID` + `$TMUX_PANE`), so without an explicit `--tab` they fight
-over the SAME tab. Do **not** run a bare high-rate `eval` loop — it saturates the
-single serial extension connection and gets `429 rate_limited`.
-→ `reference/tabs-instances.md`
-
-## Before you rely on it
-
-1. `browser health` — if `extension_connected:false` or it errors, the extension
-   isn't loaded/paired. Tell the user to load + pair it (`reference/security-ops.md`);
-   you cannot do this for them (it's a manual Brave step).
-2. **Verify it's the LIVE authenticated session**: after a read, confirm the content
-   contains **logged-in-only** material (their name, account menu, inbox). If it
-   looks logged-out/anonymous, the wrong tab is active or they aren't logged in —
-   say so rather than proceeding.
+**Concurrent drivers (esp. sibling subagents, which SHARE one session id) → each
+`open` and thread its own `--tab <id>`**; and no high-rate `js` loop (the extension
+connection is serial → `429 rate_limited`). → `reference/tabs-instances.md`
 
 ## Reference files — load ONE only when its trigger fires
 
-**Read them at `~/workspace/devrc/scripts/browser-bridge/reference/<file>`.** (That
-exact path — only `SKILL.md` and the `browser` CLI are symlinked into
-`~/.claude/skills/browser/`; `reference/` is not.)
+**Read them at `~/workspace/devrc/scripts/browser-bridge/reference/<file>`** — that
+exact path; only `SKILL.md` + the `browser` CLI are symlinked into
+`~/.claude/skills/browser/`, `reference/` is not.
 
 | file | load it when… |
 |---|---|
@@ -142,5 +142,6 @@ exact path — only `SKILL.md` and the `browser` CLI are symlinked into
 | `reference/css-hit-test.md` | an element is present but invisible/unclickable/painted under something; a `z-index` change "does nothing"; a `data-testid` selector matches NOTHING on a prod page |
 | `reference/emulation.md` | `emulate` BEFORE `nav` (else no touch API); presets, overrides, errors |
 | `reference/agent.md` | running `browser agent` — flags, guardrails, prereqs; it returned `blocked`; `op_not_allowed` / `nav_scheme_denied` |
+| `reference/auth-pages.md` | an authenticated request; you were about to read a cookie; a read looks logged-OUT; `extension_connected:false` |
 | `reference/security-ops.md` | 🔴 **you are MODIFYING browser-bridge** (the live-verify-on-real-Brave gate is mandatory); the user asks whether/what it records; first-time setup or a second profile |
 | `reference/x-fallback.md` | CDP `screenshot` is unsatisfactory and you must capture the raw X window (`DISPLAY`/`XAUTHORITY`, xdotool/maim) |
