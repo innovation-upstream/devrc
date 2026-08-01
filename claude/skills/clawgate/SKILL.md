@@ -5,8 +5,37 @@ description: Operate clawgate — the self-hosted Claude Code permission-approva
 
 # clawgate operations
 
-clawgate is a self-hosted Go + gomponents + htmx + Tailwind PWA that routes Claude Code permission prompts to the user's phone for approve / approve-with-comment / deny, replacing the dead Telegram notify-bot. It has since grown four phases: permission approval (0–1), Tasks/Repos/Agents tabs on Postgres (2), agent self-service + privilege profiles + the Operator (3), and **runbooks** — parameterized, privilege-aware dispatch templates with approval checkpoints (4) — plus a **production-hardening** pass (Wave 1: resilience/security/correctness; Wave 2: CI + observability), a **mobile UX pass** (per-project auto-approve, inline task quick-add), **streaming agent chat** (live text/thinking/tool-use) + **per-agent model switching**, and a **chat/agents-tab UX overhaul** (0.7.3–0.7.17): operator-as-FAB, full-height markdown chat (incl. GFM tables), **multi-session** chat with a history drawer, a searchable autosave model selector, agent-card rename/⋯-menu/live-status, a worker prompt grounded in the agent's real repo + kubeconfig, an **agent-reply notification FAB** (per-agent unread → session), session-id-in-URL, and a consolidated **auto-approve card** (per-project approved count + remove-on-expiry). **0.7.18–0.7.24 (2026-06-11):** the **decision-labeling loop was REMOVED** (`/ui/decisions`, `decision_labels` table, the metric — it captured per-turn self-approvals = noise; migration 0011 drops the table); **agent chat FOLDED into the SPA shell** (real sidebar + hamburger, no back arrow; sidebar tabs are boosted `<a>`; the standalone `comboboxScript` deleted — `appScript` is the single combobox impl); **notifications gained an ACTIVE section** (agents thinking/responding); new worker tool **`agent_list_pull_requests`** (lists the agent's repo PRs server-side via the stored GitHub token); dispatch-modal fixes (combobox `hx-target` inheritance, modal-close scoping) + a **privilege-grant-at-create** checklist; and the **"Suggested next step"** feature (a `Stop` hook → per-project-opt-in OpenRouter suggestions in a new 💡 **Suggestions** tab; migration 0012; 14d retention). **0.7.25–0.7.30 (2026-06-13→15) — the Suggestions feature matured:** cards show **"where the session left off"** (the session's last assistant turn, derived **server-side from the transcript** since the real Stop hook ships NO usable message field — and the transcript JSONL **schema varies across CC versions**, so parse structurally, never by field order); **hybrid generation** (the LLM EXTRACTS Claude's own proposed next steps from its last message, not re-invented from scratch — cheaper, grounded); and a **session detail view** (tap a card's context → `GET /suggestions/{sessionID}`: a scrollable page of recent history rendered as readable user/assistant turns, opens at the latest, suggestion pinned below). Hook tail bumped 16KB→**512KB** for meaningful scroll-back (it's the stored tail, NOT the full multi-MB session — true unlimited would need transcript upload to object storage). **0.7.31–0.7.35 (2026-06-24):** **usage telemetry** (Grafana **Faro RUM** + new Prometheus metrics + a `clawgate-usage` dashboard — the instrument that finally measures real usage, incl. the Suggestions funnel; see Observability below); a RUM-surfaced **error-toast fix** (`toast` was IIFE-local, now `window.toast`); **per-project auto-approve now PERSISTS** (migration 0013 + `internal/autoapprove`, survives restarts, with 1h/8h/24h/indefinite windows); and card cleanups (clipped duration menu → in-flow chips; removed unused host/tool badges; countdown now scales to days/hours). **0.7.37–0.7.42 (2026-06-25):** **🔑 clawgate's OWN human auth was REMOVED (0.7.37)** — no more `/login?token=` magic-link, no session cookie, no `CLAWGATE_AUTH_TOKEN`/`CLAWGATE_SESSION_SECRET`, no Traefik htpasswd basic-auth. Public `clawgate.zacx.dev` is now fronted by **Authelia 4.39 passwordless passkey** (portal `https://login.zacx.dev`, forward-auth at the production nebula gateway; user `zach`, passkey enrolled — see memory `authelia-passkey-sso`); the LAN (`clawgate.workbench.lan` + NodePort `:30302`) is **OPEN, no auth** (trusted LAN). Only the machine **hook token** (`CLAWGATE_HOOK_TOKEN`) remains, gating `POST /api/send`, the new `POST /api/tasks`, and the `/api/response/{id}` poll. Plus the **durable Tasks adjudication queue**: the task-spec drafter now posts verified specs as durable Task cards via `POST /api/tasks` (0.7.39, replaced the evicting `/api/send` digest); **one-tap Dispatch** per card (0.7.40); **markdown-rendered** bodies (0.7.41); cards are **collapsed `<details>` disclosures** (0.7.42). **0.7.44–0.7.58 (2026-07-02→03) — the agent loop CLOSES end-to-end + operator UX:** a **Task now carries a dispatch config** (model/repo/repo_branch/grant_profiles; **migration 0014**) so the from-card **Dispatch is a pre-filled confirm** not a blank form (0.7.45); machine **`GET /api/tasks[/{id}]`** reads (0.7.44) let a producer poll a Task's status; **repo-cos + the drafter now fill the config** on `POST /api/tasks` (repo-cos resolves the repo's GitHub `owner/name` via git remote). **Dispatched agents CLOSE THE LOOP**: `AgentInstructions` tells a repo-backed TASK agent to branch→commit→push→**open a PR**→`agent_comment_task`(PR url)→`agent_set_task_status ready_for_review` (0.7.48). 🔑🔴 **agent `git push` only works via a FILE-based credential** — openclaw's exec sandbox **STRIPS `$GITHUB_TOKEN`** from the agent's shell (container env has the 40-char token, the agent's own `printenv`=0), so the git helper reads `/root/.gh-token` written at pod startup (`buildHelmValues` `extraInitCommands`, 0.7.49; memory `openclaw-exec-sandbox-strips-env`). Also **`gh` is NOT in the clawdbot image** → PRs open via the REST API. **Tasks UI**: index **[Requests|Tasks] segment + horizontal swipe**, tasks **grouped** In-progress/Open/collapsed-Done, **live dispatch feedback** (new `agent.changed` SSE → card status chip + big Open-chat CTA, no reload), pending-count badge on the Requests segment, **optimistic auto-approve**, relative timestamp, **discoverable dismiss** (delete hoisted to the always-visible action row; **dismissing a task tears down its linked agent pod** via `Provisioner.Destroy`, 0.7.56). **Agent chat**: **LIVE kickoff streaming** — the server-side kickoff turn now streams his message→thinking→response via a new **`agent.stream` SSE** + a shared JS renderer (WS + SSE), guarded so the `chat.reply` refresh can't clobber it (0.7.50 + 0.7.57); a **completion banner** (✅ Agent finished → **Mark complete** navigates to /tasks + a feedback box); smaller header/model(name-only)/repo; markdown code-protection (no md inside `` `code` ``) + clickable bare URLs. **PWA task-lifecycle push** (created[coalesced 4s debounce]/provisioned/done; new `Provisioner.SetStreamHook`/`SetChatReplyHook`/`SetStatusChangeHook` decouple agents pkg from api/push; 0.7.53). Default dispatch model = **deepseek** (`CLAWGATE_AGENT_MODEL`); the DONE push + close-out fire on `ready_for_review`. **0.7.59–0.7.66 (2026-07-03→05) — soak-driven agent-chat polish + STRUCTURED transcript + idle-task reaper + e2e GREENED:** mobile dispatch-confirm stack (full-width Dispatch, small Cancel above) + one-row chat header + **gated feedback Send** (0.7.59); **task push notifications FLATTEN markdown** (a Web Push body is PLAIN TEXT on every platform — not an Android limit; `notificationText()`; 0.7.60); **idle-task reaper** — the daily retention sweep auto-dismisses tasks untouched **>7d** AND tears down their linked agent pods (env **`CLAWGATE_TASK_TTL`**, `off`/`0` disables; centralized in `dismissTask`; 0.7.61); **markdown chat title** + **status icon removed** from the chat header + **sticky autoscroll** (0.7.62); the **SCROLL ROOT FIX** — the page is a fixed-height app shell (`h-dvh`+`overflow-hidden`; the input bar is now **IN-FLOW `flex-none`** as of 0.7.66, no more `fixed`+`pb-28` dead gap) so **`#chat-log` is the ACTUAL scroller** (`min-h-dvh` let the WINDOW scroll → `logEl.scrollTop` was a silent no-op) + **live tool/text interleave** + a **task-detail modal** (tap the chat title → `/ui/agents/{name}/task` into `#task-modal`; 0.7.63); **STRUCTURED transcript** — a turn persists as ORDERED parts (text / tool_call / tool_result) via a **`PartCollector`** that OBSERVES the stream (**migration 0015**), so reconcile/reload show the FULL response with tool calls interleaved as collapsed chips — no more "only the final text segment" loss (0.7.64); **dismissing a task regroups the In-progress/Open/Done sections LIVE** (broadcast `EventTaskChanged`; 0.7.65); **full-height input (no gap)** + scroll-to-working-bubble (`showWorking`→`forceScroll`) + **drop the openclaw `NO_REPL` "no reply" sentinel** (`isSentinelReply` in render + `PartCollector`; the gateway emits it when a turn ends via tool calls with nothing to say; 0.7.66). **e2e SUITE GREENED (73 pass / 2 skip *at the time*; now 83/2):** `login()`→**`waitAppSettled`** (waits for no `.htmx-request` + tabs `data-cg-bound` — fixes the historical FAB "detached from DOM" flake), **retries 1 local / 2 CI + 45s timeout**, and a **`NoopProvisioner`** (env **`CLAWGATE_FAKE_PROVISIONER=1`**, set by the full-mode e2e server, INERT in prod) registers the agent-detail routes without k8s so `e2e/tests/agent-chat.spec.ts` can seed + assert the chat features. **0.7.68:** push-only `POST /api/notify` (notify-only, no approve/deny card). **0.7.69:** re-synced the vendored kubeclaw chart 0.6.0→**0.7.0** (fleet-hardening chart values). **Current live: 0.7.79** (verified 2026-07-30 via `curl -sf http://192.168.50.250:30302/health`; Zach ships concurrently — always re-check) — 0.7.72 added source-provenance (migration 0017; X-Clawgate-Source `claude-code` + X-Clawgate-Session-Id → source_type/source_session_id + card chip), 0.7.73 added TASK EDITING (store UpdateNote partial-update + machine `PATCH /api/tasks/{id}` + UI edit modal; body/title/dispatch-config editable, status/provenance/created_at immutable, in_progress→409; no migration). **0.7.74** adds the machine status setter `PATCH /api/tasks/{id}/status` (hook-token; all statuses incl. complete; shared `applyTaskStatus` helper w/ the session path; broadcasts task.changed; no migration) — the machine API now has full producer parity (create/read/edit/set-status/delete). Both shipped+verified live 2026-07-29. **0.7.75** added **task TAGS** as a routing key + the `title` companion fix (migration 0018: `tags TEXT[]` GIN-indexed + `title TEXT`): normalized/sorted/deduped tags, `GET /api/tasks?tag=` AND-filter, `GET /api/tags` vocabulary. Reserved routing namespaces are a CLOSED set — `runbook:` (hard-validated), `initiative:`, `gate:` (blocks dispatch), `auto:dispatch`. ⚠ an invalid tag or unknown `runbook:` is a **hard 400**, so a client sending a bad tag breaks EVERY create — validate client-side against the grammar (≤20 tags, ≤64 runes, charset `[a-z0-9._/-]`, at most one `:`, no empty half). **0.7.76** added machine `DELETE /api/tasks/{id}`. **0.7.77** fixed the **markdown renderer re-parsing its own output** (`internal/ui/markdown.go`): every inline pass ran over the previous passes' OUTPUT, so two links in one paragraph destroyed each other's attributes (`target="<em>blank"`), a `_`/`*` in a URL corrupted the href, and emphasis ran inside code spans. Emitted markup now goes into a **vault** keyed by a `\x00`-delimited token (`mdVaultSep`, `markdown.go:86`) and restored in **ONE** `ReplaceAllStringFunc` pass — a per-item restore is quadratic: **33.5s vs 0.7s** on a 195 KB body with 50k code spans, comfortably inside `maxTaskBodyLen` (=`200_000`, `internal/api/notes.go:406`), on the path that renders **every task's full body on the LIST page** (`ui.NotesCards`→`noteCard`→`renderMarkdown(n.Body)`, `internal/ui/notes.go:294` — collapsed in a `<details>`, but rendered server-side for every card on every load). Guarded by `internal/ui/markdown_vault_test.go` (11 cases incl. `TestRestoreIsSinglePassAtScale`, a 10s bound) + `internal/ui/source_line_render_test.go` (the extension's literal `Source: [host](url)` line survives intact — an assertion the extension's own JS suite structurally cannot make). 🔑 **The rule that matters: if a client is working around this renderer, fix the RENDERER, not the client** — a client-side workaround for this class was wrong three times running before the root cause was found. ⚠ The Go renderer's sentinel is `\x00`; the **JS mirror** in `internal/ui/agents_detail.go` uses a different one, `\uE000` — two renderers, two sentinels, don't conflate them. **0.7.78** added machine `POST /api/tasks/{id}/comments`. **0.7.79** = two fixes. (a) `ui.taskTitle` **exported as `ui.TaskTitle`** (`internal/ui/notes.go:502`; `title` if non-blank, else `directory`) and `internal/api/agents.go`'s **two dispatch-label sites** now call it — `:158` `buildTaskDispatchView` (the dispatch-modal label) and `:268` `handleAgentNoteOptions` (the task combobox options) — so a `title`-bearing task stops being labelled by its `directory`; pinned by `internal/api/dispatch_label_test.go`. (b) The **JS-mirror sentinel leak is FIXED** — `agents_detail.go:843`'s md-link regex now carries the same sentinel exclusion its autolink always had. ⚠ **`internal/ui/markdown.go:51-54` still carries a STALE comment** asserting that JS leak is unfixed (0.7.79 never touched `markdown.go`) — don't trust it. Residual: a backtick inside a URL renders a truncated autolink plus literal text (no control byte in the href).
-  - 🔑 **NAME-COLLISION TRAP — `internal/api` has its OWN `taskTitle`, and it is NOT `ui.TaskTitle`.** `internal/api/push_task.go:359` `taskTitle` = the **Web-Push notification title**: first non-empty line of the **body**, markdown-**flattened** through `notificationText()`, truncated; falls back to `directory`, then `"New task"`. `ui.TaskTitle` = the **display label**: `title` → `directory`, raw. Body-first vs title-first, flattened vs raw, push vs UI — they answer different questions. **Do not "consolidate" them** (the code says so at `push_task.go:355-358`). (versions move — ALWAYS derive the next release from the LIVE pin, Zach ships concurrently; see `clawgate-version-before-build`). ⚠ **version-collision lesson**: `git fetch origin trunk` + check the LIVE deployment pin BEFORE numbering a release — Zach ships concurrently; a mutable-tag clobber bit once (memory `clawgate-version-before-build`). ⚠ **docs-ahead-of-code lesson**: this skill (and HANDOFF) can be AHEAD of what's actually committed — the 0.7.72 source-provenance was FULLY documented here but not committed to trunk until 2026-07-29. Before assuming a documented feature exists (building on it / deploying it), verify it's really in trunk: check the LIVE pin + `git grep` the feature, don't trust the doc. Full point-in-time state, loose ends, and gotchas live in `containers/clawgate/HANDOFF.md` (authoritative — read it first) + session memories `clawgate-phase2/3` + `clawgate-runbooks` + `clawgate-loop-validation` + `authelia-passkey-sso` + `openclaw-exec-sandbox-strips-env` + `clawgate-version-before-build`.
+Self-hosted Go + gomponents + htmx + Tailwind PWA that routes Claude Code permission prompts to
+Zach's phone for approve / approve-with-comment / deny (it replaced the dead Telegram notify-bot).
+It has since grown into the **agent dispatch loop**: Tasks/Repos/Agents tabs on Postgres, agent
+self-service + privilege profiles + an Operator, runbooks with approval checkpoints, and a durable
+machine Task API that producers (task-spec drafter, repo-cos, mail-actions) post work into for
+one-tap Dispatch.
+
+🔴 **Authoritative point-in-time state is `/home/zach/workspace/homelab-talos/containers/clawgate/HANDOFF.md` — read it first.**
+
+⚠ **This skill can be AHEAD of the code.** 0.7.72 was fully documented here weeks before it was
+committed to `trunk`. Before building on or deploying a documented feature, verify it's really in
+trunk: check the LIVE pin + `git grep` the feature. Don't trust the doc.
+
+## Reference files
+Repo-absolute path `/home/zach/workspace/devrc/claude/skills/clawgate/reference/`; they also deploy
+to `~/.claude/skills/clawgate/reference/` after a home-manager switch.
+
+| file | read it when |
+|---|---|
+| `reference/changelog.md` | you need *when* a feature landed or why an old decision was made (0.2.x → 0.7.79) |
+| `reference/architecture.md` | changing agents / repos / runbooks / privilege / native tools / env / e2e; Phase 2–4 detail |
+| `reference/internals.md` | changing Go code — the markdown renderer, the two `taskTitle`s, tag grammar, migrations |
+| `reference/telemetry.md` | metrics/logs missing, adding an event, or a red CI check |
+| `reference/troubleshooting.md` | something is broken — symptom-first index (push, PWA icon, stale SW, RBAC, agent model) |
+| `reference/hooks.md` | installing hooks on another host, or the Stop / 💡 Suggestions path |
+| `reference/agent-hardening.md` | locking down any kubeclaw agent devpod (securityContext, networkPolicy, FQDN allowlist) |
+| `reference/element-references.md` | a task body contains element references from the browser extension and you need to find them in source |
+
+Session memories: `clawgate-phase2` · `clawgate-phase3` · `clawgate-runbooks` ·
+`clawgate-loop-validation` · `clawgate-version-before-build` · `authelia-passkey-sso` ·
+`openclaw-exec-sandbox-strips-env`.
 
 ## Key facts (verify against current state before asserting)
 
@@ -16,25 +45,44 @@ clawgate is a self-hosted Go + gomponents + htmx + Tailwind PWA that routes Clau
 | Hook scripts | `hook/clawgate-hook.sh` (PermissionRequest → `/api/send`) + `hook/clawgate-stop-hook.sh` (Stop → `/api/suggest`, async/fail-safe, "Suggested next step") |
 | Hook config | `~/.claude/clawgate.env` (`CLAWGATE_API_URL`, `CLAWGATE_HOOK_TOKEN`) — shared by both hooks |
 | Cluster | homelab-talos **workbench** — `KC=/home/zach/workspace/homelab-infra/workbench-kubeconfig`, namespace `clawgate` |
-| ⚠ kubeconfig path | The GitHub origin was renamed **homelab-talos → homelab-infra**. The local **repo dir is still `~/workspace/homelab-talos`** (git worktree/deploy paths below are unchanged), but the **working kubeconfig now lives at `~/workspace/homelab-infra/workbench-kubeconfig`** — deploy agents kept using the old `homelab-talos/…-kubeconfig` (gone). Repo checkout ≠ kubeconfig dir. |
-| Image | `harbor.homelab.lan/library/clawgate:<ver>` (current pinned tag is in the deployment) |
+| ⚠ kubeconfig path | The GitHub origin was renamed **homelab-talos → homelab-infra**. The local **repo dir is still `~/workspace/homelab-talos`** (deploy paths below unchanged), but the **working kubeconfig lives at `~/workspace/homelab-infra/workbench-kubeconfig`** — deploy agents kept using the old `homelab-talos/…-kubeconfig` (gone). Repo checkout ≠ kubeconfig dir. |
+| Image | `harbor.homelab.lan/library/clawgate:<ver>` (the live pinned tag is in the deployment) |
 | Deploy manifest | `homelab-talos/clusters/workbench/apps/clawgate/deployment.yaml` (Flux GitOps from branch `trunk`) |
 | LAN URL (hook + UI) | `http://192.168.50.250:30302` (NodePort) / `clawgate.workbench.lan` — **OPEN, no auth** (trusted LAN); machine endpoints still need bearer `CLAWGATE_HOOK_TOKEN` |
-| Public URL (phone) | `https://clawgate.zacx.dev` — fronted by **Authelia 4.39 passwordless passkey** (portal `login.zacx.dev`, user `zach`); no app-level login. See memory `authelia-passkey-sso`. |
-| Hook events | `PermissionRequest` (kill-switch `CLAWGATE_REMOTE_APPROVAL=off`) + `Stop` (async, kill-switch `CLAWGATE_SUGGEST=off`) — both in `~/.claude/settings.json`, ON by default; the `Stop` array also carries an unrelated tmux task-hook (preserve it) |
-| Card producers (share `CLAWGATE_HOOK_TOKEN`) | (1) the two local hooks above; (2) **the task-spec drafter** — a homelab kubeclaw CronJob that POSTs one daily `type:"permission"` digest card to `/api/send`, tool=`Task-spec drafter`, project=`task-drafter-agent` (see `close-the-loop` STATE.md). It reads the token from homelab secret `task-drafter-agent-secrets` (ns `devpod-task-drafter`), key `CLAWGATE_HOOK_TOKEN`. **⚠ rotation coupling:** if you rotate the hook token, update that secret too or the daily digest 401s **silently**. A daily `Task-spec drafter` card is the drafter, NOT a real CC permission prompt. **(3) repo-cos** (the repo "chief-of-staff", `devrc/scripts/repo-cos/clawgate.py`): when Zach replies "approve" to a weekly proposal digest, it POSTs that proposal as a durable **Task** via `POST /api/tasks` (one-tap Dispatch). Reads the token from **`~/.claude/clawgate.env`** on the workbench (NOT a k8s secret — so the rotation coupling is that file). See the `repo-cos` skill. |
+| Public URL (phone) | `https://clawgate.zacx.dev` — fronted by **Authelia 4.39 passwordless passkey** (portal `login.zacx.dev`, user `zach`); no app-level login |
+| Nebula URL (laptop) | `http://10.42.0.10:8109` (homelab gateway → clawgate; hook-token auth) |
+| Hook events | `PermissionRequest` (kill-switch `CLAWGATE_REMOTE_APPROVAL=off`) + `Stop` (async, kill-switch `CLAWGATE_SUGGEST=off`) — both in `~/.claude/settings.json`, ON by default; the `Stop` array also carries an unrelated tmux task-hook (**preserve it**) |
 
-Secrets are NOT stored here — retrieve from the live cluster secret when needed:
-```bash
-KC=/home/zach/workspace/homelab-infra/workbench-kubeconfig
-# hook token (also in ~/.claude/clawgate.env) — the ONLY clawgate auth secret that still matters:
-grep '^CLAWGATE_HOOK_TOKEN=' ~/.claude/clawgate.env | cut -d= -f2
-# NOTE (0.7.37): clawgate's own human auth was REMOVED. CLAWGATE_AUTH_TOKEN / CLAWGATE_SESSION_SECRET
-# are now orphaned-unused in clawgate-secrets; there is NO magic-link, session cookie, or Traefik
-# basic-auth. Public access is gated by Authelia passkey at login.zacx.dev (see memory authelia-passkey-sso);
-# LAN is open.
-```
-No app-level login exists anymore. To use clawgate on the phone, just open `https://clawgate.zacx.dev` and pass the **Authelia passkey** prompt (`login.zacx.dev`); on the LAN open `http://192.168.50.250:30302` / `clawgate.workbench.lan` directly (open, no auth).
+### Card producers — all share `CLAWGATE_HOOK_TOKEN`
+⚠ **Rotation coupling: rotating the token means updating all three, or they fail silently.**
+1. The two local hooks (token in `~/.claude/clawgate.env`).
+2. The **task-spec drafter** — a homelab kubeclaw CronJob POSTing one daily `type:"permission"`
+   digest card to `/api/send`, tool=`Task-spec drafter`, project=`task-drafter-agent`. It reads the
+   token from homelab secret **`task-drafter-agent-secrets`** (ns `devpod-task-drafter`), key
+   `CLAWGATE_HOOK_TOKEN` — **miss this on a rotation and the daily digest 401s silently.** A daily
+   `Task-spec drafter` card is the drafter, NOT a real CC permission prompt. See the
+   `close-the-loop` skill's STATE.md.
+3. **repo-cos** (`devrc/scripts/repo-cos/clawgate.py`) — on an "approve" reply it POSTs the proposal
+   as a durable Task via `POST /api/tasks`. Reads the token from **`~/.claude/clawgate.env`** on the
+   workbench (NOT a k8s secret). See the `repo-cos` skill.
+
+### Auth / access (0.7.37 — clawgate has NO human auth of its own)
+No magic-link `/login?token=`, no session cookie, no `CLAWGATE_AUTH_TOKEN` /
+`CLAWGATE_SESSION_SECRET` (both now orphaned-unused in `clawgate-secrets`), no Traefik basic-auth,
+and **no login QR to manage**.
+- **Phone / public** → `https://clawgate.zacx.dev`, pass the **Authelia passkey** at
+  `https://login.zacx.dev` (user `zach`, already enrolled). Authelia owns auth/SSO now — manage it
+  there, not in clawgate. Memory `authelia-passkey-sso`.
+- **LAN** → `http://192.168.50.250:30302` or `clawgate.workbench.lan` — open, no auth.
+- **Machine endpoints** (`/api/send`, `/api/tasks`, `/api/notify`, `/api/response/{id}`) require the
+  `CLAWGATE_HOOK_TOKEN` bearer. Secrets are NOT stored in this skill — retrieve it with
+  `grep '^CLAWGATE_HOOK_TOKEN=' ~/.claude/clawgate.env | cut -d= -f2`.
+- Everything else (the UI, `/ui/*`) is OPEN — behind Authelia publicly, directly reachable on the
+  LAN. The hook never has a cookie; the UI never calls `/api/response/{id}`.
+- 🔴 **"session auth" is not auth**: `requireSession` is a literal pass-through no-op since 0.7.37
+  (`internal/api/auth.go`), so **everything on the LAN NodePort is unauthenticated — including
+  `DELETE /tasks/{id}`**. And `requireHookToken` is **enforce-when-set**: with
+  `CLAWGATE_HOOK_TOKEN` empty the machine endpoints are wide open too.
 
 ---
 
@@ -49,14 +97,14 @@ kubectl --kubeconfig $KC -n clawgate logs deploy/clawgate --tail=200 | grep -iE 
 ```
 
 ## send a test
-Creates a real pending request (card + Web Push). Uses the hook token via the open LAN NodePort:
+Creates a real pending request (card + Web Push), via the hook token on the open LAN NodePort:
 ```bash
 B=http://192.168.50.250:30302
 HOOK=$(grep '^CLAWGATE_HOOK_TOKEN=' ~/.claude/clawgate.env | cut -d= -f2)
 curl -sf -X POST "$B/api/send" -H 'Content-Type: application/json' -H "Authorization: Bearer $HOOK" \
   -d '{"type":"permission","tool":"Bash","command":"echo test","host":"nixos-desktop","project":"clawgate","context":["clawgate self-test"]}' | jq .
 ```
-To confirm native delivery, tail logs (below) for `push: delivered ... to N device(s)`.
+To confirm native delivery, tail logs for `push: delivered ... to N device(s)`.
 
 ## logs (push / SSE / subscription activity)
 ```bash
@@ -66,13 +114,21 @@ kubectl --kubeconfig $KC -n clawgate logs -f deploy/clawgate | grep --line-buffe
 (For a live watch that notifies the user as events arrive, use the Monitor tool with this command.)
 
 ## deploy a new version
-Full pipeline. **ONE commit path: a dedicated git WORKTREE off `origin/trunk`**, ending on `trunk` (= live deploy). A concurrent push then rebases only your clean tree, which holds just your staged paths. **Do NOT commit from the main checkout** — it is permanently dirty with unrelated uncommitted files (`.sops.yaml`, secrets, WIP), so a forced `pull --rebase` autostashes that tree and conflicts on files you never touched (this corrupted `.sops.yaml` once, 2026-06-24; on 2026-07-30 the same pattern left the base clone 262 commits behind with three stale-file conflicts). NEVER `git add -A`; stage explicit clawgate paths. After the deploy merges, re-sync the base clone: `git -C /home/zach/workspace/homelab-talos fetch origin && git -C /home/zach/workspace/homelab-talos merge --ff-only origin/trunk`.
+
+🔴 **ONE commit path: a dedicated git WORKTREE off `origin/trunk`, ending on `trunk` (= live
+deploy).** homelab-talos is GitOps from `trunk` — **committing IS deploying.** Do **NOT** commit
+from the main checkout: it is permanently dirty with unrelated uncommitted files (`.sops.yaml`,
+secrets, WIP), so the old `git pull --rebase` stash/autostash dance autostashes that tree and conflicts on files you never
+touched (this corrupted `.sops.yaml` once, 2026-06-24; on 2026-07-30 the same pattern left the base
+clone 262 commits behind with three stale-file conflicts). A clean worktree rebases only your staged
+paths. **NEVER `git add -A`** — stage explicit clawgate paths.
+
 ```bash
-VER=0.7.80   # pick next; ⚠ FETCH trunk + check the LIVE pin FIRST (Zach ships concurrently — a
-             # mutable-tag clobber bit once). latest shipped: 0.7.79. Verify with the status snippet.
-             # ⚠ this fired FOR REAL on 2026-07-30: 0.7.77 (markdown renderer no longer re-parses its
-             # own output) landed from Zach's session WHILE 0.7.78 was being built here. Derive the
-             # number from the LIVE deployment pin, never from this file or HANDOFF.
+VER=0.7.80   # 🔴 FETCH trunk + check the LIVE deployment pin FIRST — Zach ships concurrently and a
+             # mutable-tag clobber bit once (memory clawgate-version-before-build). This fired FOR
+             # REAL 2026-07-30: 0.7.77 landed from Zach's session WHILE 0.7.78 was being built here.
+             # Derive the number from the LIVE pin, NEVER from this file or HANDOFF. (Last known
+             # shipped: 0.7.79 — assume stale, verify with the status snippet.)
 
 # 0. fresh worktree off the latest trunk (clean tree — only YOUR changes live here)
 cd /home/zach/workspace/homelab-talos && git fetch origin trunk
@@ -80,9 +136,8 @@ git worktree add /home/zach/workspace/homelab-trunk -B clawgate-$VER origin/trun
 cd /home/zach/workspace/homelab-trunk/containers/clawgate
 #  ... make your code changes here, in the worktree ...
 
-# 1. test (Go + hook bats + e2e) — must be green. A worktree-local `go test` needs
-#    app.css built FIRST (it's gitignored; a missing one 404s BOTH
-#    TestStaticAssetsServed and TestOpenRoutesNoAuth).
+# 1. test (Go + hook bats + e2e) — must be green. A worktree-local `go test` needs app.css built
+#    FIRST (it's gitignored; a missing one 404s BOTH TestStaticAssetsServed and TestOpenRoutesNoAuth).
 #    🔴 BUILD IT FROM INSIDE containers/clawgate/ — see the CSS-cwd trap below. Correct form:
 nix-shell -p tailwindcss --run "cd /home/zach/workspace/homelab-trunk/containers/clawgate && tailwindcss -i ./web/css/input.css -o ./web/static/app.css --minify"
 wc -c web/static/app.css   # sanity: ~36 KB. ~5 KB = the cwd trap fired. Or: grep -c '\.h-14' web/static/app.css
@@ -115,167 +170,109 @@ curl -sf http://192.168.50.250:30302/health   # confirm version
 # 5. clean up the worktree (force: removes gitignored build artifacts too)
 cd /home/zach/workspace/homelab-talos
 git worktree remove /home/zach/workspace/homelab-trunk --force && git branch -D clawgate-$VER
+
+# 6. re-sync the base clone — it is write-only and silently falls behind
+git -C /home/zach/workspace/homelab-talos fetch origin && git -C /home/zach/workspace/homelab-talos merge --ff-only origin/trunk
 ```
-🔴 **THE CSS-cwd TRAP (cost hours on 2026-07-30 — read before debugging any e2e failure).** Build `app.css` **from inside `containers/clawgate/`**. Running `tailwindcss -i ./web/css/input.css -o ./web/static/app.css --minify` from any other cwd makes the Tailwind config's **relative content globs resolve against the wrong tree**, so it finds no templates and silently emits a **~5 KB** stylesheet with **zero utility classes** instead of ~36 KB. Downstream: the FAB renders zero-sized → Playwright reports it `hidden` → **~25 e2e tests fail in a way that looks exactly like a code regression**. ⚠ **`TestStaticAssetsServed` does NOT catch this** — it asserts app.css is *served*, not that it contains anything. The **Dockerfile builds its own CSS, so the IMAGE is never affected** — this only ever breaks the local gate. Always `wc -c web/static/app.css` (~36 KB) or `grep -c '\.h-14' web/static/app.css` after building.
-🔴 **When an e2e run fails, run the PRISTINE-TRUNK baseline BEFORE theorising.** A throwaway worktree at `origin/trunk` running the same spec is the one control that separates "my change broke it" from "the box/env is broken". On 2026-07-30 it settled the above in a single run, after several rounds of a plausible-but-wrong host-load hypothesis.
 
-The Dockerfile rebuilds `web/static/app.css` automatically (it's `go:embed`'d). **Verifying UI live is now SIMPLE — the LAN UI is OPEN (no auth since 0.7.37).** Just drive a standalone Playwright (or curl) directly at the LAN pod **`http://192.168.50.250:30302`** — no cookie, no auth, no session injection. (The shared Playwright MCP browser is usually locked → use standalone Playwright.) To borrow Playwright deps in a fresh worktree, symlink `e2e/node_modules` to the main checkout's.
+🔴 **THE CSS-cwd TRAP (cost hours on 2026-07-30 — read before debugging any e2e failure).** Build
+`app.css` **from inside `containers/clawgate/`**. Running
+`tailwindcss -i ./web/css/input.css -o ./web/static/app.css --minify` from any other cwd makes the
+Tailwind config's **relative content globs resolve against the wrong tree**, so it finds no
+templates and silently emits a **~5 KB** stylesheet with **zero utility classes** instead of ~36 KB.
+Downstream: the FAB renders zero-sized → Playwright reports it `hidden` → **~25 e2e tests fail in a
+way that looks exactly like a code regression.** ⚠ **`TestStaticAssetsServed` does NOT catch this**
+— it asserts app.css is *served*, not that it contains anything. **The Dockerfile builds its own
+CSS, so the IMAGE is never affected** — this only ever breaks the local gate. Always
+`wc -c web/static/app.css` (~36 KB) or `grep -c '\.h-14' web/static/app.css` after building.
 
-**Deploy mechanics (as run this session):** the **docker build runs ON the workbench** via `DOCKER_HOST=ssh://zach@192.168.50.250` (invoked from a local worktree off `origin/trunk` — no local Docker daemon needed, and the image lands next to harbor). In the deploy gate, **`make e2e` is SKIPPED** (the killed-e2e `clawgate-e2e-pg-*` container leak starves the box) in favor of the **PG-gated unit tests against a throwaway `postgres:16-alpine`** — same DB coverage without the leak risk.
+🔴 **When an e2e run fails, run the PRISTINE-TRUNK baseline BEFORE theorising.** A throwaway
+worktree at `origin/trunk` running the same spec is the one control that separates "my change broke
+it" from "the box/env is broken". On 2026-07-30 it settled the CSS trap in a single run, after
+several rounds of a plausible-but-wrong host-load hypothesis.
 
-## Phase 2 — Tasks / Repos / Agents (added 2026-06, current 0.3.10)
-Beyond the permission-approval flow, clawgate now has three more tabs (each a real SPA route: `/`, `/tasks`, `/repos`, `/agents`). State is consolidated in an **in-cluster Postgres** (`clawgate-postgres`, ns clawgate). With no `DATABASE_URL` the app falls back to in-memory/file (so `go run` / the docker smoke test work with Phase 2 disabled).
+**Deploy mechanics (as last run):** the **docker build runs ON the workbench** via
+`DOCKER_HOST=ssh://zach@192.168.50.250`, invoked from a local worktree off `origin/trunk` — no local
+Docker daemon needed, and the image lands next to harbor. In the deploy gate **`make e2e` is
+SKIPPED** (the killed-e2e `clawgate-e2e-pg-*` container leak starves the box) in favour of the
+**PG-gated unit tests against a throwaway `postgres:16-alpine`** — same DB coverage without the leak
+risk.
 
-- **Tasks tab** — freeform tasks (with file attachments) scoped to a working directory (dirs sourced from permission-request cwd history). **Naming gotcha**: user-facing "Tasks", but ALL internals are still "notes" — Go pkg `internal/notes`, DB tables `notes`/`note_attachments`, form fields `note_id`/`note_text`, routes serve `/tasks`→`handleNotesContent`. When grepping, user "task" = code "note".
+**Verifying UI live is SIMPLE — the LAN UI is OPEN (no auth since 0.7.37).** Drive a standalone
+Playwright (or curl) directly at the LAN pod `http://192.168.50.250:30302` — no cookie, no auth, no
+session injection. Use standalone Playwright, not the shared Playwright MCP browser, which is
+usually locked (`Browser is already in use … use --isolated`). To borrow Playwright deps in a fresh
+worktree, symlink `e2e/node_modules` to the main checkout's.
 
-**Tasks as the durable ADJUDICATION QUEUE (0.7.39–0.7.42 — the 10x lever's front-end):** the homelab **task-spec drafter** (daily cron, DeepSeek) now posts verified specs as **durable Task cards** via the new **`POST /api/tasks`** (hook-token-gated machine endpoint, `internal/api/notes.go` `handleAPITaskCreate`). This replaced an ephemeral `/api/send` digest that evicted at the 5-min permission TTL (close-the-loop Loop #1). Each Task card has **one-tap Dispatch** (opens the dispatch modal pre-selected to that task, 0.7.40); bodies render **markdown** (escape-safe `internal/ui/markdown.go`: bold/italic/code/fenced-collapsed/blockquote/lists/links, 0.7.41); cards are **collapsed `<details>` disclosures** (status + snippet + Dispatch visible; expand for full body/comments/attachments, 0.7.42). The drafter card body is clean (goal/recommendation + safety + Done/Verifier/Agent + Source-ticket link — no raw JSON, no id). See the `close-the-loop` skill's STATE.md loop ledger.
-  - **✅ `POST /api/tasks` HAS a real `title` field as of 0.7.75 (migration 0018) — the old "no title field" gotcha is DEAD.** `handleAPITaskCreate` decodes `{directory, title, body, model, repo, branch, privileges, tags}`. The card's display label prefers `title` and falls back to `directory`, so every pre-0.7.75 producer keeps working untouched — but NEW producers should send `title` and leave `directory` for an actual directory. ⚠ `directory` is NOT cosmetic: `inferRepoFromDirectory` (`internal/api/agents.go`) matches it against connected repos to infer the dispatch repo, so smuggling a title through it feeds junk into repo inference. ⚠ the fallback is **display-label only** (`taskTitle()`, `internal/ui/notes.go`): the card's `<h3>` **heading** renders ONLY when `Title` is non-empty, so a legacy `directory`-titled card still shows no heading — another reason to migrate producers to `title`. **Legacy is still honoured, not deprecated:** `mail-actions/clawgate.py` and `repo-cos/clawgate.py` smuggle the title through `directory` and keep working. **Historical note (why this line used to say the opposite):** the pre-0018 claim came from reading `notes.go:122`, which is inside `handleNoteCreate` — the HTML **form** handler (`r.FormValue`) — not the JSON machine endpoint. Verify against `handleAPITaskCreate` specifically.
-  - **🏷 TASK TAGS (0.7.75, migration 0018 — `notes.tags TEXT[]` + GIN).** Grammar (`internal/notes/tags.go`): input is **lowercased** (never rejected for case), whitespace runs → `-`; charset `a-z0-9._/-`; **at most one `:`** for `namespace:value` (empty namespace or value = invalid); **≤64 runes/tag, ≤20 tags/task**; dedup+sorted; blanks dropped. Two classes: **free-form descriptive**, and a **closed reserved routing allowlist** — `runbook:` (**hard**-validated against the runbook store, unknown → **400**; ⚠ skipped entirely in in-memory mode, so this only holds in prod), `initiative:` (**soft** — deliberately not resolved, the store is cross-cluster; the initiatives board joins on it), `gate:` (soft to validate, but **blocks dispatch** — `agents.go` refuses with **409** "task is gated"; the disabled UI button is only a hint, the endpoint is the enforcement), `auto:dispatch` (**plumbing only, shipped OFF** behind `CLAWGATE_TAG_AUTODISPATCH`; even when ON it just logs — it does not dispatch). Machine surface: `tags` on POST/PATCH; **`addTags`/`removeTags` merge ops** on `PATCH /api/tasks/{id}` (they exist so concurrent producers don't lose each other's tags via read-modify-write — `tags` together with either merge key is a **400** "ambiguous tag edit"); `GET /api/tasks?tag=a&tag=b` (AND; an invalid filter value is NOT an error, it just matches nothing → `200 []`); `GET /api/tags` (vocabulary + counts).
-    - 🔴 **The `400` on an invalid tag is a load-bearing WIRE CONTRACT, not an incidental status.** Producers key their fail-open retry on it (repo-cos retries once with `tags` stripped **only** on 400) because a failed POST means "re-propose next week" — so a tag rejection arriving as anything else silently costs an approval for a week. **Neither side has a test pinning the cross-service contract** (clawgate pins 400 in `internal/api/tags_test.go`; the producer's dependence on it is untested). Full rationale: `homelab-talos/claudedocs/clawgate-task-tags-spec.md` §6.
-  - **`DELETE /api/tasks/{id}` (0.7.76, hook-token).** ⚠ Shares `dismissTask`, so **deleting a task with a live dispatched agent TEARS DOWN THAT AGENT POD** (`Provisioner.Destroy`, background best-effort). There is **NO in-progress guard — deliberately** (pinned by `TestAPITaskDeleteInProgressAllowed`). Delete a dispatched task only if you mean to kill its agent. `404` if absent (the existence probe is load-bearing — the store's `DELETE … WHERE id=$1` succeeds with 0 rows).
-  - **`POST /api/tasks/{id}/comments` (0.7.78, hook-token)** — lets agents/automations clawgate did NOT provision comment on a task. 🔑 **The author is derived from the bounded `X-Clawgate-Source` allowlist (`{extension, api, drafter, repo-cos, claude-code}`, unknown → `api`), NEVER from the body** — the decoded struct is `{body}` only, so `user`/`operator` are **structurally unreachable** (a `reservedCommentAuthors` map + test pins that invariant). Comments render **markdown**. Fires a **coalesced Web Push** on the machine path only — the session comment route stays silent.
-- **Repos tab** — GitHub connection. No OAuth App: a **static token** path — `CLAWGATE_GITHUB_TOKEN` (the broad `gh` token; kept as-is by operator decision) auto-connects the account at startup. The token reaches agents as a **Secret env** (`devpod-secrets` → container env via the chart's `envFrom`) — repo clones are tokenless (`https://github.com/...`) and auth via a git credential helper. 🔴 **The helper reads the token from a FILE `/root/.gh-token` (written at pod startup by `buildHelmValues` extraInitCommands), NOT `$GITHUB_TOKEN` directly (0.7.49)** — because **openclaw's exec sandbox STRIPS `$GITHUB_TOKEN` from the agent's shell** (clone worked from the startup script's full env, but the agent's later `git push` got an empty password). File access isn't stripped, so both clone + push authenticate. Token never in a ConfigMap/log. `gh` is NOT installed → PRs via the REST API. Unspecified branches resolve to the repo's GitHub default branch, not hardcoded `main` (0.4.2). See memory `openclaw-exec-sandbox-strips-env`.
-- **Agents tab** — provisions & operates **kubeclaw (OpenClaw) agent pods** from clawgate itself: the kubeclaw Helm chart is **vendored + `go:embed`'d** at `internal/agents/chart/kubeclaw/` (**compile-time** copy; re-sync with `make sync-chart` in `containers/clawgate/`; currently at kubeclaw chart **0.7.0**), installed via the Helm Go SDK + client-go using clawgate's elevated **ServiceAccount `clawgate` + ClusterRole `clawgate-agents`** (`rbac.yaml`). 🔑 **Because the chart is embedded at build time, a kubeclaw release doesn't reach clawgate-provisioned agents until you `make sync-chart` + rebuild+redeploy clawgate** (already-running agents are unaffected — their release was rendered from whatever chart was vendored then). ⚠ vendored is at **0.7.0** but kubeclaw is now **0.7.1** → a re-sync+rebuild is **PENDING** to pick up 0.7.1's networkPolicy fail-loud guards (empty-allowlist protection). Cards show live status (start/stop/delete), recent logs; the detail view streams pod logs (SSE, collapsed by default) + a chat box (WebSocket → agent gateway `:18789 /v1/chat/completions`). Dispatch modal: typeable LLM selector + type-to-filter repo/task comboboxes; "Dispatch" kicks off (sends the task as the first chat message + persists the exchange), "Save for later" provisions at 0 replicas. Agents run on **OpenRouter** (`agent.auth.provider: openrouter` + `OPENROUTER_API_KEY`, dedicated key) with image **`harbor.homelab.lan/library/clawdbot`** (the fleet's OpenClaw build — NOT plain `openclaw`, which is stale and rejects the models); model via `CLAWGATE_AGENT_MODEL` (default `openrouter/deepseek/deepseek-v4-flash`, per-agent override persisted in `agents.model`).
+## machine (hook-token) Task API — the full producer surface
+Routes registered in `internal/api/server.go` `registerNotesRoutes`, handlers in
+`internal/api/notes.go`. Token as `Authorization: Bearer <t>` **or** `X-Clawgate-Token: <t>`.
 
-**Secrets / env** (deployment.yaml + `clawgate-db.enc.yaml`, SOPS): `DATABASE_URL`, `CLAWGATE_ENCRYPTION_KEY` (AES-GCM for the GitHub token at rest), `GITHUB_TOKEN`, `OPENROUTER_API_KEY`, `GITHUB_CLIENT_ID/SECRET` (empty — OAuth unused), plus envs `CLAWGATE_AGENT_IMAGE_REPO`, `CLAWGATE_AGENT_IMAGE_TAG` (**`2026.5.7`** — OpenClaw 2026.5.7+, required for native tools; immutable retag of `test-tools-2026.5.7`), `CLAWGATE_AGENT_MODEL`, `CLAWGATE_OPERATOR_MODEL` (operator-only, `openrouter/anthropic/claude-haiku-4.5`), `CLAWGATE_AGENT_CALLBACK_URL` (in-cluster clawgate URL for agent self-service; empty → default svc), `CLAWGATE_PUBLIC_URL`. Edit with sops the normal way — `.sops.yaml` was reconciled (a `clusters/workbench/apps/clawgate/.*.enc.yaml$` rule exists), so `SOPS_AGE_KEY_FILE=.secrets/age.key sops -e -i <file>` works; the old `--config /dev/null --age …` workaround is retired. (NB: `harbor-cred.enc.yaml` MAC-mismatches under the sops 3.13 CLI but Flux decrypts it fine — leave it.)
+| op | route | notes |
+|---|---|---|
+| **create** | `POST /api/tasks` | `{directory, title, body, model, repo, branch, privileges, tags}`; `body` required (400); unknown keys silently dropped (no `DisallowUnknownFields`) |
+| **read** | `GET /api/tasks[/{id}]` · `GET /api/tasks?tag=a&tag=b` | tag filter ANDs; bogus tag → `200 []`, not an error |
+| **edit** | `PATCH /api/tasks/{id}` | content + dispatch config + `tags` (replace) / `addTags` / `removeTags` (merge); **status/provenance/created_at immutable**; **409 if `in_progress`**; `tags`+merge together → 400 (0.7.73/0.7.75) |
+| **set-status** | `PATCH /api/tasks/{id}/status` | ANY status incl. `complete`; **NO `in_progress` guard**; broadcasts `task.changed` + fires the `ready_for_review` push (0.7.74) |
+| **delete** | `DELETE /api/tasks/{id}` | ⚠ shares `dismissTask`, so it **TEARS DOWN a live dispatched agent pod** (`Provisioner.Destroy`, background best-effort). **No in-progress guard — deliberately** (`TestAPITaskDeleteInProgressAllowed`). Delete a dispatched task only if you mean to kill its agent. `404` if absent — the existence probe is load-bearing, since `DELETE … WHERE id=$1` succeeds with 0 rows (0.7.76) |
+| **comment** | `POST /api/tasks/{id}/comments` | `{body}` only; author from the bounded `X-Clawgate-Source` allowlist (`{extension, api, drafter, repo-cos, claude-code}`, unknown → `api`), **NEVER from the body** — `user`/`operator` are structurally unreachable. Markdown; coalesced push on the machine path only (0.7.78) |
+| **tag vocab** | `GET /api/tags` | `[{tag,count}]` |
+| **push-only** | `POST /api/notify` | notify-only, no approve/deny card (0.7.68) |
+| **provenance** | headers on create | `X-Clawgate-Source` + `X-Clawgate-Session-Id` → `source_type` / `source_session_id` + a card chip (0.7.72) |
 
-## Phase 3 — Task status, agent self-service, privilege, Operator (2026-06, 0.3.20–0.3.25)
-Built on Phase 2. See the session memory `clawgate-phase3` + `containers/clawgate/HANDOFF.md` for full detail.
-- **Tasks** now have a **status** (`open|in_progress|ready_for_review|complete`) + **comment thread** (migration 0003; `note_comments`). Status badge + selector + comments on each task card. Only the operator/human may set `complete`.
-- **Agent self-service**: agents call clawgate back, authenticated by their per-agent `HOOKS_TOKEN`. HTTP API `internal/api/agent.go` (`/agent/task`, `/agent/task/comment`, `/agent/task/status` [rejects complete], `/agent/privilege/request`).
-- **Privilege profiles** (migrations 0004/0005; `internal/privilege`): reusable named access bundles (k8s RBAC rules + optional env/kubeconfig) granted per-agent. Agents request access; the human approves on the Agents tab; **clawgate applies the RBAC LIVE via client-go** (`internal/agents/privilege_apply.go`). rbac.yaml ClusterRole gained `clusterroles`/`clusterrolebindings` + `escalate`+`bind`.
-- **Operator** (`agents.OperatorName="operator"`): a reserved always-on privileged agent you chat with at **`/operator`** (linked from the Agents tab). It orchestrates tasks/agents/repos. Provision via the page button (`POST /operator/provision`); runs on `claude-haiku-4.5`.
-- **🔑 NATIVE TOOL MECHANISM (how agents actually use tools — the load-bearing bit):** NOT skills, NOT `mcpServers`, NOT AGENTS.md (all dead ends on the gateway path — openclaw `doctor` rejects `mcpServers`/`customInstructions`; filesystem skills don't surface to the model). The working way (from kubeclaw-cloud) is **native flat function `tools` passed in the request to the agent gateway's `/v1/responses` endpoint + a client-side call→execute→continue loop** that dispatches each `function_call` to clawgate's in-process handlers. See `internal/agents/responses.go` (`runToolLoop`, `ToolDef`, `callResponses`), `Provisioner.ChatWithTools`, `internal/api/operator.go` `operatorToolDefs()`, `internal/api/agent.go` `AgentToolDefs()`. Requires **OpenClaw 2026.5.7+** (older 404s `/v1/responses` → falls back to plain chat). Operator tools = task/agent/repo control (+ `operator_list_runbooks`/`operator_run_runbook`, Phase 4); worker tools = read/comment/status/request-privilege on their bound task (+ `agent_checkpoint`, Phase 4). The worker kickoff turn also runs the tool loop (`Provisioner.SetAgentToolHooks`).
-- **Dispatch modal UX**: renders instantly with animated skeletons; repo + task option lists lazy-load (`/ui/agents/repos`, `/ui/agents/notes`); the model field is a typeable combobox searched live against OpenRouter (`/api/openrouter/models`, server-cached, debounced); repo selector floats recently-used to the top (localStorage `clawgate.recent.repos`).
+Status vocabulary is exactly **`open` / `in_progress` / `ready_for_review` / `complete`**
+(`notes.ValidStatus`) — there is **no `dismissed`**; dismissing deletes.
+**Route-scope distinction:** the session routes (`/tasks/...`, no `/api` prefix) are LAN/UI-only,
+and the agent route `PATCH /agent/task/status` **forbids `complete`** — the machine
+`PATCH /api/tasks/{id}/status` is the trusted-producer path that allows ALL statuses.
 
-**Migrations**: `internal/db/migrations/NNNN_*.sql`, applied on startup (advisory-locked). Append-only — add the next number, never edit an existing one. (Latest: **0015_chat_message_parts** [`chat_messages.kind`/`tool_id`/`tool_name`/`tool_ok` — the STRUCTURED transcript: an assistant turn persists as ordered parts, legacy rows = kind 'text']; 0014 = per-Task dispatch config; 0013 = persisted per-project auto-approve; 0012 = suggestions; 0011 dropped `decision_labels`; 0009/0010 = chat sessions + read_at.)
+⚠ **Tags are hard-validated: an invalid tag or an unknown `runbook:` is a hard 400, so one bad tag
+breaks the whole create.** Grammar in one line: lowercased, ≤20 tags, ≤64 runes each, charset
+`[a-z0-9._/-]`, at most one `:`, no empty half. Reserved namespaces are a CLOSED set — `runbook:`
+(hard-validated), `initiative:` (soft), `gate:` (**blocks dispatch, 409**), `auto:dispatch` (off).
+🔴 That **400 is a load-bearing WIRE CONTRACT** — producers key their fail-open retry on it. Full
+grammar, rationale, and the `title`-vs-`directory` rules: `reference/internals.md`.
 
-**WebSocket/SSE over the public route**: the nebula gateway nginx (homelab + production) has a dedicated `map $http_upgrade $clawgate_connection { default upgrade; '' ''; }` + `proxy_set_header Upgrade/Connection` on the clawgate block so agent chat (WS) and SSE share one upstream. Restart the `nebula-gateway` DaemonSet (both clusters) after editing it.
-
-**e2e tests**: `containers/clawgate/e2e/` (Playwright, NixOS). Run `make e2e` (uses `pkgs.playwright-driver.browsers`, pins `@playwright/test` to the nixpkgs driver — NOT `npx playwright install`; specs self-start clawgate + a throwaway `postgres:16-alpine`). **83 pass / 2 skip** (the 2 need an in-cluster provisioner). 🔴 **A mass failure is more often the CSS-cwd trap or the box than a regression — build app.css from `containers/clawgate/`, then run the pristine-`origin/trunk` baseline, BEFORE theorising** (see the deploy section). **GREENED 2026-07-05**: `login()` calls **`waitAppSettled`** (helpers/fixtures.ts — waits for no `.htmx-request` + tabs `data-cg-bound` before interacting; this is what killed the FAB "detached from DOM" flake — NOT `networkidle`, which never fires because the shell holds an SSE conn); `playwright.config.ts` has **retries 1 local / 2 CI + 45s timeout** for residual load flakiness; the full-mode server sets **`CLAWGATE_FAKE_PROVISIONER=1`** so a `NoopProvisioner` registers the agent-detail routes (no k8s), letting **`agent-chat.spec.ts`** seed an agent + task + STRUCTURED transcript and assert app-shell scroll / markdown title / tool chips / task modal / gated Send / NO_REPL-filtered. ⚠ agent-detail elements can read "not stable"/"outside viewport" in headless (the live SSE conn keeps the layout churning) → use `evaluate(el=>el.click())` / class-toggle assertions, not raw `.click()`/computed-visibility. ⚠ a KILLED `make e2e` leaks `clawgate-e2e-pg-*` containers → clean them (see the deploy step's note) or the box starves + the FAB flakes. It's the UI regression net — run it for UI changes. **When the shared Playwright MCP browser is locked (`Browser is already in use … use --isolated`), verify live UI with a standalone Playwright vs the LAN pod `http://192.168.50.250:30302` — which is OPEN (no auth since 0.7.37), so no cookie/session injection is needed** — this session's go-to for root-causing UI bugs.
-
-**Verify a real agent end-to-end** (P0): dispatch → `kubectl get pods -A | grep devpod` → pod Running ~90s → status `running` in UI → chat. Cleanup: delete from the UI (helm uninstall + ns delete).
-
-## Phase 4 — Runbooks (2026-06-07, 0.4.0–0.4.2; all paths verified live)
-Reusable, parameterized, privilege-aware **dispatch templates** — a saved dispatch you run with one click instead of retyping the modal. Mirrors the `privilege` domain. See `containers/clawgate/HANDOFF.md` + memory `clawgate-runbooks` for full detail.
-- **Domain** `internal/runbooks/` (`Runbook`/`Spec`/`ParamDef`/`Step`/`Run` + Postgres store; migration 0006 = `runbooks` + `runbook_runs` audit). `Runbook.Render(values)` does `{{param}}` substitution + appends a Steps checklist + "Done when".
-- **UI**: a **Runbooks** section in the Agents tab — authored via discrete form fields (params/steps as small JSON in an Advanced area; raw `spec` JSON also accepted), one-click **Run** with a param form, run-history badge. Routes in `internal/api/runbooks.go` (`/ui/runbooks`, `POST /runbooks`, `POST /runbooks/{id}/dispatch`, …).
-- **Dispatch** = render → create a task note → `createAndDispatchAgent` → auto-grant the runbook's privilege profiles → record a run. Grant ordering: grants recorded **before** provision (env/kubeconfig folds in), live RBAC applied **after** the namespace/SA exist.
-- **Operator**: `operator_list_runbooks` + `operator_run_runbook{name,params,repo?}` native tools — "operator, run the X runbook".
-- **Checkpoints**: a `Step{requiresApproval:true}` → the worker calls the `agent_checkpoint` tool, which files a request in the **same permission inbox** (reuses push + SSE + the Approve/Deny card — zero new UI), blocks until you decide, then returns `approved` + guidance. "Approve with comment" steers the agent.
-- **Token/clone hardening shipped alongside**: tokenless clone via credential helper (0.4.1); default-branch resolution (0.4.2).
-
-## Production hardening — Wave 1 + 2 (0.5.0–0.6.0, 2026-06-07)
-From a 5-dimension audit. **Wave 1 (resilience/security/correctness)**: panic-recovery middleware + `safeGo`; security headers (CSP **needs `'unsafe-eval'`** — htmx `hx-on` uses `new Function`; 0.5.0 broke without it → 0.5.1 hotfix); WebSocket origin locked (was `["*"]`); checkpoints exempt from TTL sweep (24h) + 5-consecutive-miss tolerance; `/readyz` DB-ping (readinessProbe; liveness stays `/health`); DB `statement_timeout=10s`; perf indexes (migration 0007); version via ldflags (`/health` JSON + startup log); **htmx error toasts** (failed mutations no longer silent). **Wave 2**: CI + observability (below).
-- **CI — 🔑 IT MOVED (2026-07-30). GitHub Actions is BILLING-BLOCKED repo-wide**: every workflow run fails in seconds with `steps: 0` and the annotation *"recent account payments have failed or your spending limit needs to be increased"*. **Red Actions checks on `homelab-infra` are NOISE — don't debug them, don't treat them as a gate.** `.github/workflows/clawgate-ci.yml` remains only as `name: clawgate e2e (manual)` / `on: workflow_dispatch`. The real gate is the **Tekton `clawgate-ci` pipeline** on the homelab cluster (`clusters/homelab/apps/tekton-pipelines/triggers/clawgate-ci-*.yaml`) — one Task with a Postgres-sidecar `go` step, an `extension` `npm run coverage` step, and a `hook` bats step; push-only, any branch, path-filtered to `containers/clawgate/`. Its open sharp edges (branch-creation over-match, unpinned 6Gi PVC, no concurrency control, `error`-vs-`fail` only on the CSS path) and the 🔴 **"merge → `flux reconcile kustomization tekton-triggers` → confirm → THEN push"** rule live in the **`tekton` skill** — read it before touching CI. The deploy is still manual.
-- **Observability**: metrics at **`/metrics`** (`internal/metrics`: build_info, http, panics, push_delivery{result}, agent_provision, checkpoints, permission_requests). **Workbench has no Prometheus** → **Grafana Alloy** (`clusters/workbench/apps/alloy/configmap.yaml`, `prometheus.scrape "clawgate"`) scrapes the named `http` port + **remote-writes to the homelab Prometheus** (query at `192.168.50.94:30909`, e.g. `clawgate_build_info`). **Alert rules** on homelab: `clusters/homelab/apps/clawgate-monitoring/` (ClawgateDown/ScrapeMissing/Panics/PushDeliveryFailing).
-
-## usage telemetry (0.7.31 — Faro RUM + Prometheus, "how Zach actually uses it")
-Wired into the EXISTING Grafana stack (NOT a bespoke event table). Two sources of truth; **Grafana is the surface** — dashboard `clawgate-usage` at `grafana.homelab.lan` (JSON in `clusters/homelab/flux-system/charts/prom-stack/dashboards/clawgate-usage.json`).
-- **Frontend RUM via Grafana Faro Web SDK** (vendored `web/static/vendor/faro-web-sdk.iife.js`, gated on `CLAWGATE_FARO_URL` — empty = OFF, the e2e/local default). Browser POSTs to **`https://faro.promptver.com/collect`** (public; key `CLAWGATE_FARO_API_KEY` sent as `x-api-key`, **client-public by design** → plain env, not SOPS) → homelab Alloy `faro.receiver` → **Loki** (events/logs) + **Tempo** (frontend spans, behind `CLAWGATE_FARO_TRACING=1`). **CSP gotcha:** `connect-src 'self'` silently blocks the cross-origin POST — `api.SetTelemetryConnectSrc(CLAWGATE_FARO_URL)` appends the Faro origin (else zero telemetry, no error). A `window.cgTrack(name,attrs)` helper (`internal/ui/faro.go`) emits custom events.
-- **Custom events** (→ Loki, query `{app_name="clawgate"} | event_name="…"`): `tab.view`, `permission.action`, `suggestion.{viewed,copied,dismissed,autosuggest_toggled}`, `chat.sent`, `model.switch`, `agent.dispatch`, `runbook.run`. **This finally measures whether the Suggestions loop is used** (gen→viewed→copied funnel).
-- **New Prometheus metrics** (server-truth): `clawgate_permission_decisions_total{outcome}` + `clawgate_permission_decision_latency_seconds`, `clawgate_suggestion_events_total{action}`, `clawgate_runbook_runs_total`.
-- **Query usage** (cross-cluster NodePorts): Loki `http://192.168.50.94:30310/loki/api/v1/query` (e.g. `sum by (event_name)(count_over_time({app_name="clawgate"}[24h]))`); Prometheus `http://192.168.50.94:30909/api/v1/query` (use `increase(metric[24h])` — counters reset on each deploy/restart). **Early read (2026-06-24):** clawgate is a high-volume auto-approve firehose (~4k prompts/day, ~97% auto-approved); UI browsing ≈ none; **Suggestions = 0 engagement** (trending toward removal like decision-labeling). Web vitals are excellent. **Decision (close-the-loop):** don't invest more in standalone 💡 Suggestions polish (full-transcript scroll-back / Web Push) — the plan is to **fold it into the Tasks adjudication queue as a generative source** (candidate #3, not yet built) rather than iterate it standalone. See memory `clawgate-loop-validation`.
-- **⚠️ Alloy has NO auto-reloader**: after editing its configmap, `kubectl --kubeconfig workbench-kubeconfig -n monitoring rollout restart deploy/alloy`. If clawgate metrics vanish from homelab Prometheus, that's the first thing to check.
-- **Roadmap (Wave 2 remaining)**: resilience reconciler (stuck-`provisioning` zombies + retryable kickoff), scale (N+1s/pagination/retention), durability (PITR vs accept the 24h dump window). Full backlog in HANDOFF.
-
-## install the hook on another host (e.g. laptop, ssh `zach@10.42.0.100`)
-Replicate the approval hook on a second machine so its permission prompts also route to clawgate:
-1. **Reachability** decides the API URL. On the homelab LAN → `http://192.168.50.250:30302`. On a **nebula** host (10.42.0.x, e.g. the laptop) → **`http://10.42.0.10:8109`** (homelab gateway → clawgate; hook-token auth — `curl .../health` returns 200). The public `clawgate.zacx.dev` sits behind Authelia passkey (forward-auth), so don't use it for the machine hook — use a hook-token-gated path.
-2. Copy the hook script: `cat hook/clawgate-hook.sh | ssh HOST 'mkdir -p ~/.claude; cat > ~/.claude/clawgate-hook.sh && chmod +x ~/.claude/clawgate-hook.sh'`.
-3. Write `~/.claude/clawgate.env` on the host with the reachable `CLAWGATE_API_URL` + the shared `CLAWGATE_HOOK_TOKEN` (pipe via stdin so the token isn't in the command line).
-4. Point its `~/.claude/settings.json` PermissionRequest at it, labelling the host: `jq '.hooks.PermissionRequest = [{"hooks":[{"type":"command","command":"CLAUDE_HOST=<label> /home/<user>/.claude/clawgate-hook.sh","timeout":180}]}]'` (back up settings.json first; `CLAUDE_HOST` must be a command prefix — the hook reads it before sourcing clawgate.env). Prereqs on the host: `jq`, `curl`.
-5. Test: `printf '<mock PermissionRequest json>' | CLAUDE_HOST=<label> CLAWGATE_HOOK_DEADLINE=8 ~/.claude/clawgate-hook.sh` and check `~/.claude/clawgate-hook.log` shows `send ... host=<label> -> <url>`. Takes effect in the host's next new Claude session.
+⚠ **A task body may contain element references picked with the browser extension** — lines like
+`` - `#remix-row-cf23 > div.flex > button.grid` — button "Delete remix" (host/path · prev · next) ``.
+🔑 **Do NOT search the selector first** (it is the least durable signal): work domain/path →
+adjacent text → selector → accessible name. Full procedure, worked example, and the
+`buildEnrichment` developer note: `reference/element-references.md`.
 
 ## hook management
-- The PermissionRequest hook is global + on by default. Disable for one session: launch with `CLAWGATE_REMOTE_APPROVAL=off`.
-- Inspect wiring: `jq '.hooks.PermissionRequest' ~/.claude/settings.json`.
-- Run the hook test suite: `cd /home/zach/workspace/homelab-talos/containers/clawgate && nix-shell -p bats jq --run 'bats hook/tests/clawgate-hook.bats'`.
-- Hook semantics (verified vs docs): PermissionRequest fires ONLY when approval is actually needed; output is `{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"allow"|"deny"}}}`. It has NO reason/context channel — an approver comment is record-only (only `PreToolUse` can steer the model via `additionalContext`). Any non-approve/reject decision (e.g. an `ignore`/dismiss) → the hook defers to the terminal. Any error/timeout/unreachable → defer (fail-safe = behaves as if the hook were absent).
-- **Stop hook ("Suggested next step", 0.7.23)**: `clawgate-stop-hook.sh` is registered (async) in `hooks.Stop` **alongside** an unrelated tmux task-hook — preserve both when editing (`jq '.hooks.Stop' ~/.claude/settings.json`). It fires on every turn end, ships `{session_id, project, cwd, message, transcript_tail}` to `POST /api/suggest` (hook token), always exits 0. Kill-switch `CLAWGATE_SUGGEST=off`. Generation runs server-side (OpenRouter `anthropic/claude-haiku-4.5`, key `CLAWGATE_OPENROUTER_API_KEY`; falls back to a deterministic stub when the key is empty or `CLAWGATE_SUGGEST_STUB=1`) ONLY for per-project-opt-in projects (throttled 1/10min) or on-demand from the 💡 Suggestions tab. Bats: `bats hook/tests/clawgate-stop-hook.bats`. Test it live: `curl -s -X POST "$B/api/suggest" -H "Authorization: Bearer $HOOK" -H 'Content-Type: application/json' -d '{"session_id":"t1","project":"clawgate","cwd":"/x","message":"done","transcript_tail":"...JSONL..."}'` → then open `/suggestions` (a card per session, tap its context for the scroll-back detail view) and click "Suggest next step".
-  - **`message` extraction (0.7.28+)**: the real CC Stop hook ships `transcript_path` + a `transcript_tail` but NO usable `message`, so the hook itself scans the transcript (from the END, last ~2MB) for the last assistant record WITH text — **structurally via jq, NOT regex** (the JSONL schema varies: top-level `type:"assistant"` vs `message.role:"assistant"`, and type-AFTER-content field order). The server also re-derives from the tail at ingest (`suggest.LastAssistantText`) as a fallback. **Lesson: parse the transcript structurally; a field-order regex silently missed the old schema.**
-  - **Back-filling existing blank cards** after an extraction/tail change: re-POST `/api/suggest` per session with a freshly-extracted message + a bigger tail from the on-disk transcript at `~/.claude/projects/*/<session_id>.jsonl` (session_id = transcript filename). Pass the big tail via `jq --rawfile` (a 512KB `--arg` blows `ARG_MAX`) and `curl --data-binary @file`. Did this twice this session to fix all rows live.
-  - **`g.If` gotcha** (gomponents): its node arg is evaluated EAGERLY — a node that dereferences a maybe-nil field (e.g. `detailSuggestion(v)` on `v.Suggestion`) must be nil-safe or it panics → 500.
+- The PermissionRequest hook is global + on by default. Disable for one session: launch with
+  `CLAWGATE_REMOTE_APPROVAL=off`. Inspect: `jq '.hooks.PermissionRequest' ~/.claude/settings.json`.
+- Hook test suite:
+  `cd /home/zach/workspace/homelab-talos/containers/clawgate && nix-shell -p bats jq --run 'bats hook/tests/clawgate-hook.bats'`.
+- **Hook semantics (verified vs docs)**: `PermissionRequest` fires ONLY when approval is actually
+  needed; output is
+  `{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"allow"|"deny"}}}`.
+  It has **NO reason/context channel** — an approver comment is record-only (only `PreToolUse` can
+  steer the model via `additionalContext`). Any non-approve/reject decision (e.g. an
+  `ignore`/dismiss) → the hook defers to the terminal. Any error/timeout/unreachable → defer
+  (**fail-safe: behaves as if the hook were absent**).
+- Installing the hooks on another host, and the Stop / 💡 Suggestions hook (incl. its
+  `bats hook/tests/clawgate-stop-hook.bats` suite): `reference/hooks.md`.
 
-## credentials / access (0.7.37: no more login QR)
-clawgate's own login (magic-link `/login?token=`, session cookie, Traefik basic-auth) was **removed in 0.7.37** — there is no token to QR-encode anymore. To access:
-- **Phone / public** → open `https://clawgate.zacx.dev` and pass the **Authelia passkey** prompt at `https://login.zacx.dev` (user `zach`, passkey already enrolled). Authelia owns auth/SSO now — manage it there, not in clawgate. See memory `authelia-passkey-sso`.
-- **LAN** → `http://192.168.50.250:30302` or `clawgate.workbench.lan` directly — **open, no auth**.
-- **Machine endpoints** (`/api/send`, `/api/tasks`, `/api/response/{id}`) still require the `CLAWGATE_HOOK_TOKEN` bearer.
-- **Machine (hook-token) Task API — the FULL producer surface, in one place** (this was repeatedly unclear; all routes registered in `internal/api/server.go` `registerNotesRoutes`, handlers in `internal/api/notes.go`). Token as `Authorization: Bearer <t>` **or** `X-Clawgate-Token: <t>`:
-
-  | op | route | notes |
-  |---|---|---|
-  | **create** | `POST /api/tasks` | `{directory, title, body, model, repo, branch, privileges, tags}`; `body` required (400); unknown keys silently dropped (no `DisallowUnknownFields`) |
-  | **read** | `GET /api/tasks[/{id}]` · `GET /api/tasks?tag=a&tag=b` | tag filter ANDs; bogus tag → `200 []`, not an error |
-  | **edit** | `PATCH /api/tasks/{id}` | content + dispatch config + `tags` (replace) / `addTags` / `removeTags` (merge); **status/provenance/created_at immutable**; **409 if `in_progress`**; `tags`+merge together → 400 (0.7.73/0.7.75) |
-  | **set-status** | `PATCH /api/tasks/{id}/status` | ANY status incl. `complete`; **NO `in_progress` guard**; broadcasts `task.changed` + fires the `ready_for_review` push (0.7.74) |
-  | **delete** | `DELETE /api/tasks/{id}` | ⚠ **tears down a live dispatched agent pod**; no in-progress guard (0.7.76) |
-  | **comment** | `POST /api/tasks/{id}/comments` | `{body}` only; author from `X-Clawgate-Source`, never the body; markdown; coalesced push (0.7.78) |
-  | **tag vocab** | `GET /api/tags` | `[{tag,count}]` |
-
-  Status vocabulary is exactly **`open` / `in_progress` / `ready_for_review` / `complete`** (`notes.ValidStatus`) — there is **no `dismissed`** status; dismissing deletes. **Route-scope distinction:** the session routes (`/tasks/...`, no `/api` prefix) are LAN/UI-only, and the agent route `PATCH /agent/task/status` **forbids `complete`** — the machine `PATCH /api/tasks/{id}/status` is the trusted-producer path that allows ALL statuses.
-  🔴 **"session auth" is not auth**: `requireSession` is a literal pass-through no-op since 0.7.37 (`internal/api/auth.go`), so everything on the LAN NodePort is unauthenticated — including `DELETE /tasks/{id}`. And `requireHookToken` is **enforce-when-set**: with `CLAWGATE_HOOK_TOKEN` empty the machine endpoints are wide open too.
-
-## resolving element references
-
-When a task body contains element references from the browser extension (lines starting with `- ` and a selector), the enriched format (v1.4.0+) includes page context and adjacent text that help locate the element in source code.
-
-### Reference format
-
-```
-- `#remix-row-cf23 > div.flex > button.grid` — button "Delete remix" (aigeum.com/remixes · prev: "Edit" · next: "Share")
-```
-
-### Resolution strategy
-
-Work from the most specific signal inward:
-
-1. **Domain + path** (`aigeum.com/remixes`) — identifies which route/page the element lives on. Search for the route in the app's router config or page components.
-2. **Adjacent text** (`prev: "Edit"`, `next: "Share"`) — search for these strings in the source code. They're likely rendered by the same component that owns the picked element. The preceding text often appears just before the element's component in JSX/templates.
-3. **Selector** (`#remix-row-`) — search for the element directly in DOM-generating code (look for the ID, testid, or tag+class combination).
-4. **Tag + accessible name** (`button "Delete remix"`) — further narrows the search (e.g. search for that label text in templates).
-
-### Practical example
-
-```
-Reference: - `#remix-row-cf23 > div.flex > button.grid` — button "Delete remix" (aigeum.com/remixes · prev: "Edit" · next: "Share")
-
-Resolution strategy:
-1. domain=aigeum.com, path=/remixes → look for route "/remixes" in router config
-2. prev="Edit" → search for "Edit" string in that route's components
-3. selector has #remix-row- prefix → search for "remix-row" in component code
-4. tag=button, name="Delete remix" → search for "Delete remix" label text
-```
-
-### Developer note
-
-The enrichment is built by `buildEnrichment` in `extension/content.js`. It reads `window.location` for page context and walks `previousElementSibling` / `nextElementSibling` for adjacent text, capping each at 120 chars. To modify enrichment behaviour, edit that function — `lib.js` stays pure and handles only selector building and accessible name computation.
-
-## troubleshooting playbook
-- **No native notifications**: check the pod logs for `subscription stored` (none = the phone never subscribed) and `delivered ... to N device(s)` (N>0 = server delivered, so a missing notification is the OS/browser swallowing it). On Android: allow notifications for the app + set battery to Unrestricted. Brave web-push is finicky; Chrome-installed PWA is the reliable fallback.
-- **`fetch ... URL that includes credentials`**: the page was opened with basic-auth creds in the URL (`https://user:pass@host`). Client fetches must build URLs from `location.origin` (credential-free), not relative paths. (Fixed in 0.2.1.)
-- **PWA shows the browser icon, not clawgate's**: stale install. Icons must be 8-bit PNG (Brave won't render 16-bit). Fully remove the home-screen icon → clear the site's data in the browser → reload → use "**Install app**" (WebAPK, uses the manifest icon), not "Add to Home screen" (a bookmark shortcut with the browser icon). Verify icons: `curl -s .../static/icons/icon-192.png | file -` should say 8-bit.
-- **Card not removed when resolved in Claude Code**: `DELETE /api/response/{id}` must broadcast resolved (fixed in 0.2.0). The hook DELETEs its request on decision/timeout. Card actions are now optimistic (removed instantly, POST queued in background with a `↻ N` header indicator); SSE reconciles the badge.
-- **A UI feature "looks broken" for a user but works in incognito/fresh**: stale service-worker cache. `app.css` used to be cache-first under a never-bumped cache → returning users kept old CSS missing new classes (fixed 0.3.6: app.css is now network-first, cache `clawgate-shell-v2`). A normal reload picks up fresh CSS post-deploy. Suspect the SW first.
-- **Stale request cards pile up**: the hook now DELETEs on ANY exit (trap), and the server TTL is short (`CLAWGATE_REQUEST_TTL=5m`; hook poll deadline is 170s so nothing legit pends longer). Orphans auto-evict within ~5min.
-
-## ⚠️ Phase 2 gotchas
-- **Agent helm install fails with RBAC "attempting to grant permissions not currently held"**: the chart's `rbac.create` makes a per-agent Role; clawgate's ClusterRole `clawgate-agents` must be a superset (it needs `pods/log:watch` + `apps/statefulsets`). Add missing verbs to `rbac.yaml`.
-- **Agent model "Unknown model"**: wrong image. Use `CLAWGATE_AGENT_IMAGE_REPO=harbor.homelab.lan/library/clawdbot` (newer OpenClaw), NOT `openclaw` (stale v2026.2.13).
-- **Agents can't auth to the model**: need chart 0.4.0+'s `agent.auth.provider: openrouter` (writes the api_key auth profile from `OPENROUTER_API_KEY`); without it there's no auth profile.
-- ~~`.sops.yaml` on-disk is pre-truncated~~ RESOLVED (2026-06-07): the full ruleset was restored + a `clusters/workbench/apps/clawgate/.*.enc.yaml$` rule added, so the normal `SOPS_AGE_KEY_FILE=.secrets/age.key sops -e -i <file>` flow works — no more `--config /dev/null --age …` workaround. (`harbor-cred.enc.yaml` still MAC-mismatches under the sops 3.13 CLI but Flux applies it fine.)
-
-## kubeclaw agent-devpod hardening playbook (0.7.x chart values)
-Reusable recipe for locking down ANY homelab kubeclaw agent (initiatives, task-drafter, clawgate-provisioned, …). Harden via first-class chart **values** (0.7.x), NOT postRenderers:
-- **`securityContext`** — `allowPrivilegeEscalation:false` + seccomp `RuntimeDefault` always. Add `capabilities.drop:[ALL]` **ONLY if the image bakes its runtime deps** (no apt/dpkg at init) — cap-drop breaks apt-at-init (needs CHOWN/DAC_OVERRIDE). Non-root is still deferred (chart hardcodes `/root/.openclaw|.ssh|.kube`).
-- **`tls.verify:true`** (→ `NODE_TLS_REJECT_UNAUTHORIZED=1`) when the egress targets present valid CAs — overrides the chart's historical hardcoded `0`.
-- **`networkPolicy`** (Cilium; `cilium:true`) egress **default-deny + a PER-AGENT FQDN allowlist**. Needs `allowKubeDns:true` (so `toFQDNs`/`rules.dns` resolves) + `allowKubeApiserver:true`. kubeclaw **0.7.1 fails-loud on an empty allowlist**; 0.7.0 silently bricks egress to DNS+API only.
-- **Per-agent egress must include**: the **model host** (`openrouter.ai` + `*.openrouter.ai`); any **APIs** the agent calls (clickup, etc.); **GitHub** (`github.com`+`*.githubusercontent.com` over https, **`:22` if it SSH-clones**, `api.github.com`+`codeload.github.com`); the **`infraTools` install sources** IF enabled (`dl.k8s.io`/`*.fluxcd.io`/GitHub releases — **NOT** `*.debian.org` unless the image apt-installs at init); plus kube-dns + apiserver.
-- **`tools.web.search.enabled:false` for any restricted-egress agent.** `openclaw doctor --fix` auto-enables a brave/perplexity plugin that npm-fetches `registry.npmjs.org` and **HANGS the gateway** under a locked egress (this is the whole 2026.6.11 rollback class). Turn it off unless web search is load-bearing — if it is, allowlist `registry.npmjs.org` + `api.search.brave.com` instead.
-- **Base-image rebuild**: the shared `openclaw-image` rebuilds via **`--legacy-peer-deps`** on the nested matrix-bot-sdk install (npm arborist `edgesOut` bug on node:22-slim's npm 10.9.8) — see openclaw-image PR #3.
-
-## ⚠️ gotchas (do not relearn the hard way)
-- **homelab-talos is GitOps from `trunk` and its working tree is permanently messy** — committing = deploying live; ALWAYS stage explicit clawgate paths, never `git add -A`. **Commit/build from a dedicated git WORKTREE off `origin/trunk`, NOT the main checkout** (see "deploy a new version") — the old `git pull --rebase` stash/autostash dance on the dirty main tree corrupted `.sops.yaml` once (2026-06-24); a clean worktree rebases only your staged paths.
-- **Public routing rule**: clawgate runs on the WORKBENCH cluster but is fronted by the homelab + production nebula gateways. The homelab gateway nginx block must `proxy_pass` to the workbench **NodePort IP** `http://192.168.50.250:30302`, NOT a `.svc.cluster.local` name — a cross-cluster DNS name doesn't resolve there and crashes nginx (emerg: host not found in upstream), taking down ALL nebula-routed services. The gateway nginx is a `subPath` configmap mount → needs a pod restart to reload (which re-handshakes the nebula tunnel; watchdog/route-fixer auto-recover). Touch those shared gateway configs additively and carefully. See `homelab-talos/claudedocs/nebula-production-to-homelab-routing.md`.
-- **Auth model (0.7.37):** clawgate has NO human auth of its own anymore — the machine **hook token** gates `/api/send` + `/api/tasks` + the `/api/response/{id}` poll; everything else (UI, `/ui/*`) is OPEN behind **Authelia passkey** (public, `login.zacx.dev`) or directly reachable on the **trusted LAN**. There is no session cookie, magic-link, or Traefik basic-auth. The hook never has a cookie; the UI never calls `/api/response/{id}`.
+## 🔴 gotchas (do not relearn the hard way)
+- **homelab-talos is GitOps from `trunk` and its working tree is permanently messy** — committing =
+  deploying live. ALWAYS stage explicit clawgate paths, never `git add -A`, and commit/build from a
+  dedicated worktree off `origin/trunk` (see "deploy a new version").
+- **Public routing rule**: clawgate runs on the WORKBENCH cluster but is fronted by the homelab +
+  production nebula gateways. The homelab gateway nginx block must `proxy_pass` to the workbench
+  **NodePort IP `http://192.168.50.250:30302`**, NOT a `.svc.cluster.local` name — a cross-cluster
+  DNS name doesn't resolve there and **crashes nginx** (`emerg: host not found in upstream`),
+  **taking down ALL nebula-routed services**. The gateway nginx is a `subPath` configmap mount →
+  needs a pod restart to reload (which re-handshakes the nebula tunnel; watchdog/route-fixer
+  auto-recover). Touch those shared gateway configs additively and carefully. See
+  `homelab-talos/claudedocs/nebula-production-to-homelab-routing.md`.
+- **WS/SSE over the public route** lives in the nebula gateway nginx on **both** homelab and
+  production — restart the `nebula-gateway` DaemonSet on both after editing
+  (`reference/architecture.md`).
+- **The vendored kubeclaw chart is embedded at BUILD time** — a kubeclaw release doesn't reach
+  clawgate-provisioned agents until `make sync-chart` + rebuild + redeploy clawgate. ⚠ vendored is
+  0.7.0 vs kubeclaw 0.7.1 → a re-sync is **PENDING**.
+- **Alloy has no auto-reloader** — if clawgate metrics vanish from homelab Prometheus, restart it
+  first (`reference/telemetry.md`).
+- **Red GitHub Actions checks on `homelab-infra` are NOISE** (billing-blocked repo-wide). The real
+  gate is the Tekton `clawgate-ci` pipeline — see the `tekton` skill before touching CI.
