@@ -33,6 +33,8 @@ ops) · **interactive** (click/type/submit/upload) · **diagnostic** (you must S
 screenshot, or hit-test paint order) · **secret** — agent-read pages go to
 **OpenRouter/DeepSeek**: never banking, private mail, credential managers, or
 anything you wouldn't hand a third party. Nor **virtualised/lazy-loaded lists**.
+Lightweight metadata reads (page URL, domain, title, tabId) via `context` are
+cheaper than `text`/`html` and never touch the DOM.
 
 SEE the page → drive. KNOW something from it → agent. Ambiguous → agent first;
 taking over costs ~200 tokens, so agent-first wins even at a low success rate.
@@ -62,13 +64,14 @@ Result payloads land under `.result.data`.
 | `whoami` | **read-only identity** (global; no `--instance`/`--tab`) — host label (`laptop`/`workbench`), connected instances (active-tab **domain** only), bridge diagnostics + `extension_version_current` |
 | `health` | connected instances + count, each with an explicit `extension_stale` verdict (`true`/`false`; `null` = undecidable) vs `extension_version_current` |
 | `ping` | **which extension build+dir is loaded?** → `{pong,extensionVersion,id,ops}`; older build → `unknown_op`. The only deterministic answer after a ↻ reload |
+| `context` | **page metadata** (no DOM read) — `{url, domain, path, searchParams, title, tabId}`. Tab-scoped (needs an active/owned tab). No required fields |
 | `instances` | connected instances as JSON (key, label, instanceId, active-tab url/title) |
 | `open [url]` | open a NEW tab this session owns (default `about:blank`, **created in the BACKGROUND/hidden**), returns `tabId`. Idempotent. Use for multi-step work |
 | `close` / `release` | close this session's owned tab / drop ownership without closing it |
 | `tabs` | list open tabs (`.data.ownedTabId` flags yours) |
 | `nav <url>` | navigate the owned/active tab |
-| `text [selector] [--max-bytes N]` | **cheap read** — visible `innerText` (optional CSS selector), whitespace-normalized, byte-capped (default 32768; `0`=uncapped; truncation appends a note + sets `truncated`). ~98% smaller than `html` — **prefer it** |
-| `html [--max-bytes N]` | `outerHTML`, same byte cap. One uncapped `html` on a heavy SPA is ~100K tokens — the cap is ON by default |
+| `text [selector] [--max-bytes N] [--annotated]` | **cheap read** — visible `innerText` (optional CSS selector), whitespace-normalized, byte-capped (default 32768; `0`=uncapped; truncation appends a note + sets `truncated`). ~98% smaller than `html` — **prefer it**. Envelope includes `{url, title, domain, path, searchParams, tabId, text, truncated, visibilityState, hidden?, note?}`. `--annotated` returns structured element extraction instead of flat text: each element has `{text, path, tag, attrs, precedingText, followingText}` where `attrs` includes `id`, `class`, `href`, `src`, `alt`, `title`, `name`, `placeholder`, `type`, `role`, `aria-label`, `data-testid`, `data-cy`, `data-e2e`. Byte-capped. Not supported with `--frame` (returns `annotated_with_frame_unsupported`) |
+| `html [--max-bytes N]` | `outerHTML`, same byte cap. One uncapped `html` on a heavy SPA is ~100K tokens — the cap is ON by default. Envelope includes `{url, title, domain, path, searchParams, tabId, html, truncated, visibilityState, hidden?, note?}` |
 | `js '<expr>'` (alias: `eval`) | run JS in the tab, return its value. Same op on the wire either way. **Prefer `js` in a worktree-isolated agent** — Claude Code's isolation guard refuses any command containing the literal token `eval` (it matches the WORD, not the behaviour: this ships JS over loopback to Brave and touches no filesystem) |
 | `screenshot [path] [--fullpage] [--data-url]` | CDP capture — **works on a BACKGROUND/occluded tab**. **Always writes a `.png`** (to `path`, else a mode-0600 temp auto-pruned after 24h) and prints `{ok,path,bytes,url,via}`; the base64 is **NEVER** printed (it cost 133K–890K tokens/call) — **`Read` the `.png`**. `--data-url` is the escape hatch |
 | `frames` | list the tab's frames (`frameId`/`url`/`parentFrameId`) **including cross-origin OOPIFs** — pick a numeric `frameId` for `--frame` |
@@ -138,7 +141,7 @@ exact path; only `SKILL.md` + the `browser` CLI are symlinked into
 | file | load it when… |
 |---|---|
 | `reference/spa-wake.md` | a read came back empty/half-built, `data.hidden:true`, an SPA is stuck "Loading…", or you're about to call a site broken |
-| `reference/errors.md` | any op returned an error string you don't recognise; `unknown_op`; a reload ↻ didn't take |
+| `reference/errors.md` | any op returned an error string you don't recognise; `unknown_op`; `annotated_with_frame_unsupported`; a reload ↻ didn't take |
 | `reference/frames-cdp.md` | `frame_not_found` / `ambiguous_frame` / `oopif_*_cap` / `cdp_attach_refused`; a `--frame` read returned the TOP page; you need to read or drive inside a cross-origin iframe; the debugger banner |
 | `reference/tabs-instances.md` | `ambiguous_instance` / `unknown_instance` / `superseded` / `no_owned_tab` / `owned_tab_gone`; two drivers fighting over one tab; multi-profile or multi-subagent workflows |
 | `reference/css-hit-test.md` | an element is present but invisible/unclickable/painted under something; a `z-index` change "does nothing"; a `data-testid` selector matches NOTHING on a prod page |

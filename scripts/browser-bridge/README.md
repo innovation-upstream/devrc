@@ -205,8 +205,9 @@ has not been exercised against a third-party authenticated API beyond that.)
 
 | op | maps to | returns |
 |----|---------|---------|
-| `getHtml`    | `chrome.scripting` → `document.documentElement.outerHTML`, byte-capped CLI-side (`maxBytes`, default 32768, `0`=uncapped) | `{url,title,html,truncated?,visibilityState,hidden?,note?}` |
-| `text`       | `chrome.scripting` → `(selector?document.querySelector(selector):document.body).innerText`, normalized + byte-capped (`selector`/`maxBytes` optional) | `{url,title,text,truncated,visibilityState,hidden?,note?}` |
+| `getHtml`    | `chrome.scripting` → `document.documentElement.outerHTML`, byte-capped CLI-side (`maxBytes`, default 32768, `0`=uncapped) | `{url,title,domain,path,searchParams,tabId,html,truncated?,visibilityState,hidden?,note?}` |
+| `text`       | `chrome.scripting` → `(selector?document.querySelector(selector):document.body).innerText`, normalized + byte-capped (`selector`/`maxBytes` optional); `--annotated` returns structured element extraction (`{text, path, tag, attrs, precedingText, followingText}`) | `{url,title,domain,path,searchParams,tabId,text,truncated,visibilityState,hidden?,note?}` |
+| `context`    | **page metadata without DOM read** — `{url, domain, path, searchParams, title, tabId}`. Tab-scoped, no required fields | `{url,domain,path,searchParams,title,tabId}` |
 | `eval`       | top frame: `chrome.scripting.executeScript` (MAIN world) of `js`; **`--frame`: CDP `Runtime.evaluate`** in the frame's context (same-process isolated world OR OOPIF flat session) — chrome.scripting can't eval a STRING | `{url,value,frame?,visibilityState,hidden?,note?}` |
 | `tabs`       | `chrome.tabs.query({})`                                   | `{tabs:[...],ownedTabId}` |
 | `nav`        | `chrome.tabs.update(tab,{url})`                           | `{tabId,url}` |
@@ -250,7 +251,7 @@ match failing `ambiguous_frame`. See the CDP section below. `screenshot`,
 `eval --frame`, and TOP-frame trusted input use **CDP (chrome.debugger)** (see the CDP
 section below). A `--frame` op reports the FRAME's own `url` (so a caller can confirm it
 read the intended frame, not the top document). The tab-scoped ops
-(`getHtml`/`text`/`eval`/`nav`/`screenshot`/`close`/`frames`/`click`/`type`/`key`/`wake`/`activate`/`emulate`)
+(`getHtml`/`text`/`eval`/`nav`/`screenshot`/`close`/`frames`/`click`/`type`/`key`/`wake`/`activate`/`emulate`/`context`)
 run against
 the calling session's owned tab when it has one (see Session isolation), else the
 active tab. `text` is the **cheap read**: it returns visible `innerText` (~KB)
@@ -258,6 +259,22 @@ rather than full `outerHTML` (~100s of KB) — the read the opencode browser-age
 uses. The `text` whitespace-normalization + byte-cap live in
 `extension/protocol.js` (`normalizeText`, unit-tested); a `--max-bytes` cap
 (default 32 KB, `0`=uncapped) truncates with a `…[truncated N bytes]` note.
+
+**`text --annotated`** returns structured element extraction instead of flat
+`innerText`. Each element has `{text, path, tag, attrs, precedingText, followingText}`
+where `attrs` includes `id`, `class`, `href`, `src`, `alt`, `title`, `name`,
+`placeholder`, `type`, `role`, `aria-label`, `data-testid`, `data-cy`, `data-e2e`.
+Byte-capped. **Not supported with `--frame`** — returns
+`annotated_with_frame_unsupported`.
+
+**`context`** returns page metadata without reading the DOM: `{url, domain, path,
+searchParams, title, tabId}`. No required fields. Tab-scoped (needs an active/owned
+tab). Useful for cheap page identification without incurring a DOM read.
+
+**Enriched envelope fields.** Every `text` and `html` result now includes `domain`,
+`path`, `searchParams`, and `tabId` alongside the existing `url` and `title` fields.
+These are additive and backward-compatible — callers that only read `url`/`title` are
+unchanged.
 
 ### CLI output discipline (`screenshot`, `html`) and the `js` alias
 

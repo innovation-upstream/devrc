@@ -51,6 +51,9 @@ should strand you.
 - `401 unauthorized` → token mismatch (re-paste in the extension options).
 - `wake_with_frame_unsupported` → `--wake` was combined with `--frame`. Run
   `browser wake`, then the frame read (`~/workspace/devrc/scripts/browser-bridge/reference/spa-wake.md`).
+- `annotated_with_frame_unsupported` → `--annotated` was combined with `--frame`.
+  Structured element extraction is not supported inside iframes. Use `text` without
+  `--annotated` for a frame read, or run `text --annotated` on the top frame.
 - `frame_not_found:<url> cascade[…]` / `frame_eval_failed:<reason>` /
   `ambiguous_frame:<n>` / `oopif_depth_cap:5` / `oopif_target_cap:50` →
   `~/workspace/devrc/scripts/browser-bridge/reference/frames-cdp.md`.

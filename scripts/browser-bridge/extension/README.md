@@ -170,8 +170,8 @@ come back).
    (`work` / `personal` — must be unique per profile), **Save**.
 8. Verify from a shell — this is the whole point of the change:
    ```bash
-   browser --instance <label> ping   # → {"pong":true,"extensionVersion":"0.6.0",
-                                     #     "id":"<ext-id>","ops":[…,"ping","emulate"]}
+    browser --instance <label> ping   # → {"pong":true,"extensionVersion":"0.7.0",
+                                      #     "id":"<ext-id>","ops":[…,"ping","context"]}
    browser whoami                    # → that instance: extension_stale:false
                                      #    + extension_id, and
                                      #    bridge.extension_dir_expected
@@ -384,6 +384,13 @@ The chrome.* glue needs a real browser — verify by hand after loading:
 - [ ] `browser html` on a logged-in tab returns markup containing logged-in-only
       content (proves the live authenticated session).
 - [ ] `browser eval 'document.title'` returns the active tab's title.
+- [ ] `browser context` returns `{url, domain, path, searchParams, title, tabId}` without
+      touching the DOM.
+- [ ] `browser text` and `browser html` envelopes include `domain`, `path`,
+      `searchParams`, and `tabId` alongside `url` and `title`.
+- [ ] `browser text --annotated` on a page with links returns structured elements with
+      `{text, path, tag, attrs, precedingText, followingText}`.
+- [ ] `browser text --annotated --frame <id>` returns `annotated_with_frame_unsupported`.
 - [ ] `browser tabs` lists your open tabs.
 - [ ] `browser nav https://example.com` navigates the active tab.
 - [ ] `browser screenshot /tmp/shot.png` writes a real PNG of the visible tab.
