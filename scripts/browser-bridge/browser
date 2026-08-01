@@ -288,6 +288,19 @@ case "${1:-}" in
   ""|-h|--help|help) grep -E '^#( |$)' "$0" | sed -E 's/^# ?//'; exit 0 ;;
 esac
 
+# The complete subcommand list, in ONE place: it both VALIDATES the subcommand
+# here (before the token read — a typo must not be reported as a missing token)
+# and supplies the text of the unknown-subcommand error. Keeping it single-source
+# is why this is a variable rather than a second hand-maintained list.
+SUBCOMMANDS="health whoami ping instances open close release wake emulate activate html text js eval tabs nav screenshot frames click type key upload agent"
+_sub_known=0
+for _s in $SUBCOMMANDS; do
+  # A literal string compare, NOT a `case` glob — a subcommand like `*` would
+  # otherwise pattern-match its way past this check.
+  if [ "$_s" = "${1:-}" ]; then _sub_known=1; break; fi
+done
+[ "$_sub_known" -eq 1 ] || die "unknown subcommand: ${1:-} (try: $SUBCOMMANDS)"
+
 SESSION_ID="$(derive_session_id)"
 
 [ -r "$TOKEN_FILE" ] || die "token file not found/readable: $TOKEN_FILE (is the browser-bridge service running?)"
@@ -1194,6 +1207,10 @@ else:
   # ""|-h|--help|help is handled EARLIER (above the token-file read) so that
   # printing usage never requires a token. Nothing reaches this case for it.
   *)
-    die "unknown subcommand: $sub (try: health whoami ping instances open close release wake emulate activate html text js eval tabs nav screenshot frames click type key upload agent)"
+    # BACKSTOP: unreachable while $SUBCOMMANDS matches the arms above (the
+    # pre-token validation already rejected anything unknown). Kept so that a
+    # subcommand added to the list but not to this case fails loudly here rather
+    # than falling through silently.
+    die "unknown subcommand: $sub (try: $SUBCOMMANDS)"
     ;;
 esac

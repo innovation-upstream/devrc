@@ -349,6 +349,41 @@ def test_help_does_not_require_a_token_file(tmp_path):
         assert "token file" not in cp.stderr, args
 
 
+def test_an_unknown_subcommand_is_reported_as_such_without_a_token(tmp_path):
+    """A typo must not be reported as a missing token. This is what still failed
+    the hermetic gate after the --help fix: `browser bogus-op` in a sandbox with
+    no ~/.config died with "token file not found/readable"."""
+    env = dict(os.environ,
+               BROWSER_BRIDGE_TOKEN_FILE=str(tmp_path / "absent"))
+    cp = subprocess.run(["bash", str(CLI), "bogus-op"], env=env,
+                        capture_output=True, text=True, timeout=60)
+    assert cp.returncode != 0
+    assert "unknown subcommand: bogus-op" in cp.stderr
+    assert "token file" not in cp.stderr
+    assert " js " in cp.stderr and " eval " in cp.stderr
+
+
+def test_a_glob_subcommand_cannot_pattern_match_past_the_validation(tmp_path):
+    """The validation compares literally rather than via `case`, so `*` is an
+    unknown subcommand and not a wildcard that matches every known one."""
+    env = dict(os.environ,
+               BROWSER_BRIDGE_TOKEN_FILE=str(tmp_path / "absent"))
+    for bogus in ("*", "?ealth", "[hw]ealth"):
+        cp = subprocess.run(["bash", str(CLI), bogus], env=env,
+                            capture_output=True, text=True, timeout=60)
+        assert cp.returncode != 0, bogus
+        assert f"unknown subcommand: {bogus}" in cp.stderr, cp.stderr
+
+
+def test_a_real_subcommand_still_requires_a_token(tmp_path):
+    """The validation must not have moved the token check off the real path."""
+    env = dict(os.environ,
+               BROWSER_BRIDGE_TOKEN_FILE=str(tmp_path / "absent"))
+    cp = subprocess.run(["bash", str(CLI), "health"], env=env,
+                        capture_output=True, text=True, timeout=60)
+    assert cp.returncode != 0 and "token file not found" in cp.stderr
+
+
 def test_help_documents_the_end_of_flags_separator_generally(tmp_path):
     """`--` semantics changed for six subcommands, so the doc entry must not live
     only under `js`."""
