@@ -140,7 +140,7 @@ exact path — only `SKILL.md` and the `browser` CLI are symlinked into
 | `reference/frames-cdp.md` | `frame_not_found` / `ambiguous_frame` / `oopif_*_cap` / `cdp_attach_refused`; a `--frame` read returned the TOP page; you need to read or drive inside a cross-origin iframe; the debugger banner |
 | `reference/tabs-instances.md` | `ambiguous_instance` / `unknown_instance` / `superseded` / `no_owned_tab` / `owned_tab_gone`; two drivers fighting over one tab; multi-profile or multi-subagent workflows |
 | `reference/css-hit-test.md` | an element is present but invisible/unclickable/painted under something; a `z-index` change "does nothing"; a `data-testid` selector matches NOTHING on a prod page |
-| `reference/emulation.md` | `emulate`: presets, raw overrides, `not_owned_tab`, `unknown_preset:*` |
+| `reference/emulation.md` | `emulate` BEFORE `nav` (else no touch API); presets, overrides, errors |
 | `reference/agent.md` | running `browser agent` — flags, guardrails, prereqs; it returned `blocked`; `op_not_allowed` / `nav_scheme_denied` |
 | `reference/security-ops.md` | 🔴 **you are MODIFYING browser-bridge** (the live-verify-on-real-Brave gate is mandatory); the user asks whether/what it records; first-time setup or a second profile |
 | `reference/x-fallback.md` | CDP `screenshot` is unsatisfactory and you must capture the raw X window (`DISPLAY`/`XAUTHORITY`, xdotool/maim) |

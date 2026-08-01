@@ -78,7 +78,7 @@ print(json.dumps({"answer": sys.argv[1], "evidence": [],
 }
 
 # --- parse args -------------------------------------------------------------- #
-GOAL=""; INSTANCE=""; ALLOW=""; DENY=""; STEPS=12; TIMEOUT=120; DRYRUN=0
+GOAL=""; GOAL_SEEN=0; INSTANCE=""; ALLOW=""; DENY=""; STEPS=12; TIMEOUT=120; DRYRUN=0
 _csv_to_ws() { printf '%s' "$1" | tr ',' ' '; }
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -94,9 +94,19 @@ while [ $# -gt 0 ]; do
     --timeout=*) TIMEOUT="${1#--timeout=}" ;;
     --dry-run) DRYRUN=1 ;;
     -h|--help) grep -E '^#( |$)' "$0" | sed -E 's/^# ?//'; exit 0 ;;
-    --) shift; [ $# -ge 1 ] && GOAL="$1"; break ;;
+    # `--` ends the flags: everything after it is the goal, even if it starts with
+    # `-`. It used to take only the FIRST remaining arg and silently DROP the rest
+    # (`browser agent -- g1 g2` ran with goal "g1"), the same drop-after-`--` shape
+    # fixed in the `browser` CLI's nine loops. GOAL_SEEN (not [ -z "$GOAL" ]) so an
+    # empty first goal cannot be silently overwritten by a second.
+    --) shift
+        while [ $# -gt 0 ]; do
+          [ "$GOAL_SEEN" -eq 0 ] || die "only one goal is accepted (got extra: $1)"
+          GOAL="$1"; GOAL_SEEN=1; shift
+        done
+        break ;;
     -*) die "unknown flag: $1" ;;
-    *) [ -z "$GOAL" ] || die "only one goal is accepted (got extra: $1)"; GOAL="$1" ;;
+    *) [ "$GOAL_SEEN" -eq 0 ] || die "only one goal is accepted (got extra: $1)"; GOAL="$1"; GOAL_SEEN=1 ;;
   esac
   shift
 done

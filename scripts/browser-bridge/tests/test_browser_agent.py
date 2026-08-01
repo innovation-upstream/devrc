@@ -347,6 +347,33 @@ def test_goal_required(rig):
     assert _browser_calls(rig.frb_log) == []          # no tab opened
 
 
+def test_a_second_goal_after_the_separator_is_rejected_not_dropped(rig):
+    """`--` used to take only the FIRST remaining arg and silently DROP the rest,
+    so `browser agent -- g1 g2` ran with goal "g1" and never said so — the same
+    drop-after-`--` shape fixed in the `browser` CLI's nine loops."""
+    r = rig.run(["--", "goal one", "goal two"])
+    assert r.returncode == 2
+    assert "only one goal" in r.stderr.lower()
+    assert _browser_calls(rig.frb_log) == []          # no tab opened
+
+
+def test_an_empty_first_goal_is_not_silently_overwritten(rig):
+    """GOAL_SEEN, not `[ -z "$GOAL" ]`: an empty first goal must still occupy the
+    slot rather than being overwritten by the next arg."""
+    r = rig.run(["--", "", "sneaky second"])
+    assert r.returncode == 2
+    assert "only one goal" in r.stderr.lower()
+    assert _browser_calls(rig.frb_log) == []
+
+
+def test_a_goal_beginning_with_a_dash_is_reachable_via_the_separator(rig):
+    """The point of keeping `--`: a goal that looks like a flag still parses. It
+    gets past arg-parsing (no "unknown flag"), which is all this asserts."""
+    r = rig.run(["--", "--not-a-flag"])
+    assert "unknown flag" not in r.stderr.lower()
+    assert "goal is required" not in r.stderr.lower()
+
+
 def test_bad_steps_rejected(rig):
     r = rig.run(["do a thing", "--steps", "abc"])
     assert r.returncode == 2

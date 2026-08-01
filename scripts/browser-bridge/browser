@@ -134,7 +134,9 @@
 #                               read; optional CSS selector; --max-bytes N caps
 #                               the returned text, default 32768, 0 = uncapped).
 #                               --wake as for `html`
-#   browser js '<js>'         — run JS in the owned/active tab, return its value.
+#   browser js '<js>' [--wake[=MS]]
+#                             — run JS in the owned/active tab, return its value.
+#                               FLAG ORDER IS FREE (see "End of flags" below).
 #                               ALIAS of `browser eval` (identical semantics/flags,
 #                               and the wire op is `eval` either way). PREFER `js`
 #                               in a worktree-isolated agent: Claude Code's isolation
@@ -179,6 +181,24 @@
 #   browser agent "<goal>"    — run the autonomous opencode browser-agent in its
 #                               OWN isolated tab against <goal> (see browser-agent)
 #   browser --print-session-id — print the derived per-session id and exit
+#
+# FLAG ORDER / END OF FLAGS
+#   A subcommand's flags may appear BEFORE or AFTER its positional — the two are
+#   the same command. `js --wake '<expr>'` and `js '<expr>' --wake` are identical,
+#   as are `text --max-bytes 64 'h1'` and `text 'h1' --max-bytes 64`.
+#   (`js`/`eval` did NOT honour this before 2026-08-01: it read the positional
+#   before its flags, so a leading --wake was swallowed AS the JS expression.)
+#
+#   `--` ends the flags: every argument after it is positional, even one starting
+#   with `-`. Use it whenever a value could be mistaken for a flag:
+#       browser js -- '-1+2'          browser text -- '-webkit-any'
+#       browser type -- '--force'     browser screenshot -- -weird-name.png
+#   Subcommands taking NO positional (html/wake/activate) reject anything after
+#   `--`; subcommands taking one (js/eval, text, screenshot, type, key, emulate)
+#   accept exactly one, and a SECOND is an error rather than overwriting the
+#   first — including when the first is the empty string.
+#   `nav`/`open`/`click`/`upload` take no flags at all, so their positionals stay
+#   bare and need no `--` (a `-`-leading selector or path just works).
 #
 # Global flags (before the subcommand): --instance <key>, --tab <id>,
 #   --frame <frameId|url-substring> (route a read/click INTO a cross-origin frame).
@@ -257,6 +277,29 @@ while [ $# -gt 0 ]; do
     *) break ;;
   esac
 done
+
+# --help BEFORE the token check. `-h`/`--help`/`help`/no-args reach neither the
+# server nor the token file, so requiring a token to print usage was pure
+# friction — and it FAILED the hermetic nix gate, where no ~/.config exists
+# (measured at 69f5334: test_browser_cli_help_lists_js_alias_and_screenshot_data_url
+# → "token file not found/readable"). Dispatched here rather than in the `case`
+# below, which runs after the token is read.
+case "${1:-}" in
+  ""|-h|--help|help) grep -E '^#( |$)' "$0" | sed -E 's/^# ?//'; exit 0 ;;
+esac
+
+# The complete subcommand list, in ONE place: it both VALIDATES the subcommand
+# here (before the token read — a typo must not be reported as a missing token)
+# and supplies the text of the unknown-subcommand error. Keeping it single-source
+# is why this is a variable rather than a second hand-maintained list.
+SUBCOMMANDS="health whoami ping instances open close release wake emulate activate html text js eval tabs nav screenshot frames click type key upload agent"
+_sub_known=0
+for _s in $SUBCOMMANDS; do
+  # A literal string compare, NOT a `case` glob — a subcommand like `*` would
+  # otherwise pattern-match its way past this check.
+  if [ "$_s" = "${1:-}" ]; then _sub_known=1; break; fi
+done
+[ "$_sub_known" -eq 1 ] || die "unknown subcommand: ${1:-} (try: $SUBCOMMANDS)"
 
 SESSION_ID="$(derive_session_id)"
 
@@ -545,6 +588,44 @@ cmd_op() {
 # JSON-escape a string via python (available everywhere here; avoids jq dep).
 json_str() { python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "$1"; }
 
+# --------------------------------------------------------------------------- #
+# "At most one positional" — ONE RULE, ONE PLACE.
+#
+# Six subcommands (js/eval, text, screenshot, type, key, emulate) each accept
+# flags plus AT MOST ONE positional. That rule used to be open-coded per
+# subcommand as `[ -z "$var" ] || die …`, which is WRONG for an empty positional:
+# `""` is falsy, so a second positional silently OVERWRITES the first and goes on
+# the wire with exit 0 — the same wrong-value-on-the-wire class this file's
+# flag-order fix exists to eliminate. Measured before consolidation:
+#
+#   browser type -- '' SECOND   → rc 0, {"op":"type","text":"SECOND"}   ✗
+#   browser text -- '' '#b'     → rc 0, {"selector":"#b"}               ✗
+#
+# Tracking "a positional was SEEN" (not "the variable is non-empty") is the fix.
+# It lives HERE rather than being repeated with a `<sub>_seen` flag six ways,
+# because six copies of one predicate is how a divergent seventh behaviour grows
+# back — which is exactly how this bug reached five call sites in the first place.
+#
+# Contract: a flag loop sets POS="" / POS_SEEN=0 before parsing, calls pos_add in
+# its `*)` arm and pos_rest in its `--` arm, then reads POS / POS_SEEN after.
+# POS_SEEN answers "was one given at all?"; POS is its (possibly empty) value.
+POS=""; POS_SEEN=0
+
+# pos_add LABEL VALUE — record ONE positional, or die naming LABEL.
+pos_add() {
+  [ "$POS_SEEN" -eq 0 ] || die "browser $1 (got extra: $2)"
+  POS="$2"; POS_SEEN=1
+}
+
+# pos_rest LABEL "$@" — everything after `--` is positional, even if it starts
+# with `-`. Routed through pos_add so the one-positional rule cannot diverge
+# between the `*)` arm and the `--` arm (it previously did: `--` silently DROPPED
+# the remainder in all nine loops that had it).
+pos_rest() {
+  local label="$1"; shift
+  while [ $# -gt 0 ]; do pos_add "$label" "$1"; shift; done
+}
+
 sub="${1:-}"; shift || true
 case "$sub" in
   health)
@@ -583,6 +664,11 @@ case "$sub" in
     # Optional url; default about:blank. Records this session's owned tab.
     if [ $# -ge 1 ]; then
       url="$(json_str "$1")"
+      shift
+      # `open` takes NO flags, so it keeps a bare positional (a URL can never be
+      # confused for a flag). But an extra arg used to be SILENTLY DROPPED — the
+      # same failure mode as the `js` flag-order bug, one step quieter. Reject it.
+      [ $# -eq 0 ] || die "browser open takes at most one url (got extra: $1)"
       cmd_op open "\"url\":${url}" | pretty
     else
       cmd_op open | pretty
@@ -611,7 +697,7 @@ case "$sub" in
         --wait) shift; [ $# -ge 1 ] || die "usage: browser wake [--wait MS]"; wait="$1"; shift ;;
         --wait=*) wait="${1#--wait=}"; shift ;;
         --no-wait) wait="0"; shift ;;
-        --) shift; break ;;
+        --) shift; [ $# -eq 0 ] || die "browser wake takes no positional args (got: $1)"; break ;;
         -*) die "browser wake: unknown flag: $1 (try: --wait MS | --no-wait)" ;;
         *) die "browser wake takes no positional args (got: $1)" ;;
       esac
@@ -651,7 +737,7 @@ case "$sub" in
     # lists are identical, so this cannot silently drift — see
     # tests/emulation.test.mjs "CLI preset list matches PRESET_NAMES".
     # PRESET_NAMES: iphone-15 iphone-se pixel-8 ipad-mini ipad-mini-2019 galaxy-s24
-    emu_device=""; emu_reset=0; emu_list=0
+    POS=""; POS_SEEN=0; emu_device=""; emu_reset=0; emu_list=0
     emu_width=""; emu_height=""; emu_dsf=""; emu_mobile=""; emu_touch=""
     emu_mtp=""; emu_ua=""; emu_orient=""; emu_cs=""; emu_geo=""; emu_tz=""
     while [ $# -gt 0 ]; do
@@ -680,12 +766,12 @@ case "$sub" in
         --geo=*) emu_geo="${1#--geo=}"; shift ;;
         --tz) shift; [ $# -ge 1 ] || die "--tz needs an IANA zone (e.g. Europe/London)"; emu_tz="$1"; shift ;;
         --tz=*) emu_tz="${1#--tz=}"; shift ;;
-        --) shift; break ;;
-        -*) die "browser emulate: unknown flag: $1 (try: <preset> | --width N --height N [--dsf F] [--mobile] [--touch] [--ua S] [--orientation portrait|landscape] [--color-scheme light|dark] [--geo LAT,LON] [--tz ZONE] | --reset | --list)" ;;
-        *) [ -z "$emu_device" ] || die "browser emulate takes at most one preset name (got extra: $1)"
-           emu_device="$1"; shift ;;
+        --) shift; pos_rest "emulate takes at most one preset name" "$@"; break ;;
+        -*) die "browser emulate: unknown flag: $1 (use '--' before a preset name starting with '-'; try: <preset> | --width N --height N [--dsf F] [--mobile] [--touch] [--ua S] [--orientation portrait|landscape] [--color-scheme light|dark] [--geo LAT,LON] [--tz ZONE] | --reset | --list)" ;;
+        *) pos_add "emulate takes at most one preset name" "$1"; shift ;;
       esac
     done
+    emu_device="$POS"
     if [ "$emu_list" -eq 1 ]; then
       printf '%s\n' "device presets (metrics: scripts/browser-bridge/reference/emulation.md):"
       printf '  %s\n' iphone-15 iphone-se pixel-8 ipad-mini ipad-mini-2019 galaxy-s24
@@ -774,7 +860,7 @@ sys.stdout.write(json.dumps(fields)[1:-1])
         --wait) shift; [ $# -ge 1 ] || die "usage: browser activate [--wait MS]"; wait="$1"; shift ;;
         --wait=*) wait="${1#--wait=}"; shift ;;
         --no-wait) wait="0"; shift ;;
-        --) shift; break ;;
+        --) shift; [ $# -eq 0 ] || die "browser activate takes no positional args (got: $1)"; break ;;
         -*) die "browser activate: unknown flag: $1 (try: --wait MS | --no-wait)" ;;
         *) die "browser activate takes no positional args (got: $1)" ;;
       esac
@@ -808,7 +894,7 @@ sys.stdout.write(json.dumps(fields)[1:-1])
         --wake=*) wake=1; wakewait="${1#--wake=}";
           case "$wakewait" in (*[!0-9]*|"") die "--wake=MS must be a non-negative integer of ms (got: $wakewait)";; esac
           shift ;;
-        --) shift; break ;;
+        --) shift; [ $# -eq 0 ] || die "browser html takes no positional args (got: $1)"; break ;;
         -*) die "browser html: unknown flag: $1 (try: --max-bytes N | --wake[=MS])" ;;
         *) die "browser html takes no positional args (got: $1)" ;;
       esac
@@ -824,7 +910,7 @@ sys.stdout.write(json.dumps(fields)[1:-1])
     # passed to the extension, which normalizes + byte-caps the text.
     # --wake routes this one read through CDP with the un-throttle applied in the
     # same session (see `browser html` / `browser wake`).
-    sel=""; maxb=32768; wake=""; wakewait=""
+    POS=""; POS_SEEN=0; maxb=32768; wake=""; wakewait=""
     while [ $# -gt 0 ]; do
       case "$1" in
         --max-bytes) shift; [ $# -ge 1 ] || die "usage: browser text [selector] [--max-bytes N]"; maxb="$1"; shift ;;
@@ -833,11 +919,12 @@ sys.stdout.write(json.dumps(fields)[1:-1])
         --wake=*) wake=1; wakewait="${1#--wake=}";
           case "$wakewait" in (*[!0-9]*|"") die "--wake=MS must be a non-negative integer of ms (got: $wakewait)";; esac
           shift ;;
-        --) shift; break ;;
-        -*) die "browser text: unknown flag: $1" ;;
-        *) [ -z "$sel" ] || die "browser text takes at most one selector (got extra: $1)"; sel="$1"; shift ;;
+        --) shift; pos_rest "text takes at most one selector" "$@"; break ;;
+        -*) die "browser text: unknown flag: $1 (try: --max-bytes N | --wake[=MS]; use '--' before a selector starting with '-')" ;;
+        *) pos_add "text takes at most one selector" "$1"; shift ;;
       esac
     done
+    sel="$POS"
     case "$maxb" in (*[!0-9]*|"") die "--max-bytes must be a non-negative integer (got: $maxb)";; esac
     extra="\"maxBytes\":${maxb}$(wake_fields "$wake" "$wakewait")"
     if [ -n "$sel" ]; then extra="\"selector\":$(json_str "$sel"),${extra}"; fi
@@ -855,24 +942,36 @@ sys.stdout.write(json.dumps(fields)[1:-1])
     # un-deprecated (a deprecation warning would just re-introduce the token).
     # ⚠ The WIRE op stays `eval` for BOTH spellings — the extension only knows
     # `eval`, and this is a CLI-surface alias only.
-    [ $# -ge 1 ] || die "usage: browser js '<js>'   (or the identical: browser eval '<js>')"
-    js="$(json_str "$1")"
-    shift
     # --wake evaluates inside a woken (un-throttled, focus-untouched) CDP session —
     # the shape to use when the expression MEASURES live un-throttled state (rAF
     # ticks, a lazily-hydrating SPA) rather than reading persisted DOM.
-    wake=""; wakewait=""
+    #
+    # FLAG ORDER IS FREE (fixed after a live miss): the JS expression used to be
+    # taken as `$1` BEFORE this loop ran, so `browser js --wake '<expr>'` swallowed
+    # the literal string `--wake` as the JS and then rejected the real expression
+    # as "extra" — while `browser js '<expr>' --wake` worked. Both orders are the
+    # SAME command now (matching `text`, which was already order-free). This is not
+    # only a usability wart: the documented emulation verification probe is written
+    # flags-first, so following the docs produced a parse error that read as the
+    # feature being broken.
+    # An expression that legitimately STARTS with `-` (e.g. `-1+2`) is still
+    # rejected as an unknown flag — pass it after the `--` end-of-flags separator:
+    #   browser js -- '-1+2'
+    POS=""; POS_SEEN=0; wake=""; wakewait=""
     while [ $# -gt 0 ]; do
       case "$1" in
         --wake) wake=1; shift ;;
         --wake=*) wake=1; wakewait="${1#--wake=}";
           case "$wakewait" in (*[!0-9]*|"") die "--wake=MS must be a non-negative integer of ms (got: $wakewait)";; esac
           shift ;;
-        --) shift; break ;;
-        -*) die "browser js: unknown flag: $1 (try: --wake[=MS])" ;;
-        *) die "browser js takes exactly one JS argument (got extra: $1)" ;;
+        --) shift; pos_rest "js takes exactly one JS argument" "$@"; break ;;
+        -*) die "browser js: unknown flag: $1 (try: --wake[=MS]; use '--' before a JS expression starting with '-')" ;;
+        *) pos_add "js takes exactly one JS argument" "$1"; shift ;;
       esac
     done
+    # POS_SEEN (not [ -n "$POS" ]) so `browser js ''` keeps its old meaning.
+    [ "$POS_SEEN" -eq 1 ] || die "usage: browser js '<js>' [--wake[=MS]]   (or the identical: browser eval '<js>')"
+    js="$(json_str "$POS")"
     cmd_op eval "\"js\":${js}$(wake_fields "$wake" "$wakewait")" | pretty
     ;;
   tabs)
@@ -880,7 +979,18 @@ sys.stdout.write(json.dumps(fields)[1:-1])
     ;;
   nav)
     [ $# -ge 1 ] || die "usage: browser nav <url>"
-    url="$(json_str "$1")"
+    nav_url="$1"; url="$(json_str "$1")"; shift
+    # No flags on `nav` → the positional stays bare (a URL never looks like a
+    # flag). Extra args were silently dropped before; make that loud instead.
+    # When the FIRST arg looks like a flag, name THAT rather than the trailing
+    # url: `browser nav --wake <url>` is the flag-order confusion this file's
+    # other fix is about, and "got extra: <url>" points at the innocent arg.
+    if [ $# -ne 0 ]; then
+      case "$nav_url" in
+        -*) die "browser nav takes no flags — '$nav_url' was read as the url. Put the url first: browser nav '$1'" ;;
+        *)  die "browser nav takes exactly one url (got extra: $1)" ;;
+      esac
+    fi
     cmd_op nav "\"url\":${url}" | pretty
     ;;
   screenshot)
@@ -894,16 +1004,23 @@ sys.stdout.write(json.dumps(fields)[1:-1])
     # DEFAULT (no path) now writes the PNG to a temp file and prints a compact
     # JSON result carrying the PATH + metadata. `--data-url` is the explicit
     # escape hatch that restores the old raw-data-URL output.
-    full=""; out=""; dataurl=0
+    full=""; POS=""; POS_SEEN=0; dataurl=0
     while [ $# -gt 0 ]; do
       case "$1" in
         --fullpage) full="\"fullpage\":true"; shift ;;
         --data-url) dataurl=1; shift ;;
-        --) shift; break ;;
-        -*) die "browser screenshot: unknown flag: $1 (try: --fullpage, --data-url)" ;;
-        *) [ -z "$out" ] || die "browser screenshot takes at most one path (got extra: $1)"; out="$1"; shift ;;
+        --) shift; pos_rest "screenshot takes at most one path" "$@"; break ;;
+        -*) die "browser screenshot: unknown flag: $1 (try: --fullpage, --data-url; use '--' before a path starting with '-')" ;;
+        *) pos_add "screenshot takes at most one path" "$1"; shift ;;
       esac
     done
+    # An explicitly-given but EMPTY path is a usage error, not "write a temp file":
+    # POS_SEEN distinguishes `screenshot` from `screenshot -- ''`, and the latter
+    # would otherwise silently fall through to the temp-file branch.
+    if [ "$POS_SEEN" -eq 1 ] && [ -z "$POS" ]; then
+      die "browser screenshot: the path must not be empty"
+    fi
+    out="$POS"
     if [ "$dataurl" -eq 1 ] && [ -n "$out" ]; then
       die "browser screenshot: --data-url and an explicit path are mutually exclusive"
     fi
@@ -1013,23 +1130,27 @@ else:
     # browser [--frame <f>] click <selector> — click the element's center. Top frame:
     # TRUSTED CDP. Cross-origin --frame: SYNTHETIC click injected via chrome.scripting.
     [ $# -ge 1 ] || die "usage: browser [--frame <f>] click <css-selector>"
-    sel="$(json_str "$1")"
+    sel="$(json_str "$1")"; shift
+    # No flags on `click` → the selector stays bare (so a `-`-leading selector
+    # keeps working). Extra args were silently dropped before; make that loud.
+    [ $# -eq 0 ] || die "browser click takes exactly one css-selector (got extra: $1)"
     cmd_op click "\"selector\":${sel}" | pretty
     ;;
   type)
     # browser [--frame <f>] type <text> [--selector <sel>] — text input into the
     # focused element (or --selector first). Top frame: TRUSTED CDP. Cross-origin
     # --frame: SYNTHETIC input (set value + input/change) via chrome.scripting.
-    txt=""; tsel=""
+    POS=""; POS_SEEN=0; tsel=""
     while [ $# -gt 0 ]; do
       case "$1" in
         --selector) shift; [ $# -ge 1 ] || die "usage: browser type <text> [--selector <sel>]"; tsel="$1"; shift ;;
         --selector=*) tsel="${1#--selector=}"; shift ;;
-        --) shift; break ;;
-        -*) die "browser type: unknown flag: $1 (try: --selector <sel>)" ;;
-        *) [ -z "$txt" ] || die "browser type takes one text arg (got extra: $1)"; txt="$1"; shift ;;
+        --) shift; pos_rest "type takes one text arg" "$@"; break ;;
+        -*) die "browser type: unknown flag: $1 (try: --selector <sel>; use '--' before text starting with '-')" ;;
+        *) pos_add "type takes one text arg" "$1"; shift ;;
       esac
     done
+    txt="$POS"
     [ -n "$txt" ] || die "usage: browser [--frame <f>] type <text> [--selector <sel>]"
     extra="\"text\":$(json_str "$txt")"
     if [ -n "$tsel" ]; then extra="${extra},\"selector\":$(json_str "$tsel")"; fi
@@ -1038,16 +1159,17 @@ else:
   key)
     # browser [--frame <f>] key <Enter|Tab|Escape|Backspace|Delete|Arrow*|Home|End|Page*>
     #         [--selector <sel>] — dispatch one TRUSTED key to the focused element.
-    ksel=""; kname=""
+    ksel=""; POS=""; POS_SEEN=0
     while [ $# -gt 0 ]; do
       case "$1" in
         --selector) shift; [ $# -ge 1 ] || die "usage: browser key <name> [--selector <sel>]"; ksel="$1"; shift ;;
         --selector=*) ksel="${1#--selector=}"; shift ;;
-        --) shift; break ;;
-        -*) die "browser key: unknown flag: $1 (try: --selector <sel>)" ;;
-        *) [ -z "$kname" ] || die "browser key takes one key name (got extra: $1)"; kname="$1"; shift ;;
+        --) shift; pos_rest "key takes one key name" "$@"; break ;;
+        -*) die "browser key: unknown flag: $1 (try: --selector <sel>; use '--' before a key name starting with '-')" ;;
+        *) pos_add "key takes one key name" "$1"; shift ;;
       esac
     done
+    kname="$POS"
     [ -n "$kname" ] || die "usage: browser [--frame <f>] key <Enter|Tab|Escape|...> [--selector <sel>]"
     extra="\"key\":$(json_str "$kname")"
     if [ -n "$ksel" ]; then extra="${extra},\"selector\":$(json_str "$ksel")"; fi
@@ -1082,10 +1204,13 @@ else:
     aargs+=("$@")
     exec "$HERE/browser-agent" "${aargs[@]}"
     ;;
-  ""|-h|--help|help)
-    grep -E '^#( |$)' "$0" | sed -E 's/^# ?//'
-    ;;
+  # ""|-h|--help|help is handled EARLIER (above the token-file read) so that
+  # printing usage never requires a token. Nothing reaches this case for it.
   *)
-    die "unknown subcommand: $sub (try: health whoami ping instances open close release wake emulate activate html text js eval tabs nav screenshot frames click type key upload agent)"
+    # BACKSTOP: unreachable while $SUBCOMMANDS matches the arms above (the
+    # pre-token validation already rejected anything unknown). Kept so that a
+    # subcommand added to the list but not to this case fails loudly here rather
+    # than falling through silently.
+    die "unknown subcommand: $sub (try: $SUBCOMMANDS)"
     ;;
 esac
