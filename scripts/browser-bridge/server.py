@@ -285,9 +285,14 @@ HDR_EXT_VERSION = "X-Bridge-Ext-Version"
 # ~/.local/share/browser-bridge-ext/ load — both report the same manifest
 # version. Optional, exactly like HDR_EXT_VERSION (a build predating it simply
 # omits it → the field stays null). URL-encoded like the other identity headers.
-# ⚠ The path→id derivation is INFERRED from documented Chromium behaviour, not
-# measured; the server therefore only REPORTS the id, it never computes an
-# expected one (a wrong derivation would raise false stale alarms).
+# The path→id derivation is MEASURED (2026-08-01): sha256(absolute path), first
+# 32 hex chars, each nibble 0-f mapped to a-p, with NO per-profile component.
+# Scope: Brave/Chromium on both NixOS hosts, unpacked extensions, two paths.
+#     h = hashlib.sha256(path.encode()).hexdigest()[:32]
+#     ext_id = "".join(chr(ord("a") + int(c, 16)) for c in h)
+# The server nonetheless still only REPORTS the id and never computes an
+# expected one — turning this into a real path check is a behaviour change that
+# needs its own PR (see extension/README.md "The path→id derivation (MEASURED)").
 HDR_EXT_ID = "X-Bridge-Ext-Id"
 
 # Server-side bounds on EVERY extension-supplied /poll string. protocol.js
@@ -1775,11 +1780,15 @@ def make_handler(registry: Registry, token: str, cmd_timeout: float,
                     "extension_version_current": expected,
                     # The deploy directory Brave SHOULD have been pointed at.
                     # Reported so an operator can read it next to each instance's
-                    # path-derived `extension_id`. The server deliberately does
-                    # NOT compute an expected id from it: the path→id derivation
-                    # is INFERRED, not measured, and a wrong derivation would
-                    # raise false "wrong directory" alarms. Compare ids across
-                    # time (before/after a re-point), not against a guess.
+                    # path-derived `extension_id`. The path→id derivation is now
+                    # MEASURED (see HDR_EXT_ID) — sha256(path)[:32] with each
+                    # nibble mapped a-p — so an expected id COULD be computed
+                    # from this field, turning `extension_stale` into a real
+                    # path check instead of a version-string comparison. It is
+                    # deliberately not done here: that is a behaviour change
+                    # needing its own PR and review. Today: compare ids across
+                    # time (before/after a re-point), or against the value you
+                    # compute yourself from the target path.
                     "extension_dir_expected": str(_DEPLOYED_EXT_DIR),
                 },
                 "instances": insts,
