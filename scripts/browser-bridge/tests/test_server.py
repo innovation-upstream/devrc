@@ -980,10 +980,18 @@ def test_registry_deliver_unknown_id_false():
 
 def test_validate_command_contract():
     # The op set is the shared contract with extension/protocol.js.
+    #
+    # NOTE: equality between THIS list and protocol.js's is pinned separately and
+    # structurally by test_ping_op_set_mirrors_the_extension_protocol_js, which
+    # parses both real files. What this literal adds is a deliberate speed bump:
+    # adding an op has to be acknowledged in a second place. That is a weaker
+    # signal than the drift test — consider dropping it if it keeps costing a red
+    # `main` — but it is a live check today, so it gets updated, not deleted.
     assert set(S.ALLOWED_OPS) == {"getHtml", "text", "eval", "tabs", "nav",
                                   "screenshot", "open", "close",
                                   "frames", "click", "type", "key", "wake",
-                                  "activate", "upload", "ping", "emulate"}
+                                  "activate", "upload", "ping", "emulate",
+                                  "context"}
     # `upload` is a dispatched, tab-scoped CDP op requiring selector + path.
     assert S.validate_command({"op": "upload", "selector": "#f",
                                "path": "/tmp/x"}) == ("upload", None)
@@ -3115,12 +3123,19 @@ def test_git_short_head_none_on_missing_dir(tmp_path):
 
 def test_manifest_version_reads_current():
     v = S.manifest_version(path=EXT_DIR / "manifest.json")
-    # Bumped to 0.6.0 for the `documentPredatesEmulation` hint on `emulate`.
-    # 0.5.0 was the `emulate` op itself; 0.4.0 the poll-loop no-wedge change. The
-    # bump is the operator's only falsifiable "is the new build loaded?" signal,
-    # so this assertion is deliberately a literal — it MUST be updated in the
-    # same commit as manifest.json, which is the point.
-    assert isinstance(v, str) and v == "0.6.0"
+    # Bumped to 0.7.0 for the `context` op + enriched read envelopes. 0.6.0 was
+    # the `documentPredatesEmulation` hint; 0.5.0 the `emulate` op itself; 0.4.0
+    # the poll-loop no-wedge change. The bump is the operator's only falsifiable
+    # "is the new build loaded?" signal, so this assertion is deliberately a
+    # literal — it MUST be updated in the same commit as manifest.json.
+    #
+    # ⚠ That contract has now been broken once: 0.7.0 shipped without touching
+    # this file and left `main` RED on three tests. The literal did its job (it
+    # noticed) but nobody was watching at bump time. If it breaks again, the
+    # answer is a pre-merge gate on the bump, NOT deleting the literal — a
+    # derived assertion here would compare the manifest to itself and pin
+    # nothing at all.
+    assert isinstance(v, str) and v == "0.7.0"
 
 
 def test_manifest_version_prefers_the_deployed_copy_over_the_repo(tmp_path,
@@ -3141,7 +3156,7 @@ def test_manifest_version_falls_back_to_repo_when_not_deployed(tmp_path,
     reporting the repo manifest instead of going null."""
     monkeypatch.setattr(S, "_DEPLOYED_EXT_MANIFEST", tmp_path / "absent.json")
     monkeypatch.setattr(S, "_EXT_MANIFEST_PATH", EXT_DIR / "manifest.json")
-    assert S.manifest_version() == "0.6.0"
+    assert S.manifest_version() == "0.7.0"
 
 
 def test_manifest_version_none_when_neither_exists(tmp_path, monkeypatch):
