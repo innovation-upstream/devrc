@@ -67,7 +67,10 @@ Now each session can own its own tab:
   per-session tab isolation is preserved. **If you hit `not_owned_tab` anyway**,
   the CLI now prints the session id THIS call presented; run
   `browser --print-session-id` both inside the same `$( … )`/pipeline you used
-  for the `open` and directly, and compare.
+  for the `open` and directly, and compare. **No migration needed** across the
+  id change: ownership lives in the server's memory with a 900s idle TTL reaped
+  on every touch, so a tab still mapped to an old `ppid:` id self-releases
+  within 15 minutes (and the real Brave tab is never closed by a reclaim).
 - **⚠ Concurrent drivers that may share a session id (subagents): pass explicit
   `--tab`.** Sibling subagents of ONE parent share identity — a subagent inherits
   the parent's `CLAUDE_CODE_SESSION_ID` and the same `$TMUX_PANE`, and there is NO

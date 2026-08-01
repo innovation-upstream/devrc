@@ -160,6 +160,146 @@ def test_harness_control_old_algorithm_drifts(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
+# 3b. THE /proc PARSE ITSELF.
+#
+# An independent 9-mutant sweep found 5 survivors, ALL here — the tests above
+# pin the *outcome* (stable / distinct) and every one of these mutations happens
+# to preserve it on THIS host's process tree. Two are not cosmetic:
+#   • `sid="$4"` → `"$3"` reads the process GROUP instead of the session.
+#     Measured under a real pty: at an interactive prompt a bare command gets its
+#     OWN process group while `$( … )` keeps the shell's — so pgrp-instead-of-
+#     session silently REINTRODUCES the exact bug this file exists for.
+#     `test_session_id_is_the_real_posix_session_id` cannot see it because
+#     `start_new_session=True` makes pid == pgid == sid there (an incidental
+#     value-pin). The discriminator below forces pgid ≠ sid instead.
+#   • `st="${20}"` → `${19}` reads stat field 21 (`itrealvalue`, always 0), which
+#     silently kills the PID-reuse guard.
+# BROWSER_BRIDGE_PROC (the seam already used by the harness control) lets these
+# pin the field indices against a synthetic /proc with known values.
+# --------------------------------------------------------------------------- #
+def _stat(pid, comm, ppid, pgrp, sess, starttime):
+    """One /proc/<pid>/stat line with EXPLICIT field values.
+
+    1=pid 2=(comm) 3=state 4=ppid 5=pgrp 6=session 7..21=filler 22=starttime.
+    The filler is `2xx` per index so an off-by-one lands on a recognisable
+    wrong number instead of on something that happens to look plausible.
+    """
+    filler = " ".join(str(200 + i) for i in range(7, 22))     # fields 7..21
+    return f"{pid} ({comm}) S {ppid} {pgrp} {sess} {filler} {starttime} 0 0\n"
+
+
+def _fake_proc(tmp_path, self_stat, leader=None, leader_stat=None):
+    root = tmp_path / "fakeproc"
+    (root / "self").mkdir(parents=True, exist_ok=True)
+    (root / "self" / "stat").write_text(self_stat)
+    if leader is not None:
+        (root / str(leader)).mkdir(parents=True, exist_ok=True)
+        (root / str(leader) / "stat").write_text(leader_stat)
+    return root
+
+
+def _run_id(env):
+    return subprocess.run(["bash", str(CLI), "--print-session-id"], env=env,
+                          capture_output=True, text=True, timeout=60)
+
+
+def test_comm_containing_a_close_paren_space_is_parsed_by_the_LAST_paren(tmp_path):
+    """A process whose comm contains `") "` must not truncate the field split.
+
+    With a first-`)` cut the remainder starts mid-comm and field 4 lands on the
+    pgrp (555) instead of the session (888).
+    """
+    root = _fake_proc(
+        tmp_path,
+        _stat(123, "my (weird) proc", 1, 555, 888, 111),
+        leader=888, leader_stat=_stat(888, "bash", 1, 888, 888, 987654))
+    cp = _run_id(_env(tmp_path, BROWSER_BRIDGE_PROC=str(root)))
+    assert cp.stdout.strip() == "sid:888:987654", (cp.stdout, cp.stderr)
+
+
+def test_session_field_is_used_not_the_process_group_synthetic(tmp_path):
+    """Field 6 (session), not field 5 (pgrp). Pinned with the two set apart."""
+    root = _fake_proc(
+        tmp_path,
+        _stat(123, "bash", 1, 555, 888, 111),
+        leader=888, leader_stat=_stat(888, "bash", 1, 888, 888, 987654))
+    cp = _run_id(_env(tmp_path, BROWSER_BRIDGE_PROC=str(root)))
+    assert cp.stdout.strip() == "sid:888:987654", (cp.stdout, cp.stderr)
+
+
+def test_session_field_is_used_not_the_process_group_live(tmp_path):
+    """The same pin against the REAL kernel, in the shape that actually bit.
+
+    `process_group=0` gives the child its own process group while leaving it in
+    our session — exactly what an interactive shell does to a foreground command
+    (and what a forking `$( … )` does NOT). So pgid ≠ sid here, and a `$3` read
+    would return the child's own pid.
+    """
+    sess = os.getsid(0)
+    p = subprocess.Popen(["bash", str(CLI), "--print-session-id"],
+                         env=_env(tmp_path), stdout=subprocess.PIPE,
+                         stderr=subprocess.PIPE, text=True, process_group=0)
+    out, err = p.communicate(timeout=60)
+    assert p.returncode == 0, err
+    # The discriminator must actually discriminate, or this test is vacuous.
+    assert p.pid != sess, "child pid == session id — no pgrp/sid discrimination"
+    assert out.strip().startswith(f"sid:{sess}:"), (out, p.pid, sess)
+    assert not out.strip().startswith(f"sid:{p.pid}:"), (
+        f"read the process GROUP ({p.pid}), not the session ({sess}): {out!r}")
+
+
+def test_leader_starttime_is_stat_field_22_synthetic(tmp_path):
+    """Field 22 (starttime), not 21 (`itrealvalue`). The leader's field 21 is
+    the filler 221, so an off-by-one is unmistakable."""
+    root = _fake_proc(
+        tmp_path,
+        _stat(123, "bash", 1, 888, 888, 111),
+        leader=888, leader_stat=_stat(888, "bash", 1, 888, 888, 987654))
+    cp = _run_id(_env(tmp_path, BROWSER_BRIDGE_PROC=str(root)))
+    assert cp.stdout.strip() == "sid:888:987654", (cp.stdout, cp.stderr)
+    assert "221" not in cp.stdout, f"read stat field 21, not 22: {cp.stdout!r}"
+
+
+@pytest.mark.skipif(shutil.which("awk") is None, reason="cross-check uses awk")
+def test_leader_starttime_matches_awk_field_22_live(tmp_path):
+    """Cross-check the real value with a DIFFERENT tool (awk whitespace split),
+    so the expectation is not derived from the implementation's own parse."""
+    sess = os.getsid(0)
+    raw = Path(f"/proc/{sess}/stat").read_text()
+    if " " in raw[raw.index("(") + 1:raw.rindex(")")]:
+        pytest.skip("session leader's comm contains a space; awk $22 would shift")
+    expect = subprocess.run(["awk", "{print $22}", f"/proc/{sess}/stat"],
+                            capture_output=True, text=True).stdout.strip()
+    assert expect.isdigit(), expect
+    assert _print_id(_env(tmp_path)) == f"sid:{sess}:{expect}"
+
+
+@pytest.mark.parametrize("label,self_stat", [
+    # Too few fields after the comm cut → the `[ $# -ge 4 ]` guard.
+    ("no-parens", "garbage\n"),
+    ("truncated", "123 (bash) S 1\n"),
+    # Session 0 / non-numeric → the `case "$sid"` guard.
+    ("session-zero", _stat(123, "bash", 1, 0, 0, 111)),
+    ("session-nan", "123 (bash) S 1 555 notanumber 1 2 3\n"),
+])
+def test_malformed_stat_degrades_to_the_ppid_fallback_silently(
+        tmp_path, label, self_stat):
+    """Every malformed shape must fall through to `ppid:` — never to an empty
+    id, a constant, or `sid:0:`/`sid:notanumber:`.
+
+    stderr MUST stay empty: with the `[ $# -ge 4 ]` guard removed, `set -u`
+    makes `$4` an unbound-variable error, which still lands on the ppid
+    fallback but spews a shell diagnostic on every single invocation. Asserting
+    silence is what distinguishes the two.
+    """
+    root = _fake_proc(tmp_path, self_stat)
+    cp = _run_id(_env(tmp_path, BROWSER_BRIDGE_PROC=str(root)))
+    assert cp.returncode == 0, cp.stderr
+    assert cp.stdout.strip().startswith("ppid:"), (label, cp.stdout)
+    assert cp.stderr == "", (label, cp.stderr)
+
+
+# --------------------------------------------------------------------------- #
 # 4. Precedence chain, explicitly.
 # --------------------------------------------------------------------------- #
 def test_claude_code_session_id_wins_over_everything(tmp_path):

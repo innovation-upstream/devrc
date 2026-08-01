@@ -234,7 +234,12 @@ die() { echo "browser: $*" >&2; exit 1; }
 #   2. CLAUDE_SESSION_ID — defensive alternate spelling, in case a CLI build
 #      renames the var.
 #   3. $TMUX_PANE — the user runs each session in its own tmux pane, so the pane
-#      id is a good per-session proxy when no Claude var is exported.
+#      id is a good per-session proxy when no Claude var is exported. NOTE this
+#      step is COSMETIC, not structural: MEASURED 2026-08-01, each pane gets its
+#      own pty AND its own POSIX session (%0 sess=2982021 tty=pts/8, %1
+#      sess=2982024 tty=pts/9), so step 4 alone would already isolate panes.
+#      Kept because it is cheaper and more legible — do not "simplify" it away
+#      under the belief that removing it would break pane isolation.
 #   4. the POSIX SESSION id (`sid:<sid>:<leader-starttime>`), read from
 #      /proc/self/stat. See _session_from_proc below for why this — and NOT the
 #      PPID — is the right process-tree signal.
@@ -246,8 +251,13 @@ die() { echo "browser: $*" >&2; exit 1; }
 # and `browser --tab "$T" emulate` presented another → `not_owned_tab`. Measured
 # over ssh 2026-08-01; invisible wherever CLAUDE_CODE_SESSION_ID is set. Full
 # account: reference/tabs-instances.md → "The subshell hazard".
-# DEGRADATION: if two drivers ever resolve the SAME id they SHARE a tab — no
-# worse than the pre-fix behaviour. This is NOT hypothetical for one case:
+# DEGRADATION: if two drivers ever resolve the SAME id they SHARE a tab. This is
+# a TRADE, not a strict improvement (measured): two drivers with DIFFERENT
+# parents inside ONE POSIX session were distinct under the old ppid key and now
+# collide (sid:2983316:8395877 twice, vs ppid:2983326 / ppid:2983316) — reachable
+# only with all three env sources unset. In the commoner shape the new code is
+# better: three setsid'd runs from one shell were ONE id under the old key and
+# are three now. It is NOT hypothetical for one case:
 # **sibling subagents of one parent share identity.** Empirically (dumped from
 # inside two parallel subagents) a subagent inherits the PARENT's
 # CLAUDE_CODE_SESSION_ID *and* runs in the same $TMUX_PANE, and the harness
@@ -281,7 +291,12 @@ _session_from_proc() {
   [ $# -ge 4 ] || return 1
   sid="$4"
   case "$sid" in ''|0|*[!0-9]*) return 1 ;; esac
-  st="x"                                   # leader already gone → sid alone
+  # `x` = the session leader has already exited, so no starttime is available
+  # and the id degrades to `sid:<sid>:x` — the pid-reuse guard is OFF for that
+  # session. Recorded, not acted on: an orphaned session that then collides with
+  # a recycled sid is far-fetched, and server-side ownership self-releases on the
+  # 900s idle TTL anyway.
+  st="x"
   if [ -r "${procfs}/${sid}/stat" ] && IFS= read -r line < "${procfs}/${sid}/stat"; then
     rest="${line##*\) }"
     set -- $rest
