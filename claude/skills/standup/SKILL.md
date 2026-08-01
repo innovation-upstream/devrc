@@ -13,12 +13,12 @@ allowed-tools: Bash, Read
 bash ~/.claude/skills/standup/standup.sh [all|repos|deploys|alerts|state|initiatives]   # default: all (~20–40s)
 ```
 
-All logic lives in the script (so every run is identical, token-efficient, and correctly attributed). It sweeps:
+All logic lives in the script (every run identical, token-efficient, correctly attributed). Scopes:
 - **repos** → open PRs; flags only **your** (`ME`) approved-mergeable / red-CI / conflicting ones.
 - **deploys** → Flagger canaries mid-wave + deployments not fully ready, per cluster.
 - **alerts** → firing alerts **split by `cluster` label** (so the dp-1 multi-cluster fan-in is never misattributed — submodel-GPU alerts don't get blamed on dp-1 prod), with known-noise filtered.
-- **state** → per-repo *working state* (the "where was I" view, distinct from the action queue above): branch · ahead/behind origin · dirty-file count · last-commit age+subject · `⚠unpushed`/`⚠wip` flags · a pointer to each repo's `HANDOFF.md`/`STATE.md` if present. **Cross-host:** workbench `REPOS` are read locally and the laptop's `LAPTOP_REPOS` (vetr, naida — tagged `(lap)`) over `ssh`; host-aware so it works run from either host. This is informational (not folded into `ACTIONS`).
-- **initiatives** → the cross-repo, cross-session *initiative ledger* (durable counterpart to the live agent-ops dashboard — `$mod+i`/`prefix+A`; the old Alt+i HUD was removed 2026-07): momentum counts (active/slowing/stalled), **owed/held** next-steps (folded into `ACTIONS` — they need you), initiative-tied open PRs, and the most-stalled. Runs `initiative-scan.py --json` **telemetry-OFF** (fast, no creds); the full telemetry view is the **`/initiatives`** command. Skips gracefully if the script/`nix-shell`/`jq` are absent. Adds an `Initiatives Na/Ms/Kst` field to `STATUS`.
+- **state** → per-repo *working state* (the "where was I" view, distinct from the action queue): branch · ahead/behind origin · dirty-file count · last-commit age+subject · `⚠unpushed`/`⚠wip` flags · a pointer to each repo's `HANDOFF.md`/`STATE.md` if present. **Cross-host:** workbench `REPOS` read locally, the laptop's `LAPTOP_REPOS` (vetr, naida — tagged `(lap)`) over `ssh`; host-aware, works from either host. Informational — not folded into `ACTIONS`.
+- **initiatives** → the durable cross-repo, cross-session *initiative ledger* (counterpart to the live agent-ops dashboard, `$mod+i` / `prefix+A`): momentum counts (active/slowing/stalled), **owed/held** next-steps (folded into `ACTIONS` — they need you), initiative-tied open PRs, and the most-stalled. Runs `initiative-scan.py --json` **telemetry-OFF** (fast, no creds); the full telemetry view is the **`/initiatives`** command. Skips gracefully if the script/`nix-shell`/`jq` are absent. Adds an `Initiatives Na/Ms/Kst` field to `STATUS`.
 
 Output is **action-first**: a `STATUS` counts line, an `ACTIONS` block (only items needing you, each naming a drill-down skill), and a `Filtered:` transparency line. Only that digest reaches context — never the raw JSON.
 
