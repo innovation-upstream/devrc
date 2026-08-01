@@ -604,6 +604,18 @@ class MatchContext:
     # from a time window or "the last thread seen".
     referrer_url: str = ""
     referrer_title: str = ""
+    # THE LEDGER'S KEY, when the download's own URL is not a durable name for
+    # it. An embedded player streams from a SIGNED url (`?exp=...&token=...`)
+    # that is re-signed roughly hourly, so `source_url_key(url)` would mint a
+    # fresh ledger row every rotation and the "already have this" badge would
+    # never light. The extension sends the embed PAGE url here instead, which
+    # carries the embed id and does not rotate. Empty for every other download,
+    # and `App.match` then falls back to `url` exactly as before.
+    #
+    # It is NOT used for matching or learning -- only as the ledger key. A key
+    # is a name; letting a caller-supplied string become routing evidence is a
+    # different and much larger promise.
+    source_key: str = ""
 
     @staticmethod
     def from_payload(payload: dict) -> "MatchContext":
@@ -651,6 +663,7 @@ class MatchContext:
             page_url=page_url,
             referrer_url=str(page.get("referrerUrl") or ""),
             referrer_title=str(page.get("referrerTitle") or ""),
+            source_key=str(payload.get("sourceKey") or ""),
         )
 
     def thread_slugs(self) -> list:

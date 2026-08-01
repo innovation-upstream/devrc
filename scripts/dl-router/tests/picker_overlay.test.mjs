@@ -195,7 +195,13 @@ test("the manifest delivers the overlay through the EXISTING content script", ()
     new URL("../extension/manifest.json", import.meta.url), "utf8"));
   const [cs] = manifest.content_scripts;
   assert.deepEqual(cs.matches, ["http://*/*", "https://*/*"]);
-  assert.deepEqual(cs.js, ["content_capture.js", "picker_overlay.js"]);
+  // ORDER IS LOAD-BEARING, not cosmetic: the files in one declaration run in
+  // this order in one isolated world, and player_buttons.js reuses
+  // content_capture.js's extractor through `globalThis.__DLR_CAPTURE__` rather
+  // than restating it. Put content_capture.js second and the page-context
+  // responder answers `{ok:false, error:"no_capture"}` on the first click.
+  assert.deepEqual(cs.js,
+    ["content_capture.js", "picker_overlay.js", "player_buttons.js"]);
   assert.deepEqual(manifest.permissions.slice().sort(),
     ["alarms", "contextMenus", "downloads", "notifications", "storage", "tabs"]);
   // Framing an extension page from a web page needs it web-accessible.

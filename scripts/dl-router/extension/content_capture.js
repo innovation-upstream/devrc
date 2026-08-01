@@ -162,11 +162,43 @@
     return out;
   }
 
+  /**
+   * The CONTEXT layer of a site rule: how to find the subject of a PAGE.
+   *
+   * `site_rules` is now two layers keyed on two different hosts, because the
+   * two questions are asked in two different documents:
+   *
+   *   * the CONTEXT rule, keyed on the PAGE host (this one) -- what is this
+   *     page about? Runs in the top frame.
+   *   * the PLAYER rule, keyed on the EMBED host (player_buttons.js) -- where
+   *     is the media element and how do I read its URL? Runs inside the
+   *     cross-origin embed frame, which is a different origin and therefore a
+   *     different key in the same table.
+   *
+   * Accepting BOTH the flat form (`subject`/`tags` at the top level, which is
+   * what every existing config uses and what the docs have always shown) and
+   * the explicit `[site_rules."<host>".context]` sub-table costs one function
+   * and keeps one selector grammar. The explicit form wins where both exist,
+   * so a config can be migrated a host at a time.
+   */
+  function contextSelectors(rules) {
+    if (!rules || typeof rules !== "object") return { subject: [], tags: [] };
+    var ctx = (rules.context && typeof rules.context === "object")
+      ? rules.context : rules;
+    var pick = function (v) {
+      return Array.isArray(v) ? v.filter(function (s) {
+        return typeof s === "string" && s;
+      }) : [];
+    };
+    return { subject: pick(ctx.subject), tags: pick(ctx.tags) };
+  }
+
   /** Per-site rules: { subject: [selector], tags: [selector] }. */
   function extractSiteRules(dom, rules) {
     var out = [];
     if (!rules) return out;
-    var groups = [].concat(rules.subject || [], rules.tags || []);
+    var sel = contextSelectors(rules);
+    var groups = [].concat(sel.subject, sel.tags);
     for (var i = 0; i < groups.length; i += 1) {
       if (typeof groups[i] !== "string") continue;
       var nodes = safeQuery(dom, groups[i]);
@@ -188,6 +220,19 @@
   }
 
   /**
+   * The rules entry for a host, `www.` tolerant. ONE lookup, shared by the
+   * context layer here and the player layer in player_buttons.js -- the two
+   * layers are keyed on different hosts, but "which entry is this host's" must
+   * not be answered twice and differently.
+   */
+  function rulesForHost(siteRules, host) {
+    if (!siteRules || typeof siteRules !== "object" || !host) return null;
+    var entry = siteRules[host]
+      || siteRules[String(host).replace(/^www\./, "")];
+    return (entry && typeof entry === "object") ? entry : null;
+  }
+
+  /**
    * Build the capture payload.
    * `dom`      adapter (see domAdapter)
    * `el`       the clicked element descriptor {href, mediaSrc, linkText, alt}
@@ -196,8 +241,7 @@
   function extractContext(dom, el, siteRules) {
     el = el || {};
     var site = hostOf(dom.url);
-    var rules = siteRules && (siteRules[site]
-      || siteRules[site.replace(/^www\./, "")]);
+    var rules = rulesForHost(siteRules, site);
     var tags = [];
     var seen = Object.create(null);
     var push = function (list) {
@@ -278,6 +322,9 @@
       extractJsonLd: extractJsonLd,
       extractGeneric: extractGeneric,
       extractSiteRules: extractSiteRules,
+      contextSelectors: contextSelectors,
+      rulesForHost: rulesForHost,
+      hostOf: hostOf,
       describeTarget: describeTarget,
       domAdapter: domAdapter,
       installListeners: installListeners,

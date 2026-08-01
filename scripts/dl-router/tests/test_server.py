@@ -1051,3 +1051,102 @@ def test_the_dirs_entries_are_untouched_by_the_counts(app, library):
     snap = app.dirs_snapshot()
     for entry in snap["dirs"]:
         assert set(entry) == {"name", "key", "tokens", "kind"}
+
+
+# --- the source-URL ledger's key for an EMBEDDED PLAYER --------------------- #
+#
+# An embedded player streams from a SIGNED url (`?exp=...&token=...`) that the
+# embed page re-signs in place roughly hourly. `source_url_key` deliberately
+# keeps the query string, so keying the ledger on the media url would mint a
+# fresh row on every rotation and the "already have this" badge would never
+# light -- which reads to the user as "you do not have this", the one answer
+# worse than no badge at all.
+
+MEDIA_URL = ("https://cdn.example.test/media/data/f.mp4"
+             "?exp=1900000000&token=SIGNED_A&fn=f.mp4")
+EMBED_URL = "https://embedhost.example.test/embed/SYNTH8563"
+
+
+def _quote(url):
+    from urllib.parse import quote
+    return quote(url, safe="")
+
+
+def test_sourceKey_is_what_the_ledger_records_not_the_signed_media_url(live):
+    call(live, "POST", "/match",
+         {"downloadId": 92, "filename": "f.mp4", "url": MEDIA_URL,
+          "sourceKey": EMBED_URL,
+          "page": {"url": "https://forum.example.test/threads/jane-doe.1/"}})
+    _, out, _ = call(live, "GET", f"/have?url={_quote(EMBED_URL)}")
+    assert out["have"] is True, "the stable embed url must answer the badge"
+    _, out, _ = call(live, "GET", f"/have?url={_quote(MEDIA_URL)}")
+    assert out["have"] is False, (
+        "the signed url must NOT be the key -- it rotates, so it would answer "
+        "'no' for the rest of time")
+
+
+def test_a_re_signed_media_url_still_answers_the_badge(live):
+    """The failure the key exists to prevent, played out."""
+    rotated = MEDIA_URL.replace("SIGNED_A", "SIGNED_B").replace(
+        "exp=1900000000", "exp=1900007200")
+    call(live, "POST", "/match",
+         {"downloadId": 93, "filename": "f.mp4", "url": MEDIA_URL,
+          "sourceKey": EMBED_URL, "page": {}})
+    # An hour later the same player is streaming from a different URL...
+    call(live, "POST", "/match",
+         {"downloadId": 94, "filename": "f.mp4", "url": rotated,
+          "sourceKey": EMBED_URL, "page": {}})
+    _, out, _ = call(live, "GET", f"/have?url={_quote(EMBED_URL)}")
+    assert out["have"] is True
+    assert out["hits"] == 2, "both rotations are ONE asset in the ledger"
+
+
+def test_an_unusable_sourceKey_falls_back_to_the_url_rather_than_writing_nothing(
+        live):
+    # Truthiness is not the test: a non-empty but unusable key would otherwise
+    # silently drop the ledger row the ordinary URL would have produced.
+    call(live, "POST", "/match",
+         {"downloadId": 95, "filename": "f.mp4", "url": MEDIA_URL,
+          "sourceKey": "blob:not-a-url", "page": {}})
+    _, out, _ = call(live, "GET", f"/have?url={_quote(MEDIA_URL)}")
+    assert out["have"] is True
+
+
+def test_no_sourceKey_keeps_the_pre_existing_behaviour(live):
+    url = "https://example-site.test/v/77"
+    call(live, "POST", "/match",
+         {"downloadId": 96, "filename": "clip.mp4", "url": url, "page": {}})
+    _, out, _ = call(live, "GET", f"/have?url={_quote(url)}")
+    assert out["have"] is True
+
+
+def test_sourceKey_is_a_ledger_key_only_and_never_routing_evidence(app):
+    """A caller-supplied string must not become a subject.
+
+    The whole mislearning family this subsystem has already paid for came from
+    treating an unproven string as identity evidence.
+    """
+    thread = "https://forum.example.test/threads/aster-vale-new-set.42/"
+    plain = app.match({"downloadId": 97, "filename": "f.mp4",
+                       "url": MEDIA_URL, "page": {}})
+    keyed = app.match({"downloadId": 98, "filename": "f.mp4",
+                       "url": MEDIA_URL, "sourceKey": thread, "page": {}})
+    assert plain["dir"] == keyed["dir"]
+    assert plain["confidence"] == keyed["confidence"]
+
+
+def test_the_dirs_snapshot_carries_the_player_layer_to_the_extension(app, cfg):
+    """Adding a player is a CONFIG edit, never an extension change."""
+    cfg.data["site_rules"] = {
+        "forum.example.test": {"context": {"subject": ["h1.thread-title"]}},
+        "embedhost.example.test": {"player": {
+            "container": "#video-container",
+            "mount": "#video-wrapper",
+            "media": {"element": "video#main-video", "attr": "src"}}},
+    }
+    snap = app.dirs_snapshot()
+    rules = snap["siteRules"]
+    assert rules["forum.example.test"]["context"]["subject"] == [
+        "h1.thread-title"]
+    player = rules["embedhost.example.test"]["player"]
+    assert player["media"] == {"element": "video#main-video", "attr": "src"}

@@ -225,3 +225,93 @@ def test_load_degraded_is_a_no_op_for_a_valid_config(tmp_path):
     cfg, err = config_mod.load_degraded(path, env={})
     assert err is None
     assert str(cfg.library_root) == "/tmp/lib"
+
+
+# --- the two-layer site-rule table ------------------------------------------ #
+#
+# Structural validation only: types and required fields. The SELECTOR GRAMMAR is
+# enforced where it is consumed (player_buttons.normalisePlayerRule), which
+# fails closed to "no button" so a bad selector costs one player rather than
+# the whole sidecar. A wrong SHAPE is different -- it is a typo that would
+# otherwise produce a rule the extension silently discards with nothing
+# anywhere saying why.
+
+PLAYER = {"container": "#video-container",
+          "media": {"element": "video#main-video", "attr": "src"}}
+
+
+def _load(tmp_path, rules):
+    p = tmp_path / "config.toml"
+    body = ["library_root = \"/tmp/lib\""]
+    for host, entry in rules.items():
+        body.append(f"[site_rules.\"{host}\"]")
+        body.append(_toml(entry, f"site_rules.\"{host}\""))
+    p.write_text("\n".join(body), encoding="utf-8")
+    return config_mod.load(p)
+
+
+def _toml(entry, prefix):
+    """Just enough TOML emitter for these cases."""
+    lines, tables = [], []
+    for k, v in entry.items():
+        if isinstance(v, dict):
+            tables.append((k, v))
+        elif isinstance(v, list):
+            lines.append(f"{k} = [" + ", ".join(f'"{s}"' for s in v) + "]")
+        else:
+            lines.append(f'{k} = "{v}"')
+    for k, v in tables:
+        lines.append(f"[{prefix}.{k}]")
+        lines.append(_toml(v, f"{prefix}.{k}"))
+    return "\n".join(lines)
+
+
+def test_a_valid_two_layer_rule_table_loads(tmp_path):
+    cfg = _load(tmp_path, {
+        "forum.example.test": {"context": {"subject": ["h1.thread-title"]}},
+        "embedhost.example.test": {"player": PLAYER},
+    })
+    rules = cfg.section("site_rules")
+    assert rules["forum.example.test"]["context"]["subject"] == [
+        "h1.thread-title"]
+    assert rules["embedhost.example.test"]["player"]["media"]["attr"] == "src"
+
+
+def test_the_flat_legacy_context_form_still_loads(tmp_path):
+    cfg = _load(tmp_path, {"example-site.test": {"subject": ["a.performer"],
+                                                 "tags": [".tag-list a"]}})
+    assert cfg.section("site_rules")["example-site.test"]["tags"] == [
+        ".tag-list a"]
+
+
+@pytest.mark.parametrize("entry,needle", [
+    ({"player": {"media": PLAYER["media"]}}, "container is required"),
+    ({"player": {"container": "#c"}}, "player.media must be a table"),
+    ({"player": {"container": "#c", "media": {"element": "v"}}},
+     "media.attr must be a non-empty string"),
+    ({"player": {"container": "#c", "media": {"element": "", "attr": "src"}}},
+     "media.element must be a non-empty string"),
+    ({"subject": "a.one"}, "subject must be a list of selector strings"),
+    ({"context": {"tags": "a.one"}}, "tags must be a list of selector strings"),
+])
+def test_a_malformed_rule_is_reported_rather_than_silently_dropped(
+        tmp_path, entry, needle):
+    with pytest.raises(config_mod.ConfigError) as exc:
+        _load(tmp_path, {"embedhost.example.test": entry})
+    assert needle in str(exc.value)
+
+
+def test_a_malformed_rule_degrades_the_sidecar_instead_of_crash_looping(
+        tmp_path):
+    """The unit is Restart=always, so a raise on load is a silent restart loop.
+
+    `load_degraded` is what makes the typo visible in /healthz and
+    `dl-route status` instead.
+    """
+    p = tmp_path / "config.toml"
+    p.write_text('library_root = "/tmp/lib"\n'
+                 '[site_rules."h.test".player]\ncontainer = "#c"\n',
+                 encoding="utf-8")
+    cfg, err = config_mod.load_degraded(p)
+    assert err and "player.media must be a table" in err
+    assert cfg.library_root is None, "and nothing is routed by accident"

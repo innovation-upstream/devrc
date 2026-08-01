@@ -301,6 +301,60 @@ def _validate(data: dict) -> None:
     rules = data.get("site_rules")
     if rules is not None and not isinstance(rules, dict):
         raise ConfigError("site_rules must be a table keyed by hostname")
+    _validate_site_rules(rules or {})
+
+
+def _validate_site_rules(rules: dict) -> None:
+    """Structural checks on the two-layer rule table.
+
+    Deliberately STRUCTURAL only -- types and required fields, not the selector
+    grammar. The grammar is enforced where it is consumed
+    (player_buttons.normalisePlayerRule), which fails closed to "no button" so
+    a bad selector costs one player rather than the sidecar.
+
+    A wrong SHAPE is different: `media = "video"` instead of a table is a typo
+    that would otherwise produce a rule the extension silently discards, with
+    nothing anywhere saying why. Raising here surfaces it in `/healthz` and
+    `dl-route status` via the degraded-config path, which is the one place the
+    operator looks.
+    """
+    for host, entry in rules.items():
+        where = f"site_rules.{host!r}"
+        if not isinstance(entry, dict):
+            raise ConfigError(f"{where} must be a table")
+        for layer, table in (("", entry), ("context", entry.get("context"))):
+            if table is None:
+                continue
+            if not isinstance(table, dict):
+                raise ConfigError(f"{where}.context must be a table")
+            label = f"{where}.{layer}" if layer else where
+            for key in ("subject", "tags"):
+                val = table.get(key)
+                if val is None:
+                    continue
+                if not isinstance(val, list) or not all(
+                        isinstance(s, str) for s in val):
+                    raise ConfigError(
+                        f"{label}.{key} must be a list of selector strings")
+        player = entry.get("player")
+        if player is None:
+            continue
+        if not isinstance(player, dict):
+            raise ConfigError(f"{where}.player must be a table")
+        for key in ("container", "mount", "label"):
+            if key in player and not isinstance(player[key], str):
+                raise ConfigError(f"{where}.player.{key} must be a string")
+        if not player.get("container"):
+            raise ConfigError(f"{where}.player.container is required")
+        media = player.get("media")
+        if not isinstance(media, dict):
+            raise ConfigError(
+                f"{where}.player.media must be a table "
+                '(e.g. media = {{ element = "video#main", attr = "src" }})')
+        for key in ("element", "attr"):
+            if not isinstance(media.get(key), str) or not media[key]:
+                raise ConfigError(
+                    f"{where}.player.media.{key} must be a non-empty string")
 
 
 def load_degraded(path: Path | None = None, *, env=None):
