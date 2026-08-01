@@ -44,8 +44,9 @@ taking over costs ~200 tokens, so agent-first wins even at a low success rate.
 `blocked` → non-zero exit, take over. `partial` → read `evidence`, drive the rest.
 Thin `evidence` is a weak smell, **NOT** protection against a wrong answer — the
 one wrong run quoted its unrendered page verbatim, and the check would have flagged
-a *correct* run. What protects you: the deterministic auto-`wake` on a hidden
-`text`/`html` read (that was the one failure; fixed), and cheap escalation — if the
+a *correct* run. What protects you: the agent tool's auto-`wake` on a hidden
+`text`/`html` read (that was the one failure; closed by construction, NOT
+live-verified), and cheap escalation — if the
 answer depends on rendered SPA state, confirm with ONE `text --wake`. **Ignore
 `steps_used`** (undercounted, 5/14). Keep `--allow-domains` TIGHT *and* list the
 frame hosts you expect. → `reference/agent.md`

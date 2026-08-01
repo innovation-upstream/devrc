@@ -54,8 +54,15 @@ different model, or run-to-run variance.
   at 48.7s and 59.0s / 8–12 tool calls.
 - The **one wrong answer** (`status:"ok"`, confidently wrong) came from reading an
   unrendered shell in a throttled hidden tab — 1 of 13 `ok` runs (7.7%). That is the
-  failure the deterministic auto-wake below now closes; it was not a reasoning
-  failure and no other run produced a wrong `ok`.
+  failure the agent tool's deterministic auto-wake below closes **by construction**
+  — it is NOT yet live-verified against that run, because F2 has not been
+  reproducible since (2026-08-01: with auto-wake disabled, and again with `wake`
+  denied outright, the rig rendered before the agent's slower read landed and both
+  controls returned the CORRECT answer). The auto-wake mechanism itself IS
+  live-verified: a real run's audit shows `auto_wake` → `auto_wake_exec` (wake) →
+  `auto_wake_exec` (re-read) → `auto_wake_ok woke:true settleMs:1500`. Closing the
+  gap needs a fixture that stays an unrendered shell for ≥30s. It was not a
+  reasoning failure, and no other run produced a wrong `ok`.
 - The out-of-allowlist guardrail behaved exactly as documented: clean
   `status:"blocked"`, exit 1, empty evidence, no fabrication, no hang.
 
