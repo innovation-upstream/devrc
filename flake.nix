@@ -87,7 +87,22 @@
             # RED, not "green while silently skipping": 41 test_server.py tests
             # skipped AND five failed. Adding curl here (with the --help/token fix
             # in the CLI) is what takes it green and makes those 41 actually run.
-            nativeBuildInputs = [ pyEnv pkgs.bash pkgs.ripgrep pkgs.git pkgs.util-linux pkgs.jq pkgs.gnugrep pkgs.curl ];
+            #
+            # nodejs: MEASURED 2026-08-02 — scripts/initiatives/tests/{test_viewer,
+            # test_streaming}.py extract the viewer's inline JS and run it under
+            # `node`; without node on PATH they `pytest.skip("node not on PATH")`.
+            # That was 123 of this check's 125 skips (`660 passed, 123 skipped` in
+            # the initiatives suite vs `783 passed, 0 skipped` on a host with node).
+            # Adding it recovers all 123. This does grow the pytest gate's closure
+            # by a node toolchain — accepted deliberately: 123 silently-unrun tests
+            # cost more than a cache invalidation on a nodejs bump. The `nodetests`
+            # check below stays separate for its OWN reasons (distinct failure
+            # signal, parallel execution), which this does not change.
+            #
+            # 🔴 run-tests.sh now ASSERTS every one of these is on PATH
+            # (`REQUIRED_TOOLS`) and fails naming the missing binary. Deleting one
+            # from this list no longer silently skips tests — it fails the gate.
+            nativeBuildInputs = [ pyEnv pkgs.bash pkgs.ripgrep pkgs.git pkgs.util-linux pkgs.jq pkgs.gnugrep pkgs.curl pkgs.nodejs ];
           }
           ''
             cp -r ${./.} src
@@ -100,6 +115,10 @@
             export HOME="$TMPDIR/home"
             mkdir -p "$HOME"
             cd src
+            # The runner asserts a tool precondition, a pinned expected-skip set,
+            # a global + per-directory collected-test floor, and parses pytest's
+            # summary instead of reading its exit code. Read its header before
+            # changing this line or the nativeBuildInputs above.
             bash scripts/run-tests.sh --set hermetic .
             touch "$out"
           '';
