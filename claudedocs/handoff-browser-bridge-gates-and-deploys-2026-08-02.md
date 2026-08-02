@@ -140,3 +140,64 @@ scripts/ship.sh                     # converge both hosts
 systemctl --user is-active browser-bridge          # must be `active`, not `activating`
 curl -sf http://192.168.50.250:30302/health        # clawgate 0.7.82
 ```
+
+---
+
+## ADDENDUM — written after the above; the "State now" section is superseded
+
+Everything above was written mid-session. What followed changed the state and added the
+session's sharpest finding, so read this section as authoritative where the two disagree.
+
+**State now (final):** `main` @ **`c9cb47a`**. **Both hosts converged + switched at `c9cb47a`.**
+`nix flake check` **green**: pytest **4373 collected / 4372 passed / 1 skipped / 0 failed**,
+node **468/468**. **Zero open PRs, zero open issues.** 17 devrc PRs merged this session.
+
+### PR #276 shipped FOUR regressions that concealed each other
+
+The gate hardening (#284) made the pytest check loud, and it immediately went red on `main` —
+which read like "the new gate is noisy" and was actually four real defects, all from one commit:
+
+| # | defect | fails where | invisible where | fixed by |
+|---|---|---|---|---|
+| 1 | `HERMETIC_DIRS` gained a FILE; `run_pytest()` guarded on `[ ! -d ]` → **913 tests unrun** | everywhere | *masked 2 and 3* | #289 |
+| 2 | `SECRET_PATTERNS` moved to `guard_core.py` → drift test parses `[]` | dev hosts (hook deployed) | **skips** in sandbox | #291 |
+| 3 | `nix-instantiate` absent from the check → 10 handle tests fail | sandbox | **passes** on dev hosts | #290 |
+| 4 | `guard.js` couldn't find its core once deployed → every bash call refused | deployed hosts | — | #292 (other session) |
+
+**(2) and (3) are exact complements** — each structurally invisible in the tier where the other
+bites. That is the durable lesson, and it is now a rule in `claude/RULES.md`:
+*a suite that runs in TWO TIERS must be green in BOTH.*
+
+### Three declarations-vs-instances cases in ONE session
+2 `skipif` decorators → **123** tests · 1 `HERMETIC_DIRS` entry → **913** tests ·
+1 `nix_eval()` helper → **10** parametrized tests. Three is a pattern, not a coincidence.
+Also now a rule.
+
+### Verification notes worth keeping
+- #291 deleted a pinned skip. The named risk was "a gate that silently stops counting", so that
+  failure mode was tested **directly**: injecting an unpinned skip →
+  `ERROR: 2 test(s) skipped, but 1 are pinned … MORE than pinned: tests stopped running`, exit 1;
+  clean on revert. A targeted test of the named risk beat a general audit.
+- #290's proof is an **identical collected count with failures → 0** (`959/949/10` → `959/959/0`).
+  "Stopped failing" and "passes" are different claims; only the count distinguishes them.
+- An agent was killed mid-mutation by a session limit. Before resuming it, the worktree was checked
+  for a leftover mutation (**0 unstaged changes** — clean) and for a runaway process. Resuming blind
+  would have measured the AFTER run against a poisoned baseline.
+
+### 🔴 One thing left in the operator's tree
+`ship.sh` was blocked on the **workbench** by untracked `nix/system/apply-nebula-443.sh`, which had
+since landed upstream **with different content** (local copy has different variable names, a
+`BACKUP` path, a different guard) — the operator's own variant, not a stale duplicate. It was
+**renamed, not deleted**, sha verified identical:
+
+```
+nix/system/apply-nebula-443.sh.LOCAL-preserved-2026-08-02
+```
+
+Upstream's version now occupies the original path. `mv` it back to restore, delete to discard.
+**Operator's call — do not resolve this unasked.**
+
+### Standing operator decisions
+- **auditloop credential rotation: DROPPED by the operator. Do not re-raise.**
+- **Pre-push hook parity** (`githooks/tests-on-push.sh` does not run the node suite): deliberately
+  left as the operator's workflow call, ~8s/push.
