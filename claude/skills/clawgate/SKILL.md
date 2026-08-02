@@ -44,8 +44,8 @@ Session memories: `clawgate-phase2` · `clawgate-phase3` · `clawgate-runbooks` 
 | Source | `/home/zach/workspace/homelab-talos/containers/clawgate/` (Go module `github.com/zacxdev/clawgate`) |
 | Hook scripts | `hook/clawgate-hook.sh` (PermissionRequest → `/api/send`) + `hook/clawgate-stop-hook.sh` (Stop → `/api/suggest`, async/fail-safe, "Suggested next step") |
 | Hook config | `~/.claude/clawgate.env` (`CLAWGATE_API_URL`, `CLAWGATE_HOOK_TOKEN`) — shared by both hooks |
-| Cluster | homelab-talos **workbench** — `KC=/home/zach/workspace/homelab-infra/workbench-kubeconfig`, namespace `clawgate` |
-| ⚠ kubeconfig path | The GitHub origin was renamed **homelab-talos → homelab-infra**. The local **repo dir is still `~/workspace/homelab-talos`** (deploy paths below unchanged), but the **working kubeconfig lives at `~/workspace/homelab-infra/workbench-kubeconfig`** — deploy agents kept using the old `homelab-talos/…-kubeconfig` (gone). Repo checkout ≠ kubeconfig dir. |
+| Cluster | homelab-talos **workbench**, namespace `clawgate`. `KC=` is **per-host** — see the row below, don't hardcode it |
+| 🔴 kubeconfig path is PER-HOST | The GitHub origin was renamed **homelab-talos → homelab-infra**; the local **repo dir is still `~/workspace/homelab-talos`** (deploy paths below unchanged). The kubeconfig then landed in a **different dir on each machine**, and the one that is right on one host is **absent** on the other. MEASURED 2026-08-02, both hosts: laptop `.155` → **`~/workspace/homelab-infra/workbench-kubeconfig`** (and `homelab-talos/…` does NOT exist); workbench `.250` → **`~/workspace/homelab-talos/workbench-kubeconfig`** (and `homelab-infra/…` does NOT exist). This row previously named only the laptop path as *the* path; an agent that checked on the workbench found it missing and concluded the doc was wrong — it was neither wrong nor right, it was **host-specific**. `ls` both, take the one that exists; `browser whoami` or the IP tells you which host you are on (both are hostname `nixos`). Repo checkout ≠ kubeconfig dir. |
 | Image | `harbor.homelab.lan/library/clawgate:<ver>` (the live pinned tag is in the deployment) |
 | Deploy manifest | `homelab-talos/clusters/workbench/apps/clawgate/deployment.yaml` (Flux GitOps from branch `trunk`) |
 | LAN URL (hook + UI) | `http://192.168.50.250:30302` (NodePort) / `clawgate.workbench.lan` — **OPEN, no auth** (trusted LAN); machine endpoints still need bearer `CLAWGATE_HOOK_TOKEN` |
@@ -115,8 +115,19 @@ kubectl --kubeconfig $KC -n clawgate logs -f deploy/clawgate | grep --line-buffe
 
 ## deploy a new version
 
+🔴 **"Committing IS deploying" is true of the MANIFEST, not of container CODE — and the
+difference is silent.** `deployment.yaml` pins an **immutable literal tag**
+(`clawgate:<ver>`) and there is **no Flux image automation** in `clusters/workbench/apps/clawgate/`
+(MEASURED 2026-08-02: no `ImageRepository`, no `ImagePolicy`). So a commit that changes
+`containers/clawgate/**` — Go code, the embedded kubeclaw chart, the extension — lands on `trunk`,
+reconciles cleanly, and **changes nothing that is running**, because the cluster still pulls the old
+pinned tag. Only step 3's pin bump deploys. Ground case: the vendored kubeclaw chart re-sync
+(0.7.0 → 0.7.1, PR #274) merged to `trunk` and sat there inert — the chart is `//go:embed`ded into
+the binary (`internal/agents/embed.go`), so it could not reach the cluster until 0.7.82 was built and
+pushed. **`git log` on `trunk` is NOT evidence a code change is live; the live pin and `/health` are.**
+
 🔴 **ONE commit path: a dedicated git WORKTREE off `origin/trunk`, ending on `trunk` (= live
-deploy).** homelab-talos is GitOps from `trunk` — **committing IS deploying.** Do **NOT** commit
+deploy).** homelab-talos is GitOps from `trunk` — **committing deploys the manifest** (see above). Do **NOT** commit
 from the main checkout: it is permanently dirty with unrelated uncommitted files (`.sops.yaml`,
 secrets, WIP), so the old `git pull --rebase` stash/autostash dance autostashes that tree and conflicts on files you never
 touched (this corrupted `.sops.yaml` once, 2026-06-24; on 2026-07-30 the same pattern left the base
