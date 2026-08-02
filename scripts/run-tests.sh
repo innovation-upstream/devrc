@@ -269,16 +269,23 @@ EXPECTED_SKIPS=(
   # REPO_COS_LIVE_DRIFT_CHECK=1.
   "scripts/repo-cos/tests|live-store drift check is opt-in"
 )
-# test_scrub.py::test_patterns_cover_bash_guard compares scrub.py's
-# SECRET_PATTERNS against the DEPLOYED hook, and skips iff that file is absent —
-# `_BASH_GUARD = Path.home() / ".claude" / "hooks" / "bash-guard.py"`, which is
-# exactly the test below. It is ABSENT in the nix sandbox (synthetic $HOME) and
-# PRESENT on a switched dev host, so the test genuinely runs in one and not the
-# other. Pinning it unconditionally would fail the pre-push tier; pinning it
-# conditionally still fails if it skips on a host where the hook exists.
-if [ ! -e "$HOME/.claude/hooks/bash-guard.py" ]; then
-  EXPECTED_SKIPS+=("scripts/session-analysis/session_insight/tests|bash-guard\.py absent")
-fi
+# ⚠ REMOVED, deliberately — do not re-add. test_scrub.py's drift guard used to
+# compare scrub.py's SECRET_PATTERNS against the DEPLOYED hook
+# (`Path.home()/".claude"/"hooks"/"bash-guard.py"`) and skip when that file was
+# absent, so it ran on a switched dev host and skipped in the sandbox — and this
+# entry existed to pin that environment-dependent skip.
+#
+# That HOME-keyed referent was the bug: the check was structurally unobservable
+# in the tier that gates merges, so when #276 moved SECRET_PATTERNS into
+# guard_core.py the parser returned [] and the test failed on every dev host
+# while the hermetic gate stayed green. The test now compares two files that are
+# both TRACKED IN THIS REPO (session_insight/scrub.py vs claude-hooks/
+# guard_core.py), so it runs in every tier and NEVER skips — which is why there
+# is nothing left to pin here.
+#
+# If you find yourself re-adding a conditional skip for this suite, the drift
+# guard has been re-pointed at something environment-dependent again. Fix that
+# instead.
 
 fail=0
 declare -a RESULTS
