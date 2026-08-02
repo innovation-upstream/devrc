@@ -3,8 +3,6 @@ redacted; internal IPs survive; public IPs redacted only when enabled."""
 import ast
 from pathlib import Path
 
-import pytest
-
 import scrub
 
 
@@ -82,15 +80,35 @@ def test_empty_text():
 
 
 # --------------------------------------------------------------------------- #
-# FIX 4 — best-effort drift guard against the vendored source of truth.
+# FIX 4 — drift guard against the source of truth.
 # --------------------------------------------------------------------------- #
-_BASH_GUARD = Path.home() / ".claude" / "hooks" / "bash-guard.py"
+# 🔴 This points at the REPO file, not at ~/.claude/hooks/. Two reasons, and the
+# second is the one that bit:
+#
+#   1. CORRECT REFERENT. The deployed copy is *generated from* this file by
+#      home-manager. Comparing against the deployed copy tested whichever build
+#      the host last switched to — i.e. it answered a question about the machine,
+#      not about the commit. The drift that matters is between two files that
+#      live side by side IN THIS REPO.
+#
+#   2. IT COULD NOT FAIL IN CI. Keyed on $HOME, the test SKIPPED in the nix
+#      sandbox (synthetic HOME, no hook) and RAN only on a switched dev host —
+#      so the hermetic gate structurally could not observe it. #276 then moved
+#      SECRET_PATTERNS out of bash-guard.py into guard_core.py; the parser
+#      returned [] and this test failed on every dev host while the gate stayed
+#      green and silent. See claude/RULES.md, "A suite that runs in TWO TIERS
+#      must be green in BOTH".
+#
+# Both files are tracked, so this now runs EVERYWHERE and never skips.
+_GUARD_CORE = (
+    Path(__file__).resolve().parents[3] / "claude-hooks" / "guard_core.py"
+)
 
 
-def _bash_guard_patterns():
-    """Extract the regex strings from bash-guard.py's SECRET_PATTERNS literal by
+def _guard_core_patterns():
+    """Extract the regex strings from guard_core.py's SECRET_PATTERNS literal by
     parsing the module (never executing it)."""
-    tree = ast.parse(_BASH_GUARD.read_text(encoding="utf-8"))
+    tree = ast.parse(_GUARD_CORE.read_text(encoding="utf-8"))
     for node in ast.walk(tree):
         if (isinstance(node, ast.Assign)
                 and any(getattr(t, "id", None) == "SECRET_PATTERNS"
@@ -106,15 +124,27 @@ def _bash_guard_patterns():
     return []
 
 
-def test_patterns_cover_bash_guard():
-    """scrub.py's pattern set must be a SUPERSET of bash-guard's SECRET_PATTERNS.
-    Skipped on a fresh checkout where the hook file is absent (so CI is green)."""
-    if not _BASH_GUARD.exists():
-        pytest.skip(f"{_BASH_GUARD} absent (vendored source not on this host)")
-    theirs = _bash_guard_patterns()
-    assert theirs, "could not parse SECRET_PATTERNS from bash-guard.py"
+def test_patterns_cover_guard_core():
+    """scrub.py's pattern set must be a SUPERSET of guard_core's SECRET_PATTERNS.
+
+    Never skips: both files are tracked in this repo, so every tier runs it.
+    A NEVER-SKIPPING drift guard is the entire point — the previous version
+    keyed on $HOME and was therefore unobservable in the sandbox.
+    """
+    assert _GUARD_CORE.is_file(), (
+        f"{_GUARD_CORE} not found — this guard would be vacuous. guard_core.py "
+        "is the source of truth for the Bash hook's SECRET_PATTERNS; if it "
+        "moved, update _GUARD_CORE rather than deleting the check."
+    )
+    theirs = _guard_core_patterns()
+    assert theirs, (
+        "could not parse SECRET_PATTERNS from guard_core.py. That is a PARSER "
+        "failure, not a pass — the literal may have changed shape (it must stay "
+        "a list of (regex, label) tuples for the ast walk to see it). This exact "
+        "silence is how the check sat broken after #276 moved the patterns."
+    )
     ours = {rx.pattern for rx, _label in scrub.SECRET_PATTERNS}
     missing = [p for p in theirs if p not in ours]
     assert not missing, (
-        "scrub.py drifted from bash-guard.py — these SECRET_PATTERNS are no "
+        "scrub.py drifted from guard_core.py — these SECRET_PATTERNS are no "
         f"longer covered: {missing}")
