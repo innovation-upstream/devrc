@@ -511,6 +511,14 @@ def test_a_failing_wake_never_swallows_the_primary_result(wake_fails, sub,
     assert out["result"]["data"]["wake"]["ok"] is False
     assert out["result"]["ok"] is True, "the PRIMARY op did not fail"
 
+    # 🔴 THE REAL CAUSE, not a placeholder. This first shipped as the constant
+    # "wake_failed_after_nav", which cannot distinguish a TRANSIENT `rate_limited`
+    # (retry) from a PERMANENT `wake_with_frame_unsupported` (do not) — and a test
+    # that only asserted `ok is False` structurally could not catch that.
+    expected = {"op_error": detail, "429": "rate_limited", "504": "timeout"}[kind]
+    assert out["result"]["data"]["wake"]["error"] == expected, (
+        out["result"]["data"]["wake"])
+
     assert "SUCCEEDED" in r.stderr and sub in r.stderr
     assert "only the --wake follow-up failed" in r.stderr
     assert r.returncode == 3, (
@@ -524,11 +532,20 @@ def test_a_failing_wake_never_swallows_the_primary_result(wake_fails, sub,
 @pytest.mark.parametrize("sub", ["nav", "open"])
 def test_a_SUCCESSFUL_wake_still_exits_zero(wake_fails, sub, bridge):
     """NEGATIVE CONTROL for the exit code above: without it, `return 3` could be
-    unconditional and every test above would still pass."""
+    unconditional and every test above would still pass.
+
+    Also pins the SUCCESS SHAPE, which used to be asymmetric with the failure
+    shape. The extension's wake payload carries no `ok` key, so writing it raw
+    made `if (data.wake.ok)` falsy on every successful wake and forced callers
+    into the undiscoverable negative `wake.ok !== false`.
+    """
     r = bridge.run(sub, "https://a.test", "--wake")
     assert r.returncode == 0, r.stderr
     assert "SUCCEEDED" not in r.stderr
-    assert "wake" in json.loads(r.stdout)["result"]["data"]
+    wake = json.loads(r.stdout)["result"]["data"]["wake"]
+    assert wake["ok"] is True, (
+        "success and failure must be shape-symmetric — `ok` present in both")
+    assert "error" not in wake
 
 
 @pytest.mark.parametrize("sub", ["nav", "open"])
@@ -563,6 +580,80 @@ def test_frame_WITHOUT_wake_and_wake_WITHOUT_frame_both_still_work(bridge, sub):
     sent = bridge.bodies[before:]
     assert [b["op"] for b in sent] == [sub, sub, "wake"]
     assert sent[0]["frame"] == "child.test"      # --frame alone still threads
+
+
+@pytest.fixture
+def gateway_504(tmp_path):
+    """A stub bridge whose /cmd always answers 504 `timeout` — the shape the CLI
+    renders its op-aware timeout guidance from."""
+    class _H(BaseHTTPRequestHandler):
+        def do_POST(self):
+            n = int(self.headers.get("Content-Length") or 0)
+            self.rfile.read(n)
+            raw = json.dumps({"ok": False, "error": "timeout"}).encode()
+            self.send_response(504)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(raw)))
+            self.end_headers()
+            self.wfile.write(raw)
+
+        def log_message(self, *a):
+            pass
+
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), _H)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    tokfile = tmp_path / "token"
+    tokfile.write_text("t504\n")
+    env = dict(os.environ)
+    env.update({"BROWSER_BRIDGE_HOST": "127.0.0.1",
+                "BROWSER_BRIDGE_PORT": str(srv.server_address[1]),
+                "BROWSER_BRIDGE_TOKEN_FILE": str(tokfile),
+                "CLAUDE_CODE_SESSION_ID": "pytest-504",
+                "HOME": str(tmp_path)})
+
+    class _B:
+        @staticmethod
+        def run(*args):
+            return subprocess.run(["bash", str(CLI), *args], env=env,
+                                  capture_output=True, text=True, timeout=60)
+    try:
+        yield _B
+    finally:
+        srv.shutdown(); srv.server_close()
+
+
+def test_a_ping_timeout_does_NOT_steer_the_operator_into_restarting_brave(
+        gateway_504):
+    """REGRESSION. `ping` runs on a deadline the generic 504 wording does not
+    describe, and that wording — "is Brave focused / responsive?" — points at a
+    dead extension, whose documented remedy is a FULL Brave restart of the
+    operator's LIVE session. A ping can time out with the profile perfectly
+    healthy (a wedge is one cause; a queue of concurrent ops is another).
+
+    This message is the entire mitigation for the disclosed residual, and NOTHING
+    pinned it: deleting the whole `if [ "$op" = "ping" ]` block left both suites
+    fully green.
+    """
+    r = gateway_504.run("ping")
+    assert r.returncode != 0
+    err = r.stderr
+    assert "do NOT restart Brave" in err, err
+    assert "queued ahead of it" in err, err
+    assert "OTHERWISE IDLE profile is the real" in err, err
+    # ...and it must NOT fall through to the generic wording, which is the bug.
+    assert "is Brave focused / responsive?" not in err, err
+
+
+def test_a_NON_ping_timeout_keeps_the_generic_wording(gateway_504):
+    """NEGATIVE CONTROL: without it the ping guidance could be printed for EVERY
+    op — which would be wrong (a `nav` timeout really does suggest an unresponsive
+    tab) and would make the test above pass for the wrong reason."""
+    r = gateway_504.run("tabs")
+    assert r.returncode != 0
+    err = r.stderr
+    assert "is Brave focused / responsive?" in err, err
+    assert "do NOT restart Brave" not in err, err
+    assert "queued ahead of it" not in err, err
 
 
 def test_open_with_no_url_still_means_about_blank(bridge):

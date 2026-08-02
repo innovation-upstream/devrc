@@ -70,15 +70,16 @@ Config (env):
     BROWSER_BRIDGE_PORT          bind port (default 8788 — must NOT be 8787)
     BROWSER_BRIDGE_TOKEN_FILE    token path (default ~/.config/browser-bridge/token)
     BROWSER_BRIDGE_CMD_TIMEOUT   seconds a /cmd waits for a result (default 20)
-    BROWSER_BRIDGE_PING_TIMEOUT  seconds a `ping` /cmd waits (default 10). `ping`
-                                 is the DIAGNOSTIC op — the thing you run FIRST to
-                                 ask "is the loaded extension current?" — so it
-                                 must answer "no" faster than the generic 20s.
-                                 It must NOT go below the longest a HEALTHY
-                                 extension can be busy, or a busy profile reports
-                                 as dead; see PING_TIMEOUT_DEFAULT for the full
-                                 invariant. Applies to `ping` ONLY; every other op
-                                 keeps CMD_TIMEOUT.
+    BROWSER_BRIDGE_PING_TIMEOUT  seconds a `ping` /cmd waits when the target
+                                 instance is IDLE (default 2). `ping` is the
+                                 DIAGNOSTIC op — the thing you run FIRST to ask
+                                 "is the loaded extension current?" — so on an
+                                 idle instance it must answer "no" fast. When the
+                                 instance has work in flight the deadline is
+                                 DERIVED from that work instead (never above
+                                 CMD_TIMEOUT) so a busy profile is never reported
+                                 as dead — see Registry._effective_timeout_locked.
+                                 Applies to `ping` ONLY.
     BROWSER_BRIDGE_POLL_TIMEOUT  seconds a /poll blocks before 204 (default 25)
     BROWSER_BRIDGE_RATE_PER_SEC  per-instance sustained /cmd dispatch rate
                                  (token-bucket refill, default 5; 0 → unlimited)
@@ -201,6 +202,18 @@ MAX_RESULT_BODY = 32 * 1024 * 1024  # a screenshot data URL can be a few MB.
 # A connection is considered "present" if a long-poll landed within this window.
 CONNECT_STALE_S = 40.0
 
+# The extension's own hard self-bound on ONE command's execution
+# (EXEC_OP_BUDGET_MS in extension/protocol.js). `execute()` never exceeds it and
+# never throws, so it is the yardstick for "could a healthy extension still
+# legitimately be working on this?". Mirrored here rather than imported because
+# the two live in different languages/processes; `test_exec_budget_matches_the_
+# extension` reads protocol.js and fails if they ever drift.
+EXEC_OP_BUDGET_S = 18.0
+
+# Slack added on top of the execution budget to cover the result POST and the
+# next poll turnaround (RESULT_BUDGET_MS is 10s but a healthy POST is ms).
+WEDGE_GRACE_S = 2.0
+
 # `ping`'s own /cmd deadline, in seconds. NOT a bare literal at the call site and
 # NOT sharing CMD_TIMEOUT: `ping` is the documented FIRST thing you run when you
 # suspect the loaded extension is stale, and a diagnostic that takes 20s to say
@@ -208,43 +221,27 @@ CONNECT_STALE_S = 40.0
 # 34 pings, 13 failures (38.2% — the worst rate of any op), of which 6 timed out at
 # exactly 20,000ms; the 21 healthy ones averaged 3-4ms.
 #
-# 🔴 THE INVARIANT THIS VALUE MUST SATISFY — not the number, the property:
+# 🔴 THIS IS THE IDLE DEADLINE ONLY. It is NOT a tuned value that has to dominate
+# every op's ceiling — the BUSY case is handled STRUCTURALLY, in submit()'s
+# `fast_timeout` gate, which is where the real invariant lives. Read that first.
 #
-#   PING_TIMEOUT_DEFAULT  >  the longest a HEALTHY extension can be busy with a
-#                            command the CLI is able to ASK FOR.
+# The distinction the gate draws:
+#   * instance has NO outstanding command  -> a ping that does not answer in 2s is
+#     genuine evidence of a wedged/dead service worker. Fail FAST. Healthy pings
+#     measured at 3-4ms, so 2s is ~500x headroom.
+#   * instance HAS outstanding work        -> the poll loop is serial, so the ping
+#     simply cannot be dequeued yet. Waiting is CORRECT; the deadline is derived
+#     from the work in flight, never from this constant.
 #
-# because the extension's poll loop is strictly SERIAL (service_worker.js: `await
-# execute()` -> `await postResult()` -> next `pollOnce()`). `ping` skips the
-# per-tab FIFO but still cannot be DEQUEUED until the running command finishes. So
-# a deadline below that bound reports a perfectly healthy, merely BUSY profile as
-# dead — and the documented remedy for "dead" is a FULL Brave restart of the
-# operator's live session. That is a far worse outcome than waiting.
+# So this value never has to exceed ACTIVATE_WAIT_MAX_MS / CDP_OP_BUDGET_MS /
+# EXEC_OP_BUDGET_MS — a previous revision of this comment claimed it did, and was
+# wrong twice over (it named 8s as "the caller-requestable ceiling" while both
+# `screenshot --fullpage` at 15s and `wake --wait 6000` composed with an 8s CDP
+# attach exceed it). Deriving the deadline from observed in-flight work removes
+# the whole class instead of trying to out-bid it.
 #
-# The bounds, from extension/protocol.js:
-#   ACTIVATE_WAIT_MAX_MS  8s   <- the largest wait the CLI can request (`activate
-#                                 --wait 8000`); WAKE_SETTLE_MAX_MS is 6s
-#   CDP_OP_BUDGET_MS     15s   <- a CDP-routed op's own budget
-#   EXEC_OP_BUDGET_MS    18s   <- execute()'s hard self-bound; nothing exceeds it
-#
-# 10s is chosen as the smallest value ABOVE the 8s caller-requestable ceiling, with
-# ~2s of slack for the result POST + poll turnaround. It is ~2500x the 3-4ms
-# healthy path and halves the old 20s failure path.
-#
-# ⚠ RESIDUAL, stated rather than hidden: 10s < EXEC_OP_BUDGET_MS, so a preceding op
-# that legitimately runs 10-18s (a heavy CDP screenshot) can STILL time a ping out.
-# Only >=18s would eliminate the class, and that is the 20s this exists to avoid.
-# The mitigation is that the timeout MESSAGE for `ping` now says the extension may
-# be busy and explicitly refuses to recommend a Brave restart — see the CLI's 504
-# branch. Raise BROWSER_BRIDGE_PING_TIMEOUT on the browser-bridge service if your
-# workload runs long ops concurrently.
-#
-# ✗ REJECTED ALTERNATIVE (do not re-derive it): "use the short deadline only when
-# the instance is idle, escalate to cmd_timeout when it is busy." `inst.pending`
-# cannot distinguish BUSY from WEDGED — a wedged extension is precisely one that
-# took a command and never answered, i.e. pending > 0 — so the escalation would
-# fire in exactly the case the short deadline exists for, and `ping` would be back
-# to 20s whenever it mattered.
-PING_TIMEOUT_DEFAULT = 10.0
+# Override with BROWSER_BRIDGE_PING_TIMEOUT (raises the IDLE deadline only).
+PING_TIMEOUT_DEFAULT = 2.0
 
 
 def _env_float(name: str, default: float) -> float:
@@ -883,7 +880,7 @@ class Instance:
                  "active_polls", "last_poll", "active_tab", "superseded",
                  "pending", "rl_tokens", "rl_last", "extension_version",
                  "extension_id", "last_poll_wall", "lost_logged",
-                 "last_dispatch")
+                 "last_dispatch", "inflight")
 
     def __init__(self, key, instance_id, label, now, burst=0.0,
                  extension_version=None, extension_id=None):
@@ -923,7 +920,17 @@ class Instance:
         # The last command handed to this instance that has NOT produced a result:
         # {"id","op","at"} or None. This is the field that would have NAMED
         # `frames` as the wedging op on 2026-07-29 without any code-reading.
+        # ⚠ DIAGNOSTIC ONLY — do NOT do deadline math on it. It is overwritten by
+        # each new enqueue (so it names the NEWEST outstanding command, not the
+        # oldest) and its `at` is wall-clock `time.time()`, not the registry's
+        # injectable monotonic clock. `inflight` below is the field for timing.
         self.last_dispatch = None
+        # cid -> MONOTONIC enqueue reading, for every command handed to this
+        # instance that has not yet produced a result. Unlike `last_dispatch` this
+        # keeps EVERY outstanding command, so `min(...)` is the age of the oldest
+        # one — which is what tells a legitimately BUSY extension apart from a
+        # WEDGED one (see Registry.submit's `fast_timeout`).
+        self.inflight: dict[str, float] = {}
 
 
 class Registry:
@@ -1137,6 +1144,50 @@ class Registry:
                     return True
             return False
 
+    def _effective_timeout_locked(self, inst, timeout, fast_timeout):
+        """The deadline for a command that wants to FAIL FAST on a wedge without
+        false-negativing a merely BUSY extension. Returns `timeout` unchanged when
+        `fast_timeout` is None (every op except `ping`).
+
+        🔴 THIS IS THE REAL INVARIANT behind the ping deadline. The extension's
+        poll loop is strictly SERIAL (service_worker.js: `await execute()` ->
+        `await postResult()` -> next `pollOnce()`), so `ping` skips the per-tab
+        FIFO but still cannot be DEQUEUED until the work ahead of it finishes.
+        Timing out while that work is legitimately in progress reports a healthy
+        profile as dead — and the documented remedy for "dead" is a FULL Brave
+        restart of the operator's live session.
+
+        The signal is `inst.inflight`: every command handed to this instance that
+        has not produced a result, stamped on the registry's MONOTONIC clock.
+          * empty            -> nothing can be ahead of the ping. A ping that then
+                                fails to answer within `fast_timeout` IS the wedge.
+          * non-empty        -> allow the work in flight its own budget. Each
+                                command is self-bounded by EXEC_OP_BUDGET_S, and
+                                they drain serially, so N of them can legitimately
+                                take N * EXEC_OP_BUDGET_S; subtract how long the
+                                oldest has already been outstanding.
+
+        CLAMPED ON BOTH SIDES, and both clamps are load-bearing:
+          * never above `timeout` (cmd_timeout) — so this can NEVER be slower than
+            the behaviour that predates the whole fast-ping change;
+          * never below `fast_timeout` — so a wedged instance whose budget has gone
+            negative still gets its full fast deadline rather than an instant fail.
+
+        WHY NOT `inst.last_dispatch`, which looks like it carries the same fact:
+        it is overwritten by every new enqueue, so it names the NEWEST outstanding
+        command rather than the oldest — a fresh enqueue behind a wedged one makes
+        the wedge look young. Its `at` is also wall-clock `time.time()`, not this
+        clock, so it cannot be compared against a monotonic deadline (and an NTP
+        step would move it). It stays a DIAGNOSTIC field; `inflight` does timing.
+        """
+        if fast_timeout is None:
+            return timeout
+        if not inst.inflight:
+            return fast_timeout
+        age = self._clock() - min(inst.inflight.values())
+        budget = len(inst.inflight) * EXEC_OP_BUDGET_S + WEDGE_GRACE_S - age
+        return max(fast_timeout, min(timeout, budget))
+
     # --- concurrency backstop (per-instance rate limit + queue-depth cap) --- #
     def _admit_locked(self, inst: Instance):
         """Decide whether `inst` may accept ANOTHER /cmd dispatch RIGHT NOW.
@@ -1178,7 +1229,7 @@ class Registry:
 
     # --- skill side -------------------------------------------------------- #
     def submit(self, command: dict, timeout: float, target: str = None,
-               session_id=None, tab=None) -> dict:
+               session_id=None, tab=None, fast_timeout: float = None) -> dict:
         """Enqueue `command` (a dict without id) to the resolved target instance
         and block for its reply.
 
@@ -1196,10 +1247,18 @@ class Registry:
         BridgeSuperseded if the servicing instance is dropped mid-flight, or
         BridgeTimeout on no reply within `timeout` (the upper bound that keeps a
         FIFO-queued command from blocking forever).
+
+        `fast_timeout` (used only by `ping`) asks for a SHORTER deadline when the
+        target instance has nothing in flight, so a wedge is reported quickly
+        without ever false-negativing a busy one. See _effective_timeout_locked —
+        that is where the invariant lives.
         """
         op = command.get("op")
         with self._cond:
             inst = self._resolve_target_locked(target)
+            # BEFORE our own enqueue: the work already in flight is what decides
+            # whether a stalled reply means "wedged" or "not our turn yet".
+            timeout = self._effective_timeout_locked(inst, timeout, fast_timeout)
             tab_id, tab_key = self._effective_tab_locked(inst, op, session_id,
                                                          tab)
             # Concurrency backstop: admit (or 429) BEFORE joining the turnstile,
@@ -1224,6 +1283,9 @@ class Registry:
                                                       touch=False)
             deadline = self._clock() + timeout
             ticket = object()
+            # Declared BEFORE the try so the finally can always reference it: the
+            # FIFO wait can raise before a cid exists.
+            cid = None
             if tab_key is not None:
                 self._tab_queues.setdefault(tab_key, deque()).append(ticket)
             try:
@@ -1256,6 +1318,9 @@ class Registry:
                     cmd["reuseTabId"] = reuse_tab_id
                 inst.outbox.append(cmd)
                 inst.waiters.add(cid)
+                # Outstanding-work clock for _effective_timeout_locked. Released
+                # in the finally below, paired exactly like `pending`.
+                inst.inflight[cid] = self._clock()
                 # Remember what we handed this instance. Cleared only when a
                 # RESULT comes back, so if the instance goes silent this field
                 # still names the command it never answered — the single fact
@@ -1286,6 +1351,12 @@ class Registry:
                 # pending bump) on EVERY exit — normal return, timeout, or
                 # supersede — so the depth cap can never leak a phantom slot.
                 inst.pending -= 1
+                # Same structural pairing for the outstanding-work clock. A
+                # stranded `inflight` entry would be WORSE than a stranded pending
+                # slot: it would make the instance look permanently busy, and
+                # `ping` would never fast-fail on that instance again.
+                if cid is not None:
+                    inst.inflight.pop(cid, None)
                 # (3) Leave the turnstile and wake the next in line.
                 if tab_key is not None:
                     q = self._tab_queues.get(tab_key)
@@ -2027,13 +2098,15 @@ def make_handler(registry: Registry, token: str, cmd_timeout: float,
                     domain="", exit_code=0)
                 return
             try:
-                # `ping` alone gets the short deadline. Chosen HERE rather than
-                # inside submit() so the choice is visible next to the op, and so
-                # no other op's timeout can be changed by accident.
-                op_timeout = ping_timeout if op == "ping" else cmd_timeout
-                result = registry.submit(body, timeout=op_timeout,
-                                         target=target, session_id=session_id,
-                                         tab=tab)
+                # `ping` alone asks for the fast-fail-when-idle deadline. Named
+                # HERE so no other op can pick it up by accident; the decision of
+                # what it actually resolves to is _effective_timeout_locked's,
+                # because only that runs under the lock that can read in-flight
+                # work. Every other op passes fast_timeout=None and is untouched.
+                result = registry.submit(
+                    body, timeout=cmd_timeout, target=target,
+                    session_id=session_id, tab=tab,
+                    fast_timeout=(ping_timeout if op == "ping" else None))
             except RateLimited as e:
                 # Per-instance concurrency backstop tripped. Distinct structured
                 # log + a telemetry event carrying a COARSE session hash so the

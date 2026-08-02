@@ -24,6 +24,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
+from unittest import mock
 
 import pytest
 
@@ -1312,8 +1313,8 @@ def test_ping_does_not_wait_out_cmd_timeout(monkeypatch):
     """REGRESSION. Pre-change `ping` used cmd_timeout like every other op, so
     against a wedged extension it burned the full budget before answering."""
     monkeypatch.delenv("BROWSER_BRIDGE_PING_TIMEOUT", raising=False)
-    # cmd_timeout 25s vs PING_TIMEOUT_DEFAULT 10s — the gap has to be wide enough
-    # that "used its own deadline" and "used cmd_timeout" are unmistakable.
+    # The instance is IDLE (this ping is the only command), so nothing can be
+    # ahead of it and a stalled reply IS the wedge → the fast deadline applies.
     srv, _ = _serve(cmd_timeout=25.0, poll_timeout=5.0)
     ext = FakeExtension(srv, swallow=True)       # picks up, never answers
     ext.start()
@@ -1324,10 +1325,10 @@ def test_ping_does_not_wait_out_cmd_timeout(monkeypatch):
         elapsed = time.monotonic() - t0
         assert st == 504 and body["error"] == "timeout"
         # Red pre-change: this was ~25s (the full cmd_timeout).
-        assert elapsed < 17.0, f"ping waited {elapsed:.1f}s — cmd_timeout, not its own"
+        assert elapsed < 5.0, f"ping waited {elapsed:.1f}s — cmd_timeout, not its own"
         # ...and it did actually WAIT its own deadline rather than failing instantly
         # for some unrelated reason (which would make the bound above vacuous).
-        assert elapsed >= 8.0, f"ping returned in {elapsed:.2f}s — it never waited"
+        assert elapsed >= 1.5, f"ping returned in {elapsed:.2f}s — it never waited"
     finally:
         ext.stop(); srv.shutdown(); srv.server_close()
 
@@ -1340,16 +1341,20 @@ def test_the_short_deadline_applies_to_ping_ONLY(monkeypatch):
     Same server, same wedged extension, a non-ping op: it must still wait out the
     full cmd_timeout.
 
-    🔴 BOUNDED ON BOTH SIDES, and the UPPER bound is the load-bearing half. With
-    cmd_timeout(4s) < PING_TIMEOUT_DEFAULT(10s), a lower bound alone would SURVIVE
-    the very mutation this control exists to catch: `op_timeout = ping_timeout`
-    leaks 10s onto getHtml, and 10 >= 3.5 passes. Caught when the default was
-    raised from 2s to 10s and this control silently stopped discriminating.
+    🔴 BOUNDED ON BOTH SIDES; each bound catches a DIFFERENT mutation, and both
+    have caught one for real:
+      * LOWER — `fast_timeout` passed for every op: an idle instance would give
+        getHtml the 2s fast deadline, so it would return in ~2s, not ~5s.
+      * UPPER — the derived busy-budget applied to every op: getHtml could then
+        run far past its own cmd_timeout.
+    A single bound is not enough. An earlier revision had only the lower one and
+    silently stopped discriminating when PING_TIMEOUT_DEFAULT briefly rose above
+    this test's cmd_timeout — the leak mutant passed `10 >= 3.5`.
     """
     monkeypatch.delenv("BROWSER_BRIDGE_PING_TIMEOUT", raising=False)
-    assert S.PING_TIMEOUT_DEFAULT > 4.0, (
-        "this control needs cmd_timeout < PING_TIMEOUT_DEFAULT to discriminate")
-    srv, _ = _serve(cmd_timeout=4.0, poll_timeout=5.0)
+    assert S.PING_TIMEOUT_DEFAULT < 5.0, (
+        "this control needs the fast deadline to be clearly below cmd_timeout")
+    srv, _ = _serve(cmd_timeout=5.0, poll_timeout=5.0)
     ext = FakeExtension(srv, swallow=True)
     ext.start()
     try:
@@ -1358,11 +1363,12 @@ def test_the_short_deadline_applies_to_ping_ONLY(monkeypatch):
         st, _ = _req(srv, "POST", "/cmd", {"op": "getHtml"})
         elapsed = time.monotonic() - t0
         assert st == 504
-        assert elapsed >= 3.5, (
-            f"getHtml returned in {elapsed:.2f}s — it never waited cmd_timeout")
-        assert elapsed < 7.0, (
-            f"getHtml waited {elapsed:.2f}s — the ping deadline leaked onto every "
-            "op (cmd_timeout was 4s)")
+        assert elapsed >= 4.0, (
+            f"getHtml returned in {elapsed:.2f}s — the fast ping deadline leaked "
+            "onto every op (cmd_timeout was 5s)")
+        assert elapsed < 9.0, (
+            f"getHtml waited {elapsed:.2f}s — something gave a non-ping op a "
+            "budget beyond its own cmd_timeout")
     finally:
         ext.stop(); srv.shutdown(); srv.server_close()
 
@@ -1403,11 +1409,17 @@ def test_ping_survives_a_BUSY_but_perfectly_healthy_extension(monkeypatch):
     try:
         assert _wait_connected(srv, want=True)
 
-        # Agent A: the slow-but-healthy op.
-        t = threading.Thread(
-            target=lambda: slow.update(
-                zip(("st", "body"), _req(srv, "POST", "/cmd", {"op": "getHtml"}))),
-            daemon=True)
+        # Agent A: the slow-but-healthy op. Exceptions are captured rather than
+        # left to surface in a daemon thread (pytest would attribute them to some
+        # unrelated later test — see the wedge test below).
+        def _slow():
+            try:
+                slow.update(zip(("st", "body"),
+                                _req(srv, "POST", "/cmd", {"op": "getHtml"})))
+            except Exception as exc:           # noqa: BLE001
+                slow["exc"] = exc
+
+        t = threading.Thread(target=_slow, daemon=True)
         t.start()
 
         # Wait until the extension has actually PICKED IT UP — being busy is the
@@ -1435,6 +1447,153 @@ def test_ping_survives_a_BUSY_but_perfectly_healthy_extension(monkeypatch):
             "busy, so this proves nothing")
         t.join(timeout=10)
         assert slow.get("st") == 200, "the slow op must also have completed fine"
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
+def test_ping_fast_fails_even_while_BUSY_once_the_work_has_blown_its_budget():
+    """🔴 THE PAYOFF of the structural gate, and the case a tuned constant could
+    NEVER express: the instance is busy AND wedged.
+
+    A fixed deadline has to choose one failure. Too short → a busy healthy profile
+    reads as dead. Too long → a genuinely wedged one takes the full cmd_timeout to
+    say so. Deriving the deadline from the age of the outstanding work does both:
+    while the in-flight command is inside EXEC_OP_BUDGET_S the ping waits, and the
+    moment that budget is exhausted the extension is provably not healthy (its own
+    `execute()` self-bound says so), and the ping fails fast.
+
+    EXEC_OP_BUDGET_S is monkeypatched small so "the work has blown its budget"
+    arrives in test time rather than 18 real seconds.
+    """
+    srv, _ = _serve(cmd_timeout=25.0, poll_timeout=5.0)
+    ext = FakeExtension(srv, swallow=True)     # takes the op, never answers
+    ext.start()
+
+    # The wedging request outlives the assertions and dies when the server closes.
+    # SWALLOW its exception explicitly: an unhandled exception in a daemon thread
+    # is reported by pytest against whatever test happens to be running when it
+    # surfaces — it showed up on `test_release_drops_ownership_without_dispatch`,
+    # which has nothing to do with this. A test must not poison its neighbours.
+    wedger = {}
+
+    def _wedge():
+        try:
+            wedger["st"] = _req(srv, "POST", "/cmd", {"op": "getHtml"})[0]
+        except Exception as exc:               # noqa: BLE001 — teardown teardown
+            wedger["exc"] = exc
+
+    try:
+        assert _wait_connected(srv, want=True)
+        # Agent A's op goes out and wedges.
+        t = threading.Thread(target=_wedge, daemon=True)
+        t.start()
+        deadline = time.time() + 5.0
+        while time.time() < deadline:
+            if any(c.get("op") == "getHtml" for c in ext.dispatched):
+                break
+            time.sleep(0.02)
+        else:
+            pytest.fail("the fake extension never dequeued the wedging op")
+
+        # Let its (shrunken) budget lapse, so the in-flight work is now OVERDUE.
+        with mock.patch.object(S, "EXEC_OP_BUDGET_S", 0.2):
+            time.sleep(0.4)
+            t0 = time.monotonic()
+            st, _ = _req(srv, "POST", "/cmd", {"op": "ping"})
+            elapsed = time.monotonic() - t0
+        assert st == 504
+        # Fast, NOT the 25s cmd_timeout: the budget went negative, so the deadline
+        # clamps down to the fast floor.
+        assert elapsed < 5.0, (
+            f"ping waited {elapsed:.1f}s against a wedged instance — the gate did "
+            "not notice the in-flight work was overdue")
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+        t.join(timeout=30)                     # let it finish before pytest moves on
+
+
+def test_effective_timeout_gate_unit(monkeypatch):
+    """The gate's arithmetic, directly — the threaded tests above cover the two
+    endpoints, this covers the boundary and both clamps (one measurement is not a
+    general claim).
+    """
+    clock = {"t": 1000.0}
+    reg = S.Registry(clock=lambda: clock["t"])
+    inst = S.Instance("k", "i", "", clock["t"])
+    g = lambda t, f: reg._effective_timeout_locked(inst, t, f)   # noqa: E731
+
+    # 1. Not a fast-fail op at all -> untouched, whatever is in flight.
+    inst.inflight = {"a": 1000.0}
+    assert g(20.0, None) == 20.0
+
+    # 2. Idle -> the fast deadline.
+    inst.inflight = {}
+    assert g(20.0, 2.0) == 2.0
+
+    # 3. Busy, work just started -> a full budget, CLAMPED to cmd_timeout so this
+    #    can never be slower than the behaviour that predates the fast ping.
+    monkeypatch.setattr(S, "EXEC_OP_BUDGET_S", 18.0)
+    monkeypatch.setattr(S, "WEDGE_GRACE_S", 2.0)
+    inst.inflight = {"a": 1000.0}
+    assert g(20.0, 2.0) == 20.0
+    assert g(5.0, 2.0) == 5.0, "must never exceed cmd_timeout"
+
+    # 4. Busy, partway through -> the REMAINING budget.
+    clock["t"] = 1012.0                     # 12s elapsed of an 18+2 budget
+    assert g(20.0, 2.0) == pytest.approx(8.0)
+
+    # 5. Overdue -> negative budget, clamped UP to the fast floor (never 0/instant).
+    clock["t"] = 1030.0
+    assert g(20.0, 2.0) == 2.0
+
+    # 6. TWO commands in flight drain serially, so the budget scales with depth —
+    #    otherwise a queue of legitimate work would false-negative.
+    clock["t"] = 1012.0
+    inst.inflight = {"a": 1000.0, "b": 1005.0}
+    assert g(60.0, 2.0) == pytest.approx(2 * 18.0 + 2.0 - 12.0)
+
+
+def test_exec_budget_matches_the_extension():
+    """EXEC_OP_BUDGET_S mirrors EXEC_OP_BUDGET_MS across a language boundary, so
+    nothing can enforce it at runtime. Assert it here: if someone retunes the
+    extension's self-bound, the gate's arithmetic silently stops matching reality.
+    """
+    proto = (Path(__file__).resolve().parent.parent
+             / "extension" / "protocol.js").read_text(encoding="utf-8")
+    m = re.search(r"export const EXEC_OP_BUDGET_MS\s*=\s*(\d+)", proto)
+    assert m, "could not find EXEC_OP_BUDGET_MS in protocol.js — retarget this test"
+    assert float(m.group(1)) / 1000.0 == S.EXEC_OP_BUDGET_S, (
+        f"protocol.js says {m.group(1)}ms, server.py says "
+        f"{S.EXEC_OP_BUDGET_S}s — the busy/wedged gate is now wrong")
+
+
+def test_inflight_is_released_on_every_exit_path():
+    """A stranded `inflight` entry is worse than a stranded `pending` slot: the
+    instance would look permanently busy and `ping` could never fast-fail on it
+    again. Pinned across the three exits — success, timeout, and a never-answered
+    command whose caller gave up.
+    """
+    srv, reg = _serve(cmd_timeout=1.0, poll_timeout=5.0)
+    ext = FakeExtension(srv, executor=lambda c: {"ok": 1})
+    ext.start()
+    try:
+        assert _wait_connected(srv, want=True)
+        st, _ = _req(srv, "POST", "/cmd", {"op": "tabs"})       # success
+        assert st == 200
+        insts = list(reg._instances.values())
+        assert insts and all(not i.inflight for i in insts), "leaked after success"
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+    srv, reg = _serve(cmd_timeout=1.0, poll_timeout=5.0)
+    ext = FakeExtension(srv, swallow=True)
+    ext.start()
+    try:
+        assert _wait_connected(srv, want=True)
+        st, _ = _req(srv, "POST", "/cmd", {"op": "getHtml"})    # timeout
+        assert st == 504
+        insts = list(reg._instances.values())
+        assert insts and all(not i.inflight for i in insts), "leaked after timeout"
     finally:
         ext.stop(); srv.shutdown(); srv.server_close()
 

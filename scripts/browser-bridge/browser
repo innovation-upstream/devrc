@@ -218,6 +218,17 @@
 #
 # Output is JSON on stdout (pretty-printed if `jq` is present). Exit non-zero on
 # transport/HTTP error so a caller can branch.
+#
+# EXIT CODES
+#   0  success
+#   1  the command failed — nothing was applied, or the primary op itself failed
+#   3  ONLY from `nav --wake` / `open --wake`: the nav/open SUCCEEDED and only the
+#      wake follow-up failed. The tab HAS navigated and its JSON is still on
+#      stdout, with `result.data.wake = {"ok":false,"error":"<real cause>"}`.
+#      Branch on 3 rather than treating it as a plain failure — and read that
+#      `error` to tell a transient cause (`rate_limited`) from a permanent one
+#      (`wake_with_frame_unsupported`). On success `result.data.wake.ok` is true,
+#      so `ok` is always present in both shapes.
 set -uo pipefail
 
 HOST="${BROWSER_BRIDGE_HOST:-127.0.0.1}"
@@ -743,33 +754,71 @@ _wake_after() {
   # branch even mentioned `wake`, so the operator could not tell WHICH half failed.
   #
   # Now: capture the wake's status, always emit the primary JSON, attach the wake
-  # outcome under result.data.wake (ok:false + the error), and exit 3 — a DISTINCT
-  # code meaning "the primary op succeeded, only the --wake follow-up failed", so a
-  # caller can branch on it instead of guessing. cmd_op's own stderr diagnostics
-  # (429/504/op-level) are untouched and still printed above ours.
-  local wresp wrc
-  wresp="$(cmd_op wake "$wextra")"; wrc=$?
+  # outcome under result.data.wake, and exit 3 — a DISTINCT code meaning "the
+  # primary op succeeded, only the --wake follow-up failed", so a caller can branch
+  # on it instead of guessing.
+  #
+  # 🔴 THE ATTACHED `error` IS THE REAL CAUSE, not a placeholder. It first carried
+  # a constant ("wake_failed_after_nav"), which is worse than useless: a script
+  # reading `.result.data.wake.error` could not tell a TRANSIENT `rate_limited`
+  # (retry) from a PERMANENT `wake_with_frame_unsupported` (do not), and the actual
+  # reason existed only in unstructured stderr. cmd_op already prints the server's
+  # raw body for the HTTP failures and names the op-level error in its die message,
+  # so stderr is captured, RE-EMITTED VERBATIM (nothing is hidden from the reader)
+  # and then classified into the machine-readable token.
+  local wresp wrc werrf
+  werrf="$(mktemp -t browser-wake-err.XXXXXX)" || werrf=""
+  if [ -n "$werrf" ]; then
+    wresp="$(cmd_op wake "$wextra" 2>"$werrf")"; wrc=$?
+    cat "$werrf" >&2                       # verbatim; capture must not swallow it
+  else
+    wresp="$(cmd_op wake "$wextra")"; wrc=$?
+  fi
   if [ "$wrc" -ne 0 ]; then
     echo "browser: the '${WAKE_PRIMARY_OP:-primary}' op SUCCEEDED — only the --wake follow-up failed (see above)." >&2
     echo "browser:   The tab HAS ${WAKE_PRIMARY_VERB:-been acted on}; its JSON is on stdout with result.data.wake.ok=false." >&2
     echo "browser:   The page may still be throttled/unrendered: re-run 'browser wake' when ready." >&2
     echo "browser:   Exit code 3 = primary ok, wake failed (rc 1 would mean the whole command failed)." >&2
-    printf '%s' "$primary" | python3 -c '
-import json, sys
-raw = sys.stdin.read()
+    printf '%s\v%s' "$primary" "$(cat "${werrf:-/dev/null}" 2>/dev/null)" | python3 -c '
+import json, re, sys
+
+raw, _, err = sys.stdin.read().partition("\v")
+
+def classify(text):
+    """The machine-readable cause, from cmd_op stderr it already emits.
+
+    Order matters: the op-level line is the most specific, then the server body
+    that the HTTP branches echo verbatim, then a last-resort token.
+    """
+    m = re.search(r"op \x27\w+\x27 failed in the browser: (.+)", text)
+    if m:
+        return m.group(1).strip()
+    for line in text.splitlines():
+        line = line.strip()
+        if line.startswith("{"):
+            try:
+                e = json.loads(line).get("error")
+            except Exception:
+                continue
+            if e:
+                return str(e)
+    return "wake_failed"
+
 try:
     d = json.loads(raw)
     res = d["result"]
     data = res.get("data")
     if not isinstance(data, dict):
         data = {}; res["data"] = data
-    data["wake"] = {"ok": False, "error": sys.argv[1]}
+    data["wake"] = {"ok": False, "error": classify(err)}
     json.dump(d, sys.stdout)
 except Exception:
     sys.stdout.write(raw)
-' "wake_failed_after_${WAKE_PRIMARY_OP:-primary}"
+'
+    [ -n "$werrf" ] && rm -f "$werrf"
     return 3
   fi
+  [ -n "$werrf" ] && rm -f "$werrf"
   printf '%s\v%s' "$primary" "$wresp" | python3 -c '
 import json, sys
 primary, _, wake = sys.stdin.read().partition("\v")
@@ -788,7 +837,18 @@ if not isinstance(data, dict):
     res["data"] = data
 wres = w.get("result") if isinstance(w, dict) else None
 wdata = wres.get("data") if isinstance(wres, dict) else None
-data["wake"] = wdata if isinstance(wdata, dict) else {"applied": True}
+# 🔴 SHAPE-SYMMETRIC WITH THE FAILURE BRANCH: `ok` is ALWAYS present.
+# The wake payload from the extension has no `ok` key, so writing it raw made
+# `if (data.wake.ok)` falsy on every SUCCESSFUL wake and forced callers into
+# the undiscoverable negative `wake.ok !== false`. Three shapes existed (raw
+# data / {"applied":true} / {"ok":false,...}); now there are two, differing
+# only in the value of `ok`.
+# Assigned AFTER the copy so ours wins deterministically even if a future
+# extension build starts sending an `ok` of its own.
+# (No apostrophes in this block — it is inside python3 -c SINGLE quotes.)
+w_out = dict(wdata) if isinstance(wdata, dict) else {"applied": True}
+w_out["ok"] = True
+data["wake"] = w_out
 json.dump(d, sys.stdout)
 '
 }
@@ -836,15 +896,16 @@ cmd_op() {
       # Sending someone there on a false negative is the worst outcome this command
       # has, so the ping wording must NOT imply it.
       if [ "$op" = "ping" ]; then
-        echo "browser: ping timed out on its SHORT deadline (BROWSER_BRIDGE_PING_TIMEOUT, default 10s)." >&2
-        echo "browser:   This does NOT mean the extension is stale, wedged or dead." >&2
-        echo "browser:   The extension runs ONE command at a time, so a ping queued behind" >&2
-        echo "browser:   another session's op (a heavy nav, a --fullpage screenshot) times out" >&2
-        echo "browser:   here while the profile is perfectly healthy." >&2
-        echo "browser:   DO THIS FIRST: wait for the other op to finish and re-run the ping." >&2
-        echo "browser:   Only if it fails again on an IDLE profile is the build actually suspect." >&2
-        echo "browser:   For a host that runs long ops concurrently, raise" >&2
-        echo "browser:   BROWSER_BRIDGE_PING_TIMEOUT on the browser-bridge service and restart it." >&2
+        echo "browser: ping timed out. The server gives ping a SHORT deadline only when the" >&2
+        echo "browser:   profile has nothing in flight; while it is busy the deadline is derived" >&2
+        echo "browser:   from that work, so this is NOT simply 'you were too impatient'." >&2
+        echo "browser:   Two things still produce it:" >&2
+        echo "browser:     1. the extension really is wedged (its service worker took a command" >&2
+        echo "browser:        and blew its own 18s execution budget), or" >&2
+        echo "browser:     2. several concurrent ops from other sessions queued ahead of it." >&2
+        echo "browser:   DO THIS FIRST: if anything else is driving this profile, let it finish" >&2
+        echo "browser:   and re-run. A repeat failure on an OTHERWISE IDLE profile is the real" >&2
+        echo "browser:   signal — then, and only then, suspect the loaded build." >&2
         echo "$resp" >&2
         die "ping timed out (see above) — do NOT restart Brave on the strength of this alone"
       fi
