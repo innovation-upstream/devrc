@@ -59,8 +59,10 @@
 #                               (MEASURED)". Pass --instance when two profiles
 #                               are connected, else 409 ambiguous.
 #   browser instances         — list connected instances as JSON (key/label/url)
-#   browser open [url]        — open a NEW tab this session owns (default about:blank);
+#   browser open [url] [--wake[=MS]]
+#                             — open a NEW tab this session owns (default about:blank);
 #                               subsequent ops route to it. Prints its tabId.
+#                               --wake as for `nav`.
 #   browser close             — close this session's owned tab + drop ownership
 #   browser release           — drop ownership WITHOUT closing the tab
 #   browser wake [--wait MS | --no-wait]
@@ -146,7 +148,11 @@
 #                               the PAGE and never touches the filesystem.
 #   browser eval '<js>'       — same as `browser js` (unchanged, not deprecated)
 #   browser tabs              — list open tabs (flags this session's owned tab)
-#   browser nav <url>         — navigate the owned/active tab to <url>
+#   browser nav <url> [--wake[=MS]]
+#                             — navigate the owned/active tab to <url>. --wake
+#                               un-throttles the (background → throttled) tab in
+#                               the SAME invocation, so the next read is not a
+#                               shell — it replaces the `nav` then `wake` pair.
 #   browser screenshot [path] [--fullpage] [--data-url]
 #                             — screenshot the owned/active tab via CDP
 #                               (Page.captureScreenshot) — WORKS on a background/
@@ -198,8 +204,9 @@
 #   `--`; subcommands taking one (js/eval, text, screenshot, type, key, emulate)
 #   accept exactly one, and a SECOND is an error rather than overwriting the
 #   first — including when the first is the empty string.
-#   `nav`/`open`/`click`/`upload` take no flags at all, so their positionals stay
-#   bare and need no `--` (a `-`-leading selector or path just works).
+#   `nav`/`open` take one positional plus `--wake[=MS]`, in either order.
+#   `click`/`upload` take no flags at all, so their positionals stay bare and need
+#   no `--` (a `-`-leading selector or path just works).
 #
 # Global flags (before the subcommand): --instance <key>, --tab <id>,
 #   --frame <frameId|url-substring> (route a read/click INTO a cross-origin frame).
@@ -428,6 +435,89 @@ except Exception:
 '
 }
 
+# _explain_instance_failure RESP KEY MODE — stderr advice for the two routing
+# failures that look identical from the CLI but need OPPOSITE next actions.
+# MODE is "unknown_instance" (a 404 for --instance KEY) or "no_extension" (a 503:
+# nothing at all is connected).
+#
+# WHY THIS EXISTS — measured, 2026-08-02 usage audit. `unknown_instance` was the
+# top error at 52 occurrences, and **48 of them used the CORRECT label** (`work`),
+# 35 inside a single hour, with `eval` re-issued **37 times**. That is not user
+# error: a Brave profile dropped its long-poll for ~2 hours and the old message —
+# "no connected instance matches --instance 'work'" — reads as "you typed the
+# wrong label", so agents kept retrying a name that was right. `no_extension` has
+# the identical shape (16 of 19 in one hour) and gets the same treatment.
+#
+# The distinguishing fact is already on the wire: the server returns
+# `known_instances` (every routing key it has seen this process lifetime, each
+# with `connected`) in BOTH bodies. So:
+#   * KEY present in known_instances, connected:false → the label is RIGHT, the
+#     profile is gone. Restarting Brave is the fix; retrying is not.
+#   * KEY absent entirely                            → the label is wrong (or that
+#     profile has never once been wired up). Listing the live keys is the fix.
+# The "do not retry" line is the point of the whole change: a blind-retry burst is
+# the symptom of a message that never told anyone to stop.
+#
+# DEGRADES SILENTLY (like render_missing): an older server with no
+# `known_instances`, a non-dict body, anything unparseable → fall back to the
+# generic wording rather than tracebacking over a real error.
+_explain_instance_failure() {
+  printf '%s' "$1" | python3 -c '
+import json, sys
+
+key, mode = sys.argv[1], sys.argv[2]
+def w(line):
+    sys.stderr.write("browser: " + line + "\n")
+
+known = []
+try:
+    d = json.load(sys.stdin)
+    if isinstance(d, dict):
+        known = [i for i in (d.get("known_instances") or []) if isinstance(i, dict)]
+except Exception:
+    known = []
+
+match = next((i for i in known if i.get("key") == key), None) if key else None
+gone = [i for i in known if not i.get("connected")]
+
+def dropped(i):
+    seen = i.get("last_seen") or "?"
+    age = i.get("last_seen_age_s")
+    return "%s (last seen %s%s)" % (
+        i.get("key", "?"), seen,
+        ", %ss ago" % age if age is not None else "")
+
+if mode == "unknown_instance" and match is not None and not match.get("connected"):
+    w("instance %r is KNOWN but NOT CONNECTED — the label is correct; that Brave" % key)
+    w("  profile has dropped its long-poll.  " + dropped(match))
+    w("  FIX: switch to that Brave profile and FULLY RESTART Brave (a")
+    w("       brave://extensions reload often no-ops — the long-poll keeps the old")
+    w("       service worker alive).")
+    w("  DO NOT RETRY this command: it will fail identically until that profile")
+    w("  reconnects. Re-running it 37 times is the measured failure mode here.")
+elif mode == "unknown_instance":
+    w("instance %r is UNKNOWN — no profile has registered that routing key on this" % key)
+    w("  server. This is a WRONG LABEL (or a profile never wired up), not a drop.")
+    if known:
+        w("  Keys this server HAS seen: " + ", ".join(
+            "%s%s" % (i.get("key", "?"), "" if i.get("connected") else " [disconnected]")
+            for i in known))
+    w("  FIX: pass one of the connected keys listed above, or set this profile\x27s")
+    w("       routing key in the extension options.")
+else:  # no_extension
+    if gone:
+        w("NO Brave profile is connected — but this server HAS seen: " +
+          ", ".join(dropped(i) for i in gone))
+        w("  So the extension IS installed and has dropped its long-poll.")
+        w("  FIX: FULLY RESTART Brave (a brave://extensions reload often no-ops).")
+        w("  DO NOT RETRY until it is back — every op will fail identically.")
+    else:
+        w("NO Brave profile has EVER connected to this bridge.")
+        w("  FIX: load the browser-bridge extension in Brave and paste the token")
+        w("       into its options. Triage steps: SKILL.md -> When things look broken")
+' "$2" "$3"
+}
+
 # _curl METHOD PATH [JSON_BODY] — emits `<body>\n<http_code>` to stdout. The
 # caller splits it (globals can't cross the command-substitution subshell).
 _curl() {
@@ -483,6 +573,36 @@ if isinstance(data, dict) and data.get("hidden") is True:
                                 "or re-run this read with --wake")
     sys.stderr.write("browser: " + str(note) + "\n")
 '
+}
+
+# _wake_flag ARG — ONE RULE, ONE PLACE for `--wake` / `--wake=MS`.
+#
+# Returns 0 (and sets WAKE=1, plus WAKE_WAIT=<ms> for the `=MS` form) when ARG is
+# a wake flag; returns 1 without touching anything when it is not, so a caller's
+# `case` can go on to handle its own flags. The caller does the `shift`.
+#
+# WHY A HELPER: this parse used to be copy-pasted verbatim into `html`, `text` and
+# `js` — three call sites, three chances to drift, and adding it to `nav`/`open`
+# would have made five. A predicate duplicated across call sites regenerates the
+# same bug at every site.
+#
+# VALIDATION STAYS AT PARSE TIME (the load-bearing property this preserves): the
+# `die` fires HERE, in the flag loop, before anything is put on the wire. It must
+# NOT move into wake_fields, which runs inside `$( )` where a `die` would exit only
+# the subshell and the request would still be sent.
+#
+# It sets GLOBALS rather than echoing, precisely so the `die` is not trapped in a
+# command substitution. Every caller resets WAKE/WAKE_WAIT before its loop.
+WAKE=""; WAKE_WAIT=""
+_wake_flag() {
+  case "$1" in
+    --wake) WAKE=1; return 0 ;;
+    --wake=*)
+      WAKE=1; WAKE_WAIT="${1#--wake=}"
+      case "$WAKE_WAIT" in (*[!0-9]*|"") die "--wake=MS must be a non-negative integer of ms (got: $WAKE_WAIT)";; esac
+      return 0 ;;
+  esac
+  return 1
 }
 
 # wake_fields WAKE WAITMS — emit the `,"wake":true[,"waitMs":N]` JSON fragment for
@@ -543,6 +663,51 @@ json.dump(d, sys.stdout)
 ' "$1"
 }
 
+# _wake_after PRIMARY_JSON — the `nav`/`open` half of `--wake`.
+#
+# WHY THIS IS A CLIENT-SIDE COMPOSE AND NOT A `"wake":true` WIRE FIELD: the
+# extension honours `cmd.wake` on exactly three ops — getHtml / text / eval — where
+# it means "un-throttle and do THIS READ inside the same CDP session". `nav` and
+# `open` are not reads; there is nothing to fold the un-throttle into. So
+# `nav --wake` is defined as what the 13 measured `nav`→`wake` transcript pairs
+# were hand-typing: navigate, then wake the resulting tab. Two wire ops, ONE
+# invocation — the round trip it removes is the agent's, not the bridge's.
+#
+# Consequence worth knowing: the wire body for `nav`/`open` is UNCHANGED (no
+# `wake` field is ever sent for them), so no extension version can mis-handle it.
+#
+# Output: PRIMARY_JSON with the wake op's own `result.data` merged in under
+# `result.data.wake` — the same place `--wake` reads report it (wakeAnnotate in
+# extension/service_worker.js), so one shape covers both. Without --wake nothing
+# here runs and stdout is byte-identical to before.
+_wake_after() {
+  local primary="$1" wextra="" wresp
+  if [ -n "$WAKE_WAIT" ]; then wextra="\"waitMs\":${WAKE_WAIT}"; fi
+  # `|| exit 1` — cmd_op's `die` would otherwise exit only this substitution.
+  wresp="$(cmd_op wake "$wextra")" || exit 1
+  printf '%s\v%s' "$primary" "$wresp" | python3 -c '
+import json, sys
+primary, _, wake = sys.stdin.read().partition("\v")
+try:
+    d = json.loads(primary)
+    w = json.loads(wake)
+except Exception:
+    # Never let the annotation break the command: emit the primary verbatim.
+    sys.stdout.write(primary); sys.exit(0)
+res = d.get("result") if isinstance(d, dict) else None
+if not isinstance(res, dict):
+    sys.stdout.write(primary); sys.exit(0)
+data = res.get("data")
+if not isinstance(data, dict):
+    data = {}
+    res["data"] = data
+wres = w.get("result") if isinstance(w, dict) else None
+wdata = wres.get("data") if isinstance(wres, dict) else None
+data["wake"] = wdata if isinstance(wdata, dict) else {"applied": True}
+json.dump(d, sys.stdout)
+'
+}
+
 # cmd_op OP [EXTRA_JSON_FIELDS] — POST /cmd, print the result JSON on a genuine
 # success; exit non-zero with a readable message on a transport, HTTP, OR
 # op-level (result.ok:false) error. Honours the global --instance (INSTANCE) by
@@ -570,22 +735,27 @@ cmd_op() {
     200) : ;;  # HTTP ok — still must inspect the inner op result below.
     503)
       # Fail-FAST (no waiting on cmd_timeout): resolution failed before the
-      # command ever reached an instance. Name the profiles we HAVE seen drop.
-      printf '%s' "$resp" | render_missing
-      echo "$resp" >&2
-      die "no extension connected — load the browser-bridge extension in Brave (see SKILL.md)"
+      # command ever reached an instance. Two DIFFERENT situations wear this one
+      # status — "never wired up" and "was wired up, dropped" — and they need
+      # opposite next actions; _explain_instance_failure separates them.
+      _explain_instance_failure "$resp" "$INSTANCE" no_extension
+      die "op '$op' not dispatched: no extension connected"
       ;;
     504) echo "$resp" >&2; die "timeout waiting for the extension to answer (is Brave focused / responsive?)" ;;
     401) die "unauthorized — token mismatch (re-paste the token in the extension options)" ;;
     429)
       # rate_limited / queue_full — the per-instance concurrency backstop is
-      # shedding load (see SKILL.md → Concurrency). Exit non-zero so a runaway
+      # shedding load. Concurrency guidance: reference/tabs-instances.md, and the
+      # Concurrent-drivers paragraph of SKILL.md → This is the user's LIVE session
+      # (there is NO "Concurrency" heading — this pointer used to name one, and a
+      # test now proves every SKILL.md heading the CLI names actually exists).
+      # Exit non-zero so a runaway
       # loop gets a hard, detectable back-off signal (that IS the point).
       echo "$resp" >&2
       if printf '%s' "$resp" | grep -q '"queue_full"'; then
         die "queue full — too many concurrent browser ops on this instance; back off and retry"
       fi
-      die "rate-limited — browser ops issued too fast; back off and retry (a bare high-rate eval loop is throttled — see SKILL.md Concurrency)"
+      die "rate-limited — browser ops issued too fast; back off and retry (a bare high-rate eval loop is throttled — see reference/tabs-instances.md)"
       ;;
     409)
       # ambiguous_instance (>1 connected, no --instance), no_owned_tab, or superseded.
@@ -626,12 +796,13 @@ cmd_op() {
     404)
       if printf '%s' "$resp" | grep -q '"unknown_instance"'; then
         # Fail-FAST: the server rejects an unresolvable target BEFORE enqueueing,
-        # so this never waits out the 20s cmd_timeout. Print the live instances
-        # AND any known-but-dropped ones — a mistyped label and a profile that
-        # silently died look identical from the CLI otherwise.
-        echo "browser: no connected instance matches --instance '${INSTANCE}'. Connected:" >&2
+        # so this never waits out the 20s cmd_timeout. A mistyped label and a
+        # profile that silently died are the SAME status code and used to be the
+        # same sentence; _explain_instance_failure splits them and tells the
+        # disconnected case to STOP RETRYING (the measured failure mode).
+        _explain_instance_failure "$resp" "$INSTANCE" unknown_instance
+        echo "browser: connected right now:" >&2
         printf '%s' "$resp" | render_instances
-        printf '%s' "$resp" | render_missing
         exit 1
       fi
       echo "$resp" >&2; die "HTTP 404 from /cmd"
@@ -745,17 +916,31 @@ case "$sub" in
     printf '%s' "$resp" | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin).get("instances", []), indent=2))'
     ;;
   open)
+    # browser open [url] [--wake[=MS]]
     # Optional url; default about:blank. Records this session's owned tab.
-    if [ $# -ge 1 ]; then
-      url="$(json_str "$1")"
-      shift
-      # `open` takes NO flags, so it keeps a bare positional (a URL can never be
-      # confused for a flag). But an extra arg used to be SILENTLY DROPPED — the
-      # same failure mode as the `js` flag-order bug, one step quieter. Reject it.
-      [ $# -eq 0 ] || die "browser open takes at most one url (got extra: $1)"
-      cmd_op open "\"url\":${url}" | pretty
+    # `--wake` un-throttles the freshly-opened (BACKGROUND, therefore throttled)
+    # tab in the same invocation — see the `nav` arm and _wake_after.
+    # ⚠ `--wake` on a default `open` (about:blank) is legal but pointless: there is
+    # no page to render. It is not rejected, because `open --wake` composes with a
+    # url and a needless wake is cheap and harmless.
+    WAKE=""; WAKE_WAIT=""; POS=""; POS_SEEN=0
+    while [ $# -gt 0 ]; do
+      if _wake_flag "$1"; then shift; continue; fi
+      case "$1" in
+        --) shift; pos_rest "open takes at most one url" "$@"; break ;;
+        -*) die "browser open: unknown flag: $1 (try: --wake[=MS]; use '--' before a url starting with '-')" ;;
+        *) pos_add "open takes at most one url" "$1"; shift ;;
+      esac
+    done
+    # POS_SEEN, not [ -n "$POS" ]: `open -- ''` must not be mistaken for a bare
+    # `open` (which legitimately means about:blank).
+    extra=""
+    if [ "$POS_SEEN" -eq 1 ]; then extra="\"url\":$(json_str "$POS")"; fi
+    if [ -n "$WAKE" ]; then
+      resp="$(cmd_op open "$extra")" || exit 1
+      _wake_after "$resp" | pretty
     else
-      cmd_op open | pretty
+      cmd_op open "$extra" | pretty
     fi
     ;;
   close)
@@ -969,22 +1154,19 @@ sys.stdout.write(json.dumps(fields)[1:-1])
     # takes the light chrome.scripting path with NO debugger banner, and routing
     # every read through CDP would flash "an extension is debugging this browser"
     # on every single read — trading focus theft for banner spam.
-    maxb=32768; wake=""; wakewait=""
+    maxb=32768; WAKE=""; WAKE_WAIT=""
     while [ $# -gt 0 ]; do
+      if _wake_flag "$1"; then shift; continue; fi
       case "$1" in
         --max-bytes) shift; [ $# -ge 1 ] || die "usage: browser html [--max-bytes N]"; maxb="$1"; shift ;;
         --max-bytes=*) maxb="${1#--max-bytes=}"; shift ;;
-        --wake) wake=1; shift ;;
-        --wake=*) wake=1; wakewait="${1#--wake=}";
-          case "$wakewait" in (*[!0-9]*|"") die "--wake=MS must be a non-negative integer of ms (got: $wakewait)";; esac
-          shift ;;
         --) shift; [ $# -eq 0 ] || die "browser html takes no positional args (got: $1)"; break ;;
         -*) die "browser html: unknown flag: $1 (try: --max-bytes N | --wake[=MS])" ;;
         *) die "browser html takes no positional args (got: $1)" ;;
       esac
     done
     case "$maxb" in (*[!0-9]*|"") die "--max-bytes must be a non-negative integer (got: $maxb)";; esac
-    extra="\"maxBytes\":${maxb}$(wake_fields "$wake" "$wakewait")"
+    extra="\"maxBytes\":${maxb}$(wake_fields "$WAKE" "$WAKE_WAIT")"
     cmd_op getHtml "$extra" | cap_html "$maxb" | pretty
     ;;
   text)
@@ -995,15 +1177,12 @@ sys.stdout.write(json.dumps(fields)[1:-1])
     # --wake routes this one read through CDP with the un-throttle applied in the
     # same session (see `browser html` / `browser wake`).
     # --annotated returns structured element data instead of plain text.
-    POS=""; POS_SEEN=0; maxb=32768; wake=""; wakewait=""; annotated=""
+    POS=""; POS_SEEN=0; maxb=32768; WAKE=""; WAKE_WAIT=""; annotated=""
     while [ $# -gt 0 ]; do
+      if _wake_flag "$1"; then shift; continue; fi
       case "$1" in
         --max-bytes) shift; [ $# -ge 1 ] || die "usage: browser text [selector] [--max-bytes N] [--annotated]"; maxb="$1"; shift ;;
         --max-bytes=*) maxb="${1#--max-bytes=}"; shift ;;
-        --wake) wake=1; shift ;;
-        --wake=*) wake=1; wakewait="${1#--wake=}";
-          case "$wakewait" in (*[!0-9]*|"") die "--wake=MS must be a non-negative integer of ms (got: $wakewait)";; esac
-          shift ;;
         --annotated) annotated=1; shift ;;
         --) shift; pos_rest "text takes at most one selector" "$@"; break ;;
         -*) die "browser text: unknown flag: $1 (try: --max-bytes N | --wake[=MS] | --annotated; use '--' before a selector starting with '-')" ;;
@@ -1012,7 +1191,7 @@ sys.stdout.write(json.dumps(fields)[1:-1])
     done
     sel="$POS"
     case "$maxb" in (*[!0-9]*|"") die "--max-bytes must be a non-negative integer (got: $maxb)";; esac
-    extra="\"maxBytes\":${maxb}$(wake_fields "$wake" "$wakewait")"
+    extra="\"maxBytes\":${maxb}$(wake_fields "$WAKE" "$WAKE_WAIT")"
     if [ -n "$sel" ]; then extra="\"selector\":$(json_str "$sel"),${extra}"; fi
     if [ -n "$annotated" ]; then extra="${extra},\"annotated\":true"; fi
     cmd_op text "$extra" | pretty
@@ -1044,13 +1223,10 @@ sys.stdout.write(json.dumps(fields)[1:-1])
     # An expression that legitimately STARTS with `-` (e.g. `-1+2`) is still
     # rejected as an unknown flag — pass it after the `--` end-of-flags separator:
     #   browser js -- '-1+2'
-    POS=""; POS_SEEN=0; wake=""; wakewait=""
+    POS=""; POS_SEEN=0; WAKE=""; WAKE_WAIT=""
     while [ $# -gt 0 ]; do
+      if _wake_flag "$1"; then shift; continue; fi
       case "$1" in
-        --wake) wake=1; shift ;;
-        --wake=*) wake=1; wakewait="${1#--wake=}";
-          case "$wakewait" in (*[!0-9]*|"") die "--wake=MS must be a non-negative integer of ms (got: $wakewait)";; esac
-          shift ;;
         --) shift; pos_rest "js takes exactly one JS argument" "$@"; break ;;
         -*) die "browser js: unknown flag: $1 (try: --wake[=MS]; use '--' before a JS expression starting with '-')" ;;
         *) pos_add "js takes exactly one JS argument" "$1"; shift ;;
@@ -1059,26 +1235,40 @@ sys.stdout.write(json.dumps(fields)[1:-1])
     # POS_SEEN (not [ -n "$POS" ]) so `browser js ''` keeps its old meaning.
     [ "$POS_SEEN" -eq 1 ] || die "usage: browser js '<js>' [--wake[=MS]]   (or the identical: browser eval '<js>')"
     js="$(json_str "$POS")"
-    cmd_op eval "\"js\":${js}$(wake_fields "$wake" "$wakewait")" | pretty
+    cmd_op eval "\"js\":${js}$(wake_fields "$WAKE" "$WAKE_WAIT")" | pretty
     ;;
   tabs)
     cmd_op tabs | pretty
     ;;
   nav)
-    [ $# -ge 1 ] || die "usage: browser nav <url>"
-    nav_url="$1"; url="$(json_str "$1")"; shift
-    # No flags on `nav` → the positional stays bare (a URL never looks like a
-    # flag). Extra args were silently dropped before; make that loud instead.
-    # When the FIRST arg looks like a flag, name THAT rather than the trailing
-    # url: `browser nav --wake <url>` is the flag-order confusion this file's
-    # other fix is about, and "got extra: <url>" points at the innocent arg.
-    if [ $# -ne 0 ]; then
-      case "$nav_url" in
-        -*) die "browser nav takes no flags — '$nav_url' was read as the url. Put the url first: browser nav '$1'" ;;
-        *)  die "browser nav takes exactly one url (got extra: $1)" ;;
+    # browser nav <url> [--wake[=MS]]
+    #
+    # `nav` USED to take no flags at all, and `browser nav --wake <url>` was a
+    # deliberate hard error ("takes no flags — put the url first"). That error was
+    # correct about the parse and wrong about the need: `nav` lands you on a
+    # BACKGROUND tab, which is throttled, so the very next read is a shell. The
+    # 2026-08-02 usage audit measured 13 `nav`→`wake` / `open`→`wake` adjacent
+    # pairs in Claude transcripts and one opencode session that is literally
+    # `nav wake eval` ×5. So the flag is now REAL rather than rejected, and — like
+    # `text`/`html`/`js` — flag order is free. See _wake_after for why this is a
+    # client-side compose (the extension has no `wake` on the `nav` op).
+    WAKE=""; WAKE_WAIT=""; POS=""; POS_SEEN=0
+    while [ $# -gt 0 ]; do
+      if _wake_flag "$1"; then shift; continue; fi
+      case "$1" in
+        --) shift; pos_rest "nav takes exactly one url" "$@"; break ;;
+        -*) die "browser nav: unknown flag: $1 (try: --wake[=MS]; use '--' before a url starting with '-')" ;;
+        *) pos_add "nav takes exactly one url" "$1"; shift ;;
       esac
+    done
+    [ "$POS_SEEN" -eq 1 ] || die "usage: browser nav <url> [--wake[=MS]]"
+    url="$(json_str "$POS")"
+    if [ -n "$WAKE" ]; then
+      resp="$(cmd_op nav "\"url\":${url}")" || exit 1
+      _wake_after "$resp" | pretty
+    else
+      cmd_op nav "\"url\":${url}" | pretty
     fi
-    cmd_op nav "\"url\":${url}" | pretty
     ;;
   screenshot)
     # browser screenshot [path] [--fullpage]
@@ -1190,6 +1380,15 @@ if explicit:
     with open(out,"wb") as fh:
         fh.write(png)
     print(out)
+    # A capture nobody Reads is pure waste: the 2026-08-02 usage audit measured
+    # 7 of 63 explicit-path captures never Read back. Exit 0 and a path on stdout
+    # look like success, so the one thing still required is easy to forget. ONE
+    # short line, and deliberately `#`-prefixed so line 1 stays the bare path for
+    # anything parsing it (and so the hint cannot be mistaken FOR a path).
+    # NOT printed for --data-url (no file exists) or the temp-file branch (whose
+    # JSON already carries an equivalent `note`) — printing it there would be
+    # wrong, and those two are the negative controls for the test.
+    print("# Read %s to view it." % out)
 else:
     # mkstemp: O_CREAT|O_EXCL at 0600 — not world-readable, not symlink-followable.
     fd,out=tempfile.mkstemp(prefix=PREFIX, suffix=SUFFIX, dir=tmpdir)

@@ -70,6 +70,15 @@ Config (env):
     BROWSER_BRIDGE_PORT          bind port (default 8788 — must NOT be 8787)
     BROWSER_BRIDGE_TOKEN_FILE    token path (default ~/.config/browser-bridge/token)
     BROWSER_BRIDGE_CMD_TIMEOUT   seconds a /cmd waits for a result (default 20)
+    BROWSER_BRIDGE_PING_TIMEOUT  seconds a `ping` /cmd waits (default 2). `ping` is
+                                 the DIAGNOSTIC op — the thing you run FIRST to ask
+                                 "is the loaded extension current?" — so it must
+                                 answer "no" fast. Measured 2026-08-02: a 38%
+                                 failure rate, and every failure burned the full
+                                 20s CMD_TIMEOUT while 21 healthy pings averaged
+                                 3-4ms. 2s is ~500x headroom over the healthy path.
+                                 Applies to `ping` ONLY; every other op keeps
+                                 CMD_TIMEOUT.
     BROWSER_BRIDGE_POLL_TIMEOUT  seconds a /poll blocks before 204 (default 25)
     BROWSER_BRIDGE_RATE_PER_SEC  per-instance sustained /cmd dispatch rate
                                  (token-bucket refill, default 5; 0 → unlimited)
@@ -191,6 +200,30 @@ MAX_RESULT_BODY = 32 * 1024 * 1024  # a screenshot data URL can be a few MB.
 
 # A connection is considered "present" if a long-poll landed within this window.
 CONNECT_STALE_S = 40.0
+
+# `ping`'s own /cmd deadline, in seconds. NOT a bare literal at the call site and
+# NOT sharing CMD_TIMEOUT: `ping` is the documented FIRST thing you run when you
+# suspect the loaded extension is stale, and a diagnostic that takes 20s to say
+# "no" is one an operator learns to skip. MEASURED 2026-08-02 over a 2-day window:
+# 34 pings, 13 failures (38.2% — the worst rate of any op), of which 6 timed out at
+# exactly 20,000ms; the 21 healthy ones averaged 3-4ms. 2s leaves ~500x headroom
+# over the healthy path while capping the failure path at a tenth of what it was.
+# Override with BROWSER_BRIDGE_PING_TIMEOUT (e.g. a slow/loaded host).
+PING_TIMEOUT_DEFAULT = 2.0
+
+
+def _env_float(name: str, default: float) -> float:
+    """A float from the environment, falling back to `default` on absent OR
+    unparseable. A malformed knob must not stop the bridge from starting — a
+    typo'd BROWSER_BRIDGE_PING_TIMEOUT would otherwise take the whole service
+    down at import time with a ValueError."""
+    raw = os.environ.get(name)
+    if raw is None or raw == "":
+        return default
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return default
 
 # How long a routing key stays in `known_instances`/`missing` after it stops
 # polling. Without a forget path the registry remembers every key for the whole
@@ -683,6 +716,20 @@ def emit_cmd_event(op: str, key: str, outcome: str, duration_ms: int,
         })
     except Exception:  # noqa: BLE001 — strictly best-effort.
         pass
+
+
+def _emit_diag_event(op: str, t0: float) -> None:
+    """One metadata-only event for a read-only DIAGNOSTIC GET (/whoami, /health).
+
+    A thin, deliberately narrow wrapper over emit_cmd_event: op + outcome + latency
+    and NOTHING else. No key (these endpoints take no --instance) and NO domain —
+    they are global, describing every connected profile at once, so there is no
+    single active domain to attribute and emitting per-profile domains would widen
+    the privacy contract. Best-effort like every other emit: it cannot raise.
+    """
+    emit_cmd_event(op=op, key="", outcome="ok",
+                   duration_ms=int((time.monotonic() - t0) * 1000),
+                   domain="", exit_code=0)
 
 
 # --------------------------------------------------------------------------- #
@@ -1635,7 +1682,15 @@ def validate_command(body):
 # HTTP handler
 # --------------------------------------------------------------------------- #
 def make_handler(registry: Registry, token: str, cmd_timeout: float,
-                 poll_timeout: float):
+                 poll_timeout: float, ping_timeout: float = None):
+    # `ping` gets its OWN, much shorter deadline — see PING_TIMEOUT_DEFAULT and the
+    # BROWSER_BRIDGE_PING_TIMEOUT entry in the module docstring. Resolved here (not
+    # at the call site) so build_server callers that predate the parameter keep
+    # working and still get the fast ping.
+    if ping_timeout is None:
+        ping_timeout = _env_float("BROWSER_BRIDGE_PING_TIMEOUT",
+                                  PING_TIMEOUT_DEFAULT)
+
     class Handler(BaseHTTPRequestHandler):
         server_version = "browser-bridge/2"
 
@@ -1798,6 +1853,7 @@ def make_handler(registry: Registry, token: str, cmd_timeout: float,
         def do_GET(self):
             if not self._guard():
                 return
+            t0 = time.monotonic()
             path = urlsplit(self.path).path
             if path == "/health":
                 # extension_version_current = the manifest version the SERVER
@@ -1824,6 +1880,20 @@ def make_handler(registry: Registry, token: str, cmd_timeout: float,
                                  "instances": insts,
                                  "known_instances": known,
                                  "missing": missing})
+                # The ORIENTATION ops emit too — measured 2026-08-02, `whoami`
+                # (38 calls) and `health` (15) appeared NOWHERE in activity.events
+                # despite being the documented first thing you run, so the only
+                # structured source could not see 53 invocations.
+                #
+                # Emitted AFTER the response, exactly like the /cmd path: same
+                # best-effort + metadata-only contract (see emit_cmd_event and the
+                # PRIVACY CONTRACT above). Deliberately NO domain: /health and
+                # /whoami are GLOBAL — they describe every connected profile at
+                # once, so there is no single active domain to attribute, and
+                # emitting one per profile would widen the contract to "which sites
+                # are open in each of your browsers". `key` is likewise empty:
+                # these endpoints take no --instance.
+                _emit_diag_event("health", t0)
                 return
             if path == "/instances":
                 insts = registry.snapshot()
@@ -1832,6 +1902,7 @@ def make_handler(registry: Registry, token: str, cmd_timeout: float,
                 return
             if path == "/whoami":
                 self._send(200, self._whoami())
+                _emit_diag_event("whoami", t0)   # see the /health emit above
                 return
             if path == "/poll":
                 (instance_id, label, active, ext_version,
@@ -1921,7 +1992,11 @@ def make_handler(registry: Registry, token: str, cmd_timeout: float,
                     domain="", exit_code=0)
                 return
             try:
-                result = registry.submit(body, timeout=cmd_timeout,
+                # `ping` alone gets the short deadline. Chosen HERE rather than
+                # inside submit() so the choice is visible next to the op, and so
+                # no other op's timeout can be changed by accident.
+                op_timeout = ping_timeout if op == "ping" else cmd_timeout
+                result = registry.submit(body, timeout=op_timeout,
                                          target=target, session_id=session_id,
                                          tab=tab)
             except RateLimited as e:
@@ -2046,8 +2121,10 @@ def make_handler(registry: Registry, token: str, cmd_timeout: float,
 # Entrypoint
 # --------------------------------------------------------------------------- #
 def build_server(host: str, port: int, registry: Registry, token: str,
-                 cmd_timeout: float, poll_timeout: float) -> ThreadingHTTPServer:
-    handler = make_handler(registry, token, cmd_timeout, poll_timeout)
+                 cmd_timeout: float, poll_timeout: float,
+                 ping_timeout: float = None) -> ThreadingHTTPServer:
+    handler = make_handler(registry, token, cmd_timeout, poll_timeout,
+                           ping_timeout)
     server = ThreadingHTTPServer((host, port), handler)
     server.daemon_threads = True  # let shutdown not hang on a blocked long-poll
     return server
@@ -2094,13 +2171,17 @@ def main(argv=None) -> int:
     port = int(os.environ.get("BROWSER_BRIDGE_PORT", "8788"))
     cmd_timeout = float(os.environ.get("BROWSER_BRIDGE_CMD_TIMEOUT", "20"))
     poll_timeout = float(os.environ.get("BROWSER_BRIDGE_POLL_TIMEOUT", "25"))
+    ping_timeout = _env_float("BROWSER_BRIDGE_PING_TIMEOUT",
+                              PING_TIMEOUT_DEFAULT)
     token_file = default_token_file()
     token = load_or_create_token(token_file)
 
     registry = Registry()
-    server = build_server(host, port, registry, token, cmd_timeout, poll_timeout)
+    server = build_server(host, port, registry, token, cmd_timeout,
+                          poll_timeout, ping_timeout)
     log("listening", host=host, port=port, token_file=str(token_file),
-        cmd_timeout=cmd_timeout, poll_timeout=poll_timeout)
+        cmd_timeout=cmd_timeout, poll_timeout=poll_timeout,
+        ping_timeout=ping_timeout)
     _warn_poll_timeout_vs_extension_budget(poll_timeout)
     try:
         server.serve_forever()

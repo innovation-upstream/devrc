@@ -326,14 +326,96 @@ def test_screenshot_rejects_an_explicitly_empty_path(bridge):
     assert cp.returncode != 0 and "must not be empty" in cp.stderr
 
 
-def test_nav_error_names_the_flag_not_the_innocent_url(bridge):
-    """`browser nav --wake <url>` is the flag-order confusion this PR is about;
-    pointing at the trailing url ("got extra: https://…") sends the reader to the
-    wrong argument."""
-    cp = bridge.run("nav", "--wake", "https://a.test")
+# --------------------------------------------------------------------------- #
+# S1 — `--wake[=MS]` on `nav` and `open` (2026-08-02 usage audit, F2)
+#
+# `browser nav --wake <url>` used to be a deliberate hard error ("nav takes no
+# flags — put the url first"). The audit measured why that was the wrong answer:
+# 13 `nav`→`wake` / `open`→`wake` adjacent pairs in Claude transcripts, and one
+# opencode session that is literally `nav wake eval` ×5. `nav` lands you on a
+# BACKGROUND (throttled) tab, so the wake is not optional — it was just a second
+# call. The flag is now real, and (like text/html/js) order-free.
+#
+# `nav`/`open` send NO `wake` field on the wire — the extension honours `cmd.wake`
+# only on getHtml/text/eval. `--wake` is a client-side compose: the nav/open op,
+# then the existing `wake` op. So these tests assert TWO recorded bodies.
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize("sub", ["nav", "open"])
+def test_wake_on_nav_and_open_issues_the_wake_in_one_invocation(bridge, sub):
+    """THE REGRESSION. Pre-change `nav --wake <url>` exited 1 with "takes no flags"
+    and `open --wake <url>` exited 1 with "at most one url"; neither could reach a
+    `wake` at all without a second command."""
+    before = len(bridge.bodies)
+    cp = bridge.run(sub, "https://a.test", "--wake")
+    assert cp.returncode == 0, cp.stderr
+    sent = bridge.bodies[before:]
+    assert [b["op"] for b in sent] == [sub, "wake"], sent
+    assert sent[0]["url"] == "https://a.test"
+    # The primary op's body is UNCHANGED — no `wake` field is put on the wire for
+    # nav/open, so no extension build can mis-handle it.
+    assert "wake" not in sent[0] and "waitMs" not in sent[0]
+    assert "waitMs" not in sent[1]          # bare --wake → extension's default settle
+
+
+@pytest.mark.parametrize("sub", ["nav", "open"])
+def test_wake_on_nav_and_open_is_order_free_and_carries_ms(bridge, sub):
+    """Flag order is free here exactly as it is for text/html/js, and `--wake=MS`
+    reaches the `wake` op as waitMs."""
+    before = len(bridge.bodies)
+    assert bridge.run(sub, "--wake=250", "https://a.test").returncode == 0
+    flags_first = bridge.bodies[before:]
+
+    before = len(bridge.bodies)
+    assert bridge.run(sub, "https://a.test", "--wake=250").returncode == 0
+    flags_last = bridge.bodies[before:]
+
+    assert flags_first == flags_last
+    assert [b["op"] for b in flags_first] == [sub, "wake"]
+    assert flags_first[1]["waitMs"] == 250
+
+
+@pytest.mark.parametrize("sub", ["nav", "open"])
+def test_no_wake_on_nav_and_open_sends_exactly_one_unchanged_command(bridge, sub):
+    """INVARIANT GUARD (green pre-change). The load-bearing back-compat half: with
+    no `--wake` the byte on the wire and the NUMBER of wire ops are what they were."""
+    before = len(bridge.bodies)
+    cp = bridge.run(sub, "https://a.test")
+    assert cp.returncode == 0, cp.stderr
+    sent = bridge.bodies[before:]
+    assert len(sent) == 1, sent
+    assert sent[0]["op"] == sub and sent[0]["url"] == "https://a.test"
+    assert "wake" not in sent[0]
+
+
+@pytest.mark.parametrize("sub", ["nav", "open"])
+def test_nav_and_open_validate_wake_ms_at_parse_time(bridge, sub):
+    """`--wake=MS` is validated in the FLAG LOOP, before anything is dispatched —
+    the same property wake_fields' comment protects for the read ops. A parse-time
+    rejection must leave the wire completely untouched (not "nav happened, then the
+    wake was rejected")."""
+    before = len(bridge.bodies)
+    cp = bridge.run(sub, "https://a.test", "--wake=abc")
     assert cp.returncode != 0
-    assert "takes no flags" in cp.stderr and "--wake" in cp.stderr
-    assert "Put the url first" in cp.stderr
+    assert "--wake=MS must be a non-negative integer" in cp.stderr
+    assert len(bridge.bodies) == before, "nothing may reach the wire"
+
+
+@pytest.mark.parametrize("sub", ["nav", "open"])
+def test_nav_and_open_still_reject_an_unknown_flag(bridge, sub):
+    """Gaining ONE flag must not turn these into "anything starting with - is fine"."""
+    before = len(bridge.bodies)
+    cp = bridge.run(sub, "https://a.test", "--nope")
+    assert cp.returncode != 0
+    assert "unknown flag" in cp.stderr
+    assert len(bridge.bodies) == before
+
+
+def test_open_with_no_url_still_means_about_blank(bridge):
+    """INVARIANT GUARD (green pre-change). `open` alone must keep sending a bare
+    `{"op":"open"}` — POS_SEEN, not a non-empty test, is what distinguishes it from
+    `open -- ''`."""
+    b = _body(bridge, "open")
+    assert b["op"] == "open" and "url" not in b
 
 
 def test_help_does_not_require_a_token_file(tmp_path):

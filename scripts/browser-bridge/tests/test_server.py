@@ -165,9 +165,10 @@ def _req(srv, method, path, body=None, token=TOKEN, host="127.0.0.1",
         return e.code, (json.loads(raw) if raw else None)
 
 
-def _serve(cmd_timeout=5.0, poll_timeout=5.0, registry=None):
+def _serve(cmd_timeout=5.0, poll_timeout=5.0, registry=None, ping_timeout=None):
     registry = registry if registry is not None else S.Registry()
-    handler = S.make_handler(registry, TOKEN, cmd_timeout, poll_timeout)
+    handler = S.make_handler(registry, TOKEN, cmd_timeout, poll_timeout,
+                             ping_timeout)
     srv = S.ThreadingHTTPServer(("127.0.0.1", 0), handler)
     srv.daemon_threads = True
     t = threading.Thread(target=srv.serve_forever, daemon=True)
@@ -244,16 +245,46 @@ class FakeExtension(threading.Thread):
         self._stopev.set()
 
 
+# 🔴 _wait_connected POLLS /instances, NOT /health — and that is load-bearing.
+#
+# /health now emits ONE telemetry event per call (the orientation ops used to be
+# invisible in activity.events; see _emit_diag_event in server.py). This helper
+# calls it in a tight loop, so polling /health here injected 1..N spurious events
+# into the spool of EVERY test that waits for a connection — which is most of the
+# telemetry suite, and it broke 14 of them by making `len(evs) == 1` false.
+#
+# The fix is to make the HARNESS silent rather than to loosen those assertions:
+# /instances reports the same live-instance snapshot (`count` is len() of exactly
+# the list /health's `extension_connected` is the bool() of) and deliberately does
+# NOT emit — it is not an operator-facing orientation op. Keep it that way; if you
+# point this back at /health, the exact-count telemetry assertions go red again.
 def _wait_connected(srv, want=True, timeout=3.0):
     deadline = time.time() + timeout
     while time.time() < deadline:
-        status, body = _req(srv, "GET", "/health")
-        if status == 200 and body["extension_connected"] == want:
+        status, body = _req(srv, "GET", "/instances")
+        if status == 200 and bool(body.get("count", 0)) == want:
             return True
         time.sleep(0.02)
     return False
 
 
+# The SILENT (no-telemetry) counterpart of _wait_instances, for tests that only
+# need "N instances are up" and must not have /health events in their spool.
+def _wait_count(srv, n, timeout=3.0):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        status, body = _req(srv, "GET", "/instances")
+        if status == 200 and body.get("count", 0) >= n:
+            return body
+        time.sleep(0.02)
+    return None
+
+
+# _wait_instances stays on /health BECAUSE its callers read health-only fields
+# (`extension_connected`, `extension_version_current`, per-instance
+# `extension_stale`), which /instances does not compute. It therefore DOES emit —
+# so a telemetry test must use _wait_connected, or count only the ops it cares
+# about.
 def _wait_instances(srv, n, timeout=3.0):
     deadline = time.time() + timeout
     while time.time() < deadline:
@@ -1210,7 +1241,7 @@ def test_cmd_emits_routing_key_from_target(telemetry):
                       executor=lambda c: {"who": "b"})
     a.start(); b.start()
     try:
-        assert _wait_instances(srv, 2) is not None
+        assert _wait_count(srv, 2) is not None   # /instances: emits nothing
         st, _ = _req(srv, "POST", "/cmd", {"op": "tabs", "target": "alpha"})
         assert st == 200
         e = _wait_events(spool_dir, 1)[0]
@@ -1247,7 +1278,7 @@ def test_cmd_ambiguous_emits_ambiguous_outcome(telemetry):
     b = FakeExtension(srv, instance_id="b", label="beta")
     a.start(); b.start()
     try:
-        assert _wait_instances(srv, 2) is not None
+        assert _wait_count(srv, 2) is not None   # /instances: emits nothing
         st, _ = _req(srv, "POST", "/cmd", {"op": "tabs"})
         assert st == 409
         e = _wait_events(spool_dir, 1)[0]
@@ -1257,6 +1288,113 @@ def test_cmd_ambiguous_emits_ambiguous_outcome(telemetry):
         assert p["op"] == "tabs"
     finally:
         a.stop(); b.stop(); srv.shutdown(); srv.server_close()
+
+
+# --------------------------------------------------------------------------- #
+# S2 — `ping` gets its OWN short deadline (2026-08-02 usage audit, F7)
+#
+# `ping` is the documented FIRST thing you run when you suspect the loaded
+# extension is stale. Measured over a 2-day window: 34 pings, 13 failures (38.2%,
+# the worst rate of any op), of which 6 timed out at EXACTLY 20,000 ms — the
+# generic CMD_TIMEOUT. The 21 healthy ones averaged 3–4 ms. A diagnostic that
+# takes 20 s to say "no" is one an operator learns to skip.
+#
+# These tests are WALL-CLOCK tests, so they use a deliberately wide margin: the
+# claim is "ping does not wait out cmd_timeout", not "ping takes exactly 2.0 s".
+# --------------------------------------------------------------------------- #
+def test_ping_does_not_wait_out_cmd_timeout(monkeypatch):
+    """REGRESSION. Pre-change `ping` used cmd_timeout like every other op, so
+    against a wedged extension it burned the full budget before answering."""
+    monkeypatch.delenv("BROWSER_BRIDGE_PING_TIMEOUT", raising=False)
+    # cmd_timeout is 8s; the default ping deadline is PING_TIMEOUT_DEFAULT (2s).
+    srv, _ = _serve(cmd_timeout=8.0, poll_timeout=5.0)
+    ext = FakeExtension(srv, swallow=True)       # picks up, never answers
+    ext.start()
+    try:
+        assert _wait_connected(srv, want=True)
+        t0 = time.monotonic()
+        st, body = _req(srv, "POST", "/cmd", {"op": "ping"})
+        elapsed = time.monotonic() - t0
+        assert st == 504 and body["error"] == "timeout"
+        # Red pre-change: this was ~8s (the full cmd_timeout).
+        assert elapsed < 5.0, f"ping waited {elapsed:.1f}s — cmd_timeout, not its own"
+        # ...and it did actually WAIT its own deadline rather than failing instantly
+        # for some unrelated reason (which would make the bound above vacuous).
+        assert elapsed >= 1.5, f"ping returned in {elapsed:.2f}s — it never waited"
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
+def test_the_short_deadline_applies_to_ping_ONLY(monkeypatch):
+    """NEGATIVE CONTROL for the test above. Without this, a change that shortened
+    EVERY op's timeout would pass it — and that would be a real regression (a 2s
+    cap on `nav`/`eval` would break legitimate slow pages).
+
+    Same server, same wedged extension, a non-ping op: it must still wait out the
+    full cmd_timeout.
+    """
+    monkeypatch.delenv("BROWSER_BRIDGE_PING_TIMEOUT", raising=False)
+    srv, _ = _serve(cmd_timeout=4.0, poll_timeout=5.0)
+    ext = FakeExtension(srv, swallow=True)
+    ext.start()
+    try:
+        assert _wait_connected(srv, want=True)
+        t0 = time.monotonic()
+        st, _ = _req(srv, "POST", "/cmd", {"op": "getHtml"})
+        elapsed = time.monotonic() - t0
+        assert st == 504
+        assert elapsed >= 3.5, (
+            f"getHtml returned in {elapsed:.2f}s — the short ping deadline leaked "
+            "onto every op")
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
+def test_a_healthy_ping_is_unaffected_and_answers_in_milliseconds(monkeypatch):
+    """NEGATIVE CONTROL #2: the 2 s cap must never truncate the HEALTHY path. 21
+    measured healthy pings averaged 3–4 ms, so 2 s is ~500× headroom — assert the
+    fast path still returns 200, not a timeout."""
+    monkeypatch.delenv("BROWSER_BRIDGE_PING_TIMEOUT", raising=False)
+    srv, _ = _serve(cmd_timeout=8.0, poll_timeout=5.0)
+    ext = FakeExtension(srv, executor=lambda c: {"pong": True})
+    ext.start()
+    try:
+        assert _wait_connected(srv, want=True)
+        t0 = time.monotonic()
+        st, body = _req(srv, "POST", "/cmd", {"op": "ping"})
+        elapsed = time.monotonic() - t0
+        assert st == 200 and body["ok"] is True
+        assert elapsed < 1.0, f"a healthy ping took {elapsed:.2f}s"
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
+def test_ping_timeout_is_env_overridable_and_survives_a_malformed_value(monkeypatch):
+    """The knob is BROWSER_BRIDGE_PING_TIMEOUT, not a bare literal — and a typo in
+    it must not take the bridge down at startup (a ValueError from float() would),
+    so an unparseable value falls back to the default."""
+    monkeypatch.setenv("BROWSER_BRIDGE_PING_TIMEOUT", "0.3")
+    assert S._env_float("BROWSER_BRIDGE_PING_TIMEOUT",
+                        S.PING_TIMEOUT_DEFAULT) == 0.3
+    srv, _ = _serve(cmd_timeout=8.0, poll_timeout=5.0)   # ping_timeout=None → env
+    ext = FakeExtension(srv, swallow=True)
+    ext.start()
+    try:
+        assert _wait_connected(srv, want=True)
+        t0 = time.monotonic()
+        st, _ = _req(srv, "POST", "/cmd", {"op": "ping"})
+        elapsed = time.monotonic() - t0
+        assert st == 504
+        assert elapsed < 1.5, f"the env override was ignored ({elapsed:.2f}s)"
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+    monkeypatch.setenv("BROWSER_BRIDGE_PING_TIMEOUT", "not-a-number")
+    assert S._env_float("BROWSER_BRIDGE_PING_TIMEOUT",
+                        S.PING_TIMEOUT_DEFAULT) == S.PING_TIMEOUT_DEFAULT
+    monkeypatch.delenv("BROWSER_BRIDGE_PING_TIMEOUT")
+    assert S._env_float("BROWSER_BRIDGE_PING_TIMEOUT",
+                        S.PING_TIMEOUT_DEFAULT) == S.PING_TIMEOUT_DEFAULT
 
 
 def test_cmd_timeout_emits_timeout_outcome(telemetry):
@@ -1361,20 +1499,85 @@ def test_cmd_succeeds_when_spool_unwritable(telemetry, monkeypatch, tmp_path):
         ext.stop(); srv.shutdown(); srv.server_close()
 
 
-def test_health_and_instances_do_not_emit(telemetry):
-    """health / instances (and the extension's /poll) are noise — no events."""
+def test_instances_and_poll_still_do_not_emit(telemetry):
+    """/instances and the extension's /poll are NOISE — still no events.
+
+    This is the half of the old `test_health_and_instances_do_not_emit` that
+    survives: /poll fires continuously (a long-poll per instance, forever) and
+    /instances is a machine-facing list, so emitting for either would swamp
+    activity.events with traffic no human initiated. Only the OPERATOR-facing
+    orientation ops (/whoami, /health) emit — see the two tests below.
+    """
     spool_dir = telemetry
     srv, _ = _serve(poll_timeout=5.0)
     ext = FakeExtension(srv, instance_id="a", label="alpha")
     ext.start()
     try:
-        assert _wait_instances(srv, 1) is not None   # exercises /poll repeatedly
-        _req(srv, "GET", "/health")
+        assert _wait_count(srv, 1) is not None   # exercises /poll repeatedly
         _req(srv, "GET", "/instances")
         time.sleep(0.2)  # give any erroneous emit a chance to land
         assert _read_events(spool_dir) == []
     finally:
         ext.stop(); srv.shutdown(); srv.server_close()
+
+
+@pytest.mark.parametrize("path,op", [("/whoami", "whoami"), ("/health", "health")])
+def test_orientation_ops_emit_exactly_one_metadata_only_event(telemetry, path, op):
+    """REGRESSION (2026-08-02 usage audit, F8). `whoami` (38 calls) and `health`
+    (15) appeared NOWHERE in activity.events — 53 invocations invisible to the only
+    structured source, and they are the ops the skill tells you to run FIRST.
+
+    The count is asserted as a DELTA (0 before → exactly 1 after), not as "there is
+    a row": a post-hoc existence check would pass on any pre-existing event, and
+    this suite's own connection-wait helper used to inject /health events.
+
+    Metadata-only is asserted positively AND negatively: the payload must be
+    exactly {op,key,outcome} — in particular NO `domain`, because these endpoints
+    are global (they describe every connected profile at once) and per-profile
+    domains would widen the privacy contract at server.py's PRIVACY CONTRACT.
+    """
+    spool_dir = telemetry
+    srv, _ = _serve(poll_timeout=5.0)
+    ext = FakeExtension(srv, instance_id="a", label="alpha")
+    ext.start()
+    try:
+        assert _wait_count(srv, 1) is not None      # silent: /instances
+        assert _read_events(spool_dir) == [], "the negative control: 0 before"
+
+        st, body = _req(srv, "GET", path)
+        assert st == 200 and body["ok"] is True
+
+        evs = _wait_events(spool_dir, 1)
+        assert len(evs) == 1, f"expected exactly one event, got {evs}"
+        e = evs[0]
+        assert e["source"] == "browser-bridge" and e["kind"] == "cmd"
+        assert e["exit_code"] == "0"
+        assert e["text"] == op                      # no domain → text is the op
+        p = json.loads(e["payload"])
+        assert p == {"op": op, "key": "", "outcome": "ok"}, p
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
+def test_orientation_emit_never_breaks_the_response(telemetry, monkeypatch):
+    """BEST-EFFORT contract: a broken emitter must not fail /whoami or /health.
+
+    Mutation-proof for the try/except in emit_cmd_event as reached from the NEW
+    call site: force the emitter to raise and assert both endpoints still 200.
+    """
+    class _Boom:
+        @staticmethod
+        def emit(_rec):
+            raise RuntimeError("spool exploded")
+
+    monkeypatch.setattr(S, "_load_spool_emit", lambda: _Boom)
+    srv, _ = _serve()
+    try:
+        for path in ("/whoami", "/health"):
+            st, body = _req(srv, "GET", path)
+            assert st == 200 and body["ok"] is True, path
+    finally:
+        srv.shutdown(); srv.server_close()
 
 
 def test_emit_cmd_event_noop_when_emitter_missing(monkeypatch):
@@ -3953,14 +4156,42 @@ def test_browser_cli_screenshot_no_path_stdout_has_no_base64_payload(tmp_path):
 
 
 @pytest.mark.skipif(shutil.which("curl") is None, reason="curl not on PATH")
-def test_browser_cli_screenshot_explicit_path_unchanged(tmp_path):
-    """An explicit path still writes there and prints JUST the path (back-compat)."""
+def test_browser_cli_screenshot_explicit_path_prints_path_then_a_read_hint(tmp_path):
+    """REGRESSION (2026-08-02 usage audit, F4). 7 of 63 explicit-path captures were
+    never Read back — exit 0 plus a path on stdout looks like the job is done, and
+    an image nobody Reads is pure waste. One short `#`-prefixed hint now follows.
+
+    LINE 1 IS STILL THE BARE PATH — that is the back-compat half this used to pin
+    (`stdout.strip() == path`), and the hint is deliberately on line 2 and comment-
+    prefixed so it can never be mistaken for a second path.
+    """
     dest = tmp_path / "shot.png"
     r, _ = _run_browser_canned(_shot_data(), ["screenshot", str(dest)], tmp_path)
     assert r.returncode == 0, r.stderr
-    assert r.stdout.strip() == str(dest)
+    lines = r.stdout.splitlines()
+    assert lines[0] == str(dest), "line 1 must stay the bare path"
+    assert lines[1] == "# Read %s to view it." % dest
+    assert len(lines) == 2
     assert dest.read_bytes() == _PNG_BYTES
     assert _PNG_B64[:24] not in r.stdout
+
+
+def test_browser_cli_screenshot_read_hint_not_printed_where_it_would_be_wrong(tmp_path):
+    """NEGATIVE CONTROL for the hint above — without it, the test passes with the
+    string printed UNCONDITIONALLY.
+
+    Two forms must NOT carry it: `--data-url` (no file is written at all, so
+    "Read it" is false), and the temp-file form (whose JSON `note` already says
+    the same thing — a second copy would be per-call bytes for nothing).
+    """
+    r, _ = _run_browser_canned(_shot_data(), ["screenshot", "--data-url"], tmp_path)
+    assert r.returncode == 0, r.stderr
+    assert "# Read " not in r.stdout
+
+    r, _ = _run_browser_canned(_shot_data(), ["screenshot"], tmp_path)
+    assert r.returncode == 0, r.stderr
+    assert "# Read " not in r.stdout
+    assert json.loads(r.stdout)["path"].endswith(".png")   # still the JSON shape
 
 
 @pytest.mark.skipif(shutil.which("curl") is None, reason="curl not on PATH")
@@ -4586,6 +4817,208 @@ def test_browser_health_survives_a_malformed_known_instances(tmp_path):
         assert "Traceback" not in r.stderr
     finally:
         srv.shutdown(); srv.server_close()
+
+
+# --------------------------------------------------------------------------- #
+# S3 — the routing-failure messages (2026-08-02 usage audit, F6)
+#
+# `unknown_instance` was the TOP error at 52 occurrences, and 48 of them used the
+# CORRECT label (`work`) — 35 inside a single hour, with `eval` re-issued 37 times.
+# A Brave profile had dropped its long-poll; the message ("no connected instance
+# matches --instance 'work'") reads as "you typed the wrong label", so agents kept
+# retrying a name that was right. `no_extension` has the identical shape (16 of 19
+# in one hour).
+#
+# The distinguishing fact was already on the wire — `known_instances` — it just was
+# not being read. These tests pin BOTH branches, because a single-case test passes
+# with the branch hard-wired to one string.
+# --------------------------------------------------------------------------- #
+def _serve_canned_cmd(status, payload):
+    """A stub bridge whose /cmd always answers `status` with `payload` verbatim, so
+    the CLI's error rendering can be driven against exact server bodies."""
+    class H(S.BaseHTTPRequestHandler):
+        def do_POST(self):  # noqa: N802
+            n = int(self.headers.get("Content-Length") or 0)
+            self.rfile.read(n)
+            body = json.dumps(payload).encode()
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *a):  # noqa: A003
+            pass
+
+    srv = S.ThreadingHTTPServer(("127.0.0.1", 0), H)
+    srv.daemon_threads = True
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    return srv
+
+
+def _run_browser_routing(srv, args, tmp_path):
+    tokf = tmp_path / "token"
+    tokf.write_text("routing-token\n")
+    env = dict(os.environ)
+    env.update(BROWSER_BRIDGE_HOST="127.0.0.1",
+               BROWSER_BRIDGE_PORT=str(srv.server_address[1]),
+               BROWSER_BRIDGE_TOKEN_FILE=str(tokf))
+    return subprocess.run([str(BROWSER_BIN), *args], env=env,
+                          capture_output=True, text=True, timeout=30)
+
+
+_UNKNOWN_404 = {
+    "ok": False, "error": "unknown_instance", "target": "work",
+    "instances": [{"key": "personal", "label": "personal"}],
+    "known_instances": [
+        {"key": "personal", "connected": True, "last_seen": "2026-08-02T04:00:00Z"},
+        {"key": "work", "connected": False, "last_seen": "2026-08-02T02:11:09Z",
+         "last_seen_age_s": 6531.0, "last_unanswered_op": "eval"},
+    ],
+}
+
+
+def test_unknown_instance_KNOWN_but_disconnected_says_stop_retrying(tmp_path):
+    """REGRESSION. The label is CORRECT and the profile is gone — the message must
+    say so and must tell the operator NOT to retry. 37 blind retries is the
+    measured symptom of a message that never said that."""
+    srv = _serve_canned_cmd(404, _UNKNOWN_404)
+    try:
+        r = _run_browser_routing(srv, ["--instance", "work", "tabs"], tmp_path)
+        assert r.returncode != 0
+        err = r.stderr
+        assert "KNOWN but NOT CONNECTED" in err, err
+        assert "the label is correct" in err, err
+        assert "FULLY RESTART Brave" in err, err
+        assert "DO NOT RETRY" in err, err
+        assert "2026-08-02T02:11:09Z" in err, "name WHEN it went away"
+        # ...and it must NOT tell the operator their label was wrong.
+        assert "is UNKNOWN" not in err, err
+    finally:
+        srv.shutdown(); srv.server_close()
+
+
+def test_unknown_instance_NEVER_SEEN_key_says_wrong_label(tmp_path):
+    """NEGATIVE CONTROL for the test above. Without it, the branch could be
+    hard-wired to the disconnected wording and both tests would still be green for
+    the wrong reason. A genuinely bogus label must get the OPPOSITE message —
+    "wrong label", plus the keys that do exist, and no restart advice."""
+    srv = _serve_canned_cmd(404, {**_UNKNOWN_404, "target": "nosuchlabel"})
+    try:
+        r = _run_browser_routing(srv, ["--instance", "nosuchlabel", "tabs"],
+                                 tmp_path)
+        assert r.returncode != 0
+        err = r.stderr
+        assert "is UNKNOWN" in err, err
+        assert "WRONG LABEL" in err, err
+        assert "Keys this server HAS seen" in err and "personal" in err, err
+        # The two branches must be mutually exclusive.
+        assert "KNOWN but NOT CONNECTED" not in err, err
+        assert "DO NOT RETRY" not in err, err
+    finally:
+        srv.shutdown(); srv.server_close()
+
+
+def test_no_extension_distinguishes_dropped_from_never_wired_up(tmp_path):
+    """`no_extension` (16 of 19 in one hour) has the same shape, so it gets the
+    same split: a profile that HAS been seen and is now gone means "restart Brave,
+    stop retrying"; nothing ever seen means "load the extension"."""
+    dropped = _serve_canned_cmd(503, {
+        "ok": False, "error": "extension_not_connected",
+        "known_instances": [
+            {"key": "work", "connected": False,
+             "last_seen": "2026-08-02T02:11:09Z", "last_seen_age_s": 6531.0}]})
+    try:
+        r = _run_browser_routing(dropped, ["tabs"], tmp_path)
+        assert r.returncode != 0
+        err = r.stderr
+        assert "HAS seen" in err and "work" in err, err
+        assert "FULLY RESTART Brave" in err and "DO NOT RETRY" in err, err
+        assert "has EVER connected" not in err, err
+    finally:
+        dropped.shutdown(); dropped.server_close()
+
+    virgin = _serve_canned_cmd(503, {"ok": False,
+                                     "error": "extension_not_connected",
+                                     "known_instances": []})
+    try:
+        r = _run_browser_routing(virgin, ["tabs"], tmp_path)
+        assert r.returncode != 0
+        err = r.stderr
+        assert "has EVER connected" in err, err
+        assert "load the browser-bridge extension" in err, err
+        assert "DO NOT RETRY" not in err, err
+    finally:
+        virgin.shutdown(); virgin.server_close()
+
+
+def test_routing_failure_explainer_degrades_against_an_OLD_server(tmp_path):
+    """`browser` is a symlink to the working tree, so it goes live on `git pull` —
+    BEFORE the switch that restarts server.py. It WILL run against a server with no
+    `known_instances`, and must still exit non-zero with readable advice and no
+    traceback (the same degradation contract render_missing has)."""
+    for status, payload, args in (
+            (404, {"ok": False, "error": "unknown_instance", "target": "work"},
+             ["--instance", "work", "tabs"]),
+            (503, {"ok": False, "error": "extension_not_connected"}, ["tabs"]),
+            (404, {"ok": False, "error": "unknown_instance",
+                   "known_instances": ["not-a-dict", 7, None]},
+             ["--instance", "work", "tabs"])):
+        srv = _serve_canned_cmd(status, payload)
+        try:
+            r = _run_browser_routing(srv, args, tmp_path)
+            assert r.returncode != 0, payload
+            assert "Traceback" not in r.stderr, r.stderr
+            assert r.stderr.strip(), "must still say something"
+        finally:
+            srv.shutdown(); srv.server_close()
+
+
+# --------------------------------------------------------------------------- #
+# S6 — doc pointers inside the CLI must RESOLVE
+# --------------------------------------------------------------------------- #
+def test_every_skill_md_heading_the_cli_points_at_actually_exists():
+    """`browser:582` and `browser:588` pointed at "SKILL.md → Concurrency" — a
+    heading that has never existed (SKILL.md has 7 `##` headings and none is it;
+    the content is bold text under "This is the user's LIVE session"). A pointer
+    that does not resolve sends a reader hunting, and nothing was checking.
+
+    HARNESS NEGATIVE CONTROL is inline below: the extractor is first run against a
+    string containing a KNOWN-BAD pointer and must report it. Without that, an
+    extractor that silently matches nothing would report a green that means
+    nothing.
+    """
+    import re
+
+    def bad_pointers(text, headings):
+        """Every `SKILL.md -> <name>` / `SKILL.md → <name>` in `text` whose <name>
+        does not resolve to a heading. A pointer may name a heading's PREFIX (the
+        headings carry trailing "— triage"-style qualifiers that nobody types), but
+        it must resolve to at least one — "Concurrency" resolves to none, which is
+        the whole defect."""
+        out = []
+        for m in re.finditer(
+                r'SKILL\.md\s*(?:->|→)\s*"?([^"\n(]+?)"?\s*(?:$|[)\.,]|→)',
+                text, re.M):
+            name = m.group(1).strip()
+            if name and not any(h == name or h.startswith(name + " ")
+                                for h in headings):
+                out.append(name)
+        return out
+
+    skill = (BROWSER_BIN.parent / "SKILL.md").read_text(encoding="utf-8")
+    headings = {ln.lstrip("#").strip()
+                for ln in skill.splitlines() if ln.startswith("#")}
+    assert len(headings) >= 5, "SKILL.md heading extraction looks broken"
+
+    # NEGATIVE CONTROL: a pointer at a heading that is not there MUST be reported.
+    assert bad_pointers('see SKILL.md → Concurrency.', headings) == ["Concurrency"]
+    # ...and a pointer at a REAL heading must not be.
+    assert bad_pointers('see SKILL.md -> "Ops".', headings) == []
+
+    cli = BROWSER_BIN.read_text(encoding="utf-8")
+    assert bad_pointers(cli, headings) == [], (
+        "the CLI points at SKILL.md headings that do not exist")
 
 
 def test_poll_timeout_at_or_above_the_extension_poll_budget_warns(capsys):
