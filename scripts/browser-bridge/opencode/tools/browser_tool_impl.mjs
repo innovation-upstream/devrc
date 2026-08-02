@@ -51,6 +51,35 @@ import { homedir } from "node:os";
 // This is a stronger stance than `upload`'s opt-in, and intentionally so: `upload`
 // is a risk the operator can knowingly accept per run, whereas a model stealing
 // focus has no legitimate autonomous use at all.
+// ⚠ `ping` is DELIBERATELY ABSENT from OP_TO_SERVER. It is an OPERATOR
+// diagnostic for extension staleness — "is the build I just deployed actually
+// the one Brave loaded?" — answered by {pong, extensionVersion, id, ops}. The
+// model cannot ACT on that answer: it cannot reload an unpacked extension, it
+// cannot restart Brave, and it cannot re-run a home-manager switch. It also
+// reads NO page state, so it cannot inform a browsing decision either. An op
+// whose only possible follow-up is unavailable to the caller is pure token cost
+// with no available action, so it stays operator-only on the `browser` CLI —
+// excluded like `activate`, not gated like `upload`.
+//
+// ⚠ `emulate` is DELIBERATELY ABSENT from OP_TO_SERVER. Unlike every read op it
+// MUTATES the tab and leaves STICKY PER-TAB STATE THAT OUTLIVES THE OP: device
+// metrics, UA-CH and media overrides persist on the tab until they are
+// explicitly reset (`emulate --reset`) or the tab is replaced. An autonomous
+// model that emulates and then does not reset — because it moved on, hit its
+// step budget, or crashed — hands the operator back a silently altered tab. It
+// also attaches CDP, raising Brave's "an extension is debugging this browser"
+// banner. That is the same hazard class as `upload` being off-by-default, but
+// with a PERSISTENT side effect rather than a one-shot one, so the answer is
+// exclusion rather than an opt-in the operator has to remember to undo.
+//
+// `context` IS reachable (below). It is a cheap READ of page state — url,
+// domain, path, searchParams, title, tabId — and reads NO DOM content, so it is
+// strictly less powerful than the `text`/`html` the agent already has, while
+// letting the model confirm WHERE it actually is after a nav/redirect without
+// paying for a full page read. Its absence here was an oversight, not a
+// decision: this file was last edited 2026-07-31 (#243) and `context` only
+// reached server.py's ALLOWED_OPS on 2026-08-01 (#263), so the agent-surface
+// mapping has never been looked at since the op came into existence.
 // `whoami` is a READ-ONLY, GLOBAL diagnostic: it is NOT a /cmd op (it hits the
 // server's GET /whoami, has no tab, drives nothing) — it lets the agent confirm
 // which HOST + which browser profile it is connected to before acting. It maps to
@@ -69,10 +98,11 @@ export const OP_TO_SERVER = Object.freeze({
   key: "key",
   wake: "wake",
   upload: "upload",
+  context: "context",
   whoami: "whoami",
 });
 
-// The AUTONOMOUS model's DEFAULT op set — 11 ops, identical to browser.js's typed
+// The AUTONOMOUS model's DEFAULT op set — 12 ops, identical to browser.js's typed
 // `op` enum, the agent-md capability table, and the README's published contract.
 // Keep those four in lockstep (tests/browser_tool.test.mjs parses all four and
 // asserts they match, so a drift fails CI).
@@ -90,7 +120,7 @@ export const OP_TO_SERVER = Object.freeze({
 // README) — never by default, and never by anything the model can set itself.
 export const ALLOWED_OPS_DEFAULT = Object.freeze([
   "text", "html", "eval", "nav", "screenshot",
-  "frames", "click", "type", "key", "wake", "whoami",
+  "frames", "click", "type", "key", "wake", "context", "whoami",
 ]);
 
 export const TEXT_MAX_BYTES_DEFAULT = 32768;
@@ -312,7 +342,8 @@ export function buildRequest(args, env, token) {
     body.path = String(args.path);
     _addFrame(body, args);
   }
-  // frames / screenshot: no extra typed fields (the tab is forced by env).
+  // frames / screenshot / context: no extra typed fields (the tab is forced by
+  // env, and `context` reports on that tab only).
 
   const host = env.BROWSER_BRIDGE_HOST || "127.0.0.1";
   const port = env.BROWSER_BRIDGE_PORT || "8788";
@@ -668,6 +699,16 @@ export function summarizeResult(op, envelope, env = {}, autoWake = null) {
       woke: data.woke ?? null, visibilityState: data.visibilityState ?? null,
       readyState: data.readyState ?? null, settleMs: data.settleMs ?? null,
       url: data.url ?? null, title: data.title ?? null });
+  }
+  if (op === "context") {
+    // Page-level metadata for the agent's OWN tab. Field-pinned rather than a
+    // bare passthrough, so a later server-side addition to the `context`
+    // payload cannot silently widen what reaches the model.
+    return JSON.stringify({
+      url: data.url ?? null, domain: data.domain ?? null,
+      path: data.path ?? null, searchParams: data.searchParams ?? null,
+      title: data.title ?? null, tabId: data.tabId ?? null,
+    });
   }
   if (op === "whoami") {
     // Identity + diagnostics. `envelope` IS the whole whoami object (no .data).

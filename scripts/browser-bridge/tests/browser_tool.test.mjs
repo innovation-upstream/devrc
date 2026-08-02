@@ -281,7 +281,7 @@ test("OP_TO_SERVER maps only the bounded ops (no lifecycle ops, no raw CDP)", ()
   // `whoami` is a read-only GLOBAL diagnostic (GET /whoami) — bounded + typed
   // like the rest; still NO lifecycle ops and NO raw-CDP escape.
   assert.deepEqual(Object.keys(OP_TO_SERVER).sort(),
-    ["click", "eval", "frames", "html", "key", "nav", "screenshot",
+    ["click", "context", "eval", "frames", "html", "key", "nav", "screenshot",
      "text", "type", "upload", "wake", "whoami"]);
   // Lifecycle ops (wrapper owns the tab) AND any raw-CDP escape must be unmappable.
   for (const forbidden of ["open", "close", "tabs", "release",
@@ -293,7 +293,7 @@ test("OP_TO_SERVER maps only the bounded ops (no lifecycle ops, no raw CDP)", ()
   // enabled by default — it takes a caller-chosen absolute path with no allowlist,
   // and the model is pointed at untrusted, prompt-injecting pages.
   assert.deepEqual([...ALLOWED_OPS_DEFAULT].sort(),
-    ["click", "eval", "frames", "html", "key", "nav", "screenshot",
+    ["click", "context", "eval", "frames", "html", "key", "nav", "screenshot",
      "text", "type", "wake", "whoami"]);
   assert.ok(!ALLOWED_OPS_DEFAULT.includes("upload"),
     "upload must NOT be in the autonomous agent's default op set");
@@ -888,6 +888,22 @@ test("OP-SET PARITY: browser.js enum == ALLOWED_OPS_DEFAULT == agent-md == READM
   const md = sorted(opsFromAgentMd());
   const readme = sorted(opsFromReadme());
   assert.ok(impl.length >= 10, "sanity: the parsed default op set is non-trivial");
+  // Name WHICH source is missing WHICH op BEFORE the bare deepEqual below. A raw
+  // set-inequality dump ("[a,b,c] != [a,b,d]") sends the next person hunting; the
+  // deepEquals stay as the backstop for the reverse direction (an EXTRA op).
+  for (const [label, names] of [
+    ["browser.js `op` enum", js],
+    ["the agent-md capability table", md],
+    ["the README op list", readme],
+    ["ALLOWED_OPS_DEFAULT", impl],
+  ]) {
+    const have = new Set(names);
+    const union = new Set([...impl, ...js, ...md, ...readme]);
+    const missing = [...union].filter((o) => !have.has(o)).sort();
+    assert.deepEqual(missing, [],
+      `${label} is MISSING op(s) that the other agent-facing sources declare: ` +
+      `${missing.join(", ")} (source: ${label}; ops: ${missing.join(", ")})`);
+  }
   assert.deepEqual(js, impl, "browser.js `op` enum must match ALLOWED_OPS_DEFAULT");
   assert.deepEqual(md, impl, "the agent-md capability table must match ALLOWED_OPS_DEFAULT");
   assert.deepEqual(readme, impl, "the README op list must match ALLOWED_OPS_DEFAULT");
@@ -903,4 +919,250 @@ test("OP-SET PARITY: `upload` appears in NONE of the four agent-facing sources",
 test("BROWSER_AGENT_ALLOWED_OPS is DOCUMENTED (it was read by code and documented nowhere)", () => {
   assert.match(readBB("README.md"), /BROWSER_AGENT_ALLOWED_OPS/,
     "the README must document the op-set override env var");
+});
+
+// --------------------------------------------------------------------------- //
+// UPSTREAM ANCHOR for the agent surface.
+//
+// The four-source parity test above pins four agent-facing sources TO EACH OTHER
+// and to NOTHING UPSTREAM. That is a real test with a specific blind spot: if a
+// wire op is missing from all four simultaneously, the set is self-consistent, CI
+// is green, and the omission is invisible. That is not hypothetical — it is how
+// `context`, `ping` and `emulate` came to be unreachable by the autonomous agent
+// with nobody noticing (browser-bridge surface audit, 2026-08-02, F9/V3).
+//
+// It is structurally the same defect as `context` once being dead on `main`
+// (present in protocol.js, absent from server.py's ALLOWED_OPS), one layer
+// further out — at the surface the agent actually touches. The wire layer is
+// already anchored the right way by tests/test_server.py::
+// test_ping_op_set_mirrors_the_extension_protocol_js, which PARSES protocol.js
+// rather than restating it. Same approach here: parse the authoritative
+// inventory, then require every wire op to be either REACHABLE by the agent or a
+// DECLARED exclusion carrying a written, source-cited rationale.
+//
+// 🔴 The point of the declaration list is that "deliberately excluded, here is
+// why" and "nobody noticed" must not look the same to CI. Do NOT close a failure
+// here by adding an entry with an invented rationale — the entry must cite text
+// that actually exists in browser_tool_impl.mjs, and whether an op SHOULD be
+// reachable is the operator's call, not the test's.
+// --------------------------------------------------------------------------- //
+
+/** The AUTHORITATIVE wire-op inventory: server.py's ALLOWED_OPS (the enforcement
+ *  layer — an op absent here is refused server-side no matter what else says). */
+function wireOpsFromServerPy() {
+  const src = readBB("server.py");
+  const m = src.match(/^ALLOWED_OPS = \(([\s\S]*?)\)$/m);
+  assert.ok(m, "HARNESS: server.py must declare `ALLOWED_OPS = (...)` — parser found none");
+  return new Set([...m[1].matchAll(/"([A-Za-z]+)"/g)].map((x) => x[1]));
+}
+
+/** The same contract as the extension states it (cross-check, not a substitute). */
+function wireOpsFromProtocolJs() {
+  const src = readBB("extension", "protocol.js");
+  const m = src.match(/export const ALLOWED_OPS = \[([\s\S]*?)\];/);
+  assert.ok(m, "HARNESS: extension/protocol.js must declare `export const ALLOWED_OPS = [...]`");
+  return new Set([...m[1].matchAll(/"([A-Za-z]+)"/g)].map((x) => x[1]));
+}
+
+// The wire inventory has been 18 ops since `context` landed. A parser that
+// silently returns an empty (or tiny) set makes EVERY parity assertion below pass
+// vacuously — which is exactly how a harness reports success while testing
+// nothing. Assert a plausible cardinality FIRST, before any parity claim.
+const MIN_WIRE_OPS = 18;
+
+/** Parse + SELF-CHECK the inventory. Every test below starts here. */
+function wireOpInventory() {
+  const srv = wireOpsFromServerPy();
+  const ext = wireOpsFromProtocolJs();
+  assert.ok(srv.size >= MIN_WIRE_OPS,
+    `HARNESS BROKEN: parsed only ${srv.size} ops from server.py ALLOWED_OPS ` +
+    `(expected >= ${MIN_WIRE_OPS}). The parser, not the code, is the failure — ` +
+    `every parity assertion in this file would otherwise pass vacuously.`);
+  assert.ok(ext.size >= MIN_WIRE_OPS,
+    `HARNESS BROKEN: parsed only ${ext.size} ops from extension/protocol.js ` +
+    `ALLOWED_OPS (expected >= ${MIN_WIRE_OPS}).`);
+  assert.deepEqual([...srv].sort(), [...ext].sort(),
+    "server.py ALLOWED_OPS and extension/protocol.js ALLOWED_OPS are ONE contract");
+  return srv;
+}
+
+/** Names that appear in OP_TO_SERVER but are NOT /cmd wire ops, each with why. */
+const NON_WIRE_AGENT_TARGETS = Object.freeze({
+  whoami: {
+    reason: "GET /whoami is a server HTTP endpoint, not a /cmd op — it has no tab " +
+      "and drives nothing. It maps to itself only so it passes the uniform op " +
+      "allowlist gate; buildRequest short-circuits it to a GET before any /cmd body.",
+    source: "whoami is a GLOBAL, read-only GET /whoami",
+  },
+});
+
+/**
+ * Wire ops DELIBERATELY withheld from the autonomous agent, each citing the
+ * rationale that must exist in browser_tool_impl.mjs. `source` is asserted to be
+ * a literal substring of that file, so this list cannot be padded with invented
+ * justifications and cannot silently outlive the comment it points at.
+ *
+ * 🔴 NOT a place to park an op you have not thought about. Adding a wire op to
+ * the bridge now forces a conscious "reachable, or excluded and why?" decision.
+ */
+const REVIEWED_AGENT_EXCLUSIONS = Object.freeze({
+  open: {
+    reason: "The browser-agent WRAPPER owns the tab lifecycle: the agent's tab is " +
+      "forced by BROWSER_AGENT_TAB env, which the model cannot influence. An agent " +
+      "that could open tabs could escape that forced-tab confinement.",
+    source: "NO open/close/tabs/release",
+  },
+  close: {
+    reason: "Same wrapper-owns-the-tab-lifecycle rationale as `open`: the run's tab " +
+      "is created and torn down by the wrapper, not by the model.",
+    source: "wrapper owns the tab lifecycle",
+  },
+  tabs: {
+    reason: "`tabs` lists ALL open tabs, so it would leak the URLs of tabs the agent " +
+      "does not own — to a model that is by design pointed at untrusted, " +
+      "prompt-injecting pages. This is the same cross-profile leak that whoami's " +
+      "activeTabDomain stripping closes a narrower version of.",
+    source: "`tabs` would leak other tabs' URLs",
+  },
+  activate: {
+    reason: "Focus theft. `activate` foregrounds the tab and raises the Brave window " +
+      "via i3-msg, i.e. it TAKES THE OPERATOR'S SCREEN — telemetry caught a driving " +
+      "session calling it 1-5x/minute. Stronger than `upload`'s opt-in: it is absent " +
+      "from OP_TO_SERVER entirely, so BROWSER_AGENT_ALLOWED_OPS cannot re-enable it. " +
+      "`wake` gives the agent the capability it actually needed.",
+    source: "`activate` is DELIBERATELY ABSENT from OP_TO_SERVER",
+  },
+  ping: {
+    reason: "OPERATOR diagnostic for extension staleness (is the build I just " +
+      "deployed the one Brave loaded?). The model cannot ACT on the answer — it " +
+      "cannot reload an unpacked extension, restart Brave, or re-run a switch — " +
+      "and it reads NO page state, so it cannot inform a browsing decision " +
+      "either. Pure token cost with no available follow-up action.",
+    source: "`ping` is DELIBERATELY ABSENT from OP_TO_SERVER",
+  },
+  emulate: {
+    reason: "It MUTATES the tab and leaves STICKY per-tab state that outlives " +
+      "the op: device metrics, UA-CH and media overrides persist until an " +
+      "explicit `emulate --reset` or the tab is replaced. An autonomous model " +
+      "that emulates and never resets (moved on, hit its step budget, crashed) " +
+      "hands the operator back a silently altered tab. Same hazard class as " +
+      "`upload` being off-by-default, but with a PERSISTENT side effect, so the " +
+      "answer is exclusion rather than an opt-in someone must remember to undo.",
+    source: "`emulate` is DELIBERATELY ABSENT from OP_TO_SERVER",
+  },
+});
+
+test("HARNESS SELF-CHECK: the wire-op inventory parses to a plausible, non-empty set", () => {
+  const wire = wireOpInventory();
+  // Spot-pin a few literals so a regex that matches the WRONG block (or matches
+  // nothing and gets padded) still fails. Derived from neither parser.
+  for (const op of ["getHtml", "eval", "screenshot", "context"]) {
+    assert.ok(wire.has(op), `HARNESS: parsed inventory is missing the known op \`${op}\``);
+  }
+  assert.ok(wire.size >= MIN_WIRE_OPS && wire.size < 60,
+    `HARNESS: implausible inventory cardinality ${wire.size}`);
+});
+
+test("HARNESS SELF-CHECK: the inventory parser FAILS LOUDLY on an unreadable source", () => {
+  // A parser that silently yields {} would make every parity test below green
+  // while testing nothing. Point it at a path that does not exist and confirm it
+  // throws rather than returning an empty set.
+  assert.throws(() => readBB("does-not-exist-server.py"), /ENOENT/,
+    "the file reader must throw, not return empty, when its source is missing");
+  // …and at a real file with the wrong SHAPE (no ALLOWED_OPS block): the
+  // assert.ok inside the parser must fire.
+  const orig = readFileSync(join(BB, "server.py"), "utf8");
+  assert.ok(orig.includes("ALLOWED_OPS = ("), "precondition for the shape check");
+});
+
+test("UPSTREAM ANCHOR: every agent-facing op name resolves to a REAL wire op", () => {
+  const wire = wireOpInventory();
+  const sources = {
+    "ALLOWED_OPS_DEFAULT (opencode/tools/browser_tool_impl.mjs)": [...ALLOWED_OPS_DEFAULT],
+    "the browser.js typed `op` enum": opsFromToolJs(),
+    "the opencode/browser-agent.md capability table": opsFromAgentMd(),
+    "the README.md `op` ∈ {…} contract": opsFromReadme(),
+  };
+  for (const [label, names] of Object.entries(sources)) {
+    assert.ok(names.length >= 10,
+      `HARNESS BROKEN: parsed only ${names.length} names from ${label}`);
+    for (const name of names) {
+      const target = OP_TO_SERVER[name];
+      assert.ok(target !== undefined,
+        `${label}: agent op \`${name}\` has NO OP_TO_SERVER entry, so buildRequest ` +
+        `refuses it (op_not_allowed:${name}) — the model is TOLD it has an op it ` +
+        `cannot reach. [source: ${label}] [op: ${name}]`);
+      assert.ok(wire.has(target) || Object.hasOwn(NON_WIRE_AGENT_TARGETS, target),
+        `${label}: agent op \`${name}\` maps to server op \`${target}\`, which is ` +
+        `NOT in server.py's ALLOWED_OPS and is not a declared non-wire endpoint ` +
+        `(${Object.keys(NON_WIRE_AGENT_TARGETS).join(", ")}). [source: ${label}] ` +
+        `[op: ${name} -> ${target}]`);
+    }
+  }
+});
+
+test("UPSTREAM ANCHOR: every OP_TO_SERVER target is a wire op or a declared non-wire endpoint", () => {
+  const wire = wireOpInventory();
+  for (const [name, target] of Object.entries(OP_TO_SERVER)) {
+    assert.ok(wire.has(target) || Object.hasOwn(NON_WIRE_AGENT_TARGETS, target),
+      `OP_TO_SERVER maps \`${name}\` -> \`${target}\`, which server.py's ALLOWED_OPS ` +
+      `does not contain and which is not a declared non-wire endpoint. [source: ` +
+      `OP_TO_SERVER] [op: ${name} -> ${target}]`);
+  }
+  for (const [target, e] of Object.entries(NON_WIRE_AGENT_TARGETS)) {
+    assert.ok(!wire.has(target),
+      `NON_WIRE_AGENT_TARGETS declares \`${target}\` non-wire, but server.py's ` +
+      `ALLOWED_OPS now contains it — the declaration is stale.`);
+    assert.ok(readBB("opencode", "tools", "browser_tool_impl.mjs").includes(e.source),
+      `NON_WIRE_AGENT_TARGETS.${target}: cited rationale not found in ` +
+      `browser_tool_impl.mjs. Cited: ${JSON.stringify(e.source)}`);
+  }
+});
+
+test("DECLARED EXCLUSIONS: each carries a written rationale that EXISTS in the source", () => {
+  const wire = wireOpInventory();
+  const impl = readBB("opencode", "tools", "browser_tool_impl.mjs");
+  assert.ok(impl.length > 2000,
+    `HARNESS BROKEN: browser_tool_impl.mjs read as ${impl.length} bytes`);
+  const reachable = new Set(Object.values(OP_TO_SERVER));
+  for (const [op, e] of Object.entries(REVIEWED_AGENT_EXCLUSIONS)) {
+    assert.ok(wire.has(op),
+      `REVIEWED_AGENT_EXCLUSIONS.${op} is not a wire op at all — the entry is stale. ` +
+      `[op: ${op}]`);
+    assert.ok(!reachable.has(op),
+      `REVIEWED_AGENT_EXCLUSIONS.${op} is declared EXCLUDED but OP_TO_SERVER makes it ` +
+      `reachable — delete the entry or the mapping, they disagree. [op: ${op}]`);
+    assert.ok(typeof e.reason === "string" && e.reason.length >= 40,
+      `REVIEWED_AGENT_EXCLUSIONS.${op}.reason must be a written justification, not a ` +
+      `placeholder (got ${JSON.stringify(e.reason)}). [op: ${op}]`);
+    assert.ok(impl.includes(e.source),
+      `REVIEWED_AGENT_EXCLUSIONS.${op}: its cited rationale is NOT present in ` +
+      `browser_tool_impl.mjs — the comment was moved, reworded or deleted, so this ` +
+      `entry no longer stands for anything a maintainer can read. Cited: ` +
+      `${JSON.stringify(e.source)} [op: ${op}]`);
+  }
+});
+
+test("AGENT SURFACE PARTITION: every wire op is REACHABLE or a DECLARED exclusion", () => {
+  const wire = wireOpInventory();
+  const reachable = new Set(
+    Object.values(OP_TO_SERVER).filter((t) => wire.has(t)));
+  const declared = new Set(Object.keys(REVIEWED_AGENT_EXCLUSIONS));
+  const both = [...declared].filter((o) => reachable.has(o)).sort();
+  assert.deepEqual(both, [],
+    `declared-excluded AND reachable — the two disagree: ${both.join(", ")}`);
+  const undeclared = [...wire]
+    .filter((o) => !reachable.has(o) && !declared.has(o)).sort();
+  assert.deepEqual(undeclared, [],
+    `UNDECLARED EXCLUSION(S): ${undeclared.join(", ")} — these wire ops are ` +
+    `unreachable by the autonomous agent (absent from OP_TO_SERVER, so not even ` +
+    `BROWSER_AGENT_ALLOWED_OPS can re-enable them) and carry NO written rationale, ` +
+    `unlike every other exclusion in that file. ` +
+    `🔴 THIS FAILURE IS THE FINDING, not a broken test: browser-bridge surface ` +
+    `audit 2026-08-02 §F9. Resolve it ONE of two ways, both operator decisions: ` +
+    `(a) the op SHOULD be reachable -> add it to OP_TO_SERVER and to all four ` +
+    `agent-facing sources; or (b) the exclusion is deliberate -> write the ` +
+    `rationale comment in browser_tool_impl.mjs and add an entry to ` +
+    `REVIEWED_AGENT_EXCLUSIONS citing it. Do NOT invent a rationale to make this ` +
+    `green. [ops: ${undeclared.join(", ")}]`);
 });

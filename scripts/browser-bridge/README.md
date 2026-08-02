@@ -1435,7 +1435,7 @@ The agent's entire capability is a single **custom opencode tool**, `browser`
 (`opencode/tools/browser.js` + its pure-logic sibling `browser_tool_impl.mjs`,
 copied into the scratch project's `.opencode/tools/` per run). The model calls it
 with TYPED arguments — `op` ∈ {`text`,`html`,`eval`,`nav`,`screenshot`,`frames`,
-`click`,`type`,`key`,`wake`,`whoami`} plus optional `selector`/`url`/`js`/`text`/`key`/`frame`/
+`click`,`type`,`key`,`wake`,`context`,`whoami`} plus optional `selector`/`url`/`js`/`text`/`key`/`frame`/
 `maxBytes`/`waitMs` — **never a shell command string, and never a raw-CDP `cdp`/`method`
 field** (the CDP ops are bounded typed ops only; see the CDP security model above).
 

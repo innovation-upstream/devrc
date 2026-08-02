@@ -43,7 +43,7 @@ export default tool({
     // of them (operator-only, opt-in via BROWSER_AGENT_ALLOWED_OPS).
     op: tool.schema
       .enum(["text", "html", "eval", "nav", "screenshot",
-             "frames", "click", "type", "key", "wake", "whoami"])
+             "frames", "click", "type", "key", "wake", "context", "whoami"])
       .describe("the operation to perform on your tab"),
     selector: tool.schema.string().optional()
       .describe("op=text/click/type/key: CSS selector (click target / focus / scope)"),
