@@ -118,13 +118,32 @@ patterns has known bypasses, which is exactly why layer 2 exists.
 
 | Policy | Checks | Used by |
 |---|---|---|
-| `claude-code` | the original six, **frozen** | `~/.claude/hooks/bash-guard.py` |
-| `opencode` | those six **plus** `talosctl reset`, `mkfs`, `dd` to a block device, `rm -r` of `/`/`$HOME`/cwd/system dirs, `git stash`, `git clean -f`, and `git reset --hard` through a `-C` hop | `plugin/guard.js` |
+| `claude-code` | the original six, **plus** `git reset --hard` through a global-option hop | `~/.claude/hooks/bash-guard.py` |
+| `opencode` | those seven **plus** `talosctl reset`, `mkfs`, `dd` to a block device, `rm -r` of `/`/`$HOME`/cwd/system dirs, `git stash`, and `git clean -f` | `plugin/guard.js` |
 
 `bash-guard.py` fires on **every** Bash call in **every** Claude Code session on
 both hosts, so adding a check to `claude-code` changes the operator's primary
-tool. It is deliberately unchanged: a before/after decision matrix over a
-2,097-command corpus differs on **0** rows.
+tool. It is added to only by explicit, reported decision.
+
+**Changed 2026-08-02** — `check_git_reset_hard_argv` moved from the
+irreversible set into `_CLAUDE_CODE_CHECKS` (which `POLICIES["opencode"]`
+includes, so opencode keeps it by inheritance, not duplication). Before the
+move, the raw-text `check_git_reset_hard` was anchored on `\bgit\s+reset\b` and
+so never matched `git -C <path> reset --hard` — the worktree-first spelling
+`RULES.md` **mandates**. Probed against the live hook:
+
+```
+DENY   git reset --hard origin/main
+ALLOW  git -C /tmp/wt reset --hard origin/main      <- RULES-mandated spelling
+ALLOW  sudo -n git -C /tmp/wt reset --hard HEAD~5
+DENY   git add -A
+DENY   git -C /tmp/wt add -A                        <- add ALREADY hopped
+```
+
+The guard was stricter about the recoverable action (`add -A`) than the
+irreversible one. A before/after decision matrix over a 66-command corpus
+differs on **12** rows under `claude-code` — every one a `reset --hard`
+spelling going ALLOW → DENY — and on **0** rows under `opencode`.
 
 ## Why `AGENTS.md` is generated rather than symlinked
 

@@ -64,6 +64,19 @@ def test_unknown_policy_raises_rather_than_running_nothing():
 CLAUDE_CODE_EXPECTED = [
     "check_git_add_all",
     "check_git_reset_hard",
+    # 🔴 Added 2026-08-02 by explicit operator decision — the SEVENTH check, and
+    # the first ever added to this policy. The raw-text `check_git_reset_hard`
+    # above is anchored on `\bgit\s+reset\b`, so it never saw
+    # `git -C <path> reset --hard`: the worktree-first spelling RULES.md
+    # MANDATES. Measured against the live hook before the move —
+    #   DENY  `git reset --hard origin/main`
+    #   ALLOW `git -C /tmp/wt reset --hard origin/main`
+    # — i.e. the irreversible guard was blind to the spelling the rules push
+    # agents toward, while `check_git_add_all` already handled that same hop.
+    # It sits BEFORE check_cd_then_git deliberately: that ordering is what makes
+    # `cd /x && git -C <p> reset --hard` report the reset reason rather than the
+    # cd reason. See test_reset_hard_deny_is_attributed_to_the_reset_check.
+    "check_git_reset_hard_argv",
     "check_heredoc_to_file",
     "check_cd_then_git",
     "check_private_key",
@@ -71,7 +84,7 @@ CLAUDE_CODE_EXPECTED = [
 ]
 
 
-def test_claude_code_policy_is_frozen_at_the_original_six():
+def test_claude_code_policy_is_pinned_by_name():
     """🔴 bash-guard.py runs this policy on EVERY Bash call in EVERY Claude Code
     session on both hosts. Adding a check here changes the operator's primary
     tool and must be an explicit, reported decision.
@@ -107,7 +120,6 @@ IRREVERSIBLE_EXPECTED = [
     "check_rm_rf_critical",
     "check_git_stash",
     "check_git_clean_force",
-    "check_git_reset_hard_argv",
 ]
 
 
@@ -123,13 +135,9 @@ def test_opencode_policy_carries_the_irreversible_checks():
     "rm -rf /",
     "git stash push -m wip",
     "git clean -fd",
-    # 🔴 `git -C <path> reset --hard` is the ONE row here that is a GAP in
-    # Claude Code today, not merely a check we chose not to enable: the frozen
-    # `check_git_reset_hard` is a raw-text regex anchored on `git reset`, so the
-    # worktree-first spelling RULES.md mandates slips past it. Enabling the argv
-    # version for claude-code is a new deny on the operator's primary tool and
-    # is theirs to approve — see the PR body.
-    "git -C /tmp/x reset --hard",
+    # NOTE: `git -C <path> reset --hard` USED to be listed here, asserting that
+    # Claude Code allowed it. That was the gap, not a feature — it is now denied
+    # under both policies and is asserted positively in section 1b below.
 ])
 def test_the_new_checks_do_not_leak_into_claude_code(command):
     """🔴 The blast-radius assertion, by OUTCOME rather than by list membership.
@@ -140,6 +148,207 @@ def test_the_new_checks_do_not_leak_into_claude_code(command):
     """
     assert gc.evaluate(command, "opencode") is not None
     assert gc.evaluate(command, "claude-code") is None
+
+
+# --------------------------------------------------------------------------- #
+# 1b. 🔴 `git reset --hard` under the CLAUDE-CODE policy
+#
+# Closes a gap that was live on both hosts until 2026-08-02. `check_git_add_all`
+# had always handled the `git [global-opts] <verb>` hop; the raw-text
+# `check_git_reset_hard` never did, so the IRREVERSIBLE one of the two was blind
+# to exactly the spelling RULES.md mandates. Probed against the live
+# ~/.claude/hooks/bash-guard.py before the change:
+#
+#     DENY   git reset --hard origin/main
+#     ALLOW  git -C /tmp/wt reset --hard origin/main      <- RULES-mandated
+#     ALLOW  sudo -n git -C /tmp/wt reset --hard HEAD~5
+#     DENY   git add -A
+#     DENY   git -C /tmp/wt add -A                        <- add DOES hop
+#
+# Every deny test below is asserted BY REASON, not merely by "something denied".
+# Three of these commands are ALSO caught by an unrelated check (check_cd_then_git
+# for the `cd &&` form, and the raw-text check for any spelling where the literal
+# bytes "git reset" happen to appear), so a bare `is not None` would pass with
+# this change fully reverted — green for the wrong reason.
+# --------------------------------------------------------------------------- #
+RESET_REASON_MARK = "`git reset --hard` is blocked"
+
+
+def _deny_reason(command, policy="claude-code"):
+    reason = gc.evaluate(command, policy)
+    assert reason is not None, f"{command!r} was ALLOWED under {policy}"
+    return reason
+
+
+def _assert_denied_as_reset_hard(command, policy="claude-code"):
+    """Deny AND attribute it to a reset-hard check.
+
+    The attribution is the load-bearing half: `cd /x && git -C <p> reset --hard`
+    is denied by check_cd_then_git with this change reverted, so asserting only
+    that it denies pins nothing about reset --hard at all.
+    """
+    reason = _deny_reason(command, policy)
+    assert RESET_REASON_MARK in reason, (
+        f"{command!r} denied under {policy}, but for the WRONG reason — got "
+        f"{reason[:120]!r}. Some other check fired first; this asserts nothing "
+        f"about reset --hard coverage."
+    )
+    return reason
+
+
+# Deny fixtures. Paths are pairwise DISTINCT and — 🔴 critically — none of them
+# ends in `.git`. A `--git-dir=/tmp/d/.git` fixture makes the raw command text
+# contain the substring "git reset" (from ".git reset"), so the frozen raw-text
+# regex matches the PATH and the case passes on unpatched code. That exact
+# fixture silently masked the --git-dir gap during this work until the paths
+# were made honest.
+RESET_HARD_DENY = [
+    "git reset --hard",
+    "git -C /srv/repos/alpha reset --hard",
+    "git -c core.fileMode=false reset --hard",
+    "git --git-dir=/var/lib/beta reset --hard",
+    "git --git-dir /opt/gamma reset --hard",
+    "git --work-tree=/home/u/delta reset --hard",
+    "sudo -n git -C /mnt/epsilon reset --hard HEAD~5",
+    "DEBUG=1 git -C /data/zeta reset --hard",
+    "cd /srv/eta && git -C /srv/repos/theta reset --hard",
+    # `--hard` AFTER a ref — the flag is not adjacent to the subcommand at all
+    "git -C /usr/local/iota reset origin/main --hard",
+    "git -C /tmp/kappa reset --hard; echo done",
+    "bash -c 'git -C /tmp/lambda reset --hard'",
+    "/usr/bin/git -C /tmp/mu reset --hard",
+]
+
+
+@pytest.mark.parametrize("command", RESET_HARD_DENY)
+def test_reset_hard_deny_is_attributed_to_the_reset_check(command):
+    """🔴 RED at origin/main for every row except the two the raw-text check
+    already covered (`git reset --hard`, which needs no hop). Attribution by
+    reason is what makes the `cd &&` row a real regression test: at origin/main
+    it denies with check_cd_then_git's message, so this assertion fails there.
+    """
+    _assert_denied_as_reset_hard(command, "claude-code")
+
+
+@pytest.mark.parametrize("command", RESET_HARD_DENY)
+def test_reset_hard_still_denied_under_opencode(command):
+    """The move must not COST opencode anything. `POLICIES["opencode"]` is
+    `_CLAUDE_CODE_CHECKS + _IRREVERSIBLE_CHECKS`, so the check is inherited
+    rather than duplicated — this asserts the inheritance actually holds.
+    """
+    _assert_denied_as_reset_hard(command, "opencode")
+
+
+def test_reset_hard_reason_is_reported_once_not_twice():
+    """Both reset checks can match the same command. `evaluate` returns on the
+    FIRST hit, so exactly one reason comes back — no double-reporting, and the
+    message existing denials already produced is unchanged."""
+    cmd = "git reset --hard origin/main"
+    matching = [c.__name__ for c in gc.POLICIES["claude-code"] if c(cmd)]
+    assert matching == ["check_git_reset_hard", "check_git_reset_hard_argv"], matching
+    assert gc.evaluate(cmd, "claude-code") == gc.check_git_reset_hard(cmd)
+
+
+def test_both_reset_checks_are_present_and_neither_is_redundant():
+    """They cover different shapes. Deleting either loses real coverage:
+      - raw-text only: `git -C <p> reset --hard` slips through;
+      - argv only: quoted prose (below) stops being caught.
+    """
+    names = [c.__name__ for c in gc.POLICIES["claude-code"]]
+    assert "check_git_reset_hard" in names and "check_git_reset_hard_argv" in names
+    # raw-text catches what argv cannot
+    assert gc.check_git_reset_hard("echo 'never use git reset --hard'") is not None
+    assert gc.check_git_reset_hard_argv("echo 'never use git reset --hard'") is None
+    # argv catches what raw-text cannot
+    assert gc.check_git_reset_hard("git -C /srv/repos/nu reset --hard") is None
+    assert gc.check_git_reset_hard_argv("git -C /srv/repos/nu reset --hard") is not None
+
+
+# --- the ALLOW half -------------------------------------------------------- #
+# 🔴 Built independently of the deny list — different paths, different refs,
+# different flags — so a copy-paste symmetry cannot make both halves agree with
+# the same bug. This half is what decides whether the new deny is safe to live
+# with: `git reset --soft/--mixed` and `git -C <p> reset <ref>` are ordinary,
+# non-destructive traffic and must not become collateral.
+RESET_ALLOW = [
+    "git reset",
+    "git reset --soft HEAD~1",
+    "git reset --mixed",
+    "git reset HEAD -- src/main.py",
+    "git -C /opt/service-xi reset HEAD~1",
+    "git -C /opt/service-xi reset --soft HEAD~3",
+    "git -c user.name=bot reset --mixed HEAD",
+    "git --git-dir=/net/omicron reset --keep HEAD~1",
+    "git -C /opt/service-xi log --oneline -3",
+    "git -C /opt/service-xi diff --stat",
+    "git restore src/app.ts",
+    "git restore --staged docs/README.md",
+    "git checkout -- src/app.ts",
+    "git checkout origin/main -- config/prod.yaml",
+    "git revert abc1234",
+    "git reflog -20",
+]
+
+
+@pytest.mark.parametrize("command", RESET_ALLOW)
+def test_non_destructive_reset_and_neighbours_stay_allowed(command):
+    """INVARIANT GUARD (green before and after) — the false-positive fence.
+
+    Not regression coverage for any bug: it pins that closing the gap did not
+    widen into ordinary traffic. `--soft`/`--mixed`/`--keep` do not touch the
+    working tree, and `git -C <p> reset <ref>` is the everyday index reset.
+    """
+    assert gc.evaluate(command, "claude-code") is None
+    assert gc.evaluate(command, "opencode") is None
+
+
+# --- pinned pre-existing behaviour ----------------------------------------- #
+@pytest.mark.parametrize("command", [
+    "echo 'never use git reset --hard'",
+    "grep -rn 'git reset --hard' RULES.md",
+])
+def test_quoted_prose_mentioning_reset_hard_stays_denied(command):
+    """INVARIANT GUARD, and a deliberate NON-fix.
+
+    The raw-text check matches these today and must keep doing so. This is the
+    accepted false positive the module docstring defends: a `_strip_message_text`
+    helper that would have "fixed" it was built and REVERTED in PR #217 after
+    three audit rounds each found a hole that let a genuinely-executing
+    destructive command through. Deciding which bytes are inert message vs.
+    executable command is shell parsing; regexes cannot do it.
+
+    The workaround costs one step — write the text to a file and use
+    `git commit -F <file>` / `gh pr create --body-file <file>`.
+
+    Do NOT "improve" this by making these allow.
+    """
+    reason = _assert_denied_as_reset_hard(command, "claude-code")
+    assert "commit -F" in reason  # the escape hatch is spelled out to the caller
+
+
+def test_git_dir_ending_in_dot_git_passes_for_the_WRONG_reason():
+    """🔴 Fixture-hygiene pin, kept as a warning to the next author.
+
+    `--git-dir=/tmp/d/.git` puts the literal bytes "git reset" into the command
+    text, so the RAW-TEXT check matches the PATH. Any --git-dir test written with
+    a `.git`-suffixed value therefore passes with the argv check removed
+    entirely, and proves nothing. The honest fixtures above avoid `.git`.
+    """
+    accidental = "git --git-dir=/tmp/d/.git reset --hard"
+    assert gc.check_git_reset_hard(accidental) is not None  # matches the PATH
+    honest = "git --git-dir=/tmp/d/objects-only reset --hard"
+    assert gc.check_git_reset_hard(honest) is None          # raw text cannot see it
+    assert gc.check_git_reset_hard_argv(honest) is not None  # argv can
+
+
+def test_add_all_and_reset_hard_now_agree_about_the_global_option_hop():
+    """The asymmetry that WAS the bug, pinned as a symmetry.
+
+    `git -C <p> add -A` was denied while `git -C <p> reset --hard` was allowed —
+    the guard was stricter about the recoverable action than the irreversible one.
+    """
+    for cmd in ("git -C /srv/repos/pi add -A", "git -C /srv/repos/pi reset --hard"):
+        assert gc.evaluate(cmd, "claude-code") is not None, cmd
 
 
 # --------------------------------------------------------------------------- #
