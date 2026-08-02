@@ -90,6 +90,30 @@ reference file. Six triggers share `el-github-listener`: `naida-push-main`,
 `remix-push-trunk`, `gitops-validate-pr`, `gitops-validate-push-trunk`, `clawgate-ci-push`,
 `auditloop-push-main`.
 
+### `gitops-validate` — the gitleaks leg (hardened #265)
+
+`clusters/homelab/apps/tekton-pipelines/triggers/gitops-validate-pipeline.yaml`. Legs:
+kustomize + kubeconform + gitleaks + helm render-diff + sops-rules.
+
+- **Baseline line-drift now has its OWN verdict.** The status description reads
+  `BASELINE DRIFT: gitleaks` instead of masquerading as `FAILED: gitleaks`. That masquerade
+  is what made the gate look permanently broken. (Drift still sets the commit state to
+  `failure` — only the description distinguishes it.) Third class: `COULD NOT RUN: <leg>`.
+- **`scripts/check-gitleaks-baseline.py`** (+ `scripts/tests/test-check-gitleaks-baseline.sh`).
+  rc: `0` clean · `1` drift ONLY · `2` usage/environment error · `3` drift **AND** a finding
+  with no baseline counterpart. 🔴 **It fails CLOSED** — `die()` is `NoReturn`/rc=2 for a
+  missing, empty, unreadable or malformed baseline. An earlier revision let an `OSError`
+  escape as an unhandled traceback → Python rc=1 → which this very scheme maps to the
+  *benign* drift verdict: a broken guard reporting itself as routine bookkeeping. Every
+  failure path must go through `die()`, never a traceback.
+- **Fixture suppression = rule + path + one exact value** (was 11 globally-scoped literals,
+  10 of which were never findings). 🔴 **A GLOBAL `paths` allowlist exempts the file
+  wholesale even with `condition = "AND"`** — planted creds inside it go undetected; only a
+  rule-scoped `[[rules.allowlists]]` honours the AND. Measurement table is in `.gitleaks.toml`.
+- 🔴 **gitleaks 8.30.1 detects NO AWS key shape at all** (`useDefault = true`; neither `AKIA…`
+  nor a 40-char secret) — an AWS-shaped negative test is a **permanent false green**. Prove
+  the gate still fires with a `ghp_` token, generic-api-key, or a private-key header.
+
 ## 🔴 Merging a trigger does NOT fire the first run — reconcile FIRST
 
 The single most expensive Tekton gotcha here. **The webhook arrives within seconds of the
