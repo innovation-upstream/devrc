@@ -126,7 +126,12 @@ MIN_TESTS="${MIN_TESTS:-2850}"
 #   jq,grep scripts/task-spec-drafter/tests/test_severity_and_gate_skip.py
 #   setsid  scripts/browser-bridge/tests/test_browser_agent.py (process-group kill)
 #   python3 scripts/browser-bridge/tests/test_browser_agent.py
-REQUIRED_TOOLS=(bash curl node rg git awk jq grep setsid python3)
+#   nix-instantiate
+#           scripts/tests/test_opencode_config.py (10 parametrized handle tests)
+#           — `nix_eval()` calls pytest.FAIL, not skip, when it is absent, so
+#           without this entry a missing nix reads as 10 unexplained assertion
+#           failures deep in the run instead of one named precondition here.
+REQUIRED_TOOLS=(bash curl node rg git awk jq grep setsid python3 nix-instantiate)
 missing_tools=()
 for t in "${REQUIRED_TOOLS[@]}"; do
   command -v "$t" >/dev/null 2>&1 || missing_tools+=("$t")

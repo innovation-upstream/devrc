@@ -99,10 +99,39 @@
             # check below stays separate for its OWN reasons (distinct failure
             # signal, parallel execution), which this does not change.
             #
+            # nix: MEASURED 2026-08-02 — scripts/tests/test_opencode_config.py's
+            # `nix_eval()` shells out to `nix-instantiate --eval` to pin the
+            # GENERATED handle values from nix/agent-handles.nix, and calls
+            # `pytest.fail()` (NOT skip) when the binary is absent, deliberately:
+            # "a skip here is how a wrong kubeconfig path ships". Without nix on
+            # PATH that fired for all 10 `test_handles_resolve_to_the_exact_
+            # expected_paths[...]` cases — `10 failed, 455 passed` in that file,
+            # reproduced on a dev host by stripping PATH down to python alone.
+            #
+            # 🔴 This was INVISIBLE until #289. Those 10 fail ONLY in the sandbox
+            # (every dev host has nix) and were hidden behind the gate being red
+            # for an unrelated reason. Its sibling defect is the exact complement:
+            # session_insight's test_patterns_cover_bash_guard fails only on a
+            # host where ~/.claude/hooks/bash-guard.py is DEPLOYED, and skips
+            # here. A two-tier suite needs BOTH tiers read — see claude/RULES.md.
+            #
+            # Cost, stated as deliberately as the nodejs one above: this grows the
+            # pytest gate's closure by the nix package, and a nixpkgs bump that
+            # moves `nix` now invalidates this check's build cache (the same trade
+            # already accepted for nodejs). Bought: 10 tests that structurally
+            # cannot run without it, pinning that the handles every agent shell
+            # exports resolve to the exact expected paths. The alternative —
+            # moving them to DEVHOST_TARGETS — would keep the closure small but
+            # weaken the pin to "runs only where someone remembers to run it",
+            # which is the failure mode this whole area keeps hitting.
+            # `--eval` is a PURE evaluation: agent-handles.nix is `{ home }: {…}`
+            # with no nixpkgs import and no fetch, so it needs no daemon, no
+            # network and no store realisation.
+            #
             # 🔴 run-tests.sh now ASSERTS every one of these is on PATH
             # (`REQUIRED_TOOLS`) and fails naming the missing binary. Deleting one
             # from this list no longer silently skips tests — it fails the gate.
-            nativeBuildInputs = [ pyEnv pkgs.bash pkgs.ripgrep pkgs.git pkgs.util-linux pkgs.jq pkgs.gnugrep pkgs.curl pkgs.nodejs ];
+            nativeBuildInputs = [ pyEnv pkgs.bash pkgs.ripgrep pkgs.git pkgs.util-linux pkgs.jq pkgs.gnugrep pkgs.curl pkgs.nodejs pkgs.nix ];
           }
           ''
             cp -r ${./.} src
