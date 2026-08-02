@@ -1,46 +1,135 @@
-# Scripts
+# `scripts/`
 
-Utility scripts for the devrc repo — automation, tmux tooling, system
-monitoring, and development helpers.
+Operational scripts for the devrc environment. **435 tracked files**: 50 top-level entrypoints (plus
+this README) and 13 subsystem directories that are small applications in their own right.
 
-## Top-level scripts
+This index covers the 50 top-level entrypoints individually and the subsystems one line each. It
+deliberately does not enumerate every file — most of the tree is `test_*.py`, and a flat listing
+would be noise that goes stale on the next commit.
 
-| Script | Description |
+Descriptions come from each script's own header comment. Most are self-documenting: run with
+`--help` where supported, or read the header.
+
+## i3 status bar
+
+Custom blocks for i3status-rust — each prints one block's state; the bar polls them.
+
+| script | purpose |
 |---|---|
-| `cpu-monitor.sh` | Desktop-notification daemon for sustained high CPU load, runaway processes, and high package temperature. |
-| `dictate` | Wrapper that launches `dictate.py` from its venv; intended as an i3 keybinding target. |
-| `dictate.py` | Voice dictation daemon using faster-whisper, with socket-based start/stop control. |
-| `dogfood-cycle` | Automate the civitai App Block "dogfood test cycle": create, install, run, tear down, and upgrade. |
-| `i3blocks-cpu` | i3blocks blocklet: per-second CPU utilization with warning/critical colour thresholds. |
-| `i3blocks-disk` | i3blocks blocklet: disk usage for a mount point with colour thresholds. |
-| `i3blocks-memory` | i3blocks blocklet: memory usage with colour thresholds. |
-| `i3blocks-temp` | i3blocks blocklet: CPU package temperature (AMD k10temp / Intel coretemp). |
-| `i3blocks-vpn` | i3blocks blocklet: Mullvad VPN status with left-click rofi menu and right-click details terminal. |
-| `i3blocks-vpn-detail` | Script launched by `i3blocks-vpn` on right-click: shows full Mullvad status in a floating terminal. |
-| `i3blocks-vpn-sudo` | Privileged helper (NOPASSWD sudo) for `i3blocks-vpn`: switch server, bring VPN up/down. |
-| `setup-dictation.sh` | One-time setup: creates a Python venv and installs faster-whisper for dictation. |
-| `ship.sh` | Converge both NixOS hosts (workbench + laptop) to `origin/main` and run `home-manager switch`. |
-| `tmux-activity-emit.sh` | Focus-change hook that ships window/session telemetry to the activity-collector spool. |
-| `tmux-activity-receiver.sh` | Receives piped pane output and updates per-window idle-timestamp files. |
-| `tmux-claude-counters.sh` | Status-right widget: counts running/paused/waiting Claude windows across all tmux sessions. |
-| `tmux-idle-update.sh` | Batch-updates tmux window tab colours based on idle time, called each status-interval. |
-| `tmux-initiatives.sh` | Fzf dashboard (Alt+i) aggregating Claude sessions grouped by tmux session with project info. |
-| `tmux-pipe-activity.sh` | Manages `pipe-pane` lifecycle (start/stop/switch) for background activity tracking. |
-| `tmux-scratch-monitor.sh` | Live HUD popup (Alt+m) showing output from all 12 scratch sessions. |
-| `tmux-scratch-picker.sh` | Scratch-session picker (Alt+Shift+G): list, toggle, or create scratchpads via fzf. |
-| `tmux-scratch-status.sh` | Status-left widget: renders 12 scratch-slot hotkey letters coloured to match popup borders. |
-| `tmux-task-hook.sh` | Claude Code Stop hook — persists task status to `~/.tmux/tasks/` (wraps `fuzzyclaw`). |
-| `tmux-task-resume.sh` | PreToolUse hook — marks a paused task as running when Claude resumes work. |
+| `i3status-agent-ops` | live count of Claude-Code-in-tmux runs |
+| `i3status-airvpn` | host AirVPN WireGuard tunnel state |
+| `i3status-alerts` | firing cluster-alert count |
+| `i3status-civitai` | firing civitai-prod alert count (client cluster) |
+| `i3status-clawgate` | clawgate operator-pending task count |
+| `i3status-mail` | open mail-actions count |
+| `i3status-media` | qBittorrent (behind the gluetun AirVPN sidecar) |
+| `i3status-notifs` | merged notifications bell + DND indicator |
+| `bar-status-poll` | decoupled status poller for the bar (workbench only) |
 
-## Subdirectories
+Click actions for those blocks:
 
-| Directory | Description |
+| script | purpose |
 |---|---|
-| `claude-hooks/` | Claude Code hook scripts for PR audit nudges, shell environment checks, and hook registration. |
-| `collector/` | Activity-collector daemon: ships telemetry (tmux, i3, keylog, browser) to ClickHouse. |
-| `mail-actions/` | Email processing pipeline: fetch, extract, filter, LLM-classify, archive, and notify via Clawgate. |
-| `repo-cos/` | Weekly repo-consistency scanner: fuzzy-matches config, generates digests, and emails reports. |
-| `session-analysis/` | Scripts for analysing Claude session logs and espanso usage patterns. |
-| `task-spec-drafter/` | Agent that drafts task specifications from conversations using structured prompts. |
-| `tests/` | Test scripts (e.g. `ship-converge.test.sh`). |
-| `validation/` | Config-invariant validators, query assertions, and replay-based regression checkers. |
+| `airvpn-menu` / `airvpn-detail` | rofi action menu (left-click) / detail popup (right-click) |
+| `media-menu` / `media-detail` | rofi action menu / detail popup for the media block |
+| `disk-detail` / `disk-explore` | all-disks view / `ncdu` on the fullest real filesystem |
+| `notif-center` | notification center for the notifications pill |
+| `mail-triage` | interactive triage view for the mail block |
+
+## Desktop / window management
+
+| script | purpose |
+|---|---|
+| `i3-grid` | arrange all windows on a workspace into a grid |
+| `rig-control.sh` | yad control panel (and CLI) for two workbench toggles |
+| `i3blocks-rigcontrol` | launcher block for the rig-control panel |
+| `monitor-blackout.sh` | black out the external monitor without powering it off |
+
+## tmux
+
+| script | purpose |
+|---|---|
+| `tmux-scratch-slots.sh` | canonical scratchpad slot table — the single source of truth |
+| `tmux-scratch-picker.sh` | list/toggle/create `scratch-*` sessions |
+| `tmux-scratch-monitor.sh` | live HUD of the last N lines across all scratch sessions |
+| `tmux-scratch-status.sh` | scratch slot indicator for `status-left` |
+| `tmux-claude-counters.sh` | aggregate Claude-window counters for `status-right` |
+| `tmux-idle-update.sh` | batch-update window tab colours by idle time |
+| `tmux-pipe-activity.sh` | manage `pipe-pane` for background activity tracking |
+| `tmux-activity-emit.sh` | activity-telemetry shipper for tmux |
+| `tmux-activity-receiver.sh` | receive piped pane output, update timestamps |
+| `tmux-session-restore.py` | snapshot the live claude/tmux workspace, resume it post-reboot |
+| `tmux-task-hook.sh` | Claude Code `Stop` hook (thin wrapper for fuzzyclaw) |
+| `tmux-task-resume.sh` | `PreToolUse` hook — mark a window active |
+
+## Agent & development tooling
+
+| script | purpose |
+|---|---|
+| `agent-ops` | tmux "mission-control" agent operations dashboard |
+| `verify-agent-work` | deterministic, repo-aware post-agent verification gate |
+| `find-session.py` | find past Claude Code sessions by keyword |
+| `memory-audit.py` | audit a project's auto-memory index (`MEMORY.md`) |
+| `resume-state.sh` | initiative-scoped live-state reconciler for `/resume` |
+| `obs-read` | one-command, cluster-aware observability query tool |
+| `playwright-nixos` | drive Playwright with the nixpkgs-provided Chromium |
+| `dogfood-cycle` | automate the civitai App Block "dogfood test cycle" |
+
+## Network / VPN
+
+| script | purpose |
+|---|---|
+| `airvpn-updown` | tunnel PostUp/PostDown helper — the killswitch + split-tunnel |
+| `airvpn-sudo` | privileged helper for the AirVPN block (via a NOPASSWD sudo rule) |
+
+## Media
+
+| script | purpose |
+|---|---|
+| `deep-search` | search all Prowlarr indexers, grab a release into qBittorrent |
+
+## System
+
+| script | purpose |
+|---|---|
+| `cpu-monitor.sh` | CPU desktop notifications on two independent conditions |
+| `notify-failure.sh` | systemd `OnFailure` toast handler |
+| `keylog-spin-capture.sh` | catch the `keylog.service` CPU spin in the act |
+
+## Test runners & deploy
+
+| script | purpose |
+|---|---|
+| `run-tests.sh` | **single source of truth** for running the Python suites |
+| `run-node-tests.sh` | single source of truth for running the `.mjs` suites |
+| `ship.sh` | converge BOTH NixOS hosts (workbench + laptop) to `origin/main`, then verify |
+
+## Subsystems
+
+Each is a self-contained application with its own tests. Counts are tracked files.
+
+| directory | files | what it is |
+|---|---|---|
+| `dl-router/` | 75 | download-routing sidecar — files downloads by page context, not filename |
+| `browser-bridge/` | 66 | loopback rendezvous server + MV3 extension for driving live Brave |
+| `collector/` | 59 | per-host activity-telemetry daemon and its sources (keylog, i3, tmux, Claude, OpenCode) |
+| `initiatives/` | 41 | durable cross-repo initiative ledger — sync, web viewer, Q&A assistant |
+| `session-analysis/` | 28 | scans over Claude transcripts — activity, adoption, initiatives, insights |
+| `repo-cos/` | 22 | weekly "repo chief-of-staff" — scan repos, synthesize proposals, email them |
+| `mail-actions/` | 21 | action-required extraction over the self-hosted inbox + invoice archiver |
+| `validation/` | 19 | activity-telemetry validation harness (replay, invariants, reconciliation) |
+| `tests/` | 19 | cross-cutting tests for the top-level scripts above |
+| `task-spec-drafter/` | 15 | continuous deep-context task-spec drafter + digest email |
+| `claude-hooks/` | 11 | Claude Code hooks — bash guard, nudges, notifier, hook registrant |
+| `opencode/` | 6 | OpenCode activity source (tailer, backfill, schema) |
+| `data/` | 2 | static data files |
+
+## Conventions
+
+- Shell scripts use `#!/usr/bin/env bash`; Python uses `#!/usr/bin/env python3`.
+- NixOS hosts: ad-hoc dependencies come via `nix-shell -p <pkg>`, never a system package manager.
+- Indentation follows the repo-root `.editorconfig` (2-space default, 4 for Python).
+- 🔴 Many of these are deployed by home-manager rather than run from this directory, so **a `git pull`
+  changes nothing that nix manages.** An edit here takes effect only after
+  `home-manager switch --flake ~/workspace/devrc --impure`. Whether a given deployed path is live or
+  a store copy is answered by `readlink -f`, never by diffing it against this repo.
