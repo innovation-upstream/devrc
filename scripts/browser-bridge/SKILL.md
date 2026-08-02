@@ -58,10 +58,10 @@ Result payloads land under `.result.data`.
 | `health` / `instances` | connected instances + count (`instances` as JSON: key, label, instanceId, active-tab url/title), each with an explicit `extension_stale` verdict (`true`/`false`; `null` = undecidable) |
 | `ping` | **which extension build+dir is loaded?** → `{pong,extensionVersion,id,ops}`; older build → `unknown_op`. The only deterministic answer after a ↻ reload |
 | `context` | **page metadata, no DOM read** — url/domain/path/query/title/tabId, tab-scoped. Cheapest read; ⚠ NOT a render check → `reference/read-envelopes.md` |
-| `open [url]` | open a NEW tab this session owns (default `about:blank`, **created in the BACKGROUND/hidden**), returns `tabId`. Idempotent. Use for multi-step work |
+| `open [url] [--wake[=MS]]` | open a NEW tab this session owns (default `about:blank`, **created in the BACKGROUND/hidden**), returns `tabId`. Idempotent. Use for multi-step work |
 | `close` / `release` | close this session's owned tab / drop ownership without closing it |
 | `tabs` | list open tabs (`.data.ownedTabId` flags yours) |
-| `nav <url>` | navigate the owned/active tab |
+| `nav <url> [--wake[=MS]]` | navigate the owned/active tab; it lands hidden, so `--wake` un-throttles in the SAME call |
 | `text [selector] [--max-bytes N] [--annotated]` | **cheap read** — visible `innerText` (optional CSS selector), whitespace-normalized, byte-capped (default 32768; `0`=uncapped). ~98% smaller than `html` — **prefer it**. `--annotated` swaps flat text for per-element extraction — use it when you need a SELECTOR to click/type; refused with `--frame`. Envelope fields + `--annotated` schema → `reference/read-envelopes.md` |
 | `html [--max-bytes N]` | `outerHTML`, same byte cap and same envelope. One uncapped `html` on a heavy SPA is ~100K tokens — the cap is ON by default |
 | `js '<expr>'` (alias: `eval`) | run JS in the tab, return its value; same op on the wire either way. **Prefer `js` in a worktree-isolated agent** — Claude Code's isolation guard refuses any command containing the literal token `eval` (it matches the WORD, not the behaviour) |
@@ -71,7 +71,7 @@ Result payloads land under `.result.data`.
 | `type <text> [--selector S]` | text input — TRUSTED CDP top frame, SYNTHETIC in-frame |
 | `key <Enter\|Tab\|Escape\|Backspace\|Delete\|Arrow*\|Home\|End\|Page*> [--selector S]` | one bounded keypress, same trust rules |
 | `upload <selector> <path>` | fill an `<input type=file>` via CDP — Chrome reads the file BY PATH, **no bytes cross the bridge**. AUDIT-LOGGED, **operator-only** (agent → `op_not_allowed:upload`) |
-| `wake [--wait MS]`, or `text\|html\|js --wake[=MS]` | **UN-THROTTLE a hidden/background tab with NO focus movement** — the fix for an empty or `hidden` read. ~1.5s settle, cap **6s**. **Wake once per PAGE, not per read** — the un-throttled state ends at detach, but the DOM already rendered PERSISTS. `--wake` folds un-throttle+read into one session; refused with `--frame` (`wake_with_frame_unsupported`). ISOLATED-vs-MAIN world nuance → `reference/spa-wake.md` |
+| `wake [--wait MS]`, or `text\|html\|js\|nav\|open --wake[=MS]` | **UN-THROTTLE a hidden/background tab with NO focus movement** — the fix for an empty or `hidden` read. ~1.5s settle, cap **6s**. **Wake once per PAGE, not per read** — the un-throttled state ends at detach, but the DOM already rendered PERSISTS. `--wake` folds un-throttle+read into one session; refused with `--frame` (`wake_with_frame_unsupported`). ISOLATED-vs-MAIN world nuance → `reference/spa-wake.md` |
 | `activate` | **⚠⚠ STEALS THE OPERATOR'S SCREEN — the ONE intrusive op, a LAST RESORT.** It is **NOT** the fix for a hidden/unrendered tab — that is `wake`. Read `reference/spa-wake.md` BEFORE using it |
 | `emulate <preset>\|--reset` | **device emulation** (mobile testing) on a tab you `open`ed; sticky, owned-tab-only → `reference/emulation.md` |
 | `agent "<goal>"` | the autonomous browser-agent — see **FIRST DECISION** above, then `reference/agent.md` |

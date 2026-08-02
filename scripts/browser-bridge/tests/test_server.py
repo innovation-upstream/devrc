@@ -24,6 +24,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
+from unittest import mock
 
 import pytest
 
@@ -165,9 +166,10 @@ def _req(srv, method, path, body=None, token=TOKEN, host="127.0.0.1",
         return e.code, (json.loads(raw) if raw else None)
 
 
-def _serve(cmd_timeout=5.0, poll_timeout=5.0, registry=None):
+def _serve(cmd_timeout=5.0, poll_timeout=5.0, registry=None, ping_timeout=None):
     registry = registry if registry is not None else S.Registry()
-    handler = S.make_handler(registry, TOKEN, cmd_timeout, poll_timeout)
+    handler = S.make_handler(registry, TOKEN, cmd_timeout, poll_timeout,
+                             ping_timeout)
     srv = S.ThreadingHTTPServer(("127.0.0.1", 0), handler)
     srv.daemon_threads = True
     t = threading.Thread(target=srv.serve_forever, daemon=True)
@@ -244,16 +246,52 @@ class FakeExtension(threading.Thread):
         self._stopev.set()
 
 
+# 🔴 _wait_connected POLLS /instances, NOT /health — and that is load-bearing.
+#
+# /health now emits ONE telemetry event per call (the orientation ops used to be
+# invisible in activity.events; see _emit_diag_event in server.py). This helper
+# calls it in a tight loop, so polling /health here injected 1..N spurious events
+# into the spool of EVERY test that waits for a connection — which is most of the
+# telemetry suite, and it broke 14 of them by making `len(evs) == 1` false.
+#
+# The fix is to make the HARNESS silent rather than to loosen those assertions:
+# /instances reports the same live-instance snapshot (`count` is len() of exactly
+# the list /health's `extension_connected` is the bool() of) and deliberately does
+# NOT emit — it is not an operator-facing orientation op. Keep it that way; if you
+# point this back at /health, the exact-count telemetry assertions go red again.
+#
+# `body["count"]`, NOT `body.get("count", 0)`: a missing key must RAISE, not read
+# as "nothing connected". With a default, a shape change on /instances turns
+# `want=False` into an instantly vacuous pass — the helper would report success
+# without ever observing the server. The old /health helper used `body[...]` for
+# exactly this reason; the move to /instances must not quietly weaken it.
 def _wait_connected(srv, want=True, timeout=3.0):
     deadline = time.time() + timeout
     while time.time() < deadline:
-        status, body = _req(srv, "GET", "/health")
-        if status == 200 and body["extension_connected"] == want:
+        status, body = _req(srv, "GET", "/instances")
+        if status == 200 and bool(body["count"]) == want:
             return True
         time.sleep(0.02)
     return False
 
 
+# The SILENT (no-telemetry) counterpart of _wait_instances, for tests that only
+# need "N instances are up" and must not have /health events in their spool.
+def _wait_count(srv, n, timeout=3.0):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        status, body = _req(srv, "GET", "/instances")
+        if status == 200 and body["count"] >= n:   # see _wait_connected on `[...]`
+            return body
+        time.sleep(0.02)
+    return None
+
+
+# _wait_instances stays on /health BECAUSE its callers read health-only fields
+# (`extension_connected`, `extension_version_current`, per-instance
+# `extension_stale`), which /instances does not compute. It therefore DOES emit —
+# so a telemetry test must use _wait_connected, or count only the ops it cares
+# about.
 def _wait_instances(srv, n, timeout=3.0):
     deadline = time.time() + timeout
     while time.time() < deadline:
@@ -1210,7 +1248,7 @@ def test_cmd_emits_routing_key_from_target(telemetry):
                       executor=lambda c: {"who": "b"})
     a.start(); b.start()
     try:
-        assert _wait_instances(srv, 2) is not None
+        assert _wait_count(srv, 2) is not None   # /instances: emits nothing
         st, _ = _req(srv, "POST", "/cmd", {"op": "tabs", "target": "alpha"})
         assert st == 200
         e = _wait_events(spool_dir, 1)[0]
@@ -1247,7 +1285,7 @@ def test_cmd_ambiguous_emits_ambiguous_outcome(telemetry):
     b = FakeExtension(srv, instance_id="b", label="beta")
     a.start(); b.start()
     try:
-        assert _wait_instances(srv, 2) is not None
+        assert _wait_count(srv, 2) is not None   # /instances: emits nothing
         st, _ = _req(srv, "POST", "/cmd", {"op": "tabs"})
         assert st == 409
         e = _wait_events(spool_dir, 1)[0]
@@ -1257,6 +1295,642 @@ def test_cmd_ambiguous_emits_ambiguous_outcome(telemetry):
         assert p["op"] == "tabs"
     finally:
         a.stop(); b.stop(); srv.shutdown(); srv.server_close()
+
+
+# --------------------------------------------------------------------------- #
+# S2 — `ping` gets its OWN short deadline (2026-08-02 usage audit, F7)
+#
+# `ping` is the documented FIRST thing you run when you suspect the loaded
+# extension is stale. Measured over a 2-day window: 34 pings, 13 failures (38.2%,
+# the worst rate of any op), of which 6 timed out at EXACTLY 20,000 ms — the
+# generic CMD_TIMEOUT. The 21 healthy ones averaged 3–4 ms. A diagnostic that
+# takes 20 s to say "no" is one an operator learns to skip.
+#
+# These tests are WALL-CLOCK tests, so they use a deliberately wide margin: the
+# claim is "ping does not wait out cmd_timeout", not "ping takes exactly 2.0 s".
+# --------------------------------------------------------------------------- #
+def test_ping_does_not_wait_out_cmd_timeout(monkeypatch):
+    """REGRESSION. Pre-change `ping` used cmd_timeout like every other op, so
+    against a wedged extension it burned the full budget before answering."""
+    monkeypatch.delenv("BROWSER_BRIDGE_PING_TIMEOUT", raising=False)
+    # The instance is IDLE (this ping is the only command), so nothing can be
+    # ahead of it and a stalled reply IS the wedge → the fast deadline applies.
+    srv, _ = _serve(cmd_timeout=25.0, poll_timeout=5.0)
+    ext = FakeExtension(srv, swallow=True)       # picks up, never answers
+    ext.start()
+    try:
+        assert _wait_connected(srv, want=True)
+        t0 = time.monotonic()
+        st, body = _req(srv, "POST", "/cmd", {"op": "ping"})
+        elapsed = time.monotonic() - t0
+        assert st == 504 and body["error"] == "timeout"
+        # Red pre-change: this was ~25s (the full cmd_timeout).
+        assert elapsed < 5.0, f"ping waited {elapsed:.1f}s — cmd_timeout, not its own"
+        # ...and it did actually WAIT its own deadline rather than failing instantly
+        # for some unrelated reason (which would make the bound above vacuous).
+        assert elapsed >= 1.5, f"ping returned in {elapsed:.2f}s — it never waited"
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
+def test_the_short_deadline_applies_to_ping_ONLY(monkeypatch):
+    """NEGATIVE CONTROL for the test above. Without this, a change that shortened
+    EVERY op's timeout would pass it — and that would be a real regression (a 2s
+    cap on `nav`/`eval` would break legitimate slow pages).
+
+    Same server, same wedged extension, a non-ping op: it must still wait out the
+    full cmd_timeout.
+
+    🔴 BOUNDED ON BOTH SIDES; each bound catches a DIFFERENT mutation, and both
+    have caught one for real:
+      * LOWER — `fast_timeout` passed for every op: an idle instance would give
+        getHtml the 2s fast deadline, so it would return in ~2s, not ~5s.
+      * UPPER — the derived busy-budget applied to every op: getHtml could then
+        run far past its own cmd_timeout.
+    A single bound is not enough. An earlier revision had only the lower one and
+    silently stopped discriminating when PING_TIMEOUT_DEFAULT briefly rose above
+    this test's cmd_timeout — the leak mutant passed `10 >= 3.5`.
+    """
+    monkeypatch.delenv("BROWSER_BRIDGE_PING_TIMEOUT", raising=False)
+    assert S.PING_TIMEOUT_DEFAULT < 5.0, (
+        "this control needs the fast deadline to be clearly below cmd_timeout")
+    srv, _ = _serve(cmd_timeout=5.0, poll_timeout=5.0)
+    ext = FakeExtension(srv, swallow=True)
+    ext.start()
+    try:
+        assert _wait_connected(srv, want=True)
+        t0 = time.monotonic()
+        st, _ = _req(srv, "POST", "/cmd", {"op": "getHtml"})
+        elapsed = time.monotonic() - t0
+        assert st == 504
+        assert elapsed >= 4.0, (
+            f"getHtml returned in {elapsed:.2f}s — the fast ping deadline leaked "
+            "onto every op (cmd_timeout was 5s)")
+        assert elapsed < 9.0, (
+            f"getHtml waited {elapsed:.2f}s — something gave a non-ping op a "
+            "budget beyond its own cmd_timeout")
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
+def test_ping_survives_a_BUSY_but_perfectly_healthy_extension(monkeypatch):
+    """🔴 REGRESSION (adversarial audit of PR #278). The FIRST cut of this feature
+    used a 2s deadline and had NO test with a BUSY extension — only a wedged one
+    and an idle one. That is the whole gap: the extension's poll loop is strictly
+    SERIAL (service_worker.js:1646-1652 — `await execute()` → `await postResult()`
+    → next `pollOnce()`), so `ping` skips the per-tab FIFO but still cannot be
+    DEQUEUED until whatever is already running finishes.
+
+    Consequence of the 2s cut, measured: two sessions drive one Brave profile;
+    agent B runs `browser ping` (the skill's documented FIRST action) while agent A
+    is mid-`nav` on a heavy page. B got a 504 and the message "is Brave focused /
+    responsive?", whose documented remedy is a FULL Brave restart of the operator's
+    live session. A healthy profile reported as dead.
+
+    This models exactly that: a legitimate BUSY_S-second op in flight, then a ping.
+
+    The elapsed LOWER bound is what stops this being vacuous — without it the test
+    passes against an extension that was never actually busy, which is the mistake
+    the original S2 tests made.
+    """
+    BUSY_S = 6.0
+    monkeypatch.delenv("BROWSER_BRIDGE_PING_TIMEOUT", raising=False)
+
+    def executor(cmd):
+        if cmd.get("op") == "getHtml":
+            time.sleep(BUSY_S)          # a legitimate slow op, NOT a wedge
+            return {"html": "<html></html>"}
+        return {"pong": True, "extensionVersion": "0.7.0"}
+
+    srv, _ = _serve(cmd_timeout=25.0, poll_timeout=5.0)
+    ext = FakeExtension(srv, executor=executor)
+    ext.start()
+    slow = {}
+    try:
+        assert _wait_connected(srv, want=True)
+
+        # Agent A: the slow-but-healthy op. Exceptions are captured rather than
+        # left to surface in a daemon thread (pytest would attribute them to some
+        # unrelated later test — see the wedge test below).
+        def _slow():
+            try:
+                slow.update(zip(("st", "body"),
+                                _req(srv, "POST", "/cmd", {"op": "getHtml"})))
+            except Exception as exc:           # noqa: BLE001
+                slow["exc"] = exc
+
+        t = threading.Thread(target=_slow, daemon=True)
+        t.start()
+
+        # Wait until the extension has actually PICKED IT UP — being busy is the
+        # precondition under test, so it must be established, not assumed.
+        deadline = time.time() + 5.0
+        while time.time() < deadline:
+            if any(c.get("op") == "getHtml" for c in ext.dispatched):
+                break
+            time.sleep(0.02)
+        else:
+            pytest.fail("the fake extension never dequeued the slow op")
+
+        # Agent B: the diagnostic, issued against a busy-but-healthy extension.
+        t0 = time.monotonic()
+        st, body = _req(srv, "POST", "/cmd", {"op": "ping"})
+        elapsed = time.monotonic() - t0
+
+        assert st == 200, (
+            f"a BUSY but healthy extension was reported dead after {elapsed:.2f}s "
+            "— this is the false negative that sends an operator to restart Brave")
+        assert body["result"]["data"]["pong"] is True
+        # NOT vacuous: it genuinely queued behind the slow op.
+        assert elapsed >= BUSY_S * 0.5, (
+            f"ping answered in {elapsed:.2f}s — the extension was not actually "
+            "busy, so this proves nothing")
+        t.join(timeout=10)
+        assert slow.get("st") == 200, "the slow op must also have completed fine"
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
+def test_ping_fast_fails_even_while_BUSY_once_the_work_has_blown_its_budget():
+    """🔴 THE PAYOFF of the structural gate, and the case a tuned constant could
+    NEVER express: the instance is busy AND wedged.
+
+    A fixed deadline has to choose one failure. Too short → a busy healthy profile
+    reads as dead. Too long → a genuinely wedged one takes the full cmd_timeout to
+    say so. Deriving the deadline from the age of the outstanding work does both:
+    while the in-flight command is inside EXEC_OP_BUDGET_S the ping waits, and the
+    moment that budget is exhausted the extension is provably not healthy (its own
+    `execute()` self-bound says so), and the ping fails fast.
+
+    🔴 THE FIXTURE IS CALIBRATED, and that is load-bearing — an earlier version was
+    INSENSITIVE to the `- age` term it advertises. It used EXEC=0.2 with the default
+    2s grace, so the no-age budget was 0.2+2.0 = 2.2s, comfortably under its own
+    `elapsed < 5.0` bound: deleting `- age` from the formula left this GREEN and only
+    the unit test caught it. Now EXEC=3.0 / GRACE=0.5 / age≈4s, so:
+        with `- age`:    3.0 + 0.5 - 4.0  = -0.5  -> clamps to the 0.3s fast floor
+        without `- age`: 3.0 + 0.5        =  3.5s
+    and the bound sits between them.
+
+    cmd_timeout is also kept BELOW `_req`'s 10s urlopen timeout. It was 25s, so the
+    `return timeout` mutant died on a transport TimeoutError instead of this test's
+    own assertion — red for a NEIGHBOURING guard's reason, which proves nothing
+    about this one.
+    """
+    # ping_timeout is passed EXPLICITLY: make_handler resolves it once at
+    # construction, so patching the env (or PING_TIMEOUT_DEFAULT) at request time
+    # would be inert and the test would silently measure the 2s default instead.
+    srv, _ = _serve(cmd_timeout=8.0, poll_timeout=5.0,   # < the 10s urlopen bound
+                    ping_timeout=0.3)
+    ext = FakeExtension(srv, swallow=True)     # takes the op, never answers
+    ext.start()
+
+    # The wedging request outlives the assertions and dies when the server closes.
+    # SWALLOW its exception explicitly: an unhandled exception in a daemon thread
+    # is reported by pytest against whatever test happens to be running when it
+    # surfaces — it showed up on `test_release_drops_ownership_without_dispatch`,
+    # which has nothing to do with this. A test must not poison its neighbours.
+    wedger = {}
+
+    def _wedge():
+        try:
+            wedger["st"] = _req(srv, "POST", "/cmd", {"op": "getHtml"})[0]
+        except Exception as exc:               # noqa: BLE001 — teardown teardown
+            wedger["exc"] = exc
+
+    try:
+        assert _wait_connected(srv, want=True)
+        # Agent A's op goes out and wedges.
+        t = threading.Thread(target=_wedge, daemon=True)
+        t.start()
+        deadline = time.time() + 5.0
+        while time.time() < deadline:
+            if any(c.get("op") == "getHtml" for c in ext.dispatched):
+                break
+            time.sleep(0.02)
+        else:
+            pytest.fail("the fake extension never dequeued the wedging op")
+
+        # Let the (shrunken) budget lapse, so the in-flight work is now OVERDUE.
+        # age ends up ~4s: 3.0 + 0.5 - 4.0 < 0, so the budget is negative WITH the
+        # age term and +3.5s without it.
+        time.sleep(4.0)
+        with mock.patch.object(S, "EXEC_OP_BUDGET_S", 3.0), \
+                mock.patch.object(S, "WEDGE_GRACE_S", 0.5):
+            t0 = time.monotonic()
+            st, _ = _req(srv, "POST", "/cmd", {"op": "ping"})
+            elapsed = time.monotonic() - t0
+        assert st == 504
+        # Fast, NOT cmd_timeout: the budget went negative, so it clamps to the
+        # fast floor. 1.5 sits between 0.3 (correct) and 3.5 (no `- age` term).
+        assert elapsed < 1.5, (
+            f"ping waited {elapsed:.2f}s against a wedged instance — the gate did "
+            "not subtract how long the in-flight work had already been running")
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+        t.join(timeout=30)                     # let it finish before pytest moves on
+
+
+def test_ping_still_waits_after_the_SUBMITTER_gave_up_on_a_running_command():
+    """🔴 REGRESSION (round-3 audit). The submitter abandoning a command does NOT
+    free the extension: its serial loop is still executing that command for up to
+    EXEC_OP_BUDGET_MS (18s) + RESULT_BUDGET_MS (10s) = 28s, which EXCEEDS the 20s
+    default cmd_timeout. Dropping the `inflight` entry on BridgeTimeout therefore
+    opened a window where the instance looks IDLE while it is provably still busy,
+    and the next ping fast-failed at 2s against a perfectly healthy extension.
+
+    In that window a0a0021 was WORSE than both main (20s flat) and the round-2
+    constant (10s flat) — under either of those the ping would have waited it out.
+
+    Shape: cmd_timeout 5s, a command that takes 8s. The submitter gives up at 5s;
+    the extension is still executing until 8s; the ping is issued at ~5s and must
+    still be alive at 8s.
+    """
+    srv, _ = _serve(cmd_timeout=5.0, poll_timeout=5.0)
+
+    def executor(cmd):
+        if cmd.get("op") == "getHtml":
+            time.sleep(8.0)                 # outlives the submitter's 5s deadline
+            return {"html": "<html></html>"}
+        return {"pong": True}
+
+    ext = FakeExtension(srv, executor=executor)
+    ext.start()
+    abandoned = {}
+
+    def _abandon():
+        try:
+            abandoned["st"] = _req(srv, "POST", "/cmd", {"op": "getHtml"})[0]
+        except Exception as exc:            # noqa: BLE001
+            abandoned["exc"] = exc
+
+    t = threading.Thread(target=_abandon, daemon=True)
+    try:
+        assert _wait_connected(srv, want=True)
+        t.start()
+        # Wait for the extension to actually START it, then for the submitter to
+        # give up. Both preconditions are established, not assumed.
+        deadline = time.time() + 5.0
+        while time.time() < deadline:
+            if any(c.get("op") == "getHtml" for c in ext.dispatched):
+                break
+            time.sleep(0.02)
+        else:
+            pytest.fail("the fake extension never dequeued the long op")
+        t.join(timeout=15)
+        assert abandoned.get("st") == 504, "precondition: the submitter must give up"
+
+        # The extension is STILL executing here. The ping must not read this as idle.
+        t0 = time.monotonic()
+        st, body = _req(srv, "POST", "/cmd", {"op": "ping"})
+        elapsed = time.monotonic() - t0
+        assert st == 200, (
+            f"ping was told the extension is dead after {elapsed:.2f}s, while it "
+            "was still executing an abandoned command")
+        assert body["result"]["data"]["pong"] is True
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+        t.join(timeout=15)
+
+
+def test_effective_timeout_gate_unit(monkeypatch):
+    """The gate's arithmetic, directly — the threaded tests above cover the two
+    endpoints, this covers the boundary and both clamps (one measurement is not a
+    general claim).
+    """
+    clock = {"t": 1000.0}
+    reg = S.Registry(clock=lambda: clock["t"])
+    inst = S.Instance("k", "i", "", clock["t"])
+    g = lambda t, f: reg._effective_timeout_locked(inst, t, f)   # noqa: E731
+
+    # 1. Not a fast-fail op at all -> untouched, whatever is in flight.
+    inst.inflight = {"a": 1000.0}
+    assert g(20.0, None) == 20.0
+
+    # 2. Idle -> the fast deadline.
+    inst.inflight = {}
+    assert g(20.0, 2.0) == 2.0
+
+    # 3. Busy, work just started -> a full budget, CLAMPED to cmd_timeout so this
+    #    can never be slower than the behaviour that predates the fast ping.
+    monkeypatch.setattr(S, "EXEC_OP_BUDGET_S", 18.0)
+    monkeypatch.setattr(S, "WEDGE_GRACE_S", 2.0)
+    inst.inflight = {"a": 1000.0}
+    assert g(20.0, 2.0) == 20.0
+    assert g(5.0, 2.0) == 5.0, "must never exceed cmd_timeout"
+
+    # 4. Busy, partway through -> the REMAINING budget.
+    clock["t"] = 1012.0                     # 12s elapsed of an 18+2 budget
+    assert g(20.0, 2.0) == pytest.approx(8.0)
+
+    # 5. Overdue -> negative budget, clamped UP to the fast floor (never 0/instant).
+    clock["t"] = 1030.0
+    assert g(20.0, 2.0) == 2.0
+
+    # 6. TWO commands in flight drain serially, so the budget scales with depth —
+    #    otherwise a queue of legitimate work would false-negative.
+    clock["t"] = 1012.0
+    inst.inflight = {"a": 1000.0, "b": 1005.0}
+    assert g(60.0, 2.0) == pytest.approx(2 * 18.0 + 2.0 - 12.0)
+
+    # 7. 🟢-D: fast_timeout ABOVE cmd_timeout must NOT escape the ceiling. Both are
+    #    operator-settable and nothing validates the relation; before the inner
+    #    clamp this returned 60.0 for fast=60 / cmd=20, contradicting the
+    #    "never above cmd_timeout" claim in the docstring.
+    inst.inflight = {}
+    assert g(20.0, 60.0) == 20.0, "idle: fast_timeout must be capped at cmd_timeout"
+    inst.inflight = {"a": 1000.0}
+    clock["t"] = 1030.0                     # overdue -> lower clamp is what applies
+    assert g(20.0, 60.0) == 20.0, "busy: the lower clamp must not lift it past cmd"
+
+
+def test_exec_budget_matches_the_extension():
+    """EXEC_OP_BUDGET_S mirrors EXEC_OP_BUDGET_MS across a language boundary, so
+    nothing can enforce it at runtime. Assert it here: if someone retunes the
+    extension's self-bound, the gate's arithmetic silently stops matching reality.
+    """
+    proto = (Path(__file__).resolve().parent.parent
+             / "extension" / "protocol.js").read_text(encoding="utf-8")
+    m = re.search(r"export const EXEC_OP_BUDGET_MS\s*=\s*(\d+)", proto)
+    assert m, "could not find EXEC_OP_BUDGET_MS in protocol.js — retarget this test"
+    assert float(m.group(1)) / 1000.0 == S.EXEC_OP_BUDGET_S, (
+        f"protocol.js says {m.group(1)}ms, server.py says "
+        f"{S.EXEC_OP_BUDGET_S}s — the busy/wedged gate is now wrong")
+
+
+def test_inflight_release_distinguishes_queued_from_running_on_abandon():
+    """`inflight` bookkeeping across the exits that behave DIFFERENTLY. A stranded
+    entry makes an instance look permanently busy so `ping` can never fast-fail on
+    it again; releasing too eagerly makes a busy instance look idle (the bug this
+    round fixed). Both directions are wrong, so both are pinned.
+
+    An earlier version of this test claimed three exits, had two blocks, and both
+    described the same case (timeout-after-dequeue). These are genuinely distinct:
+
+      1. SUCCESS                     -> released at once.
+      2. abandoned while STILL QUEUED -> released at once: it never ran and never
+         will, so the instance really is that much less busy.
+      3. abandoned while RUNNING      -> KEPT. The extension is still executing it;
+         releasing here is exactly what made a busy instance read as idle.
+      4. ...and the kept entry is released when the late result finally arrives,
+         rather than lingering until the staleness window expires.
+    """
+    # 1. SUCCESS
+    srv, reg = _serve(cmd_timeout=1.0, poll_timeout=5.0)
+    ext = FakeExtension(srv, executor=lambda c: {"ok": 1})
+    ext.start()
+    try:
+        assert _wait_connected(srv, want=True)
+        assert _req(srv, "POST", "/cmd", {"op": "tabs"})[0] == 200
+        insts = list(reg._instances.values())
+        assert insts and all(not i.inflight for i in insts), "leaked after success"
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+    # 2. ABANDONED WHILE STILL QUEUED — nothing is polling, so the command never
+    #    leaves the outbox. The instance stays resolvable (CONNECT_STALE_S).
+    #    A SHORT poll_timeout matters: stop() only sets a flag, so the thread must
+    #    be allowed to finish its in-flight long poll and exit before we submit —
+    #    otherwise it dequeues the command and this becomes case 3 by accident.
+    srv, reg = _serve(cmd_timeout=1.0, poll_timeout=0.5)
+    ext = FakeExtension(srv, swallow=True)
+    ext.start()
+    try:
+        assert _wait_connected(srv, want=True)
+        ext.stop()
+        ext.join(timeout=10)
+        assert not ext.is_alive(), "the fake must be fully stopped, not just flagged"
+        before = len(ext.dispatched)
+        assert _req(srv, "POST", "/cmd", {"op": "getHtml"})[0] == 504
+        assert len(ext.dispatched) == before, "precondition: it must NOT be dequeued"
+        insts = list(reg._instances.values())
+        assert insts and all(not i.inflight for i in insts), (
+            "a command that never left the outbox must not keep the instance busy")
+    finally:
+        srv.shutdown(); srv.server_close()
+
+    # 3 + 4. ABANDONED WHILE RUNNING, then the late result lands.
+    gate = threading.Event()
+
+    def executor(cmd):
+        gate.wait(timeout=10)
+        return {"ok": 1}
+
+    srv, reg = _serve(cmd_timeout=1.0, poll_timeout=5.0)
+    ext = FakeExtension(srv, executor=executor)
+    ext.start()
+    try:
+        assert _wait_connected(srv, want=True)
+        assert _req(srv, "POST", "/cmd", {"op": "getHtml"})[0] == 504
+        insts = list(reg._instances.values())
+        assert insts and any(i.inflight for i in insts), (
+            "the extension is STILL executing it — the entry must survive")
+        gate.set()                            # let the late result arrive
+        deadline = time.time() + 5.0
+        while time.time() < deadline:
+            if all(not i.inflight for i in reg._instances.values()):
+                break
+            time.sleep(0.02)
+        assert all(not i.inflight for i in reg._instances.values()), (
+            "the late result must release the kept entry, not leave it to expire")
+        # ...and `last_dispatch` must stop naming it. Its contract is "the command
+        # it never answered" (surfaced by health/whoami); after a late result it
+        # DID answer, so leaving it set reports a phantom unanswered op forever.
+        assert all((i.last_dispatch or {}).get("id") is None
+                   for i in reg._instances.values()), (
+            "last_dispatch still names a command that has now been answered")
+    finally:
+        gate.set(); ext.stop(); srv.shutdown(); srv.server_close()
+
+
+def test_a_kept_inflight_entry_expires_if_the_result_never_arrives():
+    """The memory/liveness bound on case 3 above. If the abandoned command's result
+    NEVER comes, the entry must stop counting after INFLIGHT_STALE_S — otherwise
+    one wedged command would make `ping` slow on that instance forever, which is
+    the failure the whole fast path exists to avoid.
+
+    Measured at THREE points, because the two thresholds are different and it
+    would be easy to conflate them:
+      * age <  EXEC+GRACE      -> the extension may still be working: derived
+                                  deadline, entry retained.
+      * EXEC+GRACE < age < STALE -> budget has gone negative (the extension blew
+                                  its own self-bound, so it IS wedged): the ping is
+                                  fast again, but the entry is still RETAINED.
+      * age >  STALE           -> pruned.
+
+    ⚠ SCOPE: all three points are measured at **N=1, no live submitter** (a single
+    ABANDONED entry). "The staleness window bounds memory, not the verdict" is TRUE
+    ONLY AT N=1 — it holds here because a lone entry's budget is already negative
+    by 20s, so pruning at 28s is verdict-neutral BY CONSTRUCTION. At N>=2 the prune
+    does change the verdict (3 entries at age 29s: 27.0s -> 2.0s), which is exactly
+    the bug `test_stale_prune_never_evicts_an_entry_whose_submitter_is_STILL_WAITING`
+    covers. Do not generalise this test's conclusion past N=1.
+    """
+    clock = {"t": 1000.0}
+    reg = S.Registry(clock=lambda: clock["t"])
+    inst = S.Instance("k", "i", "", clock["t"])
+    inst.inflight = {"abandoned": 1000.0}
+    assert S.INFLIGHT_STALE_S > S.EXEC_OP_BUDGET_S + S.WEDGE_GRACE_S, (
+        "this test needs the two thresholds to be distinct")
+
+    # 1. Could still be running -> derived deadline, retained.
+    clock["t"] = 1000.0 + 5.0
+    assert reg._effective_timeout_locked(inst, 20.0, 2.0) > 2.0
+    assert inst.inflight, "must not be pruned while it could still be running"
+
+    # 2. Past its own budget but inside the staleness window -> fast, still retained.
+    clock["t"] = 1000.0 + S.EXEC_OP_BUDGET_S + S.WEDGE_GRACE_S + 1.0
+    assert reg._effective_timeout_locked(inst, 20.0, 2.0) == 2.0
+    assert inst.inflight, "the staleness window is about memory, not the verdict"
+
+    # 3. Past the staleness window -> pruned.
+    clock["t"] = 1000.0 + S.INFLIGHT_STALE_S + 1.0
+    assert reg._effective_timeout_locked(inst, 20.0, 2.0) == 2.0
+    assert not inst.inflight, "a stale entry must be pruned, not just ignored"
+
+
+def test_waiters_is_exactly_the_live_submitter_set():
+    """The prune now READS `waiters` as "is a submitter still blocked on this?", so
+    that property has to be pinned rather than assumed — it is the load-bearing
+    premise of the fix below, and it lives in a different function.
+
+    Checked on the exits that are reachable from outside: success and timeout.
+    (The `finally`'s extra discard is a defensive net for an unexpected raise
+    INSIDE the wait loop, which no test can reach from here — it is an invariant
+    guard, and is labelled as such in the source rather than claimed as covered.)
+    """
+    srv, reg = _serve(cmd_timeout=1.0, poll_timeout=5.0)
+    ext = FakeExtension(srv, executor=lambda c: {"ok": 1})
+    ext.start()
+    try:
+        assert _wait_connected(srv, want=True)
+        assert _req(srv, "POST", "/cmd", {"op": "tabs"})[0] == 200
+        assert all(not i.waiters for i in reg._instances.values()), (
+            "a completed submit must leave no waiter")
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+    srv, reg = _serve(cmd_timeout=1.0, poll_timeout=5.0)
+    ext = FakeExtension(srv, swallow=True)
+    ext.start()
+    try:
+        assert _wait_connected(srv, want=True)
+        assert _req(srv, "POST", "/cmd", {"op": "getHtml"})[0] == 504
+        assert all(not i.waiters for i in reg._instances.values()), (
+            "a timed-out submit must leave no waiter — otherwise its inflight "
+            "entry would be exempt from the staleness prune forever")
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
+def test_stale_prune_never_evicts_an_entry_whose_submitter_is_STILL_WAITING():
+    """🔴 REGRESSION (round-4 audit). INFLIGHT_STALE_S is measured from ENQUEUE,
+    but a queued command's 18s execution budget does not start until the serial
+    extension DEQUEUES it. So "past this point a healthy extension has certainly
+    answered" is false exactly when N>=2 — which is the case the
+    `len(inst.inflight) * EXEC_OP_BUDGET_S` term exists to model.
+
+    The scenario is the remediation the same commit documented: an operator reads
+    "raise CMD_TIMEOUT if that is your workload", sets 60s, and submits 3 ops. The
+    extension legitimately works until t~54s. At t=29s all three entries aged past
+    STALE(28) and were pruned WHILE THEIR SUBMITTERS WERE STILL BLOCKED, the
+    instance read idle, and ping fast-failed at 2s. Worse than a0a0021 in that
+    window, and it falsified the advice.
+
+    Fix: an entry may only be pruned once NO live submitter awaits it. `waiters` is
+    exactly that set (added at enqueue, discarded on all three loop exits, and
+    discarded again in the finally so an unexpected raise cannot strand one).
+
+    NEGATIVE CONTROL is the last block: an ABANDONED entry (no waiter) must still
+    be pruned, or this "fix" would just disable the memory bound.
+    """
+    clock = {"t": 1000.0}
+    reg = S.Registry(clock=lambda: clock["t"])
+    inst = S.Instance("k", "i", "", clock["t"])
+
+    # N=3, cmd_timeout 60 — every submitter still blocked.
+    inst.inflight = {"a": 1000.0, "b": 1000.0, "c": 1000.0}
+    inst.waiters = {"a", "b", "c"}
+    clock["t"] = 1000.0 + 27.0                      # inside STALE: fine before too
+    assert reg._effective_timeout_locked(inst, 60.0, 2.0) == pytest.approx(29.0)
+    clock["t"] = 1000.0 + 29.0                      # PAST STALE — the bug window
+    assert reg._effective_timeout_locked(inst, 60.0, 2.0) == pytest.approx(27.0), (
+        "three live submitters were pruned as stale, so the instance read idle "
+        "while the extension was legitimately working")
+    assert len(inst.inflight) == 3, "a live submitter's entry must not be evicted"
+
+    # N=2, cmd_timeout 20 — the default-ish shape.
+    inst.inflight = {"a": 1000.0, "b": 1000.0}
+    inst.waiters = {"a", "b"}
+    clock["t"] = 1000.0 + 27.0
+    assert reg._effective_timeout_locked(inst, 20.0, 2.0) == pytest.approx(11.0)
+    clock["t"] = 1000.0 + 29.0
+    assert reg._effective_timeout_locked(inst, 20.0, 2.0) == pytest.approx(9.0)
+    assert len(inst.inflight) == 2
+
+    # NEGATIVE CONTROL: no live submitter -> the staleness bound still applies.
+    inst.inflight = {"abandoned": 1000.0}
+    inst.waiters = set()
+    clock["t"] = 1000.0 + 29.0
+    assert reg._effective_timeout_locked(inst, 20.0, 2.0) == 2.0
+    assert not inst.inflight, "an ABANDONED entry must still be pruned"
+
+
+def test_result_budget_matches_the_extension():
+    """RESULT_BUDGET_S mirrors RESULT_BUDGET_MS across a language boundary — the
+    same drift hazard as EXEC_OP_BUDGET_S, and it feeds INFLIGHT_STALE_S."""
+    proto = (Path(__file__).resolve().parent.parent
+             / "extension" / "protocol.js").read_text(encoding="utf-8")
+    m = re.search(r"export const RESULT_BUDGET_MS\s*=\s*(\d+)", proto)
+    assert m, "could not find RESULT_BUDGET_MS in protocol.js — retarget this test"
+    assert float(m.group(1)) / 1000.0 == S.RESULT_BUDGET_S, (
+        f"protocol.js says {m.group(1)}ms, server.py says {S.RESULT_BUDGET_S}s")
+
+
+def test_a_healthy_ping_is_unaffected_and_answers_in_milliseconds(monkeypatch):
+    """NEGATIVE CONTROL #2: the cap must never truncate the HEALTHY path. 21
+    measured healthy pings averaged 3–4 ms, so the 10 s deadline is ~2500×
+    headroom — assert the fast path still returns 200, not a timeout."""
+    monkeypatch.delenv("BROWSER_BRIDGE_PING_TIMEOUT", raising=False)
+    srv, _ = _serve(cmd_timeout=25.0, poll_timeout=5.0)
+    ext = FakeExtension(srv, executor=lambda c: {"pong": True})
+    ext.start()
+    try:
+        assert _wait_connected(srv, want=True)
+        t0 = time.monotonic()
+        st, body = _req(srv, "POST", "/cmd", {"op": "ping"})
+        elapsed = time.monotonic() - t0
+        assert st == 200 and body["ok"] is True
+        assert elapsed < 1.0, f"a healthy ping took {elapsed:.2f}s"
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
+def test_ping_timeout_is_env_overridable_and_survives_a_malformed_value(monkeypatch):
+    """The knob is BROWSER_BRIDGE_PING_TIMEOUT, not a bare literal — and a typo in
+    it must not take the bridge down at startup (a ValueError from float() would),
+    so an unparseable value falls back to the default."""
+    monkeypatch.setenv("BROWSER_BRIDGE_PING_TIMEOUT", "0.3")
+    assert S._env_float("BROWSER_BRIDGE_PING_TIMEOUT",
+                        S.PING_TIMEOUT_DEFAULT) == 0.3
+    srv, _ = _serve(cmd_timeout=8.0, poll_timeout=5.0)   # ping_timeout=None → env
+    ext = FakeExtension(srv, swallow=True)
+    ext.start()
+    try:
+        assert _wait_connected(srv, want=True)
+        t0 = time.monotonic()
+        st, _ = _req(srv, "POST", "/cmd", {"op": "ping"})
+        elapsed = time.monotonic() - t0
+        assert st == 504
+        assert elapsed < 1.5, f"the env override was ignored ({elapsed:.2f}s)"
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+    monkeypatch.setenv("BROWSER_BRIDGE_PING_TIMEOUT", "not-a-number")
+    assert S._env_float("BROWSER_BRIDGE_PING_TIMEOUT",
+                        S.PING_TIMEOUT_DEFAULT) == S.PING_TIMEOUT_DEFAULT
+    monkeypatch.delenv("BROWSER_BRIDGE_PING_TIMEOUT")
+    assert S._env_float("BROWSER_BRIDGE_PING_TIMEOUT",
+                        S.PING_TIMEOUT_DEFAULT) == S.PING_TIMEOUT_DEFAULT
 
 
 def test_cmd_timeout_emits_timeout_outcome(telemetry):
@@ -1361,20 +2035,85 @@ def test_cmd_succeeds_when_spool_unwritable(telemetry, monkeypatch, tmp_path):
         ext.stop(); srv.shutdown(); srv.server_close()
 
 
-def test_health_and_instances_do_not_emit(telemetry):
-    """health / instances (and the extension's /poll) are noise — no events."""
+def test_instances_and_poll_still_do_not_emit(telemetry):
+    """/instances and the extension's /poll are NOISE — still no events.
+
+    This is the half of the old `test_health_and_instances_do_not_emit` that
+    survives: /poll fires continuously (a long-poll per instance, forever) and
+    /instances is a machine-facing list, so emitting for either would swamp
+    activity.events with traffic no human initiated. Only the OPERATOR-facing
+    orientation ops (/whoami, /health) emit — see the two tests below.
+    """
     spool_dir = telemetry
     srv, _ = _serve(poll_timeout=5.0)
     ext = FakeExtension(srv, instance_id="a", label="alpha")
     ext.start()
     try:
-        assert _wait_instances(srv, 1) is not None   # exercises /poll repeatedly
-        _req(srv, "GET", "/health")
+        assert _wait_count(srv, 1) is not None   # exercises /poll repeatedly
         _req(srv, "GET", "/instances")
         time.sleep(0.2)  # give any erroneous emit a chance to land
         assert _read_events(spool_dir) == []
     finally:
         ext.stop(); srv.shutdown(); srv.server_close()
+
+
+@pytest.mark.parametrize("path,op", [("/whoami", "whoami"), ("/health", "health")])
+def test_orientation_ops_emit_exactly_one_metadata_only_event(telemetry, path, op):
+    """REGRESSION (2026-08-02 usage audit, F8). `whoami` (38 calls) and `health`
+    (15) appeared NOWHERE in activity.events — 53 invocations invisible to the only
+    structured source, and they are the ops the skill tells you to run FIRST.
+
+    The count is asserted as a DELTA (0 before → exactly 1 after), not as "there is
+    a row": a post-hoc existence check would pass on any pre-existing event, and
+    this suite's own connection-wait helper used to inject /health events.
+
+    Metadata-only is asserted positively AND negatively: the payload must be
+    exactly {op,key,outcome} — in particular NO `domain`, because these endpoints
+    are global (they describe every connected profile at once) and per-profile
+    domains would widen the privacy contract at server.py's PRIVACY CONTRACT.
+    """
+    spool_dir = telemetry
+    srv, _ = _serve(poll_timeout=5.0)
+    ext = FakeExtension(srv, instance_id="a", label="alpha")
+    ext.start()
+    try:
+        assert _wait_count(srv, 1) is not None      # silent: /instances
+        assert _read_events(spool_dir) == [], "the negative control: 0 before"
+
+        st, body = _req(srv, "GET", path)
+        assert st == 200 and body["ok"] is True
+
+        evs = _wait_events(spool_dir, 1)
+        assert len(evs) == 1, f"expected exactly one event, got {evs}"
+        e = evs[0]
+        assert e["source"] == "browser-bridge" and e["kind"] == "cmd"
+        assert e["exit_code"] == "0"
+        assert e["text"] == op                      # no domain → text is the op
+        p = json.loads(e["payload"])
+        assert p == {"op": op, "key": "", "outcome": "ok"}, p
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
+def test_orientation_emit_never_breaks_the_response(telemetry, monkeypatch):
+    """BEST-EFFORT contract: a broken emitter must not fail /whoami or /health.
+
+    Mutation-proof for the try/except in emit_cmd_event as reached from the NEW
+    call site: force the emitter to raise and assert both endpoints still 200.
+    """
+    class _Boom:
+        @staticmethod
+        def emit(_rec):
+            raise RuntimeError("spool exploded")
+
+    monkeypatch.setattr(S, "_load_spool_emit", lambda: _Boom)
+    srv, _ = _serve()
+    try:
+        for path in ("/whoami", "/health"):
+            st, body = _req(srv, "GET", path)
+            assert st == 200 and body["ok"] is True, path
+    finally:
+        srv.shutdown(); srv.server_close()
 
 
 def test_emit_cmd_event_noop_when_emitter_missing(monkeypatch):
@@ -3953,14 +4692,42 @@ def test_browser_cli_screenshot_no_path_stdout_has_no_base64_payload(tmp_path):
 
 
 @pytest.mark.skipif(shutil.which("curl") is None, reason="curl not on PATH")
-def test_browser_cli_screenshot_explicit_path_unchanged(tmp_path):
-    """An explicit path still writes there and prints JUST the path (back-compat)."""
+def test_browser_cli_screenshot_explicit_path_prints_path_then_a_read_hint(tmp_path):
+    """REGRESSION (2026-08-02 usage audit, F4). 7 of 63 explicit-path captures were
+    never Read back — exit 0 plus a path on stdout looks like the job is done, and
+    an image nobody Reads is pure waste. One short `#`-prefixed hint now follows.
+
+    LINE 1 IS STILL THE BARE PATH — that is the back-compat half this used to pin
+    (`stdout.strip() == path`), and the hint is deliberately on line 2 and comment-
+    prefixed so it can never be mistaken for a second path.
+    """
     dest = tmp_path / "shot.png"
     r, _ = _run_browser_canned(_shot_data(), ["screenshot", str(dest)], tmp_path)
     assert r.returncode == 0, r.stderr
-    assert r.stdout.strip() == str(dest)
+    lines = r.stdout.splitlines()
+    assert lines[0] == str(dest), "line 1 must stay the bare path"
+    assert lines[1] == "# Read %s to view it." % dest
+    assert len(lines) == 2
     assert dest.read_bytes() == _PNG_BYTES
     assert _PNG_B64[:24] not in r.stdout
+
+
+def test_browser_cli_screenshot_read_hint_not_printed_where_it_would_be_wrong(tmp_path):
+    """NEGATIVE CONTROL for the hint above — without it, the test passes with the
+    string printed UNCONDITIONALLY.
+
+    Two forms must NOT carry it: `--data-url` (no file is written at all, so
+    "Read it" is false), and the temp-file form (whose JSON `note` already says
+    the same thing — a second copy would be per-call bytes for nothing).
+    """
+    r, _ = _run_browser_canned(_shot_data(), ["screenshot", "--data-url"], tmp_path)
+    assert r.returncode == 0, r.stderr
+    assert "# Read " not in r.stdout
+
+    r, _ = _run_browser_canned(_shot_data(), ["screenshot"], tmp_path)
+    assert r.returncode == 0, r.stderr
+    assert "# Read " not in r.stdout
+    assert json.loads(r.stdout)["path"].endswith(".png")   # still the JSON shape
 
 
 @pytest.mark.skipif(shutil.which("curl") is None, reason="curl not on PATH")
@@ -4586,6 +5353,220 @@ def test_browser_health_survives_a_malformed_known_instances(tmp_path):
         assert "Traceback" not in r.stderr
     finally:
         srv.shutdown(); srv.server_close()
+
+
+# --------------------------------------------------------------------------- #
+# S3 — the routing-failure messages (2026-08-02 usage audit, F6)
+#
+# `unknown_instance` was the TOP error at 52 occurrences, and 48 of them used the
+# CORRECT label (`work`) — 35 inside a single hour, with `eval` re-issued 37 times.
+# A Brave profile had dropped its long-poll; the message ("no connected instance
+# matches --instance 'work'") reads as "you typed the wrong label", so agents kept
+# retrying a name that was right. `no_extension` has the identical shape (16 of 19
+# in one hour).
+#
+# The distinguishing fact was already on the wire — `known_instances` — it just was
+# not being read. These tests pin BOTH branches, because a single-case test passes
+# with the branch hard-wired to one string.
+# --------------------------------------------------------------------------- #
+def _serve_canned_cmd(status, payload):
+    """A stub bridge whose /cmd always answers `status` with `payload` verbatim, so
+    the CLI's error rendering can be driven against exact server bodies."""
+    class H(S.BaseHTTPRequestHandler):
+        def do_POST(self):  # noqa: N802
+            n = int(self.headers.get("Content-Length") or 0)
+            self.rfile.read(n)
+            body = json.dumps(payload).encode()
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *a):  # noqa: A003
+            pass
+
+    srv = S.ThreadingHTTPServer(("127.0.0.1", 0), H)
+    srv.daemon_threads = True
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    return srv
+
+
+def _run_browser_routing(srv, args, tmp_path):
+    tokf = tmp_path / "token"
+    tokf.write_text("routing-token\n")
+    env = dict(os.environ)
+    env.update(BROWSER_BRIDGE_HOST="127.0.0.1",
+               BROWSER_BRIDGE_PORT=str(srv.server_address[1]),
+               BROWSER_BRIDGE_TOKEN_FILE=str(tokf))
+    return subprocess.run([str(BROWSER_BIN), *args], env=env,
+                          capture_output=True, text=True, timeout=30)
+
+
+_UNKNOWN_404 = {
+    "ok": False, "error": "unknown_instance", "target": "work",
+    "instances": [{"key": "personal", "label": "personal"}],
+    "known_instances": [
+        {"key": "personal", "connected": True, "last_seen": "2026-08-02T04:00:00Z"},
+        {"key": "work", "connected": False, "last_seen": "2026-08-02T02:11:09Z",
+         "last_seen_age_s": 6531.0, "last_unanswered_op": "eval"},
+    ],
+}
+
+
+def test_unknown_instance_KNOWN_but_disconnected_says_stop_retrying(tmp_path):
+    """REGRESSION. The label is CORRECT and the profile is gone — the message must
+    say so and must tell the operator NOT to retry. 37 blind retries is the
+    measured symptom of a message that never said that."""
+    srv = _serve_canned_cmd(404, _UNKNOWN_404)
+    try:
+        r = _run_browser_routing(srv, ["--instance", "work", "tabs"], tmp_path)
+        assert r.returncode != 0
+        err = r.stderr
+        assert "KNOWN but NOT CONNECTED" in err, err
+        assert "the label is correct" in err, err
+        assert "FULLY RESTART Brave" in err, err
+        assert "DO NOT RETRY" in err, err
+        assert "2026-08-02T02:11:09Z" in err, "name WHEN it went away"
+        # `last_unanswered_op` is the evidence server.py calls "the single fact that
+        # turns the next silent drop from inference into evidence" — it says the
+        # profile died MID-`eval` rather than going quiet while idle. render_missing
+        # always printed it; the rewritten advice must not have dropped it.
+        assert "last unanswered op: eval" in err, err
+        # ...and it must NOT tell the operator their label was wrong.
+        assert "is UNKNOWN" not in err, err
+    finally:
+        srv.shutdown(); srv.server_close()
+
+
+def test_unknown_instance_NEVER_SEEN_key_says_wrong_label(tmp_path):
+    """NEGATIVE CONTROL for the test above. Without it, the branch could be
+    hard-wired to the disconnected wording and both tests would still be green for
+    the wrong reason. A genuinely bogus label must get the OPPOSITE message —
+    "wrong label", plus the keys that do exist, and no restart advice."""
+    srv = _serve_canned_cmd(404, {**_UNKNOWN_404, "target": "nosuchlabel"})
+    try:
+        r = _run_browser_routing(srv, ["--instance", "nosuchlabel", "tabs"],
+                                 tmp_path)
+        assert r.returncode != 0
+        err = r.stderr
+        assert "is UNKNOWN" in err, err
+        assert "WRONG LABEL" in err, err
+        assert "Keys this server HAS seen" in err and "personal" in err, err
+        # The wrong-label branch ALSO keeps render_missing's drop evidence: a typo
+        # and a dead profile are frequently the SAME incident, and this branch is
+        # where that used to become invisible.
+        assert "last seen 2026-08-02T02:11:09Z" in err, err
+        assert "last unanswered op: eval" in err, err
+        # The two branches must be mutually exclusive.
+        assert "KNOWN but NOT CONNECTED" not in err, err
+        assert "DO NOT RETRY" not in err, err
+    finally:
+        srv.shutdown(); srv.server_close()
+
+
+def test_no_extension_distinguishes_dropped_from_never_wired_up(tmp_path):
+    """`no_extension` (16 of 19 in one hour) has the same shape, so it gets the
+    same split: a profile that HAS been seen and is now gone means "restart Brave,
+    stop retrying"; nothing ever seen means "load the extension"."""
+    dropped = _serve_canned_cmd(503, {
+        "ok": False, "error": "extension_not_connected",
+        "known_instances": [
+            {"key": "work", "connected": False,
+             "last_seen": "2026-08-02T02:11:09Z", "last_seen_age_s": 6531.0,
+             "last_unanswered_op": "screenshot"}]})
+    try:
+        r = _run_browser_routing(dropped, ["tabs"], tmp_path)
+        assert r.returncode != 0
+        err = r.stderr
+        assert "HAS seen" in err and "work" in err, err
+        assert "last unanswered op: screenshot" in err, err
+        assert "FULLY RESTART Brave" in err and "DO NOT RETRY" in err, err
+        assert "has EVER connected" not in err, err
+    finally:
+        dropped.shutdown(); dropped.server_close()
+
+    virgin = _serve_canned_cmd(503, {"ok": False,
+                                     "error": "extension_not_connected",
+                                     "known_instances": []})
+    try:
+        r = _run_browser_routing(virgin, ["tabs"], tmp_path)
+        assert r.returncode != 0
+        err = r.stderr
+        assert "has EVER connected" in err, err
+        assert "load the browser-bridge extension" in err, err
+        assert "DO NOT RETRY" not in err, err
+    finally:
+        virgin.shutdown(); virgin.server_close()
+
+
+def test_routing_failure_explainer_degrades_against_an_OLD_server(tmp_path):
+    """`browser` is a symlink to the working tree, so it goes live on `git pull` —
+    BEFORE the switch that restarts server.py. It WILL run against a server with no
+    `known_instances`, and must still exit non-zero with readable advice and no
+    traceback (the same degradation contract render_missing has)."""
+    for status, payload, args in (
+            (404, {"ok": False, "error": "unknown_instance", "target": "work"},
+             ["--instance", "work", "tabs"]),
+            (503, {"ok": False, "error": "extension_not_connected"}, ["tabs"]),
+            (404, {"ok": False, "error": "unknown_instance",
+                   "known_instances": ["not-a-dict", 7, None]},
+             ["--instance", "work", "tabs"])):
+        srv = _serve_canned_cmd(status, payload)
+        try:
+            r = _run_browser_routing(srv, args, tmp_path)
+            assert r.returncode != 0, payload
+            assert "Traceback" not in r.stderr, r.stderr
+            assert r.stderr.strip(), "must still say something"
+        finally:
+            srv.shutdown(); srv.server_close()
+
+
+# --------------------------------------------------------------------------- #
+# S6 — doc pointers inside the CLI must RESOLVE
+# --------------------------------------------------------------------------- #
+def test_every_skill_md_heading_the_cli_points_at_actually_exists():
+    """`browser:582` and `browser:588` pointed at "SKILL.md → Concurrency" — a
+    heading that has never existed (SKILL.md has 7 `##` headings and none is it;
+    the content is bold text under "This is the user's LIVE session"). A pointer
+    that does not resolve sends a reader hunting, and nothing was checking.
+
+    HARNESS NEGATIVE CONTROL is inline below: the extractor is first run against a
+    string containing a KNOWN-BAD pointer and must report it. Without that, an
+    extractor that silently matches nothing would report a green that means
+    nothing.
+    """
+    import re
+
+    def bad_pointers(text, headings):
+        """Every `SKILL.md -> <name>` / `SKILL.md → <name>` in `text` whose <name>
+        does not resolve to a heading. A pointer may name a heading's PREFIX (the
+        headings carry trailing "— triage"-style qualifiers that nobody types), but
+        it must resolve to at least one — "Concurrency" resolves to none, which is
+        the whole defect."""
+        out = []
+        for m in re.finditer(
+                r'SKILL\.md\s*(?:->|→)\s*"?([^"\n(]+?)"?\s*(?:$|[)\.,]|→)',
+                text, re.M):
+            name = m.group(1).strip()
+            if name and not any(h == name or h.startswith(name + " ")
+                                for h in headings):
+                out.append(name)
+        return out
+
+    skill = (BROWSER_BIN.parent / "SKILL.md").read_text(encoding="utf-8")
+    headings = {ln.lstrip("#").strip()
+                for ln in skill.splitlines() if ln.startswith("#")}
+    assert len(headings) >= 5, "SKILL.md heading extraction looks broken"
+
+    # NEGATIVE CONTROL: a pointer at a heading that is not there MUST be reported.
+    assert bad_pointers('see SKILL.md → Concurrency.', headings) == ["Concurrency"]
+    # ...and a pointer at a REAL heading must not be.
+    assert bad_pointers('see SKILL.md -> "Ops".', headings) == []
+
+    cli = BROWSER_BIN.read_text(encoding="utf-8")
+    assert bad_pointers(cli, headings) == [], (
+        "the CLI points at SKILL.md headings that do not exist")
 
 
 def test_poll_timeout_at_or_above_the_extension_poll_budget_warns(capsys):
