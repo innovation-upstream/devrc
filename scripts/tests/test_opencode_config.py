@@ -1366,13 +1366,31 @@ def test_every_source_path_home_nix_claims_actually_exists():
 
 
 def test_plugin_resolves_the_core_next_to_the_config_dir():
-    """🔴 The two deployments must AGREE. guard.js does
-    `new URL("../guard_core.py", import.meta.url)` from
+    """🔴 The two deployments must AGREE — but NOT via the plugin's own location.
+
+    🔴 THIS TEST USED TO ASSERT THE BUG. Its previous body was:
+
+        assert 'new URL("../guard_core.py", import.meta.url)' in GUARD_PLUGIN.read_text()
+
+    with a docstring reasoning that guard.js "does `../guard_core.py` from
     ~/.config/opencode/plugin/, i.e. ~/.config/opencode/guard_core.py — which is
-    exactly where home.nix links it. If someone moves either, the plugin fails
-    CLOSED (every bash call refused), which is loud but total.
+    exactly where home.nix links it." That reasoning is about the DEPLOY path,
+    and the deploy path is a SYMLINK: `home.file` links the plugin into the nix
+    store, node resolves `import.meta.url` THROUGH it, and the store is FLAT, so
+    `..` was `/nix`. The guard failed closed on every bash call in opencode while
+    this test — which pinned the broken line as the contract — stayed green.
+
+    A substring assertion over source text cannot see a deployment bug. The real
+    coverage now lives in scripts/tests/test_opencode_guard_plugin.py, which
+    builds the store-symlink layout on disk and RUNS the plugin. What is left
+    here is the structural half: the plugin must resolve the core from $HOME, and
+    home.nix must deploy it there.
     """
-    assert 'new URL("../guard_core.py", import.meta.url)' in GUARD_PLUGIN.read_text()
+    src = GUARD_PLUGIN.read_text()
+    assert "homedir()" in src, (
+        "guard.js must locate guard_core.py from $HOME, not from its own module "
+        "URL — `import.meta.url` resolves into the FLAT nix store"
+    )
     assert '.config/opencode/guard_core.py' in HOME_NIX.read_text()
 
 
