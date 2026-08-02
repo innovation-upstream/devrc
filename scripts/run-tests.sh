@@ -7,6 +7,14 @@
 #      — runs the HERMETIC set in the nix sandbox (no network, pinned python).
 #   2. githooks/pre-push — runs the fuller set on the dev host before a push.
 #
+# SCOPE: this script runs the PYTHON suites ONLY. The browser-bridge `.mjs` suite
+# (scripts/browser-bridge/tests/*.test.mjs) is NOT run here — it has its own
+# runner, scripts/run-node-tests.sh, gated by its own flake check
+# (`nix build .#checks.x86_64-linux.nodetests`). `nix flake check` runs both.
+# Note that `HERMETIC_DIRS` below includes scripts/browser-bridge/tests, but that
+# entry collects only the `test_*.py` files in that directory — pytest does not
+# see the `.mjs` files at all.
+#
 # The caller is responsible for putting a pytest-capable `python` on PATH (the
 # flake check does this via the derivation's buildInputs; the pre-push hook wraps
 # this in a nix-shell with the deps). This script only ORCHESTRATES: each test
