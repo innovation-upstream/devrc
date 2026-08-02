@@ -24,6 +24,25 @@ permission:
   # Deliberately NOT allow-listed: `VAR=… git diff` and `sudo git diff`. A
   # reviewer has no need for either, and a leading-`*` allow here would punch a
   # hole straight through the global deny block (which is all leading-`*`).
+  #
+  # 🔴 THE ALLOW-LIST ITSELF WAS A HOLE, AND THE DENIES BELOW IT ARE THE FIX.
+  # `git -C * diff*` has a MIDDLE `*`, and opencode's `*` is an unrestricted
+  # `.*` that crosses spaces — so it matches any `git -C …` command whose text
+  # contains "diff" ANYWHERE, argument text included. VERIFIED BY EXECUTION:
+  #   git -C <path> stash push -m 'wip on the diff'   -> RAN, and created a stash
+  #   git -C <path> stash push -m 'wip'               -> denied
+  # i.e. the word "diff" in a commit/stash message was the entire bypass. Because
+  # opencode is LAST-MATCH-WINS, restating the critical denies AFTER the
+  # allow-list is what closes it: they are later, so they win.
+  #
+  # These re-stated denies cost the reviewer nothing it needs — it reads diffs,
+  # it does not write. The overlap (a `git -C … diff` whose ARGUMENTS mention
+  # "stash") is an over-block and is the correct side to err on.
+  #
+  # Layer 2 covers this too: ~/.config/opencode/plugin/guard.js parses argv and
+  # denies `git stash`/`reset --hard`/`clean -f` on EVERY agent regardless of
+  # glob spelling. Both layers are kept — a plugin that fails to load must not
+  # silently reopen this.
   bash:
     "*": deny
     "git diff*": allow
@@ -35,6 +54,27 @@ permission:
     "git -C * show*": allow
     "git -C * status*": allow
     "rg *": allow
+    # 🔴 MUST STAY LAST. Last-match-wins: these beat the allow-list above.
+    # Scoped to the WRITING verbs — `*merge*` / `*branch*` / `*add*` unscoped
+    # would also block `git log --merges`, `--branches` and `-S'add'`, and a
+    # reviewer that cannot read history is a reviewer that invents findings.
+    "*stash*": deny
+    "*commit*": deny
+    "*push*": deny
+    "*reset*": deny
+    "*clean*": deny
+    "*checkout*": deny
+    "*restore*": deny
+    "*rebase*": deny
+    "*add -A*": deny
+    "*add --all*": deny
+    "*branch -D*": deny
+    "*branch -d*": deny
+    "*worktree remove*": deny
+    "*worktree add*": deny
+    "*rm *": deny
+    "*mv *": deny
+    "*>*": deny
 ---
 
 You are an adversarial reviewer. Your job is to find what is wrong with this
@@ -46,6 +86,14 @@ You have `read`/`glob`/`grep` plus a narrow shell: `git diff`, `git log`,
 `git -C <path> …` form, so you can review a worktree other than the cwd.
 Nothing else runs — every other command is denied, so you cannot execute the
 test suite. Never claim you did.
+
+One shape to know about: the WRITING verbs (`stash`, `commit`, `push`, `reset`,
+`clean`, `checkout`, `restore`, `rebase`, `rm`, `mv`, `>`) are re-denied AFTER
+that allow-list, and a redirect (`>`) is denied outright. So a read command
+whose ARGUMENTS happen to contain one of those words is refused too. That is
+deliberate over-blocking: the allow-list's `git -C * diff*` used to match any
+`git -C …` command containing "diff" anywhere, and a stash whose message said
+"wip on the diff" executed. Rephrase and move on; do not try to route around it.
 
 ## Start here
 

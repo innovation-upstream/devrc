@@ -657,6 +657,18 @@ in
     source = ../scripts/claude-hooks/bash-guard.py;
     force = true;
   };
+  # 🔴 guard_core.py — the SHARED, caller-agnostic checking core. bash-guard.py
+  # is now a thin adapter that imports it from its OWN directory, so this file
+  # MUST land next to it or the guard fails closed on every Bash call (it denies
+  # with an actionable message rather than passing commands through unchecked).
+  # The SAME source file is also deployed to ~/.config/opencode/guard_core.py
+  # below and driven by the opencode plugin — one implementation, two harnesses,
+  # two named policies ("claude-code" = the frozen original six; "opencode" =
+  # those plus the irreversible-action checks).
+  home.file.".claude/hooks/guard_core.py" = {
+    source = ../scripts/claude-hooks/guard_core.py;
+    force = true;
+  };
   # `browser` skill — the DELIBERATE EXCEPTION to the store-symlink pattern above.
   # Its source of truth is the browser-bridge subsystem in THIS repo
   # (scripts/browser-bridge/{SKILL.md,browser}), NOT devrc/claude/skills/. So rather
@@ -730,6 +742,35 @@ in
   # Claude Code — opencode is LAST-MATCH-WINS, so `"*": "allow"` comes FIRST and
   # the denies after. Do not sort those keys. See the file's own header comment.
   home.file.".config/opencode/opencode.jsonc".source = ../scripts/opencode/opencode.jsonc;
+
+  # 🔴 THE ENFORCEMENT LAYER. opencode.jsonc's globs are FRICTION; this plugin is
+  # the control. It runs guard_core.py's "opencode" policy on every bash call
+  # from `tool.execute.before` and THROWS on a deny, which hard-blocks the call.
+  #
+  # Why a plugin and not more globs: a glob matches a command node's full text,
+  # so `talosctl -n <ip> reset` (a node wipe) resolved ALLOW at c1e4c02 because
+  # the pattern required the tool and the verb to be adjacent. guard_core.py
+  # tokenises instead — it splits on `;`/`&&`/`||`/`|`/`&`, strips `VAR=…`
+  # prefixes and sudo/doas/env/timeout wrappers, recurses into `bash -c '…'`,
+  # and reasons about argv.
+  #
+  # Why `tool.execute.before` and not `permission.ask`: MEASURED on 1.18.4 —
+  # `permission.ask` is in the Hooks type and its `output.status` is typed
+  # `"ask"|"deny"|"allow"`, but it NEVER FIRED in any probe (not on the allow
+  # path, not on the ask path). `tool.execute.before` fired on every bash call.
+  # So DENY is expressible from a plugin and ASK is not; ask-grade families stay
+  # as globs.
+  #
+  # 🔴 Same deployment constraints as env.js: directly in `plugin/`, `.js` only,
+  # non-recursive glob.
+  home.file.".config/opencode/plugin/guard.js".source = ../scripts/opencode/plugin/guard.js;
+
+  # The plugin resolves `../guard_core.py` relative to its own module URL, so the
+  # SAME source file that backs ~/.claude/hooks/guard_core.py is deployed here
+  # too. Two independent deployments of one implementation: opencode's guard does
+  # not depend on ~/.claude/ existing, and Claude Code's does not depend on
+  # ~/.config/opencode/ existing.
+  home.file.".config/opencode/guard_core.py".source = ../scripts/claude-hooks/guard_core.py;
 
   # `shell.env` plugin — the only supported seam for putting environment into
   # opencode's bash tool (there is no `env` config key; setting one is silently

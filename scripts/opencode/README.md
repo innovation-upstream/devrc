@@ -37,7 +37,94 @@ thing that destroys a config someone had edited.
 | `~/.config/opencode/AGENTS.md` | **generated** | `claude/PRINCIPLES.md` + `claude/RULES.md` + `claude/opencode-addendum.md`, concatenated at switch time |
 | `~/.config/opencode/opencode.jsonc` | `opencode.jsonc` | model, permissions, compaction, agent pinning |
 | `~/.config/opencode/plugin/env.js` | **generated** | from `nix/agent-handles.nix` — the same file that generates the zsh exports |
+| `~/.config/opencode/plugin/guard.js` | `plugin/guard.js` | 🔴 the deterministic bash guard — see below |
+| `~/.config/opencode/guard_core.py` | `../claude-hooks/guard_core.py` | the shared checking core, the same file Claude Code's `bash-guard.py` imports |
 | `~/.config/opencode/agent/*.md` | `agent/` | the `nav`, `k8s` and `review` subagents |
+
+## 🔴 Two layers, and only one of them is a safety control
+
+**Layer 1 — the `permission.bash` globs in `opencode.jsonc`: FRICTION.** Broad
+`ask` on mutation families so a human sees the command.
+
+**Layer 2 — `plugin/guard.js` → `guard_core.py`: ENFORCEMENT.** It parses:
+splits on `;`/`&&`/`||`/`|`/`&`, strips `VAR=…` prefixes and
+`sudo`/`doas`/`env`/`timeout`/… wrappers, recurses into `bash -c '…'`, and
+reasons about **argv**. It throws from `tool.execute.before`, which hard-blocks
+the call.
+
+### Why the split
+
+A glob matches a command node's **full text**, so "this command wipes a node" is
+not expressible — the set of spellings is unbounded. Two rounds of
+pattern-patching each closed the spellings we thought of and left the ones we
+did not. Measured at `c1e4c02` by replaying that ref's config through the
+resolver model, **all resolving `allow` on the primary agent**:
+
+```
+talosctl -n 192.168.50.94 reset          <- a node wipe, no prompt
+talosctl --nodes=192.168.50.94 reset
+rm -f -r /          rm --recursive --force /
+mke2fs /dev/sdc     mkswap /dev/sdd
+```
+
+because `"*talosctl reset*"` requires the tool and the verb to be **adjacent**,
+and `"*rm -rf*"`/`"*mkfs*"` knew one flag order and one binary name. The deny
+block had been given infix wildcards; the ask block had not.
+
+The `review` agent had a second instance of the same class: its `git -C * diff*`
+allow-list sat after its own `"*": deny`, and opencode's `*` is an unrestricted
+`.*` crossing spaces — so **`git -C <path> stash push -m 'wip on the diff'`
+executed and created a stash** (verified; the same command without the word
+"diff" was denied). The word "diff" in a message was the whole bypass.
+
+**So: do not add a new dangerous family to `opencode.jsonc` and consider it
+handled.** A glob there buys a prompt for the spelling you thought of. If the
+action is irreversible, add a check to `guard_core.py`'s `"opencode"` policy.
+
+### Why `tool.execute.before` and not `permission.ask`
+
+Measured on 1.18.4, this host, 2026-08-02:
+
+- `permission.ask` **is** in the `Hooks` type and its `output.status` is typed
+  `"ask" | "deny" | "allow"`, so an *ask* decision looks expressible. It is not:
+  the hook **never fired** in any probe — not on the allow path, and not on the
+  ask path either (a `*probe-beta*: ask` rule under `opencode run` printed
+  `auto-rejecting` without the hook logging a line). A hook that does not run
+  cannot upgrade an allow into an ask, which is the one thing a guard needs it
+  for.
+- `tool.execute.before` **did** fire on every bash call, and **throwing from it
+  hard-blocks** — opencode surfaces the thrown message to the model as a tool
+  error and the command never runs.
+
+**DENY is expressible from a plugin; ASK is not.** Ask-grade families therefore
+stay as globs. Globs are acceptable for friction and unacceptable as the only
+thing guarding an irreversible action.
+
+Also measured: **`opencode run` AUTO-REJECTS an `ask`** (it prints
+`auto-rejecting`); only the interactive TUI turns one into a prompt, and
+`opencode debug agent --tool` auto-**approves** it. So `ask` means "friction for
+a human", never "a control on an unattended agent".
+
+### What the deny globs are still for
+
+A short, deliberately **non-exhaustive** mirror of the guard's families in their
+naive spellings, so a `guard.js` that fails to load does not silently remove
+every deny at once. Defence in depth, not the control — every one of those
+patterns has known bypasses, which is exactly why layer 2 exists.
+
+### Two policies, one implementation
+
+`guard_core.py` exposes named policy sets:
+
+| Policy | Checks | Used by |
+|---|---|---|
+| `claude-code` | the original six, **frozen** | `~/.claude/hooks/bash-guard.py` |
+| `opencode` | those six **plus** `talosctl reset`, `mkfs`, `dd` to a block device, `rm -r` of `/`/`$HOME`/cwd/system dirs, `git stash`, `git clean -f`, and `git reset --hard` through a `-C` hop | `plugin/guard.js` |
+
+`bash-guard.py` fires on **every** Bash call in **every** Claude Code session on
+both hosts, so adding a check to `claude-code` changes the operator's primary
+tool. It is deliberately unchanged: a before/after decision matrix over a
+2,097-command corpus differs on **0** rows.
 
 ## Why `AGENTS.md` is generated rather than symlinked
 
@@ -156,8 +243,24 @@ general-purpose agent is not free — justify it against that number.
 ## Tests
 
 ```bash
-python -m pytest scripts/tests/test_opencode_config.py -q
+python -m pytest scripts/tests/test_opencode_config.py -q          # config + agents + browser-agent
+python -m pytest scripts/claude-hooks/tests/test_guard_core.py -q  # the shared guard core
+python3 scripts/claude-hooks/tests/test_bash_guard.py              # the Claude Code adapter, end-to-end
 ```
+
+`test_guard_core.py` runs every new rule across an outer product of nine
+prefixes (`VAR=`, `sudo`, `sudo -n`, `doas`, `env`, `timeout`, `nohup`, …), each
+git global-option hop, and each of the five command separators — because the
+glob-era suite pinned one spelling per pattern, always the one the pattern was
+written around, which is exactly why it was blind to `talosctl -n <ip> reset`.
+That matrix immediately caught a real bug in the first draft of the parser
+(`sudo -n <cmd>` peeled wrong, because `-n` had been put in a shared value-flag
+set for `nice -n 5`).
+
+`test_opencode_config.py` asserts the **layered** verdict (`layered_verdict`)
+for "must not run", and the glob-only model (`effective_bash_action`) only for
+claims about the config file's own structure and for `ask`, which the guard
+cannot express.
 
 Part of the hermetic set run by `scripts/run-tests.sh` and the flake check.
 Two tests shell out to `nix-instantiate --eval` to pin the generated handle

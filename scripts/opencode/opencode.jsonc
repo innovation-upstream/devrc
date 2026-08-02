@@ -5,32 +5,76 @@
 // symlink — editing it directly is impossible, and editing it "successfully"
 // would mean the symlink is gone and the file has drifted.
 //
+// ==========================================================================
+// 🔴 TWO LAYERS, AND ONLY ONE OF THEM IS A SAFETY CONTROL.
+// ==========================================================================
+//
+//   LAYER 1 — this file's `permission.bash` globs: FRICTION. Broad `ask` on
+//     mutation-ish families so a human sees the command. Cheap, readable, and
+//     STRUCTURALLY UNABLE to be airtight (see below).
+//
+//   LAYER 2 — ~/.config/opencode/plugin/guard.js -> guard_core.py: ENFORCEMENT.
+//     It PARSES: splits on `;`/`&&`/`||`/`|`/`&`, strips `VAR=…` prefixes and
+//     `sudo`/`doas`/`env`/`timeout`/… wrappers, recurses into `bash -c '…'`,
+//     and reasons about argv. It throws from `tool.execute.before`, which hard-
+//     blocks the call. This is what actually stands between an agent and an
+//     irreversible action.
+//
+// WHY THE SPLIT. Globs match a command node's FULL TEXT, so "this command wipes
+// a node" is not expressible — the set of spellings is unbounded. Two rounds of
+// pattern-patching each closed the spellings we thought of and left the ones we
+// did not. MEASURED at c1e4c02, all resolving ALLOW on the primary agent:
+//     talosctl -n 192.168.50.94 reset          (a node wipe, no prompt)
+//     talosctl --nodes=192.168.50.94 reset
+//     rm -f -r /        rm --recursive --force /
+//     mke2fs /dev/sdc   mkswap /dev/sdd
+// because `"*talosctl reset*"` requires the tool and the verb to be ADJACENT,
+// and `"*rm -rf*"`/`"*mkfs*"` only knew one flag order and one binary name.
+// The DENY block had been given infix wildcards; the ASK block had not.
+//
+// 🔴 SO: DO NOT ADD A NEW DANGEROUS FAMILY HERE AND CONSIDER IT HANDLED. A glob
+// added here buys a prompt for the spelling you thought of. If the action is
+// irreversible, add a check to guard_core.py's "opencode" policy — that is the
+// layer with a parser and the layer with a test matrix over nine prefixes.
+//
+// WHAT THE DENY BLOCK BELOW IS FOR (honestly): it is a short, deliberately
+// NON-EXHAUSTIVE mirror of the guard's families in their naive spellings. It
+// exists ONLY so that a failure to load guard.js does not silently remove every
+// deny at once. It is defence in depth, not the control — every one of these
+// patterns has known bypasses, which is the whole reason layer 2 exists.
+//
+// ==========================================================================
+// Mechanics of layer 1 (measured on v1.18.4 — do not re-derive)
+// ==========================================================================
+//
 // 🔴 PERMISSION ORDERING IS LOAD-BEARING AND IS THE INVERSE OF CLAUDE CODE.
 // opencode evaluates permission globs with LAST-MATCH-WINS over a FLAT ORDERED
-// ARRAY (measured on v1.18.4 via `opencode debug agent <name>`, which prints
-// that array — it is the authority, not this file). So `"*": "allow"` must come
-// FIRST and every deny/ask AFTER it.
-// If someone "tidies" these keys alphabetically, `"*"` (0x2A) still sorts to the
-// front — so the obvious first-key assertion does NOT catch it — but the
-// specific patterns reorder among themselves and a broad `ask` can end up AFTER
-// the narrow `deny` it was meant to be overridden by. scripts/tests/
+// ARRAY (`opencode debug agent <name>` prints that array — it is the authority,
+// not this file). So `"*": "allow"` must come FIRST and every deny/ask AFTER
+// it, and THE BLOCK IS ORDERED: `"*": "allow"`, then every ASK, then every
+// DENY. Deny-last is what makes a narrow deny beat a broad ask. Do not
+// interleave them. If someone "tidies" these keys alphabetically, `"*"` (0x2A)
+// still sorts to the front — so the obvious first-key assertion does NOT catch
+// it — but the specific patterns reorder among themselves. scripts/tests/
 // test_opencode_config.py pins the EFFECTIVE RESOLVED OUTCOME for exactly this
 // reason; a key-order assertion alone is vacuous.
 //
-// 🔴 THE BLOCK IS ORDERED: `"*": "allow"`, then every ASK, then every DENY.
-// Deny-last is what makes a narrow deny beat a broad ask (`*talosctl reset*`
-// deny must win over `*talosctl*` ask). Do not interleave them.
-//
-// 🔴 EVERY DANGEROUS PATTERN IS LEADING-`*`. opencode matches a command NODE's
-// FULL TEXT, so a bare `"git stash*"` is trivially bypassed by any prefix:
-// `FOO=1 git stash`, `sudo -n git stash` and `git -C /tmp stash` all MISSED it
-// (measured). This matters because the house style mandates the bypassing form
-// — `KUBECONFIG=$KC_HOMELAB kubectl …` and `git -C <path> …`. MEASURED on
-// v1.18.4 with a live tool call: `*` crosses spaces, `/` and `-`, so
-// `*git*stash*` catches all four spellings above. Pipelines and `&&` chains are
-// already checked PER COMMAND, so only the prefix/wrapper case needed closing.
+// 🔴 EVERY PATTERN IS LEADING-`*` AND INFIX-`*`. opencode matches a command
+// node's FULL TEXT, so a bare `"git stash*"` is bypassed by any prefix
+// (`FOO=1 git stash`, `sudo -n git stash`, `git -C /tmp stash` all MISSED it),
+// and a `"kubectl delete*"` is bypassed by any INTERLEAVED FLAG
+// (`kubectl -n foo delete pod`). Both bypassing forms are the house style
+// (`KUBECONFIG=$KC_HOMELAB kubectl -n ns …`, `git -C <path> …`). `*` crosses
+// spaces, `/` and `-`, so `*kubectl*delete*` catches every ordering. The
+// deliberate cost is over-matching — `git log | grep push` prompts. An `ask`
+// that fires too often on a mutation family is a far better failure than an
+// `ask` that never fires on the spelling an operator actually types.
 //
 // Other measured facts baked into this file (v1.18.4):
+//   * `opencode run` AUTO-REJECTS an `ask` (it prints "auto-rejecting"); only
+//     the interactive TUI turns one into a prompt. `opencode debug agent
+//     --tool` AUTO-APPROVES it. So `ask` means "friction for a human", never
+//     "a control on an unattended agent".
 //   * only a `"*": "deny"` removes a tool from the request schema; a narrow
 //     deny does not, and `"ask"` costs exactly what `"allow"` costs.
 //   * `small_model` drives TITLE GENERATION ONLY — not compaction. The real
@@ -149,74 +193,73 @@
     "doom_loop": "ask",
     "external_directory": "ask",
 
-    // 🔴 LAST MATCH WINS. Order: `"*"` FIRST, then every ASK, then every DENY.
-    // Every pattern is leading-`*` so a `VAR=…`/`sudo`/`git -C <path>` prefix
-    // cannot slip past it. See the header for the measurements.
     "bash": {
       "*": "allow",
 
-      // ================= ASK: legitimate, real blast radius ================= //
+      // ================= ASK: friction on mutation families ================ //
+      // Every pattern is leading-`*` AND infix-`*`, so no prefix (`VAR=…`,
+      // `sudo`, `git -C <path>`) and no interleaved flag (`kubectl -n ns …`)
+      // slips past. Over-matching is deliberate — see the header.
+      //
+      // 🔴 These are FRICTION, not enforcement, and `opencode run` auto-rejects
+      // rather than prompting. Anything irreversible belongs in guard_core.py.
 
       // --- git ---
-      "*git push*": "ask",
-      "*git commit*": "ask",
-      "*git rebase*": "ask",
-      "*git checkout -- *": "ask",
-      "*git restore*": "ask",
-      "*git branch -D*": "ask",
-      "*gh pr merge*": "ask",
+      "*git*push*": "ask",
+      "*git*commit*": "ask",
+      "*git*rebase*": "ask",
+      "*git*checkout*": "ask",
+      "*git*restore*": "ask",
+      "*git*branch -D*": "ask",
+      "*git*worktree remove*": "ask",
+      "*gh*pr merge*": "ask",
 
-      // --- kubernetes ---
-      "*kubectl delete*": "ask",
-      "*kubectl apply*": "ask",
-      "*kubectl patch*": "ask",
-      "*kubectl scale*": "ask",
-      "*kubectl drain*": "ask",
-      "*kubectl edit*": "ask",
-      "*kubectl replace*": "ask",
-      "*kubectl exec*": "ask",
-      "*kubectl cp*": "ask",
-      "*kubectl rollout undo*": "ask",
+      // --- kubernetes / gitops ---
+      "*kubectl*delete*": "ask",
+      "*kubectl*apply*": "ask",
+      "*kubectl*patch*": "ask",
+      "*kubectl*scale*": "ask",
+      "*kubectl*drain*": "ask",
+      "*kubectl*edit*": "ask",
+      "*kubectl*replace*": "ask",
+      "*kubectl*exec*": "ask",
+      "*kubectl*cp*": "ask",
+      "*kubectl*rollout undo*": "ask",
       // `get secret -o yaml` prints every value base64-encoded, i.e. plaintext.
-      "*kubectl get secret*": "ask",
-      "*kubectl describe secret*": "ask",
+      "*kubectl*secret*": "ask",
+      "*helm*upgrade*": "ask",
+      "*helm*uninstall*": "ask",
+      "*helm*rollback*": "ask",
+      "*flux*suspend*": "ask",
+      "*flux*resume*": "ask",
+      "*flux*delete*": "ask",
 
-      "*helm upgrade*": "ask",
-      "*helm uninstall*": "ask",
-      "*helm rollback*": "ask",
-
-      "*flux suspend*": "ask",
-      "*flux resume*": "ask",
-      "*flux delete*": "ask",
-
-      // --- talos --- (`*talosctl reset*` is DENIED below, after this)
-      "*talosctl patch*": "ask",
-      "*talosctl reboot*": "ask",
-      "*talosctl upgrade*": "ask",
-      "*talosctl apply-config*": "ask",
-      "*talosctl shutdown*": "ask",
+      // --- talos --- (the RESET verb is enforced by guard_core.py, which is
+      // the only layer that catches `talosctl -n <ip> reset`. This broad ask is
+      // friction for every other node-level verb.)
+      "*talosctl*": "ask",
 
       // --- secrets to plaintext ---
-      "*sops -d*": "ask",
-      "*sops --decrypt*": "ask",
-      "*sops exec-env*": "ask",
-      "*age -d*": "ask",
-      "*age --decrypt*": "ask",
+      "*sops*-d*": "ask",
+      "*sops*--decrypt*": "ask",
+      "*sops*exec-env*": "ask",
+      "*age*-d*": "ask",
+      "*age*--decrypt*": "ask",
 
       // --- whole-system state ---
       "*nixos-rebuild*": "ask",
-      "*home-manager switch*": "ask",
+      "*home-manager*switch*": "ask",
       "*nix-collect-garbage*": "ask",
-      "*nix profile remove*": "ask",
+      "*nix*profile remove*": "ask",
       // Only the MUTATING systemctl verbs. `systemctl status`/`list-timers` are
       // read-only and high-frequency — gating those is pure prompt fatigue,
       // which trains the operator to click through the ones that matter.
-      "*systemctl start*": "ask",
-      "*systemctl stop*": "ask",
-      "*systemctl restart*": "ask",
-      "*systemctl enable*": "ask",
-      "*systemctl disable*": "ask",
-      "*systemctl daemon-reload*": "ask",
+      "*systemctl*start*": "ask",
+      "*systemctl*stop*": "ask",
+      "*systemctl*restart*": "ask",
+      "*systemctl*enable*": "ask",
+      "*systemctl*disable*": "ask",
+      "*systemctl*daemon-reload*": "ask",
 
       // --- privilege escalation: gate the WRAPPER itself ---
       "sudo*": "ask",
@@ -226,45 +269,33 @@
       // --- filesystem blast radius ---
       "*chmod -R*": "ask",
       "*chown -R*": "ask",
-      // Broad `rm -rf` asks; the catastrophic targets are DENIED below.
-      "*rm -rf*": "ask",
-      "*rm -fr*": "ask",
+      "*rm*-r*": "ask",
+      // `dd` stays ANCHORED / operand-scoped on purpose: a leading-`*` `"*dd *"`
+      // also matches `git add src/` (…"add "…), and gating every `git add` is
+      // exactly the prompt fatigue that trains an operator to click through.
       "dd *": "ask",
       "*dd if=*": "ask",
       "*dd of=*": "ask",
 
-      // ============ DENY: destructive or rule-violating, never worth ======== //
-      // ============ a prompt. MUST stay LAST — deny beats ask.       ======== //
-
-      // Blind-staging leaks unrelated WIP and secrets from a dirty tree.
+      // ================= DENY: naive-spelling backstop ONLY ================ //
+      // 🔴 READ THE HEADER. These are NOT airtight and are NOT the control.
+      // Every one has known bypasses (that is the measured history of this
+      // file). They exist so that a guard.js that fails to load does not
+      // silently remove every deny at once. The enforcement lives in
+      // guard_core.py's "opencode" policy, which parses argv.
       "*git*add -A*": "deny",
       "*git*add --all*": "deny",
       "*git*add .": "deny",
-      "*git*add ..*": "deny",
-      // The stash stack is repo-GLOBAL across worktrees — a concurrent agent
-      // or session pops your entry, or you pop theirs. Copy files aside
-      // instead.
       "*git*stash*": "deny",
-      // Irreversibly destroys uncommitted work.
       "*git*reset --hard*": "deny",
-      "*git*clean -fd*": "deny",
-
-      // Catastrophic delete targets. (`rm -rf /*` also covers `/tmp/x` — that
-      // is pre-existing behaviour and deliberately kept: an absolute-path
-      // recursive delete is worth the friction.)
+      "*git*clean -f*": "deny",
       "*rm -rf /*": "deny",
-      "*rm -fr /*": "deny",
       "*rm -rf ~*": "deny",
-      "*rm -fr ~*": "deny",
       "*rm -rf $HOME*": "deny",
-      "*rm -rf .": "deny",
-      "*rm -rf ..*": "deny",
-
-      // Wipes a Talos node. Must come after `*talosctl*` asks.
-      "*talosctl reset*": "deny",
-
-      // Formats a filesystem. No agent on these hosts has a reason to.
-      "*mkfs*": "deny"
+      "*talosctl*reset*": "deny",
+      "*mkfs*": "deny",
+      "*mke2fs*": "deny",
+      "*mkswap*": "deny"
     }
   }
 }

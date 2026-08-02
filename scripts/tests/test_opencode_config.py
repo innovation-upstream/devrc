@@ -63,6 +63,7 @@ import json
 import re
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -86,18 +87,18 @@ EXPECTED_AGENTS = {"nav", "k8s", "review"}
 # deliberately loose bound — it only has to catch growth into that failure mode.
 AGENTS_MD_MAX_BYTES = 100 * 1024
 
-# 🔴 yaml is REQUIRED, not optional. It used to be pulled in with
-# `pytest.importorskip`, which meant a run without PyYAML reported
-# "77 passed, 5 skipped" and exit 0 — a green that had silently stopped checking
-# every agent permission block, i.e. exactly the assertions that matter most.
-yaml = pytest.importorskip(
-    "yaml",
-    reason=(
-        "PyYAML is REQUIRED for this suite — without it the agent-permission "
-        "tests silently vanish and the run still reports success. Install it "
-        "(nix-shell -p python312Packages.pyyaml) rather than skipping."
-    ),
-)
+# 🔴 yaml is REQUIRED, not optional — a HARD import, on purpose.
+#
+# It was previously pulled in with `pytest.importorskip`, under a comment
+# claiming that had already been replaced. It had not. MEASURED: without PyYAML
+# the run reported "486 passed, 1 skipped", exit 0 — while 384 assertions across
+# every agent-permission test had silently vanished. That is the worst kind of
+# green: a comment certifying a hazard that is open is worse than no comment,
+# because it is what stops the next reader from checking.
+#
+# A hard import makes a missing PyYAML a COLLECTION ERROR (loud, exit non-zero)
+# instead of a skip. Install it: nix-shell -p python312Packages.pyyaml.
+import yaml  # noqa: E402
 
 
 # --------------------------------------------------------------------------- #
@@ -426,7 +427,36 @@ def test_generated_agents_md_size_is_sane():
 
 # --------------------------------------------------------------------------- #
 # 2. 🔴 EFFECTIVE resolved permissions — the load-bearing section
+#
+# 🔴 TWO LAYERS. `effective_bash_action` models LAYER 1 ONLY (the globs). Since
+# c1e4c02 there is a LAYER 2 — ~/.config/opencode/plugin/guard.js, which runs
+# guard_core.py's "opencode" policy on every bash call and THROWS on a deny. The
+# glob layer is friction; the guard is the control.
+#
+# So the assertions below come in two shapes, and mixing them up is how a test
+# starts asserting a fiction:
+#   * `layered_verdict()` — what actually happens to the agent. Use this for
+#     "must not run".
+#   * `effective_bash_action()` — the globs alone. Use this ONLY for claims
+#     about the config file's own structure (ordering, prefix tolerance,
+#     no-allow-after-wildcard), and for `ask`, which the guard cannot express.
 # --------------------------------------------------------------------------- #
+sys.path.insert(0, str(ROOT / "scripts" / "claude-hooks"))
+import guard_core  # noqa: E402
+
+
+def guard_verdict(command: str) -> str:
+    """LAYER 2: what guard_core's opencode policy does with this command."""
+    return "deny" if guard_core.evaluate(command, "opencode") else "allow"
+
+
+def layered_verdict(command: str, agent: str | None = None) -> str:
+    """What actually reaches the shell. The guard runs from
+    `tool.execute.before`, so its deny is final regardless of the glob outcome.
+    """
+    if guard_verdict(command) == "deny":
+        return "deny"
+    return effective_bash_action(command, agent)
 
 # Commands that must NEVER resolve to plain `allow`, in every spelling an agent
 # actually uses. The `VAR=…`, `sudo ` and `git -C <path> ` forms are here
@@ -525,11 +555,65 @@ def test_dangerous_commands_resolve_deny_on_every_agent(agent, command):
     different (also correct) reason; the parametrisation over every agent is
     what catches an agent-level block that re-opens the wildcard.
     """
-    got = effective_bash_action(command, agent)
+    got = layered_verdict(command, agent)
     assert got == "deny", (
         f"agent={agent or '<primary>'}: {command!r} resolves {got!r}, expected "
-        f"'deny'. opencode is LAST-MATCH-WINS over a flat array — check that no "
-        f"later rule (including an agent-level '*') re-opens it."
+        f"'deny'. Two layers can produce this: opencode is LAST-MATCH-WINS over a "
+        f"flat array (check no later rule, including an agent-level '*', re-opens "
+        f"it), and guard_core.py's 'opencode' policy runs from "
+        f"`tool.execute.before`. glob-only={effective_bash_action(command, agent)!r}, "
+        f"guard={guard_verdict(command)!r}."
+    )
+
+
+# --------------------------------------------------------------------------- #
+# 🔴 THE SPELLINGS THE GLOBS COULD NOT EXPRESS
+#
+# Every row below RESOLVED ALLOW on the primary agent at c1e4c02 — measured by
+# replaying that ref's config through this same resolver model. They are the
+# reason the guard exists, and they are asserted twice: once for the outcome
+# (must not run) and once for WHICH LAYER catches it (the guard), so a future
+# "fix" that only widens a glob does not quietly claim the credit.
+# --------------------------------------------------------------------------- #
+GLOB_BLIND_SPOTS = [
+    # tool and verb NOT adjacent — `*talosctl reset*` never matched these.
+    "talosctl -n 192.168.50.94 reset",
+    "talosctl --nodes 192.168.50.94 reset",
+    "talosctl --nodes=192.168.50.94 reset",
+    "talosctl -e 1.2.3.4 -n 5.6.7.8 reset",
+    "talosctl --talosconfig /tmp/tc -n 1.2.3.4 reset",
+    "sudo -n talosctl -n 192.168.50.94 reset",
+    # flag ORDER the `rm -rf` patterns did not know.
+    "rm -f -r /",
+    "rm --recursive --force /",
+    "rm -r -f $HOME",
+    # binaries the `*mkfs*` pattern did not know.
+    "mke2fs /dev/sdc",
+    "mkswap /dev/sdd",
+    # the global-option hop past a raw-text `git reset` anchor.
+    "git -C /tmp/x reset --hard",
+]
+
+
+@pytest.mark.parametrize("command", GLOB_BLIND_SPOTS)
+@pytest.mark.parametrize("agent", [None] + sorted(EXPECTED_AGENTS))
+def test_glob_blind_spots_are_denied_on_every_agent(agent, command):
+    assert layered_verdict(command, agent) == "deny"
+
+
+@pytest.mark.parametrize("command", GLOB_BLIND_SPOTS)
+def test_glob_blind_spots_are_caught_by_the_GUARD_not_the_globs(command):
+    """🔴 The attribution assertion.
+
+    If someone later widens a glob to cover one of these, this test still passes
+    — but if someone DELETES the guard check believing the glob has it, it fails.
+    That is the direction that matters: the glob layer is friction and cannot be
+    made airtight (unbounded spellings), so the guard must be what holds.
+    """
+    assert guard_verdict(command) == "deny", (
+        f"{command!r} is not caught by guard_core's opencode policy. It was "
+        f"measured ALLOW under the c1e4c02 globs; a glob is not an acceptable "
+        f"sole control for an irreversible action."
     )
 
 
@@ -939,14 +1023,53 @@ def test_no_agent_promises_a_list_tool():
 
 
 def test_review_denies_bash_first_then_allows_read_only_git():
-    """review's block is the INVERSE shape of the global one: a `"*": "deny"`
-    FIRST, then the read-only git/rg allows after it."""
+    """review's block is THREE phases: `"*": "deny"`, then the read-only
+    git/rg allows, then the writing verbs re-denied LAST.
+
+    The third phase is not decoration — see
+    test_review_allowlist_cannot_be_ridden_by_argument_text below for the
+    execution-verified bypass it closes.
+    """
     bash = agent_permission("review")["bash"]
-    keys = list(bash)
-    assert keys[0] == "*" and bash["*"] == "deny", (
-        f"review's bash block must start with '*': deny, got {keys[0]!r}"
+    items = list(bash.items())
+    assert items[0] == ("*", "deny"), (
+        f"review's bash block must start with '*': deny, got {items[0]!r}"
     )
-    assert all(bash[k] == "allow" for k in keys[1:]), "only allows may follow the deny-all"
+    actions = [v for _, v in items[1:]]
+    assert set(actions) <= {"allow", "deny"}
+    assert "allow" in actions and "deny" in actions, (
+        "review must have BOTH an allow-list and re-stated denies after it"
+    )
+    last_allow = max(i for i, a in enumerate(actions) if a == "allow")
+    first_deny = min(i for i, a in enumerate(actions) if a == "deny")
+    assert first_deny > last_allow, (
+        "every re-stated deny must come AFTER every allow. opencode is "
+        "last-match-wins, so a deny placed before the allow-list is a no-op."
+    )
+
+
+@pytest.mark.parametrize("command", [
+    # 🔴 VERIFIED BY EXECUTION at c1e4c02: this RAN and created a stash. The
+    # allow-list's `git -C * diff*` has a MIDDLE `*`, and opencode's `*` is an
+    # unrestricted `.*` crossing spaces — so the word "diff" anywhere in the
+    # ARGUMENT TEXT satisfied it. The control was a message without "diff",
+    # which was correctly denied.
+    "git -C /tmp/wt stash push -m 'wip on the diff'",
+    "git -C /tmp/wt commit -m 'review the diff'",
+    "git -C /tmp/wt reset --hard  # diff",
+    "git -C /tmp/wt clean -fd  # diff",
+    "git -C /tmp/wt push --force  # log",
+    "git -C /tmp/wt checkout main  # show the diff",
+    "git -C /tmp/wt worktree remove /tmp/wt  # status",
+    "rm -rf /tmp/wt  # diff",
+])
+def test_review_allowlist_cannot_be_ridden_by_argument_text(command):
+    """Layer 1 (globs) must now refuse these, and layer 2 must refuse the
+    destructive subset regardless of glob spelling."""
+    assert layered_verdict(command, "review") == "deny", (
+        f"{command!r} resolves {layered_verdict(command, 'review')!r} on the "
+        f"review agent. glob-only={effective_bash_action(command, 'review')!r}"
+    )
 
 
 @pytest.mark.parametrize(
@@ -1026,17 +1149,93 @@ def test_switch_cannot_be_blocked_by_the_unmanaged_config():
 BROWSER_AGENT = ROOT / "scripts" / "browser-bridge" / "browser-agent"
 
 
+def browser_agent_code() -> str:
+    """browser-agent's source with COMMENTS AND BLANK LINES STRIPPED.
+
+    🔴 Every assertion in this section must run against this, not the raw text.
+    The audit found `assert "--version" in src` passing off a COMMENT that says
+    "Deliberately not `opencode --version`" — i.e. an assertion satisfied by
+    prose stating the code does the opposite. A substring test over a
+    heavily-commented shell script is a test of the comments.
+
+    Crude but sufficient: strip whole-line `#` comments. Trailing comments after
+    code survive, so this is a floor on rigour, not a ceiling — which is why the
+    assertions below also pin STRUCTURE (ordering, call sites) rather than the
+    presence of a word.
+    """
+    return "\n".join(
+        ln for ln in BROWSER_AGENT.read_text().split("\n")
+        if ln.strip() and not ln.lstrip().startswith("#")
+    )
+
+
+def test_browser_agent_code_helper_actually_strips_comments():
+    """Negative control for the helper above — without it every assertion in
+    this section is a claim about prose."""
+    raw = BROWSER_AGENT.read_text()
+    code = browser_agent_code()
+    assert "Deliberately not `opencode --version`" in raw
+    assert "Deliberately not `opencode --version`" not in code
+
+
 def test_browser_agent_isolates_its_opencode_config_dir():
-    src = BROWSER_AGENT.read_text()
-    assert "export OPENCODE_CONFIG_DIR=" in src
+    assert "export OPENCODE_CONFIG_DIR=" in browser_agent_code()
+
+
+def test_browser_agent_checks_for_opencode_before_touching_the_cache():
+    """🔴 ORDERING BUG, not a presence bug.
+
+    `oc_warm_version` falls back to the BARE string "$OPENCODE_BIN" when
+    `command -v` finds nothing, and `readlink -f` then resolves that against the
+    CURRENT WORKING DIRECTORY. The stamp becomes cwd-dependent, `oc_is_warm` can
+    never match, and `_oc_bootstrap_locked` takes its "stale tree" branch and
+    `rm -rf`s node_modules out of the SHARED cache on every run — then fails to
+    re-warm (no opencode), leaving the dir cold for the next invocation. That is
+    reachable from systemd/cron/a home-manager switch, where PATH is not a login
+    shell's.
+
+    So the preflight must come BEFORE the bootstrap, and a presence-only
+    assertion cannot see that: the check existed at c1e4c02, ~180 lines too
+    late.
+    """
+    code = browser_agent_code()
+    # 🔴 Anchored on the `|| die` PREFLIGHT, not on any `command -v`. The first
+    # draft of this test used the bare `command -v "$OPENCODE_BIN"` substring —
+    # which also matches the one INSIDE `oc_warm_version()` at line ~136, i.e.
+    # before the bootstrap even at c1e4c02. It therefore passed against the
+    # buggy ordering it was written to catch. Caught by running this suite
+    # against a pre-change seed tree; without that run it would have shipped as
+    # coverage for a bug it could not see.
+    preflight = code.index('command -v "$OPENCODE_BIN" >/dev/null 2>&1 || die')
+    bootstrap_call = code.index('oc_is_warm "$_oc_ver" || oc_bootstrap')
+    rm_in_bootstrap = code.index('rm -rf "$OC_CONFIG_DIR/node_modules"')
+    assert preflight < bootstrap_call, (
+        "the `command -v opencode` preflight must run BEFORE the config-dir "
+        "bootstrap — otherwise a missing binary makes the warm stamp "
+        "cwd-dependent and the bootstrap rm -rf's the shared cache every run"
+    )
+    assert preflight < rm_in_bootstrap
+
+
+def test_browser_agent_config_dir_is_not_the_live_one():
+    """INVARIANT GUARD, not regression coverage — it is green at c1e4c02 too.
+    It exists because a mutation pointing this at the REAL ~/.config/opencode
+    passed every substring test in this file's earlier form."""
+    line = next(ln for ln in browser_agent_code().split("\n")
+                if ln.startswith("OC_CONFIG_DIR="))
+    assert ".config/opencode" not in line, (
+        "the isolated config dir must NOT be the live ~/.config/opencode — that "
+        "re-imports the ~37 KB AGENTS.md this mechanism exists to shed, and puts "
+        "the warm step's `rm -rf` on the managed directory"
+    )
 
 
 def test_browser_agent_config_dir_is_stable_not_per_run():
     """🔴 A FRESH config dir per run is NOT acceptable: it makes opencode
     materialise 62 MB of node_modules, and offline it HUNG (killed at 120 s, 0
     bytes, tripping the harness's own tool-set gate)."""
-    src = BROWSER_AGENT.read_text()
-    line = next(ln for ln in src.split("\n") if ln.startswith("OC_CONFIG_DIR="))
+    line = next(ln for ln in browser_agent_code().split("\n")
+                if ln.startswith("OC_CONFIG_DIR="))
     assert "mktemp" not in line
     assert ".cache" in line
 
@@ -1050,28 +1249,71 @@ def test_browser_agent_warms_the_config_dir():
     while installing NOTHING. Only resolving a project's `.opencode/tools/`
     (browser.js imports `@opencode-ai/plugin`) triggers the install.
     """
-    src = BROWSER_AGENT.read_text()
-    assert "oc_bootstrap" in src and "oc_is_warm" in src
-    assert ".opencode/tools" in src, (
+    code = browser_agent_code()
+    assert 'oc_is_warm "$_oc_ver" || oc_bootstrap "$_oc_ver"' in code, (
+        "the warm must actually be INVOKED — a mutation that defines "
+        "oc_bootstrap and never calls it passed the old `'oc_bootstrap' in src` "
+        "assertion"
+    )
+    assert 'mkdir -p "$seed/.opencode/tools"' in code, (
         "the warm step must run from a seed project carrying the tools — a bare "
         "`opencode debug` command exits 0 and leaves the dir just as cold"
     )
-    assert '[ -d "$OC_CONFIG_DIR/node_modules" ]' in src, (
+    assert '[ -d "$OC_CONFIG_DIR/node_modules" ]' in code, (
         "warmth must be verified by node_modules existing, never by exit code"
     )
 
 
+def test_browser_agent_stamp_only_after_a_COMPLETE_warm():
+    """🔴 `[ -d node_modules ]` alone is not completeness.
+
+    A warm killed by `timeout` mid-install leaves the tree present and PARTIAL;
+    stamping that marks a broken tree valid forever, because every later run
+    then short-circuits on `oc_is_warm`. Require that the timeout did not fire
+    AND that the one package the warm exists to install resolves.
+    """
+    code = browser_agent_code()
+    assert '[ "$warm_rc" -ne 124 ]' in code, (
+        "a `timeout`-killed warm (exit 124) must not be stamped valid"
+    )
+    assert '[ -d "$OC_CONFIG_DIR/node_modules/@opencode-ai/plugin" ]' in code, (
+        "completeness must be judged by the package the warm exists to install"
+    )
+
+
 def test_browser_agent_warm_handles_races_staleness_and_failure():
-    src = BROWSER_AGENT.read_text()
-    assert "OC_LOCK" in src and "mkdir \"$OC_LOCK\"" in src, (
+    """INVARIANT GUARD — green at c1e4c02 as well. What changed is that its
+    assertions now run against comment-stripped source: the previous
+    `"--version" in src` was satisfied by a COMMENT saying the code deliberately
+    does NOT use `--version`. Strengthening a vacuous assertion is not the same
+    as adding regression coverage, and is not counted as such."""
+    code = browser_agent_code()
+    assert 'mkdir "$OC_LOCK"' in code, (
         "concurrent runs must be serialised by an atomic lock"
     )
-    assert "OC_STAMP" in src and "--version" in src, (
-        "a version stamp must force a clean re-warm across an opencode upgrade"
+    # 🔴 The stamp is the RESOLVED BINARY PATH + size:mtime, deliberately NOT
+    # `opencode --version` (an extra process per run that also breaks the test
+    # rig's invocation-counting assertions). The old assertion here was
+    # `"--version" in src`, which matched only the COMMENT saying exactly that.
+    assert 'readlink -f "$p"' in code and "stat -c '%s:%Y'" in code, (
+        "the version stamp must be derived from the resolved binary identity"
     )
-    assert "OC_ISOLATED" in src and "WARNING" in src, (
+    assert '[ "$(cat "$OC_STAMP" 2>/dev/null)" = "$1" ]' in code, (
+        "oc_is_warm must COMPARE the stamp, not merely check it exists"
+    )
+    assert "OC_ISOLATED=1" in code and "WARNING" in code, (
         "failure to warm must degrade to the global config LOUDLY, not silently "
         "hang or die"
+    )
+
+
+def test_browser_agent_lock_wait_outlasts_the_work_it_guards():
+    """A 30 s wait around a 90 s job force-steals the lock and `rm -rf`s
+    node_modules while the first process is still writing into it."""
+    code = browser_agent_code()
+    assert "max=$(( (OC_WARM_TIMEOUT + 30) * 2 ))" in code, (
+        "the lock wait must be derived from OC_WARM_TIMEOUT, not a fixed count "
+        "shorter than the warm it serialises"
     )
 
 
@@ -1087,6 +1329,83 @@ def test_browser_agent_isolated_config_keeps_the_global_safety_settings():
 def test_browser_agent_fails_loud_if_an_instruction_file_appears():
     src = BROWSER_AGENT.read_text()
     assert '"$OC_CONFIG_DIR/AGENTS.md"' in src
+
+
+# --------------------------------------------------------------------------- #
+# 8. 🔴 the guard plugin's DEPLOYMENT
+#
+# The guard is only a control if it is actually deployed. Three home.file
+# entries have to line up, and the plugin resolves guard_core.py RELATIVE to its
+# own module URL — so `plugin/guard.js` + `../guard_core.py` must both land.
+# --------------------------------------------------------------------------- #
+GUARD_PLUGIN = OC_DIR / "plugin" / "guard.js"
+GUARD_CORE = ROOT / "scripts" / "claude-hooks" / "guard_core.py"
+
+
+@pytest.mark.parametrize("attr,src", [
+    ('home.file.".config/opencode/plugin/guard.js".source',
+     "../scripts/opencode/plugin/guard.js"),
+    ('home.file.".config/opencode/guard_core.py".source',
+     "../scripts/claude-hooks/guard_core.py"),
+    ('home.file.".claude/hooks/guard_core.py"',
+     "../scripts/claude-hooks/guard_core.py"),
+])
+def test_home_nix_deploys_the_guard(attr, src):
+    nix = HOME_NIX.read_text()
+    assert attr in nix, f"home.nix does not declare {attr}"
+    assert src in nix, f"home.nix does not reference {src}"
+
+
+def test_every_source_path_home_nix_claims_actually_exists():
+    """A `source = ../…` pointing at a missing file fails the switch, not the
+    tests — unless something asserts it here."""
+    for rel in ["../scripts/opencode/plugin/guard.js",
+                "../scripts/claude-hooks/guard_core.py",
+                "../scripts/claude-hooks/bash-guard.py"]:
+        assert (ROOT / "nix" / rel).resolve().is_file(), f"{rel} does not exist"
+
+
+def test_plugin_resolves_the_core_next_to_the_config_dir():
+    """🔴 The two deployments must AGREE. guard.js does
+    `new URL("../guard_core.py", import.meta.url)` from
+    ~/.config/opencode/plugin/, i.e. ~/.config/opencode/guard_core.py — which is
+    exactly where home.nix links it. If someone moves either, the plugin fails
+    CLOSED (every bash call refused), which is loud but total.
+    """
+    assert 'new URL("../guard_core.py", import.meta.url)' in GUARD_PLUGIN.read_text()
+    assert '.config/opencode/guard_core.py' in HOME_NIX.read_text()
+
+
+def test_bash_guard_imports_the_core_from_its_own_directory():
+    src = (ROOT / "scripts" / "claude-hooks" / "bash-guard.py").read_text()
+    assert "os.path.dirname(os.path.abspath(__file__))" in src
+    assert "import guard_core" in src
+    assert '.claude/hooks/guard_core.py' in HOME_NIX.read_text()
+
+
+def test_guard_core_is_a_single_source_file_used_by_both():
+    """One implementation, two harnesses. If this ever becomes two files they
+    will drift — which is precisely what happened to bash-guard.py itself
+    (workbench had 6 checks, the laptop a stale copy with 4)."""
+    nix = HOME_NIX.read_text()
+    refs = nix.count("../scripts/claude-hooks/guard_core.py")
+    assert refs == 2, (
+        f"guard_core.py is referenced {refs}x in home.nix; expected exactly 2 "
+        f"(~/.claude/hooks/ for Claude Code, ~/.config/opencode/ for opencode)"
+    )
+
+
+def test_readme_is_honest_about_what_globs_guarantee():
+    """🔴 The docs claim is a claim like any other. The old header asserted the
+    patterns were airtight ("EVERY DANGEROUS PATTERN IS LEADING-`*` … catches
+    all four spellings"), which is what made two rounds of pattern-patching feel
+    like a fix. It must now say plainly that globs are friction."""
+    header = (OC_DIR / "opencode.jsonc").read_text()
+    assert "FRICTION" in header and "ENFORCEMENT" in header
+    assert "guard_core.py" in header
+    readme = (OC_DIR / "README.md").read_text()
+    assert "Two layers, and only one of them is a safety control" in readme
+    assert "tool.execute.before" in readme and "permission.ask" in readme
 
 
 def test_readme_documents_the_one_time_command():

@@ -58,6 +58,27 @@ MODEL="${BROWSER_AGENT_MODEL:-openrouter/deepseek/deepseek-v4-flash}"
 
 die() { echo "browser-agent: $*" >&2; exit 2; }
 
+# --- opencode preflight (MUST stay above the config-dir bootstrap) ----------- #
+# 🔴 THIS CHECK USED TO LIVE ~180 LINES BELOW, after the warm/bootstrap block,
+# and that ordering was a live `rm -rf`. `oc_warm_version` falls back to the
+# BARE string "$OPENCODE_BIN" when `command -v` finds nothing, and `readlink -f`
+# then resolves that bare string against the CURRENT WORKING DIRECTORY — so the
+# stamp becomes a cwd-dependent path that can never match the stored one,
+# `oc_is_warm` always fails, and `_oc_bootstrap_locked` takes the "stale tree"
+# branch and `rm -rf`s node_modules + package.json out of the shared config dir
+# on EVERY run. Then the warm itself fails (no opencode), so the dir is left
+# COLD for the next invocation, which is the exact 120 s offline hang this
+# isolation exists to avoid.
+#
+# Reachable without a login shell: systemd user units, cron, and the window
+# during a `home-manager switch` when the profile symlink is being swapped.
+# Checking first costs one `command -v` and makes the failure a clean exit 2
+# with a message, instead of silent cache destruction.
+#
+# (It was ALSO already required to sit above the tab-opening code, so a missing
+# binary can never leave an orphaned tab. Both constraints point the same way.)
+command -v "$OPENCODE_BIN" >/dev/null 2>&1 || die "opencode not found on PATH ('$OPENCODE_BIN') — install it or set BROWSER_AGENT_OPENCODE"
+
 # --- isolated opencode CONFIG dir (token containment) ------------------------ #
 # devrc now deploys a ~37 KB global ~/.config/opencode/AGENTS.md (PRINCIPLES +
 # RULES + addendum). MEASURED on 1.18.4: that file IS injected into a run whose
@@ -157,10 +178,17 @@ oc_bootstrap() {  # <version> -> 0 warm, 1 could not warm
 _oc_lock() {
   # Serialise concurrent runs. Bounded wait, then proceed anyway: a stale lock
   # from a killed run must not wedge every future invocation.
-  local i=0
+  # 🔴 The wait MUST outlast the work it guards. It was a fixed 60 x 0.5 s = 30 s
+  # while the warm step it serialises is bounded at OC_WARM_TIMEOUT (default
+  # 90 s) — so the loser force-stole the lock at 30 s and then `rm -rf`d
+  # node_modules out from under a first process that was still writing into it,
+  # which is the "half-materialised tree that fails in confusing ways" this lock
+  # exists to prevent. Derive it instead: warm timeout + 30 s slack.
+  local i=0 max
+  max=$(( (OC_WARM_TIMEOUT + 30) * 2 ))
   while ! mkdir "$OC_LOCK" 2>/dev/null; do
     i=$((i + 1))
-    [ "$i" -ge 60 ] && { rmdir "$OC_LOCK" 2>/dev/null; mkdir "$OC_LOCK" 2>/dev/null; break; }
+    [ "$i" -ge "$max" ] && { rmdir "$OC_LOCK" 2>/dev/null; mkdir "$OC_LOCK" 2>/dev/null; break; }
     sleep 0.5
   done
 }
@@ -210,14 +238,25 @@ OCJSON
   cp "$TOOL_JS" "$TOOL_IMPL" "$seed/.opencode/tools/" 2>/dev/null \
     || { rm -rf "$seed"; return 1; }
 
+  local warm_rc=0
   ( cd "$seed" && OPENCODE_CONFIG_DIR="$OC_CONFIG_DIR" \
       timeout "$OC_WARM_TIMEOUT" "$OPENCODE_BIN" debug agent build ) >/dev/null 2>&1
+  warm_rc=$?
   rm -rf "$seed"
 
-  # Verify the OUTCOME, never the exit code: the command can succeed while
+  # Verify the OUTCOME, never the exit code alone: the command can succeed while
   # having installed nothing (that is exactly how the `debug paths` version of
   # this step passed while leaving the dir cold).
-  if [ -d "$OC_CONFIG_DIR/node_modules" ]; then
+  #
+  # 🔴 But `[ -d node_modules ]` ALONE is not completeness either. A warm killed
+  # by `timeout` mid-install leaves the directory present and PARTIAL, and
+  # stamping that marks a broken tree valid FOREVER — every later run sees
+  # `oc_is_warm` true and never repairs it. So require all three: the timeout
+  # did not fire (124), the tree exists, and the ONE package the warm exists to
+  # install actually resolves.
+  if [ "$warm_rc" -ne 124 ] \
+     && [ -d "$OC_CONFIG_DIR/node_modules" ] \
+     && [ -d "$OC_CONFIG_DIR/node_modules/@opencode-ai/plugin" ]; then
     printf '%s\n' "$ver" > "$OC_STAMP" 2>/dev/null || return 1
     return 0
   fi
@@ -305,9 +344,10 @@ case "$TIMEOUT" in (*[!0-9]*|"") die "--timeout must be a positive integer of se
 [ -r "$TOOL_IMPL" ] || die "custom tool impl not found: $TOOL_IMPL"
 [ -r "$PARSER" ] || die "parser not found: $PARSER"
 
-# opencode must be present BEFORE we open any tab — so a missing binary can never
-# leave an orphaned tab.
-command -v "$OPENCODE_BIN" >/dev/null 2>&1 || die "opencode not found on PATH ('$OPENCODE_BIN') — install it or set BROWSER_AGENT_OPENCODE"
+# (The `command -v "$OPENCODE_BIN"` preflight that used to live here has been
+# HOISTED to just under `die()`, above the config-dir bootstrap — see the 🔴
+# comment there. It still runs before any tab is opened; it now also runs before
+# the bootstrap can `rm -rf` the shared cache on a cwd-dependent stamp.)
 
 declare -a bflags=()
 [ -n "$INSTANCE" ] && bflags+=(--instance "$INSTANCE")
