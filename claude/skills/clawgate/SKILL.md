@@ -287,3 +287,24 @@ adjacent text → selector → accessible name. Full procedure, worked example, 
   first (`reference/telemetry.md`).
 - **Red GitHub Actions checks on `homelab-infra` are NOISE** (billing-blocked repo-wide). The real
   gate is the Tekton `clawgate-ci` pipeline — see the `tekton` skill before touching CI.
+- 🔴 **The browser extension does NOT ship via Flux — merging to `trunk` deploys NOTHING.** Brave
+  loads it unpacked from a **flat copy** at `~/clawgate-extension` **on the workbench** (that is
+  where Zach's Brave runs — `localhost:8972` civitai-manager answers there, not on the desktop).
+  Delivery is `scripts/sync-clawgate-extension.sh` (`--check` = drift only, rc 1 on drift), and
+  **Brave does not hot-reload unpacked extensions** — a sync without a `brave://extensions` ↻ leaves
+  the OLD build running. After adding a command, also check `brave://extensions/shortcuts`: Brave
+  routinely leaves newly-added hotkeys unbound on an in-place reload.
+  **A missing `.synced-from` stamp means someone hand-copied it out of band.** That is exactly how a
+  build that never passed CI ran live for ~11 hours on 2026-08-01 while `trunk` looked clean — it
+  was copied straight from a working tree, so `clawgate-ci` never saw it (it leaked typed text;
+  fixed in `fcaca875`/PR #276). Check the stamp before trusting any claim about which build is
+  loaded:
+  ```bash
+  ssh 192.168.50.250 'cat ~/clawgate-extension/.synced-from; grep "\"version\"" ~/clawgate-extension/manifest.json'
+  ssh 192.168.50.250 '~/workspace/homelab-talos/scripts/sync-clawgate-extension.sh --check'
+  ```
+  ⚠ Serving a scratch test page **to** that Brave: the workbench firewall `allowedTCPPorts` is a
+  short allowlist (80/443/6443/7844/8110/8180/25565/58012), so an ad-hoc port is unreachable over
+  the LAN — serve it on the workbench and open **`http://localhost:<port>`** rather than opening a
+  firewall port for a throwaway. Verifying the picker's privacy guard by hand has a trap that makes
+  the obvious test vacuous → `reference/element-references.md`.

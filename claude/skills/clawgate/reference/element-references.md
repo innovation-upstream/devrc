@@ -43,4 +43,38 @@ Resolution strategy:
 
 ### Developer note
 
-The enrichment is built by `buildEnrichment` in `extension/content.js`. It reads `window.location` for page context and walks `previousElementSibling` / `nextElementSibling` for adjacent text, capping each at 120 chars. To modify enrichment behaviour, edit that function — `lib.js` stays pure and handles only selector building and accessible name computation.
+The enrichment is built by `buildEnrichment` in `extension/content.js`. It reads `window.location`
+for page context and walks `previousSibling` / `nextSibling` (the **node** variants — text nodes
+count) for adjacent text, slicing each side at 40 chars; `refText` in `lib.js` then caps at
+`MAX_REF_TEXT_CHARS` (80). To modify enrichment behaviour, edit that function — `lib.js` stays pure
+and handles only selector building and accessible name computation.
+
+🔴 **Every page-text read in the walk MUST go through `adjacentText` → `pageText`.** That is the
+privacy choke point: element siblings get `pageText` (self / ancestor / descendant via the derived
+`TYPING_SURFACE_SEL`), text siblings are withheld unless `nearTypingSurface(parentElement)` is
+false, and anything unrecognised returns `""` — fail-closed. Reading `.textContent` directly here is
+the bug that shipped in the first cut of 1.4.0 (fixed in `fcaca875`, PR #276): it put the operator's
+typed text on the wire. **Never add a second "is this a text field" predicate** — derive from the
+shared sets so a new role covers self, ancestor and descendant at once. This same root cause
+recurred through six audit rounds on the picker and a seventh here.
+
+### 🔴 Testing the privacy guard: most obvious tests CANNOT fail
+
+**A native `<input>` or `<textarea>` never exposes its current value through `textContent`.** Typing
+updates `.value`; `.textContent` stays whatever the server rendered (empty, if it was empty). So a
+test that types a canary into a form field and picks the neighbouring element **passes under the
+leaking build too** and proves nothing. Three consecutive live captures were wasted this way on
+2026-08-02 (tasks #147–#149), each read as a pass.
+
+Only these carry user text in `textContent`:
+- `contenteditable` elements and `role="textbox"` divs (Gmail / Slack / Notion compose boxes)
+- a `<textarea>`'s **server-rendered initial** content — not what was typed into it
+
+A capture is only discriminating if the withheld neighbour's text was **server-rendered**. The
+fixture that settled it (task #150): a button flanked by two `contenteditable` divs holding known
+canaries, plus a second button beside a plain `<span>` as a positive control — the guard must
+withhold the canaries *and* still capture the span, or it is a blanket refusal rather than a fix.
+
+⚠ The keystroke path itself (`chrome.commands`) is **not reachable from Playwright** — every spec
+posts to the service worker directly. A live capture by hand is the only way to verify the build
+actually loaded in Brave, which is why an out-of-band flat copy (below) is dangerous.
