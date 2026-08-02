@@ -52,7 +52,8 @@
       # Deps below cover the modules-under-test's import-time requirements
       # (requests/psycopg2/minio/pyyaml); the tests themselves mock the I/O.
       # ---------------------------------------------------------------------
-      checks.${system}.pytests =
+      checks.${system} = {
+        pytests =
         let
           pyEnv = pkgs.python312.withPackages (ps: with ps; [
             pytest
@@ -102,5 +103,55 @@
             bash scripts/run-tests.sh --set hermetic .
             touch "$out"
           '';
+
+      # ---------------------------------------------------------------------
+      # Node test gate — scripts/browser-bridge/tests/*.test.mjs (460 tests).
+      #
+      # Deliberately a SEPARATE check from `pytests`, not folded into it:
+      #  • distinct toolchain (nodejs vs python312) — keeping them apart means
+      #    the pytest gate's closure doesn't grow a node dependency, and a node
+      #    toolchain bump can't invalidate the python gate's build cache;
+      #  • distinct failure signal — `nix flake check` names the failing check,
+      #    so "nodetests failed" vs "pytests failed" is legible without reading
+      #    the log;
+      #  • they run in parallel under `nix flake check`, so the wall-clock cost
+      #    of adding this is ~0 next to the (much slower) python gate.
+      #
+      # Until this existed the .mjs suite gated NOTHING — flake.nix had zero
+      # references to node, so every "460 pass" claim was a MANUAL run and a
+      # .mjs regression could merge freely.
+      #
+      # HERMETIC (audited 2026-08-02): the suite has no `createServer`/`.listen()`,
+      # no `spawn`/`execFile`, and every `fetch` is a stub assigned onto
+      # `globalThis.fetch`. Its only I/O is reads of repo-relative files and
+      # writes under `tmpdir()`. Nothing needs the network the sandbox denies —
+      # so nothing is excluded, and the runner's test-count floor is what proves
+      # that stays true.
+      #
+      # nodejs is pinned from THIS flake's locked nixpkgs, NOT whatever node
+      # happens to be on the dev host's PATH. MEASURED 2026-08-02: the sandbox
+      # runs v24.18.0 while the workbench's PATH node is v26.5.0 — the runner
+      # echoes `node --version` on every run so the gate's toolchain is never a
+      # guess, and that divergence is the proof the pin is real.
+      # ---------------------------------------------------------------------
+        nodetests =
+        pkgs.runCommandLocal "devrc-nodetests"
+          {
+            nativeBuildInputs = [ pkgs.nodejs pkgs.bash pkgs.git pkgs.gnugrep pkgs.gawk pkgs.coreutils ];
+          }
+          ''
+            cp -r ${./.} src
+            chmod -R u+w src
+            export HOME="$TMPDIR/home"
+            mkdir -p "$HOME"
+            cd src
+            # The runner globs the .test.mjs files itself, asserts a file-count
+            # and a TEST-COUNT floor, and refuses to degrade to `node --test <dir>`
+            # (which silently yields a bogus `# tests 1 / # fail 1`). Read its
+            # header before changing this line.
+            bash scripts/run-node-tests.sh .
+            touch "$out"
+          '';
+      };
     };
 }
