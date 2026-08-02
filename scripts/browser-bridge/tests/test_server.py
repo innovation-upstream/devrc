@@ -258,11 +258,17 @@ class FakeExtension(threading.Thread):
 # the list /health's `extension_connected` is the bool() of) and deliberately does
 # NOT emit — it is not an operator-facing orientation op. Keep it that way; if you
 # point this back at /health, the exact-count telemetry assertions go red again.
+#
+# `body["count"]`, NOT `body.get("count", 0)`: a missing key must RAISE, not read
+# as "nothing connected". With a default, a shape change on /instances turns
+# `want=False` into an instantly vacuous pass — the helper would report success
+# without ever observing the server. The old /health helper used `body[...]` for
+# exactly this reason; the move to /instances must not quietly weaken it.
 def _wait_connected(srv, want=True, timeout=3.0):
     deadline = time.time() + timeout
     while time.time() < deadline:
         status, body = _req(srv, "GET", "/instances")
-        if status == 200 and bool(body.get("count", 0)) == want:
+        if status == 200 and bool(body["count"]) == want:
             return True
         time.sleep(0.02)
     return False
@@ -274,7 +280,7 @@ def _wait_count(srv, n, timeout=3.0):
     deadline = time.time() + timeout
     while time.time() < deadline:
         status, body = _req(srv, "GET", "/instances")
-        if status == 200 and body.get("count", 0) >= n:
+        if status == 200 and body["count"] >= n:   # see _wait_connected on `[...]`
             return body
         time.sleep(0.02)
     return None
@@ -4975,6 +4981,11 @@ def test_unknown_instance_KNOWN_but_disconnected_says_stop_retrying(tmp_path):
         assert "FULLY RESTART Brave" in err, err
         assert "DO NOT RETRY" in err, err
         assert "2026-08-02T02:11:09Z" in err, "name WHEN it went away"
+        # `last_unanswered_op` is the evidence server.py calls "the single fact that
+        # turns the next silent drop from inference into evidence" — it says the
+        # profile died MID-`eval` rather than going quiet while idle. render_missing
+        # always printed it; the rewritten advice must not have dropped it.
+        assert "last unanswered op: eval" in err, err
         # ...and it must NOT tell the operator their label was wrong.
         assert "is UNKNOWN" not in err, err
     finally:
@@ -4995,6 +5006,11 @@ def test_unknown_instance_NEVER_SEEN_key_says_wrong_label(tmp_path):
         assert "is UNKNOWN" in err, err
         assert "WRONG LABEL" in err, err
         assert "Keys this server HAS seen" in err and "personal" in err, err
+        # The wrong-label branch ALSO keeps render_missing's drop evidence: a typo
+        # and a dead profile are frequently the SAME incident, and this branch is
+        # where that used to become invisible.
+        assert "last seen 2026-08-02T02:11:09Z" in err, err
+        assert "last unanswered op: eval" in err, err
         # The two branches must be mutually exclusive.
         assert "KNOWN but NOT CONNECTED" not in err, err
         assert "DO NOT RETRY" not in err, err
@@ -5010,12 +5026,14 @@ def test_no_extension_distinguishes_dropped_from_never_wired_up(tmp_path):
         "ok": False, "error": "extension_not_connected",
         "known_instances": [
             {"key": "work", "connected": False,
-             "last_seen": "2026-08-02T02:11:09Z", "last_seen_age_s": 6531.0}]})
+             "last_seen": "2026-08-02T02:11:09Z", "last_seen_age_s": 6531.0,
+             "last_unanswered_op": "screenshot"}]})
     try:
         r = _run_browser_routing(dropped, ["tabs"], tmp_path)
         assert r.returncode != 0
         err = r.stderr
         assert "HAS seen" in err and "work" in err, err
+        assert "last unanswered op: screenshot" in err, err
         assert "FULLY RESTART Brave" in err and "DO NOT RETRY" in err, err
         assert "has EVER connected" not in err, err
     finally:

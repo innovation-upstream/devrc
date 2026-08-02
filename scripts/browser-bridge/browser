@@ -494,9 +494,16 @@ gone = [i for i in known if not i.get("connected")]
 def dropped(i):
     seen = i.get("last_seen") or "?"
     age = i.get("last_seen_age_s")
-    return "%s (last seen %s%s)" % (
+    # `last_unanswered_op` is NOT decoration. server.py records it as "the single
+    # fact that turns the next silent drop from inference into evidence": it names
+    # the command the instance was handed and never answered, which is what tells
+    # you whether the profile died mid-op or went quiet while idle. render_missing
+    # has always printed it; the rewritten advice must not drop it.
+    op = i.get("last_unanswered_op")
+    return "%s (last seen %s%s%s)" % (
         i.get("key", "?"), seen,
-        ", %ss ago" % age if age is not None else "")
+        ", %ss ago" % age if age is not None else "",
+        ", last unanswered op: %s" % op if op else "")
 
 if mode == "unknown_instance" and match is not None and not match.get("connected"):
     w("instance %r is KNOWN but NOT CONNECTED — the label is correct; that Brave" % key)
@@ -513,6 +520,14 @@ elif mode == "unknown_instance":
         w("  Keys this server HAS seen: " + ", ".join(
             "%s%s" % (i.get("key", "?"), "" if i.get("connected") else " [disconnected]")
             for i in known))
+    # The wrong-label branch ALSO carries the drop evidence render_missing used to
+    # print here. A mistyped label and a profile that died are frequently the same
+    # incident (you mistype `wrk` AND `work` is also gone), and withholding the
+    # last-seen/last-op lines on this branch would make the second half invisible.
+    # NOTE: no apostrophes in this block — it lives inside python3 -c SINGLE quotes,
+    # so one would terminate the shell string (it did, once).
+    for i in gone:
+        w("  " + dropped(i))
     w("  FIX: pass one of the connected keys listed above, or set this profile\x27s")
     w("       routing key in the extension options.")
 else:  # no_extension
@@ -674,6 +689,30 @@ json.dump(d, sys.stdout)
 ' "$1"
 }
 
+# _reject_frame_with_wake SUB — refuse `--frame X <nav|open> --wake` at PARSE time.
+#
+# A NEW half-state this feature created, and the reason it must be caught HERE
+# rather than left to the extension: `--frame` is a GLOBAL flag that cmd_op splices
+# into EVERY op. `nav`/`open` ignore it, but the standalone `wake` op does not —
+# the extension's assertWakeNotFramed refuses it ("un-throttling is tab-level, not
+# per-frame"). So the composed form lands the navigation and then fails the wake:
+# a half-applied command. Before `--wake` existed on nav/open, `--frame X nav
+# --wake <url>` was a hard parse error ("nav takes no flags"), so the path did not
+# exist at all — this feature is what opened it.
+#
+# ONE RULE, ONE PLACE: both callers use this, so the predicate cannot drift.
+# Scoped to nav/open deliberately — `text`/`html`/`js --wake --frame` also refuse,
+# but they refuse in the EXTENSION with a precise message and, being pure reads,
+# leave nothing half-applied. There is no half-state there to prevent.
+_reject_frame_with_wake() {
+  [ -n "$FRAME" ] || return 0
+  echo "browser: --frame and --wake cannot be combined on '$1'." >&2
+  echo "browser:   Un-throttling is TAB-level, not per-frame, so the wake half would be" >&2
+  echo "browser:   refused by the extension AFTER the $1 had already happened." >&2
+  echo "browser:   Do this instead:  browser $1 <url> --wake   then   browser --frame $FRAME <read>" >&2
+  die "refused before anything was sent (nothing has been navigated or opened)"
+}
+
 # _wake_after PRIMARY_JSON — the `nav`/`open` half of `--wake`.
 #
 # WHY THIS IS A CLIENT-SIDE COMPOSE AND NOT A `"wake":true` WIRE FIELD: the
@@ -694,8 +733,43 @@ json.dump(d, sys.stdout)
 _wake_after() {
   local primary="$1" wextra="" wresp
   if [ -n "$WAKE_WAIT" ]; then wextra="\"waitMs\":${WAKE_WAIT}"; fi
-  # `|| exit 1` — cmd_op's `die` would otherwise exit only this substitution.
-  wresp="$(cmd_op wake "$wextra")" || exit 1
+  # 🔴 THE PRIMARY OP ALREADY HAPPENED. It is not undoable and it is not in doubt:
+  # the tab HAS navigated. So a FAILING wake must never swallow it.
+  #
+  # The first cut used `|| exit 1` here, which exited with EMPTY stdout — measured
+  # on 429, 504 and an op-level `unknown_op`, all rc 1 with nothing on stdout. That
+  # makes `T=$(browser nav --wake "$url")` yield an empty T for a tab that really
+  # did navigate, i.e. it loses the tabId of a real tab. Worse, only the op-level
+  # branch even mentioned `wake`, so the operator could not tell WHICH half failed.
+  #
+  # Now: capture the wake's status, always emit the primary JSON, attach the wake
+  # outcome under result.data.wake (ok:false + the error), and exit 3 — a DISTINCT
+  # code meaning "the primary op succeeded, only the --wake follow-up failed", so a
+  # caller can branch on it instead of guessing. cmd_op's own stderr diagnostics
+  # (429/504/op-level) are untouched and still printed above ours.
+  local wresp wrc
+  wresp="$(cmd_op wake "$wextra")"; wrc=$?
+  if [ "$wrc" -ne 0 ]; then
+    echo "browser: the '${WAKE_PRIMARY_OP:-primary}' op SUCCEEDED — only the --wake follow-up failed (see above)." >&2
+    echo "browser:   The tab HAS ${WAKE_PRIMARY_VERB:-been acted on}; its JSON is on stdout with result.data.wake.ok=false." >&2
+    echo "browser:   The page may still be throttled/unrendered: re-run 'browser wake' when ready." >&2
+    echo "browser:   Exit code 3 = primary ok, wake failed (rc 1 would mean the whole command failed)." >&2
+    printf '%s' "$primary" | python3 -c '
+import json, sys
+raw = sys.stdin.read()
+try:
+    d = json.loads(raw)
+    res = d["result"]
+    data = res.get("data")
+    if not isinstance(data, dict):
+        data = {}; res["data"] = data
+    data["wake"] = {"ok": False, "error": sys.argv[1]}
+    json.dump(d, sys.stdout)
+except Exception:
+    sys.stdout.write(raw)
+' "wake_failed_after_${WAKE_PRIMARY_OP:-primary}"
+    return 3
+  fi
   printf '%s\v%s' "$primary" "$wresp" | python3 -c '
 import json, sys
 primary, _, wake = sys.stdin.read().partition("\v")
@@ -971,8 +1045,9 @@ case "$sub" in
     extra=""
     if [ "$POS_SEEN" -eq 1 ]; then extra="\"url\":$(json_str "$POS")"; fi
     if [ -n "$WAKE" ]; then
+      _reject_frame_with_wake open
       resp="$(cmd_op open "$extra")" || exit 1
-      _wake_after "$resp" | pretty
+      WAKE_PRIMARY_OP=open WAKE_PRIMARY_VERB="been opened" _wake_after "$resp" | pretty
     else
       cmd_op open "$extra" | pretty
     fi
@@ -1298,8 +1373,11 @@ sys.stdout.write(json.dumps(fields)[1:-1])
     [ "$POS_SEEN" -eq 1 ] || die "usage: browser nav <url> [--wake[=MS]]"
     url="$(json_str "$POS")"
     if [ -n "$WAKE" ]; then
+      _reject_frame_with_wake nav
       resp="$(cmd_op nav "\"url\":${url}")" || exit 1
-      _wake_after "$resp" | pretty
+      # pipefail (set at the top) carries _wake_after's rc 3 through `| pretty`,
+      # and this is the last command of the arm, so it becomes the script's status.
+      WAKE_PRIMARY_OP=nav WAKE_PRIMARY_VERB=navigated _wake_after "$resp" | pretty
     else
       cmd_op nav "\"url\":${url}" | pretty
     fi

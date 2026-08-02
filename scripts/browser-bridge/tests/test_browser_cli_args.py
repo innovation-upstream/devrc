@@ -130,6 +130,78 @@ def bridge(tmp_path):
         srv.server_close()
 
 
+@pytest.fixture
+def wake_fails(tmp_path):
+    """A stub bridge where the PRIMARY op succeeds and the `wake` op FAILS.
+
+    `responder(op)` decides the wake failure mode per test: an op-level
+    `ok:false` envelope, or a raw HTTP status (429 / 504). Everything else gets a
+    normal success envelope carrying a tabId, so the test can prove the primary
+    result survived.
+    """
+    mode = {"wake": ("op_error", "wake_with_frame_unsupported: un-throttling is "
+                                 "tab-level, not per-frame")}
+
+    class _H(BaseHTTPRequestHandler):
+        bodies: list = []
+
+        def _reply(self, code, payload):
+            raw = json.dumps(payload).encode()
+            self.send_response(code)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(raw)))
+            self.end_headers()
+            self.wfile.write(raw)
+
+        def do_POST(self):
+            n = int(self.headers.get("Content-Length") or 0)
+            body = json.loads(self.rfile.read(n).decode())
+            self.bodies.append(body)
+            op = body.get("op")
+            if op == "wake":
+                kind, detail = mode["wake"]
+                if kind == "op_error":
+                    self._reply(200, {"ok": True, "result": {
+                        "id": "w", "ok": False, "error": detail}})
+                    return
+                self._reply(int(kind), {"ok": False, "error": detail})
+                return
+            self._reply(200, {"ok": True, "result": {
+                "id": "c", "ok": True,
+                "data": {"tabId": 4242, "url": "https://a.test"}}})
+
+        def log_message(self, *a):
+            pass
+
+    _H.bodies = []
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), _H)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    tokfile = tmp_path / "token"
+    tokfile.write_text("wake-fail-token\n")
+    env = dict(os.environ)
+    env.update({"BROWSER_BRIDGE_HOST": "127.0.0.1",
+                "BROWSER_BRIDGE_PORT": str(srv.server_address[1]),
+                "BROWSER_BRIDGE_TOKEN_FILE": str(tokfile),
+                "CLAUDE_CODE_SESSION_ID": "pytest-wake-fail",
+                "HOME": str(tmp_path)})
+
+    class _B:
+        bodies = _H.bodies
+
+        @staticmethod
+        def set_wake_failure(kind, detail):
+            mode["wake"] = (kind, detail)
+
+        @staticmethod
+        def run(*args):
+            return subprocess.run(["bash", str(CLI), *args], env=env,
+                                  capture_output=True, text=True, timeout=60)
+    try:
+        yield _B
+    finally:
+        srv.shutdown(); srv.server_close()
+
+
 def _body(bridge, *args):
     """Run the CLI, assert it succeeded, return the single recorded /cmd body."""
     before = len(bridge.bodies)
@@ -410,6 +482,89 @@ def test_nav_and_open_still_reject_an_unknown_flag(bridge, sub):
     assert len(bridge.bodies) == before
 
 
+@pytest.mark.parametrize("sub", ["nav", "open"])
+@pytest.mark.parametrize("kind,detail", [
+    ("op_error", "wake_with_frame_unsupported: tab-level, not per-frame"),
+    ("429", "rate_limited"),
+    ("504", "timeout"),
+])
+def test_a_failing_wake_never_swallows_the_primary_result(wake_fails, sub,
+                                                          kind, detail):
+    """REGRESSION (adversarial audit of #278). The primary op ALREADY HAPPENED —
+    the tab really did navigate — so a failing `--wake` must not discard it.
+
+    The first cut used `|| exit 1`, which exited rc 1 with EMPTY stdout on all
+    three failure modes below. `T=$(browser nav --wake "$url")` then yielded an
+    empty T for a tab that exists, and only the op-level branch even mentioned
+    `wake`, so you could not tell WHICH half failed.
+
+    Pinned: the primary JSON survives with its tabId, the wake failure is attached
+    where a successful wake would have been reported, stderr says the primary
+    SUCCEEDED, and the exit code is the distinct 3 rather than the generic 1.
+    """
+    wake_fails.set_wake_failure(kind, detail)
+    r = wake_fails.run(sub, "https://a.test", "--wake")
+
+    out = json.loads(r.stdout)
+    assert out["result"]["data"]["tabId"] == 4242, (
+        "the primary result was swallowed — this is the whole bug")
+    assert out["result"]["data"]["wake"]["ok"] is False
+    assert out["result"]["ok"] is True, "the PRIMARY op did not fail"
+
+    assert "SUCCEEDED" in r.stderr and sub in r.stderr
+    assert "only the --wake follow-up failed" in r.stderr
+    assert r.returncode == 3, (
+        f"expected the distinct 'primary ok, wake failed' code 3, got "
+        f"{r.returncode}")
+
+    # Both ops really were attempted, in order.
+    assert [b["op"] for b in wake_fails.bodies] == [sub, "wake"]
+
+
+@pytest.mark.parametrize("sub", ["nav", "open"])
+def test_a_SUCCESSFUL_wake_still_exits_zero(wake_fails, sub, bridge):
+    """NEGATIVE CONTROL for the exit code above: without it, `return 3` could be
+    unconditional and every test above would still pass."""
+    r = bridge.run(sub, "https://a.test", "--wake")
+    assert r.returncode == 0, r.stderr
+    assert "SUCCEEDED" not in r.stderr
+    assert "wake" in json.loads(r.stdout)["result"]["data"]
+
+
+@pytest.mark.parametrize("sub", ["nav", "open"])
+def test_frame_plus_wake_is_refused_before_anything_reaches_the_wire(bridge, sub):
+    """A half-state this feature CREATED. `--frame` is a global flag that cmd_op
+    splices into every op; `nav`/`open` ignore it, but the standalone `wake` op is
+    refused by the extension's assertWakeNotFramed. So the composed form would
+    navigate and THEN fail the wake — half applied.
+
+    Before `--wake` existed on nav/open this was a hard parse error ("nav takes no
+    flags"), so the path did not exist; the feature is what opened it. Refuse it at
+    PARSE time, and prove NOTHING was sent — that is the difference between a
+    rejection and a half-applied command.
+    """
+    before = len(bridge.bodies)
+    cp = bridge.run("--frame", "child.test", sub, "https://a.test", "--wake")
+    assert cp.returncode != 0
+    assert "--frame and --wake cannot be combined" in cp.stderr
+    assert "nothing has been navigated or opened" in cp.stderr
+    assert len(bridge.bodies) == before, (
+        "a refusal must not put the primary op on the wire")
+
+
+@pytest.mark.parametrize("sub", ["nav", "open"])
+def test_frame_WITHOUT_wake_and_wake_WITHOUT_frame_both_still_work(bridge, sub):
+    """NEGATIVE CONTROL for the refusal: it must fire on the CONJUNCTION only.
+    A blanket "reject --frame on nav" or "reject --wake when FRAME is set anywhere"
+    would pass the test above while breaking two legitimate forms."""
+    before = len(bridge.bodies)
+    assert bridge.run("--frame", "child.test", sub, "https://a.test").returncode == 0
+    assert bridge.run(sub, "https://a.test", "--wake").returncode == 0
+    sent = bridge.bodies[before:]
+    assert [b["op"] for b in sent] == [sub, sub, "wake"]
+    assert sent[0]["frame"] == "child.test"      # --frame alone still threads
+
+
 def test_open_with_no_url_still_means_about_blank(bridge):
     """INVARIANT GUARD (green pre-change). `open` alone must keep sending a bare
     `{"op":"open"}` — POS_SEEN, not a non-empty test, is what distinguishes it from
@@ -463,6 +618,22 @@ def test_help_prints_the_HEADER_block_only_not_the_whole_files_comments(tmp_path
     # And it genuinely stops at the code: the header ends right before this line.
     header = src.split("\nset -uo pipefail", 1)[0]
     assert len(cp.stdout) < len(header), "help is larger than the header block"
+
+    # 🔴 PIN THE LAST LINE — an upper bound plus landmarks is NOT enough. `awk`
+    # exits at the first non-`#` line, so a blank line inserted anywhere in the
+    # final stretch of the header TRUNCATES --help from that point on, and every
+    # assertion above still passes (the landmarks sit further up, and a shorter
+    # output only makes the length bound more true). Deriving the expectation from
+    # the source rather than hard-coding it keeps this honest as the header grows.
+    expected_last = [ln[2:] if ln.startswith("# ") else ln[1:]
+                     for ln in header.splitlines()[1:] if ln.startswith("#")][-1]
+    assert cp.stdout.splitlines()[-1] == expected_last, (
+        "--help was truncated before the end of the header block (a blank/non-`#` "
+        "line in the header stops the awk)")
+    # The whole header, line for line — the strongest form of the same claim.
+    expected_all = [ln[2:] if ln.startswith("# ") else ln[1:]
+                    for ln in header.splitlines()[1:]]
+    assert cp.stdout.splitlines() == expected_all
 
 
 def test_an_unknown_subcommand_is_reported_as_such_without_a_token(tmp_path):
