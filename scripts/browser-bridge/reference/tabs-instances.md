@@ -4,7 +4,8 @@
 `409 superseded`, `409 no_owned_tab`, or `owned_tab_gone` · two drivers appear to be
 fighting over one tab / you read a page another session navigated · you are designing a
 multi-session, multi-subagent or multi-profile workflow · you want to know whether
-`open` leaks tabs, or what `close` vs `release` do.
+`open` leaks tabs, or what `close` vs `release` do · a re-`open` came back on the
+WRONG url (it does not navigate — see below).
 
 Core: `~/workspace/devrc/scripts/browser-bridge/SKILL.md`.
 
@@ -24,9 +25,21 @@ Now each session can own its own tab:
   fall back to the active tab — the historical "read the tab the user has open"
   behaviour, which is a single read and inherently safe.
 - **`--tab <id>`** targets a specific tab explicitly (overrides owned/active).
-- **Double `open` is safe (idempotent).** Calling `browser open` again in a
-  session that already owns a **live** tab returns that SAME tabId (it does not
-  leak a second tab). If the owned tab was closed, `open` makes a fresh one.
+- **Double `open` is safe (idempotent) — but 🔴 a re-`open` DOES NOT NAVIGATE, it
+  DISCARDS your url.** Calling `browser open <url>` again in a session that already
+  owns a **live** tab returns that SAME tabId (it does not leak a second tab) — and
+  drops the url on the floor. In `extension/service_worker.js`'s `open`, a live
+  `reuseTabId` returns `chrome.tabs.get(reuseTabId)` as `{tabId, url, reused: true}`
+  and **never calls `chrome.tabs.update`**, so `cmd.url` is never applied and the
+  `url` handed back is the tab's **CURRENT** address, not the one you asked for.
+  Measured: a second `open` against a different port returned the same `tabId` with
+  the tab still on the previous port, and the echoed `url` agreed with the tab, not
+  the request. **So `open`'s returned url is an ECHO OF STATE, never an
+  acknowledgement of your navigation** — this is the failure mode behind "confirm
+  `location.href` before trusting a read". To move a tab you already own, use
+  **`nav <url>`**; **`reused: true` in the envelope is the tell.** If the owned tab
+  was closed, `open` falls through to `chrome.tabs.create({url: cmd.url …})` and
+  makes a fresh one — the url IS honoured on that path only.
 - **Self-heal.** If the user manually closes your owned tab, the next op fails
   with `owned_tab_gone` and the bridge drops your ownership — your NEXT command
   automatically falls back to the active tab. `browser close` always clears the

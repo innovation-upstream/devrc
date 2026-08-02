@@ -58,7 +58,7 @@ Result payloads land under `.result.data`.
 | `health` / `instances` | connected instances + count (`instances` as JSON: key, label, instanceId, active-tab url/title), each with an explicit `extension_stale` verdict (`true`/`false`; `null` = undecidable) |
 | `ping` | **which extension build+dir is loaded?** → `{pong,extensionVersion,id,ops}`; older build → `unknown_op`. The only deterministic answer after a ↻ reload |
 | `context` | **page metadata, no DOM read** — url/domain/path/query/title/tabId, tab-scoped. Cheapest read; ⚠ NOT a render check → `reference/read-envelopes.md` |
-| `open [url] [--wake[=MS]]` | open a NEW tab this session owns (default `about:blank`, **created in the BACKGROUND/hidden**), returns `tabId`. Idempotent. Use for multi-step work |
+| `open [url] [--wake[=MS]]` | open a NEW tab this session owns (default `about:blank`, **created in the BACKGROUND/hidden**), returns `tabId`. Idempotent — a re-`open` does NOT navigate (url DISCARDED). Use for multi-step work |
 | `close` / `release` | close this session's owned tab / drop ownership without closing it |
 | `tabs` | list open tabs (`.data.ownedTabId` flags yours) |
 | `nav <url> [--wake[=MS]]` | navigate the owned/active tab; it lands hidden, so `--wake` un-throttles in the SAME call |
@@ -115,10 +115,6 @@ work (a half-typed comment, a form) — `open` your own tab, or an obviously
 disposable one. If anything moved their focus, **restore it**
 (`i3-msg '[id="<prev-winid>"] focus'`).
 
-**Concurrent drivers (sibling subagents SHARE one session id) → each `open` and
-thread its own `--tab <id>`**; no high-rate `js` loop (the extension connection is
-serial → `429 rate_limited`). → `reference/tabs-instances.md`
-
 ## Reference files — load ONE only when its trigger fires
 
 **Read them at `~/workspace/devrc/scripts/browser-bridge/reference/<file>`** — that
@@ -130,7 +126,7 @@ exact path; only `SKILL.md` + the CLI are symlinked into `~/.claude/skills/brows
 | `reference/read-envelopes.md` | a read's exact envelope fields; `context` vs `text`; `text --annotated` + the `attrs` it returns; getting a SELECTOR out of a read |
 | `reference/errors.md` | any op returned an error string you don't recognise; `unknown_op`; a reload ↻ didn't take |
 | `reference/frames-cdp.md` | `frame_not_found` / `ambiguous_frame` / `oopif_*_cap` / `cdp_attach_refused`; a `--frame` read returned the TOP page; reading or driving inside a cross-origin iframe; the debugger banner |
-| `reference/tabs-instances.md` | `ambiguous_instance` / `unknown_instance` / `superseded` / `no_owned_tab` / `owned_tab_gone`; two drivers fighting over one tab; multi-profile or multi-subagent workflows |
+| `reference/tabs-instances.md` | `ambiguous_instance` / `unknown_instance` / `superseded` / `no_owned_tab` / `owned_tab_gone`; two drivers fighting over one tab; concurrent subagents SHARE a session id; a re-`open` ignored your url |
 | `reference/css-hit-test.md` | an element is present but invisible/unclickable/painted under something; a `z-index` change "does nothing"; a `data-testid` selector matches NOTHING |
 | `reference/emulation.md` | `emulate` BEFORE `nav` (else no touch API); presets, overrides, errors |
 | `reference/agent.md` | running `browser agent` — flags, guardrails, prereqs; it returned `blocked`; `op_not_allowed` / `nav_scheme_denied` |
