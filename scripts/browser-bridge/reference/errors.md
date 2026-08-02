@@ -117,6 +117,13 @@ readable) — `null` is NOT "fine". `browser whoami` carries the same three fiel
 change shipped without a manifest bump is invisible to it. That is why the
 version bump is part of the change contract, and why `ping` exists.
 
+🔴 **The concrete shape that gap takes: an op answers `unknown_op` while `health`
+reports a MATCHING `extension_version`.** That combination reads as a
+contradiction and sends people debugging the server or the CLI instead. It is not
+a contradiction — the *loaded* worker predates the op even though the manifest
+version agrees. Observed on `wake` (2026-08-01). **Believe the op, not the
+version**, and go straight to the reload/restart ladder below.
+
 **⚠ Reload ↻ is UNRELIABLE — a full Brave restart is the reliable fix.** The
 extension's long-poll keeps the OLD service worker permanently alive, so clicking
 ↻ in `brave://extensions` often does NOT swap in the new build. If a reload
