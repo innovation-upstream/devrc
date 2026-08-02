@@ -50,8 +50,9 @@ verifier — see perf-deep-dive). "Answer THIS specific question from THIS data"
 question *is* the boundary, and its answer is checkable. So before/within aiming, go to a real
 data corpus (metrics, events, cluster state, this ledger) and surface the most decision-relevant
 questions — **of the data** ("why did X happen?") and **of ourselves** ("what are we assuming
-that we haven't checked?"). Answer the bounded ones; rate which were *worth asking* (cheap
-up/down → decision-labeling → compound). Improving question quality compounds results faster
+that we haven't checked?"). Answer the bounded ones; rate which were *worth asking* — a cheap
+operator up/down, captured **by hand into STATE.md** (there is no automatic capture substrate;
+see step 6). Improving question quality compounds results faster
 than improving answers, and is the highest-leverage loop candidate (see STATE.md ledger) because
 it scales Zach's judgment — his actual bottleneck.
 
@@ -92,10 +93,18 @@ Rules that override naive scoring:
    measured signal (false-positive rate / acceptance rate / did-the-win-hold). One rigged demo
    is not validation.
 6. **Capture (compound)** — write the lesson/decision back to STATE.md; where possible encode
-   the correction as a rule/runbook so the mistake can't recur. The clawgate **decision-labeling
-   loop** (0.6.4: approve/deny → `decision_labels` + `clawgate_proposal_decisions_total`) is the
-   capture substrate — its acceptance-rate is the graduated-autonomy signal (≥90% over ≥N →
-   candidate to drop the checkpoint).
+   the correction as a rule/runbook so the mistake can't recur.
+   ⛔ **There is no decision-labeling substrate any more.** The old loop (0.6.4: approve/deny →
+   `decision_labels` + a per-proposal metric) was **REMOVED in clawgate 0.7.18–0.7.24; migration
+   0011 drops the table** — it captured per-turn self-approvals, not judgments. Do NOT go looking
+   for it. What exists today is **`clawgate_permission_decisions_total{outcome}`** (+
+   `clawgate_permission_decision_latency_seconds`) in Prometheus and the Faro **`permission.action`**
+   event in Loki — see the `/clawgate` skill's `reference/telemetry.md`.
+   ⚠ Those measure a **~4k/day, ~97% auto-approved firehose**, so treat them as a *usage* signal,
+   NOT as an acceptance-rate that can retire a checkpoint. The graduated-autonomy signal the old
+   loop was supposed to provide **does not currently exist** — per the validated lesson in STATE.md
+   it must be rebuilt on *checkpoint* decisions over *runbook-dispatched* work (scarce, attributable),
+   which only becomes possible once such runbooks run at volume.
 
 ---
 
