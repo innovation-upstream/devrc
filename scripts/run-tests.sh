@@ -11,9 +11,12 @@
 # (scripts/browser-bridge/tests/*.test.mjs) is NOT run here — it has its own
 # runner, scripts/run-node-tests.sh, gated by its own flake check
 # (`nix build .#checks.x86_64-linux.nodetests`). `nix flake check` runs both.
-# Note that `HERMETIC_DIRS` below includes scripts/browser-bridge/tests, but that
-# entry collects only the `test_*.py` files in that directory — pytest does not
-# see the `.mjs` files at all.
+# Note that `HERMETIC_TARGETS` below includes scripts/browser-bridge/tests, but
+# that entry collects only the `test_*.py` files in that directory — pytest does
+# not see the `.mjs` files at all.
+#
+# A target in that list may be a DIRECTORY or a single .py FILE; both are used
+# today. See GUARD 5.
 #
 # The caller is responsible for putting a pytest-capable `python` on PATH (the
 # flake check does this via the derivation's buildInputs; the pre-push hook wraps
@@ -22,7 +25,7 @@
 # per-directory sys.path (bare `import collector` / `import extract` etc. would
 # collide if collected together under one rootdir).
 #
-# 🔴 FOUR STRUCTURAL GUARDS — each exists because a green exit code lies here.
+# 🔴 FIVE STRUCTURAL GUARDS — each exists because a green exit code lies here.
 #    They mirror scripts/run-node-tests.sh (which asserts a test-count floor and
 #    parses node's TAP summary instead of reading an exit code). Read that file
 #    too before changing this one.
@@ -61,13 +64,25 @@
 #      FAILS — an unparseable summary means this runner cannot vouch for the run,
 #      which is not the same as a pass.
 #
+#   5. TARGET RESOLUTION (`GUARD 5`). Every entry in the target list must resolve
+#      to something pytest can actually run, checked UP FRONT and reported by
+#      name. This one is retrospective: #276 added a FILE to the list, the old
+#      `[ ! -d ]` check rejected it as a "missing directory", and the gate went
+#      RED on main with 913 tests never running — while reading like an
+#      environment fault. A typo, a moved suite, or an unexpanded glob all failed
+#      the same indistinguishable way. Now the list is validated as a whole
+#      before any suite runs, and a bad entry is named.
+#
 # Env overrides (defaults are the point — raise them, don't lower them casually):
 #   MIN_TESTS  minimum tests the whole run must REPORT  (default 2850; 2920 today)
 #
 # Usage:
-#   scripts/run-tests.sh [--set hermetic|all] [ROOT]
-#     --set hermetic  (default) — dirs safe to run offline in the nix sandbox.
-#     --set all                 — hermetic + any dirs deferred to the dev host.
+#   scripts/run-tests.sh [--set hermetic|all] [--check-targets] [ROOT]
+#     --set hermetic  (default) — targets safe to run offline in the nix sandbox.
+#     --set all                 — hermetic + any targets deferred to the dev host.
+#     --check-targets           — run GUARD 5 only (validate the target list and
+#                                 exit; no pytest, no tool precondition). Cheap
+#                                 enough to be exercised by a unit test.
 #   ROOT defaults to the git repo root (or the script's parent-parent).
 #
 # Exit non-zero if ANY selected suite fails OR any guard above trips. Prints a
@@ -77,10 +92,15 @@ set -uo pipefail
 
 SET="hermetic"
 ROOT=""
+CHECK_TARGETS_ONLY=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --set) SET="${2:-hermetic}"; shift; [ $# -gt 0 ] && shift ;;
     --set=*) SET="${1#*=}"; shift ;;
+    # Run GUARD 5 (target resolution) and nothing else. Milliseconds, no pytest,
+    # no tool precondition — so the guard can be exercised by a regression test
+    # without paying for the whole suite. Exit 0 = every target resolves.
+    --check-targets) CHECK_TARGETS_ONLY=1; shift ;;
     *) ROOT="$1"; shift ;;
   esac
 done
@@ -111,6 +131,12 @@ missing_tools=()
 for t in "${REQUIRED_TOOLS[@]}"; do
   command -v "$t" >/dev/null 2>&1 || missing_tools+=("$t")
 done
+# --check-targets runs no tests, so the tool precondition is not its business —
+# gating it here keeps the target-resolution guard cheap and independently
+# testable instead of coupling it to a full sandbox's PATH.
+if [ "$CHECK_TARGETS_ONLY" -eq 1 ]; then
+  missing_tools=()
+fi
 if [ "${#missing_tools[@]}" -gt 0 ]; then
   echo "run-tests: FATAL — required tool(s) missing from PATH: ${missing_tools[*]}" >&2
   echo "  The suites SKIP the tests that need these, so the run would go green while" >&2
@@ -124,7 +150,12 @@ fi
 # Verified to pass in the offline nix sandbox: every third-party call
 # (psycopg2 / requests / minio HTTP) is mocked, so no live DB or network is
 # reached. See flake.nix `checks.pytests` and the PR body for the audit.
-HERMETIC_DIRS=(
+#
+# 🔴 ENTRIES MAY BE DIRECTORIES **OR** SINGLE .py FILES. The list was called
+# HERMETIC_DIRS while already holding a file, and `run_pytest` rejected anything
+# that was not a directory — see GUARD 5 and the note in `run_pytest`. Renamed so
+# the name stops asserting something false about its own contents.
+HERMETIC_TARGETS=(
   scripts/tests
   scripts/collector/tests
   scripts/collector/keylog/tests
@@ -148,14 +179,71 @@ HERMETIC_DIRS=(
 )
 
 # --- DEV-HOST-ONLY set ---------------------------------------------------------
-# Dirs deferred to the pre-push tier (empty today — nothing here currently needs
-# a live DB/network at runtime; kept so a future DB-bound suite has a home that
-# does NOT block the hermetic flake gate).
-DEVHOST_DIRS=()
+# Targets deferred to the pre-push tier (empty today — nothing here currently
+# needs a live DB/network at runtime; kept so a future DB-bound suite has a home
+# that does NOT block the hermetic flake gate).
+DEVHOST_TARGETS=()
 
-DIRS=("${HERMETIC_DIRS[@]}")
+TARGETS=("${HERMETIC_TARGETS[@]}")
 if [ "$SET" = "all" ]; then
-  DIRS+=("${DEVHOST_DIRS[@]}")
+  TARGETS+=("${DEVHOST_TARGETS[@]}")
+fi
+
+# --- GUARD 5: every target must RESOLVE, up front ------------------------------
+# The #276 failure mode: an entry was added to the list, the runner silently
+# rejected it, and the gate failed for a reason that read like an environment
+# problem ("missing directory") rather than "this target is missing". A typo, a
+# moved suite, or a glob that bash never expanded would all land the same way,
+# and only at the point the suite was reached — after minutes of other output.
+#
+# So validate the WHOLE list before running anything, and name every bad entry
+# in one report rather than dying on the first. A directory is fine; a file must
+# look pytest-collectable, because `python -m pytest not_a_test.py` collects 0
+# and would trip the per-target floor with a confusing message instead of this
+# one.
+#
+# Globs: bash DOES perform pathname expansion inside an array literal (MEASURED
+# 2026-08-02 — injecting `scripts/tests/test_*.py` took the list from 15 to 32
+# entries), and the array is built AFTER the `cd "$ROOT"`, so a MATCHING glob
+# expands to real files and is harmless. The case that must fail is a glob that
+# matches NOTHING: with nullglob unset it survives as a literal `*`, which would
+# otherwise be reported as a missing path and read as a moved suite. Catching
+# the literal metacharacter says what actually happened.
+bad_targets=()
+for t in "${TARGETS[@]}"; do
+  case "$t" in
+    *'*'*|*'?'*|*'['*)
+      bad_targets+=("$t  — looks like an unexpanded GLOB; name each target literally")
+      continue ;;
+  esac
+  if [ ! -e "$t" ]; then
+    bad_targets+=("$t  — does not exist (typo, or the suite moved?)")
+  elif [ -d "$t" ]; then
+    :
+  elif [ -f "$t" ]; then
+    case "$(basename "$t")" in
+      test_*.py|*_test.py) : ;;
+      *) bad_targets+=("$t  — a FILE target must be pytest-collectable (test_*.py / *_test.py)") ;;
+    esac
+  else
+    bad_targets+=("$t  — neither a file nor a directory")
+  fi
+done
+if [ "${#bad_targets[@]}" -gt 0 ]; then
+  echo "run-tests: FATAL — ${#bad_targets[@]} unusable entr(ies) in the $SET target list:" >&2
+  for b in "${bad_targets[@]}"; do echo "    $b" >&2; done
+  echo "  Entries may be DIRECTORIES or single .py FILES. Fix the list (or the" >&2
+  echo "  path) — do NOT delete the entry to make this pass, which is how a" >&2
+  echo "  suite stops running while the gate goes green." >&2
+  exit 2
+fi
+
+if [ "$CHECK_TARGETS_ONLY" -eq 1 ]; then
+  echo "run-tests: all ${#TARGETS[@]} $SET target(s) resolve."
+  for t in "${TARGETS[@]}"; do
+    if [ -d "$t" ]; then echo "  dir   $t"; else echo "  file  $t"; fi
+  done
+  exit 0
 fi
 
 # A writable, self-consistent HOME so the claude-hooks nudge cache-write path
@@ -211,9 +299,26 @@ run_pytest() {
   local d="$1"
   echo "=== pytest $d ==="
 
-  if [ ! -d "$d" ]; then
-    echo "run-tests: FATAL — test directory does not exist: $d" >&2
-    RESULTS+=("FAIL  $d (missing directory)")
+  # A target is a DIRECTORY **or** a single FILE, and both are load-bearing:
+  # scripts/claude-hooks/tests/ mixes pytest-collectable modules with hand-rolled
+  # scripts, so only the collectable file is named (see HERMETIC_TARGETS).
+  #
+  # 🔴 This guard used to be `[ ! -d "$d" ]`. That rejected the file target added
+  # by #276 and reported it as "missing directory" — so the gate was RED on main
+  # while the 913 tests in test_guard_core.py never ran, and the failure read
+  # like an environment problem rather than "this target is missing". Existence
+  # is checked with -e; the file/dir distinction only changes the MESSAGE,
+  # because `python -m pytest` accepts either.
+  if [ ! -e "$d" ]; then
+    echo "run-tests: FATAL — test target does not exist: $d" >&2
+    RESULTS+=("FAIL  $d (missing target)")
+    fail=1
+    echo
+    return
+  fi
+  if [ ! -d "$d" ] && [ ! -f "$d" ]; then
+    echo "run-tests: FATAL — test target is neither a file nor a directory: $d" >&2
+    RESULTS+=("FAIL  $d (not a file or directory)")
     fail=1
     echo
     return
@@ -275,7 +380,7 @@ run_pytest() {
   echo
 }
 
-for d in "${DIRS[@]}"; do
+for d in "${TARGETS[@]}"; do
   run_pytest "$d"
 done
 
