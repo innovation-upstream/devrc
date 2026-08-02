@@ -13,6 +13,13 @@
     un-throttled        -> body text contains  WAKE-RIG-RENDERED
 
   window.__rig = {raf, timer, rendered, ms} is the machine-readable counter set.
+
+  The shell is DURABLE, not merely slow: a hidden tab gets no compositor frames, so `raf`
+  stops at 1 (the commit-time frame) and never advances -- there is no render deadline to
+  outlast. MEASURED 2026-08-01 (laptop .155 / personal / ext 0.7.0): polled every 5s from
+  t=0s to t=36s, raf constant at 1, rendered:false, while `timer` climbed 7 -> 43 (~1Hz),
+  proving the page was live and throttled rather than dead. Do NOT build a "longer" rig;
+  see README "Reproducing F2 on demand".
 -->
 <body>
 <div id="app">WAKE-RIG-SHELL (waiting for frames)</div>

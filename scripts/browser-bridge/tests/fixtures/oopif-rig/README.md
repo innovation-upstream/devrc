@@ -264,6 +264,78 @@ baseline rAF **0/s**, timers 8/s, `hidden`; after
 rendered *DOM* does. `Page.setWebLifecycleState({state:"active"})` alone changed nothing
 (it is only for a FROZEN page).
 
+### Reproducing F2 on demand — the auto-wake CURE, made falsifiable
+
+F2 (the one measured failure in the 2026-07-31 deepseek run) is *"the agent read an
+unrendered shell and reported the shell text as the answer"*. It later stopped
+reproducing, and the leading hypothesis was that **the rig renders before the agent's
+slower read lands**, i.e. that the fixture needed a longer render deadline.
+
+**That hypothesis is WRONG — measured 2026-08-01, laptop `.155` / `personal` /
+extension 0.7.0 / `fc92ccc`, deployed artifacts byte-identical to HEAD.** The rig has no
+render deadline to outlast: a hidden tab gets **no** compositor frames, so the counter
+never advances and the shell is durable indefinitely. Polled every 5 s from t=0 s to
+**t=36 s** with no wake:
+
+```
+raf: 1  (constant)      rendered: false      #app: "WAKE-RIG-SHELL (waiting for frames)"
+timer: 7 → 43           vis: "hidden"        (≈1 Hz — the throttled timer channel, still alive)
+```
+
+`raf` stops at **1** (the single commit-time frame) and never moves. **This fixture is
+already the ≥30 s unrendered shell**; nothing needs building. Run that poll first — it is
+the harness's own negative control, and it is what makes a green result mean anything.
+
+#### The 2×2 is really a 1×3 — auto-wake is behind the op allowlist
+
+`BROWSER_AGENT_ALLOWED_OPS` gates the tool-initiated wake exactly like a model-initiated
+one (`opencode/tools/browser_tool_impl.mjs:948-950` — deliberate, so a narrowed allowlist
+cannot be bypassed). So **"auto-wake ON + `wake` denied" is unreachable**: denying `wake`
+disables auto-wake too. Three cells, not four:
+
+| # | condition | answer | status | steps |
+|---|---|---|---|---|
+| A | default (auto-wake on, `wake` allowed) | `WAKE-RIG-RENDERED` | `ok` ✅ | 3 |
+| B | `BROWSER_AGENT_AUTO_WAKE=0`, `wake` allowed | `WAKE-RIG-RENDERED` | `ok` ✅ | 5 |
+| C | `BROWSER_AGENT_ALLOWED_OPS=nav,text,html,eval` (⇒ auto-wake refused too) | `WAKE-RIG-SHELL (waiting for frames)` | `partial` | 4 |
+
+```bash
+BB=~/workspace/devrc/scripts/browser-bridge/browser
+GOAL='Open http://127.0.0.1:8901/wake-rig.html and report the EXACT text content of the element with id "app". Quote it verbatim.'
+BROWSER_AGENT_KEEP_SCRATCH=1 $BB agent "$GOAL" --instance personal --allow-domains 127.0.0.1 --steps 8 --timeout 120
+cat /tmp/browser-agent.*/tool-audit.jsonl     # the discriminator — see below
+```
+
+⚠ `BROWSER_AGENT_AUDIT` is **forced** to `$SCRATCH/tool-audit.jsonl` by `browser-agent:413`
+and the scratch dir is `rm -rf`'d on every exit path — setting `BROWSER_AGENT_AUDIT`
+yourself does nothing. `BROWSER_AGENT_KEEP_SCRATCH=1` is the only way to read the trail.
+
+#### What the audit trail settles
+
+The answer text alone cannot tell you *why* a cell passed. The trail can. Cell **A**:
+
+```
+exec nav → exec text → auto_wake text "hidden" → auto_wake_exec wake
+  → auto_wake_exec text "re-read" → auto_wake_ok "woke:true settleMs:1500" → exec eval
+```
+
+The model's **first** `text` came back rendered; it never issued a wake itself. Cell **B**
+shows the contrast — `exec text` (shell), then the model's **own** `exec wake`, then a
+second `exec text`. So on this goal **the model self-cures when it can**, and auto-wake's
+measured contribution is the 2 steps and ~4 s it saves, not the correctness of the answer.
+
+**What IS now proven:** the read auto-wake intercepted would otherwise have returned a
+shell — established independently twice (the 36 s poll, and cell C returning that exact
+shell string). The mechanism was already live-verified; **the cure is now verified end to
+end against a rig that cannot render on its own.**
+
+**What is still NOT reproduced: the original F2 failure *shape*.** F2 was a confident
+wrong **`ok`**. Cell C is the same unrendered read and the model handled it *correctly* —
+`status:"partial"`, and evidence naming the cause (`op_not_allowed:wake`, "the hidden tab
+is throttled"). So auto-wake is demonstrated as *"turns a shell read into a rendered
+read"*, **not** as *"prevents a confident wrong answer"* — that failure mode did not recur
+here, and one goal at one model version is not a general claim about it.
+
 ### Main-world shadowing check (`wake-shadow.html`)
 
 Only the *un-throttle* is CDP — `text`/`html --wake` still perform the READ through

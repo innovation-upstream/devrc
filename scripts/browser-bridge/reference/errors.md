@@ -14,6 +14,12 @@ should strand you.
 
 - `503 extension_not_connected` → extension not loaded/paired, or Brave closed.
 - `504 timeout` → extension picked it up but didn't answer (tab unresponsive).
+  **Exception — `ping`.** It runs on a SHORT deadline
+  (`BROWSER_BRIDGE_PING_TIMEOUT`, default 10s) and the extension executes ONE
+  command at a time, so a ping queued behind another session's heavy `nav` /
+  `--fullpage screenshot` times out while the profile is perfectly healthy. Wait
+  for the other op and re-run. **A ping 504 is not evidence of a stale build and is
+  not a reason to restart Brave** — only a repeat failure on an IDLE profile is.
 - `429 rate_limited` / `429 queue_full` → the per-instance concurrency backstop is
   shedding load — you're dispatching too fast / too many at once. **Back off and
   retry** (the body carries a `retry_after` seconds hint). A normal handful of ops
@@ -25,7 +31,21 @@ should strand you.
 - `409 ambiguous_instance` → >1 instance connected and no `--instance` — pick one.
 - `409 no_owned_tab` → `close` with nothing to close — run `browser open` first (or `--tab`).
 - `409 superseded` → the instance was replaced by a newer connection; retry.
-- `404 unknown_instance` → the `--instance` key matches no connected instance.
+- `404 unknown_instance` → **read which of the two the CLI printed — they need
+  OPPOSITE actions.** The status is the same for both; the message is not.
+  - *"instance 'X' is **KNOWN but NOT CONNECTED**"* → your label is **right**; that
+    Brave profile dropped its long-poll. **FULLY RESTART Brave** (a
+    `brave://extensions` reload often no-ops). **Do NOT retry** — it fails
+    identically until the profile reconnects. Measured 2026-08-02: 48 of 52
+    `unknown_instance` failures used the CORRECT label, and `eval` was re-issued
+    **37 times** against it because the old single message read as "wrong label".
+  - *"instance 'X' is **UNKNOWN**"* → nothing has ever registered that key. Wrong
+    label (or that profile was never wired up); the CLI lists the keys it has seen.
+  Both print the dropped profiles' `last seen` + `last unanswered op` — that names
+  whether a profile died mid-op or went quiet while idle.
+- `503 extension_not_connected` → same split: *"HAS seen …"* means it was wired up
+  and dropped (restart Brave, stop retrying); *"has EVER connected"* means load the
+  extension and paste the token.
 - `400 unknown_op` / `missing_field:url|js` → bad command.
 - `op '<op>' failed in the browser: unknown_op` (op-level — the CLI knows the op
   but the **extension** doesn't) → the loaded extension is an older build. See the
@@ -113,6 +133,13 @@ readable) — `null` is NOT "fine". `browser whoami` carries the same three fiel
 **`extension_stale:false` is a VERSION match, not a code match.** An extension
 change shipped without a manifest bump is invisible to it. That is why the
 version bump is part of the change contract, and why `ping` exists.
+
+🔴 **The concrete shape that gap takes: an op answers `unknown_op` while `health`
+reports a MATCHING `extension_version`.** That combination reads as a
+contradiction and sends people debugging the server or the CLI instead. It is not
+a contradiction — the *loaded* worker predates the op even though the manifest
+version agrees. Observed on `wake` (2026-08-01). **Believe the op, not the
+version**, and go straight to the reload/restart ladder below.
 
 **⚠ Reload ↻ is UNRELIABLE — a full Brave restart is the reliable fix.** The
 extension's long-poll keeps the OLD service worker permanently alive, so clicking

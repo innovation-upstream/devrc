@@ -70,6 +70,21 @@ Config (env):
     BROWSER_BRIDGE_PORT          bind port (default 8788 — must NOT be 8787)
     BROWSER_BRIDGE_TOKEN_FILE    token path (default ~/.config/browser-bridge/token)
     BROWSER_BRIDGE_CMD_TIMEOUT   seconds a /cmd waits for a result (default 20)
+    BROWSER_BRIDGE_PING_TIMEOUT  seconds a `ping` /cmd waits when the target
+                                 instance is IDLE (default 2). `ping` is the
+                                 DIAGNOSTIC op — the thing you run FIRST to ask
+                                 "is the loaded extension current?" — so on an
+                                 idle instance it must answer "no" fast. When the
+                                 instance has work in flight the deadline is
+                                 DERIVED from that work instead, so ordinary
+                                 concurrency does not report a busy profile as
+                                 dead. NOT unconditional: the derived budget is
+                                 still capped at CMD_TIMEOUT, so more than
+                                 CMD_TIMEOUT of legitimate serial work (N>=2 busy
+                                 commands) can still time a ping out — raise
+                                 CMD_TIMEOUT if that is your workload. See
+                                 Registry._effective_timeout_locked.
+                                 Applies to `ping` ONLY.
     BROWSER_BRIDGE_POLL_TIMEOUT  seconds a /poll blocks before 204 (default 25)
     BROWSER_BRIDGE_RATE_PER_SEC  per-instance sustained /cmd dispatch rate
                                  (token-bucket refill, default 5; 0 → unlimited)
@@ -191,6 +206,81 @@ MAX_RESULT_BODY = 32 * 1024 * 1024  # a screenshot data URL can be a few MB.
 
 # A connection is considered "present" if a long-poll landed within this window.
 CONNECT_STALE_S = 40.0
+
+# The extension's own hard self-bound on ONE command's execution
+# (EXEC_OP_BUDGET_MS in extension/protocol.js). `execute()` never exceeds it and
+# never throws, so it is the yardstick for "could a healthy extension still
+# legitimately be working on this?". Mirrored here rather than imported because
+# the two live in different languages/processes; `test_exec_budget_matches_the_
+# extension` reads protocol.js and fails if they ever drift.
+EXEC_OP_BUDGET_S = 18.0
+
+# Slack added on top of the execution budget to cover the result POST and the
+# next poll turnaround (RESULT_BUDGET_MS is 10s but a healthy POST is ms).
+WEDGE_GRACE_S = 2.0
+
+# The extension's own bound on posting a result back (RESULT_BUDGET_MS in
+# extension/protocol.js). Mirrored for the same reason as EXEC_OP_BUDGET_S, and
+# pinned against protocol.js by test_result_budget_matches_the_extension.
+RESULT_BUDGET_S = 10.0
+
+# How long an `inflight` entry can still describe a command a healthy extension
+# might be working on. After EXEC + RESULT the extension has certainly either
+# answered or given up, so an entry older than this says nothing about current
+# business and is disregarded (and pruned).
+#
+# 🔴 THIS IS WHY AN ABANDONED COMMAND IS NOT SIMPLY DROPPED. The SUBMITTER giving
+# up (BridgeTimeout at cmd_timeout, default 20s) does NOT free the extension —
+# its serial loop keeps executing that command for up to EXEC(18) + RESULT(10) =
+# 28s, which is LONGER than cmd_timeout. Popping the entry at submitter-exit
+# therefore made the instance look IDLE while it was provably still busy, and the
+# next `ping` fast-failed against a healthy extension (measured; in that window it
+# was worse than both the old flat 20s and the interim flat 10s). The entry is kept
+# and expires on its own instead.
+INFLIGHT_STALE_S = EXEC_OP_BUDGET_S + RESULT_BUDGET_S
+
+# `ping`'s own /cmd deadline, in seconds. NOT a bare literal at the call site and
+# NOT sharing CMD_TIMEOUT: `ping` is the documented FIRST thing you run when you
+# suspect the loaded extension is stale, and a diagnostic that takes 20s to say
+# "no" is one an operator learns to skip. MEASURED 2026-08-02 over a 2-day window:
+# 34 pings, 13 failures (38.2% — the worst rate of any op), of which 6 timed out at
+# exactly 20,000ms; the 21 healthy ones averaged 3-4ms.
+#
+# 🔴 THIS IS THE IDLE DEADLINE ONLY. It is NOT a tuned value that has to dominate
+# every op's ceiling — the BUSY case is handled STRUCTURALLY, in submit()'s
+# `fast_timeout` gate, which is where the real invariant lives. Read that first.
+#
+# The distinction the gate draws:
+#   * instance has NO outstanding command  -> a ping that does not answer in 2s is
+#     genuine evidence of a wedged/dead service worker. Fail FAST. Healthy pings
+#     measured at 3-4ms, so 2s is ~500x headroom.
+#   * instance HAS outstanding work        -> the poll loop is serial, so the ping
+#     simply cannot be dequeued yet. Waiting is CORRECT; the deadline is derived
+#     from the work in flight, never from this constant.
+#
+# So this value never has to exceed ACTIVATE_WAIT_MAX_MS / CDP_OP_BUDGET_MS /
+# EXEC_OP_BUDGET_MS — a previous revision of this comment claimed it did, and was
+# wrong twice over (it named 8s as "the caller-requestable ceiling" while both
+# `screenshot --fullpage` at 15s and `wake --wait 6000` composed with an 8s CDP
+# attach exceed it). Deriving the deadline from observed in-flight work removes
+# the whole class instead of trying to out-bid it.
+#
+# Override with BROWSER_BRIDGE_PING_TIMEOUT (raises the IDLE deadline only).
+PING_TIMEOUT_DEFAULT = 2.0
+
+
+def _env_float(name: str, default: float) -> float:
+    """A float from the environment, falling back to `default` on absent OR
+    unparseable. A malformed knob must not stop the bridge from starting — a
+    typo'd BROWSER_BRIDGE_PING_TIMEOUT would otherwise take the whole service
+    down at import time with a ValueError."""
+    raw = os.environ.get(name)
+    if raw is None or raw == "":
+        return default
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return default
 
 # How long a routing key stays in `known_instances`/`missing` after it stops
 # polling. Without a forget path the registry remembers every key for the whole
@@ -685,6 +775,20 @@ def emit_cmd_event(op: str, key: str, outcome: str, duration_ms: int,
         pass
 
 
+def _emit_diag_event(op: str, t0: float) -> None:
+    """One metadata-only event for a read-only DIAGNOSTIC GET (/whoami, /health).
+
+    A thin, deliberately narrow wrapper over emit_cmd_event: op + outcome + latency
+    and NOTHING else. No key (these endpoints take no --instance) and NO domain —
+    they are global, describing every connected profile at once, so there is no
+    single active domain to attribute and emitting per-profile domains would widen
+    the privacy contract. Best-effort like every other emit: it cannot raise.
+    """
+    emit_cmd_event(op=op, key="", outcome="ok",
+                   duration_ms=int((time.monotonic() - t0) * 1000),
+                   domain="", exit_code=0)
+
+
 # --------------------------------------------------------------------------- #
 # Token
 # --------------------------------------------------------------------------- #
@@ -801,7 +905,7 @@ class Instance:
                  "active_polls", "last_poll", "active_tab", "superseded",
                  "pending", "rl_tokens", "rl_last", "extension_version",
                  "extension_id", "last_poll_wall", "lost_logged",
-                 "last_dispatch")
+                 "last_dispatch", "inflight")
 
     def __init__(self, key, instance_id, label, now, burst=0.0,
                  extension_version=None, extension_id=None):
@@ -841,7 +945,17 @@ class Instance:
         # The last command handed to this instance that has NOT produced a result:
         # {"id","op","at"} or None. This is the field that would have NAMED
         # `frames` as the wedging op on 2026-07-29 without any code-reading.
+        # ⚠ DIAGNOSTIC ONLY — do NOT do deadline math on it. It is overwritten by
+        # each new enqueue (so it names the NEWEST outstanding command, not the
+        # oldest) and its `at` is wall-clock `time.time()`, not the registry's
+        # injectable monotonic clock. `inflight` below is the field for timing.
         self.last_dispatch = None
+        # cid -> MONOTONIC enqueue reading, for every command handed to this
+        # instance that has not yet produced a result. Unlike `last_dispatch` this
+        # keeps EVERY outstanding command, so `min(...)` is the age of the oldest
+        # one — which is what tells a legitimately BUSY extension apart from a
+        # WEDGED one (see Registry.submit's `fast_timeout`).
+        self.inflight: dict[str, float] = {}
 
 
 class Registry:
@@ -1053,7 +1167,119 @@ class Registry:
                     inst.results[cid] = payload
                     self._cond.notify_all()
                     return True
+            # No live submitter — but this may be the ABANDONED command whose
+            # inflight entry we deliberately kept (see INFLIGHT_STALE_S). The reply
+            # proves the extension is free again, so release it NOW instead of
+            # waiting out the staleness window: that is the difference between the
+            # next ping fast-failing correctly and being told to wait for nothing.
+            for inst in candidates:
+                if inst.inflight.pop(cid, None) is not None:
+                    # It DID answer, so `last_dispatch` — whose contract is "the
+                    # command it never answered", surfaced by health/whoami — must
+                    # stop naming it. The normal path clears it on the same
+                    # condition; this branch is simply where the abandoned command
+                    # reaches the same state.
+                    if (inst.last_dispatch or {}).get("id") == cid:
+                        inst.last_dispatch = None
+                    log("result_after_abandon", id=cid, instance_id=instance_id)
+                    break
             return False
+
+    def _effective_timeout_locked(self, inst, timeout, fast_timeout):
+        """The deadline for a command that wants to FAIL FAST on a wedge without
+        false-negativing a merely BUSY extension. Returns `timeout` unchanged when
+        `fast_timeout` is None (every op except `ping`).
+
+        🔴 THIS IS THE REAL INVARIANT behind the ping deadline. The extension's
+        poll loop is strictly SERIAL (service_worker.js: `await execute()` ->
+        `await postResult()` -> next `pollOnce()`), so `ping` skips the per-tab
+        FIFO but still cannot be DEQUEUED until the work ahead of it finishes.
+        Timing out while that work is legitimately in progress reports a healthy
+        profile as dead — and the documented remedy for "dead" is a FULL Brave
+        restart of the operator's live session.
+
+        The signal is `inst.inflight`: every command handed to this instance that
+        has not produced a result, stamped on the registry's MONOTONIC clock.
+          * empty            -> nothing can be ahead of the ping. A ping that then
+                                fails to answer within `fast_timeout` IS the wedge.
+          * non-empty        -> allow the work in flight its own budget. Each
+                                command is self-bounded by EXEC_OP_BUDGET_S, and
+                                they drain serially, so N of them can legitimately
+                                take N * EXEC_OP_BUDGET_S; subtract how long the
+                                oldest has already been outstanding.
+
+        Entries older than INFLIGHT_STALE_S are DISREGARDED (and pruned): past that
+        point a healthy extension has certainly answered or given up, so the entry
+        no longer describes current business. This is also what bounds an abandoned
+        command's influence — see INFLIGHT_STALE_S for why abandoning does not drop
+        the entry outright.
+
+        CLAMPED ON BOTH SIDES, and both clamps are load-bearing:
+          * never above `timeout` (cmd_timeout) — so this can NEVER be slower than
+            the behaviour that predates the whole fast-ping change. `fast_timeout`
+            is clamped into that range FIRST: both it and cmd_timeout are
+            operator-settable (BROWSER_BRIDGE_PING_TIMEOUT / _CMD_TIMEOUT) and
+            nothing validates the relation, so a fast_timeout ABOVE cmd_timeout
+            would otherwise escape the ceiling through the lower clamp below
+            (measured: fast=60 / cmd=20 returned 60.0).
+          * never below the (clamped) `fast_timeout` — so a wedged instance whose
+            budget has gone negative still gets its full fast deadline rather than
+            an instant fail.
+
+        WHY NOT `inst.last_dispatch`, which looks like it carries the same fact:
+        it is overwritten by every new enqueue, so it names the NEWEST outstanding
+        command rather than the oldest — a fresh enqueue behind a wedged one makes
+        the wedge look young. Its `at` is also wall-clock `time.time()`, not this
+        clock, so it cannot be compared against a monotonic deadline (and an NTP
+        step would move it). It stays a DIAGNOSTIC field; `inflight` does timing.
+        """
+        if fast_timeout is None:
+            return timeout
+        # 🟢-D: clamp the operator-settable fast deadline into [.., timeout] BEFORE
+        # it is used, so the "never above cmd_timeout" claim holds unconditionally.
+        fast = min(fast_timeout, timeout)
+        now = self._clock()
+        self._prune_inflight_locked(inst, now)
+        if not inst.inflight:
+            return fast
+        age = now - min(inst.inflight.values())
+        budget = len(inst.inflight) * EXEC_OP_BUDGET_S + WEDGE_GRACE_S - age
+        return max(fast, min(timeout, budget))
+
+    @staticmethod
+    def _prune_inflight_locked(inst, now):
+        """Drop `inflight` entries that can no longer describe current business.
+
+        TWO conditions, and the second is not optional:
+
+        (a) older than INFLIGHT_STALE_S, AND
+        (b) NO live submitter is still blocked on it (`cid not in inst.waiters`).
+
+        🔴 WHY (b). INFLIGHT_STALE_S is measured from ENQUEUE, but a queued
+        command's EXEC_OP_BUDGET_S does not start until the SERIAL extension
+        dequeues it. So age alone says nothing about whether a healthy extension is
+        done — precisely when N >= 2, which is the case the `len(inst.inflight) *
+        EXEC_OP_BUDGET_S` term above exists to model. Measured with the injected
+        clock: 3 commands, cmd_timeout=60, age 29s -> all three pruned while their
+        submitters were still blocked, the instance read IDLE, and `ping` fast-
+        failed at 2s while the extension legitimately had ~25s of work left. That
+        is the exact workload the docstring at BROWSER_BRIDGE_CMD_TIMEOUT tells an
+        operator to raise cmd_timeout for, so the advice made it worse.
+
+        `waiters` is exactly "a submitter is still blocked on this cid": added at
+        enqueue, discarded on all three exits of the wait loop, and discarded again
+        in submit()'s finally so an unexpected raise cannot strand one.
+
+        THE MEMORY BOUND IS NOT WEAKENED, it is split by owner:
+          * live-submitter entries are bounded by that submitter's own deadline —
+            it unwinds through the finally, which pops the entry;
+          * abandoned entries have no one to bound them, which is what
+            INFLIGHT_STALE_S is for.
+        """
+        stale = [c for c, t in inst.inflight.items()
+                 if now - t > INFLIGHT_STALE_S and c not in inst.waiters]
+        for c in stale:
+            del inst.inflight[c]
 
     # --- concurrency backstop (per-instance rate limit + queue-depth cap) --- #
     def _admit_locked(self, inst: Instance):
@@ -1096,7 +1322,7 @@ class Registry:
 
     # --- skill side -------------------------------------------------------- #
     def submit(self, command: dict, timeout: float, target: str = None,
-               session_id=None, tab=None) -> dict:
+               session_id=None, tab=None, fast_timeout: float = None) -> dict:
         """Enqueue `command` (a dict without id) to the resolved target instance
         and block for its reply.
 
@@ -1114,10 +1340,20 @@ class Registry:
         BridgeSuperseded if the servicing instance is dropped mid-flight, or
         BridgeTimeout on no reply within `timeout` (the upper bound that keeps a
         FIFO-queued command from blocking forever).
+
+        `fast_timeout` (used only by `ping`) asks for a SHORTER deadline when the
+        target instance has nothing in flight, so a wedge is reported quickly
+        without false-negativing a busy one under ordinary concurrency (the derived
+        budget is still capped at `timeout`, so >`timeout` of legitimate serial work
+        can still time it out). See _effective_timeout_locked —
+        that is where the invariant lives.
         """
         op = command.get("op")
         with self._cond:
             inst = self._resolve_target_locked(target)
+            # BEFORE our own enqueue: the work already in flight is what decides
+            # whether a stalled reply means "wedged" or "not our turn yet".
+            timeout = self._effective_timeout_locked(inst, timeout, fast_timeout)
             tab_id, tab_key = self._effective_tab_locked(inst, op, session_id,
                                                          tab)
             # Concurrency backstop: admit (or 429) BEFORE joining the turnstile,
@@ -1142,6 +1378,13 @@ class Registry:
                                                       touch=False)
             deadline = self._clock() + timeout
             ticket = object()
+            # Declared BEFORE the try so the finally can always reference it: the
+            # FIFO wait can raise before a cid exists.
+            cid = None
+            # Set when THIS submitter gives up on a command the extension has
+            # already taken. See INFLIGHT_STALE_S: abandoning does not free the
+            # extension, so the inflight entry must OUTLIVE us and expire on age.
+            abandoned_running = False
             if tab_key is not None:
                 self._tab_queues.setdefault(tab_key, deque()).append(ticket)
             try:
@@ -1174,6 +1417,13 @@ class Registry:
                     cmd["reuseTabId"] = reuse_tab_id
                 inst.outbox.append(cmd)
                 inst.waiters.add(cid)
+                # Outstanding-work clock for _effective_timeout_locked. Released
+                # in the finally below, paired exactly like `pending`. Prune here
+                # too so entries left behind by abandoned commands cannot pile up
+                # on an instance that never receives another ping.
+                _now = self._clock()
+                self._prune_inflight_locked(inst, _now)
+                inst.inflight[cid] = _now
                 # Remember what we handed this instance. Cleared only when a
                 # RESULT comes back, so if the instance goes silent this field
                 # still names the command it never answered — the single fact
@@ -1187,6 +1437,17 @@ class Registry:
                     remaining = deadline - self._clock()
                     if remaining <= 0:
                         inst.waiters.discard(cid)
+                        # Was it still QUEUED, or already taken by the extension?
+                        # Queued  -> it will never run; dropping it frees the slot
+                        #            honestly and the instance really is that much
+                        #            less busy.
+                        # Taken   -> the extension is executing it RIGHT NOW and
+                        #            will be for up to EXEC+RESULT. We are leaving,
+                        #            but the work is not: keep the inflight entry so
+                        #            the instance does not read as idle, and let it
+                        #            expire on age (INFLIGHT_STALE_S).
+                        abandoned_running = not any(c.get("id") == cid
+                                                    for c in inst.outbox)
                         inst.outbox = deque(c for c in inst.outbox
                                             if c.get("id") != cid)
                         raise BridgeTimeout()
@@ -1204,6 +1465,25 @@ class Registry:
                 # pending bump) on EVERY exit — normal return, timeout, or
                 # supersede — so the depth cap can never leak a phantom slot.
                 inst.pending -= 1
+                # Same structural pairing for the outstanding-work clock — EXCEPT
+                # when we abandoned a command the extension had already taken. Then
+                # the work outlives this submitter and the entry must too, or the
+                # instance reads as idle while it is provably still executing.
+                # A stranded entry would be worse than a stranded pending slot (the
+                # instance would look busy forever and `ping` could never fast-fail
+                # again), which is why the surviving entry is bounded by age rather
+                # than left to a result that may never come.
+                if cid is not None and not abandoned_running:
+                    inst.inflight.pop(cid, None)
+                # `waiters` is discarded on all three exits of the wait loop above;
+                # this is the SAFETY NET that makes it structurally leak-proof, like
+                # `pending`. It matters because the staleness prune now reads
+                # `waiters` as "is a submitter still blocked on this?" — an entry
+                # stranded by an unexpected raise inside the loop would otherwise be
+                # exempt from pruning forever. discard() is idempotent, so this is a
+                # no-op on every normal path.
+                if cid is not None:
+                    inst.waiters.discard(cid)
                 # (3) Leave the turnstile and wake the next in line.
                 if tab_key is not None:
                     q = self._tab_queues.get(tab_key)
@@ -1635,7 +1915,15 @@ def validate_command(body):
 # HTTP handler
 # --------------------------------------------------------------------------- #
 def make_handler(registry: Registry, token: str, cmd_timeout: float,
-                 poll_timeout: float):
+                 poll_timeout: float, ping_timeout: float = None):
+    # `ping` gets its OWN, much shorter deadline — see PING_TIMEOUT_DEFAULT and the
+    # BROWSER_BRIDGE_PING_TIMEOUT entry in the module docstring. Resolved here (not
+    # at the call site) so build_server callers that predate the parameter keep
+    # working and still get the fast ping.
+    if ping_timeout is None:
+        ping_timeout = _env_float("BROWSER_BRIDGE_PING_TIMEOUT",
+                                  PING_TIMEOUT_DEFAULT)
+
     class Handler(BaseHTTPRequestHandler):
         server_version = "browser-bridge/2"
 
@@ -1798,6 +2086,7 @@ def make_handler(registry: Registry, token: str, cmd_timeout: float,
         def do_GET(self):
             if not self._guard():
                 return
+            t0 = time.monotonic()
             path = urlsplit(self.path).path
             if path == "/health":
                 # extension_version_current = the manifest version the SERVER
@@ -1824,6 +2113,20 @@ def make_handler(registry: Registry, token: str, cmd_timeout: float,
                                  "instances": insts,
                                  "known_instances": known,
                                  "missing": missing})
+                # The ORIENTATION ops emit too — measured 2026-08-02, `whoami`
+                # (38 calls) and `health` (15) appeared NOWHERE in activity.events
+                # despite being the documented first thing you run, so the only
+                # structured source could not see 53 invocations.
+                #
+                # Emitted AFTER the response, exactly like the /cmd path: same
+                # best-effort + metadata-only contract (see emit_cmd_event and the
+                # PRIVACY CONTRACT above). Deliberately NO domain: /health and
+                # /whoami are GLOBAL — they describe every connected profile at
+                # once, so there is no single active domain to attribute, and
+                # emitting one per profile would widen the contract to "which sites
+                # are open in each of your browsers". `key` is likewise empty:
+                # these endpoints take no --instance.
+                _emit_diag_event("health", t0)
                 return
             if path == "/instances":
                 insts = registry.snapshot()
@@ -1832,6 +2135,7 @@ def make_handler(registry: Registry, token: str, cmd_timeout: float,
                 return
             if path == "/whoami":
                 self._send(200, self._whoami())
+                _emit_diag_event("whoami", t0)   # see the /health emit above
                 return
             if path == "/poll":
                 (instance_id, label, active, ext_version,
@@ -1921,9 +2225,15 @@ def make_handler(registry: Registry, token: str, cmd_timeout: float,
                     domain="", exit_code=0)
                 return
             try:
-                result = registry.submit(body, timeout=cmd_timeout,
-                                         target=target, session_id=session_id,
-                                         tab=tab)
+                # `ping` alone asks for the fast-fail-when-idle deadline. Named
+                # HERE so no other op can pick it up by accident; the decision of
+                # what it actually resolves to is _effective_timeout_locked's,
+                # because only that runs under the lock that can read in-flight
+                # work. Every other op passes fast_timeout=None and is untouched.
+                result = registry.submit(
+                    body, timeout=cmd_timeout, target=target,
+                    session_id=session_id, tab=tab,
+                    fast_timeout=(ping_timeout if op == "ping" else None))
             except RateLimited as e:
                 # Per-instance concurrency backstop tripped. Distinct structured
                 # log + a telemetry event carrying a COARSE session hash so the
@@ -2046,8 +2356,10 @@ def make_handler(registry: Registry, token: str, cmd_timeout: float,
 # Entrypoint
 # --------------------------------------------------------------------------- #
 def build_server(host: str, port: int, registry: Registry, token: str,
-                 cmd_timeout: float, poll_timeout: float) -> ThreadingHTTPServer:
-    handler = make_handler(registry, token, cmd_timeout, poll_timeout)
+                 cmd_timeout: float, poll_timeout: float,
+                 ping_timeout: float = None) -> ThreadingHTTPServer:
+    handler = make_handler(registry, token, cmd_timeout, poll_timeout,
+                           ping_timeout)
     server = ThreadingHTTPServer((host, port), handler)
     server.daemon_threads = True  # let shutdown not hang on a blocked long-poll
     return server
@@ -2094,13 +2406,17 @@ def main(argv=None) -> int:
     port = int(os.environ.get("BROWSER_BRIDGE_PORT", "8788"))
     cmd_timeout = float(os.environ.get("BROWSER_BRIDGE_CMD_TIMEOUT", "20"))
     poll_timeout = float(os.environ.get("BROWSER_BRIDGE_POLL_TIMEOUT", "25"))
+    ping_timeout = _env_float("BROWSER_BRIDGE_PING_TIMEOUT",
+                              PING_TIMEOUT_DEFAULT)
     token_file = default_token_file()
     token = load_or_create_token(token_file)
 
     registry = Registry()
-    server = build_server(host, port, registry, token, cmd_timeout, poll_timeout)
+    server = build_server(host, port, registry, token, cmd_timeout,
+                          poll_timeout, ping_timeout)
     log("listening", host=host, port=port, token_file=str(token_file),
-        cmd_timeout=cmd_timeout, poll_timeout=poll_timeout)
+        cmd_timeout=cmd_timeout, poll_timeout=poll_timeout,
+        ping_timeout=ping_timeout)
     _warn_poll_timeout_vs_extension_budget(poll_timeout)
     try:
         server.serve_forever()
