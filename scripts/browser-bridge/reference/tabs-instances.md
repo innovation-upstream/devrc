@@ -82,6 +82,21 @@ Now each session can own its own tab:
   (`browser --tab <id> nav …`, `--tab <id> html`, …). An explicit `--tab`
   overrides owned-tab routing entirely, so indistinguishable drivers never
   collide. (Each `close`s its own `--tab <id>` at the end.)
+- **🔴 `open` can hand you a SIBLING'S TAB — check the `reused` field.** It does
+  not always create a fresh tab: it can return **`reused: true`** carrying the
+  other agent's `tabId` (and its URL, on a different port) instead. Observed for
+  real, 2026-07-31. **The returned `tabId` is not automatically yours.** This is
+  the failure mode the explicit-`--tab` rule above exists to prevent — but if you
+  took the `tabId` from `open`'s response without reading `reused`, you inherited
+  the collision rather than avoiding it.
+- **🔴 Verify the page before you trust a screenshot.** After `open`/`wake`, and
+  before reading anything, confirm identity with one cheap call:
+  `browser --instance work --tab "$TAB" js '(function(){return location.href})()'`.
+  Cost of skipping it: an agent screenshotted a **different application
+  instance** — a sibling's server on another port — and reported findings about
+  the wrong build. One call turns "I screenshotted something" into "I
+  screenshotted the thing under test". Same class as the reuse trap above: **an
+  op that SUCCEEDS is not an op that did what you meant.**
 - **Contention → FIFO, not failure.** If two sessions DO target the same tab
   (both active, or one `--tab`s another's tab), the commands queue in arrival
   order (bounded by `cmd_timeout`) rather than fail.
