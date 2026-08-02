@@ -1174,6 +1174,13 @@ class Registry:
             # next ping fast-failing correctly and being told to wait for nothing.
             for inst in candidates:
                 if inst.inflight.pop(cid, None) is not None:
+                    # It DID answer, so `last_dispatch` — whose contract is "the
+                    # command it never answered", surfaced by health/whoami — must
+                    # stop naming it. The normal path clears it on the same
+                    # condition; this branch is simply where the abandoned command
+                    # reaches the same state.
+                    if (inst.last_dispatch or {}).get("id") == cid:
+                        inst.last_dispatch = None
                     log("result_after_abandon", id=cid, instance_id=instance_id)
                     break
             return False
@@ -1241,12 +1248,36 @@ class Registry:
 
     @staticmethod
     def _prune_inflight_locked(inst, now):
-        """Drop `inflight` entries too old to describe current business.
+        """Drop `inflight` entries that can no longer describe current business.
 
-        Bounded by INFLIGHT_STALE_S. Also the memory bound for entries left behind
-        by an abandoned command whose result never arrives.
+        TWO conditions, and the second is not optional:
+
+        (a) older than INFLIGHT_STALE_S, AND
+        (b) NO live submitter is still blocked on it (`cid not in inst.waiters`).
+
+        🔴 WHY (b). INFLIGHT_STALE_S is measured from ENQUEUE, but a queued
+        command's EXEC_OP_BUDGET_S does not start until the SERIAL extension
+        dequeues it. So age alone says nothing about whether a healthy extension is
+        done — precisely when N >= 2, which is the case the `len(inst.inflight) *
+        EXEC_OP_BUDGET_S` term above exists to model. Measured with the injected
+        clock: 3 commands, cmd_timeout=60, age 29s -> all three pruned while their
+        submitters were still blocked, the instance read IDLE, and `ping` fast-
+        failed at 2s while the extension legitimately had ~25s of work left. That
+        is the exact workload the docstring at BROWSER_BRIDGE_CMD_TIMEOUT tells an
+        operator to raise cmd_timeout for, so the advice made it worse.
+
+        `waiters` is exactly "a submitter is still blocked on this cid": added at
+        enqueue, discarded on all three exits of the wait loop, and discarded again
+        in submit()'s finally so an unexpected raise cannot strand one.
+
+        THE MEMORY BOUND IS NOT WEAKENED, it is split by owner:
+          * live-submitter entries are bounded by that submitter's own deadline —
+            it unwinds through the finally, which pops the entry;
+          * abandoned entries have no one to bound them, which is what
+            INFLIGHT_STALE_S is for.
         """
-        stale = [c for c, t in inst.inflight.items() if now - t > INFLIGHT_STALE_S]
+        stale = [c for c, t in inst.inflight.items()
+                 if now - t > INFLIGHT_STALE_S and c not in inst.waiters]
         for c in stale:
             del inst.inflight[c]
 
@@ -1444,6 +1475,15 @@ class Registry:
                 # than left to a result that may never come.
                 if cid is not None and not abandoned_running:
                     inst.inflight.pop(cid, None)
+                # `waiters` is discarded on all three exits of the wait loop above;
+                # this is the SAFETY NET that makes it structurally leak-proof, like
+                # `pending`. It matters because the staleness prune now reads
+                # `waiters` as "is a submitter still blocked on this?" — an entry
+                # stranded by an unexpected raise inside the loop would otherwise be
+                # exempt from pruning forever. discard() is idempotent, so this is a
+                # no-op on every normal path.
+                if cid is not None:
+                    inst.waiters.discard(cid)
                 # (3) Leave the turnstile and wake the next in line.
                 if tab_key is not None:
                     q = self._tab_queues.get(tab_key)

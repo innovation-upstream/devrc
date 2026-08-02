@@ -1732,6 +1732,12 @@ def test_inflight_release_distinguishes_queued_from_running_on_abandon():
             time.sleep(0.02)
         assert all(not i.inflight for i in reg._instances.values()), (
             "the late result must release the kept entry, not leave it to expire")
+        # ...and `last_dispatch` must stop naming it. Its contract is "the command
+        # it never answered" (surfaced by health/whoami); after a late result it
+        # DID answer, so leaving it set reports a phantom unanswered op forever.
+        assert all((i.last_dispatch or {}).get("id") is None
+                   for i in reg._instances.values()), (
+            "last_dispatch still names a command that has now been answered")
     finally:
         gate.set(); ext.stop(); srv.shutdown(); srv.server_close()
 
@@ -1748,11 +1754,16 @@ def test_a_kept_inflight_entry_expires_if_the_result_never_arrives():
                                   deadline, entry retained.
       * EXEC+GRACE < age < STALE -> budget has gone negative (the extension blew
                                   its own self-bound, so it IS wedged): the ping is
-                                  fast again, but the entry is still RETAINED —
-                                  the staleness window bounds memory, not the
-                                  busy/wedged verdict. Conflating the two would
-                                  make the ping slow for a further 8s.
+                                  fast again, but the entry is still RETAINED.
       * age >  STALE           -> pruned.
+
+    ⚠ SCOPE: all three points are measured at **N=1, no live submitter** (a single
+    ABANDONED entry). "The staleness window bounds memory, not the verdict" is TRUE
+    ONLY AT N=1 — it holds here because a lone entry's budget is already negative
+    by 20s, so pruning at 28s is verdict-neutral BY CONSTRUCTION. At N>=2 the prune
+    does change the verdict (3 entries at age 29s: 27.0s -> 2.0s), which is exactly
+    the bug `test_stale_prune_never_evicts_an_entry_whose_submitter_is_STILL_WAITING`
+    covers. Do not generalise this test's conclusion past N=1.
     """
     clock = {"t": 1000.0}
     reg = S.Registry(clock=lambda: clock["t"])
@@ -1775,6 +1786,93 @@ def test_a_kept_inflight_entry_expires_if_the_result_never_arrives():
     clock["t"] = 1000.0 + S.INFLIGHT_STALE_S + 1.0
     assert reg._effective_timeout_locked(inst, 20.0, 2.0) == 2.0
     assert not inst.inflight, "a stale entry must be pruned, not just ignored"
+
+
+def test_waiters_is_exactly_the_live_submitter_set():
+    """The prune now READS `waiters` as "is a submitter still blocked on this?", so
+    that property has to be pinned rather than assumed — it is the load-bearing
+    premise of the fix below, and it lives in a different function.
+
+    Checked on the exits that are reachable from outside: success and timeout.
+    (The `finally`'s extra discard is a defensive net for an unexpected raise
+    INSIDE the wait loop, which no test can reach from here — it is an invariant
+    guard, and is labelled as such in the source rather than claimed as covered.)
+    """
+    srv, reg = _serve(cmd_timeout=1.0, poll_timeout=5.0)
+    ext = FakeExtension(srv, executor=lambda c: {"ok": 1})
+    ext.start()
+    try:
+        assert _wait_connected(srv, want=True)
+        assert _req(srv, "POST", "/cmd", {"op": "tabs"})[0] == 200
+        assert all(not i.waiters for i in reg._instances.values()), (
+            "a completed submit must leave no waiter")
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+    srv, reg = _serve(cmd_timeout=1.0, poll_timeout=5.0)
+    ext = FakeExtension(srv, swallow=True)
+    ext.start()
+    try:
+        assert _wait_connected(srv, want=True)
+        assert _req(srv, "POST", "/cmd", {"op": "getHtml"})[0] == 504
+        assert all(not i.waiters for i in reg._instances.values()), (
+            "a timed-out submit must leave no waiter — otherwise its inflight "
+            "entry would be exempt from the staleness prune forever")
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
+def test_stale_prune_never_evicts_an_entry_whose_submitter_is_STILL_WAITING():
+    """🔴 REGRESSION (round-4 audit). INFLIGHT_STALE_S is measured from ENQUEUE,
+    but a queued command's 18s execution budget does not start until the serial
+    extension DEQUEUES it. So "past this point a healthy extension has certainly
+    answered" is false exactly when N>=2 — which is the case the
+    `len(inst.inflight) * EXEC_OP_BUDGET_S` term exists to model.
+
+    The scenario is the remediation the same commit documented: an operator reads
+    "raise CMD_TIMEOUT if that is your workload", sets 60s, and submits 3 ops. The
+    extension legitimately works until t~54s. At t=29s all three entries aged past
+    STALE(28) and were pruned WHILE THEIR SUBMITTERS WERE STILL BLOCKED, the
+    instance read idle, and ping fast-failed at 2s. Worse than a0a0021 in that
+    window, and it falsified the advice.
+
+    Fix: an entry may only be pruned once NO live submitter awaits it. `waiters` is
+    exactly that set (added at enqueue, discarded on all three loop exits, and
+    discarded again in the finally so an unexpected raise cannot strand one).
+
+    NEGATIVE CONTROL is the last block: an ABANDONED entry (no waiter) must still
+    be pruned, or this "fix" would just disable the memory bound.
+    """
+    clock = {"t": 1000.0}
+    reg = S.Registry(clock=lambda: clock["t"])
+    inst = S.Instance("k", "i", "", clock["t"])
+
+    # N=3, cmd_timeout 60 — every submitter still blocked.
+    inst.inflight = {"a": 1000.0, "b": 1000.0, "c": 1000.0}
+    inst.waiters = {"a", "b", "c"}
+    clock["t"] = 1000.0 + 27.0                      # inside STALE: fine before too
+    assert reg._effective_timeout_locked(inst, 60.0, 2.0) == pytest.approx(29.0)
+    clock["t"] = 1000.0 + 29.0                      # PAST STALE — the bug window
+    assert reg._effective_timeout_locked(inst, 60.0, 2.0) == pytest.approx(27.0), (
+        "three live submitters were pruned as stale, so the instance read idle "
+        "while the extension was legitimately working")
+    assert len(inst.inflight) == 3, "a live submitter's entry must not be evicted"
+
+    # N=2, cmd_timeout 20 — the default-ish shape.
+    inst.inflight = {"a": 1000.0, "b": 1000.0}
+    inst.waiters = {"a", "b"}
+    clock["t"] = 1000.0 + 27.0
+    assert reg._effective_timeout_locked(inst, 20.0, 2.0) == pytest.approx(11.0)
+    clock["t"] = 1000.0 + 29.0
+    assert reg._effective_timeout_locked(inst, 20.0, 2.0) == pytest.approx(9.0)
+    assert len(inst.inflight) == 2
+
+    # NEGATIVE CONTROL: no live submitter -> the staleness bound still applies.
+    inst.inflight = {"abandoned": 1000.0}
+    inst.waiters = set()
+    clock["t"] = 1000.0 + 29.0
+    assert reg._effective_timeout_locked(inst, 20.0, 2.0) == 2.0
+    assert not inst.inflight, "an ABANDONED entry must still be pruned"
 
 
 def test_result_budget_matches_the_extension():
