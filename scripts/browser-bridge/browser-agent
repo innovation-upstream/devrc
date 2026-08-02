@@ -42,7 +42,8 @@
 # BROWSER_AGENT_BROWSER_BIN (real browser CLI for open/close), BROWSER_AGENT_MODEL,
 # BROWSER_AGENT_TEMPLATE (agent md template), BROWSER_AGENT_TOOL_DIR (dir holding
 # browser.js + browser_tool_impl.mjs), BROWSER_AGENT_KEEP_SCRATCH=1,
-# BROWSER_AGENT_READY_ATTEMPTS / BROWSER_AGENT_READY_BACKOFF (open→readiness retry).
+# BROWSER_AGENT_READY_ATTEMPTS / BROWSER_AGENT_READY_BACKOFF (open→readiness retry),
+# BROWSER_AGENT_OPENCODE_CONFIG_DIR (isolated opencode config dir — see below).
 set -uo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -56,6 +57,48 @@ OPENCODE_BIN="${BROWSER_AGENT_OPENCODE:-opencode}"
 MODEL="${BROWSER_AGENT_MODEL:-openrouter/deepseek/deepseek-v4-flash}"
 
 die() { echo "browser-agent: $*" >&2; exit 2; }
+
+# --- isolated opencode CONFIG dir (token containment) ------------------------ #
+# devrc now deploys a ~37 KB global ~/.config/opencode/AGENTS.md (PRINCIPLES +
+# RULES + addendum). MEASURED on 1.18.4: that file IS injected into a run whose
+# --dir is an unrelated scratch project — a tool-less probe in a scratch dir
+# quoted a passphrase planted at the END of the file, so it arrives in FULL.
+#
+# Cost here: 8,343 input tokens vs 631 with an isolated config dir = ~7.7k
+# EXTRA PER REQUEST. `cache.read`/`cache.write` were 0 in every run, so it is
+# not amortised — it is multiplied by the agent-loop step count ($STEPS,
+# default 12), i.e. up to ~90k tokens per browser-agent run. For an agent whose
+# every host tool is DENIED (no shell, no file access), 100% of that is rules it
+# can neither use nor act on.
+#
+# Neither mitigation that looks obvious works: OPENCODE_DISABLE_CLAUDE_CODE=1
+# had ZERO effect (byte-identical token count), and a project-local AGENTS.md
+# does NOT suppress the global one — they are CONCATENATED (both passphrases
+# came back, tokens went UP). Relocating the config dir is what works.
+#
+# 🔴 STABLE AND REUSED, never `mktemp -d` per run. A FRESH config dir makes
+# opencode materialise package.json + 63 MB of node_modules (2.6-4.5 s), and
+# with no network it HUNG — killed at 120 s having produced 0 bytes, which trips
+# the gate below and dies with "produced NO output". A warm reused dir runs
+# offline fine (+0.05-0.3 s).
+#
+# Verified safe for this harness: auth is unaffected (auth.json lives in the
+# DATA dir), and the tool-set gate output was BYTE-IDENTICAL (10,670 B, same
+# resolved tools map, `browser:true` and every host tool false) under live vs
+# isolated config — the custom `browser` tool loads from the scratch project's
+# .opencode/tools/, not from the config dir.
+#
+# NOTE: this dir deliberately does NOT see devrc's global agent/ and plugin/.
+# browser-agent needs neither (it defines its own agent and has no shell), so
+# that is the intended trade, not an oversight.
+OC_CONFIG_DIR="${BROWSER_AGENT_OPENCODE_CONFIG_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/browser-agent-opencode-config}"
+mkdir -p "$OC_CONFIG_DIR" || die "cannot create opencode config dir '$OC_CONFIG_DIR'"
+# Fail loud if an instruction file ever appears here — that would silently
+# reintroduce the whole cost this isolation exists to remove.
+for _stray in "$OC_CONFIG_DIR/AGENTS.md" "$OC_CONFIG_DIR/CLAUDE.md"; do
+  [ -e "$_stray" ] && die "unexpected instruction file at '$_stray' — the isolated opencode config dir must stay free of AGENTS.md/CLAUDE.md (that is the entire point; see the comment above). Remove it."
+done
+export OPENCODE_CONFIG_DIR="$OC_CONFIG_DIR"
 
 # Emit a compact schema result on stdout and exit (0 for ok/partial, 1 for
 # blocked). NEVER prints raw page content — only the structured schema.

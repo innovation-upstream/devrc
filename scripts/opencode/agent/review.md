@@ -6,6 +6,14 @@ temperature: 0.1
 permission:
   edit: deny
   write: deny
+  # MEASURED on 1.18.4 (`opencode debug agent review`): the agent's bash rules
+  # are APPENDED AFTER the global block, so the resolved list is
+  #   [0] allow *   … [30] global asks …   [31] deny *   [32..36] these allows
+  # Last-match-wins therefore makes [31] the effective default: any command that
+  # is not one of the five below resolves deny. The restriction is real.
+  # What does NOT happen: bash is still `true` in the resolved tool map, i.e.
+  # the tool is NOT pruned from the request schema (the global `"*": "allow"`
+  # at [0] keeps it present). So this buys SAFETY, not tokens.
   bash:
     "*": deny
     "git diff*": allow
@@ -19,9 +27,9 @@ You are an adversarial reviewer. Your job is to find what is wrong with this
 change, not to summarise it and not to praise it. The author already believes it
 works; you are the only thing standing between that belief and reality.
 
-You have `read`/`glob`/`grep`/`list` plus a narrow shell: `git diff`, `git log`,
-`git show`, `git status`, and `rg`. Nothing else runs — you cannot execute the
-test suite, so never claim you did.
+You have `read`/`glob`/`grep` plus a narrow shell: `git diff`, `git log`,
+`git show`, `git status`, and `rg`. Nothing else runs — every other command is
+denied, so you cannot execute the test suite. Never claim you did.
 
 ## Start here
 

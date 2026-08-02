@@ -518,11 +518,56 @@ def test_nav_has_no_shell():
     assert perm["write"] == "deny"
 
 
+def test_nav_is_kept_lean():
+    """nav must not carry the skill catalogue or be able to recurse.
+
+    VERIFIED against `opencode debug agent nav` on 1.18.4: with these denies the
+    resolved tool set is exactly {glob, grep, read} (+ the internal `invalid`).
+    Without `skill: deny` it also carries {skill, task, todowrite, webfetch} —
+    and `skill` alone injects the whole catalogue, measured at ~3,730 tokens on
+    EVERY request. This is a cost guard, and it is the high-frequency agent.
+    """
+    yaml = pytest.importorskip("yaml")
+    fm, _ = parse_frontmatter((AGENT_DIR / "nav.md").read_text())
+    perm = yaml.safe_load(fm)["permission"]
+    for tool in ("skill", "task"):
+        assert perm.get(tool) == "deny", (
+            f"nav must deny {tool!r} — it is the cheap high-frequency navigator "
+            f"and `skill` alone costs ~3,730 tokens per request"
+        )
+
+
+def test_no_agent_promises_a_list_tool():
+    """There is NO `list` tool on opencode 1.18.4.
+
+    Measured: the resolved tool map is exactly {bash, edit, glob, grep, invalid,
+    question, read, skill, task, todowrite, webfetch, write}. A prompt that
+    tells an agent to "use `list`" sends it hunting for a tool that does not
+    exist — and the likely fallback is exactly the shell-out these agents were
+    built to stop.
+    """
+    targets = [AGENT_DIR / f"{n}.md" for n in EXPECTED_AGENTS] + [ADDENDUM]
+    bad = []
+    for p in targets:
+        for i, ln in enumerate(p.read_text().split("\n"), 1):
+            # a backticked `list` presented as a tool name
+            if re.search(r"`list`", ln) and "no `list` tool" not in ln:
+                bad.append(f"{p.name}:{i}: {ln.strip()}")
+    assert not bad, f"reference(s) to a nonexistent `list` tool: {bad}"
+
+
 def test_review_denies_bash_first_then_allows_read_only_git():
     """review's block is the INVERSE shape of the global one: a `"*": "deny"`
-    FIRST (which is also the only form that removes the tool from the request
-    schema), then the read-only git/rg allows after it. Last match wins, so the
-    allows must come second."""
+    FIRST, then the read-only git/rg allows after it. Last match wins, so the
+    allows must come second.
+
+    MEASURED on 1.18.4: agent rules are APPENDED AFTER the global block, giving
+    resolved order [0] allow * … [31] deny * [32..36] these allows. So [31] is
+    the effective default and any non-allowlisted command resolves deny — the
+    restriction is real. NOTE it does NOT prune bash from the request schema
+    (bash stays `true` in the resolved tool map, because the global `"*":
+    "allow"` at [0] keeps it present): this buys SAFETY, not tokens.
+    """
     yaml = pytest.importorskip("yaml")
     fm, _ = parse_frontmatter((AGENT_DIR / "review.md").read_text())
     bash = yaml.safe_load(fm)["permission"]["bash"]
@@ -581,6 +626,56 @@ def test_switch_cannot_be_blocked_by_the_unmanaged_config():
     )
     assert "mv" in block and "rm -f" not in block, (
         "the unmanaged file's content exists nowhere else — back it up, do not rm"
+    )
+
+
+# --------------------------------------------------------------------------- #
+# 6. browser-agent must NOT inherit the global AGENTS.md
+#
+# MEASURED on 1.18.4: the global ~/.config/opencode/AGENTS.md IS injected into a
+# run whose --dir is an unrelated scratch project (a tool-less probe quoted a
+# passphrase planted at the END of the file). Cost: 8,343 input tokens vs 631
+# isolated = ~7.7k EXTRA PER REQUEST, with cache.read/cache.write both 0, so it
+# is multiplied by $STEPS (default 12) — up to ~90k tokens per run, for an agent
+# whose every host tool is denied and which can therefore act on none of it.
+# --------------------------------------------------------------------------- #
+BROWSER_AGENT = ROOT / "scripts" / "browser-bridge" / "browser-agent"
+
+
+def test_browser_agent_isolates_its_opencode_config_dir():
+    src = BROWSER_AGENT.read_text()
+    assert "export OPENCODE_CONFIG_DIR=" in src, (
+        "browser-agent must export OPENCODE_CONFIG_DIR — without it every run "
+        "pays ~7.7k extra input tokens PER REQUEST (x$STEPS) for the global "
+        "AGENTS.md, which that agent cannot act on (all host tools denied)"
+    )
+
+
+def test_browser_agent_config_dir_is_stable_not_per_run():
+    """🔴 A FRESH config dir per run is NOT an acceptable implementation.
+
+    Measured: a fresh dir makes opencode materialise package.json + 63 MB of
+    node_modules (2.6-4.5 s), and with no network it HUNG — killed at 120 s
+    having produced 0 bytes, which trips the harness's own tool-set gate and
+    dies with "produced NO output". A warm reused dir runs offline fine.
+    """
+    src = BROWSER_AGENT.read_text()
+    assert "OC_CONFIG_DIR=" in src
+    line = next(ln for ln in src.split("\n") if ln.startswith("OC_CONFIG_DIR="))
+    assert "mktemp" not in line, (
+        "the isolated opencode config dir must be STABLE and REUSED, never "
+        "mktemp'd per run — a fresh dir triggers a 63 MB npm install and hangs "
+        "offline, producing 0 bytes and tripping the tool-set gate"
+    )
+    assert ".cache" in line, "expected a stable dir under the cache dir"
+
+
+def test_browser_agent_fails_loud_if_an_instruction_file_appears():
+    """The isolation is silent when it breaks — so it needs its own alarm."""
+    src = BROWSER_AGENT.read_text()
+    assert '"$OC_CONFIG_DIR/AGENTS.md"' in src, (
+        "must check for a stray AGENTS.md in the isolated config dir — its "
+        "reappearance would silently restore the full per-request cost"
     )
 
 

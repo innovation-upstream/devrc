@@ -19,17 +19,22 @@ tools cannot drift. **Do not replace this concatenation with imports.**
 
 ## Use the native tools, not the shell
 
-opencode ships first-class `read` / `glob` / `grep` / `list` tools. Use them.
-Shelling out to `cd`, `ls`, `cat`, `find`, `head`, `tail`, `wc -l` for file
-navigation is slower, costs more tokens, loses structured output, and on this
-host trips the bash guard.
+opencode ships first-class `read` / `glob` / `grep` tools. Use them. Shelling
+out to `cd`, `ls`, `cat`, `find`, `head`, `tail`, `wc -l` for file navigation is
+slower, costs more tokens, loses structured output, and on this host trips the
+bash guard.
 
 | Want to… | Use | NOT |
 |---|---|---|
-| read a file | `read` | `cat` / `head` / `tail` |
+| read a file | `read` (with offset/limit) | `cat` / `head` / `tail` |
 | find files by name | `glob` | `find` / `ls -R` |
 | search file contents | `grep` | `rg` / `grep` via bash |
-| see what is in a dir | `list` | `ls` |
+| see what is in a dir | `glob` on `<dir>/*` | `ls` |
+
+There is **no `list` tool** on opencode 1.18.4 — verified against the resolved
+tool map, which contains exactly `bash, edit, glob, grep, invalid, question,
+read, skill, task, todowrite, webfetch, write`. Use `glob` to enumerate a
+directory.
 
 `cd` is never needed — every tool takes an absolute path, and the bash tool's
 working directory does not persist the way you expect. **Pass absolute paths.**
@@ -67,10 +72,11 @@ KUBECONFIG=./homelab-kubeconfig kubectl get pods # WRONG — depends on cwd
 
 Two subagents exist and are cheaper than doing the work in the primary context:
 
-- **`nav`** — bulk file navigation and search. It has `read`/`glob`/`grep`/`list`
-  and **no shell at all**, runs on the cheap model at temperature 0, and returns
-  absolute paths plus minimal excerpts. Send it anything shaped like "where is
-  X", "which files do Y", "find all callers of Z". Do not run a sprawling
+- **`nav`** — bulk file navigation and search. It has `read`/`glob`/`grep` and
+  **no shell at all** (and no `skill`/`task`, so it carries none of the skill
+  catalogue), runs on the cheap model at temperature 0, and returns absolute
+  paths plus minimal excerpts. Send it anything shaped like "where is X",
+  "which files do Y", "find all callers of Z". Do not run a sprawling
   multi-step search yourself.
 - **`k8s`** — cluster work across homelab / workbench / production. It knows the
   three clusters, the handles, and the read-before-mutate discipline.
