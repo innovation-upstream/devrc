@@ -201,11 +201,27 @@ The persona evaluator reasons over **screenshots only** unless DOM-grounded, so 
 `sr-only` labels, ARIA, `<a>`/`<button>` semantics, and JS focus/keyboard behaviour → it
 **invents a11y false positives AND can't confirm its own a11y fixes**. The DOM/a11y grounding
 (#35 crawl path + #37 driven path + #36 structural label gate) fixes the **crawl + driven**
-paths (the `dropContradicted` gate refutes contradicted findings deterministically).
-**⚠ plugin-PUSH runs remain screenshot-only (NOT DOM-grounded)** — treat their a11y/keyboard
-findings with skepticism. Refs:
+paths (the `dropContradicted` gate refutes contradicted findings deterministically). Refs:
 `claudedocs/evaluator-meta-audit-naida-outreach-2026-07-24.md`,
 `claudedocs/scoping-dom-a11y-evaluator-grounding-2026-07-24.md`.
+
+**Plugin-PUSH runs CAN now be DOM-grounded too (#39, 2026-07-30)** — a push may carry an OPTIONAL
+per-page `a11y_digest` artifact ref; auditloop validates + canonicalises it
+(`internal/plugin/a11y.go` `NormalizeA11yDigest`), stores it to the existing
+`pages.a11y_digest_key`, and the SAME `dropContradicted` gate applies. Producer contract is in
+auditloop's `CLAUDE.md` (never send an EMPTY digest — it 400s the whole push; `has_label` is
+ignored + re-derived from `label_source`; conflicting duplicates on one ANCHOR reject; caps are
+BYTES). `civitai-manager` emits it (its harness vendors `a11y-digest.js` verbatim).
+- **⚠ HONEST REACH LIMIT (measured 2026-07-30):** the gate only indexes **concrete anchors**
+  (`#id` / `[name=…]`, via `concreteKeys` in `internal/eval/verify.go`). The evaluator cites
+  selectors it INVENTS from pixels (`input[placeholder='…']`, `.main-content`, `h3:contains(…)`),
+  so on a target whose markup lacks ids **the deterministic gate drops nothing** — verified by
+  running real captured digests + the real prior claims through `dropContradicted`: **4 claims in,
+  4 survived.** What IS working on push runs is the digest reaching the PROMPT (the "SEMANTIC
+  STRUCTURE … AUTHORITATIVE" block carries the real `label_source` facts). That is prevention, not
+  deterministic dropping, and a single before/after run cannot be distinguished from LLM variance.
+  To make the gate bite: constrain the evaluator to cite only selectors present in the digest,
+  and/or add ids to the target's controls.
 
 ## Live-bug playbook
 - **PWA service worker MUST NOT intercept navigations** — page routes 302
