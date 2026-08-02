@@ -1,6 +1,6 @@
 ---
 name: activity
-description: Operate the personal activity-telemetry pipeline — 6 sources (zsh, tmux, X11 keylogger, browser, Claude Code sessions, i3 window/workspace focus) → per-host collector → dedicated authed homelab ClickHouse (activity.events) → Grafana "Activity & Productivity" dashboard, plus a deterministic validation harness. Status, query the data, troubleshoot a stalled source, deploy a change, run validation. Use when the user mentions activity tracking, the keylogger, "where my time goes", the activity dashboard, activity.events, the collector, or productivity mining of their own behaviour.
+description: Operate the personal activity-telemetry pipeline — 6 sources (zsh, tmux, X11 keylogger, browser, Claude Code sessions, i3 window/workspace focus) → per-host collector → homelab ClickHouse (activity.events) → Grafana "Activity & Productivity" dashboard + validation harness. Status, query the data, troubleshoot a stalled source, deploy a change, run validation. Use when the user mentions activity tracking, the keylogger, "where my time goes", the activity dashboard, activity.events, the collector, or productivity mining of their own behaviour.
 ---
 
 # activity-telemetry operations

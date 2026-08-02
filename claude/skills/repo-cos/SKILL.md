@@ -1,6 +1,6 @@
 ---
 name: repo-cos
-description: Operate the "repo chief-of-staff" — a weekly agent that scans Zach's codebases for improvement opportunities (TODO/FIXME, skipped tests, unpinned `latest` tags, churn hotspots, large files) → cheap LLM synthesis → ranked, evidence-backed proposals emailed to his Gmail. Its PRIMARY cross-session use: READ the latest proposals and COLLABORATIVELY EVALUATE them with him (which to act on → dispatch/PR). Also: run/regenerate the scan, tune the signals/model/repo-list, manage the weekly timer. Use when the user mentions repo proposals, the repo chief-of-staff, "the ideas the agent emailed me", evaluating/triaging the weekly repo suggestions, repo-cos, or improving the proposal quality.
+description: Operate the "repo chief-of-staff" — a weekly agent that scans Zach's codebases for improvement opportunities (TODO/FIXME, skipped tests, unpinned `latest` tags, churn hotspots, large files) → cheap LLM synthesis → ranked, evidence-backed proposals emailed to his Gmail. PRIMARY use — READ the latest proposals and COLLABORATIVELY EVALUATE them with him (which to act on → dispatch/PR). Also run/regenerate the scan, tune the signals/model/repo-list, manage the weekly timer. Use when the user mentions repo proposals, the repo chief-of-staff, "the ideas the agent emailed me", evaluating/triaging the weekly repo suggestions, repo-cos, or improving the proposal quality.
 ---
 
 # repo-cos — repo chief-of-staff
