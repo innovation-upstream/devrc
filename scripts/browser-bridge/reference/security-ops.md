@@ -34,8 +34,8 @@ subsystem, do not conflate.
   the site), so **every upload is AUDIT-LOGGED** (op + target domain + path) and it is
   **OPERATOR-ONLY** — not in the autonomous agent's default op set (`op_not_allowed:upload`;
   re-enable only via an explicit `BROWSER_AGENT_ALLOWED_OPS` opt-in). The result carries
-  the basename only. Chrome reads the file BY PATH itself (same host), so **no bytes
-  cross the bridge**; the CLI validates the path (readable regular file) and resolves it
+  the basename only. Chrome reads the file BY PATH itself (same host) via CDP
+  `DOM.setFileInputFiles`, so **no bytes cross the bridge**; the CLI validates the path (readable regular file) and resolves it
   to ABSOLUTE **before** dispatch.
 - **`screenshot` writes owner-only files** — a screenshot is a pixel-perfect image of an
   **authenticated** view, so temp captures are mode-0600 and **auto-pruned after 24h**
