@@ -116,6 +116,39 @@ Now each session can own its own tab:
 - **Lifecycle:** idle ownership is reclaimed after a TTL, which RELEASES it but
   does NOT close the real Brave tab (only `browser close` closes it).
 
+### A discard assigns a NEW tabId and releases ownership (MEASURED, #273)
+
+A forced discard via `brave://discards` → **Urgent Discard** → reactivate does
+**not** preserve the tab id. Measured on laptop `192.168.50.155`, profile
+`personal`, extension **0.7.1**: tab **`484065264`** came back as
+**`484065273`**, `ownedTabId` became **`None`**, and `emulate` on the new id was
+refused — *"tab 484065273 is not owned by THIS session"*. So a long-running
+session must be ready to re-`open` (or re-`--tab`) after a discard; a cached
+`tabId` simply stops resolving.
+
+Consequence for the `documentEmulation` staleness hazard #273 was filed
+against: it is **not reachable** on this Chromium. That hazard needs the tabId
+**preserved**, so a stale `documentEmulation[tabId]` record is consulted for a
+newly-created, un-emulated document and `documentPredatesEmulation` goes falsely
+silent. The map is keyed by tabId and the id does not survive, so a later
+`emulate` hits the `undefined`-record path, which
+`protocol.js:1262-1265` documents as comparing unequal to every real signature
+and therefore **WARNS** — the intended conservative default. **The widely-repeated
+claim that a memory-saver discard preserves the tab id did not hold when
+measured.**
+
+**Scope of that claim, stated honestly:**
+
+- **One** measurement — one Brave build, one profile, one discard mechanism
+  (`brave://discards` → Urgent Discard). Chromium's memory-saver **auto-discard
+  under real memory pressure was NOT exercised** and could differ.
+- The id **changing** and ownership dropping were observed. `chrome.tabs.onReplaced`
+  firing was **inferred** from that evidence, **not observed**.
+- 🔴 **The safety is a property of the BROWSER, not of the bridge.** Nothing in
+  the code defends against a preserved id — if a future Chromium preserves it,
+  the defect returns **silently**. Re-measure before relying on this after a
+  Brave/Chromium upgrade.
+
 ## Don't do this: a bare high-rate `eval` loop
 
 Do **NOT** run a bare high-rate `eval` loop (no `--instance`/`open`). It shares
