@@ -14,7 +14,6 @@ Continue from session 269ba59a-4aac-437c-bd0b-80351d57a17f (element references e
 - Annotated selectors differ from clawgate selectors — can't match by selector, must use page context or local DOM
 
 ## Open threads
-- `--annotated` not supported with `--frame` (returns `annotated_with_frame_unsupported`)
 - `context` op not in autonomous agent's op list
 - Consider `browser resolve "<description>"` op using annotated DOM
 - CI check for server.py/protocol.js ALLOWED_OPS parity

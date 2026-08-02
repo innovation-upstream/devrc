@@ -63,7 +63,6 @@
 
 ## Open threads / next steps
 
-- browser-bridge `--annotated` not supported with `--frame` yet (returns `annotated_with_frame_unsupported`)
 - Could add `browser resolve "<description>"` op using annotated DOM for natural language element finding
 - `context` op not in the autonomous agent's op list — consider adding if agent needs page metadata
 - clawgate enrichment could optionally call browser-bridge for richer annotated data when available (currently fully local)

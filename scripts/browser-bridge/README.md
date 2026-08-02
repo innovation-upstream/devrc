@@ -264,8 +264,7 @@ uses. The `text` whitespace-normalization + byte-cap live in
 `innerText`. Each element has `{text, path, tag, attrs, precedingText, followingText}`
 where `attrs` includes `id`, `class`, `href`, `src`, `alt`, `title`, `name`,
 `placeholder`, `type`, `role`, `aria-label`, `data-testid`, `data-cy`, `data-e2e`.
-Byte-capped. **Not supported with `--frame`** — returns
-`annotated_with_frame_unsupported`.
+Byte-capped. Works with `--frame` (frame-relative CSS paths).
 
 **`context`** returns page metadata without reading the DOM: `{url, domain, path,
 searchParams, title, tabId}`. No required fields. Tab-scoped (needs an active/owned

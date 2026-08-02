@@ -7,7 +7,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   generateCssPath, extractIdentifyingAttrs, getAdjacentText,
-  annotatedTextFn, ANNOTATED_TEXT_MAX_ITEMS_DEFAULT,
+  annotatedTextFn, ANNOTATED_TEXT_MAX_ITEMS_DEFAULT, byteCapElements,
 } from "../extension/protocol.js";
 
 // --- mock DOM helpers ------------------------------------------------------ //
@@ -202,4 +202,56 @@ test("annotatedTextFn: returns { elements, count } shape", () => {
 test("annotatedTextFn: default maxItems is 200", () => {
   // Verify the constant matches.
   assert.equal(ANNOTATED_TEXT_MAX_ITEMS_DEFAULT, 200);
+});
+
+// --- byteCapElements ------------------------------------------------------- //
+test("byteCapElements: no cap needed when under maxBytes", () => {
+  const data = { elements: [{ text: "a" }], count: 1, truncated: 0 };
+  const result = byteCapElements(data, 1000);
+  assert.equal(result.elements.length, 1);
+  assert.equal(result.truncated, 0);
+  assert.equal(result.count, 1);
+});
+
+test("byteCapElements: no cap when at exactly maxBytes", () => {
+  const elements = Array.from({ length: 5 }, (_, i) => ({ text: `item${i}` }));
+  const data = { elements, count: 5, truncated: 0 };
+  // Measure the actual JSON size and set cap to that exact value.
+  const jsonSize = new TextEncoder().encode(JSON.stringify(elements)).length;
+  const result = byteCapElements(data, jsonSize);
+  assert.equal(result.elements.length, 5);
+  assert.equal(result.truncated, 0);
+});
+
+test("byteCapElements: drops elements from end when over cap", () => {
+  const elements = Array.from({ length: 10 }, (_, i) => ({ text: `element-${i}-padding`.padEnd(50, ".") }));
+  const data = { elements, count: 10, truncated: 0 };
+  // Set a cap that fits ~3 elements.
+  const smallCap = 200;
+  const result = byteCapElements(data, smallCap);
+  assert.ok(result.elements.length < 10, `expected fewer than 10, got ${result.elements.length}`);
+  assert.ok(result.elements.length >= 1, "should keep at least one");
+  assert.equal(result.count, result.elements.length);
+  assert.ok(result.truncated > 0, "truncated should be positive");
+});
+
+test("byteCapElements: returns empty elements when cap is too small for any element", () => {
+  const data = { elements: [{ text: "a" }], count: 1, truncated: 0 };
+  const result = byteCapElements(data, 1);
+  assert.equal(result.elements.length, 0);
+  assert.equal(result.count, 0);
+  assert.ok(result.truncated > 0);
+});
+
+test("byteCapElements: handles empty elements array", () => {
+  const data = { elements: [], count: 0, truncated: 0 };
+  const result = byteCapElements(data, 100);
+  assert.equal(result.elements.length, 0);
+  assert.equal(result.truncated, 0);
+});
+
+test("byteCapElements: mutates and returns the same data object", () => {
+  const data = { elements: [{ text: "a" }, { text: "b" }], count: 2, truncated: 0 };
+  const result = byteCapElements(data, 1);
+  assert.strictEqual(result, data);
 });

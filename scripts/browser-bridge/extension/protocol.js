@@ -154,6 +154,28 @@ export function normalizeText(raw, maxBytes = TEXT_MAX_BYTES_DEFAULT) {
   return { text: `${kept}\n…[truncated ${dropped} bytes]`, truncated: dropped };
 }
 
+// Byte-cap an annotated elements array: if total JSON exceeds maxBytes, pop
+// elements from the end until it fits. Mutates `data` in place and returns it.
+// `data.truncated` is set to the byte delta (0 when nothing was dropped).
+export function byteCapElements(data, maxBytes) {
+  const jsonBytes = new TextEncoder().encode(JSON.stringify(data.elements)).length;
+  if (jsonBytes <= maxBytes) { data.truncated = 0; return data; }
+  const els = [...data.elements];
+  let total = 0;
+  const enc = new TextEncoder();
+  let kept = 0;
+  for (let i = 0; i < els.length; i++) {
+    const entryBytes = enc.encode(JSON.stringify(els[i])).length;
+    if (total + entryBytes > maxBytes) break;
+    total += entryBytes;
+    kept = i + 1;
+  }
+  data.elements = els.slice(0, kept);
+  data.count = data.elements.length;
+  data.truncated = jsonBytes - total;
+  return data;
+}
+
 // Compile a user `eval` snippet into a single callable, choosing between the
 // expression form (`return (src)`) and the statement form (`src`) WITHOUT ever
 // executing a side effect twice.

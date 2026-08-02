@@ -390,7 +390,6 @@ The chrome.* glue needs a real browser — verify by hand after loading:
       `searchParams`, and `tabId` alongside `url` and `title`.
 - [ ] `browser text --annotated` on a page with links returns structured elements with
       `{text, path, tag, attrs, precedingText, followingText}`.
-- [ ] `browser text --annotated --frame <id>` returns `annotated_with_frame_unsupported`.
 - [ ] `browser tabs` lists your open tabs.
 - [ ] `browser nav https://example.com` navigates the active tab.
 - [ ] `browser screenshot /tmp/shot.png` writes a real PNG of the visible tab.
