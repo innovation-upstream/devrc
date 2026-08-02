@@ -56,6 +56,7 @@ Priority legend: **🔴 CRITICAL** (security/data/prod — never compromise) · 
 - 🔴 **A test that skips itself, or passes by accident of the environment, is worse than no test** — it reports safety. Two tests passed only because the headless browser's default window is 437px tall; setting a realistic viewport failed them on clean main. Set viewport/locale/timezone explicitly whenever the outcome depends on them.
 - 🔴 **Distinguish a real failure from a load flake by WALL TIME (~15×), not by one re-run.** And a flaky test is fixable: one went from ~1-in-2 failing at 22-45s to 6/6 deterministic at 2.6s once the timing dependency was removed.
 - 🔴 **A permanently-red gate is worse than no gate** — it trains everyone to click through. Unbreak it or stop gating on it; do not merge through a gate you have already called meaningless.
+- 🔴 **A comment is a claim too.** Six consecutive audit rounds in one session found comments asserting what the implementation contradicts — including a safety comment whose falsity would have led a maintainer to delete the guard preventing content deletion. Tests assert what you believed; only reading the code against the comment tells you it still holds. When you close a hazard, update the comment describing it as open.
 
 ## Professional Honesty 🟡
 **Triggers**: assessments, reviews, recommendations, technical claims
