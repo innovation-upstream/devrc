@@ -88,9 +88,9 @@ each carrying its DOM path and the attributes you need to build a selector:
 and flat `text` gave you the label but not a way to address the element. For a
 pure "what does the page say" read, plain `text` is smaller.
 
-**Not supported with `--frame`** — returns `annotated_with_frame_unsupported`.
-Inside an iframe, read flat `text --frame …` and build the selector from the
-`html --frame …` output instead. See `reference/frames-cdp.md`.
+**Works with `--frame`** — structured element extraction runs inside the target
+frame. CSS paths are frame-relative (the frame's own DOM), and `url`/`domain` in
+the envelope reflect the frame, not the top page.
 
 An element that `--annotated` lists but that will not click is a paint-order /
 hit-test problem, not an extraction problem → `reference/css-hit-test.md`.

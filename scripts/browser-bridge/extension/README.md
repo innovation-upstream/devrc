@@ -170,7 +170,7 @@ come back).
    (`work` / `personal` — must be unique per profile), **Save**.
 8. Verify from a shell — this is the whole point of the change:
    ```bash
-    browser --instance <label> ping   # → {"pong":true,"extensionVersion":"0.7.0",
+    browser --instance <label> ping   # → {"pong":true,"extensionVersion":"0.7.1",
                                       #     "id":"<ext-id>","ops":[…,"ping","context"]}
    browser whoami                    # → that instance: extension_stale:false
                                      #    + extension_id, and
@@ -272,6 +272,21 @@ If `ping` still reports the old version after ↻, **fully quit and reopen Brave
 > because "is the new build loaded?" was previously unfalsifiable, which cost
 > three full Brave restarts in a single session. (0.3.0 → 0.3.1 was exactly
 > this: adding `id` to `ping`'s reply is a discriminator, so it got a bump.)
+
+> **0.7.1 — `text --annotated` inside `--frame`.** No new wire op, so `ping`'s
+> `ops` list is byte-identical to 0.7.0's and cannot discriminate this build.
+> The discriminator is the **capability itself**, and it is exact — it exercises
+> the changed line rather than trusting a version string:
+>
+> ```bash
+> browser --instance <label> frames                 # pick a real frameId
+> browser --instance <label> text --annotated --frame <frameId>
+>   # 0.7.0 → annotated_with_frame_unsupported: --annotated is not supported with --frame
+>   # 0.7.1 → the per-element `elements[]` payload (frame-relative CSS paths)
+> ```
+>
+> Run it against a page that HAS an iframe: on a frameless page both builds fail
+> the same way (`frame_not_found`), which discriminates nothing.
 
 > **MANDATORY reload after a permission change:** the manifest requests the
 > `debugger` permission (screenshot + TOP-frame trusted input) AND the
@@ -390,7 +405,6 @@ The chrome.* glue needs a real browser — verify by hand after loading:
       `searchParams`, and `tabId` alongside `url` and `title`.
 - [ ] `browser text --annotated` on a page with links returns structured elements with
       `{text, path, tag, attrs, precedingText, followingText}`.
-- [ ] `browser text --annotated --frame <id>` returns `annotated_with_frame_unsupported`.
 - [ ] `browser tabs` lists your open tabs.
 - [ ] `browser nav https://example.com` navigates the active tab.
 - [ ] `browser screenshot /tmp/shot.png` writes a real PNG of the visible tab.

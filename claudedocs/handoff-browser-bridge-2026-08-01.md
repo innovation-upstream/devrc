@@ -47,11 +47,6 @@ added to both in this change — verify `protocol.js`'s `OPS` and `server.py`'s
 
 ## Known limitations
 
-- **`--annotated` + `--frame`**: not supported. Returns
-  `annotated_with_frame_unsupported`. Structured element extraction is only
-  available on the top frame. The extension could implement it for frames via
-  `chrome.scripting` injection into the frame context, but that was deferred
-  (the `attrs` extraction logic would need frame-aware selectors).
 - **`context` is tab-scoped**: needs an active/owned tab. With no tab, it falls
   back to the active tab (like other tab-scoped ops). This is by design — the
   op has no selector or JS injection, so it only works on a tab with a
@@ -83,7 +78,7 @@ $BB whoami                          # ORIENT FIRST — host + instances + loaded
 $BB --instance <key> context        # → {url, domain, path, searchParams, title, tabId}
 $BB --instance <key> text           # → enriched envelope with domain, path, searchParams, tabId
 $BB --instance <key> text --annotated  # → structured element extraction
-$BB --instance <key> text --annotated --frame <id>  # → annotated_with_frame_unsupported
+$BB --instance <key> text --annotated --frame <id>  # → annotated elements from inside the frame
 # Confirm ping shows 0.7.0:
 $BB --instance <key> ping           # → extensionVersion:"0.7.0", ops includes "context"
 ```

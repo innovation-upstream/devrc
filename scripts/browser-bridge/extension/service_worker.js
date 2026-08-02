@@ -61,7 +61,7 @@ import {
   // page context (shared by `context` op + enriched `text`/`html` results).
   parsePageContext, annotatePageContext,
   // annotated text: structured element extraction for `text --annotated`.
-  annotatedTextFn, ANNOTATED_TEXT_MAX_ITEMS_DEFAULT,
+  annotatedTextFn, ANNOTATED_TEXT_MAX_ITEMS_DEFAULT, byteCapElements,
 } from "./protocol.js";
 
 const DEFAULT_PORT = 8788;
@@ -681,12 +681,28 @@ const OPS = {
     const annotated = !!(cmd && cmd.annotated);
     const maxItems = (cmd && typeof cmd.maxItems === "number")
       ? cmd.maxItems : ANNOTATED_TEXT_MAX_ITEMS_DEFAULT;
-    // --frame → read innerText INSIDE the chosen (cross-origin OOPIF) frame via
+    // --frame → read INSIDE the chosen (cross-origin OOPIF) frame via
     // chrome.scripting (reaches an out-of-process iframe; no debugger banner).
     if (cmd && cmd.frame) {
-      if (annotated) throw new Error("annotated_with_frame_unsupported: --annotated is not supported with --frame");
       const frame = await resolveFrame(tab.id, cmd.frame);
       const vis = await tabVisibilityState(tab.id);   // BEFORE the read → read stays last
+      if (annotated) {
+        // Annotated inside a frame: inject annotatedTextFn, wrap in page context
+        // with the frame URL, byte-cap, and return via emuAnnotate.
+        const raw = await execInFrame(tab.id, frame.frameId, annotatedTextFn, [sel, maxItems]);
+        const data = annotatePageContext({
+          elements: raw ? raw.elements : [],
+          count: raw ? raw.count : 0,
+          url: frame.url || tab.url,
+          title: tab.title,
+          tabId: tab.id,
+          frame: cmd.frame,
+          truncated: 0,
+        }, tab.url);
+        byteCapElements(data, cap);
+        return emuAnnotate(annotateVisibility(data, vis), tab.id, false);
+      }
+      // Plain text inside a frame.
       const raw = await execInFrame(tab.id, frame.frameId, frameReadTextFn, [sel]);
       const { text, truncated } = normalizeText(raw, cap);
       // Report the FRAME's own url (see getHtml) so the caller confirms the right frame.
@@ -715,23 +731,7 @@ const OPS = {
           tabId: tab.id,
           truncated: 0,
         }, tab.url);
-        // Byte-cap: if total JSON exceeds maxBytes, truncate elements array.
-        const jsonBytes = new TextEncoder().encode(JSON.stringify(data.elements)).length;
-        if (jsonBytes > cap) {
-          let kept = 0;
-          let total = 0;
-          const enc = new TextEncoder();
-          for (let i = 0; i < data.elements.length; i++) {
-            const entry = JSON.stringify(data.elements[i]);
-            const entryBytes = enc.encode(entry).length;
-            if (total + entryBytes > cap) break;
-            total += entryBytes;
-            kept = i + 1;
-          }
-          data.elements = data.elements.slice(0, kept);
-          data.count = data.elements.length;
-          data.truncated = jsonBytes - total;
-        }
+        byteCapElements(data, cap);
         return emuAnnotate(wakeAnnotate(data, w), tab.id, true);
       }
       // ISOLATED-world read inside the still-attached wake session — see getHtml's
@@ -767,23 +767,7 @@ const OPS = {
         tabId: tab.id,
         truncated: 0,
       }, tab.url);
-      // Byte-cap: if total JSON exceeds maxBytes, truncate elements array.
-      const jsonBytes = new TextEncoder().encode(JSON.stringify(data.elements)).length;
-      if (jsonBytes > cap) {
-        let kept = 0;
-        let total = 0;
-        const enc = new TextEncoder();
-        for (let i = 0; i < data.elements.length; i++) {
-          const entry = JSON.stringify(data.elements[i]);
-          const entryBytes = enc.encode(entry).length;
-          if (total + entryBytes > cap) break;
-          total += entryBytes;
-          kept = i + 1;
-        }
-        data.elements = data.elements.slice(0, kept);
-        data.count = data.elements.length;
-        data.truncated = jsonBytes - total;
-      }
+      byteCapElements(data, cap);
       return emuAnnotate(
         annotateVisibility(data, await tabVisibilityState(tab.id)),
         tab.id, false);

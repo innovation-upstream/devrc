@@ -123,6 +123,46 @@ test("--frame html: inject into the resolved OOPIF frame via executeScript; repo
   assert.equal(h.url, OOPIF_URL, "a frame read reports the FRAME's own url, not the top url");
   assert.deepEqual(state.calls.debugger, [], "a fixed-func frame read must NOT use the debugger");
 });
+// REGRESSION (v0.7.1): `--annotated` + `--frame` used to throw
+// `annotated_with_frame_unsupported` before any injection. It now injects
+// annotatedTextFn into the resolved OOPIF and returns the element payload.
+// RED on origin/main (a0a5d73): the old code threw, so no executeScript ran.
+test("--frame text --annotated: injects annotatedTextFn into the OOPIF; no longer refused", async () => {
+  resetCalls();
+  // Frame-RELATIVE CSS paths — the annotated payload is relative to the FRAME's
+  // own document, not the top page (there is no `iframe > …` prefix).
+  state.execResult = {
+    elements: [{ tag: "button", text: "Run", cssPath: "#panel > button" }],
+    count: 1,
+  };
+  const out = await OPS.text({ tabId: TAB_ID, frame: "7", annotated: true });
+  assert.deepEqual(lastExec().target, { tabId: TAB_ID, frameIds: [7] },
+    "annotated-in-frame must inject into the RESOLVED frame, not the top page");
+  assert.equal(typeof lastExec().func, "function");
+  assert.equal(out.count, 1);
+  assert.deepEqual(out.elements,
+    [{ tag: "button", text: "Run", cssPath: "#panel > button" }]);
+  assert.equal(out.url, OOPIF_URL, "reports the FRAME's own url");
+  assert.equal(out.frame, "7");
+  assert.equal(out.truncated, 0);
+  assert.equal(out.text, undefined, "annotated replaces flat text, it does not add to it");
+  assert.deepEqual(state.calls.debugger, [], "an annotated frame read must NOT use the debugger");
+});
+
+test("--frame text --annotated: byte-cap applies inside the frame path too", async () => {
+  resetCalls();
+  state.execResult = {
+    elements: Array.from({ length: 20 },
+      (_, i) => ({ tag: "p", text: `element-${i}`.padEnd(60, "."), cssPath: `p:nth-of-type(${i + 1})` })),
+    count: 20,
+  };
+  const out = await OPS.text({ tabId: TAB_ID, frame: "7", annotated: true, maxBytes: 300 });
+  assert.ok(out.elements.length < 20,
+    `byte-cap must drop elements in the frame path; kept ${out.elements.length}`);
+  assert.equal(out.count, out.elements.length);
+  assert.ok(out.truncated > 0, "truncated byte count must be reported");
+});
+
 // NOTE: `eval --frame` no longer uses executeScript (chrome.scripting can only run a
 // serialized FUNC, never an arbitrary JS STRING → the #190 value:null bug). It now runs
 // via CDP Runtime.evaluate — see tests/frame_eval_cdp.test.mjs.
