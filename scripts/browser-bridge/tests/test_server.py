@@ -1306,8 +1306,9 @@ def test_ping_does_not_wait_out_cmd_timeout(monkeypatch):
     """REGRESSION. Pre-change `ping` used cmd_timeout like every other op, so
     against a wedged extension it burned the full budget before answering."""
     monkeypatch.delenv("BROWSER_BRIDGE_PING_TIMEOUT", raising=False)
-    # cmd_timeout is 8s; the default ping deadline is PING_TIMEOUT_DEFAULT (2s).
-    srv, _ = _serve(cmd_timeout=8.0, poll_timeout=5.0)
+    # cmd_timeout 25s vs PING_TIMEOUT_DEFAULT 10s — the gap has to be wide enough
+    # that "used its own deadline" and "used cmd_timeout" are unmistakable.
+    srv, _ = _serve(cmd_timeout=25.0, poll_timeout=5.0)
     ext = FakeExtension(srv, swallow=True)       # picks up, never answers
     ext.start()
     try:
@@ -1316,11 +1317,11 @@ def test_ping_does_not_wait_out_cmd_timeout(monkeypatch):
         st, body = _req(srv, "POST", "/cmd", {"op": "ping"})
         elapsed = time.monotonic() - t0
         assert st == 504 and body["error"] == "timeout"
-        # Red pre-change: this was ~8s (the full cmd_timeout).
-        assert elapsed < 5.0, f"ping waited {elapsed:.1f}s — cmd_timeout, not its own"
+        # Red pre-change: this was ~25s (the full cmd_timeout).
+        assert elapsed < 17.0, f"ping waited {elapsed:.1f}s — cmd_timeout, not its own"
         # ...and it did actually WAIT its own deadline rather than failing instantly
         # for some unrelated reason (which would make the bound above vacuous).
-        assert elapsed >= 1.5, f"ping returned in {elapsed:.2f}s — it never waited"
+        assert elapsed >= 8.0, f"ping returned in {elapsed:.2f}s — it never waited"
     finally:
         ext.stop(); srv.shutdown(); srv.server_close()
 
@@ -1332,8 +1333,16 @@ def test_the_short_deadline_applies_to_ping_ONLY(monkeypatch):
 
     Same server, same wedged extension, a non-ping op: it must still wait out the
     full cmd_timeout.
+
+    🔴 BOUNDED ON BOTH SIDES, and the UPPER bound is the load-bearing half. With
+    cmd_timeout(4s) < PING_TIMEOUT_DEFAULT(10s), a lower bound alone would SURVIVE
+    the very mutation this control exists to catch: `op_timeout = ping_timeout`
+    leaks 10s onto getHtml, and 10 >= 3.5 passes. Caught when the default was
+    raised from 2s to 10s and this control silently stopped discriminating.
     """
     monkeypatch.delenv("BROWSER_BRIDGE_PING_TIMEOUT", raising=False)
+    assert S.PING_TIMEOUT_DEFAULT > 4.0, (
+        "this control needs cmd_timeout < PING_TIMEOUT_DEFAULT to discriminate")
     srv, _ = _serve(cmd_timeout=4.0, poll_timeout=5.0)
     ext = FakeExtension(srv, swallow=True)
     ext.start()
@@ -1344,18 +1353,92 @@ def test_the_short_deadline_applies_to_ping_ONLY(monkeypatch):
         elapsed = time.monotonic() - t0
         assert st == 504
         assert elapsed >= 3.5, (
-            f"getHtml returned in {elapsed:.2f}s — the short ping deadline leaked "
-            "onto every op")
+            f"getHtml returned in {elapsed:.2f}s — it never waited cmd_timeout")
+        assert elapsed < 7.0, (
+            f"getHtml waited {elapsed:.2f}s — the ping deadline leaked onto every "
+            "op (cmd_timeout was 4s)")
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
+def test_ping_survives_a_BUSY_but_perfectly_healthy_extension(monkeypatch):
+    """🔴 REGRESSION (adversarial audit of PR #278). The FIRST cut of this feature
+    used a 2s deadline and had NO test with a BUSY extension — only a wedged one
+    and an idle one. That is the whole gap: the extension's poll loop is strictly
+    SERIAL (service_worker.js:1646-1652 — `await execute()` → `await postResult()`
+    → next `pollOnce()`), so `ping` skips the per-tab FIFO but still cannot be
+    DEQUEUED until whatever is already running finishes.
+
+    Consequence of the 2s cut, measured: two sessions drive one Brave profile;
+    agent B runs `browser ping` (the skill's documented FIRST action) while agent A
+    is mid-`nav` on a heavy page. B got a 504 and the message "is Brave focused /
+    responsive?", whose documented remedy is a FULL Brave restart of the operator's
+    live session. A healthy profile reported as dead.
+
+    This models exactly that: a legitimate BUSY_S-second op in flight, then a ping.
+
+    The elapsed LOWER bound is what stops this being vacuous — without it the test
+    passes against an extension that was never actually busy, which is the mistake
+    the original S2 tests made.
+    """
+    BUSY_S = 6.0
+    monkeypatch.delenv("BROWSER_BRIDGE_PING_TIMEOUT", raising=False)
+
+    def executor(cmd):
+        if cmd.get("op") == "getHtml":
+            time.sleep(BUSY_S)          # a legitimate slow op, NOT a wedge
+            return {"html": "<html></html>"}
+        return {"pong": True, "extensionVersion": "0.7.0"}
+
+    srv, _ = _serve(cmd_timeout=25.0, poll_timeout=5.0)
+    ext = FakeExtension(srv, executor=executor)
+    ext.start()
+    slow = {}
+    try:
+        assert _wait_connected(srv, want=True)
+
+        # Agent A: the slow-but-healthy op.
+        t = threading.Thread(
+            target=lambda: slow.update(
+                zip(("st", "body"), _req(srv, "POST", "/cmd", {"op": "getHtml"}))),
+            daemon=True)
+        t.start()
+
+        # Wait until the extension has actually PICKED IT UP — being busy is the
+        # precondition under test, so it must be established, not assumed.
+        deadline = time.time() + 5.0
+        while time.time() < deadline:
+            if any(c.get("op") == "getHtml" for c in ext.dispatched):
+                break
+            time.sleep(0.02)
+        else:
+            pytest.fail("the fake extension never dequeued the slow op")
+
+        # Agent B: the diagnostic, issued against a busy-but-healthy extension.
+        t0 = time.monotonic()
+        st, body = _req(srv, "POST", "/cmd", {"op": "ping"})
+        elapsed = time.monotonic() - t0
+
+        assert st == 200, (
+            f"a BUSY but healthy extension was reported dead after {elapsed:.2f}s "
+            "— this is the false negative that sends an operator to restart Brave")
+        assert body["result"]["data"]["pong"] is True
+        # NOT vacuous: it genuinely queued behind the slow op.
+        assert elapsed >= BUSY_S * 0.5, (
+            f"ping answered in {elapsed:.2f}s — the extension was not actually "
+            "busy, so this proves nothing")
+        t.join(timeout=10)
+        assert slow.get("st") == 200, "the slow op must also have completed fine"
     finally:
         ext.stop(); srv.shutdown(); srv.server_close()
 
 
 def test_a_healthy_ping_is_unaffected_and_answers_in_milliseconds(monkeypatch):
-    """NEGATIVE CONTROL #2: the 2 s cap must never truncate the HEALTHY path. 21
-    measured healthy pings averaged 3–4 ms, so 2 s is ~500× headroom — assert the
-    fast path still returns 200, not a timeout."""
+    """NEGATIVE CONTROL #2: the cap must never truncate the HEALTHY path. 21
+    measured healthy pings averaged 3–4 ms, so the 10 s deadline is ~2500×
+    headroom — assert the fast path still returns 200, not a timeout."""
     monkeypatch.delenv("BROWSER_BRIDGE_PING_TIMEOUT", raising=False)
-    srv, _ = _serve(cmd_timeout=8.0, poll_timeout=5.0)
+    srv, _ = _serve(cmd_timeout=25.0, poll_timeout=5.0)
     ext = FakeExtension(srv, executor=lambda c: {"pong": True})
     ext.start()
     try:

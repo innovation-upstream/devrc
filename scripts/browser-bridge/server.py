@@ -70,15 +70,15 @@ Config (env):
     BROWSER_BRIDGE_PORT          bind port (default 8788 — must NOT be 8787)
     BROWSER_BRIDGE_TOKEN_FILE    token path (default ~/.config/browser-bridge/token)
     BROWSER_BRIDGE_CMD_TIMEOUT   seconds a /cmd waits for a result (default 20)
-    BROWSER_BRIDGE_PING_TIMEOUT  seconds a `ping` /cmd waits (default 2). `ping` is
-                                 the DIAGNOSTIC op — the thing you run FIRST to ask
-                                 "is the loaded extension current?" — so it must
-                                 answer "no" fast. Measured 2026-08-02: a 38%
-                                 failure rate, and every failure burned the full
-                                 20s CMD_TIMEOUT while 21 healthy pings averaged
-                                 3-4ms. 2s is ~500x headroom over the healthy path.
-                                 Applies to `ping` ONLY; every other op keeps
-                                 CMD_TIMEOUT.
+    BROWSER_BRIDGE_PING_TIMEOUT  seconds a `ping` /cmd waits (default 10). `ping`
+                                 is the DIAGNOSTIC op — the thing you run FIRST to
+                                 ask "is the loaded extension current?" — so it
+                                 must answer "no" faster than the generic 20s.
+                                 It must NOT go below the longest a HEALTHY
+                                 extension can be busy, or a busy profile reports
+                                 as dead; see PING_TIMEOUT_DEFAULT for the full
+                                 invariant. Applies to `ping` ONLY; every other op
+                                 keeps CMD_TIMEOUT.
     BROWSER_BRIDGE_POLL_TIMEOUT  seconds a /poll blocks before 204 (default 25)
     BROWSER_BRIDGE_RATE_PER_SEC  per-instance sustained /cmd dispatch rate
                                  (token-bucket refill, default 5; 0 → unlimited)
@@ -206,10 +206,45 @@ CONNECT_STALE_S = 40.0
 # suspect the loaded extension is stale, and a diagnostic that takes 20s to say
 # "no" is one an operator learns to skip. MEASURED 2026-08-02 over a 2-day window:
 # 34 pings, 13 failures (38.2% — the worst rate of any op), of which 6 timed out at
-# exactly 20,000ms; the 21 healthy ones averaged 3-4ms. 2s leaves ~500x headroom
-# over the healthy path while capping the failure path at a tenth of what it was.
-# Override with BROWSER_BRIDGE_PING_TIMEOUT (e.g. a slow/loaded host).
-PING_TIMEOUT_DEFAULT = 2.0
+# exactly 20,000ms; the 21 healthy ones averaged 3-4ms.
+#
+# 🔴 THE INVARIANT THIS VALUE MUST SATISFY — not the number, the property:
+#
+#   PING_TIMEOUT_DEFAULT  >  the longest a HEALTHY extension can be busy with a
+#                            command the CLI is able to ASK FOR.
+#
+# because the extension's poll loop is strictly SERIAL (service_worker.js: `await
+# execute()` -> `await postResult()` -> next `pollOnce()`). `ping` skips the
+# per-tab FIFO but still cannot be DEQUEUED until the running command finishes. So
+# a deadline below that bound reports a perfectly healthy, merely BUSY profile as
+# dead — and the documented remedy for "dead" is a FULL Brave restart of the
+# operator's live session. That is a far worse outcome than waiting.
+#
+# The bounds, from extension/protocol.js:
+#   ACTIVATE_WAIT_MAX_MS  8s   <- the largest wait the CLI can request (`activate
+#                                 --wait 8000`); WAKE_SETTLE_MAX_MS is 6s
+#   CDP_OP_BUDGET_MS     15s   <- a CDP-routed op's own budget
+#   EXEC_OP_BUDGET_MS    18s   <- execute()'s hard self-bound; nothing exceeds it
+#
+# 10s is chosen as the smallest value ABOVE the 8s caller-requestable ceiling, with
+# ~2s of slack for the result POST + poll turnaround. It is ~2500x the 3-4ms
+# healthy path and halves the old 20s failure path.
+#
+# ⚠ RESIDUAL, stated rather than hidden: 10s < EXEC_OP_BUDGET_MS, so a preceding op
+# that legitimately runs 10-18s (a heavy CDP screenshot) can STILL time a ping out.
+# Only >=18s would eliminate the class, and that is the 20s this exists to avoid.
+# The mitigation is that the timeout MESSAGE for `ping` now says the extension may
+# be busy and explicitly refuses to recommend a Brave restart — see the CLI's 504
+# branch. Raise BROWSER_BRIDGE_PING_TIMEOUT on the browser-bridge service if your
+# workload runs long ops concurrently.
+#
+# ✗ REJECTED ALTERNATIVE (do not re-derive it): "use the short deadline only when
+# the instance is idle, escalate to cmd_timeout when it is busy." `inst.pending`
+# cannot distinguish BUSY from WEDGED — a wedged extension is precisely one that
+# took a command and never answered, i.e. pending > 0 — so the escalation would
+# fire in exactly the case the short deadline exists for, and `ping` would be back
+# to 20s whenever it mattered.
+PING_TIMEOUT_DEFAULT = 10.0
 
 
 def _env_float(name: str, default: float) -> float:

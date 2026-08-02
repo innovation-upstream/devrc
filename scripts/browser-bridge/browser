@@ -752,7 +752,30 @@ cmd_op() {
       _explain_instance_failure "$resp" "$INSTANCE" no_extension
       die "op '$op' not dispatched: no extension connected"
       ;;
-    504) echo "$resp" >&2; die "timeout waiting for the extension to answer (is Brave focused / responsive?)" ;;
+    504)
+      # `ping` needs its OWN wording. It runs on a SHORT deadline
+      # (BROWSER_BRIDGE_PING_TIMEOUT, default 10s) and the extension's poll loop is
+      # strictly SERIAL, so a ping queued behind another session's in-flight op
+      # times out while the profile is perfectly healthy. The generic message —
+      # "is Brave focused / responsive?" — points at a stale/dead extension, whose
+      # documented remedy is a FULL Brave restart of the operator's LIVE session.
+      # Sending someone there on a false negative is the worst outcome this command
+      # has, so the ping wording must NOT imply it.
+      if [ "$op" = "ping" ]; then
+        echo "browser: ping timed out on its SHORT deadline (BROWSER_BRIDGE_PING_TIMEOUT, default 10s)." >&2
+        echo "browser:   This does NOT mean the extension is stale, wedged or dead." >&2
+        echo "browser:   The extension runs ONE command at a time, so a ping queued behind" >&2
+        echo "browser:   another session's op (a heavy nav, a --fullpage screenshot) times out" >&2
+        echo "browser:   here while the profile is perfectly healthy." >&2
+        echo "browser:   DO THIS FIRST: wait for the other op to finish and re-run the ping." >&2
+        echo "browser:   Only if it fails again on an IDLE profile is the build actually suspect." >&2
+        echo "browser:   For a host that runs long ops concurrently, raise" >&2
+        echo "browser:   BROWSER_BRIDGE_PING_TIMEOUT on the browser-bridge service and restart it." >&2
+        echo "$resp" >&2
+        die "ping timed out (see above) — do NOT restart Brave on the strength of this alone"
+      fi
+      echo "$resp" >&2; die "timeout waiting for the extension to answer (is Brave focused / responsive?)"
+      ;;
     401) die "unauthorized — token mismatch (re-paste the token in the extension options)" ;;
     429)
       # rate_limited / queue_full — the per-instance concurrency backstop is
