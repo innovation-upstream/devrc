@@ -698,6 +698,57 @@ in
     source = ../scripts/claude-hooks/claude-notify.py;
   };
 
+  # ------------------------------------------------------------------------- #
+  # opencode — global config, instruction file, env plugin and subagents.
+  # Source of truth: devrc/scripts/opencode/ (+ the generated AGENTS.md below).
+  # See scripts/opencode/README.md for the measured facts behind each choice.
+  # ------------------------------------------------------------------------- #
+
+  # 🔴 GENERATED, not symlinked — and that is the whole point.
+  # opencode does NOT expand `@`-imports inside AGENTS.md/CLAUDE.md (measured on
+  # v1.18.4 with an all-tools-denied agent, so no file read was possible: an
+  # imported passphrase came back NONE, the same content inline came back
+  # verbatim). ~/.claude/CLAUDE.md is ~1.5 KB of `@PRINCIPLES.md` + `@RULES.md`
+  # import lines, so pointing opencode at it would deliver NONE of the 32 KB of
+  # actual rules. A project AGENTS.md also SUPPRESSES CLAUDE.md (first match
+  # wins), so this is the file opencode really reads.
+  #
+  # Concatenating at switch time means it can never drift from the sources
+  # Claude Code reads. Measured result: 38,033 B / 37.1 KB ≈ 8.8k tokens (at the
+  # 4.31 B/token measured on this exact content) — safe. (For scale: a 331 KB
+  # AGENTS.md causes a permanent compaction loop.)
+  # scripts/tests/test_opencode_config.py pins the content and a 100 KB ceiling.
+  home.file.".config/opencode/AGENTS.md".text =
+    builtins.readFile ../claude/PRINCIPLES.md
+    + "\n\n" + builtins.readFile ../claude/RULES.md
+    + "\n\n" + builtins.readFile ../claude/opencode-addendum.md;
+
+  # Global config: model + small_model, the cheap-model pinning of the hidden
+  # title/summary/compaction agents, a genuinely read-only `plan`, and the
+  # permission block.
+  # 🔴 The permission block's ordering is LOAD-BEARING and is the INVERSE of
+  # Claude Code — opencode is LAST-MATCH-WINS, so `"*": "allow"` comes FIRST and
+  # the denies after. Do not sort those keys. See the file's own header comment.
+  home.file.".config/opencode/opencode.jsonc".source = ../scripts/opencode/opencode.jsonc;
+
+  # `shell.env` plugin — the ONLY way to get environment into opencode's bash
+  # tool. There is no `env` config key (verified: silently ignored), and the
+  # bash tool does not source zsh startup files — which is why `KUBECONFIG=`
+  # ended up hand-retyped 169 times across 3 spellings before this existed.
+  # 🔴 Must land DIRECTLY in `plugin/` as a `.js`: the glob is
+  # `{plugin,plugins}/*.{ts,js}` — non-recursive, and a `.mjs` will NOT load.
+  # Hence a single-file entry rather than a recursive dir symlink.
+  home.file.".config/opencode/plugin/env.js".source = ../scripts/opencode/env.js;
+
+  # Subagents: nav (read-only navigator, bash DENIED — the deterministic fix for
+  # ~356 file-navigation shell-outs), k8s (cluster ops), review (adversarial).
+  # Deliberately only three: every available subagent permanently enlarges the
+  # PRIMARY agent's `task` tool description on every single request.
+  home.file.".config/opencode/agent" = {
+    source = ../scripts/opencode/agent;
+    recursive = true;
+  };
+
   # These hooks previously existed as PLAIN local files (claude-notify.py +
   # test_claude_notify.py on the laptop; bash-guard.py on BOTH hosts). A
   # hand-placed regular file at a managed path is NOT replaced by the store
@@ -721,6 +772,25 @@ in
         $DRY_RUN_CMD rm -f "$f"
       fi
     done
+  '';
+
+  # Same failure mode as dropStaleClaudeHooks above, for opencode's config:
+  # ~/.config/opencode/opencode.jsonc already exists on this host as a
+  # HAND-PLACED REGULAR FILE (a 50-byte `$schema`-only stub). checkLinkTargets
+  # would abort the whole switch with "would be clobbered", and `force = true`
+  # is NOT sufficient to displace a real file at a managed path.
+  #
+  # Unlike the hooks above — whose content is in git, so deleting them is
+  # lossless — this file is UNMANAGED and its content exists nowhere else. So
+  # BACK IT UP rather than `rm`: move it aside to a timestamped .bak and let the
+  # store symlink take the path. Guarded on `! -L` so a legitimately-managed
+  # store symlink is never touched, which also makes this a no-op on every
+  # switch after the first (and on a host that never had the stub).
+  home.activation.opencodeDropStaleConfig = lib.hm.dag.entryBefore ["checkLinkTargets"] ''
+    f="$HOME/.config/opencode/opencode.jsonc"
+    if [ -e "$f" ] && [ ! -L "$f" ]; then
+      $DRY_RUN_CMD mv -f "$f" "$f.pre-devrc-$(date +%Y%m%d%H%M%S).bak"
+    fi
   '';
 
   # Reusable failure-notification TEMPLATE unit. The important user units below
