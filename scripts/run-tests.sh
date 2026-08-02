@@ -139,6 +139,12 @@ HERMETIC_DIRS=(
   scripts/initiatives/tests
   scripts/repo-cos/tests
   scripts/task-spec-drafter/tests
+  # A FILE, not a dir, and deliberately so: scripts/claude-hooks/tests/ also
+  # holds hand-rolled scripts that call main() at import and sys.exit(), which
+  # pytest cannot collect. Naming the one pytest-collectable file keeps them
+  # apart. (test_guard_core.py covers the shared guard core behind BOTH
+  # bash-guard.py and opencode's plugin/guard.js.)
+  scripts/claude-hooks/tests/test_guard_core.py
 )
 
 # --- DEV-HOST-ONLY set ---------------------------------------------------------

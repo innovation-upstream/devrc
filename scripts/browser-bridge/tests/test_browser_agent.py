@@ -276,6 +276,12 @@ def rig(tmp_path):
     oc_env = tmp_path / "oc_env.log"
     probe_count = tmp_path / "probe.count"
     scratch_root = tmp_path / "scratch"; scratch_root.mkdir()
+    # 🔴 Isolate the isolated-config-dir. Without this the wrapper falls back to
+    # the REAL ~/.cache/browser-agent-opencode-config, and its warm/bootstrap step
+    # would see a stamp written by the real opencode, judge the dir stale (the
+    # fake binary has a different identity), and `rm -rf` the operator's warmed
+    # 62 MB node_modules as a side effect of running the test suite.
+    oc_config_dir = tmp_path / "oc-config"
 
     def run(args, mode="ok", extra_env=None, timeout=60, open_fail=False,
             tabid=TAB_ID, probe_fail=0):
@@ -287,6 +293,7 @@ def rig(tmp_path):
             FRB_LOG=str(frb_log), FRB_TABID=str(tabid),
             FRB_PROBE_FAIL_TIMES=str(probe_fail), FRB_PROBE_COUNT=str(probe_count),
             TMPDIR=str(scratch_root),
+            BROWSER_AGENT_OPENCODE_CONFIG_DIR=str(oc_config_dir),
             BROWSER_AGENT_KEEP_SCRATCH="1",
             # Keep the open->readiness-retry backoff near-zero so the retry tests
             # don't sleep (the real default is ~0.4s to let the SW settle).

@@ -657,6 +657,18 @@ in
     source = ../scripts/claude-hooks/bash-guard.py;
     force = true;
   };
+  # 🔴 guard_core.py — the SHARED, caller-agnostic checking core. bash-guard.py
+  # is now a thin adapter that imports it from its OWN directory, so this file
+  # MUST land next to it or the guard fails closed on every Bash call (it denies
+  # with an actionable message rather than passing commands through unchecked).
+  # The SAME source file is also deployed to ~/.config/opencode/guard_core.py
+  # below and driven by the opencode plugin — one implementation, two harnesses,
+  # two named policies ("claude-code" = the frozen original six; "opencode" =
+  # those plus the irreversible-action checks).
+  home.file.".claude/hooks/guard_core.py" = {
+    source = ../scripts/claude-hooks/guard_core.py;
+    force = true;
+  };
   # `browser` skill — the DELIBERATE EXCEPTION to the store-symlink pattern above.
   # Its source of truth is the browser-bridge subsystem in THIS repo
   # (scripts/browser-bridge/{SKILL.md,browser}), NOT devrc/claude/skills/. So rather
@@ -698,6 +710,162 @@ in
     source = ../scripts/claude-hooks/claude-notify.py;
   };
 
+  # ------------------------------------------------------------------------- #
+  # opencode — global config, instruction file, env plugin and subagents.
+  # Source of truth: devrc/scripts/opencode/ (+ the generated AGENTS.md below).
+  # See scripts/opencode/README.md for the measured facts behind each choice.
+  # ------------------------------------------------------------------------- #
+
+  # 🔴 GENERATED, not symlinked — and that is the whole point.
+  # opencode does NOT expand `@`-imports inside AGENTS.md/CLAUDE.md (measured on
+  # v1.18.4 with an all-tools-denied agent, so no file read was possible: an
+  # imported passphrase came back NONE, the same content inline came back
+  # verbatim). ~/.claude/CLAUDE.md is ~1.5 KB of `@PRINCIPLES.md` + `@RULES.md`
+  # import lines, so pointing opencode at it would deliver NONE of the 32 KB of
+  # actual rules. A project AGENTS.md also SUPPRESSES CLAUDE.md (first match
+  # wins), so this is the file opencode really reads.
+  #
+  # Concatenating at switch time means it can never drift from the sources
+  # Claude Code reads. Measured result: 38,363 B / 37.5 KB ≈ 8.9k tokens (at the
+  # 4.31 B/token measured on this exact content) — safe. (For scale: a 331 KB
+  # AGENTS.md causes a permanent compaction loop.)
+  # scripts/tests/test_opencode_config.py pins the content and a 100 KB ceiling.
+  home.file.".config/opencode/AGENTS.md".text =
+    builtins.readFile ../claude/PRINCIPLES.md
+    + "\n\n" + builtins.readFile ../claude/RULES.md
+    + "\n\n" + builtins.readFile ../claude/opencode-addendum.md;
+
+  # Global config: model + small_model, the cheap-model pinning of the hidden
+  # title/summary/compaction agents, a genuinely read-only `plan`, and the
+  # permission block.
+  # 🔴 The permission block's ordering is LOAD-BEARING and is the INVERSE of
+  # Claude Code — opencode is LAST-MATCH-WINS, so `"*": "allow"` comes FIRST and
+  # the denies after. Do not sort those keys. See the file's own header comment.
+  home.file.".config/opencode/opencode.jsonc".source = ../scripts/opencode/opencode.jsonc;
+
+  # 🔴 THE ENFORCEMENT LAYER. opencode.jsonc's globs are FRICTION; this plugin is
+  # the control. It runs guard_core.py's "opencode" policy on every bash call
+  # from `tool.execute.before` and THROWS on a deny, which hard-blocks the call.
+  #
+  # Why a plugin and not more globs: a glob matches a command node's full text,
+  # so `talosctl -n <ip> reset` (a node wipe) resolved ALLOW at c1e4c02 because
+  # the pattern required the tool and the verb to be adjacent. guard_core.py
+  # tokenises instead — it splits on `;`/`&&`/`||`/`|`/`&`, strips `VAR=…`
+  # prefixes and sudo/doas/env/timeout wrappers, recurses into `bash -c '…'`,
+  # and reasons about argv.
+  #
+  # Why `tool.execute.before` and not `permission.ask`: MEASURED on 1.18.4 —
+  # `permission.ask` is in the Hooks type and its `output.status` is typed
+  # `"ask"|"deny"|"allow"`, but it NEVER FIRED in any probe (not on the allow
+  # path, not on the ask path). `tool.execute.before` fired on every bash call.
+  # So DENY is expressible from a plugin and ASK is not; ask-grade families stay
+  # as globs.
+  #
+  # 🔴 Same deployment constraints as env.js: directly in `plugin/`, `.js` only,
+  # non-recursive glob.
+  home.file.".config/opencode/plugin/guard.js".source = ../scripts/opencode/plugin/guard.js;
+
+  # The plugin resolves `../guard_core.py` relative to its own module URL, so the
+  # SAME source file that backs ~/.claude/hooks/guard_core.py is deployed here
+  # too. Two independent deployments of one implementation: opencode's guard does
+  # not depend on ~/.claude/ existing, and Claude Code's does not depend on
+  # ~/.config/opencode/ existing.
+  home.file.".config/opencode/guard_core.py".source = ../scripts/claude-hooks/guard_core.py;
+
+  # `shell.env` plugin — the only supported seam for putting environment into
+  # opencode's bash tool (there is no `env` config key; setting one is silently
+  # ignored). NOTE the bash tool DOES source .zshenv on this host — see the
+  # correction in the generated header below; this plugin is belt-and-braces
+  # for a non-zsh `$SHELL`, not a workaround for a missing mechanism.
+  # 🔴 Must land DIRECTLY in `plugin/` as a `.js`: the glob is
+  # `{plugin,plugins}/*.{ts,js}` — non-recursive, and a `.mjs` will NOT load.
+  # Hence a single-file entry rather than a recursive dir symlink.
+  #
+  # 🔴 GENERATED (.text), not symlinked, from nix/agent-handles.nix — the SAME
+  # file programs/zsh reads. It used to be a checked-in .js with a hardcoded
+  # `/home/zach/workspace/homelab-talos` that duplicated (and had already
+  # drifted from) the zsh block: no existence guard, and a KC_PROD zsh lacked.
+  # Deriving both from `${config.home.homeDirectory}` removes the second copy.
+  #
+  # The existence guard matters: an unguarded handle pointing at a missing
+  # kubeconfig is the failure mode where a command runs against NO cluster while
+  # looking like it worked. `fs.existsSync` is used rather than a shell test
+  # because this is a JS hook, and it is evaluated per shell.env call (cheap —
+  # a handful of stats) so a checkout appearing mid-session is picked up.
+  home.file.".config/opencode/plugin/env.js".text =
+    let
+      handles = import ./agent-handles.nix { home = config.home.homeDirectory; };
+      entry = kind: name: path:
+        "  if (${kind}(${builtins.toJSON path})) output.env.${name} = ${builtins.toJSON path};";
+      lines =
+        (builtins.attrValues (builtins.mapAttrs (entry "isDir") handles.repos))
+        ++ (builtins.attrValues (builtins.mapAttrs (entry "isFile") handles.kubeconfigs));
+    in
+    ''
+      // env.js — opencode plugin that injects the repo/kubeconfig handles into
+      // every bash tool invocation.
+      //
+      // 🔴 GENERATED by nix/home.nix from nix/agent-handles.nix. Do NOT edit this
+      // file, and do not edit ~/.config/opencode/plugin/env.js (a read-only store
+      // symlink). Add or change a handle in nix/agent-handles.nix — that same file
+      // also generates the zsh exports Claude Code sees, which is the point.
+      //
+      // WHY A PLUGIN AT ALL: opencode has NO `env` config key (verified on v1.18.4
+      // — setting one is silently ignored), so the `shell.env` hook is the only
+      // supported seam for putting variables into the bash tool.
+      //
+      // 🔴 CORRECTION (measured 2026-08-02, opencode 1.18.4, this host). An earlier
+      // version of this comment claimed the bash tool "does NOT source zsh startup
+      // files, so the handles devrc exports from .zshenv are invisible to it".
+      // THAT IS FALSE HERE. The tool shell is zsh (`ZSH_VERSION` reports 5.9 inside
+      // a bash tool call) and it DOES source `.zshenv`: with this plugin absent AND
+      // `VITEST_MAX_WORKERS` explicitly unset in the parent environment, the tool
+      // still reported `4` — a value set only by `.zshenv`. `$HOMELAB` likewise
+      // resolved with no plugin present.
+      //
+      // The original negative control ("with the plugin present $KC_HOMELAB
+      // resolves; with it absent it is empty") was real but MISATTRIBUTED. The
+      // kubeconfigs are gitignored and absent from this checkout, so zsh's
+      // existence guard correctly declines to export `KC_HOMELAB` — while the old
+      // UNGUARDED env.js exported it regardless. The plugin looked load-bearing
+      // because it was pointing a handle at a file that does not exist, which is
+      // exactly the "runs against no cluster while looking like it worked" failure
+      // the k8s agent prompt warns about. Hence the guard above.
+      //
+      // So this plugin is BELT-AND-BRACES, not a workaround for a missing
+      // mechanism: it is independent of `$SHELL`, so the handles survive on a host
+      // whose login shell is not zsh. Keep it, but do not restate the old claim.
+      //
+      // DEPLOYMENT CONSTRAINTS (measured on v1.18.4 — do not "tidy" these away):
+      //   * the plugin glob is `{plugin,plugins}/*.{ts,js}` — NON-RECURSIVE, and
+      //     `.ts`/`.js` ONLY. A `.mjs` file will NOT load. This file must therefore
+      //     land directly at `~/.config/opencode/plugin/env.js`, never in a subdir.
+      //   * the hook mutates `output.env`; it does not return a new object.
+      import { statSync } from "node:fs";
+
+      // Existence-guarded, mirroring the `[[ -d ]]` / `[[ -f ]]` tests in the zsh
+      // block. A handle that points at a missing kubeconfig is worse than an
+      // absent one: `KUBECONFIG=$KC_PROD kubectl …` would run against no cluster
+      // while looking like it worked.
+      const isDir = (p) => { try { return statSync(p).isDirectory(); } catch { return false; } };
+      const isFile = (p) => { try { return statSync(p).isFile(); } catch { return false; } };
+
+      export const EnvPlugin = async () => ({
+        "shell.env": async (_input, output) => {
+      ${builtins.concatStringsSep "\n" (map (l: "  " + l) lines)}
+        },
+      });
+    '';
+
+  # Subagents: nav (read-only navigator, bash DENIED — the deterministic fix for
+  # ~356 file-navigation shell-outs), k8s (cluster ops), review (adversarial).
+  # Deliberately only three: every available subagent permanently enlarges the
+  # PRIMARY agent's `task` tool description on every single request.
+  home.file.".config/opencode/agent" = {
+    source = ../scripts/opencode/agent;
+    recursive = true;
+  };
+
   # These hooks previously existed as PLAIN local files (claude-notify.py +
   # test_claude_notify.py on the laptop; bash-guard.py on BOTH hosts). A
   # hand-placed regular file at a managed path is NOT replaced by the store
@@ -721,6 +889,25 @@ in
         $DRY_RUN_CMD rm -f "$f"
       fi
     done
+  '';
+
+  # Same failure mode as dropStaleClaudeHooks above, for opencode's config:
+  # ~/.config/opencode/opencode.jsonc already exists on this host as a
+  # HAND-PLACED REGULAR FILE (a 50-byte `$schema`-only stub). checkLinkTargets
+  # would abort the whole switch with "would be clobbered", and `force = true`
+  # is NOT sufficient to displace a real file at a managed path.
+  #
+  # Unlike the hooks above — whose content is in git, so deleting them is
+  # lossless — this file is UNMANAGED and its content exists nowhere else. So
+  # BACK IT UP rather than `rm`: move it aside to a timestamped .bak and let the
+  # store symlink take the path. Guarded on `! -L` so a legitimately-managed
+  # store symlink is never touched, which also makes this a no-op on every
+  # switch after the first (and on a host that never had the stub).
+  home.activation.opencodeDropStaleConfig = lib.hm.dag.entryBefore ["checkLinkTargets"] ''
+    f="$HOME/.config/opencode/opencode.jsonc"
+    if [ -e "$f" ] && [ ! -L "$f" ]; then
+      $DRY_RUN_CMD mv -f "$f" "$f.pre-devrc-$(date +%Y%m%d%H%M%S).bak"
+    fi
   '';
 
   # Reusable failure-notification TEMPLATE unit. The important user units below
