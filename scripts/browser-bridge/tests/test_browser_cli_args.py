@@ -431,6 +431,40 @@ def test_help_does_not_require_a_token_file(tmp_path):
         assert "token file" not in cp.stderr, args
 
 
+def test_help_prints_the_HEADER_block_only_not_the_whole_files_comments(tmp_path):
+    """REGRESSION. `--help` was `grep -E '^#( |$)' "$0"` — EVERY column-0 comment
+    in the file, so it shipped 25,440 bytes of implementation commentary against a
+    ~15 KB header, and it grew with every internal comment anyone wrote.
+
+    Pinned three ways, because a size bound alone is a weak claim:
+      * the header's own landmarks are present (it did not over-trim);
+      * comments that live BELOW the first line of code are absent;
+      * `--help` stops at the first non-comment line.
+    """
+    env = dict(os.environ,
+               BROWSER_BRIDGE_TOKEN_FILE=str(tmp_path / "absent"))
+    cp = subprocess.run(["bash", str(CLI), "--help"], env=env,
+                        capture_output=True, text=True, timeout=60)
+    assert cp.returncode == 0, cp.stderr
+
+    # Landmarks from the header block — the help must still be the real help.
+    for needle in ("FLAG ORDER / END OF FLAGS", "browser nav <url> [--wake[=MS]]",
+                   "Global flags (before the subcommand)"):
+        assert needle in cp.stdout, needle
+
+    # Implementation commentary lives after `set -uo pipefail`, the first line of
+    # code. These strings are all in the file and must NOT be in --help.
+    src = CLI.read_text(encoding="utf-8")
+    for needle in ("wake_fields WAKE WAITMS", "cmd_op OP [EXTRA_JSON_FIELDS]",
+                   "_wake_flag ARG", "strict=validate"):
+        assert needle in src, f"{needle} vanished from the source; retarget this test"
+        assert needle not in cp.stdout, f"--help leaked an internal comment: {needle}"
+
+    # And it genuinely stops at the code: the header ends right before this line.
+    header = src.split("\nset -uo pipefail", 1)[0]
+    assert len(cp.stdout) < len(header), "help is larger than the header block"
+
+
 def test_an_unknown_subcommand_is_reported_as_such_without_a_token(tmp_path):
     """A typo must not be reported as a missing token. This is what still failed
     the hermetic gate after the --help fix: `browser bogus-op` in a sandbox with

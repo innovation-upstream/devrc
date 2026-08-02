@@ -352,7 +352,18 @@ done
 # → "token file not found/readable"). Dispatched here rather than in the `case`
 # below, which runs after the token is read.
 case "${1:-}" in
-  ""|-h|--help|help) grep -E '^#( |$)' "$0" | sed -E 's/^# ?//'; exit 0 ;;
+  # --help prints the LEADING comment block only — the contiguous run of `#` lines
+  # after the shebang, stopping at the first line of code.
+  #
+  # It used to be `grep -E '^#( |$)' "$0"`, which matched EVERY column-0 comment in
+  # the file, so `--help` shipped the whole implementation commentary: 25,440 bytes
+  # against a ~15 KB header, and it GREW with every internal comment anyone added
+  # (the five audit fixes in the parent commit would alone have put 4,129 bytes of
+  # maintainer notes onto a user-facing help screen). The header block is what
+  # `--help` was always meant to be; the rest is for whoever is reading the source,
+  # which they are already doing.
+  ""|-h|--help|help)
+    awk 'NR==1 {next} /^#/ {sub(/^# ?/, ""); print; next} {exit}' "$0"; exit 0 ;;
 esac
 
 # The complete subcommand list, in ONE place: it both VALIDATES the subcommand
