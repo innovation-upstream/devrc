@@ -165,8 +165,8 @@ nothing and are never gated.
 ## Player buttons / embedded video downloads
 
 Per-player download buttons let you save embedded video directly from an `<video>`
-element (e.g. `turbo.cr` iframes embedded on a forum page like `simpcity.cr`).
-This uses a **two-layer rule system**:
+element (e.g. `example-embed.test` iframes embedded on a forum page like
+`someforum.test`). This uses a **two-layer rule system**:
 
 | Rule type | Keyed on | Purpose |
 |---|---|---|
