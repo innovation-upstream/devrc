@@ -1,4 +1,16 @@
 { config, ... }:
+let
+  # 🔴 SINGLE SOURCE OF TRUTH — shared with the opencode `shell.env` plugin
+  # generated in nix/home.nix. Defining these handles in two places is what let
+  # scripts/opencode/env.js drift (hardcoded /home/zach, no existence guard, and
+  # a KC_PROD that zsh never had). Add a handle THERE, not here.
+  handles = import ../../agent-handles.nix { home = config.home.homeDirectory; };
+  exportIf = flag: name: path:
+    "[[ ${flag} ${path} ]] && export ${name}=${path}";
+  handleLines =
+    (builtins.attrValues (builtins.mapAttrs (exportIf "-d") handles.repos))
+    ++ (builtins.attrValues (builtins.mapAttrs (exportIf "-f") handles.kubeconfigs));
+in
 {
   enable = true;
   autocd = true;
@@ -22,15 +34,12 @@
     # checkouts) and any missing file stay clean — no stale vars.
     # NO default KUBECONFIG on purpose: a merged/default one lets a bare
     # `kubectl` hit prod. Pick a cluster explicitly per command.
-    [[ -d $HOME/workspace/devrc ]]                  && export DEVRC=$HOME/workspace/devrc
-    [[ -d $HOME/workspace/homelab-talos ]]          && export HOMELAB=$HOME/workspace/homelab-talos
-    [[ -d $HOME/workspace/civit/datapacket-talos ]] && export DATAPACKET=$HOME/workspace/civit/datapacket-talos
-    [[ -d $HOME/workspace/civit/civitai ]]          && export CIVITAI=$HOME/workspace/civit/civitai
-    [[ -d $HOME/workspace/civit/civitai-cli ]]      && export CIVITAI_CLI=$HOME/workspace/civit/civitai-cli
-    [[ -f $HOME/workspace/homelab-talos/homelab-kubeconfig ]]       && export KC_HOMELAB=$HOME/workspace/homelab-talos/homelab-kubeconfig
-    [[ -f $HOME/workspace/homelab-talos/workbench-kubeconfig ]]     && export KC_WORKBENCH=$HOME/workspace/homelab-talos/workbench-kubeconfig
-    [[ -f $HOME/workspace/civit/datapacket-talos/prod-kubeconfig ]] && export KC_DPPROD=$HOME/workspace/civit/datapacket-talos/prod-kubeconfig
-    [[ -f $HOME/.kube/homelab-nebula.yaml ]]        && export KC_NEBULA=$HOME/.kube/homelab-nebula.yaml
+    #
+    # 🔴 GENERATED from nix/agent-handles.nix — the SAME file that generates
+    # opencode's plugin/env.js. Do not add a handle by hand here; it would exist
+    # for Claude Code and not for opencode, which is exactly the drift this
+    # replaced. `KC_PROD` arrived this way (env.js had it, zsh did not).
+${builtins.concatStringsSep "\n" (map (l: "    " + l) handleLines)}
 
     # ── Global test concurrency cap ─────────────────────────────────────────
     # Vitest sizes its worker pool off the FULL CPU count with no awareness of

@@ -92,13 +92,154 @@ die() { echo "browser-agent: $*" >&2; exit 2; }
 # browser-agent needs neither (it defines its own agent and has no shell), so
 # that is the intended trade, not an oversight.
 OC_CONFIG_DIR="${BROWSER_AGENT_OPENCODE_CONFIG_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/browser-agent-opencode-config}"
-mkdir -p "$OC_CONFIG_DIR" || die "cannot create opencode config dir '$OC_CONFIG_DIR'"
+
+# --- WARM/BOOTSTRAP the isolated config dir ---------------------------------- #
+# 🔴 "Stable and reused" is only half the fix: the dir has to be WARM. An
+# EMPTY-but-existing dir is byte-for-byte the cold-start case — opencode
+# materialises package.json + ~63 MB of node_modules on first use, and with no
+# network that HUNG (killed at 120 s, 0 bytes out, which trips the tool-set gate
+# below and dies with "produced NO output"). Creating the dir without warming it
+# is therefore NOT sufficient, and looks fine right up until the first offline
+# run. Verified: the dir existed and was EMPTY.
+#
+# The warm step is idempotent and cheap once warm (~0.05-0.3 s), so it runs on
+# every invocation rather than being gated on a flag that could go stale.
+#
+# Concurrency: two browser-agent runs can race here. An exclusive lock
+# serialises them so the loser waits for a warm dir instead of both driving npm
+# into the same tree. mkdir is the lock primitive (atomic on every filesystem
+# that matters, and no flock/util-linux dependency).
+#
+# Staleness: node_modules materialised by opencode X is not necessarily valid
+# for opencode Y, and a stale tree fails in confusing ways rather than loudly.
+# A version stamp forces a clean re-warm across an opencode upgrade.
+#
+# Failure: DEGRADE, LOUDLY. If the dir cannot be created or warmed we fall back
+# to the caller's normal (global) opencode config. That costs the ~7.7k
+# tokens/request this isolation exists to avoid, but it RUNS — a browser-agent
+# that works and is expensive beats one that hangs. The warning goes to stderr
+# on every such run so it cannot rot silently.
+OC_WARM_TIMEOUT="${BROWSER_AGENT_WARM_TIMEOUT:-90}"
+OC_STAMP="$OC_CONFIG_DIR/.devrc-warm-stamp"
+OC_LOCK="$OC_CONFIG_DIR.lock"
+OC_ISOLATED=0
+
+# Version stamp WITHOUT invoking opencode. Deliberately not `opencode --version`:
+# that is an extra process on every run, it fails offline in some installs, and —
+# measured — it lands in the test rig's opencode-invocation log and breaks the
+# "a hard opencode error must NOT retry" assertions, which count calls.
+# The resolved binary path is a better identity anyway: on nix it is
+# /nix/store/<hash>-opencode-<version>/bin/opencode, so the hash changes on every
+# upgrade. size:mtime covers a non-nix install that upgrades in place.
+oc_warm_version() {
+  local p
+  p="$(command -v "$OPENCODE_BIN" 2>/dev/null)" || p="$OPENCODE_BIN"
+  p="$(readlink -f "$p" 2>/dev/null || printf '%s' "$p")"
+  printf '%s|%s\n' "$p" "$(stat -c '%s:%Y' "$p" 2>/dev/null || echo '?')"
+}
+
+oc_is_warm() {  # warm == node_modules present AND stamped for THIS opencode
+  [ -d "$OC_CONFIG_DIR/node_modules" ] || return 1
+  [ -f "$OC_STAMP" ] || return 1
+  [ "$(cat "$OC_STAMP" 2>/dev/null)" = "$1" ] || return 1
+  return 0
+}
+
+oc_bootstrap() {  # <version> -> 0 warm, 1 could not warm
+  local ver="$1" rc=1
+  mkdir -p "$OC_CONFIG_DIR" 2>/dev/null || return 1
+  _oc_lock
+  _oc_bootstrap_locked "$ver"; rc=$?
+  rmdir "$OC_LOCK" 2>/dev/null
+  return $rc
+}
+
+_oc_lock() {
+  # Serialise concurrent runs. Bounded wait, then proceed anyway: a stale lock
+  # from a killed run must not wedge every future invocation.
+  local i=0
+  while ! mkdir "$OC_LOCK" 2>/dev/null; do
+    i=$((i + 1))
+    [ "$i" -ge 60 ] && { rmdir "$OC_LOCK" 2>/dev/null; mkdir "$OC_LOCK" 2>/dev/null; break; }
+    sleep 0.5
+  done
+}
+
+_oc_bootstrap_locked() {  # <version>
+  local ver="$1"
+  # Re-check under the lock: the run we queued behind may have warmed it.
+  oc_is_warm "$ver" && return 0
+
+  # Stale (different opencode version, or a half-materialised tree): start clean.
+  if [ -e "$OC_STAMP" ] || [ -d "$OC_CONFIG_DIR/node_modules" ]; then
+    rm -rf "$OC_CONFIG_DIR/node_modules" "$OC_CONFIG_DIR/package.json" \
+           "$OC_CONFIG_DIR/package-lock.json" "$OC_STAMP" 2>/dev/null
+  fi
+
+  # The minimal config this dir SHOULD carry. Isolation otherwise silently drops
+  # these three global settings, and each is worth keeping for a browser run:
+  #   autoupdate:false  — no self-update firing mid-run
+  #   share:"disabled"  — a browser session must never be shareable
+  #   tool_output caps  — a page dump is exactly the huge tool result these cap
+  # Deliberately NOT copied: the permission block, agent/, plugin/ and AGENTS.md
+  # — those are the ~7.7k tokens/request this whole mechanism exists to shed,
+  # and this agent denies every host tool anyway so the permission block is moot.
+  cat > "$OC_CONFIG_DIR/opencode.jsonc" <<'OCJSON'
+{
+  "$schema": "https://opencode.ai/config.json",
+  "autoupdate": false,
+  "share": "disabled",
+  "tool_output": { "max_lines": 800, "max_bytes": 24576 }
+}
+OCJSON
+
+  # Force materialisation. Bounded — this is the step that hangs offline.
+  #
+  # 🔴 The trigger is NOT any opencode invocation. MEASURED on 1.18.4 against a
+  # fresh config dir: `debug paths`, `debug config`, `debug skill`, `debug v2`
+  # and even `debug agent` run from a PLAIN directory all complete in ~1.2 s and
+  # create NOTHING. What installs the 62 MB tree is resolving a project's
+  # `.opencode/tools/` — browser.js does `import { tool } from
+  # "@opencode-ai/plugin"`, and opencode installs that dependency into the
+  # CONFIG dir. So the warm step must run from a throwaway project carrying the
+  # same tools (6.8 s cold, ~0.4 s warm). Warming with a bare `debug` command
+  # would look successful and leave the dir exactly as cold as it found it.
+  local seed
+  seed="$(mktemp -d 2>/dev/null)" || return 1
+  mkdir -p "$seed/.opencode/tools" 2>/dev/null || { rm -rf "$seed"; return 1; }
+  cp "$TOOL_JS" "$TOOL_IMPL" "$seed/.opencode/tools/" 2>/dev/null \
+    || { rm -rf "$seed"; return 1; }
+
+  ( cd "$seed" && OPENCODE_CONFIG_DIR="$OC_CONFIG_DIR" \
+      timeout "$OC_WARM_TIMEOUT" "$OPENCODE_BIN" debug agent build ) >/dev/null 2>&1
+  rm -rf "$seed"
+
+  # Verify the OUTCOME, never the exit code: the command can succeed while
+  # having installed nothing (that is exactly how the `debug paths` version of
+  # this step passed while leaving the dir cold).
+  if [ -d "$OC_CONFIG_DIR/node_modules" ]; then
+    printf '%s\n' "$ver" > "$OC_STAMP" 2>/dev/null || return 1
+    return 0
+  fi
+  return 1
+}
+
+_oc_ver="$(oc_warm_version)"
+if oc_is_warm "$_oc_ver" || oc_bootstrap "$_oc_ver"; then
+  OC_ISOLATED=1
+else
+  echo "browser-agent: WARNING: could not warm the isolated opencode config dir '$OC_CONFIG_DIR' (opencode $_oc_ver, timeout ${OC_WARM_TIMEOUT}s). Falling back to the GLOBAL opencode config — this run works but costs ~7.7k extra input tokens PER REQUEST (x\$STEPS) for an AGENTS.md this agent cannot act on. Fix: make '$OC_CONFIG_DIR' writable and re-run ONCE with network available (the warm step needs to npm-install @opencode-ai/plugin into it)." >&2
+fi
+
 # Fail loud if an instruction file ever appears here — that would silently
 # reintroduce the whole cost this isolation exists to remove.
 for _stray in "$OC_CONFIG_DIR/AGENTS.md" "$OC_CONFIG_DIR/CLAUDE.md"; do
   [ -e "$_stray" ] && die "unexpected instruction file at '$_stray' — the isolated opencode config dir must stay free of AGENTS.md/CLAUDE.md (that is the entire point; see the comment above). Remove it."
 done
-export OPENCODE_CONFIG_DIR="$OC_CONFIG_DIR"
+
+if [ "$OC_ISOLATED" = 1 ]; then
+  export OPENCODE_CONFIG_DIR="$OC_CONFIG_DIR"
+fi
 
 # Emit a compact schema result on stdout and exit (0 for ok/partial, 1 for
 # blocked). NEVER prints raw page content — only the structured schema.

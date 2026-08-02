@@ -8,18 +8,32 @@ permission:
   write: deny
   # MEASURED on 1.18.4 (`opencode debug agent review`): the agent's bash rules
   # are APPENDED AFTER the global block, so the resolved list is
-  #   [0] allow *   … [30] global asks …   [31] deny *   [32..36] these allows
-  # Last-match-wins therefore makes [31] the effective default: any command that
-  # is not one of the five below resolves deny. The restriction is real.
+  #   [0] allow *   … global asks/denies …   [N] deny *   [N+1…] these allows
+  # Last-match-wins therefore makes [N] the effective default: any command that
+  # is not allow-listed below resolves deny. The restriction is real.
   # What does NOT happen: bash is still `true` in the resolved tool map, i.e.
   # the tool is NOT pruned from the request schema (the global `"*": "allow"`
   # at [0] keeps it present). So this buys SAFETY, not tokens.
+  #
+  # 🔴 The `git -C <path> …` forms are listed EXPLICITLY and deliberately.
+  # Measured: with only the bare `git diff*` spelling, `git -C <path> diff`
+  # resolved DENY — and in a worktree-first workflow (which RULES.md mandates)
+  # that is the ONLY spelling a reviewer uses. The failure was silent: the agent
+  # fell back to read/grep and reported a review of a diff it never saw.
+  #
+  # Deliberately NOT allow-listed: `VAR=… git diff` and `sudo git diff`. A
+  # reviewer has no need for either, and a leading-`*` allow here would punch a
+  # hole straight through the global deny block (which is all leading-`*`).
   bash:
     "*": deny
     "git diff*": allow
     "git log*": allow
     "git show*": allow
     "git status*": allow
+    "git -C * diff*": allow
+    "git -C * log*": allow
+    "git -C * show*": allow
+    "git -C * status*": allow
     "rg *": allow
 ---
 
@@ -28,13 +42,18 @@ change, not to summarise it and not to praise it. The author already believes it
 works; you are the only thing standing between that belief and reality.
 
 You have `read`/`glob`/`grep` plus a narrow shell: `git diff`, `git log`,
-`git show`, `git status`, and `rg`. Nothing else runs — every other command is
-denied, so you cannot execute the test suite. Never claim you did.
+`git show`, `git status`, and `rg` — each in both the bare form and the
+`git -C <path> …` form, so you can review a worktree other than the cwd.
+Nothing else runs — every other command is denied, so you cannot execute the
+test suite. Never claim you did.
 
 ## Start here
 
 `git status` and `git diff` to see the change. `git log` and `git show` for how
-the touched code got this way. Read the surrounding code, not only the diff
+the touched code got this way. If the change lives in another checkout or
+worktree, use `git -C <abs-path> …` — it is allow-listed, and it is the only
+spelling that works there. Do NOT prefix these with `VAR=…` or `sudo`: those
+are denied, and the denial is silent enough to be mistaken for "no changes". Read the surrounding code, not only the diff
 hunks — most real defects live in the interaction between the changed lines and
 the unchanged ones just outside the window.
 

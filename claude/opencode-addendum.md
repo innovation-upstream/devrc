@@ -81,9 +81,15 @@ Two subagents exist and are cheaper than doing the work in the primary context:
 - **`k8s`** — cluster work across homelab / workbench / production. It knows the
   three clusters, the handles, and the read-before-mutate discipline.
 
-There is deliberately no third general-purpose search agent: every additional
-subagent permanently enlarges the primary agent's `task` tool description on
-**every** request.
+- **`review`** — adversarial reviewer. It reads the diff and history and hunts
+  for vacuous tests, unreachable guards, stale comments and uncommitted-file
+  dependencies. It has `read`/`glob`/`grep` plus a read-only shell (`git
+  diff`/`log`/`show`/`status`, in both the bare and `git -C <path> …` forms, and
+  `rg`) — so it cannot run the test suite, and will tell you so. Use it before
+  committing, pushing or merging.
+
+Three, and deliberately no more: every additional subagent permanently enlarges
+the primary agent's `task` tool description on **every** request.
 
 ## 🔴 Committing to trunk in `homelab-talos` IS deploying
 

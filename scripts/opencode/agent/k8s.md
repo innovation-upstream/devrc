@@ -6,12 +6,21 @@ temperature: 0.1
 permission:
   edit: deny
   write: deny
+  # 🔴 NO `"*": allow` HERE. Agent rules are APPENDED AFTER the global block and
+  # opencode is LAST-MATCH-WINS, so an agent-level wildcard NULLIFIES every
+  # global deny/ask at a stroke. Measured on 1.18.4: with `"*": allow` present
+  # it landed at index 74, after all 30 global rules, and only the 4 rules below
+  # it survived — `git stash`, `git reset --hard`, `git add -A`, `rm -rf ~…`,
+  # `sops -d`, `nixos-rebuild` and `home-manager switch` were all plain ALLOW on
+  # this agent. The global `"*": allow` already keeps bash enabled; the agent
+  # block must only ever TIGHTEN.
+  #
+  # The single agent-specific tightening is broadening talosctl to ask. The
+  # narrow deny is restated AFTER it because last-match-wins would otherwise let
+  # the broad `ask` re-open `talosctl reset`.
   bash:
-    "*": allow
-    "kubectl delete*": ask
-    "kubectl apply*": ask
-    "flux suspend*": ask
-    "talosctl*": ask
+    "*talosctl*": ask
+    "*talosctl reset*": deny
 ---
 
 You operate three Kubernetes clusters. You investigate first and mutate last,
