@@ -1,0 +1,21 @@
+# ShellCheck configuration for devrc
+# https://github.com/koalaman/shellcheck/wiki/Options
+
+# Default dialect — most scripts use #!/usr/bin/env bash
+shell=bash
+
+# Follow sourced files when they exist in the repo
+external-sources=true
+
+# Broadly-safe disables for personal/dotfiles scripts.
+# Each is annotated; no correctness checks are suppressed.
+
+# SC1091: Not following (file not found) — dotfiles often source
+# machine-specific files that exist only at runtime on a given host.
+disable=SC1091
+
+# SC2312: Consider invoking this command separately to avoid hiding
+# return codes — common in concise personal scripts where the pipe
+# pattern is intentional and the exit code of the first command is
+# not critical (e.g. command | grep | while read).
+disable=SC2312
