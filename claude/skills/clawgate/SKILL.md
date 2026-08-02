@@ -135,11 +135,12 @@ clone 262 commits behind with three stale-file conflicts). A clean worktree reba
 paths. **NEVER `git add -A`** — stage explicit clawgate paths.
 
 ```bash
-VER=0.7.80   # 🔴 FETCH trunk + check the LIVE deployment pin FIRST — Zach ships concurrently and a
+VER=0.7.83   # 🔴 FETCH trunk + check the LIVE deployment pin FIRST — Zach ships concurrently and a
              # mutable-tag clobber bit once (memory clawgate-version-before-build). This fired FOR
              # REAL 2026-07-30: 0.7.77 landed from Zach's session WHILE 0.7.78 was being built here.
              # Derive the number from the LIVE pin, NEVER from this file or HANDOFF. (Last known
-             # shipped: 0.7.79 — assume stale, verify with the status snippet.)
+             # shipped: 0.7.82, built + deployed 2026-08-02 — assume stale, verify with the status
+             # snippet.)
 
 # 0. fresh worktree off the latest trunk (clean tree — only YOUR changes live here)
 cd /home/zach/workspace/homelab-talos && git fetch origin trunk
@@ -316,8 +317,20 @@ status claim. What follows is only what does NOT go stale.
   production — restart the `nebula-gateway` DaemonSet on both after editing
   (`reference/architecture.md`).
 - **The vendored kubeclaw chart is embedded at BUILD time** — a kubeclaw release doesn't reach
-  clawgate-provisioned agents until `make sync-chart` + rebuild + redeploy clawgate. ⚠ vendored is
-  0.7.0 vs kubeclaw 0.7.1 → a re-sync is **PENDING**.
+  clawgate-provisioned agents until `make sync-chart` + rebuild + redeploy clawgate. ✅ The 0.7.0 →
+  0.7.1 re-sync **shipped in 0.7.82** (built + deployed 2026-08-02); vendored and kubeclaw are both
+  **0.7.1**.
+- 🔴 **`make check-chart` is only meaningful if `~/workspace/kubeclaw` is CURRENT — sync it FIRST or
+  it silently tests the wrong tree.** `check-chart` depends on `sync-chart`, which **rsyncs from the
+  local `~/workspace/kubeclaw` clone**. That clone is a normal checkout and goes stale like any
+  other. Measured 2026-08-02: it sat at chart **0.3.14** while the vendored copy was **0.7.1**, so
+  running `check-chart` would have **clobbered the deployed chart with a 4-minor-versions-old one and
+  then reported a false failure** — the "drift" it found would have been drift it had just created.
+  Resolved by fast-forwarding the clone. Always, before either target:
+  ```bash
+  git -C ~/workspace/kubeclaw fetch origin && git -C ~/workspace/kubeclaw merge --ff-only origin/trunk
+  ```
+  `--ff-only` is the point: it cannot autostash, and a refusal is the signal that the clone diverged.
 - **Alloy has no auto-reloader** — if clawgate metrics vanish from homelab Prometheus, restart it
   first (`reference/telemetry.md`).
 - **Red GitHub Actions checks on `homelab-infra` are NOISE** (billing-blocked repo-wide). The real
