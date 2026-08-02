@@ -765,10 +765,21 @@ in
   # non-recursive glob.
   home.file.".config/opencode/plugin/guard.js".source = ../scripts/opencode/plugin/guard.js;
 
-  # The plugin resolves `../guard_core.py` relative to its own module URL, so the
-  # SAME source file that backs ~/.claude/hooks/guard_core.py is deployed here
-  # too. Two independent deployments of one implementation: opencode's guard does
-  # not depend on ~/.claude/ existing, and Claude Code's does not depend on
+  # 🔴 THIS PATH IS LOAD-BEARING AND IS RESOLVED BY $HOME, NOT BY THE PLUGIN'S
+  # OWN LOCATION. The plugin used to compute `../guard_core.py` from
+  # `import.meta.url`, which reads correctly against THIS declaration and is
+  # wrong in reality: `home.file` makes the deploy path a symlink into the store,
+  # node resolves `import.meta.url` through it, and the store is FLAT
+  # (/nix/store/<hash>-hm_guard.js), so `..` was `/nix`. The guard failed closed
+  # on every bash call in opencode. guard.js now looks in
+  # `$HOME/.config/opencode/guard_core.py` — i.e. exactly the attrpath below —
+  # so moving or renaming this entry breaks the guard. See the resolution comment
+  # in scripts/opencode/plugin/guard.js and the deployed-layout regression tests
+  # in scripts/tests/test_opencode_guard_plugin.py.
+  #
+  # The SAME source file that backs ~/.claude/hooks/guard_core.py is deployed
+  # here too. Two independent deployments of one implementation: opencode's guard
+  # does not depend on ~/.claude/ existing, and Claude Code's does not depend on
   # ~/.config/opencode/ existing.
   home.file.".config/opencode/guard_core.py".source = ../scripts/claude-hooks/guard_core.py;
 
