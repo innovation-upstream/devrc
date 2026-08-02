@@ -25,13 +25,17 @@ TWO CALLERS, TWO POLICIES
 -------------------------
 `POLICIES` maps a name to an ordered list of checks:
 
-  "claude-code" — EXACTLY the six checks bash-guard.py has always run. This
-                  policy is FROZEN by deliberate decision: bash-guard.py fires
-                  on every Bash call in every Claude Code session on both
-                  hosts, so a new deny here changes the operator's primary
-                  tool. Adding to it is a decision for the operator, not a side
-                  effect of hardening opencode.
-  "opencode"    — the six, plus the irreversible-action checks below. opencode
+  "claude-code" — the checks bash-guard.py runs. This policy is FROZEN by
+                  deliberate decision: bash-guard.py fires on every Bash call in
+                  every Claude Code session on both hosts, so a new deny here
+                  changes the operator's primary tool. Adding to it is a
+                  decision for the operator, not a side effect of hardening
+                  opencode. It was the original six raw-text checks until
+                  2026-08-02, when `check_git_reset_hard_argv` was added as
+                  exactly such an approved decision (the raw-text reset check
+                  was blind to `git -C <path> reset --hard`, the spelling
+                  RULES.md mandates). Pinned by name in test_guard_core.py.
+  "opencode"    — all of the above, plus the irreversible-action checks below. opencode
                   agents run unattended (`opencode run` AUTO-REJECTS an `ask`
                   rather than prompting — measured on 1.18.4), so a hard deny is
                   the only thing standing between the model and an irreversible
@@ -91,6 +95,10 @@ import sys, os, json, re, shlex, ipaddress
 # ORIGINAL SIX — raw-text checks, byte-for-byte the behaviour bash-guard.py has
 # always had. Do not modify without re-running scripts/claude-hooks/tests/
 # test_bash_guard.py, which is the regression suite for every bypass they close.
+#
+# NOTE: "the original six" describes the functions DEFINED in this section, not
+# the contents of the claude-code policy — that policy also carries the argv
+# check `check_git_reset_hard_argv` since 2026-08-02. See POLICIES at the bottom.
 # =========================================================================== #
 
 # Blind-stage forms. Quotes are STRIPPED from the argument text before matching,
@@ -719,9 +727,11 @@ def check_git_reset_hard_argv(cmd):
     ALLOW under the `review` agent's glob list AND was passed by the Claude Code
     guard.
 
-    This argv version closes it for opencode. It is deliberately NOT added to
-    the "claude-code" policy: that would be a new deny on the operator's primary
-    tool and is theirs to approve. See the PR body.
+    Enabled for BOTH policies since 2026-08-02. It first shipped opencode-only,
+    because switching it on for "claude-code" is a new deny on the operator's
+    primary tool and was theirs to approve; they approved it. It now lives in
+    `_CLAUDE_CODE_CHECKS`, which `POLICIES["opencode"]` includes, so opencode
+    keeps its coverage by inheritance rather than by a duplicate entry.
     """
     for argv in commands(cmd):
         if os.path.basename(argv[0]) != "git":
@@ -782,13 +792,37 @@ def _git_strip_global_opts(argv):
 # =========================================================================== #
 
 # 🔴 FROZEN. bash-guard.py runs this on EVERY Bash call in EVERY Claude Code
-# session on both hosts. These are the six checks it has always had, in the
-# order it has always run them. Adding to this list is a change to the
-# operator's primary tool and must be an explicit, reported decision — not a
-# side effect of hardening opencode.
+# session on both hosts. Adding to this list is a change to the operator's
+# primary tool and must be an explicit, reported decision — not a side effect
+# of hardening opencode.
+#
+# For a long time this was exactly SIX raw-text checks. `check_git_reset_hard_argv`
+# is the seventh, added 2026-08-02 as such an explicit decision: the raw-text
+# `check_git_reset_hard` is anchored on `\bgit\s+reset\b`, so it never saw
+# `git -C <path> reset --hard` — the worktree-first spelling RULES.md actively
+# MANDATES. Measured against the live hook before the move: `git reset --hard
+# origin/main` denied, `git -C /tmp/wt reset --hard origin/main` ALLOWED. The
+# irreversible half of the guard was blind to the spelling the rules push agents
+# toward. `check_git_add_all` already handled that same global-option hop; this
+# brings reset --hard into line.
+#
+# Both reset checks are kept. They are not redundant: the raw-text one matches
+# shapes the parser cannot reach (quoted prose, argv assembled from variables),
+# and the argv one matches hops the regex cannot reach. `evaluate` returns on the
+# FIRST hit, so a command matching both is reported ONCE, by the raw-text check
+# — which is why every deny message the raw-text check already produced is
+# unchanged.
+#
+# ORDER MATTERS, and it changes one message. The argv check is placed BEFORE
+# check_cd_then_git, so `cd /x && git -C <p> reset --hard` now reports the
+# reset --hard reason instead of the `cd`-then-git reason. The DECISION is
+# unchanged (it denied before and denies now, under both policies) — only the
+# text differs, and it now names the more serious of the two problems. That is
+# the sole message change; it is asserted in test_guard_core.py.
 _CLAUDE_CODE_CHECKS = [
     check_git_add_all,
     check_git_reset_hard,
+    check_git_reset_hard_argv,
     check_heredoc_to_file,
     check_cd_then_git,
     check_private_key,
@@ -806,7 +840,6 @@ _IRREVERSIBLE_CHECKS = [
     check_rm_rf_critical,
     check_git_stash,
     check_git_clean_force,
-    check_git_reset_hard_argv,
 ]
 
 POLICIES = {
