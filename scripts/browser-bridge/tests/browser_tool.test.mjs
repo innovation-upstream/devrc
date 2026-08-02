@@ -281,7 +281,7 @@ test("OP_TO_SERVER maps only the bounded ops (no lifecycle ops, no raw CDP)", ()
   // `whoami` is a read-only GLOBAL diagnostic (GET /whoami) — bounded + typed
   // like the rest; still NO lifecycle ops and NO raw-CDP escape.
   assert.deepEqual(Object.keys(OP_TO_SERVER).sort(),
-    ["click", "eval", "frames", "html", "key", "nav", "screenshot",
+    ["click", "context", "eval", "frames", "html", "key", "nav", "screenshot",
      "text", "type", "upload", "wake", "whoami"]);
   // Lifecycle ops (wrapper owns the tab) AND any raw-CDP escape must be unmappable.
   for (const forbidden of ["open", "close", "tabs", "release",
@@ -293,7 +293,7 @@ test("OP_TO_SERVER maps only the bounded ops (no lifecycle ops, no raw CDP)", ()
   // enabled by default — it takes a caller-chosen absolute path with no allowlist,
   // and the model is pointed at untrusted, prompt-injecting pages.
   assert.deepEqual([...ALLOWED_OPS_DEFAULT].sort(),
-    ["click", "eval", "frames", "html", "key", "nav", "screenshot",
+    ["click", "context", "eval", "frames", "html", "key", "nav", "screenshot",
      "text", "type", "wake", "whoami"]);
   assert.ok(!ALLOWED_OPS_DEFAULT.includes("upload"),
     "upload must NOT be in the autonomous agent's default op set");
@@ -1031,6 +1031,24 @@ const REVIEWED_AGENT_EXCLUSIONS = Object.freeze({
       "from OP_TO_SERVER entirely, so BROWSER_AGENT_ALLOWED_OPS cannot re-enable it. " +
       "`wake` gives the agent the capability it actually needed.",
     source: "`activate` is DELIBERATELY ABSENT from OP_TO_SERVER",
+  },
+  ping: {
+    reason: "OPERATOR diagnostic for extension staleness (is the build I just " +
+      "deployed the one Brave loaded?). The model cannot ACT on the answer — it " +
+      "cannot reload an unpacked extension, restart Brave, or re-run a switch — " +
+      "and it reads NO page state, so it cannot inform a browsing decision " +
+      "either. Pure token cost with no available follow-up action.",
+    source: "`ping` is DELIBERATELY ABSENT from OP_TO_SERVER",
+  },
+  emulate: {
+    reason: "It MUTATES the tab and leaves STICKY per-tab state that outlives " +
+      "the op: device metrics, UA-CH and media overrides persist until an " +
+      "explicit `emulate --reset` or the tab is replaced. An autonomous model " +
+      "that emulates and never resets (moved on, hit its step budget, crashed) " +
+      "hands the operator back a silently altered tab. Same hazard class as " +
+      "`upload` being off-by-default, but with a PERSISTENT side effect, so the " +
+      "answer is exclusion rather than an opt-in someone must remember to undo.",
+    source: "`emulate` is DELIBERATELY ABSENT from OP_TO_SERVER",
   },
 });
 

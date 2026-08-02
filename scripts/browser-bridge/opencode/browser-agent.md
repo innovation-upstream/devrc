@@ -29,6 +29,7 @@ fetch). Your tab is FIXED: you cannot choose or change which tab you act on.
 | `browser(op="type", text="…")` (opt. `selector`, `frame`) | **trusted** text input (focus `selector` first if given) |
 | `browser(op="key", key="Enter")` (opt. `selector`, `frame`) | dispatch one **trusted** key (Enter/Tab/Escape/Arrow*/…) |
 | `browser(op="wake")` (opt. `waitMs`)   | **UN-THROTTLE your tab** so a throttled SPA actually renders. It does NOT move the operator's screen. **You almost never need to call this** — a hidden `text`/`html` read wakes and re-reads automatically, including the first read after you drove the page (see Rules) |
+| `browser(op="context")`                | read WHERE your tab actually is — url, domain, path, searchParams, title — WITHOUT reading any page content. Cheap; use it to confirm a `nav` landed (redirects, login walls) before paying for a `text` read |
 | `browser(op="whoami")`                 | read-only identity + diagnostics: which HOST (laptop/workbench), YOUR OWN browser profile, and bridge/extension versions — call it to CONFIRM which host/profile you're on before acting (metadata only; you cannot see the operator's other profiles or what any tab is browsing) |
 
 ## Rules
