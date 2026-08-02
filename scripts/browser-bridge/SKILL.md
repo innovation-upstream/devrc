@@ -7,8 +7,7 @@ description: Drive the user's LIVE, logged-in Brave browser from Claude Code —
 
 ```bash
 BB=~/workspace/devrc/scripts/browser-bridge/browser   # ← run it by this exact path
-$BB whoami                          # ORIENT FIRST: which HOST + which profiles are connected
-$BB health                          # is an extension connected? loaded vs repo extension_version
+$BB whoami                          # ORIENT FIRST: HOST + connected profiles + extension_stale
 $BB --instance <key> open <url>     # open a NEW tab THIS session owns → returns tabId
 $BB --instance <key> --tab <id> text   # cheap read of a specific tab
 ```
