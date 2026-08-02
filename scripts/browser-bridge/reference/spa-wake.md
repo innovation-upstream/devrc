@@ -4,7 +4,9 @@
 a read reported `data.hidden:true` or printed a hidden-tab warning on stderr · an SPA
 looks stuck "Loading…" · `frames` lists no OOPIF you know is there · in-frame
 `click`/`type` hits elements that "don't exist yet" · you are about to conclude a site
-is BROKEN from a browser read · before driving any heavy JS app in an `open`ed tab.
+is BROKEN from a browser read · before driving any heavy JS app in an `open`ed tab ·
+you are measuring anything the page gates on VISIBILITY (timers, refresh loops,
+readiness) · an injected `window.__x` hook vanished between reads.
 
 Core: `~/workspace/devrc/scripts/browser-bridge/SKILL.md`.
 
@@ -78,6 +80,109 @@ session detaches (measured), but the **DOM the page rendered during the wake
 window persists** — so a following ordinary `text`/`html` sees the rendered page
 on the cheap, banner-free path. Re-wake after a navigation or when the app needs
 to do more rendering work.
+
+### 🔴 `wake` is NOT a passive read — one wake fires `visibilitychange` TWICE
+
+`wake` turns on `Emulation.setFocusEmulationEnabled`, which genuinely flips the
+document `hidden` → `visible` (that flip is the measured Chromium behaviour the
+op is built on — see the rAF/timer/visibility table in `extension/protocol.js`).
+It then **tears the emulation down** in a `finally`
+(`Emulation.setFocusEmulationEnabled{enabled:false}`, `WAKE_CDP_TEARDOWN`), which
+flips the document back `visible` → `hidden`.
+
+**So a single `wake` delivers TWO `visibilitychange` events to the page, not one.**
+
+✅ MEASURED 2026-08-01 — laptop (`192.168.50.155`), Brave profile `personal`,
+extension **0.7.0** (`extension_id bgbkamdlkdleahpgdgmjipjbgmepgenk`), a
+background `example.com` tab with a counting listener installed via `js`:
+
+| step | `window.__vc` | `document.visibilityState` |
+|---|---|---|
+| listener installed | 0 | `hidden` |
+| harness control — synthetic `dispatchEvent` | 1 | `hidden` |
+| reset, then **one `wake`** | **2** | `hidden` (after detach) |
+| a **second `wake`** | **4** | `hidden` |
+| reset, then `js --wake` — read *inside* the window | **1** | `visible` |
+| …the same tab read again *after* teardown | **2** | `hidden` |
+
+The `js --wake` rows are the clearest statement of the mechanism: **one** event
+has fired by the time your in-window read runs, and the **second** lands when the
+session detaches. (The counter was validated against a synthetic event first —
+a listener that cannot count would have reported a false 0.)
+
+Two consequences, in opposite directions:
+
+- ✅ **It is the NON-INTRUSIVE way to exercise visibility-gated behaviour.** Any
+  page whose logic is gated on being visible — deferred timers, refresh/keep-alive
+  loops, readiness handshakes that never complete while hidden — can be observed
+  *and driven* without `activate` and without stealing the operator's screen. A
+  woken background tab reaches the same state a foreground one would.
+- 🔴 **So every `wake` can RUN REAL PAGE LOGIC. Never treat one as a free look.**
+  Observed on a token-refresh page host: each `--wake` observation fired the page's
+  `visibilitychange` handler, which issued a **fresh credential mint** — so the act
+  of measuring reset the very clock being measured, and the request log contained
+  more entries than the page's own retry budget allows. If you are waiting for a
+  deadline, a keep-alive wake **past that deadline pushes the deadline out**.
+
+🔴 **If you are counting page-initiated requests/timers/retries, subtract `2 ×
+your wake count`, not one per wake** — for a handler bound to `visibilitychange`
+generally. A handler that early-returns on `document.hidden` (the common shape)
+does its work only on the `visible` edge and so runs **once** per wake; one that
+acts on both edges runs **twice**. Read the page's handler before choosing the
+multiplier — do not assume.
+
+Practical rule: decide *before* waking whether the thing you are measuring is
+visibility-sensitive. If it is, plan the wake schedule (including keep-alive
+wakes) as part of the experiment, not as incidental instrumentation.
+
+This is the page-facing half of a point `reference/agent.md` already makes about
+the operator-facing half — **"a read is passive, but a wake attaches the debugger
+to the operator's live tab"**, which is why `wake` counts as a MUTATING op for the
+autonomous agent's dry-run policy. Same conclusion, two blast radii: keep them in
+sync.
+
+### 🔴 A background tab can be DISCARDED — injected page state does not survive
+
+Chromium may **discard** a backgrounded tab under memory pressure and **reload it
+on activation**. The tab id and the URL are unchanged across the whole cycle.
+
+**A tab that is discarded RIGHT NOW is announced loudly — do not disbelieve it.**
+Any CDP op fails fast, *before* `chrome.debugger.attach`, with
+`tab_discarded: the target tab was unloaded by Chrome (memory saver) and has no
+live renderer to attach to …` (`assertTabCdpReady` in `extension/protocol.js`),
+and the load-settle poll treats `discarded` as terminal rather than waiting for a
+renderer that will never answer. That error is real and actionable: reload the
+tab or bring it to the foreground, then retry.
+
+**What is silent is the RELOAD afterwards.** Once the tab comes back, `discarded`
+is false again, the tab id and URL still match, nothing tracks document identity,
+and `browser tabs` reports no `discarded` field at all — so a later read looks
+completely ordinary. But the document is NEW, and everything you injected into the
+old one is gone: a `window.__x` instrumentation hook, a patched `window.fetch`,
+accumulated in-page logs. Same failure mode as the RE-THROTTLE-after-reload
+section below — a reload makes a new document, and a new document has none of your
+state.
+
+**Re-install after any `activate`, any `tab_discarded` you recovered from, or any
+suspected discard, and verify the hook is still there before trusting a reading:**
+
+```bash
+BB=~/workspace/devrc/scripts/browser-bridge/browser
+$BB --instance work --tab "$TAB" js 'typeof window.__mintLog'   # "undefined" ⇒ reinstall
+```
+
+A hook that reads `undefined` is the tell. An empty *array* means "installed, no
+events" — which is a completely different answer, and the one you must not
+confuse with a discarded tab. When the log itself is the evidence, prefer a
+storage that survives a bridge drop and re-read it defensively rather than
+assuming continuity across a long-running observation.
+
+⚠ **Open question (#273):** whether the emulation bookkeeping survives this cycle.
+`documentEmulation` is cleared only on tab *identity* change, and a discard-reload
+keeps the tab id — so on an **emulated** tab the `documentPredatesEmulation` hint
+may go silently wrong after a discard. Unsettled: it needs a forced discard via
+`brave://discards`. Until #273 closes, re-apply `emulate` after a suspected
+discard rather than trusting the absence of a warning.
 
 ### ⚠ After a RELOAD the tab is RE-THROTTLED — and htmx then silently stops firing
 
