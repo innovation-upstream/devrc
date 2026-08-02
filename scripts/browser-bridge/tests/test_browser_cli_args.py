@@ -485,6 +485,12 @@ def test_nav_and_open_still_reject_an_unknown_flag(bridge, sub):
 @pytest.mark.parametrize("sub", ["nav", "open"])
 @pytest.mark.parametrize("kind,detail", [
     ("op_error", "wake_with_frame_unsupported: tab-level, not per-frame"),
+    # `unknown_op` is the ODD ONE OUT: its CLI branch neither uses the
+    # "failed in the browser:" prefix nor echoes the server body, so it was the
+    # ONE failure mode that still degraded to the generic token — and it is the
+    # most likely `--wake` failure in this repo (a stale loaded extension), and
+    # the PERMANENT one the exit-3 contract promises you can distinguish.
+    ("op_error", "unknown_op"),
     ("429", "rate_limited"),
     ("504", "timeout"),
 ])
@@ -515,7 +521,8 @@ def test_a_failing_wake_never_swallows_the_primary_result(wake_fails, sub,
     # "wake_failed_after_nav", which cannot distinguish a TRANSIENT `rate_limited`
     # (retry) from a PERMANENT `wake_with_frame_unsupported` (do not) — and a test
     # that only asserted `ok is False` structurally could not catch that.
-    expected = {"op_error": detail, "429": "rate_limited", "504": "timeout"}[kind]
+    expected = detail if kind == "op_error" else \
+        {"429": "rate_limited", "504": "timeout"}[kind]
     assert out["result"]["data"]["wake"]["error"] == expected, (
         out["result"]["data"]["wake"])
 
@@ -675,6 +682,50 @@ def test_help_does_not_require_a_token_file(tmp_path):
         assert cp.returncode == 0, f"{args}: {cp.stderr}"
         assert "FLAG ORDER / END OF FLAGS" in cp.stdout, args
         assert "token file" not in cp.stderr, args
+
+
+def test_no_prose_line_looks_like_a_wire_op_dispatch():
+    """🔴 REGRESSION, and it was invisible on this branch alone.
+
+    The surface-parity gate (arriving via #277) harvests wire ops from this file
+    with `findall(<dispatch-helper> + whitespace + identifier)` and skips only
+    lines whose first non-space char is `#`. A Python DOCSTRING line inside a
+    `python3 -c` block is not one — so the phrase "<helper> stderr" in a docstring
+    was harvested as a phantom wire op named `stderr` and reddened the MERGED tree
+    (1 failed / 424 passed) while both branches were green alone.
+
+    This is the same harvest, run locally, so the trap is caught on THIS side too
+    rather than depending on the other PR hardening its parser. Defence in depth is
+    the point: either fix alone closes it, and either alone can regress.
+
+    HARNESS NEGATIVE CONTROL is inline: the harvester must find a phantom in a
+    string that contains one, or its silence here means nothing.
+    """
+    import re
+    helper = "cmd" + "_op"          # not written as one token; see the docstring
+
+    def harvest(text):
+        out = set()
+        for ln in text.splitlines():
+            if ln.lstrip().startswith("#"):
+                continue
+            out.update(re.findall(r"\b%s\s+([A-Za-z]+)" % helper, ln))
+        return out
+
+    # NEGATIVE CONTROL: a docstring-style line with the offending shape MUST be
+    # harvested — otherwise a green verdict below is a fact about the harvester.
+    assert harvest('    """The cause, from %s stderr it emits."""' % helper) == \
+        {"stderr"}
+    assert harvest("# %s stderr in a real comment is skipped" % helper) == set()
+
+    src = CLI.read_text(encoding="utf-8")
+    real = set(re.search(r'^SUBCOMMANDS="([^"]+)"', src, re.M).group(1).split())
+    # The wire names the CLI dispatches that are not spelled like their subcommand.
+    real |= {"getHtml", "eval"}
+    phantom = harvest(src) - real
+    assert phantom == set(), (
+        f"prose in the CLI reads as a wire-op dispatch: {sorted(phantom)} — "
+        "reword it (name the helper in backticks, never followed by a bare word)")
 
 
 def test_help_prints_the_HEADER_block_only_not_the_whole_files_comments(tmp_path):

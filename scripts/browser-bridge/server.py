@@ -76,9 +76,14 @@ Config (env):
                                  "is the loaded extension current?" — so on an
                                  idle instance it must answer "no" fast. When the
                                  instance has work in flight the deadline is
-                                 DERIVED from that work instead (never above
-                                 CMD_TIMEOUT) so a busy profile is never reported
-                                 as dead — see Registry._effective_timeout_locked.
+                                 DERIVED from that work instead, so ordinary
+                                 concurrency does not report a busy profile as
+                                 dead. NOT unconditional: the derived budget is
+                                 still capped at CMD_TIMEOUT, so more than
+                                 CMD_TIMEOUT of legitimate serial work (N>=2 busy
+                                 commands) can still time a ping out — raise
+                                 CMD_TIMEOUT if that is your workload. See
+                                 Registry._effective_timeout_locked.
                                  Applies to `ping` ONLY.
     BROWSER_BRIDGE_POLL_TIMEOUT  seconds a /poll blocks before 204 (default 25)
     BROWSER_BRIDGE_RATE_PER_SEC  per-instance sustained /cmd dispatch rate
@@ -213,6 +218,26 @@ EXEC_OP_BUDGET_S = 18.0
 # Slack added on top of the execution budget to cover the result POST and the
 # next poll turnaround (RESULT_BUDGET_MS is 10s but a healthy POST is ms).
 WEDGE_GRACE_S = 2.0
+
+# The extension's own bound on posting a result back (RESULT_BUDGET_MS in
+# extension/protocol.js). Mirrored for the same reason as EXEC_OP_BUDGET_S, and
+# pinned against protocol.js by test_result_budget_matches_the_extension.
+RESULT_BUDGET_S = 10.0
+
+# How long an `inflight` entry can still describe a command a healthy extension
+# might be working on. After EXEC + RESULT the extension has certainly either
+# answered or given up, so an entry older than this says nothing about current
+# business and is disregarded (and pruned).
+#
+# 🔴 THIS IS WHY AN ABANDONED COMMAND IS NOT SIMPLY DROPPED. The SUBMITTER giving
+# up (BridgeTimeout at cmd_timeout, default 20s) does NOT free the extension —
+# its serial loop keeps executing that command for up to EXEC(18) + RESULT(10) =
+# 28s, which is LONGER than cmd_timeout. Popping the entry at submitter-exit
+# therefore made the instance look IDLE while it was provably still busy, and the
+# next `ping` fast-failed against a healthy extension (measured; in that window it
+# was worse than both the old flat 20s and the interim flat 10s). The entry is kept
+# and expires on its own instead.
+INFLIGHT_STALE_S = EXEC_OP_BUDGET_S + RESULT_BUDGET_S
 
 # `ping`'s own /cmd deadline, in seconds. NOT a bare literal at the call site and
 # NOT sharing CMD_TIMEOUT: `ping` is the documented FIRST thing you run when you
@@ -1142,6 +1167,15 @@ class Registry:
                     inst.results[cid] = payload
                     self._cond.notify_all()
                     return True
+            # No live submitter — but this may be the ABANDONED command whose
+            # inflight entry we deliberately kept (see INFLIGHT_STALE_S). The reply
+            # proves the extension is free again, so release it NOW instead of
+            # waiting out the staleness window: that is the difference between the
+            # next ping fast-failing correctly and being told to wait for nothing.
+            for inst in candidates:
+                if inst.inflight.pop(cid, None) is not None:
+                    log("result_after_abandon", id=cid, instance_id=instance_id)
+                    break
             return False
 
     def _effective_timeout_locked(self, inst, timeout, fast_timeout):
@@ -1167,11 +1201,23 @@ class Registry:
                                 take N * EXEC_OP_BUDGET_S; subtract how long the
                                 oldest has already been outstanding.
 
+        Entries older than INFLIGHT_STALE_S are DISREGARDED (and pruned): past that
+        point a healthy extension has certainly answered or given up, so the entry
+        no longer describes current business. This is also what bounds an abandoned
+        command's influence — see INFLIGHT_STALE_S for why abandoning does not drop
+        the entry outright.
+
         CLAMPED ON BOTH SIDES, and both clamps are load-bearing:
           * never above `timeout` (cmd_timeout) — so this can NEVER be slower than
-            the behaviour that predates the whole fast-ping change;
-          * never below `fast_timeout` — so a wedged instance whose budget has gone
-            negative still gets its full fast deadline rather than an instant fail.
+            the behaviour that predates the whole fast-ping change. `fast_timeout`
+            is clamped into that range FIRST: both it and cmd_timeout are
+            operator-settable (BROWSER_BRIDGE_PING_TIMEOUT / _CMD_TIMEOUT) and
+            nothing validates the relation, so a fast_timeout ABOVE cmd_timeout
+            would otherwise escape the ceiling through the lower clamp below
+            (measured: fast=60 / cmd=20 returned 60.0).
+          * never below the (clamped) `fast_timeout` — so a wedged instance whose
+            budget has gone negative still gets its full fast deadline rather than
+            an instant fail.
 
         WHY NOT `inst.last_dispatch`, which looks like it carries the same fact:
         it is overwritten by every new enqueue, so it names the NEWEST outstanding
@@ -1182,11 +1228,27 @@ class Registry:
         """
         if fast_timeout is None:
             return timeout
+        # 🟢-D: clamp the operator-settable fast deadline into [.., timeout] BEFORE
+        # it is used, so the "never above cmd_timeout" claim holds unconditionally.
+        fast = min(fast_timeout, timeout)
+        now = self._clock()
+        self._prune_inflight_locked(inst, now)
         if not inst.inflight:
-            return fast_timeout
-        age = self._clock() - min(inst.inflight.values())
+            return fast
+        age = now - min(inst.inflight.values())
         budget = len(inst.inflight) * EXEC_OP_BUDGET_S + WEDGE_GRACE_S - age
-        return max(fast_timeout, min(timeout, budget))
+        return max(fast, min(timeout, budget))
+
+    @staticmethod
+    def _prune_inflight_locked(inst, now):
+        """Drop `inflight` entries too old to describe current business.
+
+        Bounded by INFLIGHT_STALE_S. Also the memory bound for entries left behind
+        by an abandoned command whose result never arrives.
+        """
+        stale = [c for c, t in inst.inflight.items() if now - t > INFLIGHT_STALE_S]
+        for c in stale:
+            del inst.inflight[c]
 
     # --- concurrency backstop (per-instance rate limit + queue-depth cap) --- #
     def _admit_locked(self, inst: Instance):
@@ -1250,7 +1312,9 @@ class Registry:
 
         `fast_timeout` (used only by `ping`) asks for a SHORTER deadline when the
         target instance has nothing in flight, so a wedge is reported quickly
-        without ever false-negativing a busy one. See _effective_timeout_locked —
+        without false-negativing a busy one under ordinary concurrency (the derived
+        budget is still capped at `timeout`, so >`timeout` of legitimate serial work
+        can still time it out). See _effective_timeout_locked —
         that is where the invariant lives.
         """
         op = command.get("op")
@@ -1286,6 +1350,10 @@ class Registry:
             # Declared BEFORE the try so the finally can always reference it: the
             # FIFO wait can raise before a cid exists.
             cid = None
+            # Set when THIS submitter gives up on a command the extension has
+            # already taken. See INFLIGHT_STALE_S: abandoning does not free the
+            # extension, so the inflight entry must OUTLIVE us and expire on age.
+            abandoned_running = False
             if tab_key is not None:
                 self._tab_queues.setdefault(tab_key, deque()).append(ticket)
             try:
@@ -1319,8 +1387,12 @@ class Registry:
                 inst.outbox.append(cmd)
                 inst.waiters.add(cid)
                 # Outstanding-work clock for _effective_timeout_locked. Released
-                # in the finally below, paired exactly like `pending`.
-                inst.inflight[cid] = self._clock()
+                # in the finally below, paired exactly like `pending`. Prune here
+                # too so entries left behind by abandoned commands cannot pile up
+                # on an instance that never receives another ping.
+                _now = self._clock()
+                self._prune_inflight_locked(inst, _now)
+                inst.inflight[cid] = _now
                 # Remember what we handed this instance. Cleared only when a
                 # RESULT comes back, so if the instance goes silent this field
                 # still names the command it never answered — the single fact
@@ -1334,6 +1406,17 @@ class Registry:
                     remaining = deadline - self._clock()
                     if remaining <= 0:
                         inst.waiters.discard(cid)
+                        # Was it still QUEUED, or already taken by the extension?
+                        # Queued  -> it will never run; dropping it frees the slot
+                        #            honestly and the instance really is that much
+                        #            less busy.
+                        # Taken   -> the extension is executing it RIGHT NOW and
+                        #            will be for up to EXEC+RESULT. We are leaving,
+                        #            but the work is not: keep the inflight entry so
+                        #            the instance does not read as idle, and let it
+                        #            expire on age (INFLIGHT_STALE_S).
+                        abandoned_running = not any(c.get("id") == cid
+                                                    for c in inst.outbox)
                         inst.outbox = deque(c for c in inst.outbox
                                             if c.get("id") != cid)
                         raise BridgeTimeout()
@@ -1351,11 +1434,15 @@ class Registry:
                 # pending bump) on EVERY exit — normal return, timeout, or
                 # supersede — so the depth cap can never leak a phantom slot.
                 inst.pending -= 1
-                # Same structural pairing for the outstanding-work clock. A
-                # stranded `inflight` entry would be WORSE than a stranded pending
-                # slot: it would make the instance look permanently busy, and
-                # `ping` would never fast-fail on that instance again.
-                if cid is not None:
+                # Same structural pairing for the outstanding-work clock — EXCEPT
+                # when we abandoned a command the extension had already taken. Then
+                # the work outlives this submitter and the entry must too, or the
+                # instance reads as idle while it is provably still executing.
+                # A stranded entry would be worse than a stranded pending slot (the
+                # instance would look busy forever and `ping` could never fast-fail
+                # again), which is why the surviving entry is bounded by age rather
+                # than left to a result that may never come.
+                if cid is not None and not abandoned_running:
                     inst.inflight.pop(cid, None)
                 # (3) Leave the turnstile and wake the next in line.
                 if tab_key is not None:

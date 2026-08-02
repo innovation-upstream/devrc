@@ -1462,10 +1462,25 @@ def test_ping_fast_fails_even_while_BUSY_once_the_work_has_blown_its_budget():
     moment that budget is exhausted the extension is provably not healthy (its own
     `execute()` self-bound says so), and the ping fails fast.
 
-    EXEC_OP_BUDGET_S is monkeypatched small so "the work has blown its budget"
-    arrives in test time rather than 18 real seconds.
+    🔴 THE FIXTURE IS CALIBRATED, and that is load-bearing — an earlier version was
+    INSENSITIVE to the `- age` term it advertises. It used EXEC=0.2 with the default
+    2s grace, so the no-age budget was 0.2+2.0 = 2.2s, comfortably under its own
+    `elapsed < 5.0` bound: deleting `- age` from the formula left this GREEN and only
+    the unit test caught it. Now EXEC=3.0 / GRACE=0.5 / age≈4s, so:
+        with `- age`:    3.0 + 0.5 - 4.0  = -0.5  -> clamps to the 0.3s fast floor
+        without `- age`: 3.0 + 0.5        =  3.5s
+    and the bound sits between them.
+
+    cmd_timeout is also kept BELOW `_req`'s 10s urlopen timeout. It was 25s, so the
+    `return timeout` mutant died on a transport TimeoutError instead of this test's
+    own assertion — red for a NEIGHBOURING guard's reason, which proves nothing
+    about this one.
     """
-    srv, _ = _serve(cmd_timeout=25.0, poll_timeout=5.0)
+    # ping_timeout is passed EXPLICITLY: make_handler resolves it once at
+    # construction, so patching the env (or PING_TIMEOUT_DEFAULT) at request time
+    # would be inert and the test would silently measure the 2s default instead.
+    srv, _ = _serve(cmd_timeout=8.0, poll_timeout=5.0,   # < the 10s urlopen bound
+                    ping_timeout=0.3)
     ext = FakeExtension(srv, swallow=True)     # takes the op, never answers
     ext.start()
 
@@ -1495,21 +1510,86 @@ def test_ping_fast_fails_even_while_BUSY_once_the_work_has_blown_its_budget():
         else:
             pytest.fail("the fake extension never dequeued the wedging op")
 
-        # Let its (shrunken) budget lapse, so the in-flight work is now OVERDUE.
-        with mock.patch.object(S, "EXEC_OP_BUDGET_S", 0.2):
-            time.sleep(0.4)
+        # Let the (shrunken) budget lapse, so the in-flight work is now OVERDUE.
+        # age ends up ~4s: 3.0 + 0.5 - 4.0 < 0, so the budget is negative WITH the
+        # age term and +3.5s without it.
+        time.sleep(4.0)
+        with mock.patch.object(S, "EXEC_OP_BUDGET_S", 3.0), \
+                mock.patch.object(S, "WEDGE_GRACE_S", 0.5):
             t0 = time.monotonic()
             st, _ = _req(srv, "POST", "/cmd", {"op": "ping"})
             elapsed = time.monotonic() - t0
         assert st == 504
-        # Fast, NOT the 25s cmd_timeout: the budget went negative, so the deadline
-        # clamps down to the fast floor.
-        assert elapsed < 5.0, (
-            f"ping waited {elapsed:.1f}s against a wedged instance — the gate did "
-            "not notice the in-flight work was overdue")
+        # Fast, NOT cmd_timeout: the budget went negative, so it clamps to the
+        # fast floor. 1.5 sits between 0.3 (correct) and 3.5 (no `- age` term).
+        assert elapsed < 1.5, (
+            f"ping waited {elapsed:.2f}s against a wedged instance — the gate did "
+            "not subtract how long the in-flight work had already been running")
     finally:
         ext.stop(); srv.shutdown(); srv.server_close()
         t.join(timeout=30)                     # let it finish before pytest moves on
+
+
+def test_ping_still_waits_after_the_SUBMITTER_gave_up_on_a_running_command():
+    """🔴 REGRESSION (round-3 audit). The submitter abandoning a command does NOT
+    free the extension: its serial loop is still executing that command for up to
+    EXEC_OP_BUDGET_MS (18s) + RESULT_BUDGET_MS (10s) = 28s, which EXCEEDS the 20s
+    default cmd_timeout. Dropping the `inflight` entry on BridgeTimeout therefore
+    opened a window where the instance looks IDLE while it is provably still busy,
+    and the next ping fast-failed at 2s against a perfectly healthy extension.
+
+    In that window a0a0021 was WORSE than both main (20s flat) and the round-2
+    constant (10s flat) — under either of those the ping would have waited it out.
+
+    Shape: cmd_timeout 5s, a command that takes 8s. The submitter gives up at 5s;
+    the extension is still executing until 8s; the ping is issued at ~5s and must
+    still be alive at 8s.
+    """
+    srv, _ = _serve(cmd_timeout=5.0, poll_timeout=5.0)
+
+    def executor(cmd):
+        if cmd.get("op") == "getHtml":
+            time.sleep(8.0)                 # outlives the submitter's 5s deadline
+            return {"html": "<html></html>"}
+        return {"pong": True}
+
+    ext = FakeExtension(srv, executor=executor)
+    ext.start()
+    abandoned = {}
+
+    def _abandon():
+        try:
+            abandoned["st"] = _req(srv, "POST", "/cmd", {"op": "getHtml"})[0]
+        except Exception as exc:            # noqa: BLE001
+            abandoned["exc"] = exc
+
+    t = threading.Thread(target=_abandon, daemon=True)
+    try:
+        assert _wait_connected(srv, want=True)
+        t.start()
+        # Wait for the extension to actually START it, then for the submitter to
+        # give up. Both preconditions are established, not assumed.
+        deadline = time.time() + 5.0
+        while time.time() < deadline:
+            if any(c.get("op") == "getHtml" for c in ext.dispatched):
+                break
+            time.sleep(0.02)
+        else:
+            pytest.fail("the fake extension never dequeued the long op")
+        t.join(timeout=15)
+        assert abandoned.get("st") == 504, "precondition: the submitter must give up"
+
+        # The extension is STILL executing here. The ping must not read this as idle.
+        t0 = time.monotonic()
+        st, body = _req(srv, "POST", "/cmd", {"op": "ping"})
+        elapsed = time.monotonic() - t0
+        assert st == 200, (
+            f"ping was told the extension is dead after {elapsed:.2f}s, while it "
+            "was still executing an abandoned command")
+        assert body["result"]["data"]["pong"] is True
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+        t.join(timeout=15)
 
 
 def test_effective_timeout_gate_unit(monkeypatch):
@@ -1552,6 +1632,16 @@ def test_effective_timeout_gate_unit(monkeypatch):
     inst.inflight = {"a": 1000.0, "b": 1005.0}
     assert g(60.0, 2.0) == pytest.approx(2 * 18.0 + 2.0 - 12.0)
 
+    # 7. 🟢-D: fast_timeout ABOVE cmd_timeout must NOT escape the ceiling. Both are
+    #    operator-settable and nothing validates the relation; before the inner
+    #    clamp this returned 60.0 for fast=60 / cmd=20, contradicting the
+    #    "never above cmd_timeout" claim in the docstring.
+    inst.inflight = {}
+    assert g(20.0, 60.0) == 20.0, "idle: fast_timeout must be capped at cmd_timeout"
+    inst.inflight = {"a": 1000.0}
+    clock["t"] = 1030.0                     # overdue -> lower clamp is what applies
+    assert g(20.0, 60.0) == 20.0, "busy: the lower clamp must not lift it past cmd"
+
 
 def test_exec_budget_matches_the_extension():
     """EXEC_OP_BUDGET_S mirrors EXEC_OP_BUDGET_MS across a language boundary, so
@@ -1567,35 +1657,135 @@ def test_exec_budget_matches_the_extension():
         f"{S.EXEC_OP_BUDGET_S}s — the busy/wedged gate is now wrong")
 
 
-def test_inflight_is_released_on_every_exit_path():
-    """A stranded `inflight` entry is worse than a stranded `pending` slot: the
-    instance would look permanently busy and `ping` could never fast-fail on it
-    again. Pinned across the three exits — success, timeout, and a never-answered
-    command whose caller gave up.
+def test_inflight_release_distinguishes_queued_from_running_on_abandon():
+    """`inflight` bookkeeping across the exits that behave DIFFERENTLY. A stranded
+    entry makes an instance look permanently busy so `ping` can never fast-fail on
+    it again; releasing too eagerly makes a busy instance look idle (the bug this
+    round fixed). Both directions are wrong, so both are pinned.
+
+    An earlier version of this test claimed three exits, had two blocks, and both
+    described the same case (timeout-after-dequeue). These are genuinely distinct:
+
+      1. SUCCESS                     -> released at once.
+      2. abandoned while STILL QUEUED -> released at once: it never ran and never
+         will, so the instance really is that much less busy.
+      3. abandoned while RUNNING      -> KEPT. The extension is still executing it;
+         releasing here is exactly what made a busy instance read as idle.
+      4. ...and the kept entry is released when the late result finally arrives,
+         rather than lingering until the staleness window expires.
     """
+    # 1. SUCCESS
     srv, reg = _serve(cmd_timeout=1.0, poll_timeout=5.0)
     ext = FakeExtension(srv, executor=lambda c: {"ok": 1})
     ext.start()
     try:
         assert _wait_connected(srv, want=True)
-        st, _ = _req(srv, "POST", "/cmd", {"op": "tabs"})       # success
-        assert st == 200
+        assert _req(srv, "POST", "/cmd", {"op": "tabs"})[0] == 200
         insts = list(reg._instances.values())
         assert insts and all(not i.inflight for i in insts), "leaked after success"
     finally:
         ext.stop(); srv.shutdown(); srv.server_close()
 
-    srv, reg = _serve(cmd_timeout=1.0, poll_timeout=5.0)
+    # 2. ABANDONED WHILE STILL QUEUED — nothing is polling, so the command never
+    #    leaves the outbox. The instance stays resolvable (CONNECT_STALE_S).
+    #    A SHORT poll_timeout matters: stop() only sets a flag, so the thread must
+    #    be allowed to finish its in-flight long poll and exit before we submit —
+    #    otherwise it dequeues the command and this becomes case 3 by accident.
+    srv, reg = _serve(cmd_timeout=1.0, poll_timeout=0.5)
     ext = FakeExtension(srv, swallow=True)
     ext.start()
     try:
         assert _wait_connected(srv, want=True)
-        st, _ = _req(srv, "POST", "/cmd", {"op": "getHtml"})    # timeout
-        assert st == 504
+        ext.stop()
+        ext.join(timeout=10)
+        assert not ext.is_alive(), "the fake must be fully stopped, not just flagged"
+        before = len(ext.dispatched)
+        assert _req(srv, "POST", "/cmd", {"op": "getHtml"})[0] == 504
+        assert len(ext.dispatched) == before, "precondition: it must NOT be dequeued"
         insts = list(reg._instances.values())
-        assert insts and all(not i.inflight for i in insts), "leaked after timeout"
+        assert insts and all(not i.inflight for i in insts), (
+            "a command that never left the outbox must not keep the instance busy")
     finally:
-        ext.stop(); srv.shutdown(); srv.server_close()
+        srv.shutdown(); srv.server_close()
+
+    # 3 + 4. ABANDONED WHILE RUNNING, then the late result lands.
+    gate = threading.Event()
+
+    def executor(cmd):
+        gate.wait(timeout=10)
+        return {"ok": 1}
+
+    srv, reg = _serve(cmd_timeout=1.0, poll_timeout=5.0)
+    ext = FakeExtension(srv, executor=executor)
+    ext.start()
+    try:
+        assert _wait_connected(srv, want=True)
+        assert _req(srv, "POST", "/cmd", {"op": "getHtml"})[0] == 504
+        insts = list(reg._instances.values())
+        assert insts and any(i.inflight for i in insts), (
+            "the extension is STILL executing it — the entry must survive")
+        gate.set()                            # let the late result arrive
+        deadline = time.time() + 5.0
+        while time.time() < deadline:
+            if all(not i.inflight for i in reg._instances.values()):
+                break
+            time.sleep(0.02)
+        assert all(not i.inflight for i in reg._instances.values()), (
+            "the late result must release the kept entry, not leave it to expire")
+    finally:
+        gate.set(); ext.stop(); srv.shutdown(); srv.server_close()
+
+
+def test_a_kept_inflight_entry_expires_if_the_result_never_arrives():
+    """The memory/liveness bound on case 3 above. If the abandoned command's result
+    NEVER comes, the entry must stop counting after INFLIGHT_STALE_S — otherwise
+    one wedged command would make `ping` slow on that instance forever, which is
+    the failure the whole fast path exists to avoid.
+
+    Measured at THREE points, because the two thresholds are different and it
+    would be easy to conflate them:
+      * age <  EXEC+GRACE      -> the extension may still be working: derived
+                                  deadline, entry retained.
+      * EXEC+GRACE < age < STALE -> budget has gone negative (the extension blew
+                                  its own self-bound, so it IS wedged): the ping is
+                                  fast again, but the entry is still RETAINED —
+                                  the staleness window bounds memory, not the
+                                  busy/wedged verdict. Conflating the two would
+                                  make the ping slow for a further 8s.
+      * age >  STALE           -> pruned.
+    """
+    clock = {"t": 1000.0}
+    reg = S.Registry(clock=lambda: clock["t"])
+    inst = S.Instance("k", "i", "", clock["t"])
+    inst.inflight = {"abandoned": 1000.0}
+    assert S.INFLIGHT_STALE_S > S.EXEC_OP_BUDGET_S + S.WEDGE_GRACE_S, (
+        "this test needs the two thresholds to be distinct")
+
+    # 1. Could still be running -> derived deadline, retained.
+    clock["t"] = 1000.0 + 5.0
+    assert reg._effective_timeout_locked(inst, 20.0, 2.0) > 2.0
+    assert inst.inflight, "must not be pruned while it could still be running"
+
+    # 2. Past its own budget but inside the staleness window -> fast, still retained.
+    clock["t"] = 1000.0 + S.EXEC_OP_BUDGET_S + S.WEDGE_GRACE_S + 1.0
+    assert reg._effective_timeout_locked(inst, 20.0, 2.0) == 2.0
+    assert inst.inflight, "the staleness window is about memory, not the verdict"
+
+    # 3. Past the staleness window -> pruned.
+    clock["t"] = 1000.0 + S.INFLIGHT_STALE_S + 1.0
+    assert reg._effective_timeout_locked(inst, 20.0, 2.0) == 2.0
+    assert not inst.inflight, "a stale entry must be pruned, not just ignored"
+
+
+def test_result_budget_matches_the_extension():
+    """RESULT_BUDGET_S mirrors RESULT_BUDGET_MS across a language boundary — the
+    same drift hazard as EXEC_OP_BUDGET_S, and it feeds INFLIGHT_STALE_S."""
+    proto = (Path(__file__).resolve().parent.parent
+             / "extension" / "protocol.js").read_text(encoding="utf-8")
+    m = re.search(r"export const RESULT_BUDGET_MS\s*=\s*(\d+)", proto)
+    assert m, "could not find RESULT_BUDGET_MS in protocol.js — retarget this test"
+    assert float(m.group(1)) / 1000.0 == S.RESULT_BUDGET_S, (
+        f"protocol.js says {m.group(1)}ms, server.py says {S.RESULT_BUDGET_S}s")
 
 
 def test_a_healthy_ping_is_unaffected_and_answers_in_milliseconds(monkeypatch):
