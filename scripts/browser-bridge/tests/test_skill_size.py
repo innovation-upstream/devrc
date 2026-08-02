@@ -1,0 +1,93 @@
+"""Deterministic byte-size gate for `scripts/browser-bridge/SKILL.md`.
+
+WHY THIS EXISTS
+---------------
+The `browser` skill body is loaded into context on every browser task, so it has
+a hard budget. That budget used to be enforced by a prose warning in the project
+`CLAUDE.md` ("`wc -c` before you commit"). It did not hold: the ceiling was
+breached three times in a single day at 2-11 bytes of headroom, and once by 974
+bytes when a feature commit added op documentation without evicting anything.
+Each breach was caught by a human noticing, or not caught until later.
+
+`claude/RULES.md`: "Prefer deterministic/structural fixes over prompt-tuning,
+prose instructions, or suffix/keyword heuristics." This file is that fix. The
+numbers below are the SINGLE source of truth for the ceiling -- any other
+mention of it (CLAUDE.md, handoff docs) must cross-reference this module rather
+than restate the literal, because a second hand-maintained copy of the number is
+exactly how the drift regrows.
+
+This module is part of the hermetic set (`scripts/run-tests.sh`), so it runs in
+`nix build .#checks.x86_64-linux.pytests` -- the repo's real pre-merge gate.
+"""
+from pathlib import Path
+
+# The hard ceiling: SKILL.md must never exceed this many bytes.
+MAX_BYTES = 12_288
+
+# Required working margin below the ceiling. A file sitting at 12,287 bytes
+# technically holds the line but leaves no room for a one-line correction --
+# and that is the exact position this file has been re-breached from. The
+# ENFORCED budget is therefore MAX_BYTES - MIN_HEADROOM_BYTES = 12,188.
+MIN_HEADROOM_BYTES = 100
+
+SKILL_MD = Path(__file__).resolve().parent.parent / "SKILL.md"
+
+_EVICTION_PLAYBOOK = """
+  How to fix (the #233/#235 pattern -- do NOT just delete content):
+    1. Pick a coherent block of the core that is only needed for ONE kind of
+       task (a subsystem, a failure mode, a fallback path).
+    2. Move it whole into scripts/browser-bridge/reference/<topic>.md
+       (existing topics: agent, css-hit-test, errors, frames-cdp,
+       security-ops, spa-wake, tabs-instances, x-fallback).
+    3. Leave a ~110-byte pointer row in SKILL.md naming the topic and its
+       REPO-ABSOLUTE path -- nix/home.nix symlinks only SKILL.md and the
+       `browser` CLI into ~/.claude/skills/browser/, NOT reference/, so a
+       relative path does not resolve for the reader.
+    4. Re-run this test. Ceiling + headroom constants live in
+       scripts/browser-bridge/tests/test_skill_size.py.
+"""
+
+
+def _size() -> int:
+    return len(SKILL_MD.read_bytes())
+
+
+def test_skill_md_exists():
+    """Guard the guard: a moved/renamed SKILL.md must not silently pass."""
+    assert SKILL_MD.is_file(), (
+        f"{SKILL_MD} not found -- the size gate below would be vacuous. "
+        "If SKILL.md moved, update SKILL_MD in this module."
+    )
+
+
+def test_skill_md_under_hard_ceiling():
+    size = _size()
+    assert size <= MAX_BYTES, (
+        f"\n\nscripts/browser-bridge/SKILL.md is OVER its hard ceiling.\n"
+        f"  current:  {size:,} bytes\n"
+        f"  ceiling:  {MAX_BYTES:,} bytes\n"
+        f"  OVER BY:  {size - MAX_BYTES:,} bytes\n"
+        f"{_EVICTION_PLAYBOOK}"
+    )
+
+
+def test_skill_md_keeps_working_headroom():
+    """The ceiling alone is not enough -- keep a margin to edit into.
+
+    Fails in the MAX_BYTES-MIN_HEADROOM .. MAX_BYTES band (and above, where the
+    ceiling test also fires with the overage). "You are one word from breaking
+    it" becomes a signal instead of a surprise.
+    """
+    size = _size()
+    headroom = MAX_BYTES - size
+    assert headroom >= MIN_HEADROOM_BYTES, (
+        f"\n\nscripts/browser-bridge/SKILL.md has no working headroom left.\n"
+        f"  current:   {size:,} bytes\n"
+        f"  ceiling:   {MAX_BYTES:,} bytes\n"
+        f"  free:      {headroom:,} bytes  (minimum required: "
+        f"{MIN_HEADROOM_BYTES:,})\n"
+        f"  budget:    {MAX_BYTES - MIN_HEADROOM_BYTES:,} bytes "
+        f"(ceiling minus the required margin)\n"
+        f"  RECLAIM:   {MIN_HEADROOM_BYTES - headroom:,} bytes\n"
+        f"{_EVICTION_PLAYBOOK}"
+    )
