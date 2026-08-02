@@ -489,6 +489,13 @@ def _peel_variants(argv):
                 i += 2 if takes_value else 1
                 continue
             if wrapper and _WRAPPER_POSITIONAL.get(wrapper):
+                # Branch here too, for the same fail-open reason as the flag
+                # arity above: if the positional count is wrong (or a preceding
+                # flag already ate the duration), consuming it swallows the real
+                # command. Found by the generated (wrapper, value-flag) matrix —
+                # `timeout -k talosctl reset` peeled to `['reset']` through BOTH
+                # branches, because the alternate still hit this consumption.
+                stack.append((i, None))
                 i += _WRAPPER_POSITIONAL[wrapper]
                 wrapper = None
                 continue

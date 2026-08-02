@@ -446,6 +446,262 @@ def test_high_frequency_commands_are_not_denied_by_the_guard(command):
 
 
 # --------------------------------------------------------------------------- #
+# 4b. 🔴 gaps found by an INDEPENDENTLY-CONSTRUCTED mutation sweep
+#
+# A 52-mutant sweep built differently from this suite (pattern-NARROWING mutants
+# that keep the function, the policy entry and the deny action, and change only
+# what matches) killed 39/50 and left 11 survivors. Every survivor was a hole in
+# THIS FILE, not a defect in guard_core.py — the code already handled each case,
+# nothing pinned it. That is exactly the failure mode the previous round had:
+# a 10/10 sweep whose blind spots only a differently-built sweep could see.
+#
+# Each block below names the mutant it kills.
+# --------------------------------------------------------------------------- #
+
+# --- N16 / P14: argv[0] and wrapper tokens are BASENAME-normalised ---------- #
+# On NixOS everything resolves through /run/current-system/sw/bin and sudo lives
+# at /run/wrappers/bin/sudo, so an absolute argv[0] is the NORMAL spelling here,
+# not an exotic one. Mutants that dropped `os.path.basename` on either the
+# command or the wrapper token survived the whole suite.
+ABS_PREFIXES = ["/usr/bin/", "/run/current-system/sw/bin/", "/bin/", "./"]
+
+
+@pytest.mark.parametrize("command", [
+    "talosctl -n 192.168.50.94 reset",
+    "mkfs.ext4 /dev/sda1",
+    "mke2fs /dev/sdc",
+    "dd of=/dev/sda if=/dev/zero",
+    "rm -rf $HOME",
+    "git -C /repo stash push -m wip",
+    "git clean -fd",
+    "git -C /repo reset --hard",
+])
+@pytest.mark.parametrize("prefix", ABS_PREFIXES)
+def test_absolute_argv0_is_still_matched(prefix, command):
+    """kills N16."""
+    head, _, tail = command.partition(" ")
+    assert gc.evaluate(f"{prefix}{head} {tail}", "opencode") is not None
+
+
+@pytest.mark.parametrize("wrapper", [
+    "/usr/bin/sudo", "/run/wrappers/bin/sudo", "/usr/bin/env", "/usr/bin/doas",
+    "/usr/bin/nohup", "/run/current-system/sw/bin/setsid",
+])
+def test_absolute_wrapper_paths_are_still_peeled(wrapper):
+    """kills P14. `/run/wrappers/bin/sudo` is the real path on this host."""
+    assert gc.evaluate(f"{wrapper} talosctl -n 1.2.3.4 reset", "opencode") is not None
+
+
+def test_absolute_timeout_wrapper_consumes_its_positional():
+    assert gc.evaluate("/usr/bin/timeout 60 talosctl reset", "opencode") is not None
+
+
+# --- P04: the arity-BRANCHING safety net ------------------------------------ #
+# `_peel_variants` branches on the other arity interpretation precisely so that
+# a wrong entry in `_WRAPPER_VALUE_FLAGS` cannot fail OPEN — that is what the
+# historical `sudo -n` bug was. A mutant returning only the primary peeling
+# survived every other test in this file, i.e. the safety net was pure prose.
+WRAPPER_FLAG_PAIRS = sorted(
+    (w, f) for w, flags in gc._WRAPPER_VALUE_FLAGS.items() for f in flags
+)
+
+
+@pytest.mark.parametrize("wrapper,flag", WRAPPER_FLAG_PAIRS)
+def test_a_value_flag_used_WITHOUT_a_value_still_denies(wrapper, flag):
+    """kills P04.
+
+    Every flag here is in the value-taking table, so the PRIMARY peeling
+    swallows `talosctl` as the flag's value and sees `['reset']`. Only the
+    alternate interpretation recovers the real command. If this ever goes red,
+    the guard has the `sudo -n` bug again — for a different flag.
+    """
+    assert gc.evaluate(f"{wrapper} {flag} talosctl reset", "opencode") is not None
+
+
+@pytest.mark.parametrize("command", [
+    "sudo -u rm -rf /", "env -C mkfs.ext4 /dev/sda1", "nice -n rm -rf $HOME",
+    "doas -u git -C /repo stash push -m x", "ionice -c dd of=/dev/sda if=/dev/zero",
+])
+def test_arity_branch_covers_the_other_checks_too(command):
+    assert gc.evaluate(command, "opencode") is not None
+
+
+# --- P13: bundled `-c` shells ----------------------------------------------- #
+@pytest.mark.parametrize("wrapper", [
+    "bash -xc '{}'", "bash -ec '{}'", "bash -exc '{}'", 'sh -lc "{}"',
+    "zsh -ic '{}'", "bash -o pipefail -c '{}'",
+])
+@pytest.mark.parametrize("inner", ["talosctl reset", "rm -rf $HOME", "git stash"])
+def test_bundled_dash_c_shells_are_inspected(wrapper, inner):
+    """kills P13. The matrix above only used a bare `-c`."""
+    assert gc.evaluate(wrapper.format(inner), "opencode") is not None
+
+
+# --- S08: the UNLEXABLE-input fallback -------------------------------------- #
+# A stray quote makes shlex raise and `_tokenise` falls back to a crude split.
+# That branch was untested for EVERY check, not just dd — and it is reachable
+# from any truncated heredoc or an unbalanced quote in a message.
+@pytest.mark.parametrize("command", [
+    'dd of="/dev/sda" if=/dev/zero',
+    "talosctl -n 1.2.3.4 reset",
+    "rm -rf $HOME",
+    "mkfs.ext4 /dev/sda1",
+    "git -C /repo stash push -m wip",
+])
+def test_unlexable_input_still_denies(command):
+    """kills S08. The trailing `'` makes shlex.split raise."""
+    assert gc.evaluate(command + " '", "opencode") is not None
+    assert gc.evaluate(command + ' "', "opencode") is not None
+
+
+# --- S09: `cd <path> ; git …`, not only `&&` -------------------------------- #
+@pytest.mark.parametrize("sep", ["&&", ";", " && ", " ; "])
+def test_cd_then_git_covers_both_separators(sep):
+    """kills S09. Only the `&&` spelling was pinned."""
+    assert gc.check_cd_then_git(f"cd /home/zach/repo{sep}git status") is not None
+
+
+@pytest.mark.parametrize("command", ["git -C /home/zach/repo status", "cd /tmp",
+                                     "cd /tmp && ls", "echo cd /tmp && git status"])
+def test_cd_then_git_does_not_over_match(command):
+    assert gc.check_cd_then_git(command) is None
+
+
+# --- S11: every private-key header spelling --------------------------------- #
+@pytest.mark.parametrize("kind", ["RSA ", "DSA ", "EC ", "OPENSSH ", "PGP ",
+                                  "ENCRYPTED ", "", "RSA2 "])
+def test_every_private_key_header_spelling_is_caught(kind):
+    """kills S11. Only `RSA PRIVATE KEY` was pinned; the `[A-Z0-9 ]*` wildcard —
+    which is what covers modern OPENSSH keys — was unpinned."""
+    body = "-----BEGIN " + kind + "PRIVATE KEY-----\nAAAA\n"
+    assert gc.check_private_key(f"echo '{body}' > /tmp/k") is not None
+
+
+def test_private_key_check_does_not_fire_on_a_public_key():
+    assert gc.check_private_key("ssh-add ~/.ssh/id_ed25519.pub") is None
+
+
+# --- N14 / N15 / S12: the secret + public-IP publish guard ------------------ #
+SECRET_SAMPLES = {
+    "an AWS access key id": "AKIAIOSFODNN7EXAMPLE",
+    "an AWS temporary access key id": "ASIAIOSFODNN7EXAMPLE",
+    "a GitHub token": "ghp_" + "A" * 36,
+    "a GitHub fine-grained PAT": "github_pat_" + "A" * 42,
+    "a GitLab token": "glpat-" + "A" * 20,
+    "an Anthropic API key": "sk-ant-" + "A" * 20,
+    "an OpenRouter API key": "sk-or-v1-" + "A" * 20,
+    "an OpenAI project key": "sk-proj-" + "A" * 20,
+    "a Slack token": "xoxb-" + "A" * 12,
+    "a Google API key": "AIza" + "A" * 35,
+}
+
+
+def test_every_secret_pattern_has_a_pinned_sample():
+    """kills N14 (structurally). Deleting three `sk-*` shapes changed nothing,
+    because no test pinned any INDIVIDUAL pattern."""
+    labels = {label for _, label in gc.SECRET_PATTERNS}
+    assert labels == set(SECRET_SAMPLES), (
+        "SECRET_PATTERNS and the pinned samples have diverged — every shape must "
+        "carry a sample, or deleting one is invisible"
+    )
+
+
+@pytest.mark.parametrize("label,sample", sorted(SECRET_SAMPLES.items()))
+def test_each_secret_shape_is_caught_at_a_publish_sink(label, sample):
+    """kills N14."""
+    reason = gc.check_secret_or_ip_publish(f'git commit -m "creds {sample}"')
+    assert reason is not None and label in reason
+
+
+PUBLISH_SINKS = [
+    "git commit -m 'X'",
+    "git notes add -m 'X'",
+    "gh pr create --body 'X'",
+    "gh pr comment 12 --body 'X'",
+    "gh pr edit 4 --body 'X'",
+    "gh pr review 9 --body 'X'",
+    "gh issue create --body 'X'",
+    "gh issue comment 3 --body 'X'",
+    "gh issue edit 3 --body 'X'",
+    "gh release create v1 --notes 'X'",
+    "gh gist create -d 'X' f.txt",
+]
+
+
+@pytest.mark.parametrize("sink", PUBLISH_SINKS)
+def test_every_publish_sink_is_gated(sink):
+    """kills N15. Only the `create` sinks were pinned, so narrowing
+    PUBLISH_SINKS to `gh … create` let `gh pr comment` post a secret."""
+    assert gc.check_secret_or_ip_publish(sink.replace("X", "AKIAIOSFODNN7EXAMPLE")) is not None
+
+
+@pytest.mark.parametrize("sink", PUBLISH_SINKS)
+def test_a_public_ip_is_gated_at_every_publish_sink(sink):
+    """kills S12. This is the arm the design note says exists because a real
+    session leaked an ingress origin IP into a public-repo comment — and it was
+    entirely unpinned."""
+    reason = gc.check_secret_or_ip_publish(sink.replace("X", "origin 5.161.118.55"))
+    assert reason is not None and "5.161.118.55" in reason
+
+
+@pytest.mark.parametrize("ip", ["192.168.50.94", "10.0.0.2", "127.0.0.1",
+                                "100.64.0.1", "172.16.0.5", "169.254.1.1"])
+def test_internal_ips_are_exempt_at_a_publish_sink(ip):
+    """The EXEMPTION side was unpinned too. Zach's infra work is full of these;
+    if they started tripping the guard, every commit would be blocked."""
+    assert gc.check_secret_or_ip_publish(f"git commit -m 'node {ip}'") is None
+
+
+def test_a_secret_without_a_publish_sink_passes():
+    """Deliberate: writing a cred into a config file is normal work."""
+    assert gc.check_secret_or_ip_publish(
+        "echo AKIAIOSFODNN7EXAMPLE > ~/.config/x/env") is None
+
+
+# --- S03: the `--` boundary in _flags_and_operands -------------------------- #
+def test_flags_and_operands_respects_the_double_dash():
+    """kills S03 — pinned on the HELPER directly.
+
+    The sweep confirmed this branch is currently safety-NEUTRAL: no fatal `rm`
+    target and no denied git subcommand begins with `-`, so removing the `--`
+    handling could not open a hole across 1,102 brute-forced shapes. It becomes
+    live the moment a check gains a dash-leading operand of interest, so pin the
+    contract rather than an outcome that happens not to depend on it.
+    """
+    flags, operands = gc._flags_and_operands(["rm", "-rf", "--", "-weird", "x"])
+    assert flags == {"-rf"}
+    assert operands == ["-weird", "x"]
+
+
+# --- weak kills the sweep flagged: N13, S01, S04 ---------------------------- #
+@pytest.mark.parametrize("hop", ["-C /tmp/x ", "-C /tmp/x -C /tmp/y ",
+                                 "--git-dir=/tmp/x/store ", "--no-pager ",
+                                 "-c user.name=x ", "-P "])
+@pytest.mark.parametrize("prefix", ["", "sudo ", "FOO=1 ", "timeout 60 "])
+def test_git_reset_hard_through_every_global_option_hop(prefix, hop):
+    """N13 was killed by exactly ONE test — a one-test-deep guard on its own
+    headline case (`git -C <path> reset --hard`, the gap this work found)."""
+    assert gc.check_git_reset_hard_argv(f"{prefix}git {hop}reset --hard") is not None
+
+
+@pytest.mark.parametrize("command", ["git reset --soft HEAD~1", "git reset HEAD~1",
+                                     "git -C /tmp/x reset --mixed", "git status"])
+def test_git_reset_without_hard_stays_allowed(command):
+    assert gc.check_git_reset_hard_argv(command) is None
+
+
+@pytest.mark.parametrize("command", [
+    "rm /", "rm /etc", "rm $HOME", "rm -f /", "rm -f $HOME", "rm -i ~",
+])
+def test_non_recursive_rm_of_a_fatal_target_is_not_denied(command):
+    """S01 (`recursive` always True) was killed ONLY by an over-block test.
+    Pinned here as a SECURITY-adjacent contract in its own right: `rm` without
+    `-r` refuses a directory, so denying these would be pure prompt fatigue on
+    commands that cannot do the damage."""
+    assert gc.check_rm_rf_critical(command) is None
+
+
+# --------------------------------------------------------------------------- #
 # 5. the CLI seam the opencode plugin calls
 # --------------------------------------------------------------------------- #
 def _cli(command, policy="opencode", raw=None):

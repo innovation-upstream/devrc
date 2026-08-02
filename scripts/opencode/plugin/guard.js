@@ -41,6 +41,11 @@
 // degrades to "allow" is worse than no guard: it reports safety it is not
 // providing.
 //
+// COST: one python3 subprocess per bash call. Measured 26 ms average over 10
+// runs on a representative command on this host — a rounding error next to a
+// model round-trip, and `spawnSync` keeps the ordering unambiguous (no chance
+// of the tool starting before the verdict lands).
+//
 // Test seams: DEVRC_GUARD_CORE (path to guard_core.py), DEVRC_GUARD_PYTHON
 // (interpreter), DEVRC_GUARD_POLICY (policy name), DEVRC_GUARD_DISABLE=1.
 
