@@ -704,6 +704,17 @@ in
   home.file.".claude/hooks/shell-env-nudge.py" = {
     source = ../scripts/claude-hooks/shell-env-nudge.py;
   };
+  # search-tool-nudge fires PostToolUse on Bash calls that are a TREE SEARCH (`grep -r`,
+  # bare `rg`, `find <path> -name`, `ls -R`, `find | xargs grep`) and points at the
+  # native Grep/Glob tools. Same "prose didn't work, so nudge structurally" reasoning as
+  # shell-env-nudge: over a 30-day telemetry window Bash was 71% of all tool calls
+  # (workbench 31,355 / laptop 6,164) against 50 Grep+Glob calls total — zero on the
+  # laptop — despite RULES.md already saying "Grep over bash grep, Glob over find".
+  # Conservative by design (false positives are expensive on a per-Bash-call hook) and
+  # deduped to once per kind per session.
+  home.file.".claude/hooks/search-tool-nudge.py" = {
+    source = ../scripts/claude-hooks/search-tool-nudge.py;
+  };
   # claude-notify is the turn-finished notifier: on UserPromptSubmit/Stop/SubagentStop
   # it fires a desktop toast (or, headless, a clawgate phone push as FALLBACK) when a
   # turn ran >= threshold (default 60s). Telemetry shows Claude runs mostly on the
