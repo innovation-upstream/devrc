@@ -45,14 +45,23 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 import collector as C  # noqa: E402
+import _mockbin as M  # noqa: E402
 
 SCRIPT_DIR = Path(__file__).resolve().parent.parent
 PLUGIN_JS = SCRIPT_DIR / "activity-plugin.js"
 EMIT = SCRIPT_DIR.parent / "emit"
 
 NAME_CAPTURE_FAILED = "__name_capture_failed__"
+
+# `#!` and the quoted forms the shebang guard scans for, assembled from char
+# codes so this module's own source never contains the pattern it searches for.
+_HB = chr(35) + chr(33)
+_NEEDLES = (chr(34) + _HB, chr(39) + _HB)
 
 
 # --------------------------------------------------------------------------- #
@@ -64,15 +73,16 @@ def write_argv_recorder(path: Path, log: Path) -> None:
     One-arg-per-line is load-bearing: `echo "$@"` re-joins the arguments with
     spaces, which is exactly the corruption we are trying to detect, so a
     space-joined log cannot tell a mangled call from a clean one.
+
+    The shebang is owned by `_mockbin.write_exec` — see that module for why a
+    `#!/usr/bin/env` stub is green on the dev host and RED in the nix sandbox.
     """
-    path.write_text(
-        "#!/usr/bin/env bash\n"
+    M.write_exec(
+        path,
         f'for a in "$@"; do printf "%s\\n" "$a" >> "{log}"; done\n'
         f'printf -- "--END--\\n" >> "{log}"\n'
         "exit 0\n",
-        encoding="utf-8",
     )
-    path.chmod(0o755)
 
 
 def read_calls(log: Path) -> list[list[str]]:
@@ -146,8 +156,97 @@ def drive_tool_call(tmp_path: Path, hook_input: dict) -> list[str]:
                             "XDG_STATE_HOME": str(tmp_path / "state")})
     assert r.returncode == 0, r.stderr
     calls = read_calls(log)
+    # 🔴 An empty log is AMBIGUOUS and must not be read as "the plugin chose not
+    # to emit". `emitEvent` swallows every error by design, so node still exits
+    # 0 when the stub cannot be exec'd at all — which is precisely how a
+    # `#!/usr/bin/env` shebang failed silently in the nix sandbox while the dev
+    # host stayed green. Name the rival mechanism instead of guessing.
+    assert calls, (
+        "the mock emit produced NO output. Either the plugin did not emit, or "
+        f"the stub could not be exec'd. Interpreter {M.SH} executable: "
+        f"{M.interpreter_is_executable()}; stub first line: "
+        f"{mock.read_text().splitlines()[0]!r}")
     assert len(calls) == 1, f"expected exactly 1 emit call, got {len(calls)}: {calls}"
     return calls[0]
+
+
+# --------------------------------------------------------------------------- #
+# TIER PRECONDITION — every test below depends on a runtime-written stub being
+# EXECUTABLE. That is environment-dependent, and it differs between the dev host
+# and the nix build sandbox, so it gets its own named check rather than being
+# discovered as 14 confusing downstream failures.
+# --------------------------------------------------------------------------- #
+def test_the_mock_helper_can_actually_exec(tmp_path):
+    """Runs in BOTH tiers and must never skip.
+
+    MEASURED 2026-08-02: with `#!/usr/bin/env bash` this suite was 166/166 green
+    under `nix-shell` on the laptop and 152 passed / 14 FAILED under
+    `nix build .#checks.x86_64-linux.pytests`, because the sandbox has no
+    /usr/bin/env. The dev host structurally could not observe it.
+    """
+    assert M.interpreter_is_executable(), f"{M.SH} is not executable"
+    out = tmp_path / "out"
+    stub = M.write_exec(tmp_path / "stub", f'printf ran >> "{out}"\nexit 0\n')
+    rc = subprocess.run([str(stub)], capture_output=True, text=True, timeout=10)
+    assert rc.returncode == 0, f"stub failed to exec: {rc.stderr}"
+    assert out.read_text() == "ran"
+
+
+def test_brace_expansion_probe_agrees_with_the_shell_node_actually_uses():
+    """The probe decides which corruption shape the negative controls assert, so
+    it must describe the SAME shell node's `execSync` runs — not a guess.
+
+    MEASURED 2026-08-02: dev host (/bin/sh → bash-interactive) expands; the nix
+    build sandbox does not. Both are green because both are asserted.
+    """
+    probe = M.shell_does_brace_expansion()
+    r = run_node('import { execSync } from "child_process";'
+                 'process.stdout.write(execSync(\'printf "%s\\\\n" {a,b}\').toString());')
+    assert r.returncode == 0, r.stderr
+    assert (r.stdout.split() == ["a", "b"]) is probe, (
+        f"probe says {probe} but node's shell produced {r.stdout!r}")
+
+
+def test_no_runtime_written_shebang_uses_usr_bin_env():
+    """STRUCTURAL GUARD — the deterministic half of the fix.
+
+    A quoted `#!` anywhere in this suite's sources means a call site is writing
+    its own shebang instead of going through `_mockbin.write_exec`, which is how
+    `/usr/bin/env` came back the first time. `_mockbin` itself is exempt: it
+    owns the one shebang, and its docstring names the trap.
+    """
+    # ⚠ The needles are BUILT AT RUNTIME, character by character — including the
+    # `#!` itself. Written as literals they appear in this function's own source
+    # and the scan reports ITSELF, the same self-match that makes
+    # `pgrep -f <pattern>` find its own shell. (Measured: the first version of
+    # this guard failed on its own two source lines.)
+    needles = _NEEDLES
+    tests_dir = Path(__file__).resolve().parent
+    offenders = []
+    for py in sorted(tests_dir.glob("test_*.py")):
+        for i, line in enumerate(py.read_text(encoding="utf-8").splitlines(), 1):
+            if i == 1:
+                continue          # the module's own shebang; pytest imports, never execs
+            if any(n in line for n in needles):
+                offenders.append(f"{py.name}:{i}: {line.strip()}")
+    assert not offenders, (
+        "a test writes its own shebang — use _mockbin.write_exec instead:\n  "
+        + "\n  ".join(offenders))
+
+
+def test_positive_control_the_shebang_guard_can_detect_an_offender(tmp_path):
+    """POSITIVE CONTROL for the `not offenders` (== empty) assertion above.
+
+    An empty offender list is indistinguishable from a scan wired to nothing.
+    Feed the same matcher a file that MUST be flagged and watch the count move.
+    """
+    bad = tmp_path / "test_bad.py"
+    # Assembled at runtime for the same self-match reason as the guard itself.
+    offending = 'p.write_text(' + chr(34) + _HB + '/usr/bin/env bash' + chr(34) + ')'
+    bad.write_text("x = 1\n" + offending + "\n", encoding="utf-8")
+    hits = [i for i, line in enumerate(bad.read_text().splitlines(), 1)
+            if i != 1 and any(n in line for n in _NEEDLES)]
+    assert hits == [2], f"guard is wired to nothing — no hit on {offending!r}"
 
 
 # --------------------------------------------------------------------------- #
@@ -213,8 +312,16 @@ def test_harness_negative_control_sees_the_mangled_payload(tmp_path):
     else:
         raise AssertionError(
             f"harness cannot observe the payload corruption — {raw!r} parsed as JSON")
-    # ...and it is corrupted in exactly the shape the live rows showed.
-    assert raw == 'args_summary:{"name":"customize-opencode"}', raw
+    # UNIVERSAL half — quote removal happens in every POSIX shell, both tiers.
+    assert 'args_summary:{"name":"customize-opencode"}' in raw, raw
+    # BASH-ONLY half — brace expansion split the object into three
+    # `b64:payload=` args and emit kept the LAST, which is the exact value the
+    # 2,699 live rows carry. The workbench runs bash; the nix sandbox's /bin/sh
+    # does not brace-expand, so this is gated on a MEASURED probe, not assumed.
+    if M.shell_does_brace_expansion():
+        assert raw == 'args_summary:{"name":"customize-opencode"}', raw
+    else:
+        assert raw.startswith("{duration_ms:0,success:true,"), raw
 
 
 def test_positive_control_corrupted_arg_count_can_be_nonzero(tmp_path):
@@ -240,14 +347,27 @@ def test_positive_control_corrupted_arg_count_can_be_nonzero(tmp_path):
     # `b64:project=my proj` → +1, `b64:cwd=/tmp/dir with space` → +2.
     assert n == 3, f"positive control expected 3 corrupted entries, got {n}: {argv}"
 
-    # And the exact live signature: bash BRACE-EXPANDS the unquoted JSON object
+    # The exact live signature: bash BRACE-EXPANDS the unquoted JSON object
     # `{"duration_ms":0,"success":true,"args_summary":"…"}` into three separate
     # `b64:payload=` arguments. `emit` takes the LAST one, which is why every
     # stored payload read `args_summary:{"name":"…"}` — a fragment, not JSON.
+    #
+    # Brace expansion is bash-only, and `/bin/sh` is bash on the workbench (where
+    # the live rows were produced) but not in the nix build sandbox. So PROBE it
+    # rather than assuming, and assert the shape that shell actually produces.
     payloads = [a for a in argv if a.startswith("b64:payload=")]
-    assert len(payloads) == 3, payloads
-    assert payloads[-1] == 'b64:payload=args_summary:{"name":"customize-opencode"}', (
-        "this is the literal value the 2,699 live rows carried")
+    if M.shell_does_brace_expansion():
+        assert len(payloads) == 3, payloads
+        assert payloads[-1] == 'b64:payload=args_summary:{"name":"customize-opencode"}', (
+            "this is the literal value the 2,699 live rows carried")
+    else:
+        assert len(payloads) == 1, payloads
+        assert payloads[0].startswith("b64:payload={duration_ms:0,success:true,"), payloads
+    # Either way the payload is NOT valid JSON — that is the tier-independent
+    # claim, and it is what makes the rows unreadable.
+    for p in payloads:
+        with pytest.raises(json.JSONDecodeError):
+            json.loads(p.split("=", 1)[1])
 
 
 # --------------------------------------------------------------------------- #
