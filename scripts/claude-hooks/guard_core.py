@@ -37,13 +37,18 @@ TWO CALLERS, TWO POLICIES
                   RULES.md mandates), followed the same day by
                   `check_git_stash` + `check_git_clean_force` — both 🔴 in
                   RULES.md, both measured ALLOW against the live hook, and
-                  neither with a benign in-repo use. Pinned by name in
+                  neither with a benign in-repo use — and then, later the same
+                  day, by `check_talosctl_reset` + `check_mkfs` +
+                  `check_dd_to_block_device`, the three device/cluster-
+                  destruction families, on the same evidence. Pinned by name in
                   test_guard_core.py.
-  "opencode"    — all of the above, plus the irreversible-action checks below. opencode
-                  agents run unattended (`opencode run` AUTO-REJECTS an `ask`
-                  rather than prompting — measured on 1.18.4), so a hard deny is
-                  the only thing standing between the model and an irreversible
-                  action.
+  "opencode"    — all of the above, plus `check_rm_rf_critical`, which is now
+                  the ONLY opencode-only check. opencode agents run unattended
+                  (`opencode run` AUTO-REJECTS an `ask` rather than prompting —
+                  measured on 1.18.4), so a hard deny is the only thing standing
+                  between the model and an irreversible action. `rm -rf` was
+                  deliberately held back from "claude-code" because it has
+                  frequent legitimate use here — see _IRREVERSIBLE_CHECKS.
 
 A check is `f(cmd) -> reason|None`. Adding one to "opencode" is additive; adding
 one to "claude-code" is a behaviour change to report.
@@ -571,11 +576,34 @@ def _flags_and_operands(argv):
 # =========================================================================== #
 # ARGV-BASED CHECKS — the irreversible families globs handle badly.
 #
-# NOT all opencode-only any more. `check_git_reset_hard_argv` (2026-08-02),
-# `check_git_stash` and `check_git_clean_force` (2026-08-02) run under BOTH
-# policies; talosctl/mkfs/dd/rm stay opencode-only. POLICIES at the bottom is
-# the authority — read it rather than assuming from this section heading.
+# NOT opencode-only any more, and by now MOSTLY not: `check_git_reset_hard_argv`,
+# `check_git_stash` and `check_git_clean_force` (all 2026-08-02) run under BOTH
+# policies, and `check_talosctl_reset`, `check_mkfs` and `check_dd_to_block_device`
+# joined them later the same day. `check_rm_rf_critical` is the ONLY check in
+# this section that is still opencode-only, deliberately — see _IRREVERSIBLE_CHECKS.
+# POLICIES at the bottom is the authority — read it rather than assuming from
+# this section heading.
 # =========================================================================== #
+
+# The escape hatch every claude-code-policy deny message must carry. The guard
+# parses RAW TEXT, and the argv parser splits on newlines — so a heredoc body
+# LINE that documents a banned command is parsed as that command and denied.
+# `check_git_add_all` established this convention after the operator's own test
+# harness was blocked for containing the literal string `git add -A`; #295
+# extended it to the stash/clean messages. Every check that is in
+# `_CLAUDE_CODE_CHECKS` hands the caller the same documented way out, because a
+# check that fires on every Bash call in every session WILL eventually fire on
+# someone writing ABOUT the command.
+#
+# One string, one place: a message asserted to contain it in test_guard_core.py
+# should not be able to drift per-check.
+_QUOTING_ESCAPE_HATCH = (
+    " (Only QUOTING this command — e.g. a heredoc body documenting the ban, whose lines this "
+    "guard parses as real commands? Write the text to a file with the Write tool and use "
+    "`git commit -F <file>` / `gh pr create --body-file <file>` — which your RULES prefer over "
+    "heredocs anyway.)"
+)
+
 
 def check_talosctl_reset(cmd):
     """Wipes a Talos node.
@@ -589,6 +617,10 @@ def check_talosctl_reset(cmd):
     Enumerating which talosctl flags take a value is a moving target across
     versions, and getting it wrong fails OPEN. `talosctl get resetstatus` is not
     a bare `reset` token, so the obvious false positive does not occur.
+
+    Enabled for BOTH policies since 2026-08-02 (it shipped opencode-only). It
+    lives in `_CLAUDE_CODE_CHECKS`, which `POLICIES["opencode"]` includes, so
+    opencode keeps coverage by inheritance rather than a duplicate entry.
     """
     for argv in commands(cmd):
         if os.path.basename(argv[0]) != "talosctl":
@@ -599,7 +631,8 @@ def check_talosctl_reset(cmd):
                     "no prompt worth clicking through. If a node genuinely must be reset, run it "
                     "yourself with the exact `--system-labels-to-wipe` / `--graceful` flags you "
                     "intend. (This guard parses argv, so `talosctl -n <ip> reset`, "
-                    "`talosctl --nodes <ip> reset` and `sudo talosctl reset` are all caught.)")
+                    "`talosctl --nodes <ip> reset` and `sudo talosctl reset` are all caught.)"
+                    + _QUOTING_ESCAPE_HATCH)
     return None
 
 
@@ -607,14 +640,20 @@ _MKFS = re.compile(r"^(?:mkfs(?:\.[A-Za-z0-9_-]+)?|mke2fs|mkswap|newfs|mkntfs|mk
 
 
 def check_mkfs(cmd):
-    """Formats a filesystem — destroys every byte on the target device."""
+    """Formats a filesystem — destroys every byte on the target device.
+
+    Enabled for BOTH policies since 2026-08-02 (it shipped opencode-only), by
+    inheritance from `_CLAUDE_CODE_CHECKS`. It matches on the PROGRAM NAME, so
+    it cannot fire on a `mkfs` substring inside an argument — `grep -rn 'mkfs'`
+    and `echo 'mkfs.ext4 is banned'` stay allowed, asserted in the tests.
+    """
     for argv in commands(cmd):
         base = os.path.basename(argv[0])
         if _MKFS.match(base):
             return (f"`{base}` is blocked — it FORMATS a filesystem and destroys everything on "
                     "the target device. No agent on these hosts has a reason to run it. If you "
                     "are provisioning a disk, do it yourself with the device path in front of "
-                    "you.")
+                    "you." + _QUOTING_ESCAPE_HATCH)
     return None
 
 
@@ -623,7 +662,13 @@ _DD_SAFE_DEV = re.compile(r"^/dev/(?:null|zero|stdout|stderr|stdin|tty|full|rand
 
 
 def check_dd_to_block_device(cmd):
-    """`dd of=/dev/sdX` overwrites a disk in place. `of=/dev/null` is fine."""
+    """`dd of=/dev/sdX` overwrites a disk in place. `of=/dev/null` is fine.
+
+    Enabled for BOTH policies since 2026-08-02 (it shipped opencode-only), by
+    inheritance from `_CLAUDE_CODE_CHECKS`. Only an `of=` under `/dev/` that is
+    not one of the pseudo sinks denies, so the ordinary file-to-file `dd` an
+    agent might legitimately run is untouched.
+    """
     for argv in commands(cmd):
         if os.path.basename(argv[0]) != "dd":
             continue
@@ -635,7 +680,7 @@ def check_dd_to_block_device(cmd):
                 return (f"`dd of={target}` is blocked — writing to a block device overwrites the "
                         "disk in place, past every filesystem and every backup tool. If you are "
                         "imaging a device, run it yourself. (`of=/dev/null` and the other pseudo "
-                        "sinks are allowed.)")
+                        "sinks are allowed.)" + _QUOTING_ESCAPE_HATCH)
     return None
 
 
@@ -867,34 +912,69 @@ def _git_strip_global_opts(argv):
 # does: `cd /x && git stash` now reports the stash reason, which names the more
 # serious of the two problems.
 #
-# The four remaining families (talosctl reset / mkfs / dd / rm -rf) stay
-# opencode-ONLY and were deliberately NOT moved here — see _IRREVERSIBLE_CHECKS.
+# 🔴 `check_talosctl_reset`, `check_mkfs` and `check_dd_to_block_device` were
+# added later on 2026-08-02 as the TENTH, ELEVENTH and TWELFTH checks, by the
+# same kind of explicit operator decision. Measured against the live
+# ~/.claude/hooks/bash-guard.py BEFORE the move, with `git add -A` and
+# `git reset --hard` as positive controls that came back DENY in the same sweep:
+#     ALLOW  talosctl -n 192.168.50.94 reset
+#     ALLOW  mkfs.ext4 /dev/sdc
+#     ALLOW  dd if=/dev/zero of=/dev/sdc
+# i.e. wiping a cluster node, formatting a disk and overwriting a block device
+# were all permitted, unprompted, on the operator's primary tool. None of the
+# three has ANY benign use from an agent on these hosts: the read/inspect
+# neighbours (`talosctl version`, `talosctl -n <ip> get members`, a file-to-file
+# `dd`, `dd of=/dev/null`) do not match, and `mkfs` matches on the PROGRAM name
+# so merely naming it in an argument is not a command.
+#
+# They sit BEFORE check_heredoc_to_file and check_cd_then_git so that a command
+# tripping both reports the DEVICE-DESTRUCTION reason rather than the token-waste
+# or use-`git -C` reason — the more serious of the two problems, the same
+# ordering rationale the git argv checks above use.
+#
+# 🔴 `check_rm_rf_critical` was deliberately NOT moved with them. See
+# _IRREVERSIBLE_CHECKS below for why, and do not "finish the job".
 _CLAUDE_CODE_CHECKS = [
     check_git_add_all,
     check_git_reset_hard,
     check_git_reset_hard_argv,
     check_git_stash,
     check_git_clean_force,
+    check_talosctl_reset,
+    check_mkfs,
+    check_dd_to_block_device,
     check_heredoc_to_file,
     check_cd_then_git,
     check_private_key,
     check_secret_or_ip_publish,
 ]
 
-# The irreversible families that remain opencode-ONLY: `opencode run`
-# AUTO-REJECTS an `ask` rather than prompting (measured on 1.18.4), and the
-# interactive TUI is the only place a human sees one — so for an unattended
-# agent a hard deny is the only real control.
+# 🔴 THE ONE CHECK THAT REMAINS opencode-ONLY — and it stays that way.
 #
-# 🔴 These four are NOT in the claude-code policy, and that narrowness is a
-# DECISION, not an oversight. `rm -rf` in particular risks false positives on
-# legitimate build-directory cleanup, and the other three are hardware/cluster
-# operations an interactive Claude Code session can be prompted about. Widening
-# any of them to claude-code is a separate operator decision.
+# `opencode run` AUTO-REJECTS an `ask` rather than prompting (measured on
+# 1.18.4), and the interactive TUI is the only place a human sees one, so for an
+# unattended agent a hard deny is the only real control. That justifies the deny
+# for opencode. It does NOT justify it for Claude Code, and the difference is
+# specific to this check:
+#
+#   `rm -rf` has legitimate, FREQUENT use on these hosts — build directories,
+#   `node_modules`, `.direnv`, throwaway worktrees, scratch trees under /tmp.
+#   `check_rm_rf_critical` is narrow (only `/`, `~`/`$HOME`, `.`/`..`, and the
+#   top-level system dirs), but "narrow" is not "never": the operator's own
+#   cleanup habits put `rm -rf` in front of this guard routinely, and a guard
+#   that fires during routine cleanup trains its subject to route around it.
+#   A guard that has been routed around is worse than no guard, because it also
+#   reports safety. In Claude Code the fallback is a PROMPT the operator sees —
+#   the exact control opencode lacks — so the deny buys much less there.
+#
+# 🔴 This narrowness is a DECISION, not an oversight, and it is NOT the residue
+# of a half-finished migration: talosctl/mkfs/dd moved to the claude-code policy
+# on 2026-08-02 and `check_rm_rf_critical` was held back in the SAME change, on
+# purpose. Do not "finish the job". Moving it is its own operator decision with
+# its own evidence, and the thing to bring is a measurement of how often the
+# fatal-target set would fire on real sessions — not the observation that it is
+# the last one left.
 _IRREVERSIBLE_CHECKS = [
-    check_talosctl_reset,
-    check_mkfs,
-    check_dd_to_block_device,
     check_rm_rf_critical,
 ]
 
