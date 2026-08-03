@@ -131,7 +131,32 @@
             # 🔴 run-tests.sh now ASSERTS every one of these is on PATH
             # (`REQUIRED_TOOLS`) and fails naming the missing binary. Deleting one
             # from this list no longer silently skips tests — it fails the gate.
-            nativeBuildInputs = [ pyEnv pkgs.bash pkgs.ripgrep pkgs.git pkgs.util-linux pkgs.jq pkgs.gnugrep pkgs.curl pkgs.nodejs pkgs.nix ];
+            # opencode: MEASURED 2026-08-02 — scripts/tests/test_opencode_engine.py
+            # runs the REAL `opencode debug agent <name> --pure` against a
+            # throwaway OPENCODE_CONFIG_DIR seeded from scripts/opencode/, and
+            # compares the engine's authoritative flat permission array against
+            # the Python resolver model that every permission assertion in
+            # test_opencode_config.py rests on. Without the binary those 19 tests
+            # `pytest.fail()` (NOT skip) — the same deliberate choice as
+            # nix-instantiate above, for the same reason.
+            #
+            # HERMETIC, verified before adding: `debug agent` is READ-ONLY (it
+            # executes no tool), needs no network (OPENCODE_DISABLE_MODELS_FETCH
+            # is baked into the derivation), materialises no node_modules, takes
+            # ~1 s per call, and was reproduced byte-for-byte under an env
+            # carrying only PATH/HOME/TMPDIR — which is what makes it sandbox-
+            # gateable rather than a dev-host-only check.
+            #
+            # 🔴 This ALSO makes the sandbox the tier that pins the VERSION.
+            # `pkgs.opencode` here and in nix/pkgs/tools/default.nix resolve from
+            # the same flake.lock, so CI tests the exact binary the hosts deploy
+            # (1.18.4 at rev 9bc02893134c). Cost, stated as deliberately as the
+            # nodejs and nix entries above: this check's closure grows by
+            # opencode, and a nixpkgs bump that moves it invalidates the cache
+            # AND turns the version assertion red. That red is the point — the
+            # config header's "measured on v1.18.4 — do not re-derive" claims are
+            # otherwise pinned to nothing.
+            nativeBuildInputs = [ pyEnv pkgs.bash pkgs.ripgrep pkgs.git pkgs.util-linux pkgs.jq pkgs.gnugrep pkgs.curl pkgs.nodejs pkgs.nix pkgs.opencode ];
           }
           ''
             cp -r ${./.} src

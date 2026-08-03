@@ -18,10 +18,17 @@ JSON object matching the schema:
     {"answer":str, "evidence":[str,...], "steps_used":int,
      "status":"ok"|"partial"|"blocked"}
 
-This reader is deliberately DEFENSIVE about the envelope (the two hosts are on
-different opencode versions — laptop 1.18.4, workbench 1.17.20 — and the event
-shape may drift): it concatenates every text part it can find (several nesting
-shapes accepted), then extracts the LAST balanced top-level JSON object that
+This reader is deliberately DEFENSIVE about the envelope, because the event shape
+is opencode's and may drift across versions. It carries NO per-host version
+claim on purpose: nothing below branches on a version, so such a comment would be
+pure hand-maintained bookkeeping — and it duly went stale (it named the workbench
+as 1.17.20; MEASURED 2026-08-02 it was 1.18.9). The binary is now pinned
+declaratively via nix/pkgs/tools/default.nix + flake.lock, and the version that
+IS load-bearing is asserted against the engine in
+scripts/tests/test_opencode_engine.py — not restated here.
+
+Defensiveness in practice: it concatenates every text part it can find (several
+nesting shapes accepted), then extracts the LAST balanced top-level JSON object that
 parses and carries the schema keys. It NEVER prints raw page content — only the
 normalized compact schema.
 
