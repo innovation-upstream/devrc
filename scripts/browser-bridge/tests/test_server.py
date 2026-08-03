@@ -3862,10 +3862,12 @@ def test_git_short_head_none_on_missing_dir(tmp_path):
 
 def test_manifest_version_reads_current():
     v = S.manifest_version(path=EXT_DIR / "manifest.json")
-    # Bumped to 0.7.1 for `text --annotated` inside `--frame` (the extension's
-    # service_worker/protocol changed; no new wire op, so `ping`'s `ops` list
-    # CANNOT discriminate this build — the version and the capability probe are
-    # the only tells). 0.7.0 was the `context` op + enriched read envelopes;
+    # Bumped to 0.7.2 for `emulate --reset` actually CLEARING the CDP overrides
+    # (#319 — the device-metrics viewport survives the debugger detach, so the
+    # old reset left the tab permanently phone-sized). No new wire op, so
+    # `ping`'s `ops` list CANNOT discriminate this build — the version and a
+    # post-reset innerWidth read are the only tells. 0.7.1 was `text
+    # --annotated` inside `--frame`; 0.7.0 the `context` op + enriched read envelopes;
     # 0.6.0 the `documentPredatesEmulation` hint; 0.5.0 the `emulate` op itself;
     # 0.4.0 the poll-loop no-wedge change. The bump is the operator's only
     # falsifiable "is the new build loaded?" signal, so this assertion is
@@ -3878,7 +3880,7 @@ def test_manifest_version_reads_current():
     # answer is a pre-merge gate on the bump, NOT deleting the literal — a
     # derived assertion here would compare the manifest to itself and pin
     # nothing at all.
-    assert isinstance(v, str) and v == "0.7.1"
+    assert isinstance(v, str) and v == "0.7.2"
 
 
 def test_manifest_version_prefers_the_deployed_copy_over_the_repo(tmp_path,
@@ -3899,7 +3901,7 @@ def test_manifest_version_falls_back_to_repo_when_not_deployed(tmp_path,
     reporting the repo manifest instead of going null."""
     monkeypatch.setattr(S, "_DEPLOYED_EXT_MANIFEST", tmp_path / "absent.json")
     monkeypatch.setattr(S, "_EXT_MANIFEST_PATH", EXT_DIR / "manifest.json")
-    assert S.manifest_version() == "0.7.1"
+    assert S.manifest_version() == "0.7.2"
 
 
 def test_manifest_version_none_when_neither_exists(tmp_path, monkeypatch):

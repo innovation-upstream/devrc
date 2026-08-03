@@ -24,6 +24,7 @@ import { fileURLToPath } from "node:url";
 import {
   DEVICE_PRESETS, PRESET_NAMES, PRESET_REQUIRED_KEYS, EMULATION_LIMITS,
   normalizeEmulation, emulationCdpSteps, applyEmulationSteps, emulationSummary,
+  emulationResetCdpSteps, applyEmulationResetSteps, EMULATION_RESET_MAX_STEPS,
   isTouchEmulated, touchTapEvents, ALLOWED_OPS, EMULATION_MAX_STEPS,
   CDP_OP_BUDGET_MS, EXEC_OP_BUDGET_MS,
   hasCommittedDocument, emulationCreateTimeSignature, documentPredatesEmulation,
@@ -319,6 +320,103 @@ test("`reset` yields no steps at all", () => {
   assert.equal(isTouchEmulated(s), false);
 });
 
+// --------------------------------------------------------------------------- //
+// PURE: the RESET (undo) step list — issue #319
+//
+// The bug this pins: `--reset` used to drop the in-memory state and send NOTHING
+// to CDP, on the premise that every override dies at the debugger detach. The
+// device-metrics VIEWPORT SIZE does not (measured 2026-08-03, live Brave 0.7.1:
+// innerWidth stayed 393 after `--reset` AND after a further nav, against a
+// never-emulated control tab reading 1124), so the tab was left permanently
+// phone-sized with nothing left that knew how to undo it.
+//
+// ⚠ These assert the CDP CLEAR LIST, deliberately — NOT that reset returns
+// ok/reset:true. The broken behaviour returned `reset: true` with a populated
+// `wasEmulating`, so any test asserting only the envelope shape passes against
+// the bug.
+// --------------------------------------------------------------------------- //
+
+test("RESET STEPS: a full emulation undoes EVERY class it applied, in order", () => {
+  const s = normalizeEmulation({
+    device: "iphone-15", colorScheme: "dark", tz: "Europe/London",
+    geo: { latitude: 51.5074, longitude: -0.1278 },
+  });
+  const steps = emulationResetCdpSteps(s);
+  assert.deepEqual(steps.map((x) => x.method), [
+    // Metrics FIRST: it is the one measured to actually be stuck, so it lands
+    // even if a later clear fails.
+    "Emulation.clearDeviceMetricsOverride",
+    "Emulation.setTouchEmulationEnabled",
+    "Emulation.setUserAgentOverride",
+    "Emulation.setEmulatedMedia",
+    "Emulation.setTimezoneOverride",
+    "Emulation.clearGeolocationOverride",
+  ]);
+  // Every apply step has an undo: same count, and never more than the constant.
+  assert.equal(steps.length, emulationCdpSteps(s).length);
+  assert.ok(steps.length <= EMULATION_RESET_MAX_STEPS);
+
+  // The PARAMS are the point, not just the method names — a clear that carries
+  // the wrong payload is a no-op that looks like an undo.
+  const by = Object.fromEntries(steps.map((x) => [x.method, x.params]));
+  assert.deepEqual(by["Emulation.clearDeviceMetricsOverride"], {});
+  assert.deepEqual(by["Emulation.setTouchEmulationEnabled"], { enabled: false });
+  assert.deepEqual(by["Emulation.setUserAgentOverride"], { userAgent: "" });
+  assert.deepEqual(by["Emulation.setEmulatedMedia"], { media: "", features: [] });
+  assert.deepEqual(by["Emulation.setTimezoneOverride"], { timezoneId: "" });
+  assert.deepEqual(by["Emulation.clearGeolocationOverride"], {});
+});
+
+test("RESET STEPS: derived from what was APPLIED, not a fixed list", () => {
+  // A metrics-only raw emulation undoes metrics and nothing else — sending a
+  // timezone or UA clear here would reset overrides this bridge never set.
+  const metricsOnly = normalizeEmulation({ width: 400, height: 800 });
+  assert.equal(metricsOnly.touch, null, "harness check: this state sets no touch");
+  assert.deepEqual(emulationResetCdpSteps(metricsOnly).map((x) => x.method),
+    ["Emulation.clearDeviceMetricsOverride"]);
+
+  // An EXPLICIT --no-touch still applied a touch override, so it still gets undone.
+  const noTouch = normalizeEmulation({ width: 400, height: 800, touch: false });
+  assert.deepEqual(emulationResetCdpSteps(noTouch).map((x) => x.method),
+    ["Emulation.clearDeviceMetricsOverride", "Emulation.setTouchEmulationEnabled"]);
+
+  // A media-only emulation invents no device-metrics clear.
+  const mediaOnly = normalizeEmulation({ colorScheme: "dark" });
+  assert.deepEqual(emulationResetCdpSteps(mediaOnly).map((x) => x.method),
+    ["Emulation.setEmulatedMedia"]);
+
+  // Nothing stored → nothing to undo → no CDP session, no debugger banner.
+  assert.deepEqual(emulationResetCdpSteps(null), []);
+  assert.deepEqual(emulationResetCdpSteps(normalizeEmulation({ reset: true })), []);
+});
+
+test("RESET STEPS: applyEmulationResetSteps is BEST-EFFORT and reports the damage",
+  async () => {
+    // The opposite policy to applyEmulationSteps on purpose: aborting an UNDO at
+    // the first failure would leave the remaining overrides in place, which is
+    // the state the undo exists to escape.
+    const seen = [];
+    const send = async (method) => {
+      seen.push(method);
+      if (method === "Emulation.setUserAgentOverride") throw new Error("nope");
+      return {};
+    };
+    const s = normalizeEmulation({ device: "pixel-8", tz: "UTC" });
+    const steps = emulationResetCdpSteps(s);
+    const out = await applyEmulationResetSteps(send, steps);
+
+    assert.deepEqual(seen, steps.map((x) => x.method),
+      "every step must be ATTEMPTED — a failure must not abort the undo");
+    assert.deepEqual(out.cleared, [
+      "Emulation.clearDeviceMetricsOverride",
+      "Emulation.setTouchEmulationEnabled",
+      "Emulation.setTimezoneOverride",
+    ]);
+    assert.equal(out.failed.length, 1);
+    assert.equal(out.failed[0].method, "Emulation.setUserAgentOverride");
+    assert.match(out.failed[0].error, /nope/);
+  });
+
 test("applyEmulationSteps propagates the FIRST failure (no optional swallowing)", () => {
   const seen = [];
   const send = async (method) => {
@@ -411,6 +509,7 @@ const sw = {
   elementRect: { x: 10, y: 20, width: 100, height: 40 },
   failMethod: null,        // make one CDP method reject (the failure path)
   hangMethod: null,        // make one CDP method never settle (the no-wedge path)
+  failAttach: false,       // make chrome.debugger.attach reject (refused attach)
 };
 
 function resetSw() {
@@ -421,6 +520,7 @@ function resetSw() {
   sw.tabsRemove = [];
   sw.failMethod = null;
   sw.hangMethod = null;
+  sw.failAttach = false;
   sw.frames = [];
   sw.frameTree = null;
   sw.tabs = new Map([
@@ -458,7 +558,10 @@ globalThis.chrome = {
   },
   windows: { async update() {} },
   debugger: {
-    async attach() { sw.events.push("attach"); },
+    async attach() {
+      sw.events.push("attach");
+      if (sw.failAttach) throw new Error("cdp_attach_refused:test");
+    },
     async detach() { sw.events.push("detach"); },
     async sendCommand(_t, method, params) {
       sw.cdp.push({ method, params });
@@ -672,6 +775,78 @@ test("--reset STOPS re-application (and reports what it stopped)", async () => {
   // …and the fast path is available again.
   assert.ok(sw.events.includes("captureVisibleTab"));
 });
+
+// 🔴 THE REGRESSION TEST FOR #319. It asserts the CDP CALLS `--reset` makes, not
+// the envelope: pre-fix, `--reset` returned reset:true + a populated wasEmulating
+// and sent NOTHING, leaving the tab stuck at the emulated viewport (measured live
+// 2026-08-03: innerWidth still 393 after reset and after a further nav).
+test("--reset SENDS the CDP clears — the tab is actually un-emulated", async () => {
+  fresh();
+  await OPS.emulate({
+    tabId: TAB_A, device: "iphone-15", colorScheme: "dark", tz: "Europe/London",
+    geo: { latitude: 51.5074, longitude: -0.1278 },
+  });
+  sw.cdp = []; sw.events = [];
+
+  const out = await OPS.emulate({ tabId: TAB_A, reset: true });
+
+  const CLEARS = [
+    "Emulation.clearDeviceMetricsOverride",
+    "Emulation.setTouchEmulationEnabled",
+    "Emulation.setUserAgentOverride",
+    "Emulation.setEmulatedMedia",
+    "Emulation.setTimezoneOverride",
+    "Emulation.clearGeolocationOverride",
+  ];
+  assert.deepEqual(methods(), CLEARS,
+    "--reset must UNDO the overrides on the tab; dropping the Map entry alone "
+    + "leaves the viewport permanently emulated (#319)");
+  // Inside ONE session, and it did not stay open.
+  assert.deepEqual(sw.events, ["attach", ...CLEARS, "detach"]);
+  // The clear that the live measurement proved necessary carries the right shape.
+  assert.deepEqual(paramsOf("Emulation.clearDeviceMetricsOverride"), {});
+  assert.deepEqual(paramsOf("Emulation.setTouchEmulationEnabled"), { enabled: false });
+
+  // …and it is REPORTED, so the caller can see what was undone.
+  assert.deepEqual(out.cleared, CLEARS);
+  assert.equal(out.clearFailed, undefined);
+  assert.equal(out.clearError, undefined);
+  assert.equal(emulationState.has(TAB_A), false);
+});
+
+test("--reset REPORTS a clear that the browser refused, and still drops the state",
+  async () => {
+    fresh();
+    await OPS.emulate({ tabId: TAB_A, device: "iphone-15" });
+    sw.cdp = []; sw.events = [];
+    sw.failMethod = "Emulation.setUserAgentOverride";
+
+    const out = await OPS.emulate({ tabId: TAB_A, reset: true });
+
+    // Best-effort: the failure did not abort the undo…
+    assert.deepEqual(out.cleared, ["Emulation.clearDeviceMetricsOverride",
+                                   "Emulation.setTouchEmulationEnabled"]);
+    assert.equal(out.clearFailed.length, 1);
+    assert.equal(out.clearFailed[0].method, "Emulation.setUserAgentOverride");
+    // …and the metrics clear — the one that matters — went out anyway.
+    assert.ok(methods().includes("Emulation.clearDeviceMetricsOverride"));
+    assert.equal(emulationState.has(TAB_A), false);
+  });
+
+test("--reset does not THROW when CDP refuses to attach — state is dropped anyway",
+  async () => {
+    fresh();
+    await OPS.emulate({ tabId: TAB_A, device: "iphone-15" });
+    sw.cdp = []; sw.events = [];
+    sw.failAttach = true;
+
+    const out = await OPS.emulate({ tabId: TAB_A, reset: true });
+    assert.equal(out.reset, true);
+    assert.deepEqual(out.cleared, []);
+    assert.match(out.clearError, /cdp_attach_refused/);
+    assert.equal(emulationState.has(TAB_A), false,
+      "a reset that cannot reach the browser must still stop re-applying");
+  });
 
 test("--reset on a tab that was never emulated is a clean no-op", async () => {
   fresh();

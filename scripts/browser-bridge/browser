@@ -98,11 +98,11 @@
 #                               Raw override: --width/--height/--dsf/--mobile/
 #                               --touch/--ua for anything not in the table.
 #                               STICKY per tab: re-applied inside every later op's
-#                               CDP session, because CDP overrides die at detach.
-#                               ✅ That is also the SAFETY property — between ops
-#                               the tab is NOT emulated, so a crashed agent can
-#                               never leave your real browser distorted.
-#                               `--reset` stops re-applying (nothing to undo).
+#                               CDP session, because most CDP overrides die at
+#                               detach. 🔴 The VIEWPORT SIZE does NOT (measured) —
+#                               it survives the detach, so a crashed agent CAN
+#                               leave a tab phone-sized. `--reset` sends the CDP
+#                               clears to undo it; closing the tab also works.
 #                               ⚠ OWNED TABS ONLY (`browser open` first): emulating
 #                               a tab you are browsing in is refused with
 #                               `not_owned_tab`. Screenshots on an emulated tab are

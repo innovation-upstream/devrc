@@ -561,19 +561,32 @@ export async function applyWakeSteps(send, steps = WAKE_CDP_STEPS) {
 // everything in THIS file is the pure, browser-free half: the preset table, the
 // validation, and the ordered CDP step list.
 //
-// ✅ THE SAFETY PROPERTY THIS BUYS — state it explicitly, it is the REASON this
-// design was chosen over holding one long-lived debugger session open:
+// 🔴 THE "DIE AT DETACH" PREMISE IS ONLY MOSTLY TRUE — measured, do not restate
+// the old claim. This block used to assert that because every override dies at
+// detach, the tab is never emulated between ops and a crashed agent CANNOT leave
+// the operator's browser distorted. Issue #319 falsified it, and the follow-up
+// measurement (2026-08-03, live Brave, extension 0.7.1, laptop, `iphone-15`,
+// read via `js --wake`, against a never-emulated control tab in the same window)
+// says exactly which half is which:
 //
-//   Because the overrides die at detach, the tab is NOT emulated between ops. A
-//   crashed agent, a killed Claude session, or an evicted MV3 service worker
-//   therefore CANNOT leave the operator's real browser distorted. The worst case
-//   is a forgotten entry in an in-memory Map that dies with the worker — not a
-//   Brave tab stuck at 393×852 pretending to be an iPhone with nothing left
-//   running that knows how to undo it.
+//   * setDeviceMetricsOverride's VIEWPORT SIZE does NOT die at detach. After
+//     `--reset` — and after a further navigation — innerWidth×innerHeight was
+//     still 393×852 while the control tab read 1124×1400. Interestingly
+//     devicePixelRatio, set by the same call, DID revert to 1, which points at
+//     the residue being the resized render widget rather than a live override.
+//   * touch, UA/UA-CH, emulated media and the timezone override DO die at
+//     detach: after `--reset` they all read as the real desktop values.
 //
-// A held session would have been simpler to write and strictly worse to own: the
-// failure mode would be a permanently mangled tab plus a permanent debug banner,
-// recoverable only by the operator finding and closing the tab.
+// So the honest statement of what the design buys: between ops the tab keeps the
+// emulated VIEWPORT SIZE and nothing else. A crashed agent, a killed Claude
+// session or an evicted MV3 service worker CAN leave a tab sized as a phone —
+// closing the tab, or `emulate --reset` (which since #319 sends
+// Emulation.clearDeviceMetricsOverride and the matching clears — see
+// emulationResetCdpSteps below), is what undoes it.
+//
+// A held session would still have been worse to own: its failure mode adds a
+// permanent debug banner and leaves the UA, touch and media overrides live too,
+// none of which survive today.
 //
 // BLAST RADIUS: enforced SERVER-side (see server.py OWNED_TAB_ONLY_OPS). Only a
 // tab the calling session opened via `open` may be emulated; anything else is
@@ -1106,6 +1119,103 @@ export async function applyEmulationSteps(send, steps) {
   return applied;
 }
 
+// --- UNDOING an emulation: the ordered CDP CLEAR list ----------------------- //
+//
+// 🔴 THIS EXISTS BECAUSE THE "OVERRIDES DIE AT DETACH" PREMISE IS ONLY MOSTLY
+// TRUE. See the EMULATION header comment above for the measurement. The short
+// version: the DEVICE-METRICS VIEWPORT SIZE survives the debugger detach, so
+// dropping the `emulationState` entry — which is all `--reset` used to do — left
+// the tab permanently sized as the phone, with nothing left that knew how to undo
+// it. Issue #319.
+//
+// Which class needs which clear, and how strong the evidence is (measured
+// 2026-08-03, live Brave, extension 0.7.1, laptop, `iphone-15` + `--color-scheme
+// dark --tz Europe/London --geo …`, read through `js --wake`, against a control
+// tab in the same window that was never emulated):
+//
+//   * Emulation.clearDeviceMetricsOverride — 🔴 MEASURED NECESSARY.
+//     innerWidth×innerHeight stayed 393×852 after `--reset` AND after a further
+//     navigation; the control tab read 1124×1400 throughout. (devicePixelRatio,
+//     set by the SAME CDP call, DID revert to 1 — consistent with the residue
+//     being the resized render widget rather than a live override.)
+//   * the other five — MEASURED to clear themselves at detach: after `--reset`,
+//     maxTouchPoints was 0, `pointer:coarse` false, `prefers-color-scheme: dark`
+//     false, the UA was the real desktop one and the timezone was back to the
+//     host's. They are cleared here ANYWAY, deliberately: the measurement is one
+//     Chromium build on one host, the clears run inside a session that is already
+//     open (so they cost a loopback round-trip each and nothing else), and a clear
+//     on a domain that holds no override is a no-op. "Undo what was applied" is a
+//     property worth having independent of which Chromium you are on.
+//
+// What a clear CANNOT undo: properties Chromium installs at DOCUMENT CREATION.
+// `"ontouchstart" in window` was still true immediately after `--reset` (the
+// document had been BUILT under touch emulation) and only went false after a
+// re-navigation. Same asymmetry as the `documentPredatesEmulation` hint, in the
+// other direction.
+//
+// Derived from the state that was in force, not from a fixed list, so `--reset`
+// sends exactly the undo of what this bridge applied. A tab with NO stored state
+// yields NO steps — reset stays a zero-CDP, zero-debugger-banner no-op there.
+export const EMULATION_RESET_MAX_STEPS = 6;
+
+export function emulationResetCdpSteps(state) {
+  if (!state || state.reset) return [];
+  const steps = [];
+  // Metrics first: it is the one measured to actually be stuck, so it lands even
+  // if a later clear fails (they are applied best-effort, see below).
+  if (state.metrics) {
+    steps.push({ method: "Emulation.clearDeviceMetricsOverride", params: {} });
+  }
+  if (state.touch) {
+    // maxTouchPoints is meaningless with enabled:false and CDP rejects 0, so it
+    // is omitted rather than sent as a placeholder.
+    steps.push({ method: "Emulation.setTouchEmulationEnabled",
+                 params: { enabled: false } });
+  }
+  if (state.ua) {
+    // An EMPTY userAgent is how CDP spells "no override" — the same call DevTools
+    // makes when you untick its custom-user-agent box. userAgentMetadata is
+    // omitted so it reverts with it.
+    steps.push({ method: "Emulation.setUserAgentOverride",
+                 params: { userAgent: "" } });
+  }
+  if (state.media) {
+    steps.push({ method: "Emulation.setEmulatedMedia",
+                 params: { media: "", features: [] } });
+  }
+  if (state.timezone) {
+    steps.push({ method: "Emulation.setTimezoneOverride",
+                 params: { timezoneId: "" } });
+  }
+  if (state.geolocation) {
+    steps.push({ method: "Emulation.clearGeolocationOverride", params: {} });
+  }
+  return steps;
+}
+
+// Apply the CLEAR steps through `send`, IN ORDER, BEST-EFFORT — the exact
+// opposite policy to applyEmulationSteps, and the difference is deliberate.
+//
+// An apply must fail loudly: a half-applied emulation returns a plausible
+// screenshot of the wrong thing. An UNDO must not: aborting on the first failure
+// would leave the remaining overrides in place, which is the very state this
+// function exists to escape. So every step is attempted and the outcome is
+// REPORTED — { cleared: [method], failed: [{ method, error }] } — rather than
+// thrown. The caller drops the stored state regardless.
+export async function applyEmulationResetSteps(send, steps) {
+  const cleared = [];
+  const failed = [];
+  for (const step of steps || []) {
+    try {
+      await send(step.method, step.params);
+      cleared.push(step.method);
+    } catch (e) {
+      failed.push({ method: step.method, error: String((e && e.message) || e) });
+    }
+  }
+  return { cleared, failed };
+}
+
 // The compact, METADATA-ONLY summary of a stored state — what `emulate` returns,
 // what `tabs` annotates an emulated tab with, and what goes into telemetry. No
 // URL, no page content; the UA string is deliberately EXCLUDED (it is long, and
@@ -1135,13 +1245,14 @@ export function emulationSummary(state) {
 // NEVER attaches the debugger, so withCdp's re-application choke point never runs
 // and the DOM they see is the tab's REAL, un-emulated one.
 //
-// That is correct-by-design, not a bug: between ops the tab genuinely is not
-// emulated (the safety property above), so the at-rest DOM really is desktop.
-// But it is a TRAP, and it is this feature's characteristic failure mode on the
-// read path: an agent screenshots a phone layout, then reads `text`/`html` and
-// reasons about a DESKTOP DOM, with nothing in the envelope to tell it apart.
-// Layout-derived values (innerWidth, getBoundingClientRect, matchMedia) and
-// navigator.userAgent all come back REAL.
+// That is correct-by-design, not a bug: between ops the tab is not emulated
+// EXCEPT for the viewport size, which is measured to survive the detach (see the
+// EMULATION header). But it is a TRAP, and it is this feature's characteristic
+// failure mode on the read path: an agent screenshots a phone layout, then reads
+// `text`/`html` and reasons about a DESKTOP DOM, with nothing in the envelope to
+// tell it apart. navigator.userAgent, matchMedia and the touch surface come back
+// REAL; innerWidth/innerHeight are the one pair that may still read emulated,
+// which makes the mixture WORSE than a uniformly-desktop read, not better.
 //
 // So every read of a tab that HAS emulation state says which one it got. Same
 // pattern, and the same reasoning, as HIDDEN_TAB_NOTE: the read self-announces
@@ -1152,11 +1263,13 @@ export function emulationSummary(state) {
 // the read through cdpWake → withCdp and therefore through the emulation apply.
 export const NOT_EMULATED_READ_NOTE =
   "This tab has device emulation configured, but THIS read did not go through "
-  + "CDP — it read the tab's REAL, un-emulated DOM. Emulation overrides only "
-  + "exist inside a CDP session (they die at detach), so layout-derived values "
-  + "(innerWidth, getBoundingClientRect, matchMedia) and navigator.userAgent are "
-  + "the DESKTOP ones here. Re-run this read with --wake to read inside an "
-  + "emulated session.";
+  + "CDP — it read the tab's REAL, un-emulated DOM. Most emulation overrides only "
+  + "exist inside a CDP session (they die at detach), so navigator.userAgent, "
+  + "matchMedia and the touch surface are the DESKTOP ones here — while "
+  + "innerWidth/innerHeight may still be the EMULATED ones, because the device-"
+  + "metrics viewport size is measured to survive the detach. A mixture, not a "
+  + "clean desktop read. Re-run this read with --wake to read inside an emulated "
+  + "session.";
 
 // Annotate a READ result with whether it observed the emulated page.
 //   * no emulation state for the tab → returns `data` UNTOUCHED (a plain tab's

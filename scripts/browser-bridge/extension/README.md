@@ -273,6 +273,24 @@ If `ping` still reports the old version after ↻, **fully quit and reopen Brave
 > three full Brave restarts in a single session. (0.3.0 → 0.3.1 was exactly
 > this: adding `id` to `ping`'s reply is a discriminator, so it got a bump.)
 
+> **0.7.2 — `emulate --reset` actually CLEARS the overrides (#319).** No new wire
+> op, so `ping`'s `ops` list is byte-identical to 0.7.1's. The discriminator is
+> the **behaviour**, and it is exact — a post-reset viewport read:
+>
+> ```bash
+> browser --instance <label> open https://example.com          # note the tabId
+> browser --instance <label> --tab <id> js --wake 'innerWidth'  # e.g. 1124 (desktop)
+> browser --instance <label> --tab <id> emulate iphone-15
+> browser --instance <label> --tab <id> emulate --reset
+> browser --instance <label> --tab <id> js --wake 'innerWidth'
+>   # 0.7.1 → 393   (the reset was a no-op; the tab is stuck as an iPhone)
+>   # 0.7.2 → 1124  (Emulation.clearDeviceMetricsOverride was sent)
+> browser --instance <label> --tab <id> close
+> ```
+>
+> The `--reset` reply also grows a `cleared: [...]` array on 0.7.2, which is a
+> second, cheaper tell.
+
 > **0.7.1 — `text --annotated` inside `--frame`.** No new wire op, so `ping`'s
 > `ops` list is byte-identical to 0.7.0's and cannot discriminate this build.
 > The discriminator is the **capability itself**, and it is exact — it exercises

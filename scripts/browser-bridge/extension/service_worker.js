@@ -52,9 +52,10 @@ import {
   promiseWithTimeout, EXEC_OP_BUDGET_MS, POLL_BUDGET_MS, RESULT_BUDGET_MS,
   LOOP_STALL_MS, STORAGE_BUDGET_MS,
   // `emulate` op: device emulation (viewport/touch/UA+UA-CH/media/geo/tz) that is
-  // STICKY per tab because CDP overrides die at detach — see the EMULATION section
-  // in protocol.js for the central problem and the safety property it buys.
+  // STICKY per tab because most CDP overrides die at detach (the viewport size
+  // does NOT — see the EMULATION section in protocol.js for the measurement).
   normalizeEmulation, emulationCdpSteps, applyEmulationSteps, emulationSummary,
+  emulationResetCdpSteps, applyEmulationResetSteps,
   isTouchEmulated, touchTapEvents, DEVICE_PRESETS, PRESET_NAMES,
   annotateEmulatedRead, emulationCreateTimeSignature, documentPredatesEmulation,
   annotateDocumentPredates,
@@ -209,11 +210,17 @@ const cdpAttached = new Set();
 // tabId -> the normalized emulation state from normalizeEmulation(). This is the
 // ONLY mutable emulation state in the extension.
 //
-// It is IN-MEMORY on purpose (not chrome.storage): CDP overrides die at detach, so
-// state that outlived the service worker would describe an emulation that is not
-// actually applied anywhere — a lie that survives a restart is worse than a
-// forgotten one. Losing it on worker eviction is the correct, safe failure: the
-// operator's tab is already un-emulated at that point.
+// It is IN-MEMORY on purpose (not chrome.storage): the touch/UA/media/timezone
+// overrides die at detach, so state that outlived the service worker would
+// describe an emulation that is mostly not applied anywhere — a lie that survives
+// a restart is worse than a forgotten one.
+//
+// ⚠ The cost, measured (#319): losing this map on worker eviction is NOT a clean
+// failure. The device-metrics VIEWPORT SIZE survives the detach, so the tab stays
+// phone-sized while the map that knew how to undo it is gone — and `--reset`
+// derives its clears from that map, so it can no longer help. Closing the tab is
+// the remedy. Persisting the map instead would trade this for the lie above; the
+// trade has not been re-litigated, it is just no longer free.
 //
 // Emptied by: `emulate --reset`, `close`, chrome.tabs.onRemoved, and a failed
 // tabs.get during CDP attach (the tab went away out-of-band).
@@ -1181,9 +1188,23 @@ const OPS = {
   // rather than discovering a bad timezone id three ops later. Every subsequent op
   // that attaches CDP re-applies it (see the choke point in withCdp).
   //
-  // `--reset` means "STOP RE-APPLYING". It does not need to undo anything: the
-  // overrides died at the previous op's detach, and the tab is already un-emulated
-  // right now. That is the whole safety property (protocol.js EMULATION).
+  // `--reset` STOPS RE-APPLYING **and UNDOES** what was applied. It has to do
+  // both: the device-metrics viewport size is measured NOT to die at the previous
+  // op's detach (2026-08-03 — see protocol.js emulationResetCdpSteps), so dropping
+  // the Map entry alone left the tab permanently sized as the phone with nothing
+  // left that knew how to undo it. That was issue #319.
+  //
+  // Shape of the undo, and why:
+  //   * the Map entry is dropped FIRST and unconditionally — whatever the browser
+  //     does with the clears, this op must never leave the tab still being
+  //     re-emulated by later ops;
+  //   * the clears are BEST-EFFORT and their outcome is REPORTED, not thrown. A
+  //     closed tab or a refused attach yields `clearError`; an individual step
+  //     that rejects yields a `clearFailed` entry. Either way the state is gone
+  //     and the caller can see exactly what did and did not get undone;
+  //   * a tab with NO stored state yields NO steps, so reset stays a zero-CDP,
+  //     zero-debugger-banner no-op there. It also means reset cannot repair a tab
+  //     whose state died with an evicted service worker — closing it still can.
   //
   // OWNERSHIP is enforced SERVER-side (server.py OWNED_TAB_ONLY_OPS → the named
   // `not_owned_tab` refusal), not here, because the server is the only side that
@@ -1194,14 +1215,47 @@ const OPS = {
     const state = normalizeEmulation(cmd);   // throws a NAMED error on bad input
 
     if (state.reset) {
-      const had = emulationSummary(emulationFor(tab.id));
+      const previous = emulationFor(tab.id);
+      const had = emulationSummary(previous);
       clearEmulation(tab.id);
-      return {
+
+      const steps = emulationResetCdpSteps(previous);
+      let cleared = [];
+      let failed = [];
+      let clearError = null;
+      if (steps.length) {
+        try {
+          const outcome = await withCdp(tab.id, tab.url, (send) =>
+            applyEmulationResetSteps(send, steps));
+          cleared = outcome.cleared;
+          failed = outcome.failed;
+        } catch (e) {
+          // Tab already closed, a scheme CDP may not attach to, a wedged
+          // renderer. The state is already dropped; say so instead of throwing.
+          clearError = String((e && e.message) || e);
+        }
+      }
+
+      const out = {
         tabId: tab.id, url: tab.url, reset: true,
         wasEmulating: had,
-        note: "emulation stopped. Nothing had to be undone — CDP overrides die at "
-          + "debugger detach, so the tab was already un-emulated between ops.",
+        cleared,
+        note: steps.length
+          ? "emulation stopped and the overrides CLEARED on the tab. This is "
+            + "required, not belt-and-braces: the device-metrics viewport size "
+            + "survives the debugger detach (measured), so dropping the state "
+            + "alone would leave the tab stuck at the emulated size. Properties "
+            + "installed at DOCUMENT CREATION are not undone by a clear — "
+            + "`\"ontouchstart\" in window` stays true on the document that was "
+            + "built emulated; re-`nav` for a fully desktop document."
+          : "emulation stopped. This tab had no stored emulation, so nothing was "
+            + "sent to the browser and no debugger attached. NOTE this cannot "
+            + "repair a tab whose emulation state was lost (evicted service "
+            + "worker) — closing the tab is the remedy there.",
       };
+      if (failed.length) out.clearFailed = failed;
+      if (clearError) out.clearError = clearError;
+      return out;
     }
 
     // Store BEFORE applying so the apply goes through the same withCdp choke point
@@ -1241,9 +1295,12 @@ const OPS = {
       emulation: emulationSummary(state),
       applied,
       note: "sticky per tab: these overrides are re-applied inside every "
-        + "subsequent op's CDP session. Between ops the tab is NOT emulated (the "
-        + "overrides die at detach), so a crashed agent cannot leave your browser "
-        + "distorted. `browser emulate --reset` stops re-applying.",
+        + "subsequent op's CDP session. Between ops the touch, UA, media and "
+        + "timezone overrides are gone (they die at detach) but the VIEWPORT SIZE "
+        + "is NOT — it survives the detach (measured), so this tab stays at the "
+        + "emulated width until something clears it. `browser emulate --reset` "
+        + "now sends that clear; closing the tab also works. A crashed agent that "
+        + "does neither leaves the tab at the emulated size.",
     }, documentPredatesEmulation(tab.url, emulationCreateTimeSignature(state),
                                  documentEmulation.get(tab.id)));
   },

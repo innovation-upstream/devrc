@@ -107,31 +107,73 @@ document that was not built under this emulation. See "The
 
 ---
 
-## Why it is sticky, and the safety property that buys
+## Why it is sticky, and what actually survives a detach
 
-CDP emulation overrides are **session-scoped**: they die the instant the debugger
-detaches. The bridge **always** detaches (`withCdpSession`'s `finally` — that is a
-load-bearing invariant; a leaked attachment is a stuck banner plus an open
-surface). So a naive `emulate` would set a viewport that had already evaporated
-before the next command ran.
+Most CDP emulation overrides are **session-scoped**: they die the instant the
+debugger detaches. The bridge **always** detaches (`withCdpSession`'s `finally` —
+that is a load-bearing invariant; a leaked attachment is a stuck banner plus an
+open surface). So a naive `emulate` would set a viewport that had already
+evaporated before the next command ran.
 
 Instead, `emulate` **stores** the device state per tab, and **every op that
 attaches CDP re-applies it inside its own session, before doing its work.**
 
-✅ **The property this buys, and the reason this design beat holding one long-lived
-session open: between ops the tab is NOT emulated.** A crashed agent, a killed
-Claude session, or an evicted MV3 service worker cannot leave the operator's real
-browser distorted. The worst case is a forgotten entry in an in-memory Map that
-dies with the worker — not a Brave tab stuck pretending to be an iPhone with
-nothing left running that knows how to undo it.
+### 🔴 One override does NOT die at detach: the viewport size
 
-That is also why `--reset` has nothing to undo. It means **"stop re-applying"**;
-the overrides are already gone.
+This page used to claim that *every* override dies at detach, that the tab is
+therefore never emulated between ops, and that `--reset` consequently has nothing
+to undo. **That was wrong** (issue #319), and it is the reason `--reset` was a
+no-op that left tabs permanently phone-sized until you closed them.
 
-**Consequence to plan around:** a page that re-measures the viewport *later* — on
-a `resize` listener, or well after load — sees the real window until your next op
-re-applies. Drive the page with bridge ops rather than expecting the emulation to
-persist while you sit idle.
+**Measured 2026-08-03** — live Brave, extension 0.7.1, laptop, `personal`
+profile, `https://example.com` in an owned tab, `emulate iphone-15
+--color-scheme dark --tz Europe/London --geo 51.5074,-0.1278`, every read taken
+the same way (`js --wake`), with a control tab opened in the same window that was
+never emulated:
+
+| signal | control (never emulated) | after `emulate`+`nav` | after `--reset` | after `--reset`+re-`nav` |
+|---|---|---|---|---|
+| `innerWidth`×`innerHeight` | 1124×1400 | 393×852 | 🔴 **393×852** | 🔴 **393×852** |
+| `devicePixelRatio` | 1 | 3 | 1 | 1 |
+| `navigator.maxTouchPoints` | 0 | 5 | 0 | 0 |
+| `"ontouchstart" in window` | false | true | true¹ | false |
+| `matchMedia("(pointer:coarse)")` | false | true | false | false |
+| `prefers-color-scheme: dark` | false | true | false | false |
+| `navigator.userAgent` | X11 Linux | iPhone OS 17 | X11 Linux | X11 Linux |
+| `Intl…resolvedOptions().timeZone` | America/Winnipeg | Europe/London | America/Winnipeg | America/Winnipeg |
+
+¹ not an override — the *document* was built under touch emulation, and
+`ontouchstart` is installed on the global at document creation. A clear cannot
+remove it; the re-`nav` does.
+
+Note `devicePixelRatio` reverts while the width does not, even though both come
+from the same `setDeviceMetricsOverride` call — which points at the residue being
+the resized **render widget** rather than a live override.
+
+Geolocation was not measured (reading it needs a permission grant).
+
+### What `--reset` does now
+
+`--reset` drops the stored state **and** sends the undo inside one CDP session:
+`Emulation.clearDeviceMetricsOverride` (the measured-necessary one) plus
+`setTouchEmulationEnabled{enabled:false}`, `setUserAgentOverride{userAgent:""}`,
+`setEmulatedMedia{}`, `setTimezoneOverride{""}` and `clearGeolocationOverride` for
+whichever classes were in force. The reply carries `cleared: [...]`, and
+`clearFailed` / `clearError` if the browser refused any of it.
+
+The clears are **best-effort**: a closed tab or a refused attach is reported, not
+thrown, and the stored state is dropped either way — `--reset` must never leave a
+tab still being re-emulated.
+
+⚠ **A reset cannot repair a tab whose stored state is gone.** If the MV3 service
+worker was evicted, or a different session owns the tab, there is nothing to
+derive the undo from and `--reset` sends nothing. **Closing the tab** is the
+remedy there — and it is the reason a `SIGKILL`'d agent run (which bypasses
+`browser-agent`'s cleanup trap) can still strand a phone-sized tab.
+
+**Consequence to plan around:** a page that re-measures *touch, UA or media*
+later — on a `resize` listener, or well after load — sees the real desktop values
+until your next op re-applies. The viewport size is the exception; it stays.
 
 ---
 
@@ -244,10 +286,12 @@ and sends no `Sec-CH-UA` at all. That is correct emulation, not a missing field.
 the tab's **real, un-emulated DOM**. `innerWidth`, `getBoundingClientRect`,
 `matchMedia` and `navigator.userAgent` all come back **desktop**.
 
-That is correct-by-design, not a bug: between ops the tab genuinely is not emulated
-(see the safety property above), so the at-rest DOM really *is* desktop. But it is
-the trap this feature is most likely to spring — screenshot a phone layout, then
-read `text` and reason about a desktop DOM.
+That is correct-by-design, not a bug: between ops the tab's touch/UA/media/timezone
+overrides really are gone (see the measurement above). But the at-rest DOM is a
+**mixture**, not a clean desktop read — the viewport size survives the detach, so
+`innerWidth` may still be the emulated one next to a desktop `navigator.userAgent`.
+That is the trap this feature is most likely to spring — screenshot a phone layout,
+then read `text` and reason about a half-desktop DOM.
 
 **Which reads are emulated:**
 
