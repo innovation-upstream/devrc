@@ -152,7 +152,11 @@ MIN_TESTS="${MIN_TESTS:-5600}"
 # against a temp directory (rotation, truncation, generation cap, and the .bak
 # scope fence). Those tests FAIL rather than skip when it is absent — a skipped
 # rotation test reports safety it never measured — so it belongs here.
-REQUIRED_TOOLS=(bash curl node rg git awk jq grep setsid python3 nix-instantiate opencode logrotate)
+#
+# 🔴 `python` is listed as well as `python3` because THIS SCRIPT invokes
+# `python -m pytest`, not `python3`. Asserting only `python3` checked a binary
+# the runner never calls.
+REQUIRED_TOOLS=(bash curl node rg git awk jq grep setsid python python3 nix-instantiate opencode logrotate)
 missing_tools=()
 for t in "${REQUIRED_TOOLS[@]}"; do
   command -v "$t" >/dev/null 2>&1 || missing_tools+=("$t")
@@ -170,6 +174,38 @@ if [ "${#missing_tools[@]}" -gt 0 ]; then
   echo "  nativeBuildInputs / the pre-push nix-shell) — do NOT drop them from" >&2
   echo "  REQUIRED_TOOLS to make this pass." >&2
   exit 2
+fi
+
+# --- GUARD 1b: pytest ITSELF must be importable --------------------------------
+# 🔴 REQUIRED_TOOLS is a list of BINARIES checked with `command -v`. pytest is
+# not a binary this runner calls — it is a MODULE (`python -m pytest`) — so it
+# was structurally outside the one guard whose entire job is "the thing that
+# runs the tests is present". The precondition that mattered most was the one
+# the precondition mechanism could not express.
+#
+# MEASURED 2026-08-03 on this dev host, with every REQUIRED_TOOLS binary present
+# but no pytest importable from `python`: all 17 targets reported
+#   run-tests: ERROR — could not parse pytest's summary for <dir>.
+# and the run ended `TOTAL collected=0 … RESULT: FAIL`, exit 1.
+#
+# So the gate did NOT go green — GUARD 4 (unparseable summary) and GUARD 3 (the
+# collected floor) both fired, and the "reports per-target PASS with collected=0"
+# version of this hole does not exist on this revision. What it produced instead
+# was SEVENTEEN copies of a message blaming pytest's OUTPUT FORMAT for what was
+# actually "pytest is not installed" — a diagnosis pointing at the wrong
+# subsystem, the shape that has repeatedly cost this repo whole sessions (#276's
+# "missing directory" read as an environment fault). One named error is the fix.
+if [ "$CHECK_TARGETS_ONLY" -eq 0 ]; then
+  if ! python -m pytest --version >/dev/null 2>&1; then
+    echo "run-tests: FATAL — \`python -m pytest\` is not runnable." >&2
+    echo "  \`python\` resolves to $(command -v python 2>/dev/null || echo '(not found)') but the" >&2
+    echo "  pytest MODULE is not importable from it, so every suite would collect 0" >&2
+    echo "  tests and report an unparseable summary. This is NOT a pytest output-format" >&2
+    echo "  change — it is a missing dependency in the caller's environment." >&2
+    echo "  Fix the caller: flake.nix checks.pytests builds a python312.withPackages" >&2
+    echo "  env that includes pytest; the pre-push hook wraps this in a nix-shell." >&2
+    exit 2
+  fi
 fi
 
 # --- HERMETIC set --------------------------------------------------------------
@@ -327,8 +363,22 @@ EXPECTED_SKIPS=(
 # instead.
 
 fail=0
-declare -a RESULTS
-declare -a SKIP_LINES
+# 🔴 `RESULTS=()` not `declare -a RESULTS`. Under `set -u`, `declare -a foo`
+# leaves the variable DECLARED BUT UNSET, so the first `${#foo[@]}` or
+# `"${foo[@]}"` on a still-empty array aborts with "foo: unbound variable"
+# (MEASURED on bash 5.3.15; an explicit `=()` assignment makes it set-and-empty).
+#
+# That was live: with zero skips, GUARD 2's reporting block died at
+# `if [ "${#SKIP_LINES[@]}" -eq 0 ]`, printing a raw
+# `run-tests.sh: line 479: SKIP_LINES: unbound variable` instead of the skip
+# list, and the unpinned-skip loop below it never executed. Because there is no
+# `set -e` the script carried on, so the damage was confined to the DIAGNOSTIC
+# path — the skip-total accounting still fired — but the runner emitted a bash
+# internal error at exactly the moment someone is trying to read why the gate is
+# red. That is the #276 lesson repeating: a failure that reads like an
+# environment fault rather than a named finding.
+RESULTS=()
+SKIP_LINES=()
 TOT_COLLECTED=0
 TOT_PASSED=0
 TOT_SKIPPED=0
