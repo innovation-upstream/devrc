@@ -2,7 +2,7 @@
 
 Goal: stop skills from growing until the body displaces the work it was loaded for. Run an on-demand audit of a skill (or a whole `.claude/skills/` dir), then apply the same aggressive cut methodology `/prune-memory` uses on the index — one level down.
 
-Why this recurs: a `SKILL.md` costs **0 tokens until its trigger fires, then ALL of it at once**. Nothing applies per-session pressure, so nobody notices, and every session appends. Measured 2026-08-02 in `datapacket-talos/.claude/skills/`: 67 skills = **3.13 MB**, up from 2.79 MB six days earlier while the skill COUNT went 65 → 66 — the growth was accretion into existing files, not new skills. Worst case `app-blocks/SKILL.md` = **726 KB ≈ 182k tokens**, which does not fit a 200k context at all; **37% of it (268,867 B) is 40 dated `### Session …` blocks.**
+Why this recurs: a `SKILL.md` costs **0 tokens until its trigger fires, then ALL of it at once**. Nothing applies per-session pressure, so nobody notices, and every session appends. Measured 2026-08-02 in `datapacket-talos/.claude/skills/`: 67 skills = **3.13 MB**, up from 2.79 MB six days earlier while the skill COUNT went 65 → 66 — the growth was accretion into existing files, not new skills. Worst case `app-blocks/SKILL.md` = **742 KB ≈ 186k tokens** (2026-08-03), which does not fit a 200k context at all; **43.0% of it (319,587 B in 48 blocks) is dated history**, 42 of those being `### Session …` blocks.
 
 The cost model DIFFERS from `/prune-memory`: the memory index costs every session, a skill costs per *invocation*. That is not a licence to let it grow — a body big enough to crowd out the task is the same failure in a different currency, and it lands exactly when you are mid-task.
 

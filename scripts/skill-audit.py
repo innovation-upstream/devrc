@@ -52,6 +52,11 @@ FAT_LINE = 500
 
 HEADING = re.compile(r"^(#{1,6})\s+(.+)$")
 
+# A code-fence marker: up to 3 leading spaces, then a run of >=3 backticks or
+# tildes, then the info string. Length and info are BOTH load-bearing when
+# deciding whether a marker opens or closes — see _fence_map.
+FENCE = re.compile(r"^ {0,3}(?P<f>`{3,}|~{3,})(?P<info>.*)$")
+
 # A heading that names WORK DONE rather than HOW TO DO IT. An ISO date in a
 # heading is the strongest single signal (`### Session 2026-08-02 — ...`), so it
 # is matched anywhere in the title; the word forms cover undated changelogs.
@@ -81,39 +86,68 @@ def _bytes(lines):
     return sum(len(ln.encode()) for ln in lines)
 
 
+def _fence_map(lines):
+    """(inside_fence_per_line, unclosed_at_eof) using CommonMark fence semantics.
+
+    🔴 A PARITY COUNT OF ``` MARKERS IS NOT A FENCE CHECK. Under CommonMark a
+    fence opened with N of a char closes only on >= N of the SAME char followed
+    by nothing but whitespace — a marker carrying an INFO STRING (```action)
+    can never close one. So the ordinary pattern of a literal ```lang example
+    nested inside an outer fence is well-formed but has ODD marker parity.
+
+    MEASURED 2026-08-03, and this replaced a heuristic that got it exactly
+    backwards: parity called datapacket-talos app-blocks/SKILL.md (47 markers)
+    and manage-support-stack/SKILL.md (57) "unclosed"; a CommonMark read shows
+    BOTH well-formed. The "250 KB phantom H1" parity produced by re-partitioning
+    app-blocks at a `# 3. SQL state:` shell COMMENT did not exist, and the
+    dated-history share it derived (75.4%) was inflated from a true 43%. Two
+    independent readers reproduced that false positive because they used the
+    same wrong instrument — so the tell is the FIX, not the agreement.
+    """
+    inside = []
+    open_char, open_len = "", 0
+    for raw in lines:
+        m = FENCE.match(raw.rstrip("\n"))
+        is_marker = False
+        if m:
+            char, run, info = m.group("f")[0], len(m.group("f")), m.group("info")
+            if open_len:
+                if char == open_char and run >= open_len and not info.strip():
+                    open_len, is_marker = 0, True
+            elif not (char == "`" and "`" in info):
+                # a backtick opener's info string may not contain a backtick
+                open_char, open_len, is_marker = char, run, True
+        inside.append(True if is_marker else open_len > 0)
+    return inside, open_len > 0
+
+
 def _headings(lines):
     """(line_index, level, title) for every ATX heading OUTSIDE a code fence.
 
     Fence tracking is load-bearing: a `# comment` inside a ```bash block is not
     a heading, and counting it as one silently re-partitions the whole file.
     """
+    inside, _ = _fence_map(lines)
     out = []
-    in_fence = False
     for i, raw in enumerate(lines):
-        s = raw.rstrip("\n")
-        if s.lstrip().startswith("```"):
-            in_fence = not in_fence
+        if inside[i]:
             continue
-        if in_fence:
-            continue
-        m = HEADING.match(s)
+        m = HEADING.match(raw.rstrip("\n"))
         if m:
             out.append((i, len(m.group(1)), m.group(2).strip()))
     return out
 
 
 def fence_balanced(lines):
-    """False when a ``` fence is never closed.
+    """False when a fence is never closed.
 
     Not a nicety: an unclosed fence makes every heading after it invisible to
     _headings(), so the last real section silently swallows the rest of the file
-    and every byte-weight below is wrong. MEASURED 2026-08-02 —
-    datapacket-talos app-blocks/SKILL.md has an unclosed fence at line 1600,
-    which turned a `# 3. SQL state: …` shell COMMENT into an H1 owning 250 KB.
-    The audit must say so rather than quietly reporting the skewed numbers.
+    and every byte-weight below is wrong. The audit must say so rather than
+    quietly reporting the skewed numbers — but it must not cry wolf either, so
+    the check is a real fence walk, not a marker count (see _fence_map).
     """
-    n = sum(1 for ln in lines if ln.rstrip("\n").lstrip().startswith("```"))
-    return n % 2 == 0
+    return not _fence_map(lines)[1]
 
 
 def _extent(headings, i, level, n_lines):
@@ -227,7 +261,11 @@ def audit_one(skill_md):
     fattest = max(h2, key=lambda s: s[3]) if h2 else None
     return {
         "path": skill_md,
-        "name": skill_md.parent.name,
+        # A skill is identified by its DIRECTORY (.claude/skills/<name>/SKILL.md).
+        # Auditing a loose file — a scratch copy, a candidate rewrite — must not
+        # inherit whatever directory it happens to be sitting in: that reported a
+        # copy under scratchpad/ as the skill "scratchpad".
+        "name": skill_md.parent.name if skill_md.name == "SKILL.md" else skill_md.stem,
         "size": size,
         "status": "OK" if size <= TARGET else ("OVER TARGET" if size <= HARD else "OVER HARD CAP"),
         "preamble_bytes": _bytes(lines[:first_h2]),

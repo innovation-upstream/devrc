@@ -328,9 +328,14 @@ def test_headings_inside_a_code_fence_are_not_sections(tmp_path):
 
 
 def test_unclosed_fence_is_reported(tmp_path):
-    """Positive control for the fence counter. MEASURED on the real
-    datapacket-talos app-blocks/SKILL.md (unclosed fence at line 1600), which
-    made a shell comment own 250 KB of phantom 'dated history'."""
+    """Positive control for the fence counter: a genuinely unclosed fence.
+
+    The docstring here used to cite datapacket-talos app-blocks/SKILL.md as a
+    real instance ('unclosed fence at line 1600, a shell comment owning 250 KB
+    of phantom dated history'). RETRACTED 2026-08-03 — that file is well-formed
+    under CommonMark; the finding was an artifact of the marker-parity check
+    this suite now pins against (see the false-positive tests below).
+    """
     body = "## Real\n\n```bash\necho hi\n\n## Later\n\nmore\n"
     p = _write_skill(tmp_path, "unclosed", body)
     a = sa.audit_one(p)
@@ -338,6 +343,84 @@ def test_unclosed_fence_is_reported(tmp_path):
     out = _run(tmp_path)
     assert "unclosed code fence" in out.lower()
     assert "no prune needed" not in out
+
+
+# --- fence FALSE POSITIVES: odd marker parity that is nonetheless well-formed ---
+# Each of these has an ODD number of ``` markers and is valid CommonMark. The
+# marker-parity heuristic these replaced called all of them "unclosed", which is
+# how two independent readers concluded a 726 KB production skill was broken.
+
+def test_info_string_marker_cannot_close_a_fence(tmp_path):
+    """The exact shape from datapacket-talos manage-support-stack/SKILL.md: an
+    outer fence displaying a literal ```action example. 3 markers, odd parity,
+    perfectly well-formed — a closing fence may not carry an info string."""
+    body = ('## Contract\n\n```\n```action\n{"type": "apply_filter"}\n```\n\ntail\n')
+    a = sa.audit_one(_write_skill(tmp_path, "infoclose", body))
+    assert a["fence_ok"] is True, "an info-string marker must not close a fence"
+    assert [t for t, *_ in a["h2"]] == ["Contract"]
+
+
+def test_longer_outer_fence_wraps_a_shorter_literal_one(tmp_path):
+    """A 4-backtick fence is closed only by >=4 backticks, so the ``` pair
+    inside it is literal content, not structure."""
+    body = "## Doc\n\n````\n```bash\necho hi\n```\n````\n\n## After\n\ntail\n"
+    a = sa.audit_one(_write_skill(tmp_path, "nested", body))
+    assert a["fence_ok"] is True
+    assert [t for t, *_ in a["h2"]] == ["Doc", "After"], \
+        "the heading after a correctly-nested fence must stay visible"
+
+
+def test_a_shorter_marker_cannot_close_a_longer_fence(tmp_path):
+    """Complement of the above: ``` inside a ```` block leaves it OPEN, so a
+    genuinely unclosed longer fence is still caught."""
+    body = "## Doc\n\n````\n```\nstill inside\n"
+    a = sa.audit_one(_write_skill(tmp_path, "shortmarker", body))
+    assert a["fence_ok"] is False
+
+
+def test_tilde_fence_is_tracked_and_not_closed_by_backticks(tmp_path):
+    """Fences are per-character: ``` cannot close a ~~~ block."""
+    body = "## Doc\n\n~~~\n```\n~~~\n\n## After\n\ntail\n"
+    a = sa.audit_one(_write_skill(tmp_path, "tilde", body))
+    assert a["fence_ok"] is True
+    assert [t for t, *_ in a["h2"]] == ["Doc", "After"]
+
+
+def test_real_datapacket_skills_are_not_reported_broken():
+    """Regression pin on the two files the parity check falsely accused.
+
+    Skipped when that clone is absent so the suite stays hermetic; when it IS
+    present this is the highest-value assertion in the file, because it is the
+    one that would have caught the false positive before it cost a change to a
+    shared production repo.
+    """
+    root = Path("/home/zach/workspace/civit/datapacket-talos/.claude/skills")
+    if not root.is_dir():
+        pytest.skip("datapacket-talos clone not present")
+    for name in ("app-blocks", "manage-support-stack"):
+        p = root / name / "SKILL.md"
+        if not p.is_file():
+            pytest.skip(f"{name} absent")
+        assert sa.audit_one(p)["fence_ok"] is True, \
+            f"{name}: well-formed under CommonMark; a FAIL here means the fence walk regressed"
+
+
+# --- skill naming ---------------------------------------------------------------
+
+def test_loose_file_is_named_after_the_file_not_its_directory(tmp_path):
+    """A scratch copy must not inherit its containing directory's name — an
+    app-blocks copy under scratchpad/ was reported as the skill 'scratchpad'."""
+    d = tmp_path / "scratchpad"
+    d.mkdir()
+    p = d / "app-blocks-candidate.md"
+    p.write_text("## Real\n\nbody\n")
+    assert sa.audit_one(p)["name"] == "app-blocks-candidate"
+
+
+def test_a_real_skill_is_still_named_after_its_directory(tmp_path):
+    """Complement: the .claude/skills/<name>/SKILL.md convention is unchanged."""
+    assert sa.audit_one(_write_skill(tmp_path, "manage-redis", "## X\n\nb\n"))["name"] \
+        == "manage-redis"
 
 
 def test_a_foreign_repos_reference_path_is_not_a_broken_sidecar(tmp_path):
