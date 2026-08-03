@@ -40,10 +40,15 @@ cli = _load_cli()
 
 
 @pytest.fixture
-def cli_env(tmp_path, library, dirs_file, monkeypatch):
-    """Point the CLI's config loader entirely at temp paths."""
+def cli_env(tmp_path, library, dirs_file, monkeypatch, closed_port):
+    """Point the CLI's config loader entirely at temp paths.
+
+    The port comes from the `closed_port` fixture, never a literal — see
+    conftest._free_port for the orphan-listener that made a hard-coded 8799 a
+    claim about the whole machine.
+    """
     cfg_path = tmp_path / "config.toml"
-    cfg_path.write_text(f'library_root = "{library}"\nport = 8799\n',
+    cfg_path.write_text(f'library_root = "{library}"\nport = {closed_port}\n',
                         encoding="utf-8")
     state = tmp_path / "state"
     monkeypatch.setenv("DL_ROUTER_CONFIG", str(cfg_path))
@@ -102,9 +107,10 @@ def test_status_reports_a_down_sidecar_without_raising(cli_env, capsys):
     assert "dirs       6" in out
 
 
-def test_status_reports_an_unset_library_root(tmp_path, monkeypatch, capsys):
+def test_status_reports_an_unset_library_root(tmp_path, monkeypatch, capsys,
+                                              closed_port):
     cfg = tmp_path / "config.toml"
-    cfg.write_text("port = 8799\n", encoding="utf-8")
+    cfg.write_text(f"port = {closed_port}\n", encoding="utf-8")
     monkeypatch.setenv("DL_ROUTER_CONFIG", str(cfg))
     monkeypatch.setenv("DL_ROUTER_STATE_DIR", str(tmp_path / "state"))
     monkeypatch.setenv("DL_ROUTER_TOKEN_FILE", str(tmp_path / "token"))
@@ -197,9 +203,10 @@ def test_a_malformed_config_is_reported_as_exit_2(tmp_path, monkeypatch,
 
 
 def test_an_unset_library_root_is_reported_not_a_traceback(tmp_path,
-                                                           monkeypatch, capsys):
+                                                           monkeypatch, capsys,
+                                                           closed_port):
     cfg = tmp_path / "config.toml"
-    cfg.write_text("port = 8799\n", encoding="utf-8")
+    cfg.write_text(f"port = {closed_port}\n", encoding="utf-8")
     monkeypatch.setenv("DL_ROUTER_CONFIG", str(cfg))
     monkeypatch.setenv("DL_ROUTER_STATE_DIR", str(tmp_path / "state"))
     monkeypatch.setenv("DL_ROUTER_TOKEN_FILE", str(tmp_path / "token"))

@@ -7,6 +7,7 @@ All fixture data is SYNTHETIC (`Jane Doe`, `acme-studio`, `example-site.test`).
 from __future__ import annotations
 
 import json
+import socket
 import sys
 from pathlib import Path
 
@@ -81,6 +82,37 @@ class FakeClock:
     def advance(self, seconds: float) -> float:
         self.now += float(seconds)
         return self.now
+
+
+def _free_port() -> int:
+    """A loopback port with NOTHING listening on it, chosen at call time.
+
+    🔴 Do not go back to a hard-coded number. Every "the sidecar is DOWN /
+    unreachable" assertion in this suite is really an assertion that nobody is
+    listening on the configured port, and a literal (8799) makes that a claim
+    about the WHOLE MACHINE rather than about the test.
+
+    MEASURED 2026-08-02 on the workbench: an orphaned `python3` from the
+    previous day (pid 2994086, started Aug 1 13:40, ppid 1) was listening on
+    127.0.0.1:8799, so `test_an_unreachable_sidecar_gives_an_actionable_message`
+    reached a REAL dl-router and failed with `sidecar HTTP 409: not_owned_tab`
+    instead of the expected message. The nix sandbox has no such listener, so
+    this failed on the dev-host tier ONLY — the two-tier hazard again, in the
+    opposite direction from the shebang one.
+
+    Asking the kernel for port 0 and closing gives a port that is free NOW.
+    That is not a lease — but it beats a constant, and the alternative (an
+    assertion whose truth depends on ambient host state) is not a test.
+    """
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+@pytest.fixture
+def closed_port() -> int:
+    """See `_free_port`. Use this wherever a test needs a port that is DOWN."""
+    return _free_port()
 
 
 @pytest.fixture

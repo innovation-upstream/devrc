@@ -22,8 +22,10 @@ import pytest
 # Import collector for parse_line
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
+# scripts/ — for the cross-suite helpers in testlib/.
+sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 import collector as C  # noqa: E402
-import _mockbin as M  # noqa: E402
+from testlib import mockbin as M  # noqa: E402
 
 SCRIPT_DIR = Path(__file__).resolve().parent.parent
 PLUGIN_JS = SCRIPT_DIR / "activity-plugin.js"
@@ -47,7 +49,7 @@ def run_node(code: str, *, env: dict | None = None, cwd: str | None = None) -> s
 def write_mock_emit(path: Path, log_file: Path) -> None:
     """Write a mock `emit` script that records its arguments to log_file.
 
-    Shebang owned by `_mockbin.write_exec`: this used to be
+    Shebang owned by `testlib.mockbin.write_exec`: this used to be
     `#!/usr/bin/env bash`, which execs on a NixOS dev host but NOT in the nix
     build sandbox (no /usr/bin/env). That was invisible until this suite was
     added to run-tests.sh's target list.

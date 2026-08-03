@@ -27,6 +27,10 @@ from pathlib import Path
 
 import pytest
 
+# scripts/ — for the cross-suite helpers in testlib/.
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from testlib import mockbin  # noqa: E402
+
 SCRIPT = Path(__file__).resolve().parent.parent / "setup-brave-profile.sh"
 
 # Exit codes the script's own documentation commits to.
@@ -129,10 +133,50 @@ def write_pgrep(bin_dir: Path, *, exit_code: int):
 
     exit 0 = "a process with that binary name exists". That used to be the
     whole guard; it must not decide anything now.
+
+    🔴 The shebang is owned by `testlib.mockbin.write_exec` (/bin/sh), NOT
+    written here. This stub used to carry `#!/usr/bin/env bash`, which cannot
+    exec in the nix build sandbox — no /usr/bin/env there, while every NixOS dev
+    host has one. That made the defect invisible on the tier people look at and
+    red only on the tier that gates merges. See that module for the full account.
     """
-    (bin_dir / "pgrep").write_text(
-        f"#!/usr/bin/env bash\nexit {exit_code}\n", encoding="utf-8")
-    os.chmod(bin_dir / "pgrep", 0o755)
+    mockbin.write_exec(bin_dir / "pgrep", f"exit {exit_code}\n")
+
+
+@pytest.mark.parametrize("exit_code", [0, 1])
+def test_the_fake_pgrep_actually_execs(tmp_path, exit_code):
+    """🔴 SELF-CHECK on the harness — every `write_pgrep` test depends on it.
+
+    MEASURED 2026-08-02 in the nix build sandbox: with the old
+    `#!/usr/bin/env bash` shebang the stub could NOT exec (there is no
+    /usr/bin/env there — probed directly) and all 989 tests in this suite still
+    PASSED. The `exit 0` cases are exactly the ones asserting that "a brave
+    binary is running" must not decide anything, so a `pgrep` that cannot run at
+    all is indistinguishable from one answering "no": the harness was inert and
+    nothing in the suite could tell.
+
+    Asserting the stub's exit code directly makes the harness's own breakage a
+    loud failure HERE, rather than something only the repo-wide structural scan
+    (scripts/tests/test_runtime_shebangs.py) can see. Verified red: restoring
+    the bad shebang takes this suite to 991 collected / 989 passed / 2 failed.
+    """
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    write_pgrep(bin_dir, exit_code=exit_code)
+    stub = bin_dir / "pgrep"
+    try:
+        out = subprocess.run([str(stub), "brave"], capture_output=True,
+                             text=True, timeout=30)
+    except OSError as exc:
+        # ⚠ execve reports ENOENT for a MISSING INTERPRETER, and Python renders
+        # that as "No such file or directory: <the stub>" — naming the file that
+        # does exist. Say what actually happened.
+        raise AssertionError(
+            f"{stub} exists ({stub.exists()}) but could not be exec'd: {exc}. "
+            f"Its shebang names an interpreter this environment lacks — "
+            f"see testlib.mockbin.") from exc
+    assert out.returncode == exit_code, (
+        f"the fake pgrep did not exec (rc={out.returncode}): {out.stderr!r}")
 
 
 def run(fake_env, *args, env_extra=None):

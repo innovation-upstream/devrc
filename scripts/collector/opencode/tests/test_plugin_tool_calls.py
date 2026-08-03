@@ -49,19 +49,16 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
+# scripts/ — for the cross-suite helpers in testlib/.
+sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 import collector as C  # noqa: E402
-import _mockbin as M  # noqa: E402
+from testlib import mockbin as M  # noqa: E402
 
 SCRIPT_DIR = Path(__file__).resolve().parent.parent
 PLUGIN_JS = SCRIPT_DIR / "activity-plugin.js"
 EMIT = SCRIPT_DIR.parent / "emit"
 
 NAME_CAPTURE_FAILED = "__name_capture_failed__"
-
-# `#!` and the quoted forms the shebang guard scans for, assembled from char
-# codes so this module's own source never contains the pattern it searches for.
-_HB = chr(35) + chr(33)
-_NEEDLES = (chr(34) + _HB, chr(39) + _HB)
 
 
 # --------------------------------------------------------------------------- #
@@ -74,7 +71,7 @@ def write_argv_recorder(path: Path, log: Path) -> None:
     spaces, which is exactly the corruption we are trying to detect, so a
     space-joined log cannot tell a mangled call from a clean one.
 
-    The shebang is owned by `_mockbin.write_exec` — see that module for why a
+    The shebang is owned by `testlib.mockbin.write_exec` — see that module for why a
     `#!/usr/bin/env` stub is green on the dev host and RED in the nix sandbox.
     """
     M.write_exec(
@@ -207,46 +204,13 @@ def test_brace_expansion_probe_agrees_with_the_shell_node_actually_uses():
         f"probe says {probe} but node's shell produced {r.stdout!r}")
 
 
-def test_no_runtime_written_shebang_uses_usr_bin_env():
-    """STRUCTURAL GUARD — the deterministic half of the fix.
+# The STRUCTURAL GUARD that used to live here (a scan for runtime-written
+# `/usr/bin/env` shebangs, plus its positive control) moved to
+# scripts/tests/test_runtime_shebangs.py and is now REPO-WIDE. It was scoped to
+# this one directory, which is exactly why it could not see the identical defect
+# in scripts/dl-router/tests/test_setup_script.py. The scanner itself lives in
+# scripts/testlib/shebang_scan.py.
 
-    A quoted `#!` anywhere in this suite's sources means a call site is writing
-    its own shebang instead of going through `_mockbin.write_exec`, which is how
-    `/usr/bin/env` came back the first time. `_mockbin` itself is exempt: it
-    owns the one shebang, and its docstring names the trap.
-    """
-    # ⚠ The needles are BUILT AT RUNTIME, character by character — including the
-    # `#!` itself. Written as literals they appear in this function's own source
-    # and the scan reports ITSELF, the same self-match that makes
-    # `pgrep -f <pattern>` find its own shell. (Measured: the first version of
-    # this guard failed on its own two source lines.)
-    needles = _NEEDLES
-    tests_dir = Path(__file__).resolve().parent
-    offenders = []
-    for py in sorted(tests_dir.glob("test_*.py")):
-        for i, line in enumerate(py.read_text(encoding="utf-8").splitlines(), 1):
-            if i == 1:
-                continue          # the module's own shebang; pytest imports, never execs
-            if any(n in line for n in needles):
-                offenders.append(f"{py.name}:{i}: {line.strip()}")
-    assert not offenders, (
-        "a test writes its own shebang — use _mockbin.write_exec instead:\n  "
-        + "\n  ".join(offenders))
-
-
-def test_positive_control_the_shebang_guard_can_detect_an_offender(tmp_path):
-    """POSITIVE CONTROL for the `not offenders` (== empty) assertion above.
-
-    An empty offender list is indistinguishable from a scan wired to nothing.
-    Feed the same matcher a file that MUST be flagged and watch the count move.
-    """
-    bad = tmp_path / "test_bad.py"
-    # Assembled at runtime for the same self-match reason as the guard itself.
-    offending = 'p.write_text(' + chr(34) + _HB + '/usr/bin/env bash' + chr(34) + ')'
-    bad.write_text("x = 1\n" + offending + "\n", encoding="utf-8")
-    hits = [i for i, line in enumerate(bad.read_text().splitlines(), 1)
-            if i != 1 and any(n in line for n in _NEEDLES)]
-    assert hits == [2], f"guard is wired to nothing — no hit on {offending!r}"
 
 
 # --------------------------------------------------------------------------- #
