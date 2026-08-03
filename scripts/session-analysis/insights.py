@@ -36,9 +36,23 @@ Usage:
   --html   ALSO write a styled, self-contained HTML report to PATH
            (default when the flag is given bare: ~/.claude/usage-data/insights-<today>.html)
 
-Degrades gracefully: if telemetry is unconfigured/unreachable it prints a clear
-message and exits 0 (only a real error — e.g. an unwritable --html path — is
-non-zero), exactly like initiative-scan.
+FAILURE REPORTING (🔴 this is load-bearing — see the exit codes below):
+"telemetry is switched off", "the server is unreachable" and "the server
+rejected my query" are THREE DIFFERENT FACTS. Until 2026-08-02 this tool
+collapsed all three into one `TelemetryUnavailable` and exited 0, so a healthy
+pipeline whose message-stream query was being OvercommitTracker-killed by
+ClickHouse reported "telemetry unavailable; nothing to report" and no caller
+could tell. (That query is also gone now — see the block above `q_summaries`.)
+
+    exit 0  ok                — the full report
+    exit 0  not-configured    — no CLICKHOUSE_URL; the documented optional path
+    exit 3  unreachable       — could not reach the server at all
+    exit 4  query-failed      — server reachable, ALL queries rejected
+    exit 5  degraded          — server reachable, SOME queries failed; the
+                                report renders with a loud banner naming which
+                                query died and which sections are missing
+
+`--json` always carries `status`, and `error`/`errors`/`failed_queries`.
 """
 from __future__ import annotations
 
@@ -69,7 +83,50 @@ _LEVERAGE_ORDER = {lv: i for i, lv in enumerate(SCH.LEVERAGES)}
 
 
 class TelemetryUnavailable(Exception):
-    """Telemetry is not configured / not reachable — degrade, don't crash."""
+    """Base class. Kept so older `except TelemetryUnavailable` callers still work.
+
+    🔴 Do NOT catch this to mean "telemetry is off". The three cases below are
+    different facts and must be reported (and exited) differently — conflating
+    them is the bug this taxonomy exists to kill.
+    """
+
+
+class TelemetryNotConfigured(TelemetryUnavailable):
+    """No CLICKHOUSE_URL in the environment. Not a failure: the tool is
+    optional and this is the documented graceful path (exit 0)."""
+
+
+class TelemetryUnreachable(TelemetryUnavailable):
+    """The ClickHouse server could not be reached (connect/DNS/timeout).
+    A genuine failure — exit non-zero."""
+
+
+class TelemetryQueryFailed(TelemetryUnavailable):
+    """The server answered and REJECTED our queries. The pipeline is up and the
+    report is wrong; the loudest possible failure. Exit non-zero."""
+
+    def __init__(self, message: str, errors: dict[str, str] | None = None):
+        super().__init__(message)
+        self.errors = errors or {}
+
+
+# Exit codes — distinct so a caller/cron can branch without parsing text.
+EXIT_OK = 0
+EXIT_NOT_CONFIGURED = 0     # documented graceful degradation, not a failure
+EXIT_UNREACHABLE = 3
+EXIT_QUERY_FAILED = 4
+EXIT_DEGRADED = 5           # some queries succeeded, some failed
+
+# Which report sections each query feeds, so a partial failure can say exactly
+# what is missing instead of silently rendering zeros.
+QUERY_SECTIONS = {
+    "summaries": "ACTIVITY totals, TOOLS, LANGUAGES, PROJECTS, PER-HOST session counts",
+    "messages": "message counts, PER-HOST messages, ACTIVITY OVER TIME",
+    "commands": "TOP SLASH-COMMANDS",
+    "first_words": "TOP PROMPT FIRST-WORDS",
+    "themes": "TOP PROMPT THEMES",
+    "insights": "OUTCOMES, AUTOMATION CANDIDATES, RECURRING TOIL, WORKFLOW GAPS (Layer B)",
+}
 
 
 # --------------------------------------------------------------------------- #
@@ -135,6 +192,52 @@ def _host_filter(host: str | None) -> str:
     return f" AND host={Q.sql_quote(host)}" if host else ""
 
 
+# --------------------------------------------------------------------------- #
+# 🔴 WHY THE MESSAGE STREAM IS AGGREGATED SERVER-SIDE
+# --------------------------------------------------------------------------- #
+# This tool used to stream the whole `text` column to the client and count in
+# Python. `activity.events.text` is wide (mean 2,498 B, max 27,136 B over 14d —
+# measured 2026-08-02) and the `activity` ClickHouse runs under a hard 2.5 GiB
+# total-memory ceiling, so materializing those strings into an HTTP result set
+# is what the server cannot do. That is the whole bug: the report said
+# "telemetry unavailable" while the pipeline was healthy.
+#
+# MEASURED on the laptop → nebula endpoint, 2026-08-02, interleaved with
+# `SELECT 1` (0.04s) and `count()` (0.20s) controls so a server outage could not
+# be mistaken for a query problem:
+#
+#   ROW STREAM  `SELECT kind, host, text, ts … ts>now()-N`
+#      1d / 2d / 4d / 7d / 14d ....... TIMEOUT, every one, at 60s
+#      14d, second attempt ............ HTTP 500 `Code: 241 MEMORY_LIMIT_EXCEEDED
+#                                       … (while reading column text)`
+#      14d + max_block_size=1024 ...... TIMEOUT
+#      14d + max_threads=1 ............ TIMEOUT
+#      14d + both ..................... TIMEOUT
+#   SERVER-SIDE AGGREGATES (what this file now issues, same 14d window)
+#      counts by kind/host/day ........ 0.59s,  56 rows,  3,581 B
+#      top slash-commands ............. 0.51s,  30 rows,    986 B
+#      prompt first-words ............. 0.46s,  20 rows,    466 B
+#      10 × countIf(match(…)) themes .. 0.72s,   1 row,     120 B
+#
+# So: capping block size / threads does NOT fix it (an earlier single
+# observation suggested it did and did not reproduce — one measurement is not a
+# general claim), and neither does chunking by day, because even a 1-day slice
+# times out. Not sending 15.8 MB of prompt text over the wire does fix it, and
+# it drops the payload for these sections from ~15.8 MB to ~5 KB.
+#
+# SEMANTICS: the SQL below is generated FROM the Python definitions above
+# (THEMES / _WORD_RX) so the two cannot drift, and was cross-checked against the
+# Python implementation over 200 real rows — themes, first-words and
+# slash-command tokens all matched EXACTLY. Caveat on that check: only 4 of the
+# 200 sampled rows were slash-commands, so the command-token comparison is thin.
+#
+# Ordering is the one deliberate difference: ties used to fall out in row order
+# (which was never pinned — the old query had no ORDER BY, so the "top 15" was
+# not reproducible run to run). Ties now break on the key, ascending.
+_WORD_PATTERN = "[a-zA-Z']+"           # must stay in step with _WORD_RX above
+_TOP_N_SQL = 200                       # generous head; the report renders 15
+
+
 def q_summaries(win: int, host: str | None = None) -> str:
     """Latest session-summary per session (argMax on ingested_at — the read contract)."""
     return (
@@ -155,12 +258,52 @@ def q_summaries(win: int, host: str | None = None) -> str:
     )
 
 
-def q_messages(win: int, host: str | None = None) -> str:
-    """The user's typed prompts + slash-commands over the window."""
-    return (
-        "SELECT kind, host, text, ts FROM activity.events "
-        f"WHERE source='claude' AND kind IN ('prompt','command') AND ts>now()-{win}{_host_filter(host)}"
-    )
+def _msg_where(win: int, host: str | None, kind: str | None = None) -> str:
+    k = f" AND kind={Q.sql_quote(kind)}" if kind else " AND kind IN ('prompt','command')"
+    return (f"WHERE source='claude'{k} AND ts>now()-{win}{_host_filter(host)}")
+
+
+def q_message_counts(win: int, host: str | None = None) -> str:
+    """Message volume per (kind, host, day) — feeds every message COUNT in the
+    report (totals, per-host, activity-by-day). Tens of rows, no `text`."""
+    return ("SELECT kind, host, toDate(ts) AS day, count() AS n "
+            f"FROM activity.events {_msg_where(win, host)} "
+            "GROUP BY kind, host, day ORDER BY day ASC, host ASC, kind ASC")
+
+
+def q_top_commands(win: int, host: str | None = None, limit: int = _TOP_N_SQL) -> str:
+    """Slash-command leaderboard. `splitByWhitespace(trimBoth(text))[1]` is the
+    SQL twin of `_first_token` (Python's str.split() also splits on ANY
+    whitespace — splitByChar(' ') would NOT be equivalent)."""
+    return ("SELECT splitByWhitespace(trimBoth(text))[1] AS cmd, count() AS n "
+            f"FROM activity.events {_msg_where(win, host, 'command')} "
+            f"GROUP BY cmd ORDER BY n DESC, cmd ASC LIMIT {int(limit)}")
+
+
+def q_first_words(win: int, host: str | None = None, limit: int = _TOP_N_SQL) -> str:
+    """First word of each typed prompt. `extract` returns the FIRST match of the
+    pattern, which is what `_WORD_RX.findall(...)[0]` does."""
+    return (f"SELECT lower(extract(text, {Q.sql_quote(_WORD_PATTERN)})) AS w, count() AS n "
+            f"FROM activity.events {_msg_where(win, host, 'prompt')} "
+            f"GROUP BY w ORDER BY n DESC, w ASC LIMIT {int(limit)}")
+
+
+def q_prompt_themes(win: int, host: str | None = None) -> str:
+    """One row of 10 `countIf(match(lower(text), <THEMES pattern>))` columns.
+
+    Generated from THEMES so the SQL and the Python regexes cannot drift. The
+    aliases are positional (`t0`…`tN`) because a theme name like `deploy/infra`
+    is not a bare SQL identifier; `theme_aliases()` is the decoder.
+    """
+    cols = ", ".join(f"countIf(match(lower(text), {Q.sql_quote(pat)})) AS t{i}"
+                     for i, pat in enumerate(THEMES.values()))
+    return (f"SELECT {cols} FROM activity.events "
+            f"{_msg_where(win, host, 'prompt')}")
+
+
+def theme_aliases() -> list[str]:
+    """Positional SQL alias → theme name, in THEMES declaration order."""
+    return list(THEMES)
 
 
 def q_insights(win: int, host: str | None = None) -> str:
@@ -172,6 +315,60 @@ def q_insights(win: int, host: str | None = None) -> str:
         f"WHERE source='claude' AND kind='session-insight' AND ts>now()-{win}{_host_filter(host)} "
         "GROUP BY session"
     )
+
+
+# --------------------------------------------------------------------------- #
+# Message-stream aggregation from the SERVER-SIDE rollups — pure
+# --------------------------------------------------------------------------- #
+def aggregate_message_stats(count_rows: list[dict], command_rows: list[dict],
+                            word_rows: list[dict], theme_rows: list[dict]) -> dict:
+    """Fold the four server-side rollups into the shape `aggregate()` renders.
+
+    Mirrors, exactly, what the old client-side loop over raw message rows
+    produced — same keys, same numbers. Only tie-breaking differs (see the note
+    beside the query builders). Zero-count themes are DROPPED, because
+    `Counter.most_common()` never emitted a theme that matched nothing.
+    """
+    prompts = commands = 0
+    by_day: Counter = Counter()
+    hosts: dict[str, dict] = {}
+    for r in count_rows:
+        n = int(num(r.get("n")))
+        kind = r.get("kind")
+        h = r.get("host") or "?"
+        day = str(r.get("day") or "")[:10]
+        if day:
+            by_day[day] += n
+        hp = hosts.setdefault(h, {"messages": 0, "prompts": 0, "commands": 0})
+        hp["messages"] += n
+        if kind == "command":
+            commands += n
+            hp["commands"] += n
+        else:
+            prompts += n
+            hp["prompts"] += n
+
+    top_commands = [(r.get("cmd") or "", int(num(r.get("n")))) for r in command_rows]
+    top_first_words = [(r.get("w") or "", int(num(r.get("n")))) for r in word_rows]
+
+    themes: list[tuple[str, int]] = []
+    if theme_rows:
+        row = theme_rows[0]
+        for i, name in enumerate(theme_aliases()):
+            n = int(num(row.get(f"t{i}")))
+            if n:
+                themes.append((name, n))
+        themes.sort(key=lambda kv: -kv[1])   # stable → ties keep THEMES order
+
+    return {
+        "prompts": prompts,
+        "commands": commands,
+        "activity_by_day": dict(sorted(by_day.items())),
+        "hosts": hosts,
+        "top_commands": top_commands,
+        "top_first_words": top_first_words,
+        "top_themes": themes,
+    }
 
 
 # --------------------------------------------------------------------------- #
@@ -284,7 +481,12 @@ def aggregate_insights(insight_rows: list[dict]) -> dict:
 # --------------------------------------------------------------------------- #
 def aggregate(summary_rows: list[dict], message_rows: list[dict],
               insight_rows: list[dict], days: int, host: str | None,
-              insight_days: int | None = None) -> dict:
+              insight_days: int | None = None,
+              message_stats: dict | None = None) -> dict:
+    """`message_stats`, when given, REPLACES the client-side loop over
+    `message_rows` — that is the server-side-aggregation path gather() uses.
+    The raw-rows path is kept because it is the pure, fixture-driven reference
+    the tests exercise (and it is what `message_stats` is validated against)."""
     tool_counts: Counter = Counter()
     languages: Counter = Counter()
     projects: Counter = Counter()
@@ -340,6 +542,22 @@ def aggregate(summary_rows: list[dict], message_rows: list[dict],
     first_words: Counter = Counter()
     by_day: Counter = Counter()
     prompt_n = command_n = 0
+    if message_stats is not None:
+        # Server-side path: the counts already exist; only merge the per-host
+        # message columns into the host map the summary loop just built.
+        prompt_n = int(num(message_stats.get("prompts")))
+        command_n = int(num(message_stats.get("commands")))
+        by_day = Counter(message_stats.get("activity_by_day") or {})
+        for h, hp_src in (message_stats.get("hosts") or {}).items():
+            hp = hosts.setdefault(h, {"sessions": 0, "messages": 0, "prompts": 0,
+                                      "commands": 0, "commits": 0,
+                                      "output_tokens": 0})
+            for k in ("messages", "prompts", "commands"):
+                hp[k] += int(num(hp_src.get(k)))
+        commands = None      # rendered straight from message_stats below
+        first_words = None
+        themes = None
+        message_rows = []
     for row in message_rows:
         kind = row.get("kind")
         h = row.get("host") or "?"
@@ -388,9 +606,12 @@ def aggregate(summary_rows: list[dict], message_rows: list[dict],
         "projects": dict(projects.most_common()),
         "models": dict(models.most_common()),
         "tool_error_categories": dict(err_cats.most_common()),
-        "top_commands": commands.most_common(15),
-        "top_themes": themes.most_common(),
-        "top_first_words": first_words.most_common(15),
+        "top_commands": (message_stats["top_commands"][:15] if message_stats is not None
+                         else commands.most_common(15)),
+        "top_themes": (message_stats["top_themes"] if message_stats is not None
+                       else themes.most_common()),
+        "top_first_words": (message_stats["top_first_words"][:15] if message_stats is not None
+                            else first_words.most_common(15)),
         "activity_by_day": dict(sorted(by_day.items())),
         "hosts": hosts,
         # Layer B qualitative aggregates (spec §11).
@@ -418,14 +639,49 @@ def gather(client, days: int, host: str | None = None,
     win = window_seconds(days)
     # Layer B uses a wider window than Layer A (qualitative facets accrue slower).
     iwin = window_seconds(max(insight_days or DEFAULT_INSIGHT_DAYS, days))
-    try:
-        summaries = client.rows(q_summaries(win, host))
-        messages = client.rows(q_messages(win, host))
-        insights = client.rows(q_insights(iwin, host))
-    except Exception as e:  # noqa: BLE001 — telemetry is optional; degrade cleanly
-        raise TelemetryUnavailable(str(e)) from e
-    return aggregate(summaries, messages, insights, days, host,
-                     insight_days=insight_days)
+
+    # 🔴 Run the three queries INDEPENDENTLY and account for each one.
+    #
+    # The old code wrapped all three in one `except Exception` and re-raised a
+    # single "telemetry unavailable", so (a) a query rejected by a healthy
+    # server was reported as the pipeline being off, and (b) if query 1 blew up,
+    # queries 2 and 3 never ran and their sections rendered as zeros with no
+    # indication anything was missing. Silently-dropped sections are the failure
+    # mode this whole taxonomy exists to prevent.
+    #
+    # An UNREACHABLE server is different: no query can possibly succeed, so
+    # abort immediately rather than paying three timeouts.
+    plan = (
+        ("summaries", q_summaries(win, host)),
+        ("messages", q_message_counts(win, host)),
+        ("commands", q_top_commands(win, host)),
+        ("first_words", q_first_words(win, host)),
+        ("themes", q_prompt_themes(win, host)),
+        ("insights", q_insights(iwin, host)),
+    )
+    results: dict[str, list[dict]] = {}
+    errors: dict[str, str] = {}
+    for name, sql in plan:
+        try:
+            results[name] = client.rows(sql)
+        except Q.CHUnreachable as e:
+            raise TelemetryUnreachable(str(e)) from e
+        except Exception as e:  # noqa: BLE001 — record and carry on, degraded
+            errors[name] = f"{type(e).__name__}: {e}"
+            results[name] = []
+
+    if len(errors) == len(plan):
+        raise TelemetryQueryFailed(
+            "every query was rejected by the server (it IS reachable — this is "
+            "a query failure, not a telemetry outage)", errors)
+
+    stats = aggregate_message_stats(results["messages"], results["commands"],
+                                    results["first_words"], results["themes"])
+    data = aggregate(results["summaries"], [], results["insights"],
+                     days, host, insight_days=insight_days, message_stats=stats)
+    data["failed_queries"] = errors
+    data["status"] = "degraded" if errors else "ok"
+    return data
 
 
 # --------------------------------------------------------------------------- #
@@ -438,12 +694,30 @@ def _bar(n, peak, width=18):
     return "█" * (max(1, round(n / peak * width)) if n > 0 else 0)
 
 
+def render_failure_banner(failed: dict) -> list[str]:
+    """A LOUD, unmissable header naming every query that failed and the report
+    sections that are consequently empty. A degraded report that looks like a
+    quiet one is worse than no report."""
+    if not failed:
+        return []
+    out = ["", "!" * 78,
+           f"!! DEGRADED REPORT — {len(failed)} of {len(QUERY_SECTIONS)} queries FAILED.",
+           "!! The server IS reachable; these numbers are INCOMPLETE, not low."]
+    for name, err in failed.items():
+        out.append(f"!!   {name}: {err}")
+        out.append(f"!!     → missing: {QUERY_SECTIONS.get(name, '?')}")
+    out.append("!" * 78)
+    return out
+
+
 def render(data: dict) -> str:
     t = data["totals"]
     out = []
     scope = data["host"] or "all hosts"
+    failed = data.get("failed_queries") or {}
     out.append(f"=== Claude Code insights — trailing {data['days']}d ({scope}) ===")
     out.append(f"    {data['window_start_utc']} → now (UTC) · generated {data['generated_utc']}")
+    out.extend(render_failure_banner(failed))
 
     out.append("\n## ACTIVITY")
     out.append(f"  sessions:   {data['sessions']}"
@@ -496,6 +770,11 @@ def render(data: dict) -> str:
                    f"{hp['commits']} commits · {hp['output_tokens']:,} out-tokens")
 
     out.append(f"\n## OUTCOMES (qualitative — Layer B · trailing {data['insight_days']}d)")
+    if "insights" in failed:
+        # NOT "nothing here yet" — that would read a query failure as an empty
+        # dataset, which is exactly the conflation this PR removes.
+        out.append(f"  UNAVAILABLE — the session-insight query FAILED: {failed['insights']}")
+        return "\n".join(out)
     if data["qualitative_pending"]:
         out.append("  (no qualitative insights yet — run session_insight via the activity skill)")
         out.append("  This report shows ONLY deterministic facts — no fabricated outcomes.")
@@ -586,6 +865,17 @@ def render_html(data: dict) -> str:
     scope = data["host"] or "all hosts"
     total_in = (num(t.get('input_tokens', 0)) + num(t.get('cache_read_tokens', 0))
                 + num(t.get('cache_creation_tokens', 0)))
+    failed = data.get("failed_queries") or {}
+    degraded_html = ""
+    if failed:
+        items = "".join(
+            f"<li><b>{html.escape(n)}</b>: {html.escape(e)}<br>"
+            f"<span class=mut>missing: {html.escape(QUERY_SECTIONS.get(n, '?'))}</span></li>"
+            for n, e in failed.items())
+        degraded_html = (
+            f'<div class="note" style="border-left-color:#c0392b"><b>DEGRADED — '
+            f'{len(failed)} of {len(QUERY_SECTIONS)} queries FAILED.</b> The server is reachable; the '
+            f'numbers below are <b>incomplete, not low</b>.<ul>{items}</ul></div>')
     hosts_rows = "".join(
         f"<tr><td>{html.escape(h)}</td><td>{hp['sessions']}</td><td>{hp['messages']}</td>"
         f"<td>{hp['commits']}</td><td>{hp['output_tokens']:,}</td></tr>"
@@ -649,6 +939,7 @@ footer{{color:var(--mut);font-size:12px;margin-top:40px;border-top:1px solid var
 <div class="note">Deterministic view built from <code>activity.events</code> (Layer&nbsp;A
 session rollups + the prompt/command stream). No LLM, no confabulation. The qualitative
 layer (goal/outcome/friction) arrives in PR-2.</div>
+{degraded_html}
 {unreadable_note}
 <h2>ACTIVITY</h2>
 <div class="grid">
@@ -716,17 +1007,37 @@ def main(argv=None) -> int:
     if a.days <= 0:
         print("error: --days must be positive", file=sys.stderr)
         return 2
+    # 🔴 THREE separable states, three exit codes, an error carried in --json.
+    # Previously all of these printed one "telemetry unavailable" line and
+    # exited 0, so a broken query looked identical to telemetry being off and
+    # nothing downstream could ever notice.
+    def _fail(status: str, message: str, rc: int, errors: dict | None = None) -> int:
+        if a.json:
+            print(json.dumps({"status": status, "error": message,
+                              "errors": errors or {}, "days": a.days,
+                              "host": a.host}, indent=2))
+        print(f"insights: {message}", file=sys.stderr)
+        return rc
+
     try:
         conn = Q.CHConn.from_env()
     except RuntimeError as e:
-        print(f"insights: telemetry not configured — {e}", file=sys.stderr)
-        return 0
+        # Not a failure: the tool is optional and this is the documented path.
+        return _fail("not-configured",
+                     f"telemetry NOT CONFIGURED — {e}", EXIT_NOT_CONFIGURED)
     client = Q.CHClient(conn)
     try:
         data = gather(client, a.days, a.host, insight_days=a.insight_days)
-    except TelemetryUnavailable as e:
-        print(f"insights: telemetry unavailable ({e}); nothing to report.", file=sys.stderr)
-        return 0
+    except TelemetryUnreachable as e:
+        return _fail("unreachable",
+                     f"telemetry UNREACHABLE at {conn.url} — {e}. "
+                     "The report was NOT produced.", EXIT_UNREACHABLE)
+    except TelemetryQueryFailed as e:
+        return _fail("query-failed",
+                     f"telemetry QUERY FAILED at {conn.url} — {e}. The server is "
+                     "reachable; the queries are broken or the server rejected "
+                     "them. The report was NOT produced.",
+                     EXIT_QUERY_FAILED, errors=e.errors)
 
     if a.json:
         print(json.dumps(data, indent=2, default=str))
@@ -739,7 +1050,14 @@ def main(argv=None) -> int:
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(render_html(data), encoding="utf-8")
         print(f"\nwrote HTML report → {p}", file=sys.stderr)
-    return 0
+
+    failed = data.get("failed_queries") or {}
+    if failed:
+        print(f"insights: DEGRADED — {len(failed)} of {len(QUERY_SECTIONS)} queries failed "
+              f"({', '.join(failed)}); the sections they feed are EMPTY, not zero.",
+              file=sys.stderr)
+        return EXIT_DEGRADED
+    return EXIT_OK
 
 
 if __name__ == "__main__":
