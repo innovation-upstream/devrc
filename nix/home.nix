@@ -799,6 +799,23 @@ in
   # ~/.config/opencode/ existing.
   home.file.".config/opencode/guard_core.py".source = ../scripts/claude-hooks/guard_core.py;
 
+  # Activity telemetry plugin — emits session/prompt/tool-call events into
+  # activity.events via ~/.config/activity-collector/emit.
+  #
+  # 🔴 THIS ENTRY IS THE ONLY DEPLOYMENT. It replaces
+  # scripts/collector/opencode/deploy-plugin.sh, a hand-run script that had to
+  # be remembered per host — and was not: it was run on the workbench on
+  # 2026-07-29 and NEVER on the laptop, which therefore recorded zero
+  # kind=tool-call rows for the plugin's entire existence. Same constraints as
+  # guard.js/env.js: directly in `plugin/`, `.js` only, non-recursive glob.
+  #
+  # 🔴 Do NOT also deploy to `plugins/` (plural). opencode's glob is
+  # `{plugin,plugins}/*.{ts,js}` and reads BOTH, so a file in each loads the
+  # plugin TWICE and double-emits every event. opencodeDropStalePluginsDir below
+  # removes the pre-existing plural-dir symlink that deploy-plugin.sh left.
+  home.file.".config/opencode/plugin/activity.js".source =
+    ../scripts/collector/opencode/activity-plugin.js;
+
   # `shell.env` plugin — the only supported seam for putting environment into
   # opencode's bash tool (there is no `env` config key; setting one is silently
   # ignored). NOTE the bash tool DOES source .zshenv on this host — see the
@@ -935,6 +952,43 @@ in
     if [ -e "$f" ] && [ ! -L "$f" ]; then
       $DRY_RUN_CMD mv -f "$f" "$f.pre-devrc-$(date +%Y%m%d%H%M%S).bak"
     fi
+  '';
+
+  # Remove the activity plugin's PRE-DECLARATIVE deployments. Until 2026-08-02
+  # it was installed by a hand-run script that symlinked the repo's
+  # activity-plugin.js into the config dir. Two stale copies can exist, and both
+  # must go before the managed entry above can take effect:
+  #
+  #   plugin/activity.js  (SINGULAR) — the path home.file now owns. A
+  #     pre-existing non-store symlink here makes checkLinkTargets ABORT THE
+  #     WHOLE SWITCH with "would be clobbered", and `force` does not help. This
+  #     symlink exists on the workbench right now (hand-made 2026-08-02 while
+  #     diagnosing the outage), so without this step the very switch that
+  #     deploys the fix would fail. Hence entryBefore checkLinkTargets.
+  #
+  #   plugins/activity.js (PLURAL) — where the old script deployed. opencode's
+  #     glob is `{plugin,plugins}/*.{ts,js}` and 1.18.4 reads BOTH (measured: it
+  #     logged a load error for each path independently), so leaving this one
+  #     would load the plugin TWICE and double-emit every telemetry event.
+  #
+  # Only ever removes a SYMLINK whose target is the repo's activity-plugin.js —
+  # a real file, a store symlink, or a foreign plugin someone put there
+  # deliberately is left untouched. Each parent dir is removed only if it is
+  # then empty. No-op on a host that never ran the script (the laptop) and on
+  # every switch after the first.
+  home.activation.opencodeDropStaleActivityPlugin = lib.hm.dag.entryBefore ["checkLinkTargets"] ''
+    for d in "$HOME/.config/opencode/plugin" "$HOME/.config/opencode/plugins"; do
+      f="$d/activity.js"
+      if [ -L "$f" ]; then
+        case "$(readlink "$f")" in
+          /nix/store/*) ;;                       # managed — leave alone
+          *activity-plugin.js)
+            $DRY_RUN_CMD rm -f "$f"
+            $DRY_RUN_CMD rmdir "$d" 2>/dev/null || true
+            ;;
+        esac
+      fi
+    done
   '';
 
   # Reusable failure-notification TEMPLATE unit. The important user units below
