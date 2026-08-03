@@ -831,3 +831,187 @@ def test_emulate_preset_and_flags_are_order_independent(bridge):
     c = _body(bridge, "emulate", "--color-scheme", "dark", "--", "iphone-15")
     assert a == b == c
     assert a["device"] == "iphone-15" and a["colorScheme"] == "dark"
+
+
+# --------------------------------------------------------------------------- #
+# `emulate --reset --recreate` — the #319 workaround (CLI-side, no extension).
+#
+# WHY IT EXISTS. Measured 2026-08-03 (laptop, extension 0.7.2, fresh-tab control):
+#
+#     fresh tab, never emulated   innerWidth 1124   (control — read path works)
+#     after `emulate iphone-15`   innerWidth  393
+#     after `emulate --reset`     innerWidth  393   ← NOT restored
+#     after `--reset` + re-nav    innerWidth  393   ← still NOT restored
+#
+# and the reset DID report `cleared: [Emulation.clearDeviceMetricsOverride,
+# Emulation.setTouchEmulationEnabled, Emulation.setUserAgentOverride]`. The
+# viewport size is stuck; closing the tab is the only known remedy. `--recreate`
+# automates the replacement. The mechanism is NOT established — these tests pin
+# the CLI's ORCHESTRATION, not a browser behaviour.
+#
+# What must hold:
+#   1. the op ORDER is emulate(reset) → release → open(url) → close(old tab),
+#      i.e. the replacement is opened BEFORE the stuck tab is closed, so no
+#      failure path can leave the operator with no tab;
+#   2. `release` is sent at all — `open` is idempotent server-side and would hand
+#      back the SAME stuck tab to a session that still owns one;
+#   3. the NEW tab id is reported (it changes, and later ops route to it);
+#   4. plain `--reset` NEVER swaps tab ids (one request, nothing else);
+#   5. `--recreate` alone is refused;
+#   6. a non-http(s) url is refused without closing anything;
+#   7. an `open` failure leaves the original tab open and names it.
+# --------------------------------------------------------------------------- #
+OLD_TAB, NEW_TAB = 4242, 9999
+PAGE_URL = "https://example.com/a"
+
+
+@pytest.fixture
+def recreate_bridge(tmp_path):
+    """An OP-AWARE stub: `emulate` answers a reset envelope carrying the stuck
+    tab's id+url, `open` answers a NEW tab id. `fail_op` makes one op fail."""
+    cfg = {"fail_op": None, "reset_url": PAGE_URL}
+
+    class _H(BaseHTTPRequestHandler):
+        bodies: list = []
+
+        def _reply(self, code, payload):
+            raw = json.dumps(payload).encode()
+            self.send_response(code)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(raw)))
+            self.end_headers()
+            self.wfile.write(raw)
+
+        def do_POST(self):
+            n = int(self.headers.get("Content-Length") or 0)
+            body = json.loads(self.rfile.read(n).decode())
+            self.bodies.append(body)
+            op = body.get("op")
+            if op == cfg["fail_op"]:
+                self._reply(200, {"ok": True, "result": {
+                    "id": "x", "ok": False, "error": f"{op}_refused_by_stub"}})
+                return
+            if op == "emulate":
+                self._reply(200, {"ok": True, "result": {
+                    "id": "e", "ok": True, "tabId": OLD_TAB,
+                    "url": cfg["reset_url"], "reset": True,
+                    "wasEmulating": {"device": "iphone-15"}}})
+                return
+            if op == "open":
+                self._reply(200, {"ok": True, "result": {
+                    "id": "o", "ok": True, "tabId": NEW_TAB,
+                    "url": body.get("url")}})
+                return
+            self._reply(200, {"ok": True, "result": {"id": "c", "ok": True}})
+
+        def do_GET(self):
+            self._reply(200, {"ok": True, "instances": []})
+
+        def log_message(self, *a):
+            pass
+
+    class _Handler(_H):
+        bodies = []
+
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    tokfile = tmp_path / "token"
+    tokfile.write_text("test-token-abc123\n")
+    env = dict(os.environ)
+    env.update({
+        "BROWSER_BRIDGE_HOST": "127.0.0.1",
+        "BROWSER_BRIDGE_PORT": str(srv.server_address[1]),
+        "BROWSER_BRIDGE_TOKEN_FILE": str(tokfile),
+        "CLAUDE_CODE_SESSION_ID": "pytest-recreate",
+        "HOME": str(tmp_path),
+    })
+
+    _cfg = cfg
+
+    class _Bridge:
+        bodies = _Handler.bodies
+        cfg = _cfg
+
+        @staticmethod
+        def run(*args):
+            return subprocess.run(["bash", str(CLI), *args], env=env,
+                                  capture_output=True, text=True, timeout=60)
+
+    try:
+        yield _Bridge
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+
+def test_recreate_requires_reset(recreate_bridge):
+    """`--recreate` is a modifier of `--reset`, never a standalone verb."""
+    cp = recreate_bridge.run("emulate", "--recreate")
+    assert cp.returncode != 0, cp.stdout
+    assert "--recreate requires --reset" in cp.stderr, cp.stderr
+    assert recreate_bridge.bodies == [], \
+        "a refused --recreate must not reach the bridge at all"
+
+
+def test_recreate_op_order_opens_before_it_closes(recreate_bridge):
+    """emulate(reset) -> release -> open(url) -> close(OLD tab), in that order.
+
+    The order IS the safety property: the replacement exists before the stuck tab
+    is closed, so no failure path leaves the operator with no tab. And `release`
+    must be there — `open` is idempotent server-side and would otherwise hand the
+    SAME stuck tab back to a session that still owns one.
+    """
+    cp = recreate_bridge.run("emulate", "--reset", "--recreate")
+    assert cp.returncode == 0, cp.stderr
+    ops = [b["op"] for b in recreate_bridge.bodies]
+    assert ops == ["emulate", "release", "open", "close"], ops
+    assert recreate_bridge.bodies[0].get("reset") is True
+    assert recreate_bridge.bodies[2].get("url") == PAGE_URL, \
+        "the replacement tab must be opened at the stuck tab's own url"
+    assert recreate_bridge.bodies[3].get("tab") == OLD_TAB, \
+        "close must target the OLD tab explicitly, never 'whatever is owned'"
+
+
+def test_recreate_reports_the_new_tab_id(recreate_bridge):
+    """The tab id CHANGES; an operator who is not told that will drive the wrong
+    tab with an explicit --tab."""
+    cp = recreate_bridge.run("emulate", "--reset", "--recreate")
+    assert cp.returncode == 0, cp.stderr
+    out = json.loads(cp.stdout)
+    assert out["recreated"] is True
+    assert out["oldTabId"] == OLD_TAB and out["newTabId"] == NEW_TAB
+    assert out["url"] == PAGE_URL and out["closedOldTab"] is True
+    assert str(NEW_TAB) in out["note"] and str(OLD_TAB) in out["note"], \
+        "the note must name BOTH ids so the change is unmissable"
+
+
+def test_plain_reset_never_swaps_tab_ids(recreate_bridge):
+    """INVARIANT GUARD (not regression coverage): `--reset` without `--recreate`
+    keeps its old behaviour — one request, no release/open/close."""
+    cp = recreate_bridge.run("emulate", "--reset")
+    assert cp.returncode == 0, cp.stderr
+    assert [b["op"] for b in recreate_bridge.bodies] == ["emulate"]
+
+
+def test_recreate_refuses_a_non_http_url_and_closes_nothing(recreate_bridge):
+    """`open` cannot meaningfully rebuild an about:/chrome:/file: tab. Refusing is
+    the safe end state: the operator keeps the tab and is told how to close it."""
+    recreate_bridge.cfg["reset_url"] = "about:blank"
+    cp = recreate_bridge.run("emulate", "--reset", "--recreate")
+    assert cp.returncode != 0, cp.stdout
+    assert "non-http(s) url" in cp.stderr, cp.stderr
+    assert f"browser --tab {OLD_TAB} close" in cp.stderr, cp.stderr
+    assert [b["op"] for b in recreate_bridge.bodies] == ["emulate"], \
+        "nothing may be released, opened or closed on the refusal path"
+
+
+def test_recreate_open_failure_leaves_the_original_tab_open(recreate_bridge):
+    """The failure that matters: if the replacement cannot be opened, the stuck
+    tab must still be there and must be NAMED."""
+    recreate_bridge.cfg["fail_op"] = "open"
+    cp = recreate_bridge.run("emulate", "--reset", "--recreate")
+    assert cp.returncode != 0, cp.stdout
+    assert "close" not in [b["op"] for b in recreate_bridge.bodies], \
+        "a tab must never be closed once the replacement has failed"
+    assert f"browser --tab {OLD_TAB} close" in cp.stderr, cp.stderr
+    assert "STILL OPEN" in cp.stderr, cp.stderr

@@ -63,28 +63,40 @@ import { homedir } from "node:os";
 //
 // `emulate` IS reachable, and DEFAULT-ON (#316). It used to be excluded here on
 // the stated grounds that it "leaves STICKY PER-TAB STATE THAT OUTLIVES THE OP …
-// until explicitly reset or the tab is replaced", so a model that emulated and
-// then crashed would hand the operator back a silently altered tab. That
-// rationale was FACTUALLY WRONG, and it was wrong about the exact property the
-// emulation design was BUILT to guarantee — read extension/protocol.js's
-// EMULATION header (the "✅ THE SAFETY PROPERTY THIS BUYS" block):
+// until explicitly reset or the tab is replaced". THAT OBSERVATION IS CORRECT —
+// what was wrong was the conclusion drawn from it, and the counter-argument this
+// comment used to carry (that overrides "die at detach" so a crashed agent could
+// not leave a distorted browser) is FALSE. Measured 2026-08-03 on extension 0.7.2
+// with a fresh-tab control:
 //
-//   CDP Emulation overrides are SESSION-SCOPED and die the instant the debugger
-//   detaches, and `withCdpSession` ALWAYS detaches in its `finally`. That is why
-//   `emulate` does not hold a long-lived session at all: it stores a normalized
-//   state in an in-memory Map and EVERY op re-applies it inside its OWN session.
-//   So "the tab is NOT emulated between ops", and a crashed agent, a killed
-//   session or an evicted MV3 service worker CANNOT leave the operator's real
-//   browser distorted — the worst case is a forgotten Map entry that dies with
-//   the worker. A held-session design would have had the sticky failure mode the
-//   old comment described here; this design was chosen to avoid exactly it.
+//   fresh tab, never emulated   innerWidth 1124   (control — the read path works)
+//   after `emulate iphone-15`   innerWidth  393
+//   after `emulate --reset`     innerWidth  393   ← NOT restored
+//   after `--reset` + re-nav    innerWidth  393   ← still NOT restored
 //
-// BLAST RADIUS is bounded server-side, not by convention: server.py's
-// OWNED_TAB_ONLY_OPS = {"emulate"} refuses the op with `not_owned_tab` on any tab
-// the calling session did not `open` itself. The browser-agent wrapper opens the
-// run's tab under the run's own SESSION_ID and closes it on every exit path
-// (`trap _cleanup_all EXIT INT TERM`), so the agent can only ever emulate the tab
-// it was given, and that tab is gone when the run ends.
+// and the reset demonstrably DID send and report its clears
+// (`Emulation.clearDeviceMetricsOverride` / `setTouchEmulationEnabled` /
+// `setUserAgentOverride`). Every other override does revert on its own — dpr,
+// maxTouchPoints, pointer:coarse, prefers-color-scheme, userAgent, timeZone. Only
+// the viewport SIZE is sticky; it survives the detach, the clear and a
+// re-navigation. THE MECHANISM IS NOT ESTABLISHED (a render-widget resize residue
+// is the leading hypothesis, not a finding). CLOSING THE TAB is the only known
+// remedy. That is #319; the operator-side workaround is
+// `browser emulate --reset --recreate`.
+//
+// SO WHY IS IT STILL DEFAULT-ON FOR THE AGENT? Because on the agent path the
+// remedy is already unconditional: THE WRAPPER OWNS ITS TAB'S WHOLE LIFECYCLE. It
+// `open`s the run's own tab under the run's own SESSION_ID and closes it on every
+// exit path (`trap _cleanup_all EXIT INT TERM`, browser-agent:373) — and closing
+// is exactly what un-sticks the viewport. Blast radius is bounded server-side, not
+// by convention: server.py's OWNED_TAB_ONLY_OPS = {"emulate"} refuses the op with
+// `not_owned_tab` on any tab the calling session did not `open` itself, so the
+// sticky residue can never reach one of the OPERATOR's tabs on this path.
+//
+// THE RESIDUAL, PLAINLY: a SIGKILL (or a host that dies) bypasses the trap, and
+// then the run's tab is orphaned STUCK AT THE EMULATED SIZE. `--reset` cannot
+// repair that tab — it has to be closed. It is the agent's own tab, not the
+// operator's, but it is a real leak and it is not fixed by any code here.
 //
 // The one real residual is the transient "an extension is debugging this browser"
 // banner from the CDP attach — which `eval`, `screenshot` (fullpage/emulated) and

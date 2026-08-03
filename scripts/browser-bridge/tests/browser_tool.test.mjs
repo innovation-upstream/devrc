@@ -855,12 +855,14 @@ test("BROWSER_AGENT_ALLOWED_OPS can explicitly re-enable upload (documented over
 // --------------------------------------------------------------------------- //
 // `emulate` via the TYPED tool (#316) — REACHABLE and DEFAULT-ON.
 //
-// It was excluded on a rationale that was factually wrong (it claimed sticky
-// per-tab state outliving the op; extension/protocol.js's EMULATION header
-// documents session-scoped overrides that die at detach as the DELIBERATE safety
-// property). What must hold now: default-reachable, forced own tab, typed
-// whitelist only, protocol.js's bounds enforced client-side with protocol.js's
-// refusal vocabulary, and MUTATING for dry-run (it attaches the debugger).
+// It was excluded because emulation leaves sticky per-tab state that outlives the
+// op. That observation is CORRECT (#319: the viewport size survives --reset and a
+// re-nav; measured 1124 -> 393 -> 393 -> 393). What was wrong was the conclusion:
+// the browser-agent wrapper owns its tab's whole lifecycle and closes it on every
+// exit path, and closing is the remedy, so the residue cannot reach the operator's
+// tabs. What must hold now: default-reachable, forced own tab, typed whitelist
+// only, protocol.js's bounds enforced client-side with protocol.js's refusal
+// vocabulary, and MUTATING for dry-run (it attaches the debugger).
 // --------------------------------------------------------------------------- //
 
 test("MIRROR PARITY: the tool's emulation bounds equal extension/protocol.js's", () => {

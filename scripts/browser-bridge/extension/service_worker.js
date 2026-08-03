@@ -1181,9 +1181,13 @@ const OPS = {
   // rather than discovering a bad timezone id three ops later. Every subsequent op
   // that attaches CDP re-applies it (see the choke point in withCdp).
   //
-  // `--reset` means "STOP RE-APPLYING". It does not need to undo anything: the
-  // overrides died at the previous op's detach, and the tab is already un-emulated
-  // right now. That is the whole safety property (protocol.js EMULATION).
+  // `--reset` means "STOP RE-APPLYING, and send the clears". It is NOT an undo,
+  // and it must not be described as one: measured 2026-08-03 (ext 0.7.2, fresh-tab
+  // control), the emulated VIEWPORT SIZE survives the reset and a re-navigation —
+  // 1124 → emulate → 393 → reset → 393 → re-nav → 393 — even though the clears
+  // are demonstrably sent and reported. The other overrides (UA, tz, dpr, touch
+  // points, prefers-color-scheme) do revert. Mechanism unestablished; closing the
+  // tab is the only known remedy. See protocol.js EMULATION and issue #319.
   //
   // OWNERSHIP is enforced SERVER-side (server.py OWNED_TAB_ONLY_OPS → the named
   // `not_owned_tab` refusal), not here, because the server is the only side that
@@ -1199,8 +1203,13 @@ const OPS = {
       return {
         tabId: tab.id, url: tab.url, reset: true,
         wasEmulating: had,
-        note: "emulation stopped. Nothing had to be undone — CDP overrides die at "
-          + "debugger detach, so the tab was already un-emulated between ops.",
+        note: "emulation stopped: this tab will no longer have overrides re-applied, "
+          + "and the CDP clears were sent. THIS IS NOT AN UNDO. The UA, timezone, "
+          + "devicePixelRatio, touch points and prefers-color-scheme do revert, but "
+          + "the emulated VIEWPORT SIZE does NOT come back — measured, and it "
+          + "survives a re-navigation too (mechanism unknown; issue #319). Closing "
+          + "the tab is the only known remedy: `browser emulate --reset --recreate` "
+          + "replaces it with a fresh tab at the same url (the tab id changes).",
       };
     }
 

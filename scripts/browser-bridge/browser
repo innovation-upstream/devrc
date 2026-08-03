@@ -83,7 +83,8 @@
 #                               `--wake` on that read instead (below).
 #                               THIS IS THE REMEDY FOR A HIDDEN/EMPTY READ — not
 #                               `activate`.
-#   browser emulate <preset> | --width N --height N [...] | --reset | --list
+#   browser emulate <preset> | --width N --height N [...] | --reset [--recreate]
+#                            | --list
 #                             — DEVICE EMULATION on the tab THIS SESSION OWNS, for
 #                               real mobile testing. Presets: iphone-15 iphone-se
 #                               pixel-8 ipad-mini ipad-mini-2019 galaxy-s24
@@ -99,10 +100,17 @@
 #                               --touch/--ua for anything not in the table.
 #                               STICKY per tab: re-applied inside every later op's
 #                               CDP session, because CDP overrides die at detach.
-#                               ✅ That is also the SAFETY property — between ops
-#                               the tab is NOT emulated, so a crashed agent can
-#                               never leave your real browser distorted.
-#                               `--reset` stops re-applying (nothing to undo).
+#                               🔴 `--reset` STOPS RE-APPLYING AND SENDS THE CDP
+#                               CLEARS, BUT DOES NOT RESTORE THE VIEWPORT SIZE
+#                               (#319, measured 2026-08-03: 1124 → emulate → 393 →
+#                               --reset → 393 → re-nav → 393). UA, timezone, dpr,
+#                               touch points and prefers-color-scheme DO revert;
+#                               only the viewport size sticks, and the mechanism is
+#                               NOT established. Closing the tab is the only known
+#                               remedy — `--reset --recreate` does that for you
+#                               (opens a fresh tab at the same url, closes the
+#                               stuck one, and REPORTS THE NEW TAB ID; plain
+#                               `--reset` never swaps tab ids).
 #                               ⚠ OWNED TABS ONLY (`browser open` first): emulating
 #                               a tab you are browsing in is refused with
 #                               `not_owned_tab`. Screenshots on an emulated tab are
@@ -1027,6 +1035,135 @@ cmd_op() {
 json_str() { python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "$1"; }
 
 # --------------------------------------------------------------------------- #
+# `emulate --reset --recreate` — the #319 workaround for the STICKY VIEWPORT.
+#
+# MEASURED 2026-08-03 (laptop, extension 0.7.2, fresh-tab control): a tab that has
+# been emulated keeps the emulated viewport SIZE after `--reset` and after a
+# re-navigation — 1124 → 393 → 393 → 393 — even though the reset demonstrably
+# sends and reports `Emulation.clearDeviceMetricsOverride` /
+# `setTouchEmulationEnabled` / `setUserAgentOverride`. Every other override (dpr,
+# maxTouchPoints, pointer, prefers-color-scheme, UA, timezone) DOES revert.
+# The mechanism is NOT established. Closing the tab is the only known remedy.
+#
+# So this is a REPLACEMENT, not a repair: reset → note the url → drop ownership →
+# `open` a fresh tab at that url (now owned by this same session) → close the
+# stuck one. THE TAB ID CHANGES, which is why it is printed loudly.
+#
+# ORDER IS THE SAFETY PROPERTY. The new tab is opened BEFORE the old one is
+# closed, so every failure path leaves the operator with a tab. Closing first
+# would mean an `open` failure loses the page entirely.
+#
+# Why `release` is needed at all: `open` is IDEMPOTENT server-side — a session
+# that already owns a live tab gets that SAME tab back as `reuseTabId` (so a
+# double `open` cannot orphan tabs). That is exactly wrong here, since the tab we
+# own is the one we are trying to get rid of. `release` drops the ownership
+# mapping WITHOUT touching the real tab, which is the documented way to make the
+# next `open` create a genuinely new one.
+_emulate_reset_recreate() {
+  local extra="$1" reset_resp parsed old_tab old_url open_resp new_tab saved_tab
+
+  reset_resp="$(cmd_op emulate "$extra")" || {
+    echo "browser: emulate --reset failed — NOTHING was recreated and no tab was closed." >&2
+    exit 1
+  }
+
+  parsed="$(printf '%s' "$reset_resp" | python3 -c '
+import json, sys
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    sys.exit(2)
+r = d.get("result") or {}
+tid, url = r.get("tabId"), r.get("url")
+if not isinstance(tid, int) or isinstance(tid, bool) or not isinstance(url, str) or not url:
+    sys.exit(3)
+print(tid)
+print(url)
+')" || {
+    echo "$reset_resp" >&2
+    die "emulate --recreate: the reset envelope carried no usable tabId+url, so the tab was NOT recreated. The reset itself DID apply; your (still stuck) tab is untouched."
+  }
+  old_tab="${parsed%%$'\n'*}"; old_url="${parsed#*$'\n'}"
+
+  # Only http(s) can be meaningfully reopened. `about:`/`chrome:`/`file:` either
+  # cannot be re-created by `open` or would silently hand back something other
+  # than what the operator was looking at — refuse and say what to do by hand.
+  case "$old_url" in
+    http://*|https://*) : ;;
+    *)
+      die "emulate --recreate: tab ${old_tab} is at a non-http(s) url (${old_url}); it was NOT recreated and NOT closed. The reset applied. Close it yourself (browser --tab ${old_tab} close) — closing is the only known remedy for the stuck viewport."
+      ;;
+  esac
+
+  cmd_op release >/dev/null || {
+    die "emulate --recreate: could not release ownership of tab ${old_tab}, so no replacement was opened and nothing was closed. The reset applied; the tab is still stuck at the emulated size."
+  }
+
+  # From here the session owns nothing, so `open` builds a genuinely new tab.
+  saved_tab="$TAB"; TAB=""
+  open_resp="$(cmd_op open "\"url\":$(json_str "$old_url")")" || {
+    TAB="$saved_tab"
+    echo "browser: emulate --recreate: the replacement tab could NOT be opened." >&2
+    echo "browser:   Your original tab ${old_tab} is STILL OPEN (and still stuck at the" >&2
+    echo "browser:   emulated viewport). This session no longer owns it — close it with:" >&2
+    echo "browser:     browser --tab ${old_tab} close" >&2
+    exit 1
+  }
+  new_tab="$(printf '%s' "$open_resp" | python3 -c '
+import json, sys
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    sys.exit(2)
+t = (d.get("result") or {}).get("tabId")
+if not isinstance(t, int) or isinstance(t, bool):
+    sys.exit(3)
+print(t)
+')" || {
+    TAB="$saved_tab"
+    echo "$open_resp" >&2
+    die "emulate --recreate: a replacement tab was opened but the bridge did not report its tabId, so the old tab ${old_tab} was NOT closed (closing blind could have closed the wrong one). Close it with: browser --tab ${old_tab} close"
+  }
+
+  # Both tabs exist right now. Close the stuck one LAST, and never treat a failure
+  # here as fatal — the operator already has a working tab; they just also have a
+  # stray one, and saying so is more useful than a non-zero exit.
+  local close_ok="true" close_err=""
+  TAB="$old_tab"
+  if ! cmd_op close >/dev/null 2>/dev/null; then
+    close_ok="false"
+    close_err="the stuck tab ${old_tab} could NOT be closed; close it by hand: browser --tab ${old_tab} close"
+  fi
+  TAB="$saved_tab"
+
+  RECREATE_OLD="$old_tab" RECREATE_NEW="$new_tab" RECREATE_URL="$old_url" \
+  RECREATE_CLOSED="$close_ok" RECREATE_CLOSE_ERR="$close_err" \
+  python3 -c '
+import json, os, sys
+reset = json.load(sys.stdin)
+out = {
+    "recreated": True,
+    "reset": (reset.get("result") or {}),
+    "oldTabId": int(os.environ["RECREATE_OLD"]),
+    "newTabId": int(os.environ["RECREATE_NEW"]),
+    "url": os.environ["RECREATE_URL"],
+    "closedOldTab": os.environ["RECREATE_CLOSED"] == "true",
+    "note": ("THE TAB ID CHANGED: %s -> %s. `--reset` alone does NOT restore the "
+             "viewport size (measured); replacing the tab is the only known remedy, "
+             "so this opened a fresh tab at the same url and closed the stuck one. "
+             "Later ops in this session route to %s."
+             % (os.environ["RECREATE_OLD"], os.environ["RECREATE_NEW"],
+                os.environ["RECREATE_NEW"])),
+}
+err = os.environ.get("RECREATE_CLOSE_ERR") or ""
+if err:
+    out["closeError"] = err
+    sys.stderr.write("browser: " + err + "\n")
+json.dump(out, sys.stdout)
+' <<< "$reset_resp" | pretty
+}
+
+# --------------------------------------------------------------------------- #
 # "At most one positional" — ONE RULE, ONE PLACE.
 #
 # Six subcommands (js/eval, text, screenshot, type, key, emulate) each accept
@@ -1182,10 +1319,30 @@ case "$sub" in
     #
     # STICKY PER TAB: the extension stores the state and re-applies it inside every
     # subsequent op's CDP session. It has to — CDP emulation overrides die when the
-    # debugger detaches, and the bridge always detaches. The upside of that is the
-    # reason the design was chosen: BETWEEN ops the tab is NOT emulated, so a
-    # crashed agent or a dead service worker cannot leave your real browser
-    # distorted. `--reset` just stops the re-applying.
+    # debugger detaches, and the bridge always detaches. `--reset` stops the
+    # re-applying and sends the CDP clears.
+    #
+    # 🔴 `--reset` DOES NOT RESTORE THE VIEWPORT (#319, measured 2026-08-03 on
+    # extension 0.7.2, laptop, with a fresh-tab control):
+    #
+    #   fresh tab, never emulated   innerWidth 1124   (control — the read path works)
+    #   after `emulate iphone-15`   innerWidth  393
+    #   after `emulate --reset`     innerWidth  393   ← NOT restored
+    #   after `--reset` + re-nav    innerWidth  393   ← still NOT restored
+    #
+    # The reset DID send and report the clears
+    # (`Emulation.clearDeviceMetricsOverride`, `setTouchEmulationEnabled`,
+    # `setUserAgentOverride`). Every OTHER override does revert on its own —
+    # devicePixelRatio, maxTouchPoints, pointer:coarse, prefers-color-scheme,
+    # userAgent, timeZone. Only the viewport SIZE is sticky, it survives the
+    # detach, the clear AND a re-navigation. The MECHANISM IS NOT ESTABLISHED (the
+    # leading hypothesis is a render-widget resize residue; do not repeat it as
+    # fact). Closing the tab is the only known remedy.
+    #
+    # `--reset --recreate` is that remedy, automated: it resets, then replaces the
+    # stuck tab with a fresh one at the SAME url owned by the same session, and
+    # closes the stuck one. THE TAB ID CHANGES — it is reported. Plain `--reset`
+    # never swaps tab ids.
     #
     # OWNED TABS ONLY. `browser open` first. Emulating a tab you are browsing in is
     # refused server-side with `not_owned_tab` — an agent must not be able to
@@ -1196,12 +1353,13 @@ case "$sub" in
     # lists are identical, so this cannot silently drift — see
     # tests/emulation.test.mjs "CLI preset list matches PRESET_NAMES".
     # PRESET_NAMES: iphone-15 iphone-se pixel-8 ipad-mini ipad-mini-2019 galaxy-s24
-    POS=""; POS_SEEN=0; emu_device=""; emu_reset=0; emu_list=0
+    POS=""; POS_SEEN=0; emu_device=""; emu_reset=0; emu_list=0; emu_recreate=0
     emu_width=""; emu_height=""; emu_dsf=""; emu_mobile=""; emu_touch=""
     emu_mtp=""; emu_ua=""; emu_orient=""; emu_cs=""; emu_geo=""; emu_tz=""
     while [ $# -gt 0 ]; do
       case "$1" in
         --reset) emu_reset=1; shift ;;
+        --recreate) emu_recreate=1; shift ;;
         --list) emu_list=1; shift ;;
         --width) shift; [ $# -ge 1 ] || die "--width needs a value"; emu_width="$1"; shift ;;
         --width=*) emu_width="${1#--width=}"; shift ;;
@@ -1226,11 +1384,17 @@ case "$sub" in
         --tz) shift; [ $# -ge 1 ] || die "--tz needs an IANA zone (e.g. Europe/London)"; emu_tz="$1"; shift ;;
         --tz=*) emu_tz="${1#--tz=}"; shift ;;
         --) shift; pos_rest "emulate takes at most one preset name" "$@"; break ;;
-        -*) die "browser emulate: unknown flag: $1 (use '--' before a preset name starting with '-'; try: <preset> | --width N --height N [--dsf F] [--mobile] [--touch] [--ua S] [--orientation portrait|landscape] [--color-scheme light|dark] [--geo LAT,LON] [--tz ZONE] | --reset | --list)" ;;
+        -*) die "browser emulate: unknown flag: $1 (use '--' before a preset name starting with '-'; try: <preset> | --width N --height N [--dsf F] [--mobile] [--touch] [--ua S] [--orientation portrait|landscape] [--color-scheme light|dark] [--geo LAT,LON] [--tz ZONE] | --reset [--recreate] | --list)" ;;
         *) pos_add "emulate takes at most one preset name" "$1"; shift ;;
       esac
     done
     emu_device="$POS"
+    # `--recreate` is a MODIFIER of `--reset`, never a standalone verb: recreating a
+    # tab that is still re-applying an emulation would just hand back a fresh tab
+    # that the next op re-emulates. Refuse early and name the working form.
+    if [ "$emu_recreate" -eq 1 ] && [ "$emu_reset" -ne 1 ]; then
+      die "browser emulate: --recreate requires --reset (usage: browser emulate --reset --recreate)"
+    fi
     if [ "$emu_list" -eq 1 ]; then
       printf '%s\n' "device presets (metrics: scripts/browser-bridge/reference/emulation.md):"
       printf '  %s\n' iphone-15 iphone-se pixel-8 ipad-mini ipad-mini-2019 galaxy-s24
@@ -1297,12 +1461,16 @@ else:
 
 if not fields:
     sys.stderr.write("usage: browser emulate <preset> | --width N --height N [...] "
-                     "| --reset | --list\n")
+                     "| --reset [--recreate] | --list\n")
     sys.exit(1)
 # Emit WITHOUT the enclosing braces — cmd_op splices this into the command body.
 sys.stdout.write(json.dumps(fields)[1:-1])
 ')" || exit 1
-    cmd_op emulate "$extra" | pretty
+    if [ "$emu_recreate" -eq 1 ]; then
+      _emulate_reset_recreate "$extra"
+    else
+      cmd_op emulate "$extra" | pretty
+    fi
     ;;
   activate)
     # browser [--tab <id>] activate [--wait MS | --no-wait]
