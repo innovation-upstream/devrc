@@ -30,7 +30,7 @@ X — your call"). Leave the setup a little more modern than you found it; never
 | Bar definition (blocks, theme, icons, thresholds) | `nix/graphical.nix` (`programs.i3status-rust.bars.top`) |
 | i3 WM config (binds, bar buttons) | `nix/i3/config.nix` → `~/.config/i3/config` |
 | Decoupled poller (workbench systemd-user timer) | `scripts/bar-status-poll` |
-| Instant block scripts (read cache, never network) | `scripts/i3status-{clawgate,mail,alerts,civitai,dnd,media,airvpn}` |
+| Instant block scripts (read cache, never network) | `scripts/i3status-{clawgate,mail,alerts,civitai,dnd,media,airvpn,telemetry}` |
 | Poller output (per-source JSON) | `~/.cache/bar-status/*.json` (0600) |
 | Generated bar TOML + symlinked scripts | `~/.config/i3status-rust/` |
 | **RETIRED — never edit** | `/etc/nixos/{i3config,i3blocks}.nix`, `/etc/nixos/i3blocks-scripts` (except `airvpn-sudo` + `airvpn-updown`, which MUST stay there for the NOPASSWD sudoers rule + the tunnel PostUp/PostDown; the old Mullvad `vpn-sudo` is dead) |
@@ -61,6 +61,7 @@ X — your call"). Leave the setup a little more modern than you found it; never
 | clawgate | `i3status-clawgate` | 11 | 0 (0→>0) | operator-pending Tasks |
 | DND | `i3status-dnd` | 15 | — | dunst paused indicator; `$mod+Shift+n` toggles |
 | media | `i3status-media` | 16 | n/a | qBit-POD AirVPN pill (net_down), **state-driven**: neutral=connected, **RED**=firewalled (tunnel/port-fwd broken), soft-yellow=stale. poller `parse_media`/`fetch_media` read creds from `~/.config/bar/media.env` (0600) — the same `media.env` also feeds `deep-search`, a media release search/grab CLI on PATH (workbench) after `home-manager switch`. **left → `media-menu`**; **right → qBit WebUI** |
+| telemetry deadman | `i3status-telemetry` | 17 | n/a | `tlm N` = N activity-telemetry (host, source) pairs have STOPPED emitting into ClickHouse; `tlm ?` = the check itself has been unable to evaluate for >30 min. 🔴 **The ONE block that does NOT render an unreachable backend as empty** — its reassuring answer is a zero, so "cannot tell" must not look like "all healthy". Measures BOTH hosts from the workbench poller (it reads the shared table). Logic + the per-source budget table: `scripts/collector/deadman.py` (run it bare for the table; left-click floats it). See the `activity` skill. |
 | airvpn (host) | `i3status-airvpn` | 10 | n/a | **HOST** AirVPN WireGuard pill (net_vpn), **state-driven**, default-OFF. **left → `airvpn-menu`**; **right → `airvpn-detail` float**. 🔴 Full detail + the killswitch re-test protocol: **`airvpn.md`** |
 
 Bars differ by host (`isLaptop` in `graphical.nix`): laptop gets `batteryBlock` and **omits** GPU

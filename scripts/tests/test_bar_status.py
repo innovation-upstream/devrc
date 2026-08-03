@@ -41,6 +41,13 @@ mail_block = _load("i3status-mail", "i3status_mail")
 alerts_block = _load("i3status-alerts", "i3status_alerts")
 civitai_block = _load("i3status-civitai", "i3status_civitai")
 media_block = _load("i3status-media", "i3status_media")
+telemetry_block = _load("i3status-telemetry", "i3status_telemetry")
+
+# The deadman states the telemetry pill treats as "cannot tell". Pinned here as
+# a LITERAL rather than imported from deadman.py: a test expectation derived
+# from the implementation it tests proves nothing (RULES.md).
+UNKNOWN_STATES = frozenset(
+    {"no-data", "unreachable", "query-failed", "not-configured"})
 
 
 # --------------------------------------------------------------------------- #
@@ -776,3 +783,169 @@ def test_fire_toast_dispatches_with_action(monkeypatch):
     joined = " ".join(argv)
     assert "-A open,Open" in joined                            # clickable action
     assert "--setenv=DISPLAY=:0" in argv
+
+
+# --------------------------------------------------------------------------- #
+# poller parse + block: telemetry deadman
+#
+# 🔴 This is the ONE block whose reassuring answer is a ZERO, so its tests are
+# written as PAIRS: every "renders empty" assertion has a sibling that makes the
+# same code path produce a visible pill. A renderer wired to nothing would pass
+# the first half of each pair and fail the second.
+# --------------------------------------------------------------------------- #
+def _verdict(state="ok", count=0, detail="", **kw):
+    v = {"state": state, "count": count, "detail": detail,
+         "evaluated": 17, "rows": 11103, "newest_event_age_minutes": 2}
+    v.update(kw)
+    return v
+
+
+def test_telemetry_uses_a_free_signal():
+    """INVARIANT GUARD: 17 must not collide with any existing block's signal, or
+    `pkill -RTMIN+17` would refresh the wrong pill."""
+    assert poll.SIGNALS["telemetry"] == 17
+    others = [v for k, v in poll.SIGNALS.items() if k != "telemetry"]
+    assert 17 not in others
+    assert len(set(poll.SIGNALS.values())) == len(poll.SIGNALS)
+
+
+def test_parse_telemetry_clean_is_idle_and_invisible():
+    out = poll.parse_telemetry(_verdict(count=0, detail="17 source(s) fresh"),
+                               now=1000)
+    assert out["count"] == 0 and out["state"] == "Idle"
+    assert out["unknown"] is False
+    assert telemetry_block.render(out) == {"text": "", "state": "Idle"}
+
+
+def test_parse_telemetry_dead_source_is_critical_and_visible():
+    """POSITIVE CONTROL for the pair above — same path, non-zero count."""
+    out = poll.parse_telemetry(
+        _verdict(count=2, detail="workbench/opencode silent 19.0h active"),
+        now=1000)
+    assert out["count"] == 2 and out["state"] == "Critical"
+    blk = telemetry_block.render(out)
+    assert blk["text"] == "tlm 2"
+    assert blk["state"] == "Critical"
+
+
+@pytest.mark.parametrize("state", sorted(UNKNOWN_STATES))
+def test_parse_telemetry_unknown_is_not_reported_as_healthy(state):
+    """Each non-evaluable state must be carried through as UNKNOWN, never
+    collapsed into the clean/Idle branch."""
+    out = poll.parse_telemetry(_verdict(state=state, detail="nope"), now=1000,
+                               unknown_states=UNKNOWN_STATES)
+    assert out["telemetry_state"] == state
+    assert out["unknown_since"] == 1000
+    assert "UNKNOWN" in out["detail"]
+
+
+def test_parse_telemetry_unknown_is_grace_gated_then_visible():
+    """The pair that proves the grace timer is REACHABLE, not just present."""
+    first = poll.parse_telemetry(_verdict(state="unreachable"), now=1000,
+                                 grace=1800, unknown_states=UNKNOWN_STATES)
+    # A single failed poll must NOT flicker the bar.
+    assert first["unknown"] is False
+    assert telemetry_block.render(first) == {"text": "", "state": "Idle"}
+    # ...but a persistent one must become visible, carrying `unknown_since`
+    # forward across the oneshot poller's restarts.
+    later = poll.parse_telemetry(_verdict(state="unreachable"), prev=first,
+                                 now=1000 + 1800, grace=1800,
+                                 unknown_states=UNKNOWN_STATES)
+    assert later["unknown_since"] == 1000
+    assert later["unknown"] is True
+    assert telemetry_block.render(later) == {
+        "text": "tlm ?", "short_text": "tlm ?", "state": "Warning"}
+
+
+def test_parse_telemetry_unknown_clock_resets_after_recovery():
+    bad = poll.parse_telemetry(_verdict(state="unreachable"), now=1000,
+                               unknown_states=UNKNOWN_STATES)
+    good = poll.parse_telemetry(_verdict(count=0), prev=bad, now=2000,
+                                unknown_states=UNKNOWN_STATES)
+    assert good["unknown_since"] is None
+    bad2 = poll.parse_telemetry(_verdict(state="unreachable"), prev=good,
+                                now=3000, unknown_states=UNKNOWN_STATES)
+    assert bad2["unknown_since"] == 3000      # fresh clock, not the old one
+
+
+def test_parse_telemetry_junk_verdict_is_unknown_not_healthy():
+    """A garbage verdict must NOT read as 'all fresh'."""
+    for junk in (None, "x", 3, []):
+        out = poll.parse_telemetry(junk, now=1000, unknown_states=UNKNOWN_STATES)
+        assert out["telemetry_state"] == "query-failed"
+        assert out["unknown_since"] == 1000
+
+
+def test_telemetry_block_hides_on_missing_and_poller_stale():
+    assert telemetry_block.render(None) == {"text": "", "state": "Idle"}
+    assert telemetry_block.render({"state": "stale", "count": 0}) == {
+        "text": "", "state": "Idle"}
+    assert telemetry_block.render({"error": "boom", "count": 5}) == {
+        "text": "", "state": "Idle"}
+    assert telemetry_block.render({"count": "NaN"}) == {"text": "", "state": "Idle"}
+
+
+def test_telemetry_block_main_emits_one_json_line(tmp_path, monkeypatch):
+    monkeypatch.setenv("BAR_STATUS_DIR", str(tmp_path))
+    (tmp_path / "telemetry.json").write_text(json.dumps(
+        {"count": 3, "state": "Critical", "unknown": False}))
+    out = subprocess.run([sys.executable, str(SCRIPTS / "i3status-telemetry")],
+                         capture_output=True, text=True,
+                         env={**os.environ, "BAR_STATUS_DIR": str(tmp_path)})
+    assert out.returncode == 0
+    blk = json.loads(out.stdout.strip())
+    assert blk["text"] == "tlm 3" and blk["state"] == "Critical"
+
+
+def test_mock_run_writes_telemetry(tmp_path, monkeypatch):
+    """The whole write+signal path, driven from a fixture verdict."""
+    monkeypatch.setenv("BAR_STATUS_DIR", str(tmp_path))
+    monkeypatch.setattr(poll, "signal_bar", lambda name: None)
+    f = tmp_path / "verdict.json"
+    f.write_text(json.dumps(_verdict(count=1, detail="laptop/keys silent 9h")))
+    assert poll.main(["--mock-telemetry", str(f)]) == 0
+    written = json.loads((tmp_path / "telemetry.json").read_text())
+    assert written["count"] == 1
+    assert written["source"] == "telemetry"
+    assert telemetry_block.render(written)["text"] == "tlm 1"
+
+
+def test_mock_run_telemetry_clean_writes_zero(tmp_path, monkeypatch):
+    """The zero half of the pair, through the same write path."""
+    monkeypatch.setenv("BAR_STATUS_DIR", str(tmp_path))
+    monkeypatch.setattr(poll, "signal_bar", lambda name: None)
+    f = tmp_path / "verdict.json"
+    f.write_text(json.dumps(_verdict(count=0)))
+    assert poll.main(["--mock-telemetry", str(f)]) == 0
+    written = json.loads((tmp_path / "telemetry.json").read_text())
+    assert written["count"] == 0
+    assert telemetry_block.render(written)["text"] == ""
+
+
+def test_telemetry_toast_spec_fires_from_zero():
+    spec = poll._toast_specs()["telemetry"]
+    assert spec["threshold"] == 0
+    assert spec["urgency"] == "critical"
+    fired = []
+    poll.evaluate_edge_toast(
+        "telemetry", _verdict(count=1, detail="d"), spec,
+        fire=lambda *a, **kw: fired.append(a), read=lambda n: False,
+        write=lambda n, v: None)
+    assert len(fired) == 1
+
+
+def test_telemetry_fetch_stale_when_deadman_module_missing(monkeypatch):
+    """FAIL-SAFE: a broken deadman import must become a poller `stale` marker
+    (block renders empty, unit's OnFailure covers it) — never a crash."""
+    monkeypatch.setattr(poll, "DEVRC_DIR", "/no/such/repo")
+    out = poll.source("telemetry", poll.fetch_telemetry)
+    assert out["state"] == "stale" and out["count"] == 0
+
+
+def test_deadman_unknown_states_fallback_is_not_empty(monkeypatch):
+    """If the deadman module cannot be loaded the fallback set must still be
+    non-empty — an empty set would make EVERY unknown verdict read as healthy,
+    which is precisely the failure this check exists to prevent."""
+    monkeypatch.setattr(poll, "DEVRC_DIR", "/no/such/repo")
+    assert poll._deadman_unknown_states() == UNKNOWN_STATES
+

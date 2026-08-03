@@ -26,6 +26,15 @@ Sources
              InfoInhibitor) from Alertmanager /api/v2/alerts, reached through a
              short bounded `kubectl port-forward`. homelab is REQUIRED; the
              production cluster is best-effort (added only if reachable).
+  telemetry: DEADMAN over the activity-telemetry pipeline — which (host, source)
+             pairs have STOPPED emitting into ClickHouse `activity.events`.
+             scripts/collector/deadman.py does the measuring (read its docstring
+             for what "dead" means for a source that only fires on demand); this
+             poller only maps the verdict onto a pill. UNLIKE every other source
+             here, an unreachable backend does NOT render as an empty block: a
+             check whose reassuring answer is a zero must never let "cannot tell"
+             look like "all healthy", so a persistent unknown gets a visible
+             `tlm ?` pill (grace-gated, see TELEMETRY_UNKNOWN_GRACE).
   civitai  : the SAME firing-alert filter, but against the civitai DataPacket
              prod cluster (a CLIENT prod cluster) via its own kubeconfig
              (CIVITAI_KUBECONFIG). Deliberately a SEPARATE block/count from the
@@ -65,7 +74,14 @@ IGNORE_ALERTNAMES = frozenset({"Watchdog", "InfoInhibitor"})
 # Real-time signal offset per source: the block's `signal = N` in graphical.nix
 # must match, so `pkill -RTMIN+N i3status-rs` refreshes exactly that block.
 SIGNALS = {"clawgate": 11, "mail": 12, "alerts": 13, "civitai": 14, "media": 16,
-           "airvpn": 10}
+           "airvpn": 10, "telemetry": 17}
+
+# telemetry deadman: how long the check must be CONTINUOUSLY unable to evaluate
+# before the bar shows the visible `tlm ?` pill. A ClickHouse restart or a nebula
+# blip between two 45s polls must not flicker the bar, but a persistent "cannot
+# tell" must NOT keep reading as "all healthy" — that is the entire point of the
+# check. 30 minutes = ~40 consecutive failed polls.
+TELEMETRY_UNKNOWN_GRACE = 1800
 
 # media (qBittorrent behind the gluetun AirVPN sidecar). The pill's ONLY content
 # is the qBit tunnel status + ↓/↑ speed; secondary metrics live behind the block's
@@ -314,6 +330,66 @@ def parse_airvpn(probe) -> dict:
     }
 
 
+def parse_telemetry(verdict, prev=None, now=None,
+                    grace: int = TELEMETRY_UNKNOWN_GRACE,
+                    unknown_states=None) -> dict:
+    """Map a deadman verdict -> bar status dict. PURE (given `now`).
+
+    Three outcomes, and the third is the one that matters:
+      state=ok, count=0   -> Idle, invisible pill.        "measured, all fresh"
+      state=ok, count>0   -> Critical `tlm N`.            "N sources are dead"
+      unknown state       -> `unknown` once it has PERSISTED past `grace`,
+                             rendering a visible `tlm ?`. "cannot tell"
+
+    "Cannot tell" must be distinguishable from "all healthy" — a check whose
+    reassuring answer is a zero is exactly the shape that can be wired to
+    nothing and report green forever, which is the bug class this check exists
+    to catch (PR #299 drew the same not-configured/unreachable/query-failed/ok
+    distinction in insights.py; this follows it).
+
+    `unknown_since` is carried forward from the PREVIOUS cache payload so the
+    grace timer survives the poller being a systemd oneshot with no memory
+    between runs — the same reason the edge-toast latch is a sidecar file.
+    """
+    if unknown_states is None:
+        unknown_states = _deadman_unknown_states()
+    now = int(time.time()) if now is None else int(now)
+    v = verdict if isinstance(verdict, dict) else {}
+    tstate = v.get("state") or "query-failed"
+    detail = str(v.get("detail") or "")
+    out = {
+        "telemetry_state": tstate,
+        "evaluated": int(v.get("evaluated") or 0),
+        "rows": int(v.get("rows") or 0),
+        "newest_event_age_minutes": v.get("newest_event_age_minutes"),
+    }
+    if tstate in unknown_states:
+        prev_since = None
+        if isinstance(prev, dict) and prev.get("telemetry_state") in unknown_states:
+            try:
+                prev_since = int(prev.get("unknown_since"))
+            except (TypeError, ValueError):
+                prev_since = None
+        since = prev_since if prev_since is not None else now
+        out.update({
+            "count": 0,
+            "state": "Warning",
+            "unknown": (now - since) >= grace,
+            "unknown_since": since,
+            "detail": "telemetry health UNKNOWN (%s): %s" % (tstate, detail),
+        })
+        return out
+    count = int(v.get("count") or 0)
+    out.update({
+        "count": count,
+        "state": "Critical" if count else "Idle",
+        "unknown": False,
+        "unknown_since": None,
+        "detail": detail or ("%d dead source(s)" % count),
+    })
+    return out
+
+
 def stale(reason: str, err=None) -> dict:
     """A neutral 'source unavailable' marker; the block renders it as empty."""
     d = {"count": 0, "state": "stale", "detail": reason}
@@ -456,6 +532,14 @@ def _toast_specs() -> dict:
                      "action": "xdg-open http://192.168.50.250:30302"},
         "mail": {"threshold": 0, "urgency": "low",
                  "summary": "New mail action", "action": None},
+        # Rare by construction (measured 2026-08-03: 0 dead across 17 live
+        # host/source pairs), and the thing it announces is invisible by
+        # definition — a telemetry source that stopped emitting. Critical
+        # urgency because the alternative is finding out weeks later that every
+        # analysis since has rested on stale data.
+        "telemetry": {"threshold": 0, "urgency": "critical",
+                      "summary": "🔴 Telemetry source DEAD",
+                      "action": "xdg-open http://grafana.homelab.lan"},
     }
 
 
@@ -552,6 +636,50 @@ def _load_maildb():
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod
+
+
+def _load_deadman():
+    """Load scripts/collector/deadman.py by explicit path (same idiom as
+    _load_maildb — never via sys.path, so nothing in scripts/collector/ can
+    shadow a name this poller relies on)."""
+    import importlib.util
+    path = os.path.join(DEVRC_DIR, "scripts", "collector", "deadman.py")
+    spec = importlib.util.spec_from_file_location("_bar_deadman", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _deadman_unknown_states():
+    """The deadman module's UNKNOWN_STATES, with a fallback so this poller does
+    not silently treat an unknown verdict as healthy if the import breaks."""
+    try:
+        return _load_deadman().UNKNOWN_STATES
+    except Exception:
+        return frozenset({"no-data", "unreachable", "query-failed",
+                          "not-configured"})
+
+
+def read_prev_status(name: str):
+    """The previous poll's cache payload for `name`, or None. Read-only."""
+    try:
+        with open(os.path.join(cache_dir(), name + ".json")) as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+
+def fetch_telemetry() -> dict:
+    """Deadman check over activity.events: which (host, source) pairs stopped?
+
+    Runs on the WORKBENCH only (this whole poller does), but covers BOTH hosts:
+    the check reads the shared ClickHouse table, so one runner sees the fleet.
+    Credentials come from the collector's own 0600 env file — the same ones the
+    collector is already proven to work with, and nothing new in the nix store.
+    """
+    mod = _load_deadman()
+    prev = read_prev_status("telemetry")
+    return parse_telemetry(mod.check(), prev=prev)
 
 
 def fetch_mail() -> dict:
@@ -896,11 +1024,15 @@ def main(argv=None) -> int:
                     help="parse this JSON file as the host-AirVPN probe payload")
     ap.add_argument("--mock-mail", metavar="N", type=int,
                     help="use N as the open-mail_actions count")
+    ap.add_argument("--mock-telemetry", metavar="FILE",
+                    help="parse this JSON file as a deadman verdict (see "
+                         "scripts/collector/deadman.py --json)")
     args = ap.parse_args(argv)
 
     mocking = any(x is not None for x in
                   (args.mock_clawgate, args.mock_alerts, args.mock_civitai,
-                   args.mock_media, args.mock_airvpn, args.mock_mail))
+                   args.mock_media, args.mock_airvpn, args.mock_mail,
+                   args.mock_telemetry))
 
     if mocking:
         if args.mock_clawgate is not None:
@@ -920,6 +1052,11 @@ def main(argv=None) -> int:
         if args.mock_airvpn is not None:
             with open(args.mock_airvpn) as f:
                 run_source("airvpn", lambda: parse_airvpn(json.load(f)))
+        if args.mock_telemetry is not None:
+            with open(args.mock_telemetry) as f:
+                verdict = json.load(f)
+            prev = read_prev_status("telemetry")
+            run_source("telemetry", lambda: parse_telemetry(verdict, prev=prev))
         return 0
 
     # Live poll: each source is independent + fail-safe. After writing each
@@ -929,9 +1066,17 @@ def main(argv=None) -> int:
     specs = _toast_specs()
     for name, fn in (("clawgate", fetch_clawgate), ("mail", fetch_mail),
                      ("alerts", fetch_alerts), ("civitai", fetch_civitai),
-                     ("media", fetch_media), ("airvpn", fetch_airvpn)):
+                     ("media", fetch_media), ("airvpn", fetch_airvpn),
+                     ("telemetry", fetch_telemetry)):
         payload = run_source(name, fn)
         spec = specs.get(name)   # media has no edge-toast spec (alarm is in-pill)
+        # An UNKNOWN telemetry verdict carries count=0, which would clear the
+        # rising-edge latch and re-toast a still-dead source when ClickHouse came
+        # back. Skip it, exactly as evaluate_edge_toast already skips stale
+        # payloads for the other sources: a blackout must never move the latch.
+        if name == "telemetry" and isinstance(payload, dict) \
+                and payload.get("unknown_since") is not None:
+            spec = None
         if spec is not None:
             with contextlib.suppress(Exception):
                 evaluate_edge_toast(name, payload, spec)
