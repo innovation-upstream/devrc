@@ -7,10 +7,16 @@ by nix/home.nix). Read guard_core.py's docstring first: it carries the DESIGN
 NOTE about why message-text stripping is forbidden, and the reasoning behind the
 argv parser.
 
-🔴 THIS ADAPTER RUNS THE "claude-code" POLICY, WHICH IS FROZEN AT THE ORIGINAL
-SIX CHECKS:
+🔴 THIS ADAPTER RUNS THE "claude-code" POLICY. It was FROZEN at the original six
+raw-text checks until 2026-08-02, when three argv checks were added by explicit
+operator decision. The list today:
   - git add -A / --all / .   -> stage specific paths instead (RULES: never blind-stage)
   - git reset --hard         -> use git restore/checkout, NOT stash (RULES: never reset --hard)
+  - git -C <p> reset --hard  -> the same, through git's global-option hop (2026-08-02)
+  - git stash                -> the stash stack is repo-GLOBAL (2026-08-02; RULES 🔴,
+    incident 2026-07-25). `git stash list`/`show` are reads and stay allowed.
+  - git clean -f             -> deletes untracked files, which here are routinely
+    real work (2026-08-02; RULES 🔴). `git clean -nd` stays allowed.
   - large heredoc -> file    -> use the Write tool (token waste; audit-driven)
   - cd <path> && git ...     -> use git -C <path> (audit: #1 command shape, 1482x)
   - private key in a command -> reference the key file instead (never inline)
@@ -18,12 +24,13 @@ SIX CHECKS:
     committing/posting (insights: leaked ingress IP into a public repo once)
 
 This hook fires on EVERY Bash call in EVERY Claude Code session on both hosts,
-so adding a check here changes the operator's primary tool. The extra
-irreversible-action checks added for opencode (talosctl reset, mkfs, dd to a
-block device, rm -r of /|$HOME|cwd, git stash, git clean -f) live in the
-"opencode" policy and are deliberately NOT enabled here. Switching this adapter
-to the "opencode" policy is a one-word change — and a decision for the operator
-to make explicitly, not a side effect of hardening a different tool.
+so adding a check here changes the operator's primary tool. FOUR
+irreversible-action families remain opencode-ONLY and are deliberately NOT
+enabled here: talosctl reset, mkfs, dd to a block device, and rm -r of
+/|$HOME|cwd|a top-level system dir. `rm -rf` in particular risks false positives
+on legitimate build-directory cleanup. Switching this adapter to the "opencode"
+policy is a one-word change — and a decision for the operator to make
+explicitly, not a side effect of hardening a different tool.
 
 I/O contract (unchanged): reads PreToolUse JSON on stdin (`tool_name`,
 `tool_input.command`), prints `hookSpecificOutput.permissionDecision = "deny"`

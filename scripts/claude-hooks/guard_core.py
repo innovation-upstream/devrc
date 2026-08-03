@@ -34,7 +34,11 @@ TWO CALLERS, TWO POLICIES
                   2026-08-02, when `check_git_reset_hard_argv` was added as
                   exactly such an approved decision (the raw-text reset check
                   was blind to `git -C <path> reset --hard`, the spelling
-                  RULES.md mandates). Pinned by name in test_guard_core.py.
+                  RULES.md mandates), followed the same day by
+                  `check_git_stash` + `check_git_clean_force` — both 🔴 in
+                  RULES.md, both measured ALLOW against the live hook, and
+                  neither with a benign in-repo use. Pinned by name in
+                  test_guard_core.py.
   "opencode"    — all of the above, plus the irreversible-action checks below. opencode
                   agents run unattended (`opencode run` AUTO-REJECTS an `ask`
                   rather than prompting — measured on 1.18.4), so a hard deny is
@@ -566,7 +570,11 @@ def _flags_and_operands(argv):
 
 # =========================================================================== #
 # ARGV-BASED CHECKS — the irreversible families globs handle badly.
-# opencode policy only (see POLICIES).
+#
+# NOT all opencode-only any more. `check_git_reset_hard_argv` (2026-08-02),
+# `check_git_stash` and `check_git_clean_force` (2026-08-02) run under BOTH
+# policies; talosctl/mkfs/dd/rm stay opencode-only. POLICIES at the bottom is
+# the authority — read it rather than assuming from this section heading.
 # =========================================================================== #
 
 def check_talosctl_reset(cmd):
@@ -698,6 +706,10 @@ def check_git_stash(cmd):
     agent's `git -C * diff*` allow-list let `git -C <path> stash push -m 'wip on
     the diff'` EXECUTE, because the glob's middle `*` is greedy across spaces.
     argv[1] is `stash` regardless of how many global options precede it.
+
+    Enabled for BOTH policies since 2026-08-02 (it shipped opencode-only). It
+    lives in `_CLAUDE_CODE_CHECKS`, which `POLICIES["opencode"]` includes, so
+    opencode keeps coverage by inheritance rather than a duplicate entry.
     """
     for argv in commands(cmd):
         if os.path.basename(argv[0]) != "git":
@@ -713,7 +725,11 @@ def check_git_stash(cmd):
                 "ZERO isolation and a concurrent agent or session can pop your entry (observed "
                 "twice — two parallel subagents stole each other's work). To set work aside, COPY "
                 "it aside (`cp <file> /tmp/…`) or commit it to a throwaway branch. "
-                "`git stash list` and `git stash show` are reads and remain allowed.")
+                "`git stash list` and `git stash show` are reads and remain allowed. "
+                "(Only QUOTING this command — e.g. a heredoc body documenting the ban, whose "
+                "lines this guard parses as real commands? Write the text to a file with the "
+                "Write tool and use `git commit -F <file>` / `gh pr create --body-file <file>` — "
+                "which your RULES prefer over heredocs anyway.)")
     return None
 
 
@@ -749,7 +765,13 @@ def check_git_reset_hard_argv(cmd):
 
 def check_git_clean_force(cmd):
     """`git clean -f` deletes untracked files — including the un-committed docs
-    RULES warns are one routine command away from silent loss."""
+    RULES warns are one routine command away from silent loss.
+
+    Enabled for BOTH policies since 2026-08-02 (it shipped opencode-only), by
+    inheritance from `_CLAUDE_CODE_CHECKS`. The dry-run spellings (`-n`,
+    `--dry-run`) are untouched: `git clean -nd` is the diagnostic the deny
+    message points at, so denying it would push the operator toward guessing.
+    """
     for argv in commands(cmd):
         if os.path.basename(argv[0]) != "git":
             continue
@@ -761,7 +783,11 @@ def check_git_clean_force(cmd):
             return ("`git clean -f` is blocked — it permanently deletes untracked files, and in "
                     "this repo untracked files are routinely real work (handoff docs, scratch "
                     "analyses) rather than junk. Run `git clean -nd` to see what it would remove, "
-                    "then delete the specific paths you mean.")
+                    "then delete the specific paths you mean. "
+                    "(Only QUOTING this command — e.g. a heredoc body documenting the ban, whose "
+                    "lines this guard parses as real commands? Write the text to a file with the "
+                    "Write tool and use `git commit -F <file>` / `gh pr create --body-file "
+                    "<file>` — which your RULES prefer over heredocs anyway.)")
     return None
 
 
@@ -819,27 +845,57 @@ def _git_strip_global_opts(argv):
 # unchanged (it denied before and denies now, under both policies) — only the
 # text differs, and it now names the more serious of the two problems. That is
 # the sole message change; it is asserted in test_guard_core.py.
+#
+# 🔴 `check_git_stash` and `check_git_clean_force` were added 2026-08-02 as the
+# EIGHTH and NINTH checks, by the same kind of explicit operator decision.
+# Measured against the live hook before the move (PreToolUse JSON piped into
+# ~/.claude/hooks/bash-guard.py, with `git add -A` and `git reset --hard HEAD`
+# as positive controls that came back DENY):
+#     ALLOW  git stash
+#     ALLOW  git stash push -m wip
+#     ALLOW  git stash pop
+#     ALLOW  git -C <repo> stash
+#     ALLOW  git clean -fd
+# i.e. the two operations RULES.md treats as 🔴 CRITICAL data-loss — `git stash`
+# with a documented incident (two parallel subagents stole each other's work,
+# 2026-07-25; the ban was re-BROADENED 2026-08-01 after a subagent read the
+# narrow wording and stashed anyway) and `git clean -f`, which deletes exactly
+# the untracked handoff docs RULES calls unsaved work — were enforced for
+# opencode and silently allowed for the operator's primary tool.
+#
+# They sit BEFORE check_cd_then_git for the same reason the reset argv check
+# does: `cd /x && git stash` now reports the stash reason, which names the more
+# serious of the two problems.
+#
+# The four remaining families (talosctl reset / mkfs / dd / rm -rf) stay
+# opencode-ONLY and were deliberately NOT moved here — see _IRREVERSIBLE_CHECKS.
 _CLAUDE_CODE_CHECKS = [
     check_git_add_all,
     check_git_reset_hard,
     check_git_reset_hard_argv,
+    check_git_stash,
+    check_git_clean_force,
     check_heredoc_to_file,
     check_cd_then_git,
     check_private_key,
     check_secret_or_ip_publish,
 ]
 
-# The irreversible families. opencode only: `opencode run` AUTO-REJECTS an
-# `ask` rather than prompting (measured on 1.18.4), and the interactive TUI is
-# the only place a human sees one — so for an unattended agent a hard deny is
-# the only real control.
+# The irreversible families that remain opencode-ONLY: `opencode run`
+# AUTO-REJECTS an `ask` rather than prompting (measured on 1.18.4), and the
+# interactive TUI is the only place a human sees one — so for an unattended
+# agent a hard deny is the only real control.
+#
+# 🔴 These four are NOT in the claude-code policy, and that narrowness is a
+# DECISION, not an oversight. `rm -rf` in particular risks false positives on
+# legitimate build-directory cleanup, and the other three are hardware/cluster
+# operations an interactive Claude Code session can be prompted about. Widening
+# any of them to claude-code is a separate operator decision.
 _IRREVERSIBLE_CHECKS = [
     check_talosctl_reset,
     check_mkfs,
     check_dd_to_block_device,
     check_rm_rf_critical,
-    check_git_stash,
-    check_git_clean_force,
 ]
 
 POLICIES = {
