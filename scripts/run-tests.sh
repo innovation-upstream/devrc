@@ -131,7 +131,14 @@ MIN_TESTS="${MIN_TESTS:-2850}"
 #           — `nix_eval()` calls pytest.FAIL, not skip, when it is absent, so
 #           without this entry a missing nix reads as 10 unexplained assertion
 #           failures deep in the run instead of one named precondition here.
-REQUIRED_TOOLS=(bash curl node rg git awk jq grep setsid python3 nix-instantiate)
+#   opencode
+#           scripts/tests/test_opencode_engine.py (19 tests) — runs the REAL
+#           `opencode debug agent --pure` against a throwaway config dir seeded
+#           from scripts/opencode/. Like nix-instantiate above it calls
+#           pytest.FAIL, not skip, when absent: this is the ONLY file that can
+#           see a resolver-semantics change under an unchanged config, so a skip
+#           there is precisely the silent green the version pin exists to stop.
+REQUIRED_TOOLS=(bash curl node rg git awk jq grep setsid python3 nix-instantiate opencode)
 missing_tools=()
 for t in "${REQUIRED_TOOLS[@]}"; do
   command -v "$t" >/dev/null 2>&1 || missing_tools+=("$t")
