@@ -132,17 +132,23 @@ crashed agent could never leave the operator's browser distorted. **Measured fal
 | after `emulate --reset` | **393** ← not restored |
 | after `--reset` **and** a re-`nav` | **393** ← still not restored |
 
-The reset genuinely sent and reported its clears
+The build under test genuinely sent and reported its clears
 (`cleared: [Emulation.clearDeviceMetricsOverride,
-Emulation.setTouchEmulationEnabled, Emulation.setUserAgentOverride]`). **Sending
-`clearDeviceMetricsOverride` does not bring the viewport back.** The size survives
-the detach, the clear and a re-navigation.
+Emulation.setTouchEmulationEnabled, Emulation.setUserAgentOverride]`) and the size
+survived them. **Sending `clearDeviceMetricsOverride` does not bring the viewport
+back.** The size survives the detach, the clear and a re-navigation.
+
+🔴 **The shipped build therefore sends nothing.** `emulate --reset` deletes the
+tab's stored emulation state and stops later ops re-applying it — no debugger
+attach, no CDP message, no `cleared` field. The clears were deliberately not
+carried over, because the measurement above shows they are not the remedy.
 
 Everything else *does* revert on its own, measured in the same pass:
 `devicePixelRatio`, `maxTouchPoints`, `pointer: coarse`, `prefers-color-scheme`,
-`userAgent`, `timeZone`. **Only the viewport size is sticky.** (`'ontouchstart' in
-window` also stays true on a document that was *built* emulated — that one is
-document-creation residue, and a re-`nav` clears it.)
+`userAgent`, `timeZone` — **because a CDP override dies when the debugger
+detaches**, not because a clear was sent. **Only the viewport size is sticky.**
+(`'ontouchstart' in window` also stays true on a document that was *built*
+emulated — that one is document-creation residue, and a re-`nav` clears it.)
 
 **The mechanism is not established.** The leading hypothesis is a render-widget
 resize residue — consistent with `devicePixelRatio` reverting while the width does
@@ -150,7 +156,7 @@ not, though both come from the same CDP call — but that is a hypothesis, not a
 finding. Do not repeat it as fact.
 
 **Closing the tab is the only known remedy.** So `--reset` means *"stop
-re-applying, and send the clears"*, never *"undo"*. The workaround is:
+re-applying"*, never *"undo"*. The workaround is:
 
 ```
 browser emulate --reset --recreate
@@ -500,17 +506,37 @@ neither this page nor the note claims that list is exhaustive.
 `emulate` is mapped in `OP_TO_SERVER` **and** listed in `ALLOWED_OPS_DEFAULT` in
 `opencode/tools/browser_tool_impl.mjs`, so the `browser agent` model can call it
 with no opt-in. The typed fields it may pass are `device`, `width`, `height`,
-`deviceScaleFactor`, `mobile`, `maxTouchPoints`, `userAgent`, `timezone`,
-`orientation`, `colorScheme` and `reset`; `geo` and `touch` are deliberately not
-offered to the agent (location spoofing is unrelated to the viewport question and
-is a fingerprinting surface; touch is implied by a preset or by `maxTouchPoints`).
+`deviceScaleFactor`, `mobile`, `maxTouchPoints`, `orientation`, `colorScheme` and
+`reset`.
+
+**`geo`, `touch`, `userAgent` and `timezone` are deliberately NOT offered to the
+agent** — the operator CLI keeps all four. `geo` spoofs the operator's location,
+which is unrelated to the viewport question and is a fingerprinting surface handed
+to a model reading untrusted pages. `userAgent` and `timezone` are the same class:
+both are identity the page can read, both are attacker-*reachable* (the model
+picks them after reading a page it does not control), and emulation is **sticky
+for the whole run**, so a prompt-injected UA rides along on every later `nav` —
+including to an authenticated site. A **device preset still sets a matching UA
+server-side**, so the legitimate mobile-testing path is untouched; what is removed
+is the model choosing an arbitrary one. `touch` is merely redundant (a preset
+carries its own touch support, and a raw `maxTouchPoints` turns touch on by
+itself). `userAgent`/`timezone` are refused client-side BY NAME
+(`emulation_field_operator_only:<field>`) before anything is sent, because they
+were declared args until now and a model could still try one; `geo`/`touch` were
+never declared and stay on the whitelist's silent-drop path.
+
 Bounds are mirrored from `EMULATION_LIMITS` and enforced client-side before the
 request is sent, with the same `invalid_emulation:<field>` vocabulary.
 
 It was excluded until #316 on the stated grounds that it "leaves sticky per-tab
-state that outlives the op". **That was factually wrong** — and wrong about the
-exact property this page's design section exists to establish: the overrides are
-session-scoped, `withCdpSession` always detaches, the tab is *not* emulated between
-ops, and a crashed agent therefore cannot leave the operator's browser distorted.
-The ownership gate (`OWNED_TAB_ONLY_OPS`) confines the op to the tab the agent's own
-run opened, and the wrapper closes that tab on every exit path.
+state that outlives the op". **That observation was correct; the conclusion drawn
+from it was not** — and the counter-argument originally offered here (that the
+overrides are session-scoped, `withCdpSession` always detaches, so a crashed agent
+could not leave the operator's browser distorted) is **measured false for the
+viewport**: the emulated size survives the detach and a re-navigation (see the
+table above). The non-viewport overrides *do* die at detach as described. What
+actually bounds the blast radius is not detach semantics: the ownership gate
+(`OWNED_TAB_ONLY_OPS`) confines the op to the tab the agent's own run opened, and
+the wrapper closes that tab on every exit path — and **closing is what un-sticks
+the viewport**. The residual is a SIGKILL that bypasses the trap, which orphans
+the run's own tab stuck at the emulated size.

@@ -163,6 +163,9 @@ ALLOWED_OPS = ("getHtml", "text", "eval", "tabs", "nav", "screenshot",
 
 # Ops handled ENTIRELY server-side (never dispatched to the extension). `release`
 # relinquishes a session's owned-tab mapping without touching the real Brave tab.
+# It is INSTANCE-SCOPED when the request carries a `target` (i.e. `--instance`):
+# ownership is keyed (instance, session), so an unscoped release drops this
+# session's tab on every connected profile. See Registry.release_session.
 # Not part of the shared JS contract (the extension never sees these).
 SERVER_OPS = ("release",)
 
@@ -1099,13 +1102,37 @@ class Registry:
         tab_key = (inst.key, resolved if resolved is not None else "active")
         return resolved, tab_key
 
-    def release_session(self, session_id) -> int:
-        """Drop ALL tab ownership held by `session_id` (across every instance)
-        WITHOUT closing any real tab. Returns how many mappings were released."""
+    def release_session(self, session_id, target=None) -> int:
+        """Drop tab ownership held by `session_id` WITHOUT closing any real tab.
+        Returns how many mappings were released.
+
+        `target` (the request's routing hint — a routing key or an instanceId)
+        SCOPES the release to that ONE instance. Ownership is keyed
+        `(instance_key, session_id)`, so a single session can legitimately own a
+        tab on EVERY connected Brave profile at once; an unscoped release drops
+        all of them. That is right for "this session is finished" and WRONG for
+        `emulate --reset --recreate`, which is fixing one tab on one profile —
+        there it would orphan the other profile's owned tab, after which a later
+        bare op on that profile falls back to the operator's ACTIVE tab, exactly
+        the blast radius the ownership map exists to prevent.
+
+        An unresolvable `target` releases NOTHING (returns 0) rather than falling
+        back to the unscoped sweep: silently widening the blast radius when the
+        caller asked to narrow it is the failure this argument exists to stop.
+        """
         if session_id is None:
             return 0
         with self._cond:
-            keys = [k for k in self._owners if k[1] == session_id]
+            if target:
+                inst = self._find_locked(target)
+                # `_find_locked` matches key OR instanceId. If the instance is not
+                # known at all, still honour a target that IS an owner key — a
+                # profile can disconnect while its ownership row lives on.
+                key = inst.key if inst is not None else target
+                keys = [k for k in self._owners
+                        if k[1] == session_id and k[0] == key]
+            else:
+                keys = [k for k in self._owners if k[1] == session_id]
             for k in keys:
                 del self._owners[k]
             if keys:
@@ -2214,9 +2241,12 @@ def make_handler(registry: Registry, token: str, cmd_timeout: float,
             emulate_extra = _emulate_extra(body) if op == "emulate" else None
             outcome, exit_code, domain = "ok", 0, ""
             # `release` is server-side: drop the session's ownership without ever
-            # touching the real Brave tab or the extension.
+            # touching the real Brave tab or the extension. `target` (the popped
+            # --instance routing hint) SCOPES it to one profile — see
+            # release_session: unscoped, it would drop this session's owned tab on
+            # every OTHER connected profile too.
             if op == "release":
-                n = registry.release_session(session_id)
+                n = registry.release_session(session_id, target=target)
                 self._send(200, {"ok": True, "result": {
                     "id": None, "ok": True, "data": {"released": n}}})
                 emit_cmd_event(

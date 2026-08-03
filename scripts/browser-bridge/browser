@@ -1039,11 +1039,13 @@ json_str() { python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "$1"; 
 #
 # MEASURED 2026-08-03 (laptop, extension 0.7.2, fresh-tab control): a tab that has
 # been emulated keeps the emulated viewport SIZE after `--reset` and after a
-# re-navigation — 1124 → 393 → 393 → 393 — even though the reset demonstrably
-# sends and reports `Emulation.clearDeviceMetricsOverride` /
-# `setTouchEmulationEnabled` / `setUserAgentOverride`. Every other override (dpr,
-# maxTouchPoints, pointer, prefers-color-scheme, UA, timezone) DOES revert.
-# The mechanism is NOT established. Closing the tab is the only known remedy.
+# re-navigation — 1124 → 393 → 393 → 393. That build's reset demonstrably sent and
+# reported `Emulation.clearDeviceMetricsOverride` / `setTouchEmulationEnabled` /
+# `setUserAgentOverride` and the size survived them, so the shipped build does not
+# send them at all: `--reset` only stops re-applying. Every other override (dpr,
+# maxTouchPoints, pointer, prefers-color-scheme, UA, timezone) DOES revert — at
+# the debugger detach, on its own. The mechanism behind the sticky viewport is NOT
+# established. Closing the tab is the only known remedy.
 #
 # So this is a REPLACEMENT, not a repair: reset → note the url → drop ownership →
 # `open` a fresh tab at that url (now owned by this same session) → close the
@@ -1059,6 +1061,24 @@ json_str() { python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "$1"; 
 # own is the one we are trying to get rid of. `release` drops the ownership
 # mapping WITHOUT touching the real tab, which is the documented way to make the
 # next `open` create a genuinely new one.
+#
+# 🔴 `release` IS INSTANCE-SCOPED, and it has to be. Ownership is keyed
+# `(instance, session)`, so ONE session can own a tab on EVERY connected Brave
+# profile at once — the normal case on these hosts, where two profiles are
+# connected. An unscoped release would drop the OTHER profile's owned tab too,
+# and a later bare op there would silently fall back to the operator's active
+# tab, which is precisely what the ownership system exists to prevent. `cmd_op`
+# forwards `--instance` as the request's `target`, and server.py's release
+# handler scopes the delete to that instance (release_session(target=…)). With
+# no `--instance` there is at most one live instance — anything else 409s as
+# `ambiguous_instance` on the `emulate` above, before we get here.
+#
+# 🔴 NEITHER `release` NOR `close` BELOW MAY RUN BARE. `cmd_op` reports an op
+# failure by calling `die`, i.e. `exit 1` — as a FUNCTION, that exits this whole
+# script, so `if ! cmd_op close` cannot catch anything and the intended
+# non-fatal/contextual handling never runs (measured: rc=1, stdout AND stderr
+# empty). Command substitution runs the function in a SUBSHELL, so the exit is
+# confined and `$?` is readable. That is why both calls are wrapped in `$( … )`.
 _emulate_reset_recreate() {
   local extra="$1" reset_resp parsed old_tab old_url open_resp new_tab saved_tab
 
@@ -1098,9 +1118,17 @@ print(url)
       ;;
   esac
 
-  cmd_op release >/dev/null || {
+  # Subshell (see the header note): a bare `cmd_op release` would `exit 1` out of
+  # the whole script on failure and this message would never print. A failed
+  # release IS fatal — `open` is idempotent, so continuing would hand back the
+  # same stuck tab and report it as the replacement — but it must be fatal WITH
+  # the explanation, not with cmd_op's generic one and nothing else.
+  local release_err rc
+  release_err="$( cmd_op release 2>&1 >/dev/null )"; rc=$?
+  if [ "$rc" -ne 0 ]; then
+    [ -n "$release_err" ] && printf '%s\n' "$release_err" >&2
     die "emulate --recreate: could not release ownership of tab ${old_tab}, so no replacement was opened and nothing was closed. The reset applied; the tab is still stuck at the emulated size."
-  }
+  fi
 
   # From here the session owns nothing, so `open` builds a genuinely new tab.
   saved_tab="$TAB"; TAB=""
@@ -1145,12 +1173,23 @@ print(t)
   # server pop THAT (nonexistent) mapping instead of ours. `close` is not in
   # OWNED_TAB_ONLY_OPS and accepts an explicit `--tab`, so this is ordinary
   # documented behaviour, not a reach-around.
-  local close_ok="true" close_err="" saved_sid="$SESSION_ID"
+  #
+  # And the failure must be REACHABLE: `cmd_op` fails by `die`ing, which as a
+  # function is `exit 1` on THIS shell, so the old `if ! cmd_op close` form killed
+  # the script before printing anything at all (measured: rc=1, stdout and stderr
+  # both empty, the new tab id lost). The `$( … )` confines the exit to a
+  # subshell, so `close_ok="false"` / `closeError` / `closedOldTab:false` are live
+  # code paths rather than the dead ones they used to be.
+  local close_ok="true" close_err="" saved_sid="$SESSION_ID" close_rc close_stderr
   SESSION_ID="${SESSION_ID}+recreate-close"
   TAB="$old_tab"
-  if ! cmd_op close >/dev/null 2>/dev/null; then
+  close_stderr="$( cmd_op close 2>&1 >/dev/null )"; close_rc=$?
+  if [ "$close_rc" -ne 0 ]; then
     close_ok="false"
     close_err="the stuck tab ${old_tab} could NOT be closed; close it by hand: browser --tab ${old_tab} close"
+    echo "browser: emulate --recreate: the replacement tab IS open (see newTabId below);" >&2
+    echo "browser:   only the close of the old tab ${old_tab} failed. This is NOT fatal." >&2
+    [ -n "$close_stderr" ] && printf '%s\n' "$close_stderr" >&2
   fi
   SESSION_ID="$saved_sid"
   TAB="$saved_tab"
@@ -1340,7 +1379,9 @@ case "$sub" in
     # STICKY PER TAB: the extension stores the state and re-applies it inside every
     # subsequent op's CDP session. It has to — CDP emulation overrides die when the
     # debugger detaches, and the bridge always detaches. `--reset` stops the
-    # re-applying and sends the CDP clears.
+    # re-applying and NOTHING ELSE: it sends no CDP clears and attaches no
+    # debugger. The non-viewport overrides come back on their own, because the
+    # overrides died at the last detach and reset simply stops re-installing them.
     #
     # 🔴 `--reset` DOES NOT RESTORE THE VIEWPORT (#319, measured 2026-08-03 on
     # extension 0.7.2, laptop, with a fresh-tab control):
@@ -1350,12 +1391,14 @@ case "$sub" in
     #   after `emulate --reset`     innerWidth  393   ← NOT restored
     #   after `--reset` + re-nav    innerWidth  393   ← still NOT restored
     #
-    # The reset DID send and report the clears
-    # (`Emulation.clearDeviceMetricsOverride`, `setTouchEmulationEnabled`,
-    # `setUserAgentOverride`). Every OTHER override does revert on its own —
-    # devicePixelRatio, maxTouchPoints, pointer:coarse, prefers-color-scheme,
-    # userAgent, timeZone. Only the viewport SIZE is sticky, it survives the
-    # detach, the clear AND a re-navigation. The MECHANISM IS NOT ESTABLISHED (the
+    # That measurement was taken on a build whose reset DID send and report the
+    # clears (`Emulation.clearDeviceMetricsOverride`, `setTouchEmulationEnabled`,
+    # `setUserAgentOverride`) — and the size survived them, which is why the
+    # clears were NOT carried into the shipped build. Every OTHER override does
+    # revert on its own — devicePixelRatio, maxTouchPoints, pointer:coarse,
+    # prefers-color-scheme, userAgent, timeZone — because CDP overrides die at
+    # debugger detach, not because they were cleared. Only the viewport SIZE is
+    # sticky; it survives the detach AND a re-navigation. The MECHANISM IS NOT ESTABLISHED (the
     # leading hypothesis is a render-widget resize residue; do not repeat it as
     # fact). Closing the tab is the only known remedy.
     #

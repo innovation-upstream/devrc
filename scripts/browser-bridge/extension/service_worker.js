@@ -1181,13 +1181,25 @@ const OPS = {
   // rather than discovering a bad timezone id three ops later. Every subsequent op
   // that attaches CDP re-applies it (see the choke point in withCdp).
   //
-  // `--reset` means "STOP RE-APPLYING, and send the clears". It is NOT an undo,
-  // and it must not be described as one: measured 2026-08-03 (ext 0.7.2, fresh-tab
-  // control), the emulated VIEWPORT SIZE survives the reset and a re-navigation —
-  // 1124 → emulate → 393 → reset → 393 → re-nav → 393 — even though the clears
-  // are demonstrably sent and reported. The other overrides (UA, tz, dpr, touch
-  // points, prefers-color-scheme) do revert. Mechanism unestablished; closing the
-  // tab is the only known remedy. See protocol.js EMULATION and issue #319.
+  // `--reset` means "STOP RE-APPLYING", and NOTHING ELSE. Read the branch below:
+  // it calls clearEmulation(), which is `emulationState.delete(tabId)` and no more
+  // — no debugger is attached and NOT ONE CDP message is sent. It is NOT an undo,
+  // and it must not be described as one.
+  //
+  // WHY IT LOOKS LIKE AN UNDO ANYWAY. The non-viewport overrides (UA, tz, dpr,
+  // touch points, prefers-color-scheme) revert ON THEIR OWN, because a CDP
+  // override lives only as long as the debugger session that set it and withCdp
+  // always detaches. Reset does not clear them; it simply stops re-installing
+  // them on the next attach. That distinction is load-bearing — anyone who
+  // believes a clear was sent will mis-diagnose the viewport.
+  //
+  // THE VIEWPORT SIZE IS THE EXCEPTION and it does NOT come back: measured
+  // 2026-08-03 (ext 0.7.2, fresh-tab control), 1124 → emulate → 393 → reset →
+  // 393 → re-nav → 393. That build DID send `Emulation.clearDeviceMetricsOverride`
+  // and the size survived it anyway, which is exactly why the clears were NOT
+  // carried into this build: they are not the remedy. Mechanism unestablished
+  // (#319); replacing the tab (`--reset --recreate`) is the only known remedy.
+  // See protocol.js EMULATION.
   //
   // OWNERSHIP is enforced SERVER-side (server.py OWNED_TAB_ONLY_OPS → the named
   // `not_owned_tab` refusal), not here, because the server is the only side that
@@ -1203,13 +1215,21 @@ const OPS = {
       return {
         tabId: tab.id, url: tab.url, reset: true,
         wasEmulating: had,
-        note: "emulation stopped: this tab will no longer have overrides re-applied, "
-          + "and the CDP clears were sent. THIS IS NOT AN UNDO. The UA, timezone, "
-          + "devicePixelRatio, touch points and prefers-color-scheme do revert, but "
-          + "the emulated VIEWPORT SIZE does NOT come back — measured, and it "
-          + "survives a re-navigation too (mechanism unknown; issue #319). Closing "
-          + "the tab is the only known remedy: `browser emulate --reset --recreate` "
-          + "replaces it with a fresh tab at the same url (the tab id changes).",
+        // 🔴 PINNED, character for character, by tests/service_worker.test.mjs
+        // ("emulate --reset: the runtime note"). That test also asserts NO
+        // debugger call is made, so the "nothing was sent" sentence cannot rot
+        // into a claim while the code does something else. If you change this
+        // string, change the test in the SAME commit — that is the point.
+        note: "emulation stopped: this tab will no longer have overrides re-applied. "
+          + "NOTHING WAS SENT TO THE BROWSER — no debugger was attached and no CDP "
+          + "clears were issued. THIS IS NOT AN UNDO. The UA, timezone, "
+          + "devicePixelRatio, touch points and prefers-color-scheme revert on "
+          + "their own, because CDP overrides die when the debugger detaches — not "
+          + "because anything cleared them. The emulated VIEWPORT SIZE does NOT "
+          + "come back: it survives the detach and a re-navigation (measured; "
+          + "mechanism unknown, issue #319). Replacing the tab is the only known "
+          + "remedy: `browser emulate --reset --recreate` opens a fresh tab at the "
+          + "same url and closes this one (the tab id changes).",
       };
     }
 

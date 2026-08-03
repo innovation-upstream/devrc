@@ -572,17 +572,20 @@ export async function applyWakeSteps(send, steps = WAKE_CDP_STEPS) {
 //   after `emulate --reset`     innerWidth  393   ← NOT restored
 //   after `--reset` + re-nav    innerWidth  393   ← still NOT restored
 //
-// The reset is not silently skipping: it reported
+// That measurement was taken on a build whose reset DID send and report
 // `cleared: [Emulation.clearDeviceMetricsOverride,
-// Emulation.setTouchEmulationEnabled, Emulation.setUserAgentOverride]`. Sending
-// `clearDeviceMetricsOverride` simply does not restore the viewport, and the size
-// survives the detach, the clear AND a re-navigation.
+// Emulation.setTouchEmulationEnabled, Emulation.setUserAgentOverride]`, and the
+// size survived them anyway. Sending `clearDeviceMetricsOverride` simply does not
+// restore the viewport — which is why THIS build does not send it: `--reset` here
+// only stops re-applying (service_worker.js's reset branch is a Map delete; no
+// debugger attach, no CDP message). The measurement stands; the clears do not.
 //
 // What DOES revert by itself, measured in the same pass: devicePixelRatio,
-// maxTouchPoints, pointer:coarse, prefers-color-scheme, userAgent, timeZone. Only
-// the viewport SIZE is sticky. (`"ontouchstart" in window` also stays true on a
-// document that was BUILT emulated — that one is document-creation residue and a
-// re-nav does clear it.)
+// maxTouchPoints, pointer:coarse, prefers-color-scheme, userAgent, timeZone —
+// and they revert because a CDP override dies with the debugger session that set
+// it, NOT because anything cleared them. Only the viewport SIZE is sticky.
+// (`"ontouchstart" in window` also stays true on a document that was BUILT
+// emulated — that one is document-creation residue and a re-nav does clear it.)
 //
 // THE MECHANISM IS NOT ESTABLISHED. The leading hypothesis is a render-widget
 // resize residue — consistent with devicePixelRatio reverting while the width does
@@ -590,7 +593,7 @@ export async function applyWakeSteps(send, steps = WAKE_CDP_STEPS) {
 // not a finding. Do not restate it as known, and do not build a fix on it.
 //
 // THE ONLY KNOWN REMEDY IS TO CLOSE THE TAB. `--reset` therefore means "stop
-// re-applying, and send the clears" — it is NOT an undo. That is issue #319; the
+// re-applying" and nothing more — it is NOT an undo. That is issue #319; the
 // operator-facing workaround is `browser emulate --reset --recreate`, which
 // replaces the stuck tab with a fresh one at the same url (the tab id changes).
 //

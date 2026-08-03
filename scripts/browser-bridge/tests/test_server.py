@@ -2827,6 +2827,69 @@ def test_fifo_queued_command_respects_cmd_timeout():
         "a FIFO-queued command must still honour cmd_timeout"
 
 
+# --- release_session: INSTANCE-SCOPED when a target is given --------------- #
+# Ownership is keyed (instance, session), so ONE session legitimately owns a tab
+# on EVERY connected Brave profile — the normal case on these hosts, where two
+# profiles are connected at once. `release` used to delete every one of them.
+#
+# That is right for "this session is done" and WRONG for `emulate --reset
+# --recreate`, whose whole job is fixing ONE tab on ONE profile: it silently
+# orphaned the other profile's owned tab, after which a later bare op there fell
+# back to the OPERATOR'S ACTIVE TAB — the exact blast radius the ownership map
+# exists to prevent.
+#
+# RED-BEFORE-GREEN: on origin/main `release_session` takes no `target` at all, so
+# the first test below raises TypeError and the second's assertion fails.
+def _seed_owner(reg, inst_key, session, tab_id):
+    with reg._cond:
+        reg._owners[(inst_key, session)] = {"tab_id": tab_id,
+                                            "last_seen": reg._clock()}
+
+
+def test_release_session_scoped_to_target_leaves_other_instances_alone():
+    reg = S.Registry()
+    _seed_owner(reg, "work", "S", 101)
+    _seed_owner(reg, "personal", "S", 202)
+    _seed_owner(reg, "work", "OTHER", 303)
+    assert reg.release_session("S", target="work") == 1
+    assert reg.owners_snapshot() == {("personal", "S"): 202, ("work", "OTHER"): 303}, \
+        "a scoped release must touch ONLY (target, session)"
+
+
+def test_release_session_unscoped_still_drops_every_instance():
+    """The other half of the contract — a bare `browser release` means 'this
+    session is finished', and must keep clearing every profile."""
+    reg = S.Registry()
+    _seed_owner(reg, "work", "S", 101)
+    _seed_owner(reg, "personal", "S", 202)
+    assert reg.release_session("S") == 2
+    assert reg.owners_snapshot() == {}
+
+
+def test_release_session_resolves_a_target_by_instance_id_too():
+    """`--instance` accepts a routing key OR an instanceId (_find_locked matches
+    both), so the scope must resolve the same way — otherwise a caller who used
+    the id gets a release that matches nothing and silently keeps ownership."""
+    reg = S.Registry()
+    inst = _register_live(reg, iid="brave-abc", key="work")
+    assert inst.instance_id == "brave-abc"
+    _seed_owner(reg, "work", "S", 101)
+    _seed_owner(reg, "personal", "S", 202)
+    assert reg.release_session("S", target="brave-abc") == 1
+    assert reg.owners_snapshot() == {("personal", "S"): 202}
+
+
+def test_release_session_unknown_target_releases_nothing():
+    """FAIL CLOSED. A target that resolves to no instance and matches no owner key
+    must NOT fall back to the unscoped sweep — silently widening the blast radius
+    when the caller asked to narrow it is the whole bug this argument fixes."""
+    reg = S.Registry()
+    _seed_owner(reg, "work", "S", 101)
+    _seed_owner(reg, "personal", "S", 202)
+    assert reg.release_session("S", target="nope") == 0
+    assert reg.owners_snapshot() == {("work", "S"): 101, ("personal", "S"): 202}
+
+
 # --- TTL reclaim: released, NOT closed ------------------------------------- #
 def test_owner_ttl_reclaims_without_closing(monkeypatch):
     """Ownership idle past the TTL is RELEASED (mapping dropped) using an injected
@@ -3860,25 +3923,109 @@ def test_git_short_head_none_on_missing_dir(tmp_path):
     assert S.git_short_head(repo=tmp_path / "does-not-exist") is None
 
 
+# --------------------------------------------------------------------------- #
+# 🔴 WHERE THE EXPECTED EXTENSION VERSION COMES FROM — read this before "fixing"
+# a failure here by editing a number.
+#
+# The bump is the operator's only falsifiable "is the new build loaded?" signal,
+# so it must be a CONSCIOUS, DECLARED act. It used to be declared as a LITERAL in
+# this file, twice, buried inside two test bodies. That went stale on a version
+# bump TWICE — 0.7.0 and 0.7.3 — each time leaving `main` RED on exactly these
+# tests, and each time the fix was "update the number", which regenerates the bug
+# at the next bump. It is not a literal any more.
+#
+# The declaration now lives in extension/README.md's build-discriminator
+# changelog: a `> **X.Y.Z — …**` block saying what that build is and HOW TO TELL
+# IT APART from the previous one. That file is the right home because it is what
+# an operator actually reads to answer "which build is loaded?", and because it
+# is NOT derivable from manifest.json — so asserting manifest == declaration is a
+# real two-source agreement, not the manifest compared to itself.
+#
+# WHAT THIS BUYS, precisely:
+#   * bump manifest.json and write the changelog block  -> green, NO test edit,
+#     so it can never go stale again;
+#   * bump manifest.json and write nothing              -> RED, naming the block
+#     you have to write. That is the case both stale bumps were.
+# The conscious act is preserved — it is just relocated to the artefact that has
+# to exist anyway, instead of a number no one thinks to grep for.
+#
+# Version history: 0.7.3 the corrected `emulate --reset` note; 0.7.1 `text
+# --annotated` inside `--frame`; 0.7.0 the `context` op + enriched read
+# envelopes; 0.6.0 the `documentPredatesEmulation` hint; 0.5.0 the `emulate` op;
+# 0.4.0 the poll-loop no-wedge change. (0.7.2 was a branch build, never on main.)
+# --------------------------------------------------------------------------- #
+_EXT_CHANGELOG_BLOCK = re.compile(r"^> \*\*(\d+\.\d+\.\d+) —", re.MULTILINE)
+
+
+def declared_ext_versions(readme_text=None):
+    """Every version DECLARED in extension/README.md's changelog, newest first.
+
+    Raises rather than returning [] on a parse miss: a silently-empty result
+    would make every caller below vacuous, which is the exact harness failure
+    mode these tests exist to avoid.
+    """
+    if readme_text is None:
+        readme_text = (EXT_DIR / "README.md").read_text(encoding="utf-8")
+    found = _EXT_CHANGELOG_BLOCK.findall(readme_text)
+    if not found:
+        raise AssertionError(
+            "HARNESS: parsed ZERO `> **X.Y.Z — …**` changelog blocks out of "
+            "extension/README.md. The block format changed — fix this parser, "
+            "do NOT weaken it, and do not read the empty result as 'nothing to "
+            "check'."
+        )
+    return sorted(found, key=lambda v: tuple(int(p) for p in v.split(".")),
+                  reverse=True)
+
+
+def test_declared_ext_versions_parser_is_wired_to_something():
+    """HARNESS SELF-CHECK — the positive + negative controls for the parser every
+    assertion below depends on. Without these, a regex that matched nothing would
+    make the version tests report success while testing NOTHING."""
+    # POSITIVE control: it must find more than one block, including a known one
+    # from a build that is definitely documented (0.7.1, `text --annotated` in
+    # `--frame`). A parser wired to nothing cannot produce this.
+    declared = declared_ext_versions()
+    assert len(declared) >= 2, declared
+    assert "0.7.1" in declared, declared
+    # NEGATIVE control: fed a document with no blocks, it must FAIL LOUDLY.
+    with pytest.raises(AssertionError, match="parsed ZERO"):
+        declared_ext_versions("# a readme with no changelog blocks at all\n")
+    # …and it must not be fooled by prose that merely mentions a version.
+    assert declared_ext_versions("> **9.9.9 — x**\nsee 1.2.3 for details\n") \
+        == ["9.9.9"]
+
+
+def test_manifest_version_matches_the_declared_build():
+    """manifest.json's version must be DECLARED in extension/README.md.
+
+    This is the gate that replaces the twice-stale literal. It fails when a bump
+    lands with no changelog block — which is a bump nobody can identify in the
+    field, and is what both stale bumps looked like.
+    """
+    v = S.manifest_version(path=EXT_DIR / "manifest.json")
+    declared = declared_ext_versions()
+    assert isinstance(v, str) and v, "manifest.json must carry a version"
+    assert v == declared[0], (
+        f"extension/manifest.json is {v} but the newest version DECLARED in "
+        f"extension/README.md is {declared[0]}. A bump needs BOTH, in one "
+        f"commit: the manifest version, and a `> **{v} — …**` block saying what "
+        f"discriminates this build from the last (a new op, a new `ping` field, "
+        f"or a specific string it emits). Do not 'fix' this by editing a number "
+        f"in the tests — there is no longer one to edit."
+    )
+
+
+# The single expected-version handle the rest of this file uses. Derived, on
+# purpose (see the header): every site below is now automatically correct after a
+# bump, and the ONE place that can disagree with the manifest is the README
+# declaration, which the test above gates.
+PINNED_EXT_VERSION = declared_ext_versions()[0]
+
+
 def test_manifest_version_reads_current():
     v = S.manifest_version(path=EXT_DIR / "manifest.json")
-    # Bumped to 0.7.1 for `text --annotated` inside `--frame` (the extension's
-    # service_worker/protocol changed; no new wire op, so `ping`'s `ops` list
-    # CANNOT discriminate this build — the version and the capability probe are
-    # the only tells). 0.7.0 was the `context` op + enriched read envelopes;
-    # 0.6.0 the `documentPredatesEmulation` hint; 0.5.0 the `emulate` op itself;
-    # 0.4.0 the poll-loop no-wedge change. The bump is the operator's only
-    # falsifiable "is the new build loaded?" signal, so this assertion is
-    # deliberately a literal — it MUST be updated in the same commit as
-    # manifest.json.
-    #
-    # ⚠ That contract has now been broken once: 0.7.0 shipped without touching
-    # this file and left `main` RED on three tests. The literal did its job (it
-    # noticed) but nobody was watching at bump time. If it breaks again, the
-    # answer is a pre-merge gate on the bump, NOT deleting the literal — a
-    # derived assertion here would compare the manifest to itself and pin
-    # nothing at all.
-    assert isinstance(v, str) and v == "0.7.1"
+    assert isinstance(v, str) and v == PINNED_EXT_VERSION
 
 
 def test_manifest_version_prefers_the_deployed_copy_over_the_repo(tmp_path,
@@ -3899,7 +4046,7 @@ def test_manifest_version_falls_back_to_repo_when_not_deployed(tmp_path,
     reporting the repo manifest instead of going null."""
     monkeypatch.setattr(S, "_DEPLOYED_EXT_MANIFEST", tmp_path / "absent.json")
     monkeypatch.setattr(S, "_EXT_MANIFEST_PATH", EXT_DIR / "manifest.json")
-    assert S.manifest_version() == "0.7.1"
+    assert S.manifest_version() == PINNED_EXT_VERSION
 
 
 def test_manifest_version_none_when_neither_exists(tmp_path, monkeypatch):

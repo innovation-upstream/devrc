@@ -214,7 +214,7 @@ has not been exercised against a third-party authenticated API beyond that.)
 | `screenshot` | **CDP `Page.captureScreenshot`** (png) — works on a BACKGROUND/occluded tab + each profile's own tab; a foreground tab uses the cheap `captureVisibleTab` fast path. `fullpage` grabs the whole document. The CLI decodes `dataUrl` to a **`.png` on disk** and prints a path, never the base64 (see below) | `{url,dataUrl,via}` |
 | `open`       | `chrome.tabs.create({url,active:false})` — **background/HIDDEN** (`visibilityState:"hidden"` → Chromium throttles it → a heavy SPA won't render → reads return a shell). The escape hatch is **`browser wake`** (or a `--wake` read): it un-throttles the tab and moves NO focus. Reads self-announce this via `hidden`/`note` | `{tabId,url}` |
 | `close`      | `chrome.tabs.remove(tabId)`                               | `{closed:tabId}` |
-| `emulate`    | **device emulation** — CDP `Emulation.setDeviceMetricsOverride` / `setTouchEmulationEnabled` / `setUserAgentOverride` (**+`userAgentMetadata`**) / `setEmulatedMedia` / `setTimezoneOverride` / `setGeolocationOverride`, from a named preset or raw params. **Sticky per tab** (re-applied inside every later CDP session) and **owned-tab-only**. `--reset` stops re-applying and sends the clears, but 🔴 **does NOT restore the viewport size** (#319) — `--reset --recreate` replaces the tab (new tab id) and is the only known remedy | `{tabId,url,emulation,applied,note}` or `{tabId,url,reset,wasEmulating,note}` |
+| `emulate`    | **device emulation** — CDP `Emulation.setDeviceMetricsOverride` / `setTouchEmulationEnabled` / `setUserAgentOverride` (**+`userAgentMetadata`**) / `setEmulatedMedia` / `setTimezoneOverride` / `setGeolocationOverride`, from a named preset or raw params. **Sticky per tab** (re-applied inside every later CDP session) and **owned-tab-only**. `--reset` only stops re-applying — it sends NOTHING to CDP — and 🔴 **does NOT restore the viewport size** (#319); `--reset --recreate` replaces the tab (new tab id) and is the only known remedy | `{tabId,url,emulation,applied,note}` or `{tabId,url,reset,wasEmulating,note}` |
 | `frames`     | **`chrome.webNavigation.getAllFrames`** — the tab's frames INCLUDING cross-origin OUT-OF-PROCESS iframes (OOPIFs) | `{url,title,frames:[{frameId,url,parentFrameId}]}` |
 | `click`      | top frame: **CDP** `getBoundingClientRect` → `Input.dispatchMouseEvent` (trusted); `--frame`: **SYNTHETIC** click via `chrome.scripting`; `selector` required, `frame` optional | `{url,clicked,x,y,frame,trusted}` |
 | `type`       | top frame: **CDP `Input.insertText`** (trusted); `--frame`: **SYNTHETIC** input via `chrome.scripting`; `text` required, `selector`/`frame` optional | `{url,typed,frame,trusted}` |
@@ -545,25 +545,30 @@ This section used to claim the opposite — that because the overrides die at de
 | after `emulate --reset` | **393** ← not restored |
 | after `--reset` **and** a re-`nav` | **393** ← still not restored |
 
-The reset is not silently skipping the work: it reported
+That measurement was taken on a build whose reset really did report
 `cleared: [Emulation.clearDeviceMetricsOverride, Emulation.setTouchEmulationEnabled,
-Emulation.setUserAgentOverride]`. **Sending `clearDeviceMetricsOverride` simply does
-not bring the viewport back**, and the size survives the detach, the clear and a
-re-navigation.
+Emulation.setUserAgentOverride]`, and the size survived them anyway. **Sending
+`clearDeviceMetricsOverride` simply does not bring the viewport back** — which is
+why the clears were not carried into the shipped build. 🔴 **On the current build
+`--reset` sends nothing at all**: it deletes the tab's stored emulation state, so
+later ops stop re-applying it. No debugger is attached and no CDP message is
+issued.
 
 Everything else *does* revert on its own, measured in the same pass:
 `devicePixelRatio`, `maxTouchPoints`, `pointer: coarse`, `prefers-color-scheme`,
-`userAgent`, `timeZone`. Only the viewport **size** is sticky. (`"ontouchstart" in
-window` also stays true on a document that was *built* emulated — that one is
-document-creation residue and a re-`nav` clears it.)
+`userAgent`, `timeZone` — and it reverts because **a CDP override dies when the
+debugger detaches**, not because anything cleared it. Only the viewport **size**
+is sticky. (`"ontouchstart" in window` also stays true on a document that was
+*built* emulated — that one is document-creation residue and a re-`nav` clears
+it.)
 
 **The mechanism is not established.** The leading hypothesis is a render-widget
 resize residue — consistent with `devicePixelRatio` reverting while the width does
 not, though both come from the same CDP call — but it is a hypothesis. Do not
 restate it as a finding.
 
-**Closing the tab is the only known remedy.** So `--reset` means "stop re-applying,
-and send the clears", never "undo". The workaround:
+**Closing the tab is the only known remedy.** So `--reset` means "stop
+re-applying", never "undo". The workaround:
 
 ```
 browser emulate --reset --recreate

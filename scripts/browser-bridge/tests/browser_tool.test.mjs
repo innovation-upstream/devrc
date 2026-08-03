@@ -14,7 +14,7 @@ import {
   BrowserToolRefusal, hostOf, navSchemeOf, hostDenied, allowedOpsFromEnv, forcedTab,
   buildRequest, summarizeResult, runBrowserOp,
   EMULATION_LIMITS_MIRROR, EMULATION_ORIENTATIONS_ALLOWED,
-  EMULATION_COLOR_SCHEMES_ALLOWED,
+  EMULATION_COLOR_SCHEMES_ALLOWED, EMULATE_OPERATOR_ONLY_FIELDS,
 } from "../opencode/tools/browser_tool_impl.mjs";
 // The AUTHORITY on emulation bounds. The tool file cannot import this (the
 // browser-agent wrapper copies only browser.js + browser_tool_impl.mjs into the
@@ -893,14 +893,14 @@ test("buildRequest: emulate is DEFAULT-reachable and forced to the env tab (pres
 test("buildRequest: emulate raw width/height path forwards typed scalars only", () => {
   const b = buildRequest({
     op: "emulate", width: 390, height: 844, deviceScaleFactor: 3, mobile: true,
-    maxTouchPoints: 5, userAgent: "UA/1.0", timezone: "Europe/London",
+    maxTouchPoints: 5,
     orientation: "portrait", colorScheme: "dark",
   }, baseEnv(), TOK).body;
   assert.deepEqual(b, {
     op: "emulate", tab: 4242, width: 390, height: 844, dsf: 3, mobile: true,
-    maxTouchPoints: 5, ua: "UA/1.0", tz: "Europe/London",
+    maxTouchPoints: 5,
     orientation: "portrait", colorScheme: "dark",
-  }, "descriptive arg names map onto the wire's dsf/ua/tz; nothing else is added");
+  }, "descriptive arg names map onto the wire's dsf; nothing else is added");
   // The body must be something normalizeEmulation (the authority) accepts — a
   // whitelist that produced a shape the extension rejects would be a green test
   // and a broken op.
@@ -916,6 +916,68 @@ test("buildRequest: emulate reset path sends {reset:true} and refuses reset+para
     () => buildRequest({ op: "emulate", reset: true, device: "iphone-15" }, baseEnv(), TOK),
     /invalid_emulation:reset_with_params/,
     "reset + a device description is contradictory, not resolved by precedence");
+});
+
+// --------------------------------------------------------------------------- //
+// OPERATOR-ONLY emulation fields (#F7). `userAgent`/`timezone` used to be
+// forwarded RAW from the model. They are identity a page can read, chosen by a
+// model whose input includes untrusted pages, and emulation is sticky for the
+// whole run — so a prompt-injected UA rides every later `nav`, including to an
+// authenticated site. Same reasoning that already excluded `geo`.
+//
+// RED-BEFORE-GREEN: on origin/main `buildRequest({op:"emulate",userAgent:"x"})`
+// SUCCEEDS and puts `ua:"x"` on the wire, so every assertion below fails there.
+// --------------------------------------------------------------------------- //
+test("buildRequest: emulate REFUSES the operator-only fields by name", () => {
+  for (const field of EMULATE_OPERATOR_ONLY_FIELDS) {
+    assert.throws(
+      () => buildRequest({ op: "emulate", device: "iphone-15", [field]: "x" },
+                         baseEnv(), TOK),
+      new RegExp(`emulation_field_operator_only:${field}`),
+      `\`${field}\` must be refused BY NAME, not silently dropped`);
+  }
+  // The refusal must also be reachable in combination with `reset` (which
+  // short-circuits) and on its own (which would otherwise hit
+  // `emulate_needs_device_or_params` and refuse for the WRONG reason).
+  assert.throws(
+    () => buildRequest({ op: "emulate", reset: true, userAgent: "UA/1.0" }, baseEnv(), TOK),
+    /emulation_field_operator_only:userAgent/,
+    "reset short-circuits, so the operator-only check must run BEFORE it");
+  assert.throws(
+    () => buildRequest({ op: "emulate", timezone: "Europe/London" }, baseEnv(), TOK),
+    /emulation_field_operator_only:timezone/,
+    "alone, it must refuse for THIS reason — not emulate_needs_device_or_params");
+  // Pin the SET, not just its behaviour: the loop above derives from the export,
+  // so an accidental emptying would make it vacuous (zero iterations, green).
+  assert.deepEqual([...EMULATE_OPERATOR_ONLY_FIELDS], ["userAgent", "timezone"],
+    "the exported list is the single source these refusals derive from");
+  // `geo`/`touch` deliberately stay on the SILENT-DROP path (never declared args,
+  // pinned by the raw-CDP-passthrough test) — asserted here so the asymmetry is a
+  // decision on the record rather than an oversight.
+  assert.deepEqual(
+    buildRequest({ op: "emulate", device: "iphone-15", geo: { latitude: 1 }, touch: true },
+                 baseEnv(), TOK).body,
+    { op: "emulate", tab: 4242, device: "iphone-15" },
+    "geo/touch are dropped by the whitelist, not refused by name");
+});
+
+test("buildRequest: NO agent path can put `ua`/`tz` on the wire", () => {
+  // The complement of the refusal test: a refusal that is bypassable by some
+  // other spelling would leave the wire field reachable. A preset is the ONLY
+  // legitimate way a UA gets set, and that happens server-side — so the body the
+  // tool builds must never carry `ua`/`tz` itself.
+  const bodies = [
+    buildRequest({ op: "emulate", device: "iphone-15" }, baseEnv(), TOK).body,
+    buildRequest({ op: "emulate", width: 390, height: 844 }, baseEnv(), TOK).body,
+    buildRequest({ op: "emulate", reset: true }, baseEnv(), TOK).body,
+  ];
+  for (const b of bodies) {
+    assert.equal(b.ua, undefined, "the agent must never send a raw ua");
+    assert.equal(b.tz, undefined, "the agent must never send a raw tz");
+  }
+  // A device preset still reaches the extension, which is what sets the matching
+  // UA — proving the legitimate mobile-testing path survives the removal.
+  assert.equal(bodies[0].device, "iphone-15");
 });
 
 test("buildRequest: emulate with NO parameters is refused (mirrors protocol.js)", () => {
@@ -940,13 +1002,6 @@ test("buildRequest: emulate enforces EMULATION_LIMITS bounds client-side", () =>
   bad({ device: "iphone-15", deviceScaleFactor: 0 }, /invalid_emulation:dsf/);
   bad({ device: "iphone-15", maxTouchPoints: EMULATION_LIMITS.maxTouchPoints + 1 },
       /invalid_emulation:maxTouchPoints/);
-  bad({ userAgent: "x".repeat(EMULATION_LIMITS.maxUserAgentChars + 1) },
-      /invalid_emulation:ua/);
-  // A CR/LF in a UA is the header-injection primitive — REFUSED, never stripped.
-  bad({ userAgent: "UA/1.0\r\nX-Evil: 1" }, /invalid_emulation:ua/);
-  bad({ timezone: "Europe/London; DROP" }, /invalid_emulation:tz/);
-  bad({ timezone: "z".repeat(EMULATION_LIMITS.maxTimezoneChars + 1) },
-      /invalid_emulation:tz/);
   bad({ orientation: "sideways" }, /invalid_emulation:orientation/);
   bad({ colorScheme: "sepia" }, /invalid_emulation:colorScheme/);
   bad({ device: "iphone 15; rm -rf /" }, /invalid_emulation:device/);
@@ -1110,10 +1165,18 @@ test("OP-SET PARITY: `emulate` appears in ALL FOUR agent-facing sources (#316)",
   // a viewport, so the op would be listed and unusable — the whole point of #316.
   const toolSrc = readBB("opencode", "tools", "browser.js");
   for (const field of ["device", "width", "height", "deviceScaleFactor", "mobile",
-                       "maxTouchPoints", "userAgent", "timezone", "orientation",
+                       "maxTouchPoints", "orientation",
                        "colorScheme", "reset"]) {
     assert.match(toolSrc, new RegExp(`^\\s*${field}: tool\\.schema\\.`, "m"),
       `browser.js args schema must declare \`${field}\` or the model cannot pass it`);
+  }
+  // …and the complement: the operator-only fields must NOT be declared, or the
+  // model is invited to pass one and only the impl refusal stands in the way.
+  assert.ok(EMULATE_OPERATOR_ONLY_FIELDS.length > 0,
+    "HARNESS: an empty list would make the loop below vacuous");
+  for (const field of EMULATE_OPERATOR_ONLY_FIELDS) {
+    assert.doesNotMatch(toolSrc, new RegExp(`^\\s*${field}: tool\\.schema\\.`, "m"),
+      `browser.js args schema must NOT declare \`${field}\` — it is operator-only`);
   }
 });
 
@@ -1241,12 +1304,17 @@ const REVIEWED_AGENT_EXCLUSIONS = Object.freeze({
       "either. Pure token cost with no available follow-up action.",
     source: "`ping` is DELIBERATELY ABSENT from OP_TO_SERVER",
   },
-  // NOTE: `emulate` used to be declared here. It is REACHABLE and default-on as
-  // of #316 — the exclusion rationale it cited was factually wrong (it asserted
-  // sticky per-tab state that outlives the op; extension/protocol.js's EMULATION
-  // header documents the opposite as the deliberately-chosen safety property).
-  // The `DECLARED EXCLUSIONS` test below asserts a declared op is NOT reachable,
-  // so this entry could not survive the mapping.
+  // NOTE: `emulate` used to be declared here, citing "sticky per-tab state that
+  // outlives the op". THAT OBSERVATION IS CORRECT — and it is the conclusion, not
+  // the observation, that #316 rejected. (An earlier version of this note claimed
+  // protocol.js documented "the opposite" as a safety property; protocol.js now
+  // documents the stickiness as MEASURED TRUE for the viewport — it survives the
+  // debugger detach and a re-nav, #319. The non-viewport overrides do die at
+  // detach, as that header always said.) What makes the op safe for the agent is
+  // not detach semantics but the ownership gate plus the wrapper closing its own
+  // tab on every exit path — closing being the only known un-sticker. The
+  // `DECLARED EXCLUSIONS` test below asserts a declared op is NOT reachable, so
+  // this entry could not survive the mapping either way.
 });
 
 test("HARNESS SELF-CHECK: the wire-op inventory parses to a plausible, non-empty set", () => {

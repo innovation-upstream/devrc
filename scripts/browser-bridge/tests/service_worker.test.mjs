@@ -347,3 +347,77 @@ test("ping: degrades to empty version + id when runtime is bare", async () => {
   assert.equal(out.extensionVersion, "");
   assert.equal(out.id, "");
 });
+
+// --------------------------------------------------------------------------- //
+// `emulate --reset` — THE RUNTIME NOTE IS PINNED CHARACTER FOR CHARACTER.
+//
+// WHY A LITERAL, and why the WHOLE string. This note is read by a human operator
+// AND forwarded verbatim to the autonomous LLM agent (browser_tool_impl.mjs's
+// emulate summarizer carries `note` through on purpose), so a false sentence in
+// it is acted on by both. It has already shipped false once: the note claimed
+// "the CDP clears were sent" while the reset branch is a single Map delete that
+// sends nothing — and NOTHING in the tree asserted the text, which is exactly
+// why it shipped. Pinning a FEATURE of the string ("mentions #319", "contains
+// the word viewport") would have passed on that false note too. So: the whole
+// normalised string, or this test is theatre.
+//
+// The two tests below are COMPLEMENTS and both are required:
+//   * the text says nothing was sent to the browser;
+//   * `state.calls.debugger` is empty, which is the code-side fact that makes
+//     that sentence true. Either alone can go green while the other rots.
+// --------------------------------------------------------------------------- //
+const RESET_NOTE =
+  "emulation stopped: this tab will no longer have overrides re-applied. " +
+  "NOTHING WAS SENT TO THE BROWSER — no debugger was attached and no CDP " +
+  "clears were issued. THIS IS NOT AN UNDO. The UA, timezone, " +
+  "devicePixelRatio, touch points and prefers-color-scheme revert on " +
+  "their own, because CDP overrides die when the debugger detaches — not " +
+  "because anything cleared them. The emulated VIEWPORT SIZE does NOT " +
+  "come back: it survives the detach and a re-navigation (measured; " +
+  "mechanism unknown, issue #319). Replacing the tab is the only known " +
+  "remedy: `browser emulate --reset --recreate` opens a fresh tab at the " +
+  "same url and closes this one (the tab id changes).";
+
+test("emulate --reset: the runtime note is pinned VERBATIM", async () => {
+  resetCalls();
+  const out = await OPS.emulate({ tabId: TAB_ID, reset: true });
+  assert.equal(out.reset, true);
+  assert.equal(out.tabId, TAB_ID);
+  // Normalise whitespace runs ONLY — the source is `+`-concatenated across lines,
+  // so a re-wrap must not fail, but a WORD change must.
+  const norm = (s) => String(s).replace(/\s+/g, " ").trim();
+  assert.equal(norm(out.note), norm(RESET_NOTE),
+    "the emulate --reset note is a CONTRACT read by the operator AND forwarded " +
+    "to the LLM agent — update this literal in the same commit as the string");
+});
+
+test("emulate --reset: sends NOTHING to CDP (the fact the note asserts)", async () => {
+  resetCalls();
+  const out = await OPS.emulate({ tabId: TAB_ID, reset: true });
+  assert.deepEqual(state.calls.debugger, [],
+    "reset must attach NO debugger and send NO CDP command — a non-empty list " +
+    "makes the note's 'NOTHING WAS SENT TO THE BROWSER' sentence false");
+  assert.deepEqual(state.calls.executeScript, [],
+    "reset must not inject into the page either");
+  // It must not invent a `cleared` field either: the recreate stub in
+  // tests/test_browser_cli_args.py used to model one the code cannot emit.
+  assert.equal("cleared" in out, false,
+    "there is no `cleared` field — nothing is cleared, so nothing is reported");
+});
+
+test("emulate --reset: reports what WAS in force, then forgets it", async () => {
+  resetCalls();
+  // Seed real state through the normal apply path (this one DOES use CDP), then
+  // reset it — so the "no debugger" assertion above is about reset specifically
+  // and not about a mock that never calls the debugger at all.
+  await OPS.emulate({ tabId: TAB_ID, width: 390, height: 844 });
+  assert.ok(state.calls.debugger.length > 0,
+    "HARNESS: applying emulation MUST use the debugger, else the reset test's " +
+    "empty-debugger assertion proves nothing about reset");
+  resetCalls();
+  const out = await OPS.emulate({ tabId: TAB_ID, reset: true });
+  assert.ok(out.wasEmulating, "the reset reports the state it dropped");
+  const again = await OPS.emulate({ tabId: TAB_ID, reset: true });
+  assert.equal(again.wasEmulating, null,
+    "a second reset has nothing left to report — the state really was dropped");
+});

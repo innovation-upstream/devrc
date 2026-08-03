@@ -285,14 +285,21 @@ If `ping` still reports the old version after ↻, **fully quit and reopen Brave
 > ```bash
 > browser open https://example.com && browser emulate iphone-15
 > browser emulate --reset          # read `.note`
->   # ≤0.7.1 → "…overrides CLEARED on the tab" (false for the viewport)
->   # 0.7.3  → says the viewport is NOT restored; points at --reset --recreate
+>   # ≤0.7.1 → "emulation stopped. Nothing had to be undone — CDP overrides die at
+>   #           debugger detach, so the tab was already un-emulated between ops."
+>   #           (the "already un-emulated" half is false for the viewport)
+>   # 0.7.3  → "…NOTHING WAS SENT TO THE BROWSER…" + says the viewport is NOT
+>   #           restored and points at --reset --recreate
 > ```
 >
-> 🔴 The viewport stickiness itself is UNFIXED and the mechanism is unexplained —
-> `Emulation.clearDeviceMetricsOverride` is sent and acknowledged and the size
-> survives it, along with a re-nav. Replacing the tab is the only known remedy
-> (`emulate --reset --recreate`). See #319.
+> (Quoted verbatim from `4ca5ed5:extension/service_worker.js`. 0.7.2's note — the
+> one that said the overrides were CLEARED — never shipped on `main`.)
+>
+> 🔴 The viewport stickiness itself is UNFIXED and the mechanism is unexplained. On
+> the 0.7.2 branch build `Emulation.clearDeviceMetricsOverride` was sent and
+> acknowledged and the size survived it, along with a re-nav — so the clears were
+> NOT carried into 0.7.3, which sends nothing on reset. Replacing the tab is the
+> only known remedy (`emulate --reset --recreate`). See #319.
 
 > **0.7.1 — `text --annotated` inside `--frame`.** No new wire op, so `ping`'s
 > `ops` list is byte-identical to 0.7.0's and cannot discriminate this build.
