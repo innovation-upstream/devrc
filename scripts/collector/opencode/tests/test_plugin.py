@@ -2,10 +2,10 @@
 """Tests for the OpenCode activity plugin.
 
 Covers:
-  - State file round-trip and ring-buffer pruning (shell-level via node)
   - Emit round-trip: plugin calls emit → collector.parse_line succeeds
   - opencode plugin-loader contract: exactly one named export, and it is a
     function (a non-function export makes opencode reject the whole module)
+  - Registered hook keys are ONLY the two real ones (`tool.execute.before/after`)
   - Declarative deployment via nix/home.nix into the singular plugin/ dir
 """
 from __future__ import annotations
@@ -58,40 +58,53 @@ def write_mock_emit(path: Path, log_file: Path) -> None:
 
 
 # --------------------------------------------------------------------------- #
-# State round-trip + ring buffer (JS logic, tested via node)
+# Registered hook keys  (regression: three handlers that could never fire)
 # --------------------------------------------------------------------------- #
+#
+# `session.created`, `message.updated` and `session.idle` are opencode BUS EVENT
+# TYPES, not plugin hook names — they are delivered through a generic `event`
+# hook. Registering them as hook keys is a silent no-op. The plugin carried all
+# three from 2026-07-29 to 2026-08-03 and none ever fired: `kind=session-create`
+# and `kind=session-idle` recorded 0 rows for the plugin's entire existence.
+#
+# This test pins the SCOPE decision: only real hooks are registered, so a
+# handler that cannot run can never be re-added silently.
 
-def test_state_file_roundtrip(tmp_path):
-    """Write state JSON, read it back, verify contents."""
-    state_file = tmp_path / "state.json"
-    state_file.write_text(
-        json.dumps({"version": 1, "seen": ["a", "b", "c"]}),
-        encoding="utf-8",
+REAL_HOOKS = ["tool.execute.after", "tool.execute.before"]
+# Bus event types — hook keys that opencode will never call.
+DEAD_HOOKS = ["session.created", "message.updated", "session.idle"]
+
+
+def _hook_keys() -> list:
+    """Instantiate ActivityPlugin and return the hook keys it registers."""
+    code = (
+        f'const m = await import({json.dumps(PLUGIN_JS.as_uri())});\n'
+        'const hooks = await m.ActivityPlugin({\n'
+        '  project: { name: "p" }, directory: "/tmp", worktree: "/tmp",\n'
+        '  client: {}, serverUrl: "", $: {},\n'
+        '});\n'
+        'console.log(JSON.stringify(Object.keys(hooks).sort()));\n'
     )
-    data = json.loads(state_file.read_text(encoding="utf-8"))
-    assert data["version"] == 1
-    assert data["seen"] == ["a", "b", "c"]
+    rc = run_node(code)
+    assert rc.returncode == 0, f"plugin factory threw: {rc.stderr}"
+    return json.loads(rc.stdout)
 
 
-def test_state_ring_buffer():
-    """Add 1100 IDs to state, verify oldest 100 are pruned (keeps last 1000)."""
-    code = '''
-import { readFileSync, writeFileSync } from "fs";
-const MAX_SEEN = 1000;
-let seen = [];
-for (let i = 0; i < 1100; i++) seen.push("msg_" + i);
-// Ring buffer logic (mirrors plugin)
-const trimmed = seen.slice(-MAX_SEEN);
-const state = JSON.stringify({ version: 1, seen: trimmed });
-const parsed = JSON.parse(state);
-console.log(JSON.stringify({ count: parsed.seen.length, first: parsed.seen[0], last: parsed.seen[parsed.seen.length - 1] }));
-'''
-    result = run_node(code)
-    assert result.returncode == 0, result.stderr
-    out = json.loads(result.stdout.strip())
-    assert out["count"] == 1000
-    assert out["first"] == "msg_100"  # first 100 pruned
-    assert out["last"] == "msg_1099"
+def test_only_real_hooks_are_registered():
+    """Every registered key must be a hook opencode actually calls."""
+    assert _hook_keys() == REAL_HOOKS
+
+
+def test_no_bus_event_types_registered_as_hooks():
+    """A bus event type registered as a hook key is dead code that reads live."""
+    registered = set(_hook_keys())
+    revived = registered & set(DEAD_HOOKS)
+    assert not revived, (
+        f"{sorted(revived)} registered as hook key(s) — these are opencode BUS "
+        f"EVENT TYPES, not hooks, and will never fire. They emitted 0 rows over "
+        f"5 days. Route them through a single `event` hook that switches on "
+        f"`event.type` instead."
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -110,11 +123,14 @@ def test_plugin_emit_roundtrip(tmp_path):
     payload = json.dumps({"agent": "code", "model": "gpt-4"})
 
     env = dict(os.environ, ACTIVITY_SPOOL_DIR=str(spool))
-    # Build emit args the same way the JS plugin would
+    # Build emit args the same way the JS plugin would. `tool-call` is the only
+    # kind the plugin emits — using a kind it does not emit would encode a claim
+    # about the plugin that is false (this test read `session-create` while that
+    # handler was dead).
     rc = subprocess.run(
         [
             "bash", str(EMIT),
-            "source=opencode", "kind=session-create",
+            "source=opencode", "kind=tool-call",
             f"b64:text={text}", f"b64:project={project}",
             f"b64:cwd={cwd}", f"b64:session={session}",
             "b64:app=opencode", f"b64:payload={payload}",
@@ -129,7 +145,7 @@ def test_plugin_emit_roundtrip(tmp_path):
     ev = C.parse_line(lines[0])
     assert ev is not None
     assert ev["source"] == "opencode"
-    assert ev["kind"] == "session-create"
+    assert ev["kind"] == "tool-call"
     assert ev["text"] == text
     assert ev["project"] == project
     assert ev["cwd"] == cwd
@@ -320,7 +336,7 @@ function emitEvent({{ kind, text, project, cwd, session, app, payload }}) {{
 }}
 
 emitEvent({{
-  kind: "session-create",
+  kind: "tool-call",
   text: "test session",
   project: "my-proj",
   cwd: "/tmp",
@@ -334,7 +350,7 @@ emitEvent({{
 
     log_content = log_file.read_text(encoding="utf-8").strip()
     assert "source=opencode" in log_content
-    assert "kind=session-create" in log_content
+    assert "kind=tool-call" in log_content
     assert "b64:project=" in log_content
     assert "b64:session=s1" in log_content
     assert "b64:app=opencode" in log_content
