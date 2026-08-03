@@ -94,6 +94,23 @@ CLAUDE_CODE_EXPECTED = [
     # does — `cd /x && git stash` reports the stash reason, not the cd reason.
     "check_git_stash",
     "check_git_clean_force",
+    # 🔴 Added later on 2026-08-02 by explicit operator decision — the TENTH,
+    # ELEVENTH and TWELFTH. The three device/cluster-destruction families, each
+    # measured ALLOW against the live ~/.claude/hooks/bash-guard.py before the
+    # move, with `git add -A` and `git reset --hard` as DENY positive controls
+    # in the same sweep:
+    #   ALLOW  talosctl -n 192.168.50.94 reset
+    #   ALLOW  mkfs.ext4 /dev/sdc
+    #   ALLOW  dd if=/dev/zero of=/dev/sdc
+    # None has a benign use from an agent here; the read/inspect neighbours
+    # (`talosctl version`, `talosctl -n <ip> get members`, file-to-file `dd`,
+    # `dd of=/dev/null`) do not match, and `mkfs` matches on the PROGRAM name so
+    # naming it in an argument is not a command. See section 3c.
+    # They sit BEFORE check_heredoc_to_file / check_cd_then_git so a command
+    # tripping both reports the device-destruction reason.
+    "check_talosctl_reset",
+    "check_mkfs",
+    "check_dd_to_block_device",
     "check_heredoc_to_file",
     "check_cd_then_git",
     "check_private_key",
@@ -130,17 +147,29 @@ def test_opencode_policy_is_a_strict_superset():
     assert set(CLAUDE_CODE_EXPECTED) < set(oc)
 
 
-# 🔴 The families that remain opencode-ONLY. `check_git_stash` and
-# `check_git_clean_force` USED to be listed here; they moved into the
-# claude-code policy on 2026-08-02. These four did NOT move, deliberately:
-# `rm -rf` risks false positives on legitimate build-directory cleanup, and
-# talosctl/mkfs/dd are hardware/cluster operations an interactive Claude Code
-# session can be prompted about rather than hard-denied. Widening any of them
-# is a separate operator decision.
+# 🔴 THE ONE CHECK THAT REMAINS opencode-ONLY — and this list is expected to
+# STAY a list of one.
+#
+# `check_git_stash` + `check_git_clean_force` were listed here and moved into
+# the claude-code policy on 2026-08-02; `check_talosctl_reset`, `check_mkfs` and
+# `check_dd_to_block_device` followed later the same day. `check_rm_rf_critical`
+# was held back IN THAT SAME CHANGE, on purpose — it is not the residue of an
+# unfinished migration:
+#
+#   `rm -rf` has legitimate, FREQUENT use on these hosts (build directories,
+#   node_modules, .direnv, throwaway worktrees, /tmp scratch trees). The check
+#   is narrow — only `/`, `~`/`$HOME`, `.`/`..` and the top-level system dirs —
+#   but narrow is not never, and a guard that fires during routine cleanup
+#   trains its subject to route around it. A routed-around guard is worse than
+#   no guard because it still reports safety. Claude Code also falls back to a
+#   PROMPT the operator sees, which is exactly the control opencode lacks
+#   (`opencode run` auto-rejects an `ask`), so the deny buys much less here.
+#
+# 🔴 Do not "finish the job" by moving it. That is its own operator decision and
+# it needs its own evidence — a measurement of how often the fatal-target set
+# would actually fire on real sessions, not the observation that it is the last
+# one left.
 IRREVERSIBLE_EXPECTED = [
-    "check_talosctl_reset",
-    "check_mkfs",
-    "check_dd_to_block_device",
     "check_rm_rf_critical",
 ]
 
@@ -151,22 +180,28 @@ def test_opencode_policy_carries_the_irreversible_checks():
 
 
 @pytest.mark.parametrize("command", [
-    "talosctl -n 192.168.50.94 reset",
-    "mkfs.ext4 /dev/sda",
-    "dd if=x of=/dev/sda",
     "rm -rf /",
+    "rm -rf $HOME",
+    "sudo rm -rf /etc",
+    "rm -fr /usr",
     # NOTE: `git -C <path> reset --hard` USED to be listed here, asserting that
     # Claude Code allowed it. That was the gap, not a feature — it is now denied
     # under both policies and is asserted positively in section 1b below.
     # NOTE: `git stash push -m wip` and `git clean -fd` were listed here for the
     # same reason and moved for the same reason — see section 1c.
+    # NOTE: `talosctl -n <ip> reset`, `mkfs.ext4 /dev/sda` and
+    # `dd if=x of=/dev/sda` were listed here for the same reason and moved for
+    # the same reason — see section 3c.
 ])
 def test_the_new_checks_do_not_leak_into_claude_code(command):
     """🔴 The blast-radius assertion, by OUTCOME rather than by list membership.
 
     Each of these is denied under "opencode" and must resolve to no-deny under
-    "claude-code" — the four families that stayed opencode-only. This is the
-    fence that keeps a later "while I'm here" widening honest.
+    "claude-code" — the ONE family that stayed opencode-only, `rm -rf` of a
+    critical path. This is the fence that keeps a later "while I'm here"
+    widening honest, and after 2026-08-02 it is the whole fence: if these rows
+    start denying under claude-code, someone finished a job that was
+    deliberately left unfinished. Read IRREVERSIBLE_EXPECTED above first.
     """
     assert gc.evaluate(command, "opencode") is not None
     assert gc.evaluate(command, "claude-code") is None
@@ -798,6 +833,225 @@ def test_the_one_real_quoting_false_positive_is_a_heredoc_body():
 
 
 # --------------------------------------------------------------------------- #
+# 3c. 🔴 talosctl reset / mkfs / dd-to-a-block-device under the CLAUDE-CODE policy
+#
+# Closes a gap that was live on both hosts until 2026-08-02. All three checks
+# existed and were correct — they were simply not in the policy bash-guard.py
+# runs, so wiping a cluster node, formatting a disk and overwriting a block
+# device were all permitted, unprompted, on the operator's primary tool.
+#
+# Probed against the repo's guard_core under BOTH policies before the change,
+# WITH controls in the same sweep so a wired-to-nothing harness could not have
+# produced the reassuring answer:
+#
+#     DENY   git add -A                          <- positive control (guard live)
+#     DENY   git reset --hard HEAD               <- positive control
+#     ALLOW  talosctl -n 192.168.50.94 reset
+#     ALLOW  mkfs.ext4 /dev/sdc
+#     ALLOW  dd if=/dev/zero of=/dev/sdc
+#     ALLOW  ls -la /tmp                         <- benign control
+#
+# (Independently measured against the DEPLOYED ~/.claude/hooks/bash-guard.py by
+# the operator the same evening, with the same verdicts.)
+#
+# Every deny below is asserted BY REASON, not by `is not None`. The heredoc row
+# is the reason that matters: with this change reverted it still DENIES, via
+# check_heredoc_to_file — so a bare truthiness assertion would be green for the
+# wrong reason and would pass with check_mkfs deleted from the policy entirely.
+# --------------------------------------------------------------------------- #
+TALOS_REASON_MARK = "`talosctl reset` is blocked"
+# mkfs/dd interpolate the program name and the device into the message, so the
+# mark is the stable clause rather than the leading backtick phrase.
+MKFS_REASON_MARK = "FORMATS a filesystem"
+DD_REASON_MARK = "writing to a block device overwrites the disk in place"
+
+
+# The wrapped/prefixed spellings the parser exists to survive. Device paths and
+# node IPs are pairwise distinct so no fixture can pass by accident of another's
+# text, and none of the paths contains the substring `reset`/`mkfs`/`dd`.
+TALOS_DENY = [
+    "talosctl reset",
+    "talosctl -n 192.168.50.94 reset",
+    "talosctl --nodes 192.168.50.95 reset",
+    "talosctl -n 192.168.50.96 reset --graceful=false",
+    "VAR=1 talosctl reset",
+    "sudo talosctl reset",
+    "sudo -n talosctl -n 192.168.50.97 reset",
+    "env talosctl reset",
+    "timeout 60 talosctl -n 192.168.50.98 reset",
+    "bash -c 'talosctl -n 192.168.50.99 reset'",
+    "echo ok && talosctl reset",
+    "kubectl get nodes; talosctl -n 192.168.50.100 reset",
+    "/usr/local/bin/talosctl -n 192.168.50.101 reset",
+]
+
+MKFS_DENY = [
+    "mkfs.ext4 /dev/sdc",
+    "mkfs.xfs /dev/sdd1",
+    "mkfs -t ext4 /dev/sde",
+    "mke2fs /dev/sdf",
+    "mkswap /dev/sdg",
+    "mkdosfs /dev/sdh1",
+    "VAR=1 mkfs.ext4 /dev/sdi",
+    "sudo mkfs.ext4 /dev/sdj",
+    "sudo -n mkfs.btrfs /dev/sdk",
+    "env mkfs.ext4 /dev/sdl",
+    "bash -c 'mkfs.ext4 /dev/sdm'",
+    "echo ok && mkfs.ext4 /dev/sdn",
+    "lsblk; mkfs.ext4 /dev/sdo",
+    "/usr/sbin/mkfs.ext4 /dev/sdp",
+]
+
+DD_DENY = [
+    "dd if=/dev/zero of=/dev/sdc",
+    "dd if=image.iso of=/dev/sdd bs=4M status=progress",
+    "dd of=/dev/sde if=/dev/zero",
+    "dd if=/dev/zero of=/dev/nvme0n1",
+    "dd if=/dev/zero of=/dev/mapper/vg0-lv0",
+    "VAR=1 dd if=/dev/zero of=/dev/sdf",
+    "sudo dd if=/dev/zero of=/dev/sdg",
+    "sudo -n dd if=/dev/zero of=/dev/sdh",
+    "env dd if=/dev/zero of=/dev/sdi",
+    "bash -c 'dd if=/dev/zero of=/dev/sdj'",
+    "echo ok && dd if=/dev/zero of=/dev/sdk",
+    "lsblk; dd if=/dev/zero of=/dev/sdl",
+    "/usr/bin/dd if=/dev/zero of=/dev/sdm",
+]
+
+
+@pytest.mark.parametrize("command", TALOS_DENY)
+def test_talosctl_reset_is_denied_under_claude_code(command):
+    """🔴 RED at origin/main for every row: the check was opencode-only, so
+    `claude-code` returned None."""
+    _assert_denied_as(command, TALOS_REASON_MARK, "claude-code")
+
+
+@pytest.mark.parametrize("command", MKFS_DENY)
+def test_mkfs_is_denied_under_claude_code(command):
+    """🔴 RED at origin/main for every row — same mechanism."""
+    _assert_denied_as(command, MKFS_REASON_MARK, "claude-code")
+
+
+@pytest.mark.parametrize("command", DD_DENY)
+def test_dd_to_block_device_is_denied_under_claude_code(command):
+    """🔴 RED at origin/main for every row — same mechanism."""
+    _assert_denied_as(command, DD_REASON_MARK, "claude-code")
+
+
+@pytest.mark.parametrize("command", TALOS_DENY)
+def test_talosctl_reset_still_denied_under_opencode(command):
+    """The move must not COST opencode anything: `POLICIES["opencode"]` is
+    `_CLAUDE_CODE_CHECKS + _IRREVERSIBLE_CHECKS`, so the check is inherited
+    rather than duplicated. This asserts the inheritance actually holds."""
+    _assert_denied_as(command, TALOS_REASON_MARK, "opencode")
+
+
+@pytest.mark.parametrize("command", MKFS_DENY)
+def test_mkfs_still_denied_under_opencode(command):
+    _assert_denied_as(command, MKFS_REASON_MARK, "opencode")
+
+
+@pytest.mark.parametrize("command", DD_DENY)
+def test_dd_to_block_device_still_denied_under_opencode(command):
+    _assert_denied_as(command, DD_REASON_MARK, "opencode")
+
+
+def test_mkfs_in_a_heredoc_body_reports_the_mkfs_reason_not_the_heredoc_reason():
+    """🔴 The ORDERING pin, and the one row that is NOT green-by-default.
+
+    With this change reverted this command still denies — via
+    check_heredoc_to_file, which sits later in the list but was the only check
+    of the two in the claude-code policy. So `assert reason is not None` passes
+    at origin/main and pins nothing. The attribution is the whole test: the
+    three new checks sit BEFORE check_heredoc_to_file, so the reason names the
+    device destruction rather than the token waste.
+    """
+    heredoc = (
+        "cat > /tmp/runbook.md <<'EOF'\n"
+        "mkfs.ext4 /dev/sdq\n"
+        + ("filler line to clear the heredoc size threshold\n" * 40)
+        + "EOF"
+    )
+    assert gc.check_heredoc_to_file(heredoc) is not None, (
+        "fixture no longer trips the heredoc check, so this test would pass "
+        "trivially — the ordering is no longer being exercised"
+    )
+    _assert_denied_as(heredoc, MKFS_REASON_MARK, "claude-code")
+
+
+# --- the ALLOW half -------------------------------------------------------- #
+# 🔴 Built independently of the deny lists — different subcommands, different
+# device paths — so a copy-paste symmetry cannot make both halves agree with the
+# same bug. INVARIANT GUARDS (green before and after): this is the
+# false-positive fence, not regression coverage for any shipped bug.
+DEVICE_ALLOW = [
+    # talosctl reads and non-reset verbs
+    "talosctl version",
+    "talosctl -n 192.168.50.110 get members",
+    "talosctl -n 192.168.50.111 get resetstatus",
+    "talosctl -n 192.168.50.112 dmesg",
+    "talosctl -n 192.168.50.113 health",
+    "talosctl --nodes 192.168.50.114 services",
+    # dd that is not aimed at a block device
+    "dd if=in.img of=out.img bs=1M",
+    "dd if=/dev/urandom of=/tmp/seed.bin count=1",
+    "dd if=/dev/zero of=/dev/null bs=1M count=10",
+    "dd if=/dev/sdz of=/tmp/backup.img",
+    # mkfs matched on the PROGRAM name, so naming it is not running it
+    "echo 'mkfs.ext4 is banned on these hosts'",
+    "grep -rn 'mkfs' claude/RULES.md",
+    "rg 'dd if=/dev/zero of=/dev/sda' docs/",
+    "git commit -m 'document why mkfs is blocked'",
+    # near-miss program names
+    "mkdir -p /tmp/scratch-nu",
+    "mktemp -d",
+    "ddrescue --help",
+]
+
+
+@pytest.mark.parametrize("command", DEVICE_ALLOW)
+def test_device_check_neighbours_stay_allowed_under_claude_code(command):
+    """INVARIANT GUARD. Reads and inspections are how an operator diagnoses the
+    thing the deny message tells them to do by hand; blocking those would push
+    them toward guessing. `dd if=/dev/sdz of=/tmp/backup.img` is the asymmetry
+    that matters — reading a device is not writing one."""
+    assert gc.evaluate(command, "claude-code") is None
+    assert gc.evaluate(command, "opencode") is None
+
+
+# --- the escape hatch ------------------------------------------------------ #
+def test_device_deny_messages_carry_the_quoting_escape_hatch():
+    """🔴 The convention `check_git_add_all` set and #295 extended: every check
+    in the claude-code policy fires on RAW TEXT in every Bash call in every
+    session, so it WILL eventually fire on someone writing ABOUT the command.
+    All three new messages must hand the caller the same documented way out."""
+    for reason in (gc.check_talosctl_reset("talosctl reset"),
+                   gc.check_mkfs("mkfs.ext4 /dev/sdr"),
+                   gc.check_dd_to_block_device("dd if=/dev/zero of=/dev/sds")):
+        assert reason is not None
+        assert "commit -F" in reason, reason
+        assert "--body-file" in reason, reason
+        assert "Write tool" in reason, reason
+
+
+def test_rm_rf_is_the_only_check_left_out_of_claude_code():
+    """🔴 The DECISION pin, stated as an assertion so it cannot quietly become
+    an oversight in either direction.
+
+    Down: if `check_rm_rf_critical` is later added to claude-code this fails,
+    and whoever does it must come with the evidence IRREVERSIBLE_EXPECTED asks
+    for (how often the fatal-target set fires on real sessions) rather than the
+    observation that it is the last one left.
+
+    Up: it also fails if a NEW check is parked in `_IRREVERSIBLE_CHECKS` as a
+    way of adding a guard without the claude-code conversation.
+    """
+    oc = [f.__name__ for f in gc.POLICIES["opencode"]]
+    cc = [f.__name__ for f in gc.POLICIES["claude-code"]]
+    assert [n for n in oc if n not in cc] == ["check_rm_rf_critical"]
+
+
+# --------------------------------------------------------------------------- #
 # 4. end-to-end through the policy, over the full spelling product
 # --------------------------------------------------------------------------- #
 IRREVERSIBLE_SAMPLES = [
@@ -1133,9 +1387,14 @@ def test_cli_denies_with_a_reason():
 
 
 def test_cli_honours_the_policy_flag():
+    """The discriminating command must be one the two policies DISAGREE about,
+    and after 2026-08-02 `talosctl reset` is no longer such a command — it moved
+    into the claude-code policy, which turned this test red (correctly: it was
+    asserting the gap). `rm -rf /` is the one remaining disagreement, so it is
+    the only fixture that can still exercise the flag."""
     import json
-    assert json.loads(_cli("talosctl reset", "claude-code").stdout)["decision"] == "allow"
-    assert json.loads(_cli("talosctl reset", "opencode").stdout)["decision"] == "deny"
+    assert json.loads(_cli("rm -rf /", "claude-code").stdout)["decision"] == "allow"
+    assert json.loads(_cli("rm -rf /", "opencode").stdout)["decision"] == "deny"
 
 
 def test_cli_reports_bad_input_with_a_nonzero_exit():

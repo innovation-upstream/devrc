@@ -664,11 +664,13 @@ in
   # The SAME source file is also deployed to ~/.config/opencode/guard_core.py
   # below and driven by the opencode plugin — one implementation, two harnesses,
   # two named policies. "claude-code" was the frozen original six until
-  # 2026-08-02, when three argv checks were added to it by explicit operator
-  # decision — `git -C <p> reset --hard`, `git stash` and `git clean -f`, all
-  # 🔴 in RULES.md and all measured ALLOW against the live hook beforehand.
-  # "opencode" = those plus the still-opencode-only irreversible families
-  # (talosctl reset / mkfs / dd to a block device / rm -rf of a critical path).
+  # 2026-08-02, when SIX argv checks were added to it by explicit operator
+  # decision — `git -C <p> reset --hard`, `git stash`, `git clean -f`,
+  # `talosctl … reset`, `mkfs*` and `dd of=/dev/<block-dev>`, all 🔴 in RULES.md
+  # or unconditionally destructive, and all measured ALLOW against the live hook
+  # beforehand. "opencode" = those plus the one still-opencode-only family,
+  # `rm -rf` of a critical path (held back deliberately — it has frequent
+  # legitimate use here, so a deny would train the operator to route around it).
   # POLICIES in guard_core.py is the authority; test_guard_core.py pins it.
   home.file.".claude/hooks/guard_core.py" = {
     source = ../scripts/claude-hooks/guard_core.py;

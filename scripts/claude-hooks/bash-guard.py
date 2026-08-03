@@ -17,6 +17,12 @@ operator decision. The list today:
     incident 2026-07-25). `git stash list`/`show` are reads and stay allowed.
   - git clean -f             -> deletes untracked files, which here are routinely
     real work (2026-08-02; RULES 🔴). `git clean -nd` stays allowed.
+  - talosctl … reset         -> WIPES a Talos node (2026-08-02). Reads such as
+    `talosctl version` / `talosctl -n <ip> get members` stay allowed.
+  - mkfs / mke2fs / mkswap … -> formats a filesystem (2026-08-02). Matched on the
+    PROGRAM name, so naming it in an argument is not a command.
+  - dd of=/dev/<block-dev>   -> overwrites a disk in place (2026-08-02).
+    `of=/dev/null` and the other pseudo sinks, and file-to-file dd, stay allowed.
   - large heredoc -> file    -> use the Write tool (token waste; audit-driven)
   - cd <path> && git ...     -> use git -C <path> (audit: #1 command shape, 1482x)
   - private key in a command -> reference the key file instead (never inline)
@@ -24,13 +30,18 @@ operator decision. The list today:
     committing/posting (insights: leaked ingress IP into a public repo once)
 
 This hook fires on EVERY Bash call in EVERY Claude Code session on both hosts,
-so adding a check here changes the operator's primary tool. FOUR
-irreversible-action families remain opencode-ONLY and are deliberately NOT
-enabled here: talosctl reset, mkfs, dd to a block device, and rm -r of
-/|$HOME|cwd|a top-level system dir. `rm -rf` in particular risks false positives
-on legitimate build-directory cleanup. Switching this adapter to the "opencode"
-policy is a one-word change — and a decision for the operator to make
-explicitly, not a side effect of hardening a different tool.
+so adding a check here changes the operator's primary tool. Exactly ONE
+irreversible-action family remains opencode-ONLY and is deliberately NOT enabled
+here: `rm -r` of /|$HOME|cwd|a top-level system dir. 🔴 That is a DECISION, not
+the leftover of an unfinished migration — `rm -rf` has frequent legitimate use
+on these hosts (build dirs, node_modules, throwaway worktrees), and a guard that
+fires during routine cleanup trains the operator to route around it, which is
+worse than no guard because it also reports safety. Claude Code additionally
+falls back to a PROMPT the operator sees, the control opencode lacks. Do not
+"finish the job" by adding it; see _IRREVERSIBLE_CHECKS in guard_core.py.
+Switching this adapter to the "opencode" policy is a one-word change — and a
+decision for the operator to make explicitly, not a side effect of hardening a
+different tool.
 
 I/O contract (unchanged): reads PreToolUse JSON on stdin (`tool_name`,
 `tool_input.command`), prints `hookSpecificOutput.permissionDecision = "deny"`
