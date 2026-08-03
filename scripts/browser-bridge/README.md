@@ -617,13 +617,35 @@ tab. These are loopback `chrome.debugger` calls to a local renderer and are
 there was no browser in the session that built this. If a legitimate op is ever
 seen timing out at 18s only when emulated, that is the first number to go measure.
 
-### Not exposed to the autonomous agent
+### Exposed to the autonomous agent, DEFAULT-ON (#316)
 
-`emulate` is absent from `ALLOWED_OPS_DEFAULT` and `OP_TO_SERVER`, so `browser
-agent` cannot reach it even via `BROWSER_AGENT_ALLOWED_OPS`. The agent's op set is
-deliberately minimal; widening it is a separate decision. The ownership gate
-already confines the op to the caller's own tab, so this is scope discipline rather
-than a safety requirement.
+`emulate` is in `OP_TO_SERVER` and in `ALLOWED_OPS_DEFAULT`, so the `browser agent`
+model can call it with no opt-in, with the typed fields
+`device`/`width`/`height`/`deviceScaleFactor`/`mobile`/`maxTouchPoints`/
+`userAgent`/`timezone`/`orientation`/`colorScheme`/`reset`. `geo` and `touch` are
+deliberately **not** forwarded to the agent (location spoofing is unrelated to the
+viewport question and is a fingerprinting surface; touch is implied by a preset or
+by `maxTouchPoints`).
+
+It was excluded until #316 on a rationale that was **factually wrong**: the comment
+in `browser_tool_impl.mjs` claimed emulation "leaves STICKY per-tab state that
+outlives the op … until an explicit `emulate --reset` or the tab is replaced", so a
+crashed agent would hand back a distorted browser. The opposite is the documented,
+deliberately-chosen design (`extension/protocol.js`, the EMULATION header's "✅ THE
+SAFETY PROPERTY THIS BUYS"): CDP Emulation overrides are **session-scoped and die at
+detach**, `withCdpSession` always detaches in its `finally`, and `emulate` therefore
+stores state in a Map that every op re-applies inside its OWN session — so **the tab
+is not emulated between ops** and a crashed agent *cannot* leave the operator's real
+browser distorted. A held-session design would have had the sticky failure the old
+comment described; this design exists to avoid it.
+
+Blast radius is bounded server-side, not by convention: `OWNED_TAB_ONLY_OPS =
+{"emulate"}` refuses the op with `not_owned_tab` on any tab the calling session did
+not `open`, and the `browser-agent` wrapper opens the run's tab under the run's own
+session id and closes it on every exit path. The residual is the transient "an
+extension is debugging this browser" banner from the CDP attach — which `eval`,
+`screenshot` and `wake` already raise. Like those, `emulate` counts as MUTATING for
+`BROWSER_AGENT_DRY_RUN`, so a dry run never attaches the debugger.
 
 ## `wake` — un-throttling a background tab without stealing the screen
 
@@ -1434,8 +1456,10 @@ The agent's entire capability is a single **custom opencode tool**, `browser`
 (`opencode/tools/browser.js` + its pure-logic sibling `browser_tool_impl.mjs`,
 copied into the scratch project's `.opencode/tools/` per run). The model calls it
 with TYPED arguments — `op` ∈ {`text`,`html`,`eval`,`nav`,`screenshot`,`frames`,
-`click`,`type`,`key`,`wake`,`context`,`whoami`} plus optional `selector`/`url`/`js`/`text`/`key`/`frame`/
-`maxBytes`/`waitMs` — **never a shell command string, and never a raw-CDP `cdp`/`method`
+`click`,`type`,`key`,`wake`,`context`,`emulate`,`whoami`} plus optional `selector`/`url`/`js`/`text`/`key`/`frame`/
+`maxBytes`/`waitMs` and the `emulate` fields (`device`/`width`/`height`/
+`deviceScaleFactor`/`mobile`/`maxTouchPoints`/`userAgent`/`timezone`/`orientation`/
+`colorScheme`/`reset`) — **never a shell command string, and never a raw-CDP `cdp`/`method`
 field** (the CDP ops are bounded typed ops only; see the CDP security model above).
 
 - **The agent's `whoami` is NARROWED — no cross-profile reconnaissance.** The

@@ -458,12 +458,22 @@ neither this page nor the note claims that list is exhaustive.
 
 ---
 
-## Not available to the autonomous agent
+## Available to the autonomous agent, default-on (#316)
 
-`emulate` is **operator-only**: it is absent from `ALLOWED_OPS_DEFAULT` and
-`OP_TO_SERVER` in `opencode/tools/browser_tool_impl.mjs`, so `browser agent`
-cannot reach it even via `BROWSER_AGENT_ALLOWED_OPS`. The agent's op set is
-deliberately minimal and widening it is a separate decision. Adding it would mean
-mapping `emulate → emulate` in `OP_TO_SERVER` and listing it in
-`ALLOWED_OPS_DEFAULT`; the ownership gate already confines it to the agent's own
-tab, so the question is scope discipline, not safety.
+`emulate` is mapped in `OP_TO_SERVER` **and** listed in `ALLOWED_OPS_DEFAULT` in
+`opencode/tools/browser_tool_impl.mjs`, so the `browser agent` model can call it
+with no opt-in. The typed fields it may pass are `device`, `width`, `height`,
+`deviceScaleFactor`, `mobile`, `maxTouchPoints`, `userAgent`, `timezone`,
+`orientation`, `colorScheme` and `reset`; `geo` and `touch` are deliberately not
+offered to the agent (location spoofing is unrelated to the viewport question and
+is a fingerprinting surface; touch is implied by a preset or by `maxTouchPoints`).
+Bounds are mirrored from `EMULATION_LIMITS` and enforced client-side before the
+request is sent, with the same `invalid_emulation:<field>` vocabulary.
+
+It was excluded until #316 on the stated grounds that it "leaves sticky per-tab
+state that outlives the op". **That was factually wrong** — and wrong about the
+exact property this page's design section exists to establish: the overrides are
+session-scoped, `withCdpSession` always detaches, the tab is *not* emulated between
+ops, and a crashed agent therefore cannot leave the operator's browser distorted.
+The ownership gate (`OWNED_TAB_ONLY_OPS`) confines the op to the tab the agent's own
+run opened, and the wrapper closes that tab on every exit path.
