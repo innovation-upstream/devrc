@@ -74,9 +74,10 @@ def test_app_honours_the_ytdlp_section(tmp_path, library, monkeypatch):
 
 
 def test_an_unconfigured_app_builds_nothing_that_needs_a_root(tmp_path,
-                                                              monkeypatch):
+                                                              monkeypatch,
+                                                              closed_port):
     cfg = tmp_path / "config.toml"
-    cfg.write_text("port = 8799\n", encoding="utf-8")
+    cfg.write_text(f"port = {closed_port}\n", encoding="utf-8")
     monkeypatch.setenv("DL_ROUTER_STATE_DIR", str(tmp_path / "state"))
     monkeypatch.setenv("DL_ROUTER_TOKEN_FILE", str(tmp_path / "token"))
     app = S.App(config_mod.load(cfg, env={}))

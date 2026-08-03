@@ -2,7 +2,7 @@
 """One place that writes an executable test helper, with a shebang that execs in
 BOTH tiers.
 
-🔴 THE TRAP (cost this suite 14 red tests on 2026-08-02)
+🔴 THE TRAP (cost the OpenCode suite 14 red tests on 2026-08-02)
 --------------------------------------------------------
 A test that writes a stub script at RUNTIME and then execs it must not use
 `#!/usr/bin/env <interp>`:
@@ -19,10 +19,19 @@ test creates while running. So the defect is invisible on the dev host and only
 the sandbox can observe it. That is the two-tier hazard in RULES.md, and the
 failure reads as "my mock emit exited 1", not as "wrong shebang".
 
-Worse, in this suite the symptom was mostly SILENT: `emitEvent` swallows every
+Worse, in the OpenCode suite the symptom was mostly SILENT: `emitEvent` swallows every
 error by design (telemetry must never crash OpenCode), so a stub that cannot
 exec produces an EMPTY log and a node exit code of 0 — the tests failed later,
 on an empty list, pointing at the wrong thing.
+
+🔴 IT CAME BACK THE NEXT DAY, in another suite (2026-08-02, same day)
+---------------------------------------------------------------------
+`scripts/dl-router/tests` had been absent from `scripts/run-tests.sh`'s target
+list since it was written — **989 tests no gate had ever run** — and
+`test_setup_script.py`'s `write_pgrep()` wrote exactly this shebang. Adding the
+suite to the gate would have gone red in the sandbox on day one. It lives in
+`scripts/testlib/` (rather than inside one suite's tests dir) precisely so the
+NEXT suite can import it instead of re-deriving it a seventh time.
 
 WHY THIS FILE EXISTS AT ALL
 ---------------------------

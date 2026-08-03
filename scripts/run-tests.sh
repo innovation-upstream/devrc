@@ -74,7 +74,17 @@
 #      before any suite runs, and a bad entry is named.
 #
 # Env overrides (defaults are the point — raise them, don't lower them casually):
-#   MIN_TESTS  minimum tests the whole run must REPORT  (default 2850; 2920 today)
+#   MIN_TESTS  minimum tests the whole run must REPORT
+#              MEASURED 2026-08-02 in the nix sandbox (`nix build
+#              .#checks.x86_64-linux.pytests`) at 4eb5798+this change: 5658
+#              collected / 5657 passed / 1 skipped / 0 failed. The dev-host
+#              tier (scripts/run-tests.sh under nix-shell) reports the same
+#              5658. origin/main alone measures 4662.
+#              Floor set at 5600 — the previous 2850 had drifted to less
+#              than HALF the real total,
+#              which is a floor that can no longer detect the collapse it
+#              exists for (an entire 989-test suite could vanish under it).
+#              Raise it when suites are added; never lower it to get green.
 #
 # Usage:
 #   scripts/run-tests.sh [--set hermetic|all] [--check-targets] [ROOT]
@@ -112,7 +122,7 @@ fi
 
 cd "$ROOT" || { echo "run-tests: cannot cd to ROOT=$ROOT" >&2; exit 2; }
 
-MIN_TESTS="${MIN_TESTS:-2850}"
+MIN_TESTS="${MIN_TESTS:-5600}"
 
 # --- GUARD 1: tool precondition ------------------------------------------------
 # Every binary the suites `skipif` on. Absence must be an ERROR, never a skip.
@@ -183,6 +193,14 @@ HERMETIC_TARGETS=(
   # `tool.execute.after` handler mis-read the hook contract shipped and produced
   # 2,699 rows of `text='unknown'` before anyone noticed.
   scripts/collector/opencode/tests
+  # Added 2026-08-02, the SAME shape as the opencode entry above and found the
+  # same day: 989 tests that no gate had ever run since dl-router was written.
+  # The suite is hermetic by construction (temp roots, temp SQLite, a stub
+  # qBittorrent, an injected clock — see its conftest) and passed 989/989 in
+  # both tiers once two portability defects were fixed: a stub script written
+  # with `#!/usr/bin/env bash` (dead in the sandbox) and a hard-coded port 8799
+  # that an orphaned listener on the workbench was answering.
+  scripts/dl-router/tests
   scripts/browser-bridge/tests
   scripts/validation/tests
   scripts/session-analysis/tests
