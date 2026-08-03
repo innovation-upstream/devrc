@@ -189,7 +189,16 @@
           '';
 
       # ---------------------------------------------------------------------
-      # Node test gate — scripts/browser-bridge/tests/*.test.mjs (460 tests).
+      # Node test gate — every scripts/**/*.test.mjs suite (997 tests, measured
+      # 2026-08-03 in this sandbox across three suites: browser-bridge 468,
+      # dl-router 508, collector/browser-ext 21).
+      #
+      # 🔴 It covered ONLY browser-bridge until 2026-08-03, because the runner
+      # hard-coded `FILES=(scripts/browser-bridge/tests/*.test.mjs)`. dl-router's
+      # 508 tests and browser-ext's 21 were gated by NOTHING from the day each
+      # suite was written — the #276/#298/#306 shape in a fourth costume. The
+      # runner now DISCOVERS suites and pins them both ways; read its header
+      # before changing this.
       #
       # Deliberately a SEPARATE check from `pytests`, not folded into it:
       #  • distinct toolchain (nodejs vs python312) — keeping them apart means
