@@ -954,25 +954,41 @@ in
     fi
   '';
 
-  # Remove the activity plugin's PRE-DECLARATIVE deployment. Until 2026-08-02 it
-  # was installed by a hand-run script into ~/.config/opencode/plugins/ (PLURAL),
-  # while home-manager owns ~/.config/opencode/plugin/ (SINGULAR). opencode's
-  # glob is `{plugin,plugins}/*.{ts,js}` and reads BOTH — measured 1.18.4, which
-  # logged a load error for each path independently — so leaving the old copy in
-  # place would load the plugin TWICE and double-emit every telemetry event.
+  # Remove the activity plugin's PRE-DECLARATIVE deployments. Until 2026-08-02
+  # it was installed by a hand-run script that symlinked the repo's
+  # activity-plugin.js into the config dir. Two stale copies can exist, and both
+  # must go before the managed entry above can take effect:
   #
-  # Only ever removes the specific symlink that deploy-plugin.sh created (a
-  # symlink whose target is the repo's activity-plugin.js); a real file or a
-  # foreign plugin someone put there deliberately is left untouched. The
-  # directory is removed only if it is then empty. No-op on every host that
-  # never ran the script (the laptop) and on every switch after the first.
-  home.activation.opencodeDropStalePluginsDir = lib.hm.dag.entryAfter ["writeBoundary"] ''
-    d="$HOME/.config/opencode/plugins"
-    f="$d/activity.js"
-    if [ -L "$f" ] && case "$(readlink "$f")" in *activity-plugin.js) true;; *) false;; esac; then
-      $DRY_RUN_CMD rm -f "$f"
-      $DRY_RUN_CMD rmdir "$d" 2>/dev/null || true
-    fi
+  #   plugin/activity.js  (SINGULAR) — the path home.file now owns. A
+  #     pre-existing non-store symlink here makes checkLinkTargets ABORT THE
+  #     WHOLE SWITCH with "would be clobbered", and `force` does not help. This
+  #     symlink exists on the workbench right now (hand-made 2026-08-02 while
+  #     diagnosing the outage), so without this step the very switch that
+  #     deploys the fix would fail. Hence entryBefore checkLinkTargets.
+  #
+  #   plugins/activity.js (PLURAL) — where the old script deployed. opencode's
+  #     glob is `{plugin,plugins}/*.{ts,js}` and 1.18.4 reads BOTH (measured: it
+  #     logged a load error for each path independently), so leaving this one
+  #     would load the plugin TWICE and double-emit every telemetry event.
+  #
+  # Only ever removes a SYMLINK whose target is the repo's activity-plugin.js —
+  # a real file, a store symlink, or a foreign plugin someone put there
+  # deliberately is left untouched. Each parent dir is removed only if it is
+  # then empty. No-op on a host that never ran the script (the laptop) and on
+  # every switch after the first.
+  home.activation.opencodeDropStaleActivityPlugin = lib.hm.dag.entryBefore ["checkLinkTargets"] ''
+    for d in "$HOME/.config/opencode/plugin" "$HOME/.config/opencode/plugins"; do
+      f="$d/activity.js"
+      if [ -L "$f" ]; then
+        case "$(readlink "$f")" in
+          /nix/store/*) ;;                       # managed — leave alone
+          *activity-plugin.js)
+            $DRY_RUN_CMD rm -f "$f"
+            $DRY_RUN_CMD rmdir "$d" 2>/dev/null || true
+            ;;
+        esac
+      fi
+    done
   '';
 
   # Reusable failure-notification TEMPLATE unit. The important user units below
