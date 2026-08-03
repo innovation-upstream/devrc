@@ -77,6 +77,23 @@ CLAUDE_CODE_EXPECTED = [
     # `cd /x && git -C <p> reset --hard` report the reset reason rather than the
     # cd reason. See test_reset_hard_deny_is_attributed_to_the_reset_check.
     "check_git_reset_hard_argv",
+    # 🔴 Added 2026-08-02 by explicit operator decision — the EIGHTH and NINTH.
+    # Both are 🔴 CRITICAL in RULES.md and both were measured ALLOW against the
+    # live ~/.claude/hooks/bash-guard.py before the move, with `git add -A` and
+    # `git reset --hard HEAD` as DENY positive controls in the same sweep:
+    #   ALLOW  git stash / git stash push -m wip / git stash pop
+    #   ALLOW  git -C <repo> stash
+    #   ALLOW  git clean -fd
+    # `git stash` carries a documented incident (two parallel subagents stole
+    # each other's work, 2026-07-25) and the ban was re-BROADENED 2026-08-01
+    # after a subagent read the narrow wording and stashed anyway. `git clean
+    # -f` deletes exactly the untracked handoff docs RULES calls unsaved work.
+    # Neither has a benign in-repo use; the READ spellings (`stash list`,
+    # `stash show`, `clean -n`) are untouched.
+    # They sit BEFORE check_cd_then_git for the same reason the reset argv check
+    # does — `cd /x && git stash` reports the stash reason, not the cd reason.
+    "check_git_stash",
+    "check_git_clean_force",
     "check_heredoc_to_file",
     "check_cd_then_git",
     "check_private_key",
@@ -113,13 +130,18 @@ def test_opencode_policy_is_a_strict_superset():
     assert set(CLAUDE_CODE_EXPECTED) < set(oc)
 
 
+# 🔴 The families that remain opencode-ONLY. `check_git_stash` and
+# `check_git_clean_force` USED to be listed here; they moved into the
+# claude-code policy on 2026-08-02. These four did NOT move, deliberately:
+# `rm -rf` risks false positives on legitimate build-directory cleanup, and
+# talosctl/mkfs/dd are hardware/cluster operations an interactive Claude Code
+# session can be prompted about rather than hard-denied. Widening any of them
+# is a separate operator decision.
 IRREVERSIBLE_EXPECTED = [
     "check_talosctl_reset",
     "check_mkfs",
     "check_dd_to_block_device",
     "check_rm_rf_critical",
-    "check_git_stash",
-    "check_git_clean_force",
 ]
 
 
@@ -133,18 +155,18 @@ def test_opencode_policy_carries_the_irreversible_checks():
     "mkfs.ext4 /dev/sda",
     "dd if=x of=/dev/sda",
     "rm -rf /",
-    "git stash push -m wip",
-    "git clean -fd",
     # NOTE: `git -C <path> reset --hard` USED to be listed here, asserting that
     # Claude Code allowed it. That was the gap, not a feature — it is now denied
     # under both policies and is asserted positively in section 1b below.
+    # NOTE: `git stash push -m wip` and `git clean -fd` were listed here for the
+    # same reason and moved for the same reason — see section 1c.
 ])
 def test_the_new_checks_do_not_leak_into_claude_code(command):
     """🔴 The blast-radius assertion, by OUTCOME rather than by list membership.
 
     Each of these is denied under "opencode" and must resolve to no-deny under
-    "claude-code" — that is what "Claude Code's behaviour is unchanged" means
-    operationally.
+    "claude-code" — the four families that stayed opencode-only. This is the
+    fence that keeps a later "while I'm here" widening honest.
     """
     assert gc.evaluate(command, "opencode") is not None
     assert gc.evaluate(command, "claude-code") is None
@@ -601,6 +623,178 @@ def test_git_clean_force_is_denied(hop, spelling):
                                      "git clean -n", "git status"])
 def test_git_clean_dry_run_stays_allowed(command):
     assert gc.check_git_clean_force(command) is None
+
+
+# --------------------------------------------------------------------------- #
+# 3b. 🔴 `git stash` and `git clean -f` under the CLAUDE-CODE policy
+#
+# Closes a gap that was live on both hosts until 2026-08-02. The two checks
+# existed and were correct — they were simply not in the policy bash-guard.py
+# runs. Probed against the live ~/.claude/hooks/bash-guard.py before the change,
+# by piping PreToolUse JSON into it, WITH positive controls in the same sweep so
+# a wired-to-nothing harness could not produce the reassuring answer:
+#
+#     DENY   git add -A                      <- positive control (guard is live)
+#     DENY   git reset --hard HEAD           <- positive control
+#     ALLOW  git stash
+#     ALLOW  git stash push -m wip
+#     ALLOW  git stash pop
+#     ALLOW  git -C <repo> stash
+#     ALLOW  git clean -fd
+#     ALLOW  ls -la /tmp                     <- benign control
+#
+# Every deny below is asserted BY REASON. `cd /x && git stash` is denied by
+# check_cd_then_git with this change fully reverted, so a bare `is not None`
+# would be green for the wrong reason — the exact trap section 1b records.
+# --------------------------------------------------------------------------- #
+STASH_REASON_MARK = "`git stash` is blocked"
+CLEAN_REASON_MARK = "`git clean -f` is blocked"
+
+
+def _assert_denied_as(command, mark, policy="claude-code"):
+    reason = _deny_reason(command, policy)
+    assert mark in reason, (
+        f"{command!r} denied under {policy}, but for the WRONG reason — got "
+        f"{reason[:120]!r}. Some other check fired first; this asserts nothing "
+        f"about {mark} coverage."
+    )
+    return reason
+
+
+# The wrapped/prefixed spellings RULES requires the guard to survive. Paths are
+# pairwise distinct and none of them contains the substring `stash`/`clean`,
+# so a fixture cannot pass by accident of its own text.
+STASH_DENY = [
+    "git stash",
+    "git stash push -m wip",
+    "git stash pop",
+    "git stash apply",
+    "git stash drop",
+    "VAR=1 git stash",
+    "sudo git stash",
+    "sudo -n git -C /srv/repos/alpha stash push -m wip",
+    "git -C /srv/repos/beta stash",
+    "git --git-dir=/var/lib/gamma stash pop",
+    "bash -c 'git stash'",
+    "echo ok && git stash",
+    "cd /srv/delta && git stash",
+    "git -C /tmp/epsilon stash; echo done",
+    "/usr/bin/git -C /tmp/zeta stash push -m wip",
+]
+
+CLEAN_DENY = [
+    "git clean -f",
+    "git clean -fd",
+    "git clean -fdx",
+    "git clean --force -d",
+    "VAR=1 git clean -fd",
+    "sudo git clean -fd",
+    "git -C /srv/repos/eta clean -fd",
+    "bash -c 'git clean -fd'",
+    "echo ok && git clean -fd",
+    "cd /srv/theta && git clean -fd",
+    "/usr/bin/git -C /tmp/iota clean -xf",
+]
+
+
+@pytest.mark.parametrize("command", STASH_DENY)
+def test_git_stash_is_denied_under_claude_code(command):
+    """🔴 RED at origin/main for every row: the check was opencode-only, so
+    `claude-code` returned None (the `cd &&` row denied with the WRONG reason,
+    which the attribution assertion catches)."""
+    _assert_denied_as(command, STASH_REASON_MARK, "claude-code")
+
+
+@pytest.mark.parametrize("command", CLEAN_DENY)
+def test_git_clean_force_is_denied_under_claude_code(command):
+    """🔴 RED at origin/main for every row — same mechanism as stash above."""
+    _assert_denied_as(command, CLEAN_REASON_MARK, "claude-code")
+
+
+@pytest.mark.parametrize("command", STASH_DENY)
+def test_git_stash_still_denied_under_opencode(command):
+    """The move must not COST opencode anything: `POLICIES["opencode"]` is
+    `_CLAUDE_CODE_CHECKS + _IRREVERSIBLE_CHECKS`, so the check is inherited
+    rather than duplicated. This asserts the inheritance actually holds."""
+    _assert_denied_as(command, STASH_REASON_MARK, "opencode")
+
+
+@pytest.mark.parametrize("command", CLEAN_DENY)
+def test_git_clean_force_still_denied_under_opencode(command):
+    _assert_denied_as(command, CLEAN_REASON_MARK, "opencode")
+
+
+def test_cd_then_git_stash_reports_the_stash_reason_not_the_cd_reason():
+    """🔴 The ORDERING pin. check_git_stash sits before check_cd_then_git, so
+    the more serious of the two problems is the one named. At origin/main this
+    command denies with the `cd` message — i.e. this is regression coverage for
+    the ordering, not just for the policy membership."""
+    reason = _deny_reason("cd /srv/kappa && git stash", "claude-code")
+    assert STASH_REASON_MARK in reason
+    assert "use `git -C <path>" not in reason
+
+
+# --- the ALLOW half -------------------------------------------------------- #
+# 🔴 Built independently of the deny list — different paths, different
+# subcommands — so a copy-paste symmetry cannot make both halves agree with the
+# same bug. INVARIANT GUARDS (green before and after): they are the
+# false-positive fence, not regression coverage for any shipped bug.
+STASH_CLEAN_ALLOW = [
+    "git stash list",
+    "git stash show -p",
+    "git -C /opt/service-lambda stash list",
+    "git clean -nd",
+    "git clean --dry-run",
+    "git clean -n -d",
+    "git -C /opt/service-lambda clean -nd",
+    "git status",
+    "git -C /opt/service-lambda diff --stat",
+    "git checkout -- src/app.ts",
+    "git worktree list",
+    "rm -rf /tmp/scratch-mu",
+    # merely NAMING the commands, as an argument rather than as a command
+    "echo 'git stash is banned'",
+    "grep -rn 'git clean -fd' RULES.md",
+    "rg 'git stash' claude/RULES.md",
+    "git commit -m 'document why git stash is banned'",
+]
+
+
+@pytest.mark.parametrize("command", STASH_CLEAN_ALLOW)
+def test_stash_and_clean_neighbours_stay_allowed_under_claude_code(command):
+    """INVARIANT GUARD. `git stash list` is the diagnostic RULES tells you to
+    run, `git clean -nd` is the one the deny message points at, and the argv
+    parser means quoting the command as an ARGUMENT is not a command."""
+    assert gc.evaluate(command, "claude-code") is None
+    assert gc.evaluate(command, "opencode") is None
+
+
+# --- the escape hatch ------------------------------------------------------ #
+def test_new_deny_messages_carry_the_quoting_escape_hatch():
+    """🔴 The convention `check_git_add_all` set, and the reason it exists: the
+    operator's own test harness was blocked because an ARGUMENT contained the
+    literal string `git add -A`. Both new messages must hand the caller the same
+    documented way out."""
+    for reason in (gc.check_git_stash("git stash"),
+                   gc.check_git_clean_force("git clean -fd")):
+        assert reason is not None
+        assert "commit -F" in reason, reason
+        assert "--body-file" in reason, reason
+        assert "Write tool" in reason, reason
+
+
+def test_the_one_real_quoting_false_positive_is_a_heredoc_body():
+    """The accepted false positive, MEASURED rather than assumed.
+
+    The argv parser splits on newlines, so a heredoc body LINE that begins with
+    the command is parsed as a command. That is the case the escape hatch is
+    for. The same text passed as a single quoted ARGUMENT is one token and is
+    correctly allowed — asserted here so the docstring above cannot drift.
+    """
+    heredoc = "cat > /tmp/doc.md <<'EOF'\ngit stash push -m wip\nEOF"
+    reason = _assert_denied_as(heredoc, STASH_REASON_MARK, "claude-code")
+    assert "commit -F" in reason
+    assert gc.evaluate("git commit -m 'git stash push -m wip'", "claude-code") is None
 
 
 # --------------------------------------------------------------------------- #
