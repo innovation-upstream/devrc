@@ -1,13 +1,15 @@
 ---
 name: activity
-description: Operate the personal activity-telemetry pipeline — 6 sources (zsh, tmux, X11 keylogger, browser, Claude Code sessions, i3 window/workspace focus) → per-host collector → homelab ClickHouse (activity.events) → Grafana "Activity & Productivity" dashboard + validation harness. Status, query the data, troubleshoot a stalled source, deploy a change, run validation. Use when the user mentions activity tracking, the keylogger, "where my time goes", the activity dashboard, activity.events, the collector, or productivity mining of their own behaviour.
+description: Operate the personal activity-telemetry pipeline — 9 sources (zsh, tmux, X11 keylogger, browser, Claude Code sessions, i3 window/workspace focus, opencode, browser-bridge, tool invocations) → per-host collector → homelab ClickHouse (activity.events) → Grafana "Activity & Productivity" dashboard + validation harness + a per-host/per-source deadman check. Status, query the data, troubleshoot a stalled source, find out whether a source has silently DIED, deploy a change, run validation. Use when the user mentions activity tracking, the keylogger, "where my time goes", the activity dashboard, activity.events, the collector, a dead/stale telemetry source, the `tlm` bar pill, or productivity mining of their own behaviour.
 ---
 
 # activity-telemetry operations
 
-Six sources emit through one per-host collector daemon into a dedicated, authenticated
+Nine sources emit through one per-host collector daemon into a dedicated, authenticated
 ClickHouse on the homelab cluster; a Grafana dashboard surfaces time/attention +
-focus/context-switching, and a validation harness proves capture/query correctness.
+focus/context-switching, a validation harness proves capture/query correctness, and a
+**deadman check** (`scripts/collector/deadman.py`, surfaced as the `tlm` bar pill) catches a
+source that has silently STOPPED emitting.
 Point-in-time state: memory `activity-telemetry-pipeline` (read it first) + the latest
 `devrc/claudedocs/handoff-activity-*.md`.
 
@@ -35,20 +37,41 @@ stamps `host` from `ACTIVITY_HOST`.
 | CH users | `default`=admin (`admin-password`), `activity_writer`=INSERT+SELECT (`writer-password`, collector uses this), `activity_reader`=SELECT (`reader-password`, dashboard + harness) |
 | CH creds | SOPS secret `homelab-talos/clusters/homelab/apps/activity/secrets.enc.yaml`. Decrypt: `SOPS_AGE_KEY_FILE=~/workspace/homelab-talos/.secrets/age.key sops -d --extract '["stringData"]["reader-password"]' <file>` (on a `<(git show …)` process substitution, add `--input-type yaml`) |
 | Collector config | `~/.config/activity-collector/env` per host (chmod 600, NOT in git/nix store): `CLICKHOUSE_URL/USER/PASSWORD`, `ACTIVITY_HOST` (=`workbench`/`laptop`), batch/flush/buffer caps |
-| Services (home-manager systemd **user**) | `activity-collector` (always), `keylog` (graphical-session.target — laptop only), `browser-activity-receiver` (:8787 loopback), `claude-activity-source` (oneshot + 5-min timer), `i3-source` (i3ipc focus daemon, graphical-session.target — laptop only) |
+| Services (home-manager systemd **user**) | `activity-collector` (always), `keylog` + `i3-source` (graphical-session.target — **BOTH hosts run these; the workbench has a real X/i3 session**), `browser-activity-receiver` (:8787 loopback), `claude-activity-source` (oneshot + 5-min timer) |
 | Dashboard | Grafana "Activity & Productivity" (uid `activity-productivity`), datasource `activity-clickhouse` → `https://grafana.homelab.lan` |
 | Cluster access | `KUBECONFIG=~/workspace/homelab-talos/homelab-kubeconfig` (context `admin@zach-homelab`); manifests in `clusters/homelab/apps/activity/` + dashboard in `clusters/homelab/flux-system/charts/prom-stack/`. **From the laptop** (nebula-only, can't reach the LAN API `192.168.50.94:6443`): `KUBECONFIG=~/.kube/homelab-nebula.yaml` — routes through the `homelab-kube-tunnel` systemd user service (ssh -D SOCKS via the workbench `10.42.0.30`) |
 | Schema columns | `ts DateTime64(3) (UTC), host, source, kind, project, cwd, session, app, text, duration_ms, exit_code, payload(JSON), ingested_at` |
 
-### The six sources
-| source | what |
-|---|---|
-| `zsh` | preexec/precmd, interactive-only → excludes Claude's Bash tool |
-| `tmux` | focus hooks |
-| `keys` | X11 XRecord keylogger, **full content**, GUI-only. Carries `app`=WM_CLASS + `payload.workspace` |
-| `browser` | Brave MV3 ext → loopback receiver :8787. **nav events only**: `text`=URL, `title`, `scroll_pct` (max reading depth), `scroll_ms` (active-scroll time) per page view. Receiver labels `app` from `BROWSER_APP` env. `active_ms` + focus/idle events were **RETIRED** (PR #27) — structurally wrong on i3 (`chrome.idle` is system-wide, blur unreliable → counted *other-app* time as browser-active). Browser attention is now derived downstream (i3 ∩ domain — see `reference/queries.md`) |
-| `claude` | tails `~/.claude/projects/**/*.jsonl`, 5-min timer. Three kinds: `prompt`/`command` (message stream), `session-summary` (Layer A rollups), `session-insight` (Layer B facets) |
-| `i3` | i3ipc `window::focus` + `workspace::focus` → `i3-source` daemon, GUI-only/laptop; captures attention even when NOT typing. Carries `app`=WM_CLASS + `payload.workspace` |
+### The sources — MEASURED, not declared
+🔴 This table said "six sources" and got two things wrong; both were measured on
+2026-08-03 against `activity.events` and corrected. **Do not re-derive the
+expected-present set from prose — run `python3 ~/workspace/devrc/scripts/collector/deadman.py`,
+which derives it from the table.** Live pairs: **9 sources on the laptop, 8 on the
+workbench, 17 pairs total.**
+
+| source | what | laptop | workbench |
+|---|---|---|---|
+| `zsh` | preexec/precmd, interactive-only → excludes Claude's Bash tool | ✅ | ✅ |
+| `tmux` | focus hooks | ✅ | ✅ |
+| `keys` | X11 XRecord keylogger, **full content**. Carries `app`=WM_CLASS + `payload.workspace` | ✅ | ✅ **(the doc said laptop-only — wrong)** |
+| `browser` | Brave MV3 ext → loopback receiver :8787 | ✅ | ❌ **0 rows, correctly — the ext is laptop-only. This is the ONLY genuinely laptop-only source.** |
+| `claude` | Claude Code transcript tailer, 5-min timer | ✅ | ✅ |
+| `i3` | i3ipc focus daemon | ✅ | ✅ **(the doc said laptop-only — wrong)** |
+| `opencode` | opencode plugin + tailers (`prompt`/`assistant-turn`/`tool-call`/`session-summary`) | ✅ | ✅ |
+| `browser-bridge` | metadata-only telemetry from the agent browser-bridge | ✅ | ✅ |
+| `tool` | on-demand tool-invocation events (`scripts/collector/invocation.py`) | ✅ | ✅ |
+
+Per-source detail that matters when querying:
+- `browser` — **nav events only**: `text`=URL, `title`, `scroll_pct` (max reading depth),
+  `scroll_ms` (active-scroll time) per page view. Receiver labels `app` from `BROWSER_APP`.
+  `active_ms` + focus/idle were **RETIRED** (PR #27) — structurally wrong on i3
+  (`chrome.idle` is system-wide, blur unreliable → counted *other-app* time as
+  browser-active). Browser attention is derived downstream (i3 ∩ domain — see
+  `reference/queries.md`).
+- `claude` — tails `~/.claude/projects/**/*.jsonl`. Kinds: `prompt`/`command` (message
+  stream), `session-summary` (Layer A rollups), `session-insight` (Layer B facets).
+- `i3` — `window::focus` + `workspace::focus` → `i3-source`; captures attention even when
+  NOT typing. Carries `app`=WM_CLASS + `payload.workspace`.
 
 **Browser extension is NOT fully nix-managed.** Hand-loaded unpacked in Brave (the laptop's
 daily browser) from `~/.local/share/activity-browser-ext/` — a real-file copy, since
@@ -66,8 +89,13 @@ inject post-reload). Manifest **v1.4.0**. When a file is DELETED upstream (e.g. 
   `$__timeFilter` / range comparisons (they're UTC, aligned with `now()`).
 - **Both hosts are hostname `nixos`** → without `ACTIVITY_HOST` in the env, every row
   collides on `host=nixos`. Set it per host.
-- **keylog + browser + i3 are GUI-only** → laptop only (X11/i3). The workbench is headless
-  (server-mode).
+- 🔴 **CORRECTED 2026-08-03 — "keylog + browser + i3 are GUI-only → laptop only; the
+  workbench is headless" was FALSE and had been for a long time.** Measured against
+  `activity.events`: the workbench emits **i3 (41,001 rows) and keys (37,376 rows)**, both
+  fresh. The workbench runs a real X/i3 session; only the **Brave activity extension** is
+  laptop-only, so `browser` is the single source with 0 workbench rows. Anything that
+  decides "is this source expected here?" must read the TABLE, not this file — which is why
+  `deadman.py` derives the expected set from measured baselines instead of a hand-kept list.
 - **Full-content keylogging** → `activity.events` holds secrets. That is WHY the store is a
   dedicated authed ClickHouse, not the shared LAN-open clickstack. Treat reader/writer creds
   as sensitive.
@@ -75,6 +103,20 @@ inject post-reload). Manifest **v1.4.0**. When a file is DELETED upstream (e.g. 
   `X-Restart-Triggers` flips the unit definition when the code changes. No manual
   `systemctl --user restart` after a ship. (`claude-activity-source` is excluded — its 5-min
   timer oneshot re-runs fresh code anyway.)
+- 🔴 **opencode plugin: only `tool.execute.before` / `tool.execute.after` are real plugin
+  HOOK names. `session.created`, `message.updated` and `session.idle` are BUS EVENT TYPES,
+  not hooks — `activity-plugin.js` registers all three and none has ever fired.** MEASURED
+  2026-08-03 on opencode 1.18.4 with a probe plugin registering all 14 candidate names
+  against a throwaway `OPENCODE_CONFIG_DIR` + `opencode serve` + `POST /session`: the session
+  was created, the named `session.created` hook fired **0 times**, and the generic `event`
+  hook fired **once** with `event.type == "session.created"`. Corroborated in the data:
+  `kind=session-create` and `kind=session-idle` have **0 rows, ever**; every `prompt`/
+  `assistant-turn` row comes from `tailer.py`, not the plugin. Downstream consequence —
+  `currentSession` is only ever set by the dead `session.created` handler, so **2,736 of
+  2,799 `kind=tool-call` rows carry `session=''`** and cannot be attributed to a session.
+  The fix is to route these through a single `event` hook that switches on `event.type`;
+  🔴 do it in a dedicated PR with a live post-deploy check — this is the exact file whose
+  last edit (#298) killed ALL opencode telemetry on both hosts for ~11 hours.
 - **`session-summary` / `session-insight` rows are APPEND-ONLY** — dedupe on read with
   `argMax(<field>, ingested_at)` grouped by `session`.
 
@@ -104,6 +146,40 @@ Current invariant set: `active_ms_capped` + `per_host_hour_active_cap` are **ret
 (per-domain i3-derived attention ≤ total Brave i3 dwell, trailing 48h). The `duration_ms`
 garbage bound is **7d**, not 24h — a multi-day interactive `claude --resume` is real.
 `session_summary_rows_bounded` flags >24 rows/session ingested in 24h.
+
+## deadman — "has a source silently DIED?"
+`scripts/collector/deadman.py`. **Read its module docstring before changing any tunable** —
+every default in it is derived from a measurement that is named inline.
+
+```bash
+python3 ~/workspace/devrc/scripts/collector/deadman.py           # the per-pair table
+python3 ~/workspace/devrc/scripts/collector/deadman.py --json    # machine-readable
+# exit 0 = measured & clean · 1 = something is DEAD · 2 = CANNOT TELL (never "healthy")
+```
+Creds come from `~/.config/activity-collector/env` (the collector's own file) unless
+`CLICKHOUSE_URL/USER/PASSWORD` are already in the environment.
+
+- **Silence is counted in ACTIVE time, not wall time.** A host's *active* 5-min buckets are
+  the ones where any of its sources emitted; overnight/away time is simply not in the set.
+  This is what makes a per-source budget work for `keys` (continuous) and `tool` (on-demand)
+  at the same time.
+- **The budget is MEASURED per (host, source)**: `clamp(2 × p99 active-gap, 2h, 48h)`.
+  Measured 2026-08-03 — `keys`/`i3`/`tmux` land on the 2h floor; `workbench/opencode` 11.5h;
+  `workbench/tool` 31.1h. Nothing is hand-tuned and nothing is hand-listed.
+- **Expected-present is measured too**: a pair is judged only if it cleared a baseline in the
+  14-day window, so `workbench/browser` (0 rows, correctly absent) can never alarm, while a
+  source that *was* emitting and stopped keeps its baseline and does.
+- 🔴 **"Cannot tell" ≠ "healthy".** `not-configured` / `unreachable` / `query-failed` /
+  `no-data` are each their own state; `ok` is unreachable unless rows came back AND at least
+  one pair was actually measured (`evaluated > 0` is the verdict's own positive control).
+- 🔴 **Blind spot, by design:** this is a RELATIVE check. A simultaneous outage of every
+  source on every host produces zero active buckets and reads as "0 dead" — indistinguishable
+  from the operator being away. `newest_event_age_minutes` is reported for the human;
+  it is deliberately not an alarm.
+- **Surface:** the workbench `bar-status-poll` (~45s) runs it as its `telemetry` source →
+  `~/.cache/bar-status/telemetry.json` → the `tlm` pill (signal 17) + a rising-edge dunst
+  toast. One workbench runner covers BOTH hosts because it reads the shared table. See the
+  `bar` skill.
 
 ## troubleshoot a stalled source
 1. `journalctl --user -u <service> -n 30` — `urlopen timed out` = can't reach CH (check the

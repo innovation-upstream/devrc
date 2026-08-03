@@ -200,6 +200,27 @@ let
       { button = "left"; cmd = "xdg-open https://grafana-new.civitai.com"; }
     ];
   };
+  # Telemetry deadman — which activity-telemetry (host, source) pairs have
+  # STOPPED emitting. Covers BOTH hosts from this one workbench poller, because
+  # the check reads the shared ClickHouse table rather than local state.
+  # `tlm N` (Critical) = N dead sources; `tlm ?` (Warning) = the check has been
+  # unable to evaluate for >30 min and CANNOT VOUCH for the pipeline — that
+  # second state exists because this is the one block whose reassuring answer is
+  # a zero, and a zero from a broken query must not read as "all healthy".
+  # No --red-above: there is no standing backlog here, any count is real.
+  telemetryBlock = {
+    block = "custom";
+    command = "${scriptsDir}/i3status-telemetry";
+    json = true;
+    interval = 30;
+    signal = 17;
+    click = [
+      # Float the full per-host/per-source table (measured budget vs measured
+      # silence, per pair). `read` holds the window open — deadman.py prints and
+      # exits, and i3status-rust runs a click cmd through `sh -c`.
+      { button = "left"; cmd = "alacritty --class float,float -o window.dimensions.columns=110 -o window.dimensions.lines=30 -e ${pkgs.bash}/bin/bash -c '${pollPyEnv}/bin/python3 ${home}/workspace/devrc/scripts/collector/deadman.py; echo; read -n 1 -r -s -p \"[any key to close]\"'"; }
+    ];
+  };
   mailBlock = {
     block = "custom";
     command = "${scriptsDir}/i3status-mail";
@@ -309,7 +330,7 @@ let
     ++ lib.optional (!isLaptop) gpuBlock
     ++ lib.optional isLaptop batteryBlock
     ++ [ soundBlock ]
-    ++ lib.optionals (!isLaptop) [ alertsBlock civitaiBlock mailBlock clawgateBlock mediaBlock airvpnBlock ]
+    ++ lib.optionals (!isLaptop) [ telemetryBlock alertsBlock civitaiBlock mailBlock clawgateBlock mediaBlock airvpnBlock ]
     ++ [ timeBlock ]
     ++ lib.optionals (!isLaptop) [ agentOpsBlock rigcontrolBlock ]
     ++ [ notifsBlock ];
@@ -409,6 +430,10 @@ lib.mkIf isNixOS {
     source = ../scripts/i3status-alerts;
     executable = true;
   };
+  home.file.".config/i3status-rust/scripts/i3status-telemetry" = lib.mkIf (!isLaptop) {
+    source = ../scripts/i3status-telemetry;
+    executable = true;
+  };
   home.file.".config/i3status-rust/scripts/i3status-civitai" = lib.mkIf (!isLaptop) {
     source = ../scripts/i3status-civitai;
     executable = true;
@@ -468,7 +493,7 @@ lib.mkIf isNixOS {
   # repo paths itself (no .zshenv handles under systemd).
   systemd.user.services.bar-status-poll = lib.mkIf (!isLaptop) {
     Unit = {
-      Description = "Poll clawgate/mail/alerts/civitai/media/airvpn → ~/.cache/bar-status for the i3 bar";
+      Description = "Poll clawgate/mail/alerts/civitai/media/airvpn/telemetry → ~/.cache/bar-status for the i3 bar";
       After = [ "network-online.target" ];
       Wants = [ "network-online.target" ];
       # Toast on failure (the notify-failure@ template lives in home.nix, installed
@@ -507,7 +532,13 @@ lib.mkIf isNixOS {
       ];
       ExecStart = "${pollPyEnv}/bin/python3 %h/workspace/devrc/scripts/bar-status-poll";
       # Re-run the unit when the poller changes (cf. X-Restart-Triggers in home.nix).
-      X-Restart-Triggers = [ "${../scripts/bar-status-poll}" ];
+      # deadman.py is listed too: the poller loads it by explicit path out of the
+      # working tree, so without this entry a change to the deadman logic would
+      # leave the unit definition identical and the timer would not re-arm.
+      X-Restart-Triggers = [
+        "${../scripts/bar-status-poll}"
+        "${../scripts/collector/deadman.py}"
+      ];
     };
   };
 
