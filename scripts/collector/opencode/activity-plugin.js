@@ -6,7 +6,7 @@
 // OpenCode loads plugins from that directory and calls the exported async
 // handler factory with { project, client, directory, $ }.
 
-import { execSync } from "child_process";
+import { execFileSync } from "child_process";
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from "fs";
 import { join, dirname } from "path";
 import { homedir } from "os";
@@ -23,6 +23,18 @@ const STATE_FILE = join(STATE_DIR, "opencode-plugin-state.json");
 const MAX_SEEN = 1000;
 const MAX_TEXT_LEN = 4096;
 const MAX_ARGS_SUMMARY = 200;
+
+// Sentinel written to `text` when the tool NAME could not be read off the hook
+// input. It must NOT be a plausible tool name: `unknown` was, and 2,699 rows
+// (100% of source=opencode kind=tool-call on the workbench, measured 2026-08-02)
+// carried it because the plugin read `input.tool.name` while the OpenCode hook
+// contract passes `input.tool` as a STRING. A capture failure has to be
+// distinguishable from a genuinely-unnamed tool, so the sentinel is namespaced
+// and the payload carries a machine-readable reason + the raw shape we saw.
+const NAME_CAPTURE_FAILED = "__name_capture_failed__";
+const MAX_INFLIGHT_CALLS = 256;
+
+export const _internals = { NAME_CAPTURE_FAILED, MAX_ARGS_SUMMARY };
 
 // --------------------------------------------------------------------------- #
 // State management (ring buffer of seen message IDs)
@@ -80,7 +92,7 @@ function resolveEmitPath() {
   return "emit";
 }
 
-function emitEvent({ kind, text, project, cwd, session, app, payload }) {
+export function emitEvent({ kind, text, project, cwd, session, app, payload }) {
   try {
     const emit = resolveEmitPath();
     const args = ["source=opencode", `kind=${kind}`];
@@ -105,9 +117,20 @@ function emitEvent({ kind, text, project, cwd, session, app, payload }) {
       args.push(`b64:payload=${p}`);
     }
 
-    execSync(`${emit} ${args.join(" ")}`, {
+    // 🔴 execFileSync with an ARGV ARRAY — never execSync with a joined string.
+    // The old `execSync(\`${emit} ${args.join(" ")}\`)` ran the arguments through
+    // a shell, so every value was word-split on spaces and had its quoting
+    // characters EATEN before `emit` ever saw it. A payload of
+    //   {"duration_ms":0,"success":true,"args_summary":"{\"name\":\"x\"}"}
+    // reached emit as the single mangled token
+    //   {duration_ms:0,success:true,args_summary:{"name":"x"}}
+    // (not valid JSON), and any `text`/`cwd` containing a space was split into
+    // several bogus key=value args. execFileSync passes argv straight to
+    // execve(2) — no shell, no splitting, no quote removal.
+    execFileSync(emit, args, {
       stdio: "ignore",
       timeout: 5000,
+      shell: false,
     });
   } catch {
     // swallow — never crash OpenCode
@@ -132,6 +155,69 @@ function extractText(msg) {
 }
 
 // --------------------------------------------------------------------------- #
+// Tool-call field extraction
+// --------------------------------------------------------------------------- #
+
+/** Read the tool NAME off a `tool.execute.{before,after}` hook input.
+ *
+ * The OpenCode plugin contract (@opencode-ai/plugin, dist/index.d.ts) is:
+ *     "tool.execute.after"?: (input: { tool: string, sessionID: string,
+ *                                      callID: string, args: any }, output) => …
+ * `input.tool` is a plain STRING. The original code read `input.tool.name`,
+ * which is `undefined` on a string, then fell through to the literal
+ * `"unknown"` — so the name was lost on 100% of events.
+ *
+ * Returns { name, ok, shape }. `ok=false` means capture FAILED (callers must
+ * record that distinguishably); `shape` is the typeof/ctor we actually saw, so
+ * a future contract change is diagnosable from the row itself.
+ */
+export function extractToolName(input) {
+  const t = input?.tool;
+  if (typeof t === "string" && t.length > 0) {
+    return { name: t, ok: true, shape: "string" };
+  }
+  // Tolerate an object form in case the contract ever moves back to `{ name }`.
+  if (t && typeof t === "object" && typeof t.name === "string" && t.name) {
+    return { name: t.name, ok: true, shape: "object.name" };
+  }
+  if (typeof input?.name === "string" && input.name) {
+    return { name: input.name, ok: true, shape: "input.name" };
+  }
+  return {
+    name: NAME_CAPTURE_FAILED,
+    ok: false,
+    shape: t === undefined ? "undefined" : Array.isArray(t) ? "array" : typeof t,
+  };
+}
+
+/** Serialize the tool arguments to a BOUNDED JSON string.
+ *
+ * `args_summary` must stay valid JSON after truncation, so we do NOT slice a
+ * JSON string mid-token (which is what produced unparseable payloads). We
+ * serialize, and if the result is over budget we replace it with a structured
+ * marker that names the keys and reports the dropped size.
+ */
+export function summarizeArgs(args) {
+  if (args == null) return { args_summary: null, args_truncated: false };
+  let s;
+  try {
+    s = JSON.stringify(args);
+  } catch {
+    return { args_summary: null, args_truncated: false, args_unserializable: true };
+  }
+  if (typeof s !== "string") return { args_summary: null, args_truncated: false };
+  if (s.length <= MAX_ARGS_SUMMARY) {
+    return { args_summary: s, args_truncated: false };
+  }
+  const keys =
+    args && typeof args === "object" && !Array.isArray(args) ? Object.keys(args) : [];
+  return {
+    args_summary: JSON.stringify({ _truncated: true, keys, bytes: s.length }),
+    args_truncated: true,
+  };
+}
+
+// --------------------------------------------------------------------------- #
 // Plugin export
 // --------------------------------------------------------------------------- #
 
@@ -139,6 +225,10 @@ export const ActivityPlugin = async ({ project, directory }) => {
   let currentSession = null;
   const seen = loadState();
   let dirty = false;
+  // callID → Date.now() at `tool.execute.before`, so `.after` can report a real
+  // duration. Bounded (insertion-ordered Map, oldest evicted) so an abandoned
+  // call can never leak memory in a long-lived OpenCode process.
+  const callStarts = new Map();
 
   return {
     // --- Session lifecycle ---
@@ -204,28 +294,60 @@ export const ActivityPlugin = async ({ project, directory }) => {
     },
 
     // --- Tool calls ---
+    // `tool.execute.before` only records a start time so `.after` can report a
+    // REAL duration. The hook `output` carries {title, output, metadata} — it
+    // has no duration and no error field, so the old code's `output.duration_ms`
+    // was always undefined (→ 0) and `success` was always hard-coded true.
+    "tool.execute.before": async (input, _output) => {
+      try {
+        const id = input?.callID;
+        if (!id) return;
+        callStarts.set(id, Date.now());
+        // Bound the map — a crashed/never-completed call must not leak.
+        if (callStarts.size > MAX_INFLIGHT_CALLS) {
+          const oldest = callStarts.keys().next().value;
+          callStarts.delete(oldest);
+        }
+      } catch {
+        // best-effort
+      }
+    },
+
     "tool.execute.after": async (input, output) => {
       try {
-        const toolName = input?.tool?.name || input?.name || "unknown";
-        const argsStr = input?.args
-          ? JSON.stringify(input.args).slice(0, MAX_ARGS_SUMMARY)
-          : "";
+        const name = extractToolName(input);
+        const args = summarizeArgs(input?.args);
+
+        const id = input?.callID;
+        const startedAt = id ? callStarts.get(id) : undefined;
+        if (id) callStarts.delete(id);
+        // duration is only known when we saw the matching `.before`; null
+        // (absent) is honest, 0 would be a measurement claim we cannot make.
         const durationMs =
-          output?.duration_ms || output?.durationMs || 0;
-        const success = output?.error ? false : true;
+          startedAt === undefined ? null : Math.max(0, Date.now() - startedAt);
+
+        const payload = {
+          // `tool.execute.after` fires only on a COMPLETED call — OpenCode
+          // throws past it on tool failure — so this hook cannot observe an
+          // error. Say that, rather than asserting success:true on every row.
+          outcome: "completed",
+          name_captured: name.ok,
+          ...(name.ok ? {} : { name_capture_shape: name.shape }),
+          ...(durationMs === null ? {} : { duration_ms: durationMs }),
+          ...args,
+          call_id: id || null,
+        };
 
         emitEvent({
           kind: "tool-call",
-          text: toolName,
+          text: name.name,
           project: project?.name || "",
           cwd: directory || "",
-          session: currentSession,
+          // sessionID is on the hook input; `currentSession` is only set by the
+          // session.created handler, which the plugin contract never calls.
+          session: input?.sessionID || currentSession,
           app: "opencode",
-          payload: {
-            duration_ms: durationMs,
-            success,
-            args_summary: argsStr,
-          },
+          payload,
         });
       } catch {
         // best-effort

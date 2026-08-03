@@ -167,6 +167,11 @@ HERMETIC_TARGETS=(
   scripts/collector/claude/tests
   scripts/collector/i3/tests
   scripts/collector/browser-ext/tests
+  # Added 2026-08-02. This suite existed since the OpenCode source landed and was
+  # never in this list — 166 tests that no gate ran. That is why a plugin whose
+  # `tool.execute.after` handler mis-read the hook contract shipped and produced
+  # 2,699 rows of `text='unknown'` before anyone noticed.
+  scripts/collector/opencode/tests
   scripts/browser-bridge/tests
   scripts/validation/tests
   scripts/session-analysis/tests
