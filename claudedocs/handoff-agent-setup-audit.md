@@ -84,34 +84,38 @@ issues, token inefficiency and tool opportunities — then fix what was found.
   is dead and the next suspect is the NodePort path, not the tunnel.
 - **Priority: LOW.** Workaround is real — run it from the workbench.
 
-### 2. `session=''` on 97.7% of opencode `tool-call` rows
+### 2. ~~`session=''` on opencode `tool-call` rows~~ — **CLOSED 2026-08-03**
 
-- **Symptom:** `2,736 of 2,799` `source='opencode', kind='tool-call'` rows carry
-  an empty `session`, so tool calls cannot be grouped into sessions.
-- **Observed / root cause (MEASURED, not inferred):** `session.created` is **not
-  a plugin hook name** on opencode 1.18.4 — it is a **bus event type**. Probed
-  with a throwaway `OPENCODE_CONFIG_DIR` + `opencode serve` + `POST /session`:
-  the named `session.created` hook fired **0 times**; the generic `event` hook
-  fired **once** with `event.type === "session.created"`. Same for
-  `message.updated` and `session.idle`. Only `tool.execute.before/after` are real
-  hooks. Corroborated: `kind='session-create'` and `kind='session-idle'` have
-  **0 rows ever**; all `prompt`/`assistant-turn` rows come from `tailer.py`, not
-  the plugin.
-- **Ruled out:** a deployment problem — the plugin IS loaded and IS emitting
-  (verified live on both hosts post-#302, real tool names, `name_captured=true`,
-  exactly 1 row per call).
-- **Leading hypothesis:** none needed; the cause is established. `currentSession`
-  is only ever assigned by the dead handler.
-- **Next probe:** none — go straight to the fix: subscribe to the generic
-  `event` hook and switch on `event.type`, in
-  `scripts/collector/opencode/activity-plugin.js`.
-- 🔴 **Handle with care.** That file's last edit (#298, a stray
-  `export const _internals`) killed ALL opencode telemetry on both hosts for
-  ~11 hours, silently. opencode's loader rejects the ENTIRE module if any named
-  export is not a function, AND invokes every *function* export as a plugin
-  factory. **`ActivityPlugin` must remain the only export.** After any change:
-  `home-manager switch`, run a real `opencode run` that makes a tool call, then
-  confirm rows land — do not trust the switch.
+**It was already fixed by #298, before the session that wrote this entry.** No
+`event`-hook work was needed.
+
+- **Why the entry was wrong:** `tool.execute.after` carries `sessionID` on its
+  own hook input, so attribution never depended on a session-lifecycle handler.
+  #298 added `session: input?.sessionID || currentSession` (line 367) at
+  2026-08-02 21:47; it deployed with the `home-manager switch` at 01:10.
+- **The "2,736 of 2,799 (97.7%)" figure was a stale LIFETIME aggregate**,
+  dominated by the 2,699 pre-fix rows from 2026-07-29→08-02 when the filled
+  count was 0. 🔴 **Window any re-check by deploy time** — a lifetime aggregate
+  over a fixed bug will keep reporting the bug forever.
+- **Measured (2026-08-03):** clean cliff — last empty row `02:32:26` (an opencode
+  process still holding the pre-deploy module), first filled `03:28:27`.
+  Since then **188 filled / 0 empty**, laptop 4 + workbench 184. Live positive
+  control: a real `opencode run` making a `glob` call landed at `16:48:48` with
+  `session=ses_037791641ffe1wbFfgX3Ib0UG3`.
+- **Residual, now also closed:** the three handlers that *were* dead —
+  `session.created`, `message.updated`, `session.idle` (bus event types, not hook
+  names) — have been **removed**, along with the seen-ID ring buffer and
+  `extractText` that only they used. Nothing consumed `session-create` /
+  `session-idle` (0 rows ever, no readers outside the plugin's own tests) and
+  `tailer.py` already covers `prompt`/`assistant-turn`. `test_plugin.py` now pins
+  the registered hook keys to exactly `tool.execute.before/after`.
+- 🔴 **Still handle this file with care.** #298's stray `export const _internals`
+  killed ALL opencode telemetry on both hosts for ~11 hours, silently. opencode's
+  loader rejects the ENTIRE module if any named export is not a function, AND
+  invokes every *function* export as a plugin factory. **`ActivityPlugin` must
+  remain the only export.** After any change: `home-manager switch`, run a real
+  `opencode run` that makes a tool call, then confirm rows land — never trust the
+  switch.
 
 ### 3. ClickHouse regrowth — untestable now, and will therefore go unchecked
 
@@ -160,9 +164,8 @@ by content, not by branch topology**, before deleting any worktree.
 
 ## Next steps (ranked)
 
-1. **Fix `session=''`** (investigation 2). Highest value: it makes opencode tool
-   telemetry groupable, and the cause is already established — no diagnosis left.
-   Respect the single-export constraint and verify live.
+1. ~~Fix `session=''`~~ — **DONE** (investigation 2); it was already fixed by
+   #298 and the dead handlers are now removed. Nothing left here.
 2. **Schedule the ClickHouse regrowth check** (investigation 3). It is a
    two-command check that will simply not happen unless it is on a calendar.
    Add `system.error_log` / `query_metric_log` TTLs at the same time.
@@ -220,6 +223,11 @@ by content, not by branch topology**, before deleting any worktree.
 - **A local worktree branch ref can resolve to `origin/main`**, making a
   `merge-tree` test compare main with main and return a confident clean. A
   positive control (the diffstat must be non-empty) is what caught it.
+- 🔴 **A LIFETIME aggregate over a fixed bug reports the bug forever.** The
+  "97.7% of tool-call rows have `session=''`" figure was true across all time and
+  false for every row since the fix — the fix was already deployed when the
+  number was quoted as an open problem. **Window by deploy time, and check for a
+  cliff, before opening or re-opening a data-quality investigation.**
 - **Deadman returns `count=0` for BOTH `ok` and `unreachable`.** Read `state`,
   never `count`. The bar already does this correctly (`tlm ?` Warning on
   sustained unknown) — do not "simplify" it to a count check.

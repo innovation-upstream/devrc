@@ -105,18 +105,24 @@ inject post-reload). Manifest **v1.4.0**. When a file is DELETED upstream (e.g. 
   timer oneshot re-runs fresh code anyway.)
 - 🔴 **opencode plugin: only `tool.execute.before` / `tool.execute.after` are real plugin
   HOOK names. `session.created`, `message.updated` and `session.idle` are BUS EVENT TYPES,
-  not hooks — `activity-plugin.js` registers all three and none has ever fired.** MEASURED
-  2026-08-03 on opencode 1.18.4 with a probe plugin registering all 14 candidate names
-  against a throwaway `OPENCODE_CONFIG_DIR` + `opencode serve` + `POST /session`: the session
-  was created, the named `session.created` hook fired **0 times**, and the generic `event`
-  hook fired **once** with `event.type == "session.created"`. Corroborated in the data:
-  `kind=session-create` and `kind=session-idle` have **0 rows, ever**; every `prompt`/
-  `assistant-turn` row comes from `tailer.py`, not the plugin. Downstream consequence —
-  `currentSession` is only ever set by the dead `session.created` handler, so **2,736 of
-  2,799 `kind=tool-call` rows carry `session=''`** and cannot be attributed to a session.
-  The fix is to route these through a single `event` hook that switches on `event.type`;
-  🔴 do it in a dedicated PR with a live post-deploy check — this is the exact file whose
-  last edit (#298) killed ALL opencode telemetry on both hosts for ~11 hours.
+  not hooks.** MEASURED 2026-08-03 on opencode 1.18.4 with a probe plugin registering all 14
+  candidate names against a throwaway `OPENCODE_CONFIG_DIR` + `opencode serve` +
+  `POST /session`: the session was created, the named `session.created` hook fired **0
+  times**, and the generic `event` hook fired **once** with
+  `event.type == "session.created"`. Corroborated in the data: `kind=session-create` and
+  `kind=session-idle` had **0 rows, ever**; every `prompt`/`assistant-turn` row comes from
+  `tailer.py`, not the plugin. `activity-plugin.js` registered all three from 2026-07-29
+  until they were **removed** (nothing consumed those kinds and `tailer.py` already covers
+  the message path). `test_plugin.py` now pins the registered hook keys to exactly the two
+  real ones. To add session lifecycle later, use ONE `event` handler switching on
+  `event.type` — 🔴 in a dedicated PR with a live post-deploy check, this being the file
+  whose #298 edit killed ALL opencode telemetry on both hosts for ~11 hours.
+- **`session=''` on opencode `tool-call` rows is FIXED** (#298) — `tool.execute.after`
+  carries `sessionID` on its own hook input, so attribution never needed a session handler.
+  Verified 2026-08-03: last empty row `02:32:26`, first filled `03:28:27` (the deploy),
+  **188/188 filled, 0 empty since, both hosts**. The often-quoted "2,736 of 2,799 empty" is a
+  stale LIFETIME aggregate dominated by pre-fix rows — always window the query by deploy
+  time before re-opening this.
 - **`session-summary` / `session-insight` rows are APPEND-ONLY** — dedupe on read with
   `argMax(<field>, ingested_at)` grouped by `session`.
 

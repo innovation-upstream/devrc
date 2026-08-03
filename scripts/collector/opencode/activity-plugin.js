@@ -2,6 +2,17 @@
 // activity-plugin.js — OpenCode plugin that emits activity telemetry events
 // to the activity collector pipeline via the `emit` CLI.
 //
+// SCOPE: `tool.execute.before` / `tool.execute.after` ONLY — those are the only
+// real plugin HOOK names on opencode 1.18.4. `session.created`,
+// `message.updated` and `session.idle` are BUS EVENT TYPES, delivered through a
+// generic `event` hook; registering them as hook keys does nothing. This file
+// used to register all three, and none ever fired: `kind=session-create` and
+// `kind=session-idle` recorded 0 rows for the plugin's entire existence, and
+// `prompt`/`assistant-turn` rows all come from `tailer.py`. They were removed
+// rather than revived — nothing consumes those kinds, and `tailer.py` already
+// covers the message path. If session lifecycle is ever wanted here, add ONE
+// `event` handler that switches on `event.type`.
+//
 // DEPLOYMENT: home-manager, `home.file.".config/opencode/plugin/activity.js"`
 // in nix/home.nix — the same declarative mechanism as guard.js and env.js.
 // There is deliberately no deploy script: a hand-run one left the laptop
@@ -14,7 +25,7 @@
 // double-emit every event.
 
 import { execFileSync } from "child_process";
-import { readFileSync, writeFileSync, mkdirSync, existsSync } from "fs";
+import { existsSync } from "fs";
 import { join, dirname } from "path";
 import { homedir } from "os";
 
@@ -22,13 +33,6 @@ import { homedir } from "os";
 // Constants
 // --------------------------------------------------------------------------- #
 
-const STATE_DIR = join(
-  process.env.XDG_STATE_HOME || join(homedir(), ".local", "state"),
-  "activity"
-);
-const STATE_FILE = join(STATE_DIR, "opencode-plugin-state.json");
-const MAX_SEEN = 1000;
-const MAX_TEXT_LEN = 4096;
 const MAX_ARGS_SUMMARY = 200;
 
 // Sentinel written to `text` when the tool NAME could not be read off the hook
@@ -54,38 +58,6 @@ const MAX_INFLIGHT_CALLS = 256;
 // `export const _internals = {...}` plus three exported helpers, and emission
 // stopped dead at the moment ship.sh deployed it. Helpers stay module-private;
 // if a test needs one, hang it off ActivityPlugin rather than exporting it.
-
-// --------------------------------------------------------------------------- #
-// State management (ring buffer of seen message IDs)
-// --------------------------------------------------------------------------- #
-
-function loadState() {
-  try {
-    const raw = readFileSync(STATE_FILE, "utf-8");
-    const data = JSON.parse(raw);
-    if (data && data.version === 1 && Array.isArray(data.seen)) {
-      return data.seen;
-    }
-  } catch {
-    // corrupt or missing — start fresh
-  }
-  return [];
-}
-
-function saveState(seen) {
-  try {
-    mkdirSync(dirname(STATE_FILE), { recursive: true });
-    // Ring buffer: keep last MAX_SEEN entries
-    const trimmed = seen.slice(-MAX_SEEN);
-    writeFileSync(
-      STATE_FILE,
-      JSON.stringify({ version: 1, seen: trimmed }),
-      "utf-8"
-    );
-  } catch {
-    // best-effort, never crash
-  }
-}
 
 // --------------------------------------------------------------------------- #
 // Emit helper
@@ -157,23 +129,6 @@ function emitEvent({ kind, text, project, cwd, session, app, payload }) {
 }
 
 // --------------------------------------------------------------------------- #
-// Extract text from message parts
-// --------------------------------------------------------------------------- #
-
-function extractText(msg) {
-  if (!msg) return "";
-  const parts = msg.parts || msg.content;
-  if (!parts) return "";
-  if (typeof parts === "string") return parts;
-  if (!Array.isArray(parts)) return "";
-  return parts
-    .filter((p) => p && p.type === "text")
-    .map((p) => p.text || "")
-    .join("\n")
-    .trim();
-}
-
-// --------------------------------------------------------------------------- #
 // Tool-call field extraction
 // --------------------------------------------------------------------------- #
 
@@ -241,77 +196,12 @@ function summarizeArgs(args) {
 // --------------------------------------------------------------------------- #
 
 export const ActivityPlugin = async ({ project, directory }) => {
-  let currentSession = null;
-  const seen = loadState();
-  let dirty = false;
   // callID → Date.now() at `tool.execute.before`, so `.after` can report a real
   // duration. Bounded (insertion-ordered Map, oldest evicted) so an abandoned
   // call can never leak memory in a long-lived OpenCode process.
   const callStarts = new Map();
 
   return {
-    // --- Session lifecycle ---
-    "session.created": async (_input, output) => {
-      try {
-        currentSession = output?.session?.id || null;
-        const title = output?.session?.title || "";
-        emitEvent({
-          kind: "session-create",
-          text: title,
-          project: project?.name || "",
-          cwd: directory || "",
-          session: currentSession,
-          app: "opencode",
-          payload: {
-            agent: output?.session?.agent || "",
-            model: output?.session?.model || "",
-            title,
-          },
-        });
-      } catch {
-        // best-effort
-      }
-    },
-
-    // --- User messages ---
-    "message.updated": async (input, _output) => {
-      try {
-        const msg = input?.message || input;
-        if (!msg) return;
-        if (msg.role !== "user") return;
-
-        const id = msg.id;
-        if (!id) return;
-        if (seen.includes(id)) return;
-
-        const text = extractText(msg);
-        if (!text || text.length < 2) return;
-
-        const truncated =
-          text.length > MAX_TEXT_LEN ? text.slice(0, MAX_TEXT_LEN) : text;
-        const kind = truncated.startsWith("/") ? "command" : "prompt";
-
-        emitEvent({
-          kind,
-          text: truncated,
-          project: project?.name || "",
-          cwd: directory || "",
-          session: currentSession,
-          app: "opencode",
-          payload: { role: "user", messageId: id },
-        });
-
-        seen.push(id);
-        dirty = true;
-        if (seen.length > MAX_SEEN) {
-          saveState(seen);
-          dirty = false;
-        }
-      } catch {
-        // best-effort
-      }
-    },
-
     // --- Tool calls ---
     // `tool.execute.before` only records a start time so `.after` can report a
     // REAL duration. The hook `output` carries {title, output, metadata} — it
@@ -362,39 +252,16 @@ export const ActivityPlugin = async ({ project, directory }) => {
           text: name.name,
           project: project?.name || "",
           cwd: directory || "",
-          // sessionID is on the hook input; `currentSession` is only set by the
-          // session.created handler, which the plugin contract never calls.
-          session: input?.sessionID || currentSession,
+          // `sessionID` is carried on the hook input itself — this hook needs no
+          // session-lifecycle handler to attribute a call. MEASURED 2026-08-03:
+          // every tool-call row emitted after this landed (#298) carries a real
+          // session; 188/188 across both hosts, 0 empty.
+          session: input?.sessionID || null,
           app: "opencode",
           payload,
         });
       } catch {
         // best-effort
-      }
-    },
-
-    // --- Session end ---
-    "session.idle": async (_input, _output) => {
-      try {
-        emitEvent({
-          kind: "session-idle",
-          text: "",
-          project: project?.name || "",
-          cwd: directory || "",
-          session: currentSession,
-          app: "opencode",
-        });
-        currentSession = null;
-      } catch {
-        // best-effort
-      }
-    },
-
-    // --- Cleanup: persist state if dirty ---
-    _cleanup: () => {
-      if (dirty) {
-        saveState(seen);
-        dirty = false;
       }
     },
   };
