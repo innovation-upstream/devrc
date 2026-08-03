@@ -4,7 +4,9 @@
 Covers:
   - State file round-trip and ring-buffer pruning (shell-level via node)
   - Emit round-trip: plugin calls emit → collector.parse_line succeeds
-  - Deploy script: creates plugins dir and symlink
+  - opencode plugin-loader contract: exactly one named export, and it is a
+    function (a non-function export makes opencode reject the whole module)
+  - Declarative deployment via nix/home.nix into the singular plugin/ dir
 """
 from __future__ import annotations
 
@@ -25,7 +27,6 @@ import _mockbin as M  # noqa: E402
 
 SCRIPT_DIR = Path(__file__).resolve().parent.parent
 PLUGIN_JS = SCRIPT_DIR / "activity-plugin.js"
-DEPLOY_SH = SCRIPT_DIR / "deploy-plugin.sh"
 EMIT = SCRIPT_DIR.parent / "emit"
 
 # --------------------------------------------------------------------------- #
@@ -169,64 +170,118 @@ def test_plugin_tool_call_emit_roundtrip(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
-# Deploy script
+# opencode plugin-loader contract  (regression: PR #298 → silent total outage)
 # --------------------------------------------------------------------------- #
+#
+# MEASURED on opencode 1.18.4, 2026-08-02, by dropping probe plugins into the
+# real ~/.config/opencode/plugin/ and reading `opencode run --print-logs`:
+#
+#   export const _internals = {};                 → ERROR "failed to load plugin
+#   export const P = async () => ({});              … Plugin export is not a
+#                                                     function"  (WHOLE module
+#                                                     rejected, no hooks run)
+#
+#   export const P = async () => ({});             → loads clean, no error
+#
+#   two FUNCTION exports                           → BOTH invoked as plugin
+#                                                    factories, with
+#                                                    {client, project, worktree,
+#                                                     directory, serverUrl, $}
+#
+# So a single non-function `export const` disables ALL telemetry, silently —
+# `emitEvent` swallows every error by design, so nothing surfaces anywhere.
+# That is precisely what #298 shipped, and emission stopped at the moment
+# ship.sh deployed it (last kind=tool-call row 2026-08-03 02:32 UTC).
+#
+# These tests pin the contract at the file level. The old tests here exercised
+# deploy-plugin.sh instead — they stayed green through the entire outage,
+# because "the script makes a symlink" says nothing about whether opencode can
+# LOAD what the symlink points at.
 
-def test_deploy_creates_symlink(tmp_path):
-    """Deploy script creates the plugins dir and symlinks activity.js."""
-    fake_home = tmp_path / "fakehome"
-    fake_home.mkdir()
-    plugins_dir = fake_home / ".config" / "opencode" / "plugins"
-
-    env = dict(os.environ, HOME=str(fake_home))
-    rc = subprocess.run(
-        ["bash", str(DEPLOY_SH)],
-        env=env, capture_output=True, text=True, timeout=5,
+def _named_exports() -> dict:
+    """Return {exportName: typeof} for activity-plugin.js, via node."""
+    code = (
+        f'const m = await import({json.dumps(PLUGIN_JS.as_uri())});\n'
+        'const out = {};\n'
+        'for (const k of Object.keys(m)) out[k] = typeof m[k];\n'
+        'console.log(JSON.stringify(out));\n'
     )
-    assert rc.returncode == 0, rc.stderr
-    assert plugins_dir.is_dir()
-
-    link = plugins_dir / "activity.js"
-    assert link.is_symlink()
-    assert link.resolve() == PLUGIN_JS.resolve()
+    rc = run_node(code)
+    assert rc.returncode == 0, f"module failed to import: {rc.stderr}"
+    return json.loads(rc.stdout)
 
 
-def test_deploy_idempotent(tmp_path):
-    """Running deploy twice doesn't error and the symlink is correct."""
-    fake_home = tmp_path / "fakehome"
-    fake_home.mkdir()
+def test_every_named_export_is_a_function():
+    """opencode rejects the WHOLE module if any named export is not a function.
 
-    env = dict(os.environ, HOME=str(fake_home))
-    for _ in range(2):
-        rc = subprocess.run(
-            ["bash", str(DEPLOY_SH)],
-            env=env, capture_output=True, text=True, timeout=5,
-        )
-        assert rc.returncode == 0, rc.stderr
-
-    link = fake_home / ".config" / "opencode" / "plugins" / "activity.js"
-    assert link.is_symlink()
-    assert link.resolve() == PLUGIN_JS.resolve()
-
-
-def test_deploy_removes_stale_regular_file(tmp_path):
-    """If a regular file exists at the link target, deploy replaces it with a symlink."""
-    fake_home = tmp_path / "fakehome"
-    plugins_dir = fake_home / ".config" / "opencode" / "plugins"
-    plugins_dir.mkdir(parents=True)
-    stale = plugins_dir / "activity.js"
-    stale.write_text("stale content", encoding="utf-8")
-    assert stale.is_file()
-
-    env = dict(os.environ, HOME=str(fake_home))
-    rc = subprocess.run(
-        ["bash", str(DEPLOY_SH)],
-        env=env, capture_output=True, text=True, timeout=5,
+    This is the exact assertion that would have caught #298.
+    """
+    exports = _named_exports()
+    offenders = {k: t for k, t in exports.items() if t != "function"}
+    assert not offenders, (
+        f"non-function named export(s) {offenders} — opencode's loader will "
+        f"reject activity-plugin.js entirely with 'Plugin export is not a "
+        f"function' and ALL telemetry stops silently. Keep helpers "
+        f"module-private."
     )
-    assert rc.returncode == 0, rc.stderr
-    link = plugins_dir / "activity.js"
-    assert link.is_symlink()
-    assert link.resolve() == PLUGIN_JS.resolve()
+
+
+def test_exactly_one_named_export():
+    """Every function export is CALLED as a plugin factory — so export only one.
+
+    A helper exported for testability (e.g. `emitEvent`) is invoked by opencode
+    at startup with the plugin context, which for `emitEvent` means shelling out
+    to `emit` with kind=undefined — a junk telemetry row on every launch.
+    """
+    exports = _named_exports()
+    assert list(exports) == ["ActivityPlugin"], (
+        f"expected exactly one named export (ActivityPlugin), got "
+        f"{sorted(exports)} — opencode invokes each function export as a "
+        f"plugin factory"
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Declarative deployment  (regression: the laptop was never deployed at all)
+# --------------------------------------------------------------------------- #
+#
+# The plugin used to be installed by a hand-run deploy-plugin.sh. It was run on
+# the workbench on 2026-07-29 and never on the laptop, so the laptop recorded
+# ZERO kind=tool-call rows for the plugin's entire existence. home.nix is now
+# the single deployment, which makes both hosts identical by construction.
+
+HOME_NIX = SCRIPT_DIR.parent.parent.parent / "nix" / "home.nix"
+
+
+def test_home_nix_deploys_plugin_to_singular_plugin_dir():
+    """The plugin must be declared into a directory opencode actually globs."""
+    text = HOME_NIX.read_text(encoding="utf-8")
+    assert '.config/opencode/plugin/activity.js' in text, (
+        "nix/home.nix does not deploy the activity plugin — opencode will "
+        "never load it and telemetry is silently dead on every host"
+    )
+    assert 'collector/opencode/activity-plugin.js' in text, (
+        "the deployment does not point at activity-plugin.js"
+    )
+
+
+def test_home_nix_does_not_deploy_to_plural_plugins_dir():
+    """opencode globs BOTH plugin/ and plugins/ — two copies = double emission."""
+    text = HOME_NIX.read_text(encoding="utf-8")
+    assert '.config/opencode/plugins/activity.js' not in text, (
+        "activity.js is declared in the PLURAL plugins/ dir as well; opencode "
+        "globs {plugin,plugins}/*.{ts,js} and would load it twice, "
+        "double-emitting every event"
+    )
+
+
+def test_deploy_script_is_gone():
+    """The hand-run script is superseded; its return would reintroduce drift."""
+    assert not (SCRIPT_DIR / "deploy-plugin.sh").exists(), (
+        "deploy-plugin.sh is back — it deploys to the plural dir and must be "
+        "remembered per host, which is how the laptop went blind. Deployment "
+        "belongs in nix/home.nix."
+    )
 
 
 # --------------------------------------------------------------------------- #

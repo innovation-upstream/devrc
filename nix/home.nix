@@ -799,6 +799,23 @@ in
   # ~/.config/opencode/ existing.
   home.file.".config/opencode/guard_core.py".source = ../scripts/claude-hooks/guard_core.py;
 
+  # Activity telemetry plugin — emits session/prompt/tool-call events into
+  # activity.events via ~/.config/activity-collector/emit.
+  #
+  # 🔴 THIS ENTRY IS THE ONLY DEPLOYMENT. It replaces
+  # scripts/collector/opencode/deploy-plugin.sh, a hand-run script that had to
+  # be remembered per host — and was not: it was run on the workbench on
+  # 2026-07-29 and NEVER on the laptop, which therefore recorded zero
+  # kind=tool-call rows for the plugin's entire existence. Same constraints as
+  # guard.js/env.js: directly in `plugin/`, `.js` only, non-recursive glob.
+  #
+  # 🔴 Do NOT also deploy to `plugins/` (plural). opencode's glob is
+  # `{plugin,plugins}/*.{ts,js}` and reads BOTH, so a file in each loads the
+  # plugin TWICE and double-emits every event. opencodeDropStalePluginsDir below
+  # removes the pre-existing plural-dir symlink that deploy-plugin.sh left.
+  home.file.".config/opencode/plugin/activity.js".source =
+    ../scripts/collector/opencode/activity-plugin.js;
+
   # `shell.env` plugin — the only supported seam for putting environment into
   # opencode's bash tool (there is no `env` config key; setting one is silently
   # ignored). NOTE the bash tool DOES source .zshenv on this host — see the
@@ -934,6 +951,27 @@ in
     f="$HOME/.config/opencode/opencode.jsonc"
     if [ -e "$f" ] && [ ! -L "$f" ]; then
       $DRY_RUN_CMD mv -f "$f" "$f.pre-devrc-$(date +%Y%m%d%H%M%S).bak"
+    fi
+  '';
+
+  # Remove the activity plugin's PRE-DECLARATIVE deployment. Until 2026-08-02 it
+  # was installed by a hand-run script into ~/.config/opencode/plugins/ (PLURAL),
+  # while home-manager owns ~/.config/opencode/plugin/ (SINGULAR). opencode's
+  # glob is `{plugin,plugins}/*.{ts,js}` and reads BOTH — measured 1.18.4, which
+  # logged a load error for each path independently — so leaving the old copy in
+  # place would load the plugin TWICE and double-emit every telemetry event.
+  #
+  # Only ever removes the specific symlink that deploy-plugin.sh created (a
+  # symlink whose target is the repo's activity-plugin.js); a real file or a
+  # foreign plugin someone put there deliberately is left untouched. The
+  # directory is removed only if it is then empty. No-op on every host that
+  # never ran the script (the laptop) and on every switch after the first.
+  home.activation.opencodeDropStalePluginsDir = lib.hm.dag.entryAfter ["writeBoundary"] ''
+    d="$HOME/.config/opencode/plugins"
+    f="$d/activity.js"
+    if [ -L "$f" ] && case "$(readlink "$f")" in *activity-plugin.js) true;; *) false;; esac; then
+      $DRY_RUN_CMD rm -f "$f"
+      $DRY_RUN_CMD rmdir "$d" 2>/dev/null || true
     fi
   '';
 

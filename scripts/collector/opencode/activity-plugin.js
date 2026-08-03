@@ -2,9 +2,16 @@
 // activity-plugin.js — OpenCode plugin that emits activity telemetry events
 // to the activity collector pipeline via the `emit` CLI.
 //
-// Placed in ~/.config/opencode/plugins/ (symlinked by deploy-plugin.sh).
-// OpenCode loads plugins from that directory and calls the exported async
-// handler factory with { project, client, directory, $ }.
+// DEPLOYMENT: home-manager, `home.file.".config/opencode/plugin/activity.js"`
+// in nix/home.nix — the same declarative mechanism as guard.js and env.js.
+// There is deliberately no deploy script: a hand-run one left the laptop
+// without the plugin for its entire existence (2026-07-29 → 2026-08-02, zero
+// kind=tool-call rows ever recorded from that host).
+//
+// opencode's plugin glob is `{plugin,plugins}/*.{ts,js}` — non-recursive, both
+// the singular and plural directory, `.mjs` will NOT load. We deploy to the
+// SINGULAR `plugin/` only; a copy in `plugins/` would load a SECOND time and
+// double-emit every event.
 
 import { execFileSync } from "child_process";
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from "fs";
@@ -34,7 +41,19 @@ const MAX_ARGS_SUMMARY = 200;
 const NAME_CAPTURE_FAILED = "__name_capture_failed__";
 const MAX_INFLIGHT_CALLS = 256;
 
-export const _internals = { NAME_CAPTURE_FAILED, MAX_ARGS_SUMMARY };
+// 🔴 DO NOT ADD A NAMED EXPORT TO THIS FILE. `ActivityPlugin` must be the ONLY
+// one. opencode's loader iterates EVERY named export of a plugin module and
+// (a) throws "Plugin export is not a function" for any non-function — which
+// aborts the WHOLE module, so one stray `export const` silently disables all
+// telemetry — and (b) CALLS every function export as a plugin factory with
+// { client, project, worktree, directory, experimental_workspace, serverUrl, $ }.
+// Both measured on opencode 1.18.4, 2026-08-02, via probe plugins in
+// ~/.config/opencode/plugin/ (see tests/test_activity_plugin_exports.py).
+//
+// That is exactly how #298 killed this plugin: it added
+// `export const _internals = {...}` plus three exported helpers, and emission
+// stopped dead at the moment ship.sh deployed it. Helpers stay module-private;
+// if a test needs one, hang it off ActivityPlugin rather than exporting it.
 
 // --------------------------------------------------------------------------- #
 // State management (ring buffer of seen message IDs)
@@ -92,7 +111,7 @@ function resolveEmitPath() {
   return "emit";
 }
 
-export function emitEvent({ kind, text, project, cwd, session, app, payload }) {
+function emitEvent({ kind, text, project, cwd, session, app, payload }) {
   try {
     const emit = resolveEmitPath();
     const args = ["source=opencode", `kind=${kind}`];
@@ -171,7 +190,7 @@ function extractText(msg) {
  * record that distinguishably); `shape` is the typeof/ctor we actually saw, so
  * a future contract change is diagnosable from the row itself.
  */
-export function extractToolName(input) {
+function extractToolName(input) {
   const t = input?.tool;
   if (typeof t === "string" && t.length > 0) {
     return { name: t, ok: true, shape: "string" };
@@ -197,7 +216,7 @@ export function extractToolName(input) {
  * serialize, and if the result is over budget we replace it with a structured
  * marker that names the keys and reports the dropped size.
  */
-export function summarizeArgs(args) {
+function summarizeArgs(args) {
   if (args == null) return { args_summary: null, args_truncated: false };
   let s;
   try {
