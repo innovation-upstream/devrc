@@ -51,13 +51,15 @@ from __future__ import annotations
 
 import os
 import re
-import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+sys.path.insert(0, str(REPO_ROOT / "scripts"))
+from testlib.mockbin import write_exec  # noqa: E402
 RUN_TESTS = REPO_ROOT / "scripts" / "run-tests.sh"
 
 
@@ -143,21 +145,23 @@ def test_missing_pytest_module_is_named(tmp_path):
     of 'could not parse pytest's summary', a diagnosis pointing at the wrong
     subsystem entirely.
     """
-    # A `python` shim that exists and runs but has no pytest. Written without a
-    # `#!/usr/bin/env` shebang: the nix build sandbox has no /usr/bin/env, and a
-    # stub that is dead in one tier is how #306's portability defect shipped.
+    # A `python` shim that exists and runs but has no pytest.
+    #
+    # 🔴 Written via testlib.mockbin.write_exec, NOT by hand. The first draft
+    # wrote its own `#!{shutil.which("bash")}` shebang and the repo-wide runtime
+    # -shebang scanner (scripts/tests/test_runtime_shebangs.py, added by #306)
+    # failed it IN THE SANDBOX ONLY — the dev-host run of this file alone was
+    # green, because the scanner lives in a different file. Exactly the two-tier
+    # lesson: a per-file dev-host run cannot see a repo-wide guard.
     bindir = tmp_path / "bin"
     bindir.mkdir()
-    real_bash = shutil.which("bash")
-    shim = bindir / "python"
-    shim.write_text(
-        f"#!{real_bash}\n"
+    write_exec(
+        bindir / "python",
         'if [ "$1" = "-m" ] && [ "$2" = "pytest" ]; then\n'
-        '  echo "/usr/bin/python: No module named pytest" >&2; exit 1\n'
+        '  echo "python: No module named pytest" >&2; exit 1\n'
         "fi\n"
-        "exit 0\n"
+        "exit 0\n",
     )
-    shim.chmod(0o755)
 
     env = dict(os.environ)
     env["PATH"] = f"{bindir}{os.pathsep}{env.get('PATH', '')}"
