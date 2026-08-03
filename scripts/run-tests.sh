@@ -402,12 +402,21 @@ done
 # no counts, so they are pass/fail only and are NOT part of the totals.
 HOOK_TESTS=(
   "scripts/claude-hooks/tests/test_shell_env_nudge.py"
+  "scripts/claude-hooks/tests/test_search_tool_nudge.py"
   "scripts/claude-hooks/tests/test_claude_notify.py"
   "scripts/claude-hooks/tests/test_register_nudge_hook.py"
   "scripts/claude-hooks/tests/test_bash_guard.py"
 )
 for HOOK_TEST in "${HOOK_TESTS[@]}"; do
-  [ -f "$HOOK_TEST" ] || continue
+  # Was `|| continue` — a SILENT skip, the exact #276 shape GUARD 5 exists to stop:
+  # an entry added to this list that the runner quietly rejects, leaving the gate
+  # green while the tests never ran. A missing entry is now a loud failure.
+  if [ ! -f "$HOOK_TEST" ]; then
+    echo "run-tests: ERROR — hook test '$HOOK_TEST' does not exist (typo, or moved?)." >&2
+    RESULTS+=("FAIL  $HOOK_TEST (missing)")
+    fail=1
+    continue
+  fi
   echo "=== script $HOOK_TEST ==="
   if python "$HOOK_TEST"; then
     RESULTS+=("PASS  $HOOK_TEST (script)")

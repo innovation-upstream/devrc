@@ -8,7 +8,7 @@ and NEVER clobbers hooks it doesn't own (clawgate PermissionRequest/Stop, bash-g
 tmux hooks, etc. are preserved — this only ever appends).
 
 Registers:
-  * PostToolUse(Bash): audit-pr-nudge.py, shell-env-nudge.py
+  * PostToolUse(Bash): audit-pr-nudge.py, shell-env-nudge.py, search-tool-nudge.py
   * UserPromptSubmit / Stop / SubagentStop: claude-notify.py (the turn-finished
     notifier — a best-effort side-effect hook, appended alongside any existing
     Stop/clawgate-stop/tmux hooks).
@@ -24,6 +24,7 @@ SETTINGS = os.path.expanduser("~/.claude/settings.json")
 POST_BASH_CMDS = [
     "python3 ~/.claude/hooks/audit-pr-nudge.py",
     "python3 ~/.claude/hooks/shell-env-nudge.py",
+    "python3 ~/.claude/hooks/search-tool-nudge.py",
 ]
 
 # The turn-finished notifier fires on these three events (single script,

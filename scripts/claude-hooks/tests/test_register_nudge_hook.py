@@ -20,6 +20,7 @@ SCRIPT = os.path.join(HERE, "..", "register-nudge-hook.py")
 
 NOTIFY = "python3 ~/.claude/hooks/claude-notify.py"
 CLAWGATE_STOP = "/home/zach/.claude/clawgate-stop-hook.sh"
+SEARCH_NUDGE = "python3 ~/.claude/hooks/search-tool-nudge.py"
 
 failures = []
 
@@ -80,6 +81,10 @@ with tempfile.TemporaryDirectory() as tmp:
     check("2: both PostToolUse nudges preserved",
           "python3 ~/.claude/hooks/audit-pr-nudge.py" in cmds(d, "PostToolUse")
           and "python3 ~/.claude/hooks/shell-env-nudge.py" in cmds(d, "PostToolUse"))
+    # search-tool-nudge is absent from BASE_SETTINGS, so this also proves the registrant
+    # ADDS a missing PostToolUse nudge rather than only preserving existing ones.
+    check("1: search-tool-nudge registered on PostToolUse",
+          SEARCH_NUDGE in cmds(d, "PostToolUse"))
 
     # Idempotency: a second run changes nothing and never duplicates.
     p2 = run(env)
@@ -88,6 +93,7 @@ with tempfile.TemporaryDirectory() as tmp:
     with open(settings) as f:
         d2 = json.load(f)
     check("3: no duplicate claude-notify on Stop", cmds(d2, "Stop").count(NOTIFY) == 1)
+    check("3: no duplicate search-tool-nudge", cmds(d2, "PostToolUse").count(SEARCH_NUDGE) == 1)
     check("3: clawgate Stop still single + present", cmds(d2, "Stop").count(CLAWGATE_STOP) == 1)
 
     # Atomicity: no temp litter left in the dir, and the source uses os.replace.
