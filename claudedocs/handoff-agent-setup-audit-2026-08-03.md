@@ -51,7 +51,11 @@ forward.
 - `insights.py` reporting "telemetry unavailable" **with exit 0** on a healthy
   pipeline.
 - Harnesses that **tested nothing** and reported green.
-- A runner printing `collected=0`, `RESULT: FAIL`, and **exiting 0**.
+- ~~A runner printing `collected=0`, `RESULT: FAIL`, and **exiting 0**.~~
+  **RETRACTED** — see Open. It exits 1; the real defect was a misleading
+  diagnostic, not a false green. Relayed from a subagent report without being
+  tested, which is the same class of error as the four corrections above — the
+  difference is that this one made it into a merged doc before anyone checked.
 
 ## Corrections — things asserted then disproved
 
@@ -99,13 +103,43 @@ is now deleted; deployment is declarative.
 
 ## Open — nothing scheduled
 
-- 🔴 **`scripts/dl-router/tests/*.test.mjs` — 508 tests, ungated.**
-  `run-node-tests.sh` hard-codes `FILES=(scripts/browser-bridge/tests/*.test.mjs)`.
-  Measured 508 pass / 0 fail. *(in flight)*
-- 🔴 **`run-tests.sh` can exit 0 while printing `RESULT: FAIL` / `collected=0`,
-  and `REQUIRED_TOOLS` omits `pytest` itself.** *(in flight)*
-- **Telemetry deadman** — no check exists for a source going dead. *(in flight)*
-- **`kind=session-create` has never emitted a single row, ever.** Cause unknown.
+- ~~`scripts/dl-router/tests/*.test.mjs` — 508 tests, ungated.~~ **DONE (#309)** —
+  and it was **529**, not 508: `scripts/collector/browser-ext/tests` (21 `.mjs`)
+  was ungated too, found by auditing every `*.test.mjs` rather than only the one
+  directory named in the brief. The hard-coded glob was replaced with discovery
+  plus a two-way pin, because adding two lines leaves the *next* suite ungated
+  identically. Node gate 468 → **997**.
+- ~~`run-tests.sh` can exit 0 while printing `RESULT: FAIL` / `collected=0`.~~
+  **RETRACTED — this does not reproduce.** Measured on `13bc8bd`: a run without
+  pytest importable prints 17 × "could not parse pytest's summary",
+  `RESULT: FAIL`, and exits **1** (2 in another probe). It is structurally
+  impossible: `RESULT: FAIL` prints only inside `if [ "$fail" -ne 0 ]`, and the
+  next statement is `exit "$fail"`. The original report most likely read a status
+  through a pipeline — the `rc=$?` trap RULES.md names. **The real defect is
+  narrower and was fixed in #310**: `REQUIRED_TOOLS` checks *binaries* via
+  `command -v`, but pytest is a *module*, so a missing pytest produced a
+  confusing diagnostic blaming pytest's output format rather than a clean
+  precondition failure. It also asserted `python3` while the runner calls
+  `python`. Bad diagnostics, **not** a false green.
+- ~~Telemetry deadman.~~ **DONE (#311)** — per `(host, source)` liveness measured
+  in ACTIVE time (buckets where any source emitted), so away-time is not silence,
+  and budgets are measured per pair rather than configured. Surfaces as a `tlm`
+  pill via the existing workbench `bar-status-poll`; no new timer or secret.
+  🔴 The load-bearing property, verified end-to-end against the pill's real
+  renderer: deadman returns `count=0` for **both** `ok` and `unreachable`, so a
+  consumer reading `count` alone would render "cannot tell" as "all healthy".
+  It doesn't — healthy is invisible, sustained-unknown shows `tlm ?` (Warning),
+  a dead source shows `tlm N` (Critical).
+- **`kind=session-create` has never emitted a single row, ever.** **Cause found
+  (#311), not fixed:** `session.created` is **not a plugin hook name** on
+  opencode 1.18.4 — it is a *bus event type*. Probed directly: the named hook
+  fired 0 times, the generic `event` hook fired once with
+  `event.type === "session.created"`. Same for `message.updated` / `session.idle`;
+  only `tool.execute.before/after` are real hooks. **Downstream cost:
+  `currentSession` is only ever set by that dead handler, so 2,736 of 2,799
+  `tool-call` rows carry `session=''`.** Deliberately not fixed in the same PR —
+  the fix rewrites the plugin's hook surface, and that file's last edit killed 11
+  hours of telemetry.
 - **Nebula-path stall** — laptop `insights.py` 3/6, workbench 6/6. Deliberately
   deprioritised: workaround is to run it from the workbench.
 - **`system.error_log` (2.85M rows) and `query_metric_log` are still un-TTL'd** —
