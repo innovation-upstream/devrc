@@ -11,6 +11,7 @@ formatting. We test:
 """
 import importlib.util
 import json
+from collections import Counter
 import sys
 from pathlib import Path
 
@@ -57,12 +58,19 @@ def test_summaries_query_is_argmax_windowed_and_scoped():
 def test_host_filter_is_quoted():
     sql = I.q_summaries(86400, "o'brien")
     assert "host='o\\'brien'" in sql
-    assert "host='laptop'" in I.q_messages(86400, "laptop")
+    assert "host='laptop'" in I.q_message_counts(86400, "laptop")
 
 
 def test_messages_and_insights_queries():
-    assert "kind IN ('prompt','command')" in I.q_messages(86400)
+    # The message stream is now aggregated SERVER-SIDE (see insights.py) — the
+    # old `q_messages` row-stream is gone because the server could not execute
+    # it under its memory ceiling.
+    assert "kind IN ('prompt','command')" in I.q_message_counts(86400)
+    assert "kind='command'" in I.q_top_commands(86400)
+    assert "kind='prompt'" in I.q_first_words(86400)
+    assert "kind='prompt'" in I.q_prompt_themes(86400)
     assert "kind='session-insight'" in I.q_insights(86400)
+    assert not hasattr(I, "q_messages"), "the unbounded text row-stream must stay gone"
 
 
 def test_summaries_host_alias_is_not_shadowing():
@@ -82,7 +90,10 @@ def test_no_select_alias_shadows_a_where_filtered_column():
     op = re.compile(r"\b([a-zA-Z_]\w*)\s*(?:>=|<=|=|>|<)")
     for sql in (I.q_summaries(86400, "workbench"),
                 I.q_insights(86400, "workbench"),
-                I.q_messages(86400, "workbench")):
+                I.q_message_counts(86400, "workbench"),
+                I.q_top_commands(86400, "workbench"),
+                I.q_first_words(86400, "workbench"),
+                I.q_prompt_themes(86400, "workbench")):
         aliases = set(re.findall(r"\bAS\s+(\w+)", sql))
         where = sql.split("WHERE", 1)[1] if "WHERE" in sql else ""
         where_cols = set(op.findall(where))
@@ -185,16 +196,67 @@ def test_aggregate_host_scope_recorded():
 # --------------------------------------------------------------------------- #
 # gather() + graceful degrade
 # --------------------------------------------------------------------------- #
+def query_name(sql: str) -> str:
+    """Map a gather() query back to its plan name (the message stream is now
+    FOUR server-side rollups, not one row-stream)."""
+    if "session-summary" in sql:
+        return "summaries"
+    if "session-insight" in sql:
+        return "insights"
+    if "splitByWhitespace" in sql:
+        return "commands"
+    if "extract(" in sql:
+        return "first_words"
+    if "countIf(match" in sql:
+        return "themes"
+    return "messages"
+
+
+def rollups_from_messages(rows):
+    """Compute the four server-side rollups from raw message rows, in PYTHON.
+
+    This is the equivalence harness: it lets a fixture of raw rows drive the
+    server-side code path, so the two paths can be compared directly.
+    """
+    counts, cmds, words, themes = Counter(), Counter(), Counter(), Counter()
+    for r in rows:
+        kind = r.get("kind")
+        counts[(kind, r.get("host") or "?", str(r.get("ts") or "")[:10])] += 1
+        text = r.get("text") or ""
+        if kind == "command":
+            cmds[I._first_token(text)] += 1
+        else:
+            low = text.lower()
+            for name, rx in I._THEME_RX.items():
+                if rx.search(low):
+                    themes[name] += 1
+            w = I._WORD_RX.findall(low)
+            if w:
+                words[w[0]] += 1
+    return {
+        "messages": [{"kind": k, "host": h, "day": d, "n": n}
+                     for (k, h, d), n in counts.items()],
+        "commands": [{"cmd": c, "n": n} for c, n in
+                     sorted(cmds.items(), key=lambda kv: (-kv[1], kv[0]))],
+        "first_words": [{"w": w, "n": n} for w, n in
+                        sorted(words.items(), key=lambda kv: (-kv[1], kv[0]))],
+        "themes": [{f"t{i}": themes.get(name, 0)
+                    for i, name in enumerate(I.theme_aliases())}],
+    }
+
+
 class FakeClient:
     def __init__(self, summaries, messages, insights):
-        self._s, self._m, self._i = summaries, messages, insights
+        self._s, self._i = summaries, insights
+        self._roll = rollups_from_messages(messages)
 
     def rows(self, sql):
-        if "session-summary" in sql:
+        name = query_name(sql)
+        if name == "summaries":
             return self._s
-        if "session-insight" in sql:
+        if name == "insights":
             return self._i
-        return self._m
+        return self._roll[name]
 
 
 def test_gather_assembles_from_client():

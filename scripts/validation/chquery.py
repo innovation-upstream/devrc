@@ -36,10 +36,57 @@ from __future__ import annotations
 
 import json
 import os
+import re
+import socket
+import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from datetime import datetime
+
+
+# --------------------------------------------------------------------------- #
+# Error taxonomy
+# --------------------------------------------------------------------------- #
+# 🔴 "could not reach the server" and "the server rejected my query" are
+# DIFFERENT FACTS and callers must be able to tell them apart. Collapsing them
+# is how `insights.py` reported a healthy pipeline as "telemetry unavailable"
+# and exited 0: a MEMORY_LIMIT_EXCEEDED on one query was indistinguishable from
+# telemetry being switched off. Both subclass RuntimeError so pre-existing
+# `except RuntimeError` call sites keep working unchanged.
+class CHError(RuntimeError):
+    """Base class for ClickHouse client failures."""
+
+
+class CHUnreachable(CHError):
+    """The server could not be reached at all (DNS, connect, reset, timeout).
+
+    Nothing can be said about any query — retrying a DIFFERENT query is
+    pointless, so callers should abort the whole gather.
+    """
+
+
+class CHQueryError(CHError):
+    """The server answered and REJECTED or FAILED this specific query.
+
+    The pipeline is up. Another query may well succeed, so callers should
+    record which one failed and carry on — degraded, not dead.
+    """
+
+    def __init__(self, message: str, *, code: int | None = None,
+                 http_status: int | None = None):
+        super().__init__(message)
+        self.code = code                # ClickHouse error code, e.g. 241
+        self.http_status = http_status
+
+
+_CH_CODE_RX = re.compile(r"Code:\s*(\d+)")
+
+
+def ch_error_code(body: str) -> int | None:
+    """Pull ClickHouse's numeric error code out of an error body, if present."""
+    m = _CH_CODE_RX.search(body or "")
+    return int(m.group(1)) if m else None
 
 
 # --------------------------------------------------------------------------- #
@@ -94,7 +141,28 @@ class CHClient:
             req.add_header("X-ClickHouse-User", self.conn.user)
         if self.conn.password:
             req.add_header("X-ClickHouse-Key", self.conn.password)
-        resp = self._opener(req, timeout=self.conn.timeout)
+        try:
+            resp = self._opener(req, timeout=self.conn.timeout)
+        except urllib.error.HTTPError as e:
+            # The server ANSWERED — with an error status. urlopen raises before
+            # the status check below ever runs, which is why the old
+            # `RuntimeError(f"ClickHouse HTTP {code}")` branch was unreachable
+            # for the common case (a query that CH rejects → HTTP 500 + a
+            # `Code: NNN. DB::Exception: …` body). Classify it as a QUERY error.
+            try:
+                body = e.read().decode("utf-8", "replace")
+            except Exception:  # noqa: BLE001 — never mask the original failure
+                body = ""
+            raise CHQueryError(
+                f"ClickHouse HTTP {e.code}: {body[:500] or e.reason}",
+                code=ch_error_code(body), http_status=e.code,
+            ) from e
+        except (urllib.error.URLError, socket.timeout, TimeoutError, OSError) as e:
+            # No usable answer: DNS, refused, reset, or the read timed out.
+            raise CHUnreachable(
+                f"{type(e).__name__}: {e} (url={self.conn.url}, "
+                f"timeout={self.conn.timeout}s)"
+            ) from e
         try:
             code = getattr(resp, "status", None) or resp.getcode()
             body = resp.read()
@@ -105,7 +173,8 @@ class CHClient:
         if isinstance(body, bytes):
             body = body.decode("utf-8", "replace")
         if not (200 <= code < 300):
-            raise RuntimeError(f"ClickHouse HTTP {code}: {body[:500]}")
+            raise CHQueryError(f"ClickHouse HTTP {code}: {body[:500]}",
+                               code=ch_error_code(body), http_status=code)
         return body
 
     def scalar(self, sql: str):
