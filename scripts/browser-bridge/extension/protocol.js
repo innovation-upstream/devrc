@@ -561,19 +561,43 @@ export async function applyWakeSteps(send, steps = WAKE_CDP_STEPS) {
 // everything in THIS file is the pure, browser-free half: the preset table, the
 // validation, and the ordered CDP step list.
 //
-// ✅ THE SAFETY PROPERTY THIS BUYS — state it explicitly, it is the REASON this
-// design was chosen over holding one long-lived debugger session open:
+// 🔴 THE VIEWPORT SIZE DOES **NOT** COME BACK. This block used to claim the
+// opposite — that because the overrides die at detach "the tab is NOT emulated
+// between ops", so a crashed agent could never leave the operator's browser
+// distorted. MEASURED FALSE, 2026-08-03, extension 0.7.2, with a fresh-tab
+// control:
 //
-//   Because the overrides die at detach, the tab is NOT emulated between ops. A
-//   crashed agent, a killed Claude session, or an evicted MV3 service worker
-//   therefore CANNOT leave the operator's real browser distorted. The worst case
-//   is a forgotten entry in an in-memory Map that dies with the worker — not a
-//   Brave tab stuck at 393×852 pretending to be an iPhone with nothing left
-//   running that knows how to undo it.
+//   fresh tab, never emulated   innerWidth 1124   (control — the read path works)
+//   after `emulate iphone-15`   innerWidth  393
+//   after `emulate --reset`     innerWidth  393   ← NOT restored
+//   after `--reset` + re-nav    innerWidth  393   ← still NOT restored
 //
-// A held session would have been simpler to write and strictly worse to own: the
-// failure mode would be a permanently mangled tab plus a permanent debug banner,
-// recoverable only by the operator finding and closing the tab.
+// The reset is not silently skipping: it reported
+// `cleared: [Emulation.clearDeviceMetricsOverride,
+// Emulation.setTouchEmulationEnabled, Emulation.setUserAgentOverride]`. Sending
+// `clearDeviceMetricsOverride` simply does not restore the viewport, and the size
+// survives the detach, the clear AND a re-navigation.
+//
+// What DOES revert by itself, measured in the same pass: devicePixelRatio,
+// maxTouchPoints, pointer:coarse, prefers-color-scheme, userAgent, timeZone. Only
+// the viewport SIZE is sticky. (`"ontouchstart" in window` also stays true on a
+// document that was BUILT emulated — that one is document-creation residue and a
+// re-nav does clear it.)
+//
+// THE MECHANISM IS NOT ESTABLISHED. The leading hypothesis is a render-widget
+// resize residue — consistent with devicePixelRatio reverting while the width does
+// not, even though both come from the same CDP call — but that is a hypothesis,
+// not a finding. Do not restate it as known, and do not build a fix on it.
+//
+// THE ONLY KNOWN REMEDY IS TO CLOSE THE TAB. `--reset` therefore means "stop
+// re-applying, and send the clears" — it is NOT an undo. That is issue #319; the
+// operator-facing workaround is `browser emulate --reset --recreate`, which
+// replaces the stuck tab with a fresh one at the same url (the tab id changes).
+//
+// The apply-then-act design above is still the right shape — a held-open session
+// would add a permanent debug banner on top of the same stuck viewport — but it
+// buys strictly less than this comment used to claim, and the difference is
+// exactly what the operator gets stuck with.
 //
 // BLAST RADIUS: enforced SERVER-side (see server.py OWNED_TAB_ONLY_OPS). Only a
 // tab the calling session opened via `open` may be emulated; anything else is

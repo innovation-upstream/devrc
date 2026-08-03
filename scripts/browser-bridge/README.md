@@ -214,7 +214,7 @@ has not been exercised against a third-party authenticated API beyond that.)
 | `screenshot` | **CDP `Page.captureScreenshot`** (png) — works on a BACKGROUND/occluded tab + each profile's own tab; a foreground tab uses the cheap `captureVisibleTab` fast path. `fullpage` grabs the whole document. The CLI decodes `dataUrl` to a **`.png` on disk** and prints a path, never the base64 (see below) | `{url,dataUrl,via}` |
 | `open`       | `chrome.tabs.create({url,active:false})` — **background/HIDDEN** (`visibilityState:"hidden"` → Chromium throttles it → a heavy SPA won't render → reads return a shell). The escape hatch is **`browser wake`** (or a `--wake` read): it un-throttles the tab and moves NO focus. Reads self-announce this via `hidden`/`note` | `{tabId,url}` |
 | `close`      | `chrome.tabs.remove(tabId)`                               | `{closed:tabId}` |
-| `emulate`    | **device emulation** — CDP `Emulation.setDeviceMetricsOverride` / `setTouchEmulationEnabled` / `setUserAgentOverride` (**+`userAgentMetadata`**) / `setEmulatedMedia` / `setTimezoneOverride` / `setGeolocationOverride`, from a named preset or raw params. **Sticky per tab** (re-applied inside every later CDP session) and **owned-tab-only**. `--reset` stops re-applying | `{tabId,url,emulation,applied,note}` or `{tabId,url,reset,wasEmulating,note}` |
+| `emulate`    | **device emulation** — CDP `Emulation.setDeviceMetricsOverride` / `setTouchEmulationEnabled` / `setUserAgentOverride` (**+`userAgentMetadata`**) / `setEmulatedMedia` / `setTimezoneOverride` / `setGeolocationOverride`, from a named preset or raw params. **Sticky per tab** (re-applied inside every later CDP session) and **owned-tab-only**. `--reset` stops re-applying and sends the clears, but 🔴 **does NOT restore the viewport size** (#319) — `--reset --recreate` replaces the tab (new tab id) and is the only known remedy | `{tabId,url,emulation,applied,note}` or `{tabId,url,reset,wasEmulating,note}` |
 | `frames`     | **`chrome.webNavigation.getAllFrames`** — the tab's frames INCLUDING cross-origin OUT-OF-PROCESS iframes (OOPIFs) | `{url,title,frames:[{frameId,url,parentFrameId}]}` |
 | `click`      | top frame: **CDP** `getBoundingClientRect` → `Input.dispatchMouseEvent` (trusted); `--frame`: **SYNTHETIC** click via `chrome.scripting`; `selector` required, `frame` optional | `{url,clicked,x,y,frame,trusted}` |
 | `type`       | top frame: **CDP `Input.insertText`** (trusted); `--frame`: **SYNTHETIC** input via `chrome.scripting`; `text` required, `selector`/`frame` optional | `{url,typed,frame,trusted}` |
@@ -532,21 +532,55 @@ The choke point is deliberate. Patching `screenshot` and `click` individually wo
 have fixed the two visible cases and regenerated the bug at the next CDP op anyone
 added. One rule, one place.
 
-### ✅ The safety property this buys
+### 🔴 `--reset` does NOT restore the viewport (#319)
 
-**Because the overrides die at detach, the tab is not emulated between ops.** A
-crashed agent, a killed session, or an evicted MV3 service worker cannot leave the
-operator's real browser distorted — the worst case is a forgotten `Map` entry that
-dies with the worker.
+This section used to claim the opposite — that because the overrides die at detach
+"the tab is not emulated between ops", so nothing could stick. **Measured false**
+(2026-08-03, laptop, extension 0.7.2, with a fresh-tab control):
 
-A held-open session would have been simpler to write and strictly worse to own: its
-failure mode is a permanently mangled tab plus a permanent debug banner,
-recoverable only by the operator finding and closing the tab. That trade is the
-whole reason for the design, and it is why `--reset` means "stop re-applying"
-rather than "undo" — there is nothing live to undo.
+| step | `innerWidth` |
+| --- | --- |
+| fresh tab, never emulated (**control** — proves the read path works) | **1124** |
+| after `emulate iphone-15` | **393** |
+| after `emulate --reset` | **393** ← not restored |
+| after `--reset` **and** a re-`nav` | **393** ← still not restored |
 
-The cost, stated plainly: a page that re-measures the viewport *after* an op (a
-`resize` listener, a late layout pass) sees the real window until the next op
+The reset is not silently skipping the work: it reported
+`cleared: [Emulation.clearDeviceMetricsOverride, Emulation.setTouchEmulationEnabled,
+Emulation.setUserAgentOverride]`. **Sending `clearDeviceMetricsOverride` simply does
+not bring the viewport back**, and the size survives the detach, the clear and a
+re-navigation.
+
+Everything else *does* revert on its own, measured in the same pass:
+`devicePixelRatio`, `maxTouchPoints`, `pointer: coarse`, `prefers-color-scheme`,
+`userAgent`, `timeZone`. Only the viewport **size** is sticky. (`"ontouchstart" in
+window` also stays true on a document that was *built* emulated — that one is
+document-creation residue and a re-`nav` clears it.)
+
+**The mechanism is not established.** The leading hypothesis is a render-widget
+resize residue — consistent with `devicePixelRatio` reverting while the width does
+not, though both come from the same CDP call — but it is a hypothesis. Do not
+restate it as a finding.
+
+**Closing the tab is the only known remedy.** So `--reset` means "stop re-applying,
+and send the clears", never "undo". The workaround:
+
+```
+browser emulate --reset --recreate
+```
+
+which resets, opens a **fresh tab at the same url** owned by the same session,
+closes the stuck one, and reports the **new tab id** (it changes — later ops route
+to it). It refuses on a non-http(s) url and always opens the replacement *before*
+closing the original, so no failure path leaves you with no tab. Plain `--reset`
+never swaps tab ids.
+
+The apply-then-act design is still the right shape — a held-open session would add
+a permanent debug banner on top of the same stuck viewport — but it buys strictly
+less than this section used to claim.
+
+The other cost, stated plainly: a page that re-measures the viewport *after* an op
+(a `resize` listener, a late layout pass) sees the real window until the next op
 re-applies.
 
 ### Blast radius: owned tabs only
@@ -617,13 +651,43 @@ tab. These are loopback `chrome.debugger` calls to a local renderer and are
 there was no browser in the session that built this. If a legitimate op is ever
 seen timing out at 18s only when emulated, that is the first number to go measure.
 
-### Not exposed to the autonomous agent
+### Exposed to the autonomous agent, DEFAULT-ON (#316)
 
-`emulate` is absent from `ALLOWED_OPS_DEFAULT` and `OP_TO_SERVER`, so `browser
-agent` cannot reach it even via `BROWSER_AGENT_ALLOWED_OPS`. The agent's op set is
-deliberately minimal; widening it is a separate decision. The ownership gate
-already confines the op to the caller's own tab, so this is scope discipline rather
-than a safety requirement.
+`emulate` is in `OP_TO_SERVER` and in `ALLOWED_OPS_DEFAULT`, so the `browser agent`
+model can call it with no opt-in, with the typed fields
+`device`/`width`/`height`/`deviceScaleFactor`/`mobile`/`maxTouchPoints`/
+`userAgent`/`timezone`/`orientation`/`colorScheme`/`reset`. `geo` and `touch` are
+deliberately **not** forwarded to the agent (location spoofing is unrelated to the
+viewport question and is a fingerprinting surface; touch is implied by a preset or
+by `maxTouchPoints`).
+
+It was excluded until #316 with the comment in `browser_tool_impl.mjs` saying
+emulation "leaves STICKY per-tab state that outlives the op … until an explicit
+`emulate --reset` or the tab is replaced", so a crashed agent would hand back a
+distorted browser. **That observation is correct** (see "🔴 `--reset` does not
+restore the viewport" above) — what was wrong was the counter-argument this section
+used to make, that overrides "die at detach" so nothing can stick. They do not all
+die at detach: the viewport size survives the detach, the `--reset` clears and a
+re-navigation, and closing the tab is the only known remedy.
+
+**The honest argument for shipping it default-on is ownership, not harmlessness:
+the `browser-agent` wrapper owns its tab's whole lifecycle.** It `open`s the run's
+own tab under the run's own session id and closes it on **every** exit path
+(`trap _cleanup_all EXIT INT TERM`, `browser-agent:373`) — and closing is exactly
+the remedy for the stuck viewport. Blast radius is additionally bounded
+server-side, not by convention: `OWNED_TAB_ONLY_OPS = {"emulate"}` refuses the op
+with `not_owned_tab` on any tab the calling session did not `open`. So on the agent
+path the sticky residue cannot reach one of the operator's own tabs.
+
+**The residual, stated plainly:** a `SIGKILL` bypasses the trap, and then the run's
+tab is orphaned **stuck at the emulated size**. `--reset` cannot repair it; it has
+to be closed. That is the agent's own tab rather than the operator's, but it is a
+real leak and nothing in #316 fixes it.
+
+The other residual is the transient "an extension is debugging this browser" banner
+from the CDP attach — which `eval`, `screenshot` and `wake` already raise. Like
+those, `emulate` counts as MUTATING for `BROWSER_AGENT_DRY_RUN`, so a dry run never
+attaches the debugger.
 
 ## `wake` — un-throttling a background tab without stealing the screen
 
@@ -1434,8 +1498,10 @@ The agent's entire capability is a single **custom opencode tool**, `browser`
 (`opencode/tools/browser.js` + its pure-logic sibling `browser_tool_impl.mjs`,
 copied into the scratch project's `.opencode/tools/` per run). The model calls it
 with TYPED arguments — `op` ∈ {`text`,`html`,`eval`,`nav`,`screenshot`,`frames`,
-`click`,`type`,`key`,`wake`,`context`,`whoami`} plus optional `selector`/`url`/`js`/`text`/`key`/`frame`/
-`maxBytes`/`waitMs` — **never a shell command string, and never a raw-CDP `cdp`/`method`
+`click`,`type`,`key`,`wake`,`context`,`emulate`,`whoami`} plus optional `selector`/`url`/`js`/`text`/`key`/`frame`/
+`maxBytes`/`waitMs` and the `emulate` fields (`device`/`width`/`height`/
+`deviceScaleFactor`/`mobile`/`maxTouchPoints`/`userAgent`/`timezone`/`orientation`/
+`colorScheme`/`reset`) — **never a shell command string, and never a raw-CDP `cdp`/`method`
 field** (the CDP ops are bounded typed ops only; see the CDP security model above).
 
 - **The agent's `whoami` is NARROWED — no cross-profile reconnaissance.** The

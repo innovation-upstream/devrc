@@ -30,7 +30,17 @@ export default tool({
     "re-reads AUTOMATICALLY, and that includes the read right after a " +
     "nav/click/key/eval. Do NOT spend a step on 'wake' — just read, and trust what " +
     "the reply tells you about the wake), " +
-    "'whoami' (read-only host/instance/version diagnostics — metadata only). " +
+    "'whoami' (read-only host/instance/version diagnostics — metadata only), " +
+    "'emulate' (put YOUR tab into DEVICE EMULATION so you can check a page at a " +
+    "real phone/tablet viewport instead of guessing from a desktop DOM: pass a " +
+    "`device` preset (iphone-15, iphone-se, pixel-8, ipad-mini, ipad-mini-2019, " +
+    "galaxy-s24) OR raw `width`+`height` (both together) with optional " +
+    "`deviceScaleFactor`/`mobile`/`maxTouchPoints`/`userAgent`/`timezone`/" +
+    "`orientation` (portrait|landscape)/`colorScheme` (light|dark|no-preference); " +
+    "`reset:true` stops emulating. The overrides are re-applied inside every " +
+    "later op, so 'text'/'html'/'screenshot' after this see the emulated page — " +
+    "but touch-dependent behaviour only becomes real for a document created " +
+    "UNDER emulation, so re-'nav' after emulating if the reply says so). " +
     "There is NO 'upload' op: file upload is off by default for the autonomous " +
     "agent. text/html/eval/click/type/key accept `frame` (a frameId or " +
     "url-substring from `frames`) to act INSIDE a cross-origin iframe. You cannot " +
@@ -43,7 +53,8 @@ export default tool({
     // of them (operator-only, opt-in via BROWSER_AGENT_ALLOWED_OPS).
     op: tool.schema
       .enum(["text", "html", "eval", "nav", "screenshot",
-             "frames", "click", "type", "key", "wake", "context", "whoami"])
+             "frames", "click", "type", "key", "wake", "context", "emulate",
+             "whoami"])
       .describe("the operation to perform on your tab"),
     selector: tool.schema.string().optional()
       .describe("op=text/click/type/key: CSS selector (click target / focus / scope)"),
@@ -61,6 +72,32 @@ export default tool({
       .describe("op=text: cap the returned text in bytes (default 32768, 0=uncapped)"),
     waitMs: tool.schema.number().optional()
       .describe("op=wake: bounded ms to hold the un-throttle so the page can render (0=no wait)"),
+    // op=emulate. Without these fields declared the model literally cannot pass a
+    // viewport, so the op would be listed and unusable. Names are the descriptive
+    // ones; browser_tool_impl.mjs maps them onto the wire's dsf/ua/tz and enforces
+    // protocol.js's bounds before anything is sent.
+    device: tool.schema.string().optional()
+      .describe("op=emulate: a device preset (iphone-15, iphone-se, pixel-8, ipad-mini, ipad-mini-2019, galaxy-s24)"),
+    width: tool.schema.number().optional()
+      .describe("op=emulate: viewport width in CSS px (must be paired with height unless a device preset is given)"),
+    height: tool.schema.number().optional()
+      .describe("op=emulate: viewport height in CSS px (must be paired with width unless a device preset is given)"),
+    deviceScaleFactor: tool.schema.number().optional()
+      .describe("op=emulate: device pixel ratio, 0.1-10 (default 1)"),
+    mobile: tool.schema.boolean().optional()
+      .describe("op=emulate: emulate a mobile device (meta viewport, overlay scrollbars, text autosizing)"),
+    maxTouchPoints: tool.schema.number().optional()
+      .describe("op=emulate: enable touch with this many contact points, 1-16"),
+    userAgent: tool.schema.string().optional()
+      .describe("op=emulate: raw User-Agent string (a preset already sets a matching UA + client hints)"),
+    timezone: tool.schema.string().optional()
+      .describe("op=emulate: IANA timezone id, e.g. Europe/London"),
+    orientation: tool.schema.string().optional()
+      .describe("op=emulate: 'portrait' or 'landscape' (landscape also swaps the viewport)"),
+    colorScheme: tool.schema.string().optional()
+      .describe("op=emulate: prefers-color-scheme — 'light', 'dark' or 'no-preference'"),
+    reset: tool.schema.boolean().optional()
+      .describe("op=emulate: stop emulating (cannot be combined with any other emulate field)"),
   },
   async execute(args) {
     // runBrowserOp reads the forced tab / instance / domain policy / token from

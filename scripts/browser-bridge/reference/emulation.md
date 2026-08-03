@@ -19,7 +19,9 @@ browser emulate iphone-15            # ← replies documentPredatesEmulation: tr
 browser nav https://example.com      # ← … so RE-NAV: the document is rebuilt emulated
 browser screenshot                   # ← captured at 393×852 @3x, as an iPhone
 browser click '#menu'                # ← dispatched as a TOUCH tap
-browser emulate --reset
+browser emulate --reset --recreate   # ← the viewport does NOT come back on
+                                     #   --reset alone (#319); --recreate
+                                     #   replaces the tab. THE TAB ID CHANGES.
 ```
 
 `browser emulate --list` prints the preset names without touching the browser.
@@ -107,7 +109,7 @@ document that was not built under this emulation. See "The
 
 ---
 
-## Why it is sticky, and the safety property that buys
+## Why it is sticky — and 🔴 why `--reset` does NOT undo it (#319)
 
 CDP emulation overrides are **session-scoped**: they die the instant the debugger
 detaches. The bridge **always** detaches (`withCdpSession`'s `finally` — that is a
@@ -118,20 +120,52 @@ before the next command ran.
 Instead, `emulate` **stores** the device state per tab, and **every op that
 attaches CDP re-applies it inside its own session, before doing its work.**
 
-✅ **The property this buys, and the reason this design beat holding one long-lived
-session open: between ops the tab is NOT emulated.** A crashed agent, a killed
-Claude session, or an evicted MV3 service worker cannot leave the operator's real
-browser distorted. The worst case is a forgotten entry in an in-memory Map that
-dies with the worker — not a Brave tab stuck pretending to be an iPhone with
-nothing left running that knows how to undo it.
+🔴 **This page used to claim a safety property here that does not exist** — that
+because the overrides die at detach, "between ops the tab is NOT emulated", so a
+crashed agent could never leave the operator's browser distorted. **Measured false**
+(2026-08-03, laptop, extension 0.7.2, fresh-tab control):
 
-That is also why `--reset` has nothing to undo. It means **"stop re-applying"**;
-the overrides are already gone.
+| step | `innerWidth` |
+| --- | --- |
+| fresh tab, never emulated (**control** — proves the read path works) | **1124** |
+| after `emulate iphone-15` | **393** |
+| after `emulate --reset` | **393** ← not restored |
+| after `--reset` **and** a re-`nav` | **393** ← still not restored |
+
+The reset genuinely sent and reported its clears
+(`cleared: [Emulation.clearDeviceMetricsOverride,
+Emulation.setTouchEmulationEnabled, Emulation.setUserAgentOverride]`). **Sending
+`clearDeviceMetricsOverride` does not bring the viewport back.** The size survives
+the detach, the clear and a re-navigation.
+
+Everything else *does* revert on its own, measured in the same pass:
+`devicePixelRatio`, `maxTouchPoints`, `pointer: coarse`, `prefers-color-scheme`,
+`userAgent`, `timeZone`. **Only the viewport size is sticky.** (`'ontouchstart' in
+window` also stays true on a document that was *built* emulated — that one is
+document-creation residue, and a re-`nav` clears it.)
+
+**The mechanism is not established.** The leading hypothesis is a render-widget
+resize residue — consistent with `devicePixelRatio` reverting while the width does
+not, though both come from the same CDP call — but that is a hypothesis, not a
+finding. Do not repeat it as fact.
+
+**Closing the tab is the only known remedy.** So `--reset` means *"stop
+re-applying, and send the clears"*, never *"undo"*. The workaround is:
+
+```
+browser emulate --reset --recreate
+```
+
+→ resets, opens a **fresh tab at the same url** owned by the same session, closes
+the stuck one, and reports the **new tab id** (it changes — later ops route to it).
+It refuses on a non-http(s) url, and always opens the replacement *before* closing
+the original, so no failure path leaves you with no tab. Plain `--reset` never
+swaps tab ids.
 
 **Consequence to plan around:** a page that re-measures the viewport *later* — on
-a `resize` listener, or well after load — sees the real window until your next op
-re-applies. Drive the page with bridge ops rather than expecting the emulation to
-persist while you sit idle.
+a `resize` listener, or well after load — sees whatever the tab's physical size now
+is, not necessarily the emulation you asked for. Drive the page with bridge ops
+rather than expecting a stable state while you sit idle.
 
 ---
 
@@ -209,7 +243,7 @@ browser emulate --width 390 --height 844 --ua 'Mozilla/5.0 (custom) Mobile'
 Flags: `--width --height --dsf --mobile/--no-mobile --touch/--no-touch
 --max-touch-points N --ua STR --orientation portrait|landscape
 --color-scheme light|dark|no-preference --geo LAT,LON[,ACC] --tz ZONE --reset
---list`.
+[--recreate] --list`.
 
 **⚠ A raw `--ua` gets MINIMAL UA-Client-Hints metadata**, not a faithful
 per-device one. `platform`/`model` are **derived from the UA string** (an iPhone UA
@@ -244,10 +278,13 @@ and sends no `Sec-CH-UA` at all. That is correct emulation, not a missing field.
 the tab's **real, un-emulated DOM**. `innerWidth`, `getBoundingClientRect`,
 `matchMedia` and `navigator.userAgent` all come back **desktop**.
 
-That is correct-by-design, not a bug: between ops the tab genuinely is not emulated
-(see the safety property above), so the at-rest DOM really *is* desktop. But it is
-the trap this feature is most likely to spring — screenshot a phone layout, then
-read `text` and reason about a desktop DOM.
+That is by design for the *override* half — UA, `matchMedia`, timezone and dpr
+really do come back desktop on these reads, because nothing re-applies them. ⚠ The
+**viewport size is the exception**: it is physically stuck on the tab (see "🔴 why
+`--reset` does NOT undo it" above), so `innerWidth` on an emulated tab reads the
+emulated width even on the un-emulated path. Either way this is the trap the
+feature is most likely to spring — screenshot a phone layout, then read `text` and
+reason about a half-desktop DOM.
 
 **Which reads are emulated:**
 
@@ -458,12 +495,22 @@ neither this page nor the note claims that list is exhaustive.
 
 ---
 
-## Not available to the autonomous agent
+## Available to the autonomous agent, default-on (#316)
 
-`emulate` is **operator-only**: it is absent from `ALLOWED_OPS_DEFAULT` and
-`OP_TO_SERVER` in `opencode/tools/browser_tool_impl.mjs`, so `browser agent`
-cannot reach it even via `BROWSER_AGENT_ALLOWED_OPS`. The agent's op set is
-deliberately minimal and widening it is a separate decision. Adding it would mean
-mapping `emulate → emulate` in `OP_TO_SERVER` and listing it in
-`ALLOWED_OPS_DEFAULT`; the ownership gate already confines it to the agent's own
-tab, so the question is scope discipline, not safety.
+`emulate` is mapped in `OP_TO_SERVER` **and** listed in `ALLOWED_OPS_DEFAULT` in
+`opencode/tools/browser_tool_impl.mjs`, so the `browser agent` model can call it
+with no opt-in. The typed fields it may pass are `device`, `width`, `height`,
+`deviceScaleFactor`, `mobile`, `maxTouchPoints`, `userAgent`, `timezone`,
+`orientation`, `colorScheme` and `reset`; `geo` and `touch` are deliberately not
+offered to the agent (location spoofing is unrelated to the viewport question and
+is a fingerprinting surface; touch is implied by a preset or by `maxTouchPoints`).
+Bounds are mirrored from `EMULATION_LIMITS` and enforced client-side before the
+request is sent, with the same `invalid_emulation:<field>` vocabulary.
+
+It was excluded until #316 on the stated grounds that it "leaves sticky per-tab
+state that outlives the op". **That was factually wrong** — and wrong about the
+exact property this page's design section exists to establish: the overrides are
+session-scoped, `withCdpSession` always detaches, the tab is *not* emulated between
+ops, and a crashed agent therefore cannot leave the operator's browser distorted.
+The ownership gate (`OWNED_TAB_ONLY_OPS`) confines the op to the tab the agent's own
+run opened, and the wrapper closes that tab on every exit path.
