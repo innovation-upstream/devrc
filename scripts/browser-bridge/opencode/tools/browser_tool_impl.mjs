@@ -61,16 +61,42 @@ import { homedir } from "node:os";
 // with no available action, so it stays operator-only on the `browser` CLI —
 // excluded like `activate`, not gated like `upload`.
 //
-// ⚠ `emulate` is DELIBERATELY ABSENT from OP_TO_SERVER. Unlike every read op it
-// MUTATES the tab and leaves STICKY PER-TAB STATE THAT OUTLIVES THE OP: device
-// metrics, UA-CH and media overrides persist on the tab until they are
-// explicitly reset (`emulate --reset`) or the tab is replaced. An autonomous
-// model that emulates and then does not reset — because it moved on, hit its
-// step budget, or crashed — hands the operator back a silently altered tab. It
-// also attaches CDP, raising Brave's "an extension is debugging this browser"
-// banner. That is the same hazard class as `upload` being off-by-default, but
-// with a PERSISTENT side effect rather than a one-shot one, so the answer is
-// exclusion rather than an opt-in the operator has to remember to undo.
+// `emulate` IS reachable, and DEFAULT-ON (#316). It used to be excluded here on
+// the stated grounds that it "leaves STICKY PER-TAB STATE THAT OUTLIVES THE OP …
+// until explicitly reset or the tab is replaced", so a model that emulated and
+// then crashed would hand the operator back a silently altered tab. That
+// rationale was FACTUALLY WRONG, and it was wrong about the exact property the
+// emulation design was BUILT to guarantee — read extension/protocol.js's
+// EMULATION header (the "✅ THE SAFETY PROPERTY THIS BUYS" block):
+//
+//   CDP Emulation overrides are SESSION-SCOPED and die the instant the debugger
+//   detaches, and `withCdpSession` ALWAYS detaches in its `finally`. That is why
+//   `emulate` does not hold a long-lived session at all: it stores a normalized
+//   state in an in-memory Map and EVERY op re-applies it inside its OWN session.
+//   So "the tab is NOT emulated between ops", and a crashed agent, a killed
+//   session or an evicted MV3 service worker CANNOT leave the operator's real
+//   browser distorted — the worst case is a forgotten Map entry that dies with
+//   the worker. A held-session design would have had the sticky failure mode the
+//   old comment described here; this design was chosen to avoid exactly it.
+//
+// BLAST RADIUS is bounded server-side, not by convention: server.py's
+// OWNED_TAB_ONLY_OPS = {"emulate"} refuses the op with `not_owned_tab` on any tab
+// the calling session did not `open` itself. The browser-agent wrapper opens the
+// run's tab under the run's own SESSION_ID and closes it on every exit path
+// (`trap _cleanup_all EXIT INT TERM`), so the agent can only ever emulate the tab
+// it was given, and that tab is gone when the run ends.
+//
+// The one real residual is the transient "an extension is debugging this browser"
+// banner from the CDP attach — which `eval`, `screenshot` (fullpage/emulated) and
+// `wake` already raise on every call, so it is not a new capability class. Like
+// those, `emulate` is treated as MUTATING for dry-run purposes (see runBrowserOp)
+// so a `--dry-run` never attaches the debugger to the operator's browser.
+//
+// What it BUYS: the agent can check a page at a real phone viewport instead of
+// guessing from a desktop DOM — the thing it is most often asked to do and could
+// not do at all. buildRequest builds the emulate body from a TYPED WHITELIST like
+// every other op (no raw passthrough), and mirrors protocol.js's bounds so an
+// out-of-range value is refused before it reaches the bridge.
 //
 // `context` IS reachable (below). It is a cheap READ of page state — url,
 // domain, path, searchParams, title, tabId — and reads NO DOM content, so it is
@@ -99,10 +125,11 @@ export const OP_TO_SERVER = Object.freeze({
   wake: "wake",
   upload: "upload",
   context: "context",
+  emulate: "emulate",
   whoami: "whoami",
 });
 
-// The AUTONOMOUS model's DEFAULT op set — 12 ops, identical to browser.js's typed
+// The AUTONOMOUS model's DEFAULT op set — 13 ops, identical to browser.js's typed
 // `op` enum, the agent-md capability table, and the README's published contract.
 // Keep those four in lockstep (tests/browser_tool.test.mjs parses all four and
 // asserts they match, so a drift fails CI).
@@ -120,7 +147,7 @@ export const OP_TO_SERVER = Object.freeze({
 // README) — never by default, and never by anything the model can set itself.
 export const ALLOWED_OPS_DEFAULT = Object.freeze([
   "text", "html", "eval", "nav", "screenshot",
-  "frames", "click", "type", "key", "wake", "context", "whoami",
+  "frames", "click", "type", "key", "wake", "context", "emulate", "whoami",
 ]);
 
 export const TEXT_MAX_BYTES_DEFAULT = 32768;
@@ -219,6 +246,185 @@ export function forcedTab(env) {
 function _addFrame(body, args) {
   if (args && args.frame != null && args.frame !== "") {
     body.frame = String(args.frame).slice(0, 512);
+  }
+}
+
+// --- `emulate` argument validation ----------------------------------------- //
+//
+// extension/protocol.js's normalizeEmulation is THE authority on what an emulate
+// command may contain (EMULATION_LIMITS / EMULATION_ORIENTATIONS /
+// EMULATION_COLOR_SCHEMES). These constants MIRROR it rather than import it, and
+// that is forced, not lazy: the browser-agent wrapper copies ONLY browser.js and
+// this file into the per-run scratch project, so an
+// `import … from "../../extension/protocol.js"` would resolve in the repo and
+// throw MODULE_NOT_FOUND in every real run. tests/browser_tool.test.mjs imports
+// BOTH and asserts these values equal protocol.js's, so the mirror cannot drift
+// silently.
+//
+// Client-side validation is a REFUSAL, not a re-implementation: it refuses the
+// nonsense values early (with the same `invalid_emulation:<field>` names the
+// extension uses, so one vocabulary reaches the model either way) and forwards
+// only typed scalars. Anything semantic that needs the preset table — an unknown
+// device name — is left to the extension, which owns that table.
+export const EMULATION_LIMITS_MIRROR = Object.freeze({
+  minDimension: 1,
+  maxDimension: 10000,
+  minScaleFactor: 0.1,
+  maxScaleFactor: 10,
+  maxTouchPoints: 16,
+  maxUserAgentChars: 1024,
+  maxTimezoneChars: 64,
+});
+export const EMULATION_ORIENTATIONS_ALLOWED = Object.freeze(["portrait", "landscape"]);
+export const EMULATION_COLOR_SCHEMES_ALLOWED =
+  Object.freeze(["light", "dark", "no-preference"]);
+const EMULATE_DEVICE_MAX_CHARS = 64;
+
+// The model-facing arg name -> the wire field normalizeEmulation reads. Three
+// differ deliberately (deviceScaleFactor/userAgent/timezone are self-describing
+// to a model; the wire names are the CLI's terse dsf/ua/tz).
+//
+// `geo` and `touch` are NOT offered. `geo` spoofs the operator's LOCATION, which
+// has nothing to do with the viewport/mobile-rendering question the agent has,
+// and is a fingerprinting surface handed to a model reading untrusted pages.
+// `touch` is redundant: a preset carries its own touch support, and a raw
+// `maxTouchPoints` turns touch on by itself (normalizeEmulation). Neither is a
+// capability the agent needs, so neither is forwarded.
+const EMULATE_FIELD_TO_WIRE = Object.freeze({
+  device: "device",
+  width: "width",
+  height: "height",
+  deviceScaleFactor: "dsf",
+  mobile: "mobile",
+  maxTouchPoints: "maxTouchPoints",
+  userAgent: "ua",
+  timezone: "tz",
+  orientation: "orientation",
+  colorScheme: "colorScheme",
+});
+
+function _emuInt(v, field, min, max) {
+  const n = Number(v);
+  if (!Number.isFinite(n) || !Number.isInteger(n) || n < min || n > max) {
+    throw new BrowserToolRefusal(`invalid_emulation:${field}`);
+  }
+  return n;
+}
+
+function _emuNumber(v, field, min, max) {
+  const n = Number(v);
+  if (!Number.isFinite(n) || n < min || n > max) {
+    throw new BrowserToolRefusal(`invalid_emulation:${field}`);
+  }
+  return n;
+}
+
+function _emuBool(v, field) {
+  if (typeof v === "boolean") return v;
+  if (v === "true" || v === 1 || v === "1") return true;
+  if (v === "false" || v === 0 || v === "0") return false;
+  throw new BrowserToolRefusal(`invalid_emulation:${field}`);
+}
+
+// A UA string is echoed into a request HEADER by Chromium, so a CR/LF in it is
+// the classic header-injection primitive. Refused, never stripped — silently
+// sanitizing model input is how you end up unsure what went on the wire.
+function _emuUserAgent(v) {
+  if (typeof v !== "string") throw new BrowserToolRefusal("invalid_emulation:ua");
+  const s = v.trim();
+  if (!s || s.length > EMULATION_LIMITS_MIRROR.maxUserAgentChars) {
+    throw new BrowserToolRefusal("invalid_emulation:ua");
+  }
+  // eslint-disable-next-line no-control-regex
+  if (/[\x00-\x1f\x7f]/.test(s)) throw new BrowserToolRefusal("invalid_emulation:ua");
+  return s;
+}
+
+function _emuTimezone(v) {
+  const s = typeof v === "string" ? v.trim() : "";
+  if (!s || s.length > EMULATION_LIMITS_MIRROR.maxTimezoneChars
+      || !/^[A-Za-z0-9_+\-/]+$/.test(s)) {
+    throw new BrowserToolRefusal("invalid_emulation:tz");
+  }
+  return s;
+}
+
+// Bounded, charset-restricted preset NAME only. The preset TABLE lives in the
+// extension (DEVICE_PRESETS), so an unrecognised-but-well-formed name is
+// forwarded and comes back as `unknown_preset:<name>` from the authority that
+// owns the list — duplicating the table here is exactly the drift this file
+// avoids everywhere else.
+function _emuDevice(v) {
+  const s = typeof v === "string" ? v.trim() : "";
+  if (!s || s.length > EMULATE_DEVICE_MAX_CHARS || !/^[A-Za-z0-9._-]+$/.test(s)) {
+    throw new BrowserToolRefusal("invalid_emulation:device");
+  }
+  return s;
+}
+
+// Populate an `emulate` /cmd body from a WHITELIST of typed scalars. Never
+// forwards a raw arg: a smuggled `cdp`/`method`/`geo`/`tab` is simply not read.
+function _addEmulation(body, args) {
+  const a = args || {};
+  const has = (k) => a[k] !== undefined && a[k] !== null && a[k] !== "";
+
+  // `--reset` means "stop re-applying", and combining it with a device
+  // description is contradictory rather than resolvable by precedence (do you
+  // want the viewport or not?) — protocol.js refuses it, so refuse it here too.
+  const wantsReset = a.reset === true || a.reset === "true";
+  const supplied = Object.keys(EMULATE_FIELD_TO_WIRE).filter(has);
+  if (wantsReset) {
+    if (supplied.length) {
+      throw new BrowserToolRefusal("invalid_emulation:reset_with_params");
+    }
+    body.reset = true;
+    return;
+  }
+  // Mirrors protocol.js: an emulate that describes nothing is a no-op the caller
+  // almost certainly did not mean.
+  if (!supplied.length) throw new BrowserToolRefusal("emulate_needs_device_or_params");
+
+  if (has("device")) body.device = _emuDevice(a.device);
+  // A viewport needs BOTH dimensions — Emulation.setDeviceMetricsOverride takes
+  // both or neither, and inferring the other from the operator's real window
+  // would make the result depend on their window size. A preset supplies the
+  // missing half, so the pairing is only required when there is no preset.
+  if (!has("device") && has("width") !== has("height")) {
+    throw new BrowserToolRefusal("invalid_emulation:width_and_height_together");
+  }
+  if (has("width")) {
+    body.width = _emuInt(a.width, "width", EMULATION_LIMITS_MIRROR.minDimension,
+                         EMULATION_LIMITS_MIRROR.maxDimension);
+  }
+  if (has("height")) {
+    body.height = _emuInt(a.height, "height", EMULATION_LIMITS_MIRROR.minDimension,
+                          EMULATION_LIMITS_MIRROR.maxDimension);
+  }
+  if (has("deviceScaleFactor")) {
+    body.dsf = _emuNumber(a.deviceScaleFactor, "dsf",
+                          EMULATION_LIMITS_MIRROR.minScaleFactor,
+                          EMULATION_LIMITS_MIRROR.maxScaleFactor);
+  }
+  if (has("mobile")) body.mobile = _emuBool(a.mobile, "mobile");
+  if (has("maxTouchPoints")) {
+    body.maxTouchPoints = _emuInt(a.maxTouchPoints, "maxTouchPoints", 1,
+                                  EMULATION_LIMITS_MIRROR.maxTouchPoints);
+  }
+  if (has("userAgent")) body.ua = _emuUserAgent(a.userAgent);
+  if (has("timezone")) body.tz = _emuTimezone(a.timezone);
+  if (has("orientation")) {
+    const o = String(a.orientation);
+    if (!EMULATION_ORIENTATIONS_ALLOWED.includes(o)) {
+      throw new BrowserToolRefusal("invalid_emulation:orientation");
+    }
+    body.orientation = o;
+  }
+  if (has("colorScheme")) {
+    const cs = String(a.colorScheme);
+    if (!EMULATION_COLOR_SCHEMES_ALLOWED.includes(cs)) {
+      throw new BrowserToolRefusal("invalid_emulation:colorScheme");
+    }
+    body.colorScheme = cs;
   }
 }
 
@@ -341,6 +547,11 @@ export function buildRequest(args, env, token) {
     body.selector = String(args.selector);
     body.path = String(args.path);
     _addFrame(body, args);
+  } else if (op === "emulate") {
+    // Device emulation on the agent's OWN (env-forced) tab — server.py's
+    // OWNED_TAB_ONLY_OPS refuses it on any other. TYPED scalars from a whitelist,
+    // bounds mirrored from protocol.js. NO `frame`: emulation is per-TAB.
+    _addEmulation(body, args);
   }
   // frames / screenshot / context: no extra typed fields (the tab is forced by
   // env, and `context` reports on that tab only).
@@ -710,6 +921,27 @@ export function summarizeResult(op, envelope, env = {}, autoWake = null) {
       title: data.title ?? null, tabId: data.tabId ?? null,
     });
   }
+  if (op === "emulate") {
+    // Field-pinned like `context`, not a bare passthrough: a later server-side
+    // addition to the emulate payload must not silently widen what reaches the
+    // model. `note` and `emulationNote` are carried because they are exactly the
+    // two strings the model must ACT on — the "overrides are re-applied per op,
+    // the tab is not emulated between ops" contract, and the create-time hint
+    // that says a document created BEFORE this emulate needs a re-`nav` before
+    // touch-dependent behaviour is real.
+    return JSON.stringify({
+      ok: true,
+      tabId: data.tabId ?? null,
+      url: data.url ?? null,
+      reset: data.reset ?? false,
+      emulation: data.emulation ?? null,
+      wasEmulating: data.wasEmulating ?? null,
+      applied: Array.isArray(data.applied) ? data.applied : null,
+      documentPredatesEmulation: data.documentPredatesEmulation ?? false,
+      note: typeof data.note === "string" ? data.note : null,
+      emulationNote: typeof data.emulationNote === "string" ? data.emulationNote : null,
+    });
+  }
   if (op === "whoami") {
     // Identity + diagnostics. `envelope` IS the whole whoami object (no .data).
     // METADATA ONLY, and NARROWED to the op's stated purpose: "which HOST and
@@ -802,6 +1034,7 @@ export async function runBrowserOp(args, opts = {}) {
   const MUTATING = op === "nav" || op === "eval" ||
                    op === "click" || op === "type" || op === "key" ||
                    op === "upload" ||    // upload populates a file input → never in a dry-run
+                   op === "emulate" ||   // emulate ATTACHES THE DEBUGGER → same as wake
                    op === "wake";        // wake ATTACHES THE DEBUGGER → see below
   // (`activate` used to be listed here. It is now unreachable for the agent at
   //  all — absent from OP_TO_SERVER — so buildRequest refuses it long before this

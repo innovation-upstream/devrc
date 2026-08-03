@@ -13,7 +13,17 @@ import {
   OP_TO_SERVER, ALLOWED_OPS_DEFAULT, TEXT_MAX_BYTES_DEFAULT, NAV_ALLOWED_SCHEMES,
   BrowserToolRefusal, hostOf, navSchemeOf, hostDenied, allowedOpsFromEnv, forcedTab,
   buildRequest, summarizeResult, runBrowserOp,
+  EMULATION_LIMITS_MIRROR, EMULATION_ORIENTATIONS_ALLOWED,
+  EMULATION_COLOR_SCHEMES_ALLOWED,
 } from "../opencode/tools/browser_tool_impl.mjs";
+// The AUTHORITY on emulation bounds. The tool file cannot import this (the
+// browser-agent wrapper copies only browser.js + browser_tool_impl.mjs into the
+// per-run scratch project, so the relative path would not resolve at runtime), so
+// it mirrors the constants — and this test file imports BOTH and pins them equal.
+import {
+  EMULATION_LIMITS, EMULATION_ORIENTATIONS, EMULATION_COLOR_SCHEMES, PRESET_NAMES,
+  normalizeEmulation,
+} from "../extension/protocol.js";
 
 const TOK = "secret-token";
 const TAB = "4242";
@@ -281,8 +291,8 @@ test("OP_TO_SERVER maps only the bounded ops (no lifecycle ops, no raw CDP)", ()
   // `whoami` is a read-only GLOBAL diagnostic (GET /whoami) — bounded + typed
   // like the rest; still NO lifecycle ops and NO raw-CDP escape.
   assert.deepEqual(Object.keys(OP_TO_SERVER).sort(),
-    ["click", "context", "eval", "frames", "html", "key", "nav", "screenshot",
-     "text", "type", "upload", "wake", "whoami"]);
+    ["click", "context", "emulate", "eval", "frames", "html", "key", "nav",
+     "screenshot", "text", "type", "upload", "wake", "whoami"]);
   // Lifecycle ops (wrapper owns the tab) AND any raw-CDP escape must be unmappable.
   for (const forbidden of ["open", "close", "tabs", "release",
                            "cdp", "command", "attach", "detach", "sendCommand"]) {
@@ -293,8 +303,8 @@ test("OP_TO_SERVER maps only the bounded ops (no lifecycle ops, no raw CDP)", ()
   // enabled by default — it takes a caller-chosen absolute path with no allowlist,
   // and the model is pointed at untrusted, prompt-injecting pages.
   assert.deepEqual([...ALLOWED_OPS_DEFAULT].sort(),
-    ["click", "context", "eval", "frames", "html", "key", "nav", "screenshot",
-     "text", "type", "wake", "whoami"]);
+    ["click", "context", "emulate", "eval", "frames", "html", "key", "nav",
+     "screenshot", "text", "type", "wake", "whoami"]);
   assert.ok(!ALLOWED_OPS_DEFAULT.includes("upload"),
     "upload must NOT be in the autonomous agent's default op set");
   assert.ok("upload" in OP_TO_SERVER,
@@ -843,6 +853,174 @@ test("BROWSER_AGENT_ALLOWED_OPS can explicitly re-enable upload (documented over
 });
 
 // --------------------------------------------------------------------------- //
+// `emulate` via the TYPED tool (#316) — REACHABLE and DEFAULT-ON.
+//
+// It was excluded on a rationale that was factually wrong (it claimed sticky
+// per-tab state outliving the op; extension/protocol.js's EMULATION header
+// documents session-scoped overrides that die at detach as the DELIBERATE safety
+// property). What must hold now: default-reachable, forced own tab, typed
+// whitelist only, protocol.js's bounds enforced client-side with protocol.js's
+// refusal vocabulary, and MUTATING for dry-run (it attaches the debugger).
+// --------------------------------------------------------------------------- //
+
+test("MIRROR PARITY: the tool's emulation bounds equal extension/protocol.js's", () => {
+  // The tool cannot import protocol.js (see the import note at the top), so the
+  // mirror is the drift risk. Pin it against the authority, both directions.
+  assert.deepEqual({ ...EMULATION_LIMITS_MIRROR }, { ...EMULATION_LIMITS },
+    "EMULATION_LIMITS_MIRROR must equal protocol.js's EMULATION_LIMITS");
+  assert.deepEqual([...EMULATION_ORIENTATIONS_ALLOWED].sort(),
+    Object.keys(EMULATION_ORIENTATIONS).sort(),
+    "the tool's accepted orientations must equal protocol.js's");
+  assert.deepEqual([...EMULATION_COLOR_SCHEMES_ALLOWED].sort(),
+    [...EMULATION_COLOR_SCHEMES].sort(),
+    "the tool's accepted colour schemes must equal protocol.js's");
+});
+
+test("buildRequest: emulate is DEFAULT-reachable and forced to the env tab (preset path)", () => {
+  const b = buildRequest({ op: "emulate", device: "iphone-15" }, baseEnv(), TOK).body;
+  assert.equal(b.op, "emulate", "maps to the `emulate` wire op");
+  assert.equal(b.tab, 4242, "emulate is forced to the env tab (own-tab-scoped)");
+  assert.equal(b.device, "iphone-15");
+  assert.ok(ALLOWED_OPS_DEFAULT.includes("emulate"),
+    "emulate must be reachable with NO BROWSER_AGENT_ALLOWED_OPS opt-in");
+  // The preset name the tool forwards must be one protocol.js actually knows —
+  // otherwise this test would pass while the agent got `unknown_preset:`.
+  assert.ok(PRESET_NAMES.includes("iphone-15"), "HARNESS: iphone-15 must be a real preset");
+});
+
+test("buildRequest: emulate raw width/height path forwards typed scalars only", () => {
+  const b = buildRequest({
+    op: "emulate", width: 390, height: 844, deviceScaleFactor: 3, mobile: true,
+    maxTouchPoints: 5, userAgent: "UA/1.0", timezone: "Europe/London",
+    orientation: "portrait", colorScheme: "dark",
+  }, baseEnv(), TOK).body;
+  assert.deepEqual(b, {
+    op: "emulate", tab: 4242, width: 390, height: 844, dsf: 3, mobile: true,
+    maxTouchPoints: 5, ua: "UA/1.0", tz: "Europe/London",
+    orientation: "portrait", colorScheme: "dark",
+  }, "descriptive arg names map onto the wire's dsf/ua/tz; nothing else is added");
+  // The body must be something normalizeEmulation (the authority) accepts — a
+  // whitelist that produced a shape the extension rejects would be a green test
+  // and a broken op.
+  const { tab, op, ...cmd } = b;
+  assert.doesNotThrow(() => normalizeEmulation(cmd),
+    "the wire body the tool builds must normalize cleanly in the extension");
+});
+
+test("buildRequest: emulate reset path sends {reset:true} and refuses reset+params", () => {
+  const b = buildRequest({ op: "emulate", reset: true }, baseEnv(), TOK).body;
+  assert.deepEqual(b, { op: "emulate", tab: 4242, reset: true });
+  assert.throws(
+    () => buildRequest({ op: "emulate", reset: true, device: "iphone-15" }, baseEnv(), TOK),
+    /invalid_emulation:reset_with_params/,
+    "reset + a device description is contradictory, not resolved by precedence");
+});
+
+test("buildRequest: emulate with NO parameters is refused (mirrors protocol.js)", () => {
+  assert.throws(() => buildRequest({ op: "emulate" }, baseEnv(), TOK),
+    /emulate_needs_device_or_params/);
+  // …and the same name the extension would have used, so one vocabulary reaches
+  // the model whichever layer refuses.
+  assert.throws(() => normalizeEmulation({}), /emulate_needs_device_or_params/);
+});
+
+test("buildRequest: emulate enforces EMULATION_LIMITS bounds client-side", () => {
+  const bad = (args, re) => assert.throws(
+    () => buildRequest({ op: "emulate", ...args }, baseEnv(), TOK), re);
+  bad({ width: EMULATION_LIMITS.maxDimension + 1, height: 100 },
+      /invalid_emulation:width/);
+  bad({ width: 0, height: 100 }, /invalid_emulation:width/);
+  bad({ width: 100, height: EMULATION_LIMITS.maxDimension + 1 },
+      /invalid_emulation:height/);
+  bad({ width: 100.5, height: 100 }, /invalid_emulation:width/);
+  bad({ device: "iphone-15", deviceScaleFactor: EMULATION_LIMITS.maxScaleFactor + 1 },
+      /invalid_emulation:dsf/);
+  bad({ device: "iphone-15", deviceScaleFactor: 0 }, /invalid_emulation:dsf/);
+  bad({ device: "iphone-15", maxTouchPoints: EMULATION_LIMITS.maxTouchPoints + 1 },
+      /invalid_emulation:maxTouchPoints/);
+  bad({ userAgent: "x".repeat(EMULATION_LIMITS.maxUserAgentChars + 1) },
+      /invalid_emulation:ua/);
+  // A CR/LF in a UA is the header-injection primitive — REFUSED, never stripped.
+  bad({ userAgent: "UA/1.0\r\nX-Evil: 1" }, /invalid_emulation:ua/);
+  bad({ timezone: "Europe/London; DROP" }, /invalid_emulation:tz/);
+  bad({ timezone: "z".repeat(EMULATION_LIMITS.maxTimezoneChars + 1) },
+      /invalid_emulation:tz/);
+  bad({ orientation: "sideways" }, /invalid_emulation:orientation/);
+  bad({ colorScheme: "sepia" }, /invalid_emulation:colorScheme/);
+  bad({ device: "iphone 15; rm -rf /" }, /invalid_emulation:device/);
+  bad({ device: "iphone-15", mobile: "maybe" }, /invalid_emulation:mobile/);
+  // A viewport needs BOTH dimensions when there is no preset to supply the other.
+  bad({ width: 390 }, /invalid_emulation:width_and_height_together/);
+  bad({ height: 844 }, /invalid_emulation:width_and_height_together/);
+  // …but a preset supplies the missing half, so one override alone is fine there.
+  assert.equal(
+    buildRequest({ op: "emulate", device: "iphone-15", width: 390 }, baseEnv(), TOK)
+      .body.width, 390);
+});
+
+test("NO raw-CDP passthrough: emulate forwards ONLY the whitelisted emulate fields", () => {
+  const hostile = {
+    op: "emulate", device: "iphone-15",
+    cdp: "Page.navigate", method: "Runtime.evaluate", params: { x: 1 },
+    tab: 99, target: "other", geo: { latitude: 1, longitude: 2 },
+    touch: true, frame: "f", selector: "#x", path: "/etc/passwd",
+  };
+  const b = buildRequest(hostile, baseEnv(), TOK).body;
+  assert.deepEqual(Object.keys(b).sort(), ["device", "op", "tab"],
+    "only the typed emulate fields reach the wire (no cdp/method/geo/touch/frame)");
+  assert.equal(b.tab, 4242, "a model-supplied `tab` never overrides the forced one");
+});
+
+test("summarizeResult: emulate is field-pinned and carries the two model-facing notes", () => {
+  const s = JSON.parse(summarizeResult("emulate", { data: {
+    tabId: 7, url: "https://x.test/", emulation: { preset: "iphone-15", width: 393 },
+    applied: ["Emulation.setDeviceMetricsOverride"],
+    documentPredatesEmulation: true,
+    note: "sticky per tab: …", emulationNote: "re-nav to get touch",
+    secretServerField: "must not leak",
+  } }));
+  assert.equal(s.tabId, 7);
+  assert.equal(s.applied[0], "Emulation.setDeviceMetricsOverride");
+  assert.equal(s.documentPredatesEmulation, true);
+  assert.equal(s.emulationNote, "re-nav to get touch");
+  assert.ok(!("secretServerField" in s),
+    "a later server-side payload addition must not silently widen the model's view");
+});
+
+test("runBrowserOp: emulate reaches the bridge on the forced tab, no opt-in needed", async () => {
+  const fx = fetchStub({ emulate: { tabId: 4242, url: "https://x.test/",
+    emulation: { preset: "iphone-15" }, applied: ["Emulation.setDeviceMetricsOverride"],
+    note: "sticky per tab" } });
+  const out = JSON.parse(await run({ op: "emulate", device: "iphone-15" },
+    baseEnv(), fx));
+  assert.equal(fx.calls.length, 1);
+  assert.equal(fx.calls[0].body.op, "emulate");
+  assert.equal(fx.calls[0].body.tab, 4242);
+  assert.equal(out.ok, true);
+  assert.equal(out.emulation.preset, "iphone-15");
+});
+
+test("runBrowserOp: emulate is MUTATING → a dry-run never attaches the debugger", async () => {
+  const fx = fetchStub();
+  const out = JSON.parse(await run({ op: "emulate", device: "iphone-15" },
+    baseEnv({ BROWSER_AGENT_DRY_RUN: "1" }), fx));
+  assert.equal(fx.calls.length, 0, "a dry-run emulate must not reach the bridge");
+  assert.equal(out.dryRun, true);
+  assert.equal(out.op, "emulate");
+});
+
+// ⚠ INVARIANT GUARD, not regression coverage — labelled honestly. It passes on
+// pre-#316 code too (for the different reason that `emulate` was unmappable), and
+// it was confirmed NOT to go red in any stage of the red/green sweep. It pins that
+// the operator can still NARROW the agent's op set below the new default.
+test("runBrowserOp: a narrowed BROWSER_AGENT_ALLOWED_OPS still refuses emulate", async () => {
+  const fx = fetchStub();
+  await assert.rejects(run({ op: "emulate", device: "iphone-15" },
+    baseEnv({ BROWSER_AGENT_ALLOWED_OPS: "text,html" }), fx),
+    /op_not_allowed:emulate/);
+});
+
+// --------------------------------------------------------------------------- //
 // FOUR-SOURCE OP-SET PARITY (drift guard).
 //
 // The agent's op set is stated in four independent places; they silently drifted
@@ -914,6 +1092,27 @@ test("OP-SET PARITY: `upload` appears in NONE of the four agent-facing sources",
   assert.ok(!opsFromToolJs().includes("upload"), "browser.js typed op enum");
   assert.ok(!opsFromAgentMd().includes("upload"), "agent-md capability table");
   assert.ok(!opsFromReadme().includes("upload"), "README op list");
+});
+
+test("OP-SET PARITY: `emulate` appears in ALL FOUR agent-facing sources (#316)", () => {
+  // The exact complement of the `upload` test above. Named per-source so a
+  // failure says WHICH surface forgot it — the model is bound by browser.js's
+  // enum, so an op present in three sources and missing there is unreachable in
+  // practice while looking documented.
+  assert.ok(ALLOWED_OPS_DEFAULT.includes("emulate"), "ALLOWED_OPS_DEFAULT");
+  assert.ok(opsFromToolJs().includes("emulate"), "browser.js typed op enum");
+  assert.ok(opsFromAgentMd().includes("emulate"), "agent-md capability table");
+  assert.ok(opsFromReadme().includes("emulate"), "README op list");
+  assert.equal(OP_TO_SERVER.emulate, "emulate", "OP_TO_SERVER maps it to the wire op");
+  // Being in the enum is not enough: without the ARG fields the model cannot pass
+  // a viewport, so the op would be listed and unusable — the whole point of #316.
+  const toolSrc = readBB("opencode", "tools", "browser.js");
+  for (const field of ["device", "width", "height", "deviceScaleFactor", "mobile",
+                       "maxTouchPoints", "userAgent", "timezone", "orientation",
+                       "colorScheme", "reset"]) {
+    assert.match(toolSrc, new RegExp(`^\\s*${field}: tool\\.schema\\.`, "m"),
+      `browser.js args schema must declare \`${field}\` or the model cannot pass it`);
+  }
 });
 
 test("BROWSER_AGENT_ALLOWED_OPS is DOCUMENTED (it was read by code and documented nowhere)", () => {
@@ -1040,16 +1239,12 @@ const REVIEWED_AGENT_EXCLUSIONS = Object.freeze({
       "either. Pure token cost with no available follow-up action.",
     source: "`ping` is DELIBERATELY ABSENT from OP_TO_SERVER",
   },
-  emulate: {
-    reason: "It MUTATES the tab and leaves STICKY per-tab state that outlives " +
-      "the op: device metrics, UA-CH and media overrides persist until an " +
-      "explicit `emulate --reset` or the tab is replaced. An autonomous model " +
-      "that emulates and never resets (moved on, hit its step budget, crashed) " +
-      "hands the operator back a silently altered tab. Same hazard class as " +
-      "`upload` being off-by-default, but with a PERSISTENT side effect, so the " +
-      "answer is exclusion rather than an opt-in someone must remember to undo.",
-    source: "`emulate` is DELIBERATELY ABSENT from OP_TO_SERVER",
-  },
+  // NOTE: `emulate` used to be declared here. It is REACHABLE and default-on as
+  // of #316 — the exclusion rationale it cited was factually wrong (it asserted
+  // sticky per-tab state that outlives the op; extension/protocol.js's EMULATION
+  // header documents the opposite as the deliberately-chosen safety property).
+  // The `DECLARED EXCLUSIONS` test below asserts a declared op is NOT reachable,
+  // so this entry could not survive the mapping.
 });
 
 test("HARNESS SELF-CHECK: the wire-op inventory parses to a plausible, non-empty set", () => {
