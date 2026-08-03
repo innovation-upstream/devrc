@@ -1918,4 +1918,49 @@ in
       WantedBy = [ "timers.target" ];
     };
   };
+
+  # ~/.claude log rotation. NOT serverMode-gated, deliberately: both hosts run
+  # Claude Code and both accumulate these files. Measured on the workbench
+  # 2026-08-02 — notify.log 39.8 MB (dead writer, last touched 2026-07-06),
+  # clawgate-hook.log 12.0 MB (live), 51.6 MB unrotated in total and growing.
+  #
+  # Only ONE of those writers lives in this repo, which is why the cap is on the
+  # DIRECTORY rather than in each writer: `clawgate-hook.log` comes from the
+  # clawgate approval hook and `notify.log` from something no longer running.
+  # The wrapper uses logrotate's `copytruncate` so an open fd (that hook fires on
+  # every tool call) keeps writing to the same file instead of to an unlinked
+  # inode. Scope is `*.log` ONLY — the hand-made `.bak` config copies in that
+  # directory are never touched. See scripts/claude-log-rotate/rotate.sh.
+  systemd.user.services.claude-log-rotate = {
+    Unit = {
+      Description = "Size-cap the unrotated logs in ~/.claude (logrotate, copytruncate)";
+      OnFailure = [ "notify-failure@%n.service" ];
+    };
+    Service = {
+      Type = "oneshot";
+      Environment = [
+        "PATH=${lib.makeBinPath [ pkgs.logrotate pkgs.bash pkgs.coreutils ]}"
+        "HOME=%h"
+      ];
+      ExecStart = "${pkgs.bash}/bin/bash %h/workspace/devrc/scripts/claude-log-rotate/rotate.sh";
+      # Re-run the unit when the wrapper changes (cf. X-Restart-Triggers above).
+      X-Restart-Triggers = [ "${../scripts/claude-log-rotate/rotate.sh}" ];
+    };
+  };
+
+  # Daily. Persistent catches up a single missed run (host asleep / powered off),
+  # which matters here precisely because the growth is slow and unattended.
+  systemd.user.timers.claude-log-rotate = {
+    Unit = {
+      Description = "Daily timer for the ~/.claude log size cap";
+    };
+    Timer = {
+      OnCalendar = "*-*-* 04:00:00";
+      Persistent = true;
+      RandomizedDelaySec = 600;
+    };
+    Install = {
+      WantedBy = [ "timers.target" ];
+    };
+  };
 }

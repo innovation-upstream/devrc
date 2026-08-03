@@ -138,7 +138,11 @@ MIN_TESTS="${MIN_TESTS:-2850}"
 #           pytest.FAIL, not skip, when absent: this is the ONLY file that can
 #           see a resolver-semantics change under an unchanged config, so a skip
 #           there is precisely the silent green the version pin exists to stop.
-REQUIRED_TOOLS=(bash curl node rg git awk jq grep setsid python3 nix-instantiate opencode)
+# logrotate: scripts/tests/test_claude_log_rotate.py drives the REAL binary
+# against a temp directory (rotation, truncation, generation cap, and the .bak
+# scope fence). Those tests FAIL rather than skip when it is absent — a skipped
+# rotation test reports safety it never measured — so it belongs here.
+REQUIRED_TOOLS=(bash curl node rg git awk jq grep setsid python3 nix-instantiate opencode logrotate)
 missing_tools=()
 for t in "${REQUIRED_TOOLS[@]}"; do
   command -v "$t" >/dev/null 2>&1 || missing_tools+=("$t")
