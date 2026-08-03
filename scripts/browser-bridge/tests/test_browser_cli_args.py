@@ -885,24 +885,32 @@ def recreate_bridge(tmp_path):
         def do_POST(self):
             n = int(self.headers.get("Content-Length") or 0)
             body = json.loads(self.rfile.read(n).decode())
+            body["__session"] = self.headers.get("X-Session-Id")
             self.bodies.append(body)
             op = body.get("op")
             if op == cfg["fail_op"]:
                 self._reply(200, {"ok": True, "result": {
                     "id": "x", "ok": False, "error": f"{op}_refused_by_stub"}})
                 return
+            # 🔴 THE REAL WIRE SHAPE, read off live Brave 2026-08-03:
+            # {"ok":true,"result":{"id":…,"ok":true,"data":{tabId,url,…}}}.
+            # An earlier version of this stub put tabId at result level; the tests
+            # passed and the CLI could not find a tabId against real Brave. The
+            # nesting is load-bearing — do not flatten it.
             if op == "emulate":
                 self._reply(200, {"ok": True, "result": {
-                    "id": "e", "ok": True, "tabId": OLD_TAB,
-                    "url": cfg["reset_url"], "reset": True,
-                    "wasEmulating": {"device": "iphone-15"}}})
+                    "id": "e", "ok": True, "data": {
+                        "tabId": OLD_TAB, "url": cfg["reset_url"],
+                        "reset": True, "cleared": [],
+                        "wasEmulating": {"device": "iphone-15"}}}})
                 return
             if op == "open":
                 self._reply(200, {"ok": True, "result": {
-                    "id": "o", "ok": True, "tabId": NEW_TAB,
-                    "url": body.get("url")}})
+                    "id": "o", "ok": True, "data": {
+                        "tabId": NEW_TAB, "url": body.get("url")}}})
                 return
-            self._reply(200, {"ok": True, "result": {"id": "c", "ok": True}})
+            self._reply(200, {"ok": True, "result": {
+                "id": "c", "ok": True, "data": {"closed": True}}})
 
         def do_GET(self):
             self._reply(200, {"ok": True, "instances": []})
@@ -1015,3 +1023,23 @@ def test_recreate_open_failure_leaves_the_original_tab_open(recreate_bridge):
         "a tab must never be closed once the replacement has failed"
     assert f"browser --tab {OLD_TAB} close" in cp.stderr, cp.stderr
     assert "STILL OPEN" in cp.stderr, cp.stderr
+
+
+def test_recreate_keeps_ownership_of_the_new_tab(recreate_bridge):
+    """The close must NOT run under this session's own id.
+
+    server.py drops a session's tab ownership on `close` UNCONDITIONALLY — it does
+    not check that the closed tab is the owned one. So closing the OLD tab under
+    our own session id evicts the mapping `open` just made for the NEW tab, and the
+    next bare op silently falls back to the ACTIVE tab. MEASURED live 2026-08-03:
+    a post-recreate `browser js` returned "Cannot access a chrome:// URL" — it was
+    reading the operator's foreground tab. The close therefore carries a THROWAWAY
+    X-Session-Id, so the server pops that mapping instead of ours.
+    """
+    cp = recreate_bridge.run("emulate", "--reset", "--recreate")
+    assert cp.returncode == 0, cp.stderr
+    by_op = {b["op"]: b["__session"] for b in recreate_bridge.bodies}
+    assert by_op["emulate"] == by_op["release"] == by_op["open"], by_op
+    assert by_op["close"] != by_op["open"], (
+        "the close must use a throwaway session id, or it evicts the ownership "
+        "of the tab `open` just created: " + repr(by_op))

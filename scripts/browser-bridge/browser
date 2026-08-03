@@ -1073,7 +1073,10 @@ try:
     d = json.load(sys.stdin)
 except Exception:
     sys.exit(2)
+# MEASURED wire shape: {"ok":true,"result":{"id":…,"ok":true,"data":{tabId,url,…}}}.
+# The op payload is under result.data; result itself carries only the envelope.
 r = d.get("result") or {}
+r = r.get("data") if isinstance(r.get("data"), dict) else r
 tid, url = r.get("tabId"), r.get("url")
 if not isinstance(tid, int) or isinstance(tid, bool) or not isinstance(url, str) or not url:
     sys.exit(3)
@@ -1115,7 +1118,9 @@ try:
     d = json.load(sys.stdin)
 except Exception:
     sys.exit(2)
-t = (d.get("result") or {}).get("tabId")
+r = d.get("result") or {}
+r = r.get("data") if isinstance(r.get("data"), dict) else r
+t = r.get("tabId")
 if not isinstance(t, int) or isinstance(t, bool):
     sys.exit(3)
 print(t)
@@ -1128,12 +1133,26 @@ print(t)
   # Both tabs exist right now. Close the stuck one LAST, and never treat a failure
   # here as fatal — the operator already has a working tab; they just also have a
   # stray one, and saying so is more useful than a non-zero exit.
-  local close_ok="true" close_err=""
+  #
+  # 🔴 THE CLOSE RUNS UNDER A THROWAWAY SESSION ID, and that is load-bearing, not
+  # tidiness. server.py drops a session's tab ownership on `close` UNCONDITIONALLY
+  # ("the session asked to end its tab") — it does NOT check that the closed tab is
+  # the owned one, so an explicit `--tab <old>` close still evicts the mapping we
+  # just established for the NEW tab. MEASURED live 2026-08-03: after a recreate,
+  # a bare `browser js …` fell back to the ACTIVE tab and returned
+  # "Cannot access a chrome:// URL" — it was reading the operator's foreground tab,
+  # not the replacement. Sending the close under a different X-Session-Id makes the
+  # server pop THAT (nonexistent) mapping instead of ours. `close` is not in
+  # OWNED_TAB_ONLY_OPS and accepts an explicit `--tab`, so this is ordinary
+  # documented behaviour, not a reach-around.
+  local close_ok="true" close_err="" saved_sid="$SESSION_ID"
+  SESSION_ID="${SESSION_ID}+recreate-close"
   TAB="$old_tab"
   if ! cmd_op close >/dev/null 2>/dev/null; then
     close_ok="false"
     close_err="the stuck tab ${old_tab} could NOT be closed; close it by hand: browser --tab ${old_tab} close"
   fi
+  SESSION_ID="$saved_sid"
   TAB="$saved_tab"
 
   RECREATE_OLD="$old_tab" RECREATE_NEW="$new_tab" RECREATE_URL="$old_url" \
@@ -1141,9 +1160,10 @@ print(t)
   python3 -c '
 import json, os, sys
 reset = json.load(sys.stdin)
+_r = reset.get("result") or {}
 out = {
     "recreated": True,
-    "reset": (reset.get("result") or {}),
+    "reset": (_r.get("data") if isinstance(_r.get("data"), dict) else _r),
     "oldTabId": int(os.environ["RECREATE_OLD"]),
     "newTabId": int(os.environ["RECREATE_NEW"]),
     "url": os.environ["RECREATE_URL"],
