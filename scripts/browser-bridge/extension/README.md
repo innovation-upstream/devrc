@@ -273,6 +273,27 @@ If `ping` still reports the old version after ↻, **fully quit and reopen Brave
 > three full Brave restarts in a single session. (0.3.0 → 0.3.1 was exactly
 > this: adding `id` to `ping`'s reply is a discriminator, so it got a bump.)
 
+> **0.7.3 — the `emulate --reset` note stops claiming the viewport was restored.**
+> Prose only; no wire-op or behaviour change, so `ping`'s `ops` list cannot
+> discriminate it. The version bump exists because the corrected note shipped in
+> #321 with NO bump, which made it undetectable — and because 0.7.2 (an unmerged
+> branch build) was live on the laptop, so on-disk 0.7.1 read as OLDER than the
+> running build and `extension_stale` went true for both profiles on a tree that
+> was actually current. 0.7.2 is deliberately skipped: it was never on `main`.
+> The discriminator is the note text itself:
+>
+> ```bash
+> browser open https://example.com && browser emulate iphone-15
+> browser emulate --reset          # read `.note`
+>   # ≤0.7.1 → "…overrides CLEARED on the tab" (false for the viewport)
+>   # 0.7.3  → says the viewport is NOT restored; points at --reset --recreate
+> ```
+>
+> 🔴 The viewport stickiness itself is UNFIXED and the mechanism is unexplained —
+> `Emulation.clearDeviceMetricsOverride` is sent and acknowledged and the size
+> survives it, along with a re-nav. Replacing the tab is the only known remedy
+> (`emulate --reset --recreate`). See #319.
+
 > **0.7.1 — `text --annotated` inside `--frame`.** No new wire op, so `ping`'s
 > `ops` list is byte-identical to 0.7.0's and cannot discriminate this build.
 > The discriminator is the **capability itself**, and it is exact — it exercises
