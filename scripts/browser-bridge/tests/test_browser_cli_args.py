@@ -843,11 +843,13 @@ def test_emulate_preset_and_flags_are_order_independent(bridge):
 #     after `emulate --reset`     innerWidth  393   ← NOT restored
 #     after `--reset` + re-nav    innerWidth  393   ← still NOT restored
 #
-# and the reset DID report `cleared: [Emulation.clearDeviceMetricsOverride,
-# Emulation.setTouchEmulationEnabled, Emulation.setUserAgentOverride]`. The
-# viewport size is stuck; closing the tab is the only known remedy. `--recreate`
-# automates the replacement. The mechanism is NOT established — these tests pin
-# the CLI's ORCHESTRATION, not a browser behaviour.
+# That build's reset DID report `cleared: [Emulation.clearDeviceMetricsOverride,
+# Emulation.setTouchEmulationEnabled, Emulation.setUserAgentOverride]` and the
+# size survived it anyway — which is why the SHIPPED extension does not send the
+# clears at all: `--reset` only stops re-applying, and emits NO `cleared` field.
+# The viewport size is stuck; closing the tab is the only known remedy.
+# `--recreate` automates the replacement. The mechanism is NOT established —
+# these tests pin the CLI's ORCHESTRATION, not a browser behaviour.
 #
 # What must hold:
 #   1. the op ORDER is emulate(reset) → release → open(url) → close(old tab),
@@ -855,11 +857,18 @@ def test_emulate_preset_and_flags_are_order_independent(bridge):
 #      failure path can leave the operator with no tab;
 #   2. `release` is sent at all — `open` is idempotent server-side and would hand
 #      back the SAME stuck tab to a session that still owns one;
-#   3. the NEW tab id is reported (it changes, and later ops route to it);
-#   4. plain `--reset` NEVER swaps tab ids (one request, nothing else);
-#   5. `--recreate` alone is refused;
-#   6. a non-http(s) url is refused without closing anything;
-#   7. an `open` failure leaves the original tab open and names it.
+#   3. `release` is INSTANCE-SCOPED — it carries the `--instance` target, or it
+#      drops this session's owned tab on every OTHER connected profile too;
+#   4. the NEW tab id is reported (it changes, and later ops route to it);
+#   5. plain `--reset` NEVER swaps tab ids (one request, nothing else);
+#   6. `--recreate` alone is refused;
+#   7. a non-http(s) url is refused without closing anything;
+#   8. an `open` failure leaves the original tab open and names it;
+#   9. a failed `close` is NON-FATAL and still reports the new tab id, and a
+#      failed `release` is fatal WITH its own explanation. Both used to be
+#      unreachable: `cmd_op` fails by `die`ing (`exit 1`), which as a shell
+#      function exits the whole script, so `if ! cmd_op close` caught nothing —
+#      measured rc=1 with stdout AND stderr empty. They run in `$( … )` now.
 # --------------------------------------------------------------------------- #
 OLD_TAB, NEW_TAB = 4242, 9999
 PAGE_URL = "https://example.com/a"
@@ -901,7 +910,10 @@ def recreate_bridge(tmp_path):
                 self._reply(200, {"ok": True, "result": {
                     "id": "e", "ok": True, "data": {
                         "tabId": OLD_TAB, "url": cfg["reset_url"],
-                        "reset": True, "cleared": [],
+                        # NO `cleared` field: the shipped reset branch sends
+                        # nothing to CDP, so it has nothing to report. Modelling
+                        # one here taught the tests a shape the code cannot emit.
+                        "reset": True,
                         "wasEmulating": {"device": "iphone-15"}}}})
                 return
             if op == "open":
@@ -1023,6 +1035,84 @@ def test_recreate_open_failure_leaves_the_original_tab_open(recreate_bridge):
         "a tab must never be closed once the replacement has failed"
     assert f"browser --tab {OLD_TAB} close" in cp.stderr, cp.stderr
     assert "STILL OPEN" in cp.stderr, cp.stderr
+
+
+def test_recreate_close_failure_is_non_fatal_and_still_reports_the_new_tab(
+        recreate_bridge):
+    """A failed `close` must NOT be fatal — the operator already has a working
+    tab, and the one thing they cannot reconstruct is its id.
+
+    RED-BEFORE-GREEN: on origin/main this path ran as a bare `if ! cmd_op close`.
+    `cmd_op` reports an op failure by calling `die`, i.e. `exit 1`, and a shell
+    function's `exit` exits the SCRIPT — so the `if` never got a chance to run,
+    the stderr was swallowed by `2>/dev/null`, and the measured result was rc=1
+    with stdout AND stderr empty. The new tab id was simply lost. `close_ok`,
+    `closeError` and `closedOldTab:false` were unreachable dead code.
+    """
+    recreate_bridge.cfg["fail_op"] = "close"
+    cp = recreate_bridge.run("emulate", "--reset", "--recreate")
+    assert cp.returncode == 0, (
+        "a failed close must not exit non-zero — the recreate SUCCEEDED; "
+        f"stdout={cp.stdout!r} stderr={cp.stderr!r}")
+    assert cp.stdout.strip(), "the result JSON must still be printed"
+    out = json.loads(cp.stdout)
+    assert out["recreated"] is True
+    assert out["newTabId"] == NEW_TAB, \
+        "the NEW tab id is the one thing the operator cannot recover otherwise"
+    assert out["closedOldTab"] is False, \
+        "`closedOldTab` must report the truth — it was dead code before"
+    assert str(OLD_TAB) in json.dumps(out), \
+        "the stray tab must be named so the operator can close it by hand"
+    # The order still holds: everything up to the close happened.
+    assert [b["op"] for b in recreate_bridge.bodies] == \
+        ["emulate", "release", "open", "close"]
+
+
+def test_recreate_close_failure_says_so_on_stderr(recreate_bridge):
+    """…and it must SAY so. The old path printed nothing at all (`2>/dev/null`),
+    so a silently un-closed stuck tab looked like a clean run."""
+    recreate_bridge.cfg["fail_op"] = "close"
+    cp = recreate_bridge.run("emulate", "--reset", "--recreate")
+    assert cp.returncode == 0, cp.stderr
+    assert "NOT fatal" in cp.stderr, cp.stderr
+    assert str(OLD_TAB) in cp.stderr, cp.stderr
+
+
+def test_recreate_release_failure_is_fatal_with_its_own_explanation(
+        recreate_bridge):
+    """A failed `release` IS fatal — `open` is idempotent server-side, so
+    continuing would hand back the SAME stuck tab and report it as the
+    replacement. But it must be fatal WITH the contextual message, which the bare
+    `cmd_op release || { die … }` form could never reach (same `die`-is-`exit`
+    defect as the close above): the `||` branch never ran.
+    """
+    recreate_bridge.cfg["fail_op"] = "release"
+    cp = recreate_bridge.run("emulate", "--reset", "--recreate")
+    assert cp.returncode != 0, cp.stdout
+    assert "could not release ownership" in cp.stderr, cp.stderr
+    assert str(OLD_TAB) in cp.stderr, cp.stderr
+    assert [b["op"] for b in recreate_bridge.bodies] == ["emulate", "release"], \
+        "nothing may be opened or closed once the release has failed"
+
+
+def test_recreate_release_carries_the_instance_target(recreate_bridge):
+    """`release` must be SCOPED to the profile being repaired.
+
+    Ownership is keyed (instance, session), so one session can own a tab on every
+    connected Brave profile — the normal case here, with two profiles connected.
+    An unscoped release orphans the OTHER profile's owned tab, and a later bare op
+    there falls back to the operator's ACTIVE tab. The CLI's half of the fix is
+    forwarding `--instance` as the request `target`; server.py's half is
+    release_session(target=…) (see test_server.py).
+    """
+    cp = recreate_bridge.run("--instance", "work", "emulate", "--reset",
+                             "--recreate")
+    assert cp.returncode == 0, cp.stderr
+    rel = [b for b in recreate_bridge.bodies if b["op"] == "release"]
+    assert len(rel) == 1, recreate_bridge.bodies
+    assert rel[0].get("target") == "work", (
+        "release must carry the instance target, or the server releases this "
+        f"session's tab on EVERY connected profile: {rel[0]!r}")
 
 
 def test_recreate_keeps_ownership_of_the_new_tab(recreate_bridge):

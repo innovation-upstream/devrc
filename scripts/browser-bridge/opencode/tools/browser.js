@@ -35,8 +35,10 @@ export default tool({
     "real phone/tablet viewport instead of guessing from a desktop DOM: pass a " +
     "`device` preset (iphone-15, iphone-se, pixel-8, ipad-mini, ipad-mini-2019, " +
     "galaxy-s24) OR raw `width`+`height` (both together) with optional " +
-    "`deviceScaleFactor`/`mobile`/`maxTouchPoints`/`userAgent`/`timezone`/" +
-    "`orientation` (portrait|landscape)/`colorScheme` (light|dark|no-preference); " +
+    "`deviceScaleFactor`/`mobile`/`maxTouchPoints`/" +
+    "`orientation` (portrait|landscape)/`colorScheme` (light|dark|no-preference). " +
+    "You CANNOT set a raw User-Agent or timezone — use a `device` preset, which " +
+    "sets a matching UA for you; " +
     "`reset:true` stops emulating. The overrides are re-applied inside every " +
     "later op, so 'text'/'html'/'screenshot' after this see the emulated page — " +
     "but touch-dependent behaviour only becomes real for a document created " +
@@ -88,10 +90,13 @@ export default tool({
       .describe("op=emulate: emulate a mobile device (meta viewport, overlay scrollbars, text autosizing)"),
     maxTouchPoints: tool.schema.number().optional()
       .describe("op=emulate: enable touch with this many contact points, 1-16"),
-    userAgent: tool.schema.string().optional()
-      .describe("op=emulate: raw User-Agent string (a preset already sets a matching UA + client hints)"),
-    timezone: tool.schema.string().optional()
-      .describe("op=emulate: IANA timezone id, e.g. Europe/London"),
+    // `userAgent` and `timezone` are DELIBERATELY ABSENT (operator CLI only) —
+    // see EMULATE_OPERATOR_ONLY_FIELDS in browser_tool_impl.mjs for the reasoning
+    // (identity a page can read, chosen by a model that reads untrusted pages,
+    // and sticky for the whole run so it rides later navs to authenticated
+    // sites). A `device` preset sets a matching UA server-side, so mobile testing
+    // is unaffected. Passing either is refused: emulation_field_operator_only:<f>.
+    // `geo`/`touch` are likewise absent, for the reasons documented there.
     orientation: tool.schema.string().optional()
       .describe("op=emulate: 'portrait' or 'landscape' (landscape also swaps the viewport)"),
     colorScheme: tool.schema.string().optional()

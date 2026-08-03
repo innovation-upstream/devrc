@@ -74,11 +74,13 @@ import { homedir } from "node:os";
 //   after `emulate --reset`     innerWidth  393   ← NOT restored
 //   after `--reset` + re-nav    innerWidth  393   ← still NOT restored
 //
-// and the reset demonstrably DID send and report its clears
+// on that build the reset DID send and report its clears
 // (`Emulation.clearDeviceMetricsOverride` / `setTouchEmulationEnabled` /
-// `setUserAgentOverride`). Every other override does revert on its own — dpr,
-// maxTouchPoints, pointer:coarse, prefers-color-scheme, userAgent, timeZone. Only
-// the viewport SIZE is sticky; it survives the detach, the clear and a
+// `setUserAgentOverride`) and the size survived them, which is why the SHIPPED
+// build sends nothing on reset at all — it only stops re-applying. Every other
+// override does revert on its own — dpr, maxTouchPoints, pointer:coarse,
+// prefers-color-scheme, userAgent, timeZone — at the debugger detach, not by any
+// clear. Only the viewport SIZE is sticky; it survives the detach, the clear and a
 // re-navigation. THE MECHANISM IS NOT ESTABLISHED (a render-widget resize residue
 // is the leading hypothesis, not a finding). CLOSING THE TAB is the only known
 // remedy. That is #319; the operator-side workaround is
@@ -292,16 +294,33 @@ export const EMULATION_COLOR_SCHEMES_ALLOWED =
   Object.freeze(["light", "dark", "no-preference"]);
 const EMULATE_DEVICE_MAX_CHARS = 64;
 
-// The model-facing arg name -> the wire field normalizeEmulation reads. Three
-// differ deliberately (deviceScaleFactor/userAgent/timezone are self-describing
-// to a model; the wire names are the CLI's terse dsf/ua/tz).
+// The model-facing arg name -> the wire field normalizeEmulation reads. One
+// differs deliberately (deviceScaleFactor is self-describing to a model; the wire
+// name is the CLI's terse dsf).
 //
-// `geo` and `touch` are NOT offered. `geo` spoofs the operator's LOCATION, which
-// has nothing to do with the viewport/mobile-rendering question the agent has,
-// and is a fingerprinting surface handed to a model reading untrusted pages.
-// `touch` is redundant: a preset carries its own touch support, and a raw
-// `maxTouchPoints` turns touch on by itself (normalizeEmulation). Neither is a
-// capability the agent needs, so neither is forwarded.
+// `geo`, `touch`, `userAgent` and `timezone` are NOT offered to the agent. The
+// OPERATOR CLI keeps all four — this asymmetry is the point, not an oversight.
+//
+//   * `geo` spoofs the operator's LOCATION, which has nothing to do with the
+//     viewport/mobile-rendering question the agent has, and is a fingerprinting
+//     surface handed to a model reading untrusted pages.
+//   * `userAgent` and `timezone` are THE SAME CLASS and were excluded for the
+//     same reason (#F7). Both are identity a page can read; both are chosen by a
+//     model whose input includes pages it does not control; and emulation is
+//     STICKY FOR THE WHOLE RUN, so a prompt-injected UA is not confined to the
+//     page that injected it — it rides along on every later `nav`, including to
+//     an authenticated site. A DEVICE PRESET still sets a matching UA (and client
+//     hints) server-side, so the legitimate mobile-testing path is untouched;
+//     what is removed is the model picking an ARBITRARY one.
+//   * `touch` is merely redundant: a preset carries its own touch support, and a
+//     raw `maxTouchPoints` turns touch on by itself (normalizeEmulation).
+//
+// `userAgent`/`timezone` are REFUSED BY NAME rather than silently dropped
+// (`emulation_field_operator_only:<field>`): a silent drop would leave the model
+// believing it set a UA it did not set, and then reasoning about a page it read
+// under the wrong identity. `geo`/`touch` keep their pre-existing silent-drop
+// behaviour — they were NEVER a declared arg, so no model can believe it passed
+// one, and the raw-CDP-passthrough test pins that drop deliberately.
 const EMULATE_FIELD_TO_WIRE = Object.freeze({
   device: "device",
   width: "width",
@@ -309,11 +328,19 @@ const EMULATE_FIELD_TO_WIRE = Object.freeze({
   deviceScaleFactor: "dsf",
   mobile: "mobile",
   maxTouchPoints: "maxTouchPoints",
-  userAgent: "ua",
-  timezone: "tz",
   orientation: "orientation",
   colorScheme: "colorScheme",
 });
+
+// Emulation fields the OPERATOR CLI accepts, the AGENT may not, and that were
+// PREVIOUSLY DECLARED ARGS — so a model could plausibly still pass one and must
+// be told, by name, that it did not take effect. Refused before anything else in
+// _addEmulation so the refusal is reachable even alongside `reset` (which
+// short-circuits) or alone (which would otherwise refuse with the wrong name,
+// `emulate_needs_device_or_params`). `geo`/`touch` are NOT here: they were never
+// declared, so they stay on the silent-drop path the whitelist already gives
+// every unknown key.
+export const EMULATE_OPERATOR_ONLY_FIELDS = Object.freeze(["userAgent", "timezone"]);
 
 function _emuInt(v, field, min, max) {
   const n = Number(v);
@@ -338,28 +365,13 @@ function _emuBool(v, field) {
   throw new BrowserToolRefusal(`invalid_emulation:${field}`);
 }
 
-// A UA string is echoed into a request HEADER by Chromium, so a CR/LF in it is
-// the classic header-injection primitive. Refused, never stripped — silently
-// sanitizing model input is how you end up unsure what went on the wire.
-function _emuUserAgent(v) {
-  if (typeof v !== "string") throw new BrowserToolRefusal("invalid_emulation:ua");
-  const s = v.trim();
-  if (!s || s.length > EMULATION_LIMITS_MIRROR.maxUserAgentChars) {
-    throw new BrowserToolRefusal("invalid_emulation:ua");
-  }
-  // eslint-disable-next-line no-control-regex
-  if (/[\x00-\x1f\x7f]/.test(s)) throw new BrowserToolRefusal("invalid_emulation:ua");
-  return s;
-}
-
-function _emuTimezone(v) {
-  const s = typeof v === "string" ? v.trim() : "";
-  if (!s || s.length > EMULATION_LIMITS_MIRROR.maxTimezoneChars
-      || !/^[A-Za-z0-9_+\-/]+$/.test(s)) {
-    throw new BrowserToolRefusal("invalid_emulation:tz");
-  }
-  return s;
-}
+// NOTE: there is no `_emuUserAgent`/`_emuTimezone` here any more. They validated
+// fields the agent may no longer pass at all (see EMULATE_OPERATOR_ONLY_FIELDS),
+// and keeping a validator for an unreachable field is how a "we still check it"
+// belief outlives the code path. `maxUserAgentChars`/`maxTimezoneChars` stay in
+// EMULATION_LIMITS_MIRROR because that object mirrors protocol.js's
+// EMULATION_LIMITS wholesale and a drift test compares them key for key — the
+// OPERATOR CLI still sends both fields, and the extension still enforces them.
 
 // Bounded, charset-restricted preset NAME only. The preset TABLE lives in the
 // extension (DEVICE_PRESETS), so an unrecognised-but-well-formed name is
@@ -379,6 +391,14 @@ function _emuDevice(v) {
 function _addEmulation(body, args) {
   const a = args || {};
   const has = (k) => a[k] !== undefined && a[k] !== null && a[k] !== "";
+
+  // OPERATOR-ONLY fields first, so the refusal is REACHABLE: the `reset`
+  // short-circuit below returns before any per-field handling, and the
+  // "describes nothing" refusal fires before it too, so a check placed lower
+  // could never run for `{reset:true, userAgent:…}` or for a UA on its own.
+  for (const f of EMULATE_OPERATOR_ONLY_FIELDS) {
+    if (has(f)) throw new BrowserToolRefusal(`emulation_field_operator_only:${f}`);
+  }
 
   // `--reset` means "stop re-applying", and combining it with a device
   // description is contradictory rather than resolvable by precedence (do you
@@ -422,8 +442,6 @@ function _addEmulation(body, args) {
     body.maxTouchPoints = _emuInt(a.maxTouchPoints, "maxTouchPoints", 1,
                                   EMULATION_LIMITS_MIRROR.maxTouchPoints);
   }
-  if (has("userAgent")) body.ua = _emuUserAgent(a.userAgent);
-  if (has("timezone")) body.tz = _emuTimezone(a.timezone);
   if (has("orientation")) {
     const o = String(a.orientation);
     if (!EMULATION_ORIENTATIONS_ALLOWED.includes(o)) {
@@ -937,10 +955,16 @@ export function summarizeResult(op, envelope, env = {}, autoWake = null) {
     // Field-pinned like `context`, not a bare passthrough: a later server-side
     // addition to the emulate payload must not silently widen what reaches the
     // model. `note` and `emulationNote` are carried because they are exactly the
-    // two strings the model must ACT on — the "overrides are re-applied per op,
-    // the tab is not emulated between ops" contract, and the create-time hint
-    // that says a document created BEFORE this emulate needs a re-`nav` before
-    // touch-dependent behaviour is real.
+    // two strings the model must ACT on: on a reset, the note that says the
+    // viewport does NOT come back (so the model must not re-read expecting a
+    // desktop width — the tab is stuck until the wrapper closes it), and the
+    // create-time hint that says a document created BEFORE this emulate needs a
+    // re-`nav` before touch-dependent behaviour is real.
+    //
+    // ⚠ The note is NOT "the tab is not emulated between ops" any more — that
+    // claim was measured false for the viewport (#319, see the header). Do not
+    // reintroduce a summary of the note here; forward the string the extension
+    // actually emitted, which is what this passthrough does.
     return JSON.stringify({
       ok: true,
       tabId: data.tabId ?? null,
