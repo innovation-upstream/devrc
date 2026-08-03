@@ -156,7 +156,18 @@
             # AND turns the version assertion red. That red is the point — the
             # config header's "measured on v1.18.4 — do not re-derive" claims are
             # otherwise pinned to nothing.
-            nativeBuildInputs = [ pyEnv pkgs.bash pkgs.ripgrep pkgs.git pkgs.util-linux pkgs.jq pkgs.gnugrep pkgs.curl pkgs.nodejs pkgs.nix pkgs.opencode ];
+            #
+            # logrotate: scripts/tests/test_claude_log_rotate.py drives the REAL
+            # binary against a temp directory — it asserts that an oversized log
+            # is rotated AND truncated in place (copytruncate), that a small one
+            # is left alone, that the generation cap holds, and 🔴 that the nine
+            # hand-made `.bak` config copies in ~/.claude are never touched. That
+            # last one is a data-loss fence, so it must not be a skipif: those
+            # tests FAIL naming the missing binary, the same deliberate choice as
+            # nix-instantiate and opencode above. Hermetic — logrotate only ever
+            # sees a pytest tmp_path, its own generated config and its own state
+            # file; no network, no ambient /var/lib/logrotate.status.
+            nativeBuildInputs = [ pyEnv pkgs.bash pkgs.ripgrep pkgs.git pkgs.util-linux pkgs.jq pkgs.gnugrep pkgs.curl pkgs.nodejs pkgs.nix pkgs.opencode pkgs.logrotate ];
           }
           ''
             cp -r ${./.} src

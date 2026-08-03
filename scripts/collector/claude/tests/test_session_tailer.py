@@ -39,6 +39,16 @@ _spec.loader.exec_module(S)
 
 EMIT = _COLLECTOR_DIR / "emit"
 
+# The row-count cap this emitter must respect is OWNED by the validation
+# harness, not by this file — read it from there so the two cannot drift. (The
+# module must be registered in sys.modules before exec_module: it defines a
+# @dataclass, and dataclasses resolves annotations via sys.modules[__module__].)
+_INV_PATH = _COLLECTOR_DIR.parent / "validation" / "invariants.py"
+_inv_spec = importlib.util.spec_from_file_location("devrc_invariants", _INV_PATH)
+INV = importlib.util.module_from_spec(_inv_spec)
+sys.modules["devrc_invariants"] = INV
+_inv_spec.loader.exec_module(INV)
+
 # Settle policy in seconds, from the module's own defaults (no magic numbers).
 SETTLE = S.DEFAULT_SETTLE_MINUTES * 60.0
 INTERIM = S.DEFAULT_INTERIM_HOURS * 3600.0
@@ -345,7 +355,16 @@ def test_idempotent_no_reemit_when_unchanged(env):
 
 def test_settled_growth_reemits_the_complete_rollup(env):
     """A session that grew and then SETTLED re-emits, and the newest row is the
-    complete rollup (the argMax-on-read contract stays correct)."""
+    complete rollup (the argMax-on-read contract stays correct).
+
+    🔴 UPDATED 2026-08-02. This test used to settle 20 minutes after the
+    first-seen emit and assert the row landed immediately. That is precisely the
+    amplification being fixed — the settled branch now consults `emitted_at`, so
+    a settle inside the interim window DEFERS. Both halves are asserted here:
+    the deferral, and that the deferral costs nothing but latency (the rollup
+    still lands, still complete, on the first tick past the window). Reverting
+    the fix turns the first half red.
+    """
     t0 = time.time()
     p = _write(env["projects"], "-home-zach-workspace-devrc", "s1", [
         user_typed("hello", ts="2026-07-11T10:00:00.000Z"),
@@ -356,8 +375,12 @@ def test_settled_growth_reemits_the_complete_rollup(env):
     _append(p, assistant([("Edit", {"file_path": "b.go",
                                     "old_string": "x", "new_string": "y"})],
                          ts="2026-07-11T11:00:00.000Z"), mtime=t0)
-    # … then goes idle past the settle window → re-emit with the full rollup
+    # … and settles, but only SETTLE after the last emit → DEFERRED, no new row
     assert S.run(now=t0 + SETTLE + 1) == 0
+    assert len(_spool_events(env["spool"])) == 1
+    # … and once the interim window has passed it lands, complete. The deferral
+    # did NOT record the new signature, which is what makes this re-evaluate.
+    assert S.run(now=t0 + INTERIM + SETTLE + 1) == 0
     evs = _spool_events(env["spool"])
     assert len(evs) == 2  # append-only: two rows for the same session
     latest = json.loads(evs[-1]["payload"])
@@ -448,8 +471,78 @@ def test_decision_unchanged_signature_never_emits():
 
 
 def test_decision_settled_emits():
+    """🔴 UPDATED 2026-08-02: the fixture's last emit must now be older than the
+    interim window, because the settled branch is rate-limited on `emitted_at`.
+    The old fixture (`emitted_at=100.0`, `now=1000+SETTLE`) is only ~35 min past
+    the last emit and is now the DEFERRED case — see
+    test_decision_settled_is_rate_limited_by_the_last_emit, which pins it."""
     prev = {"sig": "old", "emitted_at": 100.0}
-    assert _decide(prev, "new", mtime=1000.0, now=1000.0 + SETTLE) == (True, "settled")
+    assert _decide(prev, "new", mtime=1000.0,
+                   now=100.0 + INTERIM + SETTLE) == (True, "settled")
+
+
+# --------------------------------------------------------------------------- #
+# 🔴 The settled-branch rate limit (2026-08-02).
+#
+# THE BUG: the settled branch returned (True, "settled") without ever consulting
+# `emitted_at`, while the interim branch immediately below it was rate-limited.
+# So an ACTIVE session was bounded to one emit per interim window, and a session
+# idling BETWEEN BURSTS was bounded by nothing — one full rollup per burst,
+# forever. That is the ordinary `claude --resume` shape, i.e. the bound was
+# missing from exactly the common case. Measured over the 30 days to 2026-08-02:
+# 31,815 rows / 482 sessions, median 2 but p90 209, max 572, mean 66, against
+# validation/invariants.py's `session_summary_rows_bounded` (>24/session/24h).
+# --------------------------------------------------------------------------- #
+def test_decision_settled_is_rate_limited_by_the_last_emit():
+    """🔴 THE regression pin. RED before the fix: this returned
+    (True, "settled") because the branch never read `emitted_at`."""
+    prev = {"sig": "old", "emitted_at": 1000.0}
+    # settled (idle >= SETTLE) but the last emit was only an hour ago
+    assert _decide(prev, "new", mtime=1000.0,
+                   now=1000.0 + 3600) == (False, "settled-recently")
+
+
+def test_decision_settled_reemits_after_a_long_gap():
+    """🔴 The case the rate limit MUST NOT swallow, pinned explicitly: a session
+    that genuinely settled, was resumed DAYS later, and settles again. Its
+    `emitted_at` is far older than the interval, so it emits."""
+    prev = {"sig": "old", "emitted_at": 1000.0}
+    two_days = 2 * 86400
+    assert _decide(prev, "new", mtime=1000.0 + two_days,
+                   now=1000.0 + two_days + SETTLE) == (True, "settled")
+
+
+def test_decision_settled_with_no_known_last_emit_always_emits():
+    """A session's FIRST rollup is never deferred — neither for a transcript we
+    have never emitted for, nor for a v1/corrupt state entry with no timestamp.
+    This is what keeps `session_summary_no_orphans` (2h grace) satisfiable."""
+    assert _decide(None, "new", mtime=1000.0,
+                   now=1000.0 + SETTLE) == (True, "settled")
+    assert _decide({"sig": "old", "emitted_at": None}, "new", mtime=1000.0,
+                   now=1000.0 + SETTLE) == (True, "settled")
+
+
+def test_decision_settle_zero_bypasses_the_rate_limit():
+    """The documented `CLAUDE_SUMMARY_SETTLE_MINUTES=0` escape hatch restores
+    the pre-emit-on-settle "every change emits" behaviour, so the rate limit
+    deliberately does not apply to it — otherwise the knob would be a no-op."""
+    prev = {"sig": "old", "emitted_at": 1000.0}
+    assert _decide(prev, "new", mtime=1000.0, now=1000.0,
+                   settle=0) == (True, "settled")
+
+
+def test_decision_settled_rate_limit_follows_the_interim_knob():
+    """One knob, not two: the settled bound IS `interim_s`. Shrinking the knob
+    shrinks the bound, and `interim=0` (the documented "no interim emits"
+    setting) restores the old unbounded settled behaviour — which is what makes
+    it usable as the positive control in the end-to-end test below."""
+    prev = {"sig": "old", "emitted_at": 1000.0}
+    assert _decide(prev, "new", mtime=1000.0, now=1000.0 + 3600,
+                   interim=1800)[0] is True          # bound below the gap
+    assert _decide(prev, "new", mtime=1000.0, now=1000.0 + 3600,
+                   interim=7200) == (False, "settled-recently")
+    assert _decide(prev, "new", mtime=1000.0, now=1000.0 + 3600,
+                   interim=0) == (True, "settled")
 
 
 def test_decision_active_first_seen_emits_once_then_defers():
@@ -561,7 +654,13 @@ def test_resumed_after_settle_reemits_the_final_rollup(env):
         assert S.run(now=t_resume + tick * 300) == 0
     assert len(_spool_events(env["spool"])) == 2
     # Once it settles again it re-emits, and the newest row is complete.
+    # 🔴 UPDATED 2026-08-02: the settle must now be past the interim window from
+    # the previous emit (at t_resume+300), because the settled branch is
+    # rate-limited. Inside the window it defers — asserted first, so this test
+    # covers BOTH sides of the fix rather than quietly moving the goalposts.
     assert S.run(now=t_resume + 8 * 300 + SETTLE) == 0
+    assert len(_spool_events(env["spool"])) == 2         # deferred, not emitted
+    assert S.run(now=t_resume + 300 + INTERIM + SETTLE) == 0
     evs = _spool_events(env["spool"])
     assert len(evs) == 3
     latest = json.loads(evs[-1]["payload"])
@@ -587,6 +686,68 @@ def test_interim_backstop_bounds_a_never_settling_session(env):
     expected = 1 + int(12 * 3600 // INTERIM)        # first-seen + 3 interims
     assert n == expected, f"expected {expected} bounded emits, got {n}"
     assert n < 10                                   # vs 145 under the old rule
+
+
+def test_bursty_resumed_session_stays_under_the_invariant_cap(env, monkeypatch):
+    """🔴 The end-to-end regression, WITH its own positive control.
+
+    Scenario = the measured one: a session worked on in short bursts, each
+    followed by enough quiet to cross the settle window. Before the fix every
+    such burst re-entered the settled branch and shipped a full rollup, so the
+    row count tracked the burst count with no ceiling at all.
+
+    The reassuring answer here is a SMALL NUMBER, and a small number is exactly
+    what a harness wired to nothing produces. So the same scenario is run twice
+    through the same code path, and the only thing that changes is the knob:
+
+      POSITIVE CONTROL  interim=0 -> the settled branch is unbounded, which IS
+                        the pre-fix behaviour. The count MUST move well past the
+                        cap. If it does not, the harness is not generating
+                        bursts and the bounded number below means nothing.
+      UNDER TEST        the 4h default -> bounded.
+
+    Cap is validation/invariants.py's SUMMARY_ROWS_PER_SESSION_CAP (24 rows per
+    session per 24h), read from the module rather than restated here.
+    """
+    def burst_run(interim_hours):
+        """36 bursts over 24h (one every 40 min), each settling before the next.
+        Returns the number of session-summary rows emitted."""
+        monkeypatch.setenv("CLAUDE_SUMMARY_INTERIM_HOURS", str(interim_hours))
+        for f in env["spool"].glob("*"):
+            f.unlink()
+        if env["state"].exists():
+            env["state"].unlink()
+        t0 = time.time()
+        p = _write(env["projects"], "-home-zach-workspace-devrc", "bursty", [
+            user_typed("burst 0", ts="2026-07-11T10:00:00.000Z"),
+        ])
+        assert S.run(now=t0) == 0                      # first-seen
+        step = 40 * 60                                 # > SETTLE, so each settles
+        for i in range(1, 37):
+            t = t0 + i * step
+            _append(p, assistant([("Read", {"file_path": f"f{i}.py"})],
+                                 ts="2026-07-11T10:00:00.000Z"), mtime=t)
+            # tick once right after the write (active) and once after it settles
+            assert S.run(now=t + 60) == 0
+            assert S.run(now=t + SETTLE + 60) == 0
+        return len(_spool_events(env["spool"]))
+
+    cap = INV.SUMMARY_ROWS_PER_SESSION_CAP
+
+    unbounded = burst_run(0)          # POSITIVE CONTROL — pre-fix behaviour
+    assert unbounded > cap, (
+        f"positive control produced only {unbounded} rows, which is under the "
+        f"cap of {cap} — the scenario is not generating bursts, so the bounded "
+        f"number below would be a fact about the harness, not about the fix"
+    )
+
+    bounded = burst_run(S.DEFAULT_INTERIM_HOURS)
+    assert bounded <= cap, (
+        f"{bounded} rows for one session in 24h, cap is {cap} "
+        f"(session_summary_rows_bounded)"
+    )
+    # and it is a real reduction, not a rounding difference
+    assert bounded < unbounded / 2
 
 
 def test_state_survives_a_restart(env):

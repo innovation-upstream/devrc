@@ -29,10 +29,16 @@ transcript takes exactly one of these branches:
 
   unchanged   signature == the one we last emitted for  -> skip (nothing new)
   settled     changed AND idle >= CLAUDE_SUMMARY_SETTLE_MINUTES (default 20)
-              -> EMIT. This is the authoritative final rollup for the session.
-              A session that is later RESUMED (`claude --resume` is real here)
-              changes signature again, settles again, and re-emits — so the
-              latest row is always the complete rollup.
+              AND (never emitted, or last emit older than
+              CLAUDE_SUMMARY_INTERIM_HOURS) -> EMIT. This is the authoritative
+              final rollup for the session. A session that is later RESUMED
+              (`claude --resume` is real here) changes signature again, settles
+              again, and re-emits — so the latest row is always the complete
+              rollup.
+  settled-recently
+              settled, but emitted within CLAUDE_SUMMARY_INTERIM_HOURS -> skip.
+              The new signature is deliberately NOT recorded, so the session
+              still owes a rollup and emits on the first tick past the window.
   first-seen  changed, still active, never emitted before -> EMIT once, so an
               in-flight session (or one interrupted by a reboot) is present in
               the report instead of missing entirely.
@@ -40,6 +46,20 @@ transcript takes exactly one of these branches:
               CLAUDE_SUMMARY_INTERIM_HOURS (default 4) -> EMIT a bounded
               interim rollup (backstop for very long sessions).
   active      changed, still active, emitted recently -> skip.
+
+🔴 `settled-recently` was added 2026-08-02 and it closes a REAL, MEASURED
+amplification. The settled branch used to emit unconditionally, without
+consulting `emitted_at` — so an ACTIVE session was bounded to one emit per
+interim window while a session idling BETWEEN BURSTS was not bounded at all: one
+full rollup per burst, forever. That is the ordinary `claude --resume` shape, so
+the bound was missing from exactly the common case. Measured over the 30 days to
+2026-08-02: 31,815 rows across 482 sessions — median 2/session, but p90 209, max
+572, mean 66 — against validation/invariants.py's `session_summary_rows_bounded`,
+which flags >24 rows/session/24h. The fix is to make the settled branch consult
+the same `emitted_at` with the same interval, so there is ONE knob rather than
+two that can disagree; worst case becomes 1 + 24h/interim ≈ 7 rows/session/24h.
+No backfill: reads dedupe with argMax(…, ingested_at) and the existing rows age
+out of the invariant's trailing window.
 
 WHY: the previous rule was "re-emit whenever the signature changed", i.e. once
 per 5-min tick for the whole life of a live session. Measured on 2026-07-28 that
@@ -537,17 +557,65 @@ def emit_decision(prev: dict | None, sig: str, mtime: float, now: float,
                   settle_s: float, interim_s: float) -> tuple[bool, str]:
     """(should_emit, reason) for one transcript. See the module docstring.
 
-    Reasons: unchanged | settled | first-seen | interim | active.
+    Reasons: unchanged | settled | settled-recently | first-seen | interim |
+    active.
     """
     if prev and prev.get("sig") == sig:
         return (False, "unchanged")
     idle = now - mtime
-    if settle_s <= 0 or idle >= settle_s:
+    last = prev.get("emitted_at") if prev else None
+    known_last = isinstance(last, (int, float))
+    if settle_s <= 0:
+        # Documented escape hatch, unchanged: 0 disables the settle gate
+        # ENTIRELY and restores the pre-emit-on-settle "every change emits"
+        # behaviour. Rate-limiting it would make the knob a no-op, so the
+        # bounding below deliberately does not apply here.
         return (True, "settled")
+    if idle >= settle_s:
+        # 🔴 The settled branch is rate-limited on `emitted_at`, exactly as the
+        # interim branch below is. It was NOT, until 2026-08-02, and that
+        # asymmetry is the whole bug:
+        #
+        #   an ACTIVE session was bounded to one emit per `interim_s`, while a
+        #   session that went idle BETWEEN BURSTS was unbounded — every burst
+        #   followed by >= settle_s of quiet re-entered this branch and shipped
+        #   a fresh full rollup. That is the ordinary `claude --resume` shape,
+        #   so the bound was missing from precisely the common case. Measured
+        #   over 30 days: 31,815 rows across 482 sessions, median 2/session but
+        #   p90 209, max 572, mean 66 — against a documented invariant
+        #   (`session_summary_rows_bounded`, validation/invariants.py) that
+        #   flags >24 rows/session/24h.
+        #
+        # The fix is the missing consult, not a clamp on a counter: the same
+        # `emitted_at` the interim branch already reads, with the same interval,
+        # so there is ONE knob (CLAUDE_SUMMARY_INTERIM_HOURS) rather than two
+        # that can disagree. Worst case per session per 24h becomes
+        # 1 first-seen + 24h/interim_s ≈ 7 at the 4h default, well under the
+        # invariant's cap of 24.
+        #
+        # 🔴 The legitimate case is deliberately PRESERVED, two ways:
+        #   * a session with no known last-emit (never emitted, or a v1/corrupt
+        #     state entry) ALWAYS emits — so a session's first rollup is never
+        #     deferred, and `session_summary_no_orphans` cannot start failing;
+        #   * a session that settles, is resumed DAYS later and settles again
+        #     has an `emitted_at` far older than the interval, so it emits
+        #     again. That is the case the rate limit must not swallow, and it is
+        #     pinned by test_decision_settled_reemits_after_a_long_gap and
+        #     test_resumed_after_settle_reemits_the_final_rollup.
+        #
+        # Cost, stated honestly: a deferred settle means the newest row can lag
+        # the transcript's final content by up to `interim_s`. Nothing is lost —
+        # the deferral does NOT record the new signature (see run()), so the
+        # session still owes a rollup and emits on the first tick past the
+        # window, and reads take argMax(…, ingested_at) anyway.
+        if not known_last:
+            return (True, "settled")
+        if interim_s <= 0 or (now - last) >= interim_s:
+            return (True, "settled")
+        return (False, "settled-recently")
     if not prev:
         return (True, "first-seen")
-    last = prev.get("emitted_at")
-    if not isinstance(last, (int, float)):
+    if not known_last:
         # Unknown last-emit (v1 state / corrupt entry): emit once to establish it.
         return (True, "interim")
     if interim_s > 0 and (now - last) >= interim_s:
