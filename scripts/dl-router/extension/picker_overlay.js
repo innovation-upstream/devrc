@@ -40,8 +40,8 @@
   var HOST_STYLE = [
     "all: initial !important",
     "position: fixed !important",
-    "top: 16px !important",
-    "right: 16px !important",
+    "top: 100px !important",
+    "left: 16px !important",
     "width: " + WIDTH + "px !important",
     "height: " + HEIGHT + "px !important",
     // Above anything a page is likely to have parked at 2147483647-ish; this
