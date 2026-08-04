@@ -673,12 +673,24 @@ test("--reset STOPS re-application (and reports what it stopped)", async () => {
   assert.ok(sw.events.includes("captureVisibleTab"));
 });
 
-test("--reset on a tab that was never emulated is a clean no-op", async () => {
+// --reset sends the restore pair UNCONDITIONALLY — including when this service
+// worker holds no state for the tab. That is deliberate and it is the case that
+// matters most: an evicted MV3 worker forgets `emulationState`, but the tab is
+// still physically stuck at the emulated size (the widget resize survives the
+// detach — #319). Gating the restore on `wasEmulating` would leave exactly the
+// orphaned tab unrescuable, which is the situation the operator actually hits.
+// Measured safe: arm-then-clear on a never-emulated tab left it at its true width
+// (2/2 runs, scratch Brave 2026-08-04) — see EMULATION_RESET_CDP_STEPS.
+test("--reset on a tab that was never emulated still sends the restore pair", async () => {
   fresh();
   const out = await OPS.emulate({ tabId: TAB_A, reset: true });
   assert.equal(out.reset, true);
-  assert.equal(out.wasEmulating, null);
-  assert.deepEqual(sw.cdp, [], "reset touches no CDP at all");
+  assert.equal(out.wasEmulating, null, "nothing was stored, and it says so");
+  assert.deepEqual(methods(),
+    ["Emulation.setDeviceMetricsOverride", "Emulation.clearDeviceMetricsOverride"],
+    "the restore is unconditional: a worker that forgot the state must still be " +
+    "able to un-stick the tab");
+  assert.deepEqual(out.cleared, methods());
 });
 
 test("`close` clears the tab's emulation state", async () => {

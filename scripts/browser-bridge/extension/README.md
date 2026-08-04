@@ -319,6 +319,37 @@ enough (never `pkill` Brave — tabs are not restorable).
 > because "is the new build loaded?" was once unfalsifiable, which cost three
 > full Brave restarts in a single session.)
 
+> **0.8.1 — `emulate --reset` actually UNDOES the viewport (#319).** The reset
+> branch was a Map delete that sent nothing; it now attaches one CDP session and
+> sends `Emulation.setDeviceMetricsOverride{width:0,height:0,deviceScaleFactor:0,
+> mobile:false}` followed by `Emulation.clearDeviceMetricsOverride`, and reports
+> them as `cleared` + `restored`. **Both steps are required**: measured
+> 2026-08-04 in a throwaway Brave 147.0.7727.56 under Xvfb over raw CDP, a bare
+> `clearDeviceMetricsOverride` sent from a session that did not itself set an
+> override is a **no-op that reports success** — which is why PR #320 changed
+> nothing. Arming the session first makes the clear resize the widget back.
+> That also explains the dpr-vs-width asymmetry #319 could not: dpr/touch/UA/
+> media/timezone are renderer-side session state that dies at detach, while the
+> size additionally resizes the browser-side render widget.
+>
+> New response fields are the discriminator — an older build cannot emit them:
+>
+> ```bash
+> browser open https://example.com && browser emulate iphone-15
+> browser emulate --reset          # read `.cleared` / `.restored`
+>   # ≤0.8.0 → {"reset":true,"wasEmulating":{…},"note":"…NOTHING WAS SENT…"}   (no `cleared`)
+>   # 0.8.1  → {"reset":true,"restored":true,
+>   #           "cleared":["Emulation.setDeviceMetricsOverride",
+>   #                      "Emulation.clearDeviceMetricsOverride"], …}
+> browser js --wake 'innerWidth'   # ← the REAL check: back to the desktop width
+> ```
+>
+> `--reset --recreate` is unchanged and still needed: it needs no CDP, and it is
+> the only remedy for an un-upgraded build or a tab orphaned by a `SIGKILL`'d
+> agent. ⚠ Verified in a scratch Brave and in unit tests against a browser model
+> calibrated to the measurements above — **not** against the operator's live
+> profile.
+
 > **0.8.0 — the BUILD MARKER: `ping` gains `buildMarker`, and `extension_stale`
 > is computed from it instead of from the version (#324).** New generated file
 > `build_id.js` exporting a `BUILD_MARKER` literal, imported by

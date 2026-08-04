@@ -230,7 +230,7 @@ has not been exercised against a third-party authenticated API beyond that.)
 | `screenshot` | **CDP `Page.captureScreenshot`** (png) — works on a BACKGROUND/occluded tab + each profile's own tab; a foreground tab uses the cheap `captureVisibleTab` fast path. `fullpage` grabs the whole document. The CLI decodes `dataUrl` to a **`.png` on disk** and prints a path, never the base64 (see below) | `{url,dataUrl,via}` |
 | `open`       | `chrome.tabs.create({url,active:false})` — **background/HIDDEN** (`visibilityState:"hidden"` → Chromium throttles it → a heavy SPA won't render → reads return a shell). The escape hatch is **`browser wake`** (or a `--wake` read): it un-throttles the tab and moves NO focus. Reads self-announce this via `hidden`/`note` | `{tabId,url}` |
 | `close`      | `chrome.tabs.remove(tabId)`                               | `{closed:tabId}` |
-| `emulate`    | **device emulation** — CDP `Emulation.setDeviceMetricsOverride` / `setTouchEmulationEnabled` / `setUserAgentOverride` (**+`userAgentMetadata`**) / `setEmulatedMedia` / `setTimezoneOverride` / `setGeolocationOverride`, from a named preset or raw params. **Sticky per tab** (re-applied inside every later CDP session) and **owned-tab-only**. `--reset` only stops re-applying — it sends NOTHING to CDP — and 🔴 **does NOT restore the viewport size** (#319); `--reset --recreate` replaces the tab (new tab id) and is the only known remedy | `{tabId,url,emulation,applied,note}` or `{tabId,url,reset,wasEmulating,note}` |
+| `emulate`    | **device emulation** — CDP `Emulation.setDeviceMetricsOverride` / `setTouchEmulationEnabled` / `setUserAgentOverride` (**+`userAgentMetadata`**) / `setEmulatedMedia` / `setTimezoneOverride` / `setGeolocationOverride`, from a named preset or raw params. **Sticky per tab** (re-applied inside every later CDP session) and **owned-tab-only**. `--reset` stops re-applying **and restores the viewport** — it sends an arm-then-clear pair, because a bare `clearDeviceMetricsOverride` is a measured no-op (#319). `--reset --recreate` replaces the tab (new tab id) instead, and is the only remedy for a tab the extension cannot reach | `{tabId,url,emulation,applied,note}` or `{tabId,url,reset,wasEmulating,cleared,restored,note}` |
 | `frames`     | **`chrome.webNavigation.getAllFrames`** — the tab's frames INCLUDING cross-origin OUT-OF-PROCESS iframes (OOPIFs) | `{url,title,frames:[{frameId,url,parentFrameId}]}` |
 | `click`      | top frame: **CDP** `getBoundingClientRect` → `Input.dispatchMouseEvent` (trusted); `--frame`: **SYNTHETIC** click via `chrome.scripting`; `selector` required, `frame` optional | `{url,clicked,x,y,frame,trusted}` |
 | `type`       | top frame: **CDP `Input.insertText`** (trusted); `--frame`: **SYNTHETIC** input via `chrome.scripting`; `text` required, `selector`/`frame` optional | `{url,typed,frame,trusted}` |
@@ -548,11 +548,11 @@ The choke point is deliberate. Patching `screenshot` and `click` individually wo
 have fixed the two visible cases and regenerated the bug at the next CDP op anyone
 added. One rule, one place.
 
-### 🔴 `--reset` does NOT restore the viewport (#319)
+### `--reset` restores the viewport — and why it took two steps (#319)
 
-This section used to claim the opposite — that because the overrides die at detach
-"the tab is not emulated between ops", so nothing could stick. **Measured false**
-(2026-08-03, laptop, extension 0.7.2, with a fresh-tab control):
+This section has been wrong twice. It first claimed that because the overrides die
+at detach "the tab is not emulated between ops", so nothing could stick. **Measured
+false** (2026-08-03, laptop, extension 0.7.2, with a fresh-tab control):
 
 | step | `innerWidth` |
 | --- | --- |
@@ -563,28 +563,49 @@ This section used to claim the opposite — that because the overrides die at de
 
 That measurement was taken on a build whose reset really did report
 `cleared: [Emulation.clearDeviceMetricsOverride, Emulation.setTouchEmulationEnabled,
-Emulation.setUserAgentOverride]`, and the size survived them anyway. **Sending
-`clearDeviceMetricsOverride` simply does not bring the viewport back** — which is
-why the clears were not carried into the shipped build. 🔴 **On the current build
-`--reset` sends nothing at all**: it deletes the tab's stored emulation state, so
-later ops stop re-applying it. No debugger is attached and no CDP message is
-issued.
+Emulation.setUserAgentOverride]`, and the size survived them anyway. It is correct,
+and it is why PR #320 was closed. It then became the second wrong claim — that the
+size *could not* be restored and the mechanism was unknown.
 
-Everything else *does* revert on its own, measured in the same pass:
-`devicePixelRatio`, `maxTouchPoints`, `pointer: coarse`, `prefers-color-scheme`,
-`userAgent`, `timeZone` — and it reverts because **a CDP override dies when the
-debugger detaches**, not because anything cleared it. Only the viewport **size**
-is sticky. (`"ontouchstart" in window` also stays true on a document that was
-*built* emulated — that one is document-creation residue and a re-`nav` clears
-it.)
+Everything else *does* revert on its own: `devicePixelRatio`, `maxTouchPoints`,
+`pointer: coarse`, `prefers-color-scheme`, `userAgent`, `timeZone` — because **a
+CDP override dies with the debugger session that set it**, not because anything
+cleared it. Only the viewport **size** is sticky. (`"ontouchstart" in window` also
+stays true on a document that was *built* emulated — that one is document-creation
+residue and a re-`nav` clears it.)
 
-**The mechanism is not established.** The leading hypothesis is a render-widget
-resize residue — consistent with `devicePixelRatio` reverting while the width does
-not, though both come from the same CDP call — but it is a hypothesis. Do not
-restate it as a finding.
+**The mechanism, established 2026-08-04** in a throwaway Brave 147.0.7727.56 under
+Xvfb, driven over raw CDP with no extension in the loop, control tab every round:
 
-**Closing the tab is the only known remedy.** So `--reset` means "stop
-re-applying", never "undo". The workaround:
+| what was done | victim `innerWidth` | control |
+| --- | --- | --- |
+| `setDeviceMetricsOverride{393×852}` in session A, then **detach** | **394** | 1055 |
+| `clearDeviceMetricsOverride` in a **fresh** session B | **394** ← no-op | 1055 |
+| `setDeviceMetricsOverride{…}` **then** the clear, in session B | **1055** ← restored | 1055 |
+
+🔴 **`clearDeviceMetricsOverride` does nothing when the session sending it never
+set an override itself** — and it reports success either way. Every earlier attempt
+to undo this sent the clear from a fresh session, so it was a no-op that looked
+acknowledged.
+
+**That is also the dpr-vs-width asymmetry** #319 could not explain. One call, two
+destinations: dpr/touch/UA/media/timezone are renderer-side session state that dies
+at detach; the size additionally resizes the **browser-side render widget**, and
+only an explicit clear from an armed session undoes that. Nothing does it at
+detach. (Inference from the table, not from Chromium's source.)
+
+**So `--reset` now sends an arm-then-clear pair** in one session
+(`EMULATION_RESET_CDP_STEPS`) and reports `restored` + `cleared`. The arming
+override is `{width:0,height:0,deviceScaleFactor:0,mobile:false}` — measured not to
+resize anything by itself, so there is no flash to a wrong size. It fires
+**unconditionally**, even when the worker holds no state for the tab, because an
+evicted MV3 worker forgets the state while the tab stays stuck; measured safe on a
+never-emulated tab. It is **best-effort**: a refused attach yields
+`restored:false` + `restoreError`, never an exception.
+
+**`--reset --recreate` stays**, and is still the right tool twice over — it needs
+no CDP, and it is the **only** remedy for a tab the extension cannot reach (an
+un-upgraded build, or a tab orphaned by a `SIGKILL`'d agent):
 
 ```
 browser emulate --reset --recreate
@@ -596,13 +617,18 @@ to it). It refuses on a non-http(s) url and always opens the replacement *before
 closing the original, so no failure path leaves you with no tab. Plain `--reset`
 never swaps tab ids.
 
+⚠ **Not verified against the operator's live Brave.** The fix was measured in a
+throwaway instance and pinned by unit tests against a browser model calibrated to
+those measurements. The live check is in the PR for #319.
+
 The apply-then-act design is still the right shape — a held-open session would add
 a permanent debug banner on top of the same stuck viewport — but it buys strictly
 less than this section used to claim.
 
-The other cost, stated plainly: a page that re-measures the viewport *after* an op
-(a `resize` listener, a late layout pass) sees the real window until the next op
-re-applies.
+The other cost, stated plainly: a page that re-measures its *capabilities* after an
+op (a `resize` listener reading `devicePixelRatio` or `matchMedia`, a late layout
+pass) sees the desktop ones until the next op re-applies. The width it measures
+stays the emulated one, because that half is physically stuck on the tab.
 
 ### Blast radius: owned tabs only
 
@@ -638,15 +664,18 @@ desktop bundle before emulation is ever re-applied.
 ### The read path is not emulated (and says so)
 
 `text` / `html` / `eval` take the `chrome.scripting` path. Verified by execution:
-after `emulate iphone-15` they issue **zero** CDP calls and zero attaches, so the
-DOM they read is the real desktop one — `innerWidth`, `getBoundingClientRect`,
-`matchMedia` and `navigator.userAgent` all come back un-emulated.
+after `emulate iphone-15` they issue **zero** CDP calls and zero attaches, so no
+override is applied to them.
 
-This is correct-by-design (between ops the tab genuinely is not emulated, which is
-the safety property), but it is a trap: an agent screenshots a phone layout, then
-reads `text` and reasons about a desktop DOM with nothing to tell it apart. Same
-command, two answers — `js --wake 'innerWidth'` returns the emulated width because
-it routes `cdpWake` → `withCdp`; bare `js 'innerWidth'` returns the real one.
+What comes back is a **mixture**: `navigator.userAgent`, `devicePixelRatio`,
+`maxTouchPoints` and `matchMedia('(pointer: coarse)')` are the real desktop values
+(those overrides died at detach), while `innerWidth` and every
+`getBoundingClientRect` are the **emulated** ones, because the widget is physically
+that size until a reset clears it. So the read describes a page laid out at the
+phone width with desktop capability signals — a document no real device produces,
+and a trap: an agent screenshots a phone layout, then reads `text` and reasons
+about that hybrid. `js --wake 'devicePixelRatio'` returns the emulated dpr because
+it routes `cdpWake` → `withCdp`; bare `js 'devicePixelRatio'` returns the real one.
 
 So a read of a tab **that has emulation state** is annotated, in the same spirit as
 `HIDDEN_TAB_NOTE`: `{emulated:false, notEmulatedRead:true, emulationNote}` on the
@@ -685,11 +714,11 @@ by `maxTouchPoints`).
 It was excluded until #316 with the comment in `browser_tool_impl.mjs` saying
 emulation "leaves STICKY per-tab state that outlives the op … until an explicit
 `emulate --reset` or the tab is replaced", so a crashed agent would hand back a
-distorted browser. **That observation is correct** (see "🔴 `--reset` does not
-restore the viewport" above) — what was wrong was the counter-argument this section
-used to make, that overrides "die at detach" so nothing can stick. They do not all
-die at detach: the viewport size survives the detach, the `--reset` clears and a
-re-navigation, and closing the tab is the only known remedy.
+distorted browser. **That observation was correct** — what was wrong was the
+counter-argument this section used to make, that overrides "die at detach" so
+nothing can stick. They do not all die at detach: the viewport size survives it,
+and survives a re-navigation. Since #319 a *clean* `--reset` does repair it (see
+"`--reset` restores the viewport" above); a **crashed** agent still cannot run one.
 
 **The honest argument for shipping it default-on is ownership, not harmlessness:
 the `browser-agent` wrapper owns its tab's whole lifecycle.** It `open`s the run's
@@ -701,9 +730,11 @@ with `not_owned_tab` on any tab the calling session did not `open`. So on the ag
 path the sticky residue cannot reach one of the operator's own tabs.
 
 **The residual, stated plainly:** a `SIGKILL` bypasses the trap, and then the run's
-tab is orphaned **stuck at the emulated size**. `--reset` cannot repair it; it has
-to be closed. That is the agent's own tab rather than the operator's, but it is a
-real leak and nothing in #316 fixes it.
+tab is orphaned **stuck at the emulated size** with nothing left running that will
+issue a reset. A later `browser emulate --reset` against that tab id would repair
+it, but nothing does so automatically; `--reset --recreate` or a close is the
+practical fix. That is the agent's own tab rather than the operator's, but it is a
+real leak and nothing in #316 or #319 removes it.
 
 The other residual is the transient "an extension is debugging this browser" banner
 from the CDP attach — which `eval`, `screenshot` and `wake` already raise. Like

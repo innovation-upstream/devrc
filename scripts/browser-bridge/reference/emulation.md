@@ -19,9 +19,9 @@ browser emulate iphone-15            # ← replies documentPredatesEmulation: tr
 browser nav https://example.com      # ← … so RE-NAV: the document is rebuilt emulated
 browser screenshot                   # ← captured at 393×852 @3x, as an iPhone
 browser click '#menu'                # ← dispatched as a TOUCH tap
-browser emulate --reset --recreate   # ← the viewport does NOT come back on
-                                     #   --reset alone (#319); --recreate
-                                     #   replaces the tab. THE TAB ID CHANGES.
+browser emulate --reset              # ← undoes it, viewport included (0.8.1, #319)
+                                     #   --reset --recreate replaces the tab
+                                     #   instead; THE TAB ID CHANGES.
 ```
 
 `browser emulate --list` prints the preset names without touching the browser.
@@ -109,7 +109,7 @@ document that was not built under this emulation. See "The
 
 ---
 
-## Why it is sticky — and 🔴 why `--reset` does NOT undo it (#319)
+## Why it is sticky — and how `--reset` undoes it (#319)
 
 CDP emulation overrides are **session-scoped**: they die the instant the debugger
 detaches. The bridge **always** detaches (`withCdpSession`'s `finally` — that is a
@@ -132,31 +132,78 @@ crashed agent could never leave the operator's browser distorted. **Measured fal
 | after `emulate --reset` | **393** ← not restored |
 | after `--reset` **and** a re-`nav` | **393** ← still not restored |
 
-The build under test genuinely sent and reported its clears
+The build under test genuinely sent and reported a clear
 (`cleared: [Emulation.clearDeviceMetricsOverride,
 Emulation.setTouchEmulationEnabled, Emulation.setUserAgentOverride]`) and the size
-survived them. **Sending `clearDeviceMetricsOverride` does not bring the viewport
-back.** The size survives the detach, the clear and a re-navigation.
+survived it. That measurement is correct, and it is why PR #320 was closed. What
+it did **not** establish is *why* — and the reason turns out to be the fix.
 
-🔴 **The shipped build therefore sends nothing.** `emulate --reset` deletes the
-tab's stored emulation state and stops later ops re-applying it — no debugger
-attach, no CDP message, no `cleared` field. The clears were deliberately not
-carried over, because the measurement above shows they are not the remedy.
+Everything else *does* revert on its own: `devicePixelRatio`, `maxTouchPoints`,
+`pointer: coarse`, `prefers-color-scheme`, `userAgent`, `timeZone` — **because a
+CDP override dies with the debugger session that set it**, not because a clear was
+sent. **Only the viewport size is sticky.** (`'ontouchstart' in window` also stays
+true on a document that was *built* emulated — that one is document-creation
+residue, and a re-`nav` clears it.)
 
-Everything else *does* revert on its own, measured in the same pass:
-`devicePixelRatio`, `maxTouchPoints`, `pointer: coarse`, `prefers-color-scheme`,
-`userAgent`, `timeZone` — **because a CDP override dies when the debugger
-detaches**, not because a clear was sent. **Only the viewport size is sticky.**
-(`'ontouchstart' in window` also stays true on a document that was *built*
-emulated — that one is document-creation residue, and a re-`nav` clears it.)
+### The mechanism (established 2026-08-04)
 
-**The mechanism is not established.** The leading hypothesis is a render-widget
-resize residue — consistent with `devicePixelRatio` reverting while the width does
-not, though both come from the same CDP call — but that is a hypothesis, not a
-finding. Do not repeat it as fact.
+Measured against a **throwaway Brave 147.0.7727.56 under Xvfb**, driven over the
+raw DevTools websocket with no extension in the loop, with a never-emulated control
+tab read every round:
 
-**Closing the tab is the only known remedy.** So `--reset` means *"stop
-re-applying"*, never *"undo"*. The workaround is:
+| what was done | victim `innerWidth` | control |
+| --- | --- | --- |
+| `setDeviceMetricsOverride{393×852}` in session A, then **detach** | **394** | 1055 |
+| `clearDeviceMetricsOverride` in a **fresh** session B, then detach | **394** ← no-op | 1055 |
+| `setDeviceMetricsOverride{…}` **then** `clearDeviceMetricsOverride` in session B | **1055** ← restored | 1055 |
+
+🔴 **`Emulation.clearDeviceMetricsOverride` does nothing when the session sending
+it never set an override itself.** It returns success either way. Every previous
+attempt to undo this sent the clear from a fresh session — so it was a no-op, and
+the acknowledgement made it look like it had worked.
+
+**That also explains the dpr-vs-width asymmetry**, which was the open question in
+#319. The two values live in different places even though one call sets both:
+`devicePixelRatio`, touch, UA, media and timezone are **renderer-side session
+state** that dies at detach; the viewport size additionally resizes the
+**browser-side render widget**, and that resize is undone *only* by an explicit
+clear from a session that has emulation armed. Nothing does that at detach — so
+the size, and only the size, survives. (Inference from the behaviour above, not
+from reading Chromium's source. The table is the finding.)
+
+The arming params do not matter — `{393×852}`, `{800×600}`, `{1×1}` and
+`{0,0,0,false}` all made the following clear restore the true width. The shipped
+pair uses `{width:0,height:0,deviceScaleFactor:0,mobile:false}` because it was
+measured **not to resize anything on its own** (still 394 in-session after arming),
+so there is no intermediate flash to a wrong size.
+
+### What `--reset` does now (0.8.1)
+
+`emulate --reset` drops the stored state **and then** attaches one CDP session and
+sends `EMULATION_RESET_CDP_STEPS` — the arming override, then the clear. It
+reports them:
+
+```json
+{ "reset": true, "wasEmulating": {…}, "restored": true,
+  "cleared": ["Emulation.setDeviceMetricsOverride",
+              "Emulation.clearDeviceMetricsOverride"] }
+```
+
+Three properties worth knowing:
+
+* **Both steps ride one session.** Splitting them reintroduces the bug exactly.
+* **It is unconditional** — it fires even when this service worker holds no state
+  for the tab. That is the case that matters: an evicted MV3 worker forgets the
+  state while the tab stays physically stuck. Measured safe on a never-emulated
+  tab (2/2 runs left it at its true width).
+* **It is best-effort.** A closed/discarded tab or a privileged scheme makes the
+  attach fail; you get `restored: false` + `restoreError` and no exception, because
+  "stop emulating" did succeed.
+
+`--reset --recreate` **stays**, and is still the right tool twice over: it is the
+remedy that needs no CDP at all, and it is the **only** one for a tab the extension
+can no longer reach — an un-upgraded build, or a tab orphaned by a `SIGKILL`'d
+agent that never ran its reset.
 
 ```
 browser emulate --reset --recreate
@@ -167,6 +214,11 @@ the stuck one, and reports the **new tab id** (it changes — later ops route to
 It refuses on a non-http(s) url, and always opens the replacement *before* closing
 the original, so no failure path leaves you with no tab. Plain `--reset` never
 swaps tab ids.
+
+⚠ **Not verified against the operator's live Brave.** Everything above was
+measured in a throwaway instance and in unit tests against a browser model
+calibrated to those measurements. See the PR for the exact live-verification
+commands.
 
 **Consequence to plan around:** a page that re-measures the viewport *later* — on
 a `resize` listener, or well after load — sees whatever the tab's physical size now
@@ -280,17 +332,18 @@ and sends no `Sec-CH-UA` at all. That is correct emulation, not a missing field.
 **The single most important thing on this page.** Read it before you trust a read.
 
 `text`, `html` and the default `js`/`eval` go through `chrome.scripting`, which
-**never attaches the debugger** — so the emulation is never applied and they return
-the tab's **real, un-emulated DOM**. `innerWidth`, `getBoundingClientRect`,
-`matchMedia` and `navigator.userAgent` all come back **desktop**.
+**never attaches the debugger** — so the emulation is never applied. What you get
+back is a **MIXTURE**, which is worse than either pure case:
 
-That is by design for the *override* half — UA, `matchMedia`, timezone and dpr
-really do come back desktop on these reads, because nothing re-applies them. ⚠ The
-**viewport size is the exception**: it is physically stuck on the tab (see "🔴 why
-`--reset` does NOT undo it" above), so `innerWidth` on an emulated tab reads the
-emulated width even on the un-emulated path. Either way this is the trap the
-feature is most likely to spring — screenshot a phone layout, then read `text` and
-reason about a half-desktop DOM.
+| on a `text`/`html`/`js` read of an emulated tab | value |
+| --- | --- |
+| `navigator.userAgent`, `devicePixelRatio`, `maxTouchPoints`, `matchMedia('(pointer: coarse)')`, timezone | **real / desktop** — the overrides died at detach |
+| `innerWidth`, every `getBoundingClientRect` | **emulated** — the widget is physically that size (see "Why it is sticky" above) |
+
+So the page you read is laid out at the phone **width** while every capability
+signal says desktop — a document no real device would produce. This is the trap the
+feature is most likely to spring: screenshot a phone layout, then read `text` and
+reason about that hybrid. Use `--wake`.
 
 **Which reads are emulated:**
 
