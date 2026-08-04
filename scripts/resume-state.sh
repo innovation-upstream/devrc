@@ -11,8 +11,10 @@
 # degrades SILENTLY when a source is unreachable/absent rather than faking state.
 #
 # Usage: resume-state.sh [topic-slug | path/to/handoff.md]
-#   no arg      -> newest claudedocs/handoff-*.md in the repo of $PWD
-#   slug        -> claudedocs/handoff-<slug>*.md in the repo of $PWD
+#   no arg      -> newest claudedocs/handoff-*.md in the repo of $PWD,
+#                  else newest claudedocs/*HANDOFF*.md (SESSION-HANDOFF.md &c.)
+#   slug        -> claudedocs/handoff-<slug>*.md in the repo of $PWD,
+#                  else the no-arg chain above
 #   handoff path-> that file; the target repo is derived FROM the path
 #
 # v1 workload/alerts target datapacket (prod-kubeconfig at <repo>/prod-kubeconfig);
@@ -42,10 +44,79 @@ extract_prs(){
 # branch tokens: the conventional prefixes only (zach/ feat/ fix/ docs/ chore/),
 # starting at a word boundary so "notafix/x" doesn't match; trailing sentence
 # punctuation is stripped.
+#
+# 🔴 THESE PREFIXES ARE ALSO ORDINARY DIRECTORY NAMES, so a handoff that merely
+# QUOTES A PATH used to mint a phantom branch — and the branch loop then printed
+# "referenced by handoff no longer exists (merged & pruned?)", i.e. a fabricated
+# fact, which is worse than the silence it replaced. Both shapes were measured
+# live, one in each repo the SESSION-HANDOFF fallback newly reaches:
+#
+#   civitai-manager  `docs/configuration.md`            -> a real 15 KB FILE
+#   naida-ai         /home/zach/workspace/scratch/…     -> yielded zach/workspace/…
+#
+# Two string filters, and one repo-aware check in the branch loop below:
+#
+#  1. The leading boundary excludes `/`. `\b` matched after a slash, so ANY
+#     absolute path containing /zach/ or /docs/ produced a token. The class is
+#     otherwise exactly \b's: `.` and `-` still delimit, so `my-fix/x` matches
+#     as before and `notafix/x` still does not. `/` is the only change.
+#  2. A trailing FILE EXTENSION disqualifies the token — `\.[A-Za-z]{1,6}$`,
+#     alphabetic only, so `.md`/`.json`/`.sh`/`.tsx` drop while a version-ish
+#     suffix like `fix/v1.2` or `fix/thing.v2` survives.
+#
+# Failure directions are asymmetric and this trades in the safe one: dropping a
+# real branch costs one drift check silently, while inventing one puts a false
+# statement in front of someone deciding what to do next.
+#
+# 🔴 …BUT AN OMISSION IS NOT FREE EITHER, AND FILTER 1 OVERSHOT. Excluding `/`
+# also killed every reference that legitimately CARRIES a slash-bearing prefix —
+# `origin/fix/x`, `upstream/feat/x`, `refs/heads/fix/x`, and GitHub `/tree/`
+# URLs. Measured across 211 real handoff docs: one live casualty,
+# `origin/zach/engaged-models-client-store` in datapacket-talos, which is the
+# ONLY form that branch appears in and IS genuinely gone — so the old code's
+# DRIFT line was right and the new code was silently mute. In a go/no-go tool
+# that is the same disease as the fabrication, just the other polarity: it reads
+# as "no drift".
+#
+# So STRIP the ref-ish prefix first, then match. Each stripped form is a strong
+# POSITIVE signal that what follows is a ref, which is exactly what a bare
+# filesystem path lacks — `/home/zach/workspace/…` still yields nothing.
+#
+# ⚠ `/compare/` is deliberately NOT stripped, though an earlier revision did.
+# It was redundant (a compare URL's `main...feat/x` already matches, because the
+# `.` satisfies the boundary) AND unpinned (deleting it left all 55 tests
+# green) AND strictly worse on a compare whose LEFT side carries a slash:
+# stripping turned `…/compare/zach/a...zach/b` into the junk token
+# `zach/a...zach/b`, where not stripping yields `zach/b` — the head of the
+# compare, which is the ref a reader means. Untested defensive code that makes
+# one real case worse is not defence.
+#
+# ⚠ The `origin|upstream` rule's leading bound is LOAD-BEARING, but not for the
+# case you would guess. `/home/zach/repos/origin/fix/x` is NOT the reason:
+# strip `origin/` there and `fix` is still preceded by `/`, which the grep
+# boundary rejects anyway — both spellings yield nothing. The bound earns its
+# place on a remote-like segment glued to a WORD inside a path. Measured with
+# the bound loosened to `s#(origin|upstream)/##g`:
+#
+#   /home/zach/repos/origin/fix/x  -> []        (identical — cannot discriminate)
+#   /var/log/my-origin/fix/x       -> [fix/x]   <- FABRICATED out of a path
+#   .origin/fix/x                  -> [fix/x]
+#
+# Accepted cost: a genuinely remote-qualified `my-origin/fix/x` yields nothing.
+# That is an omission, and fabrication is the worse direction, so the bound
+# stays. (An earlier revision of this comment named the `/origin/` case, which
+# measurement showed proves nothing.)
 extract_branches(){
   printf '%s\n' "$1" \
-    | grep -oE '\b(zach|feat|fix|docs|chore)/[A-Za-z0-9._/-]+' 2>/dev/null \
-    | sed -E 's/[.,;:)]+$//' | sort -u
+    | sed -E '
+        s#https?://[^[:space:]]*/tree/# #g
+        s#refs/(heads|remotes)/# #g
+        s#(^|[^A-Za-z0-9._/-])(origin|upstream)/#\1#g
+      ' \
+    | grep -oE '(^|[^A-Za-z0-9_/])(zach|feat|fix|docs|chore)/[A-Za-z0-9._/-]+' 2>/dev/null \
+    | sed -E 's/^[^A-Za-z]+//; s/[.,;:)]+$//' \
+    | grep -vE '\.[A-Za-z]{1,6}$' \
+    | sort -u
 }
 
 # candidate workload tokens: [a-z][a-z0-9-]{3,} (len>=4). Deliberately loose —
@@ -82,6 +153,31 @@ resolve(){
       HANDOFF=$(ls -t "$REPO"/claudedocs/handoff-"$arg"*.md 2>/dev/null | head -1)
     fi
     [ -z "$HANDOFF" ] && HANDOFF=$(ls -t "$REPO"/claudedocs/handoff-*.md 2>/dev/null | head -1)
+    # FALLBACK for repos that name their handoff in caps — civitai-manager uses
+    # claudedocs/SESSION-HANDOFF.md, which the lowercase glob above misses, and
+    # a missed handoff is not a quiet failure: the DRIFT block below used to
+    # print "(none detected — live state matches the handoff's claims)" after
+    # reconciling against NOTHING. A false green.
+    #
+    # Reach, deliberately narrow: basenames under claudedocs/ containing the
+    # literal, UPPERCASE substring HANDOFF and ending .md, i.e.
+    # SESSION-HANDOFF.md, HANDOFF.md, HANDOFF-2026-08-04.md. claudedocs/ in
+    # these repos is mostly design/audit docs (*-DESIGN.md,
+    # SECURITY-AUDIT-*.md, LAUNCH-*.md, *-RESEARCH.md) and none of those
+    # contains HANDOFF, so none can resolve as one.
+    #
+    # ⚠ THE ONE THING PROTECTING THE LOWERCASE FAMILY IS THAT THIS IS TRIED
+    # LAST. An earlier version of this comment also credited bash's
+    # case-sensitive globbing — that reason is inert: this line is only ever
+    # reached when the lowercase globs found NOTHING, so there is nothing left
+    # to poach whatever the case rules are. If you reorder these three lines,
+    # case-sensitivity will not save you.
+    #
+    # The topic slug gets no fallback of its own on purpose: an unmatched slug
+    # already falls through this chain, so `resume-state.sh session` in a repo
+    # whose only handoff is SESSION-HANDOFF.md still finds it, and there is
+    # nothing for a slug to disambiguate when the family holds one file.
+    [ -z "$HANDOFF" ] && HANDOFF=$(ls -t "$REPO"/claudedocs/*HANDOFF*.md 2>/dev/null | head -1)
   fi
   local url
   url=$(git -C "$REPO" remote get-url origin 2>/dev/null) \
@@ -91,7 +187,9 @@ resolve(){
 # ---------------------------------------------------------------------------
 # GIT / PR — always runs; the rock-solid core of the digest.
 # ---------------------------------------------------------------------------
-DRIFT=()   # lines where live state contradicts the handoff
+DRIFT=()         # lines where live state contradicts the handoff
+UNRECONCILED=()  # sources that did NOT answer — an empty DRIFT means less when
+                 # this is non-empty, and the digest has to say so
 
 git_pr_block(){
   echo "GIT/PR"
@@ -118,11 +216,28 @@ git_pr_block(){
   local text; text=$(cat "$HANDOFF")
 
   # --- PRs: reconcile every referenced PR against gh; drop 404s (false positives) ---
+  #
+  # 🔴 COUNT WHAT ACTUALLY ANSWERED. `|| continue` swallows every gh failure
+  # identically — offline, unauthenticated, rate-limited, no access, or a prose
+  # ref that is not a real PR — and prints NOTHING. Without these counters a run
+  # where gh answered for zero of five referenced PRs was indistinguishable from
+  # a run that reconciled them all and found nothing, and DRIFT then printed
+  # "(none detected — live state matches the handoff's claims)": the same false
+  # green, one layer up from the missing-handoff case.
+  #
+  # We deliberately do NOT try to attribute the cause. gh returns non-zero for
+  # a genuine 404 and for an auth/network failure alike, so any classifier here
+  # would be guessing; the honest report is the RATIO plus the list of causes it
+  # could be. A partial answer is reported too — otherwise one unreachable PR
+  # hides behind four that worked.
+  local prs; prs=$(extract_prs "$text")
   if have gh && [ -n "$SLUG" ]; then
-    local pr j state merged ci
-    for pr in $(extract_prs "$text"); do
+    local pr j state merged ci n_try=0 n_ok=0
+    for pr in $prs; do
+      n_try=$((n_try+1))
       j=$(gh pr view "$pr" -R "$SLUG" --json state,mergeable,mergedAt,statusCheckRollup 2>/dev/null) || continue
       [ -z "$j" ] && continue                         # 404 / not a real PR -> silently drop
+      n_ok=$((n_ok+1))
       state=$(printf '%s' "$j" | jq -r '.state')
       ci=$(printf '%s' "$j" | jq -r '[.statusCheckRollup[]?.conclusion]
              | if any(.=="FAILURE" or .=="ERROR") then "red"
@@ -137,17 +252,41 @@ git_pr_block(){
       [ "$state" = CLOSED ] && DRIFT+=("PR #$pr CLOSED without merge (was the handoff plan abandoned?)")
       [ "$state" = OPEN ] && [ "$ci" = red ] && DRIFT+=("PR #$pr OPEN with RED ci")
     done
+    if [ "$n_try" -gt 0 ] && [ "$n_ok" -eq 0 ]; then
+      echo "  (gh answered for 0 of $n_try referenced PR(s))"
+      UNRECONCILED+=("gh answered for 0 of $n_try referenced PR(s) — offline, unauthenticated, no access, or none is a real PR")
+    elif [ "$n_ok" -lt "$n_try" ]; then
+      UNRECONCILED+=("gh answered for $n_ok of $n_try referenced PR(s) — the rest were not reconciled")
+    fi
   else
     echo "  (gh unavailable or no remote — PR reconciliation skipped)"
+    # Only a GAP if the handoff actually referenced PRs. A handoff naming none
+    # has nothing for gh to answer, so the absence of gh costs no coverage and
+    # must not downgrade an otherwise honest clean result.
+    if [ -n "$prs" ]; then
+      UNRECONCILED+=("gh unavailable or no remote — $(printf '%s\n' "$prs" | grep -c .) referenced PR(s) were never checked")
+    fi
   fi
 
   # --- branches: does the handoff's named branch still exist / is it merged? ---
   local b tip
   for b in $(extract_branches "$text"); do
+    # ORDER IS DELIBERATE: being a real BRANCH wins over being a real PATH.
+    # The tracked-path probe is the repo-aware half of the anti-fabrication
+    # filter documented on extract_branches — it catches the extensionless
+    # cases the string filters cannot see (a quoted `docs/architecture`
+    # directory, say). But it used to run FIRST, which meant a token that was
+    # both a live branch AND a tracked path got silently dropped. No such
+    # collision exists across 2893 real branches today, so this reorder loses
+    # nothing measurable; it just removes a latent wrong-drop, and the
+    # anti-fabrication guarantee is unchanged because a token still has to fail
+    # BOTH branch lookups before the path probe can rescue it from GONE.
     if git -C "$d" rev-parse --verify -q "$b" >/dev/null 2>&1; then
       tip=local
     elif git -C "$d" rev-parse --verify -q "origin/$b" >/dev/null 2>&1; then
       tip="origin/$b"
+    elif git -C "$d" cat-file -e "HEAD:$b" 2>/dev/null; then
+      continue                                      # a tracked PATH, not a branch
     else
       echo "  branch $b: GONE (deleted or never local)"
       DRIFT+=("branch $b referenced by handoff no longer exists (merged & pruned?)")
@@ -245,8 +384,23 @@ alerts_block(){
   kill "$pf" 2>/dev/null; wait "$pf" 2>/dev/null
   if [ -z "$out" ]; then echo "  (alertmanager unreachable — skipped)"; else echo "$out"; fi
   # feed real criticals into DRIFT
+  #
+  # ⚠ NOTHING IN THE TEST SUITE REACHES THIS BLOCK. The hermetic fixtures carry
+  # no prod-kubeconfig, so alerts_block always returns at the `WL_NS` guard;
+  # inverting the CRITICAL test below survives all 56 tests. Pre-existing gap,
+  # recorded so the suite's green is not read as covering it — the change here
+  # is hygiene, verified by reading, not by a guard.
+  #
+  # A full `if`, not `[[ … ]] && DRIFT+=(…)`. The `&&` form is the same class of
+  # bug that made `main` exit 1 when it found drift with nothing unreconciled:
+  # a false test leaves the compound returning 1, and here that is the last
+  # statement of the LOOP and so of the function. It is harmless TODAY only
+  # because alerts_block is not the last thing `main` runs — i.e. it is one
+  # reordering away from being a bug, which is not a property worth relying on.
   while read -r line; do
-    [[ "$line" == *"***"* ]] && DRIFT+=("firing CRITICAL in $WL_NS:${line%%  \*\*\*}")
+    if [[ "$line" == *"***"* ]]; then
+      DRIFT+=("firing CRITICAL in $WL_NS:${line%%  \*\*\*}")
+    fi
   done <<<"$out"
 }
 
@@ -261,6 +415,29 @@ main(){
   echo "DRIFT"
   if [ "${#DRIFT[@]}" -gt 0 ]; then
     printf '  - %s\n' "${DRIFT[@]}"
+    # Print gaps ALONGSIDE findings too: a source that never answered is easy to
+    # miss when real drift is on screen, and "here are 3 findings" reads as a
+    # complete list unless the incompleteness is stated next to it.
+    #
+    # ⚠ A full `if` block, NOT `[ … ] && printf`. This is the last statement of
+    # the branch, so a false test would make `main` — and the script — exit 1
+    # on every run that found drift and had nothing unreconciled. Caught by
+    # test_a_genuinely_missing_branch_is_still_reported, which asserts rc 0.
+    if [ "${#UNRECONCILED[@]}" -gt 0 ]; then
+      printf '  ! %s\n' "${UNRECONCILED[@]}"
+    fi
+  elif [ -z "$HANDOFF" ]; then
+    # No handoff resolved => nothing was reconciled. Saying "live state matches
+    # the handoff's claims" here is a LIE, and the reassuring shape of it is the
+    # actual harm: a caller reads it as a clean bill of health for an initiative
+    # whose doc was never loaded. Name the absence instead.
+    echo "  (no handoff loaded — nothing to reconcile; this is NOT a clean bill of health)"
+  elif [ "${#UNRECONCILED[@]}" -gt 0 ]; then
+    # A handoff loaded and nothing contradicted it — but a source went
+    # unanswered, so "no drift" is not a finding about live state, it is a
+    # finding about the part of live state we managed to see.
+    echo "  (nothing detected, but a source did not answer — NOT a clean bill of health)"
+    printf '  ! %s\n' "${UNRECONCILED[@]}"
   else
     echo "  (none detected — live state matches the handoff's claims)"
   fi
