@@ -141,7 +141,22 @@ def _git_env(repo):
 
 
 def run_resume(repo, stub_bin, *args, cwd=None):
-    """Run resume-state.sh with `repo` as cwd; return its stdout."""
+    """Run resume-state.sh with `repo` as cwd; return its stdout.
+
+    🔴 `env=env` is LOAD-BEARING and was MISSING when this suite first shipped.
+    Without it the subject inherits os.environ: the stub PATH never applied, so
+    the script would reach the REAL gh/kubectl/curl, and STUB_LOG was unset so
+    nothing could ever be logged. test_no_network_tool_is_ever_invoked was
+    therefore asserting a STRUCTURAL zero — a counter wired to nothing, which is
+    the exact failure its positive control was added to prevent. The control
+    execs the stub DIRECTLY with env=env, a path the subject never took, so it
+    validated the stub rather than the tripwire.
+
+    Proven, not reasoned: injecting a `gh` call into resolve() left the tripwire
+    GREEN before this fix and RED after (log shows one probe per run_resume).
+    This also restores the GIT_CONFIG_GLOBAL/SYSTEM isolation to the script's
+    own git calls, which likewise never reached them.
+    """
     d, log = stub_bin
     env = _git_env(repo)
     env["PATH"] = f"{d}{os.pathsep}{env['PATH']}"
@@ -152,6 +167,7 @@ def run_resume(repo, stub_bin, *args, cwd=None):
         capture_output=True,
         text=True,
         timeout=30,
+        env=env,
     )
     assert out.returncode == 0, f"script failed rc={out.returncode}\n{out.stderr}"
     return out.stdout
