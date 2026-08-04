@@ -80,7 +80,7 @@ design when two profiles were connected).
   `~/.local/share/browser-bridge-ext/`, falling back to the repo copy). It answers
   "am I on the laptop or the workbench, and which profile?" in one shot (both
   hosts are hostname `nixos`).
-  **Explicit staleness verdict — computed from the BUILD MARKER (#324).** Each
+  **Explicit staleness verdict — an ALL-CLEAR comes from the BUILD MARKER (#324).** Each
   instance carries `extension_version` (loaded), `extension_version_expected`,
   `extension_build`, `extension_build_expected`, and **`extension_stale`**:
   `true` (this profile is running code that is not the deployed code → Remove +
@@ -88,10 +88,10 @@ design when two profiles were connected).
   The bridge carries `extension_build_current` alongside
   `extension_version_current`.
 
-  🔴 The verdict is **not** a version comparison, and cannot be. `extension_version`
-  is `chrome.runtime.getManifest().version` — read off the on-disk manifest at
-  call time — and `extension_id` is derived from the load PATH, so **both describe
-  the DIRECTORY, not the code that is executing**. MEASURED 2026-08-04: two Brave
+  🔴 An all-clear is **not** a version comparison, and cannot be. `extension_version`
+  is `chrome.runtime.getManifest().version` — it describes the manifest of the
+  extension the worker LOADED — and `extension_id` is derived from the load PATH,
+  so **neither describes the code that is executing**. MEASURED 2026-08-04: two Brave
   profiles loading the SAME directory reported an identical id, an identical
   `0.7.3` and `extension_stale: false`, while one ran `main` and the other an
   unmerged 0.7.2 build whose source existed on no disk. `extension_build` is a
@@ -99,10 +99,14 @@ design when two profiles were connected).
   so it is frozen into the loaded module graph and travels with the code — a stale
   worker reports the stale marker by construction.
 
-  🔴 **It FAILS CLOSED.** A marker missing on *either* side — an extension build
-  predating #324, or an unreadable/undeployed source tree — yields `null`, never
-  `false`. `false` means verified-current and nothing else; `null` is never
-  "fine". Staleness is also **per profile**: one can be current while another is
+  🔴 **It FAILS CLOSED — asymmetrically.** `false` means two markers present and
+  identical, and nothing else can produce it: a marker missing on *either* side —
+  an extension build predating #324, or an unreadable/undeployed source tree —
+  never yields `false`. It yields `null` *unless* both versions are known and
+  DISAGREE, which yields `true` — a mismatch is positive proof that the loaded
+  code is not the deployed code, so a missing marker must not discard it. Only
+  `true` is ever reachable from versions alone; `null` is never "fine".
+  Staleness is also **per profile**: one can be current while another is
   not, at the same instant, from one directory.
   ⚠ A marker still cannot see a change you made and never deployed, and it says
   nothing about WHICH DIRECTORY the build came from — for that, read
@@ -1470,8 +1474,10 @@ poll header; `null` until a build that reports it), its **`extension_id`** (from
 `chrome.runtime.id`, i.e. WHICH DIRECTORY was loaded), its **`extension_build`**
 (from `X-Bridge-Ext-Build` — the BUILD MARKER of the code actually EXECUTING,
 `null` on a build predating #324), both `_expected` values, and the explicit
-**`extension_stale`** verdict (`true`/`false`/`null`=undecidable), which is
-computed from the MARKER and **fails closed** to `null` when either side lacks one.
+**`extension_stale`** verdict (`true`/`false`/`null`=undecidable): `false`
+requires two present, identical MARKERS and nothing else, so a marker missing on
+either side **fails closed** — to `null`, except that two known but DISAGREEING
+versions still decide `true`.
 `extension_version_current` is the manifest the server expects Brave to have loaded
 and `extension_build_current` the marker in the `build_id.js` beside it:
 the deployed `~/.local/share/browser-bridge-ext/` copy, else the repo one.

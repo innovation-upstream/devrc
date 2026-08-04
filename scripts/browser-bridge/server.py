@@ -391,9 +391,10 @@ HDR_EXT_ID = "X-Bridge-Ext-Id"
 # The BUILD MARKER of the code the instance is actually EXECUTING (#324) — a
 # generated literal in extension/build_id.js that the service worker IMPORTS,
 # so it is frozen into the loaded module graph and travels with the code. This
-# is the field `extension_stale` is computed from; the version is a hint only.
-# Absent from a build that predates the marker → the verdict is null, never
-# false (see annotate_staleness).
+# is the only field an ALL-CLEAR can be computed from; the version can never
+# certify code as current. Absent from a build that predates the marker → the
+# verdict is NEVER false; it is null unless the two versions are both known and
+# DISAGREE, which decides true on its own (see annotate_staleness).
 HDR_EXT_BUILD = "X-Bridge-Ext-Build"
 
 # Server-side bounds on EVERY extension-supplied /poll string. protocol.js
@@ -2210,11 +2211,13 @@ def make_handler(registry: Registry, token: str, cmd_timeout: float,
                     "extension_version_current": expected,
                     # The BUILD MARKER the server expects the running code to
                     # carry, read from the deployed extension/build_id.js (#324).
-                    # This is what each instance's `extension_stale` is computed
-                    # against — the version above is a hint only, because it (and
-                    # `extension_id`) describe the load DIRECTORY rather than the
-                    # executing code. null here → every verdict is null, which is
-                    # the honest answer, not "fine".
+                    # An ALL-CLEAR is computed against THIS and nothing else —
+                    # the version above can never certify code as current,
+                    # because it (and `extension_id`) describe the load DIRECTORY
+                    # rather than the executing code. null here → no verdict can
+                    # be false; each is null unless that instance's version is
+                    # known and DISAGREES, which still decides true. Either way,
+                    # null is the honest answer, not "fine".
                     "extension_build_current": expected_build,
                     # The deploy directory Brave SHOULD have been pointed at.
                     # Reported so an operator can read it next to each instance's
