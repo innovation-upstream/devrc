@@ -70,8 +70,8 @@ extract_prs(){
 #
 # 🔴 …BUT AN OMISSION IS NOT FREE EITHER, AND FILTER 1 OVERSHOT. Excluding `/`
 # also killed every reference that legitimately CARRIES a slash-bearing prefix —
-# `origin/fix/x`, `upstream/feat/x`, `refs/heads/fix/x`, and GitHub `/tree/` and
-# `/compare/` URLs. Measured across 211 real handoff docs: one live casualty,
+# `origin/fix/x`, `upstream/feat/x`, `refs/heads/fix/x`, and GitHub `/tree/`
+# URLs. Measured across 211 real handoff docs: one live casualty,
 # `origin/zach/engaged-models-client-store` in datapacket-talos, which is the
 # ONLY form that branch appears in and IS genuinely gone — so the old code's
 # DRIFT line was right and the new code was silently mute. In a go/no-go tool
@@ -81,11 +81,26 @@ extract_prs(){
 # So STRIP the ref-ish prefix first, then match. Each stripped form is a strong
 # POSITIVE signal that what follows is a ref, which is exactly what a bare
 # filesystem path lacks — `/home/zach/workspace/…` still yields nothing.
+#
+# ⚠ `/compare/` is deliberately NOT stripped, though an earlier revision did.
+# It was redundant (a compare URL's `main...feat/x` already matches, because the
+# `.` satisfies the boundary) AND unpinned (deleting it left all 55 tests
+# green) AND strictly worse on a compare whose LEFT side carries a slash:
+# stripping turned `…/compare/zach/a...zach/b` into the junk token
+# `zach/a...zach/b`, where not stripping yields `zach/b` — the head of the
+# compare, which is the ref a reader means. Untested defensive code that makes
+# one real case worse is not defence.
+#
+# ⚠ The `origin|upstream` rule's leading bound is LOAD-BEARING, not decoration:
+# it is what stops a filesystem path like `/home/zach/repos/origin/fix/x` from
+# having its `origin/` stripped and minting `fix/x`. That is the exact
+# fabrication class this whole function exists to prevent, so the bound must
+# keep requiring a non-path character before the remote name.
 extract_branches(){
   printf '%s\n' "$1" \
     | sed -E '
-        s#https?://[^[:space:]]*/(tree|compare)/# #g
-        s#(refs/(heads|remotes)/)+# #g
+        s#https?://[^[:space:]]*/tree/# #g
+        s#refs/(heads|remotes)/# #g
         s#(^|[^A-Za-z0-9._/-])(origin|upstream)/#\1#g
       ' \
     | grep -oE '(^|[^A-Za-z0-9_/])(zach|feat|fix|docs|chore)/[A-Za-z0-9._/-]+' 2>/dev/null \
@@ -359,6 +374,12 @@ alerts_block(){
   kill "$pf" 2>/dev/null; wait "$pf" 2>/dev/null
   if [ -z "$out" ]; then echo "  (alertmanager unreachable — skipped)"; else echo "$out"; fi
   # feed real criticals into DRIFT
+  #
+  # ⚠ NOTHING IN THE TEST SUITE REACHES THIS BLOCK. The hermetic fixtures carry
+  # no prod-kubeconfig, so alerts_block always returns at the `WL_NS` guard;
+  # inverting the CRITICAL test below survives all 56 tests. Pre-existing gap,
+  # recorded so the suite's green is not read as covering it — the change here
+  # is hygiene, verified by reading, not by a guard.
   #
   # A full `if`, not `[[ … ]] && DRIFT+=(…)`. The `&&` form is the same class of
   # bug that made `main` exit 1 when it found drift with nothing unreconciled:

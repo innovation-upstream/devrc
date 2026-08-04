@@ -737,26 +737,62 @@ def test_the_word_boundary_behaviour_is_preserved(tmp_path, stub_bin):
     assert not any("must-not-match" in t for t in toks), toks
 
 
-# Every ref-ish spelling that carries a slash-bearing prefix. Excluding `/` from
-# the leading boundary killed ALL of these — a real regression, measured across
-# 211 real handoff docs: `origin/zach/engaged-models-client-store` in
-# datapacket-talos is the ONLY form that branch appears in, and it is genuinely
-# gone, so the pre-regression DRIFT line was correct and the regressed code was
-# silently mute. Omission replacing fabrication is the same disease in a go/no-go
-# tool — it reads as "no drift".
+# Ref-ish spellings that carry a slash-bearing prefix. Excluding `/` from the
+# leading boundary killed these — a real regression, measured across 211 real
+# handoff docs: `origin/zach/engaged-models-client-store` in datapacket-talos is
+# the ONLY form that branch appears in, and it is genuinely gone, so the
+# pre-regression DRIFT line was correct and the regressed code was silently
+# mute. Omission replacing fabrication is the same disease in a go/no-go tool —
+# it reads as "no drift".
+#
+# 🔴 REGRESSION COVERAGE vs INVARIANT GUARD — and WHICH regression. The third
+# tuple element names the prior script version a row actually goes RED against;
+# a row that goes red against nothing is an invariant guard and the repo's rules
+# say it must not be counted as regression coverage. All of it MEASURED by
+# replaying each spelling through each old version, not asserted:
+#
+#   version    what it is
+#   base       pre-PR: `\b` boundary, no sed pre-strip
+#   r2         this PR round 2: `/`-excluding boundary, no sed  (the F3 regression)
+#   r3         this PR round 3 (dfcb800): sed strips tree AND compare
+#
+#   row                                     base   r2    r3     -> pins
+#   origin/fix/wanted                       same   RED   same      r2
+#   upstream/feat/wanted                    same   RED   same      r2
+#   refs/heads/fix/wanted                   same   RED   same      r2
+#   refs/remotes/origin/zach/wanted         same   RED   same      r2
+#   .../tree/feat/wanted                    same   RED   same      r2
+#   .../compare/main...feat/wanted          same   same  same      NOTHING
+#   .../compare/zach/a...zach/b             RED    same  RED       base + r3
+#
+# ⚠ Note what that first column says: against the PRE-PR base every one of the
+# first six rows is an INVARIANT — base's `\b` already handled all of them. The
+# defect these rows exist for is round 2's own regression, not the original bug.
+# Saying "regression coverage" without naming the reference point is how a table
+# like this reads as more than it is.
 SLASHED_REF_FORMS = [
-    ("origin/fix/wanted", "fix/wanted"),
-    ("upstream/feat/wanted", "feat/wanted"),
-    ("refs/heads/fix/wanted", "fix/wanted"),
-    ("refs/remotes/origin/zach/wanted", "zach/wanted"),
-    ("https://github.com/a/b/tree/feat/wanted", "feat/wanted"),
-    ("https://github.com/a/b/compare/main...feat/wanted", "feat/wanted"),
+    # (spelling, expected, pins)
+    ("origin/fix/wanted", "fix/wanted", "r2"),
+    ("upstream/feat/wanted", "feat/wanted", "r2"),
+    ("refs/heads/fix/wanted", "fix/wanted", "r2"),
+    ("refs/remotes/origin/zach/wanted", "zach/wanted", "r2"),
+    ("https://github.com/a/b/tree/feat/wanted", "feat/wanted", "r2"),
+    # Pins NOTHING — kept as a documented invariant, not deleted, because it is
+    # the shape a reader assumes is covered. It was previously described as
+    # regression coverage; that description measured FALSE against every prior
+    # version.
+    ("https://github.com/a/b/compare/main...feat/wanted", "feat/wanted", "nothing"),
+    # Pins the decision NOT to strip `/compare/`. r3 stripped it and produced the
+    # junk token `zach/a...zach/b`; base produced the same junk. Not stripping
+    # yields `zach/b`, the head of the compare, which is the ref a reader means —
+    # so this row guards an improvement over BOTH. Re-adding `|compare` -> RED.
+    ("https://github.com/a/b/compare/zach/a...zach/b", "zach/b", "base+r3"),
 ]
 
 
-@pytest.mark.parametrize("spelling,expected", SLASHED_REF_FORMS)
+@pytest.mark.parametrize("spelling,expected,pins", SLASHED_REF_FORMS)
 def test_a_ref_with_a_slashed_prefix_is_still_extracted(
-    tmp_path, stub_bin, spelling, expected
+    tmp_path, stub_bin, spelling, expected, pins
 ):
     repo = make_repo(
         tmp_path,
@@ -765,6 +801,42 @@ def test_a_ref_with_a_slashed_prefix_is_still_extracted(
     )
     toks = branch_tokens(run_resume(repo, stub_bin))
     assert toks == [expected], f"{spelling!r} -> {toks}, expected [{expected!r}]"
+
+
+def test_the_slashed_ref_table_keeps_its_real_coverage():
+    """Meta-guard on the table above — pin the SHAPE, not just the rows.
+
+    The table mixes rows that pin a real prior defect with rows that pin
+    nothing, and that split is only useful while it stays honest. Deleting the
+    rows that actually go red, or relabelling them, would leave a table that
+    still looks like a thorough sweep while covering nothing. This is the guard
+    that notices.
+    """
+    pins = [p for _, _, p in SLASHED_REF_FORMS]
+    r2 = [s for s, _, p in SLASHED_REF_FORMS if p == "r2"]
+    assert len(r2) >= 5, f"r2 regression rows dropped to {len(r2)}: {r2}"
+    # the shape of the one live casualty measured in the field must be covered
+    assert any(s.startswith("origin/") for s in r2), r2
+    # and the /compare/ no-strip decision must stay pinned by something
+    assert "base+r3" in pins, pins
+    # every label must be one we have actually measured
+    assert set(pins) <= {"r2", "base+r3", "nothing"}, set(pins)
+
+
+def test_a_remote_name_inside_a_filesystem_path_is_not_stripped(tmp_path, stub_bin):
+    """The `origin|upstream` rule's leading bound is load-bearing.
+
+    Without it, `/home/zach/repos/origin/fix/x` has its `origin/` stripped and
+    mints `fix/x` — the exact fabrication class this function exists to prevent.
+    Untested until the round-3 audit pointed at the bound as an unguarded
+    tightening.
+    """
+    repo = make_repo(
+        tmp_path,
+        docs=("HANDOFF.md",),
+        doc_body="## Handoff\nBuilt from `/home/zach/repos/origin/fix/x` last week.\n",
+    )
+    assert branch_tokens(run_resume(repo, stub_bin)) == []
 
 
 def test_stripping_ref_prefixes_does_not_revive_path_fabrication(tmp_path, stub_bin):
