@@ -47,6 +47,15 @@ pytestmark = pytest.mark.skipif(
 )
 
 # Docs that live beside a handoff in these repos and must NEVER resolve as one.
+# The first six are real filenames lifted from civitai-manager's claudedocs/.
+#
+# The last three are ADVERSARIAL, added after a mutation SURVIVED the original
+# set: broadening the fallback to `*[Hh][Aa][Nn][Dd]*.md` — a plausible "match
+# handoff in any case" edit — passed all 26 cases, because not one decoy
+# contained the letters HAND. A guard that only rules out the over-broad globs
+# you happened to imagine is a guard calibrated to your own imagination. These
+# three are HAND-but-not-HANDOFF, so any glob looser than the exact uppercase
+# substring sweeps them in and fails here.
 DECOY_DOCS = (
     "SOME-DESIGN.md",
     "COMFYUI-INTEGRATION-DESIGN.md",
@@ -54,6 +63,9 @@ DECOY_DOCS = (
     "LAUNCH-REDDIT-POST.md",
     "HUGGINGFACE-FALLBACK-RESEARCH.md",
     "BREADCRUMBS-AND-COPY-DESIGN.md",
+    "HANDBOOK.md",
+    "SHORTHAND-NOTES.md",
+    "handling-errors.md",
 )
 
 
