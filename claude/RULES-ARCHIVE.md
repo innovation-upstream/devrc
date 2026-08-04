@@ -348,20 +348,35 @@ runs.
 ## consolidation-finds-bugs
 *Supports: 🔴 "Consolidation is also a BUG-FINDING instrument, not just hygiene."*
 
-Consolidating a duplicated predicate is normally filed as cleanup. Measured on civitai-manager
-2026-08-03, it repeatedly surfaced live defects nobody was hunting:
+Consolidating a duplicated predicate is normally filed as cleanup. On civitai-manager PR #59
+(`fe346b5`) **one** gate consolidation produced **two** findings — and it is the second that
+makes the point, because nobody was hunting it.
 
-- **A false "Ready" on a graph the run path would REFUSE to submit.** Two surfaces answered
-  the same question about the same graph — `realRun` ("may I submit this to ComfyUI?") and
-  `workflowReadiness` ("may I tell the user it is ready?") — and the readiness copy was
-  strictly WEAKER: it keyed on the three preflight COUNTS plus conversion warnings and never
-  read `report.OK`. `comfy.Preflight` returns `OK:false` with all three lists **empty** for a
-  graph it could not parse at all, so an unparseable graph (a UI graph stored as api, a JSON
-  array, a bare string, garbage bytes) fell through every count and rendered *"Ready — every
-  node type and model file this workflow references is installed"* about a graph `realRun`
-  refuses. An adversarial audit measured **6 of 10** probed unusable inputs rendering
-  `ready`, all reachable end to end through `POST /workflows/import-png`. Consolidated into
-  `internal/web/run_gate.go` — "the never-submit gate, in one place".
+**1. The AUDIT finding — a false "Ready" on a graph the run path would refuse.** Two surfaces
+answered the same question about the same graph: `realRun` ("may I submit this to ComfyUI?")
+and `workflowReadiness` ("may I tell the user it is ready?"). The readiness copy was strictly
+WEAKER — it keyed on the three preflight COUNTS plus conversion warnings and never read
+`report.OK`. An adversarial audit measured **6 of 10** probed unusable inputs rendering
+`ready`, all reachable end to end through `POST /workflows/import-png`.
+
+**2. The CONSOLIDATION finding — `realRun` itself SUBMITTED `{}` to ComfyUI.** Nobody was
+looking for this; it fell out of putting the copies side by side. Verified against the
+**pre-fix** tree at `fe346b5^`, not inferred from the fixed code:
+
+- `Preflight` returned `PreflightReport{OK: false}` **only** on a `json.Unmarshal` error. `{}`
+  unmarshals successfully into an *empty map*, so the node loop runs zero times and
+  `report.OK = len(MissingNodes)==0 && len(MissingModels)==0 && len(BadOptions)==0` → **true**.
+- `realRun`'s never-submit gate was `if convWarned || graphIncomplete || !report.OK`. For `{}`:
+  `convWarned` false, `graphIncomplete` false, `report.OK` true → the disjunction is **false**
+  → not blocked → **submitted**.
+- Corroborated independently by PR #59's delta auditor, which probed **14 payloads** comparing
+  old vs new verdict: **3 changed, all stricter, none looser** — `{}`, `null`, and whitespace
+  variants. An empirical before/after, not a reading.
+
+Both were consolidated into `internal/web/run_gate.go` — "the never-submit gate, in one place".
+
+**Other instances, same session:**
+
 - **The node-pack `needed()` predicate** — open-coded as `Contested && !Best` at **three**
   sites (the collapse, the Install button's prominence, the contest badge), and all three
   wrong *in the same direction* for the same reason: a pack can lose a contest on one class
@@ -370,16 +385,40 @@ Consolidating a duplicated predicate is normally filed as cleanup. Measured on c
 - **`canQueue`** — duplicated between `runZone` and the count segment that must agree with
   it; both now derive from `canQueueWorkflow`.
 
-⚠ **The first case above was first reported to this file with its direction INVERTED** — as
-"an empty prompt was being submitted". Reading `run_gate.go` showed the opposite: nothing
-was wrongly submitted, the *readiness line* wrongly said yes about a graph the submit path
-already refused. Worth keeping as a reminder that a remembered defect's direction is exactly
-the detail that decays, and that the fix site is where you check it.
-
 Mechanism: a predicate open-coded at N sites is typically wrong at N−1 of them **in the same
 direction**, because each copy was written from the same incomplete mental model. That is why
 reading the copies individually finds nothing — they agree with each other. Unifying them is
 what makes the disagreement with the *correct* rule audible.
+
+### 🔴 The correction to this entry was itself wrong — and its error class is the better lesson
+
+Finding 2 was briefly **deleted** from this file and replaced with "nothing was wrongly
+submitted; only the readiness line said yes", on the strength of reading
+`internal/web/run_gate.go`.
+
+**`run_gate.go` did not exist before the fix.** `git log --diff-filter=A -- <path>` shows it
+was ADDED by `fe346b5` — the very commit that fixed this. The file being read *was the
+remedy*, and the bug was inferred backwards out of it. The inference was coherent and
+specific and wrong, which is what makes it dangerous: it produced a plausible history that
+deleted a real finding.
+
+**Inferring PAST behaviour from CURRENT source is its own error class.** It is
+[dirty-tree-probe](#dirty-tree-probe) rotated into the time axis: there, the artifact you
+measured was not the artifact you were claiming about; here, the *revision* you read was not
+the revision you were claiming about. Going to read the code is the right instinct — it is
+why the session's other corrections were correct — so the failure is invisible from inside
+the method. Only the input was wrong.
+
+**The pre-change state is cheap and available. Read it there:**
+
+```sh
+git log --diff-filter=A -- <path>   # was this file ADDED by the fix?
+git show <fix-sha>^:<path>          # what the code ACTUALLY was, before
+```
+
+Corollary: **when the thing you are describing is a fix, the file that fix created is the
+worst available witness to the bug.** Prefer an empirical before/after (an old-vs-new probe
+across payloads) over any reading of either revision.
 
 ## isolation-seam
 *Supports: 🔴 ""Verified in isolation" is the new vacuous green."*
