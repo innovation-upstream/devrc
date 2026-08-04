@@ -258,19 +258,75 @@ def test_bad_fixture_verdict_says_prune_needed(tmp_path):
 
 # --- the detectors, exercised on their edges ------------------------------------
 
-def test_a_date_only_heading_is_dated_history(tmp_path):
-    """The ISO-date alternative must carry its own weight.
+def test_a_date_only_heading_is_a_LESSON_not_evictable_history(tmp_path):
+    """The ISO-date alternative must carry its own weight — but into the RIGHT bucket.
 
-    Added because a mutation sweep KILLED nothing when that alternative was
-    neutered — the word forms in the shared fixture were covering for it. A
-    real datapacket heading, `## Marketplace (F-E — E1–E5, all merged
-    2026-06-15, DARK behind the mod gate)`, contains no Session/Changelog word
-    at all; with only the word forms it would be invisible.
+    This test previously asserted a date-only heading was EVICT_HISTORY. That
+    assertion was WRONG and is why it now reads differently: it pinned a
+    classification that, measured across the 67-skill datapacket-talos corpus on
+    2026-08-04, was correct on exactly ONE skill. app-blocks carries 45
+    work-status headings; every other skill carries ZERO while carrying 8-17
+    dated-but-topical ones. The merged metric therefore reported 59% "evictable
+    history" for manage-alerts, whose two largest such blocks were its most
+    valuable operational content ("Common silent-failure modes", "The INERT-ALERT
+    defect class"). Evicting on that signal would have gutted the skill.
+
+    The date branch is still pinned — it just resolves to `lessons`, not `dated`.
     """
     body = "## Marketplace (E1–E5, all merged 2026-06-15, DARK behind the gate)\n\nbody\n"
     a = sa.audit_one(_write_skill(tmp_path, "dateonly", body))
-    assert [t for t, *_ in a["dated"]] == [
-        "Marketplace (E1–E5, all merged 2026-06-15, DARK behind the gate)"]
+    title = "Marketplace (E1–E5, all merged 2026-06-15, DARK behind the gate)"
+    assert [t for t, *_ in a["lessons"]] == [title]
+    assert a["dated"] == [], "a date CITATION is not work-status narrative"
+    assert a["dated_bytes"] == 0
+
+
+def test_work_status_and_lessons_are_disjoint(tmp_path):
+    """No block may appear in both buckets — the whole point of the split is that
+    a reader can act on one and not the other."""
+    body = ("## Session 2026-08-02 — what we did\n\nnarrative\n\n"
+            "## Failure modes (from the 2026-05-22 audit)\n\nguidance\n")
+    a = sa.audit_one(_write_skill(tmp_path, "disjoint", body))
+    ws = {t for t, *_ in a["dated"]}
+    ls = {t for t, *_ in a["lessons"]}
+    assert ws == {"Session 2026-08-02 — what we did"}
+    assert ls == {"Failure modes (from the 2026-05-22 audit)"}
+    assert not (ws & ls)
+
+
+def test_a_dated_work_status_heading_goes_to_work_status_not_lessons(tmp_path):
+    """Precedence: a heading carrying BOTH a work-status word and a date is
+    work-status. Without this, `### Session 2026-07-29` would land in the
+    non-evictable bucket and app-blocks' 45 real Session blocks would go
+    unreported."""
+    body = "### Session 2026-07-29→30 — dogfood + audit\n\nnarrative\n"
+    a = sa.audit_one(_write_skill(tmp_path, "both", body))
+    assert len(a["dated"]) == 1 and a["lessons"] == []
+
+
+def test_real_skills_classify_the_way_the_corpus_measurement_says():
+    """Regression pin against the live corpus, so the conflation cannot return.
+
+    Skipped when the clone is absent so the suite stays hermetic. Measured
+    2026-08-04: manage-alerts has ZERO work-status blocks (15 dated lessons),
+    app-blocks has 46 work-status blocks. If manage-alerts ever reports
+    work-status history, the buckets have re-merged.
+    """
+    root = Path("/home/zach/workspace/civit/datapacket-talos/.claude/skills")
+    if not root.is_dir():
+        pytest.skip("datapacket-talos clone not present")
+    for name, expect_ws in (("manage-alerts", False), ("app-blocks", True)):
+        p = root / name / "SKILL.md"
+        if not p.is_file():
+            pytest.skip(f"{name} absent")
+        a = sa.audit_one(p)
+        if expect_ws:
+            assert a["dated"], f"{name}: expected work-status blocks, found none"
+        else:
+            assert not a["dated"], (
+                f"{name}: reported {len(a['dated'])} work-status block(s); its dated "
+                "headings are durable lessons, so the buckets have re-merged")
+            assert a["lessons"], f"{name}: expected dated lessons, found none"
 
 
 @pytest.mark.parametrize("heading", [
