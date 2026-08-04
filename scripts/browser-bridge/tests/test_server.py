@@ -4782,8 +4782,12 @@ def test_health_stale_verdict_is_null_when_only_the_version_matches(
 def test_whoami_carries_the_stale_verdict_per_instance(pinned_manifest,
                                                        pinned_build):
     srv, _ = _serve()
+    # Reports the EXPECTED version on purpose, so the True can ONLY have come
+    # from the marker comparison. (With a mismatching version this test passes
+    # even against a build that ignores the marker entirely — measured while
+    # mutation-testing this PR.)
     ext = FakeExtension(srv, instance_id="a", label="alpha",
-                        ext_version="0.1.0", ext_build="0000000000000bad")
+                        ext_version=PINNED_VERSION, ext_build="0000000000000bad")
     ext.start()
     try:
         _wait_instances(srv, 1)
