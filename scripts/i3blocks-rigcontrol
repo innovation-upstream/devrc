@@ -3,10 +3,16 @@
 #   interval=once  -> renders the icon at startup; i3blocks re-runs this on click
 #                     with $BLOCK_BUTTON set (1=left, 2=middle, 3=right).
 # Left-click opens the control panel, detached so it outlives this block run.
+# Icon reflects sleep state: ☀ (awake) or 🌙 (sleeping).
 RIG="$HOME/workspace/devrc/scripts/rig-control.sh"
+STATE_FILE="${XDG_CACHE_HOME:-$HOME/.cache}/rig-control/state"
 
 case "${BLOCK_BUTTON:-}" in
   1) setsid -f "$RIG" gui >/dev/null 2>&1 ;;   # left-click -> open panel
 esac
 
-echo "⚙"
+if [[ -f "$STATE_FILE" ]] && read -r _s < "$STATE_FILE" && [[ "$_s" == "sleeping" ]]; then
+  echo "🌙"
+else
+  echo "☀"
+fi
