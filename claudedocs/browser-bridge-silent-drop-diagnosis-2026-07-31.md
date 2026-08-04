@@ -136,9 +136,13 @@ That is the predicted asymmetry and it holds.
 ### 1.5 The stable `instanceId` is a red herring
 
 `instanceId()` (`service_worker.js:58-64`) reads `chrome.storage.local`, generating a UUID only if
-absent. It is **persistent across worker restarts, ↻, and browser restarts**. So `work`'s id being
-unchanged since session start tells us nothing about worker liveness and is *not* evidence that the
-worker survived. Worth stating explicitly so it is not re-derived as a clue.
+absent. It is **persistent across worker restarts, ↻, browser restarts — and (measured 2026-08-04,
+both hosts, four of four profiles) across a per-profile Remove + Load unpacked that demonstrably
+swapped the executing code**. So `work`'s id being unchanged since session start tells us nothing
+about worker liveness and is *not* evidence that the worker survived — nor, per that later
+measurement, that the extension was never re-added. Worth stating explicitly so it is not
+re-derived as a clue. (What *does* regenerate the id is unestablished. The did-the-reload-take
+signal is the build marker / `extension_stale`, not this.)
 
 ### 1.6 Confidence
 
