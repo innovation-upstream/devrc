@@ -650,9 +650,10 @@ def annotate_staleness(instances, expected, expected_build=None):
     marker is a literal in the worker's own imported module graph, so a stale
     worker reports the stale value by construction.
 
-    (Also measured 2026-08-04, same host: profile "personal - other" reported
-    `0.7.1` and profile "personal" `0.8.1` under one `extension_id` — i.e. one
-    load path — while the directory on disk held only `0.8.1`. That is evidence
+    (Also measured 2026-08-04, on the OTHER host — workbench: profile
+    "personal - other" reported `0.7.1` and profile "work" `0.8.1` under one
+    `extension_id` — i.e. one load path — while the directory on disk held
+    only `0.8.1` (`manifest.json` + `build_id.js`, both stamped 09:31). Evidence
     the version is metadata parsed at extension-LOAD time rather than re-read
     from disk per call. ONE observation, a hypothesis, not established — it
     changes nothing here either way: the version still cannot certify the code.)
