@@ -561,46 +561,42 @@ export async function applyWakeSteps(send, steps = WAKE_CDP_STEPS) {
 // everything in THIS file is the pure, browser-free half: the preset table, the
 // validation, and the ordered CDP step list.
 //
-// 🔴 THE VIEWPORT SIZE DOES **NOT** COME BACK. This block used to claim the
-// opposite — that because the overrides die at detach "the tab is NOT emulated
-// between ops", so a crashed agent could never leave the operator's browser
-// distorted. MEASURED FALSE, 2026-08-03, extension 0.7.2, with a fresh-tab
-// control:
+// 🔴 THE VIEWPORT SIZE DOES **NOT** DIE AT DETACH — it is the ONE exception, and
+// this block twice claimed something false about it. It first claimed the tab is
+// "NOT emulated between ops", so a crashed agent could never leave the operator's
+// browser distorted; that was measured false on 2026-08-03 (fresh-tab control
+// 1124, after `emulate iphone-15` 393, after `--reset` 393, after a re-nav 393).
+// It then claimed the size could not be restored at all and that the mechanism was
+// unknown. That second claim is ALSO false, and it is now fixed — see
+// EMULATION_RESET_CDP_STEPS below for the measurement and the mechanism.
 //
-//   fresh tab, never emulated   innerWidth 1124   (control — the read path works)
-//   after `emulate iphone-15`   innerWidth  393
-//   after `emulate --reset`     innerWidth  393   ← NOT restored
-//   after `--reset` + re-nav    innerWidth  393   ← still NOT restored
+// The accurate statement:
 //
-// That measurement was taken on a build whose reset DID send and report
-// `cleared: [Emulation.clearDeviceMetricsOverride,
-// Emulation.setTouchEmulationEnabled, Emulation.setUserAgentOverride]`, and the
-// size survived them anyway. Sending `clearDeviceMetricsOverride` simply does not
-// restore the viewport — which is why THIS build does not send it: `--reset` here
-// only stops re-applying (service_worker.js's reset branch is a Map delete; no
-// debugger attach, no CDP message). The measurement stands; the clears do not.
+//   * devicePixelRatio, maxTouchPoints, pointer:coarse, prefers-color-scheme,
+//     userAgent and timeZone are renderer-side session state and DO revert on
+//     their own at detach — because the override dies with the session that set
+//     it, not because anything cleared them;
+//   * the viewport SIZE additionally resizes the BROWSER-side render widget, and
+//     nothing undoes that at detach. So between ops the tab is visibly still the
+//     emulated size, and it survives a re-navigation.
+//   * (`"ontouchstart" in window` also stays true on a document that was BUILT
+//     emulated — that one is document-creation residue and a re-nav does clear it.)
 //
-// What DOES revert by itself, measured in the same pass: devicePixelRatio,
-// maxTouchPoints, pointer:coarse, prefers-color-scheme, userAgent, timeZone —
-// and they revert because a CDP override dies with the debugger session that set
-// it, NOT because anything cleared them. Only the viewport SIZE is sticky.
-// (`"ontouchstart" in window` also stays true on a document that was BUILT
-// emulated — that one is document-creation residue and a re-nav does clear it.)
+// `--reset` therefore has to UNDO the size explicitly, and it does: it attaches a
+// session and sends EMULATION_RESET_CDP_STEPS (arm, then clear). The arming step
+// is the whole trick — a bare clearDeviceMetricsOverride from a session that never
+// set an override is a no-op, which is why PR #320 sent exactly that and changed
+// nothing. Full measurement lives next to the step list, deliberately: it is the
+// justification for a two-step list that looks like it should be one step.
 //
-// THE MECHANISM IS NOT ESTABLISHED. The leading hypothesis is a render-widget
-// resize residue — consistent with devicePixelRatio reverting while the width does
-// not, even though both come from the same CDP call — but that is a hypothesis,
-// not a finding. Do not restate it as known, and do not build a fix on it.
-//
-// THE ONLY KNOWN REMEDY IS TO CLOSE THE TAB. `--reset` therefore means "stop
-// re-applying" and nothing more — it is NOT an undo. That is issue #319; the
-// operator-facing workaround is `browser emulate --reset --recreate`, which
-// replaces the stuck tab with a fresh one at the same url (the tab id changes).
+// `browser emulate --reset --recreate` stays. It is the remedy that needs no CDP
+// at all, and it is the ONLY one for a tab the extension can no longer reach —
+// an un-upgraded build, or a tab orphaned by a SIGKILL'd agent that never got to
+// run its reset. See issue #319.
 //
 // The apply-then-act design above is still the right shape — a held-open session
-// would add a permanent debug banner on top of the same stuck viewport — but it
-// buys strictly less than this comment used to claim, and the difference is
-// exactly what the operator gets stuck with.
+// would add a permanent debug banner — but it buys less than this comment
+// originally claimed: it bounds the renderer-side overrides, not the size.
 //
 // BLAST RADIUS: enforced SERVER-side (see server.py OWNED_TAB_ONLY_OPS). Only a
 // tab the calling session opened via `open` may be emulated; anything else is
@@ -1133,6 +1129,64 @@ export async function applyEmulationSteps(send, steps) {
   return applied;
 }
 
+// --- UNDOING the viewport: the ARM-THEN-CLEAR pair -------------------------- //
+//
+// The ordered CDP step list `emulate --reset` sends. TWO steps, and the FIRST one
+// is the entire reason this works — deleting it silently restores the #319 bug
+// while every response field still says `ok`.
+//
+// WHAT WAS MEASURED (2026-08-04, throwaway Brave 147.0.7727.56 under Xvfb, raw
+// CDP over the DevTools websocket, never-emulated control tab every round):
+//
+//   session A: setDeviceMetricsOverride{393x852} → detach       innerWidth 394
+//   session B: clearDeviceMetricsOverride        → detach       innerWidth 394  ← no-op
+//   session B: setDeviceMetricsOverride{…} then clear → detach  innerWidth 1055 ← restored
+//
+// `Emulation.clearDeviceMetricsOverride` sent from a session that never itself set
+// a device-metrics override DOES NOTHING. The clear is conditional on the calling
+// session's own emulation handler believing emulation is on; a fresh session's is
+// off, so the clear returns success and never reaches the browser-side widget
+// resize. Sending ANY setDeviceMetricsOverride first flips that bit — the params
+// are irrelevant: {393x852}, {800x600}, {1x1} and {0,0,0,false} all made the
+// following clear restore the true width (5 restores / 5 attempts on the shipped
+// pair, plus 2 no-op runs on a never-emulated tab).
+//
+// THAT IS ALSO THE dpr-VS-WIDTH ASYMMETRY (#319's sharpest clue, previously
+// unexplained). Both come from the same call, but they live in different places:
+// devicePixelRatio, touch points, pointer:coarse, UA, timezone and emulated media
+// are renderer-side session state that dies with the debugger session — measured
+// reverting on their own at detach. The viewport SIZE additionally resizes the
+// BROWSER-side render widget, and that resize is undone only by an explicit clear
+// from a session that has emulation armed. Nothing does that at detach, so the
+// size — and only the size — survives. This is an inference from the observable
+// behaviour above, not from reading Chromium's source; the measurements are the
+// finding, this paragraph is the explanation they support.
+//
+// WHY {width:0, height:0, deviceScaleFactor:0, mobile:false} for the arming step:
+// it is the least invasive override that still flips the bit. Measured in-session
+// after arming, the width was still the EMULATED one (394, not the real 1055) —
+// so arming does not itself resize anything and there is no intermediate flash to
+// the wrong size. The restore happens on the clear.
+//
+// NOTHING ELSE IS SENT, deliberately. There is no clear for touch/UA/media/tz/geo
+// here because they need none: they were measured reverting at detach on their
+// own. A clear for them would be ceremony that makes the reset look thorough
+// while doing nothing.
+//
+// BEST-EFFORT AT THE CALL SITE: the reset must not fail because a tab was closed,
+// discarded, or sits on a privileged scheme the debugger refuses. service_worker's
+// reset branch catches and reports (`restored`/`restoreError`) rather than throwing
+// — the in-memory state is dropped either way.
+export const EMULATION_RESET_CDP_STEPS = Object.freeze([
+  // 1. ARM. Without this the next step is a no-op. See above.
+  Object.freeze({
+    method: "Emulation.setDeviceMetricsOverride",
+    params: Object.freeze({ width: 0, height: 0, deviceScaleFactor: 0, mobile: false }),
+  }),
+  // 2. CLEAR. This is the step that resizes the render widget back.
+  Object.freeze({ method: "Emulation.clearDeviceMetricsOverride", params: Object.freeze({}) }),
+]);
+
 // The compact, METADATA-ONLY summary of a stored state — what `emulate` returns,
 // what `tabs` annotates an emulated tab with, and what goes into telemetry. No
 // URL, no page content; the UA string is deliberately EXCLUDED (it is long, and
@@ -1162,13 +1216,18 @@ export function emulationSummary(state) {
 // NEVER attaches the debugger, so withCdp's re-application choke point never runs
 // and the DOM they see is the tab's REAL, un-emulated one.
 //
-// That is correct-by-design, not a bug: between ops the tab genuinely is not
-// emulated (the safety property above), so the at-rest DOM really is desktop.
-// But it is a TRAP, and it is this feature's characteristic failure mode on the
-// read path: an agent screenshots a phone layout, then reads `text`/`html` and
-// reasons about a DESKTOP DOM, with nothing in the envelope to tell it apart.
-// Layout-derived values (innerWidth, getBoundingClientRect, matchMedia) and
-// navigator.userAgent all come back REAL.
+// The at-rest DOM is a MIXTURE, and that is worse than either pure case. Measured
+// (2026-08-04, scratch Brave, a session that applies no overrides — the exact
+// shape of a non-CDP read): navigator.userAgent, devicePixelRatio,
+// maxTouchPoints and `pointer: coarse` all come back REAL/desktop, because those
+// overrides died with the session that set them — but `innerWidth` comes back
+// EMULATED (394, against a 1055 control), because the widget really is that size
+// until something clears it.
+//
+// So the trap is not "you get the desktop DOM"; it is that you get a page laid out
+// at the phone WIDTH while every capability signal says desktop. An agent that
+// screenshots a phone layout, then reads `text`/`html`, reasons about a document
+// that no real device would ever produce.
 //
 // So every read of a tab that HAS emulation state says which one it got. Same
 // pattern, and the same reasoning, as HIDDEN_TAB_NOTE: the read self-announces
@@ -1179,11 +1238,14 @@ export function emulationSummary(state) {
 // the read through cdpWake → withCdp and therefore through the emulation apply.
 export const NOT_EMULATED_READ_NOTE =
   "This tab has device emulation configured, but THIS read did not go through "
-  + "CDP — it read the tab's REAL, un-emulated DOM. Emulation overrides only "
-  + "exist inside a CDP session (they die at detach), so layout-derived values "
-  + "(innerWidth, getBoundingClientRect, matchMedia) and navigator.userAgent are "
-  + "the DESKTOP ones here. Re-run this read with --wake to read inside an "
-  + "emulated session.";
+  + "CDP, so the overrides were NOT applied to it — and what you got is a MIXTURE, "
+  + "not a clean desktop read. navigator.userAgent, devicePixelRatio, "
+  + "maxTouchPoints and matchMedia('(pointer: coarse)') are the REAL desktop "
+  + "values, because those overrides die when the debugger detaches. But the "
+  + "VIEWPORT SIZE persists on the tab, so innerWidth and every "
+  + "getBoundingClientRect are the EMULATED ones: this is a page laid out at the "
+  + "phone width while every capability signal says desktop. Re-run this read "
+  + "with --wake to read inside a properly emulated session.";
 
 // Annotate a READ result with whether it observed the emulated page.
 //   * no emulation state for the tab → returns `data` UNTOUCHED (a plain tab's

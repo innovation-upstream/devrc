@@ -389,21 +389,30 @@ test("ping: reports the BUILD MARKER, and it is INDEPENDENT of chrome.* (#324)",
 // normalised string, or this test is theatre.
 //
 // The two tests below are COMPLEMENTS and both are required:
-//   * the text says nothing was sent to the browser;
-//   * `state.calls.debugger` is empty, which is the code-side fact that makes
-//     that sentence true. Either alone can go green while the other rots.
+//   * the text says an arm-then-clear pair was sent;
+//   * `state.calls.debugger` shows exactly that pair, which is the code-side fact
+//     that makes the sentence true. Either alone can go green while the other rots.
+//
+// ⚠ The note was rewritten in 0.8.1 (#319): reset now DOES undo the viewport. The
+// old literal asserted "NOTHING WAS SENT TO THE BROWSER" and a matching empty
+// debugger list — both were true of the broken behaviour, and pinning them is
+// exactly what kept the false safety claim honest until the fix landed. The
+// VIEWPORT assertion itself lives in tests/emulation_reset.test.mjs, against a
+// browser model; this file pins the wording and the wire traffic.
 // --------------------------------------------------------------------------- //
 const RESET_NOTE =
-  "emulation stopped: this tab will no longer have overrides re-applied. " +
-  "NOTHING WAS SENT TO THE BROWSER — no debugger was attached and no CDP " +
-  "clears were issued. THIS IS NOT AN UNDO. The UA, timezone, " +
-  "devicePixelRatio, touch points and prefers-color-scheme revert on " +
-  "their own, because CDP overrides die when the debugger detaches — not " +
-  "because anything cleared them. The emulated VIEWPORT SIZE does NOT " +
-  "come back: it survives the detach and a re-navigation (measured; " +
-  "mechanism unknown, issue #319). Replacing the tab is the only known " +
-  "remedy: `browser emulate --reset --recreate` opens a fresh tab at the " +
-  "same url and closes this one (the tab id changes).";
+  "emulation stopped AND the emulated viewport was restored: a CDP " +
+  "session was attached and Emulation.setDeviceMetricsOverride " +
+  "{width:0,height:0} then Emulation.clearDeviceMetricsOverride were " +
+  "sent (see `cleared`). Both steps are required — a bare " +
+  "clearDeviceMetricsOverride from a session that did not itself set " +
+  "an override is a measured no-op, which is why earlier attempts to " +
+  "undo this changed nothing (#319). The UA, timezone, " +
+  "devicePixelRatio, touch points and prefers-color-scheme were NOT " +
+  "cleared and did not need to be: they die with the debugger session " +
+  "that set them. If you still see the emulated size, `browser " +
+  "emulate --reset --recreate` opens a fresh tab at the same url and " +
+  "closes this one (the tab id changes).";
 
 test("emulate --reset: the runtime note is pinned VERBATIM", async () => {
   resetCalls();
@@ -418,18 +427,24 @@ test("emulate --reset: the runtime note is pinned VERBATIM", async () => {
     "to the LLM agent — update this literal in the same commit as the string");
 });
 
-test("emulate --reset: sends NOTHING to CDP (the fact the note asserts)", async () => {
+test("emulate --reset: sends the arm-then-clear pair (the fact the note asserts)", async () => {
   resetCalls();
   const out = await OPS.emulate({ tabId: TAB_ID, reset: true });
-  assert.deepEqual(state.calls.debugger, [],
-    "reset must attach NO debugger and send NO CDP command — a non-empty list " +
-    "makes the note's 'NOTHING WAS SENT TO THE BROWSER' sentence false");
+  assert.deepEqual(state.calls.debugger,
+    ["attach",
+     "Emulation.setDeviceMetricsOverride",
+     "Emulation.clearDeviceMetricsOverride",
+     "detach"],
+    "reset attaches ONE session and sends the arming override then the clear — " +
+    "in that order, nothing else. A bare clear is a measured no-op (#319), so " +
+    "dropping the first command silently reinstates the bug");
   assert.deepEqual(state.calls.executeScript, [],
-    "reset must not inject into the page either");
-  // It must not invent a `cleared` field either: the recreate stub in
-  // tests/test_browser_cli_args.py used to model one the code cannot emit.
-  assert.equal("cleared" in out, false,
-    "there is no `cleared` field — nothing is cleared, so nothing is reported");
+    "reset must not inject into the page");
+  assert.deepEqual(out.cleared,
+    ["Emulation.setDeviceMetricsOverride", "Emulation.clearDeviceMetricsOverride"],
+    "`cleared` reports exactly what was acknowledged — the note points at it");
+  assert.equal(out.restored, true);
+  assert.equal("restoreError" in out, false, "no error key on the success path");
 });
 
 test("emulate --reset: reports what WAS in force, then forgets it", async () => {

@@ -98,7 +98,7 @@ MIN_TESTS="${MIN_TESTS:-970}"
 # Raise a floor when a suite grows. NEVER lower one to get green — that is the
 # move that turned the pytest global floor into less than half the real total.
 SUITES=(
-  "scripts/browser-bridge/tests|14|450"
+  "scripts/browser-bridge/tests|15|490"
   # Ungated until 2026-08-03: `FILES=` above named browser-bridge alone, so these
   # 508 tests had never run under any gate since dl-router was written.
   "scripts/dl-router/tests|13|500"

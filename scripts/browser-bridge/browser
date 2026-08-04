@@ -111,17 +111,20 @@
 #                               --touch/--ua for anything not in the table.
 #                               STICKY per tab: re-applied inside every later op's
 #                               CDP session, because CDP overrides die at detach.
-#                               🔴 `--reset` STOPS RE-APPLYING AND SENDS THE CDP
-#                               CLEARS, BUT DOES NOT RESTORE THE VIEWPORT SIZE
-#                               (#319, measured 2026-08-03: 1124 → emulate → 393 →
-#                               --reset → 393 → re-nav → 393). UA, timezone, dpr,
-#                               touch points and prefers-color-scheme DO revert;
-#                               only the viewport size sticks, and the mechanism is
-#                               NOT established. Closing the tab is the only known
-#                               remedy — `--reset --recreate` does that for you
-#                               (opens a fresh tab at the same url, closes the
-#                               stuck one, and REPORTS THE NEW TAB ID; plain
-#                               `--reset` never swaps tab ids).
+#                               `--reset` stops re-applying AND restores the
+#                               viewport (#319, 0.8.1): it sends an ARM-then-CLEAR
+#                               pair in one session, because a bare
+#                               clearDeviceMetricsOverride from a session that did
+#                               not itself set an override is a measured NO-OP —
+#                               that is why every earlier attempt failed. UA,
+#                               timezone, dpr, touch points and prefers-color-scheme
+#                               need no clear; they die at detach. Only the size
+#                               had to be undone. `--reset --recreate` replaces the
+#                               tab instead (opens a fresh tab at the same url,
+#                               closes the old one, and REPORTS THE NEW TAB ID) —
+#                               the remedy that needs no CDP, and the only one for
+#                               a tab orphaned by a killed agent or an un-upgraded
+#                               build; plain `--reset` never swaps tab ids.
 #                               ⚠ OWNED TABS ONLY (`browser open` first): emulating
 #                               a tab you are browsing in is refused with
 #                               `not_owned_tab`. Screenshots on an emulated tab are
@@ -1046,17 +1049,17 @@ cmd_op() {
 json_str() { python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "$1"; }
 
 # --------------------------------------------------------------------------- #
-# `emulate --reset --recreate` — the #319 workaround for the STICKY VIEWPORT.
+# `emulate --reset --recreate` — REPLACE a tab instead of repairing it (#319).
 #
-# MEASURED 2026-08-03 (laptop, extension 0.7.2, fresh-tab control): a tab that has
-# been emulated keeps the emulated viewport SIZE after `--reset` and after a
-# re-navigation — 1124 → 393 → 393 → 393. That build's reset demonstrably sent and
-# reported `Emulation.clearDeviceMetricsOverride` / `setTouchEmulationEnabled` /
-# `setUserAgentOverride` and the size survived them, so the shipped build does not
-# send them at all: `--reset` only stops re-applying. Every other override (dpr,
-# maxTouchPoints, pointer, prefers-color-scheme, UA, timezone) DOES revert — at
-# the debugger detach, on its own. The mechanism behind the sticky viewport is NOT
-# established. Closing the tab is the only known remedy.
+# Since 0.8.1 plain `--reset` DOES repair the stuck viewport (arm-then-clear; see
+# extension/protocol.js EMULATION_RESET_CDP_STEPS for the measurement). This path
+# is deliberately kept, because repairing needs the extension to be able to reach
+# the tab and two cases defeat that:
+#   * the profile is running an UN-UPGRADED build whose `--reset` still sends
+#     nothing (or sends a bare clear, which is a measured no-op);
+#   * the tab was orphaned by a SIGKILL'd agent — nothing is left running that
+#     would issue a reset for it, and `--recreate` is the one-command cleanup.
+# It also needs no CDP at all, so it works where the debugger is refused.
 #
 # So this is a REPLACEMENT, not a repair: reset → note the url → drop ownership →
 # `open` a fresh tab at that url (now owned by this same session) → close the
@@ -1218,9 +1221,12 @@ out = {
     "newTabId": int(os.environ["RECREATE_NEW"]),
     "url": os.environ["RECREATE_URL"],
     "closedOldTab": os.environ["RECREATE_CLOSED"] == "true",
-    "note": ("THE TAB ID CHANGED: %s -> %s. `--reset` alone does NOT restore the "
-             "viewport size (measured); replacing the tab is the only known remedy, "
-             "so this opened a fresh tab at the same url and closed the stuck one. "
+    "note": ("THE TAB ID CHANGED: %s -> %s. You asked to REPLACE the tab rather "
+             "than repair it, so this opened a fresh tab at the same url and closed "
+             "the old one. (Plain `--reset` does restore the viewport since 0.8.1 — "
+             "see the `reset` field for whether it did. `--recreate` remains the "
+             "remedy that needs no CDP, and the only one for an un-upgraded build "
+             "or a tab orphaned by a killed agent.) "
              "Later ops in this session route to %s."
              % (os.environ["RECREATE_OLD"], os.environ["RECREATE_NEW"],
                 os.environ["RECREATE_NEW"])),
@@ -1390,33 +1396,34 @@ case "$sub" in
     # STICKY PER TAB: the extension stores the state and re-applies it inside every
     # subsequent op's CDP session. It has to — CDP emulation overrides die when the
     # debugger detaches, and the bridge always detaches. `--reset` stops the
-    # re-applying and NOTHING ELSE: it sends no CDP clears and attaches no
-    # debugger. The non-viewport overrides come back on their own, because the
-    # overrides died at the last detach and reset simply stops re-installing them.
+    # re-applying, AND — since 0.8.1 — undoes the one override that does not clean
+    # itself up.
     #
-    # 🔴 `--reset` DOES NOT RESTORE THE VIEWPORT (#319, measured 2026-08-03 on
-    # extension 0.7.2, laptop, with a fresh-tab control):
+    # WHAT STICKS, AND WHY (#319, mechanism established 2026-08-04 in a throwaway
+    # Brave over raw CDP, never-emulated control tab every round):
     #
-    #   fresh tab, never emulated   innerWidth 1124   (control — the read path works)
-    #   after `emulate iphone-15`   innerWidth  393
-    #   after `emulate --reset`     innerWidth  393   ← NOT restored
-    #   after `--reset` + re-nav    innerWidth  393   ← still NOT restored
+    #   setDeviceMetricsOverride{393x852} in session A, detach   innerWidth  394
+    #   clearDeviceMetricsOverride in a FRESH session B          innerWidth  394 ← no-op
+    #   setDeviceMetricsOverride{...} THEN the clear, session B  innerWidth 1055 ← restored
+    #   (control tab, same window, untouched)                    innerWidth 1055
     #
-    # That measurement was taken on a build whose reset DID send and report the
-    # clears (`Emulation.clearDeviceMetricsOverride`, `setTouchEmulationEnabled`,
-    # `setUserAgentOverride`) — and the size survived them, which is why the
-    # clears were NOT carried into the shipped build. Every OTHER override does
-    # revert on its own — devicePixelRatio, maxTouchPoints, pointer:coarse,
-    # prefers-color-scheme, userAgent, timeZone — because CDP overrides die at
-    # debugger detach, not because they were cleared. Only the viewport SIZE is
-    # sticky; it survives the detach AND a re-navigation. The MECHANISM IS NOT ESTABLISHED (the
-    # leading hypothesis is a render-widget resize residue; do not repeat it as
-    # fact). Closing the tab is the only known remedy.
+    # `Emulation.clearDeviceMetricsOverride` does NOTHING when the session sending
+    # it never set an override itself — and it reports success anyway. That is why
+    # PR #320, which sent exactly that, changed nothing. Arming the session with
+    # any setDeviceMetricsOverride first makes the clear work.
     #
-    # `--reset --recreate` is that remedy, automated: it resets, then replaces the
-    # stuck tab with a fresh one at the SAME url owned by the same session, and
-    # closes the stuck one. THE TAB ID CHANGES — it is reported. Plain `--reset`
-    # never swaps tab ids.
+    # It is also the dpr-vs-width asymmetry the issue could not explain: dpr,
+    # maxTouchPoints, pointer:coarse, prefers-color-scheme, userAgent and timeZone
+    # are renderer-side session state that dies at detach, while the viewport SIZE
+    # additionally resizes the browser-side render widget, and only an armed
+    # session's clear undoes that. So only the size survived the detach and a
+    # re-navigation.
+    #
+    # `--reset --recreate` is kept as the REPLACEMENT path: it needs no CDP, and it
+    # is the only remedy for an un-upgraded build or a tab orphaned by a killed
+    # agent. It resets, opens a fresh tab at the SAME url owned by the same
+    # session, and closes the old one. THE TAB ID CHANGES — it is reported. Plain
+    # `--reset` never swaps tab ids.
     #
     # OWNED TABS ONLY. `browser open` first. Emulating a tab you are browsing in is
     # refused server-side with `not_owned_tab` — an agent must not be able to

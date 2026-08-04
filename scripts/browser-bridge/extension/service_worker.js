@@ -55,6 +55,7 @@ import {
   // STICKY per tab because CDP overrides die at detach — see the EMULATION section
   // in protocol.js for the central problem and the safety property it buys.
   normalizeEmulation, emulationCdpSteps, applyEmulationSteps, emulationSummary,
+  EMULATION_RESET_CDP_STEPS,
   isTouchEmulated, touchTapEvents, DEVICE_PRESETS, PRESET_NAMES,
   annotateEmulatedRead, emulationCreateTimeSignature, documentPredatesEmulation,
   annotateDocumentPredates,
@@ -1206,25 +1207,32 @@ const OPS = {
   // rather than discovering a bad timezone id three ops later. Every subsequent op
   // that attaches CDP re-applies it (see the choke point in withCdp).
   //
-  // `--reset` means "STOP RE-APPLYING", and NOTHING ELSE. Read the branch below:
-  // it calls clearEmulation(), which is `emulationState.delete(tabId)` and no more
-  // — no debugger is attached and NOT ONE CDP message is sent. It is NOT an undo,
-  // and it must not be described as one.
+  // `--reset` does TWO things: it stops re-applying, AND it actively restores the
+  // emulated viewport by attaching a CDP session and sending the arm-then-clear
+  // pair (protocol.js EMULATION_RESET_CDP_STEPS). It IS an undo now — #319.
   //
-  // WHY IT LOOKS LIKE AN UNDO ANYWAY. The non-viewport overrides (UA, tz, dpr,
-  // touch points, prefers-color-scheme) revert ON THEIR OWN, because a CDP
-  // override lives only as long as the debugger session that set it and withCdp
-  // always detaches. Reset does not clear them; it simply stops re-installing
-  // them on the next attach. That distinction is load-bearing — anyone who
-  // believes a clear was sent will mis-diagnose the viewport.
+  // THE ORDER IN THE BRANCH IS LOAD-BEARING: clearEmulation() runs FIRST, before
+  // the attach. withCdp's re-application choke point reads `emulationFor(tabId)`
+  // at attach time, so resetting the Map afterwards would have this very session
+  // re-install the phone metrics on the way in, and the clear would then be
+  // undoing an override the reset itself had just applied.
   //
-  // THE VIEWPORT SIZE IS THE EXCEPTION and it does NOT come back: measured
-  // 2026-08-03 (ext 0.7.2, fresh-tab control), 1124 → emulate → 393 → reset →
-  // 393 → re-nav → 393. That build DID send `Emulation.clearDeviceMetricsOverride`
-  // and the size survived it anyway, which is exactly why the clears were NOT
-  // carried into this build: they are not the remedy. Mechanism unestablished
-  // (#319); replacing the tab (`--reset --recreate`) is the only known remedy.
-  // See protocol.js EMULATION.
+  // WHY THE ARMING STEP EXISTS — do not "simplify" it away. A bare
+  // clearDeviceMetricsOverride from a fresh session is a NO-OP (measured); that is
+  // why PR #320, which sent exactly that, changed nothing and was closed. Full
+  // measurement and the dpr-vs-width explanation live in protocol.js next to the
+  // step list.
+  //
+  // The other overrides (UA, tz, dpr, touch points, prefers-color-scheme) need no
+  // clear — they die with the debugger session that set them, measured. Reset just
+  // stops re-installing them.
+  //
+  // BEST-EFFORT, ALWAYS. A closed/discarded tab or a privileged scheme makes the
+  // attach throw; the state is dropped regardless and the failure is REPORTED
+  // (`restored:false` + `restoreError`) rather than raised, because the caller's
+  // "stop emulating" did succeed. `--reset --recreate` remains the remedy that
+  // needs no CDP at all — and the only one for a tab orphaned by a SIGKILL'd agent
+  // or an un-upgraded build.
   //
   // OWNERSHIP is enforced SERVER-side (server.py OWNED_TAB_ONLY_OPS → the named
   // `not_owned_tab` refusal), not here, because the server is the only side that
@@ -1236,25 +1244,48 @@ const OPS = {
 
     if (state.reset) {
       const had = emulationSummary(emulationFor(tab.id));
-      clearEmulation(tab.id);
+      clearEmulation(tab.id);            // FIRST — see the ordering note above.
+      let cleared = [];
+      let restoreError = null;
+      try {
+        cleared = await withCdp(tab.id, tab.url, (send) =>
+          applyEmulationSteps(send, EMULATION_RESET_CDP_STEPS));
+      } catch (e) {
+        restoreError = String((e && e.message) || e);
+      }
+      const restored = restoreError === null;
       return {
         tabId: tab.id, url: tab.url, reset: true,
         wasEmulating: had,
+        // The METHODS actually acknowledged by the browser, in order. Empty when
+        // the attach failed. This is the field that makes the note's claim
+        // checkable instead of trusted.
+        cleared,
+        restored,
+        ...(restoreError === null ? {} : { restoreError }),
         // 🔴 PINNED, character for character, by tests/service_worker.test.mjs
-        // ("emulate --reset: the runtime note"). That test also asserts NO
-        // debugger call is made, so the "nothing was sent" sentence cannot rot
-        // into a claim while the code does something else. If you change this
-        // string, change the test in the SAME commit — that is the point.
-        note: "emulation stopped: this tab will no longer have overrides re-applied. "
-          + "NOTHING WAS SENT TO THE BROWSER — no debugger was attached and no CDP "
-          + "clears were issued. THIS IS NOT AN UNDO. The UA, timezone, "
-          + "devicePixelRatio, touch points and prefers-color-scheme revert on "
-          + "their own, because CDP overrides die when the debugger detaches — not "
-          + "because anything cleared them. The emulated VIEWPORT SIZE does NOT "
-          + "come back: it survives the detach and a re-navigation (measured; "
-          + "mechanism unknown, issue #319). Replacing the tab is the only known "
-          + "remedy: `browser emulate --reset --recreate` opens a fresh tab at the "
-          + "same url and closes this one (the tab id changes).",
+        // ("emulate --reset: the runtime note"). Written AFTER the branch above,
+        // from what it does. If you change this string, change the test in the
+        // SAME commit — that is the point.
+        note: restored
+          ? "emulation stopped AND the emulated viewport was restored: a CDP "
+            + "session was attached and Emulation.setDeviceMetricsOverride "
+            + "{width:0,height:0} then Emulation.clearDeviceMetricsOverride were "
+            + "sent (see `cleared`). Both steps are required — a bare "
+            + "clearDeviceMetricsOverride from a session that did not itself set "
+            + "an override is a measured no-op, which is why earlier attempts to "
+            + "undo this changed nothing (#319). The UA, timezone, "
+            + "devicePixelRatio, touch points and prefers-color-scheme were NOT "
+            + "cleared and did not need to be: they die with the debugger session "
+            + "that set them. If you still see the emulated size, `browser "
+            + "emulate --reset --recreate` opens a fresh tab at the same url and "
+            + "closes this one (the tab id changes)."
+          : "emulation stopped, but the viewport restore did NOT reach the tab "
+            + "(see `restoreError`): no CDP clears were acknowledged, so this tab "
+            + "may still be stuck at the emulated size. Nothing will be re-applied "
+            + "to it from now on. The remedy that needs no CDP is `browser emulate "
+            + "--reset --recreate`, which opens a fresh tab at the same url and "
+            + "closes this one (the tab id changes).",
       };
     }
 
@@ -1295,9 +1326,13 @@ const OPS = {
       emulation: emulationSummary(state),
       applied,
       note: "sticky per tab: these overrides are re-applied inside every "
-        + "subsequent op's CDP session. Between ops the tab is NOT emulated (the "
-        + "overrides die at detach), so a crashed agent cannot leave your browser "
-        + "distorted. `browser emulate --reset` stops re-applying.",
+        + "subsequent op's CDP session. Between ops the UA, timezone, "
+        + "devicePixelRatio, touch points and prefers-color-scheme are NOT in "
+        + "force (they die at detach), but the VIEWPORT SIZE stays: it resizes the "
+        + "browser-side widget and survives the detach, so this tab is visibly the "
+        + "emulated size until you undo it. `browser emulate --reset` undoes it "
+        + "(it sends the arm-then-clear pair — #319); if the tab is orphaned by a "
+        + "killed agent, `--reset --recreate` replaces it.",
     }, documentPredatesEmulation(tab.url, emulationCreateTimeSignature(state),
                                  documentEmulation.get(tab.id)));
   },
