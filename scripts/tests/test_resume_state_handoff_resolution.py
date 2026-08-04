@@ -35,11 +35,17 @@ gate cannot see is a guard that reports no failures.
 import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 
-SCRIPT = Path(__file__).resolve().parents[1] / "resume-state.sh"
+REPO_ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(REPO_ROOT / "scripts"))
+
+from testlib.mockbin import write_exec  # noqa: E402
+
+SCRIPT = REPO_ROOT / "scripts/resume-state.sh"
 
 pytestmark = pytest.mark.skipif(
     shutil.which("git") is None or shutil.which("bash") is None,
@@ -82,13 +88,13 @@ def stub_bin(tmp_path_factory):
     d = tmp_path_factory.mktemp("stubbin")
     log = d / "invocations.log"
     for name in ("gh", "kubectl", "curl"):
-        p = d / name
-        p.write_text(
-            "#!/usr/bin/env bash\n"
-            f'printf "{name} %s\\n" "$*" >> "$STUB_LOG"\n'
-            "exit 1\n"
-        )
-        p.chmod(0o755)
+        # testlib.mockbin owns the shebang (/bin/sh, not #!/usr/bin/env). The
+        # nix build sandbox that runs the authoritative gate has no
+        # /usr/bin/env, and patchShebangs cannot reach a file a test writes at
+        # runtime — so a hand-written shebang here is green on this host and red
+        # only on the tier that gates merges. test_runtime_shebangs.py caught
+        # exactly that in this file.
+        write_exec(d / name, f'printf "{name} %s\\n" "$*" >> "$STUB_LOG"\nexit 1\n')
     return d, log
 
 
@@ -365,6 +371,31 @@ def test_drift_keeps_its_clean_message_when_a_handoff_did_load(tmp_path, stub_bi
 # --------------------------------------------------------------------------- #
 # hermeticity
 # --------------------------------------------------------------------------- #
+@pytest.mark.parametrize("tool", ["gh", "kubectl", "curl"])
+def test_stub_tripwire_actually_fires_when_the_tool_is_run(tmp_path, stub_bin, tool):
+    """POSITIVE CONTROL for the tripwire below.
+
+    That test asserts a ZERO — an empty invocation log — and a zero is
+    indistinguishable from a stub that cannot exec at all. A stub whose shebang
+    is wrong (the exact defect testlib.mockbin exists to prevent) writes nothing
+    and would make the tripwire green forever. So drive each stub directly and
+    watch the number move: 1 here, 0 under test.
+    """
+    d, log = stub_bin
+    if log.exists():
+        log.unlink()
+    env = dict(os.environ)
+    env["PATH"] = f"{d}{os.pathsep}{env['PATH']}"
+    env["STUB_LOG"] = str(log)
+    out = subprocess.run(
+        [tool, "--probe"], env=env, capture_output=True, text=True, timeout=30
+    )
+    assert out.returncode == 1, f"{tool} stub did not exec: rc={out.returncode} {out.stderr}"
+    assert log.exists(), f"{tool} stub ran but logged nothing"
+    assert log.read_text().strip() == f"{tool} --probe"
+    log.unlink()
+
+
 def test_no_network_tool_is_ever_invoked(tmp_path, stub_bin):
     """Tripwire. If a fixture ever grows a remote or a prod-kubeconfig, the
     script reaches for gh/kubectl/curl and this suite starts costing seconds
