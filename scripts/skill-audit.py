@@ -9,8 +9,9 @@ was accretion into existing files. Worst case `app-blocks/SKILL.md` = 726 KB
 ~= 182k tokens, which does not fit a 200k context at all.
 
 Reports, per skill: size vs budget, per-section (H2, then H3 inside the fattest
-H2) byte weights, dated session/changelog history blocks (the top eviction
-candidate) with a projected saving, fat lines (>500 B), and reference-file
+H2) byte weights, work-status history blocks (the top eviction candidate) with a
+projected saving, dated LESSONS reported separately because they are NOT
+evictable, fat lines (>500 B), and reference-file
 integrity in BOTH directions (a referenced file that is missing, and a file on
 disk that nothing routes to — an orphan reference file is invisible, therefore
 dead). Pure measurement — makes NO edits. The /prune-skill command runs this,
@@ -57,12 +58,27 @@ HEADING = re.compile(r"^(#{1,6})\s+(.+)$")
 # deciding whether a marker opens or closes — see _fence_map.
 FENCE = re.compile(r"^ {0,3}(?P<f>`{3,}|~{3,})(?P<info>.*)$")
 
-# A heading that names WORK DONE rather than HOW TO DO IT. An ISO date in a
-# heading is the strongest single signal (`### Session 2026-08-02 — ...`), so it
-# is matched anywhere in the title; the word forms cover undated changelogs.
-DATED_HEADING = re.compile(
-    r"\b\d{4}-\d{2}-\d{2}\b"
-    r"|\bsessions?\b"
+# 🔴 TWO DIFFERENT THINGS, and conflating them costs you your best content.
+#
+# WORK_STATUS names WORK DONE — `### Session 2026-07-29→30 — dogfood + audit`.
+# It is narrative about a past session and belongs in a claudedocs/ handoff, so
+# it is the genuine EVICT_HISTORY bucket.
+#
+# DATED_LESSON is durable guidance whose heading merely CITES a date —
+# `## Common silent-failure modes (from the 2026-05-22 audit)`, `## 🔴 The
+# INERT-ALERT defect class … (2026-08-01)`. Evicting it guts the skill. It is at
+# most a DEMOTE_TO_REFERENCE candidate.
+#
+# These were one bucket keyed on the ISO date, which made the date the dominant
+# signal. MEASURED 2026-08-04 across the 67-skill datapacket-talos corpus:
+# app-blocks carries 45 work-status headings, and EVERY OTHER SKILL CARRIES
+# ZERO — while manage-alerts has 17 dated-but-topical headings, manage-redis 15,
+# profile-dp 10. So the merged metric reported 59% "evictable history" for
+# manage-alerts whose two largest blocks were its most valuable operational
+# content. The single bucket was a true signal on 1 skill of 67 and a false one
+# on the other 66.
+WORK_STATUS_HEADING = re.compile(
+    r"\bsessions?\b"
     r"|\bchangelog\b"
     r"|\bwork\s*log\b"
     r"|\bwhat\s+(?:we\s+)?shipped\b"
@@ -70,6 +86,9 @@ DATED_HEADING = re.compile(
     r"|\bhistory\b",
     re.I,
 )
+# Only consulted for a heading that is NOT work-status; a bare date is the
+# weakest signal, so it downgrades to "review", never to "evict".
+ISO_DATE = re.compile(r"\b\d{4}-\d{2}-\d{2}\b")
 
 # A reference path mentioned in the core. Placeholders (`reference/<file>.md`)
 # deliberately do NOT match — `<` is outside the character class — so a doc that
@@ -170,15 +189,25 @@ def sections(lines, headings, level, lo=0, hi=None):
     return out
 
 
-def dated_blocks(lines, headings):
-    """Dated/changelog blocks, outermost-only (a nested one is already inside).
+def dated_blocks(lines, headings, kind="work_status"):
+    """Work-status OR dated-lesson blocks, outermost-only (a nested one is
+    already inside its parent).
+
+    kind="work_status" -> the EVICT_HISTORY bucket: narrative about a past
+    session, which belongs in a claudedocs/ handoff.
+    kind="dated_lesson" -> durable guidance that merely cites a date. NOT
+    evictable; reported separately so a reader cannot mistake one for the other.
 
     Returns (title, start, end, bytes), in file order.
     """
     out = []
     covered_until = -1
     for i, lv, title in headings:
-        if i < covered_until or not DATED_HEADING.search(title):
+        if i < covered_until:
+            continue
+        ws = bool(WORK_STATUS_HEADING.search(title))
+        hit = ws if kind == "work_status" else (not ws and bool(ISO_DATE.search(title)))
+        if not hit:
             continue
         end = _extent(headings, i, lv, len(lines))
         out.append((title, i, end, _bytes(lines[i:end])))
@@ -254,7 +283,8 @@ def audit_one(skill_md):
     heads = _headings(lines)
     size = len(text.encode())
     h2 = sections(lines, heads, 2)
-    dated = dated_blocks(lines, heads)
+    dated = dated_blocks(lines, heads, "work_status")
+    lessons = dated_blocks(lines, heads, "dated_lesson")
     fat = fat_lines(lines)
     refs, missing, orphans, n_rel, abs_base = reference_integrity(skill_md, text)
     first_h2 = h2[0][1] if h2 else len(lines)
@@ -274,6 +304,8 @@ def audit_one(skill_md):
         "h3_of_fattest": sections(lines, heads, 3, fattest[1], fattest[2]) if fattest else [],
         "dated": dated,
         "dated_bytes": sum(b for *_, b in dated),
+        "lessons": lessons,
+        "lesson_bytes": sum(b for *_, b in lessons),
         "fat": fat,
         "fat_bytes": sum(b for b, _ in fat),
         "refs": refs,
@@ -357,7 +389,7 @@ def render(audits, show_all, n_sections, n_detail, out=sys.stdout):
             if len(a["h3_of_fattest"]) > n_sections:
                 p(f"    ... {len(a['h3_of_fattest']) - n_sections} more H3 section(s)")
 
-        p("\n  dated history (EVICT_HISTORY — the top candidate)")
+        p("\n  work-status history (EVICT_HISTORY — genuinely evictable)")
         if a["dated"]:
             pct = 100.0 * a["dated_bytes"] / a["size"]
             after = a["size"] - a["dated_bytes"]
@@ -366,6 +398,20 @@ def render(audits, show_all, n_sections, n_detail, out=sys.stdout):
             p(f"    {len(a['dated'])} block(s), {a['dated_bytes']:,} B ({pct:.1f}% of the file)")
             p(f"    → evicting them to a claudedocs/ doc leaves {after:,} B — {verdict}")
             for title, _s, _e, b in sorted(a["dated"], key=lambda s: -s[3])[:5]:
+                p(f"      {b:>8,} B  {title[:64]}")
+        else:
+            p("    (none detected)")
+
+        # Reported SEPARATELY and never added to the eviction total. These were
+        # one bucket with the above, keyed on the ISO date; that read a skill's
+        # best operational content as evictable narrative on 66 of 67 skills.
+        p("\n  dated lessons (NOT evictable — durable guidance that cites a date)")
+        if a["lessons"]:
+            lpct = 100.0 * a["lesson_bytes"] / a["size"]
+            p(f"    {len(a['lessons'])} block(s), {a['lesson_bytes']:,} B ({lpct:.1f}% of the file)")
+            p("    → DEMOTE_TO_REFERENCE at most. Do NOT evict to claudedocs/: the")
+            p("      date is a citation, not a work-status marker. Read each before moving it.")
+            for title, _s, _e, b in sorted(a["lessons"], key=lambda s: -s[3])[:5]:
                 p(f"      {b:>8,} B  {title[:64]}")
         else:
             p("    (none detected)")

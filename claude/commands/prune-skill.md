@@ -27,7 +27,8 @@ BK=/tmp/skill-prune-$(date +%s); mkdir -p "$BK"; cp -a <SKILL_DIR>/. "$BK"/; ech
 
 ## 3. Classify every over-budget block (the judgment cut)
 For a big pass, dispatch read-only classifier subagents (one per fat H2) that check each block against the always-loaded files (`CLAUDE.md`, `~/.claude/RULES.md`) and the sibling skills, returning one verdict each:
-- **EVICT_HISTORY** — dated session/changelog/"what we shipped" narrative → a `claudedocs/` doc, leaving at most **one ≤200-char durable tell**. Biggest single win; this is `/prune-memory`'s "work-STATUS doesn't belong in the index" rule one level down.
+- **EVICT_HISTORY** — **work-status** narrative (`### Session …`, `Changelog`, "what we shipped") → a `claudedocs/` doc, leaving at most **one ≤200-char durable tell**. This is `/prune-memory`'s "work-STATUS doesn't belong in the index" rule one level down.
+  🔴 **A date in a heading is NOT this verdict.** `## Common silent-failure modes (from the 2026-05-22 audit)` is durable guidance that cites a date; evicting it guts the skill. The auditor reports the two separately for exactly this reason — measured across the 67-skill datapacket corpus on 2026-08-04, **app-blocks holds 45 work-status headings and every other skill holds ZERO**, while carrying 8–17 dated-but-topical ones. Read the auditor's "dated lessons" section as DEMOTE candidates, never as eviction candidates.
 - **DEMOTE_TO_REFERENCE** — long-but-real procedures, tables, gotcha-depth → `reference/<topic>.md` beside the skill, with **ONE routing line** left in the core ("load it when…"). Free, exactly like the index's topic files.
 - **DROP_REDUNDANT** — already in an always-loaded file or another skill; **cite where**, then delete.
 - **MERGE_DUP** — the same gotcha restated across N appended sections → one statement.
