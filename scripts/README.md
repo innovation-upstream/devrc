@@ -70,6 +70,7 @@ Click actions for those blocks:
 | `verify-agent-work` | deterministic, repo-aware post-agent verification gate |
 | `find-session.py` | find past Claude Code sessions by keyword |
 | `memory-audit.py` | audit a project's auto-memory index (`MEMORY.md`) |
+| `skill-audit.py` | audit `SKILL.md` byte budgets + reference routing (`/prune-skill`) |
 | `resume-state.sh` | initiative-scoped live-state reconciler for `/resume` |
 | `obs-read` | one-command, cluster-aware observability query tool |
 | `playwright-nixos` | drive Playwright with the nixpkgs-provided Chromium |
