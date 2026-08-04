@@ -102,8 +102,21 @@ in
 
           # Workflows
           # (:whn removed 2026-07-06 — 0 fires over the audit window, superseded by
-          #  /handoff + :eos which ends "…then write the handoff to proceed in next session")
-          { trigger = ":eos"; replace = "reflect on work done and key learnings this session then identify skills and documentation that may need updating, then dispatch subagent to update those skills and any relevant docs, then do the handoff to proceed in next session"; label = "End-of-session ritual: review → update skills/docs → handoff"; search_terms = ["end" "session" "wrap" "handoff" "skills" "review" "update" "docs" "ritual"]; }
+          #  /handoff + :eos, which now OPENS with the handoff rather than ending on it)
+          # 2026-08-04: rewritten to carry an EVICTION half. Every verb in the old text
+          # was additive ("identify skills that may need updating" → "update those
+          # skills"), and the subagent it dispatched arrived with no byte budget and no
+          # view of the file's size, so appending was the cheapest way to comply.
+          # Measured downstream over 30 days: 5,355 lines added vs 863 deleted across
+          # every SKILL.md — 84% of edit volume pure addition. app-blocks/SKILL.md grew
+          # 42,425 B in a single day (2026-08-03→04), more than the whole 40,960 B cap.
+          # The ritual also asked for a reflection on "work done this session", which is
+          # session-SHAPED, so the subagent wrote session-shaped blocks: 42 dated
+          # `### Session …` headings, 43% of that file. Handoff now comes FIRST so the
+          # narrative has a home before any skill is touched. This is the weak half —
+          # a snippet enforces nothing; the gate is what makes it stick. See
+          # /prune-skill + scripts/skill-audit.py.
+          { trigger = ":eos"; replace = "reflect on work done and key learnings this session, then write the handoff FIRST — all session narrative, status and what-shipped goes THERE, never into a skill. Then extract only the durable reusable lessons, and name the single skill or doc that should own each. Then dispatch subagent to fold them in under these rules: report each target file's byte size before and after; every edit must be net-neutral or smaller — evict, merge or demote something stale in the SAME edit; never append a dated session block to a SKILL.md; collapse a retraction to a one-line do-not-re-derive tell rather than preserving the superseded belief; if a file is over budget with nowhere to demote to, say so instead of appending. Then give me the kickoff message."; label = "End-of-session ritual: handoff first → durable lessons only → net-neutral skill edits"; search_terms = ["end" "session" "wrap" "handoff" "skills" "review" "update" "docs" "ritual" "prune" "evict" "bloat"]; }
           { trigger = ":acq"; replace = "dispatch subagent to process feedback\nask me clarifying questions and recommend anything you think would be useful to include before dispatching (include complete test coverage)"; label = "Ask clarifying questions + suggest additions"; search_terms = ["ask" "clarify" "clarifying" "questions" "elicit" "scope" "include"]; }
           { trigger = ":kickoff"; replace = "give me the kickoff message to copy paste to next session"; label = "Kickoff message for next session"; search_terms = ["kickoff" "kick off" "next session" "copy paste" "handoff" "message"]; }
           # Removed 2026-07-25 via /espanso-audit — all keylog-evidence-backed:
