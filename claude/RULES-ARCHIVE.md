@@ -34,15 +34,21 @@ the last revision before the core/archive split.
 - [nine-broken-harnesses](#nine-broken-harnesses)
 - [positive-control](#positive-control)
 - [parsing-tool-output](#parsing-tool-output)
+- [isolation-seam](#isolation-seam)
+- [spelled-guards](#spelled-guards)
 
 **Memory / Failure Investigation**
 - [stale-observation](#stale-observation)
 - [empty-result](#empty-result)
 
+**Deterministic Over Prose**
+- [consolidation-finds-bugs](#consolidation-finds-bugs)
+
 **Green Test Suite**
 - [merged-tree](#merged-tree)
 - [two-tiers](#two-tiers)
 - [declarations-vs-instances](#declarations-vs-instances)
+- [count-not-exit-code](#count-not-exit-code)
 
 **Git Workflow**
 - [wrong-branch-writes](#wrong-branch-writes)
@@ -54,6 +60,7 @@ the last revision before the core/archive split.
 
 **Shell & Tooling**
 - [readlink-arbiter](#readlink-arbiter)
+- [zsh-unbraced-var](#zsh-unbraced-var)
 
 ---
 
@@ -297,3 +304,113 @@ terminates at `/nix/store/…-hm_RULES.md`, a read-only **regular file** — a c
 An agent called the browser skill an in-store copy because the two files were byte-identical —
 but identity was simply the consequence of their being **one file**, and acting on it meant
 either an unnecessary rebuild or, worse, treating a live edit as inert.
+
+## zsh-unbraced-var
+*Supports: 🔴 "zsh's unbraced `$var` is NOT bash's — two traps." (Shell & Tooling).*
+
+**(a) No word-splitting.** `for x in $SPACE_SEPARATED` loops **once** with the whole string as
+`$x`; a following `${x%%:*}`/`${x##*:}` then silently grabs the wrong field. Bit prod: a
+`node:ip` loop ran one iteration and applied one node's Talos machineconfig to the **last**
+node's IP.
+
+**(b) History modifiers apply inside parameter expansion.** Measured 2026-08-03 under `zsh -f`:
+
+```
+B=feature/foo
+"origin/$B:e2e/uxaudit/fakes.go"    →  origin/2e/uxaudit/fakes.go     # WRONG, silent
+"origin/${B}:e2e/uxaudit/fakes.go"  →  origin/feature/foo:e2e/uxaudit/fakes.go
+```
+
+zsh parses `$B:e` as `$B` with the **`:e` (extension) history modifier**; `feature/foo` has no
+extension, so it expands to the empty string and the literal `2e/uxaudit/fakes.go` survives.
+The result is a well-formed path that is simply *wrong* — `git show` then reports a plausible
+"does not exist in" error about a ref nobody typed, so the failure reads as a missing file
+rather than a quoting bug. bash does not do this.
+
+The modifier set is `e` (extension), `h` (head), `t` (tail), `r` (root), `s` (substitute) and
+`gs`, so the collision surface is any `$var` immediately followed by `:` plus one of those
+letters — git refs (`$B:path`), `rsync`/`scp` targets (`$HOST:/path`), and timestamps.
+
+## count-not-exit-code
+*Supports: 🔴 "COUNT the tests; never read an exit code." (Green Test Suite).*
+
+Four separate false greens in one session:
+
+1. a wrapper's trailing `echo`, whose exit status replaced the suite's;
+2. a trailing `grep` with no match (exit 1) at the end of a pipeline;
+3. a suite truncated by `panic: test timed out`, which **still reported `FAIL=0`**;
+4. a piped `grep` inside `nix-shell --run`, where the runner's status was lost.
+
+A known-red slow test must be `-skip`ped BY NAME, or it eats the suite budget and silently
+truncates everything after it — that truncation hid two regressions through two "green" full
+runs.
+
+## consolidation-finds-bugs
+*Supports: 🔴 "Consolidation is also a BUG-FINDING instrument, not just hygiene."*
+
+Consolidating a duplicated predicate is normally filed as cleanup. Measured on civitai-manager
+2026-08-03, it repeatedly surfaced live defects nobody was hunting:
+
+- **An empty / `class_type`-less prompt was being SUBMITTED to ComfyUI.** A third call site
+  already refused those, so the gate was the odd one out among three. Nothing was looking for
+  this; it fell out of putting the three copies side by side.
+- **`canQueue`** — three copies.
+- **The node-pack `needed()` predicate** — three sites, all wrong *in the same direction*.
+  Fixing only the reported one would have left a required pack demoted and mislabelled.
+
+Mechanism: a predicate open-coded at N sites is typically wrong at N−1 of them **in the same
+direction**, because each copy was written from the same incomplete mental model. That is why
+reading the copies individually finds nothing — they agree with each other. Unifying them is
+what makes the disagreement with the *correct* rule audible.
+
+## isolation-seam
+*Supports: 🔴 ""Verified in isolation" is the new vacuous green."*
+
+Two civitai-manager features shipped in consecutive releases: a pre-click **readiness line** and
+a post-failure **panel**. Each had hermetic tests, mutation matrices, live-browser checks and
+multiple audit rounds. Clicking Generate on a workflow that could not run rendered **both, 0px
+apart**, with the same counts and the same caveat. No test or audit ever constructed that state,
+because each was scoped to one surface — B's reviewer ran before A existed, and neither
+fixture loaded the other's component.
+
+**Four more of the same shape, all measured in one session:**
+
+- the axe fixture that **never rendered the panel's custom-node half** — so "0 violations" was a
+  fact about a surface never loaded. Closing it took captures 24 → 26 and immediately surfaced a
+  *serious* keyboard-accessibility bug;
+- a lab fixture with `comfy_model_path` already set, so the setup disclosure never rendered;
+- a CI job that never compiled the nested `e2e/uxaudit` module;
+- `cardInstallBlockedText`, which has **never been axe-scanned in any wording** because it
+  renders inside a `<dialog>` the walk never opens.
+
+**The guard that closes a seam pins a RELATIONSHIP, not a component.** Worked example:
+`TestEveryRunStatusWriterGoesThroughRunStatusBody` (`internal/web/run_status_writers_web_test.go`)
+AST-parses the package's non-test source and asserts a **two-entry ledger** of everything allowed
+to call `runStatusFragment` — failing when the set GROWS (a new writer bypasses the owner) *and*
+when it SHRINKS (a listed caller no longer exists). It carries a scanner precondition
+(`if files < 20 { t.Fatalf }`) so a broken parse cannot pass as "no offenders".
+
+It is paired with a behavioural table (`TestEveryRunStartingEndpointClearsTheReadinessLine`)
+because the structural check is blind to a **wrong argument**: passing the wrong id into
+`runStatusBody` type-checks perfectly and still writes the line to the wrong workflow. Structure
+and behaviour catch different halves; neither alone closes the seam.
+
+## spelled-guards
+*Supports: 🔴 "A guard can be SPELLED rather than STRUCTURAL."*
+
+The test is one question: **can this guard pass while the hazard exists in a different shape?**
+Four measured instances:
+
+1. **`Contains(body, "disabled")`** — satisfied by htmx's `hx-disabled-elt` attribute on a
+   perfectly **live** button. Green for an accidental reason; worse, its failure message
+   *instructed* a maintainer to reintroduce the dead button it was meant to forbid.
+2. **A "no dead control" guard that knew only the old button's exact label**, so a
+   differently-labelled disabled button passed the whole suite.
+3. **A newly-added branch with no no-POST guard at all** — a planted POSTing button caused
+   **zero** failures.
+4. **An invariant asserted at 1 of 14 writers.** Reverting the other 13 — including the one
+   response that must clear the line the user is looking at — left the suite green.
+
+The remedy is to assert a **state**, not a spelling: an `id` plus the attribute on the same
+element, an ARIA role, or an enumerated set of allowed callers. Any assertion whose subject is a
+word that another feature is free to use is a coincidence waiting to be relied on.
