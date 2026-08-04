@@ -267,6 +267,29 @@ test("pollHeaders carries the extension ID — WHICH DIRECTORY Brave loaded", ()
   assert.deepEqual(pollHeaders("uuid-3", ""), { "X-Bridge-Instance-Id": "uuid-3" });
 });
 
+test("pollHeaders carries the BUILD MARKER — WHICH CODE is executing (#324)", () => {
+  // The version and the id both describe the load DIRECTORY: the version is read
+  // off the on-disk manifest at call time, the id is path-derived. MEASURED
+  // 2026-08-04 — two profiles on ONE directory reported an identical id, an
+  // identical 0.7.3 and `extension_stale:false` while running different code.
+  // The marker is a literal in the loaded module graph, so it travels with the
+  // code and is the field the server's staleness verdict is computed from.
+  const h = pollHeaders("uuid-1", "work", null, "0.8.0", "abcdefghijklmnop",
+    "00000000fakemark");
+  assert.equal(h["X-Bridge-Ext-Build"], "00000000fakemark");
+  assert.equal(h["X-Bridge-Ext-Version"], "0.8.0");
+  assert.equal(h["X-Bridge-Ext-Id"], "abcdefghijklmnop");
+  // Optional + backwards-safe like the other identity headers: a build that
+  // predates the marker omits it, and the server then reports the verdict as
+  // null (undecidable) rather than false.
+  assert.equal(
+    pollHeaders("uuid-2", "work", null, "0.7.3", "abcdefghijklmnop")["X-Bridge-Ext-Build"],
+    undefined);
+  assert.equal(pollHeaders("uuid-3", "", null, null, null, "")["X-Bridge-Ext-Build"],
+    undefined);
+  assert.deepEqual(pollHeaders("uuid-4", ""), { "X-Bridge-Instance-Id": "uuid-4" });
+});
+
 // --- poll-response classification: the distinct supersede signal ------------ //
 test("classifyPollStatus distinguishes command / idle / superseded / auth", () => {
   assert.equal(classifyPollStatus(200), POLL_COMMAND);

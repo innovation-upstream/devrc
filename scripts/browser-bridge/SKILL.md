@@ -55,8 +55,8 @@ Result payloads land under `.result.data`.
 | command | does |
 |---|---|
 | `whoami` | **read-only identity** (global; no `--instance`/`--tab`) — host label (`laptop`/`workbench`), connected instances (active-tab **domain** only), bridge diagnostics, `extension_version_current` |
-| `health` / `instances` | connected instances + count (`instances` as JSON: key, label, instanceId, active-tab url/title), each with an explicit `extension_stale` verdict (`true`/`false`; `null` = undecidable) |
-| `ping` | **which extension build+dir is loaded?** → `{pong,extensionVersion,id,ops}`; older build → `unknown_op`. The only deterministic answer after a ↻ reload |
+| `health` / `instances` | connected instances + count (JSON: key, label, instanceId, tab url/title), each with an `extension_stale` verdict from the BUILD MARKER, not the version (`null` = undecidable, fails closed) |
+| `ping` | **which extension CODE is loaded?** → `{pong,extensionVersion,buildMarker,id,ops}`; read `buildMarker` — version+id describe the DIRECTORY. Staleness is PER PROFILE |
 | `context` | **page metadata, no DOM read** — url/domain/path/query/title/tabId, tab-scoped. Cheapest read; ⚠ NOT a render check → `reference/read-envelopes.md` |
 | `open [url] [--wake[=MS]]` | open a NEW tab this session owns (default `about:blank`, **created in the BACKGROUND/hidden**), returns `tabId`. Idempotent — a re-`open` does NOT navigate (url DISCARDED). Use for multi-step work |
 | `close` / `release` | close this session's owned tab / drop ownership without closing it |

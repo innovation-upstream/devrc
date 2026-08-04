@@ -64,6 +64,12 @@ import {
   annotatedTextFn, ANNOTATED_TEXT_MAX_ITEMS_DEFAULT, byteCapElements,
 } from "./protocol.js";
 
+// The BUILD MARKER (#324) — a generated LITERAL that travels with THIS module
+// graph. Imported (not fetched, not read off the manifest) on purpose: see the
+// header comment in build_id.js for why every runtime-read alternative
+// reproduces the bug it fixes.
+import { BUILD_MARKER } from "./build_id.js";
+
 const DEFAULT_PORT = 8788;
 let running = false;
 // Wall-clock (Date.now) stamped at the START of each poll-loop iteration — NOT
@@ -105,6 +111,24 @@ function extensionVersion() {
   }
 }
 
+// The BUILD MARKER of the code that is ACTUALLY EXECUTING (#324) — the one
+// freshness signal that is not a statement about the load directory.
+// `extensionVersion()` above and `extensionId()` below both describe the
+// DIRECTORY: the version is read from the on-disk manifest at call time, and
+// the id is derived from the load path. Measured 2026-08-04 — two profiles on
+// one directory reported the same id, the same version and `extension_stale:
+// false` while running different code. BUILD_MARKER is a literal in an imported
+// module, so a stale worker reports the STALE value by construction.
+// Best-effort ("" if the import is somehow absent, e.g. under a unit-test
+// module mock) — the server treats "" as UNDECIDABLE, never as "current".
+function buildMarker() {
+  try {
+    return (typeof BUILD_MARKER === "string" && BUILD_MARKER) || "";
+  } catch (e) {
+    return "";
+  }
+}
+
 // `chrome.runtime.id` — the extension's ID, which for an UNPACKED extension is
 // derived from the absolute directory Brave loaded it from. That makes it the
 // only signal that distinguishes a repo-path load from a
@@ -128,6 +152,7 @@ async function config() {
     instanceId: await instanceId(),
     extVersion: extensionVersion(),
     extId: extensionId(),
+    extBuild: buildMarker(),
   };
 }
 
@@ -1371,8 +1396,17 @@ const OPS = {
   // component, so two profiles on one directory report one id. The expected id
   // is therefore computable in advance; see extension/README.md "The path→id
   // derivation (MEASURED)".
+  // `buildMarker` (#324) is the field that actually answers the question. Both
+  // `extensionVersion` and `id` describe the DIRECTORY Brave loaded from, so
+  // two profiles on one directory report identical values while running
+  // different code (measured 2026-08-04). The marker is a literal in this
+  // worker's own module graph, so it is a statement about the RUNNING code.
+  // `extensionVersion` is kept — it is still a useful hint and older tooling
+  // reads it — but the server's `extension_stale` verdict is computed from the
+  // marker now, and fails closed (null) when either side lacks one.
   async ping() {
     return { pong: true, extensionVersion: extensionVersion(),
+             buildMarker: buildMarker(),
              id: extensionId(), ops: ALLOWED_OPS.slice() };
   },
 
@@ -1510,7 +1544,7 @@ async function pollOnce(cfg, retired) {
     // Identify this instance so the server routes only its commands here.
     headers: { ...authHeaders(cfg.token),
                ...pollHeaders(cfg.instanceId, cfg.label, active, cfg.extVersion,
-                              cfg.extId) },
+                              cfg.extId, cfg.extBuild) },
     signal: abortAfter(loopTiming().pollMs),
   });
   const kind = classifyPollStatus(res.status);

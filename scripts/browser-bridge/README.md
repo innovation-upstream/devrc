@@ -80,18 +80,34 @@ design when two profiles were connected).
   `~/.local/share/browser-bridge-ext/`, falling back to the repo copy). It answers
   "am I on the laptop or the workbench, and which profile?" in one shot (both
   hosts are hostname `nixos`).
-  **Explicit staleness verdict.** Each instance carries `extension_version`
-  (loaded), `extension_version_expected`, and **`extension_stale`**: `true` (the
-  loaded build differs → reload it), `false` (versions match), or **`null` =
-  undecidable** — the instance reports no version (a build predating the
-  `X-Bridge-Ext-Version` poll header) or no manifest is readable. `null` is never
-  "fine"; the server does not guess. This replaces the earlier "eyeball two
-  strings" arrangement, which existed only because the manifest version was not
-  bumped per-change — bumping it is now part of the change contract.
-  ⚠ `extension_stale:false` is a **version** match, not a code match: a change
-  shipped without a manifest bump is invisible to it, and it says nothing about
-  WHICH DIRECTORY the build came from. The deterministic checks are
-  **`browser ping`** and the per-instance **`extension_id`** (below).
+  **Explicit staleness verdict — computed from the BUILD MARKER (#324).** Each
+  instance carries `extension_version` (loaded), `extension_version_expected`,
+  `extension_build`, `extension_build_expected`, and **`extension_stale`**:
+  `true` (this profile is running code that is not the deployed code → Remove +
+  Load unpacked it), `false` (**verified current**), or **`null` = undecidable**.
+  The bridge carries `extension_build_current` alongside
+  `extension_version_current`.
+
+  🔴 The verdict is **not** a version comparison, and cannot be. `extension_version`
+  is `chrome.runtime.getManifest().version` — read off the on-disk manifest at
+  call time — and `extension_id` is derived from the load PATH, so **both describe
+  the DIRECTORY, not the code that is executing**. MEASURED 2026-08-04: two Brave
+  profiles loading the SAME directory reported an identical id, an identical
+  `0.7.3` and `extension_stale: false`, while one ran `main` and the other an
+  unmerged 0.7.2 build whose source existed on no disk. `extension_build` is a
+  generated LITERAL (`extension/build_id.js`) that the service worker **imports**,
+  so it is frozen into the loaded module graph and travels with the code — a stale
+  worker reports the stale marker by construction.
+
+  🔴 **It FAILS CLOSED.** A marker missing on *either* side — an extension build
+  predating #324, or an unreadable/undeployed source tree — yields `null`, never
+  `false`. `false` means verified-current and nothing else; `null` is never
+  "fine". Staleness is also **per profile**: one can be current while another is
+  not, at the same instant, from one directory.
+  ⚠ A marker still cannot see a change you made and never deployed, and it says
+  nothing about WHICH DIRECTORY the build came from — for that, read
+  **`extension_id`** (below), and prefer a behavioural discriminator when the
+  change has one.
   Each instance also carries **`extension_id`** (`chrome.runtime.id`, path-derived
   for an unpacked extension), and the bridge carries **`extension_dir_expected`**
   (the directory Brave should be pointed at). The server never computes an
@@ -981,18 +997,28 @@ NOT swap in the new build. Symptom of a stale extension: a NEW op (e.g. `upload`
 on a pre-0.2.0 build) returns a server-side op-level **`unknown_op`** — the server
 knew the op and dispatched it, but the old service worker didn't. The **CLI maps
 that to a clear reload/restart message + non-zero exit**, and **`browser health`
-shows the loaded `extension_version` vs `extension_version_current` plus an
-explicit `extension_stale` verdict** so you can confirm. If a reload doesn't take,
-**fully quit and reopen Brave** (never `pkill` it — `restore_on_startup` is unset
-on both profiles, so the operator's tabs would be gone for good).
+shows the loaded `extension_build` vs `extension_build_current` plus an
+explicit `extension_stale` verdict** so you can confirm. 🔴 A full quit/reopen of
+Brave has been MEASURED not to be sufficient either (2026-08-04: oldest browser
+process 392 s, deploy 9 h earlier, still running the old code) — the reliable
+step is a **per-profile Remove + Load unpacked** at `brave://extensions`. Never
+`pkill` Brave — `restore_on_startup` is unset on both profiles, so the operator's
+tabs would be gone for good.
 
 ### `browser ping` — the deterministic "is the new build loaded?" probe
 
 ```bash
 browser --instance <label> ping
-# NEW → {"pong":true,"extensionVersion":"0.4.0","id":"<ext-id>","ops":[…,"ping"]}
+# NEW → {"pong":true,"extensionVersion":"0.8.0","buildMarker":"<hex>","id":"<ext-id>","ops":[…]}
 # OLD → op 'ping' returned unknown_op — … FULLY RESTART Brave …        (exit 1)
 ```
+
+🔴 **Read `buildMarker`.** It is the only field that describes the RUNNING CODE
+(a literal in the loaded module graph); `extensionVersion` and `id` both describe
+the load DIRECTORY, so two profiles on one directory report identical values
+while running different code (#324). Compare it against `whoami`'s
+`bridge.extension_build_current`, and check **every** profile — staleness is
+per-profile.
 
 Pass `--instance`: with two profiles connected, a bare call gets
 `409 ambiguous_instance` instead of an answer.
@@ -1406,14 +1432,17 @@ per-session (multi-step **workflow**) isolation did not.
   The multi-instance `--instance` targeting, ambiguity/supersede semantics, and
   telemetry are unchanged.
 
-`GET /health` → `{"ok":true,"extension_connected":bool,"count":N,"extension_version_current":"<deployed-else-repo manifest>","instances":[{key,label,instanceId,activeTab,extension_version,extension_id,extension_version_expected,extension_stale},…]}`.
+`GET /health` → `{"ok":true,"extension_connected":bool,"count":N,"extension_version_current":"<deployed-else-repo manifest>","extension_build_current":"<deployed-else-repo build_id.js>","instances":[{key,label,instanceId,activeTab,extension_version,extension_id,extension_build,extension_version_expected,extension_build_expected,extension_stale},…]}`.
 Each instance carries its **loaded `extension_version`** (from the `X-Bridge-Ext-Version`
 poll header; `null` until a build that reports it), its **`extension_id`** (from
 `X-Bridge-Ext-Id`; `null` likewise — this is the path-derived
-`chrome.runtime.id`, i.e. WHICH DIRECTORY was loaded), the
-`extension_version_expected`, and the explicit **`extension_stale`** verdict
-(`true`/`false`/`null`=undecidable).
-`extension_version_current` is the manifest the server expects Brave to have loaded:
+`chrome.runtime.id`, i.e. WHICH DIRECTORY was loaded), its **`extension_build`**
+(from `X-Bridge-Ext-Build` — the BUILD MARKER of the code actually EXECUTING,
+`null` on a build predating #324), both `_expected` values, and the explicit
+**`extension_stale`** verdict (`true`/`false`/`null`=undecidable), which is
+computed from the MARKER and **fails closed** to `null` when either side lacks one.
+`extension_version_current` is the manifest the server expects Brave to have loaded
+and `extension_build_current` the marker in the `build_id.js` beside it:
 the deployed `~/.local/share/browser-bridge-ext/` copy, else the repo one.
 `GET /instances` → `{"ok":true,"count":N,"instances":[…]}`.
 
@@ -1919,9 +1948,9 @@ systemctl --user status browser-bridge
 3. Open the extension's **options** (⋯ → Options / "Extension options"), paste the
    token from `~/.config/browser-bridge/token`, port `8788`, **Save**.
 4. `scripts/browser-bridge/browser health` → `{"ok":true,"extension_connected":true}`
-   with `extension_stale:false` on the instance, and
+   with `extension_stale:false` on the instance (`null` = undecidable, NOT ok), and
    `scripts/browser-bridge/browser --instance <label> ping` →
-   `{"pong":true,"extensionVersion":"0.4.0","id":"<ext-id>",…}` (an `unknown_op`
+   `{"pong":true,"extensionVersion":"0.8.0","buildMarker":"<hex>","id":"<ext-id>",…}` (an `unknown_op`
    here means Brave is still running an older build). Record that `id` — it is
    the per-profile baseline for "which directory is loaded".
 5. Focus a tab where you are **logged in** (e.g. Gmail), then

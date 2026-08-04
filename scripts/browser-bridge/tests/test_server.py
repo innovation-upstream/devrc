@@ -58,6 +58,25 @@ def pinned_manifest(tmp_path, monkeypatch):
     monkeypatch.setattr(S, "_EXT_MANIFEST_PATH", tmp_path / "no-repo-manifest.json")
     return PINNED_VERSION
 
+
+# The build marker the staleness tests pin. Same hermeticity argument as
+# PINNED_VERSION: build_marker() prefers the DEPLOYED extension tree, so a test
+# that asserts a verdict must pin it or it reads the operator's live deploy
+# state. Deliberately not a real marker so a leak is obvious.
+PINNED_BUILD = "deadbeefcafef00d"
+
+
+@pytest.fixture
+def pinned_build(tmp_path, monkeypatch):
+    """Pin build_marker() to PINNED_BUILD, hermetically: a tmp deployed
+    build_id.js + a non-existent repo fallback. Never reads host state."""
+    deployed = tmp_path / "pinned-build_id.js"
+    deployed.write_text(f'export const BUILD_MARKER = "{PINNED_BUILD}";\n',
+                        encoding="utf-8")
+    monkeypatch.setattr(S, "_DEPLOYED_EXT_BUILD_ID", deployed)
+    monkeypatch.setattr(S, "_EXT_BUILD_ID_PATH", tmp_path / "no-repo-build_id.js")
+    return PINNED_BUILD
+
 # The in-repo activity spool emitter (single source of truth for the v1 line
 # format). scripts/browser-bridge/tests/ -> parent.parent.parent == scripts/.
 SPOOL_EMIT_PY = (Path(__file__).resolve().parent.parent.parent
@@ -183,7 +202,7 @@ class FakeExtension(threading.Thread):
 
     def __init__(self, srv, instance_id="fake-1", label="", executor=None,
                  swallow=False, active_url=None, active_title=None,
-                 ext_version=None, ext_id=None):
+                 ext_version=None, ext_id=None, ext_build=None):
         super().__init__(daemon=True)
         self.srv = srv
         self.instance_id = instance_id
@@ -194,6 +213,7 @@ class FakeExtension(threading.Thread):
         self.active_title = active_title
         self.ext_version = ext_version  # reported via X-Bridge-Ext-Version (or None)
         self.ext_id = ext_id            # reported via X-Bridge-Ext-Id (or None)
+        self.ext_build = ext_build      # reported via X-Bridge-Ext-Build (or None)
         self.dispatched = []    # every command this fake picked up (for assertions)
         self._stopev = threading.Event()
 
@@ -209,6 +229,8 @@ class FakeExtension(threading.Thread):
             h[S.HDR_EXT_VERSION] = urllib.parse.quote(self.ext_version)
         if self.ext_id:
             h[S.HDR_EXT_ID] = urllib.parse.quote(self.ext_id)
+        if self.ext_build:
+            h[S.HDR_EXT_BUILD] = urllib.parse.quote(self.ext_build)
         return h
 
     def run(self):
@@ -4023,6 +4045,126 @@ def test_manifest_version_matches_the_declared_build():
 PINNED_EXT_VERSION = declared_ext_versions()[0]
 
 
+# --------------------------------------------------------------------------- #
+# 🔴 THE BUILD-MARKER DRIFT GATE (#324) — read this before "fixing" a failure
+# here by editing a hex string.
+#
+# extension/build_id.js is GENERATED. Its `BUILD_MARKER` literal is a digest over
+# the extension source, and it is the value `extension_stale` is computed from —
+# so a marker that silently goes stale reintroduces the bug this whole change
+# exists to fix: a profile running old code would report a marker matching the
+# new deployed source and read `extension_stale: false`.
+#
+# The derivation lives in gen-build-marker.py and is IMPORTED here rather than
+# reimplemented — a second copy of the rule is how a gate like this drifts into
+# agreeing with itself. To fix a red:
+#
+#     python3 scripts/browser-bridge/gen-build-marker.py
+#
+# and commit the regenerated build_id.js in the SAME commit as the source change.
+# --------------------------------------------------------------------------- #
+def _load_gen_build_marker():
+    """Import gen-build-marker.py by path (the filename has dashes, so it is not
+    importable by name)."""
+    import importlib.util
+    path = Path(__file__).resolve().parent.parent / "gen-build-marker.py"
+    spec = importlib.util.spec_from_file_location("gen_build_marker", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+GEN = _load_gen_build_marker()
+COMMITTED_BUILD_MARKER = GEN.read_marker(EXT_DIR / "build_id.js")
+
+
+def test_build_marker_generator_is_wired_to_something(tmp_path):
+    """HARNESS SELF-CHECK for the drift gate below — its positive and negative
+    controls. Without these, a generator that hashed nothing (or hashed a
+    constant) would make the gate report success while testing NOTHING.
+
+    POSITIVE control: change an extension source file and the computed marker
+    MUST move. That is the exact failure the gate is supposed to catch, so if
+    this cannot move the number the gate can only ever pass."""
+    src = tmp_path / "ext"
+    src.mkdir()
+    shutil.copy(EXT_DIR / "manifest.json", src / "manifest.json")
+    for js in EXT_DIR.glob("*.js"):
+        shutil.copy(js, src / js.name)
+    before = GEN.compute_marker(src)
+    assert before == GEN.compute_marker(src), "must be deterministic"
+
+    # (1) touching a hashed source file moves the marker
+    sw = src / "service_worker.js"
+    sw.write_text(sw.read_text(encoding="utf-8") + "\n// positive control\n",
+                  encoding="utf-8")
+    after = GEN.compute_marker(src)
+    assert after != before, (before, after)
+
+    # (2) so does a manifest bump
+    src2 = tmp_path / "ext2"
+    shutil.copytree(src, src2)
+    (src2 / "manifest.json").write_text('{"version": "0.0.0"}', encoding="utf-8")
+    assert GEN.compute_marker(src2) != GEN.compute_marker(src)
+
+    # (3) build_id.js is EXCLUDED (no self-reference): rewriting it must NOT move
+    #     the marker, or regeneration could never converge.
+    (src / "build_id.js").write_text('export const BUILD_MARKER = "ffff";\n',
+                                     encoding="utf-8")
+    assert GEN.compute_marker(src) == after
+    names = [p.name for p in GEN.marker_inputs(src)]
+    assert "build_id.js" not in names, names
+    assert "service_worker.js" in names and "protocol.js" in names, names
+    assert "manifest.json" in names, names
+
+    # NEGATIVE control: fed a directory with nothing to hash, it must FAIL
+    # LOUDLY rather than returning a digest of the empty string.
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    with pytest.raises(AssertionError, match="hashed ZERO files"):
+        GEN.compute_marker(empty)
+
+
+def test_committed_build_marker_matches_the_extension_source():
+    """THE GATE. extension/build_id.js must be the digest of the extension
+    source it ships with. Any extension change that forgets to regenerate it
+    fails here, naming the command to run."""
+    want = GEN.compute_marker(EXT_DIR)
+    assert COMMITTED_BUILD_MARKER == want, (
+        f"extension/build_id.js declares BUILD_MARKER "
+        f"{COMMITTED_BUILD_MARKER!r} but the extension source hashes to "
+        f"{want!r}. The marker is what `extension_stale` compares, so a stale "
+        f"one lets a profile running OLD code report `false`. Regenerate it in "
+        f"the SAME commit as the source change:\n\n    {GEN.REGEN_CMD}\n\n"
+        f"Do NOT 'fix' this by editing the hex string by hand.")
+
+
+def test_build_marker_check_mode_agrees_with_the_gate():
+    """`gen-build-marker.py --check` is what a human runs; it must give the same
+    verdict as the CI gate above (a check mode that could disagree would be a
+    second source of truth about what is current)."""
+    assert GEN.main(["--check"]) == 0
+
+
+def test_service_worker_imports_the_marker_as_a_literal():
+    """🔴 The marker must travel with the CODE, and that property comes entirely
+    from it being a static import of a literal. Anything the worker reads at
+    RUNTIME (getManifest, fetch(getURL(...)), chrome.storage) reproduces the
+    exact bug #324 documents, because a stale worker reads the NEW file.
+
+    So: build_id.js must declare a literal and reach for no runtime read, and
+    service_worker.js must import it statically and report it from `ping`."""
+    body = (EXT_DIR / "build_id.js").read_text(encoding="utf-8")
+    assert re.search(r'export const BUILD_MARKER = "[0-9a-f]+";', body), body
+    code = [ln for ln in body.splitlines() if not ln.lstrip().startswith("//")]
+    code = "\n".join(code)
+    assert "fetch(" not in code and "getManifest" not in code, code
+    sw = (EXT_DIR / "service_worker.js").read_text(encoding="utf-8")
+    assert 'import { BUILD_MARKER } from "./build_id.js";' in sw
+    # ping must report it — the discriminator an older build cannot fake.
+    assert "buildMarker: buildMarker()" in sw
+
+
 def test_manifest_version_reads_current():
     v = S.manifest_version(path=EXT_DIR / "manifest.json")
     assert isinstance(v, str) and v == PINNED_EXT_VERSION
@@ -4055,31 +4197,138 @@ def test_manifest_version_none_when_neither_exists(tmp_path, monkeypatch):
     assert S.manifest_version() is None
 
 
+# --------------------------------------------------------------------------- #
+# 🔴 THE BUILD MARKER (#324) — where `extension_stale` gets its answer from.
+#
+# It is NOT the version. `extension_version` is chrome.runtime.getManifest()
+# .version (read from the on-disk manifest at call time) and `extension_id` is
+# derived from the load PATH, so both describe the DIRECTORY, not the running
+# code. MEASURED 2026-08-04: two Brave profiles loading the SAME directory
+# reported an identical id, an identical 0.7.3 and `extension_stale: false`
+# while one ran `main` and the other an unmerged 0.7.2 build whose source was on
+# no disk. A version-shaped signal cannot separate those rows.
+#
+# The marker is a generated LITERAL in extension/build_id.js that
+# service_worker.js imports, so it is frozen into the loaded module graph and
+# travels with the code. The server reads the expected value out of the DEPLOYED
+# build_id.js (build_marker()) and compares.
+#
+# The verdict FAILS CLOSED: either side missing a marker -> None. `False` is
+# only ever reachable with two present, equal markers.
+# --------------------------------------------------------------------------- #
+def test_build_marker_reads_the_literal(tmp_path):
+    f = tmp_path / "build_id.js"
+    f.write_text('export const BUILD_MARKER = "abc123def456abcd";\n',
+                 encoding="utf-8")
+    assert S.build_marker(path=f) == "abc123def456abcd"
+
+
+def test_build_marker_none_on_missing_unreadable_or_absent_literal(tmp_path):
+    assert S.build_marker(path=tmp_path / "nope.js") is None
+    bad = tmp_path / "build_id.js"
+    bad.write_text("// a file with no marker in it at all\n", encoding="utf-8")
+    assert S.build_marker(path=bad) is None
+
+
+def test_build_marker_prefers_the_deployed_copy_over_the_repo(tmp_path,
+                                                              monkeypatch):
+    """The marker the server calls EXPECTED is the one in the tree Brave loads —
+    the deployed copy — not the repo working tree, which any concurrent
+    session's checkout can change under a live verification."""
+    deployed = tmp_path / "deployed_build_id.js"
+    deployed.write_text('export const BUILD_MARKER = "0000deb10ded0000";\n',
+                        encoding="utf-8")
+    monkeypatch.setattr(S, "_DEPLOYED_EXT_BUILD_ID", deployed)
+    monkeypatch.setattr(S, "_EXT_BUILD_ID_PATH", EXT_DIR / "build_id.js")
+    assert S.build_marker() == "0000deb10ded0000"
+
+
+def test_build_marker_falls_back_to_the_repo_when_not_deployed(tmp_path,
+                                                               monkeypatch):
+    monkeypatch.setattr(S, "_DEPLOYED_EXT_BUILD_ID", tmp_path / "absent.js")
+    monkeypatch.setattr(S, "_EXT_BUILD_ID_PATH", EXT_DIR / "build_id.js")
+    assert S.build_marker() == COMMITTED_BUILD_MARKER
+
+
+def test_build_marker_none_when_neither_exists(tmp_path, monkeypatch):
+    monkeypatch.setattr(S, "_DEPLOYED_EXT_BUILD_ID", tmp_path / "a.js")
+    monkeypatch.setattr(S, "_EXT_BUILD_ID_PATH", tmp_path / "b.js")
+    assert S.build_marker() is None
+
+
 # --- annotate_staleness: the explicit loaded-vs-expected verdict ------------ #
-def test_annotate_staleness_flags_a_mismatch_true():
-    insts = [{"key": "work", "extension_version": "0.2.0"}]
-    S.annotate_staleness(insts, expected="0.3.0")
+def test_annotate_staleness_flags_a_marker_mismatch_true():
+    """A profile running code whose marker differs from the deployed source's is
+    STALE — regardless of what version it reports. This is the #324 case: the
+    version agreed and the code did not."""
+    insts = [{"key": "personal", "extension_version": "0.7.3",
+              "extension_build": "0000000000000002"}]
+    S.annotate_staleness(insts, expected="0.7.3",
+                         expected_build="0000000000000001")
     assert insts[0]["extension_stale"] is True
-    assert insts[0]["extension_version_expected"] == "0.3.0"
+    assert insts[0]["extension_build_expected"] == "0000000000000001"
+    assert insts[0]["extension_version_expected"] == "0.7.3"
 
 
-def test_annotate_staleness_flags_a_match_false():
-    insts = [{"key": "work", "extension_version": "0.3.0"}]
-    S.annotate_staleness(insts, expected="0.3.0")
+def test_annotate_staleness_flags_a_marker_match_false():
+    insts = [{"key": "work", "extension_version": "0.3.0",
+              "extension_build": "0000000000000001"}]
+    S.annotate_staleness(insts, expected="0.3.0",
+                         expected_build="0000000000000001")
     assert insts[0]["extension_stale"] is False
 
 
-def test_annotate_staleness_is_none_when_undecidable():
-    """NEVER guess: an instance that reports no version (a build predating
-    version reporting), or an unreadable manifest, yields null — not False."""
-    insts = [{"key": "a", "extension_version": None},
-             {"key": "b", "extension_version": ""}]
-    S.annotate_staleness(insts, expected="0.3.0")
-    assert [i["extension_stale"] for i in insts] == [None, None]
+def test_annotate_staleness_fails_closed_when_a_marker_is_missing():
+    """🔴 FAIL CLOSED. A missing marker on EITHER side is undecidable — null,
+    never False. `false` must mean "verified current", so a build predating the
+    marker, or an unreadable/undeployed source tree, cannot produce one. Note
+    the version MATCHES in every case below: under the old version-based rule
+    each of these returned False, which is exactly the affirmative all-clear
+    #324 was filed about."""
+    # (a) the instance reports no marker (a build predating #324)
+    insts = [{"key": "a", "extension_version": "0.3.0",
+              "extension_build": None},
+             {"key": "b", "extension_version": "0.3.0",
+              "extension_build": ""},
+             {"key": "c", "extension_version": "0.3.0"}]     # key absent entirely
+    S.annotate_staleness(insts, expected="0.3.0",
+                         expected_build="0000000000000001")
+    assert [i["extension_stale"] for i in insts] == [None, None, None]
 
-    insts2 = [{"key": "c", "extension_version": "0.3.0"}]
-    S.annotate_staleness(insts2, expected=None)
-    assert insts2[0]["extension_stale"] is None
+    # (b) the SERVER cannot read a marker (no deployed/repo build_id.js)
+    for missing in (None, ""):
+        insts2 = [{"key": "d", "extension_version": "0.3.0",
+                   "extension_build": "0000000000000001"}]
+        S.annotate_staleness(insts2, expected="0.3.0", expected_build=missing)
+        assert insts2[0]["extension_stale"] is None, missing
+
+    # (c) the default (no expected_build passed at all) is also undecidable —
+    #     a caller that forgets to pass it cannot accidentally get a False.
+    insts3 = [{"key": "e", "extension_version": "0.3.0",
+               "extension_build": "0000000000000001"}]
+    S.annotate_staleness(insts3, expected="0.3.0")
+    assert insts3[0]["extension_stale"] is None
+
+
+def test_annotate_staleness_a_version_match_alone_never_yields_false():
+    """The regression this PR exists to prevent: two profiles reporting the same
+    version as the deployed manifest must NOT read `false` on the strength of
+    that alone. Without markers the honest answer is null."""
+    insts = [{"key": "personal", "extension_version": "0.7.3"},
+             {"key": "work", "extension_version": "0.7.3"}]
+    S.annotate_staleness(insts, expected="0.7.3", expected_build=None)
+    assert [i["extension_stale"] for i in insts] == [None, None]
+    assert not any(i["extension_stale"] is False for i in insts)
+
+
+def test_annotate_staleness_marker_match_with_version_mismatch_is_stale():
+    """Markers equal but versions not: the deployed manifest moved without the
+    marker moving (or a header was spoofed). Not a verified-current state."""
+    insts = [{"key": "a", "extension_version": "0.7.1",
+              "extension_build": "0000000000000001"}]
+    S.annotate_staleness(insts, expected="0.7.3",
+                         expected_build="0000000000000001")
+    assert insts[0]["extension_stale"] is True
 
 
 def test_manifest_version_none_on_missing(tmp_path):
@@ -4472,27 +4721,35 @@ def test_health_no_extension_still_reports_current_version():
         srv.shutdown(); srv.server_close()
 
 
-def test_health_carries_an_explicit_stale_verdict_per_instance(pinned_manifest):
-    """The point of the change: a yes/no, not two version strings to eyeball.
-    An instance reporting 0.1.0 against the expected manifest is STALE=True."""
+def test_health_carries_an_explicit_stale_verdict_per_instance(
+        pinned_manifest, pinned_build):
+    """The point of the change: a yes/no, not two strings to eyeball. An
+    instance whose reported BUILD MARKER differs from the deployed source's is
+    STALE=True — note it reports the EXPECTED VERSION here, which is the #324
+    case exactly: the version agreed and the code did not."""
     srv, _ = _serve()
-    ext = FakeExtension(srv, instance_id="a", label="alpha", ext_version="0.1.0")
+    ext = FakeExtension(srv, instance_id="a", label="alpha",
+                        ext_version=PINNED_VERSION,
+                        ext_build="0000000000000bad")
     ext.start()
     try:
         body = _wait_instances(srv, 1)
         assert body is not None
         inst = body["instances"][0]
         assert inst["extension_version_expected"] == PINNED_VERSION
+        assert inst["extension_build_expected"] == PINNED_BUILD
+        assert inst["extension_build"] == "0000000000000bad"
         assert inst["extension_stale"] is True
+        assert body["extension_build_current"] == PINNED_BUILD
     finally:
         ext.stop(); srv.shutdown(); srv.server_close()
 
 
 def test_health_stale_verdict_is_false_when_the_loaded_build_matches(
-        pinned_manifest):
+        pinned_manifest, pinned_build):
     srv, _ = _serve()
     ext = FakeExtension(srv, instance_id="a", label="alpha",
-                        ext_version=PINNED_VERSION)
+                        ext_version=PINNED_VERSION, ext_build=PINNED_BUILD)
     ext.start()
     try:
         body = _wait_instances(srv, 1)
@@ -4502,9 +4759,31 @@ def test_health_stale_verdict_is_false_when_the_loaded_build_matches(
         ext.stop(); srv.shutdown(); srv.server_close()
 
 
-def test_whoami_carries_the_stale_verdict_per_instance(pinned_manifest):
+def test_health_stale_verdict_is_null_when_only_the_version_matches(
+        pinned_manifest, pinned_build):
+    """🔴 FAIL CLOSED end-to-end: an instance that reports the EXPECTED VERSION
+    but NO marker reads null, not false. Under the old rule this exact instance
+    read `false` — the affirmative all-clear #324 was filed about."""
     srv, _ = _serve()
-    ext = FakeExtension(srv, instance_id="a", label="alpha", ext_version="0.1.0")
+    ext = FakeExtension(srv, instance_id="a", label="alpha",
+                        ext_version=PINNED_VERSION)   # no ext_build
+    ext.start()
+    try:
+        body = _wait_instances(srv, 1)
+        assert body is not None
+        inst = body["instances"][0]
+        assert inst["extension_version"] == PINNED_VERSION
+        assert inst["extension_build"] is None
+        assert inst["extension_stale"] is None
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
+def test_whoami_carries_the_stale_verdict_per_instance(pinned_manifest,
+                                                       pinned_build):
+    srv, _ = _serve()
+    ext = FakeExtension(srv, instance_id="a", label="alpha",
+                        ext_version="0.1.0", ext_build="0000000000000bad")
     ext.start()
     try:
         _wait_instances(srv, 1)
@@ -4513,15 +4792,18 @@ def test_whoami_carries_the_stale_verdict_per_instance(pinned_manifest):
         inst = body["instances"][0]
         assert inst["extension_stale"] is True
         assert inst["extension_version_expected"] == PINNED_VERSION
+        assert inst["extension_build_expected"] == PINNED_BUILD
         assert body["bridge"]["extension_version_current"] == PINNED_VERSION
+        assert body["bridge"]["extension_build_current"] == PINNED_BUILD
     finally:
         ext.stop(); srv.shutdown(); srv.server_close()
 
 
-def test_whoami_stale_verdict_is_null_for_an_unreporting_extension():
-    """A build that predates version reporting is UNDECIDABLE, never "fine"."""
+def test_whoami_stale_verdict_is_null_for_an_unreporting_extension(
+        pinned_build):
+    """A build that predates the marker is UNDECIDABLE, never "fine"."""
     srv, _ = _serve()
-    ext = FakeExtension(srv, instance_id="a", label="alpha")  # no ext_version
+    ext = FakeExtension(srv, instance_id="a", label="alpha")  # no ext_build
     ext.start()
     try:
         _wait_instances(srv, 1)
@@ -4530,6 +4812,55 @@ def test_whoami_stale_verdict_is_null_for_an_unreporting_extension():
         assert body["instances"][0]["extension_stale"] is None
     finally:
         ext.stop(); srv.shutdown(); srv.server_close()
+
+
+def test_stale_verdict_is_null_when_the_server_cannot_read_a_marker(
+        pinned_manifest, tmp_path, monkeypatch):
+    """The other half of fail-closed: an unreadable/undeployed extension source
+    tree makes the verdict undecidable even for an instance that DOES report a
+    marker and the expected version."""
+    monkeypatch.setattr(S, "_DEPLOYED_EXT_BUILD_ID", tmp_path / "absent-a.js")
+    monkeypatch.setattr(S, "_EXT_BUILD_ID_PATH", tmp_path / "absent-b.js")
+    srv, _ = _serve()
+    ext = FakeExtension(srv, instance_id="a", label="alpha",
+                        ext_version=PINNED_VERSION, ext_build="abcabcabcabcabca")
+    ext.start()
+    try:
+        body = _wait_instances(srv, 1)
+        assert body is not None
+        assert body["extension_build_current"] is None
+        assert body["instances"][0]["extension_stale"] is None
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
+def test_two_profiles_one_directory_are_distinguishable(pinned_manifest,
+                                                        pinned_build):
+    """🔴 THE MEASURED #324 CASE, reproduced. Two instances loaded from the SAME
+    directory: identical extension_id (it is path-derived, so it MUST be) and
+    identical reported version — but different running code. The old verdict
+    said `false` for both. The marker separates them."""
+    srv, _ = _serve()
+    same_id = "bgbkamdlkdleahpgdgmjipjbgmepgenk"
+    personal = FakeExtension(srv, instance_id="p", label="personal",
+                             ext_version=PINNED_VERSION, ext_id=same_id,
+                             ext_build="0000000000000bad")   # unmerged build
+    work = FakeExtension(srv, instance_id="w", label="work",
+                         ext_version=PINNED_VERSION, ext_id=same_id,
+                         ext_build=PINNED_BUILD)             # main
+    personal.start(); work.start()
+    try:
+        body = _wait_instances(srv, 2)
+        assert body is not None
+        by_key = {i["key"]: i for i in body["instances"]}
+        assert by_key["personal"]["extension_id"] == \
+               by_key["work"]["extension_id"] == same_id
+        assert by_key["personal"]["extension_version"] == \
+               by_key["work"]["extension_version"] == PINNED_VERSION
+        assert by_key["personal"]["extension_stale"] is True
+        assert by_key["work"]["extension_stale"] is False
+    finally:
+        personal.stop(); work.stop(); srv.shutdown(); srv.server_close()
 
 
 # --- extension_id: WHICH DIRECTORY Brave loaded ---------------------------- #

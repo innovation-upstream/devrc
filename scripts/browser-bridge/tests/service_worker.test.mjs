@@ -348,6 +348,33 @@ test("ping: degrades to empty version + id when runtime is bare", async () => {
   assert.equal(out.id, "");
 });
 
+test("ping: reports the BUILD MARKER, and it is INDEPENDENT of chrome.* (#324)", async () => {
+  // 🔴 The property that makes the marker worth having: it comes from the
+  // module graph, NOT from anything the browser can be asked at call time.
+  // extensionVersion and id both come from chrome.runtime — stub those to a
+  // different build entirely and the marker must not move, because it describes
+  // the CODE that is executing rather than the directory it was loaded from.
+  const { BUILD_MARKER } = await import("../extension/build_id.js");
+  assert.match(BUILD_MARKER, /^[0-9a-f]{8,}$/);
+
+  const origRuntime = globalThis.chrome.runtime;
+  globalThis.chrome.runtime = { ...origRuntime, id: "zzzzzzzzzzzzzzzz",
+    getManifest: () => ({ version: "99.99.99" }) };
+  try {
+    const out = await OPS.ping({});
+    assert.equal(out.buildMarker, BUILD_MARKER);
+    assert.equal(out.extensionVersion, "99.99.99");   // control: chrome.* DID move
+    assert.equal(out.id, "zzzzzzzzzzzzzzzz");
+  } finally {
+    globalThis.chrome.runtime = origRuntime;
+  }
+  // …and with a bare runtime (no getManifest, no id) the marker is STILL there:
+  // it never depended on chrome.* in the first place.
+  const bare = await OPS.ping({});
+  assert.equal(bare.buildMarker, BUILD_MARKER);
+  assert.equal(bare.extensionVersion, "");
+});
+
 // --------------------------------------------------------------------------- //
 // `emulate --reset` — THE RUNTIME NOTE IS PINNED CHARACTER FOR CHARACTER.
 //
