@@ -528,6 +528,19 @@ def test_a_handoff_naming_no_prs_is_not_downgraded_by_gh_being_absent(tmp_path, 
     assert "did not answer" not in joined, joined
 
 
+def test_no_remote_with_referenced_prs_is_reported_as_unreconciled(tmp_path, stub_bin):
+    """The OTHER unreconciled path: gh never runs at all because there is no
+    remote (or gh is not installed). The handoff still names three PRs that
+    nobody checked, so the verdict must degrade exactly as it does when gh runs
+    and fails. Untested until the mutation battery pointed at this branch."""
+    repo = make_repo(tmp_path, docs=("SESSION-HANDOFF.md",), doc_body=PR_HANDOFF)
+    out = run_resume(repo, stub_bin)
+    joined = " ".join(drift_lines(out))
+    assert "matches the handoff's claims" not in joined, joined
+    assert "did not answer" in joined, joined
+    assert "3 referenced PR(s) were never checked" in joined, joined
+
+
 def test_drift_is_clean_when_gh_actually_answers(tmp_path, stub_bin):
     """POSITIVE CONTROL for the two tests above.
 
@@ -572,6 +585,29 @@ def test_a_quoted_file_path_is_not_reported_as_a_branch(tmp_path, stub_bin):
     out = run_resume(repo, stub_bin)
     assert branch_tokens(out) == [], f"fabricated a branch from a file path: {out}"
     assert "docs/configuration.md" not in " ".join(drift_lines(out)), drift_lines(out)
+
+
+def test_a_quoted_file_path_that_is_not_tracked_here_is_not_a_branch(tmp_path, stub_bin):
+    """The DISCRIMINATING half of the test above, which is over-determined.
+
+    There the file really is tracked, so the `git cat-file` probe catches it and
+    the extension filter is never load-bearing — deleting that filter left the
+    whole suite GREEN. Here the quoted path does not exist in this repo at all
+    (handoffs routinely cite paths in OTHER repos, or files since deleted), so
+    only the extension filter can reject it. Keep both cases: one is the real
+    measured shape, this one is the one that can fail.
+    """
+    repo = make_repo(
+        tmp_path,
+        docs=("HANDOFF.md",),
+        doc_body="## Handoff\nSee `docs/upstream-notes.md` in the other repo, and fix/real-branch.\n",
+    )
+    out = run_resume(repo, stub_bin)
+    toks = branch_tokens(out)
+    assert "docs/upstream-notes.md" not in toks, f"fabricated a branch from an untracked path: {toks}"
+    # and the genuine reference beside it still survives, so this is not just
+    # "nothing was extracted"
+    assert toks == ["fix/real-branch"], toks
 
 
 def test_an_absolute_path_containing_a_prefix_is_not_a_branch(tmp_path, stub_bin):
