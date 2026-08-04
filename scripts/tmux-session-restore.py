@@ -17,6 +17,11 @@ Usage:
   tmux-session-restore.py restore   # AFTER reboot   — relaunches claude per window
   tmux-session-restore.py show      # print the last saved cheat-sheet
 
+Restore flags:
+  --dry-run / -n          show what would happen without sending keys
+  --plan PATH             use a custom plan file instead of the default
+  --staleness-check [H]   refuse to restore if plan is > H hours old (default: 2h)
+
 State: ~/.config/initiatives/restore-plan.json  (+ restore-cheatsheet.md)
 Scratchpad codenames come from the canonical scripts/tmux-scratch-slots.sh.
 """
@@ -231,11 +236,26 @@ def window_state(target: str) -> tuple[bool, str]:
     return (bool(out.strip()), out.strip())
 
 
-def cmd_restore(dry_run: bool = False, plan_path: Path | None = None) -> int:
+def plan_age_hours() -> float | None:
+    """Age of the current restore plan in hours, or None if no plan exists."""
+    if not PLAN.exists():
+        return None
+    import time
+    return (time.time() - PLAN.stat().st_mtime) / 3600
+
+
+def cmd_restore(dry_run: bool = False, plan_path: Path | None = None,
+                 staleness_hours: float | None = None) -> int:
     src = plan_path or PLAN
     if not src.exists():
         print(f"no restore plan at {src} — run `save` before rebooting", file=sys.stderr)
         return 1
+    if staleness_hours is not None and plan_path is None:
+        age = plan_age_hours()
+        if age is not None and age > staleness_hours:
+            print(f"restore plan is {age:.1f}h old (limit {staleness_hours}h) — "
+                  f"too stale, skipping. Run `save` first.", file=sys.stderr)
+            return 1
     plan = json.loads(src.read_text())
     tag = "[dry-run] would " if dry_run else ""
     sent = skipped = 0
@@ -275,12 +295,20 @@ def main(argv: list[str]) -> int:
     if argv[:1] == ["restore"]:
         rest = argv[1:]
         dry = "--dry-run" in rest or "-n" in rest
+        staleness = None
+        if "--staleness-check" in rest:
+            i = rest.index("--staleness-check")
+            if i + 1 < len(rest) and rest[i + 1].replace(".", "").isdigit():
+                staleness = float(rest[i + 1])
+            else:
+                staleness = 2.0  # default: 2 hours
         plan_path = None
         if "--plan" in rest:
             i = rest.index("--plan")
             if i + 1 < len(rest):
                 plan_path = Path(os.path.expanduser(rest[i + 1]))
-        return cmd_restore(dry_run=dry, plan_path=plan_path)
+        return cmd_restore(dry_run=dry, plan_path=plan_path,
+                           staleness_hours=staleness)
     print(__doc__.strip().split("\n\n")[0])
     print("\nusage: tmux-session-restore.py "
           "{save | restore [--dry-run] [--plan PATH] | show}", file=sys.stderr)

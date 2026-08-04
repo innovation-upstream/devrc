@@ -547,6 +547,15 @@ in
     executable = true;
   };
 
+  # tmux-resurrect post-save hook — captures claude-session-to-window mappings
+  # every 15 min (continuum's save interval).  Runs in background so it never
+  # blocks continuum's own save.  See nix/programs/tmux/default.nix for the
+  # hook wiring.
+  home.file.".config/tmux/tmux-post-save.sh" = {
+    source = ../scripts/tmux-post-save.sh;
+    executable = true;
+  };
+
   # CPU load monitor: desktop alert on sustained high load
   home.file.".config/cpu-monitor/cpu-monitor.sh" = {
     source = ../scripts/cpu-monitor.sh;
@@ -1971,6 +1980,45 @@ in
       OnCalendar = "*-*-* 04:00:00";
       Persistent = true;
       RandomizedDelaySec = 600;
+    };
+    Install = {
+      WantedBy = [ "timers.target" ];
+    };
+  };
+
+  # Post-reboot claude session restore — fires ~45s after login so
+  # tmux-continuum has time to restore the session layout first, then this
+  # service resumes claude conversations in each window.  Idempotent: skips
+  # windows already running claude.
+  systemd.user.services.tmux-session-restore = {
+    Unit = {
+      Description = "Resume claude conversations after tmux-continuum restores sessions";
+      After = [ "graphical-session.target" ];
+      Wants = [ "graphical-session.target" ];
+      OnFailure = [ "notify-failure@%n.service" ];
+    };
+    Service = {
+      Type = "oneshot";
+      # 45s gives continuum (15-min save interval, restore on tmux server start)
+      # ample time to recreate all sessions/windows/panes before we send-keys.
+      ExecStartPre = "/bin/sleep 45";
+      Environment = [
+        "PATH=${lib.makeBinPath [ pkgs.python312 pkgs.tmux pkgs.coreutils ]}"
+        "HOME=%h"
+      ];
+      ExecStart = "${pkgs.python312}/bin/python3 %h/workspace/devrc/scripts/tmux-session-restore.py restore --staleness-check 2";
+      # Re-run the unit when the script changes.
+      X-Restart-Triggers = [ "${../scripts/tmux-session-restore.py}" ];
+    };
+  };
+
+  systemd.user.timers.tmux-session-restore = {
+    Unit = {
+      Description = "One-shot timer — run tmux-session-restore once after login";
+    };
+    Timer = {
+      OnActiveSec = "45s";
+      Unit = "tmux-session-restore.service";
     };
     Install = {
       WantedBy = [ "timers.target" ];

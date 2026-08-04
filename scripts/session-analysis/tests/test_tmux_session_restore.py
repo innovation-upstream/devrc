@@ -10,6 +10,7 @@ picker), and cheat-sheet rendering. tmux/grep/capture-pane I/O is stubbed.
 """
 import importlib.util
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -144,3 +145,82 @@ def test_cmd_restore_skips_window_already_running_claude(tmp_path, monkeypatch, 
     monkeypatch.setattr(tsr, "window_state", lambda t: (True, "claude"))  # already running
     tsr.cmd_restore(dry_run=True, plan_path=plan)
     assert "claude already running" in capsys.readouterr().out
+
+
+# --------------------------------------------------------------------------- #
+# staleness check
+# --------------------------------------------------------------------------- #
+def test_plan_age_hours_returns_none_when_no_plan(tmp_path, monkeypatch):
+    monkeypatch.setattr(tsr, "PLAN", tmp_path / "missing.json")
+    assert tsr.plan_age_hours() is None
+
+
+def test_plan_age_hours_returns_age(tmp_path, monkeypatch):
+    import time
+    plan = tmp_path / "restore-plan.json"
+    plan.write_text("[]")
+    # Set mtime to 3 hours ago
+    old = time.time() - 3 * 3600
+    os.utime(plan, (old, old))
+    monkeypatch.setattr(tsr, "PLAN", plan)
+    age = tsr.plan_age_hours()
+    assert age is not None
+    assert 2.9 < age < 3.1
+
+
+def test_cmd_restore_rejects_stale_plan(tmp_path, monkeypatch, capsys):
+    import time
+    plan = tmp_path / "restore-plan.json"
+    plan.write_text(json.dumps([{"session": "s", "window": "1", "codename": "Vapor",
+                                 "cwd": "/r", "session_id": "abc", "title": "t", "hint": ""}]))
+    # Set mtime to 5 hours ago
+    old = time.time() - 5 * 3600
+    os.utime(plan, (old, old))
+    monkeypatch.setattr(tsr, "PLAN", plan)
+    monkeypatch.setattr(tsr, "tmux_session_exists", lambda n: True)
+    monkeypatch.setattr(tsr, "window_state", lambda t: (True, "zsh"))
+    # Default staleness limit is 2h — should reject (no custom plan_path)
+    rc = tsr.cmd_restore(dry_run=False, plan_path=None, staleness_hours=2.0)
+    assert rc == 1
+    assert "stale" in capsys.readouterr().err.lower()
+
+
+def test_cmd_restore_accepts_fresh_plan(tmp_path, monkeypatch, capsys):
+    plan = tmp_path / "p.json"
+    plan.write_text(json.dumps([{"session": "s", "window": "1", "codename": "Vapor",
+                                 "cwd": "/r", "session_id": "abc", "title": "t", "hint": ""}]))
+    # Fresh plan (just created)
+    monkeypatch.setattr(tsr, "tmux_session_exists", lambda n: True)
+    monkeypatch.setattr(tsr, "window_state", lambda t: (True, "zsh"))
+    rc = tsr.cmd_restore(dry_run=True, plan_path=plan, staleness_hours=2.0)
+    assert rc == 0
+    assert "would send" in capsys.readouterr().out
+
+
+def test_cmd_restore_staleness_check_skips_when_no_plan(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(tsr, "PLAN", tmp_path / "missing.json")
+    rc = tsr.cmd_restore(dry_run=False, staleness_hours=2.0)
+    assert rc == 1
+    assert "no restore plan" in capsys.readouterr().err.lower()
+
+
+def test_staleness_check_cli_parsing(monkeypatch, capsys):
+    """--staleness-check without a number uses the 2h default."""
+    import tempfile
+    # Parse argv, not actually restoring — just verify the flag is consumed
+    argv = ["restore", "--staleness-check"]
+    # We need a plan to get past the initial check; use a fake one
+    fd, path = tempfile.mkstemp(suffix=".json")
+    try:
+        with open(fd, "w") as f:
+            json.dump([], f)
+        # Override PLAN to point at our temp file
+        monkeypatch.setattr(tsr, "PLAN", Path(path))
+        monkeypatch.setattr(tsr, "tmux_session_exists", lambda n: True)
+        monkeypatch.setattr(tsr, "window_state", lambda t: (True, "zsh"))
+        # Should parse without error and use default 2h limit
+        rc = tsr.main(argv)
+        # Empty plan → no windows to process, but should not error
+        assert rc == 0
+    finally:
+        os.unlink(path)

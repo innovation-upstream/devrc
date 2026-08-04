@@ -44,6 +44,11 @@ in
       extraConfig = ''
         set -g @resurrect-capture-pane-contents 'on'
         set -g @resurrect-strategy-nvim 'session'
+        # Auto-save claude-session-to-window mappings every continuum save cycle
+        # (15 min).  The hook script runs in the background so continuum's own
+        # save is never blocked.  This keeps restore-plan.json fresh so a crash
+        # recovery always has a recent plan.
+        set -g @resurrect-hook-post-save '~/.config/tmux/tmux-post-save.sh'
       '';
     }
     {
