@@ -4,7 +4,10 @@
 UNDER something else · a popover/dropdown/tooltip renders behind neighbouring content ·
 a `z-index` change "does nothing" · a click lands on the wrong element · a
 `data-testid` selector matches NOTHING on a production page · you are about
-to reason about paint order from CSS source instead of measuring it.
+to reason about paint order from CSS source instead of measuring it · **users take the
+wrong action on a page that "looks fine"**, or you need to argue about visual
+hierarchy with numbers · **a page's text "shrank"** and you must say whether it was
+deleted or merely relocated.
 
 Core: `~/workspace/devrc/scripts/browser-bridge/SKILL.md`.
 
@@ -107,3 +110,61 @@ out-ranks. **Always remove the probe** — it's the user's live page.
 All four steps above are multi-statement, so every one of them must be wrapped in
 `(function(){ … })()` — otherwise you get `null` with no error and spend the next
 ten minutes debugging a bridge that is working fine.
+
+## Is the LOUDEST control the one that works? — measure prominence
+
+A different question from paint order, same instrument. Hit-testing asks *what covers
+what*; this asks **whether visual weight matches importance** — and it catches a defect
+no markup assertion can express, because every element is present, correct, and visible.
+
+For every visible control read `getBoundingClientRect()` **size and y**, plus computed
+**`opacity`** and **`backgroundColor`**:
+
+```bash
+$BB --instance work js '(function(){
+  return JSON.stringify([].slice.call(document.querySelectorAll("button, a.btn, [role=button]"))
+    .filter(function(el){ var r=el.getBoundingClientRect(); return r.width && r.height })
+    .map(function(el){
+      var r=el.getBoundingClientRect(), s=getComputedStyle(el);
+      return {text:el.textContent.trim().slice(0,40), w:Math.round(r.width), h:Math.round(r.height),
+              y:Math.round(r.top), opacity:s.opacity, bg:s.backgroundColor,
+              disabled:el.disabled===true || el.getAttribute("aria-disabled")==="true"};
+    }));
+})()'
+```
+
+**What it found (civitai-manager, 2026-08-03):** a **disabled** button measured 279×36 at
+y=102 while the **working** one was 251×30 at y=336 — *the same fill*, differing only by
+`opacity: 0.6`. So the largest, highest, loudest control on the panel did nothing, and the
+affordance that actually resolved the user's problem was the smallest element there. A
+screenshot showed both and read as fine; **the numbers are what made it arguable.**
+
+Read the output for: a disabled control **larger or higher** than the live one; the primary
+action **below** the fold of its own panel; several controls sharing one `backgroundColor`
+so the fill no longer signals "primary"; `opacity` as the *only* disabled affordance —
+which is a contrast failure as well as a hierarchy one.
+
+## "The page got shorter" — was text DELETED or just RELOCATED?
+
+`innerText` is **rendered** text and omits anything inside a closed `<details>`;
+`textContent` returns all of it. Comparing the two separates the cases — and they are not
+the same finding, so never report one as the other.
+
+```bash
+$BB --instance work js '(function(){
+  var n=function(s){ return s.replace(/\s+/g," ").trim().length };
+  return JSON.stringify({visible:n(document.body.innerText), total:n(document.body.textContent)});
+})()'
+```
+
+- **both drop** → text really was removed;
+- **`visible` drops while `total` holds** → it moved behind a disclosure.
+
+Verified on a probe page with one closed `<details>`: `innerText` **68** chars vs
+`textContent` **120**, and the hidden string appears in `textContent` only; opening the
+element brings it into `innerText`. In the real case a **47% visible-text reduction** was
+~1,000 of ~1,180 characters *merely moved* behind disclosures — reporting that as deletion
+would have been wrong.
+
+⚠ `innerText` depends on layout, so it needs a rendered tab: **`wake` first**, or a
+throttled background tab returns a shell and both numbers lie.
