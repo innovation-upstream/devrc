@@ -22,7 +22,8 @@ WORKLOAD block and the ALERTS block on their skip paths. `gh`, `kubectl` and
 `curl` are additionally stubbed onto the front of $PATH as tripwires that log
 and fail; `test_no_network_tool_is_ever_invoked` asserts the log stayed empty,
 so a future change that reaches for the network fails here instead of hanging
-on a real timeout. Measured runtime of the whole module: well under a second.
+on a real timeout. Measured runtime of the whole module: ~3.2 s cold, ~2.0-2.9 s
+warm. (This line used to claim "well under a second", which was never measured.)
 
 STYLE NOTE — the stub-fake-binaries-on-$PATH technique is
 scripts/tests/test_release_wrapper.sh's convention. This suite is written as
@@ -94,30 +95,60 @@ def stub_bin(tmp_path_factory):
         # runtime — so a hand-written shebang here is green on this host and red
         # only on the tier that gates merges. test_runtime_shebangs.py caught
         # exactly that in this file.
-        write_exec(d / name, f'printf "{name} %s\\n" "$*" >> "$STUB_LOG"\nexit 1\n')
+        # The gh stub answers with $STUB_GH_JSON when set, so a test can drive
+        # the PR-reconciliation path both ways — answering and failing — without
+        # a network. Unset (the default) it behaves as a pure tripwire: log the
+        # invocation and fail, which is what `gh pr view` does offline.
+        body = f'printf "{name} %s\\n" "$*" >> "$STUB_LOG"\n'
+        if name == "gh":
+            body += 'if [ -n "${STUB_GH_JSON:-}" ]; then printf "%s\\n" "$STUB_GH_JSON"; exit 0; fi\n'
+        write_exec(d / name, body + "exit 1\n")
     return d, log
 
 
-def make_repo(tmp_path, docs=(), name="fixture-repo"):
+def make_repo(
+    tmp_path,
+    docs=(),
+    name="fixture-repo",
+    doc_body=None,
+    files=(),
+    branches=(),
+    remote=None,
+):
     """A throwaway git repo whose claudedocs/ holds exactly `docs`.
 
-    No `origin` remote (so SLUG stays empty and the PR block skips) and no
-    prod-kubeconfig (so WORKLOAD/ALERTS skip). Files are created in the order
-    given and stamped with increasing mtimes, so `docs[-1]` is the NEWEST —
-    which is what `ls -t | head -1` selects.
+    By default: no `origin` remote (so SLUG stays empty and the PR block skips)
+    and no prod-kubeconfig (so WORKLOAD/ALERTS skip). Docs are created in the
+    order given and stamped with increasing mtimes, so `docs[-1]` is the NEWEST
+    — which is what `ls -t | head -1` selects.
+
+    `doc_body`   prose written into every doc (drives extract_prs/extract_branches)
+    `files`      extra tracked paths, committed — so `git cat-file -e HEAD:<p>` hits
+    `branches`   real branches created off the seed commit
+    `remote`     an `origin` URL, which is what makes SLUG non-empty and sends
+                 the script down the gh path
     """
     repo = tmp_path / name
     (repo / "claudedocs").mkdir(parents=True)
     env = _git_env(repo)
-    subprocess.run(["git", "-C", str(repo), "init", "-q"], check=True, env=env)
+    git = ["git", "-C", str(repo)]
+    subprocess.run([*git, "init", "-q"], check=True, env=env)
     (repo / "README.md").write_text("seed\n")
-    subprocess.run(["git", "-C", str(repo), "add", "README.md"], check=True, env=env)
-    subprocess.run(
-        ["git", "-C", str(repo), "commit", "-qm", "seed"], check=True, env=env
-    )
+    tracked = ["README.md"]
+    for rel in files:
+        p = repo / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(f"contents of {rel}\n")
+        tracked.append(rel)
+    subprocess.run([*git, "add", *tracked], check=True, env=env)
+    subprocess.run([*git, "commit", "-qm", "seed"], check=True, env=env)
+    for br in branches:
+        subprocess.run([*git, "branch", br], check=True, env=env)
+    if remote:
+        subprocess.run([*git, "remote", "add", "origin", remote], check=True, env=env)
     for i, doc in enumerate(docs):
         p = repo / "claudedocs" / doc
-        p.write_text(f"## {doc}\nsome handoff prose\n")
+        p.write_text(doc_body if doc_body is not None else f"## {doc}\nsome handoff prose\n")
         # 1000s apart so `ls -t` ordering is unambiguous regardless of fs mtime
         # granularity; later entries in `docs` are newer.
         os.utime(p, (1_700_000_000 + i * 1000, 1_700_000_000 + i * 1000))
@@ -140,7 +171,7 @@ def _git_env(repo):
     return env
 
 
-def run_resume(repo, stub_bin, *args, cwd=None):
+def run_resume(repo, stub_bin, *args, cwd=None, extra_env=None):
     """Run resume-state.sh with `repo` as cwd; return its stdout.
 
     🔴 `env=env` is LOAD-BEARING and was MISSING when this suite first shipped.
@@ -161,6 +192,7 @@ def run_resume(repo, stub_bin, *args, cwd=None):
     env = _git_env(repo)
     env["PATH"] = f"{d}{os.pathsep}{env['PATH']}"
     env["STUB_LOG"] = str(log)
+    env.update(extra_env or {})
     out = subprocess.run(
         ["bash", str(SCRIPT), *args],
         cwd=str(cwd or repo),
@@ -178,6 +210,16 @@ def handoff_line(stdout):
     hits = [ln.strip() for ln in stdout.splitlines() if ln.strip().startswith("handoff:")]
     assert len(hits) == 1, f"expected exactly one handoff: line, got {hits}\n{stdout}"
     return hits[0]
+
+
+def branch_lines(stdout):
+    """Every `branch <tok>: …` line the GIT/PR block emitted, stripped."""
+    return [ln.strip() for ln in stdout.splitlines() if ln.strip().startswith("branch ")]
+
+
+def branch_tokens(stdout):
+    """Just the token from each branch line — what the digest CLAIMS is a branch."""
+    return [ln.split(":", 1)[0][len("branch "):] for ln in branch_lines(stdout)]
 
 
 def drift_lines(stdout):
@@ -355,6 +397,33 @@ def test_slug_does_not_reach_the_decoys(tmp_path, stub_bin):
     )
 
 
+def test_slug_is_anchored_to_the_handoff_prefix(tmp_path, stub_bin):
+    """The slug must only ever fill `handoff-<slug>*.md`, never `*<slug>*.md`.
+
+    This case exists because the test above was green for an INCIDENTAL reason:
+    broadening line 84 to `*"$arg"*.md` survived the whole suite, purely because
+    its decoy is SOME-DESIGN.md and its slug is `design` — a case mismatch.
+    devrc really does carry claudedocs/browser-bridge-usage-audit-2026-08-02.md,
+    so under that mutation `resume-state.sh browser` would resolve an audit
+    document as a handoff. Lowercase decoy, lowercase slug, no coincidence left.
+    """
+    repo = make_repo(tmp_path, docs=("browser-bridge-usage-audit-2026-08-02.md",))
+    assert handoff_line(run_resume(repo, stub_bin, "browser")) == (
+        "handoff: (none found — git-only)"
+    )
+
+
+def test_resolution_is_scoped_to_claudedocs(tmp_path, stub_bin):
+    """Both globs name `claudedocs/` explicitly; a handoff-shaped file anywhere
+    else — repo root or a sibling directory — must not resolve. Untested until
+    now: mutating the fallback to `*/*HANDOFF*.md` survived the whole suite."""
+    repo = make_repo(tmp_path, docs=())
+    (repo / "SESSION-HANDOFF.md").write_text("## root, not claudedocs\n")
+    (repo / "docs").mkdir(exist_ok=True)
+    (repo / "docs" / "SESSION-HANDOFF.md").write_text("## sibling dir\n")
+    assert handoff_line(run_resume(repo, stub_bin)) == "handoff: (none found — git-only)"
+
+
 # --------------------------------------------------------------------------- #
 # THE FALSE GREEN — the DRIFT section must not claim a reconciliation it
 # never performed
@@ -375,13 +444,205 @@ def test_drift_is_honest_when_no_handoff_loaded(tmp_path, stub_bin):
 
 
 def test_drift_keeps_its_clean_message_when_a_handoff_did_load(tmp_path, stub_bin):
-    """The honest-git-only wording must not leak onto the real clean path."""
+    """The honest-git-only wording must not leak onto the real clean path.
+
+    This handoff references NO PRs, so gh has nothing to answer and its absence
+    costs no coverage — the clean line is legitimate here. That distinction is
+    the point of test_drift_is_honest_when_gh_answered_for_nothing below: this
+    test may only assert the clean line on a run that had nothing to reconcile
+    remotely, never on one where a source failed.
+    """
     repo = make_repo(tmp_path, docs=("SESSION-HANDOFF.md",))
     out = run_resume(repo, stub_bin)
     assert handoff_line(out) == "handoff: SESSION-HANDOFF.md"
     joined = " ".join(drift_lines(out))
     assert "matches the handoff's claims" in joined, joined
     assert "no handoff" not in joined, joined
+    assert "did not answer" not in joined, joined
+
+
+# --------------------------------------------------------------------------- #
+# 🔴 THE SAME FALSE GREEN ONE LAYER UP — a handoff loaded, but the source that
+# was supposed to reconcile it never answered
+# --------------------------------------------------------------------------- #
+PR_HANDOFF = (
+    "## Handoff\n"
+    "PR #4101 is OPEN and awaiting review. #4102 is also in-flight.\n"
+    "See https://github.com/acme/widget/pull/4103 for the follow-on.\n"
+)
+
+
+def test_drift_is_honest_when_gh_answered_for_nothing(tmp_path, stub_bin):
+    """gh present, remote present, every `gh pr view` FAILS (offline / unauth /
+    rate-limited / no access) — the loop's `|| continue` swallows all of it.
+
+    Before the fix this printed no diagnostic at all and DRIFT still claimed
+    live state "matches the handoff's claims" — the same sentence and the same
+    harm class as the missing-handoff case this PR set out to remove.
+    """
+    repo = make_repo(
+        tmp_path,
+        docs=("SESSION-HANDOFF.md",),
+        doc_body=PR_HANDOFF,
+        remote="git@github.com:acme/widget.git",
+    )
+    out = run_resume(repo, stub_bin)
+    assert handoff_line(out) == "handoff: SESSION-HANDOFF.md"
+    joined = " ".join(drift_lines(out))
+    assert "matches the handoff's claims" not in joined, (
+        f"DRIFT claimed a clean reconciliation while gh answered for nothing: {joined}"
+    )
+    assert "did not answer" in joined, joined
+    # and it must say HOW MUCH went unchecked, not merely that something did
+    assert "0 of 3" in joined, joined
+
+
+def test_the_unanswered_source_is_reported_alongside_real_findings(tmp_path, stub_bin):
+    """A gap must not hide behind findings. With real drift on screen, a list of
+    findings reads as complete unless the incompleteness is stated next to it."""
+    repo = make_repo(
+        tmp_path,
+        docs=("SESSION-HANDOFF.md",),
+        doc_body=PR_HANDOFF + "Also on feat/gone-branch.\n",
+        remote="git@github.com:acme/widget.git",
+    )
+    out = run_resume(repo, stub_bin)
+    lines = drift_lines(out)
+    assert any("feat/gone-branch" in ln for ln in lines), lines
+    assert any("did not answer" in ln or "0 of 3" in ln for ln in lines), lines
+
+
+def test_a_handoff_naming_no_prs_is_not_downgraded_by_gh_being_absent(tmp_path, stub_bin):
+    """Fail-open in the honest direction: if the handoff references no PRs there
+    is nothing for gh to answer, so its absence must NOT downgrade the verdict.
+    Otherwise every non-GitHub repo reads as permanently unreconciled and the
+    warning becomes noise people learn to ignore."""
+    repo = make_repo(
+        tmp_path,
+        docs=("SESSION-HANDOFF.md",),
+        doc_body="## Handoff\nNo pull requests are referenced here at all.\n",
+        remote="git@github.com:acme/widget.git",
+    )
+    joined = " ".join(drift_lines(run_resume(repo, stub_bin)))
+    assert "matches the handoff's claims" in joined, joined
+    assert "did not answer" not in joined, joined
+
+
+def test_drift_is_clean_when_gh_actually_answers(tmp_path, stub_bin):
+    """POSITIVE CONTROL for the two tests above.
+
+    They assert the presence of a warning; this proves the warning is driven by
+    the reconciliation actually failing rather than being unconditional — with
+    the same handoff and a gh that ANSWERS, the clean line comes back. Without
+    this, hard-coding the warning would pass both.
+    """
+    repo = make_repo(
+        tmp_path,
+        docs=("SESSION-HANDOFF.md",),
+        doc_body=PR_HANDOFF,
+        remote="git@github.com:acme/widget.git",
+    )
+    out = run_resume(
+        repo,
+        stub_bin,
+        extra_env={"STUB_GH_JSON": '{"state":"OPEN","statusCheckRollup":[]}'},
+    )
+    assert "PR #4101 OPEN" in out, out
+    joined = " ".join(drift_lines(out))
+    assert "did not answer" not in joined, joined
+    assert "matches the handoff's claims" in joined, joined
+
+
+# --------------------------------------------------------------------------- #
+# 🔴 FABRICATED BRANCHES — the branch prefixes are also ordinary directory
+# names, so a handoff that merely QUOTES A PATH used to mint a phantom branch
+# and report it "no longer exists (merged & pruned?)"
+# --------------------------------------------------------------------------- #
+def test_a_quoted_file_path_is_not_reported_as_a_branch(tmp_path, stub_bin):
+    """MEASURED LIVE in civitai-manager: its handoff backtick-quotes
+    `docs/configuration.md`, a real 15 KB file, and the digest emitted
+    `branch docs/configuration.md ... no longer exists (merged & pruned?)`.
+    That line was in this PR's own body as success evidence."""
+    repo = make_repo(
+        tmp_path,
+        docs=("SESSION-HANDOFF.md",),
+        doc_body="## Handoff\n🔴 `docs/configuration.md` shipped a bad sample for ~89 releases.\n",
+        files=("docs/configuration.md",),
+    )
+    out = run_resume(repo, stub_bin)
+    assert branch_tokens(out) == [], f"fabricated a branch from a file path: {out}"
+    assert "docs/configuration.md" not in " ".join(drift_lines(out)), drift_lines(out)
+
+
+def test_an_absolute_path_containing_a_prefix_is_not_a_branch(tmp_path, stub_bin):
+    """MEASURED LIVE in naida-ai: the prose "local checkout
+    `/home/zach/workspace/scratch/naida-ai`" yielded a branch token
+    `zach/workspace/scratch/naida-ai`, because `\\b` matches after a slash."""
+    repo = make_repo(
+        tmp_path,
+        docs=("HANDOFF.md",),
+        doc_body="## Handoff\nlocal checkout `/home/zach/workspace/scratch/naida-ai` is stale.\n",
+    )
+    out = run_resume(repo, stub_bin)
+    assert branch_tokens(out) == [], f"fabricated a branch from an absolute path: {out}"
+
+
+def test_a_quoted_tracked_directory_is_not_a_branch(tmp_path, stub_bin):
+    """The extensionless case the string filters cannot see — caught by the
+    `git cat-file -e HEAD:<tok>` probe in the branch loop."""
+    repo = make_repo(
+        tmp_path,
+        docs=("HANDOFF.md",),
+        doc_body="## Handoff\nEverything under `docs/architecture` needs a rewrite.\n",
+        files=("docs/architecture/overview.md",),
+    )
+    assert branch_tokens(run_resume(repo, stub_bin)) == []
+
+
+def test_a_genuinely_missing_branch_is_still_reported(tmp_path, stub_bin):
+    """POSITIVE CONTROL for the three tests above.
+
+    They assert an ABSENCE, which is exactly what deleting extract_branches
+    entirely would also produce. This proves the branch machinery still works:
+    a real branch reference that no longer exists must still surface, both as a
+    branch line and as DRIFT.
+    """
+    repo = make_repo(
+        tmp_path,
+        docs=("HANDOFF.md",),
+        doc_body="## Handoff\nWork continues on feat/vanished-branch.\n",
+    )
+    out = run_resume(repo, stub_bin)
+    assert branch_tokens(out) == ["feat/vanished-branch"], out
+    assert any("feat/vanished-branch" in ln for ln in drift_lines(out)), drift_lines(out)
+
+
+def test_an_existing_branch_is_reported_as_existing_not_gone(tmp_path, stub_bin):
+    """Second positive control: the loop distinguishes present from absent, so
+    the filters above are not simply suppressing every branch."""
+    repo = make_repo(
+        tmp_path,
+        docs=("HANDOFF.md",),
+        doc_body="## Handoff\nWork continues on feat/live-branch.\n",
+        branches=("feat/live-branch",),
+    )
+    out = run_resume(repo, stub_bin)
+    assert branch_tokens(out) == ["feat/live-branch"], out
+    assert not any("feat/live-branch" in ln for ln in drift_lines(out)), drift_lines(out)
+
+
+def test_the_word_boundary_behaviour_is_preserved(tmp_path, stub_bin):
+    """Only `/` changed. `-` and `.` must still delimit as `\\b` did, and an
+    embedded prefix must still NOT match — otherwise the narrower boundary
+    would be silently dropping real branch references."""
+    repo = make_repo(
+        tmp_path,
+        docs=("HANDOFF.md",),
+        doc_body="## Handoff\nsee my-fix/kept-branch, and notafix/must-not-match.\n",
+    )
+    toks = branch_tokens(run_resume(repo, stub_bin))
+    assert "fix/kept-branch" in toks, toks
+    assert not any("must-not-match" in t for t in toks), toks
 
 
 # --------------------------------------------------------------------------- #
