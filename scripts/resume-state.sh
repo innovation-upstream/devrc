@@ -91,11 +91,21 @@ extract_prs(){
 # compare, which is the ref a reader means. Untested defensive code that makes
 # one real case worse is not defence.
 #
-# ⚠ The `origin|upstream` rule's leading bound is LOAD-BEARING, not decoration:
-# it is what stops a filesystem path like `/home/zach/repos/origin/fix/x` from
-# having its `origin/` stripped and minting `fix/x`. That is the exact
-# fabrication class this whole function exists to prevent, so the bound must
-# keep requiring a non-path character before the remote name.
+# ⚠ The `origin|upstream` rule's leading bound is LOAD-BEARING, but not for the
+# case you would guess. `/home/zach/repos/origin/fix/x` is NOT the reason:
+# strip `origin/` there and `fix` is still preceded by `/`, which the grep
+# boundary rejects anyway — both spellings yield nothing. The bound earns its
+# place on a remote-like segment glued to a WORD inside a path. Measured with
+# the bound loosened to `s#(origin|upstream)/##g`:
+#
+#   /home/zach/repos/origin/fix/x  -> []        (identical — cannot discriminate)
+#   /var/log/my-origin/fix/x       -> [fix/x]   <- FABRICATED out of a path
+#   .origin/fix/x                  -> [fix/x]
+#
+# Accepted cost: a genuinely remote-qualified `my-origin/fix/x` yields nothing.
+# That is an omission, and fabrication is the worse direction, so the bound
+# stays. (An earlier revision of this comment named the `/origin/` case, which
+# measurement showed proves nothing.)
 extract_branches(){
   printf '%s\n' "$1" \
     | sed -E '

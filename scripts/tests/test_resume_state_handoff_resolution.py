@@ -823,18 +823,33 @@ def test_the_slashed_ref_table_keeps_its_real_coverage():
     assert set(pins) <= {"r2", "base+r3", "nothing"}, set(pins)
 
 
-def test_a_remote_name_inside_a_filesystem_path_is_not_stripped(tmp_path, stub_bin):
-    """The `origin|upstream` rule's leading bound is load-bearing.
+def test_a_remote_like_path_segment_is_not_stripped(tmp_path, stub_bin):
+    """The `origin|upstream` rule's leading bound is load-bearing — but NOT for
+    the case the obvious fixture uses, which is why this needed measuring.
 
-    Without it, `/home/zach/repos/origin/fix/x` has its `origin/` stripped and
-    mints `fix/x` — the exact fabrication class this function exists to prevent.
-    Untested until the round-3 audit pointed at the bound as an unguarded
-    tightening.
+    `/home/zach/repos/origin/fix/x` does NOT discriminate: with the bound
+    loosened, `origin/` is stripped and the result is `/home/zach/repos/fix/x`,
+    where `fix` is still preceded by `/` and the grep boundary rejects it
+    anyway. Both versions yield nothing, so a test built on it passes with the
+    bound deleted — measured, and the first version of this test did exactly
+    that.
+
+    The discriminating shape is a remote-like segment glued to a WORD, inside a
+    path. Measured with the bound loosened to `s#(origin|upstream)/##g`:
+
+        /home/zach/repos/origin/fix/x  -> []        (same, cannot discriminate)
+        /var/log/my-origin/fix/x       -> [fix/x]   <- FABRICATED from a path
+        .origin/fix/x                  -> [fix/x]
+        my-origin/fix/x                -> [fix/x]
+
+    Accepted cost of the bound: a genuinely remote-qualified `my-origin/fix/x`
+    yields nothing. That is an omission, and the fabrication is the worse
+    direction, so the bound stays.
     """
     repo = make_repo(
         tmp_path,
         docs=("HANDOFF.md",),
-        doc_body="## Handoff\nBuilt from `/home/zach/repos/origin/fix/x` last week.\n",
+        doc_body="## Handoff\nBuilt from `/var/log/my-origin/fix/x` last week.\n",
     )
     assert branch_tokens(run_resume(repo, stub_bin)) == []
 
