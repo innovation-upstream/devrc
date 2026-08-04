@@ -11,8 +11,10 @@
 # degrades SILENTLY when a source is unreachable/absent rather than faking state.
 #
 # Usage: resume-state.sh [topic-slug | path/to/handoff.md]
-#   no arg      -> newest claudedocs/handoff-*.md in the repo of $PWD
-#   slug        -> claudedocs/handoff-<slug>*.md in the repo of $PWD
+#   no arg      -> newest claudedocs/handoff-*.md in the repo of $PWD,
+#                  else newest claudedocs/*HANDOFF*.md (SESSION-HANDOFF.md &c.)
+#   slug        -> claudedocs/handoff-<slug>*.md in the repo of $PWD,
+#                  else the no-arg chain above
 #   handoff path-> that file; the target repo is derived FROM the path
 #
 # v1 workload/alerts target datapacket (prod-kubeconfig at <repo>/prod-kubeconfig);
@@ -82,6 +84,26 @@ resolve(){
       HANDOFF=$(ls -t "$REPO"/claudedocs/handoff-"$arg"*.md 2>/dev/null | head -1)
     fi
     [ -z "$HANDOFF" ] && HANDOFF=$(ls -t "$REPO"/claudedocs/handoff-*.md 2>/dev/null | head -1)
+    # FALLBACK for repos that name their handoff in caps — civitai-manager uses
+    # claudedocs/SESSION-HANDOFF.md, which the lowercase glob above misses, and
+    # a missed handoff is not a quiet failure: the DRIFT block below used to
+    # print "(none detected — live state matches the handoff's claims)" after
+    # reconciling against NOTHING. A false green.
+    #
+    # Reach, deliberately narrow: basenames containing the literal, UPPERCASE
+    # substring HANDOFF and ending .md, i.e. SESSION-HANDOFF.md, HANDOFF.md,
+    # HANDOFF-2026-08-04.md. claudedocs/ in these repos is mostly design/audit
+    # docs (*-DESIGN.md, SECURITY-AUDIT-*.md, LAUNCH-*.md, *-RESEARCH.md) and
+    # none of those contain HANDOFF, so none can resolve as one. Case matters:
+    # bash globs are case-sensitive by default, so this cannot poach the
+    # lowercase family — and it is tried LAST regardless, so a repo carrying
+    # both shapes resolves exactly as it does today (handoff-*.md wins).
+    #
+    # The topic slug gets no fallback of its own on purpose: an unmatched slug
+    # already falls through this chain, so `resume-state.sh session` in a repo
+    # whose only handoff is SESSION-HANDOFF.md still finds it, and there is
+    # nothing for a slug to disambiguate when the family holds one file.
+    [ -z "$HANDOFF" ] && HANDOFF=$(ls -t "$REPO"/claudedocs/*HANDOFF*.md 2>/dev/null | head -1)
   fi
   local url
   url=$(git -C "$REPO" remote get-url origin 2>/dev/null) \
@@ -261,6 +283,12 @@ main(){
   echo "DRIFT"
   if [ "${#DRIFT[@]}" -gt 0 ]; then
     printf '  - %s\n' "${DRIFT[@]}"
+  elif [ -z "$HANDOFF" ]; then
+    # No handoff resolved => nothing was reconciled. Saying "live state matches
+    # the handoff's claims" here is a LIE, and the reassuring shape of it is the
+    # actual harm: a caller reads it as a clean bill of health for an initiative
+    # whose doc was never loaded. Name the absence instead.
+    echo "  (no handoff loaded — nothing to reconcile; this is NOT a clean bill of health)"
   else
     echo "  (none detected — live state matches the handoff's claims)"
   fi
