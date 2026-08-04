@@ -99,9 +99,28 @@ def stub_bin(tmp_path_factory):
         # the PR-reconciliation path both ways — answering and failing — without
         # a network. Unset (the default) it behaves as a pure tripwire: log the
         # invocation and fail, which is what `gh pr view` does offline.
+        # $STUB_GH_OK_PRS (space-separated) additionally makes gh answer for
+        # THOSE PR numbers only and fail for the rest. Without that selective
+        # mode the fixtures could only make gh answer for all or none, which
+        # left the PARTIAL-answer branch structurally unreachable — a mutation
+        # of it survived the whole suite.
         body = f'printf "{name} %s\\n" "$*" >> "$STUB_LOG"\n'
         if name == "gh":
-            body += 'if [ -n "${STUB_GH_JSON:-}" ]; then printf "%s\\n" "$STUB_GH_JSON"; exit 0; fi\n'
+            body += (
+                'if [ -n "${STUB_GH_JSON:-}" ]; then\n'
+                '  if [ -n "${STUB_GH_OK_PRS:-}" ]; then\n'
+                '    num=""\n'
+                '    for a in "$@"; do\n'
+                '      case "$a" in ""|*[!0-9]*) ;; *) num="$a"; break ;; esac\n'
+                '    done\n'
+                '    for p in $STUB_GH_OK_PRS; do\n'
+                '      if [ "$num" = "$p" ]; then printf "%s\\n" "$STUB_GH_JSON"; exit 0; fi\n'
+                '    done\n'
+                '    exit 1\n'
+                '  fi\n'
+                '  printf "%s\\n" "$STUB_GH_JSON"; exit 0\n'
+                'fi\n'
+            )
         write_exec(d / name, body + "exit 1\n")
     return d, log
 
@@ -541,6 +560,38 @@ def test_no_remote_with_referenced_prs_is_reported_as_unreconciled(tmp_path, stu
     assert "3 referenced PR(s) were never checked" in joined, joined
 
 
+def test_a_partial_gh_answer_is_reported_as_partial(tmp_path, stub_bin):
+    """gh answers for SOME referenced PRs and fails for the rest.
+
+    This is the case the code's own comment names — "one unreachable PR hides
+    behind four that worked" — and it was UNGUARDED: mutating
+    `elif [ "$n_ok" -lt "$n_try" ]` to `-lt 0` survived all 46 tests, because
+    the fixtures could only make gh answer for all or none. The selective stub
+    exists for this branch.
+    """
+    repo = make_repo(
+        tmp_path,
+        docs=("SESSION-HANDOFF.md",),
+        doc_body=PR_HANDOFF,
+        remote="git@github.com:acme/widget.git",
+    )
+    out = run_resume(
+        repo,
+        stub_bin,
+        extra_env={
+            "STUB_GH_JSON": '{"state":"OPEN","statusCheckRollup":[]}',
+            "STUB_GH_OK_PRS": "4101 4102",       # 4103 fails
+        },
+    )
+    # precondition: the fixture really did reach the PARTIAL case, not all-or-none
+    assert "PR #4101 OPEN" in out and "PR #4102 OPEN" in out, out
+    assert "PR #4103" not in out, out
+    joined = " ".join(drift_lines(out))
+    assert "2 of 3" in joined, joined
+    assert "matches the handoff's claims" not in joined, joined
+    assert "did not answer" in joined, joined
+
+
 def test_drift_is_clean_when_gh_actually_answers(tmp_path, stub_bin):
     """POSITIVE CONTROL for the two tests above.
 
@@ -668,9 +719,14 @@ def test_an_existing_branch_is_reported_as_existing_not_gone(tmp_path, stub_bin)
 
 
 def test_the_word_boundary_behaviour_is_preserved(tmp_path, stub_bin):
-    """Only `/` changed. `-` and `.` must still delimit as `\\b` did, and an
-    embedded prefix must still NOT match — otherwise the narrower boundary
-    would be silently dropping real branch references."""
+    """`-` and `.` must still delimit as `\\b` did, and an embedded prefix must
+    still NOT match.
+
+    ⚠ This test is documented as guarding against "silently dropping real
+    branch references", and for one round it did NOT: it exercises only `-` and
+    `notafix/`, so it structurally could not see the `origin/` class below. The
+    parametrised test that follows is the part that actually covers that claim.
+    """
     repo = make_repo(
         tmp_path,
         docs=("HANDOFF.md",),
@@ -679,6 +735,80 @@ def test_the_word_boundary_behaviour_is_preserved(tmp_path, stub_bin):
     toks = branch_tokens(run_resume(repo, stub_bin))
     assert "fix/kept-branch" in toks, toks
     assert not any("must-not-match" in t for t in toks), toks
+
+
+# Every ref-ish spelling that carries a slash-bearing prefix. Excluding `/` from
+# the leading boundary killed ALL of these — a real regression, measured across
+# 211 real handoff docs: `origin/zach/engaged-models-client-store` in
+# datapacket-talos is the ONLY form that branch appears in, and it is genuinely
+# gone, so the pre-regression DRIFT line was correct and the regressed code was
+# silently mute. Omission replacing fabrication is the same disease in a go/no-go
+# tool — it reads as "no drift".
+SLASHED_REF_FORMS = [
+    ("origin/fix/wanted", "fix/wanted"),
+    ("upstream/feat/wanted", "feat/wanted"),
+    ("refs/heads/fix/wanted", "fix/wanted"),
+    ("refs/remotes/origin/zach/wanted", "zach/wanted"),
+    ("https://github.com/a/b/tree/feat/wanted", "feat/wanted"),
+    ("https://github.com/a/b/compare/main...feat/wanted", "feat/wanted"),
+]
+
+
+@pytest.mark.parametrize("spelling,expected", SLASHED_REF_FORMS)
+def test_a_ref_with_a_slashed_prefix_is_still_extracted(
+    tmp_path, stub_bin, spelling, expected
+):
+    repo = make_repo(
+        tmp_path,
+        docs=("HANDOFF.md",),
+        doc_body=f"## Handoff\nRebase onto {spelling} before continuing.\n",
+    )
+    toks = branch_tokens(run_resume(repo, stub_bin))
+    assert toks == [expected], f"{spelling!r} -> {toks}, expected [{expected!r}]"
+
+
+def test_stripping_ref_prefixes_does_not_revive_path_fabrication(tmp_path, stub_bin):
+    """The two fixes pull in opposite directions, so pin them TOGETHER.
+
+    Stripping `origin/`-style prefixes must not re-open the door that filter 1
+    closed: a bare filesystem path carries no ref prefix and must still yield
+    nothing, in the same document that legitimately names a prefixed ref.
+    """
+    repo = make_repo(
+        tmp_path,
+        docs=("HANDOFF.md",),
+        doc_body=(
+            "## Handoff\n"
+            "local checkout `/home/zach/workspace/scratch/naida-ai` is stale.\n"
+            "`docs/configuration.md` shipped a bad sample.\n"
+            "Rebase onto origin/zach/engaged-models-client-store first.\n"
+        ),
+    )
+    assert branch_tokens(run_resume(repo, stub_bin)) == [
+        "zach/engaged-models-client-store"
+    ]
+
+
+def test_a_token_that_is_both_a_live_branch_and_a_tracked_path_is_a_branch(
+    tmp_path, stub_bin
+):
+    """The tracked-path probe must not outrank a real branch.
+
+    It used to run FIRST, so a token that was both silently vanished. No such
+    collision exists across 2893 real branches, so this is a latent wrong-drop
+    rather than a live bug — but the ordering is cheap to get right and cheaper
+    to pin than to rediscover.
+    """
+    repo = make_repo(
+        tmp_path,
+        docs=("HANDOFF.md",),
+        doc_body="## Handoff\nWork continues on docs/overhaul.\n",
+        files=("docs/overhaul",),      # a tracked FILE of exactly that name
+        branches=("docs/overhaul",),   # …and a real branch of exactly that name
+    )
+    out = run_resume(repo, stub_bin)
+    assert branch_tokens(out) == ["docs/overhaul"], out
+    assert not any("docs/overhaul" in ln for ln in drift_lines(out)), drift_lines(out)
 
 
 # --------------------------------------------------------------------------- #
