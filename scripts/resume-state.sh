@@ -67,8 +67,27 @@ extract_prs(){
 # Failure directions are asymmetric and this trades in the safe one: dropping a
 # real branch costs one drift check silently, while inventing one puts a false
 # statement in front of someone deciding what to do next.
+#
+# 🔴 …BUT AN OMISSION IS NOT FREE EITHER, AND FILTER 1 OVERSHOT. Excluding `/`
+# also killed every reference that legitimately CARRIES a slash-bearing prefix —
+# `origin/fix/x`, `upstream/feat/x`, `refs/heads/fix/x`, and GitHub `/tree/` and
+# `/compare/` URLs. Measured across 211 real handoff docs: one live casualty,
+# `origin/zach/engaged-models-client-store` in datapacket-talos, which is the
+# ONLY form that branch appears in and IS genuinely gone — so the old code's
+# DRIFT line was right and the new code was silently mute. In a go/no-go tool
+# that is the same disease as the fabrication, just the other polarity: it reads
+# as "no drift".
+#
+# So STRIP the ref-ish prefix first, then match. Each stripped form is a strong
+# POSITIVE signal that what follows is a ref, which is exactly what a bare
+# filesystem path lacks — `/home/zach/workspace/…` still yields nothing.
 extract_branches(){
   printf '%s\n' "$1" \
+    | sed -E '
+        s#https?://[^[:space:]]*/(tree|compare)/# #g
+        s#(refs/(heads|remotes)/)+# #g
+        s#(^|[^A-Za-z0-9._/-])(origin|upstream)/#\1#g
+      ' \
     | grep -oE '(^|[^A-Za-z0-9_/])(zach|feat|fix|docs|chore)/[A-Za-z0-9._/-]+' 2>/dev/null \
     | sed -E 's/^[^A-Za-z]+//; s/[.,;:)]+$//' \
     | grep -vE '\.[A-Za-z]{1,6}$' \
@@ -227,16 +246,22 @@ git_pr_block(){
   # --- branches: does the handoff's named branch still exist / is it merged? ---
   local b tip
   for b in $(extract_branches "$text"); do
-    # A token that names a real tracked PATH is a path, not a branch. This is
-    # the repo-aware half of the anti-fabrication filter documented on
-    # extract_branches: it catches the extensionless cases the string filters
-    # cannot see (a quoted `docs/architecture` directory, say). Cheap — one
-    # object-existence probe, no network, and only for tokens that got this far.
-    if git -C "$d" cat-file -e "HEAD:$b" 2>/dev/null; then continue; fi
+    # ORDER IS DELIBERATE: being a real BRANCH wins over being a real PATH.
+    # The tracked-path probe is the repo-aware half of the anti-fabrication
+    # filter documented on extract_branches — it catches the extensionless
+    # cases the string filters cannot see (a quoted `docs/architecture`
+    # directory, say). But it used to run FIRST, which meant a token that was
+    # both a live branch AND a tracked path got silently dropped. No such
+    # collision exists across 2893 real branches today, so this reorder loses
+    # nothing measurable; it just removes a latent wrong-drop, and the
+    # anti-fabrication guarantee is unchanged because a token still has to fail
+    # BOTH branch lookups before the path probe can rescue it from GONE.
     if git -C "$d" rev-parse --verify -q "$b" >/dev/null 2>&1; then
       tip=local
     elif git -C "$d" rev-parse --verify -q "origin/$b" >/dev/null 2>&1; then
       tip="origin/$b"
+    elif git -C "$d" cat-file -e "HEAD:$b" 2>/dev/null; then
+      continue                                      # a tracked PATH, not a branch
     else
       echo "  branch $b: GONE (deleted or never local)"
       DRIFT+=("branch $b referenced by handoff no longer exists (merged & pruned?)")
@@ -334,8 +359,17 @@ alerts_block(){
   kill "$pf" 2>/dev/null; wait "$pf" 2>/dev/null
   if [ -z "$out" ]; then echo "  (alertmanager unreachable — skipped)"; else echo "$out"; fi
   # feed real criticals into DRIFT
+  #
+  # A full `if`, not `[[ … ]] && DRIFT+=(…)`. The `&&` form is the same class of
+  # bug that made `main` exit 1 when it found drift with nothing unreconciled:
+  # a false test leaves the compound returning 1, and here that is the last
+  # statement of the LOOP and so of the function. It is harmless TODAY only
+  # because alerts_block is not the last thing `main` runs — i.e. it is one
+  # reordering away from being a bug, which is not a property worth relying on.
   while read -r line; do
-    [[ "$line" == *"***"* ]] && DRIFT+=("firing CRITICAL in $WL_NS:${line%%  \*\*\*}")
+    if [[ "$line" == *"***"* ]]; then
+      DRIFT+=("firing CRITICAL in $WL_NS:${line%%  \*\*\*}")
+    fi
   done <<<"$out"
 }
 
