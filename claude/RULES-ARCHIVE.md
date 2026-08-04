@@ -351,12 +351,30 @@ runs.
 Consolidating a duplicated predicate is normally filed as cleanup. Measured on civitai-manager
 2026-08-03, it repeatedly surfaced live defects nobody was hunting:
 
-- **An empty / `class_type`-less prompt was being SUBMITTED to ComfyUI.** A third call site
-  already refused those, so the gate was the odd one out among three. Nothing was looking for
-  this; it fell out of putting the three copies side by side.
-- **`canQueue`** — three copies.
-- **The node-pack `needed()` predicate** — three sites, all wrong *in the same direction*.
-  Fixing only the reported one would have left a required pack demoted and mislabelled.
+- **A false "Ready" on a graph the run path would REFUSE to submit.** Two surfaces answered
+  the same question about the same graph — `realRun` ("may I submit this to ComfyUI?") and
+  `workflowReadiness` ("may I tell the user it is ready?") — and the readiness copy was
+  strictly WEAKER: it keyed on the three preflight COUNTS plus conversion warnings and never
+  read `report.OK`. `comfy.Preflight` returns `OK:false` with all three lists **empty** for a
+  graph it could not parse at all, so an unparseable graph (a UI graph stored as api, a JSON
+  array, a bare string, garbage bytes) fell through every count and rendered *"Ready — every
+  node type and model file this workflow references is installed"* about a graph `realRun`
+  refuses. An adversarial audit measured **6 of 10** probed unusable inputs rendering
+  `ready`, all reachable end to end through `POST /workflows/import-png`. Consolidated into
+  `internal/web/run_gate.go` — "the never-submit gate, in one place".
+- **The node-pack `needed()` predicate** — open-coded as `Contested && !Best` at **three**
+  sites (the collapse, the Install button's prominence, the contest badge), and all three
+  wrong *in the same direction* for the same reason: a pack can lose a contest on one class
+  while being the sole provider of another. Fixing only the reported site would have left a
+  required pack demoted and mislabelled. Now one method, `rankedPack.needed()`.
+- **`canQueue`** — duplicated between `runZone` and the count segment that must agree with
+  it; both now derive from `canQueueWorkflow`.
+
+⚠ **The first case above was first reported to this file with its direction INVERTED** — as
+"an empty prompt was being submitted". Reading `run_gate.go` showed the opposite: nothing
+was wrongly submitted, the *readiness line* wrongly said yes about a graph the submit path
+already refused. Worth keeping as a reminder that a remembered defect's direction is exactly
+the detail that decays, and that the fix site is where you check it.
 
 Mechanism: a predicate open-coded at N sites is typically wrong at N−1 of them **in the same
 direction**, because each copy was written from the same incomplete mental model. That is why
