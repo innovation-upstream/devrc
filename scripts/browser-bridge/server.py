@@ -391,9 +391,10 @@ HDR_EXT_ID = "X-Bridge-Ext-Id"
 # The BUILD MARKER of the code the instance is actually EXECUTING (#324) — a
 # generated literal in extension/build_id.js that the service worker IMPORTS,
 # so it is frozen into the loaded module graph and travels with the code. This
-# is the field `extension_stale` is computed from; the version is a hint only.
-# Absent from a build that predates the marker → the verdict is null, never
-# false (see annotate_staleness).
+# is the only field an ALL-CLEAR can be computed from; the version can never
+# certify code as current. Absent from a build that predates the marker → the
+# verdict is NEVER false; it is null unless the two versions are both known and
+# DISAGREE, which decides true on its own (see annotate_staleness).
 HDR_EXT_BUILD = "X-Bridge-Ext-Build"
 
 # Server-side bounds on EVERY extension-supplied /poll string. protocol.js
@@ -639,29 +640,47 @@ def annotate_staleness(instances, expected, expected_build=None):
     `expected_build` is the BUILD MARKER read from the deployed extension source
     (build_marker()). Either may be None.
 
-    🔴 THE VERDICT IS COMPUTED FROM THE MARKER, NOT THE VERSION (#324). The
+    🔴 AN ALL-CLEAR IS COMPUTED FROM THE MARKER, NEVER THE VERSION (#324). The
     version cannot answer the question it was being asked. `extension_version`
-    is `chrome.runtime.getManifest().version`, read from the on-disk manifest at
-    call time, and `extension_id` is derived from the load PATH — so both
-    describe the DIRECTORY, not the executing code. Measured 2026-08-04: two
+    is `chrome.runtime.getManifest().version` — it describes the manifest of the
+    extension the worker LOADED, and `extension_id` is derived from the load
+    PATH, so neither describes the executing code. Measured 2026-08-04: two
     Brave profiles loading the SAME directory reported an identical id, an
     identical `0.7.3` and `extension_stale: false`, while one ran `main` and the
     other an unmerged 0.7.2 build whose source exists on no disk. The build
     marker is a literal in the worker's own imported module graph, so a stale
     worker reports the stale value by construction.
 
+    (Also measured 2026-08-04, on the OTHER host — workbench: profile
+    "personal - other" reported `0.7.1` and profile "work" `0.8.1` under one
+    `extension_id` — i.e. one load path — while the directory on disk held
+    only `0.8.1` (`manifest.json` + `build_id.js`, both stamped 09:31). Evidence
+    the version is metadata parsed at extension-LOAD time rather than re-read
+    from disk per call. ONE observation, a hypothesis, not established — it
+    changes nothing here either way: the version still cannot certify the code.)
+
+    But the uselessness is ASYMMETRIC, and only one direction of it is real. A
+    version MATCH proves nothing (the paragraph above is exactly that case). A
+    version MISMATCH, both sides known, is positive proof that what was loaded
+    is not what is deployed — that direction was never in doubt, so a missing
+    marker must not discard it.
+
     `extension_stale` is a yes/no, not two strings to eyeball:
       True  — the marker this instance reports differs from `expected_build`
               (this profile is running code that is not the deployed code →
-              Remove + Load unpacked it, per profile), or the markers agree but
-              the reported VERSION disagrees (a nonsense state worth flagging).
+              Remove + Load unpacked it, per profile); or the markers agree but
+              the reported VERSION disagrees (a nonsense state worth flagging);
+              or a marker is MISSING on either side and the two versions are
+              both known and disagree (the asymmetry above).
       False — the markers are both present and identical. This, and only this,
               means "verified current".
-      None  — 🔴 UNDECIDABLE, and it FAILS CLOSED to here. Either side missing a
-              marker (a build predating #324, an unreadable/undeployed source
-              tree) yields null. NEVER guess, and never let a version match
+      None  — 🔴 UNDECIDABLE, and it FAILS CLOSED to here. A marker missing on
+              either side (a build predating #324, an unreadable/undeployed
+              source tree) with versions that agree, or with either version
+              unknown, yields null. NEVER guess, and never let a version match
               stand in for a marker: a False that is not marker-backed is
-              exactly the affirmative all-clear that #324 was filed about.
+              exactly the affirmative all-clear that #324 was filed about. Only
+              True is ever reachable from versions alone.
     """
     for inst in instances:
         loaded = inst.get("extension_version")
@@ -669,7 +688,11 @@ def annotate_staleness(instances, expected, expected_build=None):
         inst["extension_version_expected"] = expected
         inst["extension_build_expected"] = expected_build
         if not expected_build or not loaded_build:
-            inst["extension_stale"] = None
+            # No marker on one side → no all-clear is available. A known version
+            # DISAGREEMENT is still positive proof of staleness; agreement, or
+            # an unknown version on either side, stays undecidable.
+            inst["extension_stale"] = (
+                True if expected and loaded and loaded != expected else None)
             continue
         stale = loaded_build != expected_build
         if not stale and expected and loaded and loaded != expected:
@@ -2188,11 +2211,13 @@ def make_handler(registry: Registry, token: str, cmd_timeout: float,
                     "extension_version_current": expected,
                     # The BUILD MARKER the server expects the running code to
                     # carry, read from the deployed extension/build_id.js (#324).
-                    # This is what each instance's `extension_stale` is computed
-                    # against — the version above is a hint only, because it (and
-                    # `extension_id`) describe the load DIRECTORY rather than the
-                    # executing code. null here → every verdict is null, which is
-                    # the honest answer, not "fine".
+                    # An ALL-CLEAR is computed against THIS and nothing else —
+                    # the version above can never certify code as current,
+                    # because it (and `extension_id`) describe the load DIRECTORY
+                    # rather than the executing code. null here → no verdict can
+                    # be false; each is null unless that instance's version is
+                    # known and DISAGREES, which still decides true. Either way,
+                    # null is the honest answer, not "fine".
                     "extension_build_current": expected_build,
                     # The deploy directory Brave SHOULD have been pointed at.
                     # Reported so an operator can read it next to each instance's

@@ -4282,9 +4282,11 @@ def test_annotate_staleness_fails_closed_when_a_marker_is_missing():
     """🔴 FAIL CLOSED. A missing marker on EITHER side is undecidable — null,
     never False. `false` must mean "verified current", so a build predating the
     marker, or an unreadable/undeployed source tree, cannot produce one. Note
-    the version MATCHES in every case below: under the old version-based rule
-    each of these returned False, which is exactly the affirmative all-clear
-    #324 was filed about."""
+    the version MATCHES in every case below — deliberately, and that is the
+    whole scope of this test: under the old version-based rule each of these
+    returned False, which is exactly the affirmative all-clear #324 was filed
+    about. A marker-missing case whose versions DISAGREE is decidable (True)
+    and lives in test_annotate_staleness_version_mismatch_decides_true_*."""
     # (a) the instance reports no marker (a build predating #324)
     insts = [{"key": "a", "extension_version": "0.3.0",
               "extension_build": None},
@@ -4329,6 +4331,88 @@ def test_annotate_staleness_marker_match_with_version_mismatch_is_stale():
     S.annotate_staleness(insts, expected="0.7.3",
                          expected_build="0000000000000001")
     assert insts[0]["extension_stale"] is True
+
+
+@pytest.mark.parametrize("loaded_build,expected_build", [
+    (None, "73f5438f18f395d2"),   # instance reports no marker (the LIVE case)
+    ("a1b2c3d4e5f60718", None),   # server cannot read a marker
+    (None, None),                 # neither side has one
+    ("", "73f5438f18f395d2"),     # empty string is "missing" too
+    ("a1b2c3d4e5f60718", ""),
+])
+def test_annotate_staleness_version_mismatch_decides_true_without_markers(
+        loaded_build, expected_build):
+    """🔴 THE ASYMMETRY. A version MATCH proves nothing (two profiles loading one
+    directory report one version while running different code — #324), but a
+    version MISMATCH is positive proof the loaded code is not the deployed code.
+    That direction was never in doubt, so a missing marker must not discard it.
+
+    The first parameter set is the LIVE observation from the workbench on
+    2026-08-04 that motivated this: profile "personal - other" reported
+    extension_version 0.7.1 / extension_build null against an expected 0.8.1 /
+    73f5438f18f395d2, and the verdict came back null."""
+    insts = [{"key": "personal - other", "extension_version": "0.7.1",
+              "extension_build": loaded_build}]
+    S.annotate_staleness(insts, expected="0.8.1",
+                         expected_build=expected_build)
+    assert insts[0]["extension_stale"] is True
+    assert insts[0]["extension_version_expected"] == "0.8.1"
+    assert insts[0]["extension_build_expected"] == expected_build
+
+
+@pytest.mark.parametrize("loaded_build,expected_build", [
+    (None, "73f5438f18f395d2"),
+    ("a1b2c3d4e5f60718", None),
+    (None, None),
+])
+def test_annotate_staleness_missing_marker_version_agreement_stays_none(
+        loaded_build, expected_build):
+    """A marker is missing and the versions AGREE: still undecidable. Agreement
+    is exactly the signal #324 proved worthless, so it may not upgrade the
+    verdict in either direction."""
+    insts = [{"key": "work", "extension_version": "0.9.2",
+              "extension_build": loaded_build}]
+    S.annotate_staleness(insts, expected="0.9.2",
+                         expected_build=expected_build)
+    assert insts[0]["extension_stale"] is None
+
+
+@pytest.mark.parametrize("loaded_version,expected_version", [
+    (None, "0.8.1"),    # instance reported no version
+    ("0.7.1", None),    # server could not read a manifest version
+    (None, None),
+    ("", "0.8.1"),      # empty string is "unknown", not a mismatch
+    ("0.7.1", ""),
+])
+def test_annotate_staleness_missing_marker_and_unknown_version_stays_none(
+        loaded_version, expected_version):
+    """With a marker missing, a verdict may only come from two KNOWN versions.
+    An absent version is not evidence of disagreement."""
+    insts = [{"key": "other", "extension_version": loaded_version,
+              "extension_build": None}]
+    S.annotate_staleness(insts, expected=expected_version,
+                         expected_build="73f5438f18f395d2")
+    assert insts[0]["extension_stale"] is None
+
+
+def test_annotate_staleness_false_stays_strictly_marker_backed():
+    """🔴 THE INVARIANT. `False` is the affirmative all-clear; only two present,
+    identical markers may produce one. Sweep every marker-missing shape — with
+    versions agreeing, disagreeing, and unknown — and assert not one yields
+    False. Only True becomes newly reachable from versions alone."""
+    versions = [("0.7.1", "0.8.1"), ("0.9.2", "0.9.2"), (None, "0.8.1"),
+                ("0.7.1", None), (None, None), ("", "0.8.1"), ("0.7.1", "")]
+    markers = [(None, "73f5438f18f395d2"), ("a1b2c3d4e5f60718", None),
+               (None, None), ("", "73f5438f18f395d2"),
+               ("a1b2c3d4e5f60718", "")]
+    for loaded_v, expected_v in versions:
+        for loaded_b, expected_b in markers:
+            insts = [{"key": "k", "extension_version": loaded_v,
+                      "extension_build": loaded_b}]
+            S.annotate_staleness(insts, expected=expected_v,
+                                 expected_build=expected_b)
+            assert insts[0]["extension_stale"] is not False, (
+                loaded_v, expected_v, loaded_b, expected_b)
 
 
 def test_manifest_version_none_on_missing(tmp_path):

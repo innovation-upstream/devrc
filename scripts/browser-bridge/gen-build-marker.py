@@ -9,7 +9,7 @@ WHY THIS EXISTS (#324). `ping` used to answer "is the build I just deployed the
 one Brave loaded?" with `chrome.runtime.getManifest().version` and
 `chrome.runtime.id`. Both describe the DIRECTORY the extension was loaded from,
 not the code that is executing: the id is derived from the load path, and the
-version is read off the manifest on disk at call time. Measured 2026-08-04 —
+version describes the manifest of the extension that was LOADED. Measured 2026-08-04 —
 two Brave profiles loading the SAME directory reported an identical id, an
 identical `0.7.3`, and `extension_stale: false`, while one was executing `main`
 and the other an unmerged 0.7.2 build whose source exists on no disk. No
@@ -115,15 +115,15 @@ def render(marker: str) -> str:
 // deployed?". A value that a running service worker COMPUTES by reading disk
 // cannot answer it, because the disk is the thing that was updated — a stale
 // worker reads the NEW file and reports the NEW value. That is precisely the
-// bug in #324: `chrome.runtime.getManifest().version` reads the on-disk
-// manifest, and `chrome.runtime.id` is derived from the load PATH, so both
-// describe the DIRECTORY rather than the running code. Measured 2026-08-04:
+// bug in #324: `chrome.runtime.getManifest().version` describes the manifest of
+// the extension that was LOADED, and `chrome.runtime.id` is derived from the
+// load PATH, so neither describes the running code. Measured 2026-08-04:
 // two Brave profiles on ONE directory reported the same id, the same 0.7.3 and
 // `extension_stale: false` while executing different code.
 //
 // So do NOT "simplify" this to any of:
 //   * fetch(chrome.runtime.getURL("build_id.json"))  — reads disk at runtime
-//   * chrome.runtime.getManifest().version            — reads disk at runtime
+//   * chrome.runtime.getManifest().version            — describes the LOAD
 //   * a value written into chrome.storage.local       — survives a code swap
 //   * a hash computed in the worker over its own source — same disk read
 // The marker must be a LITERAL in a module the worker imported, so that it was

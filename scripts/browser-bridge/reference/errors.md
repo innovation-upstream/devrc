@@ -130,20 +130,29 @@ at `~/.local/share/browser-bridge-ext/`, else the repo copy), and an explicit
 **`null` = undecidable** — `null` is NOT "fine". `browser whoami` carries the
 same fields plus `bridge.extension_build_current`.
 
-🔴 **The verdict is computed from `extension_build`, NOT from the version
-(#324).** `extension_version` is `chrome.runtime.getManifest().version` (read
-off the on-disk manifest at call time) and `extension_id` is derived from the
-load PATH, so **both describe the DIRECTORY, not the code that is running**.
-MEASURED 2026-08-04: two Brave profiles loading the SAME directory reported an
-identical id, an identical `0.7.3` and `extension_stale: false`, while one ran
-`main` and the other an unmerged 0.7.2 build whose source existed **on no disk**.
-No version-shaped signal can separate those two rows.
+🔴 **An ALL-CLEAR is computed from `extension_build`, NEVER from the version
+(#324).** `extension_version` is `chrome.runtime.getManifest().version` — it
+describes the manifest of the extension the worker LOADED — and `extension_id`
+is derived from the load PATH, so **neither describes the code that is
+running**. MEASURED 2026-08-04: two Brave profiles loading the SAME directory
+reported an identical id, an identical `0.7.3` and `extension_stale: false`,
+while one ran `main` and the other an unmerged 0.7.2 build whose source existed
+**on no disk**. No version-shaped signal can separate those two rows, so a
+version MATCH can never produce `false`.
 
 `extension_build` is a generated LITERAL (`extension/build_id.js`) that the
 service worker **imports**, so it is frozen into the loaded module graph and
 travels with the code — a stale worker reports the stale marker by construction.
-The verdict **fails closed**: either side missing a marker → `null`, never
-`false`. A profile still running ≤0.7.3 therefore reads `null`, which is correct.
+
+The verdict is **ASYMMETRIC**, because the two directions are not equally
+knowable. `false` requires two markers that are present and identical — that is
+the whole of it, and nothing else can produce it. `true` additionally comes from
+a version MISMATCH with both sides known, marker or no marker: a mismatch is
+positive proof that the loaded code is not the deployed code, so a missing
+marker must not discard it. Everything else **fails closed** to `null` — a
+marker missing on either side with versions that agree, or with either version
+unknown. A profile still running ≤0.7.3 therefore reads `null` (or `true`, if
+its version disagrees), which is correct.
 
 Two things follow, both measured in the same session:
 

@@ -1436,9 +1436,11 @@ const OPS = {
   // two profiles on one directory report identical values while running
   // different code (measured 2026-08-04). The marker is a literal in this
   // worker's own module graph, so it is a statement about the RUNNING code.
-  // `extensionVersion` is kept — it is still a useful hint and older tooling
-  // reads it — but the server's `extension_stale` verdict is computed from the
-  // marker now, and fails closed (null) when either side lacks one.
+  // `extensionVersion` is kept — a version MISMATCH is still positive proof of
+  // staleness, and older tooling reads it — but the server's `extension_stale`
+  // ALL-CLEAR is computed from the marker alone: with a marker missing on either
+  // side it fails closed, never to `false`, and to `null` unless the two known
+  // versions disagree.
   async ping() {
     return { pong: true, extensionVersion: extensionVersion(),
              buildMarker: buildMarker(),

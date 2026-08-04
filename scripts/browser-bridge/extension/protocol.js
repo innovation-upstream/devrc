@@ -2743,11 +2743,12 @@ export function capHeaderValue(s, max = MAX_HEADER_VALUE_CHARS) {
 // `buildMarker` (#324) is the ONLY one of these three that describes the CODE
 // rather than the directory: it is a generated literal in build_id.js, imported
 // into the worker's module graph, so a stale worker sends the STALE value while
-// `extVersion` (read off the on-disk manifest at call time) and `extId`
+// `extVersion` (the manifest of the extension this worker LOADED) and `extId`
 // (path-derived) both report the freshly-deployed directory. Measured
 // 2026-08-04 — two profiles, one directory, identical id + version +
-// `extension_stale: false`, different code. Omitted (→ undecidable, never
-// "current") by a build that predates the marker.
+// `extension_stale: false`, different code. Omitted by a build that predates the
+// marker → that instance can never be called "current"; it is undecidable
+// unless the two known versions DISAGREE, which still decides "stale".
 export function pollHeaders(instanceId, label, active, extVersion, extId,
                             buildMarker) {
   const h = { "X-Bridge-Instance-Id": String(instanceId || "") };
