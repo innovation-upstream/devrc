@@ -58,7 +58,20 @@ Recorded so nobody re-derives it.
   - BOTH reported `extension_id bgbkamdlkdleahpgdgmjipjbgmepgenk`, `extension_version 0.7.3`, `extension_stale false`
   - `grep -ra "CLEARED on the tab" ~/.local/share/browser-bridge-ext/ $DEVRC/scripts/browser-bridge/` → **no matches anywhere**
   - `ps -eo lstart,comm | grep brave` → oldest Brave process **392 s** old; deploy was **9 h** earlier
-  - `personal` `instanceId` `c0e5f081` was **constant across every restart of the session**, changing only on Remove + Load unpacked
+  - ~~`personal` `instanceId` `c0e5f081` was **constant across every restart of the session**, changing only on Remove + Load unpacked~~
+    🔴 **RETRACTED 2026-08-04 — the second half was never measured, and is now falsified.**
+    The id being constant across restarts is real; "changing only on Remove + Load unpacked" was
+    an assumption. Re-measured on BOTH hosts and all FOUR profiles: every profile kept its
+    `instanceId` verbatim through a Remove + Load unpacked that demonstrably swapped the executing
+    code (build marker moved in all four: `73f5438f18f395d2` → `04bbd6f9c695141d` on three, and
+    `null` → `04bbd6f9c695141d` on the workbench's `personal - other`, which also moved 0.7.1 → 0.8.1). **So this bullet is not evidence of anything here** —
+    a constant `instanceId` is equally consistent with "no re-add happened" and with "a re-add
+    happened and swapped the code", which are exactly the two branches this investigation was
+    trying to separate. It does **not** show the profile was never re-added, and it does not
+    narrow the unexplained mechanism below by one bit. **What instanceId actually regenerates on
+    is unestablished** (a fresh profile? storage cleared? neither was tested) — do not
+    substitute a new lifecycle claim for the retracted one. The only signal that answers
+    "did the reload take" is the build marker / `extension_stale`.
 - **Ruled out:** stale service worker surviving a restart (browser processes were minutes old);
   stale `browser-bridge` service (restarted, new PID, behaviour unchanged); wrong directory
   (`extension_id` is `sha256(abs path)[:32]` mapped `0-f`→`a-p`; computed id matched

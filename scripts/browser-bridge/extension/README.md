@@ -99,6 +99,23 @@ Options) if present, else the auto-id. **Give each profile a unique label** so
 best-effort active-tab snapshot for `browser instances`) and echoes its
 `instanceId` in each `/result`.
 
+🔴 **`instanceId` is NOT a did-the-reload-take signal.** MEASURED 2026-08-04 on
+BOTH hosts and all FOUR profiles: every profile kept its `instanceId` verbatim
+through a per-profile **Remove + Load unpacked** that demonstrably swapped the
+executing code — the build marker moved in every one (three profiles
+`73f5438f18f395d2` → `04bbd6f9c695141d`; the workbench's `personal - other`
+`null` → `04bbd6f9c695141d`, its manifest version moving 0.7.1 → 0.8.1 too).
+An earlier claim that the id "changes only on Remove + Load unpacked" is
+therefore **false**, and reaching for it to check whether a reload took gives a
+confident wrong answer — precisely the failure class the build marker (#324)
+exists to close. **The only signal that answers that question is the build
+marker** (`buildMarker` from `ping`; `extension_build` vs
+`extension_build_current`, surfaced as the `extension_stale` verdict).
+
+⚠ **Scope:** that measurement establishes what `instanceId` does NOT tell you.
+What actually *does* regenerate it is **unestablished** — a fresh profile and an
+explicitly cleared `chrome.storage.local` were not tested. Don't invent one.
+
 **Duplicate-label safety.** If two profiles end up sharing one label (a
 misconfig), the server keeps only the newest and answers the displaced worker's
 `/poll` with a distinct `409 superseded` (not the idle `204`). On that signal the
@@ -160,9 +177,11 @@ come back).
    answers `unknown_op`.) You can also **compute what it should be** from the
    path — see [The path→id derivation](#the-pathid-derivation-measured) below —
    so this reading is now a confirmation, not the only source of truth. Then, if
-   the path is under `~/workspace/devrc/…`, click **Remove** (this drops that
-   profile's `chrome.storage.local` — token/port/label/`instanceId` — hence
-   step 7).
+   the path is under `~/workspace/devrc/…`, click **Remove** (you will have to
+   re-enter that profile's token/port/label — hence step 7). Do **not** expect
+   the `instanceId` to change: it was measured on 2026-08-04 to survive a
+   Remove + Load unpacked on all four profiles, so it is no evidence the re-add
+   happened. Read the `buildMarker` for that (step 8).
 5. **Load unpacked** → select `~/.local/share/browser-bridge-ext/`.
    (`Ctrl+L` in the GTK file chooser lets you type the path.)
 6. Confirm any permission re-prompt (`debugger`, `webNavigation`).
@@ -240,10 +259,12 @@ way:
 3. ⋯ → **Options**: re-paste the token, port `8788`, and the profile's label.
 4. `browser --instance <label> ping` to confirm it answers.
 
-⚠ **Rollback is not free.** Remove wipes that profile's
-`chrome.storage.local` — token, port, label and the persisted `instanceId` all
-go, which is why step 3 is mandatory and why the profile comes back with a NEW
-auto-id. Per profile. You are also back on the git-mutable path.
+⚠ **Rollback is not free.** Remove costs that profile its token, port and label,
+which is why step 3 is mandatory. Per profile. You are also back on the
+git-mutable path. What it does **not** cost is the `instanceId` — measured
+2026-08-04, four of four profiles came back with the SAME auto-id after a
+Remove + Load unpacked, so an unchanged id is **not** evidence the rollback
+failed to take. Use `ping`'s `buildMarker` (step 4) for that.
 
 ## Reload after every change (and how to know it took)
 
