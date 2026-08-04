@@ -4282,9 +4282,11 @@ def test_annotate_staleness_fails_closed_when_a_marker_is_missing():
     """🔴 FAIL CLOSED. A missing marker on EITHER side is undecidable — null,
     never False. `false` must mean "verified current", so a build predating the
     marker, or an unreadable/undeployed source tree, cannot produce one. Note
-    the version MATCHES in every case below: under the old version-based rule
-    each of these returned False, which is exactly the affirmative all-clear
-    #324 was filed about."""
+    the version MATCHES in every case below — deliberately, and that is the
+    whole scope of this test: under the old version-based rule each of these
+    returned False, which is exactly the affirmative all-clear #324 was filed
+    about. A marker-missing case whose versions DISAGREE is decidable (True)
+    and lives in test_annotate_staleness_version_mismatch_decides_true_*."""
     # (a) the instance reports no marker (a build predating #324)
     insts = [{"key": "a", "extension_version": "0.3.0",
               "extension_build": None},
