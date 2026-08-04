@@ -12,6 +12,7 @@ or merge them.
 | `manifest.json`     | MV3 manifest (permissions, icons, background SW, options page) |
 | `service_worker.js` | long-poll loop + chrome.* op executors (needs real Brave) |
 | `protocol.js`       | pure op-set / validation / envelope / backoff + registration payload (unit-tested) |
+| `build_id.js`       | **GENERATED** — the `BUILD_MARKER` literal that travels with the CODE (#324). Regenerate with `python3 scripts/browser-bridge/gen-build-marker.py`; CI fails if it is stale |
 | `options.html/js`   | one-time setup: bearer token + port + optional **label** → `chrome.storage.local` |
 | `icons/icon.svg`    | gruvbox bridge/link glyph — the SVG source |
 | `icons/icon-{16,32,48,128}.png` | rasterised icons wired into the manifest (regenerate with `rsvg-convert`, see `../README.md`) |
@@ -257,21 +258,85 @@ MV3 service worker alive, so a reload often no-ops. Never assume it took —
 
 ```bash
 browser --instance <label> ping
-  # new build → {"pong":true,"extensionVersion":"<manifest version>","id":"…",…}
+  # new build → {"pong":true,"extensionVersion":"…","buildMarker":"…","id":"…",…}
   # old build → op 'ping' returned unknown_op …                  (non-zero exit)
 # --instance matters: with two profiles connected, a bare call gets
 # 409 ambiguous_instance rather than an answer.
 ```
 
-If `ping` still reports the old version after ↻, **fully quit and reopen Brave**
-(never `pkill` it — tabs are not restorable).
+🔴 **Read `buildMarker`, not `extensionVersion` — and check EVERY profile.**
+`extensionVersion` is `chrome.runtime.getManifest().version`, read off the
+on-disk manifest at call time, and `id` is derived from the load PATH. Both
+therefore describe the **directory**, not the code that is executing.
+
+> **MEASURED 2026-08-04 (laptop, #324).** Two Brave profiles loading the SAME
+> directory reported an identical `extension_id`, an identical `0.7.3`, and
+> `extension_stale: false` — while one was executing `main` and the other an
+> unmerged 0.7.2 build whose source was present **on no disk** (`grep -ra` over
+> the whole deployed tree and the whole repo found nothing). Three further facts
+> from that session, all re-measured at the time:
+>
+> * **A full browser restart is NOT sufficient.** Brave was genuinely fresh —
+>   oldest browser process 392 s old, deploy 9 h earlier — and still ran the old
+>   code. Restarting the `browser-bridge` service did not help either.
+> * **Per-profile Remove + Load unpacked at `brave://extensions` IS what
+>   reloads it.** After doing it in both profiles, both ran `main`.
+> * **Staleness is PER PROFILE.** One profile was current and the other was not,
+>   at the same instant, on one host, from one directory. Checking one profile
+>   tells you nothing about the other.
+>
+> The mechanism (how a freshly-started browser executes a service worker whose
+> source is on no disk) is still **UNEXPLAINED**. The operational facts above
+> are measured; do not let a plausible story about MV3 worker caching harden
+> into a finding.
+
+If `ping` still reports the old `buildMarker` after ↻, do the **per-profile
+Remove + Load unpacked** — a full Brave quit/reopen has been measured NOT to be
+enough (never `pkill` Brave — tabs are not restorable).
 
 > **CONTRACT for an extension change that must be provably loaded:** bump
-> `manifest.json`'s `version` AND add a new discriminator the old build cannot
-> fake — a new op name, or a new field in `ping`'s reply. `ping` itself exists
-> because "is the new build loaded?" was previously unfalsifiable, which cost
-> three full Brave restarts in a single session. (0.3.0 → 0.3.1 was exactly
-> this: adding `id` to `ping`'s reply is a discriminator, so it got a bump.)
+> `manifest.json`'s `version`, add a `> **X.Y.Z — …**` changelog block below
+> (gated), and **regenerate the build marker**:
+>
+> ```bash
+> python3 scripts/browser-bridge/gen-build-marker.py    # rewrites extension/build_id.js
+> ```
+>
+> The **build marker is now the mechanical discriminator** and it needs no
+> per-change cleverness: `BUILD_MARKER` is a generated literal in `build_id.js`
+> that `service_worker.js` **imports**, so it is frozen into the loaded module
+> graph and travels with the CODE. A stale worker reports the stale marker by
+> construction, and the server compares it against the marker in the deployed
+> source (`bridge.extension_build_current`) to produce `extension_stale` — which
+> **fails closed**: either side missing a marker yields `null`, never `false`.
+> `false` now means *verified current*.
+>
+> A behavioural discriminator (a new op name, a new `ping` field, a specific
+> string the old build cannot emit) is still worth adding when one is natural —
+> it exercises the changed line rather than a reported value, and it is the only
+> check that survives a spoofed or mis-generated marker. But it is no longer the
+> only thing standing between you and a false all-clear. (`ping` itself exists
+> because "is the new build loaded?" was once unfalsifiable, which cost three
+> full Brave restarts in a single session.)
+
+> **0.8.0 — the BUILD MARKER: `ping` gains `buildMarker`, and `extension_stale`
+> is computed from it instead of from the version (#324).** New generated file
+> `build_id.js` exporting a `BUILD_MARKER` literal, imported by
+> `service_worker.js` and sent on every `/poll` as `X-Bridge-Ext-Build`. The
+> discriminator is the new `ping` field itself — an older build cannot fake it:
+>
+> ```bash
+> browser --instance <label> ping
+>   # ≤0.7.3 → {"pong":true,"extensionVersion":"0.7.3","id":"…","ops":[…]}   (no buildMarker)
+>   # 0.8.0  → {"pong":true,"extensionVersion":"0.8.0","buildMarker":"<hex>","id":"…","ops":[…]}
+> browser whoami   # each instance: extension_build + extension_stale
+>                  # bridge.extension_build_current = the deployed source's marker
+> ```
+>
+> On a profile still running ≤0.7.3 the marker is absent, so `extension_stale`
+> reads **`null`** (undecidable) rather than `false` — that is the fail-closed
+> behaviour, not a bug. It becomes `false` only once a profile reports a marker
+> matching the deployed one.
 
 > **0.7.3 — the `emulate --reset` note stops claiming the viewport was restored.**
 > Prose only; no wire-op or behaviour change, so `ping`'s `ops` list cannot

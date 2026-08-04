@@ -2678,13 +2678,23 @@ export function capHeaderValue(s, max = MAX_HEADER_VALUE_CHARS) {
 // extensions, two paths): id = sha256(absolute path), first 32 hex chars, each
 // nibble 0-f mapped to a-p. PATH ONLY — no per-profile component. So the id is
 // computable in advance; see extension/README.md "The path→id derivation".
-export function pollHeaders(instanceId, label, active, extVersion, extId) {
+// `buildMarker` (#324) is the ONLY one of these three that describes the CODE
+// rather than the directory: it is a generated literal in build_id.js, imported
+// into the worker's module graph, so a stale worker sends the STALE value while
+// `extVersion` (read off the on-disk manifest at call time) and `extId`
+// (path-derived) both report the freshly-deployed directory. Measured
+// 2026-08-04 — two profiles, one directory, identical id + version +
+// `extension_stale: false`, different code. Omitted (→ undecidable, never
+// "current") by a build that predates the marker.
+export function pollHeaders(instanceId, label, active, extVersion, extId,
+                            buildMarker) {
   const h = { "X-Bridge-Instance-Id": String(instanceId || "") };
   if (label) h["X-Bridge-Label"] = encodeURIComponent(capHeaderValue(label));
   if (active && active.url) h["X-Bridge-Active-Url"] = encodeURIComponent(capHeaderValue(active.url));
   if (active && active.title) h["X-Bridge-Active-Title"] = encodeURIComponent(capHeaderValue(active.title));
   if (extVersion) h["X-Bridge-Ext-Version"] = encodeURIComponent(capHeaderValue(String(extVersion)));
   if (extId) h["X-Bridge-Ext-Id"] = encodeURIComponent(capHeaderValue(String(extId)));
+  if (buildMarker) h["X-Bridge-Ext-Build"] = encodeURIComponent(capHeaderValue(String(buildMarker)));
   return h;
 }
 

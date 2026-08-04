@@ -123,29 +123,51 @@ pre-0.2.0 extension).
 The CLI **detects this for you**: any op the CLI dispatches that returns a
 server-side `unknown_op` is mapped to a clear message + non-zero exit telling you
 the loaded extension is OLDER than the CLI and to reload/restart. **`browser
-health` also shows the build** — each instance's loaded `extension_version`, the
-`extension_version_expected` (the DEPLOYED manifest at
-`~/.local/share/browser-bridge-ext/`, else the repo copy), and an explicit
-`extension_stale` verdict: `true` = reload it, `false` = versions match,
-**`null` = undecidable** (the build predates version reporting, or no manifest is
-readable) — `null` is NOT "fine". `browser whoami` carries the same three fields.
+health` also shows the build** — each instance's loaded `extension_version` and
+`extension_build`, the corresponding `_expected` values (from the DEPLOYED tree
+at `~/.local/share/browser-bridge-ext/`, else the repo copy), and an explicit
+`extension_stale` verdict: `true` = reload it, `false` = **verified current**,
+**`null` = undecidable** — `null` is NOT "fine". `browser whoami` carries the
+same fields plus `bridge.extension_build_current`.
 
-**`extension_stale:false` is a VERSION match, not a code match.** An extension
-change shipped without a manifest bump is invisible to it. That is why the
-version bump is part of the change contract, and why `ping` exists.
+🔴 **The verdict is computed from `extension_build`, NOT from the version
+(#324).** `extension_version` is `chrome.runtime.getManifest().version` (read
+off the on-disk manifest at call time) and `extension_id` is derived from the
+load PATH, so **both describe the DIRECTORY, not the code that is running**.
+MEASURED 2026-08-04: two Brave profiles loading the SAME directory reported an
+identical id, an identical `0.7.3` and `extension_stale: false`, while one ran
+`main` and the other an unmerged 0.7.2 build whose source existed **on no disk**.
+No version-shaped signal can separate those two rows.
 
-🔴 **The concrete shape that gap takes: an op answers `unknown_op` while `health`
+`extension_build` is a generated LITERAL (`extension/build_id.js`) that the
+service worker **imports**, so it is frozen into the loaded module graph and
+travels with the code — a stale worker reports the stale marker by construction.
+The verdict **fails closed**: either side missing a marker → `null`, never
+`false`. A profile still running ≤0.7.3 therefore reads `null`, which is correct.
+
+Two things follow, both measured in the same session:
+
+* **Staleness is PER PROFILE.** One profile can be current while another is not,
+  at the same instant, on one host, from one directory. Check each one.
+* **A full Brave restart is NOT sufficient.** Brave was genuinely fresh (oldest
+  process 392 s, deploy 9 h earlier) and still ran the old code; restarting the
+  bridge service did not help either. **Per-profile Remove + Load unpacked at
+  `brave://extensions` is what reloads it.** The mechanism is UNEXPLAINED —
+  don't let a story about MV3 worker caching harden into a finding.
+
+🔴 **The older shape of this gap: an op answers `unknown_op` while `health`
 reports a MATCHING `extension_version`.** That combination reads as a
 contradiction and sends people debugging the server or the CLI instead. It is not
 a contradiction — the *loaded* worker predates the op even though the manifest
-version agrees. Observed on `wake` (2026-08-01). **Believe the op, not the
-version**, and go straight to the reload/restart ladder below.
+version agrees. Observed on `wake` (2026-08-01). **Believe the op and the build
+marker, not the version**, and go to the reload ladder below.
 
-**⚠ Reload ↻ is UNRELIABLE — a full Brave restart is the reliable fix.** The
-extension's long-poll keeps the OLD service worker permanently alive, so clicking
-↻ in `brave://extensions` often does NOT swap in the new build. If a reload
-doesn't take (the op still returns `unknown_op`, or `health` still shows the old
-`extension_version`), tell the user to **fully quit and reopen Brave**.
+**⚠ Reload ↻ is UNRELIABLE, and a full Brave restart has been measured not to be
+enough either.** The extension's long-poll keeps the OLD service worker alive, so
+↻ often does NOT swap in the new build. If a reload doesn't take (the op still
+returns `unknown_op`, or `ping` still shows the old `buildMarker`), the reliable
+step is a **per-profile Remove + Load unpacked**; try a full quit/reopen first
+only because it is cheaper, not because it is sufficient.
 
 **Nuance (measured 2026-07-30): a ↻ reload DID take** — swapping in a new build after an
 earlier full restart in the same Brave session. So ↻ is worth trying **first**, but only

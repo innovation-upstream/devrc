@@ -41,12 +41,23 @@
 #                               ~/.local/share/browser-bridge-ext/, else the repo
 #                               copy). Each instance also carries an explicit
 #                               `extension_stale` verdict (true/false, or null =
-#                               undecidable) and its `extension_id`
+#                               undecidable) — computed from the BUILD MARKER
+#                               (`extension_build` vs bridge.extension_build_current),
+#                               NOT from the version: the version and the id both
+#                               describe the load DIRECTORY, so two profiles on one
+#                               directory reported identical values while running
+#                               different code (#324). It FAILS CLOSED: either side
+#                               missing a marker -> null, never false. And its
+#                               `extension_id`
 #                               (chrome.runtime.id — WHICH DIRECTORY it was
 #                               loaded from), plus bridge.extension_dir_expected.
 #                               Global (no --instance/--tab).
 #   browser ping              — BUILD-FRESHNESS PROBE: ask the loaded extension
-#                               what it is. Prints {pong,extensionVersion,id,ops}
+#                               what it is. Prints
+#                               {pong,extensionVersion,buildMarker,id,ops}.
+#                               `buildMarker` is the only field that describes the
+#                               RUNNING CODE (a literal in the loaded module graph);
+#                               extensionVersion + id describe the directory (#324)
 #                               on a CURRENT build; a build older than this op
 #                               fails with `unknown_op` and the reload/restart
 #                               hint. Use this — not two version strings — to
