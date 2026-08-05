@@ -69,3 +69,20 @@ After an extraction/tail change, re-POST `/api/suggest` per session with a fresh
 + a bigger tail from the on-disk transcript at `~/.claude/projects/*/<session_id>.jsonl`
 (session_id = the transcript filename). ⚠ Pass the big tail via `jq --rawfile` (a 512KB `--arg`
 blows `ARG_MAX`) and `curl --data-binary @file`.
+
+## PermissionRequest hook semantics (verified against the code, vs the docs)
+
+`PermissionRequest` fires **ONLY when approval is actually needed**. Its output is:
+
+```json
+{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"allow"}}}
+```
+
+(`"behavior"` is `"allow"` or `"deny"`.)
+
+- It has **NO reason/context channel** — an approver comment is **record-only**. Only `PreToolUse`
+  can steer the model, via `additionalContext`. Do not design a feature that relies on feeding an
+  approver's words back into the session through this hook.
+- Any non-approve/reject decision (e.g. an `ignore`/dismiss) → the hook **defers to the terminal**.
+- Any error / timeout / unreachable server → **defer** (fail-safe: behaves as if the hook were
+  absent). This is why an outage of clawgate never blocks Claude Code.
