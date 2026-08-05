@@ -49,6 +49,8 @@ the last revision before the core/archive split.
 - [two-tiers](#two-tiers)
 - [declarations-vs-instances](#declarations-vs-instances)
 - [count-not-exit-code](#count-not-exit-code)
+- [config-blind-suite](#config-blind-suite)
+- [flake-vs-assertion](#flake-vs-assertion)
 
 **Git Workflow**
 - [wrong-branch-writes](#wrong-branch-writes)
@@ -141,6 +143,13 @@ happened to use a fixture where `pid == pgid == sid` and could not discriminate.
 7. the repo's own flake gate skipping a suite for want of `curl`;
 8. and 9. two frontmatter extractors that re-matched `---` in the document body and reported
    false parse-failures.
+
+A tenth shape, 2026-08-05: a **negative control built from a textbook fixture**. `gitleaks`
+allowlists canonical example credentials, so a control file containing nothing but
+`AKIAIOSFODNN7EXAMPLE` + the documented AWS example secret scanned as `no leaks found` — the
+harness reported clean while being structurally unable to see the very thing it was pointed at.
+A canary built from realistic-looking values reported `leaks found: 2`. Build the bad case from
+realistic data, never from the vendor's own example pair.
 
 ## positive-control
 *Supports: 🔴 "A harness that COUNTS needs a POSITIVE control too."*
@@ -291,6 +300,21 @@ inherent NixOS trap; **126** civitai worktrees had no `.envrc`.
 homelab-talos was 262 commits behind on 2026-07-30. Its dirty files were *stale orphans* of
 already-merged work, not WIP.
 
+The deterministic test for *dirty is not WIP* (2026-08-05): hash the working copy and compare it
+against that path's recent committed revisions —
+
+```bash
+sha256sum <path>
+for c in $(git log -n 20 --format=%H -- <path>); do
+  printf '%s %s\n' "$c" "$(git show "$c:<path>" | sha256sum | cut -d' ' -f1)"
+done
+```
+
+A byte-for-byte match with an **older** revision proves the file is a stale orphan of
+already-merged work, not work in progress. Measured on two dirty files that matched a revision
+**four months** old; treating them as WIP and "restoring" them would have reverted four months of
+changes and reinstated a line that had been deliberately removed.
+
 ## readlink-arbiter
 *Supports: "Is an edit to a home-manager-managed dotfile LIVE? `readlink -f` is the arbiter."*
 
@@ -330,6 +354,50 @@ rather than a quoting bug. bash does not do this.
 The modifier set is `e` (extension), `h` (head), `t` (tail), `r` (root), `s` (substitute) and
 `gs`, so the collision surface is any `$var` immediately followed by `:` plus one of those
 letters — git refs (`$B:path`), `rsync`/`scp` targets (`$HOST:/path`), and timestamps.
+
+**(c) The mirror image, in a test wrapper (2026-08-05).** Where (a) is zsh *not* splitting when
+you expected it to, this is a wrapper splitting when it must not. A runner interpolated bare
+unquoted `$*` into an inner shell:
+
+```
+npx playwright test $*          # WRONG
+npx playwright test "$@"        # or, when re-entering a shell:  printf ' %q' "$@"
+```
+
+Invoked as `run.sh -g "some phrase"`, the quotes are gone by the time the inner shell parses the
+line, so `some` and `phrase` become **filename filters**. Playwright matched no files, printed
+`No tests found` and **exited 0** — zero tests run, reported as success. The generalisable half:
+a wrapper that answers "nothing to do" instead of erroring is how a green gets believed; make a
+zero-selection case a non-zero exit.
+
+## config-blind-suite
+*Supports: 🔴 "A test that skips itself, or passes by accident of the environment, is worse than
+no test — and a suite whose CONFIG pins a dimension is STRUCTURALLY BLIND to that dimension's
+bugs." (Green Test Suite).*
+
+Two ground cases, both where the *harness config*, not any individual test, decided what could be
+observed:
+
+- **Headless default window.** Two tests passed only because the headless browser's default
+  window is 437 px tall; setting a realistic viewport failed them on clean `main`.
+- **Desktop-only Playwright project (2026-08-05).** The suite ran a single project pinned to
+  `devices['Desktop Chrome']` with `hasTouch: false`, so a responsive breakpoint was permanently
+  on the desktop side and **not one test in the suite had ever rendered the component at phone
+  width**. Every mobile defect passed it vacuously. The consequence that matters: writing new
+  specs into that config to "cover" a mobile fix would have produced tests that pass whether or
+  not the fix works — so widening the config (adding a mobile project) was part of the fix, not
+  extra work.
+
+## flake-vs-assertion
+*Supports: 🔴 "Distinguish a real failure from a load flake by WALL TIME — and by WHOSE time
+moved." (Green Test Suite).*
+
+Worked example, 2026-08-05: a spec failed at **16.5 s** against a **2.4 s** norm — a ~7x
+inflation that reads as load at a glance. Decomposed, 16.5 s is the 2.4 s baseline + one 10 s
+Playwright `expect` timeout + teardown: the arithmetic of a **single failed assertion**, not of a
+loaded box. The discriminator is distributional, not a ratio: **load inflates every test in the
+run, a failed assertion inflates exactly one.** Read the sibling tests' durations in the same run
+before calling it load.
 
 ## count-not-exit-code
 *Supports: 🔴 "COUNT the tests; never read an exit code." (Green Test Suite).*

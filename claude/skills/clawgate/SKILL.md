@@ -317,24 +317,25 @@ status claim. What follows is only what does NOT go stale.
   production — restart the `nebula-gateway` DaemonSet on both after editing
   (`reference/architecture.md`).
 - **The vendored kubeclaw chart is embedded at BUILD time** — a kubeclaw release doesn't reach
-  clawgate-provisioned agents until `make sync-chart` + rebuild + redeploy clawgate. ✅ The 0.7.0 →
-  0.7.1 re-sync **shipped in 0.7.82** (built + deployed 2026-08-02); vendored and kubeclaw are both
-  **0.7.1**.
+  clawgate-provisioned agents until `make sync-chart` + rebuild + redeploy clawgate.
 - 🔴 **`make check-chart` is only meaningful if `~/workspace/kubeclaw` is CURRENT — sync it FIRST or
   it silently tests the wrong tree.** `check-chart` depends on `sync-chart`, which **rsyncs from the
-  local `~/workspace/kubeclaw` clone**. That clone is a normal checkout and goes stale like any
-  other. Measured 2026-08-02: it sat at chart **0.3.14** while the vendored copy was **0.7.1**, so
-  running `check-chart` would have **clobbered the deployed chart with a 4-minor-versions-old one and
-  then reported a false failure** — the "drift" it found would have been drift it had just created.
-  Resolved by fast-forwarding the clone. Always, before either target:
+  local `~/workspace/kubeclaw` clone** — a normal checkout, stale like any other. A stale
+  clone makes `check-chart` **clobber the deployed chart with an older one and then report a false
+  failure** — the "drift" it finds is drift it just created (measured: clone at **0.3.14** vs
+  vendored **0.7.1**). Always, before either target:
   ```bash
   git -C ~/workspace/kubeclaw fetch origin && git -C ~/workspace/kubeclaw merge --ff-only origin/trunk
   ```
   `--ff-only` is the point: it cannot autostash, and a refusal is the signal that the clone diverged.
 - **Alloy has no auto-reloader** — if clawgate metrics vanish from homelab Prometheus, restart it
   first (`reference/telemetry.md`).
-- **Red GitHub Actions checks on `homelab-infra` are NOISE** (billing-blocked repo-wide). The real
+- **Red GitHub Actions checks on `homelab-infra` are NOISE** (billing-blocked repo-wide); the real
   gate is the Tekton `clawgate-ci` pipeline — see the `tekton` skill before touching CI.
+  🔴 **But `clawgate-ci` runs `go build`/`vet`/`test -race` + extension coverage + hook bats and
+  does NOT run Playwright — browser-layer changes are UNGATED by CI.** Run `make e2e` locally and
+  **count** the results: `tasks.spec.ts` `test.skip`s the whole file without Docker, so a "green"
+  run can mean 17 tests never executed.
 - 🔴 **The browser extension does NOT ship via Flux — merging to `trunk` deploys NOTHING.** Brave
   loads it unpacked from a **flat copy** at `~/clawgate-extension` **on the workbench** (that is
   where Zach's Brave runs — `localhost:8972` civitai-manager answers there, not on the desktop).
@@ -343,16 +344,15 @@ status claim. What follows is only what does NOT go stale.
   the OLD build running. After adding a command, also check `brave://extensions/shortcuts`: Brave
   routinely leaves newly-added hotkeys unbound on an in-place reload.
   **A missing `.synced-from` stamp means someone hand-copied it out of band.** That is exactly how a
-  build that never passed CI ran live for ~11 hours on 2026-08-01 while `trunk` looked clean — it
-  was copied straight from a working tree, so `clawgate-ci` never saw it (it leaked typed text;
-  fixed in `fcaca875`/PR #276). Check the stamp before trusting any claim about which build is
-  loaded:
+  build that never passed CI ran live for ~11 hours while `trunk` looked clean — copied straight
+  from a working tree, so `clawgate-ci` never saw it. Check the stamp before trusting any claim
+  about which build is loaded:
   ```bash
   ssh 192.168.50.250 'cat ~/clawgate-extension/.synced-from; grep "\"version\"" ~/clawgate-extension/manifest.json'
   ssh 192.168.50.250 '~/workspace/homelab-talos/scripts/sync-clawgate-extension.sh --check'
   ```
   ⚠ Serving a scratch test page **to** that Brave: the workbench firewall `allowedTCPPorts` is a
   short allowlist (80/443/6443/7844/8110/8180/25565/58012), so an ad-hoc port is unreachable over
-  the LAN — serve it on the workbench and open **`http://localhost:<port>`** rather than opening a
+  the LAN — serve it on the workbench and open **`http://localhost:<port>`**, never open a
   firewall port for a throwaway. Verifying the picker's privacy guard by hand has a trap that makes
   the obvious test vacuous → `reference/element-references.md`.
