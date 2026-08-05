@@ -1999,9 +1999,7 @@ in
     };
     Service = {
       Type = "oneshot";
-      # 45s gives continuum (15-min save interval, restore on tmux server start)
-      # ample time to recreate all sessions/windows/panes before we send-keys.
-      ExecStartPre = "/bin/sleep 45";
+      # The timer's OnActiveSec=45s already delays startup; no ExecStartPre needed.
       Environment = [
         "PATH=${lib.makeBinPath [ pkgs.python312 pkgs.tmux pkgs.coreutils ]}"
         "HOME=%h"
