@@ -40,6 +40,8 @@ thing that destroys a config someone had edited.
 | `~/.config/opencode/plugin/guard.js` | `plugin/guard.js` | 🔴 the deterministic bash guard — see below |
 | `~/.config/opencode/guard_core.py` | `../claude-hooks/guard_core.py` | the shared checking core, the same file Claude Code's `bash-guard.py` imports |
 | `~/.config/opencode/agent/*.md` | `agent/` | the `nav`, `k8s` and `review` subagents |
+| `~/.config/opencode/commands/` | `../claude/commands/` | symlinked — same 17 commands Claude Code reads; opencode ignores unknown frontmatter |
+| `~/.config/opencode/skills/` | `../claude/skills/` | symlinked — same skills Claude Code reads; opencode ignores unknown frontmatter |
 
 ## 🔴 Two layers, and only one of them is a safety control
 

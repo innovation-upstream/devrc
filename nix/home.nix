@@ -145,14 +145,6 @@ in
     };
   };
 
-  # Compositor disabled — NVIDIA forceFullCompositionPipeline handles vsync/tearing
-  # picom conflicts with NVIDIA's composition pipeline causing workspace switch flicker
-  # services.picom = {
-  #   enable = true;
-  #   backend = "glx";
-  #   vSync = true;
-  # };
-
   # Notification daemon (Gruvbox-themed, CALM). Value formats verified parse-clean
   # against dunst 1.13.2 (the running version): `width`/`offset` take a paren-tuple
   # `(min, max)` / `(x, y)` (v1.11- used NxN); the home-manager module quotes string
@@ -932,6 +924,23 @@ in
   home.file.".config/opencode/agent" = {
     source = ../scripts/opencode/agent;
     recursive = true;
+  };
+
+  # opencode commands + skills — symlink the same Claude Code sources so both
+  # tools share a single source of truth. opencode reads commands from
+  # ~/.config/opencode/commands/ and skills from ~/.config/opencode/skills/;
+  # it ignores unknown frontmatter keys (name/argument-hint/allowed-tools are
+  # skipped; only description/agent/model are consumed). Edit in devrc/claude/
+  # then switch — both hosts + both tools stay in lockstep.
+  home.file.".config/opencode/commands" = {
+    source = ../claude/commands;
+    recursive = true;
+    force = true;
+  };
+  home.file.".config/opencode/skills" = {
+    source = ../claude/skills;
+    recursive = true;
+    force = true;
   };
 
   # These hooks previously existed as PLAIN local files (claude-notify.py +
