@@ -145,14 +145,6 @@ in
     };
   };
 
-  # Compositor disabled — NVIDIA forceFullCompositionPipeline handles vsync/tearing
-  # picom conflicts with NVIDIA's composition pipeline causing workspace switch flicker
-  # services.picom = {
-  #   enable = true;
-  #   backend = "glx";
-  #   vSync = true;
-  # };
-
   # Notification daemon (Gruvbox-themed, CALM). Value formats verified parse-clean
   # against dunst 1.13.2 (the running version): `width`/`offset` take a paren-tuple
   # `(min, max)` / `(x, y)` (v1.11- used NxN); the home-manager module quotes string
