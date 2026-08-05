@@ -24,6 +24,7 @@ the last revision before the core/archive split.
 ## Table of contents
 
 **Verification Honesty**
+- [honest-phrasings](#honest-phrasings)
 - [green-and-audited-but-broken](#green-and-audited-but-broken)
 - [deploy-vs-consumer](#deploy-vs-consumer)
 - [dirty-tree-probe](#dirty-tree-probe)
@@ -65,6 +66,23 @@ the last revision before the core/archive split.
 - [zsh-unbraced-var](#zsh-unbraced-var)
 
 ---
+
+## honest-phrasings
+*Supports: "Deployed ≠ verified" (Verification Honesty) and "Write tool over heredoc-to-file"
+(Token & Tool Hygiene).*
+
+The ✅/❌ pairs that used to sit inline in the core. Both restate rules the surrounding bullets
+already state, so they live here rather than being paid for every session.
+
+**Verification Honesty**
+
+- ✅ "Deployed. Reproduced the FAB click via Playwright — modal opens. Verified."
+- ❌ "FAB fixed and verified on-cluster." (the rollout succeeded; the click still does nothing)
+
+**Token & Tool Hygiene**
+
+- ✅ `Write` tool to create `/tmp/build.sh`; Read `foo.go` once, then Edit it
+- ❌ `cat > /tmp/build.sh << 'EOF' … EOF`; Edit a file never Read this session
 
 ## green-and-audited-but-broken
 *Supports: "Reproduce the original symptom" (Verification Honesty).*
@@ -314,6 +332,13 @@ A byte-for-byte match with an **older** revision proves the file is a stale orph
 already-merged work, not work in progress. Measured on two dirty files that matched a revision
 **four months** old; treating them as WIP and "restoring" them would have reverted four months of
 changes and reinstated a line that had been deliberately removed.
+
+**Two drift tells** while sorting it out:
+
+- `warning: skipped previously applied commit` during a rebase — that work already landed from a
+  worktree; `git rebase --skip`;
+- untracked docs blocking a checkout — a worktree committed them already. Diff against upstream,
+  then delete the local copy.
 
 ## readlink-arbiter
 *Supports: "Is an edit to a home-manager-managed dotfile LIVE? `readlink -f` is the arbiter."*
