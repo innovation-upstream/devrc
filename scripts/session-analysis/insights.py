@@ -636,6 +636,13 @@ def aggregate(summary_rows: list[dict], message_rows: list[dict],
         # NOT clipped to the window and NOT bounded by `window_wall_clock_hours`.
         "session_span_hours": num(agg.get("duration_minutes", 0)) / 60,
         "window_wall_clock_hours": days * 24,
+        # 🔴 The span sum's ACTUAL divisor population. The loop above `continue`s
+        # on an unreadable row BEFORE reaching `duration_minutes`, so an
+        # unreadable session contributes no span and must not be counted as one.
+        # `sessions` (= len(summary_rows)) is a DIFFERENT population, and printing
+        # it beside the sum reproduced — inside this very report — the
+        # undisclosed-denominator defect the rest of this file exists to close.
+        "session_span_sessions": len(summary_rows) - unreadable,
         "messages": prompt_n + command_n,
         "prompts": prompt_n,
         "commands": command_n,
@@ -778,7 +785,10 @@ def render(data: dict) -> str:
     span_h = num(data.get("session_span_hours", num(t.get('duration_minutes', 0)) / 60))
     bound_h = num(data.get("window_wall_clock_hours", data["days"] * 24))
     ratio = f" — {span_h / bound_h:,.1f}x MORE THAN EXISTS" if bound_h and span_h > bound_h else ""
-    out.append(f"  session span: {span_h:,.1f}h summed over {data['sessions']} session spans "
+    # NOT data['sessions'] — an unreadable session contributes no span. See
+    # `session_span_sessions`.
+    span_n = data.get("session_span_sessions", data["sessions"] - data["unreadable_sessions"])
+    out.append(f"  session span: {span_h:,.1f}h summed over {span_n} session spans "
                f"(the {data['days']}d window holds {bound_h:,.0f}h of wall clock{ratio})")
     out.append(f"   NOTE: {SESSION_SPAN_CAVEAT}")
     out.append(f"  friction:   {t.get('interruptions',0)} interruptions · {t.get('tool_errors',0)} tool errors")
