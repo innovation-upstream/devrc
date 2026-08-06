@@ -229,7 +229,11 @@ def agent_permission(name: str) -> dict:
 _GLOB_ESCAPE = re.compile(r"[.+^${}()|\[\]\\]")
 
 
+@functools.lru_cache(maxsize=None)
 def wildcard_match(text: str, pattern: str) -> bool:
+    # Memoised: pure function of (text, pattern), and the ledgers below resolve
+    # ~50 rules x ~115 commands x ~65 patterns per pass, once per detector
+    # control. Without this the file took 46 s; with it, ~5 s.
     t = text.replace("\\", "/")
     p = _GLOB_ESCAPE.sub(lambda m: "\\" + m.group(0), pattern.replace("\\", "/"))
     p = p.replace("*", ".*").replace("?", ".")
@@ -269,6 +273,31 @@ def bash_ruleset(agent: str | None = None) -> tuple:
     return tuple(rules)
 
 
+def _resolve_over(rules, command: str) -> str:
+    """LAST match wins, over an EXPLICIT ordered ruleset.
+
+    🔴 THE ONLY implementation of the resolution loop in this file. It briefly
+    had two — `_ask_ledger` carried a private copy so it could run against a
+    synthetic ruleset — and two copies with nothing pinning them together is a
+    predicate that will disagree eventually and silently. They agreed on all 51
+    ask rules at the time, which is exactly how a duplicate survives review.
+    Everything that resolves a command goes through here.
+    """
+    action = "ask"  # opencode's fallback when nothing matches
+    for pattern, act in rules:
+        if wildcard_match(command, pattern):
+            action = act
+    return action
+
+
+def _rules_without(rules, drop: str):
+    """`rules` with every config-level occurrence of `drop` removed.
+
+    Index 0 is the built-in catch-all and is never a deletion candidate.
+    """
+    return rules[:1] + tuple(r for r in rules[1:] if r[0] != drop)
+
+
 def effective_bash_action(command: str, agent: str | None = None) -> str:
     """LAST match wins — the inverse of Claude Code.
 
@@ -281,11 +310,7 @@ def effective_bash_action(command: str, agent: str | None = None) -> str:
     or command substitutions to it. Chains are SAFER than this model would
     suggest, never less safe: an extra node can only add a deny.
     """
-    action = "ask"  # opencode's fallback when nothing matches
-    for pattern, act in bash_ruleset(agent):
-        if wildcard_match(command, pattern):
-            action = act
-    return action
+    return _resolve_over(bash_ruleset(agent), command)
 
 
 def effective_bash_action_without(drop: str, command: str, agent: str | None = None) -> str:
@@ -300,13 +325,7 @@ def effective_bash_action_without(drop: str, command: str, agent: str | None = N
     The leading built-in `("*", "allow")` is never dropped: it is not a config
     rule, and removing it would change every verdict at once.
     """
-    action = "ask"
-    for i, (pattern, act) in enumerate(bash_ruleset(agent)):
-        if i and pattern == drop:
-            continue
-        if wildcard_match(command, pattern):
-            action = act
-    return action
+    return _resolve_over(_rules_without(bash_ruleset(agent), drop), command)
 
 
 def nix_eval(expr: str):
@@ -654,9 +673,19 @@ MUST_ASK = [
     "nix-collect-garbage",                                       # *nix-collect-garbage*
     "nix-collect-garbage --max-freed 1G",                        # *nix-collect-garbage*
     # `dd *` is ANCHORED, so it holds only a LEADING dd — every prefixed form
-    # (`FOO=1 …`, `time …`) rests on these two rules alone. guard_core denies a
-    # dd whose operands name a DEVICE, which is why the of=/dev/sda spellings
-    # look covered; these do not name one, and resolve allow.
+    # (`FOO=1 …`, `time …`) rests on these two rules alone.
+    #
+    # 🔴 THE GUARD IS NOT A BLANKET BACKSTOP HERE, and an earlier version of this
+    # comment claimed it was. guard_core denies a dd whose operands name a DEVICE
+    # only once it has PEELED the prefix down to `dd`; a wrapper missing from its
+    # table leaves argv[0] alone and the check never runs. MEASURED at the time:
+    # `time dd bs=1M if=/dev/zero of=/dev/sda` was ALLOW at BOTH layers. `time`
+    # is now in the wrapper table (see test_guard_core.py section 8), but
+    # `xargs`, `watch`, `strace`, `flock <f>`, `systemd-run`, `eatmydata` and
+    # ~8 more are still unpeeled — and dd is the family where that matters,
+    # because these globs are SPELLED and cannot backstop an unknown prefix the
+    # way `*rm*`/`*mkfs*`/`*talosctl*` do. Treat "the guard has dd" as true only
+    # for prefixes the guard actually knows.
     "FOO=1 dd if=/dev/sda",                                      # *dd if=*
     "time dd if=/dev/zero bs=1M count=100",                      # *dd if=*
     "FOO=1 dd of=/tmp/img bs=1M",                                # *dd of=*
@@ -687,6 +716,18 @@ MUST_ASK = [
 # is actually matched by the redundant rule, and with that rule deleted the
 # witness's verdict is unchanged AND the LAST matching pattern is exactly the
 # declared coverer. A wrong-but-existing coverer fails just like an imaginary one.
+#
+# 🔴 HONEST LIMIT — this NARROWS the hatch, it does not close it. The witness is
+# chosen by the declarer, so the check establishes "some other rule wins on THIS
+# ONE command", while the claim being made is "another rule covers the FAMILY".
+# Nothing here verifies subsumption. A genuinely load-bearing rule can still be
+# waved through by declaring a witness its coverer happens to win on — e.g.
+# `("*sudo *", "sudo <verb>")` for a rule whose unprefixed spellings nobody
+# covers. That is future-drift rather than a live hole (all three entries below
+# are genuinely subsumed — every spelling of `--decrypt` contains `-d`, every
+# `restart` contains `start`), but do not read this dict as proof of coverage.
+# Closing it properly means checking that the coverer's match SET contains the
+# rule's, which is a different and much larger piece of work.
 REDUNDANTLY_COVERED_ASKS = {
     "*sops*--decrypt*": ("*sops*-d*", "sops --decrypt s.enc.yaml"),
     "*age*--decrypt*": ("*age*-d*", "age --decrypt -i k f"),
@@ -938,10 +979,17 @@ def test_all_asks_precede_all_denies():
     So the floor is now the MEASURED count, with no cushion. That is a
     deliberate trade: a genuine prune must lower this literal in the same
     commit, which is what makes a prune a visible act instead of free slack.
-    Adding rules is unaffected (`>=`) — but the literal is still raised when one
-    lands, so the number never drifts back into being a cushion. It went 50 -> 51
-    when `"*sudoedit*"` was added in this same PR; that is the policy working,
-    not ceremony.
+
+    🔴 AND IT IS `==`, NOT `>=`. An earlier version of this paragraph asserted
+    that "the literal is still raised when one lands, so the number never drifts
+    back into being a cushion" — which was PROSE, not a gate. MEASURED: adding an
+    ask rule and pinning it in MUST_ASK, while leaving the literal at 51, was
+    GREEN. The cushion regrows silently, one rule at a time, until it is exactly
+    the exploitable slack this docstring spends two paragraphs condemning. A
+    count assertion that only constrains one direction cannot enforce a claim
+    about both, so the code now says what the paragraph says.
+
+    (It went 50 -> 51 when `"*sudoedit*"` was added in this same PR.)
 
     WHAT THIS FLOOR NOW UNIQUELY COVERS — honestly, very little, and it is kept
     as a cheap tripwire rather than a control:
@@ -955,16 +1003,19 @@ def test_all_asks_precede_all_denies():
     """
     items = list(load_config()["permission"]["bash"].items())[1:]
     asks = [k for k, v in items if v == "ask"]
-    assert len(asks) >= 51, (
-        f"only {len(asks)} `ask` rules in the bash block (51 measured: 50 after "
-        f"the 1fb8c2b restoration, +1 for `*sudoedit*`; the floor IS that "
-        f"measurement, with no cushion — "
-        f"see this test's docstring for why the old 40 was exploitable). "
-        f"A collapse is the signature of a blanket ask->allow rewrite, which "
-        f"ALSO makes this test's ordering assertion and the prefix-tolerance "
-        f"test vacuous. If you pruned a rule deliberately, lower this literal "
-        f"in the SAME commit and check "
-        f"`test_every_ask_rule_is_individually_pinned` still passes."
+    assert len(asks) == 51, (
+        f"{len(asks)} `ask` rules in the bash block, pinned at 51 (50 after the "
+        f"1fb8c2b restoration, +1 for `*sudoedit*`). This is `==`, not `>=`, on "
+        f"purpose — see the docstring: a one-sided floor lets the cushion regrow "
+        f"silently until it is the same slack that let ten dangerous families be "
+        f"deleted with the gate green.\n"
+        f"  FEWER: a collapse is the signature of a blanket ask->allow rewrite, "
+        f"which ALSO makes this test's ordering assertion and the "
+        f"prefix-tolerance test vacuous. If you pruned deliberately, lower this "
+        f"literal in the SAME commit.\n"
+        f"  MORE: you added a rule — raise the literal in the SAME commit, and "
+        f"make sure `test_every_ask_rule_is_individually_pinned` still passes "
+        f"(a new rule needs its own MUST_ASK row, or it is unpinned)."
     )
     last_ask = max((i for i, (_, v) in enumerate(items) if v == "ask"), default=-1)
     first_deny = min((i for i, (_, v) in enumerate(items) if v == "deny"), default=len(items))
@@ -1077,19 +1128,13 @@ def _ask_ledger(rules: tuple, declarations: dict, pinned: list):
     `rules` is the ordered (pattern, action) tuple INCLUDING the leading
     built-in catch-all at index 0, which is never a deletion candidate.
     """
-    def resolve(rs, command):
-        action = "ask"
-        for pattern, act in rs:
-            if wildcard_match(command, pattern):
-                action = act
-        return action
-
     present = {p for p, _ in rules[1:]}
     asks = [p for p, a in rules[1:] if a == "ask"]
     unpinned, wrongly_redundant, bad_claim = [], [], []
     for pat in asks:
-        rest = rules[:1] + tuple(r for r in rules[1:] if r[0] != pat)
-        killers = [c for c in pinned if resolve(rules, c) != resolve(rest, c)]
+        rest = _rules_without(rules, pat)
+        killers = [c for c in pinned
+                   if _resolve_over(rules, c) != _resolve_over(rest, c)]
         if pat in declarations:
             if killers:
                 wrongly_redundant.append((pat, killers[:3]))
@@ -1115,32 +1160,188 @@ def _ask_ledger(rules: tuple, declarations: dict, pinned: list):
     return unpinned, wrongly_redundant, bad_claim, stale
 
 
-def test_an_unpinned_ask_rule_is_detected():
-    """🔴 POSITIVE CONTROL for the ledger below — report the pair, not the zero.
+def _deny_ledger(rules, glob_enforced: dict, guard_backstopped: dict,
+                 pinned: list, guard):
+    """The deny ledger's logic, over an EXPLICIT ruleset — same reason as
+    `_ask_ledger`: every detector below returns an EMPTY list when healthy, so
+    each needs to be drivable to a non-empty one on demand.
 
-    `test_every_ask_rule_is_individually_pinned` passes by producing an EMPTY
-    list, and an empty list is exactly what a ledger wired to nothing produces.
-    So feed the same logic a config it MUST flag, and watch the number move.
+    `guard` is injected (rather than calling `guard_verdict` directly) so a
+    control can simulate the guard check disappearing without touching
+    guard_core.py.
 
-    MEASURED: this is not hypothetical. The `elif` that populates `unpinned`
-    was lost while extending the redundancy check, and every other test in this
-    file stayed green — including the whole mutation battery, because the rules
-    it deletes were still caught by the per-command assertions. Only a control
-    that manufactures an unpinned rule could see it.
+    Returns (missing, undeclared, unpinned, unheld, downgraded).
     """
-    real = bash_ruleset(None)
-    clean = _ask_ledger(real, REDUNDANTLY_COVERED_ASKS,
-                        MUST_ASK + DANGEROUS_FAMILIES)[0]
-    # A rule no pinned command can possibly match, appended in the ask region.
-    synthetic = real + (("*terraform*destroy*", "ask"),)
-    seeded = _ask_ledger(synthetic, REDUNDANTLY_COVERED_ASKS,
-                         MUST_ASK + DANGEROUS_FAMILIES)[0]
-    assert (clean, seeded) == ([], ["*terraform*destroy*"]), (
-        f"positive control FAILED: clean={clean}, seeded={seeded}, expected "
-        f"([], ['*terraform*destroy*']). If `seeded` is empty the ledger cannot "
-        f"see an unpinned rule at all, and its green verdict below is a fact "
-        f"about the harness, not about the config."
+    denies = [p for p, a in rules[1:] if a == "deny"]
+    expected = set(glob_enforced) | set(guard_backstopped)
+    missing = sorted(expected - set(denies))
+    undeclared = sorted(set(denies) - expected)
+
+    unpinned, unheld, downgraded = [], [], []
+    for pat in denies:
+        if pat in guard_backstopped:
+            cmd = guard_backstopped[pat]
+            if guard(cmd) != "deny":
+                unheld.append(
+                    (pat, cmd, _resolve_over(_rules_without(rules, pat), cmd)))
+            probes = [cmd]
+        else:
+            rest = _rules_without(rules, pat)
+            probes = [c for c in pinned
+                      if _resolve_over(rules, c) != _resolve_over(rest, c)]
+            if not probes:
+                unpinned.append(pat)
+        if probes and not any(_resolve_over(rules, c) == "deny" for c in probes):
+            downgraded.append((pat, probes[0], _resolve_over(rules, probes[0])))
+    return missing, undeclared, unpinned, unheld, downgraded
+
+
+# --------------------------------------------------------------------------- #
+# 🔴 POSITIVE CONTROLS FOR EVERY LEDGER DETECTOR
+#
+# Nine detectors across the two ledgers, and every one of them reports health as
+# an EMPTY LIST — the single most dangerous shape a check can have, because a
+# detector wired to nothing produces exactly the same output as a clean config.
+#
+# MEASURED, and this is not a hypothetical: the `elif` populating the ask
+# ledger's `unpinned` was lost while extending the redundancy check, and the
+# whole suite stayed green — 616 passed, and all five mutation batteries at 0
+# survivors — because the rules the battery deletes were still caught by the
+# per-command assertions. One control caught it. So each detector gets one.
+#
+# `_ask_ledger`/`_deny_ledger` take their rules, declarations and pinned pool as
+# PARAMETERS specifically so these can drive them. A control that only varies
+# the `rules` dimension leaves the declaration legs untested — that was the gap
+# the delta audit found after the first fix.
+# --------------------------------------------------------------------------- #
+# A pattern that must never exist in the real config, so "the seeded rule was
+# flagged" can never be confused with a real rule being flagged.
+SENTINEL = "*zz-not-a-real-rule-sentinel*"
+
+
+def test_the_sentinel_used_by_the_controls_is_absent_from_the_config():
+    """If this ever fails, every control below is testing the wrong thing."""
+    assert SENTINEL not in load_config()["permission"]["bash"], (
+        f"{SENTINEL!r} is now a real rule. Pick a different sentinel — the "
+        f"controls rely on it being absent."
     )
+
+
+def _ask_case(extra_rules=(), declarations=None):
+    return _ask_ledger(bash_ruleset(None) + tuple(extra_rules),
+                       REDUNDANTLY_COVERED_ASKS if declarations is None
+                       else declarations,
+                       MUST_ASK + DANGEROUS_FAMILIES)
+
+
+@functools.lru_cache(maxsize=1)
+def _ask_clean():
+    """The unmutated ask ledger — recomputed by every control otherwise."""
+    return _ask_case()
+
+
+ASK_CONTROLS = [
+    # (name, bucket index, kwargs, expected-non-empty predicate)
+    ("unpinned: a rule no pinned command matches", 0,
+     dict(extra_rules=[(SENTINEL, "ask")]), None),
+    ("wrongly_redundant: a load-bearing rule declared redundant", 1,
+     dict(declarations={**REDUNDANTLY_COVERED_ASKS,
+                        "*git*commit*": ("*git*push*", "git -C /repo commit -m x")}),
+     None),
+    ("bad_claim leg 1: declared coverer does not exist", 2,
+     dict(extra_rules=[(SENTINEL, "ask")],
+          declarations={**REDUNDANTLY_COVERED_ASKS,
+                        SENTINEL: ("*no-such-pattern-anywhere*",
+                                   "zz-not-a-real-rule-sentinel")}),
+     "is not in the config"),
+    ("bad_claim leg 2: witness is not matched by the rule", 2,
+     dict(extra_rules=[(SENTINEL, "ask")],
+          declarations={**REDUNDANTLY_COVERED_ASKS,
+                        SENTINEL: ("*talosctl*", "ls -la")}),
+     "not even matched"),
+    ("bad_claim leg 3: coverer is not what actually last-matches", 2,
+     dict(declarations={**REDUNDANTLY_COVERED_ASKS,
+                        "*systemctl*restart*": ("*systemctl*stop*",
+                                                "systemctl restart foo")}),
+     "not by the declared coverer"),
+    ("stale: a declaration for a pattern that is not an ask rule", 3,
+     dict(declarations={**REDUNDANTLY_COVERED_ASKS,
+                        "*no-such-pattern-anywhere*": ("*talosctl*", "x")}),
+     None),
+]
+
+
+@pytest.mark.parametrize(
+    "name,bucket,kwargs,needle",
+    ASK_CONTROLS, ids=[c[0].split(":")[0] for c in ASK_CONTROLS])
+def test_ask_ledger_detector_is_wired(name, bucket, kwargs, needle):
+    """🔴 Each ask-ledger detector must go non-empty on a case built for IT.
+
+    Reported as a PAIR — clean must be empty, seeded must not — because "seeded
+    is non-empty" alone would also pass if the detector fired on everything.
+    """
+    clean = _ask_clean()[bucket]
+    seeded = _ask_case(**kwargs)[bucket]
+    assert clean == [] and seeded, (
+        f"{name}: clean={clean}, seeded={seeded}. Both halves matter — an empty "
+        f"`seeded` means this detector cannot see its own failure mode, so its "
+        f"green verdict in test_every_ask_rule_is_individually_pinned says "
+        f"nothing."
+    )
+    if needle:
+        assert any(needle in str(x) for x in seeded), (
+            f"{name}: fired, but not on the intended leg — got {seeded}. Another "
+            f"leg preempting this one makes it dead code."
+        )
+
+
+def _deny_case(extra_rules=(), glob_enforced=None, backstopped=None, guard=None):
+    return _deny_ledger(
+        bash_ruleset(None) + tuple(extra_rules),
+        GLOB_ENFORCED_DENIES if glob_enforced is None else glob_enforced,
+        GUARD_BACKSTOPPED_DENIES if backstopped is None else backstopped,
+        MUST_DENY + DANGEROUS_FAMILIES,
+        guard_verdict if guard is None else guard)
+
+
+@functools.lru_cache(maxsize=1)
+def _deny_clean():
+    return _deny_case()
+
+
+DENY_CONTROLS = [
+    ("missing: a declared deny that is no longer in the config", 0,
+     dict(glob_enforced={**GLOB_ENFORCED_DENIES,
+                         "*no-such-deny*": "no-such-deny"})),
+    ("undeclared: a deny rule nobody declared", 1,
+     dict(extra_rules=[(SENTINEL, "deny")])),
+    ("unpinned: a glob-enforced deny no pinned command decides", 2,
+     dict(extra_rules=[(SENTINEL, "deny")],
+          glob_enforced={**GLOB_ENFORCED_DENIES, SENTINEL: "irrelevant"})),
+    ("unheld: a backstopped deny the guard does not actually hold", 3,
+     dict(guard=lambda c: "allow")),
+    ("downgraded: a declared deny that does not resolve deny at the glob", 4,
+     dict(extra_rules=[(SENTINEL, "deny"), ("*git*add -A*", "ask")],
+          glob_enforced={**GLOB_ENFORCED_DENIES, SENTINEL: "irrelevant"})),
+]
+
+
+@pytest.mark.parametrize(
+    "name,bucket,kwargs", DENY_CONTROLS,
+    ids=[c[0].split(":")[0] for c in DENY_CONTROLS])
+def test_deny_ledger_detector_is_wired(name, bucket, kwargs):
+    """🔴 The same, for the deny ledger's five detectors."""
+    clean = _deny_clean()[bucket]
+    seeded = _deny_case(**kwargs)[bucket]
+    assert clean == [] and seeded, (
+        f"{name}: clean={clean}, seeded={seeded}"
+    )
+
+
+# NOTE the standalone `test_an_unpinned_ask_rule_is_detected` that used to live
+# here is GONE, not lost: it is ASK_CONTROLS[0], which does the same thing with
+# the guaranteed-absent SENTINEL instead of a hard-coded `*terraform*destroy*`
+# that would have started failing the day such a rule legitimately landed.
 
 
 def test_every_ask_rule_is_individually_pinned():
@@ -1215,43 +1416,25 @@ def test_every_deny_rule_is_individually_pinned():
     the chance to approve it. So each deny rule must resolve `deny` at the glob
     layer too.
     """
-    bash = load_config()["permission"]["bash"]
-    denies = [k for k, v in list(bash.items())[1:] if v == "deny"]
+    missing, undeclared, unpinned, unheld, downgraded = _deny_ledger(
+        bash_ruleset(None), GLOB_ENFORCED_DENIES, GUARD_BACKSTOPPED_DENIES,
+        MUST_DENY + DANGEROUS_FAMILIES, guard_verdict)
 
-    # 🔴 FIRST: the SET, against the declarations. Reading `denies` off the
-    # config and only checking what is in it cannot see a rule that left the set
+    # 🔴 FIRST: the SET, against the declarations. Reading the deny list off the
+    # config and only checking what is IN it cannot see a rule that LEFT the set
     # — a `deny`->`ask` downgrade removes the rule from every subsequent loop.
-    expected = set(GLOB_ENFORCED_DENIES) | set(GUARD_BACKSTOPPED_DENIES)
-    assert set(denies) == expected, (
+    assert not (missing or undeclared), (
         f"the deny block's pattern SET differs from the declarations.\n"
-        f"  no longer `deny` (deleted, or downgraded to ask/allow): "
-        f"{sorted(expected - set(denies))}\n"
-        f"  present but undeclared: {sorted(set(denies) - expected)}\n"
+        f"  no longer `deny` (deleted, or downgraded to ask/allow): {missing}\n"
+        f"  present but undeclared: {undeclared}\n"
         f"Add a new deny to GLOB_ENFORCED_DENIES (with a command it decides) or "
         f"to GUARD_BACKSTOPPED_DENIES (with the command guard_core holds)."
     )
-
-    unpinned, unheld, downgraded = [], [], []
-    for pat in denies:
-        if pat in GUARD_BACKSTOPPED_DENIES:
-            cmd = GUARD_BACKSTOPPED_DENIES[pat]
-            # With the glob gone, the guard must still deny it outright.
-            if guard_verdict(cmd) != "deny":
-                unheld.append((pat, cmd, effective_bash_action_without(pat, cmd, None)))
-            probes = [cmd]
-        else:
-            probes = _sole_decider_commands(pat, MUST_DENY + DANGEROUS_FAMILIES)
-            if not probes:
-                unpinned.append(pat)
-        if probes and not any(effective_bash_action(c, None) == "deny" for c in probes):
-            downgraded.append((pat, probes[0], effective_bash_action(probes[0], None)))
-
     # NOTE deliberately NO "stale declaration" assertion here, unlike the ask
     # ledger. The set assertion above subsumes it — a declared pattern that left
     # the config already fails there — so a second check would be UNREACHABLE,
     # and an unreachable assertion reports safety while testing nothing.
     # (Verified by mutation: dropping `*mkswap*` fails on the set assertion.)
-
     assert not unpinned, (
         f"{len(unpinned)} `deny` rule(s) are pinned by NOTHING at the glob "
         f"layer and are not declared guard-backstopped: {unpinned}. Add a "
