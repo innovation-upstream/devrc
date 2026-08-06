@@ -384,6 +384,19 @@ _WRAPPER_VALUE_FLAGS = {
     "chrt": {"-p", "--pid"},
     "stdbuf": {"-i", "--input", "-o", "--output", "-e", "--error"},
     "exec": {"-a"},
+    # 🔴 `time` covers BOTH the bash KEYWORD and GNU /usr/bin/time, which have
+    # different flags — the value-taking ones here are GNU's. MEASURED before
+    # this entry existed: `time dd bs=1M if=/dev/zero of=/dev/sda` resolved
+    # ALLOW at BOTH layers, because argv[0] stayed "time" so
+    # check_dd_to_block_device bailed at its `basename(argv[0]) != "dd"`.
+    # `dd` is where that mattered: for every other family the glob layer
+    # backstops an unpeeled wrapper (`time rm -rf /`, `time mkfs…`,
+    # `time talosctl … reset` all deny on the globs alone), but the dd globs are
+    # the only SPELLED ones — `"dd *"` is anchored and `"*dd if=*"`/`"*dd of=*"`
+    # are literal — so an unrecognised prefix defeats both at once.
+    # `\time` (the alias/keyword bypass) needs no entry: the tokeniser already
+    # normalises it to `time`. `/usr/bin/time` is handled by the basename().
+    "time": {"-f", "--format", "-o", "--output"},
     "nohup": set(), "setsid": set(), "command": set(), "builtin": set(),
 }
 _WRAPPERS = set(_WRAPPER_VALUE_FLAGS)

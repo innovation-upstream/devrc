@@ -1455,3 +1455,78 @@ def test_no_pathological_slowness(probe):
     t0 = time.time()
     gc.evaluate(probe, "opencode")
     assert time.time() - t0 < 2.0
+
+
+# --------------------------------------------------------------------------- #
+# 8. 🔴 `time` — the wrapper that defeated BOTH layers at once
+#
+# MEASURED before `time` was added to `_WRAPPER_VALUE_FLAGS`:
+#   time dd bs=1M if=/dev/zero of=/dev/sda   ->  glob=allow guard=allow
+# argv[0] stayed "time", so `check_dd_to_block_device` bailed at its
+# `basename(argv[0]) != "dd"` and never looked at the operands.
+#
+# 🔴 WHY dd SPECIFICALLY, and why this is not just one more wrapper: for every
+# OTHER dangerous family the glob layer backstops an unpeeled prefix — measured,
+# `time rm -rf /`, `time mkfs.ext4 …`, `time talosctl … reset` and `time git
+# stash` all still resolve DENY on the globs alone. The dd globs are the only
+# SPELLED ones (`"dd *"` anchored, `"*dd if=*"`/`"*dd of=*"` literal), so an
+# unrecognised wrapper is the one input that defeats the glob and the guard
+# together. That intersection is the whole finding.
+# --------------------------------------------------------------------------- #
+TIME_SPELLINGS = [
+    "time dd bs=1M if=/dev/zero of=/dev/sda",
+    # the alias/keyword bypass — the tokeniser normalises `\time` to `time`
+    "\\time dd bs=1M of=/dev/sda",
+    "/usr/bin/time dd bs=1M of=/dev/sda",
+    "time -p dd bs=1M of=/dev/sda",
+    "/usr/bin/time -v dd bs=1M of=/dev/sda",
+    # GNU time's value-taking flags must consume their value, not the command
+    "/usr/bin/time -o /tmp/t dd bs=1M of=/dev/sda",
+    "/usr/bin/time -f %e dd bs=1M of=/dev/sda",
+    "/usr/bin/time --output=/tmp/t dd bs=1M of=/dev/sda",
+    # and composed with the wrappers that already worked
+    "sudo time dd bs=1M of=/dev/sda",
+    "FOO=1 time dd bs=1M of=/dev/sda",
+    "time sudo dd bs=1M of=/dev/sda",
+    "timeout 60 time dd bs=1M of=/dev/sda",
+]
+
+
+@pytest.mark.parametrize("command", TIME_SPELLINGS)
+def test_time_wrapper_is_peeled_before_the_dd_check(command):
+    """RED before `time` joined the wrapper table, GREEN after."""
+    assert gc.evaluate(command, "opencode") is not None, (
+        f"`time`-wrapped dd not caught: {command!r}. argv[0] must peel to `dd` "
+        f"or check_dd_to_block_device never runs."
+    )
+
+
+@pytest.mark.parametrize("command", [
+    "time rm -rf /", "time mkfs.ext4 /dev/sda", "time git stash",
+    "time git add -A", "\\time rm -rf $HOME",
+])
+def test_time_wrapper_peels_for_the_other_families_too(command):
+    """The same peel, for every other check — so `time` is fixed as a WRAPPER,
+    not patched into one call site."""
+    assert gc.evaluate(command, "opencode") is not None
+
+
+@pytest.mark.parametrize("command", [
+    "time ls -la", "time git status", "time rg foo", "time npm run build",
+    "/usr/bin/time -v cargo build",
+])
+def test_time_wrapper_does_not_over_block_ordinary_commands(command):
+    """The other half of the trade: peeling `time` must not make it a deny.
+
+    Without this, "the guard got stricter" and "the guard got broken" look the
+    same from the green side.
+    """
+    assert gc.evaluate(command, "opencode") is None, (
+        f"{command!r} is an ordinary timed command and must stay allowed"
+    )
+
+
+def test_time_alone_is_not_a_crash():
+    """A wrapper with nothing after it peels to an empty argv."""
+    assert gc.evaluate("time", "opencode") is None
+    assert gc.evaluate("/usr/bin/time -v", "opencode") is None

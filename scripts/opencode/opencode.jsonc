@@ -249,11 +249,23 @@
       // --- whole-system state ---
       "*nixos-rebuild*": "ask",
       "*home-manager*switch*": "ask",
+      // 🔴 LOAD-BEARING — do not delete it as "already covered".
+      // `"*age*-d*"` DOES match some spellings of this command by pure
+      // coincidence ("nix-collect-gar(BAGE) … -d"), but ONLY those containing a
+      // literal `-d`. MEASURED: with this rule deleted, `nix-collect-garbage`
+      // and `nix-collect-garbage --max-freed 1G` both resolve ALLOW at both
+      // layers. Two things follow, and they point opposite ways: this rule is
+      // the real gate for the no-`-d` spellings, AND `"*age*-d*"` must not be
+      // deleted on the reasoning that GC is separately gated for the rest.
       "*nix-collect-garbage*": "ask",
       "*nix*profile remove*": "ask",
-      // Only the MUTATING systemctl verbs. `systemctl status`/`list-timers` are
-      // read-only and high-frequency — gating those is pure prompt fatigue,
-      // which trains the operator to click through the ones that matter.
+      // The mutating systemctl verbs SEEN SO FAR — this list is NOT exhaustive
+      // and must not be read as "the mutating verbs are handled". MEASURED:
+      // `mask`, `unmask`, `kill`, `isolate`, `set-property` and `edit` all
+      // resolve ALLOW today. Read-only, high-frequency verbs (`status`,
+      // `list-timers`) are deliberately absent — gating those is pure prompt
+      // fatigue, which trains the operator to click through the ones that
+      // matter. Adding a verb here buys a prompt for that spelling only.
       "*systemctl*start*": "ask",
       "*systemctl*stop*": "ask",
       "*systemctl*restart*": "ask",
@@ -262,8 +274,23 @@
       "*systemctl*daemon-reload*": "ask",
 
       // --- privilege escalation: gate the WRAPPER itself ---
+      // 🔴 ALL THREE `sudo` ROWS ARE LOAD-BEARING — none is a duplicate, and
+      // each was found unpinned by a separate mutation sweep.
+      //   `"*sudo *"`   needs the LITERAL "sudo " (space) -> misses `sudoedit`
+      //   `"sudo*"`     is ANCHORED -> misses sudo in non-leading position
+      //                 (`FOO=1 sudo …`, which IS the house style)
+      //   `"*sudoedit*"` covers their INTERSECTION, which neither had:
+      //                 MEASURED ALLOW at both layers before this rule —
+      //                 `FOO=1 sudoedit /etc/nixos/configuration.nix`,
+      //                 `EDITOR=vim sudoedit …` (the NORMAL invocation, since
+      //                 sudoedit needs $EDITOR) and
+      //                 `/run/wrappers/bin/sudoedit …` (the NixOS path).
+      // Unlike a flag spelling, `sudoedit` is a fixed BINARY NAME, so a single
+      // leading-and-infix `*` genuinely closes the family rather than buying
+      // one more spelling. Delete any row and the others do NOT cover it.
       "sudo*": "ask",
       "*sudo *": "ask",
+      "*sudoedit*": "ask",
       "*doas *": "ask",
 
       // --- filesystem blast radius ---
