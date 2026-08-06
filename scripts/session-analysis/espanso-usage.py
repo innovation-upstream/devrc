@@ -161,6 +161,11 @@ SNIPPETS = {
     # NOTE :rna is deliberately "actions", NOT the pruned :rns's "steps" (3 rows).
     ":rna":     ("prompt", ["recommend next actions"], [], False),
     ":lr":      ("prompt", ["limit restored, resume agent"], [], False),
+    # added 2026-08-05 via /espanso-audit — whole-standalone-message shaped;
+    # 8 genuine instances over ~3 weeks (5 standalone), heavy typing toil.
+    # Include substring is the OPENER, which is distinctive enough on its own —
+    # the rest of the expansion is long and gets paraphrased when hand-typed.
+    ":mt":      ("prompt", ["tee up what we can do in the meantime"], [], False),
     # utilities / typo-correction — output not distinguishable
     ":uuid":     ("util", None, [], False),
     ":clip":     ("util", None, [], False),

@@ -466,3 +466,168 @@ def test_single_word_term_behaviour_unchanged():
 def test_multiword_term_with_extra_whitespace_is_tokenized():
     d = _det_for(CIVIT_BASE)
     assert d._attribute("  civit   prod  ") == ":cpk"
+
+
+# --------------------------------------------------------------------------- #
+# LIVE-CONFIG guards — these read nix/home.nix, NOT a fixture.
+#
+# Everything above pins detector SEMANTICS against hand-written fixtures. That
+# is structurally blind to the config itself: a fixture keeps asserting whatever
+# was true the day it was typed, so deleting a snippet's search_terms in
+# nix/home.nix leaves every test above green. But `label` + `search_terms` ARE
+# the interface — 168 of 173 measured fires go through the Ctrl+Space search UI
+# — so a snippet whose terms stop resolving is a DEAD snippet, and the next
+# /espanso-audit prunes it for recording zero fires.
+#
+# So these guards parse the real file. It is scraped, not nix-evaluated: every
+# snippet is a single-line `{ trigger = "…"; … }` record, and a regex over that
+# needs no nix binary in the sandbox. A MISSING file FAILS rather than skips —
+# the whole point is that this cannot go quietly green.
+# --------------------------------------------------------------------------- #
+import re  # noqa: E402
+import pytest  # noqa: E402
+
+HOME_NIX = Path(__file__).resolve().parents[4] / "nix" / "home.nix"
+
+_NIX_REC = re.compile(r"^\s*\{\s*trigger\s*=\s*\"((?:[^\"\\]|\\.)*)\"\s*;")
+_NIX_LABEL = re.compile(r"label\s*=\s*\"((?:[^\"\\]|\\.)*)\"\s*;")
+_NIX_REPLACE = re.compile(r"replace\s*=\s*\"((?:[^\"\\]|\\.)*)\"\s*;")
+_NIX_TERMS = re.compile(r"search_terms\s*=\s*\[([^\]]*)\]")
+_NIX_STR = re.compile(r"\"((?:[^\"\\]|\\.)*)\"")
+
+
+def _live_base():
+    """The espanso match set as written in nix/home.nix, in base.yml dict shape.
+
+    CAVEAT: `replace` here is the RAW nix source, so a path snippet reads
+    "${workspace}/…" pre-interpolation. That is fine — the detector never
+    consults `replace` (see `_token_matches`), and the fields it DOES consult
+    (trigger, label, search_terms) were verified byte-identical to the base.yml
+    nix actually generates (2026-08-05, via `nix build …#homeConfigurations.zach
+    .activationPackage` + espanso_triggers.load_triggers over the emitted YAML).
+    """
+    if not HOME_NIX.exists():
+        pytest.fail(f"nix/home.nix not found at {HOME_NIX} — this guard cannot "
+                    f"be allowed to skip; fix the path.")
+    matches = []
+    for line in HOME_NIX.read_text(encoding="utf-8").splitlines():
+        m = _NIX_REC.match(line)
+        if not m:
+            continue
+        lab = _NIX_LABEL.search(line)
+        rep = _NIX_REPLACE.search(line)
+        ter = _NIX_TERMS.search(line)
+        matches.append({
+            "trigger": m.group(1),
+            "replace": rep.group(1) if rep else "",
+            "label": lab.group(1) if lab else "",
+            "search_terms": _NIX_STR.findall(ter.group(1)) if ter else [],
+        })
+    return {"matches": matches}
+
+
+def _live_det():
+    return EspansoDetector(ET.load_triggers(_live_base(), DEFAULT))
+
+
+def test_live_scraper_observes_the_real_config():
+    """POSITIVE CONTROL for the scraper the three guards below depend on.
+
+    Without this, a regex that silently matched NOTHING would make every guard
+    below vacuously true (empty trigger set → nothing to contradict). Pin a
+    non-trivial count and two long-standing snippets with known metadata.
+    """
+    base = _live_base()
+    trigs = [m["trigger"] for m in base["matches"]]
+    assert len(trigs) >= 20, f"scraper found only {len(trigs)} snippets: {trigs}"
+    assert len(set(trigs)) == len(trigs), "duplicate trigger in nix/home.nix"
+    assert ":date" in trigs and "dashbaord" in trigs
+    by_trig = {m["trigger"]: m for m in base["matches"]}
+    assert by_trig[":date"]["search_terms"] == ["today", "calendar"]
+    assert by_trig[":kickoff"]["label"] == "Kickoff message for next session"
+
+
+# The queries the 2026-08-05 /espanso-audit measured him actually typing (plus
+# the single-word prefixes the search bar sees mid-type). EVERY one must land on
+# :mt alone. Goes RED if :mt's search_terms are removed, or if a future snippet
+# makes any of them ambiguous.
+_MT_TERMS = [
+    "meantime", "mean", "while", "parallel", "queue", "tee", "wait",
+    "blocked", "idle", "tee up", "queue up", "in the meantime",
+    "what can we do", "while that runs",
+]
+
+
+def test_live_mt_search_terms_all_resolve_to_mt():
+    d = _live_det()
+    unresolved = {}
+    for term in _MT_TERMS:
+        got = d._attribute(term)
+        if got != ":mt":
+            competing = [t for t in d.ts.triggers if d._term_matches(term, t)]
+            unresolved[term] = (got, competing)
+    assert not unresolved, (
+        "these search terms no longer resolve to :mt "
+        "(term -> (attributed, competing snippets)): " + repr(unresolved)
+    )
+    # "up" alone is a substring of :eos's search_term "update", so the two-token
+    # queries are the ones that could silently drift — assert them explicitly.
+    assert d._attribute("tee up") == ":mt"
+    assert d._attribute("queue up") == ":mt"
+    # ...and the trigger really is present with the label leading on "Meantime".
+    assert ":mt" in d.ts.triggers
+    assert d.ts.meta[":mt"]["label"].lower().startswith("meantime")
+
+
+# Resolutions that held BEFORE :mt existed and must still hold. A new snippet's
+# search_terms are the classic way to make an existing one ambiguous.
+_EXISTING_RESOLUTIONS = [
+    ("rit", ":eos"), ("kick", ":kickoff"), ("kic", ":kickoff"),
+    ("recom", ":rna"), ("recommend", ":rna"),
+    ("limit", ":lr"), ("resume", ":lr"), ("restored", ":lr"),
+    ("feedback", ":acq"), ("dispatch", ":acq"), ("process", ":acq"),
+    ("cc", ":cc"), ("kubecl", ":kuc"), ("spine", ":csc"), ("orch", ":cmo"),
+    ("home", ":hlt"), ("prod", ":cpk"), ("datap", ":cdp"), ("civit prod", ":cpk"),
+]
+
+
+def test_live_existing_resolutions_not_made_ambiguous():
+    d = _live_det()
+    bad = {}
+    for term, want in _EXISTING_RESOLUTIONS:
+        got = d._attribute(term)
+        if got != want:
+            bad[term] = (want, got, [t for t in d.ts.triggers if d._term_matches(term, t)])
+    assert not bad, (
+        "search terms regressed (term -> (expected, actual, matching snippets)): "
+        + repr(bad)
+    )
+
+
+def test_live_triggers_have_no_prefix_or_suffix_collisions():
+    """espanso longest-matches; the detector emits the SHORTEST match.
+
+    Where one trigger is a prefix or suffix of another the two disagree, so the
+    keylog signal misattributes. Pin zero such pairs — and prove the checker can
+    SEE one, so the zero is a real zero and not a check wired to nothing.
+    """
+    def pairs(trigs):
+        found = set()
+        for a in trigs:
+            for b in trigs:
+                if a == b:
+                    continue
+                if a.startswith(b):
+                    found.add((b, a, "prefix"))
+                if a.endswith(b):
+                    found.add((b, a, "suffix"))
+        return found
+
+    live = [m["trigger"] for m in _live_base()["matches"]]
+    # POSITIVE CONTROL: seed a known-bad set and require the checker to report it.
+    control = pairs(live + [":m", "x:mt"])
+    assert (":m", ":mt", "prefix") in control and (":mt", "x:mt", "suffix") in control, (
+        "collision checker failed its positive control — its zero below would "
+        "mean nothing"
+    )
+    assert pairs(live) == set(), f"colliding triggers in nix/home.nix: {pairs(live)}"
