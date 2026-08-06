@@ -249,6 +249,13 @@
       // --- whole-system state ---
       "*nixos-rebuild*": "ask",
       "*home-manager*switch*": "ask",
+      // 🔴 MEASURED: this rule is REDUNDANT — deleting it changes no verdict,
+      // because `"*age*-d*"` above already matches it by pure coincidence of
+      // spelling ("nix-collect-gar(BAGE) … -D"). Kept anyway, because an
+      // operator reading this block should see the family named rather than
+      // have to notice it is covered by accident. The corollary is the part
+      // that matters: do NOT delete `"*age*-d*"` on the reasoning that garbage
+      // collection is separately gated — it is not.
       "*nix-collect-garbage*": "ask",
       "*nix*profile remove*": "ask",
       // Only the MUTATING systemctl verbs. `systemctl status`/`list-timers` are
@@ -262,6 +269,12 @@
       "*systemctl*daemon-reload*": "ask",
 
       // --- privilege escalation: gate the WRAPPER itself ---
+      // 🔴 BOTH `sudo` ROWS ARE LOAD-BEARING — neither is a redundant duplicate
+      // of the other, and each was found unpinned by a separate mutation sweep.
+      // `"*sudo *"` needs the LITERAL "sudo " (space), so it misses `sudoedit`;
+      // the anchored `"sudo*"` catches `sudoedit` and a bare `sudo` but misses
+      // sudo in non-leading position (`FOO=1 sudo …`, the house style). Delete
+      // either and the other does NOT cover it.
       "sudo*": "ask",
       "*sudo *": "ask",
       "*doas *": "ask",

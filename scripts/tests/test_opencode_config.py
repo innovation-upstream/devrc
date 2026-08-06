@@ -28,6 +28,21 @@ WHAT IS UNDER TEST (see scripts/opencode/README.md for the measurements):
      Both are pinned by `effective_bash_action` below, which REIMPLEMENTS
      opencode's resolver and asserts the outcome.
 
+  2b. 🔴 PER-RULE COVERAGE — a claim about the RULES, not about commands.
+     Everything in (2) asserts that a COMMAND resolves correctly. None of it
+     asserts that a RULE is doing any work, and the two come apart: MEASURED at
+     f76b3d7 by deleting each of opencode.jsonc's 77 single-line verdict rows
+     one at a time and re-running this file, **39 of 77 deletions left the suite
+     fully green** — 17 of them real holes where a realistic command dropped to
+     plain `allow` at BOTH layers (`*git*commit*`, `*kubectl*drain*`,
+     `*helm*upgrade*`, all four mutating `systemctl` verbs, the anchored
+     `sudo*`, `*rm*-r*`, …). The aggregate `len(asks) >= 40` floor could not see
+     it: deleting exactly ten ask rules left exactly 40 and reported
+     480 passed, 0 failed while ten dangerous families ran unprompted.
+     `test_every_ask_rule_is_individually_pinned` and its deny twin turn that
+     manual sweep into a standing assertion — after them, 10 of 77 survive, and
+     all ten are non-bash tool rows.
+
   3. The resolver model itself. opencode 1.18.4 resolves a permission by
      `findLast` over a FLAT ORDERED array (built-in defaults, then agent rules,
      then user config — later wins), matching with a hand-rolled glob→regex:
@@ -59,6 +74,7 @@ skip) if nix is absent, because a silent skip there is how a wrong path ships.
     run:  python -m pytest scripts/tests/test_opencode_config.py -q
 """
 
+import functools
 import json
 import re
 import shutil
@@ -224,13 +240,23 @@ def wildcard_match(text: str, pattern: str) -> bool:
     return re.match("^" + p + "$", t, re.S) is not None
 
 
-def bash_ruleset(agent: str | None = None) -> list:
+@functools.lru_cache(maxsize=None)
+def bash_ruleset(agent: str | None = None) -> tuple:
     """The ORDERED (pattern, action) list opencode resolves a bash command against.
 
     Order mirrors the real merge: the built-in `permission:"*" pattern:"*"
     allow`, then the global config block, then the agent's own block appended
     LAST — which is precisely why an agent-level `"*": "allow"` would nullify
     every global rule.
+
+    Cached, and a TUPLE rather than a list, for one reason each:
+      * cached because the per-rule ledger resolves ~63 rules x ~90 commands,
+        and re-reading + hand-parsing the 13 KB JSONC each time took this file
+        from 1.7 s to 18.5 s — a real cost on a gate that runs in CI;
+      * a tuple because a cached MUTABLE result is poisonable, and this repo has
+        a caller that mutates a parsed config in place (test_opencode_engine.py's
+        `add_trailing_git_allow`). `load_config()` is deliberately left UNCACHED
+        for exactly that caller.
     """
     rules = [("*", "allow")]  # built-in catch-all
     rules += list(load_config()["permission"]["bash"].items())
@@ -240,7 +266,7 @@ def bash_ruleset(agent: str | None = None) -> list:
             rules.append(("*", perm))
         elif isinstance(perm, dict):
             rules += list(perm.items())
-    return rules
+    return tuple(rules)
 
 
 def effective_bash_action(command: str, agent: str | None = None) -> str:
@@ -257,6 +283,27 @@ def effective_bash_action(command: str, agent: str | None = None) -> str:
     """
     action = "ask"  # opencode's fallback when nothing matches
     for pattern, act in bash_ruleset(agent):
+        if wildcard_match(command, pattern):
+            action = act
+    return action
+
+
+def effective_bash_action_without(drop: str, command: str, agent: str | None = None) -> str:
+    """`effective_bash_action`, with rule `drop` DELETED from the config block.
+
+    🔴 This is the deletion mutant, run in-process. The suite's whole
+    coverage-of-the-permission-block story is "if this rule vanished, some
+    pinned command would change verdict" — a claim that can only be checked by
+    actually removing the rule, never by looking at the file. The rules below
+    that use it turn a manual mutation sweep into a standing assertion.
+
+    The leading built-in `("*", "allow")` is never dropped: it is not a config
+    rule, and removing it would change every verdict at once.
+    """
+    action = "ask"
+    for i, (pattern, act) in enumerate(bash_ruleset(agent)):
+        if i and pattern == drop:
+            continue
         if wildcard_match(command, pattern):
             action = act
     return action
@@ -533,7 +580,98 @@ MUST_ASK = [
     "FOO=1 sudo something-unlisted",
     "doas something-unlisted",
     "FOO=1 doas something-unlisted",
+
+    # 🔴 THE SAME FINDING AS A CLASS, not as two more instances.
+    #
+    # The `*sudo *`/`*doas *` rows above closed TWO deletion mutants. An
+    # exhaustive re-sweep of all 77 single-line verdict rows (delete one, run
+    # this file, attribute by failing test id) then measured **39 survivors**,
+    # of which **17** are real holes: a realistic command in that family drops
+    # to plain `allow` at BOTH layers with the rule gone. Every row below is one
+    # of those 17, chosen so that the rule named in its comment is its SOLE
+    # DECIDER — `test_every_ask_rule_is_individually_pinned` re-measures that
+    # claim rather than trusting this comment, so a row that stops being
+    # load-bearing fails loudly instead of rotting into decoration.
+    #
+    # House spellings are deliberate: RULES.md mandates `git -C <path> …` and
+    # k8s.md mandates `KUBECONFIG=$KC_… kubectl -n ns …`, i.e. the habitual
+    # spelling is the prefixed one.
+    "git -C /repo commit -m x",                                  # *git*commit*
+    "git -C /repo rebase origin/main",                           # *git*rebase*
+    "git -C /repo worktree remove ../wt",                        # *git*worktree remove*
+    "gh pr merge 12 --squash",                                   # *gh*pr merge*
+    "KUBECONFIG=$KC_HOMELAB kubectl -n ns patch deploy x --type=merge",  # *kubectl*patch*
+    "KUBECONFIG=$KC_HOMELAB kubectl -n ns scale deploy x --replicas=0",  # *kubectl*scale*
+    "KUBECONFIG=$KC_HOMELAB kubectl drain node1 --ignore-daemonsets",    # *kubectl*drain*
+    "helm upgrade --install app ./chart -n ns",                  # *helm*upgrade*
+    "helm rollback app 1 -n ns",                                 # *helm*rollback*
+    "flux resume kustomization apps",                            # *flux*resume*
+    # The four MUTATING systemctl verbs. `*systemctl*restart*` is redundant —
+    # `*systemctl*start*` already matches "re-START" — which is exactly why the
+    # one row that existed ("systemctl restart foo") pinned neither of them.
+    "systemctl --user start browser-bridge",                     # *systemctl*start*
+    "systemctl --user enable bar-status-poll.timer",             # *systemctl*enable*
+    "systemctl --user disable bar-status-poll.timer",            # *systemctl*disable*
+    "systemctl --user daemon-reload",                            # *systemctl*daemon-reload*
+    # 🔴 THE MIRROR of the `*sudo *` finding above, and MISSED by the audit that
+    # found that one: the ANCHORED `sudo*` is the only rule covering a `sudo`
+    # that is not followed by a space. `*sudo *` needs the literal "sudo ", so
+    # `sudoedit` walks straight past it.
+    "sudoedit /etc/nixos/configuration.nix",                     # sudo*
+    # `rm -r` / `rm --recursive` on an ORDINARY path. guard_core's
+    # check_rm_rf_critical deliberately does NOT fire here (its fatal-target set
+    # is `/`, `~`/`$HOME`, `.`/`..` and the top-level system dirs only — see
+    # test_guard_core_catches_recursive_rm_without_the_force_flag below), so
+    # this glob is the ONLY thing between an agent and a silent recursive
+    # delete of a project directory.
+    "rm -r /repo/build",                                         # *rm*-r*
+    "rm --recursive /repo/node_modules",                         # *rm*-r*
+    # A leading `dd` with neither an `if=` nor an `of=` operand — the one shape
+    # the operand-scoped `*dd if=*`/`*dd of=*` rules structurally cannot see.
+    # Stated honestly: this spelling is the least dangerous of the dd family
+    # (no `of=` means no output file), and the destructive spellings are held by
+    # `*dd if=*`/`*dd of=*` AND by guard_core. It is pinned because `dd *` is
+    # load-bearing for SOMETHING, and an unpinned rule is how this class returns.
+    "dd conv=notrunc",                                           # dd *
 ]
+
+# 🔴 ASK rules that are DELIBERATELY redundant: deleting one changes no verdict,
+# because another rule already covers the family. Being on this list is a claim
+# — "some other rule has this" — and `test_every_ask_rule_is_individually_pinned`
+# VERIFIES it both ways: an entry here that turns out to be load-bearing fails,
+# and so does a rule that is load-bearing but absent from MUST_ASK and from here.
+# So a future edit that removes the COVERING rule cannot leave this list quietly
+# wrong.
+REDUNDANTLY_COVERED_ASKS = {
+    "*sops*--decrypt*": "`*sops*-d*` already matches `--d`ecrypt",
+    "*age*--decrypt*": "`*age*-d*` already matches `--d`ecrypt",
+    "*systemctl*restart*": "`*systemctl*start*` already matches re-`start`",
+    # Kept for documentation value: an operator reading the block should see the
+    # family named, not have to notice it is caught by accident.
+    "*nix-collect-garbage*": (
+        "caught ACCIDENTALLY by `*age*-d*`: 'nix-collect-gar(bage) … -d'. That "
+        "is a coincidence of spelling, not a design — do not delete `*age*-d*` "
+        "on the reasoning that garbage collection is covered."
+    ),
+    "*dd if=*": "guard_core denies a dd whose operands name a device; `dd *` holds the leading form",
+    "*dd of=*": "guard_core denies a dd whose operands name a device; `dd *` holds the leading form",
+}
+
+# 🔴 DENY rules the GUARD layer backstops by design. The config header says the
+# deny block is "a short, deliberately NON-EXHAUSTIVE mirror of the guard's
+# families in their naive spellings" — so a deny glob whose deletion changes no
+# LAYERED verdict is working as intended, not untested. Being on this list is
+# again a verified claim: `test_every_deny_rule_is_individually_pinned` asserts
+# the command still resolves deny with the glob removed, i.e. that the guard
+# really is holding it.
+GUARD_BACKSTOPPED_DENIES = {
+    "*git*add --all*": "git -C /repo add --all",
+    "*git*add .": "git add .",
+    "*git*clean -f*": "git -C /repo clean -fd",
+    "*talosctl*reset*": "talosctl -n 10.0.0.1 reset",
+    "*mke2fs*": "mke2fs /dev/sdc",
+    "*mkswap*": "mkswap /dev/sdd",
+}
 
 # Read-only, high-frequency. If these start prompting, the operator is trained
 # to click through — which is how the prompts that matter stop working.
@@ -736,16 +874,42 @@ def test_all_asks_precede_all_denies():
     floor is asserted HERE, once, rather than restated at each vacuous site.
 
     The floor is a LITERAL, not derived from the config: 50 ask rules were
-    measured after the restoration. 40 leaves room to prune ten deliberately
-    while still failing loudly on a mass flip.
+    measured after the restoration.
+
+    🔴 THE FLOOR WAS 40, AND THE TEN-RULE SLACK WAS ITSELF EXPLOITABLE. An
+    adversarial sweep deleted exactly ten ask rules — the four mutating
+    `systemctl` verbs, `kubectl` patch/scale/drain, `helm` upgrade/rollback and
+    `flux resume` — leaving exactly 40. The suite reported 480 passed, 0 failed
+    while all ten of those commands resolved `glob=allow layered=allow`. "Room
+    to prune ten deliberately" and "room to un-gate ten dangerous families" are
+    the same slack; the docstring only named the first.
+
+    So the floor is now the MEASURED count, 50, with no cushion. That is a
+    deliberate trade: a genuine prune must lower this literal in the same
+    commit, which is what makes a prune a visible act instead of free slack.
+    Adding rules is unaffected (`>=`).
+
+    WHAT THIS FLOOR NOW UNIQUELY COVERS — honestly, very little, and it is kept
+    as a cheap tripwire rather than a control:
+      * a mass ask->allow FLIP is already caught by
+        `test_no_allow_rule_follows_the_wildcard` (that is what produced the
+        original 117 failures), and ask->deny by the ordering assertion below;
+      * mass DELETION, which used to be its one unique catch, is now caught rule
+        by rule and BY NAME by `test_every_ask_rule_is_individually_pinned`.
+    Its remaining value is that it fails on the COUNT, so a mass edit is
+    localised to one obvious assertion before the per-rule ledger enumerates it.
     """
     items = list(load_config()["permission"]["bash"].items())[1:]
     asks = [k for k, v in items if v == "ask"]
-    assert len(asks) >= 40, (
+    assert len(asks) >= 50, (
         f"only {len(asks)} `ask` rules in the bash block (50 measured after the "
-        f"1fb8c2b restoration, floor 40). A collapse to near-zero is the "
-        f"signature of a blanket ask->allow rewrite, which ALSO makes this "
-        f"test's ordering assertion and the prefix-tolerance test vacuous."
+        f"1fb8c2b restoration; the floor IS that measurement, with no cushion — "
+        f"see this test's docstring for why the old 40 was exploitable). "
+        f"A collapse is the signature of a blanket ask->allow rewrite, which "
+        f"ALSO makes this test's ordering assertion and the prefix-tolerance "
+        f"test vacuous. If you pruned a rule deliberately, lower this literal "
+        f"in the SAME commit and check "
+        f"`test_every_ask_rule_is_individually_pinned` still passes."
     )
     last_ask = max((i for i, (_, v) in enumerate(items) if v == "ask"), default=-1)
     first_deny = min((i for i, (_, v) in enumerate(items) if v == "deny"), default=len(items))
@@ -776,12 +940,17 @@ def test_every_dangerous_pattern_is_prefix_tolerant():
     )
 
 
-@pytest.mark.parametrize(
-    "command",
-    [
-        # Every command family the audit called out as unlisted. Asserted by
-        # RESOLVED OUTCOME, not by substring-matching the config keys — a key
-        # search would pass on a pattern that is present but shadowed.
+# Every command family the audit called out as unlisted. Asserted by RESOLVED
+# OUTCOME, not by substring-matching the config keys — a key search would pass
+# on a pattern that is present but shadowed.
+#
+# 🔴 A MODULE-LEVEL CONSTANT, not an inline parametrize list, because the
+# per-rule ledger below must consider EVERY command this file pins. Left inline,
+# these rows were invisible to it and four rules they cover
+# (`*git*restore*`, `*kubectl*replace*`, `*flux*suspend*`, `*systemctl*stop*`)
+# were reported as unpinned. The ledger's question is "would deleting this rule
+# turn any pinned command green-to-silent", so its pool must be all of them.
+DANGEROUS_FAMILIES = [
         "git stash", "git reset --hard", "git add -A", "rm -rf /x",
         "talosctl reset", "kubectl delete pod x", "kubectl apply -f x",
         "kubectl exec -it x -- sh", "kubectl cp a b", "kubectl edit deploy x",
@@ -796,13 +965,174 @@ def test_every_dangerous_pattern_is_prefix_tolerant():
         "dd if=/dev/zero of=/dev/sda", "mkfs.ext4 /dev/sda",
         "nix profile remove x", "systemctl stop foo", "nixos-rebuild switch",
         "home-manager switch", "nix-collect-garbage -d",
-    ],
-)
+]
+
+
+@pytest.mark.parametrize("command", DANGEROUS_FAMILIES)
 def test_dangerous_command_family_is_gated(command):
     """Every family the audit called out resolves to something other than a
     silent `allow`, on the primary agent."""
     got = effective_bash_action(command, None)
     assert got != "allow", f"{command!r} resolves 'allow' — it would run unprompted"
+
+
+# --------------------------------------------------------------------------- #
+# 🔴 THE PER-RULE LEDGER — the mutation sweep, as a standing assertion.
+#
+# THE DEFECT CLASS THESE CLOSE. Every assertion above is a claim about a
+# COMMAND. None is a claim about a RULE, and the two are not the same: a rule
+# can be deleted outright while every pinned command keeps its verdict, because
+# some OTHER rule happens to catch each one. MEASURED on this file at f76b3d7 by
+# deleting each of the 77 single-line verdict rows in opencode.jsonc one at a
+# time and re-running: **39 of 77 deletions left the suite fully green**, and
+# **17** of those were real holes — a realistic command in that family dropped to
+# plain `allow` at BOTH the glob layer and the layered (glob + guard_core) layer.
+# Among them: `*git*commit*`, `*kubectl*drain*`, `*helm*upgrade*` and all four
+# mutating `systemctl` verbs.
+#
+# 🔴 AND THE AGGREGATE FLOOR COULD NOT SEE IT. `test_all_asks_precede_all_denies`
+# pins `len(asks) >= 40` against 50 measured, so ten ask rules could be deleted
+# with the gate GREEN — which is exactly ten dangerous families going ungated.
+# That is why the protection has to be PER RULE. The floor is now a tripwire
+# behind these, not the primary guard.
+#
+# The two tests below assert a RELATIONSHIP, not a component: every ask/deny rule
+# is either the SOLE DECIDER for some pinned command, or explicitly declared
+# redundant/guard-backstopped with that claim re-measured. They fail when the
+# rule set GROWS (a new rule nobody pinned) and when it SHRINKS (a rule the
+# declarations depended on went away).
+# --------------------------------------------------------------------------- #
+def _sole_decider_commands(pattern: str, commands: list) -> list:
+    """Commands whose PRIMARY-agent verdict changes when `pattern` is deleted."""
+    return [c for c in commands
+            if effective_bash_action(c, None)
+            != effective_bash_action_without(pattern, c, None)]
+
+
+def test_every_ask_rule_is_individually_pinned():
+    """🔴 Deleting ANY single `ask` rule must change a pinned command's verdict.
+
+    An `ask` rule with no such command is dead weight in the test suite's eyes:
+    it can be deleted and nothing goes red, so the family it names silently
+    drops to `allow`. Every rule must therefore be either
+      * the SOLE DECIDER for at least one command this file pins — MUST_ASK
+        (asserted `== ask`) or DANGEROUS_FAMILIES (asserted `!= allow`) — or
+      * listed in REDUNDANTLY_COVERED_ASKS — and that listing is VERIFIED here,
+        not taken on trust, so it cannot outlive the rule that covers it.
+    """
+    bash = load_config()["permission"]["bash"]
+    asks = [k for k, v in list(bash.items())[1:] if v == "ask"]
+
+    pinned = MUST_ASK + DANGEROUS_FAMILIES
+    unpinned, wrongly_redundant = [], []
+    for pat in asks:
+        killers = _sole_decider_commands(pat, pinned)
+        if pat in REDUNDANTLY_COVERED_ASKS:
+            if killers:
+                wrongly_redundant.append((pat, killers[:3]))
+        elif not killers:
+            unpinned.append(pat)
+
+    stale = [p for p in REDUNDANTLY_COVERED_ASKS if p not in asks]
+
+    assert not unpinned, (
+        f"{len(unpinned)} `ask` rule(s) are pinned by NOTHING — each can be "
+        f"deleted with this suite fully green, dropping its family to plain "
+        f"`allow`: {unpinned}\n"
+        f"Fix by adding one MUST_ASK command that ONLY this rule matches (mind "
+        f"the house spellings: `git -C <path> …`, `KUBECONFIG=$KC_… kubectl -n "
+        f"ns …`), or — if another rule genuinely covers it — by adding it to "
+        f"REDUNDANTLY_COVERED_ASKS with the covering pattern named."
+    )
+    assert not wrongly_redundant, (
+        f"rule(s) declared REDUNDANTLY_COVERED_ASKS are in fact LOAD-BEARING: "
+        f"{wrongly_redundant}. The rule that used to cover them is gone or "
+        f"changed. Remove them from that dict — they now need real coverage."
+    )
+    assert not stale, (
+        f"REDUNDANTLY_COVERED_ASKS names pattern(s) that no longer exist in the "
+        f"config: {stale}. Drop the stale entries."
+    )
+
+
+def test_every_deny_rule_is_individually_pinned():
+    """🔴 The deny-block half, asserted at the layer that actually holds it.
+
+    The config header is explicit that the deny globs are "a short, deliberately
+    NON-EXHAUSTIVE mirror of the guard's families in their naive spellings" —
+    defence in depth, not the control. So a deny rule may legitimately be
+    unnecessary at the GLOB layer. What may NOT happen is that nobody checks.
+
+    Each deny rule is therefore either the sole decider for a MUST_DENY command
+    at the glob layer, or listed in GUARD_BACKSTOPPED_DENIES with a command that
+    is re-measured here to still resolve `deny` once the glob is removed. That
+    second assertion is the one that matters: it fails if someone deletes the
+    GUARD check believing the glob has it, or the glob believing the guard does.
+    """
+    bash = load_config()["permission"]["bash"]
+    denies = [k for k, v in list(bash.items())[1:] if v == "deny"]
+
+    unpinned, unheld = [], []
+    for pat in denies:
+        if pat in GUARD_BACKSTOPPED_DENIES:
+            cmd = GUARD_BACKSTOPPED_DENIES[pat]
+            # With the glob gone, the guard must still deny it outright.
+            if guard_verdict(cmd) != "deny":
+                unheld.append((pat, cmd, effective_bash_action_without(pat, cmd, None)))
+        elif not _sole_decider_commands(pat, MUST_DENY + DANGEROUS_FAMILIES):
+            unpinned.append(pat)
+
+    stale = [p for p in GUARD_BACKSTOPPED_DENIES if p not in denies]
+
+    assert not unpinned, (
+        f"{len(unpinned)} `deny` rule(s) are pinned by NOTHING at the glob "
+        f"layer and are not declared guard-backstopped: {unpinned}. Add a "
+        f"MUST_DENY command only this rule matches, or add it to "
+        f"GUARD_BACKSTOPPED_DENIES with the command the guard holds."
+    )
+    assert not unheld, (
+        f"🔴 rule(s) declared GUARD_BACKSTOPPED_DENIES are NOT actually held by "
+        f"guard_core: {unheld}. The glob is the ONLY control for these — either "
+        f"the guard check was removed, or it never covered this spelling. Do "
+        f"not fix this by widening the glob; the header explains why."
+    )
+    assert not stale, (
+        f"GUARD_BACKSTOPPED_DENIES names pattern(s) not in the config: {stale}."
+    )
+
+
+def test_guard_core_catches_recursive_rm_without_the_force_flag():
+    """The `rm -r` attribution, measured rather than assumed.
+
+    🔴 LABEL: this is an INVARIANT GUARD, not regression coverage — it passed
+    before this file's per-family rows were added and passes after. It exists
+    because a plausible-sounding claim ("guard_core only handles `-rf` forms, so
+    `rm -r /` is glob-only") is FALSE, and acting on it would mean widening a
+    glob or a guard that already holds. check_rm_rf_critical tests the RECURSIVE
+    flag alone — `--recursive`, or any short bundle containing r/R — and never
+    requires `-f`.
+
+    The complement is the part that IS regression coverage, and it lives in
+    MUST_ASK: an ordinary recursive delete (`rm -r /repo/build`) is deliberately
+    NOT in the guard's fatal-target set, so the `*rm*-r*` glob is its only gate.
+    """
+    for cmd in ["rm -r /", "rm --recursive /", "rm -R /", "rm -r $HOME",
+                "rm --recursive $HOME", "rm -r ~", "rm -r .", "rm -r /etc",
+                "rm --recursive /nix"]:
+        assert guard_verdict(cmd) == "deny", (
+            f"{cmd!r} is NOT denied by guard_core's opencode policy. The `-rf` "
+            f"spelling is not the boundary of that check — if this fails, the "
+            f"recursive-flag test in check_rm_rf_critical was narrowed."
+        )
+    # …and the deliberate NON-coverage, so the narrowness stays a decision.
+    assert guard_verdict("rm -r /repo/build") == "allow", (
+        "guard_core now denies an ordinary recursive delete. That may be an "
+        "improvement, but it is a behaviour change: check_rm_rf_critical's "
+        "fatal-target set was deliberately narrow so routine cleanup would not "
+        "train the operator to route around the guard (see its docstring). "
+        "Update this assertion deliberately, with the measurement that "
+        "justified widening it."
+    )
 
 
 # --------------------------------------------------------------------------- #
