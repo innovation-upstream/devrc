@@ -61,8 +61,11 @@ cancel_timer() {
 }
 
 schedule_restore() { # $1=bus $2=original_brightness $3=duration
+  # Write saved brightness so `restore` can read it; use the script itself
+  # (with retry + 0-default) instead of raw ddcutil.
+  printf '%s:%s\n' "$1" "$2" > "$STATE"
   systemd-run --user --unit="$UNIT" --on-active="$3" --timer-property=AccuracySec=1s \
-    "$DDC" --bus "$1" setvcp 10 "$2" >/dev/null
+    "$0" restore >/dev/null
 }
 
 # --- actions ---------------------------------------------------------------
@@ -107,22 +110,20 @@ restore() {
 }
 
 fade_to_zero() { # $1=bus $2=from_brightness
-  local bus="$1" from="$2" to=0 i val
-  for (( i=0; i<=FADE_STEPS; i++ )); do
+  local bus="$1" from="$2" to=0 val i
+  for i in $(seq 0 $FADE_STEPS); do
     val=$(( from + (to - from) * i / FADE_STEPS ))
-    set_brightness "$bus" "$val" &
+    set_brightness "$bus" "$val"
     sleep "$FADE_DELAY"
-    wait || true
   done
 }
 
 fade_from_zero() { # $1=bus $2=to_brightness
-  local bus="$1" to="$2" from=0 i val
-  for (( i=0; i<=FADE_STEPS; i++ )); do
+  local bus="$1" to="$2" from=0 val i
+  for i in $(seq 0 $FADE_STEPS); do
     val=$(( from + (to - from) * i / FADE_STEPS ))
-    set_brightness "$bus" "$val" &
+    set_brightness "$bus" "$val"
     sleep "$FADE_DELAY"
-    wait || true
   done
 }
 
