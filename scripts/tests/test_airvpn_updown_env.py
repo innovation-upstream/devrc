@@ -125,10 +125,17 @@ def test_a_LEADING_ZERO_octet_is_REJECTED(tmp_path, v4):
     octal value is deliberately not written here — it is a routable address and
     this repo is public; `test_no_public_ips.py` flagged it when it was.)
 
-    `203.0.113.09` was previously rejected only by ACCIDENT — bash raised
-    'value too great for base' inside the arithmetic, which is a crash, not a
-    decision, and would have flipped to ACCEPTED the moment the range check was
-    written `10#$o` without also rejecting the leading zero.
+    A zero-prefixed octet like `…09` was previously rejected only by ACCIDENT —
+    bash raised 'value too great for base' inside the arithmetic, which is a
+    crash, not a decision.
+
+    🔴 ATTRIBUTION, corrected after an audit measured it (M5): what rejects
+    these is the LEADING-ZERO CHECK, which fires first. `10#` is currently
+    UNREACHABLE for zero-prefixed input and makes no behavioural difference —
+    an earlier version of this docstring credited it with the protection, which
+    would have led a maintainer to delete the check that actually works. The
+    assertion below pins the OUTCOME (rejected by a decision, not by a crash),
+    which is true whichever of the two guards fires; it does not attribute.
     """
     rc, out, err = check_env(write_env(tmp_path, f"NEBULA_LIGHTHOUSE={v4}\n"))
     assert rc == 1, (rc, out, err)
@@ -280,6 +287,21 @@ def test_a_FIFO_at_the_env_path_does_not_hang(tmp_path):
         rc, out, err = check_env(fifo, timeout=5)
     except subprocess.TimeoutExpired:  # pragma: no cover - the bug itself
         pytest.fail("reading the env path BLOCKED — G4 has regressed")
+    finally:
+        # 🔴 UNBLOCK ANY SURVIVOR, ALWAYS. `subprocess.run` kills the direct
+        # child on timeout, but a shell blocked in `open()` on a FIFO with no
+        # writer can outlive it — MEASURED IN THE WILD: 30 `check-env`
+        # processes from this suite were found still blocked, the oldest for 77
+        # minutes, after a mutation run that removed the `-f` gate. Opening the
+        # write end non-blocking releases the reader; unlinking stops anything
+        # later from blocking on it again. This runs on the GREEN path too,
+        # where it is a no-op — a cleanup that only fires on failure is a
+        # cleanup that is never exercised.
+        try:
+            os.close(os.open(fifo, os.O_WRONLY | os.O_NONBLOCK))
+        except OSError:
+            pass
+        fifo.unlink(missing_ok=True)
     assert rc == 1, (rc, out, err)
     assert "state=not-a-regular-file" in out, out
     assert "not a regular file" in err, err
@@ -440,7 +462,8 @@ def test_the_stat_stub_itself_is_load_bearing(tmp_path):
 _SENTINEL = "198.51.100.77"   # TEST-NET-2, distinctive, and a valid IPv4
 
 
-def _up_harness(tmp_path, nft_fail="", ks_present=True, lighthouse=_SENTINEL):
+def _up_harness(tmp_path, nft_fail="", ks_present=True, lighthouse=_SENTINEL,
+                extra_path=None):
     """Run `airvpn-updown up airvpn` with every external command stubbed.
 
     Returns (rc, stdout, syslog_text, [captured nft calls]).
@@ -451,10 +474,13 @@ def _up_harness(tmp_path, nft_fail="", ks_present=True, lighthouse=_SENTINEL):
     silently unfalsifiable until it was noticed. The stub writes to a file, the
     way `journalctl -t airvpn-updown` is what the operator actually reads.
     """
+    # `parents=True`: callers pass a per-case SUBDIRECTORY of tmp_path so several
+    # harness runs in one test cannot share (and overwrite) each other's capture.
+    tmp_path.mkdir(parents=True, exist_ok=True)
     bindir = tmp_path / "upbin"
-    bindir.mkdir(exist_ok=True)
+    bindir.mkdir(parents=True, exist_ok=True)
     rec = tmp_path / "nftcalls"
-    rec.mkdir(exist_ok=True)
+    rec.mkdir(parents=True, exist_ok=True)
 
     # nft stub: append argv + stdin to a numbered file, then honour the
     # requested failure mode. `list table` answers the ks_present probe.
@@ -483,7 +509,10 @@ esac
     env = write_env(tmp_path, f"NEBULA_LIGHTHOUSE={lighthouse}\n")
     e = dict(os.environ,
              AIRVPN_UPDOWN_ENV=str(env),
-             PATH=f"{bindir}:{os.environ['PATH']}",
+             # `extra_path` FIRST so a case-specific `ip`/`wg` stub overrides the
+             # default no-op ones, letting a test drive what the producers see.
+             PATH=(f"{extra_path}:" if extra_path else "")
+                  + f"{bindir}:{os.environ['PATH']}",
              NFT_FAIL=nft_fail,
              KS_PRESENT="1" if ks_present else "")
     e.pop("NEBULA_LIGHTHOUSE", None)
@@ -556,21 +585,144 @@ def test_the_load_is_ONE_atomic_transaction(tmp_path):
 
     Mutant Y6 (delete the flush entirely) survived all 44 tests of the previous
     revision, because nothing looked at HOW the ruleset was loaded.
+
+    🔴 BOTH CALLERS, NOT JUST THE PRIMARY (audit 🟡3, mutant M12). This drove
+    `_up_harness` with NO failure injected, so it only ever inspected the primary
+    path — and replacing `arm_failclosed`'s `nft_load_atomic` with the old
+    `add`+`flush`+`load` sequence SURVIVED all 83 tests. That is the
+    "second caller open-codes the old sequence" shape, and it de-atomises
+    precisely the path that runs when things are already going wrong.
     """
-    _rc, _o, _e, calls = _up_harness(tmp_path)
-    argvs = [c.splitlines()[0] for c in calls]
-    assert not any("flush" in a for a in argvs), (
-        "a separate `nft flush` is back — the load is no longer atomic: " + str(argvs))
-    assert not any(a.startswith("ARGV: add table") for a in argvs), (
-        "a separate `nft add table` is back: " + str(argvs))
-    load = [c for c in calls if "STDIN:" in c]
-    assert load, f"no ruleset was loaded via stdin: {argvs}"
-    first = load[0]
-    assert "delete table inet airvpn_ks" in first, (
-        "the replacement is not self-contained — without the in-transaction "
-        "delete this ADDS to the old table instead of replacing it:\n" + first)
-    assert first.index("delete table") < first.index("chain out"), (
-        "the delete must precede the new definition in the same transaction")
+    for label, kwargs in (("primary", {}), ("fallback", {"nft_fail": "first"})):
+        _rc, _o, _e, calls = _up_harness(tmp_path / label, **kwargs)
+        argvs = [c.splitlines()[0] for c in calls]
+        assert not any("flush" in a for a in argvs), (
+            f"[{label}] a separate `nft flush` is back — the load is no longer "
+            f"atomic: {argvs}")
+        assert not any(a.startswith("ARGV: add table") for a in argvs), (
+            f"[{label}] a separate `nft add table` is back: {argvs}")
+
+        loads = [c for c in calls if "chain out" in c]
+        assert loads, f"[{label}] no ruleset was loaded via stdin: {argvs}"
+        # EVERY load must be self-contained, not merely the first.
+        for i, payload in enumerate(loads):
+            assert "delete table inet airvpn_ks" in payload, (
+                f"[{label}] load #{i} is not self-contained — without the "
+                f"in-transaction delete this ADDS to the old table instead of "
+                f"replacing it:\n{payload}")
+            assert payload.index("delete table") < payload.index("chain out"), (
+                f"[{label}] load #{i}: the delete must precede the new "
+                f"definition in the same transaction")
+    # and the fallback path must genuinely have produced a SECOND load, or the
+    # loop above asserted twice about the same thing.
+    _rc, _o, _e, calls = _up_harness(tmp_path / "fb-count", nft_fail="first")
+    assert len([c for c in calls if "chain out" in c]) >= 2, (
+        "the fallback never rendered a ruleset — the fallback half of this test "
+        "was vacuous")
+
+
+@pytest.mark.parametrize("gw_out,label", [
+    ("default dev eth0 \n", "gateway-less default route -> awk yields 'eth0'"),
+    ("default via not-an-ip dev eth0 \n", "junk in the gateway field"),
+    ("default via 2001:db8::1 dev eth0 \n", "IPv6 gateway"),
+])
+def test_a_NON_ADDRESS_gateway_never_reaches_the_ruleset(tmp_path, gw_out, label):
+    """🔴 AUDIT 🟡4. `$GW` is interpolated as `ip daddr ${GW} accept`, exactly
+    like the lighthouse — and it was the only one of the three with NO check.
+
+    On a gateway-less default route (`default dev eth0`) the awk yields the
+    literal `eth0`; nft then tries to DNS-RESOLVE that token, as root, inside
+    wg-quick's PostUp, and FAILS the primary load — which drops into the blanket
+    fallback, which has no `meta mark` accept, which kills the tunnel. This is
+    G1's exact class, one variable over.
+    """
+    bindir = tmp_path / "gwbin"
+    bindir.mkdir(parents=True)
+    mockbin.write_exec(bindir / "ip", f'''
+case "$*" in
+  *"route show default"*) printf '%s' '{gw_out}' ;;
+esac
+exit 0
+''')
+    _rc, _o, syslog, calls = _up_harness(tmp_path, extra_path=bindir)
+    loads = [c for c in calls if "chain out" in c]
+    assert loads, f"no ruleset rendered ({label})"
+    for tok in ("eth0", "not-an-ip", "2001:db8::1"):
+        assert f"ip daddr {tok} accept" not in loads[0], (
+            f"{label}: a non-address reached the ruleset as `ip daddr {tok}`:\n"
+            + loads[0])
+    assert "gw=none" in syslog, syslog
+
+
+def test_a_NON_ADDRESS_endpoint_never_reaches_the_ruleset(tmp_path):
+    """🔴 AUDIT 🟡4, the other producer. `wg show <if> endpoints` prints the
+    literal `(none)` for a peer that has no endpoint, and an IPv6 endpoint
+    survives the `sed` as a mangled hextet run. Both were interpolated straight
+    into `ip daddr` — IPv4 family — and failed the load.
+
+    🔴 THE `ip` STUB IS NOT OPTIONAL HERE. `EP` is only computed inside the
+    `if [[ -n "$GW" && -n "$PHYS" ]]` branch, so with the harness's default
+    no-op `ip` this test never reached `endpoint_ip` at all and passed
+    vacuously — measured: mutant G4b (delete the endpoint validation) SURVIVED
+    it. A real default route is what makes the assertion reachable.
+    """
+    bindir = tmp_path / "epbin"
+    bindir.mkdir(parents=True)
+    mockbin.write_exec(bindir / "ip", '''
+case "$*" in
+  *"route show default"*) printf 'default via 192.0.2.1 dev eth0 \\n' ;;
+esac
+exit 0
+''')
+    mockbin.write_exec(bindir / "wg", '''
+case "$1" in
+  show) case "$3" in
+          endpoints) printf 'PEERKEY\\t(none)\\n' ;;
+          fwmark) printf '0xca6c\\n' ;;
+        esac ;;
+esac
+exit 0
+''')
+    _rc, _o, syslog, calls = _up_harness(tmp_path, extra_path=bindir)
+    loads = [c for c in calls if "chain out" in c]
+    assert loads, "no ruleset rendered"
+    # reachability control: the gateway DID land, so this run really did take
+    # the branch where the endpoint is computed.
+    assert "ip daddr 192.0.2.1 accept" in loads[0], (
+        "the run never reached the branch that computes EP — this test would "
+        "pass vacuously:\n" + loads[0])
+    assert "(none)" not in loads[0], (
+        "wg's literal `(none)` reached the ruleset:\n" + loads[0])
+    assert "ep=?" in syslog or "ep=none" in syslog, syslog
+
+
+def test_positive_control_a_VALID_gateway_and_endpoint_DO_reach_the_ruleset(tmp_path):
+    """🔴 The complement, and the control that keeps the two tests above from
+    passing because nothing was rendered at all. A validator that rejects
+    EVERYTHING is not a validator — feed it good values and require they land."""
+    bindir = tmp_path / "okbin"
+    bindir.mkdir(parents=True)
+    mockbin.write_exec(bindir / "ip", '''
+case "$*" in
+  *"route show default"*) printf 'default via 192.0.2.1 dev eth0 \\n' ;;
+esac
+exit 0
+''')
+    mockbin.write_exec(bindir / "wg", '''
+case "$1" in
+  show) case "$3" in
+          endpoints) printf 'PEERKEY\\t198.51.100.9:1637\\n' ;;
+          fwmark) printf '0xca6c\\n' ;;
+        esac ;;
+esac
+exit 0
+''')
+    _rc, _o, syslog, calls = _up_harness(tmp_path, extra_path=bindir)
+    loads = [c for c in calls if "chain out" in c]
+    assert loads, "no ruleset rendered"
+    assert "ip daddr 192.0.2.1 accept" in loads[0], loads[0]
+    assert "ip daddr 198.51.100.9 accept" in loads[0], loads[0]
+    assert "meta mark 0xca6c accept" in loads[0], loads[0]
 
 
 def test_the_comment_describing_the_fallback_matches_the_code():
@@ -618,6 +770,49 @@ def test_the_arm_line_names_the_FALLBACK_when_that_is_what_is_installed(tmp_path
     `meta mark` accept."""
     _rc, _o, err, _calls = _up_harness(tmp_path, nft_fail="first", ks_present=True)
     assert "killswitch ARMED(fallback)" in err, err
+
+
+def test_both_loads_failing_with_a_SURVIVING_table_reports_STALE(tmp_path):
+    """🔴 THE FOURTH STATE — one my own F4 created, and no test covered it.
+
+    Before the atomic load, "both loads failed" implied the table had already
+    been flushed, so NOT-ARMED was the only reachable outcome. After F4 a failed
+    load changes nothing, so the PREVIOUS table survives and `ks_present` is
+    TRUE while `KS_RULESET` is `none` — which reported as `ARMED(none)`,
+    directly contradicting the `FALLBACK … ALSO FAILED` line immediately above
+    it. Worse than meaningless: the surviving ruleset was built for a DIFFERENT
+    endpoint and fwmark, so it can read as armed while the tunnel is dead.
+    """
+    _rc, _o, syslog, _calls = _up_harness(tmp_path, nft_fail="all", ks_present=True)
+    assert "STALE(previous)" in syslog, syslog
+    assert "ARMED(none)" not in syslog, (
+        "the meaningless fourth state is back: " + syslog)
+    # the two lines must not contradict each other any more
+    assert "uplink is NOT filtered" not in syslog, (
+        "the fallback still claims the uplink is unfiltered while a table "
+        "survives: " + syslog)
+    assert "OLDER table" in syslog and "does NOT match" in syslog, syslog
+
+
+def test_the_four_states_are_pairwise_distinct(tmp_path):
+    """A four-way verdict is only useful if the four are distinguishable. Drive
+    every corner of (load outcome × kernel answer) and require four different
+    strings — a collapse to three is how `ARMED(none)` hid in the first place."""
+    seen = {}
+    for label, kwargs in (
+        ("primary",  {}),
+        ("fallback", {"nft_fail": "first"}),
+        ("stale",    {"nft_fail": "all", "ks_present": True}),
+        ("gone",     {"nft_fail": "all", "ks_present": False}),
+    ):
+        _rc, _o, syslog, _c = _up_harness(tmp_path / label, **kwargs)
+        # the stub replays logger's full argv, so the tag precedes the message
+        line = [l for l in syslog.splitlines() if "up: killswitch " in l]
+        assert len(line) == 1, (label, syslog)
+        seen[label] = line[0].split("up: killswitch ", 1)[1].split()[0]
+    assert len(set(seen.values())) == 4, f"states collapsed: {seen}"
+    assert seen == {"primary": "ARMED(primary)", "fallback": "ARMED(fallback)",
+                    "stale": "STALE(previous)", "gone": "NOT-ARMED"}, seen
 
 
 def test_the_ks_present_probe_is_load_bearing(tmp_path):
@@ -805,7 +1000,14 @@ def test_apply_creates_the_file_0600_root_owned_from_the_env_var(tmp_path):
     f = tmp_path / "new.env"
     rc, out, err = apply_lib(tmp_path, f, env={"NEBULA_LIGHTHOUSE": GOOD_V4})
     assert rc == 0, (out, err)
-    assert f.read_text().strip() == f"NEBULA_LIGHTHOUSE={GOOD_V4}"
+    # 🔴 EXACT BYTES, NOT `.strip()`ed (audit X11). The audit's real X11 mutant
+    # changed this `printf` from `'NEBULA_LIGHTHOUSE=%s\n'` to `'%s'` — dropping
+    # the trailing newline — and SURVIVED, because `.strip()` erases the very
+    # byte F3 is about. A file with no final newline is the canonical
+    # partially-written shape; a fixture that cannot see it is a fixture that
+    # cannot see F3's regression either.
+    assert f.read_bytes() == f"NEBULA_LIGHTHOUSE={GOOD_V4}\n".encode(), (
+        f"exact bytes differ: {f.read_bytes()!r}")
     assert oct(f.stat().st_mode & 0o777) == "0o600", oct(f.stat().st_mode)
 
 
@@ -850,13 +1052,24 @@ def test_the_apply_script_provisions_the_env_BEFORE_installing_the_helper():
 
 def test_the_skill_documents_the_prerequisite_BEFORE_the_install_command():
     """The same ordering defect in the doc an operator actually follows: the
-    requirement used to be a trailing sentence AFTER the install command."""
+    requirement used to be a trailing sentence AFTER the install command.
+
+    🔴 ANCHORED ON THE 🔴 BLOCK'S OWN TEXT (audit X15). The previous version
+    anchored on the substring `/etc/airvpn-updown.env`, which Procedure step 1's
+    own command ALSO contains — so the audit's real X15 mutant, moving the whole
+    prerequisite block to the END of the file, SURVIVED. A guard that can be
+    satisfied by a different occurrence of the same substring is pinning
+    spelling, not order.
+    """
     doc = SKILL_DOC.read_text(encoding="utf-8")
-    prereq = doc.index("/etc/airvpn-updown.env")
+    prereq = doc.index("is a PREREQUISITE, not an\nafterthought")
     install = doc.index("sudo install -m 0755 -o root -g root")
     assert prereq < install, (
         "airvpn.md introduces the env file only after telling the operator to "
         "install and re-arm")
+    # …and the block must still precede the Procedures it is a prerequisite FOR.
+    assert prereq < doc.index("## Procedures"), (
+        "the prerequisite block has been moved out from in front of Procedures")
 
 
 # --- G7: the DURABLE artifact, not just the PR body ---------------------------
@@ -918,12 +1131,81 @@ def test_the_retest_protocol_observes_the_slash32_route_directly():
     assert route < ssh, "the route check must precede the checks it is not implied by"
 
 
+def test_the_off_LAN_step_names_the_SOURCE_host_and_is_not_a_self_ssh():
+    """🔴 P1 — the step the entire do-not-merge banner exists for.
+
+    `10.42.0.30` is the WORKBENCH'S OWN nebula address, and step 1 puts the
+    operator on the LAN. `ssh zach@10.42.0.30` run there is a SELF-SSH; from
+    another LAN host it is a same-LAN hop. Neither exercises the nebula
+    DIRECT-PUNCH path that this section's opening line says a LAN-only test
+    cannot reach — the path that locked the host out in #118. The step carrying
+    the whole "off-LAN" claim never said which host to run it FROM, so followed
+    literally it passed unconditionally.
+    """
+    sec = _protocol_section()
+    tail = sec[sec.index("11."):]
+    # AND, not OR: an earlier version accepted either phrase, so a mutant that
+    # changed "ON THE LAPTOP" to "ON THIS HOST" — i.e. re-created the self-ssh —
+    # SURVIVED on the other half of the disjunction.
+    assert "ON THE LAPTOP" in tail, (
+        "the off-LAN step no longer names the SOURCE host to run it from")
+    assert "off-LAN host" in tail, (
+        "the off-LAN step no longer says the source must be off-LAN")
+    assert "self-ssh" in tail, (
+        "the step no longer explains WHY running it on the workbench is void")
+    # it must tell the operator how to notice they are still on the LAN
+    assert "192" in tail and "STILL ON THE LAN" in tail, (
+        "no guard against running the off-LAN step from the LAN")
+    # …and what a pass and a fail each look like
+    for verdict in ("**PASS**", "**FAIL**", "**INVALID**"):
+        assert verdict in tail, f"the off-LAN step does not define {verdict}"
+    assert "cannot be completed" in tail, (
+        "no instruction for the case where no off-LAN host exists — that is "
+        "when the self-ssh gets substituted")
+
+
+def test_the_precondition_checks_UP_ness_not_mere_existence():
+    """🟢 P3. `ip link show airvpn` succeeds for an interface left behind by a
+    HALF-FAILED `wg-quick up` — a state in which `wg show … fwmark` still fails
+    and arming still blackholes the host. Existence is not up-ness."""
+    sec = _protocol_section()
+    assert "EXISTENCE IS NOT UP-NESS" in sec, sec[:600]
+    assert "grep -qw UP" in sec, "the check does not require the link to be UP"
+    assert "latest-handshakes" in sec, (
+        "the check does not require a peer that has actually answered")
+
+
+def test_the_install_step_tells_the_operator_to_confirm_the_branch():
+    """🟢 P4. G8 exists precisely because the DEPLOYED helper was found
+    byte-identical to `main` while the PR was open. Installing from a checkout
+    without confirming which branch is in it reproduces that."""
+    sec = _protocol_section()
+    install = sec.index("sudo install -m 0755")
+    head = sec[:install]
+    assert "status -sb" in head, (
+        "the install step does not tell the operator to confirm the branch")
+
+
+def test_the_protocol_says_to_BAIL_on_a_degraded_ruleset():
+    """🟡 P5. `ARMED(fallback)` was described as merely 'degraded', while the
+    script's own comment says that state drops wg's encrypted packets and kills
+    the tunnel. With no instruction to bail, the operator walks into step 10's
+    `curl` and gets a confusing failure instead of a diagnosed one."""
+    sec = _protocol_section()
+    six = sec[sec.index("6. `journalctl"):sec.index("7. 🔴")]
+    for state in ("ARMED(fallback)", "STALE(previous)", "NOT-ARMED"):
+        assert state in six, f"step 6 does not mention {state}"
+    assert six.count("BAIL NOW") >= 2, (
+        "step 6 does not tell the operator to bail on a degraded/stale ruleset:\n"
+        + six)
+
+
 def test_the_retest_protocol_reads_the_new_arm_line_fields():
     """The protocol must name the fields this PR added, or it cannot detect the
     failure modes this PR introduces."""
     sec = _protocol_section()
     for token in ("lighthouse=UNSET", "ARMED(primary)", "ARMED(fallback)",
-                  "NOT-ARMED", "state=ok"):
+                  "STALE(previous)", "NOT-ARMED", "state=ok"):
         assert token in sec, f"the protocol never mentions {token}"
 
 
@@ -936,8 +1218,12 @@ def test_the_debug_section_shows_the_CURRENT_arm_line_format():
     assert "lighthouse=" in dbg, "the arm-line example predates this PR"
     assert "killswitch armed (fwmark" not in dbg, (
         "the Debug section still shows the OLD unconditional `armed` wording")
-    for state in ("ARMED(primary)", "ARMED(fallback)", "NOT-ARMED"):
+    for state in ("ARMED(primary)", "ARMED(fallback)", "STALE(previous)",
+                  "NOT-ARMED"):
         assert state in dbg, f"Debug/bail does not explain {state}"
+    assert "FOUR states" in dbg, (
+        "Debug/bail still says THREE states — `STALE(previous)` became "
+        "reachable when the load was made atomic")
 
 
 # --- the seam ------------------------------------------------------------------

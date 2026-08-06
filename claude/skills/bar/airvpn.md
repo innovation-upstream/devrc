@@ -91,22 +91,40 @@ not see forwarded pod traffic, and LAN + nebula survive — but you will blackho
 egress. Check first:
 
 ```
-ip link show airvpn >/dev/null 2>&1 && echo TUNNEL-UP || echo TUNNEL-DOWN-DO-NOT-ARM
+ip -br link show airvpn 2>/dev/null | grep -qw UP \
+  && sudo wg show airvpn latest-handshakes | grep -qv '\b0$' \
+  && echo TUNNEL-UP || echo TUNNEL-NOT-READY-DO-NOT-ARM
 ```
+
+🔴 **EXISTENCE IS NOT UP-NESS.** `ip link show airvpn` alone succeeds for an interface left
+behind by a half-failed `wg-quick up` — a state in which `wg show … fwmark` still fails and
+arming still blackholes you. The check above requires the link to be **UP** *and* wg to report
+a **non-zero handshake**, i.e. a peer that has actually answered.
 
 **Instant bail, from the LAN session, at any point:** `sudo nft delete table inet airvpn_ks`.
 
 1. Run it from a **LAN session** (192.168.50.x — always allowed = your recovery path) held open.
 2. Site config exists: `sudo test -f /etc/airvpn-updown.env && sudo stat -c '%U:%G %a' /etc/airvpn-updown.env`
    → expect `root:root 600`. Create it first if not (Procedures step 1).
-3. **Install the edited helper** — without this you are testing the OLD script:
+3. **Install the edited helper** — without this you are testing the OLD script.
+   🔴 **Confirm the right branch is checked out FIRST** — the whole reason this step exists is
+   that the deployed helper was found byte-identical to `main` while the PR was open:
+   `git -C ~/workspace/devrc status -sb | head -1` → expect the branch under test, clean.
+   Then:
    `sudo install -m 0755 -o root -g root ~/workspace/devrc/scripts/airvpn-updown /etc/nixos/i3blocks-scripts/airvpn-updown`
 4. `sudo /etc/nixos/i3blocks-scripts/airvpn-updown check-env` → **`lighthouse=<ip> state=ok`**.
    `state=unreadable-by-uid-…` means you dropped the `sudo`, not that the file is wrong.
 5. Re-arm: `sudo /etc/nixos/i3blocks-scripts/airvpn-updown up airvpn`
 6. `journalctl -t airvpn-updown -n5` → **`up: killswitch ARMED(primary) … lighthouse=<ip>`**.
-   `ARMED(fallback)` = the primary ruleset did not load. `NOT-ARMED` = **the uplink is
-   unfiltered**. `lighthouse=UNSET` = the site config was missing, rejected or malformed.
+   Anything else is a STOP:
+   - 🔴 `ARMED(fallback)` → **BAIL NOW** (`sudo nft delete table inet airvpn_ks`). The blanket
+     fallback has **no `meta mark` accept**, so wg's own encrypted packets are dropped and the
+     tunnel dies. Do not continue to step 10 — you will get a confusing `curl` failure instead
+     of a diagnosed one.
+   - 🔴 `STALE(previous)` → **BAIL NOW.** Both loads failed and an OLDER table survived; it was
+     built for a different endpoint/fwmark and does not match this tunnel.
+   - 🔴 `NOT-ARMED` → the uplink is **unfiltered**. Fix the load error before going further.
+   - `lighthouse=UNSET` → the site config was missing, rejected or malformed (step 2/4).
 7. 🔴 **`ip route get <lighthouse-ip>`** — the ONLY step that observes the `/32` bypass, i.e.
    the thing A-1 is about. `via <lan-gw> dev <phys>` = the bypass is present;
    `dev airvpn` = it is GONE and lighthouse traffic is inside the tunnel.
@@ -119,15 +137,49 @@ ip link show airvpn >/dev/null 2>&1 && echo TUNNEL-UP || echo TUNNEL-DOWN-DO-NOT
 10. Exit IP is the tunnel: `curl -s https://ipinfo.io/json` → **CA** and an AirVPN `org`,
     NOT your home ISP's IP/org. (This repo is PUBLIC — the home IP is deliberately not
     written down here; compare against the same command with the tunnel DOWN.)
-11. **Confirm off-LAN:** `ssh zach@10.42.0.30` still connects (proves the nebula path survived —
-    the LAN test can't cover this).
+11. 🔴 **Confirm OFF-LAN — and this step is worthless unless you run it FROM somewhere else.**
+
+    `10.42.0.30` is the **workbench's own** nebula address. Steps 1–10 put you *on the
+    workbench, on the LAN*, so running `ssh zach@10.42.0.30` there is a **self-ssh**; from
+    another machine on the same LAN it is a same-LAN hop. Neither touches the nebula
+    **direct-punch** path — the one this section's opening line says a LAN-only test cannot
+    reach, and the one that locked the host out in #118.
+
+    Run it **from a genuinely off-LAN host** — the laptop on a phone hotspot / any network that
+    is not `192.168.50.0/24`, reaching the workbench over nebula:
+
+    ```
+    # ON THE LAPTOP (off-LAN), toward the workbench:
+    ip -br addr | grep -q '192\.168\.50\.' && echo "STILL ON THE LAN — this proves nothing"
+    ssh -o ConnectTimeout=10 zach@10.42.0.30 'echo off-lan-ok; hostname'
+    ```
+
+    * **PASS** — `off-lan-ok` plus the workbench's hostname within the timeout. The overlay
+      survived the killswitch, including the direct-punch path.
+    * **FAIL** — timeout, `No route to host`, or a hang. The killswitch is eating nebula
+      transport. **Bail from the LAN session you held open in step 1**:
+      `sudo nft delete table inet airvpn_ks`. That is what step 1 is for.
+    * **INVALID** — the guard line above printed anything. You are on the LAN; the result tells
+      you nothing either way, so do not record it as a pass.
+
+    If no off-LAN host is available, this protocol **cannot be completed** — say so rather than
+    substituting the self-ssh, which passes unconditionally.
 
 ## Debug / bail
 - arm line: `journalctl -t airvpn-updown -n5` →
   `up: killswitch ARMED(primary) (fwmark=…) policing [<nics>], gw=… ep=… lighthouse=<ip>`.
-  Three states: `ARMED(primary)` · `ARMED(fallback)` (degraded — no `meta mark` accept) ·
-  `NOT-ARMED` (**uplink unfiltered**; the kernel is asked with `nft list table`, the line is
-  not written from an exit status).
+  **FOUR states.** The kernel is asked with `nft list table`; the line is never written from an
+  exit status. Only the first is a pass:
+
+  | state | meaning | what to do |
+  |---|---|---|
+  | `ARMED(primary)` | the intended ruleset is installed | continue |
+  | `ARMED(fallback)` | blanket fail-closed ruleset — **no `meta mark` accept, so wg's own encrypted packets are dropped and the tunnel dies** | 🔴 **BAIL** |
+  | `STALE(previous)` | both loads failed; an OLDER table survived the atomic load. Built for a different endpoint/fwmark — it can read as filtering while the tunnel is dead | 🔴 **BAIL** |
+  | `NOT-ARMED` | no table at all — **the uplink is UNFILTERED** | 🔴 fix the load error |
+
+  `STALE(previous)` only became reachable when the load was made atomic: before that, a failed
+  load had already flushed the table, so "both failed" always meant NOT-ARMED.
 - instant bail that KEEPS the tunnel up (drops the killswitch only):
   `sudo nft delete table inet airvpn_ks`.
 - connect / disconnect (NOPASSWD): `sudo /etc/nixos/i3blocks-scripts/airvpn-sudo {up,down}`.
