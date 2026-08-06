@@ -98,10 +98,6 @@ in
     matches = {
       base = {
         matches = [
-          # Date/time with labels for search bar (CTRL+SPACE)
-          { trigger = ":date"; replace = "{{mydate}}"; label = "Today's date"; search_terms = ["today" "calendar"]; vars = [{ name = "mydate"; type = "date"; params = { format = "%Y-%m-%d"; }; }]; }
-          { trigger = ":time"; replace = "{{mytime}}"; label = "Current time"; search_terms = ["now" "clock"]; vars = [{ name = "mytime"; type = "date"; params = { format = "%H:%M"; }; }]; }
-
           # Paths - labeled for autocomplete
           { trigger = ":hlt"; replace = "${workspace}/homelab-talos "; label = "homelab-talos path"; search_terms = ["infra"]; }
           { trigger = ":kuc"; replace = "${workspace}/kubeclaw "; label = "kubeclaw path"; search_terms = ["kubeclaw"]; }
@@ -109,8 +105,8 @@ in
           # SSH connect
           { trigger = ":sshwn"; replace = "ssh zach@10.42.0.30"; label = "SSH workbench (nebula)"; search_terms = ["ssh" "workbench" "wb" "nebula" "mesh" "remote"]; }
           { trigger = ":sshwl"; replace = "ssh zach@192.168.50.250"; label = "SSH workbench (LAN)"; search_terms = ["ssh" "workbench" "wb" "lan" "local"]; }
-          { trigger = ":sshln"; replace = "ssh zach@10.42.0.100"; label = "SSH laptop (nebula)"; search_terms = ["ssh" "laptop" "framewo" "nebula" "mesh" "remote"]; }
-          { trigger = ":sshll"; replace = "ssh zach@192.168.50.155"; label = "SSH laptop (LAN)"; search_terms = ["ssh" "laptop" "framewo" "lan" "local"]; }
+          { trigger = ":sshln"; replace = "ssh zach@10.42.0.100"; label = "SSH laptop (nebula)"; search_terms = ["ssh" "laptop" "nebula" "mesh" "remote"]; }
+          { trigger = ":sshll"; replace = "ssh zach@192.168.50.155"; label = "SSH laptop (LAN)"; search_terms = ["ssh" "laptop" "lan" "local"]; }
 
           # hot singles
           # (dashbaord is the ONLY snippet with real direct-trigger traffic:
@@ -204,7 +200,6 @@ in
           { trigger = ":subk"; replace = "${workspace}/civit/civitai-gpu-fleet/submodel-dc-03-a-kubeconfig "; label = "civitai submodel dc 03 kubeconfig path"; search_terms = ["civitai" "gpu" "submodel" "dc 03"]; }
 
           # Utilities
-          { trigger = ":uuid"; replace = "{{uuid}}"; label = "Generate UUID"; search_terms = ["guid" "random"]; vars = [{ name = "uuid"; type = "shell"; params = { cmd = "uuidgen"; }; }]; }
           { trigger = ":clip"; replace = "{{clip}}"; label = "Paste from clipboard"; vars = [{ name = "clip"; type = "clipboard"; }]; }
         ];
       };
@@ -1152,6 +1147,10 @@ in
         "PATH=${lib.makeBinPath [ pkgs.coreutils pkgs.gawk pkgs.procps pkgs.gnugrep pkgs.libnotify ]}"
         # This laptop runs hot at idle (cooling needs attention); warn early.
         "CPU_MON_TEMP_THRESHOLD=88"
+        # Raise thresholds to reduce alert noise (2026-08-05).
+        "CPU_MON_THRESHOLD=48"
+        "CPU_MON_RUNAWAY_PCT=95"
+        "CPU_MON_COOLDOWN=600"
         # Never alert on these (games / Android stack / expected heavy apps):
         # case-insensitive substring match on the busy process's command.
         # COMMA-separated (a space gets split by systemd's Environment= parsing
