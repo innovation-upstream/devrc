@@ -76,7 +76,7 @@
 //     --tool` AUTO-APPROVES it. So `ask` means "friction for a human", never
 //     "a control on an unattended agent".
 //   * only a `"*": "deny"` removes a tool from the request schema; a narrow
-//     deny does not, and `"allow"` costs exactly what `"allow"` costs.
+//     deny does not, and `"ask"` costs exactly what `"allow"` costs.
 //   * `small_model` drives TITLE GENERATION ONLY — not compaction. The real
 //     cheap-model lever is pinning the hidden title/summary/compaction agents
 //     in the `agent` block below.
