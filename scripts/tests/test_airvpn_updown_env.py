@@ -115,7 +115,13 @@ def test_the_last_assignment_wins(tmp_path):
 # --- A-2: a malformed value must be UNSET, never interpolated ------------------
 
 @pytest.mark.parametrize("value,why", [
-    ("5.161.118", "truncated quad — a partially-written file"),
+    # 🔴 TEST-NET-3, deliberately. An earlier revision used the REAL lighthouse's
+    # first three octets here — byte-identical to the prefix of the literal this
+    # PR deletes — which would have narrowed it from "somewhere in Hetzner" to a
+    # /24 in a PUBLIC repo, on merge. Neither gate can catch that: a 3-octet
+    # prefix is not an address, so `is_reportable()` is False by construction.
+    # Every literal in this file must be TEST-NET.
+    ("203.0.113", "truncated quad — a partially-written file"),
     ("203.0.113.", "trailing dot"),
     ("203.0.113.999", "octet > 255"),
     ("$(id)", "command substitution"),
