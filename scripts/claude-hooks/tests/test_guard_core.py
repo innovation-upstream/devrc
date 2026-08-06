@@ -409,6 +409,93 @@ def test_add_all_and_reset_hard_now_agree_about_the_global_option_hop():
 
 
 # --------------------------------------------------------------------------- #
+# 1c. 🔴 `git add <specific-files>` stays allowed
+#
+# Closes a false positive from the opencode.jsonc deny glob `"*git*add ."` which
+# matched `git add clusters/foo.yaml` (glob `*` consumed the path, `.` matched
+# the dot in `foo.yaml`). The guard_core.py argv parser is correct —
+# _stages_everything() properly tokenizes arguments and only flags `-A`, `--all`,
+# `.`, `..`, `*`, `$PWD` — but the glob backstop over-blocked.
+#
+# After the fix (removing `"*git*add ."` from opencode.jsonc), these cases
+# exercise guard_core.py directly to pin that specific-file staging stays allowed.
+# --------------------------------------------------------------------------- #
+ADD_ALL_DENY = [
+    "git add -A",
+    "git add --all",
+    "git add .",
+    "git add ..",
+    "git add *",
+    "git add -Av",
+    "git add -A -- foo",
+    "git -C /tmp/x add -A",
+    "VAR=1 git add .",
+    "sudo git add .",
+    "sudo -n git -C /tmp/x add -A",
+    "env git add .",
+    "timeout 60 git add .",
+    "bash -c 'git add .'",
+    "echo ok && git add .",
+    "cd /tmp && git add .",
+]
+
+ADD_ALL_ALLOW = [
+    "git add clusters/foo.yaml",
+    "git add src/main.py",
+    "git add -p",
+    "git add --interactive",
+    "git add clusters/workbench/apps/media-stack/kustomization.yaml",
+    "git -C /tmp/x add src/main.py",
+    "VAR=1 git add src/main.py",
+    "sudo git add src/main.py",
+    "git status",
+    "git diff",
+]
+
+
+@pytest.mark.parametrize("command", ADD_ALL_DENY)
+def test_git_add_all_denies_all_staging_spelling(command):
+    """DENY cases — commands that stage the whole tree must be caught.
+
+    These exercise check_git_add_all directly and via evaluate() under both
+    policies (the check is in both claude-code and opencode).
+    """
+    assert gc.check_git_add_all(command) is not None, f"check_git_add_all missed: {command!r}"
+    assert gc.evaluate(command, "claude-code") is not None, f"evaluate missed (claude-code): {command!r}"
+    assert gc.evaluate(command, "opencode") is not None, f"evaluate missed (opencode): {command!r}"
+
+
+@pytest.mark.parametrize("command", ADD_ALL_ALLOW)
+def test_git_add_specific_files_stays_allowed(command):
+    """ALLOW cases — staging specific files must not be blocked.
+
+    This is the false positive that motivated removing `"*git*add ."` from
+    opencode.jsonc. The argv parser in _stages_everything() correctly
+    distinguishes `-A`/`.` from specific file paths; pin it here so a
+    regression cannot re-introduce the glob's over-matching.
+    """
+    assert gc.check_git_add_all(command) is None, f"check_git_add_all false-positived: {command!r}"
+    assert gc.evaluate(command, "claude-code") is None, f"evaluate false-positived (claude-code): {command!r}"
+    assert gc.evaluate(command, "opencode") is None, f"evaluate false-positived (opencode): {command!r}"
+
+
+def test_git_add_escape_hatch_message_stays_denied():
+    """The escape hatch: merely QUOTING `git add .` in a message still denies.
+
+    check_git_add_all matches raw text, so a commit message mentioning the
+    blocked shape is caught — the same deliberate false-positive convention
+    the other checks follow. The deny message includes the escape hatch
+    (Write tool + commit -F / --body-file).
+    """
+    cmd = 'git commit -m "never use git add ."'
+    reason = gc.check_git_add_all(cmd)
+    assert reason is not None, "quoted mention of git add . must still be caught"
+    assert "commit -F" in reason
+    assert "--body-file" in reason
+    assert "Write tool" in reason
+
+
+# --------------------------------------------------------------------------- #
 # 2. the parser
 # --------------------------------------------------------------------------- #
 @pytest.mark.parametrize("text,expected_first_argv", [
