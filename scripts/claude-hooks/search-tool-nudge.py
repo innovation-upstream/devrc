@@ -20,10 +20,15 @@ Design constraints, in priority order:
      doing non-search work).
   3. Once per KIND per session (two kinds: content-search, file-search), so a session
      sees at most two of these ever.
+  4. NEVER recommend a tool this session does not have. Grep/Glob are not present in
+     every session — the harness answers a call to a missing one with
+     `Error: No such tool available: Grep. …`. A nudge pointing at a tool that cannot
+     be called is pure token cost AND trains the operator to ignore the hook, which
+     degrades it for the sessions where it IS actionable. See "Availability" below.
 
 Fail-open: any error -> exit 0 silently; it must never break the Bash tool.
 """
-import sys, json, os, re, shlex
+import sys, json, os, re, shlex, glob
 
 HOME = os.path.expanduser("~")
 CACHE_DIR = f"{HOME}/.cache/claude-search-tool-nudge"
@@ -51,6 +56,51 @@ HINTS = {
         "Glob(pattern=\"**/*.py\", path=\"…\")",
     ),
 }
+
+# The native tool each kind points at. Suppression is per-TOOL, not per-session-wide:
+# a session that has only ever PROVEN Grep missing still gets its one Glob nudge, which
+# then proves Glob too if it is also gone. Costs at most one extra nudge and keeps the
+# claim scoped to what was actually observed.
+NATIVE_TOOL = {CONTENT: "Grep", FILES: "Glob"}
+
+# --------------------------------------------------------------------------- #
+# Availability
+#
+# The PostToolUse payload does NOT enumerate the session's tools, and the wording of
+# the unavailability error is NOT in the claude-code bundle (checked: 2.1.220 contains
+# neither "Grep is not available" nor "via the Bash tool instead") — the tool set is
+# decided server-side, so there is no local config file to consult. The only observable
+# is the transcript: when the model calls a tool the session lacks, the harness writes
+#
+#   {"type":"user","message":{"role":"user","content":[{"type":"tool_result",
+#     "content":"<tool_use_error>Error: No such tool available: Grep. Grep is not
+#      available in this session — search file contents with `grep` via the Bash tool
+#      instead.</tool_use_error>",
+#     "is_error":true,"tool_use_id":"…"}]}, …}
+#
+# So availability is INFERRED, and only ever in the safe direction: silence a tool once
+# this session has proven it missing. Known gap, stated rather than papered over — the
+# signal only exists once the model has ATTEMPTED the tool. A session that never reaches
+# for Grep (because it can see Grep is not in its tool list) produces no signal and keeps
+# getting the nudge. Nothing else the hook receives distinguishes that case.
+#
+# 🔴 The match is STRUCTURAL, not spelled: only a tool_result block with `is_error` true
+# whose text STARTS with the marker counts. That matters — this very error text also
+# appears in the parent transcript as ordinary prose (quoted inside an Agent tool_use
+# prompt, and inside a subagent's final report, both `is_error` false). A substring grep
+# over the raw transcript would match those and silence a session whose tools work fine.
+# --------------------------------------------------------------------------- #
+UNAVAILABLE_MARKER = b"No such tool available: "
+_UNAVAILABLE_RE = re.compile(r"^Error: No such tool available: ([A-Za-z][A-Za-z0-9_]*)")
+# Cheap by construction: the scan runs at most once per KIND per session, because the
+# outcome either way is written to the state file and short-circuits every later call.
+# That bound needs a session_id to key the state file on — the harness always sends one
+# (it and transcript_path come from the same payload builder), so the unbounded shape is
+# "transcript_path but no session_id", which the harness does not produce.
+# Measured on the largest transcript on this host — 66.5 MB — a full byte-prefiltered
+# pass costs 73 ms; a typical transcript is under 1 MB. The cap bounds the pathological
+# case; hitting it just means "no signal", i.e. nudge exactly as before.
+MAX_SCAN_BYTES = 64 * 1024 * 1024
 
 
 def _strip_heredocs(cmd):
@@ -280,24 +330,146 @@ def analyze(cmd):
     return kinds
 
 
-def _already_nudged(session, kind):
-    """Per-session dedupe: each kind is suggested at most once. Fail-open on IO error."""
-    if not session:
-        return False
+def _error_texts(rec):
+    """Yield the text of every tool_result block in `rec` that the harness marked as an
+    ERROR. Anything else — assistant tool_use inputs, ordinary tool output, a subagent's
+    report — is deliberately not a witness (see the Availability note above)."""
+    msg = rec.get("message")
+    content = msg.get("content") if isinstance(msg, dict) else None
+    if not isinstance(content, list):
+        return
+    for block in content:
+        if not isinstance(block, dict) or not block.get("is_error"):
+            continue
+        c = block.get("content")
+        if isinstance(c, list):  # some versions wrap it as [{"type":"text","text":…}]
+            c = "".join(b.get("text", "") for b in c if isinstance(b, dict))
+        if not isinstance(c, str):
+            continue
+        yield c.replace("<tool_use_error>", "").replace("</tool_use_error>", "").strip()
+
+
+def _scan_transcript(path, wanted, budget):
+    """Names from `wanted` that `path` records as unavailable. Byte-prefiltered so all
+    but a handful of lines are rejected without a JSON parse.
+
+    Honest scope note, same convention as _newlines_to_separators above: the prefilter
+    is a pure performance optimisation and a mutation sweep confirms it SURVIVES
+    deletion — semantics are identical either way, only the cost changes (json.loads on
+    every line of a multi-MB transcript vs a substring test). Kept for the cost.
+    """
+    found = set()
+    with open(path, "rb") as fh:
+        for raw in fh:
+            budget[0] -= len(raw)
+            if budget[0] < 0:
+                break
+            if UNAVAILABLE_MARKER not in raw:
+                continue
+            try:
+                rec = json.loads(raw)
+            except Exception:
+                continue
+            if not isinstance(rec, dict):
+                continue
+            for text in _error_texts(rec):
+                m = _UNAVAILABLE_RE.match(text)
+                if m and m.group(1) in wanted:
+                    found.add(m.group(1))
+                    if found >= wanted:
+                        return found
+    return found
+
+
+def _transcript_paths(data):
+    """Transcripts that can witness THIS agent's tool errors, most specific first.
+
+    `transcript_path` is derived from the SESSION id, which a subagent shares with its
+    parent — so a subagent's own tool errors are NOT in it. They live in the per-agent
+    transcript, whose layout is (verified on disk, and in the claude-code 2.1.220
+    bundle's `K0()`):
+        <project>/<session>.jsonl                        <- transcript_path
+        <project>/<session>/subagents/[<nested>/]agent-<agent_id>.jsonl
+    """
+    tp = data.get("transcript_path")
+    if not isinstance(tp, str) or not tp.endswith(".jsonl"):
+        return []
+    paths = []
+    agent = data.get("agent_id")
+    if isinstance(agent, str) and re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", agent):
+        base = os.path.join(tp[: -len(".jsonl")], "subagents")
+        direct = os.path.join(base, "agent-%s.jsonl" % agent)
+        if os.path.isfile(direct):
+            paths.append(direct)
+        else:  # nested agent-spawned-agent case
+            paths.extend(sorted(glob.glob(os.path.join(base, "**", "agent-%s.jsonl" % agent),
+                                          recursive=True))[:2])
+    if os.path.isfile(tp):
+        paths.append(tp)
+    return paths
+
+
+def _unavailable_native_tools(data, wanted):
+    """Which of `wanted` this session has PROVEN unavailable.
+
+    Fail-open, in exactly two places — both individually reachable, so neither is an
+    unkillable belt-and-braces guard: a malformed payload that breaks path resolution,
+    and a transcript that cannot be read. Either yields no signal, i.e. the nudge is
+    delivered exactly as it was before this hook learned about availability.
+    """
+    found = set()
+    budget = [MAX_SCAN_BYTES]
+    try:
+        paths = _transcript_paths(data)
+    except Exception:
+        return found
+    for p in paths:
+        try:
+            found |= _scan_transcript(p, wanted - found, budget)
+        except Exception:
+            continue
+        if found >= wanted or budget[0] < 0:
+            break
+    return found
+
+
+def _state_path(data):
+    """Per-session state file, scoped per AGENT too.
+
+    A subagent shares its parent's session_id but not necessarily its tool set, so a
+    subagent that proves Grep missing must not silence the parent's still-actionable
+    nudge. A payload with no agent_id keys exactly as before.
+    """
+    session = data.get("session_id") or ""
+    if not isinstance(session, str) or not session:
+        return None
+    agent = data.get("agent_id")
+    key = session + ("@" + agent if isinstance(agent, str) and agent else "")
+    return os.path.join(CACHE_DIR, re.sub(r"[^A-Za-z0-9_.-]", "_", key))
+
+
+def _read_state(path):
+    """Tokens recorded for this session: a KIND already nudged, or `no:<Tool>` for a
+    native tool proven unavailable. Fail-open on IO error."""
+    if not path:
+        return set()
+    try:
+        with open(path) as fh:
+            return set(fh.read().split())
+    except Exception:
+        return set()
+
+
+def _append_state(path, tokens):
+    if not path or not tokens:
+        return
     try:
         os.makedirs(CACHE_DIR, exist_ok=True)
-        f = os.path.join(CACHE_DIR, re.sub(r"[^A-Za-z0-9_.-]", "_", session))
-        seen = set()
-        if os.path.exists(f):
-            with open(f) as fh:
-                seen = set(fh.read().split())
-        if kind in seen:
-            return True
-        with open(f, "a") as fh:
-            fh.write(kind + "\n")
-        return False
+        with open(path, "a") as fh:
+            for t in tokens:
+                fh.write(t + "\n")
     except Exception:
-        return False
+        pass
 
 
 def main():
@@ -306,15 +478,36 @@ def main():
     except Exception:
         sys.exit(0)
     try:
-        if data.get("tool_name") != "Bash":
+        if not isinstance(data, dict) or data.get("tool_name") != "Bash":
             sys.exit(0)
         cmd = (data.get("tool_input") or {}).get("command", "")
         if not cmd:
             sys.exit(0)
-        session = data.get("session_id") or ""
-        fresh = [k for k in analyze(cmd) if not _already_nudged(session, k)]
+        kinds = analyze(cmd)
+        if not kinds:
+            sys.exit(0)
+
+        state_path = _state_path(data)
+        state = _read_state(state_path)
+        fresh = [k for k in kinds if k not in state]
         if not fresh:
             sys.exit(0)
+
+        # Don't recommend a tool this session has proven it doesn't have. The scan is
+        # reached at most once per kind: whichever way it goes, the outcome is recorded
+        # below and every later call short-circuits on the state file.
+        blocked = {t for t in NATIVE_TOOL.values() if "no:" + t in state}
+        unknown = {NATIVE_TOOL[k] for k in fresh} - blocked
+        if unknown:
+            newly = _unavailable_native_tools(data, unknown)
+            if newly:
+                blocked |= newly
+                _append_state(state_path, ["no:" + t for t in sorted(newly)])
+        fresh = [k for k in fresh if NATIVE_TOOL[k] not in blocked]
+        if not fresh:
+            sys.exit(0)
+
+        _append_state(state_path, fresh)
         lines = "\n".join(f"  • {HINTS[k][0]} → {HINTS[k][1]}" for k in fresh)
         nudge = (
             "search-tool: that Bash call was a tree search. The native tools do the same "

@@ -16,7 +16,7 @@ reassuring answer here is a ZERO (no false positives):
 
 Run: python3 scripts/claude-hooks/tests/test_search_tool_nudge.py
 """
-import os, sys, json, subprocess, importlib.util
+import os, sys, glob, json, shutil, subprocess, tempfile, importlib.util
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 HOOK = os.path.join(HERE, "..", "search-tool-nudge.py")
@@ -201,7 +201,240 @@ check("io malformed rc", p.returncode, 0)
 if os.path.exists(cache):
     os.remove(cache)
 
-MIN_CHECKS = 55  # floor: a suite that silently shrinks is a vacuous green
+# --------------------------------------------------------------------------- #
+# AVAILABILITY SUPPRESSION — never recommend a tool this session does not have.
+#
+# The hook infers availability from the transcript, because nothing it receives
+# enumerates the session's tools and the unavailability wording is server-side (not in
+# the claude-code bundle). Each scenario below gets its OWN session id so one scenario's
+# cache file cannot decide another's outcome.
+#
+# The pairing that makes these readable: every "suppressed" assertion is preceded by the
+# SAME payload shape against a transcript with no error record, asserted to FIRE. A
+# passing "no nudge" is otherwise indistinguishable from a harness wired to nothing.
+# --------------------------------------------------------------------------- #
+TMP = tempfile.mkdtemp(prefix="search-tool-nudge-tests-")
+SESSIONS = []
+
+
+def cache_path(sid, agent=None):
+    key = sid + ("@" + agent if agent else "")
+    return os.path.join(HOME, ".cache", "claude-search-tool-nudge",
+                        "".join(c if c.isalnum() or c in "_.-" else "_" for c in key))
+
+
+def session(name):
+    """A fresh session id whose cache file is cleared now and removed at exit."""
+    sid = "test-search-nudge-%s-DO-NOT-COLLIDE" % name
+    SESSIONS.append(sid)
+    for p in (cache_path(sid), cache_path(sid, "agentX"), cache_path(sid, "agentY")):
+        if os.path.exists(p):
+            os.remove(p)
+    return sid
+
+
+def unavailable_record(tool):
+    """The record the harness really writes — shape copied from a live transcript
+    (claude-code 2.1.220), including the <tool_use_error> wrapper and is_error."""
+    return {
+        "type": "user",
+        "isSidechain": False,
+        "message": {"role": "user", "content": [{
+            "type": "tool_result",
+            "content": ("<tool_use_error>Error: No such tool available: %s. %s is not "
+                        "available in this session — search file contents with "
+                        "`grep` via the Bash tool instead.</tool_use_error>" % (tool, tool)),
+            "is_error": True,
+            "tool_use_id": "toolu_01FAKE",
+        }]},
+        "toolUseResult": "Error: No such tool available: %s." % tool,
+    }
+
+
+BENIGN_RECORDS = [
+    {"type": "user", "message": {"role": "user", "content": [
+        {"type": "tool_result", "content": "ok", "is_error": False, "tool_use_id": "t1"}]}},
+    {"type": "assistant", "message": {"role": "assistant", "content": [
+        {"type": "text", "text": "looking at the code"}]}},
+]
+
+
+def transcript(name, records):
+    """Write a transcript at the REAL on-disk layout, so the subagent-path derivation
+    (<project>/<session>.jsonl + <project>/<session>/subagents/agent-<id>.jsonl) is
+    exercised rather than assumed."""
+    d = os.path.join(TMP, name)
+    os.makedirs(d, exist_ok=True)
+    p = os.path.join(d, "sess.jsonl")
+    with open(p, "w") as fh:
+        for r in records:
+            fh.write(json.dumps(r) + "\n")
+    return p
+
+
+def agent_transcript(main_path, agent_id, records):
+    d = os.path.join(main_path[: -len(".jsonl")], "subagents")
+    os.makedirs(d, exist_ok=True)
+    p = os.path.join(d, "agent-%s.jsonl" % agent_id)
+    with open(p, "w") as fh:
+        for r in records:
+            fh.write(json.dumps(r) + "\n")
+    return p
+
+
+def fire(sid, cmd, transcript_path=None, agent_id=None):
+    """Run the real hook and report whether it emitted a nudge."""
+    payload = {"tool_name": "Bash", "session_id": sid, "tool_input": {"command": cmd}}
+    if transcript_path is not None:
+        payload["transcript_path"] = transcript_path
+    if agent_id is not None:
+        payload["agent_id"] = agent_id
+    rc, out = run(payload)
+    check("suppression rc 0 (%s)" % sid.split("-")[3], rc, 0)
+    return bool(out)
+
+
+# --- POSITIVE CONTROL: a transcript with no error record must still nudge. -----
+sid = session("clean")
+clean = transcript("clean", BENIGN_RECORDS)
+check("clean transcript still nudges (positive control)", fire(sid, "grep -r TODO src/", clean), True)
+
+# --- NEGATIVE: Grep proven unavailable -> the CONTENT nudge is suppressed. -----
+sid = session("grep-gone")
+gone = transcript("grep-gone", BENIGN_RECORDS + [unavailable_record("Grep")])
+check("Grep unavailable suppresses the content nudge", fire(sid, "grep -r TODO src/", gone), False)
+# Per-TOOL, not session-wide: only Grep was proven missing, so the Glob nudge still
+# fires. Pins the scope of the claim — a session-wide flag would silence this too.
+check("Glob nudge still fires when only Grep was proven gone",
+      fire(sid, "find . -name '*.py'", gone), True)
+
+# --- Both proven unavailable -> both suppressed. -------------------------------
+sid = session("both-gone")
+both = transcript("both-gone", [unavailable_record("Grep"), unavailable_record("Glob")])
+check("both tools gone: content suppressed", fire(sid, "grep -r TODO src/", both), False)
+check("both tools gone: files suppressed", fire(sid, "find . -name '*.py'", both), False)
+
+# --- The verdict is CACHED: a later call with no transcript at all stays quiet. -
+# Proves the short-circuit works (and that the scan is not re-run on every call).
+check("suppression persists once recorded", fire(sid, "grep -R other .", None), False)
+# ...and it is cached as a TOOL VERDICT, not by spending the nudge budget. Asserted on
+# the state file because the behavioural check above cannot tell the two apart: a hook
+# that simply emitted both nudges and marked both kinds used would also fall silent
+# here. Pre-change this file reads ["content", "files"].
+recorded = sorted(open(cache_path(sid)).read().split()) if os.path.exists(cache_path(sid)) else []
+check("suppression records a tool verdict, not a spent nudge budget",
+      recorded, ["no:Glob", "no:Grep"])
+
+# --- STRUCTURAL, not spelled: the same TEXT in a non-error position must not ----
+# suppress. This is the real transcript hazard — the error wording appears verbatim
+# inside an Agent tool_use prompt and inside a subagent's report, both is_error false.
+sid = session("prose")
+_echoed = unavailable_record("Grep")["message"]["content"][0]["content"]
+prose = transcript("prose", [
+    {"type": "assistant", "message": {"role": "assistant", "content": [{
+        "type": "tool_use", "id": "toolu_x", "name": "Agent",
+        "input": {"prompt": "the harness said: Error: No such tool available: Grep. "
+                            "Grep is not available in this session — fix the hook"}}]}},
+    {"type": "user", "message": {"role": "user", "content": [{
+        "type": "tool_result", "is_error": False, "tool_use_id": "toolu_x",
+        "content": "report: Error: No such tool available: Grep. (quoted, not an error)"}]}},
+    # 🔴 The one that actually pins `is_error` as the discriminator: a tool_result whose
+    # text is BYTE-IDENTICAL to the real error record's, differing ONLY in the flag.
+    # This is what a Bash call that prints a transcript record produces — i.e. exactly
+    # what debugging this hook does. Without it, dropping the is_error check survives:
+    # the other two fixtures are rejected by the leading anchor instead, so they exercise
+    # the regex anchor, not the structural guard.
+    {"type": "user", "message": {"role": "user", "content": [{
+        "type": "tool_result", "is_error": False, "tool_use_id": "toolu_y",
+        "content": _echoed}]},
+     "toolUseResult": _echoed},
+])
+check("quoted error prose does NOT suppress", fire(sid, "grep -r TODO src/", prose), True)
+
+# --- A DIFFERENT tool being unavailable must not suppress Grep/Glob. -----------
+sid = session("other-tool")
+other = transcript("other-tool", [unavailable_record("WebFetch")])
+check("an unrelated missing tool does not suppress", fire(sid, "grep -r TODO src/", other), True)
+
+# --- SUBAGENT SCOPING ---------------------------------------------------------
+# transcript_path is derived from the SESSION id, which a subagent shares with its
+# parent — so a subagent's own errors are only in its per-agent transcript.
+sid = session("subagent")
+parent = transcript("subagent", BENIGN_RECORDS)
+agent_transcript(parent, "agentX", [unavailable_record("Grep")])
+check("subagent's own transcript is consulted",
+      fire(sid, "grep -r TODO src/", parent, agent_id="agentX"), False)
+# ...and it must NOT leak: the parent session (same session_id, no agent_id) reads only
+# the parent transcript, which is clean, so its nudge is still delivered.
+check("subagent suppression does not leak to the parent session",
+      fire(sid, "grep -r TODO src/", parent), True)
+# ...nor to a SIBLING agent whose own transcript is clean.
+agent_transcript(parent, "agentY", BENIGN_RECORDS)
+check("subagent suppression does not leak to a sibling agent",
+      fire(sid, "grep -r TODO src/", parent, agent_id="agentY"), True)
+
+# --- FAIL OPEN: every detection failure leaves behaviour exactly as before. ----
+sid = session("missing-file")
+check("nonexistent transcript path -> nudge unchanged",
+      fire(sid, "grep -r TODO src/", os.path.join(TMP, "nope", "sess.jsonl")), True)
+
+sid = session("garbage")
+garbage = os.path.join(TMP, "garbage.jsonl")
+with open(garbage, "w") as fh:
+    fh.write("not json\n{\"truncated\": \n\x00\x01binary\n")
+check("unparseable transcript -> nudge unchanged", fire(sid, "grep -r TODO src/", garbage), True)
+
+sid = session("is-a-dir")
+check("transcript path is a directory -> nudge unchanged", fire(sid, "grep -r TODO src/", TMP), True)
+
+sid = session("unreadable")
+unreadable = os.path.join(TMP, "unreadable.jsonl")
+with open(unreadable, "w") as fh:
+    fh.write(json.dumps(unavailable_record("Grep")) + "\n")
+os.chmod(unreadable, 0o000)
+# Skipped under a uid that ignores the mode (root in some CI images) — asserting there
+# would pin the sandbox's uid, not the hook.
+if not os.access(unreadable, os.R_OK):
+    check("unreadable transcript -> nudge unchanged", fire(sid, "grep -r TODO src/", unreadable), True)
+os.chmod(unreadable, 0o644)
+
+sid = session("nul-byte")
+# Reaches the OTHER fail-open branch — the one around path RESOLUTION rather than the
+# one around reading. Getting there needs both an agent_id and a NUL: os.path.isfile()
+# swallows ValueError and returns False (checked — a NUL path alone proves nothing),
+# but the nested-subagent glob does not: `scandir: embedded null character in path`.
+# Without that handler the exception escapes into main()'s catch-all, which exits 0
+# silently — so a detection ERROR would have become a silent SUPPRESSION.
+check("embedded NUL in transcript_path -> nudge unchanged",
+      fire(sid, "grep -r TODO src/", "/tmp/a\x00b.jsonl", agent_id="agentZ"), True)
+
+sid = session("no-transcript-key")
+check("payload without transcript_path -> nudge unchanged (legacy shape)",
+      fire(sid, "grep -r TODO src/", None), True)
+
+for i, bad in enumerate((123, [], {"a": 1}, "", "/not/a/jsonl", "/etc")):
+    # A wrong-typed / non-jsonl transcript_path must never crash and never suppress.
+    sid = session("badtype%d" % i)
+    check("bad transcript_path %r -> nudge unchanged" % (bad,),
+          fire(sid, "grep -r TODO src/", bad), True)
+
+# Same for a wrong-typed agent_id (a `..` traversal must not become a scan target).
+for i, bad_agent in enumerate((123, [], "../../etc", "a/b", "")):
+    sid = session("badagent%d" % i)
+    payload = {"tool_name": "Bash", "session_id": sid, "agent_id": bad_agent,
+               "transcript_path": clean, "tool_input": {"command": "grep -r TODO src/"}}
+    rc, out = run(payload)
+    check("bad agent_id %r -> nudge unchanged" % (bad_agent,), (rc, bool(out)), (0, True))
+
+for p in glob.glob(os.path.join(HOME, ".cache", "claude-search-tool-nudge",
+                                "test-search-nudge-*")):
+    try:
+        os.remove(p)
+    except OSError:
+        pass
+shutil.rmtree(TMP, ignore_errors=True)
+
+MIN_CHECKS = 100  # floor: a suite that silently shrinks is a vacuous green
 if fails:
     print("FAIL:")
     for f in fails:
@@ -212,4 +445,5 @@ if len(ran) < MIN_CHECKS:
     sys.exit(1)
 print(f"all search-tool-nudge tests passed ({len(ran)} checks: "
       f"{len(MUST_FIRE)} must-fire, {len(BENIGN)} benign, "
-      f"1 harness negative control, 1 benign-counter positive control)")
+      f"1 harness negative control, 1 benign-counter positive control, "
+      f"{len(SESSIONS)} availability-suppression scenarios)")
