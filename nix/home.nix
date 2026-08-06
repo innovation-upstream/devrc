@@ -2155,7 +2155,14 @@ in
       # kubectl must not wedge the timer — the cgroup is killed and the next
       # OnCalendar re-arms. Measured end-to-end against the live store
       # 2026-08-06: ~10s over nebula (the slower path).
-      TimeoutStartSec = 180;
+      #
+      # 180 -> 240 when the checker gained retries: a transient HTTP 500 (the
+      # observed `Code: 241 MEMORY_LIMIT_EXCEEDED`) is now retried with backoff
+      # and the TTL union falls back to one query per table. ch_regrowth.py
+      # bounds that itself with COLLECT_BUDGET_SECONDS = 120 — no new attempt
+      # STARTS past 120s — so the worst case is 120 + one in-flight 30s query +
+      # the `du` exec. 240 leaves margin over that without hiding a real hang.
+      TimeoutStartSec = 240;
       Environment = [
         "PATH=${lib.makeBinPath [ pkgs.python312 pkgs.kubectl pkgs.sops pkgs.bash pkgs.coreutils ]}"
         "KUBECONFIG=%h/workspace/homelab-talos/homelab-kubeconfig"

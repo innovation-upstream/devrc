@@ -57,9 +57,35 @@ WHAT IS ASSERTED
      -> ALARM. A config revert is the likeliest cause and IS the 112 GB
      mechanism.
   4. any single table > 250 MiB -> ALARM.
-  5. TTL EFFECTIVENESS: min(event_time) younger than TTL + 1 day, per table
-     (metric_log / asynchronous_metric_log: 8d; query_log / part_log: 15d).
+  5. TTL EFFECTIVENESS: min(event_time) younger than TTL + 3 days, per table
+     (metric_log / asynchronous_metric_log: 10d; query_log / part_log: 17d).
      Rows older than the TTL surviving means the TTL is not binding.
+
+🔴 THE `du` EXIT CODE IS NOT A VERDICT ON THE MEASUREMENT. A live store creates
+and removes `tmp_merge_*` directories constantly, so busybox `du` exits 1 when
+one vanishes mid-walk — WHILE STILL PRINTING THE CORRECT TOTAL on stdout.
+Observed on 3 of 20 live runs. `run_du` therefore parses stdout FIRST and only
+consults the exit code when stdout yields no usable total. Treating exit != 0 as
+fatal turned ~15% of runs into a CANNOT TELL that is indistinguishable from a
+real ALARM, with no measurement at all until the next month.
+
+🔴 A TRANSIENT QUERY FAILURE IS NOT AN ANSWER EITHER. The pod's 2.5 GiB ceiling
+is still reached by background merges, and the TTL union returned `HTTP 500 /
+Code: 241 MEMORY_LIMIT_EXCEEDED` on 2 of 20 live runs. Queries are therefore
+retried (QUERY_ATTEMPTS, backed off), and if the union still fails it falls back
+to ONE QUERY PER TABLE.
+
+🔴 THE RETRY IS THE FIX; THE SPLIT IS A CHEAP EXTRA. Measured against
+`system.query_log` 2026-08-06 over 26 real executions: the union peaks at
+8.44 MB and a per-table query at 4.23 MB — a real ~2x cut, but BOTH are
+rounding error against the 2.5 GiB ceiling. The ceiling was reached by
+BACKGROUND MERGES eating the total budget, not by this query's own footprint.
+So do not expect the split to prevent an OOM; it removes this query as a
+contributor and gives the retry a second, smaller shape to try.
+
+Retries NEVER weaken the fail-closed property: the last attempt re-raises the
+original exception, so an exhausted retry produces a non-`ok` state and exit 2
+exactly as a single attempt did.
 
 🔴 A ZERO FROM A BROKEN CLIENT MUST NEVER READ AS A CLEAN STORE
 ---------------------------------------------------------------
@@ -149,14 +175,34 @@ PROBE_SUFFIX = "_log"
 # point of the store; if it is missing, the read is not trustworthy.
 SENTINEL_TABLE = ("activity", "events")
 
-# TTL + 1 day of slack (ClickHouse evaluates TTL during merges, not instantly).
+# TTL + 3 days of slack. ClickHouse evaluates TTL during MERGES, and TTL deletes
+# ARE merges — run by the same 8-slot pool, inside the same 2.5 GiB budget that
+# has already thrown MEMORY_LIMIT_EXCEEDED. A merge backlog of a few hours is
+# normal operation, not a regrowth signal, and +1 day left only ~0.6 days of
+# margin on the very first scheduled run.
+#
+# 🔴 THIS CANNOT MAKE THE CHECK VACUOUS, because the check runs MONTHLY. A TTL
+# that genuinely stops binding grows the oldest row without bound: by the next
+# run it is ~30+ days old, far past either bound. Widening from TTL+1d to TTL+3d
+# only moves which MERGE LAG is tolerated; it does not move which FAILURE is
+# caught. A permanently-red check nobody believes would be the worse outcome.
 TTL_MAX_AGE_DAYS = {
-    "metric_log": 8,                  # 7d TTL
-    "asynchronous_metric_log": 8,     # 7d TTL
-    "query_log": 15,                  # 14d TTL
-    "part_log": 15,                   # 14d TTL
+    "metric_log": 10,                 # 7d TTL
+    "asynchronous_metric_log": 10,    # 7d TTL
+    "query_log": 17,                  # 14d TTL
+    "part_log": 17,                   # 14d TTL
 }
 TTL_DATABASE = "system"
+
+# Transient-failure retry budget for the HTTP queries. 3 attempts, backed off,
+# is enough to ride out a merge-driven memory spike (the observed failure) while
+# keeping the worst case well inside the systemd start timeout.
+QUERY_ATTEMPTS = 3
+QUERY_BACKOFF_SECONDS = (2.0, 5.0)
+# Wall-clock ceiling on the whole collection, so retries + per-table fallbacks
+# can never approach the unit's TimeoutStartSec (240s). No new attempt STARTS
+# past this; one already in flight can still run out its own `timeout`.
+COLLECT_BUDGET_SECONDS = 120.0
 
 STORE_PATH = "/var/lib/clickhouse/store"
 DEFAULT_NAMESPACE = "activity"
@@ -330,55 +376,32 @@ def evaluate(reading, now=None) -> dict:
         "ttl_tables_measured": 0,   # filled in below
     }
 
+    # 🔴 EVERY CHECK RUNS BEFORE ANY GATE RETURNS. The gates below decide
+    # whether the reading is EVALUABLE; they must not decide what was FOUND.
+    # Running them first destroyed the diagnosis on exactly the reading that
+    # needed it most: rename every `*_log` to `*_log_0` — the orphan regrowth
+    # vector check 2 exists to catch — and nothing ends in `_log` any more, so
+    # the suffix gate returned "0 tables end in `_log`" and the orphans were
+    # never even looked for. The orphan population destroyed its own positive
+    # control. So: accumulate findings first, then gate, and carry the findings
+    # THROUGH the gate. The verdict stays unknown and the exit code stays 2 —
+    # what changes is that the reason is still in the report.
+
     # ---- 1. store size -----------------------------------------------------
-    if du_bytes is None:
-        return _unknown(STATE_EXEC_FAILED,
-                        "no du reading — store size was never measured",
-                        controls=controls)
-    if du_bytes >= DU_ALARM_BYTES:
+    if du_bytes is not None and du_bytes >= DU_ALARM_BYTES:
         findings.append({
             "check": "store-size", "level": "alarm",
             "detail": "du(%s) = %s >= alarm threshold %s"
                       % (STORE_PATH, human_bytes(du_bytes),
                          human_bytes(DU_ALARM_BYTES)),
             "observed": du_bytes, "threshold": DU_ALARM_BYTES})
-    elif du_bytes >= DU_WARN_BYTES:
+    elif du_bytes is not None and du_bytes >= DU_WARN_BYTES:
         findings.append({
             "check": "store-size", "level": "warn",
             "detail": "du(%s) = %s >= warn threshold %s"
                       % (STORE_PATH, human_bytes(du_bytes),
                          human_bytes(DU_WARN_BYTES)),
             "observed": du_bytes, "threshold": DU_WARN_BYTES})
-
-    # ---- listing-derived checks need a listing we can trust ----------------
-    if tables_seen == 0:
-        return _unknown(STATE_NO_DATA,
-                        "table listing came back EMPTY — cannot distinguish a "
-                        "clean store from a failed read",
-                        controls=controls, du_bytes=du_bytes)
-    if not sentinel_present:
-        return _unknown(STATE_NO_DATA,
-                        "sentinel table %s.%s absent from a %d-row listing — "
-                        "this is not the activity store, or the read is wrong"
-                        % (SENTINEL_TABLE[0], SENTINEL_TABLE[1], tables_seen),
-                        controls=controls, du_bytes=du_bytes)
-    if not probe_suffix:
-        return _unknown(STATE_NO_DATA,
-                        "positive control FAILED: 0 tables end in '%s' in a "
-                        "%d-row listing, so the suffix match used for the '%s' "
-                        "orphan test is not observing anything — its zero is "
-                        "meaningless"
-                        % (PROBE_SUFFIX, tables_seen, ORPHAN_SUFFIX),
-                        controls=controls, du_bytes=du_bytes)
-    if not probe_size:
-        return _unknown(STATE_NO_DATA,
-                        "positive control FAILED: 0 tables exceed %s in a "
-                        "%d-row listing, so the byte comparison used for the "
-                        "%s test is not observing anything — its zero is "
-                        "meaningless"
-                        % (human_bytes(TABLE_PROBE_BYTES), tables_seen,
-                           human_bytes(TABLE_ALARM_BYTES)),
-                        controls=controls, du_bytes=du_bytes)
 
     # ---- 2. `%_0` orphan tables -------------------------------------------
     orphans = [qualify(t) for t in tables
@@ -461,6 +484,45 @@ def evaluate(reading, now=None) -> dict:
                              "rows": row["rows"]}})
 
     controls["ttl_tables_measured"] = measured
+
+    # ---- GATES: is this reading EVALUABLE at all? --------------------------
+    # Each carries `findings` so a diagnosis already made is not thrown away.
+    # The state stays a CANNOT-TELL state and `exit_code` still returns 2 —
+    # the goal is preserving what was seen, not upgrading the verdict.
+    gate_extra = {"controls": controls, "du_bytes": du_bytes,
+                  "findings": findings}
+    if du_bytes is None:
+        return _unknown(STATE_EXEC_FAILED,
+                        "no du reading — store size was never measured",
+                        **gate_extra)
+    if tables_seen == 0:
+        return _unknown(STATE_NO_DATA,
+                        "table listing came back EMPTY — cannot distinguish a "
+                        "clean store from a failed read",
+                        **gate_extra)
+    if not sentinel_present:
+        return _unknown(STATE_NO_DATA,
+                        "sentinel table %s.%s absent from a %d-row listing — "
+                        "this is not the activity store, or the read is wrong"
+                        % (SENTINEL_TABLE[0], SENTINEL_TABLE[1], tables_seen),
+                        **gate_extra)
+    if not probe_suffix:
+        return _unknown(STATE_NO_DATA,
+                        "positive control FAILED: 0 tables end in '%s' in a "
+                        "%d-row listing, so the suffix match used for the '%s' "
+                        "orphan test is not observing anything — its zero is "
+                        "meaningless"
+                        % (PROBE_SUFFIX, tables_seen, ORPHAN_SUFFIX),
+                        **gate_extra)
+    if not probe_size:
+        return _unknown(STATE_NO_DATA,
+                        "positive control FAILED: 0 tables exceed %s in a "
+                        "%d-row listing, so the byte comparison used for the "
+                        "%s test is not observing anything — its zero is "
+                        "meaningless"
+                        % (human_bytes(TABLE_PROBE_BYTES), tables_seen,
+                           human_bytes(TABLE_ALARM_BYTES)),
+                        **gate_extra)
     if measured == 0:
         return _unknown(STATE_NO_DATA,
                         "positive control FAILED: 0 of %d TTL target table(s) "
@@ -468,9 +530,8 @@ def evaluate(reading, now=None) -> dict:
                         "proved nothing — a clean verdict here would be a "
                         "harness reporting on itself"
                         % len(present_targets),
-                        controls=controls, du_bytes=du_bytes,
                         tables_total_bytes=sum(t["bytes"] for t in tables),
-                        ttl=ttl_report)
+                        ttl=ttl_report, **gate_extra)
 
     alarms = sum(1 for f in findings if f["level"] == "alarm")
     warns = sum(1 for f in findings if f["level"] == "warn")
@@ -520,16 +581,30 @@ def _summarize(state, findings, du_bytes, controls) -> str:
     return "; ".join(f["detail"] for f in findings)
 
 
-def _unknown(state, detail, *, controls=None, du_bytes=None, **extra) -> dict:
+def _unknown(state, detail, *, controls=None, du_bytes=None, findings=None,
+             **extra) -> dict:
+    """Build a CANNOT-TELL verdict, CARRYING any findings already made.
+
+    🔴 An unevaluable reading is not an empty one. A store that is 5 GiB, or has
+    `trace_log` back at 100 GiB, and ALSO trips a positive control is both
+    things at once — dropping the findings turned a confirmed ALARM into a bare
+    "no-data" and lost the only sentence that said what was wrong.
+
+    The STATE is unchanged, and `exit_code` maps every state in UNKNOWN_STATES
+    to 2 regardless of `alarms`, so this reports more without verdict-shopping.
+    """
+    findings = list(findings or [])
     v = {
         "state": state,
-        "alarms": 0,
-        "warns": 0,
-        "findings": [],
+        "alarms": sum(1 for f in findings if f["level"] == "alarm"),
+        "warns": sum(1 for f in findings if f["level"] == "warn"),
+        "findings": findings,
         "controls": controls or {},
         "measurements": {"du_bytes": du_bytes,
                          "du_human": human_bytes(du_bytes)},
-        "detail": detail,
+        "detail": (detail if not findings
+                   else "%s | findings preserved: %s"
+                        % (detail, "; ".join(f["detail"] for f in findings))),
     }
     v["measurements"].update(extra)
     return v
@@ -555,12 +630,65 @@ def http_query(url: str, user: str, password: str, query: str,
 
 
 def run_du(argv, timeout: float = DEFAULT_TIMEOUT) -> str:
+    """Run `du -sk <store>` and return its stdout.
+
+    🔴 STDOUT IS PARSED FIRST; THE EXIT CODE IS ONLY THE TIEBREAK. A live
+    ClickHouse store creates and removes `tmp_merge_*` directories continuously,
+    so `du` routinely races one and exits 1 with
+
+        du: /var/lib/clickhouse/store/.../tmp_merge_202608_...: No such file or
+        directory
+
+    on stderr — WHILE PRINTING THE CORRECT TOTAL on stdout. Verified in-pod:
+    `du -sk <store> /nonexistent` exits 1 and still prints the total. Raising on
+    the exit code discarded a perfectly good measurement on 3 of 20 live runs.
+
+    So: a partial walk that still produced a total is a MEASUREMENT (returned,
+    with the stderr noted on our own stderr for the journal). A run that
+    produced NO usable total is a FAILURE and still raises — which is what makes
+    the caller report exec-failed / exit 2 rather than a small store.
+    """
     p = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
-    if p.returncode != 0:
-        raise RuntimeError("exit %d: %s"
+    try:
+        parse_du_kib(p.stdout)
+        usable = True
+    except Exception:  # noqa: BLE001 — no total on stdout, whatever the code
+        usable = False
+    if not usable:
+        raise RuntimeError("exit %d, no usable total on stdout: %s"
                            % (p.returncode,
                               (p.stderr or p.stdout).strip()[:200]))
+    if p.returncode != 0:
+        sys.stderr.write(
+            "ch-regrowth: du exited %d but printed a usable total; treating the "
+            "partial walk as a measurement (%s)\n"
+            % (p.returncode, (p.stderr or "").strip()[:200]))
     return p.stdout
+
+
+def _is_transient(exc) -> bool:
+    """Is this failure worth retrying?
+
+    A 5xx (the observed `Code: 241 MEMORY_LIMIT_EXCEEDED` arrives as HTTP 500),
+    a 429, or a connection-level error is a server that is momentarily unable,
+    not a server that has answered. Those are retried.
+
+    NOT retried: a 4xx (a wrong password does not become right on attempt 3) and
+    a TIMEOUT (it already spent the full per-query budget once). Both stay
+    exactly as loud as they were.
+    """
+    if isinstance(exc, urllib.error.HTTPError):
+        return exc.code >= 500 or exc.code == 429
+    # A read that already burned the full per-query timeout is NOT retried: the
+    # retry would burn it again, and the unit has a hard TimeoutStartSec. Every
+    # failure worth retrying here fails FAST, which is what keeps the worst case
+    # bounded.
+    if isinstance(exc, (TimeoutError, subprocess.TimeoutExpired)):
+        return False
+    if isinstance(exc, urllib.error.URLError) and isinstance(
+            getattr(exc, "reason", None), TimeoutError):
+        return False
+    return isinstance(exc, (urllib.error.URLError, ConnectionError, OSError))
 
 
 def resolve_config(env=None) -> dict:
@@ -578,16 +706,20 @@ def resolve_config(env=None) -> dict:
 
 
 def collect(env=None, timeout: float = DEFAULT_TIMEOUT,
-            query=None, du=None) -> dict:
+            query=None, du=None, sleep=None, clock=None) -> dict:
     """Take a live reading. Returns {"reading": {...}} or {"error": (state, detail)}.
 
     `query(url, user, password, sql, timeout) -> str` and `du(argv, timeout)
-    -> str` are injectable so EVERY failure branch is testable offline. Never
-    raises.
+    -> str` are injectable so EVERY failure branch is testable offline; `sleep`
+    and `clock` are injectable so the retry schedule is testable without
+    sleeping. Never raises.
     """
     cfg = resolve_config(env)
     query = query or http_query
     du = du or run_du
+    sleep = sleep or time.sleep
+    clock = clock or time.monotonic
+    deadline = clock() + COLLECT_BUDGET_SECONDS
 
     if not cfg["url"] or not cfg["password"]:
         missing = []
@@ -599,8 +731,34 @@ def collect(env=None, timeout: float = DEFAULT_TIMEOUT,
                           "missing %s — the check cannot run, and MUST NOT "
                           "report a clean store" % "/".join(missing))}
 
-    def _q(sql):
-        return query(cfg["url"], cfg["user"], cfg["password"], sql, timeout)
+    def _q(sql, attempts=QUERY_ATTEMPTS):
+        """Query with backoff on TRANSIENT failures only.
+
+        🔴 THE RETRY CANNOT SOFTEN THE VERDICT. The last attempt re-raises the
+        original exception unchanged, so every caller's `except` — and therefore
+        every unreachable/query-failed state and exit 2 — behaves exactly as it
+        did with one attempt. There is no path on which exhausting the retries
+        produces a reading, let alone an `ok`.
+        """
+        last = None
+        for attempt in range(1, attempts + 1):
+            try:
+                return query(cfg["url"], cfg["user"], cfg["password"], sql,
+                             timeout)
+            except Exception as e:  # noqa: BLE001
+                last = e
+                if attempt >= attempts or not _is_transient(e):
+                    raise
+                back = QUERY_BACKOFF_SECONDS[
+                    min(attempt - 1, len(QUERY_BACKOFF_SECONDS) - 1)]
+                if clock() + back >= deadline:
+                    raise
+                sys.stderr.write(
+                    "ch-regrowth: transient query failure (attempt %d/%d), "
+                    "retrying in %.0fs: %s\n"
+                    % (attempt, attempts, back, str(e)[:200]))
+                sleep(back)
+        raise last  # pragma: no cover — the loop above always raises or returns
 
     # --- server clock (also the liveness probe) ---
     try:
@@ -635,8 +793,36 @@ def collect(env=None, timeout: float = DEFAULT_TIMEOUT,
         try:
             ttl_text = _q(ttl_query(present))
         except Exception as e:  # noqa: BLE001
-            return {"error": (STATE_UNREACHABLE,
-                              "ttl query failed: %s" % str(e)[:200])}
+            # 🔴 LAST RESORT, NOT A SOFTENING. The union is the query that
+            # returned `Code: 241` twice in 20 live runs. MEASURED over 26 real
+            # executions: union peaks at 8.44 MB, per-table at 4.23 MB — a real
+            # ~2x cut, but both are trivial against the 2.5 GiB ceiling that
+            # background merges exhaust, so this is a second shape to try, not
+            # a cure. The retry above is the actual fix. If every per-table read
+            # ALSO fails we return unreachable exactly as before; and if only
+            # some succeed, the `ttl_tables_measured` positive control still
+            # governs — zero measured targets is no-data / exit 2, never `ok`.
+            if not (len(present) > 1 and _is_transient(e)):
+                return {"error": (STATE_UNREACHABLE,
+                                  "ttl query failed: %s" % str(e)[:200])}
+            sys.stderr.write("ch-regrowth: TTL union exhausted its retries "
+                             "(%s); falling back to one query per table\n"
+                             % str(e)[:200])
+            parts = []
+            for name in present:
+                if clock() >= deadline:
+                    break
+                try:
+                    parts.append(_q(ttl_query([name]), attempts=1))
+                except Exception:  # noqa: BLE001 — that target goes UNMEASURED
+                    continue       # (reason "not-queried"), never assumed fine
+            if not parts:
+                return {"error": (STATE_UNREACHABLE,
+                                  "ttl query failed (union and all %d "
+                                  "per-table fallbacks): %s"
+                                  % (len(present), str(e)[:200]))}
+            ttl_text = "".join(p if p.endswith("\n") else p + "\n"
+                               for p in parts)
         try:
             ttl_rows = parse_ttl(ttl_text)
         except Exception as e:  # noqa: BLE001
@@ -662,10 +848,11 @@ def collect(env=None, timeout: float = DEFAULT_TIMEOUT,
 
 
 def check(env=None, now=None, timeout: float = DEFAULT_TIMEOUT,
-          query=None, du=None) -> dict:
+          query=None, du=None, sleep=None, clock=None) -> dict:
     """Full live check. Returns a verdict; NEVER raises and NEVER returns `ok`
     on any error path."""
-    got = collect(env=env, timeout=timeout, query=query, du=du)
+    got = collect(env=env, timeout=timeout, query=query, du=du, sleep=sleep,
+                  clock=clock)
     if "error" in got:
         state, detail = got["error"]
         return _unknown(state, detail)

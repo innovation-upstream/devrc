@@ -34,6 +34,7 @@ import os
 import shutil
 import subprocess
 import sys
+import urllib.error
 from pathlib import Path
 
 import pytest
@@ -288,10 +289,16 @@ def test_negative_control_stale_oldest_row_alarms(table, bound):
 
 @pytest.mark.parametrize("table,bound", sorted(R.TTL_MAX_AGE_DAYS.items()))
 def test_ttl_bound_is_per_table_and_measured_at_both_sides(table, bound):
-    """A single midpoint would not catch a table wired to the wrong bound: at
-    7.9 days `query_log` (15d) must be fine while `metric_log` (8d) must be
-    fine too, but at 8.1 days they must DIVERGE."""
-    for age_days, expect_stale in ((bound - 0.1, False), (bound + 0.1, True)):
+    """Measured on BOTH sides of each table's own bound, and EXACTLY ON it.
+
+    A single midpoint would not catch a table wired to the wrong bound; and
+    without the exact-boundary point, `age_days > bound` and `age_days >= bound`
+    are indistinguishable — a surviving mutant until this case was added.
+    Exactly-at-bound must NOT be stale: the bound is already TTL + 3 days of
+    merge slack, so the first second past it is the first real evidence."""
+    for age_days, expect_stale in ((bound - 0.1, False),
+                                   (bound, False),
+                                   (bound + 0.1, True)):
         ttl = baseline_ttl()
         for row in ttl:
             if row["table"] == table:
@@ -302,11 +309,13 @@ def test_ttl_bound_is_per_table_and_measured_at_both_sides(table, bound):
         assert stale is expect_stale, (table, age_days)
 
 
-def test_the_8d_and_15d_bounds_actually_differ():
-    """Pins that the two TTL tiers are not collapsed to one number: at 10 days
-    old, the 7d-TTL tables are STALE and the 14d-TTL tables are not."""
-    ten_days = NOW - 10 * 86400
-    ttl = [dict(r, min_event_ts=ten_days) for r in baseline_ttl()]
+def test_the_two_ttl_tiers_actually_differ():
+    """Pins that the two TTL tiers are not collapsed to one number: at 12 days
+    old, the 7d-TTL tables (bound 10d) are STALE and the 14d-TTL tables (bound
+    17d) are not."""
+    assert sorted(set(R.TTL_MAX_AGE_DAYS.values())) == [10, 17]
+    twelve_days = NOW - 12 * 86400
+    ttl = [dict(r, min_event_ts=twelve_days) for r in baseline_ttl()]
     v = R.evaluate(baseline_reading(ttl=ttl), now=NOW)
     stale = {r["table"] for r in v["measurements"]["ttl"] if r["stale"]}
     assert stale == {"metric_log", "asynchronous_metric_log"}
@@ -368,6 +377,38 @@ def test_a_listing_that_cannot_match_the_suffix_is_no_data_not_ok():
     assert R.exit_code(v) == R.EXIT_UNKNOWN
 
 
+def test_the_probe_size_control_needs_a_table_STRICTLY_over_the_threshold():
+    """Measured ON the threshold and one byte above it. Without the exact
+    boundary point `> TABLE_PROBE_BYTES` and `>=` are indistinguishable, and a
+    control that counts a table sitting exactly ON its probe is weaker than it
+    claims — this gate is what licenses the 250 MiB zero."""
+    on_boundary = [tbl("activity", "events", rows=1, size=R.TABLE_PROBE_BYTES),
+                   tbl("system", "metric_log", rows=1,
+                       size=R.TABLE_PROBE_BYTES)]
+    v = R.evaluate(baseline_reading(tables=on_boundary), now=NOW)
+    assert v["controls"]["probe_size_matches"] == 0
+    assert v["state"] == R.STATE_NO_DATA
+    assert "0 tables exceed" in v["detail"], v["detail"]
+
+    above = [dict(t, bytes=R.TABLE_PROBE_BYTES + 1) for t in on_boundary]
+    v2 = R.evaluate(baseline_reading(tables=above), now=NOW)
+    assert v2["controls"]["probe_size_matches"] == 2
+
+
+def test_an_alarm_outranks_a_warn_found_in_the_same_reading():
+    """🔴 A 1.5 GiB store is a WARN and a resurrected `trace_log` is an ALARM.
+    Reporting the WARN would exit 3 instead of 1 and understate the worst thing
+    found — the two levels had never been seeded together."""
+    tables = baseline_tables() + [tbl("system", "trace_log", rows=1,
+                                      size=5 * R.MIB)]
+    v = R.evaluate(baseline_reading(du_bytes=int(1.5 * R.GIB), tables=tables),
+                   now=NOW)
+    assert v["warns"] == 1, v["findings"]
+    assert v["alarms"] == 1, v["findings"]
+    assert v["state"] == R.STATE_ALARM
+    assert R.exit_code(v) == R.EXIT_ALARM
+
+
 def test_a_listing_where_nothing_clears_1mib_is_no_data_not_ok():
     tables = [tbl("activity", "events", rows=1, size=1024),
               tbl("system", "metric_log", rows=1, size=512)]
@@ -388,9 +429,21 @@ def test_empty_listing_is_no_data_not_a_clean_store():
 
 def test_missing_sentinel_table_is_no_data():
     """Reading a real-but-WRONG ClickHouse would produce a plausible listing
-    with no `activity.events`. That is not a clean activity store."""
+    with no `activity.events`. That is not a clean activity store.
+
+    🔴 THE FIXTURE MUST NOT COLLAPSE. The predicate is `database == 'activity'
+    AND name == 'events'`; with no other `activity.*` table and no other table
+    called `events` in the listing, `AND` and `OR` compute the SAME answer and
+    the fixture cannot tell them apart — an `and`->`or` mutant survived on
+    exactly that. So both non-default siblings are seeded here: matching only
+    the database, and matching only the name, must each still be a miss.
+    """
     tables = [t for t in baseline_tables()
               if not (t["database"] == "activity" and t["name"] == "events")]
+    tables += [tbl("activity", "other", rows=7, size=3 * R.MIB),
+               tbl("system", "events", rows=9, size=4 * R.MIB)]
+    assert any(t["database"] == "activity" for t in tables)
+    assert any(t["name"] == "events" for t in tables)
     v = R.evaluate(baseline_reading(tables=tables), now=NOW)
     assert v["state"] == R.STATE_NO_DATA
     assert "sentinel" in v["detail"]
@@ -546,6 +599,348 @@ def test_no_error_path_can_produce_a_healthy_state():
         assert v["state"] not in (R.STATE_OK, R.STATE_WARN, R.STATE_ALARM)
         assert R.exit_code(v) == R.EXIT_UNKNOWN != 0
         assert v["alarms"] == 0
+
+
+# --------------------------------------------------------------------------- #
+# 🔴 `du` PARTIAL WALK — the observed 15% false CANNOT-TELL (audit #1a)
+#
+# 3 of 20 live runs exited 2 because busybox `du` returned 1 after racing a
+# `tmp_merge_*` directory that vanished mid-walk — WHILE PRINTING THE CORRECT
+# TOTAL. These are the only tests that drive `run_du` through a REAL subprocess;
+# every other error test injects a fake `du`, which is exactly why the
+# returncode guard had zero coverage.
+# --------------------------------------------------------------------------- #
+PARTIAL_DU_ARGV = [
+    sys.executable, "-c",
+    "import sys\n"
+    "print('541224\\t/var/lib/clickhouse/store')\n"
+    "sys.stderr.write('du: /var/lib/clickhouse/store/ede/tmp_merge_202608_"
+    "17463_29293_234: No such file or directory\\n')\n"
+    "sys.exit(1)\n",
+]
+
+
+def test_run_du_partial_walk_is_a_measurement_not_a_failure():
+    """🔴 THE REGRESSION. Non-zero exit + a usable total on stdout is a
+    MEASUREMENT. Before the fix this raised and the whole month's run became a
+    CANNOT-TELL indistinguishable from a real ALARM."""
+    out = R.run_du(PARTIAL_DU_ARGV)
+    assert R.parse_du_kib(out) == 541224 * 1024
+
+
+def test_run_du_partial_walk_against_the_real_du_binary(tmp_path):
+    """The same case driven through the actual `du` binary rather than a
+    simulation — `du -sk <dir> <missing>` is the shape confirmed in-pod."""
+    du = shutil.which("du")
+    assert du, "coreutils du must be on PATH for this test to mean anything"
+    store = tmp_path / "store"
+    store.mkdir()
+    (store / "part.bin").write_bytes(b"x" * 300_000)
+    argv = [du, "-sk", str(store), str(tmp_path / "tmp_merge_gone")]
+
+    # Positive control for the FIXTURE: prove this argv really does exit
+    # non-zero and really does print a total, or the test below is vacuous.
+    p = subprocess.run(argv, capture_output=True, text=True)
+    assert p.returncode != 0, "fixture is vacuous: du exited 0"
+    assert p.stdout.strip(), "fixture is vacuous: du printed no total"
+
+    assert R.parse_du_kib(R.run_du(argv)) >= 292 * 1024
+
+
+def test_run_du_still_raises_when_there_is_no_usable_total():
+    """🔴 FAIL-CLOSED HALF. Parsing stdout first must not turn a genuinely
+    failed exec into a small store: no total on stdout still raises, which is
+    what makes the caller report exec-failed / exit 2."""
+    argv = [sys.executable, "-c",
+            "import sys; sys.stderr.write('kubectl: pod not found\\n');"
+            " sys.exit(1)"]
+    with pytest.raises(RuntimeError) as e:
+        R.run_du(argv)
+    assert "exit 1" in str(e.value)
+    assert "pod not found" in str(e.value)
+
+
+def test_run_du_raises_on_a_zero_exit_that_printed_nothing_usable():
+    """The other half of the same guard: a clean exit is not a measurement
+    either if nothing parseable came out."""
+    argv = [sys.executable, "-c", "print('du: Permission denied')"]
+    with pytest.raises(RuntimeError):
+        R.run_du(argv)
+
+
+def test_partial_du_walk_reaches_a_measured_verdict_end_to_end():
+    """The finding as the operator experiences it: the whole check, with a `du`
+    that exits 1 mid-walk, must produce a real verdict — not exit 2."""
+    v = R.check(env=GOOD_ENV, now=NOW,
+                query=fake_query_factory(good_responses()),
+                du=lambda argv, timeout: R.run_du(PARTIAL_DU_ARGV, timeout))
+    assert v["state"] == R.STATE_OK, v["detail"]
+    assert v["measurements"]["du_bytes"] == 541224 * 1024
+    assert R.exit_code(v) == R.EXIT_OK
+
+
+# --------------------------------------------------------------------------- #
+# 🔴 TRANSIENT QUERY FAILURE — the other half of the 15% (audit #1b)
+#
+# The TTL union returned `HTTP 500 / Code: 241 MEMORY_LIMIT_EXCEEDED` on 2 of 20
+# live runs: the pod's 2.5 GiB ceiling reached by background merges. Retry —
+# without ever letting an exhausted retry reach `ok`.
+# --------------------------------------------------------------------------- #
+def memory_limit_500():
+    return urllib.error.HTTPError(
+        "http://ch.invalid:8123/", 500, "Internal Server Error", {}, None)
+
+
+def flaky_query(responses, fail_on, failures, exc_factory=memory_limit_500):
+    """Fail the first `failures` calls whose SQL contains `fail_on`, then
+    answer normally. Records every call so attempt COUNTS are assertable."""
+    calls = []
+
+    def q(url, user, password, sql, timeout):
+        calls.append(sql)
+        if fail_on in sql:
+            if sum(1 for c in calls if fail_on in c) <= failures:
+                raise exc_factory()
+        for needle, reply in responses.items():
+            if needle in sql:
+                return reply
+        raise AssertionError("unexpected query: %s" % sql[:80])
+
+    q.calls = calls
+    return q
+
+
+def test_transient_500_is_retried_and_the_check_recovers():
+    """🔴 THE REGRESSION. Two 500s then success must yield a real verdict, and
+    must be shown to have actually retried (2 extra calls, 2 real backoffs) —
+    otherwise this passes on a fake that never failed."""
+    slept = []
+    q = flaky_query(good_responses(), "UNION ALL", 2)
+    v = R.check(env=GOOD_ENV, now=NOW, query=q, du=ok_du, sleep=slept.append)
+    assert v["state"] == R.STATE_OK, v["detail"]
+    assert sum(1 for c in q.calls if "UNION ALL" in c) == 3
+    assert slept == list(R.QUERY_BACKOFF_SECONDS)
+    assert v["controls"]["ttl_tables_measured"] == 4
+
+
+@pytest.mark.parametrize("fail_on", ["now()", "system.tables"])
+def test_transient_500_is_retried_on_every_query_not_just_the_union(fail_on):
+    slept = []
+    q = flaky_query(good_responses(), fail_on, 1)
+    v = R.check(env=GOOD_ENV, now=NOW, query=q, du=ok_du, sleep=slept.append)
+    assert v["state"] == R.STATE_OK, v["detail"]
+    assert len(slept) == 1
+
+
+def test_exhausted_retries_still_fail_closed():
+    """🔴 THE FAIL-CLOSED HALF, and the reason a retry is safe here at all. When
+    every attempt 500s the verdict must be UNREACHABLE and exit 2 — never `ok`,
+    never a fall-through."""
+    slept = []
+    q = flaky_query(good_responses(), "now()", 99)
+    v = R.check(env=GOOD_ENV, now=NOW, query=q, du=ok_du, sleep=slept.append)
+    assert v["state"] == R.STATE_UNREACHABLE
+    assert v["state"] not in (R.STATE_OK, R.STATE_WARN)
+    assert R.exit_code(v) == R.EXIT_UNKNOWN
+    assert sum(1 for c in q.calls if "now()" in c) == R.QUERY_ATTEMPTS
+    assert len(slept) == R.QUERY_ATTEMPTS - 1
+
+
+def test_a_4xx_is_not_retried_because_it_is_a_durable_answer():
+    """A rotated password does not become right on attempt 3. Retrying a 401
+    would only spend the unit's start timeout — and must not mute it either."""
+    slept = []
+    err = urllib.error.HTTPError("http://ch.invalid:8123/", 401,
+                                 "Unauthorized", {}, None)
+    q = flaky_query(good_responses(), "now()", 99, exc_factory=lambda: err)
+    v = R.check(env=GOOD_ENV, now=NOW, query=q, du=ok_du, sleep=slept.append)
+    assert v["state"] == R.STATE_UNREACHABLE
+    assert R.exit_code(v) == R.EXIT_UNKNOWN
+    assert sum(1 for c in q.calls if "now()" in c) == 1
+    assert slept == []
+
+
+def test_a_timeout_is_not_retried_because_it_already_spent_its_budget():
+    slept = []
+    q = flaky_query(good_responses(), "now()", 99,
+                    exc_factory=lambda: TimeoutError("timed out"))
+    v = R.check(env=GOOD_ENV, now=NOW, query=q, du=ok_du, sleep=slept.append)
+    assert R.exit_code(v) == R.EXIT_UNKNOWN
+    assert sum(1 for c in q.calls if "now()" in c) == 1
+    assert slept == []
+
+
+def per_table_ttl_query(union_exc=memory_limit_500, ok_tables=None):
+    """A server on which the TTL UNION always 500s (the memory ceiling) but the
+    per-table queries in `ok_tables` succeed."""
+    rows = {r["table"]: r for r in baseline_ttl()}
+    ok_tables = rows.keys() if ok_tables is None else ok_tables
+    calls = []
+
+    def q(url, user, password, sql, timeout):
+        calls.append(sql)
+        if "now()" in sql:
+            return "%d\n" % NOW
+        if "FROM system.tables" in sql:
+            return listing_tsv(baseline_tables())
+        if "UNION ALL" in sql:
+            raise union_exc()
+        for name in rows:
+            if sql.startswith("SELECT '%s'" % name):
+                if name not in ok_tables:
+                    raise union_exc()
+                return ttl_tsv([rows[name]])
+        raise AssertionError("unexpected query: %s" % sql[:80])
+
+    q.calls = calls
+    return q
+
+
+def test_ttl_union_falls_back_to_one_query_per_table():
+    """The union aggregates all four targets at once and is what hit the 2.5 GiB
+    ceiling. Splitting it is the last resort before CANNOT TELL."""
+    q = per_table_ttl_query()
+    v = R.check(env=GOOD_ENV, now=NOW, query=q, du=ok_du, sleep=lambda s: None)
+    assert v["state"] == R.STATE_OK, v["detail"]
+    assert v["controls"]["ttl_tables_measured"] == 4
+    assert sum(1 for c in q.calls if "UNION ALL" in c) == R.QUERY_ATTEMPTS
+    assert sum(1 for c in q.calls
+               if "UNION ALL" not in c and " AS t," in c) == 4
+
+
+def test_a_partial_per_table_fallback_measures_what_it_can():
+    """Two targets answer, two do not. The two that answered are real
+    measurements; the two that did not are `not-queried`, never assumed fine."""
+    q = per_table_ttl_query(ok_tables={"metric_log", "query_log"})
+    v = R.check(env=GOOD_ENV, now=NOW, query=q, du=ok_du, sleep=lambda s: None)
+    assert v["controls"]["ttl_tables_measured"] == 2
+    unmeasured = {r["table"] for r in v["measurements"]["ttl"]
+                  if r["reason"] == "not-queried"}
+    assert unmeasured == {"asynchronous_metric_log", "part_log"}
+
+
+def test_a_fallback_that_measures_nothing_is_cannot_tell_not_ok():
+    """🔴 The fallback cannot create a clean verdict out of nothing — and must
+    say WHICH thing failed, so `unreachable` is pinned rather than merely
+    'some non-ok state'."""
+    q = per_table_ttl_query(ok_tables=set())
+    v = R.check(env=GOOD_ENV, now=NOW, query=q, du=ok_du, sleep=lambda s: None)
+    assert v["state"] == R.STATE_UNREACHABLE
+    assert v["state"] not in (R.STATE_OK, R.STATE_WARN)
+    assert R.exit_code(v) == R.EXIT_UNKNOWN
+    assert "per-table fallbacks" in v["detail"], v["detail"]
+
+
+def test_the_retry_schedule_is_pinned_to_literal_values():
+    """🔴 Asserting `slept == list(QUERY_BACKOFF_SECONDS)` elsewhere reads the
+    constant back and would hold for a schedule of zeros. Pin the numbers."""
+    assert R.QUERY_ATTEMPTS == 3
+    assert R.QUERY_BACKOFF_SECONDS == (2.0, 5.0)
+    assert len(R.QUERY_BACKOFF_SECONDS) == R.QUERY_ATTEMPTS - 1
+    assert all(s > 0 for s in R.QUERY_BACKOFF_SECONDS)
+    # The whole retry budget must stay well inside the unit's TimeoutStartSec.
+    assert sum(R.QUERY_BACKOFF_SECONDS) * 3 < R.COLLECT_BUDGET_SECONDS
+
+
+def test_no_retry_starts_once_the_collection_budget_is_spent():
+    """The retries are bounded by wall clock, not just by attempt count — a
+    unit killed at TimeoutStartSec mid-retry reports nothing at all."""
+    slept = []
+    # tick 1 sets the deadline; every later read is already past it.
+    ticks = iter([0.0] + [R.COLLECT_BUDGET_SECONDS + 1.0] * 40)
+    q = flaky_query(good_responses(), "now()", 99)
+    v = R.check(env=GOOD_ENV, now=NOW, query=q, du=ok_du, sleep=slept.append,
+                clock=lambda: next(ticks))
+    assert R.exit_code(v) == R.EXIT_UNKNOWN
+    assert v["state"] == R.STATE_UNREACHABLE
+    assert slept == [], "a retry started past the budget"
+    assert sum(1 for c in q.calls if "now()" in c) == 1
+
+
+def test_a_non_transient_ttl_failure_does_not_reach_the_fallback():
+    """An unparseable/programming error is a durable answer, not a memory
+    spike; splitting the query would only repeat it four times."""
+    q = flaky_query(good_responses(), "UNION ALL", 99,
+                    exc_factory=lambda: RuntimeError("syntax error"))
+    v = R.check(env=GOOD_ENV, now=NOW, query=q, du=ok_du, sleep=lambda s: None)
+    assert v["state"] == R.STATE_UNREACHABLE
+    assert sum(1 for c in q.calls if " AS t," in c and "UNION ALL" not in c) == 0
+
+
+# --------------------------------------------------------------------------- #
+# 🔴 A CONFIRMED ALARM MUST SURVIVE AN UNEVALUABLE READING (audit #2)
+#
+# The gates decide whether a reading is EVALUABLE. They must not decide what was
+# FOUND. Previously every one of them returned a fresh verdict with
+# `findings: []`, so a 5 GiB store or a resurrected 100 GiB `trace_log` vanished
+# from the report the moment any positive control also tripped.
+# --------------------------------------------------------------------------- #
+def test_the_orphan_population_no_longer_destroys_its_own_diagnosis():
+    """🔴 THE SHARPEST CASE. Applying a TTL to an existing `*_log` renames it to
+    `*_log_0`. Do that to ALL of them and NOTHING ends in `_log` any more — so
+    the suffix positive control trips, on precisely the regrowth vector the
+    orphan check exists to catch. The verdict is still CANNOT TELL (exit 2), but
+    the 20 orphans must be named."""
+    tables = [tbl(t["database"],
+                  t["name"] + "_0" if t["name"].endswith("_log") else t["name"],
+                  t["engine"], t["rows"], t["bytes"])
+              for t in baseline_tables()]
+    assert not any(t["name"].endswith("_log") for t in tables)
+    orphans = [t for t in tables if t["name"].endswith("_0")]
+    assert len(orphans) == 14, len(orphans)
+
+    v = R.evaluate(baseline_reading(tables=tables), now=NOW)
+    assert v["state"] == R.STATE_NO_DATA          # verdict unchanged
+    assert R.exit_code(v) == R.EXIT_UNKNOWN       # exit code unchanged
+    assert checks_named(v, "orphan-tables"), v    # DIAGNOSIS preserved
+    assert v["alarms"] == 1
+    assert "metric_log_0" in v["detail"]
+    assert "suffix match" in v["detail"]          # and the gate's own reason
+    assert "metric_log_0" in R.render_text(v)
+
+
+def test_a_store_size_alarm_survives_an_empty_listing():
+    """`du` says 5 GiB and the listing came back empty. Both facts matter; the
+    5 GiB used to disappear."""
+    v = R.evaluate(baseline_reading(du_bytes=5 * R.GIB, tables=[]), now=NOW)
+    assert v["state"] == R.STATE_NO_DATA
+    assert R.exit_code(v) == R.EXIT_UNKNOWN
+    assert checks_named(v, "store-size")
+    assert v["alarms"] == 1
+    assert "5.0 GiB" in v["detail"]
+    assert "came back EMPTY" in v["detail"]
+
+
+def test_a_resurrected_trace_log_survives_zero_measurable_ttl_targets():
+    """`trace_log` back at 100 GiB — the literal 112 GB mechanism — while every
+    TTL target reads empty. Reporting only `no-data` here was the worst case."""
+    tables = baseline_tables() + [tbl("system", "trace_log",
+                                      rows=3_770_000_000, size=100 * R.GIB)]
+    ttl = [dict(r, rows=0) for r in baseline_ttl()]
+    v = R.evaluate(baseline_reading(tables=tables, ttl=ttl), now=NOW)
+    assert v["state"] == R.STATE_NO_DATA
+    assert R.exit_code(v) == R.EXIT_UNKNOWN
+    assert checks_named(v, "forbidden-tables")
+    assert "system.trace_log" in v["detail"]
+    assert v["alarms"] >= 1
+
+
+def test_a_missing_du_reading_no_longer_hides_the_listing_findings():
+    """The `du` exec failed AND `trace_log` is back. The exec failure is the
+    state; the resurrection is still the news."""
+    tables = baseline_tables() + [tbl("system", "trace_log", rows=1,
+                                      size=90 * R.GIB)]
+    v = R.evaluate(baseline_reading(du_bytes=None, tables=tables), now=NOW)
+    assert v["state"] == R.STATE_EXEC_FAILED
+    assert R.exit_code(v) == R.EXIT_UNKNOWN
+    assert checks_named(v, "forbidden-tables")
+
+
+def test_an_unknown_verdict_with_no_findings_still_reports_zero_alarms():
+    """The counterpart control: carrying findings must not invent them."""
+    v = R._unknown(R.STATE_NO_DATA, "synthetic")
+    assert v["findings"] == [] and v["alarms"] == 0 and v["warns"] == 0
+    assert "findings preserved" not in v["detail"]
 
 
 # --------------------------------------------------------------------------- #
