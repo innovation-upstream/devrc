@@ -253,12 +253,13 @@ def test_disclosure_fixture_numbers_are_pairwise_distinct():
 
 
 def test_text_report_names_the_layer_b_denominator():
-    """REGRESSION. The outcome percentages are over the Layer-B population (1),
-    not the ACTIVITY `sessions:` figure (4). Both numbers must appear next to
-    the percentages, and both are pinned by VALUE."""
+    """REGRESSION. The outcome breakdown is over the Layer-B population (1), not
+    the ACTIVITY `sessions:` figure (4). Both numbers must appear next to the
+    breakdown, and both are pinned by VALUE."""
     pop = _line(I.render(_disclosure_case()), "population:")
-    assert "population: 1 session(s) with a Layer-B insight" in pop
-    assert "in the trailing 30d window" in pop
+    assert "population: 1 of 1 readable Layer-B insight(s)" in pop
+    assert "in the trailing 30d window reported an outcome" in pop
+    assert "covers exactly those 1" in pop
     assert "NOT the 4 Layer-A session(s)" in pop
     assert "in the 7d window above" in pop
 
@@ -281,9 +282,9 @@ def test_html_report_names_the_layer_b_denominator():
     guard added to close it. Both numbers are now pinned BY VALUE, inside one
     contiguous match so the count cannot drift away from its own label."""
     htm = I.render_html(_disclosure_case())
-    assert ("Population: <b>1</b> session(s) with a Layer-B insight in the "
-            "trailing <b>30d</b> window") in htm
-    assert "not</b> the 4 Layer-A session(s) in the 7d window above" in htm
+    assert ("population: 1 of 1 readable Layer-B insight(s) in the trailing 30d "
+            "window reported an outcome") in htm
+    assert "covers exactly those 1, NOT the 4 Layer-A session(s) in the 7d window above" in htm
 
 
 def test_html_subtitle_scopes_its_session_count_to_layer_a():
@@ -292,6 +293,98 @@ def test_html_subtitle_scopes_its_session_count_to_layer_a():
     sub = re.search(r'<p class="sub">(.*?)</p>', I.render_html(_disclosure_case()), re.S).group(1)
     assert "Layer A: trailing 7d" in sub
     assert "4 Layer-A sessions" in sub
+
+
+# --------------------------------------------------------------------------- #
+# The disclosed denominator MUST be the actual divisor (audit round 3)
+# --------------------------------------------------------------------------- #
+def _outcome_divergence_case():
+    """THREE Layer-B rows: two well-formed (distinct outcomes) and ONE whose
+    payload is a TORN JSON fragment.
+
+    `_parse_payload` returns `{}` for that row; `{}.get("unreadable")` is None —
+    falsy — so aggregate_insights counts it READABLE, while `p.get("outcome")`
+    is None so it contributes NO outcome. Disclosed population 3, actual
+    divisor 2 (distinct, so a swap cannot pass), against 5 Layer-A sessions and
+    a 14d/30d window pair — every number pairwise distinct.
+
+    🔴 REACHABILITY, measured 2026-08-05 — do NOT read this fixture as a claim
+    that the sanctioned pipeline emits such a row. It does not: `validate()`
+    hard-fails a readable payload whose `outcome` is falsy, absent or
+    out-of-enum (checked against None/''/0/False/'unknown_value'/absent), and
+    consolidate.py:97-100 quarantines anything validate() rejects. The route
+    that DOES produce `{}` is a payload that fails to parse as a JSON object —
+    a torn/truncated emit line, an empty payload column, or valid JSON that is
+    not an object — which is exactly what write.py's sub-PIPE_BUF line budget
+    exists to prevent. Frequency in the live table is UNMEASURED. So: the
+    RENDERING defect below is real and red-before/green-after, but its
+    precondition is a malformed row, not routine operation."""
+    good = [
+        {"session": "a", "payload": json.dumps({
+            "outcome": "fully_achieved", "session_type": "feature_build",
+            "goal_categories": ["infra"], "claude_helpfulness": 5,
+            "friction_counts": {}, "friction_detail": [],
+            "automation_opportunity": None, "recurring_toil": None,
+            "workflow_gap": None, "unreadable": False})},
+        {"session": "b", "payload": json.dumps({
+            "outcome": "partially_achieved", "session_type": "bugfix",
+            "goal_categories": ["bugfix"], "claude_helpfulness": 3,
+            "friction_counts": {}, "friction_detail": [],
+            "automation_opportunity": None, "recurring_toil": None,
+            "workflow_gap": None, "unreadable": False})},
+        {"session": "c", "payload": '{"outcome": "fully_ach'},   # torn emit line
+    ]
+    return I.aggregate(_mixed_readability(), [], good, 14, None)
+
+
+def test_outcome_sessions_is_the_breakdowns_actual_divisor():
+    """REGRESSION. `outcome_sessions` must be the number the breakdown is
+    divided by, which is NOT `insight_sessions` when a row parses to `{}`."""
+    d = _outcome_divergence_case()
+    assert d["insight_sessions"] == 3          # the torn row counts as readable
+    assert d["unreadable_insights"] == 0       # …and is NOT flagged unreadable
+    assert d["outcome_sessions"] == 2          # …but reports no outcome
+    assert sum(d["outcomes"].values()) == 2    # the literal divisor
+
+
+def test_text_discloses_the_divisor_not_the_readable_count():
+    """REGRESSION. Two outcomes each render as 50% — a divisor of 2 — so the
+    disclosed number must be 2. Before this fix the line disclosed 3."""
+    d = _outcome_divergence_case()
+    text = I.render(d)
+    pop = _line(text, "population:")
+    assert "population: 2 of 3 readable Layer-B insight(s)" in pop
+    assert "covers exactly those 2" in pop
+    # The rendered percentages prove 2 really is the divisor.
+    assert "1   50%" in _line(text, "fully_achieved")
+    assert "1   50%" in _line(text, "partially_achieved")
+
+
+def test_html_discloses_the_divisor_not_the_readable_count():
+    """REGRESSION — the same guard on the OTHER surface. The asymmetric-surface
+    trap has bitten this PR once already, so both renderers are pinned."""
+    htm = I.render_html(_outcome_divergence_case())
+    assert "population: 2 of 3 readable Layer-B insight(s)" in htm
+    assert "covers exactly those 2" in htm
+    assert "population: 3 of 3" not in htm
+
+
+def test_both_renderers_emit_the_denominator_note_verbatim():
+    """SEAM GUARD — pins the RELATIONSHIP, not either surface.
+
+    The note is one function used by both renderers, so the identical string
+    must appear in both outputs. This fails if either surface starts formatting
+    its own copy, which is the mechanism that produced findings H2/H3 and audit
+    finding 3."""
+    d = _outcome_divergence_case()
+    note = I.outcome_population_note(d)
+    assert "population: 2 of 3 readable Layer-B insight(s)" in note   # pin the value
+    emitters = {name for name, out in (("render", I.render(d)),
+                                       ("render_html", I.render_html(d)))
+                if note in out}
+    assert emitters == {"render", "render_html"}, (
+        f"the shared denominator note is missing from {{'render','render_html'}} - "
+        f"{emitters}; a renderer is formatting its own copy again")
 
 
 def test_html_labels_model_surfaced_candidates_as_unmeasured():

@@ -497,6 +497,14 @@ def aggregate_insights(insight_rows: list[dict]) -> dict:
     return {
         "insight_rows": len(insight_rows),
         "insight_sessions": readable,
+        # 🔴 The ACTUAL divisor of the outcome breakdown. It is NOT
+        # `insight_sessions`: the loop above only counts an outcome when
+        # `p.get("outcome")` is truthy, so a row that parses to `{}` (a torn,
+        # empty or non-object payload) is counted READABLE yet contributes no
+        # outcome. Disclosing `insight_sessions` beside a breakdown divided by
+        # this number is the same undisclosed-denominator defect as the span
+        # line. See `outcome_population_note`.
+        "outcome_sessions": sum(outcomes.values()),
         "unreadable_insights": unreadable,
         "outcomes": dict(outcomes.most_common()) if readable else None,
         "session_types": dict(session_types.most_common()),
@@ -663,6 +671,7 @@ def aggregate(summary_rows: list[dict], message_rows: list[dict],
         "insight_days": eff_insight_days,
         "insight_rows": ins["insight_rows"],
         "insight_sessions": ins["insight_sessions"],
+        "outcome_sessions": ins["outcome_sessions"],
         "unreadable_insights": ins["unreadable_insights"],
         "outcomes": ins["outcomes"],
         "session_types": ins["session_types"],
@@ -737,6 +746,28 @@ def _bar(n, peak, width=18):
     if peak <= 0:
         return ""
     return "█" * (max(1, round(n / peak * width)) if n > 0 else 0)
+
+
+def outcome_population_note(data: dict) -> str:
+    """The ONE sentence disclosing the OUTCOMES denominator — shared VERBATIM by
+    `render` and `render_html`.
+
+    🔴 It is a single function, not two format strings, on purpose. This exact
+    predicate has now regenerated the same bug twice on the pair of renderers
+    (the Layer-B window/denominator were disclosed in text but not in HTML; then
+    the HTML count was left unpinned and a wrong-population mutant survived).
+    A duplicated predicate is wrong at N−1 of its N sites — so it gets one site.
+
+    The number named here is `outcome_sessions`, which IS the breakdown's
+    divisor. `insight_sessions` is also named, because the gap between them is
+    the interesting fact: a row that parses to `{}` counts as readable but
+    reports no outcome, so it silently leaves the breakdown."""
+    div = int(num(data.get("outcome_sessions", 0)))
+    readable = int(num(data.get("insight_sessions", 0)))
+    return (f"population: {div} of {readable} readable Layer-B insight(s) in the "
+            f"trailing {data['insight_days']}d window reported an outcome — the "
+            f"outcome breakdown below covers exactly those {div}, NOT the "
+            f"{data['sessions']} Layer-A session(s) in the {data['days']}d window above.")
 
 
 def render_failure_banner(failed: dict) -> list[str]:
@@ -834,15 +865,15 @@ def render(data: dict) -> str:
         out.append("  This report shows ONLY deterministic facts — no fabricated outcomes.")
         return "\n".join(out)
 
-    # 🔴 DENOMINATOR DISCLOSURE. The percentages below are over the Layer-B
+    # 🔴 DENOMINATOR DISCLOSURE. The breakdown below is over the Layer-B
     # population, which is a DIFFERENT set (and a WIDER window) than the
     # `sessions:` figure in ACTIVITY. The built-in report quoted four session
     # populations in one document without ever naming which was which.
-    out.append(f"  population: {data['insight_sessions']} session(s) with a Layer-B insight "
-               f"in the trailing {data['insight_days']}d window — the percentages below "
-               f"are over THAT denominator, NOT the {data['sessions']} Layer-A session(s) "
-               f"in the {data['days']}d window above.")
+    out.append(f"  {outcome_population_note(data)}")
     oc = data["outcomes"] or {}
+    # The disclosed number and the divisor are ONE value — `outcome_sessions`.
+    # `or 1` only guards division by zero, and when it fires `oc` is empty so no
+    # percentage is ever printed against it.
     total_oc = sum(oc.values()) or 1
     peak = max(oc.values(), default=0)
     for name, cnt in oc.items():
@@ -950,12 +981,11 @@ def render_html(data: dict) -> str:
         # 🔴 DENOMINATOR + WINDOW DISCLOSURE — the text renderer has carried this
         # since it was written; the HTML one did not, so a reader saw the page's
         # "trailing {days}d · {sessions} sessions" subtitle sitting directly above
-        # percentages drawn from a different population over a wider window.
+        # a breakdown drawn from a different population over a wider window.
+        # The sentence is `outcome_population_note` VERBATIM — the same string
+        # the text renderer prints, so the two surfaces cannot drift again.
         parts = [
-            f'<p class="mut">Population: <b>{data["insight_sessions"]}</b> session(s) with a '
-            f'Layer-B insight in the trailing <b>{data["insight_days"]}d</b> window. The '
-            f'percentages below are over THAT denominator — <b>not</b> the '
-            f'{data["sessions"]} Layer-A session(s) in the {data["days"]}d window above.</p>',
+            f'<p class="mut">{html.escape(outcome_population_note(data))}</p>',
             _html_bars((data["outcomes"] or {}).items(), n=12),
         ]
         h = data["helpfulness"]
