@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""REPO-WIDE structural guard: no test may write `#!/usr/bin/env …` at runtime.
+"""REPO-WIDE structural guard: no test may reach for `/usr/bin/env` at runtime.
 
 WHY
 ---
@@ -20,12 +20,26 @@ defect — the scan could not see it, because the hazard is a property of the
 repo, not of one suite. Directory-scoped guards regenerate the bug in the next
 directory; `claude/RULES.md` → "One rule, one place".
 
+WHY THREE SHAPES
+----------------
+Until 2026-08-06 the scan saw ONE shape: a shebang sitting directly behind a
+quote, which is what a one-line stub body looks like. `93caa3a` then added
+`scripts/tests/test_rig_control.py` and `scripts/tests/test_monitor_blackout.py`
+— 27 tests that went red in the sandbox and stayed red for two days — and this
+guard was green through all of it, because those files carry the hazard in two
+shapes it could not see: a shebang opening its own line inside a multi-line
+`textwrap.dedent` body, and `/usr/bin/env` as a plain argv element (not a
+shebang at all — it raises FileNotFoundError before any stub is reached).
+`testlib.shebang_scan.line_is_offender` enumerates all three; each has its own
+positive control below.
+
 HOW TO SATISFY IT
 -----------------
 Use `testlib.mockbin.write_exec(path, body)` — it owns the shebang (`/bin/sh`)
-and RAISES if a call site supplies its own. Do not add an ALLOWLIST entry to get
-green; the allowlist is for sites that solve the problem a different, verified
-way, and every entry must say which way.
+and RAISES if a call site supplies its own. To EXEC an interpreter, resolve it
+with `shutil.which(...)` once, to an absolute path. Do not add an ALLOWLIST
+entry to get green; the allowlist is for sites that solve the problem a
+different, verified way, and every entry must say which way.
 """
 from __future__ import annotations
 
@@ -73,6 +87,9 @@ ALLOWLIST = [
      "the shebang before writing (see the entry above)"),
     ("scripts/dl-router/tests/test_backfill.py", "root",
      "not a shebang: a dl-router manifest header sentinel being mutated"),
+    ("scripts/claude-hooks/tests/test_guard_core.py", "/usr/bin/doas",
+     "not an argv the test EXECS: a parametrize list of wrapper-binary strings "
+     "fed to gc.evaluate() as text, so the path is never resolved"),
 ]
 
 
@@ -126,6 +143,34 @@ def test_positive_control_the_scan_can_actually_find_an_offender(tmp_path):
                    encoding="utf-8")
     hits = S.scan_tree(tmp_path, "test_*.py")
     assert len(hits) == 1, f"scan is wired to nothing: {hits}"
+    assert hits[0][1] == 2
+
+
+def test_positive_control_the_scan_finds_a_bare_shebang_line(tmp_path):
+    """🔴 POSITIVE CONTROL for shape 2 — the shape that let 27 tests through.
+
+    A multi-line `textwrap.dedent` stub body puts the shebang at the start of
+    its own line, with no quote in front of it. The original one-shape scan
+    could not see that and reported a clean zero for two days.
+    """
+    bad = tmp_path / "test_bad_multiline.py"
+    bad.write_text("body = '''\n" + S.offending_bare_shebang_line() + "\n'''\n",
+                   encoding="utf-8")
+    hits = S.scan_tree(tmp_path, "test_*.py")
+    assert len(hits) == 1, f"scan cannot see a bare shebang line: {hits}"
+    assert hits[0][1] == 2
+
+
+def test_positive_control_the_scan_finds_an_argv_element(tmp_path):
+    """🔴 POSITIVE CONTROL for shape 3 — not a shebang at all.
+
+    `subprocess.run([<env>, "bash", …])` raises FileNotFoundError in the sandbox
+    before any stub is reached. This is what actually produced the 27 failures.
+    """
+    bad = tmp_path / "test_bad_argv.py"
+    bad.write_text("x = 1\n" + S.offending_argv_line() + "\n", encoding="utf-8")
+    hits = S.scan_tree(tmp_path, "test_*.py")
+    assert len(hits) == 1, f"scan cannot see an argv element: {hits}"
     assert hits[0][1] == 2
 
 

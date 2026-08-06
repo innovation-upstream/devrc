@@ -536,14 +536,23 @@ def test_live_scraper_observes_the_real_config():
     Without this, a regex that silently matched NOTHING would make every guard
     below vacuously true (empty trigger set → nothing to contradict). Pin a
     non-trivial count and two long-standing snippets with known metadata.
+
+    The pinned metadata is READ OFF nix/home.nix, never off the scraper's own
+    output — deriving it from the implementation is exactly what would make this
+    control vacuous. (`:date` used to be the metadata pin; #351 pruned that
+    snippet, so the pin moved to `:sshwn`, added in #134 and untouched since,
+    whose `search_terms` list is longer and therefore a stricter test of the
+    list-splitting regex.)
     """
     base = _live_base()
     trigs = [m["trigger"] for m in base["matches"]]
     assert len(trigs) >= 20, f"scraper found only {len(trigs)} snippets: {trigs}"
     assert len(set(trigs)) == len(trigs), "duplicate trigger in nix/home.nix"
-    assert ":date" in trigs and "dashbaord" in trigs
+    assert ":sshwn" in trigs and "dashbaord" in trigs
     by_trig = {m["trigger"]: m for m in base["matches"]}
-    assert by_trig[":date"]["search_terms"] == ["today", "calendar"]
+    assert by_trig[":sshwn"]["search_terms"] == [
+        "ssh", "workbench", "wb", "nebula", "mesh", "remote"]
+    assert by_trig[":sshwn"]["label"] == "SSH workbench (nebula)"
     assert by_trig[":kickoff"]["label"] == "Kickoff message for next session"
 
 
