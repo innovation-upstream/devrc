@@ -1,0 +1,37 @@
+# Handoff — agent-facing workbench modernization (2026-07-11)
+
+**Thread:** Zach works ENTIRELY via agents now (Claude Code in tmux; ~20+ parallel sessions), so we stopped modernizing the *interactive* layer (shell/editor/CLI — atuin/starship/nvim were explicitly rejected as the wrong layer) and modernized the **agent-facing layer**: the i3 bar, notifications, and a new agent-ops dashboard. All merged to `devrc` `main`, live on the **workbench** (laptop pending). Repo: `~/workspace/devrc` (`$DEVRC`).
+
+## Live finding (2026-07-11) — civitai prod disk-space, REAL
+The civitai-prod alert pill went red because criticals GREW **63→128 this session** (firing ~312→367) — **not noise.** Pulled from civitai's Alertmanager: **125 of 128 criticals are `NodeFilesystemAlmostOutOfSpace`** (node filesystems within ~3-5% of full, cluster-wide and spreading) + 3× `PrometheusRemoteStorageFailures` (monitoring ns, possibly the leading edge). If any mount hits 100% → real outages (evictions, failed writes). civitai's `--red-above` was deliberately **NOT** tuned — its red is correct. Read-only recon (which nodes/mounts closest to 100%, imminent-vs-slow) was offered but **not yet run**; Zach directs remediation on client prod. **This is next-step #1.**
+
+## What shipped (devrc PRs, all merged)
+**i3 bar migration + polish**
+- **#74** — migrated the bar **i3blocks (/etc/nixos) → i3status-rust under home-manager** (`nix/graphical.nix`) + i3 config → home-manager (`nix/i3/config.nix` → `~/.config/i3/config`). ⚠ Cutover crashed once: the fix/rule is **finish with `sudo systemctl restart display-manager`, NOT `i3-msg restart`** (the running i3 had `-c /etc/i3/config` baked in argv; deleting that file + in-place restart = dead session). Staged apply script: `nix/system/apply-i3-to-hm.sh`.
+- **#75** removed dictation (reclaimed 2.3 GB venv). **#76** nerd-font icons + volume block + tuned thresholds. **#77** quieted colors (VPN-off + normal-CPU neutral). **#81** GPU icon → `expansion_card` (gpu icon override via `[icons.overrides]` — must use the icons TABLE form, not the `icons=` shortcut, or all icons drop to text).
+- **#78** GPU block (RTX 5080) + **decoupled poller** `scripts/bar-status-poll` (workbench `systemd --user` timer ~45s → `~/.cache/bar-status/*.json`) feeding hide-at-zero **count blocks**: clawgate/mail/homelab-alerts. **Audited** (#78 audit → hardening: `TimeoutStartSec=90`, `0600` caches). **#79** civitai-prod alerts as a separate block (its own kubeconfig, standing prod port-forward). **#80** `--red-above` thresholds so the standing alert backlogs (homelab ~22, civitai ~312) read **neutral** and only redden when something NEW crosses (30 / 340). **#97** — homelab `--red-above` bumped 30→34 (`nix/graphical.nix`) after the homelab backlog drifted to ~24-27 (all known noise); homelab pill neutral again. civitai's threshold was left as-is on purpose (see Live finding).
+
+**Notifications (#85, audited)** — dunst hardened (`fullscreen=pushback` DND, JetBrainsMono, positioning), i3 binds `$mod+n`/`$mod+Shift+n`/`$mod+grave`, a DND bar block, and **edge-triggered toasts** from `bar-status-poll` (fire once on the rising edge; click-action via detached `systemd-run` dunstify).
+
+**agent-ops "mission-control" dashboard** — `scripts/agent-ops`, opened 3 ways: **`$mod+i`** (i3, floating alacritty), tmux **`prefix+A`** (popup), and the **▦ bar button**. Read-only, fail-safe, deterministic. Sections: Blocked-on-me (bar-status caches), **Active runs** (live Claude-in-tmux via `/proc` scan; each row = the pane's **actual task from its title** + scratch codename + busy marker), Open PRs (`gh pr list` per repo, cached), Momentum/Done (`initiative-scan --json`), Health.
+- #86 initial → #89 scroll (`j/k/g/G`) + scratch codenames + bar button → #90 real PRs + task-titled runs + `$mod+i` → **#91 fix**: the `$mod+i` exec MUST be a single **quoted** string (unquoted/multiline i3 exec → parser-error nagbar at key-press).
+- Removed the old `tmux-initiatives.sh` **Alt+i** HUD (unused) — agent-ops supersedes it.
+
+**Docs/skills (#92 + per-host)** — refreshed `CLAUDE.md` (new "Graphical / agent-facing layer" bullet), `claude/commands/{i3,initiatives,devrc-dx}.md`, and the per-host `standup` skill to match (i3blocks→i3status-rust, /etc/nixos→home-manager, Alt+i→agent-ops).
+
+## Load-bearing facts / gotchas
+- **Edit the bar/i3 in home-manager (`nix/graphical.nix`, `nix/i3/config.nix`), NEVER /etc/nixos** — the old `/etc/nixos/{i3config,i3blocks}.nix` + `i3blocks-scripts` are RETIRED.
+- **Cutover = `systemctl restart display-manager`, not `i3-msg restart`.**
+- **fuzzyclaw is UNTRUSTED** — Zach doesn't use it; `~/.tmux/tasks/*.json` is stale. `tmux-claude-counters.sh` still reads it (grain of salt). Active-runs uses live `/proc` + pane titles instead.
+- The **bar-status poller holds standing read-only port-forwards into TWO prod clusters every ~45s** (homelab-prod + civitai DataPacket client-prod, `civit/datapacket-talos/prod-kubeconfig`, Alertmanager `monitoring/kube-prometheus-stack-alertmanager:9093`) — Zach accepted this; bounded + fail-safe + cgroup-killed.
+- **Alert backlogs — homelab is noise, civitai is NOT.** Homelab (~24-27) is standing noise → `--red-above` bumped to 34 (#97), pill neutral. **civitai criticals grew 63→128 this session (disk, `NodeFilesystemAlmostOutOfSpace`) — real; its red pill is correct, do NOT tune it away** (see Live finding).
+- Memories updated: `i3-bar-i3status-rust-migration`, `agent-ops-dashboard-direction`.
+
+## Next steps (ranked)
+1. **civitai prod disk-space recon + remediation** (real, growing, client-facing — see Live finding). The recon is cheap + read-only: pull `NodeFilesystemAlmostOutOfSpace` from civitai's Alertmanager, rank nodes/mounts by fullness, split imminent-vs-slow. Remediation (freeing/expanding disk) is on client prod → Zach directs; surface findings, don't act autonomously.
+2. **Scoped secrets (sops-nix)** — the *other* agent-native modernization Zach flagged: ~26 plaintext cred refs (kubeconfigs, `~/.claude/clawgate.env`, tokens) and agents run *with* that access. Consolidate to least-privilege injection.
+3. **Laptop (Phase 6)** — still on the old bar; needs its own `/etc/nixos/configuration.nix` inspected, then `apply-i3-to-hm.sh` + rebuild + `systemctl restart display-manager`. It inherits everything except workbench-only blocks (GPU/clawgate/mail/alerts/civitai).
+4. **Screen-share auto-DND** (dunst #3, deferred) — needs Zach's screen-share tool name to wire the pause hook.
+
+## Kickoff message for next session
+> Continuing the agent-facing workbench modernization (devrc). Live finding to pick up first: the **civitai-prod alert pill is red for a REAL reason** — criticals grew 63→128 this session and 125/128 are `NodeFilesystemAlmostOutOfSpace` (node disks cluster-wide within ~3-5% of full and spreading); if a mount hits 100% → outages. Read `claudedocs/handoff-agent-facing-workbench-2026-07-11.md`. Want me to run the (cheap, read-only) recon — rank which civitai nodes/mounts are closest to full and split imminent-vs-slow — so you can direct remediation? Or pick up **scoped secrets (sops-nix)** (~26 plaintext creds agents run with) or the **laptop bar rollout** instead. Reminders: civitai's red pill is correct, don't tune it (homelab was bumped to 34 in #97, that one's noise); edit the bar/i3 in home-manager not /etc/nixos; cutover ends with `systemctl restart display-manager`; fuzzyclaw is untrusted.
