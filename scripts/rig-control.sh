@@ -68,7 +68,7 @@ do_sleep() {
 do_wake() {
   echo "awake" > "$STATE_FILE"
   rgb_on
-  restore_bg
+  restore
   notify "Wake mode activated"
 }
 

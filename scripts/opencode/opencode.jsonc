@@ -285,7 +285,10 @@
       // guard_core.py's "opencode" policy, which parses argv.
       "*git*add -A*": "deny",
       "*git*add --all*": "deny",
-      "*git*add .": "deny",
+      // `*git*add .` removed 2026-08-05: false-positived on `git add <specific-files>`
+      // (glob `*` consumed the path, `.` matched any dot). guard_core.py's
+      // check_git_add_all handles this case via argv parsing (_stages_everything),
+      // and the remaining deny patterns catch the worst cases.
       "*git*stash*": "deny",
       "*git*reset --hard*": "deny",
       "*git*clean -f*": "deny",
