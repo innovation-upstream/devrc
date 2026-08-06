@@ -520,6 +520,19 @@ MUST_ASK = [
     "talosctl upgrade --image x",
     "dd if=/dev/zero of=/dev/sda",
     "sudo something-unlisted",
+    # 🔴 FOUND BY MUTATION TESTING, not by review. Deleting `"*sudo *": "ask"`
+    # left the suite 465-GREEN, because the only sudo row above starts with
+    # `sudo` and is caught redundantly by the ANCHORED `"sudo*"`. The infix rule
+    # is load-bearing for exactly one shape — sudo in NON-LEADING position — and
+    # nothing exercised it. `doas` was worse: it has no anchored counterpart, so
+    # `"*doas *"` was its only gate and had no test case at all.
+    # MEASURED on the restored config: each row below matches `*sudo *`/`*doas *`
+    # and NOTHING else (bar the two catch-alls), so each one kills a distinct
+    # deletion mutant. The `VAR=…` prefix is the house style, which is precisely
+    # why this shape is the one that must not be allow.
+    "FOO=1 sudo something-unlisted",
+    "doas something-unlisted",
+    "FOO=1 doas something-unlisted",
 ]
 
 # Read-only, high-frequency. If these start prompting, the operator is trained
@@ -711,8 +724,29 @@ def test_all_asks_precede_all_denies():
 
     `*talosctl reset*: deny` only wins over `*talosctl*: ask` because it comes
     later. Interleaving them, or sorting the block, silently downgrades denies.
+
+    🔴 THE NON-VACUITY GUARD BELOW IS LOAD-BEARING — it is not defensive padding.
+    MEASURED: at 1fb8c2b a blind `ask`->`allow` sed emptied the ask block (50 ->
+    0 asks) and THIS TEST STILL PASSED, because `last_ask` falls back to -1 and
+    every `first_deny` beats -1. It sat green through the entire 117-failure
+    outage, asserting an ordering over an empty set. `test_every_dangerous_
+    pattern_is_prefix_tolerant` went vacuous the same way and for the same
+    reason: it filters on `v != "allow"`, so a wiped ask block leaves it
+    inspecting only the deny block. One wipe silently defanged two tests, so the
+    floor is asserted HERE, once, rather than restated at each vacuous site.
+
+    The floor is a LITERAL, not derived from the config: 50 ask rules were
+    measured after the restoration. 40 leaves room to prune ten deliberately
+    while still failing loudly on a mass flip.
     """
     items = list(load_config()["permission"]["bash"].items())[1:]
+    asks = [k for k, v in items if v == "ask"]
+    assert len(asks) >= 40, (
+        f"only {len(asks)} `ask` rules in the bash block (50 measured after the "
+        f"1fb8c2b restoration, floor 40). A collapse to near-zero is the "
+        f"signature of a blanket ask->allow rewrite, which ALSO makes this "
+        f"test's ordering assertion and the prefix-tolerance test vacuous."
+    )
     last_ask = max((i for i, (_, v) in enumerate(items) if v == "ask"), default=-1)
     first_deny = min((i for i, (_, v) in enumerate(items) if v == "deny"), default=len(items))
     assert first_deny > last_ask, (

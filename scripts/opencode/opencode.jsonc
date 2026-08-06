@@ -190,8 +190,8 @@
 
     // Ask before burning a long unproductive loop, and before reaching outside
     // the project directory.
-    "doom_loop": "allow",
-    "external_directory": "allow",
+    "doom_loop": "ask",
+    "external_directory": "ask",
 
     "bash": {
       "*": "allow",
@@ -205,77 +205,77 @@
       // rather than prompting. Anything irreversible belongs in guard_core.py.
 
       // --- git ---
-      "*git*push*": "allow",
-      "*git*commit*": "allow",
-      "*git*rebase*": "allow",
-      "*git*checkout*": "allow",
-      "*git*restore*": "allow",
-      "*git*branch -D*": "allow",
-      "*git*worktree remove*": "allow",
-      "*gh*pr merge*": "allow",
+      "*git*push*": "ask",
+      "*git*commit*": "ask",
+      "*git*rebase*": "ask",
+      "*git*checkout*": "ask",
+      "*git*restore*": "ask",
+      "*git*branch -D*": "ask",
+      "*git*worktree remove*": "ask",
+      "*gh*pr merge*": "ask",
 
       // --- kubernetes / gitops ---
-      "*kubectl*delete*": "allow",
-      "*kubectl*apply*": "allow",
-      "*kubectl*patch*": "allow",
-      "*kubectl*scale*": "allow",
-      "*kubectl*drain*": "allow",
-      "*kubectl*edit*": "allow",
-      "*kubectl*replace*": "allow",
-      "*kubectl*exec*": "allow",
-      "*kubectl*cp*": "allow",
-      "*kubectl*rollout undo*": "allow",
+      "*kubectl*delete*": "ask",
+      "*kubectl*apply*": "ask",
+      "*kubectl*patch*": "ask",
+      "*kubectl*scale*": "ask",
+      "*kubectl*drain*": "ask",
+      "*kubectl*edit*": "ask",
+      "*kubectl*replace*": "ask",
+      "*kubectl*exec*": "ask",
+      "*kubectl*cp*": "ask",
+      "*kubectl*rollout undo*": "ask",
       // `get secret -o yaml` prints every value base64-encoded, i.e. plaintext.
-      "*kubectl*secret*": "allow",
-      "*helm*upgrade*": "allow",
-      "*helm*uninstall*": "allow",
-      "*helm*rollback*": "allow",
-      "*flux*suspend*": "allow",
-      "*flux*resume*": "allow",
-      "*flux*delete*": "allow",
+      "*kubectl*secret*": "ask",
+      "*helm*upgrade*": "ask",
+      "*helm*uninstall*": "ask",
+      "*helm*rollback*": "ask",
+      "*flux*suspend*": "ask",
+      "*flux*resume*": "ask",
+      "*flux*delete*": "ask",
 
       // --- talos --- (the RESET verb is enforced by guard_core.py, which is
       // the only layer that catches `talosctl -n <ip> reset`. This broad ask is
       // friction for every other node-level verb.)
-      "*talosctl*": "allow",
+      "*talosctl*": "ask",
 
       // --- secrets to plaintext ---
-      "*sops*-d*": "allow",
-      "*sops*--decrypt*": "allow",
-      "*sops*exec-env*": "allow",
-      "*age*-d*": "allow",
-      "*age*--decrypt*": "allow",
+      "*sops*-d*": "ask",
+      "*sops*--decrypt*": "ask",
+      "*sops*exec-env*": "ask",
+      "*age*-d*": "ask",
+      "*age*--decrypt*": "ask",
 
       // --- whole-system state ---
-      "*nixos-rebuild*": "allow",
-      "*home-manager*switch*": "allow",
-      "*nix-collect-garbage*": "allow",
-      "*nix*profile remove*": "allow",
+      "*nixos-rebuild*": "ask",
+      "*home-manager*switch*": "ask",
+      "*nix-collect-garbage*": "ask",
+      "*nix*profile remove*": "ask",
       // Only the MUTATING systemctl verbs. `systemctl status`/`list-timers` are
       // read-only and high-frequency — gating those is pure prompt fatigue,
       // which trains the operator to click through the ones that matter.
-      "*systemctl*start*": "allow",
-      "*systemctl*stop*": "allow",
-      "*systemctl*restart*": "allow",
-      "*systemctl*enable*": "allow",
-      "*systemctl*disable*": "allow",
-      "*systemctl*daemon-reload*": "allow",
+      "*systemctl*start*": "ask",
+      "*systemctl*stop*": "ask",
+      "*systemctl*restart*": "ask",
+      "*systemctl*enable*": "ask",
+      "*systemctl*disable*": "ask",
+      "*systemctl*daemon-reload*": "ask",
 
       // --- privilege escalation: gate the WRAPPER itself ---
-      "sudo*": "allow",
-      "*sudo *": "allow",
-      "*doas *": "allow",
+      "sudo*": "ask",
+      "*sudo *": "ask",
+      "*doas *": "ask",
 
       // --- filesystem blast radius ---
-      "*chmod -R*": "allow",
-      "*chown -R*": "allow",
-      "*rm*-r*": "allow",
+      "*chmod -R*": "ask",
+      "*chown -R*": "ask",
+      "*rm*-r*": "ask",
       // `dd` stays ANCHORED / operand-scoped on purpose: a leading-`*` `"*dd *"`
       // also matches `git add src/` (…"add "…), and gating every `git add` is
       // exactly the prompt fatigue that trains an operator to click through.
-      "dd *": "allow",
-      "*dd if=*": "allow",
-      "*dd of=*": "allow",
+      "dd *": "ask",
+      "*dd if=*": "ask",
+      "*dd of=*": "ask",
 
       // ================= DENY: naive-spelling backstop ONLY ================ //
       // 🔴 READ THE HEADER. These are NOT airtight and are NOT the control.
