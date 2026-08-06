@@ -34,6 +34,32 @@ It was held back until capability was measured rather than argued from token
 arithmetic; the measurement is
 `~/workspace/devrc/claudedocs/browser-bridge-deepseek-measurement-2026-07-31.md`.
 
+## 🔴 The agent is BLIND — it cannot do any visual/screenshot task
+
+**The TOOL LAYER withholds the pixels — this holds on ANY model.** `summarizeResult`
+in `opencode/tools/browser_tool_impl.mjs` handles `op === "screenshot"` by returning
+only `{ok, screenshot:true, bytes, note}` — the base64 `dataUrl` is *never* placed in
+the model's context ("NEVER dumps a base64 screenshot blob into the model context").
+So the `browser agent` **structurally cannot** judge a screenshot, a layout, a visual
+regression or "does this look right": it can navigate, read text, and run JS — it
+cannot see. This is a code-enforced capability boundary, not a prompt or tuning
+problem; no instruction makes it look at an image.
+
+The currently-configured `deepseek-v4-*` models are *also* text-only
+(`input_modalities: ['text']`, verified 2026-08-02 against the OpenRouter models API),
+so today two independent things enforce blindness. **Swapping in a vision model does
+NOT make the agent sighted** — the tool would still have to be changed to emit the
+image, so this page stays true across a model swap.
+
+**Routing consequence** (this is the mechanism behind SKILL.md's "diagnostic → drive"):
+- **Visual / diagnostic judgment** → a **direct `screenshot` + `Read`** by the caller. Never
+  delegate it, and never accept an agent's verdict about appearance.
+- **The agent** → deterministic **text/JS measurement** with a stated pass/fail, which is
+  what it is actually good at. If you hand it a layout question, give it numbers to compute,
+  not a look to take — and see the `js`-measurement render-assertion rule in
+  `reference/spa-wake.md`, because a blind measurement on a throttled tab is the exact way
+  this returns confident nonsense.
+
 ## What was measured — and the scope it was measured at
 
 **Scope, so the numbers carry it:** host **laptop `192.168.50.155`**, instance
