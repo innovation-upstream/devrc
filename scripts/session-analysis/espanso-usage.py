@@ -127,12 +127,9 @@ def keylog_section(since):
 SNIPPETS = {
     ":date":     ("date", None, [], False),
     ":time":     ("date", None, [], False),
-    ":datetime": ("date", None, [], False),
-    ":iso":      ("date", None, [], False),
     # paths
     ":hlt":   ("path", ["homelab-talos"], [], False),
     ":kuc":   ("path", ["workspace/kubeclaw"], [], False),
-    ":nixos": ("path", ["/etc/nixos/configuration.nix"], [], False),
     ":cc":    ("path", ["civit/civitai "], [], False),
     ":cdp":   ("path", ["civit/datapacket-talos"], ["prod-kubeconfig"], False),
     ":cgf":   ("path", ["civitai-gpu-fleet"], [], False),
@@ -152,14 +149,22 @@ SNIPPETS = {
     #  typing-toil (shortcut existed but long form hand-typed instead):
     #  :ds [1 fire vs 94 typed], :rns [1 vs 20] —
     #  see claudedocs/espanso-typing-toil-2026-07-25.md)
-    ":eos":     ("prompt", ["identify skills that may need updating"], [], False),
+    # (removed 2026-08-05 via /espanso-audit — 0 keylog fires over 20 days:
+    #  :nixos :iso :datetime "reocmmend")
+    # :eos expansion rewritten 2026-08-04 (#325) — match BOTH the pre-rewrite text
+    # ("…identify skills … that may need updating") and the eviction-half rewrite.
+    ":eos":     ("prompt", ["may need updating", "write the handoff first"], [], False),
     ":acq":     ("prompt", ["recommend anything you think would be useful to include"], [], False),
     ":kickoff": ("prompt", ["kickoff message to copy paste to next session"], [], False),
+    # added 2026-08-05 via /espanso-audit — whole-standalone-message shaped, the
+    # only shape that sticks; typing-stream demand 81 / 68 rows respectively.
+    # NOTE :rna is deliberately "actions", NOT the pruned :rns's "steps" (3 rows).
+    ":rna":     ("prompt", ["recommend next actions"], [], False),
+    ":lr":      ("prompt", ["limit restored, resume agent"], [], False),
     # utilities / typo-correction — output not distinguishable
     ":uuid":     ("util", None, [], False),
     ":clip":     ("util", None, [], False),
     "dashbaord": ("typo", None, [], False),
-    "reocmmend": ("typo", None, [], False),
 }
 
 WORD = re.compile(r"[a-z][a-z'\-]+")

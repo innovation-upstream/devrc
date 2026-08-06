@@ -79,16 +79,13 @@ in
     matches = {
       base = {
         matches = [
-          # Date/time with labels for search bar (ALT+SPACE)
+          # Date/time with labels for search bar (CTRL+SPACE)
           { trigger = ":date"; replace = "{{mydate}}"; label = "Today's date"; search_terms = ["today" "calendar"]; vars = [{ name = "mydate"; type = "date"; params = { format = "%Y-%m-%d"; }; }]; }
           { trigger = ":time"; replace = "{{mytime}}"; label = "Current time"; search_terms = ["now" "clock"]; vars = [{ name = "mytime"; type = "date"; params = { format = "%H:%M"; }; }]; }
-          { trigger = ":datetime"; replace = "{{mydt}}"; label = "Date and time"; search_terms = ["timestamp"]; vars = [{ name = "mydt"; type = "date"; params = { format = "%Y-%m-%d %H:%M"; }; }]; }
-          { trigger = ":iso"; replace = "{{myiso}}"; label = "ISO 8601 timestamp"; search_terms = ["utc" "rfc"]; vars = [{ name = "myiso"; type = "date"; params = { format = "%Y-%m-%dT%H:%M:%S%z"; }; }]; }
 
           # Paths - labeled for autocomplete
           { trigger = ":hlt"; replace = "${workspace}/homelab-talos "; label = "homelab-talos path"; search_terms = ["infra"]; }
           { trigger = ":kuc"; replace = "${workspace}/kubeclaw "; label = "kubeclaw path"; search_terms = ["kubeclaw"]; }
-          { trigger = ":nixos"; replace = "/etc/nixos/configuration.nix"; label = "nixos config"; search_terms = ["nixos" "configuration"]; }
 
           # SSH connect
           { trigger = ":sshwn"; replace = "ssh zach@10.42.0.30"; label = "SSH workbench (nebula)"; search_terms = ["ssh" "workbench" "wb" "nebula" "mesh" "remote"]; }
@@ -97,8 +94,9 @@ in
           { trigger = ":sshll"; replace = "ssh zach@192.168.50.155"; label = "SSH laptop (LAN)"; search_terms = ["ssh" "laptop" "framewo" "lan" "local"]; }
 
           # hot singles
+          # (dashbaord is the ONLY snippet with real direct-trigger traffic:
+          #  5 of the 5 non-search fires in 2026-07-25→08-05 were this typo-fix.)
           { trigger = "dashbaord"; replace = "dashboard"; }
-          { trigger = "reocmmend"; replace = "recommend"; }
 
           # Workflows
           # (:whn removed 2026-07-06 — 0 fires over the audit window, superseded by
@@ -117,8 +115,28 @@ in
           # a snippet enforces nothing; the gate is what makes it stick. See
           # /prune-skill + scripts/skill-audit.py.
           { trigger = ":eos"; replace = "reflect on work done and key learnings this session, then write the handoff FIRST — all session narrative, status and what-shipped goes THERE, never into a skill. Then extract only the durable reusable lessons, and name the single skill or doc that should own each. Then dispatch subagent to fold them in under these rules: report each target file's byte size before and after; every edit must be net-neutral or smaller — evict, merge or demote something stale in the SAME edit; never append a dated session block to a SKILL.md; collapse a retraction to a one-line do-not-re-derive tell rather than preserving the superseded belief; if a file is over budget with nowhere to demote to, say so instead of appending. Then give me the kickoff message."; label = "End-of-session ritual: handoff first → durable lessons only → net-neutral skill edits"; search_terms = ["end" "session" "wrap" "handoff" "skills" "review" "update" "docs" "ritual" "prune" "evict" "bloat"]; }
-          { trigger = ":acq"; replace = "dispatch subagent to process feedback\nask me clarifying questions and recommend anything you think would be useful to include before dispatching (include complete test coverage)"; label = "Ask clarifying questions + suggest additions"; search_terms = ["ask" "clarify" "clarifying" "questions" "elicit" "scope" "include"]; }
+          # 2026-08-05 /espanso-audit — DISCOVERABILITY fix, not a content fix.
+          # :acq fired ZERO times in the 20-day window, yet its expansion appears
+          # in 36 genuine user messages (clipboard-pasted from elsewhere) — so
+          # demand is proven and the TEXT is deliberately untouched. The keystroke
+          # stream shows the opener "dispatch to process feedback:" hand-typed 12×,
+          # twice trailing a mistyped ":acc"/":accc". Root cause: 168 of 173 fires
+          # go through the Ctrl+Space SEARCH UI, so `label` + `search_terms` ARE the
+          # interface — and the old search_terms (ask/clarify/questions/elicit/…)
+          # contained none of the words he actually types: feedback, dispatch,
+          # process. Lead the label with "feedback" and add those three terms.
+          { trigger = ":acq"; replace = "dispatch subagent to process feedback\nask me clarifying questions and recommend anything you think would be useful to include before dispatching (include complete test coverage)"; label = "Process feedback: dispatch subagent + ask clarifying questions"; search_terms = ["feedback" "dispatch" "process" "ask" "clarify" "clarifying" "questions" "elicit" "scope" "include"]; }
           { trigger = ":kickoff"; replace = "give me the kickoff message to copy paste to next session"; label = "Kickoff message for next session"; search_terms = ["kickoff" "kick off" "next session" "copy paste" "handoff" "message"]; }
+          # Added 2026-08-05 via /espanso-audit — both are WHOLE-STANDALONE-MESSAGE
+          # shaped, the one shape that has stuck (:eos 72 fires, :kickoff 38); every
+          # mid-sentence FRAGMENT snippet has been pruned (:ds, :rns, :pst, :rnx).
+          # Typing-stream demand: "recommend next actions" 81 rows (25 of them that
+          # phrase standing ALONE as a whole message); "limit restored, resume agent"
+          # 68 rows. NOTE the noun: the pruned :rns said "recommend next STEPS" and
+          # was typed only 3× — the real demand is "actions". He also searched the
+          # bar for "recom" on 2026-07-27 hunting for exactly this, and found nothing.
+          { trigger = ":rna"; replace = "recommend next actions"; label = "Recommend next actions"; search_terms = ["recommend" "recom" "next" "actions" "rank" "leverage"]; }
+          { trigger = ":lr"; replace = "limit restored, resume agent"; label = "Limit restored — resume agent"; search_terms = ["limit" "restored" "resume" "agent" "continue" "quota"]; }
           # Removed 2026-07-25 via /espanso-audit — all keylog-evidence-backed:
           #  ZERO-FIRE set — 0 keylog fires + short-form hand-typing; steering already in
           #   RULES.md / slash-commands: :rnx, :pst ("proceed, dispatch" typed 40+×),
@@ -128,8 +146,19 @@ in
           #   prefixes don't stick for a search-first espanso user):
           #   :ds (1 fire vs 94 hand-typed; duplicates the RULES "dispatch subagent" default),
           #   :rns (1 vs 20; overlaps /resume). See claudedocs/espanso-typing-toil-2026-07-25.md.
+          # Removed 2026-08-05 via /espanso-audit — 0 keylog fires each over the
+          #  20 days 2026-07-25→08-05 (:nixos — this host's config is a flake in
+          #  ~/workspace/devrc, so /etc/nixos/configuration.nix is a dead path;
+          #  :iso and :datetime — :date+:time cover it; "reocmmend" — the typo
+          #  never recurred, unlike "dashbaord" which is still the ONLY snippet
+          #  with direct-trigger traffic). Kept despite showing 0 ATTRIBUTED
+          #  fires: the four :ssh* plus :cgf/:subk — their searches are MULTI-WORD
+          #  ("ssh work", "ssh lap", "civit prod") and the detector's _term_matches
+          #  could not attribute a term containing a space (fixed in the same
+          #  commit), so 19+ of the 46 unattributed rows are theirs. Unattributable
+          #  ≠ dead — do not prune them on the old numbers.
 
-          { trigger = ":cc"; replace = "${workspace}/civit/civitai "; label = "civitai main repo path"; search_terms = ["civitai" "repo" "web"]; }
+          { trigger = ":cc"; replace = "${workspace}/civit/civitai "; label = "civitai main web app repo path"; search_terms = ["civitai" "repo" "web" "app"]; }
           { trigger = ":cdp"; replace = "${workspace}/civit/datapacket-talos "; label = "civitai datapacket-talos path"; search_terms = ["civitai"]; }
           { trigger = ":cgf"; replace = "${workspace}/civit/civitai-gpu-fleet "; label = "civitai gpu-fleet path"; search_terms = ["civitai"]; }
           { trigger = ":cmo"; replace = "${workspace}/civit/civitai-orchestration "; label = "civitai-orchestration path"; search_terms = ["civitai" "orchestration"]; }

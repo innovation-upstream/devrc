@@ -253,14 +253,32 @@ class EspansoDetector:
         return matched[0] if len(matched) == 1 else None
 
     def _term_matches(self, term, trig):
+        """True when EVERY whitespace-separated token of `term` matches `trig`.
+
+        Multi-word queries are how the search UI is actually driven: the
+        /espanso-audit of 2026-08-05 found 46 of 173 keylog rows unattributed,
+        19+ of them multi-word ("ssh work", "ssh lap", "ss wor", "civit prod").
+        The old rule tested the WHOLE term as a substring of a single word, so
+        any term containing a space could never match ANY snippet — which made
+        the four :ssh* snippets and :cgf/:subk read as dead when they are not.
+        A single-token term takes exactly the old path (all() over one token).
+        """
+        tokens = (term or "").split()
+        if not tokens:
+            return False
         meta = self.ts.meta.get(trig) or {}
-        if term in trig.lower():
+        return all(self._token_matches(tok, trig, meta) for tok in tokens)
+
+    @staticmethod
+    def _token_matches(token, trig, meta):
+        """One token vs one snippet, by the original (pre-2026-08-05) rules."""
+        if token in trig.lower():
             return True
         label = (meta.get("label") or "").lower()
         for w in _WORD_RE.findall(label):
-            if term in w:
+            if token in w:
                 return True
         for st in meta.get("search_terms") or []:
-            if isinstance(st, str) and term in st.lower():
+            if isinstance(st, str) and token in st.lower():
                 return True
         return False
