@@ -6,6 +6,7 @@ the script via subprocess with stubbed external commands.
     run:  pytest scripts/tests/test_rig_control.py
 """
 import os
+import shutil
 import subprocess
 import sys
 import textwrap
@@ -16,6 +17,23 @@ import pytest
 SCRIPTS = Path(__file__).resolve().parents[1]
 RIG = SCRIPTS / "rig-control.sh"
 
+sys.path.insert(0, str(SCRIPTS))
+
+from testlib.mockbin import write_exec  # noqa: E402
+
+# 🔴 Resolve the interpreter ONCE, from the ambient environment, to an absolute
+# path. Two traps this avoids:
+#   * `/usr/bin/env` does not exist in the nix build sandbox — the authoritative
+#     gate — so an argv whose first element is that literal path raises
+#     FileNotFoundError there while passing on the dev host (see
+#     scripts/testlib/mockbin.py for the same trap in stub shebangs).
+#   * a bare "bash" argv is looked up in the PATH of the env= passed to
+#     subprocess, and some tests below deliberately set PATH to a stub-only
+#     directory — which would make the interpreter itself unfindable.
+_BASH = shutil.which("bash")
+if _BASH is None:  # pragma: no cover — both tiers ship bash
+    raise RuntimeError("bash not found on PATH; this suite cannot run hermetically")
+
 
 def _run(*args, env=None):
     """Run rig-control.sh as a subprocess with optional env overrides."""
@@ -24,22 +42,23 @@ def _run(*args, env=None):
     if env:
         full_env.update(env)
     return subprocess.run(
-        ["/usr/bin/env", "bash", str(RIG), *args],
+        [_BASH, str(RIG), *args],
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
         timeout=15, env=full_env,
     )
 
 
 def _make_stub(name, tmp_path, exit_code=0, stdout=""):
-    """Create a stub script that records calls and exits."""
-    stub = tmp_path / name
-    stub.write_text(textwrap.dedent(f"""\
-        #!/usr/bin/env bash
+    """Create a stub script that records calls and exits.
+
+    testlib.mockbin owns the shebang (/bin/sh) — a `#!/usr/bin/env bash` stub
+    cannot exec in the nix build sandbox, and patchShebangs cannot reach a file
+    a test writes at runtime.
+    """
+    return write_exec(tmp_path / name, textwrap.dedent(f"""\
         echo "$@" >> "{tmp_path / 'calls.log'}"
         exit {exit_code}
     """))
-    stub.chmod(0o755)
-    return stub
 
 
 # --------------------------------------------------------------------------- #

@@ -344,6 +344,28 @@ EXPECTED_SKIPS=(
   # REPO_COS_LIVE_DRIFT_CHECK=1.
   "scripts/repo-cos/tests|live-store drift check is opt-in"
 )
+# CONDITIONAL, on the SAME predicate the tests use (see the header note above).
+# `scripts/tests/test_skill_audit.py` carries two regression pins against the
+# LIVE datapacket-talos skill corpus — a separate, PRIVATE clone that cannot
+# exist in the nix sandbox and may be absent on a dev host. Both call
+# `pytest.skip("datapacket-talos clone not present")` off exactly this
+# `is_dir()` check, so the pin mirrors it: present → the tests RUN and nothing is
+# pinned; absent → two accounted skips. #332 added them without this entry, and
+# the gate was RED on main from 2026-08-04 to 2026-08-06 on the unpinned-skip
+# guard alone, independently of any failing test.
+#
+# ⚠ This is a WEAK shape and the runner says so a few lines down: a check keyed
+# to an out-of-repo path is structurally unobservable in the tier that gates
+# merges. It is pinned rather than deleted because on a host with the clone it
+# is the highest-value assertion in that file. If it ever needs re-pointing,
+# re-point it at something tracked IN THIS REPO instead of widening this entry.
+_SKILL_CORPUS=/home/zach/workspace/civit/datapacket-talos/.claude/skills
+if [ ! -d "$_SKILL_CORPUS" ]; then
+  EXPECTED_SKIPS+=(
+    "scripts/tests|datapacket-talos clone not present"
+    "scripts/tests|datapacket-talos clone not present"
+  )
+fi
 # ⚠ REMOVED, deliberately — do not re-add. test_scrub.py's drift guard used to
 # compare scrub.py's SECRET_PATTERNS against the DEPLOYED hook
 # (`Path.home()/".claude"/"hooks"/"bash-guard.py"`) and skip when that file was

@@ -27,16 +27,43 @@ from pathlib import Path
 _HB = chr(35) + chr(33)
 NEEDLES = (chr(34) + _HB, chr(39) + _HB)
 
+# Assembled from character codes for the SAME self-match reason as the shebang
+# needles above — spelling it as a quoted literal makes this file its own first
+# offender (observed the moment shape 3 was added).
+_SL = chr(47)
+_ENV = _SL + "usr" + _SL + "bin" + _SL + "env"
+# The literal path as a standalone quoted token — i.e. an argv element, not
+# prose. Built the same character-code way, for the same self-match reason.
+_ARGV_NEEDLES = (chr(34) + _ENV + chr(34), chr(39) + _ENV + chr(39))
+
 
 def line_is_offender(lineno: int, line: str) -> bool:
-    """True when `line` embeds a quoted shebang.
+    """True when `line` carries the hazard in any of its THREE shapes.
 
     Line 1 is always exempt: that is the module's OWN shebang, and pytest
     imports test modules rather than exec'ing them, so it never runs.
+
+    🔴 Shapes 2 and 3 were added 2026-08-06. Shape 1 alone (a shebang directly
+    behind a quote) is what a ONE-LINE stub body looks like, and it was the only
+    shape this scan could see — so the guard watched `93caa3a` add
+    `scripts/tests/test_{rig_control,monitor_blackout}.py` and stayed green while
+    they put 27 tests red in the sandbox for two days. Both wrote their stub
+    bodies as MULTI-LINE `textwrap.dedent` blocks, where the shebang starts its
+    own line with no quote in front of it, and both additionally exec'd
+    `[<env>, "bash", …]` as an argv, which is not a shebang at all and raises
+    FileNotFoundError before any stub is even reached.
+
+      1. quoted shebang   — `write_text("<hb>/usr/bin/env bash\\n…")`
+      2. bare shebang line — the first line inside a multi-line string literal
+      3. quoted argv token — `subprocess.run(["<env>", "bash", …])`
     """
     if lineno == 1:
         return False
-    return any(n in line for n in NEEDLES)
+    if any(n in line for n in NEEDLES):
+        return True
+    if line.lstrip().startswith(_HB) and _ENV in line:
+        return True
+    return any(n in line for n in _ARGV_NEEDLES)
 
 
 def scan_file(path: Path) -> list[tuple[int, str]]:
@@ -64,3 +91,14 @@ def offending_source_line(interp: str = "/usr/bin/env bash") -> str:
     Assembled the same way as the needles, for the same self-match reason.
     """
     return "p.write_text(" + chr(34) + _HB + interp + chr(34) + ")"
+
+
+def offending_bare_shebang_line(interp: str = "/usr/bin/env bash") -> str:
+    """Shape 2: a shebang opening its own line inside a multi-line literal."""
+    return "        " + _HB + interp
+
+
+def offending_argv_line() -> str:
+    """Shape 3: the interpreter path as a standalone quoted argv element."""
+    return ("subprocess.run([" + chr(34) + _ENV + chr(34) + ", "
+            + chr(34) + "bash" + chr(34) + ", str(S)])")
