@@ -130,6 +130,39 @@ QUERY_SECTIONS = {
 
 
 # --------------------------------------------------------------------------- #
+# 🔴 WHY THERE IS NO "HOURS WORKED" FIGURE IN THIS REPORT
+# --------------------------------------------------------------------------- #
+# Layer A's `duration_minutes` is `round((end_ts - start_ts) / 60)` — the span
+# from a session's FIRST message to its LAST (session-tailer.py:372). It is
+# idle-inclusive, and a resumed session's span reaches back arbitrarily far, so
+# Σ duration_minutes is NOT bounded by the report's window and is NOT time spent.
+#
+# MEASURED 2026-08-05 over 2,393 real transcripts touched in a trailing 14d
+# window: Σ duration_minutes = 720,904 min = 12,015.1 h, against the 336 h of
+# wall clock that EXIST in 14 days — a 35.8× overstatement. Ten of those sessions
+# had a span longer than the whole window on their own; the worst was 818.5 h
+# (2026-06-23 → 2026-07-27). The built-in `/insights` reported this same quantity
+# as elapsed time and produced "12224h over a 44-day window" (1,056 h exist).
+#
+# Two mechanisms drive it and NEITHER is recoverable from Layer A:
+#   1. IDLE — a session open across a lunch, a night or a fortnight accrues span
+#      it did not work; there is no keystroke/turn-gap signal in the rollup.
+#   2. OVERLAP — Zach runs many concurrent agent sessions, so spans double-count
+#      the same wall-clock minute across sessions.
+# Clipping spans to the window would fix (1) partially and (2) not at all, and an
+# "active time" estimate would be a number nobody can validate. So the figure is
+# kept, RENAMED off "wall-clock", and printed next to the window's real bound so
+# a reader cannot mistake it for hours worked. `render_html` prints NO time
+# figure at all — see `test_hours_figure_ledger`.
+SESSION_SPAN_CAVEAT = (
+    "spans are IDLE-INCLUSIVE and overlap across concurrent sessions, and a "
+    "resumed session's span reaches back before the window — so this sum is NOT "
+    "bounded by the window and is NOT time worked. Layer A carries no "
+    "active-time signal; this report has no hours-worked figure."
+)
+
+
+# --------------------------------------------------------------------------- #
 # Pure helpers
 # --------------------------------------------------------------------------- #
 def window_seconds(days: int) -> int:
@@ -598,6 +631,11 @@ def aggregate(summary_rows: list[dict], message_rows: list[dict],
         "sessions": len(summary_rows),
         "unreadable_sessions": unreadable,
         "totals": dict(agg),
+        # 🔴 The bound that makes an impossible time total self-evident — see
+        # `SESSION_SPAN_CAVEAT`. `session_span_hours` is Σ per-session span; it is
+        # NOT clipped to the window and NOT bounded by `window_wall_clock_hours`.
+        "session_span_hours": num(agg.get("duration_minutes", 0)) / 60,
+        "window_wall_clock_hours": days * 24,
         "messages": prompt_n + command_n,
         "prompts": prompt_n,
         "commands": command_n,
@@ -735,8 +773,14 @@ def render(data: dict) -> str:
     out.append(f"  tokens:     {total_in:,} in "
                f"({in_fresh:,} fresh + {cache_r:,} cache-read + {cache_w:,} cache-write) "
                f"/ {num(t.get('output_tokens',0)):,} out")
-    dur_h = num(t.get('duration_minutes', 0)) / 60
-    out.append(f"  wall-clock: {dur_h:,.1f}h across sessions (sum of per-session spans)")
+    # 🔴 NOT "wall-clock" — see SESSION_SPAN_CAVEAT. The window's real bound is
+    # printed alongside so an impossible total flags itself.
+    span_h = num(data.get("session_span_hours", num(t.get('duration_minutes', 0)) / 60))
+    bound_h = num(data.get("window_wall_clock_hours", data["days"] * 24))
+    ratio = f" — {span_h / bound_h:,.1f}x MORE THAN EXISTS" if bound_h and span_h > bound_h else ""
+    out.append(f"  session span: {span_h:,.1f}h summed over {data['sessions']} session spans "
+               f"(the {data['days']}d window holds {bound_h:,.0f}h of wall clock{ratio})")
+    out.append(f"   NOTE: {SESSION_SPAN_CAVEAT}")
     out.append(f"  friction:   {t.get('interruptions',0)} interruptions · {t.get('tool_errors',0)} tool errors")
 
     def _bars(title, items, n=8):
@@ -780,6 +824,14 @@ def render(data: dict) -> str:
         out.append("  This report shows ONLY deterministic facts — no fabricated outcomes.")
         return "\n".join(out)
 
+    # 🔴 DENOMINATOR DISCLOSURE. The percentages below are over the Layer-B
+    # population, which is a DIFFERENT set (and a WIDER window) than the
+    # `sessions:` figure in ACTIVITY. The built-in report quoted four session
+    # populations in one document without ever naming which was which.
+    out.append(f"  population: {data['insight_sessions']} session(s) with a Layer-B insight "
+               f"in the trailing {data['insight_days']}d window — the percentages below "
+               f"are over THAT denominator, NOT the {data['sessions']} Layer-A session(s) "
+               f"in the {data['days']}d window above.")
     oc = data["outcomes"] or {}
     total_oc = sum(oc.values()) or 1
     peak = max(oc.values(), default=0)
@@ -885,7 +937,17 @@ def render_html(data: dict) -> str:
                          '<code>session_insight</code> via the activity skill. This report '
                          'shows ONLY deterministic facts — <b>no fabricated outcomes</b>.</p>')
     else:
-        parts = [_html_bars((data["outcomes"] or {}).items(), n=12)]
+        # 🔴 DENOMINATOR + WINDOW DISCLOSURE — the text renderer has carried this
+        # since it was written; the HTML one did not, so a reader saw the page's
+        # "trailing {days}d · {sessions} sessions" subtitle sitting directly above
+        # percentages drawn from a different population over a wider window.
+        parts = [
+            f'<p class="mut">Population: <b>{data["insight_sessions"]}</b> session(s) with a '
+            f'Layer-B insight in the trailing <b>{data["insight_days"]}d</b> window. The '
+            f'percentages below are over THAT denominator — <b>not</b> the '
+            f'{data["sessions"]} Layer-A session(s) in the {data["days"]}d window above.</p>',
+            _html_bars((data["outcomes"] or {}).items(), n=12),
+        ]
         h = data["helpfulness"]
         if h["n"]:
             parts.append(f'<p class="mut">mean Claude-helpfulness '
@@ -899,8 +961,12 @@ def render_html(data: dict) -> str:
                 f'×{a["sessions"]}</span><span class="bt"><i style="width:100%"></i></span>'
                 f'<span class="bv">{html.escape(a["description"][:80])}</span></div>'
                 for a in data["automation"][:10])
+            # Provenance label — parity with render()'s NOTE. These strings are
+            # MODEL-authored free text; without the label the HTML page presented
+            # them beside deterministic counts as if equally measured.
             parts.append(f'<p class="mut" style="margin-top:12px"><b>Automation candidates '
-                         f'(leverage-ranked)</b></p>{rows}')
+                         f'(leverage-ranked)</b> — model-surfaced qualitative candidates, '
+                         f'NOT measured savings.</p>{rows}')
         outcomes_html = "\n".join(parts)
     unreadable_note = ""
     if data["unreadable_sessions"]:
@@ -934,8 +1000,8 @@ table{{width:100%;border-collapse:collapse;font-size:13.5px}}td,th{{text-align:l
 footer{{color:var(--mut);font-size:12px;margin-top:40px;border-top:1px solid var(--line);padding-top:14px}}
 </style></head><body><div class="wrap">
 <h1>Claude Code Insights <span style="color:var(--acc)">· telemetry-native</span></h1>
-<p class="sub">{data['window_start_utc']} → now · trailing {data['days']}d · {html.escape(scope)} ·
-{data['sessions']} sessions · generated {data['generated_utc']}</p>
+<p class="sub">{data['window_start_utc']} → now · Layer A: trailing {data['days']}d · {html.escape(scope)} ·
+{data['sessions']} Layer-A sessions · generated {data['generated_utc']}</p>
 <div class="note">Deterministic view built from <code>activity.events</code> (Layer&nbsp;A
 session rollups + the prompt/command stream). No LLM, no confabulation. The qualitative
 layer (goal/outcome/friction) arrives in PR-2.</div>
@@ -972,7 +1038,7 @@ layer (goal/outcome/friction) arrives in PR-2.</div>
 <tr><th>host</th><th>sessions</th><th>messages</th><th>commits</th><th>out-tokens</th></tr>
 {hosts_rows}
 </table></div>
-<h2>OUTCOMES (qualitative — Layer B)</h2>
+<h2>OUTCOMES (qualitative — Layer B · trailing {data['insight_days']}d)</h2>
 <div class="card">{outcomes_html}</div>
 <footer>Telemetry-native successor to the built-in <code>/insights</code>.
 Regenerate: <code>insights.py --days {data['days']} --html PATH</code>. Source: activity.events.</footer>
