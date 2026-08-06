@@ -15,6 +15,27 @@ Personal dev-environment config (zsh, tmux, neovim, i3, scripts) for the workben
 - **Quick syntax check** before switching: `nix-instantiate --parse <file>.nix >/dev/null`.
 - **NEVER `sudo nixos-rebuild` from Claude** — can't sudo non-interactively. System-level changes must be staged as an apply script for the user to run (see the `laptop` skill's `stage-system` pattern). home-manager (user-level) is fine.
 
+## Git discipline
+Portable rules (`git add -A`, `reset --hard`, `stash`, worktree isolation, feature-branches,
+base-clone re-sync, stranded docs) are in **`claude/RULES.md` → "Git Workflow"** — read them
+there. Only what's specific to this repo, where a working tree is also a **deploy target**:
+
+- 🔴 **Never commit to `main` in EITHER host checkout** (`~/workspace/devrc`, workbench *or*
+  laptop). `ship.sh` converges with `merge --ff-only`, so a diverged host is **skipped and
+  left as found** — it then silently stops receiving every future change while still looking
+  healthy. 2026-08-06: two un-pushed commits on the workbench blocked it for hours, and the
+  regrowth timer would have fired on 08-11 running the very bug the undelivered commit fixed.
+  **Read every per-host line of `ship.sh`, not the final verdict** — one skip hides among
+  greens, and it prints its own rc legend on failure.
+- **Recovering a diverged host** — preserve, verify, *then* move the pointer:
+  `git branch <topic> HEAD && git push -u origin <topic>` on that host → confirm the shas are
+  on origin **from a different host** → `git reset --keep origin/main` (`--keep` refuses
+  rather than destroys; never `--hard`). Open a PR for `<topic>`: rescued commits have never
+  been gated against the tree they now land in.
+- **A failed switch is usually a pre-existing FOREIGN file, not a nix error.** `home.file`
+  won't clobber a real file it doesn't manage and `force = true` does not override that. Tell:
+  read-only, 1969 mtime (an old store copy). Look at it, copy it aside, remove, re-switch.
+
 ## Server / headless mode
 - `~/.server-mode` marker toggles graphical bits: `headless-mode` (disables dunst/espanso) vs `graphical-mode` (re-enables), both run a home-manager switch. A host may be in server mode — check for the marker before assuming a GUI.
 
@@ -49,5 +70,5 @@ Repo-level facts that are NOT in any skill — they live here on purpose:
 - 🔴 **This repo is PUBLIC.** Never commit a real media-library path, directory name, filename, route log, or a real third-party hostname used as an example.
 
 ## Conventions
-- Never `git add -A` — stage files individually.
-- Commit + push so both hosts (workbench + laptop) can `git pull` then `home-manager switch`.
+- Git: see **Git discipline** above (and `claude/RULES.md` → "Git Workflow" for the portable rules).
+- Land work on `main` via PR, then `scripts/ship.sh` — never `git pull` + switch per host by hand.
