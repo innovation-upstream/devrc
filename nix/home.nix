@@ -2109,6 +2109,95 @@ in
     };
   };
 
+  # ClickHouse regrowth check for the activity store.
+  #
+  # 2026-08-03 the store was cut 112.4 GB -> 82.1 MB after `system.trace_log`
+  # accumulated 3.77 BILLION rows in ~5 weeks. The fix was a Flux config change
+  # (logger trace -> warning, four query-profiler log tables removed, 7d/14d
+  # TTLs, merge pool 32 -> 8). 🔴 NOBODY WILL NOTICE IF THAT SILENTLY STOPS
+  # WORKING — a revert or a TTL that quietly stops binding reproduces the same
+  # outcome, and the only symptom is a disk filling up months later. Hence a
+  # timer. See scripts/collector/ch_regrowth.py for what is asserted, the
+  # measured baseline behind every threshold, and why every error path is LOUD
+  # rather than a clean-looking zero.
+  #
+  # WORKBENCH-ONLY (gated on serverMode), same discriminator and same rationale
+  # as mail-actions-archive / initiatives-sync above: the committed homelab
+  # kubeconfig points at the LAN API (192.168.50.94:6443) and the `kubectl exec
+  # ... du` reading needs it. The laptop is nebula-only AND has an open,
+  # unresolved nebula fault that makes these ClickHouse queries intermittently
+  # stall to timeout (claudedocs/handoff-agent-setup-audit.md, investigation 1)
+  # — a check that flakes is a check that gets ignored, which is the exact
+  # failure mode this is built to avoid. A laptop run is still possible BY HAND:
+  # KUBECONFIG=~/.kube/homelab-nebula.yaml CH_REGROWTH_URL=http://10.42.0.10:30123
+  # scripts/collector/run-regrowth-check.sh
+  #
+  # NOTIFICATION: no new mechanism. The wrapper exits non-zero for ALARM (1),
+  # CANNOT-TELL (2) and WARN (3), so any of the three is a unit failure and the
+  # existing OnFailure=notify-failure@%n.service turns it into a sticky critical
+  # toast (scripts/notify-failure.sh). The verdict — including every number it
+  # read — is also written to ~/.cache/ch-regrowth/status.json for after the
+  # fact. `SuccessExitStatus` is deliberately NOT set: exit 2 ("cannot tell")
+  # must toast too, because a check that could not measure is not a clean store.
+  #
+  # Minimal user-unit env, so PATH is explicit: python312 (the checker), kubectl
+  # (the du exec), sops (the run-time admin-password decrypt), bash/coreutils.
+  systemd.user.services.ch-regrowth-check = lib.mkIf serverMode {
+    Unit = {
+      Description = "ClickHouse regrowth check for the activity store (read-only)";
+      After = [ "network-online.target" ];
+      Wants = [ "network-online.target" ];
+      OnFailure = [ "notify-failure@%n.service" ];
+    };
+    Service = {
+      Type = "oneshot";
+      # Hard ceiling: three SELECTs and one `kubectl exec du`. A half-hung
+      # kubectl must not wedge the timer — the cgroup is killed and the next
+      # OnCalendar re-arms. Measured end-to-end against the live store
+      # 2026-08-06: ~10s over nebula (the slower path).
+      #
+      # 180 -> 240 when the checker gained retries: a transient HTTP 500 (the
+      # observed `Code: 241 MEMORY_LIMIT_EXCEEDED`) is now retried with backoff
+      # and the TTL union falls back to one query per table. ch_regrowth.py
+      # bounds that itself with COLLECT_BUDGET_SECONDS = 120 — no new attempt
+      # STARTS past 120s — so the worst case is 120 + one in-flight 30s query +
+      # the `du` exec. 240 leaves margin over that without hiding a real hang.
+      TimeoutStartSec = 240;
+      Environment = [
+        "PATH=${lib.makeBinPath [ pkgs.python312 pkgs.kubectl pkgs.sops pkgs.bash pkgs.coreutils ]}"
+        "KUBECONFIG=%h/workspace/homelab-talos/homelab-kubeconfig"
+        "HOME=%h"
+      ];
+      ExecStart = "${pkgs.bash}/bin/bash %h/workspace/devrc/scripts/collector/run-regrowth-check.sh";
+      # Re-run the unit when either half of the check changes.
+      X-Restart-Triggers = [
+        "${../scripts/collector/run-regrowth-check.sh}"
+        "${../scripts/collector/ch_regrowth.py}"
+      ];
+    };
+  };
+
+  # Monthly on the 11th. The date is not arbitrary: the 7-day TTLs first have
+  # anything to act on around 2026-08-10 (no TTL had fired even ONCE when this
+  # was written — every row was younger than its own TTL), so the first firing
+  # on 2026-08-11 is the first run that can observe the bounding mechanism
+  # actually working, and monthly is the steady state after that.
+  # Persistent=true so a run missed with the host off fires on next boot —
+  # which matters precisely because the growth is slow and unattended.
+  systemd.user.timers.ch-regrowth-check = lib.mkIf serverMode {
+    Unit = {
+      Description = "Monthly timer for the ClickHouse regrowth check";
+    };
+    Timer = {
+      OnCalendar = "*-*-11 09:00:00";
+      Persistent = true;
+      RandomizedDelaySec = 900;
+    };
+    Install = {
+      WantedBy = [ "timers.target" ];
+    };
+  };
+
   # Post-reboot claude session restore — fires ~45s after login so
   # tmux-continuum has time to restore the session layout first, then this
   # service resumes claude conversations in each window.  Idempotent: skips

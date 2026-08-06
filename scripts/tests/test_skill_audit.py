@@ -1,7 +1,9 @@
 """Unit tests for scripts/skill-audit.py — the /prune-skill auditor.
 
-OFFLINE and hermetic: every fixture is written into a tmp_path; nothing under
-~/.claude or any real repo is read.
+OFFLINE and hermetic: every fixture is either written into a tmp_path or tracked
+in this repo under tests/fixtures/skill_audit/. Nothing under ~/.claude, $HOME
+or any out-of-repo clone is read, and no test in this file skips — so it means
+exactly the same thing on a dev host and in the nix build sandbox.
 
 🔴 HARNESS DISCIPLINE (claude/RULES.md, "A harness that COUNTS needs a POSITIVE
 control too"). This auditor's reassuring answers are ZEROS — "0 dated-history
@@ -30,6 +32,13 @@ import pytest
 
 SCRIPTS = Path(__file__).resolve().parents[1]
 AUDIT_PY = SCRIPTS / "skill-audit.py"
+
+# Whole-FILE fixtures, tracked in this repo. The three file-scale pins here used
+# to read SKILL.md files out of a private clone at an absolute path and skip when
+# it was absent — see the tests that use these. They are deliberately NOT named
+# SKILL.md, so running skill-audit.py on this repo root cannot mistake a fixture
+# for a real skill.
+FIXTURES = Path(__file__).resolve().parent / "fixtures" / "skill_audit"
 
 
 def _load(name, modname):
@@ -304,29 +313,65 @@ def test_a_dated_work_status_heading_goes_to_work_status_not_lessons(tmp_path):
     assert len(a["dated"]) == 1 and a["lessons"] == []
 
 
-def test_real_skills_classify_the_way_the_corpus_measurement_says():
-    """Regression pin against the live corpus, so the conflation cannot return.
+def test_corpus_shaped_file_of_dated_lessons_reports_zero_work_status():
+    """Whole-file regression pin, so the conflation cannot return.
 
-    Skipped when the clone is absent so the suite stays hermetic. Measured
-    2026-08-04: manage-alerts has ZERO work-status blocks (15 dated lessons),
-    app-blocks has 46 work-status blocks. If manage-alerts ever reports
-    work-status history, the buckets have re-merged.
+    This used to read a live skill corpus out of a separate PRIVATE clone at an
+    absolute out-of-repo path, and skip when that clone was absent — so it meant
+    one thing on a dev host and vanished in the tier that gates merges. Re-pointed
+    2026-08-06 at a synthetic fixture TRACKED IN THIS REPO, reproducing the
+    corpus-majority shape measured 2026-08-04: a skill whose dated headings are
+    all durable guidance. Every value below is a literal read off the fixture,
+    not off the implementation.
+
+    The `dated == []` half is the one that matters: with the buckets merged, all
+    nine lessons land in the evictable pile, which is how a 59% "evictable
+    history" figure was reported for a skill whose largest dated blocks were its
+    most valuable operational content.
     """
-    root = Path("/home/zach/workspace/civit/datapacket-talos/.claude/skills")
-    if not root.is_dir():
-        pytest.skip("datapacket-talos clone not present")
-    for name, expect_ws in (("manage-alerts", False), ("app-blocks", True)):
-        p = root / name / "SKILL.md"
-        if not p.is_file():
-            pytest.skip(f"{name} absent")
-        a = sa.audit_one(p)
-        if expect_ws:
-            assert a["dated"], f"{name}: expected work-status blocks, found none"
-        else:
-            assert not a["dated"], (
-                f"{name}: reported {len(a['dated'])} work-status block(s); its dated "
-                "headings are durable lessons, so the buckets have re-merged")
-            assert a["lessons"], f"{name}: expected dated lessons, found none"
+    a = sa.audit_one(FIXTURES / "dated_lessons_corpus.md")
+    assert a["dated"] == [], (
+        f"reported {len(a['dated'])} work-status block(s); every dated heading in "
+        "this fixture is durable guidance, so the buckets have re-merged")
+    assert a["dated_bytes"] == 0
+    assert [t for t, *_ in a["lessons"]] == [
+        "Common silent-failure modes (from the 2026-05-22 audit)",
+        "The inert-check defect class (2026-06-01)",
+        "Why the retry budget is per-target, not global (2026-06-14)",
+        "Backoff must be capped (decided 2026-06-20)",
+        "Draining a queue safely (2026-06-28)",
+        "Reading the saturation panel (2026-07-03)",
+        "Two timeouts, two meanings (2026-07-11)",
+        "Config precedence (established 2026-07-19)",
+        "The idempotency key must cover the payload (2026-07-25)",
+    ]
+
+
+def test_corpus_shaped_file_of_session_narrative_reports_work_status():
+    """The other half of the same pin, and the POSITIVE control for it.
+
+    `dated == []` above is a zero, and a zero is indistinguishable from a
+    detector wired to nothing — so the same detector must be shown to move on a
+    file that genuinely carries session narrative. Same fixture convention:
+    five `### Session <date>` siblings under one undated `## Roadmap`, the
+    arrangement measured on the one corpus skill that really had accreted it.
+
+    The buckets must also be DISJOINT at file scale: the one dated-but-topical
+    heading here belongs to `lessons` and to nothing else.
+    """
+    a = sa.audit_one(FIXTURES / "work_status_corpus.md")
+    ws = [t for t, *_ in a["dated"]]
+    assert ws == [
+        "Session 2026-07-01 — first cut",
+        "Session 2026-07-08 — wiring the collector",
+        "Session 2026-07-15→16 — dogfood + audit",
+        "Session 2026-07-22 — fixing the retry path",
+        "Session 2026-07-29 — cleanup",
+    ]
+    assert a["dated_bytes"] > 0
+    ls = [t for t, *_ in a["lessons"]]
+    assert ls == ["Failure modes (from the 2026-05-22 audit)"]
+    assert not (set(ws) & set(ls))
 
 
 @pytest.mark.parametrize("heading", [
@@ -442,23 +487,40 @@ def test_tilde_fence_is_tracked_and_not_closed_by_backticks(tmp_path):
     assert [t for t, *_ in a["h2"]] == ["Doc", "After"]
 
 
-def test_real_datapacket_skills_are_not_reported_broken():
-    """Regression pin on the two files the parity check falsely accused.
+@pytest.mark.parametrize("fixture,h2", [
+    # The shape the parity check falsely accused in a real support-stack doc:
+    # an outer bare fence displaying a ```action marker.
+    ("odd_parity_info_string.md", ["Contract", "Runbook", "After the fences"]),
+    # The other one: a heredoc inside ```bash that writes out another ```bash
+    # block, alongside the `# 3. …` shell comment that a broken fence walk reads
+    # as an H1 and re-partitions the file on.
+    ("odd_parity_nested_lang.md", ["Runbook", "Still visible", "Also still visible"]),
+])
+def test_odd_marker_parity_wellformed_file_is_not_reported_broken(fixture, h2):
+    """Whole-FILE regression pin on the false-positive class.
 
-    Skipped when that clone is absent so the suite stays hermetic; when it IS
-    present this is the highest-value assertion in the file, because it is the
-    one that would have caught the false positive before it cost a change to a
-    shared production repo.
+    This used to read two SKILL.md files out of a PRIVATE clone at an absolute
+    path and skip when it was absent — so the highest-value assertion in this
+    file was structurally unobservable in the tier that gates merges.
+    Re-pointed 2026-08-06 at synthetic fixtures TRACKED IN THIS REPO that
+    reproduce both accused shapes at file scale.
+
+    The odd-parity assertion is the fixture's own positive control: it is what
+    the parity heuristic tripped on, so if a future edit quietly evens the
+    marker count, this test would still pass while no longer exercising the
+    trap. Pin the property, not just the verdict.
     """
-    root = Path("/home/zach/workspace/civit/datapacket-talos/.claude/skills")
-    if not root.is_dir():
-        pytest.skip("datapacket-talos clone not present")
-    for name in ("app-blocks", "manage-support-stack"):
-        p = root / name / "SKILL.md"
-        if not p.is_file():
-            pytest.skip(f"{name} absent")
-        assert sa.audit_one(p)["fence_ok"] is True, \
-            f"{name}: well-formed under CommonMark; a FAIL here means the fence walk regressed"
+    p = FIXTURES / fixture
+    lines = p.read_text().splitlines(keepends=True)
+    markers = sum(1 for ln in lines if sa.FENCE.match(ln.rstrip("\n")))
+    assert markers % 2 == 1, (
+        f"{fixture} has {markers} fence markers — EVEN parity no longer exercises "
+        "the false positive this fixture exists for; restore an odd marker")
+    a = sa.audit_one(p)
+    assert a["fence_ok"] is True, \
+        f"{fixture}: well-formed under CommonMark; a FAIL here means the fence walk regressed"
+    assert [t for t, *_ in a["h2"]] == h2, \
+        f"{fixture}: the fence walk re-partitioned the file"
 
 
 # --- skill naming ---------------------------------------------------------------

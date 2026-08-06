@@ -344,6 +344,21 @@ EXPECTED_SKIPS=(
   # REPO_COS_LIVE_DRIFT_CHECK=1.
   "scripts/repo-cos/tests|live-store drift check is opt-in"
 )
+# ⚠ REMOVED, deliberately — do not re-add. `scripts/tests/test_skill_audit.py`
+# carried two regression pins against the LIVE datapacket-talos skill corpus, a
+# separate PRIVATE clone that cannot exist in the nix sandbox and may be absent
+# on a dev host. Both skipped off an `is_dir()` check on an absolute out-of-repo
+# path, and this entry existed to pin those two environment-dependent skips.
+# (#332 added the tests without the entry, and the gate was RED on main from
+# 2026-08-04 to 2026-08-06 on the unpinned-skip guard alone.)
+#
+# Same defect as the test_scrub.py case below: a check keyed to a path outside
+# the repo is structurally unobservable in the tier that gates merges, so it
+# means one thing on a dev host and nothing at all here. Re-pointed 2026-08-06
+# at synthetic fixtures TRACKED IN THIS REPO
+# (scripts/tests/fixtures/skill_audit/), so those pins now RUN in every tier and
+# NEVER skip — which is why there is nothing left to pin.
+#
 # ⚠ REMOVED, deliberately — do not re-add. test_scrub.py's drift guard used to
 # compare scrub.py's SECRET_PATTERNS against the DEPLOYED hook
 # (`Path.home()/".claude"/"hooks"/"bash-guard.py"`) and skip when that file was

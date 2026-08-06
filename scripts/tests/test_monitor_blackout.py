@@ -6,6 +6,7 @@ mocked ddcutil and systemctl commands.
     run:  pytest scripts/tests/test_monitor_blackout.py
 """
 import os
+import shutil
 import subprocess
 import sys
 import textwrap
@@ -16,6 +17,23 @@ import pytest
 SCRIPTS = Path(__file__).resolve().parents[1]
 MB = SCRIPTS / "monitor-blackout.sh"
 
+sys.path.insert(0, str(SCRIPTS))
+
+from testlib.mockbin import write_exec  # noqa: E402
+
+# 🔴 Resolve the interpreter ONCE, from the ambient environment, to an absolute
+# path. Two traps this avoids:
+#   * `/usr/bin/env` does not exist in the nix build sandbox — the authoritative
+#     gate — so an argv whose first element is that literal path raises
+#     FileNotFoundError there while passing on the dev host (see
+#     scripts/testlib/mockbin.py for the same trap in stub shebangs).
+#   * a bare "bash" argv is looked up in the PATH of the env= passed to
+#     subprocess, and every test below overrides PATH with a stub directory —
+#     which would make the interpreter itself unfindable.
+_BASH = shutil.which("bash")
+if _BASH is None:  # pragma: no cover — both tiers ship bash
+    raise RuntimeError("bash not found on PATH; this suite cannot run hermetically")
+
 
 def _run(*args, env=None):
     """Run monitor-blackout.sh as a subprocess."""
@@ -23,7 +41,7 @@ def _run(*args, env=None):
     if env:
         full_env.update(env)
     return subprocess.run(
-        ["/usr/bin/env", "bash", str(MB), *args],
+        [_BASH, str(MB), *args],
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
         timeout=30, env=full_env,
     )
@@ -33,10 +51,12 @@ def _make_ddcutil_stub(tmp_path, brightness="75"):
     """Create a ddcutil stub that responds to getvcp 10.
     Output format: 'VCP <hex> <current> <max>' — awk $4 = max, $3 = current.
     The script's get_brightness uses awk $4, so stub outputs brightness in $4.
+
+    testlib.mockbin owns the shebang (/bin/sh) — a `#!/usr/bin/env bash` stub
+    cannot exec in the nix build sandbox, and patchShebangs cannot reach a file
+    a test writes at runtime.
     """
-    stub = tmp_path / "ddcutil"
-    stub.write_text(textwrap.dedent(f"""\
-        #!/usr/bin/env bash
+    return write_exec(tmp_path / "ddcutil", textwrap.dedent(f"""\
         echo "$@" >> "{tmp_path / 'ddcutil.log'}"
         case "$*" in
             *detect*) echo "i2c-5" ;;
@@ -44,23 +64,17 @@ def _make_ddcutil_stub(tmp_path, brightness="75"):
             *) echo "ok" ;;
         esac
     """))
-    stub.chmod(0o755)
-    return stub
 
 
 def _make_systemctl_stub(tmp_path):
     """Create a systemctl stub that simulates timer management."""
-    stub = tmp_path / "systemctl"
-    stub.write_text(textwrap.dedent(f"""\
-        #!/usr/bin/env bash
+    return write_exec(tmp_path / "systemctl", textwrap.dedent(f"""\
         echo "$@" >> "{tmp_path / 'systemctl.log'}"
         case "$*" in
             *is-active*) exit 3 ;;  # no timer active
             *) exit 0 ;;
         esac
     """))
-    stub.chmod(0o755)
-    return stub
 
 
 # --------------------------------------------------------------------------- #
@@ -119,6 +133,13 @@ def test_restore_uses_default_brightness_when_no_state(tmp_path):
 # CLI: status subcommand
 # --------------------------------------------------------------------------- #
 def test_status_no_timer(tmp_path):
+    # 🔴 ddcutil too, not just systemctl. monitor-blackout.sh resolves ddcutil at
+    # line 20 — BEFORE it dispatches a subcommand — and exits 1 with "ddcutil not
+    # found on PATH" when it is absent, so `status` needs the stub as much as the
+    # brightness paths do. This test claimed to be OFFLINE while silently
+    # depending on the dev host having a real ddcutil; the sandbox does not, and
+    # the FileNotFoundError this suite used to die on hid that for two days.
+    _make_ddcutil_stub(tmp_path)
     systemctl = _make_systemctl_stub(tmp_path)
     path = str(tmp_path) + ":" + os.environ.get("PATH", "")
 
@@ -216,16 +237,13 @@ def test_blackout_custom_duration(tmp_path):
 # --------------------------------------------------------------------------- #
 def test_blackout_fails_when_no_monitor(tmp_path):
     # Stub ddcutil that responds to detect but with no valid buses
-    stub = tmp_path / "ddcutil"
-    stub.write_text(textwrap.dedent(f"""\
-        #!/usr/bin/env bash
+    write_exec(tmp_path / "ddcutil", textwrap.dedent(f"""\
         echo "$@" >> "{tmp_path / 'ddcutil.log'}"
         case "$*" in
             *detect*) echo "no devices found" ;;
             *) echo "ok" ;;
         esac
     """))
-    stub.chmod(0o755)
     path = str(tmp_path) + ":" + os.environ.get("PATH", "")
 
     r = _run(env={"PATH": path, "XDG_RUNTIME_DIR": str(tmp_path)})
