@@ -59,7 +59,7 @@ def _bash():
     return shutil.which("bash") or "/bin/sh"
 
 
-def check_env(env_file: Path | None, extra=None):
+def check_env(env_file: Path | None, extra=None, timeout=30):
     """Run `airvpn-updown check-env` and return (rc, stdout, stderr)."""
     env = dict(os.environ)
     env.pop("NEBULA_LIGHTHOUSE", None)
@@ -67,7 +67,7 @@ def check_env(env_file: Path | None, extra=None):
         env["AIRVPN_UPDOWN_ENV"] = str(env_file)
     env.update(extra or {})
     r = subprocess.run([_bash(), str(UPDOWN), "check-env"],
-                       capture_output=True, text=True, env=env, timeout=30)
+                       capture_output=True, text=True, env=env, timeout=timeout)
     return r.returncode, r.stdout, r.stderr
 
 
@@ -86,10 +86,56 @@ def test_a_valid_ipv4_resolves(tmp_path):
     assert f"lighthouse={GOOD_V4}" in out
 
 
-def test_a_valid_ipv6_resolves(tmp_path):
-    rc, out, _ = check_env(write_env(tmp_path, f"NEBULA_LIGHTHOUSE={GOOD_V6}\n"))
-    assert rc == 0, out
-    assert f"lighthouse={GOOD_V6}" in out
+@pytest.mark.parametrize("v6", [
+    # 🔴 Every v6 here is either a non-address or inside 2001:db8::/32. An
+    # arbitrary 8-group literal is GLOBALLY ROUTABLE and this repo is public;
+    # one slipped in here and `test_no_public_ips.py` caught it in the SANDBOX
+    # tier only, because running this file alone never loads that gate. Then the
+    # COMMENT explaining the mistake re-spelled the same literal and was caught
+    # again — hence the deliberately value-free wording.
+    GOOD_V6, "::", ":::::", "0::0::0", "2001:db8:0:0:0:0:0:1", "fe80::1",
+])
+def test_an_IPv6_value_is_REJECTED_because_the_ruleset_cannot_express_it(tmp_path, v6):
+    """🔴 REVERSED from the previous revision, which asserted v6 RESOLVES.
+
+    That test blessed an outage. The consumers are `ip daddr <v>` (an IPv4-family
+    nft match) and `ip route replace <v> via <IPv4 gateway>`. A v6 value passes a
+    naive "is this an address" check, then fails the nft LOAD — which used to
+    flush the table first and fall through to `arm_failclosed`, a ruleset with no
+    `meta mark` accept, so wg's own encrypted packets are dropped and THE TUNNEL
+    DIES. `::`, `:::::` and `0::0::0` were all accepted too.
+
+    Validate against what the ruleset can EXPRESS, not against what looks like an
+    address. If v6 lighthouses are ever needed, the emitter has to grow an
+    `ip6 daddr` branch and a v6 route first — and this test is where that starts.
+    """
+    rc, out, err = check_env(write_env(tmp_path, f"NEBULA_LIGHTHOUSE={v6}\n"))
+    assert rc == 1, (rc, out, err)
+    assert "lighthouse=UNSET" in out and "state=rejected-or-empty" in out, out
+    assert "not a canonical IPv4 address" in err, err
+
+
+@pytest.mark.parametrize("v4", [
+    "010.0.0.1", "00.0.0.1", "203.0.113.09", "0203.0.113.9", "203.00.113.9",
+])
+def test_a_LEADING_ZERO_octet_is_REJECTED(tmp_path, v4):
+    """🔴 Two consumers disagree about what a zero-prefixed octet means:
+    `getent`/inet_aton read it as OCTAL, nft reads it as decimal. Accepting one
+    means the route and the firewall rule name DIFFERENT hosts. (The resolved
+    octal value is deliberately not written here — it is a routable address and
+    this repo is public; `test_no_public_ips.py` flagged it when it was.)
+
+    `203.0.113.09` was previously rejected only by ACCIDENT — bash raised
+    'value too great for base' inside the arithmetic, which is a crash, not a
+    decision, and would have flipped to ACCEPTED the moment the range check was
+    written `10#$o` without also rejecting the leading zero.
+    """
+    rc, out, err = check_env(write_env(tmp_path, f"NEBULA_LIGHTHOUSE={v4}\n"))
+    assert rc == 1, (rc, out, err)
+    assert "lighthouse=UNSET" in out, out
+    assert "not a canonical IPv4 address" in err, err
+    assert "value too great" not in err, (
+        "rejected by a bash arithmetic CRASH, not by the validator: " + err)
 
 
 @pytest.mark.parametrize("body", [
@@ -135,30 +181,135 @@ def test_the_last_assignment_wins(tmp_path):
 ])
 def test_a_malformed_value_is_treated_as_UNSET_and_says_why(tmp_path, value, why):
     """🔴 A-2. Every one of these made BOTH the primary ruleset and the blanket
-    fallback fail to parse, and `up` flushes the table BEFORE loading — so a
+    fallback fail to parse, and `up` flushed the table BEFORE loading — so a
     re-arm with any of them removed a working killswitch and installed nothing,
     exit 0. UNSET is the fail-SAFE outcome, and it must be announced."""
     rc, out, err = check_env(write_env(tmp_path, f"NEBULA_LIGHTHOUSE={value}\n"))
     assert rc == 1, (rc, out, err)
     assert "lighthouse=UNSET" in out, out
-    assert "not an IP address" in err, err
+    assert "not a canonical IPv4 address" in err, err
     # 🔴 The rejected text must NEVER be echoed back — it is attacker-controlled
     # and the log line goes to syslog.
     assert value not in out and value not in err, (out, err)
 
 
-def test_an_absent_key_is_UNSET_but_quiet(tmp_path):
-    """Distinct from the case above: 'you did not set it' is the documented
-    default, 'you set it to garbage' is an error. Same safe outcome, different
-    signal — otherwise the operator cannot tell which one they are in."""
+# --- F3: the shape A-2 is NAMED for was the one shape the guard was silent on --
+
+@pytest.mark.parametrize("body,expect_ok", [
+    (f"NEBULA_LIGHTHOUSE={GOOD_V4}", True),
+    (f"# note\nNEBULA_LIGHTHOUSE={GOOD_V4}", True),
+    (f"NEBULA_LIGHTHOUSE={OTHER_V4}\nNEBULA_LIGHTHOUSE={GOOD_V4}", True),
+])
+def test_a_file_with_NO_TRAILING_NEWLINE_still_resolves(tmp_path, body, expect_ok):
+    """🔴 F3 — THE regression this whole guard is named after.
+
+    `read` returns non-zero on a final line with no trailing newline, so the
+    plain `while IFS= read -r line` loop DROPPED it. A file whose write was cut
+    short is precisely a file with no final newline, so
+    `NEBULA_LIGHTHOUSE=<ip>` with no `\\n` resolved to EMPTY and fell into the
+    "key simply absent" branch — **UNSET with no log line at all**, while the
+    PR body claimed "an unparseable value is treated as UNSET, loudly… a
+    partially-written env file was enough".
+
+    Mutant X4 (drop the final line) survived all 44 tests of the previous
+    revision. This is the coverage that kills it.
+    """
+    p = tmp_path / "nonl.env"
+    p.write_text(body, encoding="utf-8")  # deliberately no trailing newline
+    p.chmod(0o600)
+    assert not p.read_bytes().endswith(b"\n"), "fixture must have no final newline"
+    rc, out, err = check_env(p)
+    assert rc == 0, (rc, out, err)
+    assert f"lighthouse={GOOD_V4}" in out, out
+
+
+@pytest.mark.parametrize("tail", [b"\r", b"\r\n"])
+def test_CRLF_resolves_rather_than_silently_UNSETTING(tmp_path, tail):
+    """CRLF shares F3's root cause (a `\\r`-only tail is also "no final LF"), and
+    the audit flagged it alongside.
+
+    MEASURED, and the outcome is better than I first assumed: the rtrim already
+    strips `\\r` (it is `[:space:]`), so a CRLF file — with or without a final
+    LF — resolves CORRECTLY rather than being rejected. Both tails are pinned so
+    that stays true; the failure being fixed is SILENCE, and neither of these is
+    silent.
+    """
+    p = tmp_path / "crlf.env"
+    p.write_bytes(f"NEBULA_LIGHTHOUSE={GOOD_V4}".encode() + tail)
+    p.chmod(0o600)
+    rc, out, err = check_env(p)
+    assert rc == 0, (rc, out, err)
+    assert f"lighthouse={GOOD_V4} state=ok" in out, out
+
+
+def test_an_absent_key_says_so_rather_than_saying_nothing(tmp_path):
+    """Distinct from a rejected value: 'you did not set it' vs 'you set it to
+    garbage'. Same safe outcome, different signal — and after F3 BOTH are
+    announced, because a silent UNSET is indistinguishable from a truncated
+    file, which is exactly how F3 hid."""
     rc, out, err = check_env(write_env(tmp_path, "SOMETHING_ELSE=1\n"))
     assert rc == 1 and "lighthouse=UNSET" in out
-    assert "not an IP address" not in err, err
+    assert "state=rejected-or-empty" in out, out
+    assert "has no NEBULA_LIGHTHOUSE= line" in err, err
+    assert "not a canonical IPv4 address" not in err, err
 
 
-def test_a_missing_file_is_UNSET_not_a_crash(tmp_path):
-    rc, out, _ = check_env(tmp_path / "does-not-exist.env")
+def test_a_missing_file_is_UNSET_and_says_ABSENT(tmp_path):
+    rc, out, err = check_env(tmp_path / "does-not-exist.env")
     assert rc == 1 and "lighthouse=UNSET" in out, out
+    assert "state=absent" in out, out
+
+
+# --- G4: a non-regular file must not HANG or emit a raw shell error ------------
+
+def test_a_FIFO_at_the_env_path_does_not_hang(tmp_path):
+    """🔴 G4. The read runs at TOP LEVEL, which in production is inside
+    wg-quick's PostUp as root. A FIFO there blocked FOREVER (measured
+    unbounded), so `wg-quick up` stalled with the interface UP and the
+    killswitch NOT YET ARMED — an indefinite fail-OPEN window, and a NEW
+    failure mode: the pre-env-file script read no file at all.
+
+    The timeout here is the assertion. If this test ever hangs, it has found
+    the bug back.
+    """
+    fifo = tmp_path / "fifo.env"
+    os.mkfifo(fifo, 0o600)
+    try:
+        # A short timeout on purpose: the correct path returns in milliseconds,
+        # and the bug is UNBOUNDED, so waiting longer buys nothing.
+        rc, out, err = check_env(fifo, timeout=5)
+    except subprocess.TimeoutExpired:  # pragma: no cover - the bug itself
+        pytest.fail("reading the env path BLOCKED — G4 has regressed")
+    assert rc == 1, (rc, out, err)
+    assert "state=not-a-regular-file" in out, out
+    assert "not a regular file" in err, err
+
+
+def test_a_DIRECTORY_at_the_env_path_is_rejected_cleanly(tmp_path):
+    """It used to emit a raw `read: 0: read error: Is a directory` and then
+    silently UNSET — a shell error message is not a diagnosis."""
+    d = tmp_path / "dir.env"
+    d.mkdir()
+    rc, out, err = check_env(d)
+    assert rc == 1, (rc, out, err)
+    assert "state=not-a-regular-file" in out, out
+    assert "read error" not in err, ("raw shell error leaked: " + err)
+
+
+# --- G3: unreadable is NOT the same as absent ---------------------------------
+
+def test_an_UNREADABLE_file_says_so_rather_than_looking_UNSET(tmp_path):
+    """🔴 G3. `check-env` is the ONE diagnostic the operator protocol tells you
+    to trust. Running it WITHOUT sudo on a correct 0600 root:root host is the
+    likeliest way to see UNSET, and reporting that identically to 'you never
+    created the file' sends the operator to fix the wrong thing."""
+    if os.geteuid() == 0:  # pragma: no cover - the sandbox runs unprivileged
+        pytest.skip("root can read anything; the distinction is unobservable")
+    p = write_env(tmp_path, f"NEBULA_LIGHTHOUSE={GOOD_V4}\n", mode=0o000)
+    rc, out, err = check_env(p)
+    assert rc == 1, (rc, out, err)
+    assert "state=unreadable-by-uid-" in out, out
+    assert "not readable" in err and "run as root" in err, err
 
 
 # --- A-4: the file is parsed, not sourced --------------------------------------
@@ -269,25 +420,157 @@ def test_the_stat_stub_itself_is_load_bearing(tmp_path):
         "the stat stub is not being used — the owner tests prove nothing")
 
 
-# --- the fallback ruleset ------------------------------------------------------
+# --- the RENDER harness: what the kernel would actually have been handed -------
+#
+# 🔴 WHY THIS EXISTS. The previous revision asserted the fallback "carries no
+# lighthouse" by grepping the function body for the string `NEBULA_LIGHTHOUSE`.
+# That is a SPELLED guard, and the audit's mutant Y1 walked straight past it:
+# assign `_FB_LH="${NEBULA_LIGHTHOUSE}"` OUTSIDE the function and interpolate
+# `${_FB_LH}` inside — the token is gone, the hazard is fully restored, the test
+# is green. RULES.md: "can the guard pass while the hazard exists in a different
+# shape?" It could.
+#
+# So assert the PROPERTY instead: render the rulesets with the lighthouse set to
+# a distinctive sentinel and require that the fallback's actual TEXT does not
+# contain it, whatever route it took to get there.
+#
+# Nothing real is touched. `nft`, `ip`, `wg` and `logger` are all stubs; the stub
+# `nft` records every invocation's argv and stdin, and NEVER commits anything.
 
-def test_the_blanket_fallback_carries_no_lighthouse():
-    """🔴 A-2, structural half. `arm_failclosed` is the fallback for 'the primary
-    ruleset did not parse'. Any value that could have broken that parse must not
-    appear in it too, or both fail together and the uplink ends up with NO table.
+_SENTINEL = "198.51.100.77"   # TEST-NET-2, distinctive, and a valid IPv4
 
-    Asserted on the function BODY, not on the file — a match anywhere else in a
-    600-line script would pass while the fallback stayed broken.
+
+def _up_harness(tmp_path, nft_fail="", ks_present=True, lighthouse=_SENTINEL):
+    """Run `airvpn-updown up airvpn` with every external command stubbed.
+
+    Returns (rc, stdout, syslog_text, [captured nft calls]).
+
+    🔴 `syslog_text`, not stderr. `log()` runs `logger … 2>/dev/null`, so a stub
+    that writes to stderr is DISCARDED by the code under test — which is correct
+    in production (syslog is the sink) and made every arm-line assertion here
+    silently unfalsifiable until it was noticed. The stub writes to a file, the
+    way `journalctl -t airvpn-updown` is what the operator actually reads.
     """
-    src = UPDOWN.read_text(encoding="utf-8")
-    start = src.index("arm_failclosed() {")
-    end = src.index("\n}\n", src.index("FB\n", start))
-    body = src[start:end]
-    assert "NEBULA_LIGHTHOUSE" not in body, (
-        "the fallback ruleset interpolates the lighthouse again:\n" + body)
-    # and it must still be a real fallback, not an empty one
-    for required in ("meta skuid", "LAN_SUBNET", "drop"):
-        assert required in body, f"the fallback lost its {required} rule"
+    bindir = tmp_path / "upbin"
+    bindir.mkdir(exist_ok=True)
+    rec = tmp_path / "nftcalls"
+    rec.mkdir(exist_ok=True)
+
+    # nft stub: append argv + stdin to a numbered file, then honour the
+    # requested failure mode. `list table` answers the ks_present probe.
+    mockbin.write_exec(bindir / "nft", f'''
+n=$(ls "{rec}" | wc -l)
+f="{rec}/$n"
+printf 'ARGV: %s\\n' "$*" > "$f"
+case "$1" in
+  list) [ -n "$KS_PRESENT" ] && exit 0 || exit 1 ;;
+esac
+printf 'STDIN:\\n' >> "$f"
+cat >> "$f"
+case "$NFT_FAIL" in
+  all) exit 1 ;;
+  first) [ "$n" = "0" ] && exit 1 || exit 0 ;;
+  *) exit 0 ;;
+esac
+''')
+    # ip: no default route -> the bypass-route block is skipped entirely, so
+    # nothing is written to /run and no route is ever touched.
+    mockbin.write_exec(bindir / "ip", "exit 0\n")
+    mockbin.write_exec(bindir / "wg", "exit 1\n")
+    syslog = tmp_path / "syslog.txt"
+    mockbin.write_exec(bindir / "logger", f'printf "%s\\n" "$*" >> "{syslog}"\n')
+
+    env = write_env(tmp_path, f"NEBULA_LIGHTHOUSE={lighthouse}\n")
+    e = dict(os.environ,
+             AIRVPN_UPDOWN_ENV=str(env),
+             PATH=f"{bindir}:{os.environ['PATH']}",
+             NFT_FAIL=nft_fail,
+             KS_PRESENT="1" if ks_present else "")
+    e.pop("NEBULA_LIGHTHOUSE", None)
+    r = subprocess.run([_bash(), str(UPDOWN), "up", "airvpn"],
+                       capture_output=True, text=True, env=e, timeout=30)
+    calls = []
+    for i in sorted(rec.iterdir(), key=lambda p: int(p.name)):
+        calls.append(i.read_text())
+    log_text = syslog.read_text(encoding="utf-8") if syslog.exists() else ""
+    return r.returncode, r.stdout, log_text, calls
+
+
+def test_the_syslog_stub_is_load_bearing(tmp_path):
+    """🔴 POSITIVE CONTROL for every arm-line assertion below. They all read
+    `syslog_text`; if the stub never captured anything they would all be
+    assertions against an empty string — which is exactly what happened when the
+    stub wrote to stderr and `log()`'s `2>/dev/null` ate it. Require a non-zero
+    capture before believing any of them."""
+    _rc, _o, syslog, _calls = _up_harness(tmp_path)
+    assert syslog.strip(), "the logger stub captured NOTHING"
+    assert "up: killswitch" in syslog, syslog
+
+
+def test_the_harness_observes_a_real_ruleset(tmp_path):
+    """🔴 POSITIVE CONTROL for everything below. Every assertion that follows is
+    of the form "the sentinel is NOT in the fallback" or "there is no flush" —
+    all satisfiable by a harness that captured nothing at all. Require a
+    NON-ZERO observation first: the primary ruleset must be captured, and it
+    must contain the sentinel (which is the whole point of the primary)."""
+    _rc, _o, _e, calls = _up_harness(tmp_path)
+    assert calls, "the nft stub captured NOTHING — the harness is wired to nothing"
+    body = "\n".join(calls)
+    assert _SENTINEL in body, (
+        "the primary ruleset does not contain the lighthouse the env file set — "
+        "the harness is not reaching the real code path")
+    assert "chain out" in body and "drop" in body, body[:400]
+
+
+def test_the_FALLBACK_ruleset_contains_no_lighthouse_derived_value(tmp_path):
+    """🔴 A-2, asserted as a PROPERTY of the rendered text (kills mutant Y1).
+
+    Force the primary load to fail so `arm_failclosed` runs, then require that
+    the text the fallback handed to nft contains the sentinel NOWHERE — no
+    matter what variable name it travelled under.
+    """
+    _rc, _o, _e, calls = _up_harness(tmp_path, nft_fail="first")
+    # Select the fallback by CONTENT, not by index. Indexing on `calls[1]`
+    # happened to be right for the current implementation and wrong for the
+    # previous one (which issued `add` and `flush` as separate nft calls), so it
+    # went red for an indexing reason rather than for the property — red for the
+    # wrong reason is as misleading as green for the wrong reason.
+    loads = [c for c in calls if "chain out" in c]
+    assert len(loads) >= 2, f"the fallback never rendered a ruleset: {calls}"
+    fallback = loads[-1]
+    assert _SENTINEL not in fallback, (
+        "the FALLBACK ruleset interpolates a lighthouse-derived value — the "
+        "value that can break the primary parse must not be able to break the "
+        "fallback too:\n" + fallback)
+    # …and it must still be a real fallback, not an empty one.
+    for required in ("meta skuid", "chain out", "drop"):
+        assert required in fallback, f"the fallback lost its {required} rule"
+
+
+def test_the_load_is_ONE_atomic_transaction(tmp_path):
+    """🔴 F4. The old sequence was `nft add table` → `nft flush table` → `nft -f`:
+    three transactions, the first two of which DESTROY the working killswitch
+    before the third is known to parse. Any failure then left the uplink flushed
+    and empty at exit 0 — the A-2 outcome by a different door (and reachable
+    without the env file at all, e.g. a `$NEBULA_USER` nft cannot resolve).
+
+    Mutant Y6 (delete the flush entirely) survived all 44 tests of the previous
+    revision, because nothing looked at HOW the ruleset was loaded.
+    """
+    _rc, _o, _e, calls = _up_harness(tmp_path)
+    argvs = [c.splitlines()[0] for c in calls]
+    assert not any("flush" in a for a in argvs), (
+        "a separate `nft flush` is back — the load is no longer atomic: " + str(argvs))
+    assert not any(a.startswith("ARGV: add table") for a in argvs), (
+        "a separate `nft add table` is back: " + str(argvs))
+    load = [c for c in calls if "STDIN:" in c]
+    assert load, f"no ruleset was loaded via stdin: {argvs}"
+    first = load[0]
+    assert "delete table inet airvpn_ks" in first, (
+        "the replacement is not self-contained — without the in-transaction "
+        "delete this ADDS to the old table instead of replacing it:\n" + first)
+    assert first.index("delete table") < first.index("chain out"), (
+        "the delete must precede the new definition in the same transaction")
 
 
 def test_the_comment_describing_the_fallback_matches_the_code():
@@ -299,6 +582,201 @@ def test_the_comment_describing_the_fallback_matches_the_code():
     tail = head[head.rindex("# Blanket FAIL-CLOSED"):]
     assert "NO OPERATOR-SUPPLIED TEXT" in tail, (
         "the fallback's comment no longer states what the code does")
+
+
+# --- G6: the arm line must not claim ARMED when nothing is armed --------------
+
+def test_the_arm_line_reports_NOT_ARMED_when_both_loads_failed(tmp_path):
+    """🔴 G6. The old arm line was UNCONDITIONAL — it printed `killswitch armed`
+    even when the primary load AND `arm_failclosed` had both failed, i.e. exactly
+    when the uplink was unfiltered. This PR adds the `lighthouse=` field to that
+    same line and tells the operator to read it, so the line carrying the new
+    signal was the one that lied. Mutant Y5 (always report a lighthouse) survived
+    the previous revision.
+
+    Driven with both loads failing AND the kernel reporting the table absent.
+    """
+    _rc, _o, err, _calls = _up_harness(tmp_path, nft_fail="all", ks_present=False)
+    assert "NOT-ARMED" in err, err
+    assert "UNFILTERED" in err, err
+    assert "killswitch ARMED" not in err, (
+        "the arm line claims ARMED after both loads failed: " + err)
+
+
+def test_the_arm_line_reports_ARMED_when_the_kernel_says_the_table_is_there(tmp_path):
+    """The complement. A guard that only ever says NOT-ARMED is useless too —
+    measure both ends, not just the failure side."""
+    _rc, _o, err, _calls = _up_harness(tmp_path, ks_present=True)
+    assert "killswitch ARMED(primary)" in err, err
+    assert "NOT-ARMED" not in err, err
+    assert f"lighthouse={_SENTINEL}" in err, err
+
+
+def test_the_arm_line_names_the_FALLBACK_when_that_is_what_is_installed(tmp_path):
+    """Three states, not two: primary / fallback / none. Collapsing fallback into
+    'armed' hides that the uplink is running a degraded ruleset with no
+    `meta mark` accept."""
+    _rc, _o, err, _calls = _up_harness(tmp_path, nft_fail="first", ks_present=True)
+    assert "killswitch ARMED(fallback)" in err, err
+
+
+def test_the_ks_present_probe_is_load_bearing(tmp_path):
+    """POSITIVE CONTROL for the three above: flipping ONLY the kernel's answer,
+    with the loads succeeding, must flip the verdict. If it does not, the arm
+    line is still being written from the load's exit status."""
+    _r1, _o1, ok_err, _c1 = _up_harness(tmp_path, ks_present=True)
+    _r2, _o2, no_err, _c2 = _up_harness(tmp_path, ks_present=False)
+    assert "ARMED(primary)" in ok_err and "NOT-ARMED" in no_err, (ok_err, no_err)
+
+
+# --- G9a: check-env is read-only, asserted as a PROPERTY -----------------------
+
+def test_check_env_performs_no_filesystem_writes(tmp_path):
+    """🔴 BEHAVIOURAL half of the read-only guard.
+
+    The previous version forbade a list of TOKENS in the branch text. Mutants X2
+    (`echo x >/tmp/canary`, no space after `>`) and X3 (`touch /tmp/canary`) both
+    walked past it. Snapshot every byte of a sandbox — including the env file
+    itself, HOME and TMPDIR — and require it identical afterwards.
+    """
+    home = tmp_path / "home"; home.mkdir()
+    tmp = tmp_path / "tmp"; tmp.mkdir()
+    env = write_env(tmp_path, f"NEBULA_LIGHTHOUSE={GOOD_V4}\n")
+
+    def snapshot():
+        out = {}
+        for p in sorted(tmp_path.rglob("*")):
+            if p.is_file():
+                st = p.stat()
+                out[str(p.relative_to(tmp_path))] = (st.st_size, st.st_mode,
+                                                     p.read_bytes())
+            elif p.is_dir():
+                out[str(p.relative_to(tmp_path)) + "/"] = None
+        return out
+
+    before = snapshot()
+    rc, _out, _err = check_env(env, extra={"HOME": str(home), "TMPDIR": str(tmp)})
+    assert rc == 0
+    assert snapshot() == before, "check-env WROTE to the filesystem"
+
+
+def test_check_env_invokes_no_external_command_beyond_a_read_only_set(tmp_path):
+    """🔴 STRUCTURAL half — a WHITELIST, not a blacklist.
+
+    A blacklist is what X2/X3 defeated: any command not thought of passes. Run
+    `check-env` with a PATH whose ONLY entries are recording stubs for a small
+    read-only set, plus a catch-all that FAILS LOUDLY for anything else, and
+    require the run to still succeed. A mutant adding `touch`, `cp`, `tee`,
+    `dd`, `install`, `nft` … cannot find it and the recorded log names it.
+
+    Scoped honestly: this observes commands resolved through PATH. A bash
+    BUILTIN redirection is caught by the behavioural test above instead — the
+    two together cover both shapes.
+    """
+    bindir = tmp_path / "robin"; bindir.mkdir()
+    log = tmp_path / "cmds.log"
+    # the read-only set check-env is allowed to reach
+    for allowed in ("id", "logger", "stat"):
+        real = __import__("shutil").which(allowed) or "/bin/true"
+        mockbin.write_exec(bindir / allowed,
+                           f'printf "%s\\n" "{allowed}" >> "{log}"\nexec {real} "$@"\n')
+    env = write_env(tmp_path, f"NEBULA_LIGHTHOUSE={GOOD_V4}\n")
+    # PATH is ONLY the stub dir: anything else is "command not found".
+    rc, out, err = check_env(env, extra={"PATH": str(bindir)})
+    assert rc == 0, (rc, out, err)
+    assert "command not found" not in err, (
+        "check-env reached a command outside the read-only set: " + err)
+    assert f"lighthouse={GOOD_V4}" in out, out
+
+
+def _check_env_code() -> str:
+    src = UPDOWN.read_text(encoding="utf-8")
+    start = src.index("    check-env)")
+    return "\n".join(l for l in src[start:src.index("        ;;", start)].splitlines()
+                     if not l.strip().startswith("#"))
+
+
+def _write_redirections(code: str) -> list[str]:
+    """Every output redirection in `code` that targets a PATH rather than an fd.
+
+    EXHAUSTIVE over the syntax class, which is what makes this different from
+    the token blacklist it replaces: bash has exactly one way to spell "send
+    output somewhere" (`>` / `>>`), and the only benign form here is a
+    duplication onto an existing descriptor (`>&N`). So this is a whitelist over
+    a closed set, not a guess-list of commands somebody might use.
+    """
+    out = []
+    for line in code.splitlines():
+        i = 0
+        while (i := line.find(">", i)) != -1:
+            rest = line[i + 1:].lstrip(">")
+            if not rest.startswith("&"):
+                out.append(line.strip())
+                break
+            i += 1
+    return out
+
+
+def test_check_env_contains_no_output_redirection_to_a_path():
+    """🔴 THE X2 GAP. The audit's mutant X2 — `echo x >/tmp/canary`, no space
+    after the `>` — survived BOTH behavioural guards above: the sandbox snapshot
+    only sees paths under `tmp_path`, and a bash builtin redirection reaches no
+    command through PATH. A write to an absolute path outside the sandbox is
+    invisible to both.
+
+    Three complementary properties now cover `check-env`:
+      1. it writes nothing into a sandbox           (behavioural)
+      2. it reaches no command outside a read-only set (behavioural, PATH)
+      3. it contains no output redirection to a path   (syntactic, THIS)
+    """
+    offenders = _write_redirections(_check_env_code())
+    assert not offenders, (
+        "check-env writes to a path — it must stay read-only:\n  "
+        + "\n  ".join(offenders))
+
+
+@pytest.mark.parametrize("planted", [
+    'echo x >/tmp/canary',          # X2 exactly: no space after >
+    'echo x > /tmp/canary',         # with a space
+    'echo x >>/tmp/canary',         # append
+    'printf y > "$SITE_ENV"',       # clobbering the input
+])
+def test_positive_control_the_redirection_check_catches_each_write_shape(planted):
+    """🔴 A zero-shaped assertion needs a non-zero control. Feed the checker the
+    exact mutant shapes and require a NON-EMPTY result — otherwise "no
+    offenders" is indistinguishable from a checker that can never find one."""
+    found = _write_redirections(_check_env_code() + "\n        " + planted)
+    assert found, f"the redirection check cannot see {planted!r}"
+
+
+def test_positive_control_the_redirection_check_allows_fd_duplication():
+    """The complement: it must not fire on `>&2`, or the guard is unusable and
+    gets deleted the first time someone legitimately writes to stderr."""
+    assert not _write_redirections('        echo "x" >&2')
+
+
+def test_the_read_only_harness_would_catch_a_side_effect(tmp_path):
+    """🔴 POSITIVE CONTROL for both tests above. Neither is worth anything unless
+    a planted side effect actually trips them — a snapshot that compares two
+    empty dicts, or a PATH that was never narrowed, would pass identically.
+
+    Runs a deliberately-mutated COPY of the script, so the real one is untouched.
+    """
+    mutant = tmp_path / "airvpn-updown-mutant"
+    src = UPDOWN.read_text(encoding="utf-8")
+    canary = tmp_path / "canary"
+    # X3's shape: a real external command with a real side effect.
+    src = src.replace('        echo "lighthouse=${NEBULA_LIGHTHOUSE:-UNSET}',
+                      f'        touch "{canary}"\n        echo "lighthouse=${{NEBULA_LIGHTHOUSE:-UNSET}}')
+    mutant.write_text(src, encoding="utf-8")
+    env = write_env(tmp_path, f"NEBULA_LIGHTHOUSE={GOOD_V4}\n")
+    e = dict(os.environ, AIRVPN_UPDOWN_ENV=str(env))
+    e.pop("NEBULA_LIGHTHOUSE", None)
+    subprocess.run([_bash(), str(mutant), "check-env"],
+                   capture_output=True, text=True, env=e, timeout=30)
+    assert canary.exists(), (
+        "the planted side effect did not happen — this control proves nothing "
+        "about the two tests above")
 
 
 # --- the apply script (A-3) ----------------------------------------------------
@@ -373,7 +851,7 @@ def test_the_apply_script_provisions_the_env_BEFORE_installing_the_helper():
 def test_the_skill_documents_the_prerequisite_BEFORE_the_install_command():
     """The same ordering defect in the doc an operator actually follows: the
     requirement used to be a trailing sentence AFTER the install command."""
-    doc = (REPO / "claude" / "skills" / "bar" / "airvpn.md").read_text(encoding="utf-8")
+    doc = SKILL_DOC.read_text(encoding="utf-8")
     prereq = doc.index("/etc/airvpn-updown.env")
     install = doc.index("sudo install -m 0755 -o root -g root")
     assert prereq < install, (
@@ -381,26 +859,106 @@ def test_the_skill_documents_the_prerequisite_BEFORE_the_install_command():
         "install and re-arm")
 
 
+# --- G7: the DURABLE artifact, not just the PR body ---------------------------
+#
+# 🔴 A PR body is read once, by one person, and then it is gone. The file a
+# future session loads is `claude/skills/bar/airvpn.md`. The previous revision
+# renumbered the Procedures correctly and left the *re-test protocol* untouched —
+# so after merge the durable doc described a protocol that could not detect this
+# PR's own failure mode. These pin the protocol itself.
+
+SKILL_DOC = REPO / "claude" / "skills" / "bar" / "airvpn.md"
+
+
+def _protocol_section() -> str:
+    doc = SKILL_DOC.read_text(encoding="utf-8")
+    start = doc.index("## 🔴 Mandatory re-test protocol")
+    return doc[start:doc.index("\n## ", start + 1)]
+
+
+def test_the_retest_protocol_states_the_tunnel_must_ALREADY_BE_UP():
+    """🔴 F2. MEASURED on the workbench: the `airvpn` interface does not
+    currently exist, so the host is in exactly the state where following this
+    protocol literally blackholes its own egress. Arming with the tunnel down
+    yields a chain with no `meta mark` accept and no endpoint accept, ending in
+    `drop`.
+
+    The precondition and the bail must both be IN the protocol, not inferable
+    from it.
+    """
+    sec = _protocol_section()
+    assert "PRECONDITION" in sec and "TUNNEL MUST ALREADY BE UP" in sec.upper(), sec
+    assert "ip link show airvpn" in sec, "no way to CHECK the precondition"
+    assert "nft delete table inet airvpn_ks" in sec, "no bail in the protocol"
+
+
+def test_the_retest_protocol_installs_the_edited_helper():
+    """🔴 G8. MEASURED: the deployed `/etc/nixos/i3blocks-scripts/airvpn-updown`
+    is byte-identical to `origin/main` — the OLD script, with no `check-env`
+    action. A protocol that says "run check-env" without first saying "install
+    the thing you edited" prints usage and exits 1."""
+    sec = _protocol_section()
+    install = sec.index("sudo install -m 0755")
+    check = sec.index("check-env")
+    assert install < check, (
+        "the protocol runs check-env before installing the edited helper — it "
+        "would be exercising the OLD script")
+
+
+def test_the_retest_protocol_observes_the_slash32_route_directly():
+    """🔴 G8. `ip route get <lighthouse>` is the ONLY step that observes A-1.
+    The off-LAN ssh check cannot substitute: with a healthy tunnel, lighthouse
+    traffic routed INTO the tunnel still arrives, so ssh succeeds whether or not
+    the /32 exists."""
+    sec = _protocol_section()
+    assert "ip route get" in sec, "the protocol never observes the /32 bypass"
+    assert "dev airvpn" in sec, "no stated FAILING reading for the route check"
+    route = sec.index("ip route get")
+    ssh = sec.index("ssh zach@")
+    assert route < ssh, "the route check must precede the checks it is not implied by"
+
+
+def test_the_retest_protocol_reads_the_new_arm_line_fields():
+    """The protocol must name the fields this PR added, or it cannot detect the
+    failure modes this PR introduces."""
+    sec = _protocol_section()
+    for token in ("lighthouse=UNSET", "ARMED(primary)", "ARMED(fallback)",
+                  "NOT-ARMED", "state=ok"):
+        assert token in sec, f"the protocol never mentions {token}"
+
+
+def test_the_debug_section_shows_the_CURRENT_arm_line_format():
+    """A stale example is a claim too. The Debug/bail block still showed the
+    pre-`lighthouse=` format, so an operator comparing against it would see a
+    field they had no reason to expect and no reason to check."""
+    doc = SKILL_DOC.read_text(encoding="utf-8")
+    dbg = doc[doc.index("## Debug / bail"):]
+    assert "lighthouse=" in dbg, "the arm-line example predates this PR"
+    assert "killswitch armed (fwmark" not in dbg, (
+        "the Debug section still shows the OLD unconditional `armed` wording")
+    for state in ("ARMED(primary)", "ARMED(fallback)", "NOT-ARMED"):
+        assert state in dbg, f"Debug/bail does not explain {state}"
+
+
 # --- the seam ------------------------------------------------------------------
 
-def test_check_env_is_read_only():
-    """`check-env` exists so this file can test the resolution without arming.
-    If it ever grew a side effect, every test above would be running against a
-    live killswitch path. Pin the SHAPE of the branch, structurally."""
+def test_check_env_still_does_the_one_thing_it_exists_for():
+    """The read-only PROPERTY is asserted behaviourally and by PATH-whitelist
+    above (`test_check_env_performs_no_filesystem_writes`,
+    `…_invokes_no_external_command_beyond_a_read_only_set`), both with a positive
+    control. The token-blacklist that used to live here was a SPELLED guard and
+    the audit's mutants X2/X3 walked past it — it is deleted rather than kept as
+    reassurance.
+
+    What remains here is the complement: a read-only branch that reads nothing
+    would also pass every test above.
+    """
     src = UPDOWN.read_text(encoding="utf-8")
     start = src.index("    check-env)")
-    end = src.index("        ;;", start)
-    # CODE only — a comment explaining "touches no nft table" would otherwise
-    # satisfy a naive substring search for `nft `, which is the spelled-vs-
-    # structural trap (RULES.md).
-    code = "\n".join(l for l in src[start:end].splitlines()
+    code = "\n".join(l for l in src[start:src.index("        ;;", start)].splitlines()
                      if not l.strip().startswith("#"))
-    for forbidden in ("nft ", "ip route", "ip rule", "rm -f", "install ",
-                      "> ", ">>"):
-        assert forbidden not in code, (
-            f"check-env is no longer read-only ({forbidden!r}):\n{code}")
-    # …and it must still actually do the one thing it exists for.
     assert "NEBULA_LIGHTHOUSE" in code and "echo " in code, code
+    assert "state=" in code, "check-env no longer reports WHY it is UNSET (G3)"
 
 
 def test_the_lighthouse_is_never_a_literal_in_this_repo():

@@ -125,9 +125,18 @@ site_env_trusted() {
 
 # Extract NEBULA_LIGHTHOUSE and NOTHING else. Last assignment wins, matching
 # what sourcing would have done, without executing anything.
+#
+# 🔴 `|| [[ -n "$line" ]]` IS THE POINT, NOT A TIDY-UP (audit F3). `read` returns
+# non-zero on a final line with no trailing newline, so the plain loop DROPS it.
+# A file whose write was cut short is exactly a file with no final newline — the
+# canonical A-2 shape — and without this the value resolved to empty and fell
+# into the "key simply absent, no noise" branch below. The guard advertised as
+# "loud about a partially-written file" was SILENT for the one shape it is named
+# after. CRLF-without-final-LF has the same root cause; the `\r` then survives
+# into the value and `valid_ip` rejects it loudly, which is the correct outcome.
 site_env_lighthouse() {
     local path="$1" line val=""
-    while IFS= read -r line; do
+    while IFS= read -r line || [[ -n "$line" ]]; do
         [[ "$line" =~ ^[[:space:]]*NEBULA_LIGHTHOUSE[[:space:]]*=(.*)$ ]] || continue
         val="${BASH_REMATCH[1]}"
         val="${val%%#*}"                       # strip a trailing comment
@@ -146,36 +155,70 @@ site_env_lighthouse() {
     printf '%s' "$val"
 }
 
-# A bare IPv4/IPv6 literal and nothing else. Deliberately STRICTER than "does it
-# look like an address": anything that is not exactly an address is rejected,
-# because the value is interpolated into an nft ruleset and a shell-ish or
-# whitespace-carrying value is the fail-open above.
+# A bare, CANONICAL IPv4 dotted quad and nothing else.
+#
+# 🔴 IPv4 ONLY, DELIBERATELY (audit G1). The consumers of this value are
+# `ip daddr ${…}` — an IPv4-family nft match — and
+# `ip route replace ${…} via ${GW}` where `$GW` is the IPv4 default gateway.
+# Neither can express an IPv6 address. The previous version accepted `::`,
+# `:::::`, `0::0::0` and real v6 literals, and every one of them would have
+# passed validation and then failed the nft LOAD — which flushes the table and
+# falls through to `arm_failclosed`, a ruleset with NO `meta mark` accept, so
+# wg's own encrypted packets are dropped and THE TUNNEL DIES. Validating against
+# "is this an address" instead of "can the ruleset express this" is how a
+# validator becomes the outage.
+#
+# 🔴 LEADING ZEROS ARE REJECTED, not normalised. A zero-prefixed octet is OCTAL
+# to `getent`/`inet_aton` and DECIMAL to nft, so accepting one means the route
+# and the firewall rule name different hosts. (Measured: `getent ahostsv4` on a
+# zero-prefixed octet resolves to a different address than nft would match.)
+# `(( 10# … ))` also stops the range check itself from being an accident:
+# without it, an octet like `09` was rejected only by bash erroring with
+# "value too great for base", which is a crash, not a decision.
 valid_ip() {
-    local v="$1"
+    local v="$1" i o
     [[ -n "$v" ]] || return 1
-    if [[ "$v" =~ ^([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})$ ]]; then
-        local i
-        for i in 1 2 3 4; do (( BASH_REMATCH[i] <= 255 )) || return 1; done
-        return 0
-    fi
-    # IPv6: hex groups and colons only, at least two colons, no zone/scope.
-    [[ "$v" =~ ^[0-9A-Fa-f:]+$ && "$v" == *::* ]] && return 0
-    [[ "$v" =~ ^([0-9A-Fa-f]{1,4}:){7}[0-9A-Fa-f]{1,4}$ ]] && return 0
-    return 1
+    [[ "$v" =~ ^([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})$ ]] || return 1
+    for i in 1 2 3 4; do
+        o="${BASH_REMATCH[i]}"
+        # no leading zeros (except the single digit "0" itself)
+        [[ "$o" == "0" || "$o" != 0* ]] || return 1
+        (( 10#$o <= 255 )) || return 1
+    done
+    return 0
 }
 
+# 🔴 EVERY OUTCOME EXCEPT "file is not there at all" LOGS A REASON. This block
+# runs at TOP LEVEL, which in production means inside wg-quick's PostUp as root,
+# and the operator is told to read `lighthouse=` after a re-arm — so an UNSET
+# with no reason is the failure mode that gets misread as success.
 NEBULA_LIGHTHOUSE=""
-if [[ -r "$SITE_ENV" ]] && site_env_trusted "$SITE_ENV"; then
-    _lh="$(site_env_lighthouse "$SITE_ENV")"
-    if [[ -z "$_lh" ]]; then
-        :   # key simply absent — the documented UNSET case, no noise
-    elif valid_ip "$_lh"; then
-        NEBULA_LIGHTHOUSE="$_lh"
-    else
-        # 🔴 The A-2 case. Do NOT interpolate it anywhere.
-        log "ERROR: NEBULA_LIGHTHOUSE in ${SITE_ENV} is not an IP address (${#_lh} chars) — treating as UNSET"
+if [[ -e "$SITE_ENV" || -L "$SITE_ENV" ]]; then
+    # 🔴 -f, NOT -r (audit G4). A FIFO at this path made the read block FOREVER —
+    # measured, unbounded — with wg-quick's PostUp stalled, the interface UP and
+    # the killswitch NOT yet armed: an indefinite fail-OPEN window, and a failure
+    # mode the pre-env-file script did not have because it read no file at all.
+    # A directory emitted a raw `read error: Is a directory` and silently UNSET.
+    if [[ ! -f "$SITE_ENV" ]]; then
+        log "ERROR: ${SITE_ENV} is not a regular file — IGNORING it (lighthouse UNSET)"
+    elif [[ ! -r "$SITE_ENV" ]]; then
+        # audit G3: distinct from absent. Hitting this while running `check-env`
+        # WITHOUT sudo on a correct 0600 root:root host is the expected answer,
+        # and it must say so rather than looking like "you never set it".
+        log "ERROR: ${SITE_ENV} exists but is not readable by uid $(id -u) — lighthouse UNSET (run as root?)"
+    elif site_env_trusted "$SITE_ENV"; then
+        _lh="$(site_env_lighthouse "$SITE_ENV")"
+        if [[ -z "$_lh" ]]; then
+            log "NOTE: ${SITE_ENV} has no NEBULA_LIGHTHOUSE= line — lighthouse UNSET"
+        elif valid_ip "$_lh"; then
+            NEBULA_LIGHTHOUSE="$_lh"
+        else
+            # 🔴 The A-2 case. Do NOT interpolate the value ANYWHERE — it is
+            # attacker-controlled and this line goes to syslog.
+            log "ERROR: NEBULA_LIGHTHOUSE in ${SITE_ENV} is not a canonical IPv4 address (${#_lh} chars) — treating as UNSET"
+        fi
+        unset _lh
     fi
-    unset _lh
 fi
 
 # Nebula binds listen.port:0 → a RANDOM source port, so match its transport by the
@@ -189,6 +232,38 @@ IFACE_FILE="/run/airvpn-iface"
 KS_TABLE="airvpn_ks"
 
 # (log() is defined near the top — its first callers run before this point.)
+
+# --- ATOMIC ruleset replacement (audit F4) ---------------------------------- #
+# 🔴 THIS IS THE STRUCTURAL FIX FOR A-2, and it is smaller than the validator.
+#
+# The old sequence was `nft add table` → `nft flush table` → `nft -f -`: THREE
+# transactions, the first two of which destroy the working killswitch before the
+# third is known to parse. Any failure in the third left the uplink flushed and
+# EMPTY, and the script exited 0. Validating the env value shut one door into
+# that state; it is not the only door. The fallback still interpolates
+# `$NEBULA_USER`, which comes from `id -un nebula-mesh 2>/dev/null || echo
+# nebula-mesh` — that emits the name EVEN WHEN THE ACCOUNT DOES NOT EXIST, and
+# nft must then resolve it via getpwnam at evaluation time. On a fresh host, or
+# after the nebula user is renamed, BOTH rulesets fail and you are back in the
+# original A-2 outcome by a different route.
+#
+# So: ONE `nft -f`. `table … {}` creates the table if it is absent (idempotent),
+# `delete table …` then removes it, and the full definition recreates it — all in
+# a single transaction, so a parse or evaluation failure changes NOTHING and the
+# previous killswitch stays exactly where it was.
+nft_load_atomic() {
+    local body err rc
+    body="$(cat)"
+    err="$(printf 'table inet %s {}\ndelete table inet %s\n%s\n' \
+             "$KS_TABLE" "$KS_TABLE" "$body" | nft -f - 2>&1)"
+    rc=$?
+    (( rc == 0 )) || log "nft load failed: ${err%%$'\n'*}"
+    return $rc
+}
+
+# Ask the KERNEL whether the table is there. A command's exit status is a claim
+# about the command; this is the observation (audit G6).
+ks_present() { nft list table inet "$KS_TABLE" >/dev/null 2>&1; }
 
 # Blanket FAIL-CLOSED ruleset — installed only if the main killswitch nft load
 # fails, so an nft error can never leave the uplink UNFILTERED (fail-open).
@@ -204,17 +279,29 @@ KS_TABLE="airvpn_ks"
 # The LIGHTHOUSE is deliberately ABSENT. It is the one value that comes from a
 # file on disk, it is exactly what a partially-written env file corrupts, and
 # with it in here a bad value took out BOTH the primary ruleset and its
-# fallback (audit A-2). Losing the lighthouse `accept` here costs the direct
-# un-tunnelled path to it; nebula's own transport is still allowed by the
-# `meta skuid` rule above, and the LAN rule keeps a recovery path open. That is
-# the correct trade for a fallback whose whole job is to parse.
+# fallback (audit A-2).
+#
+# 🔴 WHAT REMOVING IT ACTUALLY COSTS — read this carefully, because the obvious
+# reasoning is WRONG and an earlier version of this comment used it.
+#
+#   It is tempting to say "nebula still has egress via `meta skuid`, so we only
+#   lose the direct path". That conflates a FIREWALL decision with a ROUTING
+#   decision. `meta skuid` and `ip daddr <lighthouse>` are both ACCEPT rules in
+#   the same chain; the thing that decides whether lighthouse traffic goes out
+#   un-tunnelled is the main-table `/32` ROUTE, which lives nowhere near this
+#   ruleset and is unaffected by anything here.
+#
+#   So the honest accounting is: removing this line costs NOTHING that the
+#   `meta skuid` rule above was not already granting. `meta skuid` PRECEDES it
+#   in rule order and matches nebula's socket owner regardless of destination,
+#   so the lighthouse `accept` was DOMINATED — a no-op — in both rulesets. What
+#   ever mattered for the lighthouse is the `/32` route, and that is a separate
+#   mechanism with a separate failure mode (see the header, and A-1).
 #
 # The reachability of THIS function is what matters, not its rule count: it runs
-# only when `nft -f -` on the primary ruleset returned non-zero.
+# only when the primary `nft_load_atomic` returned non-zero.
 arm_failclosed() {
-    nft add table inet "$KS_TABLE" 2>/dev/null || true
-    nft flush table inet "$KS_TABLE" 2>/dev/null || true
-    nft -f - <<FB || log "FALLBACK nft load ALSO FAILED — uplink is NOT filtered!"
+    nft_load_atomic <<FB || { log "FALLBACK nft load ALSO FAILED — uplink is NOT filtered!"; return 1; }
 table inet ${KS_TABLE} {
     chain out {
         type filter hook output priority 0; policy accept;
@@ -301,9 +388,9 @@ case "$action" in
             log "ERROR: no physical uplink NIC found — arming FAIL-CLOSED killswitch (internal ifaces only)"
             UPLINK_GUARD='oifname { "lo", "'"${IFACE}"'", "nebula.mesh", "cni0", "flannel.1", "docker0" } accept'
         fi
-        nft add table inet "$KS_TABLE" 2>/dev/null || true
-        nft flush table inet "$KS_TABLE" 2>/dev/null || true
-        nft -f - <<NFT || { log "killswitch nft load FAILED — installing blanket fail-closed fallback"; arm_failclosed; }
+        # 🔴 ONE transaction (see nft_load_atomic). A failure here changes NOTHING
+        # — the previous killswitch, if any, is still installed.
+        if nft_load_atomic <<NFT
 table inet ${KS_TABLE} {
     chain out {
         type filter hook output priority 0; policy accept;
@@ -325,10 +412,29 @@ table inet ${KS_TABLE} {
     }
 }
 NFT
+        then
+            KS_RULESET="primary"
+        else
+            log "killswitch nft load FAILED — installing blanket fail-closed fallback"
+            if arm_failclosed; then KS_RULESET="fallback"; else KS_RULESET="none"; fi
+        fi
+
+        # 🔴 THE LOG LINE BELOW IS THE ONE THE OPERATOR IS TOLD TO READ, so it
+        # must not claim "armed" on the word of a command that returned non-zero
+        # (audit G6 — the old line was unconditional and printed `armed` even
+        # when the primary load AND the fallback had both failed, i.e. exactly
+        # when the uplink was unfiltered). ASK THE KERNEL.
+        if ks_present; then
+            KS_STATE="ARMED(${KS_RULESET})"
+        else
+            KS_STATE="NOT-ARMED"
+            log "🔴 killswitch NOT ARMED — table inet ${KS_TABLE} is ABSENT after load; the uplink is UNFILTERED"
+        fi
         # 🔴 `lighthouse=` is the field to read after a re-arm. UNSET on a host
         # that should have it means the env file is missing/untrusted/malformed,
-        # NOT that the change worked.
-        log "up: killswitch armed (fwmark=${FWMARK:-none}) policing [${PHYS_SET[*]:-FAIL-CLOSED}], gw=${GW:-none} ep=${EP:-?} lighthouse=${NEBULA_LIGHTHOUSE:-UNSET}"
+        # NOT that the change worked. `ip route get <lighthouse>` is the only
+        # check that observes the /32 bypass itself — see the `bar` skill.
+        log "up: killswitch ${KS_STATE} (fwmark=${FWMARK:-none}) policing [${PHYS_SET[*]:-FAIL-CLOSED}], gw=${GW:-none} ep=${EP:-?} lighthouse=${NEBULA_LIGHTHOUSE:-UNSET}"
         ;;
     check-env)
         # READ-ONLY. Touches no nft table, no route, no file. Exists so the env
@@ -336,7 +442,23 @@ NFT
         # its lighthouse bypass — is testable without root and without arming
         # anything. Prints one line; exits 0 when a lighthouse resolved, 1 when
         # it did not.
-        echo "lighthouse=${NEBULA_LIGHTHOUSE:-UNSET} env=${SITE_ENV}"
+        #
+        # 🔴 `state=` distinguishes the outcomes an UNSET can mean (audit G3).
+        # This is the diagnostic the operator is told to trust, and running it
+        # WITHOUT sudo on a correct 0600 root:root host is the likeliest way to
+        # see UNSET — that must read as "you are not root", not as "unset".
+        if [[ -n "$NEBULA_LIGHTHOUSE" ]]; then
+            _st="ok"
+        elif [[ ! -e "$SITE_ENV" && ! -L "$SITE_ENV" ]]; then
+            _st="absent"
+        elif [[ ! -f "$SITE_ENV" ]]; then
+            _st="not-a-regular-file"
+        elif [[ ! -r "$SITE_ENV" ]]; then
+            _st="unreadable-by-uid-$(id -u)"
+        else
+            _st="rejected-or-empty"
+        fi
+        echo "lighthouse=${NEBULA_LIGHTHOUSE:-UNSET} state=${_st} env=${SITE_ENV}"
         [[ -n "$NEBULA_LIGHTHOUSE" ]]
         exit $?
         ;;

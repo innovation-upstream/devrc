@@ -80,22 +80,54 @@ before the helper that reads it is installed, or you install and re-arm a degrad
    leaves you with `lighthouse=UNSET`. Read `journalctl -t airvpn-updown -n5` every time.
 
 ## 🔴 Mandatory re-test protocol for ANY killswitch change
-A LAN-only test CANNOT reach the nebula direct-punch lockout mode, so it is NOT sufficient:
+A LAN-only test CANNOT reach the nebula direct-punch lockout mode, so it is NOT sufficient.
+
+🔴 **PRECONDITION — THE TUNNEL MUST ALREADY BE UP.** `airvpn-updown up` arms the killswitch
+against whatever it can see *now*. With the tunnel DOWN, `wg show … fwmark` fails (no
+`meta mark` accept) and there is no endpoint accept, so the chain reduces to
+*allow LAN + gateway + nebula-by-skuid + lighthouse, then **drop***, and **every other
+host-originated packet on a physical NIC is dropped**. It is bounded — the output hook does
+not see forwarded pod traffic, and LAN + nebula survive — but you will blackhole the host's own
+egress. Check first:
+
+```
+ip link show airvpn >/dev/null 2>&1 && echo TUNNEL-UP || echo TUNNEL-DOWN-DO-NOT-ARM
+```
+
+**Instant bail, from the LAN session, at any point:** `sudo nft delete table inet airvpn_ks`.
+
 1. Run it from a **LAN session** (192.168.50.x — always allowed = your recovery path) held open.
-2. Workbench k3s healthy:
+2. Site config exists: `sudo test -f /etc/airvpn-updown.env && sudo stat -c '%U:%G %a' /etc/airvpn-updown.env`
+   → expect `root:root 600`. Create it first if not (Procedures step 1).
+3. **Install the edited helper** — without this you are testing the OLD script:
+   `sudo install -m 0755 -o root -g root ~/workspace/devrc/scripts/airvpn-updown /etc/nixos/i3blocks-scripts/airvpn-updown`
+4. `sudo /etc/nixos/i3blocks-scripts/airvpn-updown check-env` → **`lighthouse=<ip> state=ok`**.
+   `state=unreadable-by-uid-…` means you dropped the `sudo`, not that the file is wrong.
+5. Re-arm: `sudo /etc/nixos/i3blocks-scripts/airvpn-updown up airvpn`
+6. `journalctl -t airvpn-updown -n5` → **`up: killswitch ARMED(primary) … lighthouse=<ip>`**.
+   `ARMED(fallback)` = the primary ruleset did not load. `NOT-ARMED` = **the uplink is
+   unfiltered**. `lighthouse=UNSET` = the site config was missing, rejected or malformed.
+7. 🔴 **`ip route get <lighthouse-ip>`** — the ONLY step that observes the `/32` bypass, i.e.
+   the thing A-1 is about. `via <lan-gw> dev <phys>` = the bypass is present;
+   `dev airvpn` = it is GONE and lighthouse traffic is inside the tunnel.
+   **Step 10 cannot substitute for this**: with a healthy tunnel, lighthouse traffic routed
+   *into* the tunnel still arrives, so the ssh check passes either way.
+8. Workbench k3s healthy:
    `KUBECONFIG=/home/zach/workspace/homelab-talos/workbench-kubeconfig kubectl get pods -A | grep -vE 'Running|Completed'`
    (expect nothing bad).
-3. Nebula overlay intact: `KUBECONFIG=$KC_HOMELAB kubectl get nodes` → **4 nodes**.
-4. Exit IP is the tunnel: `curl -s https://ipinfo.io/json` → **CA** and an AirVPN `org`,
-   NOT your home ISP's IP/org. (This repo is PUBLIC — the home IP is deliberately not
-   written down here; compare against `curl -s https://ipinfo.io/json` with the tunnel
-   DOWN.)
-5. **Confirm off-LAN:** `ssh zach@10.42.0.30` still connects (proves the nebula path survived —
-   the LAN test can't cover this).
+9. Nebula overlay intact: `KUBECONFIG=$KC_HOMELAB kubectl get nodes` → **4 nodes**.
+10. Exit IP is the tunnel: `curl -s https://ipinfo.io/json` → **CA** and an AirVPN `org`,
+    NOT your home ISP's IP/org. (This repo is PUBLIC — the home IP is deliberately not
+    written down here; compare against the same command with the tunnel DOWN.)
+11. **Confirm off-LAN:** `ssh zach@10.42.0.30` still connects (proves the nebula path survived —
+    the LAN test can't cover this).
 
 ## Debug / bail
 - arm line: `journalctl -t airvpn-updown -n5` →
-  `up: killswitch armed (fwmark=…) policing [<nics>] …`.
+  `up: killswitch ARMED(primary) (fwmark=…) policing [<nics>], gw=… ep=… lighthouse=<ip>`.
+  Three states: `ARMED(primary)` · `ARMED(fallback)` (degraded — no `meta mark` accept) ·
+  `NOT-ARMED` (**uplink unfiltered**; the kernel is asked with `nft list table`, the line is
+  not written from an exit status).
 - instant bail that KEEPS the tunnel up (drops the killswitch only):
   `sudo nft delete table inet airvpn_ks`.
 - connect / disconnect (NOPASSWD): `sudo /etc/nixos/i3blocks-scripts/airvpn-sudo {up,down}`.
