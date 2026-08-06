@@ -43,11 +43,9 @@ stamps `host` from `ACTIVITY_HOST`.
 | Schema columns | `ts DateTime64(3) (UTC), host, source, kind, project, cwd, session, app, text, duration_ms, exit_code, payload(JSON), ingested_at` |
 
 ### The sources — MEASURED, not declared
-🔴 This table said "six sources" and got two things wrong; both were measured on
-2026-08-03 against `activity.events` and corrected. **Do not re-derive the
-expected-present set from prose — run `python3 ~/workspace/devrc/scripts/collector/deadman.py`,
-which derives it from the table.** Live pairs: **9 sources on the laptop, 8 on the
-workbench, 17 pairs total.**
+🔴 **Do not re-derive the expected-present set from prose** — run
+`python3 ~/workspace/devrc/scripts/collector/deadman.py`, which derives it from the table.
+Live pairs (measured 2026-08-03): **9 sources on the laptop, 8 on the workbench, 17 total.**
 
 | source | what | laptop | workbench |
 |---|---|---|---|
@@ -89,13 +87,10 @@ inject post-reload). Manifest **v1.4.0**. When a file is DELETED upstream (e.g. 
   `$__timeFilter` / range comparisons (they're UTC, aligned with `now()`).
 - **Both hosts are hostname `nixos`** → without `ACTIVITY_HOST` in the env, every row
   collides on `host=nixos`. Set it per host.
-- 🔴 **CORRECTED 2026-08-03 — "keylog + browser + i3 are GUI-only → laptop only; the
-  workbench is headless" was FALSE and had been for a long time.** Measured against
-  `activity.events`: the workbench emits **i3 (41,001 rows) and keys (37,376 rows)**, both
-  fresh. The workbench runs a real X/i3 session; only the **Brave activity extension** is
-  laptop-only, so `browser` is the single source with 0 workbench rows. Anything that
-  decides "is this source expected here?" must read the TABLE, not this file — which is why
-  `deadman.py` derives the expected set from measured baselines instead of a hand-kept list.
+- 🔴 **Never decide "is this source expected on this host?" from prose.** "keylog + browser
+  + i3 are GUI-only → laptop-only; the workbench is headless" was FALSE for a long time —
+  the workbench runs a real X/i3 session (see the source table above). Read the TABLE;
+  `deadman.py` derives the expected set from measured baselines, not a hand-kept list.
 - **Full-content keylogging** → `activity.events` holds secrets. That is WHY the store is a
   dedicated authed ClickHouse, not the shared LAN-open clickstack. Treat reader/writer creds
   as sensitive.
@@ -189,11 +184,11 @@ Creds come from `~/.config/activity-collector/env` (the collector's own file) un
 
 ## regrowth check — "is the ClickHouse store growing back?"
 `scripts/collector/ch_regrowth.py` (+ `run-regrowth-check.sh`, the sops/kubeconfig wrapper).
-2026-08-03 the store was cut **112.4 GB → 82.1 MB** after `system.trace_log` hit 3.77
-BILLION rows in ~5 weeks; the fix was a Flux config change (logger trace→warning, four
-query-profiler log tables removed, 7d/14d TTLs, merge pool 32→8). **Nothing else would
-notice that silently reverting.** Read-only; **workbench-only** systemd user timer
-`ch-regrowth-check`, **monthly on the 11th**, `Persistent=true`.
+2026-08-03 the store was cut **112.4 GB → 82.1 MB** (`system.trace_log`: 3.77 BILLION rows
+in ~5 weeks); the Flux fix = logger trace→warning, four query-profiler log tables removed,
+7d/14d TTLs, merge pool 32→8. **Nothing else would notice that silently reverting.**
+Read-only; **workbench-only** timer `ch-regrowth-check`, **monthly on the 11th**,
+`Persistent=true`.
 ```bash
 scripts/collector/run-regrowth-check.sh            # or: systemctl --user start ch-regrowth-check
 # from the laptop (nebula), by hand:
@@ -203,18 +198,23 @@ KUBECONFIG=~/.kube/homelab-nebula.yaml CH_REGROWTH_URL=http://10.42.0.10:30123 \
 - Asserts: `du(store)` >2 GiB ALARM / >1 GiB WARN · any `*_0` table (a TTL applied to an
   existing `*_log` RENAMES the old one aside, which then keeps its rows with **NO TTL
   forever**) · `trace_log`/`text_log`/`latency_log`/`processors_profile_log` existing at all
-  · any table >250 MiB · **TTL effectiveness** — `min(event_time)` younger than TTL+1d
-  (the only check that tests the MECHANISM, not today's outcome).
-- Exit **0 ok · 1 ALARM · 2 CANNOT TELL · 3 WARN**. Every non-zero is a unit failure →
-  the existing `OnFailure=notify-failure@` sticky toast. Verdict + every number it read
-  lands in `~/.cache/ch-regrowth/status.json`.
+  · any table >250 MiB · **TTL effectiveness** — `min(event_time)` younger than **TTL+3d**
+  (**10d** / **17d**; the only check that tests the MECHANISM, not today's outcome) · **TTL
+  coverage** — fewer targets measured than present → WARN.
+- Exit **0 ok · 1 ALARM · 2 CANNOT TELL · 3 WARN (incl. a DEGRADED/partial read)**. Every
+  non-zero is a unit failure → the existing `OnFailure=notify-failure@` sticky toast.
+  Verdict + every number it read lands in `~/.cache/ch-regrowth/status.json`.
+- Transient failures (5xx/429/connection — the pod's 2.5 GiB ceiling returns `Code: 241`
+  under merge load) are retried; the TTL union then falls back to one retried query per
+  table, wall-clock bounded. Exhausted retries stay CANNOT TELL.
 - 🔴 **`du` sits ~40% above the live `total_bytes` sum by design** (8-slot merge pool
   leaves inactive parts around). That gap is NOT a leak — do not re-derive an alarm from it.
 - 🔴 Its reassuring answers are all ZEROS, so `ok` is gated on positive controls (listing
-  non-empty, `activity.events` present, >0 `*_log` matches, >0 tables over 1 MiB, ≥1 TTL
-  target measured). Any failure state — `not-configured`/`unreachable`/`query-failed`/
-  `exec-failed`/`no-data` — is LOUD and is never `ok`. Read its module docstring before
-  changing any threshold; every one is derived from a named measurement.
+  non-empty, `activity.events` present, >0 `*_log` matches, >0 tables over 1 MiB, **all**
+  present TTL targets measured — 1-of-4 measured is exit 3, not a clean store). Any failure
+  state — `not-configured`/`unreachable`/`query-failed`/`exec-failed`/`no-data` — is LOUD
+  and never `ok`. Read its module docstring before changing a threshold; each is derived
+  from a named measurement.
 
 ## troubleshoot a stalled source
 1. `journalctl --user -u <service> -n 30` — `urlopen timed out` = can't reach CH (check the

@@ -60,6 +60,15 @@ WHAT IS ASSERTED
   5. TTL EFFECTIVENESS: min(event_time) younger than TTL + 3 days, per table
      (metric_log / asynchronous_metric_log: 10d; query_log / part_log: 17d).
      Rows older than the TTL surviving means the TTL is not binding.
+  6. TTL COVERAGE: fewer targets measured than are PRESENT -> WARN (exit 3).
+     🔴 A DEGRADED READ IS NOT A CLEAN ONE. Check 5 is per-table, so a target
+     that never answered is simply absent from the verdict — and the table most
+     likely to keep failing its own `min(event_time)` is the LARGEST one, i.e.
+     precisely the one that would be regrowing. "1 of 4 measured, all within
+     bound" exiting 0 would let the single most diagnostic target drop out
+     silently. It is deliberately a WARN and not an ALARM: nothing was OBSERVED
+     to be wrong, and it stays distinct from CANNOT-TELL (exit 2), which is what
+     ZERO measured targets still produces.
 
 🔴 THE `du` EXIT CODE IS NOT A VERDICT ON THE MEASUREMENT. A live store creates
 and removes `tmp_merge_*` directories constantly, so busybox `du` exits 1 when
@@ -81,7 +90,12 @@ to ONE QUERY PER TABLE.
 rounding error against the 2.5 GiB ceiling. The ceiling was reached by
 BACKGROUND MERGES eating the total budget, not by this query's own footprint.
 So do not expect the split to prevent an OOM; it removes this query as a
-contributor and gives the retry a second, smaller shape to try.
+contributor and gives the retry a second, smaller shape to try. The per-table
+fallback gets the SAME retry budget as the union (it used to get one attempt, so
+the target most likely to fail — the largest — had the fewest chances). That
+does not widen the worst case: no retry STARTS past COLLECT_BUDGET_SECONDS, and
+the fallback loop itself breaks at that deadline, so the whole collection is
+bounded by one full retry budget plus one in-flight query per remaining phase.
 
 Retries NEVER weaken the fail-closed property: the last attempt re-raises the
 original exception, so an exhausted retry produces a non-`ok` state and exit 2
@@ -200,8 +214,18 @@ TTL_DATABASE = "system"
 QUERY_ATTEMPTS = 3
 QUERY_BACKOFF_SECONDS = (2.0, 5.0)
 # Wall-clock ceiling on the whole collection, so retries + per-table fallbacks
-# can never approach the unit's TimeoutStartSec (240s). No new attempt STARTS
-# past this; one already in flight can still run out its own `timeout`.
+# can never approach the unit's TimeoutStartSec. No RETRY starts past this, and
+# the per-table fallback loop breaks at it; a query already in flight can still
+# run out its own `timeout`.
+#
+# 🔴 THIS NUMBER IS COUPLED TO `TimeoutStartSec` IN nix/home.nix, AND THE
+# COUPLING IS ASSERTED, NOT COMMENTED. A comment cannot fail. The worst case is
+# ONE phase burning its whole retry budget (QUERY_ATTEMPTS * DEFAULT_TIMEOUT +
+# every backoff = 97s — after which no later retry can start) plus ONE ungated
+# first attempt for each remaining phase (listing, ttl, du = 3 * 30s) = 187s.
+# `test_the_collection_budget_is_pinned_to_the_units_timeout` MEASURES that by
+# simulating the adversary rather than restating the arithmetic, and reads
+# `TimeoutStartSec` out of nix/home.nix rather than re-declaring it here.
 COLLECT_BUDGET_SECONDS = 120.0
 
 STORE_PATH = "/var/lib/clickhouse/store"
@@ -374,6 +398,7 @@ def evaluate(reading, now=None) -> dict:
         "probe_size_threshold": TABLE_PROBE_BYTES,
         "probe_size_matches": len(probe_size),
         "ttl_tables_measured": 0,   # filled in below
+        "ttl_targets_present": 0,   # filled in below
     }
 
     # 🔴 EVERY CHECK RUNS BEFORE ANY GATE RETURNS. The gates below decide
@@ -484,6 +509,35 @@ def evaluate(reading, now=None) -> dict:
                              "rows": row["rows"]}})
 
     controls["ttl_tables_measured"] = measured
+    controls["ttl_targets_present"] = len(present_targets)
+
+    # ---- 6. TTL COVERAGE — a DEGRADED read must not report success ---------
+    # 🔴 THE CONTROL MUST AFFECT THE VERDICT, NOT JUST THE REPORT. Reporting
+    # `ttl_tables_measured` while letting the state stay `ok` produced exit 0
+    # with the detail "1 TTL target(s) measured, all within bound" — a green
+    # unit built on three targets that never answered. And the target most
+    # likely to keep failing its own `min(event_time)` is the LARGEST one, i.e.
+    # the one that would be regrowing, so the most diagnostic reading is the
+    # one that silently drops out.
+    #
+    # WARN, not ALARM: nothing was OBSERVED to be wrong. Distinct from
+    # CANNOT-TELL: zero measured targets is still `no-data` / exit 2 below.
+    unmeasured = [r for r in ttl_report if r["reason"] != "measured"]
+    if unmeasured:
+        findings.append({
+            "check": "ttl-coverage", "level": "warn",
+            "detail": "only %d of %d present TTL target(s) yielded a "
+                      "measurable oldest row (%s) — the TTL verdict covers "
+                      "less than the store, and an unmeasured target is NOT "
+                      "evidence that its TTL is binding"
+                      % (measured, len(present_targets),
+                         ", ".join("%s: %s" % (r["table"], r["reason"])
+                                   for r in unmeasured)),
+            "observed": {"measured": measured,
+                         "present": len(present_targets),
+                         "unmeasured": [{"table": r["table"],
+                                         "reason": r["reason"]}
+                                        for r in unmeasured]}})
 
     # ---- GATES: is this reading EVALUABLE at all? --------------------------
     # Each carries `findings` so a diagnosis already made is not thrown away.
@@ -571,13 +625,16 @@ def _summarize(state, findings, du_bytes, controls) -> str:
         # "0 orphans" is indistinguishable from a check wired to nothing.
         return ("store %s; 0 orphan '*%s' tables (control: %d tables matched "
                 "'*%s'); 0 forbidden log tables; 0 tables over %s (control: %d "
-                "tables over %s); %d TTL target(s) measured, all within bound"
+                "tables over %s); %d of %d TTL target(s) measured, all within "
+                "bound"
                 % (human_bytes(du_bytes), ORPHAN_SUFFIX,
                    controls["probe_suffix_matches"], PROBE_SUFFIX,
                    human_bytes(TABLE_ALARM_BYTES),
                    controls["probe_size_matches"],
                    human_bytes(TABLE_PROBE_BYTES),
-                   controls["ttl_tables_measured"]))
+                   controls["ttl_tables_measured"],
+                   controls.get("ttl_targets_present",
+                                controls["ttl_tables_measured"])))
     return "; ".join(f["detail"] for f in findings)
 
 
@@ -801,7 +858,9 @@ def collect(env=None, timeout: float = DEFAULT_TIMEOUT,
             # a cure. The retry above is the actual fix. If every per-table read
             # ALSO fails we return unreachable exactly as before; and if only
             # some succeed, the `ttl_tables_measured` positive control still
-            # governs — zero measured targets is no-data / exit 2, never `ok`.
+            # governs — zero measured targets is no-data / exit 2, and FEWER
+            # measured than present is the check-6 WARN / exit 3. Neither is
+            # `ok`. A partial answer is a degraded read, not a clean store.
             if not (len(present) > 1 and _is_transient(e)):
                 return {"error": (STATE_UNREACHABLE,
                                   "ttl query failed: %s" % str(e)[:200])}
@@ -810,10 +869,23 @@ def collect(env=None, timeout: float = DEFAULT_TIMEOUT,
                              % str(e)[:200])
             parts = []
             for name in present:
+                # 🔴 THE ONLY THING STOPPING THIS LOOP FROM OUTLIVING THE UNIT.
+                # Nothing inside the loop is bounded by attempt count alone: a
+                # per-table read gets the full retry budget, and a slow one can
+                # burn `timeout` per attempt. This break is what makes the
+                # TimeoutStartSec argument true — the loop starts no NEW target
+                # past the budget, so the overrun is at most one in-flight
+                # query. Reached (with targets left unqueried) by
+                # `test_the_fallback_stops_starting_new_targets_at_the_deadline`.
                 if clock() >= deadline:
                     break
                 try:
-                    parts.append(_q(ttl_query([name]), attempts=1))
+                    # Same retry budget as the union. It used to be ONE attempt,
+                    # which gave the fewest chances to the target most likely to
+                    # fail its own `min(event_time)`: the LARGEST one — the one
+                    # that would be regrowing. The deadline above, not the
+                    # attempt count, is what bounds this.
+                    parts.append(_q(ttl_query([name])))
                 except Exception:  # noqa: BLE001 — that target goes UNMEASURED
                     continue       # (reason "not-queried"), never assumed fine
             if not parts:
@@ -915,8 +987,9 @@ def render_text(v: dict) -> str:
                         c.get("probe_size_matches"),
                         human_bytes(TABLE_ALARM_BYTES),
                         m.get("oversized_count")))
-        lines.append("  TTL tables measured     = %s"
-                     % c.get("ttl_tables_measured"))
+        lines.append("  TTL tables measured     = %s of %s present"
+                     % (c.get("ttl_tables_measured"),
+                        c.get("ttl_targets_present")))
     if m.get("ttl"):
         lines.append("")
         lines.append("%-26s %12s %10s %10s  %s"

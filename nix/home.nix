@@ -2158,10 +2158,20 @@ in
       #
       # 180 -> 240 when the checker gained retries: a transient HTTP 500 (the
       # observed `Code: 241 MEMORY_LIMIT_EXCEEDED`) is now retried with backoff
-      # and the TTL union falls back to one query per table. ch_regrowth.py
-      # bounds that itself with COLLECT_BUDGET_SECONDS = 120 — no new attempt
-      # STARTS past 120s — so the worst case is 120 + one in-flight 30s query +
-      # the `du` exec. 240 leaves margin over that without hiding a real hang.
+      # and the TTL union falls back to one query per table (which retries too).
+      # ch_regrowth.py bounds that itself with COLLECT_BUDGET_SECONDS = 120 — no
+      # RETRY starts past 120s, and the per-table fallback loop breaks there.
+      #
+      # 🔴 WORST CASE IS 187s, NOT ~180. This comment used to say "120 + one
+      # in-flight 30s query + the du exec", which understates it by a whole
+      # query phase: only RETRIES are deadline-gated, so after ONE phase burns
+      # its full budget (3 x 30s + 2s + 5s = 97s) each of the three remaining
+      # phases still gets one ungated 30s attempt — 97 + 90 = 187. The
+      # conclusion holds (187 < 240), but do not re-derive the margin from the
+      # old sentence. This number is not asserted from a comment:
+      # test_the_collection_budget_is_pinned_to_the_units_timeout SIMULATES the
+      # adversary that maximises wall clock and reads THIS `TimeoutStartSec`
+      # out of this file, so the two cannot drift apart.
       TimeoutStartSec = 240;
       Environment = [
         "PATH=${lib.makeBinPath [ pkgs.python312 pkgs.kubectl pkgs.sops pkgs.bash pkgs.coreutils ]}"

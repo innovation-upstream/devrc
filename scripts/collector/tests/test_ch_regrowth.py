@@ -31,6 +31,7 @@ Run: pytest scripts/collector/tests/test_ch_regrowth.py
 """
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -325,7 +326,12 @@ def test_the_two_ttl_tiers_actually_differ():
 
 def test_empty_ttl_target_is_not_evidence_and_is_not_stale():
     """min() over an empty table reports the epoch. That must not read as a
-    62-year-old row (a false ALARM) — nor be counted as a measurement."""
+    62-year-old row (a false ALARM) — nor be counted as a measurement.
+
+    It is also not a clean read: 3 of 4 targets measured is degraded TTL
+    coverage, so the verdict is WARN / exit 3 (check 6), not `ok`. What this
+    test pins is that the EMPTY table is not STALE — the coverage warn is a
+    separate finding and must not be an `ttl-effectiveness` alarm."""
     ttl = baseline_ttl()
     ttl[0].update(rows=0, min_event_ts=0)
     v = R.evaluate(baseline_reading(ttl=ttl), now=NOW)
@@ -333,7 +339,9 @@ def test_empty_ttl_target_is_not_evidence_and_is_not_stale():
     assert row["stale"] is False
     assert row["reason"] == "empty"
     assert v["controls"]["ttl_tables_measured"] == 3
-    assert v["state"] == R.STATE_OK
+    assert checks_named(v, "ttl-effectiveness") == []
+    assert v["state"] == R.STATE_WARN
+    assert R.exit_code(v) == R.EXIT_WARN
 
 
 def test_control_pair_ttl_measured_count_moves():
@@ -810,13 +818,17 @@ def test_ttl_union_falls_back_to_one_query_per_table():
 
 def test_a_partial_per_table_fallback_measures_what_it_can():
     """Two targets answer, two do not. The two that answered are real
-    measurements; the two that did not are `not-queried`, never assumed fine."""
+    measurements; the two that did not are `not-queried`, never assumed fine —
+    and the run as a whole is DEGRADED, so it exits 3 rather than reporting a
+    clean store off half a reading."""
     q = per_table_ttl_query(ok_tables={"metric_log", "query_log"})
     v = R.check(env=GOOD_ENV, now=NOW, query=q, du=ok_du, sleep=lambda s: None)
     assert v["controls"]["ttl_tables_measured"] == 2
     unmeasured = {r["table"] for r in v["measurements"]["ttl"]
                   if r["reason"] == "not-queried"}
     assert unmeasured == {"asynchronous_metric_log", "part_log"}
+    assert v["state"] == R.STATE_WARN
+    assert R.exit_code(v) == R.EXIT_WARN
 
 
 def test_a_fallback_that_measures_nothing_is_cannot_tell_not_ok():
@@ -838,8 +850,11 @@ def test_the_retry_schedule_is_pinned_to_literal_values():
     assert R.QUERY_BACKOFF_SECONDS == (2.0, 5.0)
     assert len(R.QUERY_BACKOFF_SECONDS) == R.QUERY_ATTEMPTS - 1
     assert all(s > 0 for s in R.QUERY_BACKOFF_SECONDS)
-    # The whole retry budget must stay well inside the unit's TimeoutStartSec.
-    assert sum(R.QUERY_BACKOFF_SECONDS) * 3 < R.COLLECT_BUDGET_SECONDS
+    # 🔴 The budget's coupling to TimeoutStartSec is NOT asserted here. It used
+    # to be, as `sum(QUERY_BACKOFF_SECONDS) * 3 < COLLECT_BUDGET_SECONDS` —
+    # i.e. `21 < budget`, true of anything >= 22, so the budget could be set to
+    # 100000.0 with the suite still green. The real coupling is measured in
+    # `test_the_collection_budget_is_pinned_to_the_units_timeout`.
 
 
 def test_no_retry_starts_once_the_collection_budget_is_spent():
@@ -855,6 +870,45 @@ def test_no_retry_starts_once_the_collection_budget_is_spent():
     assert v["state"] == R.STATE_UNREACHABLE
     assert slept == [], "a retry started past the budget"
     assert sum(1 for c in q.calls if "now()" in c) == 1
+
+
+def per_table_flaky(failures_by_table):
+    """The UNION always 500s; each per-table read 500s its first
+    `failures_by_table[name]` times and then answers."""
+    rows = {r["table"]: r for r in baseline_ttl()}
+    calls, seen = [], {}
+
+    def q(url, user, password, sql, timeout):
+        calls.append(sql)
+        if "now()" in sql:
+            return "%d\n" % NOW
+        if "FROM system.tables" in sql:
+            return listing_tsv(baseline_tables())
+        if "UNION ALL" in sql:
+            raise memory_limit_500()
+        name = sql.split("'")[1]
+        seen[name] = seen.get(name, 0) + 1
+        if seen[name] <= failures_by_table.get(name, 0):
+            raise memory_limit_500()
+        return ttl_tsv([rows[name]])
+
+    q.calls, q.seen = calls, seen
+    return q
+
+
+def test_the_per_table_fallback_gets_the_same_retry_budget_as_the_union():
+    """🔴 THE REGRESSION. The fallback used to run each target with
+    `attempts=1` — no retry at all — which handed the FEWEST chances to the
+    target most likely to keep failing its own `min(event_time)`: the largest
+    table, i.e. the one that would be regrowing. Measured as call counts on a
+    target that recovers on its LAST allowed attempt."""
+    q = per_table_flaky({"metric_log": R.QUERY_ATTEMPTS - 1})
+    v = R.check(env=GOOD_ENV, now=NOW, query=q, du=ok_du, sleep=lambda s: None)
+    assert q.seen["metric_log"] == R.QUERY_ATTEMPTS
+    # ... and the recovery is what keeps the reading complete.
+    assert v["controls"]["ttl_tables_measured"] == 4
+    assert v["state"] == R.STATE_OK, v["detail"]
+    assert R.exit_code(v) == R.EXIT_OK
 
 
 def test_a_non_transient_ttl_failure_does_not_reach_the_fallback():
@@ -1066,6 +1120,32 @@ def home_nix():
     return HOME_NIX.read_text()
 
 
+def nix_block(home_nix_text, key):
+    """The nix attribute block for `key`, cut at the next TOP-LEVEL comment.
+
+    🔴 NOT a fixed character count. These tests used `[:2000]`, and adding a
+    comment INSIDE the unit pushed `ExecStart` past the window — turning a
+    wiring assertion red for a reason with nothing to do with the wiring, and
+    (worse, in the other direction) it could equally have pushed a forbidden
+    `SuccessExitStatus` out of a "must not contain" assertion's view. Every
+    comment inside a unit is indented 4+ spaces, so a line beginning `\\n  # `
+    is the next top-level thing and a reliable terminator.
+    """
+    assert key in home_nix_text, key
+    after = home_nix_text.split(key)[1]
+    end = after.find("\n  # ")
+    return after if end < 0 else after[:end]
+
+
+def test_the_nix_block_helper_actually_bounds_the_unit(home_nix):
+    """POSITIVE + NEGATIVE control for the helper the wiring tests rely on: it
+    must contain the unit's own last field and NOT the next unit's."""
+    block = nix_block(home_nix, "systemd.user.services.ch-regrowth-check")
+    assert "X-Restart-Triggers" in block          # the unit's last field
+    assert "systemd.user.timers" not in block     # ...and not the next unit
+    assert 0 < len(block) < len(home_nix)
+
+
 def test_unit_and_timer_are_workbench_only(home_nix):
     """The laptop's unresolved nebula fault makes these queries stall, and a
     flaky check gets ignored. Both halves must be serverMode-gated."""
@@ -1077,7 +1157,7 @@ def test_unit_and_timer_are_workbench_only(home_nix):
 
 
 def test_timer_fires_monthly_on_the_11th_and_catches_up(home_nix):
-    block = home_nix.split("systemd.user.timers.ch-regrowth-check")[1][:600]
+    block = nix_block(home_nix, "systemd.user.timers.ch-regrowth-check")
     assert 'OnCalendar = "*-*-11 09:00:00"' in block
     # A missed run with the host off must fire on next boot — the growth this
     # watches for is slow and unattended.
@@ -1087,7 +1167,7 @@ def test_timer_fires_monthly_on_the_11th_and_catches_up(home_nix):
 def test_failure_is_surfaced_through_the_existing_notify_path(home_nix):
     """No new notification mechanism: the repo's OnFailure -> notify-failure@
     template (scripts/notify-failure.sh) is what makes an ALARM loud."""
-    block = home_nix.split("systemd.user.services.ch-regrowth-check")[1][:2000]
+    block = nix_block(home_nix, "systemd.user.services.ch-regrowth-check")
     assert 'OnFailure = [ "notify-failure@%n.service" ]' in block
     # 🔴 SuccessExitStatus would swallow exit 2 (CANNOT TELL) and exit 3 (WARN),
     # turning "could not measure" into a silent success. It must not be set.
@@ -1095,7 +1175,7 @@ def test_failure_is_surfaced_through_the_existing_notify_path(home_nix):
 
 
 def test_unit_runs_the_committed_wrapper_with_its_deps_on_path(home_nix):
-    block = home_nix.split("systemd.user.services.ch-regrowth-check")[1][:2000]
+    block = nix_block(home_nix, "systemd.user.services.ch-regrowth-check")
     assert "scripts/collector/run-regrowth-check.sh" in block
     for dep in ("pkgs.python312", "pkgs.kubectl", "pkgs.sops"):
         assert dep in block, dep
@@ -1121,3 +1201,400 @@ def test_wrapper_fails_closed_when_the_age_key_is_missing(tmp_path):
                             "SOPS_AGE_KEY_FILE": str(tmp_path / "no.key")})
     assert r.returncode == R.EXIT_UNKNOWN, r.stdout + r.stderr
     assert "CANNOT TELL" in r.stderr
+
+
+# --------------------------------------------------------------------------- #
+# 🔴 A DEGRADED READ IS NOT A CLEAN ONE (check 6)
+#
+# The per-table fallback measures what it can. Reporting `ttl_tables_measured`
+# while letting the state stay `ok` gave exit 0 with the detail "1 TTL target(s)
+# measured, all within bound" — a green unit built on three targets that never
+# answered. The control has to affect the VERDICT, not just the report.
+# --------------------------------------------------------------------------- #
+def partial_ttl_reading(measured_tables):
+    """A reading in which only `measured_tables` answered — exactly the shape
+    the per-table fallback leaves behind when some targets keep failing."""
+    return baseline_reading(
+        ttl=[r for r in baseline_ttl() if r["table"] in measured_tables])
+
+
+def test_a_partial_ttl_read_warns_instead_of_reporting_success():
+    """🔴 THE REGRESSION, at its worst point: ONE of four targets answered and
+    every other check is clean."""
+    v = R.evaluate(partial_ttl_reading({"metric_log"}), now=NOW)
+    assert v["controls"]["ttl_tables_measured"] == 1
+    assert v["controls"]["ttl_targets_present"] == 4
+    assert v["state"] == R.STATE_WARN
+    assert R.exit_code(v) == R.EXIT_WARN
+    f = checks_named(v, "ttl-coverage")
+    assert len(f) == 1 and f[0]["level"] == "warn"
+    # Pin THIS finding's own numbers and its own wording: asserting only the
+    # state would stay green if some other check started warning instead.
+    assert "1 of 4" in f[0]["detail"], f[0]["detail"]
+    assert {u["table"] for u in f[0]["observed"]["unmeasured"]} == {
+        "asynchronous_metric_log", "part_log", "query_log"}
+    # The old, false headline must be gone — not merely outranked.
+    assert "all within bound" not in v["detail"], v["detail"]
+
+
+def test_full_partial_none_and_stale_ttl_reads_are_four_DIFFERENT_verdicts():
+    """🔴 The WARN must not collapse into ALARM or into CANNOT-TELL. Four
+    readings that differ ONLY in their TTL rows must produce four distinct
+    (state, exit) pairs — a single point could not tell them apart."""
+    stale_ttl = [dict(r, min_event_ts=NOW - 40 * 86400) for r in baseline_ttl()]
+    got = [(R.evaluate(reading, now=NOW)["state"],
+            R.exit_code(R.evaluate(reading, now=NOW)))
+           for reading in (baseline_reading(),
+                           partial_ttl_reading({"metric_log"}),
+                           partial_ttl_reading(set()),
+                           baseline_reading(ttl=stale_ttl))]
+    assert got == [(R.STATE_OK, R.EXIT_OK),
+                   (R.STATE_WARN, R.EXIT_WARN),
+                   (R.STATE_NO_DATA, R.EXIT_UNKNOWN),
+                   (R.STATE_ALARM, R.EXIT_ALARM)]
+    assert len({s for s, _ in got}) == 4
+    assert len({c for _, c in got}) == 4
+
+
+def test_a_stale_row_outranks_the_coverage_warn():
+    """A degraded read that ALSO caught a non-binding TTL is an ALARM. The WARN
+    must not downgrade the worst thing found."""
+    ttl = [dict(r) for r in baseline_ttl() if r["table"] in ("metric_log",
+                                                            "part_log")]
+    ttl[0]["min_event_ts"] = NOW - 40 * 86400
+    v = R.evaluate(baseline_reading(ttl=ttl), now=NOW)
+    assert v["warns"] == 1 and v["alarms"] == 1, v["findings"]
+    assert v["state"] == R.STATE_ALARM
+    assert R.exit_code(v) == R.EXIT_ALARM
+
+
+def test_zero_measured_targets_is_still_cannot_tell_not_merely_a_warn():
+    """🔴 The fail-closed boundary the WARN must not erode. Nothing measured is
+    CANNOT TELL (exit 2) — a louder verdict than degraded coverage."""
+    v = R.evaluate(partial_ttl_reading(set()), now=NOW)
+    assert v["state"] == R.STATE_NO_DATA
+    assert R.exit_code(v) == R.EXIT_UNKNOWN
+    assert "positive control FAILED" in v["detail"]
+    # ...and the coverage finding is carried through the gate, not dropped.
+    assert checks_named(v, "ttl-coverage")
+
+
+def test_a_degraded_fallback_read_exits_three_end_to_end():
+    """The same thing as the operator meets it: a live-shaped run whose union
+    500s and whose per-table reads mostly fail."""
+    q = per_table_ttl_query(ok_tables={"metric_log"})
+    v = R.check(env=GOOD_ENV, now=NOW, query=q, du=ok_du, sleep=lambda s: None)
+    assert v["controls"]["ttl_tables_measured"] == 1
+    assert v["state"] == R.STATE_WARN
+    assert R.exit_code(v) == R.EXIT_WARN
+    assert checks_named(v, "ttl-coverage")
+
+
+def test_cli_degraded_ttl_read_exits_three(tmp_path):
+    """At the process boundary — the layer systemd actually reads, and where
+    exit 3 becomes the OnFailure toast."""
+    r = run_cli(["--json", "--now", str(NOW)],
+                partial_ttl_reading({"metric_log"}), tmp_path)
+    assert r.returncode == R.EXIT_WARN, r.stdout + r.stderr
+    v = json.loads(r.stdout)
+    assert v["state"] == R.STATE_WARN
+    assert "ttl-coverage" in {f["check"] for f in v["findings"]}
+
+
+def test_the_coverage_control_pair_reports_both_numbers():
+    """The zero-with-its-evidence rule applied to coverage: `ok` must state how
+    many of how many were measured, never a bare count."""
+    v = R.evaluate(baseline_reading(), now=NOW)
+    assert v["state"] == R.STATE_OK
+    assert "4 of 4 TTL target(s) measured" in v["detail"], v["detail"]
+    assert "4 of 4 present" in R.render_text(v)
+
+
+# --------------------------------------------------------------------------- #
+# 🔴 THE FALLBACK'S DEADLINE BREAK — the guard the TimeoutStartSec argument
+# leans on, and which no test reached (mutating it to `if False:` was green).
+# --------------------------------------------------------------------------- #
+class AdvanceableClock:
+    """A clock the fake server moves, so the deadline is crossed by simulated
+    elapsed time rather than by a scripted tick sequence that could just as
+    easily be crossing it somewhere else."""
+
+    def __init__(self):
+        self.t = 0.0
+
+    def __call__(self):
+        return self.t
+
+
+def deadline_tripping_query(clock, jump_after=1):
+    """UNION always 500s. Per-table reads answer, but the `jump_after`-th one
+    pushes the clock past COLLECT_BUDGET_SECONDS on its way out."""
+    rows = {r["table"]: r for r in baseline_ttl()}
+    calls = []
+
+    def per_table_calls():
+        return [c for c in calls if "UNION ALL" not in c and " AS t," in c]
+
+    def q(url, user, password, sql, timeout):
+        calls.append(sql)
+        if "now()" in sql:
+            return "%d\n" % NOW
+        if "FROM system.tables" in sql:
+            return listing_tsv(baseline_tables())
+        if "UNION ALL" in sql:
+            raise memory_limit_500()
+        name = sql.split("'")[1]
+        if len(per_table_calls()) >= jump_after:
+            clock.t = R.COLLECT_BUDGET_SECONDS + 1.0
+        return ttl_tsv([rows[name]])
+
+    q.calls, q.per_table_calls = calls, per_table_calls
+    return q
+
+
+def test_the_fallback_stops_starting_new_targets_at_the_deadline():
+    """🔴 REACHABILITY, not just breakability. The first per-table read SUCCEEDS
+    and spends the budget; the remaining three are then never ATTEMPTED — which
+    is this guard's own observable behaviour and nothing else's:
+
+      * no earlier gate rejects this case — the run reaches a real verdict with
+        a real `du` reading, not a CANNOT-TELL;
+      * the three unqueried targets are `not-queried` because they were never
+        SENT, not because they failed (the fake would have answered them);
+      * with the break removed, all four are queried and the verdict is `ok`,
+        so this test fails on the count, not on a different guard's error.
+    """
+    clock = AdvanceableClock()
+    q = deadline_tripping_query(clock)
+    v = R.check(env=GOOD_ENV, now=NOW, query=q, du=ok_du, sleep=lambda s: None,
+                clock=clock)
+
+    per_table = q.per_table_calls()
+    assert len(per_table) == 1, per_table
+    assert "'asynchronous_metric_log'" in per_table[0]
+    for name in ("metric_log", "part_log", "query_log"):
+        assert not any("'%s'" % name in c for c in per_table), name
+
+    assert v["controls"]["ttl_tables_measured"] == 1
+    assert {r["table"] for r in v["measurements"]["ttl"]
+            if r["reason"] == "not-queried"} == {"metric_log", "part_log",
+                                                 "query_log"}
+    # A degraded reading, not an unevaluable one — the break is on the path to a
+    # verdict, so a test that only checked for "some non-ok state" would also
+    # pass with the break deleted.
+    assert v["state"] == R.STATE_WARN
+    assert R.exit_code(v) == R.EXIT_WARN
+
+
+def test_the_deadline_break_fixture_can_reach_every_target():
+    """POSITIVE CONTROL for the fixture above: with the clock never advanced,
+    the SAME fake answers all four targets. Without this, `1 per-table call`
+    could just as well mean the fake was broken."""
+    clock = AdvanceableClock()
+    q = deadline_tripping_query(clock, jump_after=99)
+    v = R.check(env=GOOD_ENV, now=NOW, query=q, du=ok_du, sleep=lambda s: None,
+                clock=clock)
+    assert len(q.per_table_calls()) == 4
+    assert v["controls"]["ttl_tables_measured"] == 4
+    assert v["state"] == R.STATE_OK, v["detail"]
+
+
+# --------------------------------------------------------------------------- #
+# 🔴 THE COLLECTION BUDGET IS COUPLED TO `TimeoutStartSec` — MEASURED
+#
+# The old assertion was `sum(QUERY_BACKOFF_SECONDS) * 3 < COLLECT_BUDGET_SECONDS`
+# -> `21 < budget`, satisfied by any value >= 22: setting the budget to 100000.0
+# left the whole suite green. That is a comment wearing an assert's clothes.
+# These simulate the adversary that MAXIMISES wall clock and compare the result
+# with the TimeoutStartSec actually written in nix/home.nix — read from there,
+# not restated here, so the two cannot drift apart.
+# --------------------------------------------------------------------------- #
+def unit_timeout_start_sec(home_nix_text):
+    block = nix_block(home_nix_text, "systemd.user.services.ch-regrowth-check")
+    m = re.search(r"TimeoutStartSec\s*=\s*(\d+)", block)
+    assert m, "TimeoutStartSec not found in the ch-regrowth-check unit"
+    return float(m.group(1))
+
+
+class WallClockSim:
+    """Every attempt burns `cost(phase)` seconds and fails TRANSIENTLY whenever
+    a retry would still be permitted — forcing the retry — and succeeds
+    otherwise. That is the worst case by construction: a phase that failed when
+    no retry was permitted would END the collection early, i.e. sooner."""
+
+    def __init__(self, cost, always_fail=()):
+        self.t = 0.0
+        self.cost = cost
+        self.always_fail = set(always_fail)
+        self.attempts = {}
+        self.deadline = R.COLLECT_BUDGET_SECONDS   # the clock starts at 0.0
+
+    def clock(self):
+        return self.t
+
+    def sleep(self, seconds):
+        self.t += seconds
+
+    @staticmethod
+    def phase(sql):
+        if "now()" in sql:
+            return "now"
+        if "FROM system.tables" in sql:
+            return "listing"
+        if "UNION ALL" in sql:
+            return "union"
+        return "per-table:" + sql.split("'")[1]
+
+    def query(self, url, user, password, sql, timeout):
+        ph = self.phase(sql)
+        self.t += self.cost(ph, timeout)
+        n = self.attempts[ph] = self.attempts.get(ph, 0) + 1
+        if ph.split(":")[0] in self.always_fail:
+            raise memory_limit_500()
+        if n < R.QUERY_ATTEMPTS:
+            back = R.QUERY_BACKOFF_SECONDS[
+                min(n - 1, len(R.QUERY_BACKOFF_SECONDS) - 1)]
+            if self.t + back < self.deadline:
+                raise memory_limit_500()
+        if ph == "now":
+            return "%d\n" % NOW
+        if ph == "listing":
+            return listing_tsv(baseline_tables())
+        if ph == "union":
+            return ttl_tsv(baseline_ttl())
+        name = ph.split(":", 1)[1]
+        return ttl_tsv([r for r in baseline_ttl() if r["table"] == name])
+
+    def du(self, argv, timeout):
+        self.t += self.cost("du", timeout)
+        return ok_du(argv, timeout)
+
+
+def test_the_collection_budget_is_pinned_to_the_units_timeout(home_nix):
+    """🔴 THE COUPLING, MEASURED. One phase burns its whole retry budget
+    (3 * 30s + 2s + 5s = 97s), after which no LATER retry can start because
+    `clock() + backoff >= deadline`; each remaining phase (listing, ttl, du)
+    then gets exactly one ungated 30s attempt. 97 + 90 = 187s against a
+    TimeoutStartSec of 240."""
+    # Literal pins: reading a constant back would hold for any value.
+    assert R.COLLECT_BUDGET_SECONDS == 120.0
+    assert R.DEFAULT_TIMEOUT == 30.0
+
+    sim = WallClockSim(cost=lambda ph, timeout: timeout)
+    v = R.check(env=GOOD_ENV, now=NOW, query=sim.query, du=sim.du,
+                sleep=sim.sleep, clock=sim.clock)
+    # POSITIVE CONTROLS for the sim: it must have driven the check all the way
+    # to a verdict AND actually retried. A sim that fell over early would report
+    # a reassuringly small elapsed time.
+    assert v["state"] == R.STATE_OK, v["detail"]
+    assert sim.attempts["now"] == R.QUERY_ATTEMPTS
+    assert sim.attempts["listing"] == 1
+    assert sim.t == 187.0, sim.attempts
+
+    limit = unit_timeout_start_sec(home_nix)
+    assert limit > 0
+    assert sim.t < limit, (sim.t, limit)
+
+
+def test_the_per_table_fallback_cannot_outlive_the_units_timeout(home_nix):
+    """The other shape: the union fails fast (as `Code: 241` does) and the
+    fallback runs, each target retrying. The loop's deadline break is what
+    bounds this — the overrun past the budget is one in-flight query."""
+    sim = WallClockSim(
+        cost=lambda ph, timeout: (0.0 if ph in ("now", "listing", "union")
+                                  else timeout),
+        always_fail=("union",))
+    v = R.check(env=GOOD_ENV, now=NOW, query=sim.query, du=sim.du,
+                sleep=sim.sleep, clock=sim.clock)
+    assert sim.attempts["union"] == R.QUERY_ATTEMPTS
+    assert [k for k in sim.attempts if k.startswith("per-table:")], sim.attempts
+    assert v["state"] == R.STATE_WARN, v["detail"]   # 2 of 4 measured
+    # 21s of fast-failing retries across now/listing/union, then two per-table
+    # targets at 30s+ each, the second of which starts at 118s and overruns the
+    # budget; the third is never started. 148 + one 30s `du` = 178.
+    assert sim.t == 178.0, sim.attempts
+    assert sim.t < unit_timeout_start_sec(home_nix)
+
+
+def test_the_wallclock_sim_would_notice_an_unbounded_budget(home_nix):
+    """🔴 NEGATIVE CONTROL FOR THE HARNESS. Point the same sim at a budget that
+    no longer bounds anything (the `COLLECT_BUDGET_SECONDS = 100000.0` mutation
+    the old assertion could not see) and it must blow past TimeoutStartSec. A
+    coupling test that cannot go red proves nothing about the coupling."""
+    real = R.COLLECT_BUDGET_SECONDS
+    try:
+        R.COLLECT_BUDGET_SECONDS = 100000.0
+        sim = WallClockSim(cost=lambda ph, timeout: timeout)
+        R.check(env=GOOD_ENV, now=NOW, query=sim.query, du=sim.du,
+                sleep=sim.sleep, clock=sim.clock)
+    finally:
+        R.COLLECT_BUDGET_SECONDS = real
+    assert R.COLLECT_BUDGET_SECONDS == 120.0
+    assert sim.t > unit_timeout_start_sec(home_nix), sim.t
+
+
+# --------------------------------------------------------------------------- #
+# `_is_transient` — which failures are worth a retry
+#
+# All three of these mutate in the FAIL-CLOSED direction, so none was a live
+# risk; all three were untested, so the sweep could not see them.
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize("exc", [
+    ConnectionResetError("Connection reset by peer"),
+    ConnectionRefusedError("Connection refused"),
+    urllib.error.URLError("[Errno 111] Connection refused"),
+    OSError("[Errno 101] Network is unreachable"),
+])
+def test_a_connection_level_failure_is_retried(exc):
+    """A pod restart — the COMMONEST transient here — arrives as a connection
+    error, not an HTTP status. Nothing asserted that it is retried."""
+    assert R._is_transient(exc) is True, exc
+
+
+def test_a_pod_restart_mid_check_is_retried_end_to_end():
+    """The same thing through `check`, so the branch is proven REACHED and not
+    merely correct in isolation."""
+    slept = []
+    q = flaky_query(good_responses(), "UNION ALL", 2,
+                    exc_factory=lambda: ConnectionResetError(
+                        "Connection reset by peer"))
+    v = R.check(env=GOOD_ENV, now=NOW, query=q, du=ok_du, sleep=slept.append)
+    assert v["state"] == R.STATE_OK, v["detail"]
+    assert sum(1 for c in q.calls if "UNION ALL" in c) == R.QUERY_ATTEMPTS
+    assert slept == list(R.QUERY_BACKOFF_SECONDS)
+
+
+def test_a_urlerror_wrapping_a_timeout_is_not_retried():
+    """🔴 A URLError IS an OSError, so the catch-all would retry it. A read that
+    already burned the full per-query budget must not burn it again — that is
+    what keeps the worst case bounded."""
+    exc = urllib.error.URLError(TimeoutError("timed out"))
+    assert R._is_transient(exc) is False
+    # And a URLError wrapping anything else still IS retried, so this is a
+    # guard about timeouts and not a blanket refusal of URLError.
+    assert R._is_transient(urllib.error.URLError(OSError("reset"))) is True
+
+    slept = []
+    q = flaky_query(good_responses(), "now()", 99, exc_factory=lambda: exc)
+    v = R.check(env=GOOD_ENV, now=NOW, query=q, du=ok_du, sleep=slept.append)
+    assert R.exit_code(v) == R.EXIT_UNKNOWN
+    assert sum(1 for c in q.calls if "now()" in c) == 1
+    assert slept == []
+
+
+def test_a_429_is_retried_and_the_other_4xx_are_not():
+    """429 is a server saying "later", not a server that has answered."""
+    def http(code):
+        return urllib.error.HTTPError("http://ch.invalid:8123/", code,
+                                      "status %d" % code, {}, None)
+
+    assert R._is_transient(http(429)) is True
+    assert R._is_transient(http(500)) is True
+    for code in (400, 401, 403, 404, 428, 430):
+        assert R._is_transient(http(code)) is False, code
+
+    slept = []
+    q = flaky_query(good_responses(), "now()", 2, exc_factory=lambda: http(429))
+    v = R.check(env=GOOD_ENV, now=NOW, query=q, du=ok_du, sleep=slept.append)
+    assert v["state"] == R.STATE_OK, v["detail"]
+    assert sum(1 for c in q.calls if "now()" in c) == R.QUERY_ATTEMPTS
