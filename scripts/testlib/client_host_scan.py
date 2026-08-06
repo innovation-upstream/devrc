@@ -34,13 +34,29 @@ command and two initiative data dumps when this scan was written.
 The domain list is DATA (`CLIENT_DOMAINS`); the regex is DERIVED from it. Adding
 a client is one line, and cannot be spelled wrong in two places.
 
-WHAT THIS DOES **NOT** CATCH — read before calling it complete
---------------------------------------------------------------
-  * a client hostname under a domain not in `CLIENT_DOMAINS`;
+WHAT THIS DOES **NOT** CATCH
+----------------------------
+🔴 THIS LIST IS NOT EXHAUSTIVE, AND MUST NOT BE READ AS IF IT WERE. An audit
+found two smuggling forms that were absent from an earlier version of this list
+precisely because the list *looked* complete: a subdomain written as a REGEX
+LITERAL WITH ESCAPED DOTS, and one whose left neighbour is `_`. Both are now
+CAUGHT (see `_LABEL` and `_DOT`), and the lesson is about the list, not about
+those two: assume there are more, and treat a clean run as "no match for the
+shapes below", never as "no client host here".
+
+Known and open:
+  * a client hostname under a domain not in `CLIENT_DOMAINS` — the single
+    biggest one, and the only real defence is keeping that list current;
   * the apex itself, by design (see above);
-  * a host split across lines, encoded, or punycoded;
+  * a host split across lines; percent-, HTML-entity- or base64-encoded;
+    punycoded; or with a fullwidth/homoglyph dot;
+  * a label separated by something other than `.` or `\\.` — e.g. `[.]`, ` dot `,
+    or a template seam like `metrics-internal.${CLIENT_DOMAIN}`;
   * a hostname in a FILENAME rather than file content — like the IP scan, this
     reads content only, never `path.name`;
+  * a hostname inside a file this scan skips: a binary suffix, or any tracked
+    file that is not valid UTF-8 (`scan_file` swallows `UnicodeDecodeError` and
+    returns nothing — a silent skip, not a reported one);
   * a client's IP address, which is the OTHER gate's job.
 
 It stops the accidental paste. It is not an exfiltration control.
@@ -77,7 +93,22 @@ SKIP_SUFFIXES = frozenset({
     ".xz", ".zst", ".woff", ".woff2", ".ttf", ".otf", ".so", ".bin", ".wasm",
 })
 
-_LABEL = r"[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?"
+#: 🔴 `_` IS ALLOWED IN A LABEL, and that is not cosmetic. `_` is `\w`, so with
+#: it excluded the left lookbehind refused to back off to the valid suffix and
+#: `_grpc.metrics.<client>` reported NOTHING despite carrying a real host —
+#: MEASURED, 0 hits. Realistic shapes: a DNS SRV/TXT record, and markdown
+#: italics (`_host.<client>_`). Underscore is not legal in a hostname label, but
+#: it is extremely common in the places one gets WRITTEN DOWN, which is what
+#: this scan reads.
+_LABEL = r"[A-Za-z0-9_](?:[A-Za-z0-9_-]*[A-Za-z0-9_])?"
+
+#: A dot that may be BACKSLASH-ESCAPED. A hostname matcher in JS/Python source
+#: is one of the likeliest places a real client host gets written down, and it
+#: is written `metrics-internal\.<client>` there — which the plain-dot pattern
+#: missed entirely (MEASURED: escaped 0 hits, unescaped 1). The scrub this gate
+#: was written for found a regex literal among its own occurrences, so this is
+#: not hypothetical in kind, only in the current tree.
+_DOT = r"\\?\."
 
 
 def _build_re(domains) -> re.Pattern:
@@ -88,7 +119,9 @@ def _build_re(domains) -> re.Pattern:
 
       * `(?<![\\w.-])` on the left — otherwise `mycivitclient.example` reports a
         truncated tail, and a longer host reports as its own suffix.
-      * `(?![\\w-])` on the right — otherwise `<domain>munity` is a hit.
+      * `(?![A-Za-z0-9-])` on the right — otherwise `<domain>munity` is a hit.
+        Deliberately NOT `(?![\\w-])`: that also rejects a trailing `_`, i.e.
+        the closing delimiter of markdown italics.
       * `(?!\\.[A-Za-z0-9])` on the right as WELL. Without it a longer,
         unrelated host (`x.<domain>.evil.test`) reports as a client subdomain.
         It is deliberately NOT the simpler `(?![\\w.-])`: that also rejects a
@@ -100,9 +133,11 @@ def _build_re(domains) -> re.Pattern:
     this gate was written for missed exactly that occurrence. `find_in_line`
     lower-cases what it returns, so a hit is reported in one canonical form.
     """
-    alt = "|".join(re.escape(d) for d in sorted(domains))
+    # Domains are DATA; escape them, then let each dot be optionally backslashed.
+    alt = "|".join(re.escape(d).replace(r"\.", _DOT) for d in sorted(domains))
     return re.compile(
-        rf"(?<![\w.-])((?:{_LABEL}\.)+(?:{alt}))(?![\w-])(?!\.[A-Za-z0-9])",
+        rf"(?<![\w.-])((?:{_LABEL}{_DOT})+(?:{alt}))"
+        rf"(?![A-Za-z0-9-])(?!\.[A-Za-z0-9])",
         re.IGNORECASE)
 
 
@@ -110,10 +145,16 @@ HOST_RE = _build_re(CLIENT_DOMAINS)
 
 
 def find_in_line(line: str, rx: re.Pattern | None = None) -> list[str]:
-    """Every client-subdomain literal in `line`, left to right, deduped."""
+    """Every client-subdomain literal in `line`, left to right, deduped.
+
+    Reported in ONE canonical form: lower-cased, and with regex backslashes
+    removed. `metrics\\.<client>` and `metrics.<client>` are the same disclosure,
+    and an allowlist keyed on the spelling rather than the host would need an
+    entry per escaping style.
+    """
     out: list[str] = []
     for m in (rx or HOST_RE).finditer(line):
-        tok = m.group(1).lower()
+        tok = m.group(1).lower().replace("\\", "")
         if tok not in out:
             out.append(tok)
     return out

@@ -56,9 +56,19 @@ def env_path() -> str:
 
 
 def load(path: str | None = None) -> dict:
-    """Parse `NAME=URL` lines. A missing/unreadable file is an EMPTY dict, not an
-    exception — the caller turns that into the loud per-name error, so a host
-    that has never created the file gets the same message as one missing a key."""
+    """Parse `NAME=URL` lines. A missing/unreadable/UNDECODABLE file is an EMPTY
+    dict, not an exception — the caller turns that into the loud per-name error,
+    so a host that has never created the file gets the same message as one
+    missing a key.
+
+    🔴 `UnicodeDecodeError` IS NOT AN `OSError`, and catching only `OSError` was
+    a hole straight back into the failure this module exists to prevent
+    (MEASURED: one `\\xff` byte in `urls.env` → unhandled traceback, exit 1).
+    From a bar click stderr goes NOWHERE, so a stray byte in a hand-maintained
+    file produced a button that silently does nothing — while the contract at
+    the top of this file promises exit 3 naming the key and the path. Any
+    unreadable-for-any-reason file must reach that one loud path.
+    """
     out: dict[str, str] = {}
     try:
         with open(path or env_path(), encoding="utf-8") as f:
@@ -70,7 +80,7 @@ def load(path: str | None = None) -> dict:
                 k, v = k.strip(), v.strip()
                 if k:
                     out[k] = v
-    except OSError:
+    except (OSError, UnicodeDecodeError):
         pass
     return out
 

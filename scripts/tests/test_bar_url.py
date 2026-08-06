@@ -84,6 +84,47 @@ def test_an_unset_name_resolves_to_none_not_an_exception(mod, envfile):
     assert mod.resolve("nope") is None
 
 
+@pytest.mark.parametrize("blob", [
+    b"civitai_grafana=https://ok.example.invalid/\xff\n",   # one stray byte
+    b"\xff\xfe\x00c\x00i\x00v\x00",                          # UTF-16 BOM + text
+    b"\x80\x81\x82",                                          # bare continuation bytes
+], ids=["stray-byte", "utf16-bom", "invalid-continuation"])
+def test_an_UNDECODABLE_file_is_an_empty_mapping_not_a_traceback(mod, tmp_path,
+                                                                 monkeypatch, blob):
+    """🔴 MEASURED REGRESSION. `UnicodeDecodeError` is NOT an `OSError`, so
+    catching only `OSError` let it escape as an unhandled traceback with exit 1
+    — contradicting this module's own 🔴 contract ("FAILS LOUD… exit 3 with a
+    message naming the file and the key").
+
+    Why it matters more than it looks: from a bar click **stderr goes nowhere**.
+    A traceback is not "loud", it is invisible — so one stray byte in a
+    hand-maintained file restored exactly the silent-dead-button failure this
+    component exists to prevent.
+    """
+    p = tmp_path / "urls.env"
+    p.write_bytes(blob)
+    monkeypatch.setenv("BAR_URLS_ENV", str(p))
+    assert mod.load() == {}
+    assert mod.resolve("civitai_grafana") is None
+
+
+@pytest.mark.parametrize("blob", [
+    b"civitai_grafana=https://ok.example.invalid/\xff\n",
+    b"\x80\x81\x82",
+], ids=["stray-byte", "invalid-continuation"])
+def test_cli_on_an_UNDECODABLE_file_exits_3_not_1(tmp_path, blob):
+    """The end-to-end half of the case above: the CLI's exit code and message
+    are the contract, and exit 1 with a traceback is a different contract.
+    Distinguishing 3 from 1 is the whole point — 1 is "it crashed", 3 is "here
+    is the key and the file to fix"."""
+    p = tmp_path / "urls.env"
+    p.write_bytes(blob)
+    r = _run(["civitai_grafana"], p)
+    assert r.returncode == 3, (r.returncode, r.stdout, r.stderr)
+    assert "civitai_grafana" in r.stderr and str(p) in r.stderr
+    assert "Traceback" not in r.stderr, r.stderr
+
+
 def test_a_missing_file_is_an_empty_mapping_not_a_crash(mod, tmp_path, monkeypatch):
     """A host that has never created the file must reach the SAME loud per-name
     error as a host missing one key — not an unhandled traceback out of a
@@ -167,6 +208,12 @@ def test_bar_url_seam():
     THIS script, and the literal must appear in NEITHER. Pinning the
     RELATIONSHIP is the point: each file is clean in isolation, and the bug this
     forbids is one of them quietly re-inlining the URL.
+
+    🔴 THE STRUCTURAL HALF IS NOT ENOUGH — see
+    `test_the_toast_action_is_an_executable_bar_url_invocation` below. Asserting
+    that a call APPEARS is a check on spelling; it type-checks past a wrong
+    argument. Both surfaces need a behavioural assertion, and only the nix side
+    is genuinely text-only (it is a nix string literal, not runnable here).
     """
     nix = (REPO / "nix" / "graphical.nix").read_text(encoding="utf-8")
     poll = (REPO / "scripts" / "bar-status-poll").read_text(encoding="utf-8")
@@ -185,6 +232,129 @@ def test_bar_url_seam():
                 continue
             assert "xdg-open http" not in line, (
                 f"{name}:{i} inlines a URL on a civitai line again: {line.strip()}")
+
+
+def _load_poller(monkeypatch):
+    """Load `scripts/bar-status-poll` by explicit path, the way the repo's other
+    tests load it — it has no `.py` suffix, so it is not importable.
+
+    🔴 `DEVRC_DIR` is pinned at THIS checkout. The poller reads it at import time
+    and defaults to `~/workspace/devrc`, so without this the tests would assert
+    against whatever the developer's base clone happens to contain — green or
+    red for reasons that have nothing to do with the change under test. (It is
+    also how this asymmetry became visible: the toast resolves `bar-url` out of
+    the GIT CHECKOUT, while the bar block's left-click uses the NIX-DEPLOYED
+    copy under `~/.config/i3status-rust/scripts`. Two copies of one script, and
+    only one of them is updated by `home-manager switch`. Reported, not changed
+    here — it is a behaviour change to a live bar component.)
+    """
+    import importlib.machinery
+    import importlib.util
+    monkeypatch.setenv("DEVRC_DIR", str(REPO))
+    path = REPO / "scripts" / "bar-status-poll"
+    loader = importlib.machinery.SourceFileLoader("_bar_status_poll", str(path))
+    spec = importlib.util.spec_from_loader("_bar_status_poll", loader)
+    mod = importlib.util.module_from_spec(spec)
+    loader.exec_module(mod)
+    return mod
+
+
+def test_the_toast_action_resolves_bar_url_from_the_repo_root_handle(monkeypatch):
+    """Pin WHERE the toast looks, because it is not where the bar block looks.
+
+    INVARIANT GUARD, labelled as such: it is green at the base ref too. It
+    exists so the two-copies asymmetry above is visible in the suite rather than
+    only in a report — and so a future change to the resolution root is a
+    decision someone makes on purpose.
+    """
+    poll = _load_poller(monkeypatch)
+    action = poll._bar_url_action("civitai_grafana")
+    assert action.split()[0] == str(REPO / "scripts" / "bar-url"), action
+
+
+def test_the_toast_action_is_an_executable_bar_url_invocation(monkeypatch):
+    """🔴 THE TOAST HALF, asserted on what the function RETURNS.
+
+    The seam guard above only checked that the literal `_bar_url_action("…")`
+    APPEARS in the poller. MEASURED: mutating that function's body to
+    `"--openn " + name + "_typo"` left 150 tests passing and 0 failing, and
+    repointing it at a non-existent `scripts/bar-urls` left 135 passing — both
+    make the toast COMPLETELY INERT. A structural check type-checks past a wrong
+    argument (RULES.md → "isolation-seam").
+
+    The toast is the half with no other coverage: `test_bar_status.py` (122
+    tests) asserts nothing about the civitai action. And its stated purpose is
+    that it can never be silently dead — a dunst action that fails produces no
+    output anywhere a human looks.
+    """
+    poll = _load_poller(monkeypatch)
+    action = poll._bar_url_action("civitai_grafana")
+
+    parts = action.split()
+    assert len(parts) == 3, f"the action is not a 3-token invocation: {action!r}"
+    target, flag, key = parts
+    assert flag == "--open", f"wrong flag: {flag!r} (the toast would not open)"
+    assert key == "civitai_grafana", f"wrong key: {key!r}"
+
+    # 🔴 The target must EXIST and be RUNNABLE. A path that is merely
+    # well-formed is what the `scripts/bar-urls` mutant produced.
+    t = Path(target)
+    assert t.name == "bar-url", f"the action does not invoke bar-url: {target!r}"
+    assert t.is_file(), f"the toast action points at a missing file: {target}"
+    assert os.access(t, os.X_OK), f"the toast action target is not executable: {target}"
+
+
+def _stub_xdg_open(tmp_path):
+    """🔴 MANDATORY for any test that runs the `--open` path.
+
+    The toast action ends in `--open`, and `--open` execs the REAL `xdg-open`.
+    The first version of the test below did exactly that and **launched a
+    browser tab on the developer's desktop** — a test suite must not touch the
+    user's session. The stub records argv instead, which is also the only way to
+    assert the URL reached xdg-open intact.
+    """
+    bindir = tmp_path / "xdgbin"
+    bindir.mkdir(exist_ok=True)
+    rec = tmp_path / "xdg-argv.txt"
+    mockbin.write_exec(bindir / "xdg-open", f'printf "%s\\n" "$@" > "{rec}"\n')
+    return bindir, rec
+
+
+def test_the_toast_action_actually_resolves_a_url_end_to_end(tmp_path, monkeypatch):
+    """The complement: the invocation the toast builds must, when RUN, print the
+    URL, exit 0, and hand that URL to xdg-open. Everything above is about the
+    shape of a string; this exercises the shape as a COMMAND, which is the only
+    thing dunst does with it."""
+    poll = _load_poller(monkeypatch)
+    env_file = tmp_path / "urls.env"
+    env_file.write_text(f"civitai_grafana={FIXTURE_URL}\n", encoding="utf-8")
+    bindir, rec = _stub_xdg_open(tmp_path)
+
+    action = poll._bar_url_action("civitai_grafana")
+    r = subprocess.run([sys.executable, *action.split()],
+                       capture_output=True, text=True, timeout=20,
+                       env=dict(os.environ, BAR_URLS_ENV=str(env_file),
+                                PATH=f"{bindir}:{os.environ['PATH']}"))
+    assert r.returncode == 0, (r.returncode, r.stdout, r.stderr)
+    assert r.stdout.strip() == FIXTURE_URL, r.stdout
+    assert rec.exists(), "the toast action never reached xdg-open"
+    assert rec.read_text().strip() == FIXTURE_URL, rec.read_text()
+
+
+def test_the_toast_action_fails_loud_on_an_unset_key(tmp_path, monkeypatch):
+    """And the failure path, through the same constructed command: exit 3 with
+    the key and the file named. A toast whose action exits 0 having done nothing
+    is the silent-dead-button this whole indirection exists to prevent."""
+    poll = _load_poller(monkeypatch)
+    env_file = tmp_path / "urls.env"
+    env_file.write_text("something_else=https://x.example.invalid/\n", encoding="utf-8")
+
+    action = poll._bar_url_action("civitai_grafana")
+    r = subprocess.run([sys.executable, *action.split()],
+                       capture_output=True, text=True, timeout=20,
+                       env=dict(os.environ, BAR_URLS_ENV=str(env_file)))
+    assert r.returncode == 3, (r.returncode, r.stdout, r.stderr)
+    assert "civitai_grafana" in r.stderr and str(env_file) in r.stderr
 
 
 def test_bar_url_is_deployed_by_home_manager():

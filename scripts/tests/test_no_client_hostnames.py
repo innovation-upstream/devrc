@@ -137,6 +137,61 @@ def test_positive_control_case_is_normalised(tmp_path):
     assert len(hits) == 1 and hits[0][2] == planted_host(), hits
 
 
+def test_a_subdomain_written_as_a_REGEX_LITERAL_is_found():
+    """🔴 MEASURED SMUGGLING FORM #1 (audit). A hostname matcher in JS/Python
+    source is one of the likeliest places a real client host gets written down,
+    and there it is spelled with ESCAPED DOTS. Before the fix: escaped → 0 hits,
+    unescaped → 1. The scrub this gate was written for found a regex literal
+    among its own occurrences, so this is hypothetical only in the current tree.
+
+    The hit is reported in ONE canonical form — backslashes stripped — so an
+    allowlist cannot need an entry per escaping style.
+    """
+    host = planted_host()
+    esc = host.replace(".", r"\.")
+    assert H.find_in_line(f"/^{esc}$/") == [host]
+    assert H.find_in_line(f"re.compile(r'{esc}')") == [host]
+    # a JS regex with escaped slashes around it, the exact shape in this repo
+    assert H.find_in_line(rf"/frame_not_found:https:\/\/{esc}\//") == [host]
+
+
+def test_a_subdomain_whose_left_neighbour_is_an_underscore_is_found():
+    """🔴 MEASURED SMUGGLING FORM #2 (audit). `_` is `\\w`, so with it excluded
+    from a label the left lookbehind refused to back off to the valid suffix and
+    the whole host reported NOTHING — 0 hits despite an embedded real leak.
+
+    Realistic shapes: a DNS SRV/TXT record, and markdown italics. Underscore is
+    not legal in a hostname label; it is very common in the places one gets
+    WRITTEN DOWN, which is what this scan reads.
+    """
+    host = planted_host()
+    assert H.find_in_line(f"_grpc.{host}") == [f"_grpc.{host}"]
+    assert H.find_in_line(f"_{host}_") == [f"_{host}"]      # markdown italics
+    srv = H.find_in_line(f"_grpc._tcp.{host}  3600 IN SRV 0 5 443 x.{host}")
+    assert srv == [f"_grpc._tcp.{host}", f"x.{host}"], srv
+
+
+def test_the_widened_pattern_did_not_lose_anything_it_used_to_find():
+    """🔴 THE COST SIDE of the two fixes above, pinned rather than assumed.
+
+    Widening a scanner can LOSE matches as easily as gain them, and a loss is
+    invisible — the gate just goes quieter. MEASURED across six domains that are
+    heavily present in this repo (519 hits total): the widened pattern was
+    **+2, -0**, and both additions were genuine escaped-dot regex literals.
+
+    This case re-runs the shrinking half as a unit: every shape the narrow
+    pattern matched must still match.
+    """
+    host = planted_host()
+    for line in (f"https://{host}/app",
+                 f'frame: "{host}"',
+                 f"the dashboard lives at {host}.",
+                 f"({host}), reachable",
+                 f"a.b.{host}",
+                 host.upper()):
+        assert H.find_in_line(line), f"the widened pattern LOST {line!r}"
+
+
 def test_positive_control_the_allowlist_does_not_swallow_a_real_value():
     """The scan FINDING a line and the assertion REPORTING it are different
     things; an over-broad allowlist would eat a genuine leak silently."""
