@@ -27,13 +27,14 @@ page) never enters YOUR context.
     browser agent "go to news.ycombinator.com and report the top 3 story titles"
 
 **Drive ops directly when** the task is **precise** (URL + selector/JS known, 1–3
-ops) · **interactive** (click/type/submit/upload) · **diagnostic** (you must SEE a
-screenshot, or hit-test paint order) · **secret** — agent-read pages go to
+ops) · **interactive** (click/type/submit/upload) · **diagnostic** (the agent is
+BLIND — its tool returns no pixels; you must SEE a screenshot, or hit-test paint
+order) · **secret** — agent-read pages go to
 **OpenRouter/DeepSeek**: never banking, private mail, credential managers, or
 anything you wouldn't hand a third party. Nor **virtualised/lazy-loaded lists**.
 
-SEE the page → drive. KNOW something from it → agent. Ambiguous → agent first;
-taking over costs ~200 tokens, so agent-first wins even at a low success rate.
+KNOW something from it → agent. Ambiguous → agent first; taking over costs ~200
+tokens, so agent-first wins even at a low success rate.
 
 **Measured** 2026-07-31 (laptop, `deepseek-v4-flash`, n=1/goal): ≈0.9 correct,
 ~$0.0025/run, ~20s — read as "≈0.9", **not** a rate. Numbers, guardrails, and what
@@ -41,9 +42,9 @@ was NOT measured → `reference/agent.md`.
 
 `blocked` → non-zero exit, take over. `partial` → read `evidence`, drive the rest.
 Thin `evidence` is a weak smell, **NOT** protection against a wrong answer. What
-protects you: the agent tool's auto-`wake` on a hidden `text`/`html` read (closed
-by construction, **NOT live-verified**), and cheap escalation — if the answer
-depends on rendered SPA state, confirm with ONE `text --wake`. Ignore
+protects you: the agent tool's auto-`wake` on a hidden `text`/`html` read — **never
+`eval`/`js`, so ASSERT a non-zero content count in any `js` measurement** — and
+escalation: if the answer depends on rendered SPA state, ONE `text --wake`. Ignore
 `steps_used` (undercounted); keep `--allow-domains` TIGHT, incl. frame hosts.
 
 ## Ops

@@ -219,6 +219,36 @@ read. `--wake` cannot be combined with `--frame` (refused with
 no page globals); `js`/`eval --wake` is **MAIN world** by definition — that is what
 `eval` means.
 
+### 🔴 A `js` MEASUREMENT is the unprotected case — assert the page RENDERED
+
+The `browser agent`'s deterministic auto-wake covers **`text` and `html` ONLY**
+(`AUTO_WAKE_OPS = ["text","html"]` in `opencode/tools/browser_tool_impl.mjs`); `eval`/`js`
+is deliberately **not** in that set. So a `js`-based *measurement* — layout, geometry,
+overflow, element counts — can be taken on a **throttled, hidden, never-rendered** tab and
+comes back as plausible numbers with no error. Measured 2026-08-02: a bare
+`js` on a freshly-`open`ed tab returns `visibilityState:"hidden"`. It cost a
+"no horizontal overflow, no wide elements" verdict taken on a page whose SPA content had
+never loaded — every number was real and about an empty document.
+
+🔴 **Rule: end every `js` measurement with a render assertion in the SAME expression** — a
+content count that MUST be non-zero (`document.querySelectorAll('<the card selector>').length`).
+A zero there invalidates the whole reading; without it, empty and correct look identical.
+(`eval` *is* in `HIDDEN_SIGNAL_OPS`, so the agent still sees the hidden note — but nothing
+un-throttles the tab for it.)
+
+🔴 **`visibilityState` is NOT a check for "did wake work"** — the flip is scoped to the
+wake window (`WAKE_CDP_TEARDOWN` reverts focus emulation before detaching), so a
+*separate* later `js` read correctly reads `"hidden"` again. The measured table under
+"*one wake fires `visibilitychange` TWICE*" above is the authority. Judge a wake by
+`woke` + whether the content is actually there, never by a later `visibilityState`.
+
+⚠ **`--wake` on `open` can fail with `cdp_attach_refused:about:`** — the tab was still
+`about:blank` because navigation had not completed, and `about:` is not an attachable
+scheme. (`<no-scheme>` is the *different* case where the url is absent/uncommitted so
+`new URL()` throws — see `cdpSchemeOf` in `extension/protocol.js` and
+`reference/errors.md`.) Not a bridge fault: `nav` first (or `nav --wake`), or re-issue
+the wake once the URL is real. See `reference/frames-cdp.md`.
+
 ## When you actually need `activate` (rare)
 
 `activate` is still the honest answer when something needs the REAL foreground: a
