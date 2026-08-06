@@ -133,6 +133,13 @@ def test_restore_uses_default_brightness_when_no_state(tmp_path):
 # CLI: status subcommand
 # --------------------------------------------------------------------------- #
 def test_status_no_timer(tmp_path):
+    # 🔴 ddcutil too, not just systemctl. monitor-blackout.sh resolves ddcutil at
+    # line 20 — BEFORE it dispatches a subcommand — and exits 1 with "ddcutil not
+    # found on PATH" when it is absent, so `status` needs the stub as much as the
+    # brightness paths do. This test claimed to be OFFLINE while silently
+    # depending on the dev host having a real ddcutil; the sandbox does not, and
+    # the FileNotFoundError this suite used to die on hid that for two days.
+    _make_ddcutil_stub(tmp_path)
     systemctl = _make_systemctl_stub(tmp_path)
     path = str(tmp_path) + ":" + os.environ.get("PATH", "")
 
