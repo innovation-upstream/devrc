@@ -1,0 +1,24 @@
+# Global direnvrc — custom use_ functions.
+# Managed by home-manager (devrc/nix/home.nix). Edit HERE, not ~/.config/direnv/.
+
+# use opencode — make project-level Claude Code commands visible to
+# opencode by symlinking .opencode/commands/ → .claude/commands/.
+# opencode reads .opencode/commands/ at project level but ignores
+# .claude/commands/ (asymmetry with skills, which do have .claude/ compat).
+#
+# Usage: add `use opencode` to a repo's .envrc (after `use flake` or similar).
+use_opencode() {
+  local claude_cmds="${PWD}/.claude/commands"
+  local opencode_cmds="${PWD}/.opencode/commands"
+  if [[ -d "$claude_cmds" ]]; then
+    if [[ -L "$opencode_cmds" ]]; then
+      : # already a symlink, nothing to do
+    elif [[ -e "$opencode_cmds" ]]; then
+      echo "opencode: WARNING — $opencode_cmds exists but is not a symlink, skipping"
+    else
+      mkdir -p "$(dirname "$opencode_cmds")"
+      ln -s "$claude_cmds" "$opencode_cmds"
+      echo "opencode: linked $opencode_cmds → $claude_cmds"
+    fi
+  fi
+}

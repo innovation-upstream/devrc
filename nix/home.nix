@@ -942,6 +942,13 @@ in
     recursive = true;
     force = true;
   };
+
+  # direnvrc — deploy the managed direnv config with layout opencode.
+  home.file.".config/direnv/direnvrc" = {
+    source = ../scripts/direnv/direnvrc;
+    force = true;
+  };
+
   # browser + dl-router: deliberate mkOutOfStoreSymlink exceptions (same as their
   # ~/.claude/skills/ counterparts above) so opencode sees the live working tree.
   home.file.".config/opencode/skills/browser/SKILL.md".source =
