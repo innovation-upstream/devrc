@@ -515,6 +515,20 @@ def fire_toast(urgency, summary, body, action_cmd=None, runner=None) -> bool:
         return False
 
 
+def _bar_url_action(name: str) -> str:
+    """The toast action for a URL this repo may not spell.
+
+    Delegates to `scripts/bar-url`, the SAME resolver the bar block's left-click
+    uses (`nix/graphical.nix`), so the client Grafana hostname lives in exactly
+    one host-local file (`~/.config/bar/urls.env`) instead of being duplicated
+    into a public repo twice. The resolution happens when the toast is CLICKED,
+    not when the spec is built — so a host that has not created the file yet
+    gets bar-url's loud message rather than a silent no-op.
+    """
+    return "%s %s" % (os.path.join(DEVRC_DIR, "scripts", "bar-url"),
+                      "--open " + name)
+
+
 def _toast_specs() -> dict:
     """Per-source rising-edge toast config, resolved at call time (thresholds are
     env-tunable and MUST match the block's --red-above in graphical.nix). The
@@ -526,7 +540,7 @@ def _toast_specs() -> dict:
                    "action": "xdg-open http://grafana.homelab.lan"},
         "civitai": {"threshold": _env_int("CIVITAI_TOAST_ABOVE", 340),
                     "urgency": "normal", "summary": "⚠ civitai prod alerts firing",
-                    "action": "xdg-open https://grafana-new.civitai.com"},
+                    "action": _bar_url_action("civitai_grafana")},
         "clawgate": {"threshold": 0, "urgency": "normal",
                      "summary": "clawgate: task awaiting",
                      "action": "xdg-open http://192.168.50.250:30302"},

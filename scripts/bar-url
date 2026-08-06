@@ -1,0 +1,123 @@
+#!/usr/bin/env python3
+"""Resolve a NAMED, host-specific URL out of `~/.config/bar/urls.env`.
+
+WHY THIS EXISTS
+---------------
+This repo is PUBLIC (`CLAUDE.md`: never commit "a real third-party hostname used
+as an example"), but two bar affordances OPEN a real client dashboard: the
+`civitai` block's left-click (`nix/graphical.nix`) and the matching rising-edge
+dunst toast (`scripts/bar-status-poll`). Placeholdering the URL would have left
+a button that goes nowhere, so the VALUE moves out of tracked source instead of
+the FEATURE moving out of the bar.
+
+This follows the pattern the bar already uses for anything host-specific or
+secret — `~/.config/bar/media.env` (qBittorrent creds), `~/.config/bar/airvpn.env`
+(WG/forwarded ports): a 0600 file read by explicit path at run time, with an env
+var overriding the path so tests can point at a fixture. This one holds URLs
+rather than credentials, hence its own file.
+
+FORMAT — `~/.config/bar/urls.env`, one `NAME=URL` per line, `#` comments ok:
+
+    civitai_grafana=https://grafana.example.invalid
+
+USAGE
+    bar-url <name>            # print the URL, exit 0; exit 3 if unset
+    bar-url --open <name>     # xdg-open it (and print it)
+
+🔴 FAILS LOUD, NOT SILENT. An unset name exits 3 with a message naming the file
+and the key. A left-click that silently does nothing is indistinguishable from a
+broken bar, and the whole reason this indirection exists is a button that must
+keep working — so the failure has to be legible without reading this source.
+
+🔴 NEVER GOES THROUGH A SHELL. `--open` execs `xdg-open` with the URL as an argv
+element, so a URL containing shell metacharacters cannot become a command. The
+file is host-local, but it is exactly the kind of file that gets pasted into.
+"""
+from __future__ import annotations
+
+import os
+import subprocess
+import sys
+
+DEFAULT_PATH = "~/.config/bar/urls.env"
+
+#: The names this repo knows about, and what each one is for. Reference only —
+#: `bar-url` will resolve any name present in the file. Kept here so a reader of
+#: `graphical.nix` can find out what `civitai_grafana` is supposed to point at
+#: without it being written down as a value.
+KNOWN = {
+    "civitai_grafana": "the client prod Grafana opened by the `civ` bar block "
+                       "and its rising-edge toast",
+}
+
+
+def env_path() -> str:
+    return os.environ.get("BAR_URLS_ENV") or os.path.expanduser(DEFAULT_PATH)
+
+
+def load(path: str | None = None) -> dict:
+    """Parse `NAME=URL` lines. A missing/unreadable/UNDECODABLE file is an EMPTY
+    dict, not an exception — the caller turns that into the loud per-name error,
+    so a host that has never created the file gets the same message as one
+    missing a key.
+
+    🔴 `UnicodeDecodeError` IS NOT AN `OSError`, and catching only `OSError` was
+    a hole straight back into the failure this module exists to prevent
+    (MEASURED: one `\\xff` byte in `urls.env` → unhandled traceback, exit 1).
+    From a bar click stderr goes NOWHERE, so a stray byte in a hand-maintained
+    file produced a button that silently does nothing — while the contract at
+    the top of this file promises exit 3 naming the key and the path. Any
+    unreadable-for-any-reason file must reach that one loud path.
+    """
+    out: dict[str, str] = {}
+    try:
+        with open(path or env_path(), encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                k, v = line.split("=", 1)
+                k, v = k.strip(), v.strip()
+                if k:
+                    out[k] = v
+    except (OSError, UnicodeDecodeError):
+        pass
+    return out
+
+
+def resolve(name: str, path: str | None = None) -> str | None:
+    return load(path).get(name) or None
+
+
+def main(argv: list[str]) -> int:
+    args = list(argv[1:])
+    do_open = False
+    if args and args[0] == "--open":
+        do_open = True
+        args.pop(0)
+    if len(args) != 1:
+        print(f"usage: bar-url [--open] <name>\nknown names: "
+              f"{', '.join(sorted(KNOWN))}", file=sys.stderr)
+        return 2
+
+    name = args[0]
+    url = resolve(name)
+    if not url:
+        print(
+            f"bar-url: '{name}' is not set in {env_path()}.\n"
+            f"  This value is host-specific and deliberately NOT committed "
+            f"(this repo is public).\n"
+            f"  Fix:  printf '{name}=<url>\\n' >> {env_path()} "
+            f"&& chmod 0600 {env_path()}",
+            file=sys.stderr)
+        return 3
+
+    print(url)
+    if do_open:
+        # argv list, never a shell string.
+        subprocess.run(["xdg-open", url], check=False)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

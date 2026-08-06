@@ -93,7 +93,7 @@ $ browser --instance personal agent --allow-domains example.com \
   server change: stop the service, run the branch's `server.py` manually on 8788, restore
   after. The EXTENSION loads from the repo path — so another session's checkout silently
   reverts a staged build.
-- **`vcap.me` now resolves to a REAL PUBLIC IP** (103.224.182.214) — do not use it as a
+- **`vcap.me` now resolves to a REAL PUBLIC IP** (`getent hosts vcap.me`) — do not use it as a
   loopback alias. Use `lvh.me`, `127.0.0.1.sslip.io`, `127.0.0.1.nip.io`.
   ⚠ **`lvh.me` is on Phantom Wallet's phishing blocklist** and gets tabs hijacked to
   `chrome-extension://…/phishing.html` — the rig uses `sslip.io`.

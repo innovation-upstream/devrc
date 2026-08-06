@@ -17,7 +17,7 @@ import assert from "node:assert/strict";
 
 // --- a single mutable chrome mock the SW closes over -------------------------- //
 const TAB_ID = 5;
-const OOPIF_URL = "https://model-benchmarking.civit.ai/";
+const OOPIF_URL = "https://model-benchmarking.example.test/";
 const state = {
   frames: [
     { frameId: 0, parentFrameId: -1, url: "https://civitai.com/apps/run/model-benchmarking" },
@@ -102,13 +102,13 @@ test("frames op: enumerates via webNavigation.getAllFrames — the OOPIF child I
 test("--frame text: resolves the numeric frameId + injects via executeScript into that frame", async () => {
   resetCalls();
   state.execResult = "INNER OOPIF TEXT";
-  const out = await OPS.text({ tabId: TAB_ID, frame: "model-benchmarking.civit.ai" });
+  const out = await OPS.text({ tabId: TAB_ID, frame: "model-benchmarking.example.test" });
   const call = lastExec();
   assert.deepEqual(call.target, { tabId: TAB_ID, frameIds: [7] },
     "the resolved OOPIF frameId is the executeScript target");
   assert.equal(typeof call.func, "function");
   assert.equal(out.text, "INNER OOPIF TEXT");
-  assert.equal(out.frame, "model-benchmarking.civit.ai");
+  assert.equal(out.frame, "model-benchmarking.example.test");
   assert.equal(out.url, OOPIF_URL,
     "a frame read reports the FRAME's own url (proves it targeted the OOPIF, not the top)");
   assert.deepEqual(state.calls.debugger, [], "a frame read must NOT use the debugger");
@@ -170,15 +170,15 @@ test("--frame text --annotated: byte-cap applies inside the frame path too", asy
 test("--frame click/type/key: injected into the OOPIF frame; report trusted:false", async () => {
   resetCalls();
   state.execResult = { ok: true, x: 60, y: 40 };
-  const c = await OPS.click({ tabId: TAB_ID, frame: "model-benchmarking.civit.ai", selector: "#run" });
+  const c = await OPS.click({ tabId: TAB_ID, frame: "model-benchmarking.example.test", selector: "#run" });
   assert.deepEqual(lastExec().target, { tabId: TAB_ID, frameIds: [7] });
   assert.deepEqual(lastExec().args, ["#run"]);
   assert.deepEqual(c, { url: OOPIF_URL, clicked: "#run", x: 60, y: 40,
-                        frame: "model-benchmarking.civit.ai", trusted: false });
+                        frame: "model-benchmarking.example.test", trusted: false });
 
   resetCalls();
   state.execResult = { ok: true, typed: 5 };
-  const t = await OPS.type({ tabId: TAB_ID, frame: "model-benchmarking.civit.ai", text: "hello", selector: "#q" });
+  const t = await OPS.type({ tabId: TAB_ID, frame: "model-benchmarking.example.test", text: "hello", selector: "#q" });
   assert.deepEqual(lastExec().target, { tabId: TAB_ID, frameIds: [7] });
   assert.deepEqual(lastExec().args, ["#q", "hello"]);
   assert.equal(t.typed, 5);
@@ -187,7 +187,7 @@ test("--frame click/type/key: injected into the OOPIF frame; report trusted:fals
 
   resetCalls();
   state.execResult = { ok: true, key: "Enter" };
-  const k = await OPS.key({ tabId: TAB_ID, frame: "model-benchmarking.civit.ai", key: "Enter" });
+  const k = await OPS.key({ tabId: TAB_ID, frame: "model-benchmarking.example.test", key: "Enter" });
   assert.deepEqual(lastExec().target, { tabId: TAB_ID, frameIds: [7] });
   // The bounded key params (resolved in the SW) are passed to the injected fn.
   assert.equal(lastExec().args[0], "");            // no --selector
@@ -252,7 +252,7 @@ test("screenshot STILL uses the chrome.debugger (CDP) path — not regressed to 
 // --------------------------------------------------------------------------- //
 test("activate: makes the tab active + requests its window focus; returns tab info", async () => {
   resetCalls();
-  state.tab = { id: TAB_ID, url: "https://model-benchmarking.civit.ai/",
+  state.tab = { id: TAB_ID, url: "https://model-benchmarking.example.test/",
     title: "Bench", active: false, status: "complete", windowId: 3 };
   const out = await OPS.activate({ tabId: TAB_ID });
   // chrome.tabs.update(tabId, {active:true}) — make it the active tab of its window.
@@ -264,7 +264,7 @@ test("activate: makes the tab active + requests its window focus; returns tab in
   assert.equal(out.windowId, 3);
   assert.equal(out.status, "complete");
   assert.equal(out.active, true);
-  assert.equal(out.url, "https://model-benchmarking.civit.ai/");
+  assert.equal(out.url, "https://model-benchmarking.example.test/");
   // Intrusive-but-bounded: NO debugger attach, NO page injection.
   assert.deepEqual(state.calls.debugger, [], "activate must not use the debugger");
   assert.equal(state.calls.executeScript.length, 0, "activate must not inject a script");

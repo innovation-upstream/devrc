@@ -486,7 +486,7 @@ test("summarizeResult: CDP ops summarize compactly; type NEVER echoes the text",
 
 test("runBrowserOp: a CDP op (frames) reaches the bridge with the forced tab", async () => {
   const fx = fetchStub({ frames: { url: "https://civitai.com", frames: [
-    { frameId: "F1", url: "https://model-benchmarking.civit.ai/app", name: "bench" }] } });
+    { frameId: "F1", url: "https://model-benchmarking.example.test/app", name: "bench" }] } });
   const out = await run({ op: "frames" }, baseEnv(), fx);
   assert.equal(fx.calls.length, 1);
   assert.equal(fx.calls[0].body.op, "frames");

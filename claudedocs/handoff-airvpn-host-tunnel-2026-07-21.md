@@ -17,7 +17,7 @@ outstanding** — this doc is a record + operating guide for the next session.
 | #128 | Police **all physical NICs** (union w/ default-route egress iface) + fail-closed on nft error / no-NIC / bridge uplink + active-pill display fix (`???`→`CA?`) |
 
 ## Live state (verified end-to-end 2026-07-21)
-- Tunnel **UP**, exit `CA` (e.g. 184.75.208.162), **not** home `24.79.61.66`.
+- Tunnel **UP**, exit `CA` (an AirVPN egress IP), **not** the home ISP IP.
 - Killswitch armed **policing all 3 physical NICs** — journal: `up: killswitch armed
   (fwmark=…) policing [enp18s0u2u2c2 eth1 wlp15s0]`.
 - **k3s cluster healthy**, **nebula overlay** reachable (homelab 4 nodes), and

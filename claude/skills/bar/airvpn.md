@@ -66,8 +66,10 @@ A LAN-only test CANNOT reach the nebula direct-punch lockout mode, so it is NOT 
    `KUBECONFIG=/home/zach/workspace/homelab-talos/workbench-kubeconfig kubectl get pods -A | grep -vE 'Running|Completed'`
    (expect nothing bad).
 3. Nebula overlay intact: `KUBECONFIG=$KC_HOMELAB kubectl get nodes` → **4 nodes**.
-4. Exit IP is the tunnel: `curl -s https://ipinfo.io/json` → **CA**, NOT the home IP
-   `24.79.61.66`.
+4. Exit IP is the tunnel: `curl -s https://ipinfo.io/json` → **CA** and an AirVPN `org`,
+   NOT your home ISP's IP/org. (This repo is PUBLIC — the home IP is deliberately not
+   written down here; compare against `curl -s https://ipinfo.io/json` with the tunnel
+   DOWN.)
 5. **Confirm off-LAN:** `ssh zach@10.42.0.30` still connects (proves the nebula path survived —
    the LAN test can't cover this).
 

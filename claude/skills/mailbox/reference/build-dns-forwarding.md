@@ -53,7 +53,9 @@ KUBECONFIG=~/workspace/homelab-talos/production-kubeconfig
 CFT=$(kubectl -n external-dns get secret cloudflare-api-token -o jsonpath='{.data.cloudflare_api_token}' | base64 -d)
 ZID=72f00688be30dfc863a2c84fa6ab771c
 curl -s -H "Authorization: Bearer $CFT" "https://api.cloudflare.com/client/v4/zones/$ZID/dns_records?type=MX&per_page=100"
-# REQUIRED state: inbox.zacx.dev MX 10 mx-in.zacx.dev ; mx-in.zacx.dev A 5.161.118.55 with proxied=FALSE
+# REQUIRED state: inbox.zacx.dev MX 10 mx-in.zacx.dev ; mx-in.zacx.dev A <hetzner-gw-ip> with proxied=FALSE
+#   (the gateway's public IP is deliberately NOT in this PUBLIC repo — read it from the
+#    live A record above, or from the `server:` URL in $KC_PROD)
 # (PATCH proxied:false on the A record id if it's ever orange — SMTP can't cross the CF proxy)
 ```
 

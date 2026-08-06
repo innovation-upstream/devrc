@@ -22,7 +22,7 @@ import assert from "node:assert/strict";
 
 const TAB_ID = 5;
 const TOP_URL = "https://civitai.com/apps/run/model-benchmarking";
-const OOPIF_URL = "https://model-benchmarking.civit.ai/";
+const OOPIF_URL = "https://model-benchmarking.example.test/";
 const ABS_PATH = "/home/zach/pics/render.png";
 
 const FRAME_TREE = {
@@ -130,14 +130,14 @@ test("upload TOP frame: DOM.setFileInputFiles with the ABS path on the resolved 
 
 test("upload --frame OOPIF: setFileInputFiles is issued in the auto-attached OOPIF session", async () => {
   reset();
-  const out = await OPS.upload({ tabId: TAB_ID, frame: "model-benchmarking.civit.ai",
+  const out = await OPS.upload({ tabId: TAB_ID, frame: "model-benchmarking.example.test",
     selector: "#drop input[type=file]", path: ABS_PATH });
   assert.ok(cdpMethods().includes("Target.setAutoAttach"), "reaches the OOPIF via auto-attach");
   assert.equal(state.calls.setFile.length, 1);
   assert.equal(state.calls.setFile[0].sessionId, "SID_OOPIF",
     "the file is set INSIDE the cross-origin OOPIF's flat session");
   assert.deepEqual(state.calls.setFile[0].params.files, [ABS_PATH]);
-  assert.equal(out.frame, "model-benchmarking.civit.ai");
+  assert.equal(out.frame, "model-benchmarking.example.test");
   assert.equal(out.url, OOPIF_URL, "reports the FRAME's own url (proves it targeted the OOPIF)");
   assert.deepEqual(out.files, ["render.png"]);
   assert.equal(state.calls.detach.length, 1);
@@ -188,7 +188,7 @@ test("upload --frame unresolvable OOPIF: frame_not_found, NOTHING set (never a s
 
 test("SECURITY: upload attaches ONLY to the op's own tab; a FIXED typed CDP method set", async () => {
   reset();
-  await OPS.upload({ tabId: TAB_ID, frame: "model-benchmarking.civit.ai", selector: "#f", path: ABS_PATH });
+  await OPS.upload({ tabId: TAB_ID, frame: "model-benchmarking.example.test", selector: "#f", path: ABS_PATH });
   assert.ok(state.calls.attach.every((t) => t.tabId === TAB_ID), "own-tab-only attach (#187)");
   assert.ok(state.calls.detach.every((t) => t.tabId === TAB_ID || t.tabId === undefined));
   assert.ok(state.calls.getAllFrames.every((t) => t === TAB_ID), "frame enum scoped to the op's tab");

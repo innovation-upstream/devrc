@@ -594,8 +594,8 @@ test("matchOopifSessions: exact tier wins; trailing-slash tier only as a fallbac
 });
 
 test("pickOopifSessionId: single match → id, none → null, MULTIPLE → ambiguous_frame (never first-match)", () => {
-  const one = [{ sessionId: "S_bench", url: "https://model-benchmarking.civit.ai/" }];
-  assert.equal(pickOopifSessionId(one, "https://model-benchmarking.civit.ai/"), "S_bench");
+  const one = [{ sessionId: "S_bench", url: "https://model-benchmarking.example.test/" }];
+  assert.equal(pickOopifSessionId(one, "https://model-benchmarking.example.test/"), "S_bench");
   assert.equal(pickOopifSessionId(one, "https://nope.test/"), null);
   assert.throws(() => pickOopifSessionId(
     [{ sessionId: "A", url: "https://dup.test/" }, { sessionId: "B", url: "https://dup.test/" }],

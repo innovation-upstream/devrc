@@ -1,20 +1,25 @@
 #!/usr/bin/env bash
 # Add UDP 443 fallback for prod lighthouse in nebula static host map
-# Run: sudo bash nix/system/apply-nebula-443.sh
+#
+# This repo is PUBLIC, so the lighthouse's public IP is NOT committed. Supply it:
+#   sudo NEBULA_LIGHTHOUSE=<lighthouse public IP> bash nix/system/apply-nebula-443.sh
+# (read it out of the existing staticHostMap in /etc/nixos/configuration.nix, or from
+#  the `server:` URL in $KC_PROD).
 set -euo pipefail
 
 CFG="/etc/nixos/configuration.nix"
+LH="${NEBULA_LIGHTHOUSE:?set NEBULA_LIGHTHOUSE to the nebula lighthouse public IP}"
 
-if grep -q '5.161.118.55:443' "$CFG"; then
+if grep -q "${LH}:443" "$CFG"; then
   echo "Already configured — skipping"
   exit 0
 fi
 
 cp "$CFG" "$CFG.bak-nebula443"
-sed -i 's|"10.42.0.2" = \[ "5.161.118.55:4242" \];|"10.42.0.2" = [ "5.161.118.55:4242" "5.161.118.55:443" ];|' "$CFG"
+sed -i "s|\"10.42.0.2\" = \[ \"${LH}:4242\" \];|\"10.42.0.2\" = [ \"${LH}:4242\" \"${LH}:443\" ];|" "$CFG"
 
-if grep -q '5.161.118.55:443' "$CFG"; then
-  echo "[1/2] Added 5.161.118.55:443 to staticHostMap"
+if grep -q "${LH}:443" "$CFG"; then
+  echo "[1/2] Added ${LH}:443 to staticHostMap"
 else
   echo "ERROR: sed failed"
   cp "$CFG.bak-nebula443" "$CFG"
