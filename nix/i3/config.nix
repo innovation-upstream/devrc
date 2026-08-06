@@ -207,6 +207,9 @@ bindsym $mod+minus move scratchpad
 # Notifications (dunst). dunstctl ships with the dunst package on PATH.
 bindsym $mod+n exec --no-startup-id dunstctl history-pop            # recall last dismissed
 bindsym $mod+Shift+n exec --no-startup-id dunstctl set-paused toggle && pkill -RTMIN+15 i3status-rs # manual DND (quiet mode) + refresh the notifications bar block
+
+# Background blur toggle (picom dual_kawase)
+bindsym $mod+Shift+b exec --no-startup-id ~/workspace/devrc/scripts/toggle-blur.sh
 bindsym $mod+grave exec --no-startup-id dunstctl close-all          # clear the whole stack
 
 # Thin borders
