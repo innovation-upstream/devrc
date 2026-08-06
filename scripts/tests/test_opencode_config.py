@@ -664,6 +664,21 @@ REDUNDANTLY_COVERED_ASKS = {
 # again a verified claim: `test_every_deny_rule_is_individually_pinned` asserts
 # the command still resolves deny with the glob removed, i.e. that the guard
 # really is holding it.
+# 🔴 The deny rules the GLOB layer itself enforces (i.e. not merely mirrors of a
+# guard check), each with a command it decides. Declared rather than derived,
+# because a derived list is read OFF the current verdicts — and a rule silently
+# downgraded `deny`->`ask` simply drops out of the set being checked, which is
+# exactly how that mutant survived every other assertion here.
+GLOB_ENFORCED_DENIES = {
+    "*git*add -A*": "git add -A",
+    "*git*stash*": "git stash",
+    "*git*reset --hard*": "git reset --hard",
+    "*rm -rf /*": "rm -rf /var/x",
+    "*rm -rf ~*": "rm -rf ~/x",
+    "*rm -rf $HOME*": "rm -rf $HOME/x",
+    "*mkfs*": "mkfs.ext4 /dev/sda",
+}
+
 GUARD_BACKSTOPPED_DENIES = {
     "*git*add --all*": "git -C /repo add --all",
     "*git*add .": "git add .",
@@ -1068,21 +1083,52 @@ def test_every_deny_rule_is_individually_pinned():
     is re-measured here to still resolve `deny` once the glob is removed. That
     second assertion is the one that matters: it fails if someone deletes the
     GUARD check believing the glob has it, or the glob believing the guard does.
+
+    🔴 THE VERDICT IS ALSO ASSERTED AT THE GLOB LAYER, not only end-to-end.
+    MEASURED: downgrading `"*git*add -A*"` from `deny` to `ask` survived every
+    other assertion in this file, because guard_core denies `git add -A` anyway
+    so nothing observable changed. That mutant is not equivalent, though — the
+    deny block's whole reason for existing is the case where guard.js FAILS TO
+    LOAD, and under a silent downgrade the interactive TUI would offer a human
+    the chance to approve it. So each deny rule must resolve `deny` at the glob
+    layer too.
     """
     bash = load_config()["permission"]["bash"]
     denies = [k for k, v in list(bash.items())[1:] if v == "deny"]
 
-    unpinned, unheld = [], []
+    # 🔴 FIRST: the SET, against the declarations. Reading `denies` off the
+    # config and only checking what is in it cannot see a rule that left the set
+    # — a `deny`->`ask` downgrade removes the rule from every subsequent loop.
+    expected = set(GLOB_ENFORCED_DENIES) | set(GUARD_BACKSTOPPED_DENIES)
+    assert set(denies) == expected, (
+        f"the deny block's pattern SET differs from the declarations.\n"
+        f"  no longer `deny` (deleted, or downgraded to ask/allow): "
+        f"{sorted(expected - set(denies))}\n"
+        f"  present but undeclared: {sorted(set(denies) - expected)}\n"
+        f"Add a new deny to GLOB_ENFORCED_DENIES (with a command it decides) or "
+        f"to GUARD_BACKSTOPPED_DENIES (with the command guard_core holds)."
+    )
+
+    unpinned, unheld, downgraded = [], [], []
     for pat in denies:
         if pat in GUARD_BACKSTOPPED_DENIES:
             cmd = GUARD_BACKSTOPPED_DENIES[pat]
             # With the glob gone, the guard must still deny it outright.
             if guard_verdict(cmd) != "deny":
                 unheld.append((pat, cmd, effective_bash_action_without(pat, cmd, None)))
-        elif not _sole_decider_commands(pat, MUST_DENY + DANGEROUS_FAMILIES):
-            unpinned.append(pat)
+            probes = [cmd]
+        else:
+            probes = _sole_decider_commands(pat, MUST_DENY + DANGEROUS_FAMILIES)
+            if not probes:
+                unpinned.append(pat)
+        if probes and not any(effective_bash_action(c, None) == "deny" for c in probes):
+            downgraded.append((pat, probes[0], effective_bash_action(probes[0], None)))
 
-    stale = [p for p in GUARD_BACKSTOPPED_DENIES if p not in denies]
+    # NOTE deliberately NO "stale declaration" assertion here, unlike the ask
+    # ledger. The set assertion above subsumes it — a declared pattern that left
+    # the config already fails there — so a second check would be UNREACHABLE,
+    # and an unreachable assertion reports safety while testing nothing.
+    # (Verified by mutation: dropping `*mkswap*` fails on the set assertion.)
 
     assert not unpinned, (
         f"{len(unpinned)} `deny` rule(s) are pinned by NOTHING at the glob "
@@ -1096,8 +1142,12 @@ def test_every_deny_rule_is_individually_pinned():
         f"the guard check was removed, or it never covered this spelling. Do "
         f"not fix this by widening the glob; the header explains why."
     )
-    assert not stale, (
-        f"GUARD_BACKSTOPPED_DENIES names pattern(s) not in the config: {stale}."
+    assert not downgraded, (
+        f"🔴 `deny` rule(s) do NOT resolve deny at the GLOB layer: {downgraded}. "
+        f"Either the rule was silently downgraded to `ask`, or a later rule "
+        f"shadows it. This is invisible end-to-end whenever guard_core covers "
+        f"the same command — and the deny block exists precisely for the case "
+        f"where guard.js does not load."
     )
 
 
@@ -1150,6 +1200,50 @@ def test_no_blanket_read_allow():
     assert "read" not in perm, (
         "`read: allow` defeats opencode's built-in .env guard on every agent. "
         "Remove the key; the default already allows all non-.env reads."
+    )
+
+
+# The TOOL-level permission rows, verbatim. `bash` is excluded — it has its own
+# ordered-glob block and its own per-rule ledger above.
+EXPECTED_TOOL_PERMISSIONS = {
+    "glob": "allow",
+    "grep": "allow",
+    "edit": "allow",
+    "write": "allow",
+    "webfetch": "allow",
+    "todowrite": "allow",
+    "task": "allow",
+    "skill": "allow",
+    "doom_loop": "ask",
+    "external_directory": "ask",
+}
+
+
+def test_tool_level_permissions_are_pinned_exactly():
+    """🔴 The per-rule ledger, for the NON-bash half of the block.
+
+    These ten rows were the entire residue of the deletion sweep after the bash
+    ledger landed: 10 of 77 mutants still survived, and all ten were here.
+    `doom_loop` and `external_directory` are the ones that matter — they are the
+    only `ask` rows outside the bash block, and flipping either to `allow`
+    removed a real control (an unbounded loop; reaching outside the project
+    directory) with the suite fully green.
+
+    Pinned as an EXACT mapping rather than a set of `in` checks, so the sweep's
+    three mutant shapes all fail: deleting a row, commenting it out, and
+    inverting its verdict. An exact map also fails on an ADDED row, which is
+    deliberate — a new tool-level permission should be a reviewed decision, and
+    `read` in particular must never appear (see test_no_blanket_read_allow).
+    """
+    perm = {k: v for k, v in load_config()["permission"].items() if k != "bash"}
+    assert perm == EXPECTED_TOOL_PERMISSIONS, (
+        f"tool-level permission rows differ from the pinned set.\n"
+        f"  missing/changed: "
+        f"{ {k: v for k, v in EXPECTED_TOOL_PERMISSIONS.items() if perm.get(k) != v} }\n"
+        f"  unexpected:      "
+        f"{ {k: v for k, v in perm.items() if k not in EXPECTED_TOOL_PERMISSIONS} }\n"
+        f"If the change is intended, update EXPECTED_TOOL_PERMISSIONS in the "
+        f"SAME commit and say why in the message."
     )
 
 
