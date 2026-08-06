@@ -283,6 +283,9 @@ class KeyLogger:
 
     # -- idle flusher (wall clock) --------------------------------------- #
     def _idle_loop(self, poll: float):
+        # Monotonic (not wall) clock so a system clock step can't skip or storm
+        # the ptrace-revoke check.
+        last_ptracer_check = time.monotonic()
         while not self._stop.wait(poll):
             now = time.time()
             with self._lock:
@@ -297,6 +300,13 @@ class KeyLogger:
                 evs = []
             for ev in evs:
                 _emit_espanso(ev, self.spool_dir)
+            # ~Every 60s, revoke the PR_SET_PTRACER_ANY opt-in once the sibling
+            # spin-capture watcher is done — so the keylogger's live memory is
+            # exposed only until first capture, not for its whole lifetime.
+            mono = time.monotonic()
+            if mono - last_ptracer_check >= 60.0:
+                last_ptracer_check = mono
+                _maybe_revoke_ptracer()
 
     def run(self, poll_seconds: float = 0.5):
         from Xlib import X
@@ -353,7 +363,185 @@ class KeyLogger:
             pass
 
 
+# Set True once PR_SET_PTRACER_ANY has actually been applied (rc==0), so the
+# idle-loop revoke only fires when there is something to revoke. NEVER trust this
+# as a security fact on its own — it is a best-effort bookkeeping flag; the kernel
+# is the authority on the process's real ptracer setting.
+_ptracer_opt_in_active = False
+
+
+def _allow_any_ptracer() -> None:
+    """Opt this process in to being ptraced by a non-descendant same-UID tracer.
+
+    Why this exists: keylog.service is a `systemd --user` unit; the
+    keylog-spin-capture watcher (py-spy) is a SIBLING `oneshot`, never a
+    descendant of it. Under Yama `kernel.yama.ptrace_scope=1` ("restricted
+    ptrace" — Yama's upstream default when nothing in /etc/sysctl.d manages it,
+    which is what both hosts currently read; this repo sets no yama sysctl) a
+    non-descendant is
+    denied BOTH `process_vm_readv` and `PTRACE_ATTACH` even at the same UID, so
+    the watcher hits EPERM and captures nothing. Yama honours exactly ONE opt-out:
+    a tracee may declare who is allowed to trace it via
+    `prctl(PR_SET_PTRACER, ...)`. `PR_SET_PTRACER_ANY` opts in for ANY same-UID
+    tracer. This is the whole-fleet-safe alternative to persisting
+    `ptrace_scope=0` system-wide (which would expose EVERY same-UID process
+    permanently): it exposes ONLY this process, and — with the revoke wired into
+    the idle loop below — only until the spin-capture watcher captures or gives up.
+
+    TRADE-OFF, stated straight rather than sold: keylog is a keystroke collector —
+    arguably the single most sensitive process on the box — and
+    `PR_SET_PTRACER_ANY` opens its live memory to ANY process running as this
+    same user. It grants nothing cross-user and
+    nothing to root that root lacked. Pinning ONE tracer PID would be tighter,
+    but the watcher is a `oneshot` whose PID changes on every 5-minute tick, so
+    there is no stable PID to name.
+
+    This is NOT harmless, and must not be sold as such. Same-UID compromise was
+    already game-over for keystroke confidentiality — but this opt-in is not a
+    no-op on top of that; the honest accounting is that it removes a speed bump
+    AND widens the loot. It removes the restart/detectability speed bump:
+    tampering with keylog.py to exfiltrate goes via the code on disk, and
+    `readlink -f` resolves it to an `r--r--r-- root`-owned copy in the Nix store,
+    so tampering needs a home-manager switch + service restart — a journal line, a
+    PID change, and a coverage gap `deadman.py` catches. `PTRACE_ATTACH` (a WRITE
+    primitive, not just a read) injects into the running process silently and
+    lifts the current X cookie immediately. And it widens the loot from a
+    ~10-second on-disk spool window to full live state: segments are shipped and
+    unlinked within ACTIVITY_FLUSH_SECONDS (~10s), so the spool is emphatically
+    NOT a durable same-UID-readable equivalent. Live memory holds what the spool
+    never does — the unflushed `Chunker._buf` (the password/token being typed
+    RIGHT NOW, up to max_chars, held while typing continues), BACKSPACED
+    characters (`_buf.pop()`) that never reach the spool at all, aborted/
+    escape-cancelled espanso search terms, raw keycodes + modifier state, and the
+    X11 MIT-MAGIC-COOKIE held by the two live `display.Display()` connections —
+    the credential that grants the very same X RECORD keystroke-capture capability
+    keylog itself has.
+
+    Mitigations that actually HOLD (as opposed to the false "you could already
+    read the spool" equivalence): it grants nothing cross-user and nothing to root
+    that root lacked; it is GATED on KEYLOG_ALLOW_ANY_PTRACER, set by home-manager
+    ONLY on the workbench where the spin-capture diagnostic runs (the laptop keylog
+    never opts in); and the opt-in is REVOKED via `prctl(PR_SET_PTRACER, 0)` as
+    soon as the watcher captures or gives up (see `_maybe_revoke_ptracer` in the
+    idle loop), cutting the exposure window from keylog's whole lifetime down to
+    "until first capture". Remove the env gate and this call together once the
+    spin is root-caused.
+
+    Fail SOFT: a non-Linux kernel, a kernel too old for PR_SET_PTRACER, a missing
+    libc, or an EINVAL must NEVER take the keylogger down. Log and continue — the
+    worst case is the watcher stays inert, exactly as it is today.
+    """
+    if os.environ.get("KEYLOG_ALLOW_ANY_PTRACER", "").strip().lower() not in (
+        "1", "true", "yes", "on",
+    ):
+        return
+    if sys.platform != "linux":
+        return
+    try:
+        import ctypes
+
+        PR_SET_PTRACER = 0x59616D61  # <linux/prctl.h>
+        PR_SET_PTRACER_ANY = ctypes.c_ulong(-1).value  # (unsigned long)-1
+        libc = ctypes.CDLL("libc.so.6", use_errno=True)
+        libc.prctl.restype = ctypes.c_int
+        libc.prctl.argtypes = [
+            ctypes.c_int, ctypes.c_ulong, ctypes.c_ulong,
+            ctypes.c_ulong, ctypes.c_ulong,
+        ]
+        rc = libc.prctl(PR_SET_PTRACER, PR_SET_PTRACER_ANY, 0, 0, 0)
+        if rc != 0:
+            err = ctypes.get_errno()
+            print(
+                f"keylog: PR_SET_PTRACER_ANY failed rc={rc} errno={err} "
+                f"({os.strerror(err)}) — spin-capture may be unable to attach",
+                file=sys.stderr, flush=True,
+            )
+        else:
+            global _ptracer_opt_in_active
+            _ptracer_opt_in_active = True
+            print(
+                "keylog: PR_SET_PTRACER_ANY set — spin-capture (py-spy) may attach",
+                file=sys.stderr, flush=True,
+            )
+    except Exception as exc:  # noqa: BLE001 — must never crash the collector
+        print(
+            f"keylog: PR_SET_PTRACER_ANY opt-in skipped: {exc!r}",
+            file=sys.stderr, flush=True,
+        )
+
+
+def _spin_capture_done() -> bool:
+    """True once the sibling spin-capture watcher has finished FOR GOOD — it either
+    captured a usable dump (`.captured`) or gave up after repeated incomplete
+    passes (`.giveup`). Mirrors keylog-spin-capture.sh's OUT dir exactly:
+    ${XDG_CACHE_HOME:-$HOME/.cache}/keylog-spin. Once either sentinel exists the
+    watcher will never attach again, so keylog no longer needs to stay traceable.
+    """
+    base = os.environ.get("XDG_CACHE_HOME") or os.path.join(
+        os.path.expanduser("~"), ".cache",
+    )
+    d = Path(base) / "keylog-spin"
+    return (d / ".captured").exists() or (d / ".giveup").exists()
+
+
+def _revoke_any_ptracer() -> None:
+    """Undo _allow_any_ptracer: `prctl(PR_SET_PTRACER, 0)` drops the opt-in so a
+    non-descendant same-UID sibling can no longer attach (it gets EPERM again
+    under ptrace_scope=1). Fail SOFT for the same reasons as the opt-in — a revoke
+    that cannot be issued must never take the collector down; worst case the
+    opt-in lingers, exactly as it would have without this at all.
+    """
+    global _ptracer_opt_in_active
+    if sys.platform != "linux":
+        return
+    try:
+        import ctypes
+
+        PR_SET_PTRACER = 0x59616D61  # <linux/prctl.h>
+        libc = ctypes.CDLL("libc.so.6", use_errno=True)
+        libc.prctl.restype = ctypes.c_int
+        libc.prctl.argtypes = [
+            ctypes.c_int, ctypes.c_ulong, ctypes.c_ulong,
+            ctypes.c_ulong, ctypes.c_ulong,
+        ]
+        rc = libc.prctl(PR_SET_PTRACER, 0, 0, 0, 0)
+        if rc != 0:
+            err = ctypes.get_errno()
+            print(
+                f"keylog: PR_SET_PTRACER clear failed rc={rc} errno={err} "
+                f"({os.strerror(err)}) — opt-in may still be active",
+                file=sys.stderr, flush=True,
+            )
+        else:
+            _ptracer_opt_in_active = False
+            print(
+                "keylog: PR_SET_PTRACER cleared — spin-capture watcher is done, "
+                "siblings can no longer attach",
+                file=sys.stderr, flush=True,
+            )
+    except Exception as exc:  # noqa: BLE001 — must never crash the collector
+        print(
+            f"keylog: PR_SET_PTRACER clear skipped: {exc!r}",
+            file=sys.stderr, flush=True,
+        )
+
+
+def _maybe_revoke_ptracer() -> None:
+    """Idle-loop hook (called ~every 60s): once we actually opted in AND the
+    watcher has captured or given up, revoke the opt-in. This cuts the
+    PR_SET_PTRACER_ANY exposure from keylog's whole lifetime (Restart=always →
+    until reboot or a home-manager switch) down to "until first capture".
+    """
+    if _ptracer_opt_in_active and _spin_capture_done():
+        _revoke_any_ptracer()
+
+
 def main(argv=None) -> int:
+    # Opt in to the sibling spin-capture watcher BEFORE anything else, so the
+    # permission is in place well before the watcher's first 5-minute attach.
+    # Gated + fail-soft; see _allow_any_ptracer.
+    _allow_any_ptracer()
+
     spool_dir = SE.default_spool_dir()
     idle_seconds = float(os.environ.get("KEYLOG_IDLE_SECONDS", "2.0"))
     max_chars = int(os.environ.get("KEYLOG_MAX_CHARS", "4096"))
