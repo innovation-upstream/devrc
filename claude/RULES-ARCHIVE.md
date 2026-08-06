@@ -121,7 +121,7 @@ inert** feature that still passed 428 green tests and a second clean audit. The 
 about the gap and the fix was wrong about reality.
 
 ## unreachable-guards
-*Supports: "A guard must be proven REACHABLE, not just breakable."*
+*Supports: 🔴 "Mutation-test a guard before certifying it — and prove it REACHABLE, not just breakable." (the reachability half).*
 
 Three ways a passing mutation test still leaves a guard untested:
 (a) **an earlier check always wins**, so the guard can never execute at all — a cap shipped this
@@ -140,7 +140,7 @@ by an adversarial audit. One "invariant guard" passed because its click landed o
 viewport, so the interaction never happened.
 
 ## mutation-sweep-blind-spots
-*Supports: "Mutation-test a guard before certifying it."*
+*Supports: 🔴 "Mutation-test a guard before certifying it — and prove it REACHABLE, not just breakable." (the sweep half).*
 
 An 18/18 and a 20/20 sweep each had blind spots that only a *differently-constructed
 independent* sweep found — including a mutant that dropped one component from a signature and
@@ -148,7 +148,7 @@ independent* sweep found — including a mutant that dropped one component from 
 happened to use a fixture where `pid == pgid == sid` and could not discriminate.
 
 ## nine-broken-harnesses
-*Supports: 🔴 "Validate the HARNESS against a known-bad state before you read its verdict."*
+*Supports: 🔴 "Validate the INSTRUMENT before you read its verdict." (negative control).*
 
 **Nine** harnesses in one session (2026-08-01) reported success while testing nothing:
 1. a runner absent from `PATH` (so *every* mutant exited non-zero);
@@ -170,14 +170,14 @@ A canary built from realistic-looking values reported `leaks found: 2`. Build th
 realistic data, never from the vendor's own example pair.
 
 ## positive-control
-*Supports: 🔴 "A harness that COUNTS needs a POSITIVE control too."*
+*Supports: 🔴 "Validate the INSTRUMENT before you read its verdict." (positive control).*
 
 Ground case (2026-08-01): four consecutive "0 submits" results were treated as evidence a guard
 held; they only became evidence once one clean run submitted **exactly 1** through the same
 counter.
 
 ## parsing-tool-output
-*Supports: 🔴 "When you PARSE a tool's output, its format is a dependency you did not pin."*
+*Supports: 🔴 "Validate the INSTRUMENT before you read its verdict." (parsing an output format you did not pin).*
 
 The [nine-broken-harnesses](#nine-broken-harnesses) list includes `diff`'s unified default as
 one item; it is a **CLASS, not that one manifestation** — that rule was READ in-session and the
@@ -210,7 +210,7 @@ client-side (the request was never sent) and by a server that received the reque
 request never left the page, which is the former and only the former.
 
 ## merged-tree
-*Supports: 🔴 "Gate on the MERGED tree, not the PR branch."*
+*Supports: 🔴 "A green run covers only the tree and the environment it ran in." (a) the merged tree.*
 
 Four PRs in one remix batch were all individually green and individually audit-clean; **two were
 red** — one a pure cross-PR interaction (PR A's feature deleted the DOM nodes PR B's tests
@@ -219,7 +219,7 @@ this: B's reviewer ran before A existed. One PR was 10 commits behind main and h
 tested against it.
 
 ## two-tiers
-*Supports: 🔴 "A suite that runs in TWO TIERS must be green in BOTH."*
+*Supports: 🔴 "A green run covers only the tree and the environment it ran in." (b) both tiers.*
 
 Ground case (2026-08-02): **one commit shipped three regressions that masked each other.**
 
@@ -425,7 +425,7 @@ run, a failed assertion inflates exactly one.** Read the sibling tests' duration
 before calling it load.
 
 ## count-not-exit-code
-*Supports: 🔴 "COUNT the tests; never read an exit code." (Green Test Suite).*
+*Supports: 🔴 "Validate the INSTRUMENT before you read its verdict." (read the CONTENT, never an exit code).*
 
 Four separate false greens in one session:
 
