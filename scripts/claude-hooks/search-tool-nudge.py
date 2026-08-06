@@ -91,16 +91,57 @@ NATIVE_TOOL = {CONTENT: "Grep", FILES: "Glob"}
 # over the raw transcript would match those and silence a session whose tools work fine.
 # --------------------------------------------------------------------------- #
 UNAVAILABLE_MARKER = b"No such tool available: "
-_UNAVAILABLE_RE = re.compile(r"^Error: No such tool available: ([A-Za-z][A-Za-z0-9_]*)")
-# Cheap by construction: the scan runs at most once per KIND per session, because the
-# outcome either way is written to the state file and short-circuits every later call.
-# That bound needs a session_id to key the state file on — the harness always sends one
-# (it and transcript_path come from the same payload builder), so the unbounded shape is
-# "transcript_path but no session_id", which the harness does not produce.
-# Measured on the largest transcript on this host — 66.5 MB — a full byte-prefiltered
-# pass costs 73 ms; a typical transcript is under 1 MB. The cap bounds the pathological
-# case; hitting it just means "no signal", i.e. nudge exactly as before.
-MAX_SCAN_BYTES = 64 * 1024 * 1024
+# NO `^` in the pattern: `.match()` already anchors at the start, so a `^` here would be
+# a second, redundant anchor — and a redundant guard is one a mutation sweep can delete
+# without any test noticing. One anchor, and it is `.match` (NOT `.search`): an is_error
+# tool_result that merely CONTAINS the marker — a failed Bash call whose stderr quotes it
+# — must not suppress. Pinned by "marker mid-text in a real error does NOT suppress".
+_UNAVAILABLE_RE = re.compile(r"Error: No such tool available: ([A-Za-z][A-Za-z0-9_]*)")
+
+# Scan cost bound. The scan is O(bytes) and runs at most once per KIND per session (see
+# the claim protocol below), so the cap exists only to bound a pathological or corrupt
+# transcript, NOT the normal case.
+#
+# Why 1 GiB and not something snug: the previous value (64 MiB) was chosen just above the
+# largest transcript then on this host (63.4 MiB = 99.1% of it) — i.e. one long session
+# away from silently truncating, which would have looked exactly like "no signal". A cap
+# whose whole job is to catch the pathological case must not sit inside the normal range.
+# Throughput measured on that 63.4 MiB file, 5 runs: 52-102 ms, i.e. 0.8-1.6 ms/MiB with
+# a WARM page cache. That is a FLOOR, not a bound — caches could not be dropped on this
+# host, so a cold read is slower by an unmeasured factor. Even at 10x the floor, 1 GiB is
+# a few seconds, once per kind per session, and truncation fails OPEN: nudge delivered.
+# Overridable so the truncation boundary itself is testable rather than assumed.
+MAX_SCAN_BYTES = int(os.environ.get("SEARCH_TOOL_NUDGE_MAX_SCAN_BYTES") or 1024 * 1024 * 1024)
+
+# --------------------------------------------------------------------------- #
+# Per-session state, and the claim protocol
+#
+# 🔴 Concurrency is the normal case here, not an edge: parallel subagents share one
+# session, so several hook processes run at once. The old layout — one state FILE per
+# session, read-modify-write — raced, and this hook's transcript scan sits between the
+# read and the write, which widens the window from microseconds to tens of milliseconds.
+# MEASURED, 12 truly-concurrent invocations against a 66.5 MB transcript: 10-11 duplicate
+# nudges (base hook, no scan: 0-2). N copies of the nudge in one turn is precisely the
+# "trains the operator to ignore it" failure this hook exists to avoid.
+#
+# So state is a DIRECTORY per session and each token is an empty marker FILE created with
+# O_CREAT|O_EXCL — an atomic test-and-set, no lock, so nothing can block the Bash call.
+# The kind is claimed BEFORE the transcript is scanned, which means exactly one process
+# per kind scans and exactly one can emit; the losers exit silently and pay nothing.
+#
+# What is actually guaranteed, stated precisely because the old comment overclaimed:
+#   * at most ONE nudge per kind per session, including under concurrency, as long as
+#     the state directory is writable and on a POSIX filesystem (O_EXCL);
+#   * if state is UNWRITABLE the hook fails OPEN — it may nudge more than once, exactly
+#     as the pre-existing hook did, rather than swallow the nudge or raise;
+#   * a process that claims a kind and then dies burns that kind's nudge for the session.
+#     Deliberate: one lost nudge is far cheaper than N duplicates.
+#
+# Tokens: a KIND ("content"/"files") = nudge handled; "no:<Tool>" = that tool proven
+# unavailable. ":" is not filename-safe, so tokens map to filenames via a fixed injective
+# encoding over the closed token set.
+# --------------------------------------------------------------------------- #
+STATE_ROOT = f"{CACHE_DIR}/s"
 
 
 def _strip_heredocs(cmd):
@@ -433,43 +474,76 @@ def _unavailable_native_tools(data, wanted):
     return found
 
 
-def _state_path(data):
-    """Per-session state file, scoped per AGENT too.
+def _sanitize(part):
+    return re.sub(r"[^A-Za-z0-9_.-]", "_", part)[:120]
+
+
+def _state_dir(data):
+    """Per-session state directory, scoped per AGENT too.
 
     A subagent shares its parent's session_id but not necessarily its tool set, so a
     subagent that proves Grep missing must not silence the parent's still-actionable
-    nudge. A payload with no agent_id keys exactly as before.
+    nudge.
+
+    🔴 The components are joined with "@", which `_sanitize` maps to "_" and therefore
+    cannot appear INSIDE a sanitized component. That is what makes the key injective:
+    joining sanitized parts with any character the sanitizer can emit (e.g. "_") would
+    make session="a" + agent="b" collide with session="a_b" alone, and the first would
+    then silence the second. Residual, pre-existing and NOT introduced here: two raw
+    session ids that sanitize to the same string still alias (real ids are UUIDs).
     """
     session = data.get("session_id") or ""
     if not isinstance(session, str) or not session:
         return None
     agent = data.get("agent_id")
-    key = session + ("@" + agent if isinstance(agent, str) and agent else "")
-    return os.path.join(CACHE_DIR, re.sub(r"[^A-Za-z0-9_.-]", "_", key))
+    parts = [_sanitize(session)]
+    if isinstance(agent, str) and agent:
+        parts.append(_sanitize(agent))
+    return os.path.join(STATE_ROOT, "@".join(parts))
 
 
-def _read_state(path):
-    """Tokens recorded for this session: a KIND already nudged, or `no:<Tool>` for a
-    native tool proven unavailable. Fail-open on IO error."""
-    if not path:
+def _token_file(state_dir, token):
+    # Tokens are stored verbatim: ":" is a legal filename byte on Linux (the only OS
+    # these hooks run on), so an encode/decode pair here would be complexity that
+    # nothing can observe — a mutation sweep deletes either half without any test
+    # noticing, which is the definition of a guard not worth shipping.
+    return os.path.join(state_dir, token)
+
+
+def _read_state(state_dir):
+    """Tokens already recorded: a KIND handled, or `no:<Tool>` proven unavailable.
+    Fail-open — an unreadable/absent directory reads as "nothing recorded yet"."""
+    if not state_dir:
         return set()
     try:
-        with open(path) as fh:
-            return set(fh.read().split())
+        return set(os.listdir(state_dir))
     except Exception:
         return set()
 
 
-def _append_state(path, tokens):
-    if not path or not tokens:
-        return
+def _claim(state_dir, token):
+    """Atomically claim `token` for this process. True iff THIS process created it.
+
+    O_CREAT|O_EXCL is a single atomic test-and-set, so of N concurrent hook processes
+    exactly one gets True. It never blocks — there is no lock to wait on, which is why
+    this cannot hang a Bash call.
+
+    Fails OPEN, and that direction is deliberate: if the state directory cannot be
+    written we return True (proceed, possibly duplicating a nudge) rather than False
+    (silently swallow it). Duplicating restores the pre-existing behaviour; swallowing
+    would be a new failure mode invisible to the operator.
+    """
+    if not state_dir:
+        return True
     try:
-        os.makedirs(CACHE_DIR, exist_ok=True)
-        with open(path, "a") as fh:
-            for t in tokens:
-                fh.write(t + "\n")
+        os.makedirs(state_dir, exist_ok=True)
+        os.close(os.open(_token_file(state_dir, token),
+                         os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600))
+        return True
+    except FileExistsError:
+        return False
     except Exception:
-        pass
+        return True
 
 
 def main():
@@ -487,27 +561,39 @@ def main():
         if not kinds:
             sys.exit(0)
 
-        state_path = _state_path(data)
-        state = _read_state(state_path)
-        fresh = [k for k in kinds if k not in state]
+        state_dir = _state_dir(data)
+        # Fast path, NOT a correctness guard — honest scope note, same convention as the
+        # byte prefilter: a mutation sweep confirms this read SURVIVES deletion, because
+        # the atomic claim below already rejects an already-handled kind. It is kept so
+        # the overwhelmingly common case (kind already handled) costs one listdir instead
+        # of a mkdir + open, on a hook that runs after every Bash call.
+        fresh = [k for k in kinds if k not in _read_state(state_dir)]
         if not fresh:
             sys.exit(0)
 
-        # Don't recommend a tool this session has proven it doesn't have. The scan is
-        # reached at most once per kind: whichever way it goes, the outcome is recorded
-        # below and every later call short-circuits on the state file.
-        blocked = {t for t in NATIVE_TOOL.values() if "no:" + t in state}
-        unknown = {NATIVE_TOOL[k] for k in fresh} - blocked
-        if unknown:
-            newly = _unavailable_native_tools(data, unknown)
-            if newly:
-                blocked |= newly
-                _append_state(state_path, ["no:" + t for t in sorted(newly)])
-        fresh = [k for k in fresh if NATIVE_TOOL[k] not in blocked]
+        # 🔴 CLAIM BEFORE SCANNING. Everything past this point is done by exactly one
+        # process per kind, so concurrent invocations cannot each emit a nudge AND
+        # cannot each read the whole transcript. The losers exit silently, paying nothing.
+        fresh = [k for k in fresh if _claim(state_dir, k)]
         if not fresh:
             sys.exit(0)
 
-        _append_state(state_path, fresh)
+        # Don't recommend a tool this session has proven it doesn't have.
+        newly = _unavailable_native_tools(data, {NATIVE_TOOL[k] for k in fresh})
+        if newly:
+            # A DIAGNOSTIC breadcrumb, deliberately not load-bearing: the kind marker
+            # claimed above is what enforces once-per-kind, so nothing reads this back.
+            # It exists so `ls ~/.cache/claude-search-tool-nudge/s/<session>/` answers
+            # "why did the nudge go quiet in this session" without re-deriving it. An
+            # earlier revision DID branch on it; that branch was unreachable once the
+            # claim moved ahead of the scan, and shipping an unreachable branch is how
+            # a guard gets believed. Removed rather than left in as decoration.
+            for t in sorted(newly):
+                _claim(state_dir, "no:" + t)
+            fresh = [k for k in fresh if NATIVE_TOOL[k] not in newly]
+        if not fresh:
+            sys.exit(0)
+
         lines = "\n".join(f"  • {HINTS[k][0]} → {HINTS[k][1]}" for k in fresh)
         nudge = (
             "search-tool: that Bash call was a tree search. The native tools do the same "

@@ -16,7 +16,7 @@ reassuring answer here is a ZERO (no false positives):
 
 Run: python3 scripts/claude-hooks/tests/test_search_tool_nudge.py
 """
-import os, sys, glob, json, shutil, subprocess, tempfile, importlib.util
+import os, sys, glob, json, time, shutil, subprocess, tempfile, threading, importlib.util
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 HOOK = os.path.join(HERE, "..", "search-tool-nudge.py")
@@ -161,11 +161,34 @@ def run(payload):
     return p.returncode, p.stdout.strip()
 
 
+STATE_ROOT = os.path.join(HOME, ".cache", "claude-search-tool-nudge", "s")
+# Every test session id starts with one of these, and the suite wipes their state dirs
+# both before and after. 🔴 This suite MUST be idempotent: state that survives a run
+# makes the NEXT run fail, which during a mutation sweep reads as "mutant killed" for
+# every mutant — a broken harness reporting a perfect score. Guarded below by
+# re-running the whole file and asserting the second run is identical.
+TEST_SID_PREFIXES = ("test-session-search-nudge-", "test-search-nudge-", "test-search-nudge-collide")
+
+
+def clear_test_state():
+    for pref in TEST_SID_PREFIXES:
+        for p in glob.glob(os.path.join(STATE_ROOT, pref + "*")):
+            shutil.rmtree(p, ignore_errors=True)
+        # Also the LEGACY layout (one flat FILE per session, pre-dating the state dir).
+        # Not housekeeping: without it, running this file against an older revision of
+        # the hook leaves state the newer cleanup cannot see, and the next run reads as
+        # "everything suppressed" — which is exactly how a contaminated measurement gets
+        # mistaken for 44 regressions.
+        for p in glob.glob(os.path.join(os.path.dirname(STATE_ROOT), pref + "*")):
+            if os.path.isfile(p):
+                try:
+                    os.remove(p)
+                except OSError:
+                    pass
+
+
+clear_test_state()
 sid = "test-session-search-nudge-DO-NOT-COLLIDE"
-cache = os.path.join(HOME, ".cache", "claude-search-tool-nudge",
-                     "".join(c if c.isalnum() or c in "_.-" else "_" for c in sid))
-if os.path.exists(cache):
-    os.remove(cache)
 
 rc, out = run({"tool_name": "Bash", "session_id": sid,
                "tool_input": {"command": "grep -r TODO src/"}})
@@ -198,8 +221,7 @@ check("io non-bash silent", (rc5, out5), (0, ""))
 p = subprocess.run([sys.executable, HOOK], input="not json", capture_output=True, text=True)
 check("io malformed rc", p.returncode, 0)
 
-if os.path.exists(cache):
-    os.remove(cache)
+clear_test_state()
 
 # --------------------------------------------------------------------------- #
 # AVAILABILITY SUPPRESSION — never recommend a tool this session does not have.
@@ -217,19 +239,44 @@ TMP = tempfile.mkdtemp(prefix="search-tool-nudge-tests-")
 SESSIONS = []
 
 
+def internal(name):
+    """Resolve a hook internal, recording a LOUD failure if it is missing.
+
+    Not a skip: a check that quietly vanishes when the symbol is gone is worse than no
+    check. This also lets the whole file run against an OLDER revision of the hook — the
+    missing symbols report as red and every other check still executes, which is what
+    makes a per-check red/green matrix across revisions possible at all.
+    """
+    obj = getattr(mod, name, None)
+    check("hook exposes %s" % name, obj is not None, True)
+    return obj
+
+
+def _san(part):
+    return "".join(c if c.isalnum() or c in "_.-" else "_" for c in part)[:120]
+
+
 def cache_path(sid, agent=None):
-    key = sid + ("@" + agent if agent else "")
-    return os.path.join(HOME, ".cache", "claude-search-tool-nudge",
-                        "".join(c if c.isalnum() or c in "_.-" else "_" for c in key))
+    """The hook's per-session state DIRECTORY. Components are sanitized individually and
+    joined with a literal "@" — see _state_dir's note on why that separator is the thing
+    that makes the key injective."""
+    key = "@".join([_san(sid)] + ([_san(agent)] if agent else []))
+    return os.path.join(STATE_ROOT, key)
+
+
+def recorded_tokens(sid, agent=None):
+    try:
+        return sorted(os.listdir(cache_path(sid, agent)))
+    except OSError:
+        return []
 
 
 def session(name):
-    """A fresh session id whose cache file is cleared now and removed at exit."""
+    """A fresh session id whose state dir is cleared now and removed at exit."""
     sid = "test-search-nudge-%s-DO-NOT-COLLIDE" % name
     SESSIONS.append(sid)
-    for p in (cache_path(sid), cache_path(sid, "agentX"), cache_path(sid, "agentY")):
-        if os.path.exists(p):
-            os.remove(p)
+    for p in glob.glob(os.path.join(STATE_ROOT, _san(sid) + "*")):
+        shutil.rmtree(p, ignore_errors=True)
     return sid
 
 
@@ -307,6 +354,15 @@ check("Grep unavailable suppresses the content nudge", fire(sid, "grep -r TODO s
 # fires. Pins the scope of the claim — a session-wide flag would silence this too.
 check("Glob nudge still fires when only Grep was proven gone",
       fire(sid, "find . -name '*.py'", gone), True)
+# The same distinction inside ONE command that earns BOTH kinds: the Grep half must be
+# dropped and the Glob half still delivered. A session-wide "any tool missing -> stay
+# silent" passes every check above and fails only here.
+sid = session("grep-gone-both")
+gone2 = transcript("grep-gone-both", [unavailable_record("Grep")])
+rc_b, out_b = run({"tool_name": "Bash", "session_id": sid, "transcript_path": gone2,
+                   "tool_input": {"command": "grep -r foo . && find . -name '*.md'"}})
+check("one command, both kinds: only the unavailable half is dropped",
+      ("Glob tool" in out_b, "Grep tool" in out_b), (True, False))
 
 # --- Both proven unavailable -> both suppressed. -------------------------------
 sid = session("both-gone")
@@ -317,13 +373,14 @@ check("both tools gone: files suppressed", fire(sid, "find . -name '*.py'", both
 # --- The verdict is CACHED: a later call with no transcript at all stays quiet. -
 # Proves the short-circuit works (and that the scan is not re-run on every call).
 check("suppression persists once recorded", fire(sid, "grep -R other .", None), False)
-# ...and it is cached as a TOOL VERDICT, not by spending the nudge budget. Asserted on
-# the state file because the behavioural check above cannot tell the two apart: a hook
-# that simply emitted both nudges and marked both kinds used would also fall silent
-# here. Pre-change this file reads ["content", "files"].
-recorded = sorted(open(cache_path(sid)).read().split()) if os.path.exists(cache_path(sid)) else []
-check("suppression records a tool verdict, not a spent nudge budget",
-      recorded, ["no:Glob", "no:Grep"])
+# ...and it is cached as a TOOL VERDICT, not merely by spending the nudge budget.
+# Asserted on the state dir because the behavioural check above cannot tell the two
+# apart: a hook that simply emitted both nudges and marked both kinds used would also
+# fall silent here. Pre-change this reads ["content", "files"] with no verdict at all.
+# (The kinds ARE present too — a kind is claimed before the scan, so that the scan runs
+# once and only one process can emit; see the claim protocol.)
+check("suppression records a tool verdict alongside the spent kinds",
+      recorded_tokens(sid), ["content", "files", "no:Glob", "no:Grep"])
 
 # --- STRUCTURAL, not spelled: the same TEXT in a non-error position must not ----
 # suppress. This is the real transcript hazard — the error wording appears verbatim
@@ -351,6 +408,28 @@ prose = transcript("prose", [
 ])
 check("quoted error prose does NOT suppress", fire(sid, "grep -r TODO src/", prose), True)
 
+# --- ANCHORED: the marker must START the error text, not merely appear in it. --
+# A genuinely failed Bash call whose stderr quotes the marker is an is_error result, so
+# is_error alone does not separate it — only the anchor does. Kills `.match -> .search`;
+# there is deliberately no `^` in the pattern for a mutant to delete for free.
+sid = session("mid-text")
+midtext = transcript("mid-text", [{
+    "type": "user", "message": {"role": "user", "content": [{
+        "type": "tool_result", "is_error": True, "tool_use_id": "toolu_z",
+        "content": "grep: exit 2\nlog line: Error: No such tool available: Grep. "
+                   "Grep is not available in this session"}]}}])
+check("marker mid-text in a real error does NOT suppress",
+      fire(sid, "grep -r TODO src/", midtext), True)
+
+# --- The list-form content branch is real, not speculative. -------------------
+sid = session("list-form")
+listform = transcript("list-form", [{
+    "type": "user", "message": {"role": "user", "content": [{
+        "type": "tool_result", "is_error": True, "tool_use_id": "toolu_l",
+        "content": [{"type": "text",
+                     "text": "Error: No such tool available: Grep. gone."}]}]}}])
+check("list-form error content is understood", fire(sid, "grep -r TODO src/", listform), False)
+
 # --- A DIFFERENT tool being unavailable must not suppress Grep/Glob. -----------
 sid = session("other-tool")
 other = transcript("other-tool", [unavailable_record("WebFetch")])
@@ -372,6 +451,53 @@ check("subagent suppression does not leak to the parent session",
 agent_transcript(parent, "agentY", BENIGN_RECORDS)
 check("subagent suppression does not leak to a sibling agent",
       fire(sid, "grep -r TODO src/", parent, agent_id="agentY"), True)
+
+# A NESTED agent (an agent spawned by an agent) lives one level deeper; the glob
+# fallback is what finds it. Without it this transcript is never consulted.
+sid = session("nested-agent")
+nested_parent = transcript("nested-agent", BENIGN_RECORDS)
+nested_dir = os.path.join(nested_parent[: -len(".jsonl")], "subagents", "outer")
+os.makedirs(nested_dir, exist_ok=True)
+with open(os.path.join(nested_dir, "agent-inner1.jsonl"), "w") as fh:
+    fh.write(json.dumps(unavailable_record("Grep")) + "\n")
+check("nested subagent transcript is found via the glob fallback",
+      fire(sid, "grep -r TODO src/", nested_parent, agent_id="inner1"), False)
+
+# --- agent_id VALIDATION, asserted on the RESOLVED SCAN TARGET. ---------------
+# The outcome alone cannot see this: `_transcript_paths` is called directly so the
+# assertion is about which files would be READ, not about whether a nudge appeared.
+# A glob metacharacter is the realistic leak — unvalidated, "*" makes the fallback
+# glob match a SIBLING agent's transcript and inherit its verdict.
+sid = session("agent-glob")
+sib_parent = transcript("agent-glob", BENIGN_RECORDS)
+agent_transcript(sib_parent, "realsibling", [unavailable_record("Grep")])
+_paths = internal("_transcript_paths")
+check("a glob metacharacter in agent_id resolves to NO extra scan target",
+      _paths({"transcript_path": sib_parent, "agent_id": "*"}) if _paths else None,
+      [sib_parent])
+check("...and a traversal in agent_id resolves to no extra scan target either",
+      _paths({"transcript_path": sib_parent, "agent_id": "../../etc"}) if _paths else None,
+      [sib_parent])
+# Behavioural companion: it must not inherit the sibling's verdict.
+check("agent_id='*' does not inherit a sibling's suppression",
+      fire(sid, "grep -r TODO src/", sib_parent, agent_id="*"), True)
+
+# --- STATE KEY IS INJECTIVE ---------------------------------------------------
+# session="…a" + agent="b" must not share a state dir with session="…a_b" alone.
+# Joining sanitized components with any character the sanitizer can EMIT (e.g. "_")
+# makes these collide, and the first call then silences the second.
+# The pair has to be EXACT for the collision to exist, so these ids are built raw
+# rather than through session(): X with agent "b", versus the session literally named
+# X_b. sanitize(X + "@" + "b") == "X_b" == sanitize("X_b") — one state dir for both.
+X = "test-search-nudge-collide"
+for _sid in (X, X + "_b"):
+    SESSIONS.append(_sid)
+for _p in glob.glob(os.path.join(STATE_ROOT, X + "*")):
+    shutil.rmtree(_p, ignore_errors=True)
+check("state key: agent-scoped call nudges",
+      fire(X, "grep -r TODO src/", None, agent_id="b"), True)
+check("state key: the session that ALIASES it still gets its own nudge",
+      fire(X + "_b", "grep -r TODO src/", None), True)
 
 # --- FAIL OPEN: every detection failure leaves behaviour exactly as before. ----
 sid = session("missing-file")
@@ -412,6 +538,145 @@ sid = session("no-transcript-key")
 check("payload without transcript_path -> nudge unchanged (legacy shape)",
       fire(sid, "grep -r TODO src/", None), True)
 
+# --- SCAN CAP: truncation fails OPEN, and the boundary is pinned at 2 points. --
+# Measured at both ends rather than one: a cap that admits the error line exactly, and
+# one byte less. Without both, an off-by-one on the comparison is invisible.
+cap_records = BENIGN_RECORDS + [unavailable_record("Grep")]
+cap_file = transcript("cap", cap_records)
+with open(cap_file, "rb") as fh:
+    _cap_bytes = fh.read()
+EXACT = len(_cap_bytes)  # budget that admits the final (error) line in full
+
+
+def fire_with_cap_agent(sid, cap, transcript_path, agent_id=None):
+    payload = {"tool_name": "Bash", "session_id": sid, "transcript_path": transcript_path,
+               "tool_input": {"command": "grep -r TODO src/"}}
+    if agent_id is not None:
+        payload["agent_id"] = agent_id
+    p = subprocess.run([sys.executable, HOOK], input=json.dumps(payload),
+                       capture_output=True, text=True,
+                       env=dict(os.environ, SEARCH_TOOL_NUDGE_MAX_SCAN_BYTES=str(cap)))
+    check("cap rc 0", p.returncode, 0)
+    return bool(p.stdout.strip())
+
+
+def fire_with_cap(sid, cap, transcript_path):
+    return fire_with_cap_agent(sid, cap, transcript_path)
+
+
+sid = session("cap-exact")
+check("cap exactly covering the error line still detects it",
+      fire_with_cap(sid, EXACT, cap_file), False)
+sid = session("cap-short")
+check("cap one byte short truncates and fails OPEN (nudge delivered)",
+      fire_with_cap(sid, EXACT - 1, cap_file), True)
+sid = session("cap-tiny")
+check("a tiny cap fails OPEN rather than suppressing",
+      fire_with_cap(sid, 1, cap_file), True)
+
+# --- CONCURRENCY: at most ONE nudge per kind per session, under real parallelism.
+# 12 processes released by a shared barrier so their read-modify-write windows overlap.
+# Measured pre-fix on this exact harness: 10-11 duplicates against a large transcript.
+sid = session("concurrent")
+conc_transcript = transcript("concurrent", BENIGN_RECORDS * 400)
+
+
+def _one(_i, out, idx, barrier):
+    p = subprocess.Popen([sys.executable, HOOK], stdin=subprocess.PIPE,
+                         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    # 🔴 Let every child finish interpreter startup and block on stdin BEFORE the
+    # barrier releases. Without this the ~30 ms of Python start-up staggers the
+    # workers by far more than the ~1 ms of hook work, so they serialise and the
+    # race never happens — a concurrency test that cannot observe a broken claim.
+    # Measured: with the stagger, deleting O_EXCL still produced exactly 1 nudge.
+    time.sleep(0.6)
+    barrier.wait()
+    stdout, _e = p.communicate(json.dumps(
+        {"tool_name": "Bash", "session_id": sid, "transcript_path": conc_transcript,
+         "tool_input": {"command": "grep -r TODO src/"}}))
+    out[idx] = (p.returncode, stdout.strip())
+
+
+NPROC = 12
+_out = [None] * NPROC
+_barrier = threading.Barrier(NPROC)
+_threads = [threading.Thread(target=_one, args=(i, _out, i, _barrier)) for i in range(NPROC)]
+for _t in _threads:
+    _t.start()
+for _t in _threads:
+    _t.join()
+check("concurrency: every invocation exits 0",
+      [rc for rc, _ in _out], [0] * NPROC)
+check("concurrency: exactly one nudge across %d parallel invocations" % NPROC,
+      sum(1 for _rc, o in _out if o), 1)
+
+# --- The claim PRIMITIVE, asserted directly. ----------------------------------
+# 🔴 The end-to-end check above cannot see a broken claim: with the claim placed ahead
+# of the scan the read->claim window is microseconds wide, so O_EXCL can be deleted and
+# 12 racing processes STILL produce one nudge (measured — that mutant survived the
+# end-to-end test). The atomicity is therefore pinned where it actually lives.
+_claim = internal("_claim")
+_claimdir = os.path.join(TMP, "claimdir")
+check("claim: first caller wins", _claim(_claimdir, "content") if _claim else None, True)
+check("claim: second caller loses (O_EXCL test-and-set)",
+      _claim(_claimdir, "content") if _claim else None, False)
+check("claim: a different token is independent",
+      _claim(_claimdir, "files") if _claim else None, True)
+# Fail OPEN, not closed: an unwritable state dir must let the nudge through (the
+# pre-existing behaviour) rather than silently swallow it.
+_ro = os.path.join(TMP, "readonly")
+os.makedirs(_ro, exist_ok=True)
+os.chmod(_ro, 0o500)
+if not os.access(_ro, os.W_OK):
+    check("claim: unwritable state dir fails OPEN",
+          _claim(os.path.join(_ro, "sess"), "content") if _claim else None, True)
+os.chmod(_ro, 0o700)
+check("claim: no state dir at all fails OPEN", _claim(None, "content") if _claim else None, True)
+
+# 🔴 The claim's ANSWER must be honoured by main(), not just computed. Proving that
+# needs a state where the marker EXISTS but the directory listing does NOT show it —
+# otherwise the cheap `_read_state` fast-path filters the kind first and the claim is
+# never consulted, so "ignore the claim result" is invisible. A write+execute but
+# NOT readable directory is exactly that state: listdir() fails (fail-open -> "nothing
+# recorded"), while open(O_EXCL) on the existing marker still raises FileExistsError.
+# Deterministic — the alternative, inferring it from the 12-way race, is flaky: that
+# mutant was killed on one sweep and survived the next.
+sid = session("claim-honoured")
+_cdir = cache_path(sid)
+os.makedirs(_cdir, exist_ok=True)
+open(os.path.join(_cdir, "content"), "w").close()
+os.chmod(_cdir, 0o300)
+if not os.access(_cdir, os.R_OK):
+    check("the claim's answer is honoured (marker present, listing blind)",
+          fire(sid, "grep -r TODO src/", None), False)
+os.chmod(_cdir, 0o700)
+
+# --- Scan ORDER is load-bearing, not cosmetic. --------------------------------
+# Most-specific-first only shows up when the budget cannot cover both files: the
+# subagent's own transcript must be read BEFORE the parent's, or a large parent eats
+# the budget and the agent's own verdict is never seen.
+sid = session("scan-order")
+order_parent = transcript("scan-order", BENIGN_RECORDS * 300)
+agent_transcript(order_parent, "agentO", [unavailable_record("Grep")])
+_agent_len = os.path.getsize(os.path.join(order_parent[: -len(".jsonl")], "subagents",
+                                          "agent-agentO.jsonl"))
+check("agent transcript is scanned before the parent (budget covers only one)",
+      fire_with_cap_agent(sid, _agent_len, order_parent, "agentO"), False)
+
+# --- Only a .jsonl is treated as a transcript. --------------------------------
+sid = session("not-jsonl")
+_notjson = os.path.join(TMP, "notatranscript.txt")
+with open(_notjson, "w") as fh:
+    fh.write(json.dumps(unavailable_record("Grep")) + "\n")
+check("a non-.jsonl transcript_path is not scanned", fire(sid, "grep -r TODO src/", _notjson), True)
+
+# --- State key components are sanitized (no directory escape). ----------------
+_sdir = internal("_state_dir")
+_root = internal("STATE_ROOT")
+check("a traversal in session/agent ids cannot escape the state root",
+      os.path.dirname(_sdir({"session_id": "../../escape", "agent_id": "../x"}))
+      if (_sdir and _root) else None, _root)
+
 for i, bad in enumerate((123, [], {"a": 1}, "", "/not/a/jsonl", "/etc")):
     # A wrong-typed / non-jsonl transcript_path must never crash and never suppress.
     sid = session("badtype%d" % i)
@@ -426,15 +691,17 @@ for i, bad_agent in enumerate((123, [], "../../etc", "a/b", "")):
     rc, out = run(payload)
     check("bad agent_id %r -> nudge unchanged" % (bad_agent,), (rc, bool(out)), (0, True))
 
-for p in glob.glob(os.path.join(HOME, ".cache", "claude-search-tool-nudge",
-                                "test-search-nudge-*")):
-    try:
-        os.remove(p)
-    except OSError:
-        pass
+clear_test_state()
+leaked = sorted(os.path.basename(p) for pref in TEST_SID_PREFIXES
+                for p in glob.glob(os.path.join(STATE_ROOT, pref + "*")))
+# 🔴 IDEMPOTENCE GUARD. State left behind by one run makes the NEXT run fail — and during
+# a mutation sweep that reads as "every mutant killed", including mutants that change
+# nothing. That is exactly what happened while writing this file: a 31/31 perfect score
+# from a harness that was simply dirty. Cheap to assert, so assert it.
+check("no test state leaks into the next run", leaked, [])
 shutil.rmtree(TMP, ignore_errors=True)
 
-MIN_CHECKS = 100  # floor: a suite that silently shrinks is a vacuous green
+MIN_CHECKS = 135  # floor: a suite that silently shrinks is a vacuous green
 if fails:
     print("FAIL:")
     for f in fails:
