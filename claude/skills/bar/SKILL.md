@@ -56,7 +56,7 @@ X — your call"). Leave the setup a little more modern than you found it; never
 | Block | Script | signal | `--red-above` | Notes |
 |---|---|---|---|---|
 | homelab alerts | `i3status-alerts` | 13 | **34** (#97) | homelab backlog is noise; bumped 30→34 when it drifted to ~24-27 |
-| civitai prod alerts | `i3status-civitai` | 14 | **340** | CLIENT prod; its own kubeconfig. **Red is CORRECT when real — do NOT tune it away.** (disk-space growth, 2026-07) |
+| civitai prod alerts | `i3status-civitai` | 14 | **340** | CLIENT prod; its own kubeconfig. **Red is CORRECT when real — do NOT tune it away.** (disk-space growth, 2026-07). 🔴 **left-click + its toast open the client Grafana via `scripts/bar-url --open civitai_grafana`, NOT a URL literal** — this repo is PUBLIC, so the host lives in `~/.config/bar/urls.env` (0600, untracked, `civitai_grafana=<url>`). A host missing that key gets `bar-url` exit 3 naming the key + file; the button is never silently dead. Gated by `scripts/tests/test_no_client_hostnames.py` |
 | mail | `i3status-mail` | 12 | 0 (0→>0) | open `mail_actions` rows |
 | clawgate | `i3status-clawgate` | 11 | 0 (0→>0) | operator-pending Tasks |
 | DND | `i3status-dnd` | 15 | — | dunst paused indicator; `$mod+Shift+n` toggles |

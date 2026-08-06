@@ -24,7 +24,7 @@ _2026-07-28. Read-only analysis. Repo `/home/zach/workspace/devrc`, both hosts (
 
 ### A.2 The eval storm (the only heavy real usage)
 - Sustained ~770–815 eval/min all afternoon 2026-07-28 17:xx UTC = ~13/sec.
-- Driver: unisolated persona-fleet hammering the single shared active tab. Domain rotation confirms an un-pinned tab: civitai.com 30,327 · 192.168.50.250 (initiatives viewer) 5,793 · grafana-new.civitai.com 3,979 · discord.com 2,135 · empty 1,684 · google/github/youtube/claude.ai tails.
+- Driver: unisolated persona-fleet hammering the single shared active tab. Domain rotation confirms an un-pinned tab: civitai.com 30,327 · 192.168.50.250 (initiatives viewer) 5,793 · the client Grafana host 3,979 · discord.com 2,135 · empty 1,684 · google/github/youtube/claude.ai tails.
 - **Not in transcripts** — the 44K storm was an external loop/persona process, not a logged Claude-Code session → un-attributable at session level (predates the coarse `sess` hash).
 - Latency: eval avg=10.3ms p50=5 p95=23 p99=35 **max=5,525ms** — the queue-saturation balloon, produced with NO throttling (predates the guard).
 

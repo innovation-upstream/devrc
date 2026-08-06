@@ -480,9 +480,9 @@ def test_a_real_skill_is_still_named_after_its_directory(tmp_path):
 
 
 def test_a_foreign_repos_reference_path_is_not_a_broken_sidecar(tmp_path):
-    """`apps/reference/manifest.md` is a page on developer.civitai.com, not this
-    skill's sidecar. Two real datapacket skills write paths like that; flagging
-    them as broken is a false alarm about another repo."""
+    """`apps/reference/manifest.md` is a page on a client's public developer-docs
+    site, not this skill's sidecar. Two real datapacket skills write paths like
+    that; flagging them as broken is a false alarm about another repo."""
     body = ("## Docs\n\nSee `apps/reference/manifest.md` on the docs site.\n"
             "And `reference/errors.md` here.\n")
     p = _write_skill(tmp_path, "foreign", body, refs=("errors.md",))

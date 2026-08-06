@@ -228,10 +228,10 @@ def _is_sidecar(skill_dir, ref):
     """Is this path THIS skill's own reference sidecar?
 
     A bare `reference/x.md` is; an absolute path under the skill dir is. A
-    relative path rooted elsewhere (`apps/reference/manifest.md` — a page on
-    developer.civitai.com, seen in two real datapacket skills) is NOT, and
-    reporting it as a broken sidecar is a false alarm about another repo's
-    docs site.
+    relative path rooted elsewhere (`apps/reference/manifest.md` — a page on a
+    CLIENT's public developer-docs site, seen in two real datapacket skills) is
+    NOT, and reporting it as a broken sidecar is a false alarm about another
+    repo's docs site.
     """
     if ref.startswith("reference/") or ref.startswith("./reference/"):
         return True

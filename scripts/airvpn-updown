@@ -57,20 +57,8 @@ IFACE="${2:-airvpn}"
 # INTERNAL (nebula overlay, k3s pod/service CIDRs, CNI bridges) needs no entry here:
 # it egresses a non-physical iface and the killswitch only polices the uplink.
 LAN_ROUTER="192.168.50.1"          # LAN router / DNS upstream
+NEBULA_LIGHTHOUSE="5.161.118.55"   # Hetzner nebula lighthouse (discovery/relay)
 LAN_SUBNET="192.168.50.0/24"       # LAN kept direct
-
-# The nebula lighthouse's PUBLIC IP is site-local and this repo is PUBLIC, so it is NOT
-# committed. It comes from a root-owned, untracked env file:
-#     /etc/airvpn-updown.env  ->  NEBULA_LIGHTHOUSE=<lighthouse public IP>
-# (override the path with $AIRVPN_UPDOWN_ENV; that is also how the tests point at a
-# fixture). If it is absent the script still arms — the lighthouse-specific bypass
-# route + nft accept are simply omitted and the arm line says `lighthouse=UNSET`.
-# Nebula itself keeps egress either way via the `meta skuid <nebula user>` rule; only
-# the direct (un-tunnelled) path to the lighthouse is lost.
-SITE_ENV="${AIRVPN_UPDOWN_ENV:-/etc/airvpn-updown.env}"
-# shellcheck source=/dev/null
-[[ -r "$SITE_ENV" ]] && . "$SITE_ENV"
-NEBULA_LIGHTHOUSE="${NEBULA_LIGHTHOUSE:-}"
 # Nebula binds listen.port:0 → a RANDOM source port, so match its transport by the
 # SOCKET OWNER instead of a port. This covers punchy DIRECT peers (to a remote
 # operator's public IP) + relay + lighthouse regardless of port. `id -un` the nebula
@@ -98,7 +86,7 @@ table inet ${KS_TABLE} {
         oifname { "lo", "${IFACE}", "nebula.mesh", "cni0", "flannel.1", "docker0" } accept
         meta skuid "${NEBULA_USER}" accept
         ip daddr ${LAN_SUBNET} accept
-        $( [[ -n "$NEBULA_LIGHTHOUSE" ]] && echo "ip daddr ${NEBULA_LIGHTHOUSE} accept" )
+        ip daddr ${NEBULA_LIGHTHOUSE} accept
         drop
     }
 }
@@ -152,8 +140,7 @@ case "$action" in
             EP="$(endpoint_ip)"
             [[ -n "$EP" ]] && ip route replace "$EP" via "$GW" dev "$PHYS" 2>/dev/null || true
             ip route replace "$LAN_ROUTER"        via "$GW" dev "$PHYS" 2>/dev/null || true
-            [[ -n "$NEBULA_LIGHTHOUSE" ]] \
-                && ip route replace "$NEBULA_LIGHTHOUSE" via "$GW" dev "$PHYS" 2>/dev/null || true
+            ip route replace "$NEBULA_LIGHTHOUSE" via "$GW" dev "$PHYS" 2>/dev/null || true
             # LAN /24 stays direct via the connected route; assert it explicitly too.
             ip route replace "$LAN_SUBNET" dev "$PHYS" scope link 2>/dev/null || true
         else
@@ -188,7 +175,7 @@ table inet ${KS_TABLE} {
         $( [[ -n "$FWMARK" && "$FWMARK" != "off" ]] && echo "meta mark ${FWMARK} accept" )
         ip daddr ${LAN_SUBNET} accept
         meta skuid "${NEBULA_USER}" accept
-        $( [[ -n "$NEBULA_LIGHTHOUSE" ]] && echo "ip daddr ${NEBULA_LIGHTHOUSE} accept" )
+        ip daddr ${NEBULA_LIGHTHOUSE} accept
         $( [[ -n "$EP" ]] && echo "ip daddr ${EP} accept" )
         $( [[ -n "$GW" ]] && echo "ip daddr ${GW} accept" )
         # link-local + multicast housekeeping stay allowed
@@ -199,12 +186,11 @@ table inet ${KS_TABLE} {
     }
 }
 NFT
-        log "up: killswitch armed (fwmark=${FWMARK:-none}) policing [${PHYS_SET[*]:-FAIL-CLOSED}], gw=${GW:-none} ep=${EP:-?} lighthouse=${NEBULA_LIGHTHOUSE:-UNSET}"
+        log "up: killswitch armed (fwmark=${FWMARK:-none}) policing [${PHYS_SET[*]:-FAIL-CLOSED}], gw=${GW:-none} ep=${EP:-?}"
         ;;
     down)
         nft delete table inet "$KS_TABLE" 2>/dev/null || true
         for dst in "$NEBULA_LIGHTHOUSE" "$LAN_ROUTER"; do
-            [[ -n "$dst" ]] || continue
             ip route del "$dst" 2>/dev/null || true
         done
         # endpoint bypass /32 (if any) — best-effort cleanup by removing non-default

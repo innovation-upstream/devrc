@@ -39,6 +39,28 @@ Everything else is reported with `file:line`. The CALLER owns the allowlist —
 this module has no policy, deliberately, so the reasons live next to the
 assertions that grant them.
 
+🔴 WHAT THIS SCAN DOES **NOT** CATCH — read this before calling it complete
+--------------------------------------------------------------------------
+An adversarial audit enumerated forms that carry a routable address past the
+regexes below. NONE of them is present in this repo today (checked), and closing
+them is deliberately NOT attempted — every one costs false positives on ordinary
+source, and this gate's job is stopping the accidental paste, not a determined
+author. Documented so nobody mistakes "green" for "there is no address here":
+
+  * a **leading-zero octet** (`203.0.113.009`) — `ipaddress` rejects it, so it is
+    a ValueError, not a hit. Shared with `guard_core._public_ips`, which
+    delegates to the same stdlib: the seam stays honest, both sides miss it.
+  * **decimal-integer** (the plain 32-bit int) and **hex-dotted** forms —
+    resolvers accept them, this regex does not.
+  * a quad **glued to alphanumerics** (`host203.0.113.9x`), which the word
+    boundary rejects on purpose (it is what keeps version strings out).
+  * **split across lines** — the scan is line-at-a-time by construction.
+  * **base64 / any encoding** of the literal.
+  * a **fullwidth or unicode dot** between octets.
+  * IPv6 with a **`%zone` suffix**.
+  * the value in a **FILENAME** rather than file CONTENT — `scan_file` never
+    inspects `path.name`.
+
 🔴 IPv6 FALSE POSITIVE, MEASURED. A naive IPv6 regex matches `DB::` inside
 `Code: 209. DB::Exception: …` — and `ipaddress.ip_address("DB::")` parses fine
 and reports `is_global`. Four such lines exist in this repo (ClickHouse error

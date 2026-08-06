@@ -590,14 +590,14 @@ The chrome.* glue needs a real browser — verify by hand after loading:
       OWN tab's PNG even though only one profile is foreground.
 - [ ] **Read INTO a CROSS-ORIGIN (OOPIF) iframe:** open a page embedding a
       cross-origin iframe (e.g. `civitai.com/apps/run/model-benchmarking` embedding
-      `model-benchmarking.civit.ai`). `browser --tab <id> frames` MUST now LIST the
-      cross-origin `model-benchmarking.civit.ai` frame (the whole point — CDP
+      `model-benchmarking.example.test`). `browser --tab <id> frames` MUST now LIST the
+      cross-origin `model-benchmarking.example.test` frame (the whole point — CDP
       getFrameTree missed it); `browser --tab <id> --frame <numericId-or-url> text`
       returns THAT frame's innerText (plain `text` shows only the top frame).
 - [ ] **`eval --frame` actually evaluates INSIDE the frame (the #190 fix):** on the same
       OOPIF page, `browser --tab <id> frames` → note the cross-origin frame's numeric id.
       `browser --tab <id> --frame <oopif-id> eval 'location.href'` returns
-      `https://model-benchmarking.civit.ai/...` (PROOF eval ran inside the OOPIF) — NOT
+      `https://model-benchmarking.example.test/...` (PROOF eval ran inside the OOPIF) — NOT
       `value:null`. `--frame 0 eval 'location.href'` returns the TOP url. A bad frame
       (`--frame nope eval '1'`) returns a clear `frame_not_found` error, and a throwing
       expression (`--frame <id> eval 'x.y.z'`) returns `frame_eval_failed:<reason>` —

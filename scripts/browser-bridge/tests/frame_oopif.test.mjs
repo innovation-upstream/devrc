@@ -21,11 +21,11 @@ import {
 } from "../extension/protocol.js";
 
 // A getAllFrames() result for civitai.com/apps/run/model-benchmarking: the top frame
-// PLUS a CROSS-ORIGIN child (model-benchmarking.civit.ai) that runs OUT-OF-PROCESS —
+// PLUS a CROSS-ORIGIN child (model-benchmarking.example.test) that runs OUT-OF-PROCESS —
 // the frame the old CDP getFrameTree could NOT see.
 const GET_ALL_FRAMES = [
   { frameId: 0, parentFrameId: -1, url: "https://civitai.com/apps/run/model-benchmarking", documentId: "d0" },
-  { frameId: 7, parentFrameId: 0, url: "https://model-benchmarking.civit.ai/", documentId: "d7" },
+  { frameId: 7, parentFrameId: 0, url: "https://model-benchmarking.example.test/", documentId: "d7" },
   { frameId: 12, parentFrameId: 7, url: "https://ads.example/pixel", documentId: "d12" },
 ];
 
@@ -34,11 +34,11 @@ test("normalizeWebNavFrames maps getAllFrames → {frameId,url,parentFrameId} in
   const out = normalizeWebNavFrames(GET_ALL_FRAMES);
   assert.deepEqual(out, [
     { frameId: 0, url: "https://civitai.com/apps/run/model-benchmarking", parentFrameId: -1 },
-    { frameId: 7, url: "https://model-benchmarking.civit.ai/", parentFrameId: 0 },
+    { frameId: 7, url: "https://model-benchmarking.example.test/", parentFrameId: 0 },
     { frameId: 12, url: "https://ads.example/pixel", parentFrameId: 7 },
   ]);
   // THE REGRESSION: the cross-origin child frame IS present (getFrameTree missed it).
-  assert.ok(out.some((f) => f.url.includes("model-benchmarking.civit.ai")),
+  assert.ok(out.some((f) => f.url.includes("model-benchmarking.example.test")),
     "the cross-origin OOPIF must appear in the enumeration");
 });
 
@@ -68,8 +68,8 @@ test("resolveWebNavFrameId: exact numeric frameId wins; url substring; case-inse
   assert.equal(resolveWebNavFrameId(frames, "7"), 7);
   assert.equal(resolveWebNavFrameId(frames, "0"), 0);
   // url substring → the numeric id of the matching frame.
-  assert.equal(resolveWebNavFrameId(frames, "model-benchmarking.civit.ai"), 7);
-  assert.equal(resolveWebNavFrameId(frames, "MODEL-BENCHMARKING.CIVIT.AI"), 7);
+  assert.equal(resolveWebNavFrameId(frames, "model-benchmarking.example.test"), 7);
+  assert.equal(resolveWebNavFrameId(frames, "MODEL-BENCHMARKING.EXAMPLE.TEST"), 7);
 });
 
 // --- Fix 3: host-preference + ambiguity (no silent wrong-frame) ------------- //
@@ -77,7 +77,7 @@ test("resolveWebNavFrame: a url substring prefers a HOST match over a top-frame 
   const frames = normalizeWebNavFrames(GET_ALL_FRAMES);
   // THE civitai self-shadow: `model-benchmarking` appears in the TOP frame's PATH
   // (civitai.com/apps/run/model-benchmarking) AND the OOPIF's HOST
-  // (model-benchmarking.civit.ai). The HOST match (the OOPIF, frame 7) is intended —
+  // (model-benchmarking.example.test). The HOST match (the OOPIF, frame 7) is intended —
   // never the top path (frame 0), which the old first-match returned.
   assert.equal(resolveWebNavFrame(frames, "model-benchmarking").frameId, 7);
   assert.equal(resolveWebNavFrameId(frames, "model-benchmarking"), 7);
@@ -104,15 +104,15 @@ test("resolveWebNavFrame: returns the FRAME OBJECT (id+url+parent) so the SW can
   const frames = normalizeWebNavFrames(GET_ALL_FRAMES);
   // exact numeric id → the whole object (url is what the SW reports + matches in CDP).
   assert.deepEqual(resolveWebNavFrame(frames, "7"),
-    { frameId: 7, url: "https://model-benchmarking.civit.ai/", parentFrameId: 0 });
+    { frameId: 7, url: "https://model-benchmarking.example.test/", parentFrameId: 0 });
   // url substring → the same object.
-  assert.deepEqual(resolveWebNavFrame(frames, "model-benchmarking.civit.ai"),
-    { frameId: 7, url: "https://model-benchmarking.civit.ai/", parentFrameId: 0 });
+  assert.deepEqual(resolveWebNavFrame(frames, "model-benchmarking.example.test"),
+    { frameId: 7, url: "https://model-benchmarking.example.test/", parentFrameId: 0 });
   // the top frame.
   assert.equal(resolveWebNavFrame(frames, "0").frameId, 0);
   // resolveWebNavFrameId delegates → same numeric id, never diverges.
-  assert.equal(resolveWebNavFrameId(frames, "model-benchmarking.civit.ai"),
-    resolveWebNavFrame(frames, "model-benchmarking.civit.ai").frameId);
+  assert.equal(resolveWebNavFrameId(frames, "model-benchmarking.example.test"),
+    resolveWebNavFrame(frames, "model-benchmarking.example.test").frameId);
   assert.throws(() => resolveWebNavFrame(frames, "nope"), /frame_not_found:nope/);
   assert.throws(() => resolveWebNavFrame(frames, ""), /frame_not_specified/);
 });

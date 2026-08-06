@@ -15,7 +15,7 @@ import { HIDDEN_TAB_NOTE } from "../extension/protocol.js";
 
 const TAB_ID = 5;
 const TOP_URL = "https://civitai.com/apps/run/model-benchmarking";
-const OOPIF_URL = "https://model-benchmarking.civit.ai/";
+const OOPIF_URL = "https://model-benchmarking.example.test/";
 
 const state = {
   frames: [
@@ -97,9 +97,9 @@ test("hidden tab: html / eval / frames each self-announce too", async () => {
 
 test("hidden tab: a --frame read reports the tab's hidden state the same way", async () => {
   state.visibility = "hidden";
-  const out = await OPS.text({ tabId: TAB_ID, frame: "model-benchmarking.civit.ai" });
+  const out = await OPS.text({ tabId: TAB_ID, frame: "model-benchmarking.example.test" });
   assert.equal(out.text, "FRAME READ", "the OOPIF read still returns its content");
-  assert.equal(out.frame, "model-benchmarking.civit.ai");
+  assert.equal(out.frame, "model-benchmarking.example.test");
   assert.equal(out.hidden, true, "an OOPIF's document follows the tab → hidden reported the same way");
   assert.equal(out.note, HIDDEN_TAB_NOTE);
 });
