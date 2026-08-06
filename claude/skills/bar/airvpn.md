@@ -46,18 +46,38 @@ enumerate-internal-networks allow-list first dropped the nebula overlay (would h
 out of the remote host, #118), then dropped k3s apiserver→pod replies and CrashLooped the cluster
 (#126); uplink-only + skuid is leak-equivalent and durable (#122/#128).
 
+🔴 **`/etc/airvpn-updown.env` (root-owned, 0600, untracked) is a PREREQUISITE, not an
+afterthought** — one line, `NEBULA_LIGHTHOUSE=<lighthouse public IP>`. This repo is PUBLIC,
+so the IP is not committed (`scripts/tests/test_no_public_ips.py` enforces that). Without it
+the killswitch still arms, but the lighthouse's direct bypass route + nft accept are omitted
+and the arm line reads `lighthouse=UNSET`. The script **parses** this file (it never sources
+it) and **ignores it** if it is not root/self-owned, if it is group/other-writable, or if the
+value is not an IP — each of those logs a reason. **Check `lighthouse=` after any re-arm**;
+`UNSET` on a host that should have it means the file is missing or was rejected, NOT that the
+change worked.
+`sudo /etc/nixos/i3blocks-scripts/airvpn-updown check-env` prints the resolved value without
+touching a single rule or route.
+
 ## Procedures
-- **Apply / re-apply Phase 2:** `sudo bash ~/workspace/devrc/nix/system/apply-airvpn-host.sh`
-  (secret conf `/etc/wireguard/airvpn.conf` must exist first; installs helpers →
-  `/etc/nixos/i3blocks-scripts/`, copies the module, wires `configuration.nix` `imports`,
-  `nixos-rebuild`). Default-OFF — does NOT bring the tunnel up.
-- **Ship a helper edit (no rebuild):** after editing `scripts/airvpn-{updown,sudo}`, re-install
-  with plain `sudo install -m 0755 -o root -g root ~/workspace/devrc/scripts/airvpn-updown /etc/nixos/i3blocks-scripts/airvpn-updown`
-  (same for `airvpn-sudo`). They're plain scripts and the NOPASSWD sudoers rule points at that
-  path — **no `nixos-rebuild` needed**.
-- **Apply a killswitch edit WITHOUT dropping the tunnel:**
-  `sudo /etc/nixos/i3blocks-scripts/airvpn-updown up airvpn` re-arms in place (flush+reload the
-  `airvpn_ks` table) — no reconnect.
+🔴 **These are in dependency order. Do not reorder them** — the site config has to exist
+before the helper that reads it is installed, or you install and re-arm a degraded killswitch.
+
+1. **Create the site config (FIRST, once per host):**
+   `printf 'NEBULA_LIGHTHOUSE=%s\n' <lighthouse ip> | sudo install -m 0600 -o root -g root /dev/stdin /etc/airvpn-updown.env`
+2. **Apply / re-apply Phase 2:** `NEBULA_LIGHTHOUSE=<ip> sudo -E bash ~/workspace/devrc/nix/system/apply-airvpn-host.sh`
+   (secret conf `/etc/wireguard/airvpn.conf` must exist first; **refuses** unless the site
+   config exists or you pass `NEBULA_LIGHTHOUSE=` / `ALLOW_NO_LIGHTHOUSE=1`; installs helpers →
+   `/etc/nixos/i3blocks-scripts/`, copies the module, wires `configuration.nix` `imports`,
+   `nixos-rebuild`). Default-OFF — does NOT bring the tunnel up.
+3. **Ship a helper edit (no rebuild):** after editing `scripts/airvpn-{updown,sudo}`, re-install
+   with plain `sudo install -m 0755 -o root -g root ~/workspace/devrc/scripts/airvpn-updown /etc/nixos/i3blocks-scripts/airvpn-updown`
+   (same for `airvpn-sudo`). They're plain scripts and the NOPASSWD sudoers rule points at that
+   path — **no `nixos-rebuild` needed**. Step 1 must already be done on this host.
+4. **Apply a killswitch edit WITHOUT dropping the tunnel:**
+   `sudo /etc/nixos/i3blocks-scripts/airvpn-updown up airvpn` re-arms in place (flush+reload the
+   `airvpn_ks` table) — no reconnect. 🔴 Re-arming **deletes the table first**, so a re-arm that
+   fails to load leaves you with the blanket fallback, and a re-arm with a bad site config
+   leaves you with `lighthouse=UNSET`. Read `journalctl -t airvpn-updown -n5` every time.
 
 ## 🔴 Mandatory re-test protocol for ANY killswitch change
 A LAN-only test CANNOT reach the nebula direct-punch lockout mode, so it is NOT sufficient:

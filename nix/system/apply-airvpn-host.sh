@@ -18,6 +18,78 @@
 # =============================================================================
 set -euo pipefail
 
+# ---------------------------------------------------------------------------- #
+# ensure_site_env — /etc/airvpn-updown.env, the killswitch's site config.
+# ---------------------------------------------------------------------------- #
+# 🔴 THIS RUNS BEFORE THE HELPERS ARE INSTALLED, ON PURPOSE. `airvpn-updown`
+# reads NEBULA_LIGHTHOUSE from this file; without it the killswitch still arms
+# but silently loses the nebula lighthouse's bypass route and nft accept —
+# a DEGRADED killswitch that looks fine. Installing the helper first and
+# mentioning the file afterwards is how an operator following this top-to-bottom
+# ends up re-arming before the file exists (audit A-3).
+#
+# The wg conf (step 1) is the model: it REFUSES rather than proceeding without
+# the operator's secret. This does the same, with an explicit opt-out for a host
+# that genuinely has no lighthouse.
+#
+#   NEBULA_LIGHTHOUSE=<ip> sudo -E bash nix/system/apply-airvpn-host.sh
+#   ALLOW_NO_LIGHTHOUSE=1  sudo -E bash nix/system/apply-airvpn-host.sh
+#
+# $AIRVPN_SITE_ENV overrides the path (the tests point it at a tmp file).
+ensure_site_env() {
+  local f="${AIRVPN_SITE_ENV:-/etc/airvpn-updown.env}"
+
+  if [[ -f "${f}" ]]; then
+    # Exists: make the ownership/mode true rather than assuming it. Whoever can
+    # write this file names a destination that gets BOTH a main-table bypass
+    # route and an nft accept — a hole punched through the killswitch.
+    chown root:root "${f}" 2>/dev/null || true
+    chmod 0600 "${f}"
+    if ! grep -qE '^[[:space:]]*NEBULA_LIGHTHOUSE[[:space:]]*=[[:space:]]*[0-9A-Fa-f.:]+[[:space:]]*$' "${f}"; then
+      echo "  -> WARNING: ${f} exists but has no plain NEBULA_LIGHTHOUSE=<ip> line." >&2
+      echo "     The killswitch will arm with lighthouse=UNSET. Check it after re-arming:" >&2
+      echo "       journalctl -t airvpn-updown -n5" >&2
+    else
+      echo "  -> ${f} present (root:root 0600)."
+    fi
+    return 0
+  fi
+
+  if [[ -n "${NEBULA_LIGHTHOUSE:-}" ]]; then
+    ( umask 077; printf 'NEBULA_LIGHTHOUSE=%s\n' "${NEBULA_LIGHTHOUSE}" > "${f}" )
+    chown root:root "${f}" 2>/dev/null || true
+    chmod 0600 "${f}"
+    echo "  -> created ${f} (root:root 0600) from \$NEBULA_LIGHTHOUSE."
+    return 0
+  fi
+
+  if [[ -n "${ALLOW_NO_LIGHTHOUSE:-}" ]]; then
+    echo "  -> ${f} absent; ALLOW_NO_LIGHTHOUSE=1 set, continuing." >&2
+    echo "     The killswitch will arm with lighthouse=UNSET — the direct" >&2
+    echo "     un-tunnelled path to the nebula lighthouse is NOT preserved." >&2
+    return 0
+  fi
+
+  cat >&2 <<MSG
+[!] ${f} not found — the killswitch's site config.
+    This repo is PUBLIC, so the nebula lighthouse's public IP is not committed;
+    the killswitch reads it from this root-owned 0600 file. Without it the
+    killswitch still arms, but the lighthouse's bypass route + nft accept are
+    OMITTED — a degraded killswitch that reports success.
+
+    Re-run with the value, or opt out explicitly:
+      NEBULA_LIGHTHOUSE=<lighthouse ip> sudo -E bash nix/system/apply-airvpn-host.sh
+      ALLOW_NO_LIGHTHOUSE=1             sudo -E bash nix/system/apply-airvpn-host.sh
+MSG
+  return 1
+}
+
+# Sourced by the tests (AIRVPN_APPLY_LIB=1) to exercise ensure_site_env without
+# applying anything. When EXECUTED the variable is unset and this is a no-op.
+if [[ -n "${AIRVPN_APPLY_LIB:-}" ]]; then
+  return 0
+fi
+
 if [[ ${EUID} -ne 0 ]]; then
   echo "This must run as root:  sudo bash nix/system/apply-airvpn-host.sh" >&2
   exit 1
@@ -71,7 +143,11 @@ fi
 # ---------------------------------------------------------------------------- #
 # 3. Privileged helpers at the STABLE sudoers-trusted path (never a nix-store path).
 # ---------------------------------------------------------------------------- #
-echo "[3/5] Installing airvpn-sudo + airvpn-updown to ${HELPER_DIR}..."
+echo "[3/5] Killswitch site config + helpers..."
+# 🔴 ORDER IS LOAD-BEARING: the site config must exist BEFORE the helper that
+# reads it is installed (and before anyone re-arms with it). See ensure_site_env.
+ensure_site_env
+echo "  -> installing airvpn-sudo + airvpn-updown to ${HELPER_DIR}..."
 install -d -m 0755 "${HELPER_DIR}"
 install -m 0755 -o root -g root "${REPO}/scripts/airvpn-sudo"   "${HELPER_DIR}/airvpn-sudo"
 install -m 0755 -o root -g root "${REPO}/scripts/airvpn-updown" "${HELPER_DIR}/airvpn-updown"

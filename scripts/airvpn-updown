@@ -16,7 +16,10 @@
 #   * the VPN ENDPOINT via the original gateway (so the handshake isn't routed into
 #     the tunnel; also what a `switch` refreshes),
 #   * 192.168.50.1 (LAN router / DNS upstream) + the LAN 192.168.50.0/24 direct,
-#   * the nebula Hetzner lighthouse (discovery/relay).
+#   * the nebula lighthouse (discovery/relay) — CONDITIONAL: its public IP is not
+#     committed (this repo is PUBLIC), it is read from /etc/airvpn-updown.env, and
+#     when that is absent/untrusted/malformed this route is OMITTED. See the
+#     NEBULA_LIGHTHOUSE block below, and read `lighthouse=` in the arm line.
 #
 # KILLSWITCH (fail-closed) — POLICES ALL PHYSICAL NICs. The chain's first rule is
 # `oifname != { <all physical NICs> } accept`, so everything leaving via a
@@ -53,12 +56,128 @@ set -uo pipefail
 action="${1:-}"
 IFACE="${2:-airvpn}"
 
+# 🔴 DEFINED FIRST, BEFORE ANY CALLER. The site-config resolution below logs its
+# rejections, and it runs at top level — with this definition further down the
+# file (where it used to be) every one of those calls was `log: command not
+# found`: the guard still failed SAFE, but the REASON was lost, which is the
+# whole value of a guard that silently degrades a killswitch.
+#
+# `check-env` mirrors to stderr as well as syslog: it is an interactive
+# diagnostic, and "why is this UNSET" is the only question it is asked.
+log() {
+    [[ "$action" == "check-env" ]] && echo "airvpn-updown: $*" >&2
+    logger -t airvpn-updown "$*" 2>/dev/null || echo "airvpn-updown: $*" >&2
+}
+
 # The split-tunnel bypass destinations (mirror the old Mullvad conf). Everything
 # INTERNAL (nebula overlay, k3s pod/service CIDRs, CNI bridges) needs no entry here:
 # it egresses a non-physical iface and the killswitch only polices the uplink.
 LAN_ROUTER="192.168.50.1"          # LAN router / DNS upstream
-NEBULA_LIGHTHOUSE="5.161.118.55"   # Hetzner nebula lighthouse (discovery/relay)
 LAN_SUBNET="192.168.50.0/24"       # LAN kept direct
+
+# --- the nebula lighthouse's PUBLIC IP -------------------------------------- #
+# Site-local, and this repo is PUBLIC, so it is NOT committed. It comes from a
+# root-owned, untracked file:
+#     /etc/airvpn-updown.env   ->   NEBULA_LIGHTHOUSE=<lighthouse public IP>
+# ($AIRVPN_UPDOWN_ENV overrides the path; that is also how the tests point at a
+# fixture.) Absent or unusable ⇒ the script STILL ARMS: the lighthouse-specific
+# bypass route and its nft accept are omitted and the arm line says
+# `lighthouse=UNSET`.
+#
+# 🔴 THE FILE IS PARSED, NOT SOURCED, AND THE VALUE IS VALIDATED. Both matter,
+# and both are audit findings against the first version of this change:
+#
+#   (A-4) `. "$SITE_ENV"` executes the file AS ROOT. A stray or malicious
+#   `LAN_SUBNET=`/`IFACE=`/`NEBULA_USER=` line silently clobbers the constants
+#   above — i.e. rewrites the killswitch — and any other shell in it just runs.
+#   So: check owner+mode first, then extract ONLY `NEBULA_LIGHTHOUSE` with a
+#   line-anchored match. Nothing else in the file can affect this script.
+#
+#   (A-2) A malformed value was FAIL-OPEN. It is interpolated into the nft
+#   ruleset, and a truncated/garbage value makes the ruleset a SYNTAX ERROR —
+#   verified with `nft -c`. Because `up` does `nft add table` + `nft flush table`
+#   BEFORE loading, a re-arm with a bad value DELETED a working killswitch and
+#   installed nothing, then exited 0. A partially-written env file was enough.
+#   So an unparseable value is treated as UNSET, loudly.
+SITE_ENV="${AIRVPN_UPDOWN_ENV:-/etc/airvpn-updown.env}"
+
+# Is the env file safe to read? It must not be writable by anyone who is not
+# root or us — whoever can write it can name the destination that gets BOTH a
+# main-table bypass route and an nft `accept`, which is a hole punched through
+# the killswitch on purpose.
+site_env_trusted() {
+    local path="$1" owner mode
+    read -r owner mode < <(stat -c '%u %a' "$path" 2>/dev/null) || return 1
+    [[ -n "$owner" && -n "$mode" ]] || return 1
+    # owner must be root, or us (so a non-root run against a fixture works)
+    if [[ "$owner" != "0" && "$owner" != "$(id -u)" ]]; then
+        log "WARNING: ${path} is owned by uid ${owner} (not root) — IGNORING it"
+        return 1
+    fi
+    # no group- or other-WRITE. `mode` is 3 or 4 octal digits.
+    local perm="${mode: -3}"
+    if (( ${perm:1:1} & 2 )) || (( ${perm:2:1} & 2 )); then
+        log "WARNING: ${path} is group/other-writable (${mode}) — IGNORING it"
+        return 1
+    fi
+    return 0
+}
+
+# Extract NEBULA_LIGHTHOUSE and NOTHING else. Last assignment wins, matching
+# what sourcing would have done, without executing anything.
+site_env_lighthouse() {
+    local path="$1" line val=""
+    while IFS= read -r line; do
+        [[ "$line" =~ ^[[:space:]]*NEBULA_LIGHTHOUSE[[:space:]]*=(.*)$ ]] || continue
+        val="${BASH_REMATCH[1]}"
+        val="${val%%#*}"                       # strip a trailing comment
+        val="${val#"${val%%[![:space:]]*}"}"   # ltrim
+        val="${val%"${val##*[![:space:]]}"}"   # rtrim
+        # Unquote only a BALANCED pair. A lone quote is what a partially-written
+        # file looks like, and stripping it would turn a malformed value into an
+        # empty one — i.e. into the quiet "you didn't set it" case, losing the
+        # signal that the file is truncated (the A-2 scenario).
+        if [[ ${#val} -ge 2 && "$val" == \"*\" ]]; then
+            val="${val:1:${#val}-2}"
+        elif [[ ${#val} -ge 2 && "$val" == \'*\' ]]; then
+            val="${val:1:${#val}-2}"
+        fi
+    done < "$path"
+    printf '%s' "$val"
+}
+
+# A bare IPv4/IPv6 literal and nothing else. Deliberately STRICTER than "does it
+# look like an address": anything that is not exactly an address is rejected,
+# because the value is interpolated into an nft ruleset and a shell-ish or
+# whitespace-carrying value is the fail-open above.
+valid_ip() {
+    local v="$1"
+    [[ -n "$v" ]] || return 1
+    if [[ "$v" =~ ^([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})$ ]]; then
+        local i
+        for i in 1 2 3 4; do (( BASH_REMATCH[i] <= 255 )) || return 1; done
+        return 0
+    fi
+    # IPv6: hex groups and colons only, at least two colons, no zone/scope.
+    [[ "$v" =~ ^[0-9A-Fa-f:]+$ && "$v" == *::* ]] && return 0
+    [[ "$v" =~ ^([0-9A-Fa-f]{1,4}:){7}[0-9A-Fa-f]{1,4}$ ]] && return 0
+    return 1
+}
+
+NEBULA_LIGHTHOUSE=""
+if [[ -r "$SITE_ENV" ]] && site_env_trusted "$SITE_ENV"; then
+    _lh="$(site_env_lighthouse "$SITE_ENV")"
+    if [[ -z "$_lh" ]]; then
+        :   # key simply absent — the documented UNSET case, no noise
+    elif valid_ip "$_lh"; then
+        NEBULA_LIGHTHOUSE="$_lh"
+    else
+        # 🔴 The A-2 case. Do NOT interpolate it anywhere.
+        log "ERROR: NEBULA_LIGHTHOUSE in ${SITE_ENV} is not an IP address (${#_lh} chars) — treating as UNSET"
+    fi
+    unset _lh
+fi
+
 # Nebula binds listen.port:0 → a RANDOM source port, so match its transport by the
 # SOCKET OWNER instead of a port. This covers punchy DIRECT peers (to a remote
 # operator's public IP) + relay + lighthouse regardless of port. `id -un` the nebula
@@ -69,13 +188,29 @@ GW_FILE="/run/airvpn-gateway"
 IFACE_FILE="/run/airvpn-iface"
 KS_TABLE="airvpn_ks"
 
-log() { logger -t airvpn-updown "$*" 2>/dev/null || echo "airvpn-updown: $*" >&2; }
+# (log() is defined near the top — its first callers run before this point.)
 
 # Blanket FAIL-CLOSED ruleset — installed only if the main killswitch nft load
-# fails, so an nft error can never leave the uplink UNFILTERED (fail-open). Minimal
-# on purpose (no dynamic PHYS_SET / fwmark / EP substitution that could be what
-# broke the main load): allow internal ifaces + nebula (skuid) + LAN + lighthouse,
-# drop the rest. Keeps the operator reachable while still stopping an internet leak.
+# fails, so an nft error can never leave the uplink UNFILTERED (fail-open).
+#
+# 🔴 NO OPERATOR-SUPPLIED TEXT REACHES THIS RULESET. It is the fallback for "the
+# main load did not parse", so anything that could have BROKEN that parse must
+# not appear here as well, or the fallback fails for the same reason and the
+# uplink ends up with no table at all. Everything interpolated below is derived
+# in-process from the kernel or from constants in this file:
+#   * $IFACE       — argv (wg-quick's %i), a device name
+#   * $NEBULA_USER — `id -un`, a local account name
+#   * $LAN_SUBNET  — a constant above
+# The LIGHTHOUSE is deliberately ABSENT. It is the one value that comes from a
+# file on disk, it is exactly what a partially-written env file corrupts, and
+# with it in here a bad value took out BOTH the primary ruleset and its
+# fallback (audit A-2). Losing the lighthouse `accept` here costs the direct
+# un-tunnelled path to it; nebula's own transport is still allowed by the
+# `meta skuid` rule above, and the LAN rule keeps a recovery path open. That is
+# the correct trade for a fallback whose whole job is to parse.
+#
+# The reachability of THIS function is what matters, not its rule count: it runs
+# only when `nft -f -` on the primary ruleset returned non-zero.
 arm_failclosed() {
     nft add table inet "$KS_TABLE" 2>/dev/null || true
     nft flush table inet "$KS_TABLE" 2>/dev/null || true
@@ -86,7 +221,6 @@ table inet ${KS_TABLE} {
         oifname { "lo", "${IFACE}", "nebula.mesh", "cni0", "flannel.1", "docker0" } accept
         meta skuid "${NEBULA_USER}" accept
         ip daddr ${LAN_SUBNET} accept
-        ip daddr ${NEBULA_LIGHTHOUSE} accept
         drop
     }
 }
@@ -140,7 +274,12 @@ case "$action" in
             EP="$(endpoint_ip)"
             [[ -n "$EP" ]] && ip route replace "$EP" via "$GW" dev "$PHYS" 2>/dev/null || true
             ip route replace "$LAN_ROUTER"        via "$GW" dev "$PHYS" 2>/dev/null || true
-            ip route replace "$NEBULA_LIGHTHOUSE" via "$GW" dev "$PHYS" 2>/dev/null || true
+            # The lighthouse /32 is the ROUTING half of its bypass and is skipped
+            # when unset. 🔴 That is a real loss, not a cosmetic one — see the
+            # header note on `suppress_prefixlength 0`.
+            if [[ -n "$NEBULA_LIGHTHOUSE" ]]; then
+                ip route replace "$NEBULA_LIGHTHOUSE" via "$GW" dev "$PHYS" 2>/dev/null || true
+            fi
             # LAN /24 stays direct via the connected route; assert it explicitly too.
             ip route replace "$LAN_SUBNET" dev "$PHYS" scope link 2>/dev/null || true
         else
@@ -175,7 +314,7 @@ table inet ${KS_TABLE} {
         $( [[ -n "$FWMARK" && "$FWMARK" != "off" ]] && echo "meta mark ${FWMARK} accept" )
         ip daddr ${LAN_SUBNET} accept
         meta skuid "${NEBULA_USER}" accept
-        ip daddr ${NEBULA_LIGHTHOUSE} accept
+        $( [[ -n "$NEBULA_LIGHTHOUSE" ]] && echo "ip daddr ${NEBULA_LIGHTHOUSE} accept" )
         $( [[ -n "$EP" ]] && echo "ip daddr ${EP} accept" )
         $( [[ -n "$GW" ]] && echo "ip daddr ${GW} accept" )
         # link-local + multicast housekeeping stay allowed
@@ -186,11 +325,25 @@ table inet ${KS_TABLE} {
     }
 }
 NFT
-        log "up: killswitch armed (fwmark=${FWMARK:-none}) policing [${PHYS_SET[*]:-FAIL-CLOSED}], gw=${GW:-none} ep=${EP:-?}"
+        # 🔴 `lighthouse=` is the field to read after a re-arm. UNSET on a host
+        # that should have it means the env file is missing/untrusted/malformed,
+        # NOT that the change worked.
+        log "up: killswitch armed (fwmark=${FWMARK:-none}) policing [${PHYS_SET[*]:-FAIL-CLOSED}], gw=${GW:-none} ep=${EP:-?} lighthouse=${NEBULA_LIGHTHOUSE:-UNSET}"
+        ;;
+    check-env)
+        # READ-ONLY. Touches no nft table, no route, no file. Exists so the env
+        # resolution above — the part that decides whether the killswitch keeps
+        # its lighthouse bypass — is testable without root and without arming
+        # anything. Prints one line; exits 0 when a lighthouse resolved, 1 when
+        # it did not.
+        echo "lighthouse=${NEBULA_LIGHTHOUSE:-UNSET} env=${SITE_ENV}"
+        [[ -n "$NEBULA_LIGHTHOUSE" ]]
+        exit $?
         ;;
     down)
         nft delete table inet "$KS_TABLE" 2>/dev/null || true
         for dst in "$NEBULA_LIGHTHOUSE" "$LAN_ROUTER"; do
+            [[ -n "$dst" ]] || continue
             ip route del "$dst" 2>/dev/null || true
         done
         # endpoint bypass /32 (if any) — best-effort cleanup by removing non-default
@@ -200,7 +353,7 @@ NFT
         log "down: killswitch disarmed, bypass routes removed"
         ;;
     *)
-        echo "usage: airvpn-updown {up|down} <iface>" >&2
+        echo "usage: airvpn-updown {up|down|check-env} <iface>" >&2
         exit 1
         ;;
 esac
