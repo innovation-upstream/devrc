@@ -942,6 +942,20 @@ in
     recursive = true;
     force = true;
   };
+  # browser + dl-router: deliberate mkOutOfStoreSymlink exceptions (same as their
+  # ~/.claude/skills/ counterparts above) so opencode sees the live working tree.
+  home.file.".config/opencode/skills/browser/SKILL.md".source =
+    config.lib.file.mkOutOfStoreSymlink "${workspace}/devrc/scripts/browser-bridge/SKILL.md";
+  home.file.".config/opencode/skills/browser/browser".source =
+    config.lib.file.mkOutOfStoreSymlink "${workspace}/devrc/scripts/browser-bridge/browser";
+  home.file.".config/opencode/skills/dl-router/SKILL.md".source =
+    config.lib.file.mkOutOfStoreSymlink "${workspace}/devrc/scripts/dl-router/SKILL.md";
+  home.file.".config/opencode/skills/dl-router/dl-route".source =
+    config.lib.file.mkOutOfStoreSymlink "${workspace}/devrc/scripts/dl-router/dl-route";
+  # clickup: standalone repo at ~/.claude/skills/clickup/ — symlink the directory
+  # so opencode picks it up without duplicating the checkout.
+  home.file.".config/opencode/skills/clickup".source =
+    config.lib.file.mkOutOfStoreSymlink "${home}/.claude/skills/clickup";
 
   # These hooks previously existed as PLAIN local files (claude-notify.py +
   # test_claude_notify.py on the laptop; bash-guard.py on BOTH hosts). A
