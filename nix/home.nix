@@ -29,20 +29,34 @@ let
   # build failure there fails the whole switch. Flip to false to opt a host out
   # without touching the unit definitions. DELETE the flag and the units once
   # the spin is root-caused and the CPUQuota on keylog.service comes off.
-  # NOT on the laptop — for BUILD COST, not ptrace reasons. Both hosts now read
-  # kernel.yama.ptrace_scope=1, and keylog.py opts into being traced via
-  # prctl(PR_SET_PTRACER_ANY) when KEYLOG_ALLOW_ANY_PTRACER=1 (wired onto
-  # keylog.service below, gated on THIS flag), so py-spy can attach under scope=1
-  # on any host — the old "laptop reads 1 so it can never attach" rationale no
-  # longer holds. The remaining reason to keep it workbench-only: merely ENABLING
-  # it drags the uncached from-source py-spy build (Rust + libunwind) into a
+  # WORKBENCH ONLY. This flag now doubles as a SECURITY boundary: when set it
+  # wires KEYLOG_ALLOW_ANY_PTRACER=1 onto keylog.service, which opens the
+  # keystroke collector's live memory to any same-UID process (see
+  # keylog.py:_allow_any_ptracer). So it MUST fail CLOSED — an unenrolled host
+  # must not silently get it.
+  #
+  # It is gated on `serverMode` (an explicit operator-set marker, `~/.server-mode`),
+  # NOT on `!isLaptop`. `!isLaptop` fails OPEN: `isLaptop` is a backlight probe
+  # authored purely to discriminate the laptop's display config (see below), and
+  # ANY future graphical NixOS host with an AMD (`amdgpu_bl0`), NVIDIA, or
+  # ACPI-only (`acpi_video0`) backlight — or none — evaluates `isLaptop=false` and
+  # would inherit PR_SET_PTRACER_ANY on its keylogger with no error and no signal.
+  # `serverMode` is the same explicit marker every workbench-only server task keys
+  # off (mail-actions-archive, initiatives-sync, repo-cos, task-spec-drafter): the
+  # workbench carries it, the laptop does not, and a brand-new host does not until
+  # the operator deliberately `touch ~/.server-mode`. (There is no per-host
+  # hostName/osConfig to allowlist on here: this is a STANDALONE home-manager
+  # config — flake.nix hardcodes home.username="zach" and both hosts report
+  # gethostname()=="nixos" — so an impure operator marker is the only real
+  # host allowlist available.)
+  #
+  # Keeping it workbench-only is ALSO required for BUILD COST: enabling it drags an
+  # UNCACHED from-source py-spy build (Rust + libunwind) into every
   # `home-manager switch`, and a build failure there fails the whole switch —
   # which on the laptop would stop it converging to origin/main for a
-  # workbench-only diagnostic. Keeping it off the laptop ALSO means the laptop's
-  # keylog never sets PR_SET_PTRACER_ANY, so its keystroke collector stays
-  # untraceable by siblings. (`isLaptop` is defined below; `let` bindings are
-  # order-independent.)
-  enableKeylogSpinCapture = graphical && !isLaptop;
+  # workbench-only diagnostic. And because the laptop never sets
+  # PR_SET_PTRACER_ANY, its keystroke collector stays untraceable by siblings.
+  enableKeylogSpinCapture = graphical && serverMode;
   # Host discriminator for the graphical config (i3 + i3status-rust bar). Evaluated
   # per-host under `--impure`: the laptop has an intel_backlight, the workbench does
   # not. Threaded into ./graphical.nix via _module.args below. Drives battery/backlight

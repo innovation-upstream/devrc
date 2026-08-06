@@ -24,8 +24,9 @@
 # to re-arm).
 #
 # Needs same-UID ptrace of a NON-descendant (keylog.service is a sibling unit).
-# Under Yama kernel.yama.ptrace_scope=1 ("restricted", the fleet default since
-# the 2026-08-04 reboot) that is denied UNLESS the tracee opts in via
+# Under Yama kernel.yama.ptrace_scope=1 ("restricted" — Yama's upstream default
+# when nothing in /etc/sysctl.d manages it, which is what both hosts currently
+# read; this repo sets no yama sysctl) that is denied UNLESS the tracee opts in via
 # prctl(PR_SET_PTRACER, PR_SET_PTRACER_ANY) — which keylog.py now does when
 # KEYLOG_ALLOW_ANY_PTRACER=1 (set by home-manager on the spin-capture host). So
 # scope 0 (classic) and scope 1 (with keylog's opt-in) both work; scope >= 2
@@ -48,12 +49,15 @@ FAILCOUNT="$OUT/.failcount"
 # Stop rather than looping every 5 min forever.
 [[ -f $GIVEUP ]] && exit 0
 
-# Hard precondition: scope 0 or 1 is attachable here (scope 1 relies on keylog's
-# PR_SET_PTRACER_ANY opt-in — see keylog.py). scope >= 2 requires CAP_SYS_PTRACE
-# that a --user unit cannot hold and the opt-in cannot grant, so every attach
-# fails: bail QUIETLY — no dump file, no toast, no retry churn.
+# Hard precondition: ONLY scope 0 (classic) or 1 (relies on keylog's
+# PR_SET_PTRACER_ANY opt-in — see keylog.py) is attachable here. scope >= 2
+# requires CAP_SYS_PTRACE that a --user unit cannot hold and the opt-in cannot
+# grant, so every attach fails: bail QUIETLY — no dump file, no toast, no retry
+# churn. Match ONLY the literal attachable values and bail on anything else, so an
+# unexpected/unparseable read fails CLOSED: `[[ abc -ge 2 ]]` treats `abc` as an
+# (unset→0) arithmetic var and would wrongly PROCEED past a `-ge 2` test.
 ptrace_scope=$(cat /proc/sys/kernel/yama/ptrace_scope 2>/dev/null || echo 0)
-if [[ ${ptrace_scope:-0} -ge 2 ]]; then
+if [[ $ptrace_scope != 0 && $ptrace_scope != 1 ]]; then
   exit 0
 fi
 

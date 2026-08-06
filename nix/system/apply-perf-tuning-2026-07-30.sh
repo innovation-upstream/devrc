@@ -53,10 +53,18 @@
 #     will not apply it.
 #
 #   - kernel.yama.ptrace_scope=0. The earlier revision prompted to set this so
-#     py-spy could attach to keylog.service. Unnecessary: this host already
-#     reads 0 (nothing in /etc/sysctl.d sets it, and a py-spy attach succeeded
-#     — see ~/.cache/keylog-spin/baseline-healthy-*.txt). It would have asked
-#     you to accept a real, if mild, security relaxation for zero gain.
+#     py-spy could attach to keylog.service. CORRECTION (2026-08-05): the old
+#     "unnecessary, this host already reads 0" claim was WRONG and is retracted.
+#     Nothing in /etc/sysctl.d sets ptrace_scope on either host, so it is NOT
+#     managed and NOT durable: it reads Yama's upstream default of 1, and the
+#     workbench's own baseline-healthy-20260730.txt recorded 0 only transiently
+#     (both hosts read 1 now). Under scope=1 a sibling py-spy is denied unless the
+#     tracee opts in — which is exactly why PR #343 added keylog.py's
+#     prctl(PR_SET_PTRACER_ANY) opt-in (KEYLOG_ALLOW_ANY_PTRACER on the
+#     workbench). Persisting scope=0 host-wide is still the WRONG fix (it relaxes
+#     ptrace for EVERY same-UID process permanently); the narrow per-process
+#     opt-in is the right one. So: still don't set scope=0 here — but not because
+#     "it already reads 0".
 #
 #   - zramSwap.memoryMax. Removed as an inert no-op that was documented as the
 #     opposite of what it does. nixpkgs computes
