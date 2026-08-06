@@ -137,6 +137,24 @@ in
           # bar for "recom" on 2026-07-27 hunting for exactly this, and found nothing.
           { trigger = ":rna"; replace = "recommend next actions"; label = "Recommend next actions"; search_terms = ["recommend" "recom" "next" "actions" "rank" "leverage"]; }
           { trigger = ":lr"; replace = "limit restored, resume agent"; label = "Limit restored — resume agent"; search_terms = ["limit" "restored" "resume" "agent" "continue" "quota"]; }
+          # Added 2026-08-05 via /espanso-audit. WHOLE-STANDALONE-MESSAGE shaped,
+          # which is the ONLY shape that has ever stuck here (:eos 72 fires,
+          # :kickoff 38); every mid-sentence FRAGMENT snippet has since been
+          # pruned (:ds :rns :pst :rnx :aep :nday :fhrs :fdays). SHAPE, not
+          # length, is the predictor — :ds's phrase was hand-typed 94× and the
+          # snippet still only ever fired once.
+          # Measured demand: 8 genuine instances over ~3 weeks across the keylog
+          # typing stream + transcripts, 5 of them standing ALONE as a whole
+          # message, and typed with heavy toil ("in th eme meantime",
+          # "meatimmeantime", "wahwhat can youwe rudo").
+          # His vocabulary is meantime / while that runs / tee up / queue up /
+          # in parallel — "meanwhile" has ZERO hits, so it is deliberately NOT a
+          # search term. 168 of 173 fires go through the Ctrl+Space SEARCH UI,
+          # so `label` + `search_terms` ARE the interface: the label leads with
+          # the word he'd search, and the multi-word terms exist so his real
+          # queries ("in the meantime", "what can we do") tokenize onto this
+          # snippet (see espanso_detect._term_matches).
+          { trigger = ":mt"; replace = "tee up what we can do in the meantime: identify work that is INDEPENDENT of what is currently running — nothing touching the same files — then dispatch it in parallel with complete test coverage. if we are actually blocked until that finishes, say so plainly instead of inventing filler work."; label = "Meantime: tee up independent parallel work while that runs"; search_terms = ["meantime" "in the meantime" "while" "while that runs" "parallel" "queue" "queue up" "tee" "tee up" "wait" "blocked" "idle" "what can we do"]; }
           # Removed 2026-07-25 via /espanso-audit — all keylog-evidence-backed:
           #  ZERO-FIRE set — 0 keylog fires + short-form hand-typing; steering already in
           #   RULES.md / slash-commands: :rnx, :pst ("proceed, dispatch" typed 40+×),
@@ -1320,7 +1338,22 @@ in
       # Remove once the spin is fixed and verified idle-at-~0%.
       CPUQuota = "30%";
       # Restart on a script-only change (see activity-collector for rationale).
-      X-Restart-Triggers = [ "${../scripts/collector/keylog}" ];
+      #
+      # ...AND on an espanso CONFIG-only change. keylog loads the espanso trigger
+      # set ONCE, at process init (keylog.py's ctor → espanso_triggers.load_triggers
+      # over ~/.config/espanso/{match/base.yml,config/default.yml}). Pinning only
+      # the keylog script directory meant an espanso-only edit to this file left
+      # the keylog UNIT DEFINITION byte-identical, so sd-switch did not restart it
+      # and the daemon kept matching the OLD trigger set. Counter-example on
+      # record: d0156c5 (#325, the :eos rewrite) was espanso-only → no restart.
+      # Consequence: a newly added snippet records ZERO fires and the next
+      # /espanso-audit prunes it as dead — a self-reinforcing loop.
+      # `graphical` guard: the espanso HM module only defines these xdg.configFile
+      # entries under `mkIf cfg.enable`, and services.espanso.enable = graphical.
+      X-Restart-Triggers = [ "${../scripts/collector/keylog}" ] ++ lib.optionals graphical [
+        "${config.xdg.configFile."espanso/match/base.yml".source}"
+        "${config.xdg.configFile."espanso/config/default.yml".source}"
+      ];
     };
     Install = {
       WantedBy = [ "graphical-session.target" ];
