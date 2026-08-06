@@ -111,7 +111,25 @@ _UNAVAILABLE_RE = re.compile(r"Error: No such tool available: ([A-Za-z][A-Za-z0-
 # host, so a cold read is slower by an unmeasured factor. Even at 10x the floor, 1 GiB is
 # a few seconds, once per kind per session, and truncation fails OPEN: nudge delivered.
 # Overridable so the truncation boundary itself is testable rather than assumed.
-MAX_SCAN_BYTES = int(os.environ.get("SEARCH_TOOL_NUDGE_MAX_SCAN_BYTES") or 1024 * 1024 * 1024)
+#
+# 🔴 The override is parsed DEFENSIVELY, because this runs at import time — outside
+# main()'s try — so an exception here escapes as a non-zero exit with a traceback on
+# EVERY Bash call in that session, which is exactly what the module docstring promises
+# never happens. A bare int() on the raw value made a single typo in a shell profile
+# (`...=abc`) enough to do that. Anything unparseable or non-positive falls back to the
+# default. Known and accepted: Python's int() also accepts underscore separators, so
+# "1_0" parses as 10 rather than being rejected — harmless, because a too-SMALL cap only
+# truncates the scan, which fails open and delivers the nudge.
+def _scan_cap(default):
+    try:
+        raw = os.environ.get("SEARCH_TOOL_NUDGE_MAX_SCAN_BYTES")
+        value = int(raw) if raw else default
+        return value if value > 0 else default
+    except Exception:
+        return default
+
+
+MAX_SCAN_BYTES = _scan_cap(1024 * 1024 * 1024)
 
 # --------------------------------------------------------------------------- #
 # Per-session state, and the claim protocol
@@ -138,8 +156,8 @@ MAX_SCAN_BYTES = int(os.environ.get("SEARCH_TOOL_NUDGE_MAX_SCAN_BYTES") or 1024 
 #     Deliberate: one lost nudge is far cheaper than N duplicates.
 #
 # Tokens: a KIND ("content"/"files") = nudge handled; "no:<Tool>" = that tool proven
-# unavailable. ":" is not filename-safe, so tokens map to filenames via a fixed injective
-# encoding over the closed token set.
+# unavailable. They are stored VERBATIM as filenames — ":" is a legal filename byte on
+# Linux, so no encoding step is involved (see _token_file).
 # --------------------------------------------------------------------------- #
 STATE_ROOT = f"{CACHE_DIR}/s"
 
@@ -489,8 +507,12 @@ def _state_dir(data):
     cannot appear INSIDE a sanitized component. That is what makes the key injective:
     joining sanitized parts with any character the sanitizer can emit (e.g. "_") would
     make session="a" + agent="b" collide with session="a_b" alone, and the first would
-    then silence the second. Residual, pre-existing and NOT introduced here: two raw
-    session ids that sanitize to the same string still alias (real ids are UUIDs).
+    then silence the second.
+
+    Residual aliasing, stated at its real scope: two raw session ids that sanitize to the
+    same string alias. The character-substitution half of that is pre-existing; the [:120]
+    TRUNCATION half is new here and is mine, not inherited. Both are unreachable with the
+    UUID/hex ids the harness actually sends.
     """
     session = data.get("session_id") or ""
     if not isinstance(session, str) or not session:
@@ -535,8 +557,18 @@ def _claim(state_dir, token):
     """
     if not state_dir:
         return True
+    # 🔴 The two steps have SEPARATE handlers on purpose. `makedirs(exist_ok=True)` also
+    # raises FileExistsError — when the path is an existing regular file or symlink, not
+    # a directory (e.g. a leftover from the pre-directory state layout). Sharing one
+    # handler with the open below made that indistinguishable from "lost the race", so
+    # the hook returned False and the nudge vanished for the whole session: fail CLOSED,
+    # contradicting both this docstring and the module comment. Only the O_EXCL open may
+    # ever mean "someone else got there first".
     try:
         os.makedirs(state_dir, exist_ok=True)
+    except Exception:
+        return True
+    try:
         os.close(os.open(_token_file(state_dir, token),
                          os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600))
         return True

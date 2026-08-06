@@ -420,6 +420,19 @@ midtext = transcript("mid-text", [{
                    "Grep is not available in this session"}]}}])
 check("marker mid-text in a real error does NOT suppress",
       fire(sid, "grep -r TODO src/", midtext), True)
+# 🔴 SAME LINE, no newline before the marker. The fixture above is not enough on its
+# own: `.` does not cross newlines, so a mutant that loosens the pattern to
+# `.*No such tool available: (…)` still fails to match it and survives. This is the
+# realistic shape — a failed command whose own stderr quotes the marker on one line —
+# and under that mutant it is FALSELY SUPPRESSED.
+sid = session("mid-line")
+midline = transcript("mid-line", [{
+    "type": "user", "message": {"role": "user", "content": [{
+        "type": "tool_result", "is_error": True, "tool_use_id": "toolu_z1",
+        "content": "Command failed with exit code 2: hook.py: Error: No such tool "
+                   "available: Grep. (matched 0 files)"}]}}])
+check("marker mid-LINE in a real error does NOT suppress",
+      fire(sid, "grep -r TODO src/", midline), True)
 
 # --- The list-form content branch is real, not speculative. -------------------
 sid = session("list-form")
@@ -499,6 +512,24 @@ check("state key: agent-scoped call nudges",
 check("state key: the session that ALIASES it still gets its own nudge",
       fire(X + "_b", "grep -r TODO src/", None), True)
 
+# 🔴 Pin the PROPERTY, not the separator's spelling. The pair above only exercises the
+# "_" alias, so widening the sanitizer's allowed set to include "@" keeps it green while
+# silently reintroducing exactly the non-injectivity it was written to catch: the key
+# is injective only because "@" cannot survive _sanitize.
+_san_fn = internal("_sanitize")
+check("the join separator cannot survive sanitization",
+      _san_fn("@") if _san_fn else None, "_")
+# ...and the behavioural pair that "@" makes collide if the property is broken.
+Y = "test-search-nudge-atcollide"
+for _sid in (Y, Y + "@b"):
+    SESSIONS.append(_sid)
+for _p in glob.glob(os.path.join(STATE_ROOT, Y + "*")):
+    shutil.rmtree(_p, ignore_errors=True)
+check("state key: '@' pair — agent-scoped call nudges",
+      fire(Y, "grep -r TODO src/", None, agent_id="b"), True)
+check("state key: '@' pair — the raw '@' session still gets its own nudge",
+      fire(Y + "@b", "grep -r TODO src/", None), True)
+
 # --- FAIL OPEN: every detection failure leaves behaviour exactly as before. ----
 sid = session("missing-file")
 check("nonexistent transcript path -> nudge unchanged",
@@ -574,11 +605,64 @@ sid = session("cap-tiny")
 check("a tiny cap fails OPEN rather than suppressing",
       fire_with_cap(sid, 1, cap_file), True)
 
+# 🔴 The override is read at IMPORT time, outside main()'s try. An unparseable value
+# there escapes as a non-zero exit with a traceback on EVERY Bash call in the session —
+# the one thing the module docstring promises never happens, and a typo in a shell
+# profile is enough to trigger it. Every junk shape must exit 0 AND still nudge.
+for _i, _bad in enumerate(("abc", "", "  ", "-1", "0", "1e9", "9" * 400, "12abc", "0x10")):
+    sid = session("cap-junk-%d" % _i)
+    _p = subprocess.run(
+        [sys.executable, HOOK],
+        input=json.dumps({"tool_name": "Bash", "session_id": sid,
+                          "tool_input": {"command": "grep -r TODO src/"}}),
+        capture_output=True, text=True,
+        env=dict(os.environ, SEARCH_TOOL_NUDGE_MAX_SCAN_BYTES=_bad))
+    check("junk scan-cap %r: exit 0, no traceback, nudge delivered" % _bad,
+          (_p.returncode, "Traceback" in _p.stderr, bool(_p.stdout.strip())),
+          (0, False, True))
+
+# ...and a junk value must FALL BACK to the default, not silently disable detection.
+# Asserting "no crash" alone cannot see that: with a non-positive cap accepted verbatim,
+# every scan truncates on its first line, which also fails open and also nudges — the
+# same observable, a completely different reason. Only a transcript that SHOULD suppress
+# separates them.
+for _i, _bad in enumerate(("0", "-1", "abc")):
+    sid = session("cap-fallback-%d" % _i)
+    _p = subprocess.run(
+        [sys.executable, HOOK],
+        input=json.dumps({"tool_name": "Bash", "session_id": sid, "transcript_path": gone,
+                          "tool_input": {"command": "grep -r TODO src/"}}),
+        capture_output=True, text=True,
+        env=dict(os.environ, SEARCH_TOOL_NUDGE_MAX_SCAN_BYTES=_bad))
+    check("junk scan-cap %r falls back to the default (detection still works)" % _bad,
+          (_p.returncode, bool(_p.stdout.strip())), (0, False))
+
 # --- CONCURRENCY: at most ONE nudge per kind per session, under real parallelism.
 # 12 processes released by a shared barrier so their read-modify-write windows overlap.
 # Measured pre-fix on this exact harness: 10-11 duplicates against a large transcript.
 sid = session("concurrent")
-conc_transcript = transcript("concurrent", BENIGN_RECORDS * 400)
+# 🔴 Fixture SIZE is what makes this check able to fail on broken code, and it is not a
+# free parameter. Pre-fix, the race window IS the transcript scan sitting between the
+# state read and the state write, so it scales with the file. At ~100 KB the check was
+# flaky against the pre-fix hook — 11 runs gave 2,3,3,3,3,5,5,6,10 duplicates and ONCE
+# gave 1, i.e. GREEN on code that was broken. A test that can pass on the bug it exists
+# to catch is not a test. Sized so the window is milliseconds, not microseconds; the
+# post-fix hook claims before scanning, so it pays this scan exactly once. Measured
+# after: reliably red on the pre-fix hook, 5 runs of 5.
+#
+# Scope of that claim, so nobody later "fixes" the remainder: this is reliable against
+# the pre-fix hook, whose window IS the scan. It stays a coin flip (2/5) against base
+# main, which never reads a transcript at all — that race is genuinely microseconds wide
+# and NO fixture size widens it. Base main's narrow race is a real but separate defect,
+# and this check is not the instrument for it.
+CONC_BYTES = 8 * 1024 * 1024
+conc_transcript = os.path.join(TMP, "concurrent-big.jsonl")
+_filler = {"type": "assistant", "message": {"role": "assistant", "content": [
+    {"type": "text", "text": "x" * 400}]}}
+with open(conc_transcript, "w") as fh:
+    _line = json.dumps(_filler) + "\n"
+    for _ in range(CONC_BYTES // len(_line)):
+        fh.write(_line)
 
 
 def _one(_i, out, idx, barrier):
@@ -628,10 +712,36 @@ _ro = os.path.join(TMP, "readonly")
 os.makedirs(_ro, exist_ok=True)
 os.chmod(_ro, 0o500)
 if not os.access(_ro, os.W_OK):
-    check("claim: unwritable state dir fails OPEN",
+    # The state dir cannot be CREATED -> the makedirs handler.
+    check("claim: unwritable parent (dir cannot be created) fails OPEN",
           _claim(os.path.join(_ro, "sess"), "content") if _claim else None, True)
 os.chmod(_ro, 0o700)
+# The state dir EXISTS but the marker cannot be created -> the open()'s generic handler,
+# a different branch entirely. Without this the two are conflated and "fail closed on a
+# generic error" survives: every existing test reaches the makedirs handler instead.
+_ro2 = os.path.join(TMP, "readonly-existing")
+os.makedirs(_ro2, exist_ok=True)
+os.chmod(_ro2, 0o500)
+if not os.access(_ro2, os.W_OK):
+    check("claim: existing but unwritable state dir fails OPEN",
+          _claim(_ro2, "content") if _claim else None, True)
+os.chmod(_ro2, 0o700)
 check("claim: no state dir at all fails OPEN", _claim(None, "content") if _claim else None, True)
+# 🔴 makedirs(exist_ok=True) ALSO raises FileExistsError — when the path is a regular
+# file or a symlink rather than a directory (a leftover flat state file from the old
+# layout is exactly that). Sharing one handler with the O_EXCL open made that
+# indistinguishable from "lost the race", so the nudge vanished for the whole session:
+# fail CLOSED, contradicting the docstring. Each blocker is checked separately because
+# they reach makedirs by different routes.
+for _label, _mk in (
+    ("regular file", lambda p: open(p, "w").close()),
+    ("dangling symlink", lambda p: os.symlink(os.path.join(TMP, "nonexistent"), p)),
+    ("symlink to a file", lambda p: (open(p + ".t", "w").close(), os.symlink(p + ".t", p))),
+):
+    _blocked = os.path.join(TMP, "blocked-" + _label.replace(" ", "-"))
+    _mk(_blocked)
+    check("claim: state path is a %s -> fails OPEN" % _label,
+          _claim(_blocked, "content") if _claim else None, True)
 
 # 🔴 The claim's ANSWER must be honoured by main(), not just computed. Proving that
 # needs a state where the marker EXISTS but the directory listing does NOT show it —
@@ -701,7 +811,7 @@ leaked = sorted(os.path.basename(p) for pref in TEST_SID_PREFIXES
 check("no test state leaks into the next run", leaked, [])
 shutil.rmtree(TMP, ignore_errors=True)
 
-MIN_CHECKS = 135  # floor: a suite that silently shrinks is a vacuous green
+MIN_CHECKS = 160  # floor: a suite that silently shrinks is a vacuous green
 if fails:
     print("FAIL:")
     for f in fails:
