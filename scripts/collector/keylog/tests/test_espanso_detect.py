@@ -352,3 +352,117 @@ def test_notify_navigation_leaves_search_mode_intact():
     evs = list(d.feed_char("\n", app=APP, session=SESS, now=8.0))
     assert len(evs) == 1
     assert evs[0].search_term == "today"
+
+
+# -- FIX 3: MULTI-WORD search terms ------------------------------------------
+# The /espanso-audit run of 2026-08-05 found 46 of 173 keylog espanso rows
+# unattributed, and 19+ of them were MULTI-WORD queries: "ssh work", "ssh lap",
+# "ss wor", "ssh worc", "civit prod". `_term_matches` required the whole term to
+# be a substring of a SINGLE word (of the trigger, of a label word, or of one
+# search_term), so a term containing a space could never match ANY snippet — the
+# four :ssh* snippets and :cgf/:subk therefore read as dead when they are not.
+# Fix: tokenize on whitespace and require EVERY token to match by the old rules.
+# These fixtures carry the REAL labels/search_terms from nix/home.nix.
+SSH_BASE = {"matches": [
+    {"label": "SSH workbench (nebula)", "replace": "...", "trigger": ":sshwn",
+     "search_terms": ["ssh", "workbench", "wb", "nebula", "mesh", "remote"]},
+    {"label": "SSH workbench (LAN)", "replace": "...", "trigger": ":sshwl",
+     "search_terms": ["ssh", "workbench", "wb", "lan", "local"]},
+    {"label": "SSH laptop (nebula)", "replace": "...", "trigger": ":sshln",
+     "search_terms": ["ssh", "laptop", "framewo", "nebula", "mesh", "remote"]},
+    {"label": "SSH laptop (LAN)", "replace": "...", "trigger": ":sshll",
+     "search_terms": ["ssh", "laptop", "framewo", "lan", "local"]},
+]}
+
+CIVIT_BASE = {"matches": [
+    {"label": "civitai main web app repo path", "replace": "...", "trigger": ":cc",
+     "search_terms": ["civitai", "repo", "web", "app"]},
+    {"label": "civitai datapacket-talos path", "replace": "...", "trigger": ":cdp",
+     "search_terms": ["civitai"]},
+    {"label": "civitai gpu-fleet path", "replace": "...", "trigger": ":cgf",
+     "search_terms": ["civitai"]},
+    {"label": "civitai dp prod kubeconfig path", "replace": "...", "trigger": ":cpk",
+     "search_terms": ["civitai"]},
+    {"label": "civitai submodel dc 03 kubeconfig path", "replace": "...",
+     "trigger": ":subk",
+     "search_terms": ["civitai", "gpu", "submodel", "dc 03"]},
+]}
+
+
+def _det_for(base):
+    return EspansoDetector(ET.load_triggers(base, DEFAULT))
+
+
+def test_multiword_term_matches_each_workbench_ssh_snippet():
+    # RED before the fix: "ssh work" is not a substring of any single word, so
+    # _term_matches returned False for EVERY trigger. Now both workbench
+    # snippets match ("ssh" ⊂ the trigger, "work" ⊂ label word "workbench").
+    d = _det_for(SSH_BASE)
+    assert d._term_matches("ssh work", ":sshwn") is True
+    assert d._term_matches("ssh work", ":sshwl") is True
+    # ...and the LAPTOP ones legitimately do not — no "work" anywhere in them.
+    assert d._term_matches("ssh work", ":sshln") is False
+    assert d._term_matches("ssh work", ":sshll") is False
+
+
+def test_multiword_ssh_work_stays_ambiguous_by_design():
+    # HONEST result: "ssh work" now matches TWO snippets (nebula + LAN), and
+    # _attribute's "exactly one match else None" rule is deliberately unchanged,
+    # so the row still lands trigger=None. The win is that the term is no longer
+    # a GUARANTEED zero-match — a disambiguating token resolves it (below).
+    d = _det_for(SSH_BASE)
+    assert d._attribute("ssh work") is None
+    assert d._attribute("ssh work lan") == ":sshwl"
+    assert d._attribute("ssh work nebula") == ":sshwn"
+
+
+def test_multiword_ssh_lap_matches_only_laptop_snippets():
+    d = _det_for(SSH_BASE)
+    assert d._term_matches("ssh lap", ":sshln") is True
+    assert d._term_matches("ssh lap", ":sshll") is True
+    assert d._term_matches("ssh lap", ":sshwn") is False
+
+
+def test_multiword_civit_prod_attributes_uniquely():
+    # RED before the fix (returned None). "civit" ⊂ "civitai", "prod" ⊂ the
+    # label word "prod" — and ONLY :cpk carries "prod", so it resolves.
+    d = _det_for(CIVIT_BASE)
+    assert d._attribute("civit prod") == ":cpk"
+
+
+def test_multiword_end_to_end_through_search_ui():
+    d = _det_for(CIVIT_BASE)
+    d.feed_search_open(app=APP, session=SESS, now=0.0)
+    _type(d, "civit prod", now=1.0)
+    evs = list(d.feed_char("\n", app=APP, session=SESS, now=20.0))
+    assert len(evs) == 1
+    assert evs[0].trigger == ":cpk"
+    assert evs[0].search_term == "civit prod"
+    assert evs[0].method == "search" and evs[0].inferred is True
+
+
+def test_multiword_all_tokens_required():
+    # Every token must match — one bogus token disqualifies the snippet.
+    d = _det_for(CIVIT_BASE)
+    assert d._term_matches("civit zzzzz", ":cpk") is False
+    assert d._attribute("civit zzzzz") is None
+
+
+def test_single_word_term_behaviour_unchanged():
+    # The single-token path must be byte-for-byte the old semantics.
+    d = _det_for(CIVIT_BASE)
+    assert d._term_matches("prod", ":cpk") is True
+    assert d._term_matches("prod", ":cc") is False
+    assert d._attribute("prod") == ":cpk"
+    assert d._attribute("civitai") is None      # matches all 5 → ambiguous
+    assert d._attribute("submodel") == ":subk"
+    # ...and on the original fixture set too.
+    d2 = _det()
+    assert d2._attribute("leverage") == ":rnx"
+    assert d2._attribute("date") is None
+    assert d2._attribute("zzzzz") is None
+
+
+def test_multiword_term_with_extra_whitespace_is_tokenized():
+    d = _det_for(CIVIT_BASE)
+    assert d._attribute("  civit   prod  ") == ":cpk"
