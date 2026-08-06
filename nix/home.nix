@@ -29,14 +29,19 @@ let
   # build failure there fails the whole switch. Flip to false to opt a host out
   # without touching the unit definitions. DELETE the flag and the units once
   # the spin is root-caused and the CPUQuota on keylog.service comes off.
-  # NOT on the laptop: it reads kernel.yama.ptrace_scope=1 (workbench reads 0,
-  # verified 2026-07-30), so py-spy can never attach to keylog.service there and
-  # the unit would exit at the sysctl gate every 5min forever. Worse, merely
-  # ENABLING it drags the uncached from-source py-spy build (Rust + libunwind)
-  # into the laptop's `home-manager switch` — and a build failure there fails
-  # the whole switch, which would stop the laptop converging to origin/main for
-  # a workbench-only diagnostic. (`isLaptop` is defined below; `let` bindings
-  # are order-independent.)
+  # NOT on the laptop — for BUILD COST, not ptrace reasons. Both hosts now read
+  # kernel.yama.ptrace_scope=1, and keylog.py opts into being traced via
+  # prctl(PR_SET_PTRACER_ANY) when KEYLOG_ALLOW_ANY_PTRACER=1 (wired onto
+  # keylog.service below, gated on THIS flag), so py-spy can attach under scope=1
+  # on any host — the old "laptop reads 1 so it can never attach" rationale no
+  # longer holds. The remaining reason to keep it workbench-only: merely ENABLING
+  # it drags the uncached from-source py-spy build (Rust + libunwind) into a
+  # `home-manager switch`, and a build failure there fails the whole switch —
+  # which on the laptop would stop it converging to origin/main for a
+  # workbench-only diagnostic. Keeping it off the laptop ALSO means the laptop's
+  # keylog never sets PR_SET_PTRACER_ANY, so its keystroke collector stays
+  # untraceable by siblings. (`isLaptop` is defined below; `let` bindings are
+  # order-independent.)
   enableKeylogSpinCapture = graphical && !isLaptop;
   # Host discriminator for the graphical config (i3 + i3status-rust bar). Evaluated
   # per-host under `--impure`: the laptop has an intel_backlight, the workbench does
@@ -1269,7 +1274,15 @@ in
       # graphical env if available.
       Environment = [
         "PATH=${lib.makeBinPath [ (pkgs.python312.withPackages (ps: [ ps.xlib ps.pyyaml ])) pkgs.coreutils ]}"
-      ];
+      ]
+      # Opt keylog in to being ptraced by the SIBLING keylog-spin-capture watcher
+      # (py-spy) — but ONLY on the host where that diagnostic is enabled. keylog.py
+      # calls prctl(PR_SET_PTRACER_ANY) when this is set, which is what lets py-spy
+      # attach under Yama ptrace_scope=1 WITHOUT persisting ptrace_scope=0 host-wide.
+      # Gated so a host NOT running the capture never opens its keystroke collector
+      # to same-UID tracers for nothing. See _allow_any_ptracer in keylog.py for the
+      # blast-radius trade-off.
+      ++ lib.optional enableKeylogSpinCapture "KEYLOG_ALLOW_ANY_PTRACER=1";
       ExecStart = "${pkgs.python312.withPackages (ps: [ ps.xlib ps.pyyaml ])}/bin/python3 %h/.config/activity-collector/keylog/keylog.py";
       Restart = "always";
       RestartSec = 10;
@@ -1317,12 +1330,17 @@ in
   # enableKeylogSpinCapture = false (defined in the `let` block ABOVE) to opt
   # a host out entirely.
   #
-  # py-spy needs kernel.yama.ptrace_scope=0 to attach to a non-descendant, and
-  # that is NOT uniform here: the workbench reads 0, the LAPTOP reads 1
-  # (verified 2026-07-30). On a ptrace_scope=1 host py-spy can never attach, so
-  # the script checks the sysctl FIRST and exits quietly — no dump, no toast,
-  # no retry. It also gives up after KEYLOG_SPIN_MAX_FAILS incomplete captures,
-  # so a broken py-spy cannot turn the 5-min timer into a permanent loop.
+  # py-spy attaching to a NON-descendant (keylog.service is a sibling unit) needs
+  # same-UID ptrace, which Yama ptrace_scope=1 (the current fleet default) blocks
+  # by default. Rather than persist ptrace_scope=0 host-wide — which would expose
+  # EVERY same-UID process permanently — keylog.py opts ITSELF in via
+  # prctl(PR_SET_PTRACER_ANY) when KEYLOG_ALLOW_ANY_PTRACER=1 (set on
+  # keylog.service above, gated on enableKeylogSpinCapture). Verified on a live
+  # scope=1 kernel: py-spy dumps both plain and --native frames against a tracee
+  # that made the opt-in, and is denied against one that did not. The script still
+  # bails on scope >= 2 (CAP_SYS_PTRACE, which the opt-in cannot grant) and gives
+  # up after KEYLOG_SPIN_MAX_FAILS incomplete captures, so a broken py-spy cannot
+  # turn the 5-min timer into a permanent loop.
   systemd.user.services.keylog-spin-capture = lib.mkIf enableKeylogSpinCapture {
     Unit = {
       Description = "Capture a py-spy stack dump if keylog.service starts spinning";

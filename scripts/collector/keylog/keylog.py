@@ -353,7 +353,83 @@ class KeyLogger:
             pass
 
 
+def _allow_any_ptracer() -> None:
+    """Opt this process in to being ptraced by a non-descendant same-UID tracer.
+
+    Why this exists: keylog.service is a `systemd --user` unit; the
+    keylog-spin-capture watcher (py-spy) is a SIBLING `oneshot`, never a
+    descendant of it. Under Yama `kernel.yama.ptrace_scope=1` ("restricted
+    ptrace" — the fleet default since the 2026-08-04 reboot) a non-descendant is
+    denied BOTH `process_vm_readv` and `PTRACE_ATTACH` even at the same UID, so
+    the watcher hits EPERM and captures nothing. Yama honours exactly ONE opt-out:
+    a tracee may declare who is allowed to trace it via
+    `prctl(PR_SET_PTRACER, ...)`. `PR_SET_PTRACER_ANY` opts in for ANY same-UID
+    tracer. This is the whole-fleet-safe alternative to persisting
+    `ptrace_scope=0` system-wide (which would expose EVERY same-UID process
+    permanently): it exposes ONLY this process, ONLY while it runs.
+
+    TRADE-OFF, stated straight rather than sold: keylog is a keystroke collector —
+    arguably the single most sensitive process on the box — and
+    `PR_SET_PTRACER_ANY` opens its live memory to ANY process running as this
+    same user for keylog's whole lifetime. It grants nothing cross-user and
+    nothing to root that root lacked. Pinning ONE tracer PID would be tighter,
+    but the watcher is a `oneshot` whose PID changes on every 5-minute tick, so
+    there is no stable PID to name. The mitigating fact (a boundary statement,
+    not an excuse): a same-UID attacker can ALREADY read keylog's on-disk spool
+    at ~/.local/state/activity/spool, so live-memory read does not cross a new
+    trust boundary — it is the same same-UID boundary in a different shape. That
+    is why this is GATED on KEYLOG_ALLOW_ANY_PTRACER, which home-manager sets
+    ONLY on the host where the spin-capture diagnostic is enabled (workbench);
+    everywhere else keylog stays untraceable by siblings. Remove the env gate and
+    this call together once the spin is root-caused.
+
+    Fail SOFT: a non-Linux kernel, a kernel too old for PR_SET_PTRACER, a missing
+    libc, or an EINVAL must NEVER take the keylogger down. Log and continue — the
+    worst case is the watcher stays inert, exactly as it is today.
+    """
+    if os.environ.get("KEYLOG_ALLOW_ANY_PTRACER", "").strip().lower() not in (
+        "1", "true", "yes", "on",
+    ):
+        return
+    if sys.platform != "linux":
+        return
+    try:
+        import ctypes
+
+        PR_SET_PTRACER = 0x59616D61  # <linux/prctl.h>
+        PR_SET_PTRACER_ANY = ctypes.c_ulong(-1).value  # (unsigned long)-1
+        libc = ctypes.CDLL("libc.so.6", use_errno=True)
+        libc.prctl.restype = ctypes.c_int
+        libc.prctl.argtypes = [
+            ctypes.c_int, ctypes.c_ulong, ctypes.c_ulong,
+            ctypes.c_ulong, ctypes.c_ulong,
+        ]
+        rc = libc.prctl(PR_SET_PTRACER, PR_SET_PTRACER_ANY, 0, 0, 0)
+        if rc != 0:
+            err = ctypes.get_errno()
+            print(
+                f"keylog: PR_SET_PTRACER_ANY failed rc={rc} errno={err} "
+                f"({os.strerror(err)}) — spin-capture may be unable to attach",
+                file=sys.stderr, flush=True,
+            )
+        else:
+            print(
+                "keylog: PR_SET_PTRACER_ANY set — spin-capture (py-spy) may attach",
+                file=sys.stderr, flush=True,
+            )
+    except Exception as exc:  # noqa: BLE001 — must never crash the collector
+        print(
+            f"keylog: PR_SET_PTRACER_ANY opt-in skipped: {exc!r}",
+            file=sys.stderr, flush=True,
+        )
+
+
 def main(argv=None) -> int:
+    # Opt in to the sibling spin-capture watcher BEFORE anything else, so the
+    # permission is in place well before the watcher's first 5-minute attach.
+    # Gated + fail-soft; see _allow_any_ptracer.
+    _allow_any_ptracer()
+
     spool_dir = SE.default_spool_dir()
     idle_seconds = float(os.environ.get("KEYLOG_IDLE_SECONDS", "2.0"))
     max_chars = int(os.environ.get("KEYLOG_MAX_CHARS", "4096"))

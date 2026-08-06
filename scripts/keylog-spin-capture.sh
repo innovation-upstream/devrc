@@ -23,10 +23,14 @@
 # disk waiting for you. Self-disables after one capture (delete the sentinel
 # to re-arm).
 #
-# Requires kernel.yama.ptrace_scope=0 to attach to a non-descendant process.
-# This is NOT uniform across the fleet: the workbench reads 0, the LAPTOP reads
-# 1 (verified 2026-07-30). On a host with 1, py-spy can never attach, so this
-# exits early rather than retrying a guaranteed failure every 5 minutes.
+# Needs same-UID ptrace of a NON-descendant (keylog.service is a sibling unit).
+# Under Yama kernel.yama.ptrace_scope=1 ("restricted", the fleet default since
+# the 2026-08-04 reboot) that is denied UNLESS the tracee opts in via
+# prctl(PR_SET_PTRACER, PR_SET_PTRACER_ANY) — which keylog.py now does when
+# KEYLOG_ALLOW_ANY_PTRACER=1 (set by home-manager on the spin-capture host). So
+# scope 0 (classic) and scope 1 (with keylog's opt-in) both work; scope >= 2
+# (admin-only / no-attach) needs CAP_SYS_PTRACE and the opt-in cannot help, so
+# we still bail there rather than retrying a guaranteed failure every 5 minutes.
 set -euo pipefail
 
 THRESH=${KEYLOG_SPIN_THRESHOLD:-20}   # percent of one core
@@ -44,10 +48,12 @@ FAILCOUNT="$OUT/.failcount"
 # Stop rather than looping every 5 min forever.
 [[ -f $GIVEUP ]] && exit 0
 
-# Hard precondition: without same-UID ptrace, every attach fails. Bail QUIETLY
-# — no dump file, no toast, no retry churn. Nothing here is fixable at runtime.
+# Hard precondition: scope 0 or 1 is attachable here (scope 1 relies on keylog's
+# PR_SET_PTRACER_ANY opt-in — see keylog.py). scope >= 2 requires CAP_SYS_PTRACE
+# that a --user unit cannot hold and the opt-in cannot grant, so every attach
+# fails: bail QUIETLY — no dump file, no toast, no retry churn.
 ptrace_scope=$(cat /proc/sys/kernel/yama/ptrace_scope 2>/dev/null || echo 0)
-if [[ $ptrace_scope != 0 ]]; then
+if [[ ${ptrace_scope:-0} -ge 2 ]]; then
   exit 0
 fi
 
