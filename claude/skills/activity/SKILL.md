@@ -187,6 +187,35 @@ Creds come from `~/.config/activity-collector/env` (the collector's own file) un
   toast. One workbench runner covers BOTH hosts because it reads the shared table. See the
   `bar` skill.
 
+## regrowth check — "is the ClickHouse store growing back?"
+`scripts/collector/ch_regrowth.py` (+ `run-regrowth-check.sh`, the sops/kubeconfig wrapper).
+2026-08-03 the store was cut **112.4 GB → 82.1 MB** after `system.trace_log` hit 3.77
+BILLION rows in ~5 weeks; the fix was a Flux config change (logger trace→warning, four
+query-profiler log tables removed, 7d/14d TTLs, merge pool 32→8). **Nothing else would
+notice that silently reverting.** Read-only; **workbench-only** systemd user timer
+`ch-regrowth-check`, **monthly on the 11th**, `Persistent=true`.
+```bash
+scripts/collector/run-regrowth-check.sh            # or: systemctl --user start ch-regrowth-check
+# from the laptop (nebula), by hand:
+KUBECONFIG=~/.kube/homelab-nebula.yaml CH_REGROWTH_URL=http://10.42.0.10:30123 \
+  scripts/collector/run-regrowth-check.sh
+```
+- Asserts: `du(store)` >2 GiB ALARM / >1 GiB WARN · any `*_0` table (a TTL applied to an
+  existing `*_log` RENAMES the old one aside, which then keeps its rows with **NO TTL
+  forever**) · `trace_log`/`text_log`/`latency_log`/`processors_profile_log` existing at all
+  · any table >250 MiB · **TTL effectiveness** — `min(event_time)` younger than TTL+1d
+  (the only check that tests the MECHANISM, not today's outcome).
+- Exit **0 ok · 1 ALARM · 2 CANNOT TELL · 3 WARN**. Every non-zero is a unit failure →
+  the existing `OnFailure=notify-failure@` sticky toast. Verdict + every number it read
+  lands in `~/.cache/ch-regrowth/status.json`.
+- 🔴 **`du` sits ~40% above the live `total_bytes` sum by design** (8-slot merge pool
+  leaves inactive parts around). That gap is NOT a leak — do not re-derive an alarm from it.
+- 🔴 Its reassuring answers are all ZEROS, so `ok` is gated on positive controls (listing
+  non-empty, `activity.events` present, >0 `*_log` matches, >0 tables over 1 MiB, ≥1 TTL
+  target measured). Any failure state — `not-configured`/`unreachable`/`query-failed`/
+  `exec-failed`/`no-data` — is LOUD and is never `ok`. Read its module docstring before
+  changing any threshold; every one is derived from a named measurement.
+
 ## troubleshoot a stalled source
 1. `journalctl --user -u <service> -n 30` — `urlopen timed out` = can't reach CH (check the
    endpoint matches the host: laptop must use the nebula IP).
