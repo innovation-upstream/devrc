@@ -12,9 +12,9 @@ self-hosted (no Gmail API, no third party). Point-in-time state: memory
 **Mail flow (the whole chain):**
 ```
 Gmail ──forward──► me@inbox.zacx.dev
-   │ Cloudflare DNS: inbox.zacx.dev MX 10 mx-in.zacx.dev ; mx-in.zacx.dev A 5.161.118.55 (GREY/DNS-only)
+   │ Cloudflare DNS: inbox.zacx.dev MX 10 mx-in.zacx.dev ; mx-in.zacx.dev A <hetzner-gw-ip> (GREY/DNS-only)
    ▼
-Hetzner gateway 5.161.118.55:25  (production nebula-gateway nginx stream: listen 0.0.0.0:25 → 10.42.0.10:2525)
+Hetzner gateway mx-in.zacx.dev:25  (production nebula-gateway nginx stream: listen 0.0.0.0:25 → 10.42.0.10:2525)
    ▼ nebula mesh
 homelab gateway 10.42.0.10:2525  (homelab nebula-gateway nginx: proxy_pass mail-receiver.mailbox.svc:2525)
    ▼

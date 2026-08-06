@@ -2258,7 +2258,7 @@ export function focusExpression(selector) {
 // Under Chrome's site isolation a CROSS-ORIGIN iframe is an OUT-OF-PROCESS iframe
 // (OOPIF) living in a SEPARATE renderer/target, so getFrameTree from the top tab
 // silently OMITS it — `frames` could never list it and `--frame` could never
-// target it (the whole point of a cross-origin embed like model-benchmarking.civit.ai).
+// target it (the whole point of a cross-origin embed like model-benchmarking.example.test).
 //
 // The fix uses the two chrome.* APIs that ARE OOPIF-aware:
 //   * chrome.webNavigation.getAllFrames({tabId}) enumerates EVERY frame in the tab
@@ -2306,7 +2306,7 @@ export function frameHostOf(url) {
 //      tested against each frame's HOSTNAME first. This disambiguates the civitai
 //      self-shadow: `--frame model-benchmarking` matches the TOP frame's PATH
 //      (civitai.com/apps/run/model-benchmarking) but the OOPIF's HOST
-//      (model-benchmarking.civit.ai) — the host match is the intended frame.
+//      (model-benchmarking.example.test) — the host match is the intended frame.
 //   3. If the substring still matches MULTIPLE frames ambiguously (all host, or all
 //      path), throw `ambiguous_frame:<n> [<frameId>:<url>, …]` listing the candidates
 //      so the caller re-issues with a NUMERIC frameId, INSTEAD of silently choosing

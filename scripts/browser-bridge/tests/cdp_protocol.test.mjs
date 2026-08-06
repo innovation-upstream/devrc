@@ -111,18 +111,18 @@ test("flattenFrameTree flattens depth-first, main-frame first, metadata only", (
   const tree = {
     frame: { id: "MAIN", url: "https://civitai.com/", name: "" },
     childFrames: [
-      { frame: { id: "F1", url: "https://model-benchmarking.civit.ai/app", name: "bench" },
+      { frame: { id: "F1", url: "https://model-benchmarking.example.test/app", name: "bench" },
         childFrames: [
           { frame: { id: "F1a", url: "https://ads.example/x", name: "ad" } },
         ] },
-      { frame: { id: "F2", url: "https://other.civit.ai/y", name: "" } },
+      { frame: { id: "F2", url: "https://other-origin.example.test/y", name: "" } },
     ],
   };
   assert.deepEqual(flattenFrameTree(tree), [
     { frameId: "MAIN", url: "https://civitai.com/", name: "", parentId: null },
-    { frameId: "F1", url: "https://model-benchmarking.civit.ai/app", name: "bench", parentId: "MAIN" },
+    { frameId: "F1", url: "https://model-benchmarking.example.test/app", name: "bench", parentId: "MAIN" },
     { frameId: "F1a", url: "https://ads.example/x", name: "ad", parentId: "F1" },
-    { frameId: "F2", url: "https://other.civit.ai/y", name: "", parentId: "MAIN" },
+    { frameId: "F2", url: "https://other-origin.example.test/y", name: "", parentId: "MAIN" },
   ]);
 });
 
@@ -352,7 +352,7 @@ test("matchCdpFrameId: finds a SAME-PROCESS frame's CDP id by url; an OOPIF (abs
   assert.equal(matchCdpFrameId(tree, "https://civitai.com/embed/widget"), "SAME1");
   // the cross-origin OOPIF is NOT in the top session's frame tree → null (take the
   // auto-attach path). This is the whole reason getFrameTree can't reach it.
-  assert.equal(matchCdpFrameId(tree, "https://model-benchmarking.civit.ai/"), null);
+  assert.equal(matchCdpFrameId(tree, "https://model-benchmarking.example.test/"), null);
   assert.equal(matchCdpFrameId(tree, ""), null);
   assert.equal(matchCdpFrameId(null, "https://x/"), null);
 });
@@ -360,11 +360,11 @@ test("matchCdpFrameId: finds a SAME-PROCESS frame's CDP id by url; an OOPIF (abs
 test("pickOopifSessionId: matches the auto-attached OOPIF target session by url (trailing-slash tolerant)", () => {
   const attached = [
     { sessionId: "S_ad", url: "https://ads.example/pixel" },
-    { sessionId: "S_bench", url: "https://model-benchmarking.civit.ai/" },
+    { sessionId: "S_bench", url: "https://model-benchmarking.example.test/" },
   ];
-  assert.equal(pickOopifSessionId(attached, "https://model-benchmarking.civit.ai/"), "S_bench");
+  assert.equal(pickOopifSessionId(attached, "https://model-benchmarking.example.test/"), "S_bench");
   // frame url without the trailing slash still matches the target url that has one.
-  assert.equal(pickOopifSessionId(attached, "https://model-benchmarking.civit.ai"), "S_bench");
+  assert.equal(pickOopifSessionId(attached, "https://model-benchmarking.example.test"), "S_bench");
   assert.equal(pickOopifSessionId(attached, "https://ads.example/pixel"), "S_ad");
   assert.equal(pickOopifSessionId(attached, "https://not-attached/"), null);
   assert.equal(pickOopifSessionId([], "https://x/"), null);
@@ -374,8 +374,8 @@ test("pickOopifSessionId: matches the auto-attached OOPIF target session by url 
 test("evalValueOrThrow: NEVER-SILENT-NULL — exception → frame_eval_failed; real null/undefined pass AS values", () => {
   // A real value passes through.
   assert.equal(evalValueOrThrow({ result: { value: 1234 } }), 1234);
-  assert.equal(evalValueOrThrow({ result: { value: "https://model-benchmarking.civit.ai/" } }),
-    "https://model-benchmarking.civit.ai/");
+  assert.equal(evalValueOrThrow({ result: { value: "https://model-benchmarking.example.test/" } }),
+    "https://model-benchmarking.example.test/");
   // A GENUINE null/undefined result is a legitimate value (distinct from a failure).
   assert.equal(evalValueOrThrow({ result: { value: null } }), null);
   assert.equal(evalValueOrThrow({ result: { value: undefined } }), undefined);

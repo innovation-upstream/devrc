@@ -187,7 +187,9 @@ let
   # civitai DataPacket prod alerts — a SEPARATE block from the homelab alertsBlock
   # (Zach's request). Renders `civ <count>` so it reads distinctly on the bar; the
   # poller reaches the client cluster's Alertmanager through CIVITAI_KUBECONFIG.
-  # Click opens the civitai Grafana.
+  # Click opens the client Grafana, whose hostname is host-local: it lives in
+  # ~/.config/bar/urls.env as `civitai_grafana` and is resolved by `bar-url` at
+  # click time, NOT baked in here (this repo is PUBLIC — see scripts/bar-url).
   civitaiBlock = {
     block = "custom";
     # --red-above: neutral at/below the standing civitai-prod backlog (~312), red
@@ -197,7 +199,7 @@ let
     interval = 30;
     signal = 14;
     click = [
-      { button = "left"; cmd = "xdg-open https://grafana-new.civitai.com"; }
+      { button = "left"; cmd = "${scriptsDir}/bar-url --open civitai_grafana"; }
     ];
   };
   # Telemetry deadman — which activity-telemetry (host, source) pairs have
@@ -436,6 +438,16 @@ lib.mkIf isNixOS {
   };
   home.file.".config/i3status-rust/scripts/i3status-civitai" = lib.mkIf (!isLaptop) {
     source = ../scripts/i3status-civitai;
+    executable = true;
+  };
+  # bar-url: resolves a NAMED host-specific URL out of ~/.config/bar/urls.env at
+  # CLICK time. This repo is public, so a real client dashboard hostname cannot be
+  # a nix string literal — but placeholdering it would leave a dead button, so the
+  # value moves out of tracked source and the button keeps working. Same shape as
+  # ~/.config/bar/{media,airvpn}.env. Read by the civitai block's left-click below
+  # and by bar-status-poll's matching toast, so ONE file answers both.
+  home.file.".config/i3status-rust/scripts/bar-url" = lib.mkIf (!isLaptop) {
+    source = ../scripts/bar-url;
     executable = true;
   };
   # notifications bell + its notif-center rofi list. BOTH hosts (NOT !isLaptop-

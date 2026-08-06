@@ -17,7 +17,7 @@ A heavy SPA opened in a **backgrounded** tab is throttled by Chrome —
 ~1 Hz timers, and it often **never finishes rendering**. You then can't read or
 drive it: `text`/`frames` come back empty or half-built, and in-frame
 `click`/`type` hit elements that don't exist yet. Verified case:
-`model-benchmarking.civit.ai` (an OOPIF inside a `civitai.com` tab) stayed blank
+`model-benchmarking.example.test` (an OOPIF inside a `civitai.com` tab) stayed blank
 while backgrounded.
 
 `browser open` creates its tab in the **background** (`active:false`) on purpose, so

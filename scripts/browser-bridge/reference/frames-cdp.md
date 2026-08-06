@@ -22,7 +22,7 @@ limitations:
    tab, so the old i3 "not visible on-screen" limitation is gone for the normal
    path. (`--fullpage` grabs the whole scrollable document.)
 2. **Read/drive INTO a CROSS-ORIGIN iframe (the OOPIF fix)** — `browser --tab T frames`
-   LISTS the cross-origin frame (e.g. `model-benchmarking.civit.ai` inside
+   LISTS the cross-origin frame (e.g. `model-benchmarking.example.test` inside
    `civitai.com`) because `chrome.webNavigation.getAllFrames` enumerates OOPIFs that
    CDP `Page.getFrameTree` could not; then `browser --tab T --frame <numericId-or-url>
    text` reads inside it and `--frame … click/type/key` drives an in-app control (via
@@ -53,7 +53,7 @@ FRAME's own `url` (so you can confirm you read the intended frame, not the top).
 **Picking `--frame` reliably (avoid the wrong frame):** prefer a **numeric `frameId`**
 from `frames` — it always wins and is never ambiguous. A URL substring is resolved
 **HOST-first** (matched against each frame's hostname before its path), so
-`--frame model-benchmarking` targets the OOPIF `model-benchmarking.civit.ai` rather than
+`--frame model-benchmarking` targets the OOPIF `model-benchmarking.example.test` rather than
 the top page's `civitai.com/apps/run/model-benchmarking` PATH. If a substring still
 matches **multiple** frames the op fails with `ambiguous_frame:<n> [<id>:<url>, …]`
 listing the candidates — re-issue with the numeric `frameId` (it does NOT silently pick

@@ -2341,7 +2341,7 @@ def test_activate_telemetry_is_metadata_only(telemetry):
     ext = FakeExtension(
         srv, executor=lambda c: {"tabId": 5, "windowId": 1, "active": True,
                                  "status": "complete",
-                                 "url": "https://model-benchmarking.civit.ai/run"})
+                                 "url": "https://model-benchmarking.example.test/run"})
     ext.start()
     try:
         assert _wait_connected(srv, want=True)
@@ -2351,7 +2351,7 @@ def test_activate_telemetry_is_metadata_only(telemetry):
         p = json.loads(e["payload"])
         assert p["op"] == "activate"
         assert p["outcome"] == "ok"
-        assert p["domain"] == "model-benchmarking.civit.ai"
+        assert p["domain"] == "model-benchmarking.example.test"
     finally:
         ext.stop(); srv.shutdown(); srv.server_close()
 
@@ -2444,7 +2444,7 @@ def test_activate_invokes_i3_msg_on_success(monkeypatch):
     srv, _ = _serve()
     ext = FakeExtension(srv, executor=lambda c: {
         "tabId": 5, "windowId": 1, "active": True, "status": "complete",
-        "url": "https://model-benchmarking.civit.ai/run",
+        "url": "https://model-benchmarking.example.test/run",
         "title": "Model Benchmarking"})
     ext.start()
     try:
@@ -2552,7 +2552,7 @@ def test_activate_i3_telemetry_stays_metadata_only(telemetry, monkeypatch):
     srv, _ = _serve()
     ext = FakeExtension(srv, executor=lambda c: {
         "tabId": 5, "active": True, "status": "complete",
-        "url": "https://model-benchmarking.civit.ai/run",
+        "url": "https://model-benchmarking.example.test/run",
         "title": "SECRET PAGE CONTENT IN TITLE"})
     ext.start()
     try:
@@ -2562,7 +2562,7 @@ def test_activate_i3_telemetry_stays_metadata_only(telemetry, monkeypatch):
         e = _wait_events(spool_dir, 1)[0]
         p = json.loads(e["payload"])
         assert p["op"] == "activate" and p["outcome"] == "ok"
-        assert p["domain"] == "model-benchmarking.civit.ai"
+        assert p["domain"] == "model-benchmarking.example.test"
         # No title anywhere in the emitted event.
         assert "SECRET" not in json.dumps(e)
         assert "title" not in p
@@ -3736,7 +3736,7 @@ def test_frames_telemetry_metadata_only(telemetry):
         "frames": [
             {"frameId": "MAIN", "url": "https://civitai.com/", "name": ""},
             {"frameId": "F1", "name": "bench",
-             "url": "https://model-benchmarking.civit.ai/secret-app-path?token=abc"},
+             "url": "https://model-benchmarking.example.test/secret-app-path?token=abc"},
         ]})
     ext.start()
     try:
@@ -5680,7 +5680,7 @@ def test_wake_NEVER_invokes_i3_msg(monkeypatch):
     srv, _ = _serve()
     ext = FakeExtension(srv, executor=lambda c: {
         "tabId": 5, "woke": True, "visibilityState": "visible",
-        "url": "https://model-benchmarking.civit.ai/run",
+        "url": "https://model-benchmarking.example.test/run",
         "title": "Model Benchmarking"})
     ext.start()
     try:
@@ -5702,7 +5702,7 @@ def test_wake_telemetry_is_metadata_only(telemetry):
     srv, _ = _serve()
     ext = FakeExtension(srv, executor=lambda c: {
         "tabId": 5, "woke": True,
-        "url": "https://model-benchmarking.civit.ai/run?q=secret"})
+        "url": "https://model-benchmarking.example.test/run?q=secret"})
     ext.start()
     try:
         assert _wait_connected(srv, want=True)
@@ -5712,7 +5712,7 @@ def test_wake_telemetry_is_metadata_only(telemetry):
         p = json.loads(e["payload"])
         assert p["op"] == "wake"
         assert p["outcome"] == "ok"
-        assert p["domain"] == "model-benchmarking.civit.ai"
+        assert p["domain"] == "model-benchmarking.example.test"
         assert "secret" not in json.dumps(e), "no full URL / query ever in telemetry"
     finally:
         ext.stop(); srv.shutdown(); srv.server_close()

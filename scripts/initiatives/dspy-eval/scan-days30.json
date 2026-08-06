@@ -1237,7 +1237,7 @@
         "summary": "> Continue the Playable Collections app-blocks dogfood. Read this handoff first. First action: confirm v0.1.3 (pubreq_01KXGCAD1K3P5XFWBDQ9P8TE24) is approved+live, then load\u2026",
         "date": "2026-07-14",
         "doc_mtime": 1784035499.560478,
-        "next_step": "Confirm v0.1.3 approved+live (app_block_publish_requests deploy_state=live; playable-collections.civit.ai HTTP 200) then load the run page as a mod/tester \u2014 expect: token mints, collections list + player render (no loop, no crash). If it errors, the hardened client shows a clean state \u2192 read the network tab.",
+        "next_step": "Confirm v0.1.3 approved+live (app_block_publish_requests deploy_state=live; playable-collections.example.test HTTP 200) then load the run page as a mod/tester \u2014 expect: token mints, collections list + player render (no loop, no crash). If it errors, the hardened client shows a clean state \u2192 read the network tab.",
         "open_investigations": [],
         "current_doc": "/home/zach/workspace/civit/datapacket-talos/claudedocs/handoff-app-blocks-playable-collections-2026-07-14.md",
         "docs": [
@@ -1286,7 +1286,7 @@
         "repo": "/home/zach/workspace/civit/datapacket-talos",
         "slug": "app-blocks-playable-collections-run-page-arc",
         "title": "Handoff: Playable Collections run-page arc (v0.1.3\u2192v0.1.6)",
-        "summary": "> Continue the Playable Collections app-blocks dogfood. Read this handoff first. Everything is shipped + LIVE \u2014 server #3110/#3106/#3103, and app v0.1.6 (playable-collections.civit.ai +\u2026",
+        "summary": "> Continue the Playable Collections app-blocks dogfood. Read this handoff first. Everything is shipped + LIVE \u2014 server #3110/#3106/#3103, and app v0.1.6 (playable-collections.example.test +\u2026",
         "date": "2026-07-14",
         "doc_mtime": 1784250271.1904013,
         "next_step": null,
@@ -2009,7 +2009,7 @@
         "repo": "/home/zach/workspace/civit/datapacket-talos",
         "slug": "app-blocks-dev-tunnel",
         "title": "Handoff \u2014 App Blocks on-site dev tunnel: P3 SHIPPED, LIVE for moderators (2026-07-05)",
-        "summary": "The on-site dev tunnel is LIVE end-to-end for moderators. A mod runs civitai app dev-tunnel from their app dir \u2192 mints a session \u2192 ssh -R to sish.civitai.com:2224 \u2192 sish authorizes the bind \u2192 opens\u2026",
+        "summary": "The on-site dev tunnel is LIVE end-to-end for moderators. A mod runs civitai app dev-tunnel from their app dir \u2192 mints a session \u2192 ssh -R to sish.example.test:2224 \u2192 sish authorizes the bind \u2192 opens\u2026",
         "date": "2026-07-05",
         "doc_mtime": 1783278666.659842,
         "next_step": null,
@@ -2691,7 +2691,7 @@
         "repo": "/home/zach/workspace/civit/datapacket-talos",
         "slug": "vitrine-integration",
         "title": "Handoff: vitrine cluster integration + hardening",
-        "summary": "Onboard civitai/vitrine (Next.js 16 campaign/photoshoot generator, vitrine.civitai.com) as a first-class DataPacket app: full observability, tag-driven Tekton build, tests, and the follow-up\u2026",
+        "summary": "Onboard civitai/vitrine (Next.js 16 campaign/photoshoot generator, vitrine.example.test) as a first-class DataPacket app: full observability, tag-driven Tekton build, tests, and the follow-up\u2026",
         "date": "2026-07-03",
         "doc_mtime": 1783128283.2180562,
         "next_step": "\ud83d\udd34 Session replay = a privacy decision. civitai is an adult platform with accounts + Buzz/payment flows. Recommend ship WITHOUT replay first (errors + web-vitals + tracing only); treat replay as a separate reviewed call.",
@@ -3523,7 +3523,7 @@
             "ts": 1782906629.635
           },
           {
-            "text": "the build completes but it doesn't render: GET https://review-c4b4351a969e31b4.civit.ai/assets/index-DtcxNzop.js net::ERR_ABORTED 401",
+            "text": "the build completes but it doesn't render: GET https://review-SYNTH.example.test/assets/index-DtcxNzop.js net::ERR_ABORTED 401",
             "ts": 1782906118.112
           },
           {
@@ -3738,7 +3738,7 @@
         "summary": "Keep the external App-Block author loop (scaffold \u2192 dev:live \u2192 submit \u2192 approve \u2192 live) frictionless and dogfood-able. This session closed the dev:live picker arc + phase-4 (live\u2026",
         "date": "2026-06-28",
         "doc_mtime": 1783078295.3637273,
-        "next_step": "Finish the dogfood submission. pubreq_01KW83GS9TCZC436XS0AJGBPC4 (dogfood-manual@0.1.0) is PENDING. Approve it at civitai.com/apps/review \u2192 civitai app status (Building\u2192Deploying\u2192Live) \u2192 verify curl -sI https://dogfood-manual.civit.ai/ 200 + civitai.com/apps/run/dogfood-manual renders. If the build stalls, walk debug-cutover-flow (Forgejo webhook \u2192 app-blocks-trigger \u2192 PipelineRun \u2192 apply Job \u2192 IngressRoute \u2192 ExternalDNS).",
+        "next_step": "Finish the dogfood submission. pubreq_01KW83GS9TCZC436XS0AJGBPC4 (dogfood-manual@0.1.0) is PENDING. Approve it at civitai.com/apps/review \u2192 civitai app status (Building\u2192Deploying\u2192Live) \u2192 verify curl -sI https://dogfood-manual.example.test/ 200 + civitai.com/apps/run/dogfood-manual renders. If the build stalls, walk debug-cutover-flow (Forgejo webhook \u2192 app-blocks-trigger \u2192 PipelineRun \u2192 apply Job \u2192 IngressRoute \u2192 ExternalDNS).",
         "open_investigations": [],
         "current_doc": "/home/zach/workspace/civit/datapacket-talos/claudedocs/handoff-app-blocks-dev-live-session-2026-06-28.md",
         "docs": [
@@ -3845,7 +3845,7 @@
         "repo": "/home/zach/workspace/civit/datapacket-talos",
         "slug": "civitai-auth-observability",
         "title": "Handoff \u2014 civitai-auth hub: Turnstile fix \u2192 observability \u2192 metrics (2026-06-26)",
-        "summary": "Started as \"check the auth service for errors\" and turned into a full build-out of the civitai-auth login hub (auth.civitai.com): fixed login, gave it observability, and stood up its first metrics\u2026",
+        "summary": "Started as \"check the auth service for errors\" and turned into a full build-out of the civitai-auth login hub (auth.example.test): fixed login, gave it observability, and stood up its first metrics\u2026",
         "date": "2026-06-26",
         "doc_mtime": 1783078295.3637273,
         "next_step": null,

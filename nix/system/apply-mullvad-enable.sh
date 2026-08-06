@@ -1,18 +1,47 @@
 #!/usr/bin/env bash
 # Enable Mullvad WireGuard VPN, server: ca-mtr-wg-301 (Montreal, 20Gbps)
-# Run: sudo bash nix/system/apply-mullvad-enable.sh
+#
+# LEGACY — Mullvad was retired in favour of AirVPN (see scripts/airvpn-updown and the
+# `bar` skill's airvpn.md). Kept only as the reverse-cutover recipe.
+#
+# This repo is PUBLIC, so no real IP is committed here. Every address is supplied at
+# run time; the script refuses to run without them:
+#   sudo OLD_MULLVAD_EP=<prev endpoint> MULLVAD_EP=<new endpoint> \
+#        NEBULA_LH=<nebula lighthouse public IP> HOME_IP=<home uplink public IP> \
+#        bash nix/system/apply-mullvad-enable.sh
+# Read the current values out of /etc/nixos/configuration.nix before running.
 set -euo pipefail
 
 CFG="/etc/nixos/configuration.nix"
 TS=$(date +%Y%m%d-%H%M%S)
 
+: "${OLD_MULLVAD_EP:?set OLD_MULLVAD_EP to the endpoint IP in the commented-out block}"
+: "${MULLVAD_EP:?set MULLVAD_EP to the ca-mtr-wg-301 endpoint IP}"
+: "${NEBULA_LH:?set NEBULA_LH to the nebula lighthouse public IP}"
+: "${HOME_IP:?set HOME_IP to the home uplink public IP}"
+
 cp "$CFG" "${CFG}.bak-${TS}"
 echo "[1/3] Backed up configuration.nix to ${CFG}.bak-${TS}"
 
 python3 - "$CFG" << 'PYBLOCK'
-import sys
+import os, sys
 p = sys.argv[1]
 content = open(p).read()
+
+# Tokens (not f-strings): the nix blocks below contain `${pkgs.gawk}` and `{ }`,
+# which any brace-based formatting would mangle.
+SUBS = {
+    "@OLD_MULLVAD_EP@": os.environ["OLD_MULLVAD_EP"],
+    "@MULLVAD_EP@":     os.environ["MULLVAD_EP"],
+    "@NEBULA_LH@":      os.environ["NEBULA_LH"],
+    "@HOME_IP@":        os.environ["HOME_IP"],
+}
+
+
+def fill(s):
+    for k, v in SUBS.items():
+        s = s.replace(k, v)
+    return s
 
 old = '''# ==========================================
   # Mullvad WireGuard VPN (Bogota)
@@ -31,25 +60,25 @@ old = '''# ==========================================
 #      GW=$(cat /run/mullvad-gateway)
 #      IFACE=$(cat /run/mullvad-iface)
 #      # Bypass VPN for Mullvad endpoint
-#      ip route add 154.47.16.34 via $GW dev $IFACE || true
+#      ip route add @OLD_MULLVAD_EP@ via $GW dev $IFACE || true
 #      # Bypass VPN for LAN
 #      ip route add 192.168.50.0/24 via $GW dev $IFACE || true
 #      # Bypass VPN for Nebula endpoints (Hetzner + homelab public)
-#      ip route add 5.161.118.55 via $GW dev $IFACE || true
-#      ip route add 24.79.61.66 via $GW dev $IFACE || true
+#      ip route add @NEBULA_LH@ via $GW dev $IFACE || true
+#      ip route add @HOME_IP@ via $GW dev $IFACE || true
 #    '';
 
 #    preDown = ''
-#      ip route del 154.47.16.34 || true
+#      ip route del @OLD_MULLVAD_EP@ || true
 #      ip route del 192.168.50.0/24 || true
-#      ip route del 5.161.118.55 || true
-#      ip route del 24.79.61.66 || true
+#      ip route del @NEBULA_LH@ || true
+#      ip route del @HOME_IP@ || true
 #    '';
 
 #    peers = [
 #      {
 #        publicKey = "iaMa84nCHK+v4TnQH4h2rxkqwwxemORXM12VbJDRZSU=";
-#        endpoint = "154.47.16.34:51820";
+#        endpoint = "@OLD_MULLVAD_EP@:51820";
 #        persistentKeepalive = 25;
 #        allowedIPs = [ "0.0.0.0/1" "128.0.0.0/1" ];
 #      }
@@ -76,25 +105,25 @@ new = '''# ==========================================
       GW=$(cat /run/mullvad-gateway)
       IFACE=$(cat /run/mullvad-iface)
       # Bypass VPN for Mullvad endpoint
-      ip route add 23.234.120.2 via $GW dev $IFACE || true
+      ip route add @MULLVAD_EP@ via $GW dev $IFACE || true
       # Bypass VPN for LAN
       ip route add 192.168.50.0/24 via $GW dev $IFACE || true
       # Bypass VPN for Nebula endpoints (Hetzner + homelab public)
-      ip route add 5.161.118.55 via $GW dev $IFACE || true
-      ip route add 24.79.61.66 via $GW dev $IFACE || true
+      ip route add @NEBULA_LH@ via $GW dev $IFACE || true
+      ip route add @HOME_IP@ via $GW dev $IFACE || true
     '';
 
     preDown = ''
-      ip route del 23.234.120.2 || true
+      ip route del @MULLVAD_EP@ || true
       ip route del 192.168.50.0/24 || true
-      ip route del 5.161.118.55 || true
-      ip route del 24.79.61.66 || true
+      ip route del @NEBULA_LH@ || true
+      ip route del @HOME_IP@ || true
     '';
 
     peers = [
       {
         publicKey = "iV7uZuw8vbqrW/p4YhsxkIxXaUuI4Uj2hTl8TaJZfAA=";
-        endpoint = "23.234.120.2:51820";
+        endpoint = "@MULLVAD_EP@:51820";
         persistentKeepalive = 25;
         allowedIPs = [ "0.0.0.0/1" "128.0.0.0/1" ];
       }
@@ -104,6 +133,9 @@ new = '''# ==========================================
   systemd.services."wg-quick-mullvad".after = [ "network-online.target" ];
   systemd.services."wg-quick-mullvad".wants = [ "network-online.target" ];'''
 
+old = fill(old)
+new = fill(new)
+
 if old not in content:
     print("ERROR: expected commented mullvad block not found in configuration.nix")
     print("       (the file may have already been edited or has drifted from expected layout)")
@@ -111,7 +143,7 @@ if old not in content:
 
 content = content.replace(old, new)
 open(p, 'w').write(content)
-print("[2/3] Enabled Mullvad block (server: ca-mtr-wg-301, 23.234.120.2)")
+print("[2/3] Enabled Mullvad block (server: ca-mtr-wg-301)")
 PYBLOCK
 
 echo "[3/3] Rebuilding NixOS..."

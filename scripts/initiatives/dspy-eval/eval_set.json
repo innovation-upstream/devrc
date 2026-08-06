@@ -177,7 +177,7 @@
         "recent_messages": [
           "merged and deployed is rolling out, we'll continue in next session. review work done this session and identify skills that may need updating, then update those skills and any relevant docs, then writ…",
           "yes, use subagent",
-          "the build completes but it doesn't render: GET https://review-c4b4351a969e31b4.civit.ai/assets/index-DtcxNzop.js net::ERR_ABORTED 401",
+          "the build completes but it doesn't render: GET https://review-SYNTH.example.test/assets/index-DtcxNzop.js net::ERR_ABORTED 401",
           "clicked",
           "merged and deployed"
         ],

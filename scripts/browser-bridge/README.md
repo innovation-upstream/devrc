@@ -259,7 +259,7 @@ never a silent null. `--frame <numeric-frameId|url-substring>`
 selects the frame (the identifier is the numeric webNavigation `frameId`). **Resolution
 is deterministic:** an exact numeric `frameId` always wins; a URL substring is matched
 **HOST-first** (against each frame's hostname before its path — so
-`--frame model-benchmarking` picks the OOPIF host `model-benchmarking.civit.ai`, not the
+`--frame model-benchmarking` picks the OOPIF host `model-benchmarking.example.test`, not the
 top page's `…/run/model-benchmarking` path); a substring matching **multiple** frames
 fails with `ambiguous_frame:<n> [<id>:<url>, …]` (re-issue with the numeric id) rather
 than silently choosing the first. **Prefer a numeric `frameId` or a host substring.**

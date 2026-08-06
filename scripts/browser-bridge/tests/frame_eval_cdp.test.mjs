@@ -25,7 +25,7 @@ import assert from "node:assert/strict";
 
 const TAB_ID = 5;
 const TOP_URL = "https://civitai.com/apps/run/model-benchmarking";
-const OOPIF_URL = "https://model-benchmarking.civit.ai/";
+const OOPIF_URL = "https://model-benchmarking.example.test/";
 
 // A same-process frame tree from the TOP session's Page.getFrameTree: the top frame +
 // a same-process child. The cross-origin OOPIF is DELIBERATELY ABSENT (getFrameTree
@@ -141,7 +141,7 @@ test("eval --frame 0 (SAME-PROCESS/top): CDP Runtime.evaluate returns the VALUE,
 test("eval --frame <oopif>: OOPIF target resolved via setAutoAttach flat session → Runtime.evaluate returns the value", async () => {
   reset();
   state.evalReply = { result: { value: OOPIF_URL } };   // location.href INSIDE the OOPIF
-  const out = await OPS.eval({ tabId: TAB_ID, frame: "model-benchmarking.civit.ai", js: "location.href" });
+  const out = await OPS.eval({ tabId: TAB_ID, frame: "model-benchmarking.example.test", js: "location.href" });
   // Still CDP for the eval — the only executeScript is the top-frame visibility probe.
   assert.ok(state.calls.executeScript.every((c) => !(c.target && c.target.frameIds)),
     "eval --frame still uses CDP; the only executeScript is the top-frame visibility probe");
@@ -178,7 +178,7 @@ test("NEVER-SILENT-NULL: an unresolvable OOPIF frame → frame_not_found (not va
   // DIFFERENT target → no session matches its url → frame_not_found, never a silent null.
   state.autoAttachTargets = [{ sessionId: "SID_OTHER", url: "https://unrelated.example/" }];
   await assert.rejects(() => OPS.eval({ tabId: TAB_ID, frame: "7", js: "location.href" }),
-    /frame_not_found:https:\/\/model-benchmarking\.civit\.ai\//);
+    /frame_not_found:https:\/\/model-benchmarking\.example\.test\//);
   // Runtime.evaluate was NEVER issued (we failed to resolve the context first).
   assert.equal(cdpMethods().includes("Runtime.evaluate"), false);
   assert.equal(state.calls.detach.length, 1, "still detaches on the frame_not_found path");

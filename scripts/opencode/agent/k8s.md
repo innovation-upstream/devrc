@@ -35,7 +35,7 @@ plugin. Use them **verbatim**.
 |---|---|---|---|
 | homelab | Talos Linux, GPU, GitOps via Flux | `$KC_HOMELAB` | `192.168.50.94` |
 | workbench | NixOS + k3s, GPU | `$KC_WORKBENCH` | `192.168.50.250` |
-| production | Ubuntu + k0s, Hetzner, dual-stack | `$KC_PROD` | `5.161.118.55` |
+| production | Ubuntu + k0s, Hetzner, dual-stack | `$KC_PROD` | public — read it from `$KC_PROD` |
 
 `$HOMELAB` is the `homelab-talos` repo root.
 

@@ -48,7 +48,8 @@ port is a different *origin* but the same *site*) — the hostnames are what mat
 
 ### ⚠ Two traps when picking a loopback alias
 
-1. **`vcap.me` now resolves to a REAL PUBLIC IP** (103.224.182.214). It is still widely
+1. **`vcap.me` now resolves to a REAL PUBLIC IP** (a parking address — `getent hosts vcap.me`
+   to see today's). It is still widely
    recommended as a loopback alias; it is not one any more. A loopback alias going public
    is a live-traffic leak, not just a broken test. **Always** `getent hosts <name>` before
    trusting any of these — including `sslip.io`/`nip.io`, which were verified pointing at
