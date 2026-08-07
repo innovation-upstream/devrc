@@ -57,6 +57,7 @@ set_brightness() { # $1=bus $2=value  — retries 3x on DDC-CI failure (this LG 
 
 cancel_timer() {
   systemctl --user stop    "${UNIT}.timer"   2>/dev/null || true
+  systemctl --user kill    "${UNIT}.service" 2>/dev/null || true
   systemctl --user reset-failed "${UNIT}.service" "${UNIT}.timer" 2>/dev/null || true
 }
 
@@ -64,6 +65,9 @@ schedule_restore() { # $1=bus $2=original_brightness $3=duration
   # Write saved brightness so `restore` can read it; use the script itself
   # (with retry + 0-default) instead of raw ddcutil.
   printf '%s:%s\n' "$1" "$2" > "$STATE"
+  # Aggressively cancel any existing timer — stale pre-fix timers share the
+  # same unit name and can race with this creation.
+  cancel_timer
   systemd-run --user --unit="$UNIT" --on-active="$3" --timer-property=AccuracySec=1s \
     "$0" restore >/dev/null
 }
