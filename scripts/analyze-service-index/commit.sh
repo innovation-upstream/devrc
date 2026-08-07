@@ -34,11 +34,23 @@
 # The scopes contain client-identifying infrastructure detail — public IPs and
 # ports for client hosts, internal hostnames, a named client engineer. This
 # script therefore never adds a remote, never pushes, never fetches, and never
-# reads a remote from config or environment. Every git subcommand below is local:
-# init, config, status, add, commit, rev-parse, ls-files, diff. If you are editing
-# this file and reaching for `git push`, stop — see the scope README, and devrc
-# commit 60e6d9d, which exists because this class of data had to be scrubbed
-# retroactively out of a public repo.
+# reads a remote from config or environment.
+#
+# This is enforced as an ASSERTED LEDGER, not a blocklist of banned words. The
+# COMPLETE set of git subcommands this file may invoke is:
+#
+#     add  commit  config  diff  init  ls-files  rev-parse  status  var
+#
+# and test_the_set_of_git_subcommands_is_exactly_the_asserted_ledger fails when
+# that set GROWS *or* SHRINKS. A blocklist of five forbidden verbs is what a
+# mutation sweep walked straight past: `git archive`, `git bundle`, a plain
+# `cp -r` of a scope, and `_s=pu"sh"; git $_s origin …` were all invisible to it.
+# A subcommand supplied through a VARIABLE is itself a ledger violation, because
+# no static check can tell what it will expand to.
+#
+# If you are editing this file and reaching for `git push`, stop — see the scope
+# README, and devrc commit 60e6d9d, which exists because this class of data had
+# to be scrubbed retroactively out of a public repo.
 #
 # 🔴 STAGING IS EXPLICIT, ALWAYS
 # ------------------------------
@@ -69,6 +81,7 @@
 #   systemctl --user start analyze-service-index-commit.service
 #   scripts/analyze-service-index/commit.sh [STORE_DIR]
 #   scripts/analyze-service-index/commit.sh --print-plan [STORE_DIR]  # no writes
+#   scripts/analyze-service-index/commit.sh [STORE_DIR] --print-plan  # same thing
 #
 # Environment:
 #   ASI_NO_INIT=1   do not bootstrap a repo for a scope that lacks one; skip it.
@@ -85,13 +98,30 @@ say()  { echo "${PROG}: $*"; }
 warn() { echo "${PROG}: WARNING: $*" >&2; }
 die()  { echo "${PROG}: $*" >&2; exit 1; }
 
+# A REAL argument loop, not a positional test. `--print-plan` used to be honoured
+# only as $1, so `commit.sh <STORE> --print-plan` silently took the COMMITTING
+# path — a dry run that writes is the worst possible failure mode for this
+# script (MEASURED: it initialised a repo and committed). Order must not matter,
+# and an unrecognised option must be an error rather than a silently-ignored
+# word that lands in $STORE.
 PRINT_PLAN=0
-if [ "${1:-}" = "--print-plan" ]; then
-  PRINT_PLAN=1
-  shift
+POSITIONAL=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --print-plan) PRINT_PLAN=1; shift ;;
+    --) shift; while [ $# -gt 0 ]; do POSITIONAL+=("$1"); shift; done ;;
+    -*) die "unknown option: $1
+  usage: commit.sh [--print-plan] [STORE_DIR]" ;;
+    *) POSITIONAL+=("$1"); shift ;;
+  esac
+done
+
+if [ "${#POSITIONAL[@]}" -gt 1 ]; then
+  die "expected at most one STORE argument, got ${#POSITIONAL[@]}: ${POSITIONAL[*]}
+  usage: commit.sh [--print-plan] [STORE_DIR]"
 fi
 
-STORE="${1:-${HOME}/.claude/analyze-service-index}"
+STORE="${POSITIONAL[0]:-${HOME}/.claude/analyze-service-index}"
 
 ASI_GIT_NAME="${ASI_GIT_NAME:-analyze-service index}"
 ASI_GIT_EMAIL="${ASI_GIT_EMAIL:-analyze-service-index@localhost}"
@@ -116,17 +146,51 @@ fi
 # the script starts reasoning about git's own internals (FOUND by the nested-repo
 # negative control, which printed `scope .git: ... skipping`). A scope is a
 # repo-slug; none of them begin with a dot.
+#
+# 🔴 NUL-DELIMITED, AND SYMLINKS FOLLOWED. Both are correctness, not polish:
+#   * a scope name containing a newline used to be split into two nonexistent
+#     scopes, each reported "no *.md files — skipping", exit 0 (MEASURED) — the
+#     content sat UNVERSIONED and the unit called it success, which is the exact
+#     silent-loss outcome this script exists to prevent;
+#   * a scope reached through a symlink was not enumerated AT ALL ("no scope
+#     directories — nothing to do", exit 0, also MEASURED). `-L` is safe here
+#     precisely because `-maxdepth 1` means nothing is ever recursed into, so
+#     there is no symlink-loop to fall into.
+# `sort -z` keeps the NUL framing; pipefail makes a `find` failure this
+# function's failure instead of an empty list that reads as "no scopes".
 list_scopes() {
-  find "$STORE" -mindepth 1 -maxdepth 1 -type d -not -name '.*' -printf '%f\n' | sort
+  find -L "$STORE" -mindepth 1 -maxdepth 1 -type d -not -name '.*' -printf '%f\0' \
+    | sort -z
 }
 
-# Every *.md on disk in a scope (relative to it), plus everything already tracked.
+# Every *.md on disk in a scope (relative to it), plus everything already
+# tracked. NUL-delimited for the same reason as list_scopes.
 list_candidates() {
   local scope="$1" is_repo="$2"
-  find "$scope" -type f -name '*.md' -not -path "${scope}/.git/*" -printf '%P\n'
+  find -L "$scope" -type f -name '*.md' -not -path "${scope}/.git/*" -printf '%P\0'
   if [ "$is_repo" -eq 1 ]; then
-    git -C "$scope" ls-files
+    git -C "$scope" ls-files -z
   fi
+}
+
+# Run a git command capturing stdout and stderr SEPARATELY, preserving the exit
+# code. 🔴 Folding stderr into stdout with `2>&1` CORRUPTS every predicate built
+# on the output: `git status --porcelain` can exit 0 while writing a warning
+# (MEASURED with an unreadable subdirectory — rc=0, empty stdout, one warning
+# line on stderr), and with `2>&1` that warning became the "dirty state". A
+# genuinely CLEAN tree was then reported as dirty, the wrong cause was named,
+# the change count was inflated, and the warning text was embedded verbatim in
+# the commit message. Diagnostics belong in error messages, never in data.
+CAP_OUT=""
+CAP_ERR=""
+capture() {
+  local errfile rc
+  errfile="$(mktemp "${TMPDIR:-/tmp}/asi-stderr.XXXXXX")" || return 125
+  CAP_OUT="$("$@" 2>"$errfile")"
+  rc=$?
+  CAP_ERR="$(cat "$errfile")"
+  rm -f "$errfile"
+  return "$rc"
 }
 
 # Is this scope its OWN repo? `git rev-parse` walks UP the tree, so if the store
@@ -171,24 +235,148 @@ if [ "$PRINT_PLAN" -eq 1 ]; then
   echo "remote:  none — this script never adds one, never pushes, never fetches"
   echo "staging: explicit pathspecs only — never -A, never --all, never ."
   scopes_found=0
-  while IFS= read -r name; do
+  while IFS= read -r -d '' name; do
     [ -n "$name" ] || continue
     scopes_found=1
     scope="${STORE}/${name}"
     st="$(scope_repo_state "$scope")"
+    # `desc` is deliberately reset every iteration and the case has a `*)`
+    # default: it used to be a global with no default, so an unexpected state
+    # silently REUSED the previous scope's description — a plan that quietly
+    # describes the wrong scope is worse than one that admits confusion.
+    desc="unknown"
     case "$st" in
       1) desc="repo" ;;
       0) desc="$([ "$ASI_NO_INIT" = "1" ] && echo "no repo — would SKIP (ASI_NO_INIT=1)" \
                                           || echo "no repo — would git init -b ${ASI_BRANCH}")" ;;
       2) desc="INSIDE ANOTHER REPO — would refuse" ;;
+      *) desc="UNKNOWN repo state (${st}) — would refuse" ;;
     esac
     echo "scope:   ${name}  (${desc})"
     list_candidates "$scope" "$([ "$st" = "1" ] && echo 1 || echo 0)" \
-      | sort -u | sed 's/^/    /'
+      | sort -zu | tr '\0' '\n' | sed 's/^/    /'
   done < <(list_scopes)
   [ "$scopes_found" -eq 1 ] || echo "scope:   (none found under ${STORE})"
   exit 0
 fi
+
+# --- Stage, commit, and assert the tree is clean afterwards --------------------
+# Split out of commit_scope so the benign-race retry below has ONE implementation
+# to call twice rather than a second copy of the staging rule (RULES.md: one
+# rule, one place).
+#
+#   0 = committed, tree clean afterwards
+#   2 = committed, but the tree was RE-DIRTIED during the commit and every path
+#       still dirty is COVERED (matches *.md, or is already tracked) — benign,
+#       retryable, self-healing; NOT an allowlist gap
+#   1 = failure; the specific cause has already been reported to stderr
+commit_once() {
+  local scope="$1" name="$2" fail_prefix="$3" before="$4"
+  local rc staged_rc n_changed msg sha after rec path
+  local -a paths_arr uncovered_arr
+
+  mapfile -d '' -t paths_arr < <(list_candidates "$scope" 1 | sort -zu)
+  if [ "${#paths_arr[@]}" -eq 0 ]; then
+    echo "${PROG}: ${fail_prefix} tree is dirty but no candidate paths were enumerated. Dirty state:
+${before}" >&2
+    return 1
+  fi
+
+  capture git -C "$scope" add -- "${paths_arr[@]}"
+  rc=$?
+  if [ "$rc" -ne 0 ]; then
+    echo "${PROG}: ${fail_prefix} git add failed (rc=${rc}): ${CAP_ERR}${CAP_OUT}" >&2
+    return 1
+  fi
+
+  # Did the explicit allowlist actually pick anything up? A dirty tree that
+  # stages to nothing means every dirty path was filtered out — report it,
+  # never return success.
+  git -C "$scope" diff --cached --quiet
+  staged_rc=$?
+  if [ "$staged_rc" -eq 0 ]; then
+    echo "${PROG}: ${fail_prefix} tree is dirty but NOTHING staged — every dirty path was filtered out by the *.md allowlist. Look at it by hand; do NOT widen the filter blindly. Dirty state:
+${before}" >&2
+    return 1
+  elif [ "$staged_rc" -gt 1 ]; then
+    echo "${PROG}: ${fail_prefix} git diff --cached failed (rc=${staged_rc})" >&2
+    return 1
+  fi
+
+  n_changed="$(printf '%s\n' "$before" | grep -c .)"
+  msg="autocommit: ${n_changed} change(s) in the ${name} analyze-service index
+
+Committed by ${PROG} (systemd --user timer). Working-tree state at the time:
+
+${before}
+
+Staged as explicit pathspecs (never -A/--all/.), then the tree was asserted
+clean. See scripts/analyze-service-index/commit.sh in devrc."
+
+  capture git -C "$scope" commit -q -m "$msg"
+  rc=$?
+  if [ "$rc" -ne 0 ]; then
+    echo "${PROG}: ${fail_prefix} git commit failed (rc=${rc}): ${CAP_ERR}${CAP_OUT}" >&2
+    return 1
+  fi
+
+  capture git -C "$scope" rev-parse --short HEAD
+  rc=$?
+  if [ "$rc" -ne 0 ]; then
+    echo "${PROG}: ${fail_prefix} could not read HEAD after committing: ${CAP_ERR}" >&2
+    return 1
+  fi
+  sha="$CAP_OUT"
+
+  # 🔴 The assertion that makes the allowlist safe.
+  capture git -C "$scope" status --porcelain
+  rc=$?
+  after="$CAP_OUT"
+  if [ "$rc" -ne 0 ]; then
+    echo "${PROG}: ${fail_prefix} git status failed AFTER committing (rc=${rc}): ${CAP_ERR}" >&2
+    return 1
+  fi
+  if [ -z "$after" ]; then
+    say "${fail_prefix} committed ${sha} — ${n_changed} change(s)"
+    return 0
+  fi
+
+  # PARTITION what is still dirty rather than blaming the allowlist for all of
+  # it. The old code reported "Something is not covered by the *.md allowlist"
+  # for ANY leftover dirt — including a plain `.md` file that IS covered and had
+  # simply been written between `git add` and `git commit`. That is a race the
+  # design positively guarantees (the store is written by agents at arbitrary
+  # times), so it produced a failed unit and a sticky critical toast pointing at
+  # the wrong cause, on a run that lost no data at all.
+  uncovered_arr=()
+  while IFS= read -r -d '' rec; do
+    # `-z` records are "XY<space>PATH". A rename also emits a bare continuation
+    # record holding the ORIGINAL path; the primary record already covers it.
+    [ "${#rec}" -gt 3 ] || continue
+    case "$rec" in
+      ??\ *) path="${rec:3}" ;;
+      *) continue ;;
+    esac
+    case "$path" in
+      *.md) continue ;;
+    esac
+    if git -C "$scope" ls-files --error-unmatch -- "$path" >/dev/null 2>&1; then
+      continue
+    fi
+    uncovered_arr+=("$path")
+  done < <(git -C "$scope" status --porcelain -z 2>/dev/null)
+
+  if [ "${#uncovered_arr[@]}" -eq 0 ]; then
+    return 2
+  fi
+
+  echo "${PROG}: ${fail_prefix} committed ${sha}, but the tree is STILL DIRTY afterwards:
+${after}
+  These path(s) are neither matched by the *.md allowlist nor already tracked:
+$(printf '    %s\n' "${uncovered_arr[@]}")
+  This is loud on purpose — decide deliberately whether they belong in the index." >&2
+  return 1
+}
 
 # --- Commit one scope ----------------------------------------------------------
 # Returns 0 on success (committed or already clean), 1 on failure. Deliberately
@@ -196,7 +384,7 @@ fi
 commit_scope() {
   local scope="$1" name="$2"
   local fail_prefix="scope ${name}:"
-  local st rc before add_out staged_rc n_changed msg commit_out sha after
+  local st rc before attempt result
 
   st="$(scope_repo_state "$scope")"
 
@@ -207,7 +395,20 @@ commit_scope() {
 
   if [ "$st" = "0" ]; then
     # Nothing to version yet? Then there is nothing to bootstrap either.
-    if ! find "$scope" -type f -name '*.md' -print -quit | grep -q .; then
+    #
+    # find's rc is checked SEPARATELY from its output. Piping it into `grep -q .`
+    # discarded the exit code, so an UNREADABLE scope produced no output, read as
+    # "no *.md files", and was skipped with a success message — the same
+    # empty-result-means-clean confusion the header warns about, on the one path
+    # whose whole job is to notice new content.
+    local md_probe md_rc
+    md_probe="$(find -L "$scope" -type f -name '*.md' -print -quit 2>/dev/null)"
+    md_rc=$?
+    if [ "$md_rc" -ne 0 ]; then
+      echo "${PROG}: ${fail_prefix} could not enumerate *.md files (find rc=${md_rc}) — refusing to report a clean skip" >&2
+      return 1
+    fi
+    if [ -z "$md_probe" ]; then
       say "${fail_prefix} no repo and no *.md files — skipping"
       return 0
     fi
@@ -245,12 +446,18 @@ commit_scope() {
   fi
 
   # rc checked SEPARATELY from output: empty output means "clean" only once rc=0
-  # has been seen.
-  before="$(git -C "$scope" status --porcelain 2>&1)"
+  # has been seen. stdout and stderr are captured SEPARATELY (see `capture`), so
+  # a warning printed by a SUCCEEDING status call can never be mistaken for
+  # dirty state.
+  capture git -C "$scope" status --porcelain
   rc=$?
+  before="$CAP_OUT"
   if [ "$rc" -ne 0 ]; then
-    echo "${PROG}: ${fail_prefix} git status failed (rc=${rc}): ${before}" >&2
+    echo "${PROG}: ${fail_prefix} git status failed (rc=${rc}): ${CAP_ERR}" >&2
     return 1
+  fi
+  if [ -n "$CAP_ERR" ]; then
+    warn "${fail_prefix} git status succeeded but wrote to stderr (NOT treated as dirty state): ${CAP_ERR}"
   fi
 
   if [ -z "$before" ]; then
@@ -258,75 +465,35 @@ commit_scope() {
     return 0
   fi
 
-  local paths
-  mapfile -t paths < <(list_candidates "$scope" 1 | sort -u)
-  if [ "${#paths[@]}" -eq 0 ]; then
-    echo "${PROG}: ${fail_prefix} tree is dirty but no candidate paths were enumerated. Dirty state:
-${before}" >&2
-    return 1
-  fi
+  # TWO passes at most. commit_once returns 2 when the tree was re-dirtied
+  # during the commit by paths the allowlist DOES cover — a race the design
+  # permits and which the next run would fix anyway. Retrying once turns a
+  # spurious daily failure into a completed backup; still-racing after two
+  # passes is a warning, not a failed unit, because nothing has been lost.
+  for attempt in 1 2; do
+    commit_once "$scope" "$name" "$fail_prefix" "$before"
+    result=$?
+    case "$result" in
+      0) return 0 ;;
+      1) return 1 ;;
+    esac
 
-  add_out="$(git -C "$scope" add -- "${paths[@]}" 2>&1)"
-  rc=$?
-  if [ "$rc" -ne 0 ]; then
-    echo "${PROG}: ${fail_prefix} git add failed (rc=${rc}): ${add_out}" >&2
-    return 1
-  fi
+    capture git -C "$scope" status --porcelain
+    rc=$?
+    if [ "$rc" -ne 0 ]; then
+      echo "${PROG}: ${fail_prefix} git status failed while re-checking after a racing write (rc=${rc}): ${CAP_ERR}" >&2
+      return 1
+    fi
+    before="$CAP_OUT"
+    if [ -z "$before" ]; then
+      return 0
+    fi
+    if [ "$attempt" -eq 1 ]; then
+      say "${fail_prefix} the tree was re-dirtied during the commit by path(s) the *.md allowlist DOES cover — committing them in a second pass"
+    fi
+  done
 
-  # Did the explicit allowlist actually pick anything up? A dirty tree that
-  # stages to nothing means every dirty path was filtered out — report it,
-  # never return success.
-  git -C "$scope" diff --cached --quiet
-  staged_rc=$?
-  if [ "$staged_rc" -eq 0 ]; then
-    echo "${PROG}: ${fail_prefix} tree is dirty but NOTHING staged — every dirty path was filtered out by the *.md allowlist. Look at it by hand; do NOT widen the filter blindly. Dirty state:
-${before}" >&2
-    return 1
-  elif [ "$staged_rc" -gt 1 ]; then
-    echo "${PROG}: ${fail_prefix} git diff --cached failed (rc=${staged_rc})" >&2
-    return 1
-  fi
-
-  n_changed="$(printf '%s\n' "$before" | grep -c .)"
-  msg="autocommit: ${n_changed} change(s) in the ${name} analyze-service index
-
-Committed by ${PROG} (systemd --user timer). Working-tree state at the time:
-
-${before}
-
-Staged as explicit pathspecs (never -A/--all/.), then the tree was asserted
-clean. See scripts/analyze-service-index/commit.sh in devrc."
-
-  commit_out="$(git -C "$scope" commit -q -m "$msg" 2>&1)"
-  rc=$?
-  if [ "$rc" -ne 0 ]; then
-    echo "${PROG}: ${fail_prefix} git commit failed (rc=${rc}): ${commit_out}" >&2
-    return 1
-  fi
-
-  sha="$(git -C "$scope" rev-parse --short HEAD 2>&1)"
-  rc=$?
-  if [ "$rc" -ne 0 ]; then
-    echo "${PROG}: ${fail_prefix} could not read HEAD after committing: ${sha}" >&2
-    return 1
-  fi
-
-  # 🔴 The assertion that makes the allowlist safe.
-  after="$(git -C "$scope" status --porcelain 2>&1)"
-  rc=$?
-  if [ "$rc" -ne 0 ]; then
-    echo "${PROG}: ${fail_prefix} git status failed AFTER committing (rc=${rc}): ${after}" >&2
-    return 1
-  fi
-  if [ -n "$after" ]; then
-    echo "${PROG}: ${fail_prefix} committed ${sha}, but the tree is STILL DIRTY afterwards:
-${after}
-  Something is not covered by the *.md allowlist. This is loud on purpose —
-  decide deliberately whether it belongs in the index." >&2
-    return 1
-  fi
-
-  say "${fail_prefix} committed ${sha} — ${n_changed} change(s)"
+  warn "${fail_prefix} still dirty after two passes, but every remaining path is covered by the *.md allowlist or already tracked — a write is landing faster than this run completes. Nothing is lost; the next run commits it. Not failing the unit for a self-healing race."
   return 0
 }
 
@@ -335,7 +502,7 @@ warn_about_store_root_files
 
 failed=()
 seen=0
-while IFS= read -r name; do
+while IFS= read -r -d '' name; do
   [ -n "$name" ] || continue
   seen=$((seen + 1))
   if ! commit_scope "${STORE}/${name}" "$name"; then

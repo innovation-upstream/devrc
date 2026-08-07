@@ -2259,9 +2259,17 @@ in
 
   # Daily. Persistent catches up a single missed run (host asleep / powered off).
   # 03:30 keeps it clear of the 04:00 log rotate and the 06:00/08:00/09:00 server
-  # jobs. Daily is adequate rather than lazy: with no remote, a commit only ever
-  # buys recovery from a bad WRITE, and a same-day clobber is still recoverable
-  # from the previous day's commit. Tighten OnCalendar if that stops being true.
+  # jobs.
+  #
+  # What daily actually buys, stated at the scope it holds: a file that has been
+  # committed at least once survives a later bad Write, because the previous
+  # run's commit still has it. What it does NOT cover — content CREATED and
+  # DESTROYED between two 03:30 runs never reaches any commit and is
+  # unrecoverable. That is not a corner case; it is the same-day
+  # write-then-clobber this work exists to defend against, merely narrowed from
+  # "always" to "after the first commit". Tightening OnCalendar shrinks that
+  # window but cannot close it — only committing at write time would, and the
+  # store is written by agents that will not do so (see commit.sh's header).
   systemd.user.timers.analyze-service-index-commit = {
     Unit = {
       Description = "Daily timer for the /analyze-service index autocommit";
