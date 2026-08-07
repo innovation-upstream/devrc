@@ -18,7 +18,8 @@
 set -euo pipefail
 
 DDC=$(command -v ddcutil) || { echo "ddcutil not found on PATH" >&2; exit 1; }
-UNIT=monitor-blackout-restore
+UNIT=monitor-blackout-restore-v2
+UNIT_LEGACY=monitor-blackout-restore
 STATE="${XDG_RUNTIME_DIR:-/tmp}/monitor-blackout.state"   # "bus:brightness"
 FADE_PID_FILE="${XDG_RUNTIME_DIR:-/tmp}/monitor-blackout.fade.pid"
 
@@ -56,9 +57,12 @@ set_brightness() { # $1=bus $2=value  — retries 3x on DDC-CI failure (this LG 
 }
 
 cancel_timer() {
-  systemctl --user stop    "${UNIT}.timer"   2>/dev/null || true
-  systemctl --user kill    "${UNIT}.service" 2>/dev/null || true
-  systemctl --user reset-failed "${UNIT}.service" "${UNIT}.timer" 2>/dev/null || true
+  local u
+  for u in "$UNIT" "$UNIT_LEGACY"; do
+    systemctl --user stop    "${u}.timer"   2>/dev/null || true
+    systemctl --user kill    "${u}.service" 2>/dev/null || true
+    systemctl --user reset-failed "${u}.service" "${u}.timer" 2>/dev/null || true
+  done
 }
 
 schedule_restore() { # $1=bus $2=original_brightness $3=duration
