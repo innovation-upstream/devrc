@@ -7,9 +7,47 @@
       url = "github:nix-community/home-manager";
       inputs.nixpkgs.follows = "nixpkgs";
     };
+
+    # ------------------------------------------------------------------------
+    # SECOND, DELIBERATELY-FROZEN nixpkgs — the ONLY thing taken from it is
+    # `playwright-driver` at 1.57.0. Do NOT `nix flake update` this input; it is
+    # a version pin, not a channel, and moving it is the whole failure mode it
+    # exists to prevent.
+    #
+    # WHY A SECOND INPUT AT ALL: Playwright's version→browser-build mapping is
+    # strict 1:1. One nixpkgs revision can only ever offer ONE playwright-driver
+    # version, so a single input structurally cannot serve two projects pinned
+    # to different playwright releases — which is now the normal case here:
+    #   • civitai/civitai            pins ^1.57.0  → chromium-1200
+    #   • civitai-developer-docs     pins ^1.61.1  → chromium-1228
+    # MEASURED 2026-08-06 (the failure reproduced, then fixed, in one session):
+    # the 1.61.1 bundle ships chromium-1228 / chromium_headless_shell-1228 only,
+    # so the civitai `component` vitest project COLLECTED 130 files and EXECUTED
+    # 0 of them — `Test Files (130)` / `Tests no tests` / 180ms / exit 1. A zero
+    # that reads exactly like a broken suite rather than a missing browser
+    # build. With the 1.57 bundle selected: 130 passed (130) / 1304 passed
+    # (1304) / exit 0, on an unchanged repo.
+    #
+    # WHY THIS EXACT REV (d61c78f4921b, nixpkgs 2026-03-09): it is inside the
+    # window where nixpkgs' playwright-driver was 1.57.0 — bumped in to 1.57.0 at
+    # 145b67bd0bd4 (2026-01-03) and out to 1.58.2 at 9cded172058d (2026-03-15).
+    # Verified by evaluation, not by reading the log:
+    #   nix eval --raw github:NixOS/nixpkgs/d61c78f4921b…#playwright-driver.version
+    #     → 1.57.0
+    # and the realised bundle contains chromium-1200 / chromium_headless_shell-1200.
+    # Chosen near the END of that window so the closure is as close to the
+    # current channel as the pin allows: `--dry-run` reports 1 derivation built
+    # (the fixed-output browser fetch) + 228 paths substituted from
+    # cache.nixos.org, i.e. no stdenv rebuild.
+    #
+    # NOT `follows = "nixpkgs"` — that would defeat the pin entirely. The
+    # duplicated nixpkgs eval is the price of the second driver version; it is
+    # paid only when something actually asks for the 1.57 output.
+    # ------------------------------------------------------------------------
+    nixpkgs-playwright-1_57.url = "github:NixOS/nixpkgs/d61c78f4921b1622127584d67b2e9afddf588c92";
   };
 
-  outputs = { self, nixpkgs, home-manager, ... }:
+  outputs = { self, nixpkgs, home-manager, nixpkgs-playwright-1_57, ... }:
     let
       system = "x86_64-linux";
       # Explicit allowUnfree so unfree pkgs (elixir-ls, playwright browsers)
@@ -18,17 +56,46 @@
         inherit system;
         config.allowUnfree = true;
       };
+      # Same allowUnfree treatment for the frozen 1.57 nixpkgs — the browser
+      # bundle is unfree there too, and an --impure fallback would make the
+      # 1.57 path behave differently from the default one.
+      pkgs157 = import nixpkgs-playwright-1_57 {
+        inherit system;
+        config.allowUnfree = true;
+      };
     in
     {
-      # Pinned Playwright driver + browsers, built from THIS flake's locked
-      # (allowUnfree) nixpkgs — the single source of truth shared by both
-      # Playwright paths so they can never diverge on a channel bump:
-      #   • scripts/playwright-nixos resolves `<repo>#playwright-driver.browsers`
-      #     (+ `.version`) — NOT the ambient `nixpkgs#…` registry, which tracks
-      #     the moving unstable channel.
-      #   • nix/sessionVariables.nix (Recipe 2 / the Playwright MCP) exports the
-      #     same `pkgs.playwright-driver.browsers`.
-      packages.${system}.playwright-driver = pkgs.playwright-driver;
+      # ---------------------------------------------------------------------
+      # Playwright driver + browsers — a REGISTRY of versions, not a single
+      # value, because Playwright's version→chromium-build mapping is 1:1 and
+      # this host drives projects pinned to different Playwright releases.
+      #
+      # NAMING IS LOAD-BEARING — scripts/playwright-nixos derives the attr name
+      # from the project's own installed Playwright version by convention:
+      #     <major>.<minor>.<patch>  →  playwright-driver-<major>_<minor>
+      # so `1.57.0` → `playwright-driver-1_57`. Adding another version means
+      # adding an input + one line here with that exact spelling; the wrapper
+      # needs no edit. `--list` enumerates whatever is present.
+      #
+      # `playwright-driver` (unsuffixed) is the DEFAULT and stays on the current
+      # channel's version (1.61.1 today). It is what:
+      #   • nix/sessionVariables.nix exports GLOBALLY as
+      #     PLAYWRIGHT_BROWSERS_PATH (interactive shells + the Playwright MCP),
+      #     via pkgs.playwright-driver.browsers in nix/home.nix — same locked
+      #     nixpkgs, so the two can never diverge on a channel bump;
+      #   • scripts/playwright-nixos falls back to when a project pins a version
+      #     with no matching output here, or when no project can be detected.
+      # Every non-default entry is therefore strictly OPT-IN: nothing that works
+      # on 1.61.1 today changes because a 1.57 bundle now exists alongside it.
+      #
+      # Both consumers resolve `<repo>#playwright-driver…`, NOT the ambient
+      # `nixpkgs#…` registry — the registry tracks the moving unstable channel
+      # and would silently drift out of sync with the HM export.
+      # ---------------------------------------------------------------------
+      packages.${system} = {
+        playwright-driver = pkgs.playwright-driver;             # 1.61.1 → chromium-1228
+        playwright-driver-1_57 = pkgs157.playwright-driver;      # 1.57.0 → chromium-1200
+      };
 
       homeConfigurations."zach" = home-manager.lib.homeManagerConfiguration {
         inherit pkgs;

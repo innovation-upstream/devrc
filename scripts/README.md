@@ -73,7 +73,7 @@ Click actions for those blocks:
 | `skill-audit.py` | audit `SKILL.md` byte budgets + reference routing (`/prune-skill`) |
 | `resume-state.sh` | initiative-scoped live-state reconciler for `/resume` |
 | `obs-read` | one-command, cluster-aware observability query tool |
-| `playwright-nixos` | drive Playwright with the nixpkgs-provided Chromium |
+| `playwright-nixos` | drive Playwright with the nixpkgs Chromium matching *this project's* pin (`--list` / `--select`) |
 | `dogfood-cycle` | automate the civitai App Block "dogfood test cycle" |
 
 ## Network / VPN
