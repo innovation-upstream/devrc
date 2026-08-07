@@ -2197,6 +2197,85 @@ in
     };
   };
 
+  # Autocommit for the /analyze-service index store.
+  #
+  # WHAT IT PROTECTS: ~/.claude/analyze-service-index/<scope>/<service>.md — the
+  # curated recon nuance the /analyze-service write-back protocol appends to
+  # (claude/commands/analyze-service.md). Measured 2026-08-06 on the workbench:
+  # 20 files, 56,862 bytes, actively written that same day, with NO git history,
+  # NO backup and NO host sync (ship.sh rsyncs only ~/.claude/skills/). The
+  # content is not re-derivable — it records gotchas and incident tie-ins that
+  # were true at a moment in time — so one bad agent Write destroyed it silently.
+  #
+  # 🔴 WHY A TIMER RATHER THAN A LINE IN THE WRITE-BACK PROTOCOL. The store is
+  # written by an agent's Write tool mid-recon, so no git operation happens
+  # naturally, and "remember to commit afterwards" is precisely the mechanism
+  # MEASURED not to stick here — claude/skills/close-the-loop/STATE.md records
+  # opt-in prose steps failing and the pivot to autonomous loops. A backup that
+  # depends on an agent remembering is not a backup. PRINCIPLES.md: prefer the
+  # deterministic fix over the prose one.
+  #
+  # 🔴 DELIBERATELY **NOT** GATED ON serverMode, unlike mail-actions-archive /
+  # initiatives-sync / ch-regrowth-check above. Those are gated because they need
+  # the homelab kubeconfig, the LAN API or a server role. This needs nothing but a
+  # local disk and git. It follows claude-log-rotate instead — the other unit that
+  # maintains ~/.claude and runs everywhere. Gating it would be actively harmful:
+  # /analyze-service runs on whichever host Zach is working from, the stores are
+  # per-host and NOT synced, so a laptop-gated-out store would sit unversioned
+  # forever while the workbench looked healthy — the exact silent gap this closes.
+  #
+  # NO NETWORK, BY CONSTRUCTION. The scopes hold client-identifying infrastructure
+  # detail, so the script never adds a remote, never pushes and never fetches, and
+  # there is deliberately no network dependency on the unit to hint otherwise.
+  # See devrc 60e6d9d for why that matters.
+  #
+  # Failure is LOUD: the script exits non-zero on a locked index, an unexpected
+  # non-.md file it refuses to sweep in, or a scope nested inside a foreign repo —
+  # and OnFailure hands that to the existing notify-failure@ toast. It is a silent
+  # no-op only when there is genuinely nothing to commit.
+  #
+  # Minimal user-unit env, so PATH is explicit: git (the whole job), findutils
+  # (scope + candidate enumeration), gnugrep/gnused (message assembly), plus
+  # bash/coreutils.
+  systemd.user.services.analyze-service-index-commit = {
+    Unit = {
+      Description = "Commit any dirty state in the /analyze-service index store";
+      OnFailure = [ "notify-failure@%n.service" ];
+    };
+    Service = {
+      Type = "oneshot";
+      # Purely local git over ~20 small files. A hang means something is very
+      # wrong (a stale lock, a wedged filesystem) and must not pin the timer.
+      TimeoutStartSec = 120;
+      Environment = [
+        "PATH=${lib.makeBinPath [ pkgs.git pkgs.bash pkgs.coreutils pkgs.findutils pkgs.gnugrep pkgs.gnused ]}"
+        "HOME=%h"
+      ];
+      ExecStart = "${pkgs.bash}/bin/bash %h/workspace/devrc/scripts/analyze-service-index/commit.sh";
+      # Re-run the unit when the committer changes (cf. X-Restart-Triggers above).
+      X-Restart-Triggers = [ "${../scripts/analyze-service-index/commit.sh}" ];
+    };
+  };
+
+  # Daily. Persistent catches up a single missed run (host asleep / powered off).
+  # 03:30 keeps it clear of the 04:00 log rotate and the 06:00/08:00/09:00 server
+  # jobs. Daily is adequate rather than lazy: with no remote, a commit only ever
+  # buys recovery from a bad WRITE, and a same-day clobber is still recoverable
+  # from the previous day's commit. Tighten OnCalendar if that stops being true.
+  systemd.user.timers.analyze-service-index-commit = {
+    Unit = {
+      Description = "Daily timer for the /analyze-service index autocommit";
+    };
+    Timer = {
+      OnCalendar = "*-*-* 03:30:00";
+      Persistent = true;
+      RandomizedDelaySec = 600;
+    };
+    Install = {
+      WantedBy = [ "timers.target" ];
+    };
+  };
+
   # ClickHouse regrowth check for the activity store.
   #
   # 2026-08-03 the store was cut 112.4 GB -> 82.1 MB after `system.trace_log`
