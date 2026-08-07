@@ -21,15 +21,21 @@ If the service obviously belongs to one repo, scope there; if ambiguous, search 
 
 ## Cache / index (local pointer & nuance layer)
 
-Alongside the live recon, `/analyze-service` keeps a **local, out-of-repo, gitignored** markdown pointer/nuance sheet per service, so each run front-loads "this bit us with X" instead of re-discovering every gotcha from scratch. The sheet holds **pointers + nuance only** — never live state, never re-derived config values.
+Alongside the live recon, `/analyze-service` keeps a **local markdown pointer/nuance sheet per service, outside every repo you work in**, so each run front-loads "this bit us with X" instead of re-discovering every gotcha from scratch. The sheet holds **pointers + nuance only** — never live state, never re-derived config values.
 
-- **Location:** `~/.claude/analyze-service-index/<repo-slug>/<service>.md` — a LOCAL cache under the user's home `.claude`, **not** versioned in any cluster repo (nothing to gitignore inside a repo — it never lands there).
-- **`<repo-slug>`** is the basename of the owning repo root the service resolved into: `datapacket-talos`, `homelab-talos`, or (if it lives in neither infra repo) the current working repo's basename. Derived from the same locate step below — no separate assumption. If those infra-repo roots ever move, this slug derivation moves with them.
-- **`<service>`** is normalized: lowercase, any char outside `[a-z0-9._-]` → `-`, collapsed — applied identically on read and write so `External DNS` / `externaldns` / `external-dns` all resolve to one `external-dns.md`. Match `$ARGUMENTS` against the filename **and** the file's `aliases:` before deciding a service has no index yet.
+- **Location:** `~/.claude/analyze-service-index/<scope>/<slug>.md` — a LOCAL store under the user's home `.claude`; it never lands inside a cluster repo or `devrc`.
+- **`<scope>`** defaults to the basename of the owning repo root the service resolved into: `datapacket-talos`, `homelab-talos`, else the current working repo's basename — derived from the locate step below, no separate assumption. A scope **need not be a repo**: a ritual owned by no repo, or a client spanning several, may use a plain scope word. Repo-derived is the default; a non-repo scope is a deliberate choice — say so in the brief.
+- **`<slug>`** is normalized: lowercase, `_` → `-`, any other char outside `[a-z0-9.-]` → `-`, collapsed — applied identically on read and write **and to `aliases:` before comparing**, so `External DNS` / `externaldns` / `external-dns` land on one file, and so do `image_ingestion` / `image-ingestion`. The `_` fold matters: the index links `_`-spelled `MEMORY.md` slugs (`bastion_config_stale_until_reload_2026_07_08`). **Keep the pre-fold spelling in `aliases:`** — it stays a valid ref and records how the thing is really written.
+- **Kind qualification — only when disambiguation is needed.** One slug can name two KINDS of thing (`devrc/repo-cos` is both a code subsystem and the weekly ritual about it): qualify with `<slug>.<kind>.md` (`repo-cos.process.md`), kind ∈ `service` | `process` | `org` | `doc`. A trailing dot-segment is a kind **only if it is in that enum**, else it's part of the slug. 🔴 **Bare `<slug>.md` is the default and resolves exactly as today — backward compatibility is a hard requirement: no existing file is renamed, and a scope with no qualified filename behaves identically to before.**
+- **Resolution — ambiguity is an ERROR, never a shadow.** Two tiers; an alias can never outrank a filename:
+  1. **Filename tier** — normalized ref vs `<slug>.md` *and* every `<slug>.<kind>.md` in the scope. A ref naming its own kind (`repo-cos.process`) matches only that qualified file.
+  2. **Alias tier** — normalized `aliases:` across the scope, consulted **only if tier 1 returned zero hits**.
+  One hit → use it. **>1 hit in a tier → never pick: stop, call the ref ambiguous, list the candidate filenames** (`repo-cos.md` vs `repo-cos.process.md`) and let the user choose. Zero in both → no index yet.
 - **Lazy — nothing pre-created.** `~/.claude/analyze-service-index/` may not exist; the dir + a service file appear only on a confirmed write-back (see "## Write-back (opt-in)").
 
 **File schema** (markdown, so prose is surfaced verbatim via Read and reads well in a diff):
-- **Front-matter — identity only:** `service` (canonical name, matches filename), `aliases` (alternate spellings), `repo` (owning repo basename — human note), `namespace` (human note; may be `multiple` for umbrella services). No machine/location fields.
+- **Front-matter — identity + sensitivity only:** `service` (canonical name, matches the filename's slug part), `aliases` (alternate spellings, incl. pre-normalization ones), `scope` (owning repo basename or the non-repo scope word — human note; **replaces `repo:`**, which older files still carry and which reads as `scope`), `sensitivity` (below), `namespace` (**optional** — keep it where it's load-bearing k8s infra, `multiple` for umbrella services; **omit it rather than writing `n/a`**), `kind` (optional; only meaningful on a kind-qualified filename). No machine/location fields.
+- 🔴 **`sensitivity:` — fail-safe: absent means sensitive.** One of `client-confidential` | `personal` | `public`; **absent or unrecognized ⇒ `client-confidential`, never public**, and `public` is a deliberate operator claim a recon run may never infer. Live, not hypothetical — entries carry a client bastion's public IP + SSH port, client hostnames, and a named client engineer. So the store **must never gain a git remote**, and **no line of it may be copied into `devrc` (PUBLIC) or any other public repo, PR body, issue, gist or commit message** — devrc commit `60e6d9d` exists because this exact data class had to be scrubbed out of a public repo retroactively. This spec **marks**; enforcement is separate.
 - **`## What it is`** — one-line description. For an umbrella/multi-instance service (redis, monitoring, meilisearch) enumerate the instances in prose — it's an index OF instances, not one location.
 - **`## Pointers`** — each entry is a path/slug + one-clause why, **never a copy** of the pointed-to content:
   - `manage-* skill:` the matching skill (e.g. `manage-redis`) — invoke it for ops.
@@ -37,13 +43,13 @@ Alongside the live recon, `/analyze-service` keeps a **local, out-of-repo, gitig
   - `claudedocs handoff(s):` handoff doc path(s).
 - **`## Nuance / work-history`** — dated bullets, newest-first, ≤2 lines each: a gotcha, a lying/misleading status condition, a revert or bump that explains why someone was looking, an incident tie-in. Prune-on-resolve.
 
-**Read at recon START.** When an index file exists for the resolved service, surface its `## Pointers` + `## Nuance / work-history` **before** re-discovering gotchas below — front-load the curated recall, then run locate/config/live live as usual. Label these `from index` in the brief. A read miss (no file) just proceeds with today's behavior and may offer to create the file on write-back.
+**Read at recon START** — front-load the curated recall before re-discovering anything; mechanics in step 1 below. A miss proceeds with today's behavior and may offer to create the file on write-back.
 
 ## Recon steps
 
 1. **Locate (deterministic, parallel).** Glob/grep the service name across the repo root(s) to find its directory + manifests: `kustomization.yaml`, `HelmRelease`, `Deployment`/`StatefulSet`/`DaemonSet`, `ConfigMap`, `*values*.yaml`. Identify the **namespace** and the owning **kustomization/Flux Kustomization**. Prefer the Grep/Glob tools; for a broad sweep dispatch an **Explore** subagent and have it return file paths + the key config excerpts (not whole-file dumps).
 
-   Once the owning repo (hence `<repo-slug>`) is known, **read `~/.claude/analyze-service-index/<repo-slug>/<service>.md` if it exists and surface its `## Pointers` + `## Nuance / work-history` first** (labelled `from index`), before deriving any gotchas below — this is the front-load. The locate/config/live steps still run live every time; the index only supplies pointers and prior nuance, never a cached location or status. A miss just proceeds.
+   Once the owning `<scope>` is known, do the index read described above — resolve the ref, surface `## Pointers` + `## Nuance / work-history` (labelled `from index`) **before** deriving any gotchas below. Locate/config/live still run live every time; an ambiguous ref stops for a choice, a miss just proceeds.
 
 2. **Config.** Read the manifests found. Pull out the load-bearing knobs: image/chart version, replicas/HPA, resources, key env/ConfigMap values, mounted secrets (names only — never print secret contents), exposed routes/services, dependsOn.
 
@@ -58,12 +64,12 @@ Alongside the live recon, `/analyze-service` keeps a **local, out-of-repo, gitig
 
 ## Output — recon brief
 
-Header line: which index file was read + hit/miss — e.g. `index: datapacket-talos/redis.md — pointers loaded` or `index: none (first run)`.
+Header line: which index file resolved + hit/miss — e.g. `index: datapacket-talos/redis.md — pointers loaded`, `index: none (first run)`, or `index: AMBIGUOUS — repo-cos.md | repo-cos.process.md (pick one)`.
 
 - **Service** + one-line "what it is".
 - **Pointers / nuance** (`from index`): the `## Pointers` + `## Nuance / work-history` surfaced at recon start, if any — curated recall to follow for detail, not this-run observation. Omit if the index missed.
-- **Lives at**: repo + path(s) as `file:line` (clickable), namespace, owning kustomization. Always **re-derived live** (Phase 1 never caches location).
-- **Config**: the load-bearing knobs (version, scale, resources, key values, routes, deps). Always **re-derived live**.
+- **Lives at**: repo + path(s) as `file:line` (clickable), namespace, owning kustomization (Phase 1 never caches location).
+- **Config**: the load-bearing knobs (version, scale, resources, key values, routes, deps).
 - **Live**: pod/HR/kustomization status + anything unhealthy — or "unverified (no cluster access)".
 - **Recent changes**: last few commits touching it, flag any revert/bump.
 - **Gotchas**: anything non-obvious you hit (lying status conditions, stale comments, ephemeral-vs-durable, etc).
@@ -80,7 +86,7 @@ Recon stays **read-only by default** — the index is mutated only when a run su
 2. **After** the brief, evaluate whether it surfaced anything **notable** (below).
 3. Nothing notable → **do nothing**, say `index unchanged`.
 4. A proposed change → present it as a **unified diff** against the current index file (or "new file" for first-ever), one compact block, and ask a single yes/no: *"append this to the index? (y/N)"*.
-5. **Write only on explicit confirm.** On confirm, re-read the file (so a concurrent append isn't clobbered), re-apply the change to current bytes, then plain Write to `~/.claude/analyze-service-index/<repo-slug>/<service>.md` (creating the dir/file if first-ever). On decline, discard — the recon result already stood on its own. The write is local and final; there is no commit/worktree step (the file is outside every repo).
+5. **Write only on explicit confirm.** On confirm, re-read the file (so a concurrent append isn't clobbered), re-apply the change to current bytes, then plain Write to `~/.claude/analyze-service-index/<scope>/<slug>.md` (creating the dir/file if first-ever; use `<slug>.<kind>.md` **only** when a same-slug entry of another kind already exists, and say why in the diff). On decline, discard — the recon result already stood on its own. The write is local and final; there is no commit/worktree step (the file is outside every repo).
 
 **Notable — append-worthy** (matches the "Gotchas" spirit + the `MEMORY.md` "durable lesson, not status" bar):
 - A **gotcha**: non-obvious behavior, a lying/misleading status condition, an ephemeral-vs-durable trap, a wrong-looking-but-correct error string.
@@ -99,8 +105,9 @@ Recon stays **read-only by default** — the index is mutated only when a run su
 - `claudedocs handoff`: same spirit — **prefer handoff filenames containing the normalized service token**; only density-rank a content-grep fallback if filename-match is too thin, and cap the proposal count.
 
 **Bloat discipline** (mirrors the `MEMORY.md` memory-hygiene rules):
-- **Pointers, not copies** — `## Pointers` is paths/slugs + a one-clause why; domain detail stays in the skill/slug/handoff it points at.
+- **Pointers, not copies** (schema above) — domain detail stays in the skill/slug/handoff it points at.
 - **NEVER persist live status** — pod counts, Ready/NotReady, canary phase, event tails, current image tag/replica values. Re-derived every run. This is the single most important anti-bloat rule.
+  - **No live probe ⇒ persist the DERIVATION, not the reading.** For a process/ritual entry the load-bearing question is "is this still being followed?", and there is no `kubectl` two seconds away — so record *how to take the reading and what a stale one looks like*: "liveness = mtime of the exclusions file vs. the timer's last fire; stale ⇒ mtime predates the last two fires." The method is durable; the answer it gave ("last followed 2026-08-01") is live status exactly like a pod count and stays forbidden. Same rule, applied where the probe is a method rather than a command — not an exception to it.
 - **Dated nuance bullets, newest-first, ≤2 lines each.**
 - **Prune-on-resolve** — when a gotcha is fixed / incident closed / revert superseded, **remove** the bullet (its durable form lives in the slug/handoff it points to). The index is a live pointer sheet, not an append-only log.
 
