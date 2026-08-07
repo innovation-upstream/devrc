@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # playwright-nixos — drive Playwright with the NIXPKGS-provided Chromium so it
-# actually launches on this NixOS host.
+# actually launches on this NixOS host, at the version THIS project pins.
 #
 # WHY: Playwright's own download (~/.cache/ms-playwright/chromium-*/…/chrome) is
 # a generic-linux dynamically-linked ELF. NixOS has no global /lib ld-linux, so
@@ -12,12 +12,21 @@
 # (playwright-driver.browsers), pointed to via PLAYWRIGHT_BROWSERS_PATH, and skip
 # Playwright's host-requirements probe + its (broken) auto-download.
 #
-# VERSION-MATCH GOTCHA (important): Playwright pins one exact Chromium *build*
-# per release. The nixpkgs `playwright-driver` version MUST match the npm
-# `playwright` (or `@playwright/test` / `playwright-core`) version in your project,
-# or Playwright looks for a build number the nix bundle doesn't contain and refuses
-# to launch. This wrapper prints the nixpkgs driver version so you can pin npm to it,
-# and WARNS if it detects a mismatched local install.
+# 🔴 VERSION-MATCH IS 1:1, AND THE FAILURE IS A SILENT ZERO. Playwright pins one
+# exact Chromium *build* per release, so a bundle whose build number the project's
+# playwright doesn't recognise doesn't error usefully — it resolves NO test files.
+# MEASURED 2026-08-06: civitai (playwright ^1.57.0 → chromium-1200) against the
+# 1.61.1 bundle (chromium-1228) ran **0 of ~130** component-test files and exited
+# 1. A zero that reads exactly like a broken suite. That is the bug this wrapper
+# now prevents structurally rather than warning about.
+#
+# HOW: the flake exposes a REGISTRY of driver versions, not one value —
+# `playwright-driver` (default, current channel) plus `playwright-driver-<M>_<m>`
+# for each extra pin. This wrapper reads the project's OWN installed Playwright
+# (node_modules, walking up from $PWD), maps its version to that attr name by
+# convention, and — the actual guard — asserts the realised bundle contains the
+# exact `chromium-<revision>` the project's playwright-core/browsers.json asks
+# for. Mismatch is a hard, named error, never a 0-file "pass".
 #
 # USAGE:
 #   playwright-nixos <cmd> [args...]   run <cmd> with the browser env exported
@@ -25,27 +34,229 @@
 #                                             playwright-nixos npx playwright test
 #   playwright-nixos --env             print `export …` lines (eval it, or feed an
 #                                        MCP server / skill the same vars)
-#   playwright-nixos --version         print the nixpkgs driver version to pin npm to
+#   playwright-nixos --version         print the SELECTED driver version
+#   playwright-nixos --select          explain the selection (project pin, chosen
+#                                        attr, bundle, chromium build) and exit
+#   playwright-nixos --list            list every driver version this flake offers
 #   playwright-nixos                   (no args) print the resolved env + guidance
 #
+# OVERRIDE (when cwd-detection is wrong — a monorepo subdir, a bare script, an
+# MCP server with its own bundled playwright-core):
+#   PLAYWRIGHT_NIXOS_DRIVER=1.57       force that version's bundle
+#   PLAYWRIGHT_NIXOS_DRIVER=default    force the flake default, skip detection
+#   PLAYWRIGHT_NIXOS_ALLOW_REV_SKEW=1  downgrade the chromium-revision assertion
+#                                        to a warning (escape hatch: a permanently
+#                                        red gate is worse than no gate)
+#
 # Needs no home-manager switch — it resolves the browser bundle from nixpkgs on
-# demand (nix caches it after the first realise).
+# demand (nix caches it after the first realise). That is deliberate and load-
+# bearing: home.sessionVariables land in profile.d and are sourced by INTERACTIVE
+# shells only, so a non-interactive `zsh -c` (what agent tooling uses) never sees
+# PLAYWRIGHT_BROWSERS_PATH. This script is the switch-free path.
 set -euo pipefail
 
-# SINGLE SOURCE OF TRUTH: resolve the browser bundle from THIS repo's flake
-# (the flake.lock-pinned nixpkgs), NOT the ambient `nixpkgs#…` registry — the
-# registry tracks the moving unstable channel, so it would silently drift out of
-# sync with the HM export (nix/sessionVariables.nix), which uses the pinned
-# `pkgs.playwright-driver.browsers`. Both paths must resolve to ONE build.
-# The `playwright-driver` flake output (flake.nix) exposes both `.browsers` and
-# `.version` from that locked, allowUnfree pkgs.
+# SINGLE SOURCE OF TRUTH: resolve browser bundles from THIS repo's flake (the
+# flake.lock-pinned nixpkgs), NOT the ambient `nixpkgs#…` registry — the registry
+# tracks the moving unstable channel, so it would silently drift out of sync with
+# the HM export (nix/sessionVariables.nix), which uses the pinned
+# `pkgs.playwright-driver.browsers`.
 SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
 REPO="$(cd "$(dirname "$SCRIPT_PATH")/.." && pwd)"    # <repo>/scripts/.. = repo root
-FLAKEREF="${REPO}#playwright-driver"
+DEFAULT_ATTR="playwright-driver"
 
-# Resolve (and realise, cached) the NixOS-patched browser bundle + driver version.
-BROWSERS="$(nix build --no-link --print-out-paths "${FLAKEREF}.browsers" 2>/dev/null | head -n1 || true)"
-DRIVER_VER="$(nix eval --raw "${FLAKEREF}.version" 2>/dev/null || echo unknown)"
+# ---------------------------------------------------------------------------
+# 1. Detect what the PROJECT pins.
+# ---------------------------------------------------------------------------
+# Walks up from $PWD looking for a node_modules holding any of the three package
+# names a project can depend on. Records the version AND — the key the browser
+# bundle is actually indexed by — the chromium build number from
+# playwright-core/browsers.json. pnpm's layout is handled: node_modules/playwright
+# is a symlink into .pnpm/playwright@<v>/node_modules/playwright, so its sibling
+# `../playwright-core` resolves after the symlink, which is where browsers.json is.
+PROJ_ROOT=""
+PROJ_PKG=""
+PROJ_VER=""
+PROJ_CHROMIUM=""
+
+json_string_field() {           # json_string_field <file> <key>
+  # package.json's "version" is a flat top-level string; a grep is enough here and
+  # keeps detection working with no python/node on PATH.
+  sed -n "s/.*\"$2\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p" "$1" | head -n1
+}
+
+chromium_revision_from_browsers_json() {   # <browsers.json>
+  # browsers.json is a nested array — needs a real parser, not a grep. python3
+  # first (always present on this host), node second. If NEITHER is available we
+  # return empty and the caller says so LOUDLY rather than silently skipping the
+  # assertion this whole script exists to make.
+  local f="$1"
+  if command -v python3 >/dev/null 2>&1; then
+    python3 -c '
+import json,sys
+try:
+    d=json.load(open(sys.argv[1]))
+except Exception:
+    sys.exit(0)
+for b in d.get("browsers",[]):
+    if b.get("name")=="chromium":
+        print(b.get("revision","")); break
+' "$f" 2>/dev/null || true
+  elif command -v node >/dev/null 2>&1; then
+    node -e '
+const d=require(process.argv[1]);
+const b=(d.browsers||[]).find(x=>x.name==="chromium");
+if (b&&b.revision) process.stdout.write(String(b.revision));
+' "$f" 2>/dev/null || true
+  fi
+}
+
+detect_project() {
+  # 🔴 Runs UNCONDITIONALLY, including under PLAYWRIGHT_NIXOS_DRIVER. Detection
+  # feeds the chromium-revision assertion, not just selection, and an override
+  # that quietly skipped detection would ALSO quietly skip the assertion — a
+  # guard that no longer fires while still reporting success. (Caught by its own
+  # negative control 2026-08-06: `PLAYWRIGHT_NIXOS_DRIVER=default` in a 1.57
+  # project exited 0 instead of flagging the 1228-vs-1200 skew.) Each knob does
+  # exactly one thing: DRIVER selects a bundle, ALLOW_REV_SKEW suppresses the
+  # assertion — and you have to ask for the second one by name.
+  local dir="$PWD" nm pkgdir
+  while :; do
+    nm="$dir/node_modules"
+    if [[ -d "$nm" ]]; then
+      for pkgdir in "$nm/playwright-core" "$nm/playwright" "$nm/@playwright/test"; do
+        if [[ -f "$pkgdir/package.json" ]]; then
+          PROJ_ROOT="$dir"
+          PROJ_PKG="$pkgdir/package.json"
+          PROJ_VER="$(json_string_field "$PROJ_PKG" version)"
+          # browsers.json ships in playwright-core only; find it from whichever
+          # package we matched (self / nested / pnpm sibling).
+          local bj
+          for bj in "$pkgdir/browsers.json" \
+                    "$pkgdir/node_modules/playwright-core/browsers.json" \
+                    "$pkgdir/../playwright-core/browsers.json" \
+                    "$pkgdir/../../playwright-core/browsers.json"; do
+            if [[ -f "$bj" ]]; then
+              PROJ_CHROMIUM="$(chromium_revision_from_browsers_json "$bj")"
+              break
+            fi
+          done
+          return 0
+        fi
+      done
+    fi
+    [[ "$dir" == "/" ]] && break
+    dir="$(dirname "$dir")"
+  done
+}
+
+# ---------------------------------------------------------------------------
+# 2. Map that pin to a flake output, by CONVENTION (see flake.nix).
+# ---------------------------------------------------------------------------
+#   <major>.<minor>.<patch>  →  playwright-driver-<major>_<minor>
+# Deliberately keyed on major.minor, not the full version: nixpkgs carries one
+# patch release per line (1.57.0, not 1.57.0 AND 1.57.2) while a project's caret
+# range floats within the line, and Playwright's chromium build is stable across
+# a minor line. The chromium-revision assertion below is what actually proves the
+# pairing — this mapping only has to be a good first guess.
+attr_for_version() {            # attr_for_version 1.57.0 → playwright-driver-1_57
+  local v="$1" major minor rest
+  major="${v%%.*}"; rest="${v#*.}"; minor="${rest%%.*}"
+  [[ -n "$major" && -n "$minor" ]] || return 1
+  printf 'playwright-driver-%s_%s' "$major" "$minor"
+}
+
+attr_version() {                # eval an attr's .version; empty if it doesn't exist
+  nix eval --raw "${REPO}#${1}.version" 2>/dev/null || true
+}
+
+minor_line() { local v="$1"; local r="${v#*.}"; printf '%s.%s' "${v%%.*}" "${r%%.*}"; }
+
+DRIVER_ATTR=""
+DRIVER_VER=""
+SELECT_REASON=""
+
+select_driver() {
+  local want="${PLAYWRIGHT_NIXOS_DRIVER:-}" attr v
+
+  # (a) explicit override
+  if [[ -n "$want" && "$want" != "default" ]]; then
+    attr="$(attr_for_version "$want")" || {
+      echo "playwright-nixos: PLAYWRIGHT_NIXOS_DRIVER='$want' is not a version (want e.g. 1.57)" >&2
+      exit 2
+    }
+    v="$(attr_version "$attr")"
+    if [[ -z "$v" ]]; then
+      echo "playwright-nixos: no flake output '${attr}' for PLAYWRIGHT_NIXOS_DRIVER='$want'" >&2
+      echo "  available:" >&2; list_drivers | sed 's/^/    /' >&2
+      exit 2
+    fi
+    DRIVER_ATTR="$attr"; DRIVER_VER="$v"
+    SELECT_REASON="PLAYWRIGHT_NIXOS_DRIVER=$want"
+    return 0
+  fi
+
+  # (b) forced default
+  if [[ "$want" == "default" ]]; then
+    DRIVER_ATTR="$DEFAULT_ATTR"; DRIVER_VER="$(attr_version "$DEFAULT_ATTR")"
+    SELECT_REASON="PLAYWRIGHT_NIXOS_DRIVER=default"
+    return 0
+  fi
+
+  # (c) project-pinned — the normal path
+  if [[ -n "$PROJ_VER" ]]; then
+    if attr="$(attr_for_version "$PROJ_VER")"; then
+      v="$(attr_version "$attr")"
+      # Convention check: an attr named …-1_57 that isn't 1.57.x is a flake bug,
+      # and treating it as a match would reintroduce the silent-zero.
+      if [[ -n "$v" && "$(minor_line "$v")" == "$(minor_line "$PROJ_VER")" ]]; then
+        DRIVER_ATTR="$attr"; DRIVER_VER="$v"
+        SELECT_REASON="project pins playwright $PROJ_VER (${PROJ_PKG/#$HOME/\~})"
+        return 0
+      fi
+      if [[ -n "$v" ]]; then
+        echo "playwright-nixos: WARNING — flake output '$attr' is $v, not ${PROJ_VER}'s line; ignoring it" >&2
+      fi
+    fi
+  fi
+
+  # (d) fallback: the flake default (what the global PLAYWRIGHT_BROWSERS_PATH and
+  #     the Playwright MCP use). Preserves the pre-registry behaviour exactly.
+  DRIVER_ATTR="$DEFAULT_ATTR"; DRIVER_VER="$(attr_version "$DEFAULT_ATTR")"
+  if [[ -z "$PROJ_VER" ]]; then
+    SELECT_REASON="no project playwright detected — using the flake default"
+  elif [[ -n "$DRIVER_VER" && "$(minor_line "$PROJ_VER")" == "$(minor_line "$DRIVER_VER")" ]]; then
+    # The common case: the project is on the current channel's line, so the
+    # DEFAULT already is the matching bundle. No suffixed output needed.
+    SELECT_REASON="project pins playwright $PROJ_VER — the flake default matches"
+  else
+    SELECT_REASON="no flake output for playwright $PROJ_VER — fell back to the default"
+    echo "playwright-nixos: WARNING — project pins playwright $PROJ_VER but this flake offers no matching bundle." >&2
+    echo "  Falling back to the default ($DRIVER_VER). Chromium build numbers will NOT align." >&2
+    echo "  Fix: add a pinned nixpkgs input + a 'playwright-driver-$(attr_for_version "$PROJ_VER" | sed 's/.*-//')' output in ${REPO}/flake.nix" >&2
+    echo "  (see the nixpkgs-playwright-1_57 input there for the worked example)." >&2
+  fi
+}
+
+list_drivers() {
+  local names n v
+  names="$(nix eval --json "${REPO}#packages.$(nix eval --raw --impure --expr builtins.currentSystem)" \
+             --apply builtins.attrNames 2>/dev/null || echo '[]')"
+  # Keep the parse dependency-free: attr names are simple identifiers here.
+  for n in $(printf '%s' "$names" | tr -d '[]"' | tr ',' ' '); do
+    case "$n" in
+      playwright-driver*) v="$(attr_version "$n")"; printf '%-26s %s%s\n' "$n" "${v:-?}" \
+        "$([[ "$n" == "$DEFAULT_ATTR" ]] && echo '  (default)')" ;;
+    esac
+  done
+}
+
+detect_project
+select_driver
+
+# ---------------------------------------------------------------------------
+# 3. Realise the bundle.
+# ---------------------------------------------------------------------------
+BROWSERS="$(nix build --no-link --print-out-paths "${REPO}#${DRIVER_ATTR}.browsers" 2>/dev/null | head -n1 || true)"
 
 # --- adoption telemetry (best-effort; NEVER changes exit code or output) -------
 # Emit ONE invocation event via the sibling `emit` binary. Bounded by a timeout
@@ -63,54 +274,83 @@ _emit_invocation() {
       b64:text=playwright-nixos \
       b64:tool=playwright-nixos \
       "b64:outcome=$outcome" \
-      "b64:driver=$DRIVER_VER" \
+      "b64:driver=${DRIVER_VER:-unknown}" \
       "b64:mode=$mode" >/dev/null 2>&1 || true
 }
 
 if [[ -z "$BROWSERS" || ! -d "$BROWSERS" ]]; then
   _emit_invocation error resolve-error
-  echo "playwright-nixos: could not resolve ${FLAKEREF}.browsers from $REPO" >&2
-  echo "  try: nix build \"${FLAKEREF}.browsers\"" >&2
+  echo "playwright-nixos: could not resolve ${REPO}#${DRIVER_ATTR}.browsers" >&2
+  echo "  try: nix build \"${REPO}#${DRIVER_ATTR}.browsers\"" >&2
   exit 1
 fi
+
+bundle_chromium_build() {       # the chromium build number the bundle ships, if any
+  local d
+  for d in "$BROWSERS"/chromium-*; do
+    [[ -d "$d" ]] || continue
+    case "${d##*/}" in chromium-[0-9]*) printf '%s' "${d##*/chromium-}"; return 0 ;; esac
+  done
+}
+BUNDLE_CHROMIUM="$(bundle_chromium_build || true)"
+
+# ---------------------------------------------------------------------------
+# 4. THE GUARD — assert the bundle carries the exact build the project wants.
+# ---------------------------------------------------------------------------
+# This is the whole point. The version→attr mapping above is a heuristic; THIS is
+# the verdict, read off the two artifacts that actually have to agree:
+# playwright-core/browsers.json (what the project's playwright will look for) and
+# the realised store path (what exists). Failing loudly here is what turns the
+# silent "0 test files collected, exit 1" into a diagnosis.
+assert_bundle_matches() {
+  [[ -n "$PROJ_VER" ]] || return 0                 # nothing detected → nothing to assert
+  if [[ -z "$PROJ_CHROMIUM" ]]; then
+    # We found a playwright but could not read a chromium revision. Say so —
+    # a skipped assertion must never look like a passed one.
+    echo "playwright-nixos: NOTE — could not read a chromium revision for playwright $PROJ_VER;" >&2
+    echo "  build-number assertion SKIPPED (no browsers.json found, or no python3/node to parse it)." >&2
+    return 0
+  fi
+  [[ -n "$BUNDLE_CHROMIUM" ]] || return 0          # bundle ships no chromium (fx/webkit-only) → not our call
+  [[ "$PROJ_CHROMIUM" == "$BUNDLE_CHROMIUM" ]] && return 0
+
+  local msg="playwright-nixos: chromium build MISMATCH — project playwright $PROJ_VER wants chromium-$PROJ_CHROMIUM, bundle '$DRIVER_ATTR' ($DRIVER_VER) ships chromium-$BUNDLE_CHROMIUM"
+  if [[ "${PLAYWRIGHT_NIXOS_ALLOW_REV_SKEW:-}" == "1" ]]; then
+    echo "$msg" >&2
+    echo "  PLAYWRIGHT_NIXOS_ALLOW_REV_SKEW=1 — continuing anyway (expect 0 tests collected)." >&2
+    return 0
+  fi
+  echo "$msg" >&2
+  echo "  Running anyway resolves ZERO test files and exits 1 — a failure that reads like a broken suite." >&2
+  echo "  Fix one of:" >&2
+  echo "    • add a pinned nixpkgs input + 'playwright-driver-<M>_<m>' output in ${REPO}/flake.nix" >&2
+  echo "    • PLAYWRIGHT_NIXOS_DRIVER=<M>.<m>  to force an existing bundle" >&2
+  echo "    • PLAYWRIGHT_NIXOS_ALLOW_REV_SKEW=1  to proceed regardless" >&2
+  echo "  available bundles:" >&2; list_drivers | sed 's/^/    /' >&2
+  _emit_invocation error rev-mismatch
+  exit 1
+}
 
 export PLAYWRIGHT_BROWSERS_PATH="$BROWSERS"
 export PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS=true
 export PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
 
-# Best-effort version-match warning against a local npm install, if present.
-warn_version_mismatch() {
-  local pkg_json v
-  for pkg_json in \
-      "$PWD/node_modules/playwright-core/package.json" \
-      "$PWD/node_modules/playwright/package.json" \
-      "$PWD/node_modules/@playwright/test/package.json"; do
-    if [[ -f "$pkg_json" ]]; then
-      v="$(node -e "process.stdout.write(require('$pkg_json').version)" 2>/dev/null || true)"
-      if [[ -n "$v" && "$v" != "$DRIVER_VER" && "$DRIVER_VER" != "unknown" ]]; then
-        echo "playwright-nixos: WARNING — npm playwright $v != nixpkgs driver $DRIVER_VER" >&2
-        echo "  Chromium build numbers won't align; browser may refuse to launch." >&2
-        echo "  Pin npm to the driver:  npm install playwright@$DRIVER_VER" >&2
-      fi
-      return 0
-    fi
-  done
-}
-
 # Deterministic MCP-alignment check (addresses the Recipe 2 blind spot): the
-# Playwright MCP ships its OWN playwright-core and, when it honours
-# PLAYWRIGHT_BROWSERS_PATH, looks up ITS pinned Chromium *build number* inside the
-# nix bundle. Compare the build the MCP already downloaded (~/.cache/ms-playwright
-# /chromium-<N>) against the build the pinned bundle provides; a mismatch means the
-# MCP would fail to launch after a switch even though this wrapper works.
+# Playwright MCP ships its OWN playwright-core and reads the GLOBAL
+# PLAYWRIGHT_BROWSERS_PATH — which is the flake DEFAULT, never a per-project pin.
+# So this only says anything when we are on the default; on a project-selected
+# bundle a skew is expected and warning about it would be noise.
 warn_mcp_build_skew() {
-  local nix_build mcp_build
-  nix_build="$(basename "$(echo "$BROWSERS"/chromium-* 2>/dev/null | tr ' ' '\n' | grep -m1 -E '/chromium-[0-9]+$')" 2>/dev/null || true)"
-  mcp_build="$(basename "$(echo "$HOME"/.cache/ms-playwright/chromium-* 2>/dev/null | tr ' ' '\n' | grep -m1 -E '/chromium-[0-9]+$')" 2>/dev/null || true)"
-  if [[ -n "$nix_build" && -n "$mcp_build" && "$nix_build" != "$mcp_build" ]]; then
-    echo "playwright-nixos: WARNING — Playwright MCP expects $mcp_build but the pinned bundle provides $nix_build" >&2
-    echo "  The MCP (Recipe 2) may fail to launch; bump the flake's playwright-driver to match the MCP," >&2
-    echo "  or the MCP's playwright-core to a version whose build == the pinned one." >&2
+  [[ "$DRIVER_ATTR" == "$DEFAULT_ATTR" ]] || return 0
+  local mcp_build d
+  for d in "$HOME"/.cache/ms-playwright/chromium-*; do
+    [[ -d "$d" ]] || continue
+    case "${d##*/}" in chromium-[0-9]*) mcp_build="${d##*/chromium-}"; break ;; esac
+  done
+  if [[ -n "${mcp_build:-}" && -n "$BUNDLE_CHROMIUM" && "$mcp_build" != "$BUNDLE_CHROMIUM" ]]; then
+    echo "playwright-nixos: WARNING — Playwright MCP expects chromium-$mcp_build but the default bundle provides chromium-$BUNDLE_CHROMIUM" >&2
+    echo "  The MCP (Recipe 2) may fail to launch; bump the flake's DEFAULT playwright-driver to match the MCP," >&2
+    echo "  or the MCP's playwright-core to a version whose build == the default bundle's." >&2
   fi
 }
 
@@ -120,23 +360,35 @@ print_env() {
   echo "export PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=$PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD"
 }
 
+print_selection() {
+  echo "# project        : ${PROJ_ROOT:-<none detected>}"
+  echo "# project pins   : ${PROJ_VER:-<none>}${PROJ_CHROMIUM:+  (wants chromium-$PROJ_CHROMIUM)}"
+  echo "# selected attr  : $DRIVER_ATTR"
+  echo "# selected ver   : ${DRIVER_VER:-unknown}${BUNDLE_CHROMIUM:+  (ships chromium-$BUNDLE_CHROMIUM)}"
+  echo "# reason         : $SELECT_REASON"
+  echo "# bundle         : $BROWSERS"
+}
+
 case "${1:-}" in
-  --version) echo "$DRIVER_VER"; exit 0 ;;
-  --env)     print_env; exit 0 ;;
+  --version) echo "${DRIVER_VER:-unknown}"; exit 0 ;;
+  --env)     assert_bundle_matches; print_env; exit 0 ;;
+  --list)    list_drivers; exit 0 ;;
+  --select)  print_selection; assert_bundle_matches; exit 0 ;;
   "")
     echo "# playwright-nixos — nixpkgs Chromium for Playwright on NixOS"
-    echo "# nixpkgs driver version (pin npm playwright to this): $DRIVER_VER"
+    print_selection
     echo "#"
     print_env
     echo "#"
     echo "# run a script:   playwright-nixos node e2e.mjs"
     echo "# run PW test:    playwright-nixos npx playwright test"
     echo "# export in shell: eval \"\$(playwright-nixos --env)\""
+    echo "# other versions: playwright-nixos --list"
     exit 0
     ;;
 esac
 
-warn_version_mismatch
+assert_bundle_matches
 warn_mcp_build_skew
 # Emit BEFORE exec — exec replaces this process, so "ok" here means the wrapper
 # resolved the NixOS browser bundle and is about to launch the command (we can't
