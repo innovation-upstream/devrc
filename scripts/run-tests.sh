@@ -133,7 +133,24 @@ fi
 
 cd "$ROOT" || { echo "run-tests: cannot cd to ROOT=$ROOT" >&2; exit 2; }
 
-MIN_TESTS="${MIN_TESTS:-5638}"
+# MEASURED 2026-08-06 on `nix build .#checks.x86_64-linux.pytests` (the
+# authoritative tier, which runs `run-tests.sh --set hermetic .`):
+#   TOTAL collected=6566  passed=6565  skipped=1  failed=0
+#
+# 🔴 The floor tracks the measurement. It was 5638 against a real total of 6545
+# — 907 tests of slack, which is more than the entire 783-test
+# scripts/initiatives/tests suite: that whole directory could have vanished with
+# this gate still reporting green, which is precisely the failure the floor
+# exists to catch.
+#
+# `--set all` and `--set hermetic` are measured identical BY CONSTRUCTION today,
+# so this one number is valid for both: DEVHOST_TARGETS is empty (see below), so
+# `all` appends nothing to the hermetic list. If a DEVHOST target is ever added,
+# this floor stops covering `--set all` and needs splitting per set.
+#
+# Raise this whenever tests are added; LOWER it only with the new measurement
+# quoted in the commit message, never to make a red gate go green.
+MIN_TESTS="${MIN_TESTS:-6566}"
 
 # --- GUARD 1: tool precondition ------------------------------------------------
 # Every binary the suites `skipif` on. Absence must be an ERROR, never a skip.

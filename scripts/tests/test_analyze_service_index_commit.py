@@ -32,13 +32,31 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-SCRIPT = ROOT / "scripts" / "analyze-service-index" / "commit.sh"
+SCRIPTS = ROOT / "scripts"
+SCRIPT = SCRIPTS / "analyze-service-index" / "commit.sh"
 HOME_NIX = ROOT / "nix" / "home.nix"
 
-BASH = shutil.which("bash")
+sys.path.insert(0, str(SCRIPTS))
+
+from testlib.mockbin import write_exec  # noqa: E402
+
+# 🔴 Resolve the interpreter ONCE, to an absolute path, and NARROW IT HERE.
+# `shutil.which` returns `str | None`, so leaving it unnarrowed makes every
+# `subprocess.run([BASH, ...])` a `list[str | None]`. On a host without bash
+# that surfaces as a TypeError from deep inside subprocess — a failure that
+# names the wrong cause, which is the very shape this PR is fixing elsewhere.
+# Fail once, here, with a message that says what is actually wrong.
+_BASH = shutil.which("bash")
+if _BASH is None:  # pragma: no cover - the flake check puts bash on PATH
+    raise RuntimeError(
+        "bash is not on PATH. It is declared in run-tests.sh REQUIRED_TOOLS and "
+        "in the flake's pytests check; add it there rather than skipping these "
+        "tests — a skipped backup test reports safety it never measured.")
+BASH: str = _BASH
 
 
 def _run(store, *args, **env):
@@ -46,7 +64,6 @@ def _run(store, *args, **env):
     shebang and never through an interpreter that may be absent in the sandbox."""
     e = dict(os.environ)
     e.update({k: str(v) for k, v in env.items()})
-    assert BASH is not None, "bash not on PATH"
     return subprocess.run(
         [BASH, str(SCRIPT), *[str(a) for a in args], str(store)],
         capture_output=True, text=True, env=e)
@@ -339,19 +356,121 @@ def test_a_normal_run_adds_no_remote(tmp_path):
 
 def test_a_configured_remote_is_never_pushed_to(tmp_path):
     """🔴 Even if a remote is somehow configured, this must not become an
-    exfiltration path for client-identifying infrastructure detail. The run
-    still succeeds locally and touches nothing on the far side."""
+    exfiltration path for client-identifying infrastructure detail.
+
+    🔴 THE FAR SIDE IS A REAL INITIALISED BARE REPO. This test previously
+    pointed `origin` at a path that did not exist and then asserted the path
+    still did not exist and that no remote-tracking refs had appeared. A push to
+    a nonexistent path can only fail, so NEITHER assertion could ever move — the
+    test was a vacuous zero and killed exactly zero mutants, including a literal
+    `git push origin trunk` (MEASURED). With a real bare fixture both assertions
+    become live: the positive control below shows a push here produces
+    `refs/heads/trunk` on the far side and `refs/remotes/origin/trunk` locally.
+    """
     store = _seed(tmp_path)
     _run(store)
-    far_side = tmp_path / "far-side"
+    far_side = tmp_path / "far-side.git"
+    subprocess.run(["git", "init", "-q", "--bare", str(far_side)], check=True)
     _git(store / "some-scope", "remote", "add", "origin", str(far_side))
     (store / "some-scope" / "delta.md").write_text("d\n", encoding="utf-8")
     p = _run(store)
     assert p.returncode == 0, p.stderr
-    assert not far_side.exists(), "something was written to the remote path"
+
+    far_refs = subprocess.run(
+        ["git", "-C", str(far_side), "for-each-ref", "--format=%(refname)"],
+        capture_output=True, text=True).stdout.strip()
+    assert far_refs == "", f"refs were pushed to the far side: {far_refs}"
     refs = _git(store / "some-scope", "for-each-ref", "--format=%(refname)",
                 "refs/remotes").stdout.strip()
     assert refs == "", f"remote-tracking refs appeared: {refs}"
+
+
+def test_the_far_side_fixture_would_actually_record_a_push(tmp_path):
+    """🔴 POSITIVE CONTROL for the test above. Its two assertions are ZEROES,
+    and a zero is indistinguishable from a fixture wired to nothing (RULES.md).
+    Push to the same kind of fixture by hand and watch both numbers move."""
+    store = _seed(tmp_path)
+    _run(store)
+    far_side = tmp_path / "far-side.git"
+    subprocess.run(["git", "init", "-q", "--bare", str(far_side)], check=True)
+    _git(store / "some-scope", "remote", "add", "origin", str(far_side))
+    push = _git(store / "some-scope", "push", "origin", "trunk")
+    assert push.returncode == 0, f"the fixture cannot even be pushed to: {push.stderr}"
+
+    far_refs = subprocess.run(
+        ["git", "-C", str(far_side), "for-each-ref", "--format=%(refname)"],
+        capture_output=True, text=True).stdout.strip()
+    assert "refs/heads/trunk" in far_refs, (
+        "a real push produced no ref on the far side — the assertion in "
+        "test_a_configured_remote_is_never_pushed_to cannot detect a push")
+    refs = _git(store / "some-scope", "for-each-ref", "--format=%(refname)",
+                "refs/remotes").stdout.strip()
+    assert "refs/remotes/origin/trunk" in refs, (
+        "a real push produced no remote-tracking ref — the second assertion "
+        "cannot detect a push either")
+
+
+def test_a_run_writes_nothing_outside_the_store(tmp_path):
+    """🔴 BEHAVIOURAL no-exfiltration control, complementing the static ledger.
+
+    The static check reads call sites; this one reads the FILESYSTEM. A mutation
+    sweep produced a `cp -r "$scope" …` that copied two scope trees of
+    client-sensitive data out of the store while every existing test passed. So:
+    sandbox HOME, snapshot every path in the sandbox, run, and assert the only
+    thing that changed is inside $STORE.
+    """
+    sandbox = tmp_path / "sandbox"
+    home = sandbox / "home"
+    (home / "workspace" / "devrc" / "claudedocs").mkdir(parents=True)
+    (home / "asi-leak-sentinel").mkdir(parents=True)
+    store = _seed(sandbox)
+    (sandbox / "bystander").mkdir()
+    (sandbox / "bystander" / "keep.txt").write_text("untouched\n", encoding="utf-8")
+
+    def snapshot():
+        out = {}
+        for p in sorted(sandbox.rglob("*")):
+            if store in p.parents or p == store:
+                continue
+            out[str(p.relative_to(sandbox))] = (
+                p.read_bytes() if p.is_file() and not p.is_symlink() else None)
+        return out
+
+    before = snapshot()
+    p = _run(store, HOME=str(home))
+    assert p.returncode == 0, p.stderr
+    after = snapshot()
+
+    appeared = sorted(set(after) - set(before))
+    vanished = sorted(set(before) - set(after))
+    changed = sorted(k for k in set(before) & set(after) if before[k] != after[k])
+    assert not appeared, f"the run created path(s) OUTSIDE the store: {appeared}"
+    assert not vanished, f"the run deleted path(s) outside the store: {vanished}"
+    assert not changed, f"the run modified path(s) outside the store: {changed}"
+
+
+def test_the_outside_the_store_snapshot_can_actually_see_a_write(tmp_path):
+    """🔴 POSITIVE CONTROL for the snapshot above — three more zero-assertions.
+    Write outside the store by hand and confirm the comparison reports it."""
+    sandbox = tmp_path / "sandbox"
+    store = _seed(sandbox)
+    (sandbox / "bystander").mkdir()
+
+    def snapshot():
+        out = {}
+        for p in sorted(sandbox.rglob("*")):
+            if store in p.parents or p == store:
+                continue
+            out[str(p.relative_to(sandbox))] = (
+                p.read_bytes() if p.is_file() and not p.is_symlink() else None)
+        return out
+
+    before = snapshot()
+    (sandbox / "bystander" / "LEAK-some-scope.md").write_text(
+        "exfiltrated\n", encoding="utf-8")
+    after = snapshot()
+    assert sorted(set(after) - set(before)) == ["bystander/LEAK-some-scope.md"], (
+        "the snapshot comparison cannot see a file written outside the store")
 
 
 def _script_code_lines():
@@ -365,13 +484,119 @@ def _script_code_lines():
     return out
 
 
-def test_the_script_contains_no_network_touching_git_subcommand():
-    """Structural, not behavioural: the behavioural test above can only prove the
-    paths it exercised. This pins that no push/fetch/pull/clone/remote call site
-    exists at all."""
-    bad = re.compile(r"\bgit\b[^|;&]*\b(push|fetch|pull|clone|ls-remote)\b")
-    hits = [l for l in _script_code_lines() if bad.search(l)]
-    assert not hits, f"network-touching git call site(s): {hits}"
+# 🔴 THE ASSERTED LEDGER. The complete set of git subcommands commit.sh may
+# invoke. Kept in ONE place, mirrored by the header comment in the script.
+GIT_SUBCOMMAND_LEDGER = {
+    "add", "commit", "config", "diff", "init",
+    "ls-files", "rev-parse", "status", "var",
+}
+
+_GIT_CALL = re.compile(r"\bgit\b(?P<rest>[^|;&]*)")
+
+# `git` counts as a CALL only in command position. Without this the word `git`
+# inside an error string ("git is not on PATH") parses as an invocation of a
+# subcommand called `is`. Command position = start of line, or straight after a
+# separator (`;` `&` `|` `(` including `$(` `&&` `||`), or after one of these
+# words. Deliberately NOT `}`, so `"${fail_prefix} git status failed"` — prose
+# inside a message — is rejected, while `$(git …)` inside the same message is
+# still seen.
+_CMD_WORDS = {"capture", "if", "then", "do", "else", "elif", "while", "until", "!"}
+_CMD_CHARS = (";", "&", "|", "(", "!")
+
+
+def _in_command_position(prefix: str) -> bool:
+    p = prefix.rstrip()
+    if not p:
+        return True
+    if p.endswith(_CMD_CHARS):
+        return True
+    return p.split()[-1] in _CMD_WORDS
+
+
+def _git_subcommands_invoked():
+    """Every git subcommand actually invoked, plus every INDIRECT one.
+
+    Returns (concrete, indirect). `indirect` holds call sites whose subcommand
+    comes from a variable — those are ledger violations by construction, because
+    no static reading can say what `$_s` expands to.
+    """
+    concrete, indirect = set(), []
+    for line in _script_code_lines():
+        for m in _GIT_CALL.finditer(line):
+            if not _in_command_position(line[:m.start()]):
+                continue
+            toks = m.group("rest").split()
+            i = 0
+            while i < len(toks):
+                t = toks[i]
+                if t in ("-C", "-c", "--git-dir", "--work-tree"):
+                    i += 2
+                    continue
+                if t.startswith("-"):
+                    i += 1
+                    continue
+                break
+            if i >= len(toks):
+                continue
+            sub = toks[i].strip('"\'')
+            if "$" in sub or "`" in sub:
+                indirect.append(line.strip())
+            else:
+                concrete.add(sub)
+    return concrete, indirect
+
+
+def test_the_set_of_git_subcommands_is_exactly_the_asserted_ledger():
+    """🔴 AN ASSERTED LEDGER, NOT A BLOCKLIST — and it fails when the set GROWS
+    *or* SHRINKS.
+
+    The previous version enumerated five forbidden verbs
+    (push/fetch/pull/clone/ls-remote). A sweep built differently walked past it
+    three times over: `git archive -o …`, `git bundle create …`, and a plain
+    `cp -r "$scope" …` are all exfiltration and none of them is on that list.
+    An allowlist has no such blind spot: anything not named here is a failure,
+    whether or not anybody thought to forbid it.
+
+    Shrinking is a failure too — a ledger that silently tracks whatever the
+    script happens to do is not an assertion about anything.
+    """
+    concrete, indirect = _git_subcommands_invoked()
+    assert not indirect, (
+        "git subcommand supplied INDIRECTLY (via a variable or substitution); "
+        "no static check can tell what it expands to, so this is a ledger "
+        f"violation on its own: {indirect}")
+    added = sorted(concrete - GIT_SUBCOMMAND_LEDGER)
+    removed = sorted(GIT_SUBCOMMAND_LEDGER - concrete)
+    assert not added, (
+        f"commit.sh invokes git subcommand(s) NOT on the asserted ledger: {added}. "
+        "If one of these is legitimate, add it to GIT_SUBCOMMAND_LEDGER *and* to "
+        "the ledger comment in commit.sh — deliberately, in the same commit.")
+    assert not removed, (
+        f"the ledger names git subcommand(s) commit.sh no longer invokes: {removed}. "
+        "Remove them from GIT_SUBCOMMAND_LEDGER and the script's header comment, "
+        "so the ledger keeps asserting something.")
+
+
+def test_the_ledger_extractor_sees_what_it_claims_to_see():
+    """🔴 POSITIVE CONTROL for the extractor. `added == []` is a zero, and a zero
+    is indistinguishable from a parser wired to nothing. Feed it lines it MUST
+    classify, including the two obfuscations that survived the old blocklist."""
+    global _script_code_lines
+    original = _script_code_lines
+    try:
+        _script_code_lines = lambda: [  # noqa: E731
+            '  git -C "$scope" push origin trunk',
+            '  git -C "$scope" archive -o /tmp/x.tar HEAD',
+            '  _s=push; git -C "$scope" $_s origin trunk',
+            '  git -C "$scope" status --porcelain',
+        ]
+        concrete, indirect = _git_subcommands_invoked()
+    finally:
+        _script_code_lines = original
+    assert "push" in concrete, "the extractor missed a plain `git push`"
+    assert "archive" in concrete, "the extractor missed `git archive`"
+    assert "status" in concrete, "the extractor missed the -C-prefixed `git status`"
+    assert indirect, "the extractor did not flag a variable-supplied subcommand"
 
 
 def test_the_script_never_blind_stages():
@@ -381,7 +606,7 @@ def test_the_script_never_blind_stages():
     assert not hits, f"blind-staging call site(s): {hits}"
 
 
-def test_the_forbidden_pattern_scanners_can_actually_match(tmp_path):
+def test_the_forbidden_pattern_scanners_can_actually_match():
     """🔴 POSITIVE CONTROL for the two zero-assertions above. `not hits` is a
     ZERO, and a zero is indistinguishable from a regex wired to nothing
     (RULES.md). Feed both patterns a line that MUST match and watch the number
@@ -471,18 +696,28 @@ def test_the_unit_is_not_gated_on_server_mode():
     """🔴 A DELIBERATE decision, pinned so it cannot be "tidied" into the
     serverMode block beside it. The stores are per-host and NOT synced by
     ship.sh, so gating this out on the laptop leaves that host's index
-    unversioned forever while the workbench looks healthy."""
+    unversioned forever while the workbench looks healthy.
+
+    🔴 ASSERTED POSITIVELY, NOT BY GREPPING FOR A TOKEN. This used to check that
+    the substring `mkIf` did not appear between `=` and `{`, which is a SPELLED
+    guard: `= lib.optionalAttrs serverMode {` contains no `mkIf`, passes, and
+    produces exactly the gating the test forbids (MEASURED — it survived the
+    whole suite). So require the declaration to be UNCONDITIONAL by shape: an
+    unbroken `= {`, with nothing whatsoever in between.
+    """
     src = _home_nix()
-    m = re.search(r"systemd\.user\.(services|timers)\.analyze-service-index-commit"
-                  r"\s*=\s*(.*?)\{", src, re.S)
-    assert m, "the analyze-service-index-commit unit is missing from nix/home.nix"
     for kind in ("services", "timers"):
         decl = re.search(
             rf"systemd\.user\.{kind}\.analyze-service-index-commit\s*=\s*([^{{]*)\{{",
             src)
-        assert decl, f"no {kind} declaration found"
-        assert "mkIf" not in decl.group(1), (
-            f"the {kind} declaration is conditional: {decl.group(1)!r}")
+        assert decl, f"no {kind} declaration found in nix/home.nix"
+        between = decl.group(1).strip()
+        assert between == "", (
+            f"the {kind} declaration is CONDITIONAL — it must read "
+            f"`systemd.user.{kind}.analyze-service-index-commit = {{` with "
+            f"nothing between `=` and `{{`, but found {between!r}. Any wrapper "
+            "here (mkIf, optionalAttrs, an `if`) can gate the unit out of a "
+            "host and leave that host's index silently unversioned.")
 
 
 def test_the_unit_is_wired_to_the_failure_toast():
@@ -500,6 +735,312 @@ def test_the_timer_is_daily_and_catches_up_a_missed_run():
     block = src[i:i + 600]
     assert re.search(r'OnCalendar = "\*-\*-\* \d\d:\d\d:\d\d"', block)
     assert "Persistent = true" in block
+
+
+def test_the_timer_is_actually_installed_into_timers_target():
+    """🔴 BLOCKING, and the reason this test exists separately: without an
+    `Install.WantedBy` home-manager renders no `[Install]` section, never writes
+    the `timers.target.wants` symlink, and the timer NEVER FIRES. The whole PR
+    becomes a no-op — a backup that does not run — and MEASURED, deleting the
+    Install block passed every other test in this file.
+
+    `OnCalendar` and `Persistent` say WHEN it would fire; only this says THAT it
+    is wired up at all."""
+    src = _home_nix()
+    i = src.index("systemd.user.timers.analyze-service-index-commit")
+    block = src[i:i + 600]
+    assert 'Install = {' in block, (
+        "the timer has no Install block — home-manager will not enable it and "
+        "it will never fire")
+    assert 'WantedBy = [ "timers.target" ]' in block, (
+        "the timer's Install.WantedBy is not timers.target — it will not be "
+        "started by the timer target and the autocommit never runs")
+
+
+def test_the_unit_cannot_hang_forever():
+    """A oneshot with no timeout that wedges on a stale lock pins the timer and
+    the backup silently stops, with the unit stuck in `activating`."""
+    src = _home_nix()
+    i = src.index("systemd.user.services.analyze-service-index-commit")
+    block = src[i:i + 1200]
+    m = re.search(r"TimeoutStartSec = (\d+);", block)
+    assert m, "no TimeoutStartSec on the oneshot — a wedged run pins the timer"
+    assert 0 < int(m.group(1)) <= 900, (
+        f"TimeoutStartSec={m.group(1)} is not a bound that fails fast")
+
+
+# --------------------------------------------------------------------------- #
+# 7. 🔴 REGRESSIONS — each of these FAILED on the pre-fix tree (measured)
+# --------------------------------------------------------------------------- #
+def test_a_status_warning_on_stderr_is_not_mistaken_for_dirty_state(tmp_path):
+    """🔴 `git status` can exit 0 and still WRITE TO STDERR. Folding stderr into
+    stdout (`2>&1`) made that warning the "dirty state": a genuinely CLEAN tree
+    was reported dirty, the run FAILED naming the wrong cause, the change count
+    counted warning lines, and the warning text was embedded in the commit
+    message body.
+
+    Reproduced with an unreadable subdirectory — `warning: could not open
+    directory 'sub/': Permission denied`, rc=0, empty stdout.
+    """
+    store = _seed(tmp_path)
+    assert _run(store).returncode == 0
+    blocked = store / "some-scope" / "sub"
+    blocked.mkdir()
+    blocked.chmod(0o000)
+    try:
+        p = _run(store)
+    finally:
+        blocked.chmod(0o755)
+    assert p.returncode == 0, (
+        f"a clean tree with a warning on stderr was treated as a failure:\n{p.stderr}")
+    assert "clean — nothing to commit" in p.stdout, (
+        f"the warning was mistaken for dirty state; stdout was:\n{p.stdout}")
+    assert "Permission denied" in p.stderr, (
+        "the warning was swallowed entirely — it must still be surfaced, just "
+        "not as dirty state")
+
+
+def test_a_status_warning_never_reaches_the_commit_message(tmp_path):
+    """The other half of the same defect: `before` is pasted verbatim into the
+    commit body, so a warning line became part of the permanent history."""
+    store = _seed(tmp_path)
+    _run(store)
+    blocked = store / "some-scope" / "sub"
+    blocked.mkdir()
+    blocked.chmod(0o000)
+    (store / "some-scope" / "alpha.md").write_text("CHANGED\n", encoding="utf-8")
+    try:
+        p = _run(store)
+    finally:
+        blocked.chmod(0o755)
+    assert p.returncode == 0, p.stderr
+    msg = _git(store / "some-scope", "log", "-1", "--format=%B").stdout
+    assert "Permission denied" not in msg, (
+        f"a stderr warning was committed into the message body:\n{msg}")
+    assert "1 change(s)" in msg, (
+        f"the change count was inflated by warning lines:\n{msg}")
+
+
+def _race_hook(scope, body):
+    """Install a pre-commit hook — a deterministic stand-in for a write landing
+    in the window between `git add` and `git commit`.
+
+    🔴 The shebang belongs to testlib.mockbin, not to this call site.
+    `#!/usr/bin/env bash` works on the dev host and does NOT exist in the nix
+    build sandbox, so a hook written that way makes `git commit` fail with
+    "cannot exec" — the test then goes green-for-the-wrong-reason locally and
+    red in the authoritative tier (MEASURED: exactly that, both ways).
+    """
+    hooks = scope / ".git" / "hooks"
+    hooks.mkdir(parents=True, exist_ok=True)
+    return write_exec(hooks / "pre-commit", f"{body}\nexit 0\n")
+
+
+def test_a_covered_file_written_during_the_commit_is_not_a_failure(tmp_path):
+    """🔴 The one race the design GUARANTEES. The store is written by agents at
+    arbitrary times, so a `.md` write can land between `git add` and `git
+    commit`. That used to produce rc=1, a failed unit, a sticky critical toast
+    and the message "Something is not covered by the *.md allowlist" — about a
+    file that IS covered. No data was lost, so it was a pure false positive
+    sending the operator to the wrong place.
+
+    Now it is retried and committed."""
+    store = _seed(tmp_path)
+    _run(store)
+    scope = store / "some-scope"
+    (scope / "alpha.md").write_text("CHANGED\n", encoding="utf-8")
+    _race_hook(scope, 'printf "raced\\n" > "$(git rev-parse --show-toplevel)/gamma.md"')
+    p = _run(store)
+    assert p.returncode == 0, (
+        f"a benign covered-file race failed the unit:\n{p.stderr}")
+    assert "not covered by the *.md allowlist" not in p.stderr, (
+        f"the wrong cause was reported for a covered file:\n{p.stderr}")
+    assert "re-dirtied" in p.stdout, (
+        f"the race was not identified as a re-dirty:\n{p.stdout}")
+    tracked = _git(scope, "ls-files").stdout.split()
+    assert "gamma.md" in tracked, (
+        f"the racing file was never committed: {tracked}")
+    assert _git(scope, "status", "--porcelain").stdout == ""
+
+
+def test_a_genuinely_uncovered_file_is_still_a_loud_failure(tmp_path):
+    """🔴 REACHABILITY + the complement of the test above. Softening the race
+    must NOT soften the real guard: a non-.md file that survives the commit is
+    still rc=1, and the message must name the path rather than the whole tree."""
+    store = _seed(tmp_path)
+    _run(store)
+    scope = store / "some-scope"
+    (scope / "alpha.md").write_text("CHANGED\n", encoding="utf-8")
+    _race_hook(scope, 'printf "x\\n" > "$(git rev-parse --show-toplevel)/secret.pem"')
+    p = _run(store)
+    assert p.returncode != 0, (
+        f"an uncovered file surviving the commit was reported as success:\n{p.stdout}")
+    assert "STILL DIRTY" in p.stderr, p.stderr
+    assert "secret.pem" in p.stderr, p.stderr
+    assert "neither matched by the *.md allowlist nor already tracked" in p.stderr
+    assert "secret.pem" not in _git(scope, "ls-files").stdout
+
+
+def test_a_dirty_tree_with_no_candidate_paths_fails_loudly(tmp_path):
+    """🔴 M1 — this guard had ZERO coverage: deleting it left the suite fully
+    green. It IS reachable: a scope that is already a repo, has no tracked
+    files, and holds one untracked NON-.md file enumerates nothing at all, which
+    is a different condition from "enumerated something that staged to nothing".
+    """
+    store = tmp_path / "store"
+    scope = store / "some-scope"
+    scope.mkdir(parents=True)
+    subprocess.run(["git", "init", "-q", "-b", "trunk", str(scope)], check=True)
+    (scope / "notes.txt").write_text("not an index file\n", encoding="utf-8")
+    p = _run(store)
+    assert p.returncode != 0, "a dirty scope with nothing enumerable exited 0"
+    assert "no candidate paths were enumerated" in p.stderr, (
+        f"a DIFFERENT guard fired — this one is still unreached:\n{p.stderr}")
+    assert "notes.txt" in p.stderr
+
+
+def test_an_unreadable_scope_is_not_reported_as_having_no_index_files(tmp_path):
+    """🔴 M2, the silent half. The "is there anything to bootstrap?" probe used
+    to pipe `find` into `grep -q .`, which DISCARDS find's exit code. An
+    unreadable scope then produced no output, read as "no *.md files", and was
+    SKIPPED with a success message — an empty result standing in for a clean
+    one, on the single path whose job is to notice new content.
+
+    Reachability note: the scope must have no repo and no readable *.md, or
+    `find -print -quit` exits 0 before it ever reaches the unreadable directory
+    and this guard is never executed.
+    """
+    store = tmp_path / "store"
+    scope = store / "some-scope"
+    blocked = scope / "sub"
+    blocked.mkdir(parents=True)
+    blocked.chmod(0o000)
+    try:
+        p = _run(store)
+    finally:
+        blocked.chmod(0o755)
+    assert p.returncode != 0, (
+        f"an unreadable scope was reported as a clean skip:\n{p.stdout}")
+    assert "could not enumerate *.md files" in p.stderr, (
+        f"a DIFFERENT guard fired — this one is still unreached:\n{p.stderr}")
+    assert "skipping" not in p.stdout
+
+
+def test_a_scope_name_containing_a_newline_is_one_scope_not_two(tmp_path):
+    """🔴 M2. Newline-delimited enumeration split `we\\nird` into two
+    nonexistent scopes, each reported "no *.md files — skipping", and the run
+    exited 0 — content left UNVERSIONED while the unit claimed success, which is
+    precisely the silent loss this script exists to prevent."""
+    store = tmp_path / "store"
+    scope = store / "we\nird"
+    scope.mkdir(parents=True)
+    (scope / "alpha.md").write_text("a\n", encoding="utf-8")
+    p = _run(store)
+    assert p.returncode == 0, p.stderr
+    assert "1 scope(s) processed" in p.stdout, (
+        f"the scope name was split: {p.stdout}")
+    assert (scope / ".git").is_dir(), "the scope was left unversioned"
+    assert "alpha.md" in _git(scope, "ls-files").stdout
+
+
+def test_a_scope_reached_through_a_symlink_is_still_versioned(tmp_path):
+    """🔴 M2. `find -type d` without `-L` did not enumerate a symlinked scope at
+    all: "no scope directories — nothing to do", exit 0, unversioned."""
+    real = tmp_path / "elsewhere" / "real-scope"
+    real.mkdir(parents=True)
+    (real / "alpha.md").write_text("a\n", encoding="utf-8")
+    store = tmp_path / "store"
+    store.mkdir()
+    (store / "linked-scope").symlink_to(real, target_is_directory=True)
+    p = _run(store)
+    assert p.returncode == 0, p.stderr
+    assert "nothing to do" not in p.stdout, (
+        f"the symlinked scope was not enumerated:\n{p.stdout}")
+    assert (real / ".git").is_dir(), "the symlinked scope was left unversioned"
+    assert "alpha.md" in _git(real, "ls-files").stdout
+
+
+def test_print_plan_is_honoured_after_the_store_argument(tmp_path):
+    """🔴 M5. `--print-plan` was recognised only as $1, so
+    `commit.sh <STORE> --print-plan` took the COMMITTING path — MEASURED: it
+    initialised a repo and wrote a commit. A dry run that mutates is the worst
+    possible failure mode for this script."""
+    store = _seed(tmp_path)
+    p = subprocess.run([BASH, str(SCRIPT), str(store), "--print-plan"],
+                       capture_output=True, text=True)
+    assert p.returncode == 0, p.stderr
+    assert "remote:  none" in p.stdout, f"not the plan output: {p.stdout}"
+    assert not (store / "some-scope" / ".git").exists(), (
+        "a --print-plan invocation CREATED A REPO and committed")
+
+
+def test_an_unknown_option_is_rejected_rather_than_treated_as_the_store(tmp_path):
+    """A mistyped flag must not silently become $STORE and send the script off
+    to enumerate a directory that does not exist."""
+    p = subprocess.run([BASH, str(SCRIPT), "--dry-run", str(_seed(tmp_path))],
+                       capture_output=True, text=True)
+    assert p.returncode != 0
+    assert "unknown option: --dry-run" in p.stderr
+
+
+def test_two_store_arguments_are_rejected(tmp_path):
+    p = subprocess.run([BASH, str(SCRIPT), str(tmp_path / "a"), str(tmp_path / "b")],
+                       capture_output=True, text=True)
+    assert p.returncode != 0
+    assert "at most one STORE argument" in p.stderr
+
+
+# --------------------------------------------------------------------------- #
+# 8. previously-untested guards (M3)
+# --------------------------------------------------------------------------- #
+def test_a_readme_at_the_store_root_is_exempt_from_the_stray_warning(tmp_path):
+    """README.md is the expected signpost at the root. Warning about it every
+    single day is how a gate gets trained out of the operator (RULES.md:
+    a permanently-red gate is worse than no gate)."""
+    store = _seed(tmp_path)
+    (store / "README.md").write_text("what this store is\n", encoding="utf-8")
+    p = _run(store)
+    assert p.returncode == 0, p.stderr
+    assert "STORE ROOT" not in p.stderr, (
+        f"README.md tripped the stray-file warning:\n{p.stderr}")
+
+
+def test_a_bootstrapped_scope_is_on_the_configured_branch(tmp_path):
+    """`git init` without `-b` lands on git's `init.defaultBranch`, which varies
+    by host config — the scope would then be on `master` on one machine and
+    `trunk` on another."""
+    store = _seed(tmp_path)
+    p = _run(store, ASI_BRANCH="indexline")
+    assert p.returncode == 0, p.stderr
+    head = _git(store / "some-scope", "rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
+    assert head == "indexline", f"bootstrapped onto {head!r}, not the configured branch"
+
+
+def test_commit_signing_is_pinned_off_for_the_scope(tmp_path):
+    """A timer must never block on a GPG passphrase prompt. A global
+    `commit.gpgsign=true` would otherwise wedge the unit until its timeout."""
+    store = _seed(tmp_path)
+    p = _run(store)
+    assert p.returncode == 0, p.stderr
+    val = _git(store / "some-scope", "config", "--local", "commit.gpgsign").stdout.strip()
+    assert val == "false", f"commit.gpgsign is {val!r}, not pinned off locally"
+
+
+def test_a_scope_still_commits_when_signing_is_forced_on_globally(tmp_path):
+    """🔴 The behavioural half: pin the setting AND prove it wins. Force signing
+    on in a sandbox global config and confirm the commit still lands."""
+    store = _seed(tmp_path)
+    home = tmp_path / "home"
+    home.mkdir()
+    gitconfig = home / "gitconfig"
+    gitconfig.write_text(
+        "[user]\n\tname = T\n\temail = t@example.com\n"
+        "[commit]\n\tgpgsign = true\n"
+        "[gpg]\n\tprogram = /nonexistent-gpg\n", encoding="utf-8")
+    p = _run(store, HOME=str(home), GIT_CONFIG_GLOBAL=str(gitconfig))
+    assert p.returncode == 0, (
+        f"a global commit.gpgsign=true wedged the run:\n{p.stderr}")
+    assert _commits(store / "some-scope") == 1
 
 
 def test_the_units_path_provides_git():
