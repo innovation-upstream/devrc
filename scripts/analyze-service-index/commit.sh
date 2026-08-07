@@ -36,17 +36,41 @@
 # script therefore never adds a remote, never pushes, never fetches, and never
 # reads a remote from config or environment.
 #
-# This is enforced as an ASSERTED LEDGER, not a blocklist of banned words. The
-# COMPLETE set of git subcommands this file may invoke is:
+# 🔴 THE PRIMARY CONTROL IS CONTAINMENT, NOT DETECTION. Three fix rounds tried to
+# make exfiltration *visible* to a static check and each round was evaded a new
+# way. What actually holds is the unit's sandbox in nix/home.nix — ProtectSystem
+# =strict + ProtectHome=tmpfs (so the only writable path in the whole namespace
+# is the store itself) and PrivateNetwork=true (so there is no route off-box at
+# all). MEASURED 2026-08-06 under exactly that sandbox: `cp -r <scope> <dir>`
+# fails "Read-only file system", and bash's builtin `/dev/tcp` egress — which no
+# PATH restriction can reach — fails where it succeeds uncontained. A future edit
+# reaching for exfiltration does not need to be *noticed*; it cannot land.
 #
-#     add  commit  config  diff  init  ls-files  rev-parse  status  var
+# 🔴 AND AMBIENT GIT CONFIG IS NEUTRALISED, because it bypassed everything above
+# WITHOUT EDITING THIS FILE AT ALL. MEASURED: a global `core.hooksPath`
+# post-commit hook (or `init.templateDir` baking one into the repo this script
+# bootstraps) copied a scope out of the store while this script printed
+# "committed … ok — 1 scope(s) processed" and exited 0. No static reading of this
+# file could ever have seen it — the payload was in ~/.gitconfig. See the
+# GIT_CONFIG_* block below.
+#
+# The static ledger below is a SECONDARY check. The COMPLETE set of git
+# subcommands this file may invoke is:
+#
+#     add  check-ignore  commit  config  diff  init  ls-files  rev-parse
+#     status  var
 #
 # and test_the_set_of_git_subcommands_is_exactly_the_asserted_ledger fails when
-# that set GROWS *or* SHRINKS. A blocklist of five forbidden verbs is what a
-# mutation sweep walked straight past: `git archive`, `git bundle`, a plain
-# `cp -r` of a scope, and `_s=pu"sh"; git $_s origin …` were all invisible to it.
-# A subcommand supplied through a VARIABLE is itself a ledger violation, because
-# no static check can tell what it will expand to.
+# that set GROWS *or* SHRINKS. A `git` that is NOT in command position is a
+# violation too, rather than being skipped — skipping it is what made `env git
+# push`, `timeout … git push`, `eval "git push"`, `xargs git push`, `{ git push;
+# }` and `\git push` invisible (MEASURED: 8 wrapper forms survived).
+#
+# 🔴 BE HONEST ABOUT THE LEDGER'S BLIND SPOT: it reads *git* call sites, so it
+# cannot see exfiltration that never invokes git. A plain `cp -r "$scope" …` is
+# invisible to it and always will be. An earlier revision of this comment claimed
+# "an allowlist has no such blind spot" — that was false, and it is exactly why
+# the containment above, not this ledger, is the control being relied on.
 #
 # If you are editing this file and reaching for `git push`, stop — see the scope
 # README, and devrc commit 60e6d9d, which exists because this class of data had
@@ -98,6 +122,17 @@ say()  { echo "${PROG}: $*"; }
 warn() { echo "${PROG}: WARNING: $*" >&2; }
 die()  { echo "${PROG}: $*" >&2; exit 1; }
 
+# ONE place that formats a failed git call: <fail_prefix> <subcommand> <rc>
+# [detail]. This is consolidation for its own sake (RULES.md: one rule, one
+# place) and it is also what keeps the static ledger honest — the ledger now
+# treats EVERY `git` token that is not in command position as a violation, and
+# pins the handful of legitimate prose mentions as an explicit set. Fourteen
+# hand-written "git <verb> failed" strings would have made that set unreadable;
+# collapsing them here leaves three.
+git_failed() {
+  echo "${PROG}: $1 git $2 failed (rc=$3)${4:+: $4}" >&2
+}
+
 # A REAL argument loop, not a positional test. `--print-plan` used to be honoured
 # only as $1, so `commit.sh <STORE> --print-plan` silently took the COMMITTING
 # path — a dry run that writes is the worst possible failure mode for this
@@ -129,7 +164,71 @@ ASI_BRANCH="${ASI_BRANCH:-trunk}"
 ASI_NO_INIT="${ASI_NO_INIT:-0}"
 
 command -v git >/dev/null 2>&1 ||
-  die "git is not on PATH — refusing to report success"
+  die "the version-control binary is not on PATH — refusing to report success"
+
+# --- 🔴 NEUTRALISE AMBIENT GIT CONFIG ------------------------------------------
+# This block exists because the no-exfiltration guarantee was bypassable WITHOUT
+# TOUCHING THIS FILE. MEASURED 2026-08-06 (git 2.55.0), end to end:
+#
+#   ~/.gitconfig: [core] hooksPath = <attacker dir>   →  a post-commit hook ran
+#   and copied a scope's client-identifying content out of the store, while this
+#   script printed "committed <sha>" and "ok — 1 scope(s) processed" and exited
+#   0. `[init] templateDir = <dir>` does the same by baking the hook into the
+#   repository THIS SCRIPT bootstraps.
+#
+# The fix deliberately does NOT enumerate dangerous keys (hooksPath, fsmonitor,
+# filter.*.clean, diff.external, …) — enumerating badness is the mistake the
+# ledger already made twice. It removes the whole ambient surface instead:
+#
+#   GIT_CONFIG_NOSYSTEM=1     ignore /etc/gitconfig entirely
+#   GIT_CONFIG_GLOBAL=/dev/null   ignore ~/.gitconfig and ~/.config/git/config
+#                             entirely — EVERY key, not a chosen subset
+#
+# That leaves only per-repo `.git/config` and `.git/hooks`, which an errant agent
+# Write could still plant inside a scope — squarely in the threat model, since
+# the whole premise is that agents write into this store. So hooks are pinned off
+# for every invocation via GIT_CONFIG_COUNT (equivalent to `-c`, and MEASURED to
+# override even a repo-local `core.hooksPath`), pointing at a directory that is
+# empty by construction. VERIFIED: with this in place an ambient hook, a
+# template-baked hook and a directly-planted .git/hooks/post-commit all fail to
+# fire.
+#
+# Each of the two controls is pinned by a test that ONLY it can satisfy —
+# test_no_ambient_global_config_reaches_git_at_all for the GLOBAL neutralisation,
+# test_a_hook_planted_inside_the_scope_does_not_fire for the hooksPath pin. That
+# separation was not free: a mutation sweep found that deleting either one killed
+# NO test, because each independently blocked the other's fixture.
+#
+# ⚠ `init.templateDir` (KEY_1) is the exception and is deliberately left as
+# REDUNDANT belt-and-braces: with GLOBAL neutralised there is no remaining source
+# for it, so no single-mutant test can observe it. It is kept because it still
+# holds if the GLOBAL line is ever removed. Stated plainly rather than implied,
+# so nobody later mistakes it for a covered control.
+#
+# Consequence worth stating: commits are no longer attributed to the operator's
+# global git identity. That is intentional — the identity of a machine backup
+# should not vary by host — and it is what makes
+# test_an_identity_is_seeded_when_git_cannot_resolve_one environment-independent
+# instead of passing in a sandbox and failing on a host with a system gitconfig.
+ASI_NOHOOKS="$(mktemp -d "${TMPDIR:-/tmp}/asi-nohooks.XXXXXX")" ||
+  die "could not create the empty hooks directory — refusing to run with hooks live"
+# Candidate enumeration goes to FILES, not pipes, for two independent reasons:
+#   * find's exit code survives (a pipe discards it — see list_candidates);
+#   * NUL-delimited output survives. `$(…)` silently drops NUL bytes ("warning:
+#     command substitution: ignored null byte in input"), which would corrupt
+#     exactly the framing that makes newline-containing paths safe.
+ASI_CANDFILE="$(mktemp "${TMPDIR:-/tmp}/asi-cands.XXXXXX")" &&
+  ASI_SORTED="$(mktemp "${TMPDIR:-/tmp}/asi-sorted.XXXXXX")" &&
+  ASI_IGNORED="$(mktemp "${TMPDIR:-/tmp}/asi-ignored.XXXXXX")" ||
+  die "could not create the temporary files this run needs"
+cleanup() { rm -rf "$ASI_NOHOOKS" "$ASI_CANDFILE" "$ASI_SORTED" "$ASI_IGNORED"; }
+trap cleanup EXIT
+
+export GIT_CONFIG_NOSYSTEM=1
+export GIT_CONFIG_GLOBAL=/dev/null
+export GIT_CONFIG_COUNT=2
+export GIT_CONFIG_KEY_0=core.hooksPath   GIT_CONFIG_VALUE_0="$ASI_NOHOOKS"
+export GIT_CONFIG_KEY_1=init.templateDir GIT_CONFIG_VALUE_1="$ASI_NOHOOKS"
 
 # A host that has never run /analyze-service has no store. Legitimate
 # nothing-to-do, not an error: this unit is installed on every host.
@@ -147,15 +246,20 @@ fi
 # negative control, which printed `scope .git: ... skipping`). A scope is a
 # repo-slug; none of them begin with a dot.
 #
-# 🔴 NUL-DELIMITED, AND SYMLINKS FOLLOWED. Both are correctness, not polish:
+# 🔴 NUL-DELIMITED, AND -L ONLY HERE. Both are correctness, not polish:
 #   * a scope name containing a newline used to be split into two nonexistent
 #     scopes, each reported "no *.md files — skipping", exit 0 (MEASURED) — the
 #     content sat UNVERSIONED and the unit called it success, which is the exact
 #     silent-loss outcome this script exists to prevent;
 #   * a scope reached through a symlink was not enumerated AT ALL ("no scope
-#     directories — nothing to do", exit 0, also MEASURED). `-L` is safe here
-#     precisely because `-maxdepth 1` means nothing is ever recursed into, so
-#     there is no symlink-loop to fall into.
+#     directories — nothing to do", exit 0, also MEASURED).
+#
+# `-L` is correct HERE and nowhere else. This walk needs symlinked ENTRIES under
+# the store to test as `-type d`, and `-maxdepth 1` means nothing is ever
+# recursed into, so there is no symlink loop to fall into. Every other find in
+# this file uses `-H` — follow the starting point (the scope may itself be a
+# symlink) but never descend THROUGH one. See list_candidates for what `-L`
+# there cost.
 # `sort -z` keeps the NUL framing; pipefail makes a `find` failure this
 # function's failure instead of an empty list that reads as "no scopes".
 list_scopes() {
@@ -164,13 +268,32 @@ list_scopes() {
 }
 
 # Every *.md on disk in a scope (relative to it), plus everything already
-# tracked. NUL-delimited for the same reason as list_scopes.
+# tracked, NUL-delimited, written to the file named by $1.
+#
+# 🔴 `-H`, NOT `-L`. A round of this PR "fixed" symlinked-scope enumeration by
+# putting `-L` on this walk too, which made it descend INTO symlinked
+# subdirectories of a scope and emit paths beyond them. git then refuses the
+# pathspec — `fatal: pathspec 'linkdir/inner.md' is beyond a symbolic link` —
+# so `git add` exits 128, the scope FAILS, and MEASURED it never self-heals:
+# byte-identical failure on the next run, with the whole scope left unversioned
+# forever. `-H` follows only the starting point, which is all the symlinked-SCOPE
+# case ever needed.
+#
+# 🔴 AND THE EXIT CODE IS CHECKED. This used to be piped straight into `sort -zu`
+# by its callers, which discards find's rc — the same empty-result-reads-as-clean
+# confusion this file's own header rails against. Writing to a file instead of a
+# pipe is what makes the rc observable.
 list_candidates() {
-  local scope="$1" is_repo="$2"
-  find -L "$scope" -type f -name '*.md' -not -path "${scope}/.git/*" -printf '%P\0'
-  if [ "$is_repo" -eq 1 ]; then
-    git -C "$scope" ls-files -z
+  local out="$1" scope="$2" is_repo="$3" rc=0
+  find -H "$scope" -type f -name '*.md' -not -path "${scope}/.git/*" -printf '%P\0' \
+    > "$out" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    return "$rc"
   fi
+  if [ "$is_repo" -eq 1 ]; then
+    git -C "$scope" ls-files -z >> "$out" || return $?
+  fi
+  return 0
 }
 
 # Run a git command capturing stdout and stderr SEPARATELY, preserving the exit
@@ -253,8 +376,12 @@ if [ "$PRINT_PLAN" -eq 1 ]; then
       *) desc="UNKNOWN repo state (${st}) — would refuse" ;;
     esac
     echo "scope:   ${name}  (${desc})"
-    list_candidates "$scope" "$([ "$st" = "1" ] && echo 1 || echo 0)" \
-      | sort -zu | tr '\0' '\n' | sed 's/^/    /'
+    if list_candidates "$ASI_CANDFILE" "$scope" \
+         "$([ "$st" = "1" ] && echo 1 || echo 0)"; then
+      sort -zu "$ASI_CANDFILE" | tr '\0' '\n' | sed 's/^/    /'
+    else
+      echo "    (could not enumerate this scope — it would FAIL, not be skipped)"
+    fi
   done < <(list_scopes)
   [ "$scopes_found" -eq 1 ] || echo "scope:   (none found under ${STORE})"
   exit 0
@@ -273,19 +400,67 @@ fi
 commit_once() {
   local scope="$1" name="$2" fail_prefix="$3" before="$4"
   local rc staged_rc n_changed msg sha after rec path
-  local -a paths_arr uncovered_arr
+  local -a paths_arr uncovered_arr ignored_arr
 
-  mapfile -d '' -t paths_arr < <(list_candidates "$scope" 1 | sort -zu)
+  # 🔴 AN INCOMPLETE ENUMERATION IS RECORDED, NOT ABORTED ON.
+  # find's exit code used to be discarded entirely (piped into `sort -zu`), so a
+  # scope containing an unreadable subdirectory enumerated a PARTIAL list and the
+  # run reported success — content that could not be seen was silently never
+  # staged, which is the failure this whole unit exists to prevent.
+  #
+  # But refusing outright is worse, not better: an unreadable `sub/` would then
+  # stop a perfectly readable `alpha.md` from ever being backed up, i.e. the
+  # guard would cause the data loss it is meant to catch. So commit what WAS
+  # enumerated — that content is now safe — and fail the scope afterwards so the
+  # incompleteness is loud. Protect first, then alarm.
+  ASI_ENUM_RC=0
+  list_candidates "$ASI_CANDFILE" "$scope" 1 || ASI_ENUM_RC=$?
+  sort -zu "$ASI_CANDFILE" > "$ASI_SORTED"
+  mapfile -d '' -t paths_arr < "$ASI_SORTED"
   if [ "${#paths_arr[@]}" -eq 0 ]; then
     echo "${PROG}: ${fail_prefix} tree is dirty but no candidate paths were enumerated. Dirty state:
 ${before}" >&2
     return 1
   fi
 
+  # 🔴 IGNORED INDEX FILES ARE THEIR OWN NAMED ERROR, CHECKED BEFORE STAGING.
+  # A `*.md` line in a scope's .gitignore makes every index file unstageable.
+  # `git add` then fails with "The following paths are ignored by one of your
+  # .gitignore files", which reads as a tooling problem and buries the only fact
+  # that matters: THOSE FILES WILL NEVER BE VERSIONED. MEASURED: rc=1 on every
+  # run, byte-identical, forever — a permanently-red gate, which RULES.md says is
+  # worse than no gate because it trains the operator to ignore the toast.
+  #
+  # Pre-filtering here reports the real cause by name and leaves the index
+  # completely untouched. (The "half-staged index" this was also reported to
+  # cause did NOT reproduce on git 2.55.0 — `git add` validates every pathspec
+  # before staging any of it, so nothing is staged. The permanent redness is
+  # real; the half-staging was not, and is not claimed here.)
+  git -C "$scope" check-ignore -z --stdin < "$ASI_SORTED" > "$ASI_IGNORED" 2>/dev/null
+  rc=$?
+  # rc 0 = at least one path is ignored, 1 = none are, >1 = the call itself
+  # failed. Only 1 is the clean case; rc=0 with an empty file must NOT read as
+  # "nothing ignored" — that is the empty-result confusion again.
+  if [ "$rc" -gt 1 ]; then
+    git_failed "$fail_prefix" check-ignore "$rc"
+    return 1
+  fi
+  if [ "$rc" -eq 0 ]; then
+    mapfile -d '' -t ignored_arr < "$ASI_IGNORED"
+    if [ "${#ignored_arr[@]}" -gt 0 ]; then
+      echo "${PROG}: ${fail_prefix} an index file is gitignored and will therefore never be versioned:
+$(printf '    %s\n' "${ignored_arr[@]}")
+  A .gitignore inside a scope silently un-backs-up the very content this unit
+  exists to protect. Nothing was staged. Remove the pattern, or move the file
+  out of the index — do not use -f." >&2
+      return 1
+    fi
+  fi
+
   capture git -C "$scope" add -- "${paths_arr[@]}"
   rc=$?
   if [ "$rc" -ne 0 ]; then
-    echo "${PROG}: ${fail_prefix} git add failed (rc=${rc}): ${CAP_ERR}${CAP_OUT}" >&2
+    git_failed "$fail_prefix" add "$rc" "${CAP_ERR}${CAP_OUT}"
     return 1
   fi
 
@@ -299,7 +474,7 @@ ${before}" >&2
 ${before}" >&2
     return 1
   elif [ "$staged_rc" -gt 1 ]; then
-    echo "${PROG}: ${fail_prefix} git diff --cached failed (rc=${staged_rc})" >&2
+    git_failed "$fail_prefix" "diff --cached" "$staged_rc"
     return 1
   fi
 
@@ -316,7 +491,7 @@ clean. See scripts/analyze-service-index/commit.sh in devrc."
   capture git -C "$scope" commit -q -m "$msg"
   rc=$?
   if [ "$rc" -ne 0 ]; then
-    echo "${PROG}: ${fail_prefix} git commit failed (rc=${rc}): ${CAP_ERR}${CAP_OUT}" >&2
+    git_failed "$fail_prefix" commit "$rc" "${CAP_ERR}${CAP_OUT}"
     return 1
   fi
 
@@ -333,7 +508,7 @@ clean. See scripts/analyze-service-index/commit.sh in devrc."
   rc=$?
   after="$CAP_OUT"
   if [ "$rc" -ne 0 ]; then
-    echo "${PROG}: ${fail_prefix} git status failed AFTER committing (rc=${rc}): ${CAP_ERR}" >&2
+    git_failed "$fail_prefix" "status (AFTER committing)" "$rc" "$CAP_ERR"
     return 1
   fi
   if [ -z "$after" ]; then
@@ -381,10 +556,25 @@ $(printf '    %s\n' "${uncovered_arr[@]}")
 # --- Commit one scope ----------------------------------------------------------
 # Returns 0 on success (committed or already clean), 1 on failure. Deliberately
 # does NOT exit: one bad scope must not stop the others being backed up.
+
+# Every point at which commit_scope is about to report success runs through
+# here. A scope whose candidate list could not be fully read is a FAILURE even
+# though the commit landed — the readable content is safe, but part of the scope
+# is unaccounted for and may hold index files that will never be versioned.
+# Reporting 0 here is precisely the "empty result read as clean" this file's
+# header forbids.
+ASI_ENUM_RC=0
+enum_verdict() {
+  [ "$ASI_ENUM_RC" -eq 0 ] && return 0
+  echo "${PROG}: $1 candidate enumeration was INCOMPLETE (find rc=${ASI_ENUM_RC}). Everything that COULD be read has been committed, so nothing readable was lost — but part of this scope could not be listed and may hold unversioned index files. Check directory permissions inside the scope." >&2
+  return 1
+}
+
 commit_scope() {
   local scope="$1" name="$2"
   local fail_prefix="scope ${name}:"
   local st rc before attempt result
+  ASI_ENUM_RC=0
 
   st="$(scope_repo_state "$scope")"
 
@@ -402,7 +592,10 @@ commit_scope() {
     # empty-result-means-clean confusion the header warns about, on the one path
     # whose whole job is to notice new content.
     local md_probe md_rc
-    md_probe="$(find -L "$scope" -type f -name '*.md' -print -quit 2>/dev/null)"
+    # `-H`, matching list_candidates: follow the scope itself (it may be a
+    # symlink) but never descend through one. `-L` here would make this probe
+    # answer for content that list_candidates cannot stage and git cannot track.
+    md_probe="$(find -H "$scope" -type f -name '*.md' -print -quit 2>/dev/null)"
     md_rc=$?
     if [ "$md_rc" -ne 0 ]; then
       echo "${PROG}: ${fail_prefix} could not enumerate *.md files (find rc=${md_rc}) — refusing to report a clean skip" >&2
@@ -420,10 +613,10 @@ commit_scope() {
     # the exact silent gap this script exists to close: a new scope would sit
     # unversioned indefinitely while the unit reported success every day.
     if ! git init -q -b "$ASI_BRANCH" "$scope"; then
-      echo "${PROG}: ${fail_prefix} git init failed" >&2
+      git_failed "$fail_prefix" init 1
       return 1
     fi
-    say "${fail_prefix} initialised a new git repository (branch ${ASI_BRANCH}, no remote)"
+    say "${fail_prefix} initialised a new repository (branch ${ASI_BRANCH}, no remote)"
   fi
 
   # A timer must never block on a GPG passphrase prompt. Pin per-repo so a future
@@ -439,10 +632,10 @@ commit_scope() {
   if ! git -C "$scope" var GIT_COMMITTER_IDENT >/dev/null 2>&1; then
     if ! git -C "$scope" config user.name "$ASI_GIT_NAME" ||
        ! git -C "$scope" config user.email "$ASI_GIT_EMAIL"; then
-      echo "${PROG}: ${fail_prefix} could not seed a git identity" >&2
+      echo "${PROG}: ${fail_prefix} could not seed a commit identity" >&2
       return 1
     fi
-    say "${fail_prefix} seeded a local git identity (${ASI_GIT_NAME} <${ASI_GIT_EMAIL}>)"
+    say "${fail_prefix} seeded a local commit identity (${ASI_GIT_NAME} <${ASI_GIT_EMAIL}>)"
   fi
 
   # rc checked SEPARATELY from output: empty output means "clean" only once rc=0
@@ -453,11 +646,11 @@ commit_scope() {
   rc=$?
   before="$CAP_OUT"
   if [ "$rc" -ne 0 ]; then
-    echo "${PROG}: ${fail_prefix} git status failed (rc=${rc}): ${CAP_ERR}" >&2
+    git_failed "$fail_prefix" status "$rc" "$CAP_ERR"
     return 1
   fi
   if [ -n "$CAP_ERR" ]; then
-    warn "${fail_prefix} git status succeeded but wrote to stderr (NOT treated as dirty state): ${CAP_ERR}"
+    warn "${fail_prefix} the status call succeeded but wrote to stderr (NOT treated as dirty state): ${CAP_ERR}"
   fi
 
   if [ -z "$before" ]; then
@@ -474,27 +667,40 @@ commit_scope() {
     commit_once "$scope" "$name" "$fail_prefix" "$before"
     result=$?
     case "$result" in
-      0) return 0 ;;
+      0) enum_verdict "$fail_prefix"; return $? ;;
       1) return 1 ;;
     esac
 
     capture git -C "$scope" status --porcelain
     rc=$?
     if [ "$rc" -ne 0 ]; then
-      echo "${PROG}: ${fail_prefix} git status failed while re-checking after a racing write (rc=${rc}): ${CAP_ERR}" >&2
+      git_failed "$fail_prefix" "status (re-checking after a racing write)" "$rc" "$CAP_ERR"
       return 1
     fi
     before="$CAP_OUT"
     if [ -z "$before" ]; then
-      return 0
+      enum_verdict "$fail_prefix"; return $?
     fi
     if [ "$attempt" -eq 1 ]; then
       say "${fail_prefix} the tree was re-dirtied during the commit by path(s) the *.md allowlist DOES cover — committing them in a second pass"
     fi
   done
 
-  warn "${fail_prefix} still dirty after two passes, but every remaining path is covered by the *.md allowlist or already tracked — a write is landing faster than this run completes. Nothing is lost; the next run commits it. Not failing the unit for a self-healing race."
-  return 0
+  # 🔴 EXIT 0 HERE IS A DELIBERATE JUDGEMENT CALL, SO IT IS PINNED.
+  # Nothing has been lost — every remaining path is covered and the next run
+  # commits it — so failing the unit would produce a critical toast for a
+  # non-event. But an unpinned judgement call is one refactor from silently
+  # inverting, and both mutants of this branch (returning 1 instead, and changing
+  # the two-pass cadence) survived the previous round's suite.
+  #
+  # ASI-RACE-UNSETTLED is a GREPPABLE MARKER, not decoration. Exit 0 means a
+  # chronically-racing scope is invisible in `systemctl status` forever; the
+  # marker is what makes `journalctl --user -u analyze-service-index-commit |
+  # grep ASI-RACE-UNSETTLED` answer "is this happening every day?". A scope that
+  # never settles is a real problem — it just is not a DATA-LOSS problem, which
+  # is what this unit's failure signal is reserved for.
+  warn "${fail_prefix} ASI-RACE-UNSETTLED still dirty after two passes, but every remaining path is covered by the *.md allowlist or already tracked — a write is landing faster than this run completes. Nothing is lost; the next run commits it. Not failing the unit for a self-healing race."
+  enum_verdict "$fail_prefix"; return $?
 }
 
 # --- Walk every scope ----------------------------------------------------------
