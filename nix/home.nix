@@ -2109,6 +2109,131 @@ in
     };
   };
 
+  # Autocommit for the /analyze-service index store.
+  #
+  # WHAT IT PROTECTS: ~/.claude/analyze-service-index/<scope>/<service>.md — the
+  # curated recon nuance the /analyze-service write-back protocol appends to
+  # (claude/commands/analyze-service.md). Measured 2026-08-06 on the workbench:
+  # 20 files, 56,862 bytes, actively written that same day, with NO git history,
+  # NO backup and NO host sync (ship.sh rsyncs only ~/.claude/skills/). The
+  # content is not re-derivable — it records gotchas and incident tie-ins that
+  # were true at a moment in time — so one bad agent Write destroyed it silently.
+  #
+  # 🔴 WHY A TIMER RATHER THAN A LINE IN THE WRITE-BACK PROTOCOL. The store is
+  # written by an agent's Write tool mid-recon, so no git operation happens
+  # naturally, and "remember to commit afterwards" is precisely the mechanism
+  # MEASURED not to stick here — claude/skills/close-the-loop/STATE.md records
+  # opt-in prose steps failing and the pivot to autonomous loops. A backup that
+  # depends on an agent remembering is not a backup. PRINCIPLES.md: prefer the
+  # deterministic fix over the prose one.
+  #
+  # 🔴 DELIBERATELY **NOT** GATED ON serverMode, unlike mail-actions-archive /
+  # initiatives-sync / ch-regrowth-check above. Those are gated because they need
+  # the homelab kubeconfig, the LAN API or a server role. This needs nothing but a
+  # local disk and git. It follows claude-log-rotate instead — the other unit that
+  # maintains ~/.claude and runs everywhere. Gating it would be actively harmful:
+  # /analyze-service runs on whichever host Zach is working from, the stores are
+  # per-host and NOT synced, so a laptop-gated-out store would sit unversioned
+  # forever while the workbench looked healthy — the exact silent gap this closes.
+  #
+  # NO NETWORK, BY CONSTRUCTION. The scopes hold client-identifying infrastructure
+  # detail, so the script never adds a remote, never pushes and never fetches, and
+  # there is deliberately no network dependency on the unit to hint otherwise.
+  # See devrc 60e6d9d for why that matters.
+  #
+  # Failure is LOUD: the script exits non-zero on a locked index, an unexpected
+  # non-.md file it refuses to sweep in, or a scope nested inside a foreign repo —
+  # and OnFailure hands that to the existing notify-failure@ toast. It is a silent
+  # no-op only when there is genuinely nothing to commit.
+  #
+  # Minimal user-unit env, so PATH is explicit: git (the whole job), findutils
+  # (scope + candidate enumeration), gnugrep/gnused (message assembly), plus
+  # bash/coreutils.
+  #
+  # 🔴 CONTAINMENT IS THE PRIMARY NO-EXFILTRATION CONTROL — the static ledger in
+  # the test file is secondary. Three fix rounds tried to make exfiltration
+  # DETECTABLE by reading commit.sh, and each round was evaded a new way (`cp -r`,
+  # eight wrapper prefixes, brace groups). This block makes it not land.
+  #
+  # ⚠ A PATH restriction is NOT that control, and it is worth saying so because
+  # it reads like one. `cp` and `tee` live in pkgs.coreutils, which this script
+  # genuinely needs (mktemp/sort/rm/realpath/tr) — so no honest PATH here can
+  # make `cp` "fail on sight". What makes `cp` useless is having nowhere to
+  # write.
+  #
+  # MEASURED 2026-08-06 under exactly these directives, on this host AND the
+  # laptop (systemd-run --user with the same properties, journal-captured):
+  #   * the committer runs normally and its commits persist in the real store;
+  #   * `cp -r <scope> <dir>` fails "Read-only file system", rc=1, nothing lands
+  #     (uncontained positive control: rc=0, 27 files copied);
+  #   * bash's BUILTIN `/dev/tcp` egress fails rc=1 where it returns rc=0
+  #     uncontained — a hole no PATH restriction can reach, since it needs no
+  #     binary at all.
+  #
+  # Each directive earns its place:
+  #   ProtectSystem=strict  everything read-only except what is bound back in
+  #   ProtectHome=tmpfs     $HOME disappears; the store and the script are the
+  #                         only parts of it that exist inside the namespace
+  #   BindPaths=-<store>    the ONE writable path. `-` so a host that has never
+  #                         run /analyze-service still starts and no-ops cleanly
+  #                         (the script's "no store — nothing to do" path)
+  #   PrivateTmp            mktemp scratch dies with the unit
+  #   PrivateNetwork        no route off-box, for any binary or builtin
+  #   NoNewPrivileges       no setuid escape from the above
+  systemd.user.services.analyze-service-index-commit = {
+    Unit = {
+      Description = "Commit any dirty state in the /analyze-service index store";
+      OnFailure = [ "notify-failure@%n.service" ];
+    };
+    Service = {
+      Type = "oneshot";
+      # Purely local git over ~20 small files. A hang means something is very
+      # wrong (a stale lock, a wedged filesystem) and must not pin the timer.
+      TimeoutStartSec = 120;
+      Environment = [
+        "PATH=${lib.makeBinPath [ pkgs.git pkgs.bash pkgs.coreutils pkgs.findutils pkgs.gnugrep pkgs.gnused ]}"
+        "HOME=%h"
+      ];
+      ProtectSystem = "strict";
+      ProtectHome = "tmpfs";
+      BindReadOnlyPaths = [ "-%h/workspace/devrc/scripts/analyze-service-index" ];
+      BindPaths = [ "-%h/.claude/analyze-service-index" ];
+      PrivateTmp = true;
+      PrivateNetwork = true;
+      NoNewPrivileges = true;
+      ExecStart = "${pkgs.bash}/bin/bash %h/workspace/devrc/scripts/analyze-service-index/commit.sh";
+      # Re-run the unit when the committer changes (cf. X-Restart-Triggers above).
+      X-Restart-Triggers = [ "${../scripts/analyze-service-index/commit.sh}" ];
+    };
+  };
+
+  # Daily. Persistent catches up a single missed run (host asleep / powered off).
+  # 03:30 keeps it clear of the 04:00 log rotate and the 06:00/08:00/09:00 server
+  # jobs.
+  #
+  # What daily actually buys, stated at the scope it holds: a file that has been
+  # committed at least once survives a later bad Write, because the previous
+  # run's commit still has it. What it does NOT cover — content CREATED and
+  # DESTROYED between two 03:30 runs never reaches any commit and is
+  # unrecoverable. That is not a corner case; it is the same-day
+  # write-then-clobber this work exists to defend against, merely narrowed from
+  # "always" to "after the first commit". Tightening OnCalendar shrinks that
+  # window but cannot close it — only committing at write time would, and the
+  # store is written by agents that will not do so (see commit.sh's header).
+  systemd.user.timers.analyze-service-index-commit = {
+    Unit = {
+      Description = "Daily timer for the /analyze-service index autocommit";
+    };
+    Timer = {
+      OnCalendar = "*-*-* 03:30:00";
+      Persistent = true;
+      RandomizedDelaySec = 600;
+    };
+    Install = {
+      WantedBy = [ "timers.target" ];
+    };
+  };
+
   # ClickHouse regrowth check for the activity store.
   #
   # 2026-08-03 the store was cut 112.4 GB -> 82.1 MB after `system.trace_log`

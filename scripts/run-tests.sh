@@ -85,6 +85,15 @@
 #              which is a floor that can no longer detect the collapse it
 #              exists for (an entire 989-test suite could vanish under it).
 #              Raise it when suites are added; never lower it to get green.
+#              2026-08-06: +38 for scripts/tests/test_analyze_service_index_commit.py
+#              (the /analyze-service index autocommit). The suite needs no new
+#              HERMETIC_TARGETS entry — scripts/tests is already a directory
+#              target, so the file is collected by the existing one.
+#              2026-08-07: the drift noted here (a floor ~900 below the real
+#              total, the same way the 2850 had drifted) is now CLOSED — the
+#              floor is set to the measured total with no headroom. See
+#              MIN_TESTS below for the current number and how it was measured;
+#              do not restate it here, one place only.
 #
 # Usage:
 #   scripts/run-tests.sh [--set hermetic|all] [--check-targets] [ROOT]
@@ -122,7 +131,29 @@ fi
 
 cd "$ROOT" || { echo "run-tests: cannot cd to ROOT=$ROOT" >&2; exit 2; }
 
-MIN_TESTS="${MIN_TESTS:-5600}"
+# MEASURED 2026-08-07 on `nix build .#checks.x86_64-linux.pytests` (the
+# authoritative tier, which runs `run-tests.sh --set hermetic .`):
+#   TOTAL collected=6595  passed=6594  skipped=1  failed=0
+#
+# 🔴 RE-MEASURE ON THE MERGED TREE, NOT THE BRANCH. The previous value, 6566,
+# was measured on a branch two commits behind main and was already stale when
+# written: #363 added 13 tests to test_playwright_nixos.py, and this branch adds
+# 16 more. A floor measured on a stale tree is a floor with invisible slack —
+# the same failure it exists to catch, one level up.
+#
+# 🔴 The floor tracks the measurement. It was once 5638 against a real total of
+# 6545 — 907 tests of slack, more than the entire 783-test
+# scripts/initiatives/tests suite: that whole directory could have vanished with
+# this gate still reporting green.
+#
+# `--set all` and `--set hermetic` are measured identical BY CONSTRUCTION today,
+# so this one number is valid for both: DEVHOST_TARGETS is empty (see below), so
+# `all` appends nothing to the hermetic list. If a DEVHOST target is ever added,
+# this floor stops covering `--set all` and needs splitting per set.
+#
+# Raise this whenever tests are added; LOWER it only with the new measurement
+# quoted in the commit message, never to make a red gate go green.
+MIN_TESTS="${MIN_TESTS:-6595}"
 
 # --- GUARD 1: tool precondition ------------------------------------------------
 # Every binary the suites `skipif` on. Absence must be an ERROR, never a skip.
