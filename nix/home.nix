@@ -2149,6 +2149,37 @@ in
   # Minimal user-unit env, so PATH is explicit: git (the whole job), findutils
   # (scope + candidate enumeration), gnugrep/gnused (message assembly), plus
   # bash/coreutils.
+  #
+  # 🔴 CONTAINMENT IS THE PRIMARY NO-EXFILTRATION CONTROL — the static ledger in
+  # the test file is secondary. Three fix rounds tried to make exfiltration
+  # DETECTABLE by reading commit.sh, and each round was evaded a new way (`cp -r`,
+  # eight wrapper prefixes, brace groups). This block makes it not land.
+  #
+  # ⚠ A PATH restriction is NOT that control, and it is worth saying so because
+  # it reads like one. `cp` and `tee` live in pkgs.coreutils, which this script
+  # genuinely needs (mktemp/sort/rm/realpath/tr) — so no honest PATH here can
+  # make `cp` "fail on sight". What makes `cp` useless is having nowhere to
+  # write.
+  #
+  # MEASURED 2026-08-06 under exactly these directives, on this host AND the
+  # laptop (systemd-run --user with the same properties, journal-captured):
+  #   * the committer runs normally and its commits persist in the real store;
+  #   * `cp -r <scope> <dir>` fails "Read-only file system", rc=1, nothing lands
+  #     (uncontained positive control: rc=0, 27 files copied);
+  #   * bash's BUILTIN `/dev/tcp` egress fails rc=1 where it returns rc=0
+  #     uncontained — a hole no PATH restriction can reach, since it needs no
+  #     binary at all.
+  #
+  # Each directive earns its place:
+  #   ProtectSystem=strict  everything read-only except what is bound back in
+  #   ProtectHome=tmpfs     $HOME disappears; the store and the script are the
+  #                         only parts of it that exist inside the namespace
+  #   BindPaths=-<store>    the ONE writable path. `-` so a host that has never
+  #                         run /analyze-service still starts and no-ops cleanly
+  #                         (the script's "no store — nothing to do" path)
+  #   PrivateTmp            mktemp scratch dies with the unit
+  #   PrivateNetwork        no route off-box, for any binary or builtin
+  #   NoNewPrivileges       no setuid escape from the above
   systemd.user.services.analyze-service-index-commit = {
     Unit = {
       Description = "Commit any dirty state in the /analyze-service index store";
@@ -2163,6 +2194,13 @@ in
         "PATH=${lib.makeBinPath [ pkgs.git pkgs.bash pkgs.coreutils pkgs.findutils pkgs.gnugrep pkgs.gnused ]}"
         "HOME=%h"
       ];
+      ProtectSystem = "strict";
+      ProtectHome = "tmpfs";
+      BindReadOnlyPaths = [ "-%h/workspace/devrc/scripts/analyze-service-index" ];
+      BindPaths = [ "-%h/.claude/analyze-service-index" ];
+      PrivateTmp = true;
+      PrivateNetwork = true;
+      NoNewPrivileges = true;
       ExecStart = "${pkgs.bash}/bin/bash %h/workspace/devrc/scripts/analyze-service-index/commit.sh";
       # Re-run the unit when the committer changes (cf. X-Restart-Triggers above).
       X-Restart-Triggers = [ "${../scripts/analyze-service-index/commit.sh}" ];
