@@ -457,11 +457,31 @@ def test_a_run_writes_nothing_outside_the_store(tmp_path):
     🔴 AND HERE IS WHAT IT STILL CANNOT SEE, stated rather than implied: a
     mutant writing to a HARDCODED absolute path outside the sandbox is invisible
     to any snapshot of this shape, because "everywhere else" is not enumerable.
-    That residue is exactly why the primary control is containment, not
-    detection — under the unit's ProtectSystem=strict/ProtectHome=tmpfs sandbox
-    there IS no writable path outside the store, so the hardcoded-path variant
-    fails at the kernel (MEASURED live: "Read-only file system"). This test is
-    the second line, and it is honest about being second.
+    That residue is why the primary control is containment, not detection.
+
+    🔴 THE PREVIOUS SENTENCE HERE WAS FALSE, AND IT WAS THE JUSTIFICATION FOR
+    LEAVING THIS HOLE OPEN. It read: "under the unit's ProtectSystem=strict/
+    ProtectHome=tmpfs sandbox there IS no writable path outside the store, so the
+    hardcoded-path variant fails at the kernel". MEASURED 2026-08-07 under
+    exactly those directives, `systemd-run --user`, journal-captured:
+
+        cp -r <store> /dev/shm/asi-leak   →  rc=0
+
+    and after the unit exited the HOST still held every file, mode 644, under a
+    1777 directory. A mutant doing precisely that survived all 75 tests. The
+    comment was not decoration — it is the reason this residue was accepted as
+    covered, so being wrong about it left the hole open in both layers at once.
+
+    /dev/shm is now closed by InaccessiblePaths on the unit (MEASURED: rc=1,
+    "Permission denied", /dev/shm is `d---------` inside the namespace), and
+    test_the_unit_is_contained_so_exfiltration_has_nowhere_to_go pins it.
+
+    What is HONESTLY true, at the scope it was measured: the directives named
+    there, TOGETHER, leave no writable path outside the store — on the paths
+    that have been probed. No test in this repo can check that; the nix build
+    sandbox has no systemd. This test remains the second line, and the sentence
+    above is a reminder that the first line is only as good as its last live
+    measurement.
     """
     sandbox = tmp_path / "sandbox"
     home = sandbox / "home"
@@ -891,12 +911,33 @@ def test_the_unit_is_wired_to_the_failure_toast():
     assert 'OnFailure = [ "notify-failure@%n.service" ]' in block
 
 
-def test_the_timer_is_daily_and_catches_up_a_missed_run():
+def test_the_timer_is_hourly_and_catches_up_a_missed_run():
+    """🔴 HOURLY, NOT DAILY, AND THE NUMBER IS THE POINT.
+
+    Content created and destroyed between two runs never reaches any commit and
+    is unrecoverable. That window cannot be CLOSED without committing at write
+    time — but "cannot be closed" was being used to argue for leaving it at 24 h,
+    and it is not an argument for that. Hourly cuts it 24×.
+
+    The cost, MEASURED 2026-08-07 under the unit's full sandbox, at two points so
+    the claim carries its own scope: ~80 ms for a 1-scope store, ~200-220 ms for
+    a 21-scope / 84-file / 204 KB store (the live store's shape). No network
+    (PrivateNetwork=true), no remote, no other host. 24 runs a day is ~5 s.
+
+    RandomizedDelaySec must stay well inside the hour or runs pile up.
+    """
     src = _home_nix()
     i = src.index("systemd.user.timers.analyze-service-index-commit")
-    block = src[i:i + 600]
-    assert re.search(r'OnCalendar = "\*-\*-\* \d\d:\d\d:\d\d"', block)
+    block = src[i:i + 900]
+    assert re.search(r'OnCalendar = "hourly"', block), (
+        "the timer is no longer hourly. A daily cadence leaves a 24-hour "
+        "unrecoverable create-and-destroy window; hourly costs ~200 ms a run.")
     assert "Persistent = true" in block
+    m = re.search(r"RandomizedDelaySec = (\d+)", block)
+    assert m, "no RandomizedDelaySec on the timer"
+    assert int(m.group(1)) < 3600, (
+        f"RandomizedDelaySec is {m.group(1)}s, >= the hourly period — runs can "
+        "overlap or be skipped.")
 
 
 def test_the_timer_is_actually_installed_into_timers_target():
@@ -943,9 +984,24 @@ def test_a_status_warning_on_stderr_is_not_mistaken_for_dirty_state(tmp_path):
 
     Reproduced with an unreadable subdirectory — `warning: could not open
     directory 'sub/': Permission denied`, rc=0, empty stdout.
+
+    🔴 DELIBERATE CONTRACT CHANGE, and the SECOND time this fixture has moved —
+    the same change test_a_status_warning_never_reaches_the_commit_message
+    records for the DIRTY path now reaches the CLEAN one. An unreadable
+    subdirectory makes the enumeration incomplete, and that alarm used to be
+    unreachable on a clean tree, so a permanently-unreadable directory reported
+    `ok` forever while its content sat unversioned. It now fails.
+
+    So this test no longer asserts `rc == 0`, and the distinction matters: rc was
+    never this test's invariant, it was a PROXY for one, and the proxy and the
+    invariant have come apart. What it owns is that a warning on stderr is not
+    read as DIRTY STATE — asserted directly below (clean-path message, no commit,
+    no warning text in the history) rather than inferred from an exit code that
+    now moves for an unrelated and correct reason.
     """
     store = _seed(tmp_path)
     assert _run(store).returncode == 0
+    before_commits = _commits(store / "some-scope")
     blocked = store / "some-scope" / "sub"
     blocked.mkdir()
     blocked.chmod(0o000)
@@ -953,13 +1009,23 @@ def test_a_status_warning_on_stderr_is_not_mistaken_for_dirty_state(tmp_path):
         p = _run(store)
     finally:
         blocked.chmod(0o755)
-    assert p.returncode == 0, (
-        f"a clean tree with a warning on stderr was treated as a failure:\n{p.stderr}")
     assert "clean — nothing to commit" in p.stdout, (
         f"the warning was mistaken for dirty state; stdout was:\n{p.stdout}")
+    assert _commits(store / "some-scope") == before_commits, (
+        "a commit was created from a warning line — the warning became the "
+        "dirty state, which is the whole defect this test pins")
     assert "Permission denied" in p.stderr, (
         "the warning was swallowed entirely — it must still be surfaced, just "
         "not as dirty state")
+    # The run DOES fail, and it must fail for the enumeration reason, not for a
+    # dirty tree. A test that accepted any non-zero exit would go green on
+    # exactly the regression it exists to catch.
+    assert p.returncode != 0
+    assert "enumeration was INCOMPLETE" in p.stderr, (
+        f"the run failed for the WRONG reason — a warning is being read as "
+        f"dirty state again:\n{p.stderr}")
+    assert "tree is dirty" not in p.stderr, (
+        f"the clean tree was reported as dirty:\n{p.stderr}")
 
 
 def test_a_status_warning_never_reaches_the_commit_message(tmp_path):
@@ -1226,6 +1292,99 @@ def test_an_unreadable_scope_is_not_reported_as_having_no_index_files(tmp_path):
     assert "skipping" not in p.stdout
 
 
+def test_an_unreadable_subdirectory_still_alarms_once_the_tree_is_CLEAN(tmp_path):
+    """🔴 THE ALARM WAS UNREACHABLE ON THE CLEAN PATH — i.e. on every run after
+    the first, i.e. forever.
+
+    `commit_scope` returned at `[ -z "$before" ]` before `commit_once` ever
+    called `list_candidates`, so ASI_ENUM_RC stayed 0 and `enum_verdict` was
+    never consulted. MEASURED on the previous round's tree, one scope holding a
+    readable `alpha.md` and an unreadable `sub/hidden.md`:
+
+        run 1 (tree dirty)  → alarms, rc=1          ← the only alarm, ever
+        run 2 (tree clean)  → "clean — nothing to commit", rc=0
+        run 3 (tree clean)  → "clean — nothing to commit", rc=0
+
+    with `git ls-files` holding `alpha.md` alone and `sub/hidden.md` sitting
+    unversioned on disk. One toast, once — then permanent silence over live data
+    loss. That is the exact shape of the bug this whole unit exists to prevent,
+    reproduced by its own alarm.
+
+    So the enumeration now runs BEFORE the clean-tree return. This asserts the
+    SECOND run, deliberately: run 1 alarms for a reason that already worked, and
+    a test that only checked run 1 is what let this survive.
+    """
+    store = tmp_path / "store"
+    scope = store / "some-scope"
+    blocked = scope / "sub"
+    blocked.mkdir(parents=True)
+    (scope / "alpha.md").write_text("readable\n", encoding="utf-8")
+    (blocked / "hidden.md").write_text("UNREADABLE\n", encoding="utf-8")
+
+    try:
+        blocked.chmod(0o000)
+        first = _run(store)
+        blocked.chmod(0o755)
+        # The tree is now clean as far as git can see: alpha.md is committed and
+        # sub/ is unreadable, so status reports nothing.
+        blocked.chmod(0o000)
+        second = _run(store)
+        blocked.chmod(0o000)
+        third = _run(store)
+    finally:
+        blocked.chmod(0o755)
+
+    assert first.returncode != 0, "the DIRTY run did not alarm — different bug"
+    assert "alpha.md" in _git(scope, "ls-files").stdout, (
+        "the readable content was not committed — the guard must protect first "
+        "and alarm second, never refuse outright")
+
+    for label, p in (("second", second), ("third", third)):
+        assert p.returncode != 0, (
+            f"the {label} (CLEAN-tree) run reported success while "
+            f"sub/hidden.md sat unversioned:\n{p.stdout}")
+        assert "enumeration was INCOMPLETE" in p.stderr, (
+            f"a DIFFERENT guard fired on the {label} run — this one is still "
+            f"unreached:\n{p.stderr}")
+        assert "clean — nothing to commit" in p.stdout, (
+            f"the {label} run was not actually on the clean path, so it does "
+            f"not test what it claims:\n{p.stdout}")
+
+
+def test_the_incomplete_enumeration_alarm_clears_when_the_scope_becomes_readable(tmp_path):
+    """🔴 THE OTHER HALF: a red gate nobody can clear trains you to ignore it
+    (RULES.md). Making the clean path alarm is only correct if `chmod` silences
+    it — otherwise this is a permanently-red gate, which is worse than none.
+
+    Also a negative control for the test above: it proves the failure there is
+    caused by the unreadable directory and not by the fixture's mere shape.
+    """
+    store = tmp_path / "store"
+    scope = store / "some-scope"
+    blocked = scope / "sub"
+    blocked.mkdir(parents=True)
+    (scope / "alpha.md").write_text("readable\n", encoding="utf-8")
+    (blocked / "hidden.md").write_text("was unreadable\n", encoding="utf-8")
+
+    try:
+        blocked.chmod(0o000)
+        _run(store)
+        blocked.chmod(0o000)
+        still_red = _run(store)
+    finally:
+        blocked.chmod(0o755)
+    assert still_red.returncode != 0, "precondition: the alarm should be firing"
+
+    healed = _run(store)
+    assert healed.returncode == 0, (
+        f"the alarm did not clear after chmod — it is a permanently-red gate:\n"
+        f"{healed.stdout}\n{healed.stderr}")
+    assert "enumeration was INCOMPLETE" not in healed.stderr
+    tracked = _git(scope, "ls-files").stdout
+    assert "sub/hidden.md" in tracked, (
+        f"the previously-unreadable content was still not versioned: {tracked}")
+
+
 def test_a_scope_name_containing_a_newline_is_one_scope_not_two(tmp_path):
     """🔴 M2. Newline-delimited enumeration split `we\\nird` into two
     nonexistent scopes, each reported "no *.md files — skipping", and the run
@@ -1243,9 +1402,33 @@ def test_a_scope_name_containing_a_newline_is_one_scope_not_two(tmp_path):
     assert "alpha.md" in _git(scope, "ls-files").stdout
 
 
-def test_a_scope_reached_through_a_symlink_is_still_versioned(tmp_path):
-    """🔴 M2. `find -type d` without `-L` did not enumerate a symlinked scope at
-    all: "no scope directories — nothing to do", exit 0, unversioned."""
+def test_a_symlinked_scope_fails_loudly_instead_of_silently_vanishing(tmp_path):
+    """🔴 THIS TEST USED TO ASSERT THE OPPOSITE, AND THE SUPPORT IT ASSERTED WAS
+    NEVER DELIVERED IN PRODUCTION.
+
+    It was `test_a_scope_reached_through_a_symlink_is_still_versioned`, green,
+    pinning `-L` on the scope walk. Under the unit's sandbox that does not work,
+    and it fails the silent way. MEASURED 2026-08-07, `systemd-run --user` with
+    the unit's exact directives, one real scope plus one symlinked scope:
+
+        contained    → "ok — 1 scope(s) processed", exit 0, symlink target has
+                       NO .git — never versioned, never mentioned
+        uncontained  → "ok — 2 scope(s) processed", target versioned
+
+    ProtectHome=tmpfs masks the target, the link dangles inside the namespace,
+    `find -L … -type d` stops matching, and the scope disappears. THIS SUITE RUNS
+    UNCONTAINED AND CANNOT SEE ANY OF THAT (RULES.md: a suite whose config pins a
+    dimension is structurally blind to that dimension's bugs) — which is exactly
+    how a test asserting unsupported behaviour stayed green while the unit lost
+    data every night.
+
+    Decision: symlinked scopes are NOT supported. Making them work needs
+    BindPaths widened to cover symlink targets — the hole
+    test_the_bind_lists_are_pinned_by_exact_contents exists to close — for a
+    feature with zero users. So they must FAIL, by name. A symlink must never
+    produce a silent `ok`, which is the one property this suite CAN verify and
+    which holds in both environments.
+    """
     real = tmp_path / "elsewhere" / "real-scope"
     real.mkdir(parents=True)
     (real / "alpha.md").write_text("a\n", encoding="utf-8")
@@ -1253,11 +1436,92 @@ def test_a_scope_reached_through_a_symlink_is_still_versioned(tmp_path):
     store.mkdir()
     (store / "linked-scope").symlink_to(real, target_is_directory=True)
     p = _run(store)
-    assert p.returncode == 0, p.stderr
+    assert p.returncode != 0, (
+        f"a symlinked scope exited 0 — the silent failure is back:\n{p.stdout}")
+    assert "is a SYMLINK" in p.stderr, (
+        f"a DIFFERENT guard fired — this one is still unreached:\n{p.stderr}")
+    assert "linked-scope" in p.stderr, "the failure did not name the scope"
     assert "nothing to do" not in p.stdout, (
-        f"the symlinked scope was not enumerated:\n{p.stdout}")
-    assert (real / ".git").is_dir(), "the symlinked scope was left unversioned"
-    assert "alpha.md" in _git(real, "ls-files").stdout
+        "the run reported nothing to do while a scope sat unversioned")
+    assert not (real / ".git").exists(), (
+        "the symlinked scope was versioned after all — support was re-added "
+        "without widening BindPaths, so it works here and NOT under the unit")
+
+
+def test_a_store_holding_only_a_symlinked_scope_still_fails(tmp_path):
+    """🔴 THE REACHABILITY CASE THE GUARD EXISTS FOR, and the one a naive fix
+    misses. With the symlink pass placed after the directory walk, or not
+    counted towards `seen`, a store whose ONLY entry is a symlink falls straight
+    through to the `seen -eq 0` branch — "no scope directories — nothing to do",
+    exit 0. That is the identical silent success, reached by a different route.
+    """
+    real = tmp_path / "elsewhere" / "real-scope"
+    real.mkdir(parents=True)
+    (real / "alpha.md").write_text("a\n", encoding="utf-8")
+    store = tmp_path / "store"
+    store.mkdir()
+    (store / "only-link").symlink_to(real, target_is_directory=True)
+    p = _run(store)
+    assert p.returncode != 0, (
+        f"a store holding only a symlinked scope exited 0:\n{p.stdout}")
+    assert "is a SYMLINK" in p.stderr, (
+        f"a DIFFERENT guard fired — this one is still unreached:\n{p.stderr}")
+    assert "nothing to do" not in p.stdout
+
+    # 🔴 ONE FILESYSTEM ENTRY IS ONE SCOPE. The store holds exactly one thing, so
+    # the tally must read "1 of 1". Found by a mutation that restored `-L` on the
+    # scope walk: the entry was then enumerated BOTH as a symlink and as a
+    # directory, giving "1 of 2 scope(s) FAILED" over a one-entry store, plus a
+    # contradictory "no repo and no *.md files — skipping" beside the SYMLINK
+    # failure. Every other assertion in this file still passed — the mutant was
+    # observable only in the count. Same invariant as the newline test: a scope
+    # counted twice is a scope the operator cannot reconcile against `ls`.
+    assert "1 of 1 scope(s) FAILED" in p.stderr, (
+        f"a one-entry store was not tallied as one scope:\n{p.stderr}")
+    assert "skipping" not in p.stdout, (
+        f"the symlink was ALSO processed as an ordinary scope — the run "
+        f"contradicts itself about what it did:\n{p.stdout}")
+
+
+def test_a_dangling_symlink_at_scope_level_also_fails(tmp_path):
+    """🔴 THE PREDICATE MUST BE `-type l`, NOT `-xtype l`.
+
+    Inside the sandbox the symlink is DANGLING (its target is masked by
+    ProtectHome=tmpfs); on this host and in this suite it points at a real
+    directory. `-xtype l` matches only the first shape, so a guard built on it
+    would be green here and untestable — measurable in neither environment at
+    the same time. `-type l` matches both, which is what makes the guard
+    observable in the suite AND effective under the unit. Both shapes pinned, so
+    a later "simplification" to -xtype dies here.
+    """
+    store = tmp_path / "store"
+    store.mkdir()
+    (store / "dangling-scope").symlink_to(tmp_path / "does-not-exist")
+    p = _run(store)
+    assert p.returncode != 0, (
+        f"a dangling symlink at scope level exited 0:\n{p.stdout}")
+    assert "is a SYMLINK" in p.stderr, (
+        f"a DIFFERENT guard fired — this one is still unreached:\n{p.stderr}")
+
+
+def test_print_plan_shows_a_symlinked_scope_as_a_would_fail(tmp_path):
+    """The plan must describe the store the next real run will see. Omitting an
+    entry that WILL fail describes a store that does not exist — and --print-plan
+    is what an operator reads to understand why the unit is red."""
+    real = tmp_path / "elsewhere" / "real-scope"
+    real.mkdir(parents=True)
+    (real / "alpha.md").write_text("a\n", encoding="utf-8")
+    store = tmp_path / "store"
+    (store / "ordinary").mkdir(parents=True)
+    (store / "ordinary" / "svc.md").write_text("x\n", encoding="utf-8")
+    (store / "linked-scope").symlink_to(real, target_is_directory=True)
+    p = _run(store, "--print-plan")
+    assert p.returncode == 0, p.stderr
+    assert "linked-scope" in p.stdout, "the plan hid the symlinked scope"
+    assert "SYMLINK" in p.stdout and "would FAIL" in p.stdout, (
+        f"the plan did not say the symlinked scope would fail:\n{p.stdout}")
+    assert "(none found under" not in p.stdout
+    assert not (real / ".git").exists(), "--print-plan mutated the symlink target"
 
 
 def test_a_symlinked_subdirectory_inside_a_scope_does_not_wedge_the_scope(tmp_path):
@@ -1650,13 +1914,33 @@ def _service_directives() -> set:
     return keys
 
 
+def _service_list(name: str) -> list:
+    """The string literals of a list-valued Service directive, in order.
+
+    Returns None when the directive is absent, so "missing" and "empty" stay
+    distinguishable — an empty list read as a missing directive is the
+    empty-result confusion this whole PR is about.
+    """
+    m = re.search(rf"\b{re.escape(name)}\s*=\s*\[(.*?)\]\s*;",
+                  _service_block(), re.S)
+    if not m:
+        return None
+    return re.findall(r'"([^"]*)"', m.group(1))
+
+
 # 🔴 The EXACT set of Service directives. Asserted, not sampled.
 SERVICE_DIRECTIVE_LEDGER = {
     "Type", "TimeoutStartSec", "Environment",
     "ProtectSystem", "ProtectHome", "BindReadOnlyPaths", "BindPaths",
+    "InaccessiblePaths",
     "PrivateTmp", "PrivateNetwork", "NoNewPrivileges",
     "ExecStart", "X-Restart-Triggers",
 }
+
+# 🔴 The EXACT contents of the two bind lists — the directives that ARE the
+# containment. See test_the_bind_lists_are_pinned_by_exact_contents.
+BIND_PATHS_LEDGER = ["-%h/.claude/analyze-service-index"]
+BIND_READ_ONLY_PATHS_LEDGER = ["%h/workspace/devrc/scripts/analyze-service-index"]
 
 
 def test_execstart_is_the_only_exec_directive():
@@ -1753,13 +2037,98 @@ def test_the_unit_is_contained_so_exfiltration_has_nowhere_to_go():
             "no-exfiltration guarantee rests entirely on a static check that "
             "has already been evaded three times.")
 
-    assert re.search(r'BindPaths\s*=\s*\[\s*"-%h/\.claude/analyze-service-index"',
-                     block), (
-        "the store is not bind-mounted back in as the ONE writable path (or the "
-        "leading `-` is missing, which makes a host that has never run "
-        "/analyze-service fail to start instead of no-opping cleanly)")
-    assert re.search(
-        r'BindReadOnlyPaths\s*=\s*\[\s*"-%h/workspace/devrc/scripts/analyze-service-index"',
-        block), (
-        "the script directory is not bound in read-only — with ProtectHome="
-        "tmpfs the ExecStart path would not exist inside the namespace")
+    # 🔴 /dev/shm. Not covered by ANY of the directives above — MEASURED
+    # 2026-08-07 under exactly them: `cp -r <store> /dev/shm/...` rc=0, and the
+    # content was still on the HOST after the unit exited, mode 644 under a 1777
+    # directory. A mutant doing that survived all 75 tests of the previous round.
+    # PrivateDevices and PrivateIPC do NOT close it (both measured: rc=0, still
+    # persists); TemporaryFileSystem=/dev/shm makes it private but still
+    # writable. InaccessiblePaths is what was measured to work.
+    inaccessible = _service_list("InaccessiblePaths")
+    assert inaccessible is not None, (
+        "InaccessiblePaths is gone. /dev/shm is then writable, world-shared and "
+        "HOST-PERSISTENT inside this unit — a working exfiltration target that "
+        "ProtectSystem=strict and ProtectHome=tmpfs do not cover.")
+    assert "/dev/shm" in inaccessible, (
+        f"/dev/shm is not in InaccessiblePaths ({inaccessible}).")
+
+
+def test_the_bind_lists_are_pinned_by_exact_contents(tmp_path):
+    """🔴 THE CONTAINMENT WAS PINNED ON ITS FIRST LIST ELEMENT ONLY.
+
+    The old assertions were prefix regexes anchored at `[`, so APPENDING an
+    entry passed. VERIFIED on the previous round's tree:
+
+        BindPaths = [ "-%h/.claude/analyze-service-index" "-%h" ];
+
+    → 75 passed. Live, that second entry gives the unit a writable real $HOME:
+    `~/.ssh`, the devrc checkout, everything (MEASURED 2026-08-07 with
+    systemd-run --user: write rc=0, content present on the host afterwards).
+    One token, no test moves, and the primary no-exfiltration control is gone.
+
+    This is the same class test_execstart_is_the_only_exec_directive closes, and
+    it was left open on the two directives that ARE the control. So both lists
+    are asserted by EXACT CONTENTS, failing on grow *or* shrink — a directive
+    ledger, one level down.
+
+    Deliberately frozen at one entry each. Widening either is what supporting
+    symlinked scopes would require, which is why commit.sh refuses them instead.
+    """
+    for name, ledger in (("BindPaths", BIND_PATHS_LEDGER),
+                         ("BindReadOnlyPaths", BIND_READ_ONLY_PATHS_LEDGER)):
+        actual = _service_list(name)
+        assert actual is not None, f"{name} is missing from the unit entirely."
+        added = [e for e in actual if e not in ledger]
+        removed = [e for e in ledger if e not in actual]
+        assert not added, (
+            f"{name} gained entr(ies): {added}. Every entry is a path this unit "
+            "can reach INSIDE the sandbox — for BindPaths, a path it can WRITE. "
+            "Add it to the ledger deliberately, in the same commit, having "
+            "measured live what it lets the unit touch.")
+        assert not removed, (
+            f"{name} LOST entr(ies): {removed}. For BindPaths that is the store "
+            "itself; for BindReadOnlyPaths the unit cannot see its own script.")
+        assert actual == ledger, (
+            f"{name} is {actual}, ledger is {ledger} — same entries, different "
+            "order or duplicated; mount order is not cosmetic.")
+
+    # The leading `-` is policy, per list, and the two differ ON PURPOSE.
+    assert BIND_PATHS_LEDGER[0].startswith("-"), (
+        "the store bind lost its leading `-`: a host that has never run "
+        "/analyze-service would fail to start instead of no-opping cleanly.")
+    assert not BIND_READ_ONLY_PATHS_LEDGER[0].startswith("-"), (
+        "the script bind grew a leading `-`. MEASURED 2026-08-07 with the "
+        "source absent: WITH `-` systemd skips the mount silently and you get "
+        "`bash: .../commit.sh: No such file or directory`, status=127 — loud, "
+        "but naming the wrong thing. WITHOUT it: status=226/NAMESPACE, "
+        "'Failed to set up mount namespacing: <path>: No such file or "
+        "directory', which names the actual fault.")
+
+
+def test_the_bind_list_parser_sees_an_appended_entry():
+    """🔴 POSITIVE CONTROL for the exact-contents assertion above. The whole
+    point is catching a SECOND element, so prove the parser can see one — and
+    that it does not confuse a missing directive with an empty list."""
+    import types
+    fake = types.SimpleNamespace()
+    fake.text = (
+        "systemd.user.services.analyze-service-index-commit = {\n"
+        "    Service = {\n"
+        '      BindPaths = [ "-%h/.claude/analyze-service-index" "-%h" ];\n'
+        "      BindReadOnlyPaths = [ ];\n"
+        "    };\n"
+        "  };\n")
+    global _home_nix
+    original = _home_nix
+    try:
+        _home_nix = lambda: fake.text  # noqa: E731
+        got = _service_list("BindPaths")
+        empty = _service_list("BindReadOnlyPaths")
+        absent = _service_list("InaccessiblePaths")
+    finally:
+        _home_nix = original
+    assert got == ["-%h/.claude/analyze-service-index", "-%h"], (
+        f"the parser cannot see an appended BindPaths entry (got {got}) — "
+        "test_the_bind_lists_are_pinned_by_exact_contents is vacuous")
+    assert empty == [], "an EMPTY list must read as empty, not as missing"
+    assert absent is None, "a MISSING directive must read as None, not as empty"

@@ -39,12 +39,21 @@
 # 🔴 THE PRIMARY CONTROL IS CONTAINMENT, NOT DETECTION. Three fix rounds tried to
 # make exfiltration *visible* to a static check and each round was evaded a new
 # way. What actually holds is the unit's sandbox in nix/home.nix — ProtectSystem
-# =strict + ProtectHome=tmpfs (so the only writable path in the whole namespace
-# is the store itself) and PrivateNetwork=true (so there is no route off-box at
-# all). MEASURED 2026-08-06 under exactly that sandbox: `cp -r <scope> <dir>`
-# fails "Read-only file system", and bash's builtin `/dev/tcp` egress — which no
-# PATH restriction can reach — fails where it succeeds uncontained. A future edit
-# reaching for exfiltration does not need to be *noticed*; it cannot land.
+# =strict + ProtectHome=tmpfs + InaccessiblePaths=/dev/shm (together: no writable
+# path in the namespace but the store) and PrivateNetwork=true (no route off-box
+# at all). MEASURED 2026-08-06 under that sandbox: `cp -r <scope> <dir>` fails
+# "Read-only file system", and bash's builtin `/dev/tcp` egress — which no PATH
+# restriction can reach — fails where it succeeds uncontained.
+#
+# ⚠ THE PARENTHETICAL ABOVE ONCE NAMED ONLY THE FIRST TWO DIRECTIVES, AND WAS
+# MEASURABLY FALSE: `/dev/shm` was writable, world-shared and host-persistent
+# under exactly that pair (2026-08-07 — `cp -r` rc=0, files still on the host
+# after the unit exited). The comment was not merely stale; it was load-bearing,
+# cited in the test file as the reason a hardcoded-path exfil mutant was allowed
+# to survive by design. Read that as a standing warning about this whole block:
+# every claim here is about a namespace nothing in this repo can construct at
+# test time, so it is only ever as true as the last `systemd-run --user`
+# measurement behind it.
 #
 # 🔴 AND AMBIENT GIT CONFIG IS NEUTRALISED, because it bypassed everything above
 # WITHOUT EDITING THIS FILE AT ALL. MEASURED: a global `core.hooksPath`
@@ -246,38 +255,71 @@ fi
 # negative control, which printed `scope .git: ... skipping`). A scope is a
 # repo-slug; none of them begin with a dot.
 #
-# 🔴 NUL-DELIMITED, AND -L ONLY HERE. Both are correctness, not polish:
-#   * a scope name containing a newline used to be split into two nonexistent
-#     scopes, each reported "no *.md files — skipping", exit 0 (MEASURED) — the
-#     content sat UNVERSIONED and the unit called it success, which is the exact
-#     silent-loss outcome this script exists to prevent;
-#   * a scope reached through a symlink was not enumerated AT ALL ("no scope
-#     directories — nothing to do", exit 0, also MEASURED).
-#
-# `-L` is correct HERE and nowhere else. This walk needs symlinked ENTRIES under
-# the store to test as `-type d`, and `-maxdepth 1` means nothing is ever
-# recursed into, so there is no symlink loop to fall into. Every other find in
-# this file uses `-H` — follow the starting point (the scope may itself be a
-# symlink) but never descend THROUGH one. See list_candidates for what `-L`
-# there cost.
-# `sort -z` keeps the NUL framing; pipefail makes a `find` failure this
+# 🔴 NUL-DELIMITED. That is correctness, not polish: a scope name containing a
+# newline used to be split into two nonexistent scopes, each reported "no *.md
+# files — skipping", exit 0 (MEASURED) — the content sat UNVERSIONED and the unit
+# called it success, which is the exact silent-loss outcome this script exists to
+# prevent. `sort -z` keeps the NUL framing; pipefail makes a `find` failure this
 # function's failure instead of an empty list that reads as "no scopes".
+#
+# 🔴 A SYMLINKED SCOPE IS NOT SUPPORTED, AND THAT IS A DECISION, NOT AN
+# OVERSIGHT. Earlier rounds put `-L` here so a symlinked scope would enumerate,
+# and a test asserted it worked. Under the unit's sandbox it does NOT, and the
+# failure is the silent kind. MEASURED 2026-08-07 with `systemd-run --user`
+# carrying the unit's exact directives, one real scope plus one symlinked scope:
+#
+#     contained    → "ok — 1 scope(s) processed", exit 0, and the symlink
+#                    target has NO .git at all — never versioned, no warning
+#     uncontained  → "ok — 2 scope(s) processed", target versioned
+#
+# The mechanism is ProtectHome=tmpfs: the symlink's target lives elsewhere under
+# $HOME, which does not exist inside the namespace, so the link dangles, `find
+# -L … -type d` does not match it, and the scope vanishes. The suite runs
+# uncontained and therefore CANNOT see this — it is the config-blind-suite
+# hazard in RULES.md, and it is why the old test was green while production was
+# broken.
+#
+# Making it genuinely work would mean widening BindPaths to cover symlink
+# targets, i.e. handing the unit writable paths outside the store — the exact
+# hazard the exact-list assertion in the test file now pins shut — for a feature
+# with zero users. So: both bind lists stay frozen at one entry each, symlinks
+# are refused, and the refusal is LOUD (see list_scope_symlinks). Silence is the
+# one outcome that is not allowed.
 list_scopes() {
-  find -L "$STORE" -mindepth 1 -maxdepth 1 -type d -not -name '.*' -printf '%f\0' \
+  find "$STORE" -mindepth 1 -maxdepth 1 -type d -not -name '.*' -printf '%f\0' \
+    | sort -z
+}
+
+# Symlinks sitting where a scope directory should be. `-type l` under the
+# default `-P`, deliberately: it matches a link to a real directory AND a
+# dangling one. `-xtype l` would match only the dangling case — which is what
+# the link becomes INSIDE the sandbox but not what it looks like on the host or
+# in the test suite, so a guard built on it would be unobservable in exactly the
+# environment that has to prove it works.
+list_scope_symlinks() {
+  find "$STORE" -mindepth 1 -maxdepth 1 -type l -not -name '.*' -printf '%f\0' \
     | sort -z
 }
 
 # Every *.md on disk in a scope (relative to it), plus everything already
 # tracked, NUL-delimited, written to the file named by $1.
 #
-# 🔴 `-H`, NOT `-L`. A round of this PR "fixed" symlinked-scope enumeration by
-# putting `-L` on this walk too, which made it descend INTO symlinked
-# subdirectories of a scope and emit paths beyond them. git then refuses the
-# pathspec — `fatal: pathspec 'linkdir/inner.md' is beyond a symbolic link` —
-# so `git add` exits 128, the scope FAILS, and MEASURED it never self-heals:
-# byte-identical failure on the next run, with the whole scope left unversioned
-# forever. `-H` follows only the starting point, which is all the symlinked-SCOPE
-# case ever needed.
+# 🔴 NO `-L`, AND NO `-H` EITHER. A round of this PR "fixed" symlinked-scope
+# enumeration by putting `-L` on this walk too, which made it descend INTO
+# symlinked subdirectories of a scope and emit paths beyond them. git then
+# refuses the pathspec — `fatal: pathspec 'linkdir/inner.md' is beyond a
+# symbolic link` — so `git add` exits 128, the scope FAILS, and MEASURED it
+# never self-heals: byte-identical failure on the next run, with the whole scope
+# left unversioned forever.
+#
+# The `-H` that replaced it existed for ONE reason: to follow a scope that was
+# itself a symlink. Symlinked scopes are now refused outright (see list_scopes),
+# so `$scope` can never be a symlink and `-H` differs from the default in no
+# case this script can reach. It is dropped rather than left in place, because a
+# flag whose stated justification no longer exists reads as a supported case and
+# invites someone to re-add `-L` to "finish the job". All three walks in this
+# file — this one, the md_probe, and scope discovery — now answer the same
+# question the same way.
 #
 # 🔴 AND THE EXIT CODE IS CHECKED. This used to be piped straight into `sort -zu`
 # by its callers, which discards find's rc — the same empty-result-reads-as-clean
@@ -285,7 +327,7 @@ list_scopes() {
 # pipe is what makes the rc observable.
 list_candidates() {
   local out="$1" scope="$2" is_repo="$3" rc=0
-  find -H "$scope" -type f -name '*.md' -not -path "${scope}/.git/*" -printf '%P\0' \
+  find "$scope" -type f -name '*.md' -not -path "${scope}/.git/*" -printf '%P\0' \
     > "$out" || rc=$?
   if [ "$rc" -ne 0 ]; then
     return "$rc"
@@ -358,6 +400,13 @@ if [ "$PRINT_PLAN" -eq 1 ]; then
   echo "remote:  none — this script never adds one, never pushes, never fetches"
   echo "staging: explicit pathspecs only — never -A, never --all, never ."
   scopes_found=0
+  # Symlinks first, matching the real walk. A plan that quietly omits an entry
+  # which WILL fail the next real run describes a store that does not exist.
+  while IFS= read -r -d '' name; do
+    [ -n "$name" ] || continue
+    scopes_found=1
+    echo "scope:   ${name}  (SYMLINK — would FAIL; symlinked scopes are not supported)"
+  done < <(list_scope_symlinks)
   while IFS= read -r -d '' name; do
     [ -n "$name" ] || continue
     scopes_found=1
@@ -413,6 +462,13 @@ commit_once() {
   # guard would cause the data loss it is meant to catch. So commit what WAS
   # enumerated — that content is now safe — and fail the scope afterwards so the
   # incompleteness is loud. Protect first, then alarm.
+  #
+  # This is the SECOND enumeration of the scope in a dirty run — commit_scope
+  # already did one before its clean-tree early return, which is what makes the
+  # alarm reachable on a CLEAN run too. Re-enumerating here is not redundant:
+  # attempt 2 of the retry loop must see a tree that was re-dirtied since
+  # attempt 1. Deliberately re-derives ASI_ENUM_RC from scratch rather than
+  # OR-ing into it, so a condition that has cleared stops alarming.
   ASI_ENUM_RC=0
   list_candidates "$ASI_CANDFILE" "$scope" 1 || ASI_ENUM_RC=$?
   sort -zu "$ASI_CANDFILE" > "$ASI_SORTED"
@@ -592,10 +648,12 @@ commit_scope() {
     # empty-result-means-clean confusion the header warns about, on the one path
     # whose whole job is to notice new content.
     local md_probe md_rc
-    # `-H`, matching list_candidates: follow the scope itself (it may be a
-    # symlink) but never descend through one. `-L` here would make this probe
-    # answer for content that list_candidates cannot stage and git cannot track.
-    md_probe="$(find -H "$scope" -type f -name '*.md' -print -quit 2>/dev/null)"
+    # No `-L` and no `-H`, matching list_candidates exactly: the probe decides
+    # whether to CREATE a repository and list_candidates decides what can be
+    # STAGED, so they must answer the same question. `-L` here would make the
+    # probe see content beyond a symlink that list_candidates cannot stage and
+    # git cannot track — a repository bootstrapped and then failed on daily.
+    md_probe="$(find "$scope" -type f -name '*.md' -print -quit 2>/dev/null)"
     md_rc=$?
     if [ "$md_rc" -ne 0 ]; then
       echo "${PROG}: ${fail_prefix} could not enumerate *.md files (find rc=${md_rc}) — refusing to report a clean skip" >&2
@@ -653,9 +711,30 @@ commit_scope() {
     warn "${fail_prefix} the status call succeeded but wrote to stderr (NOT treated as dirty state): ${CAP_ERR}"
   fi
 
+  # 🔴 ENUMERATE BEFORE THE CLEAN-TREE EARLY RETURN, OR THE ALARM IS UNREACHABLE.
+  # This used to live only inside commit_once, which a clean tree never reaches.
+  # MEASURED on a scope holding a readable `alpha.md` and an unreadable `sub/`
+  # containing `hidden.md`:
+  #
+  #   run 1 (tree dirty)  → alarms, rc=1                      ← the only alarm
+  #   run 2 (tree clean)  → "clean — nothing to commit", rc=0
+  #   run 3 (tree clean)  → "clean — nothing to commit", rc=0  ← forever
+  #
+  # and `git ls-files` held `alpha.md` alone while `sub/hidden.md` sat on disk,
+  # unversioned, with the unit reporting success every day. One toast, once,
+  # months before anyone looks — then permanent silence over live data loss.
+  #
+  # Running it here makes a permanently-unreadable scope permanently RED. That is
+  # deliberate and it is NOT the "permanently-red gate" RULES.md warns about: the
+  # content genuinely is unversioned, a human must act, and it clears the instant
+  # a `chmod` lands. A gate nobody can clear trains you to ignore it; this one
+  # goes green the moment the thing it names is fixed.
+  ASI_ENUM_RC=0
+  list_candidates "$ASI_CANDFILE" "$scope" 1 || ASI_ENUM_RC=$?
+
   if [ -z "$before" ]; then
     say "${fail_prefix} clean — nothing to commit"
-    return 0
+    enum_verdict "$fail_prefix"; return $?
   fi
 
   # TWO passes at most. commit_once returns 2 when the tree was re-dirtied
@@ -708,6 +787,26 @@ warn_about_store_root_files
 
 failed=()
 seen=0
+
+# 🔴 A SYMLINK WHERE A SCOPE SHOULD BE IS A NAMED FAILURE — FIRST, AND ALWAYS.
+# It runs before the directory walk and counts towards `seen` on purpose: a
+# store holding ONLY a symlinked scope would otherwise fall through to the
+# `seen -eq 0` branch and exit 0 with "no scope directories — nothing to do",
+# which is the silent success this whole unit exists to eliminate. Refusing is
+# the decision (see list_scopes); refusing QUIETLY is not on the menu.
+while IFS= read -r -d '' name; do
+  [ -n "$name" ] || continue
+  seen=$((seen + 1))
+  echo "${PROG}: scope ${name}: is a SYMLINK, and symlinked scopes are NOT supported — its content is NOT being versioned.
+  Under this unit's sandbox (ProtectHome=tmpfs) the target does not exist inside
+  the namespace, so the link dangles and the scope silently disappears from
+  enumeration: MEASURED as \"ok — N scope(s) processed\", exit 0, and no commit
+  ever made. Failing here is the only honest signal.
+  Fix it by moving the real directory into ${STORE}/${name} — do not re-add \`-L\`
+  to the scope walk, which restores the silent version of this bug." >&2
+  failed+=("$name")
+done < <(list_scope_symlinks)
+
 while IFS= read -r -d '' name; do
   [ -n "$name" ] || continue
   seen=$((seen + 1))

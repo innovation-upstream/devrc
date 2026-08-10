@@ -2230,9 +2230,11 @@ in
   # See devrc 60e6d9d for why that matters.
   #
   # Failure is LOUD: the script exits non-zero on a locked index, an unexpected
-  # non-.md file it refuses to sweep in, or a scope nested inside a foreign repo —
-  # and OnFailure hands that to the existing notify-failure@ toast. It is a silent
-  # no-op only when there is genuinely nothing to commit.
+  # non-.md file it refuses to sweep in, a scope nested inside a foreign repo, a
+  # SYMLINK where a scope directory should be, or a scope it could not fully
+  # enumerate (an unreadable subdirectory) — and OnFailure hands that to the
+  # existing notify-failure@ toast. It is a silent no-op only when there is
+  # genuinely nothing to commit.
   #
   # Minimal user-unit env, so PATH is explicit: git (the whole job), findutils
   # (scope + candidate enumeration), gnugrep/gnused (message assembly), plus
@@ -2258,6 +2260,17 @@ in
   #     uncontained — a hole no PATH restriction can reach, since it needs no
   #     binary at all.
   #
+  # 🔴 THAT SET WAS NOT COMPLETE, AND THE GAP WAS A LIVE ONE. Re-measured
+  # 2026-08-07: `/dev/shm` was writable and its contents SURVIVED on the host.
+  # The lesson generalises past the one path — "ProtectSystem=strict plus
+  # ProtectHome=tmpfs means the store is the only writable path" is a claim
+  # about two directives, not about the namespace, and the only way to find the
+  # difference is to run it. The nix build sandbox has no systemd, so NO TEST IN
+  # THIS REPO CAN CHECK ANY OF THIS: the suite can assert a directive is
+  # present, never that it works. Adding a directive here without a
+  # `systemd-run --user` measurement is how a declared-but-ineffective
+  # hardening line ships, which is worse than none.
+  #
   # Each directive earns its place:
   #   ProtectSystem=strict  everything read-only except what is bound back in
   #   ProtectHome=tmpfs     $HOME disappears; the store and the script are the
@@ -2265,9 +2278,19 @@ in
   #   BindPaths=-<store>    the ONE writable path. `-` so a host that has never
   #                         run /analyze-service still starts and no-ops cleanly
   #                         (the script's "no store — nothing to do" path)
-  #   PrivateTmp            mktemp scratch dies with the unit
+  #   InaccessiblePaths     closes /dev/shm, which none of the above covered
+  #   PrivateTmp            mktemp scratch dies with the unit; also covers /var/tmp
   #   PrivateNetwork        no route off-box, for any binary or builtin
   #   NoNewPrivileges       no setuid escape from the above
+  #
+  # 🔴 BOTH BIND LISTS ARE FROZEN AT EXACTLY ONE ENTRY, and the test file
+  # asserts their full contents rather than a prefix. Appending a second entry
+  # is a one-token hole: `BindPaths = [ "-%h/.claude/analyze-service-index"
+  # "-%h" ];` passed all 75 tests of the previous round and gives the unit a
+  # writable real $HOME — `~/.ssh`, the devrc checkout, everything (MEASURED
+  # 2026-08-07: write rc=0, content present on the host afterwards). This is
+  # also why symlinked scopes are refused rather than supported: supporting them
+  # means widening BindPaths to cover symlink targets, i.e. this exact hole.
   systemd.user.services.analyze-service-index-commit = {
     Unit = {
       Description = "Commit any dirty state in the /analyze-service index store";
@@ -2284,8 +2307,36 @@ in
       ];
       ProtectSystem = "strict";
       ProtectHome = "tmpfs";
-      BindReadOnlyPaths = [ "-%h/workspace/devrc/scripts/analyze-service-index" ];
+      # 🔴 NO LEADING `-` HERE, UNLIKE BindPaths. With `-` a missing source is
+      # silently skipped and the unit fails as `bash: …/commit.sh: No such file
+      # or directory`, status=127 — loud, but naming the wrong thing entirely.
+      # MEASURED 2026-08-07, source removed, same unit otherwise:
+      #   with `-`     → status=127, "bash: …/gone/commit.sh: No such file …"
+      #   without `-`  → status=226/NAMESPACE, "Failed to set up mount
+      #                  namespacing: …/gone: No such file or directory"
+      # The second names the missing mount. `-` is right on the STORE (a host
+      # that has never run /analyze-service must no-op cleanly, not fail) and
+      # wrong here: this script ships with the repo, so its absence is a real
+      # deployment fault and must say so.
+      BindReadOnlyPaths = [ "%h/workspace/devrc/scripts/analyze-service-index" ];
       BindPaths = [ "-%h/.claude/analyze-service-index" ];
+      # 🔴 /dev/shm IS WRITABLE AND PERSISTS ON THE HOST UNDER EVERYTHING ABOVE.
+      # ProtectSystem=strict and ProtectHome=tmpfs do not cover it, and it is a
+      # 1777 host-shared tmpfs, so it was a fully working exfiltration target.
+      # MEASURED 2026-08-07 under the exact directive set above:
+      #   `cp -r <store> /dev/shm/asi-leak` → rc=0, and after the unit exited
+      #   the HOST still showed every file, mode 644, under a 1777 directory.
+      # A mutant doing exactly that survived all 75 tests in the suite.
+      # With this line: rc=1 "Permission denied", /dev/shm is `d---------`
+      # inside the namespace, `touch` rc=1, and the committer is unaffected.
+      #
+      # What does NOT work, stated so nobody swaps it for the "tidier" option:
+      #   PrivateDevices=true  → cp rc=0, content persists on the host (MEASURED)
+      #   PrivateIPC=true      → cp rc=0, content persists on the host (MEASURED)
+      #   TemporaryFileSystem=/dev/shm → private, but still WRITABLE
+      # /var/tmp needs nothing: PrivateTmp already covers it (MEASURED: cp rc=0
+      # inside, nothing on the host afterwards).
+      InaccessiblePaths = [ "/dev/shm" "/dev/mqueue" ];
       PrivateTmp = true;
       PrivateNetwork = true;
       NoNewPrivileges = true;
@@ -2295,25 +2346,38 @@ in
     };
   };
 
-  # Daily. Persistent catches up a single missed run (host asleep / powered off).
-  # 03:30 keeps it clear of the 04:00 log rotate and the 06:00/08:00/09:00 server
-  # jobs.
+  # HOURLY. Persistent catches up a missed run (host asleep / powered off).
   #
-  # What daily actually buys, stated at the scope it holds: a file that has been
-  # committed at least once survives a later bad Write, because the previous
+  # What the timer actually buys, stated at the scope it holds: a file that has
+  # been committed at least once survives a later bad Write, because the previous
   # run's commit still has it. What it does NOT cover — content CREATED and
-  # DESTROYED between two 03:30 runs never reaches any commit and is
-  # unrecoverable. That is not a corner case; it is the same-day
-  # write-then-clobber this work exists to defend against, merely narrowed from
-  # "always" to "after the first commit". Tightening OnCalendar shrinks that
-  # window but cannot close it — only committing at write time would, and the
-  # store is written by agents that will not do so (see commit.sh's header).
+  # DESTROYED between two runs never reaches any commit and is unrecoverable.
+  # That is not a corner case; it is the same-day write-then-clobber this work
+  # exists to defend against.
+  #
+  # 🔴 THAT WINDOW IS NARROWED, NOT CLOSED, and the distinction is the whole
+  # point. Only committing at write time would close it, and the store is written
+  # by agents that will not do so (see commit.sh's header). But "cannot be
+  # closed" was being used as an argument for leaving it at 24 h, and it is not
+  # one: hourly cuts the unrecoverable window 24× for a cost measured at nothing.
+  # MEASURED 2026-08-07, contained, at two points so the claim carries its own
+  # scope:
+  #   1 scope,   2 files            → ~80 ms per clean run
+  #   21 scopes, 84 files, 204 KB   → ~200-220 ms per clean run
+  #     (the live store's shape: 21 entries. First-ever run, bootstrapping 21
+  #      repositories from nothing: 663 ms — once, then never again.)
+  # 24 runs a day is therefore ~5 s of CPU. The unit touches no network
+  # (PrivateNetwork=true), no remote and no other host, so hourly costs a
+  # rounding error and buys 23 hours of exposure back.
+  #
+  # RandomizedDelaySec stays at 600 — well inside the hour, so runs cannot pile
+  # up, and it keeps the unit off a predictable boundary.
   systemd.user.timers.analyze-service-index-commit = {
     Unit = {
-      Description = "Daily timer for the /analyze-service index autocommit";
+      Description = "Hourly timer for the /analyze-service index autocommit";
     };
     Timer = {
-      OnCalendar = "*-*-* 03:30:00";
+      OnCalendar = "hourly";
       Persistent = true;
       RandomizedDelaySec = 600;
     };
