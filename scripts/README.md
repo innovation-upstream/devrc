@@ -104,6 +104,8 @@ Click actions for those blocks:
 | `run-tests.sh` | **single source of truth** for running the Python suites |
 | `run-node-tests.sh` | single source of truth for running the `.mjs` suites |
 | `ship.sh` | converge BOTH NixOS hosts (workbench + laptop) to `origin/main`, then verify |
+| `drift-check.sh` | **passive deadman** — is either host silently no longer receiving changes? READ-ONLY: fetches and reports, never fixes. Distinct rc per condition (8 un-pushed/diverged, 10 behind, 12 not-on-main, 3/4 cannot-evaluate, 13 unreachable), aligned with `ship.sh`'s legend. Runs unattended as the `drift-check` systemd-user timer; drift ⇒ non-zero ⇒ the existing `notify-failure@` dunst toast |
+| `lib/host-role.sh` | the ONE host-identity predicate (both hosts report hostname `nixos`, so identity comes from local IPv4s). Sourced by `ship.sh` **and** `drift-check.sh` — never copied |
 
 ## Subsystems
 

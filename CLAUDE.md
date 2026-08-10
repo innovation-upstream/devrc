@@ -26,7 +26,11 @@ there. Only what's specific to this repo, where a working tree is also a **deplo
   healthy. 2026-08-06: two un-pushed commits on the workbench blocked it for hours, and the
   regrowth timer would have fired on 08-11 running the very bug the undelivered commit fixed.
   **Read every per-host line of `ship.sh`, not the final verdict** — one skip hides among
-  greens, and it prints its own rc legend on failure.
+  greens, and it prints its own rc legend on failure. Recurred 2026-08-09 (three un-pushed
+  commits, rescued as #366) — because **nothing runs `ship.sh` on a schedule**, so the only
+  detector was a human shipping something unrelated. `scripts/drift-check.sh` is the passive
+  deadman for exactly this: READ-ONLY (fetch + report, never fixes), same rc vocabulary as
+  `ship.sh`, run it any time by hand or via the `drift-check` systemd-user timer.
 - **Recovering a diverged host** — preserve, verify, *then* move the pointer:
   `git branch <topic> HEAD && git push -u origin <topic>` on that host → confirm the shas are
   on origin **from a different host** → `git reset --keep origin/main` (`--keep` refuses

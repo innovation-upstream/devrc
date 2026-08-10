@@ -18,6 +18,16 @@ let
   # DDL/insert path (snapshot #1 wrote 23 rows to prod, telemetry-on, and the DSN role
   # is confirmed to have CREATE SCHEMA). The timer runs hourly (see the timer below).
   enableInitiativesSync = true;
+  # Drift-deadman master switch (scripts/drift-check.sh) — gates ONLY whether the
+  # timer is wired into timers.target. The SERVICE definition is always emitted, so
+  # `systemctl --user start drift-check` works by hand on either host regardless.
+  # 🔴 Deliberately OFF at merge: the deadman was built + validated against scratch
+  # clones only, and enabling a timer is a live change to a host's behaviour. Flip to
+  # true in a separate, supervised deploy after one hand-run on the workbench proves
+  # the ssh leg reaches the laptop from a systemd-user context (a user unit has no
+  # ssh-agent, so the laptop key must be usable non-interactively — the one thing
+  # scratch clones structurally cannot test).
+  enableDriftDeadman = false;
   # Graphical host = runs X/i3 (both current NixOS hosts do; only a genuinely headless
   # box would not). Approximated as isNixOS, mirroring graphical.nix — deliberately NOT
   # !serverMode, which is true on the graphical workbench.
@@ -1811,6 +1821,84 @@ in
     };
     Install = {
       WantedBy = [ "timers.target" ];
+    };
+  };
+
+  # ── PASSIVE DRIFT DEADMAN (scripts/drift-check.sh) ───────────────────────────
+  # The gap this closes: `scripts/ship.sh` converges both hosts correctly, and a
+  # host it cannot fast-forward is SKIPPED and left as found (rc=8). But NOTHING
+  # RUNS SHIP ON A SCHEDULE — so a skipped host silently stops receiving every
+  # change while looking completely healthy. That has now happened twice
+  # (2026-08-06, 2026-08-09), both times found only because a human happened to
+  # ship something unrelated and read the per-host lines.
+  #
+  # This unit is the thing that looks when nobody is looking. It is READ-ONLY: it
+  # fetches (remote-tracking refs only) and reports. It never checks out, merges,
+  # fast-forwards, rebases, resets, or runs home-manager — enforced statically by
+  # scripts/tests/test_drift_check.py.
+  #
+  # ALERTING: no new notification mechanism. The script exits non-zero on drift,
+  # the unit enters `failed`, and the EXISTING OnFailure=notify-failure@%n.service
+  # turns that into the same sticky critical dunst toast every other important
+  # user unit already uses. The toast names the unit; the rc legend + per-host
+  # lines are in `journalctl --user -u drift-check`.
+  #
+  # The service is emitted UNCONDITIONALLY (any host can run it by hand); only the
+  # TIMER's timers.target wiring is gated — see enableDriftDeadman above.
+  systemd.user.services.drift-check = {
+    Unit = {
+      Description = "Passive drift deadman — is either devrc host silently no longer receiving changes?";
+      After = [ "network-online.target" ];
+      Wants = [ "network-online.target" ];
+      OnFailure = [ "notify-failure@%n.service" ];
+    };
+    Service = {
+      Type = "oneshot";
+      # Two `git fetch`es plus one ssh round trip. The ConnectTimeout inside the
+      # script is 10s, so this ceiling only ever fires on a wedged fetch; the
+      # cgroup is killed and the timer re-arms on the next OnUnitActiveSec.
+      TimeoutStartSec = 180;
+      Environment = [
+        # iproute2 is load-bearing, not incidental: `ip -4 -o addr show` is how
+        # local_ipv4s identifies WHICH host this is (both report hostname `nixos`).
+        # Without it detection returns "unknown" and the script exits 6.
+        "PATH=${lib.makeBinPath [ pkgs.git pkgs.openssh pkgs.iproute2 pkgs.bash pkgs.coreutils pkgs.gawk pkgs.gnused pkgs.gnugrep ]}"
+        "HOME=%h"
+      ];
+      ExecStart = "${pkgs.bash}/bin/bash %h/workspace/devrc/scripts/drift-check.sh";
+      # Re-run the unit when either the checker or the shared host-identity
+      # predicate changes.
+      X-Restart-Triggers = [
+        "${../scripts/drift-check.sh}"
+        "${../scripts/lib/host-role.sh}"
+      ];
+    };
+  };
+
+  # 6-hourly, not daily. The choice is bounded by the incident: on 2026-08-06 the
+  # workbench was blocked "for hours"; on 2026-08-09 three commits sat un-pushed
+  # long enough for a whole day's changes to miss that host. Daily would leave a
+  # ~24h window in which every merge silently misses a host — which is the failure
+  # itself, only shorter. 6h caps it at a quarter of that for 4 ssh+fetch round
+  # trips a day, a cost too small to be worth trading against. Anything tighter
+  # buys little: a human ships several times a day anyway, and the toast would
+  # start reading as noise. OnStartupSec gives one prompt run after login (the
+  # laptop is intermittent, so "just resumed" is exactly when it should look).
+  # No Persistent — it only applies to OnCalendar timers, not monotonic ones.
+  systemd.user.timers.drift-check = {
+    Unit = {
+      Description = "Periodic timer for the passive devrc drift deadman";
+    };
+    Timer = {
+      OnStartupSec = "10min";
+      OnUnitActiveSec = "6h";
+    };
+    Install = {
+      # 🔴 The master switch acts HERE and only here: with enableDriftDeadman
+      # false the unit file still exists (so it can be started/inspected by hand)
+      # but is wired into nothing, so no routine `ship.sh` can silently start a
+      # timer nobody has supervised once.
+      WantedBy = lib.optionals (serverMode && enableDriftDeadman) [ "timers.target" ];
     };
   };
 
