@@ -1432,6 +1432,218 @@ def test_the_incomplete_enumeration_alarm_clears_when_the_scope_becomes_readable
         f"the previously-unreadable content was still not versioned: {tracked}")
 
 
+def _find_shim_that_fails_the_scope_walk(tmp_path, walk_type="d"):
+    """PATH shim whose `find` runs the REAL find, prints everything it found, and
+    THEN exits 1 — but only for the depth-1 `-type <walk_type>` walk (`d` = the
+    scope-directory walk, `l` = the symlinked-scope walk).
+
+    Parameterised on purpose: the two walks share a root, so a chmod fixture
+    fails BOTH and cannot tell their two recorded rcs apart — a mutation sweep
+    found that dropping the symlink walk's rc capture killed no test. Selecting
+    one walk is what makes each capture independently observable.
+
+    This is the exact shape GNU findutils 4.10.0 produces on the sibling probe
+    (`find … -print -quit` prints its match AND exits 1, because `-quit` does not
+    clear an error that has already occurred), reproduced deterministically at a
+    level where a real permission fixture cannot produce it: MEASURED, a
+    `-maxdepth 1` walk does NOT error on an unreadable CHILD directory, so the
+    only real-world failure of this walk is the root itself, which yields an
+    EMPTY list. The partial list is therefore unreachable with chmod alone — and
+    "process what was enumerated" is precisely the property that must not
+    silently rot into "refuse the whole run", which is #372's bug one level up.
+
+    🔴 Shebang belongs to testlib.mockbin (see _racing_git).
+    """
+    real = shutil.which("find")
+    assert real, "find is not on PATH — the shim would recurse into itself"
+    bindir = tmp_path / f"findbin-{walk_type}"
+    bindir.mkdir(exist_ok=True)
+    write_exec(bindir / "find", (
+        'prev=""\n'
+        'scopewalk=0\n'
+        'for a in "$@"; do\n'
+        f'  if [ "$prev" = "-type" ] && [ "$a" = "{walk_type}" ]; then scopewalk=1; fi\n'
+        '  prev="$a"\n'
+        'done\n'
+        f'{real} "$@"\n'
+        'rc=$?\n'
+        'if [ "$scopewalk" = "1" ]; then exit 1; fi\n'
+        'exit $rc\n'))
+    return f"{bindir}:{os.environ['PATH']}"
+
+
+def test_an_unreadable_store_root_is_not_reported_as_an_empty_store(tmp_path):
+    """🔴 THE SILENT ZERO AT THE OUTERMOST WALK. `list_scopes` was
+    `find … | sort -z`, read as `< <(list_scopes)` — a process substitution
+    discards the function's rc as completely as the pipe discards find's. So a
+    store root that could not be READ enumerated nothing, fell through to the
+    `seen -eq 0` branch, and printed
+
+        "no scope directories under <store> — nothing to do"   (rc=0)
+
+    over content that exists. MEASURED 2026-08-10 against pre-fix commit.sh
+    (GNU findutils 4.10.0 — the `find` a script gets from PATH; note the
+    interactive `find` on this host is aliased to bfs 4.1.1, which returns 0 on
+    the same fixture and would have talked you out of the bug): store at mode
+    0300 over a real `alpha/svc.md`, find rc=1, script rc=0.
+
+    That is the mirror of #372. There an enumeration failure REFUSED legitimate
+    work; here it was discarded entirely and read as "there is nothing to do".
+    Same primitive, opposite failure, both silent.
+
+    🔴 POSITIVE CONTROL IS PART OF THIS TEST, NOT A SEPARATE ONE. This is a bug
+    about a check that cannot see, so a test asserting a zero is worthless until
+    the same fixture has been watched to produce a NON-zero: the readable run
+    below must report 1 scope processed. 1 on the positive control, 0 under test.
+    """
+    store = tmp_path / "store"
+    scope = store / "alpha"
+    scope.mkdir(parents=True)
+    (scope / "svc.md").write_text("real content\n", encoding="utf-8")
+
+    # --- positive control: the fixture CAN produce a non-zero scope count ---
+    control = _run(store)
+    assert control.returncode == 0, f"{control.stdout}\n{control.stderr}"
+    assert "1 scope(s) processed" in control.stdout, (
+        f"the fixture never enumerated a scope even when readable — a zero "
+        f"below would then prove nothing:\n{control.stdout}")
+
+    try:
+        store.chmod(0o300)          # write+search, NOT readable → find rc=1
+        blind = _run(store)
+    finally:
+        store.chmod(0o700)
+
+    assert "nothing to do" not in blind.stdout, (
+        f"a store that could not be READ was reported as a store that is "
+        f"EMPTY:\n{blind.stdout}")
+    assert blind.returncode != 0, (
+        f"an unenumerable store root exited 0:\n{blind.stdout}\n{blind.stderr}")
+    assert "scope enumeration of" in blind.stderr and (
+        "was INCOMPLETE" in blind.stderr), (
+        f"a DIFFERENT guard produced the non-zero exit — this one is still "
+        f"unreached:\n{blind.stderr}")
+
+    healed = _run(store)
+    assert healed.returncode == 0, (
+        f"the alarm did not clear after chmod — a permanently-red gate is worse "
+        f"than no gate:\n{healed.stdout}\n{healed.stderr}")
+    assert "1 scope(s) processed" in healed.stdout
+
+
+def test_a_partial_scope_enumeration_still_commits_the_scopes_it_did_see(tmp_path):
+    """🔴 THE OVER-CORRECTION THIS FIX MUST NOT MAKE. Failing the run on a bad
+    enumeration rc is only half right: doing it BEFORE the walk would refuse
+    every scope that WAS listed because one entry could not be read — which is
+    exactly #372 ("the guard meant to stop a silent skip was causing the loss it
+    exists to catch"), relocated from the scope level to the store level.
+
+    Protect first, then alarm: with a `find` that emits the full list and then
+    exits 1, the scope must still be bootstrapped and committed, AND the run must
+    still fail with the store-level INCOMPLETE message.
+    """
+    store = tmp_path / "store"
+    scope = store / "alpha"
+    scope.mkdir(parents=True)
+    (scope / "svc.md").write_text("real content\n", encoding="utf-8")
+
+    p = _run(store, PATH=_find_shim_that_fails_the_scope_walk(tmp_path))
+
+    assert (scope / ".git").is_dir(), (
+        f"the enumeration rc refused the whole run, so a readable scope was "
+        f"left unversioned — this is #372 one level up:\n"
+        f"{p.stdout}\n{p.stderr}")
+    assert "svc.md" in _git(scope, "ls-files").stdout, (
+        f"the scope was reached but its content was never committed:\n"
+        f"{p.stdout}\n{p.stderr}")
+    assert p.returncode != 0, (
+        f"protecting the readable scope must NOT silence the alarm:\n{p.stdout}")
+    assert "scope enumeration of" in p.stderr and "was INCOMPLETE" in p.stderr, (
+        f"a DIFFERENT guard produced the non-zero exit — this one is still "
+        f"unreached:\n{p.stderr}")
+    assert "ok — 1 scope(s) processed" not in p.stdout, (
+        f"a partial view of the store was reported as a completed run:\n"
+        f"{p.stdout}")
+
+
+def test_the_find_shim_only_fails_the_scope_walk(tmp_path):
+    """Positive/negative control for the shim above. Without it the same fixture
+    exits 0, so the failure in that test is caused by the injected rc and not by
+    the shim breaking `find` for everything (which would make the assertions
+    pass for the wrong reason — the shim is an instrument, and an instrument's
+    verdict is a claim about the instrument until both controls are watched)."""
+    store = tmp_path / "store"
+    scope = store / "alpha"
+    scope.mkdir(parents=True)
+    (scope / "svc.md").write_text("real content\n", encoding="utf-8")
+
+    shimmed = _run(store, PATH=_find_shim_that_fails_the_scope_walk(tmp_path))
+    assert shimmed.returncode != 0, "the shim injected no failure at all"
+
+    fresh = tmp_path / "store2"
+    (fresh / "alpha").mkdir(parents=True)
+    (fresh / "alpha" / "svc.md").write_text("real content\n", encoding="utf-8")
+    plain = _run(fresh)
+    assert plain.returncode == 0 and "1 scope(s) processed" in plain.stdout, (
+        f"the unshimmed control did not pass, so the shimmed failure is not "
+        f"attributable to the shim:\n{plain.stdout}\n{plain.stderr}")
+
+
+def test_a_failed_SYMLINK_walk_alarms_on_its_own(tmp_path):
+    """The symlinked-scope walk records its own rc, and that capture is
+    independently observable rather than riding on the directory walk's.
+
+    Both walks share the store root, so every chmod fixture fails both and a
+    single recorded rc would look sufficient — MEASURED as a surviving mutant
+    ("drop the symlink walk's rc capture", killed no test) before this existed.
+    A symlinked scope is a NAMED FAILURE (see list_scope_symlinks); an
+    enumeration of them that silently returns nothing converts that named
+    failure straight back into the silence it was written to replace.
+    """
+    store = tmp_path / "store"
+    scope = store / "alpha"
+    scope.mkdir(parents=True)
+    (scope / "svc.md").write_text("real content\n", encoding="utf-8")
+
+    p = _run(store, PATH=_find_shim_that_fails_the_scope_walk(tmp_path, "l"))
+
+    assert "svc.md" in _git(scope, "ls-files").stdout, (
+        f"the readable scope was refused rather than protected:\n"
+        f"{p.stdout}\n{p.stderr}")
+    assert p.returncode != 0, (
+        f"a failed symlink walk was swallowed:\n{p.stdout}\n{p.stderr}")
+    assert "symlinks=1" in p.stderr, (
+        f"the symlink walk's rc was not the thing that alarmed — a DIFFERENT "
+        f"guard fired:\n{p.stderr}")
+
+
+def test_print_plan_does_not_describe_an_unreadable_store_as_empty(tmp_path):
+    """--print-plan is what an operator reaches for to ask "what is in there?",
+    so a plan that answers "(none found)" over a store it could not READ is the
+    same silent zero, on the more consulted surface."""
+    store = tmp_path / "store"
+    scope = store / "alpha"
+    scope.mkdir(parents=True)
+    (scope / "svc.md").write_text("real content\n", encoding="utf-8")
+
+    control = _run(store, "--print-plan")
+    assert control.returncode == 0 and "scope:   alpha" in control.stdout, (
+        f"the fixture cannot even list a readable scope:\n{control.stdout}")
+
+    try:
+        store.chmod(0o300)
+        p = _run(store, "--print-plan")
+    finally:
+        store.chmod(0o700)
+
+    assert "none found" not in p.stdout, (
+        f"the plan claimed the store is empty when it could not read it:\n"
+        f"{p.stdout}")
+    assert p.returncode != 0, f"the plan exited 0 over a partial view:\n{p.stdout}"
+    assert "was INCOMPLETE" in p.stderr, (
+        f"a DIFFERENT guard fired — this one is still unreached:\n{p.stderr}")
+
+
 def test_a_scope_name_containing_a_newline_is_one_scope_not_two(tmp_path):
     """🔴 M2. Newline-delimited enumeration split `we\\nird` into two
     nonexistent scopes, each reported "no *.md files — skipping", and the run

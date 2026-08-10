@@ -121,8 +121,11 @@
 #   ASI_BRANCH      branch name for a scope this script initialises (default trunk)
 #   ASI_GIT_NAME / ASI_GIT_EMAIL   identity used ONLY when git cannot resolve one
 #
-# Exit codes: 0 = every scope committed or already clean. 1 = at least one scope
-# failed; read the message. It is deliberately never "quietly 0" on an error path.
+# Exit codes: 0 = every scope committed or already clean AND the store root was
+# fully enumerated. 1 = at least one scope failed, or the scope list itself is a
+# partial view of the store (see store_enum_verdict); read the message. It is
+# deliberately never "quietly 0" on an error path — and "no scopes found" counts
+# as 0 only once the walk that found none is known to have SUCCEEDED.
 set -uo pipefail
 
 PROG="analyze-service-index-commit"
@@ -221,16 +224,22 @@ command -v git >/dev/null 2>&1 ||
 # instead of passing in a sandbox and failing on a host with a system gitconfig.
 ASI_NOHOOKS="$(mktemp -d "${TMPDIR:-/tmp}/asi-nohooks.XXXXXX")" ||
   die "could not create the empty hooks directory — refusing to run with hooks live"
-# Candidate enumeration goes to FILES, not pipes, for two independent reasons:
-#   * find's exit code survives (a pipe discards it — see list_candidates);
+# ALL enumeration goes to FILES, not pipes, for two independent reasons:
+#   * find's exit code survives (a pipe discards it — see list_candidates; a
+#     process substitution discards it just as completely — see list_scopes);
 #   * NUL-delimited output survives. `$(…)` silently drops NUL bytes ("warning:
 #     command substitution: ignored null byte in input"), which would corrupt
 #     exactly the framing that makes newline-containing paths safe.
 ASI_CANDFILE="$(mktemp "${TMPDIR:-/tmp}/asi-cands.XXXXXX")" &&
   ASI_SORTED="$(mktemp "${TMPDIR:-/tmp}/asi-sorted.XXXXXX")" &&
-  ASI_IGNORED="$(mktemp "${TMPDIR:-/tmp}/asi-ignored.XXXXXX")" ||
+  ASI_IGNORED="$(mktemp "${TMPDIR:-/tmp}/asi-ignored.XXXXXX")" &&
+  ASI_SCOPEFILE="$(mktemp "${TMPDIR:-/tmp}/asi-scopes.XXXXXX")" &&
+  ASI_SYMFILE="$(mktemp "${TMPDIR:-/tmp}/asi-syms.XXXXXX")" ||
   die "could not create the temporary files this run needs"
-cleanup() { rm -rf "$ASI_NOHOOKS" "$ASI_CANDFILE" "$ASI_SORTED" "$ASI_IGNORED"; }
+cleanup() {
+  rm -rf "$ASI_NOHOOKS" "$ASI_CANDFILE" "$ASI_SORTED" "$ASI_IGNORED" \
+         "$ASI_SCOPEFILE" "$ASI_SYMFILE"
+}
 trap cleanup EXIT
 
 export GIT_CONFIG_NOSYSTEM=1
@@ -285,9 +294,36 @@ fi
 # with zero users. So: both bind lists stay frozen at one entry each, symlinks
 # are refused, and the refusal is LOUD (see list_scope_symlinks). Silence is the
 # one outcome that is not allowed.
+#
+# 🔴 AND THE EXIT CODE IS OBSERVABLE, BECAUSE THE RESULT GOES TO A FILE.
+# This used to be `find … | sort -z` read as `< <(list_scopes)`, and a process
+# substitution discards the function's rc as completely as a pipe discards
+# find's — the two rc-laundering shapes this file has now been bitten by three
+# times. MEASURED 2026-08-10 on this host (GNU findutils 4.10.0; note the
+# INTERACTIVE `find` here is aliased to bfs 4.1.1, which is NOT what a script
+# gets — bfs returns 0 on the same fixture, so an interactive spot-check lies):
+# with the store root at mode 0300 over a real scope holding `svc.md`, find
+# exits 1 and prints nothing, and the run said
+#
+#     "no scope directories under <store> — nothing to do"   (rc=0)
+#
+# i.e. a store that could not be READ was indistinguishable from a store that
+# was EMPTY. That is this file's own header — "an EMPTY RESULT cannot
+# distinguish two mechanisms" — failing on the outermost walk of all.
+#
+# The rc is now returned to the caller, which records it in ASI_SCOPE_ENUM_RC.
+# Note this walk is `-maxdepth 1`, so MEASURED the only reachable failure is the
+# root itself and the list then comes back EMPTY (an unreadable *child* dir does
+# not error a depth-1 walk: rc=0, child still listed). The loop still runs over
+# whatever WAS enumerated rather than aborting on the rc — protect first, alarm
+# second, exactly as commit_once's header and the #372 probe fix require — so a
+# future partial list is committed rather than refused.
 list_scopes() {
+  local out="$1" rc=0
   find "$STORE" -mindepth 1 -maxdepth 1 -type d -not -name '.*' -printf '%f\0' \
-    | sort -z
+    > "$out" || rc=$?
+  sort -z "$out" -o "$out" || return $?
+  return "$rc"
 }
 
 # Symlinks sitting where a scope directory should be. `-type l` under the
@@ -296,9 +332,30 @@ list_scopes() {
 # the link becomes INSIDE the sandbox but not what it looks like on the host or
 # in the test suite, so a guard built on it would be unobservable in exactly the
 # environment that has to prove it works.
+#
+# Same file-not-pipe treatment as list_scopes, and for the same reason: a
+# symlinked scope is a NAMED FAILURE, so an enumeration that silently returned
+# nothing would convert that named failure back into the silence it replaced.
 list_scope_symlinks() {
+  local out="$1" rc=0
   find "$STORE" -mindepth 1 -maxdepth 1 -type l -not -name '.*' -printf '%f\0' \
-    | sort -z
+    > "$out" || rc=$?
+  sort -z "$out" -o "$out" || return $?
+  return "$rc"
+}
+
+# --- The store-level analogue of enum_verdict ----------------------------------
+# enum_verdict (below) covers an incomplete walk INSIDE one scope. This covers an
+# incomplete walk OF THE STORE, which is strictly worse: a scope that cannot be
+# listed is never even reached, so not one of the per-scope guards runs and the
+# only remaining signal is this one. Same shape as enum_verdict deliberately —
+# record during the walk, judge afterwards, never refuse up front.
+ASI_SCOPE_ENUM_RC=0
+ASI_SYMLINK_ENUM_RC=0
+store_enum_verdict() {
+  [ "$ASI_SCOPE_ENUM_RC" -eq 0 ] && [ "$ASI_SYMLINK_ENUM_RC" -eq 0 ] && return 0
+  echo "${PROG}: scope enumeration of ${STORE} was INCOMPLETE (find rc: directories=${ASI_SCOPE_ENUM_RC}, symlinks=${ASI_SYMLINK_ENUM_RC}). Every scope that COULD be listed has been processed, so nothing readable was skipped — but the store root itself could not be fully read, so an unknown number of scopes were never even looked at and may hold unversioned index files. A store that cannot be READ must never be reported as a store that is EMPTY. Check the permissions on ${STORE} itself." >&2
+  return 1
 }
 
 # Every *.md on disk in a scope (relative to it), plus everything already
@@ -381,6 +438,17 @@ scope_repo_state() {
 # a failure — a permanently-red gate is worse than no gate (RULES.md), but a
 # silently-unversioned service file is exactly the hazard this work exists to
 # close, so it must be visible.
+#
+# ⚠ THIS ONE DELIBERATELY STILL DISCARDS find's rc, AND THAT IS ARGUED, NOT
+# OVERLOOKED. It walks the IDENTICAL path at the IDENTICAL depth as list_scopes
+# (`find "$STORE" -mindepth 1 -maxdepth 1`), differing only in `-type f` vs
+# `-type d`, so its failure set is exactly list_scopes' failure set: it cannot
+# fail on a run where list_scopes succeeds. Any rc it could report is therefore
+# already reported, loudly and non-zero, by store_enum_verdict — a second alarm
+# for the same fact would be noise, and this path is warning-only with no
+# refuse/skip decision hanging off it. 🔴 That reasoning dies the moment the two
+# walks stop sharing a root or a depth: if you change either one, this needs its
+# own rc check.
 warn_about_store_root_files() {
   local strays
   strays="$(find "$STORE" -mindepth 1 -maxdepth 1 -type f -name '*.md' \
@@ -400,13 +468,19 @@ if [ "$PRINT_PLAN" -eq 1 ]; then
   echo "remote:  none — this script never adds one, never pushes, never fetches"
   echo "staging: explicit pathspecs only — never -A, never --all, never ."
   scopes_found=0
+  # Both walks' rcs are recorded here too. A plan that prints "(none found)" over
+  # a store it could not READ is the same silent zero as the real run's, and it
+  # is the more dangerous of the two: --print-plan is what an operator reaches
+  # for to ask "what is in there?".
+  list_scope_symlinks "$ASI_SYMFILE" || ASI_SYMLINK_ENUM_RC=$?
+  list_scopes "$ASI_SCOPEFILE" || ASI_SCOPE_ENUM_RC=$?
   # Symlinks first, matching the real walk. A plan that quietly omits an entry
   # which WILL fail the next real run describes a store that does not exist.
   while IFS= read -r -d '' name; do
     [ -n "$name" ] || continue
     scopes_found=1
     echo "scope:   ${name}  (SYMLINK — would FAIL; symlinked scopes are not supported)"
-  done < <(list_scope_symlinks)
+  done < "$ASI_SYMFILE"
   while IFS= read -r -d '' name; do
     [ -n "$name" ] || continue
     scopes_found=1
@@ -431,7 +505,14 @@ if [ "$PRINT_PLAN" -eq 1 ]; then
     else
       echo "    (could not enumerate this scope — it would FAIL, not be skipped)"
     fi
-  done < <(list_scopes)
+  done < "$ASI_SCOPEFILE"
+  # The "(none found)" line is only truthful once the walk is known to have
+  # SUCCEEDED. Order matters: the verdict is consulted before the empty-store
+  # sentence is allowed to be printed at all.
+  if ! store_enum_verdict; then
+    echo "scope:   (enumeration INCOMPLETE — the plan above is a PARTIAL view of ${STORE})"
+    exit 1
+  fi
   [ "$scopes_found" -eq 1 ] || echo "scope:   (none found under ${STORE})"
   exit 0
 fi
@@ -805,6 +886,13 @@ warn_about_store_root_files
 failed=()
 seen=0
 
+# 🔴 ENUMERATE BOTH WALKS FIRST, RECORDING EACH rc — THEN PROCESS, THEN JUDGE.
+# Not "enumerate, and bail if the rc is bad": that would recreate #372's refusal
+# one level up, throwing away every scope that WAS listed because one entry of
+# the store root could not be read. Protect first, then alarm.
+list_scope_symlinks "$ASI_SYMFILE" || ASI_SYMLINK_ENUM_RC=$?
+list_scopes "$ASI_SCOPEFILE" || ASI_SCOPE_ENUM_RC=$?
+
 # 🔴 A SYMLINK WHERE A SCOPE SHOULD BE IS A NAMED FAILURE — FIRST, AND ALWAYS.
 # It runs before the directory walk and counts towards `seen` on purpose: a
 # store holding ONLY a symlinked scope would otherwise fall through to the
@@ -822,7 +910,7 @@ while IFS= read -r -d '' name; do
   Fix it by moving the real directory into ${STORE}/${name} — do not re-add \`-L\`
   to the scope walk, which restores the silent version of this bug." >&2
   failed+=("$name")
-done < <(list_scope_symlinks)
+done < "$ASI_SYMFILE"
 
 while IFS= read -r -d '' name; do
   [ -n "$name" ] || continue
@@ -830,9 +918,18 @@ while IFS= read -r -d '' name; do
   if ! commit_scope "${STORE}/${name}" "$name"; then
     failed+=("$name")
   fi
-done < <(list_scopes)
+done < "$ASI_SCOPEFILE"
 
-if [ "$seen" -eq 0 ]; then
+# 🔴 THE CLEAN ZERO IS GATED ON THE WALK HAVING SUCCEEDED — THAT IS THE FIX.
+# "no scope directories — nothing to do", rc=0, was ALSO what an unreadable
+# store root produced (MEASURED 2026-08-10, store at mode 0300 over a real scope
+# holding svc.md): a reassuring zero from a check that could not see anything.
+# So the verdict is consulted BEFORE that sentence may be printed, and an
+# incomplete walk exits non-zero whether or not any scope was reachable.
+enum_incomplete=0
+store_enum_verdict || enum_incomplete=1
+
+if [ "$seen" -eq 0 ] && [ "$enum_incomplete" -eq 0 ]; then
   say "no scope directories under ${STORE} — nothing to do"
   exit 0
 fi
@@ -841,6 +938,13 @@ if [ "${#failed[@]}" -gt 0 ]; then
   die "${#failed[@]} of ${seen} scope(s) FAILED: ${failed[*]}
   The other scopes were still processed. Read the messages above — this unit
   fails rather than reporting a success it did not achieve."
+fi
+
+# The scopes that WERE reachable are done and their content is safe; the run
+# still fails, because "ok — N scope(s) processed" over a store whose scope list
+# is a partial view is a success this run did not achieve.
+if [ "$enum_incomplete" -ne 0 ]; then
+  exit 1
 fi
 
 say "ok — ${seen} scope(s) processed"
