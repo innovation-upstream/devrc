@@ -18,8 +18,10 @@
 set -euo pipefail
 
 DDC=$(command -v ddcutil) || { echo "ddcutil not found on PATH" >&2; exit 1; }
-UNIT=monitor-blackout-restore
+UNIT=monitor-blackout-restore-v2
+UNIT_LEGACY=monitor-blackout-restore
 STATE="${XDG_RUNTIME_DIR:-/tmp}/monitor-blackout.state"   # "bus:brightness"
+FADE_PID_FILE="${XDG_RUNTIME_DIR:-/tmp}/monitor-blackout.fade.pid"
 
 # Number of fade steps and inter-step delay for fade transitions.
 # ~560ms per ddcutil call (hard floor at --sleep-multiplier 0.1), so 15 steps
@@ -44,18 +46,34 @@ get_brightness() { # $1=bus  -> current VCP 0x10 value
   "$DDC" --bus "$1" getvcp 10 --brief 2>/dev/null | awk '{print $4}'
 }
 
-set_brightness() { # $1=bus $2=value
-  "$DDC" --bus "$1" setvcp 10 "$2" --noverify 2>/dev/null
+set_brightness() { # $1=bus $2=value  — retries 3x on DDC-CI failure (this LG panel is flaky)
+  local bus="$1" val="$2" attempt
+  for attempt in 1 2 3; do
+    "$DDC" --bus "$bus" setvcp 10 "$val" --noverify 2>/dev/null && return 0
+    sleep 0.5
+  done
+  echo "DDC-CI setvcp failed after 3 attempts on bus $bus (val=$val)" >&2
+  return 1
 }
 
 cancel_timer() {
-  systemctl --user stop    "${UNIT}.timer"   2>/dev/null || true
-  systemctl --user reset-failed "${UNIT}.service" "${UNIT}.timer" 2>/dev/null || true
+  local u
+  for u in "$UNIT" "$UNIT_LEGACY"; do
+    systemctl --user stop    "${u}.timer"   2>/dev/null || true
+    systemctl --user kill    "${u}.service" 2>/dev/null || true
+    systemctl --user reset-failed "${u}.service" "${u}.timer" 2>/dev/null || true
+  done
 }
 
 schedule_restore() { # $1=bus $2=original_brightness $3=duration
+  # Write saved brightness so `restore` can read it; use the script itself
+  # (with retry + 0-default) instead of raw ddcutil.
+  printf '%s:%s\n' "$1" "$2" > "$STATE"
+  # Aggressively cancel any existing timer — stale pre-fix timers share the
+  # same unit name and can race with this creation.
+  cancel_timer
   systemd-run --user --unit="$UNIT" --on-active="$3" --timer-property=AccuracySec=1s \
-    "$DDC" --bus "$1" setvcp 10 "$2" >/dev/null
+    "$0" restore >/dev/null
 }
 
 # --- actions ---------------------------------------------------------------
@@ -77,9 +95,25 @@ blackout() {
 
 restore() {
   cancel_timer
+  # Kill any running background fade (sleep was triggered but wake came before it finished)
+  if [ -f "$FADE_PID_FILE" ]; then
+    local fpid
+    fpid=$(cat "$FADE_PID_FILE" 2>/dev/null || true)
+    rm -f "$FADE_PID_FILE"
+    if [ -n "$fpid" ] && kill -0 "$fpid" 2>/dev/null; then
+      kill "$fpid" 2>/dev/null || true
+      sleep 0.5
+    fi
+  fi
+  # Cancel again — a fade that completes between first cancel and kill may have
+  # re-created the timer via schedule_restore.
+  cancel_timer
   local bus="" cur=""
   [ -f "$STATE" ] && IFS=: read -r bus cur < "$STATE" || true
-  bus="${bus:-$(detect_bus || true)}"; cur="${cur:-60}"
+  bus="${bus:-$(detect_bus || true)}"
+  # Saved brightness of 0 means blackout read while monitor was already dark
+  # (race with prior fade) — fall back to a usable default instead of staying dark.
+  [ -n "$cur" ] && [ "$cur" != "0" ] || cur=60
   [ -n "$bus" ] || { echo "no DDC/CI monitor detected" >&2; exit 1; }
   set_brightness "$bus" "$cur"
   rm -f "$STATE"
@@ -90,9 +124,8 @@ fade_to_zero() { # $1=bus $2=from_brightness
   local bus="$1" from="$2" to=0 i val
   for (( i=0; i<=FADE_STEPS; i++ )); do
     val=$(( from + (to - from) * i / FADE_STEPS ))
-    set_brightness "$bus" "$val" &
+    set_brightness "$bus" "$val"
     sleep "$FADE_DELAY"
-    wait
   done
 }
 
@@ -100,9 +133,8 @@ fade_from_zero() { # $1=bus $2=to_brightness
   local bus="$1" to="$2" from=0 i val
   for (( i=0; i<=FADE_STEPS; i++ )); do
     val=$(( from + (to - from) * i / FADE_STEPS ))
-    set_brightness "$bus" "$val" &
+    set_brightness "$bus" "$val"
     sleep "$FADE_DELAY"
-    wait
   done
 }
 
@@ -113,8 +145,11 @@ fade_blackout() {
   cur=$(get_brightness "$bus") || true
   [ -n "${cur:-}" ] || { echo "could not read brightness on bus $bus" >&2; exit 1; }
   printf '%s:%s\n' "$bus" "$cur" > "$STATE"
+  echo "$$" > "$FADE_PID_FILE"
 
   fade_to_zero "$bus" "$cur"
+
+  rm -f "$FADE_PID_FILE"
 
   cancel_timer
   schedule_restore "$bus" "$cur" "$dur"
@@ -125,7 +160,8 @@ fade_restore() {
   cancel_timer
   local bus="" cur=""
   [ -f "$STATE" ] && IFS=: read -r bus cur < "$STATE" || true
-  bus="${bus:-$(detect_bus || true)}"; cur="${cur:-60}"
+  bus="${bus:-$(detect_bus || true)}"
+  [ -n "$cur" ] && [ "$cur" != "0" ] || cur=60
   [ -n "$bus" ] || { echo "no DDC/CI monitor detected" >&2; exit 1; }
 
   fade_from_zero "$bus" "$cur"
