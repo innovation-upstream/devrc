@@ -9,7 +9,7 @@ Routes registered in `internal/api/server.go` `registerNotesRoutes`, handlers in
 
 | op | route | notes |
 |---|---|---|
-| **create** | `POST /api/tasks` | `{directory, title, body, model, repo, branch, privileges, tags}`; `body` required (400); unknown keys silently dropped (no `DisallowUnknownFields`) |
+| **create** | `POST /api/tasks` | `{directory, title, body, model, repo, branch, privileges, tags}`; `body` required (400); unknown keys silently dropped (no `DisallowUnknownFields`). ⚠ **Response is `{"id":N}` and nothing else** — not the created task; read any field back with `GET /api/tasks/{id}` |
 | **read** | `GET /api/tasks[/{id}]` · `GET /api/tasks?tag=a&tag=b` | tag filter ANDs; bogus tag → `200 []`, not an error |
 | **edit** | `PATCH /api/tasks/{id}` | content + dispatch config + `tags` (replace) / `addTags` / `removeTags` (merge); **status/provenance/created_at immutable**; **409 if `in_progress`**; `tags`+merge together → 400 (0.7.73/0.7.75) |
 | **set-status** | `PATCH /api/tasks/{id}/status` | ANY status incl. `complete`; **NO `in_progress` guard**; broadcasts `task.changed` + fires the `ready_for_review` push (0.7.74) |
@@ -17,7 +17,7 @@ Routes registered in `internal/api/server.go` `registerNotesRoutes`, handlers in
 | **comment** | `POST /api/tasks/{id}/comments` | `{body}` only; author from the bounded `X-Clawgate-Source` allowlist (`{extension, api, drafter, repo-cos, claude-code}`, unknown → `api`), **NEVER from the body** — `user`/`operator` are structurally unreachable. Markdown; coalesced push on the machine path only (0.7.78) |
 | **tag vocab** | `GET /api/tags` | `[{tag,count}]` |
 | **push-only** | `POST /api/notify` | notify-only, no approve/deny card (0.7.68) |
-| **provenance** | headers on create | `X-Clawgate-Source` + `X-Clawgate-Session-Id` → `source_type` / `source_session_id` + a card chip (0.7.72) |
+| **provenance** | headers on create | `X-Clawgate-Source` + `X-Clawgate-Session-Id` → **stored** `source_type` / `source_session_id` + a card chip (0.7.72). The two headers are **independent** — source stamps with no session id, and vice versa. See the phantom-null note below before reporting provenance as broken |
 
 Status vocabulary is exactly **`open` / `in_progress` / `ready_for_review` / `complete`**
 (`notes.ValidStatus`) — there is **no `dismissed`**; dismissing deletes.
@@ -25,6 +25,22 @@ Status vocabulary is exactly **`open` / `in_progress` / `ready_for_review` / `co
 **Route-scope distinction:** the session routes (`/tasks/...`, no `/api` prefix) are LAN/UI-only, and
 the agent route `PATCH /agent/task/status` **forbids `complete`** — the machine
 `PATCH /api/tasks/{id}/status` is the trusted-producer path that allows ALL statuses.
+
+## ⚠ Provenance reads back as a phantom `null` — twice, for two different reasons
+Both are reporting artifacts, not bugs. Measured against live **0.7.85**, 2026-08-09.
+
+1. **You read it off the create response.** `handleAPITaskCreate` ends
+   `writeJSON(w, 200, map[string]any{"id": note.ID})` (`internal/api/notes.go`), so `.sourceType`
+   there is an **absent key**, not a null value — while the row is already stamped. `POST` with
+   only `X-Clawgate-Source: claude-code` → `{"id":157}`, then `GET /api/tasks/157` →
+   `"sourceType":"claude-code"`. **Verify provenance with a `GET`, never off the create.**
+2. **You spelled the JSON key Go-style.** It is **`sourceSessionId`** — lowercase `d` —
+   not `sourceSessionID` (`notes.Note` struct tags). The Go-style key silently reads `null`.
+
+Also expected, not broken: the default/unidentified `api` source is stored as **NULL**, and both
+fields are `omitempty`, so a plain post legitimately has no provenance keys at all. `claude-code`
+has been in `taskSourceAllowlist` since the migration-0017 commit (0.7.72) — an unknown source
+value collapses to `api` rather than erroring, which looks identical to "provenance isn't wired".
 
 ## ⚠ Tags are hard-validated — one bad tag breaks the whole create
 An invalid tag or an unknown `runbook:` is a hard 400. Grammar in one line: lowercased, ≤20 tags,
