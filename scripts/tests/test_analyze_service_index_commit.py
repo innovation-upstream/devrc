@@ -1351,6 +1351,53 @@ def test_an_unreadable_subdirectory_still_alarms_once_the_tree_is_CLEAN(tmp_path
             f"not test what it claims:\n{p.stdout}")
 
 
+def test_an_unreadable_subdirectory_does_not_stop_a_NEW_scope_being_bootstrapped(tmp_path):
+    """🔴 THE BOOTSTRAP PROBE REFUSED OUTRIGHT, WHICH IS THE DATA LOSS ITSELF.
+
+    `commit_scope`'s "is there anything to bootstrap?" probe treated ANY non-zero
+    `find` rc as a reason to `return 1` *before* `git init` ran. MEASURED
+    2026-08-09 (GNU findutils 4.10.0) on a NEW scope holding a readable
+    `alpha.md` beside an unreadable `sub/`: `find … -print -quit` exits 1 AND
+    prints `alpha.md` — `-quit` does not clear an error that already occurred —
+    so the scope was left with no `.git` at all, run after run, and alpha.md was
+    never versioned. The guard that exists to stop a silent skip was causing the
+    loss it is meant to catch; `commit_once` already says the rule out loud
+    ("Protect first, then alarm") and this path did not follow it.
+
+    This pins the FIRST run specifically — the moment of bootstrap — which is the
+    only run on which the refusal was observable, and asserts BOTH halves:
+    the content is versioned, and the incompleteness is still loud with THIS
+    guard's own message rather than merely a non-zero exit.
+    """
+    store = tmp_path / "store"
+    scope = store / "some-scope"
+    blocked = scope / "sub"
+    blocked.mkdir(parents=True)
+    (scope / "alpha.md").write_text("readable\n", encoding="utf-8")
+    (blocked / "hidden.md").write_text("UNREADABLE\n", encoding="utf-8")
+
+    try:
+        blocked.chmod(0o000)
+        first = _run(store)
+    finally:
+        blocked.chmod(0o755)
+
+    assert (scope / ".git").is_dir(), (
+        f"the scope was never bootstrapped, so its readable content is "
+        f"unversioned forever:\n{first.stdout}\n{first.stderr}")
+    assert "alpha.md" in _git(scope, "ls-files").stdout, (
+        f"readable content was not committed on the bootstrap run:\n"
+        f"{first.stdout}\n{first.stderr}")
+    assert "refusing to report a clean skip" not in first.stderr, (
+        f"the probe still refused outright:\n{first.stderr}")
+    assert first.returncode != 0, (
+        f"protecting the readable content must NOT silence the alarm:\n"
+        f"{first.stdout}")
+    assert "enumeration was INCOMPLETE" in first.stderr, (
+        f"a DIFFERENT guard produced the non-zero exit — this one is still "
+        f"unreached:\n{first.stderr}")
+
+
 def test_the_incomplete_enumeration_alarm_clears_when_the_scope_becomes_readable(tmp_path):
     """🔴 THE OTHER HALF: a red gate nobody can clear trains you to ignore it
     (RULES.md). Making the clean path alarm is only correct if `chmod` silences
