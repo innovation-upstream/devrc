@@ -17,6 +17,16 @@
 #   monitor-blackout.sh get-brightness  # print current VCP 0x10 value (for scripts)
 set -euo pipefail
 
+# Guard: only the canonical copy may create timers / modify brightness.
+# Copies in /tmp (Claude scratchpads, worktrees, mutation tests) must not
+# interfere with the live rig-control flow.
+REAL_SCRIPT="$(readlink -f "$0")"
+CANONICAL="${HOME}/workspace/devrc/scripts/monitor-blackout.sh"
+if [ "$REAL_SCRIPT" != "$CANONICAL" ]; then
+  echo "refusing to run from $REAL_SCRIPT (canonical: $CANONICAL)" >&2
+  exit 1
+fi
+
 DDC=$(command -v ddcutil) || { echo "ddcutil not found on PATH" >&2; exit 1; }
 UNIT=monitor-blackout-restore-v2
 UNIT_LEGACY=monitor-blackout-restore
