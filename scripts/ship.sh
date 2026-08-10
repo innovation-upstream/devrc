@@ -96,17 +96,57 @@ set -uo pipefail
 # drift deadman) needs the IDENTICAL predicate, and a second copy of it would
 # drift and be wrong — which is precisely how host identity used to be broken
 # (see the "Host identity" paragraph in the header). One rule, one place.
-_ship_lib="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)/lib/host-role.sh"
-if [ ! -r "$_ship_lib" ]; then
-  echo "ship: cannot read $_ship_lib — host identity cannot be resolved." >&2
-  exit 6
+# The source path is SYMLINK-RESOLVED first. Unresolved, ${BASH_SOURCE[0]} is
+# whatever path invoked us, so running ship.sh through a symlink (~/bin/ship, a
+# PATH shim) would look for lib/ next to the SYMLINK and exit 6 — on the one tool
+# whose whole job is recovering a host that is already broken.
+_ship_self="${BASH_SOURCE[0]}"
+_ship_resolved="$(readlink -f "$_ship_self" 2>/dev/null || true)"
+[ -n "$_ship_resolved" ] && _ship_self="$_ship_resolved"
+_ship_lib="$(cd "$(dirname "$_ship_self")" 2>/dev/null && pwd)/lib/host-role.sh"
+if [ -r "$_ship_lib" ]; then
+  # shellcheck source=lib/host-role.sh
+  . "$_ship_lib"
+else
+  # 🔴 DEGRADED RECOVERY MODE. ship.sh is the tool you reach for when a host is
+  # already broken, so a missing lib must not be an unconditional dead end: it
+  # used to carry inline constants, which made `SHIP_ROLE=workbench ship.sh`
+  # work regardless. That escape hatch is restored — but ONLY as an escape
+  # hatch, and it deliberately duplicates NOTHING that can drift:
+  #   * detect_role is NOT redefined here. It is the predicate that has already
+  #     been wrong once, `test_host_identity_has_exactly_one_definition` pins it
+  #     to exactly one file, and a second copy is the failure mode itself. In
+  #     this mode there is no detection at all — SHIP_ROLE is mandatory.
+  #   * the SSH constants are NOT copied either (ship.sh once shipped an SSH
+  #     target that pointed at the host itself). REMOTE_SSH must be given
+  #     explicitly if the remote leg is wanted.
+  if [ -z "${SHIP_ROLE:-}" ]; then
+    echo "ship: cannot read $_ship_lib — host identity cannot be resolved." >&2
+    echo "  recovery: re-run with an explicit role, e.g." >&2
+    echo "    SHIP_ROLE=workbench $0 --no-remote" >&2
+    echo "    SHIP_ROLE=laptop REMOTE_SSH=zach@<workbench-ip> $0" >&2
+    exit 6
+  fi
+  echo "ship: WARNING — $_ship_lib is missing; running in degraded recovery mode." >&2
+  echo "  role is taken from SHIP_ROLE='$SHIP_ROLE'; no host detection is performed." >&2
+  local_ipv4s()      { :; }
+  resolve_local_role() { echo "${SHIP_ROLE:-unknown}"; }
+  remote_role_of()   { case "${1:-}" in workbench) echo laptop ;; laptop) echo workbench ;; *) echo "" ;; esac; }
+  remote_ssh_of()    { echo "${REMOTE_SSH:-}"; }
+  WORKBENCH_IP_PRIMARY="<lib unavailable>"
+  LAPTOP_IP_PRIMARY="<lib unavailable>"
 fi
-# shellcheck source=lib/host-role.sh
-. "$_ship_lib"
 
 # Hidden mode: print the role detected from an injected IP list (for tests) or,
 # with no list, from this machine's own addresses. Prints role, exits 0.
 if [ "${1:-}" = "--detect-role" ]; then
+  # Detection lives in the lib and is not reimplemented in degraded mode, so this
+  # probe is simply unavailable there — said out loud rather than crashing on an
+  # undefined function.
+  if ! command -v detect_role >/dev/null 2>&1; then
+    echo "ship: --detect-role needs $_ship_lib, which is missing (degraded mode)." >&2
+    exit 6
+  fi
   # With an explicit (even empty) IP-list arg, detect from it (testable);
   # with no second arg, detect from THIS machine's own addresses.
   if [ "$#" -ge 2 ]; then detect_role "$2"; else detect_role "$(local_ipv4s | tr '\n' ' ')"; fi
@@ -145,6 +185,14 @@ fi
 # the remote host really is the laptop (from the laptop it would point at itself).
 REMOTE_ROLE="$(remote_role_of "$SHIP_ROLE")"
 REMOTE_SSH="$(remote_ssh_of "$SHIP_ROLE")"
+
+# In degraded recovery mode the SSH defaults are deliberately absent (see above),
+# so the remote leg needs an explicit target or must be skipped. Say which.
+if [ "$DO_REMOTE" = 1 ] && [ -z "$REMOTE_SSH" ]; then
+  echo "ship: no ssh target for the remote host ($REMOTE_ROLE)." >&2
+  echo "  pass REMOTE_SSH=user@host, or run with --no-remote to converge this host only." >&2
+  exit 6
+fi
 
 # Self-contained converge routine, run identically on each host (local via
 # bash -c, remote via ssh). Single source of truth for the sequence.

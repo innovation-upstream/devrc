@@ -1834,14 +1834,33 @@ in
   #
   # This unit is the thing that looks when nobody is looking. It is READ-ONLY: it
   # fetches (remote-tracking refs only) and reports. It never checks out, merges,
-  # fast-forwards, rebases, resets, or runs home-manager — enforced statically by
-  # scripts/tests/test_drift_check.py.
+  # fast-forwards, rebases, resets, or runs home-manager.
+  #
+  # scripts/tests/test_drift_check.py enforces that statically, via an ALLOWLIST
+  # of read-only git subcommands anchored at every command separator (`;`, `&&`,
+  # `||`, `|`, `$(`) — not the first-word keyword grep it started as, which
+  # missed `git update-ref`, `git config`, `git worktree add`, `rm -rf "$repo"`
+  # and anything after a `&&`. The one file the script writes is its
+  # consecutive-unreachable counter under $XDG_STATE_HOME/drift-check, and that
+  # is itself pinned by an asserted ledger of redirection targets.
   #
   # ALERTING: no new notification mechanism. The script exits non-zero on drift,
   # the unit enters `failed`, and the EXISTING OnFailure=notify-failure@%n.service
   # turns that into the same sticky critical dunst toast every other important
   # user unit already uses. The toast names the unit; the rc legend + per-host
   # lines are in `journalctl --user -u drift-check`.
+  #
+  # 🔴 WHAT DOES **NOT** TOAST: an unreachable remote. This timer is serverMode-
+  # gated, i.e. it runs on the WORKBENCH ONLY, so its remote leg always ssh's to
+  # the LAPTOP — which is routinely shut, asleep or off-LAN. Failing the unit on
+  # that would fire the same sticky critical toast as a genuine rc 8 up to 4× a
+  # day, and a permanently-red gate trains you to click through the one alert
+  # that must keep its meaning. The script therefore REPORTS an unreachable
+  # remote every run but only escalates to rc 13 after
+  # DRIFT_UNREACHABLE_ESCALATE consecutive misses (default 4 ≈ 24h at this
+  # cadence), resetting the moment the host answers. Below that threshold the
+  # remote leg contributes nothing to the exit code — so a local rc 8 with the
+  # laptop shut still exits 8, still fails the unit, and still toasts.
   #
   # The service is emitted UNCONDITIONALLY (any host can run it by hand); only the
   # TIMER's timers.target wiring is gated — see enableDriftDeadman above.
@@ -1882,8 +1901,12 @@ in
   # itself, only shorter. 6h caps it at a quarter of that for 4 ssh+fetch round
   # trips a day, a cost too small to be worth trading against. Anything tighter
   # buys little: a human ships several times a day anyway, and the toast would
-  # start reading as noise. OnStartupSec gives one prompt run after login (the
-  # laptop is intermittent, so "just resumed" is exactly when it should look).
+  # start reading as noise. OnStartupSec gives one prompt run 10min after the
+  # user manager starts — i.e. after a WORKBENCH reboot. (An earlier version of
+  # this comment justified it with the laptop having "just resumed"; that cannot
+  # happen. The timer is serverMode-gated and the ~/.server-mode marker exists
+  # only on the workbench, so this timer never runs on the laptop at all — the
+  # laptop is only ever the far end of the ssh leg.)
   # No Persistent — it only applies to OnCalendar timers, not monotonic ones.
   systemd.user.timers.drift-check = {
     Unit = {
