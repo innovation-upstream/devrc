@@ -369,17 +369,71 @@ def test_unreachable_remote_below_threshold_does_not_fail_the_unit(fleet):
     a permanently-red gate is worse than no gate.
 
     So: reported loudly in the journal, exit code unaffected.
+
+    🔴 This is THE TIMER'S SHAPE — both legs on, which is what ExecStart runs.
+    It used to be written as `--no-local`, which made it a run that checked NO
+    host at all and passed for a second reason entirely (see
+    `test_no_local_plus_an_unreachable_remote_is_not_a_pass`, which is now the
+    rc 2 case). The property being pinned here is "the remote leg does not
+    poison a successfully-checked local host", so the local host has to actually
+    be checked.
     """
+    fleet.catch_up()
     fleet.stub_ssh(255)
-    rc, out = fleet.check("--no-local", REMOTE_SSH="stub@example.invalid")
+    rc, out = fleet.check(REMOTE_SSH="stub@example.invalid")
     assert rc == 0, f"a single unreachable run must not fail the unit, got {rc}\n{out}"
     assert "UNREACHABLE" in out
     assert "not a pass" in out, out                  # still not sold as a green
     assert "1/4 consecutive" in out, out
     assert "NOT escalated" in out, out
-    # ...and the summary must not claim a clean bill of health for a run that
-    # successfully checked nothing.
+    # ...and the summary must name the host it DID check, not "both hosts".
+    assert "workbench (local)" in out, out
+    assert "both hosts" not in out, out
+
+
+def test_no_local_plus_an_unreachable_remote_is_not_a_pass(fleet):
+    """🟢 THE OTHER 'checked nothing' PATH, which used to exit 0.
+
+    `--no-local` with the remote unreachable BELOW the escalation threshold
+    printed "NO HOST WAS SUCCESSFULLY CHECKED — this is not a clean bill of
+    health" and then handed systemd a 0. systemd reads the code, not the text.
+
+    It is the same shape `--no-local --no-remote` is already rc 2 for, and it is
+    NOT reachable from the timer (ExecStart passes no flags, so the local leg is
+    always checked) — this is consistency between the two paths, not a live bug.
+    """
+    fleet.stub_ssh(255)
+    rc, out = fleet.check("--no-local", REMOTE_SSH="stub@example.invalid")
+    assert rc == 2, (
+        f"a run that observed no host at all must not exit 0, got {rc}\n{out}"
+    )
     assert "NO HOST WAS SUCCESSFULLY CHECKED" in out, out
+    assert "no drift" not in out, out
+    # ...and it is still the UNESCALATED unreachable case underneath, i.e. the
+    # rc 2 is coming from "checked nothing", not from an escalation.
+    assert "1/4 consecutive" in out and "NOT escalated" in out, out
+
+
+def test_checked_nothing_does_not_rewrite_a_real_verdict(fleet):
+    """🔴 THE FAILURE MODE OF THE FIX ABOVE.
+
+    Making "checked nothing" non-zero must not touch the aggregation: a genuine
+    rc 8 has to stay exactly 8, because 8 is the code with the rescue-before-
+    reset procedure and the one the legend is read against. A 2 here would still
+    fail the unit and still toast — and would describe the incident wrong.
+    """
+    fleet.stub_ssh(8, stdout="[laptop] AHEAD by 3 un-pushed commit(s).")
+    rc, out = fleet.check("--no-local", REMOTE_SSH="stub@example.invalid")
+    assert rc == 8, f"a real remote verdict was rewritten to a usage code: {rc}\n{out}"
+
+    # ...and the same for an ESCALATED unreachable, which also checks no host:
+    # it must stay 13, not become 2.
+    fleet.stub_ssh(255)
+    for _ in range(2):
+        rc, out = fleet.check("--no-local", REMOTE_SSH="stub@example.invalid",
+                              DRIFT_UNREACHABLE_ESCALATE="2")
+    assert rc == 13, f"an escalated unreachable was rewritten to rc 2: {rc}\n{out}"
+    assert "ESCALATING" in out, out
 
 
 def test_unreachable_remote_escalates_after_n_consecutive_runs(fleet):
@@ -389,10 +443,11 @@ def test_unreachable_remote_escalates_after_n_consecutive_runs(fleet):
     'the laptop is shut' — at that point NOT alerting would be the deadman
     failing at its one job. Threshold reached -> rc 13 -> unit failed -> toast.
     """
+    fleet.catch_up()          # local is clean, so the ladder is the only variable
     fleet.stub_ssh(255)
     codes = []
     for _ in range(4):
-        rc, out = fleet.check("--no-local", REMOTE_SSH="stub@example.invalid",
+        rc, out = fleet.check(REMOTE_SSH="stub@example.invalid",
                               DRIFT_UNREACHABLE_ESCALATE="3")
         codes.append(rc)
     assert codes == [0, 0, 13, 13], f"escalation ladder wrong: {codes}\n{out}"
@@ -407,17 +462,17 @@ def test_unreachable_streak_resets_when_the_host_answers(fleet):
     fleet.catch_up()
     fleet.stub_ssh(255)
     for _ in range(2):
-        rc, _ = fleet.check("--no-local", REMOTE_SSH="stub@example.invalid",
+        rc, _ = fleet.check(REMOTE_SSH="stub@example.invalid",
                             DRIFT_UNREACHABLE_ESCALATE="3")
         assert rc == 0
 
     fleet.stub_ssh(0, stdout="[laptop] clean")       # it answers
-    rc, out = fleet.check("--no-local", REMOTE_SSH="stub@example.invalid",
+    rc, out = fleet.check(REMOTE_SSH="stub@example.invalid",
                           DRIFT_UNREACHABLE_ESCALATE="3")
     assert rc == 0, out
 
     fleet.stub_ssh(255)                              # ...and goes away again
-    rc, out = fleet.check("--no-local", REMOTE_SSH="stub@example.invalid",
+    rc, out = fleet.check(REMOTE_SSH="stub@example.invalid",
                           DRIFT_UNREACHABLE_ESCALATE="3")
     assert rc == 0, f"the streak did not reset on a successful reach\n{out}"
     assert "1/3 consecutive" in out, out
@@ -453,6 +508,70 @@ def test_unreachable_escalates_immediately_when_the_streak_cannot_be_persisted(f
                           DRIFT_STATE_DIR=str(blocked))
     assert rc == 13, f"expected an immediate escalation, got {rc}\n{out}"
     assert "could not be" in out and "persisted" in out, out
+
+
+@pytest.mark.skipif(
+    os.geteuid() == 0, reason="root ignores directory write permissions"
+)
+def test_unreachable_escalates_when_the_streak_FILE_cannot_be_written(fleet):
+    """🔴 THE SECOND FAIL-CLOSED LIMB — the one the test above does NOT reach.
+
+    `test_unreachable_escalates_immediately_when_the_streak_cannot_be_persisted`
+    points DRIFT_STATE_DIR at a regular FILE, so `mkdir -p` fails and the
+    function returns from its FIRST limb. The `printf … > "$f" || echo -1` limb
+    — an existing, readable, but UNWRITABLE state dir — was never executed by
+    any test, and mutating its `echo -1` to `echo 0` left the whole suite green.
+
+    That mutant is not cosmetic: `streak_bump` would return 0 forever, 0 is
+    below every threshold, and the escalation ladder goes PERMANENTLY MUTE —
+    the silent deadman this entire feature exists to prevent.
+    """
+    ro = fleet.root / "readonly-state"
+    ro.mkdir()
+    counter = ro / "unreachable-laptop"
+    counter.write_text("2\n")                        # a streak already in flight
+    # BOTH are required. A mode-500 DIRECTORY does not stop a write to a file
+    # that already exists inside it (directory write permission gates create and
+    # unlink, not the open-for-write of an existing inode) — with only the
+    # chmod on the dir this test passes on the `echo 0` mutant, i.e. it would be
+    # a vacuous guard. The read-only FILE is what makes the redirection fail
+    # while `cat` still succeeds, so `prev` is a real 2 and the -1 can only come
+    # from the write limb.
+    counter.chmod(0o400)
+    ro.chmod(0o500)
+    try:
+        fleet.stub_ssh(255)
+        rc, out = fleet.check("--no-local", REMOTE_SSH="stub@example.invalid",
+                              DRIFT_STATE_DIR=str(ro))
+    finally:
+        ro.chmod(0o700)                              # so tmp_path can be cleaned
+        counter.chmod(0o600)
+    assert rc == 13, (
+        "an unpersistable streak must escalate immediately — 'for how long' is "
+        f"unknowable, so going quiet is an unbounded silent window. got {rc}\n{out}"
+    )
+    assert "could not be" in out and "persisted" in out, out
+    # ...and it must be the UNKNOWN-streak branch, not the threshold branch: the
+    # counter on disk still says 2, below the default threshold of 4.
+    assert "CONSECUTIVE unreachable checks" not in out, (
+        "escalated via the threshold branch, so this does not exercise the "
+        "cannot-persist limb at all\n" + out
+    )
+    # 🟢 …and it does so QUIETLY. The unit's only output is the journal, where
+    # every line is either a `[host]` per-host line or a `drift-check:` summary.
+    # `> "$f" 2>/dev/null` cannot suppress the SHELL's own message for a failed
+    # redirection (fd 2 is still the terminal when the open fails), so it leaked
+    # a raw `drift-check.sh: line NNN: …: Permission denied`. Reordering to
+    # `2>/dev/null > "$f"` applies the redirections in the other order and fixes
+    # it. Cosmetic — escalation fired correctly either way — but this is the one
+    # code path whose output a human only ever reads under stress.
+    stray = [
+        ln for ln in out.splitlines()
+        if ln.strip() and not ln.startswith(("[", "===", "drift-check: ", "  "))
+    ]
+    assert stray == [], (
+        "unprefixed output leaked into the journal between the [host] lines: %r" % stray
+    )
 
 
 def test_remote_rc_is_passed_through(fleet):
@@ -505,13 +624,14 @@ def test_the_unreachable_streak_is_kept_PER_REMOTE_HOST(fleet):
     nothing would let two hosts' absences add up into an escalation neither one
     earned. Driven by flipping the LOCAL role, which flips which host is remote.
     """
+    fleet.catch_up()
     fleet.stub_ssh(255)
     for _ in range(2):                       # laptop misses twice
-        rc, out = fleet.check("--no-local", REMOTE_SSH="stub@example.invalid",
+        rc, out = fleet.check(REMOTE_SSH="stub@example.invalid",
                               SHIP_ROLE="workbench", DRIFT_UNREACHABLE_ESCALATE="3")
         assert rc == 0, out
     # Now the OTHER direction: from the laptop, the remote is the workbench.
-    rc, out = fleet.check("--no-local", REMOTE_SSH="stub@example.invalid",
+    rc, out = fleet.check(REMOTE_SSH="stub@example.invalid",
                           SHIP_ROLE="laptop", DRIFT_UNREACHABLE_ESCALATE="3")
     assert rc == 0, out
     assert "1/3 consecutive" in out, (
@@ -702,6 +822,33 @@ _TRANSPARENT = frozenset({
 
 _PRINTERS = frozenset({"say", "echo", "printf"})
 
+# 🔴 Commands whose ARGUMENTS are themselves a command line. Before these were
+# handled, `_classify` looked only at toks[0], so EVERY one of these hid a
+# mutation from the scanner:
+#
+#     ssh "$REMOTE_SSH" git checkout -q -B evil     bash -c "git reset --hard"
+#     timeout 5 git checkout main                   flock /tmp/l git checkout main
+#     stdbuf -oL git checkout main                  nice -n 5 git reset --hard
+#
+# The behavioural layer catches every one of those that touches the LOCAL
+# checkout (`test_run_against_diverged_repo_mutates_nothing`). The `ssh <target>
+# …` shape is the one that was invisible to BOTH layers: it mutates the OTHER
+# host — this script's primary hazard — and `ssh` is stubbed in every test here,
+# so the injected line ran green. `ssh …` and `bash -c` are also shapes already
+# present in drift-check.sh, so a maintainer writing one is entirely plausible.
+_WRAPPERS = frozenset({
+    "timeout", "flock", "stdbuf", "ionice", "nice", "chrt", "setsid",
+})
+_SHELL_RUNNERS = frozenset({"bash", "sh", "zsh", "dash", "ksh"})
+_REMOTE_RUNNERS = frozenset({"ssh", "rsh", "doas", "chroot"})
+
+# Aliasing a command into a variable (`g=git; $g checkout main`) defeats any
+# argv-based scanner, because the second segment's command word is `$g`. It
+# cannot be resolved statically, so the ALIAS ITSELF is what gets flagged.
+_ALIASABLE = frozenset({"git"}) | DESTRUCTIVE_COMMANDS
+
+_MAX_NEST = 4
+
 
 def _walk(line):
     """Split ONE shell line into command segments, quote-aware.
@@ -818,7 +965,41 @@ def _classify_git(args):
     return "git %s (not in the read-only allowlist)" % sub
 
 
-def _classify(seg):
+def _classify_nested(toks, depth):
+    """Classify the innermost command of a wrapper / `ssh host …` / `sh -c …`.
+
+    Their argument grammars all differ (`timeout 5 CMD`, `flock -n /lock CMD`,
+    `ssh -o X=y host CMD`, `bash -c 'CMD'`) and a parser that gets each exactly
+    right is one nobody will maintain. So: try EVERY suffix and report the first
+    that classifies.
+
+    That over-approximates — `ssh host cat ./rm` would flag — and that is the
+    correct direction for a passivity scanner, which must fail CLOSED. The cost
+    of over-approximating is false positives, and a scanner that fails the suite
+    on legitimate code gets deleted by the next maintainer; the two guards that
+    hold that side are `test_scanner_does_not_flag_legitimate_read_only_lines`
+    (which includes the real `ssh … bash -s` and `bash -c "$CHECK"` lines) and
+    `test_drift_check_source_never_mutates` over the whole real file.
+    """
+    if depth >= _MAX_NEST:
+        return None
+    for i in range(1, len(toks)):
+        r = _classify(" ".join(toks[i:]), depth + 1)
+        if r:
+            return r
+    return None
+
+
+def _classify(seg, depth=0):
+    # Leading assignments are stripped by _command_tokens, so an alias would
+    # otherwise vanish entirely. Inspect them BEFORE that happens.
+    for t in seg.split():
+        m = re.fullmatch(r"[A-Za-z_][A-Za-z_0-9]*=(.+)", t)
+        if not m:
+            break
+        if m.group(1).strip("\"'").rsplit("/", 1)[-1] in _ALIASABLE:
+            return "%s (a command aliased into a variable — defeats an argv scan)" % t
+
     toks = _command_tokens(seg)
     if not toks:
         return None
@@ -829,10 +1010,16 @@ def _classify(seg):
         return None
     if cmd == "git":
         return _classify_git(toks[1:])
-    if cmd == "sed" and any(t.startswith("-i") for t in toks[1:]):
-        return "sed -i (in-place edit)"
+    if cmd in ("sed", "perl") and any(t.startswith("-i") for t in toks[1:]):
+        return "%s -i (in-place edit)" % cmd
+    if cmd == "find" and any(
+        t in ("-delete", "-exec", "-execdir", "-fprint", "-fprintf") for t in toks[1:]
+    ):
+        return "find with a mutating action"
     if cmd in DESTRUCTIVE_COMMANDS:
         return "%s (destructive command)" % cmd
+    if cmd in _WRAPPERS or cmd in _SHELL_RUNNERS or cmd in _REMOTE_RUNNERS:
+        return _classify_nested(toks, depth)
     return None
 
 
@@ -894,6 +1081,26 @@ MUTATION_PROBES = [
     'git -C "$repo" checkout main',
     "if true; then git reset --hard; fi",
     "for f in x; do rm -rf $f; done",
+    # --- INDIRECT / WRAPPED invocations (the #369 delta-audit finding) --------
+    # 🔴 The first one is the one that mattered: inserted into drift-check.sh it
+    # ran the FULL suite green (105 passed), because it mutates the OTHER host —
+    # which `ssh` is stubbed out of in every behavioural test — and toks[0] was
+    # `ssh`, so the static layer never looked past it. Both layers blind at once.
+    'ssh "$REMOTE_SSH" git checkout -q -B evil',
+    'ssh -o BatchMode=yes host git reset --hard origin/main',
+    'ssh host home-manager switch --flake .',
+    'bash -c "git reset --hard"',
+    "sh -c 'git checkout main'",
+    "timeout 5 git checkout main",
+    "flock /tmp/lock git checkout main",
+    "flock -n /tmp/lock git reset --hard",
+    "stdbuf -oL git checkout main",
+    "ionice -c3 git clean -fdx",
+    "nice -n 5 git reset --hard",
+    'timeout 5 rm -rf "$repo"',
+    "g=git",                                    # the alias itself is the flag
+    "find . -name '*.txt' -delete",
+    'perl -i -pe "s/a/b/" "$repo/f"',
 ]
 
 
@@ -927,6 +1134,16 @@ BENIGN_PROBES = [
     'git log --oneline --no-decorate origin/main..main | head -n 10 | sed "s|^|  + |"',
     'echo "[$REMOTE_ROLE] UNREACHABLE — ssh failed" ',
     'mkdir -p "$DRIFT_STATE_DIR" 2>/dev/null',
+    # The two REAL indirect-invocation lines in drift-check.sh. The wrapper
+    # recursion added for the shapes above over-approximates on purpose, so
+    # these are the guard that it did not over-approximate onto the script
+    # itself — without them the recursion could be flagging everything and this
+    # suite could not tell.
+    'ssh -o ConnectTimeout=10 -o BatchMode=yes "$REMOTE_SSH" bash -s',
+    'bash -c "$CHECK"',
+    "timeout 10 git fetch origin -q",
+    'ssh "$REMOTE_SSH" git rev-parse -q --verify origin/main',
+    'DRIFT_REPO="$DRIFT_REPO" DRIFT_LABEL="$LOCAL_ROLE" bash -c "$CHECK"',
 ]
 
 
@@ -1159,7 +1376,130 @@ UNIT_PATH_REQUIREMENTS = {
     "wc": "pkgs.coreutils",
     "tr": "pkgs.coreutils",
     "cut": "pkgs.coreutils",
+    # Added by #369 and missing from the accounting until #371 — the table's own
+    # docstring calls itself "the accounting", so a command the scripts run and
+    # the table omits makes that claim false. No live risk: all three are in
+    # pkgs.coreutils, which the unit's PATH already carries. `readlink` is the
+    # least obviously safe of them — it resolves BASH_SOURCE so the script can
+    # find lib/host-role.sh when invoked through a symlink, and without it the
+    # script exits 6 with "cannot read …/lib/host-role.sh".
+    "readlink": "pkgs.coreutils",
+    "mkdir": "pkgs.coreutils",
+    "cat": "pkgs.coreutils",
+    # Found only by the REVERSE guard below, never by review: `dirname` builds
+    # the path to lib/host-role.sh, and `bash` is what the local leg and the
+    # remote payload are both handed to.
+    "dirname": "pkgs.coreutils",
+    "bash": "pkgs.bash",
 }
+
+# Shell builtins/keywords: present as command words, never resolved via PATH.
+_SHELL_BUILTINS = frozenset("""
+    : . [ alias bg bind break builtin caller cd command compgen complete
+    continue declare dirs disown echo enable eval exec exit export false fc fg
+    getopts hash help history jobs let local logout mapfile popd printf pushd
+    pwd read readonly return set shift shopt source suspend test times trap
+    true type typeset ulimit umask unalias unset wait
+""".split())
+
+# 🔴 NOT commands — prose. `_walk` splits at `$(`, and `$((` starts with it, so
+# arithmetic inside a quoted message (`say "... and $(( n - maxu )) more"`)
+# ends the printer segment and leaves the REST OF THE SENTENCE looking like a
+# command line. Kept as an asserted ledger rather than a silent filter: a new
+# entry here is a maintainer declaring "this word is prose", which is a claim a
+# reviewer can check, whereas a heuristic filter would swallow a real command.
+_PROSE_NOT_COMMANDS = frozenset({
+    "a", "f", "n", "prev", "more", "see", "the", "laptop", "workbench",
+})
+
+
+def _defined_functions(text):
+    return set(re.findall(r"^\s*([A-Za-z_][A-Za-z_0-9]*)\s*\(\)", text, re.M))
+
+
+def _candidate_command_words():
+    """Every lowercase word that appears in COMMAND POSITION in either script."""
+    words = set()
+    for path in (DRIFT, HOST_ROLE_LIB):
+        for ln in path.read_text().splitlines():
+            s = ln.strip()
+            if not s or s.startswith("#"):
+                continue
+            for seg in _walk(ln):
+                toks = _command_tokens(seg)
+                if toks:
+                    words.add(toks[0].rsplit("/", 1)[-1])
+    return {w for w in words if re.fullmatch(r"[a-z][a-z0-9._-]*", w)}
+
+
+def test_the_unit_path_table_accounts_for_every_command_the_scripts_run():
+    """🔴 THE REVERSE DIRECTION — and the one that can actually bite.
+
+    `test_every_command_the_checker_runs_is_on_the_unit_path` only walks the
+    table and asks "is this still used?". It is one-directional: a command ADDED
+    to the scripts and never added to the table is invisible to it, so the
+    docstring calling the table "the accounting" was false the moment #369 added
+    `readlink`, `mkdir` and `cat` (harmless — all in coreutils, already on the
+    PATH — but the next addition need not be).
+
+    This walks the SCRIPTS and asks "is this accounted for?". It found `dirname`
+    and `bash`, neither of which any reviewer noticed across two rounds.
+
+    The failure it ultimately guards is silent: a command missing from the unit
+    PATH does not crash — `ip` going missing makes host detection return
+    "unknown" and the deadman exit 6 forever, from a unit that looks correct.
+    """
+    known = (
+        set(UNIT_PATH_REQUIREMENTS)
+        | _SHELL_BUILTINS
+        | _PROSE_NOT_COMMANDS
+        | _defined_functions(DRIFT.read_text())
+        | _defined_functions(HOST_ROLE_LIB.read_text())
+    )
+    unaccounted = sorted(_candidate_command_words() - known)
+    assert unaccounted == [], (
+        "these run as commands in drift-check.sh / lib/host-role.sh but are in "
+        "neither UNIT_PATH_REQUIREMENTS nor the builtin/prose ledgers: %r\n"
+        "Add each to UNIT_PATH_REQUIREMENTS with the nixpkgs attr that provides "
+        "it (and to the unit's makeBinPath in nix/home.nix), or — if it is prose "
+        "that only LOOKS like a command — to _PROSE_NOT_COMMANDS." % unaccounted
+    )
+
+
+def test_the_reverse_path_guard_can_actually_see_a_new_command(tmp_path):
+    """🔴 POSITIVE CONTROL. The guard above passing is indistinguishable from a
+    tokenizer wired to nothing — an empty set minus anything is still empty. So:
+    watch the number move.
+
+      * the tokenizer must find the real commands (a non-zero count), and
+      * a command INSERTED into a copy of the script must come out unaccounted.
+    """
+    found = _candidate_command_words()
+    assert {"git", "ssh", "awk"} <= found, (
+        "the tokenizer does not see the commands the script definitely runs: %r" % found
+    )
+
+    # Insert an unaccounted command into a COPY and re-derive from that copy.
+    copy = tmp_path / "drift-check.sh"
+    copy.write_text(DRIFT.read_text() + '\njq -r .x "$f"\n')
+    words = set()
+    for ln in copy.read_text().splitlines():
+        s = ln.strip()
+        if not s or s.startswith("#"):
+            continue
+        for seg in _walk(ln):
+            toks = _command_tokens(seg)
+            if toks:
+                words.add(toks[0].rsplit("/", 1)[-1])
+    words = {w for w in words if re.fullmatch(r"[a-z][a-z0-9._-]*", w)}
+    known = (
+        set(UNIT_PATH_REQUIREMENTS) | _SHELL_BUILTINS | _PROSE_NOT_COMMANDS
+        | _defined_functions(DRIFT.read_text())
+        | _defined_functions(HOST_ROLE_LIB.read_text())
+    )
+    assert sorted(words - known) == ["jq"], (
+        "an added command was NOT reported as unaccounted: %r" % sorted(words - known)
+    )
 
 
 @pytest.mark.parametrize("cmd,attr", sorted(UNIT_PATH_REQUIREMENTS.items()))

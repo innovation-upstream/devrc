@@ -31,10 +31,27 @@
 # supervision; a deadman that reports is a deadman.
 #
 # `scripts/tests/test_drift_check.py` enforces that STATICALLY, and the scanner
-# is an ALLOWLIST, not a keyword blocklist: every `git` invocation in executable
-# code must be one of a fixed set of read-only subcommands, and the check is
+# is an ALLOWLIST, not a keyword blocklist: a `git` invocation it can RESOLVE
+# STATICALLY must name one of a fixed set of read-only subcommands. The check is
 # anchored at each COMMAND SEPARATOR (`;`, `&&`, `||`, `|`, `$(`), not at the
-# start of the line — so `say "hi" && git checkout main` is caught.
+# start of the line — so `say "hi" && git checkout main` is caught — and it
+# recurses through wrappers (`timeout`, `flock`, `stdbuf`, `ionice`, `nice`) and
+# through `ssh <target> …` / `bash -c` / `sh -c`, which each hide a command line
+# inside their arguments. `ssh <target> git checkout …` matters most: it mutates
+# THE OTHER HOST, this script's primary hazard, and `ssh` is stubbed out of every
+# behavioural test, so it was invisible to both layers until #371.
+#
+# 🔴 WHAT THE SCANNER CANNOT SEE — an accurate claim beats a reassuring one:
+#   * a command word produced by EXPANSION (`$g checkout main`, `eval "$cmd"`).
+#     The scanner flags the alias where it can see one being made (`g=git`), but
+#     an alias built from parts, or read from a file, resolves to nothing static.
+#   * anything inside a string that only becomes code on the FAR SIDE of the ssh
+#     hop. The $CHECK payload is scanned because it is literal text in this file;
+#     a payload assembled at runtime would not be. `require_int` plus `%q` on the
+#     two interpolated values is what covers that, not the scanner.
+# The BEHAVIOURAL layer (`test_run_against_diverged_repo_mutates_nothing`) closes
+# the local-checkout half of both holes, and closes it for shapes nobody has
+# enumerated. Neither layer covers a runtime-built mutation of the REMOTE host.
 #
 # THE ONE FILE THIS SCRIPT WRITES is the consecutive-unreachable counter under
 # $DRIFT_STATE_DIR (default $XDG_STATE_HOME/drift-check). It lives outside every
@@ -54,8 +71,11 @@
 # take (5 conflicted-tree, 7 cannot-ff, 9 switch-failed, 11 verify-failed) are
 # left UNUSED rather than repurposed.
 #
-#   2   usage error (unknown flag, non-integer tunable, or a flag combination
-#       that would check nothing at all)
+#   2   usage error (unknown flag, non-integer tunable), or a RUN THAT CHECKED
+#       NO HOST AT ALL — either because the flags asked for none (`--no-local
+#       --no-remote`) or because the only host it was asked to look at could not
+#       be reached. rc 0 from a run that observed nothing is the vacuous green
+#       this whole subsystem exists to prevent, so it is never emitted.
 #   3   repo missing on that host
 #   4   git fetch failed, or origin/main is missing / HEAD unborn
 #   6   local host could not be identified (see detect_role)
@@ -348,6 +368,36 @@ mark_unchecked() { UNCHECKED="${UNCHECKED:+$UNCHECKED, }$1"; }
 
 # --- Consecutive-unreachable streak (see "UNREACHABLE IS NOT DRIFT" above) -----
 # The ONLY file this script writes, and it lives outside every repo.
+#
+# 🔴 KNOWN AND ACCEPTED BOUNDS — documented rather than engineered away, because
+# both cost more to fix than they cost to have, and both err in the SAFE
+# direction (they delay an escalation; neither can invent one):
+#
+#  1. NOT ATOMIC. `streak_bump` is a read-modify-write with no lock, so two runs
+#     overlapping in the same instant can both read N and both write N+1,
+#     losing a miss. Measured on this host: 20 concurrent bumps landed 10; an
+#     earlier round measured 9 on the same code, i.e. the loss is real and
+#     non-deterministic, and the DIRECTION is what matters, not the number.
+#     It is only
+#     reachable when an operator hand-runs the script at the same moment the
+#     timer fires (the timer itself is a single serialised oneshot at a 6h
+#     cadence), and the effect is UNDERCOUNTING — escalation arrives later,
+#     never earlier, so it cannot produce a false alarm. An atomic
+#     write-temp-then-`mv` would need `mv`, which the passivity scanner
+#     correctly classes as destructive, and a lock would need `flock`, which is
+#     one of the wrapper shapes the scanner now recurses through; both trade a
+#     real hardening of this file for a bound that only bites a human racing a
+#     6-hourly timer.
+#
+#  2. A HAND-RUN SHARES THE COUNTER WITH THE TIMER. There is one file per remote
+#     role, not one per invocation, so `scripts/drift-check.sh` typed at a
+#     prompt bumps or resets the same streak the unit is keeping. Two
+#     consequences worth knowing before you read an alert: hand-running while
+#     the laptop is OFF pushes the streak up and can trip rc 13 sooner than the
+#     6h cadence implies, and hand-running while it is ON resets a genuine
+#     streak the timer had accumulated. That is deliberate — the streak is a
+#     property of "how long has this host been unreachable", not of who asked —
+#     but it does mean a hand-run is not a read-only observation of the ladder.
 _streak_file() { printf '%s\n' "$DRIFT_STATE_DIR/unreachable-${1:-remote}"; }
 
 streak_bump() { # streak_bump <role> -> new streak, or -1 if it cannot be persisted
@@ -357,7 +407,13 @@ streak_bump() { # streak_bump <role> -> new streak, or -1 if it cannot be persis
   prev="$(cat "$f" 2>/dev/null || true)"
   case "$prev" in ''|*[!0-9]*) prev=0 ;; esac
   next=$(( prev + 1 ))
-  printf '%s\n' "$next" > "$f" 2>/dev/null || { echo -1; return 0; }
+  # 🔴 `2>/dev/null` FIRST, then the target. Redirections are applied left to
+  # right, and the shell reports a FAILED redirection on whatever fd 2 is at
+  # that moment: written the other way round (`> "$f" 2>/dev/null`) an
+  # unwritable state dir leaks a raw `drift-check.sh: line NNN: …: Permission
+  # denied` into the journal, unprefixed, between the `[host]`-prefixed lines.
+  # The fail-closed limb still fires either way; this only fixes the noise.
+  printf '%s\n' "$next" 2>/dev/null > "$f" || { echo -1; return 0; }
   echo "$next"
 }
 
@@ -365,7 +421,7 @@ streak_reset() { # streak_reset <role> — the host answered; the run of misses 
   local f
   f="$(_streak_file "$1")"
   [ -d "$DRIFT_STATE_DIR" ] || return 0
-  printf '0\n' > "$f" 2>/dev/null || true
+  printf '0\n' 2>/dev/null > "$f" || true
 }
 
 if [ "$DO_LOCAL" = 1 ]; then
@@ -435,7 +491,25 @@ if [ "$rc" = 0 ]; then
   if [ -n "$CHECKED" ]; then
     echo "drift-check: no drift on the host(s) CHECKED: $CHECKED — each on branch main at origin/main."
   else
+    # 🔴 CHECKED NOTHING, AND SAID SO — but used to hand systemd a 0 anyway.
+    # Reachable as `--no-local` with the remote unreachable BELOW the escalation
+    # threshold: the text says "this is not a clean bill of health" and the exit
+    # code says "clean". systemd reads the code. It is the same shape the
+    # `--no-local --no-remote` refusal above is already rc 2 for, so it gets the
+    # same code: a run that observed no host is a usage outcome, not a verdict.
+    #
+    # 🔴 GUARDED ON rc = 0, deliberately. This can only ever turn a ZERO into a
+    # 2 — it can never rewrite a real verdict, so an rc 8 stays 8 and still
+    # reaches OnFailure. (`test_local_rc8_still_wins_when_the_remote_is_
+    # unreachable` and `test_checked_nothing_does_not_rewrite_a_real_verdict`.)
+    #
+    # NOT reachable from the timer, whose ExecStart passes no flags — with both
+    # legs on, an unreachable remote still leaves the local host CHECKED. This
+    # is consistency between the two "looked at nothing" paths, not a live bug.
     echo "drift-check: NO HOST WAS SUCCESSFULLY CHECKED — this is not a clean bill of health."
+    echo "  refusing to exit 0 for a run that produced no verdict about any host."
+    [ -n "$UNCHECKED" ] && echo "drift-check: NOT checked: $UNCHECKED"
+    exit 2
   fi
 else
   echo "drift-check: DRIFT (rc=$rc) — see per-host lines above."

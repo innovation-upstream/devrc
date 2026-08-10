@@ -1840,9 +1840,21 @@ in
   # of read-only git subcommands anchored at every command separator (`;`, `&&`,
   # `||`, `|`, `$(`) — not the first-word keyword grep it started as, which
   # missed `git update-ref`, `git config`, `git worktree add`, `rm -rf "$repo"`
-  # and anything after a `&&`. The one file the script writes is its
-  # consecutive-unreachable counter under $XDG_STATE_HOME/drift-check, and that
-  # is itself pinned by an asserted ledger of redirection targets.
+  # and anything after a `&&`. It also recurses through wrappers (`timeout`,
+  # `flock`, `stdbuf`, `ionice`, `nice`) and through `ssh <target> …` /
+  # `bash -c` / `sh -c`; `ssh <target> git checkout …` was invisible to the
+  # static AND the behavioural layer until #371 (it mutates the far host, and
+  # `ssh` is stubbed in every behavioural test). The one file the script writes
+  # is its consecutive-unreachable counter under $XDG_STATE_HOME/drift-check,
+  # and that is itself pinned by an asserted ledger of redirection targets.
+  #
+  # 🔴 The static layer is NOT a proof of passivity, and the comment above is
+  # scoped on purpose: it can only resolve command words that are literally in
+  # the file. A `git` reached through expansion (`$g checkout`, `eval "$cmd"`)
+  # or a payload assembled at runtime and piped over the ssh hop resolves to
+  # nothing static. The BEHAVIOURAL tests close that for the local checkout and
+  # for shapes nobody enumerated; nothing closes it for a runtime-built mutation
+  # of the REMOTE host. See the "PASSIVITY" header block in drift-check.sh.
   #
   # ALERTING: no new notification mechanism. The script exits non-zero on drift,
   # the unit enters `failed`, and the EXISTING OnFailure=notify-failure@%n.service
