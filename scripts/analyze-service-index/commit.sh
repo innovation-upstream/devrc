@@ -655,7 +655,24 @@ commit_scope() {
     # git cannot track — a repository bootstrapped and then failed on daily.
     md_probe="$(find "$scope" -type f -name '*.md' -print -quit 2>/dev/null)"
     md_rc=$?
-    if [ "$md_rc" -ne 0 ]; then
+    # 🔴 PROTECT FIRST, ALARM SECOND — HERE TOO, NOT ONLY IN commit_once.
+    # A bad probe rc alone used to `return 1` before `git init` ever ran, which
+    # is the "refuse outright" that commit_once's own header forbids: MEASURED
+    # 2026-08-09 on a NEW scope holding a readable `alpha.md` beside an
+    # unreadable `sub/` (GNU findutils 4.10.0 — `find … -print -quit` exits 1
+    # *and* prints `alpha.md`, because `-quit` does not clear an error that has
+    # already occurred), the scope was left with NO `.git` at all and alpha.md
+    # was never versioned, on that run or any later one. The guard meant to stop
+    # a silent skip was instead causing the data loss it exists to catch, and it
+    # is the un-versioned-forever half that matters — the alarm fired either way.
+    #
+    # So the probe's rc only REFUSES when nothing readable was found. Once a
+    # readable index file exists the repo is bootstrapped and that content is
+    # committed; the incompleteness is not swallowed — `list_candidates` below
+    # re-derives it into ASI_ENUM_RC and `enum_verdict` fails the scope with
+    # "candidate enumeration was INCOMPLETE", on this run and on every clean run
+    # after it, until a chmod lands.
+    if [ "$md_rc" -ne 0 ] && [ -z "$md_probe" ]; then
       echo "${PROG}: ${fail_prefix} could not enumerate *.md files (find rc=${md_rc}) — refusing to report a clean skip" >&2
       return 1
     fi
