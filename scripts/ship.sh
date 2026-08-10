@@ -91,38 +91,18 @@
 set -uo pipefail
 
 # --- Canonical per-host identity (both hosts share hostname `nixos`) -----------
-# Primary signal: the stable LAN address (192.168.50.x) — reliable across boots.
-# Secondary signal: the 10.42.x address (less stable) — fallback only.
-WORKBENCH_IP_PRIMARY="192.168.50.250"
-WORKBENCH_IP_SECONDARY="10.42.0.30"
-LAPTOP_IP_PRIMARY="192.168.50.155"
-LAPTOP_IP_SECONDARY="10.42.0.100"
-WORKBENCH_SSH_DEFAULT="zach@192.168.50.250"
-LAPTOP_SSH_DEFAULT="zach@192.168.50.155"
-
-# detect_role <space-or-comma-separated ipv4 list> -> workbench|laptop|unknown
-# Pure + testable: takes an IP list as input (no live-machine calls), so it can
-# be unit-tested with injected addresses. Precedence is deterministic:
-#   1. primary LAN addresses (192.168.50.x) are matched before secondary ones;
-#   2. within a pass, WORKBENCH is matched before LAPTOP — so an (unexpected)
-#      list carrying BOTH hosts' primary addresses resolves to "workbench".
-detect_role() {
-  local ips="${1:-}"
-  ips="${ips//,/ }"
-  local ip
-  for ip in $ips; do [ "$ip" = "$WORKBENCH_IP_PRIMARY" ] && { echo workbench; return 0; }; done
-  for ip in $ips; do [ "$ip" = "$LAPTOP_IP_PRIMARY" ]    && { echo laptop;    return 0; }; done
-  for ip in $ips; do [ "$ip" = "$WORKBENCH_IP_SECONDARY" ] && { echo workbench; return 0; }; done
-  for ip in $ips; do [ "$ip" = "$LAPTOP_IP_SECONDARY" ]    && { echo laptop;    return 0; }; done
-  echo unknown
-  return 0
-}
-
-# local_ipv4s — global-scope IPv4 addresses of THIS machine, one per line
-# (scope global drops 127.0.0.1). Used as detect_role's input at runtime.
-local_ipv4s() {
-  ip -4 -o addr show scope global 2>/dev/null | awk '{print $4}' | cut -d/ -f1
-}
+# 🔴 detect_role / local_ipv4s / the IP + SSH constants are SOURCED from
+# scripts/lib/host-role.sh, not defined here. scripts/drift-check.sh (the passive
+# drift deadman) needs the IDENTICAL predicate, and a second copy of it would
+# drift and be wrong — which is precisely how host identity used to be broken
+# (see the "Host identity" paragraph in the header). One rule, one place.
+_ship_lib="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)/lib/host-role.sh"
+if [ ! -r "$_ship_lib" ]; then
+  echo "ship: cannot read $_ship_lib — host identity cannot be resolved." >&2
+  exit 6
+fi
+# shellcheck source=lib/host-role.sh
+. "$_ship_lib"
 
 # Hidden mode: print the role detected from an injected IP list (for tests) or,
 # with no list, from this machine's own addresses. Prints role, exits 0.
@@ -151,10 +131,7 @@ for a in "$@"; do
 done
 
 # --- Resolve local role (detection, override-able) + derive the remote target --
-SHIP_ROLE="${SHIP_ROLE:-}"
-if [ -z "$SHIP_ROLE" ]; then
-  SHIP_ROLE="$(detect_role "$(local_ipv4s | tr '\n' ' ')")"
-fi
+SHIP_ROLE="$(resolve_local_role)"
 if [ "$SHIP_ROLE" != workbench ] && [ "$SHIP_ROLE" != laptop ]; then
   echo "ship: could not identify this host (role='$SHIP_ROLE')." >&2
   echo "  local IPv4s: $(local_ipv4s | tr '\n' ' ')" >&2
@@ -163,15 +140,11 @@ if [ "$SHIP_ROLE" != workbench ] && [ "$SHIP_ROLE" != laptop ]; then
   exit 6
 fi
 
-if [ "$SHIP_ROLE" = workbench ]; then
-  REMOTE_ROLE=laptop
-  # remote is the laptop -> honor the back-compat LAPTOP_SSH override here.
-  REMOTE_SSH="${REMOTE_SSH:-${LAPTOP_SSH:-$LAPTOP_SSH_DEFAULT}}"
-else
-  REMOTE_ROLE=workbench
-  # remote is the workbench -> LAPTOP_SSH must NOT apply (it is the laptop itself).
-  REMOTE_SSH="${REMOTE_SSH:-$WORKBENCH_SSH_DEFAULT}"
-fi
+# Derived in lib/host-role.sh: remote_role_of flips the role, remote_ssh_of
+# applies $REMOTE_SSH unconditionally and the back-compat $LAPTOP_SSH ONLY when
+# the remote host really is the laptop (from the laptop it would point at itself).
+REMOTE_ROLE="$(remote_role_of "$SHIP_ROLE")"
+REMOTE_SSH="$(remote_ssh_of "$SHIP_ROLE")"
 
 # Self-contained converge routine, run identically on each host (local via
 # bash -c, remote via ssh). Single source of truth for the sequence.
