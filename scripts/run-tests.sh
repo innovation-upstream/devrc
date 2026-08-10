@@ -153,7 +153,12 @@ cd "$ROOT" || { echo "run-tests: cannot cd to ROOT=$ROOT" >&2; exit 2; }
 #
 # Raise this whenever tests are added; LOWER it only with the new measurement
 # quoted in the commit message, never to make a red gate go green.
-MIN_TESTS="${MIN_TESTS:-6595}"
+#
+# 6643 MEASURED post-rebase onto fce27f2 (#367/#368), not computed. Control pair
+# under one tool set: base fce27f2 collected 6561, this branch 6643 (+82 = the
+# analyze-service-index suite exactly). The floor is BASE-DEPENDENT — re-measure
+# after any rebase rather than carrying this number forward.
+MIN_TESTS="${MIN_TESTS:-6643}"
 
 # --- GUARD 1: tool precondition ------------------------------------------------
 # Every binary the suites `skipif` on. Absence must be an ERROR, never a skip.
