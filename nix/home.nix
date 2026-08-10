@@ -2197,6 +2197,195 @@ in
     };
   };
 
+  # Autocommit for the /analyze-service index store.
+  #
+  # WHAT IT PROTECTS: ~/.claude/analyze-service-index/<scope>/<service>.md — the
+  # curated recon nuance the /analyze-service write-back protocol appends to
+  # (claude/commands/analyze-service.md). Measured 2026-08-06 on the workbench:
+  # 20 files, 56,862 bytes, actively written that same day, with NO git history,
+  # NO backup and NO host sync (ship.sh rsyncs only ~/.claude/skills/). The
+  # content is not re-derivable — it records gotchas and incident tie-ins that
+  # were true at a moment in time — so one bad agent Write destroyed it silently.
+  #
+  # 🔴 WHY A TIMER RATHER THAN A LINE IN THE WRITE-BACK PROTOCOL. The store is
+  # written by an agent's Write tool mid-recon, so no git operation happens
+  # naturally, and "remember to commit afterwards" is precisely the mechanism
+  # MEASURED not to stick here — claude/skills/close-the-loop/STATE.md records
+  # opt-in prose steps failing and the pivot to autonomous loops. A backup that
+  # depends on an agent remembering is not a backup. PRINCIPLES.md: prefer the
+  # deterministic fix over the prose one.
+  #
+  # 🔴 DELIBERATELY **NOT** GATED ON serverMode, unlike mail-actions-archive /
+  # initiatives-sync / ch-regrowth-check above. Those are gated because they need
+  # the homelab kubeconfig, the LAN API or a server role. This needs nothing but a
+  # local disk and git. It follows claude-log-rotate instead — the other unit that
+  # maintains ~/.claude and runs everywhere. Gating it would be actively harmful:
+  # /analyze-service runs on whichever host Zach is working from, the stores are
+  # per-host and NOT synced, so a laptop-gated-out store would sit unversioned
+  # forever while the workbench looked healthy — the exact silent gap this closes.
+  #
+  # NO NETWORK, BY CONSTRUCTION. The scopes hold client-identifying infrastructure
+  # detail, so the script never adds a remote, never pushes and never fetches, and
+  # there is deliberately no network dependency on the unit to hint otherwise.
+  # See devrc 60e6d9d for why that matters.
+  #
+  # Failure is LOUD: the script exits non-zero on a locked index, an unexpected
+  # non-.md file it refuses to sweep in, a scope nested inside a foreign repo, a
+  # SYMLINK where a scope directory should be, or a scope it could not fully
+  # enumerate (an unreadable subdirectory) — and OnFailure hands that to the
+  # existing notify-failure@ toast. It is a silent no-op only when there is
+  # genuinely nothing to commit.
+  #
+  # Minimal user-unit env, so PATH is explicit: git (the whole job), findutils
+  # (scope + candidate enumeration), gnugrep/gnused (message assembly), plus
+  # bash/coreutils.
+  #
+  # 🔴 CONTAINMENT IS THE PRIMARY NO-EXFILTRATION CONTROL — the static ledger in
+  # the test file is secondary. Three fix rounds tried to make exfiltration
+  # DETECTABLE by reading commit.sh, and each round was evaded a new way (`cp -r`,
+  # eight wrapper prefixes, brace groups). This block makes it not land.
+  #
+  # ⚠ A PATH restriction is NOT that control, and it is worth saying so because
+  # it reads like one. `cp` and `tee` live in pkgs.coreutils, which this script
+  # genuinely needs (mktemp/sort/rm/realpath/tr) — so no honest PATH here can
+  # make `cp` "fail on sight". What makes `cp` useless is having nowhere to
+  # write.
+  #
+  # MEASURED 2026-08-06 under exactly these directives, on this host AND the
+  # laptop (systemd-run --user with the same properties, journal-captured):
+  #   * the committer runs normally and its commits persist in the real store;
+  #   * `cp -r <scope> <dir>` fails "Read-only file system", rc=1, nothing lands
+  #     (uncontained positive control: rc=0, 27 files copied);
+  #   * bash's BUILTIN `/dev/tcp` egress fails rc=1 where it returns rc=0
+  #     uncontained — a hole no PATH restriction can reach, since it needs no
+  #     binary at all.
+  #
+  # 🔴 THAT SET WAS NOT COMPLETE, AND THE GAP WAS A LIVE ONE. Re-measured
+  # 2026-08-07: `/dev/shm` was writable and its contents SURVIVED on the host.
+  # The lesson generalises past the one path — "ProtectSystem=strict plus
+  # ProtectHome=tmpfs means the store is the only writable path" is a claim
+  # about two directives, not about the namespace, and the only way to find the
+  # difference is to run it. The nix build sandbox has no systemd, so NO TEST IN
+  # THIS REPO CAN CHECK ANY OF THIS: the suite can assert a directive is
+  # present, never that it works. Adding a directive here without a
+  # `systemd-run --user` measurement is how a declared-but-ineffective
+  # hardening line ships, which is worse than none.
+  #
+  # Each directive earns its place:
+  #   ProtectSystem=strict  everything read-only except what is bound back in
+  #   ProtectHome=tmpfs     $HOME disappears; the store and the script are the
+  #                         only parts of it that exist inside the namespace
+  #   BindPaths=-<store>    the ONE writable path. `-` so a host that has never
+  #                         run /analyze-service still starts and no-ops cleanly
+  #                         (the script's "no store — nothing to do" path)
+  #   InaccessiblePaths     closes /dev/shm, which none of the above covered
+  #   PrivateTmp            mktemp scratch dies with the unit; also covers /var/tmp
+  #   PrivateNetwork        no route off-box, for any binary or builtin
+  #   NoNewPrivileges       no setuid escape from the above
+  #
+  # 🔴 BOTH BIND LISTS ARE FROZEN AT EXACTLY ONE ENTRY, and the test file
+  # asserts their full contents rather than a prefix. Appending a second entry
+  # is a one-token hole: `BindPaths = [ "-%h/.claude/analyze-service-index"
+  # "-%h" ];` passed all 75 tests of the previous round and gives the unit a
+  # writable real $HOME — `~/.ssh`, the devrc checkout, everything (MEASURED
+  # 2026-08-07: write rc=0, content present on the host afterwards). This is
+  # also why symlinked scopes are refused rather than supported: supporting them
+  # means widening BindPaths to cover symlink targets, i.e. this exact hole.
+  systemd.user.services.analyze-service-index-commit = {
+    Unit = {
+      Description = "Commit any dirty state in the /analyze-service index store";
+      OnFailure = [ "notify-failure@%n.service" ];
+    };
+    Service = {
+      Type = "oneshot";
+      # Purely local git over ~20 small files. A hang means something is very
+      # wrong (a stale lock, a wedged filesystem) and must not pin the timer.
+      TimeoutStartSec = 120;
+      Environment = [
+        "PATH=${lib.makeBinPath [ pkgs.git pkgs.bash pkgs.coreutils pkgs.findutils pkgs.gnugrep pkgs.gnused ]}"
+        "HOME=%h"
+      ];
+      ProtectSystem = "strict";
+      ProtectHome = "tmpfs";
+      # 🔴 NO LEADING `-` HERE, UNLIKE BindPaths. With `-` a missing source is
+      # silently skipped and the unit fails as `bash: …/commit.sh: No such file
+      # or directory`, status=127 — loud, but naming the wrong thing entirely.
+      # MEASURED 2026-08-07, source removed, same unit otherwise:
+      #   with `-`     → status=127, "bash: …/gone/commit.sh: No such file …"
+      #   without `-`  → status=226/NAMESPACE, "Failed to set up mount
+      #                  namespacing: …/gone: No such file or directory"
+      # The second names the missing mount. `-` is right on the STORE (a host
+      # that has never run /analyze-service must no-op cleanly, not fail) and
+      # wrong here: this script ships with the repo, so its absence is a real
+      # deployment fault and must say so.
+      BindReadOnlyPaths = [ "%h/workspace/devrc/scripts/analyze-service-index" ];
+      BindPaths = [ "-%h/.claude/analyze-service-index" ];
+      # 🔴 /dev/shm IS WRITABLE AND PERSISTS ON THE HOST UNDER EVERYTHING ABOVE.
+      # ProtectSystem=strict and ProtectHome=tmpfs do not cover it, and it is a
+      # 1777 host-shared tmpfs, so it was a fully working exfiltration target.
+      # MEASURED 2026-08-07 under the exact directive set above:
+      #   `cp -r <store> /dev/shm/asi-leak` → rc=0, and after the unit exited
+      #   the HOST still showed every file, mode 644, under a 1777 directory.
+      # A mutant doing exactly that survived all 75 tests in the suite.
+      # With this line: rc=1 "Permission denied", /dev/shm is `d---------`
+      # inside the namespace, `touch` rc=1, and the committer is unaffected.
+      #
+      # What does NOT work, stated so nobody swaps it for the "tidier" option:
+      #   PrivateDevices=true  → cp rc=0, content persists on the host (MEASURED)
+      #   PrivateIPC=true      → cp rc=0, content persists on the host (MEASURED)
+      #   TemporaryFileSystem=/dev/shm → private, but still WRITABLE
+      # /var/tmp needs nothing: PrivateTmp already covers it (MEASURED: cp rc=0
+      # inside, nothing on the host afterwards).
+      InaccessiblePaths = [ "/dev/shm" "/dev/mqueue" ];
+      PrivateTmp = true;
+      PrivateNetwork = true;
+      NoNewPrivileges = true;
+      ExecStart = "${pkgs.bash}/bin/bash %h/workspace/devrc/scripts/analyze-service-index/commit.sh";
+      # Re-run the unit when the committer changes (cf. X-Restart-Triggers above).
+      X-Restart-Triggers = [ "${../scripts/analyze-service-index/commit.sh}" ];
+    };
+  };
+
+  # HOURLY. Persistent catches up a missed run (host asleep / powered off).
+  #
+  # What the timer actually buys, stated at the scope it holds: a file that has
+  # been committed at least once survives a later bad Write, because the previous
+  # run's commit still has it. What it does NOT cover — content CREATED and
+  # DESTROYED between two runs never reaches any commit and is unrecoverable.
+  # That is not a corner case; it is the same-day write-then-clobber this work
+  # exists to defend against.
+  #
+  # 🔴 THAT WINDOW IS NARROWED, NOT CLOSED, and the distinction is the whole
+  # point. Only committing at write time would close it, and the store is written
+  # by agents that will not do so (see commit.sh's header). But "cannot be
+  # closed" was being used as an argument for leaving it at 24 h, and it is not
+  # one: hourly cuts the unrecoverable window 24× for a cost measured at nothing.
+  # MEASURED 2026-08-07, contained, at two points so the claim carries its own
+  # scope:
+  #   1 scope,   2 files            → ~80 ms per clean run
+  #   21 scopes, 84 files, 204 KB   → ~200-220 ms per clean run
+  #     (the live store's shape: 21 entries. First-ever run, bootstrapping 21
+  #      repositories from nothing: 663 ms — once, then never again.)
+  # 24 runs a day is therefore ~5 s of CPU. The unit touches no network
+  # (PrivateNetwork=true), no remote and no other host, so hourly costs a
+  # rounding error and buys 23 hours of exposure back.
+  #
+  # RandomizedDelaySec stays at 600 — well inside the hour, so runs cannot pile
+  # up, and it keeps the unit off a predictable boundary.
+  systemd.user.timers.analyze-service-index-commit = {
+    Unit = {
+      Description = "Hourly timer for the /analyze-service index autocommit";
+    };
+    Timer = {
+      OnCalendar = "hourly";
+      Persistent = true;
+      RandomizedDelaySec = 600;
+    };
+    Install = {
+      WantedBy = [ "timers.target" ];
+    };
+  };
+
   # ClickHouse regrowth check for the activity store.
   #
   # 2026-08-03 the store was cut 112.4 GB -> 82.1 MB after `system.trace_log`
