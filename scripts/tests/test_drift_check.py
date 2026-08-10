@@ -13,16 +13,22 @@ are not the happy path — they are:
 
   1. rc-PER-CONDITION. Each drift shape must produce its OWN distinct non-zero
      code (8 diverged/ahead, 10 behind, 12 not-on-main, 3 no-repo, 4
-     fetch/origin-main, 13 unreachable). One code for "something is wrong" would
-     be indistinguishable from the un-pushed-commits case that actually bit us
-     twice, which is the only one that needs a rescue-before-reset procedure.
+     fetch/origin-main, 13 unreachable-for-N-consecutive-runs). One code for
+     "something is wrong" would be indistinguishable from the un-pushed-commits
+     case that actually bit us twice, which is the only one that needs a
+     rescue-before-reset procedure.
   2. THE POSITIVE CONTROL. `test_clean_repo_is_green` proves the checker can
      observe the clean case at all. A reassuring rc=0 from a checker wired to
      nothing is indistinguishable from a real green, so the green is only
      meaningful reported alongside the reds above.
-  3. PASSIVITY. Both statically (the forbidden mutating primitives must not
-     appear as CODE) and behaviourally (after a run against a diverged repo the
-     branch, HEAD, worktree and stash stack must all be byte-identical).
+  2b. THE ALERTING POLICY, IN BOTH DIRECTIONS. An unreachable laptop must NOT
+     fail the unit on its own (a permanently-red gate is worse than no gate) —
+     and a genuine rc 8 must still exit non-zero even while the laptop is
+     unreachable, or the softening has simply muted the deadman.
+  3. PASSIVITY. Statically — an ALLOWLIST of read-only git subcommands, anchored
+     at every command separator, plus an asserted ledger of the only file the
+     script writes — and behaviourally: after a run against a diverged repo the
+     branch, HEAD, worktree and stash stack must all be byte-identical.
   4. THE SEAM. drift-check.sh and ship.sh must resolve host identity through the
      SAME sourced predicate. Asserted as a ledger — neither file may define
      detect_role itself, both must source lib/host-role.sh — plus a behavioural
@@ -67,6 +73,7 @@ class Fleet:
         self.work = tmp_path / "work"
         self.home = tmp_path / "home"
         self.bin = tmp_path / "bin"
+        self.state = tmp_path / "state"
         self.home.mkdir()
         self.bin.mkdir()
 
@@ -148,8 +155,13 @@ class Fleet:
         env = self.env(
             SHIP_ROLE="workbench",           # bypass IP detection (no `ip` here)
             DRIFT_REPO=str(repo or self.work),
-            **envextra,
+            # Pinned into tmp_path: the unreachable streak is PERSISTENT state,
+            # and left to its default ($XDG_STATE_HOME/…) these tests would both
+            # write to the operator's real state dir and inherit a streak from
+            # whatever ran before them.
+            DRIFT_STATE_DIR=str(self.state),
         )
+        env.update(envextra)   # per-test overrides win (e.g. a blocked state dir)
         proc = subprocess.run(
             ["bash", str(DRIFT), *args],
             capture_output=True, text=True, env=env,
@@ -247,6 +259,50 @@ def test_not_on_main_is_rc12(fleet):
     assert "feat/something" in out, out
 
 
+def test_off_main_with_diverged_main_is_rc8(fleet):
+    """🔴 REGRESSION PIN for a mutant that the whole 41-test suite survived.
+
+    Shape: HEAD sits on a feature branch AND local `main` has un-pushed commits.
+    That is the rc 8 incident shape — ship.sh skips the host entirely and moves
+    nothing — but it is ALSO 'not on branch main', so the answer depends purely
+    on the ORDER of the two checks in drift-check.sh.
+
+    Hoisting the `off_main -> exit 12` guard above the ahead/behind comparison
+    (a mutant that deletes nothing and moves one line) makes this case report
+    rc 12 with the advice 'ship.sh will move it' — which is FALSE: ship.sh skips
+    this host and it receives nothing, forever. The pre-existing suite stayed
+    green under that mutant (41 passed, 0 failed).
+    """
+    fleet.catch_up()
+    fleet.add_local_commit("un-pushed work stranded on main")
+    fleet.git(fleet.work, "checkout", "-q", "-b", "feat/elsewhere")
+
+    rc, out = fleet.check("--no-remote")
+    assert rc == 8, f"off-main + diverged main must be the rc8 shape, got {rc}\n{out}"
+    # ...and the verdict must not tell the operator ship.sh will fix the checkout.
+    assert "ship.sh SKIPS this host" in out, out
+    assert "will NOT move it" in out, out
+    assert "ship.sh will land the checkout back on main" not in out, (
+        "reported that ship.sh will fix a host ship.sh actually skips\n" + out
+    )
+    # The stranded commit is still named — the report must be actionable.
+    assert "un-pushed work stranded on main" in out, out
+
+
+def test_off_main_and_behind_is_rc12_matching_the_published_severity_order(fleet):
+    """off-main AND behind -> rc 12, not rc 10.
+
+    The file publishes `12 > 10` in its own severity table; returning 10 for a
+    host that is both would contradict it, and the aggregate code a timer hands
+    to systemd is derived from that very table.
+    """
+    fleet.git(fleet.work, "checkout", "-q", "-b", "feat/behind-too")  # work is 1 behind
+    rc, out = fleet.check("--no-remote")
+    assert rc == 12, f"expected rc12, got {rc}\n{out}"
+    assert "not on branch main" in out, out
+    assert "also BEHIND by 1" in out, out
+
+
 def test_no_local_main_branch_is_rc12(fleet):
     """A checkout with no local `main` at all -> rc 12, not a crash."""
     fleet.git(fleet.work, "checkout", "-q", "-b", "only-branch")
@@ -282,17 +338,121 @@ def test_fetch_failure_is_rc4(fleet):
     assert "no drift" not in out, f"reported green despite being unable to look\n{out}"
 
 
+def test_fetch_failure_surfaces_gits_own_stderr(fleet):
+    """rc 4 must carry a DIAGNOSIS, not just a verdict.
+
+    The unit's only output is the journal, and rc 4 is the recurring code (key
+    rotation, DNS, host-key churn). Discarding git's stderr — which the original
+    did, with `2>/dev/null` — makes every one of those indistinguishable from
+    every other, on a unit nobody is watching live.
+    """
+    fleet.git(fleet.work, "remote", "set-url", "origin",
+              str(fleet.root / "does-not-exist.git"))
+    rc, out = fleet.check("--no-remote")
+    assert rc == 4, out
+    diag = [ln for ln in out.splitlines() if "] " in ln and " git: " in ln]
+    assert diag, f"git's own error was swallowed; nothing to debug from:\n{out}"
+    assert any(ln.split(" git: ", 1)[1].strip() for ln in diag), (
+        f"the git: prefix is there but carries no message\n{out}"
+    )
+
+
 # --------------------------------------------------------------------------- #
 # 3. The REMOTE leg (stubbed ssh — no network, no real host)
 # --------------------------------------------------------------------------- #
-def test_unreachable_remote_is_rc13(fleet):
-    """ssh's 255 must become a LOUD rc 13, never a pass."""
+def test_unreachable_remote_below_threshold_does_not_fail_the_unit(fleet):
+    """🔴 A SHUT LAPTOP MUST NOT LOOK LIKE DRIFT.
+
+    The timer is serverMode-gated (workbench-only), so its remote leg always
+    ssh's to the laptop — routinely off/asleep/off-LAN. Failing the unit on that
+    fires the SAME sticky critical toast as a genuine rc 8, up to 4× a day, and
+    a permanently-red gate is worse than no gate.
+
+    So: reported loudly in the journal, exit code unaffected.
+    """
     fleet.stub_ssh(255)
     rc, out = fleet.check("--no-local", REMOTE_SSH="stub@example.invalid")
-    assert rc == 13, f"expected rc13, got {rc}\n{out}"
+    assert rc == 0, f"a single unreachable run must not fail the unit, got {rc}\n{out}"
     assert "UNREACHABLE" in out
-    assert "this is not a pass" in out
-    assert "no drift" not in out
+    assert "not a pass" in out, out                  # still not sold as a green
+    assert "1/4 consecutive" in out, out
+    assert "NOT escalated" in out, out
+    # ...and the summary must not claim a clean bill of health for a run that
+    # successfully checked nothing.
+    assert "NO HOST WAS SUCCESSFULLY CHECKED" in out, out
+
+
+def test_unreachable_remote_escalates_after_n_consecutive_runs(fleet):
+    """🔴 THE OTHER DIRECTION: the softening must not make the deadman mute.
+
+    A host that has been unlookable for the whole threshold window is no longer
+    'the laptop is shut' — at that point NOT alerting would be the deadman
+    failing at its one job. Threshold reached -> rc 13 -> unit failed -> toast.
+    """
+    fleet.stub_ssh(255)
+    codes = []
+    for _ in range(4):
+        rc, out = fleet.check("--no-local", REMOTE_SSH="stub@example.invalid",
+                              DRIFT_UNREACHABLE_ESCALATE="3")
+        codes.append(rc)
+    assert codes == [0, 0, 13, 13], f"escalation ladder wrong: {codes}\n{out}"
+    assert "ESCALATING" in out, out
+    assert "CONSECUTIVE unreachable checks" in out, out
+
+
+def test_unreachable_streak_resets_when_the_host_answers(fleet):
+    """The streak counts CONSECUTIVE misses. One successful reach clears it —
+    otherwise a laptop that is merely offline every other day would eventually
+    escalate anyway and the threshold would be meaningless."""
+    fleet.catch_up()
+    fleet.stub_ssh(255)
+    for _ in range(2):
+        rc, _ = fleet.check("--no-local", REMOTE_SSH="stub@example.invalid",
+                            DRIFT_UNREACHABLE_ESCALATE="3")
+        assert rc == 0
+
+    fleet.stub_ssh(0, stdout="[laptop] clean")       # it answers
+    rc, out = fleet.check("--no-local", REMOTE_SSH="stub@example.invalid",
+                          DRIFT_UNREACHABLE_ESCALATE="3")
+    assert rc == 0, out
+
+    fleet.stub_ssh(255)                              # ...and goes away again
+    rc, out = fleet.check("--no-local", REMOTE_SSH="stub@example.invalid",
+                          DRIFT_UNREACHABLE_ESCALATE="3")
+    assert rc == 0, f"the streak did not reset on a successful reach\n{out}"
+    assert "1/3 consecutive" in out, out
+
+
+def test_local_rc8_still_wins_when_the_remote_is_unreachable(fleet):
+    """🔴 THE FAILURE MODE OF THE FIX ABOVE, pinned.
+
+    Softening the unreachable case must not soften anything else. With the
+    laptop shut AND this host carrying un-pushed commits, the run must still
+    exit 8 — non-zero is what puts the unit in `failed`, which is what
+    OnFailure=notify-failure@%n.service turns into the toast.
+    """
+    fleet.catch_up()
+    fleet.add_local_commit("un-pushed while the laptop is shut")
+    fleet.stub_ssh(255)
+    rc, out = fleet.check(REMOTE_SSH="stub@example.invalid")
+    assert rc == 8, f"local drift was masked by the unreachable remote: {rc}\n{out}"
+    assert "ship.sh SKIPS this host" in out, out
+    assert "UNREACHABLE" in out, out                 # both are still reported
+
+
+def test_unreachable_escalates_immediately_when_the_streak_cannot_be_persisted(fleet):
+    """If 'for how long' is unknowable, the run must fail CLOSED (loud), not open.
+
+    A state dir that cannot be created is the one case where the threshold logic
+    has no input at all; going quiet there would be an unbounded silent window.
+    """
+    blocked = fleet.root / "blocked-state"
+    blocked.write_text("not a directory\n")          # mkdir -p will fail on this
+    fleet.stub_ssh(255)
+    rc, out = fleet.check("--no-local", REMOTE_SSH="stub@example.invalid",
+                          DRIFT_STATE_DIR=str(blocked))
+    assert rc == 13, f"expected an immediate escalation, got {rc}\n{out}"
+    assert "could not be" in out and "persisted" in out, out
 
 
 def test_remote_rc_is_passed_through(fleet):
@@ -319,6 +479,61 @@ def test_worst_code_wins_across_hosts(fleet):
     assert "2 un-pushed" in out, f"remote line missing\n{out}"
 
 
+def test_rc8_outranks_an_escalated_rc13(fleet):
+    """The severity TABLE, exercised — killed a surviving mutant.
+
+    `test_worst_code_wins_across_hosts` only ever compares 8 against 10, so a
+    mutant that reranks rc 8 *below* rc 13 survived it. Un-pushed commits are the
+    condition with the rescue-before-reset procedure; an unreachable host is not.
+    The number handed to systemd must be the former.
+    """
+    fleet.catch_up()
+    fleet.add_local_commit("un-pushed, while the laptop has been gone for days")
+    fleet.stub_ssh(255)
+    for _ in range(3):
+        rc, out = fleet.check(REMOTE_SSH="stub@example.invalid",
+                              DRIFT_UNREACHABLE_ESCALATE="2")
+    assert "ESCALATING" in out, out          # the remote really did escalate
+    assert rc == 8, f"an escalated rc13 outranked the un-pushed-commits rc8\n{out}"
+
+
+def test_the_unreachable_streak_is_kept_PER_REMOTE_HOST(fleet):
+    """Killed a surviving mutant: a single shared counter file.
+
+    Today there is one remote per run so a shared file is invisible — but the
+    streak is what decides whether the alert fires, and a counter keyed by
+    nothing would let two hosts' absences add up into an escalation neither one
+    earned. Driven by flipping the LOCAL role, which flips which host is remote.
+    """
+    fleet.stub_ssh(255)
+    for _ in range(2):                       # laptop misses twice
+        rc, out = fleet.check("--no-local", REMOTE_SSH="stub@example.invalid",
+                              SHIP_ROLE="workbench", DRIFT_UNREACHABLE_ESCALATE="3")
+        assert rc == 0, out
+    # Now the OTHER direction: from the laptop, the remote is the workbench.
+    rc, out = fleet.check("--no-local", REMOTE_SSH="stub@example.invalid",
+                          SHIP_ROLE="laptop", DRIFT_UNREACHABLE_ESCALATE="3")
+    assert rc == 0, out
+    assert "1/3 consecutive" in out, (
+        "the workbench inherited the laptop's streak — one shared counter\n" + out
+    )
+
+
+def test_the_remote_payload_is_shell_quoted():
+    """STRUCTURAL, and labelled as such.
+
+    `require_int` already rejects every value that could inject, so swapping %q
+    back to %s is behaviourally invisible to this suite — a mutant that survives
+    every behavioural test. %q is the second layer, and the only way to hold a
+    second layer whose first layer never lets anything through is to assert it
+    is there.
+    """
+    src = DRIFT.read_text()
+    assert "DRIFT_LABEL=%q" in src and "DRIFT_UNTRACKED_MAX=%q" in src, (
+        "the values interpolated into the REMOTE payload are no longer %q-quoted"
+    )
+
+
 def test_clean_local_plus_clean_remote_is_green(fleet):
     """Positive control for the two-host path, including the ssh leg."""
     fleet.catch_up()
@@ -326,6 +541,66 @@ def test_clean_local_plus_clean_remote_is_green(fleet):
     rc, out = fleet.check(REMOTE_SSH="stub@example.invalid")
     assert rc == 0, f"expected rc0, got {rc}\n{out}"
     assert "no drift" in out
+
+
+def test_untracked_max_cannot_inject_a_command_into_the_remote_payload(fleet):
+    """🔴 The tunables are INTERPOLATED INTO A SCRIPT THAT RUNS ON THE OTHER HOST.
+
+    `DRIFT_UNTRACKED_MAX='10; echo INJECTED-COMMAND-RAN'` used to be executed
+    remotely — a passivity hole on the far side of the ssh hop, which the static
+    scanner structurally cannot see (it only reads this file). Operator-supplied,
+    so low exploitability, but a deadman forbidden from touching a host must not
+    contain a path that runs arbitrary commands on it.
+    """
+    fleet.stub_ssh(0, stdout="[laptop] clean")
+    rc, out = fleet.check(
+        "--no-local",
+        REMOTE_SSH="stub@example.invalid",
+        DRIFT_UNTRACKED_MAX="10; echo INJECTED-COMMAND-RAN",
+    )
+    # The marker may legitimately appear INSIDE the rejection message (it quotes
+    # the offending value back). What must never appear is the marker as the
+    # OUTPUT OF A COMMAND — i.e. on a line of its own.
+    ran = [ln for ln in out.splitlines() if ln.strip() == "INJECTED-COMMAND-RAN"]
+    assert not ran, f"remote command injection: the payload executed\n{out}"
+    assert rc == 2, f"a non-integer tunable must be a usage error, got {rc}\n{out}"
+    assert "must be a non-negative integer" in out, out
+
+
+@pytest.mark.parametrize(
+    "var", ["DRIFT_UNTRACKED_MAX", "DRIFT_UNREACHABLE_ESCALATE"]
+)
+def test_non_integer_tunables_are_rejected(fleet, var):
+    rc, out = fleet.check("--no-remote", **{var: "not-a-number"})
+    assert rc == 2, f"{var} was accepted as {'not-a-number'!r}\n{out}"
+    assert var in out, out
+
+
+def test_checking_nothing_is_refused_rather_than_reported_as_a_pass(fleet):
+    """`--no-local --no-remote` used to print 'no drift — both hosts on branch
+    main at origin/main' and exit 0 having looked at neither host: the exact
+    vacuous green this subsystem exists to prevent, from the subsystem itself."""
+    rc, out = fleet.check("--no-local", "--no-remote")
+    assert rc == 2, f"expected a usage error, got {rc}\n{out}"
+    assert "check NOTHING" in out, out
+    assert "no drift" not in out, out
+    assert "both hosts" not in out, out
+
+
+def test_a_single_host_run_does_not_claim_both_hosts(fleet):
+    """The summary must state WHAT WAS CHECKED.
+
+    `--no-remote` on a clean repo previously printed "no drift — both hosts on
+    branch main at origin/main", naming a host the run never contacted. That
+    wording appears in PR #367's own positive-control transcript, where it read
+    as evidence of coverage the run did not have.
+    """
+    fleet.catch_up()
+    rc, out = fleet.check("--no-remote")
+    assert rc == 0, out
+    assert "both hosts" not in out, f"claimed coverage it did not have\n{out}"
+    assert "workbench (local)" in out, out
+    assert "NOT checked" in out and "laptop" in out, out
 
 
 # --------------------------------------------------------------------------- #
@@ -389,47 +664,282 @@ def test_run_against_feature_branch_does_not_move_it(fleet):
 # --------------------------------------------------------------------------- #
 # 6. PASSIVITY — structural
 # --------------------------------------------------------------------------- #
-FORBIDDEN_PRIMITIVES = (
-    "git checkout", "git switch", "git merge", "git rebase", "git reset",
-    "git stash", "git clean", "git commit", "git push", "git pull",
-    "git cherry-pick", "git branch -", "--autostash", "home-manager",
-)
+# 🔴 An ALLOWLIST of read-only git subcommands, NOT a blocklist of mutating ones.
+#
+# The blocklist this replaced ("git checkout", "git reset", …) anchored on the
+# FIRST WORD OF A LINE and enumerated verbs, so it missed every one of:
+#   git restore --staged .        git update-ref refs/heads/main origin/main
+#   git config user.name evil     git gc --prune=now        git prune
+#   git worktree add /tmp/x       git branch new origin/main
+#   git symbolic-ref HEAD refs/heads/other                  rm -rf "$repo"
+#   say "checking" && git checkout main    echo hi; git reset --hard origin/main
+# — while three separate docstrings claimed it enforced passivity. A blocklist of
+# verbs is a game you lose once; an allowlist fails CLOSED on a verb nobody
+# thought of.
+READONLY_GIT_SUBCOMMANDS = frozenset({
+    "fetch",        # writes remote-tracking refs ONLY — the one deliberate write
+    "rev-parse", "rev-list", "show-ref", "ls-files", "log", "show",
+    "status", "diff", "cat-file", "for-each-ref", "merge-base", "describe",
+    "name-rev", "shortlog", "var", "check-ignore", "ls-remote", "count-objects",
+})
+
+# Non-git commands that can destroy or rewrite a host's files. `mkdir` is
+# deliberately absent (it creates, never destroys) and the ONE directory this
+# script creates is pinned separately by the redirection ledger below.
+DESTRUCTIVE_COMMANDS = frozenset({
+    "rm", "mv", "cp", "ln", "dd", "truncate", "tee", "shred", "mkfifo",
+    "chmod", "chown", "chgrp", "install", "rsync",
+    "home-manager", "nixos-rebuild", "nix-env",
+})
+
+# Words that are not the command — strip them and look at what follows.
+_TRANSPARENT = frozenset({
+    "if", "then", "elif", "else", "fi", "while", "until", "for", "do", "done",
+    "case", "esac", "select", "function", "!", "time", "exec", "eval",
+    "command", "builtin", "sudo", "env", "nohup", "xargs", "local", "export",
+    "declare", "readonly", "return", "in",
+})
+
+_PRINTERS = frozenset({"say", "echo", "printf"})
 
 
-# A line whose FIRST word is a printer can only PRINT the forbidden primitive,
-# not run it — and drift-check's whole value is that it prints the rescue
-# procedure (`git branch … && git push …`, `git reset --keep`) so the operator
-# does not have to go looking for it. The carve-out is withdrawn the moment the
-# line contains a command substitution, which is the one way a printer CAN
-# execute something; `test_scanner_catches_a_substitution_inside_a_message`
-# is the positive control for that half.
-_OUTPUT_ONLY = re.compile(r"^\s*(say|echo|printf)\b")
+def _walk(line):
+    """Split ONE shell line into command segments, quote-aware.
+
+    Segments break at every command separator — `;` `&&` `||` `|` `&` `(` `)`
+    `{` `}` — AND at `$(` / backtick, because a command substitution executes
+    even inside double quotes. That last part is why the old first-word anchor
+    was not enough: `say "x" && git checkout main` is two commands, and the
+    second one runs.
+
+    Quoted RUNS are kept in the segment text (so a message's words survive for
+    the human-readable report) but never create separators, which is what lets
+    `say "… git branch <t> && git push …"` stay a single printer segment.
+    """
+    segs, cur = [], []
+    i, n, q = 0, len(line), None
+    while i < n:
+        c = line[i]
+        if q == "'":
+            if c == "'":
+                q = None
+            else:
+                cur.append(c)
+            i += 1
+            continue
+        if q == '"':
+            if c == '"':
+                q = None
+                i += 1
+                continue
+            if c == "$" and line[i:i + 2] == "$(":
+                segs.append("".join(cur)); cur = []; q = None; i += 2
+                continue
+            if c == "`":
+                segs.append("".join(cur)); cur = []; q = None; i += 1
+                continue
+            cur.append(c)
+            i += 1
+            continue
+        # --- unquoted -------------------------------------------------------
+        if c == "\\":
+            i += 2
+            continue
+        if c == "'":
+            q = "'"; i += 1; continue
+        if c == '"':
+            q = '"'; i += 1; continue
+        if line[i:i + 2] == "$(":
+            segs.append("".join(cur)); cur = []; i += 2; continue
+        if c == "`":
+            segs.append("".join(cur)); cur = []; i += 1; continue
+        if c in "();{}&|":
+            segs.append("".join(cur)); cur = []
+            i += 2 if line[i:i + 2] in ("&&", "||") else 1
+            continue
+        cur.append(c)
+        i += 1
+    segs.append("".join(cur))
+    return [s for s in (x.strip() for x in segs) if s]
+
+
+def _command_tokens(seg):
+    """The tokens of a segment with leading assignments/redirections/keywords
+    stripped, so tokens[0] is the command actually being run (or [])."""
+    toks = seg.split()
+    while toks:
+        t = toks[0]
+        if re.fullmatch(r"[A-Za-z_][A-Za-z_0-9]*=.*", t) or re.match(r"^\d?[<>]", t):
+            toks.pop(0); continue
+        if t in _TRANSPARENT:
+            toks.pop(0); continue
+        break
+    return toks
+
+
+def _strip_redirections(toks):
+    """Drop redirection tokens (`2>/dev/null`, `>`, `"$f"`) from an argv list.
+
+    Without this, `git symbolic-ref --quiet --short HEAD 2>/dev/null` looks like
+    it has TWO operands and is misread as the ref-WRITING form."""
+    out, i = [], 0
+    while i < len(toks):
+        t = toks[i]
+        if re.fullmatch(r"\d?[<>]{1,2}", t):
+            i += 2; continue            # separated target
+        if re.match(r"^\d?[<>]", t):
+            i += 1; continue            # attached target
+        out.append(t); i += 1
+    return out
+
+
+def _classify_git(args):
+    args = _strip_redirections(args)
+    if "--autostash" in args:
+        return "git --autostash"
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a in ("-C", "-c", "--git-dir", "--work-tree", "--namespace"):
+            i += 2; continue
+        if a.startswith("-"):
+            i += 1; continue
+        break
+    if i >= len(args):
+        return None                       # bare `git`, or only global flags
+    sub = args[i]
+    operands = [x for x in args[i + 1:] if not x.startswith("-")]
+    if sub == "symbolic-ref":
+        # READ: `git symbolic-ref --quiet --short HEAD`.
+        # WRITE: `git symbolic-ref HEAD refs/heads/other` — same verb, two operands.
+        return None if len(operands) <= 1 else "git symbolic-ref (WRITES a ref)"
+    if sub in READONLY_GIT_SUBCOMMANDS:
+        return None
+    return "git %s (not in the read-only allowlist)" % sub
+
+
+def _classify(seg):
+    toks = _command_tokens(seg)
+    if not toks:
+        return None
+    cmd = toks[0].rsplit("/", 1)[-1]
+    if cmd in _PRINTERS:
+        # A printer can only PRINT — any substitution inside it became its own
+        # segment above, so this carve-out cannot swallow an execution.
+        return None
+    if cmd == "git":
+        return _classify_git(toks[1:])
+    if cmd == "sed" and any(t.startswith("-i") for t in toks[1:]):
+        return "sed -i (in-place edit)"
+    if cmd in DESTRUCTIVE_COMMANDS:
+        return "%s (destructive command)" % cmd
+    return None
 
 
 def scan_mutations(text):
-    """Return [(lineno, line, hits)] for every executable line that could MUTATE.
+    """Return [(lineno, line, reasons)] for every executable segment that could
+    MUTATE a checkout.
 
     Comment lines are excluded on purpose — the header DOCUMENTS the ban and the
     rescue procedure, so a whole-file grep would flag the script's own warning
-    label.
+    label. Line numbers are the file's real ones.
     """
-    code = [ln for ln in text.splitlines() if ln.strip() and not ln.strip().startswith("#")]
     out = []
-    for i, ln in enumerate(code, 1):
-        hits = [p for p in FORBIDDEN_PRIMITIVES if p in ln]
-        if not hits:
+    for i, ln in enumerate(text.splitlines(), 1):
+        s = ln.strip()
+        if not s or s.startswith("#"):
             continue
-        if _OUTPUT_ONLY.match(ln) and "$(" not in ln and "`" not in ln:
-            continue
-        out.append((i, ln.strip(), hits))
+        reasons = []
+        for seg in _walk(ln):
+            r = _classify(seg)
+            if r and r not in reasons:
+                reasons.append(r)
+        if reasons:
+            out.append((i, s, reasons))
     return out
+
+
+# Every command shape the previous first-word scanner MISSED, plus the two it
+# caught. This list IS the finding: a scanner is only worth its docstring once
+# each of these has been watched to flag.
+MUTATION_PROBES = [
+    "git checkout main",
+    "git switch -c other",
+    "git reset --hard origin/main",
+    "git restore --staged .",
+    "git update-ref refs/heads/main origin/main",
+    'git config user.name evil',
+    "git gc --prune=now",
+    "git prune",
+    "git worktree add /tmp/x",
+    "git branch newbranch origin/main",
+    "git symbolic-ref HEAD refs/heads/other",
+    "git clean -fdx",
+    "git stash",
+    "git commit -am wat",
+    "git push --force origin main",
+    "git pull --autostash",
+    "git remote set-url origin evil",
+    "git apply /tmp/patch",
+    "git am /tmp/patch",
+    'rm -rf "$repo"',
+    'mv "$repo" /tmp/gone',
+    'say "checking" && git checkout main',
+    "echo hi; git reset --hard origin/main",
+    'printf "x" || git clean -fdx',
+    'say "note" | git stash',
+    'say "oops $(git reset --hard origin/main)"',
+    "home-manager switch --flake .",
+    'sed -i "s/a/b/" "$repo/f"',
+    'git -C "$repo" checkout main',
+    "if true; then git reset --hard; fi",
+    "for f in x; do rm -rf $f; done",
+]
+
+
+@pytest.mark.parametrize("probe", MUTATION_PROBES)
+def test_scanner_flags_every_known_mutation_shape(probe):
+    """NEGATIVE CONTROL, one case per shape.
+
+    Each probe is appended to the REAL script, so a probe can only be flagged
+    because of itself — the rest of the file is known-clean by
+    `test_drift_check_source_never_mutates`.
+    """
+    offenders = scan_mutations(DRIFT.read_text() + "\n" + probe + "\n")
+    assert offenders, "the passivity scanner does not flag: %s" % probe
+    assert any(probe.strip() == ln for _, ln, _ in offenders), (
+        "flagged something, but not the injected line %r: %r" % (probe, offenders)
+    )
+
+
+# Lines that MUST NOT be flagged. Without these the scanner is indistinguishable
+# from one that flags everything — and a scanner that flags everything gets
+# deleted the first time it blocks a legitimate change.
+BENIGN_PROBES = [
+    'say "  fix: git reset --keep origin/main"',
+    'say "  rescue (on that host): git branch <topic> main && git push -u origin <topic>"',
+    "git fetch origin -q",
+    'fetch_err=$(git fetch origin -q 2>&1)',
+    "git rev-list --left-right --count origin/main...main 2>/dev/null",
+    "branch=$(git symbolic-ref --quiet --short HEAD 2>/dev/null || echo DETACHED)",
+    "untracked=$(git ls-files --others --exclude-standard 2>/dev/null)",
+    "git show-ref --verify --quiet refs/heads/main",
+    'git log --oneline --no-decorate origin/main..main | head -n 10 | sed "s|^|  + |"',
+    'echo "[$REMOTE_ROLE] UNREACHABLE — ssh failed" ',
+    'mkdir -p "$DRIFT_STATE_DIR" 2>/dev/null',
+]
+
+
+@pytest.mark.parametrize("probe", BENIGN_PROBES)
+def test_scanner_does_not_flag_legitimate_read_only_lines(probe):
+    assert scan_mutations(probe + "\n") == [], probe
 
 
 def test_drift_check_source_never_mutates():
     offenders = scan_mutations(DRIFT.read_text())
     assert offenders == [], (
-        "drift-check.sh is PASSIVE — these lines could mutate a host:\n"
-        + "\n".join(f"  line {i}: {ln}   (matched {h})" for i, ln, h in offenders)
+        "drift-check.sh is PASSIVE — these segments could mutate a host:\n"
+        + "\n".join(f"  line {i}: {ln}   ({h})" for i, ln, h in offenders)
     )
     src = DRIFT.read_text()
     # ...and the read-only primitives must still be the ones doing the work.
@@ -437,39 +947,76 @@ def test_drift_check_source_never_mutates():
     assert "git rev-list --left-right --count" in src
 
 
-def test_scanner_catches_a_bare_mutating_command(tmp_path):
-    """Negative control #1 for the scanner above.
+def test_host_role_lib_never_mutates():
+    """The lib is SOURCED into the deadman, so its passivity is the deadman's."""
+    offenders = scan_mutations(HOST_ROLE_LIB.read_text())
+    assert offenders == [], offenders
 
-    Without it, `test_drift_check_source_never_mutates` is indistinguishable from
-    a scan wired to nothing — the vacuous-green shape this suite exists to stop.
+
+def _unquoted_redirect_targets(line):
+    """Redirection targets appearing OUTSIDE quotes on one line.
+
+    Quote-aware on purpose: `say "… git branch <topic> main …"` contains a `>`
+    that is text, not a redirection, and a naive regex reads it as a write to
+    the file `main`.
     """
-    mutated = DRIFT.read_text() + "\ngit checkout main\n"
-    offenders = scan_mutations(mutated)
-    assert offenders, "the passivity scanner cannot detect an injected mutation"
-    assert any("git checkout main" in ln for _, ln, _ in offenders)
+    targets, i, n, q, prev = [], 0, len(line), None, ""
+    while i < n:
+        c = line[i]
+        if q:
+            if c == q:
+                q = None
+            i += 1; prev = c; continue
+        if c in "'\"":
+            q = c; i += 1; prev = c; continue
+        if c == "#" and prev in ("", " ", "\t"):
+            break                       # trailing comment — not code
+        if c == ">" and prev not in "0123456789&":
+            j = i
+            while j < n and line[j] == ">":
+                j += 1
+            while j < n and line[j] == " ":
+                j += 1
+            k = j
+            while k < n and line[k] not in " \t;|&)":
+                k += 1
+            targets.append(line[j:k])
+            i = k; prev = ">"; continue
+        prev = c
+        i += 1
+    return targets
 
 
-def test_scanner_catches_a_substitution_inside_a_message(tmp_path):
-    """Negative control #2 — the carve-out's own boundary.
+def test_the_only_files_the_deadman_writes_are_the_streak_counters():
+    """LEDGER, not a spot check: every non-/dev/null redirection target in the
+    script, asserted as a set. Fails when it GROWS (a new file gets written) or
+    SHRINKS (the streak counter stops being persisted, which would silently
+    disable the escalation ladder).
 
-    The say/echo/printf carve-out exists so the rescue procedure can be PRINTED.
-    A command substitution smuggled into such a line would execute, so the
-    carve-out must not cover it. This is the mutation that a naive
-    "skip all message lines" scanner would sail straight past.
+    The static command scanner cannot see this: `printf … > "$repo/f"` is a
+    printer as far as it is concerned.
     """
-    mutated = DRIFT.read_text() + '\nsay "oops $(git reset --hard origin/main)"\n'
-    offenders = scan_mutations(mutated)
-    assert offenders, "the carve-out swallows a command substitution"
-    assert any("git reset" in " ".join(h) for _, _, h in offenders)
+    found = set()
+    for ln in DRIFT.read_text().splitlines():
+        s = ln.strip()
+        if not s or s.startswith("#"):
+            continue
+        for t in _unquoted_redirect_targets(ln):
+            if t in ("/dev/null", "&2", "&1", ""):
+                continue
+            found.add(t)
+    assert found == {'"$f"'}, (
+        "drift-check.sh writes files other than the unreachable streak counter: %r" % found
+    )
 
 
-def test_scanner_carve_out_still_allows_a_plain_message():
-    """...and the carve-out genuinely carves: a pure message line is NOT flagged.
-
-    Proves the two controls above are not passing merely because the scanner
-    flags everything.
-    """
-    assert scan_mutations('say "  fix: git reset --keep origin/main"\n') == []
+def test_redirect_ledger_notices_a_new_write():
+    """POSITIVE CONTROL for the ledger — a zero from it would otherwise be
+    indistinguishable from a regex that never matches anything."""
+    assert _unquoted_redirect_targets('printf "x" > "$repo/f"') == ['"$repo/f"']
+    assert _unquoted_redirect_targets('echo hi 2>/dev/null') == []
+    assert _unquoted_redirect_targets(
+        'say "  git branch <topic> main && git push"') == []
 
 
 # --------------------------------------------------------------------------- #
@@ -621,7 +1168,11 @@ def test_every_command_the_checker_runs_is_on_the_unit_path(cmd, attr):
     code = "\n".join(
         ln for ln in scripts_src.splitlines() if not ln.strip().startswith("#")
     )
-    assert cmd in code, (
+    # WORD-BOUNDED, not a raw substring: `"ip" in code` is satisfied by
+    # `pipefail` and `"tr" in code` by `untracked`, so half of this table used to
+    # pass without the command appearing anywhere as a command.
+    present = re.search(r"(?<![\w.-])%s(?![\w.-])" % re.escape(cmd), code) is not None
+    assert present, (
         f"{cmd!r} is pinned as a PATH requirement but the scripts no longer call "
         f"it — drop it from UNIT_PATH_REQUIREMENTS (the pin is the accounting)"
     )
@@ -629,3 +1180,110 @@ def test_every_command_the_checker_runs_is_on_the_unit_path(cmd, attr):
         f"the drift-check unit's PATH is missing {attr} — {cmd!r} would not resolve "
         f"under systemd, which has none of the login shell's PATH"
     )
+
+
+# --------------------------------------------------------------------------- #
+# 9. Recovery ergonomics — ship.sh must still work on a HALF-BROKEN host
+#
+# ship.sh is the tool you run when a host is already wrong. Making it hard-depend
+# on a second file removed the escape hatch that used to exist (the constants
+# were inline), so a missing lib/host-role.sh took out the recovery tool along
+# with everything else.
+# --------------------------------------------------------------------------- #
+def _ship_copy_without_lib(tmp_path):
+    """A copy of ship.sh whose lib/host-role.sh does NOT exist."""
+    d = tmp_path / "brokenhost" / "scripts"
+    d.mkdir(parents=True)
+    (d / "ship.sh").write_text(SHIP.read_text())
+    return d / "ship.sh"
+
+
+def test_ship_without_the_lib_still_honours_an_explicit_role(tmp_path):
+    """SHIP_ROLE must short-circuit detection without needing the lib."""
+    ship = _ship_copy_without_lib(tmp_path)
+    env = dict(os.environ, SHIP_ROLE="workbench", SHIP_REPO=str(tmp_path / "nope"))
+    out = subprocess.run(["bash", str(ship), "--no-remote", "--no-switch"],
+                         capture_output=True, text=True, env=env)
+    combined = out.stdout + out.stderr
+    assert out.returncode != 6, (
+        "SHIP_ROLE no longer overrides a missing lib — the recovery tool is "
+        f"unusable on a host missing one file\n{combined}"
+    )
+    assert "degraded recovery mode" in combined, combined
+
+
+def test_ship_without_the_lib_and_without_a_role_fails_loudly(tmp_path):
+    """The escape hatch is an ESCAPE HATCH: with no role there is no detection
+    (detect_role is deliberately NOT duplicated here), so this must exit 6 and
+    say what to do — not guess a role."""
+    ship = _ship_copy_without_lib(tmp_path)
+    env = {k: v for k, v in os.environ.items() if k != "SHIP_ROLE"}
+    out = subprocess.run(["bash", str(ship), "--no-remote", "--no-switch"],
+                         capture_output=True, text=True, env=env)
+    combined = out.stdout + out.stderr
+    assert out.returncode == 6, combined
+    assert "SHIP_ROLE=workbench" in combined, combined
+
+
+@pytest.mark.parametrize("script", ["ship.sh", "drift-check.sh"])
+def test_invoking_through_a_symlink_still_finds_the_shared_lib(tmp_path, script):
+    """${BASH_SOURCE[0]} is the INVOKING path, not the real one.
+
+    Unresolved, a ~/bin shim or any PATH symlink makes both scripts look for
+    lib/ next to the SYMLINK and exit 6. Latent today (no such symlink exists),
+    but it is exactly the shape that bites during a recovery.
+    """
+    link = tmp_path / ("link-" + script)
+    link.symlink_to(REPO_ROOT / "scripts" / script)
+    out = subprocess.run(["bash", str(link), "--detect-role", "192.168.50.250"],
+                         capture_output=True, text=True)
+    assert out.returncode == 0, out.stdout + out.stderr
+    assert out.stdout.strip() == "workbench", out.stdout + out.stderr
+
+
+def test_host_role_lib_is_safe_to_execute_directly():
+    """It is mode 755, so `./scripts/lib/host-role.sh --detect-role` happens.
+
+    Without a shebang the kernel hands it to /bin/sh; under a dash-ish /bin/sh
+    ${BASH_SOURCE[0]} is EMPTY, the executed-not-sourced guard never matches, and
+    the probe exits 0 having printed nothing — a silent no-op from a tool you are
+    reading an answer out of.
+    """
+    executable = os.access(HOST_ROLE_LIB, os.X_OK)
+    first = HOST_ROLE_LIB.read_text().splitlines()[0]
+    # Assembled from character codes, not written as a literal: a quoted `#!` in
+    # a test file is exactly what `test_runtime_shebangs.py` scans the repo for,
+    # and this line would otherwise report itself as an offender.
+    hashbang = chr(35) + chr(33)
+    assert (not executable) or first.startswith(hashbang), (
+        "host-role.sh is executable but has no shebang; first line: %r" % first
+    )
+    if executable:
+        out = subprocess.run([str(HOST_ROLE_LIB), "--detect-role", "192.168.50.155"],
+                             capture_output=True, text=True)
+        assert out.stdout.strip() == "laptop", (out.returncode, out.stdout, out.stderr)
+
+
+def test_the_timer_rationale_does_not_claim_laptop_behaviour():
+    """A COMMENT IS A CLAIM. The timer is serverMode-gated and ~/.server-mode
+    exists only on the workbench, so the timer never runs on the laptop —
+    OnStartupSec cannot be justified by the laptop 'having just resumed'.
+    """
+    timer_start = HOME_NIX.index("systemd.user.timers.drift-check")
+    rationale = HOME_NIX[max(0, timer_start - 1500):timer_start]
+    assert "laptop is intermittent" not in rationale, (
+        "the OnStartupSec rationale still describes laptop resume behaviour that "
+        "cannot occur — the timer is workbench-only:\n" + rationale
+    )
+    assert "workbench" in rationale.lower(), rationale
+
+
+def test_home_nix_documents_that_an_unreachable_remote_does_not_toast():
+    """The alerting POLICY is the load-bearing part of this unit, and it lives in
+    two files (the script decides, the unit alerts). Pin the unit-side claim so
+    the two cannot silently disagree."""
+    start = HOME_NIX.index("PASSIVE DRIFT DEADMAN")
+    block = HOME_NIX[start:HOME_NIX.index("systemd.user.services.drift-check")]
+    assert "serverMode" in block, "the block never states the timer is workbench-only"
+    assert "DRIFT_UNREACHABLE_ESCALATE" in block, block
+    assert "still exits 8" in block, block

@@ -1,5 +1,13 @@
+#!/usr/bin/env bash
 # shellcheck shell=bash
 # host-role.sh — canonical per-host identity for the devrc two-host fleet.
+#
+# The shebang is load-bearing despite this file normally being SOURCED: the file
+# is mode 755, so `./scripts/lib/host-role.sh --detect-role` is a thing an
+# operator will do, and without it the kernel hands the file to /bin/sh. Under a
+# dash-ish /bin/sh, ${BASH_SOURCE[0]} expands to the empty string, the
+# executed-not-sourced guard at the bottom never matches, and --detect-role exits
+# 0 having printed NOTHING — a silent no-op from a probe you are trusting.
 #
 # 🔴 SINGLE SOURCE OF TRUTH. Both NixOS hosts report hostname `nixos`, so nothing
 # can tell them apart by name. This file owns the ONE predicate that can: derive
