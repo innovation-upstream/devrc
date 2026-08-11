@@ -304,7 +304,14 @@ for label, probe in [
 _repo_root = tempfile.mkdtemp(prefix="bash-guard-repos-")
 
 
-def _mkrepo(name, branch, remote="git@github.com:someone/thing.git"):
+_DEFAULT_REMOTE = "git@github.com:someone/thing.git"
+
+
+def _mkrepo(name, branch, remote: "str | None" = _DEFAULT_REMOTE):
+    """`remote=None` builds a repo with NO remotes — the scratch-repo carve-out.
+    Annotated Optional explicitly: inferring the type from the default made it
+    `str`, so the `remote=None` call below was a type error (flagged by static
+    analysis) even though it is the whole point of one of the cases."""
     path = os.path.join(_repo_root, name)
     subprocess.run(["git", "init", "-q", "-b", branch, path],
                    capture_output=True, check=True)
@@ -366,8 +373,64 @@ for name, cmd, want in [
     fail += not ok
     print(f"{'PASS' if ok else 'FAIL'}  block={blocked!s:<5} want={want!s:<5}  {name}")
 
+# --- 🔴 FAIL-CLOSED: the adapter's error paths, exercised for real -----------
+# The docstring at the top of bash-guard.py promises the guard denies rather than
+# passing a command through unchecked when it cannot check it. That promise had a
+# hole, found by probing rather than reading: `except Exception` does not catch a
+# BaseException, so one escaped as a traceback with rc=-2 — and for a PreToolUse
+# hook only exit code 2 blocks, so any other non-zero status lets the command RUN.
+# Measured before the fix: missing-core -> deny, Exception -> deny,
+# BaseException -> ALLOW. All three must now deny.
+#
+# Each case gets its OWN copy of the adapter next to a broken/absent core, so the
+# failure is real rather than mocked.
+_broken_root = tempfile.mkdtemp(prefix="bash-guard-broken-")
+
+
+def _run_guard_from(dirpath, cmd="ls -la"):
+    proc = subprocess.run([sys.executable, os.path.join(dirpath, "bash-guard.py")],
+                          input=json.dumps({"tool_name": "Bash", "cwd": NEUTRAL_CWD,
+                                            "tool_input": {"command": cmd}}),
+                          capture_output=True, text=True, timeout=30)
+    return proc.returncode, ('"deny"' in proc.stdout)
+
+
+for label, core_src in [
+    ("core MISSING", None),
+    ("core raises Exception",
+     "def evaluate(cmd, policy='claude-code', cwd=None):\n"
+     "    raise RuntimeError('deliberate checker crash')\n"),
+    ("core raises BaseException",
+     "def evaluate(cmd, policy='claude-code', cwd=None):\n"
+     "    raise KeyboardInterrupt('a BaseException, not an Exception')\n"),
+]:
+    d = os.path.join(_broken_root, label.replace(" ", "_"))
+    os.makedirs(d, exist_ok=True)
+    shutil.copy(GUARD, os.path.join(d, "bash-guard.py"))
+    if core_src is not None:
+        with open(os.path.join(d, "guard_core.py"), "w") as fh:
+            fh.write(core_src)
+    rc, denied = _run_guard_from(d)
+    # rc MUST be 0 with a deny verdict on stdout. A non-zero rc that is not 2 is
+    # the fail-open shape, and rc=2 would be a different contract than this
+    # adapter uses (it denies via hookSpecificOutput, not via the exit code).
+    ok = denied and rc == 0
+    fail += not ok
+    print(f"{'PASS' if ok else 'FAIL'}  rc={rc!s:<3} denied={denied!s:<5} "
+          f"fail-closed when {label}")
+
+# And the control: an INTACT adapter must still allow a harmless command, or the
+# three assertions above would pass for the wrong reason (a guard that denies
+# everything is trivially "fail-closed").
+_intact_rc, _intact_denied = _run_guard_from(os.path.dirname(GUARD))
+_ok = (_intact_rc == 0 and not _intact_denied)
+fail += not _ok
+print(f"{'PASS' if _ok else 'FAIL'}  rc={_intact_rc!s:<3} denied={_intact_denied!s:<5} "
+      f"control: the intact guard still ALLOWS a harmless command")
+
 shutil.rmtree(NEUTRAL_CWD, ignore_errors=True)
 shutil.rmtree(_repo_root, ignore_errors=True)
+shutil.rmtree(_broken_root, ignore_errors=True)
 
 print("\nRESULT:", "all good" if not fail else f"{fail} failure(s)")
 sys.exit(1 if fail else 0)

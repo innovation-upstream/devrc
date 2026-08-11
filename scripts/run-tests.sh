@@ -182,7 +182,15 @@ cd "$ROOT" || { echo "run-tests: cannot cd to ROOT=$ROOT" >&2; exit 2; }
 # and picking between "teach the guard about the sandbox" and "teach the tests to
 # set HOME" is a decision, not a cleanup) — but flagged, because a permanently
 # red gate trains everyone to click through it.
-MIN_TESTS="${MIN_TESTS:-6847}"
+# 6897 MEASURED on the FINAL tree of #376 (the 6847 above was an intermediate
+# measurement, taken before the audit-fix round added its regression tests):
+#     nix build .#checks.x86_64-linux.pytests
+#     TOTAL collected=6897  passed=6893  skipped=1  failed=3  (floor: 6847)
+# The 3 failures are the pre-existing monitor-blackout ones described above, not
+# this branch's. The later fail-closed cases went into test_bash_guard.py, which
+# run-tests.sh executes as a SCRIPT rather than collecting, so they legitimately
+# do not move this number.
+MIN_TESTS="${MIN_TESTS:-6897}"
 
 # --- GUARD 1: tool precondition ------------------------------------------------
 # Every binary the suites `skipif` on. Absence must be an ERROR, never a skip.
