@@ -93,6 +93,10 @@ Config (env):
                                  burst would rate_limit EVERY /cmd forever)
     BROWSER_BRIDGE_MAX_QUEUE     per-instance pending-command cap (default 32;
                                  0 → unlimited). Over-cap /cmd → HTTP 429.
+    BROWSER_BRIDGE_HEARTBEAT_S   seconds between liveness telemetry heartbeats
+                                 (default 900; 0 → disabled). See
+                                 HEARTBEAT_INTERVAL_S for why the source needs a
+                                 cadence at all.
 """
 from __future__ import annotations
 
@@ -337,6 +341,27 @@ OWNER_TTL_S = float(os.environ.get("BROWSER_BRIDGE_OWNER_TTL", "900"))
 RATE_PER_SEC = float(os.environ.get("BROWSER_BRIDGE_RATE_PER_SEC", "5"))
 BURST = float(os.environ.get("BROWSER_BRIDGE_BURST", "20"))
 MAX_QUEUE = int(os.environ.get("BROWSER_BRIDGE_MAX_QUEUE", "32"))
+
+# Liveness heartbeat interval, in seconds. 0 (or negative) disables the thread.
+#
+# WHY A HEARTBEAT EXISTS AT ALL. Every other browser-bridge event is emitted by a
+# handled COMMAND, so the source has no cadence: it emits when an agent drives it
+# and is otherwise silent for as long as nobody does. That makes it undetectable
+# by the activity pipeline's deadman check (scripts/collector/deadman.py), which
+# decides "dead" by comparing silence against a MEASURED per-source budget —
+# there is no budget that separates "unused" from "down" when normal silence is
+# unbounded. Measured 2026-08-11: laptop/browser-bridge had been silent 30.9
+# ACTIVE hours, 2.2x the worst lull in its own 14-day history, purely because the
+# operator had not run a browser task; the check called it DEAD and was right by
+# its own definition and useless by ours.
+#
+# 900s = 3 of the deadman's 5-minute buckets, so a live bridge emits ~96 rows/day
+# and its p99 active-gap collapses to ~3 buckets. The budget then bottoms out on
+# that module's 2-ACTIVE-HOUR floor: silence beyond ~2 active hours means the
+# unit is genuinely not running, and no amount of not-using-the-browser can
+# produce it. Cheap enough to be uninteresting (one local spool append) and
+# bounded by the same best-effort contract as every other emit.
+HEARTBEAT_INTERVAL_S = float(os.environ.get("BROWSER_BRIDGE_HEARTBEAT_S", "900"))
 
 # Host-side i3 foregrounding for the `activate` op (see i3_foreground below).
 # The Chrome-side activate (chrome.tabs.update{active}+windows.update{focused})
@@ -838,7 +863,8 @@ def _emulate_extra(body) -> dict:
 
 
 def emit_cmd_event(op: str, key: str, outcome: str, duration_ms: int,
-                   domain: str = "", exit_code: int = 0, extra: dict = None) -> None:
+                   domain: str = "", exit_code: int = 0, extra: dict = None,
+                   kind: str = "cmd") -> None:
     """Append ONE metadata-only activity event for a handled command.
 
     Best-effort + fire-and-forget: any failure is swallowed so telemetry can
@@ -846,6 +872,13 @@ def emit_cmd_event(op: str, key: str, outcome: str, duration_ms: int,
     `extra` merges additional METADATA-ONLY keys into the payload (used by the
     throttle path for {reason, sess} — a fixed reason string + a coarse session
     hash, never page content).
+
+    🔴 `kind` defaults to "cmd" and MUST stay that way for operator-driven
+    commands: `kind='cmd'` is the USAGE signal downstream — session-analysis/
+    adoption-scan.py queries source='browser-bridge' AND kind='cmd' to answer
+    "is the browser skill actually used". Anything the SERVER emits on its own
+    (the heartbeat) has to carry a different kind, or ~96 machine-generated rows
+    a day would read as operator usage and the adoption number becomes a lie.
     """
     try:
         se = _load_spool_emit()
@@ -859,7 +892,7 @@ def emit_cmd_event(op: str, key: str, outcome: str, duration_ms: int,
             payload.update(extra)
         se.emit({
             "source": "browser-bridge",
-            "kind": "cmd",
+            "kind": kind,
             "text": domain or op,
             "duration_ms": int(duration_ms),
             "exit_code": int(exit_code),
@@ -882,6 +915,71 @@ def _emit_diag_event(op: str, t0: float) -> None:
     emit_cmd_event(op=op, key="", outcome="ok",
                    duration_ms=int((time.monotonic() - t0) * 1000),
                    domain="", exit_code=0)
+
+
+# --------------------------------------------------------------------------- #
+# Liveness heartbeat (see HEARTBEAT_INTERVAL_S for WHY this exists)
+# --------------------------------------------------------------------------- #
+def emit_heartbeat_event(registry) -> None:
+    """Emit ONE liveness event: `source=browser-bridge, kind=heartbeat`.
+
+    Deliberately NOT kind="cmd" — see the contract on emit_cmd_event's `kind`.
+
+    The payload carries whether an extension is currently connected, which makes
+    the row strictly more useful than a bare "the process is up": the bridge is
+    two halves, and the half that actually breaks in practice is the extension
+    end (a silent drop, an un-reloaded build). `Registry.connected` is the ONE
+    definition of live in this process, so asking it here cannot disagree with
+    what /health reports — and it drives the edge-triggered instance_lost logging
+    on a timer instead of only when traffic happens to arrive.
+
+    Metadata-only and best-effort like every other emit: a bool and a count, no
+    URL/domain/title/content, and nothing here may raise into the caller.
+    """
+    try:
+        connected = bool(registry.connected)
+        live = len(registry.snapshot())
+    except Exception:  # noqa: BLE001 — a registry problem must not kill the thread.
+        connected, live = False, 0
+    emit_cmd_event(op="heartbeat", key="", outcome="ok", duration_ms=0,
+                   domain="", exit_code=0, kind="heartbeat",
+                   extra={"connected": connected, "instances": live})
+
+
+def run_heartbeat(registry, interval: float, stop: threading.Event,
+                  emit=None) -> None:
+    """Emit a heartbeat NOW, then every `interval` seconds until `stop` is set.
+
+    Emitting immediately (rather than after the first sleep) is what makes a
+    restart observable promptly: the deadman's silence measurement resets as soon
+    as the unit comes back, so a bounce is not indistinguishable from an outage
+    for the first interval.
+
+    `stop.wait(interval)` rather than `time.sleep` so shutdown is immediate
+    instead of blocking a service stop for up to 15 minutes. `emit` is injectable
+    for tests.
+    """
+    emit = emit or emit_heartbeat_event
+    while True:
+        try:
+            emit(registry)
+        except Exception:  # noqa: BLE001 — strictly best-effort, and this thread
+            pass           # must outlive a transient emitter failure.
+        if stop.wait(interval):
+            return
+
+
+def start_heartbeat(registry, interval: float = None):
+    """Start the heartbeat thread. Returns (thread, stop_event), or (None, None)
+    when disabled (interval <= 0 — the documented escape hatch)."""
+    interval = HEARTBEAT_INTERVAL_S if interval is None else interval
+    if interval <= 0:
+        return None, None
+    stop = threading.Event()
+    t = threading.Thread(target=run_heartbeat, args=(registry, interval, stop),
+                         name="browser-bridge-heartbeat", daemon=True)
+    t.start()
+    return t, stop
 
 
 # --------------------------------------------------------------------------- #
@@ -2576,13 +2674,17 @@ def main(argv=None) -> int:
                           poll_timeout, ping_timeout)
     log("listening", host=host, port=port, token_file=str(token_file),
         cmd_timeout=cmd_timeout, poll_timeout=poll_timeout,
-        ping_timeout=ping_timeout)
+        ping_timeout=ping_timeout,
+        heartbeat_s=HEARTBEAT_INTERVAL_S)
     _warn_poll_timeout_vs_extension_budget(poll_timeout)
+    _hb_thread, hb_stop = start_heartbeat(registry)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         pass
     finally:
+        if hb_stop is not None:
+            hb_stop.set()
         server.server_close()
     return 0
 

@@ -6493,3 +6493,215 @@ def test_poll_budget_warning_still_claims_extension_0_4_0_plus():
     major, minor, _ = (int(x) for x in manifest["version"].split("."))
     assert (major, minor) >= (0, 4), \
         f"manifest {manifest['version']} no longer satisfies 0.4.0+"
+
+
+# --------------------------------------------------------------------------- #
+# Liveness heartbeat
+#
+# WHY: browser-bridge only ever emitted on a handled COMMAND, so the source had
+# no cadence and its silence was unbounded — which made the activity deadman
+# check (scripts/collector/deadman.py) structurally unable to tell "the operator
+# has not run a browser task" from "the bridge is down". Measured 2026-08-11:
+# laptop/browser-bridge silent 30.9 ACTIVE hours, 2.2x its own worst 14-day lull,
+# flagged DEAD while the unit was healthy and simply unused.
+#
+# The tests below pin the three things that make the heartbeat a fix rather than
+# a code change: it EMITS on a cadence, it is NOT counted as operator usage, and
+# it cannot take the server down.
+# --------------------------------------------------------------------------- #
+class _FakeRegistry:
+    """Minimal Registry stand-in: just the two attributes the heartbeat reads."""
+
+    def __init__(self, connected=True, instances=1, boom=False):
+        self._connected = connected
+        self._instances = instances
+        self._boom = boom
+
+    @property
+    def connected(self):
+        if self._boom:
+            raise RuntimeError("registry exploded")
+        return self._connected
+
+    def snapshot(self):
+        if self._boom:
+            raise RuntimeError("registry exploded")
+        return [{"key": "k%d" % i} for i in range(self._instances)]
+
+
+def test_heartbeat_emits_a_metadata_only_liveness_event(telemetry):
+    """The row the deadman needs: source=browser-bridge, a cadence kind, and a
+    payload that says whether the EXTENSION half is connected."""
+    spool_dir = telemetry
+    assert _read_events(spool_dir) == [], "negative control: 0 before"
+
+    S.emit_heartbeat_event(_FakeRegistry(connected=True, instances=2))
+
+    evs = _wait_events(spool_dir, 1)
+    assert len(evs) == 1, f"expected exactly one event, got {evs}"
+    e = evs[0]
+    assert e["source"] == "browser-bridge"
+    assert e["kind"] == "heartbeat"
+    assert e["text"] == "heartbeat"
+    assert e["exit_code"] == "0"
+    p = json.loads(e["payload"])
+    assert p == {"op": "heartbeat", "key": "", "outcome": "ok",
+                 "connected": True, "instances": 2}, p
+
+
+def test_heartbeat_reports_a_disconnected_extension(telemetry):
+    """The positive control for the field that carries the information: a bridge
+    whose extension half is gone must report connected=False, or the heartbeat
+    degenerates into 'the process is up' and hides the failure that actually
+    happens (a silent extension drop)."""
+    spool_dir = telemetry
+    S.emit_heartbeat_event(_FakeRegistry(connected=False, instances=0))
+    e = _wait_events(spool_dir, 1)[0]
+    p = json.loads(e["payload"])
+    assert p["connected"] is False and p["instances"] == 0, p
+
+
+def test_heartbeat_is_not_counted_as_operator_usage(telemetry):
+    """🔴 SEAM GUARD — server.py's emit vs adoption-scan.py's usage query.
+
+    Neither module can see the other, and each is 'correct' alone: adoption-scan
+    counts source='browser-bridge' AND kind='cmd' to answer "is the browser skill
+    actually used". A heartbeat emitted as kind='cmd' would add ~96 machine rows
+    a day and report a skill nobody touched as heavily used.
+
+    So this asserts the RELATIONSHIP, against the real spec adoption-scan ships
+    with — not a copy of the string. It fails if either side moves.
+    """
+    import importlib.util
+    scan_py = (Path(__file__).resolve().parents[2]
+               / "session-analysis" / "adoption-scan.py")
+    spec = importlib.util.spec_from_file_location("adoption_scan_seam", scan_py)
+    A = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(A)
+
+    specs = [s for s in A.REGISTRY if s.get("source") == "browser-bridge"]
+    assert specs, "adoption-scan no longer tracks browser-bridge — re-check this seam"
+    counted_kinds = {s.get("kind") for s in specs}
+    assert counted_kinds == {"cmd"}, \
+        f"adoption-scan's browser-bridge kinds changed to {counted_kinds}"
+
+    spool_dir = telemetry
+    S.emit_heartbeat_event(_FakeRegistry())
+    e = _wait_events(spool_dir, 1)[0]
+    assert e["kind"] not in counted_kinds, \
+        ("the heartbeat is being counted as operator usage by adoption-scan — "
+         f"emitted kind={e['kind']!r}, counted={counted_kinds}")
+
+
+def test_heartbeat_repeats_on_the_interval(telemetry):
+    """The cadence itself: the loop keeps emitting until stopped."""
+    calls = []
+    stop = threading.Event()
+
+    def _emit(reg):
+        calls.append(time.monotonic())
+        if len(calls) >= 3:
+            stop.set()
+
+    S.run_heartbeat(_FakeRegistry(), 0.01, stop, emit=_emit)
+    assert len(calls) >= 3, calls
+
+
+def test_heartbeat_emits_BEFORE_its_first_sleep():
+    """A restart must reset the deadman's silence promptly, so the FIRST emit
+    happens before the first sleep — not one interval later.
+
+    🔴 The interval here is deliberately LONG relative to the assertion window.
+    An earlier version of this test used 0.01s and a <0.05s bound, which PASSED
+    against a mutant that slept first — at a 10ms interval the two orderings are
+    indistinguishable. The gap between interval and bound IS the guard: emit-first
+    returns in microseconds, sleep-first cannot return in under `interval`.
+    """
+    interval = 2.0
+    bound = 0.5
+    assert interval > 2 * bound, "the mutant must not fit inside the bound"
+    calls = []
+    stop = threading.Event()
+
+    def _emit(reg):
+        calls.append(time.monotonic())
+        stop.set()          # one emit is all this test needs
+
+    t0 = time.monotonic()
+    S.run_heartbeat(_FakeRegistry(), interval, stop, emit=_emit)
+    elapsed = time.monotonic() - t0
+    assert len(calls) == 1, calls
+    assert elapsed < bound, \
+        (f"first heartbeat took {elapsed:.2f}s with a {interval}s interval — "
+         "the loop is sleeping before its first emit")
+
+
+def test_run_heartbeat_survives_an_emitter_that_raises():
+    """MUTATION-PROOF for the loop's try/except: one bad emit must not kill the
+    thread, or a transient spool problem silently ends the cadence forever and
+    the deadman then reports the bridge dead for the rest of its uptime."""
+    calls = []
+    stop = threading.Event()
+
+    def _emit(reg):
+        calls.append(1)
+        if len(calls) >= 3:
+            stop.set()
+        raise RuntimeError("spool exploded")
+
+    S.run_heartbeat(_FakeRegistry(), 0.01, stop, emit=_emit)  # must not raise
+    assert len(calls) >= 3, f"loop died after {len(calls)} emit(s)"
+
+
+def test_emit_heartbeat_survives_a_broken_registry(telemetry):
+    """A registry that raises must still produce a row: the event's PURPOSE is to
+    prove the process is alive, so degrading to connected=False beats emitting
+    nothing (which would read as the process being dead)."""
+    spool_dir = telemetry
+    S.emit_heartbeat_event(_FakeRegistry(boom=True))
+    e = _wait_events(spool_dir, 1)[0]
+    p = json.loads(e["payload"])
+    assert e["kind"] == "heartbeat"
+    assert p["connected"] is False and p["instances"] == 0, p
+
+
+def test_start_heartbeat_disabled_at_zero_interval():
+    """The documented escape hatch: BROWSER_BRIDGE_HEARTBEAT_S=0 starts nothing."""
+    t, stop = S.start_heartbeat(_FakeRegistry(), 0)
+    assert t is None and stop is None
+
+
+def test_start_heartbeat_runs_and_stops():
+    """The thread is real, is a daemon (a stuck heartbeat must never hold up
+    shutdown), and stops promptly when the stop event is set."""
+    spool_before = S.HEARTBEAT_INTERVAL_S
+    t, stop = S.start_heartbeat(_FakeRegistry(), 0.01)
+    try:
+        assert t is not None and t.daemon is True
+        assert t.is_alive()
+    finally:
+        stop.set()
+        t.join(timeout=2.0)
+    assert not t.is_alive(), "heartbeat thread did not stop"
+    assert S.HEARTBEAT_INTERVAL_S == spool_before
+
+
+def test_heartbeat_uses_the_real_registry_connected_definition(telemetry):
+    """Structural: the heartbeat must read the SAME liveness definition /health
+    reports (Registry.connected), not a second one that can disagree.
+
+    A live FakeExtension → connected True; after it stops and the instance goes
+    stale → False. Exercised through the real Registry, so a divergent definition
+    would have to break this test to exist.
+    """
+    spool_dir = telemetry
+    srv, registry = _serve(poll_timeout=1.0)
+    ext = FakeExtension(srv, instance_id="hb-1", label="hb")
+    ext.start()
+    try:
+        assert _wait_count(srv, 1) is not None
+        S.emit_heartbeat_event(registry)
+        p = json.loads(_wait_events(spool_dir, 1)[0]["payload"])
+        assert p["connected"] is True and p["instances"] >= 1, p
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()

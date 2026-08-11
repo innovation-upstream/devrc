@@ -390,3 +390,91 @@ def test_cli_text_render_shows_the_table(tmp_path):
     p = _run_cli(["--tsv", str(tsv), "--now", str(NOW_BUCKET + 60)])
     assert "budget_h" in p.stdout
     assert "keys" in p.stdout
+
+
+# --------------------------------------------------------------------------- #
+# The heartbeat contract — why browser-bridge grew a cadence
+#
+# An on-demand source (browser-bridge, tool) emits only when an agent drives it,
+# so its normal silence is UNBOUNDED and no measured budget can separate "unused"
+# from "down". Measured 2026-08-11: laptop/browser-bridge was silent 30.9 ACTIVE
+# hours -- 2.2x the worst lull in its own 14-day history, and 2x what even a
+# K=4 budget would have allowed -- purely because nobody had run a browser task.
+# Raising the budget could not fix that; giving the source a CADENCE could.
+#
+# These two tests pin the before/after as DATA, so the claim "a 15-minute
+# heartbeat collapses the budget onto the 2-active-hour floor" is checked rather
+# than asserted in a commit message. The heartbeat emitter itself lives in
+# scripts/browser-bridge/server.py (run_heartbeat / HEARTBEAT_INTERVAL_S) and is
+# tested there; this is the other half of that seam.
+# --------------------------------------------------------------------------- #
+HEARTBEAT_STEP = 3  # 900s / BUCKET_SECONDS -- one heartbeat every 3 buckets
+
+
+def _pair(verdict, source, host="h1"):
+    recs = [s for s in verdict["sources"]
+            if s["source"] == source and s["host"] == host]
+    assert recs, "pair %s/%s missing from the verdict" % (host, source)
+    return recs[0]
+
+
+def test_command_only_source_earns_an_unbounded_budget():
+    """THE BEFORE CASE (the negative control for the fix): a source that emits in
+    rare bursts gets a budget so wide it cannot mean anything.
+
+    This is the shape browser-bridge had. The test asserts the PROBLEM exists, so
+    that the after-case below is a measured contrast and not a lone green."""
+    n = 400
+    start = NOW_BUCKET - (n - 1) * B
+    rows = healthy_table(NOW_BUCKET, n)
+    # Five short bursts separated by long idle stretches. Five (not three) so the
+    # pair clears MIN_BASELINE_BUCKETS and is actually JUDGED — at 15 buckets it
+    # is skipped as insufficient-baseline and the test proves nothing.
+    for offset in (0, 90, 180, 270, 350):
+        rows += contiguous("h1", "bursty", start + offset * B, 5)
+    assert 5 * 5 >= D.MIN_BASELINE_BUCKETS, "fixture no longer clears the baseline"
+    v = D.evaluate(rows, now=NOW_BUCKET + 60)
+    rec = _pair(v, "bursty")
+    assert rec["evaluated"] is True
+    assert rec["budget_active_hours"] > 8.0, \
+        ("a burst-only source should earn a budget far above the floor — got "
+         "%r; if this ever drops, the after-case below proves nothing"
+         % rec["budget_active_hours"])
+
+
+def test_heartbeat_cadence_collapses_the_budget_to_the_floor():
+    """THE AFTER CASE: the same source emitting every 3rd bucket (900s) has a p99
+    active-gap of ~3 buckets, so its budget bottoms out on FLOOR_BUCKETS.
+
+    That is the whole point of the heartbeat: at a 2-ACTIVE-HOUR budget, silence
+    means the unit is not running, and no amount of not-using-the-browser can
+    manufacture it."""
+    n = 400
+    start = NOW_BUCKET - (n - 1) * B
+    rows = healthy_table(NOW_BUCKET, n)
+    rows += contiguous("h1", "browser-bridge", start, n // HEARTBEAT_STEP,
+                       step=HEARTBEAT_STEP)
+    v = D.evaluate(rows, now=NOW_BUCKET + 60)
+    rec = _pair(v, "browser-bridge")
+    assert rec["evaluated"] is True
+    assert rec["budget_buckets"] == D.FLOOR_BUCKETS, rec
+    assert rec["budget_active_hours"] == 2.0, rec
+    assert rec["dead"] is False, "a beating heartbeat must never read as dead"
+
+
+def test_a_stopped_heartbeat_is_dead_within_the_floor():
+    """The positive control for the pair above: the SAME cadenced source, stopped
+    just over the floor, must flip to DEAD through the same code path.
+
+    Without this, the green above is indistinguishable from a check that can only
+    ever say 'ok'."""
+    n = 400
+    start = NOW_BUCKET - (n - 1) * B
+    stopped_at = n - (D.FLOOR_BUCKETS + 5)   # silent for floor+5 active buckets
+    rows = healthy_table(NOW_BUCKET, n)
+    rows += contiguous("h1", "browser-bridge", start,
+                       stopped_at // HEARTBEAT_STEP, step=HEARTBEAT_STEP)
+    v = D.evaluate(rows, now=NOW_BUCKET + 60)
+    rec = _pair(v, "browser-bridge")
+    assert rec["dead"] is True, rec
+    assert v["count"] == 1 and v["state"] == D.STATE_OK, v
