@@ -242,7 +242,29 @@ in
         width = "(0, 420)";
         # Cap the visible stack + keep a recall buffer (dunstctl history-pop).
         notification_limit = 4;
-        history_length = 40;
+        # RECALL BUFFER sized against the MEASURED notification rate, not a guess.
+        # Audited 2026-08-11 on the workbench: ~330 notifications/day reach dunst
+        # (claude-notify ~193/day from its own log; cpu-monitor + earlyoom ~137/day
+        # combined, split by cross-checking `journalctl --user -u systembus-notify`
+        # against dunst's per-notification icon warning). At the previous value of
+        # 40 the buffer therefore held under THREE HOURS of traffic.
+        #
+        # That is the recall path for anything DND swallowed, and it is the only
+        # one: a paused notification sits in the `waiting` queue, which dunst 1.13.2
+        # exposes only as a COUNT (`dunstctl count waiting`) — its contents cannot
+        # be enumerated or recovered. History is what `$mod+n` (history-pop) and
+        # scripts/notif-center read.
+        #
+        # Measured consequence of 40: on the workbench the history was 38/40
+        # `system-notify` (earlyoom OOM-kill toasts, which arrive in bursts of 100+
+        # during a single kill episode), having evicted everything else — including
+        # the `notify-failure` deadman toasts that PR #381 exists to protect. One
+        # OOM burst was enough to flush the entire recall buffer.
+        #
+        # This does NOT suppress or reduce anything; it only widens the window in
+        # which a swallowed notification can still be recovered. Cost is a few
+        # hundred structs in dunst's memory. Reverting is this one line.
+        history_length = 300;
         stack_duplicates = true;      # collapse repeats into one with a counter
         show_indicators = false;      # no "(x more)" / action hints — calmer
         # Mouse: left dismisses the current toast, middle fires its action then
