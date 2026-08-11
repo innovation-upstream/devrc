@@ -207,6 +207,20 @@ cd "$ROOT" || { echo "run-tests: cannot cd to ROOT=$ROOT" >&2; exit 2; }
 #   = 7122
 # scripts/tests 1874 = #378's measured 1867 + #380's 7, confirming both landed.
 #
+# 2026-08-11, the opencode pipe-truncation fix: 7122 -> 7127. MEASURED in BOTH
+# tiers on this branch, not computed — dev-host `run-tests.sh --set all` and
+# `nix build .#checks.x86_64-linux.pytests` each report
+#     TOTAL collected=7127  passed=7126  skipped=1  failed=0
+# and it reconciles: +3 in scripts/tests/test_opencode_engine.py (the flush-race
+# fixture control, the behavioural pin, the call-site ledger) and +2 in
+# scripts/tests/test_run_tests_preconditions.py (the REQUIRED_TOOLS seam), so
+# scripts/tests goes 1874 -> 1879 and nothing else moves.
+#
+# 🔴 Worth saying once, because this floor could not have caught what that PR
+# fixed: the dev-host tier had 17 FAILURES on the exact tree where the sandbox
+# reported this line clean. A collected-count floor sees tests that VANISH, never
+# tests that RUN AND FAIL in only one tier. Read both tiers' output.
+#
 # 🔴 MERGE RESOLUTION AGAIN, one day later (#384 <- origin/main @ e0cf5d2), and
 # the SAME hazard for the third time on this one line. #384 measured 6984 on a
 # merge with 5a20dff; #376 then landed and moved main to 7122. Both numbers were
@@ -235,7 +249,38 @@ cd "$ROOT" || { echo "run-tests: cannot cd to ROOT=$ROOT" >&2; exit 2; }
 # numbers. Three consecutive PRs have now hit it, and every time the answer was
 # a number NEITHER side had. Re-run the gate on the merged tree and copy what it
 # reports.
-MIN_TESTS="${MIN_TESTS:-7138}"
+#
+# 🔴 FOURTH RESOLUTION (this branch <- origin/main @ f380936, 2026-08-11), and
+# the number above is stale AGAIN: #392 landed between this branch's measurement
+# and this merge, taking main from 7122 to 7127. So BOTH sides are wrong here —
+# this branch's 7138 was measured against main@e0cf5d2, and main's 7127 does not
+# carry this branch's tests.
+#   main f380936 (post-#392)             7127  (measured; #392 added +3 in
+#                                              test_opencode_engine.py and +2 in
+#                                              test_run_tests_preconditions.py)
+#   + this branch  test_ship_converge.py  +16  (17 -> 33)
+#   = 7143, and scripts/tests 1879 -> 1895 by the same +16 on its OWN line.
+# MEASURED on this merged tree in BOTH tiers, then reconciled against that
+# arithmetic — the arithmetic CHECKS the measurement, it never sources it.
+#
+# ⚠ RERERE HAZARD, hit for real while resolving this line. `rerere.enabled` is
+# true in this repo, so the resolution recorded on a DIFFERENT merge of this same
+# conflict was replayed here automatically and silently — it wrote 7168, the
+# total for a four-way integration tree that also carried #391 and #377, onto a
+# tree containing NEITHER. rerere replays the TEXT you last chose for a conflict
+# whose two sides hash the same; it knows nothing about which branches are in the
+# tree. On a BASE-DEPENDENT constant that is exactly wrong. Always re-read this
+# line after a "Resolved ... using previous resolution" message, and re-measure.
+#
+# 🔴 Read BOTH tiers. #392 exists because the dev-host tier had 17 failures on a
+# tree where this sandbox line was clean: a collected-count floor sees tests that
+# VANISH, never tests that RUN AND FAIL in one tier only. Counted from the
+# runner's structured summary CONTENT — never an exit code, which the wrapper's
+# trailing echo has now swallowed for three separate agents.
+#
+# EXPECTED_SKIPS untouched: skipped=1, the one pinned entry. This branch adds
+# ZERO skips — every fixture is built in tmp_path.
+MIN_TESTS="${MIN_TESTS:-7143}"
 
 # --- GUARD 1: tool precondition ------------------------------------------------
 # Every binary the suites `skipif` on. Absence must be an ERROR, never a skip.
