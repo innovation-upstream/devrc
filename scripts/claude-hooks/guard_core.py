@@ -1272,6 +1272,12 @@ def _env_file_vars(raw, base, known):
     return out
 
 
+# The value a POISONED name resolves to: a path that cannot be a directory on
+# any host. Under `/dev/null/` so `os.path.isdir` answers False rather than
+# raising — a NUL byte would crash the check it is meant to fail.
+_UNRESOLVABLE = "/dev/null/guard-unresolvable"
+
+
 def _command_vars(cmd, base):
     """Shell variables this command line SETS, as far as they can be evaluated.
 
@@ -1329,6 +1335,18 @@ def _command_vars(cmd, base):
         if i < len(toks) and toks[i] in _SOURCE_CMDS and i + 1 < len(toks):
             sourced.append(toks[i + 1])
 
+    # 🔴 A POISONED NAME IS PINNED UNRESOLVABLE, not merely left absent. Since
+    # `cvars` is consulted BEFORE the environment, "absent" would mean "fall
+    # through to `expandvars`" — so a name the command assigned ambiguously would
+    # quietly resolve to a stale ambient export of that name, reintroducing the
+    # guard-vs-shell disagreement the ordering exists to remove, by the back
+    # door. The command DID assign this name; the guard just cannot say to what,
+    # and the honest answer is "unknown", never "whatever it used to mean".
+    # Pinned by test_an_ambiguous_name_does_not_fall_through_to_the_ambient_value
+    # — written expecting it to pass, and it did not.
+    for name in poisoned:
+        vals[name] = _UNRESOLVABLE
+
     # A sourced file is the LOWER layer: an assignment written in the command
     # text itself is more specific and wins, and a poisoned name stays poisoned.
     for raw in sourced:
@@ -1341,16 +1359,34 @@ def _command_vars(cmd, base):
 def _resolve_dir(value, base, cvars=None):
     """A command-supplied path -> an existing directory, or None.
 
-    Expands `$HANDLE` (from the environment first, then from `cvars` — the
-    variables the command line itself sets) and `~`, resolves a relative path
-    against `base`, and maps `<repo>/.git` onto `<repo>` so a `--git-dir` is
-    judged as its worktree.
+    Expands `$HANDLE` (from `cvars` — the variables the command line itself sets
+    — FIRST, then from the hook process's environment) and `~`, resolves a
+    relative path against `base`, and maps `<repo>/.git` onto `<repo>` so a
+    `--git-dir` is judged as its worktree.
+
+    🔴 THAT ORDER IS THE WHOLE POINT AND IT USED TO BE THE OTHER WAY ROUND.
+    `expandvars` reads the hook's OWN environment, which on this host carries
+    pre-exported handles (`$DEVRC`, `$DATAPACKET`, …). When a command re-points
+    one of those names at a different directory, the shell uses the command's
+    value and the guard used the ambient one — so the two disagreed about which
+    repo was being committed in, in BOTH directions. Measured against the
+    previous order, ambient `$WT` and a command that reassigns it:
+
+        ambient=<feature repo>, command `WT=<repo on main>; git -C "$WT" commit`
+            -> ALLOW, and the commit really does land on main   (FAIL-OPEN)
+        ambient=<repo on main>, command `WT=<feature repo>; git -C "$WT" commit`
+            -> DENY, blocking work that was never on main       (false positive)
+
+    A shell evaluates the assignment it just executed, not a stale export of the
+    same name; so does this now. `cvars` is already fail-closed about what it
+    will evaluate (a name assigned twice, or to anything containing `$`, is
+    dropped), so preferring it cannot resolve a value the guard had to guess.
     """
     if not value:
         return None
-    value = os.path.expandvars(value.strip("\"'"))
+    value = _subst_vars(value.strip("\"'"), cvars)
     if "$" in value:
-        value = _subst_vars(value, cvars)
+        value = os.path.expandvars(value)
     value = os.path.expanduser(value)
     if not value:
         return None
