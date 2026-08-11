@@ -158,7 +158,14 @@ cd "$ROOT" || { echo "run-tests: cannot cd to ROOT=$ROOT" >&2; exit 2; }
 # under one tool set: base fce27f2 collected 6561, this branch 6643 (+82 = the
 # analyze-service-index suite exactly). The floor is BASE-DEPENDENT — re-measure
 # after any rebase rather than carrying this number forward.
-MIN_TESTS="${MIN_TESTS:-6745}"
+#
+# 6761 MEASURED 2026-08-11 on `nix build .#checks.x86_64-linux.pytests` at
+# e97c032 + the ship.sh consumer check: TOTAL collected=6761 passed=6760
+# skipped=1 failed=0, read off the summary CONTENT (the +14 are the consumer
+# check's cases in scripts/tests/test_ship_converge.py). The previous 6745 was
+# already 2 low against this branch's 6747 before those were added — slack that
+# would have hidden two whole tests vanishing.
+MIN_TESTS="${MIN_TESTS:-6761}"
 
 # --- GUARD 1: tool precondition ------------------------------------------------
 # Every binary the suites `skipif` on. Absence must be an ERROR, never a skip.

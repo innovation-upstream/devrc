@@ -24,11 +24,22 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 
-SHIP = Path(__file__).resolve().parents[1] / "ship.sh"
+SCRIPTS = Path(__file__).resolve().parents[1]
+SHIP = SCRIPTS / "ship.sh"
+
+sys.path.insert(0, str(SCRIPTS))
+
+# 🔴 mockbin owns the shebang. A stub written with `#!/usr/bin/env bash` execs
+# on a NixOS dev host and ENOENTs in the nix build sandbox (no /usr/bin/env) —
+# the two-tier hazard, and it bit this file: the `find` shims below were written
+# that way, went green locally, and turned up as 3 sandbox failures that each
+# pointed at the wrong guard. See scripts/testlib/mockbin.py.
+from testlib.mockbin import write_exec  # noqa: E402
 
 pytestmark = pytest.mark.skipif(
     shutil.which("git") is None or shutil.which("bash") is None,
@@ -59,7 +70,39 @@ class Repo:
       stable.txt   — the ahead commit never touches it           (non-overlapping)
     and the ahead commit ADDS:
       added-upstream.txt                                         (overlapping)
+
+    The throwaway $HOME additionally carries a FABRICATED home-manager
+    generation (see _seed_home_manager_generation) so the post-switch
+    consumer check has something real to walk. Without it every run would hit
+    the "cannot locate the manifest" branch and no test could tell a working
+    check from one wired to nothing.
     """
+
+    # Home-relative paths the fabricated generation "manages". Deliberately
+    # spans four different `home.file` families — a top-level file, a recursive
+    # command dir, a recursive skill dir, a hook, and an opencode mirror — so
+    # the check is exercised structurally rather than against one spelling.
+    MANAGED = (
+        ".claude/RULES.md",
+        ".claude/commands/standup.md",
+        ".claude/skills/bar/SKILL.md",
+        ".claude/hooks/bash-guard.py",
+        ".config/opencode/AGENTS.md",
+    )
+
+    # The store path a cross-host copy leaves behind: a well-formed link into
+    # ANOTHER host's home-manager closure, absent on the host doing the check.
+    # This is the real 2026-08-10 failure shape, not a textbook fixture — the
+    # laptop's $HOME/.claude/skills/* pointed at a `-home-manager-files` store
+    # path belonging to the WORKBENCH after ship.sh rsynced them over.
+    #
+    # 🔴 The hash is deliberately NOT the one observed in the incident. That one
+    # is the workbench's own, so it EXISTS on the machine that runs this suite —
+    # every dangling case silently resolved and four tests passed while asserting
+    # nothing (measured 2026-08-11: "5 checked, 0 dangling"). A test whose bad
+    # case is not actually bad is the same vacuous green this check exists to
+    # kill, so _assert_foreign_store_is_absent() pins it.
+    FOREIGN_STORE = "/nix/store/zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz-home-manager-files"
 
     def __init__(self, tmp_path, gitconfig_extra=""):
         self.root = tmp_path
@@ -67,6 +110,7 @@ class Repo:
         self.work = tmp_path / "work"
         self.home = tmp_path / "home"
         self.home.mkdir()
+        self._seed_home_manager_generation()
 
         # Isolated global git config — the host's real one must not leak in.
         self.gitconfig = tmp_path / "gitconfig"
@@ -106,6 +150,81 @@ class Repo:
         self._git(builder, "commit", "-q", "-m", "ahead")
         self._git(builder, "push", "-q", "origin", "main")
 
+    # -- fabricated home-manager generation --------------------------------- #
+    def _seed_home_manager_generation(self):
+        """Reproduce a real host's home-manager layout inside the fake $HOME.
+
+        Faithful to what `home-manager switch` actually leaves on disk, because
+        the check navigates every hop:
+
+            $HOME/.local/state/home-manager/gcroots/current-home
+                                            -> <gen>/            (symlink)
+            <gen>/home-files                -> <hmfiles>/        (symlink)
+            <hmfiles>/<rel>                 -> <content>/<flat>  (symlink)
+            $HOME/<rel>                     -> <hmfiles>/<rel>   (symlink)
+
+        `home-files` being a SYMLINK is the load-bearing detail: a bare
+        `find <gen>/home-files` (no trailing slash, no -L) does not descend a
+        symlinked start point and yields ZERO entries — a vacuous green from an
+        otherwise-correct check.
+        """
+        store = self.root / "nixstore"
+        self.hmfiles = store / "aaaaaaaa-home-manager-files"
+        self.gen = store / "bbbbbbbb-home-manager-generation"
+        content = store / "content"
+        content.mkdir(parents=True)
+        self.gen.mkdir(parents=True)
+
+        for rel in self.MANAGED:
+            blob = content / rel.replace("/", "_")
+            blob.write_text(f"managed content for {rel}\n")
+            for base in (self.hmfiles, self.home):
+                (base / rel).parent.mkdir(parents=True, exist_ok=True)
+            (self.hmfiles / rel).symlink_to(blob)
+            (self.home / rel).symlink_to(self.hmfiles / rel)
+
+        (self.gen / "home-files").symlink_to(self.hmfiles)
+        gcroots = self.home / ".local" / "state" / "home-manager" / "gcroots"
+        gcroots.mkdir(parents=True)
+        (gcroots / "current-home").symlink_to(self.gen)
+
+        # --- UNMANAGED content that must NOT be flagged --------------------- #
+        # `~/.claude/skills/clickup/` is a standalone git checkout living INSIDE
+        # a home-manager-managed directory, and its node_modules is full of pnpm
+        # symlinks. Any check that walks $HOME instead of the manifest trips on
+        # these; the manifest never mentions them, so a correct check cannot.
+        pnpm = self.home / ".claude" / "skills" / "clickup" / "node_modules" / ".pnpm"
+        pnpm.mkdir(parents=True)
+        (pnpm / "dangles").symlink_to("../../nowhere/pkg")          # broken, on purpose
+        (self.home / ".claude" / "skills" / "clickup" / "SKILL.md").write_text("unmanaged\n")
+        # ...and a plain broken symlink sitting directly among managed files.
+        (self.home / ".claude" / "settings.local.json.bak").symlink_to("/nonexistent/nope")
+
+    def break_managed_symlink(self, rel):
+        """Repoint a managed path at ANOTHER host's store — the real failure."""
+        assert not Path(self.FOREIGN_STORE).exists(), (
+            f"{self.FOREIGN_STORE} exists on this machine, so the 'broken' link "
+            f"resolves and the negative control asserts nothing. Pick a hash "
+            f"that is not in this host's /nix/store."
+        )
+        p = self.home / rel
+        p.unlink()
+        p.symlink_to(f"{self.FOREIGN_STORE}/{rel}")
+        assert not p.exists() and p.is_symlink(), "fixture did not produce a dangling link"
+
+    def delete_managed_path(self, rel):
+        (self.home / rel).unlink()
+
+    def drop_home_manager_generation(self):
+        (self.home / ".local" / "state" / "home-manager" / "gcroots" / "current-home").unlink()
+
+    def use_legacy_manifest_location(self):
+        """Move the generation to the OTHER path home-manager has used."""
+        self.drop_home_manager_generation()
+        profiles = self.home / ".local" / "state" / "nix" / "profiles"
+        profiles.mkdir(parents=True, exist_ok=True)
+        (profiles / "home-manager").symlink_to(self.gen)
+
     def env(self, **extra):
         e = dict(os.environ)
         e.update(
@@ -114,6 +233,11 @@ class Repo:
             GIT_CONFIG_SYSTEM="/dev/null",
             GIT_TERMINAL_PROMPT="0",
         )
+        # The consumer check derives the state dir from $XDG_STATE_HOME, falling
+        # back to $HOME/.local/state. Both real hosts leave it UNSET (measured),
+        # so drop any ambient value: the fallback is the path under test, and an
+        # inherited one would point the check outside the throwaway $HOME.
+        e.pop("XDG_STATE_HOME", None)
         e.update(extra)
         return e
 
@@ -154,12 +278,13 @@ class Repo:
     def stash_list(self):
         return self._git(self.work, "stash", "list")
 
-    def ship(self, *args):
+    def ship(self, *args, **env_extra):
         """Run ship.sh against this repo: local only, no home-manager switch."""
         env = self.env(
             SHIP_ROLE="workbench",     # bypass IP detection (no `ip` in sandbox)
             SHIP_REPO=str(self.work),
             SHIP_NO_SWITCH="1",        # never run a real home-manager switch
+            **env_extra,
         )
         proc = subprocess.run(
             ["bash", str(SHIP), "--no-remote", *args],
@@ -601,3 +726,309 @@ def test_ship_never_rsyncs_a_home_manager_managed_path():
             f"they dangle there. `home-manager switch` already deploys this "
             f"path on every host; delete the rsync.\n  offending line: {line}"
         )
+
+
+# --------------------------------------------------------------------------- #
+# The post-switch CONSUMER check (rc12)
+#
+# Removing the rsync (above) fixes the cause. This is the DETECTOR, because
+# three separate layers reported healthy for the entire time the laptop's
+# ~/.claude/skills/ was 100% broken: ship.sh printed "skills synced" while
+# causing it, drift-check.sh only ever compares git refs, and the rsync's own
+# comment asserted the opposite of the truth. A deploy reporting success is a
+# claim about the DEPLOY, not about the CONSUMER.
+#
+# The check walks home-manager's OWN manifest — the `home-files` tree of the
+# host's current generation — and asserts every path it lists resolves in $HOME.
+# Deriving the path set from the manifest rather than from a hardcoded
+# `skills/` is what makes it catch the same break in commands/, hooks/, the
+# opencode mirrors, or any home.file target added tomorrow; and it is also what
+# keeps unmanaged content (the clickup checkout's pnpm symlinks) out of scope
+# without needing an exclusion list that would rot.
+#
+# What it structurally CANNOT see, stated so nobody reads more into a green
+# than is there: a managed path REPLACED by a real file of the same name
+# resolves fine and is not reported. This check answers "does every managed
+# path resolve", not "is every managed path the store link nix intended".
+# --------------------------------------------------------------------------- #
+def _assert_shim_is_live(shim_dir, args, must_fail, why, expect_prefix=None):
+    """🔴 Validate the INSTRUMENT before reading its verdict.
+
+    Both `find` shims below are the whole experiment: if one silently fails to
+    exec, or execs but does not alter behaviour, the test around it passes (or
+    fails) for a reason that has nothing to do with ship.sh. That is not
+    hypothetical — the first version of these shims carried a
+    `#!/usr/bin/env bash` shebang, which does not exist in the nix build
+    sandbox, so the shim never ran and the failure was reported against the
+    wrong guard entirely.
+    """
+    p = subprocess.run(
+        [str(shim_dir / "find"), *args],
+        capture_output=True, text=True,
+        env={**os.environ, "PATH": f"{shim_dir}:{os.environ['PATH']}"},
+    )
+    if must_fail:
+        assert p.returncode != 0, f"{why}\nstdout={p.stdout!r} stderr={p.stderr!r}"
+    else:
+        assert p.returncode == 0, f"shim did not run: {p.stderr!r}"
+    if expect_prefix is not None:
+        assert p.stdout.startswith(expect_prefix), f"{why}\nstdout={p.stdout!r}"
+
+
+def _managed_counts(out):
+    """(checked, dangling) parsed out of the consumer-check line."""
+    m = re.search(r"(\d+) checked, (\d+) dangling", out)
+    assert m, f"no consumer-check line with counts in output:\n{out}"
+    return int(m.group(1)), int(m.group(2))
+
+
+def test_managed_artifact_check_reports_how_many_it_examined(repo):
+    """🔴 POSITIVE CONTROL — a zero must be distinguishable from a dead probe.
+
+    "0 dangling" is exactly what ship.sh effectively claimed for the entire
+    period the laptop was broken, so the count of what was EXAMINED is the
+    load-bearing half of the line. A check wired to nothing also reports
+    0 dangling; only a non-zero examined count separates the two.
+    """
+    rc, out = repo.ship()
+    assert rc == 0, out
+    checked, dangling = _managed_counts(out)
+    assert checked == len(Repo.MANAGED), (
+        f"expected all {len(Repo.MANAGED)} managed paths to be examined, "
+        f"got {checked} — the manifest walk is missing entries\n{out}"
+    )
+    assert dangling == 0, out
+
+
+@pytest.mark.parametrize(
+    "rel",
+    [
+        ".claude/skills/bar/SKILL.md",     # the family that actually broke
+        ".claude/commands/standup.md",     # ...and three that have not yet
+        ".claude/hooks/bash-guard.py",
+        ".config/opencode/AGENTS.md",
+    ],
+)
+def test_managed_artifact_check_fails_on_a_dangling_managed_symlink(repo, rel):
+    """🔴 NEGATIVE CONTROL, in the REAL failure shape.
+
+    Parametrised across four home.file families on purpose: a check that only
+    caught `skills/` would pass three of these while the hazard sat in a
+    different shape. Each case points the managed path at a well-formed link
+    into another host's home-manager closure — byte-for-byte what the rsync
+    left on the laptop — not at an obviously-bogus fixture path.
+    """
+    repo.break_managed_symlink(rel)
+
+    rc, out = repo.ship()
+
+    assert rc == 12, f"expected rc12 (consumer broken), got {rc}\n{out}"
+    assert "MANAGED ARTIFACTS BROKEN" in out, f"wrong failure reported\n{out}"
+    assert rel in out, f"the broken path is not named\n{out}"
+    assert Repo.FOREIGN_STORE in out, f"the foreign store target is not named\n{out}"
+    # It must not also claim success. The git state IS fine here — that is the
+    # whole point: converged-and-verified was true while the consumer was dead.
+    assert "✅ VERIFIED" not in out, f"reported VERIFIED with a broken consumer\n{out}"
+    checked, dangling = _managed_counts(out)
+    assert (checked, dangling) == (len(Repo.MANAGED), 1), out
+
+
+def test_managed_artifact_check_fails_when_a_managed_path_is_absent(repo):
+    """A managed path missing entirely is a different diagnosis, also fatal."""
+    repo.delete_managed_path(".claude/RULES.md")
+
+    rc, out = repo.ship()
+
+    assert rc == 12, f"expected rc12, got {rc}\n{out}"
+    assert ".claude/RULES.md" in out
+    assert "absent" in out, f"absent vs dangling not distinguished\n{out}"
+
+
+def test_managed_artifact_check_ignores_unmanaged_dangling_symlinks(repo):
+    """🔴 No false positive on content home-manager does not own.
+
+    The fixture plants two broken symlinks in $HOME that nix never deployed:
+    one inside `~/.claude/skills/clickup/node_modules/.pnpm` (a standalone git
+    checkout nested INSIDE a managed directory) and one sitting directly beside
+    the managed files in `~/.claude`. A $HOME-walking implementation would
+    report both and need an exclusion list; a manifest-driven one cannot see
+    them at all.
+    """
+    pnpm_link = repo.home / ".claude/skills/clickup/node_modules/.pnpm/dangles"
+    assert pnpm_link.is_symlink() and not pnpm_link.exists(), "fixture not broken"
+
+    rc, out = repo.ship()
+
+    assert rc == 0, f"false positive on unmanaged content\n{out}"
+    assert "clickup" not in out, f"flagged an unmanaged checkout\n{out}"
+    assert "settings.local.json.bak" not in out, f"flagged an unmanaged link\n{out}"
+    checked, dangling = _managed_counts(out)
+    assert dangling == 0, out
+
+
+def test_managed_artifact_check_refuses_when_the_manifest_is_unlocatable(repo):
+    """A probe that cannot find its input must go RED, never quietly green.
+
+    This is the branch that turns "0 dangling" back into a lie, so it is the
+    one place a silent skip would reinstate the original failure exactly.
+    """
+    repo.drop_home_manager_generation()
+
+    rc, out = repo.ship()
+
+    assert rc == 12, f"a check with no input reported success: rc={rc}\n{out}"
+    assert "NOT CHECKED" in out, f"the skip is not announced\n{out}"
+    assert "proves NOTHING" in out, f"the green is not disclaimed\n{out}"
+    assert "✅ VERIFIED" not in out, out
+
+
+def test_managed_artifact_check_refuses_a_manifest_that_lists_nothing(repo):
+    """🔴 REACHABILITY for the zero-examined guard.
+
+    A mutation sweep (2026-08-11) found this guard SURVIVING: nothing in the
+    suite produced a manifest that is locatable but empty, so deleting the guard
+    changed no result — it was untested code sitting in front of the exact
+    vacuous green the whole check exists to prevent. This reaches it with a case
+    no earlier branch rejects: the gcroot resolves, `home-files` exists and is a
+    directory, and the walk simply returns nothing.
+    """
+    empty = repo.root / "nixstore" / "cccccccc-home-manager-files-empty"
+    empty.mkdir()
+    link = repo.gen / "home-files"
+    link.unlink()
+    link.symlink_to(empty)
+
+    rc, out = repo.ship()
+
+    assert rc == 12, f"an empty manifest reported success: rc={rc}\n{out}"
+    assert "listed NO files" in out, f"wrong guard fired\n{out}"
+    assert "broken probe, not a clean host" in out, out
+    assert "✅ VERIFIED" not in out, out
+
+
+def test_managed_artifact_check_refuses_unparseable_find_output(repo, tmp_path):
+    """🔴 REACHABILITY for the prefix-strip guard.
+
+    If find(1) ever changes its output shape, every entry stops matching the
+    manifest prefix and would be skipped — leaving a walk that examines nothing
+    and says so only through the guard below. Reached with a `find` shim that
+    emits paths under a different root.
+    """
+    real_find = shutil.which("find")
+    assert real_find, "no find on PATH"
+    shim_dir = tmp_path / "reshaping-shim"
+    shim_dir.mkdir()
+    write_exec(shim_dir / "find", f'{real_find} "$@" | sed "s|^|/elsewhere|"\n')
+    _assert_shim_is_live(
+        shim_dir,
+        args=[str(tmp_path), "-maxdepth", "0"],
+        must_fail=False,
+        expect_prefix="/elsewhere",
+        why="the shim never reshaped find's output, so this test proves nothing",
+    )
+
+    rc, out = repo.ship(PATH=f"{shim_dir}:{os.environ['PATH']}")
+
+    assert rc == 12, f"unparseable manifest output reported success: rc={rc}\n{out}"
+    assert "could not derive home-relative paths" in out, f"wrong guard fired\n{out}"
+    assert "✅ VERIFIED" not in out, out
+
+
+def test_managed_artifact_check_finds_the_legacy_manifest_location(repo):
+    """🔴 REACHABILITY for the second probed location.
+
+    home-manager has kept its generation under both
+    `…/home-manager/gcroots/current-home` and `…/nix/profiles/home-manager`;
+    both exist on the workbench today (measured 2026-08-11). The fallback was a
+    surviving mutant until this test — deleting it changed no result, so it was
+    an untested branch whose only failure mode is a spurious rc12 after a
+    home-manager upgrade, and a permanently-red gate is worse than no gate.
+    """
+    repo.use_legacy_manifest_location()
+
+    rc, out = repo.ship()
+
+    assert rc == 0, f"the legacy manifest location is not probed\n{out}"
+    checked, dangling = _managed_counts(out)
+    assert (checked, dangling) == (len(Repo.MANAGED), 0), out
+
+
+def test_managed_artifact_check_honours_xdg_state_home(tmp_path):
+    """The manifest lookup follows $XDG_STATE_HOME when it is set."""
+    r = Repo(tmp_path)
+    moved = tmp_path / "elsewhere-state"
+    shutil.move(str(r.home / ".local" / "state"), str(moved))
+
+    rc, out = r.ship(XDG_STATE_HOME=str(moved))
+
+    assert rc == 0, out
+    checked, _ = _managed_counts(out)
+    assert checked == len(Repo.MANAGED), out
+
+
+def test_managed_artifact_check_works_without_gnu_find_extensions(repo, tmp_path):
+    """🔴 The manifest walk must not depend on GNU `find`.
+
+    MEASURED 2026-08-11: over `ssh <laptop>`, `command -v find` resolves to a
+    BusyBox applet in that host's nix profile, and BusyBox find has no
+    `-printf`. The first draft of this check used `-printf '%P\\n'` and, run on
+    the laptop that way, reported `checked=1 dangling=0` —
+    a clean bill of health for a host that in fact had 46 dangling managed
+    links. ship.sh runs this same routine over ssh on the REMOTE host, so the
+    remote leg is precisely where a GNU-only flag silently zeroes the count.
+
+    The shim reproduces that: a `find` that rejects the GNU-only flags while
+    passing everything else through.
+    """
+    real_find = shutil.which("find")
+    assert real_find, "no find on PATH"
+    shim_dir = tmp_path / "busybox-shim"
+    shim_dir.mkdir()
+    write_exec(
+        shim_dir / "find",
+        'for a in "$@"; do\n'
+        "  case $a in\n"
+        "    -printf|-regextype|-quit)\n"
+        '      echo "find: unrecognized: $a" >&2; exit 1 ;;\n'
+        "  esac\n"
+        "done\n"
+        f'exec {real_find} "$@"\n',
+    )
+    _assert_shim_is_live(
+        shim_dir,
+        args=["-printf", "%p"],
+        must_fail=True,
+        why="the shim never rejected -printf, so this test proves nothing",
+    )
+
+    rc, out = repo.ship(PATH=f"{shim_dir}:{os.environ['PATH']}")
+
+    assert rc == 0, f"the manifest walk needs GNU find extensions\n{out}"
+    checked, _ = _managed_counts(out)
+    assert checked == len(Repo.MANAGED), (
+        f"BusyBox-compatible find examined {checked} of {len(Repo.MANAGED)} "
+        f"managed paths — the walk silently under-counts on the remote leg\n{out}"
+    )
+
+
+def test_managed_artifact_check_runs_on_the_remote_leg_too(repo):
+    """The routine shipped over ssh must be the SAME one that runs locally.
+
+    The bug existed only on the laptop, so a consumer check that runs only on
+    the local host is worthless for it. ship.sh has exactly one CONVERGE body,
+    executed locally via `bash -c` and remotely via `ssh <host> "<body>"` — so
+    this asserts the check lives INSIDE that body rather than in the local-only
+    driver below it, which is the way it could regress to local-only.
+    """
+    src = SHIP.read_text()
+    body = src.split("CONVERGE='", 1)
+    assert len(body) == 2, "CONVERGE block not found — ship.sh was restructured"
+    converge = body[1].split("\n'\n", 1)[0]
+    assert "verify_managed_artifacts" in converge, (
+        "the consumer check is not inside CONVERGE, so it cannot run on the "
+        "remote host — which is the only host the original bug affected"
+    )
+    # ...and CONVERGE really is what gets sent over ssh.
+    assert re.search(r'ssh .*"\$REMOTE_SSH".*\$CONVERGE', src), (
+        "CONVERGE is no longer the body executed over ssh"
+    )
