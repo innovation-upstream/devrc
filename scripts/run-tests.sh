@@ -280,7 +280,27 @@ cd "$ROOT" || { echo "run-tests: cannot cd to ROOT=$ROOT" >&2; exit 2; }
 #
 # EXPECTED_SKIPS untouched: skipped=1, the one pinned entry. This branch adds
 # ZERO skips — every fixture is built in tmp_path.
-MIN_TESTS="${MIN_TESTS:-7143}"
+#
+# 🔴 FIFTH RESOLUTION (this branch <- origin/main @ 58dd9e2, 2026-08-11). Same
+# base-dependent line, third stale number in one day. This branch measured 7147
+# against main@e0cf5d2; #392 then landed (+5) and #384 landed (+16), so main is
+# now 7143 and NEITHER side's number describes this tree.
+#   main 58dd9e2 (post-#392, post-#384)   7143  (measured, both tiers)
+#   + this branch  test_drift_check.py     +25  (135 -> 160: 24 new tests, plus
+#                                                one parametrize case on
+#                                                UNIT_PATH_REQUIREMENTS for `sort`)
+#   = 7168, and scripts/tests 1895 -> 1920 by the same +25 on its OWN line.
+# MEASURED on this merged tree in BOTH tiers, then reconciled against that
+# arithmetic — the arithmetic CHECKS the measurement, it never sources it.
+#
+# ⚠ RERERE. `rerere.enabled` is true here, and on the #384 sync it silently
+# replayed a resolution recorded on a DIFFERENT merge of this same conflict,
+# writing a four-way total onto a two-way tree. rerere replays the TEXT last
+# chosen for a conflict whose sides hash the same; it knows nothing about which
+# branches are in the tree, which on a base-dependent constant is exactly wrong.
+# After any "Resolved ... using previous resolution", re-read this line and
+# re-measure.
+MIN_TESTS="${MIN_TESTS:-7168}"
 
 # --- GUARD 1: tool precondition ------------------------------------------------
 # Every binary the suites `skipif` on. Absence must be an ERROR, never a skip.

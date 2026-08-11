@@ -1,8 +1,16 @@
 #!/usr/bin/env bash
 # drift-check — PASSIVE deadman for the devrc two-host fleet.
 #
-# Answers ONE question, unattended, on a timer: "is either host silently no
+# Answers one question, unattended, on a timer: "is either host silently no
 # longer receiving changes?" It REPORTS. It never fixes.
+#
+# 🔴 THAT QUESTION HAS TWO HALVES, and for a long time this file only asked the
+# first. GIT PARITY (is the checkout still tracking origin/main?) and HOST PARITY
+# (is what the checkout describes actually DEPLOYED and the same on both
+# machines?) are independent. Every skill on the laptop was a dangling symlink
+# into a garbage-collected /nix/store path while `git log` matched origin/main
+# exactly — perfect git parity, zero host parity, and this script said clean.
+# See "the per-host HOST-PARITY routine" below and exit codes 14 and 15.
 #
 # ── WHY THIS EXISTS ───────────────────────────────────────────────────────────
 # `scripts/ship.sh` converges both hosts and is correct: a host it cannot
@@ -84,6 +92,13 @@
 #   10  DRIFT — local `main` is BEHIND origin/main (just needs a ship)
 #   12  DRIFT — the checkout is not ON branch `main`
 #   13  remote host unreachable for $DRIFT_UNREACHABLE_ESCALATE CONSECUTIVE runs
+#   14  DRIFT — a host has MANAGED SYMLINKS THAT RESOLVE TO NOTHING. 🔴 The one
+#       git is structurally blind to: every skill on the laptop dangled into a
+#       garbage-collected /nix/store path while the checkout was byte-identical
+#       to origin/main. Git parity is not host parity.
+#   15  DRIFT — HOST PARITY: the two hosts' settings.json top-level KEY SETS or
+#       their enabledPlugins differ, or a host has a plugin enabled that is not
+#       installed there.
 #
 # ── UNREACHABLE IS NOT DRIFT (the alerting policy) ────────────────────────────
 # 🔴 The timer runs on the WORKBENCH ONLY (gated on the ~/.server-mode marker in
@@ -110,7 +125,7 @@
 # is reading a timer's output, so the single number it hands to systemd must be
 # the worst thing found, or an un-pushed workbench could hide behind a merely
 # behind laptop. Severity order (worst first):
-#     8  >  13  >  6  >  4  >  3  >  12  >  10
+#     8  >  14  >  13  >  6  >  4  >  3  >  12  >  15  >  10
 # (6 is unreachable through this path today — the script exits 6 directly before
 # any per-host leg runs — but the order is documented for every code it owns,
 # and severity() ranks it rather than falling through to the unknown-code slot.)
@@ -132,6 +147,13 @@
 #   LAPTOP_SSH   back-compat: applies ONLY when the remote host is the laptop
 #   DRIFT_REPO   repo path checked on the LOCAL host (default $HOME/workspace/devrc)
 #   DRIFT_UNTRACKED_MAX  max untracked paths listed per host (default 10, integer)
+#   DRIFT_DANGLING_MAX   max dangling symlinks listed per host (default 10, integer)
+#   DRIFT_PARITY_ROOTS   space-separated dirs, relative to $HOME, scanned for
+#                        dangling MANAGED symlinks (default ".claude .config/opencode")
+#   DRIFT_MANAGED_PREFIX what counts as a MANAGED symlink target (default
+#                        "/nix/store/"). Exists so the test suite can build a
+#                        fixture tree; the default is the only correct value on
+#                        a real host, and is NOT forwarded over ssh.
 #   DRIFT_UNREACHABLE_ESCALATE  consecutive unreachable runs before rc 13 (default 4)
 #   DRIFT_STATE_DIR  where the unreachable streak is persisted
 #                    (default ${XDG_STATE_HOME:-$HOME/.local/state}/drift-check)
@@ -158,6 +180,7 @@ fi
 
 DRIFT_REPO="${DRIFT_REPO:-$HOME/workspace/devrc}"
 DRIFT_UNTRACKED_MAX="${DRIFT_UNTRACKED_MAX:-10}"
+DRIFT_DANGLING_MAX="${DRIFT_DANGLING_MAX:-10}"
 DRIFT_UNREACHABLE_ESCALATE="${DRIFT_UNREACHABLE_ESCALATE:-4}"
 DRIFT_STATE_DIR="${DRIFT_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/drift-check}"
 
@@ -173,6 +196,7 @@ require_int() { # require_int <name> <value>
   esac
 }
 require_int DRIFT_UNTRACKED_MAX "$DRIFT_UNTRACKED_MAX"
+require_int DRIFT_DANGLING_MAX "$DRIFT_DANGLING_MAX"
 require_int DRIFT_UNREACHABLE_ESCALATE "$DRIFT_UNREACHABLE_ESCALATE"
 
 DO_LOCAL=1
@@ -216,6 +240,12 @@ severity() {
   case "${1:-0}" in
     0)  echo 0 ;;
     8)  echo 70 ;;
+    # 14 (a host's managed symlinks resolve to nothing) sits between 8 and 13.
+    # It is BELOW 8 because rc 8 means work exists on exactly one machine and a
+    # careless fix destroys it, whereas a broken deployment is repaired by a
+    # switch with nothing to lose. It is ABOVE 13 because it is a host we DID
+    # observe, saying something is wrong — 13 only says we could not look.
+    14) echo 65 ;;
     13) echo 60 ;;
     # 6 cannot arrive here today (the script exits 6 before any host leg runs),
     # but it is a code this file OWNS, and an owned code with no case would rank
@@ -225,6 +255,11 @@ severity() {
     4)  echo 55 ;;
     3)  echo 50 ;;
     12) echo 40 ;;
+    # 15 ranks BELOW 12 and above 10: a key-set or plugin difference is a real
+    # divergence, but ship.sh does not fix it and it costs the operator a
+    # capability, not a commit. 14 ranks just under 8 — see the table in the
+    # header for why un-pushed commits still outrank a broken deployment.
+    15) echo 35 ;;
     10) echo 30 ;;
     *)  echo 99 ;;
   esac
@@ -351,6 +386,243 @@ say "✅ clean — on branch main, main == origin/main ($target)"
 exit 0
 '
 
+# ── The per-host HOST-PARITY routine ──────────────────────────────────────────
+# 🔴 GIT PARITY IS NOT HOST PARITY. The CHECK above answers "is this host still
+# receiving commits?" — and it answered YES, correctly, for the whole period in
+# which every skill on the laptop was a dangling symlink into a garbage-collected
+# /nix/store path. `git log` matched, `git status` was clean, origin/main was the
+# checked-out HEAD, and ~/.claude/skills/*/SKILL.md resolved to nothing. A
+# deadman that reports "clean" for that host is the vacuous green this subsystem
+# exists to prevent, one level up from the one it was built for.
+#
+# So this payload reports the differences that MATTER between the two machines
+# and are invisible to git:
+#
+#   1. DANGLING MANAGED SYMLINKS. home-manager deploys by symlinking into
+#      /nix/store. A link whose target no longer exists is a file the operator
+#      believes is deployed and which is not there. rc 14.
+#   2. settings.json TOP-LEVEL KEY SET. Compared across hosts by the driver.
+#   3. enabledPlugins, and any plugin ENABLED BUT NOT INSTALLED. rc 15.
+#
+# 🔴 WHAT "MANAGED" MEANS HERE — STRUCTURAL, NOT SPELLED. A managed link is one
+# whose IMMEDIATE target starts with /nix/store/. Nothing hardcodes `skills/`,
+# so a new managed subtree is covered the day it is added. Three consequences
+# fall out of that definition for free, and each one is a false positive this
+# check would otherwise have produced:
+#   * ~/.claude/debug/latest points at a SIBLING transcript file and is
+#     routinely stale — Claude Code runtime state, not a deployment. Not a store
+#     target, so it is not counted. (It is dangling on the workbench right now.)
+#   * ~/.claude/skills/clickup/ is a standalone git checkout with ~176 pnpm
+#     symlinks under node_modules/, all pointing at RELATIVE paths. Legitimately
+#     unmanaged, and excluded by the store-target rule even before pruning.
+#   * mkOutOfStoreSymlink links (the `browser` skill) point INTO the store at a
+#     path that is itself a symlink to the working tree. First hop is a store
+#     path, so they ARE examined — and `[ -e ]` follows the whole chain, so a
+#     broken out-of-store link is caught too.
+# Directories are pruned for SPEED (never for correctness) when they are named
+# node_modules or contain a .git — a nested checkout is by construction not
+# home-manager's. Measured on the workbench: 0.43s over ~18500 entries.
+#
+# 🔴 THE COUNT OF LINKS EXAMINED IS REPORTED ALONGSIDE THE COUNT THAT DANGLED,
+# ALWAYS. "0 dangling" from a scan that walked 0 links is indistinguishable from
+# a clean host, and is exactly how a scanner wired to nothing reads as a pass.
+# The pair is the claim; neither number alone is.
+#
+# 🔴 NO `find`. The laptop resolves `find` to BUSYBOX, which does not implement
+# `-xtype` — and rejects it by printing usage to stderr and EXITING 0. So
+# `find -xtype l | wc -l` yields a confident 0 dangling on that host, forever,
+# from a check wired to nothing. Measured 2026-08-11. The walk below is bash
+# builtins plus `readlink`, which behaves identically under both.
+#
+# READ-ONLY BY CONSTRUCTION: readlink, sed, sort, tr, head and shell builtins.
+# It writes nothing and creates nothing.
+#
+# Variables that appear inside $(( )) are UPPERCASE on purpose: the test suite
+# tokenizes `$(( lower + 1 ))` as a command word in command position, and an
+# uppercase name is dropped by that filter instead of needing a ledger entry
+# declaring an arithmetic operand to be "prose".
+PARITY='
+set -uo pipefail
+label="${DRIFT_LABEL:-host}"
+maxd="${DRIFT_DANGLING_MAX:-10}"
+psay() { echo "[$label] $*"; }
+
+# What makes a symlink MANAGED. The default is the only correct value in
+# production — home-manager deploys by pointing into the nix store, and
+# test_the_managed_prefix_defaults_to_the_nix_store pins it. It is a variable
+# solely so the suite can build a fixture tree it fully controls: a HEALTHY
+# managed link needs a target that both matches the prefix AND exists, which no
+# test can arrange under a real /nix/store. Deliberately NOT forwarded to the
+# remote host — production always uses the default there, and every value this
+# script sends over ssh is a value that has to be proved safe.
+mprefix="${DRIFT_MANAGED_PREFIX:-/nix/store/}"
+
+P_EXAMINED=0
+P_DANGLED=0
+p_list=""
+
+# Loop and local variable names are UPPERCASE throughout this payload for the
+# same reason the arithmetic operands are: the suite tokenizes `for x in …` and
+# `local v` with `x`/`v` in command position, and an uppercase name is dropped by
+# its `[a-z]…` filter. The alternative is a ledger entry per variable declaring
+# it "prose", which would be widening an accounting guard to fit new code.
+p_walk() { # p_walk <dir> — recurse, counting managed symlinks and dead ones
+  local E BASE T
+  for E in "$1"/* "$1"/.*; do
+    BASE="${E##*/}"
+    [ "$BASE" = "." ] && continue
+    [ "$BASE" = ".." ] && continue
+    [ -e "$E" ] || [ -L "$E" ] || continue
+    if [ -L "$E" ]; then
+      T="$(readlink "$E")"
+      case "$T" in
+        "$mprefix"*)
+          P_EXAMINED=$(( P_EXAMINED + 1 ))
+          if [ ! -e "$E" ]; then
+            P_DANGLED=$(( P_DANGLED + 1 ))
+            p_list="$p_list$E -> $T
+"
+          fi
+          ;;
+      esac
+      continue
+    fi
+    [ -d "$E" ] || continue
+    [ "$BASE" = "node_modules" ] && continue
+    [ -e "$E/.git" ] && continue
+    p_walk "$E"
+  done
+}
+
+# Roots are relative to $HOME so the whole payload is exercisable against a
+# fixture home in the test suite without a single $HOME-conditional skip.
+roots="${DRIFT_PARITY_ROOTS:-.claude .config/opencode}"
+P_ROOTS_SEEN=0
+for R in $roots; do
+  if [ -d "$HOME/$R" ]; then
+    P_ROOTS_SEEN=$(( P_ROOTS_SEEN + 1 ))
+    p_walk "$HOME/$R"
+  fi
+done
+
+p_rc=0
+if [ "$P_ROOTS_SEEN" = 0 ]; then
+  psay "managed symlinks: NOT EVALUATED — none of the roots exist ($roots)"
+  psay "  a scan that examined nothing is not a clean scan; it is no scan."
+else
+  psay "managed symlinks: examined=$P_EXAMINED dangling=$P_DANGLED (roots: $roots)"
+fi
+if [ "$P_DANGLED" -gt 0 ]; then
+  psay "🔴 DRIFT — $P_DANGLED of $P_EXAMINED managed symlink(s) point at a path that does not exist."
+  psay "  home-manager believes these are deployed. They resolve to nothing."
+  printf "%s" "$p_list" | head -n "$maxd" | sed "s|^|[$label]     x |"
+  if [ "$P_DANGLED" -gt "$maxd" ]; then
+    psay "    ... and $(( P_DANGLED - maxd )) more"
+  fi
+  psay "  fix (on that host): home-manager switch --flake ~/workspace/devrc --impure"
+  p_rc=14
+fi
+
+# --- settings.json: KEY NAMES ONLY --------------------------------------------
+# 🔴 Never the values. This file holds tokens, hook command lines and permission
+# rules, and this output goes to a systemd journal.
+#
+# 🔴 THE EXTRACTOR HAS A FORMAT DEPENDENCY, AND IT FAILS LOUD. Top-level keys are
+# read as the 2-space-indented lines Claude Code writes. Cross-checked against
+# json.load on the real 14 KB workbench file (2026-08-11): identical 11-key set.
+# If the file is ever minified the extractor yields NOTHING — and an empty result
+# is reported as UNEVALUATED, never as "no divergence", because those two are the
+# same observation to a diff and only one of them is good news.
+# 🔴 EACH EXTRACTION IS SPLIT FROM ITS NORMALISATION, ON PURPOSE. The obvious
+# one-liner `x="$(sed … | sort | tr …)"` hides `sort` and `tr` from the reverse
+# PATH guard in the suite: that tokenizer does not honour a backslash-escaped quote
+# inside double quotes, so the whole pipeline collapses into one `sed` segment
+# and the two commands after the pipes are never seen. The guard then passes
+# while the unit PATH goes unchecked for them — a guard that cannot see a
+# command is not accounting for it. Extract, then normalise on its own line,
+# where every command word sits in plain command position.
+#
+# The sed scripts are SINGLE-quoted (the same quote-dance CHECK already uses)
+# rather than double-quoted with a backslash-escaped quote, for the same reason:
+# with `\"` the tokenizer ends the quoted run early and the brace in the address
+# reads as a command separator, leaving the trailing `/p` looking like a command.
+norm_set() { # norm_set <newline-list> -> sorted, space-separated, or "" if empty
+  [ -n "$1" ] || return 0
+  printf "%s\n" "$1" | sort | tr "\n" " "
+}
+
+set_file="$HOME/.claude/settings.json"
+skeys="UNEVALUATED"
+eplug="UNEVALUATED"
+if [ -r "$set_file" ]; then
+  k="$(sed -n '"'"'s/^  "\([^"]*\)":.*/\1/p'"'"' "$set_file")"
+  if [ -n "$k" ]; then
+    skeys="$(norm_set "$k")"
+    # enabledPlugins may legitimately be absent — that is a FACT, not a failure.
+    if [ -n "$(sed -n '"'"'/^  "enabledPlugins":/p'"'"' "$set_file")" ]; then
+      eplist="$(sed -n '"'"'/^  "enabledPlugins": {/,/^  }/p'"'"' "$set_file")"
+      eplist="$(printf "%s\n" "$eplist" | sed -n '"'"'s/^    "\([^"]*\)":.*/\1/p'"'"')"
+      eplug="$(norm_set "$eplist")"
+      [ -n "$eplug" ] || eplug="NONE"
+    else
+      eplug="NONE"
+    fi
+  else
+    psay "settings.json: NOT EVALUATED — no 2-space top-level keys found in $set_file"
+  fi
+else
+  psay "settings.json: NOT EVALUATED — $set_file is missing or unreadable"
+fi
+
+inst_file="$HOME/.claude/plugins/installed_plugins.json"
+iplug="UNEVALUATED"
+if [ -r "$inst_file" ]; then
+  iplist="$(sed -n '"'"'/^  "plugins": {/,$p'"'"' "$inst_file")"
+  iplist="$(printf "%s\n" "$iplist" | sed -n '"'"'s/^    "\([^"]*\)":.*/\1/p'"'"')"
+  iplug="$(norm_set "$iplist")"
+  [ -n "$iplug" ] || iplug="NONE"
+fi
+
+# --- enabled but NOT installed (per-host; needs no second host) ---------------
+if [ "$eplug" != UNEVALUATED ] && [ "$eplug" != NONE ] && [ "$iplug" != UNEVALUATED ]; then
+  ghost=""
+  for PL in $eplug; do
+    case " $iplug " in
+      *" $PL "*) ;;
+      *) ghost="$ghost $PL" ;;
+    esac
+  done
+  if [ -n "$ghost" ]; then
+    psay "🔴 DRIFT — plugin(s) ENABLED in settings.json but NOT installed:$ghost"
+    psay "  fix (on that host): claude plugin install <plugin>"
+    [ "$p_rc" = 0 ] && p_rc=15
+  fi
+fi
+
+# FACT lines are the machine-readable half — the driver diffs them ACROSS hosts,
+# which is the only place a key-set difference can be seen at all.
+echo "[$label] FACT settings-keys $skeys"
+echo "[$label] FACT enabled-plugins $eplug"
+echo "[$label] FACT installed-plugins $iplug"
+echo "[$label] PARITY-RC=$p_rc"
+'
+
+# The payload actually shipped to each host: the git CHECK in a SUBSHELL (so its
+# many `exit`s end the subshell and not the run) followed by the parity scan.
+# Composed rather than run as two ssh legs so an unreachable host is still ONE
+# missed connection and ONE bump of the streak counter.
+#
+# The exit status is the GIT verdict, byte-for-byte what it always was — every
+# pinned rc in the suite is a statement about that number. The parity verdict
+# rides back on the PARITY-RC= line and is folded in by the driver through the
+# same severity() table, so there is exactly one severity ranking in this file.
+PAYLOAD="(
+$CHECK
+)
+_drift_git_rc=\$?
+$PARITY
+exit \$_drift_git_rc"
+
 rc=0
 note_rc() { # note_rc <rc> — keep the MOST SEVERE code seen (see header)
   local new="$1"
@@ -365,6 +637,40 @@ CHECKED=""
 UNCHECKED=""
 mark_checked()   { CHECKED="${CHECKED:+$CHECKED, }$1"; }
 mark_unchecked() { UNCHECKED="${UNCHECKED:+$UNCHECKED, }$1"; }
+
+# --- Reading the parity facts back off a host's output ------------------------
+# Each host's payload prints its own verdict AND a few `FACT <name> <values>`
+# lines. The per-host verdict (dangling links, enabled-but-absent plugins) needs
+# only that host. A KEY-SET or enabledPlugins DIFFERENCE is not a property of
+# either host alone — it exists only between them — so it is computed here, from
+# both outputs, and only when both were actually obtained.
+LOCAL_OUT=""
+REMOTE_OUT=""
+
+fact_of() { # fact_of <host-output> <fact-name> -> the value list, or "" if absent
+  printf '%s\n' "$1" | sed -n "s/^\[[^]]*\] FACT $2 //p" | head -n 1
+}
+
+parity_rc_of() { # parity_rc_of <host-output> -> that host's parity rc (0 if none)
+  # A host that printed no PARITY-RC line (an old drift-check.sh on the far side,
+  # a truncated stream) yields 0 — deliberately: an ABSENT verdict must not
+  # invent a failure. The absence is still visible, because the FACT lines are
+  # missing too and the cross-host block then reports NOT COMPARED.
+  local V
+  V="$(printf '%s\n' "$1" | sed -n 's/^\[[^]]*\] PARITY-RC=//p' | head -n 1)"
+  case "$V" in ''|*[!0-9]*) echo 0 ;; *) echo "$V" ;; esac
+}
+
+only_in() { # only_in <set-a> <set-b> -> members of a absent from b
+  local X OUT=""
+  for X in $1; do
+    case " $2 " in
+      *" $X "*) ;;
+      *) OUT="$OUT $X" ;;
+    esac
+  done
+  printf '%s' "$OUT"
+}
 
 # --- Consecutive-unreachable streak (see "UNREACHABLE IS NOT DRIFT" above) -----
 # The ONLY file this script writes, and it lives outside every repo.
@@ -426,10 +732,17 @@ streak_reset() { # streak_reset <role> — the host answered; the run of misses 
 
 if [ "$DO_LOCAL" = 1 ]; then
   echo "=== local ($LOCAL_ROLE) ==="
-  DRIFT_REPO="$DRIFT_REPO" DRIFT_LABEL="$LOCAL_ROLE" \
+  # Captured rather than streamed so the FACT lines can be diffed against the
+  # other host's. stderr is deliberately NOT captured — it still goes straight
+  # to the terminal/journal, so a fetch failure's git stderr keeps arriving
+  # exactly as before.
+  LOCAL_OUT="$(DRIFT_REPO="$DRIFT_REPO" DRIFT_LABEL="$LOCAL_ROLE" \
     DRIFT_UNTRACKED_MAX="$DRIFT_UNTRACKED_MAX" \
-    bash -c "$CHECK"
+    DRIFT_DANGLING_MAX="$DRIFT_DANGLING_MAX" \
+    bash -c "$PAYLOAD")"
   note_rc "$?"
+  [ -n "$LOCAL_OUT" ] && printf '%s\n' "$LOCAL_OUT"
+  note_rc "$(parity_rc_of "$LOCAL_OUT")"
   mark_checked "$LOCAL_ROLE (local)"
   echo
 else
@@ -442,10 +755,11 @@ if [ "$DO_REMOTE" = 1 ]; then
   # remote host's repo lives at its own $HOME/workspace/devrc.
   # `bash -s` (piped, not inlined) — see the CHECK header re: zsh.
   # %q, not %s — these two values are executed on ANOTHER host (see require_int).
-  printf 'DRIFT_LABEL=%q\nDRIFT_UNTRACKED_MAX=%q\n%s\n' \
-    "$REMOTE_ROLE" "$DRIFT_UNTRACKED_MAX" "$CHECK" \
-    | ssh -o ConnectTimeout=10 -o BatchMode=yes "$REMOTE_SSH" bash -s
+  REMOTE_OUT="$(printf 'DRIFT_LABEL=%q\nDRIFT_UNTRACKED_MAX=%q\nDRIFT_DANGLING_MAX=%q\n%s\n' \
+    "$REMOTE_ROLE" "$DRIFT_UNTRACKED_MAX" "$DRIFT_DANGLING_MAX" "$PAYLOAD" \
+    | ssh -o ConnectTimeout=10 -o BatchMode=yes "$REMOTE_SSH" bash -s)"
   remrc=$?
+  [ -n "$REMOTE_OUT" ] && printf '%s\n' "$REMOTE_OUT"
   # ssh itself exits 255 on a connection/auth failure — that is "we could not
   # look". For a deadman that must never read as a pass... but it must not read
   # as DRIFT either: see "UNREACHABLE IS NOT DRIFT" in the header.
@@ -477,6 +791,7 @@ if [ "$DO_REMOTE" = 1 ]; then
     # It answered — with a verdict, good or bad. The run of misses is over.
     streak_reset "$REMOTE_ROLE"
     note_rc "$remrc"
+    note_rc "$(parity_rc_of "$REMOTE_OUT")"
     mark_checked "$REMOTE_ROLE (remote)"
   fi
   echo
@@ -484,12 +799,78 @@ else
   mark_unchecked "$REMOTE_ROLE (remote, --no-remote)"
 fi
 
+# ── CROSS-HOST PARITY ─────────────────────────────────────────────────────────
+# 🔴 A DIFFERENCE IS NOT A PROPERTY OF EITHER HOST. Both machines can be
+# internally consistent — every symlink resolving, every enabled plugin present —
+# and still disagree about which keys settings.json has or which plugins are on.
+# That is only visible from here, with both outputs in hand.
+#
+# 🔴 AND IT IS ONLY VISIBLE WITH BOTH. One host checked is not "no divergence
+# found", it is "divergence not looked for", and the two must never print the
+# same way. An unreachable laptop lands here with an empty REMOTE_OUT and gets
+# the SKIPPED branch — it does not silently contribute a clean parity verdict.
+echo "=== host parity ($LOCAL_ROLE vs $REMOTE_ROLE) ==="
+L_KEYS="$(fact_of "$LOCAL_OUT" settings-keys)"
+R_KEYS="$(fact_of "$REMOTE_OUT" settings-keys)"
+L_EPLUG="$(fact_of "$LOCAL_OUT" enabled-plugins)"
+R_EPLUG="$(fact_of "$REMOTE_OUT" enabled-plugins)"
+
+if [ -z "$L_KEYS" ] || [ -z "$R_KEYS" ]; then
+  echo "[parity] NOT COMPARED — needs a fact set from EACH host; obtained from: ${CHECKED:-none}."
+  echo "[parity]   this is not 'the hosts agree'. Nothing was compared."
+elif [ "$L_KEYS" = UNEVALUATED ] || [ "$R_KEYS" = UNEVALUATED ]; then
+  echo "[parity] NOT COMPARED — a host could not read or parse its settings.json (see its line above)."
+else
+  # KEY NAMES ONLY, never values — this output reaches the journal.
+  l_only="$(only_in "$L_KEYS" "$R_KEYS")"
+  r_only="$(only_in "$R_KEYS" "$L_KEYS")"
+  if [ -n "$l_only" ] || [ -n "$r_only" ]; then
+    echo "[parity] DRIFT — settings.json top-level KEY SETS differ (names only; no values shown):"
+    [ -n "$l_only" ] && echo "[parity]   only on $LOCAL_ROLE:$l_only"
+    [ -n "$r_only" ] && echo "[parity]   only on $REMOTE_ROLE:$r_only"
+    note_rc 15
+  else
+    # Counted into a variable first, not interpolated as `$( … | wc -w )` inside
+    # the message: a command substitution ENDS the printer segment, leaving the
+    # rest of the sentence looking like a command line to the suite's tokenizer.
+    N_KEYS="$(printf '%s' "$L_KEYS" | wc -w)"
+    echo "[parity] settings.json top-level key sets AGREE ($N_KEYS key names on each host)."
+  fi
+
+  if [ "$L_EPLUG" = UNEVALUATED ] || [ "$R_EPLUG" = UNEVALUATED ]; then
+    echo "[parity] enabledPlugins NOT COMPARED — unreadable on at least one host."
+  else
+    le="$L_EPLUG"; re="$R_EPLUG"
+    [ "$le" = NONE ] && le=""
+    [ "$re" = NONE ] && re=""
+    el_only="$(only_in "$le" "$re")"
+    er_only="$(only_in "$re" "$le")"
+    if [ -n "$el_only" ] || [ -n "$er_only" ]; then
+      echo "[parity] DRIFT — enabledPlugins differ:"
+      [ -n "$el_only" ] && echo "[parity]   enabled only on $LOCAL_ROLE:$el_only"
+      [ -n "$er_only" ] && echo "[parity]   enabled only on $REMOTE_ROLE:$er_only"
+      echo "[parity]   fix: claude plugin install <plugin> on the host that lacks it."
+      note_rc 15
+    else
+      echo "[parity] enabledPlugins AGREE."
+    fi
+  fi
+fi
+echo
+
 # 🔴 The summary states WHAT WAS CHECKED. It previously said "both hosts on
 # branch main at origin/main" regardless — including for a --no-remote run that
 # looked at one host, and for a --no-local --no-remote run that looked at none.
 if [ "$rc" = 0 ]; then
   if [ -n "$CHECKED" ]; then
-    echo "drift-check: no drift on the host(s) CHECKED: $CHECKED — each on branch main at origin/main."
+    # 🔴 No phrasing here may name a host this run did not contact — the wording
+    # it replaced said "both hosts" unconditionally, and read as coverage the run
+    # never had (`test_a_single_host_run_does_not_claim_both_hosts`). The same
+    # trap now exists one level down: the CROSS-HOST comparison needs a fact set
+    # from each machine, so a clean rc here is not a claim that it ran.
+    echo "drift-check: no drift on the host(s) CHECKED: $CHECKED — each on branch main at"
+    echo "  origin/main, with every managed symlink resolving. The CROSS-HOST comparison is"
+    echo "  a separate claim: read the [parity] block above for whether it ran at all."
   else
     # 🔴 CHECKED NOTHING, AND SAID SO — but used to hand systemd a 0 anyway.
     # Reachable as `--no-local` with the remote unreachable BELOW the escalation
@@ -518,6 +899,8 @@ else
   echo "  rc8=DIVERGED/AHEAD:un-pushed-commits(ship.sh will skip this host forever)"
   echo "  rc10=behind(needs a ship)  rc12=not-on-branch-main"
   echo "  rc13=remote unreachable for >=$DRIFT_UNREACHABLE_ESCALATE consecutive runs"
+  echo "  rc14=managed symlinks resolve to nothing (needs a home-manager switch on that host)"
+  echo "  rc15=host parity: settings.json key sets / enabledPlugins differ, or enabled-but-not-installed"
 fi
 [ -n "$UNCHECKED" ] && echo "drift-check: NOT checked: $UNCHECKED"
 exit "$rc"
